@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>3d web — dashboard</title>
+<link rel="stylesheet" href="/static/app.css" />
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.161.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.161.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+<header class="topbar">
+  <span class="brand">3d<span class="dim">web</span></span>
+  <span id="root-label" class="dim"></span>
+  <span class="spacer"></span>
+  <button id="refresh" class="btn">↻ refresh</button>
+</header>
+
+<div class="layout">
+  <!-- left: projects -->
+  <aside class="sidebar">
+    <h2>Projects</h2>
+    <ul id="projects" class="list"></ul>
+    <h2>Agents <span id="agent-count" class="pill">0</span></h2>
+    <ul id="agents" class="list compact"></ul>
+  </aside>
+
+  <!-- center: viewer + tabs -->
+  <main class="main">
+    <nav class="tabs">
+      <button class="tab active" data-tab="viewer">3D Viewer</button>
+      <button class="tab" data-tab="constants">Constants</button>
+      <button class="tab" data-tab="colors">Colors</button>
+      <button class="tab" data-tab="anim">Animations</button>
+      <button class="tab" data-tab="spec">Spec</button>
+    </nav>
+
+    <section id="tab-viewer" class="panel active">
+      <div class="viewer-toolbar">
+        <select id="scad-select" class="sel"></select>
+        <label><input type="checkbox" id="lyr-axes" checked> axes</label>
+        <label><input type="checkbox" id="lyr-bbox"> bbox</label>
+        <label><input type="checkbox" id="lyr-wire"> wireframe</label>
+        <span id="render-status" class="status"></span>
+      </div>
+      <div id="viewer"></div>
+      <div class="overlays">
+        <div class="ov-col"><h3>Analytical layers (PNG overlays) — click to set A, then B to compare</h3>
+          <div id="overlay-list" class="thumbs"></div></div>
+        <div id="compare" class="compare hidden">
+          <div class="cmp-head">
+            <span>Compare: <b id="cmp-a-name">A</b> vs <b id="cmp-b-name">B</b></span>
+            <label>wipe <input type="range" id="cmp-wipe" min="0" max="100" value="50"></label>
+            <button id="cmp-clear" class="btn">clear</button>
+          </div>
+          <div class="cmp-view">
+            <img id="cmp-a" alt="layer A">
+            <div id="cmp-b-wrap"><img id="cmp-b" alt="layer B"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="tab-constants" class="panel">
+      <p class="dim">Click-drag a value to scrub. <b>Shift</b>=fine, <b>Alt</b>=coarse. Re-renders live; "Apply" writes to disk.</p>
+      <div id="constants-list"></div>
+      <div class="apply-row">
+        <button id="apply-constants" class="btn primary">Apply to constants.scad</button>
+        <span id="apply-status" class="status"></span>
+      </div>
+    </section>
+
+    <section id="tab-colors" class="panel">
+      <p class="dim">Per-part color / material. Reads & writes <code>3d.yaml</code> if present, else viewer-only.</p>
+      <div id="colors-list"></div>
+      <button id="save-colors" class="btn">Save to 3d.yaml</button>
+      <span id="colors-status" class="status"></span>
+    </section>
+
+    <section id="tab-anim" class="panel">
+      <div id="anim-list"></div>
+    </section>
+
+    <section id="tab-spec" class="panel">
+      <article id="spec-html" class="markdown"></article>
+    </section>
+  </main>
+
+  <!-- right: agent activity feed -->
+  <aside class="feed">
+    <h2>Agent activity</h2>
+    <div class="feed-filter">
+      <label><input type="checkbox" class="src-filter" value="claude" checked> claude</label>
+      <label><input type="checkbox" class="src-filter" value="codex" checked> codex</label>
+      <label><input type="checkbox" class="src-filter" value="opencode" checked> opencode</label>
+    </div>
+    <div id="feed" class="events"></div>
+  </aside>
+</div>
+
+<script type="module" src="/static/app.js"></script>
+</body>
+</html>
