@@ -3,7 +3,7 @@
 This maps every tool in the original `garage-band` workspace to its generalized
 `3d` CLI subcommand (or records why it was intentionally dropped). The CLI tools
 are **project-agnostic**: no hardcoded project paths, configs/inputs passed as
-arguments. Verified with `grep -rniE 'garage-band|/Users/ultra|ejector|co2|inflator' lib/`
+arguments. Verified with `grep -rniE 'garage-band|/Users/|/home/|ejector|co2|inflator' lib/`
 — the only hits are explanatory comments/examples, never behavior.
 
 ## `.claude/skills/openscad/tools/` (bash)
