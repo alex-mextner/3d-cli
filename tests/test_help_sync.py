@@ -1,9 +1,9 @@
 """Focused regressions for command help / docs sync."""
 from __future__ import annotations
 
+import importlib
 from pathlib import Path
-
-from commands import render
+from typing import cast
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -14,11 +14,12 @@ def _doc(name: str) -> str:
 
 
 def test_render_usage_keeps_section_headers_and_options_aligned() -> None:
-    assert "\n  --colorscheme NAME" in render.USAGE
-    assert "\n  --render" in render.USAGE
-    assert "\nSection options:" in render.USAGE
-    assert "\n   --colorscheme NAME" not in render.USAGE
-    assert "\n   Section options:" not in render.USAGE
+    usage = cast(str, getattr(importlib.import_module("commands.render"), "USAGE"))
+    assert "\n  --colorscheme NAME" in usage
+    assert "\n  --render" in usage
+    assert "\nSection options:" in usage
+    assert "\n   --colorscheme NAME" not in usage
+    assert "\n   Section options:" not in usage
 
 
 def test_updated_help_examples_are_reflected_in_command_docs() -> None:
