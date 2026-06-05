@@ -227,7 +227,7 @@ The binary subject mask (white=subject) of a render or reference; the basis of I
 <a id="section"></a>
 A cross-sectional view of a 3D model; produced by cutting with a plane. Used to inspect internal geometry.
 
-![Section — cube cut by a plane, cut face highlighted](docs/img/section.svg)
+![Section — cube cut by a plane, cut face highlighted](docs/img/section.jpg)
 
 ### Slicer
 <a id="slicer"></a>
