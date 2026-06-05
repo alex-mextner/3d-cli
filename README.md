@@ -27,9 +27,10 @@ Requirements:
 - **ImageMagick** (`brew install imagemagick`) — for the overlay / score / silhouette commands.
 - **Python**: the python subcommands run via `cli.pyrun`, which prefers a repo `.venv`,
   then `uv run --with <deps>` (no global installs), then system `python3`. With `uv`
-  on PATH nothing needs pre-installing. For a fast offline path:
+  on PATH nothing needs pre-installing. For a fast offline path (uv project, deps in
+  `pyproject.toml` + locked in `uv.lock`):
   ```bash
-  python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+  uv sync --all-extras      # creates .venv from the lockfile
   ```
 
 Every command either works or fails with a clear, structured "install X" message
@@ -267,7 +268,8 @@ tests/              pytest unit tests + the CLI smoke harness (run via `3d test`
 docs/critic-prompts.md  the vision-critic prompt patterns (from lego-loco match/prompts.md)
 libs/               OpenSCAD libraries cloned on demand (gitignored)
 examples/cube.scad  trivial test part
-requirements.txt    python deps for the full offline path
+pyproject.toml      python deps (uv project: core + optional extras preprocess/viz/web/dev)
+uv.lock             locked dependency set (uv sync)
 ```
 
 Adding a command is a one-file change — see `lib/cli/registry.py` (and `AGENTS.md`) for the
@@ -315,4 +317,4 @@ Per-source accounting of the requested migration set:
   Without the whole mesh stack, the manifold gate degrades to openscad-log-grep (reported
   in the output, never a silent false PASS).
 - `3d preprocess` runs the OpenCV grabCut + pseudo-depth floor unless `rembg` / SAM2 /
-  Depth-Anything-V2 are installed (see `requirements.txt` and `--help`).
+  Depth-Anything-V2 are installed (see the `preprocess` extra in `pyproject.toml` and `--help`).

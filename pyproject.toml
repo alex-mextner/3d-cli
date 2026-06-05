@@ -1,0 +1,31 @@
+[project]
+name = "3d-cli"
+version = "0.1.0"
+description = "Scriptable, AI-assisted CLI + web toolkit for parametric 3D FDM modeling, verification, matching and print prep (OpenSCAD-first)."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+
+# Core: the geometry / render / check pipeline (mesh QA). Resolved by uv.
+dependencies = [
+    "trimesh>=4.0",
+    "manifold3d>=2.4",
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "rtree>=1.0",
+]
+
+[project.optional-dependencies]
+# Reference pre-processing (`3d preprocess`). Heavy "best path" tiers (rembg / Depth-Anything
+# via transformers+torch / SAM2) stay import-guarded and out of the lock — install ad hoc.
+preprocess = ["opencv-python-headless>=4.8", "pillow>=10.0"]
+# Collision visualization (`3d collision --viz`).
+viz = ["pyvista>=0.43"]
+# Web dashboard (`3d web`). markdown + pyyaml degrade gracefully; fastapi+uvicorn serve.
+web = ["fastapi>=0.110", "uvicorn>=0.27", "markdown>=3.5", "pyyaml>=6.0"]
+# Test gate (`3d test`): pytest + mypy (+ httpx for the web TestClient).
+dev = ["pytest>=8.0", "mypy>=1.8", "httpx>=0.27"]
+
+[tool.uv]
+# `3d` is an application, not a distributable library — no build backend needed.
+package = false

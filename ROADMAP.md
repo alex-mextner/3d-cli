@@ -43,8 +43,10 @@ These are not features; they are the lens. New surface should be justifiable by 
 - ✅ **Commit discipline** — ATOMIC commits; **run `codex exec review --uncommitted`
   before EVERY commit**, read findings, fix real issues, then commit; **push to
   origin regularly**.
-- 📋 **Dependencies fully specified** — `requirements.txt` + `3d doctor` + first-run
-  auto-bootstrap. No dependency left implicit.
+- ✅ **Dependencies fully specified** — `pyproject.toml` (uv project: core + optional extras
+  `preprocess`/`viz`/`web`/`dev`) + `uv.lock` + `3d doctor` + first-run auto-bootstrap. No
+  `requirements.txt` (pip-era); `uv sync --all-extras` for the offline `.venv`. No dependency
+  left implicit.
 - 📋 **Parallel build** — independent work runs in parallel subagents in **separate
   git worktrees** (distinct file ownership → clean merge).
 - 📋 **Error UX — verbose, actionable errors.** Every error states (1) WHAT failed and

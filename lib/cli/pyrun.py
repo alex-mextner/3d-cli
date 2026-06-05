@@ -51,8 +51,8 @@ def tool_argv(deps: str, script: str, args: list[str]) -> list[str]:
     raise MissingDependency(
         "a python runtime (.venv, uv, or python3)",
         install=(
-            f"cd {root} && python3 -m venv .venv && "
-            ".venv/bin/pip install -r requirements.txt"
+            f"cd {root} && uv sync --all-extras"
+            "  (creates .venv from pyproject.toml + uv.lock; or install uv from https://docs.astral.sh/uv/)"
         ),
         degrades="all python-backed commands (mesh / collision / printability / preprocess) cannot run",
     )
