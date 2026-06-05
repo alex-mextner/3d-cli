@@ -34,6 +34,34 @@ the surface looks the way it does:
   behind §19's roll-forward.
 These are not features; they are the lens. New surface should be justifiable by one of them.
 
+### Why these tools (not others) — the deliberate choices
+Tool selection is itself part of the philosophy; each pick has a reason, and a reason is the bar
+for swapping it. The throughline: **prefer code/text artifacts over GUIs and binary blobs**, because
+code is what AI agents, version control, and shell pipes all operate on natively.
+- **OpenSCAD as the modeling base — because a model is CODE, not a GUI document.** Code is trivially
+  **stored** (a `.scad` is text in git), **diffed/compared** (review a change line-by-line, bisect a
+  regression), **edited by AI** (the LLM writes/patches the source directly — no clicking through a
+  GUI), and lets you perform **arbitrarily complex parametric operations** and transform the model
+  any way you like — none of which a GUI-first CAD (Fusion/SolidWorks/Blender-modeling) gives you.
+  Every other tool here is chosen to keep that text-first, AI-and-git-native property. (Its weakness
+  — a thin stock language — is why §33 extends it rather than abandoning it.)
+- **Blender only for the photoreal LEAF (render/animate shaders), never as the modeling source** —
+  it's a GUI binary-document tool; we touch it headless (`bpy`) at the very end for Cycles/EEVEE
+  output, so the source of truth stays code. Installed on demand (§3), not in the base.
+- **BOSL2 / NopSCADlib** — mature, open OpenSCAD libraries: they extend the code-base with fillets/
+  threads/gears/hardware *as more OpenSCAD code*, not a separate binary kernel. Same text-first
+  property; reuse beats re-deriving (§33).
+- **trimesh / manifold3d / open3d** — scriptable Python mesh stack for the gates (watertight/
+  manifold/self-intersection): a library you call in-process, not a GUI to drive. Degrades cleanly
+  when a wheel is missing (§ FALLBACK modes) instead of hard-failing.
+- **ImageMagick + OpenCV** — composable, headless image ops (silhouette/IoU/overlay, PCA/contours/
+  moments §7) that pipe in the shell like every other stage; no GUI image editor in the loop.
+- **ffmpeg** — the code-first video/animation backend (§6/§22): a filter-GRAPH you script, matching
+  the op-DAG ethos (§19/§21), not a timeline GUI.
+- **uv / pipx for distribution** (§29), **FastAPI+SSE for web** (§9) — standard, scriptable, no
+  bespoke installer or heavyweight framework; the web is a *thin frontend over the same core* (§20),
+  never a place logic hides.
+
 ## 1. Engineering policy (applies to ALL work)
 - 📋 **Python everywhere** — replace all `sh`/`bash` with Python; `bin/3d` is a thin
   Python dispatcher. Type hints everywhere, **mypy-clean**. **async** where it
@@ -172,6 +200,15 @@ These are not features; they are the lens. New surface should be justifiable by 
 - 📋 **`3d kinematics <3d.yaml>`** — model + verify motion (per-frame, axes/guides, reach/sweep).
 - 📋 **`3d animate <3d.yaml>`** — generate animation + **per-frame verification**
   (collisions, sync with the motion model). Requires **ffmpeg** (check/install).
+  - **Two render backends, same animation spec:** a **fast OpenSCAD preview** (throwntogether,
+    no CGAL — for scrubbing/iterating, the default) and a **photoreal Blender (Cycles/EEVEE)
+    shader render** (materials/HDRI/soft shadows from the materials registry, §2a) for the final
+    clip. **Why:** you iterate on motion + parameters at preview speed, then render the keeper once
+    with shaders — never pay Blender cost while still tuning. **Example:**
+    `3d animate robot.3d.yaml --backend openscad --out preview.mp4` (fast),
+    `3d animate robot.3d.yaml --backend blender --out hero.mp4` (photoreal).
+  - **Drives the §9 web animation panel** — the same core produces the frames the web scrubs and
+    records; the CLI is for batch/headless, the web for interactive exploration.
 
 ## 7. Camera fit, axes, opencode
 - ✅ **`3d fit-camera <model> <ref>`** — silhouette-IoU camera pose fitting (bbox-derived
@@ -209,6 +246,19 @@ These are not features; they are the lens. New surface should be justifiable by 
 - **Constants editor** with Figma-like **scrubbers** (drag; **Shift = fine, Alt = coarse**),
   live dynamic re-render.
 - Run **animations**; change **colors/materials**; view project **spec**; browse **all projects**.
+- 📋 **Interactive animation studio** — the web's headline creative loop, all over the same
+  `lib` core (§20) and the §6 `3d animate` backends:
+  - **Scrub model parameters live** (the §9 Figma-like scrubbers: drag; **Shift = fine, Alt =
+    coarse**) and watch the **animation re-render in place** — change a constant, see the motion
+    update without leaving the panel.
+  - **Scrub time** along a timeline (scrub bar + play/pause/loop, per-frame stepping) to inspect
+    any moment of the motion; the per-frame verification overlays (§6) ride along.
+  - **Two view modes:** **fast OpenSCAD preview** for real-time scrubbing/iterating and a
+    **photoreal Blender shader render** for the polished look — toggle without changing the spec.
+  - **Record to video** — capture the current parameter/time exploration straight to an MP4
+    (ffmpeg, §10), in either view mode, for sharing. **Why:** the value of code-based modeling is
+    that *everything is a parameter* — the studio makes exploring that parameter+time space direct
+    and visual, then bottles the good run as a clip.
 - 📋 **Print monitoring & control** (§31) — auto-discovers printers, shows **live print status**
   (temps/progress/layer/ETA), the **camera stream**, and the printer's own web UI; **monitor and
   control** prints (start/pause/resume/cancel) — all driven through the same CLI/core so the web is
