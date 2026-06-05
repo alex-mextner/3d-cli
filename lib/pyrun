@@ -19,7 +19,9 @@ while [ -h "$SOURCE" ]; do
 done
 : "${REPO_ROOT:=$(cd -P "$(dirname "$SOURCE")/.." && pwd)}"
 
-DEPS="${1:?usage: pyrun '<deps>' script.py [args]}"; shift
+# DEPS may be EMPTY (caller wants no extra deps — e.g. render's optional mesh stack);
+# require it to be SET (?) but allow empty (no :), else uv adds no --with flags.
+DEPS="${1?usage: pyrun '<deps>' script.py [args]}"; shift
 VENV_PY="$REPO_ROOT/.venv/bin/python"
 
 if [ -x "$VENV_PY" ]; then
