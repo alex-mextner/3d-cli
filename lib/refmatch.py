@@ -426,7 +426,10 @@ def _parse_metric(raw: str) -> float:
     m = re.search(r"\(([-+0-9.eE]+)\)", s)
     if m:
         return float(m.group(1))
-    return float(s.split()[0])
+    try:
+        return float(s.split()[0])
+    except (IndexError, ValueError) as exc:
+        raise MagickError(f"compare produced no numeric metric output: {raw.strip()}") from exc
 
 
 def ssim_dssim(render_png: str, masked_ref_png: str, outdir: str) -> tuple[float, float]:

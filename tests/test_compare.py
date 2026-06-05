@@ -252,7 +252,13 @@ def test_ssim_dssim_invariants(tmp_path):
     a = str(tmp_path / "a.png")
     subprocess.run([mgk, "-size", "120x120", f"xc:{refmatch.BG}",
                     "-fill", "gray", "-draw", "circle 60,60 60,20", a], check=True)
-    ssim_same, dssim_same = refmatch.ssim_dssim(a, a, str(tmp_path))
+    try:
+        ssim_same, dssim_same = refmatch.ssim_dssim(a, a, str(tmp_path))
+    except refmatch.MagickError as exc:
+        msg = str(exc)
+        if "DSSIM" in msg or "metric" in msg:
+            pytest.skip(f"ImageMagick build does not support DSSIM: {msg}")
+        raise
     assert dssim_same == pytest.approx(0.0, abs=1e-6)
     assert ssim_same == pytest.approx(1.0, abs=1e-6)
 
@@ -278,3 +284,8 @@ def test_build_collage_three_panels(tmp_path):
     # 3 tiles wide -> width clearly exceeds a single panel.
     w = refmatch._identify_int(out, "%w")
     assert w > 120
+
+
+def test_parse_metric_rejects_nonnumeric_imagemagick_errors() -> None:
+    with pytest.raises(refmatch.MagickError, match="no numeric metric output"):
+        refmatch._parse_metric("convert-im6.q16: unrecognized metric type `DSSIM'")
