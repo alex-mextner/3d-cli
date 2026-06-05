@@ -48,6 +48,7 @@ Target package: `lib/geometry/`, with subpackages only when a real boundary appe
 
 These modules model project state, user config, and local registries:
 
+- `ai_tools.py`
 - `config.py`
 - `extract_params.py`
 - `hardware.py`
@@ -97,6 +98,7 @@ to a dedicated resources package.
 
 Every current root Python module is listed here so future additions are intentional:
 
+- `ai_tools.py` — offline AI-assist prompt bundle construction.
 - `collision_check.py` — geometry / collision check implementation.
 - `collision_viz.py` — geometry / collision visualization implementation.
 - `config.py` — project and CLI configuration helpers.

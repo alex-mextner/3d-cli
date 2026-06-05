@@ -72,6 +72,7 @@ For a practical figure-by-figure image backplate loop, see
 
 | Command | Doc | Role |
 |---|---|---|
+| `ai` | [ai.md](ai.md) | Build offline AI-assist prompt bundles without calling a backend. |
 | `doctor` | [doctor.md](doctor.md) | Read-only dependency report with install commands. |
 | `init` | [init.md](init.md) | Scaffold a `3d.yaml` project and agent-friendly project skeleton. |
 | `projects` | [projects.md](projects.md) | Register/list/remove project directories used by `3d web`. |

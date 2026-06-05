@@ -162,3 +162,54 @@ def test_user_exports_machine_capabilities_as_json(tmp_path: Path) -> None:
     names = {item["name"] for item in payload["items"]}
     assert {"openscad", "imagemagick", "slicer", "python3", "python mesh stack"} <= names
     assert "Traceback" not in result.stderr
+
+
+def test_user_builds_an_ai_prompt_bundle_without_network_calls(tmp_path: Path) -> None:
+    """AI review starts from deterministic CLI evidence instead of a blind prompt."""
+    result = _run_3d(
+        tmp_path,
+        "ai",
+        "design",
+        "review",
+        str(CUBE),
+        "--backend",
+        "mock",
+        "--context",
+        "tighten wall thickness before printing",
+        "--json",
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["tool"] == "design"
+    assert payload["operator"] == "review"
+    assert payload["backend"] == "mock"
+    assert payload["network_call"] is False
+    assert payload["target"] == str(CUBE)
+    assert payload["preflight_commands"] == [
+        f"3d params {CUBE} --json",
+        f"3d check {CUBE}",
+    ]
+    assert "tighten wall thickness" in payload["prompt"]["user"]
+    assert "Traceback" not in result.stderr
+
+
+def test_user_reads_an_ai_prompt_bundle_as_plain_text(tmp_path: Path) -> None:
+    """The default AI output is readable enough to paste into a model session."""
+    result = _run_3d(
+        tmp_path,
+        "ai",
+        "design",
+        "review",
+        str(CUBE),
+        "--backend=mock",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "3d ai" in result.stdout
+    assert "offline prompt bundle" in result.stdout
+    assert "backend: mock" in result.stdout
+    assert "preflight plan:" in result.stdout
+    assert f"3d params {CUBE} --json" in result.stdout
+    assert "No network call has been made" in result.stdout
+    assert "Traceback" not in result.stderr
