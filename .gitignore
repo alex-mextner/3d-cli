@@ -20,3 +20,5 @@ score/
 # local tooling state
 .serena/
 .claude/
+.coverage
+3d.yaml
