@@ -1,8 +1,8 @@
-# `3d printability` — wall / feature / overhang / orientation gate (FDM)
+# `3d printability` — wall / feature / overhang / orientation gate ([FDM](GLOSSARY.md#fdm))
 
 Checks whether a model is printable on a standard FDM printer (Bambu A1 + PLA / PETG). Enforces hard thresholds: wall ≥ 1.2 mm, floor ≥ 0.8 mm, feature ≥ 1.0 mm, overhang ≤ 45°.
 
-**Why it exists.** A watertight manifold model can still be unprintable — walls too thin, overhangs too steep, or features too small. This gate catches those issues before you waste filament and time.
+**Why it exists.** A watertight [manifold](GLOSSARY.md#manifold) model can still be unprintable — walls too thin, overhangs too steep, or features too small. This gate catches those issues before you waste filament and time.
 
 ## Usage
 
@@ -23,4 +23,4 @@ Checks whether a model is printable on a standard FDM printer (Bambu A1 + PLA / 
 
 ## Implementation notes
 
-`.scad` inputs are exported to STL first via OpenSCAD. The mesh analysis is run by `lib/printability_mesh.py` (trimesh + rtree + scipy). If the mesh stack is absent, the gate degrades to `SKIP` inside `3d check` rather than failing the whole run.
+`.scad` inputs are exported to STL first via [OpenSCAD](GLOSSARY.md#openscad). The mesh analysis is run by `lib/printability_mesh.py` ([trimesh](GLOSSARY.md#trimesh) + rtree + scipy). If the mesh stack is absent, the gate degrades to `SKIP` inside `3d check` rather than failing the whole run.

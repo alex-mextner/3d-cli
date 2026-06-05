@@ -1,4 +1,4 @@
-# `3d score` — silhouette AE + IoU scoring
+# `3d score` — silhouette [AE](GLOSSARY.md#ae) + [IoU](GLOSSARY.md#iou) scoring
 
 Compares a render or a `.scad` model against a reference image and prints machine-parseable `KEY=VALUE` lines: `AE`, `AE_NORM`, `IoU`, `CLOSENESS`, `FRAME`, and `OVERLAY`.
 

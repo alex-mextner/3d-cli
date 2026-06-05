@@ -61,7 +61,7 @@ orchestration + the pure score math).
 ## Testing
 
 ```bash
-3d test            # pytest (unit + CLI smoke harness) then mypy — both must pass
+3d test            # ruff, pytest (unit + CLI smoke harness), then mypy — all must pass
 3d test -k errors  # forward args to pytest
 ```
 
@@ -69,7 +69,7 @@ Unit tests live in `tests/` (registry/alias resolution, errors formatting, score
 math, param parsing, env helpers). `tests/test_cli_smoke.py` runs `3d <cmd> --help` for
 EVERY registered command and the safe commands on `examples/cube.scad` (skipping when a
 tool is absent). `tests/test_imports.py` enforces the stdlib-only rule. `3d test` also runs
-mypy over `bin/3d + lib/ + tests/` against `mypy.ini` — keep it clean.
+ruff over `lib/ + tests/` and mypy over `bin/3d + lib/ + tests/` — keep both clean.
 
 ## Engineering conventions
 
@@ -162,6 +162,6 @@ Run the full list, not a subset:
   PNG must visibly show the **cavity** — "a PNG exists" is not proof it cut.
 - `3d check examples/cube.scad` runs all gates by default; `--mesh` alone runs only mesh.
 - First-run bootstrap: `rm ~/.config/3d-cli/.bootstrapped` then any `3d` cmd re-bootstraps.
-- `3d test` green (pytest + mypy); aliases still work; the smoke harness covers every
+- `3d test` green (ruff + pytest + mypy); aliases still work; the smoke harness covers every
   command's `--help`.
 - Everything committed atomically, codex-reviewed, and PUSHED to origin.

@@ -1,6 +1,6 @@
 # `3d slice` — slice to G-code
 
-Sends a model (`.stl`, `.3mf`, or `.scad`) to the installed slicer and produces G-code. Slicers are auto-detected in priority order: **OrcaSlicer** > **Bambu Studio** > **PrusaSlicer** (PATH and macOS app bundles). A `.scad` input is exported to STL first via `3d export`.
+Sends a model ([`.stl`](GLOSSARY.md#stl), [`.3mf`](GLOSSARY.md#3mf), or `.scad`) to the installed [slicer](GLOSSARY.md#slicer) and produces G-code. Slicers are auto-detected in priority order: **OrcaSlicer** > **Bambu Studio** > **PrusaSlicer** (PATH and macOS app bundles). A `.scad` input is exported to STL first via `3d export`.
 
 **Why it exists.** The old pipeline assumed PrusaSlicer only. Modern workflows use OrcaSlicer / Bambu Studio, which take `.json` profiles and different CLI flags. This command abstracts the slicer differences so the same invocation works on any machine.
 

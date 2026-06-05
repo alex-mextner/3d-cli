@@ -35,7 +35,7 @@ render/state caches live under `~/.config/3d-cli/web-state/`.
 
 - **Projects browser** — scans the root for projects (dirs with a `*.scad` / `SPEC.md` /
   `3d.yaml`).
-- **3D viewer** — exports the model to STL (reusing `lib/render.py` / OpenSCAD) and loads
+- **3D viewer** — exports the model to [STL](GLOSSARY.md#stl) (reusing `lib/render.py` / [OpenSCAD](GLOSSARY.md#openscad)) and loads
   it in three.js (orbit/zoom/pan); toggle axes / bounding-box / wireframe and thumbnail
   analytical-layer PNGs from `previews/` `match/` `verify/`. Pick two overlays to compare
   with an A/B wipe slider.

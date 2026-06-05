@@ -1,7 +1,7 @@
-"""3d test — run the test gate: pytest (unit + CLI smoke) then mypy.
+"""3d test — run the test gate: ruff, pytest (unit + CLI smoke), then mypy.
 
-Delegates to tests/run_gate.py through pyrun so pytest/mypy resolve via the same
-.venv/uv/system tiers as every other python tool. Both must pass for exit 0.
+Delegates to tests/run_gate.py through pyrun so ruff/pytest/mypy resolve via the same
+.venv/uv/system tiers as every other python tool. All three must pass for exit 0.
 """
 from __future__ import annotations
 
@@ -12,10 +12,10 @@ from cli.pyrun import exec_tool
 from cli.registry import Command
 
 USAGE = """3d test [pytest-args...]
-  Run the test gate: pytest (unit tests + CLI smoke harness) then mypy.
-  Both must pass for exit 0. Extra args are forwarded to pytest.
+  Run the test gate: ruff, pytest (unit tests + CLI smoke harness), then mypy.
+  All three must pass for exit 0. Extra args are forwarded to pytest.
 
-  mypy runs over bin/3d + lib/ + tests/ against mypy.ini.
+  ruff checks lib/ + tests/; mypy runs over bin/3d + lib/ + tests/ against mypy.ini.
 
 Examples:
   3d test
@@ -31,13 +31,13 @@ def run(argv: list[str]) -> int:
     runner = os.path.join(repo_root(), "tests", "run_gate.py")
     # fastapi/uvicorn/markdown/pyyaml: the `web` tests + mypy over lib/web need them
     # importable in the gate's runtime (uv resolves them per-call here).
-    return exec_tool("pytest,mypy,fastapi,uvicorn,markdown,pyyaml,httpx", runner, list(argv))
+    return exec_tool("ruff,pytest,mypy,fastapi,uvicorn,markdown,pyyaml,httpx", runner, list(argv))
 
 
 COMMAND = Command(
     name="test",
     group="ENVIRONMENT",
-    summary="run the test gate: pytest (unit + CLI smoke) then mypy",
+    summary="run the test gate: ruff, pytest (unit + CLI smoke), then mypy",
     usage=USAGE,
     run=run,
 )

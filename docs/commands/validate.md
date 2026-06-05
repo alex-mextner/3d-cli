@@ -2,7 +2,7 @@
 
 Checks whether an `.scad` file parses without error. No geometry is rendered, so it is fast and lightweight — ideal for editor-on-save hooks or CI linting.
 
-**Why it exists.** A full CGAL render can take minutes on complex models. `validate` only runs the parser, so it catches syntax errors, missing includes, and broken `assert()` calls in seconds.
+**Why it exists.** A full [CGAL](GLOSSARY.md#cgal) render can take minutes on complex models. `validate` only runs the parser, so it catches syntax errors, missing includes, and broken `assert()` calls in seconds.
 
 ## Usage
 

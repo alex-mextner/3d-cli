@@ -16,12 +16,12 @@ Reports which dependencies are present or missing for the full `3d` pipeline, an
 
 ## Checks
 
-- **Core** — `openscad`, `imagemagick (magick)`, `python3`
+- **Core** — [`openscad`](GLOSSARY.md#openscad), `imagemagick (magick)`, `python3`
 - **Python runtime** — `uv` (preferred), `pip`, `.venv`
-- **Python mesh stack** — `trimesh`, `manifold3d`, `numpy`, `scipy`, `rtree`, `pillow`, `opencv`, `pyvista` (optional, for `collision --viz`)
+- **Python mesh stack** — [`trimesh`](GLOSSARY.md#trimesh), [`manifold3d`](GLOSSARY.md#manifold3d), `numpy`, `scipy`, `rtree`, `pillow`, [`opencv`](GLOSSARY.md#opencv), `pyvista` (optional, for `collision --viz`)
 - **Web dashboard** — `fastapi`, `uvicorn`, `markdown`, `pyyaml` (optional tier)
 - **Slicer** — `OrcaSlicer` / `Bambu Studio` / `PrusaSlicer`
-- **OpenSCAD libraries** — `BOSL2`, `NopSCADlib` (auto-install on first run)
+- **OpenSCAD libraries** — [`BOSL2`](GLOSSARY.md#bosl2), [`NopSCADlib`](GLOSSARY.md#nopscadlib) (auto-install on first run)
 
 ## Exit codes
 

@@ -1,6 +1,6 @@
-# `3d match` — forced-monotonic silhouette-match loop
+# `3d match` — [forced-monotonic](GLOSSARY.md#forced-monotonic-loop) silhouette-match loop
 
-Iteratively adjusts an `.scad` model’s numeric parameters to improve silhouette match against a reference image. An LLM critic proposes one delta per round; the change is accepted **only if** the IoU / AE score strictly improves **and** the manifold gate passes. Otherwise it reverts. Every step is logged to a changelog.
+Iteratively adjusts an `.scad` model’s numeric parameters to improve [silhouette](GLOSSARY.md#silhouette) match against a reference image. An LLM critic proposes one delta per round; the change is accepted **only if** the [IoU](GLOSSARY.md#iou) / [AE](GLOSSARY.md#ae) score strictly improves **and** the [manifold](GLOSSARY.md#manifold) gate passes. Otherwise it reverts. Every step is logged to a changelog.
 
 **Why it exists.** Manual tuning of constants to match a reference photo is tedious. The loop automates the propose-evaluate-revert cycle with a strict monotonicity guarantee, so the model never regresses.
 

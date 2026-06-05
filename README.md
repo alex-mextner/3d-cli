@@ -96,11 +96,8 @@ invocation (once, quiet, non-fatal offline) and auto-exports `OPENSCADPATH`, so
 ## Commands
 
 Run `3d <command> --help` for full options. Examples below assume `examples/cube.scad`.
-
-> **Coming in this branch:** `3d init` (project scaffolder), `3d projects` (project registry),
-> `3d materials` / `3d printers` (shared material/printer vocabularies, §2a) are landing in
-> the same development wave and are **not** documented as existing yet. The table below is the
-> verified surface that exists today.
+For the full registered command map and per-command docs, see
+[docs/commands/README.md](docs/commands/README.md).
 
 ### Render & view  (unified under `render`)
 
@@ -147,12 +144,16 @@ assembly mode (the assembly must honour `-D cut=true` and colour each part outsi
 | `3d export <file.scad>` | STL/[3MF](GLOSSARY.md#3mf) with manifold/self-intersect validation. **Nonzero exit on bad geometry.** |
 | `3d validate <file.scad>` | Fast syntax check (no render). |
 | `3d params <file.scad> [--json]` | Extract Customizer-style parameters. |
+| `3d om <file.scad> <selector>` | Query `.scad` object-model annotations as JSON. |
+| `3d usdz <file.scad\|file.stl>` | Export a colored USDZ for Apple AR Quick Look. |
 
 ```bash
 3d export examples/cube.scad -o cube.stl          # PASS, exit 0
 3d export examples/cube.scad -o cube.3mf -D 'width=80'
 3d validate examples/cube.scad
 3d params examples/cube.scad --json
+3d om annotated.scad '#valve'
+3d usdz examples/cube.scad -o cube.usdz
 ```
 
 `export` validates the produced mesh with the trimesh/manifold3d stack (watertight +
@@ -175,6 +176,7 @@ selection flags it runs ALL applicable gates; selectors run a subset; `--skip` e
 | `3d mesh <file.stl\|.scad>` | watertight / manifold / self-intersection / volume (trimesh + open3d/manifold3d; falls back to openscad warnings). |
 | `3d printability <file.scad>` | wall / min-feature / overhang / orientation (FDM, PLA/PETG). |
 | `3d collision <config.json>` | generic collision/penetration engine (static / `--frame` / `--viz`). |
+| `3d lint [--all \| paths...]` | advisory repository lint rules. |
 
 ```bash
 3d check examples/cube.scad                          # all applicable gates
@@ -211,6 +213,7 @@ photo of a real object and want a printable part with the same proportions and p
 | `3d match <assembly.scad> <reference>` | forced-monotonic acceptance loop (render→score→critic→apply→accept/revert + changelog). |
 | `3d fit-camera <model.scad> <reference>` | fit an OpenSCAD camera to a reference photo by maximizing silhouette IoU; **saves the viewpoint** + a fit render + an overlay. |
 | `3d preprocess <reference.jpg>` | subject mask + proportional depth ([SAM2](GLOSSARY.md#sam2)/[Depth-Anything](GLOSSARY.md#depth-anything) if installable, else [OpenCV](GLOSSARY.md#opencv). |
+| `3d compare <model.scad\|render.png> <reference.jpg>` | segmented model/reference comparison with IoU + SSIM/DSSIM and artifacts. |
 
 ```bash
 3d silhouette examples/cube.scad -o mask.png --ortho --cam 130,-600,52,130,0,52
@@ -279,12 +282,21 @@ per-OS install command (e.g. `brew install --cask orcaslicer`) — never broken.
 
 | Command | What |
 |---|---|
+| `3d init [path]` | scaffold a `3d.yaml` project skeleton. |
+| `3d projects list\|add\|remove` | manage the project registry used by `3d web`. |
+| `3d materials list\|show` | inspect FDM material names and properties. |
+| `3d printers list\|show` | inspect printer names, bed volumes, and nozzle metadata. |
+| `3d metrics list\|show` | inspect persisted command metrics JSONL records. |
 | `3d doctor` | report present/missing deps + the exact install command per OS (read-only). |
-| `3d test [pytest-args]` | run the test gate: pytest (unit + CLI smoke harness) then mypy. |
+| `3d test [pytest-args]` | run the test gate: ruff, pytest (unit + CLI smoke harness), then mypy. |
 
 ```bash
+3d init my-bracket --no-input
+3d projects add ./my-bracket
+3d materials list
+3d printers list
 3d doctor                 # PASS/MISSING table (read-only)
-3d test                   # pytest + mypy — both must pass
+3d test                   # ruff + pytest + mypy — all must pass
 3d test -k registry       # forward args to pytest
 ```
 
@@ -342,7 +354,7 @@ lib/errors.py       structured CLI error types (WHAT/WHY/remediation/accepted/in
 lib/commands/*.py   one self-registering module per subcommand (drop a file = add a command)
 lib/*.py            heavy python tools (render/mesh/collision/printability/preprocess/match/fit)
 lib/web/            the web dashboard app (FastAPI + SSE + three.js SPA)
-tests/              pytest unit tests + the CLI smoke harness (run via `3d test`)
+tests/              ruff + pytest unit tests + the CLI smoke harness + mypy gate (`3d test`)
 docs/commands/      per-command documentation fragments
 docs/critic-prompts.md  the vision-critic prompt patterns
 libs/               OpenSCAD libraries cloned on demand (gitignored)

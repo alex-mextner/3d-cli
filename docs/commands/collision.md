@@ -32,4 +32,4 @@ The `config.json` supplies: `pair_scad` (placement), `parts`, `phases`, `intende
 
 ## Dependencies
 
-Needs the Python mesh stack (`trimesh`, `manifold3d`, `rtree`, `numpy`, `scipy`). `--viz` also needs `pyvista`.
+Needs the Python mesh stack ([`trimesh`](GLOSSARY.md#trimesh), [`manifold3d`](GLOSSARY.md#manifold3d), `rtree`, `numpy`, `scipy`). `--viz` also needs `pyvista`.

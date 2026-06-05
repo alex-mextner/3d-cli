@@ -1,6 +1,6 @@
 # Testing
 
-Ported from hyper-canvas-draft, adapted to pytest + mypy.
+Ported from hyper-canvas-draft, adapted to ruff + pytest + mypy.
 
 ## TDD is mandatory (new features and bugfixes)
 1. Write a failing test for the desired behavior.
@@ -25,7 +25,7 @@ Never write the implementation first "to see if it works" and add tests after.
   from (b) behavior changed (that's a regression, not a fix).
 
 ## The gate
-`3d test` = pytest + mypy (and lint). Unit-test the pure functions (bbox→camera, axis math, score/
+`3d test` = ruff + pytest + mypy. Unit-test the pure functions (bbox→camera, axis math, score/
 IoU, strength formulas, `3d.yaml`/object-model loader, selector resolution, op-DAG recompute, log
 adapters). CLI smoke harness: `3d <cmd> --help` for every registered command + safe commands on
 `examples/`. Skip gracefully when an external tool is absent (don't fail the suite for a missing
