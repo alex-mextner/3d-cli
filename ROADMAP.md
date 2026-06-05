@@ -58,7 +58,19 @@ live observation of AI agents doing the work. Its own repo
     duplicated per-stage definitions.
 
 ## 3. Core command surface (option-driven, consolidated)
-- 🔨 **`3d render <file.scad>`** — `--view front|back|left|right|top|bottom|iso|3-4|front-left|front-right|rear-left|rear-right` (camera from model bbox), `--multi [outdir]` (all standard angles), `--section [--plane YZ|XZ|XY] [--color] [--keep pos|neg] [--module 'm();']` (proper 6-param vector cross-section, never 7-param gimbal), `--cam` (manual override), `--ortho`, `-D k=v`, `--debug`.
+- 🔨 **`3d render <file.scad>`** — `--view front|back|left|right|top|bottom|iso|3-4|front-left|front-right|rear-left|rear-right` (camera from model bbox), `--multi [outdir]` (all standard angles), `--section` (see "Sections" below), `--cam` (manual override, last resort), `--ortho`, `-D k=v`, `--debug`.
+- 📋 **Camera: whole-model-in-frame is the DEFAULT, not a flag.** `--autocenter`/`--viewall`
+  behavior is always on — every render centers and fits the whole model unless told otherwise.
+  There is no `--autocenter`/`--viewall` flag. **Cropping/zoom happens ONLY when the camera is
+  told to focus** on specific regions/anchors/parts.
+- 📋 **Many convenient modes & PRESETS, not raw numbers.** The primary UX for camera/render/
+  section is high-level intent; raw `--cam` coordinates are the rare escape hatch. Provide a rich
+  preset library (named views, framings, section presets) and let the **object model (§5)** name
+  reusable ones per project.
+- 📋 **Object-model-driven camera framing** (§5): say WHAT must be in frame and FROM WHICH
+  angle — `--frame <anchor|part|tag>[,..]` (fit exactly those, zoomed/cropped to them) and
+  `--view`/named angles — instead of computing eye/center coordinates by hand. The camera solves
+  the pose to satisfy the intent.
 - 📋 **Photorealistic render** — `3d render --photo` (or `3d photo`) via **Blender** (Cycles/EEVEE):
   export STL/3MF → Blender headless (`bpy`) with materials/colors from the materials registry,
   proper lighting/HDRI, soft shadows. **Blender is installed ON DEMAND** (only when the user
@@ -67,6 +79,19 @@ live observation of AI agents doing the work. Its own repo
 - 📋 **`3d check <file>`** — runs ALL applicable gates by DEFAULT; `--mesh --printability --collision --manifold --silhouette` select a subset; `--skip X` excludes. Per-gate breakdown + PASS/FAIL. (= the acceptance master gate.)
 - ✅ `export` (mesh-validated, nonzero on bad geometry), `validate`, `params`.
 - ✅ `mesh`, `printability`, `collision` (static / `--frame` / `--viz`), `acceptance`, `silhouette`, `overlay`, `score`, `match` (forced-monotonic loop + changelog, `--dry-run`), `fit-camera`, `preprocess`.
+- 📋 **Sections — colored-only, anchored, multi, auto-framed** (replaces the confusing
+  "true cross-section" / "--color per-part assembly mode" wording):
+  - **Always colored.** Every section preserves each part's color ON the cut face. The plain
+    monochrome section is REMOVED — never wanted. No `--color` flag (color is not optional).
+  - **High-level spec (primary):** presets `mid-x|mid-y|mid-z` (through the centroid on an
+    axis), `through:<anchor>` (plane through a named feature), and named sections from the
+    object model (`--section <name>`). Low-level secondary: `--plane YZ|XZ|XY [--at <coord> |
+    --offset d] [--keep pos|neg]`. All cameras 6-param vector, never 7-param gimbal.
+  - **Multiple sections at once** — accept several `--section` specs → render each + optionally
+    a combined multi-cut view.
+  - **Auto-camera for sections** — pose solved to **maximize the projected area of the cut face
+    in frame** and **minimize occlusion** of the cut by the remaining solid (shares machinery
+    with `fit-camera`, different objective). `--cam` overrides.
 - 📋 **Thin aliases** `multi`/`section`/`mesh`/`printability`/`collision`/`acceptance` → `render --multi`/`render --section`/`check --…`.
 
 ## 4. Slicing
@@ -94,6 +119,29 @@ live observation of AI agents doing the work. Its own repo
 - 📋 **Anchors** answer "where + which characteristics": named anchors declared in the
   `.scad` via `// @anchor <name> pos=[x,y,z] dir=[..] area=<feat> note="…"` comments
   (recommended over a sidecar `.anchors.yaml`); `loads` in `3d.yaml` reference them.
+- 📋 **Object model = a DOM + stylesheet, without HTML/CSS** (design: `docs/specs/2026-06-05-3d-cli-architecture.md` §4):
+  geometry is a tree (assembly → parts → features); the object model adds an HTML/CSS-like
+  layer over it but with no HTML/CSS:
+  - **id** (unique, `#boiler`) + **class** (= `tags`, `.structural`) per node.
+  - **selectors** — one addressing mechanism reused EVERYWHERE: `#valve`, `.cosmetic`,
+    `.structural.removable`. Used by `render --frame .cosmetic`, `section through:#valve`,
+    `check --only .structural`, `pack` per-class supports, `ai` tool scoping.
+  - **stylesheet (rules)** `selector → properties` (color, material, orientation, supports,
+    infill, gate set, loads, section & camera-frame membership) — authored once, not repeated
+    per part. **Cascade + specificity** like CSS (class default < id override < inline; pinnable).
+  - engineering-vs-art is just a different rule set; no fork.
+- 📋 **Object-model file format — backward-compatible, never breaks other tools:**
+  - `.scad` → `// @anchor`/`// @section`/`// @part`/`// @view`/`// @class`/`// @color`
+    comments (OpenSCAD ignores comments → file still renders everywhere).
+  - `.3mf` → native metadata + per-object color/material (preferred rich mesh format).
+  - `.stl` → **sidecar** `<model>.3d.yaml` next to it (STL has no metadata slot; embedding
+    would corrupt it → sidecar only).
+  - `3d.yaml` ties parts ↔ files ↔ object model. One model drives sections, camera framing,
+    colors/materials, `pack`, strength, kinematics, AI RAG.
+- 📋 **Named camera views/framings in the object model** — declare WHAT must be in frame and
+  FROM WHICH angle (`// @view <name> frame=#valve,.cosmetic angle=front-left`); reuse by name
+  (`3d render --view <name>`) instead of raw coordinates. Convenient modes & presets first,
+  numbers last.
 
 ## 6. Physics / math tools
 - 📋 **`3d strength <part|3d.yaml>`** — strength-of-materials (beam/wall/hoop stress vs
@@ -205,3 +253,44 @@ one-line usage):
   Purpose: regression tracking + **data for subsequent improvement** (prompt tuning, model A/B,
   fine-tuning). `3d metrics` / `3d ai bench --compare` view history + deltas. `3d web` surfaces the
   benchmark/metric trend lines live.
+
+## 15. Project-agnostic, modular architecture (the go-to design)
+Full design: **`docs/specs/2026-06-05-3d-cli-architecture.md`**. `3d` is a Swiss-army knife for
+**all 3D FDM work — engineering-first today, artistic later** — NOT the lego-loco tool it started
+as. The four layers: (1) project-agnostic **core**, (2) self-registering **capability plugins**
+(gates/ai-tools/slicers/render-backends/importers/metrics), (3) **project layer** (pure data:
+`3d.yaml` + parts + references + project checks; CLI finds nearest `3d.yaml` from cwd), (4) optional
+named **pipelines** (the reference-photo match is ONE pipeline, not the identity).
+- 📋 **No subject knowledge in core (enforce in code, not just docs).** Core tools take subject /
+  reference / feature-list / camera / plane as PARAMETERS — zero default filenames, cameras, part
+  lists, or feature taxonomies. Sweep core for leakage; priority offenders found:
+  `lib/preprocess_reference.py` (written around "the locomotive" → must mask "the subject"),
+  `docs/critic-prompts.md` (hardcodes `funnel/boiler/smokebox` as THE feature taxonomy → caller
+  supplies it). Marked "e.g." examples (`config.py` "ejector", `frame_check.py` "cartridge") are OK.
+  Add a CI/grep check that core contains only marked examples.
+- 📋 **Gate set is project-determined, not a fixed list.** `3d check` with no flags runs the gates
+  THIS project declares (via `3d.yaml`/tags/stylesheet), so an art piece runs manifold+printability
+  and skips strength/collision while an engineering part runs the full set — same binary.
+- 📋 **Extension = drop in a self-registering module** (command/gate/ai-tool/backend/importer/metric)
+  following the foundation wave's registry contract; never edit a central dispatcher or shared list.
+
+## 16. README & docs de-coupling (user MINIMUM ask — keeps getting missed)
+- 📋 **ONE docs/reframe owner** edits the README intro + Requirements + framing; feature work NEVER
+  touches these (a feature ships `--help` + a `docs/commands/<name>` fragment only). Runs FIRST
+  after the foundation wave (the foundation rewrites the README with the OLD loco framing — that
+  output is known-throwaway).
+- 📋 **README intro reframed:** `3d` = scriptable, AI-assisted CLI for ANY 3D FDM project
+  (engineering now, art later); the reference-photo match is one example pipeline (linked), not the
+  headline. Drop "operationalizes the lego-loco research pipeline."
+- 📋 **Requirements section = a plain LIST, no manual instructions.** Every dependency, a one-line
+  purpose, an `(optional)` marker where applicable, and a single line that the CLI **auto-installs
+  what it can** (`3d doctor` to inspect). DELETE the manual venv/pip walkthrough and the `3d setup`
+  block. Must list ALL deps (it is still incomplete).
+
+## 17. Research-driven backlog (from §12 survey)
+- 📋 Source of truth: `garage-band/projects/lego-loco/research/3d-cli-backlog.md` (14 prioritized
+  items P0–P5, each with integration point + expected metric). Fold the actionable ones into the
+  sections above. Highest-value NET-NEW vein: **program synthesis for CAD** (CSGNet / ShapeAssembly
+  / DeepCAD) → `3d ai design`. Also: pin exact metric formulas + library conventions in `3d metrics`
+  (§13.4); peer-reviewed FDM anisotropy knockdowns (PETG ~0.7×, PLA ~0.45× cross-layer) in
+  `3d strength`; normal-map critic channels (Marigold/Wonder3D) for `3d ai critique`.
