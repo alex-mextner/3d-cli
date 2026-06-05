@@ -1,0 +1,52 @@
+# printers.yaml — built-in printer registry for the `3d` CLI (ROADMAP §2a).
+#
+# ACCESSED VIA: lib/printers.py load_printers() (this is the lowest-priority layer;
+# user ~/.config/3d-cli/printers.yaml and a project ./printers.yaml override by name).
+# Read by `3d printers list` / `3d printers show <name>` and by slice/check/pack to
+# resolve a project's `printer:` name into a build volume + firmware + default material.
+#
+# INVARIANTS:
+#   - Keys are the canonical printer name exactly as a user writes it in 3d.yaml's
+#     `printer:` field. A later layer (user/project) with the SAME key fully replaces
+#     this entry (no deep-merge of nested fields — last writer wins per name).
+#   - `bed` is [x, y, z] BUILD VOLUME in mm (not the bed plate footprint): the largest
+#     part that fits. Values are the vendors' published usable build volumes.
+#   - `nozzle_mm` defaults to 0.4 (the near-universal stock nozzle) when omitted.
+#   - `firmware` is one of: klipper | bambu | marlin | prusa (drives which flavor of
+#     g-code / slicer profile downstream tooling targets).
+#   - `material` is a default filament NAME into materials.yaml; a project/part material
+#     overrides it. It is only the "what's loaded by default" hint.
+#
+# Sources: Bambu Lab A1 = 256x256x256, A1 mini = 180x180x180, Prusa MK4 = 250x210x220,
+# Prusa MINI = 180x180x180 (vendor spec sheets). "Generic 220" is a safe fallback for an
+# unknown Marlin/Ender-class machine with a 220x220x250 bed.
+
+Bambu Lab A1:
+  bed: [256, 256, 256]
+  nozzle_mm: 0.4
+  firmware: bambu
+  material: PLA
+
+Bambu Lab A1 mini:
+  bed: [180, 180, 180]
+  nozzle_mm: 0.4
+  firmware: bambu
+  material: PLA
+
+Prusa MK4:
+  bed: [250, 210, 220]
+  nozzle_mm: 0.4
+  firmware: prusa
+  material: PLA
+
+Prusa MINI:
+  bed: [180, 180, 180]
+  nozzle_mm: 0.4
+  firmware: prusa
+  material: PLA
+
+Generic 220:
+  bed: [220, 220, 250]
+  nozzle_mm: 0.4
+  firmware: marlin
+  material: PLA
