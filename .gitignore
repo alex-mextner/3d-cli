@@ -1,0 +1,18 @@
+# python
+.venv/
+__pycache__/
+*.pyc
+
+# OpenSCAD libraries are cloned on demand (3d libs install …), not vendored.
+libs/*/
+
+# test / scratch render outputs
+*.png
+*.stl
+*.3mf
+*.csg
+match_work/
+score/
+
+# keep example sources and any intentionally-committed reference images
+!examples/*.scad
