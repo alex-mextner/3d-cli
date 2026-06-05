@@ -43,12 +43,16 @@ Single-view options:
                         dimension-accurate technical drawings or when measuring
                         from the render.
                         Example: 3d render bracket.scad --view top --ortho
-  --colorscheme NAME   OpenSCAD color theme for the render. Use this to match a
-                        dark or light document background.
-                        Default: 'Tomorrow Night'
-                        Example: 3d render bracket.scad --colorscheme 'Before Dawn'
+   --colorscheme NAME   OpenSCAD color theme for the render. Use this to match a
+                         dark or light document background.
+                         Default: 'Tomorrow Night'
+                         Example: 3d render bracket.scad --colorscheme 'Before Dawn'
+   --render             force CGAL render mode (slower but exact). Use this when
+                         the preview mode produces visual artifacts or when you need
+                         the exact geometry for a downstream gate.
+                         Example: 3d render bracket.scad --view left --render
 
-Section options:
+   Section options:
   --plane YZ|XZ|XY     cut plane orientation. The plane passes through the model's
                         centroid by default. Use this to show the internal layout
                         on a specific face.

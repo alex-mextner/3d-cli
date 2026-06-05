@@ -31,7 +31,12 @@ USAGE = """3d doctor
 
   Checks: openscad, imagemagick, python3, uv/pip, the python mesh stack
   (trimesh, manifold3d, numpy, scipy, rtree, pillow, opencv), and a slicer
-  (OrcaSlicer / Bambu Studio / PrusaSlicer)."""
+  (OrcaSlicer / Bambu Studio / PrusaSlicer).
+
+Examples:
+  3d doctor
+  3d doctor | grep MISSING   # filter to only missing items
+  3d doctor                  # run before CI to verify the environment"""
 
 
 def run(argv: list[str]) -> int:  # noqa: C901
