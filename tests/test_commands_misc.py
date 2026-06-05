@@ -154,14 +154,24 @@ def test_fit_camera_missing_second() -> None:
 
 
 def test_fit_camera_missing_model() -> None:
-    with pytest.raises(InputNotFound):
-        fit_run(["model.scad", "ref.png"])
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("cli.env.find_openscad", lambda: "/usr/bin/openscad")
+        with pytest.raises(InputNotFound):
+            fit_run(["model.scad", "ref.png"])
 
 
 def test_fit_camera_missing_ref() -> None:
-    # we can't easily make os.path.isfile return True for just one path in a simple test
-    # so mock it
-    pass
+    model = "model.scad"
+    ref = "ref.png"
+
+    def exists(path: str) -> bool:
+        return path == model
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("os.path.isfile", exists)
+        mp.setattr("cli.env.find_openscad", lambda: "/usr/bin/openscad")
+        with pytest.raises(InputNotFound):
+            fit_run([model, ref])
 
 
 def test_fit_camera_unknown_option(monkeypatch: Any) -> None:
@@ -172,17 +182,55 @@ def test_fit_camera_unknown_option(monkeypatch: Any) -> None:
 
 
 def test_fit_camera_runs(monkeypatch: Any) -> None:
+    seen: list[str] = []
+
+    def fake_exec_tool(deps: str, script: str, args: list[str]) -> int:
+        seen[:] = args
+        return 0
+
     monkeypatch.setattr("os.path.isfile", lambda p: True)
     monkeypatch.setattr("cli.env.find_openscad", lambda: "/usr/bin/openscad")
-    monkeypatch.setattr("commands.fit_camera.exec_tool", lambda d, s, a: 0)
-    assert fit_run(["model.scad", "ref.png", "--out", "cam.json"]) == 0
+    monkeypatch.setattr("commands.fit_camera.exec_tool", fake_exec_tool)
+    assert fit_run(["model.scad", "ref.png", "--out", "cam.json", "--el-range", "-20,75"]) == 0
+    assert seen == [
+        "--model",
+        "model.scad",
+        "--ref",
+        "ref.png",
+        "--out",
+        "cam.json",
+        "--el-range",
+        "-20,75",
+    ]
 
 
 def test_fit_camera_bool_flag(monkeypatch: Any) -> None:
+    seen: list[str] = []
+
+    def fake_exec_tool(deps: str, script: str, args: list[str]) -> int:
+        seen[:] = args
+        return 0
+
     monkeypatch.setattr("os.path.isfile", lambda p: True)
     monkeypatch.setattr("cli.env.find_openscad", lambda: "/usr/bin/openscad")
-    monkeypatch.setattr("commands.fit_camera.exec_tool", lambda d, s, a: 0)
+    monkeypatch.setattr("commands.fit_camera.exec_tool", fake_exec_tool)
     assert fit_run(["model.scad", "ref.png", "--draw-axes"]) == 0
+    assert "--draw-axes" in seen
+
+
+def test_fit_camera_seed_forwarded(monkeypatch: Any) -> None:
+    seen: list[str] = []
+
+    def fake_exec_tool(deps: str, script: str, args: list[str]) -> int:
+        seen[:] = args
+        return 0
+
+    monkeypatch.setattr("os.path.isfile", lambda p: True)
+    monkeypatch.setattr("cli.env.find_openscad", lambda: "/usr/bin/openscad")
+    monkeypatch.setattr("commands.fit_camera.exec_tool", fake_exec_tool)
+    assert fit_run(["model.scad", "ref.png", "--seed", "11"]) == 0
+    assert "--seed" in seen
+    assert seen[seen.index("--seed") + 1] == "11"
 
 
 def test_fit_camera_value_flag_needs_value(monkeypatch: Any) -> None:

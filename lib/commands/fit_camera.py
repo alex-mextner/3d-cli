@@ -43,9 +43,9 @@ Options:
   --thresh N            ref subject darkness threshold 0..255 (default 150)
   --rand N              random-search samples (default 80)
   --refine N            coordinate-descent refine steps (default 40)
+  --seed N              RNG seed for reproducibility (default 7)
   --el-range lo,hi      elevation search range in degrees (default -45,85); -89,89 restores full sphere
   --draw-axes           overlay PCA principal axis + bbox contour of both silhouettes
-  --seed N              RNG seed for reproducibility (default 7)
 
 Use the result:
   openscad --render --camera="$(jq -r .camera_arg camera.json)" -o view.png model.scad
@@ -53,7 +53,8 @@ Use the result:
 Examples:
   3d fit-camera model.scad ref.jpg
   3d fit-camera model.scad ref.jpg --out match/camera.json --draw-axes
-  3d fit-camera examples/cube.scad ref.png --rand 8 --refine 3   # quick smoke"""
+  3d fit-camera examples/cube.scad ref.png --rand 8 --refine 3   # quick smoke
+  3d fit-camera model.scad ref.jpg --el-range -20,75 --seed 11"""
 
 _VALUE_FLAGS = {"--out", "--center", "--opt-size", "--final-size", "--thresh", "--rand", "--refine", "--el-range", "--seed"}
 _BOOL_FLAGS = {"--draw-axes"}

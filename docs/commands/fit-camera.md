@@ -19,13 +19,15 @@ Optimises an [OpenSCAD](GLOSSARY.md#openscad) camera vector so that the rendered
 | `--thresh N` | `150` | Reference subject darkness threshold (0–255) |
 | `--rand N` | `80` | Random-search samples |
 | `--refine N` | `40` | Coordinate-descent refine steps |
-| `--draw-axes` | off | Overlay PCA principal axis + bbox contour of both silhouettes |
 | `--seed N` | `7` | RNG seed for reproducibility |
+| `--el-range lo,hi` | `-45,85` | Elevation search range in degrees; use `-89,89` to search the full sphere |
+| `--draw-axes` | off | Overlay PCA principal axis + bbox contour of both silhouettes |
 
 ```bash
 3d fit-camera model.scad ref.jpg
 3d fit-camera model.scad ref.jpg --out match/camera.json --draw-axes
 3d fit-camera examples/cube.scad ref.png --rand 8 --refine 3   # quick smoke
+3d fit-camera model.scad ref.jpg --el-range -20,75 --seed 11
 ```
 
 ## Using the result
@@ -33,6 +35,17 @@ Optimises an [OpenSCAD](GLOSSARY.md#openscad) camera vector so that the rendered
 ```bash
 openscad --render --camera="$(jq -r .camera_arg camera.json)" -o view.png model.scad
 ```
+
+## Output contract
+
+The JSON contains:
+
+- `camera_arg` and `camera` for replaying the exact OpenSCAD camera.
+- `params` for the fitted azimuth, elevation, distance, and pan offsets.
+- `center`, `model_diag`, `opt_size`, and `final_size` for auditing the scale and frame.
+- `ref` for the reference image path used during fitting.
+- `iou` and `ssim` for the final optimization-resolution mask comparison.
+- `fit_render` and `overlay` paths. The overlay is a red/cyan binary mask diagnostic at the optimization resolution: red is the reference mask, cyan is the rendered mask.
 
 ## Dependencies
 
