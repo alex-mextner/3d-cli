@@ -513,16 +513,15 @@ The CLI work now has its own repo and this ROADMAP as the single source. Pick up
 4. **Integration + demo (final):** merge everything, end-to-end tests, README screenshots (§11),
    then the §14 showcase demo + §22 video report.
 
-**State at handoff (2026-06-05):**
-- ✅ Foundation (python registry CLI, errors, 54 tests, mypy clean) — on `main`.
-- ✅ Research extended + `3d-cli-backlog.md` (in `garage-band`, see §17).
-- ✅ ROADMAP §0–§21 + `docs/specs/2026-06-05-3d-cli-architecture.md` — on `main`.
-- 📋 **MERGE FIRST**: `docs/roadmap-finalize` (this §0a/§22/§23 + handoff + `docs/rules/`) and
-   `docs/strip-local-paths` are pushed but NOT yet on `main` (the web agent occupied `main` at
-   handoff). Merge both into `main` before anything else, then re-read this ROADMAP from `main`.
-- 🔨 **Web dashboard integration** — a background agent was bringing `lib/web/` into the new registry
-   (uncommitted in the `main` working tree at handoff); the NEXT session must verify it committed +
-   pushed, or finish it. It used the wrong config dir (`~/.config/3d/`) — fix per §23.
-- 📋 **Branch `docs/strip-local-paths`** (pushed) — merge it: strips machine paths from docs.
-- ⚠️ The web integration ran in THIS session; if this session ended mid-flight it may be incomplete —
-   check `git status` + `lib/web/` + `lib/commands/web.py` first thing.
+**State at handoff (2026-06-05) — all consolidated on `main`, tree clean, pushed:**
+- ✅ Foundation: python registry CLI + `lib/errors.py`, **72 tests**, mypy clean.
+- ✅ Web dashboard integrated into the registry (`lib/commands/web.py` + `lib/web/`); `3d web` boots.
+- ✅ ROADMAP §0–§27 + `docs/specs/2026-06-05-3d-cli-architecture.md` + `docs/rules/` (dev/testing/
+   code-style/decision-requests).
+- ✅ Research vendored: `docs/research/{report.md,report.pdf,sources.md,3d-cli-backlog.md}` +
+   `RESEARCH.md` / `APPLY-RESEARCH.md` / `GLOSSARY.md`.
+- ✅ All temp doc branches merged + deleted; no open branches, no worktrees.
+- ⚠️ **First real code task next session — config dir**: code uses `~/.config/3d/` (foundation + web,
+   incl. the web agent's choice); rename to `~/.config/3d-cli/` per §23 (one constant in
+   `lib/cli/env.py`, `lib/web/webconfig.py`, `lib/commands/{web,libs,doctor}.py`) so docs+code agree.
+- NOTE: nothing is in-flight; this session ended cleanly. Start from the build order above (1→4).
