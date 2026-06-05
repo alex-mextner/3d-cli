@@ -1,4 +1,24 @@
-"""3d match — forced-monotonic silhouette-match loop (lib/match_loop.py).
+"""3d match — forced-monotonic silhouette-match loop.
+
+WHAT: an automated optimization loop that proposes a single parameter change, re-renders,
+  scores the silhouette against a reference, and accepts the change ONLY if the score
+  strictly improves AND all hard gates pass. Otherwise it reverts and tries again.
+
+WHY: unconstrained self-judged LLM loops oscillate without bound (the FlipFlop effect:
+  ~46% flips, ~17% accuracy drop). Forced-monotonic acceptance turns "an LLM fiddling
+  with numbers" into a convergent optimizer — the single most important rule for making
+  AI-assisted modeling actually reach a target.
+
+Examples:
+  3d match model.scad ref.jpg --rounds 2 --dry-run   # smoke test, no real critic
+  3d match model.scad ref.jpg --rounds 8 --ortho
+  3d match model.scad ref.jpg --params width,height --no-improve 4
+
+ROADMAP §13.1: "Forced-monotonic acceptance: the loop applies ONE critic-proposed edit,
+  re-scores, and accepts only on strict metric improvement AND all hard gates PASS;
+  otherwise it reverts + resamples. A changelog of attempts is fed back so a failed move
+  is never retried. This single rule turns an LLM fiddling with numbers into a convergent
+  optimiser."
 
 match_loop.py shells back out to `bin/3d` for render/score/mesh, so it needs no heavy
 deps itself; the original ran it with bare python3. We run it via pyrun with no deps so

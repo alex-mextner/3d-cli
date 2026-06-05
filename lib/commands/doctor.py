@@ -1,5 +1,24 @@
 """3d doctor — read-only health/compat report: present/missing deps + install commands.
 
+WHAT: inspects the environment and reports which dependencies are present or missing for
+  the full `3d` pipeline, with the exact install command for THIS OS.
+
+WHY: before running renders, gates, or slicing, you need to know whether OpenSCAD,
+  ImageMagick, the Python mesh stack, and a slicer are available. `doctor` gives a
+  PASS/MISSING breakdown and the exact command to install each missing item — so you
+  never guess. `3d setup` was removed; install is either automatic (first-run bootstrap)
+  or driven by the per-item commands printed here.
+
+Examples:
+  3d doctor
+  3d doctor | grep MISSING   # filter to only missing items
+  3d doctor                  # run before CI to verify the environment
+
+ROADMAP §2: "First-run auto-bootstrap (NO manual setup). On any 3d invocation, if not
+  bootstrapped: auto-clone/configure OpenSCAD libraries (BOSL2, NopSCADlib) + set
+  OPENSCADPATH, once, quietly, idempotent, non-fatal offline. 3d doctor stays (read-only
+  health/compat report)."
+
 `3d setup` was removed (deps install via the first-run bootstrap + the per-item commands
 printed here), so doctor never points at a `setup` command — it prints the exact install
 line for each missing item instead.

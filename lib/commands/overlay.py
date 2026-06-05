@@ -1,4 +1,23 @@
-"""3d overlay — difference / 50% ghost / canny edge-overlay diagnostics (ImageMagick)."""
+"""3d overlay — difference / 50% ghost / canny edge-overlay diagnostics (ImageMagick).
+
+WHAT: produces three visual comparisons between a render and a reference photo:
+  a difference map (red = mismatch), a 50% ghost blend (spot misalignment), and a
+  canny edge overlay (red = reference edges, cyan = render edges) so geometry drift
+  is visible before numbers are computed.
+
+WHY: numeric scores (IoU, AE, SSIM) can tell you THAT something is wrong, but not WHAT
+  is wrong or WHERE. The overlay diagnostics let you see misalignment, missing features,
+  or geometry drift at a glance — essential for debugging a match loop or fit-camera run.
+
+Examples:
+  3d overlay render.png ref.jpg -o diff/
+  3d overlay preview.png photo.jpg           # writes to preview's directory
+  3d overlay render.png ref.jpg -o work/    # collect all three outputs in one place
+
+ROADMAP §7 / §13.2: "match/fit-camera → silhouette IoU, overlay-diff (AE / blend / canny).
+  The lowest-effort, highest-leverage primitive is a deterministic render → binary mask
+  → {IoU, AE} + overlay (red=ref, cyan=render) for the critic."
+"""
 from __future__ import annotations
 
 import os

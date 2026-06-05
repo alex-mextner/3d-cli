@@ -1,4 +1,22 @@
-"""3d export — STL/3MF/USDZ export WITH geometry validation. Nonzero exit on bad geometry."""
+"""3d export — STL/3MF/USDZ export WITH geometry validation. Nonzero exit on bad geometry.
+
+WHAT: exports a .scad model to a mesh format (STL, 3MF, OFF, AMF, USDZ) and validates
+  the result for manifoldness, watertightness, and self-intersection before returning.
+
+WHY: a bad mesh exported to a slicer will fail mid-print or produce garbage. `export`
+  gates the output: if OpenSCAD warns about non-manifold geometry, self-intersections,
+  or degenerate faces, the command exits nonzero and the bad mesh never reaches the
+  slicer. This is the last line of defense before physical printing.
+
+Examples:
+  3d export model.scad -o model.stl
+  3d export model.scad -o model.3mf -D 'width=80'
+  3d export model.scad -o model.usdz --color 0.30,0.55,0.85
+
+ROADMAP §34: "STL — the slicing/mesh-export lingua franca. 3d export part.scad -o part.stl
+  (auto-emits part.3d.yaml sidecar). 3MF — preferred rich print format (per-part color,
+  material, metadata). USDZ — Apple AR Quick Look (tap-to-view)."
+"""
 from __future__ import annotations
 
 import os

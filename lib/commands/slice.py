@@ -1,4 +1,25 @@
-"""3d slice - slice a model to G-code via the installed slicer."""
+"""3d slice — slice a model to G-code via the installed slicer.
+
+WHAT: sends a model (.stl, .3mf, or .scad) to the installed slicer (OrcaSlicer > Bambu
+  Studio > PrusaSlicer, auto-detected) and produces G-code. Optionally runs a dry-run
+  sliceability gate that verifies without keeping the G-code.
+
+WHY: slicing is the bridge between the designed model and the physical printer. The
+  slicer converts the mesh into toolpaths, temperatures, and speeds. `3d slice` wraps
+  that process with automatic slicer detection, profile validation, and a --dry-run
+  gate so you can verify a model is sliceable before committing filament and time.
+
+Examples:
+  3d slice part.stl -o part.gcode
+  3d slice part.scad --dry-run
+  3d slice part.3mf --profile "machine.json,process.json,filament.json"
+  3d slice --list-profiles
+
+ROADMAP §4: "3d slice <stl|3mf|scad> [-o] [--printer] [--profile]. Always runs the
+  sliceability check as a gate. Rename --check → --dry-run (slice to temp, verify only,
+  keep no g-code). Map material + printer (by name, from the registries §2a) → slicer
+  machine/process/filament profiles."
+"""
 from __future__ import annotations
 
 import glob

@@ -1,3 +1,22 @@
+"""3d om — query .scad object-model annotations and print matching nodes as JSON.
+
+WHAT: parses // @id, // @class, // @anchor, // @color comments from an OpenSCAD file
+  and runs a CSS-like selector (#id, .class, .class.other) to return the matching nodes.
+
+WHY: the object model (§5) adds an HTML/CSS-like addressing layer over geometry — id,
+  class, anchors, selectors — so you can name features in the .scad and then query them
+  from the CLI, web, or AI tools without re-parsing the source each time.
+
+Examples:
+  3d om part.scad '#valve'              # find the node with @id valve
+  3d om part.scad '.structural'         # all nodes tagged structural
+  3d om part.scad '.structural.removable'  # intersection of two classes
+
+ROADMAP §18: "3d om — object-model query & transform language (jq for 3D).
+  Reads a model from a file arg or stdin, applies a chained expression, and emits a
+  model document to stdout that downstream 3d commands consume. Pipes compose in the
+  shell; jq is the explicit analogy."
+"""
 from __future__ import annotations
 
 import json

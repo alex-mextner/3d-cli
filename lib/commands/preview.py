@@ -1,5 +1,22 @@
 """3d preview — fast throwntogether preview PNG (no CGAL render).
 
+WHAT: generates a quick, low-cost PNG of a .scad model using OpenSCAD's preview mode
+  (no CGAL meshing), so you can iterate on shape and placement in seconds rather than
+  minutes.
+
+WHY: the full CGAL render used by `3d render` is exact but slow. When you are iterating
+  on parameters, checking proportions, or producing a quick screenshot for a chat,
+  preview is the right tool — it trades exactness for speed.
+
+Examples:
+  3d preview model.scad
+  3d preview model.scad -o look.png --size 1024x768
+  3d preview model.scad --cam 0,0,0,55,0,25,0   # 7-param gimbal (preview mode)
+
+ROADMAP §3 / §6: "3d render — fast throwntogether preview (no CGAL) for scrubbing/
+  iterating. Two render backends: fast OpenSCAD preview (default) and photoreal Blender
+  (Cycles/EEVEE) for the final clip."
+
 Note: preview's default camera is a 7-param gimbal ON PURPOSE (throwntogether wants the
 gimbal form); the 6-param vector validation that render/silhouette/score apply does NOT
 apply here.

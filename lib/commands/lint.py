@@ -1,3 +1,23 @@
+"""3d lint — run advisory lint rules over .scad / .py / project files.
+
+WHAT: scans source files for hygiene issues (subject leakage, naming conventions,
+  style violations) and prints human-readable or JSON findings.
+
+WHY: before the acceptance gates (`3d check`) catch geometric defects, lint catches
+  the code-quality and project-hygiene issues that make a model hard to maintain or
+  share — hardcoded subject names, leaked internal references, inconsistent naming.
+  Advisory, not fatal: exit 0 = clean, 1 = findings, 2 = bad invocation.
+
+Examples:
+  3d lint --all                       # scan lib/*.py and lib/**/*.py
+  3d lint lib/preprocess_reference.py # scan one file
+  3d lint --all --rule no-subject-leakage --json   # JSON output, one rule
+
+ROADMAP §25: "3d lint — runs a configurable set of model checks (geometry, printability,
+  naming, object-model hygiene, convention conformance). Distinct from check (the
+  correctness/acceptance gates): lint is advisory/style/best-practice with levels
+  (error|warn|off), like a code linter."
+"""
 from __future__ import annotations
 
 import json

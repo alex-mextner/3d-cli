@@ -1,4 +1,21 @@
-"""3d metrics — inspect the longitudinal metrics JSONL store (ROADMAP §13.4)."""
+"""3d metrics — inspect the longitudinal metrics JSONL store.
+
+WHAT: lists and shows timestamped benchmark/metric records that every tool run
+  appends to ~/.local/share/3d-cli/metrics/ (or $XDG_DATA_HOME/3d-cli/metrics/).
+
+WHY: every `3d` run (render, check, score, match loop, ai bench) persists its
+  numbers so you can track regressions, compare model A/B results, and tune prompts
+  with real data instead of memory. `metrics` is the read-only viewer for that store.
+
+Examples:
+  3d metrics list                     # which commands have records, and how many
+  3d metrics show --limit 20          # last 20 records across all commands
+  3d metrics show --command render --limit 5   # last 5 render runs only
+
+ROADMAP §13.4: "Always-on, persisted longitudinal store. EVERY do/review/loop and
+  every tool run appends a timestamped record ... to a metrics store ...
+  3d metrics / 3d ai bench --compare view history + deltas."
+"""
 from __future__ import annotations
 
 import json

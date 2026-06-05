@@ -1,4 +1,24 @@
-"""3d preprocess — subject mask + proportional depth (SAM2/Depth-Anything else OpenCV)."""
+"""3d preprocess — subject mask + proportional depth (SAM2/Depth-Anything else OpenCV).
+
+WHAT: takes a reference photo and produces two outputs: a clean binary mask (white
+  subject, black background) and a proportional depth map (lighter = closer, darker =
+  farther), using the best available tier and degrading gracefully.
+
+WHY: the match pipeline and score gate need a clean reference silhouette to compare
+  against. A raw photo with sky, ground, or clutter produces a garbage mask. Preprocessing
+  isolates the subject first — via SAM2, Depth-Anything, or OpenCV fallback — so every
+  downstream metric operates on a real silhouette rather than background noise.
+
+Examples:
+  3d preprocess ref.jpg -o work/          # mask + depth into work/
+  3d preprocess ref.jpg --force-fallback    # skip model tiers, use OpenCV only
+  3d preprocess ref.jpg --sam2-checkpoint sam2.pt   # enable SAM2 tier
+
+ROADMAP §13.2: "Reference silhouette pre-pass: one prompt-click on the reference photo
+  → a clean binary subject mask via SAM2 (+ optional per-feature sub-masks), normalised
+  to the render frame; falls back to Depth-Anything + GrabCut when SAM2 is unavailable.
+  Why: a clean reference silhouette is the foundation of the whole metric."
+"""
 from __future__ import annotations
 
 import os

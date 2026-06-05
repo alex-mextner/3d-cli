@@ -1,4 +1,21 @@
-"""3d multi — alias for `3d render <file> --multi [outdir]`."""
+"""3d multi — alias for `3d render <file> --multi [outdir]`.
+
+WHAT: renders all standard angles (front, back, left, right, top, iso) in one async
+  batch, producing a gallery of PNGs for documentation, READMEs, or design review.
+
+WHY: a single render only shows one side of the story. When you need to communicate a
+  design to a teammate, client, or reviewer, you need the full set of standard views —
+  and you want them produced automatically, not by hand-crafting six separate commands.
+
+Examples:
+  3d multi bracket.scad previews/       # all angles into previews/
+  3d multi bracket.scad --render       # exact CGAL renders for the gallery
+  3d multi bracket.scad -D 'depth=40'  # batch at a specific parameter
+
+ROADMAP §3: "3d render — --view front|back|left|right|top|bottom|iso|3-4|front-left|...
+  (camera from model bbox), --multi [outdir] (all standard angles, async batch),
+  --section (true cross-section)."
+"""
 from __future__ import annotations
 
 from cli.registry import Command

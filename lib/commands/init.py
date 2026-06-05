@@ -1,4 +1,22 @@
-"""3d init — scaffold a new 3d project (the `3d.yaml` + directory skeleton). ROADMAP §28.
+"""3d init — scaffold a new 3d project (the `3d.yaml` + directory skeleton).
+
+WHAT: creates a valid 3d.yaml, directory skeleton (parts/, references/, previews/),
+  .gitignore, git repo, and agent environment (MCP, skills, AGENTS.md) in one command.
+
+WHY: this is the first command a user runs; everything else (pack/slice/check/strength/
+  projects/AI tools) reads the `3d.yaml` it writes. Like `git init` for git, `3d init`
+  is the entry point that makes every subsequent command work. Re-running is safe — it
+  tops up missing pieces without clobbering existing files.
+
+Examples:
+  3d init                                   # scaffold current directory, prompting
+  3d init my-bracket --no-input             # CI-safe: name from dir, all defaults
+  3d init --name pantheon --reference pantheon.jpg --printer X1C --no-input
+
+ROADMAP §28: "3d init [path] — fully sets up a new 3d project in one command:
+  git init, 3d.yaml (§5), directory skeleton, MCP, skills, git hooks, agents docs,
+  and register the project so 3d web (§9) lists it. Idempotent — re-running tops up
+  missing pieces without clobbering."
 
 ACCESSED VIA: `3d init [path] [flags]` from the CLI. This is the first command a user runs;
 everything else (pack/slice/check/strength/projects/AI tools) reads the `3d.yaml` it writes,

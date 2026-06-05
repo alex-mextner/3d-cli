@@ -1,4 +1,22 @@
-"""3d libs — OpenSCAD library info (path / list). Install is automatic on first run."""
+"""3d libs — OpenSCAD library info (path / list). Install is automatic on first run.
+
+WHAT: prints the OPENSCADPATH to export, or lists the installed OpenSCAD libraries
+  (BOSL2, NopSCADlib) that the first-run bootstrap cloned into libs/.
+
+WHY: the CLI auto-exports OPENSCADPATH on every invocation so `include <BOSL2/std.scad>`
+  just works. `libs path` is for the rare case when you want that path in a non-3d shell
+  (e.g. running OpenSCAD directly). `libs list` confirms the libraries are present.
+
+Examples:
+  3d libs list
+  export $(3d libs path)              # make OpenSCAD see the libs in your own shell
+  3d libs path                        # print the line for copy-paste
+
+ROADMAP §2: "First-run auto-bootstrap (NO manual setup). On any 3d invocation, if not
+  bootstrapped: auto-clone/configure OpenSCAD libraries (BOSL2, NopSCADlib) + set
+  OPENSCADPATH, once, quietly, idempotent, non-fatal offline. Remove 3d setup and
+  3d libs install — both become automatic. Keep only 3d libs path (info)."
+"""
 from __future__ import annotations
 
 import os

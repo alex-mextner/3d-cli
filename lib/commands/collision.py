@@ -1,4 +1,22 @@
-"""3d collision — generic collision/penetration engine (static / --frame / --viz)."""
+"""3d collision — generic collision/penetration engine (static / --frame / --viz).
+
+WHAT: checks whether parts in an assembly overlap or penetrate each other, either at
+  static poses (every pair at every phase), per-frame over a motion timeline, or as a
+  visualization with overlaps highlighted in red.
+
+WHY: an assembly can look correct from the outside but have internal parts clipping
+  through each other — especially after parameter changes in a match loop. The collision
+  gate catches those penetrations before they become a real mechanical failure.
+
+Examples:
+  3d collision project/verify/collision.json     # static gate, all pairs
+  3d collision project/verify/collision.json --frame   # per-frame over motion
+  3d collision project/verify/collision.json --viz       # render with overlaps red
+
+ROADMAP §3: "collision (static / --frame / --viz). config.json supplies: pair_scad,
+  parts, phases, intended contacts, eps_mm3 / touch_tol_mm / contact_max_mm3 thresholds.
+  All paths in the config are resolved RELATIVE TO THE CONFIG FILE'S DIRECTORY."
+"""
 from __future__ import annotations
 
 import os

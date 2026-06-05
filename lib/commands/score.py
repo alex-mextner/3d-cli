@@ -1,4 +1,24 @@
-"""3d score — silhouette AE + IoU; prints machine-parseable KEY=VALUE lines."""
+"""3d score — silhouette AE + IoU; prints machine-parseable KEY=VALUE lines.
+
+WHAT: renders a .scad (or accepts a ready PNG), thresholds it to a binary silhouette,
+  thresholds the reference photo, then computes AE (mismatched pixels) and IoU
+  (intersection-over-union) — the core metrics of the reference-match pipeline.
+
+WHY: the match loop and fit-camera optimizer need a single scalar to decide whether a
+  parameter change improved the model. IoU is that scalar: 1.0 = perfect overlap,
+  0.0 = no overlap. AE adds the pixel-count sanity check so the optimizer cannot game
+  the metric by shrinking the render to a dot.
+
+Examples:
+  3d score model.scad ref.jpg               # render, mask, score
+  3d score render.png ref.jpg -o work/      # already-rendered image
+  3d score mask_a.png mask_b.png --masks    # compare two pre-made masks
+
+ROADMAP §7 / §13.4: "Compute axes/contours by math (OpenCV/ImageMagick: PCA, image
+  moments, contours). Render-vs-reference: silhouette IoU (primary), SSIM, LPIPS.
+  The lowest-effort, highest-leverage primitive is a deterministic render → binary
+  mask → {IoU, AE} + overlay."
+"""
 from __future__ import annotations
 
 import os

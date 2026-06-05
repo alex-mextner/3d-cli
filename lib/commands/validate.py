@@ -1,4 +1,20 @@
-"""3d validate — fast parse-only syntax check (no geometry render)."""
+"""3d validate — fast parse-only syntax check (no geometry render).
+
+WHAT: runs OpenSCAD in parse-only mode (exports echo, no CGAL meshing) to check that a
+  .scad file is syntactically valid, all includes resolve, and assert() calls hold.
+
+WHY: a full CGAL render can take minutes and only then fail on a syntax error. `validate`
+  catches those problems in seconds — perfect for editor-on-save hooks and CI linting
+  before the expensive gates run.
+
+Examples:
+  3d validate bracket.scad
+  3d validate model.scad   # fast CI check; no geometry rendered
+  3d validate model.scad && 3d render model.scad   # validate first, then render
+
+ROADMAP §3: "Core command surface: export (mesh-validated, nonzero on bad geometry),
+  validate, params."
+"""
 from __future__ import annotations
 
 import os

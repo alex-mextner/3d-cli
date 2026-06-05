@@ -1,4 +1,22 @@
-"""usdz.py — `3d usdz` command: export a .scad/.stl to a COLORED USDZ for AR Quick Look.
+"""3d usdz — export a .scad/.stl to a colored USDZ for Apple AR Quick Look.
+
+WHAT: converts a model into a USDZ file that an iPhone/Mac can rotate natively —
+  AirDrop or Message the file, tap and drag to spin it in 3D or place it in AR.
+
+WHY: every other format needs a slicer, a CAD seat, or a dev environment to view.
+  USDZ needs only a phone and one tap — it's the lowest-friction way to show a client,
+  teammate, or the person you're printing for what the thing actually looks like at
+  real-world scale. The export fixes common gotchas: Z-up → Y-up, mm units, and a
+  UsdPreviewSurface material so it renders shaded instead of flat grey.
+
+Examples:
+  3d usdz part.scad -o part.usdz
+  3d usdz part.stl --color 0.30,0.55,0.85
+  3d export part.scad -o part.usdz --color 0.78,0.74,0.66   # preferred path
+
+ROADMAP §34: "USDZ — Apple AR Quick Look: tap a file on iPhone/iPad/Mac to view &
+  rotate the model in 3D / AR, no app install. The format for handing a finished
+  result to a human. Example: 3d export boiler.scad --usdz -o boiler.usdz."
 
 Accessed via: the `3d usdz` subcommand (discovered by lib/cli/registry.py).
 Invariants: stdlib-only at module top level (discovery imports every command on every

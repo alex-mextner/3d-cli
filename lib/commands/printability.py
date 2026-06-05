@@ -1,4 +1,21 @@
-"""3d printability — wall / min-feature / overhang / orientation gate (FDM, PLA/PETG)."""
+"""3d printability — wall / min-feature / overhang / orientation gate (FDM, PLA/PETG).
+
+WHAT: checks that a part satisfies hard FDM rules: wall thickness ≥ 1.2 mm, floor ≥ 0.8 mm,
+  min feature ≥ 1.0 mm, overhang angle ≤ 45°. Runs per part, prints a per-part breakdown.
+
+WHY: a model can be geometrically perfect (manifold, no collisions) and still fail on the
+  printer because a wall is too thin or an overhang is too steep. `printability` is the
+  gate that catches the slicer-level failures before you waste filament and hours.
+
+Examples:
+  3d printability part.scad           # check one part
+  3d printability a.scad b.scad       # check multiple parts
+  3d check part.scad --printability   # same gate, run through the umbrella command
+
+ROADMAP §3: "printability — wall / min-feature / overhang / orientation flags (FDM,
+  PLA/PETG). Thresholds: wall>=1.2 floor>=0.8 feature>=1.0 overhang<=45deg.
+  Exit 0 = all parts clear HARD rules, 1 = a HARD rule failed."
+"""
 from __future__ import annotations
 
 import os

@@ -1,4 +1,21 @@
-"""3d silhouette — camera-locked render -> binary silhouette mask."""
+"""3d silhouette — camera-locked render -> binary silhouette mask.
+
+WHAT: renders a .scad at a fixed camera (or auto-fit from the model bbox), then
+  thresholds the result to a binary black-and-white mask (white shape, black background).
+
+WHY: the match pipeline, fit-camera optimizer, and score gate all need a clean binary
+  silhouette to compare against a reference photo. `silhouette` is the primitive that
+  produces that mask — it is the input to every downstream metric in the pipeline.
+
+Examples:
+  3d silhouette model.scad -o mask.png --ortho
+  3d silhouette model.scad --cam 130,-600,52,130,0,52 --size 1600x700
+  3d score model.scad ref.jpg             # score calls silhouette internally
+
+ROADMAP §7 / §8: "Compute axes/contours by math (OpenCV/ImageMagick: PCA, image
+  moments, contours). Rich --debug across render/fit-camera/score/strength/kinematics:
+  draw intermediate results with overlaid axes, contours, masks, render↔reference overlays."
+"""
 from __future__ import annotations
 
 import os

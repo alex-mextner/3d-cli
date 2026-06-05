@@ -1,9 +1,20 @@
-"""3d projects — register / list / unregister 3d projects (ROADMAP §28/§9).
+"""3d projects — register / list / unregister 3d projects.
+
+WHAT: maintains a registry of all your 3d project directories so cross-project tools
+  (the web dashboard, `3d web`, and future multi-project commands) can list them all.
 
 WHY: the CLI works on the nearest 3d.yaml walking up from cwd, but the dashboard
-(`3d web`) and cross-project tooling need to know ALL your projects, not just the one
-you happen to be standing in. This command maintains that list so you can jump between a
-dozen prints without remembering where each lives.
+  (`3d web`) and cross-project tooling need to know ALL your projects, not just the one
+  you happen to be standing in. This command maintains that list so you can jump between a
+  dozen prints without remembering where each lives.
+
+Examples:
+  3d projects add ./my-bracket        # register the project in ./my-bracket
+  3d projects list                    # see everything you have registered
+  3d projects remove ~/old-print      # forget a project you are done with
+
+ROADMAP §28: "3d projects list|add <path>|remove <path> — manage the registry that
+  3d init writes and 3d web reads (replaces the single web root, §9)."
 
 ACCESSED VIA: `3d projects list|add|remove`. The on-disk store and all logic live in the
 headless core `projects_registry`; this module only parses argv, prints, and raises

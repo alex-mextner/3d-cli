@@ -1,4 +1,22 @@
-"""3d compare -- reliable model<->reference comparison (segmented IoU + SSIM/DSSIM).
+"""3d compare — reliable model<->reference comparison (segmented IoU + SSIM/DSSIM).
+
+WHAT: segments a reference photo into a clean subject mask, fits the camera against
+  that mask, then scores and collages the render against the masked subject — producing
+  IoU, SSIM, DSSIM, and diagnostic artifacts.
+
+WHY: raw thresholding of a cluttered photo (sky, ground, adjacent buildings) produces
+  a garbage mask and meaningless IoU (0.7 reported while the building clearly does
+  not match). `compare` uses grabCut segmentation first, rejects degenerate camera fits,
+  then scores — so the number actually means something.
+
+Examples:
+  3d compare model.scad photo.jpg -o match/
+  3d compare render.png photo.jpg          # already-rendered image, no camera fit
+  3d compare model.scad photo.jpg --rand 8 --refine 3   # quick smoke
+
+ROADMAP §7 / §13.2: "fit-camera — silhouette-IoU camera pose fitting (bbox-derived
+  bounds), saves camera.json ... match/fit-camera → silhouette IoU, overlay-diff
+  (AE / blend / canny)."
 
 Thin CLI wrapper over lib/refmatch.py. The heavy lifting (segmentation, camera
 fit/fallback, ImageMagick metrics, collage) lives there and is import-light;

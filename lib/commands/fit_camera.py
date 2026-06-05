@@ -1,4 +1,23 @@
-"""3d fit-camera — fit an OpenSCAD camera to a reference photo by maximizing IoU."""
+"""3d fit-camera — fit an OpenSCAD camera to a reference photo by maximizing IoU.
+
+WHAT: searches for the camera pose (distance, pan, elevation) that makes a rendered
+  silhouette overlap maximally with a reference photo, then saves that pose as
+  camera.json for locked downstream renders.
+
+WHY: a model and a reference photo almost never start aligned. A drifting pose makes
+  the match-loop score meaningless ("never improves for no reason" — the top failure
+  signature). `fit-camera` locks the viewpoint first, so every subsequent score change
+  reflects a real geometry change, not a camera wobble.
+
+Examples:
+  3d fit-camera model.scad ref.jpg
+  3d fit-camera model.scad ref.jpg --out match/camera.json --draw-axes
+  3d fit-camera examples/cube.scad ref.png --rand 8 --refine 3   # quick smoke
+
+ROADMAP §7: "3d fit-camera — silhouette-IoU camera pose fitting (bbox-derived bounds),
+  saves camera.json, writes fit render + overlay. Pose freeze: hold the pose fixed
+  through the shape match so the monotonic-acceptance score is meaningful."
+"""
 from __future__ import annotations
 
 import os

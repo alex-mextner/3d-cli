@@ -1,12 +1,23 @@
-"""3d printers — inspect the printer registry (list / show), ROADMAP §2a.
+"""3d printers — inspect the printer registry.
+
+WHAT: lists every known printer and shows the full spec sheet (build volume, nozzle,
+  firmware, default material) for a single printer by name.
+
+WHY: a project's 3d.yaml references a printer BY NAME (`printer: Prusa MK4`). Before you
+  write that name you need to know which printers the tool knows, what build volume each
+  has, and whether a 240 mm part will fit. `list` is the menu; `show` is the spec sheet.
+
+Examples:
+  3d printers list                    # valid names + bed sizes at a glance
+  3d printers show "Prusa MK4"        # full spec sheet for one machine
+  3d printers show "Bambu A1"         # check bed size before slicing
+
+ROADMAP §2a: "Materials & printers — shared, cross-cutting vocabularies.
+  Single canonical registries materials.yaml + printers.yaml (built-in defaults +
+  user/project overrides), referenced BY NAME everywhere."
 
 ACCESSED VIA: `3d printers list` and `3d printers show <name>`. A thin CLI frontend over
 lib/printers.py: it resolves the merged built-in+user+project registry and prints it.
-
-WHY: a project's 3d.yaml references a printer BY NAME (`printer: Prusa MK4`); before you
-write that name you need to know which printers the tool knows, what build volume each
-has, and what firmware/default material they carry. `list` is the menu; `show` is the
-spec sheet you check a part against ("does my 240mm part fit this bed?").
 
 INVARIANTS: stdlib-only at import time (the registry contract); the printers loader and
 yaml are reached lazily inside run(). Errors come from lib/errors.py via the loader; this

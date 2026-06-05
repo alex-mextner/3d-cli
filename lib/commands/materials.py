@@ -1,8 +1,25 @@
-"""3d materials — inspect the FDM material registry (ROADMAP §2a).
+"""3d materials — inspect the FDM material registry.
+
+WHAT: lists every known filament or resin, and shows the full datasheet (density,
+  mechanical properties, max temp, finish) for a single material by name.
+
+WHY: every part in 3d.yaml references a material BY NAME. Before you write that name
+  you need to know what the tool knows — which survives heat, which is dense, what
+  the cross-layer strength knockdown is. `list` is the menu; `show` is the spec sheet.
+
+Examples:
+  3d materials list                   # table: name, density, max temp, finish
+  3d materials show PETG              # full datasheet for one material
+  3d materials show PLA               # see the anisotropic knockdown factor
+
+ROADMAP §2a: "Materials & printers — shared, cross-cutting vocabularies.
+  Single canonical registries materials.yaml + printers.yaml (built-in defaults +
+  user/project overrides), referenced BY NAME everywhere."
 
 ACCESSED VIA: `3d materials list` / `3d materials show <name>`. Thin CLI over the headless
 lib/materials.py loader (stdlib-only at top level; the loader lazy-imports yaml). INVARIANT:
-this module only parses argv and prints — all merge/validation/error logic lives in the loader."""
+this module only parses argv and prints — all merge/validation/error logic lives in the loader.
+"""
 from __future__ import annotations
 
 from cli.registry import Command

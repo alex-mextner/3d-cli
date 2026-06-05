@@ -1,4 +1,22 @@
-"""3d section — alias for `3d render <file> --section`."""
+"""3d section — alias for `3d render <file> --section`.
+
+WHAT: cuts a true cross-section through a .scad model to reveal internal cavities,
+  wall thicknesses, and fit clearances that are hidden in an external view.
+
+WHY: when you are designing an assembly with hidden pockets, channels, or mating parts,
+  an external render shows you nothing. A section cut is the only way to verify that the
+  internal geometry actually matches your intent before printing.
+
+Examples:
+  3d section bracket.scad -o sec.png --plane YZ
+  3d section assembly.scad --color --plane YZ -o sec.png
+  3d render bracket.scad --section --plane XZ --keep pos
+
+ROADMAP §3: "Sections — colored-only, anchored, multi, auto-framed.
+  Always colored. Every section preserves each part's color ON the cut face.
+  High-level spec: presets mid-x|mid-y|mid-z, through:<anchor>, and named sections
+  from the object model."
+"""
 from __future__ import annotations
 
 from cli.registry import Command

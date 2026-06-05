@@ -1,4 +1,21 @@
-"""3d mesh — watertight / manifold / self-intersection / volume report (lib/mesh_check.py)."""
+"""3d mesh — watertight / manifold / self-intersection / volume report.
+
+WHAT: runs a geometric health check on a mesh or .scad file, reporting whether it is
+  watertight (closed), manifold (no holes), self-intersection-free, and its volume.
+
+WHY: every slicer and every downstream gate (printability, collision, pack) requires a
+  clean manifold mesh. `mesh` is the surgical primitive that exposes the raw geometry
+  facts before the umbrella gates (`3d check`) bundle them into a verdict.
+
+Examples:
+  3d mesh part.stl                    # full mesh report on an STL
+  3d mesh model.scad -D 'width=80'    # export + check at a specific parameter
+  3d check part.scad --mesh           # same gate, run through the umbrella command
+
+ROADMAP §3: "mesh — watertight/manifold/self-intersect/volume report.
+  Engine tiers: trimesh+open3d (full) -> trimesh+manifold3d -> openscad warning grep.
+  Exit 0 = PASS, 1 = FAIL (geometric defect), 2 = load/usage error."
+"""
 from __future__ import annotations
 
 from cli.pyrun import exec_tool

@@ -1,4 +1,20 @@
-"""3d params — extract Customizer-style parameters (stdlib-only; imports extract_params)."""
+"""3d params — extract Customizer-style parameters from a .scad file.
+
+WHAT: parses OpenSCAD source for Customizer-style parameter declarations
+  (name = value; // [min:max] desc) and emits them as a human-readable list or JSON.
+
+WHY: parametric models are only useful if you know what parameters exist and what they
+  do. `params` introspects a .scad without running it, giving you the tunable constants
+  you can feed into batch renders, the match loop, or manual design exploration.
+
+Examples:
+  3d params bracket.scad                  # human-readable parameter list
+  3d params bracket.scad --json | jq '.[] | {name, value}'
+  3d params bracket.scad --json > params.json   # drive a batch script
+
+ROADMAP §3: "Core command surface: export (mesh-validated, nonzero on bad geometry),
+  validate, params."
+"""
 from __future__ import annotations
 
 import os
