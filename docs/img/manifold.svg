@@ -1,17 +1,41 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
   <rect width="1024" height="1024" fill="#F8F5F0"/>
-  <!-- Watertight cube -->
-  <g transform="translate(180, 320)">
-    <rect x="0" y="0" width="280" height="280" fill="#A3B59A" stroke="#2A2A2A" stroke-width="4"/>
-    <text x="140" y="340" font-size="36" text-anchor="middle" fill="#2A2A2A" font-family="sans-serif">Watertight</text>
-    <text x="140" y="380" font-size="28" text-anchor="middle" fill="#A3B59A" font-family="sans-serif">PASS</text>
+  <!-- Manifold mesh (clean closed quad) -->
+  <g transform="translate(180, 300)">
+    <text x="140" y="-40" font-size="36" text-anchor="middle" fill="#2A2A2A" font-family="sans-serif">Manifold (PASS)</text>
+    <!-- A clean quad made of two triangles -->
+    <polygon points="40,40 240,40 240,240 40,240" fill="#A3B59A" opacity="0.3" stroke="#A3B59A" stroke-width="2"/>
+    <!-- Diagonal edge -->
+    <line x1="40" y1="40" x2="240" y2="240" stroke="#A3B59A" stroke-width="2"/>
+    <!-- Vertices -->
+    <circle cx="40" cy="40" r="6" fill="#A3B59A"/>
+    <circle cx="240" cy="40" r="6" fill="#A3B59A"/>
+    <circle cx="240" cy="240" r="6" fill="#A3B59A"/>
+    <circle cx="40" cy="240" r="6" fill="#A3B59A"/>
+    <circle cx="140" cy="140" r="6" fill="#A3B59A"/>
+    <!-- Labels -->
+    <text x="140" y="280" font-size="24" text-anchor="middle" fill="#2A2A2A" font-family="sans-serif">closed watertight</text>
+    <text x="140" y="310" font-size="24" text-anchor="middle" fill="#2A2A2A" font-family="sans-serif">every edge shared by 2 faces</text>
   </g>
-  <!-- Broken cube with hole -->
-  <g transform="translate(564, 320)">
-    <rect x="0" y="0" width="280" height="280" fill="#E6A57E" stroke="#2A2A2A" stroke-width="4"/>
-    <circle cx="140" cy="140" r="60" fill="#F8F5F0" stroke="#2A2A2A" stroke-width="4"/>
-    <text x="140" y="340" font-size="36" text-anchor="middle" fill="#2A2A2A" font-family="sans-serif">Hole (non-manifold)</text>
-    <text x="140" y="380" font-size="28" text-anchor="middle" fill="#E6A57E" font-family="sans-serif">FAIL</text>
+  <!-- Non-manifold mesh (broken + floating + self-intersection) -->
+  <g transform="translate(564, 300)">
+    <text x="140" y="-40" font-size="36" text-anchor="middle" fill="#2A2A2A" font-family="sans-serif">Non-Manifold (FAIL)</text>
+    <!-- Self-intersection: two triangles crossing -->
+    <polygon points="40,40 240,240 240,40" fill="#E6A57E" opacity="0.2" stroke="#E6A57E" stroke-width="2"/>
+    <polygon points="40,240 240,40 40,40" fill="#E6A57E" opacity="0.2" stroke="#E6A57E" stroke-width="2"/>
+    <line x1="40" y1="40" x2="240" y2="240" stroke="#E6A57E" stroke-width="3"/>
+    <line x1="40" y1="240" x2="240" y2="40" stroke="#E6A57E" stroke-width="3"/>
+    <!-- Broken contour: disconnected edge -->
+    <line x1="40" y1="240" x2="120" y2="240" stroke="#E6A57E" stroke-width="3" stroke-dasharray="8,4"/>
+    <text x="80" y="265" font-size="20" text-anchor="middle" fill="#E6A57E" font-family="sans-serif">broken edge</text>
+    <!-- Floating vertex -->
+    <circle cx="200" cy="120" r="8" fill="#E6A57E"/>
+    <text x="200" y="105" font-size="20" text-anchor="middle" fill="#E6A57E" font-family="sans-serif">floating vertex</text>
+    <!-- Self-intersection label -->
+    <text x="140" y="180" font-size="20" text-anchor="middle" fill="#E6A57E" font-family="sans-serif">self-intersection</text>
+    <!-- Labels -->
+    <text x="140" y="280" font-size="24" text-anchor="middle" fill="#2A2A2A" font-family="sans-serif">broken / floating / intersecting</text>
+    <text x="140" y="310" font-size="24" text-anchor="middle" fill="#2A2A2A" font-family="sans-serif">not printable</text>
   </g>
   <!-- Title -->
   <text x="512" y="180" font-size="48" text-anchor="middle" fill="#2A2A2A" font-family="sans-serif">Manifold Check</text>

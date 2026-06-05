@@ -47,21 +47,45 @@ def iou() -> str:
 
 
 def manifold() -> str:
-    """Watertight cube vs broken cube with hole."""
+    """Manifold mesh (closed, watertight) vs non-manifold (broken edges, floating vertices, self-intersection)."""
     svg = f"""<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
   <rect width="1024" height="1024" fill="{BG}"/>
-  <!-- Watertight cube -->
-  <g transform="translate(180, 320)">
-    <rect x="0" y="0" width="280" height="280" fill="{SAGE}" stroke="{DARK}" stroke-width="4"/>
-    <text x="140" y="340" font-size="36" text-anchor="middle" fill="{DARK}" font-family="sans-serif">Watertight</text>
-    <text x="140" y="380" font-size="28" text-anchor="middle" fill="{SAGE}" font-family="sans-serif">PASS</text>
+  <!-- Manifold mesh (clean closed quad) -->
+  <g transform="translate(180, 300)">
+    <text x="140" y="-40" font-size="36" text-anchor="middle" fill="{DARK}" font-family="sans-serif">Manifold (PASS)</text>
+    <!-- A clean quad made of two triangles -->
+    <polygon points="40,40 240,40 240,240 40,240" fill="{SAGE}" opacity="0.3" stroke="{SAGE}" stroke-width="2"/>
+    <!-- Diagonal edge -->
+    <line x1="40" y1="40" x2="240" y2="240" stroke="{SAGE}" stroke-width="2"/>
+    <!-- Vertices -->
+    <circle cx="40" cy="40" r="6" fill="{SAGE}"/>
+    <circle cx="240" cy="40" r="6" fill="{SAGE}"/>
+    <circle cx="240" cy="240" r="6" fill="{SAGE}"/>
+    <circle cx="40" cy="240" r="6" fill="{SAGE}"/>
+    <circle cx="140" cy="140" r="6" fill="{SAGE}"/>
+    <!-- Labels -->
+    <text x="140" y="280" font-size="24" text-anchor="middle" fill="{DARK}" font-family="sans-serif">closed watertight</text>
+    <text x="140" y="310" font-size="24" text-anchor="middle" fill="{DARK}" font-family="sans-serif">every edge shared by 2 faces</text>
   </g>
-  <!-- Broken cube with hole -->
-  <g transform="translate(564, 320)">
-    <rect x="0" y="0" width="280" height="280" fill="{TERRACOTTA}" stroke="{DARK}" stroke-width="4"/>
-    <circle cx="140" cy="140" r="60" fill="{BG}" stroke="{DARK}" stroke-width="4"/>
-    <text x="140" y="340" font-size="36" text-anchor="middle" fill="{DARK}" font-family="sans-serif">Hole (non-manifold)</text>
-    <text x="140" y="380" font-size="28" text-anchor="middle" fill="{TERRACOTTA}" font-family="sans-serif">FAIL</text>
+  <!-- Non-manifold mesh (broken + floating + self-intersection) -->
+  <g transform="translate(564, 300)">
+    <text x="140" y="-40" font-size="36" text-anchor="middle" fill="{DARK}" font-family="sans-serif">Non-Manifold (FAIL)</text>
+    <!-- Self-intersection: two triangles crossing -->
+    <polygon points="40,40 240,240 240,40" fill="{TERRACOTTA}" opacity="0.2" stroke="{TERRACOTTA}" stroke-width="2"/>
+    <polygon points="40,240 240,40 40,40" fill="{TERRACOTTA}" opacity="0.2" stroke="{TERRACOTTA}" stroke-width="2"/>
+    <line x1="40" y1="40" x2="240" y2="240" stroke="{TERRACOTTA}" stroke-width="3"/>
+    <line x1="40" y1="240" x2="240" y2="40" stroke="{TERRACOTTA}" stroke-width="3"/>
+    <!-- Broken contour: disconnected edge -->
+    <line x1="40" y1="240" x2="120" y2="240" stroke="{TERRACOTTA}" stroke-width="3" stroke-dasharray="8,4"/>
+    <text x="80" y="265" font-size="20" text-anchor="middle" fill="{TERRACOTTA}" font-family="sans-serif">broken edge</text>
+    <!-- Floating vertex -->
+    <circle cx="200" cy="120" r="8" fill="{TERRACOTTA}"/>
+    <text x="200" y="105" font-size="20" text-anchor="middle" fill="{TERRACOTTA}" font-family="sans-serif">floating vertex</text>
+    <!-- Self-intersection label -->
+    <text x="140" y="180" font-size="20" text-anchor="middle" fill="{TERRACOTTA}" font-family="sans-serif">self-intersection</text>
+    <!-- Labels -->
+    <text x="140" y="280" font-size="24" text-anchor="middle" fill="{DARK}" font-family="sans-serif">broken / floating / intersecting</text>
+    <text x="140" y="310" font-size="24" text-anchor="middle" fill="{DARK}" font-family="sans-serif">not printable</text>
   </g>
   <!-- Title -->
   <text x="512" y="180" font-size="48" text-anchor="middle" fill="{DARK}" font-family="sans-serif">Manifold Check</text>
@@ -70,29 +94,38 @@ def manifold() -> str:
 
 
 def section() -> str:
-    """Cube cut by a plane, cut face highlighted."""
+    """Gear cut by a plane, cut face showing internal teeth."""
     svg = f"""<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
   <rect width="1024" height="1024" fill="{BG}"/>
-  <!-- Cube -->
-  <g transform="translate(362, 280)">
-    <!-- Back face -->
-    <rect x="60" y="60" width="240" height="240" fill="{STEEL}" opacity="0.4" stroke="{DARK}" stroke-width="3"/>
-    <!-- Front face -->
-    <rect x="0" y="0" width="240" height="240" fill="{STEEL}" opacity="0.6" stroke="{DARK}" stroke-width="3"/>
-    <!-- Cut plane (highlighted face) -->
-    <polygon points="240,0 300,60 300,300 240,240" fill="{HIGHLIGHT}" opacity="0.8" stroke="{DARK}" stroke-width="3"/>
-    <!-- Top edge -->
-    <line x1="0" y1="0" x2="60" y2="60" stroke="{DARK}" stroke-width="3"/>
-    <!-- Right edge -->
-    <line x1="240" y1="0" x2="300" y2="60" stroke="{DARK}" stroke-width="3"/>
-    <!-- Bottom edge -->
-    <line x1="240" y1="240" x2="300" y2="300" stroke="{DARK}" stroke-width="3"/>
-    <!-- Left edge -->
-    <line x1="0" y1="240" x2="60" y2="300" stroke="{DARK}" stroke-width="3"/>
+  <!-- Gear body -->
+  <g transform="translate(512, 420)">
+    <!-- Outer gear ring (front) -->
+    <circle cx="0" cy="0" r="220" fill="none" stroke="{DARK}" stroke-width="4"/>
+    <circle cx="0" cy="0" r="140" fill="none" stroke="{DARK}" stroke-width="4"/>
+    <!-- Teeth (front) -->
+    <circle cx="0" cy="0" r="240" fill="none" stroke="{DARK}" stroke-width="3" stroke-dasharray="18,12"/>
+    <!-- Cut plane -->
+    <line x1="-300" y1="0" x2="300" y2="0" stroke="{TERRACOTTA}" stroke-width="4" stroke-dasharray="15,8"/>
+    <text x="0" y="-280" font-size="32" text-anchor="middle" fill="{TERRACOTTA}" font-family="sans-serif">cut plane</text>
+    <!-- Cross-section (highlighted cut face) -->
+    <g transform="translate(0, 0)">
+      <!-- Outer ring section -->
+      <rect x="-240" y="-30" width="480" height="60" fill="{HIGHLIGHT}" opacity="0.7" stroke="{DARK}" stroke-width="2"/>
+      <!-- Teeth section (wider) -->
+      <rect x="-260" y="-40" width="520" height="80" fill="{HIGHLIGHT}" opacity="0.5" stroke="{DARK}" stroke-width="2"/>
+      <!-- Inner ring section -->
+      <rect x="-140" y="-20" width="280" height="40" fill="{SAGE}" opacity="0.6" stroke="{DARK}" stroke-width="2"/>
+      <!-- Shaft hole section -->
+      <rect x="-50" y="-15" width="100" height="30" fill="{BG}" opacity="0.9" stroke="{DARK}" stroke-width="2"/>
+    </g>
+    <!-- Labels -->
+    <text x="320" y="-10" font-size="28" text-anchor="start" fill="{DARK}" font-family="sans-serif">teeth</text>
+    <text x="160" y="-10" font-size="28" text-anchor="start" fill="{DARK}" font-family="sans-serif">body</text>
+    <text x="0" y="-60" font-size="28" text-anchor="middle" fill="{DARK}" font-family="sans-serif">shaft hole</text>
   </g>
-  <!-- Section label -->
-  <text x="512" y="820" font-size="48" text-anchor="middle" fill="{DARK}" font-family="sans-serif">Cross-Section</text>
-  <text x="512" y="880" font-size="32" text-anchor="middle" fill="{DARK}" font-family="sans-serif">Cut face = highlighted</text>
+  <!-- Title -->
+  <text x="512" y="850" font-size="48" text-anchor="middle" fill="{DARK}" font-family="sans-serif">Cross-Section</text>
+  <text x="512" y="910" font-size="32" text-anchor="middle" fill="{DARK}" font-family="sans-serif">Cut plane reveals internal teeth</text>
 </svg>"""
     return svg
 
