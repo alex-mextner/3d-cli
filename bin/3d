@@ -1,122 +1,24 @@
-#!/usr/bin/env bash
+#!/usr/bin/env python3
 # =============================================================================
 # 3d — a scriptable CLI for AI-assisted, reference-photo-driven parametric 3D
-#      modeling in OpenSCAD. Operationalizes the lego-loco research report:
-#      camera-locked renders, silhouette scoring, forced-monotonic match loop,
-#      manifold/printability/collision gates, and OpenSCAD library management.
-#
-# Subcommand dispatcher. Each command lives in lib/cmd_<name>.sh (bash) or is a
-# thin wrapper around a python tool in lib/ run through lib/pyrun.
+#      modeling in OpenSCAD. Thin Python dispatcher: it resolves the repo root
+#      through this (possibly symlinked) launcher, puts lib/ on sys.path, and
+#      hands off to cli.dispatch.main, which discovers commands from the
+#      lib/commands/ registry. Adding a command = drop a module in lib/commands/;
+#      no edit here. See lib/cli/registry.py for the command-authoring contract.
 # =============================================================================
-set -uo pipefail
+from __future__ import annotations
 
-# ---- resolve REPO_ROOT through the bin/3d symlink (macOS has no readlink -f) --
-SOURCE="${BASH_SOURCE[0]}"
-while [ -h "$SOURCE" ]; do
-    DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
-    SOURCE="$(readlink "$SOURCE")"
-    [[ "$SOURCE" != /* ]] && SOURCE="$DIR/$SOURCE"
-done
-REPO_ROOT="$(cd -P "$(dirname "$SOURCE")/.." && pwd)"
-export REPO_ROOT
-LIB="$REPO_ROOT/lib"
+import os
+import sys
 
-VERSION="0.1.0"
+# Resolve the repo root THROUGH the bin/3d symlink (~/.files/bin/3d -> this file).
+_self = os.path.realpath(__file__)
+_repo = os.path.dirname(os.path.dirname(_self))
+os.environ.setdefault("REPO_ROOT", _repo)
+sys.path.insert(0, os.path.join(_repo, "lib"))
 
-# Shared helpers (also auto-exports OPENSCADPATH from libs/) + first-run bootstrap.
-source "$LIB/common.sh"
-maybe_bootstrap
+from cli.dispatch import main  # noqa: E402  (after sys.path setup)
 
-# ---- color (only when stdout is a tty) --------------------------------------
-if [ -t 1 ]; then B=$'\e[1m'; C=$'\e[36m'; Y=$'\e[33m'; R=$'\e[31m'; Z=$'\e[0m'
-else B=""; C=""; Y=""; R=""; Z=""; fi
-
-usage() {
-cat <<EOF
-${B}3d${Z} — scriptable 3D / OpenSCAD pipeline CLI  (v$VERSION)
-
-${B}USAGE${Z}
-  3d <command> [args]
-  3d <command> --help        per-command help
-  3d help                    this text
-  3d version                 print version
-
-${B}RENDER & VIEW${Z}  (unified: render = single view / --multi / --section)
-  ${C}render${Z}   <file.scad> [-o out.png] [--view NAME] [--cam ex,..,cz] [--size WxH] [--ortho] [-D k=v]...
-                  Single CGAL view. --view: front|back|left|right|top|bottom|iso|3-4|
-                  front-left|front-right|rear-left|rear-right (camera from the bounding box).
-  ${C}render${Z} <file.scad> --multi [outdir] [--render]    all standard angles (async).
-  ${C}render${Z} <file.scad> --section -o out.png [--plane YZ|XZ|XY] [--color] [--keep neg|pos] [--module 'm();']
-                  True cross-section (generic STL-cut, or --color per-part assembly mode).
-  ${C}preview${Z}  <file.scad> [-o out.png] [--cam ...] [--size WxH] [-D k=v]...
-                  Fast throwntogether preview (no CGAL).
-  ${C}multi${Z}    <file.scad> [outdir] [--render]         alias -> render --multi
-  ${C}section${Z}  <file.scad> -o out.png [...]            alias -> render --section
-
-${B}GEOMETRY & EXPORT${Z}
-  ${C}export${Z}   <file.scad> [-o out.stl|.3mf] [-D k=v]... [--ascii]
-                  STL/3MF export WITH manifold/self-intersect validation. Nonzero exit on bad geometry.
-  ${C}validate${Z} <file.scad>
-                  Fast syntax check (no render).
-  ${C}params${Z}   <file.scad> [--json]
-                  Extract customizable parameters (Customizer-style comments).
-
-${B}QA & GATES${Z}  (unified: check = the master acceptance gate)
-  ${C}check${Z}        <file.scad> [parts...] [selectors] [--skip G] [--collision cfg] [--ref img]
-                  No selectors => ALL applicable gates (manifold + consistency + printability
-                  + collision/silhouette when configured). Selectors --manifold|--mesh/
-                  --consistency/--printability run a subset; --skip excludes. PASS/FAIL.
-  ${C}mesh${Z}         <file.stl|.scad>      watertight/manifold/self-intersect/volume (trimesh/manifold3d/open3d; fallback: openscad warnings).
-  ${C}printability${Z} <file.scad>           wall / min-feature / overhang / orientation flags (FDM, PLA/PETG).
-  ${C}acceptance${Z}   <assembly.scad> [...]  alias -> check (all gates).
-  ${C}collision${Z}    <config.json>         generic collision/penetration engine (static).
-
-${B}REFERENCE-MATCH PIPELINE${Z}
-  ${C}silhouette${Z} <file.scad> [-o mask.png] [--cam ...] [--size WxH]   camera-locked render -> binary silhouette mask.
-  ${C}overlay${Z}    <render.png> <reference.png> [-o outdir]            difference / ghost / canny edge-overlay diagnostics.
-  ${C}score${Z}      <render.png|file.scad> <reference> [-o outdir]      silhouette AE + IoU (machine-parseable lines).
-  ${C}match${Z}      <assembly.scad> <reference> [--rounds N] [--dry-run] [--constants f] [--metric iou|ae]
-                                          forced-monotonic acceptance loop (render->score->critic->apply->accept/revert + changelog).
-  ${C}fit-camera${Z} <model.scad> <reference> [--out camera.json] [--rand N] [--refine N] [--draw-axes]
-                                          fit an OpenSCAD camera to a reference photo by maximizing silhouette IoU; saves the viewpoint.
-  ${C}preprocess${Z} <reference.jpg> [-o outdir]                        subject mask + proportional depth (SAM2/Depth-Anything if installable, else OpenCV).
-
-${B}SLICING${Z}
-  ${C}slice${Z}    <stl|3mf|file.scad> [-o out.gcode] [--printer NAME] [--profile FILE] [--check]
-                  Slice to G-code via OrcaSlicer / Bambu Studio / PrusaSlicer (auto-detected).
-                  --check = sliceability gate (nonzero exit on failure). .scad is exported first.
-
-${B}LIBRARIES${Z}  (BOSL2/NopSCADlib auto-install on first run; OPENSCADPATH auto-exported)
-  ${C}libs path${Z}                             print the OPENSCADPATH (info).
-  ${C}libs list${Z}                             show installed libraries.
-
-${B}ENVIRONMENT${Z}
-  ${C}doctor${Z}                                detect present/missing deps (openscad, magick, python, uv,
-                                          mesh stack, slicer) with the exact install command per OS.
-  ${C}setup${Z}    [--yes] [--dry-run] [--no-slicer]
-                  install the missing deps, OS-aware (brew / apt / dnf / pacman + repo .venv).
-
-Run '3d <command> --help' for details and examples.
-EOF
-}
-
-cmd="${1:-help}"
-[ $# -gt 0 ] && shift
-
-case "$cmd" in
-    help|-h|--help)        usage ;;
-    version|-v|--version)  echo "3d v$VERSION" ;;
-
-    render|preview|multi|section|export|validate|params|check|printability|acceptance|silhouette|overlay|score)
-        bash "$LIB/cmd_${cmd}.sh" "$@" ;;
-
-    mesh|collision|match|preprocess|libs|fit-camera|slice|doctor|setup)
-        bash "$LIB/cmd_${cmd}.sh" "$@" ;;
-
-    *)
-        echo "${R}3d: unknown command '$cmd'${Z}" >&2
-        echo "Run '3d help' for the list of commands. Closest matches:" >&2
-        compgen -W "render preview multi section export validate params check mesh printability acceptance collision silhouette overlay score match fit-camera preprocess libs slice doctor setup help version" \
-            | grep -i "$(printf '%s' "$cmd" | cut -c1-3)" 2>/dev/null | sed 's/^/  /' >&2 || true
-        exit 2 ;;
-esac
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

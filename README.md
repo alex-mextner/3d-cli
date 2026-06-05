@@ -25,27 +25,31 @@ ln -sf "$PWD/bin/3d" ~/.files/bin/3d     # or any dir on your PATH
 Requirements:
 - **OpenSCAD** (`brew install --cask openscad`) — found on PATH or common Homebrew paths.
 - **ImageMagick** (`brew install imagemagick`) — for the overlay / score / silhouette commands.
-- **Python**: the python subcommands run via `lib/pyrun`, which prefers a repo `.venv`,
+- **Python**: the python subcommands run via `cli.pyrun`, which prefers a repo `.venv`,
   then `uv run --with <deps>` (no global installs), then system `python3`. With `uv`
   on PATH nothing needs pre-installing. For a fast offline path:
   ```bash
   python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
   ```
 
-Every command either works or fails with a clear "install X" message — no broken commands.
+Every command either works or fails with a clear, structured "install X" message
+(WHAT failed + the exact install command for THIS OS + which capability degrades) — no
+broken commands, no bare tracebacks.
 
-**Or just let the CLI install its own dependencies, OS-aware:**
+**The CLI bootstraps itself:**
+
+- OpenSCAD libraries (BOSL2, NopSCADlib) auto-clone into `libs/` on the first `3d`
+  invocation (once, quiet, non-fatal offline) and `OPENSCADPATH` is auto-exported.
+- Python deps resolve per-call via `uv` (or a repo `.venv` if you create one) — nothing
+  to pre-install.
 
 ```bash
-3d doctor          # report what's present/missing + the exact install command for THIS OS
-3d setup --yes     # actually install the missing ones (brew on macOS; apt/dnf/pacman on Linux)
+3d doctor          # read-only: report what's present/missing + the exact install command per OS
 ```
 
-`doctor` is read-only and prints PASS/MISSING per item (openscad, imagemagick, python3,
-uv/pip, the python mesh stack, and a slicer). `setup` installs the missing ones —
-Homebrew formulae/casks on macOS, the right package manager on Linux (with sudo), python
-deps into the repo `.venv` — idempotent, never global, and never hard-fails the whole run
-if one optional item can't install. `--dry-run` prints the commands without running them.
+`doctor` prints PASS/MISSING per item (openscad, imagemagick, python3, uv/pip, the python
+mesh stack, and a slicer) with the exact per-OS install line for anything missing. There
+is no `3d setup` — installation is the first-run bootstrap plus those per-item commands.
 
 ## Commands
 
@@ -215,22 +219,25 @@ your `-o` path). Those core flags are the verified part of the contract; `--prin
 routed through the profile-load mechanism, so prefer `--profile` for control). `--check`
 slices as a pass/fail oracle and discards the G-code. A `.scad` input is exported to STL
 first via `3d export`. If no slicer is
-installed, `3d slice` prints the install hint (and `3d setup` offers to install OrcaSlicer)
-— never broken.
+installed, `3d slice` fails with the exact per-OS install command (e.g.
+`brew install --cask orcaslicer`) — never broken.
 
-### Environment (deps)
+### Environment (deps) & tests
 
 | Command | What |
 |---|---|
 | `3d doctor` | report present/missing deps + the exact install command per OS (read-only). |
-| `3d setup [--yes] [--dry-run] [--no-slicer]` | install the missing deps (brew / apt / dnf / pacman + repo `.venv`). |
+| `3d test [pytest-args]` | run the test gate: pytest (unit + CLI smoke harness) then mypy. |
 
 ```bash
-3d doctor                 # PASS/MISSING table
-3d setup --yes            # install everything missing, non-interactive
-3d setup --dry-run        # print the commands without running them
-3d setup --no-slicer      # skip the heaviest item (the slicer cask/AppImage)
+3d doctor                 # PASS/MISSING table (read-only)
+3d test                   # pytest + mypy — both must pass
+3d test -k registry       # forward args to pytest
 ```
+
+There is no `3d setup`: OpenSCAD libraries auto-install on the first run, python deps
+resolve via uv/`.venv` per-call, and `3d doctor` prints the exact install command for
+anything still missing.
 
 ### OpenSCAD libraries
 
@@ -247,15 +254,24 @@ auto-exported by the CLI — so `include <BOSL2/std.scad>` just resolves, no man
 ## Layout
 
 ```
-bin/3d              dispatcher (resolves REPO_ROOT through the symlink)
-lib/common.sh       shared bash helpers (binary location, symlink-safe REPO_ROOT)
-lib/pyrun           python runner: .venv -> uv -> system python3
-lib/cmd_*.sh        one file per subcommand
-lib/*.py            migrated python tools (mesh/collision/printability/preprocess/match)
+bin/3d              thin Python dispatcher (resolves REPO_ROOT through the symlink)
+lib/cli/dispatch.py routing + registry build + structured-error rendering
+lib/cli/registry.py the command registry (Command + discover()) — the plugin extension point
+lib/cli/env.py      tool discovery, OS/install table, OPENSCADPATH export, first-run bootstrap
+lib/cli/pyrun.py    run a lib/*.py tool with its deps (.venv -> uv -> system python3)
+lib/cli/imaging.py  ImageMagick orchestration + the pure score (IoU/AE) math
+lib/errors.py       structured CLI error types (WHAT/WHY/remediation/accepted/install)
+lib/commands/*.py   one self-registering module per subcommand (drop a file = add a command)
+lib/*.py            heavy python tools (render/mesh/collision/printability/preprocess/match/fit)
+tests/              pytest unit tests + the CLI smoke harness (run via `3d test`)
+docs/critic-prompts.md  the vision-critic prompt patterns (from lego-loco match/prompts.md)
 libs/               OpenSCAD libraries cloned on demand (gitignored)
 examples/cube.scad  trivial test part
 requirements.txt    python deps for the full offline path
 ```
+
+Adding a command is a one-file change — see `lib/cli/registry.py` (and `AGENTS.md`) for the
+command-authoring contract. `bin/3d` and the shared files need no edits.
 
 `section` has two modes: the default **part mode** cuts a single `--module` (the cut
 face renders mono/tan); `--color` does the **assembly coloured-section** (per-part colour
@@ -265,20 +281,6 @@ preserved — the assembly must honour `-D cut=true` and wrap parts as
 `fit-camera` searches OpenSCAD camera params (azimuth/elevation/distance/pan) to maximise
 silhouette IoU against a reference, saving the fitted 6-param vector camera to JSON plus a
 fit render and an overlay — the practical "Step 0: lock the camera" of the report's §7.1.
-
-## Layout
-
-```
-bin/3d              dispatcher (resolves REPO_ROOT through the symlink)
-lib/common.sh       shared bash helpers (binary location, symlink-safe REPO_ROOT)
-lib/pyrun           python runner: .venv -> uv -> system python3
-lib/cmd_*.sh        one file per subcommand
-lib/*.py            migrated python tools (mesh/collision/printability/preprocess/match/fit)
-docs/critic-prompts.md  the vision-critic prompt patterns (from lego-loco match/prompts.md)
-libs/               OpenSCAD libraries cloned on demand (gitignored)
-examples/cube.scad  trivial test part
-requirements.txt    python deps for the full offline path
-```
 
 ## Provenance & migration notes
 

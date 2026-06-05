@@ -22,6 +22,11 @@ pyvista>=0.43
 # open3d has no wheel for some python versions; install in a 3.11/3.12 venv if wanted.
 # open3d>=0.18
 
+# --- dev / test gate (`3d test`) ---
+# Resolved per-call by uv when you run `3d test`; install into .venv for an offline run.
+pytest>=8.0
+mypy>=1.8
+
 # --- reference pre-processing (preprocess) ---
 opencv-python-headless>=4.8
 pillow>=10.0

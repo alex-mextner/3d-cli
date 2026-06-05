@@ -18,7 +18,25 @@ arguments. Verified with `grep -rniE 'garage-band|/Users/ultra|ejector|co2|infla
 | `validate.sh` | `3d validate` | fast syntax check (echo export, no render). |
 | `extract-params.sh` | `3d params` | Customizer-style parameter extraction; `--json`. Backed by generic `lib/extract_params.py`. |
 | `version-scad.sh` | **dropped — git versioning** | the source bumped `model_NNN.scad` indices in filenames. The CLI (and project policy) version through **git** instead — one file, history in commits/tags/branches. Index-in-filename versioning is deliberately not carried over. |
-| `common.sh` | `lib/common.sh` | shared binary-location / symlink-safe `REPO_ROOT`; extended here with OS detection + the dependency table that `doctor`/`setup` share. |
+| `common.sh` | `lib/cli/env.py` | shared binary-location / symlink-safe `REPO_ROOT` / OPENSCADPATH export / first-run bootstrap / OS detection + dependency table — all **ported to typed Python** (was bash). |
+
+## Dispatcher & command architecture (the foundation wave)
+
+The CLI is now a **thin typed Python dispatcher + command-registry**:
+
+| Was (bash) | Now (Python) | Notes |
+|---|---|---|
+| `bin/3d` bash dispatcher (hardcoded `case` per command) | `bin/3d` (~15 lines) → `lib/cli/dispatch.py` | discovers commands from `lib/commands/*.py`; no per-command edits. |
+| `lib/cmd_<name>.sh` (one bash wrapper per command) | `lib/commands/<name>.py` (one self-registering module) | each defines a `COMMAND = Command(...)`. Adding a command = drop a module; **zero** edits to shared files. |
+| `lib/common.sh` (sourced helpers) | `lib/cli/env.py` | typed, importable, mypy-clean. |
+| `lib/pyrun` (bash python runner) | `lib/cli/pyrun.py` | same .venv → uv → system resolution. |
+| ad-hoc `echo "Error: …"` + `exit N` | `lib/errors.py` (structured `ThreeDError` types) | rich WHAT/WHY/HOW/accepted-values/install messages; the dispatcher renders them and maps exit codes. |
+| (none) | `lib/cli/registry.py`, `lib/cli/imaging.py`, `tests/` + `3d test` | registry/alias resolution, ImageMagick orchestration + pure score math, pytest + mypy gate. |
+
+The heavy python tools (`render.py`, `mesh_check.py`, `collision_*.py`, `printability_mesh.py`,
+`fit_camera.py`, `preprocess_reference.py`, `match_loop.py`) were **kept as-is** and are invoked
+through `cli.pyrun` exactly as the bash wrappers did — so command modules stay stdlib-only and
+import-light (heavy deps via subprocess, never at module top level).
 
 ## `tools/collision/` (python)
 
@@ -44,20 +62,28 @@ in the project's JSON config — nothing project-specific is compiled in.
 | reference preprocessing (`preprocess_reference.py`) | `3d preprocess` | yes — SAM2/Depth-Anything if installable, OpenCV fallback. |
 | mesh QA (`mesh_check.py`) | `3d mesh` | yes — watertight/manifold/self-intersect/volume on any STL/SCAD. |
 | printability (`printability_mesh.py`) | `3d printability` | yes — FDM wall/feature/overhang/orientation, PLA/PETG. |
-| master gate | `3d acceptance` | yes — manifold + consistency + printability, with collision/silhouette only when configured. |
+| master gate | `3d check` (alias `3d acceptance`) | yes — manifold + consistency + printability, with collision/silhouette only when configured. |
 
 ## New in this CLI (no direct source tool)
 
 | `3d` subcommand | Purpose |
 |---|---|
 | `3d doctor` | detect present/missing deps with the exact per-OS install command (read-only). |
-| `3d setup` | install missing deps OS-aware (brew / apt / dnf / pacman + repo `.venv`), idempotent. |
 | `3d slice` | slice a model to G-code via OrcaSlicer / Bambu Studio / PrusaSlicer (per-slicer invocation; core `-g`/`--slice` flags verified, `--printer` best-effort); `--check` is a sliceability gate that discards the G-code. |
-| `3d libs` | clone/manage OpenSCAD libraries (BOSL2, NopSCADlib) into `libs/`. |
+| `3d libs` | OpenSCAD library info: `path` / `list` (BOSL2, NopSCADlib auto-install on first run). |
 | `3d fit-camera` | (see above) camera-pose fit to a reference photo by silhouette IoU. |
+| `3d test` | run the test gate: pytest (unit + CLI smoke) then mypy. |
+
+## Removed
+
+| Removed | Why |
+|---|---|
+| `3d setup` | dependency install is now the **first-run auto-bootstrap** (OpenSCAD libs) + the per-item install commands printed by `3d doctor`; python deps resolve via uv/`.venv` per-call. No manual `setup` step. |
+| `3d libs install` | folded into the first-run bootstrap; kept only as a friendly "removed — auto-installs now" message. |
 
 ## Verdict
 
 Every source tool is either exposed as a `3d` subcommand or intentionally dropped
 (`version-scad` → git versioning). The collision engine exposes static + `--frame`
-+ `--viz`. No gaps remain; nothing project-specific is hardcoded.
++ `--viz`. The CLI is now a thin typed Python dispatcher with a self-registering command
+registry. No gaps remain; nothing project-specific is hardcoded.

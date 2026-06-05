@@ -3,7 +3,7 @@
 __pycache__/
 *.pyc
 
-# OpenSCAD libraries are cloned on demand (3d libs install …), not vendored.
+# OpenSCAD libraries are cloned on demand (first-run bootstrap), not vendored.
 libs/*/
 
 # test / scratch render outputs

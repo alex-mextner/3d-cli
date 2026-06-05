@@ -7,8 +7,69 @@ Instructions for AI agents (and humans) working in this repository. English only
 `3d` is a scriptable, cross-platform CLI for AI-assisted parametric 3D modeling in
 OpenSCAD: camera-locked renders, cross-sections, silhouette scoring, a forced-monotonic
 match loop, and manifold / printability / collision verification gates. The entry point
-is `bin/3d` (a bash dispatcher); subcommands live in `lib/cmd_<name>.sh` (bash) or are
-thin wrappers around typed Python tools in `lib/` run through `lib/pyrun`.
+is `bin/3d` — a **thin typed Python dispatcher** that discovers self-registering command
+modules from `lib/commands/<name>.py`. Heavy python tools (render/mesh/collision/…) live
+in `lib/*.py` and run through `cli.pyrun`.
+
+## Adding a command (the command-authoring contract)
+
+A command is ONE module `lib/commands/<name>.py` that defines a module-level `COMMAND`:
+
+```python
+from __future__ import annotations
+from cli.registry import Command
+
+def run(argv: list[str]) -> int:    # argv = everything after the subcommand name
+    ...                              # do the work; return a process exit code
+    return 0
+
+COMMAND = Command(
+    name="mything",
+    group="GEOMETRY & EXPORT",       # which `3d help` section it appears under
+    summary="one-line help in `3d help`",
+    usage="mything <file> [options]",
+    run=run,
+    aliases=("mt",),                  # optional
+)
+```
+
+Discovery globs `lib/commands/*.py`, imports each, reads `COMMAND`. **Adding a command
+requires ZERO edits to `bin/3d` or any shared file** — just the new module.
+
+HARD RULES for command modules (enforced by `tests/test_imports.py`):
+- **Stdlib-only + import-light at module top level.** Discovery imports EVERY command on
+  EVERY `3d` invocation, so a top-level `import trimesh`/`numpy`/`cv2` would slow/break
+  ALL commands and defeat the offline `3d help`/`render` guarantee. Reach heavy deps and
+  external binaries (openscad/magick/slicer) via subprocess (`cli.pyrun.exec_tool` /
+  `run_tool`) or a LAZY import inside `run()` — never at the top.
+- **Raise structured errors, don't `sys.exit` with ad-hoc strings.** Use `lib/errors.py`:
+  `MissingDependency` (exit 127), `InvalidArgument`/`UsageError`/`InputNotFound` (exit 2),
+  `GateFailure` (exit 1). Every NEW error you write MUST use these — they carry WHAT/WHY,
+  the remediation, the accepted values, and the install command. The dispatcher renders
+  them (no bare traceback) and maps the exit code.
+- **`--help`/no-args print usage** and return 0 / 1 respectively.
+
+Aliases: declare `aliases=(...)` (e.g. `check` aliases `acceptance`), OR write a tiny
+dedicated module whose `run()` reshapes argv and calls the target's `run` (e.g.
+`commands/multi.py` → `commands.render.run([file, "--multi", ...])`). Both are fine.
+
+Shared support modules: `cli/registry.py` (the registry), `cli/dispatch.py` (routing +
+error rendering), `cli/env.py` (tool discovery, OS/install table, bootstrap),
+`cli/pyrun.py` (run a `lib/*.py` tool with its deps), `cli/imaging.py` (ImageMagick
+orchestration + the pure score math).
+
+## Testing
+
+```bash
+3d test            # pytest (unit + CLI smoke harness) then mypy — both must pass
+3d test -k errors  # forward args to pytest
+```
+
+Unit tests live in `tests/` (registry/alias resolution, errors formatting, score IoU/AE
+math, param parsing, env helpers). `tests/test_cli_smoke.py` runs `3d <cmd> --help` for
+EVERY registered command and the safe commands on `examples/cube.scad` (skipping when a
+tool is absent). `tests/test_imports.py` enforces the stdlib-only rule. `3d test` also runs
+mypy over `bin/3d + lib/ + tests/` against `mypy.ini` — keep it clean.
 
 ## Engineering conventions
 
@@ -25,22 +86,24 @@ thin wrappers around typed Python tools in `lib/` run through `lib/pyrun`.
   fit-camera candidate evals, match-loop candidate evals) run concurrently via `asyncio`
   + `asyncio.create_subprocess_exec` / `gather`, bounded by a semaphore (~`os.cpu_count()`).
   Keep a correct, ordered single-render path; do NOT async-ify trivially-sequential code.
-- Run Python through `lib/pyrun "<deps>" script.py ...` (resolves `.venv` → `uv` → system).
+- Run a bundled python tool through `cli.pyrun` (`exec_tool`/`run_tool("<deps>",
+  "tool.py", args)`) — it resolves `.venv` → `uv` → system, the same tiers as the old
+  `lib/pyrun` shim.
 
-### Bash
-- `set -euo pipefail` where practical (at minimum `set -uo pipefail`, the repo standard).
-- Quote everything; arrays for argv pass-through (`"${arr[@]+"${arr[@]}"}"`).
-- **Cross-platform macOS + Linux.** No GNU-only flags without a fallback (macOS `readlink`
-  has no `-f`; `sed -i` differs; etc.). Robust binary discovery (PATH + app bundles).
-- Clear errors with the exact install command; degrade gracefully when an optional dep is
-  absent (report the degradation, never a silent false PASS).
+### No new bash
+The CLI is Python everywhere. There are no `lib/cmd_*.sh` / `common.sh` / `pyrun` shims
+anymore. Don't add bash; write a Python command module. (Cross-platform care still
+applies: robust binary discovery on PATH + macOS app bundles, clear errors with the exact
+install command, graceful degrade — never a silent false PASS. `cli/env.py` is the home
+for tool discovery + the OS/install table.)
 
 ### First-run bootstrap
 On ANY `3d` invocation, if `~/.config/3d/.bootstrapped` is absent, the dispatcher
 auto-installs the OpenSCAD libraries (BOSL2, NopSCADlib) into the repo `libs/` ONCE,
 quietly (one-line notice), then touches the marker. It is **idempotent** and **non-fatal
 if offline** (must never block `render`/`help`). `OPENSCADPATH` is auto-exported from
-`libs/` by `lib/common.sh` so `include <BOSL2/std.scad>` resolves with no manual step.
+`libs/` by `cli/env.export_openscadpath()` (called in the dispatcher before any
+subprocess) so `include <BOSL2/std.scad>` resolves with no manual step.
 
 ## Commit discipline (mandatory, every change)
 
@@ -63,9 +126,12 @@ Co-Authored-By trailer on commits: `Co-Authored-By: Claude Opus 4.8 (1M context)
   selection flags it runs ALL applicable gates (manifold, consistency, printability,
   collision, silhouette); `--mesh/--printability/--collision/--manifold/--silhouette`
   select a subset; `--skip X` excludes. Prints a per-gate breakdown + overall PASS/FAIL.
-- `multi`, `section`, `mesh`, `printability`, `collision`, `acceptance` remain as **thin
-  aliases** forwarding to `render --multi` / `render --section` / `check --mesh` / etc.
-- `libs install` is removed (bootstrap handles it); `libs path` / `libs list` stay (info).
+- `multi`/`section` are thin command modules forwarding to `render --multi`/`--section`;
+  `acceptance` is a declared **alias** of `check`. `mesh`/`printability`/`collision` are
+  first-class commands (also reachable as the corresponding `check` selectors).
+- `setup` and `libs install` are **removed** (the first-run bootstrap + `3d doctor`'s
+  per-item install commands replace them); `libs path` / `libs list` stay (info). `doctor`
+  stays (read-only). `3d test` runs the test gate.
 
 ## Verification before "done"
 
@@ -76,5 +142,6 @@ Run the full list, not a subset:
   PNG must visibly show the **cavity** — "a PNG exists" is not proof it cut.
 - `3d check examples/cube.scad` runs all gates by default; `--mesh` alone runs only mesh.
 - First-run bootstrap: `rm ~/.config/3d/.bootstrapped` then any `3d` cmd re-bootstraps.
-- `mypy` clean on the Python modules; aliases still work.
+- `3d test` green (pytest + mypy); aliases still work; the smoke harness covers every
+  command's `--help`.
 - Everything committed atomically, codex-reviewed, and PUSHED to origin.
