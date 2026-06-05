@@ -49,23 +49,26 @@ deps resolve per call via `uv`/`.venv`), and every command either works or fails
 "install X" message naming the exact per-OS command. Run **`3d doctor`** to inspect what is
 present or missing.
 
-| Dependency | Purpose | Tier |
-|---|---|---|
-| [OpenSCAD](https://openscad.org) | the modeling engine — render, export, section, params, validate | required |
-| [ImageMagick](https://imagemagick.org) | overlay / score / silhouette image diffs | required for the match pipeline |
-| `python3` | runs the python subcommands (mesh/collision/match/fit/preprocess/…) | required |
-| [`uv`](https://docs.astral.sh/uv) | per-call Python dep resolution (no global installs) | recommended |
-| `pyyaml` | the `3d.yaml` project model (now a **core** dep) | required (auto-installed) |
-| `trimesh`, `manifold3d`, `numpy`, `scipy`, `rtree` | the mesh stack — watertight / manifold / volume / collision math | required (auto-installed) |
-| `pillow`, `opencv-python-headless` | reference pre-processing (`3d preprocess`) | optional (`preprocess` extra) |
-| `pyvista` | collision visualization (`3d collision --viz`) | optional (`viz` extra) |
-| `fastapi`, `uvicorn`, `markdown` | the web dashboard (`3d web`) | optional (`web` extra) |
-| a slicer (OrcaSlicer / Bambu Studio / PrusaSlicer) | G-code export & sliceability gate (`3d slice`) | optional |
+**External tools** — system programs you install yourself (the CLI prints the exact per-OS line
+when one is missing; `brew`/`apt`/`winget`):
 
-The mesh stack and `pyyaml` are in `pyproject.toml`'s core dependencies; the rest are optional
-extras (`preprocess`, `viz`, `web`, `dev`). A missing optional dep degrades only the command
-that needs it — never the whole CLI. `3d doctor` prints PASS/MISSING per item with the exact
-per-OS install line for anything absent.
+| Tool | Purpose | Tier |
+|---|---|---|
+| [OpenSCAD](https://openscad.org) | the modeling engine — render, export, section, params, validate | **required** |
+| [ImageMagick](https://imagemagick.org) | silhouette / overlay / score image diffs | required for the match pipeline |
+| `python3` + [`uv`](https://docs.astral.sh/uv) | runtime for the python subcommands; `uv` resolves their deps per call (no global installs) | **required** (`uv` recommended) |
+| a slicer — [OrcaSlicer](https://github.com/SoftFever/OrcaSlicer) / [Bambu Studio](https://bambulab.com/en/download/studio) / [PrusaSlicer](https://www.prusa3d.com/page/prusaslicer_424/) | G-code export & sliceability gate (`3d slice`) | optional |
+| [ffmpeg](https://ffmpeg.org) | animation / report video export (`3d animate`, `3d report`) | optional |
+| [Blender](https://www.blender.org) | photoreal render (`3d render --photo`) — installed on demand, not bootstrapped | optional |
+
+**Python packages** — resolved automatically by `uv`/`.venv`; you normally never install these by
+hand. Only the heavyweight ones worth knowing about:
+
+- **core (auto):** the mesh stack [`trimesh`](https://trimesh.org) + [`manifold3d`](https://github.com/elalish/manifold) (watertight / manifold / volume) and `pyyaml` (the `3d.yaml` project model).
+- **optional extras:** `opencv` + `pillow` (`preprocess`), `pyvista` (`collision --viz`), `fastapi`/`uvicorn` (`web`). The full pinned set lives in `pyproject.toml` (`preprocess`/`viz`/`web`/`dev` extras) + `uv.lock`.
+
+A missing optional dependency degrades only the command that needs it — never the whole CLI.
+`3d doctor` prints PASS/MISSING per item with the exact per-OS install line for anything absent.
 
 ```bash
 3d doctor          # read-only: report present/missing + the exact install command per OS
