@@ -20,7 +20,7 @@ pipeline does not need them.
 | `--open` | off | open the dashboard in your browser once it starts |
 
 ```bash
-3d web --root ~/xp/garage-band --open    # scan that root, open the dashboard
+3d web --root ~/models --open            # scan that root, open the dashboard
 3d web --port 9000                       # override the default 8733
 ```
 

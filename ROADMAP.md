@@ -12,7 +12,7 @@ Status legend: ✅ done · 🔨 in progress · 📋 planned
 AI-assisted, reference-photo-driven **parametric** 3D modeling (OpenSCAD-first),
 verification, pixel-perfect matching, print preparation, physics/kinematics, and
 live observation of AI agents doing the work. Its own repo
-(`github.com/alex-mextner/3d-cli`), `3d` symlinked into `~/.files/bin`.
+(`github.com/alex-mextner/3d-cli`), `3d` symlinked into a dir on `PATH` (e.g. `~/.local/bin`).
 
 ## 0a. Design influences & philosophy (the meta-thinking)
 The whole tool is shaped by a few deliberate analogies — keep them visible, they explain WHY

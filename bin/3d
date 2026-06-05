@@ -12,7 +12,7 @@ from __future__ import annotations
 import os
 import sys
 
-# Resolve the repo root THROUGH the bin/3d symlink (~/.files/bin/3d -> this file).
+# Resolve the repo root THROUGH the bin/3d symlink (e.g. ~/.local/bin/3d -> this file).
 _self = os.path.realpath(__file__)
 _repo = os.path.dirname(os.path.dirname(_self))
 os.environ.setdefault("REPO_ROOT", _repo)

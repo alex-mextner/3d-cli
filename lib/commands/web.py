@@ -34,7 +34,7 @@ Config: ~/.config/3d/web.json  (the same config dir as the first-run bootstrap m
 created with defaults on first run).
 
 Examples:
-  3d web --root ~/xp/garage-band --open
+  3d web --root ~/models --open
   3d web --port 9000"""
 
 

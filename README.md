@@ -18,7 +18,7 @@ pixel-matched, printable part.
 
 ```bash
 # the repo lives wherever you cloned it; symlink bin/3d onto PATH:
-ln -sf "$PWD/bin/3d" ~/.files/bin/3d     # or any dir on your PATH
+ln -sf "$PWD/bin/3d" ~/.local/bin/3d     # or any dir on your PATH
 3d help
 ```
 
