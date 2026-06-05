@@ -18,6 +18,8 @@ working rules for any agent or human touching `3d`.
    1. Dead-code / unused scan (see `code-style.md`); fix or justify.
    2. Self-review your own diff.
    3. `timeout 1200 codex exec review --uncommitted` — read findings (`tail -120`), fix real issues.
+   4. If a slice/spec asks for an additional reviewer or a narrower review command, run that too;
+      stricter task instructions override this baseline.
 4. **Commit** atomically: message `<area>: <what changed>` (what, not "update"/"fix"). Formatter-only
    churn goes in a separate `style:` commit BEFORE logic changes.
 5. **Push** to origin regularly — don't accumulate a long unpushed tail.

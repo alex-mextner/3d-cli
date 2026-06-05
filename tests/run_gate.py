@@ -1,6 +1,6 @@
-"""run_gate.py — the `3d test` gate: pytest then mypy, both must pass.
+"""run_gate.py — the `3d test` gate: ruff, pytest, then mypy; all must pass.
 
-Invoked by the `test` command through pyrun so pytest/mypy resolve via the same
+Invoked by the `test` command through pyrun so ruff/pytest/mypy resolve via the same
 .venv/uv/system tiers as every other python tool. Extra argv is forwarded to pytest.
 """
 from __future__ import annotations
