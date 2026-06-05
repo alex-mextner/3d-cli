@@ -205,3 +205,19 @@ one-line usage):
   Purpose: regression tracking + **data for subsequent improvement** (prompt tuning, model A/B,
   fine-tuning). `3d metrics` / `3d ai bench --compare` view history + deltas. `3d web` surfaces the
   benchmark/metric trend lines live.
+
+## 14. Showcase demo video (FINAL deliverable)
+- 📋 At the **end** of all the work, produce an **impressive showcase demo of the `3d` CLI** — with
+  **music, kinetic text/captions, scene transitions, pacing**. Not a raw screen grab: a polished,
+  edited promo.
+- 📋 **Built code-first via HeyGen HyperFrames** (open-source, Apache 2.0 — AI agents compose video by
+  writing **HTML/CSS/JS**; CLI install). Ref: https://hyperframes.heygen.com/ . The demo is itself a
+  small program (HTML/CSS/JS scenes) rendered to a video file — fits this repo's "everything-as-code"
+  ethos. Install HyperFrames **on demand** (only when building the demo), not in the bootstrap.
+- 📋 **Content**: real `3d` CLI in action — capture actual runs (render `--multi`/`--section`,
+  `check` gates, `fit-camera` IoU climbing, `match` loop, `3d ai review` RAG output, `pack`→slice,
+  photoreal Blender vs OpenSCAD side-by-side, `3d web` dashboard, benchmark trend lines). Use the
+  **before / intermediate-debug / after** images from §8/§11 as scenes. Captions state what each
+  command does + the numbers (IoU, SF, metrics).
+- 📋 Music bed (royalty-free), title/section kinetic typography, smooth cuts. Render to a lossless
+  H.264 file. Deliver via `tg --file`. A `3d demo` command (or `docs/demo/` build script) reproduces it.
