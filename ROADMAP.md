@@ -600,9 +600,29 @@ Closes the "from idea to print" loop on the materials side; ties into the materi
 - 📋 **Drives planning** — `3d pack`/`3d print` check inventory before committing; a project's
   required-material total (from `3d.yaml` copies × per-part grams) feeds the procurement list.
 
----
-
-## Execution plan & handoff (for the NEXT session)
+## 33. Extend OpenSCAD's capabilities (plugins / utilities / math / primitives)
+- 📋 **Research extending OpenSCAD itself.** OpenSCAD's stock language is thin (limited math, few
+  primitives, no native plugin/extension API in mainline). **Investigate, in order:**
+  1. **Native plugins / extension points** if/when supported — survey current state: experimental
+     features, function-literals, the customizer, and the python-powered forks
+     ([PythonSCAD](https://pythonscad.org/) / [SolidPython](https://github.com/jeff-dh/SolidPython))
+     as a real extensibility path. Prefer a supported native mechanism if one exists.
+  2. **Else introduce a plugin system first** — a `3d`-side extension layer: a registry of reusable
+     OpenSCAD modules/functions auto-made-available (a preprocessor/codegen that injects helpers), or
+     generate OpenSCAD from the higher-level object model / op-DAG (§5/§19) where the extensibility
+     actually lives. Make extensions discoverable + versioned like the other registries (§3).
+- 📋 **Add convenient utilities / math / richer primitives.** Leverage
+  [BOSL2](https://github.com/BelfrySCAD/BOSL2) / [NopSCADlib](https://github.com/nophead/NopSCADlib)
+  where they cover it; fill the gaps where they don't:
+  - **d3-style math helpers** (à la [d3.js](https://github.com/d3/d3)): scales (`linear/log/pow`),
+    interpolation + easing, curve/spline generators, color scales, data-driven layout.
+  - vector/matrix math; richer primitives: fillets/chamfers, gears, threads, sweeps, lofts,
+    text-on-path.
+  - **Why:** real parts constantly need fillets, sweeps, gears, splines and parametric math that you
+    otherwise hand-roll every project; a curated, discoverable layer makes each a one-liner.
+  - **Example:** a std helper set auto-available in any `3d` project so
+    `chamfer_cube([20,20,5], r=2)` or `lerp(a, b, ease_in_out(t))` just works — instead of copy-pasting
+    a 30-line module — via either a native plugin or `include <3d/std.scad>`.
 
 This session was originally the **lego-loco train** project; it grew the `3d` CLI as a side effect.
 The CLI work now has its own repo and this ROADMAP as the single source. Pick up from here.
