@@ -14,9 +14,9 @@ Placeholders use `{curly}` braces. Fill them in before sending:
 | `{target}`       | target IoU threshold (e.g. `0.93`)                                   |
 | `{phase}`        | current coarse->fine phase name (see "Layered matching order")       |
 | `{allowed}`      | comma-separated list of `constants.scad` params the critic may edit |
-| `{features}`     | the caller's feature vocabulary — the named regions the critic may cite (subject-specific; e.g. for a locomotive: `funnel,boiler,cab,pilot,smokebox,dome_front,dome_rear,runningboard,buffer`) |
+| `{features}`     | the caller's feature vocabulary — the named regions the critic may cite (subject-specific; e.g. `body,neck,base,arm,slot,connector`) |
 | `{changelog}`    | the running changelog block (see "Changelog line format")           |
-| `{per_feature}`  | optional per-feature IoU vector, e.g. `featA:0.71 featB:0.95 ...` (for a locomotive: `funnel:0.71 boiler:0.95 ...`) |
+| `{per_feature}`  | optional per-feature IoU vector, e.g. `featA:0.71 featB:0.95 ...` (for a bracket: `body:0.71 slot:0.95 ...`) |
 
 The three images the critic always receives:
 1. **OVERLAY** — REFERENCE silhouette in RED, current RENDER silhouette in
@@ -143,10 +143,10 @@ Per-feature IoU (lower = worse, fix the worst you are allowed to touch):
 {per_feature}
 
 STEP 1 — Localise: name the ONE region with the largest contiguous colour bleed
-and state its direction. Examples of valid reasoning (for a locomotive subject):
-  "Cyan sticks out ABOVE the funnel by ~6 mm -> funnel too tall."
-  "Red band along the LOWER boiler -> render boiler diameter too small there."
-  "Cyan wedge ahead of the smokebox -> pilot/buffer beam projects too far front."
+and state its direction. Examples of valid reasoning (for a bracket subject):
+  "Cyan sticks out ABOVE the body by ~6 mm -> body too tall."
+  "Red band along the LOWER base -> render base diameter too small there."
+  "Cyan wedge ahead of the neck -> arm/connector projects too far front."
 
 STEP 2 — Map that region to exactly ONE allowed param and a signed delta in mm.
 
@@ -198,15 +198,15 @@ Canonical line:
 | `INVALID RENDER reverted` | render errored / blank mask (zero-reward anchor) — rolled back | `stale += 1`             |
 
 Worked examples (verbatim format the loop produces; the param names are illustrative
-— a locomotive subject — the format is subject-agnostic):
+— a bracket subject — the format is subject-agnostic):
 
 ```
-boiler_d 56->60: IoU 0.812->0.871 OK
-funnel_h 24->28: IoU 0.871->0.853 no improve reverted
-funnel_h 24->22: IoU 0.871->0.889 OK
-cab_h 40->46: IoU 0.889->0.901 gate FAIL reverted
-pilot_h 18->0: IoU 0.901->0.000 INVALID RENDER reverted
-dome_d 14->16: IoU 0.901->0.918 OK
+body_d 56->60: IoU 0.812->0.871 OK
+neck_h 24->28: IoU 0.871->0.853 no improve reverted
+neck_h 24->22: IoU 0.871->0.889 OK
+base_h 40->46: IoU 0.889->0.901 gate FAIL reverted
+arm_h 18->0: IoU 0.901->0.000 INVALID RENDER reverted
+slot_d 14->16: IoU 0.901->0.918 OK
 ```
 
 Reading rules for the critic:
@@ -287,35 +287,34 @@ monotonic loop above, but the critic's `{allowed}` set lists **only** that
 phase's params — lower phases stay frozen so each monotonic step stays
 meaningful. A final unfrozen polish round escapes ordering artifacts.
 
-The phase contents below are a worked example for a **locomotive** subject; the
+The phase contents below are a worked example for a **bracket** subject; the
 *ordering principle* (bounding box -> major masses -> landmarks -> fine details)
 is subject-agnostic. For a different subject, the caller supplies its own params
 per phase from its `constants.scad` and `{features}` vocabulary.
 
-| Phase | Name              | What it nails                          | Params (`{allowed}`) — locomotive example                                                             |
+| Phase | Name              | What it nails                          | Params (`{allowed}`) — bracket example                                                              |
 |-------|-------------------|----------------------------------------|------------------------------------------------------------------------------------------------------|
 | 1     | Bounding box      | subject fills the same frame (biggest IoU)| `total_length`, `total_height`, `baseline_z`                                                       |
-| 2     | Major masses      | gross silhouette shape                  | `boiler_len`, `boiler_d`, `cab_len`, `cab_h`, `smokebox_len`                                          |
-| 3     | Landmark features | funnel, domes, buffers, running board   | `funnel_frac`, `funnel_h`, `funnel_flare`, `dome_f_frac`, `dome_r_frac`, `dome_d`, `pilot_h`, `buffer_z` |
-| 4     | Fine details      | window, beading, headlight, chamfers    | `cab_window_w`, `cab_window_h`, `beading_r`, `headlight_x`                                            |
+| 2     | Major masses      | gross silhouette shape                  | `body_len`, `body_d`, `base_len`, `base_h`, `neck_len`                                                |
+| 3     | Landmark features | arm, slots, connector, mounting pad     | `arm_frac`, `arm_h`, `arm_flare`, `slot_f_frac`, `slot_r_frac`, `slot_d`, `mount_h`, `pad_z`         |
+| 4     | Fine details      | hole, rib, label, chamfers              | `hole_w`, `hole_h`, `rib_r`, `label_x`                                                                |
 
 Rationale (§7.5): match by visual dominance — bounding box first wins the most
 IoU and is the most reliable, so it earns the early monotonic steps; major
-masses set the gross shape; landmarks place the recognizable features (funnel
-~0.27 L from the front per the SPEC; the two domes; buffer beam; running-board
-line); fine details last. Coarse-to-fine ordering ensures early single-param
-moves are far from flat, which is why the loop does not plateau immediately
-(§16/§9).
+masses set the gross shape; landmarks place the recognizable features (arm
+~0.3 L from the front; the two slots; mounting pad; connector line); fine details
+last. Coarse-to-fine ordering ensures early single-param moves are far from flat,
+which is why the loop does not plateau immediately (§16/§9).
 
 Phase controller (§17.3):
 
 ```python
 PHASES = [
     ["total_length", "total_height", "baseline_z"],                 # 1 bounding box
-    ["boiler_len", "boiler_d", "cab_len", "cab_h", "smokebox_len"], # 2 major masses
-    ["funnel_frac", "funnel_h", "funnel_flare", "dome_f_frac",      # 3 landmarks
-     "dome_r_frac", "dome_d", "pilot_h", "buffer_z"],
-    ["cab_window_w", "cab_window_h", "beading_r", "headlight_x"],   # 4 fine details
+    ["body_len", "body_d", "base_len", "base_h", "neck_len"],       # 2 major masses
+    ["arm_frac", "arm_h", "arm_flare", "slot_f_frac",              # 3 landmarks
+     "slot_r_frac", "slot_d", "mount_h", "pad_z"],
+    ["hole_w", "hole_h", "rib_r", "label_x"],                       # 4 fine details
 ]
 for phase_params in PHASES:
     freeze_all_except(phase_params)
