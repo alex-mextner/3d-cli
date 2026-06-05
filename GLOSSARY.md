@@ -76,7 +76,11 @@ Media transcoder with a DAG filter-graph; inspiration for the op-DAG + the power
 
 ### fit-camera
 <a id="fit-camera"></a>
-Silhouette-IoU camera-pose fitting: search azimuth/elevation/distance/pan until a render's silhouette best matches a reference photo, then freeze. https://en.wikipedia.org/wiki/Camera_pose_estimation
+Silhouette-IoU camera-pose fitting: search azimuth/elevation/distance/pan until a render's silhouette best matches a reference photo, then freeze.
+
+![Fit camera — camera frustum aiming at object with azimuth/elevation arrows](docs/img/fit-camera.svg)
+
+https://en.wikipedia.org/wiki/Camera_pose_estimation
 
 ### FlipFlop effect
 LLMs flip answers ~46% and lose ~17% accuracy when challenged; the reason a critique loop must be judged by an external numeric metric. https://arxiv.org/abs/2311.08596
@@ -110,7 +114,11 @@ Recovering a procedural generator's parameters so its output matches a target; t
 
 ### IoU
 <a id="iou"></a>
-Intersection-over-Union; overlap of two regions (silhouettes) or volumes. 1.0 = identical. https://en.wikipedia.org/wiki/Jaccard_index
+Intersection-over-Union; overlap of two regions (silhouettes) or volumes. 1.0 = identical.
+
+![IoU — two overlapping shapes, intersection highlighted](docs/img/iou.svg)
+
+https://en.wikipedia.org/wiki/Jaccard_index
 
 ### jq
 <a id="jq"></a>
@@ -126,7 +134,11 @@ Large Reconstruction Model; feed-forward single-image → triplane NeRF. https:/
 
 ### Manifold
 <a id="manifold"></a>
-A watertight, closed solid (every edge shared by exactly two faces); required for valid boolean ops and printing. https://en.wikipedia.org/wiki/Manifold
+A watertight, closed solid (every edge shared by exactly two faces); required for valid boolean ops and printing.
+
+![Manifold — watertight cube vs broken cube with hole](docs/img/manifold.svg)
+
+https://en.wikipedia.org/wiki/Manifold
 
 ### manifold3d
 <a id="manifold3d"></a>
@@ -210,6 +222,12 @@ Signed Distance Function; implicit solid representation (distance to surface, ne
 ### Silhouette
 <a id="silhouette"></a>
 The binary subject mask (white=subject) of a render or reference; the basis of IoU matching. https://en.wikipedia.org/wiki/Silhouette
+
+### Section
+<a id="section"></a>
+A cross-sectional view of a 3D model; produced by cutting with a plane. Used to inspect internal geometry.
+
+![Section — cube cut by a plane, cut face highlighted](docs/img/section.svg)
 
 ### Slicer
 <a id="slicer"></a>
