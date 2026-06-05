@@ -15,6 +15,12 @@ def main(argv: list[str]) -> int:
     env = dict(os.environ)
     env["MYPYPATH"] = os.path.join(root, "lib")
 
+    print("=== ruff ===", flush=True)
+    rc_ruff = subprocess.run(
+        [sys.executable, "-m", "ruff", "check", os.path.join(root, "lib"), os.path.join(root, "tests")],
+        cwd=root, env=env,
+    ).returncode
+
     print("=== pytest ===", flush=True)
     rc_pytest = subprocess.run(
         [sys.executable, "-m", "pytest", os.path.join(root, "tests"), *argv],
@@ -32,9 +38,12 @@ def main(argv: list[str]) -> int:
         cwd=root, env=env,
     ).returncode
 
-    ok = rc_pytest == 0 and rc_mypy == 0
+    ok = rc_ruff == 0 and rc_pytest == 0 and rc_mypy == 0
     print()
-    print(">>> TEST: PASS" if ok else f">>> TEST: FAIL (pytest rc={rc_pytest}, mypy rc={rc_mypy})")
+    if ok:
+        print(">>> TEST: PASS")
+    else:
+        print(f">>> TEST: FAIL (ruff rc={rc_ruff}, pytest rc={rc_pytest}, mypy rc={rc_mypy})")
     return 0 if ok else 1
 
 

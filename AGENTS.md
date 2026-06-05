@@ -82,6 +82,12 @@ mypy over `bin/3d + lib/ + tests/` against `mypy.ini` — keep it clean.
   Third-party libs without stubs (trimesh, manifold3d, open3d, cv2, scipy, pyvista) are
   handled by `mypy.ini` (`ignore_missing_imports` per module) — never a blanket
   `ignore_errors`, which would fake "clean".
+- **Zero warnings.** Both `mypy` and `ruff` must run clean with **no warnings** before any
+  commit. Treat every linter warning as an error — fix it immediately. Do not add blanket
+  ignores or noqa markers to silence real issues. Run the full lint gate:
+  ```bash
+  uv run ruff check lib/ tests/ && uv run mypy lib/ tests/
+  ```
 - **Async where it genuinely helps.** Independent OpenSCAD renders (multi-angle batches,
   fit-camera candidate evals, match-loop candidate evals) run concurrently via `asyncio`
   + `asyncio.create_subprocess_exec` / `gather`, bounded by a semaphore (~`os.cpu_count()`).
