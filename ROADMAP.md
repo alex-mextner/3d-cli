@@ -14,6 +14,24 @@ verification, pixel-perfect matching, print preparation, physics/kinematics, and
 live observation of AI agents doing the work. Its own repo
 (`github.com/alex-mextner/3d-cli`), `3d` symlinked into `~/.files/bin`.
 
+## 0a. Design influences & philosophy (the meta-thinking)
+The whole tool is shaped by a few deliberate analogies — keep them visible, they explain WHY
+the surface looks the way it does:
+- **jq** → composable, pipeable filters over a structured document. `3d om` (§18) is jq for the
+  3D object model; everything streams through stdin/stdout so shell pipes compose.
+- **ffmpeg** → a complete, expressive filter-GRAPH (a DAG) with total low-level power — but its UX
+  is notoriously hostile. We keep the power (Layer 1, §21) and add a friendly layer on top (Layer 2)
+  that resolves INTO it. ffmpeg's filtergraph is also why the pipeline is a DAG (§19).
+- **vecli / vector-engine** (`github.com/hyperide/hyper-saas`, `packages/vector-engine`) → a
+  **headless compute-graph core** (`lib`) with thin frontends (`cli`/`web`/`gui`) over it (§20), and
+  an **operation DAG** where editing a past node rolls forward to dependents (§19). We adopt the
+  compute-DAG + headless-core split and fix its linear-history gap with a real history DAG.
+- **CSS + HTML DOM** → the object model is a tree (DOM) addressed by **id + class selectors** with a
+  **cascading stylesheet** of rules (§5) — but with no HTML/CSS, just the addressing/cascade idea.
+- **Houdini / Blender geometry nodes** → non-destructive, re-computable node graphs; the same model
+  behind §19's roll-forward.
+These are not features; they are the lens. New surface should be justifiable by one of them.
+
 ## 1. Engineering policy (applies to ALL work)
 - 📋 **Python everywhere** — replace all `sh`/`bash` with Python; `bin/3d` is a thin
   Python dispatcher. Type hints everywhere, **mypy-clean**. **async** where it
@@ -381,3 +399,81 @@ Design: spec §11. Inspiration: **ffmpeg's power without ffmpeg's UX**.
   `3d render --frame #hole-1 --cam-offset [0,-5,12] --cam-roll 8`; sections `through:#valve --offset 2`.
   Layer 2 resolves INTO Layer 1; `--explain` prints the resolved low-level form so anything
   high-level is inspectable/overridable.
+
+## 22. Video report (auto-generated, per run — distinct from the §14 promo)
+- 📋 **`3d report [--video]`** — an AUTO-generated, factual **video report of a build / verification /
+  match / ai-loop run**: a captioned timeline of the operations performed, the renders/sections/
+  overlays produced, and the metrics/benchmarks (IoU climbing, gate PASS/FAIL, SF, Chamfer). Not the
+  polished promo of §14 — this is the "here's what the tool/agent just did, with the numbers" artifact
+  for sharing progress (the train project's per-iteration render dumps, generalized & automated).
+- 📋 Built from the **same op-DAG run record (§19)** + the **§9 web SSE timeline** + the
+  **before/intermediate-debug/after** images (§8/§11). Stitched with **ffmpeg**; optional kinetic
+  captions via HyperFrames (§14) when `--video`. Also emit a Markdown/HTML report (no ffmpeg needed)
+  as the default; `--video` adds the rendered clip.
+- 📋 Deliverable via `tg --file`. Reuses the metrics store (§13.4) so the report's numbers are the
+  persisted ones, not recomputed ad hoc.
+
+## 23. Engineering rules, AGENTS.md & `docs/rules/` (ported from the draft workspace)
+- 📋 Ship a **comprehensive `AGENTS.md` (+ `CLAUDE.md` symlink)** and a **`docs/rules/`** set, ported
+  and Python-adapted from `hyper-canvas-draft` (the user's "write a good Claude file" ask). Portable
+  rules to carry over (generic, not stack-specific):
+  - **Commit discipline**: atomic commits; pre-commit 3-stage review (dead-code scan → self-review →
+    `codex exec review --uncommitted`); never `--no-verify`; push regularly; separate `style:` commits
+    for formatter-only churn.
+  - **TDD**: failing test first → confirm it fails for the RIGHT reason → minimal code → green →
+    refactor; tests exercise PRODUCTION code (no copy-pasted logic, no mock-only); never delete a
+    failing test — investigate; changing a test to match code is a red flag (regression vs setup bug).
+  - **Zero-warnings**: lint/mypy warnings are errors; no blanket ignores.
+  - **Naming**: describe WHAT not HOW; no temporal names (`new`/`legacy`/`improved`); no pattern
+    suffixes (`Registry` not `RegistryManager`).
+  - **File headers** (Python docstring): purpose, accessed-via, assumptions/invariants, past bugs,
+    architecture link. **Comment hygiene**: evergreen, English-only, never silently drop comments.
+  - **Shared utilities**: single source of truth (path validation, error shapes, parsing) — never
+    inline-reimplement; `SYNC:` comments when duplication is unavoidable.
+  - **Dead code**: investigate before delete (`git log -S`, read adding commit, check callsites) →
+    DELETE / FIX-RECONNECT / SALVAGE / ESCALATE; never delete on a bare grep miss.
+  - **Systematic debugging**: reproduce → compare working vs broken → one hypothesis, smallest change
+    → fix root cause, never stack symptom-fixes; timeouts are a smell, fix the cause.
+  - **Decision escalation**: verify-it-yourself first (advisor() + code review), escalate only
+    product/architectural calls not derivable from code, with Context/Problem/Options/Recommendation.
+  - **Pre-commit hooks** (lefthook or equivalent): lint + format + typecheck + conflict-marker check,
+    parallel; adapted to Python tools (ruff/black + mypy).
+- 📋 **Canonical config dir = `~/.config/3d-cli/`** (the user's stated path for `web.json` + ROADMAP
+  §2's `.bootstrapped`). RECONCILE the code: the foundation + web waves currently use `~/.config/3d/`
+  in `lib/cli/env.py`, `lib/web/webconfig.py`, `lib/commands/{web,libs,doctor}.py` — rename to
+  `~/.config/3d-cli/` (one constant, used everywhere) so docs and code agree.
+
+---
+
+## Execution plan & handoff (for the NEXT session)
+
+This session was originally the **lego-loco train** project; it grew the `3d` CLI as a side effect.
+The CLI work now has its own repo and this ROADMAP as the single source. Pick up from here.
+
+**Agreed build order (user-approved: "2+3, max reasonable autonomy"):**
+1. **README/docs de-coupling FIRST** (§16) — runs before feature work; the foundation wave rewrote
+   the README with the OLD lego-loco framing (throwaway). Reframe intro + Requirements (plain list +
+   auto-install) + sweep core for subject leakage (§15). Also land §23 (AGENTS.md + docs/rules).
+2. **Core wave (B1, mostly serial — it is the dependency for everything else):** headless `lib` core
+   (§20), the **object model + selectors/stylesheet** (§5), the **operation-DAG executor + history**
+   (§19), capability registries. Reconcile the config dir (§23).
+3. **Leaf wave (B2, parallel worktrees over the stable core):** materials/printers (§2a),
+   `3d.yaml`+`pack` (§5), `strength`/`kinematics`/`animate` (§6), `3d om` (§18), sections + camera
+   presets/auto-frame (§3), photoreal Blender (§3), `3d ai` (§13), `slice` changes (§4),
+   ollama+hardware-check (§10), debug-viz+axis-math (§7/§8), `3d report` (§22).
+4. **Integration + demo (final):** merge everything, end-to-end tests, README screenshots (§11),
+   then the §14 showcase demo + §22 video report.
+
+**State at handoff (2026-06-05):**
+- ✅ Foundation (python registry CLI, errors, 54 tests, mypy clean) — on `main`.
+- ✅ Research extended + `3d-cli-backlog.md` (in `garage-band`, see §17).
+- ✅ ROADMAP §0–§21 + `docs/specs/2026-06-05-3d-cli-architecture.md` — on `main`.
+- 📋 **MERGE FIRST**: `docs/roadmap-finalize` (this §0a/§22/§23 + handoff + `docs/rules/`) and
+   `docs/strip-local-paths` are pushed but NOT yet on `main` (the web agent occupied `main` at
+   handoff). Merge both into `main` before anything else, then re-read this ROADMAP from `main`.
+- 🔨 **Web dashboard integration** — a background agent was bringing `lib/web/` into the new registry
+   (uncommitted in the `main` working tree at handoff); the NEXT session must verify it committed +
+   pushed, or finish it. It used the wrong config dir (`~/.config/3d/`) — fix per §23.
+- 📋 **Branch `docs/strip-local-paths`** (pushed) — merge it: strips machine paths from docs.
+- ⚠️ The web integration ran in THIS session; if this session ended mid-flight it may be incomplete —
+   check `git status` + `lib/web/` + `lib/commands/web.py` first thing.
