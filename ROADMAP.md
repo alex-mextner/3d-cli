@@ -184,9 +184,12 @@ These are not features; they are the lens. New surface should be justifiable by 
   render↔reference overlays**. Emit **before / intermediate-debug / after** images.
 
 ## 9. `3d web` — interactive dashboard (✅ integrated into the registry CLI)
-- Local FastAPI + uvicorn + **SSE** app. Config `~/.config/3d/web.json` (project_root,
-  port, host) — the same config dir as the first-run bootstrap marker. Default project_root
-  e.g. the garage-band repo.
+- Local FastAPI + uvicorn + **SSE** app. Config in `~/.config/3d-cli/` (port, host) — the canonical
+  config dir (§23).
+- 📋 **No single `project_root`.** `3d web` lists the **registered projects** from
+  `~/.config/3d-cli/projects.{toml,json}` (populated by `3d init`, §28). Manage with
+  `3d projects list|add <path>|remove <path>`. "Browse all projects" = the registered set, not one
+  root. (Removes the old single-root model.)
 - **Watch agents work live** — structured SSE logs + visualizations, via extensible
   **adapters**: Claude (dynamic read of JSONL transcripts), Codex, opencode. Auto-associate
   agents↔projects by mentioned dirs/files; cache tracked session ids; detect inactive
@@ -493,6 +496,29 @@ layered rule-config structure. Build an analogous multi-level lint system for 3D
   (per-area approach/library/algorithm), referenced by the feature sections.
 - ✅ `GLOSSARY.md` — domain terms (incl. SAM2, CGAL, …) with links; linked across the repo.
 - 📋 Extend all three as new papers/tools/terms are surveyed (§12).
+
+## 28. `3d init` — project scaffolder + project registry
+- 📋 **`3d init [path]`** — fully sets up a new `3d` project in one command:
+  - **git** — `git init` if not already a repo; a sensible `.gitignore` (libs/, .venv, previews/
+    scratch, etc.).
+  - **`3d.yaml`** (§5) — project config (name, units, printer, default material, bed) from
+    answers/flags.
+  - **directory skeleton** — `parts/`, `references/`, `previews/`, `docs/`, `verify/` as applicable.
+  - **MCP** — write `.mcp.json` wiring the `openscad` MCP server (and any others).
+  - **skills** — install/link the `openscad` (and related) skills into `.claude/skills/`.
+  - **git hooks** — pre-commit (lint/format/typecheck + the relevant `3d` gates) per `docs/rules/`.
+  - **agents docs** — generate `AGENTS.md` and a `CLAUDE.md` **symlink** → `AGENTS.md`.
+  - **register the project** in `~/.config/3d-cli/projects.{toml,json}` so `3d web` (§9) lists it.
+- 📋 **Three input modes, one implementation:**
+  - **interactive** (TTY) — prompt one question at a time (printer, material, dimensions, which
+    pieces to scaffold).
+  - **no-TTY / non-interactive** — `--no-input`/`--yes`: everything from flags + defaults (CI, agents).
+  - **combined** — flags pre-fill some answers; prompt only for the rest (skip when `--no-input`).
+  - Flags mirror every prompt: `--name --printer --material --units --bed --git/--no-git
+    --mcp/--no-mcp --skills/--no-skills --hooks/--no-hooks`, etc. **Idempotent** — re-running on an
+    existing project tops up missing pieces without clobbering.
+- 📋 **`3d projects list|add <path>|remove <path>`** — manage the registry that `3d init` writes and
+  `3d web` reads (replaces the single web root, §9).
 
 ---
 
