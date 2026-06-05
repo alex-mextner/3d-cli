@@ -94,38 +94,42 @@ def manifold() -> str:
 
 
 def section() -> str:
-    """Gear cut by a plane, cut face showing internal teeth."""
+    """Torus (donut) cut by a plane, showing the hollow cross-section."""
     svg = f"""<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
   <rect width="1024" height="1024" fill="{BG}"/>
-  <!-- Gear body -->
+  <!-- Torus viewed from side, cut by a vertical plane -->
   <g transform="translate(512, 420)">
-    <!-- Outer gear ring (front) -->
-    <circle cx="0" cy="0" r="220" fill="none" stroke="{DARK}" stroke-width="4"/>
-    <circle cx="0" cy="0" r="140" fill="none" stroke="{DARK}" stroke-width="4"/>
-    <!-- Teeth (front) -->
-    <circle cx="0" cy="0" r="240" fill="none" stroke="{DARK}" stroke-width="3" stroke-dasharray="18,12"/>
-    <!-- Cut plane -->
-    <line x1="-300" y1="0" x2="300" y2="0" stroke="{TERRACOTTA}" stroke-width="4" stroke-dasharray="15,8"/>
-    <text x="0" y="-280" font-size="32" text-anchor="middle" fill="{TERRACOTTA}" font-family="sans-serif">cut plane</text>
-    <!-- Cross-section (highlighted cut face) -->
+    <!-- Outer ring of the torus -->
+    <ellipse cx="0" cy="0" rx="260" ry="100" fill="none" stroke="{DARK}" stroke-width="4"/>
+    <!-- Inner ring (the hole) -->
+    <ellipse cx="0" cy="0" rx="140" ry="40" fill="none" stroke="{DARK}" stroke-width="4"/>
+    <!-- The cut plane -->
+    <line x1="0" y1="-150" x2="0" y2="150" stroke="{TERRACOTTA}" stroke-width="4" stroke-dasharray="15,8"/>
+    <text x="30" y="-120" font-size="32" text-anchor="start" fill="{TERRACOTTA}" font-family="sans-serif">cut plane</text>
+    <!-- Cross-section: two concentric circles (the cut face) -->
     <g transform="translate(0, 0)">
-      <!-- Outer ring section -->
-      <rect x="-240" y="-30" width="480" height="60" fill="{HIGHLIGHT}" opacity="0.7" stroke="{DARK}" stroke-width="2"/>
-      <!-- Teeth section (wider) -->
-      <rect x="-260" y="-40" width="520" height="80" fill="{HIGHLIGHT}" opacity="0.5" stroke="{DARK}" stroke-width="2"/>
-      <!-- Inner ring section -->
-      <rect x="-140" y="-20" width="280" height="40" fill="{SAGE}" opacity="0.6" stroke="{DARK}" stroke-width="2"/>
-      <!-- Shaft hole section -->
-      <rect x="-50" y="-15" width="100" height="30" fill="{BG}" opacity="0.9" stroke="{DARK}" stroke-width="2"/>
+      <!-- Outer circle of the cross-section -->
+      <circle cx="0" cy="0" r="80" fill="{HIGHLIGHT}" opacity="0.7" stroke="{DARK}" stroke-width="3"/>
+      <!-- Inner circle (the hole) -->
+      <circle cx="0" cy="0" r="40" fill="{BG}" opacity="0.9" stroke="{DARK}" stroke-width="3"/>
+      <!-- Hatching to show the solid material -->
+      <line x1="-70" y1="-30" x2="-50" y2="-30" stroke="{DARK}" stroke-width="1" opacity="0.4"/>
+      <line x1="-70" y1="-10" x2="-50" y2="-10" stroke="{DARK}" stroke-width="1" opacity="0.4"/>
+      <line x1="-70" y1="10" x2="-50" y2="10" stroke="{DARK}" stroke-width="1" opacity="0.4"/>
+      <line x1="-70" y1="30" x2="-50" y2="30" stroke="{DARK}" stroke-width="1" opacity="0.4"/>
+      <line x1="50" y1="-30" x2="70" y2="-30" stroke="{DARK}" stroke-width="1" opacity="0.4"/>
+      <line x1="50" y1="-10" x2="70" y2="-10" stroke="{DARK}" stroke-width="1" opacity="0.4"/>
+      <line x1="50" y1="10" x2="70" y2="10" stroke="{DARK}" stroke-width="1" opacity="0.4"/>
+      <line x1="50" y1="30" x2="70" y2="30" stroke="{DARK}" stroke-width="1" opacity="0.4"/>
     </g>
     <!-- Labels -->
-    <text x="320" y="-10" font-size="28" text-anchor="start" fill="{DARK}" font-family="sans-serif">teeth</text>
-    <text x="160" y="-10" font-size="28" text-anchor="start" fill="{DARK}" font-family="sans-serif">body</text>
-    <text x="0" y="-60" font-size="28" text-anchor="middle" fill="{DARK}" font-family="sans-serif">shaft hole</text>
+    <text x="180" y="-10" font-size="28" text-anchor="start" fill="{DARK}" font-family="sans-serif">outer wall</text>
+    <text x="-90" y="0" font-size="24" text-anchor="middle" fill="{DARK}" font-family="sans-serif">hollow</text>
+    <text x="180" y="80" font-size="28" text-anchor="start" fill="{DARK}" font-family="sans-serif">inner wall</text>
   </g>
   <!-- Title -->
   <text x="512" y="850" font-size="48" text-anchor="middle" fill="{DARK}" font-family="sans-serif">Cross-Section</text>
-  <text x="512" y="910" font-size="32" text-anchor="middle" fill="{DARK}" font-family="sans-serif">Cut plane reveals internal teeth</text>
+  <text x="512" y="910" font-size="32" text-anchor="middle" fill="{DARK}" font-family="sans-serif">Cut plane reveals the hollow interior</text>
 </svg>"""
     return svg
 
