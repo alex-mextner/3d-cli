@@ -465,7 +465,10 @@ The CLI work now has its own repo and this ROADMAP as the single source. Pick up
 **State at handoff (2026-06-05):**
 - ✅ Foundation (python registry CLI, errors, 54 tests, mypy clean) — on `main`.
 - ✅ Research extended + `3d-cli-backlog.md` (in `garage-band`, see §17).
-- ✅ ROADMAP §0–§23 + `docs/specs/2026-06-05-3d-cli-architecture.md` — on `main`.
+- ✅ ROADMAP §0–§21 + `docs/specs/2026-06-05-3d-cli-architecture.md` — on `main`.
+- 📋 **MERGE FIRST**: `docs/roadmap-finalize` (this §0a/§22/§23 + handoff + `docs/rules/`) and
+   `docs/strip-local-paths` are pushed but NOT yet on `main` (the web agent occupied `main` at
+   handoff). Merge both into `main` before anything else, then re-read this ROADMAP from `main`.
 - 🔨 **Web dashboard integration** — a background agent was bringing `lib/web/` into the new registry
    (uncommitted in the `main` working tree at handoff); the NEXT session must verify it committed +
    pushed, or finish it. It used the wrong config dir (`~/.config/3d/`) — fix per §23.
