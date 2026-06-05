@@ -419,6 +419,10 @@ def _parse_metric(raw: str) -> float:
     s = raw.strip()
     if not s:
         raise MagickError("compare produced no metric output")
+    # IM6 sometimes prefixes the line with the tool name, e.g. "convert-im6.q16: (0.12)".
+    # Strip any leading "tool:" prefix before parsing.
+    if ":" in s and not s.startswith("("):
+        s = s.split(":", 1)[-1].strip()
     m = re.search(r"\(([-+0-9.eE]+)\)", s)
     if m:
         return float(m.group(1))
