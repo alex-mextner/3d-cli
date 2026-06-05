@@ -41,7 +41,7 @@ parametric `bracket.scad`, then let the CLI match it to the photo and verify it 
 3d fit-camera bracket.scad photo.jpg --out camera.json --draw-axes
 
 # 2. Match loop: nudge parameters until silhouette matches the photo
-3d match bracket.scad photo.jpg --rounds 10 --cam "$(jq -r .camera_arg camera.json)"
+3d match bracket.scad photo.jpg --rounds 10 --ortho --cam "$(jq -r .camera_arg camera.json)"
 
 # 3. Verify the result is manifold and printable
 3d check bracket.scad --mesh --printability
@@ -85,10 +85,10 @@ pose, then an AI agent iteratively adjusts the model.
 3d fit-camera replica.scad work/mask.png --out camera.json
 
 # 3. Agent-driven match loop (dry-run to test the pipeline first)
-3d match replica.scad work/mask.png --rounds 5 --dry-run --cam "$(jq -r .camera_arg camera.json)"
+3d match replica.scad work/mask.png --rounds 5 --dry-run --ortho --cam "$(jq -r .camera_arg camera.json)"
 
 # 4. Run the real loop with an LLM critic
-3d match replica.scad work/mask.png --rounds 15 --cam "$(jq -r .camera_arg camera.json)"
+3d match replica.scad work/mask.png --rounds 15 --ortho --cam "$(jq -r .camera_arg camera.json)"
 ```
 
 ### 4. CI gate — every commit must be printable
