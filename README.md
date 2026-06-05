@@ -4,13 +4,13 @@
 parametric modeling (OpenSCAD-first) → render & view → mesh / printability / collision
 verification → reference-photo matching → slicing & print prep. It is **engineering-first**
 today (functional parts, fits, gates) and grows toward art later. Everything is one
-discoverable dispatcher: `3d <command>`, scriptable, composable, with structured errors
-instead of bare tracebacks.
+discoverable dispatcher: `3d <command>`, scriptable, composable, with structured, actionable
+errors (what failed, why, and the exact fix).
 
-It works on **any** 3D FDM project, not a specific one. One of the pipelines it ships is a
+It is **general-purpose** across 3D FDM work. One of the pipelines it ships is a
 **reference-photo match loop** (camera-locked render → silhouette score → LLM numeric-delta
-edits → manifold/printability gates → accept-only-if-it-improves). That is *one example
-workflow* — see [Reference-match pipeline](#reference-match-pipeline) — not the headline.
+edits → manifold/printability gates → accept-only-if-it-improves) — see
+[Reference-match pipeline](#reference-match-pipeline) — one example workflow among many.
 
 ## Install
 

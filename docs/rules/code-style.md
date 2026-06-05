@@ -55,3 +55,14 @@ to reach for it — and (b) a **concrete example** invocation. Never ship a bare
 axes", "set color"). A flag's `--help`, the README, and the ROADMAP all hold to this. Explain domain
 terms at first mention with a `GLOSSARY.md` link. A help entry with no why + no example is a review
 reject, same as a missing test.
+
+## No comparisons against our own past / unstated baseline
+State what the tool DOES, affirmatively and absolutely. Never frame a capability as an improvement
+over the tool's OWN earlier state, an internal refactor, or any baseline the reader cannot see — the
+reader does not know the old version and the comparison is noise (worse, it leaks throwaway history).
+Banned shapes: "now works on any project, not just X", "instead of bare tracebacks", "no longer
+hardcoded", "unlike the previous version", "used to require …". Write the positive form instead:
+"works on any FDM project", "structured, actionable errors". The ONLY admissible comparison is
+against a **named, externally-known tool/standard** (e.g. "ffmpeg-style filter graph", "jq-like
+selectors") where the reference genuinely helps the reader place the feature. Applies to README,
+ROADMAP, `--help`, commit messages, and docs alike.
