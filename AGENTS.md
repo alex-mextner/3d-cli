@@ -103,6 +103,12 @@ applies: robust binary discovery on PATH + macOS app bundles, clear errors with 
 install command, graceful degrade — never a silent false PASS. `cli/env.py` is the home
 for tool discovery + the OS/install table.)
 
+### Help text sync
+Help text must be in sync between `lib/commands/<name>.py` (the `--help` USAGE string)
+and `docs/commands/<name>.md` (the doc fragment). Every flag/option must have a concrete
+example in both places. When a command's surface changes, both files must be updated in
+the same commit.
+
 ### First-run bootstrap
 On ANY `3d` invocation, if `~/.config/3d/.bootstrapped` is absent, the dispatcher
 auto-installs the OpenSCAD libraries (BOSL2, NopSCADlib) into the repo `libs/` ONCE,
