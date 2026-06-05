@@ -213,3 +213,53 @@ def test_user_reads_an_ai_prompt_bundle_as_plain_text(tmp_path: Path) -> None:
     assert f"3d params {CUBE} --json" in result.stdout
     assert "No network call has been made" in result.stdout
     assert "Traceback" not in result.stderr
+
+
+def test_user_plans_animation_frames_before_rendering(tmp_path: Path) -> None:
+    """Animation planning shows exactly which render commands will run."""
+    outdir = tmp_path / "frames"
+    result = _run_3d(
+        tmp_path,
+        "animate",
+        str(CUBE),
+        "--plan",
+        "--frames",
+        "3",
+        "--view",
+        "front",
+        "--size",
+        "640x480",
+        "--outdir",
+        str(outdir),
+        "-D",
+        "spin=0:180",
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["model"] == str(CUBE)
+    assert payload["outdir"] == str(outdir)
+    frames = payload["frames"]
+    assert [frame["index"] for frame in frames] == [0, 1, 2]
+    assert [frame["defines"] for frame in frames] == [["spin=0"], ["spin=90"], ["spin=180"]]
+    assert frames[0]["render_argv"] == [
+        str(CUBE),
+        "--view",
+        "front",
+        "-o",
+        str(outdir / "frame_0000.png"),
+        "--size",
+        "640x480",
+        "-D",
+        "spin=0",
+    ]
+    assert "Traceback" not in result.stderr
+
+
+def test_user_gets_animation_usage_when_model_is_missing(tmp_path: Path) -> None:
+    """Animate without a model stays readable and does not touch render tools."""
+    result = _run_3d(tmp_path, "animate")
+
+    assert result.returncode == 1
+    assert "3d animate <file.scad>" in result.stdout
+    assert "Traceback" not in result.stderr

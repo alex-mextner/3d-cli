@@ -32,6 +32,7 @@ compatibility wrappers.
 These modules are the current root-level implementation tools for model processing,
 rendering, slicing support, and verification:
 
+- `animation.py`
 - `collision_check.py`
 - `collision_viz.py`
 - `fit_camera.py`
@@ -99,6 +100,7 @@ to a dedicated resources package.
 Every current root Python module is listed here so future additions are intentional:
 
 - `ai_tools.py` — offline AI-assist prompt bundle construction.
+- `animation.py` — deterministic render frame planning.
 - `collision_check.py` — geometry / collision check implementation.
 - `collision_viz.py` — geometry / collision visualization implementation.
 - `config.py` — project and CLI configuration helpers.

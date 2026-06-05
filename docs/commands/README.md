@@ -14,6 +14,7 @@ explain why the command exists, what its inputs mean, and how it fits into the l
 
 | Command | Doc | Role |
 |---|---|---|
+| `animate` | [animate.md](animate.md) | Generate deterministic render frame plans or PNG frame sequences. |
 | `render` | [render.md](render.md) | [CGAL](GLOSSARY.md#cgal) render, named views, multi-render, and cross-sections. |
 | `preview` | [preview.md](preview.md) | Fast throwntogether preview, no CGAL render. |
 | `multi` | [multi.md](multi.md) | Thin compatibility wrapper for `render --multi`. |
