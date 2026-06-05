@@ -21,7 +21,7 @@ edits → [manifold](GLOSSARY.md#manifold)/printability gates → accept-only-if
 - **Reference-photo match** — tune a parametric model to match a photo (one pipeline among many)
 - **Design from scratch with AI** — text-to-3d, dimensions-and-sketch-to-3d, parametric skeleton generation
 - **Parts & fixtures** — design brackets, mounts, connectors, enclosures with parametric constraints
-- **Animation & motion** — `3d animate`, kinematics, motion verification
+- **Animation & motion** — kinematics, motion verification (planned)
 - **Simulation & analysis** — FEA, strength, thermal, collision detection
 - **Format conversion & AR** — export to USDZ/GLB/STEP, view in AR
 - **Slicing & print monitoring** — slice to G-code, monitor prints, failure recovery
@@ -41,7 +41,7 @@ parametric `bracket.scad`, then let the CLI match it to the photo and verify it 
 3d fit-camera bracket.scad photo.jpg --out camera.json --draw-axes
 
 # 2. Match loop: nudge parameters until silhouette matches the photo
-3d match bracket.scad photo.jpg --rounds 10 --camera camera.json
+3d match bracket.scad photo.jpg --rounds 10 --cam "$(jq -r .camera_arg camera.json)"
 
 # 3. Verify the result is manifold and printable
 3d check bracket.scad --mesh --printability
@@ -85,10 +85,10 @@ pose, then an AI agent iteratively adjusts the model.
 3d fit-camera replica.scad work/mask.png --out camera.json
 
 # 3. Agent-driven match loop (dry-run to test the pipeline first)
-3d match replica.scad work/mask.png --rounds 5 --dry-run --camera camera.json
+3d match replica.scad work/mask.png --rounds 5 --dry-run --cam "$(jq -r .camera_arg camera.json)"
 
 # 4. Run the real loop with an LLM critic
-3d match replica.scad work/mask.png --rounds 15 --camera camera.json
+3d match replica.scad work/mask.png --rounds 15 --cam "$(jq -r .camera_arg camera.json)"
 ```
 
 ### 4. CI gate — every commit must be printable
@@ -156,7 +156,9 @@ or `make`.
 
 ```bash
 # Render two parts simultaneously, then compare them
-(3d render part-a.scad --view iso -o a.png & 3d render part-b.scad --view iso -o b.png) && 3d compare a.png b.png
+3d render part-a.scad --view iso -o a.png & PID1=$!
+3d render part-b.scad --view iso -o b.png & PID2=$!
+wait $PID1 $PID2 && 3d compare a.png b.png
 ```
 
 ## Using 3d with AI agents
@@ -253,8 +255,8 @@ when one is missing; `brew`/`apt`/`winget`):
 | [ImageMagick](https://imagemagick.org) | silhouette / overlay / score image diffs | required for the match pipeline |
 | `python3` + [`uv`](https://docs.astral.sh/uv) | runtime for the python subcommands; `uv` resolves their deps per call (no global installs) | **required** (`uv` recommended) |
 | a [slicer](GLOSSARY.md#slicer) — [OrcaSlicer](https://github.com/SoftFever/OrcaSlicer) / [Bambu Studio](https://bambulab.com/en/download/studio) / [PrusaSlicer](https://www.prusa3d.com/page/prusaslicer_424/) | G-code export & sliceability gate (`3d slice`) | optional |
-| [ffmpeg](GLOSSARY.md#ffmpeg) | animation / report video export (`3d animate`, `3d report`) | optional |
-| [Blender](GLOSSARY.md#blender) | photoreal render (`3d render --photo`) — installed on demand, not bootstrapped | optional |
+| [ffmpeg](GLOSSARY.md#ffmpeg) | video export and animation pipelines | optional |
+| [Blender](GLOSSARY.md#blender) | photoreal render (planned) — installed on demand, not bootstrapped | optional |
 
 **Python packages** — resolved automatically by `uv`/`.venv`; you normally never install these by
 hand. Only the heavyweight ones worth knowing about:
@@ -353,7 +355,7 @@ selection flags it runs ALL applicable gates; selectors run a subset; `--skip` e
 | `3d check … --skip GATE` | exclude a gate (`manifold\|consistency\|printability\|collision\|silhouette`). |
 | `3d check … --collision cfg.json` / `--ref img` | supply data; the collision/silhouette gate then runs (never narrows the core set). |
 | `3d acceptance <assembly.scad>` | back-compat alias for `check` (all gates). |
-| `3d mesh <file.stl\|.scad>` | watertight / manifold / self-intersection / volume (trimesh + open3d/manifold3d; falls back to openscad warnings). |
+| `3d mesh <file.stl|3mf|.scad>` | watertight / manifold / self-intersection / volume (trimesh + open3d/manifold3d; falls back to openscad warnings). |
 | `3d printability <file.scad>` | wall / min-feature / overhang / orientation (FDM, PLA/PETG). |
 | `3d collision <config.json>` | generic collision/penetration engine (static / `--frame` / `--viz`). |
 | `3d lint [--all \| paths...]` | advisory repository lint rules. |
@@ -381,7 +383,7 @@ resolved relative to the config file's directory.
 Match a parametric model to a reference photo by viewpoint and silhouette, for when you have a
 photo of a real object and want a printable part with the same proportions and pose.
 
-> You photograph a bracket, write a rough parametric `bracket.scad`, then `3d [fit-camera](GLOSSARY.md#fit-camera)` locks
+> You photograph a bracket, write a rough parametric `bracket.scad`, then `3d fit-camera` locks
 the camera to the photo and `3d match` nudges the parameters until the rendered silhouette
 matches the photo — keeping only edits that raise the silhouette [IoU](GLOSSARY.md#iou) and stay manifold.
 
@@ -392,7 +394,7 @@ matches the photo — keeping only edits that raise the silhouette [IoU](GLOSSAR
 | `3d score <render.png\|file.scad> <reference>` | silhouette [AE](GLOSSARY.md#ae) + IoU (machine-parseable `KEY=VALUE` lines). |
 | `3d match <assembly.scad> <reference>` | forced-monotonic acceptance loop (render→score→critic→apply→accept/revert + changelog). |
 | `3d fit-camera <model.scad> <reference>` | fit an OpenSCAD camera to a reference photo by maximizing silhouette IoU; **saves the viewpoint** + a fit render + an overlay. |
-| `3d preprocess <reference.jpg>` | subject mask + proportional depth ([SAM2](GLOSSARY.md#sam2)/[Depth-Anything](GLOSSARY.md#depth-anything) if installable, else [OpenCV](GLOSSARY.md#opencv). |
+| `3d preprocess <reference.jpg>` | subject mask + proportional depth ([SAM2](GLOSSARY.md#sam2)/[Depth-Anything](GLOSSARY.md#depth-anything) if installable, else [OpenCV](GLOSSARY.md#opencv) fallback). |
 | `3d compare <model.scad\|render.png> <reference.jpg>` | segmented model/reference comparison with IoU + SSIM/DSSIM and artifacts. |
 
 ```bash
@@ -438,11 +440,11 @@ smoke-test the machinery.
 
 | Command | What |
 |---|---|
-| `3d slice <stl\|3mf\|file.scad>` | slice to G-code via the installed slicer; **`--check` = sliceability gate** (nonzero exit on failure). |
+| `3d slice <stl|3mf|file.scad>` | slice to G-code via the installed slicer; **`--dry-run` = sliceability gate** (nonzero exit on failure). |
 
 ```bash
 3d slice part.stl -o part.gcode
-3d slice part.scad --check                          # .scad → STL → slice, gate only
+3d slice part.scad --dry-run                          # .scad → STL → slice, gate only
 3d slice part.3mf --profile "machine.json,process.json" --printer "Bambu Lab A1"
 ```
 
@@ -454,7 +456,7 @@ heritage but the CLIs **diverged**, so each gets its own invocation: PrusaSlicer
 is relocated to your `-o` path). Those core flags are the verified part of the contract;
 `--printer` is **best-effort** (no single agreed printer-preset flag exists across the three
 — it routes through the profile-load mechanism, so prefer `--profile` for control).
-`--check` slices as a pass/fail oracle and discards the G-code. A `.scad` input is exported
+`--dry-run` slices as a pass/fail oracle and discards the G-code. `--check` is a deprecated alias. A `.scad` input is exported
 to STL first via `3d export`. If no slicer is installed, `3d slice` fails with the exact
 per-OS install command (e.g. `brew install --cask orcaslicer`) — never broken.
 
