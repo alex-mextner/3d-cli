@@ -24,6 +24,7 @@ def test_repo_root_uses_env(monkeypatch: Any) -> None:
 def test_export_openscadpath_skips_when_no_libs(monkeypatch: Any) -> None:
     monkeypatch.setattr(env, "_REPO_ROOT", None)
     monkeypatch.setenv("REPO_ROOT", "/tmp/repo")
+    monkeypatch.delenv("OPENSCADPATH", raising=False)
     monkeypatch.setattr("os.path.isdir", lambda p: False)
     env.export_openscadpath()
     assert "OPENSCADPATH" not in os.environ

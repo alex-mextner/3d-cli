@@ -94,46 +94,45 @@ def manifold() -> str:
 
 
 def section() -> str:
-    """Engineering cross-section: side view with cutting plane A-A, and section view below with hatched cut face."""
+    """Cube with a hemispherical cavity, cut by a plane, showing the cross-section."""
     svg = f"""<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
   <rect width="1024" height="1024" fill="{BG}"/>
   
-  <!-- SIDE VIEW: L-bracket profile with cutting plane -->
-  <g transform="translate(512, 220)">
-    <text x="0" y="-120" font-size="32" text-anchor="middle" fill="{DARK}" font-family="sans-serif">Side View</text>
-    <!-- L-bracket: horizontal flange + vertical web -->
-    <!-- Horizontal flange (top) -->
-    <rect x="-120" y="-40" width="240" height="40" fill="none" stroke="{DARK}" stroke-width="3"/>
-    <!-- Vertical web (left) -->
-    <rect x="-140" y="-40" width="40" height="160" fill="none" stroke="{DARK}" stroke-width="3"/>
-    <!-- Hole in flange -->
-    <circle cx="60" cy="-20" r="10" fill="none" stroke="{DARK}" stroke-width="2"/>
-    <!-- Hole in web -->
-    <circle cx="-120" cy="60" r="8" fill="none" stroke="{DARK}" stroke-width="2"/>
+  <!-- SIDE VIEW: cube with hidden spherical cavity and cutting plane -->
+  <g transform="translate(300, 420)">
+    <text x="0" y="-180" font-size="32" text-anchor="middle" fill="{DARK}" font-family="sans-serif">Side View</text>
+    <!-- Cube outline -->
+    <rect x="-100" y="-100" width="200" height="200" fill="none" stroke="{DARK}" stroke-width="3"/>
+    <!-- Hidden spherical cavity (hidden lines) -->
+    <circle cx="0" cy="-20" r="60" fill="none" stroke="{DARK}" stroke-width="2" stroke-dasharray="6,4"/>
     <!-- Cutting plane line A-A -->
-    <line x1="0" y1="-100" x2="0" y2="140" stroke="{TERRACOTTA}" stroke-width="3" stroke-dasharray="12,6"/>
+    <line x1="0" y1="-140" x2="0" y2="140" stroke="{TERRACOTTA}" stroke-width="3" stroke-dasharray="12,6"/>
     <!-- A-A label -->
-    <text x="15" y="-90" font-size="24" text-anchor="start" fill="{TERRACOTTA}" font-family="sans-serif">A-A</text>
-    <!-- Direction arrows (looking down at section) -->
-    <polygon points="-12,-90 0,-100 12,-90" fill="none" stroke="{TERRACOTTA}" stroke-width="2"/>
+    <text x="15" y="-130" font-size="24" text-anchor="start" fill="{TERRACOTTA}" font-family="sans-serif">A-A</text>
+    <!-- Direction arrows -->
+    <polygon points="-12,-130 0,-140 12,-130" fill="none" stroke="{TERRACOTTA}" stroke-width="2"/>
     <polygon points="-12,130 0,140 12,130" fill="none" stroke="{TERRACOTTA}" stroke-width="2"/>
+    <!-- Labels -->
+    <text x="-90" y="-120" font-size="20" text-anchor="start" fill="{DARK}" font-family="sans-serif">cube</text>
+    <text x="70" y="-20" font-size="20" text-anchor="start" fill="{DARK}" font-family="sans-serif">cavity</text>
   </g>
 
-  <!-- SECTION VIEW A-A: looking at the cut face -->
-  <g transform="translate(512, 620)">
-    <text x="0" y="-160" font-size="32" text-anchor="middle" fill="{DARK}" font-family="sans-serif">Section View A-A</text>
-    <!-- Section outline: flange + web -->
-    <!-- Flange cross-section (horizontal bar) -->
-    <rect x="-120" y="-80" width="240" height="40" fill="{HIGHLIGHT}" opacity="0.3" stroke="{DARK}" stroke-width="3"/>
-    <!-- Web cross-section (vertical bar) -->
-    <rect x="-140" y="-80" width="40" height="160" fill="{HIGHLIGHT}" opacity="0.3" stroke="{DARK}" stroke-width="3"/>
-    <!-- Hole in flange (seen from section) -->
-    <circle cx="60" cy="-60" r="10" fill="{BG}" stroke="{DARK}" stroke-width="2"/>
-    <!-- Hole in web (seen from section) -->
-    <circle cx="-120" cy="60" r="8" fill="{BG}" stroke="{DARK}" stroke-width="2"/>
-    <!-- HATCHING: 45° lines on cut faces -->
-    <!-- Hatching for flange -->
-    <line x1="-110" y1="-70" x2="-90" y2="-50" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+  <!-- SECTION VIEW A-A: cube cut through center showing hemispherical cavity -->
+  <g transform="translate(724, 420)">
+    <text x="0" y="-180" font-size="32" text-anchor="middle" fill="{DARK}" font-family="sans-serif">Section View A-A</text>
+    <!-- Cube cross-section (hatched solid material) -->
+    <rect x="-100" y="-100" width="200" height="200" fill="{HIGHLIGHT}" opacity="0.3" stroke="{DARK}" stroke-width="3"/>
+    <!-- HATCHING: 45° lines on cut face -->
+    <line x1="-90" y1="-90" x2="-70" y2="-70" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <line x1="-70" y1="-90" x2="-50" y2="-70" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <line x1="-50" y1="-90" x2="-30" y2="-70" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <line x1="-30" y1="-90" x2="-10" y2="-70" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <line x1="-10" y1="-90" x2="10" y2="-70" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <line x1="10" y1="-90" x2="30" y2="-70" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <line x1="30" y1="-90" x2="50" y2="-70" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <line x1="50" y1="-90" x2="70" y2="-70" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <line x1="70" y1="-90" x2="90" y2="-70" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <line x1="90" y1="-90" x2="110" y2="-70" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
     <line x1="-90" y1="-70" x2="-70" y2="-50" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
     <line x1="-70" y1="-70" x2="-50" y2="-50" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
     <line x1="-50" y1="-70" x2="-30" y2="-50" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
@@ -144,73 +143,85 @@ def section() -> str:
     <line x1="50" y1="-70" x2="70" y2="-50" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
     <line x1="70" y1="-70" x2="90" y2="-50" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
     <line x1="90" y1="-70" x2="110" y2="-50" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
-    <line x1="110" y1="-70" x2="130" y2="-50" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
-    <!-- Hatching for web -->
-    <line x1="-130" y1="-70" x2="-110" y2="-50" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
-    <line x1="-130" y1="-50" x2="-110" y2="-30" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
-    <line x1="-130" y1="-30" x2="-110" y2="-10" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
-    <line x1="-130" y1="-10" x2="-110" y2="10" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
-    <line x1="-130" y1="10" x2="-110" y2="30" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
-    <line x1="-130" y1="30" x2="-110" y2="50" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
-    <line x1="-130" y1="50" x2="-110" y2="70" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
-    <line x1="-130" y1="70" x2="-110" y2="90" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
-    <line x1="-130" y1="90" x2="-110" y2="110" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
-    <line x1="-130" y1="110" x2="-110" y2="130" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
-    <line x1="-130" y1="130" x2="-110" y2="150" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
-    <line x1="-130" y1="150" x2="-110" y2="170" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
-    <line x1="-130" y1="170" x2="-110" y2="190" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
-    <line x1="-130" y1="190" x2="-110" y2="210" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
-    <line x1="-130" y1="210" x2="-110" y2="230" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
-    <line x1="-130" y1="230" x2="-110" y2="250" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
-    <line x1="-130" y1="250" x2="-110" y2="270" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
-    <line x1="-130" y1="270" x2="-110" y2="290" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
-    <line x1="-130" y1="290" x2="-110" y2="310" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
-    <line x1="-130" y1="310" x2="-110" y2="330" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
-    <line x1="-130" y1="330" x2="-110" y2="350" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
-    <line x1="-130" y1="350" x2="-110" y2="370" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
-    <line x1="-130" y1="370" x2="-110" y2="390" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
-    <line x1="-130" y1="390" x2="-110" y2="410" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
-    <line x1="-130" y1="410" x2="-110" y2="430" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
-    <line x1="-130" y1="430" x2="-110" y2="450" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
-    <line x1="-130" y1="450" x2="-110" y2="470" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
-    <line x1="-130" y1="470" x2="-110" y2="490" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
-    <line x1="-130" y1="490" x2="-110" y2="510" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
-    <line x1="-130" y1="510" x2="-110" y2="530" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
-    <line x1="-130" y1="530" x2="-110" y2="550" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
-    <line x1="-130" y1="550" x2="-110" y2="570" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
-    <line x1="-130" y1="570" x2="-110" y2="590" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
-    <line x1="-130" y1="590" x2="-110" y2="610" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
-    <line x1="-130" y1="610" x2="-110" y2="630" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
-    <line x1="-130" y1="630" x2="-110" y2="650" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
-    <line x1="-130" y1="650" x2="-110" y2="670" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
-    <line x1="-130" y1="670" x2="-110" y2="690" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
-    <line x1="-130" y1="690" x2="-110" y2="710" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
-    <line x1="-130" y1="710" x2="-110" y2="730" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
-    <line x1="-130" y1="730" x2="-110" y2="750" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
-    <line x1="-130" y1="750" x2="-110" y2="770" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
-    <line x1="-130" y1="770" x2="-110" y2="790" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
-    <line x1="-130" y1="790" x2="-110" y2="810" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
-    <line x1="-130" y1="810" x2="-110" y2="830" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
-    <line x1="-130" y1="830" x2="-110" y2="850" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
-    <line x1="-130" y1="850" x2="-110" y2="870" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
-    <line x1="-130" y1="870" x2="-110" y2="890" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
-    <line x1="-130" y1="890" x2="-110" y2="910" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
-    <line x1="-130" y1="910" x2="-110" y2="930" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
-    <line x1="-130" y1="930" x2="-110" y2="950" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
-    <line x1="-130" y1="950" x2="-110" y2="970" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
-    <line x1="-130" y1="970" x2="-110" y2="990" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
-    <line x1="-130" y1="990" x2="-110" y2="1010" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
-    <line x1="-130" y1="1010" x2="-110" y2="1030" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
-    <line x1="-130" y1="1030" x2="-110" y2="1050" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <line x1="-90" y1="-50" x2="-70" y2="-30" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <line x1="-70" y1="-50" x2="-50" y2="-30" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <line x1="-50" y1="-50" x2="-30" y2="-30" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <line x1="-30" y1="-50" x2="-10" y2="-30" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <line x1="-10" y1="-50" x2="10" y2="-30" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <line x1="10" y1="-50" x2="30" y2="-30" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <line x1="30" y1="-50" x2="50" y2="-30" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <line x1="50" y1="-50" x2="70" y2="-30" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <line x1="70" y1="-50" x2="90" y2="-30" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <line x1="90" y1="-50" x2="110" y2="-30" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <line x1="-90" y1="-30" x2="-70" y2="-10" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <line x1="-70" y1="-30" x2="-50" y2="-10" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <line x1="-50" y1="-30" x2="-30" y2="-10" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <line x1="-30" y1="-30" x2="-10" y2="-10" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <line x1="-10" y1="-30" x2="10" y2="-10" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <line x1="10" y1="-30" x2="30" y2="-10" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <line x1="30" y1="-30" x2="50" y2="-10" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <line x1="50" y1="-30" x2="70" y2="-10" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <line x1="70" y1="-30" x2="90" y2="-10" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <line x1="90" y1="-30" x2="110" y2="-10" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <line x1="-90" y1="-10" x2="-70" y2="10" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <line x1="-70" y1="-10" x2="-50" y2="10" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <line x1="-50" y1="-10" x2="-30" y2="10" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <line x1="-30" y1="-10" x2="-10" y2="10" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <line x1="-10" y1="-10" x2="10" y2="10" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <line x1="10" y1="-10" x2="30" y2="10" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <line x1="30" y1="-10" x2="50" y2="10" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <line x1="50" y1="-10" x2="70" y2="10" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <line x1="70" y1="-10" x2="90" y2="10" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <line x1="90" y1="-10" x2="110" y2="10" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <line x1="-90" y1="10" x2="-70" y2="30" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <line x1="-70" y1="10" x2="-50" y2="30" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <line x1="-50" y1="10" x2="-30" y2="30" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <line x1="-30" y1="10" x2="-10" y2="30" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <line x1="-10" y1="10" x2="10" y2="30" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <line x1="10" y1="10" x2="30" y2="30" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <line x1="30" y1="10" x2="50" y2="30" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <line x1="50" y1="10" x2="70" y2="30" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <line x1="70" y1="10" x2="90" y2="30" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <line x1="90" y1="10" x2="110" y2="30" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <line x1="-90" y1="30" x2="-70" y2="50" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <line x1="-70" y1="30" x2="-50" y2="50" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <line x1="-50" y1="30" x2="-30" y2="50" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <line x1="-30" y1="30" x2="-10" y2="50" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <line x1="-10" y1="30" x2="10" y2="50" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <line x1="10" y1="30" x2="30" y2="50" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <line x1="30" y1="30" x2="50" y2="50" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <line x1="50" y1="30" x2="70" y2="50" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <line x1="70" y1="30" x2="90" y2="50" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <line x1="90" y1="30" x2="110" y2="50" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <line x1="-90" y1="50" x2="-70" y2="70" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <line x1="-70" y1="50" x2="-50" y2="70" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <line x1="-50" y1="50" x2="-30" y2="70" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <line x1="-30" y1="50" x2="-10" y2="70" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <line x1="-10" y1="50" x2="10" y2="70" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <line x1="10" y1="50" x2="30" y2="70" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <line x1="30" y1="50" x2="50" y2="70" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <line x1="50" y1="50" x2="70" y2="70" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <line x1="70" y1="50" x2="90" y2="70" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <line x1="90" y1="50" x2="110" y2="70" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <line x1="-90" y1="70" x2="-70" y2="90" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <line x1="-70" y1="70" x2="-50" y2="90" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <line x1="-50" y1="70" x2="-30" y2="90" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <line x1="-30" y1="70" x2="-10" y2="90" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <line x1="-10" y1="70" x2="10" y2="90" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <line x1="10" y1="70" x2="30" y2="90" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <line x1="30" y1="70" x2="50" y2="90" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <line x1="50" y1="70" x2="70" y2="90" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <line x1="70" y1="70" x2="90" y2="90" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <line x1="90" y1="70" x2="110" y2="90" stroke="{DARK}" stroke-width="1" opacity="0.35"/>
+    <!-- Hemispherical cavity (unhatched, filled with background color) -->
+    <path d="M -60,-80 A 60,60 0 0,1 60,-80 Z" fill="{BG}" stroke="{DARK}" stroke-width="2"/>
     <!-- Labels -->
-    <text x="0" y="120" font-size="24" text-anchor="middle" fill="{DARK}" font-family="sans-serif">cut face</text>
-    <text x="-130" y="120" font-size="24" text-anchor="start" fill="{DARK}" font-family="sans-serif">hatching</text>
-    <text x="60" y="-30" font-size="20" text-anchor="middle" fill="{DARK}" font-family="sans-serif">hole</text>
-    <text x="-120" y="90" font-size="20" text-anchor="middle" fill="{DARK}" font-family="sans-serif">hole</text>
+    <text x="0" y="130" font-size="24" text-anchor="middle" fill="{DARK}" font-family="sans-serif">hemispherical cavity</text>
+    <text x="0" y="160" font-size="20" text-anchor="middle" fill="{DARK}" font-family="sans-serif">cut face hatched</text>
   </g>
   <!-- Title -->
   <text x="512" y="920" font-size="48" text-anchor="middle" fill="{DARK}" font-family="sans-serif">Cross-Section</text>
-  <text x="512" y="970" font-size="28" text-anchor="middle" fill="{DARK}" font-family="sans-serif">Cut face is hatched to show solid material</text>
+  <text x="512" y="970" font-size="28" text-anchor="middle" fill="{DARK}" font-family="sans-serif">Cut plane reveals hemispherical cavity inside cube</text>
 </svg>"""
     return svg
 
