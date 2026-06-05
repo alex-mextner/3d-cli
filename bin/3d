@@ -41,15 +41,17 @@ ${B}USAGE${Z}
   3d help                    this text
   3d version                 print version
 
-${B}RENDER & VIEW${Z}
-  ${C}render${Z}   <file.scad> [-o out.png] [--cam ex,ey,ez,cx,cy,cz] [--size WxH] [--ortho] [-D k=v]...
-                  CGAL (--render) PNG with a locked 6-param vector camera. Default: ISO.
+${B}RENDER & VIEW${Z}  (unified: render = single view / --multi / --section)
+  ${C}render${Z}   <file.scad> [-o out.png] [--view NAME] [--cam ex,..,cz] [--size WxH] [--ortho] [-D k=v]...
+                  Single CGAL view. --view: front|back|left|right|top|bottom|iso|3-4|
+                  front-left|front-right|rear-left|rear-right (camera from the bounding box).
+  ${C}render${Z} <file.scad> --multi [outdir] [--render]    all standard angles (async).
+  ${C}render${Z} <file.scad> --section -o out.png [--plane YZ|XZ|XY] [--color] [--keep neg|pos] [--module 'm();']
+                  True cross-section (generic STL-cut, or --color per-part assembly mode).
   ${C}preview${Z}  <file.scad> [-o out.png] [--cam ...] [--size WxH] [-D k=v]...
                   Fast throwntogether preview (no CGAL).
-  ${C}multi${Z}    <file.scad> <outdir> [--render] [-D k=v]...
-                  6-angle previews: iso/front/back/left/right/top.
-  ${C}section${Z}  <file.scad> -o out.png [--plane YZ|XZ|XY] [--module 'name();'] [--keep neg|pos] [--size WxH]
-                  Colored cross-section (6-param vector camera; never 7-param gimbal).
+  ${C}multi${Z}    <file.scad> [outdir] [--render]         alias -> render --multi
+  ${C}section${Z}  <file.scad> -o out.png [...]            alias -> render --section
 
 ${B}GEOMETRY & EXPORT${Z}
   ${C}export${Z}   <file.scad> [-o out.stl|.3mf] [-D k=v]... [--ascii]
@@ -59,12 +61,14 @@ ${B}GEOMETRY & EXPORT${Z}
   ${C}params${Z}   <file.scad> [--json]
                   Extract customizable parameters (Customizer-style comments).
 
-${B}QA & GATES${Z}
-  ${C}check${Z}        <file.scad>           manifold (--render + grep ERROR/WARNING) + quick printability. PASS/FAIL.
+${B}QA & GATES${Z}  (unified: check = the master acceptance gate)
+  ${C}check${Z}        <file.scad> [parts...] [selectors] [--skip G] [--collision cfg] [--ref img]
+                  No selectors => ALL applicable gates (manifold + consistency + printability
+                  + collision/silhouette when configured). Selectors --manifold|--mesh/
+                  --consistency/--printability run a subset; --skip excludes. PASS/FAIL.
   ${C}mesh${Z}         <file.stl|.scad>      watertight/manifold/self-intersect/volume (trimesh/manifold3d/open3d; fallback: openscad warnings).
   ${C}printability${Z} <file.scad>           wall / min-feature / overhang / orientation flags (FDM, PLA/PETG).
-  ${C}acceptance${Z}   <assembly.scad> [--ref img] [--collision cfg.json]
-                                          master gate: manifold + consistency + printability (+ collision/silhouette if configured).
+  ${C}acceptance${Z}   <assembly.scad> [...]  alias -> check (all gates).
   ${C}collision${Z}    <config.json>         generic collision/penetration engine (static).
 
 ${B}REFERENCE-MATCH PIPELINE${Z}
@@ -82,9 +86,8 @@ ${B}SLICING${Z}
                   Slice to G-code via OrcaSlicer / Bambu Studio / PrusaSlicer (auto-detected).
                   --check = sliceability gate (nonzero exit on failure). .scad is exported first.
 
-${B}LIBRARIES${Z}
-  ${C}libs install${Z} bosl2|nopscadlib|all     clone OpenSCAD libraries into libs/.
-  ${C}libs path${Z}                             print the OPENSCADPATH to export.
+${B}LIBRARIES${Z}  (BOSL2/NopSCADlib auto-install on first run; OPENSCADPATH auto-exported)
+  ${C}libs path${Z}                             print the OPENSCADPATH (info).
   ${C}libs list${Z}                             show installed libraries.
 
 ${B}ENVIRONMENT${Z}

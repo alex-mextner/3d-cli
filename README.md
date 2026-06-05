@@ -51,26 +51,43 @@ if one optional item can't install. `--dry-run` prints the commands without runn
 
 Run `3d <command> --help` for full options. Examples below assume `examples/cube.scad`.
 
-### Render & view
+### Render & view  (unified under `render`)
+
+`render` is the one view/section command. `multi`/`section` remain as thin aliases.
 
 | Command | What |
 |---|---|
-| `3d render <file.scad>` | CGAL (`--render`) PNG, locked **6-param vector** camera, optional `--ortho`. |
+| `3d render <file.scad> [--view NAME]` | Single CGAL view. Camera computed from the model **bounding box** + the named direction. Default view: `iso`. |
+| `3d render <file.scad> --multi [outdir] [--render]` | Render all standard angles (front/back/left/right/top/iso) concurrently. |
+| `3d render <file.scad> --section -o out.png [--plane …] [--color]` | True cross-section: generic STL-cut (any geometry) or `--color` per-part assembly mode. |
+| `3d render <file.scad> --cam ex,..,cz` | Manual 6-param **vector** camera (wins over `--view`). |
 | `3d preview <file.scad>` | Fast throwntogether preview (no CGAL). |
-| `3d multi <file.scad> <outdir>` | 6 angles: iso/front/back/left/right/top. |
-| `3d section <file.scad> -o out.png` | Colored cross-section (6-param vector camera; never 7-param gimbal). |
+| `3d multi …` / `3d section …` | back-compat aliases for `render --multi` / `render --section`. |
+
+`--view` names: `front back left right top bottom iso 3-4 front-left front-right
+rear-left rear-right`. `3-4` is the canonical three-quarter hero angle (azimuth 45°,
+elevation 30°). With the trimesh mesh stack present the camera is placed exactly from the
+model's bounding-box centroid + diagonal; without it, `render` orbits along the view
+direction with `--autocenter --viewall` (so view selection always works, mesh stack or not).
 
 ```bash
-3d render examples/cube.scad -o cube.png
-3d render examples/cube.scad --ortho --cam 130,-600,52,130,0,52 --size 1600x700
-3d preview examples/cube.scad -o look.png
-3d multi examples/cube.scad previews/ --render
-3d section examples/cube.scad -o sec.png --module 'hollow_box(20,20,16,2);' --plane YZ
+3d render examples/cube.scad --view left -o left.png
+3d render examples/cube.scad --view 3-4 --ortho
+3d render examples/cube.scad --multi previews/ --render
+3d render examples/cube.scad --section --plane YZ -o sec.png      # generic cut (any geometry)
+3d render assembly.scad --section --color --plane YZ -o sec.png   # per-part coloured assembly
+3d render examples/cube.scad --cam 130,-600,52,130,0,52 --ortho --size 1600x700
 ```
 
 The match loop wants a **6-param vector camera** `ex,ey,ez,cx,cy,cz` (eye → center) plus
 `--ortho`. The 7-param gimbal form (`...,dist`) with `dist=0` renders an empty frame —
 `render`/`silhouette`/`score` reject a non-6 `--cam` value.
+
+The generic `--section` exports the model to STL once, then `difference(import(stl),
+halfspace)` with the colour **outside** the cut so the cut face takes the part colour — it
+cuts **arbitrary** geometry with no cut-contract needed. `--color` is the richer per-part
+assembly mode (the assembly must honour `-D cut=true` and colour each part outside its own
+`difference`). All section cameras are 6-param **vector** cameras, never a 7-param gimbal.
 
 ### Geometry & export
 
@@ -94,26 +111,33 @@ you to run `3d mesh` for the full check.
 
 ### QA & gates
 
+`check` is the one verification command — the **master acceptance gate**. With no
+selection flags it runs ALL applicable gates; selectors run a subset; `--skip` excludes.
+
 | Command | What |
 |---|---|
-| `3d check <file.scad>` | manifold (`--render` + grep ERROR/WARNING) + quick printability. PASS/FAIL. |
+| `3d check <file.scad> [parts…]` | All applicable gates: manifold + consistency + printability (+ collision/silhouette when data is supplied). Prints a per-gate breakdown + `>>> CHECK: PASS/FAIL`. |
+| `3d check … --mesh \| --manifold \| --consistency \| --printability` | run only the named **core** gate(s). |
+| `3d check … --skip GATE` | exclude a gate (`manifold\|consistency\|printability\|collision\|silhouette`). |
+| `3d check … --collision cfg.json` / `--ref img` | supply data; the collision/silhouette gate then runs (never narrows the core set). |
+| `3d acceptance <assembly.scad>` | back-compat alias for `check` (all gates). |
 | `3d mesh <file.stl\|.scad>` | watertight / manifold / self-intersection / volume (trimesh + open3d/manifold3d; falls back to openscad warnings). |
 | `3d printability <file.scad>` | wall / min-feature / overhang / orientation (FDM, PLA/PETG). |
-| `3d acceptance <assembly.scad>` | master gate: manifold + consistency + printability (+ collision/silhouette if configured). |
 | `3d collision <config.json>` | generic collision/penetration engine (static / `--frame` / `--viz`). |
 
 ```bash
-3d check examples/cube.scad
+3d check examples/cube.scad                          # all applicable gates
+3d check examples/cube.scad --mesh                   # only the manifold gate
+3d check asm.scad --skip printability
+3d check asm.scad --collision verify/collision.json --ref ref.jpg
 3d mesh cube.stl
-3d printability examples/cube.scad
-3d acceptance examples/cube.scad --ref ref.jpg --collision verify/collision.json
-3d collision verify/collision.json            # static gate
-3d collision verify/collision.json --frame    # per-frame timeline gate
+3d collision verify/collision.json --frame           # per-frame timeline gate
 ```
 
-`acceptance` runs on the single assembly you pass (add parts with `--part`); collision and
-silhouette run **only when configured** (`--collision cfg.json`, `--ref img`). It prints
-`>>> ACCEPTANCE: PASS/FAIL` and exits accordingly.
+`--collision` and `--ref` supply **data**, not a selector: they make the collision /
+silhouette gate applicable but never narrow the core gate set — so a supplied config can
+**never** silently skip a HARD gate (no false PASS). For a genuine subset, use `--skip`
+or name the core gates explicitly.
 
 The collision engine is project-agnostic: a JSON config supplies the placement `.scad`,
 part list, phases, intended-contact whitelist, and EPS/touch thresholds — all paths
@@ -210,11 +234,14 @@ installed, `3d slice` prints the install hint (and `3d setup` offers to install 
 
 ### OpenSCAD libraries
 
+BOSL2 + NopSCADlib **auto-install on the first `3d` invocation** (cloned into `libs/`,
+once, gated by `~/.config/3d/.bootstrapped`, non-fatal if offline), and `OPENSCADPATH` is
+auto-exported by the CLI — so `include <BOSL2/std.scad>` just resolves, no manual step.
+
 ```bash
-3d libs install bosl2        # clone BOSL2 into libs/
-3d libs install all          # BOSL2 + NopSCADlib
-3d libs list
-export $(3d libs path)       # so 'include <BOSL2/std.scad>' resolves
+3d libs list                 # show installed libraries
+3d libs path                 # print OPENSCADPATH (for your own non-3d shells)
+# re-install: rm ~/.config/3d/.bootstrapped && 3d help
 ```
 
 ## Layout
