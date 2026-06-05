@@ -19,12 +19,12 @@ edits → [manifold](GLOSSARY.md#manifold)/printability gates → accept-only-if
 `3d` is a Swiss-army knife for the whole 3D FDM lifecycle — not a single-purpose tool. Major use cases:
 
 - **Reference-photo match** — tune a parametric model to match a photo (one pipeline among many)
-- **Design from scratch with AI** — text-to-3d, dimensions-and-sketch-to-3d, parametric skeleton generation
+- **Design from scratch with AI** — text-to-3d, dimensions-and-sketch-to-3d, parametric skeleton generation (planned)
 - **Parts & fixtures** — design brackets, mounts, connectors, enclosures with parametric constraints
 - **Animation & motion** — kinematics, motion verification (planned)
-- **Simulation & analysis** — FEA, strength, thermal, collision detection
-- **Format conversion & AR** — export to USDZ/GLB/STEP, view in AR
-- **Slicing & print monitoring** — slice to G-code, monitor prints, failure recovery
+- **Simulation & analysis** — FEA, strength, thermal, collision detection (planned)
+- **Format conversion & AR** — export to USDZ/GLB/STEP, view in AR (partial: USDZ ready, GLB/STEP planned)
+- **Slicing & print monitoring** — slice to G-code (ready), monitor prints, failure recovery (planned)
 - **Batch & automated workflows** — multi-angle renders, batch exports, CI gates
 
 The reference-photo match pipeline is [documented below](#reference-match-pipeline) as one example workflow.
@@ -111,7 +111,7 @@ Generate a full set of views for a catalog or documentation page.
 3d render bracket.scad --multi docs/assets/bracket/
 ```
 
-This produces `front.png`, `back.png`, `left.png`, `right.png`, `top.png`, `iso.png`
+This produces `bracket_front.png`, `bracket_back.png`, `bracket_left.png`, `bracket_right.png`, `bracket_top.png`, `bracket_iso.png`
 concurrently — one command, six angles.
 
 ## Shell composition — pipes, redirects, and conditionals
@@ -256,7 +256,7 @@ when one is missing; `brew`/`apt`/`winget`):
 | `python3` + [`uv`](https://docs.astral.sh/uv) | runtime for the python subcommands; `uv` resolves their deps per call (no global installs) | **required** (`uv` recommended) |
 | a [slicer](GLOSSARY.md#slicer) — [OrcaSlicer](https://github.com/SoftFever/OrcaSlicer) / [Bambu Studio](https://bambulab.com/en/download/studio) / [PrusaSlicer](https://www.prusa3d.com/page/prusaslicer_424/) | G-code export & sliceability gate (`3d slice`) | optional |
 | [ffmpeg](GLOSSARY.md#ffmpeg) | video export and animation pipelines | optional |
-| [Blender](GLOSSARY.md#blender) | photoreal render (planned) — installed on demand, not bootstrapped | optional |
+| [Blender](GLOSSARY.md#blender--bpy) | photoreal render (planned) — installed on demand, not bootstrapped | optional |
 
 **Python packages** — resolved automatically by `uv`/`.venv`; you normally never install these by
 hand. Only the heavyweight ones worth knowing about:
@@ -394,7 +394,7 @@ matches the photo — keeping only edits that raise the silhouette [IoU](GLOSSAR
 | `3d score <render.png\|file.scad> <reference>` | silhouette [AE](GLOSSARY.md#ae) + IoU (machine-parseable `KEY=VALUE` lines). |
 | `3d match <assembly.scad> <reference>` | forced-monotonic acceptance loop (render→score→critic→apply→accept/revert + changelog). |
 | `3d fit-camera <model.scad> <reference>` | fit an OpenSCAD camera to a reference photo by maximizing silhouette IoU; **saves the viewpoint** + a fit render + an overlay. |
-| `3d preprocess <reference.jpg>` | subject mask + proportional depth ([SAM2](GLOSSARY.md#sam2)/[Depth-Anything](GLOSSARY.md#depth-anything) if installable, else [OpenCV](GLOSSARY.md#opencv) fallback). |
+| `3d preprocess <reference.jpg>` | subject mask + proportional depth ([SAM2](GLOSSARY.md#sam2)/[Depth-Anything V2](GLOSSARY.md#depth-anything-v2) if installable, else [OpenCV](GLOSSARY.md#opencv) fallback). |
 | `3d compare <model.scad\|render.png> <reference.jpg>` | segmented model/reference comparison with IoU + SSIM/DSSIM and artifacts. |
 
 ```bash
