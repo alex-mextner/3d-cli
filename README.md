@@ -1,15 +1,15 @@
 # `3d` — a scriptable, AI-assisted CLI + web toolkit for 3D FDM projects
 
-`3d` is a command-line + web toolkit for the whole **FDM (filament 3D-printing)** lifecycle:
-parametric modeling (OpenSCAD-first) → render & view → mesh / printability / collision
+`3d` is a command-line + web toolkit for the whole **[FDM](GLOSSARY.md#fdm) (filament 3D-printing)** lifecycle:
+parametric modeling ([OpenSCAD](GLOSSARY.md#openscad)-first) → render & view → mesh / printability / collision
 verification → reference-photo matching → slicing & print prep. It is **engineering-first**
 today (functional parts, fits, gates) and grows toward art later. Everything is one
 discoverable dispatcher: `3d <command>`, scriptable, composable, with structured, actionable
 errors (what failed, why, and the exact fix).
 
 It is **general-purpose** across 3D FDM work. One of the pipelines it ships is a
-**reference-photo match loop** (camera-locked render → silhouette score → LLM numeric-delta
-edits → manifold/printability gates → accept-only-if-it-improves) — see
+**reference-photo match loop** (camera-locked render → [silhouette](GLOSSARY.md#silhouette) score → LLM numeric-delta
+edits → [manifold](GLOSSARY.md#manifold)/printability gates → accept-only-if-it-improves) — see
 [Reference-match pipeline](#reference-match-pipeline) — one example workflow among many.
 
 ## Install
@@ -57,14 +57,14 @@ when one is missing; `brew`/`apt`/`winget`):
 | [OpenSCAD](https://openscad.org) | the modeling engine — render, export, section, params, validate | **required** |
 | [ImageMagick](https://imagemagick.org) | silhouette / overlay / score image diffs | required for the match pipeline |
 | `python3` + [`uv`](https://docs.astral.sh/uv) | runtime for the python subcommands; `uv` resolves their deps per call (no global installs) | **required** (`uv` recommended) |
-| a slicer — [OrcaSlicer](https://github.com/SoftFever/OrcaSlicer) / [Bambu Studio](https://bambulab.com/en/download/studio) / [PrusaSlicer](https://www.prusa3d.com/page/prusaslicer_424/) | G-code export & sliceability gate (`3d slice`) | optional |
-| [ffmpeg](https://ffmpeg.org) | animation / report video export (`3d animate`, `3d report`) | optional |
-| [Blender](https://www.blender.org) | photoreal render (`3d render --photo`) — installed on demand, not bootstrapped | optional |
+| a [slicer](GLOSSARY.md#slicer) — [OrcaSlicer](https://github.com/SoftFever/OrcaSlicer) / [Bambu Studio](https://bambulab.com/en/download/studio) / [PrusaSlicer](https://www.prusa3d.com/page/prusaslicer_424/) | G-code export & sliceability gate (`3d slice`) | optional |
+| [ffmpeg](GLOSSARY.md#ffmpeg) | animation / report video export (`3d animate`, `3d report`) | optional |
+| [Blender](GLOSSARY.md#blender) | photoreal render (`3d render --photo`) — installed on demand, not bootstrapped | optional |
 
 **Python packages** — resolved automatically by `uv`/`.venv`; you normally never install these by
 hand. Only the heavyweight ones worth knowing about:
 
-- **core (auto):** the mesh stack [`trimesh`](https://trimesh.org) + [`manifold3d`](https://github.com/elalish/manifold) (watertight / manifold / volume) and `pyyaml` (the `3d.yaml` project model).
+- **core (auto):** the mesh stack [`trimesh`](GLOSSARY.md#trimesh) + [`manifold3d`](GLOSSARY.md#manifold3d) (watertight / manifold / volume) and `pyyaml` (the `3d.yaml` project model).
 - **optional extras:** `opencv` + `pillow` (`preprocess`), `pyvista` (`collision --viz`), `fastapi`/`uvicorn` (`web`). The full pinned set lives in `pyproject.toml` (`preprocess`/`viz`/`web`/`dev` extras) + `uv.lock`.
 
 A missing optional dependency degrades only the command that needs it — never the whole CLI.
@@ -74,7 +74,7 @@ A missing optional dependency degrades only the command that needs it — never 
 3d doctor          # read-only: report present/missing + the exact install command per OS
 ```
 
-The CLI bootstraps OpenSCAD libraries (BOSL2, NopSCADlib) into `libs/` on the first `3d`
+The CLI bootstraps OpenSCAD libraries ([BOSL2](GLOSSARY.md#bosl2), [NopSCADlib](GLOSSARY.md#nopscadlib)) into `libs/` on the first `3d`
 invocation (once, quiet, non-fatal offline) and auto-exports `OPENSCADPATH`, so
 `include <BOSL2/std.scad>` just resolves with no manual step.
 
@@ -93,7 +93,7 @@ Run `3d <command> --help` for full options. Examples below assume `examples/cube
 
 | Command | What |
 |---|---|
-| `3d render <file.scad> [--view NAME]` | Single CGAL view. Camera computed from the model **bounding box** + the named direction. Default view: `iso`. |
+| `3d render <file.scad> [--view NAME]` | Single [CGAL](GLOSSARY.md#cgal) view. Camera computed from the model **bounding box** + the named direction. Default view: `iso`. |
 | `3d render <file.scad> --multi [outdir] [--render]` | Render all standard angles (front/back/left/right/top/iso) concurrently. |
 | `3d render <file.scad> --section -o out.png [--plane …] [--color]` | True cross-section: generic STL-cut (any geometry) or `--color` per-part assembly mode. |
 | `3d render <file.scad> --cam ex,..,cz` | Manual 6-param **vector** camera (wins over `--view`). |
@@ -115,11 +115,11 @@ direction with `--autocenter --viewall` (so view selection always works, mesh st
 3d render examples/cube.scad --cam 130,-600,52,130,0,52 --ortho --size 1600x700
 ```
 
-The match loop wants a **6-param vector camera** `ex,ey,ez,cx,cy,cz` (eye → center) plus
+The match loop wants a **6-param [vector camera](GLOSSARY.md#vector-camera)** `ex,ey,ez,cx,cy,cz` (eye → center) plus
 `--ortho`. The 7-param gimbal form (`...,dist`) with `dist=0` renders an empty frame —
 `render`/`silhouette`/`score` reject a non-6 `--cam` value.
 
-The generic `--section` exports the model to STL once, then `difference(import(stl),
+The generic `--section` exports the model to [STL](GLOSSARY.md#stl) once, then `difference(import(stl),
 halfspace)` with the colour **outside** the cut so the cut face takes the part colour — it
 cuts **arbitrary** geometry with no cut-contract needed. `--color` is the richer per-part
 assembly mode (the assembly must honour `-D cut=true` and colour each part outside its own
@@ -129,7 +129,7 @@ assembly mode (the assembly must honour `-D cut=true` and colour each part outsi
 
 | Command | What |
 |---|---|
-| `3d export <file.scad>` | STL/3MF with manifold/self-intersect validation. **Nonzero exit on bad geometry.** |
+| `3d export <file.scad>` | STL/[3MF](GLOSSARY.md#3mf) with manifold/self-intersect validation. **Nonzero exit on bad geometry.** |
 | `3d validate <file.scad>` | Fast syntax check (no render). |
 | `3d params <file.scad> [--json]` | Extract Customizer-style parameters. |
 
@@ -184,18 +184,18 @@ resolved relative to the config file's directory.
 Match a parametric model to a reference photo by viewpoint and silhouette, for when you have a
 photo of a real object and want a printable part with the same proportions and pose.
 
-> You photograph a bracket, write a rough parametric `bracket.scad`, then `3d fit-camera` locks
+> You photograph a bracket, write a rough parametric `bracket.scad`, then `3d [fit-camera](GLOSSARY.md#fit-camera)` locks
 > the camera to the photo and `3d match` nudges the parameters until the rendered silhouette
-> matches the photo — keeping only edits that raise the silhouette IoU and stay manifold.
+> matches the photo — keeping only edits that raise the silhouette [IoU](GLOSSARY.md#iou) and stay manifold.
 
 | Command | What |
 |---|---|
 | `3d silhouette <file.scad>` | camera-locked render → binary silhouette mask. |
 | `3d overlay <render.png> <reference.png>` | difference / 50% ghost / canny edge-overlay diagnostics. |
-| `3d score <render.png\|file.scad> <reference>` | silhouette AE + IoU (machine-parseable `KEY=VALUE` lines). |
+| `3d score <render.png\|file.scad> <reference>` | silhouette [AE](GLOSSARY.md#ae) + IoU (machine-parseable `KEY=VALUE` lines). |
 | `3d match <assembly.scad> <reference>` | forced-monotonic acceptance loop (render→score→critic→apply→accept/revert + changelog). |
 | `3d fit-camera <model.scad> <reference>` | fit an OpenSCAD camera to a reference photo by maximizing silhouette IoU; **saves the viewpoint** + a fit render + an overlay. |
-| `3d preprocess <reference.jpg>` | subject mask + proportional depth (SAM2/Depth-Anything if installable, else OpenCV). |
+| `3d preprocess <reference.jpg>` | subject mask + proportional depth ([SAM2](GLOSSARY.md#sam2)/[Depth-Anything](GLOSSARY.md#depth-anything) if installable, else [OpenCV](GLOSSARY.md#opencv). |
 
 ```bash
 3d silhouette examples/cube.scad -o mask.png --ortho --cam 130,-600,52,130,0,52
@@ -227,7 +227,7 @@ openscad --render --camera="$(jq -r .camera_arg camera.json)" -o view.png model.
 `score` prints `AE=`, `AE_NORM=`, `IoU=`, `CLOSENESS=`, `FRAME=`, `OVERLAY=` — one per
 line, machine-parseable. An empty render mask scores IoU=0 (never rewards a blank frame).
 
-`match` is the **forced-monotonic** loop: the critic (codex, optional) proposes ONE numeric
+`match` is the **[forced-monotonic loop](GLOSSARY.md#forced-monotonic-loop)**: the critic (codex, optional) proposes ONE numeric
 param delta; the IoU/AE metric + manifold gate dispose. A change is kept iff the score
 strictly improves AND the model stays a clean manifold; else it is reverted. Every step is
 logged to `<work>/changelog.md`, which is fed back to the critic so it never re-proposes a
