@@ -7,7 +7,7 @@ import pathlib
 import pytest
 
 from web import webconfig
-from web.adapters import ClaudeAdapter, SessionRef
+from web.adapters import SessionRef
 from web.adapters.base import AgentEvent, LogAdapter
 from web.agent_manager import AgentManager, TrackedSession
 
@@ -20,7 +20,7 @@ def _make_project(tmp_path: pathlib.Path) -> pathlib.Path:
 
 
 def test_server_smoke(tmp_path: pathlib.Path) -> None:
-    fastapi = pytest.importorskip("fastapi")
+    pytest.importorskip("fastapi")
     from fastapi.testclient import TestClient
 
     from web.server import create_app

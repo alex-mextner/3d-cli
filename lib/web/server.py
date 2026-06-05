@@ -42,7 +42,7 @@ from fastapi.responses import (
 from fastapi.staticfiles import StaticFiles
 
 from . import constants_io, render_service, scan, webconfig
-from .adapters import ALL_ADAPTERS, RawAdapter
+from .adapters import ALL_ADAPTERS
 from .agent_manager import AgentManager
 
 STATIC_DIR = pathlib.Path(__file__).resolve().parent / "static"

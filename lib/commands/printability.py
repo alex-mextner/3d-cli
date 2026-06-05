@@ -10,7 +10,7 @@ import tempfile
 from cli.env import require_openscad
 from cli.pyrun import run_tool
 from cli.registry import Command
-from errors import InputNotFound, UsageError
+from errors import UsageError
 
 USAGE = """3d printability <file.scad|.stl> [more parts...] [-D k=v ...]
   Wall thickness / min feature / overhang / orientation flags (FDM, PLA/PETG).

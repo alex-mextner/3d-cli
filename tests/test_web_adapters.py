@@ -7,7 +7,6 @@ import pathlib
 from collections.abc import AsyncGenerator
 from typing import cast
 
-import pytest
 
 from web.adapters import ClaudeAdapter, CodexAdapter, RawAdapter, SessionRef
 from web.adapters.base import AgentEvent, collect_paths, dedupe

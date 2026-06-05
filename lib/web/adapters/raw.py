@@ -9,7 +9,6 @@ constructs a SessionRef pointing at the file to follow.
 from __future__ import annotations
 
 import json
-import pathlib
 from collections.abc import AsyncIterator
 
 from .base import AgentEvent, LogAdapter, SessionRef, collect_paths, dedupe

@@ -370,7 +370,7 @@ def main() -> None:
     for i, (p, loss_val) in enumerate(zip(samples, losses)):
         if loss_val < best_l:
             best_l, best_p = loss_val, p
-            print(f"  rand {i:3d}  IoU={1-l:.3f}  {[round(x,1) for x in p]}", flush=True)
+            print(f"  rand {i:3d}  IoU={1-loss_val:.3f}  {[round(x,1) for x in p]}", flush=True)
     if best_p is None:
         best_p = [(lo[k] + hi[k]) / 2 for k in range(5)]
         best_l = loss(best_p)
@@ -395,9 +395,9 @@ def main() -> None:
             cl = eval_losses(args.model, cands, center, ow, oh, refm, tmp)
             # same fixed order as the sequential version (+step before -step) so ties
             # resolve identically.
-            for q, l in zip(cands, cl):
-                if l < best_l - 1e-4:
-                    best_l, best_p, improved = l, q, True
+            for q, cand_loss in zip(cands, cl):
+                if cand_loss < best_l - 1e-4:
+                    best_l, best_p, improved = cand_loss, q, True
         if not improved:
             step = [x * 0.5 for x in step]
             if max(step) < min_step:

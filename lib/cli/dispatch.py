@@ -12,7 +12,6 @@ call `main(sys.argv[1:])`.
 """
 from __future__ import annotations
 
-import os
 import sys
 
 from cli.env import export_openscadpath, maybe_bootstrap

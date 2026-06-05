@@ -213,7 +213,7 @@ def verify(
     rc, out = run(args, timeout=600)
     score, metric, better = parse_score(out, prefer)
     log(f"    score rc={rc}: " + " ".join(
-        l for l in out.splitlines() if "=" in l and l.split("=")[0] in
+        line for line in out.splitlines() if "=" in line and line.split("=")[0] in
         ("AE", "IoU", "CLOSENESS"))[:160])
 
     # manifold gate
@@ -222,7 +222,7 @@ def verify(
     if not m_ok and rc2 == 0:
         m_ok = True  # check passed by exit code
     detail = "clean" if m_ok else (
-        next((l for l in out2.splitlines() if re.search(r"(?i)(ERROR|WARNING|FAIL):", l)),
+        next((line for line in out2.splitlines() if re.search(r"(?i)(ERROR|WARNING|FAIL):", line)),
              "manifold gate failed")[:120])
     return score, metric, better, m_ok, detail
 
@@ -339,13 +339,16 @@ def main() -> int:
 
     assembly = os.path.abspath(args.assembly)
     if not os.path.isfile(assembly):
-        log(f"match: assembly not found: {assembly}"); return 2
+        log(f"match: assembly not found: {assembly}")
+        return 2
     ref = os.path.abspath(args.reference)
     if not os.path.isfile(ref):
-        log(f"match: reference not found: {ref}"); return 2
+        log(f"match: reference not found: {ref}")
+        return 2
     constants = os.path.abspath(args.constants) if args.constants else assembly
     if not os.path.isfile(constants):
-        log(f"match: constants file not found: {constants}"); return 2
+        log(f"match: constants file not found: {constants}")
+        return 2
 
     work = args.work or os.path.join(os.path.dirname(assembly), "match_work")
     os.makedirs(work, exist_ok=True)

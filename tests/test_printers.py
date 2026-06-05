@@ -6,7 +6,6 @@ list/show/usage paths. The loader reads ~/.config/3d-cli and the nearest 3d.yaml
 test isolates those via XDG_CONFIG_HOME + an empty cwd to keep results deterministic."""
 from __future__ import annotations
 
-import os
 
 import pytest
 

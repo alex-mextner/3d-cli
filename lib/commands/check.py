@@ -111,40 +111,50 @@ def run(argv: list[str]) -> int:  # noqa: C901  (faithful port of the orchestrat
     while i < n:
         a = argv[i]
         if a in ("--manifold", "--mesh"):
-            sel.append("manifold"); i += 1
+            sel.append("manifold")
+            i += 1
         elif a == "--consistency":
-            sel.append("consistency"); i += 1
+            sel.append("consistency")
+            i += 1
         elif a == "--printability":
-            sel.append("printability"); i += 1
+            sel.append("printability")
+            i += 1
         elif a == "--collision":
-            coll = argv[i + 1] if i + 1 < n else ""; i += 2
+            coll = argv[i + 1] if i + 1 < n else ""
+            i += 2
         elif a == "--silhouette":
             i += 1
         elif a == "--skip":
             if i + 1 >= n:
                 raise UsageError("--skip needs a gate name", command="check")
-            skip.append(argv[i + 1]); i += 2
+            skip.append(argv[i + 1])
+            i += 2
         elif a == "--part":
             if i + 1 < n:
                 files.append(argv[i + 1])
             i += 2
         elif a == "--ref":
-            ref = argv[i + 1] if i + 1 < n else ""; i += 2
+            ref = argv[i + 1] if i + 1 < n else ""
+            i += 2
         elif a == "--cam":
-            cam = argv[i + 1] if i + 1 < n else cam; i += 2
+            cam = argv[i + 1] if i + 1 < n else cam
+            i += 2
         elif a == "--size":
-            silsize = (argv[i + 1] if i + 1 < n else silsize).replace("x", ","); i += 2
+            silsize = (argv[i + 1] if i + 1 < n else silsize).replace("x", ",")
+            i += 2
         elif a == "-D":
             if i + 1 < n:
                 defs += ["-D", argv[i + 1]]
             i += 2
         elif a in ("-h", "--help"):
-            print(USAGE); return 0
+            print(USAGE)
+            return 0
         elif a.startswith("-"):
             print(USAGE)
             raise UsageError(f"unknown option '{a}'", command="check")
         else:
-            files.append(a); i += 1
+            files.append(a)
+            i += 1
 
     if not files:
         raise UsageError("no input file given", command="check")

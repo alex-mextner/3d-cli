@@ -30,7 +30,6 @@ import argparse
 import asyncio
 import math
 import os
-import pathlib
 import re
 import shutil
 import subprocess
@@ -405,11 +404,17 @@ def _halfspace_cube(
             return (c - big, big)        # remove the negative half
         return (c, big)                  # remove the positive half (keep neg)
     if plane == "YZ":
-        tx, sx = span(cx, True);  ty, sy = span(cy, False); tz, sz = span(cz, False)
+        tx, sx = span(cx, True)
+        ty, sy = span(cy, False)
+        tz, sz = span(cz, False)
     elif plane == "XZ":
-        tx, sx = span(cx, False); ty, sy = span(cy, True);  tz, sz = span(cz, False)
+        tx, sx = span(cx, False)
+        ty, sy = span(cy, True)
+        tz, sz = span(cz, False)
     else:  # XY
-        tx, sx = span(cx, False); ty, sy = span(cy, False); tz, sz = span(cz, True)
+        tx, sx = span(cx, False)
+        ty, sy = span(cy, False)
+        tz, sz = span(cz, True)
     return f"translate([{tx:.3f},{ty:.3f},{tz:.3f}]) cube([{sx:.3f},{sy:.3f},{sz:.3f}]);"
 
 
@@ -520,7 +525,6 @@ def render_section(args: argparse.Namespace) -> int:
                 return 2
             input_dir = os.path.dirname(os.path.abspath(scad))
             input_base = os.path.basename(scad)
-            big = 600.0
             cut_map = {
                 ("YZ", "neg"): ("translate([0,-300,-300]) cube([600,600,600]);", "240,70,120"),
                 ("YZ", "pos"): ("translate([-600,-300,-300]) cube([600,600,600]);", "-240,70,120"),

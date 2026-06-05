@@ -36,7 +36,8 @@ def extract(path: str) -> list[dict[str, str]]:
             elif re.match(r"^-?\d*\.?\d+$", value):
                 t = "number"
             elif value.startswith('"') and value.endswith('"'):
-                t = "string"; value = value[1:-1]
+                t = "string"
+                value = value[1:-1]
             elif value.startswith("["):
                 t = "array"
             else:
