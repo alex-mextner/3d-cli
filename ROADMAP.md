@@ -413,7 +413,7 @@ Design: spec §11. Inspiration: **ffmpeg's power without ffmpeg's UX**.
 
 ## 23. Engineering rules, AGENTS.md & `docs/rules/` (ported from the draft workspace)
 - 📋 Ship a **comprehensive `AGENTS.md` (+ `CLAUDE.md` symlink)** and a **`docs/rules/`** set, ported
-  and Python-adapted from `hyper-canvas-draft` (the user's "сформируй хороший Claude файл"). Portable
+  and Python-adapted from `hyper-canvas-draft` (the user's "write a good Claude file" ask). Portable
   rules to carry over (generic, not stack-specific):
   - **Commit discipline**: atomic commits; pre-commit 3-stage review (dead-code scan → self-review →
     `codex exec review --uncommitted`); never `--no-verify`; push regularly; separate `style:` commits
