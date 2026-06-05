@@ -9,8 +9,13 @@ sources are vendored in [`docs/research/`](docs/research/). Terms are defined in
   3D tools, OpenSCAD libraries, AI skills/prompts, verification, pixel-perfect 2D→3D, plus the
   extended survey §19–§25 below). PDF: [`docs/research/report.pdf`](docs/research/report.pdf).
 - [`docs/research/sources.md`](docs/research/sources.md) — ~130 sources, full visible URLs, grouped.
-- [`docs/research/3d-cli-backlog.md`](docs/research/3d-cli-backlog.md) — 14 prioritized (P0–P5)
-  implementation items, each {what, why, paper/tool, integration point, expected metric, status}.
+- The 14 prioritized (P0–P5) implementation items were **folded into [`ROADMAP.md`](ROADMAP.md)
+  (canonical) and the standalone backlog file deleted** — priority tiers + critical path live in
+  ROADMAP §17; each item's full {what, why, paper/tool, integration point, expected metric} rationale
+  is in the report above.
+- `APPLY-RESEARCH.md` — a **post-survey deliverable that does not exist yet.** Its old per-area
+  application ideas were distributed into the matching ROADMAP feature sections and the draft deleted;
+  it is to be **created** after the §12 survey as a paper-by-paper application summary (ROADMAP §12/§27).
 
 ## Survey summary (extended sections in the report)
 - **Program synthesis for CAD** — CSGNet, ShapeAssembly, DeepCAD → most valuable net-new vein for

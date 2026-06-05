@@ -126,6 +126,10 @@ code is what AI agents, version control, and shell pipes all operate on natively
   proper lighting/HDRI, soft shadows. **Blender is installed ON DEMAND** (only when the user
   requests a photoreal render), NOT auto-bootstrapped. README must show **OpenSCAD render vs
   Blender photoreal** side by side so the difference is clear.
+  - **Implementation (from research):** export 3MF → [Blender](GLOSSARY.md#blender) `bpy` headless,
+    pull materials/colors/finish from the materials registry (§2a), add HDRI + soft shadows. **Why:**
+    Blender stays a render LEAF, never the source of truth (§0a). **Example:**
+    `3d render boiler.scad --photo --out hero.png`.
 - 📋 **`3d check <file>`** — runs ALL applicable gates by DEFAULT; `--mesh --printability --collision --manifold --silhouette` select a subset; `--skip X` excludes. Per-gate breakdown + PASS/FAIL. (= the acceptance master gate.)
 - ✅ `export` (mesh-validated, nonzero on bad geometry), `validate`, `params`.
 - ✅ `mesh`, `printability`, `collision` (static / `--frame` / `--viz`), `acceptance`, `silhouette`, `overlay`, `score`, `match` (forced-monotonic loop + changelog, `--dry-run`), `fit-camera`, `preprocess`.
@@ -142,6 +146,13 @@ code is what AI agents, version control, and shell pipes all operate on natively
   - **Auto-camera for sections** — pose solved to **maximize the projected area of the cut face
     in frame** and **minimize occlusion** of the cut by the remaining solid (shares machinery
     with `fit-camera`, different objective). `--cam` overrides.
+  - **Implementation (from research):** the colored cut is a per-part `color()` applied OUTSIDE the
+    `difference()` so the cut face keeps each part's color; presets resolve to a plane via the object
+    model (§5). The auto-camera reuses the [fit-camera](GLOSSARY.md#fit-camera) optimizer with a
+    cut-face-area / occlusion objective instead of silhouette-[IoU](GLOSSARY.md#iou). **Why:** a
+    monochrome cut hides which part you're looking at; auto-framing removes the manual `--cam` fiddle.
+    **Example:** `3d render asm.scad --section through:#valve` (plane through a named feature, camera
+    auto-oriented to the cut).
 - 📋 **Thin aliases** `multi`/`section`/`mesh`/`printability`/`collision`/`acceptance` → `render --multi`/`render --section`/`check --…`.
 
 ## 4. Slicing
@@ -157,11 +168,24 @@ code is what AI agents, version control, and shell pipes all operate on natively
   profile is missing/invalid, the error names the accepted forms and the exact export steps.
   Prefer letting the `3d.yaml` (material/printer/supports/infill) drive profile selection so
   the user rarely hand-passes raw json paths.
+- 📋 **Implementation (from research):** map `material + printer` (by name, from the registries §2a)
+  → [slicer](GLOSSARY.md#slicer) machine/process/filament profiles; always dry-run as a gate;
+  `--list-profiles` discovers installed-slicer presets + project ones; profile errors are
+  self-explaining (what each file is, where to export it). Default to **Bambu A1 + PLA/PETG**.
+  **Why:** the registry is the single vocabulary, so a user names a material, not a json path.
+  **Example:** `3d slice cab.3mf --printer bambu-a1 --dry-run`.
 
 ## 5. 3MF builder + project config (`3d.yaml`)
 - 📋 **`3d pack <3d.yaml>`** — emit a print-ready **3MF**: per-part orientation solved
   for **min support + max strength**, copy layout, colors/materials, optional
   **splitting into parts** for glue / printed-connector joints, per-object slicer settings.
+  - **Orientation objective (from research, P4.2):** the per-part solver prefers orienting each
+    part so its **principal tensile load lies in the XY (flat) plane** and the weakest across-layer
+    direction carries the least load — consuming `3d strength`'s anisotropy model (§6). **Why:** XZ
+    (on-edge) is consistently the weakest direction in both PETG and PLA (PMC9230522), so orientation
+    is a strength *output*, not an afterthought; minimizing max across-layer tensile stress is the
+    measurable goal. **Example:** `3d pack train.3d.yaml --orient strength` (lay each part down to
+    keep its load in-plane). Use PCA of the mesh (§7) for the candidate flat/strong lay-downs.
 - 📋 **`3d.yaml`** — project+part config consumed by BOTH the AI and the tools:
   - `project`: name, units, copies, printer, default material, bed.
   - standard **tags** (combinable, not a single type): `structural | shell | cosmetic | functional | flexible | engineering | artistic | press-fit | removable | bought`.
@@ -180,6 +204,14 @@ code is what AI agents, version control, and shell pipes all operate on natively
     infill, gate set, loads, section & camera-frame membership) — authored once, not repeated
     per part. **Cascade + specificity** like CSS (class default < id override < inline; pinnable).
   - engineering-vs-art is just a different rule set; no fork.
+  - **Implementation (from research):** parse `// @id/@class/@anchor/@section/@view/@color`
+    comments from `.scad` via regex over source (OpenSCAD ignores comments → still renders); read
+    `.3mf` metadata; for `.stl` use the sidecar `<f>.3d.yaml`. Build an in-memory tree of nodes
+    (id, classes=tags, params, bbox). The selector engine is a tiny CSS-like matcher (`#id`,
+    `.class`, `.a.b`, descendant); the stylesheet is ordered `selector → props` rules resolved per
+    node with CSS specificity (class < id < inline) into an effective style map. **Why:** reusing
+    the CSS/DOM mental model (§0a) means one addressing mechanism everywhere instead of per-command
+    ad-hoc part lists.
 - 📋 **Object-model file format — backward-compatible, never breaks other tools:**
   - `.scad` → `// @anchor`/`// @section`/`// @part`/`// @view`/`// @class`/`// @color`
     comments (OpenSCAD ignores comments → file still renders everywhere).
@@ -196,7 +228,19 @@ code is what AI agents, version control, and shell pipes all operate on natively
 ## 6. Physics / math tools
 - 📋 **`3d strength <part|3d.yaml>`** — strength-of-materials (beam/wall/hoop stress vs
   allowable, FDM anisotropy by print orientation, SF per load-case at anchors).
-- 📋 **`3d fea`** (optional) — CalculiX (via FreeCAD FEM) / Elmer for nontrivial cases.
+  - **Anisotropic knockdown (from research, P4.1):** multiply the allowable stress for any component
+    **normal to the layer plane** by a citable, material-specific knockdown — **PETG ~0.7–0.75×**,
+    **PLA ~0.45×** of in-plane — and make the allowable a function of slicing layer height; cite the
+    sources in the gate notes. **Why:** orientation is the single biggest lever on
+    [FDM strength](GLOSSARY.md#fdm-anisotropy), and the magnitude is a real measured number — PLA
+    across-layer can be under half the in-plane strength. **Sources:** Ahn et al. 2002
+    (https://www.emerald.com/insight/content/doi/10.1108/13552540210441166/full/html); PMC9230522
+    (https://pmc.ncbi.nlm.nih.gov/articles/PMC9230522/ — PET-G XY 19.27 / XZ 14.30 MPa, +34.8%; PLA
+    XY 21.70 / XZ 9.55 MPa, +127%). **Example:** `3d strength bracket.scad` (reports predicted-vs-
+    allowable stress with SF per zone, anisotropy ratio applied). Pulls factors from the
+    [materials registry](GLOSSARY.md#fdm-anisotropy) (§2a); feeds the `3d pack` orientation solver (§5).
+- 📋 **`3d fea`** (optional) — CalculiX (via FreeCAD FEM) / Elmer for nontrivial cases; consumes the
+  same anisotropic material card (per-direction allowables) as `3d strength`.
 - 📋 **`3d kinematics <3d.yaml>`** — model + verify motion (per-frame, axes/guides, reach/sweep).
 - 📋 **`3d animate <3d.yaml>`** — generate animation + **per-frame verification**
   (collisions, sync with the motion model). Requires **ffmpeg** (check/install).
@@ -223,8 +267,25 @@ code is what AI agents, version control, and shell pipes all operate on natively
   + contours locate a hole/boss to label). **Example:**
   `3d fit-camera part.scad ref.jpg --draw-axes` overlays the model's red PCA axes against the
   reference's, so an axis/orientation mismatch is visible *before* any search runs.
+  - **Implementation (from research):** compute the principal axes via [OpenCV](GLOSSARY.md#opencv)
+    PCA of the silhouette, plus image moments + contours, the bbox and centroid; match the model's
+    axes to the reference's to seed the pose. Shared with the `axis` AI tool's RAG pre-flight (§13.2).
 - 📋 **Optional `opencode` integration** (`--opencode`) for iterative axis tuning / checks.
   opencode runs out-of-box with free models (no key needed) — use as an optional assist.
+- 📋 **Aspirational fit backends (from research, P5 — reach-for-when-needed):**
+  - **Differentiable-rendering gradient fit (P5.1)** — backprop a silhouette/soft-IoU loss into
+    parameters via [Mitsuba 3](GLOSSARY.md#mitsuba) (https://www.mitsuba-renderer.org/) or
+    [nvdiffrast](GLOSSARY.md#nvdiffrast) (https://github.com/NVlabs/nvdiffrast), only after
+    reimplementing the geometry differentiably. **Why:** faster convergence for *hundreds* of
+    parameters — but unnecessary for the few-dozen-param case where the gradient-free
+    forced-monotonic loop converges in a coffee-break, and it abandons OpenSCAD as the generator. Low
+    priority. **Example:** `3d match part.scad ref.jpg --backend mitsuba`.
+  - **Multi-view photogrammetry reference (P5.2)** — if the real subject is photographed from many
+    angles, run SfM+MVS via [COLMAP](GLOSSARY.md#colmap) (https://colmap.github.io/) / Meshroom
+    (https://alicevision.org/) for a metric ground-truth shell, then add a second-view IoU term to
+    the match loss. **Why:** a single found photo under-constrains 3D; multiple real photos pin it —
+    situational, only when such photos exist. **Example:**
+    `3d fit-camera part.scad refs/*.jpg --multi-view`.
 
 ## 8. Visual debug modes
 - 📋 Rich `--debug` across render/fit-camera/score/strength/kinematics: draw intermediate
@@ -293,6 +354,12 @@ code is what AI agents, version control, and shell pipes all operate on natively
   the report**, and **implement** the interesting algorithms; **use and improve** the tools
   it mentions (BOSL2, NopSCADlib, trimesh/manifold3d, SAM2, Depth-Anything, TRELLIS/
   Hunyuan3D, Mitsuba/nvdiffrast, COLMAP, etc.).
+- 📋 **`APPLY-RESEARCH.md` is a POST-survey deliverable, authored AFTER this §12 literature survey
+  lands** — not a now-doc, and it **does not exist yet** (the old per-area draft was folded into the
+  feature sections below and deleted). Once the survey completes, **create** `APPLY-RESEARCH.md` as
+  the paper-by-paper application summary: for each surveyed paper/algorithm, how it gets applied
+  (which `3d` command, library, metric). Until then ROADMAP is canonical and holds the content (see
+  §17 for the per-section map).
 
 ## 13. `3d ai <tool>` — AI-assisted tool group (operators + RAG + loop + benchmarks)
 A unified AI layer over the analytical commands. Pattern: **`3d ai <tool> <operator> [args]`**
@@ -324,38 +391,119 @@ The three operators differ only in what they do *with* the AI after step 1:
   acceptance criteria converge. The stop condition is a **NUMERIC benchmark threshold** (the tool's
   §13.4 metric: IoU ≥ τ, Chamfer ≤ ε, all gates PASS), not vibes — or convergence / a round-cap.
   Each iteration re-grounds on freshly measured tools (step 1) so the model always sees the current
-  state. Optionally driven by **quorex** ([github.com/alex-mextner/quorex](https://github.com/alex-mextner/quorex),
-  [ralphex](https://github.com/umputun/ralphex)-based; the `quorex` binary on `PATH`: fresh agent session per task,
-  5-agent→codex→2-agent review pipeline, worktree isolation, web dashboard, notifications) for the
-  heavyweight autonomous variant; `3d ai <tool> loop` emits a plan whose *validation commands* are
-  this tool's metric targets and drives the cycle until met.
+  state.
+  - **Forced-monotonic acceptance (from research, P0.2):** the loop applies ONE critic-proposed edit,
+    re-scores, and **accepts only on strict metric improvement AND all hard gates PASS**; otherwise it
+    reverts + resamples (cap ~10/round); an invalid render scores worst (zero-reward anchor); a
+    **changelog** of attempts is fed back so a failed move is never retried. A coarse-to-fine phase
+    controller freezes parameter subsets. **Why:** this single rule turns "an LLM fiddling with
+    numbers" into a convergent optimiser — the FlipFlop effect (~46% flips, ~17% accuracy drop when a
+    self-judging model is challenged) means unconstrained self-judged loops oscillate without bound.
+    This is the [forced-monotonic loop](GLOSSARY.md#forced-monotonic-loop). **Sources:** ReLook
+    (https://arxiv.org/abs/2510.11498); FlipFlop (https://arxiv.org/abs/2311.08596). **Metric:**
+    monotone non-decreasing IoU trajectory, rounds-to-converge, reject-rate, final IoU ≥ target.
+  - Optionally driven by **quorex** ([github.com/alex-mextner/quorex](https://github.com/alex-mextner/quorex),
+    [ralphex](https://github.com/umputun/ralphex)-based; the `quorex` binary on `PATH`: fresh agent session per task,
+    5-agent→codex→2-agent review pipeline, worktree isolation, web dashboard, notifications) for the
+    heavyweight autonomous variant; `3d ai <tool> loop` emits a plan whose *validation commands* are
+    this tool's metric targets and drives the cycle until met.
 
 ### 13.2 RAG pre-flight set — the deterministic `3d` commands each tool auto-runs before the AI
 Each tool **declares** its pre-flight set: the deterministic `3d` runs whose outputs (numbers +
 rendered PNGs) are embedded in the prompt, plus a "recommended tools" block (relevant `3d`
 subcommands with one-line usage). The set is filtered by the part/project type (§13.1 step 1):
-- `axis` → OpenCV PCA principal axes, contours, image moments, bbox, centroid + annotated overlay.
+- `axis` → [OpenCV](GLOSSARY.md#opencv) PCA principal axes, contours, image moments, bbox, centroid + annotated overlay.
 - `match`/`fit-camera` → silhouette **IoU**, overlay-diff (AE / blend / canny), current
   `camera.json` + before/after PNGs.
+  - **Reference silhouette pre-pass (from research, P3.1):** one prompt-click on the reference photo
+    → a clean binary subject mask via [SAM2](GLOSSARY.md#sam2) (+ optional per-feature sub-masks),
+    normalised to the render frame; falls back to [Depth-Anything](GLOSSARY.md#depth-anything) +
+    GrabCut when SAM2 is unavailable. **Why:** a clean reference silhouette is the foundation of the
+    whole metric; hand-thresholding a busy photo is fragile, and per-feature masks let the critic
+    target per-feature IoU. **Source:** SAM 2 (https://arxiv.org/abs/2408.00714).
 - `critique` (model↔reference) → multi-view renders + the reference + current score metrics.
+  - **Depth + normal critic channels (from research, P3.2):** run
+    [Depth-Anything V2](GLOSSARY.md#depth-anything) (or [Marigold](GLOSSARY.md#marigold) for sharper
+    edges) for a relative depth map, and [Wonder3D](GLOSSARY.md#wonder3d) once for a side-view normal
+    map; hand depth + normal + silhouette to the critic and **discard any generated mesh**. **Why:** a
+    single side silhouette under-determines depth; depth/normal priors give the critic a structured 3D
+    cue (a front-to-back mass-order consistency check) without ever making an unprintable generated
+    mesh the deliverable. **Sources:** Depth-Anything-V2
+    (https://github.com/DepthAnything/Depth-Anything-V2), Marigold (https://arxiv.org/abs/2312.02145),
+    Wonder3D (https://arxiv.org/abs/2310.15008).
 - `strength` → computed stress vs allowable per load-case + SF.
 - `printability` → overhang / wall / clearance report.
+
+Backends share the same log-adapter interface as `3d web` (Claude / Codex / [ollama](GLOSSARY.md#ollama)
+/ opencode — opencode free out-of-box).
 
 ### 13.3 Initial tool set (each gets `do/review/loop`)
 - 📋 `axis`, `match` (camera/silhouette), `critique` (model↔reference), `strength`, `printability`,
   `design` (generate/modify SCAD from a reference). Adding a tool = declare its RAG pre-flight set
   (§13.2) + benchmark/metric (§13.4); the three operators come for free.
+- 📋 **`design` — skeleton bootstrap (from research, P2.2; highest-value NET-NEW vein).**
+  `design do` writes the initial parametric `.scad` skeleton from a reference (LLM-authored today; a
+  CSGNet/ShapeAssembly-style parser later), which `design loop` then tunes via the forced-monotonic
+  loop (§13.1). Borrow program-synthesis principles now without training a network: CSGNet's
+  **render-reward** acceptance and ShapeAssembly's **structure + free-variables** factorisation.
+  **Why:** the match loop tunes a generator that must first exist; synthesis bootstraps it, and the
+  cheap high-value part (factorisation + reward shape) is adoptable immediately. **Sources:** CSGNet
+  (https://arxiv.org/abs/1712.08290), ShapeAssembly (https://arxiv.org/abs/2009.08026), DeepCAD
+  (https://arxiv.org/abs/2105.09492). **Metric:** render-success of the skeleton; initial IoU before
+  tuning; rounds-to-target after. **Example:** `3d ai design do boiler.scad --ref photo.jpg`.
+- 📋 **`design` — attachment-graph authoring convention (from research, P2.1).** Standardise authored
+  models as a [BOSL2](https://github.com/BelfrySCAD/BOSL2) **attachment graph** of parameterised
+  proxies (e.g. boiler/smokebox/cab/domes/funnel), with landmarks expressed as *fractions of a parent
+  dimension* (`funnel_frac`) over a shared `constants.scad`. **Why:** ShapeAssembly's result shows
+  attachment graphs yield more plausible, edit-stable shapes than absolute transforms, and they keep
+  the match-loop parameter space low-dimensional, decoupled, and unambiguous for monotonic acceptance
+  — a parent-dimension change must not break child placement (verifiable by re-render IoU delta).
+  **Source:** ShapeAssembly (https://arxiv.org/abs/2009.08026). This is the authoring style §33's
+  OpenSCAD-extension layer should make a one-liner. **Example:** `3d ai design review cab.scad`
+  (flags absolute transforms that should be parent-relative).
 
 ### 13.4 Benchmarks (`3d ai`) + metrics (all tools) — always computed, always saved
 - 📋 **Standard, commonly-accepted benchmarks** (not bespoke-only):
-  - **geometry**: Chamfer distance (L1/L2), **F-score@τ**, Hausdorff, normal consistency, volumetric **IoU**.
-  - **render-vs-reference**: silhouette **IoU**, **LPIPS**, **SSIM**, **PSNR**, **CLIP-similarity**.
+  - **geometry**: [Chamfer](GLOSSARY.md#chamfer) distance (L1/L2), [**F-score@τ**](GLOSSARY.md#f-score),
+    [Hausdorff](GLOSSARY.md#hausdorff), [normal consistency](GLOSSARY.md#normal-consistency),
+    volumetric [**IoU**](GLOSSARY.md#iou).
+    - **Conventions + libraries (from research, P1.1):** **F-score@τ is the PRIMARY** geometry metric
+      (τ ~1% of bbox diagonal); Chamfer/IoU alone mislead (Tatarchenko CVPR 2019,
+      https://arxiv.org/abs/1905.03678). Each run **records its convention in the store**: Chamfer
+      `k` (L1/L2, mean, bidirectional), F-score `τ`, Hausdorff directed-vs-symmetric. Library mapping:
+      `open3d`/`trimesh` for distances + vol-IoU, `scipy` KD-tree for nearest-neighbor queries
+      (Chamfer/F-score), `pymeshlab` `get_hausdorff_distance`, numpy for F-score@τ +
+      normal-consistency. **Why:** a longitudinal store is worthless if the convention silently
+      drifts between runs.
+  - **render-vs-reference**: silhouette [**IoU**](GLOSSARY.md#iou) (primary), [**LPIPS**](GLOSSARY.md#lpips),
+    [**SSIM**](GLOSSARY.md#ssim), [**PSNR**](GLOSSARY.md#psnr), [**CLIP-similarity**](GLOSSARY.md#clip-sim).
+    - **Senses + footgun (from research, P1.2):** record each metric's sense — IoU (0..1, 1 best),
+      LPIPS (≥0, 0 best), SSIM (−1..1, 1 best) vs **DSSIM (0 best — the silent-sign footgun, guard
+      it)**, PSNR (dB), CLIPScore (0..100). Silhouette IoU is the optimisation target but is blind to
+      "does it look like the subject"; LPIPS + CLIP-sim add perceptual/semantic channels IoU misses.
+      Libraries: `pip install lpips` (Zhang CVPR 2018, https://arxiv.org/abs/1801.03924), CLIPScore
+      (Hessel 2021, https://arxiv.org/abs/2104.08718), ImageMagick for IoU/AE/SSIM, SSIM def Wang 2004
+      (https://www.cns.nyu.edu/pub/eero/wang03-reprint.pdf). The lowest-effort, highest-leverage
+      primitive is a deterministic `render → binary mask → {IoU, AE} + overlay` (red=ref, cyan=render)
+      for the critic — `IoU = |S∩R|/|S∪R|`, AE = mismatched-pixel count with `-fuzz`, same `WxH!` +
+      crop on both (P0.1, ImageMagick `compare`).
   - **camera/pose**: reprojection error, rotation/translation error.
-  - **OpenSCAD-generation suite**: adopt the public *image→OpenSCAD, iterate-via-CLI-render*
-    task format (ref: [ModelRift OpenSCAD-LLM benchmark](https://modelrift.com/blog/openscad-llm-benchmark))
+    - **Pose freeze (from research, P0.3):** fit `(ortho-scale, in-plane translation, small roll)` —
+      3–4 DoF for a side elevation — by maximising silhouette IoU (or minimising reprojection error
+      on marked landmarks), coarse grid + local hill-climb, then **hold the pose fixed** through the
+      shape match. **Why:** a drifting pose makes the monotonic-acceptance score meaningless ("never
+      improves for no reason" — the top failure signature); pose fit is the precondition for trusting
+      the metric. `3d fit-camera` (✅) already produces the locked pose; add the reprojection-error
+      mode and document the freeze rule.
+  - **OpenSCAD-generation suite (from research, P1.3)**: adopt the public *image→OpenSCAD,
+    iterate-via-CLI-render* task format (ref: [ModelRift OpenSCAD-LLM benchmark](https://modelrift.com/blog/openscad-llm-benchmark))
     BUT replace its purely **subjective 0–5
     score** with the automated metrics above (render-success rate + IoU + Chamfer against a target
-    mesh), so results are reproducible. Keep a subjective score as one column, not the only one.
+    mesh + LPIPS), so results are reproducible. Keep a subjective score as one column, not the only
+    one. **Why:** ModelRift has the right task but a non-reproducible metric; CADBench-style
+    benchmarks have automated metrics but target CadQuery/Blender, not OpenSCAD — this fills the exact
+    gap. Use **BlenderLLM/CADBench** (https://arxiv.org/abs/2412.14203) as the methodology template.
+    Persist every run to the longitudinal store; `3d ai bench --compare` shows deltas-vs-history.
   - `3d ai bench [suite]` runs the suite; `3d ai bench --compare` shows deltas vs history.
 - 📋 **Per-tool metrics** for the non-AI tools too (render time, mesh stats, gate pass/fail, score
   deltas, IoU) — emitted on every run.
@@ -415,13 +563,29 @@ named **pipelines** (the reference-photo match is ONE pipeline, not the identity
   what it can** (`3d doctor` to inspect). DELETE the manual venv/pip walkthrough and the `3d setup`
   block. Must list ALL deps (it is still incomplete).
 
-## 17. Research-driven backlog (from §12 survey)
-- 📋 Source of truth: `docs/research/3d-cli-backlog.md` (14 prioritized
-  items P0–P5, each with integration point + expected metric). Fold the actionable ones into the
-  sections above. Highest-value NET-NEW vein: **program synthesis for CAD** (CSGNet / ShapeAssembly
-  / DeepCAD) → `3d ai design`. Also: pin exact metric formulas + library conventions in `3d metrics`
-  (§13.4); peer-reviewed FDM anisotropy knockdowns (PETG ~0.7×, PLA ~0.45× cross-layer) in
-  `3d strength`; normal-map critic channels (Marigold/Wonder3D) for `3d ai critique`.
+## 17. Research-driven backlog (priority tiers + critical path)
+- ✅ **The 14 actionable items are now folded into the feature sections above; ROADMAP is canonical.**
+  Each item's full `{what, why, paper/tool, integration point, expected metric}` rationale lives in
+  the underlying research report ([`docs/research/report.md`](docs/research/report.md)); the
+  priority/sequencing metadata it carried lives here because it exists nowhere else. Highest-value
+  NET-NEW vein: **program synthesis for CAD** (CSGNet / ShapeAssembly / DeepCAD) → `3d ai design`
+  (§13.3).
+- 📋 **Priority tiers** (leverage-per-effort + dependency order; P0 unblocks the rest):
+  - **P0 — measurement foundation:** P0.1 silhouette IoU+AE+overlay primitive → §13.4; P0.2
+    forced-monotonic loop + changelog → §13.1; P0.3 camera-pose fit + freeze → §13.4 / §7.
+  - **P1 — standard metric battery:** P1.1 geometry metrics, pinned conventions → §13.4; P1.2 image
+    metrics, correct senses → §13.4; P1.3 OpenSCAD-LLM bench, auto-scored → §13.4.
+  - **P2 — authoring & generation:** P2.1 attachment-graph authoring (BOSL2) → §13.3 / §33; P2.2
+    `.scad` skeleton bootstrap → §13.3.
+  - **P3 — perception scaffolding:** P3.1 SAM 2 reference silhouette → §13.2 (`match` pre-pass); P3.2
+    depth (Depth-Anything/Marigold) + Wonder3D normals → §13.2 (`critique`).
+  - **P4 — structural gates:** P4.1 anisotropic strength knockdown → §6; P4.2 strength-driven
+    orientation → §5 (`pack`).
+  - **P5 — situational/aspirational:** P5.1 differentiable-render fit (Mitsuba/nvdiffrast) → §7; P5.2
+    multi-view photogrammetry (COLMAP) → §7.
+- 📋 **Critical path:** P0.1 → P0.3 → P0.2 unblocks the entire AI loop; P1.1/P1.2 unblock `3d ai
+  bench` (P1.3) and the longitudinal metrics store. P2–P4 are parallel improvements; P5 is
+  reach-for-when-needed.
 
 ## 18. `3d om` — object-model query & transform language (jq for 3D)
 - 📋 **`3d om '<expr>'`** — a **jq-like** filter/transform engine over the object model (§5). Reads a
@@ -466,6 +630,11 @@ Design: `docs/specs/2026-06-05-3d-cli-architecture.md` §9. Modeled on `vector-e
 - 📋 **Persistence** = base snapshot + append-only op log + pointer (mirror
   `vector-engine/src/persistence/{operation-log,serialize}.ts`); compactable; replays
   deterministically into `3d.yaml`/sidecar.
+- 📋 **Implementation (from research):** port the [vector-engine](GLOSSARY.md#vector-engine) executor
+  pattern — nodes `{type, inputs, outputs, params, execute}`, topological order, per-node cache keyed
+  on `(type, params, hash(inputs))`, dirty-set invalidation → recompute only descendants. History is
+  a DAG of edits (not a linear tape) with branch + base-snapshot + op-log persistence. **Why:**
+  pure-Python and unit-testable without subprocess, and it fixes vector-engine's linear-history gap.
 
 ## 20. Headless `lib` core + thin frontends (cli / web / gui)
 Design: spec §10. Mirror `vector-engine` (headless, zero-UI) ← `vector-cli`/`vector-wasm`.
@@ -478,6 +647,9 @@ Design: spec §10. Mirror `vector-engine` (headless, zero-UI) ← `vector-cli`/`
 - 📋 **Foundation consequence**: the python dispatcher must be a frontend over an **importable core
   package**, not a bag of scripts. Wave-B "core extraction" task lifts any command-embedded logic
   into `lib`; the core is unit-tested directly (no subprocess), frontends smoke-tested.
+- 📋 **Implementation (from research):** refactor commands so logic lives in importable `lib`
+  functions; the registry commands are thin argv→core adapters. The same core serves cli / web /
+  (future gui). **Why:** one tested code path, no logic hiding in a frontend.
 
 ## 21. Two-layer command surface: technical ⊕ friendly, combinable
 Design: spec §11. Inspiration: **ffmpeg's power without ffmpeg's UX**.
@@ -504,6 +676,10 @@ Design: spec §11. Inspiration: **ffmpeg's power without ffmpeg's UX**.
   as the default; `--video` adds the rendered clip.
 - 📋 Deliverable via `tg --file`. Reuses the metrics store (§13.4) so the report's numbers are the
   persisted ones, not recomputed ad hoc.
+- 📋 **Implementation (from research):** `3d report` stitches the op-DAG run record (§19) + the web
+  SSE timeline (§9) + the before/debug/after images with [ffmpeg](GLOSSARY.md#ffmpeg); `3d demo`
+  builds the polished §14 promo via [HyperFrames](GLOSSARY.md#hyperframes). **Why:** reuse one
+  recorded run for both the factual per-run report and the curated demo, no re-capture.
 
 ## 23. Engineering rules, AGENTS.md & `docs/rules/` (ported from the draft workspace)
 - 📋 Ship a **comprehensive `AGENTS.md` (+ `CLAUDE.md` symlink)** and a **`docs/rules/`** set, ported
@@ -566,6 +742,12 @@ layered rule-config structure. Build an analogous multi-level lint system for 3D
   style / naming / project-convention), severity levels, per-selector scoping, autofixable vs manual,
   baseline/suppression, and an aggregate `3d lint` report. Work out the rule catalog in detail
   (this is a meaty sub-design — give it its own spec when built).
+- 📋 **Implementation (from research):** [oxc](GLOSSARY.md#oxc)-style rule registry — each rule a
+  self-registering plugin with `(id, level, selector, autofix)` — driven by the `3d.yaml` `lint:`
+  section, with `3d lint` reporting and a `3d fmt` formatter. **Start with a small
+  geometry/printability/naming rule set and grow the catalog** rather than designing it all up front.
+  **Why:** mirrors how oxc layers a clean rule-config structure, so each rule ships independently
+  without editing a central list (§15).
 
 ## 26. Glossary + first-use term explanations
 - 📋 **`GLOSSARY.md`** — a single glossary of every domain term (SAM2, Depth-Anything, OpenSCAD,
@@ -578,11 +760,18 @@ layered rule-config structure. Build an analogous multi-level lint system for 3D
 
 ## 27. Research capture
 - ✅ `RESEARCH.md` (this repo) — consolidated index of the literature survey + benchmarks + metrics,
-  pointing to the vendored `docs/research/{report.md,report.pdf,sources.md,3d-cli-backlog.md}`.
-- ✅ `APPLY-RESEARCH.md` — concrete implementation ideas/plan for turning research into `3d` tools
-  (per-area approach/library/algorithm), referenced by the feature sections.
+  pointing to the vendored `docs/research/{report.md,report.pdf,sources.md}`.
+- ✅ **The prioritized P0–P5 backlog was folded into the feature sections (map in §17) — now
+  canonical — and its standalone file deleted.** The full per-item rationale lives in the research
+  report ([`docs/research/report.md`](docs/research/report.md)).
+- 📋 **`APPLY-RESEARCH.md` is a POST-§12-survey deliverable that does not exist yet.** Its old
+  per-area application ideas/algorithms/libraries were distributed into the matching feature sections
+  (e.g. strength → §6, axis/PCA → §7, ai design/critique → §13, metric formulas → §13.4) and the file
+  was deleted. It is to be **created** *after* the §12 literature survey completes, summarizing how
+  each newly surveyed paper/algorithm gets applied. Until then ROADMAP holds the content.
 - ✅ `GLOSSARY.md` — domain terms (incl. SAM2, CGAL, …) with links; linked across the repo.
-- 📋 Extend all three as new papers/tools/terms are surveyed (§12).
+- 📋 Extend `RESEARCH.md` / `GLOSSARY.md` as new papers/tools/terms are surveyed, and create
+  `APPLY-RESEARCH.md` once §12 lands (§12).
 
 ## 28. `3d init` — project scaffolder + project registry
 - 📋 **`3d init [path]`** — fully sets up a new `3d` project in one command:
@@ -710,8 +899,9 @@ The CLI work now has its own repo and this ROADMAP as the single source. Pick up
 - ✅ Web dashboard integrated into the registry (`lib/commands/web.py` + `lib/web/`); `3d web` boots.
 - ✅ ROADMAP §0–§27 + `docs/specs/2026-06-05-3d-cli-architecture.md` + `docs/rules/` (dev/testing/
    code-style/decision-requests).
-- ✅ Research vendored: `docs/research/{report.md,report.pdf,sources.md,3d-cli-backlog.md}` +
-   `RESEARCH.md` / `APPLY-RESEARCH.md` / `GLOSSARY.md`.
+- ✅ Research vendored: `docs/research/{report.md,report.pdf,sources.md}` + `RESEARCH.md` /
+   `GLOSSARY.md`. (The prioritized backlog + the APPLY-RESEARCH draft were folded into the ROADMAP
+   feature sections and their files deleted — see §17/§27.)
 - ✅ All temp doc branches merged + deleted; no open branches, no worktrees.
 - ⚠️ **First real code task next session — config dir**: code uses `~/.config/3d/` (foundation + web,
    incl. the web agent's choice); rename to `~/.config/3d-cli/` per §23 (one constant in

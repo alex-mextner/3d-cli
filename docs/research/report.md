@@ -2503,4 +2503,6 @@ concrete `3d` subcommand:
   the formal framing (IoU/reprojection objective, the 3-4-DoF ortho collapse, freeze-pose
   discipline). Confirms and formalises a shipped feature rather than adding one.
 
-The companion `3d-cli-backlog.md` turns these into a prioritised, actionable backlog.
+These were turned into a prioritised, actionable backlog and folded directly into the feature
+sections of [`ROADMAP.md`](../../ROADMAP.md) (canonical); see ROADMAP §17 for the priority tiers
+and critical path.
