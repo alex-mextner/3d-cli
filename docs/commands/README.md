@@ -42,6 +42,9 @@ explain why the command exists, what its inputs mean, and how it fits into the l
 
 ### Reference-Match Pipeline
 
+For a practical figure-by-figure image backplate loop, see
+[Reference Backplate Workflow](../workflows/reference-backplate.md).
+
 | Command | Doc | Role |
 |---|---|---|
 | `compare` | [compare.md](compare.md) | Segmented model/reference comparison with [IoU](GLOSSARY.md#iou), [SSIM](GLOSSARY.md#ssim)/DSSIM, and artifacts. |

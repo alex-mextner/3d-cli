@@ -34,3 +34,22 @@ def test_updated_help_examples_are_reflected_in_command_docs() -> None:
         text = _doc(name)
         for snippet in snippets:
             assert snippet in text, f"{snippet!r} missing from docs/commands/{name}.md"
+
+
+def test_reference_backplate_workflow_documents_existing_command_story() -> None:
+    text = (ROOT / "docs" / "workflows" / "reference-backplate.md").read_text(
+        encoding="utf-8"
+    )
+    required_snippets = (
+        "3d preprocess refs/bracket-side.jpg -o work/backplate/",
+        "3d fit-camera model.scad refs/bracket-side.jpg",
+        "CAM=\"$(jq -r .camera_arg work/backplate/camera.json)\"",
+        "3d render model.scad",
+        "3d overlay work/backplate/render-001.png refs/bracket-side.jpg",
+        "3d silhouette model.scad",
+        "3d score work/backplate/model-mask-001.png work/backplate/mask.png",
+        "3d compare model.scad refs/bracket-side.jpg",
+        "Remaining Gaps",
+    )
+    for snippet in required_snippets:
+        assert snippet in text, f"{snippet!r} missing from reference backplate workflow"
