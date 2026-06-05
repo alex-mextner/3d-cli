@@ -16,3 +16,6 @@ score/
 
 # keep example sources and any intentionally-committed reference images
 !examples/*.scad
+
+# local tooling state
+.serena/
