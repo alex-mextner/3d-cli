@@ -1,41 +1,26 @@
 #!/usr/bin/env bash
-# 3d libs — manage OpenSCAD libraries (clone into the repo's libs/, print OPENSCADPATH).
+# 3d libs — INFO only: print the OPENSCADPATH and list installed OpenSCAD libraries.
+# Installation is handled automatically by the first-run bootstrap (see lib/common.sh
+# maybe_bootstrap); there is no `libs install` anymore.
 set -uo pipefail
 source "$REPO_ROOT/lib/common.sh"
 
 LIBS_DIR="$REPO_ROOT/libs"
 
-# name -> git URL  (parallel arrays for bash 3 compatibility)
-NAMES="bosl2 nopscadlib"
-url_for() {
-    case "$1" in
-        bosl2)      echo "https://github.com/BelfrySCAD/BOSL2.git" ;;
-        nopscadlib) echo "https://github.com/nophead/NopSCADlib.git" ;;
-        *) return 1 ;;
-    esac
-}
-dir_for() {
-    case "$1" in
-        bosl2)      echo "BOSL2" ;;
-        nopscadlib) echo "NopSCADlib" ;;
-        *) return 1 ;;
-    esac
-}
-
 usage() {
 cat <<EOF
-3d libs <subcommand>
-  install bosl2|nopscadlib|all   clone OpenSCAD libraries into libs/
+3d libs <subcommand>   (info only — libraries auto-install on first run)
   path                           print the OPENSCADPATH line to export
   list                           show installed libraries
 
 Notes:
-  After installing, run:  export \$(3d libs path)
-  (or add it to your shell profile) so 'include <BOSL2/std.scad>' resolves.
+  OpenSCAD libraries (BOSL2, NopSCADlib) are cloned into libs/ automatically on the
+  first \`3d\` invocation, and OPENSCADPATH is auto-exported by the CLI — so
+  'include <BOSL2/std.scad>' just resolves. \`libs path\` prints the line if you want it
+  in your own (non-3d) shell. To re-install, remove ~/.config/3d/.bootstrapped and rerun.
 
 Examples:
-  3d libs install bosl2
-  3d libs install all
+  3d libs list
   export \$(3d libs path)
 EOF
 }
@@ -44,44 +29,15 @@ EOF
 sub="$1"; shift || true
 case "$sub" in -h|--help|help) usage; exit 0 ;; esac
 
-install_one() {
-    local name="$1" url dir dst
-    url="$(url_for "$name")" || { echo "libs: unknown library '$name' (known: $NAMES)" >&2; return 2; }
-    dir="$(dir_for "$name")"
-    dst="$LIBS_DIR/$dir"
-    mkdir -p "$LIBS_DIR"
-    command -v git >/dev/null 2>&1 || { echo "libs: git not found" >&2; return 127; }
-    if [ -d "$dst/.git" ]; then
-        echo "libs: $name already present at $dst — pulling latest"
-        git -C "$dst" pull --ff-only 2>&1 | sed 's/^/  /' || echo "  (pull skipped)"
-    else
-        echo "libs: cloning $name -> $dst"
-        git clone --depth 1 "$url" "$dst" 2>&1 | sed 's/^/  /'
-    fi
-    [ -d "$dst" ] && echo "libs: $name ready ($dst)"
-}
-
 case "$sub" in
     install)
-        target="${1:-}"
-        [ -n "$target" ] || { echo "libs install: name required (bosl2|nopscadlib|all)" >&2; exit 2; }
-        rc=0
-        if [ "$target" = all ]; then
-            for n in $NAMES; do install_one "$n" || rc=$?; done
-        else
-            install_one "$target" || rc=$?
-        fi
-        echo
-        echo "Set the path:  export $($0 path 2>/dev/null || true)"
-        exit $rc ;;
+        echo "libs: 'install' was removed — libraries auto-install on first run." >&2
+        echo "      To force a re-install: rm ~/.config/3d/.bootstrapped && 3d help" >&2
+        exit 2 ;;
     path)
-        # OPENSCADPATH lets `include <BOSL2/std.scad>` resolve from libs/.
-        # Append any pre-existing OPENSCADPATH so user libs still work.
-        if [ -n "${OPENSCADPATH:-}" ]; then
-            echo "OPENSCADPATH=$LIBS_DIR:$OPENSCADPATH"
-        else
-            echo "OPENSCADPATH=$LIBS_DIR"
-        fi
+        # common.sh already prepended $LIBS_DIR to OPENSCADPATH (dedup-guarded), so emit
+        # that as-is — it lets `include <BOSL2/std.scad>` resolve and keeps user libs.
+        echo "OPENSCADPATH=${OPENSCADPATH:-$LIBS_DIR}"
         ;;
     list)
         echo "Installed OpenSCAD libraries in $LIBS_DIR:"
@@ -92,9 +48,9 @@ case "$sub" in
                 found=1
                 echo "  - $(basename "$d")"
             done
-            [ $found -eq 0 ] && echo "  (none — run '3d libs install all')"
+            [ $found -eq 0 ] && echo "  (none — re-run after removing ~/.config/3d/.bootstrapped)"
         else
-            echo "  (none — run '3d libs install all')"
+            echo "  (none — re-run after removing ~/.config/3d/.bootstrapped)"
         fi
         echo
         echo "To use:  export \$(3d libs path)" ;;

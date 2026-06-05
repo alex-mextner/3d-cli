@@ -24,6 +24,18 @@ if [ -z "${REPO_ROOT:-}" ]; then
 fi
 export REPO_ROOT
 
+# Auto-export OPENSCADPATH from the repo libs/ so `include <BOSL2/std.scad>` resolves
+# with no manual step. Prepend libs/ to any pre-existing OPENSCADPATH (user libs still
+# work). Only do it once per process and only if libs/ exists.
+if [ -d "$REPO_ROOT/libs" ]; then
+    case ":${OPENSCADPATH:-}:" in
+        *":$REPO_ROOT/libs:"*) ;;  # already present
+        *) if [ -n "${OPENSCADPATH:-}" ]; then OPENSCADPATH="$REPO_ROOT/libs:$OPENSCADPATH"
+           else OPENSCADPATH="$REPO_ROOT/libs"; fi
+           export OPENSCADPATH ;;
+    esac
+fi
+
 find_openscad() {
     if [ -n "${OPENSCAD:-}" ] && command -v "$OPENSCAD" >/dev/null 2>&1; then
         echo "$OPENSCAD"; return 0
@@ -142,4 +154,54 @@ resolve_python() {
     if [ -x "$REPO_ROOT/.venv/bin/python" ]; then echo "$REPO_ROOT/.venv/bin/python"; return 0; fi
     command -v python3 >/dev/null 2>&1 && { echo python3; return 0; }
     return 1
+}
+
+# =============================================================================
+# First-run bootstrap of the OpenSCAD libraries (BOSL2, NopSCADlib) into libs/.
+# Runs ONCE (gated by ~/.config/3d/.bootstrapped), quietly, and is NON-FATAL if
+# offline — it must never block `render`/`help`. Idempotent: skips libs already
+# present and still touches the marker so we don't retry every invocation.
+# =============================================================================
+THREED_STATE_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/3d"
+THREED_BOOTSTRAP_MARKER="$THREED_STATE_DIR/.bootstrapped"
+
+# bootstrap_url_for / bootstrap_dir_for: the library set cloned on first run.
+bootstrap_url_for() {
+    case "$1" in
+        bosl2)      echo "https://github.com/BelfrySCAD/BOSL2.git" ;;
+        nopscadlib) echo "https://github.com/nophead/NopSCADlib.git" ;;
+        *) return 1 ;;
+    esac
+}
+bootstrap_dir_for() {
+    case "$1" in
+        bosl2)      echo "BOSL2" ;;
+        nopscadlib) echo "NopSCADlib" ;;
+        *) return 1 ;;
+    esac
+}
+
+# maybe_bootstrap: the first-run hook. Returns 0 always (non-fatal).
+maybe_bootstrap() {
+    [ -f "$THREED_BOOTSTRAP_MARKER" ] && return 0   # fast path: single stat
+    command -v git >/dev/null 2>&1 || return 0       # no git -> can't bootstrap, skip quietly
+    local libs_dir="$REPO_ROOT/libs" name url dir dst did=0
+    mkdir -p "$libs_dir" 2>/dev/null || return 0
+    for name in bosl2 nopscadlib; do
+        url="$(bootstrap_url_for "$name")"; dir="$(bootstrap_dir_for "$name")"
+        dst="$libs_dir/$dir"
+        [ -d "$dst/.git" ] && continue              # already present
+        [ "$did" -eq 0 ] && { echo "3d: first run — installing OpenSCAD libraries into libs/ (once)..." >&2; did=1; }
+        # --depth 1 + bounded so an offline/slow network can NEVER stall `3d help`/`render`.
+        # Prefer a `timeout`/`gtimeout` wrapper (kills a hung TCP/DNS); always also pass git's
+        # own low-level connect/IO timeouts as a fallback when no timeout binary exists.
+        local -a tmo=()
+        if command -v timeout  >/dev/null 2>&1; then tmo=(timeout 60)
+        elif command -v gtimeout >/dev/null 2>&1; then tmo=(gtimeout 60); fi
+        "${tmo[@]+"${tmo[@]}"}" git \
+            -c http.connectTimeout=10 -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=20 \
+            clone --depth 1 "$url" "$dst" >/dev/null 2>&1 || true
+    done
+    mkdir -p "$THREED_STATE_DIR" 2>/dev/null && : > "$THREED_BOOTSTRAP_MARKER" 2>/dev/null || true
+    return 0
 }

@@ -140,7 +140,7 @@ fi
 
 echo
 echo "${B}OpenSCAD libraries${Z}"
-if [ -d "$REPO_ROOT/libs/BOSL2" ]; then pass "libs/BOSL2" "$REPO_ROOT/libs/BOSL2"; else warn "libs/BOSL2" "absent — \`3d libs install bosl2\`"; fi
+if [ -d "$REPO_ROOT/libs/BOSL2" ]; then pass "libs/BOSL2" "$REPO_ROOT/libs/BOSL2"; else warn "libs/BOSL2" "absent — auto-installs on next \`3d\` run (or: rm ~/.config/3d/.bootstrapped)"; fi
 
 echo
 if [ "$MISSING" -eq 0 ]; then

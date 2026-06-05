@@ -23,6 +23,10 @@ LIB="$REPO_ROOT/lib"
 
 VERSION="0.1.0"
 
+# Shared helpers (also auto-exports OPENSCADPATH from libs/) + first-run bootstrap.
+source "$LIB/common.sh"
+maybe_bootstrap
+
 # ---- color (only when stdout is a tty) --------------------------------------
 if [ -t 1 ]; then B=$'\e[1m'; C=$'\e[36m'; Y=$'\e[33m'; R=$'\e[31m'; Z=$'\e[0m'
 else B=""; C=""; Y=""; R=""; Z=""; fi
