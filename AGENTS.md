@@ -4,9 +4,9 @@ Instructions for AI agents (and humans) working in this repository. English only
 
 ## What this is
 
-`3d` is a scriptable, cross-platform CLI for AI-assisted parametric 3D modeling in
-OpenSCAD: camera-locked renders, cross-sections, silhouette scoring, a forced-monotonic
-match loop, and manifold / printability / collision verification gates. The entry point
+`3d` is a scriptable, AI-assisted CLI for the whole 3D FDM lifecycle — modeling,
+verification, matching, animation, simulation, conversion, slicing, and print monitoring.
+The entry point
 is `bin/3d` — a **thin typed Python dispatcher** that discovers self-registering command
 modules from `lib/commands/<name>.py`. Heavy python tools (render/mesh/collision/…) live
 in `lib/*.py` and run through `cli.pyrun`.

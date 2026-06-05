@@ -2,15 +2,30 @@
 
 `3d` is a command-line + web toolkit for the whole **[FDM](GLOSSARY.md#fdm) (filament 3D-printing)** lifecycle:
 parametric modeling ([OpenSCAD](GLOSSARY.md#openscad)-first) → render & view → mesh / printability / collision
-verification → reference-photo matching → slicing & print prep. It is **engineering-first**
-today (functional parts, fits, gates) and grows toward art later. Everything is one
-discoverable dispatcher: `3d <command>`, scriptable, composable, with structured, actionable
-errors (what failed, why, and the exact fix).
+verification → AI-assisted design, animation, simulation, matching → slicing & print prep.
+It is **engineering-first** today (functional parts, fits, gates) and grows toward art later.
+Everything is one discoverable dispatcher: `3d <command>`, scriptable, composable, with
+structured, actionable errors (what failed, why, and the exact fix).
 
 It is **general-purpose** across 3D FDM work. One of the pipelines it ships is a
 **reference-photo match loop** (camera-locked render → [silhouette](GLOSSARY.md#silhouette) score → LLM numeric-delta
 edits → [manifold](GLOSSARY.md#manifold)/printability gates → accept-only-if-it-improves) — see
 [Reference-match pipeline](#reference-match-pipeline) — one example workflow among many.
+
+## What you can do with 3d
+
+`3d` is a Swiss-army knife for the whole 3D FDM lifecycle — not a single-purpose tool. Major use cases:
+
+- **Reference-photo match** — tune a parametric model to match a photo (one pipeline among many)
+- **Design from scratch with AI** — text-to-3d, dimensions-and-sketch-to-3d, parametric skeleton generation
+- **Parts & fixtures** — design brackets, mounts, connectors, enclosures with parametric constraints
+- **Animation & motion** — `3d animate`, kinematics, motion verification
+- **Simulation & analysis** — FEA, strength, thermal, collision detection
+- **Format conversion & AR** — export to USDZ/GLB/STEP, view in AR
+- **Slicing & print monitoring** — slice to G-code, monitor prints, failure recovery
+- **Batch & automated workflows** — multi-angle renders, batch exports, CI gates
+
+The reference-photo match pipeline is [documented below](#reference-match-pipeline) as one example workflow.
 
 ## Install
 

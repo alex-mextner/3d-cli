@@ -9,10 +9,10 @@ Status legend: ✅ done · 🔨 in progress · 📋 planned
 
 ## 0. Vision
 `3d` is a rich, cross-platform (macOS + Linux) command-line + web toolkit covering the WHOLE
-FDM lifecycle — idea/spec → AI-assisted, reference-photo-driven **parametric** modeling
-(OpenSCAD-first) → verification, pixel-perfect matching, physics/kinematics → **material
-procurement/inventory** → print prep → **printing, live monitoring & failure recovery** (Klipper/
-Moonraker, OctoPrint, Bambu, Prusa) — plus live observation of AI agents doing the work. Its own repo
+FDM lifecycle — idea/spec → AI-assisted **parametric** modeling (OpenSCAD-first) → verification,
+matching, animation, simulation → **material procurement/inventory** → print prep → **printing,
+live monitoring & failure recovery** (Klipper/Moonraker, OctoPrint, Bambu, Prusa) — plus live
+observation of AI agents doing the work. Its own repo
 ([github.com/alex-mextner/3d-cli](https://github.com/alex-mextner/3d-cli)), installed as a standard Python package exposing the `3d`
 console-script (pipx / uv tool / pip — see §29), not a manual symlink.
 
