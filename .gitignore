@@ -19,3 +19,4 @@ score/
 
 # local tooling state
 .serena/
+.claude/
