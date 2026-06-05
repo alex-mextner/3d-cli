@@ -31,6 +31,7 @@ USAGE = """3d preprocess <reference.jpg> [-o outdir] [options]
   Produce mask.png (subject silhouette) + depth.png (proportional depth).
   Tiers (auto): SAM2/rembg -> grabCut (mask); Depth-Anything-V2 -> pseudo-depth.
   Always writes both outputs (degrades gracefully if heavy models unavailable).
+  Prints mask coverage, bbox_xywh, and centroid_xy so segmentation quality is inspectable.
 
 Options:
   -o, --out DIR         output dir (default: alongside the image)

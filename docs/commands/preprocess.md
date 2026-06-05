@@ -4,6 +4,8 @@ Takes a reference photograph and produces two outputs: `mask.png` (subject silho
 
 **Why it exists.** A raw photo has background clutter and no 3D information. Separating the subject and estimating depth gives the match loop clean data to compare against the model silhouette.
 
+The command also prints deterministic mask metadata: coverage percentage, `bbox_xywh`, and `centroid_xy`. Use these values to catch obvious segmentation failures, such as a mask that covers almost the whole frame or a centroid far from the intended subject.
+
 ## Usage
 
 ```
@@ -20,6 +22,13 @@ Takes a reference photograph and produces two outputs: `mask.png` (subject silho
 ```bash
 3d preprocess ref.jpg -o work/
 3d preprocess ref.jpg --force-fallback
+```
+
+Example output:
+
+```text
+[mask ] tier=grabcut(cv2-fallback) (0.1s)  -> work/mask.png  (subject covers 34.7% of frame)
+[mask ] bbox_xywh=(152, 80, 791, 612)  centroid_xy=(551.4, 392.8)
 ```
 
 ## Tiers (auto-degrade)

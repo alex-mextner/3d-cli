@@ -71,6 +71,7 @@ import argparse
 import sys
 import time
 from pathlib import Path
+from typing import TypedDict
 
 import numpy as np
 from PIL import Image
@@ -89,6 +90,12 @@ except ImportError:  # pragma: no cover
 # --------------------------------------------------------------------------- #
 #  IO helpers
 # --------------------------------------------------------------------------- #
+class MaskMetadata(TypedDict):
+    coverage_pct: float
+    bbox_xywh: tuple[int, int, int, int] | None
+    centroid_xy: tuple[float, float] | None
+
+
 def load_rgb(path: Path) -> np.ndarray:
     """Load an image as HxWx3 uint8 RGB (handles RGBA/grayscale)."""
     img = Image.open(path).convert("RGB")
@@ -98,6 +105,25 @@ def load_rgb(path: Path) -> np.ndarray:
 def save_gray(arr: np.ndarray, path: Path) -> None:
     """Save a HxW uint8 array as a single-channel PNG."""
     Image.fromarray(arr.astype(np.uint8), mode="L").save(path)
+
+
+def mask_metadata(mask: np.ndarray) -> MaskMetadata:
+    """Return deterministic geometry metadata for a binary subject mask."""
+    subject = mask > 0
+    total = int(mask.size)
+    count = int(subject.sum())
+    coverage = 100.0 * count / total if total > 0 else 0.0
+    if count == 0:
+        return {"coverage_pct": coverage, "bbox_xywh": None, "centroid_xy": None}
+
+    ys, xs = np.nonzero(subject)
+    x0 = int(xs.min())
+    y0 = int(ys.min())
+    x1 = int(xs.max())
+    y1 = int(ys.max())
+    bbox = (x0, y0, x1 - x0 + 1, y1 - y0 + 1)
+    centroid = (float(xs.mean()), float(ys.mean()))
+    return {"coverage_pct": coverage, "bbox_xywh": bbox, "centroid_xy": centroid}
 
 
 # --------------------------------------------------------------------------- #
@@ -349,8 +375,12 @@ def run(args: argparse.Namespace) -> int:
         mask = mask_grabcut(rgb)
         mask_tier = f"grabcut(cv2-fallback) ({time.time()-t:.1f}s)"
     save_gray(mask, mask_path)
-    cov = 100.0 * (mask > 0).mean()
-    print(f"[mask ] tier={mask_tier}  -> {mask_path}  (subject covers {cov:.1f}% of frame)")
+    meta = mask_metadata(mask)
+    print(
+        f"[mask ] tier={mask_tier}  -> {mask_path}  "
+        f"(subject covers {meta['coverage_pct']:.1f}% of frame)"
+    )
+    print(f"[mask ] bbox_xywh={meta['bbox_xywh']}  centroid_xy={meta['centroid_xy']}")
 
     # ----- DEPTH ------------------------------------------------------------ #
     depth = None
