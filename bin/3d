@@ -73,10 +73,21 @@ ${B}REFERENCE-MATCH PIPELINE${Z}
                                           fit an OpenSCAD camera to a reference photo by maximizing silhouette IoU; saves the viewpoint.
   ${C}preprocess${Z} <reference.jpg> [-o outdir]                        subject mask + proportional depth (SAM2/Depth-Anything if installable, else OpenCV).
 
+${B}SLICING${Z}
+  ${C}slice${Z}    <stl|3mf|file.scad> [-o out.gcode] [--printer NAME] [--profile FILE] [--check]
+                  Slice to G-code via OrcaSlicer / Bambu Studio / PrusaSlicer (auto-detected).
+                  --check = sliceability gate (nonzero exit on failure). .scad is exported first.
+
 ${B}LIBRARIES${Z}
   ${C}libs install${Z} bosl2|nopscadlib|all     clone OpenSCAD libraries into libs/.
   ${C}libs path${Z}                             print the OPENSCADPATH to export.
   ${C}libs list${Z}                             show installed libraries.
+
+${B}ENVIRONMENT${Z}
+  ${C}doctor${Z}                                detect present/missing deps (openscad, magick, python, uv,
+                                          mesh stack, slicer) with the exact install command per OS.
+  ${C}setup${Z}    [--yes] [--dry-run] [--no-slicer]
+                  install the missing deps, OS-aware (brew / apt / dnf / pacman + repo .venv).
 
 Run '3d <command> --help' for details and examples.
 EOF
@@ -92,13 +103,13 @@ case "$cmd" in
     render|preview|multi|section|export|validate|params|check|printability|acceptance|silhouette|overlay|score)
         bash "$LIB/cmd_${cmd}.sh" "$@" ;;
 
-    mesh|collision|match|preprocess|libs|fit-camera)
+    mesh|collision|match|preprocess|libs|fit-camera|slice|doctor|setup)
         bash "$LIB/cmd_${cmd}.sh" "$@" ;;
 
     *)
         echo "${R}3d: unknown command '$cmd'${Z}" >&2
         echo "Run '3d help' for the list of commands. Closest matches:" >&2
-        compgen -W "render preview multi section export validate params check mesh printability acceptance collision silhouette overlay score match fit-camera preprocess libs help version" \
+        compgen -W "render preview multi section export validate params check mesh printability acceptance collision silhouette overlay score match fit-camera preprocess libs slice doctor setup help version" \
             | grep -i "$(printf '%s' "$cmd" | cut -c1-3)" 2>/dev/null | sed 's/^/  /' >&2 || true
         exit 2 ;;
 esac

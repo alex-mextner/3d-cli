@@ -34,6 +34,19 @@ Requirements:
 
 Every command either works or fails with a clear "install X" message — no broken commands.
 
+**Or just let the CLI install its own dependencies, OS-aware:**
+
+```bash
+3d doctor          # report what's present/missing + the exact install command for THIS OS
+3d setup --yes     # actually install the missing ones (brew on macOS; apt/dnf/pacman on Linux)
+```
+
+`doctor` is read-only and prints PASS/MISSING per item (openscad, imagemagick, python3,
+uv/pip, the python mesh stack, and a slicer). `setup` installs the missing ones —
+Homebrew formulae/casks on macOS, the right package manager on Linux (with sudo), python
+deps into the repo `.venv` — idempotent, never global, and never hard-fails the whole run
+if one optional item can't install. `--dry-run` prints the commands without running them.
+
 ## Commands
 
 Run `3d <command> --help` for full options. Examples below assume `examples/cube.scad`.
@@ -154,6 +167,46 @@ re-proposes a reverted edit (the anti-FlipFlop defense, report §3). Tunable par
 **derived from the constants file** (numeric scalars) — restrict with `--params a,b,c`, or
 point at a separate `--constants FILE`. `--dry-run` skips the LLM and synthesises
 deterministic edits to smoke-test the machinery.
+
+### Slicing
+
+| Command | What |
+|---|---|
+| `3d slice <stl\|3mf\|file.scad>` | slice to G-code via the installed slicer; **`--check` = sliceability gate** (nonzero exit on failure). |
+
+```bash
+3d slice part.stl -o part.gcode
+3d slice part.scad --check                          # .scad → STL → slice, gate only
+3d slice part.3mf --profile "machine.json,process.json" --printer "Bambu Lab A1"
+```
+
+Slicer auto-detection preference: **OrcaSlicer → Bambu Studio → PrusaSlicer** (the Bambu
+A1's native studio is in the middle). Found on PATH and on macOS app bundles
+(`/Applications/OrcaSlicer.app/...`, `BambuStudio.app`, `PrusaSlicer.app`); force a
+specific one with `SLICER=/path/to/binary`. The three share heritage but the CLIs
+**diverged**, so each gets its own invocation: PrusaSlicer is `-g --output out.gcode`,
+OrcaSlicer/Bambu are `--slice 0 --outputdir <dir>` (the produced G-code is relocated to
+your `-o` path). Those core flags are the verified part of the contract; `--printer` is
+**best-effort** (no single agreed printer-preset flag exists across the three — it's
+routed through the profile-load mechanism, so prefer `--profile` for control). `--check`
+slices as a pass/fail oracle and discards the G-code. A `.scad` input is exported to STL
+first via `3d export`. If no slicer is
+installed, `3d slice` prints the install hint (and `3d setup` offers to install OrcaSlicer)
+— never broken.
+
+### Environment (deps)
+
+| Command | What |
+|---|---|
+| `3d doctor` | report present/missing deps + the exact install command per OS (read-only). |
+| `3d setup [--yes] [--dry-run] [--no-slicer]` | install the missing deps (brew / apt / dnf / pacman + repo `.venv`). |
+
+```bash
+3d doctor                 # PASS/MISSING table
+3d setup --yes            # install everything missing, non-interactive
+3d setup --dry-run        # print the commands without running them
+3d setup --no-slicer      # skip the heaviest item (the slicer cask/AppImage)
+```
 
 ### OpenSCAD libraries
 
