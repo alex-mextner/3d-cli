@@ -9,10 +9,17 @@ from errors import InputNotFound
 
 USAGE = """3d params <file.scad> [--json]
   Extract Customizer-style parameters (name = value; // [min:max] desc).
+  Use this to inspect tunable constants, generate parameter tables, drive batch
+  renders, or feed values into the match loop.
 
-Example:
-  3d params model.scad
-  3d params model.scad --json"""
+Options:
+  --json                emit JSON instead of a human-readable list. Use this when
+                         feeding the output into a script or the match loop.
+
+Examples:
+  3d params bracket.scad
+  3d params bracket.scad --json | jq '.[] | {name, value}'
+  3d params bracket.scad --json > params.json"""
 
 
 def run(argv: list[str]) -> int:

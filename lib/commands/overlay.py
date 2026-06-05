@@ -12,9 +12,19 @@ from errors import GateFailure, InputNotFound, UsageError
 
 USAGE = """3d overlay <render.png> <reference.{png,jpg}> [-o outdir]
   Difference / 50% ghost / canny edge-overlay diagnostics into outdir.
+  Produces three files: overlay.png (difference map), ghost.png (50% blend),
+  and edge_overlay.png (canny edges in red + cyan). Use this to visually spot
+  misalignment, missing features, or geometry drift that numeric scores alone
+  cannot show.
 
-Example:
-  3d overlay render.png ref.jpg -o work/"""
+Options:
+  -o, --out DIR         output directory (default: the render's directory)
+                         Use this to collect all overlay files in one place.
+
+Examples:
+  3d overlay render.png ref.jpg -o work/
+  3d overlay preview.png photo.jpg          # writes to preview's directory
+  3d overlay render.png ref.jpg -o diff/  # collect all three outputs in diff/"""
 
 CANNY = "0x1+10%+30%"  # radius x sigma + lower% + upper% hysteresis (report 7.3d)
 GHOST_OPACITY = "50"

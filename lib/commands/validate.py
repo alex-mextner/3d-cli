@@ -10,7 +10,13 @@ from cli.registry import Command
 from errors import InputNotFound, GateFailure
 
 USAGE = """3d validate <file.scad>
-  Parse-only syntax check (exports echo; no geometry render). Exit 0 = OK, 1 = error."""
+  Parse-only syntax check (exports echo; no geometry render). Exit 0 = OK, 1 = error.
+  Use this in editor-on-save hooks or CI linting to catch syntax errors,
+  missing includes, and broken assert() calls in seconds without a full CGAL render.
+
+Examples:
+  3d validate bracket.scad
+  3d validate model.scad   # fast CI check; no geometry rendered"""
 
 
 def run(argv: list[str]) -> int:

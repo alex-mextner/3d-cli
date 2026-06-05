@@ -43,6 +43,7 @@ The unified render command. It produces camera-locked PNGs from an `.scad` file 
 | `-o, --out PATH` | `<file>.png` | Output PNG (single / section) |
 | `--size WxH` | `1200x900` | Image size (single / section); multi uses `800x600` |
 | `-D k=v` | — | Pass-through OpenSCAD define (repeatable) |
+| `--render` | off | Force CGAL render mode (slower but exact; use when preview mode is not enough) |
 
 ```bash
 3d render model.scad --view left -o left.png
