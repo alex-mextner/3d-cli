@@ -68,6 +68,7 @@ These modules support reference preprocessing, image comparison, scoring, and ma
 orchestration:
 
 - `match_loop.py`
+- `mask_geometry.py`
 - `preprocess_reference.py`
 - `refmatch.py`
 - `lib/cli/imaging.py`
@@ -104,6 +105,7 @@ Every current root Python module is listed here so future additions are intentio
 - `frame_check.py` — render framing checks.
 - `linting.py` — OpenSCAD lint helpers.
 - `match_loop.py` — reference match-loop orchestration.
+- `mask_geometry.py` — lightweight mask coverage, bounding-box, and centroid metadata.
 - `materials.py` — materials registry.
 - `mesh_check.py` — mesh verification implementation.
 - `metrics.py` — metrics helpers and persistence.

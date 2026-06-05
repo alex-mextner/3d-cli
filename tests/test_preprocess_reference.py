@@ -48,25 +48,6 @@ def test_depth_pseudo_is_8bit_and_masked() -> None:
     assert depth[mask > 0].max() > 0
 
 
-def test_mask_metadata_reports_bbox_centroid_and_coverage() -> None:
-    mask = np.zeros((10, 12), dtype=np.uint8)
-    mask[2:6, 3:9] = 255
-
-    meta = pr.mask_metadata(mask)
-
-    assert meta["coverage_pct"] == pytest.approx(20.0)
-    assert meta["bbox_xywh"] == (3, 2, 6, 4)
-    assert meta["centroid_xy"] == pytest.approx((5.5, 3.5))
-
-
-def test_mask_metadata_handles_empty_mask() -> None:
-    meta = pr.mask_metadata(np.zeros((8, 9), dtype=np.uint8))
-
-    assert meta["coverage_pct"] == pytest.approx(0.0)
-    assert meta["bbox_xywh"] is None
-    assert meta["centroid_xy"] is None
-
-
 def test_no_hardcoded_subject_in_user_facing_text() -> None:
     """The parser's description/help must not assert a single subject as THE subject.
 
