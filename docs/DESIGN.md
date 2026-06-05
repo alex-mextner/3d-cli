@@ -51,7 +51,7 @@ Replace `<concept>` with the concrete subject. Examples:
 ## File naming
 
 ```
-docs/img/<term>.png
+docs/img/<term>.svg
 ```
 
 where `<term>` is the glossary anchor slug (e.g., `iou`, `manifold`, `fit-camera`).
@@ -65,7 +65,7 @@ where `<term>` is the glossary anchor slug (e.g., `iou`, `manifold`, `fit-camera
 ## Usage in Markdown
 
 ```markdown
-![Silhouette IoU — two overlapping masks, intersection in sage green, difference in terracotta](docs/img/iou.png)
+![Silhouette IoU — two overlapping masks, intersection in sage green, difference in terracotta](docs/img/iou.svg)
 ```
 
 Keep the alt text descriptive — it doubles as the caption.
@@ -73,13 +73,16 @@ Keep the alt text descriptive — it doubles as the caption.
 ## Generation command
 
 ```bash
-# single image
-draw "Minimal flat technical illustration of a watertight 3D cube, clean line art, solid fills, no text, sage green and terracotta accents on off-white background, thin dark outlines, square 1024x1024" -o docs/img/manifold.png
+# single image (AI-generated via HF)
+draw "Minimal flat technical illustration of a watertight 3D cube..." -o docs/img/manifold.png
 
 # batch (from a script)
 cat terms.txt | while read term prompt; do
   draw "$prompt" -o "docs/img/${term}.png"
 done
+
+# vector fallback (deterministic, no API needed)
+python docs/img/generate.py
 ```
 
 ## Design rationale

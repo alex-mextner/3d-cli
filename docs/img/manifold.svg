@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <rect width="1024" height="1024" fill="#F8F5F0"/>
+  <!-- Watertight cube -->
+  <g transform="translate(180, 320)">
+    <rect x="0" y="0" width="280" height="280" fill="#A3B59A" stroke="#2A2A2A" stroke-width="4"/>
+    <text x="140" y="340" font-size="36" text-anchor="middle" fill="#2A2A2A" font-family="sans-serif">Watertight</text>
+    <text x="140" y="380" font-size="28" text-anchor="middle" fill="#A3B59A" font-family="sans-serif">PASS</text>
+  </g>
+  <!-- Broken cube with hole -->
+  <g transform="translate(564, 320)">
+    <rect x="0" y="0" width="280" height="280" fill="#E6A57E" stroke="#2A2A2A" stroke-width="4"/>
+    <circle cx="140" cy="140" r="60" fill="#F8F5F0" stroke="#2A2A2A" stroke-width="4"/>
+    <text x="140" y="340" font-size="36" text-anchor="middle" fill="#2A2A2A" font-family="sans-serif">Hole (non-manifold)</text>
+    <text x="140" y="380" font-size="28" text-anchor="middle" fill="#E6A57E" font-family="sans-serif">FAIL</text>
+  </g>
+  <!-- Title -->
+  <text x="512" y="180" font-size="48" text-anchor="middle" fill="#2A2A2A" font-family="sans-serif">Manifold Check</text>
+</svg>

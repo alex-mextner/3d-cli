@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <rect width="1024" height="1024" fill="#F8F5F0"/>
+  <!-- Circle A (sage) -->
+  <circle cx="420" cy="512" r="280" fill="#A3B59A" opacity="0.6" stroke="#2A2A2A" stroke-width="3"/>
+  <!-- Circle B (terracotta) -->
+  <circle cx="604" cy="512" r="280" fill="#E6A57E" opacity="0.6" stroke="#2A2A2A" stroke-width="3"/>
+  <!-- Intersection label -->
+  <text x="512" y="530" font-size="36" text-anchor="middle" fill="#2A2A2A" font-family="sans-serif">Intersection</text>
+  <!-- Union label -->
+  <text x="512" y="200" font-size="36" text-anchor="middle" fill="#2A2A2A" font-family="sans-serif">Union</text>
+  <!-- Formula -->
+  <text x="512" y="920" font-size="48" text-anchor="middle" fill="#2A2A2A" font-family="sans-serif">IoU = |A ∩ B| / |A ∪ B|</text>
+</svg>

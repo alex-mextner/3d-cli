@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <rect width="1024" height="1024" fill="#F8F5F0"/>
+  <!-- Cube -->
+  <g transform="translate(362, 280)">
+    <!-- Back face -->
+    <rect x="60" y="60" width="240" height="240" fill="#6B8E9B" opacity="0.4" stroke="#2A2A2A" stroke-width="3"/>
+    <!-- Front face -->
+    <rect x="0" y="0" width="240" height="240" fill="#6B8E9B" opacity="0.6" stroke="#2A2A2A" stroke-width="3"/>
+    <!-- Cut plane (highlighted face) -->
+    <polygon points="240,0 300,60 300,300 240,240" fill="#D4C4A8" opacity="0.8" stroke="#2A2A2A" stroke-width="3"/>
+    <!-- Top edge -->
+    <line x1="0" y1="0" x2="60" y2="60" stroke="#2A2A2A" stroke-width="3"/>
+    <!-- Right edge -->
+    <line x1="240" y1="0" x2="300" y2="60" stroke="#2A2A2A" stroke-width="3"/>
+    <!-- Bottom edge -->
+    <line x1="240" y1="240" x2="300" y2="300" stroke="#2A2A2A" stroke-width="3"/>
+    <!-- Left edge -->
+    <line x1="0" y1="240" x2="60" y2="300" stroke="#2A2A2A" stroke-width="3"/>
+  </g>
+  <!-- Section label -->
+  <text x="512" y="820" font-size="48" text-anchor="middle" fill="#2A2A2A" font-family="sans-serif">Cross-Section</text>
+  <text x="512" y="880" font-size="32" text-anchor="middle" fill="#2A2A2A" font-family="sans-serif">Cut face = highlighted</text>
+</svg>
