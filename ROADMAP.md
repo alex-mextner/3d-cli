@@ -208,7 +208,7 @@ These are not features; they are the lens. New surface should be justifiable by 
 - ✅ `docs/migration.md` (source-tool → `3d` subcommand map). 📋 `docs/critic-prompts.md`.
 
 ## 12. Research & extension (ongoing)
-- 📋 Re-read the research report (`garage-band/projects/lego-loco/research/report.md`) and
+- 📋 Re-read the research report (`docs/research/report.md`) and
   put into work **everything still not implemented**.
 - 📋 Survey **more scientific papers** on related topics (silhouette/inverse-procedural/
   differentiable rendering, single-image-to-3D, depth/segmentation, FDM strength), **extend
@@ -324,7 +324,7 @@ named **pipelines** (the reference-photo match is ONE pipeline, not the identity
   block. Must list ALL deps (it is still incomplete).
 
 ## 17. Research-driven backlog (from §12 survey)
-- 📋 Source of truth: `garage-band/projects/lego-loco/research/3d-cli-backlog.md` (14 prioritized
+- 📋 Source of truth: `docs/research/3d-cli-backlog.md` (14 prioritized
   items P0–P5, each with integration point + expected metric). Fold the actionable ones into the
   sections above. Highest-value NET-NEW vein: **program synthesis for CAD** (CSGNet / ShapeAssembly
   / DeepCAD) → `3d ai design`. Also: pin exact metric formulas + library conventions in `3d metrics`
@@ -442,6 +442,55 @@ Design: spec §11. Inspiration: **ffmpeg's power without ffmpeg's UX**.
   §2's `.bootstrapped`). RECONCILE the code: the foundation + web waves currently use `~/.config/3d/`
   in `lib/cli/env.py`, `lib/web/webconfig.py`, `lib/commands/{web,libs,doctor}.py` — rename to
   `~/.config/3d-cli/` (one constant, used everywhere) so docs and code agree.
+
+## 24. Command structure: two levels + umbrella commands
+The two-layer idea (§21) applies to the **command tree itself**, not just argument ergonomics.
+- 📋 **Low-level tools are SECOND level, not at the root.** `silhouette`, `overlay`, `score`,
+  `mesh`, `manifold`, `printability`, `fit-camera`, `preprocess`, etc. are primitives — group them
+  under their domain (e.g. `3d match silhouette`, `3d match overlay`, `3d match score`,
+  `3d check mesh`, `3d check manifold`). The root stays small and intent-level; primitives live one
+  level down. (Thin top-level aliases may remain for the most common, but the canonical home is the
+  second level.)
+- 📋 **Umbrella commands auto-run everything applicable.** A high-level verb runs ALL relevant
+  primitives for the target with one call — e.g. `3d check` = every applicable gate (already),
+  `3d analyze` = full analysis with all available tools (mesh + printability + strength + silhouette
+  + metrics, whatever the project/object-model declares), `3d match` = the whole pixel-match
+  pipeline. The umbrella decides what's applicable from the `3d.yaml`/object model (§5), not a fixed
+  list. Two levels: the umbrella for "just do the right thing", the primitives for surgical control.
+
+## 25. Linter system (oxc-inspired) + `3d.yaml` `lint:` section
+Inspiration: **oxc** (`github.com/oxc-project/oxc`) — a fast linter + formatter with a clean,
+layered rule-config structure. Build an analogous multi-level lint system for 3D/FDM models.
+- 📋 **`3d lint`** — runs a configurable set of model checks (geometry, printability, naming,
+  object-model hygiene, convention conformance, style/format of the `.scad`/`3d.yaml`). Distinct
+  from `check` (the correctness/acceptance gates): `lint` is advisory/style/best-practice with
+  levels (`error|warn|off`), like a code linter. A `3d fmt` formatter counterpart (canonicalize
+  `.scad`/`3d.yaml`) is in scope, oxc-style.
+- 📋 **`3d.yaml` `lint:` section** — declare which checks run and at which level, per project / per
+  selector (§5): e.g. `lint: { wall-min: {level: error, mm: 1.2}, unused-anchor: warn,
+  overhang-45: {level: warn, select: ".structural"}, naming-id-kebab: error }`. Rules are a
+  **registry** (each rule a self-registering plugin, §3) with id, level, selector scope, autofix?.
+- 📋 **Detailed multi-level rule design** — rule categories (geometry / printability / object-model /
+  style / naming / project-convention), severity levels, per-selector scoping, autofixable vs manual,
+  baseline/suppression, and an aggregate `3d lint` report. Work out the rule catalog in detail
+  (this is a meaty sub-design — give it its own spec when built).
+
+## 26. Glossary + first-use term explanations
+- 📋 **`GLOSSARY.md`** — a single glossary of every domain term (SAM2, Depth-Anything, OpenSCAD,
+  BOSL2/NopSCADlib, manifold, IoU, Chamfer, F-score@τ, LPIPS, SSIM, op-DAG, CSG, 3MF, FDM
+  anisotropy, etc.) with a one-line definition + a good external link each. Linked from EVERYWHERE
+  in the repo (README, ROADMAP, specs) — `[SAM2](GLOSSARY.md#sam2)`.
+- 📋 **README explains each term at first mention** with a good link, then defers to the glossary.
+  No unexplained acronyms. (Initial `GLOSSARY.md` shipped this session; keep it growing as terms
+  appear.)
+
+## 27. Research capture
+- ✅ `RESEARCH.md` (this repo) — consolidated index of the literature survey + benchmarks + metrics,
+  pointing to the vendored `docs/research/{report.md,report.pdf,sources.md,3d-cli-backlog.md}`.
+- ✅ `APPLY-RESEARCH.md` — concrete implementation ideas/plan for turning research into `3d` tools
+  (per-area approach/library/algorithm), referenced by the feature sections.
+- ✅ `GLOSSARY.md` — domain terms (incl. SAM2, CGAL, …) with links; linked across the repo.
+- 📋 Extend all three as new papers/tools/terms are surveyed (§12).
 
 ---
 
