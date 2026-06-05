@@ -165,6 +165,21 @@ def run_arm(
     prompt = BASE_PROMPT + (THREEDCLI_EXTRA if mode == "3dcli" else "")
     ref_parts = [gemini_client.image_part(r) for r in refs]
 
+    # 3dcli mode = the productive environment: feed the project's modeling lessons +
+    # openscad skill as a system instruction (REST has no skill auto-discovery). mcp mode
+    # stays the bare ModelRift baseline (no skills) for a fair A/B.
+    system_text: str | None = None
+    if mode == "3dcli":
+        chunks: list[str] = []
+        for rel in ("CLAUDE.md", os.path.join(".claude", "skills", "openscad", "SKILL.md")):
+            p = os.path.join(workdir, rel)
+            try:
+                chunks.append(open(os.path.realpath(p), encoding="utf-8").read())
+            except OSError:
+                pass
+        if chunks:
+            system_text = "\n\n---\n\n".join(chunks)
+
     t0 = time.time()
     prompt_tokens_total = 0
     output_tokens_total = 0
@@ -201,7 +216,7 @@ def run_arm(
                     parts.append(gemini_client.image_part(img))
 
         print(f"[gemini_arm] round {rnd}/{max_rounds} -> {model}", file=sys.stderr)
-        res = gemini_client.generate(model, parts)
+        res = gemini_client.generate(model, parts, system=system_text)
         prompt_tokens_total += res["prompt_tokens"]
         output_tokens_total += res["output_tokens"]
         text = res["text"]
