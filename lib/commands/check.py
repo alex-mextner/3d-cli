@@ -24,33 +24,62 @@ from cli.registry import Command
 from errors import GateFailure, InputNotFound, UsageError
 
 USAGE = """3d check <file.scad> [more parts...] [options]
-  Unified verification = acceptance master gate. No selectors => run ALL applicable gates.
+  Unified verification = acceptance master gate. Run this before committing a model
+  or sending it to a printer. No selectors => run ALL applicable gates (manifold +
+  consistency + printability). Exit 0 = PASS (all HARD gates pass), 1 = FAIL.
 
 Core-gate selectors (any combination runs ONLY those core gates):
-  --manifold | --mesh     manifold / watertight gate
-  --consistency           assert() consistency gate
-  --printability          FDM printability gate (walls/overhangs)
-  --skip GATE             exclude a gate (repeatable) — the way to get a subset
+  --manifold | --mesh     manifold / watertight gate. Checks the mesh is closed and
+                            has no holes — a prerequisite for any slicer.
+                            Example: 3d check bracket.scad --mesh
+  --consistency           assert() consistency gate. Checks any assert() statements
+                            in the .scad hold (design invariants, dimensions,
+                            clearances).
+                            Example: 3d check bracket.scad --consistency
+  --printability          FDM printability gate. Checks wall thicknesses, overhang
+                            angles, and bridgability so the part is printable without
+                            failure.
+                            Example: 3d check bracket.scad --printability
+  --skip GATE             exclude a gate from the default set. Repeatable. Use this
+                            when a gate is not relevant for the current model (e.g. an
+                            art piece does not need printability).
+                            Example: 3d check art.scad --skip printability
 
 Data-driven gates (run whenever their data is supplied, never narrow the core set):
-  --collision CFG.json    collision/penetration gate (HARD; runs when CFG given)
-  --silhouette / --ref I  silhouette IoU/AE vs reference (ADVISORY; runs when --ref given)
+  --collision CFG.json    collision/penetration gate (HARD). Checks parts in an
+                            assembly do not overlap. Runs only when CFG.json is supplied.
+                            Example: 3d check asm.scad --collision asm_collision.json
+  --silhouette / --ref I  silhouette IoU/AE vs reference (ADVISORY). Compares a
+                            rendered silhouette against a reference photo. Runs only
+                            when --ref is supplied. This is advisory — it does not fail
+                            the overall gate.
+                            Example: 3d check bracket.scad --ref photo.jpg
 
-  To run ONLY collision:  3d check asm.scad --collision cfg --skip manifold --skip consistency --skip printability
+  To run ONLY collision:  3d check asm.scad --collision cfg.json --skip manifold --skip consistency --skip printability
 
 Other:
-  --part FILE             additional part to gate (or just pass extra positional files)
-  --ref IMAGE             reference image for the silhouette gate
-  --cam ex,..,cz          6-param vector camera for the silhouette render
-  --size WxH              silhouette render size (default 1100x480)
-  -D k=v                  pass-through define (repeatable)
-
-Exit 0 = PASS (all HARD gates pass), 1 = FAIL.
+  --part FILE             additional part to include in the gate. You can also pass
+                            extra positional files after the first one.
+                            Example: 3d check base.scad top.scad --mesh
+  --ref IMAGE             reference image for the silhouette gate. Required for
+                            --silhouette.
+                            Example: 3d check bracket.scad --ref photo.jpg
+  --cam ex,..,cz          6-param vector camera for the silhouette render. Use this
+                            when the default camera does not capture the profile you
+                            want to match against the reference.
+                            Default: 125,-330,52,125,28,44
+                            Example: 3d check bracket.scad --ref ref.jpg --cam 100,-300,40,0,0,0
+  --size WxH              silhouette render size. Larger = more detail for the IoU
+                            match. Default: 1100x480
+                            Example: 3d check bracket.scad --ref ref.jpg --size 2200x960
+  -D k=v                  pass-through OpenSCAD define. Repeatable. Use this to check
+                            the model at a different parameter set.
+                            Example: 3d check bracket.scad -D 'wall=2.0'
 
 Examples:
   3d check examples/cube.scad                 # all applicable gates
   3d check examples/cube.scad --mesh          # only the manifold gate
-  3d check asm.scad --skip printability
+  3d check bracket.scad --skip printability   # skip the FDM gate for a non-printed part
   3d check asm.scad --collision verify/collision.json --ref ref.jpg"""
 
 _DEGRADE_RE = re.compile(r"ModuleNotFoundError|No module named|no python runtime")
