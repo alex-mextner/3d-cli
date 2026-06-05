@@ -158,7 +158,7 @@ This document maps every surveyed paper, algorithm, and tool from the research p
 |---|---|---|---|
 | Silhouette IoU + AE (P0.1) | `3d score`, `3d match`, `3d fit-camera` | ImageMagick | IoU, AE |
 | ReLook forced-monotonic loop (P0.2) | `3d match`, `3d ai <tool> loop` | Python orchestrator | Monotone trajectory, rounds-to-converge |
-| Camera pose fit + freeze (P0.3) | `3d fit-camera` | OpenCV, scipy.optimize, ImageMagick | Reprojection error, IoU at frozen pose |
+| Camera pose fit + freeze (P0.3) | `3d fit-camera` | numpy, Pillow | Reprojection error, IoU at frozen pose |
 | Chamfer, F-score@τ, Hausdorff, NC, vol-IoU (P1.1) | `3d ai bench`, `3d metrics`, `3d compare` | open3d, trimesh, scipy, pymeshlab | F-score@τ (primary), Chamfer, Hausdorff, NC |
 | LPIPS, SSIM, PSNR, CLIP-sim (P1.2) | `3d ai bench`, `3d score`, `3d compare` | lpips, clip-score, ImageMagick | LPIPS, SSIM/DSSIM, PSNR, CLIP-sim |
 | OpenSCAD-LLM benchmark (P1.3) | `3d ai bench [suite]` | `lib/ai/bench.py` + above libs | Build-success, IoU, Chamfer, LPIPS, VLM-judge |

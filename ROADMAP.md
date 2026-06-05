@@ -354,12 +354,10 @@ code is what AI agents, version control, and shell pipes all operate on natively
   the report**, and **implement** the interesting algorithms; **use and improve** the tools
   it mentions (BOSL2, NopSCADlib, trimesh/manifold3d, SAM2, Depth-Anything, TRELLIS/
   Hunyuan3D, Mitsuba/nvdiffrast, COLMAP, etc.).
-- 📋 **`APPLY-RESEARCH.md` is a POST-survey deliverable, authored AFTER this §12 literature survey
-  lands** — not a now-doc, and it **does not exist yet** (the old per-area draft was folded into the
-  feature sections below and deleted). Once the survey completes, **create** `APPLY-RESEARCH.md` as
-  the paper-by-paper application summary: for each surveyed paper/algorithm, how it gets applied
-  (which `3d` command, library, metric). Until then ROADMAP is canonical and holds the content (see
-  §17 for the per-section map).
+- ✅ [`docs/APPLY-RESEARCH.md`](docs/APPLY-RESEARCH.md) is the POST-survey application summary:
+  for each surveyed paper/algorithm, how it gets applied (which `3d` command, library, metric).
+  ROADMAP remains canonical for feature ownership and scheduling (see §17 for the per-section map);
+  APPLY-RESEARCH is the audit table that keeps the research-to-command mapping explicit.
 
 ## 13. `3d ai <tool>` — AI-assisted tool group (operators + RAG + loop + benchmarks)
 A unified AI layer over the analytical commands. Pattern: **`3d ai <tool> <operator> [args]`**
@@ -764,14 +762,13 @@ layered rule-config structure. Build an analogous multi-level lint system for 3D
 - ✅ **The prioritized P0–P5 backlog was folded into the feature sections (map in §17) — now
   canonical — and its standalone file deleted.** The full per-item rationale lives in the research
   report ([`docs/research/report.md`](docs/research/report.md)).
-- 📋 **`APPLY-RESEARCH.md` is a POST-§12-survey deliverable that does not exist yet.** Its old
-  per-area application ideas/algorithms/libraries were distributed into the matching feature sections
-  (e.g. strength → §6, axis/PCA → §7, ai design/critique → §13, metric formulas → §13.4) and the file
-  was deleted. It is to be **created** *after* the §12 literature survey completes, summarizing how
-  each newly surveyed paper/algorithm gets applied. Until then ROADMAP holds the content.
+- ✅ [`docs/APPLY-RESEARCH.md`](docs/APPLY-RESEARCH.md) — POST-§12 paper/algorithm → command →
+  library → metric mapping. Its entries mirror the matching feature sections (e.g. strength → §6,
+  axis/PCA → §7, ai design/critique → §13, metric formulas → §13.4) while ROADMAP keeps the
+  scheduling and implementation ownership.
 - ✅ `GLOSSARY.md` — domain terms (incl. SAM2, CGAL, …) with links; linked across the repo.
-- 📋 Extend `RESEARCH.md` / `GLOSSARY.md` as new papers/tools/terms are surveyed, and create
-  `APPLY-RESEARCH.md` once §12 lands (§12).
+- 📋 Extend `RESEARCH.md` / `GLOSSARY.md` / `docs/APPLY-RESEARCH.md` as new papers, tools, terms,
+  and application mappings are surveyed (§12).
 
 ## 28. `3d init` — project scaffolder + project registry
 - 📋 **`3d init [path]`** — fully sets up a new `3d` project in one command:
@@ -1071,8 +1068,8 @@ The CLI work now has its own repo and this ROADMAP as the single source. Pick up
 - ✅ ROADMAP §0–§27 + `docs/specs/2026-06-05-3d-cli-architecture.md` + `docs/rules/` (dev/testing/
    code-style/decision-requests).
 - ✅ Research vendored: `docs/research/{report.md,report.pdf,sources.md}` + `RESEARCH.md` /
-   `GLOSSARY.md`. (The prioritized backlog + the APPLY-RESEARCH draft were folded into the ROADMAP
-   feature sections and their files deleted — see §17/§27.)
+   `GLOSSARY.md` + `docs/APPLY-RESEARCH.md`. (The prioritized backlog is folded into the ROADMAP
+   feature sections; APPLY-RESEARCH is the explicit paper/algorithm → command mapping — see §17/§27.)
 - ✅ All temp doc branches merged + deleted; no open branches, no worktrees.
 - ⚠️ **First real code task next session — config dir**: code uses `~/.config/3d-cli/` (foundation + web,
     incl. the web agent's choice); rename to `~/.config/3d-cli/` per §23 (one constant in
