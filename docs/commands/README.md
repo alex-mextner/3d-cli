@@ -6,7 +6,7 @@ organized without turning `README.md` into the whole manual.
 
 Run `3d <command> --help` for the exact accepted flags and examples. Per-command docs here
 explain why the command exists, what its inputs mean, and how it fits into the larger
-OpenSCAD/FDM workflow.
+[OpenSCAD](GLOSSARY.md#openscad)/[FDM](GLOSSARY.md#fdm) workflow.
 
 ## Current Surface
 
@@ -14,7 +14,7 @@ OpenSCAD/FDM workflow.
 
 | Command | Doc | Role |
 |---|---|---|
-| `render` | [render.md](render.md) | CGAL render, named views, multi-render, and cross-sections. |
+| `render` | [render.md](render.md) | [CGAL](GLOSSARY.md#cgal) render, named views, multi-render, and cross-sections. |
 | `preview` | [preview.md](preview.md) | Fast throwntogether preview, no CGAL render. |
 | `multi` | [multi.md](multi.md) | Thin compatibility wrapper for `render --multi`. |
 | `section` | [section.md](section.md) | Thin compatibility wrapper for `render --section`. |
@@ -23,7 +23,7 @@ OpenSCAD/FDM workflow.
 
 | Command | Doc | Role |
 |---|---|---|
-| `export` | [export.md](export.md) | STL/3MF export with manifold validation when the mesh stack is available. |
+| `export` | [export.md](export.md) | [STL](GLOSSARY.md#stl)/[3MF](GLOSSARY.md#3mf) export with [manifold](GLOSSARY.md#manifold) validation when the mesh stack is available. |
 | `validate` | [validate.md](validate.md) | Fast OpenSCAD parse check without rendering. |
 | `params` | [params.md](params.md) | Extract Customizer-style parameters. |
 | `om` | [om.md](om.md) | Query `.scad` object-model annotations as JSON. |
@@ -44,12 +44,12 @@ OpenSCAD/FDM workflow.
 
 | Command | Doc | Role |
 |---|---|---|
-| `compare` | [compare.md](compare.md) | Segmented model/reference comparison with IoU, SSIM/DSSIM, and artifacts. |
-| `fit-camera` | [fit-camera.md](fit-camera.md) | Fit a camera pose to a reference by silhouette IoU. |
+| `compare` | [compare.md](compare.md) | Segmented model/reference comparison with [IoU](GLOSSARY.md#iou), [SSIM](GLOSSARY.md#ssim)/DSSIM, and artifacts. |
+| `fit-camera` | [fit-camera.md](fit-camera.md) | Fit a camera pose to a reference by [silhouette](GLOSSARY.md#silhouette) IoU. |
 | `silhouette` | [silhouette.md](silhouette.md) | Camera-locked render to binary silhouette mask. |
-| `score` | [score.md](score.md) | Silhouette AE + IoU, printed as `KEY=VALUE` lines. |
+| `score` | [score.md](score.md) | Silhouette [AE](GLOSSARY.md#ae) + IoU, printed as `KEY=VALUE` lines. |
 | `overlay` | [overlay.md](overlay.md) | Difference, ghost, and edge-overlay diagnostics. |
-| `match` | [match.md](match.md) | Forced-monotonic param edit loop. |
+| `match` | [match.md](match.md) | [Forced-monotonic](GLOSSARY.md#forced-monotonic-loop) param edit loop. |
 | `preprocess` | [preprocess.md](preprocess.md) | Reference subject mask and proportional depth preprocessing. |
 
 ### Slicing
@@ -82,7 +82,7 @@ OpenSCAD/FDM workflow.
 A command is one stdlib-only module under `lib/commands/<name>.py` with a module-level
 `COMMAND = Command(...)`. Discovery imports every command on every `3d` invocation, so
 command modules must keep heavy imports out of module top level. Use `cli.pyrun.run_tool`
-or lazy imports inside `run()` for dependencies such as `trimesh`, `cv2`, `pyvista`,
+or lazy imports inside `run()` for dependencies such as [`trimesh`](GLOSSARY.md#trimesh), `cv2`, `pyvista`,
 `fastapi`, or external OpenSCAD/ImageMagick/slicer workflows.
 
 Adding a command should normally change:

@@ -14,7 +14,7 @@ Takes a reference photograph and produces two outputs: `mask.png` (subject silho
 |---|---|---|
 | `-o, --out DIR` | alongside the image | Output directory |
 | `--force-fallback` | off | Skip model tiers; use OpenCV / numpy floor only |
-| `--sam2-checkpoint P` | — | Enable SAM2 mask tier (path to a `.pt` checkpoint) |
+| `--sam2-checkpoint P` | — | Enable [SAM2](GLOSSARY.md#sam2) mask tier (path to a `.pt` checkpoint) |
 | `--depth-model ID` | `depth-anything/Depth-Anything-V2-Small-hf` | Hugging Face model ID for depth estimation |
 
 ```bash
@@ -24,8 +24,8 @@ Takes a reference photograph and produces two outputs: `mask.png` (subject silho
 
 ## Tiers (auto-degrade)
 
-1. **SAM2** or **rembg** for mask; **Depth-Anything-V2** for depth
-2. **OpenCV grabCut** for mask; pseudo-depth from OpenCV
+1. **SAM2** or **rembg** for mask; **[Depth-Anything-V2](GLOSSARY.md#depth-anything)** for depth
+2. **[OpenCV](GLOSSARY.md#opencv) grabCut** for mask; pseudo-depth from OpenCV
 3. Always writes both outputs — never crashes if heavy models are missing
 
 ## Dependencies

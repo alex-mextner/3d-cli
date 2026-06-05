@@ -1,4 +1,4 @@
-# `3d materials` — inspect FDM material properties
+# `3d materials` — inspect [FDM](GLOSSARY.md#fdm) material properties
 
 Shows the material names and properties that projects reference in `3d.yaml`. The registry
 is layered so users and projects can override built-in defaults field-by-field.

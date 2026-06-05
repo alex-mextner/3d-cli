@@ -1,6 +1,6 @@
-# `3d fit-camera` — fit a camera to a reference photo
+# `3d [fit-camera](GLOSSARY.md#fit-camera)` — fit a camera to a reference photo
 
-Optimises an OpenSCAD camera vector so that the rendered silhouette of a model maximises IoU against a reference photo. The result is saved as a JSON file plus a full-resolution fit PNG and a red/cyan overlay so you can visually verify alignment.
+Optimises an [OpenSCAD](GLOSSARY.md#openscad) camera vector so that the rendered [silhouette](GLOSSARY.md#silhouette) of a model maximises [IoU](GLOSSARY.md#iou) against a reference photo. The result is saved as a JSON file plus a full-resolution fit PNG and a red/cyan overlay so you can visually verify alignment.
 
 **Why it exists.** When matching a model to a reference image, the camera angle is usually unknown. Guessing by hand is slow. The optimiser finds the viewpoint automatically and writes a reproducible `camera.json` that can be reused for `render`, `score`, and `silhouette`.
 

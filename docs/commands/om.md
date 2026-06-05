@@ -1,4 +1,4 @@
-# `3d om` — query object-model annotations
+# `3d om` — query [object-model](GLOSSARY.md#object-model) annotations
 
 Parses `.scad` comment annotations and prints the matching object-model nodes as JSON.
 OpenSCAD ignores these comments, so annotated files remain normal `.scad` inputs.

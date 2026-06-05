@@ -1,8 +1,8 @@
-# `3d mesh` — watertight / manifold / self-intersection / volume report
+# `3d mesh` — watertight / [manifold](GLOSSARY.md#manifold) / self-intersection / volume report
 
-Runs a deep geometric check on a mesh file (`.stl`, `.3mf`, `.scad`) and reports whether it is watertight, manifold, self-intersecting, and its volume / triangle count.
+Runs a deep geometric check on a mesh file ([`.stl`](GLOSSARY.md#stl), [`.3mf`](GLOSSARY.md#3mf), `.scad`) and reports whether it is watertight, manifold, self-intersecting, and its volume / triangle count.
 
-**Why it exists.** OpenSCAD’s warning text is not always enough — the modern manifold backend can produce non-watertight output without a warning line. The mesh check uses the actual mesh geometry to verify correctness.
+**Why it exists.** [OpenSCAD](GLOSSARY.md#openscad)’s warning text is not always enough — the modern manifold backend can produce non-watertight output without a warning line. The mesh check uses the actual mesh geometry to verify correctness.
 
 ## Usage
 
@@ -19,9 +19,9 @@ Runs a deep geometric check on a mesh file (`.stl`, `.3mf`, `.scad`) and reports
 
 The tool tries progressively lighter stacks so it still works when heavy deps are missing:
 
-1. `trimesh + open3d` (full check)
-2. `trimesh + manifold3d` (watertight + manifold)
-3. OpenSCAD warning grep (degraded, grep-only)
+1. [`trimesh`](GLOSSARY.md#trimesh) + open3d (full check)
+2. `trimesh` + [`manifold3d`](GLOSSARY.md#manifold3d) (watertight + manifold)
+3. [OpenSCAD](GLOSSARY.md#openscad) warning grep (degraded, grep-only)
 
 ## Exit codes
 

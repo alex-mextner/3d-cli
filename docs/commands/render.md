@@ -1,6 +1,6 @@
 # `3d render` — single view / multi-angle / cross-section renders
 
-The unified render command. It produces camera-locked PNGs from an `.scad` file using OpenSCAD’s CGAL backend. The camera is computed from the model’s bounding box (exact fit, no drift), so the same model renders identically across machines.
+The unified render command. It produces camera-locked PNGs from an `.scad` file using [OpenSCAD](GLOSSARY.md#openscad)’s [CGAL](GLOSSARY.md#cgal) backend. The camera is computed from the model’s bounding box (exact fit, no drift), so the same model renders identically across machines.
 
 **Why it exists.** The old bash pipeline had separate `view`, `multi`, and `section` scripts. Unifying them removes duplicate argument parsing and guarantees every mode uses the same bbox-exact camera math.
 
@@ -16,7 +16,7 @@ The unified render command. It produces camera-locked PNGs from an `.scad` file 
 |---|---|
 | *(default)* | Single view render |
 | `--multi [OUTDIR]` | front / back / left / right / top / iso into `OUTDIR` (default `previews/`), async |
-| `--section` | True cross-section (generic STL-cut, or `--color` assembly mode) |
+| `--section` | True cross-section (generic [STL](GLOSSARY.md#stl)-cut, or `--color` assembly mode) |
 
 ### Single-view options
 
@@ -54,4 +54,4 @@ The unified render command. It produces camera-locked PNGs from an `.scad` file 
 
 ## Implementation notes
 
-The heavy work (bbox-exact cameras, async multi, STL-cut section) lives in `lib/render.py` and runs through `pyrun`. Single and multi need **no Python mesh deps** — they degrade to `--autocenter --viewall` if the mesh stack is absent. The generic section genuinely needs `trimesh` to read the STL bounding box for the cut.
+The heavy work (bbox-exact cameras, async multi, STL-cut section) lives in `lib/render.py` and runs through `pyrun`. Single and multi need **no Python mesh deps** — they degrade to `--autocenter --viewall` if the mesh stack is absent. The generic section genuinely needs [`trimesh`](GLOSSARY.md#trimesh) to read the STL bounding box for the cut.

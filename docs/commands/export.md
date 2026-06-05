@@ -1,8 +1,8 @@
-# `3d export` — STL / 3MF / OFF / AMF export with geometry validation
+# `3d export` — [STL](GLOSSARY.md#stl) / [3MF](GLOSSARY.md#3mf) / OFF / AMF export with geometry validation
 
 Exports a `.scad` file to a mesh format and validates the result. Nonzero exit on bad geometry, so it can be used as a gate in CI scripts.
 
-**Why it exists.** OpenSCAD’s built-in export can silently produce non-manifold or self-intersecting meshes. This command catches those defects and reports them with the exact remediation (`union()` for self-intersections, close solids for holes, etc.).
+**Why it exists.** [OpenSCAD](GLOSSARY.md#openscad)’s built-in export can silently produce non-[manifold](GLOSSARY.md#manifold) or self-intersecting meshes. This command catches those defects and reports them with the exact remediation (`union()` for self-intersections, close solids for holes, etc.).
 
 ## Usage
 

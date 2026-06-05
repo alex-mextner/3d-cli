@@ -1,7 +1,7 @@
 # `3d preview` — fast throwntogether preview
 
-Runs OpenSCAD's fast preview path and writes a PNG. This is useful for quick visual
-iteration when a full CGAL render is unnecessary.
+Runs [OpenSCAD](GLOSSARY.md#openscad)'s fast preview path and writes a PNG. This is useful for quick visual
+iteration when a full [CGAL](GLOSSARY.md#cgal) render is unnecessary.
 
 ## Usage
 

@@ -26,4 +26,4 @@ lines.
 
 - Requires ImageMagick for metrics, diffs, and collage output.
 - A `.scad` input runs the fit/compare pipeline; a PNG input compares an existing render.
-- Output includes `IoU`, `SSIM`, `DSSIM`, artifact paths, and fallback status.
+- Output includes [`IoU`](GLOSSARY.md#iou), [`SSIM`](GLOSSARY.md#ssim), `DSSIM`, artifact paths, and fallback status.

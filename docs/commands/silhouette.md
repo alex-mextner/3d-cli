@@ -1,8 +1,8 @@
-# `3d silhouette` — camera-locked render → binary silhouette mask
+# `3d silhouette` — camera-locked render → binary [silhouette](GLOSSARY.md#silhouette) mask
 
 Renders a model at a fixed camera, then thresholds the image to a binary mask (white shape on black background). Used as the first step in the reference-match pipeline.
 
-**Why it exists.** To compare a 3D model against a 2D reference photo, you need a reproducible silhouette from the model. Locking the camera and thresholding the render gives a deterministic mask that can be scored with IoU / AE.
+**Why it exists.** To compare a 3D model against a 2D reference photo, you need a reproducible silhouette from the model. Locking the camera and thresholding the render gives a deterministic mask that can be scored with [IoU](GLOSSARY.md#iou) / [AE](GLOSSARY.md#ae).
 
 ## Usage
 

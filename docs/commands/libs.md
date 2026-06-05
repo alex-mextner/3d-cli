@@ -1,6 +1,6 @@
-# `3d libs` — OpenSCAD library info
+# `3d libs` — [OpenSCAD](GLOSSARY.md#openscad) library info
 
-Prints the path to the auto-installed OpenSCAD libraries (`BOSL2`, `NopSCADlib`) and lists what is currently installed. Libraries are cloned into `libs/` automatically on the first `3d` invocation; `OPENSCADPATH` is auto-exported so `include <BOSL2/std.scad>` just works.
+Prints the path to the auto-installed OpenSCAD libraries ([`BOSL2`](GLOSSARY.md#bosl2), [`NopSCADlib`](GLOSSARY.md#nopscadlib)) and lists what is currently installed. Libraries are cloned into `libs/` automatically on the first `3d` invocation; `OPENSCADPATH` is auto-exported so `include <BOSL2/std.scad>` just works.
 
 **Why it exists.** You should not need to manually clone BOSL2 or set `OPENSCADPATH`. This command lets you verify what is installed and export the path in your own shell if needed.
 

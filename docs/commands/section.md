@@ -1,6 +1,6 @@
 # `3d section` — true cross-section render
 
-Alias for `3d render <file> --section`. Produces a cross-section PNG by cutting the model (STL-cut or per-part coloured assembly mode).
+Alias for `3d render <file> --section`. Produces a cross-section PNG by cutting the model ([STL](GLOSSARY.md#stl)-cut or per-part coloured assembly mode).
 
 **Why it exists.** A shorthand for the section mode so you can type `3d section` instead of `3d render --section`.
 

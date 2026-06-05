@@ -1,6 +1,6 @@
 # `3d check` — master acceptance gate
 
-The unified verification command. With no selectors it runs **all** applicable gates (manifold, consistency, printability, plus collision / silhouette when their data is supplied). With selectors it runs only the chosen subset. Prints a per-gate breakdown and a single `PASS` / `FAIL` verdict.
+The unified verification command. With no selectors it runs **all** applicable gates ([manifold](GLOSSARY.md#manifold), consistency, printability, plus collision / [silhouette](GLOSSARY.md#silhouette) when their data is supplied). With selectors it runs only the chosen subset. Prints a per-gate breakdown and a single `PASS` / `FAIL` verdict.
 
 **Why it exists.** Previously there were separate bash scripts for every gate. A single `check` command means one invocation gives you the full picture before slicing or printing, and the exit code is the single source of truth for CI.
 
@@ -24,7 +24,7 @@ The unified verification command. With no selectors it runs **all** applicable g
 | Flag | Gate |
 |---|---|
 | `--collision CFG.json` | Collision / penetration (HARD; runs when config given) |
-| `--silhouette` / `--ref IMAGE` | Silhouette IoU / AE vs reference (ADVISORY; runs when `--ref` given) |
+| `--silhouette` / `--ref IMAGE` | Silhouette [IoU](GLOSSARY.md#iou) / [AE](GLOSSARY.md#ae) vs reference (ADVISORY; runs when `--ref` given) |
 
 ### Other options
 
@@ -50,4 +50,4 @@ The unified verification command. With no selectors it runs **all** applicable g
 
 ## Implementation notes
 
-Gate sub-steps shell out to `bin/3d <gate>` (or OpenSCAD directly) and parse the same stdout markers the original bash version relied on (`>>> MESH CHECK: FAIL`, `ModuleNotFoundError` → `SKIP`, etc.). This preserves exact behavior and graceful degradation when the mesh stack is unavailable.
+Gate sub-steps shell out to `bin/3d <gate>` (or [OpenSCAD](GLOSSARY.md#openscad) directly) and parse the same stdout markers the original bash version relied on (`>>> MESH CHECK: FAIL`, `ModuleNotFoundError` → `SKIP`, etc.). This preserves exact behavior and graceful degradation when the mesh stack is unavailable.

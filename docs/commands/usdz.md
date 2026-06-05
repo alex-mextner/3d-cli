@@ -1,6 +1,6 @@
 # `3d usdz` — export to Apple AR Quick Look
 
-Exports a `.scad` or `.stl` model to a colored USDZ file for Apple AR Quick Look. A `.scad`
+Exports a `.scad` or [`.stl`](GLOSSARY.md#stl) model to a colored USDZ file for Apple AR Quick Look. A `.scad`
 input is first exported to STL through `3d export`, so geometry validation runs before the
 USDZ conversion.
 

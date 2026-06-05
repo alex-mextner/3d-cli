@@ -2,7 +2,7 @@
 
 Compares a render against a reference image and produces three diagnostic overlays: difference map, 50% ghost blend, and canny edge-on-edge composite. Useful for visually spotting misalignment, missing features, or geometry drift.
 
-**Why it exists.** Numeric scores (IoU, AE) tell you *how far* the model is from the reference, but not *where*. The overlays show exactly which regions mismatch.
+**Why it exists.** Numeric scores ([IoU](GLOSSARY.md#iou), [AE](GLOSSARY.md#ae)) tell you *how far* the model is from the reference, but not *where*. The overlays show exactly which regions mismatch.
 
 ## Usage
 
