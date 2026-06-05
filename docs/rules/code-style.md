@@ -48,3 +48,10 @@ Never delete silently because `grep` found nothing.
 Use the structured `lib/errors.py` types — never ad-hoc `sys.exit("...")`. Every error states WHAT
 failed + WHY, concrete remediation (exact command/file), accepted values when input was invalid, and
 the precise install command + which tier degrades for a missing dependency.
+
+## Help text & docs: motivation + example, always
+Every command and EVERY option/flag documents (a) **why** it exists — the problem it solves or when
+to reach for it — and (b) a **concrete example** invocation. Never ship a bare noun-phrase ("draw
+axes", "set color"). A flag's `--help`, the README, and the ROADMAP all hold to this. Explain domain
+terms at first mention with a `GLOSSARY.md` link. A help entry with no why + no example is a review
+reject, same as a missing test.
