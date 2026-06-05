@@ -19,6 +19,10 @@ jobs:
         uses: astral-sh/setup-uv@v3
         with:
           version: "latest"
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y openscad imagemagick
       - name: Sync dependencies
         run: uv sync --all-extras
       - name: Run ruff
