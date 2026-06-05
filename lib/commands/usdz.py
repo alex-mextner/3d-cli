@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 
+from cli.pyrun import run_tool
 from cli.registry import Command
 from errors import InputNotFound, InvalidArgument, UsageError
 
@@ -116,10 +117,8 @@ def run(argv: list[str]) -> int:
     if not out:
         out = (inp[: -(len(ext) + 1)] if ext else inp) + ".usdz"
 
-    # Lazy import: heavy deps (trimesh + pxr) live in lib/usdz.py.
-    from usdz import mesh_to_usdz  # noqa: WPS433 (lazy on purpose)
-
     stem = os.path.splitext(os.path.basename(inp))[0]
+    color_args = [str(color[0]), str(color[1]), str(color[2])]
 
     if ext == "scad":
         # Export to a temp STL first (via `3d export`, so geometry validation runs).
@@ -135,12 +134,10 @@ def run(argv: list[str]) -> int:
                 raise UsageError(
                     f"`3d export` failed for {inp} (see output above)", command="usdz"
                 )
-            nfaces = mesh_to_usdz(stl, out, color=color, name=stem)
+            # run_tool dispatches via .venv/uv so trimesh+pxr are always available.
+            return run_tool("trimesh,usd-core", "usdz.py", [stl, out] + color_args + [stem])
     else:
-        nfaces = mesh_to_usdz(inp, out, color=color, name=stem)
-
-    print(f"output: {out} ({nfaces} faces) — iPhone/Mac AR Quick Look ready")
-    return 0
+        return run_tool("trimesh,usd-core", "usdz.py", [inp, out] + color_args + [stem])
 
 
 COMMAND = Command(

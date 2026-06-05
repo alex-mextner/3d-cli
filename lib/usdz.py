@@ -147,3 +147,19 @@ def mesh_to_usdz(
             raise ValueError(f"failed to write USDZ package: {usdz_out}")
 
     return nfaces
+
+
+if __name__ == "__main__":
+    import sys as _sys
+
+    # argv: stl_path usdz_out r g b name
+    if len(_sys.argv) != 7:
+        print("usage: usdz.py stl_path usdz_out r g b name", file=_sys.stderr)
+        _sys.exit(1)
+    _, _stl, _out, _r, _g, _b, _nm = _sys.argv
+    try:
+        _nf = mesh_to_usdz(_stl, _out, color=(float(_r), float(_g), float(_b)), name=_nm)
+        print(f"output: {_out} ({_nf} faces) — iPhone/Mac AR Quick Look ready")
+    except Exception as _exc:  # noqa: BLE001
+        print(f"error: {_exc}", file=_sys.stderr)
+        _sys.exit(1)
