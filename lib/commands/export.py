@@ -11,12 +11,21 @@ from cli.registry import Command
 from errors import InputNotFound, InvalidArgument, UsageError
 
 USAGE = """3d export <file.scad> [options]
-  Export STL/3MF with manifold/self-intersect validation. Exit 1 on bad geometry.
+  Export to STL/3MF/OFF/AMF with manifold and self-intersection validation. Run this
+  before slicing or sharing a model. Exit 1 on bad geometry so bad meshes never
+  reach a slicer.
 
 Options:
-  -o, --out PATH        output (.stl/.3mf/.off/.amf). Default: <file>.stl
-  --ascii              ASCII STL (default: binary STL)
-  -D k=v                pass-through define (repeatable)
+  -o, --out PATH        output file path. Accepted extensions: .stl, .3mf, .off,
+                        .amf. Default: <file>.stl. Use .3mf for multi-material/color
+                        assemblies.
+                        Example: 3d export bracket.scad -o bracket.stl
+  --ascii              ASCII STL instead of binary. Use this only when a downstream
+                        tool requires human-readable STL (most slicers prefer binary).
+                        Example: 3d export bracket.scad -o bracket.stl --ascii
+  -D k=v               pass an OpenSCAD variable define. Repeatable. Use this to
+                        export a variant without editing the .scad.
+                        Example: 3d export bracket.scad -o wide.stl -D 'width=80'
 
 Examples:
   3d export model.scad -o model.stl
