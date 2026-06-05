@@ -877,6 +877,109 @@ Closes the "from idea to print" loop on the materials side; ties into the materi
     `chamfer_cube([20,20,5], r=2)` or `lerp(a, b, ease_in_out(t))` just works — instead of copy-pasting
     a 30-line module — via either a native plugin or `include <3d/std.scad>`.
 
+## 34. Import / export of popular 3D formats
+The whole pipeline lives or dies on talking to other tools: a slicer wants a mesh, a CAD engineer
+wants a B-rep, a teammate wants to *tap-and-rotate* the result on their phone, the §9 viewer wants
+glTF. `3d export` already ships (✅, §3 line 134 — mesh-validated, nonzero on bad geometry); this
+section is the planned **format expansion** of that command (📋 `--usdz`/`--glb`/`--step`/… selectors
+or `-o file.<ext>` autodetect) **plus a new `3d import`** that brings external geometry *into* a model
+(feeding §12 reconstruction). Every format below states WHERE it sits in the pipeline, HOW it's
+produced/consumed, and WHY it earns a slot. Detection is extension-driven; `3d export --list-formats`
+enumerates what's available.
+
+- 📋 **STL** — *the* slicing/mesh-export lingua franca.
+  - **Where/How:** terminal target of the mesh path — `3d export part.scad -o part.stl` (binary by
+    default), then `3d slice part.stl` (§4). **Import:** `3d import part.stl` to measure/repair/
+    reconstruct (§12).
+  - **Why:** universally accepted by every slicer/printer; but it is *geometry only* — no color, no
+    units, no part names, no metadata. So `3d` writes a **sidecar `3d.yaml`** (§5) next to the `.stl`
+    carrying material/printer/orientation/part identity, since the format itself can't.
+  - **Implementation (from research):** [trimesh](GLOSSARY.md#trimesh) for read/write + manifold
+    repair; STL is the lossy LEAF, the object model (§5) stays the source of truth.
+  - **Example:** `3d export bracket.scad -o bracket.stl` (auto-emits `bracket.3d.yaml` sidecar).
+
+- 📋 **3MF** — the preferred *rich* print format.
+  - **Where/How:** output of `3d pack` (§5) and the default for `3d export --3mf`; consumed directly
+    by Orca/Bambu/Prusa (§4). **Import:** `3d import asm.3mf` recovers per-part color/material.
+  - **Why:** unlike STL it natively carries **per-part color, material, and metadata** in one file,
+    so the sidecar isn't needed and the slicer sees the real assembly — this is the format we steer
+    users toward for actual printing.
+  - **Implementation (from research):** the §5 builder writes [3MF](GLOSSARY.md#3mf) with the
+    materials registry (§2a) driving colors/materials; round-trips back through `3d import`.
+  - **Example:** `3d export cabinet.scad --3mf -o cabinet.3mf` then `3d slice cabinet.3mf`.
+
+- 📋 **OBJ / PLY** — mesh interchange & debug.
+  - **Where/How:** `3d export model.scad -o model.obj` (OBJ keeps UVs/material refs) or `.ply`
+    (compact, optional per-vertex color — handy for scan/point-cloud and colored-diff dumps).
+    **Import:** `3d import scan.ply` to feed reconstruction (§12).
+  - **Why:** OBJ is the human-debuggable, viewer-friendly mesh that almost every DCC tool opens; PLY
+    is the go-to for carrying per-vertex color (e.g. a visualized surface-deviation/Hausdorff map)
+    that STL can't express.
+  - **Implementation (from research):** [trimesh](GLOSSARY.md#trimesh) for both.
+  - **Example:** `3d export bad.scad -o bad.ply` to dump a per-vertex error map for inspection.
+
+- 📋 **STEP / BREP** — true CAD B-rep exchange (engineering handoff).
+  - **Where/How:** `3d export part.scad --step -o part.step`; the bridge runs through
+    [build123d](https://github.com/gumyr/build123d) / OpenCASCADE so the result is a real
+    **boundary-representation solid** (analytic faces, exact edges), not a triangle soup. **Import:**
+    `3d import part.step` to bring a vendor/colleague CAD body into a model.
+  - **Why:** STL/3MF lose the parametric, watertight CAD intent that a machinist or FEA tool needs;
+    STEP is the only entry on this list that preserves true curved surfaces and tolerances — it's the
+    format you hand an engineer or a CNC shop. (OpenSCAD has no native B-rep, so this is the
+    research-flagged path to real CAD interop.)
+  - **Implementation (from research):** OpenCASCADE via build123d for the B-rep conversion; falls
+    back to a meshed approximation with a loud warning if a true B-rep isn't recoverable from the
+    OpenSCAD CSG.
+  - **Example:** `3d export gear.scad --step -o gear.step` (hand off to a CNC shop).
+
+- 📋 **glTF / GLB** — web / three.js viewer transport (§9).
+  - **Where/How:** `3d export model.scad --glb -o model.glb`; the §9 dashboard's three.js viewer
+    loads GLB directly (single self-contained binary with mesh + materials + colors).
+  - **Why:** glTF is "the JPEG of 3D" for the web — compact, materials/PBR baked in, instant to load
+    in a browser; it's the natural bridge from the CLI to the §9 interactive viewer and any external
+    web embed, where STL/STEP would be wrong or heavy.
+  - **Implementation (from research):** [trimesh](GLOSSARY.md#trimesh) (or `pygltflib`) export with
+    colors/materials from the registry (§2a); GLB (binary) preferred over `.gltf`+buffers for sharing.
+  - **Example:** `3d export robot.scad --glb -o robot.glb` then open it in `3d web`.
+
+- 📋 **SVG** — 2D profiles **in and out**.
+  - **Where/How (in):** `3d import profile.svg` → a closed 2D path you can `linear_extrude`/
+    `rotate_extrude` into a solid — *draw a shape in Inkscape/Figma, extrude it in `3d`*. **(out):**
+    `3d export part.scad --svg --section mid-z -o part.svg` emits a vector **section outline** or a
+    flat **silhouette** (§3 sections / §8 silhouette) — perfect for laser-cutting, drawings, or a
+    dimensioned 2D sheet.
+  - **Why:** bridges the 2D and 3D worlds at both ends — designers think in 2D vector profiles, and
+    fabrication (laser/CNC/drawings) wants clean vector outlines, not rasters or meshes.
+  - **Implementation (from research):** OpenSCAD's own `import("…svg")` / `projection()` for the
+    extrude-in and section-out paths; `svgpathtools`/shapely to normalize paths on import.
+  - **Example:** `3d import logo.svg` → extrude to a keychain; `3d export box.scad --svg --silhouette`.
+
+- 📋 **USDZ** — Apple **AR Quick Look**: tap a file on iPhone/iPad/Mac to view & rotate the model in
+  3D / AR, no app install. *The* format for handing a finished result to a human.
+  - **Where/How:** `3d export result.scad --usdz -o result.usdz`; AirDrop/iMessage it, the recipient
+    taps and the model opens full-screen, orbits with a finger, and can be **placed in their room in
+    AR**. Also the basis for an embeddable `<model-viewer>` on the web.
+  - **Why:** every other format on this list needs a slicer, a CAD seat, or a dev environment to look
+    at. USDZ needs *a phone you already own and one tap* — it's the lowest-friction way to show a
+    non-technical person (client, teammate, the person you're printing for) what the thing actually
+    looks like at real scale. Sharing the *result*, not the *toolchain*.
+  - **Implementation (from research):** build the [USD](https://openusd.org/) stage with **`pxr`**
+    (the OpenUSD Python libs), then package to `.usdz`. Three correctness musts so it renders right in
+    Quick Look: **Y-up** axis (USD/Quick Look convention, vs `3d`'s Z-up — apply the rotation on
+    export), **`metersPerUnit`** set so a part modeled in mm shows at true real-world scale in AR
+    (`metersPerUnit = 0.001`), and a **`UsdPreviewSurface`** material (with the registry's color/
+    metalness/roughness, §2a) so it isn't flat untextured grey. (Backlog task #4 is this helper.)
+  - **Example:** `3d export boiler.scad --usdz -o boiler.usdz` → AirDrop to your phone → tap → rotate
+    it in your hand. (`--up y` and `--units mm` are the defaults for USDZ; override only if needed.)
+
+- 📋 **Import side, summarized** — `3d import <file>` accepts **STL / 3MF / OBJ / PLY / STEP / SVG**
+  and lands them as model geometry: meshes go straight in (measure/repair/compare), STEP comes in as a
+  B-rep solid, SVG comes in as an extrudable 2D profile. Imported meshes are exactly the input to
+  **reconstruct-to-mesh (§12)** — e.g. a downloaded `.stl` or a scanned `.ply` → cleaned, re-fit, and
+  folded back into the object model so the rest of the pipeline (sections, checks, pack, slice) works
+  on it. **Why:** `3d` shouldn't only emit — most real work starts from *someone else's file*.
+  **Example:** `3d import thing.stl && 3d check thing` (repair + run all gates on a downloaded mesh).
+
 This session was originally the **lego-loco train** project; it grew the `3d` CLI as a side effect.
 The CLI work now has its own repo and this ROADMAP as the single source. Pick up from here.
 
