@@ -1,68 +1,88 @@
-# `3d` — a scriptable CLI for AI-assisted, reference-photo-driven parametric 3D modeling
+# `3d` — a scriptable, AI-assisted CLI + web toolkit for 3D FDM projects
 
-`3d` operationalizes the lego-loco research pipeline: camera-locked OpenSCAD renders,
-silhouette scoring, a forced-monotonic LLM match loop, and manifold / printability /
-collision gates — all from one discoverable command-line dispatcher.
+`3d` is a command-line + web toolkit for the whole **FDM (filament 3D-printing)** lifecycle:
+parametric modeling (OpenSCAD-first) → render & view → mesh / printability / collision
+verification → reference-photo matching → slicing & print prep. It is **engineering-first**
+today (functional parts, fits, gates) and grows toward art later. Everything is one
+discoverable dispatcher: `3d <command>`, scriptable, composable, with structured errors
+instead of bare tracebacks.
 
-The methodology (report §7 pixel-perfect workflow, §8 toolchain): author a part as
-parametric OpenSCAD, render it with a camera locked to an orthographic, frame-matched
-view of a reference photo, score the match with an ImageMagick silhouette IoU, let a
-vision LLM propose **ranked numeric-delta** parameter edits against an overlay image,
-and **accept an edit only when the score strictly improves and the manifold /
-printability gates pass** — logging every attempt to a changelog so the model never
-re-tries a failed move. That forced-monotonic, image-in-the-loop inverse-procedural-
-modeling pipeline is what turns "an LLM fiddling with numbers" into a reproducible,
-pixel-matched, printable part.
+It works on **any** 3D FDM project, not a specific one. One of the pipelines it ships is a
+**reference-photo match loop** (camera-locked render → silhouette score → LLM numeric-delta
+edits → manifold/printability gates → accept-only-if-it-improves). That is *one example
+workflow* — see [Reference-match pipeline](#reference-match-pipeline) — not the headline.
 
 ## Install
 
-`3d` installs as a standard Python package exposing the `3d` console command (no manual symlink):
+> **Honest status:** the package is **not on PyPI yet**. The supported, working path today
+> is running it from a clone (`./bin/3d`). Standard `pipx`/`uv tool`/`pip` install is the
+> TARGET once packaging lands (see [ROADMAP §29](ROADMAP.md)) — the `lib/` layout is being
+> restructured into an importable `threed` package with a `3d` console-script entry point.
+
+**Current working path — run from a clone:**
 
 ```bash
-pipx install 3d-cli        # or:  uv tool install 3d-cli   /   pip install 3d-cli
+git clone https://github.com/alex-mextner/3d-cli
+cd 3d-cli
+./bin/3d help                 # or symlink bin/3d onto your PATH:  ln -s "$PWD/bin/3d" ~/.local/bin/3d
+```
+
+**Target path (after packaging, §29):**
+
+```bash
+pipx install 3d-cli           # or:  uv tool install 3d-cli   /   pip install 3d-cli
 3d help
-
-# develop on it (editable):
-uv pip install -e .        # or:  pip install -e .
 ```
 
-> Packaging is being finalized (see ROADMAP §29 — the `lib/` layout is moving to an importable
-> `threed` package + console entry point). Until that lands, run it in-place from a clone:
-> `./bin/3d help` (or symlink `bin/3d` onto your `PATH`).
-
-Requirements:
-- **OpenSCAD** (`brew install --cask openscad`) — found on PATH or common Homebrew paths.
-- **ImageMagick** (`brew install imagemagick`) — for the overlay / score / silhouette commands.
-- **Python**: the python subcommands run via `cli.pyrun`, which prefers a repo `.venv`,
-  then `uv run --with <deps>` (no global installs), then system `python3`. With `uv`
-  on PATH nothing needs pre-installing. For a fast offline path (uv project, deps in
-  `pyproject.toml` + locked in `uv.lock`):
-  ```bash
-  uv sync --all-extras      # creates .venv from the lockfile
-  ```
-
-Every command either works or fails with a clear, structured "install X" message
-(WHAT failed + the exact install command for THIS OS + which capability degrades) — no
-broken commands, no bare tracebacks.
-
-**The CLI bootstraps itself:**
-
-- OpenSCAD libraries (BOSL2, NopSCADlib) auto-clone into `libs/` on the first `3d`
-  invocation (once, quiet, non-fatal offline) and `OPENSCADPATH` is auto-exported.
-- Python deps resolve per-call via `uv` (or a repo `.venv` if you create one) — nothing
-  to pre-install.
+Python deps resolve per call: `3d` prefers a repo `.venv`, then `uv run --with <deps>` (no
+global installs), then system `python3`. With `uv` on PATH nothing needs pre-installing. For
+a fast offline path:
 
 ```bash
-3d doctor          # read-only: report what's present/missing + the exact install command per OS
+uv sync --all-extras          # creates .venv from the lockfile
 ```
 
-`doctor` prints PASS/MISSING per item (openscad, imagemagick, python3, uv/pip, the python
-mesh stack, and a slicer) with the exact per-OS install line for anything missing. There
-is no `3d setup` — installation is the first-run bootstrap plus those per-item commands.
+## Requirements
+
+`3d` **auto-installs what it can** on first run (OpenSCAD libraries clone into `libs/`; Python
+deps resolve per call via `uv`/`.venv`), and every command either works or fails with a clear
+"install X" message naming the exact per-OS command. Run **`3d doctor`** to inspect what is
+present or missing.
+
+| Dependency | Purpose | Tier |
+|---|---|---|
+| [OpenSCAD](https://openscad.org) | the modeling engine — render, export, section, params, validate | required |
+| [ImageMagick](https://imagemagick.org) | overlay / score / silhouette image diffs | required for the match pipeline |
+| `python3` | runs the python subcommands (mesh/collision/match/fit/preprocess/…) | required |
+| [`uv`](https://docs.astral.sh/uv) | per-call Python dep resolution (no global installs) | recommended |
+| `pyyaml` | the `3d.yaml` project model (now a **core** dep) | required (auto-installed) |
+| `trimesh`, `manifold3d`, `numpy`, `scipy`, `rtree` | the mesh stack — watertight / manifold / volume / collision math | required (auto-installed) |
+| `pillow`, `opencv-python-headless` | reference pre-processing (`3d preprocess`) | optional (`preprocess` extra) |
+| `pyvista` | collision visualization (`3d collision --viz`) | optional (`viz` extra) |
+| `fastapi`, `uvicorn`, `markdown` | the web dashboard (`3d web`) | optional (`web` extra) |
+| a slicer (OrcaSlicer / Bambu Studio / PrusaSlicer) | G-code export & sliceability gate (`3d slice`) | optional |
+
+The mesh stack and `pyyaml` are in `pyproject.toml`'s core dependencies; the rest are optional
+extras (`preprocess`, `viz`, `web`, `dev`). A missing optional dep degrades only the command
+that needs it — never the whole CLI. `3d doctor` prints PASS/MISSING per item with the exact
+per-OS install line for anything absent.
+
+```bash
+3d doctor          # read-only: report present/missing + the exact install command per OS
+```
+
+The CLI bootstraps OpenSCAD libraries (BOSL2, NopSCADlib) into `libs/` on the first `3d`
+invocation (once, quiet, non-fatal offline) and auto-exports `OPENSCADPATH`, so
+`include <BOSL2/std.scad>` just resolves with no manual step.
 
 ## Commands
 
 Run `3d <command> --help` for full options. Examples below assume `examples/cube.scad`.
+
+> **Coming in this branch:** `3d init` (project scaffolder), `3d projects` (project registry),
+> `3d materials` / `3d printers` (shared material/printer vocabularies, §2a) are landing in
+> the same development wave and are **not** documented as existing yet. The table below is the
+> verified surface that exists today.
 
 ### Render & view  (unified under `render`)
 
@@ -158,6 +178,10 @@ resolved relative to the config file's directory.
 
 ### Reference-match pipeline
 
+This is **one example pipeline**, not the headline: match a parametric model to a reference
+photo by viewpoint and silhouette. Useful when you have a photo of a real object and want a
+printable part that matches its proportions and pose.
+
 | Command | What |
 |---|---|
 | `3d silhouette <file.scad>` | camera-locked render → binary silhouette mask. |
@@ -189,6 +213,7 @@ hardcoded numbers. `--center` overrides the auto look-at; `--draw-axes` overlays
 silhouette's PCA principal axis + bounding-box contour so axis/contour alignment is visible.
 Different builds never reach IoU = 1 (the shapes differ) — the point is best alignment of
 the bounding silhouette so viewpoint, scale and gross proportions match. Use the result:
+
 ```bash
 openscad --render --camera="$(jq -r .camera_arg camera.json)" -o view.png model.scad
 ```
@@ -196,14 +221,14 @@ openscad --render --camera="$(jq -r .camera_arg camera.json)" -o view.png model.
 `score` prints `AE=`, `AE_NORM=`, `IoU=`, `CLOSENESS=`, `FRAME=`, `OVERLAY=` — one per
 line, machine-parseable. An empty render mask scores IoU=0 (never rewards a blank frame).
 
-`match` is the report's **forced-monotonic** loop: the critic (codex, optional) proposes
-ONE numeric param delta; the IoU/AE metric + manifold gate dispose. A change is kept iff
-the score strictly improves AND the model stays a clean manifold; else it is reverted.
-Every step is logged to `<work>/changelog.md`, which is fed back to the critic so it never
-re-proposes a reverted edit (the anti-FlipFlop defense, report §3). Tunable parameters are
-**derived from the constants file** (numeric scalars) — restrict with `--params a,b,c`, or
-point at a separate `--constants FILE`. `--dry-run` skips the LLM and synthesises
-deterministic edits to smoke-test the machinery.
+`match` is the **forced-monotonic** loop: the critic (codex, optional) proposes ONE numeric
+param delta; the IoU/AE metric + manifold gate dispose. A change is kept iff the score
+strictly improves AND the model stays a clean manifold; else it is reverted. Every step is
+logged to `<work>/changelog.md`, which is fed back to the critic so it never re-proposes a
+reverted edit (the anti-FlipFlop defense). Tunable parameters are **derived from the
+constants file** (numeric scalars) — restrict with `--params a,b,c`, or point at a separate
+`--constants FILE`. `--dry-run` skips the LLM and synthesises deterministic edits to
+smoke-test the machinery.
 
 ### Slicing
 
@@ -217,19 +242,17 @@ deterministic edits to smoke-test the machinery.
 3d slice part.3mf --profile "machine.json,process.json" --printer "Bambu Lab A1"
 ```
 
-Slicer auto-detection preference: **OrcaSlicer → Bambu Studio → PrusaSlicer** (the Bambu
-A1's native studio is in the middle). Found on PATH and on macOS app bundles
-(`/Applications/OrcaSlicer.app/...`, `BambuStudio.app`, `PrusaSlicer.app`); force a
-specific one with `SLICER=/path/to/binary`. The three share heritage but the CLIs
-**diverged**, so each gets its own invocation: PrusaSlicer is `-g --output out.gcode`,
-OrcaSlicer/Bambu are `--slice 0 --outputdir <dir>` (the produced G-code is relocated to
-your `-o` path). Those core flags are the verified part of the contract; `--printer` is
-**best-effort** (no single agreed printer-preset flag exists across the three — it's
-routed through the profile-load mechanism, so prefer `--profile` for control). `--check`
-slices as a pass/fail oracle and discards the G-code. A `.scad` input is exported to STL
-first via `3d export`. If no slicer is
-installed, `3d slice` fails with the exact per-OS install command (e.g.
-`brew install --cask orcaslicer`) — never broken.
+Slicer auto-detection preference: **OrcaSlicer → Bambu Studio → PrusaSlicer**. Found on PATH
+and on macOS app bundles (`/Applications/OrcaSlicer.app/...`, `BambuStudio.app`,
+`PrusaSlicer.app`); force a specific one with `SLICER=/path/to/binary`. The three share
+heritage but the CLIs **diverged**, so each gets its own invocation: PrusaSlicer is `-g
+--output out.gcode`, OrcaSlicer/Bambu are `--slice 0 --outputdir <dir>` (the produced G-code
+is relocated to your `-o` path). Those core flags are the verified part of the contract;
+`--printer` is **best-effort** (no single agreed printer-preset flag exists across the three
+— it routes through the profile-load mechanism, so prefer `--profile` for control).
+`--check` slices as a pass/fail oracle and discards the G-code. A `.scad` input is exported
+to STL first via `3d export`. If no slicer is installed, `3d slice` fails with the exact
+per-OS install command (e.g. `brew install --cask orcaslicer`) — never broken.
 
 ### Environment (deps) & tests
 
@@ -244,21 +267,44 @@ installed, `3d slice` fails with the exact per-OS install command (e.g.
 3d test -k registry       # forward args to pytest
 ```
 
-There is no `3d setup`: OpenSCAD libraries auto-install on the first run, python deps
-resolve via uv/`.venv` per-call, and `3d doctor` prints the exact install command for
-anything still missing.
+OpenSCAD libraries auto-install on the first run, python deps resolve via uv/`.venv`
+per-call, and `3d doctor` prints the exact install command for anything still missing.
+
+### Web dashboard
+
+| Command | What |
+|---|---|
+| `3d web [--root DIR] [--port N] [--open]` | local FastAPI + SSE + three.js dashboard for your projects and for watching AI agents work live (optional **web** tier). |
+
+```bash
+3d web --root ~/models --open            # scan that root, open the dashboard
+3d web --port 9000                       # override the default 8733
+```
+
+See [docs/commands/web.md](docs/commands/web.md) for the full feature list. The web tier
+(`fastapi`/`uvicorn`/`markdown`) is optional — the core geometry/render/check pipeline does
+not need it; a missing dep is a warning in `3d doctor`, not a failure.
 
 ### OpenSCAD libraries
 
-BOSL2 + NopSCADlib **auto-install on the first `3d` invocation** (cloned into `libs/`,
-once, gated by `~/.config/3d/.bootstrapped`, non-fatal if offline), and `OPENSCADPATH` is
+BOSL2 + NopSCADlib **auto-install on the first `3d` invocation** (cloned into `libs/`, once,
+gated by `~/.config/3d-cli/.bootstrapped`, non-fatal if offline), and `OPENSCADPATH` is
 auto-exported by the CLI — so `include <BOSL2/std.scad>` just resolves, no manual step.
 
 ```bash
 3d libs list                 # show installed libraries
 3d libs path                 # print OPENSCADPATH (for your own non-3d shells)
-# re-install: rm ~/.config/3d/.bootstrapped && 3d help
+# re-install: rm ~/.config/3d-cli/.bootstrapped && 3d help
 ```
+
+## Configuration & state
+
+`3d` keeps all its state under one config dir and one data dir (ROADMAP §23):
+
+- **`~/.config/3d-cli/`** — `web.json`, the first-run bootstrap marker (`.bootstrapped`),
+  the projects registry, and registry overrides. (Honors `$XDG_CONFIG_HOME`.)
+- **`~/.local/share/3d-cli/`** — generated state, including the longitudinal metrics store.
+  (Honors `$XDG_DATA_HOME`.)
 
 ## Layout
 
@@ -267,13 +313,17 @@ bin/3d              thin Python dispatcher (resolves REPO_ROOT through the symli
 lib/cli/dispatch.py routing + registry build + structured-error rendering
 lib/cli/registry.py the command registry (Command + discover()) — the plugin extension point
 lib/cli/env.py      tool discovery, OS/install table, OPENSCADPATH export, first-run bootstrap
+lib/cli/paths.py    the single source of truth for config/data dirs (~/.config/3d-cli, …)
 lib/cli/pyrun.py    run a lib/*.py tool with its deps (.venv -> uv -> system python3)
 lib/cli/imaging.py  ImageMagick orchestration + the pure score (IoU/AE) math
+lib/project.py      the 3d.yaml project model + loader (the project spine, §5/§15)
 lib/errors.py       structured CLI error types (WHAT/WHY/remediation/accepted/install)
 lib/commands/*.py   one self-registering module per subcommand (drop a file = add a command)
 lib/*.py            heavy python tools (render/mesh/collision/printability/preprocess/match/fit)
+lib/web/            the web dashboard app (FastAPI + SSE + three.js SPA)
 tests/              pytest unit tests + the CLI smoke harness (run via `3d test`)
-docs/critic-prompts.md  the vision-critic prompt patterns (from lego-loco match/prompts.md)
+docs/commands/      per-command documentation fragments
+docs/critic-prompts.md  the vision-critic prompt patterns
 libs/               OpenSCAD libraries cloned on demand (gitignored)
 examples/cube.scad  trivial test part
 pyproject.toml      python deps (uv project: core + optional extras preprocess/viz/web/dev)
@@ -282,47 +332,3 @@ uv.lock             locked dependency set (uv sync)
 
 Adding a command is a one-file change — see `lib/cli/registry.py` (and `AGENTS.md`) for the
 command-authoring contract. `bin/3d` and the shared files need no edits.
-
-`section` has two modes: the default **part mode** cuts a single `--module` (the cut
-face renders mono/tan); `--color` does the **assembly coloured-section** (per-part colour
-preserved — the assembly must honour `-D cut=true` and wrap parts as
-`color(c) section_cut() part();`).
-
-`fit-camera` searches OpenSCAD camera params (azimuth/elevation/distance/pan) to maximise
-silhouette IoU against a reference, saving the fitted 6-param vector camera to JSON plus a
-fit render and an overlay — the practical "Step 0: lock the camera" of the report's §7.1.
-
-## Provenance & migration notes
-
-Migrated and generalized from the `garage-band / lego-loco` project's verification rig
-(copied, not moved; project-specific paths, hardcoded cameras, and loco part names removed;
-the collision/mesh/printability tools made project-agnostic via config/args). Methodology:
-that project's research report (§7 pixel-perfect workflow, §8 toolchain).
-
-Per-source accounting of the requested migration set:
-- **openscad tools** (preview/multi/section/export/validate/version/extract-params,
-  section-color): all ported. `version-scad.sh` was **intentionally dropped** — the
-  lego-loco methodology versions via git, not file-name indices, so a "next version
-  number" helper has no place here. `section-color.sh` is folded into `3d section --color`.
-- **tools/collision/** (config/collision_check/frame_check/collision_viz): ported verbatim
-  (already project-agnostic) and exposed as `3d collision [--frame|--viz]`.
-- **match/** (loop.py, overlay.sh, score.sh, prompts.md): `loop.py` generalized into
-  `3d match` (tunables derived from the constants file, not a hardcoded loco list);
-  `overlay.sh`/`score.sh` into `3d overlay`/`3d score`; `prompts.md` copied to
-  `docs/critic-prompts.md`. `render_silhouette.sh` was **not present** in the source
-  match/ dir, so `3d silhouette` reimplements it from the report (§7.1).
-- **verify/** (mesh_check, acceptance, printability_check, printability_mesh,
-  run_collision): all ported. `acceptance.sh` generalized to operate on the passed
-  assembly with collision/silhouette running only when configured. `run_collision.sh`'s
-  `../../..` repo-root math re-pointed to this repo.
-- **preprocess/preprocess_reference.py**: ported as `3d preprocess` (SAM2/Depth-Anything
-  tiers import-guarded; OpenCV grabCut + pseudo-depth always-available fallback).
-
-**FALLBACK modes** (work but degrade without optional heavy deps):
-- `3d mesh` / `export` / `check` / `acceptance` use trimesh+manifold3d for the watertight
-  check; **open3d** (the real triangle-triangle self-intersection test) has no wheel for
-  some Python versions, so self-intersection is reported UNVERIFIED unless open3d installs.
-  Without the whole mesh stack, the manifold gate degrades to openscad-log-grep (reported
-  in the output, never a silent false PASS).
-- `3d preprocess` runs the OpenCV grabCut + pseudo-depth floor unless `rembg` / SAM2 /
-  Depth-Anything-V2 are installed (see the `preprocess` extra in `pyproject.toml` and `--help`).

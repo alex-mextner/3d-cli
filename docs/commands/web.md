@@ -16,7 +16,7 @@ pipeline does not need them.
 | `--root DIR` | config, else cwd | project root to scan |
 | `--port N` | `8733` or config | listen port |
 | `--host H` | `127.0.0.1` or config | bind host |
-| `--config PATH` | `~/.config/3d/web.json` | use a specific config file |
+| `--config PATH` | `~/.config/3d-cli/web.json` | use a specific config file |
 | `--open` | off | open the dashboard in your browser once it starts |
 
 ```bash
@@ -26,10 +26,10 @@ pipeline does not need them.
 
 ## Config
 
-`~/.config/3d/web.json` — the **same** config dir the rest of the CLI uses for its
-first-run bootstrap marker (`~/.config/3d/.bootstrapped`). One config dir for the whole
+`~/.config/3d-cli/web.json` — the **same** config dir the rest of the CLI uses for its
+first-run bootstrap marker (`~/.config/3d-cli/.bootstrapped`). One config dir for the whole
 tool. Created with defaults on first run; holds `project_root`, `port`, `host`. Per-project
-render/state caches live under `~/.config/3d/web-state/`.
+render/state caches live under `~/.config/3d-cli/web-state/`.
 
 ## What the dashboard does
 
