@@ -31,6 +31,7 @@ import asyncio
 import math
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
@@ -347,6 +348,31 @@ _SECTION_DIR: dict[str, tuple[float, float, float]] = {
 }
 
 
+def _has_cut_contract(scad_path: str) -> bool:
+    """True if the .scad declares a TOP-LEVEL `cut` parameter (the colour-assembly
+    cut-contract: the file branches on `cut` and colours parts outside their difference).
+    A plain part with no such parameter can't honour -D cut=true, so --color must instead
+    use the generic STL-import cut (which also colours the cut face).
+
+    Only a brace-depth-0 assignment counts: a `cut = ...` inside a module/block is a local,
+    not the overridable top-level parameter, so it must NOT be mistaken for the contract."""
+    try:
+        with open(scad_path) as fh:
+            lines = fh.readlines()
+    except OSError:
+        return False
+    depth = 0
+    for line in lines:
+        # strip line comments so `// cut = ...` and trailing comments don't fool the scan
+        code = line.split("//", 1)[0]
+        if depth == 0 and re.match(r"\s*cut\s*=", code):
+            return True
+        depth += code.count("{") - code.count("}")
+        if depth < 0:
+            depth = 0
+    return False
+
+
 def _section_cam(
     plane: str, keep: str, bbox: tuple[tuple[float, float, float], float] | None
 ) -> str | None:
@@ -408,9 +434,12 @@ def render_section(args: argparse.Namespace) -> int:
     defines: list[str] = args.define or []
     size = args.size.replace("x", ",")
 
-    # ---- COLOUR assembly mode: the assembly honours -D cut=true + colours each part
-    # OUTSIDE its own cut, so the cut faces are per-part coloured. We just pass the flag.
-    if args.color:
+    # ---- COLOUR assembly mode: ONLY valid when the assembly implements the cut-contract
+    # (a top-level `cut` parameter it honours, colouring each part OUTSIDE its difference).
+    # If the model has no such contract (e.g. a plain part like cube.scad), `-D cut=true`
+    # would be ignored and we'd render the UNCUT solid — so fall through to the generic
+    # STL-import cut, which also colours the cut face. Never silently render an uncut solid.
+    if args.color and _has_cut_contract(scad):
         bbox = model_bbox(scad, defines, openscad)
         cam = _section_cam(plane, keep, bbox)
         use_viewall = cam is None
