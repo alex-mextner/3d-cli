@@ -21,6 +21,7 @@ import json
 import mimetypes
 import os
 import sys
+import time
 import urllib.error
 import urllib.request
 from typing import Any
@@ -74,7 +75,8 @@ def generate(
     system: str | None = None,
     *,
     generation_config: dict[str, Any] | None = None,
-    timeout: float = 300.0,
+    timeout: float = 600.0,
+    retries: int = 3,
 ) -> dict[str, Any]:
     """Call <model>:generateContent with `parts`; return {text, prompt_tokens, output_tokens}.
 
@@ -100,21 +102,33 @@ def generate(
     req = urllib.request.Request(
         url, data=raw, headers={"Content-Type": "application/json"}, method="POST"
     )
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            payload = json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        # Google's error reason lives in the response body — surface it.
+    # gemini-3-pro with a big system prompt + images + thinking can take minutes; a single read
+    # timeout must NOT kill the whole arm. Retry transient timeouts/network errors with backoff;
+    # HTTP 4xx/5xx (a real API error) surfaces immediately.
+    payload = None
+    for attempt in range(1, retries + 1):
         try:
-            err_body = exc.read().decode("utf-8")
-        except Exception:  # noqa: BLE001 - best-effort body read
-            err_body = "<no body>"
-        print(f"[gemini_client] HTTP {exc.code} {exc.reason}\n{err_body}", file=sys.stderr)
-        raise
-    except urllib.error.URLError as exc:
-        print(f"[gemini_client] network error: {exc.reason}", file=sys.stderr)
-        raise
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+            break
+        except urllib.error.HTTPError as exc:
+            try:
+                err_body = exc.read().decode("utf-8")
+            except Exception:  # noqa: BLE001 - best-effort body read
+                err_body = "<no body>"
+            print(f"[gemini_client] HTTP {exc.code} {exc.reason}\n{err_body}", file=sys.stderr)
+            raise
+        except (TimeoutError, urllib.error.URLError, OSError) as exc:
+            reason = getattr(exc, "reason", exc)
+            print(
+                f"[gemini_client] transient error (attempt {attempt}/{retries}): {reason}",
+                file=sys.stderr,
+            )
+            if attempt == retries:
+                raise
+            time.sleep(5 * attempt)
 
+    assert payload is not None  # loop either set payload (break) or raised
     # candidates / usageMetadata may be absent on a blocked or error response.
     text = ""
     candidates = payload.get("candidates") or []
