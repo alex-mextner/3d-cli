@@ -64,6 +64,25 @@ def _extract_scad(text: str) -> str:
     return text.strip() + "\n"
 
 
+_SCAD_KW = (
+    "cube", "cylinder", "sphere", "polyhedron", "module", "translate", "rotate",
+    "union", "difference", "intersection", "linear_extrude", "rotate_extrude", "hull", "polygon",
+)
+
+
+def _looks_like_scad(s: str) -> bool:
+    """True if the extracted text is plausibly real OpenSCAD (not an empty/refusal/prose reply).
+
+    Guards against overwriting a good model with garbage when a round returns no code (e.g. a
+    MALFORMED_FUNCTION_CALL empty text, or the model replying in prose)."""
+    return len(s.strip()) >= 60 and any(k in s for k in _SCAD_KW)
+
+
+# Honor a model's "DONE" only after this many rounds, so it actually uses the iteration
+# budget instead of bailing at round 2-3 (the bare ModelRift prompt lets it stop too early).
+_MIN_DONE_ROUND = 12
+
+
 def _run(cmd: list[str], timeout: float = 600.0) -> subprocess.CompletedProcess[str]:
     """Run a subprocess, capturing output; never raise on nonzero (best-effort feedback)."""
     try:
@@ -185,6 +204,8 @@ def run_arm(
     output_tokens_total = 0
     rounds = 0
     done = False
+    last_invalid = False     # previous round returned no usable scad
+    premature_done = False   # previous round said DONE before the min-round floor
 
     for rnd in range(1, max_rounds + 1):
         rounds = rnd
@@ -196,12 +217,25 @@ def run_arm(
             parts.append(ref_parts[1])
 
         if rnd > 1:
+            nudge = ""
+            if last_invalid:
+                nudge += (
+                    " Your previous reply contained NO usable OpenSCAD code. Output ONLY the "
+                    "COMPLETE model as a single ```scad ... ``` fenced block. Do not call any "
+                    "functions/tools and do not reply in prose."
+                )
+            if premature_done:
+                nudge += (
+                    f" Keep refining — you must run at least {_MIN_DONE_ROUND} rounds before "
+                    "stopping. Compare to BOTH reference photos and fix the single biggest "
+                    "remaining difference this round; do not reply DONE yet."
+                )
             # feed back the latest renders (+ 3dcli overlays/numbers)
             parts.append(
                 gemini_client.text_part(
                     f"Round {rnd}. Here is the current render of your latest .scad. "
                     "Improve it. Reply DONE (anywhere in your text) when satisfied; "
-                    "otherwise return the full updated ```scad ... ``` block."
+                    "otherwise return the full updated ```scad ... ``` block." + nudge
                 )
             )
             for png in _latest_render_pngs(workdir):
@@ -222,16 +256,27 @@ def run_arm(
         text = res["text"]
 
         scad = _extract_scad(text)
-        with open(scad_path, "w", encoding="utf-8") as fh:
-            fh.write(scad)
+        valid = _looks_like_scad(scad)
+        if valid:
+            with open(scad_path, "w", encoding="utf-8") as fh:
+                fh.write(scad)
+            # render (mcp + 3dcli both do the openscad angles)
+            _render_openscad(scad_path, workdir)
+            last_invalid = False
+        else:
+            # No usable code this round — keep the previous good .scad, re-prompt strictly.
+            print(f"[gemini_arm] round {rnd}: no valid scad in reply — keeping previous", file=sys.stderr)
+            last_invalid = True
 
-        # render (mcp + 3dcli both do the openscad angles)
-        _render_openscad(scad_path, workdir)
-
-        if "DONE" in text:
+        # Honor DONE only with a valid model AND past the min-round floor — otherwise nudge on.
+        said_done = "DONE" in text
+        premature_done = said_done and rnd < _MIN_DONE_ROUND
+        if said_done and valid and rnd >= _MIN_DONE_ROUND:
             done = True
             print(f"[gemini_arm] model reported DONE at round {rnd}", file=sys.stderr)
             break
+        if premature_done:
+            print(f"[gemini_arm] ignoring early DONE at round {rnd} (< {_MIN_DONE_ROUND})", file=sys.stderr)
 
     summary = {
         "rounds": rounds,

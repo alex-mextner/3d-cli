@@ -87,6 +87,10 @@ def generate(
     url = f"{_BASE}/{model}:generateContent?key={key}"
 
     body: dict[str, Any] = {"contents": [{"parts": parts}]}
+    # Forbid function-calling: gemini-3-pro otherwise tries to emit a tool call (no tools are
+    # declared) and returns finishReason=MALFORMED_FUNCTION_CALL with empty text. We only ever
+    # want text/code back, so disable it explicitly for every call.
+    body["toolConfig"] = {"functionCallingConfig": {"mode": "NONE"}}
     if system:
         body["system_instruction"] = {"parts": [{"text": system}]}
     if generation_config:
