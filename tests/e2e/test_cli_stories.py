@@ -172,6 +172,72 @@ def test_user_saves_params_json_for_the_next_shell_step(tmp_path: Path) -> None:
     assert {row["name"]: row["value"] for row in rows}["height"] == "16"
 
 
+def test_user_lints_model_metadata_before_running_heavy_checks(tmp_path: Path) -> None:
+    """Model lint gives readable object-model feedback through shell-friendly JSON."""
+    model = tmp_path / "bracket.scad"
+    model.write_text(
+        """// @part Main_Body
+// @anchor clip-left
+// @anchor clip-left
+cube([10, 10, 4]);
+""",
+        encoding="utf-8",
+    )
+    report = tmp_path / "lint-report.json"
+    env = _story_env(tmp_path)
+
+    lint_command = " ".join(
+        [
+            shlex.quote(sys.executable),
+            shlex.quote(str(THREED)),
+            "lint",
+            shlex.quote(str(model)),
+            "--format",
+            "json",
+            ">",
+            shlex.quote(str(report)),
+        ]
+    )
+    lint_result = subprocess.run(
+        lint_command,
+        cwd=REPO_ROOT,
+        env=env,
+        shell=True,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+
+    assert lint_result.returncode == 0, lint_result.stderr
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    assert payload["summary"] == {"warnings": 2, "errors": 0}
+
+    pipe_script = (
+        "import json,sys; "
+        "data=json.load(sys.stdin); "
+        "print('\\n'.join(f['rule_id'] for f in data['files'][0]['findings']))"
+    )
+    pipe_command = (
+        f"cat {shlex.quote(str(report))} | "
+        f"{shlex.quote(sys.executable)} -c {shlex.quote(pipe_script)}"
+    )
+    pipe_result = subprocess.run(
+        pipe_command,
+        cwd=REPO_ROOT,
+        env=env,
+        shell=True,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+
+    assert pipe_result.returncode == 0, pipe_result.stderr
+    assert pipe_result.stdout.splitlines() == [
+        "naming/id-kebab",
+        "object-model/duplicate-id",
+    ]
+
+
 def test_user_gets_actionable_errors_for_wrong_command_or_file(
     tmp_path: Path,
 ) -> None:

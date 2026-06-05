@@ -68,6 +68,7 @@ These modules model project state, user config, and local registries:
 - `inventory.py`
 - `kinematics.py`
 - `linting.py`
+- `model_lint.py`
 - `materials.py`
 - `metrics.py`
 - `object_model.py`
@@ -135,7 +136,8 @@ Every current root Python module is listed here so future additions are intentio
 - `import_formats.py` — import wrapper generation and conversion-plan helpers.
 - `inventory.py` — local materials and parts inventory store.
 - `kinematics.py` — project joint spec validation and deterministic summaries.
-- `linting.py` — OpenSCAD lint helpers.
+- `linting.py` — repository lint helpers.
+- `model_lint.py` — OpenSCAD object-model metadata lint rules.
 - `match_loop.py` — reference match-loop orchestration.
 - `mask_geometry.py` — lightweight mask coverage, bounding-box, and centroid metadata.
 - `materials.py` — materials registry.

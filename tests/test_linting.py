@@ -201,3 +201,13 @@ def test_lint_command_rejects_all_with_paths(tmp_path: Path) -> None:
 
     assert result.returncode == 2
     assert "--all cannot be combined with explicit paths" in result.stderr
+
+
+def test_lint_command_rejects_model_rule_for_python_repo_file(tmp_path: Path) -> None:
+    source = tmp_path / "core.py"
+    source.write_text("value = 1\n", encoding="utf-8")
+
+    result = _run(["lint", str(source), "--rule", "naming/id-kebab"])
+
+    assert result.returncode == 2
+    assert "accepted: no-subject-leakage" in result.stderr
