@@ -36,6 +36,9 @@ if "$OPENSCAD" --render --export-format binstl ${DEFS[@]+"${DEFS[@]}"} -o "$WORK
     echo "RENDER-ERROR rc=$? on $INPUT" >>"$LOG"
 fi
 # grep ':' so we never match the token "NoError".
+# NOTE: OpenSCAD's modern (manifold) backend often stays SILENT on a non-manifold
+# mesh (no WARNING/ERROR text, exit 0) — so the grep alone is not a real gate. Back
+# it with the trimesh watertight/manifold check on the produced STL when available.
 if grep -Eq 'WARNING:|ERROR:|Assertion' "$LOG"; then
     echo "  FAIL — geometry warnings/errors:"
     grep -E 'WARNING:|ERROR:|Assertion|RENDER-ERROR' "$LOG" | head -5 | sed 's/^/    /'
@@ -44,7 +47,15 @@ elif [ ! -s "$WORK/out.stl" ]; then
     echo "  FAIL — no mesh produced"
     FAIL=1
 else
-    echo "  PASS — clean manifold render"
+    mout="$(bash "$REPO_ROOT/lib/pyrun" "trimesh,manifold3d,numpy" "$REPO_ROOT/lib/mesh_check.py" "$WORK/out.stl" 2>&1)"
+    if printf '%s\n' "$mout" | grep -q 'ModuleNotFoundError\|No module named\|no python runtime'; then
+        echo "  PASS — no openscad warnings (mesh stack absent; grep-only — install trimesh for the real check)"
+    elif printf '%s\n' "$mout" | grep -q '>>> MESH CHECK: FAIL'; then
+        echo "  FAIL — mesh-verified non-manifold:$(printf '%s\n' "$mout" | grep 'MESH CHECK: FAIL' | sed 's/.*FAIL//')"
+        FAIL=1
+    else
+        echo "  PASS — clean manifold (mesh-verified)"
+    fi
 fi
 
 # ---- PRINTABILITY (quick; HARD if it can run) -----------------------------

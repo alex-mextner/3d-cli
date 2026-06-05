@@ -68,22 +68,42 @@ echo "  assembly: $ASSEMBLY   parts: ${#PARTS[@]}   logs: $WORK"
 echo
 
 # ---- 1. MANIFOLD (HARD) ----------------------------------------------------
-echo "${BD}[MANIFOLD]${ZZ} render --render, grep WARNING:/ERROR:"
-man_bad=0; man_n=0; man_list=""
+# OpenSCAD's manifold backend often stays SILENT on a non-manifold mesh (exit 0, no
+# text), so the warning grep is backed by the trimesh watertight/manifold check on
+# the produced STL when the mesh stack is available. mesh-stack-absent => grep-only
+# (reported), so the gate is never silently false-PASS without saying so.
+echo "${BD}[MANIFOLD]${ZZ} render --render + grep WARNING:/ERROR: + mesh watertight check"
+man_bad=0; man_n=0; man_list=""; man_degraded=0
 for f in "${FILES[@]}"; do
     [ -f "$f" ] || continue
     man_n=$((man_n+1))
     lf="$WORK/man_$(echo "$f" | tr '/.' '__').log"
-    "$OPENSCAD" --render --export-format binstl -o "$WORK/out.stl" "$f" >"$lf" 2>&1 || echo "RENDER-ERROR" >>"$lf"
+    stl="$WORK/man_$(echo "$f" | tr '/.' '__').stl"
+    "$OPENSCAD" --render --export-format binstl -o "$stl" "$f" >"$lf" 2>&1 || echo "RENDER-ERROR" >>"$lf"
+    bad_f=0
     if grep -Eq 'WARNING:|ERROR:|Assertion|RENDER-ERROR' "$lf"; then
-        man_bad=$((man_bad+1)); man_list="$man_list $f"
-        printf "    ${RD}x${ZZ} %s\n" "$f"
+        bad_f=1
+        printf "    ${RD}x${ZZ} %s (openscad warning)\n" "$f"
         grep -E 'WARNING:|ERROR:|Assertion|RENDER-ERROR' "$lf" | head -3 | sed 's/^/        /'
+    elif [ -s "$stl" ]; then
+        mout="$(bash "$REPO_ROOT/lib/cmd_mesh.sh" "$stl" 2>&1)"
+        if printf '%s\n' "$mout" | grep -q 'ModuleNotFoundError\|No module named\|no python runtime'; then
+            man_degraded=1
+        elif printf '%s\n' "$mout" | grep -q '>>> MESH CHECK: FAIL'; then
+            bad_f=1
+            printf "    ${RD}x${ZZ} %s (mesh-verified non-manifold)\n" "$f"
+            printf '%s\n' "$mout" | grep 'MESH CHECK: FAIL' | sed 's/^/        /'
+        fi
+    else
+        bad_f=1
+        printf "    ${RD}x${ZZ} %s (no mesh produced)\n" "$f"
     fi
+    [ $bad_f -eq 1 ] && { man_bad=$((man_bad+1)); man_list="$man_list $f"; }
 done
 if [ $man_n -eq 0 ]; then skip MANIFOLD "no scad files"
-elif [ $man_bad -eq 0 ]; then pass MANIFOLD "$man_n file(s) clean"
-else fail MANIFOLD "$man_bad/$man_n with warnings:$man_list"; HARD_FAIL=1; fi
+elif [ $man_bad -gt 0 ]; then fail MANIFOLD "$man_bad/$man_n bad:$man_list"; HARD_FAIL=1
+elif [ $man_degraded -eq 1 ]; then pass MANIFOLD "$man_n file(s) clean (grep-only — mesh stack absent for the watertight check)"
+else pass MANIFOLD "$man_n file(s) clean (mesh-verified)"; fi
 echo
 
 # ---- 2. CONSISTENCY (HARD) -------------------------------------------------

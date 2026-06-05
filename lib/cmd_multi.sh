@@ -44,7 +44,7 @@ left:0,0,0,90,0,90,0
 right:0,0,0,90,0,-90,0
 top:0,0,0,0,0,0,0"
 
-echo "multi: $INPUT -> $OUTDIR ${RENDER[*]}"
+echo "multi: $INPUT -> $OUTDIR ${RENDER[*]:-}"
 while IFS=: read -r angle cam; do
     out="$OUTDIR/${BASE}_${angle}.png"
     echo "  [$angle]"

@@ -177,11 +177,60 @@ examples/cube.scad  trivial test part
 requirements.txt    python deps for the full offline path
 ```
 
-## Provenance
+`section` has two modes: the default **part mode** cuts a single `--module` (the cut
+face renders mono/tan); `--color` does the **assembly coloured-section** (per-part colour
+preserved — the assembly must honour `-D cut=true` and wrap parts as
+`color(c) section_cut() part();`).
 
-The render/section/export/validate/params helpers, the collision engine, the mesh /
-printability / acceptance gates, the silhouette score/overlay, the match loop, and the
-reference pre-processor were migrated and generalized from the `garage-band / lego-loco`
-project's verification rig (copied, not moved; project-specific paths and hardcoded
-cameras / part names removed). The methodology is documented in that project's research
-report (§7 pixel-perfect workflow, §8 toolchain).
+`fit-camera` searches OpenSCAD camera params (azimuth/elevation/distance/pan) to maximise
+silhouette IoU against a reference, saving the fitted 6-param vector camera to JSON plus a
+fit render and an overlay — the practical "Step 0: lock the camera" of the report's §7.1.
+
+## Layout
+
+```
+bin/3d              dispatcher (resolves REPO_ROOT through the symlink)
+lib/common.sh       shared bash helpers (binary location, symlink-safe REPO_ROOT)
+lib/pyrun           python runner: .venv -> uv -> system python3
+lib/cmd_*.sh        one file per subcommand
+lib/*.py            migrated python tools (mesh/collision/printability/preprocess/match/fit)
+docs/critic-prompts.md  the vision-critic prompt patterns (from lego-loco match/prompts.md)
+libs/               OpenSCAD libraries cloned on demand (gitignored)
+examples/cube.scad  trivial test part
+requirements.txt    python deps for the full offline path
+```
+
+## Provenance & migration notes
+
+Migrated and generalized from the `garage-band / lego-loco` project's verification rig
+(copied, not moved; project-specific paths, hardcoded cameras, and loco part names removed;
+the collision/mesh/printability tools made project-agnostic via config/args). Methodology:
+that project's research report (§7 pixel-perfect workflow, §8 toolchain).
+
+Per-source accounting of the requested migration set:
+- **openscad tools** (preview/multi/section/export/validate/version/extract-params,
+  section-color): all ported. `version-scad.sh` was **intentionally dropped** — the
+  lego-loco methodology versions via git, not file-name indices, so a "next version
+  number" helper has no place here. `section-color.sh` is folded into `3d section --color`.
+- **tools/collision/** (config/collision_check/frame_check/collision_viz): ported verbatim
+  (already project-agnostic) and exposed as `3d collision [--frame|--viz]`.
+- **match/** (loop.py, overlay.sh, score.sh, prompts.md): `loop.py` generalized into
+  `3d match` (tunables derived from the constants file, not a hardcoded loco list);
+  `overlay.sh`/`score.sh` into `3d overlay`/`3d score`; `prompts.md` copied to
+  `docs/critic-prompts.md`. `render_silhouette.sh` was **not present** in the source
+  match/ dir, so `3d silhouette` reimplements it from the report (§7.1).
+- **verify/** (mesh_check, acceptance, printability_check, printability_mesh,
+  run_collision): all ported. `acceptance.sh` generalized to operate on the passed
+  assembly with collision/silhouette running only when configured. `run_collision.sh`'s
+  `../../..` repo-root math re-pointed to this repo.
+- **preprocess/preprocess_reference.py**: ported as `3d preprocess` (SAM2/Depth-Anything
+  tiers import-guarded; OpenCV grabCut + pseudo-depth always-available fallback).
+
+**FALLBACK modes** (work but degrade without optional heavy deps):
+- `3d mesh` / `export` / `check` / `acceptance` use trimesh+manifold3d for the watertight
+  check; **open3d** (the real triangle-triangle self-intersection test) has no wheel for
+  some Python versions, so self-intersection is reported UNVERIFIED unless open3d installs.
+  Without the whole mesh stack, the manifold gate degrades to openscad-log-grep (reported
+  in the output, never a silent false PASS).
+- `3d preprocess` runs the OpenCV grabCut + pseudo-depth floor unless `rembg` / SAM2 /
+  Depth-Anything-V2 are installed (see `requirements.txt` and `--help`).
