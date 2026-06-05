@@ -129,6 +129,23 @@ def run(argv: list[str]) -> int:  # noqa: C901
         miss("python mesh stack", f"no python3 — {install_cmd('python3')}")
 
     print()
+    print(f"{b}Web dashboard (3d web — OPTIONAL tier){z}")
+    # import-name -> pip package. fastapi/uvicorn are required for the dashboard; markdown
+    # (spec->HTML) and pyyaml (per-part colors) are nice-to-have and degrade gracefully.
+    web_deps = [("fastapi", "fastapi"), ("uvicorn", "uvicorn"),
+                ("markdown", "markdown"), ("yaml", "pyyaml")]
+    if py:
+        for mod, pkg in web_deps:
+            if py_has_module(mod):
+                passl(f"py:{mod}", f"importable by {py}")
+            elif not has_venv and has_uv:
+                warn(f"py:{mod}", f"absent (ok: uv resolves '{pkg}' per-call for 3d web)")
+            else:
+                warn(f"py:{mod}", f"absent — only 3d web needs it (pip install {pkg})")
+    else:
+        warn("web deps", f"no python3 — {install_cmd('python3')}")
+
+    print()
     print(f"{b}Slicer (3d slice){z}")
     sl = find_slicer()
     if sl:

@@ -29,7 +29,9 @@ def run(argv: list[str]) -> int:
         return 0
     os.environ.setdefault("REPO_ROOT", repo_root())
     runner = os.path.join(repo_root(), "tests", "run_gate.py")
-    return exec_tool("pytest,mypy", runner, list(argv))
+    # fastapi/uvicorn/markdown/pyyaml: the `web` tests + mypy over lib/web need them
+    # importable in the gate's runtime (uv resolves them per-call here).
+    return exec_tool("pytest,mypy,fastapi,uvicorn,markdown,pyyaml,httpx", runner, list(argv))
 
 
 COMMAND = Command(

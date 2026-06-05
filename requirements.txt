@@ -34,3 +34,13 @@ pillow>=10.0
 #   rembg[cpu]                 # salient-object mask
 #   transformers>=4.45 ; torch # Depth-Anything-V2 monocular depth
 #   sam2 (git+https://github.com/facebookresearch/sam2.git)  # SAM 2 segmenter
+
+# --- web dashboard (3d web) — OPTIONAL tier ---
+# Only `3d web` needs these; the core geometry/render/check pipeline does not. Resolved
+# per-call by uv (`3d web` -> exec via uv --with fastapi,uvicorn,markdown,pyyaml) or
+# install them for an offline .venv path. markdown (spec->HTML) and pyyaml (per-part
+# colors) degrade gracefully if absent; fastapi+uvicorn are required to serve.
+fastapi>=0.110
+uvicorn>=0.27
+markdown>=3.5
+pyyaml>=6.0
