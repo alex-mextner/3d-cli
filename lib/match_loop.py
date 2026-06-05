@@ -31,6 +31,8 @@
 #   --dry-run   SKIP codex; synthesise a deterministic edit each round so the
 #               render/score/accept/revert/changelog machinery is exercised.
 # ─────────────────────────────────────────────────────────────────────────────
+from __future__ import annotations
+
 import argparse
 import json
 import math
@@ -39,17 +41,20 @@ import re
 import shutil
 import subprocess
 import sys
+from typing import Any
 
 REPO_ROOT = os.environ.get("REPO_ROOT") or os.path.abspath(
     os.path.join(os.path.dirname(__file__), ".."))
 THREED = os.path.join(REPO_ROOT, "bin", "3d")
 
 
-def log(msg):
+def log(msg: str) -> None:
     print(msg, flush=True)
 
 
-def run(cmd, timeout=None, stdin=None):
+def run(
+    cmd: list[str], timeout: float | None = None, stdin: str | None = None
+) -> tuple[int, str]:
     try:
         p = subprocess.run(cmd, input=stdin, capture_output=True, text=True,
                            timeout=timeout)
@@ -68,14 +73,14 @@ _CONST_RE = (
 )
 
 
-def read_const(constants, name):
+def read_const(constants: str, name: str) -> float | None:
     with open(constants) as f:
         src = f.read()
     m = re.search(_CONST_RE.format(name=re.escape(name)), src)
     return float(m.group(2)) if m else None
 
 
-def write_const(constants, name, value):
+def write_const(constants: str, name: str, value: float) -> float | None:
     with open(constants) as f:
         src = f.read()
     m = re.search(_CONST_RE.format(name=re.escape(name)), src)
@@ -92,10 +97,10 @@ def write_const(constants, name, value):
     return old
 
 
-def derive_tunables(constants, restrict):
+def derive_tunables(constants: str, restrict: str | None) -> list[str]:
     """Numeric scalar parameters editable by the loop. Derived from the constants
     file (single-line `name = number;`), optionally restricted to --params."""
-    names = []
+    names: list[str] = []
     with open(constants) as f:
         in_block = 0
         for line in f:
@@ -112,7 +117,7 @@ def derive_tunables(constants, restrict):
 
 
 # ── changelog ────────────────────────────────────────────────────────────────
-def changelog_init(path):
+def changelog_init(path: str) -> None:
     if not os.path.exists(path):
         with open(path, "w") as f:
             f.write("# match loop — changelog\n\n")
@@ -122,8 +127,11 @@ def changelog_init(path):
             f.write("|---|-------|----------|----------------|----------|---------|\n")
 
 
-def changelog_append(path, rnd, param, old, new, s_old, s_new, manifold, verdict):
-    def fmt(x):
+def changelog_append(
+    path: str, rnd: int, param: str, old: Any, new: Any,
+    s_old: Any, s_new: Any, manifold: str, verdict: str,
+) -> None:
+    def fmt(x: Any) -> str:
         if x is None:
             return "—"
         if isinstance(x, float):
@@ -135,7 +143,7 @@ def changelog_append(path, rnd, param, old, new, s_old, s_new, manifold, verdict
         f.write(line)
 
 
-def changelog_text(path):
+def changelog_text(path: str) -> str:
     if not os.path.exists(path):
         return "(empty)"
     with open(path) as f:
@@ -143,8 +151,11 @@ def changelog_text(path):
 
 
 # ── metric handling ──────────────────────────────────────────────────────────
-def parse_score(out, prefer):
-    iou = ae = None
+def parse_score(
+    out: str, prefer: str
+) -> tuple[float | None, str | None, str | None]:
+    iou: float | None = None
+    ae: float | None = None
     for m in re.finditer(r"(?im)\bIoU\s*=\s*([0-9.eE+-]+)", out):
         try:
             iou = float(m.group(1))
@@ -166,7 +177,9 @@ def parse_score(out, prefer):
     return None, None, None
 
 
-def strictly_better(new, best, better, margin):
+def strictly_better(
+    new: float | None, best: float | None, better: str | None, margin: float
+) -> bool:
     if new is None:
         return False
     if best is None:
@@ -180,12 +193,15 @@ def strictly_better(new, best, better, margin):
     return new < best - margin
 
 
-def init_best(better):
+def init_best(better: str) -> float:
     return (-math.inf) if better == "higher" else math.inf
 
 
 # ── VERIFY: render (silhouette) + score + manifold ───────────────────────────
-def verify(assembly, ref, prefer, work, cam, size, ortho):
+def verify(
+    assembly: str, ref: str, prefer: str, work: str,
+    cam: str | None, size: str, ortho: bool,
+) -> tuple[float | None, str | None, str | None, bool, str]:
     """render+score the assembly vs ref via `3d score <scad> <ref>`, plus a
     manifold gate via `3d check`. Returns (score, metric, better, m_ok, m_detail)."""
     os.makedirs(work, exist_ok=True)
@@ -236,8 +252,8 @@ Output ONLY the JSON object or the token CONVERGED. No prose, no code fences.
 """
 
 
-def params_block(constants, tunables):
-    rows = []
+def params_block(constants: str, tunables: list[str]) -> str:
+    rows: list[str] = []
     for n in tunables:
         v = read_const(constants, n)
         if v is not None:
@@ -245,7 +261,11 @@ def params_block(constants, tunables):
     return "\n".join(rows)
 
 
-def critic_codex(constants, tunables, best, metric, better, work, changelog, timeout=1200):
+def critic_codex(
+    constants: str, tunables: list[str], best: float | None,
+    metric: str | None, better: str | None, work: str, changelog: str,
+    timeout: float = 1200,
+) -> str | dict[str, Any] | None:
     overlay = os.path.join(work, "overlay.png")
     prompt = CRITIC_PROMPT.format(
         best=("inf" if best is None or math.isinf(best) else f"{best:.4f}"),
@@ -265,7 +285,7 @@ def critic_codex(constants, tunables, best, metric, better, work, changelog, tim
     return parse_critic_output(out)
 
 
-def parse_critic_output(out):
+def parse_critic_output(out: str) -> str | dict[str, Any] | None:
     if re.search(r"(?m)^\s*CONVERGED\s*$", out) and not re.search(r"\{", out):
         return "CONVERGED"
     for raw in reversed(re.findall(r"\{[^{}]*\}", out)):
@@ -281,7 +301,9 @@ def parse_critic_output(out):
     return None
 
 
-def critic_dry(constants, tunables, rnd):
+def critic_dry(
+    constants: str, tunables: list[str], rnd: int
+) -> str | dict[str, Any]:
     """Deterministic stand-in for codex: cycle params with alternating small/large
     bumps — exercises both the accept and revert paths."""
     if not tunables or rnd >= len(tunables) * 2:
@@ -295,7 +317,7 @@ def critic_dry(constants, tunables, rnd):
 
 
 # ── MAIN LOOP ────────────────────────────────────────────────────────────────
-def main():
+def main() -> int:
     ap = argparse.ArgumentParser(description="forced-monotonic silhouette match loop")
     ap.add_argument("assembly")
     ap.add_argument("reference")
@@ -367,6 +389,7 @@ def main():
         log(f"[round {rnd}/{args.rounds}] best {metric}="
             f"{'inf' if math.isinf(best) else f'{best:.4f}'} no_improve={no_improve}")
 
+        edit: str | dict[str, Any] | None
         if args.dry_run:
             edit = critic_dry(constants, tunables, rnd - 1)
         else:
@@ -376,15 +399,15 @@ def main():
             log("  CRITIC -> CONVERGED")
             verdict_final = "CONVERGED"
             break
-        if not edit:
+        if not edit or not isinstance(edit, dict):
             log("  CRITIC -> no parseable edit; counting as no-improve")
             no_improve += 1
             if no_improve >= args.no_improve:
                 break
             continue
 
-        param = edit["param"]
-        target = edit["target"]
+        param = str(edit["param"])
+        target = float(edit["target"])
         if param not in tunables:
             log(f"  CRITIC proposed non-tunable '{param}'; skip")
             no_improve += 1
@@ -410,7 +433,7 @@ def main():
         log(f"  VERIFY -> {metric}={score} manifold={'PASS' if m_ok else 'FAIL'} ({m_detail})")
 
         improved = strictly_better(score, best, better, args.margin)
-        if improved and m_ok:
+        if improved and m_ok and score is not None:  # strictly_better => score not None
             log(f"  ACCEPT -> {metric} {'inf' if math.isinf(best) else best} -> {score}")
             changelog_append(changelog, rnd, param, old, target, best, score, "PASS", "ok")
             best = score

@@ -24,9 +24,12 @@ Thresholds come straight from skills/fdm-printability/SKILL.md.
 Usage:  printability_mesh.py part.stl [--name NAME] [--json]
 Exit 0 = PASS, 1 = FAIL (a hard rule violated), 2 = load/usage error.
 """
+from __future__ import annotations
+
 import sys
 import json
 import argparse
+from typing import Any, cast
 import numpy as np
 import trimesh
 
@@ -42,14 +45,14 @@ MAX_RAYS      = 6000    # cap thickness rays
 THIN_SAMPLE_FRAC = 0.05 # report the 5th-percentile thickness as "thin region"
 
 
-def load_mesh(path):
-    m = trimesh.load(path, force='mesh')
+def load_mesh(path: str) -> trimesh.Trimesh:
+    m = cast(trimesh.Trimesh, trimesh.load(path, force='mesh'))
     if m is None or m.is_empty or len(m.faces) == 0:
         raise ValueError("empty / unreadable mesh")
     return m
 
 
-def wall_thickness(mesh):
+def wall_thickness(mesh: trimesh.Trimesh) -> Any:
     """Local wall thickness at face centroids via inward ray-cast.
 
     For each sampled face we shoot a ray from its centroid in the -normal
@@ -85,7 +88,7 @@ def wall_thickness(mesh):
     return d
 
 
-def overhang(mesh):
+def overhang(mesh: trimesh.Trimesh) -> tuple[float, float]:
     """Worst overhang angle and overhanging area fraction, Z-up.
 
     A downward-facing face overhangs if the angle between its normal and -Z is
@@ -121,8 +124,8 @@ def overhang(mesh):
     return worst_from_vertical, frac
 
 
-def analyze(path, name):
-    res = {"part": name, "checks": {}, "verdict": "PASS"}
+def analyze(path: str, name: str) -> dict[str, Any]:
+    res: dict[str, Any] = {"part": name, "checks": {}, "verdict": "PASS"}
     try:
         mesh = load_mesh(path)
     except Exception as e:
@@ -184,7 +187,7 @@ def analyze(path, name):
     return res
 
 
-def main():
+def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("stl")
     ap.add_argument("--name", default=None)

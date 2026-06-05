@@ -43,8 +43,27 @@ live observation of AI agents doing the work. Its own repo
 - 📋 **Remove `3d setup` and `3d libs install`** — both become automatic. Keep only
   `3d libs path` (info). `3d doctor` stays (read-only health/compat report).
 
+## 2a. Materials & printers — shared, cross-cutting vocabularies
+- 📋 **Single canonical registries** `materials.yaml` + `printers.yaml` (built-in defaults
+  + user/project overrides), referenced BY NAME everywhere. Materials and printers are
+  cross-cutting concepts used at EVERY stage:
+  - **`3d.yaml`** parts reference a material + the project a printer by name.
+  - **strength / FEA** pull material properties (density, E-modulus, tensile/yield,
+    **FDM layer-adhesion anisotropy factors**, max temp) from the material entry.
+  - **slicing** maps material+printer → slicer filament/process/machine profiles.
+  - **rendering / visualization** pull the material's color + finish (matte/gloss/metal)
+    for both OpenSCAD colors and the photoreal (Blender) shader.
+  - **simulations** (thermal/kinematics) use material + printer constraints.
+  - `3d materials list|show <name>`, `3d printers list|show <name>`. One vocabulary, no
+    duplicated per-stage definitions.
+
 ## 3. Core command surface (option-driven, consolidated)
 - 🔨 **`3d render <file.scad>`** — `--view front|back|left|right|top|bottom|iso|3-4|front-left|front-right|rear-left|rear-right` (camera from model bbox), `--multi [outdir]` (all standard angles), `--section [--plane YZ|XZ|XY] [--color] [--keep pos|neg] [--module 'm();']` (proper 6-param vector cross-section, never 7-param gimbal), `--cam` (manual override), `--ortho`, `-D k=v`, `--debug`.
+- 📋 **Photorealistic render** — `3d render --photo` (or `3d photo`) via **Blender** (Cycles/EEVEE):
+  export STL/3MF → Blender headless (`bpy`) with materials/colors from the materials registry,
+  proper lighting/HDRI, soft shadows. **Blender is installed ON DEMAND** (only when the user
+  requests a photoreal render), NOT auto-bootstrapped. README must show **OpenSCAD render vs
+  Blender photoreal** side by side so the difference is clear.
 - 📋 **`3d check <file>`** — runs ALL applicable gates by DEFAULT; `--mesh --printability --collision --manifold --silhouette` select a subset; `--skip X` excludes. Per-gate breakdown + PASS/FAIL. (= the acceptance master gate.)
 - ✅ `export` (mesh-validated, nonzero on bad geometry), `validate`, `params`.
 - ✅ `mesh`, `printability`, `collision` (static / `--frame` / `--viz`), `acceptance`, `silhouette`, `overlay`, `score`, `match` (forced-monotonic loop + changelog, `--dry-run`), `fit-camera`, `preprocess`.

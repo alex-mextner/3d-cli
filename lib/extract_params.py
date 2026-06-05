@@ -9,13 +9,16 @@ Customizer comment syntax recognized:
 
 Usage:  extract_params.py input.scad [--json]
 """
+from __future__ import annotations
+
 import sys
 import re
 import json
+from typing import Any
 
 
-def extract(path):
-    rows = []
+def extract(path: str) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
     in_block = 0
     with open(path) as f:
         for line in f:
@@ -54,7 +57,7 @@ def extract(path):
     return rows
 
 
-def main(argv):
+def main(argv: list[str]) -> int:
     if len(argv) < 2:
         print("usage: extract_params.py input.scad [--json]", file=sys.stderr)
         return 1
@@ -62,7 +65,7 @@ def main(argv):
     as_json = "--json" in argv[2:]
     rows = extract(path)
     if as_json:
-        out = []
+        out: list[dict[str, Any]] = []
         for r in rows:
             o = {"name": r["name"], "value": r["value"], "type": r["type"]}
             if r["range"]:

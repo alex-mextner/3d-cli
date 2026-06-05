@@ -29,11 +29,15 @@ if [ -x "$VENV_PY" ]; then
 fi
 
 if [ -z "${PY3D_NO_UV:-}" ] && command -v uv >/dev/null 2>&1; then
-    # build --with flags from the comma list
+    # build --with flags from the comma list. DEPS may be EMPTY (no extra deps) — guard
+    # every empty-array expansion under `set -u` (bash 3/4 treats "${arr[@]}" on an empty
+    # array as unbound).
     args=()
-    IFS=',' read -r -a deplist <<< "$DEPS"
-    for d in "${deplist[@]}"; do [ -n "$d" ] && args+=( "--with" "$d" ); done
-    exec uv run "${args[@]}" python3 "$@"
+    if [ -n "$DEPS" ]; then
+        IFS=',' read -r -a deplist <<< "$DEPS"
+        for d in ${deplist[@]+"${deplist[@]}"}; do [ -n "$d" ] && args+=( "--with" "$d" ); done
+    fi
+    exec uv run ${args[@]+"${args[@]}"} python3 "$@"
 fi
 
 if command -v python3 >/dev/null 2>&1; then

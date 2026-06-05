@@ -23,6 +23,8 @@ Run:  uv run --with trimesh,manifold3d,rtree,numpy,scipy \
           python3 tools/collision/frame_check.py <project>/verify/collision.json
 Env:  FRAMES=N  (overrides the frame count from the config)
 """
+from __future__ import annotations
+
 import importlib.util
 import itertools
 import os
@@ -30,6 +32,7 @@ import pathlib
 import subprocess
 import sys
 import tempfile
+from typing import Callable
 
 import numpy as np
 import trimesh
@@ -38,25 +41,31 @@ import trimesh
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from config import load  # noqa: E402
 from collision_check import (  # noqa: E402
-    intersection_volume, min_surface_distance, classify,
+    intersection_volume, min_surface_distance, classify, _load_mesh,
 )
 
 np.seterr(divide="ignore", invalid="ignore")
 
 
-def import_pose(timeline_path, fn_name):
+def import_pose(timeline_path: pathlib.Path, fn_name: str) -> Callable[[float], dict]:
     """Dynamically import the project's pose(t) function from its .py path.
 
     Uses spec_from_file_location (NOT sys.path + import) so two projects can both have a
     `timeline.py` without clashing.
     """
     spec = importlib.util.spec_from_file_location("_project_timeline", str(timeline_path))
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot load timeline module from {timeline_path}")
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
-    return getattr(mod, fn_name)
+    fn = getattr(mod, fn_name)
+    return fn  # type: ignore[no-any-return]
 
 
-def export_part_pose(pair_scad, part, pose_flags, tmp, idx, sentinel):
+def export_part_pose(
+    pair_scad: pathlib.Path, part: str, pose_flags: list[str],
+    tmp: str, idx: int, sentinel: int,
+) -> trimesh.Trimesh | None:
     """Render one part placed at a CONTINUOUS pose (phase=sentinel) to binary STL."""
     out = os.path.join(tmp, f"f{idx}_{part}.stl")
     subprocess.run(
@@ -66,13 +75,10 @@ def export_part_pose(pair_scad, part, pose_flags, tmp, idx, sentinel):
         capture_output=True, text=True, timeout=180, check=False)
     if not os.path.exists(out) or os.path.getsize(out) < 100:
         return None
-    m = trimesh.load(out, process=True)
-    if m.is_empty or len(m.faces) == 0:
-        return None
-    return m
+    return _load_mesh(out)
 
 
-def main(argv):
+def main(argv: list[str]) -> None:
     if len(argv) < 2:
         print("usage: frame_check.py <config.json>", file=sys.stderr)
         sys.exit(2)
@@ -91,16 +97,17 @@ def main(argv):
     npairs = len(list(itertools.combinations(cfg.parts, 2)))
     print(f"PER-FRAME collision gate: {nframes} frames, {npairs} pairs/frame "
           f"(EPS={cfg.eps} mm^3, touch_tol={cfg.touch_tol} mm)")
-    bugs = []  # (frame, t, a, b, vol, dist, kind)
+    bugs: list[tuple[int, float, str, str, float, float, str]] = []
     for fi, t in enumerate(ts):
         p = pose(float(t))
         # Build the -D pose flags generically from the config mapping.
-        pose_flags = []
+        pose_flags: list[str] = []
         for key, var in pose_vars.items():
             pose_flags += ["-D", f"{var}={p[key]}"]
-        meshes = {part: export_part_pose(cfg.pair, part, pose_flags, tmp, fi, sentinel)
-                  for part in cfg.parts}
-        frame_bugs = []
+        meshes: dict[str, trimesh.Trimesh | None] = {
+            part: export_part_pose(cfg.pair, part, pose_flags, tmp, fi, sentinel)
+            for part in cfg.parts}
+        frame_bugs: list[tuple[str, str, float, float, str]] = []
         for a, b in itertools.combinations(cfg.parts, 2):
             ma, mb = meshes[a], meshes[b]
             if ma is None or mb is None:

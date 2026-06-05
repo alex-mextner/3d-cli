@@ -11,6 +11,8 @@ from the config.
 CRITICAL: every path in the config is resolved RELATIVE TO THE CONFIG FILE'S DIRECTORY,
 not relative to this module (which lives in tools/) and not relative to cwd.
 """
+from __future__ import annotations
+
 import json
 import pathlib
 from dataclasses import dataclass
@@ -22,7 +24,7 @@ class FrameCfg:
     timeline_fn: str           # function name in that module (returns dict of DOFs)
     frames: int                # default frame count (env FRAMES overrides)
     pose_sentinel: int         # phase value that tells pair.scad to use continuous pose
-    pose_vars: dict            # { pose_dict_key : openscad_-D_var_name }
+    pose_vars: dict[str, str]  # { pose_dict_key : openscad_-D_var_name }
 
 
 @dataclass
@@ -36,33 +38,33 @@ class CollisionConfig:
     config_path: pathlib.Path
     config_dir: pathlib.Path
     pair: pathlib.Path                 # absolute path to the placement .scad
-    parts: list                        # part module names
-    phases: dict                       # { phase_int : phase_name }
-    intended: set                      # { frozenset((a, b)), ... }
+    parts: list[str]                   # part module names
+    phases: dict[int, str]             # { phase_int : phase_name }
+    intended: set[frozenset[str]]      # { frozenset((a, b)), ... }
     eps: float                         # mm^3 interpenetration volume threshold
     touch_tol: float                   # mm surface-surface zero-gap threshold
     contact_max: float                 # mm^3 max overlap excused for an intended contact
-    frame: FrameCfg
-    viz: VizCfg
+    frame: FrameCfg | None
+    viz: VizCfg | None
 
 
-def load(config_path):
+def load(config_path: str | pathlib.Path) -> CollisionConfig:
     """Load a project collision config; resolve all paths relative to the config dir."""
     cfg_path = pathlib.Path(config_path).resolve()
     cfg_dir = cfg_path.parent
     with open(cfg_path) as fh:
         d = json.load(fh)
 
-    def rel(p):
+    def rel(p: str) -> pathlib.Path:
         return (cfg_dir / p).resolve()
 
-    parts = list(d["parts"])
+    parts: list[str] = list(d["parts"])
     # JSON object keys are strings; phases come as a list of {"phase":int,"name":str}.
-    phases = {int(ph["phase"]): str(ph["name"]) for ph in d["phases"]}
-    intended = {frozenset(pair) for pair in d["intended"]}
+    phases: dict[int, str] = {int(ph["phase"]): str(ph["name"]) for ph in d["phases"]}
+    intended: set[frozenset[str]] = {frozenset(pair) for pair in d["intended"]}
 
     fc = d.get("frame_check", {})
-    frame = FrameCfg(
+    frame: FrameCfg | None = FrameCfg(
         timeline=rel(fc["timeline"]),
         timeline_fn=fc.get("timeline_fn", "pose"),
         frames=int(fc.get("frames", 40)),
@@ -71,7 +73,7 @@ def load(config_path):
     ) if fc else None
 
     vz = d.get("viz", {})
-    viz = VizCfg(
+    viz: VizCfg | None = VizCfg(
         outdir=rel(vz.get("outdir", "../previews")),
         name_prefix=vz.get("name_prefix", "collision"),
     ) if vz else None

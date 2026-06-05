@@ -34,12 +34,15 @@ Usage:
   mesh_check.py PART.scad -D 'var=value' -D 'x=1'   # defines passed to openscad
 """
 
+from __future__ import annotations
+
 import os
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
+from typing import Any, cast
 
 # Resolve THIS repo's export helper (bin/3d), following the lib/ -> repo layout.
 # Falls back to a direct openscad call if not present, so the tool is standalone.
@@ -52,12 +55,12 @@ OPENSCAD = os.environ.get("OPENSCAD") or shutil.which("openscad") or "openscad"
 SELFX_EPS_MM3 = 8.0
 
 
-def die(msg, code=2):
+def die(msg: str, code: int = 2) -> None:
     print(f"mesh_check: {msg}", file=sys.stderr)
     sys.exit(code)
 
 
-def export_scad_to_stl(scad_path, defines):
+def export_scad_to_stl(scad_path: str, defines: list[str]) -> tuple[str, str]:
     """Export a .scad to a temp binary STL via openscad directly.
     Returns (stl_path, openscad_log)."""
     out_dir = tempfile.mkdtemp(prefix="mesh_check_")
@@ -73,24 +76,24 @@ def export_scad_to_stl(scad_path, defines):
     return stl_path, log
 
 
-def openscad_warning_grep(log):
+def openscad_warning_grep(log: str) -> list[str]:
     """Return list of real WARNING:/ERROR: lines from an openscad log.
     grep ERROR: WITH the colon to avoid matching 'NoError' (AGENTS.md footgun)."""
-    hits = []
+    hits: list[str] = []
     for line in log.splitlines():
         if re.search(r"\bERROR:", line) or re.search(r"\bWARNING:", line):
             hits.append(line.strip())
     return hits
 
 
-def check_with_trimesh(mesh_path):
+def check_with_trimesh(mesh_path: str) -> dict[str, Any]:
     import trimesh
 
     loaded = trimesh.load(mesh_path, force="mesh")
     if loaded is None or loaded.is_empty:
         die(f"trimesh loaded an empty mesh from {mesh_path}", 2)
     # force="mesh" already concatenates a Scene into one Trimesh.
-    mesh = loaded
+    mesh = cast(trimesh.Trimesh, loaded)
 
     watertight = bool(mesh.is_watertight)
     winding_ok = bool(mesh.is_winding_consistent)
@@ -141,7 +144,9 @@ def check_with_trimesh(mesh_path):
     }
 
 
-def check_self_and_vertex(mesh):
+def check_self_and_vertex(
+    mesh: Any,
+) -> tuple[bool | None, bool | None, dict[str, Any]]:
     """Return (self_intersecting, vertex_manifold, detail).
 
     self_intersecting: True / False / None(unverified)
@@ -152,7 +157,7 @@ def check_self_and_vertex(mesh):
     can prove a *topological* defect (NotManifold) but CANNOT see geometric
     self-intersection of an otherwise-valid mesh -> reported as None, not False.
     """
-    detail = {}
+    detail: dict[str, Any] = {}
     # ---- authoritative: open3d ----
     try:
         import numpy as np
@@ -207,17 +212,17 @@ def check_self_and_vertex(mesh):
         return None, None, detail
 
 
-def report_and_exit(r):
+def report_and_exit(r: dict[str, Any]) -> None:
     print("=" * 56)
     print("MESH CHECK (report 4.1 manifold/watertight gate)")
     print("=" * 56)
     print(f"engine            : {r['engine']}")
     print(f"faces / vertices  : {r.get('n_faces','?')} / {r.get('n_vertices','?')}")
 
-    def yn(b):
+    def yn(b: Any) -> str:
         return "yes" if b else "NO"
 
-    def vm_str(v):
+    def vm_str(v: Any) -> str:
         return "yes" if v is True else ("NO" if v is False else "unknown")
 
     print(f"watertight        : {yn(r['watertight'])}")
@@ -257,7 +262,7 @@ def report_and_exit(r):
     sys.exit(0)
 
 
-def fallback_openscad(scad_path, defines):
+def fallback_openscad(scad_path: str, defines: list[str]) -> None:
     """No trimesh: render the .scad and grep warnings. Cannot compute volume or
     inspect a raw mesh, but catches OpenSCAD's own non-manifold warnings."""
     print("mesh_check: trimesh unavailable -> FALLBACK to openscad warning grep",
@@ -287,11 +292,11 @@ def fallback_openscad(scad_path, defines):
     sys.exit(0)
 
 
-def main(argv):
+def main(argv: list[str]) -> None:
     if len(argv) < 2:
-        die(__doc__.strip().splitlines()[0] + "\n\n" + usage(), 2)
+        die((__doc__ or "").strip().splitlines()[0] + "\n\n" + usage(), 2)
     inp = argv[1]
-    defines = []
+    defines: list[str] = []
     i = 2
     while i < len(argv):
         if argv[i] == "-D" and i + 1 < len(argv):
@@ -328,7 +333,7 @@ def main(argv):
     report_and_exit(r)
 
 
-def usage():
+def usage() -> str:
     return (
         "Usage: mesh_check.py PART.{stl,3mf,scad} [-D 'var=val' ...]\n"
         "  Via the CLI (resolves deps): 3d mesh PART.stl\n"

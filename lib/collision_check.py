@@ -28,12 +28,15 @@ Run:  uv run --with trimesh,manifold3d,rtree,numpy,scipy \
           python3 tools/collision/collision_check.py <project>/verify/collision.json
 Env:  PHASES_SEL (e.g. "0,1") restricts which configured phases are gated.
 """
+from __future__ import annotations
+
 import itertools
 import os
 import pathlib
 import subprocess
 import sys
 import tempfile
+from typing import Any, cast
 
 import numpy as np
 import trimesh
@@ -44,7 +47,17 @@ from config import load  # noqa: E402
 np.seterr(divide="ignore", invalid="ignore")  # sharp tips yield degenerate tris
 
 
-def export_part(pair_scad, part, phase, tmp):
+def _load_mesh(path: str) -> trimesh.Trimesh | None:
+    """Load an STL as a single Trimesh (force='mesh' concatenates any Scene)."""
+    m = cast(trimesh.Trimesh, trimesh.load(path, force="mesh", process=True))
+    if m is None or m.is_empty or len(m.faces) == 0:
+        return None
+    return m
+
+
+def export_part(
+    pair_scad: pathlib.Path, part: str, phase: int, tmp: str
+) -> trimesh.Trimesh | None:
     """Render one PLACED part at a phase to binary STL and load it as a trimesh.Trimesh."""
     out = os.path.join(tmp, f"solo_{part}_{phase}.stl")
     subprocess.run(
@@ -53,13 +66,10 @@ def export_part(pair_scad, part, phase, tmp):
         capture_output=True, text=True, timeout=180, check=False)
     if not os.path.exists(out) or os.path.getsize(out) < 100:
         return None
-    m = trimesh.load(out, process=True)
-    if m.is_empty or len(m.faces) == 0:
-        return None
-    return m
+    return _load_mesh(out)
 
 
-def intersection_volume(a, b):
+def intersection_volume(a: trimesh.Trimesh, b: trimesh.Trimesh) -> float:
     """Exact boolean-intersection volume (mm^3) via the manifold engine; 0 if disjoint."""
     try:
         inter = trimesh.boolean.intersection([a, b], engine="manifold")
@@ -70,19 +80,22 @@ def intersection_volume(a, b):
     return abs(float(inter.volume))
 
 
-def _sample_points(m):
+def _sample_points(m: trimesh.Trimesh) -> Any:
     """Vertices + face centroids of a mesh — covers both near-misses and coincident faces."""
     return np.vstack([m.vertices, m.triangles.mean(axis=1)])
 
 
-def min_surface_distance(a, b):
+def min_surface_distance(a: trimesh.Trimesh, b: trimesh.Trimesh) -> float:
     """Minimum surface-to-surface distance (mm), queried in BOTH directions."""
     _, da, _ = trimesh.proximity.closest_point(b, _sample_points(a))
     _, db, _ = trimesh.proximity.closest_point(a, _sample_points(b))
     return float(min(da.min(), db.min()))
 
 
-def classify(vol, dist, intended, eps, touch_tol, contact_max):
+def classify(
+    vol: float, dist: float, intended: bool,
+    eps: float, touch_tol: float, contact_max: float,
+) -> tuple[str, str]:
     """Return (status, kind) where status in {clear, intended, bug}."""
     interpen = vol > eps
     touch = dist < touch_tol
@@ -95,7 +108,7 @@ def classify(vol, dist, intended, eps, touch_tol, contact_max):
     return "bug", kind
 
 
-def main(argv):
+def main(argv: list[str]) -> None:
     if len(argv) < 2:
         print("usage: collision_check.py <config.json>", file=sys.stderr)
         sys.exit(2)
@@ -108,13 +121,13 @@ def main(argv):
 
     tmp = tempfile.mkdtemp(prefix="collision_")
     # Pre-export every placed part once per phase (reused across all pairs).
-    meshes = {}
+    meshes: dict[tuple[str, int], trimesh.Trimesh | None] = {}
     for ph in phases:
         for p in cfg.parts:
             meshes[(p, ph)] = export_part(cfg.pair, p, ph, tmp)
 
-    rows = []          # (phase_idx, a, b, vol, dist, status, kind)
-    bugs = []
+    rows: list[tuple[int, str, str, float, float, str, str]] = []
+    bugs: list[tuple[int, str, str, float, float, str]] = []
     for ph in phases:
         for a, b in itertools.combinations(cfg.parts, 2):
             ma, mb = meshes[(a, ph)], meshes[(b, ph)]

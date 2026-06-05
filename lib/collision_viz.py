@@ -16,12 +16,15 @@ Output: <viz.outdir>/<viz.name_prefix>_<phase>.png  (one per phase)
 Run:  uv run --with trimesh,manifold3d,rtree,numpy,scipy,pyvista \
           python3 tools/collision/collision_viz.py <project>/verify/collision.json
 """
+from __future__ import annotations
+
 import itertools
 import os
 import pathlib
 import subprocess
 import sys
 import tempfile
+from typing import Any, cast
 
 import numpy as np
 import pyvista as pv
@@ -34,7 +37,9 @@ np.seterr(divide="ignore", invalid="ignore")
 pv.OFF_SCREEN = True
 
 
-def export_part(pair_scad, part, phase, tmp):
+def export_part(
+    pair_scad: pathlib.Path, part: str, phase: int, tmp: str
+) -> trimesh.Trimesh | None:
     out = os.path.join(tmp, f"solo_{part}_{phase}.stl")
     subprocess.run(
         ["openscad", "--export-format", "binstl", "-o", out,
@@ -42,11 +47,11 @@ def export_part(pair_scad, part, phase, tmp):
         capture_output=True, text=True, timeout=180, check=False)
     if not os.path.exists(out) or os.path.getsize(out) < 100:
         return None
-    m = trimesh.load(out, process=True)
+    m = cast(trimesh.Trimesh, trimesh.load(out, force="mesh", process=True))
     return None if (m.is_empty or len(m.faces) == 0) else m
 
 
-def intersection_mesh(a, b):
+def intersection_mesh(a: trimesh.Trimesh, b: trimesh.Trimesh) -> trimesh.Trimesh | None:
     try:
         inter = trimesh.boolean.intersection([a, b], engine="manifold")
     except Exception:
@@ -54,11 +59,11 @@ def intersection_mesh(a, b):
     return None if (inter is None or inter.is_empty or len(inter.faces) == 0) else inter
 
 
-def sample(m):
+def sample(m: trimesh.Trimesh) -> Any:
     return np.vstack([m.vertices, m.triangles.mean(axis=1)])
 
 
-def min_dist_and_point(a, b):
+def min_dist_and_point(a: trimesh.Trimesh, b: trimesh.Trimesh) -> tuple[float, Any]:
     pa = sample(a)
     _, da, _ = trimesh.proximity.closest_point(b, pa)
     pb = sample(b)
@@ -68,12 +73,12 @@ def min_dist_and_point(a, b):
     return float(db.min()), pb[int(np.argmin(db))]
 
 
-def to_pv(m):
+def to_pv(m: trimesh.Trimesh) -> Any:
     faces = np.hstack([np.full((len(m.faces), 1), 3), m.faces]).astype(np.int64).ravel()
     return pv.PolyData(m.vertices, faces)
 
 
-def section_clip(pdata, y=0.0):
+def section_clip(pdata: Any, y: float = 0.0) -> Any:
     """Clip away +Y half so the bore interior (and any intruding part) is visible."""
     try:
         return pdata.clip(normal="y", origin=(0, y, 0), invert=True)
@@ -81,7 +86,10 @@ def section_clip(pdata, y=0.0):
         return pdata
 
 
-def render_phase(cfg, ph, ph_name, meshes, flagged, intended_rows, out_png):
+def render_phase(
+    cfg: Any, ph: int, ph_name: str, meshes: dict[tuple[str, int], trimesh.Trimesh | None],
+    flagged: list[Any], intended_rows: list[Any], out_png: pathlib.Path,
+) -> None:
     pl = pv.Plotter(off_screen=True, window_size=[1400, 1100])
     pl.set_background("white")
     for p in cfg.parts:
@@ -133,20 +141,24 @@ def render_phase(cfg, ph, ph_name, meshes, flagged, intended_rows, out_png):
     pl.close()
 
 
-def main(argv):
+def main(argv: list[str]) -> None:
     if len(argv) < 2:
         print("usage: collision_viz.py <config.json>", file=sys.stderr)
         sys.exit(2)
     cfg = load(argv[1])
+    if cfg.viz is None:
+        print("config has no viz block", file=sys.stderr)
+        sys.exit(2)
     outdir = cfg.viz.outdir
     outdir.mkdir(parents=True, exist_ok=True)
     tmp = tempfile.mkdtemp(prefix="collision_viz_")
     meshes = {(p, ph): export_part(cfg.pair, p, ph, tmp)
               for ph in cfg.phases for p in cfg.parts}
 
-    produced = []
+    produced: list[tuple[str, pathlib.Path, int]] = []
     for ph, ph_name in cfg.phases.items():
-        flagged, intended_rows = [], []
+        flagged: list[Any] = []
+        intended_rows: list[Any] = []
         for a, b in itertools.combinations(cfg.parts, 2):
             ma, mb = meshes[(a, ph)], meshes[(b, ph)]
             if ma is None or mb is None:

@@ -22,7 +22,10 @@ removed in favor of bbox-derived bounds and ref-image-derived aspect.
 Run (via the 3d CLI):  3d fit-camera model.scad ref.jpg --out camera.json
 Direct:  pyrun "numpy,pillow" lib/fit_camera.py --model m.scad --ref r.jpg
 """
+from __future__ import annotations
+
 import argparse
+import asyncio
 import json
 import math
 import os
@@ -30,6 +33,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+from typing import Any, Sequence
 
 try:
     import numpy as np
@@ -44,7 +48,7 @@ except Exception as e:  # pragma: no cover - import guard
     sys.exit(127)
 
 
-def find_openscad():
+def find_openscad() -> str:
     """Prefer the binary the bash wrapper exported; else search common paths."""
     env = os.environ.get("OPENSCAD")
     if env and (os.path.exists(env) or _on_path(env)):
@@ -63,22 +67,78 @@ def find_openscad():
     sys.exit("fit-camera: openscad not found (install: brew install --cask openscad)")
 
 
-def _on_path(name):
+def _on_path(name: str) -> bool:
     from shutil import which
     return which(name) is not None
 
 
 OPENSCAD = find_openscad()
+# Bound concurrent openscad renders so the parallel random-search batch can't fork
+# hundreds of processes; one per CPU is a good default for CGAL-bound renders.
+_RENDER_LIMIT = max(1, os.cpu_count() or 4)
 
 
-def sh(cmd):
+def sh(cmd: list[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(cmd, capture_output=True, text=True)
+
+
+async def _render_png_async(
+    model: str, cam: Sequence[float], w: int, h: int, out: str,
+    sem: asyncio.Semaphore,
+) -> str | None:
+    """Render one camera to its OWN PNG concurrently (bounded by `sem`)."""
+    cam_arg = ",".join(f"{v:.3f}" for v in cam)
+    async with sem:
+        proc = await asyncio.create_subprocess_exec(
+            OPENSCAD, "--render", "-o", out, f"--camera={cam_arg}",
+            f"--imgsize={w},{h}", model,
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+        )
+        await proc.communicate()
+    return out if os.path.exists(out) else None
+
+
+async def eval_losses_async(
+    model: str, params: list[list[float]], center: list[float],
+    w: int, h: int, refm: Any, tmp: str,
+) -> list[float]:
+    """Render a BATCH of camera params concurrently and return 1-IoU for each.
+
+    This is the parallel core: the random-search samples (and each refine iteration's
+    candidate set) are independent renders, so we gather them under a CPU-bound semaphore
+    instead of rendering one-at-a-time."""
+    sem = asyncio.Semaphore(_RENDER_LIMIT)
+
+    async def one(i: int, p: list[float]) -> float:
+        out = os.path.join(tmp, f"cand_{i}.png")
+        png = await _render_png_async(model, cam_from_params(p, center), w, h, out, sem)
+        if png is None:
+            return 1.0
+        a = np.asarray(Image.open(png).convert("RGB").resize((w, h)), dtype=np.int16)
+        try:
+            os.remove(png)
+        except OSError:
+            pass
+        return 1.0 - iou(array_to_mask(a), refm)
+
+    return list(await asyncio.gather(*(one(i, p) for i, p in enumerate(params))))
+
+
+def eval_losses(
+    model: str, params: list[list[float]], center: list[float],
+    w: int, h: int, refm: Any, tmp: str,
+) -> list[float]:
+    """Sync entry to the async batch evaluator (correct path when asyncio is fine; the
+    work is genuinely parallel openscad renders)."""
+    return asyncio.run(eval_losses_async(model, params, center, w, h, refm, tmp))
 
 
 # --------------------------------------------------------------------------- #
 # Model bounding box: export a temp STL, parse vertices, return centroid+diag. #
 # --------------------------------------------------------------------------- #
-def model_bbox(model, tmp):
+def model_bbox(
+    model: str, tmp: str
+) -> tuple[list[float] | None, float | None]:
     """Return (centroid[3], diag) of the model, or (None, None) on failure.
 
     Forces binary STL and parses it with struct/numpy directly (no trimesh dep).
@@ -112,14 +172,14 @@ def model_bbox(model, tmp):
 # --------------------------------------------------------------------------- #
 # Masks                                                                        #
 # --------------------------------------------------------------------------- #
-def ref_mask(path, w, h, thresh):
+def ref_mask(path: str, w: int, h: int, thresh: int) -> Any:
     im = Image.open(path).convert("L").resize((w, h))
     a = np.asarray(im, dtype=np.uint8)
     # subject = darker than a light background
     return (a < thresh).astype(np.uint8)
 
 
-def render_to_array(model, cam, w, h, tmp):
+def render_to_array(model: str, cam: Sequence[float], w: int, h: int, tmp: str) -> Any:
     out = os.path.join(tmp, "r.png")
     if os.path.exists(out):
         os.remove(out)
@@ -131,25 +191,25 @@ def render_to_array(model, cam, w, h, tmp):
     return np.asarray(Image.open(out).convert("RGB").resize((w, h)), dtype=np.int16)
 
 
-def array_to_mask(a):
+def array_to_mask(a: Any) -> Any:
     # OpenSCAD default background ~ (255,255,229); subject = anything else.
     bg = np.array([255, 255, 229])
     diff = np.abs(a - bg).sum(axis=2)
     return (diff > 30).astype(np.uint8)
 
 
-def render_mask(model, cam, w, h, tmp):
+def render_mask(model: str, cam: Sequence[float], w: int, h: int, tmp: str) -> Any:
     a = render_to_array(model, cam, w, h, tmp)
     return None if a is None else array_to_mask(a)
 
 
-def iou(m1, m2):
+def iou(m1: Any, m2: Any) -> float:
     inter = np.logical_and(m1, m2).sum()
     union = np.logical_or(m1, m2).sum()
     return float(inter) / float(union) if union else 0.0
 
 
-def cam_from_params(p, center):
+def cam_from_params(p: Sequence[float], center: Sequence[float]) -> list[float]:
     az, el, dist, panx, panz = p
     cx, cy, cz = center[0] + panx, center[1], center[2] + panz
     ar, er = math.radians(az), math.radians(el)
@@ -162,7 +222,7 @@ def cam_from_params(p, center):
 # --------------------------------------------------------------------------- #
 # Diagnostic overlays                                                          #
 # --------------------------------------------------------------------------- #
-def mask_pca(mask):
+def mask_pca(mask: Any) -> tuple[Any, Any, tuple[int, int, int, int]] | None:
     """Return (centroid_xy, principal_axis_xy_unit, bbox(x0,y0,x1,y1)) or None."""
     ys, xs = np.nonzero(mask)
     if xs.size < 2:
@@ -175,7 +235,7 @@ def mask_pca(mask):
     return c, axis, (int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max()))
 
 
-def draw_axes_overlay(img, mask, color):
+def draw_axes_overlay(img: Any, mask: Any, color: tuple[int, int, int]) -> None:
     """Draw PCA principal axis + bbox contour of `mask` onto PIL `img` in `color`."""
     info = mask_pca(mask)
     if info is None:
@@ -192,7 +252,9 @@ def draw_axes_overlay(img, mask, color):
     d.ellipse([c[0] - r, c[1] - r, c[0] + r, c[1] + r], outline=color, width=2)
 
 
-def write_overlay(render_arr, ref_path, refm, out_path, draw_axes):
+def write_overlay(
+    render_arr: Any, ref_path: str, refm: Any, out_path: str, draw_axes: bool
+) -> None:
     """render(cyan) over reference(red) ghost; optionally PCA axes/bbox of each."""
     h, w = refm.shape
     rm = array_to_mask(render_arr) if render_arr is not None else np.zeros_like(refm)
@@ -208,7 +270,9 @@ def write_overlay(render_arr, ref_path, refm, out_path, draw_axes):
 
 
 # --------------------------------------------------------------------------- #
-def parse_size(s, default_wh, ref_aspect):
+def parse_size(
+    s: str | None, default_wh: tuple[int, int], ref_aspect: float
+) -> tuple[int, int]:
     """'WxH' -> (w,h). 'W' or 'Wx' -> derive H from ref aspect. '' -> default."""
     if not s:
         return default_wh
@@ -224,7 +288,7 @@ def parse_size(s, default_wh, ref_aspect):
     return w, max(1, round(w / ref_aspect))
 
 
-def main():
+def main() -> None:
     ap = argparse.ArgumentParser(prog="3d fit-camera", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--model", required=True, help="OpenSCAD model (.scad)")
@@ -277,11 +341,8 @@ def main():
     if refm.sum() == 0:
         print("fit-camera: WARN reference mask is empty (try a higher --thresh)", flush=True)
 
-    def loss(p):
-        m = render_mask(args.model, cam_from_params(p, center), ow, oh, tmp)
-        if m is None:
-            return 1.0
-        return 1.0 - iou(m, refm)
+    def loss(p: list[float]) -> float:
+        return eval_losses(args.model, [p], center, ow, oh, refm, tmp)[0]
 
     # ---- search space DERIVED FROM bbox diagonal (generic, any scale) ----------
     #  azimuth/elevation: full generic view sphere (no project view-prior).
@@ -289,11 +350,16 @@ def main():
     lo = [-180.0, -89.0, 1.2 * diag, -1.0 * diag, -1.0 * diag]
     hi = [180.0, 89.0, 6.0 * diag, 1.0 * diag, 1.0 * diag]
     rng = np.random.default_rng(args.seed)
-    best_p, best_l = None, 2.0
-    print("random search...", flush=True)
-    for i in range(args.rand):
-        p = [rng.uniform(lo[k], hi[k]) for k in range(5)]
-        l = loss(p)
+    best_p: list[float] | None = None
+    best_l = 2.0
+    # PARALLEL random search: sample all candidates up front, render the whole batch
+    # concurrently (CPU-bound semaphore), then reduce. Same RNG seed => same samples =>
+    # reproducible, just faster than one-render-at-a-time.
+    print(f"random search ({args.rand} samples, up to {_RENDER_LIMIT} parallel renders)...",
+          flush=True)
+    samples = [[rng.uniform(lo[k], hi[k]) for k in range(5)] for _ in range(args.rand)]
+    losses = eval_losses(args.model, samples, center, ow, oh, refm, tmp)
+    for i, (p, l) in enumerate(zip(samples, losses)):
         if l < best_l:
             best_l, best_p = l, p
             print(f"  rand {i:3d}  IoU={1-l:.3f}  {[round(x,1) for x in p]}", flush=True)
@@ -302,17 +368,26 @@ def main():
         best_l = loss(best_p)
 
     # ---- coordinate-descent refine; steps scale with the diagonal --------------
+    # Greedy per-coordinate descent: best_p is updated MID-PASS so a single pass can
+    # improve several coordinates (preserves the original sequential algorithm exactly).
+    # The only thing parallelized is the TWO independent directions (+step,-step) of the
+    # CURRENT coordinate — a 2-way batch — so accuracy is identical, just the per-coord
+    # pair renders concurrently.
     print("refine...", flush=True)
     step = [12.0, 6.0, 0.08 * diag, 0.15 * diag, 0.12 * diag]
     min_step = max(0.5, 0.005 * diag)
     for _it in range(args.refine):
         improved = False
         for k in range(5):
+            cands: list[list[float]] = []
             for s in (step[k], -step[k]):
                 q = list(best_p)
-                q[k] += s
-                q[k] = min(max(q[k], lo[k]), hi[k])
-                l = loss(q)
+                q[k] = min(max(q[k] + s, lo[k]), hi[k])
+                cands.append(q)
+            cl = eval_losses(args.model, cands, center, ow, oh, refm, tmp)
+            # same fixed order as the sequential version (+step before -step) so ties
+            # resolve identically.
+            for q, l in zip(cands, cl):
                 if l < best_l - 1e-4:
                     best_l, best_p, improved = l, q, True
         if not improved:
