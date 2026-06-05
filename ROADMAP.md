@@ -12,7 +12,8 @@ Status legend: ✅ done · 🔨 in progress · 📋 planned
 AI-assisted, reference-photo-driven **parametric** 3D modeling (OpenSCAD-first),
 verification, pixel-perfect matching, print preparation, physics/kinematics, and
 live observation of AI agents doing the work. Its own repo
-(`github.com/alex-mextner/3d-cli`), `3d` symlinked into a dir on `PATH` (e.g. `~/.local/bin`).
+(`github.com/alex-mextner/3d-cli`), installed as a standard Python package exposing the `3d`
+console-script (pipx / uv tool / pip — see §29), not a manual symlink.
 
 ## 0a. Design influences & philosophy (the meta-thinking)
 The whole tool is shaped by a few deliberate analogies — keep them visible, they explain WHY
@@ -519,6 +520,32 @@ layered rule-config structure. Build an analogous multi-level lint system for 3D
     existing project tops up missing pieces without clobbering.
 - 📋 **`3d projects list|add <path>|remove <path>`** — manage the registry that `3d init` writes and
   `3d web` reads (replaces the single web root, §9).
+
+## 29. Distribution & packaging — standard Python, NOT a manual symlink
+The go-to install is the standard Python mechanism, not `ln -s bin/3d`.
+- 📋 **Ship as a proper installable package** with a **`3d` console-script entry point**
+  (`[project.scripts] 3d = "threed.cli.dispatch:main"`). Install via **`pipx install 3d-cli`** /
+  **`uv tool install 3d-cli`** / `pip install 3d-cli` — pip/pipx put `3d` on `PATH` the standard way.
+  Dev: `uv pip install -e .` / `pip install -e .` (editable).
+- 📋 **Requires a layout restructure** (FOUNDATION task): `lib/` currently sits on `sys.path` with
+  top-level modules `cli`/`commands`/`web` (not pip-shippable — would pollute the global namespace).
+  Move to a real package `threed/` (`threed/cli`, `threed/commands`, `threed/web`, …) with
+  `__init__.py`; `bin/3d` becomes a thin entry (or is dropped for the console script); add
+  `[build-system]` (hatchling) and flip `[tool.uv] package = true`. Update `cli.pyrun` script
+  resolution (it locates `lib/*.py` tools) to package resources (`importlib.resources`).
+- 📋 Publish to PyPI (or a private index); `3d --version` reads package metadata. Keep `examples/`,
+  `docs/`, OpenSCAD libs handling working after the move. Verify the test gate stays green.
+
+## 30. Structured logging with levels
+- 📋 **One structured-logging path** for the whole tool: events carry **levels**
+  (`debug|info|warn|error`) + structured fields (command, op/op-DAG node, target, metric, duration),
+  emitted as human text by default and **JSON** on request. Global controls: `-v/-vv` (raise),
+  `-q` (quiet), `--log-level`, `--log-format text|json`.
+- 📋 **Shared by all frontends/sinks** — the same structured event stream feeds the terminal, the
+  **web SSE** log view (§9), the **op-DAG run record** (§19), and the **report** (§22). The web
+  timeline and `3d report` are just renderings of this stream; levels gate verbosity per sink.
+- 📋 Integrates with the rest: `lib/errors.py` (§1) raises the error-level events; metrics (§13.4)
+  can be derived from the stream; no ad-hoc `print()` for diagnostics — route through the logger.
 
 ---
 

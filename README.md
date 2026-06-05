@@ -16,11 +16,19 @@ pixel-matched, printable part.
 
 ## Install
 
+`3d` installs as a standard Python package exposing the `3d` console command (no manual symlink):
+
 ```bash
-# the repo lives wherever you cloned it; symlink bin/3d onto PATH:
-ln -sf "$PWD/bin/3d" ~/.local/bin/3d     # or any dir on your PATH
+pipx install 3d-cli        # or:  uv tool install 3d-cli   /   pip install 3d-cli
 3d help
+
+# develop on it (editable):
+uv pip install -e .        # or:  pip install -e .
 ```
+
+> Packaging is being finalized (see ROADMAP §29 — the `lib/` layout is moving to an importable
+> `threed` package + console entry point). Until that lands, run it in-place from a clone:
+> `./bin/3d help` (or symlink `bin/3d` onto your `PATH`).
 
 Requirements:
 - **OpenSCAD** (`brew install --cask openscad`) — found on PATH or common Homebrew paths.
