@@ -707,7 +707,7 @@ Design: spec §11. Inspiration: **ffmpeg's power without ffmpeg's UX**.
   - **Pre-commit hooks** (lefthook or equivalent): lint + format + typecheck + conflict-marker check,
     parallel; adapted to Python tools (ruff/black + mypy).
 - 📋 **Canonical config dir = `~/.config/3d-cli/`** (the user's stated path for `web.json` + ROADMAP
-  §2's `.bootstrapped`). RECONCILE the code: the foundation + web waves currently use `~/.config/3d/`
+  §2's `.bootstrapped`). RECONCILE the code: the foundation + web waves currently use `~/.config/3d-cli/`
   in `lib/cli/env.py`, `lib/web/webconfig.py`, `lib/commands/{web,libs,doctor}.py` — rename to
   `~/.config/3d-cli/` (one constant, used everywhere) so docs and code agree.
 
@@ -1006,7 +1006,7 @@ The CLI work now has its own repo and this ROADMAP as the single source. Pick up
    `GLOSSARY.md`. (The prioritized backlog + the APPLY-RESEARCH draft were folded into the ROADMAP
    feature sections and their files deleted — see §17/§27.)
 - ✅ All temp doc branches merged + deleted; no open branches, no worktrees.
-- ⚠️ **First real code task next session — config dir**: code uses `~/.config/3d/` (foundation + web,
-   incl. the web agent's choice); rename to `~/.config/3d-cli/` per §23 (one constant in
+- ⚠️ **First real code task next session — config dir**: code uses `~/.config/3d-cli/` (foundation + web,
+    incl. the web agent's choice); rename to `~/.config/3d-cli/` per §23 (one constant in
    `lib/cli/env.py`, `lib/web/webconfig.py`, `lib/commands/{web,libs,doctor}.py`) so docs+code agree.
 - NOTE: nothing is in-flight; this session ended cleanly. Start from the build order above (1→4).

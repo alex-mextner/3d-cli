@@ -104,7 +104,7 @@ install command, graceful degrade — never a silent false PASS. `cli/env.py` is
 for tool discovery + the OS/install table.)
 
 ### First-run bootstrap
-On ANY `3d` invocation, if `~/.config/3d/.bootstrapped` is absent, the dispatcher
+On ANY `3d` invocation, if `~/.config/3d-cli/.bootstrapped` is absent, the dispatcher
 auto-installs the OpenSCAD libraries (BOSL2, NopSCADlib) into the repo `libs/` ONCE,
 quietly (one-line notice), then touches the marker. It is **idempotent** and **non-fatal
 if offline** (must never block `render`/`help`). `OPENSCADPATH` is auto-exported from
@@ -145,7 +145,7 @@ Co-Authored-By trailer on commits: `Co-Authored-By: Claude Opus 4.8 (1M context)
   over the same `lib/` core (architecture §10). `commands/web.py` is the registry command
   (stdlib-only at top level; lazy-imports the optional web tier and raises a structured
   `MissingDependency` if fastapi/uvicorn are absent); the app lives in `lib/web/`. Config is
-  `~/.config/3d/web.json` — the same dir as the bootstrap marker. See `docs/commands/web.md`.
+  `~/.config/3d-cli/web.json` — the same dir as the bootstrap marker. See `docs/commands/web.md`.
 
 ## Verification before "done"
 
@@ -155,7 +155,7 @@ Run the full list, not a subset:
   identical on a cube; verify direction on `-D depth=40` or an L-shaped fixture). A section
   PNG must visibly show the **cavity** — "a PNG exists" is not proof it cut.
 - `3d check examples/cube.scad` runs all gates by default; `--mesh` alone runs only mesh.
-- First-run bootstrap: `rm ~/.config/3d/.bootstrapped` then any `3d` cmd re-bootstraps.
+- First-run bootstrap: `rm ~/.config/3d-cli/.bootstrapped` then any `3d` cmd re-bootstraps.
 - `3d test` green (pytest + mypy); aliases still work; the smoke harness covers every
   command's `--help`.
 - Everything committed atomically, codex-reviewed, and PUSHED to origin.
