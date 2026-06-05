@@ -8,10 +8,11 @@ Status legend: ✅ done · 🔨 in progress · 📋 planned
 ---
 
 ## 0. Vision
-`3d` is a rich, cross-platform (macOS + Linux) command-line + web toolkit for
-AI-assisted, reference-photo-driven **parametric** 3D modeling (OpenSCAD-first),
-verification, pixel-perfect matching, print preparation, physics/kinematics, and
-live observation of AI agents doing the work. Its own repo
+`3d` is a rich, cross-platform (macOS + Linux) command-line + web toolkit covering the WHOLE
+FDM lifecycle — idea/spec → AI-assisted, reference-photo-driven **parametric** modeling
+(OpenSCAD-first) → verification, pixel-perfect matching, physics/kinematics → **material
+procurement/inventory** → print prep → **printing, live monitoring & failure recovery** (Klipper/
+Moonraker, OctoPrint, Bambu, Prusa) — plus live observation of AI agents doing the work. Its own repo
 (`github.com/alex-mextner/3d-cli`), installed as a standard Python package exposing the `3d`
 console-script (pipx / uv tool / pip — see §29), not a manual symlink.
 
@@ -199,6 +200,10 @@ These are not features; they are the lens. New surface should be justifiable by 
 - **Constants editor** with Figma-like **scrubbers** (drag; **Shift = fine, Alt = coarse**),
   live dynamic re-render.
 - Run **animations**; change **colors/materials**; view project **spec**; browse **all projects**.
+- 📋 **Print monitoring & control** (§31) — auto-discovers printers, shows **live print status**
+  (temps/progress/layer/ETA), the **camera stream**, and the printer's own web UI; **monitor and
+  control** prints (start/pause/resume/cancel) — all driven through the same CLI/core so the web is
+  just a frontend over `3d print`.
 
 ## 10. AI model running (ollama) + hardware compatibility
 - 📋 `3d` can use **ollama** for local AI; install required models **on user request**.
@@ -546,6 +551,37 @@ The go-to install is the standard Python mechanism, not `ln -s bin/3d`.
   timeline and `3d report` are just renderings of this stream; levels gate verbosity per sink.
 - 📋 Integrates with the rest: `lib/errors.py` (§1) raises the error-level events; metrics (§13.4)
   can be derived from the stream; no ad-hoc `print()` for diagnostics — route through the logger.
+
+## 31. `3d print` — drive, monitor & recover real prints (printer integrations)
+`3d` covers the WHOLE lifecycle: idea → spec → **procurement/materials (§32)** → model → verify →
+pack/slice → **print → monitor → recover** → report. `3d print` is the execution end.
+- 📋 **Printer integrations** — pluggable backends (registry, §3): **Klipper/Moonraker** (primary;
+  Mainsail/Fluidd ecosystem), **OctoPrint** (REST), **Bambu** (LAN/MQTT), **PrusaLink/PrusaConnect**.
+  Each backend implements a common interface (discover, status, upload, start/pause/resume/cancel,
+  temps, camera).
+- 📋 **Auto-discovery** — find printers on the LAN (mDNS/zeroconf, Moonraker/OctoPrint/Bambu probes);
+  cache them in `~/.config/3d-cli/` (alongside the printers registry, §2a). `3d print --printer <name>`
+  or auto-pick the single discovered one.
+- 📋 **Send & run a job** — `3d print <model|3mf|gcode>`: pack/slice if needed (§4/§5), upload,
+  start; `3d print status|pause|resume|cancel`. Material check against the printers/materials
+  registry + inventory (§32) before starting.
+- 📋 **Monitor** — live status (temps, progress, current layer, ETA, speed), **camera stream**, and a
+  structured-log feed (§30). Surfaced in the terminal and in `3d web`.
+- 📋 **Recover / continue on failure** — detect failures (thermal runaway, power loss, filament
+  runout, spaghetti via the camera + a detector), pause safely, and **resume from a layer**
+  (Klipper power-loss/`SDCARD_RESET_FILE`-style recovery). Never silently abandon a multi-hour print.
+- 📋 **Multi-printer / queue** — a job queue across discovered printers; assign by capability
+  (bed size, material) from the registry.
+
+## 32. Material procurement & inventory management
+Closes the "from idea to print" loop on the materials side; ties into the materials registry (§2a).
+- 📋 **Inventory** — track filament spools on hand (material, color, brand, remaining grams, location),
+  decrement by the slicer's estimated usage per job. `3d materials inventory list|add|use`.
+- 📋 **Procurement** — when stock is low or a project needs a material not on hand, surface what to
+  buy: required spec (material/diameter/color/amount) + **concrete sourcing links** (per the project
+  rules: real shop/part-number/URL + price, no placeholders). Reorder list per project/BOM.
+- 📋 **Drives planning** — `3d pack`/`3d print` check inventory before committing; a project's
+  required-material total (from `3d.yaml` copies × per-part grams) feeds the procurement list.
 
 ---
 
