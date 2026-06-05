@@ -148,3 +148,60 @@ live observation of AI agents doing the work. Its own repo
   the report**, and **implement** the interesting algorithms; **use and improve** the tools
   it mentions (BOSL2, NopSCADlib, trimesh/manifold3d, SAM2, Depth-Anything, TRELLIS/
   Hunyuan3D, Mitsuba/nvdiffrast, COLMAP, etc.).
+
+## 13. `3d ai <tool>` — AI-assisted tool group (operators + RAG + loop + benchmarks)
+A unified AI layer over the analytical commands. Pattern: **`3d ai <tool> <operator> [args]`**
+(e.g. `3d ai axis do|review|loop`). Backend-agnostic via the SAME adapters as `3d web`
+(claude / codex / opencode — opencode runs out-of-box with free models). `--backend` selects;
+default claude.
+
+### 13.1 Operators — universal, available for EVERY ai tool
+- 📋 **`do`** — run the AI ONCE to perform the task and **apply** the result (mutating: writes the
+  SCAD edit / `camera.json` / etc.). One shot, then the deterministic gates re-run to confirm.
+- 📋 **`review`** — read-only **RAG-style** advisory, **never mutates**. Before the model is called,
+  a curated set of deterministic `3d` tools is **auto-run** and their **numbers + images + full
+  context** are injected into the prompt immediately (the RAG: ground truth in context, no
+  guessing). The model returns a DETAILED critique — concrete numbers, specific edits in mm, and a
+  list of **recommended `3d` commands** to run next. This is the "detailed flavour" the user
+  asked for: full context, details, figures, recommended tools.
+- 📋 **`loop`** — autonomous iteration via **quorex** (`/Users/ultra/xp/quorex/quorex`,
+  ralphex-based: fresh agent session per task, 5-agent→codex→2-agent review pipeline, worktree
+  isolation, web dashboard, notifications). `3d ai <tool> loop` **emits a plan** whose *validation
+  commands* are this tool's benchmark/metric targets, then drives quorex until the target is met /
+  converged / round-cap. The loop's stop condition is a NUMERIC benchmark threshold, not vibes.
+
+### 13.2 RAG pre-flight — what `review`/`do` auto-run before the model
+Each tool declares a **manifest** of deterministic pre-runs; their outputs (numbers + rendered
+PNGs) are embedded in the prompt, plus a "recommended tools" block (relevant `3d` subcommands with
+one-line usage):
+- `axis` → OpenCV PCA principal axes, contours, image moments, bbox, centroid + annotated overlay.
+- `match`/`fit-camera` → silhouette **IoU**, overlay-diff (AE / blend / canny), current
+  `camera.json` + before/after PNGs.
+- `critique` (model↔reference) → multi-view renders + the reference + current score metrics.
+- `strength` → computed stress vs allowable per load-case + SF.
+- `printability` → overhang / wall / clearance report.
+
+### 13.3 Initial tool set (each gets `do/review/loop`)
+- 📋 `axis`, `match` (camera/silhouette), `critique` (model↔reference), `strength`, `printability`,
+  `design` (generate/modify SCAD from a reference). Adding a tool = declare its RAG manifest +
+  benchmark/metric; the three operators come for free.
+
+### 13.4 Benchmarks (`3d ai`) + metrics (all tools) — always computed, always saved
+- 📋 **Standard, commonly-accepted benchmarks** (not bespoke-only):
+  - **geometry**: Chamfer distance (L1/L2), **F-score@τ**, Hausdorff, normal consistency, volumetric **IoU**.
+  - **render-vs-reference**: silhouette **IoU**, **LPIPS**, **SSIM**, **PSNR**, **CLIP-similarity**.
+  - **camera/pose**: reprojection error, rotation/translation error.
+  - **OpenSCAD-generation suite**: adopt the public *image→OpenSCAD, iterate-via-CLI-render*
+    task format (ref: ModelRift OpenSCAD-LLM benchmark —
+    https://modelrift.com/blog/openscad-llm-benchmark) BUT replace its purely **subjective 0–5
+    score** with the automated metrics above (render-success rate + IoU + Chamfer against a target
+    mesh), so results are reproducible. Keep a subjective score as one column, not the only one.
+  - `3d ai bench [suite]` runs the suite; `3d ai bench --compare` shows deltas vs history.
+- 📋 **Per-tool metrics** for the non-AI tools too (render time, mesh stats, gate pass/fail, score
+  deltas, IoU) — emitted on every run.
+- 📋 **Always-on, persisted longitudinal store.** EVERY `do/review/loop` and every tool run appends
+  a timestamped record (backend, model, tool, inputs, metric/benchmark scores, tokens, cost,
+  wall-time) to a metrics store (`~/.local/share/3d-cli/metrics/*.jsonl` + per-project `metrics/`).
+  Purpose: regression tracking + **data for subsequent improvement** (prompt tuning, model A/B,
+  fine-tuning). `3d metrics` / `3d ai bench --compare` view history + deltas. `3d web` surfaces the
+  benchmark/metric trend lines live.
