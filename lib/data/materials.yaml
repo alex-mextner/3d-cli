@@ -1,0 +1,76 @@
+# materials.yaml — built-in default FDM filament properties (ROADMAP §2a).
+#
+# ACCESSED VIA: lib/materials.py load_materials() loads this as the lowest layer; the user
+# (~/.config/3d-cli/materials.yaml) and the project (./materials.yaml next to 3d.yaml) override
+# it field-by-field. `3d materials list/show` displays it; `3d strength` consumes the mechanical
+# properties (e_modulus_mpa, yield_mpa, layer_adhesion).
+#
+# VALUES ARE TYPICAL DEFAULTS, OVERRIDABLE. They are representative figures for common
+# desktop-FDM filaments at typical print settings — real numbers vary by brand, color, print
+# temperature, infill and layer height. Treat them as order-of-magnitude defaults, not datasheet
+# guarantees; override per-spool in your user/project materials.yaml when you have real data.
+#
+# Fields per material:
+#   density        g/cm^3   — solid (100% infill) density, for mass/cost estimates.
+#   e_modulus_mpa  MPa      — tensile (Young's) modulus, in-plane (along layers).
+#   tensile_mpa    MPa      — ultimate tensile strength, in-plane.
+#   yield_mpa      MPa      — tensile yield strength, in-plane.
+#   max_temp_c     deg C    — practical continuous service temperature (well below Tg/HDT margin).
+#   color                   — sensible default display hex (overridable per spool).
+#   finish                  — surface look: matte | gloss | metal.
+#   layer_adhesion          — FDM cross-layer anisotropy factor in (0,1]: the fraction of the
+#                             in-plane strength retained across layer lines (Z / weakest axis).
+#                             1.0 = isotropic; lower = weaker between layers. Multiply an
+#                             in-plane strength by this for a worst-case across-layer estimate.
+#                             Approximate typical values (printed-part literature): PLA ~0.45,
+#                             PETG ~0.7, ABS ~0.6, ASA ~0.6, TPU ~0.8. Brand/temp dependent.
+
+PLA:
+  density: 1.24
+  e_modulus_mpa: 3300
+  tensile_mpa: 50
+  yield_mpa: 45
+  max_temp_c: 55
+  color: "#1f9c4b"
+  finish: matte
+  layer_adhesion: 0.45
+
+PETG:
+  density: 1.27
+  e_modulus_mpa: 2100
+  tensile_mpa: 45
+  yield_mpa: 40
+  max_temp_c: 70
+  color: "#2b7fb8"
+  finish: gloss
+  layer_adhesion: 0.7
+
+ABS:
+  density: 1.04
+  e_modulus_mpa: 2000
+  tensile_mpa: 40
+  yield_mpa: 35
+  max_temp_c: 85
+  color: "#3a3a3a"
+  finish: matte
+  layer_adhesion: 0.6
+
+ASA:
+  density: 1.07
+  e_modulus_mpa: 2000
+  tensile_mpa: 42
+  yield_mpa: 37
+  max_temp_c: 90
+  color: "#d9d2c5"
+  finish: matte
+  layer_adhesion: 0.6
+
+TPU:
+  density: 1.21
+  e_modulus_mpa: 80
+  tensile_mpa: 35
+  yield_mpa: 8
+  max_temp_c: 70
+  color: "#222222"
+  finish: matte
+  layer_adhesion: 0.8
