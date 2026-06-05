@@ -190,3 +190,81 @@ def test_name_defaults_to_dir(tmp_path):
 def test_no_git_skips_git_init(tmp_path):
     _run(["--no-input", "--no-git"], tmp_path)
     assert not (tmp_path / ".git").exists()
+
+
+# --------------------------------------------------------------------------------------------
+# Agent environment (ROADMAP §28): .mcp.json, skills, AGENTS.md + CLAUDE.md symlink, pre-commit.
+# --------------------------------------------------------------------------------------------
+def test_agent_env_installed_by_default(tmp_path):
+    """`3d init --no-input` installs the full agent environment alongside the skeleton."""
+    _run(["--no-input", "--name", "widget", "--no-git"], tmp_path)
+    assert (tmp_path / ".mcp.json").is_file()
+    assert (tmp_path / ".claude" / "skills" / "openscad" / "SKILL.md").is_file()
+    assert (tmp_path / ".claude" / "skills" / "fdm-printability" / "SKILL.md").is_file()
+    assert (tmp_path / "AGENTS.md").is_file()
+    hook = tmp_path / "hooks" / "pre-commit"
+    assert hook.is_file()
+    assert os.access(hook, os.X_OK), "pre-commit hook must be executable"
+
+
+def test_claude_md_is_symlink_to_agents(tmp_path):
+    _run(["--no-input", "--no-git"], tmp_path)
+    claude = tmp_path / "CLAUDE.md"
+    assert claude.is_symlink(), "CLAUDE.md must be a symlink"
+    assert os.readlink(claude) == "AGENTS.md", "CLAUDE.md must point to AGENTS.md (relative)"
+    # It must resolve to the same content as AGENTS.md.
+    assert claude.read_text(encoding="utf-8") == (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
+
+
+def test_agents_md_substitutes_project_name_and_has_lessons(tmp_path):
+    _run(["--no-input", "--name", "pantheon", "--printer", "X1C", "--material", "ABS", "--no-git"],
+         tmp_path)
+    body = (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
+    assert "pantheon" in body                 # {{PROJECT_NAME}} substituted
+    assert "{{PROJECT_NAME}}" not in body     # no leftover placeholders
+    assert "{{PRINTER}}" not in body
+    assert "{{MATERIAL}}" not in body
+    assert "X1C" in body and "ABS" in body
+    assert "MANDATORY" in body                # the hard-won lessons block is present
+
+
+def test_agent_env_reinstall_is_idempotent(tmp_path):
+    """Re-running tops up nothing and raises nothing; existing agent files are unchanged."""
+    _run(["--no-input", "--name", "first", "--no-git"], tmp_path)
+    targets = [
+        tmp_path / ".mcp.json",
+        tmp_path / ".claude" / "skills" / "openscad" / "SKILL.md",
+        tmp_path / ".claude" / "skills" / "fdm-printability" / "SKILL.md",
+        tmp_path / "AGENTS.md",
+        tmp_path / "hooks" / "pre-commit",
+    ]
+    before = {t: t.read_bytes() for t in targets}
+    claude_before = os.readlink(tmp_path / "CLAUDE.md")
+    rc = _run(["--no-input", "--name", "second", "--no-git"], tmp_path)
+    assert rc == 0
+    for t, content in before.items():
+        assert t.read_bytes() == content, f"{t} was clobbered on re-run"
+    assert os.readlink(tmp_path / "CLAUDE.md") == claude_before
+
+
+def test_agent_env_tops_up_deleted_symlink(tmp_path):
+    """A deleted CLAUDE.md symlink is recreated on re-run even though AGENTS.md still exists."""
+    _run(["--no-input", "--no-git"], tmp_path)
+    (tmp_path / "CLAUDE.md").unlink()
+    assert (tmp_path / "AGENTS.md").is_file()
+    _run(["--no-input", "--no-git"], tmp_path)
+    claude = tmp_path / "CLAUDE.md"
+    assert claude.is_symlink()
+    assert os.readlink(claude) == "AGENTS.md"
+
+
+def test_opt_out_flags_skip_each_piece(tmp_path):
+    _run(["--no-input", "--no-git", "--no-mcp", "--no-skills", "--no-agents", "--no-hooks"],
+         tmp_path)
+    assert not (tmp_path / ".mcp.json").exists()
+    assert not (tmp_path / ".claude").exists()
+    assert not (tmp_path / "AGENTS.md").exists()
+    assert not (tmp_path / "CLAUDE.md").exists()
+    assert not (tmp_path / "hooks" / "pre-commit").exists()
+    # The base skeleton is still scaffolded.
+    assert (tmp_path / "3d.yaml").is_file()

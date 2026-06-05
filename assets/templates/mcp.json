@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "openscad": {
+      "type": "stdio",
+      "command": "openscad-mcp",
+      "args": [],
+      "env": {}
+    }
+  }
+}

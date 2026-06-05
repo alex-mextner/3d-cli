@@ -1,0 +1,52 @@
+#!/bin/bash
+# Pre-commit gate: run `3d check` on every staged .scad file and block the commit on FAIL.
+#
+# Install once:  git config core.hooksPath hooks   (3d init does this for you)
+# Bypass (rare): git commit --no-verify
+set -uo pipefail
+cd "$(git rev-parse --show-toplevel)" || exit 1
+
+# Resolve the `3d` CLI: prefer the repo-local ./bin/3d, else `3d` on PATH.
+if [ -x "./bin/3d" ]; then
+    THREED="./bin/3d"
+elif command -v 3d >/dev/null 2>&1; then
+    THREED="3d"
+else
+    echo "[pre-commit] '3d' CLI not found (no ./bin/3d and not on PATH) — skipping .scad gate."
+    echo "  Install the 3d CLI or commit with: git commit --no-verify"
+    exit 0
+fi
+
+# Staged .scad files (Added/Copied/Modified/Renamed — not deletions).
+# (macOS ships bash 3.2 — no `mapfile`; use a plain newline-separated list.)
+STAGED=$(git diff --cached --name-only --diff-filter=ACMR -- '*.scad')
+
+if [ -z "$STAGED" ]; then
+    echo "[pre-commit] no staged .scad files — nothing to check."
+    exit 0
+fi
+
+FAIL=0
+while IFS= read -r scad; do
+    [ -z "$scad" ] && continue
+    [ -f "$scad" ] || continue
+    echo "[pre-commit] === check: $scad ==="
+    if "$THREED" check "$scad"; then
+        echo "[pre-commit] $scad: PASS"
+    else
+        echo "[pre-commit] $scad: *** FAIL ***"
+        FAIL=1
+    fi
+done <<EOF
+$STAGED
+EOF
+
+echo
+if [ "$FAIL" -eq 0 ]; then
+    echo "[pre-commit] all staged .scad files PASSED — commit allowed."
+    exit 0
+else
+    echo "[pre-commit] a .scad check FAILED — commit blocked."
+    echo "  Fix the failure, or bypass with: git commit --no-verify"
+    exit 1
+fi
