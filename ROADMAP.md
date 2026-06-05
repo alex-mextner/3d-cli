@@ -1,0 +1,131 @@
+# 3d CLI — ROADMAP
+
+The single source of all requirements for the `3d` toolkit (CLI + web). Captured
+from the design conversation. Keep this updated as items land.
+
+Status legend: ✅ done · 🔨 in progress · 📋 planned
+
+---
+
+## 0. Vision
+`3d` is a rich, cross-platform (macOS + Linux) command-line + web toolkit for
+AI-assisted, reference-photo-driven **parametric** 3D modeling (OpenSCAD-first),
+verification, pixel-perfect matching, print preparation, physics/kinematics, and
+live observation of AI agents doing the work. Its own repo
+(`github.com/alex-mextner/3d-cli`), `3d` symlinked into `~/.files/bin`.
+
+## 1. Engineering policy (applies to ALL work)
+- 📋 **Python everywhere** — replace all `sh`/`bash` with Python; `bin/3d` is a thin
+  Python dispatcher. Type hints everywhere, **mypy-clean**. **async** where it
+  genuinely helps (parallel OpenSCAD renders in multi / fit-camera / match,
+  subprocess via `asyncio`, async SSE).
+- 📋 **Tests** — pytest (unit: bbox→camera, axis-math, score/IoU, strength formulas,
+  `3d.yaml` loader, log adapters) + CLI smoke harness (`--help` + runs on `examples/`)
+  + mypy in the test gate. A `3d test` / CI-ready run.
+- ✅ **Commit discipline** — ATOMIC commits; **run `codex exec review --uncommitted`
+  before EVERY commit**, read findings, fix real issues, then commit; **push to
+  origin regularly**.
+- 📋 **Dependencies fully specified** — `requirements.txt` + `3d doctor` + first-run
+  auto-bootstrap. No dependency left implicit.
+- 📋 **Parallel build** — independent work runs in parallel subagents in **separate
+  git worktrees** (distinct file ownership → clean merge).
+- 📋 **Error UX — verbose, actionable errors.** Every error states (1) WHAT failed and
+  WHY (the actual cause, not just a stack trace), (2) CONCRETE step-by-step remediation
+  (the exact command to run / file to edit), (3) the **accepted options/values** when
+  input was invalid (e.g. "got `--plane=ZZ`; accepted: YZ, XZ, XY"), and (4) the precise
+  install command + which tier degrades if a dependency is missing. Never a bare
+  "command failed". A shared `lib/errors.py` with structured, helpful error types.
+
+## 2. First-run auto-bootstrap (NO manual setup)
+- 🔨 On any `3d` invocation, if not bootstrapped (`~/.config/3d-cli/.bootstrapped`):
+  auto-clone/configure OpenSCAD libraries (BOSL2, NopSCADlib) + set `OPENSCADPATH`,
+  once, quietly, idempotent, non-fatal offline.
+- 📋 **Remove `3d setup` and `3d libs install`** — both become automatic. Keep only
+  `3d libs path` (info). `3d doctor` stays (read-only health/compat report).
+
+## 3. Core command surface (option-driven, consolidated)
+- 🔨 **`3d render <file.scad>`** — `--view front|back|left|right|top|bottom|iso|3-4|front-left|front-right|rear-left|rear-right` (camera from model bbox), `--multi [outdir]` (all standard angles), `--section [--plane YZ|XZ|XY] [--color] [--keep pos|neg] [--module 'm();']` (proper 6-param vector cross-section, never 7-param gimbal), `--cam` (manual override), `--ortho`, `-D k=v`, `--debug`.
+- 📋 **`3d check <file>`** — runs ALL applicable gates by DEFAULT; `--mesh --printability --collision --manifold --silhouette` select a subset; `--skip X` excludes. Per-gate breakdown + PASS/FAIL. (= the acceptance master gate.)
+- ✅ `export` (mesh-validated, nonzero on bad geometry), `validate`, `params`.
+- ✅ `mesh`, `printability`, `collision` (static / `--frame` / `--viz`), `acceptance`, `silhouette`, `overlay`, `score`, `match` (forced-monotonic loop + changelog, `--dry-run`), `fit-camera`, `preprocess`.
+- 📋 **Thin aliases** `multi`/`section`/`mesh`/`printability`/`collision`/`acceptance` → `render --multi`/`render --section`/`check --…`.
+
+## 4. Slicing
+- 🔨 `3d slice <stl|3mf|scad> [-o] [--printer] [--profile]` — Orca > Bambu Studio > Prusa autodetect.
+- 📋 **Always runs the sliceability check** as a gate. Rename `--check` → **`--dry-run`** (slice to temp, verify only, keep no g-code).
+- 📋 **Profiles must be self-explaining.** A slicer needs config files — typically a
+  **machine** profile (printer geometry/firmware), a **process** profile (layer height,
+  speeds, supports, infill), and a **filament/material** profile. `--profile` /
+  `--printer` help + errors must explain: WHAT each file is, WHERE to get it (export from
+  the OrcaSlicer/Bambu Studio GUI → "export config", or the slicer's bundled presets), and
+  WHY. Provide `3d slice --list-profiles` (discover installed-slicer presets + any in the
+  project), ship/auto-pick a **sensible default for the Bambu A1 + PLA/PETG**, and if a
+  profile is missing/invalid, the error names the accepted forms and the exact export steps.
+  Prefer letting the `3d.yaml` (material/printer/supports/infill) drive profile selection so
+  the user rarely hand-passes raw json paths.
+
+## 5. 3MF builder + project config (`3d.yaml`)
+- 📋 **`3d pack <3d.yaml>`** — emit a print-ready **3MF**: per-part orientation solved
+  for **min support + max strength**, copy layout, colors/materials, optional
+  **splitting into parts** for glue / printed-connector joints, per-object slicer settings.
+- 📋 **`3d.yaml`** — project+part config consumed by BOTH the AI and the tools:
+  - `project`: name, units, copies, printer, default material, bed.
+  - standard **tags** (combinable, not a single type): `structural | shell | cosmetic | functional | flexible | engineering | artistic | press-fit | removable | bought`.
+  - per `parts.<name>`: file, module, tags, material, color, copies, `orientation` (auto|flat-bottom|[rx,ry,rz]), `supports` (minimize|none|tree), `infill`, `split: {allowed, joint: printed-connector|dovetail|pin|glue}`, `anchors: [...]`, `loads: [{at:<anchor>, type, N, dir, min_sf}]`.
+- 📋 **Anchors** answer "where + which characteristics": named anchors declared in the
+  `.scad` via `// @anchor <name> pos=[x,y,z] dir=[..] area=<feat> note="…"` comments
+  (recommended over a sidecar `.anchors.yaml`); `loads` in `3d.yaml` reference them.
+
+## 6. Physics / math tools
+- 📋 **`3d strength <part|3d.yaml>`** — strength-of-materials (beam/wall/hoop stress vs
+  allowable, FDM anisotropy by print orientation, SF per load-case at anchors).
+- 📋 **`3d fea`** (optional) — CalculiX (via FreeCAD FEM) / Elmer for nontrivial cases.
+- 📋 **`3d kinematics <3d.yaml>`** — model + verify motion (per-frame, axes/guides, reach/sweep).
+- 📋 **`3d animate <3d.yaml>`** — generate animation + **per-frame verification**
+  (collisions, sync with the motion model). Requires **ffmpeg** (check/install).
+
+## 7. Camera fit, axes, opencode
+- ✅ **`3d fit-camera <model> <ref>`** — silhouette-IoU camera pose fitting (bbox-derived
+  bounds), saves `camera.json`, writes fit render + overlay; `--draw-axes`.
+- 📋 Compute axes/contours by **math + OpenCV/ImageMagick** (PCA, moments, contours) by default.
+- 📋 **Optional `opencode` integration** (`--opencode`) for iterative axis tuning / checks.
+  opencode runs out-of-box with free models (no key needed) — use as an optional assist.
+
+## 8. Visual debug modes
+- 📋 Rich `--debug` across render/fit-camera/score/strength/kinematics: draw intermediate
+  results with **overlaid axes (PCA/bbox), contours, feature/anchor labels, masks,
+  render↔reference overlays**. Emit **before / intermediate-debug / after** images.
+
+## 9. `3d web` — interactive dashboard (🔨 in progress, worktree)
+- Local FastAPI + uvicorn + **SSE** app. Config `~/.config/3d-cli/web.json` (project_root,
+  port, host). Default project_root e.g. the garage-band repo.
+- **Watch agents work live** — structured SSE logs + visualizations, via extensible
+  **adapters**: Claude (dynamic read of JSONL transcripts), Codex, opencode. Auto-associate
+  agents↔projects by mentioned dirs/files; cache tracked session ids; detect inactive
+  sessions and find new ones.
+- 3D **model viewer** (three.js): orbit, toggle **analytical layers**, **compare**.
+- **Constants editor** with Figma-like **scrubbers** (drag; **Shift = fine, Alt = coarse**),
+  live dynamic re-render.
+- Run **animations**; change **colors/materials**; view project **spec**; browse **all projects**.
+
+## 10. AI model running (ollama) + hardware compatibility
+- 📋 `3d` can use **ollama** for local AI; install required models **on user request**.
+- 📋 **Hardware compatibility check** — describe min specs; check the user's OS/RAM/disk/
+  CPU/GPU; **use GPU where possible**. Target a **MacBook M4 Pro** class; warn/skip models
+  that won't fit. `3d doctor` reports hardware + model feasibility.
+- 📋 **ffmpeg** — check/install (at minimum) for animation export.
+
+## 11. Docs
+- 📋 **README** with life-like examples and invocations — especially **pipes and series
+  of calls** with varied args (active-use workflows), and embedded **screenshots**:
+  **before / intermediate-debug / after** (generated by the tool, committed to `docs/img/`).
+- ✅ `docs/migration.md` (source-tool → `3d` subcommand map). 📋 `docs/critic-prompts.md`.
+
+## 12. Research & extension (ongoing)
+- 📋 Re-read the research report (`garage-band/projects/lego-loco/research/report.md`) and
+  put into work **everything still not implemented**.
+- 📋 Survey **more scientific papers** on related topics (silhouette/inverse-procedural/
+  differentiable rendering, single-image-to-3D, depth/segmentation, FDM strength), **extend
+  the report**, and **implement** the interesting algorithms; **use and improve** the tools
+  it mentions (BOSL2, NopSCADlib, trimesh/manifold3d, SAM2, Depth-Anything, TRELLIS/
+  Hunyuan3D, Mitsuba/nvdiffrast, COLMAP, etc.).
