@@ -6,13 +6,14 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 
-# Core: the geometry / render / check pipeline (mesh QA). Resolved by uv.
+# Core: the geometry / render / check pipeline (mesh QA) + project config. Resolved by uv.
 dependencies = [
     "trimesh>=4.0",
     "manifold3d>=2.4",
     "numpy>=1.24",
     "scipy>=1.10",
     "rtree>=1.0",
+    "pyyaml>=6.0",   # 3d.yaml project model + materials/printers registries (§2a/§5)
 ]
 
 [project.optional-dependencies]
@@ -21,8 +22,8 @@ dependencies = [
 preprocess = ["opencv-python-headless>=4.8", "pillow>=10.0"]
 # Collision visualization (`3d collision --viz`).
 viz = ["pyvista>=0.43"]
-# Web dashboard (`3d web`). markdown + pyyaml degrade gracefully; fastapi+uvicorn serve.
-web = ["fastapi>=0.110", "uvicorn>=0.27", "markdown>=3.5", "pyyaml>=6.0"]
+# Web dashboard (`3d web`). markdown degrades gracefully; fastapi+uvicorn serve. (pyyaml is core.)
+web = ["fastapi>=0.110", "uvicorn>=0.27", "markdown>=3.5"]
 # Test gate (`3d test`): pytest + mypy (+ httpx for the web TestClient).
 dev = ["pytest>=8.0", "mypy>=1.8", "httpx>=0.27"]
 

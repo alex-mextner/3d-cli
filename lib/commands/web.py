@@ -24,13 +24,13 @@ USAGE = """3d web [options]
   (FastAPI + Server-Sent-Events + a three.js SPA). All Python, async.
 
 Options:
-  --root DIR     project root to scan   (default: from ~/.config/3d/web.json, else cwd)
+  --root DIR     project root to scan   (default: from ~/.config/3d-cli/web.json, else cwd)
   --port N       listen port            (default: 8733 or config)
   --host H       bind host              (default: 127.0.0.1 or config)
-  --config PATH  print/use a specific config file path  (default: ~/.config/3d/web.json)
+  --config PATH  print/use a specific config file path  (default: ~/.config/3d-cli/web.json)
   --open         open the dashboard in your browser once it starts
 
-Config: ~/.config/3d/web.json  (the same config dir as the first-run bootstrap marker;
+Config: ~/.config/3d-cli/web.json  (the same config dir as the first-run bootstrap marker;
 created with defaults on first run).
 
 Examples:

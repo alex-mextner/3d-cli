@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """webconfig.py — load/create the web dashboard config.
 
-Config path: ~/.config/3d/web.json  — the SAME config dir the rest of the CLI uses for its
-first-run bootstrap marker (~/.config/3d/.bootstrapped). One config dir for the whole tool.
-A default is written on first run.
+Config path: ~/.config/3d-cli/web.json  — the SAME config dir the rest of the CLI uses for
+its first-run bootstrap marker (~/.config/3d-cli/.bootstrapped) and registries. The dir is
+defined once in cli.paths (ROADMAP §23); this module does NOT re-derive it. A default
+web.json is written on first run.
 """
 from __future__ import annotations
 
@@ -12,19 +13,19 @@ import json
 import os
 import pathlib
 
+from cli import paths
+
 DEFAULT_PORT = 8733
 DEFAULT_HOST = "127.0.0.1"
 
 
 def config_dir() -> pathlib.Path:
-    base = os.environ.get("XDG_CONFIG_HOME")
-    root = pathlib.Path(base) if base else pathlib.Path.home() / ".config"
-    return root / "3d"
+    return paths.config_dir()
 
 
 def config_path() -> pathlib.Path:
     """The web config file. `THREED_WEB_CONFIG` (set by `3d web --config PATH`) overrides
-    the default ~/.config/3d/web.json."""
+    the default ~/.config/3d-cli/web.json."""
     override = os.environ.get("THREED_WEB_CONFIG")
     if override:
         return pathlib.Path(override).expanduser().resolve()

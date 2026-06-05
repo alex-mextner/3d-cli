@@ -15,7 +15,7 @@ Notes:
   OpenSCAD libraries (BOSL2, NopSCADlib) are cloned into libs/ automatically on the
   first `3d` invocation, and OPENSCADPATH is auto-exported by the CLI — so
   'include <BOSL2/std.scad>' just resolves. `libs path` prints the line if you want it
-  in your own (non-3d) shell. To re-install, remove ~/.config/3d/.bootstrapped and rerun.
+  in your own (non-3d) shell. To re-install, remove ~/.config/3d-cli/.bootstrapped and rerun.
 
 Examples:
   3d libs list
@@ -38,7 +38,7 @@ def run(argv: list[str]) -> int:
         raise UsageError(
             "'install' was removed — libraries auto-install on first run.",
             command="libs",
-            remediation=["To force a re-install: rm ~/.config/3d/.bootstrapped && 3d help"],
+            remediation=["To force a re-install: rm ~/.config/3d-cli/.bootstrapped && 3d help"],
         )
     if sub == "path":
         print(f"OPENSCADPATH={os.environ.get('OPENSCADPATH', libs_dir)}")
@@ -52,7 +52,7 @@ def run(argv: list[str]) -> int:
                     found = True
                     print(f"  - {name}")
         if not found:
-            print("  (none — re-run after removing ~/.config/3d/.bootstrapped)")
+            print("  (none — re-run after removing ~/.config/3d-cli/.bootstrapped)")
         print()
         print("To use:  export $(3d libs path)")
         return 0

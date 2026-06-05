@@ -158,7 +158,7 @@ def run(argv: list[str]) -> int:  # noqa: C901
     if os.path.isdir(os.path.join(repo_root(), "libs", "BOSL2")):
         passl("libs/BOSL2", os.path.join(repo_root(), "libs", "BOSL2"))
     else:
-        warn("libs/BOSL2", "absent — auto-installs on next `3d` run (or: rm ~/.config/3d/.bootstrapped)")
+        warn("libs/BOSL2", "absent — auto-installs on next `3d` run (or: rm ~/.config/3d-cli/.bootstrapped)")
 
     print()
     if missing == 0:

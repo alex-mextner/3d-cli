@@ -20,6 +20,7 @@ import shutil
 import subprocess
 import sys
 
+from cli import paths
 from errors import MissingDependency
 
 # ---------------------------------------------------------------------------
@@ -268,9 +269,10 @@ def py_has_module(mod: str) -> bool:
 
 # ---------------------------------------------------------------------------
 # First-run bootstrap of the OpenSCAD libraries (BOSL2, NopSCADlib) into libs/.
-# Gated by ~/.config/3d/.bootstrapped. Quiet, idempotent, NON-FATAL if offline —
-# it must never block `3d help`/`render`. (Keep the /3d/ marker path: switching it
-# would silently re-trigger bootstrap against a live marker.)
+# Gated by ~/.config/3d-cli/.bootstrapped (the one config dir, cli.paths §23). Quiet,
+# idempotent, NON-FATAL if offline — it must never block `3d help`/`render`. The legacy
+# ~/.config/3d/ is migrated in place (cli.paths.migrate_legacy_config) before the marker is
+# read, so an existing user is NOT silently re-bootstrapped by the rename.
 # ---------------------------------------------------------------------------
 _BOOTSTRAP_LIBS = [
     ("https://github.com/BelfrySCAD/BOSL2.git", "BOSL2"),
@@ -278,17 +280,13 @@ _BOOTSTRAP_LIBS = [
 ]
 
 
-def _state_dir() -> str:
-    base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config")
-    return os.path.join(base, "3d")
-
-
 def bootstrap_marker() -> str:
-    return os.path.join(_state_dir(), ".bootstrapped")
+    return os.fspath(paths.config_dir() / ".bootstrapped")
 
 
 def maybe_bootstrap() -> None:
     """First-run hook: clone the OpenSCAD libs once. Always returns (non-fatal)."""
+    paths.migrate_legacy_config()
     marker = bootstrap_marker()
     if os.path.isfile(marker):  # fast path: single stat
         return
@@ -331,7 +329,7 @@ def maybe_bootstrap() -> None:
             pass  # non-fatal
 
     try:
-        os.makedirs(_state_dir(), exist_ok=True)
+        paths.config_dir().mkdir(parents=True, exist_ok=True)
         with open(marker, "w"):
             pass
     except OSError:

@@ -16,6 +16,7 @@ dependencies = [
     { name = "manifold3d" },
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "pyyaml" },
     { name = "rtree" },
     { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
@@ -38,7 +39,6 @@ viz = [
 web = [
     { name = "fastapi" },
     { name = "markdown" },
-    { name = "pyyaml" },
     { name = "uvicorn" },
 ]
 
@@ -54,7 +54,7 @@ requires-dist = [
     { name = "pillow", marker = "extra == 'preprocess'", specifier = ">=10.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "pyvista", marker = "extra == 'viz'", specifier = ">=0.43" },
-    { name = "pyyaml", marker = "extra == 'web'", specifier = ">=6.0" },
+    { name = "pyyaml", specifier = ">=6.0" },
     { name = "rtree", specifier = ">=1.0" },
     { name = "scipy", specifier = ">=1.10" },
     { name = "trimesh", specifier = ">=4.0" },
