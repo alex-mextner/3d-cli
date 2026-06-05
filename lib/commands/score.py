@@ -66,7 +66,11 @@ def _m(args: list[str], what: str) -> str:
 def _identify_int(path: str, fmt: str) -> int:
     mgk = find_magick()
     assert mgk is not None
-    r = subprocess.run([mgk, "identify", "-format", fmt, path], capture_output=True, text=True)
+    if mgk == "magick":
+        cmd = ["magick", "identify", "-format", fmt, path]
+    else:
+        cmd = ["identify", "-format", fmt, path]
+    r = subprocess.run(cmd, capture_output=True, text=True)
     return int(r.stdout.strip())
 
 

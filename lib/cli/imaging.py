@@ -30,7 +30,11 @@ def run_magick(args: list[str], *, what: str) -> str:
 def magick_identify(path: str, fmt: str) -> str:
     mgk = find_magick()
     assert mgk is not None
-    r = subprocess.run([mgk, "identify", "-format", fmt, path], capture_output=True, text=True)
+    if mgk == "magick":
+        cmd = ["magick", "identify", "-format", fmt, path]
+    else:
+        cmd = ["identify", "-format", fmt, path]
+    r = subprocess.run(cmd, capture_output=True, text=True)
     return r.stdout.strip()
 
 

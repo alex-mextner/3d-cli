@@ -35,6 +35,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from typing import Any
 
 # ---------------------------------------------------------------------------
 # named-view direction table.  Each value is the eye DIRECTION from the look-at
@@ -102,6 +103,27 @@ def find_openscad() -> str:
     )
 
 
+def _openscad_prefix() -> list[str]:
+    """Return a prefix like ['xvfb-run', ...] when running headless on Linux.
+
+    OpenSCAD still needs a display server even with --render on some builds.
+    When DISPLAY is absent and xvfb-run is available, prefix the command so
+    the render succeeds on CI runners.
+    """
+    if os.environ.get("DISPLAY"):
+        return []
+    xvfb = shutil.which("xvfb-run")
+    if xvfb:
+        return [xvfb, "--auto-servernum", "--server-args=-screen 0 1280x1024x24"]
+    return []
+
+
+def _run_openscad(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+    """Run openscad (possibly wrapped in xvfb-run) and return the result."""
+    full = [*_openscad_prefix(), *cmd]
+    return subprocess.run(full, **kwargs)  # type: ignore[arg-type]
+
+
 def model_bbox(
     scad_path: str, defines: list[str], openscad: str
 ) -> tuple[tuple[float, float, float], float] | None:
@@ -119,7 +141,7 @@ def model_bbox(
         for d in defines:
             cmd += ["-D", d]
         cmd += ["-o", stl, scad_path]
-        subprocess.run(cmd, capture_output=True, text=True, timeout=300, check=False)
+        _run_openscad(cmd, capture_output=True, text=True, timeout=300, check=False)
         if not os.path.isfile(stl) or os.path.getsize(stl) < 100:
             return None
         mesh = trimesh.load(stl, force="mesh")
@@ -252,7 +274,7 @@ def render_single(args: argparse.Namespace) -> int:
         cmd[idx:idx] = ["--autocenter", "--viewall"]
     print(f"render: {scad} -> {out}  view={args.view or ('cam' if args.cam else 'iso')}"
           f"  {'ortho' if args.ortho else 'persp'}  size={size}")
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    proc = _run_openscad(cmd, capture_output=True, text=True)
     if proc.stdout:
         sys.stderr.write(proc.stdout)
     if proc.stderr:
@@ -301,6 +323,7 @@ def render_multi(args: argparse.Namespace) -> int:
 
     bbox = model_bbox(scad, defines, openscad) if render_flag else None
 
+    prefix = _openscad_prefix()
     cmds: list[tuple[str, str, list[str]]] = []
     for view in MULTI_VIEWS:
         out = os.path.join(outdir, f"{base}_{view}.png")
@@ -316,7 +339,7 @@ def render_multi(args: argparse.Namespace) -> int:
         if use_viewall:
             idx = cmd.index("-o")
             cmd[idx:idx] = ["--autocenter", "--viewall"]
-        cmds.append((view, out, cmd))
+        cmds.append((view, out, [*prefix, *cmd]))
 
     print(f"multi: {scad} -> {outdir}  ({'render' if render_flag else 'preview'}, "
           f"{'bbox cameras' if bbox else 'viewall fit'}, async)")
@@ -468,7 +491,7 @@ def render_section(args: argparse.Namespace) -> int:
             idx = cmd.index("-o")
             cmd[idx:idx] = ["--autocenter", "--viewall"]
         print(f"section: COLOUR assembly  plane={plane} keep={keep}")
-        proc = subprocess.run(cmd, capture_output=True, text=True)
+        proc = _run_openscad(cmd, capture_output=True, text=True)
         if proc.stderr:
             sys.stderr.write(proc.stderr)
         if not os.path.isfile(args.out):
@@ -493,7 +516,7 @@ def render_section(args: argparse.Namespace) -> int:
             for dv in defines:
                 ecmd += ["-D", dv]
             ecmd += ["-o", stl, scad]
-            subprocess.run(ecmd, capture_output=True, text=True, timeout=300, check=False)
+            _run_openscad(ecmd, capture_output=True, text=True, timeout=300, check=False)
             if not os.path.isfile(stl) or os.path.getsize(stl) < 100:
                 print("section: STL export failed — cannot cut", file=sys.stderr)
                 return 1
@@ -550,7 +573,7 @@ def render_section(args: argparse.Namespace) -> int:
             cmd[idx:idx] = ["--autocenter", "--viewall"]
 
         print(f"section: {scad} plane={plane} keep={keep} -> {args.out}")
-        proc = subprocess.run(cmd, capture_output=True, text=True)
+        proc = _run_openscad(cmd, capture_output=True, text=True)
         if proc.stderr:
             sys.stderr.write(proc.stderr)
         if not os.path.isfile(args.out):

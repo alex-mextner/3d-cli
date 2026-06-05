@@ -159,7 +159,11 @@ def _magick(args: list[str], *, what: str) -> str:
 def _identify_int(path: str, fmt: str) -> int:
     mgk = _find_magick()
     assert mgk is not None
-    r = subprocess.run([mgk, "identify", "-format", fmt, path], capture_output=True, text=True)
+    if mgk == "magick":
+        cmd = ["magick", "identify", "-format", fmt, path]
+    else:
+        cmd = ["identify", "-format", fmt, path]
+    r = subprocess.run(cmd, capture_output=True, text=True)
     return int(r.stdout.strip())
 
 
@@ -172,7 +176,11 @@ def _is_valid_png(path: str) -> bool:
     mgk = _find_magick()
     if mgk is None:
         return False
-    r = subprocess.run([mgk, "identify", path], capture_output=True, text=True)
+    if mgk == "magick":
+        cmd = ["magick", "identify", path]
+    else:
+        cmd = ["identify", path]
+    r = subprocess.run(cmd, capture_output=True, text=True)
     return r.returncode == 0
 
 
@@ -543,11 +551,22 @@ def build_collage(
     r2 = subprocess.run(plain, capture_output=True, text=True)
     if _is_valid_png(out):
         return out
+
+    # Fallback: `montage` may not be installed on minimal Ubuntu packages.
+    # Use `convert` (+append) for a horizontal concatenation without labels.
+    if os.path.exists(out):
+        os.remove(out)
+    convert_fb = [mgk, render_png, diff_png, reference_png, "+append", out]
+    r3 = subprocess.run(convert_fb, capture_output=True, text=True)
+    if _is_valid_png(out):
+        return out
     raise MagickError(
         "montage failed: "
         + (r.stderr or r.stdout).strip()
         + " | retry-without-labels: "
         + (r2.stderr or r2.stdout).strip()
+        + " | convert-fallback: "
+        + (r3.stderr or r3.stdout).strip()
     )
 
 
