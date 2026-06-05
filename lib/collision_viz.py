@@ -91,7 +91,10 @@ def render_phase(
     flagged: list[Any], intended_rows: list[Any], out_png: pathlib.Path,
 ) -> None:
     pl = pv.Plotter(off_screen=True, window_size=[1400, 1100])
-    pl.set_background("white")
+    # pyvista's py.typed stub wraps BasePlotter methods in a `_Wrapped` decorator
+    # that mypy fails to bind as a bound method (sees self as the first positional
+    # arg). The call is correct at runtime (verified), so ignore the stub artifact.
+    pl.set_background("white")  # type: ignore[arg-type]
     for p in cfg.parts:
         m = meshes.get((p, ph))
         if m is None:
@@ -135,7 +138,9 @@ def render_phase(
     pl.camera_position = "yz"
     pl.camera.azimuth = 35
     pl.camera.elevation = 18
-    pl.reset_camera()
+    # Same pyvista `_Wrapped` stub artifact as set_background above (mypy thinks
+    # `self` is missing); the no-arg call is correct at runtime.
+    pl.reset_camera()  # type: ignore[call-arg]
     pl.camera.zoom(1.25)
     pl.screenshot(str(out_png))
     pl.close()
