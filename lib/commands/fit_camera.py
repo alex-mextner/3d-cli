@@ -24,6 +24,7 @@ Options:
   --thresh N            ref subject darkness threshold 0..255 (default 150)
   --rand N              random-search samples (default 80)
   --refine N            coordinate-descent refine steps (default 40)
+  --el-range lo,hi      elevation search range in degrees (default -45,85); -89,89 restores full sphere
   --draw-axes           overlay PCA principal axis + bbox contour of both silhouettes
   --seed N              RNG seed for reproducibility (default 7)
 
@@ -35,7 +36,7 @@ Examples:
   3d fit-camera model.scad ref.jpg --out match/camera.json --draw-axes
   3d fit-camera examples/cube.scad ref.png --rand 8 --refine 3   # quick smoke"""
 
-_VALUE_FLAGS = {"--out", "--center", "--opt-size", "--final-size", "--thresh", "--rand", "--refine", "--seed"}
+_VALUE_FLAGS = {"--out", "--center", "--opt-size", "--final-size", "--thresh", "--rand", "--refine", "--el-range", "--seed"}
 _BOOL_FLAGS = {"--draw-axes"}
 
 

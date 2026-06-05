@@ -217,6 +217,25 @@ def iou(m1: Any, m2: Any) -> float:
     return float(inter) / float(union) if union else 0.0
 
 
+def ssim_masks(m1: Any, m2: Any) -> float:
+    """Global structural similarity between two binary masks (values in [-1, 1]).
+
+    Uses the standard SSIM formula on global statistics. Windowed SSIM would require
+    scipy/skimage; global SSIM is a reasonable reporting metric for silhouette quality.
+    Unlike IoU (which only counts overlap pixels), SSIM also captures luminance and
+    structural contrast — more stable on symmetric subjects where IoU degenerates.
+    """
+    a = m1.astype(np.float64)
+    b = m2.astype(np.float64)
+    C1, C2 = 0.01 ** 2, 0.03 ** 2
+    mu_a, mu_b = a.mean(), b.mean()
+    sigma_a2, sigma_b2 = a.var(), b.var()
+    sigma_ab = float(((a - mu_a) * (b - mu_b)).mean())
+    num = (2 * mu_a * mu_b + C1) * (2 * sigma_ab + C2)
+    den = (mu_a ** 2 + mu_b ** 2 + C1) * (sigma_a2 + sigma_b2 + C2)
+    return float(num / den) if den else 0.0
+
+
 def cam_from_params(p: Sequence[float], center: Sequence[float]) -> list[float]:
     az, el, dist, panx, panz = p
     cx, cy, cz = center[0] + panx, center[1], center[2] + panz
@@ -314,6 +333,13 @@ def main() -> None:
     ap.add_argument("--draw-axes", action="store_true",
                     help="overlay PCA principal axis + bbox contour of both silhouettes")
     ap.add_argument("--seed", type=int, default=7, help="RNG seed (reproducible search)")
+    ap.add_argument(
+        "--el-range", default="-45,85",
+        help="elevation search range 'lo,hi' in degrees (default -45,85). "
+             "Restricts the optimizer to physically plausible camera angles: -45 allows "
+             "low-angle 'looking-up' shots; 85 allows near-top-down. Use -89,89 to restore "
+             "the full sphere. Negative elevation = camera below object centre, looking up.",
+    )
     args = ap.parse_args()
 
     if not os.path.exists(args.model):
@@ -352,11 +378,23 @@ def main() -> None:
     def loss(p: list[float]) -> float:
         return eval_losses(args.model, [p], center, ow, oh, refm, tmp)[0]
 
+    # ---- elevation bounds from --el-range (geometric constraint, Tier 1 idea #3) --
+    try:
+        el_lo_str, el_hi_str = args.el_range.split(",")
+        el_lo = float(el_lo_str.strip())
+        el_hi = float(el_hi_str.strip())
+    except Exception:
+        sys.exit("fit-camera: --el-range must be 'lo,hi' floats, e.g. -45,85")
+    el_lo = max(-89.0, min(el_lo, 89.0))
+    el_hi = max(-89.0, min(el_hi, 89.0))
+    if el_lo >= el_hi:
+        sys.exit("fit-camera: --el-range lo must be < hi")
+
     # ---- search space DERIVED FROM bbox diagonal (generic, any scale) ----------
-    #  azimuth/elevation: full generic view sphere (no project view-prior).
+    #  azimuth: full 360°; elevation: constrained by --el-range (avoids underground poses).
     #  distance: 1.2..6x diagonal; pan: +/- one diagonal; centered offsets.
-    lo = [-180.0, -89.0, 1.2 * diag, -1.0 * diag, -1.0 * diag]
-    hi = [180.0, 89.0, 6.0 * diag, 1.0 * diag, 1.0 * diag]
+    lo = [-180.0, el_lo, 1.2 * diag, -1.0 * diag, -1.0 * diag]
+    hi = [180.0, el_hi, 6.0 * diag, 1.0 * diag, 1.0 * diag]
     rng = np.random.default_rng(args.seed)
     best_p: list[float] | None = None
     best_l = 2.0
@@ -420,6 +458,14 @@ def main() -> None:
     render_arr = render_to_array(args.model, cam, ow, oh, tmp)
     write_overlay(render_arr, args.ref, refm, overlay_png, args.draw_axes)
 
+    # SSIM between final render mask and reference mask (Tier 1 idea #4).
+    # More stable than IoU on symmetric subjects where silhouette edges are ambiguous.
+    if render_arr is not None:
+        rm_final = array_to_mask(render_arr)
+        ssim_val = ssim_masks(rm_final, refm)
+    else:
+        ssim_val = 0.0
+
     data = {
         "camera_arg": cam_arg,
         "camera": [round(v, 3) for v in cam],
@@ -427,6 +473,7 @@ def main() -> None:
                            [round(x, 3) for x in best_p])),
         "center": [round(x, 3) for x in center],
         "iou": round(iou_best, 4),
+        "ssim": round(ssim_val, 4),
         "model_diag": round(diag, 3),
         "opt_size": f"{ow}x{oh}",
         "final_size": f"{fw}x{fh}",
@@ -439,7 +486,7 @@ def main() -> None:
     print(f"saved {args.out}", flush=True)
     print(f"  fit render: {fit_png}", flush=True)
     print(f"  overlay:    {overlay_png}", flush=True)
-    print(f"IoU={iou_best:.4f}", flush=True)
+    print(f"IoU={iou_best:.4f}  SSIM={ssim_val:.4f}", flush=True)
     print(f"CAMERA_ARG={cam_arg}", flush=True)
 
 
