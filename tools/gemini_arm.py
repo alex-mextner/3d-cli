@@ -83,6 +83,31 @@ def _looks_like_scad(s: str) -> bool:
 _MIN_DONE_ROUND = 12
 
 
+def _log_round_metric(workdir: str, rnd: int, scad_path: str, refs: list[str]) -> None:
+    """Append this round's similarity metric to <workdir>/metrics.jsonl so convergence vs
+    looping is visible AFTER the run (the harness observes the metric every round regardless of
+    mode; the mcp model never sees it). Front reference only, low fit budget to stay cheap.
+    Best-effort: any failure is swallowed — metric logging must never break a modeling round."""
+    try:
+        out = os.path.join(workdir, "_metric")
+        r = subprocess.run(
+            [THREED, "compare", scad_path, refs[0], "-o", out, "--rand", "6", "--refine", "2"],
+            capture_output=True, text=True, timeout=240,
+        )
+        iou = ssim = None
+        for line in (r.stdout or "").splitlines():
+            if line.startswith("IoU="):
+                iou = float(line.split("=", 1)[1].strip())
+            elif line.startswith("SSIM="):
+                ssim = float(line.split("=", 1)[1].strip())
+        rec = {"round": rnd, "iou": iou, "ssim": ssim}
+        with open(os.path.join(workdir, "metrics.jsonl"), "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(rec) + "\n")
+        print(f"[gemini_arm] round {rnd} metric: iou={iou} ssim={ssim}", file=sys.stderr)
+    except Exception as exc:  # noqa: BLE001 - metric logging is strictly best-effort
+        print(f"[gemini_arm] round {rnd} metric logging failed: {exc}", file=sys.stderr)
+
+
 def _run(cmd: list[str], timeout: float = 600.0) -> subprocess.CompletedProcess[str]:
     """Run a subprocess, capturing output; never raise on nonzero (best-effort feedback)."""
     try:
@@ -262,6 +287,7 @@ def run_arm(
                 fh.write(scad)
             # render (mcp + 3dcli both do the openscad angles)
             _render_openscad(scad_path, workdir)
+            _log_round_metric(workdir, rnd, scad_path, refs)  # convergence trace, both modes
             last_invalid = False
         else:
             # No usable code this round — keep the previous good .scad, re-prompt strictly.
