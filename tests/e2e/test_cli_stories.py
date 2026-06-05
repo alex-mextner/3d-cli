@@ -147,3 +147,18 @@ def test_user_checks_the_local_environment_with_doctor(tmp_path: Path) -> None:
     assert "install:" in result.stdout or "DOCTOR: PASS" in result.stdout
     assert "Traceback" not in result.stdout
     assert "Traceback" not in result.stderr
+
+
+def test_user_exports_machine_capabilities_as_json(tmp_path: Path) -> None:
+    """Hardware list gives scripts a stable machine/toolchain capability report."""
+    result = _run_3d(tmp_path, "hardware", "list", "--json", timeout=30)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["os"]
+    assert payload["machine"]
+    assert payload["cpu_count"] >= 1
+    assert isinstance(payload["valid"], bool)
+    names = {item["name"] for item in payload["items"]}
+    assert {"openscad", "imagemagick", "slicer", "python3", "python mesh stack"} <= names
+    assert "Traceback" not in result.stderr

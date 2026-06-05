@@ -50,6 +50,7 @@ These modules model project state, user config, and local registries:
 
 - `config.py`
 - `extract_params.py`
+- `hardware.py`
 - `linting.py`
 - `materials.py`
 - `metrics.py`
@@ -103,6 +104,7 @@ Every current root Python module is listed here so future additions are intentio
 - `extract_params.py` — OpenSCAD parameter extraction.
 - `fit_camera.py` — camera fitting implementation.
 - `frame_check.py` — render framing checks.
+- `hardware.py` — local machine and toolchain capability reporting.
 - `linting.py` — OpenSCAD lint helpers.
 - `match_loop.py` — reference match-loop orchestration.
 - `mask_geometry.py` — lightweight mask coverage, bounding-box, and centroid metadata.

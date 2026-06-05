@@ -77,6 +77,7 @@ For a practical figure-by-figure image backplate loop, see
 | `projects` | [projects.md](projects.md) | Register/list/remove project directories used by `3d web`. |
 | `materials` | [materials.md](materials.md) | Inspect the merged FDM material registry. |
 | `metrics` | [metrics.md](metrics.md) | Inspect persisted command metrics JSONL records. |
+| `hardware` | [hardware.md](hardware.md) | List or validate local machine/toolchain capabilities. |
 | `web` | [web.md](web.md) | Local FastAPI/SSE/three.js dashboard. |
 | `test` | [test.md](test.md) | Ruff, pytest, and mypy gate. |
 
