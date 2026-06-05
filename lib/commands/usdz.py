@@ -11,7 +11,6 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
-import tempfile
 
 from cli.pyrun import run_tool
 from cli.registry import Command
@@ -117,27 +116,16 @@ def run(argv: list[str]) -> int:
     if not out:
         out = (inp[: -(len(ext) + 1)] if ext else inp) + ".usdz"
 
+    # For .scad, prefer the integrated export --usdz path (geometry validation + usdz in one call).
+    if ext == "scad":
+        color_arg = f"{color[0]},{color[1]},{color[2]}"
+        sys.stderr.write("usdz: deprecated for .scad — use `3d export file.scad -o file.usdz --color ...`\n")
+        r = subprocess.run([_bin3d(), "export", inp, "-o", out, "--color", color_arg])
+        return r.returncode
+
     stem = os.path.splitext(os.path.basename(inp))[0]
     color_args = [str(color[0]), str(color[1]), str(color[2])]
-
-    if ext == "scad":
-        # Export to a temp STL first (via `3d export`, so geometry validation runs).
-        with tempfile.TemporaryDirectory() as tmp:
-            stl = os.path.join(tmp, stem + ".stl")
-            r = subprocess.run(
-                [_bin3d(), "export", inp, "-o", stl],
-                capture_output=True, text=True,
-            )
-            if r.returncode != 0 or not os.path.isfile(stl):
-                sys.stderr.write(r.stdout or "")
-                sys.stderr.write(r.stderr or "")
-                raise UsageError(
-                    f"`3d export` failed for {inp} (see output above)", command="usdz"
-                )
-            # run_tool dispatches via .venv/uv so trimesh+pxr are always available.
-            return run_tool("trimesh,usd-core", "usdz.py", [stl, out] + color_args + [stem])
-    else:
-        return run_tool("trimesh,usd-core", "usdz.py", [inp, out] + color_args + [stem])
+    return run_tool("trimesh,usd-core", "usdz.py", [inp, out] + color_args + [stem])
 
 
 COMMAND = Command(

@@ -315,8 +315,8 @@ def test_usdz_export_fails(monkeypatch: Any, tmp_path: pathlib.Path) -> None:
     monkeypatch.setattr("os.path.isfile", lambda p: True)
     monkeypatch.setattr("commands.usdz._bin3d", lambda: "bin/3d")
     monkeypatch.setattr(subprocess, "run", lambda args, **kw: subprocess.CompletedProcess(args, 1, stdout="err", stderr=""))
-    with pytest.raises(UsageError):
-        usdz_run([str(scad)])
+    rc = usdz_run([str(scad)])
+    assert rc == 1
 
 
 def test_parse_color_ok() -> None:
