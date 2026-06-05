@@ -132,6 +132,11 @@ Co-Authored-By trailer on commits: `Co-Authored-By: Claude Opus 4.8 (1M context)
 - `setup` and `libs install` are **removed** (the first-run bootstrap + `3d doctor`'s
   per-item install commands replace them); `libs path` / `libs list` stay (info). `doctor`
   stays (read-only). `3d test` runs the test gate.
+- `web` starts the local dashboard (FastAPI + SSE + three.js SPA) — one **thin frontend**
+  over the same `lib/` core (architecture §10). `commands/web.py` is the registry command
+  (stdlib-only at top level; lazy-imports the optional web tier and raises a structured
+  `MissingDependency` if fastapi/uvicorn are absent); the app lives in `lib/web/`. Config is
+  `~/.config/3d/web.json` — the same dir as the bootstrap marker. See `docs/commands/web.md`.
 
 ## Verification before "done"
 

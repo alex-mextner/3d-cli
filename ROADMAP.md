@@ -163,9 +163,10 @@ live observation of AI agents doing the work. Its own repo
   results with **overlaid axes (PCA/bbox), contours, feature/anchor labels, masks,
   render↔reference overlays**. Emit **before / intermediate-debug / after** images.
 
-## 9. `3d web` — interactive dashboard (🔨 in progress, worktree)
-- Local FastAPI + uvicorn + **SSE** app. Config `~/.config/3d-cli/web.json` (project_root,
-  port, host). Default project_root e.g. the garage-band repo.
+## 9. `3d web` — interactive dashboard (✅ integrated into the registry CLI)
+- Local FastAPI + uvicorn + **SSE** app. Config `~/.config/3d/web.json` (project_root,
+  port, host) — the same config dir as the first-run bootstrap marker. Default project_root
+  e.g. the garage-band repo.
 - **Watch agents work live** — structured SSE logs + visualizations, via extensible
   **adapters**: Claude (dynamic read of JSONL transcripts), Codex, opencode. Auto-associate
   agents↔projects by mentioned dirs/files; cache tracked session ids; detect inactive
