@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="900" height="360" viewBox="0 0 900 360" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <style>
+      .box { rx: 6; ry: 6; stroke-width: 2; }
+      .agent { fill: #e3f2fd; stroke: #1976d2; }
+      .cli { fill: #fff3e0; stroke: #f57c00; }
+      .result { fill: #e8f5e9; stroke: #388e3c; }
+      .error { fill: #ffebee; stroke: #c62828; }
+      .arrow { fill: none; stroke: #555; stroke-width: 2; marker-end: url(#arrowhead); }
+      .loop { fill: none; stroke: #c62828; stroke-width: 2; stroke-dasharray: 5,3; marker-end: url(#arrowhead-red); }
+      .label { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 13px; fill: #333; }
+      .title { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 14px; font-weight: bold; fill: #333; }
+      .cmd { font-family: 'SF Mono', Monaco, monospace; font-size: 11px; fill: #666; }
+    </style>
+    <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#555"/>
+    </marker>
+    <marker id="arrowhead-red" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#c62828"/>
+    </marker>
+  </defs>
+
+  <text x="450" y="30" text-anchor="middle" class="title" font-size="18">AI Agent + 3d CLI — closed-loop design</text>
+
+  <!-- Agent box -->
+  <rect x="40" y="60" width="160" height="80" class="box agent"/>
+  <text x="120" y="90" text-anchor="middle" class="title">Agent (LLM)</text>
+  <text x="120" y="110" text-anchor="middle" class="cmd">writes .scad code</text>
+  <text x="120" y="125" text-anchor="middle" class="cmd">proposes edits</text>
+
+  <!-- Arrow to render -->
+  <line x1="200" y1="100" x2="260" y2="100" class="arrow"/>
+  <text x="230" y="90" text-anchor="middle" class="label">3d render</text>
+
+  <!-- Render box -->
+  <rect x="260" y="60" width="160" height="80" class="box cli"/>
+  <text x="340" y="90" text-anchor="middle" class="title">Render</text>
+  <text x="340" y="110" text-anchor="middle" class="cmd">silhouette / preview</text>
+  <text x="340" y="125" text-anchor="middle" class="cmd">machine-parseable</text>
+
+  <!-- Arrow to check -->
+  <line x1="420" y1="100" x2="480" y2="100" class="arrow"/>
+  <text x="450" y="90" text-anchor="middle" class="label">3d check</text>
+
+  <!-- Check box -->
+  <rect x="480" y="60" width="160" height="80" class="box result"/>
+  <text x="560" y="90" text-anchor="middle" class="title">Verify</text>
+  <text x="560" y="110" text-anchor="middle" class="cmd">manifold, printability</text>
+  <text x="560" y="125" text-anchor="middle" class="cmd">collision, score</text>
+
+  <!-- Arrow to decision -->
+  <line x1="640" y1="100" x2="700" y2="100" class="arrow"/>
+
+  <!-- Decision diamond -->
+  <polygon points="780,60 850,100 780,140 710,100" fill="#fff9c4" stroke="#f9a825" stroke-width="2"/>
+  <text x="780" y="95" text-anchor="middle" class="title" font-size="13">PASS?</text>
+  <text x="780" y="110" text-anchor="middle" class="label" font-size="12">IoU ↑</text>
+
+  <!-- Yes arrow -->
+  <line x1="850" y1="100" x2="890" y2="100" class="arrow"/>
+  <text x="870" y="90" text-anchor="middle" class="label" fill="#388e3c">yes</text>
+
+  <!-- Final box -->
+  <rect x="890" y="70" width="140" height="60" class="box result"/>
+  <text x="960" y="100" text-anchor="middle" class="title">Accept &amp; slice</text>
+
+  <!-- No loop back -->
+  <path d="M 780 140 Q 780 200 120 200 Q 40 200 40 140" class="loop"/>
+  <text x="120" y="215" text-anchor="middle" class="label" fill="#c62828">no — agent reads error, fixes, retries</text>
+
+  <!-- Bottom example -->
+  <rect x="50" y="260" width="800" height="80" fill="#263238" stroke="#37474f" rx="4"/>
+  <text x="70" y="285" fill="#81d4fa" font-family="'SF Mono', monospace" font-size="12">
+    # Agent loop: render → score → check → edit → repeat
+  </text>
+  <text x="70" y="305" fill="#aed581" font-family="'SF Mono', monospace" font-size="12">
+    $ 3d render bracket.scad --ortho --cam "$(jq -r .camera_arg cam.json)" -o render.png
+  </text>
+  <text x="70" y="325" fill="#aed581" font-family="'SF Mono', monospace" font-size="12">
+    $ 3d score render.png ref.jpg &amp;&amp; 3d check bracket.scad || agent-fix-loop
+  </text>
+</svg>

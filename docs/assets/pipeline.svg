@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="900" height="280" viewBox="0 0 900 280" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <style>
+      .box { rx: 6; ry: 6; stroke-width: 2; }
+      .box.scad { fill: #e3f2fd; stroke: #1976d2; }
+      .box.render { fill: #fff3e0; stroke: #f57c00; }
+      .box.check { fill: #e8f5e9; stroke: #388e3c; }
+      .box.slice { fill: #fce4ec; stroke: #c62828; }
+      .box.gcode { fill: #f3e5f5; stroke: #7b1fa2; }
+      .arrow { fill: none; stroke: #555; stroke-width: 2; marker-end: url(#arrowhead); }
+      .label { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 13px; fill: #333; }
+      .title { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 14px; font-weight: bold; fill: #333; }
+      .cmd { font-family: 'SF Mono', Monaco, monospace; font-size: 11px; fill: #666; }
+    </style>
+    <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#555"/>
+    </marker>
+  </defs>
+
+  <!-- Title -->
+  <text x="450" y="30" text-anchor="middle" class="title" font-size="18">3D FDM Pipeline — from model to G-code</text>
+
+  <!-- Box 1: SCAD -->
+  <rect x="40" y="70" width="140" height="70" class="box scad"/>
+  <text x="110" y="100" text-anchor="middle" class="title">.scad model</text>
+  <text x="110" y="120" text-anchor="middle" class="cmd">bracket.scad</text>
+
+  <!-- Arrow 1 -->
+  <line x1="180" y1="105" x2="240" y2="105" class="arrow"/>
+  <text x="210" y="95" text-anchor="middle" class="label">3d render</text>
+
+  <!-- Box 2: Render -->
+  <rect x="240" y="70" width="140" height="70" class="box render"/>
+  <text x="310" y="100" text-anchor="middle" class="title">Preview</text>
+  <text x="310" y="120" text-anchor="middle" class="cmd">--view 3-4 --multi</text>
+
+  <!-- Arrow 2 -->
+  <line x1="380" y1="105" x2="440" y2="105" class="arrow"/>
+  <text x="410" y="95" text-anchor="middle" class="label">3d check</text>
+
+  <!-- Box 3: Check -->
+  <rect x="440" y="70" width="140" height="70" class="box check"/>
+  <text x="510" y="100" text-anchor="middle" class="title">Verify</text>
+  <text x="510" y="120" text-anchor="middle" class="cmd">manifold / printability</text>
+
+  <!-- Arrow 3 -->
+  <line x1="580" y1="105" x2="640" y2="105" class="arrow"/>
+  <text x="610" y="95" text-anchor="middle" class="label">3d slice</text>
+
+  <!-- Box 4: Slice -->
+  <rect x="640" y="70" width="140" height="70" class="box slice"/>
+  <text x="710" y="100" text-anchor="middle" class="title">Slicer</text>
+  <text x="710" y="120" text-anchor="middle" class="cmd">OrcaSlicer / Prusa</text>
+
+  <!-- Arrow 4 -->
+  <line x1="780" y1="105" x2="840" y2="105" class="arrow"/>
+
+  <!-- Box 5: G-code -->
+  <rect x="840" y="70" width="140" height="70" class="box gcode"/>
+  <text x="910" y="100" text-anchor="middle" class="title">.gcode</text>
+  <text x="910" y="120" text-anchor="middle" class="cmd">ready to print</text>
+
+  <!-- Bottom note -->
+  <text x="450" y="190" text-anchor="middle" class="label" font-style="italic">
+    Every gate is a scriptable, composable shell command — chain them with pipes and redirects.
+  </text>
+
+  <!-- Example command line -->
+  <rect x="50" y="210" width="800" height="50" fill="#263238" stroke="#37474f" rx="4"/>
+  <text x="70" y="240" fill="#aed581" font-family="'SF Mono', monospace" font-size="12">
+    $ 3d render bracket.scad --view 3-4 -o preview.png &amp;&amp; 3d check bracket.scad &amp;&amp; 3d slice bracket.stl -o bracket.gcode
+  </text>
+</svg>

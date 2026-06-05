@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="900" height="300" viewBox="0 0 900 300" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <style>
+      .box { rx: 6; ry: 6; stroke-width: 2; }
+      .cmd-box { fill: #e3f2fd; stroke: #1976d2; }
+      .pipe-box { fill: #fff3e0; stroke: #f57c00; }
+      .out-box { fill: #e8f5e9; stroke: #388e3c; }
+      .arrow { fill: none; stroke: #555; stroke-width: 2; marker-end: url(#arrowhead); }
+      .label { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 13px; fill: #333; }
+      .title { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 14px; font-weight: bold; fill: #333; }
+      .code { font-family: 'SF Mono', Monaco, monospace; font-size: 12px; fill: #333; }
+    </style>
+    <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#555"/>
+    </marker>
+  </defs>
+
+  <text x="450" y="30" text-anchor="middle" class="title" font-size="18">Shell Composition — pipes, redirects, and subshells</text>
+
+  <!-- Example 1: Redirect output -->
+  <rect x="40" y="55" width="820" height="55" fill="#263238" stroke="#37474f" rx="4"/>
+  <text x="60" y="85" fill="#81d4fa" font-family="'SF Mono', monospace" font-size="12">
+    $ 3d render bracket.scad --view 3-4 -o bracket.png &gt; render.log 2&gt;&amp;1
+  </text>
+  <text x="60" y="100" fill="#bdbdbd" font-family="-apple-system, sans-serif" font-size="11">
+    Redirect stdout+stderr to a log file for CI artifact retention.
+  </text>
+
+  <!-- Example 2: Pipe to next tool -->
+  <rect x="40" y="125" width="820" height="55" fill="#263238" stroke="#37474f" rx="4"/>
+  <text x="60" y="155" fill="#81d4fa" font-family="'SF Mono', monospace" font-size="12">
+    $ 3d score render.png ref.jpg | grep IoU | awk -F= '{print $2}' &gt; iou.txt
+  </text>
+  <text x="60" y="170" fill="#bdbdbd" font-family="-apple-system, sans-serif" font-size="11">
+    Extract a single numeric metric from machine-parseable score output and save it.
+  </text>
+
+  <!-- Example 3: Chained conditionals -->
+  <rect x="40" y="195" width="820" height="55" fill="#263238" stroke="#37474f" rx="4"/>
+  <text x="60" y="225" fill="#81d4fa" font-family="'SF Mono', monospace" font-size="12">
+    $ 3d export bracket.scad -o bracket.stl &amp;&amp; 3d check bracket.stl &amp;&amp; 3d slice bracket.stl -o bracket.gcode
+  </text>
+  <text x="60" y="240" fill="#bdbdbd" font-family="-apple-system, sans-serif" font-size="11">
+    Chain: export only if valid, slice only if check passes. Any failure stops the pipeline.
+  </text>
+
+  <!-- Example 4: Subshell + parallel -->
+  <rect x="40" y="265" width="820" height="30" fill="#263238" stroke="#37474f" rx="4"/>
+  <text x="60" y="285" fill="#81d4fa" font-family="'SF Mono', monospace" font-size="12">
+    $ (3d render a.scad --view iso &amp; 3d render b.scad --view iso) &amp;&amp; 3d compare a.png b.png
+  </text>
+</svg>
