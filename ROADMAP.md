@@ -294,3 +294,31 @@ named **pipelines** (the reference-photo match is ONE pipeline, not the identity
   / DeepCAD) → `3d ai design`. Also: pin exact metric formulas + library conventions in `3d metrics`
   (§13.4); peer-reviewed FDM anisotropy knockdowns (PETG ~0.7×, PLA ~0.45× cross-layer) in
   `3d strength`; normal-map critic channels (Marigold/Wonder3D) for `3d ai critique`.
+
+## 18. `3d om` — object-model query & transform language (jq for 3D)
+- 📋 **`3d om '<expr>'`** — a **jq-like** filter/transform engine over the object model (§5). Reads a
+  model (`.scad`/`.stl`/`.3mf` + its object model) from a file arg or **stdin**, applies a chained
+  expression, and emits a **model document to stdout** that downstream `3d` commands consume. Pipes
+  compose in the shell; jq is the explicit analogy (identity, selection, transformation, composition).
+- 📋 **Selectors + operations, chainable** (CSS selectors from §5):
+  - select / scope: `.select("#hole-1")`, `.select(".cosmetic")`, `.parent()`, `.children()`.
+  - visibility: `.isolate()` (keep only selected), `.exclude()` / `.hide(sel)` (render-with-exclusion).
+  - transforms: `.scale(...)`, `.translate(...)`, `.rotate(...)`, `.grow(mm)` / resize a feature
+    (e.g. enlarge a hole).
+  - **boolean ops**: `.union(sel)`, `.difference(sel)`, `.intersect(sel)`.
+  - style: `.color(...)`, `.material(...)`, `.tag(...)`, `.id(...)`.
+  - intent: `.section(<preset|plane>)`, `.frame(<sel>, angle)` → produce section/camera intent
+    consumed by `render`.
+- 📋 **Streaming interchange format** — a defined object-model document (geometry reference +
+  selectors/styles/intent) that flows between `3d` commands over stdin/stdout, so `3d om` output
+  pipes into `3d render`/`check`/`pack`/`ai`. Round-trips without re-parsing geometry each stage.
+- 📋 **Common render-scoping also exposed directly on `render`** for the simple case
+  (`render --isolate <sel>`, `--exclude <sel>`, `--frame <sel>`) — `3d om` is the composable engine
+  behind them.
+- 📋 **Examples (ship in README, with pipes):**
+  - enlarge a hole then photoreal-render it:
+    `3d om part.scad '.select("#hole-1").grow(2).isolate()' | 3d render --realistic`
+    (stdin form: `cat part.scad | 3d om '.select("#hole-1").grow(2).isolate()' | 3d render --realistic`).
+  - render everything except cosmetic accents: `3d om asm.scad '.exclude(".cosmetic")' | 3d render --multi`.
+  - boolean preview of a pocket: `3d om body.scad '.difference("#pocket")' | 3d render --section mid-x`.
+  - isolate the structural set and check it: `3d om asm.scad '.select(".structural").isolate()' | 3d check`.
