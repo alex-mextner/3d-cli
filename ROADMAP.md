@@ -980,6 +980,74 @@ enumerates what's available.
   on it. **Why:** `3d` shouldn't only emit — most real work starts from *someone else's file*.
   **Example:** `3d import thing.stl && 3d check thing` (repair + run all gates on a downloaded mesh).
 
+## 35. MCP Server + Web Canvas — agent-to-human collaborative workspace
+
+The `3d web` dashboard (§9) becomes a **shared visual canvas** between the human and the AI agent,
+enabled by a built-in MCP server that starts automatically when `3d web` boots.
+
+### 35.1 Built-in MCP Server
+
+- **Auto-starts** with `3d web` on a local SSE endpoint (e.g., `http://localhost:8733/mcp/sse`).
+- **No extra binary** — it is a FastAPI sub-router inside the existing `lib/web/` app.
+- **Exposes the object model** (§5) to any MCP-capable agent (Claude, Codex, opencode, etc.) so the
+  agent can inspect the model tree, selectors, and properties without parsing `.scad` text.
+
+### 35.2 Visual selection in the web viewer (three.js)
+
+- **Click-to-select** on any mesh in the three.js viewer highlights the **part / face / edge / vertex**
+  under the cursor. The selection is stored as a CSS-like selector in the object model
+  (e.g., `#bracket>face[12]`, `#body>edge[45]`).
+- **Enter / Shift-Enter** — "drill in / drill out" exactly like Figma's selection behaviour:
+  - `Enter` on a selected part zooms into its children (faces → edges → vertices).
+  - `Shift-Enter` steps back up to the parent group.
+- **Multi-select** (`Ctrl+click`) — select disjoint parts across the scene.
+- **Selection state is broadcast** over the MCP SSE channel so the agent sees what the human is pointing
+  at in real time.
+
+### 35.3 Agent-to-human visual communication
+
+- **The agent can "point" back** — it sends a selector to the web, and the viewer highlights that
+  part/face in a bright outline (e.g., `#boiler>face[12]` pulses in yellow). This lets the agent say
+  *"widen this face"* without ambiguity.
+- **Human confirms / rejects** — the human sees the highlight, clicks a tick/cross in the web UI, and
+  the agent receives the answer via MCP. This is the **visual confirmation loop** that replaces
+  prose-only "are you sure?" back-and-forth.
+
+### 35.4 Multi-file canvas — layout & compose
+
+- **Drag multiple models and images** onto the canvas. The viewer arranges them as tiles on a shared
+  ground plane (like a light-table).
+- **Images** (reference photos, sketches, scans) are placed as textured planes behind the model so the
+  human can overlay the model on the reference for visual comparison.
+- **Models** from different `.scad` / `.stl` / `.3mf` files can be:
+  - **positioned relative to each other** (drag, snap, align axes)
+  - **merged into a single assembly** (boolean union in the object model, then export to `.3mf`)
+  - **exported together** to a single `.3mf` with per-object colors/materials, ready for the slicer
+  - **packaged** via `3d pack` (§5) so the layout drives bed placement
+
+### 35.5 Natural language + visual interaction
+
+- **"Make the bracket thicker here"** — the human clicks the bracket, Enter-drills to the face, then
+  says the sentence. The agent receives:
+  - the selector (`#bracket>face[3]`)
+  - the current dimension from the object model
+  - the instruction text
+  and proposes a parametric edit (e.g., `wall_t += 2` in `constants.scad`).
+- **"This should match the photo"** — the human places the reference photo on the canvas, drags the
+  model over it, and the agent receives both the pose and the visual comparison command. The match
+  loop (§13) can then run automatically with the camera already aligned by the human's drag.
+
+### 35.6 Why this matters
+
+- **Ambiguity kills** — "the left side of the thing" is 5 different faces. A selector + visual highlight
+  is unambiguous.
+- **Context is visual** — the agent doesn't need to parse the whole `.scad` file; it only needs the
+  subtree the human is pointing at.
+- **Figma for 3D** — the web canvas becomes the design-review surface where human and agent iterate
+  together, with the object model (§5) as the single source of truth.
+
+---
+
 This session was originally the **lego-loco train** project; it grew the `3d` CLI as a side effect.
 The CLI work now has its own repo and this ROADMAP as the single source. Pick up from here.
 
