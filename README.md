@@ -355,7 +355,7 @@ selection flags it runs ALL applicable gates; selectors run a subset; `--skip` e
 | `3d check … --skip GATE` | exclude a gate (`manifold\|consistency\|printability\|collision\|silhouette`). |
 | `3d check … --collision cfg.json` / `--ref img` | supply data; the collision/silhouette gate then runs (never narrows the core set). |
 | `3d acceptance <assembly.scad>` | back-compat alias for `check` (all gates). |
-| `3d mesh <file.stl|3mf|.scad>` | watertight / manifold / self-intersection / volume (trimesh + open3d/manifold3d; falls back to openscad warnings). |
+| `3d mesh <file.stl\|3mf\|.scad>` | watertight / manifold / self-intersection / volume (trimesh + open3d/manifold3d; falls back to openscad warnings). |
 | `3d printability <file.scad>` | wall / min-feature / overhang / orientation (FDM, PLA/PETG). |
 | `3d collision <config.json>` | generic collision/penetration engine (static / `--frame` / `--viz`). |
 | `3d lint [--all \| paths...]` | advisory repository lint rules. |
@@ -440,7 +440,7 @@ smoke-test the machinery.
 
 | Command | What |
 |---|---|
-| `3d slice <stl|3mf|file.scad>` | slice to G-code via the installed slicer; **`--dry-run` = sliceability gate** (nonzero exit on failure). |
+| `3d slice <stl\|3mf\|file.scad>` | slice to G-code via the installed slicer; **`--dry-run` = sliceability gate** (nonzero exit on failure). |
 
 ```bash
 3d slice part.stl -o part.gcode
