@@ -19,3 +19,10 @@ score/
 
 # local tooling state
 .serena/
+.claude/
+
+# CI / coverage
+.coverage
+
+# local project config (not committed)
+3d.yaml
