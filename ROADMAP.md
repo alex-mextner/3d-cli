@@ -322,3 +322,44 @@ named **pipelines** (the reference-photo match is ONE pipeline, not the identity
   - render everything except cosmetic accents: `3d om asm.scad '.exclude(".cosmetic")' | 3d render --multi`.
   - boolean preview of a pocket: `3d om body.scad '.difference("#pocket")' | 3d render --section mid-x`.
   - isolate the structural set and check it: `3d om asm.scad '.select(".structural").isolate()' | 3d check`.
+
+## 19. Operation DAG + editable history (roll-forward over a changed past op)
+Design: `docs/specs/2026-06-05-3d-cli-architecture.md` §9. Modeled on the user's `vector-engine`
+(`/Users/ultra/work/hyper-canvas-draft/packages/vector-engine`), fixing its linear-history gap.
+- 📋 **Pipeline = a DAG of operation nodes** (`load → select → grow → section → render`), each a
+  typed `{type, inputs, outputs, params, execute}` self-registered op. `3d om` chains are paths
+  through it; a project build is the whole DAG. (ffmpeg's filter graph is a DAG too — §21.)
+- 📋 **Edit a past op → automatic roll-forward.** Topological recompute of ONLY downstream-dependent
+  nodes; the rest served from a per-node cache keyed on `(op-type, params, input-fingerprints)`
+  (mirror `vector-engine/src/graph/executor.ts` dirty-set + fingerprint cache). No manual replay.
+- 📋 **History is a DAG, not a linear tape** (vector-engine has only a linear undo/redo tape) —
+  editing a middle op re-derives descendants; **branches** allowed (variant without losing the
+  other); undo/redo navigate the DAG.
+- 📋 **Persistence** = base snapshot + append-only op log + pointer (mirror
+  `vector-engine/src/persistence/{operation-log,serialize}.ts`); compactable; replays
+  deterministically into `3d.yaml`/sidecar.
+
+## 20. Headless `lib` core + thin frontends (cli / web / gui)
+Design: spec §10. Mirror `vector-engine` (headless, zero-UI) ← `vector-cli`/`vector-wasm`.
+- 📋 **`lib` = headless core** (object model + selectors, op-DAG executor + registries, gates,
+  renderers, materials/printers, metrics, AI adapters) with a typed public API — NO argv/printing/
+  shell. Everything the tool does is a function call on the core.
+- 📋 **Thin interchangeable frontends over the one core**: `cli` (the `3d` dispatcher), `web`
+  (the dashboard, already built), and a **potential `gui` app** later. A frontend holds no logic
+  the core lacks.
+- 📋 **Foundation consequence**: the python dispatcher must be a frontend over an **importable core
+  package**, not a bag of scripts. Wave-B "core extraction" task lifts any command-embedded logic
+  into `lib`; the core is unit-tested directly (no subprocess), frontends smoke-tested.
+
+## 21. Two-layer command surface: technical ⊕ friendly, combinable
+Design: spec §11. Inspiration: **ffmpeg's power without ffmpeg's UX**.
+- 📋 **Layer 1 — technical/complete**: explicit access to every op/param/selector/plane/camera
+  vector/filter-graph edge; nothing hidden; the DAG serialization speaks this.
+- 📋 **Layer 2 — user/AI-friendly**: presets, named views, anchors, selectors, intent verbs
+  (`mid-x`, `through:#valve`, `--frame .cosmetic`, `bind camera to #hole`) — the default surface
+  for humans and the AI tools.
+- 📋 **The layers COMBINE (the requirement, not either/or).** Friendly binding ⊕ technical tweak in
+  one call, e.g. attach the camera to a fragment then nudge by an explicit offset:
+  `3d render --frame #hole-1 --cam-offset [0,-5,12] --cam-roll 8`; sections `through:#valve --offset 2`.
+  Layer 2 resolves INTO Layer 1; `--explain` prints the resolved low-level form so anything
+  high-level is inspectable/overridable.

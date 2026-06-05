@@ -210,3 +210,68 @@ Replaces the confusing "true cross-section" / "--color per-part assembly mode" w
 - `3d check` on two projects with different declared gate sets runs different gates.
 - An object model authored in `.scad` comments survives a bare `openscad` render; the same
   model as an `.stl`+sidecar slices unchanged in OrcaSlicer.
+
+---
+
+## 9. Operation DAG + editable history (roll-forward over a changed past op)
+
+Inspiration: the user's `vector-engine`
+(`/Users/ultra/work/hyper-canvas-draft/packages/vector-engine`). Mirror its **compute-graph**
+model; fix the gap it has (linear history).
+
+- **The pipeline is a DAG of operations, not a script.** Every step (`load scad` → `select #hole`
+  → `grow 2` → `section mid-x` → `render`) is a NODE with typed inputs/outputs. `3d om`'s chained
+  expression is one path through this DAG; a project's build is the whole DAG. (ffmpeg's filter
+  graph is the same idea — a DAG — but with better UX, see §11.)
+- **Edit a past op → roll forward automatically.** Change any node's params and the executor
+  **topologically recomputes only the downstream-dependent nodes**; everything else is served from
+  a per-node cache keyed on `(op-type, params, input-fingerprints)` (mirror
+  `vector-engine/src/graph/executor.ts`: dirty-set + fingerprint cache). This is exactly the
+  "roll changes forward over a modified earlier operation" the user wants — it falls out of the
+  compute-DAG, no manual replay.
+- **History is itself a DAG, not a linear tape.** `vector-engine` only has a linear undo/redo tape
+  (`graph/history.ts`) — you cannot edit a middle op and keep later ops. We add the missing piece:
+  history nodes form a DAG; editing a past op re-derives descendants; branches are allowed
+  (try-a-variant without losing the other). Undo/redo navigate the DAG.
+- **Persistence**: base-state snapshot + append-only operation log + pointer, like
+  `vector-engine/src/persistence/{operation-log,serialize}.ts` (diff-based ops, compactable).
+  Serialize to the project (`3d.yaml`/sidecar). Replay reconstructs state deterministically.
+- **Operation registry**: each op type = `{type, inputs, outputs, params, execute(inputs,params)}`
+  self-registered (same registry pattern as §3). Adding an op = a new module. Operations ARE the
+  capability plugins for the DAG (a `3d om` verb, a gate, a render = op node types).
+
+## 10. Headless `lib` core + thin frontends (cli / web / gui)
+
+Mirror the `vector-engine` (headless core, zero UI deps) ← `vector-cli` / `vector-wasm` split.
+
+- **`lib` is the headless core**: object model + selectors/stylesheet (§4), the operation-DAG
+  executor + registries (§9), gates, renderers, materials/printers, metrics, AI adapters. It is a
+  normal importable library with a typed public API — NO shell, NO printing, NO argv. Everything
+  the tool can do is callable as a function on the core.
+- **Frontends are thin and interchangeable over that one core**:
+  - **`cli`** — the `3d` dispatcher (argv → core calls → stdout); the registry maps commands to
+    core ops. The CLI must not contain logic the core lacks.
+  - **`web`** — the dashboard (already built, `lib/web/`): HTTP/SSE → the same core calls.
+  - **`gui`** (potential, future) — a desktop app over the identical core API.
+- Consequence for the foundation wave: the python dispatcher is a **frontend over an importable
+  core package**, not a bag of scripts. If commands embed logic, a wave-B "core extraction" task
+  lifts it into `lib`. Test the core directly (no subprocess) + smoke-test each frontend.
+
+## 11. Two-layer command surface: technical ⊕ friendly, combinable
+
+Inspiration: **ffmpeg's power** (a complete, composable filter graph) **without ffmpeg's UX**.
+
+- **Layer 1 — technical / complete.** Full, explicit access to every op, param, selector, plane,
+  camera vector, filter-graph edge. Nothing is hidden; power users and the DAG serialization speak
+  this. (ffmpeg-grade expressiveness.)
+- **Layer 2 — user/AI-friendly.** Presets, named views, anchors, selectors, intent verbs
+  (`mid-x`, `through:#valve`, `--frame .cosmetic`, `bind camera to #hole`). Readable, guessable,
+  the default surface for humans and the AI tools (§13).
+- **The two layers COMBINE — this is the requirement, not either/or.** A friendly binding plus a
+  technical tweak in one breath: *attach the camera to a part fragment, then nudge it by an
+  explicit offset* —
+  `3d render --frame #hole-1 --cam-offset [0,-5,12] --cam-roll 8`
+  (high-level anchor binding ⊕ low-level numeric offset). Same for sections (`through:#valve`
+  ⊕ `--offset 2`), transforms, loads. Layer 2 resolves to Layer 1 under the hood, so anything
+  expressible high-level is inspectable/overridable low-level (`--explain` prints the resolved
+  Layer-1 form).
