@@ -112,11 +112,11 @@ subprocess) so `include <BOSL2/std.scad>` resolves with no manual step.
 2. **Before every commit** run `codex exec review --uncommitted` (use
    `timeout 1200 codex exec review --uncommitted` if slow), READ its findings, and fix
    the real issues before committing. Codex is a peer reviewer, not a rubber stamp.
-3. **Push regularly — do NOT let work sit only on your local machine.** After each commit or
-   small batch, push to origin: `git push -u origin <branch>` (feature work goes on a branch, not
-   straight to `main`). Pushing often means the work survives a crash, is reviewable, and a PR can
-   be opened at any point. Never end a working session with unpushed commits — finish with the local
-   branch level with `origin/<branch>`.
+3. **Push regularly — do NOT let work sit only on your local machine.** This project works
+   directly on `main` (that is where all history lives — no feature-branch dance). After each
+   commit or small batch, push: `git push origin main`. Pushing often means the work survives a
+   crash and is always visible. Never end a working session with unpushed commits — finish with
+   local `main` level with `origin/main`.
 4. Don't mix unrelated changes in one commit.
 
 Co-Authored-By trailer on commits: `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`
