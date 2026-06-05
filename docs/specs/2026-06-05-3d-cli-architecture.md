@@ -215,9 +215,8 @@ Replaces the confusing "true cross-section" / "--color per-part assembly mode" w
 
 ## 9. Operation DAG + editable history (roll-forward over a changed past op)
 
-Inspiration: the user's `vector-engine`
-(`/Users/ultra/work/hyper-canvas-draft/packages/vector-engine`). Mirror its **compute-graph**
-model; fix the gap it has (linear history).
+Inspiration: `vector-engine` (`github.com/hyperide/hyper-saas`, `packages/vector-engine`).
+Mirror its **compute-graph** model; fix the gap it has (linear history).
 
 - **The pipeline is a DAG of operations, not a script.** Every step (`load scad` → `select #hole`
   → `grow 2` → `section mid-x` → `render`) is a NODE with typed inputs/outputs. `3d om`'s chained

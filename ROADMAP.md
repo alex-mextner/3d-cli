@@ -212,9 +212,10 @@ default claude.
   guessing). The model returns a DETAILED critique — concrete numbers, specific edits in mm, and a
   list of **recommended `3d` commands** to run next. This is the "detailed flavour" the user
   asked for: full context, details, figures, recommended tools.
-- 📋 **`loop`** — autonomous iteration via **quorex** (`/Users/ultra/xp/quorex/quorex`,
-  ralphex-based: fresh agent session per task, 5-agent→codex→2-agent review pipeline, worktree
-  isolation, web dashboard, notifications). `3d ai <tool> loop` **emits a plan** whose *validation
+- 📋 **`loop`** — autonomous iteration via **quorex** (`github.com/alex-mextner/quorex`,
+  ralphex-based; invoked as the `quorex` binary on `PATH`: fresh agent session per task,
+  5-agent→codex→2-agent review pipeline, worktree isolation, web dashboard, notifications).
+  `3d ai <tool> loop` **emits a plan** whose *validation
   commands* are this tool's benchmark/metric targets, then drives quorex until the target is met /
   converged / round-cap. The loop's stop condition is a NUMERIC benchmark threshold, not vibes.
 
@@ -340,8 +341,8 @@ named **pipelines** (the reference-photo match is ONE pipeline, not the identity
   - isolate the structural set and check it: `3d om asm.scad '.select(".structural").isolate()' | 3d check`.
 
 ## 19. Operation DAG + editable history (roll-forward over a changed past op)
-Design: `docs/specs/2026-06-05-3d-cli-architecture.md` §9. Modeled on the user's `vector-engine`
-(`/Users/ultra/work/hyper-canvas-draft/packages/vector-engine`), fixing its linear-history gap.
+Design: `docs/specs/2026-06-05-3d-cli-architecture.md` §9. Modeled on `vector-engine`
+(`github.com/hyperide/hyper-saas`, `packages/vector-engine`), fixing its linear-history gap.
 - 📋 **Pipeline = a DAG of operation nodes** (`load → select → grow → section → render`), each a
   typed `{type, inputs, outputs, params, execute}` self-registered op. `3d om` chains are paths
   through it; a project build is the whole DAG. (ffmpeg's filter graph is a DAG too — §21.)
