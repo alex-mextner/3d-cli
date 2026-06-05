@@ -119,7 +119,15 @@ async def eval_losses_async(
             os.remove(png)
         except OSError:
             pass
-        return 1.0 - iou(array_to_mask(a), refm)
+        rm = array_to_mask(a)
+        # Reject degenerate camera poses DURING search, not only after.
+        # A silhouette that fills <8% or >92% of the frame is almost certainly a
+        # zoomed-in sliver or a zoomed-out speck — penalise it to max loss so the
+        # optimizer never locks onto degenerate poses in the first place.
+        frac = float(rm.mean())
+        if frac < 0.08 or frac > 0.92:
+            return 1.0
+        return 1.0 - iou(rm, refm)
 
     return list(await asyncio.gather(*(one(i, p) for i, p in enumerate(params))))
 
@@ -359,9 +367,9 @@ def main() -> None:
           flush=True)
     samples = [[rng.uniform(lo[k], hi[k]) for k in range(5)] for _ in range(args.rand)]
     losses = eval_losses(args.model, samples, center, ow, oh, refm, tmp)
-    for i, (p, l) in enumerate(zip(samples, losses)):
-        if l < best_l:
-            best_l, best_p = l, p
+    for i, (p, loss_val) in enumerate(zip(samples, losses)):
+        if loss_val < best_l:
+            best_l, best_p = loss_val, p
             print(f"  rand {i:3d}  IoU={1-l:.3f}  {[round(x,1) for x in p]}", flush=True)
     if best_p is None:
         best_p = [(lo[k] + hi[k]) / 2 for k in range(5)]

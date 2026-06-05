@@ -68,7 +68,6 @@ Run this script inside an env that has the heavy deps. Python 3.12 is recommende
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 import time
 from pathlib import Path
@@ -157,47 +156,90 @@ def mask_sam2(rgb: np.ndarray, checkpoint: str | None, config: str | None) -> np
 # --------------------------------------------------------------------------- #
 #  MASK -- tier 3: OpenCV grabCut (guaranteed fallback)
 # --------------------------------------------------------------------------- #
-def mask_grabcut(rgb: np.ndarray, iters: int = 6) -> np.ndarray:
-    """
-    grabCut subject mask. Seeds with a rect that excludes the outer frame (so the
-    background plate/track on the extreme edges is treated as background), then
-    cleans speckle and keeps the largest connected component (the subject body).
-    Returns a 0/255 mask.
-    """
-    bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+def _grabcut_attempt(bgr: np.ndarray, rect: tuple[int, int, int, int], iters: int) -> np.ndarray:
+    """Single GrabCut attempt with a specific rect. Returns 0/255 mask."""
     h, w = bgr.shape[:2]
-
     gc = np.zeros((h, w), np.uint8)
     bgd = np.zeros((1, 65), np.float64)
     fgd = np.zeros((1, 65), np.float64)
-
-    # Rect inset from the borders: assume subject is roughly centered, leave a
-    # border ring as guaranteed background to anchor the model.
-    mx, my = int(0.02 * w), int(0.04 * h)
-    rect = (mx, my, w - 2 * mx, h - 2 * my)
     cv2.grabCut(bgr, gc, rect, bgd, fgd, iters, cv2.GC_INIT_WITH_RECT)
+    return np.where((gc == cv2.GC_FGD) | (gc == cv2.GC_PR_FGD), 255, 0).astype(np.uint8)
 
-    mask = np.where((gc == cv2.GC_FGD) | (gc == cv2.GC_PR_FGD), 255, 0).astype(np.uint8)
 
-    # Morphological cleanup: close small holes, drop speckle. morphologyEx widens the
-    # dtype, so re-narrow to uint8 to keep `mask` a clean 0/255 single-byte mask.
+def _mask_quality(mask: np.ndarray) -> float:
+    """Score a binary 0/255 mask for quality: area fraction near 30–70% is best.
+
+    Front-facing symmetric subjects (buildings, monuments) typically fill 30–70% of
+    the frame. Near-zero means segmentation collapsed (grabbed nothing); near-100%
+    means it grabbed the whole image (background included). Penalise both extremes.
+    """
+    frac = float(mask.mean()) / 255.0
+    if frac < 0.05 or frac > 0.95:
+        return 0.0
+    # Prefer masks whose area fraction is near 0.5 (centred, neither too small nor too large).
+    return 1.0 - abs(frac - 0.40) * 2.0
+
+
+def _clean_mask(mask: np.ndarray) -> np.ndarray:
+    """Morphological cleanup + largest-component + hole-fill on a 0/255 mask."""
     k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k, iterations=2).astype(np.uint8)
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, k, iterations=1).astype(np.uint8)
-
-    # Keep the largest connected component (the subject), discard stray blobs.
     n, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
     if n > 1:
         largest = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
         mask = np.where(labels == largest, 255, 0).astype(np.uint8)
-
-    # Fill internal holes so the silhouette is solid.
+    # Fill internal holes.
     ff = mask.copy()
     fh, fw = ff.shape
     flood = np.zeros((fh + 2, fw + 2), np.uint8)
     cv2.floodFill(ff, flood, (0, 0), 255)
-    mask = mask | cv2.bitwise_not(ff)
-    return mask
+    return (mask | cv2.bitwise_not(ff)).astype(np.uint8)
+
+
+def mask_grabcut(rgb: np.ndarray, iters: int = 6) -> np.ndarray:
+    """GrabCut subject mask with multi-attempt border-inset selection.
+
+    Front-facing symmetric subjects (buildings, monuments) confuse GrabCut when the
+    subject fills most of the frame — a 2% border gives it almost nothing to anchor
+    as definite background, causing the model to label the subject interior as background.
+
+    Fix: try three border-inset configurations (tight 2%, medium 8%, generous 15%)
+    and pick the one with the highest quality score (area fraction near 30–70%, maximally
+    connected). The winning mask is then cleaned (morphology + largest-cc + hole-fill).
+    Uses an asymmetric inset: more space at top (sky) and bottom (ground) than at the sides.
+    """
+    bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+    h, w = bgr.shape[:2]
+
+    # Border inset configs: (x_frac, y_frac) — fraction of width/height to inset on each side.
+    # Asymmetric: buildings typically have sky above and ground below, so top/bottom get
+    # more inset than sides to give GrabCut better background anchors.
+    configs = [
+        (0.02, 0.04),   # original tight config — works when subject is small-ish
+        (0.06, 0.12),   # medium inset — better for full-frame facades
+        (0.12, 0.18),   # generous inset — for very full-frame subjects
+    ]
+
+    best_mask: np.ndarray | None = None
+    best_score = -1.0
+    for (xf, yf) in configs:
+        mx, my = max(1, int(xf * w)), max(1, int(yf * h))
+        rect = (mx, my, w - 2 * mx, h - 2 * my)
+        try:
+            raw = _grabcut_attempt(bgr, rect, iters)
+        except cv2.error:
+            continue
+        score = _mask_quality(raw)
+        if score > best_score:
+            best_score = score
+            best_mask = raw
+
+    if best_mask is None:
+        # All attempts failed — return empty mask so downstream raises/degrades gracefully.
+        return np.zeros((h, w), np.uint8)
+
+    return _clean_mask(best_mask)
 
 
 # --------------------------------------------------------------------------- #
