@@ -25,12 +25,15 @@ dependencies = [
 
 [package.optional-dependencies]
 dev = [
+    { name = "fastapi" },
     { name = "httpx" },
+    { name = "markdown" },
     { name = "mypy" },
     { name = "pytest" },
     { name = "pytest-cov" },
     { name = "pytest-timeout" },
     { name = "ruff" },
+    { name = "uvicorn" },
 ]
 preprocess = [
     { name = "opencv-python-headless" },
@@ -47,9 +50,11 @@ web = [
 
 [package.metadata]
 requires-dist = [
+    { name = "fastapi", marker = "extra == 'dev'", specifier = ">=0.110" },
     { name = "fastapi", marker = "extra == 'web'", specifier = ">=0.110" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.27" },
     { name = "manifold3d", specifier = ">=2.4" },
+    { name = "markdown", marker = "extra == 'dev'", specifier = ">=3.5" },
     { name = "markdown", marker = "extra == 'web'", specifier = ">=3.5" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.8" },
     { name = "numpy", specifier = ">=1.24" },
@@ -64,6 +69,7 @@ requires-dist = [
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.5.0" },
     { name = "scipy", specifier = ">=1.10" },
     { name = "trimesh", specifier = ">=4.0" },
+    { name = "uvicorn", marker = "extra == 'dev'", specifier = ">=0.27" },
     { name = "uvicorn", marker = "extra == 'web'", specifier = ">=0.27" },
 ]
 provides-extras = ["preprocess", "viz", "web", "dev"]
