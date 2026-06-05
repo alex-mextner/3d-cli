@@ -27,4 +27,4 @@ score/
 .coverage
 
 # local project config (not committed)
-3d.yaml
+/3d.yaml
