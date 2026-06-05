@@ -11,7 +11,8 @@ Checks whether an `.scad` file parses without error. No geometry is rendered, so
 ```
 
 ```bash
-3d validate model.scad
+3d validate bracket.scad
+3d validate model.scad   # fast CI check; no geometry rendered
 ```
 
 ## Exit codes

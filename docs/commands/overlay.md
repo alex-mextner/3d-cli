@@ -12,6 +12,8 @@ Compares a render against a reference image and produces three diagnostic overla
 
 ```bash
 3d overlay render.png ref.jpg -o work/
+3d overlay preview.png photo.jpg
+3d overlay render.png ref.jpg -o diff/
 ```
 
 ## Output files

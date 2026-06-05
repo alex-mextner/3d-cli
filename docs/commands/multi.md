@@ -11,8 +11,9 @@ Alias for `3d render <file> --multi [outdir]`. Renders front, back, left, right,
 ```
 
 ```bash
-3d multi model.scad previews/
-3d multi model.scad --size 800x600
+3d multi bracket.scad previews/
+3d multi bracket.scad --render --size 1200x900
+3d multi bracket.scad -D 'depth=40'
 ```
 
 See [`render.md`](render.md) for the full option list and implementation notes.

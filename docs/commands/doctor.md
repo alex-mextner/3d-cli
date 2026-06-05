@@ -12,6 +12,8 @@ Reports which dependencies are present or missing for the full `3d` pipeline, an
 
 ```bash
 3d doctor
+3d doctor | grep MISSING
+3d doctor   # run before CI to verify the environment
 ```
 
 ## Checks

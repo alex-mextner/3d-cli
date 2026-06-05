@@ -11,8 +11,9 @@ Extracts the tunable parameters declared in an `.scad` file (`name = value; // [
 ```
 
 ```bash
-3d params model.scad
-3d params model.scad --json
+3d params bracket.scad
+3d params bracket.scad --json | jq '.[] | {name, value}'
+3d params bracket.scad --json > params.json
 ```
 
 ## Output
