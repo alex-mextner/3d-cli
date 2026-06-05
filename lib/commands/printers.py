@@ -42,7 +42,8 @@ add or correct a machine without editing the shipped data.
 
 Examples:
   3d printers list
-  3d printers show "Prusa MK4\""""
+  3d printers show "Prusa MK4"
+"""
 
 
 def _print_list() -> int:
