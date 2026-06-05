@@ -114,6 +114,7 @@ resolved relative to the config file's directory.
 | `3d overlay <render.png> <reference.png>` | difference / 50% ghost / canny edge-overlay diagnostics. |
 | `3d score <render.png\|file.scad> <reference>` | silhouette AE + IoU (machine-parseable `KEY=VALUE` lines). |
 | `3d match <assembly.scad> <reference>` | forced-monotonic acceptance loop (render→score→critic→apply→accept/revert + changelog). |
+| `3d fit-camera <model.scad> <reference>` | fit an OpenSCAD camera to a reference photo by maximizing silhouette IoU; **saves the viewpoint** + a fit render + an overlay. |
 | `3d preprocess <reference.jpg>` | subject mask + proportional depth (SAM2/Depth-Anything if installable, else OpenCV). |
 
 ```bash
@@ -122,7 +123,24 @@ resolved relative to the config file's directory.
 3d score model.scad ref.jpg                       # renders, then scores
 3d score mask_a.png mask_b.png --masks            # compare two ready masks
 3d match model.scad ref.jpg --rounds 8 --dry-run  # exercise the loop without the LLM
+3d fit-camera model.scad ref.jpg --out camera.json --draw-axes
 3d preprocess ref.jpg -o work/ --force-fallback   # OpenCV grabCut + pseudo-depth
+```
+
+`fit-camera` searches the camera **pose** (azimuth, elevation, distance, pan-x, pan-z
+orbiting the look-at) to maximize silhouette IoU between the CGAL render and the
+reference, then writes `camera.json` with the fitted 6-param vector `camera_arg`, the
+per-param values, the IoU, plus `<out>_fit.png` (full-res fit) and `<out>_overlay.png`
+(render-cyan over reference-red ghost). The optimizer is random-search → coordinate-descent
+with a deterministic seed. Crucially it is **scale-free**: it exports a temporary STL,
+reads the model's bounding-box centroid + diagonal, and derives the distance/pan bounds and
+refine steps from that diagonal — so a 20 mm cube and a 300 mm assembly both fit without
+hardcoded numbers. `--center` overrides the auto look-at; `--draw-axes` overlays each
+silhouette's PCA principal axis + bounding-box contour so axis/contour alignment is visible.
+Different builds never reach IoU = 1 (the shapes differ) — the point is best alignment of
+the bounding silhouette so viewpoint, scale and gross proportions match. Use the result:
+```bash
+openscad --render --camera="$(jq -r .camera_arg camera.json)" -o view.png model.scad
 ```
 
 `score` prints `AE=`, `AE_NORM=`, `IoU=`, `CLOSENESS=`, `FRAME=`, `OVERLAY=` — one per

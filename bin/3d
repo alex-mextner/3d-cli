@@ -69,6 +69,8 @@ ${B}REFERENCE-MATCH PIPELINE${Z}
   ${C}score${Z}      <render.png|file.scad> <reference> [-o outdir]      silhouette AE + IoU (machine-parseable lines).
   ${C}match${Z}      <assembly.scad> <reference> [--rounds N] [--dry-run] [--constants f] [--metric iou|ae]
                                           forced-monotonic acceptance loop (render->score->critic->apply->accept/revert + changelog).
+  ${C}fit-camera${Z} <model.scad> <reference> [--out camera.json] [--rand N] [--refine N] [--draw-axes]
+                                          fit an OpenSCAD camera to a reference photo by maximizing silhouette IoU; saves the viewpoint.
   ${C}preprocess${Z} <reference.jpg> [-o outdir]                        subject mask + proportional depth (SAM2/Depth-Anything if installable, else OpenCV).
 
 ${B}LIBRARIES${Z}
@@ -90,13 +92,13 @@ case "$cmd" in
     render|preview|multi|section|export|validate|params|check|printability|acceptance|silhouette|overlay|score)
         bash "$LIB/cmd_${cmd}.sh" "$@" ;;
 
-    mesh|collision|match|preprocess|libs)
+    mesh|collision|match|preprocess|libs|fit-camera)
         bash "$LIB/cmd_${cmd}.sh" "$@" ;;
 
     *)
         echo "${R}3d: unknown command '$cmd'${Z}" >&2
         echo "Run '3d help' for the list of commands. Closest matches:" >&2
-        compgen -W "render preview multi section export validate params check mesh printability acceptance collision silhouette overlay score match preprocess libs help version" \
+        compgen -W "render preview multi section export validate params check mesh printability acceptance collision silhouette overlay score match fit-camera preprocess libs help version" \
             | grep -i "$(printf '%s' "$cmd" | cut -c1-3)" 2>/dev/null | sed 's/^/  /' >&2 || true
         exit 2 ;;
 esac
