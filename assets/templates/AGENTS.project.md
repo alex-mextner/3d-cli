@@ -61,3 +61,9 @@ Default printer: **{{PRINTER}}**.  Default material: **{{MATERIAL}}**.
    compare against the MASK; reject a fit-camera solution that zoomed onto a fragment; cross-check with the
    multi-view render and the render|diff|reference collage. A comparison you can't trust visually is telling
    you the tool is misconfigured, not that the model is good.
+9. **Measure every round and don't loop.** Track the metric (IoU/SSIM/collage) across rounds: keep a change
+   only if it improves, revert if it regresses. Flat or oscillating numbers mean you are LOOPING, not
+   converging. If the metric hasn't improved for ~3 rounds, STOP tweaking the same approach and **brainstorm
+   a structurally different one** (different primitives/decomposition, proportions-before-detail, rebuild the
+   worst part) — small tweaks on a dead end keep the numbers flat forever; changing the approach breaks the
+   plateau.

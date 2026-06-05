@@ -83,10 +83,22 @@ If `3d.yaml` has `project.reference` (or there are images under `references/`), 
 Look at the **overlay images** and the **multi-view renders** — do not chase the single IoU
 number (a degenerate zoomed-in camera can inflate it). Fix the GEOMETRY, not the camera.
 
-### 5. Iterate
+### 5. Iterate — measure every round, and don't loop
 
 Adjust the `.scad`, re-render, re-compare, **commit** each meaningful step (`git add -p &&
 git commit`). Git is your version history — no `_001`/`_002` filenames.
+
+**Every round, READ the metric and ask "did it actually get better?"** Track the comparison
+numbers (`3d compare` IoU/SSIM, the collage) across rounds — keep a change only if the metric
+improves; revert it if it regressed. Improving numbers = converging; flat/oscillating numbers =
+you are **looping**, not progressing.
+
+**If the metric has not improved for ~3 rounds, STOP nudging the same approach — brainstorm a
+different one.** Step back and consider a structurally different strategy: different primitives or
+decomposition, a different module breakdown, fixing proportions before detail, a different camera/
+section to expose the real mismatch, or rebuilding the worst part from scratch. Small parameter
+tweaks on a dead-end approach will keep the numbers flat forever. Changing the *approach* is what
+breaks a plateau — wasting rounds on the same idea is the failure mode to avoid.
 
 ### 6. Extract parameters (optional)
 
