@@ -84,8 +84,10 @@ Actionable fit-camera/reference/backplate recommendations:
 - Report both IoU and SSIM in `3d compare`. The PDF recommends making SSIM the primary
   quality signal shown to users because it captures luminance, contrast, and structure
   better than binary silhouette IoU on symmetric subjects.
-- Prefer SAM 2 as the long-term segmentation path, falling back to multi-attempt GrabCut
-  with a structured `MissingDependency` when SAM 2 is unavailable.
+- Prefer SAM 2 as the long-term segmentation path, while preserving the current
+  `preprocess` contract: missing SAM 2 degrades gracefully to multi-attempt GrabCut and
+  still writes outputs. A structured `MissingDependency` would only fit a future explicit
+  "require SAM 2" mode.
 - Keep render/reference/backplate comparison visually inspectable. The PDF reinforces the
   need for a diagnostic artifact that makes degeneracy obvious; in repo terms this aligns
   with `3d compare` collage/backplate output.
