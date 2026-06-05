@@ -178,9 +178,12 @@ resolved relative to the config file's directory.
 
 ### Reference-match pipeline
 
-This is **one example pipeline**, not the headline: match a parametric model to a reference
-photo by viewpoint and silhouette. Useful when you have a photo of a real object and want a
-printable part that matches its proportions and pose.
+Match a parametric model to a reference photo by viewpoint and silhouette, for when you have a
+photo of a real object and want a printable part with the same proportions and pose.
+
+> You photograph a bracket, write a rough parametric `bracket.scad`, then `3d fit-camera` locks
+> the camera to the photo and `3d match` nudges the parameters until the rendered silhouette
+> matches the photo — keeping only edits that raise the silhouette IoU and stay manifold.
 
 | Command | What |
 |---|---|

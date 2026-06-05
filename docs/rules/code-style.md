@@ -66,3 +66,12 @@ hardcoded", "unlike the previous version", "used to require …". Write the posi
 against a **named, externally-known tool/standard** (e.g. "ffmpeg-style filter graph", "jq-like
 selectors") where the reference genuinely helps the reader place the feature. Applies to README,
 ROADMAP, `--help`, commit messages, and docs alike.
+
+## Show examples, don't narrate about them
+Don't write meta-commentary ABOUT an example ("this is one example pipeline, not the headline",
+"here is a sample of how you might…"). Just give the example. Concrete, illustrative examples go in a
+**quote block** (`>`) for a scenario, or a fenced **code block** for runnable commands — set off from
+the prose, not buried in a sentence that talks around them. A section that positions itself ("this is
+just one of many…") instead of demonstrating is a reject; lead with what it does, then show it.
+(In design/spec docs, discussing a feature's *positioning* is fine — this rule is about user-facing
+copy, where the reader wants the thing, not commentary on the thing.)
