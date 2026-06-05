@@ -300,26 +300,40 @@ A unified AI layer over the analytical commands. Pattern: **`3d ai <tool> <opera
 (claude / codex / opencode — opencode runs out-of-box with free models). `--backend` selects;
 default claude.
 
-### 13.1 Operators — universal, available for EVERY ai tool
-- 📋 **`do`** — run the AI ONCE to perform the task and **apply** the result (mutating: writes the
-  SCAD edit / `camera.json` / etc.). One shot, then the deterministic gates re-run to confirm.
-- 📋 **`review`** — read-only **RAG-style** advisory, **never mutates**. Before the model is called,
-  a curated set of deterministic `3d` tools is **auto-run** and their **numbers + images + full
-  context** are injected into the prompt immediately (the RAG: ground truth in context, no
-  guessing). The model returns a DETAILED critique — concrete numbers, specific edits in mm, and a
-  list of **recommended `3d` commands** to run next. This is the "detailed flavour" the user
-  asked for: full context, details, figures, recommended tools.
-- 📋 **`loop`** — autonomous iteration via **quorex** ([github.com/alex-mextner/quorex](https://github.com/alex-mextner/quorex),
-  [ralphex](https://github.com/umputun/ralphex)-based; invoked as the `quorex` binary on `PATH`: fresh agent session per task,
-  5-agent→codex→2-agent review pipeline, worktree isolation, web dashboard, notifications).
-  `3d ai <tool> loop` **emits a plan** whose *validation
-  commands* are this tool's benchmark/metric targets, then drives quorex until the target is met /
-  converged / round-cap. The loop's stop condition is a NUMERIC benchmark threshold, not vibes.
+### 13.1 The shared rule — ALWAYS run the deterministic tools FIRST, then the AI
+Every operator (`do`/`review`/`loop`) follows the same two-step shape; this is the core idea,
+not a per-operator detail:
+1. **Auto-run the relevant deterministic `3d` tools first.** Before the model is ever called, the
+   tool runs the set of `3d` commands that are *always* needed to ground a task of this kind — for
+   the **part/project type at hand** (decided from `3d.yaml` tags + object model, §5, e.g. a
+   `.structural` engineering part pulls `check`+`strength`+`printability`; a `match` task pulls
+   `fit-camera`+`score`+multi-view renders). Their **numbers + rendered PNGs + full context** become
+   the prompt. This is the RAG: the model reasons over measured ground truth, never guesses.
+2. **Then call the AI** with that evidence in context.
 
-### 13.2 RAG pre-flight — what `review`/`do` auto-run before the model
-Each tool declares a **manifest** of deterministic pre-runs; their outputs (numbers + rendered
-PNGs) are embedded in the prompt, plus a "recommended tools" block (relevant `3d` subcommands with
-one-line usage):
+The per-tool/per-type list of "what to auto-run first" is the tool's **RAG pre-flight set** (see
+§13.2 — earlier called a "manifest"; it is just that declared list of pre-run `3d` commands).
+
+The three operators differ only in what they do *with* the AI after step 1:
+- 📋 **`do`** — call the AI **once** to perform the task and **apply** the result (mutating: writes
+  the SCAD edit / `camera.json` / etc.). Then the deterministic gates re-run to confirm the change.
+- 📋 **`review`** — call the AI **read-only**, **never mutates**. The model returns a DETAILED
+  critique grounded in the step-1 evidence — concrete numbers, specific edits in mm, and a list of
+  **recommended `3d` commands** to run next. The "detailed flavour": full context, figures, no edit.
+- 📋 **`loop`** — **repeat `do` → re-run the deterministic tools → `review` in a cycle** until the
+  acceptance criteria converge. The stop condition is a **NUMERIC benchmark threshold** (the tool's
+  §13.4 metric: IoU ≥ τ, Chamfer ≤ ε, all gates PASS), not vibes — or convergence / a round-cap.
+  Each iteration re-grounds on freshly measured tools (step 1) so the model always sees the current
+  state. Optionally driven by **quorex** ([github.com/alex-mextner/quorex](https://github.com/alex-mextner/quorex),
+  [ralphex](https://github.com/umputun/ralphex)-based; the `quorex` binary on `PATH`: fresh agent session per task,
+  5-agent→codex→2-agent review pipeline, worktree isolation, web dashboard, notifications) for the
+  heavyweight autonomous variant; `3d ai <tool> loop` emits a plan whose *validation commands* are
+  this tool's metric targets and drives the cycle until met.
+
+### 13.2 RAG pre-flight set — the deterministic `3d` commands each tool auto-runs before the AI
+Each tool **declares** its pre-flight set: the deterministic `3d` runs whose outputs (numbers +
+rendered PNGs) are embedded in the prompt, plus a "recommended tools" block (relevant `3d`
+subcommands with one-line usage). The set is filtered by the part/project type (§13.1 step 1):
 - `axis` → OpenCV PCA principal axes, contours, image moments, bbox, centroid + annotated overlay.
 - `match`/`fit-camera` → silhouette **IoU**, overlay-diff (AE / blend / canny), current
   `camera.json` + before/after PNGs.
@@ -329,8 +343,8 @@ one-line usage):
 
 ### 13.3 Initial tool set (each gets `do/review/loop`)
 - 📋 `axis`, `match` (camera/silhouette), `critique` (model↔reference), `strength`, `printability`,
-  `design` (generate/modify SCAD from a reference). Adding a tool = declare its RAG manifest +
-  benchmark/metric; the three operators come for free.
+  `design` (generate/modify SCAD from a reference). Adding a tool = declare its RAG pre-flight set
+  (§13.2) + benchmark/metric (§13.4); the three operators come for free.
 
 ### 13.4 Benchmarks (`3d ai`) + metrics (all tools) — always computed, always saved
 - 📋 **Standard, commonly-accepted benchmarks** (not bespoke-only):
