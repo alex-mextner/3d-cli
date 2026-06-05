@@ -83,9 +83,9 @@ Inspect the fit artifacts next to the reference:
 
 `camera.json` contains `camera_arg`, the 6-value OpenSCAD camera vector. Reuse that value
 for later `render`, `silhouette`, or `score` calls so every iteration compares geometry
-changes from the same viewpoint. Do not add `--ortho` to renders that reuse a
-`fit-camera` camera unless that camera was fitted through an orthographic path; changing
-projection after fitting makes the score reflect camera drift instead of model geometry.
+changes from the same viewpoint. `fit-camera` currently fits a perspective camera, so do
+not add `--ortho` to renders that reuse its `camera_arg`; changing projection after
+fitting makes the score reflect camera drift instead of model geometry.
 
 ```bash
 CAM="$(jq -r .camera_arg work/backplate/camera.json)"
