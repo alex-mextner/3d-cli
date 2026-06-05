@@ -13,7 +13,7 @@ FDM lifecycle — idea/spec → AI-assisted, reference-photo-driven **parametric
 (OpenSCAD-first) → verification, pixel-perfect matching, physics/kinematics → **material
 procurement/inventory** → print prep → **printing, live monitoring & failure recovery** (Klipper/
 Moonraker, OctoPrint, Bambu, Prusa) — plus live observation of AI agents doing the work. Its own repo
-(`github.com/alex-mextner/3d-cli`), installed as a standard Python package exposing the `3d`
+([github.com/alex-mextner/3d-cli](https://github.com/alex-mextner/3d-cli)), installed as a standard Python package exposing the `3d`
 console-script (pipx / uv tool / pip — see §29), not a manual symlink.
 
 ## 0a. Design influences & philosophy (the meta-thinking)
@@ -24,7 +24,7 @@ the surface looks the way it does:
 - **ffmpeg** → a complete, expressive filter-GRAPH (a DAG) with total low-level power — but its UX
   is notoriously hostile. We keep the power (Layer 1, §21) and add a friendly layer on top (Layer 2)
   that resolves INTO it. ffmpeg's filtergraph is also why the pipeline is a DAG (§19).
-- **vecli / vector-engine** (`github.com/hyperide/hyper-saas`, `packages/vector-engine`) → a
+- **vecli / vector-engine** ([github.com/hyperide/hyper-saas](https://github.com/hyperide/hyper-saas), `packages/vector-engine`) → a
   **headless compute-graph core** (`lib`) with thin frontends (`cli`/`web`/`gui`) over it (§20), and
   an **operation DAG** where editing a past node rolls forward to dependents (§19). We adopt the
   compute-DAG + headless-core split and fix its linear-history gap with a real history DAG.
@@ -259,8 +259,8 @@ default claude.
   guessing). The model returns a DETAILED critique — concrete numbers, specific edits in mm, and a
   list of **recommended `3d` commands** to run next. This is the "detailed flavour" the user
   asked for: full context, details, figures, recommended tools.
-- 📋 **`loop`** — autonomous iteration via **quorex** (`github.com/alex-mextner/quorex`,
-  ralphex-based; invoked as the `quorex` binary on `PATH`: fresh agent session per task,
+- 📋 **`loop`** — autonomous iteration via **quorex** ([github.com/alex-mextner/quorex](https://github.com/alex-mextner/quorex),
+  [ralphex](https://github.com/umputun/ralphex)-based; invoked as the `quorex` binary on `PATH`: fresh agent session per task,
   5-agent→codex→2-agent review pipeline, worktree isolation, web dashboard, notifications).
   `3d ai <tool> loop` **emits a plan** whose *validation
   commands* are this tool's benchmark/metric targets, then drives quorex until the target is met /
@@ -288,8 +288,8 @@ one-line usage):
   - **render-vs-reference**: silhouette **IoU**, **LPIPS**, **SSIM**, **PSNR**, **CLIP-similarity**.
   - **camera/pose**: reprojection error, rotation/translation error.
   - **OpenSCAD-generation suite**: adopt the public *image→OpenSCAD, iterate-via-CLI-render*
-    task format (ref: ModelRift OpenSCAD-LLM benchmark —
-    https://modelrift.com/blog/openscad-llm-benchmark) BUT replace its purely **subjective 0–5
+    task format (ref: [ModelRift OpenSCAD-LLM benchmark](https://modelrift.com/blog/openscad-llm-benchmark))
+    BUT replace its purely **subjective 0–5
     score** with the automated metrics above (render-success rate + IoU + Chamfer against a target
     mesh), so results are reproducible. Keep a subjective score as one column, not the only one.
   - `3d ai bench [suite]` runs the suite; `3d ai bench --compare` shows deltas vs history.
@@ -307,7 +307,7 @@ one-line usage):
   **music, kinetic text/captions, scene transitions, pacing**. Not a raw screen grab: a polished,
   edited promo.
 - 📋 **Built code-first via HeyGen HyperFrames** (open-source, Apache 2.0 — AI agents compose video by
-  writing **HTML/CSS/JS**; CLI install). Ref: https://hyperframes.heygen.com/ . The demo is itself a
+  writing **HTML/CSS/JS**; CLI install). Ref: [hyperframes.heygen.com](https://hyperframes.heygen.com/). The demo is itself a
   small program (HTML/CSS/JS scenes) rendered to a video file — fits this repo's "everything-as-code"
   ethos. Install HyperFrames **on demand** (only when building the demo), not in the bootstrap.
 - 📋 **Content**: real `3d` CLI in action — capture actual runs (render `--multi`/`--section`,
@@ -389,7 +389,7 @@ named **pipelines** (the reference-photo match is ONE pipeline, not the identity
 
 ## 19. Operation DAG + editable history (roll-forward over a changed past op)
 Design: `docs/specs/2026-06-05-3d-cli-architecture.md` §9. Modeled on `vector-engine`
-(`github.com/hyperide/hyper-saas`, `packages/vector-engine`), fixing its linear-history gap.
+([github.com/hyperide/hyper-saas](https://github.com/hyperide/hyper-saas), `packages/vector-engine`), fixing its linear-history gap.
 - 📋 **Pipeline = a DAG of operation nodes** (`load → select → grow → section → render`), each a
   typed `{type, inputs, outputs, params, execute}` self-registered op. `3d om` chains are paths
   through it; a project build is the whole DAG. (ffmpeg's filter graph is a DAG too — §21.)
@@ -487,7 +487,7 @@ The two-layer idea (§21) applies to the **command tree itself**, not just argum
   list. Two levels: the umbrella for "just do the right thing", the primitives for surgical control.
 
 ## 25. Linter system (oxc-inspired) + `3d.yaml` `lint:` section
-Inspiration: **oxc** (`github.com/oxc-project/oxc`) — a fast linter + formatter with a clean,
+Inspiration: **oxc** ([github.com/oxc-project/oxc](https://github.com/oxc-project/oxc)) — a fast linter + formatter with a clean,
 layered rule-config structure. Build an analogous multi-level lint system for 3D/FDM models.
 - 📋 **`3d lint`** — runs a configurable set of model checks (geometry, printability, naming,
   object-model hygiene, convention conformance, style/format of the `.scad`/`3d.yaml`). Distinct
