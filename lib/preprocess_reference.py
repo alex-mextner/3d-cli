@@ -1,10 +1,22 @@
 #!/usr/bin/env python3
 """
 preprocess_reference.py -- one-shot reference-photo pre-processor for the
-lego-loco pixel-perfect 2D->3D pipeline (report Sec 6.1-6.2, Sec 8.2 #5).
+pixel-perfect 2D->3D pipeline (report Sec 6.1-6.2, Sec 8.2 #5).
 
-Produces, from a single reference photo of the locomotive:
-  * mask.png  -- clean binary SUBJECT MASK (loco shell vs background), white=subject
+ACCESSED VIA: `3d preprocess <reference.jpg>` (lib/commands/preprocess.py shells out to
+this script via cli.pyrun.exec_tool, passing args straight through).
+
+INVARIANTS:
+  - SUBJECT-AGNOSTIC: this processes whatever subject the caller's photo contains. No
+    subject identity is hardcoded -- the segmentation/depth heuristics assume only that
+    the subject is roughly centered and fills the frame; nothing branches on what the
+    subject actually is.
+  - Always produces both outputs (mask.png + depth.png), degrading to the OpenCV/numpy
+    floor when heavy model deps are absent (never blocks, never leaves outputs missing).
+  - mask.png is a solid 0/255 uint8 silhouette; depth.png is 8-bit with background=0.
+
+Produces, from a single reference photo of the subject:
+  * mask.png  -- clean binary SUBJECT MASK (subject vs background), white=subject
   * depth.png -- proportional (relative) DEPTH map, 8-bit, brighter = nearer camera
 
 These two artifacts are what make the silhouette metric trustworthy:
@@ -35,12 +47,12 @@ Run this script inside an env that has the heavy deps. Python 3.12 is recommende
   # Depth Anything V2 (real monocular depth) -- lightest real upgrade, ~100MB model:
   uv run --python 3.12 --with opencv-python-headless,numpy,pillow \
          --with "transformers>=4.45" --with torch \
-         preprocess/preprocess_reference.py references/ref_orient_express_loco_only.jpg
+         preprocess/preprocess_reference.py references/subject.jpg
 
   # rembg (real salient mask, ONNX, lighter than SAM 2):
   uv run --python 3.12 --with opencv-python-headless,numpy,pillow \
          --with "rembg[cpu]" \
-         preprocess/preprocess_reference.py references/ref_orient_express_loco_only.jpg
+         preprocess/preprocess_reference.py references/subject.jpg
 
   # SAM 2 (the report's named "best" segmenter) -- heaviest, do this in a venv:
   #   pip install "git+https://github.com/facebookresearch/sam2.git"
@@ -50,7 +62,8 @@ Run this script inside an env that has the heavy deps. Python 3.12 is recommende
   #   then pass:  --sam2-checkpoint sam2.1_hiera_small.pt \
   #               --sam2-config configs/sam2.1/sam2.1_hiera_s.yaml
   #   (SAM 2 is prompt-based; this script prompts with a centered box covering the
-  #    loco. For per-feature sub-masks -- funnel/boiler/cab -- prompt with points.)
+  #    subject. For per-feature sub-masks -- e.g. a locomotive's funnel/boiler/cab --
+  #    prompt with points instead.)
 """
 from __future__ import annotations
 
@@ -131,7 +144,7 @@ def mask_sam2(rgb: np.ndarray, checkpoint: str | None, config: str | None) -> np
         predictor = SAM2ImagePredictor(model)
         predictor.set_image(rgb)
         h, w = rgb.shape[:2]
-        # Centered box covering the bulk of the loco (side elevation fills the frame).
+        # Centered box covering the bulk of the subject (side elevation fills the frame).
         box = np.array([0.04 * w, 0.10 * h, 0.96 * w, 0.92 * h])
         masks, scores, _ = predictor.predict(box=box[None, :], multimask_output=False)
         m = masks[0].astype(np.uint8) * 255
@@ -148,7 +161,7 @@ def mask_grabcut(rgb: np.ndarray, iters: int = 6) -> np.ndarray:
     """
     grabCut subject mask. Seeds with a rect that excludes the outer frame (so the
     background plate/track on the extreme edges is treated as background), then
-    cleans speckle and keeps the largest connected component (the loco body).
+    cleans speckle and keeps the largest connected component (the subject body).
     Returns a 0/255 mask.
     """
     bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
@@ -166,12 +179,13 @@ def mask_grabcut(rgb: np.ndarray, iters: int = 6) -> np.ndarray:
 
     mask = np.where((gc == cv2.GC_FGD) | (gc == cv2.GC_PR_FGD), 255, 0).astype(np.uint8)
 
-    # Morphological cleanup: close small holes, drop speckle.
+    # Morphological cleanup: close small holes, drop speckle. morphologyEx widens the
+    # dtype, so re-narrow to uint8 to keep `mask` a clean 0/255 single-byte mask.
     k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k, iterations=2)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, k, iterations=1)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k, iterations=2).astype(np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, k, iterations=1).astype(np.uint8)
 
-    # Keep the largest connected component (the loco), discard stray blobs.
+    # Keep the largest connected component (the subject), discard stray blobs.
     n, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
     if n > 1:
         largest = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
@@ -220,9 +234,9 @@ def depth_pseudo(rgb: np.ndarray, mask: np.ndarray) -> np.ndarray:
     Heuristic blend (each in 0..1), only where mask is set:
       - shading/luminance: lit (brighter) surfaces tend to face the camera -> nearer.
       - distance-from-mask-edge: the central bulk of the body is nearer than the
-        thin extremities (chimney, buffers) at the silhouette edge.
-      - vertical bias: very mild -- lower pixels (running gear/footplate) slightly
-        nearer than the high background-ward cab roof for a side elevation.
+        thin extremities at the silhouette edge (e.g. a locomotive's chimney/buffers).
+      - vertical bias: very mild -- lower pixels slightly nearer than the high
+        background-ward top for a side elevation (e.g. a loco's footplate vs cab roof).
     This is NOT metric; it only gives a plausible relative ordering for the critic
     and for proportion sanity-checks. Background is 0 (black).
     """
@@ -336,7 +350,7 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    p.add_argument("image", help="path to the reference photo")
+    p.add_argument("image", help="path to the reference photo of the subject to mask")
     p.add_argument("--out-dir", default=str(default_out),
                    help="output directory (default: this script's dir)")
     p.add_argument("--mask-name", default="mask.png")

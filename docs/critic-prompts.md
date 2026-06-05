@@ -14,8 +14,9 @@ Placeholders use `{curly}` braces. Fill them in before sending:
 | `{target}`       | target IoU threshold (e.g. `0.93`)                                   |
 | `{phase}`        | current coarse->fine phase name (see "Layered matching order")       |
 | `{allowed}`      | comma-separated list of `constants.scad` params the critic may edit |
+| `{features}`     | the caller's feature vocabulary — the named regions the critic may cite (subject-specific; e.g. for a locomotive: `funnel,boiler,cab,pilot,smokebox,dome_front,dome_rear,runningboard,buffer`) |
 | `{changelog}`    | the running changelog block (see "Changelog line format")           |
-| `{per_feature}`  | optional per-feature IoU vector, e.g. `funnel:0.71 boiler:0.95 ...`  |
+| `{per_feature}`  | optional per-feature IoU vector, e.g. `featA:0.71 featB:0.95 ...` (for a locomotive: `funnel:0.71 boiler:0.95 ...`) |
 
 The three images the critic always receives:
 1. **OVERLAY** — REFERENCE silhouette in RED, current RENDER silhouette in
@@ -33,11 +34,12 @@ top entry. (Report §3.3: "ranked numeric-delta diffs".)
 
 ```
 You are a CAD silhouette critic. You see an OVERLAY image: the REFERENCE
-locomotive outline in RED, the current RENDER outline in CYAN, matched regions
+subject outline in RED, the current RENDER outline in CYAN, matched regions
 in GREY. You also see an EDGE-OVERLAY (red=reference edges, cyan=render edges).
 
 Current silhouette IoU: {iou}.  Target IoU: {target}.
 Current phase: {phase}.  You may ONLY edit these params: {allowed}.
+Name features only from this vocabulary: {features}.
 
 TASK: List the TOP 3 mismatches between RENDER and REFERENCE. For each, output
 one row of strict JSON in an array, sorted by visual magnitude (largest first):
@@ -45,7 +47,7 @@ one row of strict JSON in an array, sorted by visual magnitude (largest first):
 [
   {
     "rank": 1,
-    "feature":  "<funnel|boiler|cab|pilot|smokebox|dome_front|dome_rear|runningboard|buffer>",
+    "feature":  "<one of {features}>",
     "param":    "<exact name in constants.scad, MUST be in the allowed list>",
     "current":  <number>,
     "target":   <number>,
@@ -77,12 +79,13 @@ token.
 
 ```
 You are a CAD silhouette critic. You see an OVERLAY image: the REFERENCE
-locomotive outline in RED, the current RENDER outline in CYAN, matched regions
+subject outline in RED, the current RENDER outline in CYAN, matched regions
 in GREY. You also see an EDGE-OVERLAY (red=reference edges, cyan=render edges)
 and a CHANGELOG of prior edits with their score impact.
 
 Current silhouette IoU: {iou}.  Target IoU: {target}.
 Current phase: {phase}.  You may ONLY edit these params: {allowed}.
+Name features only from this vocabulary: {features}.
 
 CHANGELOG (do NOT propose a move already marked 'reverted'; do NOT undo a move
 marked 'OK'):
@@ -91,7 +94,7 @@ marked 'OK'):
 TASK: Propose exactly ONE parameter edit that will most increase IoU. Output
 strict JSON:
 {
-  "feature":    "<funnel|boiler|cab|pilot|smokebox|dome_front|dome_rear|runningboard|buffer>",
+  "feature":    "<one of {features}>",
   "param":      "<exact name in constants.scad, MUST be in the allowed list>",
   "current":    <number>,
   "target":     <number>,
@@ -135,11 +138,12 @@ EDGE-OVERLAY shows red reference edges vs cyan render edges.
 
 Current silhouette IoU: {iou}.  Target IoU: {target}.
 Current phase: {phase}.  You may ONLY edit these params: {allowed}.
+Name features and regions only from this vocabulary: {features}.
 Per-feature IoU (lower = worse, fix the worst you are allowed to touch):
 {per_feature}
 
 STEP 1 — Localise: name the ONE region with the largest contiguous colour bleed
-and state its direction. Examples of valid reasoning:
+and state its direction. Examples of valid reasoning (for a locomotive subject):
   "Cyan sticks out ABOVE the funnel by ~6 mm -> funnel too tall."
   "Red band along the LOWER boiler -> render boiler diameter too small there."
   "Cyan wedge ahead of the smokebox -> pilot/buffer beam projects too far front."
@@ -148,9 +152,9 @@ STEP 2 — Map that region to exactly ONE allowed param and a signed delta in mm
 
 Output strict JSON:
 {
-  "region":     "<funnel-top|boiler-lower|cab-rear|pilot-front|dome_front|dome_rear|runningboard|buffer>",
+  "region":     "<a region of one of {features}, e.g. funnel-top|boiler-lower>",
   "bleed":      "<CYAN_EXTRA|RED_MISSING>",
-  "feature":    "<funnel|boiler|cab|pilot|smokebox|dome_front|dome_rear|runningboard|buffer>",
+  "feature":    "<one of {features}>",
   "param":      "<exact constants.scad name, MUST be in the allowed list>",
   "current":    <number>,
   "target":     <number>,
@@ -193,7 +197,8 @@ Canonical line:
 | `gate FAIL reverted`    | improved IoU but broke manifold/consistency/printability       | `stale += 1`               |
 | `INVALID RENDER reverted` | render errored / blank mask (zero-reward anchor) — rolled back | `stale += 1`             |
 
-Worked examples (verbatim format the loop produces):
+Worked examples (verbatim format the loop produces; the param names are illustrative
+— a locomotive subject — the format is subject-agnostic):
 
 ```
 boiler_d 56->60: IoU 0.812->0.871 OK
@@ -282,9 +287,14 @@ monotonic loop above, but the critic's `{allowed}` set lists **only** that
 phase's params — lower phases stay frozen so each monotonic step stays
 meaningful. A final unfrozen polish round escapes ordering artifacts.
 
-| Phase | Name              | What it nails                          | Params (`{allowed}`)                                                                                  |
+The phase contents below are a worked example for a **locomotive** subject; the
+*ordering principle* (bounding box -> major masses -> landmarks -> fine details)
+is subject-agnostic. For a different subject, the caller supplies its own params
+per phase from its `constants.scad` and `{features}` vocabulary.
+
+| Phase | Name              | What it nails                          | Params (`{allowed}`) — locomotive example                                                             |
 |-------|-------------------|----------------------------------------|------------------------------------------------------------------------------------------------------|
-| 1     | Bounding box      | loco fills the same frame (biggest IoU)| `total_length`, `total_height`, `baseline_z`                                                          |
+| 1     | Bounding box      | subject fills the same frame (biggest IoU)| `total_length`, `total_height`, `baseline_z`                                                       |
 | 2     | Major masses      | gross silhouette shape                  | `boiler_len`, `boiler_d`, `cab_len`, `cab_h`, `smokebox_len`                                          |
 | 3     | Landmark features | funnel, domes, buffers, running board   | `funnel_frac`, `funnel_h`, `funnel_flare`, `dome_f_frac`, `dome_r_frac`, `dome_d`, `pilot_h`, `buffer_z` |
 | 4     | Fine details      | window, beading, headlight, chamfers    | `cab_window_w`, `cab_window_h`, `beading_r`, `headlight_x`                                            |
