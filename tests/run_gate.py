@@ -2,6 +2,7 @@
 
 Invoked by the `test` command through pyrun so ruff/pytest/mypy resolve via the same
 .venv/uv/system tiers as every other python tool. Extra argv is forwarded to pytest.
+Pytest covers unit tests, CLI smoke tests, and any e2e tests under tests/e2e/.
 """
 from __future__ import annotations
 
@@ -21,7 +22,7 @@ def main(argv: list[str]) -> int:
         cwd=root, env=env,
     ).returncode
 
-    print("=== pytest ===", flush=True)
+    print("=== pytest (unit + CLI smoke + e2e) ===", flush=True)
     rc_pytest = subprocess.run(
         [sys.executable, "-m", "pytest", os.path.join(root, "tests"), *argv],
         cwd=root, env=env,

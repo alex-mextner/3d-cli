@@ -1,6 +1,6 @@
 # `3d test` — run the test gate
 
-Runs the project's test suite: `ruff check lib/ tests/`, then `pytest` (unit tests + CLI smoke harness), then `mypy` (type checking over `bin/3d + lib/ + tests/`). All three must pass for exit 0.
+Runs the project's test suite: `ruff check lib/ tests/`, then `pytest` (unit tests + CLI smoke harness + e2e tests), then `mypy` (type checking over `bin/3d + lib/ + tests/`). All three must pass for exit 0.
 
 **Why it exists.** The CLI is a single codebase with many moving parts (registry, pyrun, imaging, gates). A single `3d test` command guarantees that new commands, aliases, and refactors do not break the help surface, lint gate, or type system.
 

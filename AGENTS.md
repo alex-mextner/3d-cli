@@ -66,10 +66,14 @@ orchestration + the pure score math).
 ```
 
 Unit tests live in `tests/` (registry/alias resolution, errors formatting, score IoU/AE
-math, param parsing, env helpers). `tests/test_cli_smoke.py` runs `3d <cmd> --help` for
-EVERY registered command and the safe commands on `examples/cube.scad` (skipping when a
-tool is absent). `tests/test_imports.py` enforces the stdlib-only rule. `3d test` also runs
-ruff over `lib/ + tests/` and mypy over `bin/3d + lib/ + tests/` — keep both clean.
+math, param parsing, env helpers). User-visible command behavior must also have e2e
+coverage that calls `bin/3d`: every new command, flag, alias, shell-facing workflow, and
+docs/help behavior needs at least one e2e test. Unit tests are still required for pure
+logic. `tests/test_cli_smoke.py` runs `3d <cmd> --help` for EVERY registered command and
+the safe commands on `examples/cube.scad` (skipping when a tool is absent). `tests/e2e/`
+is part of the normal pytest sweep run by `3d test`; do not maintain a separate matrix.
+`tests/test_imports.py` enforces the stdlib-only rule. `3d test` also runs ruff over
+`lib/ + tests/` and mypy over `bin/3d + lib/ + tests/` — keep both clean.
 
 ## Engineering conventions
 
