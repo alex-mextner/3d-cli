@@ -911,15 +911,23 @@ behavior.
 1. Integrate the `roadmap/spatial-fit-experiments` branch only after rebasing it
    onto current `main` and replacing any misleading proof wording. Current
    status: useful experimental harness, not production success.
-2. Integrate or supersede `roadmap/fit-camera-proof`. Current status: three
-   commits ahead of old `origin/main`, behind current `main`, plus dirty
-   `ROADMAP.md`; Pantheon remains diagnostic/failure, not a success proof.
-3. Finish boundary-first `fit-camera` as a command feature: same-frame render,
-   original reference, overlay, metrics JSON, and warning/failure status must be
-   emitted by the normal CLI path.
-4. Make JSON schema include true contour distance metrics and distinguish area
-   IoU, SSIM, SDF loss, symmetric Chamfer, p95 miss, and diagnostic warnings.
-5. Add negative tests where area IoU is misleading but boundary metrics fail.
+2. `roadmap/fit-camera-proof` is superseded for merge purposes. The safe part
+   landed in `main` as `014dd80` (`fit-camera: add fail-closed proof status`):
+   durable `fit_status`, `diagnostic_only`, warnings, proof-mode spatial
+   reports, binary-mask proof-reference downgrade, contour-first status
+   classification, and e2e coverage. Do not merge the old branch wholesale; it
+   was based on an older command surface and includes experimental code that
+   conflicts with current `main`.
+3. Remaining ideas from the old branch should be reimplemented only as fresh
+   experiments if needed: `--view-prior`, `--az-range`, richer pose-equivalence
+   diagnostics, and candidate-evolution media. These are not accepted proof
+   until visual reference/render panels and boundary metrics pass.
+4. Finish boundary-first `fit-camera` as a reliable fitter, not only as a
+   fail-closed reporter. The normal CLI path now emits same-frame render,
+   original reference, overlay, metrics JSON, and status, but the fitter still
+   needs stronger search/spatial priors before success can be claimed.
+5. Add more negative tests where area IoU is misleading but boundary metrics
+   fail.
 6. Run synthetic hidden-camera proof with source reference included and without
    giving the hidden camera to the fitter.
 7. Run real-reference experiments as negative controls until proof panels look
