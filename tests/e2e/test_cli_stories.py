@@ -504,6 +504,56 @@ def test_user_imports_external_meshes_into_an_openscad_workflow(tmp_path: Path) 
     assert "Traceback" not in wrapped.stderr + planned.stderr
 
 
+def test_user_plans_export_formats_before_converter_work(tmp_path: Path) -> None:
+    """Export planning shows supported outputs and future converter paths without rendering."""
+    listed = _run_3d(tmp_path, "export", "--list-formats")
+
+    assert listed.returncode == 0, listed.stderr
+    assert "3d export formats" in listed.stdout
+    assert "usdz" in listed.stdout
+    assert "supported" in listed.stdout
+    assert "glb" in listed.stdout
+    assert "planned" in listed.stdout
+
+    planned = _run_3d(tmp_path, "export", str(CUBE), "--plan", "--format", "glb")
+
+    assert planned.returncode == 0, planned.stderr
+    assert "3d export plan" in planned.stdout
+    assert "format: glb (planned)" in planned.stdout
+    assert "GLB export is planned" in planned.stdout
+
+    list_cmd = " ".join(
+        shlex.quote(part)
+        for part in (
+            sys.executable,
+            str(THREED),
+            "export",
+            "--list-formats",
+        )
+    )
+    count_cmd = " ".join(
+        shlex.quote(part)
+        for part in (
+            sys.executable,
+            "-c",
+            "import sys; print(sum(1 for line in sys.stdin if 'planned' in line))",
+        )
+    )
+    piped = subprocess.run(
+        f"{list_cmd} | {count_cmd}",
+        cwd=REPO_ROOT,
+        env=_story_env(tmp_path),
+        capture_output=True,
+        text=True,
+        shell=True,
+        timeout=15,
+    )
+
+    assert piped.returncode == 0, piped.stderr
+    assert int(piped.stdout.strip()) >= 7
+    assert "Traceback" not in listed.stderr + planned.stderr + piped.stderr
+
+
 def test_user_gets_actionable_import_errors_for_unwrappable_formats(tmp_path: Path) -> None:
     """Import explains when a model needs conversion before OpenSCAD can wrap it."""
     obj = tmp_path / "scan.obj"

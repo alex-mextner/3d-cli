@@ -25,6 +25,7 @@ def test_render_usage_keeps_section_headers_and_options_aligned() -> None:
 def test_updated_help_examples_are_reflected_in_command_docs() -> None:
     expected = {
         "doctor": ("3d doctor | grep MISSING", "run before CI"),
+        "export": ("3d export --list-formats", "3d export model.scad --plan --format glb"),
         "init": ("anchors:", "gates:"),
         "lint": (
             "3d lint bracket.scad --strict --error naming/id-kebab",

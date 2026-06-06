@@ -38,6 +38,7 @@ rendering, slicing support, and verification:
 - `collision_viz.py`
 - `fit_camera.py`
 - `frame_check.py`
+- `export_formats.py`
 - `import_formats.py`
 - `mesh_check.py`
 - `packing.py`
@@ -130,6 +131,7 @@ Every current root Python module is listed here so future additions are intentio
 - `errors.py` — structured CLI error model.
 - `events.py` — append-only CLI/model workflow event store.
 - `extract_params.py` — OpenSCAD parameter extraction.
+- `export_formats.py` — export format registry, selector parsing, and dry-run export planning.
 - `fit_camera.py` — camera fitting implementation.
 - `frame_check.py` — render framing checks.
 - `hardware.py` — local machine and toolchain capability reporting.
