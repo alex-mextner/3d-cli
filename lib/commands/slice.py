@@ -12,6 +12,7 @@ WHY: slicing is the bridge between the designed model and the physical printer. 
 Examples:
   3d slice part.stl -o part.gcode
   3d slice part.scad --dry-run
+  3d slice part.3mf --printer bambu-a1 --material pla --dry-run
   3d slice part.3mf --profile "machine.json,process.json,filament.json"
   3d slice --list-profiles
 
@@ -45,6 +46,18 @@ PROFILE_EXPORT_STEPS = (
     "then use the GUI's export config/export preset action and pass the exported .json/.ini file(s) to --profile."
 )
 
+AUTO_PROFILE_PRINTERS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
+    "bambu-a1": (("bambu", "a1"), ("mini",)),
+    "bambu-lab-a1": (("bambu", "a1"), ("mini",)),
+}
+AUTO_PROFILE_MATERIALS = {"pla": ("pla",), "petg": ("petg",)}
+AUTO_PROFILE_ALL_MATERIAL_TERMS = ("pla", "petg", "abs", "asa", "tpu", "pc", "pa", "nylon", "hips", "pva")
+AUTO_PROFILE_ACCEPTED = (
+    "--printer bambu-a1|\"Bambu Lab A1\" --material pla with discoverable machine/process/filament profiles",
+    "--printer bambu-a1|\"Bambu Lab A1\" --material petg with discoverable machine/process/filament profiles",
+    "--profile machine.json,process.json,filament.json",
+)
+
 USAGE = """3d slice <model.stl|.3mf|.scad> [options]
   Slice a model to G-code with the installed slicer (OrcaSlicer > Bambu Studio >
   PrusaSlicer; auto-detected on PATH and macOS app bundles). A .scad input is
@@ -64,6 +77,9 @@ Options:
                         speeds, supports, infill; filament = material temperatures/flow.
   --printer NAME        printer/machine preset name (best-effort, slicer-flag
                         UNVERIFIED). Prefer explicit --profile files for repeatability.
+  --material NAME       material for default profile auto-pick. Supported today:
+                        pla, petg with --printer bambu-a1. Defaults to pla when
+                        --printer bambu-a1 is used without --profile.
   -D k=v                pass-through define for .scad export (repeatable)
 
 Profile export/remediation:
@@ -76,6 +92,7 @@ Env: SLICER=/path/to/binary forces a specific slicer.
 Examples:
   3d slice part.stl -o part.gcode
   3d slice part.scad --dry-run
+  3d slice part.3mf --printer bambu-a1 --material pla --dry-run
   3d slice part.3mf --profile "machine.json,process.json,filament.json"
   3d slice --list-profiles"""
 
@@ -86,6 +103,7 @@ class _Options:
     out: str
     printer: str
     profile: str
+    material: str
     dry_run: bool
     defs: list[str]
 
@@ -128,7 +146,8 @@ def run(argv: list[str]) -> int:
 
     opts = _parse(argv)
     _validate_input(opts.inp)
-    _validate_profiles(opts.profile)
+    if opts.profile:
+        _validate_profiles(opts.profile)
 
     sl = _find_slicer()
     if sl is None:
@@ -139,6 +158,8 @@ def run(argv: list[str]) -> int:
             command="slice",
         )
     slicer_kind, slicer_bin = sl
+    profile = opts.profile or _resolve_profile(opts)
+    _validate_profiles(profile)
 
     tmpdir = tempfile.mkdtemp(prefix="3dslice.")
     log = tempfile.mktemp(prefix="3dslicelog.")
@@ -151,12 +172,14 @@ def run(argv: list[str]) -> int:
         print(f"slice: {os.path.basename(opts.inp)}  via {slicer_kind}  ({slicer_bin})")
         note = "   (--dry-run: verify only, G-code discarded)" if opts.dry_run else ""
         extra = (f"   printer={opts.printer}" if opts.printer else "") + (
-            f"   profile={opts.profile}" if opts.profile else ""
+            f"   material={opts.material}" if opts.material else ""
+        ) + (
+            f"   profile={profile}" if profile else ""
         )
         print(f"  -> {final_out}{note}{extra}")
         print("================================================================")
 
-        rc = _run_slicer(slicer_kind, slicer_bin, work_input, tmpdir, prusa_out, opts, log)
+        rc = _run_slicer(slicer_kind, slicer_bin, work_input, tmpdir, prusa_out, opts, profile, log)
         produced = _find_produced_gcode(tmpdir, prusa_out) if rc == 0 else ""
         log_text = _read_log(log)
         _print_log_tail(log_text)
@@ -201,6 +224,7 @@ def _parse(argv: list[str]) -> _Options:
     out = ""
     printer = ""
     profile = ""
+    material = ""
     dry_run = False
     defs: list[str] = []
     rest = argv[1:]
@@ -212,6 +236,9 @@ def _parse(argv: list[str]) -> _Options:
             i += 2
         elif a == "--printer":
             printer = _value(rest, i, a)
+            i += 2
+        elif a == "--material":
+            material = _value(rest, i, a).lower()
             i += 2
         elif a == "--profile":
             profile = _normalize_profiles(_value(rest, i, a))
@@ -231,7 +258,7 @@ def _parse(argv: list[str]) -> _Options:
         else:
             print(USAGE)
             raise UsageError(f"unknown option '{a}'", command="slice")
-    return _Options(inp=inp, out=out, printer=printer, profile=profile, dry_run=dry_run, defs=defs)
+    return _Options(inp=inp, out=out, printer=printer, profile=profile, material=material, dry_run=dry_run, defs=defs)
 
 
 def _value(args: list[str], index: int, flag: str) -> str:
@@ -265,6 +292,156 @@ def _normalize_profiles(profile: str) -> str:
     return ",".join(part.strip() for part in profile.split(","))
 
 
+def _normalize_selector(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", value.strip().lower()).strip("-")
+
+
+def _resolve_profile(opts: _Options) -> str:
+    if opts.profile:
+        return opts.profile
+    printer_key = _normalize_selector(opts.printer)
+    if not printer_key:
+        if opts.material:
+            raise UsageError(
+                "--material currently drives profile auto-pick and needs --printer bambu-a1",
+                command="slice",
+                remediation=[
+                    "Pass --printer bambu-a1 --material pla|petg, or pass explicit --profile files."
+                ],
+            )
+        return ""
+    if printer_key not in AUTO_PROFILE_PRINTERS:
+        if opts.material:
+            raise InvalidArgument(
+                "--printer",
+                opts.printer,
+                sorted(AUTO_PROFILE_PRINTERS),
+                command="slice",
+                extra="--material auto-pick is supported only with --printer bambu-a1; otherwise pass explicit --profile files.",
+            )
+        return ""
+
+    material_key = _normalize_selector(opts.material or "pla")
+    if material_key not in AUTO_PROFILE_MATERIALS:
+        raise InvalidArgument("--material", opts.material, sorted(AUTO_PROFILE_MATERIALS), command="slice")
+
+    selected = _auto_pick_profiles(printer_key, material_key)
+    if selected:
+        print(f"slice: auto-picked {printer_key}/{material_key} profiles: {selected}")
+        return selected
+
+    raise InvalidArgument(
+        "--profile",
+        f"auto for --printer {opts.printer} --material {material_key}",
+        AUTO_PROFILE_ACCEPTED,
+        command="slice",
+        extra=(
+            f"{PROFILE_EXPORT_STEPS} Put the machine/process/filament .json/.ini files in ./profiles/ "
+            "or pass them explicitly with --profile."
+        ),
+    )
+
+
+def _auto_pick_profiles(printer_key: str, material_key: str) -> str:
+    profiles = _discover_profiles()
+    if not profiles:
+        return ""
+    printer_terms, excluded_terms = AUTO_PROFILE_PRINTERS[printer_key]
+    material_terms = AUTO_PROFILE_MATERIALS[material_key]
+    picks = {
+        "machine": _best_profile(profiles, "machine", printer_terms, excluded_terms, material_terms),
+        "process": _best_profile(profiles, "process", printer_terms, excluded_terms, material_terms),
+        "filament": _best_profile(profiles, "filament", printer_terms, excluded_terms, material_terms),
+    }
+    if any(path is None for path in picks.values()):
+        return ""
+    picked = [path for path in picks.values() if path is not None]
+    if len(set(picked)) != len(picked):
+        return ""
+    return ",".join(picks[role] or "" for role in ("machine", "process", "filament"))
+
+
+def _best_profile(
+    profiles: list[str],
+    role: str,
+    printer_terms: tuple[str, ...],
+    excluded_terms: tuple[str, ...],
+    material_terms: tuple[str, ...],
+) -> str | None:
+    scored: list[tuple[int, str]] = []
+    for path in profiles:
+        score = _profile_score(path, role, printer_terms, excluded_terms, material_terms)
+        if score > 0:
+            scored.append((score, path))
+    if not scored:
+        return None
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    return scored[0][1]
+
+
+def _profile_score(
+    path: str,
+    role: str,
+    printer_terms: tuple[str, ...],
+    excluded_terms: tuple[str, ...],
+    material_terms: tuple[str, ...],
+) -> int:
+    haystack = _profile_haystack(path)
+    if any(term in haystack for term in excluded_terms):
+        return 0
+    score = 0
+    if role == "machine":
+        if not all(term in haystack for term in printer_terms):
+            return 0
+        if any(term in haystack for term in ("filament", "material", "process")):
+            return 0
+        score += 30
+        score += 10 if any(term in haystack for term in ("machine", "printer", "nozzle")) else 0
+    elif role == "process":
+        if not _matches_process_printer(haystack, printer_terms):
+            return 0
+        if any(term not in material_terms and term in haystack for term in AUTO_PROFILE_ALL_MATERIAL_TERMS):
+            return 0
+        if any(term in haystack for term in ("filament", "material", "machine", "printer", "nozzle")):
+            return 0
+        score += 30
+        score += 15 if any(term in haystack for term in ("process", "print", "quality", "standard", "layer")) else 0
+        score += 8 if any(term in haystack for term in material_terms) else 0
+        score += 5 if "0-2" in haystack or "0-20" in haystack or "0-20mm" in haystack else 0
+    elif role == "filament":
+        if not any(term in haystack for term in material_terms):
+            return 0
+        if any(term in haystack for term in ("machine", "printer", "process")):
+            return 0
+        score += 25
+        score += 10 if any(term in haystack for term in ("filament", "material")) else 0
+    else:
+        return 0
+    return score
+
+
+def _profile_haystack(path: str) -> str:
+    parts = _profile_haystack_parts(path)
+    if parts:
+        parts[-1] = os.path.splitext(parts[-1])[0]
+    return re.sub(r"[^a-z0-9]+", "-", " ".join(parts).lower())
+
+
+def _profile_haystack_parts(path: str) -> list[str]:
+    parts = [part for part in os.path.normpath(path).split(os.sep) if part]
+    lowered = [part.lower() for part in parts]
+    for marker in ("profiles", "slicer_profiles", "slicer"):
+        if marker in lowered:
+            return parts[lowered.index(marker) + 1 :]
+    return parts[-3:]
+
+
+def _matches_process_printer(haystack: str, printer_terms: tuple[str, ...]) -> bool:
+    if all(term in haystack for term in printer_terms):
+        return True
+    return "bbl" in haystack and "a1" in haystack
+
+
 def _prepare_input(inp: str, defs: list[str], tmpdir: str) -> str:
     ext = inp.rsplit(".", 1)[-1].lower() if "." in inp else ""
     if ext != "scad":
@@ -292,18 +469,33 @@ def _run_slicer(
     outdir: str,
     prusa_out: str,
     opts: _Options,
+    profile: str,
     log: str,
 ) -> int:
+    auto_profile = profile and not opts.profile and _normalize_selector(opts.printer) in AUTO_PROFILE_PRINTERS
+    if auto_profile and _is_prusa_like_slicer(slicer_kind, slicer_bin):
+        raise InvalidArgument(
+            "--printer",
+            opts.printer,
+            AUTO_PROFILE_ACCEPTED,
+            command="slice",
+            extra="Bambu A1 profile auto-pick requires OrcaSlicer or Bambu Studio; with PrusaSlicer pass explicit .ini profiles via --profile.",
+        )
+    printer_arg = "" if auto_profile else opts.printer
     if slicer_kind == "prusa":
-        return _slice_prusa(slicer_bin, work_input, prusa_out, opts.profile, opts.printer, log)
+        return _slice_prusa(slicer_bin, work_input, prusa_out, profile, printer_arg, log)
     if slicer_kind in ("orca", "bambu"):
-        return _slice_orca(slicer_bin, work_input, outdir, opts.profile, opts.printer, log)
+        return _slice_orca(slicer_bin, work_input, outdir, profile, printer_arg, log)
     if slicer_kind == "custom":
-        rc = _slice_prusa(slicer_bin, work_input, prusa_out, opts.profile, opts.printer, log)
+        rc = _slice_prusa(slicer_bin, work_input, prusa_out, profile, printer_arg, log)
         if rc == 0:
             return rc
-        return _slice_orca(slicer_bin, work_input, outdir, opts.profile, opts.printer, log)
+        return _slice_orca(slicer_bin, work_input, outdir, profile, printer_arg, log)
     raise InvalidArgument("slicer kind", slicer_kind, ["orca", "bambu", "prusa", "custom"], command="slice")
+
+
+def _is_prusa_like_slicer(slicer_kind: str, slicer_bin: str) -> bool:
+    return slicer_kind == "prusa" or "prusa" in os.path.basename(slicer_bin).lower()
 
 
 def _find_produced_gcode(tmpdir: str, prusa_out: str) -> str:
@@ -359,6 +551,7 @@ def _print_profiles() -> None:
         print("No slicer profile files found.")
         print(f"  {PROFILE_EXPORT_STEPS}")
         print("  Put exported .ini/.json files in ./profiles/ or pass their paths to --profile.")
+        print("  For Bambu A1, 3d can auto-pick: --printer bambu-a1 --material pla|petg.")
         return
 
     print("Available .ini/.json profile files:")
@@ -367,6 +560,7 @@ def _print_profiles() -> None:
         shown = os.path.relpath(p, cwd) if _is_inside(p, cwd) else p
         print(f"  {shown}")
     print("Use comma-separated machine/process/filament files with --profile when your slicer needs them.")
+    print("Bambu A1 shortcut: --printer bambu-a1 --material pla|petg auto-picks matching profiles.")
 
 
 def _discover_profiles() -> list[str]:

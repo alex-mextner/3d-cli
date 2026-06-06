@@ -18,6 +18,7 @@ Sends a model ([`.stl`](GLOSSARY.md#stl), [`.3mf`](GLOSSARY.md#3mf), or `.scad`)
 | `--list-profiles` | — | List slicer profile files 3d can see, then exit. |
 | `--profile FILES` | — | Slicer config file(s). `.ini` for PrusaSlicer; `.json` for OrcaSlicer / Bambu Studio. Comma-separated files for machine/process/filament profiles. |
 | `--printer NAME` | — | Printer/machine preset name (best-effort, slicer-flag unverified). Prefer explicit `--profile` files for repeatability. |
+| `--material NAME` | `pla` for `--printer bambu-a1` auto-pick | Material selector for default profile auto-pick. Supported today: `pla`, `petg` with `--printer bambu-a1`. |
 | `-D k=v` | — | Pass-through define for `.scad` export (repeatable) |
 
 ### Profile export steps
@@ -27,9 +28,15 @@ In the slicer GUI, choose the printer, process, and filament/material presets, t
 ```bash
 3d slice part.stl -o part.gcode
 3d slice part.scad --dry-run
+3d slice part.3mf --printer bambu-a1 --material pla --dry-run
 3d slice part.3mf --profile "machine.json,process.json,filament.json"
 3d slice --list-profiles
 ```
+
+For Bambu A1, if `--profile` is omitted, `3d slice --printer bambu-a1 --material pla|petg`
+searches project and installed-slicer profile folders for a complete machine/process/filament
+set and passes those files to the slicer. If any piece is missing, the error explains which
+forms are accepted and how to export the profiles from the slicer GUI.
 
 ## Environment
 

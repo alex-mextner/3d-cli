@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from errors import GateFailure, InvalidArgument
+from errors import GateFailure, InvalidArgument, MissingDependency
 
 
 def _fake_slicer(tmp_path: Path) -> Path:
@@ -43,6 +43,8 @@ def test_help_explains_dry_run_and_profiles(capsys: pytest.CaptureFixture[str]) 
     assert "--dry-run" in out
     assert "--check" in out and "deprecated" in out
     assert "--list-profiles" in out
+    assert "--material" in out
+    assert "bambu-a1" in out
     assert "machine" in out
     assert "process" in out
     assert "filament" in out
@@ -107,6 +109,7 @@ def test_list_profiles_reports_empty_result_without_slicer(
     assert "No slicer profile files found" in out
     assert "machine/process/filament" in out
     assert "export config" in out
+    assert "--printer bambu-a1 --material pla|petg" in out
 
 
 def test_list_profiles_reports_project_profiles(
@@ -131,6 +134,498 @@ def test_list_profiles_reports_project_profiles(
     assert "profiles/machine.json" in out
     assert "profiles/process.ini" in out
     assert "notes.txt" not in out
+    assert "Bambu A1 shortcut" in out
+
+
+def test_auto_picks_bambu_a1_pla_profiles(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import json
+
+    import commands.slice as slice_cmd
+
+    model = tmp_path / "part.3mf"
+    profiles = tmp_path / "profiles"
+    machine = profiles / "Bambu A1 machine.json"
+    process = profiles / "Bambu A1 0.20mm Standard process.json"
+    filament = profiles / "Generic PLA filament.json"
+    arg_log = tmp_path / "args.json"
+    model.write_text("3mf placeholder\n")
+    profiles.mkdir()
+    machine.write_text("{}")
+    process.write_text("{}")
+    filament.write_text("{}")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SLICER", str(_fake_slicer(tmp_path)))
+    monkeypatch.setenv("ARG_LOG", str(arg_log))
+    monkeypatch.setattr(slice_cmd, "_profile_roots", lambda: [str(profiles)])
+    monkeypatch.setattr(slice_cmd, "_find_slicer", lambda: ("orca", str(_fake_slicer(tmp_path))))
+
+    assert slice_cmd.run([str(model), "--dry-run", "--printer", "bambu-a1", "--material", "pla"]) == 0
+
+    args = json.loads(arg_log.read_text())
+    load_settings = args[args.index("--load-settings") + 1]
+    assert str(machine) in load_settings
+    assert str(process) in load_settings
+    assert str(filament) in load_settings
+    assert "bambu-a1" not in load_settings
+
+
+def test_auto_pick_reports_missing_slicer_before_missing_profiles(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import commands.slice as slice_cmd
+
+    model = tmp_path / "part.3mf"
+    profiles = tmp_path / "profiles"
+    model.write_text("3mf placeholder\n")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(slice_cmd, "_profile_roots", lambda: [str(profiles)])
+    monkeypatch.setattr(slice_cmd, "_find_slicer", lambda: None)
+
+    with pytest.raises(MissingDependency) as got:
+        slice_cmd.run([str(model), "--dry-run", "--printer", "bambu-a1", "--material", "pla"])
+
+    assert got.value.exit_code == 127
+    assert "slicer" in got.value.message
+
+
+def test_auto_pick_accepts_registry_style_bambu_lab_a1_name(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import json
+
+    import commands.slice as slice_cmd
+
+    model = tmp_path / "part.3mf"
+    profiles = tmp_path / "profiles"
+    machine = profiles / "Bambu A1 machine.json"
+    process = profiles / "Bambu A1 0.20mm Standard process.json"
+    filament = profiles / "Generic PETG filament.json"
+    arg_log = tmp_path / "args.json"
+    model.write_text("3mf placeholder\n")
+    profiles.mkdir()
+    machine.write_text("{}")
+    process.write_text("{}")
+    filament.write_text("{}")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ARG_LOG", str(arg_log))
+    monkeypatch.setattr(slice_cmd, "_profile_roots", lambda: [str(profiles)])
+    monkeypatch.setattr(slice_cmd, "_find_slicer", lambda: ("orca", str(_fake_slicer(tmp_path))))
+
+    assert slice_cmd.run([str(model), "--dry-run", "--printer", "Bambu Lab A1", "--material", "petg"]) == 0
+
+    args = json.loads(arg_log.read_text())
+    load_settings = args[args.index("--load-settings") + 1]
+    assert str(machine) in load_settings
+    assert str(process) in load_settings
+    assert str(filament) in load_settings
+
+
+def test_auto_pick_accepts_material_specific_process_profile(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import json
+
+    import commands.slice as slice_cmd
+
+    model = tmp_path / "part.3mf"
+    profiles = tmp_path / "profiles"
+    machine = profiles / "Bambu A1 machine.json"
+    process = profiles / "Bambu A1 PLA 0.20mm Standard process.json"
+    filament = profiles / "Generic PLA filament.json"
+    arg_log = tmp_path / "args.json"
+    model.write_text("3mf placeholder\n")
+    profiles.mkdir()
+    machine.write_text("{}")
+    process.write_text("{}")
+    filament.write_text("{}")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ARG_LOG", str(arg_log))
+    monkeypatch.setattr(slice_cmd, "_profile_roots", lambda: [str(profiles)])
+    monkeypatch.setattr(slice_cmd, "_find_slicer", lambda: ("orca", str(_fake_slicer(tmp_path))))
+
+    assert slice_cmd.run([str(model), "--dry-run", "--printer", "bambu-a1", "--material", "pla"]) == 0
+
+    args = json.loads(arg_log.read_text())
+    load_settings = args[args.index("--load-settings") + 1]
+    assert str(machine) in load_settings
+    assert str(process) in load_settings
+    assert str(filament) in load_settings
+
+
+def test_auto_pick_prefers_requested_material_process_profile(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import json
+
+    import commands.slice as slice_cmd
+
+    model = tmp_path / "part.3mf"
+    profiles = tmp_path / "profiles"
+    machine = profiles / "Bambu A1 machine.json"
+    pla_process = profiles / "Bambu A1 PLA 0.20mm Standard process.json"
+    petg_process = profiles / "Bambu A1 PETG 0.20mm Standard process.json"
+    filament = profiles / "Generic PLA filament.json"
+    arg_log = tmp_path / "args.json"
+    model.write_text("3mf placeholder\n")
+    profiles.mkdir()
+    machine.write_text("{}")
+    pla_process.write_text("{}")
+    petg_process.write_text("{}")
+    filament.write_text("{}")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ARG_LOG", str(arg_log))
+    monkeypatch.setattr(slice_cmd, "_profile_roots", lambda: [str(profiles)])
+    monkeypatch.setattr(slice_cmd, "_find_slicer", lambda: ("orca", str(_fake_slicer(tmp_path))))
+
+    assert slice_cmd.run([str(model), "--dry-run", "--printer", "bambu-a1", "--material", "pla"]) == 0
+
+    args = json.loads(arg_log.read_text())
+    load_settings = args[args.index("--load-settings") + 1]
+    assert str(pla_process) in load_settings
+    assert str(petg_process) not in load_settings
+
+
+def test_auto_pick_accepts_bbl_a1_process_profile_alias(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import json
+
+    import commands.slice as slice_cmd
+
+    model = tmp_path / "part.3mf"
+    profiles = tmp_path / "profiles"
+    machine = profiles / "Bambu A1 machine.json"
+    process = profiles / "0.20mm Standard @BBL A1.json"
+    filament = profiles / "Generic PLA filament.json"
+    arg_log = tmp_path / "args.json"
+    model.write_text("3mf placeholder\n")
+    profiles.mkdir()
+    machine.write_text("{}")
+    process.write_text("{}")
+    filament.write_text("{}")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ARG_LOG", str(arg_log))
+    monkeypatch.setattr(slice_cmd, "_profile_roots", lambda: [str(profiles)])
+    monkeypatch.setattr(slice_cmd, "_find_slicer", lambda: ("orca", str(_fake_slicer(tmp_path))))
+
+    assert slice_cmd.run([str(model), "--dry-run", "--printer", "bambu-a1", "--material", "pla"]) == 0
+
+    args = json.loads(arg_log.read_text())
+    load_settings = args[args.index("--load-settings") + 1]
+    assert str(machine) in load_settings
+    assert str(process) in load_settings
+    assert str(filament) in load_settings
+
+
+def test_auto_pick_scores_parent_profile_folders(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import json
+
+    import commands.slice as slice_cmd
+
+    model = tmp_path / "part.3mf"
+    profiles = tmp_path / "profiles"
+    machine = profiles / "machine" / "Bambu Lab A1" / "0.4 nozzle.json"
+    process = profiles / "BBL" / "process" / "Bambu Lab A1" / "0.20mm Standard.json"
+    filament = profiles / "filament" / "PLA" / "Generic.json"
+    arg_log = tmp_path / "args.json"
+    model.write_text("3mf placeholder\n")
+    machine.parent.mkdir(parents=True)
+    process.parent.mkdir(parents=True)
+    filament.parent.mkdir(parents=True)
+    machine.write_text("{}")
+    process.write_text("{}")
+    filament.write_text("{}")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ARG_LOG", str(arg_log))
+    monkeypatch.setattr(slice_cmd, "_profile_roots", lambda: [str(profiles)])
+    monkeypatch.setattr(slice_cmd, "_find_slicer", lambda: ("orca", str(_fake_slicer(tmp_path))))
+
+    assert slice_cmd.run([str(model), "--dry-run", "--printer", "bambu-a1", "--material", "pla"]) == 0
+
+    args = json.loads(arg_log.read_text())
+    load_settings = args[args.index("--load-settings") + 1]
+    assert str(machine) in load_settings
+    assert str(process) in load_settings
+    assert str(filament) in load_settings
+
+
+def test_auto_pick_ignores_material_word_outside_profiles_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import json
+
+    import commands.slice as slice_cmd
+
+    project = tmp_path / "material-project"
+    model = project / "part.3mf"
+    profiles = project / "profiles"
+    machine = profiles / "Bambu A1 machine.json"
+    process = profiles / "Bambu A1 0.20mm Standard process.json"
+    filament = profiles / "Generic PLA filament.json"
+    arg_log = tmp_path / "args.json"
+    profiles.mkdir(parents=True)
+    model.write_text("3mf placeholder\n")
+    machine.write_text("{}")
+    process.write_text("{}")
+    filament.write_text("{}")
+    monkeypatch.chdir(project)
+    monkeypatch.setenv("ARG_LOG", str(arg_log))
+    monkeypatch.setattr(slice_cmd, "_profile_roots", lambda: [str(profiles)])
+    monkeypatch.setattr(slice_cmd, "_find_slicer", lambda: ("orca", str(_fake_slicer(tmp_path))))
+
+    assert slice_cmd.run([str(model), "--dry-run", "--printer", "bambu-a1", "--material", "pla"]) == 0
+
+    args = json.loads(arg_log.read_text())
+    load_settings = args[args.index("--load-settings") + 1]
+    assert str(machine) in load_settings
+    assert str(process) in load_settings
+    assert str(filament) in load_settings
+
+
+def test_auto_pick_rejects_prusa_slicer_before_loading_json_profiles(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import commands.slice as slice_cmd
+
+    model = tmp_path / "part.3mf"
+    profiles = tmp_path / "profiles"
+    model.write_text("3mf placeholder\n")
+    profiles.mkdir()
+    (profiles / "Bambu A1 machine.json").write_text("{}")
+    (profiles / "Bambu A1 0.20mm Standard process.json").write_text("{}")
+    (profiles / "Generic PLA filament.json").write_text("{}")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(slice_cmd, "_profile_roots", lambda: [str(profiles)])
+    monkeypatch.setattr(slice_cmd, "_find_slicer", lambda: ("prusa", "/usr/bin/prusa-slicer"))
+
+    with pytest.raises(InvalidArgument) as got:
+        slice_cmd.run([str(model), "--dry-run", "--printer", "bambu-a1", "--material", "pla"])
+
+    assert got.value.flag == "--printer"
+    rendered = got.value.render(color=False)
+    assert "OrcaSlicer or Bambu Studio" in rendered
+    assert "explicit .ini profiles" in rendered
+
+
+def test_auto_pick_rejects_forced_custom_prusa_slicer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import commands.slice as slice_cmd
+
+    model = tmp_path / "part.3mf"
+    profiles = tmp_path / "profiles"
+    forced_prusa = tmp_path / "prusa-slicer"
+    model.write_text("3mf placeholder\n")
+    forced_prusa.write_text("#!/bin/sh\nexit 99\n")
+    forced_prusa.chmod(0o755)
+    profiles.mkdir()
+    (profiles / "Bambu A1 machine.json").write_text("{}")
+    (profiles / "Bambu A1 0.20mm Standard process.json").write_text("{}")
+    (profiles / "Generic PLA filament.json").write_text("{}")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(slice_cmd, "_profile_roots", lambda: [str(profiles)])
+    monkeypatch.setattr(slice_cmd, "_find_slicer", lambda: ("custom", str(forced_prusa)))
+
+    with pytest.raises(InvalidArgument) as got:
+        slice_cmd.run([str(model), "--dry-run", "--printer", "bambu-a1", "--material", "pla"])
+
+    rendered = got.value.render(color=False)
+    assert "OrcaSlicer or Bambu Studio" in rendered
+    assert "explicit .ini profiles" in rendered
+
+
+def test_auto_pick_rejects_process_for_unknown_other_material(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import commands.slice as slice_cmd
+
+    model = tmp_path / "part.3mf"
+    profiles = tmp_path / "profiles"
+    model.write_text("3mf placeholder\n")
+    profiles.mkdir()
+    (profiles / "Bambu A1 machine.json").write_text("{}")
+    (profiles / "Bambu A1 ABS 0.20mm Standard process.json").write_text("{}")
+    (profiles / "Generic PLA filament.json").write_text("{}")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(slice_cmd, "_profile_roots", lambda: [str(profiles)])
+    monkeypatch.setattr(slice_cmd, "_find_slicer", lambda: ("orca", "/usr/bin/orca-slicer"))
+
+    with pytest.raises(InvalidArgument) as got:
+        slice_cmd.run([str(model), "--dry-run", "--printer", "bambu-a1", "--material", "pla"])
+
+    assert "auto for --printer bambu-a1 --material pla" in got.value.message
+
+
+def test_auto_pick_rejects_a1_mini_profiles_for_full_a1(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import commands.slice as slice_cmd
+
+    model = tmp_path / "part.3mf"
+    profiles = tmp_path / "profiles"
+    model.write_text("3mf placeholder\n")
+    profiles.mkdir()
+    (profiles / "Bambu A1 mini machine.json").write_text("{}")
+    (profiles / "Bambu A1 mini 0.20mm Standard process.json").write_text("{}")
+    (profiles / "Generic PLA filament.json").write_text("{}")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(slice_cmd, "_profile_roots", lambda: [str(profiles)])
+    monkeypatch.setattr(slice_cmd, "_find_slicer", lambda: ("orca", "/usr/bin/orca-slicer"))
+
+    with pytest.raises(InvalidArgument) as got:
+        slice_cmd.run([str(model), "--dry-run", "--printer", "Bambu Lab A1", "--material", "pla"])
+
+    assert "auto for --printer Bambu Lab A1 --material pla" in got.value.message
+
+
+def test_auto_pick_requires_complete_bambu_a1_profile_set(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import commands.slice as slice_cmd
+
+    model = tmp_path / "part.3mf"
+    profiles = tmp_path / "profiles"
+    model.write_text("3mf placeholder\n")
+    profiles.mkdir()
+    (profiles / "Bambu A1 machine.json").write_text("{}")
+    (profiles / "Generic PLA filament.json").write_text("{}")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(slice_cmd, "_profile_roots", lambda: [str(profiles)])
+    monkeypatch.setattr(slice_cmd, "_find_slicer", lambda: ("orca", "/usr/bin/orca-slicer"))
+
+    with pytest.raises(InvalidArgument) as got:
+        slice_cmd.run([str(model), "--dry-run", "--printer", "bambu-a1", "--material", "pla"])
+
+    err = got.value
+    assert err.exit_code == 2
+    assert "--profile" in err.message
+    rendered = err.render(color=False)
+    assert "machine/process/filament" in rendered
+    assert "export config" in rendered
+
+
+def test_auto_pick_rejects_process_for_different_printer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import commands.slice as slice_cmd
+
+    model = tmp_path / "part.3mf"
+    profiles = tmp_path / "profiles"
+    model.write_text("3mf placeholder\n")
+    profiles.mkdir()
+    (profiles / "Bambu A1 machine.json").write_text("{}")
+    (profiles / "Bambu X1C 0.20mm Standard process.json").write_text("{}")
+    (profiles / "Generic PLA filament.json").write_text("{}")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(slice_cmd, "_profile_roots", lambda: [str(profiles)])
+    monkeypatch.setattr(slice_cmd, "_find_slicer", lambda: ("orca", "/usr/bin/orca-slicer"))
+
+    with pytest.raises(InvalidArgument) as got:
+        slice_cmd.run([str(model), "--dry-run", "--printer", "bambu-a1", "--material", "pla"])
+
+    assert "auto for --printer bambu-a1 --material pla" in got.value.message
+
+
+def test_auto_pick_does_not_reuse_process_as_machine(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import commands.slice as slice_cmd
+
+    model = tmp_path / "part.3mf"
+    profiles = tmp_path / "profiles"
+    model.write_text("3mf placeholder\n")
+    profiles.mkdir()
+    (profiles / "Bambu A1 0.20mm Standard process.json").write_text("{}")
+    (profiles / "Generic PLA filament.json").write_text("{}")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(slice_cmd, "_profile_roots", lambda: [str(profiles)])
+    monkeypatch.setattr(slice_cmd, "_find_slicer", lambda: ("orca", "/usr/bin/orca-slicer"))
+
+    with pytest.raises(InvalidArgument) as got:
+        slice_cmd.run([str(model), "--dry-run", "--printer", "bambu-a1", "--material", "pla"])
+
+    assert "auto for --printer bambu-a1 --material pla" in got.value.message
+
+
+def test_material_is_rejected_for_unsupported_printer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import commands.slice as slice_cmd
+
+    model = tmp_path / "part.stl"
+    model.write_text("solid part\nendsolid part\n")
+    monkeypatch.setattr(slice_cmd, "_find_slicer", lambda: ("orca", "/usr/bin/orca-slicer"))
+
+    with pytest.raises(InvalidArgument) as got:
+        slice_cmd.run([str(model), "--printer", "ender3", "--material", "petg", "--dry-run"])
+
+    assert got.value.flag == "--printer"
+    assert "bambu-a1" in got.value.render(color=False)
+
+
+def test_auto_pick_does_not_reuse_process_as_filament(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import commands.slice as slice_cmd
+
+    model = tmp_path / "part.3mf"
+    profiles = tmp_path / "profiles"
+    model.write_text("3mf placeholder\n")
+    profiles.mkdir()
+    (profiles / "Bambu A1 machine.json").write_text("{}")
+    (profiles / "Bambu A1 0.20mm Standard process.json").write_text("{}")
+    (profiles / "Bambu A1 PLA process.json").write_text("{}")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(slice_cmd, "_profile_roots", lambda: [str(profiles)])
+    monkeypatch.setattr(slice_cmd, "_find_slicer", lambda: ("orca", "/usr/bin/orca-slicer"))
+
+    with pytest.raises(InvalidArgument) as got:
+        slice_cmd.run([str(model), "--dry-run", "--printer", "bambu-a1", "--material", "pla"])
+
+    assert "auto for --printer bambu-a1 --material pla" in got.value.message
+
+
+def test_auto_pick_requires_distinct_profile_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import commands.slice as slice_cmd
+
+    model = tmp_path / "part.3mf"
+    profiles = tmp_path / "profiles"
+    model.write_text("3mf placeholder\n")
+    profiles.mkdir()
+    (profiles / "Bambu A1 PLA.json").write_text("{}")
+    (profiles / "Bambu A1 0.20mm Standard process.json").write_text("{}")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(slice_cmd, "_profile_roots", lambda: [str(profiles)])
+    monkeypatch.setattr(slice_cmd, "_find_slicer", lambda: ("orca", "/usr/bin/orca-slicer"))
+
+    with pytest.raises(InvalidArgument) as got:
+        slice_cmd.run([str(model), "--dry-run", "--printer", "bambu-a1", "--material", "pla"])
+
+    assert "auto for --printer bambu-a1 --material pla" in got.value.message
 
 
 def test_missing_profile_raises_structured_invalid_argument(tmp_path: Path) -> None:
