@@ -6,6 +6,8 @@ import json
 
 import pytest
 
+import printing as printing_mod
+from slicing import printing as slicing_printing
 from errors import InputNotFound, InvalidArgument, UsageError
 from printing import JobFields, ProfileFields, build_dry_run_plan, plan_to_json
 
@@ -57,6 +59,17 @@ def test_build_dry_run_plan_validates_fields_and_is_deterministic(isolated):
         "upload job",
         "start print",
     ]
+
+
+def test_root_printing_module_re_exports_slicing_core() -> None:
+    assert printing_mod.ACCEPTED_INPUT_EXTENSIONS is slicing_printing.ACCEPTED_INPUT_EXTENSIONS
+    assert printing_mod.ACCEPTED_PROFILE_EXTENSIONS is slicing_printing.ACCEPTED_PROFILE_EXTENSIONS
+    assert printing_mod.COMMAND_NAME is slicing_printing.COMMAND_NAME
+    assert printing_mod.DryRunPlan is slicing_printing.DryRunPlan
+    assert printing_mod.JobFields is slicing_printing.JobFields
+    assert printing_mod.ProfileFields is slicing_printing.ProfileFields
+    assert printing_mod.build_dry_run_plan is slicing_printing.build_dry_run_plan
+    assert printing_mod.plan_to_json is slicing_printing.plan_to_json
 
 
 def test_plan_json_is_stable_and_sorted(isolated):

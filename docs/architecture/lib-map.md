@@ -52,7 +52,7 @@ Target package: `lib/geometry/`, with subpackages only when a real boundary appe
 
 ### Slicing / Print Workflow
 
-- `printing.py`
+- `lib/slicing/printing.py`
 
 Target package: `lib/slicing/` for slicer orchestration, dry-run print planning, printer
 job state, and future sender integrations.
@@ -149,7 +149,7 @@ Every current root Python module is listed here so future additions are intentio
 - `ollama.py` — local Ollama endpoint validation and dry-run request planning.
 - `opdag.py` — operation graph validation, dependency ordering, and query helpers.
 - `packing.py` — deterministic 2D print-bed layout planning helpers.
-- `printing.py` — deterministic dry-run print job planning helpers.
+- `printing.py` — compatibility wrapper re-exporting `slicing.printing`.
 - `preprocess_reference.py` — reference image preprocessing.
 - `printability_mesh.py` — printability mesh checks.
 - `procurement.py` — deterministic local BOM and inventory purchase-plan helpers.
@@ -171,6 +171,7 @@ Root compatibility wrappers currently allowed during the staged migration:
 - `axis.py` → `geometry.axis`
 - `materials.py` → `registries.materials`
 - `printers.py` → `registries.printers`
+- `printing.py` → `slicing.printing`
 
 ## Staged Migration Plan
 

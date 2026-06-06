@@ -13,6 +13,7 @@ ROOT_COMPATIBILITY_WRAPPERS = {
     "axis.py": "geometry.axis",
     "materials.py": "registries.materials",
     "printers.py": "registries.printers",
+    "printing.py": "slicing.printing",
 }
 
 
