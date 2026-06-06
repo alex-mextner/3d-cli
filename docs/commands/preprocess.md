@@ -27,7 +27,7 @@ The command also prints deterministic mask metadata: coverage percentage, `bbox_
 Example output:
 
 ```text
-[mask ] tier=grabcut(cv2-fallback) (0.1s)  -> work/mask.png  (subject covers 34.7% of frame)
+[mask ] tier=grabcut(cv2-fallback) (0.1s)  -> work/mask.png  (coverage=34.7% of frame)
 [mask ] bbox_xywh=(152, 80, 791, 612)  centroid_xy=(551.4, 392.8)
 ```
 

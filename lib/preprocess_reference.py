@@ -354,7 +354,7 @@ def run(args: argparse.Namespace) -> int:
     meta = mask_metadata(mask)
     print(
         f"[mask ] tier={mask_tier}  -> {mask_path}  "
-        f"(subject covers {meta['coverage_pct']:.1f}% of frame)"
+        f"(coverage={meta['coverage_pct']:.1f}% of frame)"
     )
     print(f"[mask ] bbox_xywh={meta['bbox_xywh']}  centroid_xy={meta['centroid_xy']}")
 
