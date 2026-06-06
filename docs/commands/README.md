@@ -74,6 +74,7 @@ For a practical figure-by-figure image backplate loop, see
 |---|---|---|
 | `libs` | [libs.md](libs.md) | OpenSCAD library path/list info; install is automatic on first run. |
 | `printers` | [printers.md](printers.md) | Inspect the merged printer registry. |
+| `procurement` | [procurement.md](procurement.md) | Build deterministic purchase plans from local BOM and inventory files. |
 
 ### Environment
 

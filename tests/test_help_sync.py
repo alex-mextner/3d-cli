@@ -29,6 +29,10 @@ def test_updated_help_examples_are_reflected_in_command_docs() -> None:
         "overlay": ("3d overlay preview.png photo.jpg", "3d overlay render.png ref.jpg -o diff/"),
         "pack": ("3d pack --bed 220x220 --part bracket=60x40", "jq '.placements | length'"),
         "params": ("jq '.[] | {name, value}'", "3d params bracket.scad --json > params.json"),
+        "procurement": (
+            "3d procurement plan --bom bom.yaml --inventory inventory.yaml",
+            "jq -r '.items[].sku'",
+        ),
         "validate": ("3d validate bracket.scad", "fast CI check"),
     }
     for name, snippets in expected.items():

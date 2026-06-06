@@ -65,6 +65,7 @@ These modules model project state, user config, and local registries:
 - `object_model.py`
 - `ollama.py`
 - `opdag.py`
+- `procurement.py`
 - `printers.py`
 - `project.py`
 - `projects_registry.py`
@@ -137,6 +138,7 @@ Every current root Python module is listed here so future additions are intentio
 - `packing.py` — deterministic 2D print-bed layout planning helpers.
 - `preprocess_reference.py` — reference image preprocessing.
 - `printability_mesh.py` — printability mesh checks.
+- `procurement.py` — deterministic local BOM and inventory purchase-plan helpers.
 - `printers.py` — printer registry.
 - `project.py` — project model and discovery.
 - `projects_registry.py` — known-project registry.

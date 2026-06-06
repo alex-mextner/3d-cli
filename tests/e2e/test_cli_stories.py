@@ -474,6 +474,74 @@ def test_user_tracks_materials_and_parts_before_planning_a_print(tmp_path: Path)
     assert "Traceback" not in material.stderr + part.stderr + listing.stderr + shown.stderr
 
 
+def test_user_turns_a_bom_and_inventory_into_a_purchase_plan(tmp_path: Path) -> None:
+    """Procurement turns local stock gaps into a deterministic buy list for scripts."""
+    bom = tmp_path / "bom.json"
+    inventory = tmp_path / "inventory.json"
+    bom.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "sku": "m3-bolt",
+                        "description": "M3 bolt",
+                        "quantity": 18,
+                        "supplier": "BoltCo",
+                        "package_qty": 10,
+                    },
+                    {
+                        "sku": "pla-black",
+                        "description": "PLA black spool",
+                        "quantity": 1500,
+                        "unit": "g",
+                        "supplier": "FilamentCo",
+                        "package_qty": 1000,
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    inventory.write_text(
+        json.dumps(
+            {
+                "items": {
+                    "m3-bolt": 3,
+                    "pla-black": {"quantity": 600, "unit": "g"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    table = _run_3d(tmp_path, "procurement", "plan", "--bom", str(bom), "--inventory", str(inventory))
+    assert table.returncode == 0, table.stderr
+    assert "SKU" in table.stdout
+    assert "m3-bolt" in table.stdout
+    assert "pla-black" in table.stdout
+    assert "BoltCo" in table.stdout
+
+    planned = _run_3d(
+        tmp_path,
+        "procurement",
+        "plan",
+        "--bom",
+        str(bom),
+        "--inventory",
+        str(inventory),
+        "--format",
+        "json",
+    )
+    assert planned.returncode == 0, planned.stderr
+    data = json.loads(planned.stdout)
+    assert [item["sku"] for item in data["items"]] == ["m3-bolt", "pla-black"]
+    assert data["items"][0]["short_qty"] == 15
+    assert data["items"][0]["buy_qty"] == 20
+    assert data["items"][1]["short_qty"] == 900
+    assert data["items"][1]["buy_qty"] == 1000
+    assert "Traceback" not in table.stderr + planned.stderr
+
+
 def test_user_validates_project_joint_specs_before_motion_work(tmp_path: Path) -> None:
     """Kinematics turns a project joint map into stable JSON a script can inspect."""
     project_dir = tmp_path / "robot-arm"
