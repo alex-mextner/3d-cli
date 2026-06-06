@@ -70,7 +70,7 @@ These modules model project state, user config, and local registries:
 - `kinematics.py`
 - `linting.py`
 - `model_lint.py`
-- `materials.py`
+- `lib/registries/materials.py`
 - `metrics.py`
 - `object_model.py`
 - `ollama.py`
@@ -142,7 +142,7 @@ Every current root Python module is listed here so future additions are intentio
 - `model_lint.py` — OpenSCAD object-model metadata lint rules.
 - `match_loop.py` — reference match-loop orchestration.
 - `mask_geometry.py` — lightweight mask coverage, bounding-box, and centroid metadata.
-- `materials.py` — materials registry.
+- `materials.py` — compatibility wrapper re-exporting `registries.materials`.
 - `mesh_check.py` — mesh verification implementation.
 - `metrics.py` — metrics helpers and persistence.
 - `object_model.py` — semantic object-model structures.
@@ -169,6 +169,7 @@ is needed as a compatibility shim, document it in this inventory and keep it imp
 Root compatibility wrappers currently allowed during the staged migration:
 
 - `axis.py` → `geometry.axis`
+- `materials.py` → `registries.materials`
 
 ## Staged Migration Plan
 

@@ -11,6 +11,7 @@ LIB = ROOT / "lib"
 ARCHITECTURE_MAP = ROOT / "docs" / "architecture" / "lib-map.md"
 ROOT_COMPATIBILITY_WRAPPERS = {
     "axis.py": "geometry.axis",
+    "materials.py": "registries.materials",
 }
 
 

@@ -8,6 +8,7 @@ from __future__ import annotations
 import pytest
 
 import materials
+from registries import materials as registry_materials
 from errors import InvalidArgument
 
 
@@ -18,6 +19,15 @@ def test_builtin_has_common_filaments(tmp_path):
     mats = materials.load_materials(start=tmp_path)
     for name in ("PLA", "PETG", "ABS", "ASA", "TPU"):
         assert name in mats, f"{name} missing from builtin registry"
+
+
+def test_root_materials_module_re_exports_registry_core() -> None:
+    assert materials.FINISHES is registry_materials.FINISHES
+    assert materials.OVERRIDE_FILENAME is registry_materials.OVERRIDE_FILENAME
+    assert materials.Material is registry_materials.Material
+    assert materials.MaterialError is registry_materials.MaterialError
+    assert materials.load_materials is registry_materials.load_materials
+    assert materials.get_material is registry_materials.get_material
 
 
 def test_builtin_pla_fields(tmp_path):
