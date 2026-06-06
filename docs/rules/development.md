@@ -17,7 +17,11 @@ working rules for any agent or human touching `3d`.
 3. **Before every commit (3-stage, mandatory even if asked to "just commit"):**
    1. Dead-code / unused scan (see `code-style.md`); fix or justify.
    2. Self-review your own diff.
-   3. `timeout 1200 codex exec review --uncommitted` — read findings (`tail -120`), fix real issues.
+   3. `review -m codex -m gemini -m oc:fireworks/accounts/fireworks/routers/kimi-k2p6-turbo`
+      — read findings, fix real issues, then run another review iteration after fixes.
+      For staged changes, add `--staged` to the full baseline command:
+      `review -m codex -m gemini -m oc:fireworks/accounts/fireworks/routers/kimi-k2p6-turbo --staged`.
+      If both staged and unstaged changes exist, review both diffs separately.
    4. If a slice/spec asks for an additional reviewer or a narrower review command, run that too;
       stricter task instructions override this baseline.
 4. **Commit** atomically: message `<area>: <what changed>` (what, not "update"/"fix"). Formatter-only

@@ -215,9 +215,54 @@ subprocess) so `include <BOSL2/std.scad>` resolves with no manual step.
 
 1. **Atomic commits** — one logical change each. Message form: `<area>: <what changed>`
    (e.g. `render: compute --view camera from bounding box`). No "update"/"fix" vagueness.
-2. **Before every commit** run `codex exec review --uncommitted` (use
-   `timeout 1200 codex exec review --uncommitted` if slow), READ its findings, and fix
-   the real issues before committing. Codex is a peer reviewer, not a rubber stamp.
+2. **Before every commit** run multi-model review in parallel, then iterate. Use the
+   shared read-only review runner as `review` on `$PATH`; install/update it from
+   `https://github.com/alex-mextner/review-cli` when missing:
+   ```bash
+   review -m codex -m gemini -m oc:fireworks/accounts/fireworks/routers/kimi-k2p6-turbo
+   ```
+   Equivalent comma-separated form:
+   ```bash
+   review -m codex,gemini,oc:fireworks/accounts/fireworks/routers/kimi-k2p6-turbo
+   ```
+   To force a narrower review question, pass an explicit prompt:
+   ```bash
+   review -m codex -m gemini -m oc:fireworks/accounts/fireworks/routers/kimi-k2p6-turbo --prompt "Review the current uncommitted diff for bugs, regressions, security issues, and missing tests. Return only actionable findings."
+   ```
+   Optional extra reviewers run in addition to the baseline when available:
+   ```bash
+   review -m codex -m gemini -m oc:fireworks/accounts/fireworks/routers/kimi-k2p6-turbo -m claude-p -m oc:deepseek/deepseek-reasoner
+   ```
+   Run this before staging. If changes are already staged, run the same command with
+   `--staged`; if both staged and unstaged changes exist, review both diffs separately.
+   `review` supports repeated or comma-separated `-m` values, runs reviewers in parallel,
+   and has a per-review timeout (`--timeout`, default 1200s). Backends are read-only by
+   design; keep the exact backend mechanics in the `review-cli` README
+   (`https://github.com/alex-mextner/review-cli`) rather than duplicating them here. Do
+   not print, paste into logs, or commit provider API keys. If `review` is unavailable,
+   install/update it from `https://github.com/alex-mextner/review-cli`, ensure it is on
+   `$PATH`, or fall back to equivalent direct read-only reviewer commands. The fallback
+   path must still attempt Codex plus the best available independent non-Codex reviewer:
+   ```bash
+   timeout 1200 codex exec review --uncommitted
+   gemini -p "Review the current uncommitted diff for bugs, regressions, security issues, and missing tests. Return only actionable findings."
+   # If Gemini CLI is unavailable or blocked by location/tier, use Gemini API directly:
+   git diff --no-ext-diff | timeout 300 uv run --with google-genai python -c 'import os, sys; from google import genai; diff = sys.stdin.read(); base = "Review the current uncommitted diff for bugs, regressions, security issues, and missing tests. Return only actionable findings."; print(genai.Client().models.generate_content(model=os.environ.get("GEMINI_MODEL", "gemini-2.5-flash"), contents=base + "\n\n" + diff).text)'
+   ```
+   The staged/unstaged split applies to fallback commands too; use
+   `git diff --cached --no-ext-diff` for staged Gemini API fallback review.
+   Gemini CLI must already be configured. The direct Gemini API fallback requires
+   `GEMINI_API_KEY` or `GOOGLE_API_KEY` in the environment; never print either value.
+   The API fallback defaults to `gemini-2.5-flash` for parity with the current `review`
+   backend and speed; override with `GEMINI_MODEL` when a different Gemini model is
+   required.
+   READ every finding, fix the real issues, and run another review iteration after fixes. The minimum
+   acceptable pre-commit bar is Codex plus at least one independent non-Codex reviewer
+   from a different provider or model family; a second Codex run does not count. If a
+   configured reviewer is down, replace it with the best available independent model
+   first. Only when no independent non-Codex reviewer is available may the work fall below
+   that bar, and the provider-wide blocker must be recorded; do not silently treat
+   single-review work as fully reviewed.
 3. **Push regularly — do NOT let work sit only on your local machine.** This project works
    directly on `main` (that is where all history lives — no feature-branch dance). After each
    commit or small batch, push: `git push origin main`. Pushing often means the work survives a

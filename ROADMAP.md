@@ -70,8 +70,9 @@ code is what AI agents, version control, and shell pipes all operate on natively
 - 📋 **Tests** — pytest (unit: bbox→camera, axis-math, score/IoU, strength formulas,
   `3d.yaml` loader, log adapters) + CLI smoke harness (`--help` + runs on `examples/`)
   + mypy in the test gate. A `3d test` / CI-ready run.
-- ✅ **Commit discipline** — ATOMIC commits; **run `codex exec review --uncommitted`
-  before EVERY commit**, read findings, fix real issues, then commit; **push to
+- ✅ **Commit discipline** — ATOMIC commits; run multi-model read-only review through
+  `review -m codex -m gemini -m oc:fireworks/accounts/fireworks/routers/kimi-k2p6-turbo`
+  before EVERY commit, read findings, fix real issues, then commit; **push to
   origin regularly**.
 - ✅ **Dependencies fully specified** — `pyproject.toml` (uv project: core + optional extras
   `preprocess`/`viz`/`web`/`dev`) + `uv.lock` + `3d doctor` + first-run auto-bootstrap. No
@@ -702,9 +703,9 @@ Design: spec §11. Inspiration: **ffmpeg's power without ffmpeg's UX**.
 - 📋 Ship a **comprehensive `AGENTS.md` (+ `CLAUDE.md` symlink)** and a **`docs/rules/`** set, ported
   and Python-adapted from `hyper-canvas-draft` (the user's "write a good Claude file" ask). Portable
   rules to carry over (generic, not stack-specific):
-  - **Commit discipline**: atomic commits; pre-commit 3-stage review (dead-code scan → self-review →
-    `codex exec review --uncommitted`); never `--no-verify`; push regularly; separate `style:` commits
-    for formatter-only churn.
+  - **Commit discipline**: atomic commits; follow `AGENTS.md` multi-model review runner rules
+    including staged/unstaged handling, fallback reviewers, and the minimum independent reviewer bar;
+    never `--no-verify`; push regularly; separate `style:` commits for formatter-only churn.
   - **TDD**: failing test first → confirm it fails for the RIGHT reason → minimal code → green →
     refactor; tests exercise PRODUCTION code (no copy-pasted logic, no mock-only); never delete a
     failing test — investigate; changing a test to match code is a red flag (regression vs setup bug).

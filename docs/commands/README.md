@@ -163,8 +163,12 @@ claiming the work is complete. Before committing, self-review the diff and run t
 repository-required peer review:
 
 ```bash
-timeout 1200 codex exec review --uncommitted
+review -m codex -m gemini -m oc:fireworks/accounts/fireworks/routers/kimi-k2p6-turbo
 ```
+
+For staged changes, add `--staged` to that command. If both staged and unstaged changes
+exist, review both diffs separately before committing. See `AGENTS.md` for fallback
+reviewer commands and the minimum independent-reviewer bar.
 
 Some task slices may require additional reviewers or narrower commands; follow the slice
 instructions when they are stricter than the repository baseline.
