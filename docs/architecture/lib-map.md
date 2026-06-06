@@ -77,6 +77,7 @@ These modules model project state, user config, and local registries:
 - `project.py`
 - `projects_registry.py`
 - `reporting.py`
+- `workspaces.py`
 
 Target package: `lib/project/` for project/config/object-model behavior and
 `lib/registries/` for materials, printers, project indexes, and metrics when those
@@ -151,6 +152,7 @@ Every current root Python module is listed here so future additions are intentio
 - `project.py` — project model and discovery.
 - `projects_registry.py` — known-project registry.
 - `reporting.py` — deterministic gate and metric artifact report composition.
+- `workspaces.py` — web dashboard workspace metadata registry.
 - `refmatch.py` — image/reference matching helpers.
 - `render.py` — OpenSCAD render and section implementation.
 - `usdz.py` — USDZ export helpers.

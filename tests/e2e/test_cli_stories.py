@@ -792,6 +792,75 @@ def test_user_exports_a_dry_run_print_plan_before_touching_a_printer(tmp_path: P
     assert "Traceback" not in planned.stderr + piped.stderr
 
 
+def test_user_prepares_a_web_workspace_project_picker(tmp_path: Path) -> None:
+    """Workspace metadata is local JSON that can be redirected and inspected in pipes."""
+    root = tmp_path / "models"
+    project = root / "bracket"
+    project.mkdir(parents=True)
+    (project / "3d.yaml").write_text("project:\n  name: bracket\n", encoding="utf-8")
+
+    created = _run_3d(
+        tmp_path,
+        "workspaces",
+        "create",
+        "shop",
+        "--root",
+        str(root),
+        "--project",
+        str(project),
+    )
+
+    assert created.returncode == 0, created.stderr
+    assert "Created workspace: shop" in created.stdout
+
+    workspace_json = tmp_path / "workspace.json"
+    with workspace_json.open("w", encoding="utf-8") as stdout_file:
+        shown = subprocess.run(
+            [
+                sys.executable,
+                str(THREED),
+                "workspaces",
+                "show",
+                "shop",
+                "--json",
+            ],
+            cwd=REPO_ROOT,
+            env=_story_env(tmp_path),
+            stdout=stdout_file,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=15,
+        )
+
+    assert shown.returncode == 0, shown.stderr
+    payload = json.loads(workspace_json.read_text(encoding="utf-8"))
+    assert payload["workspace"]["name"] == "shop"
+    assert payload["workspace"]["projects"][0]["name"] == "bracket"
+
+    read_cmd = " ".join(shlex.quote(part) for part in ("cat", str(workspace_json)))
+    inspect_cmd = " ".join(
+        shlex.quote(part)
+        for part in (
+            sys.executable,
+            "-c",
+            "import json,sys; w=json.load(sys.stdin)['workspace']; print(w['name'] + ':' + str(w['project_count']))",
+        )
+    )
+    piped = subprocess.run(
+        f"{read_cmd} | {inspect_cmd}",
+        cwd=REPO_ROOT,
+        env=_story_env(tmp_path),
+        capture_output=True,
+        text=True,
+        shell=True,
+        timeout=15,
+    )
+
+    assert piped.returncode == 0, piped.stderr
+    assert piped.stdout.strip() == "shop:1"
+    assert "Traceback" not in created.stderr + shown.stderr + piped.stderr
+
+
 def test_user_gets_animation_usage_when_model_is_missing(tmp_path: Path) -> None:
     """Animate without a model stays readable and does not touch render tools."""
     result = _run_3d(tmp_path, "animate")

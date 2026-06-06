@@ -16,8 +16,8 @@ import os
 
 import pytest
 
+import commands.init as init
 import project
-from commands import init
 
 
 @pytest.fixture(autouse=True)

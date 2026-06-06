@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import pytest
 
+import commands.printers as printers_cmd
 import printers as printers_mod
-from commands import printers as printers_cmd
 from errors import InvalidArgument, UsageError
 from printers import PrinterError, get_printer, load_printers
 

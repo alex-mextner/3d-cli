@@ -9,8 +9,8 @@ import json
 
 import pytest
 
+import commands.projects as projects_cmd
 import projects_registry as reg
-from commands import projects as projects_cmd
 from projects_registry import ProjectRegistryError
 
 

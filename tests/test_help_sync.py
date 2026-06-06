@@ -35,6 +35,7 @@ def test_updated_help_examples_are_reflected_in_command_docs() -> None:
         ),
         "print": ("3d print part.stl --printer \"Prusa MK4\" --dry-run", "print-plan.json"),
         "validate": ("3d validate bracket.scad", "fast CI check"),
+        "workspaces": ("3d workspaces show shop --json > workspace.json", "3d workspaces list --json |"),
     }
     for name, snippets in expected.items():
         text = _doc(name)
