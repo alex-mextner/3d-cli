@@ -14,6 +14,7 @@ explain why the command exists, what its inputs mean, and how it fits into the l
 
 | Command | Doc | Role |
 |---|---|---|
+| `axis` | [axis.md](axis.md) | Validate named axes, section planes, views, and OpenSCAD camera vectors. |
 | `animate` | [animate.md](animate.md) | Generate deterministic render frame plans or PNG frame sequences. |
 | `render` | [render.md](render.md) | [CGAL](GLOSSARY.md#cgal) render, named views, multi-render, and cross-sections. |
 | `preview` | [preview.md](preview.md) | Fast throwntogether preview, no CGAL render. |

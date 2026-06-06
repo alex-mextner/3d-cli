@@ -37,6 +37,8 @@ import sys
 import tempfile
 from typing import Any
 
+from axis import VIEW_DIRECTIONS, VIEW_NAMES
+
 # ---------------------------------------------------------------------------
 # named-view direction table.  Each value is the eye DIRECTION from the look-at
 # centroid (OpenSCAD right-handed: +X right, +Y away/into screen, +Z up). With
@@ -47,37 +49,7 @@ from typing import Any
 #   iso / 3-4 / corners : the standard 3/4 diagonals.
 # 3-4 is the canonical "three-quarter" hero angle (azimuth 45 deg, elevation ~30 deg).
 # ---------------------------------------------------------------------------
-_VIEW_DIRS: dict[str, tuple[float, float, float]] = {
-    "front":  (0.0, -1.0, 0.0),
-    "back":   (0.0,  1.0, 0.0),
-    "left":   (-1.0, 0.0, 0.0),
-    "right":  (1.0,  0.0, 0.0),
-    "top":    (0.0,  0.0, 1.0),
-    "bottom": (0.0,  0.0, -1.0),
-    "iso":    (1.0, -1.0, 1.0),
-}
-
-
-def _diag_dir(az_deg: float, el_deg: float) -> tuple[float, float, float]:
-    """Eye direction from azimuth (deg, 0=+ -Y front, CCW toward +X) and elevation (deg)."""
-    az = math.radians(az_deg)
-    el = math.radians(el_deg)
-    # front (-Y) at az=0; +az rotates toward +X (right). horizontal plane component:
-    horiz = math.cos(el)
-    x = horiz * math.sin(az)
-    y = -horiz * math.cos(az)
-    z = math.sin(el)
-    return (x, y, z)
-
-
-# three-quarter / corner views (azimuth, elevation)
-_VIEW_DIRS["3-4"] = _diag_dir(45.0, 30.0)
-_VIEW_DIRS["front-left"] = _diag_dir(-45.0, 25.0)
-_VIEW_DIRS["front-right"] = _diag_dir(45.0, 25.0)
-_VIEW_DIRS["rear-left"] = _diag_dir(-135.0, 25.0)
-_VIEW_DIRS["rear-right"] = _diag_dir(135.0, 25.0)
-
-VIEW_NAMES: list[str] = list(_VIEW_DIRS.keys())
+_VIEW_DIRS = VIEW_DIRECTIONS
 # the standard angle set rendered by --multi
 MULTI_VIEWS: list[str] = ["front", "back", "left", "right", "top", "iso"]
 

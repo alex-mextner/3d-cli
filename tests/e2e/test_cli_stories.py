@@ -366,6 +366,31 @@ def test_user_gets_actionable_import_errors_for_unwrappable_formats(tmp_path: Pa
     assert "Traceback" not in result.stderr
 
 
+def test_user_normalizes_axis_plane_view_and_camera_inputs(tmp_path: Path) -> None:
+    """Axis gives scripts stable camera and section vocabulary without rendering."""
+    plane = _run_3d(tmp_path, "axis", "plane", "xy", "--json")
+
+    assert plane.returncode == 0, plane.stderr
+    assert json.loads(plane.stdout) == {
+        "kind": "plane",
+        "name": "XY",
+        "normal_axis": "Z",
+        "normal_vector": [0.0, 0.0, 1.0],
+    }
+
+    view = _run_3d(tmp_path, "axis", "view", "front-right")
+    assert view.returncode == 0, view.stderr
+    assert "kind: view" in view.stdout
+    assert "name: front-right" in view.stdout
+    assert "direction:" in view.stdout
+
+    camera = _run_3d(tmp_path, "axis", "camera", "1,-1,1,0,0,0")
+    assert camera.returncode == 0, camera.stderr
+    assert "kind: camera" in camera.stdout
+    assert "direction: -1.0,1.0,-1.0" in camera.stdout
+    assert "Traceback" not in plane.stderr + view.stderr + camera.stderr
+
+
 def test_user_gets_animation_usage_when_model_is_missing(tmp_path: Path) -> None:
     """Animate without a model stays readable and does not touch render tools."""
     result = _run_3d(tmp_path, "animate")
