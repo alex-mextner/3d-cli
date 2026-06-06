@@ -1082,16 +1082,64 @@ The CLI work now has its own repo and this ROADMAP as the single source. Pick up
 4. **Integration + demo (final):** merge everything, end-to-end tests, README screenshots (§11),
    then the §14 showcase demo + §22 video report.
 
-**State at handoff (2026-06-05) — all consolidated on `main`, tree clean, pushed:**
-- ✅ Foundation: python registry CLI + `lib/errors.py`, **72 tests**, mypy clean.
-- ✅ Web dashboard integrated into the registry (`lib/commands/web.py` + `lib/web/`); `3d web` boots.
-- ✅ ROADMAP §0–§27 + `docs/specs/2026-06-05-3d-cli-architecture.md` + `docs/rules/` (dev/testing/
-   code-style/decision-requests).
-- ✅ Research vendored: `docs/research/{report.md,report.pdf,sources.md}` + `RESEARCH.md` /
-   `GLOSSARY.md` + `docs/APPLY-RESEARCH.md`. (The prioritized backlog is folded into the ROADMAP
-   feature sections; APPLY-RESEARCH is the explicit paper/algorithm → command mapping — see §17/§27.)
-- ✅ All temp doc branches merged + deleted; no open branches, no worktrees.
-- ⚠️ **First real code task next session — config dir**: code uses `~/.config/3d-cli/` (foundation + web,
-    incl. the web agent's choice); rename to `~/.config/3d-cli/` per §23 (one constant in
-   `lib/cli/env.py`, `lib/web/webconfig.py`, `lib/commands/{web,libs,doctor}.py`) so docs+code agree.
-- NOTE: nothing is in-flight; this session ended cleanly. Start from the build order above (1→4).
+**Current state snapshot (2026-06-06) — keep this honest as branches land:**
+- ✅ `main` is clean and pushed at `18023d6`
+  (`AGENTS.md: expand commit discipline to multi-model review with API fallbacks`).
+- ✅ Foundation is no longer just 72 tests: the repo now has a broad registry CLI, structured errors,
+  command docs, web dashboard, shell-chain story tests, `pyrun` dependency fallback, and a large
+  pytest/mypy/ruff gate.
+- ✅ Human-readable e2e guidance exists in `tests/e2e/README.md`: e2e tests must be user tasks,
+  inspect outputs, and cover shell `|`, `>`, and multi-command workflows instead of exit codes only.
+- ✅ E2E story/matrix work landed on `main`: `tests/e2e/test_cli_matrix.py`,
+  `tests/e2e/test_cli_stories.py`, `tests/e2e/test_shell_chains.py`, and the fit-camera
+  quality-gate workflow in `tests/e2e/test_fit_camera_match_workflows.py`.
+- ✅ Research/docs that are safe to publish are on `main`, including
+  `docs/notes/mac-image-to-3d-providers.md`. That document marks Hunyuan MLX, SF3D, TRELLIS Mac,
+  and HF ZeroGPU as candidates/experiments only; none are accepted as camera priors until the
+  metadata, manifest, `trimesh`, `proxy-align`, proof artifact, and visual-review gates pass.
+- ✅ Commit discipline now uses the shared read-only `review` CLI with Codex + Gemini + Kimi,
+  staged/unstaged split rules, direct fallback commands, and an independent non-Codex reviewer bar.
+- 🔨 `fit-camera` proof work is the only local active worktree:
+  `/Users/ultra/.config/superpowers/worktrees/3d-cli/fit-camera-proof` on
+  `roadmap/fit-camera-proof`. It has committed local implementation history but is not pushed or
+  merged as accepted proof; the blocker is evidence quality, not just code completion. It also has a
+  local `ROADMAP.md` status edit that must be reconciled after this docs-only update lands. Next
+  action: rebase on current `main`, regenerate proof artifacts, run multi-model review, run the full
+  gate, and merge only if the original reference, same-frame fitted render, contour overlay/error map,
+  metrics JSON, and manual review all agree.
+- 🔨 Spatial-aware `fit-camera` work remains planned from the remote branch
+  `origin/roadmap/spatial-fit-experiments`. Treat it as an experiment plan/harness, not production
+  spatial awareness, until there are real/synthetic proofs and failure cases.
+- ⚠️ Branch/worktree cleanup is still in progress. Policy: no archive tags for normal cleanup; merge
+  useful work to `main`; delete obsolete branches/worktrees/tags after confirming their useful
+  changes are already present or intentionally rejected. Current cleanup queue: delete merged/stale
+  remote roadmap branches after verification, remove the `archive/2026-06-06/codex-fit-camera-*`
+  tags, and keep only branches/worktrees that still have planned large work.
+
+**E2E status and gap (do not overstate this):**
+- ✅ Current `main`: readable e2e coverage exists for CLI matrix, shell chains, CLI stories,
+  auth/proxy workflows, and fit-camera matching.
+- 🔨 Current `roadmap/fit-camera-proof`: adds more fit-camera proof-oriented coverage, but this work
+  is not merged yet.
+- ⚠️ The requested "1000+ e2e tests" is **not done** as many separate, readable e2e scenarios.
+  The project has a large overall pytest corpus, but e2e coverage is still concentrated in a few
+  files. Next pass: split e2e by domain/command, add many readable user-task scenarios, and make
+  every important workflow demonstrate actual `3d` CLI power through shell chains, pipes,
+  redirection, and inspected artifacts.
+
+**Immediate next work queue:**
+1. Finish `roadmap/fit-camera-proof`: boundary/Chamfer metrics, JSON schema, proof panel with the
+   original reference image, full `3d test`, visual inspection, baseline `review -m codex -m gemini
+   -m oc:fireworks/accounts/fireworks/routers/kimi-k2p6-turbo`; use the independent non-Codex
+   fallback bar only if a baseline reviewer is unavailable, then atomic commit, merge, push, drop
+   worktree.
+2. Continue or merge `origin/roadmap/spatial-fit-experiments` only after the fit-camera base lands
+   and the experiment plan has honest proof artifacts; no other parked local worktrees remain.
+3. Start the dedicated e2e expansion wave: many files, many readable tests per command/domain,
+   especially render/check/fit-camera/preprocess/score/match/slice/om/web and shell `|` / `>` /
+   sequential workflows.
+4. Implement production spatial-aware fit-camera experiments from the E0-E6 plan: OpenCV contour
+   baseline, rembg/SAM2 segmentation comparisons, Depth Anything depth-order priors, real asset
+   trials, synthetic render-derived references, and visual proof panels for every accepted result.
+5. Continue the build order above: object model/selectors, operation DAG, packaging, slicer/profile
+   UX, materials/printers, pack/3MF, sections auto-camera, photoreal render, and reporting/video.
