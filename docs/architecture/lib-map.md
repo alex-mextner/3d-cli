@@ -64,6 +64,7 @@ These modules model project state, user config, and local registries:
 - `metrics.py`
 - `object_model.py`
 - `ollama.py`
+- `opdag.py`
 - `printers.py`
 - `project.py`
 - `projects_registry.py`
@@ -132,6 +133,7 @@ Every current root Python module is listed here so future additions are intentio
 - `metrics.py` — metrics helpers and persistence.
 - `object_model.py` — semantic object-model structures.
 - `ollama.py` — local Ollama endpoint validation and dry-run request planning.
+- `opdag.py` — operation graph validation, dependency ordering, and query helpers.
 - `packing.py` — deterministic 2D print-bed layout planning helpers.
 - `preprocess_reference.py` — reference image preprocessing.
 - `printability_mesh.py` — printability mesh checks.

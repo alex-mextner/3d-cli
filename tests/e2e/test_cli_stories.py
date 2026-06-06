@@ -618,6 +618,38 @@ def test_user_plans_a_print_bed_layout_before_slicing(tmp_path: Path) -> None:
     assert "Traceback" not in readable.stderr + piped.stderr
 
 
+def test_user_inspects_operation_dependencies_before_model_rebuild(tmp_path: Path) -> None:
+    """OpDAG shows build order and local impact before regenerating geometry."""
+    graph = tmp_path / "build.json"
+    graph.write_text(
+        json.dumps(
+            {
+                "operations": [
+                    {"id": "base", "op": "cube", "params": {"size": [40, 20, 8]}},
+                    {"id": "pocket", "op": "difference", "deps": ["base"]},
+                    {"id": "boss", "op": "cylinder", "deps": ["base"]},
+                    {"id": "finished", "op": "union", "deps": ["pocket", "boss"]},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    plan = _run_3d(tmp_path, "opdag", "plan", str(graph))
+
+    assert plan.returncode == 0, plan.stderr
+    assert "1. base [cube]" in plan.stdout
+    assert "4. finished [union] <- pocket, boss" in plan.stdout
+
+    query = _run_3d(tmp_path, "opdag", "query", str(graph), "base", "--json")
+
+    assert query.returncode == 0, query.stderr
+    payload = json.loads(query.stdout)
+    assert payload["needed_by"] == ["pocket", "boss"]
+    assert payload["descendants"] == ["pocket", "boss", "finished"]
+    assert "Traceback" not in plan.stderr + query.stderr
+
+
 def test_user_gets_animation_usage_when_model_is_missing(tmp_path: Path) -> None:
     """Animate without a model stays readable and does not touch render tools."""
     result = _run_3d(tmp_path, "animate")

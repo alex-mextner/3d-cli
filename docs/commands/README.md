@@ -31,6 +31,7 @@ explain why the command exists, what its inputs mean, and how it fits into the l
 | `validate` | [validate.md](validate.md) | Fast OpenSCAD parse check without rendering. |
 | `params` | [params.md](params.md) | Extract Customizer-style parameters. |
 | `om` | [om.md](om.md) | Query `.scad` object-model annotations as JSON. |
+| `opdag` | [opdag.md](opdag.md) | Describe, plan, and query model operation DAGs. |
 | `usdz` | [usdz.md](usdz.md) | Export `.scad`/`.stl` to colored USDZ for Apple AR Quick Look. |
 
 ### QA & Gates
