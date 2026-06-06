@@ -4,6 +4,7 @@ from __future__ import annotations
 import pytest
 
 from .cli_helper import (
+    ALIASES,
     COMMANDS,
     CWD_VARIANTS,
     ENV_VARIANTS,
@@ -28,7 +29,16 @@ HELP_CASES = [
     for env_variant in ENV_VARIANTS
 ]
 
-MATRIX_CASES = [*HELP_CASES, *TOP_LEVEL_CASES, *PARAMS_CASES]
+ALIAS_HELP_CASES = [
+    CliCase(
+        id=f"{alias}-alias-help-repo-baseline",
+        argv=[alias, "--help"],
+        expected_returncodes=(0,),
+    )
+    for alias in ALIASES
+]
+
+MATRIX_CASES = [*HELP_CASES, *ALIAS_HELP_CASES, *TOP_LEVEL_CASES, *PARAMS_CASES]
 
 
 def _case_id(case: CliCase) -> str:

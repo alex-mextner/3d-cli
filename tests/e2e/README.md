@@ -6,3 +6,14 @@ directories, and environment variants are checked with cheap real-CLI invocation
 The story tests in `test_cli_stories.py` give readability. They are short workflows a
 human can scan to learn how the CLI is used: discover help, inspect parameters, save JSON
 for another shell step, read structured errors, and run `doctor` as an environment report.
+
+Every user-visible command change needs e2e consideration:
+
+- New commands, aliases, flags, and docs/help behavior must remain covered by the generated
+  real-CLI matrix that calls `bin/3d` through canonical names and alias names.
+- Workflows a user would copy into a terminal should get a readable story test with a
+  docstring that describes the task in user terms.
+- Shell-facing workflows should demonstrate shell redirection (`>`) and pipes (`|`) when
+  they clarify how to chain `3d` with other tools.
+- Unit tests still own pure logic. They do not replace a real `bin/3d` e2e story for
+  command behavior.

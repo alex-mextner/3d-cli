@@ -15,7 +15,9 @@ REPO_ROOT: Final = Path(__file__).resolve().parents[2]
 THREED: Final = REPO_ROOT / "bin" / "3d"
 CUBE: Final = REPO_ROOT / "examples" / "cube.scad"
 
-COMMANDS: Final = [cmd.name for cmd in discover().commands()]
+_REGISTRY: Final = discover()
+COMMANDS: Final = [cmd.name for cmd in _REGISTRY.commands()]
+ALIASES: Final = sorted(_REGISTRY.alias_map())
 CWD_VARIANTS: Final = ("repo", "examples", "tests", "docs", "temp", "temp-nested")
 ENV_VARIANTS: Final = (
     "baseline",

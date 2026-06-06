@@ -18,6 +18,9 @@ Never write the implementation first "to see if it works" and add tests after.
 - User-visible command behavior also needs e2e coverage that calls `bin/3d`. Every new command,
   flag, alias, shell-facing workflow, and docs/help behavior needs at least one e2e test. Unit tests
   are still required for pure logic; they do not replace the shell-facing coverage.
+- E2E stories are documentation as much as regression tests. Keep them readable: use
+  user-workflow docstrings, real `bin/3d` invocations, and shell redirection (`>`) or pipes (`|`)
+  when that demonstrates how the command composes with normal terminal tools.
 
 ## Green main, always
 - If `3d test` shows failures after your change — even in "unrelated" files — your change caused it
@@ -34,3 +37,8 @@ functions (bbox→camera, axis math, score/IoU, strength formulas, `3d.yaml`/obj
 selector resolution, op-DAG recompute, log adapters). CLI smoke harness: `3d <cmd> --help` for every
 registered command + safe commands on `examples/`. Skip gracefully when an external tool is absent
 (don't fail the suite for a missing optional dependency).
+
+`tests/e2e/test_cli_matrix.py` is the breadth guard: it discovers registered commands and checks
+their help through the real dispatcher. `tests/e2e/test_cli_stories.py` and
+`tests/e2e/test_shell_chains.py` are the readable examples users and reviewers should be able to
+scan before trusting a workflow.
