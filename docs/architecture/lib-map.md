@@ -75,6 +75,7 @@ boundaries are ready.
 These modules support reference preprocessing, image comparison, scoring, and match-loop
 orchestration:
 
+- `debug_overlay.py`
 - `match_loop.py`
 - `mask_geometry.py`
 - `preprocess_reference.py`
@@ -110,6 +111,7 @@ Every current root Python module is listed here so future additions are intentio
 - `collision_check.py` — geometry / collision check implementation.
 - `collision_viz.py` — geometry / collision visualization implementation.
 - `config.py` — project and CLI configuration helpers.
+- `debug_overlay.py` — pure planning and advisory helpers for render/reference debug overlays.
 - `errors.py` — structured CLI error model.
 - `events.py` — append-only CLI/model workflow event store.
 - `extract_params.py` — OpenSCAD parameter extraction.
