@@ -66,7 +66,7 @@ These modules model project state, user config, and local registries:
 - `events.py`
 - `extract_params.py`
 - `hardware.py`
-- `inventory.py`
+- `lib/registries/inventory.py`
 - `kinematics.py`
 - `linting.py`
 - `model_lint.py`
@@ -136,7 +136,7 @@ Every current root Python module is listed here so future additions are intentio
 - `frame_check.py` — render framing checks.
 - `hardware.py` — local machine and toolchain capability reporting.
 - `import_formats.py` — import wrapper generation and conversion-plan helpers.
-- `inventory.py` — local materials and parts inventory store.
+- `inventory.py` — compatibility wrapper re-exporting `registries.inventory`.
 - `kinematics.py` — project joint spec validation and deterministic summaries.
 - `linting.py` — repository lint helpers.
 - `model_lint.py` — OpenSCAD object-model metadata lint rules.
@@ -169,6 +169,7 @@ is needed as a compatibility shim, document it in this inventory and keep it imp
 Root compatibility wrappers currently allowed during the staged migration:
 
 - `axis.py` → `geometry.axis`
+- `inventory.py` → `registries.inventory`
 - `materials.py` → `registries.materials`
 - `metrics.py` → `registries.metrics`
 - `printers.py` → `registries.printers`

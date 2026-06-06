@@ -8,6 +8,7 @@ from typing import Any, cast
 import pytest
 
 import inventory
+import registries.inventory as inventory_impl
 from errors import InvalidArgument, UsageError
 
 inventory_cmd = cast(Any, importlib.import_module("commands.inventory"))
@@ -19,6 +20,22 @@ def isolated_inventory(tmp_path, monkeypatch):
     cfg.mkdir()
     monkeypatch.setenv("XDG_CONFIG_HOME", str(cfg))
     return cfg / "3d-cli" / "inventory.json"
+
+
+def test_root_wrapper_re_exports_inventory_public_api_identities():
+    public_names = [
+        "KINDS",
+        "STORE_FILENAME",
+        "InventoryItem",
+        "add_item",
+        "get_item",
+        "list_items",
+        "store_path",
+    ]
+
+    assert inventory.__all__ == public_names
+    for name in public_names:
+        assert getattr(inventory, name) is getattr(inventory_impl, name)
 
 
 def test_empty_inventory_lists_no_items(isolated_inventory):
