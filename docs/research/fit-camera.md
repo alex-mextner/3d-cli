@@ -13,8 +13,12 @@ The current research target is not a classic topology hash. A hash can retrieve
 for improving camera pose. What `fit-camera` needs is a pose-aware objective:
 an error surface that decreases when azimuth, elevation, distance, zoom, or
 target translation moves toward the correct pose, at least inside a local basin.
-Global monotonicity is not expected because single images are ambiguous and many
-models have symmetric or near-symmetric silhouettes.
+Global monotonicity may be possible for many practical objects if it is defined
+over observable pose parameters and known equivalence classes. Symmetry is not
+automatically a failure: a sphere has unobservable rotation, and a model with two
+identical entrances can have multiple equally valid azimuths. The objective must
+distinguish true equivalence/plateaus from a wrong pose that only happens to
+match a weak silhouette.
 
 The accepted proof format is a shared-frame visual panel:
 
@@ -118,9 +122,10 @@ Closest known algorithm families:
 
 Working position:
 
-There is probably no single global pose-sensitive hash for this task. The
-practical design should combine a coarse retrieval descriptor with a local
-pose-aware energy:
+There may not be a single scalar hash that is globally monotonic in raw camera
+parameters, but a practical objective can still be monotonic over the quotient
+space of visually distinguishable poses. The design should combine a coarse
+retrieval descriptor with a pose-aware energy and explicit equivalence handling:
 
 1. build a broad render bank over azimuth, elevation, distance, field of view,
    and target translation,
@@ -129,8 +134,10 @@ pose-aware energy:
 3. retrieve top-K camera basins,
 4. refine top-K with symmetric boundary Chamfer / signed distance fields,
 5. optionally add depth or pointmap priors from a spatial model,
-6. prove local directional behavior with finite-difference perturbations around
-   synthetic hidden-camera cases.
+6. detect symmetric or unobservable degrees of freedom when several basins are
+   genuinely equivalent,
+7. prove directional behavior with finite-difference perturbations around
+   synthetic hidden-camera cases, comparing pose error modulo known symmetries.
 
 Experiment H1: boundary distance-transform energy.
 
@@ -171,9 +178,12 @@ Experiment H3: view-bank descriptor retrieval.
   depth/normal summaries.
 - Proof: synthetic hidden-camera references should retrieve a top-K set
   containing the true basin without being given the hidden pose.
-- Expected failure: symmetric objects and frontal/back silhouettes can collide.
+- Expected failure: non-equivalent frontal/back silhouettes can collide when the
+  descriptor is too weak. Truly symmetric views should be reported as equivalent
+  solutions instead of false failures.
 - Decision rule: use for coarse search only; require boundary/depth refinement
-  before acceptance.
+  before acceptance, and compare final pose modulo declared or detected
+  symmetries.
 
 Experiment H4: finite-difference pose gradients.
 
@@ -184,11 +194,27 @@ Experiment H4: finite-difference pose gradients.
   per parameter and estimate directional derivatives of the boundary-field
   energy.
 - Proof: synthetic hidden-camera diagnostic plots must mark whether the
-  negative gradient points toward the hidden pose.
+  negative gradient points toward the hidden pose or an equivalent pose.
 - Expected failure: expensive renders and discontinuous visibility at silhouette
   events.
 - Decision rule: useful for proof diagnostics and slow `--proof` refinement, not
   default fast mode until render cost is bounded.
+
+Experiment H4b: pose equivalence and unobservable degrees of freedom.
+
+- Hypothesis: some objects have several equally valid fitted poses, and the
+  metric should report equivalence instead of forcing an arbitrary "front".
+- Build: add synthetic fixtures with known symmetries: sphere-like object,
+  rotationally repeated object, and a two-entrance yurt-style object. Evaluate
+  pose recovery modulo those symmetries.
+- Proof: the diagnostic should show flat/periodic error curves along
+  unobservable rotations, while still decreasing with observable camera
+  translation, distance, and scale corrections.
+- Expected failure: if the model is only approximately symmetric, treating poses
+  as exactly equivalent may hide a real mismatch.
+- Decision rule: accept equivalent poses only when geometry or measured render
+  descriptors demonstrate equivalence; otherwise keep the stricter directional
+  pose test.
 
 Experiment H5: spatial/depth prior.
 
@@ -257,10 +283,12 @@ Implementation notes for `3d-cli`:
   `reference`, `reference_mask`, `candidate_grid`, `best_fit`, `boundary_overlay`,
   `error_vs_iteration`, and `finite_difference_direction`.
 - A synthetic proof is accepted only if the hidden camera is not passed into the
-  fitting command. The hidden pose is used after fitting only for evaluation.
+  fitting command. The hidden pose is used after fitting only for evaluation,
+  and pose error should be measured modulo declared or detected symmetries.
 - A real-photo proof is accepted only if visual review and boundary metrics agree.
   If the search locks onto the back side or a wrong crop, the result is
-  `fail`/`diagnostic`, not `ok`.
+  `fail`/`diagnostic`, not `ok`, unless the candidate is demonstrably equivalent
+  under the object's geometry.
 
 ### Area IoU on filled masks
 
