@@ -256,6 +256,52 @@ def test_user_plans_animation_frames_before_rendering(tmp_path: Path) -> None:
     assert "Traceback" not in result.stderr
 
 
+def test_user_records_and_queries_workflow_events(tmp_path: Path) -> None:
+    """Events make CLI and agent work auditable as JSONL plus a readable table."""
+    recorded = _run_3d(
+        tmp_path,
+        "events",
+        "record",
+        "--type",
+        "cli.render",
+        "--subject",
+        str(CUBE),
+        "--status",
+        "pass",
+        "--message",
+        "rendered preview",
+        "--data",
+        "view=front",
+        "--ts",
+        "2026-06-05T12:00:00+00:00",
+    )
+
+    assert recorded.returncode == 0, recorded.stderr
+    assert "Recorded event" in recorded.stdout
+
+    jsonl = _run_3d(tmp_path, "events", "query", "--subject", str(CUBE))
+    assert jsonl.returncode == 0, jsonl.stderr
+    rows = [json.loads(line) for line in jsonl.stdout.splitlines()]
+    assert len(rows) == 1
+    assert rows[0]["type"] == "cli.render"
+    assert rows[0]["subject"] == str(CUBE)
+    assert rows[0]["status"] == "pass"
+    assert rows[0]["message"] == "rendered preview"
+    assert rows[0]["data"] == {"view": "front"}
+
+    listed = _run_3d(tmp_path, "events", "list", "--type", "cli.render", "--limit", "1")
+    assert listed.returncode == 0, listed.stderr
+    assert "cli.render" in listed.stdout
+    assert "pass" in listed.stdout
+    assert str(CUBE) in listed.stdout
+    assert "rendered preview" in listed.stdout
+
+    path = _run_3d(tmp_path, "events", "path")
+    assert path.returncode == 0, path.stderr
+    assert path.stdout.strip().endswith("events.jsonl")
+    assert "Traceback" not in recorded.stderr + jsonl.stderr + listed.stderr + path.stderr
+
+
 def test_user_gets_animation_usage_when_model_is_missing(tmp_path: Path) -> None:
     """Animate without a model stays readable and does not touch render tools."""
     result = _run_3d(tmp_path, "animate")

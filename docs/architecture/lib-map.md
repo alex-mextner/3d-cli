@@ -51,6 +51,7 @@ These modules model project state, user config, and local registries:
 
 - `ai_tools.py`
 - `config.py`
+- `events.py`
 - `extract_params.py`
 - `hardware.py`
 - `linting.py`
@@ -105,6 +106,7 @@ Every current root Python module is listed here so future additions are intentio
 - `collision_viz.py` — geometry / collision visualization implementation.
 - `config.py` — project and CLI configuration helpers.
 - `errors.py` — structured CLI error model.
+- `events.py` — append-only CLI/model workflow event store.
 - `extract_params.py` — OpenSCAD parameter extraction.
 - `fit_camera.py` — camera fitting implementation.
 - `frame_check.py` — render framing checks.

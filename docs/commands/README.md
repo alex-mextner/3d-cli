@@ -75,6 +75,7 @@ For a practical figure-by-figure image backplate loop, see
 |---|---|---|
 | `ai` | [ai.md](ai.md) | Build offline AI-assist prompt bundles without calling a backend. |
 | `doctor` | [doctor.md](doctor.md) | Read-only dependency report with install commands. |
+| `events` | [events.md](events.md) | Record and inspect append-only CLI/model workflow events. |
 | `init` | [init.md](init.md) | Scaffold a `3d.yaml` project and agent-friendly project skeleton. |
 | `projects` | [projects.md](projects.md) | Register/list/remove project directories used by `3d web`. |
 | `materials` | [materials.md](materials.md) | Inspect the merged FDM material registry. |
