@@ -26,6 +26,7 @@ INVARIANTS:
 """
 from __future__ import annotations
 
+import os
 import pathlib
 from dataclasses import dataclass, field
 from typing import Any
@@ -79,10 +80,10 @@ def _user_path() -> pathlib.Path:
     return config_dir() / _USER_FILENAME
 
 
-def _project_path() -> pathlib.Path | None:
+def _project_path(start: str | os.PathLike[str] | None = None) -> pathlib.Path | None:
     from project import find_project  # lazy: avoid import-time coupling
 
-    found = find_project()
+    found = find_project(start)
     if found is None:
         return None
     return found.parent / _PROJECT_FILENAME
@@ -165,7 +166,9 @@ def _build_printer(name: str, spec: Any, *, command: str | None) -> Printer:
     )
 
 
-def load_printers(*, command: str | None = None) -> dict[str, Printer]:
+def load_printers(
+    *, command: str | None = None, start: str | os.PathLike[str] | None = None
+) -> dict[str, Printer]:
     """Merge built-in + user + project printers.yaml into a name->Printer dict.
 
     Layers are applied lowest-to-highest (built-in, then user, then project); a later
@@ -181,7 +184,7 @@ def load_printers(*, command: str | None = None) -> dict[str, Printer]:
         )
     merged.update(_load_layer(_BUILTIN_DATA, command=command))
     merged.update(_load_layer(_user_path(), command=command))
-    project_path = _project_path()
+    project_path = _project_path(start)
     if project_path is not None:
         merged.update(_load_layer(project_path, command=command))
 
@@ -191,10 +194,12 @@ def load_printers(*, command: str | None = None) -> dict[str, Printer]:
     }
 
 
-def get_printer(name: str, *, command: str | None = None) -> Printer:
+def get_printer(
+    name: str, *, command: str | None = None, start: str | os.PathLike[str] | None = None
+) -> Printer:
     """Resolve a printer NAME to its Printer. Unknown name -> InvalidArgument listing
     every accepted name (so a user/project override or a typo fix is obvious)."""
-    printers = load_printers(command=command)
+    printers = load_printers(command=command, start=start)
     printer = printers.get(name)
     if printer is None:
         raise InvalidArgument(

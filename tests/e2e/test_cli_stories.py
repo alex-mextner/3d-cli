@@ -718,6 +718,80 @@ def test_user_inspects_operation_dependencies_before_model_rebuild(tmp_path: Pat
     assert "Traceback" not in plan.stderr + query.stderr
 
 
+def test_user_exports_a_dry_run_print_plan_before_touching_a_printer(tmp_path: Path) -> None:
+    """Print planning produces reviewable JSON and works in shell redirection pipelines."""
+    model = tmp_path / "bracket.stl"
+    model.write_text("solid bracket\nendsolid bracket\n", encoding="utf-8")
+    plan_json = tmp_path / "print-plan.json"
+
+    with plan_json.open("w", encoding="utf-8") as stdout_file:
+        planned = subprocess.run(
+            [
+                sys.executable,
+                str(THREED),
+                "print",
+                str(model),
+                "--printer",
+                "Prusa MK4",
+                "--dry-run",
+                "--job-name",
+                "left bracket",
+                "--material",
+                "PLA",
+                "--copies",
+                "2",
+                "--start",
+            ],
+            cwd=REPO_ROOT,
+            env=_story_env(tmp_path),
+            stdout=stdout_file,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=15,
+        )
+
+    assert planned.returncode == 0, planned.stderr
+    payload = json.loads(plan_json.read_text(encoding="utf-8"))
+    assert payload["input_format"] == "stl"
+    assert payload["printer"]["name"] == "Prusa MK4"
+    assert payload["job"] == {
+        "copies": 2,
+        "material": "PLA",
+        "name": "left bracket",
+        "start": True,
+    }
+    assert payload["steps"] == ["validate input", "slice model", "upload job", "start print"]
+
+    read_cmd = " ".join(
+        shlex.quote(part)
+        for part in (
+            "cat",
+            str(plan_json),
+        )
+    )
+    inspect_cmd = " ".join(
+        shlex.quote(part)
+        for part in (
+            sys.executable,
+            "-c",
+            "import json,sys; p=json.load(sys.stdin); print(p['printer']['name'] + ':' + str(p['job']['copies']))",
+        )
+    )
+    piped = subprocess.run(
+        f"{read_cmd} | {inspect_cmd}",
+        cwd=REPO_ROOT,
+        env=_story_env(tmp_path),
+        capture_output=True,
+        text=True,
+        shell=True,
+        timeout=15,
+    )
+
+    assert piped.returncode == 0, piped.stderr
+    assert piped.stdout.strip() == "Prusa MK4:2"
+    assert "Traceback" not in planned.stderr + piped.stderr
+
+
 def test_user_gets_animation_usage_when_model_is_missing(tmp_path: Path) -> None:
     """Animate without a model stays readable and does not touch render tools."""
     result = _run_3d(tmp_path, "animate")

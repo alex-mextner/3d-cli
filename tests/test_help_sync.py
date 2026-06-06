@@ -33,6 +33,7 @@ def test_updated_help_examples_are_reflected_in_command_docs() -> None:
             "3d procurement plan --bom bom.yaml --inventory inventory.yaml",
             "jq -r '.items[].sku'",
         ),
+        "print": ("3d print part.stl --printer \"Prusa MK4\" --dry-run", "print-plan.json"),
         "validate": ("3d validate bracket.scad", "fast CI check"),
     }
     for name, snippets in expected.items():
