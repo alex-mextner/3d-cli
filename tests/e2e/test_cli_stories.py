@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -524,6 +525,65 @@ def test_user_turns_gate_and_score_artifacts_into_a_readable_report(tmp_path: Pa
     assert payload["overall"] == "WARN"
     assert [value["name"] for value in payload["values"]] == ["AE", "IoU"]
     assert "Traceback" not in text.stderr + json_result.stderr
+
+
+def test_user_plans_a_print_bed_layout_before_slicing(tmp_path: Path) -> None:
+    """Pack gives a human table and scriptable coordinates before slicer work."""
+    readable = _run_3d(
+        tmp_path,
+        "pack",
+        "--bed",
+        "120x80",
+        "--gap",
+        "4",
+        "--part",
+        "bracket=50x30:2",
+        "--part",
+        "clip=20x15",
+    )
+
+    assert readable.returncode == 0, readable.stderr
+    assert "PACK PLAN bed 120 x 80 mm" in readable.stdout
+    assert "bracket#1" in readable.stdout
+    assert "clip#1" in readable.stdout
+    assert "STATUS: PASS - 3 part copies placed" in readable.stdout
+
+    pack_cmd = " ".join(
+        shlex.quote(part)
+        for part in (
+            sys.executable,
+            str(THREED),
+            "pack",
+            "--bed",
+            "120x80",
+            "--gap",
+            "4",
+            "--part",
+            "bracket=50x30:2",
+            "--json",
+        )
+    )
+    count_cmd = " ".join(
+        shlex.quote(part)
+        for part in (
+            sys.executable,
+            "-c",
+            "import json,sys; print(len(json.load(sys.stdin)['placements']))",
+        )
+    )
+    piped = subprocess.run(
+        f"{pack_cmd} | {count_cmd}",
+        cwd=REPO_ROOT,
+        env=_story_env(tmp_path),
+        capture_output=True,
+        text=True,
+        shell=True,
+        timeout=15,
+    )
+
+    assert piped.returncode == 0, piped.stderr
+    assert piped.stdout.strip() == "2"
+    assert "Traceback" not in readable.stderr + piped.stderr
 
 
 def test_user_gets_animation_usage_when_model_is_missing(tmp_path: Path) -> None:

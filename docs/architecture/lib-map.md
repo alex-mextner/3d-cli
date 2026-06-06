@@ -40,6 +40,7 @@ rendering, slicing support, and verification:
 - `frame_check.py`
 - `import_formats.py`
 - `mesh_check.py`
+- `packing.py`
 - `printability_mesh.py`
 - `render.py`
 - `usdz.py`
@@ -129,6 +130,7 @@ Every current root Python module is listed here so future additions are intentio
 - `mesh_check.py` — mesh verification implementation.
 - `metrics.py` — metrics helpers and persistence.
 - `object_model.py` — semantic object-model structures.
+- `packing.py` — deterministic 2D print-bed layout planning helpers.
 - `preprocess_reference.py` — reference image preprocessing.
 - `printability_mesh.py` — printability mesh checks.
 - `printers.py` — printer registry.

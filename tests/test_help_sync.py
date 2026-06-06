@@ -27,6 +27,7 @@ def test_updated_help_examples_are_reflected_in_command_docs() -> None:
         "doctor": ("3d doctor | grep MISSING", "run before CI"),
         "multi": ("3d multi bracket.scad --render --size 1200x900", "3d multi bracket.scad -D 'depth=40'"),
         "overlay": ("3d overlay preview.png photo.jpg", "3d overlay render.png ref.jpg -o diff/"),
+        "pack": ("3d pack --bed 220x220 --part bracket=60x40", "jq '.placements | length'"),
         "params": ("jq '.[] | {name, value}'", "3d params bracket.scad --json > params.json"),
         "validate": ("3d validate bracket.scad", "fast CI check"),
     }
