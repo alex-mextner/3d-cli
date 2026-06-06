@@ -40,6 +40,7 @@ explain why the command exists, what its inputs mean, and how it fits into the l
 | `mesh` | [mesh.md](mesh.md) | Watertight/manifold/self-intersection/volume checks. |
 | `printability` | [printability.md](printability.md) | FDM wall, min-feature, overhang, and orientation checks. |
 | `collision` | [collision.md](collision.md) | Static, frame, and visualization collision checks from JSON config. |
+| `kinematics` | [kinematics.md](kinematics.md) | Validate project joint specs and emit deterministic JSON. |
 | `lint` | [lint.md](lint.md) | Advisory repository lint rules. |
 | `acceptance` | [check.md](check.md) | Alias declared by `check`. |
 

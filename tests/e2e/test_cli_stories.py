@@ -441,6 +441,55 @@ def test_user_tracks_materials_and_parts_before_planning_a_print(tmp_path: Path)
     assert "Traceback" not in material.stderr + part.stderr + listing.stderr + shown.stderr
 
 
+def test_user_validates_project_joint_specs_before_motion_work(tmp_path: Path) -> None:
+    """Kinematics turns a project joint map into stable JSON a script can inspect."""
+    project_dir = tmp_path / "robot-arm"
+    parts_dir = project_dir / "parts"
+    parts_dir.mkdir(parents=True)
+    for part_name in ("base", "arm", "gripper"):
+        (parts_dir / f"{part_name}.scad").write_text("cube(1);\n", encoding="utf-8")
+    (project_dir / "3d.yaml").write_text(
+        """project:
+  name: robot-arm
+  units: mm
+parts:
+  base:
+    file: parts/base.scad
+  arm:
+    file: parts/arm.scad
+  gripper:
+    file: parts/gripper.scad
+kinematics:
+  joints:
+    shoulder:
+      type: revolute
+      parent: base
+      child: arm
+      axis: [0, 0, 2]
+      limits: [-90, 90]
+    slide:
+      type: prismatic
+      parent: arm
+      child: gripper
+      axis: [3, 0, 0]
+      limits: [0, 25]
+""",
+        encoding="utf-8",
+    )
+
+    result = _run_3d(tmp_path, "kinematics", str(project_dir))
+
+    assert result.returncode == 0, result.stderr
+    summary = json.loads(result.stdout)
+    assert summary["project"] == "robot-arm"
+    assert summary["joint_count"] == 2
+    assert [joint["name"] for joint in summary["joints"]] == ["shoulder", "slide"]
+    assert summary["joints"][0]["axis"] == [0.0, 0.0, 1.0]
+    assert summary["joints"][0]["limits"] == {"max": 90.0, "min": -90.0, "units": "deg"}
+    assert summary["joints"][1]["limits"]["units"] == "mm"
+    assert "Traceback" not in result.stderr
+
+
 def test_user_gets_animation_usage_when_model_is_missing(tmp_path: Path) -> None:
     """Animate without a model stays readable and does not touch render tools."""
     result = _run_3d(tmp_path, "animate")
