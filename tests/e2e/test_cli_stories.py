@@ -216,6 +216,38 @@ def test_user_reads_an_ai_prompt_bundle_as_plain_text(tmp_path: Path) -> None:
     assert "Traceback" not in result.stderr
 
 
+def test_user_plans_a_local_ollama_request_without_network_calls(tmp_path: Path) -> None:
+    """Ollama dry-run output is stable JSON that can be redirected into a sender."""
+    result = _run_3d(
+        tmp_path,
+        "ollama",
+        "--endpoint",
+        "localhost:11434",
+        "--model",
+        "llama3.2",
+        "--prompt",
+        "Suggest one OpenSCAD refactor for the cube example.",
+        "--system",
+        "Return concise CAD advice.",
+        "--dry-run",
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["dry_run"] is True
+    assert payload["request"] == {
+        "method": "POST",
+        "url": "http://localhost:11434/api/generate",
+        "body": {
+            "model": "llama3.2",
+            "prompt": "Suggest one OpenSCAD refactor for the cube example.",
+            "stream": False,
+            "system": "Return concise CAD advice.",
+        },
+    }
+    assert "Traceback" not in result.stderr
+
+
 def test_user_plans_animation_frames_before_rendering(tmp_path: Path) -> None:
     """Animation planning shows exactly which render commands will run."""
     outdir = tmp_path / "frames"

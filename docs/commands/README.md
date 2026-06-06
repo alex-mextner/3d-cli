@@ -87,6 +87,7 @@ For a practical figure-by-figure image backplate loop, see
 | `metrics` | [metrics.md](metrics.md) | Inspect persisted command metrics JSONL records. |
 | `hardware` | [hardware.md](hardware.md) | List or validate local machine/toolchain capabilities. |
 | `inventory` | [inventory.md](inventory.md) | Maintain a local materials and parts inventory. |
+| `ollama` | [ollama.md](ollama.md) | Validate local Ollama settings and print a dry-run generate request. |
 | `web` | [web.md](web.md) | Local FastAPI/SSE/three.js dashboard. |
 | `test` | [test.md](test.md) | Ruff, pytest, and mypy gate. |
 
