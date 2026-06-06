@@ -351,9 +351,14 @@ def write_spatial_panel(
     mask = Image.fromarray((refm * 255).astype(np.uint8), "L").convert("RGB")
     fit = Image.open(fit_png).convert("RGB").resize((w, h))
     edge = Image.open(edge_overlay_png).convert("RGB").resize((w, h))
-    panel = Image.new("RGB", (w * 4, h), "white")
-    for idx, img in enumerate((ref, mask, fit, edge)):
-        panel.paste(img, (idx * w, 0))
+    header_h = 24
+    panel = Image.new("RGB", (w * 4, h + header_h), "white")
+    draw = ImageDraw.Draw(panel)
+    labels = ("reference", "mask", "fitted render", "contour overlay")
+    for idx, (img, label) in enumerate(zip((ref, mask, fit, edge), labels)):
+        x = idx * w
+        draw.text((x + 8, 6), label, fill=(20, 20, 20))
+        panel.paste(img, (x, header_h))
     panel.save(panel_png)
 
 

@@ -347,7 +347,7 @@ def make_demo_frames(
         overlay = Image.fromarray(overlay_arr, "RGB")
         overlay_draw = ImageDraw.Draw(overlay)
         overlay_draw.rectangle([0, 0, w - 1, 32], fill=(0, 0, 0))
-        overlay_draw.text((10, 8), "contours: white=aligned red=reference cyan=render", fill=(245, 245, 245))
+        overlay_draw.text((10, 8), "contours: white=hit red=ref cyan=render", fill=(245, 245, 245))
 
         chart_w = w
         chart = Image.new("RGB", (chart_w, h), "white")
