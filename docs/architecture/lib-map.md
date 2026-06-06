@@ -97,6 +97,7 @@ orchestration:
 - `mask_geometry.py`
 - `preprocess_reference.py`
 - `refmatch.py`
+- `spatial_fit_metrics.py`
 - `lib/cli/imaging.py`
 
 Target package: `lib/reference/`. `cli.imaging` may remain under `cli/` while command help
@@ -161,6 +162,7 @@ Every current root Python module is listed here so future additions are intentio
 - `workspaces.py` — web dashboard workspace metadata registry.
 - `refmatch.py` — image/reference matching helpers.
 - `render.py` — OpenSCAD render and section implementation.
+- `spatial_fit_metrics.py` — contour-first camera-fit diagnostics and warning metrics.
 - `strength.py` — deterministic structural-check dry-run report helpers.
 - `usdz.py` — USDZ export helpers.
 - `video.py` — video turntable and progress-frame planning / encoding helpers.

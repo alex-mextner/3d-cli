@@ -577,6 +577,300 @@ A result should be marked `warning` when:
 - optimizer parameters hit search bounds,
 - the proof panel is visually broken.
 
+## Spatial-awareness research log, 2026-06-06
+
+Fixed log format:
+
+```text
+hypothesis -> related algorithms/papers/tools -> assembled 3d-cli variant ->
+expected proof -> experiment/artifacts -> result -> decision
+```
+
+The standing goal is not just a higher score. A credible camera fit must show
+that the render and reference share a frame, the boundary error is small, and
+local camera changes have an error gradient that points back toward the hidden
+or intended pose when such a pose is identifiable.
+
+### Summary decision
+
+Global pose-sensitive monotonicity may be possible in many practical cases when
+it is defined over pose equivalence classes rather than raw poses. Exact
+symmetries and unobservable degrees of freedom should become
+plateaus/equivalent minima, not failures. The hard requirement is different:
+non-equivalent wrong views, such as a false backside selection on asymmetric
+geometry, must remain distinguishable.
+
+The practical assembly is a staged objective:
+
+1. Segment the visible subject and reject crop/scale failures.
+2. Declare or detect pose equivalence classes and unobservable degrees of
+   freedom.
+3. Retrieve a coarse view-bank candidate using contour descriptors and boundary
+   distance.
+4. Refine locally with a boundary signed-distance-field loss, symmetric
+   Chamfer, edge F1, p95 boundary distance, and coverage/border priors.
+5. Add depth/normal priors when the renderer can expose them; OpenSCAD PNG-only
+   renders currently provide only a weak RGB shading proxy.
+6. Prove local pose sensitivity and equivalence behavior with synthetic
+   hidden-camera truth before trusting the same objective on real photographs.
+
+### H1: image backplate loop
+
+Hypothesis: A standard camera pose plus reference backplate/plane and model
+overlay makes frame mismatch obvious and prevents hidden crop/scale wins.
+
+Related algorithms/papers/tools: CAD-on-image registration, visual hull
+inspection, OpenSCAD image render, alpha/backplate compositing, edge overlay
+review panels.
+
+Assembled 3d-cli variant: `3d fit-camera --spatial-report DIR` writes
+`proof_panel.png` as `backplate/reference | mask | fitted render | edge overlay`;
+`--backplate FILE` supplies the original photo/render when `--ref` is a derived
+mask, and `--trace FILE` feeds a candidate-evolution demo.
+
+Expected proof: A reviewer can see whether the model occupies the same image
+frame as the reference. The panel must not rely on area IoU text alone.
+
+Experiment/artifacts:
+
+- `/tmp/3d-spatial/synthetic-oracle/spatial-report/proof_panel.png`
+- `/tmp/3d-spatial/pantheon-gflash-front/contour/spatial-report/proof_panel.png`
+
+Result: The synthetic panel is readable and exposes residual boundary drift.
+The Pantheon panel fails visibly and is accompanied by a spatial warning.
+
+Decision: Keep. It is a required diagnostic artifact for fit-camera proofs.
+
+### H2: contour-first objective
+
+Hypothesis: Boundary metrics are harder to game than filled-area IoU because
+they penalize shape drift even when area overlap looks acceptable.
+
+Related algorithms/papers/tools: Hausdorff distance, symmetric Chamfer distance,
+edge F1 under a tolerance radius, distance transforms, ICP-like contour
+matching.
+
+Assembled 3d-cli variant: `3d fit-camera --objective contour` combines edge
+F1@4, symmetric Chamfer, boundary signed-distance-field loss, p95 boundary
+distance, coverage ratio, and border-touch penalties.
+
+Expected proof: On a synthetic oracle, boundary loss should be near zero at the
+hidden camera and should increase under local perturbations. On real photos,
+poor crop/scale must fail loudly instead of producing a plausible single score.
+
+Experiment/artifacts:
+
+- `/tmp/3d-spatial/synthetic-oracle/spatial-report/spatial_metrics.json`
+- `/tmp/3d-spatial/synthetic-oracle/spatial-report/edge_overlay.png`
+- `/tmp/3d-spatial/synthetic-oracle/pose-sensitivity/pose_sensitivity.json`
+- `/tmp/3d-spatial/synthetic-oracle/pose-sensitivity/pose_sensitivity.png`
+
+Result: Synthetic final fit is a partial pass: same-frame, sane coverage, no
+spatial warning, but not exact camera recovery. Hidden-camera perturbation
+sweeps are locally monotone for azimuth, elevation, distance, target-x, and
+target-z in the tested window.
+
+Decision: Keep as experimental objective. Do not make it an acceptance proof
+without synthetic local-gradient diagnostics or multi-view constraints.
+
+### H3: segmentation tiers
+
+Hypothesis: Camera fitting quality is capped by the reference mask. A better
+segmentation tier should reduce contour false positives and improve boundary
+metrics, while missing heavy resources must degrade gracefully.
+
+Related algorithms/papers/tools: OpenCV GrabCut/contours, `rembg` U2-Net
+salient mask, SAM/SAM2 prompted segmentation, Depth Anything V2 monocular depth.
+
+Assembled 3d-cli variant: `3d preprocess --force-fallback` is the baseline. The
+experiment harness emits optional `rembg` and Depth Anything commands; SAM2
+remains checkpoint-driven and manual.
+
+Expected proof: Mask panel shows the intended subject; contour metrics improve
+against the same model/camera search. Heavy tiers may skip, but must not leave
+missing artifacts.
+
+Experiment/artifacts:
+
+- `/tmp/3d-spatial/pantheon-gflash-front/preprocess/mask.png`
+- `/tmp/3d-spatial/pantheon-gflash-front/preprocess/depth.png`
+
+Result: Pantheon fallback GrabCut produced a usable negative baseline, but
+included background/occluder regions and later failed the real-image spatial
+diagnostic.
+
+Decision: Keep fallback as baseline only. Evaluate `rembg`/SAM2 separately
+before claiming real-photo success.
+
+### H4: multi-view and synthetic oracle
+
+Hypothesis: A single silhouette can accept wrong geometry or pose; a synthetic
+oracle with known camera and multi-view references exposes whether the optimizer
+is actually recovering pose rather than just matching projection area.
+
+Related algorithms/papers/tools: synthetic render oracle, multi-view
+consistency, visual hull constraints, coarse view banks.
+
+Assembled 3d-cli variant:
+`tools/spatial_fit_experiment.py --run-synthetic-oracle` creates an asymmetric
+SCAD model, renders a hidden-camera reference, runs contour fit, writes proof
+artifacts, and evaluates view-bank retrieval.
+
+Expected proof: The known view ranks top in a coarse view bank; local
+perturbation losses decrease toward truth; candidate-evolution frames show
+visible progress.
+
+Experiment/artifacts:
+
+- `/tmp/3d-spatial/synthetic-oracle/known_reference.png`
+- `/tmp/3d-spatial/synthetic-oracle/known_mask.png`
+- `/tmp/3d-spatial/synthetic-oracle/demo/candidate_evolution.gif`
+- `/tmp/3d-spatial/synthetic-oracle/demo/candidate_evolution.mp4`
+- `/tmp/3d-spatial/synthetic-oracle/view-bank/view_bank.json`
+- `/tmp/3d-spatial/synthetic-oracle/view-bank/view_bank_heatmap.png`
+
+Result: The coarse view bank ranked the hidden camera grid point top-1:
+azimuth 135 deg, elevation 20 deg, boundary SDF loss 0.112 px. The optimizer
+itself still landed on a different but plausible silhouette fit, so view-bank
+seeding is likely needed.
+
+Decision: Add view-bank seeding before local contour refinement in a future
+command change. Keep the current harness as the proof generator.
+
+### H5: real image diagnostic
+
+Hypothesis: Real references must warn/fail when segmentation, perspective, crop,
+or scale make a camera fit untrustworthy.
+
+Related algorithms/papers/tools: crop detection, bbox IoU, coverage ratio,
+centroid drift, Hausdorff/p95 boundary distance, visual QA panels.
+
+Assembled 3d-cli variant: `--spatial-report` includes `spatial_warning` when
+coverage, bbox, p95, Chamfer, or border conditions are suspicious.
+
+Expected proof: Pantheon negative control should not pass just because a
+silhouette overlap exists.
+
+Experiment/artifacts:
+
+- `/tmp/3d-spatial/pantheon-gflash-front/contour/camera.json`
+- `/tmp/3d-spatial/pantheon-gflash-front/contour/spatial-report/proof_panel.png`
+
+Result: Fail/warn as intended: `area_iou=0.2386`, `coverage_ratio=0.38`,
+`bbox_iou=0.27`, `edge_chamfer_px=25.4`,
+`boundary_sdf_loss_px=24.4`, `hausdorff_p95_px=73.1`.
+
+Decision: Keep warnings as diagnostic failures for real-image proofs.
+
+### H6: pose-sensitive hash or objective
+
+Hypothesis: The requested descriptor would have an error that decreases only
+when moving in the correct pose direction.
+
+Related algorithms/papers/tools: shape contexts, image moments,
+Fourier/Zernike descriptors, Chamfer matching, distance-transform matching,
+differentiable rendering, finite-difference gradients, view-bank retrieval,
+depth/normal consistency.
+
+Assembled 3d-cli variant:
+
+- Boundary signed-distance field and symmetric Chamfer in
+  `lib/spatial_fit_metrics.py`.
+- `--objective contour` consumes the SDF/Chamfer/F1/p95 mix.
+- `tools/spatial_fit_experiment.py --run-synthetic-oracle` writes
+  finite-difference sweeps for azimuth, elevation, distance, target-x, and
+  target-z.
+- The same harness writes a coarse view-bank retrieval heatmap over
+  azimuth/elevation.
+- Depth/normal mismatch is documented as unavailable for OpenSCAD PNG-only
+  renders; the harness records `rgb_shading_mse_proxy` only as a weak proxy.
+
+Expected proof: Around a synthetic hidden camera, stepping toward the truth
+lowers boundary SDF loss and stepping away raises it. A coarse view bank should
+rank the hidden view first or near-first before local refinement.
+
+Experiment/artifacts:
+
+- `/tmp/3d-spatial/synthetic-oracle/pose-sensitivity/pose_sensitivity.json`
+- `/tmp/3d-spatial/synthetic-oracle/pose-sensitivity/pose_sensitivity.png`
+- `/tmp/3d-spatial/synthetic-oracle/view-bank/view_bank.json`
+- `/tmp/3d-spatial/synthetic-oracle/view-bank/view_bank_heatmap.png`
+- `/tmp/3d-spatial/synthetic-oracle/symmetry-equivalence/symmetry_equivalence.json`
+- `/tmp/3d-spatial/synthetic-oracle/symmetry-equivalence/symmetry_equivalence.png`
+
+Result: Local monotonicity held in the synthetic asymmetric model for all five
+tested axes; each axis reported `monotonic_fraction=1.0` and
+`near_truth_all_toward_steps_improve=true`. The view bank also recovered the
+hidden azimuth/elevation as top-1. Equivalence diagnostics then separated three
+cases: sphere azimuth was an unobservable plateau with `loss_range_px=0.0`; the
+fourfold model accepted only azimuths `[45, 135, 225, 315]` as low-loss
+modulo-90 equivalents; the asymmetric +180 degree backside stayed
+non-equivalent with boundary SDF `6.46 px` versus truth `0.11 px`.
+
+Where raw-pose monotonicity fails but equivalence-aware monotonicity can still
+hold:
+
+- Exact object symmetries produce valid plateaus or multiple equivalent minima.
+- Unobservable degrees of freedom, such as sphere azimuth, should be reported as
+  unobservable rather than rejected.
+- Repeated architecture features can produce local minima where moving toward a
+  different repeated column lowers the contour loss; this is acceptable only if
+  the repetitions are declared or detected as equivalent.
+- Cropped real images can make the correct pose look worse than a wrong scaled
+  pose; this remains a diagnostic failure because it is not a pose equivalence.
+- Depth/normal priors require a renderer that exposes those buffers; OpenSCAD
+  PNG shading is not a reliable substitute.
+
+Decision: Reject a raw-pose global hash as the contract. Keep an
+equivalence-aware pose objective: plateaus are valid for declared/detected
+symmetries, while non-equivalent wrong views must stay high-loss or receive a
+diagnostic failure.
+
+### H7: symmetry-aware equivalence classes
+
+Hypothesis: A pose-sensitive objective can be globally useful if it is evaluated
+modulo symmetry/equivalence classes. Symmetry is not failure; accepting a
+non-equivalent backside on asymmetric geometry is failure.
+
+Related algorithms/papers/tools: quotient spaces over transformation groups,
+cyclic rotational symmetry detection, observability analysis, view-bank
+retrieval modulo symmetry, distance-transform matching.
+
+Assembled 3d-cli variant:
+
+- `tools/spatial_fit_experiment.py --run-synthetic-oracle` now writes a
+  `symmetry-equivalence` report.
+- Sphere azimuth sweep detects an unobservable DOF plateau.
+- A fourfold synthetic model checks azimuth modulo 90 degrees.
+- The asymmetric oracle compares the true azimuth against +180 degree backside
+  and marks it non-equivalent.
+
+Expected proof:
+
+- Sphere azimuth has small loss range and is labelled unobservable.
+- Fourfold low-loss minima match the declared modulo-90 equivalence class.
+- Asymmetric +180 degree backside has much higher boundary SDF loss than truth.
+
+Experiment/artifacts:
+
+- `/tmp/3d-spatial/synthetic-oracle/symmetry-equivalence/symmetry_equivalence.json`
+- `/tmp/3d-spatial/synthetic-oracle/symmetry-equivalence/symmetry_equivalence.png`
+- `/tmp/3d-spatial/synthetic-oracle/symmetry-equivalence/renders`
+
+Result: Pass for the assembled synthetic diagnostics:
+
+- Sphere azimuth loss range was `0.0 px`, and the DOF was labelled
+  unobservable.
+- Fourfold low-loss azimuths were `[45, 135, 225, 315]`, matching the declared
+  modulo-90 equivalence class; non-equivalent sampled azimuths had boundary SDF
+  about `5.36 px`.
+- Asymmetric truth had boundary SDF `0.11 px`; +180 degree backside had
+  `6.46 px`, so `backside_rejected=true`.
+
+Decision: Treat equivalence classes as first-class metadata/diagnostics before
+any future global pose-sensitive objective is promoted from research to command
+behavior.
+
 ## Immediate planned work
 
 1. Finish the boundary-first `fit-camera` implementation and e2e proof.

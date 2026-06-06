@@ -100,7 +100,7 @@ async def _render_png_async(
 
 async def eval_losses_async(
     model: str, params: list[list[float]], center: list[float],
-    w: int, h: int, refm: Any, tmp: str,
+    w: int, h: int, refm: Any, tmp: str, objective: str,
 ) -> list[float]:
     """Render a BATCH of camera params concurrently and return 1-IoU for each.
 
@@ -113,7 +113,7 @@ async def eval_losses_async(
         out = os.path.join(tmp, f"cand_{i}.png")
         png = await _render_png_async(model, cam_from_params(p, center), w, h, out, sem)
         if png is None:
-            return 1.0
+            return 9.0
         a = np.asarray(Image.open(png).convert("RGB").resize((w, h)), dtype=np.int16)
         try:
             os.remove(png)
@@ -126,19 +126,19 @@ async def eval_losses_async(
         # optimizer never locks onto degenerate poses in the first place.
         frac = float(rm.mean())
         if frac < 0.08 or frac > 0.92:
-            return 1.0
-        return 1.0 - iou(rm, refm)
+            return 9.0
+        return objective_loss(rm, refm, objective)
 
     return list(await asyncio.gather(*(one(i, p) for i, p in enumerate(params))))
 
 
 def eval_losses(
     model: str, params: list[list[float]], center: list[float],
-    w: int, h: int, refm: Any, tmp: str,
+    w: int, h: int, refm: Any, tmp: str, objective: str,
 ) -> list[float]:
     """Sync entry to the async batch evaluator (correct path when asyncio is fine; the
     work is genuinely parallel openscad renders)."""
-    return asyncio.run(eval_losses_async(model, params, center, w, h, refm, tmp))
+    return asyncio.run(eval_losses_async(model, params, center, w, h, refm, tmp, objective))
 
 
 # --------------------------------------------------------------------------- #
@@ -180,11 +180,13 @@ def model_bbox(
 # --------------------------------------------------------------------------- #
 # Masks                                                                        #
 # --------------------------------------------------------------------------- #
-def ref_mask(path: str, w: int, h: int, thresh: int) -> Any:
+def ref_mask(path: str, w: int, h: int, thresh: int, polarity: str = "dark") -> Any:
     im = Image.open(path).convert("L").resize((w, h))
     a = np.asarray(im, dtype=np.uint8)
-    # subject = darker than a light background
-    return (a < thresh).astype(np.uint8)
+    dark = a < thresh
+    if polarity == "light":
+        return np.logical_not(dark).astype(np.uint8)
+    return dark.astype(np.uint8)
 
 
 def render_to_array(model: str, cam: Sequence[float], w: int, h: int, tmp: str) -> Any:
@@ -215,6 +217,35 @@ def iou(m1: Any, m2: Any) -> float:
     inter = np.logical_and(m1, m2).sum()
     union = np.logical_or(m1, m2).sum()
     return float(inter) / float(union) if union else 0.0
+
+
+def objective_loss(render_mask_arr: Any, refm: Any, objective: str) -> float:
+    if objective == "area-iou":
+        return 1.0 - iou(render_mask_arr, refm)
+    from spatial_fit_metrics import spatial_fit_metrics
+
+    metrics = spatial_fit_metrics(render_mask_arr, refm)
+    diag = max(1.0, math.hypot(*render_mask_arr.shape))
+    contour_loss = 1.0 - metrics.edge_f1_at_4
+    contour_loss += 0.5 * min(1.0, metrics.edge_chamfer_px / diag)
+    contour_loss += 0.5 * min(1.0, metrics.boundary_sdf_loss_px / diag)
+    contour_loss += 0.25 * min(1.0, metrics.hausdorff_p95_px / diag)
+    contour_loss += 0.15 * min(1.0, abs(metrics.coverage_ratio - 1.0))
+    if metrics.render_touches_border and not metrics.reference_touches_border:
+        contour_loss += 0.25
+    return float(contour_loss)
+
+
+def require_spatial_metrics() -> None:
+    try:
+        import spatial_fit_metrics  # noqa: F401
+    except Exception as exc:
+        sys.stderr.write(
+            "fit-camera: missing python deps for contour/spatial report (scipy): %s\n"
+            "  Bootstrap the worktree: uv sync --extra dev --extra preprocess\n"
+            "  or install scipy in the active Python environment.\n" % exc
+        )
+        sys.exit(127)
 
 
 def ssim_masks(m1: Any, m2: Any) -> float:
@@ -296,6 +327,36 @@ def write_overlay(
     img.save(out_path)
 
 
+def write_edge_overlay(render_mask_arr: Any, refm: Any, out_path: str) -> None:
+    from spatial_fit_metrics import binary_contour
+
+    render_edge = binary_contour(render_mask_arr)
+    ref_edge = binary_contour(refm)
+    canvas = np.zeros((*refm.shape, 3), dtype=np.uint8)
+    canvas[..., 0] = (ref_edge * 255).astype(np.uint8)
+    canvas[..., 1] = (render_edge * 255).astype(np.uint8)
+    canvas[..., 2] = (render_edge * 255).astype(np.uint8)
+    Image.fromarray(canvas, "RGB").save(out_path)
+
+
+def write_spatial_panel(
+    ref_path: str,
+    refm: Any,
+    fit_png: str,
+    edge_overlay_png: str,
+    panel_png: str,
+) -> None:
+    h, w = refm.shape
+    ref = Image.open(ref_path).convert("RGB").resize((w, h))
+    mask = Image.fromarray((refm * 255).astype(np.uint8), "L").convert("RGB")
+    fit = Image.open(fit_png).convert("RGB").resize((w, h))
+    edge = Image.open(edge_overlay_png).convert("RGB").resize((w, h))
+    panel = Image.new("RGB", (w * 4, h), "white")
+    for idx, img in enumerate((ref, mask, fit, edge)):
+        panel.paste(img, (idx * w, 0))
+    panel.save(panel_png)
+
+
 # --------------------------------------------------------------------------- #
 def parse_size(
     s: str | None, default_wh: tuple[int, int], ref_aspect: float
@@ -328,10 +389,37 @@ def main() -> None:
     ap.add_argument("--final-size", default=None,
                     help="final fit render size 'WxH' (default: reference native resolution)")
     ap.add_argument("--thresh", type=int, default=150, help="ref subject darkness threshold (0..255)")
+    ap.add_argument(
+        "--mask-polarity",
+        choices=("dark", "light"),
+        default="dark",
+        help="which reference pixels are subject: dark raw photo (default) or light binary mask",
+    )
+    ap.add_argument(
+        "--backplate",
+        default=None,
+        help="original/reference photo to show in spatial proof panels when --ref is a mask",
+    )
     ap.add_argument("--rand", type=int, default=80, help="random-search samples")
     ap.add_argument("--refine", type=int, default=40, help="coordinate-descent refine steps")
     ap.add_argument("--draw-axes", action="store_true",
                     help="overlay PCA principal axis + bbox contour of both silhouettes")
+    ap.add_argument(
+        "--spatial-report",
+        default=None,
+        help="write contour-first metrics and proof panel into this directory",
+    )
+    ap.add_argument(
+        "--trace",
+        default=None,
+        help="write best-candidate trace JSONL for candidate-evolution demos",
+    )
+    ap.add_argument(
+        "--objective",
+        choices=("area-iou", "contour"),
+        default="area-iou",
+        help="search objective: area-iou (default) or contour edge F1/SDF/Chamfer/p95",
+    )
     ap.add_argument("--seed", type=int, default=7, help="RNG seed (reproducible search)")
     ap.add_argument(
         "--el-range", default="-45,85",
@@ -346,6 +434,10 @@ def main() -> None:
         sys.exit(f"fit-camera: model not found: {args.model}")
     if not os.path.exists(args.ref):
         sys.exit(f"fit-camera: reference not found: {args.ref}")
+    if args.backplate and not os.path.exists(args.backplate):
+        sys.exit(f"fit-camera: backplate not found: {args.backplate}")
+    if args.objective == "contour" or args.spatial_report:
+        require_spatial_metrics()
 
     tmp = tempfile.mkdtemp(prefix="fitcam_")
 
@@ -371,12 +463,12 @@ def main() -> None:
     print(f"model bbox: center={[round(x,2) for x in center]} diag={diag:.2f}mm", flush=True)
     print(f"opt-size={ow}x{oh}  final-size={fw}x{fh}  ref-aspect={ref_aspect:.3f}", flush=True)
 
-    refm = ref_mask(args.ref, ow, oh, args.thresh)
+    refm = ref_mask(args.ref, ow, oh, args.thresh, args.mask_polarity)
     if refm.sum() == 0:
         print("fit-camera: WARN reference mask is empty (try a higher --thresh)", flush=True)
 
     def loss(p: list[float]) -> float:
-        return eval_losses(args.model, [p], center, ow, oh, refm, tmp)[0]
+        return eval_losses(args.model, [p], center, ow, oh, refm, tmp, args.objective)[0]
 
     # ---- elevation bounds from --el-range (geometric constraint, Tier 1 idea #3) --
     try:
@@ -397,18 +489,39 @@ def main() -> None:
     hi = [180.0, el_hi, 6.0 * diag, 1.0 * diag, 1.0 * diag]
     rng = np.random.default_rng(args.seed)
     best_p: list[float] | None = None
-    best_l = 2.0
+    best_l = float("inf")
+    trace_rows: list[dict[str, object]] = []
     # PARALLEL random search: sample all candidates up front, render the whole batch
     # concurrently (CPU-bound semaphore), then reduce. Same RNG seed => same samples =>
     # reproducible, just faster than one-render-at-a-time.
     print(f"random search ({args.rand} samples, up to {_RENDER_LIMIT} parallel renders)...",
           flush=True)
     samples = [[rng.uniform(lo[k], hi[k]) for k in range(5)] for _ in range(args.rand)]
-    losses = eval_losses(args.model, samples, center, ow, oh, refm, tmp)
+    losses = eval_losses(args.model, samples, center, ow, oh, refm, tmp, args.objective)
     for i, (p, loss_val) in enumerate(zip(samples, losses)):
         if loss_val < best_l:
             best_l, best_p = loss_val, p
-            print(f"  rand {i:3d}  IoU={1-loss_val:.3f}  {[round(x,1) for x in p]}", flush=True)
+            if args.objective == "area-iou":
+                score = max(0.0, 1.0 - loss_val)
+            elif args.trace:
+                score_mask = render_mask(args.model, cam_from_params(p, center), ow, oh, tmp)
+                score = iou(score_mask, refm) if score_mask is not None else 0.0
+            else:
+                score = None
+            if args.trace:
+                trace_rows.append(
+                    {
+                        "phase": "random",
+                        "iteration": i,
+                        "loss": round(loss_val, 6),
+                        "iou": round(score or 0.0, 6),
+                        "params": [round(float(x), 6) for x in p],
+                    }
+                )
+            if score is None:
+                print(f"  rand {i:3d}  loss={loss_val:.3f}  {[round(x,1) for x in p]}", flush=True)
+            else:
+                print(f"  rand {i:3d}  loss={loss_val:.3f}  IoU={score:.3f}  {[round(x,1) for x in p]}", flush=True)
     if best_p is None:
         best_p = [(lo[k] + hi[k]) / 2 for k in range(5)]
         best_l = loss(best_p)
@@ -430,19 +543,33 @@ def main() -> None:
                 q = list(best_p)
                 q[k] = min(max(q[k] + s, lo[k]), hi[k])
                 cands.append(q)
-            cl = eval_losses(args.model, cands, center, ow, oh, refm, tmp)
+            cl = eval_losses(args.model, cands, center, ow, oh, refm, tmp, args.objective)
             # same fixed order as the sequential version (+step before -step) so ties
             # resolve identically.
             for q, cand_loss in zip(cands, cl):
                 if cand_loss < best_l - 1e-4:
                     best_l, best_p, improved = cand_loss, q, True
+                    if args.trace:
+                        score_mask = render_mask(args.model, cam_from_params(q, center), ow, oh, tmp)
+                        score = iou(score_mask, refm) if score_mask is not None else 0.0
+                        trace_rows.append(
+                            {
+                                "phase": "refine",
+                                "iteration": _it,
+                                "coord": k,
+                                "loss": round(cand_loss, 6),
+                                "iou": round(score, 6),
+                                "params": [round(float(x), 6) for x in q],
+                            }
+                        )
         if not improved:
             step = [x * 0.5 for x in step]
             if max(step) < min_step:
                 break
 
-    iou_best = 1 - best_l
     cam = cam_from_params(best_p, center)
+    best_mask = render_mask(args.model, cam, ow, oh, tmp)
+    iou_best = iou(best_mask, refm) if best_mask is not None else 0.0
     cam_arg = ",".join(f"{v:.3f}" for v in cam)
     print(f"\nBEST IoU={iou_best:.3f}  camera={cam_arg}", flush=True)
 
@@ -450,6 +577,9 @@ def main() -> None:
     out_base = os.path.splitext(args.out)[0]
     fit_png = out_base + "_fit.png"
     overlay_png = out_base + "_overlay.png"
+    spatial_metrics: dict[str, float | bool | str | None] = {}
+    spatial_panel_png: str | None = None
+    edge_overlay_png: str | None = None
     os.makedirs(os.path.dirname(os.path.abspath(args.out)) or ".", exist_ok=True)
     sh([OPENSCAD, "--render", "-o", fit_png, f"--camera={cam_arg}",
         f"--imgsize={fw},{fh}", args.model])
@@ -463,8 +593,26 @@ def main() -> None:
     if render_arr is not None:
         rm_final = array_to_mask(render_arr)
         ssim_val = ssim_masks(rm_final, refm)
+        if args.spatial_report:
+            from spatial_fit_metrics import spatial_fit_metrics
+
+            os.makedirs(args.spatial_report, exist_ok=True)
+            edge_overlay_png = os.path.join(args.spatial_report, "edge_overlay.png")
+            spatial_panel_png = os.path.join(args.spatial_report, "proof_panel.png")
+            write_edge_overlay(rm_final, refm, edge_overlay_png)
+            write_spatial_panel(args.backplate or args.ref, refm, fit_png, edge_overlay_png, spatial_panel_png)
+            spatial_metrics = spatial_fit_metrics(rm_final, refm).as_dict()
+            metrics_path = os.path.join(args.spatial_report, "spatial_metrics.json")
+            with open(metrics_path, "w") as f:
+                json.dump(spatial_metrics, f, indent=2)
     else:
         ssim_val = 0.0
+
+    if args.trace:
+        os.makedirs(os.path.dirname(os.path.abspath(args.trace)) or ".", exist_ok=True)
+        with open(args.trace, "w") as f:
+            for row in trace_rows:
+                f.write(json.dumps(row) + "\n")
 
     data = {
         "camera_arg": cam_arg,
@@ -473,14 +621,24 @@ def main() -> None:
                            [round(x, 3) for x in best_p])),
         "center": [round(x, 3) for x in center],
         "iou": round(iou_best, 4),
+        "objective": args.objective,
+        "objective_loss": round(best_l, 6),
         "ssim": round(ssim_val, 4),
         "model_diag": round(diag, 3),
         "opt_size": f"{ow}x{oh}",
         "final_size": f"{fw}x{fh}",
         "ref": args.ref,
+        "backplate": args.backplate,
+        "mask_polarity": args.mask_polarity,
         "fit_render": fit_png,
         "overlay": overlay_png,
+        "spatial_metrics": spatial_metrics,
+        "spatial_panel": spatial_panel_png,
+        "edge_overlay": edge_overlay_png,
+        "trace": args.trace,
     }
+    if spatial_metrics.get("spatial_warning"):
+        print(f"fit-camera: WARN {spatial_metrics['spatial_warning']}", flush=True)
     with open(args.out, "w") as f:
         json.dump(data, f, indent=2)
     print(f"saved {args.out}", flush=True)

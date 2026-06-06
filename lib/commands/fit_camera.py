@@ -13,6 +13,7 @@ Examples:
   3d fit-camera model.scad ref.jpg
   3d fit-camera model.scad ref.jpg --out match/camera.json --draw-axes
   3d fit-camera examples/cube.scad ref.png --rand 8 --refine 3   # quick smoke
+  3d fit-camera model.scad mask.png --mask-polarity light --backplate ref.jpg --objective contour --spatial-report match/spatial --trace match/trace.jsonl
 
 ROADMAP §7: "3d fit-camera — silhouette-IoU camera pose fitting (bbox-derived bounds),
   saves camera.json, writes fit render + overlay. Pose freeze: hold the pose fixed
@@ -41,11 +42,16 @@ Options:
   --opt-size WxH        optimization render size (default ~300px wide @ ref aspect)
   --final-size WxH      final fit render size (default: reference native resolution)
   --thresh N            ref subject darkness threshold 0..255 (default 150)
+  --mask-polarity P     subject polarity: dark raw photo (default) or light binary mask
+  --backplate FILE      original/reference photo to show in spatial proof panels
   --rand N              random-search samples (default 80)
   --refine N            coordinate-descent refine steps (default 40)
   --seed N              RNG seed for reproducibility (default 7)
   --el-range lo,hi      elevation search range in degrees (default -45,85); -89,89 restores full sphere
   --draw-axes           overlay PCA principal axis + bbox contour of both silhouettes
+  --spatial-report DIR  write contour metrics + proof_panel.png for spatial diagnostics
+  --trace FILE          write best-candidate trace JSONL for demo/video tooling
+  --objective NAME      area-iou (default) or contour edge F1/SDF/Chamfer/p95
 
 Use the result:
   openscad --render --camera="$(jq -r .camera_arg camera.json)" -o view.png model.scad
@@ -54,9 +60,25 @@ Examples:
   3d fit-camera model.scad ref.jpg
   3d fit-camera model.scad ref.jpg --out match/camera.json --draw-axes
   3d fit-camera examples/cube.scad ref.png --rand 8 --refine 3   # quick smoke
-  3d fit-camera model.scad ref.jpg --el-range -20,75 --seed 11"""
+  3d fit-camera model.scad ref.jpg --el-range -20,75 --seed 11
+  3d fit-camera model.scad mask.png --mask-polarity light --backplate ref.jpg --objective contour --spatial-report match/spatial --trace match/trace.jsonl"""
 
-_VALUE_FLAGS = {"--out", "--center", "--opt-size", "--final-size", "--thresh", "--rand", "--refine", "--el-range", "--seed"}
+_VALUE_FLAGS = {
+    "--out",
+    "--center",
+    "--opt-size",
+    "--final-size",
+    "--thresh",
+    "--mask-polarity",
+    "--backplate",
+    "--rand",
+    "--refine",
+    "--el-range",
+    "--seed",
+    "--spatial-report",
+    "--trace",
+    "--objective",
+}
 _BOOL_FLAGS = {"--draw-axes"}
 
 
@@ -79,12 +101,18 @@ def run(argv: list[str]) -> int:
     i = 2
     rest = argv
     n = len(rest)
+    needs_spatial_metrics = False
     while i < n:
         a = rest[i]
         if a in _VALUE_FLAGS:
             if i + 1 >= n:
                 raise UsageError(f"option {a} needs a value", command="fit-camera")
-            args += [a, rest[i + 1]]
+            value = rest[i + 1]
+            if a == "--backplate" and not os.path.isfile(value):
+                raise InputNotFound(value, command="fit-camera")
+            if a == "--spatial-report" or (a == "--objective" and value == "contour"):
+                needs_spatial_metrics = True
+            args += [a, value]
             i += 2
         elif a in _BOOL_FLAGS:
             args.append(a)
@@ -93,7 +121,8 @@ def run(argv: list[str]) -> int:
             print(USAGE)
             raise UsageError(f"unknown option '{a}'", command="fit-camera")
 
-    return exec_tool("numpy,pillow", "fit_camera.py", args)
+    deps = "numpy,pillow,scipy" if needs_spatial_metrics else "numpy,pillow"
+    return exec_tool(deps, "fit_camera.py", args)
 
 
 COMMAND = Command(
