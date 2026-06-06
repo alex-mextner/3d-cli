@@ -490,6 +490,42 @@ kinematics:
     assert "Traceback" not in result.stderr
 
 
+def test_user_turns_gate_and_score_artifacts_into_a_readable_report(tmp_path: Path) -> None:
+    """Report summarizes existing CLI artifacts without rerunning expensive tools."""
+    check_log = tmp_path / "check.log"
+    score_log = tmp_path / "score.log"
+    report_json = tmp_path / "report.json"
+    check_log.write_text(
+        "MANIFOLD PASS mesh clean\nPRINTABILITY WARN brim suggested\n>>> CHECK: PASS\n",
+        encoding="utf-8",
+    )
+    score_log.write_text("IoU=0.875\nAE=12\n", encoding="utf-8")
+
+    text = _run_3d(tmp_path, "report", "--title", "Reference pass", str(check_log), str(score_log))
+
+    assert text.returncode == 0, text.stderr
+    assert "Reference pass" in text.stdout
+    assert "Overall: WARN" in text.stdout
+    assert "MANIFOLD PASS" in text.stdout
+    assert "IoU=0.875" in text.stdout
+
+    json_result = _run_3d(
+        tmp_path,
+        "report",
+        "--json",
+        str(check_log),
+        str(score_log),
+        "-o",
+        str(report_json),
+    )
+
+    assert json_result.returncode == 0, json_result.stderr
+    payload = json.loads(report_json.read_text(encoding="utf-8"))
+    assert payload["overall"] == "WARN"
+    assert [value["name"] for value in payload["values"]] == ["AE", "IoU"]
+    assert "Traceback" not in text.stderr + json_result.stderr
+
+
 def test_user_gets_animation_usage_when_model_is_missing(tmp_path: Path) -> None:
     """Animate without a model stays readable and does not touch render tools."""
     result = _run_3d(tmp_path, "animate")
