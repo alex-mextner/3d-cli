@@ -4,6 +4,7 @@ import math
 
 import numpy as np
 
+from fit_camera_math import cam_from_params, fit_status_from_spatial_metrics, stratified_samples
 from spatial_fit_metrics import binary_contour, boundary_sdf_loss, signed_boundary_distance, spatial_fit_metrics
 
 
@@ -83,3 +84,42 @@ def test_signed_boundary_distance_has_expected_signs() -> None:
     assert sdf[14, 14] < 0.0
     assert sdf[4, 4] > 0.0
     assert sdf[8, 8] == 0.0
+
+
+def test_fit_status_accepts_clean_contour_metrics() -> None:
+    metrics = spatial_fit_metrics(_square(8, 8, 20, 20), _square(8, 8, 20, 20)).as_dict()
+
+    status, warnings = fit_status_from_spatial_metrics(metrics)
+
+    assert status == "ok"
+    assert warnings == []
+
+
+def test_fit_status_rejects_boundary_miss_even_when_area_exists() -> None:
+    reference = _square(5, 5, 25, 25)
+    render = _square(14, 14, 31, 31)
+    metrics = spatial_fit_metrics(render, reference).as_dict()
+
+    status, warnings = fit_status_from_spatial_metrics(metrics)
+
+    assert status in {"failed", "warning"}
+    assert warnings
+
+
+def test_cam_from_params_supports_y_pan_without_breaking_old_shape() -> None:
+    old = cam_from_params([0.0, 0.0, 10.0, 1.0, 3.0], [5.0, 6.0, 7.0])
+    new = cam_from_params([0.0, 0.0, 10.0, 1.0, 2.0, 3.0], [5.0, 6.0, 7.0])
+
+    assert old == [16.0, 6.0, 10.0, 6.0, 6.0, 10.0]
+    assert new == [16.0, 8.0, 10.0, 6.0, 8.0, 10.0]
+
+
+def test_stratified_samples_preserves_range_under_budget() -> None:
+    samples = [[float(i)] for i in range(100)]
+
+    subset = stratified_samples(samples, 5)
+
+    assert subset[0] == [0.0]
+    assert subset[-1] == [99.0]
+    assert len(subset) == 5
+    assert len({item[0] for item in subset}) == 5

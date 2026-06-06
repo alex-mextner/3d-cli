@@ -2,9 +2,9 @@
 
 WHAT: searches for the camera pose (distance, pan, elevation) that makes a rendered
   silhouette overlap maximally with a reference photo, then saves that pose as
-  camera.json for locked downstream renders. Current artifacts are diagnostics: they do
-  not yet include the durable success/warning/failure/diagnostic-only status required for
-  accepted proof.
+  camera.json for locked downstream renders. Current artifacts are conservative:
+  camera.json includes fit_status/diagnostic_only, and only fit_status=ok can be
+  treated as reusable proof after human visual review.
 
 WHY: a model and a reference photo almost never start aligned. A drifting pose makes
   the match-loop score meaningless ("never improves for no reason" — the top failure
@@ -16,6 +16,7 @@ Examples:
   3d fit-camera model.scad ref.jpg --out match/camera.json --draw-axes
   3d fit-camera examples/cube.scad ref.png --rand 8 --refine 3   # quick smoke
   3d fit-camera model.scad mask.png --mask-polarity light --backplate ref.jpg --objective contour --spatial-report match/spatial --trace match/trace.jsonl
+  3d fit-camera model.scad mask.png --mask-polarity light --proof-reference ref.jpg --search-mode proof --out match/camera.json
 
 ROADMAP §7: "3d fit-camera — silhouette-IoU camera pose fitting (bbox-derived bounds),
   saves camera.json, writes fit render + overlay. Pose freeze: hold the pose fixed
@@ -36,8 +37,8 @@ USAGE = """3d fit-camera <model.scad> <reference> [options]
   Search bounds (distance/pan/steps) are derived from the model's bbox diagonal;
   the look-at center auto-estimates from the bbox centroid unless --center given.
   Writes camera.json + <out>_fit.png (full-res fit) + <out>_overlay.png
-  (render-cyan over reference-red ghost). Current outputs are diagnostics and do
-  not yet contain the durable result label required for accepted proof.
+  (render-cyan over reference-red ghost). camera.json includes fit_status and
+  diagnostic_only; only fit_status=ok is reusable proof after visual review.
 
 Options:
   --out FILE            output JSON (default ./camera.json)
@@ -46,9 +47,13 @@ Options:
   --final-size WxH      final fit render size (default: reference native resolution)
   --thresh N            ref subject darkness threshold 0..255 (default 150)
   --mask-polarity P     subject polarity: dark raw photo (default) or light binary mask
+  --ref-polarity P      alias for --mask-polarity: dark or bright
   --backplate FILE      original/reference photo to show in spatial proof panels
+  --proof-reference FILE alias for --backplate; keeps the original photo in proof panels
   --rand N              random-search samples (default 80)
   --refine N            coordinate-descent refine steps (default 40)
+  --search-mode MODE    normal (default) or proof; proof broadens the search budget/bounds
+                       and searches x/y/z look-at pan instead of x/z only
   --seed N              RNG seed for reproducibility (default 7)
   --el-range lo,hi      elevation search range in degrees (default -45,85); -89,89 restores full sphere
   --draw-axes           overlay PCA principal axis + bbox contour of both silhouettes
@@ -64,7 +69,8 @@ Examples:
   3d fit-camera model.scad ref.jpg --out match/camera.json --draw-axes
   3d fit-camera examples/cube.scad ref.png --rand 8 --refine 3   # quick smoke
   3d fit-camera model.scad ref.jpg --el-range -20,75 --seed 11
-  3d fit-camera model.scad mask.png --mask-polarity light --backplate ref.jpg --objective contour --spatial-report match/spatial --trace match/trace.jsonl"""
+  3d fit-camera model.scad mask.png --mask-polarity light --backplate ref.jpg --objective contour --spatial-report match/spatial --trace match/trace.jsonl
+  3d fit-camera model.scad mask.png --mask-polarity light --proof-reference ref.jpg --search-mode proof --out match/camera.json"""
 
 _VALUE_FLAGS = {
     "--out",
@@ -73,9 +79,12 @@ _VALUE_FLAGS = {
     "--final-size",
     "--thresh",
     "--mask-polarity",
+    "--ref-polarity",
     "--backplate",
+    "--proof-reference",
     "--rand",
     "--refine",
+    "--search-mode",
     "--el-range",
     "--seed",
     "--spatial-report",
@@ -107,15 +116,43 @@ def run(argv: list[str]) -> int:
     needs_spatial_metrics = False
     while i < n:
         a = rest[i]
-        if a in _VALUE_FLAGS:
+        if "=" in a and a.split("=", 1)[0] in _VALUE_FLAGS:
+            flag, value = a.split("=", 1)
+            if not value:
+                raise UsageError(f"option {flag} needs a value", command="fit-camera")
+            if flag in {"--backplate", "--proof-reference"} and not os.path.isfile(value):
+                raise InputNotFound(value, command="fit-camera")
+            if flag == "--proof-reference":
+                args += ["--backplate", value]
+            elif flag == "--ref-polarity":
+                args += ["--mask-polarity", "light" if value == "bright" else value]
+            else:
+                args.append(a)
+            if (
+                flag == "--spatial-report"
+                or (flag == "--search-mode" and value == "proof")
+                or (flag == "--objective" and value == "contour")
+            ):
+                needs_spatial_metrics = True
+            i += 1
+        elif a in _VALUE_FLAGS:
             if i + 1 >= n:
                 raise UsageError(f"option {a} needs a value", command="fit-camera")
             value = rest[i + 1]
-            if a == "--backplate" and not os.path.isfile(value):
+            if a in {"--backplate", "--proof-reference"} and not os.path.isfile(value):
                 raise InputNotFound(value, command="fit-camera")
-            if a == "--spatial-report" or (a == "--objective" and value == "contour"):
+            if a == "--proof-reference":
+                args += ["--backplate", value]
+            elif a == "--ref-polarity":
+                args += ["--mask-polarity", "light" if value == "bright" else value]
+            else:
+                args += [a, value]
+            if (
+                a == "--spatial-report"
+                or (a == "--search-mode" and value == "proof")
+                or (a == "--objective" and value == "contour")
+            ):
                 needs_spatial_metrics = True
-            args += [a, value]
             i += 2
         elif a in _BOOL_FLAGS:
             args.append(a)

@@ -59,6 +59,19 @@ union() {
     )
 
 
+def _write_original_reference_ppm(path: Path) -> None:
+    rows: list[str] = []
+    width = 10
+    height = 6
+    for y in range(height):
+        for x in range(width):
+            if 2 <= x <= 7 and 1 <= y <= 4:
+                rows.append(f"{40 + x * 8} {80 + y * 10} {150 + x * 4}")
+            else:
+                rows.append(f"{215 - y * 7} {220 - x * 3} {205 + y * 5}")
+    path.write_text(f"P3\n{width} {height}\n255\n" + "\n".join(rows) + "\n", encoding="ascii")
+
+
 def test_fit_camera_quick_search_writes_pose_and_overlay(tmp_path: Path) -> None:
     """A user locks a camera pose before comparing future silhouette scores."""
     require_working_openscad()
@@ -106,6 +119,163 @@ def test_fit_camera_quick_search_writes_pose_and_overlay(tmp_path: Path) -> None
     assert isinstance(payload["ssim"], float)
     assert camera.with_name("camera_fit.png").exists()
     assert camera.with_name("camera_overlay.png").exists()
+
+
+def test_fit_camera_proof_mode_writes_fail_closed_status_and_artifacts(tmp_path: Path) -> None:
+    """Proof mode writes reusable audit artifacts even when the fit is not accepted."""
+    require_working_openscad()
+    require_python_module("numpy")
+    require_python_module("PIL")
+    require_python_module("scipy")
+    model = tmp_path / "block.scad"
+    reference = tmp_path / "ref.pgm"
+    proof_reference = tmp_path / "original_ref.pgm"
+    camera = tmp_path / "proof" / "camera.json"
+    _camera_model(model)
+    write_pgm(
+        reference,
+        [
+            "0000000000",
+            "0011111100",
+            "0011111100",
+            "0011111100",
+            "0011111100",
+            "0000000000",
+        ],
+    )
+    _write_original_reference_ppm(proof_reference)
+
+    result = run_cli(
+        tmp_path,
+        "fit-camera",
+        str(model),
+        str(reference),
+        "--mask-polarity",
+        "light",
+        "--proof-reference",
+        str(proof_reference),
+        "--search-mode",
+        "proof",
+        "--out",
+        str(camera),
+        "--rand",
+        "1",
+        "--refine",
+        "0",
+        "--opt-size",
+        "48x32",
+        "--final-size",
+        "48x32",
+        timeout=240,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    payload = json.loads(camera.read_text(encoding="utf-8"))
+    assert payload["objective"] == "contour"
+    assert payload["proof_reference"] == str(proof_reference)
+    assert payload["fit_status"] in {"ok", "warning", "failed"}
+    assert payload["diagnostic_only"] is (payload["fit_status"] != "ok")
+    assert isinstance(payload["warnings"], list)
+    assert "STATUS=" in result.stdout
+    assert payload["spatial_panel"] == str(tmp_path / "proof" / "camera_spatial" / "proof_panel.png")
+    assert payload["edge_overlay"] == str(tmp_path / "proof" / "camera_spatial" / "edge_overlay.png")
+    metrics_path = tmp_path / "proof" / "camera_spatial" / "spatial_metrics.json"
+    assert metrics_path.exists()
+    assert Path(payload["spatial_panel"]).exists()
+    assert Path(payload["edge_overlay"]).exists()
+    assert Path(payload["fit_render"]).exists()
+    assert Path(payload["overlay"]).exists()
+    assert png_size(Path(payload["fit_render"])) == (48, 32)
+    assert png_size(Path(payload["overlay"])) == (48, 32)
+    assert png_size(Path(payload["spatial_panel"])) == (192, 56)
+    assert png_size(Path(payload["edge_overlay"])) == (48, 32)
+    metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+    assert {
+        "area_iou",
+        "edge_f1@4",
+        "edge_chamfer_px",
+        "boundary_sdf_loss_px",
+        "hausdorff_p95_px",
+        "bbox_iou",
+        "spatial_warning",
+    } <= set(metrics)
+
+    contour_camera = tmp_path / "contour" / "camera.json"
+    contour_result = run_cli(
+        tmp_path,
+        "fit-camera",
+        str(model),
+        str(reference),
+        "--mask-polarity",
+        "light",
+        "--objective",
+        "contour",
+        "--spatial-report",
+        "",
+        "--out",
+        str(contour_camera),
+        "--rand",
+        "1",
+        "--refine",
+        "0",
+        "--opt-size",
+        "48x32",
+        "--final-size",
+        "48x32",
+        timeout=240,
+    )
+
+    assert contour_result.returncode == 0, contour_result.stdout + contour_result.stderr
+    contour_payload = json.loads(contour_camera.read_text(encoding="utf-8"))
+    assert contour_payload["fit_status"] in {"warning", "failed"}
+    assert contour_payload["diagnostic_only"] is True
+    assert any("distinct non-mask" in warning for warning in contour_payload["warnings"])
+    assert contour_payload["spatial_panel"] == str(tmp_path / "contour" / "camera_spatial" / "proof_panel.png")
+    assert Path(contour_payload["spatial_panel"]).exists()
+    assert (tmp_path / "contour" / "camera_spatial" / "spatial_metrics.json").exists()
+
+    copied_mask = tmp_path / "copied_mask.pgm"
+    write_pgm(
+        copied_mask,
+        [
+            "0000000000",
+            "0011111100",
+            "0011111100",
+            "0011111100",
+            "0011111100",
+            "0000000000",
+        ],
+    )
+    copied_mask_camera = tmp_path / "copied-mask-proof" / "camera.json"
+    copied_mask_result = run_cli(
+        tmp_path,
+        "fit-camera",
+        str(model),
+        str(reference),
+        "--mask-polarity",
+        "light",
+        "--proof-reference",
+        str(copied_mask),
+        "--search-mode",
+        "proof",
+        "--out",
+        str(copied_mask_camera),
+        "--rand",
+        "1",
+        "--refine",
+        "0",
+        "--opt-size",
+        "48x32",
+        "--final-size",
+        "48x32",
+        timeout=240,
+    )
+
+    assert copied_mask_result.returncode == 0, copied_mask_result.stdout + copied_mask_result.stderr
+    copied_mask_payload = json.loads(copied_mask_camera.read_text(encoding="utf-8"))
+    assert copied_mask_payload["fit_status"] in {"warning", "failed"}
+    assert copied_mask_payload["diagnostic_only"] is True
+    assert any("distinct non-mask" in warning for warning in copied_mask_payload["warnings"])
 
 
 def test_fit_camera_story_renders_reference_then_rejects_bad_proxy_model(tmp_path: Path) -> None:

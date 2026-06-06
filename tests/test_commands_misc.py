@@ -237,6 +237,20 @@ def test_fit_camera_seed_forwarded(monkeypatch: Any) -> None:
     assert seen[seen.index("--seed") + 1] == "11"
 
 
+def test_fit_camera_value_flag_equals_form(monkeypatch: Any) -> None:
+    seen: list[str] = []
+
+    def fake_exec_tool(deps: str, script: str, args: list[str]) -> int:
+        seen[:] = args
+        return 0
+
+    monkeypatch.setattr("os.path.isfile", lambda p: True)
+    monkeypatch.setattr("cli.env.find_openscad", lambda: "/usr/bin/openscad")
+    monkeypatch.setattr("commands.fit_camera.exec_tool", fake_exec_tool)
+    assert fit_run(["model.scad", "ref.png", "--el-range=-15,70"]) == 0
+    assert "--el-range=-15,70" in seen
+
+
 def test_fit_camera_spatial_flags_forwarded(monkeypatch: Any) -> None:
     seen: list[str] = []
     seen_deps = ""
@@ -277,6 +291,61 @@ def test_fit_camera_spatial_flags_forwarded(monkeypatch: Any) -> None:
     assert seen[seen.index("--backplate") + 1] == "photo.jpg"
 
 
+def test_fit_camera_proof_aliases_forward_to_current_surface(monkeypatch: Any) -> None:
+    seen: list[str] = []
+    seen_deps = ""
+
+    def fake_exec_tool(deps: str, script: str, args: list[str]) -> int:
+        nonlocal seen_deps
+        seen_deps = deps
+        seen[:] = args
+        return 0
+
+    monkeypatch.setattr("os.path.isfile", lambda p: True)
+    monkeypatch.setattr("cli.env.find_openscad", lambda: "/usr/bin/openscad")
+    monkeypatch.setattr("commands.fit_camera.exec_tool", fake_exec_tool)
+
+    assert (
+        fit_run(
+            [
+                "model.scad",
+                "mask.png",
+                "--ref-polarity",
+                "bright",
+                "--proof-reference",
+                "photo.jpg",
+                "--search-mode",
+                "proof",
+            ]
+        )
+        == 0
+    )
+
+    assert seen_deps == "numpy,pillow,scipy"
+    assert "--ref-polarity" not in seen
+    assert "--proof-reference" not in seen
+    assert seen[seen.index("--mask-polarity") + 1] == "light"
+    assert seen[seen.index("--backplate") + 1] == "photo.jpg"
+    assert seen[seen.index("--search-mode") + 1] == "proof"
+
+
+def test_fit_camera_explicit_normal_search_keeps_light_deps(monkeypatch: Any) -> None:
+    seen_deps = ""
+
+    def fake_exec_tool(deps: str, script: str, args: list[str]) -> int:
+        nonlocal seen_deps
+        seen_deps = deps
+        return 0
+
+    monkeypatch.setattr("os.path.isfile", lambda p: True)
+    monkeypatch.setattr("cli.env.find_openscad", lambda: "/usr/bin/openscad")
+    monkeypatch.setattr("commands.fit_camera.exec_tool", fake_exec_tool)
+
+    assert fit_run(["model.scad", "ref.png", "--search-mode", "normal"]) == 0
+
+    assert seen_deps == "numpy,pillow"
+
+
 def test_fit_camera_missing_backplate() -> None:
     model = "model.scad"
     ref = "ref.png"
@@ -289,6 +358,20 @@ def test_fit_camera_missing_backplate() -> None:
         mp.setattr("cli.env.find_openscad", lambda: "/usr/bin/openscad")
         with pytest.raises(InputNotFound):
             fit_run([model, ref, "--backplate", "missing.jpg"])
+
+
+def test_fit_camera_missing_proof_reference() -> None:
+    model = "model.scad"
+    ref = "ref.png"
+
+    def exists(path: str) -> bool:
+        return path in {model, ref}
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("os.path.isfile", exists)
+        mp.setattr("cli.env.find_openscad", lambda: "/usr/bin/openscad")
+        with pytest.raises(InputNotFound):
+            fit_run([model, ref, "--proof-reference", "missing.jpg"])
 
 
 def test_fit_camera_value_flag_needs_value(monkeypatch: Any) -> None:

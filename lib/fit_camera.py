@@ -35,6 +35,8 @@ import sys
 import tempfile
 from typing import Any, Sequence
 
+from fit_camera_math import cam_from_params, fit_status_from_spatial_metrics, stratified_samples
+
 try:
     import numpy as np
     from PIL import Image, ImageDraw
@@ -76,6 +78,7 @@ OPENSCAD = find_openscad()
 # Bound concurrent openscad renders so the parallel random-search batch can't fork
 # hundreds of processes; one per CPU is a good default for CGAL-bound renders.
 _RENDER_LIMIT = max(1, os.cpu_count() or 4)
+MAX_PROOF_ANCHOR_SAMPLES = 720
 
 
 def sh(cmd: list[str]) -> subprocess.CompletedProcess[str]:
@@ -208,6 +211,20 @@ def array_to_mask(a: Any) -> Any:
     return (diff > 30).astype(np.uint8)
 
 
+def image_looks_like_binary_mask(path: str) -> bool:
+    """Return true for proof references that are probably just copied masks."""
+    try:
+        arr = np.asarray(Image.open(path).convert("L"), dtype=np.uint8)
+    except Exception:
+        return False
+    unique = np.unique(arr)
+    if unique.size <= 4:
+        return True
+    extreme_fraction = float(((arr <= 8) | (arr >= 247)).mean())
+    mid_fraction = float(((arr > 16) & (arr < 239)).mean())
+    return extreme_fraction > 0.995 and mid_fraction < 0.005
+
+
 def render_mask(model: str, cam: Sequence[float], w: int, h: int, tmp: str) -> Any:
     a = render_to_array(model, cam, w, h, tmp)
     return None if a is None else array_to_mask(a)
@@ -267,14 +284,82 @@ def ssim_masks(m1: Any, m2: Any) -> float:
     return float(num / den) if den else 0.0
 
 
-def cam_from_params(p: Sequence[float], center: Sequence[float]) -> list[float]:
-    az, el, dist, panx, panz = p
-    cx, cy, cz = center[0] + panx, center[1], center[2] + panz
-    ar, er = math.radians(az), math.radians(el)
-    ex = cx + dist * math.cos(er) * math.cos(ar)
-    ey = cy + dist * math.cos(er) * math.sin(ar)
-    ez = cz + dist * math.sin(er)
-    return [ex, ey, ez, cx, cy, cz]
+def _mask_bbox_xywh(mask: Any) -> tuple[int, int, int, int] | None:
+    ys, xs = np.nonzero(mask)
+    if xs.size == 0:
+        return None
+    x0, x1 = int(xs.min()), int(xs.max())
+    y0, y1 = int(ys.min()), int(ys.max())
+    return x0, y0, x1 - x0 + 1, y1 - y0 + 1
+
+
+def _range_values(lower: float, upper: float, step: float) -> list[float]:
+    values: list[float] = []
+    value = lower
+    while value <= upper + 1e-9:
+        values.append(round(value, 6))
+        value += step
+    if not values or not math.isclose(values[-1], upper, abs_tol=1e-6):
+        values.append(upper)
+    return values
+
+
+def anchor_camera_samples(
+    lo: Sequence[float],
+    hi: Sequence[float],
+    diag: float,
+    refm: Any,
+    render_size: tuple[int, int],
+    *,
+    proof: bool,
+) -> list[list[float]]:
+    """Deterministic coarse camera anchors before random search."""
+    w, h = render_size
+    bbox = _mask_bbox_xywh(refm)
+    if bbox is None:
+        ref_cx, ref_cy = w / 2.0, h / 2.0
+    else:
+        x, y, bw, bh = bbox
+        ref_cx, ref_cy = x + bw / 2.0, y + bh / 2.0
+    panx_hint = ((ref_cx / max(1.0, w)) - 0.5) * diag
+    panz_hint = (0.5 - (ref_cy / max(1.0, h))) * diag
+    az_values = _range_values(float(lo[0]), float(hi[0]), 30.0)
+    el_seed = (-15.0, 0.0, 15.0, 30.0, 45.0, 60.0) if proof else (-10.0, 20.0, 40.0)
+    el_values = list(dict.fromkeys(max(lo[1], min(hi[1], v)) for v in el_seed))
+    dist_mults = (0.75, 1.0, 1.25, 1.6, 2.2, 3.2, 4.6) if proof else (1.6, 2.7, 4.2)
+    dist_values = list(dict.fromkeys(max(lo[2], min(hi[2], diag * m)) for m in dist_mults))
+    pan_candidates = [
+        (0.0, 0.0, 0.0),
+        (panx_hint, 0.0, panz_hint),
+        (panx_hint - 0.18 * diag, 0.0, panz_hint),
+        (panx_hint + 0.18 * diag, 0.0, panz_hint),
+        (panx_hint, 0.0, panz_hint - 0.14 * diag),
+        (panx_hint, 0.0, panz_hint + 0.14 * diag),
+    ]
+    out: list[list[float]] = []
+    seen: set[tuple[float, ...]] = set()
+    for dist in dist_values:
+        for el in el_values:
+            for az in az_values:
+                for panx, pany, panz in pan_candidates:
+                    sample = [
+                        max(lo[0], min(hi[0], az)),
+                        max(lo[1], min(hi[1], el)),
+                        dist,
+                        max(lo[3], min(hi[3], panx)),
+                    ]
+                    if len(lo) == 6:
+                        sample.extend([
+                            max(lo[4], min(hi[4], pany)),
+                            max(lo[5], min(hi[5], panz)),
+                        ])
+                    else:
+                        sample.append(max(lo[4], min(hi[4], panz)))
+                    key = tuple(round(x, 3) for x in sample)
+                    if key not in seen:
+                        seen.add(key)
+                        out.append(sample)
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -407,6 +492,12 @@ def main() -> None:
     )
     ap.add_argument("--rand", type=int, default=80, help="random-search samples")
     ap.add_argument("--refine", type=int, default=40, help="coordinate-descent refine steps")
+    ap.add_argument(
+        "--search-mode",
+        choices=("normal", "proof"),
+        default="normal",
+        help="normal random search or slower proof search with broader near-camera distance",
+    )
     ap.add_argument("--draw-axes", action="store_true",
                     help="overlay PCA principal axis + bbox contour of both silhouettes")
     ap.add_argument(
@@ -441,6 +532,8 @@ def main() -> None:
         sys.exit(f"fit-camera: reference not found: {args.ref}")
     if args.backplate and not os.path.exists(args.backplate):
         sys.exit(f"fit-camera: backplate not found: {args.backplate}")
+    if args.search_mode == "proof":
+        args.objective = "contour"
     if args.objective == "contour" or args.spatial_report:
         require_spatial_metrics()
 
@@ -490,8 +583,13 @@ def main() -> None:
     # ---- search space DERIVED FROM bbox diagonal (generic, any scale) ----------
     #  azimuth: full 360°; elevation: constrained by --el-range (avoids underground poses).
     #  distance: 1.2..6x diagonal; pan: +/- one diagonal; centered offsets.
-    lo = [-180.0, el_lo, 1.2 * diag, -1.0 * diag, -1.0 * diag]
-    hi = [180.0, el_hi, 6.0 * diag, 1.0 * diag, 1.0 * diag]
+    dist_min = 0.65 * diag if args.search_mode == "proof" else 1.2 * diag
+    if args.search_mode == "proof":
+        lo = [-180.0, el_lo, dist_min, -1.0 * diag, -1.0 * diag, -1.0 * diag]
+        hi = [180.0, el_hi, 6.0 * diag, 1.0 * diag, 1.0 * diag, 1.0 * diag]
+    else:
+        lo = [-180.0, el_lo, dist_min, -1.0 * diag, -1.0 * diag]
+        hi = [180.0, el_hi, 6.0 * diag, 1.0 * diag, 1.0 * diag]
     rng = np.random.default_rng(args.seed)
     best_p: list[float] | None = None
     best_l = float("inf")
@@ -499,9 +597,24 @@ def main() -> None:
     # PARALLEL random search: sample all candidates up front, render the whole batch
     # concurrently (CPU-bound semaphore), then reduce. Same RNG seed => same samples =>
     # reproducible, just faster than one-render-at-a-time.
-    print(f"random search ({args.rand} samples, up to {_RENDER_LIMIT} parallel renders)...",
+    effective_rand = max(args.rand, 240) if args.search_mode == "proof" else args.rand
+    print(f"random search ({effective_rand} samples, mode={args.search_mode}, up to {_RENDER_LIMIT} parallel renders)...",
           flush=True)
-    samples = [[rng.uniform(lo[k], hi[k]) for k in range(5)] for _ in range(args.rand)]
+    n_params = len(lo)
+    anchor_pool = (
+        anchor_camera_samples(lo, hi, diag, refm, (ow, oh), proof=True)
+        if args.search_mode == "proof"
+        else []
+    )
+    max_anchor_budget = effective_rand
+    if args.search_mode == "proof":
+        max_anchor_budget = max(1, int(effective_rand * 0.75))
+    anchor_budget = min(MAX_PROOF_ANCHOR_SAMPLES, len(anchor_pool), max_anchor_budget)
+    anchors = stratified_samples(anchor_pool, anchor_budget)
+    random_count = max(0, effective_rand - len(anchors))
+    random_samples = [[rng.uniform(lo[k], hi[k]) for k in range(n_params)] for _ in range(random_count)]
+    samples = anchors + random_samples
+    print(f"  anchors={len(anchors)} random={len(random_samples)}", flush=True)
     losses = eval_losses(args.model, samples, center, ow, oh, refm, tmp, args.objective)
     for i, (p, loss_val) in enumerate(zip(samples, losses)):
         if loss_val < best_l:
@@ -528,7 +641,7 @@ def main() -> None:
             else:
                 print(f"  rand {i:3d}  loss={loss_val:.3f}  IoU={score:.3f}  {[round(x,1) for x in p]}", flush=True)
     if best_p is None:
-        best_p = [(lo[k] + hi[k]) / 2 for k in range(5)]
+        best_p = [(lo[k] + hi[k]) / 2 for k in range(n_params)]
         best_l = loss(best_p)
 
     # ---- coordinate-descent refine; steps scale with the diagonal --------------
@@ -538,11 +651,15 @@ def main() -> None:
     # CURRENT coordinate — a 2-way batch — so accuracy is identical, just the per-coord
     # pair renders concurrently.
     print("refine...", flush=True)
-    step = [12.0, 6.0, 0.08 * diag, 0.15 * diag, 0.12 * diag]
+    step = (
+        [12.0, 6.0, 0.08 * diag, 0.15 * diag, 0.15 * diag, 0.12 * diag]
+        if n_params == 6
+        else [12.0, 6.0, 0.08 * diag, 0.15 * diag, 0.12 * diag]
+    )
     min_step = max(0.5, 0.005 * diag)
     for _it in range(args.refine):
         improved = False
-        for k in range(5):
+        for k in range(n_params):
             cands: list[list[float]] = []
             for s in (step[k], -step[k]):
                 q = list(best_p)
@@ -582,6 +699,10 @@ def main() -> None:
     out_base = os.path.splitext(args.out)[0]
     fit_png = out_base + "_fit.png"
     overlay_png = out_base + "_overlay.png"
+    if args.spatial_report == "":
+        args.spatial_report = None
+    if (args.search_mode == "proof" or args.objective == "contour") and args.spatial_report is None:
+        args.spatial_report = out_base + "_spatial"
     spatial_metrics: dict[str, float | bool | str | None] = {}
     spatial_panel_png: str | None = None
     edge_overlay_png: str | None = None
@@ -595,23 +716,46 @@ def main() -> None:
 
     # SSIM between final render mask and reference mask (Tier 1 idea #4).
     # More stable than IoU on symmetric subjects where silhouette edges are ambiguous.
+    proof_status = "diagnostic-only"
+    proof_warnings = ["contour spatial metrics were not requested; run with --objective contour --spatial-report DIR"]
     if render_arr is not None:
         rm_final = array_to_mask(render_arr)
         ssim_val = ssim_masks(rm_final, refm)
-        if args.spatial_report:
+        if args.objective == "contour" or args.spatial_report:
             from spatial_fit_metrics import spatial_fit_metrics
 
-            os.makedirs(args.spatial_report, exist_ok=True)
-            edge_overlay_png = os.path.join(args.spatial_report, "edge_overlay.png")
-            spatial_panel_png = os.path.join(args.spatial_report, "proof_panel.png")
-            write_edge_overlay(rm_final, refm, edge_overlay_png)
-            write_spatial_panel(args.backplate or args.ref, refm, fit_png, edge_overlay_png, spatial_panel_png)
             spatial_metrics = spatial_fit_metrics(rm_final, refm).as_dict()
-            metrics_path = os.path.join(args.spatial_report, "spatial_metrics.json")
-            with open(metrics_path, "w") as f:
-                json.dump(spatial_metrics, f, indent=2)
+            proof_status, proof_warnings = fit_status_from_spatial_metrics(spatial_metrics)
+            proof_reference_is_mask = (
+                args.mask_polarity == "light"
+                and (
+                    not args.backplate
+                    or os.path.abspath(args.backplate) == os.path.abspath(args.ref)
+                    or image_looks_like_binary_mask(args.backplate)
+                )
+            )
+            if proof_reference_is_mask:
+                mask_proof_warning = (
+                    "mask-polarity light requires a distinct non-mask --backplate/--proof-reference "
+                    "original image before fit_status can be ok"
+                )
+                if proof_status == "ok":
+                    proof_status = "warning"
+                if mask_proof_warning not in proof_warnings:
+                    proof_warnings.append(mask_proof_warning)
+            if args.spatial_report:
+                os.makedirs(args.spatial_report, exist_ok=True)
+                edge_overlay_png = os.path.join(args.spatial_report, "edge_overlay.png")
+                spatial_panel_png = os.path.join(args.spatial_report, "proof_panel.png")
+                write_edge_overlay(rm_final, refm, edge_overlay_png)
+                write_spatial_panel(args.backplate or args.ref, refm, fit_png, edge_overlay_png, spatial_panel_png)
+                metrics_path = os.path.join(args.spatial_report, "spatial_metrics.json")
+                with open(metrics_path, "w") as f:
+                    json.dump(spatial_metrics, f, indent=2)
     else:
         ssim_val = 0.0
+        proof_status = "failed"
+        proof_warnings = ["final render failed; no fitted render mask was available"]
 
     if args.trace:
         os.makedirs(os.path.dirname(os.path.abspath(args.trace)) or ".", exist_ok=True)
@@ -622,33 +766,44 @@ def main() -> None:
     data = {
         "camera_arg": cam_arg,
         "camera": [round(v, 3) for v in cam],
-        "params": dict(zip(["azim", "elev", "dist", "panx", "panz"],
-                           [round(x, 3) for x in best_p])),
+        "params": dict(zip(
+            ["azim", "elev", "dist", "panx", "pany", "panz"] if len(best_p) == 6
+            else ["azim", "elev", "dist", "panx", "panz"],
+            [round(x, 3) for x in best_p],
+        )),
         "center": [round(x, 3) for x in center],
         "iou": round(iou_best, 4),
         "objective": args.objective,
         "objective_loss": round(best_l, 6),
+        "fit_status": proof_status,
+        "diagnostic_only": proof_status != "ok",
+        "warnings": proof_warnings,
         "ssim": round(ssim_val, 4),
         "model_diag": round(diag, 3),
         "opt_size": f"{ow}x{oh}",
         "final_size": f"{fw}x{fh}",
         "ref": args.ref,
         "backplate": args.backplate,
+        "proof_reference": args.backplate or args.ref,
         "mask_polarity": args.mask_polarity,
         "fit_render": fit_png,
         "overlay": overlay_png,
         "spatial_metrics": spatial_metrics,
         "spatial_panel": spatial_panel_png,
+        "proof_panel": spatial_panel_png,
         "edge_overlay": edge_overlay_png,
         "trace": args.trace,
     }
-    if spatial_metrics.get("spatial_warning"):
-        print(f"fit-camera: WARN {spatial_metrics['spatial_warning']}", flush=True)
+    for warning in proof_warnings:
+        print(f"fit-camera: WARN {warning}", flush=True)
     with open(args.out, "w") as f:
         json.dump(data, f, indent=2)
     print(f"saved {args.out}", flush=True)
     print(f"  fit render: {fit_png}", flush=True)
     print(f"  overlay:    {overlay_png}", flush=True)
+    if spatial_panel_png:
+        print(f"  proof:      {spatial_panel_png}", flush=True)
+    print(f"STATUS={proof_status}", flush=True)
     print(f"IoU={iou_best:.4f}  SSIM={ssim_val:.4f}", flush=True)
     print(f"CAMERA_ARG={cam_arg}", flush=True)
 
