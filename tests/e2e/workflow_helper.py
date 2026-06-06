@@ -84,6 +84,13 @@ def require_binary(name: str) -> str:
     return path
 
 
+def require_imagemagick() -> str:
+    path = shutil.which("magick") or shutil.which("convert")
+    if path is None:
+        pytest.skip("ImageMagick is not installed")
+    return path
+
+
 def require_working_binary(name: str, *version_args: str) -> str:
     path = require_binary(name)
     probe = subprocess.run(
@@ -131,6 +138,52 @@ def require_working_openscad() -> str:
 def require_python_module(name: str) -> None:
     if importlib.util.find_spec(name) is None:
         pytest.skip(f"python module {name!r} is not installed")
+
+
+def _python_imports(python: str, imports: list[str], *, cwd: Path, env: dict[str, str]) -> bool:
+    if not imports:
+        return True
+    code = "import " + ", ".join(imports)
+    probe = subprocess.run(
+        [python, "-c", code],
+        cwd=cwd,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    return probe.returncode == 0
+
+
+def require_cli_python_deps(tmp_path: Path, deps: list[str], imports: list[str]) -> None:
+    """Skip unless the CLI can resolve Python deps through .venv, uv, or system python."""
+    env = isolated_env(tmp_path)
+    venv_python = REPO_ROOT / ".venv" / "bin" / "python"
+    if venv_python.exists() and os.access(venv_python, os.X_OK):
+        if _python_imports(str(venv_python), imports, cwd=tmp_path, env=env):
+            return
+
+    uv = shutil.which("uv")
+    if uv is not None:
+        with_flags = [flag for dep in deps for flag in ("--with", dep)]
+        code = "import " + ", ".join(imports)
+        probe = subprocess.run(
+            [uv, "run", *with_flags, "python3", "-c", code],
+            cwd=tmp_path,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=90,
+        )
+        if probe.returncode == 0:
+            return
+
+    python3 = shutil.which("python3")
+    if python3 is not None and _python_imports(python3, imports, cwd=tmp_path, env=env):
+        return
+
+    wanted = ", ".join(deps)
+    pytest.skip(f"CLI Python runtime cannot import {wanted} via .venv, uv, or system python")
 
 
 def write_pgm(path: Path, rows: list[str]) -> None:

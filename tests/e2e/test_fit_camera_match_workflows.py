@@ -3,7 +3,17 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from .workflow_helper import require_python_module, require_working_openscad, run_cli, run_shell, write_pgm
+from .workflow_helper import (
+    key_value_lines,
+    png_size,
+    require_cli_python_deps,
+    require_imagemagick,
+    require_python_module,
+    require_working_openscad,
+    run_cli,
+    run_shell,
+    write_pgm,
+)
 
 
 def _camera_model(path: Path) -> None:
@@ -13,6 +23,36 @@ width = 10; // [6:20]
 depth = 8; // [6:20]
 height = 6; // [4:16]
 cube([width, depth, height]);
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def _reference_proxy_model(path: Path) -> None:
+    path.write_text(
+        """
+// A deliberately asymmetric "reference object": low base, right-side tower, front lip.
+union() {
+  cube([28, 18, 6]);
+  translate([18, 4, 6]) cube([8, 6, 14]);
+  translate([0, 0, 6]) cube([9, 4, 5]);
+}
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def _bad_generated_proxy_model(path: Path) -> None:
+    path.write_text(
+        """
+// Plausible image-to-3D failure: similar bulk, but the tower/lip are on the wrong side.
+union() {
+  cube([28, 18, 6]);
+  translate([2, 10, 6]) cube([8, 6, 14]);
+  translate([19, 14, 6]) cube([9, 4, 5]);
+}
 """.strip()
         + "\n",
         encoding="utf-8",
@@ -66,6 +106,99 @@ def test_fit_camera_quick_search_writes_pose_and_overlay(tmp_path: Path) -> None
     assert isinstance(payload["ssim"], float)
     assert camera.with_name("camera_fit.png").exists()
     assert camera.with_name("camera_overlay.png").exists()
+
+
+def test_fit_camera_story_renders_reference_then_rejects_bad_proxy_model(tmp_path: Path) -> None:
+    """A user fits a hidden reference view, reuses the pose, and rejects a bad 3D proxy by contours."""
+    require_working_openscad()
+    require_imagemagick()
+    require_cli_python_deps(tmp_path, ["numpy", "pillow", "scipy"], ["numpy", "PIL", "scipy"])
+    true_model = tmp_path / "reference_object.scad"
+    bad_proxy = tmp_path / "bad_image_to_3d_proxy.scad"
+    _reference_proxy_model(true_model)
+    _bad_generated_proxy_model(bad_proxy)
+
+    hidden_camera = "58,-76,34,14,9,8"
+    result = run_shell(
+        "\n".join(
+            [
+                "set -eu",
+                'MAGICK="$(command -v magick || command -v convert)"',
+                "mkdir -p fit gate",
+                "",
+                "# 1. The reference starts as a normal render/photo from an unknown camera.",
+                f'"$PYTHON" "$THREED" render "{true_model}" --cam "{hidden_camera}" '
+                "--size 120x80 -o reference.png > render.log",
+                "",
+                "# 2. The matching pipeline extracts the binary subject mask used for contours.",
+                f'"$PYTHON" "$THREED" silhouette "{true_model}" --cam "{hidden_camera}" '
+                "--size 120x80 -o reference_mask.png > silhouette.log",
+                "",
+                "# 3. Fit-camera searches from the model and mask, then writes a reusable camera.",
+                f'"$PYTHON" "$THREED" fit-camera "{true_model}" reference_mask.png '
+                "--mask-polarity light --backplate reference.png --objective contour "
+                "--spatial-report fit/spatial --trace fit/trace.jsonl "
+                "--out fit/camera.json --rand 10 --refine 2 --seed 3 "
+                "--opt-size 120x80 --final-size 120x80 > fit/stdout.txt",
+                '"$PYTHON" -c \'import json; print(json.load(open("fit/camera.json"))["camera_arg"])\' '
+                "> fit/camera_arg.txt",
+                'CAMERA="$(cat fit/camera_arg.txt)"',
+                '"$MAGICK" reference_mask.png -threshold 50% -morphology EdgeOut Square:1 gate/reference_edge.png',
+                "",
+                "# 4. A generated proxy must be checked from the same fitted viewpoint.",
+                f'"$PYTHON" "$THREED" silhouette "{bad_proxy}" --cam "$CAMERA" '
+                "--size 120x80 -o gate/bad_proxy_mask.png > gate/bad_silhouette.log",
+                '"$PYTHON" "$THREED" score gate/bad_proxy_mask.png reference_mask.png '
+                "--masks -o gate/score | tee gate/score.txt | awk -F= '/^IoU=/{print $2}' "
+                "> gate/bad_iou.txt",
+                '"$MAGICK" gate/bad_proxy_mask.png -threshold 50% -morphology EdgeOut Square:1 gate/bad_proxy_edge.png',
+                '"$PYTHON" "$THREED" score gate/bad_proxy_edge.png gate/reference_edge.png '
+                "--masks -o gate/edge_score | tee gate/edge_score.txt | awk -F= '/^IoU=/{print $2}' "
+                "> gate/bad_edge_iou.txt",
+                "",
+                "# 5. The human-readable gate report uses contour metrics, not exit code alone.",
+                '"$PYTHON" - <<\'PY\' > gate/quality_report.md',
+                "import json, pathlib",
+                "fit = json.load(open('fit/spatial/spatial_metrics.json'))",
+                "bad_iou = float(pathlib.Path('gate/bad_iou.txt').read_text())",
+                "bad_edge_iou = float(pathlib.Path('gate/bad_edge_iou.txt').read_text())",
+                "accepted = fit['edge_f1@4'] >= 0.50 and bad_iou >= 0.50 and bad_edge_iou >= 0.35",
+                "print('# image-to-3D proxy gate')",
+                "print(f'fitted_camera={json.load(open(\"fit/camera.json\"))[\"camera_arg\"]}')",
+                "print(f'reference_edge_f1_at_4={fit[\"edge_f1@4\"]:.4f}')",
+                "print(f'bad_proxy_iou={bad_iou:.4f}')",
+                "print(f'bad_proxy_edge_iou={bad_edge_iou:.4f}')",
+                "print('decision=' + ('ACCEPT' if accepted else 'REJECT'))",
+                "PY",
+            ]
+        ),
+        tmp_path,
+        timeout=180,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    camera = json.loads((tmp_path / "fit" / "camera.json").read_text(encoding="utf-8"))
+    assert len(camera["camera"]) == 6
+    assert camera["objective"] == "contour"
+    assert camera["backplate"] == "reference.png"
+    assert camera["spatial_panel"] == "fit/spatial/proof_panel.png"
+    assert png_size(tmp_path / "reference.png") == (120, 80)
+    assert png_size(tmp_path / "fit" / "spatial" / "edge_overlay.png") == (120, 80)
+    assert png_size(tmp_path / "fit" / "spatial" / "proof_panel.png") == (480, 104)
+
+    fit_metrics = json.loads((tmp_path / "fit" / "spatial" / "spatial_metrics.json").read_text(encoding="utf-8"))
+    assert fit_metrics["area_iou"] >= 0.35
+    assert fit_metrics["edge_f1@4"] >= 0.50
+
+    score = key_value_lines((tmp_path / "gate" / "score.txt").read_text(encoding="utf-8"))
+    assert float(score["IoU"]) < 0.50
+    assert (tmp_path / score["OVERLAY"]).exists()
+    edge_score = key_value_lines((tmp_path / "gate" / "edge_score.txt").read_text(encoding="utf-8"))
+    assert float(edge_score["IoU"]) < 0.35
+    assert (tmp_path / edge_score["OVERLAY"]).exists()
+    report = (tmp_path / "gate" / "quality_report.md").read_text(encoding="utf-8")
+    assert "decision=REJECT" in report
+    assert "bad_proxy_edge_iou=" in report
 
 
 def test_match_explains_when_no_tunable_constants_exist(tmp_path: Path) -> None:

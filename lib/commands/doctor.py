@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
 import sys
 
 from cli.env import (
@@ -86,6 +87,18 @@ def run(argv: list[str]) -> int:  # noqa: C901
     def warn(item: str, detail: str = "") -> None:
         print(f"  {yel}WARN{z}    {item:<22} {detail}")
 
+    def python_has_module(python: str, mod: str) -> bool:
+        try:
+            r = subprocess.run(
+                [python, "-c", f"import importlib; importlib.import_module({mod!r})"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=10,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return False
+        return r.returncode == 0
+
     print(f"{b}3d doctor{z}  —  OS={os_name}")
     print()
 
@@ -129,7 +142,7 @@ def run(argv: list[str]) -> int:  # noqa: C901
         warn("pip", "not found (bundled with python3 -m venv)")
     venv_py = os.path.join(repo_root(), ".venv", "bin", "python")
     if os.access(venv_py, os.X_OK):
-        passl(".venv", f"{os.path.join(repo_root(), '.venv')} (pyrun prefers this)")
+        passl(".venv", f"{os.path.join(repo_root(), '.venv')} (used when requested deps import)")
         has_venv = True
     else:
         warn(".venv", "absent — create it (python3 -m venv .venv) or rely on uv per-call")
@@ -137,22 +150,27 @@ def run(argv: list[str]) -> int:  # noqa: C901
     print()
     print(f"{b}Python mesh stack (mesh / check / printability / collision / preprocess){z}")
     if has_venv:
-        print(f"  {dim}(.venv present — pyrun uses it, NOT uv; missing modules are real){z}")
+        print(f"  {dim}(.venv present — pyrun falls back to uv or importable system python when deps are missing){z}")
     py = resolve_python()
+    system_py = shutil.which("python3")
     if py:
         for mod in PY_MESH_MODULES:
             if py_has_module(mod):
                 passl(f"py:{mod}", f"importable by {py}")
             else:
                 pkg = pypkg_for(mod)
-                if not has_venv and has_uv:
+                if has_uv:
                     warn(f"py:{mod}", f"not in {py} (ok: uv resolves '{pkg}' per-call)")
+                elif system_py and system_py != py and python_has_module(system_py, mod):
+                    passl(f"py:{mod}", f"importable by {system_py} (system fallback; not in {py})")
                 else:
                     miss(f"py:{mod}", f"pip install {pkg}")
         if py_has_module("pyvista"):
             passl("py:pyvista", f"importable by {py} (collision --viz available)")
-        elif not has_venv and has_uv:
+        elif has_uv:
             warn("py:pyvista", f"not in {py} (collision --viz: uv resolves per-call)")
+        elif system_py and system_py != py and python_has_module(system_py, "pyvista"):
+            passl("py:pyvista", f"importable by {system_py} (collision --viz system fallback)")
         else:
             warn("py:pyvista", "absent — only 'collision --viz' needs it (pip install pyvista)")
     else:
@@ -160,16 +178,22 @@ def run(argv: list[str]) -> int:  # noqa: C901
 
     print()
     print(f"{b}Web dashboard (3d web — OPTIONAL tier){z}")
-    # import-name -> pip package. fastapi/uvicorn are required for the dashboard; markdown
-    # (spec->HTML) and pyyaml (per-part colors) are nice-to-have and degrade gracefully.
-    web_deps = [("fastapi", "fastapi"), ("uvicorn", "uvicorn"),
-                ("markdown", "markdown"), ("yaml", "pyyaml")]
-    if py:
-        for mod, pkg in web_deps:
-            if py_has_module(mod):
-                passl(f"py:{mod}", f"importable by {py}")
-            elif not has_venv and has_uv:
-                warn(f"py:{mod}", f"absent (ok: uv resolves '{pkg}' per-call for 3d web)")
+    print(f"  {dim}(3d web imports these in the dispatcher Python: {sys.executable}){z}")
+    # import-name -> pip package. fastapi/uvicorn are required for the dashboard;
+    # markdown (spec->HTML) and pyyaml (per-part colors) are nice-to-have.
+    web_deps = [
+        ("fastapi", "fastapi", True),
+        ("uvicorn", "uvicorn", True),
+        ("markdown", "markdown", False),
+        ("yaml", "pyyaml", False),
+    ]
+    web_py = sys.executable
+    if web_py:
+        for mod, pkg, required in web_deps:
+            if python_has_module(web_py, mod):
+                passl(f"py:{mod}", f"importable by {web_py}")
+            elif required:
+                warn(f"py:{mod}", f"absent in dispatcher Python — 3d web needs: pip install {pkg}")
             else:
                 warn(f"py:{mod}", f"absent — only 3d web needs it (pip install {pkg})")
     else:

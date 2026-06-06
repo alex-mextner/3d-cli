@@ -1,25 +1,90 @@
 """pyrun.py — run a bundled python tool with its deps, degrading gracefully.
 
 Python port of the `lib/pyrun` bash shim. Resolution order (first that works):
-  1. <repo>/.venv/bin/python              — if the user bootstrapped a venv.
+  1. <repo>/.venv/bin/python              — if it imports the requested deps.
   2. uv run --with <dep>... python3        — uv resolves deps on the fly (no global installs).
-  3. system python3                        — only if deps already importable.
+  3. system python3                        — if it imports the requested deps.
 
 `PY3D_NO_UV=1` forces skipping uv (venv or system only). DEPS may be empty (the caller
 wants no extra deps, e.g. render's optional mesh stack).
 
 `tool_argv()` returns the full argv to exec/run; `run_tool()` runs it and returns the
-exit code. The tool path is resolved against the repo lib/ dir.
+exit code. The tool path is resolved against the repo lib/ dir. DEPS entries are bare
+distribution names, not version specifiers or extras.
 """
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
 import sys
+from functools import lru_cache
 
 from cli.env import repo_root
-from errors import MissingDependency
+from errors import MissingDependency, UsageError
+
+# Keep this table in sync when a new bare `deps` package imports under a non-obvious
+# module name; Python package names and import names are not the same namespace.
+_IMPORT_NAMES = {
+    "beautifulsoup4": "bs4",
+    "msgpack-python": "msgpack",
+    "opencv-python": "cv2",
+    "opencv-contrib-python": "cv2",
+    "opencv-python-headless": "cv2",
+    "pillow": "PIL",
+    "python-dotenv": "dotenv",
+    "python-dateutil": "dateutil",
+    "pyyaml": "yaml",
+    "scikit-image": "skimage",
+    "scikit-learn": "sklearn",
+    "usd-core": "pxr",
+}
+
+
+def _dep_names(deps: str) -> list[str]:
+    names = [d for d in (p.strip() for p in deps.split(",")) if d]
+    invalid = [d for d in names if any(ch in d for ch in "<>=!~[]; @#")]
+    if invalid:
+        raise UsageError(
+            f"pyrun deps must be bare PyPI distribution names, got: {', '.join(invalid)}",
+            command="pyrun",
+            remediation=["Use comma-separated bare names such as 'numpy,pillow', not version specs or extras."],
+        )
+    return names
+
+
+def _import_name(dep: str) -> str:
+    normalized = dep.strip().lower().replace("_", "-")
+    return _IMPORT_NAMES.get(normalized, normalized.replace("-", "_"))
+
+
+@lru_cache(maxsize=128)
+def _venv_has_deps(venv_py: str, deps: str) -> bool:
+    names = [_import_name(dep) for dep in _dep_names(deps)]
+    if not names:
+        return True
+    code = (
+        "import importlib, json, sys; "
+        "names=json.loads(sys.argv[1]); "
+        "missing=[]; "
+        "\nfor n in names:\n"
+        "    try:\n"
+        "        importlib.import_module(n)\n"
+        "    except Exception:\n"
+        "        missing.append(n)\n"
+        "sys.exit(1 if missing else 0)"
+    )
+    try:
+        probe = subprocess.run(
+            [venv_py, "-c", code, json.dumps(names)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return probe.returncode == 0
 
 
 def tool_argv(deps: str, script: str, args: list[str]) -> list[str]:
@@ -32,20 +97,17 @@ def tool_argv(deps: str, script: str, args: list[str]) -> list[str]:
     script_path = script if os.path.isabs(script) else os.path.join(root, "lib", script)
 
     venv_py = os.path.join(root, ".venv", "bin", "python")
-    if os.access(venv_py, os.X_OK):
+    if os.access(venv_py, os.X_OK) and _venv_has_deps(venv_py, deps):
         return [venv_py, script_path, *args]
 
     if not os.environ.get("PY3D_NO_UV") and shutil.which("uv"):
         with_flags: list[str] = []
-        for d in (p.strip() for p in deps.split(",")):
-            if d:
-                with_flags += ["--with", d]
+        for d in _dep_names(deps):
+            with_flags += ["--with", d]
         return ["uv", "run", *with_flags, "python3", script_path, *args]
 
     py = shutil.which("python3")
-    if py:
-        # last resort: deps must already be importable; the tool reports its own
-        # missing-import errors (and where written, degrades internally).
+    if py and _venv_has_deps(py, deps):
         return [py, script_path, *args]
 
     raise MissingDependency(

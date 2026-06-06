@@ -152,10 +152,10 @@ Available on this machine during the inventory:
 - `/opt/homebrew/bin/jq`
 
 One local dependency issue was observed: after `3d render` created `.venv`, `3d
-fit-camera` initially failed because `.venv` lacked Pillow and `cli.pyrun` prefers
-`.venv` over `uv run --with ...`. Installing `pillow` into this worktree's ignored
-`.venv` fixed the local smoke run. This is an environment/tooling risk for future
-fit-camera tests.
+fit-camera` initially failed because `.venv` lacked Pillow and old `cli.pyrun`
+preferred `.venv` over `uv run --with ...`. Current `cli.pyrun` probes the requested
+imports first and falls back to `uv --with` or an importable system Python when the
+local `.venv` is incomplete.
 
 ## Risks
 
