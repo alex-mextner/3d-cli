@@ -11,6 +11,7 @@ import pytest
 
 import commands.printers as printers_cmd
 import printers as printers_mod
+from registries import printers as registry_printers
 from errors import InvalidArgument, UsageError
 from printers import PrinterError, get_printer, load_printers
 
@@ -34,6 +35,15 @@ def test_builtin_has_expected_machines(isolated):
     p = load_printers()
     for name in ("Bambu Lab A1", "Bambu Lab A1 mini", "Prusa MK4", "Prusa MINI", "Generic 220"):
         assert name in p, f"built-in registry missing {name}"
+
+
+def test_root_printers_module_re_exports_registry_core() -> None:
+    assert printers_mod.ACCEPTED_FIRMWARE is registry_printers.ACCEPTED_FIRMWARE
+    assert printers_mod.DEFAULT_NOZZLE_MM is registry_printers.DEFAULT_NOZZLE_MM
+    assert printers_mod.Printer is registry_printers.Printer
+    assert printers_mod.PrinterError is registry_printers.PrinterError
+    assert printers_mod.load_printers is registry_printers.load_printers
+    assert printers_mod.get_printer is registry_printers.get_printer
 
 
 def test_published_bed_sizes(isolated):

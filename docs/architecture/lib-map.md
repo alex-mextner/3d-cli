@@ -76,7 +76,7 @@ These modules model project state, user config, and local registries:
 - `ollama.py`
 - `opdag.py`
 - `procurement.py`
-- `printers.py`
+- `lib/registries/printers.py`
 - `project.py`
 - `projects_registry.py`
 - `reporting.py`
@@ -153,7 +153,7 @@ Every current root Python module is listed here so future additions are intentio
 - `preprocess_reference.py` — reference image preprocessing.
 - `printability_mesh.py` — printability mesh checks.
 - `procurement.py` — deterministic local BOM and inventory purchase-plan helpers.
-- `printers.py` — printer registry.
+- `printers.py` — compatibility wrapper re-exporting `registries.printers`.
 - `project.py` — project model and discovery.
 - `projects_registry.py` — known-project registry.
 - `reporting.py` — deterministic gate and metric artifact report composition.
@@ -170,6 +170,7 @@ Root compatibility wrappers currently allowed during the staged migration:
 
 - `axis.py` → `geometry.axis`
 - `materials.py` → `registries.materials`
+- `printers.py` → `registries.printers`
 
 ## Staged Migration Plan
 
