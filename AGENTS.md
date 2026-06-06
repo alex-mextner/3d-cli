@@ -118,6 +118,13 @@ reports in the active worktree/status note; if no such note exists, create
 `docs/notes/queued-telegram-reports.md` with timestamp, scope, intended recipient, and full
 message body.
 
+Every status report for this workstream, including single-worktree `fit-camera`,
+spatial-awareness, image-to-3D, and proxy-alignment work, must immediately state: what is
+being done now, current status, what is already done, what is unfinished or blocked, what
+will happen next, which worktrees/branches are involved, and which verification/review
+steps have passed. If work continues after the report, say that work continues and name
+the next concrete step.
+
 Do not call a diagnostic image a proof unless it includes the human-inspectable inputs and
 outputs. This is the acceptance bar for claimed success reports, not a statement that the
 current CLI already emits every artifact or every final schema field. For reference-matching
@@ -130,6 +137,12 @@ work, an accepted proof report MUST include:
 - the relevant JSON/metrics summary: boundary F1, symmetric contour Chamfer or SDF loss,
   p95 miss, coverage/bbox/crop/border diagnostics;
 - a plain statement of whether this is success, warning, failure, or diagnostic-only.
+
+When sending visual proof to Telegram, send the original reference and same-frame model
+render before or alongside any diagnostic overlays. A Telegram proof report must name the
+exact artifact paths and explain what the reviewer should see in the reference, render,
+and overlay. Do not write vague claims such as "final PNGs look normal" without naming the
+files and the visible evidence.
 
 Instrumental-only panels such as masks, point clouds, proxy silhouettes, hulls, view-bank
 heatmaps, or optimizer plots are useful diagnostics, but they are not success proof by
@@ -148,7 +161,9 @@ diagnostic work instead.
 
 When reporting active worktrees, do not provide only a list. For each worktree include:
 what changed, whether it is committed/pushed, whether it was reviewed, what verification
-passed, why it is not merged yet, and the next action needed.
+passed, why it is not merged yet, where the work is blocked or merely awaiting continued
+work, and the next action needed. The report must make clear whether to continue, merge,
+or delete the worktree.
 
 ## Engineering conventions
 

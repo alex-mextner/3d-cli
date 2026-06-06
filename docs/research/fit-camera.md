@@ -30,6 +30,16 @@ current CLI already emits every final schema field:
 If the visible reference/render/overlay disagree, the result is not a proof even
 when a secondary metric looks good.
 
+Telegram proof reports must make the human inspection path obvious. Send the
+original reference and same-frame fitted render before or alongside masks, point
+clouds, hulls, view-bank plots, optimizer charts, or other instrumental images.
+Links may be included as supplemental pointers, but they do not replace sending
+the core reference/render evidence. Every visual claim must name the artifact
+path and explain the evidence in plain language. A report like "final PNGs are
+visually normal" is invalid unless it says which PNGs, what visible alignment
+was checked, and whether the run is success, warning, failure, or
+diagnostic-only.
+
 The current research target is not a classic topology hash. A hash can retrieve
 "similar-looking" candidates, but it does not normally provide a local direction
 for improving camera pose. What `fit-camera` needs is a pose-aware objective:
