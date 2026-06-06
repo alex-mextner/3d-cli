@@ -41,6 +41,7 @@ def isolated_env(tmp_path: Path) -> dict[str, str]:
         }
     )
     env.pop("PYTHONPATH", None)
+    env.pop("HF_TOKEN", None)
     return env
 
 

@@ -67,6 +67,7 @@ These modules model project state, user config, and local registries:
 - `events.py`
 - `extract_params.py`
 - `hardware.py`
+- `hf_auth.py`
 - `lib/registries/inventory.py`
 - `kinematics.py`
 - `linting.py`
@@ -96,6 +97,7 @@ orchestration:
 - `match_loop.py`
 - `mask_geometry.py`
 - `preprocess_reference.py`
+- `proxy_align.py`
 - `refmatch.py`
 - `spatial_fit_metrics.py`
 - `lib/cli/imaging.py`
@@ -137,6 +139,7 @@ Every current root Python module is listed here so future additions are intentio
 - `fit_camera.py` — camera fitting implementation.
 - `frame_check.py` — render framing checks.
 - `hardware.py` — local machine and toolchain capability reporting.
+- `hf_auth.py` — optional Hugging Face token loading, validation, and secure storage.
 - `import_formats.py` — import wrapper generation and conversion-plan helpers.
 - `inventory.py` — compatibility wrapper re-exporting `registries.inventory`.
 - `kinematics.py` — project joint spec validation and deterministic summaries.
@@ -155,6 +158,7 @@ Every current root Python module is listed here so future additions are intentio
 - `preprocess_reference.py` — reference image preprocessing.
 - `printability_mesh.py` — printability mesh checks.
 - `procurement.py` — deterministic local BOM and inventory purchase-plan helpers.
+- `proxy_align.py` — generated proxy mesh to CAD mesh alignment and proof artifacts.
 - `printers.py` — compatibility wrapper re-exporting `registries.printers`.
 - `project.py` — project model and discovery.
 - `projects_registry.py` — compatibility wrapper re-exporting `registries.projects`.

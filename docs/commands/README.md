@@ -58,6 +58,7 @@ For a practical figure-by-figure image backplate loop, see
 |---|---|---|
 | `compare` | [compare.md](compare.md) | Segmented model/reference comparison with [IoU](GLOSSARY.md#iou), [SSIM](GLOSSARY.md#ssim)/DSSIM, and artifacts. |
 | `fit-camera` | [fit-camera.md](fit-camera.md) | Fit a camera pose to a reference by [silhouette](GLOSSARY.md#silhouette) IoU. |
+| `proxy-align` | [proxy-align.md](proxy-align.md) | Align generated proxy meshes to CAD meshes for spatial camera priors. |
 | `silhouette` | [silhouette.md](silhouette.md) | Camera-locked render to binary silhouette mask. |
 | `score` | [score.md](score.md) | Silhouette [AE](GLOSSARY.md#ae) + IoU, printed as `KEY=VALUE` lines. |
 | `overlay` | [overlay.md](overlay.md) | Difference, ghost, and edge-overlay diagnostics. |
@@ -84,6 +85,7 @@ For a practical figure-by-figure image backplate loop, see
 | Command | Doc | Role |
 |---|---|---|
 | `ai` | [ai.md](ai.md) | Build offline AI-assist prompt bundles without calling a backend. |
+| `auth` | [auth.md](auth.md) | Configure optional Hugging Face credentials for ZeroGPU and gated weights. |
 | `doctor` | [doctor.md](doctor.md) | Read-only dependency report with install commands. |
 | `events` | [events.md](events.md) | Record and inspect append-only CLI/model workflow events. |
 | `init` | [init.md](init.md) | Scaffold a `3d.yaml` project and agent-friendly project skeleton. |
