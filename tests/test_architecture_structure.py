@@ -15,6 +15,7 @@ ROOT_COMPATIBILITY_WRAPPERS = {
     "metrics.py": "registries.metrics",
     "printers.py": "registries.printers",
     "printing.py": "slicing.printing",
+    "projects_registry.py": "registries.projects",
 }
 
 

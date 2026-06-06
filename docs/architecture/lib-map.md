@@ -77,8 +77,8 @@ These modules model project state, user config, and local registries:
 - `opdag.py`
 - `procurement.py`
 - `lib/registries/printers.py`
+- `lib/registries/projects.py`
 - `project.py`
-- `projects_registry.py`
 - `reporting.py`
 - `workspaces.py`
 
@@ -155,7 +155,7 @@ Every current root Python module is listed here so future additions are intentio
 - `procurement.py` — deterministic local BOM and inventory purchase-plan helpers.
 - `printers.py` — compatibility wrapper re-exporting `registries.printers`.
 - `project.py` — project model and discovery.
-- `projects_registry.py` — known-project registry.
+- `projects_registry.py` — compatibility wrapper re-exporting `registries.projects`.
 - `reporting.py` — deterministic gate and metric artifact report composition.
 - `workspaces.py` — web dashboard workspace metadata registry.
 - `refmatch.py` — image/reference matching helpers.
@@ -173,6 +173,7 @@ Root compatibility wrappers currently allowed during the staged migration:
 - `metrics.py` → `registries.metrics`
 - `printers.py` → `registries.printers`
 - `printing.py` → `slicing.printing`
+- `projects_registry.py` → `registries.projects`
 
 ## Staged Migration Plan
 
