@@ -8,6 +8,7 @@ import sys
 import pytest
 
 import axis
+from geometry import axis as geometry_axis
 from errors import InvalidArgument, UsageError
 
 _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -30,6 +31,12 @@ def test_validate_named_axis_normalizes_signed_alias() -> None:
         "sign": -1,
         "vector": [0.0, 0.0, -1.0],
     }
+
+
+def test_root_axis_module_re_exports_geometry_axis_core() -> None:
+    assert axis.validate_axis is geometry_axis.validate_axis
+    assert axis.validate_camera is geometry_axis.validate_camera
+    assert axis.VIEW_DIRECTIONS is geometry_axis.VIEW_DIRECTIONS
 
 
 def test_validate_plane_returns_normal_axis() -> None:

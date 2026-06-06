@@ -9,6 +9,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 LIB = ROOT / "lib"
 ARCHITECTURE_MAP = ROOT / "docs" / "architecture" / "lib-map.md"
+ROOT_COMPATIBILITY_WRAPPERS = {
+    "axis.py": "geometry.axis",
+}
 
 
 def _python_files(path: Path) -> list[Path]:
@@ -71,3 +74,23 @@ def test_root_lib_modules_are_documented_in_architecture_map() -> None:
         "root lib/*.py modules must be compatibility shims or documented in "
         f"{ARCHITECTURE_MAP.relative_to(ROOT)}: {', '.join(missing)}"
     )
+
+
+def test_root_compatibility_wrappers_are_declared_and_minimal() -> None:
+    text = ARCHITECTURE_MAP.read_text(encoding="utf-8")
+    for filename, target in ROOT_COMPATIBILITY_WRAPPERS.items():
+        path = LIB / filename
+        tree = _tree(path)
+        assert f"`{filename}` \u2192 `{target}`" in text
+        imports_target = any(
+            isinstance(node, ast.ImportFrom)
+            and node.module == target
+            and all(alias.name != "*" for alias in node.names)
+            for node in tree.body
+        )
+        assert imports_target, f"{filename} must explicitly re-export from {target}"
+        function_defs = [node.name for node in tree.body if isinstance(node, ast.FunctionDef)]
+        class_defs = [node.name for node in tree.body if isinstance(node, ast.ClassDef)]
+        assert not function_defs and not class_defs, (
+            f"{filename} is a compatibility wrapper; implementation belongs in {target}"
+        )

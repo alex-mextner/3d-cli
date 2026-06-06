@@ -33,7 +33,7 @@ These modules are the current root-level implementation tools for model processi
 rendering, slicing support, and verification:
 
 - `animation.py`
-- `axis.py`
+- `lib/geometry/axis.py`
 - `collision_check.py`
 - `collision_viz.py`
 - `fit_camera.py`
@@ -123,7 +123,7 @@ Every current root Python module is listed here so future additions are intentio
 
 - `ai_tools.py` — offline AI-assist prompt bundle construction.
 - `animation.py` — deterministic render frame planning.
-- `axis.py` — axis, plane, named-view, and camera-vector validation helpers.
+- `axis.py` — compatibility wrapper re-exporting `geometry.axis`.
 - `collision_check.py` — geometry / collision check implementation.
 - `collision_viz.py` — geometry / collision visualization implementation.
 - `config.py` — project and CLI configuration helpers.
@@ -165,6 +165,10 @@ Every current root Python module is listed here so future additions are intentio
 
 Adding a new root `lib/*.py` file should be rare. Prefer a domain package. If a root file
 is needed as a compatibility shim, document it in this inventory and keep it import-light.
+
+Root compatibility wrappers currently allowed during the staged migration:
+
+- `axis.py` → `geometry.axis`
 
 ## Staged Migration Plan
 
