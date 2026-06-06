@@ -9,6 +9,11 @@ from e2e.test_cli_matrix import ALIAS_HELP_CASES, HELP_CASES
 
 
 ROOT = Path(__file__).resolve().parents[1]
+READABLE_E2E_FILES = [
+    path
+    for path in sorted((ROOT / "tests" / "e2e").glob("test_*workflows.py"))
+    if path.name != "test_cli_matrix.py"
+] + [ROOT / "tests" / "e2e" / "test_cli_stories.py"]
 
 
 def _source(path: str) -> str:
@@ -22,6 +27,13 @@ def _test_functions(path: str) -> list[ast.FunctionDef]:
         for node in module.body
         if isinstance(node, ast.FunctionDef) and node.name.startswith("test_")
     ]
+
+
+def _readable_story_tests() -> list[ast.FunctionDef]:
+    tests: list[ast.FunctionDef] = []
+    for path in READABLE_E2E_FILES:
+        tests.extend(_test_functions(str(path.relative_to(ROOT))))
+    return tests
 
 
 def _assertions(test: ast.FunctionDef) -> list[str]:
@@ -66,7 +78,7 @@ def test_shell_chain_e2e_uses_real_cli_redirection_and_pipes() -> None:
 
 
 def test_readable_e2e_stories_have_human_workflow_docstrings() -> None:
-    story_tests = _test_functions("tests/e2e/test_cli_stories.py")
+    story_tests = _readable_story_tests()
 
     assert story_tests
     for test in story_tests:
@@ -77,7 +89,7 @@ def test_readable_e2e_stories_have_human_workflow_docstrings() -> None:
 
 
 def test_readable_e2e_stories_assert_more_than_exit_codes() -> None:
-    story_tests = _test_functions("tests/e2e/test_cli_stories.py")
+    story_tests = _readable_story_tests()
 
     shallow = [
         test.name
@@ -89,7 +101,7 @@ def test_readable_e2e_stories_assert_more_than_exit_codes() -> None:
 
 
 def test_readable_e2e_stories_include_artifact_and_shell_examples() -> None:
-    text = _source("tests/e2e/test_cli_stories.py")
+    text = "\n".join(path.read_text(encoding="utf-8") for path in READABLE_E2E_FILES)
 
     for token in ("json.loads", ".read_text", "subprocess.run", " | ", ">"):
         assert token in text
