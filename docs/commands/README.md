@@ -25,6 +25,7 @@ explain why the command exists, what its inputs mean, and how it fits into the l
 | Command | Doc | Role |
 |---|---|---|
 | `export` | [export.md](export.md) | [STL](GLOSSARY.md#stl)/[3MF](GLOSSARY.md#3mf) export with [manifold](GLOSSARY.md#manifold) validation when the mesh stack is available. |
+| `import` | [import.md](import.md) | Generate OpenSCAD wrappers or conversion plans for imported model formats. |
 | `validate` | [validate.md](validate.md) | Fast OpenSCAD parse check without rendering. |
 | `params` | [params.md](params.md) | Extract Customizer-style parameters. |
 | `om` | [om.md](om.md) | Query `.scad` object-model annotations as JSON. |

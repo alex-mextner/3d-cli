@@ -37,6 +37,7 @@ rendering, slicing support, and verification:
 - `collision_viz.py`
 - `fit_camera.py`
 - `frame_check.py`
+- `import_formats.py`
 - `mesh_check.py`
 - `printability_mesh.py`
 - `render.py`
@@ -111,6 +112,7 @@ Every current root Python module is listed here so future additions are intentio
 - `fit_camera.py` — camera fitting implementation.
 - `frame_check.py` — render framing checks.
 - `hardware.py` — local machine and toolchain capability reporting.
+- `import_formats.py` — import wrapper generation and conversion-plan helpers.
 - `linting.py` — OpenSCAD lint helpers.
 - `match_loop.py` — reference match-loop orchestration.
 - `mask_geometry.py` — lightweight mask coverage, bounding-box, and centroid metadata.
