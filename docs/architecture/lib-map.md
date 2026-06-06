@@ -71,7 +71,7 @@ These modules model project state, user config, and local registries:
 - `linting.py`
 - `model_lint.py`
 - `lib/registries/materials.py`
-- `metrics.py`
+- `lib/registries/metrics.py`
 - `object_model.py`
 - `ollama.py`
 - `opdag.py`
@@ -144,7 +144,7 @@ Every current root Python module is listed here so future additions are intentio
 - `mask_geometry.py` — lightweight mask coverage, bounding-box, and centroid metadata.
 - `materials.py` — compatibility wrapper re-exporting `registries.materials`.
 - `mesh_check.py` — mesh verification implementation.
-- `metrics.py` — metrics helpers and persistence.
+- `metrics.py` — compatibility wrapper re-exporting `registries.metrics`.
 - `object_model.py` — semantic object-model structures.
 - `ollama.py` — local Ollama endpoint validation and dry-run request planning.
 - `opdag.py` — operation graph validation, dependency ordering, and query helpers.
@@ -170,6 +170,7 @@ Root compatibility wrappers currently allowed during the staged migration:
 
 - `axis.py` → `geometry.axis`
 - `materials.py` → `registries.materials`
+- `metrics.py` → `registries.metrics`
 - `printers.py` → `registries.printers`
 - `printing.py` → `slicing.printing`
 

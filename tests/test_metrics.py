@@ -6,7 +6,31 @@ import pathlib
 import pytest
 
 import metrics
+import registries.metrics
 from errors import InvalidArgument, UsageError
+
+
+def test_root_metrics_wrapper_reexports_public_api_by_identity() -> None:
+    assert metrics.JSONValue is registries.metrics.JSONValue
+    assert metrics.MetricFileSummary is registries.metrics.MetricFileSummary
+    assert metrics.MetricRecord is registries.metrics.MetricRecord
+    assert metrics.append_record is registries.metrics.append_record
+    assert metrics.list_metric_files is registries.metrics.list_metric_files
+    assert metrics.metrics_dir is registries.metrics.metrics_dir
+    assert metrics.read_records is registries.metrics.read_records
+
+
+def test_root_metrics_wrapper_exports_only_public_api() -> None:
+    assert metrics.__all__ == registries.metrics.__all__
+    assert set(metrics.__all__) == {
+        "JSONValue",
+        "MetricFileSummary",
+        "MetricRecord",
+        "append_record",
+        "list_metric_files",
+        "metrics_dir",
+        "read_records",
+    }
 
 
 def test_append_record_writes_command_jsonl_and_read_records(tmp_path: pathlib.Path) -> None:
