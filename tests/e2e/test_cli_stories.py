@@ -172,6 +172,112 @@ def test_user_saves_params_json_for_the_next_shell_step(tmp_path: Path) -> None:
     assert {row["name"]: row["value"] for row in rows}["height"] == "16"
 
 
+def test_user_queries_named_model_features_for_downstream_automation(tmp_path: Path) -> None:
+    """Object-model annotations become JSON that shell tools can inspect and reuse."""
+    model = tmp_path / "camera-bracket.scad"
+    model.write_text(
+        """// @id base
+// @class structural printed
+// @anchor mount-left pos=[0,0,0] dir=[0,0,1] note="left screw"
+// @anchor mount-right pos=[42,0,0] dir=[0,0,1] note="right screw"
+// @color orange
+cube([48, 20, 4]);
+
+// @id lens_cover
+// @class cosmetic printed removable
+// @anchor pull-tab pos=[24,20,8] dir=[0,1,0] note="finger access"
+// @color #33ccff
+translate([0, 0, 6]) cube([48, 20, 2]);
+""",
+        encoding="utf-8",
+    )
+    selected_json = tmp_path / "printed-parts.json"
+    env = _story_env(tmp_path)
+
+    query_command = " ".join(
+        [
+            shlex.quote(sys.executable),
+            shlex.quote(str(THREED)),
+            "om",
+            shlex.quote(str(model)),
+            shlex.quote(".printed"),
+            ">",
+            shlex.quote(str(selected_json)),
+        ]
+    )
+    queried = subprocess.run(
+        query_command,
+        cwd=REPO_ROOT,
+        env=env,
+        shell=True,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+
+    assert queried.returncode == 0, queried.stderr
+    payload = json.loads(selected_json.read_text(encoding="utf-8"))
+    assert payload["source"] == str(model)
+    assert [node["id"] for node in payload["nodes"]] == ["base", "lens_cover"]
+    assert [anchor["name"] for anchor in payload["anchors"]] == [
+        "mount-left",
+        "mount-right",
+        "pull-tab",
+    ]
+    assert payload["styles"] == [
+        {"node": "base", "style": {"color": "orange"}},
+        {"node": "lens_cover", "style": {"color": "#33ccff"}},
+    ]
+
+    pipe_script = (
+        "import json,sys; "
+        "doc=json.load(sys.stdin); "
+        "mounts=[a for a in doc['anchors'] if a['name'].startswith('mount-')]; "
+        "print(';'.join(f\"{a['node']}:{a['name']}@{','.join(str(int(v)) for v in a['pos'])}\" for a in mounts))"
+    )
+    piped = subprocess.run(
+        f"cat {shlex.quote(str(selected_json))} | "
+        f"{shlex.quote(sys.executable)} -c {shlex.quote(pipe_script)}",
+        cwd=REPO_ROOT,
+        env=env,
+        shell=True,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+
+    assert piped.returncode == 0, piped.stderr
+    assert piped.stdout.strip() == "base:mount-left@0,0,0;base:mount-right@42,0,0"
+    assert "Traceback" not in queried.stderr + piped.stderr
+
+
+def test_user_gets_structured_object_model_errors_without_partial_json(tmp_path: Path) -> None:
+    """Bad object-model queries fail cleanly so shell chains do not consume partial JSON."""
+    model = tmp_path / "camera-bracket.scad"
+    model.write_text("// @id base\n// @class printed\ncube([10, 10, 4]);\n", encoding="utf-8")
+
+    bad_selector = _run_3d(tmp_path, "om", str(model), ".printed .missing")
+
+    assert bad_selector.returncode == 2
+    assert bad_selector.stdout == ""
+    assert "om: got selector='.printed .missing'" in bad_selector.stderr
+    assert "accepted: #id, .class, .class.other" in bad_selector.stderr
+    assert "Descendant selectors are reserved" in bad_selector.stderr
+    assert "Traceback" not in bad_selector.stderr
+
+    bad_model = tmp_path / "bad-anchor.scad"
+    bad_model.write_text("// @anchor hinge pos=[0,0] dir=[0,0,1]\ncube(1);\n", encoding="utf-8")
+
+    bad_annotation = _run_3d(tmp_path, "om", str(bad_model), ".printed")
+
+    assert bad_annotation.returncode == 2
+    assert bad_annotation.stdout == ""
+    assert "om: got @anchor pos='[0,0]'" in bad_annotation.stderr
+    assert "Line 1:" in bad_annotation.stderr
+    assert "Vector values must have exactly three numbers." in bad_annotation.stderr
+    assert "Traceback" not in bad_annotation.stderr
+
+
 def test_user_lints_model_metadata_before_running_heavy_checks(tmp_path: Path) -> None:
     """Model lint gives readable object-model feedback through shell-friendly JSON."""
     model = tmp_path / "bracket.scad"

@@ -24,6 +24,14 @@ def _test_functions(path: str) -> list[ast.FunctionDef]:
     ]
 
 
+def _assertions(test: ast.FunctionDef) -> list[str]:
+    return [ast.unparse(node.test) for node in ast.walk(test) if isinstance(node, ast.Assert)]
+
+
+def _is_substantive_assertion(assertion: str) -> bool:
+    return "returncode" not in assertion and "Traceback" not in assertion
+
+
 def test_generated_e2e_matrix_smokes_every_registered_command() -> None:
     covered = {
         case.argv[0]
@@ -48,10 +56,13 @@ def test_shell_chain_e2e_uses_real_cli_redirection_and_pipes() -> None:
     text = _source("tests/e2e/test_shell_chains.py")
 
     assert '"$THREED"' in text
-    assert re.search(r'"\$THREED"[^\'"\n]*>\s*[\w.-]+', text)
-    assert re.search(r"2>\s*[\w.-]+", text)
-    assert re.search(r'"\$THREED"[^\'"\n]*\|', text)
+    assert re.search(r'"\$THREED"[^\'"\n]*>\s*[\w./-]+', text)
+    assert re.search(r"2>\s*[\w./-]+", text)
+    assert " | " in text
+    assert "&&" in text
     assert "_run_shell(" in text
+    assert "json.loads" in text
+    assert ".read_text" in text
 
 
 def test_readable_e2e_stories_have_human_workflow_docstrings() -> None:
@@ -65,6 +76,25 @@ def test_readable_e2e_stories_have_human_workflow_docstrings() -> None:
         assert not docstring.lower().startswith("test ")
 
 
+def test_readable_e2e_stories_assert_more_than_exit_codes() -> None:
+    story_tests = _test_functions("tests/e2e/test_cli_stories.py")
+
+    shallow = [
+        test.name
+        for test in story_tests
+        if not any(_is_substantive_assertion(assertion) for assertion in _assertions(test))
+    ]
+
+    assert shallow == []
+
+
+def test_readable_e2e_stories_include_artifact_and_shell_examples() -> None:
+    text = _source("tests/e2e/test_cli_stories.py")
+
+    for token in ("json.loads", ".read_text", "subprocess.run", " | ", ">"):
+        assert token in text
+
+
 def test_e2e_policy_docs_name_story_and_shell_chain_conventions() -> None:
     text = (
         _source("tests/e2e/README.md")
@@ -72,14 +102,15 @@ def test_e2e_policy_docs_name_story_and_shell_chain_conventions() -> None:
         + _source("docs/rules/testing.md")
     ).lower()
 
-    for phrase in (
-        "bin/3d",
-        "readable",
-        "story",
-        "shell redirection",
-        "pipes",
-        "new command",
-        "flag",
-        "alias",
+    for token in ("bin/3d", "readable", "artifact", "shell redirection", "pipes"):
+        assert token in text
+    for token_group in (
+        ("story", "stories"),
+        ("user task", "user tasks"),
+        ("exit code", "return code"),
+        ("not an e2e assertion", "not enough"),
+        ("new command", "new commands"),
+        ("flag", "flags"),
+        ("alias", "aliases"),
     ):
-        assert phrase in text
+        assert any(token in text for token in token_group)

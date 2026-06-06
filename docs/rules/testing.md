@@ -22,6 +22,24 @@ Never write the implementation first "to see if it works" and add tests after.
   user-workflow docstrings, real `bin/3d` invocations, and shell redirection (`>`) or pipes (`|`)
   when that demonstrates how the command composes with normal terminal tools.
 
+## E2E story philosophy
+E2E tests should read like examples we would be proud to show a new user. They are about
+user tasks, not one command's exit code:
+- Start from a practical 3D workflow: discover a model, extract parameters, query object-model
+  annotations, plan a print, summarize artifacts, or hand structured evidence to another tool.
+- Call the real `bin/3d`; when the workflow is shell-facing, exercise real shell composition
+  such as `>`, `2>`, `|`, and sequential command chains.
+- Inspect the artifact a user would trust: JSON keys and values, generated files, table rows,
+  planned render/print steps, rule IDs, anchors, styles, or report summaries. Exit code alone
+  is not an e2e assertion.
+- For commands whose main output is structured JSON, cover representative content,
+  selector/filter behavior, stdout/stderr separation, structured errors, and at least one
+  redirect or pipeline story when another tool is expected to consume the output.
+- Prefer one readable workflow test over several tiny command/status probes. A good e2e can run
+  multiple commands when that is how a user solves the task.
+- If the story describes how `3d` should work and it fails, fix the product unless the story is
+  asking for behavior outside the documented command surface.
+
 ## Green main, always
 - If `3d test` shows failures after your change — even in "unrelated" files — your change caused it
   (leaked fixtures, polluted globals, import side effects). Fix before committing.
