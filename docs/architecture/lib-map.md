@@ -43,6 +43,7 @@ rendering, slicing support, and verification:
 - `packing.py`
 - `printability_mesh.py`
 - `render.py`
+- `strength.py`
 - `usdz.py`
 
 Target package: `lib/geometry/`, with subpackages only when a real boundary appears
@@ -155,6 +156,7 @@ Every current root Python module is listed here so future additions are intentio
 - `workspaces.py` — web dashboard workspace metadata registry.
 - `refmatch.py` — image/reference matching helpers.
 - `render.py` — OpenSCAD render and section implementation.
+- `strength.py` — deterministic structural-check dry-run report helpers.
 - `usdz.py` — USDZ export helpers.
 
 Adding a new root `lib/*.py` file should be rare. Prefer a domain package. If a root file

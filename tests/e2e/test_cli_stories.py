@@ -915,6 +915,74 @@ def test_user_prepares_a_web_workspace_project_picker(tmp_path: Path) -> None:
     assert "Traceback" not in created.stderr + shown.stderr + piped.stderr
 
 
+def test_user_exports_a_structural_load_case_before_running_a_solver(tmp_path: Path) -> None:
+    """Strength planning turns a load case into reviewable JSON for shell workflows."""
+    model = tmp_path / "bracket.scad"
+    model.write_text("cube([60, 16, 6]);\n", encoding="utf-8")
+    report_json = tmp_path / "strength-report.json"
+
+    with report_json.open("w", encoding="utf-8") as stdout_file:
+        planned = subprocess.run(
+            [
+                sys.executable,
+                str(THREED),
+                "strength",
+                str(model),
+                "--material",
+                "PLA",
+                "--load",
+                "25",
+                "--axis",
+                "Z",
+                "--fixture",
+                "cantilever",
+                "--safety-factor",
+                "2.5",
+                "--json",
+            ],
+            cwd=REPO_ROOT,
+            env=_story_env(tmp_path),
+            stdout=stdout_file,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=15,
+        )
+
+    assert planned.returncode == 0, planned.stderr
+    payload = json.loads(report_json.read_text(encoding="utf-8"))
+    assert payload["status"] == "DRY-RUN"
+    assert payload["verdict"] == "NOT_EVALUATED"
+    assert payload["request"]["axis"] == "Z"
+    assert payload["request"]["fixture"] == "cantilever"
+    assert payload["request"]["safety_factor"] == 2.5
+    assert payload["material"]["name"] == "PLA"
+    assert payload["material"]["controlling_strength_mpa"] == 20.25
+    assert [check["status"] for check in payload["checks"]] == ["planned"] * 5
+
+    read_cmd = " ".join(shlex.quote(part) for part in ("cat", str(report_json)))
+    inspect_cmd = " ".join(
+        shlex.quote(part)
+        for part in (
+            sys.executable,
+            "-c",
+            "import json,sys; p=json.load(sys.stdin); print(p['request']['material'] + ':' + p['verdict'])",
+        )
+    )
+    piped = subprocess.run(
+        f"{read_cmd} | {inspect_cmd}",
+        cwd=REPO_ROOT,
+        env=_story_env(tmp_path),
+        capture_output=True,
+        text=True,
+        shell=True,
+        timeout=15,
+    )
+
+    assert piped.returncode == 0, piped.stderr
+    assert piped.stdout.strip() == "PLA:NOT_EVALUATED"
+    assert "Traceback" not in planned.stderr + piped.stderr
+
+
 def test_user_gets_animation_usage_when_model_is_missing(tmp_path: Path) -> None:
     """Animate without a model stays readable and does not touch render tools."""
     result = _run_3d(tmp_path, "animate")
