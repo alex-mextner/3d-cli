@@ -8,6 +8,14 @@ metrics are no longer accepted as proof, and what experiments remain planned.
 `fit-camera` must be judged primarily by boundary alignment, not by filled-mask
 area overlap and not by global SSIM.
 
+The current research target is not a classic topology hash. A hash can retrieve
+"similar-looking" candidates, but it does not normally provide a local direction
+for improving camera pose. What `fit-camera` needs is a pose-aware objective:
+an error surface that decreases when azimuth, elevation, distance, zoom, or
+target translation moves toward the correct pose, at least inside a local basin.
+Global monotonicity is not expected because single images are ambiguous and many
+models have symmetric or near-symmetric silhouettes.
+
 The accepted proof format is a shared-frame visual panel:
 
 1. original reference image or source render,
@@ -82,6 +90,177 @@ Goodall visual review on 2026-06-06 confirmed the current direction:
 
 This is the key policy proof: area IoU can remain as a secondary diagnostic, but
 it must not override weak boundary metrics or failed visual review.
+
+### Pose-sensitive objective / hash hypotheses
+
+Status: active research.
+
+User hypothesis: first recover enough spatial understanding from the reference,
+then align the model with an error/hash that only improves when the camera moves
+in the correct direction.
+
+Closest known algorithm families:
+
+- CAD/render pose estimation by render-and-compare over a view bank.
+- Distance-transform templates and Chamfer matching for object detection and
+  pose estimation.
+- Differentiable silhouette rendering and silhouette-consistency pose losses.
+- 6-DoF CAD-model pose estimation from a single RGB image by comparing rendered
+  views to the observed object.
+- Robust 3D registration after depth/point-cloud recovery: FPFH/SHOT/spin-image
+  descriptors, RANSAC/ICP, TEASER++.
+- 3D foundation models for geometry priors: DUSt3R, MASt3R, VGGT-style models
+  that infer depth, point maps, correspondences, and sometimes camera
+  parameters from one or more images.
+- Topological signatures such as Reeb graphs or persistent homology. These are
+  useful for shape identity but are probably too invariant to be the primary
+  pose objective.
+
+Working position:
+
+There is probably no single global pose-sensitive hash for this task. The
+practical design should combine a coarse retrieval descriptor with a local
+pose-aware energy:
+
+1. build a broad render bank over azimuth, elevation, distance, field of view,
+   and target translation,
+2. compute cheap descriptors from silhouette boundary, distance-transform
+   samples, depth, and normals,
+3. retrieve top-K camera basins,
+4. refine top-K with symmetric boundary Chamfer / signed distance fields,
+5. optionally add depth or pointmap priors from a spatial model,
+6. prove local directional behavior with finite-difference perturbations around
+   synthetic hidden-camera cases.
+
+Experiment H1: boundary distance-transform energy.
+
+- Hypothesis: a reference boundary distance field gives a smoother local error
+  surface than area IoU or binary edge F1.
+- Build: extract reference boundary, compute distance transform, render model
+  boundary for a candidate camera, score candidate boundary pixels by distance
+  to the reference and symmetrically score reference pixels against the render.
+- Direction test: from a wrong camera near the hidden synthetic truth, perturb
+  azimuth/elevation/distance/target both toward and away from truth. The error
+  should drop more often in the toward direction.
+- Expected failure: if the wrong pose has a similar silhouette, the field can
+  prefer the wrong basin.
+- Decision rule: keep as local refinement if directional accuracy is high inside
+  the correct basin; do not use it as the only global retrieval method.
+
+Experiment H2: multi-scale Chamfer field.
+
+- Hypothesis: coarse blurred/dilated fields avoid zero-overlap cliffs and make
+  early search less brittle; fine fields recover crisp boundaries after the
+  correct basin is found.
+- Build: score the same candidate at several edge-map scales or distance-field
+  clipping radii, using coarse scales first and fine scales for top-K.
+- Proof: evolution video should show broad pose correction first, then smaller
+  boundary shifts.
+- Expected failure: coarse scales may over-reward filled blobs and move toward
+  a back-facing silhouette.
+- Decision rule: keep only if a final fine-scale boundary gate can reject the
+  bad basin.
+
+Experiment H3: view-bank descriptor retrieval.
+
+- Hypothesis: a large render bank can choose the correct pose basin before local
+  optimization, making false back-side convergence less likely.
+- Build: render silhouettes/depth/normal previews for many camera candidates;
+  store compact descriptors such as boundary histograms, radial contour
+  signatures, distance-transform samples, Hu/Zernike-like moments, and optional
+  depth/normal summaries.
+- Proof: synthetic hidden-camera references should retrieve a top-K set
+  containing the true basin without being given the hidden pose.
+- Expected failure: symmetric objects and frontal/back silhouettes can collide.
+- Decision rule: use for coarse search only; require boundary/depth refinement
+  before acceptance.
+
+Experiment H4: finite-difference pose gradients.
+
+- Hypothesis: even without differentiable rendering, finite differences over
+  OpenSCAD renders can estimate useful local gradients for azimuth, elevation,
+  distance, fov, and target translation.
+- Build: around the best candidate, render small positive/negative perturbations
+  per parameter and estimate directional derivatives of the boundary-field
+  energy.
+- Proof: synthetic hidden-camera diagnostic plots must mark whether the
+  negative gradient points toward the hidden pose.
+- Expected failure: expensive renders and discontinuous visibility at silhouette
+  events.
+- Decision rule: useful for proof diagnostics and slow `--proof` refinement, not
+  default fast mode until render cost is bounded.
+
+Experiment H5: spatial/depth prior.
+
+- Hypothesis: a monocular depth or pointmap prior can break front/back silhouette
+  ambiguity by adding approximate 3D ordering.
+- Build: optional tier that runs available spatial models or preprocessors to
+  produce depth/pointmap/normal cues, then compares them with depth/normal
+  renders of candidate cameras.
+- Proof: cases where silhouette alone selects the back should be rejected or
+  re-ranked when depth/normal mismatch is considered.
+- Expected failure: real photos, statues, and architecture can have poor
+  monocular depth, missing scale, or clutter.
+- Decision rule: optional diagnostic/refinement tier with graceful skip; never
+  silently required for core `fit-camera`.
+
+Experiment H6: 2D-to-3D correspondence and registration.
+
+- Hypothesis: if image features can be tied to model features, robust
+  registration can estimate pose more directly than silhouette search.
+- Build: detect reference contours/corners/keypoints, render model feature
+  candidates from many views, match topological/visual feature graphs, then
+  solve pose with PnP/RANSAC or 3D registration if depth exists.
+- Proof: asymmetric synthetic models should recover pose with fewer candidates
+  than brute-force render search.
+- Expected failure: OpenSCAD renders and real photos may not share texture or
+  stable keypoints; pure silhouettes have weak correspondences.
+- Decision rule: research-only until repeatable feature correspondences exist.
+
+Experiment H7: topology signatures.
+
+- Hypothesis: topology descriptors can reject the wrong object or grossly wrong
+  segmentation before pose fitting.
+- Build: compute contour topology or skeleton summaries from the reference mask
+  and from rendered model views; use them as a filter before expensive scoring.
+- Proof: reject masks with extra background components, holes, or missing object
+  parts that would otherwise produce a misleading area IoU.
+- Expected failure: topology is often pose-invariant by design and therefore
+  does not tell which way to rotate the camera.
+- Decision rule: useful as a validity/crop/mask diagnostic, not a primary
+  pose-improving hash.
+
+Research sources and search anchors:
+
+- "Distance transform templates for object detection and pose estimation" is a
+  direct ancestor for boundary distance-field matching.
+- "Analytical Derivatives for Differentiable Renderer: 3D Pose Estimation by
+  Silhouette Consistency" and related differentiable rendering pose-estimation
+  papers explain why silhouette losses can provide pose gradients but also why
+  visibility discontinuities are difficult.
+- DRWR-style smooth silhouette losses show how distance fields can be used when
+  binary masks have non-informative gradients.
+- 6-DoF pose estimation from a single RGB image and CAD model retrieval papers
+  validate the render-bank plus feature-similarity framing.
+- TEASER++/ICP/FPFH/SHOT-style registration is relevant only after there is a
+  reference depth/point cloud or reliable 2D-to-3D correspondences.
+- DUSt3R, MASt3R, and VGGT are the current spatial-prior candidates for
+  producing approximate depth, pointmaps, or camera estimates from image data.
+
+Implementation notes for `3d-cli`:
+
+- Start with pure render-and-compare because it fits the existing OpenSCAD
+  pipeline and is testable with hidden-camera synthetic references.
+- Add `--search broad` or `--proof-search broad` rather than changing the fast
+  default path silently.
+- Store proof diagnostics as JSON plus PNG/MP4 artifacts:
+  `reference`, `reference_mask`, `candidate_grid`, `best_fit`, `boundary_overlay`,
+  `error_vs_iteration`, and `finite_difference_direction`.
+- A synthetic proof is accepted only if the hidden camera is not passed into the
+  fitting command. The hidden pose is used after fitting only for evaluation.
+- A real-photo proof is accepted only if visual review and boundary metrics agree.
+  If the search locks onto the back side or a wrong crop, the result is
+  `fail`/`diagnostic`, not `ok`.
 
 ### Area IoU on filled masks
 
