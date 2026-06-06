@@ -75,6 +75,23 @@ is part of the normal pytest sweep run by `3d test`; do not maintain a separate 
 `tests/test_imports.py` enforces the stdlib-only rule. `3d test` also runs ruff over
 `lib/ + tests/` and mypy over `bin/3d + lib/ + tests/` — keep both clean.
 
+## Agent worktrees
+
+Agents MUST create new worktrees through the project CLI, not raw `git worktree add`:
+
+```bash
+3d worktree create roadmap/my-task --base main
+cd ~/.config/superpowers/worktrees/3d-cli/roadmap-my-task
+3d worktree doctor .
+```
+
+`3d worktree create` runs `uv sync --extra dev` in the new checkout and verifies that
+`.venv/bin/ruff`, `.venv/bin/pytest`, and `.venv/bin/mypy` exist. This prevents the common
+failure where a fresh worktree has only runtime deps, then pre-commit or `3d test` fails
+because `ruff`/`pytest`/`mypy` are missing. Use `--path DIR` only when the default
+`~/.config/superpowers/worktrees/3d-cli/<branch>` location is unsuitable. Use raw git
+worktree commands only when repairing `3d worktree` itself.
+
 ## Engineering conventions
 
 ### Python

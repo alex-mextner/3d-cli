@@ -96,6 +96,7 @@ For a practical figure-by-figure image backplate loop, see
 | `ollama` | [ollama.md](ollama.md) | Validate local Ollama settings and print a dry-run generate request. |
 | `web` | [web.md](web.md) | Local FastAPI/SSE/three.js dashboard. |
 | `test` | [test.md](test.md) | Ruff, pytest, and mypy gate. |
+| `worktree` | [worktree.md](worktree.md) | Create agent git worktrees with a bootstrapped dev `.venv`. |
 
 ## Adding Or Changing A Command
 
