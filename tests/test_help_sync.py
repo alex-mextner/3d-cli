@@ -25,6 +25,7 @@ def test_render_usage_keeps_section_headers_and_options_aligned() -> None:
 def test_updated_help_examples_are_reflected_in_command_docs() -> None:
     expected = {
         "doctor": ("3d doctor | grep MISSING", "run before CI"),
+        "init": ("anchors:", "gates:"),
         "multi": ("3d multi bracket.scad --render --size 1200x900", "3d multi bracket.scad -D 'depth=40'"),
         "overlay": ("3d overlay preview.png photo.jpg", "3d overlay render.png ref.jpg -o diff/"),
         "pack": ("3d pack --bed 220x220 --part bracket=60x40", "jq '.placements | length'"),

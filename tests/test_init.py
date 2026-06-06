@@ -55,6 +55,16 @@ def test_no_input_scaffolds_loadable_project(tmp_path):
     assert p.parts == {}
 
 
+def test_scaffold_includes_empty_project_config_sections(tmp_path):
+    _run(["--no-input", "--name", "widget", "--no-git"], tmp_path)
+    p = project.load_project(tmp_path)
+    assert p.anchors == {}
+    assert p.sections == {}
+    assert p.loads == {}
+    assert p.gates == []
+    assert set(p.raw) >= {"project", "parts", "anchors", "sections", "loads", "gates"}
+
+
 def test_directory_skeleton_created(tmp_path):
     _run(["--no-input"], tmp_path)
     for d in ("parts", "references", "previews"):

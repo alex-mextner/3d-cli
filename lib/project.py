@@ -60,7 +60,56 @@ class Part:
     orientation: str | list[float] | None = None  # auto|flat-bottom|[rx,ry,rz]
     supports: str | None = None     # minimize|none|tree
     infill: str | int | None = None
+    gates: list[str] = field(default_factory=list)
     raw: dict[str, Any] = field(default_factory=dict)  # the untouched part dict
+
+
+@dataclass(slots=True)
+class ProjectAnchor:
+    """Named semantic point/feature in the project object model."""
+
+    name: str
+    pos: list[float]
+    direction: list[float] | None = None
+    area: float | None = None
+    note: str | None = None
+    raw: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class ProjectSection:
+    """Named section/cut declaration, resolved by render tooling later."""
+
+    name: str
+    preset: str | None = None
+    through: str | None = None
+    plane: str | None = None
+    at: float | None = None
+    offset: float | None = None
+    keep: str | None = None
+    raw: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class ProjectLoad:
+    """Named load declaration anchored to the object model."""
+
+    name: str
+    anchor: str
+    vector: list[float] | None = None
+    note: str | None = None
+    raw: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class ProjectGate:
+    """Project-level gate selection/config declaration."""
+
+    name: str
+    parts: list[str] = field(default_factory=list)
+    config: str | None = None
+    hard: bool | None = None
+    raw: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -76,6 +125,10 @@ class Project:
     material: str | None = None     # default material name into materials.yaml (§2a)
     bed: list[float] | None = None  # [x, y, z] build volume, optional
     parts: dict[str, Part] = field(default_factory=dict)
+    anchors: dict[str, ProjectAnchor] = field(default_factory=dict)
+    sections: dict[str, ProjectSection] = field(default_factory=dict)
+    loads: dict[str, ProjectLoad] = field(default_factory=dict)
+    gates: list[ProjectGate] = field(default_factory=list)
     raw: dict[str, Any] = field(default_factory=dict)  # the untouched full document
 
 
@@ -115,6 +168,176 @@ def _as_str_list(value: Any) -> list[str]:
     return [str(value)]
 
 
+def _mapping(value: Any, label: str, *, command: str | None) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ProjectError(
+            f"`{label}` must be a mapping, got {type(value).__name__}",
+            command=command,
+            remediation=[f"In {PROJECT_FILE}, write `{label}:` as key/value entries."],
+        )
+    return {str(k): v for k, v in value.items()}
+
+
+def _float_value(value: Any, label: str, *, command: str | None) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        raise ProjectError(
+            f"{label} must be a number, got {value!r}",
+            command=command,
+        ) from None
+
+
+def _float_triplet(value: Any, label: str, *, command: str | None) -> list[float]:
+    if not isinstance(value, (list, tuple)) or len(value) != 3:
+        raise ProjectError(
+            f"{label} must be a 3-number list, got {value!r}",
+            command=command,
+            remediation=[f"Example: `{label}: [0, 0, 1]`"],
+        )
+    return [_float_value(v, label, command=command) for v in value]
+
+
+def _optional_float(value: Any, label: str, *, command: str | None) -> float | None:
+    if value is None:
+        return None
+    return _float_value(value, label, command=command)
+
+
+def _optional_triplet(value: Any, label: str, *, command: str | None) -> list[float] | None:
+    if value is None:
+        return None
+    return _float_triplet(value, label, command=command)
+
+
+def _build_anchor(name: str, spec: Any, *, command: str | None) -> ProjectAnchor:
+    data = _mapping(spec, f"anchors.{name}", command=command)
+    if "pos" not in data:
+        raise ProjectError(
+            f"anchors.{name} is missing `pos:`",
+            command=command,
+            remediation=[f"Add `pos: [x, y, z]` under anchors.{name} in {PROJECT_FILE}."],
+        )
+    area = _optional_float(data.get("area"), f"anchors.{name}.area", command=command)
+    return ProjectAnchor(
+        name=name,
+        pos=_float_triplet(data["pos"], f"anchors.{name}.pos", command=command),
+        direction=_optional_triplet(data.get("dir"), f"anchors.{name}.dir", command=command),
+        area=area,
+        note=str(data["note"]) if data.get("note") is not None else None,
+        raw=data,
+    )
+
+
+def _build_section(name: str, spec: Any, *, command: str | None) -> ProjectSection:
+    if isinstance(spec, str):
+        return ProjectSection(name=name, preset=spec, raw={"preset": spec})
+    data = _mapping(spec, f"sections.{name}", command=command)
+    plane = str(data["plane"]) if data.get("plane") is not None else None
+    if plane is not None and plane not in ("YZ", "XZ", "XY"):
+        raise ProjectError(
+            f"sections.{name}.plane must be one of YZ, XZ, XY; got {plane!r}",
+            command=command,
+        )
+    keep = str(data["keep"]) if data.get("keep") is not None else None
+    if keep is not None and keep not in ("pos", "neg"):
+        raise ProjectError(
+            f"sections.{name}.keep must be one of pos, neg; got {keep!r}",
+            command=command,
+        )
+    return ProjectSection(
+        name=name,
+        preset=str(data["preset"]) if data.get("preset") is not None else None,
+        through=str(data["through"]) if data.get("through") is not None else None,
+        plane=plane,
+        at=_optional_float(data.get("at"), f"sections.{name}.at", command=command),
+        offset=_optional_float(data.get("offset"), f"sections.{name}.offset", command=command),
+        keep=keep,
+        raw=data,
+    )
+
+
+def _build_load(name: str, spec: Any, *, command: str | None) -> ProjectLoad:
+    data = _mapping(spec, f"loads.{name}", command=command)
+    anchor = data.get("anchor")
+    if not isinstance(anchor, str) or not anchor:
+        raise ProjectError(
+            f"loads.{name} is missing `anchor:`",
+            command=command,
+            remediation=[f"Add `anchor: <name>` under loads.{name} in {PROJECT_FILE}."],
+        )
+    return ProjectLoad(
+        name=name,
+        anchor=anchor,
+        vector=_optional_triplet(data.get("vector"), f"loads.{name}.vector", command=command),
+        note=str(data["note"]) if data.get("note") is not None else None,
+        raw=data,
+    )
+
+
+def _build_gate(idx: int, spec: Any, *, command: str | None) -> ProjectGate:
+    if isinstance(spec, str):
+        return ProjectGate(name=spec, raw={"name": spec})
+    data = _mapping(spec, f"gates[{idx}]", command=command)
+    name = data.get("name")
+    if not isinstance(name, str) or not name:
+        raise ProjectError(
+            f"gates[{idx}] must be a string or a mapping with `name:`",
+            command=command,
+            remediation=["Example: `gates: [manifold, printability]`"],
+        )
+    hard = data.get("hard")
+    if hard is not None and not isinstance(hard, bool):
+        raise ProjectError(f"gates[{idx}].hard must be true or false", command=command)
+    return ProjectGate(
+        name=name,
+        parts=_as_str_list(data.get("parts")),
+        config=str(data["config"]) if data.get("config") is not None else None,
+        hard=hard,
+        raw=data,
+    )
+
+
+def _build_gate_list(spec: Any, *, command: str | None) -> list[ProjectGate]:
+    if spec is None:
+        return []
+    if isinstance(spec, dict):
+        gates: list[ProjectGate] = []
+        for i, (name, value) in enumerate(spec.items()):
+            if value is None:
+                data: dict[str, Any] = {"name": str(name)}
+            elif isinstance(value, dict):
+                data = {**_mapping(value, f"gates.{name}", command=command), "name": str(name)}
+            else:
+                raise ProjectError(
+                    f"`gates.{name}` must be a mapping or null, got {type(value).__name__}",
+                    command=command,
+                    remediation=[f"Example: `gates:\n  {name}: {{config: verify/{name}.json}}`"],
+                )
+            gates.append(_build_gate(i, data, command=command))
+        return gates
+    if not isinstance(spec, (list, tuple)):
+        raise ProjectError(
+            f"`gates:` must be a list or mapping, got {type(spec).__name__}",
+            command=command,
+            remediation=["Example: `gates: [manifold, printability]`"],
+        )
+    return [_build_gate(i, item, command=command) for i, item in enumerate(spec)]
+
+
+def _build_named_mapping(
+    spec: Any,
+    label: str,
+    builder: Any,
+    *,
+    command: str | None,
+) -> dict[str, Any]:
+    if spec is None:
+        return {}
+    entries = _mapping(spec, label, command=command)
+    return {name: builder(name, value, command=command) for name, value in entries.items()}
+
+
 def _build_part(name: str, spec: Any, root: pathlib.Path, *, command: str | None) -> Part:
     if not isinstance(spec, dict):
         raise ProjectError(
@@ -148,6 +371,7 @@ def _build_part(name: str, spec: Any, root: pathlib.Path, *, command: str | None
         orientation=spec.get("orientation"),
         supports=spec.get("supports"),
         infill=spec.get("infill"),
+        gates=_as_str_list(spec.get("gates")),
         raw=dict(spec),
     )
 
@@ -234,6 +458,11 @@ def load_project(
             )
         parts[str(pname)] = part
 
+    anchors = _build_named_mapping(doc.get("anchors"), "anchors", _build_anchor, command=command)
+    sections = _build_named_mapping(doc.get("sections"), "sections", _build_section, command=command)
+    loads = _build_named_mapping(doc.get("loads"), "loads", _build_load, command=command)
+    gates = _build_gate_list(doc.get("gates"), command=command)
+
     return Project(
         path=p,
         root=root,
@@ -244,5 +473,9 @@ def load_project(
         material=proj_spec.get("material"),
         bed=bed_list,
         parts=parts,
+        anchors=anchors,
+        sections=sections,
+        loads=loads,
+        gates=gates,
         raw=doc,
     )

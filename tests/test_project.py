@@ -91,3 +91,105 @@ def test_raw_preserves_unknown_keys(tmp_path):
     _write(tmp_path, "project:\n  name: a\n  custom_future_key: 42\n")
     p = project.load_project(tmp_path)
     assert p.raw["project"]["custom_future_key"] == 42
+
+
+def test_load_project_config_sections_anchors_loads_and_gates(tmp_path):
+    _write(
+        tmp_path,
+        """project:
+  name: fixture
+anchors:
+  mount:
+    pos: [10, 0, 3.5]
+    dir: [0, 0, 1]
+    area: 12.5
+    note: screw boss
+sections:
+  center:
+    preset: mid-z
+  mount-cut:
+    through: mount
+    plane: YZ
+    offset: 2
+    keep: pos
+loads:
+  push:
+    anchor: mount
+    vector: [0, 0, -25]
+    note: lid pressure
+gates:
+  - manifold
+  - name: collision
+    config: verify/collision.json
+    hard: true
+parts:
+  body:
+    file: parts/body.scad
+    gates: [manifold, printability]
+""",
+        parts=["parts/body.scad"],
+    )
+
+    p = project.load_project(tmp_path)
+
+    mount = p.anchors["mount"]
+    assert mount.pos == [10.0, 0.0, 3.5]
+    assert mount.direction == [0.0, 0.0, 1.0]
+    assert mount.area == 12.5
+    assert mount.note == "screw boss"
+
+    assert p.sections["center"].preset == "mid-z"
+    cut = p.sections["mount-cut"]
+    assert cut.through == "mount"
+    assert cut.plane == "YZ"
+    assert cut.offset == 2.0
+    assert cut.keep == "pos"
+
+    load = p.loads["push"]
+    assert load.anchor == "mount"
+    assert load.vector == [0.0, 0.0, -25.0]
+    assert load.note == "lid pressure"
+
+    assert [g.name for g in p.gates] == ["manifold", "collision"]
+    assert p.gates[1].config == "verify/collision.json"
+    assert p.gates[1].hard is True
+    assert p.parts["body"].gates == ["manifold", "printability"]
+
+
+def test_section_shorthand_string_becomes_preset(tmp_path):
+    _write(tmp_path, "project:\n  name: a\nsections:\n  z-mid: mid-z\n")
+    p = project.load_project(tmp_path)
+    assert p.sections["z-mid"].preset == "mid-z"
+
+
+def test_invalid_anchor_position_raises_project_error(tmp_path):
+    _write(tmp_path, "project:\n  name: a\nanchors:\n  bad:\n    pos: [1, 2]\n")
+    with pytest.raises(ProjectError) as exc:
+        project.load_project(tmp_path)
+    assert "anchors.bad.pos" in str(exc.value)
+
+
+def test_invalid_gate_shape_raises_project_error(tmp_path):
+    _write(tmp_path, "project:\n  name: a\ngates:\n  - config: verify/collision.json\n")
+    with pytest.raises(ProjectError) as exc:
+        project.load_project(tmp_path)
+    assert "gates[0]" in str(exc.value)
+
+
+def test_gate_mapping_rejects_falsey_scalar_values(tmp_path):
+    _write(tmp_path, "project:\n  name: a\ngates:\n  collision: false\n")
+    with pytest.raises(ProjectError) as exc:
+        project.load_project(tmp_path)
+    assert "gates.collision" in str(exc.value)
+
+
+def test_gate_mapping_key_is_authoritative_over_inner_name(tmp_path):
+    _write(
+        tmp_path,
+        "project:\n  name: a\ngates:\n  collision:\n    name: manifold\n    config: verify/collision.json\n",
+    )
+
+    loaded = project.load_project(tmp_path)
+
+    assert loaded.gates[0].name == "collision"
+    assert loaded.gates[0].config == "verify/collision.json"

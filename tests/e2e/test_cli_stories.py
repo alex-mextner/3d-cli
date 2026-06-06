@@ -79,6 +79,60 @@ def test_user_discovers_the_command_surface_before_installing_heavy_tools(
         assert expected_phrase in command_help.stdout
 
 
+def test_user_starts_project_with_object_model_placeholders(tmp_path: Path) -> None:
+    """Init creates a project spine that future anchors, sections, loads, and gates fill in."""
+    project_dir = tmp_path / "servo-bracket"
+    result = _run_3d(
+        tmp_path,
+        "init",
+        str(project_dir),
+        "--no-input",
+        "--no-git",
+        "--no-hooks",
+        "--no-mcp",
+        "--no-skills",
+        "--no-agents",
+        "--name",
+        "servo bracket",
+    )
+
+    assert result.returncode == 0, result.stderr
+    yaml_path = project_dir / "3d.yaml"
+    assert yaml_path.is_file()
+    body = yaml_path.read_text(encoding="utf-8")
+    for key in ("parts:", "anchors:", "sections:", "loads:", "gates:"):
+        assert key in body
+
+    inspect_cmd = " ".join(
+        shlex.quote(part)
+        for part in (
+            "cat",
+            str(yaml_path),
+        )
+    )
+    parse_cmd = " ".join(
+        shlex.quote(part)
+        for part in (
+            sys.executable,
+            "-c",
+            "import sys; text=sys.stdin.read(); print(':'.join(k for k in ['anchors','sections','loads','gates'] if k + ':' in text))",
+        )
+    )
+    piped = subprocess.run(
+        f"{inspect_cmd} | {parse_cmd}",
+        cwd=REPO_ROOT,
+        env=_story_env(tmp_path),
+        capture_output=True,
+        text=True,
+        shell=True,
+        timeout=15,
+    )
+
+    assert piped.returncode == 0, piped.stderr
+    assert piped.stdout.strip() == "anchors:sections:loads:gates"
+    assert "Traceback" not in result.stderr + piped.stderr
+
+
 def test_user_inspects_a_parametric_model_as_structured_json(tmp_path: Path) -> None:
     """The params command turns OpenSCAD Customizer comments into data."""
     result = _run_3d(tmp_path, "params", str(CUBE), "--json")

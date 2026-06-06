@@ -48,7 +48,8 @@ from cli.registry import Command
 from errors import InputNotFound, InvalidArgument
 
 USAGE = """3d init [path] [options]
-  Scaffold a PRODUCTIVE agent project: write a 3d.yaml, create parts/ references/ previews/,
+  Scaffold a PRODUCTIVE agent project: write a 3d.yaml (project, parts, anchors, sections,
+  loads, gates), create parts/ references/ previews/,
   add a .gitignore, init a git repo, register the project, AND install the agent environment —
   the OpenSCAD MCP server (.mcp.json), the openscad + fdm-printability skills (.claude/skills/),
   an AGENTS.md (with CLAUDE.md symlink), and a `3d check` pre-commit hook.
@@ -239,7 +240,14 @@ def _write_yaml(target: pathlib.Path, opts: dict[str, object]) -> None:
         project_block["bed"] = opts["bed"]
     if opts["reference"]:
         project_block["reference"] = opts["reference"]
-    doc = {"project": project_block, "parts": {}}
+    doc = {
+        "project": project_block,
+        "parts": {},
+        "anchors": {},
+        "sections": {},
+        "loads": {},
+        "gates": [],
+    }
     target.write_text(
         yaml.safe_dump(doc, sort_keys=False, default_flow_style=False),
         encoding="utf-8",

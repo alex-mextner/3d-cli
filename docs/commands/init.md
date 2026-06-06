@@ -35,7 +35,8 @@ Common options:
 
 ## Notes
 
-- The generated `3d.yaml` has an empty `parts:` map; users add real parts later.
+- The generated `3d.yaml` has empty `parts:`, `anchors:`, `sections:`, `loads:`, and
+  `gates:` sections; users add real parts and object-model metadata later.
 - `3d init` can register the project so `3d web` and cross-project tools can discover it.
 - Printer and material names come from the merged registries exposed by `3d printers` and
   `3d materials`.
