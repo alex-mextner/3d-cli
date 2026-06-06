@@ -121,6 +121,28 @@ def require_magick(command: str | None = None) -> str:
     return mgk
 
 
+def find_ffmpeg() -> str | None:
+    w = shutil.which("ffmpeg")
+    if w:
+        return w
+    for p in ("/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg"):
+        if os.access(p, os.X_OK):
+            return p
+    return None
+
+
+def require_ffmpeg(command: str | None = None) -> str:
+    ffmpeg = find_ffmpeg()
+    if ffmpeg is None:
+        raise MissingDependency(
+            "ffmpeg",
+            install=install_cmd("ffmpeg"),
+            degrades="video export cannot encode PNG frames into MP4/WebM",
+            command=command,
+        )
+    return ffmpeg
+
+
 # Slicer preference: OrcaSlicer > Bambu Studio > PrusaSlicer. Each is checked across
 # BOTH PATH and macOS bundles before falling to the next, so preference holds regardless
 # of install location. Returns (kind, path) or None.
@@ -220,6 +242,12 @@ _INSTALL: dict[str, dict[str, str]] = {
         "linux-apt": "download OrcaSlicer AppImage from github.com/SoftFever/OrcaSlicer/releases",
         "linux-dnf": "download OrcaSlicer AppImage from github.com/SoftFever/OrcaSlicer/releases",
         "linux-pacman": "{sudo}pacman -S --noconfirm orca-slicer  # (AUR) or AppImage",
+    },
+    "ffmpeg": {
+        "macos": "brew install ffmpeg",
+        "linux-apt": "{sudo}apt-get install -y ffmpeg",
+        "linux-dnf": "{sudo}dnf install -y ffmpeg",
+        "linux-pacman": "{sudo}pacman -S --noconfirm ffmpeg",
     },
 }
 

@@ -32,6 +32,7 @@ import sys
 from cli.env import (
     PY_MESH_MODULES,
     detect_os,
+    find_ffmpeg,
     find_magick,
     find_openscad,
     find_slicer,
@@ -48,7 +49,7 @@ USAGE = """3d doctor
   with the exact install command for THIS OS. Read-only — installs nothing.
   (OpenSCAD libraries auto-install on first run; python deps resolve via uv or a .venv.)
 
-  Checks: openscad, imagemagick, python3, uv/pip, the python mesh stack
+  Checks: openscad, imagemagick, ffmpeg, python3, uv/pip, the python mesh stack
   (trimesh, manifold3d, numpy, scipy, rtree, pillow, opencv), and a slicer
   (OrcaSlicer / Bambu Studio / PrusaSlicer).
 
@@ -99,6 +100,11 @@ def run(argv: list[str]) -> int:  # noqa: C901
         passl("imagemagick (magick)", mgk if os.path.isabs(mgk) else (shutil.which(mgk) or mgk))
     else:
         miss("imagemagick (magick)", install_cmd("imagemagick"))
+    ffmpeg = find_ffmpeg()
+    if ffmpeg:
+        passl("ffmpeg", ffmpeg)
+    else:
+        miss("ffmpeg", install_cmd("ffmpeg"))
     py3 = shutil.which("python3")
     if py3:
         passl("python3", py3)

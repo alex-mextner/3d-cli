@@ -238,6 +238,72 @@ cube([10, 10, 4]);
     ]
 
 
+def test_user_plans_progress_video_from_existing_render_frames(tmp_path: Path) -> None:
+    """A progress clip can be planned from PNG artifacts and inspected with shell pipes."""
+    frames_dir = tmp_path / "preview-frames"
+    frames_dir.mkdir()
+    for name in ("frame_10.png", "frame_1.png", "notes.txt", "frame_2.png"):
+        (frames_dir / name).write_text("png", encoding="utf-8")
+    plan_path = tmp_path / "video-plan.txt"
+    env = _story_env(tmp_path)
+
+    plan_command = " ".join(
+        [
+            shlex.quote(sys.executable),
+            shlex.quote(str(THREED)),
+            "video",
+            "progress",
+            shlex.quote(str(frames_dir)),
+            "--dry-run",
+            "--fps",
+            "12",
+            "--pattern",
+            shlex.quote("*.png"),
+            ">",
+            shlex.quote(str(plan_path)),
+        ]
+    )
+    result = subprocess.run(
+        plan_command,
+        cwd=REPO_ROOT,
+        env=env,
+        shell=True,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert plan_path.read_text(encoding="utf-8").splitlines() == [
+        "mode: progress",
+        "frames: 3",
+        "pattern: *.png",
+        f"output: {frames_dir}.mp4",
+    ]
+
+    pipe_script = (
+        "import sys; "
+        "print([line.strip() for line in sys.stdin if line.startswith('frames:')][0])"
+    )
+    pipe_command = (
+        f"cat {shlex.quote(str(plan_path))} | "
+        f"{shlex.quote(sys.executable)} -c "
+        f"{shlex.quote(pipe_script)}"
+    )
+    pipe_result = subprocess.run(
+        pipe_command,
+        cwd=REPO_ROOT,
+        env=env,
+        shell=True,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+
+    assert pipe_result.returncode == 0, pipe_result.stderr
+    assert pipe_result.stdout.strip() == "frames: 3"
+
+
 def test_user_gets_actionable_errors_for_wrong_command_or_file(
     tmp_path: Path,
 ) -> None:

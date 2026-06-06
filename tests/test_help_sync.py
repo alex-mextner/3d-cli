@@ -42,6 +42,7 @@ def test_updated_help_examples_are_reflected_in_command_docs() -> None:
         "print": ("3d print part.stl --printer \"Prusa MK4\" --dry-run", "print-plan.json"),
         "strength": ("3d strength bracket.scad --material PLA --load 25", "strength-report.json"),
         "validate": ("3d validate bracket.scad", "fast CI check"),
+        "video": ("3d video turntable bracket.scad --dry-run", "cat video-plan.txt | grep '^frames:'"),
         "workspaces": ("3d workspaces show shop --json > workspace.json", "3d workspaces list --json |"),
     }
     for name, snippets in expected.items():

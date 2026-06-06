@@ -46,6 +46,7 @@ rendering, slicing support, and verification:
 - `render.py`
 - `strength.py`
 - `usdz.py`
+- `video.py`
 
 Target package: `lib/geometry/`, with subpackages only when a real boundary appears
 (`rendering`, `mesh`, `collision`, `export`).
@@ -162,6 +163,7 @@ Every current root Python module is listed here so future additions are intentio
 - `render.py` — OpenSCAD render and section implementation.
 - `strength.py` — deterministic structural-check dry-run report helpers.
 - `usdz.py` — USDZ export helpers.
+- `video.py` — video turntable and progress-frame planning / encoding helpers.
 
 Adding a new root `lib/*.py` file should be rare. Prefer a domain package. If a root file
 is needed as a compatibility shim, document it in this inventory and keep it import-light.
