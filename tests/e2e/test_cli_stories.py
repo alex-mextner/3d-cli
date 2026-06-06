@@ -391,6 +391,56 @@ def test_user_normalizes_axis_plane_view_and_camera_inputs(tmp_path: Path) -> No
     assert "Traceback" not in plane.stderr + view.stderr + camera.stderr
 
 
+def test_user_tracks_materials_and_parts_before_planning_a_print(tmp_path: Path) -> None:
+    """Inventory keeps local stock visible to shell scripts and agent workflows."""
+    material = _run_3d(
+        tmp_path,
+        "inventory",
+        "add",
+        "material",
+        "PLA",
+        "--qty",
+        "1",
+        "--unit",
+        "spool",
+        "--location",
+        "bin 2",
+    )
+
+    assert material.returncode == 0, material.stderr
+    assert "Added material: PLA" in material.stdout
+
+    part = _run_3d(
+        tmp_path,
+        "inventory",
+        "add",
+        "part",
+        "M3 nut",
+        "--qty",
+        "25",
+        "--material",
+        "steel",
+        "--notes",
+        "drawer A",
+    )
+
+    assert part.returncode == 0, part.stderr
+    assert "Added part: M3 nut" in part.stdout
+
+    listing = _run_3d(tmp_path, "inventory", "list")
+    assert listing.returncode == 0, listing.stderr
+    assert "MATERIALS" in listing.stdout
+    assert "PLA" in listing.stdout
+    assert "PARTS" in listing.stdout
+    assert "M3 nut" in listing.stdout
+
+    shown = _run_3d(tmp_path, "inventory", "show", "part", "M3 nut")
+    assert shown.returncode == 0, shown.stderr
+    assert "material  steel" in shown.stdout
+    assert "notes     drawer A" in shown.stdout
+    assert "Traceback" not in material.stderr + part.stderr + listing.stderr + shown.stderr
+
+
 def test_user_gets_animation_usage_when_model_is_missing(tmp_path: Path) -> None:
     """Animate without a model stays readable and does not touch render tools."""
     result = _run_3d(tmp_path, "animate")
