@@ -20,6 +20,12 @@ import numpy as np
 import trimesh
 from scipy.spatial import cKDTree
 
+PROOF_BG_COLOR = (18, 22, 28)
+PROOF_CAD_ONLY_COLOR = (220, 50, 50)
+PROOF_PROXY_ONLY_COLOR = (20, 170, 230)
+PROOF_OVERLAP_COLOR = (245, 245, 245)
+PROOF_MASK_SIZE = 256
+
 
 @dataclass(frozen=True)
 class MeshCloud:
@@ -508,24 +514,6 @@ def _mesh_dict(cloud: MeshCloud) -> dict[str, Any]:
     }
 
 
-def _project(
-    points: np.ndarray,
-    axes: tuple[int, int],
-    size: int = 420,
-    bounds: tuple[np.ndarray, np.ndarray] | None = None,
-) -> list[tuple[float, float]]:
-    xy = points[:, axes]
-    if bounds is None:
-        lo = xy.min(axis=0)
-        hi = xy.max(axis=0)
-    else:
-        lo, hi = bounds
-    span = np.maximum(hi - lo, 1e-9)
-    norm = (xy - lo) / span
-    pad = 24
-    return [(float(pad + x * (size - 2 * pad)), float(size - (pad + y * (size - 2 * pad)))) for x, y in norm]
-
-
 def _projection_bounds(cad: np.ndarray, aligned: np.ndarray, axes: tuple[int, int]) -> tuple[np.ndarray, np.ndarray]:
     xy = np.vstack([cad[:, axes], aligned[:, axes]])
     lo = xy.min(axis=0)
@@ -534,24 +522,43 @@ def _projection_bounds(cad: np.ndarray, aligned: np.ndarray, axes: tuple[int, in
     return lo - pad, hi + pad
 
 
-def _draw_projection(
-    draw: Any,
-    cad: np.ndarray,
-    aligned: np.ndarray,
+def _mask_rgb(cad_mask: np.ndarray, proxy_mask: np.ndarray) -> np.ndarray:
+    image = np.zeros((*cad_mask.shape, 3), dtype=np.uint8)
+    image[:, :] = PROOF_BG_COLOR
+    cad_only = cad_mask & ~proxy_mask
+    proxy_only = proxy_mask & ~cad_mask
+    overlap = cad_mask & proxy_mask
+    image[cad_only] = PROOF_CAD_ONLY_COLOR
+    image[proxy_only] = PROOF_PROXY_ONLY_COLOR
+    image[overlap] = PROOF_OVERLAP_COLOR
+    return image
+
+
+def _projection_masks(
+    cad: MeshCloud,
+    proxy: MeshCloud,
+    best: Candidate,
     axes: tuple[int, int],
-    origin: tuple[int, int],
-    title: str,
-) -> None:
-    ox, oy = origin
-    size = 420
-    draw.rectangle([ox, oy, ox + size, oy + size], fill=(250, 250, 250), outline=(180, 180, 180))
-    draw.text((ox + 12, oy + 10), title, fill=(20, 20, 20))
-    bounds = _projection_bounds(cad, aligned, axes)
-    for x, y in _project(cad, axes, size=size, bounds=bounds):
-        draw.point((ox + x, oy + y), fill=(220, 40, 40))
-    for x, y in _project(aligned, axes, size=size, bounds=bounds):
-        draw.point((ox + x, oy + y), fill=(20, 120, 220))
-    draw.text((ox + 12, oy + size - 24), "red=CAD  blue=aligned proxy", fill=(20, 20, 20))
+    size: int = 300,
+) -> tuple[np.ndarray, np.ndarray]:
+    aligned_vertices = best.scale * (proxy.mesh_vertices @ best.rotation.T) + best.translation
+    bounds = _projection_bounds(cad.mesh_vertices, aligned_vertices, axes)
+    cad_mask = _rasterize_projection(cad.mesh_vertices, axes, bounds, size=size, faces=cad.mesh_faces)
+    proxy_mask = _rasterize_projection(aligned_vertices, axes, bounds, size=size, faces=proxy.mesh_faces)
+    return cad_mask, proxy_mask
+
+
+def _mask_overlay_image(cad_mask: np.ndarray, proxy_mask: np.ndarray) -> Any:
+    from PIL import Image
+
+    return Image.fromarray(_mask_rgb(cad_mask, proxy_mask))
+
+
+def _score_by_name(gate: QualityGate, name: str) -> ProjectionScore:
+    for score in gate.projection_scores:
+        if score.name == name:
+            return score
+    raise ValueError(f"quality gate projection score is missing {name}")
 
 
 def write_proof(cad: MeshCloud, proxy: MeshCloud, best: Candidate, gate: QualityGate, out_dir: Path) -> Path:
@@ -560,80 +567,115 @@ def write_proof(cad: MeshCloud, proxy: MeshCloud, best: Candidate, gate: Quality
     except ImportError:
         return write_svg_proof(cad, proxy, best, gate, out_dir)
 
-    aligned = best.scale * (proxy.points @ best.rotation.T) + best.translation
-    image = Image.new("RGB", (840, 900), "white")
+    image = Image.new("RGB", (1180, 760), "white")
     draw = ImageDraw.Draw(image)
-    _draw_projection(draw, cad.points, aligned, (0, 1), (0, 0), "XY projection")
-    _draw_projection(draw, cad.points, aligned, (0, 2), (420, 0), "XZ projection")
-    _draw_projection(draw, cad.points, aligned, (1, 2), (0, 420), "YZ projection")
-    draw.text((432, 448), "Best proxy -> CAD alignment", fill=(20, 20, 20))
-    draw.text((432, 474), f"Chamfer mean: {best.chamfer_mean:.5f}", fill=(20, 20, 20))
-    draw.text((432, 498), f"Chamfer p95:  {best.chamfer_p95:.5f}", fill=(20, 20, 20))
-    draw.text((432, 522), f"Objective:     {best.objective:.5f}", fill=(20, 20, 20))
-    draw.text((432, 546), f"Initial yaw/pitch/roll: {best.yaw:g}/{best.pitch:g}/{best.roll:g}", fill=(20, 20, 20))
-    draw.text((432, 584), f"Quality gate: {gate.status}", fill=(20, 20, 20))
-    draw.text((432, 608), f"Min edge F1@3: {gate.projection_edge_f1_at_3:.3f}", fill=(20, 20, 20))
-    draw.text((432, 632), f"Max edge Chamfer px: {gate.projection_edge_chamfer_px:.2f}", fill=(20, 20, 20))
+    draw.text((24, 18), "proxy-align proof: CAD vs generated proxy silhouettes", fill=(20, 20, 20))
+    draw.text((24, 44), "white=overlap  red=CAD only  cyan=proxy only  dark=empty", fill=(60, 60, 60))
+    status_color = (45, 120, 45) if gate.status == "ok" else (180, 115, 20) if gate.status == "warning" else (180, 45, 45)
+    for title, axes, x in (("XY", (0, 1), 24), ("XZ", (0, 2), 324), ("YZ", (1, 2), 624)):
+        cad_mask, proxy_mask = _projection_masks(cad, proxy, best, axes, size=PROOF_MASK_SIZE)
+        nearest = getattr(getattr(Image, "Resampling", Image), "NEAREST")
+        panel = _mask_overlay_image(cad_mask, proxy_mask).resize((270, 270), nearest)
+        image.paste(panel, (x, 90))
+        score = _score_by_name(gate, title)
+        draw.rectangle([x, 90, x + 270, 360], outline=(120, 120, 120))
+        draw.text((x, 370), f"{title} edge F1@3: {score.edge_f1_at_3:.3f}", fill=(20, 20, 20))
+        draw.text((x, 392), f"{title} chamfer px: {score.edge_chamfer_px:.2f}", fill=(20, 20, 20))
+        draw.text((x, 414), f"{title} coverage: {score.coverage_ratio:.3f}", fill=(20, 20, 20))
+    draw.text((924, 90), "Quality gate", fill=(20, 20, 20))
+    draw.text((924, 120), f"status: {gate.status}", fill=status_color)
+    draw.text((924, 154), f"3D Chamfer mean: {best.chamfer_mean:.5f}", fill=(20, 20, 20))
+    draw.text((924, 178), f"3D Chamfer p95:  {best.chamfer_p95:.5f}", fill=(20, 20, 20))
+    draw.text((924, 202), f"objective:        {best.objective:.5f}", fill=(20, 20, 20))
+    draw.text((924, 236), f"yaw/pitch/roll: {best.yaw:g}/{best.pitch:g}/{best.roll:g}", fill=(20, 20, 20))
+    draw.text((924, 270), f"min edge F1@3: {gate.projection_edge_f1_at_3:.3f}", fill=(20, 20, 20))
+    draw.text((924, 294), f"max chamfer px: {gate.projection_edge_chamfer_px:.2f}", fill=(20, 20, 20))
+    draw.text((924, 318), f"max coverage drift: {gate.projection_coverage_ratio:.3f}", fill=(20, 20, 20))
+    draw.text((924, 360), "Reasons", fill=(20, 20, 20))
+    y = 386
+    for reason in gate.reasons[:8]:
+        draw.text((924, y), "- " + reason[:38], fill=(150, 45, 45))
+        y += 22
     reason = gate.reasons[0] if gate.reasons else "proxy accepted as a coarse prior"
-    draw.text((432, 670), reason[:62], fill=(150, 45, 45) if gate.reasons else (45, 110, 45))
-    draw.text((432, 708), "Reject/warn before fit-camera if proxy render contours do not match.", fill=(70, 70, 70))
+    draw.text((24, 704), "Decision: " + reason[:120], fill=status_color)
     path = out_dir / "alignment_proof.png"
     image.save(path)
     return path
 
 
-def _svg_points(points: np.ndarray, axes: tuple[int, int], color: str, offset_x: int, offset_y: int) -> str:
-    projected = _project(points, axes, size=360)
-    return "\n".join(
-        f'<circle cx="{offset_x + x:.1f}" cy="{offset_y + y:.1f}" r="0.9" fill="{color}" />'
-        for x, y in projected[:: max(1, len(projected) // 700)]
-    )
+def _svg_escape(text: str) -> str:
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
 
 
-def _svg_points_with_bounds(
-    points: np.ndarray,
-    axes: tuple[int, int],
-    bounds: tuple[np.ndarray, np.ndarray],
-    color: str,
-    offset_x: int,
-    offset_y: int,
-) -> str:
-    projected = _project(points, axes, size=360, bounds=bounds)
-    return "\n".join(
-        f'<circle cx="{offset_x + x:.1f}" cy="{offset_y + y:.1f}" r="0.9" fill="{color}" />'
-        for x, y in projected[:: max(1, len(projected) // 700)]
-    )
+def _svg_rgb(color: tuple[int, int, int]) -> str:
+    return f"rgb({color[0]},{color[1]},{color[2]})"
+
+
+def _svg_mask_rects(cad_mask: np.ndarray, proxy_mask: np.ndarray, offset_x: int, offset_y: int, scale: int) -> str:
+    rgb = _mask_rgb(cad_mask, proxy_mask)
+    rects: list[str] = []
+    for y in range(rgb.shape[0]):
+        x = 0
+        while x < rgb.shape[1]:
+            color = tuple(int(value) for value in rgb[y, x])
+            start = x
+            x += 1
+            while x < rgb.shape[1] and tuple(int(value) for value in rgb[y, x]) == color:
+                x += 1
+            if color == PROOF_BG_COLOR:
+                continue
+            rects.append(
+                f'<rect x="{offset_x + start * scale}" y="{offset_y + y * scale}" '
+                f'width="{(x - start) * scale}" height="{scale}" '
+                f'fill="rgb({color[0]},{color[1]},{color[2]})" />'
+            )
+    return "\n".join(rects)
 
 
 def write_svg_proof(cad: MeshCloud, proxy: MeshCloud, best: Candidate, gate: QualityGate, out_dir: Path) -> Path:
-    aligned = best.scale * (proxy.points @ best.rotation.T) + best.translation
     panels = [
-        ("XY projection", (0, 1), 0, 0),
-        ("XZ projection", (0, 2), 380, 0),
-        ("YZ projection", (1, 2), 0, 380),
+        ("XY", (0, 1), 24, 88),
+        ("XZ", (0, 2), 324, 88),
+        ("YZ", (1, 2), 624, 88),
     ]
     body = [
-        '<svg xmlns="http://www.w3.org/2000/svg" width="760" height="800" viewBox="0 0 760 800">',
-        '<rect width="760" height="800" fill="white" />',
+        '<svg xmlns="http://www.w3.org/2000/svg" width="1180" height="760" viewBox="0 0 1180 760">',
+        '<rect width="1180" height="760" fill="white" />',
+        '<text x="24" y="28" font-size="14" fill="#141414">proxy-align proof: CAD vs generated proxy silhouettes</text>',
+        '<text x="24" y="56" font-size="13" fill="#3c3c3c">white=overlap red=CAD only cyan=proxy only dark=empty</text>',
     ]
     for title, axes, ox, oy in panels:
-        body.append(f'<rect x="{ox}" y="{oy}" width="360" height="360" fill="#fafafa" stroke="#bbb" />')
-        body.append(f'<text x="{ox + 12}" y="{oy + 24}" font-size="14" fill="#222">{title}</text>')
-        bounds = _projection_bounds(cad.points, aligned, axes)
-        body.append(_svg_points_with_bounds(cad.points, axes, bounds, "#dc2828", ox, oy))
-        body.append(_svg_points_with_bounds(aligned, axes, bounds, "#1478dc", ox, oy))
-        body.append(f'<text x="{ox + 12}" y="{oy + 344}" font-size="12" fill="#222">red=CAD blue=aligned proxy</text>')
+        cad_mask, proxy_mask = _projection_masks(cad, proxy, best, axes, size=PROOF_MASK_SIZE)
+        score = _score_by_name(gate, title)
+        body.append(f'<rect x="{ox}" y="{oy}" width="256" height="256" fill="{_svg_rgb(PROOF_BG_COLOR)}" stroke="#777" />')
+        body.append(_svg_mask_rects(cad_mask, proxy_mask, ox, oy, 1))
+        body.append(f'<text x="{ox}" y="{oy + 278}" font-size="12" fill="#141414">{title} edge F1@3: {score.edge_f1_at_3:.3f}</text>')
+        body.append(f'<text x="{ox}" y="{oy + 300}" font-size="12" fill="#141414">{title} chamfer px: {score.edge_chamfer_px:.2f}</text>')
+        body.append(f'<text x="{ox}" y="{oy + 322}" font-size="12" fill="#141414">{title} coverage: {score.coverage_ratio:.3f}</text>')
+    reason = gate.reasons[0] if gate.reasons else "proxy accepted as a coarse prior"
+    status_color = "#2d782d" if gate.status == "ok" else "#b47314" if gate.status == "warning" else "#b42d2d"
     body.extend(
         [
-            '<text x="392" y="404" font-size="16" fill="#222">Best proxy -&gt; CAD alignment</text>',
-            f'<text x="392" y="432" font-size="13" fill="#222">Chamfer mean: {best.chamfer_mean:.5f}</text>',
-            f'<text x="392" y="454" font-size="13" fill="#222">Chamfer p95: {best.chamfer_p95:.5f}</text>',
-            f'<text x="392" y="476" font-size="13" fill="#222">Objective: {best.objective:.5f}</text>',
-            f'<text x="392" y="498" font-size="13" fill="#222">Initial yaw/pitch/roll: {best.yaw:g}/{best.pitch:g}/{best.roll:g}</text>',
-            f'<text x="392" y="536" font-size="13" fill="#222">Quality gate: {gate.status}</text>',
-            f'<text x="392" y="558" font-size="13" fill="#222">Min edge F1@3: {gate.projection_edge_f1_at_3:.3f}</text>',
-            f'<text x="392" y="580" font-size="13" fill="#222">Max edge Chamfer px: {gate.projection_edge_chamfer_px:.2f}</text>',
-            '<text x="392" y="620" font-size="12" fill="#555">SVG fallback written because Pillow is unavailable.</text>',
+            '<text x="924" y="100" font-size="14" fill="#141414">Quality gate</text>',
+            f'<text x="924" y="130" font-size="13" fill="{status_color}">status: {_svg_escape(gate.status)}</text>',
+            f'<text x="924" y="164" font-size="12" fill="#141414">3D Chamfer mean: {best.chamfer_mean:.5f}</text>',
+            f'<text x="924" y="188" font-size="12" fill="#141414">3D Chamfer p95: {best.chamfer_p95:.5f}</text>',
+            f'<text x="924" y="212" font-size="12" fill="#141414">objective: {best.objective:.5f}</text>',
+            f'<text x="924" y="246" font-size="12" fill="#141414">yaw/pitch/roll: {best.yaw:g}/{best.pitch:g}/{best.roll:g}</text>',
+            f'<text x="924" y="280" font-size="12" fill="#141414">min edge F1@3: {gate.projection_edge_f1_at_3:.3f}</text>',
+            f'<text x="924" y="304" font-size="12" fill="#141414">max chamfer px: {gate.projection_edge_chamfer_px:.2f}</text>',
+            f'<text x="924" y="328" font-size="12" fill="#141414">max coverage drift: {gate.projection_coverage_ratio:.3f}</text>',
+            '<text x="924" y="370" font-size="13" fill="#141414">Reasons</text>',
+        ]
+    )
+    y = 396
+    for item in gate.reasons[:8]:
+        body.append(f'<text x="924" y="{y}" font-size="12" fill="#962d2d">- {_svg_escape(item[:38])}</text>')
+        y += 22
+    body.extend(
+        [
+            f'<text x="24" y="714" font-size="12" fill="{status_color}">Decision: {_svg_escape(reason[:120])}</text>',
+            '<text x="24" y="736" font-size="11" fill="#555">SVG fallback uses the same rasterized mesh silhouettes as the quality gate; no convex hull or point cloud proof.</text>',
             "</svg>",
         ]
     )

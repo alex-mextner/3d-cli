@@ -27,7 +27,12 @@ A generated 3D proxy from a reference image can provide a coarse spatial prior f
   `fit-camera` prior;
 - emit both normalized and original-space row-vector affine transforms that can be
   applied directly to proxy mesh vertices;
-- write `result.json` and `alignment_proof.png`.
+- write `result.json` and a human-readable silhouette overlay proof (`alignment_proof.png`
+  or SVG fallback).
+
+The proof panels use the same triangle-rasterized mesh silhouettes as the gate: white is
+overlap, red is CAD-only, cyan is proxy-only. They are not convex hulls and not point-cloud
+scatter plots, so missing concavities and wrong side views stay visible.
 
 This is enough to test the alignment algorithm on saved TRELLIS outputs without depending
 on Hugging Face queues.

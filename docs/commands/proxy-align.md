@@ -55,11 +55,13 @@ prior.
   edge Chamfer distance in pixels, projection coverage drift, and candidate ambiguity;
 - top ranked candidates for debugging ambiguous or symmetric objects.
 
-`alignment_proof.png` overlays CAD samples in red and aligned proxy samples in blue from
-XY, XZ, and YZ projections. If Pillow is unavailable in the active `.venv`, the command
-writes an SVG fallback instead. The artifact is intentionally human-readable: a good proof
-should make gross backside, scale, and orientation mistakes visible before any 2D
-fit-camera stage.
+`alignment_proof.png` overlays rasterized CAD/proxy silhouettes from XY, XZ, and YZ
+projections in the same shared frame used by the quality gate: white is overlap, red is
+CAD-only, cyan is proxy-only, and dark background is empty. If Pillow is unavailable in
+the active `.venv`, the command writes an SVG fallback with the same silhouette-mask
+encoding. The proof is not a convex hull and is not a point cloud scatter plot. The
+artifact is intentionally human-readable: a good proof should make gross backside, scale,
+and orientation mistakes visible before any 2D fit-camera stage.
 
 ## Quality Gate
 
