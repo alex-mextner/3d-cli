@@ -8,6 +8,28 @@ metrics are no longer accepted as proof, and what experiments remain planned.
 `fit-camera` must be judged primarily by boundary alignment, not by filled-mask
 area overlap and not by global SSIM.
 
+As of 2026-06-06, current results do not prove a finished spatial-aware
+`fit-camera`. Synthetic diagnostics and proxy-alignment tools are useful, but
+the real-reference path still fails on visible alignment in the hard cases. Do
+not report mask-only, contour-only, proxy-only, point-cloud, hull, or heatmap
+artifacts as success. They are diagnostics unless the original reference and the
+model render visibly align in the same frame.
+
+Non-negotiable proof report package for any claimed `fit-camera` or
+spatial-awareness success. This is the completion bar, not a claim that the
+current CLI already emits every final schema field:
+
+1. original reference image;
+2. fitted model render in the same image frame;
+3. boundary/alpha/error overlay that exposes mismatch;
+4. reference mask or segmentation panel;
+5. metrics JSON with boundary F1, symmetric contour Chamfer or SDF loss, p95
+   miss, coverage/bbox/crop/border diagnostics;
+6. explicit report label: success, warning, failure, or diagnostic-only.
+
+If the visible reference/render/overlay disagree, the result is not a proof even
+when a secondary metric looks good.
+
 The current research target is not a classic topology hash. A hash can retrieve
 "similar-looking" candidates, but it does not normally provide a local direction
 for improving camera pose. What `fit-camera` needs is a pose-aware objective:
@@ -557,12 +579,12 @@ models over reference images in a 3D editor.
 
 ## Acceptance policy
 
-A `fit-camera` result may be marked `ok` only when all of these are true:
+A `fit-camera` result may be marked `success` only when all of these are true:
 
 - source reference image is present in the proof panel,
 - reference mask is visible and plausible,
 - boundary overlay is visually inspected,
-- boundary F1/recall are high,
+- boundary F1 and edge-hit diagnostics are high,
 - Chamfer and p95 contour miss are low,
 - no mask fill/crop/frame/bbox warnings,
 - the result is not accepted solely because area IoU or SSIM is high.
@@ -572,10 +594,13 @@ A result should be marked `warning` when:
 - the reference mask is tiny or near full-frame,
 - the rendered silhouette touches the frame border,
 - render/reference bbox scale differs strongly,
-- boundary F1/recall are weak,
+- boundary F1 or edge-hit diagnostics are weak,
 - Chamfer or p95 miss is high,
 - optimizer parameters hit search bounds,
 - the proof panel is visually broken.
+
+Here "edge-hit diagnostics" means the fraction of rendered/reference boundary pixels within
+a stated tolerance when an experimental variant reports precision/recall-style hit rates.
 
 ## Spatial-awareness research log, 2026-06-06
 
@@ -873,11 +898,32 @@ behavior.
 
 ## Immediate planned work
 
-1. Finish the boundary-first `fit-camera` implementation and e2e proof.
-2. Make JSON schema include true contour distance metrics.
-3. Add negative tests where area IoU is misleading but boundary metrics fail.
-4. Run synthetic proof with source reference included.
-5. Run real-reference experiments as negative controls until proof panels look
-   correct.
-6. Implement the spatial-aware experiment harness from E0-E6.
-7. Send only visually inspected proof panels to Telegram as success evidence.
+1. Integrate the `roadmap/spatial-fit-experiments` branch only after rebasing it
+   onto current `main` and replacing any misleading proof wording. Current
+   status: useful experimental harness, not production success.
+2. Integrate or supersede `roadmap/fit-camera-proof`. Current status: three
+   commits ahead of old `origin/main`, behind current `main`, plus dirty
+   `ROADMAP.md`; Pantheon remains diagnostic/failure, not a success proof.
+3. Finish boundary-first `fit-camera` as a command feature: same-frame render,
+   original reference, overlay, metrics JSON, and warning/failure status must be
+   emitted by the normal CLI path.
+4. Make JSON schema include true contour distance metrics and distinguish area
+   IoU, SSIM, SDF loss, symmetric Chamfer, p95 miss, and diagnostic warnings.
+5. Add negative tests where area IoU is misleading but boundary metrics fail.
+6. Run synthetic hidden-camera proof with source reference included and without
+   giving the hidden camera to the fitter.
+7. Run real-reference experiments as negative controls until proof panels look
+   correct. Pantheon must not be presented as success until reference/render
+   overlay visibly matches.
+8. Evaluate spatial-aware priors:
+   - local Apple Silicon image-to-3D candidates from the provider research;
+   - HF ZeroGPU/TRELLIS with auth when quota/key is needed;
+   - monocular depth/normal/pointmap approaches such as Depth Anything,
+     DUSt3R/MASt3R/VGGT-style models;
+   - topological/descriptor filters only as validity or retrieval aids, not as
+     a promised monotonic pose hash until proven.
+9. For image-to-3D proxy meshes, add a render-against-original-reference gate
+   before using the proxy as a `fit-camera` prior. A generated 3D mesh that does
+   not resemble the original image is rejected regardless of proxy/CAD alignment.
+10. Send every substantial result to Telegram with the proof package. If only
+    instrumental diagnostics exist, label the report as diagnostic/failure.

@@ -255,8 +255,27 @@ code is what AI agents, version control, and shell pipes all operate on natively
     records; the CLI is for batch/headless, the web for interactive exploration.
 
 ## 7. Camera fit, axes, opencode
-- ✅ **`3d fit-camera <model> <ref>`** — silhouette-IoU camera pose fitting (bbox-derived
-  bounds), saves `camera.json`, writes fit render + overlay; `--draw-axes`.
+- 🔨 **`3d fit-camera <model> <ref>`** — basic silhouette-IoU camera pose fitting exists
+  (bbox-derived bounds, `camera.json`, fit render + overlay, `--draw-axes`), but the
+  spatially-aware proof bar is not complete. A claimed success must include the original
+  reference image, the fitted model render in the same frame, a boundary/alpha/error
+  overlay, the reference mask, and contour metrics (boundary F1, symmetric Chamfer or SDF
+  loss, p95 miss, coverage/bbox/crop/border diagnostics). Current outputs are diagnostics
+  until the normal CLI path also provides a durable result label. Mask-only, contour-only,
+  proxy-only, point-cloud, hull, heatmap, or optimizer images are diagnostics, not success
+  proof. If the render and reference visibly do not align, report the run as
+  failure/diagnostic even when area IoU or SSIM looks acceptable.
+- 🔨 **Spatial-aware fit-camera research path** — continue the experimental branches, but do
+  not promote them as solved:
+  - synthetic hidden-camera tests must hide the camera from the fitter and use the hidden
+    pose only after fitting for evaluation;
+  - view-bank retrieval and finite-difference pose sensitivity are promising diagnostics,
+    but need integration into the normal CLI before they count as shipped behavior;
+  - real-reference cases such as Pantheon are negative controls until the source
+    reference/render/overlay visibly match;
+  - depth/normal/pointmap priors, local Apple Silicon image-to-3D, and HF ZeroGPU/TRELLIS
+    proxy meshes are optional research tiers that must be gated by visual and contour
+    proof before becoming camera priors.
 - 📋 **Compute axes/contours by math (OpenCV/ImageMagick: PCA, image moments, contours).**
   **Why:** a model and a reference photo almost never start aligned — matching their **principal
   axes** (PCA of the silhouette) + bbox + centroid gives `fit-camera` a strong INITIAL pose, so the

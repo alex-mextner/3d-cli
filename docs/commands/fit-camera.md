@@ -1,6 +1,6 @@
 # `3d [fit-camera](GLOSSARY.md#fit-camera)` — fit a camera to a reference photo
 
-Optimises an [OpenSCAD](GLOSSARY.md#openscad) camera vector so that the rendered [silhouette](GLOSSARY.md#silhouette) of a model aligns with a reference photo or mask. The default objective maximises [IoU](GLOSSARY.md#iou); the experimental `--objective contour` path optimises boundary agreement with edge F1, signed-distance-field loss, Chamfer distance, and p95 boundary distance. The result is saved as a JSON file plus a full-resolution fit PNG and red/cyan diagnostics so you can visually verify alignment.
+Optimises an [OpenSCAD](GLOSSARY.md#openscad) camera vector so that the rendered [silhouette](GLOSSARY.md#silhouette) of a model can be compared with a reference photo or mask. The default objective maximises [IoU](GLOSSARY.md#iou); the experimental `--objective contour` path optimises boundary agreement with edge F1, signed-distance-field loss, Chamfer distance, and p95 boundary distance. The result is saved as a JSON file plus fit PNGs and diagnostics. Treat current artifacts as diagnostics until the original reference, fitted render, mask/segmentation panel, overlay/error map, boundary metrics, and a durable result label all support the same conclusion.
 
 **Why it exists.** When matching a model to a reference image, the camera angle is usually unknown. Guessing by hand is slow. The optimiser finds the viewpoint automatically and writes a reproducible `camera.json` that can be reused for `render`, `score`, and `silhouette`.
 
@@ -44,6 +44,13 @@ openscad --render --camera="$(jq -r .camera_arg camera.json)" -o view.png model.
 
 ## Output contract
 
+Current output is diagnostic. The current JSON records camera parameters, paths, IoU/SSIM,
+and optional spatial metrics, but it does not yet include a durable
+success/warning/failure/diagnostic-only status field. Therefore `camera.json`,
+`spatial_metrics.json`, and `proof_panel.png` do not by themselves satisfy the accepted
+proof contract. Completing this command requires adding that durable status field and e2e
+tests that assert it together with the proof artifacts.
+
 The JSON contains:
 
 - `camera_arg` and `camera` for replaying the exact OpenSCAD camera.
@@ -55,9 +62,17 @@ The JSON contains:
 - `iou` and `ssim` for the final optimization-resolution mask comparison.
 - `fit_render` and `overlay` paths. The overlay is a red/cyan binary mask diagnostic at the optimization resolution: red is the reference mask, cyan is the rendered mask.
 - `objective` and `objective_loss` for auditing whether the run used IoU or the contour prototype.
-- `spatial_metrics`, `spatial_panel`, `edge_overlay`, and `trace` when the matching flags are enabled.
+- `spatial_metrics`, `spatial_panel` (`proof_panel.png`), `edge_overlay`, and `trace` when the matching flags are enabled.
 
-The spatial metrics include `area_iou`, `edge_f1@2`, `edge_f1@4`, `edge_f1@8`, `edge_chamfer_px`, `boundary_sdf_loss_px`, `hausdorff_p95_px`, `bbox_iou`, `coverage_ratio`, `centroid_delta_px`, border-touch flags, and `spatial_warning`. Treat `spatial_warning` as a real-image diagnostic: it means crop, scale, or boundary mismatch risk remains even if area IoU looks acceptable.
+The spatial metrics include `area_iou`, `edge_f1@2`, `edge_f1@4`, `edge_f1@8`, symmetric `edge_chamfer_px`, `boundary_sdf_loss_px`, `hausdorff_p95_px`, `bbox_iou`, `coverage_ratio`, `centroid_delta_px`, border-touch flags, and `spatial_warning`. Treat `spatial_warning` as a real-image diagnostic: it means crop, scale, or boundary mismatch risk remains even if area IoU looks acceptable.
+
+An accepted success proof is stricter than "files were written" or "area IoU improved".
+The current command artifacts are diagnostic; a completed proof contract must include the
+original reference image, the fitted model render in the same frame, a reference mask or
+segmentation panel, an overlay/error map that makes boundary mismatch visible, boundary F1
+plus symmetric contour Chamfer or SDF loss and p95 miss, and a durable status such as
+success, warning, failure, or diagnostic-only. If the render and reference do not visibly
+align, report the run as failure or diagnostic even when IoU or SSIM looks acceptable.
 
 `--spatial-report DIR` writes:
 

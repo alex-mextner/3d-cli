@@ -92,6 +92,64 @@ because `ruff`/`pytest`/`mypy` are missing. Use `--path DIR` only when the defau
 `~/.config/superpowers/worktrees/3d-cli/<branch>` location is unsuitable. Use raw git
 worktree commands only when repairing `3d worktree` itself.
 
+Roadmap and long-running tasks should be delegated to subagents whenever they can be split
+into independent slices. Each subagent must work in its own worktree and must return the
+branch/commit, changed files, tests, review status, merge blockers, and next action. If the
+available subagent quota is full, do not drop the task or continue as if it were assigned:
+record it in the active worktree/status note or roadmap queue with the intended branch
+name, scope, dependencies, and launch order, then start it when capacity frees up.
+
+## User proof/reporting requirements
+
+The project owner wants progress reports in Telegram for this workstream. When reporting
+`fit-camera`, spatial-awareness, image-to-3D, or proxy-alignment progress, send the report
+through a trusted `tg` CLI path, not an arbitrary repo-local executable from `PATH`. Use
+`$TG_CLI_PATH` only when it is an absolute, executable path that resolves outside the repo
+or worktree and matches the trusted local installation (`~/.files/bin/tg` or its target
+under `~/.files/repos/tg-cli/`). Otherwise use `~/.files/bin/tg` in the owner's local
+environment. `command -v tg` may be used only to confirm that it resolves to the trusted
+path. The recipient comes from the trusted `tg` CLI configuration (`~/.config/tg-cli/.env`,
+`TG_CHAT_ID`); do not invent chat IDs in repo docs. Expected text-report shape is
+`$TG_CLI --format html "<message>"`, with files/photos passed through the same trusted CLI.
+Do not leave the only report in chat. If a trusted `tg` or its recipient config is
+unavailable, say so explicitly in chat, include the unsent report text, and record that the
+Telegram report is queued rather than silently treating it as delivered. Record queued
+reports in the active worktree/status note; if no such note exists, create
+`docs/notes/queued-telegram-reports.md` with timestamp, scope, intended recipient, and full
+message body.
+
+Do not call a diagnostic image a proof unless it includes the human-inspectable inputs and
+outputs. This is the acceptance bar for claimed success reports, not a statement that the
+current CLI already emits every artifact or every final schema field. For reference-matching
+work, an accepted proof report MUST include:
+
+- the original reference image, not only a mask or derived contour image;
+- the model render in the same frame/camera;
+- an overlay or error map that makes boundary mismatch visible;
+- the reference mask or segmentation panel;
+- the relevant JSON/metrics summary: boundary F1, symmetric contour Chamfer or SDF loss,
+  p95 miss, coverage/bbox/crop/border diagnostics;
+- a plain statement of whether this is success, warning, failure, or diagnostic-only.
+
+Instrumental-only panels such as masks, point clouds, proxy silhouettes, hulls, view-bank
+heatmaps, or optimizer plots are useful diagnostics, but they are not success proof by
+themselves. If the render and reference do not visibly align, say that the algorithm failed
+or is still experimental. Do not describe such artifacts as "visually normal" or "proof".
+
+Synthetic hidden-camera tests must not pass the hidden camera to the fitter. The hidden
+camera is only for post-fit evaluation. Real-photo tests must be treated as failures until
+the original reference, fitted render, and overlay all make sense to a reviewer.
+
+Before `fit-camera`, spatial-awareness, image-to-3D proxy generation, or proxy alignment is
+reported as complete, e2e tests must exercise the normal `bin/3d` user workflow and assert
+the required proof artifacts, metrics, and explicit result label. If the command does not
+yet emit a durable result label, the feature is not complete; report it as planned or
+diagnostic work instead.
+
+When reporting active worktrees, do not provide only a list. For each worktree include:
+what changed, whether it is committed/pushed, whether it was reviewed, what verification
+passed, why it is not merged yet, and the next action needed.
+
 ## Engineering conventions
 
 ### Python

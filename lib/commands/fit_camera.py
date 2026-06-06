@@ -2,7 +2,9 @@
 
 WHAT: searches for the camera pose (distance, pan, elevation) that makes a rendered
   silhouette overlap maximally with a reference photo, then saves that pose as
-  camera.json for locked downstream renders.
+  camera.json for locked downstream renders. Current artifacts are diagnostics: they do
+  not yet include the durable success/warning/failure/diagnostic-only status required for
+  accepted proof.
 
 WHY: a model and a reference photo almost never start aligned. A drifting pose makes
   the match-loop score meaningless ("never improves for no reason" — the top failure
@@ -34,7 +36,8 @@ USAGE = """3d fit-camera <model.scad> <reference> [options]
   Search bounds (distance/pan/steps) are derived from the model's bbox diagonal;
   the look-at center auto-estimates from the bbox centroid unless --center given.
   Writes camera.json + <out>_fit.png (full-res fit) + <out>_overlay.png
-  (render-cyan over reference-red ghost, so you can SEE the alignment).
+  (render-cyan over reference-red ghost). Current outputs are diagnostics and do
+  not yet contain the durable result label required for accepted proof.
 
 Options:
   --out FILE            output JSON (default ./camera.json)
