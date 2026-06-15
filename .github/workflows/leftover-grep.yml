@@ -1,0 +1,63 @@
+# Leftover-marker gate: fail the PR on debugging/forbidden leftovers in the ADDED code.
+#
+# Catches the "left it in" class: focused tests (.only/fdescribe/fit), `debugger`, stray
+# console.log/debug, TODO/FIXME without a tracker reference, and merge-conflict markers.
+# Scans only the lines the PR ADDS (vs the base) so it doesn't punish pre-existing debt.
+#
+# INSTALL: copy to .github/workflows/leftover-grep.yml AND keep the gate script at
+# ci/leftover-grep/leftover-grep.sh (vendor the ci/ dir, or copy + adjust the run: path).
+#
+# KNOBS (env on the step): LEFTOVER_INCLUDE / LEFTOVER_EXCLUDE (which files), TICKET_REGEX
+# (what makes a TODO "tracked"), ALLOW_CONSOLE=1 (console.log -> warning not failure).
+#
+# TAMPER-RESISTANCE — `pull_request_target`: a merge-BLOCKING gate must run the trusted
+# BASE-branch copy of its script (a PR could otherwise edit the script to bypass its own
+# gate). Unlike the metadata-only gates, this one needs the PR's CODE — but only to READ it:
+# we fetch the PR head SHA and `git diff`/grep it as DATA (`git diff` never runs PR code).
+# The trusted base script runs; the PR's content is only scanned. The token is read-only.
+#   HARD RULE: do NOT add a build/test/install step here — that WOULD execute PR code under
+#   the privileged trigger. This job only diffs + greps.
+#   Caveat: it does NOT run on the PR that first adds it (base has no gate yet).
+
+name: leftover-grep
+
+on:
+  pull_request_target:
+  workflow_dispatch:
+    inputs:
+      head_sha:
+        description: 'Commit SHA to scan (required for manual runs)'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  leftover-grep:
+    name: leftover-grep
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout BASE branch (trusted script) with full history
+        # Default ref under pull_request_target = base. The gate SCRIPT that runs is the
+        # trusted base copy, not the PR's. fetch-depth: 0 so the base ref resolves.
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Fetch the PR head commit as DATA (not checked out / not executed)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || inputs.head_sha }}
+        run: |
+          # Fetch the PR head object into the local repo so `git diff` can reach it. We do
+          # NOT check it out and NOT run anything from it — it's only diffed + grepped.
+          git fetch --no-tags --depth=1 origin "$HEAD_SHA"
+
+      - name: Scan added lines for leftovers
+        env:
+          LEFTOVER_BASE: origin/${{ github.event.pull_request.base.ref || github.event.repository.default_branch }}
+          LEFTOVER_HEAD: ${{ github.event.pull_request.head.sha || inputs.head_sha }}
+          # TICKET_REGEX: 'ABC-[0-9]+|#[0-9]+'   # your tracker's id format
+          # ALLOW_CONSOLE: '0'
+        run: bash ci/leftover-grep/leftover-grep.sh

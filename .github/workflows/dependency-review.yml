@@ -1,0 +1,50 @@
+# Dependency review — block a PR that ADDS a vulnerable or disallowed-license dependency.
+#
+# Standard engine = actions/dependency-review-action (GitHub's official). It diffs the
+# dependency manifests/lockfiles in the PR and fails on (a) newly introduced dependencies
+# with known vulnerabilities at/above a severity threshold, and (b) dependencies whose
+# license is not allowed. This is the PR-time, "don't let it IN" complement to the audit
+# scanners in ../sast/ and ../secret-scan/ (which scan what's already there).
+#
+# AVAILABILITY: dependency-review needs the GitHub Dependency Graph. It's ON for PUBLIC
+# repos; for PRIVATE repos it requires GitHub Advanced Security (Settings -> Code security
+# -> Dependency graph). Without it, this action errors — use `bun audit` / `npm audit` /
+# `pip-audit` / `cargo audit` in a plain CI step instead (see README).
+#
+# INSTALL: copy to .github/workflows/dependency-review.yml.
+#
+# KNOBS: fail-on-severity, and license allow/deny lists below.
+#
+# Triggered by `pull_request` (read-only token) — safe; the action reads the dependency
+# diff from the PR, runs no PR code.
+
+name: dependency-review
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  # `comment-summary-in-pr` posts a summary comment — that needs write. Drop this to
+  # `contents: read` only if you also set `comment-summary-in-pr: never`.
+  pull-requests: write
+
+jobs:
+  dependency-review:
+    name: dependency-review
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Dependency review
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          # Fail if a newly added dependency has a vuln at/above this severity.
+          fail-on-severity: high
+          # License policy — set ONE of these (allow-list is stricter). Examples:
+          # allow-licenses: MIT, Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC
+          deny-licenses: AGPL-3.0, GPL-2.0, GPL-3.0
+          # To waive a specific known advisory, list its GHSA id(s):
+          # allow-ghsas: GHSA-xxxx-xxxx-xxxx
+          comment-summary-in-pr: on-failure

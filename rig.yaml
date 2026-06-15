@@ -1,0 +1,70 @@
+# rig.yaml — declarative setup for this repo, applied by `rig apply`.
+# COMMITTED BY DEFAULT: this file is the reproducible source of truth.
+# Global defaults live at ~/.config/rig/config.yaml; this file overrides them.
+# See: rig status (drift), rig apply (converge). Schema: docs/config-schema.md
+
+version: 1
+scope: both
+defaults:
+  skills_target: ~/.agents/skills
+  hooks_target: ~/.claude/hooks
+  ci_target: .github/workflows
+  mcp_target: ~/.claude/mcp
+  on_conflict: backup
+skills:
+  enabled: true
+  target: ~/.agents/skills
+  universal:
+    all: true
+    disable: []
+  by_type:
+    enable:
+    - cli
+agent_hooks:
+  enabled: true
+  target: ~/.claude/hooks
+  target_kind: claude-code
+  all: true
+git_hooks:
+  dispatcher:
+    enabled: true
+    dir: ~/.config/git/global-hooks.d
+    runner: ~/.config/git/run-global-hooks
+    set_global_hooks_path: true
+    install_local_retrofit_script: true
+    fragments:
+      secret-scan:
+        enabled: true
+ci:
+  enabled: true
+  target: .github/workflows
+  all: false
+  items:
+    secret-scan:
+      enabled: true
+      tier: block
+    codeql:
+      enabled: true
+      tier: block
+      variant: selfgate
+    dependency-review:
+      enabled: true
+      tier: block
+    leftover-grep:
+      enabled: true
+      tier: block
+    review-threads:
+      enabled: true
+      tier: block
+    ship:
+      enabled: true
+      install_to: ~/bin
+      gh_alias: true
+mcp:
+  enabled: true
+  target: ~/.claude/mcp
+  items: {}
+harness:
+  enabled: true
+  kind: claude-code
+  auto_mode: true
