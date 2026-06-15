@@ -223,6 +223,9 @@ def _gitignore_body() -> str:
         "*.3mf\n"
         "__pycache__/\n"
         ".DS_Store\n"
+        "# Claude Code personal overrides (per-machine, never shared). The shared\n"
+        "# .claude/settings.json + .claude/skills/ stay tracked.\n"
+        ".claude/settings.local.json\n"
     )
 
 

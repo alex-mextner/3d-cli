@@ -77,6 +77,8 @@ def test_gitignore_written(tmp_path):
     assert gi.is_file()
     body = gi.read_text(encoding="utf-8")
     assert "previews/" in body
+    # personal CC overrides are gitignored; shared .claude/settings.json + skills stay tracked
+    assert ".claude/settings.local.json" in body
 
 
 def test_flags_override_defaults(tmp_path):
