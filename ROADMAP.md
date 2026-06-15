@@ -420,11 +420,8 @@ The three operators differ only in what they do *with* the AI after step 1:
     This is the [forced-monotonic loop](GLOSSARY.md#forced-monotonic-loop). **Sources:** ReLook
     (https://arxiv.org/abs/2510.11498); FlipFlop (https://arxiv.org/abs/2311.08596). **Metric:**
     monotone non-decreasing IoU trajectory, rounds-to-converge, reject-rate, final IoU ≥ target.
-  - Optionally driven by **quorex** ([github.com/alex-mextner/quorex](https://github.com/alex-mextner/quorex),
-    [ralphex](https://github.com/umputun/ralphex)-based; the `quorex` binary on `PATH`: fresh agent session per task,
-    5-agent→codex→2-agent review pipeline, worktree isolation, web dashboard, notifications) for the
-    heavyweight autonomous variant; `3d ai <tool> loop` emits a plan whose *validation commands* are
-    this tool's metric targets and drives the cycle until met.
+  - `3d ai <tool> loop` emits a plan whose *validation commands* are this tool's metric targets
+    and drives the cycle until met.
 
 ### 13.2 RAG pre-flight set — the deterministic `3d` commands each tool auto-runs before the AI
 Each tool **declares** its pre-flight set: the deterministic `3d` runs whose outputs (numbers +

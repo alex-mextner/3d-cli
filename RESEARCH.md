@@ -39,8 +39,7 @@ sources are vendored in [`docs/research/`](docs/research/). Terms are defined in
 - [jq](GLOSSARY.md#jq) (composable pipes → `3d om`), [ffmpeg](GLOSSARY.md#ffmpeg) (DAG filtergraph +
   power-vs-UX → §19/§21), [vector-engine](GLOSSARY.md#vector-engine) (headless core + op-DAG →
   §19/§20), CSS/DOM (object model → §5), [oxc](GLOSSARY.md#oxc) (layered linter/formatter → §25),
-  [HyperFrames](GLOSSARY.md#hyperframes) (code-first video → §14), [quorex](GLOSSARY.md#quorex)
-  (autonomous loop → §13).
+  [HyperFrames](GLOSSARY.md#hyperframes) (code-first video → §14).
 
 ## Planned further research (see ROADMAP §12/§27)
 - Deeper rule catalog for the linter (§25), oxc rule taxonomy as a template.

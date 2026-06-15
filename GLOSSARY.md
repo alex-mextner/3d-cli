@@ -201,10 +201,6 @@ Peak Signal-to-Noise Ratio; pixel-level image fidelity. https://en.wikipedia.org
 ### PyTorch3D
 Meta's library for differentiable mesh rendering and 3D deep learning. https://github.com/facebookresearch/pytorch3d
 
-### quorex
-<a id="quorex"></a>
-The user's ralphex-based autonomous Claude-Code runner (fresh session per task + review pipeline); the engine behind `3d ai <tool> loop`. https://github.com/alex-mextner/quorex
-
 ### RAG
 <a id="rag"></a>
 Retrieval-Augmented Generation; here: auto-run deterministic tools and inject their numbers+images into the AI prompt before it acts (§13). https://en.wikipedia.org/wiki/Retrieval-augmented_generation
