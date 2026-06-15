@@ -548,53 +548,70 @@ uv.lock             locked dependency set (uv sync)
 Adding a command is a one-file change — see `lib/cli/registry.py` (and `AGENTS.md`) for the
 command-authoring contract. `bin/3d` and the shared files need no edits.
 
-## How 3d compares
+## How a coding agent + 3d compares
 
-The interesting comparison is **not** against slicers (those are a downstream stage `3d`
-delegates to). It is against the wave of **AI 3D-generation services** — hosted text-to-3D
-and image-to-3D platforms like **[Meshy](https://www.meshy.ai)**,
+`3d` is a tool **for an agent**, not a standalone CLI you grade on its own. The right unit
+of comparison is the combo **Claude Code (or any coding agent) + `3d`** — the agent supplies
+the intelligence (it generates the model, reads the score, decides the next edit) and `3d`
+supplies the deterministic 3D operations (render, silhouette-IoU score, manifold/printability
+gates, slice). Judging `3d` *alone* — "the CLI has no neural mesh generator, so text→3D is a
+dash" — measures the wrong thing. The agent is the generator; `3d` is its hands.
+
+So the comparison is **agent + `3d`** against the wave of **AI 3D-generation services** —
+hosted text-to-3D and image-to-3D platforms like **[Meshy](https://www.meshy.ai)**,
 **[Tripo](https://www.tripo3d.ai)**, **[Rodin / Hyper3D](https://hyper3d.ai)**,
 **[Kaedim](https://www.kaedim3d.com)**, and **[Sloyd](https://www.sloyd.ai)**. They take a
-prompt or a photo and return a textured mesh in seconds, in a browser, billed by credits.
+prompt or a photo and return a textured mesh in seconds, in a browser, billed by credits, and
+mostly stop there. The combo takes a prompt or a photo and drives it all the way to a
+**printable physical part**, locally and scriptably.
 
-`3d` is a different animal and the table makes that explicit. **It does not generate meshes
-from a prompt** — be clear about that. Where it earns its place is the *downstream* the
-generators mostly skip: turning a model into something a real FDM printer will accept
-(manifold repair → FDM wall/overhang/orientation gates → an actual slice → a print-job
-plan), all from a **local, scriptable CLI with no upload and no credits**, driven by an
-agent skill rather than a web app.
+The pitch in one line: **an agent + `3d` can take text or an image → a real, editable,
+printable model end-to-end** — a *parametric / CAD* route to 3D (not neural mesh-gen), driven
+by an agent loop the SaaS don't have. From a text prompt the agent writes a parametric
+[OpenSCAD](GLOSSARY.md#openscad) model (`3d ai` assembles the context bundle it reasons over);
+from a reference photo the agent + `3d fit-camera`/`match`/`score` iterate that model toward
+the photo's silhouette under a forced-monotonic [IoU](GLOSSARY.md#iou) + [manifold](GLOSSARY.md#manifold)
+gate. The output is a source model you can diff in git, gate for FDM, and slice — no upload,
+no credits.
 
-| Capability | **3d** | Meshy | Tripo | Rodin (Hyper3D) | Kaedim | Sloyd |
+| Capability | **agent + 3d** | Meshy | Tripo | Rodin (Hyper3D) | Kaedim | Sloyd |
 |---|---|---|---|---|---|---|
-| Text → 3D mesh generation | — | ✓ | ✓ | ✓ | — | ✓ |
-| Image → 3D mesh generation | ~ (silhouette *match* of a model you wrote, not generation) | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Parametric / source-editable model | ✓ (OpenSCAD) | — | — | — | — | ~ (hosted slider templates) |
+| Text → 3D | ✓ (agent writes a parametric OpenSCAD model; `3d ai` bundles the context) | ✓ | ✓ | ✓ | — | ✓ |
+| Image → 3D | ~→✓ (agent + `fit-camera`/`match`/`score` silhouette-IoU loop toward the photo) | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Route to 3D | parametric / CAD (editable, mechanical) | neural mesh | neural mesh | neural mesh | neural mesh | parametric templates |
+| Parametric / source-editable model | ✓ (OpenSCAD, git-diffable) | — | — | — | — | ~ (hosted slider templates) |
 | Mesh repair & manifold check | ✓ | ~ (analyze/repair API) | ~ (remesh/clean topo) | ~ (clean surfaces) | ~ (human-in-loop) | — |
 | FDM printability gates (wall / overhang / orientation) | ✓ | ~ (printability *analysis* only) | — | — | — | — |
 | Slice → G-code | ✓ (delegates to installed slicer) | — (exports 3MF, no slice) | — | — | — | — |
 | Print prep / job planning | ~ (dry-run job plan; monitoring planned) | — | — | — | — | — |
+| AR / USDZ export | ✓ (`3d usdz`) | ✓ (USDZ export) | ~ | — | — | — |
+| Agent-native loop (generate → score → decide → repeat) | ✓ | — | — | — | — | — |
 | Local / no hosted service / no credits | ✓ | — | — | — | — | — |
-| Scriptable CLI + agent skill | ✓ | — (REST API) | — (REST API) | — (REST API) | — (REST API) | — (REST API) |
+| Scriptable CLI / no web app | ✓ | — (REST API) | — (REST API) | — (REST API) | — (REST API) | — (REST API) |
 
 `✓` = yes, `~` = partial, `—` = no.
 
-**Where the generators win, plainly:** Meshy, Tripo, Rodin, Kaedim and Sloyd will turn "a
-chunky robot" or a single photo into a finished, textured, riggable mesh in seconds — `3d`
-**cannot do that at all**. Its `ai`/`ollama` commands only assemble offline prompt bundles
-and request plans; its image feature is the reference-**match** loop, which tunes the
-parameters of a `.scad` *you already wrote* to fit a photo's silhouette — it never
-synthesises geometry. For concept art, game/film assets and one-shot mesh creation, the
-SaaS are simply the right tool and `3d` is not competing.
+**Where the SaaS genuinely win — said plainly:** for **organic, concept, character and
+one-shot** geometry — "a chunky robot", a creature, a single photo of an irregular sculpt —
+Meshy, Tripo, Rodin, Kaedim and Sloyd return a finished, textured, riggable mesh in seconds
+with **one click and zero local setup**. The parametric route is **not** equivalent there: an
+agent writing OpenSCAD is strong on *mechanical / matchable* shapes (brackets, mounts,
+enclosures, parts with measurable proportions) and weak on free-form organic surfaces, and it
+costs reasoning rounds the SaaS skip. For concept art, game/film assets and arbitrary
+photo→organic-mesh, the neural services are simply the right tool and the combo is not
+pretending to beat them.
 
-**Where `3d` is honestly stronger:** the printable-part endgame. Meshy is the closest of the
-five — it added an *Analyze Printability* / *Repair Printability* API and a multi-color 3MF
-export — but it still stops at a 3MF and hands you to Bambu Studio or OrcaSlicer; it does
-not run FDM wall/overhang/orientation gates or the slice itself. The others stop at the mesh
-entirely. `3d` runs the manifold + FDM printability gates, performs (delegates) the slice,
-emits a job plan, and does it all as a **local Unix CLI** — pipeable, exit-code gated,
-agent-driven, with no upload, no credit meter, and a parametric source model you can diff in
-git. The realistic combined workflow is to **generate with one of these SaaS, then gate and
-print with `3d`** — they sit on opposite ends of the same pipeline, not on top of each other.
+**Where the agent + `3d` is honestly stronger:** the **printable-part endgame** and the
+**agent loop**. The SaaS hand you a mesh and stop — usually a hosted, credit-gated, often
+non-printable one. Meshy is the closest: it has *Analyze Printability* / *Repair Printability*
+APIs, a multi-color 3MF export, and even links out to Bambu Studio / OrcaSlicer — but it still
+**stops at a 3MF**; it does not run FDM wall/overhang/orientation gates or the slice itself
+(mark `~`). The others stop at the mesh entirely. The combo runs the manifold + FDM
+printability gates, performs (delegates) the slice, emits a job plan, exports USDZ for AR, and
+does it all as a **local, pipeable, exit-code-gated CLI an agent drives in a loop** — with no
+upload, no credit meter, and a parametric source model you can diff in git. The two ends are
+complementary: **generate organic meshes with a SaaS when you need them, but for a
+text-or-photo → printable mechanical part, an agent + `3d` does the whole pipeline itself.**
 
 ## Ecosystem
 
