@@ -21,7 +21,11 @@ score/
 
 # local tooling state
 .serena/
-.claude/
+.claude/*
+# but keep the committed, shared harness settings (auto-mode)
+!.claude/settings.json
+# personal per-machine Claude settings stay local (gitignored)
+.claude/settings.local.json
 
 # CI / coverage
 .coverage
