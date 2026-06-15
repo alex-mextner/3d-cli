@@ -163,21 +163,31 @@ jobs:
           }
 
           # is_source_suppressed <ruleId> <uri> <startLine> -> rc 0 if suppressed.
-          # Honors `codeql[<ruleId>]` on the flagged line or the line directly above, in
-          # either comment style: `// codeql[...]` (JS/TS) or `# codeql[...]` (YAML for the
-          # `actions` language, Python, shell). The marker is matched as a regex so both
-          # styles work without separate passes; keeps suppressions greppable + reviewable.
+          # Honors a `codeql[<ruleId>]` marker on the flagged line OR in the contiguous block
+          # of comment lines directly above it (so a multi-line justification works — the
+          # marker need only be somewhere in the attached comment block, not on one exact
+          # line). Both comment styles match: `// codeql[...]` (JS/TS) or `# codeql[...]`
+          # (YAML for the `actions` language, Python, shell). The scan walks upward and stops
+          # at the first non-comment / blank line so a marker can't leak across steps. Keeps
+          # suppressions greppable + reviewable — not a silent baseline.
           is_source_suppressed() {
-            local rid="$1" src="$2" line="$3" above
-            # Match `//` or `#` (with optional space), then `codeql[<exact rule id>]`.
+            local rid="$1" src="$2" line="$3" n txt
+            # Match `//` or `#` (with optional indent), then `codeql[<exact rule id>]`.
             local re="(//|#)[[:space:]]*codeql\[$(printf '%s' "$rid" | sed 's/[][\.*^$/]/\\&/g')\]"
+            # Any line whose first non-space char is `#` or `//` counts as a comment line.
+            local comment_re='^[[:space:]]*(#|//)'
             [ -f "$src" ] || return 1
             [ "$line" -gt 0 ] 2>/dev/null || return 1
+            # Flagged line itself.
             sed -n "${line}p" "$src" 2>/dev/null | grep -qE "$re" && return 0
-            if [ "$line" -gt 1 ]; then
-              above=$((line - 1))
-              sed -n "${above}p" "$src" 2>/dev/null | grep -qE "$re" && return 0
-            fi
+            # Walk upward through the contiguous comment block directly above the flagged line.
+            n=$((line - 1))
+            while [ "$n" -ge 1 ]; do
+              txt="$(sed -n "${n}p" "$src" 2>/dev/null)"
+              printf '%s' "$txt" | grep -qE "$comment_re" || break   # stop at first non-comment
+              printf '%s' "$txt" | grep -qE "$re" && return 0
+              n=$((n - 1))
+            done
             return 1
           }
 
