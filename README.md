@@ -550,32 +550,51 @@ command-authoring contract. `bin/3d` and the shared files need no edits.
 
 ## How 3d compares
 
-Almost every other 3D-print CLI is a **single-stage slicer**: it takes a finished mesh and
-emits G-code. CuraEngine and Slic3r are exactly that (Slic3r adds basic mesh repair and
-transforms); PrusaSlicer/OrcaSlicer ship a CLI wrapper around the same slicing core. They
-are excellent at slicing and assume the model already exists.
+The interesting comparison is **not** against slicers (those are a downstream stage `3d`
+delegates to). It is against the wave of **AI 3D-generation services** — hosted text-to-3D
+and image-to-3D platforms like **[Meshy](https://www.meshy.ai)**,
+**[Tripo](https://www.tripo3d.ai)**, **[Rodin / Hyper3D](https://hyper3d.ai)**,
+**[Kaedim](https://www.kaedim3d.com)**, and **[Sloyd](https://www.sloyd.ai)**. They take a
+prompt or a photo and return a textured mesh in seconds, in a browser, billed by credits.
 
-`3d` covers the **whole FDM lifecycle from one dispatcher**: parametric **modeling**
-(OpenSCAD-first), **render** (multi-angle, sections), **mesh** repair/manifold checks,
-**printability** gates (wall/overhang/orientation), **AI-assisted** design and a
-reference-photo **match** loop, **AR** export (USDZ), and **slicing** — delegating the
-actual slice to whichever slicer is installed. It is scriptable with structured,
-actionable errors and registers an agent skill.
+`3d` is a different animal and the table makes that explicit. **It does not generate meshes
+from a prompt** — be clear about that. Where it earns its place is the *downstream* the
+generators mostly skip: turning a model into something a real FDM printer will accept
+(manifold repair → FDM wall/overhang/orientation gates → an actual slice → a print-job
+plan), all from a **local, scriptable CLI with no upload and no credits**, driven by an
+agent skill rather than a web app.
 
-| Tool | Parametric modeling | Render / preview | Mesh repair & manifold | Printability gates | AI-assisted (match / generate) | Slicing → G-code | Whole-lifecycle CLI |
-|---|---|---|---|---|---|---|---|
-| **3d** | ✓ (OpenSCAD) | ✓ (multi-angle, sections) | ✓ | ✓ | ✓ | ✓ (delegates to installed slicer) | ✓ |
-| CuraEngine | — | — | — | — | — | ✓ (deep controls) | — |
-| PrusaSlicer (CLI) | — | ~ (thumbnails) | ~ (basic) | ~ (warnings) | — | ✓ (deep controls) | — |
-| OrcaSlicer (CLI) | — | ~ | ~ | ~ | — | ✓ | — |
-| Slic3r (CLI) | — | — | ~ (repair/transform) | — | — | ✓ | — |
-| OpenSCAD (CLI) | ✓ | ~ (render to PNG/STL) | — | — | — | — | — |
+| Capability | **3d** | Meshy | Tripo | Rodin (Hyper3D) | Kaedim | Sloyd |
+|---|---|---|---|---|---|---|
+| Text → 3D mesh generation | — | ✓ | ✓ | ✓ | — | ✓ |
+| Image → 3D mesh generation | ~ (silhouette *match* of a model you wrote, not generation) | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Parametric / source-editable model | ✓ (OpenSCAD) | — | — | — | — | ~ (hosted slider templates) |
+| Mesh repair & manifold check | ✓ | ~ (analyze/repair API) | ~ (remesh/clean topo) | ~ (clean surfaces) | ~ (human-in-loop) | — |
+| FDM printability gates (wall / overhang / orientation) | ✓ | ~ (printability *analysis* only) | — | — | — | — |
+| Slice → G-code | ✓ (delegates to installed slicer) | — (exports 3MF, no slice) | — | — | — | — |
+| Print prep / job planning | ~ (dry-run job plan; monitoring planned) | — | — | — | — | — |
+| Local / no hosted service / no credits | ✓ | — | — | — | — | — |
+| Scriptable CLI + agent skill | ✓ | — (REST API) | — (REST API) | — (REST API) | — (REST API) | — (REST API) |
 
-`~` = partial. Dedicated slicers have far deeper *slicing* controls than `3d`'s delegated
-slice — `3d` is not trying to replace them. The difference is scope: a slicer is one stage,
-`3d` is the pipeline that gets a part from a parametric idea (or a reference photo) to a
-verified, sliceable, AR-viewable model — and then hands the slice off to the slicer you
-already trust.
+`✓` = yes, `~` = partial, `—` = no.
+
+**Where the generators win, plainly:** Meshy, Tripo, Rodin, Kaedim and Sloyd will turn "a
+chunky robot" or a single photo into a finished, textured, riggable mesh in seconds — `3d`
+**cannot do that at all**. Its `ai`/`ollama` commands only assemble offline prompt bundles
+and request plans; its image feature is the reference-**match** loop, which tunes the
+parameters of a `.scad` *you already wrote* to fit a photo's silhouette — it never
+synthesises geometry. For concept art, game/film assets and one-shot mesh creation, the
+SaaS are simply the right tool and `3d` is not competing.
+
+**Where `3d` is honestly stronger:** the printable-part endgame. Meshy is the closest of the
+five — it added an *Analyze Printability* / *Repair Printability* API and a multi-color 3MF
+export — but it still stops at a 3MF and hands you to Bambu Studio or OrcaSlicer; it does
+not run FDM wall/overhang/orientation gates or the slice itself. The others stop at the mesh
+entirely. `3d` runs the manifold + FDM printability gates, performs (delegates) the slice,
+emits a job plan, and does it all as a **local Unix CLI** — pipeable, exit-code gated,
+agent-driven, with no upload, no credit meter, and a parametric source model you can diff in
+git. The realistic combined workflow is to **generate with one of these SaaS, then gate and
+print with `3d`** — they sit on opposite ends of the same pipeline, not on top of each other.
 
 ## Ecosystem
 
