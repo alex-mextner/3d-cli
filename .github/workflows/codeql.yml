@@ -1,0 +1,249 @@
+# CodeQL SELF-GATE — for a PRIVATE repo WITHOUT GitHub Advanced Security.
+#
+# Without GHAS, the Code Scanning dashboard is unavailable: uploading SARIF 403s
+# ("Advanced Security must be enabled"), so the normal `codeql/workflow.yml` can't gate.
+# This variant runs the SAME analysis but keeps the SARIF LOCAL and gates on it in-job —
+# a required check that fails on findings, with $0 of GHAS and no branch-protection UI.
+#
+# INSTALL: copy to .github/workflows/codeql.yml (use INSTEAD of workflow.yml, not both).
+# Give the job a DISTINCT `name:` if your repo also has an orphaned UI "Default Setup"
+# CodeQL whose hollow checks you exempt elsewhere — a distinct name moves THIS gate out
+# of that exemption so your merge gate (e.g. ci/ship) requires it.
+#
+# SEVERITY FLOOR (knob): GATE_LEVELS below selects which SARIF result levels FAIL the job.
+#   error            — only the highest-severity findings gate (loosest)
+#   "error warning"  — error + warning gate (recommended; this is the default)
+# Notes (recommendations) are always reported, never gating.
+#
+# IN-SOURCE SUPPRESSION: a finding is suppressed iff the flagged line OR the line directly
+# above it carries `// codeql[<exact-rule-id>]`. Keeps suppressions greppable, reviewable,
+# and reasoned — not a silent baseline. (When `upload:false`, codeql-action does NOT run
+# its own alert-suppression queries, so this gate implements suppression itself.)
+#
+# LANGUAGES / PINNING: same as ci/codeql/workflow.yml — edit the matrix; codeql-action is
+# pinned by major tag per GitHub convention.
+#
+# LANGUAGE NOT PRESENT IN THE REPO (resilience): the matrix ships with a broad default set
+# (javascript-typescript + actions). If a repo has NO source for a matrix language (e.g. a
+# Python-only CLI has zero JS/TS), CodeQL's buildless extractor errors with "No source code
+# seen" (exit 32) and the analyze step HARD-FAILS — which would block the gate on a repo it
+# was never meant to scan. To stay resilient, a preflight step detects whether the repo
+# actually contains source for the matrix language and SKIPS analysis cleanly when it does
+# not (a clear notice, job stays green). Where source IS present the gate runs and BLOCKS
+# normally — nothing is silently disabled. Trim the matrix to your real stack to skip the
+# probe entirely.
+
+name: CodeQL Self-Gate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '0 3 * * 1'
+  workflow_dispatch:
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
+# No `security-events: write` — this gate does NOT upload to Code Scanning (no GHAS).
+permissions:
+  actions: read
+  contents: read
+
+env:
+  # Severity floor — which SARIF levels fail the job. See header.
+  GATE_LEVELS: 'error warning'
+
+jobs:
+  analyze:
+    name: CodeQL Self-Gate (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: javascript-typescript
+            build-mode: none
+          - language: actions
+            build-mode: none
+          # - language: python
+          #   build-mode: none
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Detect source for this language
+        id: detect
+        shell: bash
+        env:
+          LANGUAGE: ${{ matrix.language }}
+        run: |
+          set -uo pipefail
+          # Does the repo actually contain source for this matrix language? If not, CodeQL's
+          # buildless extractor would fatally error ("No source code seen", exit 32). We probe
+          # the tracked files up front and skip cleanly for an absent language instead — so the
+          # broad default matrix doesn't hard-fail on a repo that simply isn't that language.
+          # Where source IS present this is a no-op and the real gate runs below.
+          case "$LANGUAGE" in
+            javascript-typescript)
+              pattern='\.(js|jsx|mjs|cjs|ts|tsx|mts|cts|vue|svelte)$' ;;
+            python)
+              pattern='\.py$' ;;
+            actions)
+              # CodeQL's "actions" language analyzes workflow files under .github/workflows.
+              pattern='^\.github/workflows/.*\.(yml|yaml)$' ;;
+            *)
+              # Unknown/compiled language — don't guess; let CodeQL decide (no skip).
+              echo "has_source=true" >> "$GITHUB_OUTPUT"
+              echo "No presence heuristic for '$LANGUAGE'; running analysis unconditionally."
+              exit 0 ;;
+          esac
+          if git ls-files | grep -qiE "$pattern"; then
+            echo "has_source=true" >> "$GITHUB_OUTPUT"
+            echo "Found ${LANGUAGE} source — running CodeQL."
+          else
+            echo "has_source=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=CodeQL ${LANGUAGE} skipped::No ${LANGUAGE} source found in this repo — skipping CodeQL for this language (nothing to scan). This is a clean skip, not a failure. Remove '${LANGUAGE}' from the matrix to drop this notice, or add source to enable the gate."
+          fi
+
+      - name: Initialize CodeQL
+        if: steps.detect.outputs.has_source == 'true'
+        uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+          queries: security-extended
+
+      - name: Perform CodeQL Analysis
+        if: steps.detect.outputs.has_source == 'true'
+        uses: github/codeql-action/analyze@v4
+        with:
+          category: '/language:${{ matrix.language }}'
+          # No GHAS → the dashboard upload 403s. Keep the SARIF, gate on it below.
+          upload: false
+          output: sarif-results
+
+      - name: Upload SARIF artifact
+        # Publish the raw SARIF even on a gate failure, so it's downloadable
+        # (`gh run download`) for triage. Skipped when the language wasn't analyzed.
+        if: always() && steps.detect.outputs.has_source == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: codeql-sarif-${{ matrix.language }}
+          path: sarif-results/*.sarif
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Gate on SARIF findings
+        # Skip entirely when the language is absent (handled by the detect step above).
+        if: always() && steps.detect.outputs.has_source == 'true'
+        shell: bash
+        env:
+          LANGUAGE: ${{ matrix.language }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(sarif-results/*.sarif)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "::error::No SARIF produced for ${LANGUAGE} — analysis did not emit results." >&2
+            exit 1
+          fi
+
+          # Which levels gate (from GATE_LEVELS env). Build a quick membership test.
+          is_gated_level() {
+            local lvl="$1" g
+            for g in ${GATE_LEVELS:-error warning}; do
+              [ "$lvl" = "$g" ] && return 0
+            done
+            return 1
+          }
+
+          # is_source_suppressed <ruleId> <uri> <startLine> -> rc 0 if suppressed.
+          # Honors a `codeql[<ruleId>]` marker on the flagged line OR in the contiguous block
+          # of comment lines directly above it (so a multi-line justification works — the
+          # marker need only be somewhere in the attached comment block, not on one exact
+          # line). Both comment styles match: `// codeql[...]` (JS/TS) or `# codeql[...]`
+          # (YAML for the `actions` language, Python, shell). The scan walks upward and stops
+          # at the first non-comment / blank line so a marker can't leak across steps. Keeps
+          # suppressions greppable + reviewable — not a silent baseline.
+          is_source_suppressed() {
+            local rid="$1" src="$2" line="$3" n txt
+            # Match `//` or `#` (with optional indent), then `codeql[<exact rule id>]`.
+            local re="(//|#)[[:space:]]*codeql\[$(printf '%s' "$rid" | sed 's/[][\.*^$/]/\\&/g')\]"
+            # Any line whose first non-space char is `#` or `//` counts as a comment line.
+            local comment_re='^[[:space:]]*(#|//)'
+            [ -f "$src" ] || return 1
+            [ "$line" -gt 0 ] 2>/dev/null || return 1
+            # Flagged line itself.
+            sed -n "${line}p" "$src" 2>/dev/null | grep -qE "$re" && return 0
+            # Walk upward through the contiguous comment block directly above the flagged line.
+            n=$((line - 1))
+            while [ "$n" -ge 1 ]; do
+              txt="$(sed -n "${n}p" "$src" 2>/dev/null)"
+              printf '%s' "$txt" | grep -qE "$comment_re" || break   # stop at first non-comment
+              printf '%s' "$txt" | grep -qE "$re" && return 0
+              n=$((n - 1))
+            done
+            return 1
+          }
+
+          gated=0; notes=0; suppressed=0
+          echo "=== CodeQL findings for ${LANGUAGE} ==="
+
+          for f in "${files[@]}"; do
+            # Resolve each result's effective level (per-result level overrides the rule
+            # default; default to "warning" per the SARIF spec when unspecified).
+            # TSV: <sarifSuppressed>\t<level>\t<ruleId>\t<uri>\t<startLine>\t<msg>
+            jq -r '
+              .runs[] as $run
+              | ( [ $run.tool.driver.rules[]?
+                    | { key: .id, value: ( .defaultConfiguration.level // "warning" ) } ]
+                  | from_entries ) as $ruleLevel
+              | $run.results[]?
+              | ( .level // $ruleLevel[.ruleId] // "warning" ) as $lvl
+              | ( ( ( .suppressions // [] ) | length > 0 ) | tostring ) as $sarifSup
+              | ( .locations[0].physicalLocation as $pl
+                  | [ $sarifSup, $lvl, (.ruleId // "?"),
+                      ( $pl.artifactLocation.uri // "?" ),
+                      ( ($pl.region.startLine // 0) | tostring ),
+                      ( .message.text // "" | gsub("[\t\n]"; " ") ) ] )
+              | @tsv
+            ' "$f" > findings.tsv || { echo "::error::Failed to parse $f" >&2; exit 1; }
+
+            while IFS=$'\t' read -r sarifSup lvl rule uri line msg; do
+              [ -z "${lvl:-}" ] && continue
+              loc="${uri}:${line}"
+              if [ "$sarifSup" = "true" ] || is_source_suppressed "$rule" "$uri" "$line"; then
+                suppressed=$((suppressed+1))
+                echo "  suppr.  [$lvl] $rule  $loc — $msg (in-source suppression)"
+              elif is_gated_level "$lvl"; then
+                gated=$((gated+1))
+                echo "::error file=${uri},line=${line}::[$lvl] $rule — $msg"
+                echo "  GATED   [$lvl] $rule  $loc — $msg"
+              elif [ "$lvl" = "note" ]; then
+                notes=$((notes+1))
+                echo "  note    [$lvl] $rule  $loc — $msg"
+              else
+                echo "  other   [$lvl] $rule  $loc — $msg"
+              fi
+            done < findings.tsv
+          done
+
+          echo "=== Summary (${LANGUAGE}): gated=$gated, suppressed=$suppressed, notes=$notes ==="
+          {
+            echo "### CodeQL — ${LANGUAGE}"
+            echo ""
+            echo "- Gated (${GATE_LEVELS}): **$gated**"
+            echo "- Suppressed (in-source, justified): $suppressed"
+            echo "- Notes (recommendation): $notes"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$gated" -gt 0 ]; then
+            echo "::error::CodeQL gate FAILED for ${LANGUAGE}: $gated gated finding(s). See annotations." >&2
+            exit 1
+          fi
+          echo "CodeQL gate PASSED for ${LANGUAGE}: 0 gated ($suppressed suppressed, $notes note(s))."
