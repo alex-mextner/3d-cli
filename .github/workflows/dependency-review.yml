@@ -6,10 +6,19 @@
 # license is not allowed. This is the PR-time, "don't let it IN" complement to the audit
 # scanners in ../sast/ and ../secret-scan/ (which scan what's already there).
 #
-# AVAILABILITY: dependency-review needs the GitHub Dependency Graph. It's ON for PUBLIC
-# repos; for PRIVATE repos it requires GitHub Advanced Security (Settings -> Code security
-# -> Dependency graph). Without it, this action errors — use `bun audit` / `npm audit` /
-# `pip-audit` / `cargo audit` in a plain CI step instead (see README).
+# AVAILABILITY (READ THIS): dependency-review needs the GitHub Dependency Graph. It's ON
+# for PUBLIC repos; for PRIVATE repos it must be enabled (Settings -> Code security ->
+# Dependency graph). The graph itself is FREE — it does NOT require GitHub Advanced
+# Security (GHAS is only needed for the Code Scanning *dashboard*, not the graph). On a
+# private repo where it is still off, the action HARD-FAILS with "Dependency review is not
+# supported on this repository", which would block every PR on a fresh repo.
+#
+# This workflow DEGRADES GRACEFULLY: a preflight step probes the Dependency Graph (the
+# SBOM endpoint 200s when enabled, 404s when not). The gate runs and BLOCKS only when the
+# graph is available; when it is OFF, the job SKIPS the gate with a clear notice and the
+# enable path — it does NOT hard-fail. The moment you enable the graph the gate goes live
+# automatically, no edit here. For coverage on graph-less repos in the meantime, run
+# ci/dependency-review/dep-audit.sh in a plain CI step (see README).
 #
 # INSTALL: copy to .github/workflows/dependency-review.yml.
 #
@@ -37,7 +46,28 @@ jobs:
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
+      - name: Preflight — is the Dependency Graph enabled?
+        id: preflight
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+          # The SBOM endpoint returns 200 (an SPDX document) when the Dependency Graph is
+          # enabled for this repo, and 404 when it is not. We use that as the support probe
+          # so the gate only runs where dependency-review-action can actually work — instead
+          # of letting the action hard-fail on an unsupported repo.
+          code="$(gh api "repos/${GITHUB_REPOSITORY}/dependency-graph/sbom" \
+                    --silent -i 2>/dev/null | awk 'NR==1{print $2}')"
+          if [ "${code:-}" = "200" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+            echo "Dependency Graph is ENABLED — running the dependency-review gate."
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=dependency-review skipped::Dependency Graph is not enabled on ${GITHUB_REPOSITORY} (SBOM probe returned HTTP ${code:-none}). The dependency-review gate is SKIPPED, not failed. Enable it at https://github.com/${GITHUB_REPOSITORY}/settings/security_analysis (free; no GHAS needed) and this gate goes live automatically. Until then, audit existing deps with ci/dependency-review/dep-audit.sh."
+          fi
+
       - name: Dependency review
+        if: steps.preflight.outputs.enabled == 'true'
         uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
         with:
           # Fail if a newly added dependency has a vuln at/above this severity.

@@ -45,6 +45,12 @@ jobs:
         with:
           fetch-depth: 0
 
+      # codeql[actions/untrusted-checkout/medium]
+      # Justified: under pull_request_target this fetches the PR head as a git OBJECT only —
+      # it is never checked out and never executed (see the HARD RULE in the header: no
+      # build/test/install step). The PR content is read as DATA by `git diff`/grep. The
+      # CodeQL `actions` self-gate flags any PR-head fetch in a privileged trigger; this one
+      # is safe by construction, so it is suppressed greppably rather than left to block.
       - name: Fetch the PR head commit as DATA (not checked out / not executed)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -54,6 +60,10 @@ jobs:
           # NOT check it out and NOT run anything from it — it's only diffed + grepped.
           git fetch --no-tags --depth=1 origin "$HEAD_SHA"
 
+      # codeql[actions/cache-poisoning/poisonable-step]
+      # Justified: same as above — this step only runs the trusted BASE-branch gate script
+      # (`git diff` + grep over PR content as data). It executes no PR-controlled code and
+      # writes no cache, so it cannot poison a cache. Suppressed greppably, not left to block.
       - name: Scan added lines for leftovers
         env:
           LEFTOVER_BASE: origin/${{ github.event.pull_request.base.ref || github.event.repository.default_branch }}
