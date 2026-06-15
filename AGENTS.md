@@ -175,13 +175,8 @@ or delete the worktree.
   ```
   Third-party libs without stubs (trimesh, manifold3d, open3d, cv2, scipy, pyvista) are
   handled by `mypy.ini` (`ignore_missing_imports` per module) — never a blanket
-  `ignore_errors`, which would fake "clean".
-- **Zero warnings.** Both `mypy` and `ruff` must run clean with **no warnings** before any
-  commit. Treat every linter warning as an error — fix it immediately. Do not add blanket
-  ignores or noqa markers to silence real issues. Run the full lint gate:
-  ```bash
-  uv run ruff check lib/ tests/ && uv run mypy lib/ tests/
-  ```
+  `ignore_errors`, which would fake "clean". The full lint gate is `uv run ruff check
+  lib/ tests/ && uv run mypy lib/ tests/` (also run by `3d test`).
 - **Async where it genuinely helps.** Independent OpenSCAD renders (multi-angle batches,
   fit-camera candidate evals, match-loop candidate evals) run concurrently via `asyncio`
   + `asyncio.create_subprocess_exec` / `gather`, bounded by a semaphore (~`os.cpu_count()`).
@@ -211,66 +206,22 @@ if offline** (must never block `render`/`help`). `OPENSCADPATH` is auto-exported
 `libs/` by `cli/env.export_openscadpath()` (called in the dispatcher before any
 subprocess) so `include <BOSL2/std.scad>` resolves with no manual step.
 
-## Commit discipline (mandatory, every change)
+## Commit discipline (project specifics)
 
-1. **Atomic commits** — one logical change each. Message form: `<area>: <what changed>`
-   (e.g. `render: compute --view camera from bounding box`). No "update"/"fix" vagueness.
-2. **Before every commit** run multi-model review in parallel, then iterate. Use the
-   shared read-only review runner as `review` on `$PATH`; install/update it from
-   `https://github.com/alex-mextner/review-cli` when missing:
-   ```bash
-   review -m codex -m gemini -m oc:fireworks/accounts/fireworks/routers/kimi-k2p6-turbo
-   ```
-   Equivalent comma-separated form:
-   ```bash
-   review -m codex,gemini,oc:fireworks/accounts/fireworks/routers/kimi-k2p6-turbo
-   ```
-   To force a narrower review question, pass an explicit prompt:
-   ```bash
-   review -m codex -m gemini -m oc:fireworks/accounts/fireworks/routers/kimi-k2p6-turbo --prompt "Review the current uncommitted diff for bugs, regressions, security issues, and missing tests. Return only actionable findings."
-   ```
-   Optional extra reviewers run in addition to the baseline when available:
-   ```bash
-   review -m codex -m gemini -m oc:fireworks/accounts/fireworks/routers/kimi-k2p6-turbo -m claude-p -m oc:deepseek/deepseek-reasoner
-   ```
-   Run this before staging. If changes are already staged, run the same command with
-   `--staged`; if both staged and unstaged changes exist, review both diffs separately.
-   `review` supports repeated or comma-separated `-m` values, runs reviewers in parallel,
-   and has a per-review timeout (`--timeout`, default 1200s). Backends are read-only by
-   design; keep the exact backend mechanics in the `review-cli` README
-   (`https://github.com/alex-mextner/review-cli`) rather than duplicating them here. Do
-   not print, paste into logs, or commit provider API keys. If `review` is unavailable,
-   install/update it from `https://github.com/alex-mextner/review-cli`, ensure it is on
-   `$PATH`, or fall back to equivalent direct read-only reviewer commands. The fallback
-   path must still attempt Codex plus the best available independent non-Codex reviewer:
-   ```bash
-   timeout 1200 codex exec review --uncommitted
-   gemini -p "Review the current uncommitted diff for bugs, regressions, security issues, and missing tests. Return only actionable findings."
-   # If Gemini CLI is unavailable or blocked by location/tier, use Gemini API directly:
-   git diff --no-ext-diff | timeout 300 uv run --with google-genai python -c 'import os, sys; from google import genai; diff = sys.stdin.read(); base = "Review the current uncommitted diff for bugs, regressions, security issues, and missing tests. Return only actionable findings."; print(genai.Client().models.generate_content(model=os.environ.get("GEMINI_MODEL", "gemini-2.5-flash"), contents=base + "\n\n" + diff).text)'
-   ```
-   The staged/unstaged split applies to fallback commands too; use
-   `git diff --cached --no-ext-diff` for staged Gemini API fallback review.
-   Gemini CLI must already be configured. The direct Gemini API fallback requires
-   `GEMINI_API_KEY` or `GOOGLE_API_KEY` in the environment; never print either value.
-   The API fallback defaults to `gemini-2.5-flash` for parity with the current `review`
-   backend and speed; override with `GEMINI_MODEL` when a different Gemini model is
-   required.
-   READ every finding, fix the real issues, and run another review iteration after fixes. The minimum
-   acceptable pre-commit bar is Codex plus at least one independent non-Codex reviewer
-   from a different provider or model family; a second Codex run does not count. If a
-   configured reviewer is down, replace it with the best available independent model
-   first. Only when no independent non-Codex reviewer is available may the work fall below
-   that bar, and the provider-wide blocker must be recorded; do not silently treat
-   single-review work as fully reviewed.
-3. **Push regularly — do NOT let work sit only on your local machine.** This project works
-   directly on `main` (that is where all history lives — no feature-branch dance). After each
-   commit or small batch, push: `git push origin main`. Pushing often means the work survives a
-   crash and is always visible. Never end a working session with unpushed commits — finish with
-   local `main` level with `origin/main`.
-4. Don't mix unrelated changes in one commit.
+General commit hygiene — atomic commits, AI review before commit, the pre-commit
+lint/type/test gate, and pushing regularly — is self-advertised by the agent-tools
+skills (`atomic-commits`, `ai-review-before-commit`, `pre-commit-gate`,
+`push-regularly`). Only the 3d-cli-specific overrides live here:
 
-Co-Authored-By trailer on commits: `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`
+- **Direct-to-`main` workflow.** This project works directly on `main` — no
+  feature-branch dance; that is where all history lives. After each commit or small
+  batch, `git push origin main`. (This overrides the skills' default "push to a
+  feature branch, open a PR".)
+- **Review model roster.** The pre-commit `review` runner's baseline for this repo is
+  `review -m codex -m gemini -m oc:fireworks/accounts/fireworks/routers/kimi-k2p6-turbo`
+  (install/update from `https://github.com/alex-mextner/review-cli`).
+- **Co-Authored-By trailer** on commits:
+  `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`
 
 ## Command surface (post-refactor)
 
