@@ -547,3 +547,45 @@ uv.lock             locked dependency set (uv sync)
 
 Adding a command is a one-file change — see `lib/cli/registry.py` (and `AGENTS.md`) for the
 command-authoring contract. `bin/3d` and the shared files need no edits.
+
+## How 3d compares
+
+Almost every other 3D-print CLI is a **single-stage slicer**: it takes a finished mesh and
+emits G-code. CuraEngine and Slic3r are exactly that (Slic3r adds basic mesh repair and
+transforms); PrusaSlicer/OrcaSlicer ship a CLI wrapper around the same slicing core. They
+are excellent at slicing and assume the model already exists.
+
+`3d` covers the **whole FDM lifecycle from one dispatcher**: parametric **modeling**
+(OpenSCAD-first), **render** (multi-angle, sections), **mesh** repair/manifold checks,
+**printability** gates (wall/overhang/orientation), **AI-assisted** design and a
+reference-photo **match** loop, **AR** export (USDZ), and **slicing** — delegating the
+actual slice to whichever slicer is installed. It is scriptable with structured,
+actionable errors and registers an agent skill.
+
+| Tool | Parametric modeling | Render / preview | Mesh repair & manifold | Printability gates | AI-assisted (match / generate) | Slicing → G-code | Whole-lifecycle CLI |
+|---|---|---|---|---|---|---|---|
+| **3d** | ✓ (OpenSCAD) | ✓ (multi-angle, sections) | ✓ | ✓ | ✓ | ✓ (delegates to installed slicer) | ✓ |
+| CuraEngine | — | — | — | — | — | ✓ (deep controls) | — |
+| PrusaSlicer (CLI) | — | ~ (thumbnails) | ~ (basic) | ~ (warnings) | — | ✓ (deep controls) | — |
+| OrcaSlicer (CLI) | — | ~ | ~ | ~ | — | ✓ | — |
+| Slic3r (CLI) | — | — | ~ (repair/transform) | — | — | ✓ | — |
+| OpenSCAD (CLI) | ✓ | ~ (render to PNG/STL) | — | — | — | — | — |
+
+`~` = partial. Dedicated slicers have far deeper *slicing* controls than `3d`'s delegated
+slice — `3d` is not trying to replace them. The difference is scope: a slicer is one stage,
+`3d` is the pipeline that gets a part from a parametric idea (or a reference photo) to a
+verified, sliceable, AR-viewable model — and then hands the slice off to the slicer you
+already trust.
+
+## Ecosystem
+
+Part of the [HyperIDE.ai](https://hyperide.ai) agent toolchain:
+
+- **[tg-cli](https://github.com/alex-mextner/tg-cli)** — Telegram bridge for agents: push reports, two-way control, Q→buttons
+- **[review-cli](https://github.com/alex-mextner/review-cli)** — multi-model read-only code review
+- **[rig-cli](https://github.com/alex-mextner/rig-cli)** — umbrella dev-env driver: sets up a repo from config — skills, hooks, CI, dep-bootstrap; reconciles drift
+- **[agent-tools](https://github.com/alex-mextner/agent-tools)** — the shared umbrella: portable agent skills, git/agent hooks, CI gates, and the `agenttools_log` lib that the other CLIs consume
+- **[draw-cli](https://github.com/alex-mextner/draw-cli)** — text-to-image via Hugging Face
+- **[hyperide.ai](https://hyperide.ai)** — Figma replacement inside VS Code. Edit React components directly through AST/LSP without AI hallucinations, token waste, or context-window limits. Works for indie vibe-coding and for enterprise teams with split design/dev roles.
+
+Each CLI registers a skill into your agent harnesses (`<tool> install-skill`) so agents know it exists — see Install.
