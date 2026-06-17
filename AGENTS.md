@@ -2,6 +2,16 @@
 
 Instructions for AI agents (and humans) working in this repository. English only.
 
+> **Portable dev rules live in the global agent-tools skills:**
+> github.com/alex-mextner/agent-tools (`skills/universal/` + `skills/by-type/cli`).
+> They cover the stack-agnostic discipline this file used to spell out at length — atomic
+> commits, push-regularly, AI review before commit, dead-code investigation, visual-proof
+> cycle, GAN critic loop, and the CLI-shaped skills `self-registering-commands`,
+> `lazy-heavy-imports`, `structured-exit-codes`, `help-docs-sync`, `idempotent-bootstrap`.
+> This file keeps only what is **specific to `3d-cli`**: its command-authoring contract,
+> the OpenSCAD/render/section toolchain, the proof bar for fit-camera/match work, the exact
+> test gate, and the project's command surface. Read both.
+
 ## What this is
 
 `3d` is a scriptable, AI-assisted CLI for the whole 3D FDM lifecycle — modeling,
@@ -12,6 +22,9 @@ modules from `lib/commands/<name>.py`. Heavy python tools (render/mesh/collision
 in `lib/*.py` and run through `cli.pyrun`.
 
 ## Adding a command (the command-authoring contract)
+
+> The patterns behind this contract are the global skills `cli/self-registering-commands`,
+> `cli/lazy-heavy-imports`, `cli/structured-exit-codes`. Below is `3d-cli`'s concrete instance.
 
 A command is ONE module `lib/commands/<name>.py` that defines a module-level `COMMAND`:
 
@@ -193,12 +206,17 @@ install command, graceful degrade — never a silent false PASS. `cli/env.py` is
 for tool discovery + the OS/install table.)
 
 ### Help text sync
+> Generic rule: global skill `cli/help-docs-sync`. Project specifics:
+
 Help text must be in sync between `lib/commands/<name>.py` (the `--help` USAGE string)
 and `docs/commands/<name>.md` (the doc fragment). Every flag/option must have a concrete
 example in both places. When a command's surface changes, both files must be updated in
 the same commit.
 
 ### First-run bootstrap
+> Generic rule: global skill `cli/idempotent-bootstrap` (idempotent, non-fatal if offline).
+> Project specifics:
+
 On ANY `3d` invocation, if `~/.config/3d-cli/.bootstrapped` is absent, the dispatcher
 auto-installs the OpenSCAD libraries (BOSL2, NopSCADlib) into the repo `libs/` ONCE,
 quietly (one-line notice), then touches the marker. It is **idempotent** and **non-fatal
@@ -217,9 +235,13 @@ skills (`atomic-commits`, `ai-review-before-commit`, `pre-commit-gate`,
   feature-branch dance; that is where all history lives. After each commit or small
   batch, `git push origin main`. (This overrides the skills' default "push to a
   feature branch, open a PR".)
-- **Review model roster.** The pre-commit `review` runner's baseline for this repo is
-  `review -m codex -m gemini -m oc:fireworks/accounts/fireworks/routers/kimi-k2p6-turbo`
-  (install/update from `https://github.com/alex-mextner/review-cli`).
+- **Review model roster + minimum bar.** The pre-commit `review` runner's baseline for
+  this repo is `review -m codex -m gemini -m oc:fireworks/accounts/fireworks/routers/kimi-k2p6-turbo`
+  (install/update from `https://github.com/alex-mextner/review-cli`). The minimum bar for
+  THIS repo is Codex plus at least one independent non-Codex reviewer from a different
+  provider/model family — a second Codex run does not count. If no independent non-Codex
+  reviewer is available, record the provider-wide blocker; never silently treat
+  single-review work as fully reviewed.
 - **Co-Authored-By trailer** on commits:
   `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`
 
