@@ -1,0 +1,15 @@
+api:
+  listen: :1984
+
+rtsp:
+  listen: :8554
+
+webrtc:
+  listen: :8555
+
+streams:
+  k1se_camera:
+    - http://192.168.0.34:8080/?action=stream
+    - http://192.168.0.34/webcam/?action=stream
+  u1_camera:
+    - http://192.168.0.63/webcam/?action=stream

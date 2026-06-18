@@ -1,0 +1,536 @@
+# 3D printer monitoring, commands, and alerts.
+# Router static leases:
+# - K1 SE: 192.168.0.34 / fc:ee:28:06:85:b6
+# - U1:    192.168.0.63 / 40:d9:5a:e3:18:c8
+
+rest:
+  - resource: "http://192.168.0.34:7125/printer/objects/query?print_stats&virtual_sdcard&display_status&toolhead&extruder&heater_bed&fan_feedback&system_stats&webhooks&filament_switch_sensor%20filament_sensor&filament_switch_sensor%20filament_sensor_2&temperature_sensor%20mcu_temp"
+    scan_interval: 15
+    timeout: 10
+    sensor:
+      - name: "Printer K1 SE Raw"
+        unique_id: printer_k1_se_raw
+        value_template: "{{ value_json.result.status.print_stats.state | default('unknown') }}"
+        json_attributes_path: "$.result.status"
+        json_attributes:
+          - print_stats
+          - virtual_sdcard
+          - display_status
+          - toolhead
+          - extruder
+          - heater_bed
+          - fan_feedback
+          - system_stats
+          - webhooks
+          - filament_switch_sensor filament_sensor
+          - filament_switch_sensor filament_sensor_2
+          - temperature_sensor mcu_temp
+
+  - resource: "http://192.168.0.63:7125/printer/objects/query?print_stats&virtual_sdcard&display_status&toolhead&extruder&extruder1&extruder2&extruder3&heater_bed&fan&fan_generic%20cavity_fan&temperature_sensor%20cavity&system_stats&webhooks&filament_motion_sensor%20e0_filament&filament_motion_sensor%20e1_filament&filament_motion_sensor%20e2_filament&filament_motion_sensor%20e3_filament"
+    scan_interval: 15
+    timeout: 10
+    sensor:
+      - name: "Printer U1 Raw"
+        unique_id: printer_u1_raw
+        value_template: "{{ value_json.result.status.print_stats.state | default('unknown') }}"
+        json_attributes_path: "$.result.status"
+        json_attributes:
+          - print_stats
+          - virtual_sdcard
+          - display_status
+          - toolhead
+          - extruder
+          - extruder1
+          - extruder2
+          - extruder3
+          - heater_bed
+          - fan
+          - fan_generic cavity_fan
+          - temperature_sensor cavity
+          - system_stats
+          - webhooks
+          - filament_motion_sensor e0_filament
+          - filament_motion_sensor e1_filament
+          - filament_motion_sensor e2_filament
+          - filament_motion_sensor e3_filament
+
+rest_command:
+  printer_k1_se_pause:
+    url: "http://192.168.0.34:7125/printer/print/pause"
+    method: post
+  printer_k1_se_resume:
+    url: "http://192.168.0.34:7125/printer/print/resume"
+    method: post
+  printer_k1_se_cancel:
+    url: "http://192.168.0.34:7125/printer/print/cancel"
+    method: post
+  printer_k1_se_emergency_stop:
+    url: "http://192.168.0.34:7125/printer/emergency_stop"
+    method: post
+  printer_u1_pause:
+    url: "http://192.168.0.63:7125/printer/print/pause"
+    method: post
+  printer_u1_resume:
+    url: "http://192.168.0.63:7125/printer/print/resume"
+    method: post
+  printer_u1_cancel:
+    url: "http://192.168.0.63:7125/printer/print/cancel"
+    method: post
+  printer_u1_emergency_stop:
+    url: "http://192.168.0.63:7125/printer/emergency_stop"
+    method: post
+
+script:
+  printer_send_notification:
+    alias: Printer Send Notification
+    mode: queued
+    max: 10
+    fields:
+      title:
+        description: Notification title.
+      message:
+        description: Notification body.
+    sequence:
+      - action: notify.mobile_app_echowhiskey536
+        continue_on_error: true
+        data:
+          title: "{{ title }}"
+          message: "{{ message }}"
+      - action: notify.notify
+        continue_on_error: true
+        data:
+          title: "{{ title }}"
+          message: "{{ message }}"
+      - action: persistent_notification.create
+        continue_on_error: true
+        data:
+          title: "{{ title }}"
+          message: "{{ message }}"
+
+  printer_k1_se_pause:
+    alias: "K1 SE Pause Print"
+    sequence:
+      - action: rest_command.printer_k1_se_pause
+  printer_k1_se_resume:
+    alias: "K1 SE Resume Print"
+    sequence:
+      - action: rest_command.printer_k1_se_resume
+  printer_k1_se_cancel:
+    alias: "K1 SE Cancel Print"
+    sequence:
+      - action: rest_command.printer_k1_se_cancel
+  printer_k1_se_emergency_stop:
+    alias: "K1 SE Emergency Stop"
+    sequence:
+      - action: rest_command.printer_k1_se_emergency_stop
+  printer_u1_pause:
+    alias: "U1 Pause Print"
+    sequence:
+      - action: rest_command.printer_u1_pause
+  printer_u1_resume:
+    alias: "U1 Resume Print"
+    sequence:
+      - action: rest_command.printer_u1_resume
+  printer_u1_cancel:
+    alias: "U1 Cancel Print"
+    sequence:
+      - action: rest_command.printer_u1_cancel
+  printer_u1_emergency_stop:
+    alias: "U1 Emergency Stop"
+    sequence:
+      - action: rest_command.printer_u1_emergency_stop
+
+template:
+  - sensor:
+      - name: "Printer K1 SE Status"
+        unique_id: printer_k1_se_status
+        icon: mdi:printer-3d
+        state: >
+          {% set print_stats = state_attr('sensor.printer_k1_se_raw', 'print_stats') or {} %}
+          {{ print_stats.get('state', states('sensor.printer_k1_se_raw')) }}
+
+      - name: "Printer K1 SE Progress"
+        unique_id: printer_k1_se_progress
+        unit_of_measurement: "%"
+        state_class: measurement
+        icon: mdi:progress-clock
+        state: >
+          {% set display_status = state_attr('sensor.printer_k1_se_raw', 'display_status') or {} %}
+          {% set virtual_sdcard = state_attr('sensor.printer_k1_se_raw', 'virtual_sdcard') or {} %}
+          {% set progress = display_status.get('progress', virtual_sdcard.get('progress', 0)) | float(0) %}
+          {{ (progress * 100) | round(1) }}
+
+      - name: "Printer K1 SE Remaining"
+        unique_id: printer_k1_se_remaining
+        unit_of_measurement: "min"
+        state_class: measurement
+        icon: mdi:timer-sand
+        state: >
+          {% set progress = states('sensor.printer_k1_se_progress') | float(0) %}
+          {% set print_stats = state_attr('sensor.printer_k1_se_raw', 'print_stats') or {} %}
+          {% set duration = print_stats.get('print_duration', 0) | float(0) %}
+          {% if progress > 0 and progress < 100 and duration > 0 %}
+            {{ (((duration / (progress / 100)) - duration) / 60) | round(0) }}
+          {% else %}
+            0
+          {% endif %}
+
+      - name: "Printer K1 SE File"
+        unique_id: printer_k1_se_file
+        icon: mdi:file-cad
+        state: >
+          {% set print_stats = state_attr('sensor.printer_k1_se_raw', 'print_stats') or {} %}
+          {{ print_stats.get('filename', '') or 'idle' }}
+
+      - name: "Printer K1 SE Layer"
+        unique_id: printer_k1_se_layer
+        icon: mdi:layers
+        state: >
+          {% set virtual_sdcard = state_attr('sensor.printer_k1_se_raw', 'virtual_sdcard') or {} %}
+          {% set print_stats = state_attr('sensor.printer_k1_se_raw', 'print_stats') or {} %}
+          {% set info = print_stats.get('info', {}) %}
+          {{ virtual_sdcard.get('layer', info.get('current_layer', 0)) | int(0) }}
+
+      - name: "Printer K1 SE Total Layers"
+        unique_id: printer_k1_se_total_layers
+        icon: mdi:layers-triple
+        state: >
+          {% set virtual_sdcard = state_attr('sensor.printer_k1_se_raw', 'virtual_sdcard') or {} %}
+          {% set print_stats = state_attr('sensor.printer_k1_se_raw', 'print_stats') or {} %}
+          {% set info = print_stats.get('info', {}) %}
+          {{ virtual_sdcard.get('layer_count', info.get('total_layer', 0)) | int(0) }}
+
+      - name: "Printer K1 SE Nozzle Temperature"
+        unique_id: printer_k1_se_nozzle_temperature
+        device_class: temperature
+        state_class: measurement
+        unit_of_measurement: "°C"
+        state: >
+          {% set extruder = state_attr('sensor.printer_k1_se_raw', 'extruder') or {} %}
+          {{ extruder.get('temperature', 0) | float(0) | round(1) }}
+
+      - name: "Printer K1 SE Nozzle Target"
+        unique_id: printer_k1_se_nozzle_target
+        device_class: temperature
+        state_class: measurement
+        unit_of_measurement: "°C"
+        state: >
+          {% set extruder = state_attr('sensor.printer_k1_se_raw', 'extruder') or {} %}
+          {{ extruder.get('target', 0) | float(0) | round(1) }}
+
+      - name: "Printer K1 SE Bed Temperature"
+        unique_id: printer_k1_se_bed_temperature
+        device_class: temperature
+        state_class: measurement
+        unit_of_measurement: "°C"
+        state: >
+          {% set bed = state_attr('sensor.printer_k1_se_raw', 'heater_bed') or {} %}
+          {{ bed.get('temperature', 0) | float(0) | round(1) }}
+
+      - name: "Printer K1 SE Bed Target"
+        unique_id: printer_k1_se_bed_target
+        device_class: temperature
+        state_class: measurement
+        unit_of_measurement: "°C"
+        state: >
+          {% set bed = state_attr('sensor.printer_k1_se_raw', 'heater_bed') or {} %}
+          {{ bed.get('target', 0) | float(0) | round(1) }}
+
+      - name: "Printer K1 SE Filament Used"
+        unique_id: printer_k1_se_filament_used
+        unit_of_measurement: "m"
+        state_class: measurement
+        icon: mdi:printer-3d-filament
+        state: >
+          {% set print_stats = state_attr('sensor.printer_k1_se_raw', 'print_stats') or {} %}
+          {{ ((print_stats.get('filament_used', 0) | float(0)) / 1000) | round(2) }}
+
+      - name: "Printer K1 SE Z Position"
+        unique_id: printer_k1_se_z_position
+        unit_of_measurement: "mm"
+        state_class: measurement
+        icon: mdi:axis-z-arrow
+        state: >
+          {% set toolhead = state_attr('sensor.printer_k1_se_raw', 'toolhead') or {} %}
+          {% set position = toolhead.get('position', [0, 0, 0]) %}
+          {{ position[2] | float(0) | round(2) }}
+
+      - name: "Printer U1 Status"
+        unique_id: printer_u1_status
+        icon: mdi:printer-3d
+        state: >
+          {% set print_stats = state_attr('sensor.printer_u1_raw', 'print_stats') or {} %}
+          {{ print_stats.get('state', states('sensor.printer_u1_raw')) }}
+
+      - name: "Printer U1 Progress"
+        unique_id: printer_u1_progress
+        unit_of_measurement: "%"
+        state_class: measurement
+        icon: mdi:progress-clock
+        state: >
+          {% set display_status = state_attr('sensor.printer_u1_raw', 'display_status') or {} %}
+          {% set virtual_sdcard = state_attr('sensor.printer_u1_raw', 'virtual_sdcard') or {} %}
+          {% set progress = display_status.get('progress', virtual_sdcard.get('progress', 0)) | float(0) %}
+          {{ (progress * 100) | round(1) }}
+
+      - name: "Printer U1 Remaining"
+        unique_id: printer_u1_remaining
+        unit_of_measurement: "min"
+        state_class: measurement
+        icon: mdi:timer-sand
+        state: >
+          {% set progress = states('sensor.printer_u1_progress') | float(0) %}
+          {% set print_stats = state_attr('sensor.printer_u1_raw', 'print_stats') or {} %}
+          {% set duration = print_stats.get('print_duration', 0) | float(0) %}
+          {% if progress > 0 and progress < 100 and duration > 0 %}
+            {{ (((duration / (progress / 100)) - duration) / 60) | round(0) }}
+          {% else %}
+            0
+          {% endif %}
+
+      - name: "Printer U1 File"
+        unique_id: printer_u1_file
+        icon: mdi:file-cad
+        state: >
+          {% set print_stats = state_attr('sensor.printer_u1_raw', 'print_stats') or {} %}
+          {{ print_stats.get('filename', '') or 'idle' }}
+
+      - name: "Printer U1 Active Tool"
+        unique_id: printer_u1_active_tool
+        icon: mdi:printer-3d-nozzle
+        state: >
+          {% set toolhead = state_attr('sensor.printer_u1_raw', 'toolhead') or {} %}
+          {{ toolhead.get('extruder', 'unknown') }}
+
+      - name: "Printer U1 Layer"
+        unique_id: printer_u1_layer
+        icon: mdi:layers
+        state: >
+          {% set print_stats = state_attr('sensor.printer_u1_raw', 'print_stats') or {} %}
+          {% set info = print_stats.get('info', {}) %}
+          {{ info.get('current_layer', 0) | int(0) }}
+
+      - name: "Printer U1 Total Layers"
+        unique_id: printer_u1_total_layers
+        icon: mdi:layers-triple
+        state: >
+          {% set print_stats = state_attr('sensor.printer_u1_raw', 'print_stats') or {} %}
+          {% set info = print_stats.get('info', {}) %}
+          {{ info.get('total_layer', 0) | int(0) }}
+
+      - name: "Printer U1 Nozzle Temperature"
+        unique_id: printer_u1_nozzle_temperature
+        device_class: temperature
+        state_class: measurement
+        unit_of_measurement: "°C"
+        state: >
+          {% set active = states('sensor.printer_u1_active_tool') %}
+          {% set extruder = state_attr('sensor.printer_u1_raw', active) or state_attr('sensor.printer_u1_raw', 'extruder') or {} %}
+          {{ extruder.get('temperature', 0) | float(0) | round(1) }}
+
+      - name: "Printer U1 Nozzle Target"
+        unique_id: printer_u1_nozzle_target
+        device_class: temperature
+        state_class: measurement
+        unit_of_measurement: "°C"
+        state: >
+          {% set active = states('sensor.printer_u1_active_tool') %}
+          {% set extruder = state_attr('sensor.printer_u1_raw', active) or state_attr('sensor.printer_u1_raw', 'extruder') or {} %}
+          {{ extruder.get('target', 0) | float(0) | round(1) }}
+
+      - name: "Printer U1 Bed Temperature"
+        unique_id: printer_u1_bed_temperature
+        device_class: temperature
+        state_class: measurement
+        unit_of_measurement: "°C"
+        state: >
+          {% set bed = state_attr('sensor.printer_u1_raw', 'heater_bed') or {} %}
+          {{ bed.get('temperature', 0) | float(0) | round(1) }}
+
+      - name: "Printer U1 Bed Target"
+        unique_id: printer_u1_bed_target
+        device_class: temperature
+        state_class: measurement
+        unit_of_measurement: "°C"
+        state: >
+          {% set bed = state_attr('sensor.printer_u1_raw', 'heater_bed') or {} %}
+          {{ bed.get('target', 0) | float(0) | round(1) }}
+
+      - name: "Printer U1 Cavity Temperature"
+        unique_id: printer_u1_cavity_temperature
+        device_class: temperature
+        state_class: measurement
+        unit_of_measurement: "°C"
+        state: >
+          {% set cavity = state_attr('sensor.printer_u1_raw', 'temperature_sensor cavity') or {} %}
+          {{ cavity.get('temperature', 0) | float(0) | round(1) }}
+
+      - name: "Printer U1 Filament Used"
+        unique_id: printer_u1_filament_used
+        unit_of_measurement: "m"
+        state_class: measurement
+        icon: mdi:printer-3d-filament
+        state: >
+          {% set print_stats = state_attr('sensor.printer_u1_raw', 'print_stats') or {} %}
+          {{ ((print_stats.get('filament_used', 0) | float(0)) / 1000) | round(2) }}
+
+      - name: "Printer U1 Z Position"
+        unique_id: printer_u1_z_position
+        unit_of_measurement: "mm"
+        state_class: measurement
+        icon: mdi:axis-z-arrow
+        state: >
+          {% set toolhead = state_attr('sensor.printer_u1_raw', 'toolhead') or {} %}
+          {% set position = toolhead.get('position', [0, 0, 0]) %}
+          {{ position[2] | float(0) | round(2) }}
+
+      - name: "Printer U1 Fan Speed"
+        unique_id: printer_u1_fan_speed
+        unit_of_measurement: "%"
+        state_class: measurement
+        icon: mdi:fan
+        state: >
+          {% set fan = state_attr('sensor.printer_u1_raw', 'fan') or {} %}
+          {{ ((fan.get('speed', 0) | float(0)) * 100) | round(0) }}
+
+  - binary_sensor:
+      - name: "Printer K1 SE Online"
+        unique_id: printer_k1_se_online
+        device_class: connectivity
+        state: "{{ states('sensor.printer_k1_se_raw') not in ['unknown', 'unavailable'] }}"
+
+      - name: "Printer K1 SE Printing"
+        unique_id: printer_k1_se_printing
+        icon: mdi:printer-3d
+        state: "{{ states('sensor.printer_k1_se_status') == 'printing' }}"
+
+      - name: "Printer K1 SE Paused"
+        unique_id: printer_k1_se_paused
+        icon: mdi:pause-circle
+        state: "{{ states('sensor.printer_k1_se_status') == 'paused' }}"
+
+      - name: "Printer K1 SE Problem"
+        unique_id: printer_k1_se_problem
+        device_class: problem
+        state: "{{ states('sensor.printer_k1_se_status') in ['error', 'shutdown'] }}"
+
+      - name: "Printer U1 Online"
+        unique_id: printer_u1_online
+        device_class: connectivity
+        state: "{{ states('sensor.printer_u1_raw') not in ['unknown', 'unavailable'] }}"
+
+      - name: "Printer U1 Printing"
+        unique_id: printer_u1_printing
+        icon: mdi:printer-3d
+        state: "{{ states('sensor.printer_u1_status') == 'printing' }}"
+
+      - name: "Printer U1 Paused"
+        unique_id: printer_u1_paused
+        icon: mdi:pause-circle
+        state: "{{ states('sensor.printer_u1_status') == 'paused' }}"
+
+      - name: "Printer U1 Problem"
+        unique_id: printer_u1_problem
+        device_class: problem
+        state: "{{ states('sensor.printer_u1_status') in ['error', 'shutdown'] }}"
+
+automation:
+  - alias: "3D Printer: K1 SE State Notification"
+    id: printer_k1_se_state_notification
+    trigger:
+      - platform: state
+        entity_id: sensor.printer_k1_se_status
+    condition:
+      - condition: template
+        value_template: >
+          {{ trigger.from_state is not none
+             and trigger.to_state.state != trigger.from_state.state
+             and trigger.to_state.state in ['printing', 'paused', 'complete', 'cancelled', 'error'] }}
+    action:
+      - action: script.printer_send_notification
+        data:
+          title: "K1 SE: {{ trigger.to_state.state }}"
+          message: >
+            File: {{ states('sensor.printer_k1_se_file') }}.
+            Progress: {{ states('sensor.printer_k1_se_progress') }}%.
+            Nozzle {{ states('sensor.printer_k1_se_nozzle_temperature') }}°C,
+            bed {{ states('sensor.printer_k1_se_bed_temperature') }}°C.
+
+  - alias: "3D Printer: U1 State Notification"
+    id: printer_u1_state_notification
+    trigger:
+      - platform: state
+        entity_id: sensor.printer_u1_status
+    condition:
+      - condition: template
+        value_template: >
+          {{ trigger.from_state is not none
+             and trigger.to_state.state != trigger.from_state.state
+             and trigger.to_state.state in ['printing', 'paused', 'complete', 'cancelled', 'error'] }}
+    action:
+      - action: script.printer_send_notification
+        data:
+          title: "U1: {{ trigger.to_state.state }}"
+          message: >
+            File: {{ states('sensor.printer_u1_file') }}.
+            Progress: {{ states('sensor.printer_u1_progress') }}%.
+            Tool {{ states('sensor.printer_u1_active_tool') }},
+            nozzle {{ states('sensor.printer_u1_nozzle_temperature') }}°C,
+            bed {{ states('sensor.printer_u1_bed_temperature') }}°C.
+
+  - alias: "3D Printer: Offline Alert"
+    id: printer_offline_alert
+    trigger:
+      - platform: state
+        entity_id:
+          - binary_sensor.printer_k1_se_online
+          - binary_sensor.printer_u1_online
+        to: "off"
+        for:
+          minutes: 5
+    action:
+      - action: script.printer_send_notification
+        data:
+          title: "3D printer offline"
+          message: >
+            {{ trigger.to_state.attributes.friendly_name }} has been unavailable for 5 minutes.
+
+  - alias: "3D Printer: K1 SE Temperature Overshoot"
+    id: printer_k1_se_temperature_overshoot
+    trigger:
+      - platform: template
+        value_template: >
+          {% set nt = states('sensor.printer_k1_se_nozzle_temperature') | float(0) %}
+          {% set ns = states('sensor.printer_k1_se_nozzle_target') | float(0) %}
+          {% set bt = states('sensor.printer_k1_se_bed_temperature') | float(0) %}
+          {% set bs = states('sensor.printer_k1_se_bed_target') | float(0) %}
+          {{ (ns > 0 and nt > ns + 15) or (bs > 0 and bt > bs + 10) }}
+        for:
+          minutes: 2
+    action:
+      - action: script.printer_send_notification
+        data:
+          title: "K1 SE temperature alert"
+          message: >
+            Temperature overshoot: nozzle {{ states('sensor.printer_k1_se_nozzle_temperature') }}/{{ states('sensor.printer_k1_se_nozzle_target') }}°C,
+            bed {{ states('sensor.printer_k1_se_bed_temperature') }}/{{ states('sensor.printer_k1_se_bed_target') }}°C.
+
+  - alias: "3D Printer: U1 Temperature Overshoot"
+    id: printer_u1_temperature_overshoot
+    trigger:
+      - platform: template
+        value_template: >
+          {% set nt = states('sensor.printer_u1_nozzle_temperature') | float(0) %}
+          {% set ns = states('sensor.printer_u1_nozzle_target') | float(0) %}
+          {% set bt = states('sensor.printer_u1_bed_temperature') | float(0) %}
+          {% set bs = states('sensor.printer_u1_bed_target') | float(0) %}
+          {{ (ns > 0 and nt > ns + 15) or (bs > 0 and bt > bs + 10) }}
+        for:
+          minutes: 2
+    action:
+      - action: script.printer_send_notification
+        data:
+          title: "U1 temperature alert"
+          message: >
+            Temperature overshoot: nozzle {{ states('sensor.printer_u1_nozzle_temperature') }}/{{ states('sensor.printer_u1_nozzle_target') }}°C,
+            bed {{ states('sensor.printer_u1_bed_temperature') }}/{{ states('sensor.printer_u1_bed_target') }}°C.
