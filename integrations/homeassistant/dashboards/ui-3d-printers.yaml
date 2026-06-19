@@ -78,23 +78,6 @@ views:
                   confirmation:
                     text: Emergency stop K1 SE?
 
-          - type: custom:webrtc-camera
-            title: K1 SE Camera
-            server: http://go2rtc:1984/
-            muted: true
-            ui: true
-            background: true
-            streams:
-              - url: k1se_camera
-                name: WebRTC
-                mode: webrtc
-                media: video
-              - url: k1se_camera
-                name: MSE
-                mode: mse
-                media: video
-            style: "video {aspect-ratio: 4/3; object-fit: contain; background: #111;}"
-
       - type: grid
         cards:
           - type: gauge
