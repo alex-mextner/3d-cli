@@ -188,6 +188,10 @@ views:
                 name: MSE
                 mode: mse
                 media: video
+              - url: u1_camera
+                name: MJPEG
+                mode: mjpeg
+                media: video
             style: "video {aspect-ratio: 16/9; object-fit: contain; background: #111;}"
 
       - type: grid
