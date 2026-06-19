@@ -6,6 +6,9 @@ rtsp:
 
 webrtc:
   listen: :8555
+  candidates:
+    - 192.168.0.39:8555
+    - 100.74.26.95:8555
 
 streams:
   k1se_camera:
