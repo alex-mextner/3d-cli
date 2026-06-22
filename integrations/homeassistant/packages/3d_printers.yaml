@@ -67,6 +67,11 @@ rest_command:
   printer_k1_se_emergency_stop:
     url: "http://192.168.0.34:7125/printer/emergency_stop"
     method: post
+  printer_k1_se_fans_off:
+    url: "http://192.168.0.34:7125/printer/gcode/script"
+    method: post
+    content_type: "application/json"
+    payload: '{"script": "M107\nM106 S0\nSET_PIN PIN=fan0 VALUE=0"}'
   printer_u1_pause:
     url: "http://192.168.0.63:7125/printer/print/pause"
     method: post
@@ -96,11 +101,6 @@ script:
         data:
           title: "{{ title }}"
           message: "{{ message }}"
-      - action: notify.notify
-        continue_on_error: true
-        data:
-          title: "{{ title }}"
-          message: "{{ message }}"
       - action: persistent_notification.create
         continue_on_error: true
         data:
@@ -123,6 +123,10 @@ script:
     alias: "K1 SE Emergency Stop"
     sequence:
       - action: rest_command.printer_k1_se_emergency_stop
+  printer_k1_se_fans_off:
+    alias: "K1 SE Fans Off"
+    sequence:
+      - action: rest_command.printer_k1_se_fans_off
   printer_u1_pause:
     alias: "U1 Pause Print"
     sequence:
@@ -477,6 +481,22 @@ automation:
             Tool {{ states('sensor.printer_u1_active_tool') }},
             nozzle {{ states('sensor.printer_u1_nozzle_temperature') }}°C,
             bed {{ states('sensor.printer_u1_bed_temperature') }}°C.
+
+  - alias: "3D Printer: K1 SE Fans Off After Print"
+    id: printer_k1_se_fans_off_after_print
+    mode: restart
+    trigger:
+      - platform: state
+        entity_id: sensor.printer_k1_se_status
+        to: "complete"
+        for:
+          seconds: 10
+    action:
+      - wait_template: >
+          {{ states('sensor.printer_k1_se_nozzle_temperature') | float(999) < 45 }}
+        timeout: "01:30:00"
+        continue_on_timeout: false
+      - action: rest_command.printer_k1_se_fans_off
 
   - alias: "3D Printer: Offline Alert"
     id: printer_offline_alert
