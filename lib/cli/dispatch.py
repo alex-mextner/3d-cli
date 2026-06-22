@@ -47,14 +47,21 @@ def _version_from_pyproject() -> str | None:
 
 def _resolve_version() -> str:
     """Read the declared version dynamically — pyproject is the single source of
-    truth. Prefer the installed-distribution metadata; fall back to parsing
-    `pyproject.toml [project] version` for a source checkout (no installed dist).
+    truth. `bin/3d` resolves `REPO_ROOT` through its (symlinked) launcher and runs
+    THIS checkout's `lib/`, so the checkout's `pyproject.toml` is what is actually
+    executing: read it FIRST. A stale `3d-cli` dist installed in the interpreter
+    (e.g. a leftover 0.1.0 `.dist-info`) must NOT shadow the running source tree —
+    that would reintroduce the very drift this resolver fixes. Fall back to the
+    installed-distribution metadata only when no pyproject is on disk (a real
+    installed-wheel run, where `lib/` ships inside the package).
     """
+    from_pyproject = _version_from_pyproject()
+    if from_pyproject is not None:
+        return from_pyproject
     try:
         return importlib.metadata.version(_DIST_NAME)
     except importlib.metadata.PackageNotFoundError:
-        pass
-    return _version_from_pyproject() or "0+unknown"
+        return "0+unknown"
 
 
 VERSION = _resolve_version()

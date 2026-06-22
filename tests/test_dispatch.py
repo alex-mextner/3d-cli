@@ -47,30 +47,30 @@ def test_version_is_not_the_stale_hardcoded_literal() -> None:
     assert _pyproject_version() != "0.1.0"
 
 
-def test_resolve_version_prefers_installed_metadata(monkeypatch: Any) -> None:
-    # When the dist IS installed, metadata wins and pyproject is never read.
-    monkeypatch.setattr(importlib.metadata, "version", lambda _name: "9.9.9")
-    monkeypatch.setattr(dispatch, "_version_from_pyproject", _fail_if_called)
-    assert _resolve_version() == "9.9.9"
-
-
-def test_resolve_version_falls_back_to_pyproject(monkeypatch: Any) -> None:
-    # No installed dist (source checkout): fall through to the pyproject parse.
-    def _not_found(_name: str) -> str:
-        raise importlib.metadata.PackageNotFoundError
-
-    monkeypatch.setattr(importlib.metadata, "version", _not_found)
+def test_resolve_version_prefers_checkout_pyproject(monkeypatch: Any) -> None:
+    # `bin/3d` runs THIS checkout's lib/, so the checkout pyproject is authoritative
+    # and a stale installed `.dist-info` (here 0.1.0) must NOT shadow it.
     monkeypatch.setattr(dispatch, "_version_from_pyproject", lambda: "3.4.5")
+    monkeypatch.setattr(importlib.metadata, "version", lambda _name: "0.1.0")
     assert _resolve_version() == "3.4.5"
 
 
+def test_resolve_version_falls_back_to_metadata_when_no_pyproject(
+    monkeypatch: Any,
+) -> None:
+    # No pyproject on disk (a real installed-wheel run): use installed metadata.
+    monkeypatch.setattr(dispatch, "_version_from_pyproject", lambda: None)
+    monkeypatch.setattr(importlib.metadata, "version", lambda _name: "7.8.9")
+    assert _resolve_version() == "7.8.9"
+
+
 def test_resolve_version_unknown_when_no_source(monkeypatch: Any) -> None:
-    # Neither metadata nor pyproject available: a sentinel, never a stale literal.
+    # Neither pyproject nor installed metadata: a sentinel, never a stale literal.
     def _not_found(_name: str) -> str:
         raise importlib.metadata.PackageNotFoundError
 
-    monkeypatch.setattr(importlib.metadata, "version", _not_found)
     monkeypatch.setattr(dispatch, "_version_from_pyproject", lambda: None)
+    monkeypatch.setattr(importlib.metadata, "version", _not_found)
     assert _resolve_version() == "0+unknown"
 
 
@@ -97,10 +97,6 @@ def test_version_from_pyproject_missing_file(tmp_path: Any, monkeypatch: Any) ->
     # No pyproject.toml on disk -> None (so _resolve_version yields the sentinel).
     monkeypatch.setattr(dispatch, "repo_root", lambda: str(tmp_path))
     assert _version_from_pyproject() is None
-
-
-def _fail_if_called() -> str:
-    raise AssertionError("_version_from_pyproject must not be read when metadata wins")
 
 
 def test_usage_contains_version() -> None:
