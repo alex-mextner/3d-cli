@@ -34,6 +34,7 @@ rendering, slicing support, and verification:
 
 - `animation.py`
 - `lib/geometry/axis.py`
+- `arrange_pack.py`
 - `collision_check.py`
 - `collision_viz.py`
 - `fit_camera.py`
@@ -128,6 +129,7 @@ Every current root Python module is listed here so future additions are intentio
 
 - `ai_tools.py` — offline AI-assist prompt bundle construction.
 - `animation.py` — deterministic render frame planning.
+- `arrange_pack.py` — split parts into connected bodies, shelf-pack them onto bed-sized plates, write one print-ready 3MF per plate (the `3d arrange` backend).
 - `axis.py` — compatibility wrapper re-exporting `geometry.axis`.
 - `collision_check.py` — geometry / collision check implementation.
 - `collision_viz.py` — geometry / collision visualization implementation.
