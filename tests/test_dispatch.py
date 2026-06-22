@@ -1,11 +1,102 @@
 """Unit tests for cli.dispatch — the thin typed dispatcher."""
 from __future__ import annotations
 
+import importlib.metadata
+import pathlib
+import re
 from typing import Any
 
 
-from cli.dispatch import _suggest, main, usage, VERSION
+import cli.dispatch as dispatch
+from cli.dispatch import (
+    _resolve_version,
+    _suggest,
+    _version_from_pyproject,
+    main,
+    usage,
+    VERSION,
+)
 from cli.registry import Command, Registry
+
+
+def _pyproject_version() -> str:
+    """The declared version, read independently of dispatch's own parser, so the
+    drift guard would still catch a parser bug that happens to agree with itself.
+    """
+    root = pathlib.Path(__file__).resolve().parents[1]
+    text = (root / "pyproject.toml").read_text(encoding="utf-8")
+    # The `[project]` block: from its header up to the next top-level table header.
+    after = text.split("[project]", 1)[1]
+    block = re.split(r"(?m)^\[", after, maxsplit=1)[0]
+    m = re.search(r'(?m)^version\s*=\s*["\']([^"\']+)["\']', block)
+    assert m is not None, "could not find [project] version in pyproject.toml"
+    return m.group(1)
+
+
+def test_version_matches_pyproject_no_drift() -> None:
+    # Drift guard: the version the CLI reports MUST equal pyproject's declared
+    # version. Pinned to the checkout path (the dist isn't installed in CI).
+    assert _version_from_pyproject() == _pyproject_version()
+    assert VERSION == _pyproject_version()
+
+
+def test_version_is_not_the_stale_hardcoded_literal() -> None:
+    # The bug being fixed: a frozen `VERSION = "0.1.0"` literal. The version must
+    # come from pyproject, which has since moved off 0.1.0.
+    assert VERSION != "0.1.0"
+    assert _pyproject_version() != "0.1.0"
+
+
+def test_resolve_version_prefers_checkout_pyproject(monkeypatch: Any) -> None:
+    # `bin/3d` runs THIS checkout's lib/, so the checkout pyproject is authoritative
+    # and a stale installed `.dist-info` (here 0.1.0) must NOT shadow it.
+    monkeypatch.setattr(dispatch, "_version_from_pyproject", lambda: "3.4.5")
+    monkeypatch.setattr(importlib.metadata, "version", lambda _name: "0.1.0")
+    assert _resolve_version() == "3.4.5"
+
+
+def test_resolve_version_falls_back_to_metadata_when_no_pyproject(
+    monkeypatch: Any,
+) -> None:
+    # No pyproject on disk (a real installed-wheel run): use installed metadata.
+    monkeypatch.setattr(dispatch, "_version_from_pyproject", lambda: None)
+    monkeypatch.setattr(importlib.metadata, "version", lambda _name: "7.8.9")
+    assert _resolve_version() == "7.8.9"
+
+
+def test_resolve_version_unknown_when_no_source(monkeypatch: Any) -> None:
+    # Neither pyproject nor installed metadata: a sentinel, never a stale literal.
+    def _not_found(_name: str) -> str:
+        raise importlib.metadata.PackageNotFoundError
+
+    monkeypatch.setattr(dispatch, "_version_from_pyproject", lambda: None)
+    monkeypatch.setattr(importlib.metadata, "version", _not_found)
+    assert _resolve_version() == "0+unknown"
+
+
+def test_version_from_pyproject_is_project_scoped(tmp_path: Any, monkeypatch: Any) -> None:
+    # The parser must take `[project]` version, never a `version =` in another
+    # table, and must tolerate TOML's optional leading indentation.
+    (tmp_path / "pyproject.toml").write_text(
+        "[tool.poetry]\n"
+        'version = "9.9.9"\n'
+        "\n"
+        "[project]\n"
+        '  name = "x"\n'
+        '  version = "1.2.3"\n'
+        "\n"
+        "[tool.other]\n"
+        'version = "8.8.8"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(dispatch, "repo_root", lambda: str(tmp_path))
+    assert _version_from_pyproject() == "1.2.3"
+
+
+def test_version_from_pyproject_missing_file(tmp_path: Any, monkeypatch: Any) -> None:
+    # No pyproject.toml on disk -> None (so _resolve_version yields the sentinel).
+    monkeypatch.setattr(dispatch, "repo_root", lambda: str(tmp_path))
+    assert _version_from_pyproject() is None
 
 
 def test_usage_contains_version() -> None:
