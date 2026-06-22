@@ -51,6 +51,9 @@ Options:
   --bed MM              square bed size in millimeters (default: 270, Snapmaker U1)
   --gap MM              clearance between part footprints (default: 6)
   --margin MM           keep-out margin from each bed edge (default: 8)
+  --min-volume MM3      drop (and log) split bodies below this volume as degenerate
+                        slivers (default: 1). Zero-thickness / <4-face bodies are
+                        always dropped regardless. Set 0 to keep everything.
   -o, --out PREFIX      output path/prefix. single: <PREFIX>.3mf; per-plate:
                         <PREFIX>_plate1.3mf, _plate2.3mf, ... (default: <first-input>_arranged)
   --json                emit a machine-readable JSON plan + verification instead of a table
@@ -79,6 +82,20 @@ def _parse_float(flag: str, raw: str) -> float:
     return val
 
 
+def _parse_nonneg_float(flag: str, raw: str) -> float:
+    """Parse a value that may be zero (e.g. --min-volume 0 disables the drop filter)."""
+    try:
+        val = float(raw)
+    except ValueError:
+        raise InvalidArgument(flag, raw, ["a number"], command="arrange") from None
+    if val < 0:
+        raise InvalidArgument(
+            flag, raw, ["zero or a positive number"], command="arrange",
+            extra=f"{flag} must not be negative.",
+        )
+    return val
+
+
 def run(argv: list[str]) -> int:
     if not argv:
         print(USAGE)
@@ -91,6 +108,7 @@ def run(argv: list[str]) -> int:
     bed = 270.0
     gap = 6.0
     margin = 8.0
+    min_volume = 1.0  # mm^3 floor for a split body (mirrors arrange_pack._DEFAULT_MIN_VOLUME)
     out = ""
     emit_json = False
     single = True  # default: one multi-plate project file
@@ -119,6 +137,11 @@ def run(argv: list[str]) -> int:
             if i + 1 >= n:
                 raise UsageError("option --margin needs a value", command="arrange")
             margin = _parse_float("--margin", argv[i + 1])
+            i += 2
+        elif a == "--min-volume":
+            if i + 1 >= n:
+                raise UsageError("option --min-volume needs a value", command="arrange")
+            min_volume = _parse_nonneg_float("--min-volume", argv[i + 1])
             i += 2
         elif a in ("-o", "--out"):
             if i + 1 >= n:
@@ -171,6 +194,7 @@ def run(argv: list[str]) -> int:
         "--bed", repr(bed),
         "--gap", repr(gap),
         "--margin", repr(margin),
+        "--min-volume", repr(min_volume),
     ]
     if out:
         tool_args += ["-o", out]

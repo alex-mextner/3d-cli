@@ -36,6 +36,13 @@ if TYPE_CHECKING:  # heavy types only for the checker; never imported at runtime
 
 _EPS = 1e-6
 
+# A connected body must clear ALL of these to be packed; otherwise it is dropped (and
+# logged — never silently). `min_volume` is the tunable floor (--min-volume); the face and
+# bbox-thickness gates are hard topology checks that no printable part can ever fail.
+_DEFAULT_MIN_VOLUME = 1.0  # mm^3 — well below any printable feature (smallest real neon part ~3074 mm^3), well above sliver noise
+_MIN_FACES = 4  # fewer than a tetrahedron's 4 faces = not a closed solid (a sliver/strip)
+_MIN_THICKNESS = 1e-3  # mm — a zero-thickness (flat) bbox in any axis can never print
+
 
 # --------------------------------------------------------------------------------------
 # Pure data + shelf packing (STDLIB ONLY — unit-tested without trimesh/numpy)
@@ -68,6 +75,44 @@ class Plate:
 
     index: int  # 1-based plate number
     placements: list[Placement]
+
+
+@dataclass
+class DroppedBody:
+    """A connected body discarded as degenerate / sub-threshold, kept for logging."""
+
+    name: str
+    faces: int
+    width: float  # bbox X extent (mm)
+    depth: float  # bbox Y extent (mm)
+    height: float  # bbox Z extent (mm)
+    volume: float  # mm^3
+    reason: str  # human-readable why it was dropped
+
+
+def degenerate_reason(
+    *,
+    faces: int,
+    width: float,
+    depth: float,
+    height: float,
+    volume: float,
+    min_volume: float,
+) -> str | None:
+    """Why this body is unprintable, or None if it should be kept (PURE — no trimesh).
+
+    A body is dropped if it is topologically degenerate (fewer than a tetrahedron's 4
+    faces, or a zero-thickness bounding box in any axis — both can never slice to a solid)
+    OR its volume is below `min_volume`. Returns a short reason string for the log, or None
+    when the body is a real, printable part. Kept stdlib-only so it is unit-testable.
+    """
+    if faces < _MIN_FACES:
+        return f"{faces} face(s) < {_MIN_FACES} (not a closed solid)"
+    if min(width, depth, height) < _MIN_THICKNESS:
+        return f"zero-thickness bbox {width:.3f}x{depth:.3f}x{height:.3f} mm"
+    if volume < min_volume:
+        return f"volume {volume:.3f} mm^3 < min {min_volume:g} mm^3"
+    return None
 
 
 class OversizePart(Exception):
@@ -155,16 +200,23 @@ def centering_offset(plate: Plate, *, bed: float) -> tuple[float, float]:
 # --------------------------------------------------------------------------------------
 # Mesh I/O (trimesh — lazy, only reached when actually arranging)
 # --------------------------------------------------------------------------------------
-def _load_meshes(inputs: list[str]) -> list[tuple[str, "trimesh.Trimesh"]]:
+def _load_meshes(
+    inputs: list[str], *, min_volume: float
+) -> list[tuple[str, "trimesh.Trimesh"]]:
     """Load inputs (.3mf scene or .stl files) and split each into connected bodies.
 
     Returns a list of (name, mesh) where each mesh is a single connected body laid out in
     its source coordinates (not yet flattened). A .3mf scene contributes one entry per
     object-per-connected-body; each .stl contributes one entry per connected body.
+
+    Degenerate / sub-`min_volume` bodies (zero-height slivers, single triangles) are DROPPED
+    so they don't land on a plate and silently break slicing — but never silently: every
+    dropped body is logged to stderr with its name + size + reason.
     """
     import trimesh
 
     out: list[tuple[str, trimesh.Trimesh]] = []
+    dropped: list[DroppedBody] = []
     for path in inputs:
         if not os.path.isfile(path):
             _die(f"input not found: {path}", 2)
@@ -180,23 +232,70 @@ def _load_meshes(inputs: list[str]) -> list[tuple[str, "trimesh.Trimesh"]]:
             if not hasattr(geom, "vertices") or len(geom.vertices) == 0:
                 continue
             base = stem if (not obj_name or obj_name == "geometry") else os.path.splitext(obj_name)[0]
-            bodies = _split_bodies(geom)
+            bodies, body_drops = _split_bodies(geom, base=base, min_volume=min_volume)
+            dropped.extend(body_drops)
             for bi, body in enumerate(bodies):
                 label = base if len(bodies) == 1 else f"{base}_{bi + 1}"
                 out.append((label, body))
+    _log_dropped(dropped)
     if not out:
         _die("no usable geometry found in the inputs", 2)
     return out
 
 
-def _split_bodies(mesh: "trimesh.Trimesh") -> list["trimesh.Trimesh"]:
-    """Split a mesh into connected components; fall back to the whole mesh on failure."""
+def _split_bodies(
+    mesh: "trimesh.Trimesh", *, base: str, min_volume: float
+) -> tuple[list["trimesh.Trimesh"], list[DroppedBody]]:
+    """Split a mesh into connected components, filtering out degenerate / tiny bodies.
+
+    Returns (kept_bodies, dropped). A body is dropped when `degenerate_reason` flags it
+    (too few faces, a zero-thickness bbox, or volume < `min_volume`). If the split fails or
+    yields nothing usable, fall back to the whole mesh (un-filtered — a single oversize part
+    is the packer's problem to report, not silently dropped). NEVER drops silently: every
+    discarded body is returned in `dropped` for the caller to log.
+    """
     try:
         parts = mesh.split(only_watertight=False)
     except Exception:
         parts = []
-    bodies = [p for p in parts if hasattr(p, "vertices") and len(p.vertices) > 0]
-    return bodies if bodies else [mesh]
+    candidates = [p for p in parts if hasattr(p, "vertices") and len(p.vertices) > 0]
+    if not candidates:
+        return [mesh], []
+
+    kept: list[trimesh.Trimesh] = []  # type: ignore[name-defined]  # noqa: F821
+    dropped: list[DroppedBody] = []
+    multi = len(candidates) > 1
+    for bi, body in enumerate(candidates):
+        ext = body.extents
+        w, d, h = float(ext[0]), float(ext[1]), float(ext[2])
+        try:
+            vol = abs(float(body.volume))
+        except Exception:
+            vol = 0.0
+        reason = degenerate_reason(
+            faces=len(body.faces), width=w, depth=d, height=h, volume=vol, min_volume=min_volume
+        )
+        if reason is None:
+            kept.append(body)
+            continue
+        label = base if not multi else f"{base}_{bi + 1}"
+        dropped.append(DroppedBody(label, len(body.faces), w, d, h, vol, reason))
+    if not kept:
+        # Everything was filtered out (e.g. the whole input is one sliver). Keep the mesh so
+        # the user sees an oversize/usage error rather than a silent no-op, and un-record the
+        # drops (they're really the kept fallback now).
+        return [mesh], []
+    return kept, dropped
+
+
+def _log_dropped(dropped: list[DroppedBody]) -> None:
+    """Report every dropped body to stderr — degenerate parts are NEVER silently truncated."""
+    for db in dropped:
+        sys.stderr.write(
+            f"arrange: dropped degenerate body {db.name!r}: {db.faces} face(s), "
+            f"bbox {db.width:.3f}x{db.depth:.3f}x{db.height:.3f} mm, "
+            f"vol {db.volume:.3f} mm^3 -- {db.reason}\n"
+        )
 
 
 def _lay_flat(mesh: "trimesh.Trimesh") -> tuple["trimesh.Trimesh", float, float]:
@@ -416,17 +515,20 @@ def arrange(
     out_prefix: str,
     emit_json: bool,
     single: bool = True,
+    min_volume: float = _DEFAULT_MIN_VOLUME,
 ) -> int:
     """Full pipeline: load+split -> lay flat -> pack -> write 3MF(s) -> verify.
 
     `single` (default) writes ONE multi-plate Orca project `<prefix>.3mf` holding every plate;
     `single=False` writes the legacy one-3MF-per-plate output (`<prefix>_plateN.3mf`).
+    `min_volume` is the floor below which a split connected body is dropped (and logged) as
+    degenerate — keeps zero-volume slivers off the plates that silently break slicing.
     """
     usable = bed - 2.0 * margin
     if usable <= 0:
         _die(f"usable plate area is non-positive: bed {bed} - 2*margin {margin}", 2)
 
-    named = _load_meshes(inputs)
+    named = _load_meshes(inputs, min_volume=min_volume)
     flat_by_index: dict[int, Any] = {}
     boxes: list[PartBox] = []
     for idx, (name, mesh) in enumerate(named):
@@ -537,6 +639,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     ap.add_argument("--bed", type=float, default=270.0)
     ap.add_argument("--gap", type=float, default=6.0)
     ap.add_argument("--margin", type=float, default=8.0)
+    ap.add_argument("--min-volume", dest="min_volume", type=float, default=_DEFAULT_MIN_VOLUME)
     ap.add_argument("-o", "--out", dest="out", default="")
     ap.add_argument("--json", action="store_true")
     # Output mode: single multi-plate project (default) vs one 3MF per plate (legacy).
@@ -560,6 +663,7 @@ def main(argv: list[str]) -> int:
             out_prefix=out_prefix,
             emit_json=args.json,
             single=args.single,
+            min_volume=args.min_volume,
         )
     except SystemExit as exc:
         return int(exc.code) if isinstance(exc.code, int) else 2

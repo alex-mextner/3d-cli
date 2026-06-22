@@ -19,6 +19,7 @@ from arrange_pack import (
     Plate,
     Placement,
     centering_offset,
+    degenerate_reason,
     plate_extent,
     shelf_pack,
 )
@@ -104,6 +105,82 @@ def test_plate_extent_uses_far_corners() -> None:
     w, d = plate_extent(plate)
     assert w == pytest.approx(86.0)
     assert d == pytest.approx(60.0)
+
+
+# --- degenerate-body filter (pure classifier) ---------------------------------
+
+
+def test_normal_body_is_kept() -> None:
+    # A real printable part (the smallest neon part is ~3074 mm^3, 15 mm tall) is kept.
+    assert (
+        degenerate_reason(
+            faces=922, width=93.3, depth=10.2, height=15.0, volume=3074.7, min_volume=1.0
+        )
+        is None
+    )
+
+
+def test_zero_thickness_sliver_is_dropped() -> None:
+    # The exact neonka_kon_2 sliver: 2 faces, z=0, zero volume. Caught on the face count.
+    reason = degenerate_reason(
+        faces=2, width=0.14, depth=1.55, height=0.0, volume=0.0, min_volume=1.0
+    )
+    assert reason is not None
+    assert "face" in reason
+
+
+def test_flat_but_many_faces_dropped_on_thickness() -> None:
+    # A flat shadow with enough faces still dies on the zero-thickness gate.
+    reason = degenerate_reason(
+        faces=100, width=50.0, depth=50.0, height=0.0, volume=0.0, min_volume=1.0
+    )
+    assert reason is not None
+    assert "zero-thickness" in reason
+
+
+def test_small_solid_dropped_on_volume() -> None:
+    # A proper little closed solid that is simply below the volume floor.
+    reason = degenerate_reason(
+        faces=12, width=0.5, depth=0.5, height=0.5, volume=0.1, min_volume=1.0
+    )
+    assert reason is not None
+    assert "volume" in reason
+
+
+def test_min_volume_zero_keeps_a_tiny_solid() -> None:
+    # --min-volume 0 disables the volume floor; a tiny but 3D, multi-face solid survives.
+    assert (
+        degenerate_reason(
+            faces=12, width=0.5, depth=0.5, height=0.5, volume=0.1, min_volume=0.0
+        )
+        is None
+    )
+
+
+def test_split_bodies_drops_sliver_and_reports_it() -> None:
+    """End-to-end: a cube + a degenerate triangle -> cube kept, triangle dropped + reported."""
+    trimesh = pytest.importorskip("trimesh")
+    import numpy as np
+
+    from arrange_pack import _split_bodies
+
+    cube = trimesh.creation.box(extents=(10.0, 10.0, 10.0))
+    # A lone flat triangle far away so split() sees two disconnected components.
+    sliver = trimesh.Trimesh(
+        vertices=np.array([[100.0, 0.0, 0.0], [100.07, 0.0, 0.0], [100.0, 0.28, 0.0]]),
+        faces=np.array([[0, 1, 2]]),
+        process=False,
+    )
+    combined = trimesh.util.concatenate([cube, sliver])
+
+    kept, dropped = _split_bodies(combined, base="part", min_volume=1.0)
+
+    assert len(kept) == 1  # the cube survives
+    assert kept[0].volume == pytest.approx(1000.0, rel=1e-3)
+    assert len(dropped) == 1  # the triangle is dropped, not silently lost
+    assert dropped[0].faces == 1
+    assert "face" in dropped[0].reason
+    assert dropped[0].name == "part_2"
 
 
 # --- command argv parsing / validation ----------------------------------------

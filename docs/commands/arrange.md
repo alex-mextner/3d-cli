@@ -28,6 +28,14 @@ This solves the common problem where a `.3mf` storing parts in their assembled p
 dumps everything onto **one** plate, which overflows the bed (default `270x270` mm, the
 Snapmaker U1).
 
+When the connected-body split throws off **degenerate slivers** (a stray single triangle, a
+zero-height shadow — OpenSCAD/CAD exports often emit these), they are **dropped** before
+packing: a body with fewer than 4 faces, a zero-thickness bounding box, or a volume below
+`--min-volume` (default `1` mm³) cannot print, and — worse — when it lands on its own plate
+OrcaSlicer silently produces **no g-code for that whole plate** (exit `0`, no error). Every
+dropped body is **logged to stderr** with its name, face count, bbox, and volume — it is
+never silently truncated. Pass `--min-volume 0` to keep everything.
+
 > Because no headless OrcaSlicer is available, the format is built to match the real Orca
 > exporter source but is **best-effort**: verify in your slicer that it opens showing the
 > expected number of plates.
@@ -47,6 +55,7 @@ Snapmaker U1).
 | `--bed MM` | `270` | Square bed size in millimeters (Snapmaker U1) |
 | `--gap MM` | `6` | Clearance between part footprints |
 | `--margin MM` | `8` | Keep-out margin from each bed edge (usable area = `bed - 2*margin`) |
+| `--min-volume MM3` | `1` | Drop (and **log**) split connected bodies below this volume as degenerate slivers; bodies with `<4` faces or a zero-thickness bounding box are always dropped regardless. `0` disables the volume floor. |
 | `-o, --out PREFIX` | `<first-input>_arranged` | Output path/prefix. single: `<PREFIX>.3mf`; per-plate: `<PREFIX>_plate1.3mf`, `_plate2.3mf`, ... |
 | `--json` | off | Emit a machine-readable plan + verification instead of a table |
 
