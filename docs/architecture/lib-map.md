@@ -43,6 +43,7 @@ rendering, slicing support, and verification:
 - `export_formats.py`
 - `import_formats.py`
 - `mesh_check.py`
+- `orca_project_3mf.py`
 - `packing.py`
 - `printability_mesh.py`
 - `render.py`
@@ -129,7 +130,8 @@ Every current root Python module is listed here so future additions are intentio
 
 - `ai_tools.py` — offline AI-assist prompt bundle construction.
 - `animation.py` — deterministic render frame planning.
-- `arrange_pack.py` — split parts into connected bodies, shelf-pack them onto bed-sized plates, write one print-ready 3MF per plate (the `3d arrange` backend).
+- `arrange_pack.py` — split parts into connected bodies, shelf-pack them onto bed-sized plates, write either ONE multi-plate Orca/Bambu project 3MF (default) or one print-ready 3MF per plate (the `3d arrange` backend).
+- `orca_project_3mf.py` — pure-stdlib writer for a single multi-plate OrcaSlicer/Bambu project `.3mf` (OPC zip: `[Content_Types].xml`, `_rels/.rels`, `3D/3dmodel.model` with positioned build items, `Metadata/model_settings.config` with plate assignments). Format matches the real OrcaSlicer exporter `_BBS_3MF_Exporter` in `src/libslic3r/Format/bbs_3mf.cpp`; used by `arrange_pack.py`'s single mode.
 - `axis.py` — compatibility wrapper re-exporting `geometry.axis`.
 - `collision_check.py` — geometry / collision check implementation.
 - `collision_viz.py` — geometry / collision visualization implementation.

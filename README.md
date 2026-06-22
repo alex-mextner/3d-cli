@@ -441,11 +441,15 @@ smoke-test the machinery.
 | Command | What |
 |---|---|
 | `3d slice <stl\|3mf\|file.scad>` | slice to G-code via the installed slicer; **`--dry-run` = sliceability gate** (nonzero exit on failure). |
+| `3d slice-check <3mf\|stl>` | **headless** verify a 3MF with no GUI: does it OPEN, how many PLATES, does it SLICE all plates? Exit 0 only if every check passes. |
 
 ```bash
 3d slice part.stl -o part.gcode
 3d slice part.scad --dry-run                          # .scad → STL → slice, gate only
 3d slice part.3mf --profile "machine.json,process.json" --printer "Bambu Lab A1"
+
+3d slice-check model.3mf                              # open + plate count + slice all plates
+3d slice-check model.3mf --no-slice --plates 4        # open + assert 4 plates, no slicing
 ```
 
 Slicer auto-detection preference: **OrcaSlicer → Bambu Studio → PrusaSlicer**. Found on PATH

@@ -222,7 +222,130 @@ def _np_translation(dx: float, dy: float) -> "np.ndarray":
 
 
 # --------------------------------------------------------------------------------------
-# 3MF write + reload verification
+# Single multi-plate Orca project 3MF (all plates in one file)
+# --------------------------------------------------------------------------------------
+def _placed_vertices(
+    body: "trimesh.Trimesh", *, dx: float, dy: float
+) -> list[tuple[float, float, float]]:
+    """Vertices of `body` shifted to its in-plate (dx, dy) origin, as plain float tuples."""
+    verts = body.vertices
+    return [(float(v[0]) + dx, float(v[1]) + dy, float(v[2])) for v in verts]
+
+
+def _write_single_project(
+    plates: list[Plate],
+    flat_by_index: dict[int, "trimesh.Trimesh"],
+    *,
+    bed: float,
+    out_path: str,
+) -> dict[str, Any]:
+    """Build ALL plates into one Orca multi-plate project .3mf and verify it.
+
+    Each part is placed at its in-plate (centered) position; the project writer adds the
+    plate's world-grid offset and assigns the part to its plate in model_settings.config.
+    Returns a verification summary with per-plate footprints and reload counts.
+    """
+    from orca_project_3mf import MeshPart, write_project_3mf
+
+    parts: list[MeshPart] = []
+    plate_extents: dict[int, tuple[float, float]] = {}
+    for plate in plates:
+        ox, oy = centering_offset(plate, bed=bed)
+        plate_extents[plate.index - 1] = plate_extent(plate)
+        for pl in plate.placements:
+            body = flat_by_index[pl.mesh_index]
+            verts = _placed_vertices(body, dx=pl.x + ox, dy=pl.y + oy)
+            tris = [(int(f[0]), int(f[1]), int(f[2])) for f in body.faces]
+            parts.append(
+                MeshPart(name=pl.name, vertices=verts, triangles=tris, plate=plate.index - 1)
+            )
+
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+    num_plates = write_project_3mf(out_path, parts, bed=bed)
+    return _verify_project(
+        out_path,
+        expected_objects=len(parts),
+        expected_plates=num_plates,
+        plate_extents=plate_extents,
+        bed=bed,
+    )
+
+
+def _verify_project(
+    path: str,
+    *,
+    expected_objects: int,
+    expected_plates: int,
+    plate_extents: dict[int, tuple[float, float]],
+    bed: float,
+) -> dict[str, Any]:
+    """Reload the project 3MF: valid zip + required entries + object/plate counts + bed fit.
+
+    Object geometry round-trips via trimesh; the plate count + per-object plate assignment is
+    parsed from model_settings.config; per-plate footprints (computed pre-write) are asserted
+    <= bed. All checks must hold for `valid` to be True.
+    """
+    import zipfile
+    import xml.etree.ElementTree as ET
+
+    import trimesh
+
+    required = {
+        "[Content_Types].xml",
+        "_rels/.rels",
+        "3D/3dmodel.model",
+        "3D/_rels/3dmodel.model.rels",
+        "Metadata/model_settings.config",
+    }
+    with zipfile.ZipFile(path) as zf:
+        names = set(zf.namelist())
+        settings = zf.read("Metadata/model_settings.config").decode("utf-8")
+    missing = sorted(required - names)
+
+    reloaded = trimesh.load(path, force="scene")
+    objects = len(reloaded.geometry) if isinstance(reloaded, trimesh.Scene) else 1
+
+    root = ET.fromstring(settings)
+    plate_nodes = root.findall("plate")
+    object_to_plate: dict[str, int] = {}
+    for plate_node in plate_nodes:
+        plater_id = ""
+        for md in plate_node.findall("metadata"):
+            if md.get("key") == "plater_id":
+                plater_id = md.get("value", "")
+        for inst in plate_node.findall("model_instance"):
+            for md in inst.findall("metadata"):
+                if md.get("key") == "object_id":
+                    object_to_plate[md.get("value", "")] = int(plater_id) - 1
+    assigned = len(object_to_plate)
+
+    footprints_ok = all(
+        w <= bed + 1e-3 and d <= bed + 1e-3 for (w, d) in plate_extents.values()
+    )
+    valid = (
+        not missing
+        and objects == expected_objects
+        and len(plate_nodes) == expected_plates
+        and assigned == expected_objects
+        and footprints_ok
+    )
+    return {
+        "path": path,
+        "single": True,
+        "objects": expected_objects,
+        "reloaded_objects": objects,
+        "plates": expected_plates,
+        "settings_plates": len(plate_nodes),
+        "assigned_objects": assigned,
+        "missing_entries": missing,
+        "plate_footprints": {p: [round(w, 3), round(d, 3)] for p, (w, d) in sorted(plate_extents.items())},
+        "footprints_within_bed": footprints_ok,
+        "within_bed": valid,  # name kept so the orchestrator's pass/fail check works uniformly
+    }
+
+
+# --------------------------------------------------------------------------------------
+# 3MF write + reload verification (per-plate)
 # --------------------------------------------------------------------------------------
 def _write_plate(
     plate: Plate,
@@ -292,8 +415,13 @@ def arrange(
     margin: float,
     out_prefix: str,
     emit_json: bool,
+    single: bool = True,
 ) -> int:
-    """Full pipeline: load+split -> lay flat -> pack -> write per-plate 3MF -> verify."""
+    """Full pipeline: load+split -> lay flat -> pack -> write 3MF(s) -> verify.
+
+    `single` (default) writes ONE multi-plate Orca project `<prefix>.3mf` holding every plate;
+    `single=False` writes the legacy one-3MF-per-plate output (`<prefix>_plateN.3mf`).
+    """
     usable = bed - 2.0 * margin
     if usable <= 0:
         _die(f"usable plate area is non-positive: bed {bed} - 2*margin {margin}", 2)
@@ -313,11 +441,15 @@ def arrange(
         return 1  # unreachable; for the type-checker
 
     summaries: list[dict[str, Any]] = []
-    for plate in plates:
-        out_path = f"{out_prefix}_plate{plate.index}.3mf"
-        summaries.append(_write_plate(plate, flat_by_index, bed=bed, out_path=out_path))
+    if single:
+        out_path = out_prefix if out_prefix.lower().endswith(".3mf") else f"{out_prefix}.3mf"
+        summaries.append(_write_single_project(plates, flat_by_index, bed=bed, out_path=out_path))
+    else:
+        for plate in plates:
+            out_path = f"{out_prefix}_plate{plate.index}.3mf"
+            summaries.append(_write_plate(plate, flat_by_index, bed=bed, out_path=out_path))
 
-    _report(boxes, plates, summaries, bed=bed, usable=usable, gap=gap, emit_json=emit_json)
+    _report(boxes, plates, summaries, bed=bed, usable=usable, gap=gap, single=single, emit_json=emit_json)
     # If any reloaded plate count mismatches or a part escaped the bed, fail loudly.
     bad = [s for s in summaries if not s["within_bed"] or s["reloaded_objects"] != s["objects"]]
     return 1 if bad else 0
@@ -331,6 +463,7 @@ def _report(
     bed: float,
     usable: float,
     gap: float,
+    single: bool,
     emit_json: bool,
 ) -> None:
     if emit_json:
@@ -338,6 +471,7 @@ def _report(
             "bed": bed,
             "usable": usable,
             "gap": gap,
+            "mode": "single" if single else "per-plate",
             "parts": [asdict(b) for b in boxes],
             "plates": [
                 {"index": p.index, "placements": [asdict(pl) for pl in p.placements]}
@@ -348,8 +482,12 @@ def _report(
         print(json.dumps(payload, indent=2, sort_keys=True))
         return
 
-    print(f"ARRANGE bed {bed:g}x{bed:g} mm  usable {usable:g}x{usable:g} mm  gap {gap:g} mm")
+    mode = "single multi-plate project" if single else "one 3MF per plate"
+    print(f"ARRANGE bed {bed:g}x{bed:g} mm  usable {usable:g}x{usable:g} mm  gap {gap:g} mm  [{mode}]")
     print(f"parts: {len(boxes)}   plates: {len(plates)}")
+    if single:
+        _report_single(plates, summaries[0])
+        return
     for p in plates:
         s = next(x for x in summaries if x["path"].endswith(f"_plate{p.index}.3mf"))
         verdict = "OK" if s["within_bed"] and s["reloaded_objects"] == s["objects"] else "FAIL"
@@ -368,6 +506,31 @@ def _report(
     print(f"STATUS: {'PASS' if all(s['within_bed'] for s in summaries) else 'FAIL'}")
 
 
+def _report_single(plates: list[Plate], s: dict[str, Any]) -> None:
+    """Human-readable summary for the single multi-plate project mode."""
+    for p in plates:
+        ext_w, ext_d = plate_extent(p)
+        print(
+            f"  plate {p.index}: {len(p.placements)} part(s)  used {ext_w:g}x{ext_d:g} mm"
+        )
+        for pl in p.placements:
+            print(
+                f"      {pl.name:<24} {pl.width:7.1f} x {pl.depth:7.1f} mm  "
+                f"@ ({pl.x:.1f}, {pl.y:.1f})"
+            )
+    verdict = "OK" if s["within_bed"] else "FAIL"
+    print(
+        f"  project: objects(reload) {s['reloaded_objects']}/{s['objects']}  "
+        f"plates {s['settings_plates']}/{s['plates']}  "
+        f"assigned {s['assigned_objects']}/{s['objects']}  "
+        f"footprints<=bed {s['footprints_within_bed']}  -> {verdict}"
+    )
+    if s["missing_entries"]:
+        print(f"    MISSING ENTRIES: {', '.join(s['missing_entries'])}")
+    print(f"    -> {s['path']}")
+    print(f"STATUS: {'PASS' if s['within_bed'] else 'FAIL'}")
+
+
 def _parse_args(argv: list[str]) -> argparse.Namespace:
     ap = argparse.ArgumentParser(prog="arrange_pack", add_help=False)
     ap.add_argument("inputs", nargs="+")
@@ -376,6 +539,9 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     ap.add_argument("--margin", type=float, default=8.0)
     ap.add_argument("-o", "--out", dest="out", default="")
     ap.add_argument("--json", action="store_true")
+    # Output mode: single multi-plate project (default) vs one 3MF per plate (legacy).
+    ap.add_argument("--single", dest="single", action="store_true", default=True)
+    ap.add_argument("--per-plate", dest="single", action="store_false")
     return ap.parse_args(argv)
 
 
@@ -393,6 +559,7 @@ def main(argv: list[str]) -> int:
             margin=args.margin,
             out_prefix=out_prefix,
             emit_json=args.json,
+            single=args.single,
         )
     except SystemExit as exc:
         return int(exc.code) if isinstance(exc.code, int) else 2

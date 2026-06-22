@@ -7,6 +7,8 @@ the suite stays fast and dependency-free.
 """
 from __future__ import annotations
 
+import xml.etree.ElementTree as ET
+import zipfile
 from typing import Any
 
 import pytest
@@ -22,6 +24,14 @@ from arrange_pack import (
 )
 from commands import arrange as arrange_cmd
 from errors import InputNotFound, InvalidArgument, UsageError
+from orca_project_3mf import (
+    MeshPart,
+    plate_columns,
+    plate_world_origin,
+    write_project_3mf,
+)
+
+_CORE_NS = {"c": "http://schemas.microsoft.com/3dmanufacturing/core/2015/02"}
 
 # --- pure shelf packing -------------------------------------------------------
 
@@ -165,6 +175,20 @@ def test_cmd_forwards_to_tool(monkeypatch: Any, tmp_path: Any) -> None:
     assert args[args.index("--gap") + 1] == repr(5.0)
     assert args[args.index("--margin") + 1] == repr(10.0)
     assert args[args.index("-o") + 1] == "out/tray"
+    # Single mode is the default and is always forwarded explicitly.
+    assert "--single" in args and "--per-plate" not in args
+
+
+def test_cmd_forwards_per_plate(monkeypatch: Any, tmp_path: Any) -> None:
+    src = tmp_path / "asm.3mf"
+    src.write_text("")
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr(
+        "commands.arrange.run_tool",
+        lambda d, s, a: seen.update(args=a) or 0,
+    )
+    assert arrange_cmd.run([str(src), "--per-plate"]) == 0
+    assert "--per-plate" in seen["args"] and "--single" not in seen["args"]
 
 
 def test_cmd_passes_through_tool_exit_code(monkeypatch: Any, tmp_path: Any) -> None:
@@ -173,3 +197,142 @@ def test_cmd_passes_through_tool_exit_code(monkeypatch: Any, tmp_path: Any) -> N
     # Oversize -> tool exits 1; the command must propagate that.
     monkeypatch.setattr("commands.arrange.run_tool", lambda d, s, a: 1)
     assert arrange_cmd.run([str(src)]) == 1
+
+
+# --- single multi-plate Orca project 3MF writer (stdlib only) -----------------
+
+
+def test_plate_columns_matches_orca_ceil_sqrt() -> None:
+    # compute_colum_count in PartPlate.hpp: round(sqrt(n)), bumped by 1 if sqrt > round.
+    assert plate_columns(1) == 1
+    assert plate_columns(2) == 2  # sqrt=1.41 -> round 1 -> bump to 2
+    assert plate_columns(3) == 2
+    assert plate_columns(4) == 2
+    assert plate_columns(5) == 3
+    assert plate_columns(9) == 3
+    assert plate_columns(10) == 4
+
+
+def test_plate_world_origin_grid_stride() -> None:
+    # stride = bed * (1 + 1/5). cols=2 for 4 plates: p0=(0,0), p1=(+stride,0),
+    # p2=(0,-stride), p3=(+stride,-stride).
+    bed = 270.0
+    stride = bed * 1.2
+    assert plate_world_origin(0, bed=bed, cols=2) == (0.0, 0.0)
+    assert plate_world_origin(1, bed=bed, cols=2) == pytest.approx((stride, 0.0))
+    assert plate_world_origin(2, bed=bed, cols=2) == pytest.approx((0.0, -stride))
+    assert plate_world_origin(3, bed=bed, cols=2) == pytest.approx((stride, -stride))
+
+
+def _tetra() -> tuple[list[tuple[float, float, float]], list[tuple[int, int, int]]]:
+    verts = [(0.0, 0.0, 0.0), (10.0, 0.0, 0.0), (0.0, 10.0, 0.0), (0.0, 0.0, 10.0)]
+    tris = [(0, 2, 1), (0, 1, 3), (0, 3, 2), (1, 2, 3)]
+    return verts, tris
+
+
+def test_write_project_3mf_valid_zip_with_required_entries(tmp_path: Any) -> None:
+    verts, tris = _tetra()
+    parts = [
+        MeshPart("alpha", verts, tris, 0),
+        MeshPart("beta", verts, tris, 1),
+        MeshPart("gamma", verts, tris, 1),
+    ]
+    out = str(tmp_path / "proj.3mf")
+    num_plates = write_project_3mf(out, parts, bed=270.0)
+    assert num_plates == 2
+
+    with zipfile.ZipFile(out) as zf:
+        names = zf.namelist()
+        assert zf.testzip() is None  # no CRC errors -> valid zip
+        # [Content_Types].xml must be the first OPC entry.
+        assert names[0] == "[Content_Types].xml"
+        assert {
+            "[Content_Types].xml",
+            "_rels/.rels",
+            "3D/3dmodel.model",
+            "3D/_rels/3dmodel.model.rels",
+            "Metadata/model_settings.config",
+        } <= set(names)
+
+
+def test_write_project_3mf_geometry_and_build_items_round_trip(tmp_path: Any) -> None:
+    verts, tris = _tetra()
+    parts = [MeshPart("a", verts, tris, 0), MeshPart("b", verts, tris, 1)]
+    out = str(tmp_path / "proj.3mf")
+    write_project_3mf(out, parts, bed=270.0)
+
+    with zipfile.ZipFile(out) as zf:
+        model = ET.fromstring(zf.read("3D/3dmodel.model"))
+    objects = model.findall(".//c:object", _CORE_NS)
+    items = model.findall(".//c:item", _CORE_NS)
+    assert len(objects) == 2 and len(items) == 2
+    for obj in objects:
+        assert obj.get("type") == "model"
+        assert len(obj.findall(".//c:vertex", _CORE_NS)) == 4
+        assert len(obj.findall(".//c:triangle", _CORE_NS)) == 4
+    # Build items reference objects 1..N and carry a 12-number transform; plate 1's item
+    # is offset by one stride in +X (column-major translation = last 3 numbers).
+    stride = 270.0 * 1.2
+    tails = {}
+    for it in items:
+        nums = [float(x) for x in (it.get("transform") or "").split()]
+        assert len(nums) == 12
+        assert it.get("printable") == "1"
+        tails[it.get("objectid")] = nums[-3:]
+    assert tails["1"] == pytest.approx([0.0, 0.0, 0.0])
+    assert tails["2"] == pytest.approx([stride, 0.0, 0.0])
+
+
+def test_write_project_3mf_plate_assignment(tmp_path: Any) -> None:
+    verts, tris = _tetra()
+    parts = [
+        MeshPart("p0a", verts, tris, 0),
+        MeshPart("p1a", verts, tris, 1),
+        MeshPart("p1b", verts, tris, 1),
+        MeshPart("p2a", verts, tris, 2),
+    ]
+    out = str(tmp_path / "proj.3mf")
+    num_plates = write_project_3mf(out, parts, bed=200.0)
+    assert num_plates == 3
+
+    with zipfile.ZipFile(out) as zf:
+        settings = ET.fromstring(zf.read("Metadata/model_settings.config"))
+    plates = settings.findall("plate")
+    assert len(plates) == 3
+    assignment: dict[int, list[str]] = {}
+    for plate in plates:
+        plater_id = next(
+            m.get("value") for m in plate.findall("metadata") if m.get("key") == "plater_id"
+        )
+        objs: list[str] = []
+        for inst in plate.findall("model_instance"):
+            md = inst.find("metadata")
+            assert md is not None
+            value = md.get("value")
+            assert value is not None
+            objs.append(value)
+        assignment[int(plater_id or "0")] = objs
+    # plater_id is 1-indexed; objects 1,(2,3),4 land on plates 1,2,3.
+    assert assignment == {1: ["1"], 2: ["2", "3"], 3: ["4"]}
+    # Every object has a <object id=> name entry too.
+    obj_ids = {o.get("id") for o in settings.findall("object")}
+    assert obj_ids == {"1", "2", "3", "4"}
+
+
+def test_write_project_3mf_xml_escapes_part_names(tmp_path: Any) -> None:
+    verts, tris = _tetra()
+    parts = [MeshPart('a & b <"x">', verts, tris, 0)]
+    out = str(tmp_path / "proj.3mf")
+    write_project_3mf(out, parts, bed=270.0)
+    # Must still parse (escaping correct), and the raw text must not contain a bare & .
+    with zipfile.ZipFile(out) as zf:
+        raw = zf.read("Metadata/model_settings.config").decode("utf-8")
+        settings = ET.fromstring(raw)
+    metadata = settings.find("object/metadata")
+    assert metadata is not None
+    assert metadata.get("value") == 'a & b <"x">'
+
+
+def test_write_project_3mf_rejects_empty(tmp_path: Any) -> None:
+    with pytest.raises(ValueError):
+        write_project_3mf(str(tmp_path / "x.3mf"), [], bed=270.0)
