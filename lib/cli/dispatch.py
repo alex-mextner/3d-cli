@@ -12,13 +12,52 @@ call `main(sys.argv[1:])`.
 """
 from __future__ import annotations
 
+import importlib.metadata
+import os
+import re
 import sys
 
-from cli.env import export_openscadpath, maybe_bootstrap
+from cli.env import export_openscadpath, maybe_bootstrap, repo_root
 from cli.registry import Registry, discover
 from errors import ThreeDError
 
-VERSION = "0.1.0"
+# Distribution name as declared in pyproject `[project] name`.
+_DIST_NAME = "3d-cli"
+# Scoped to the `[project]` table so we never pick up a `version =` in some other
+# table (e.g. a dependency pin). stdlib-only: no tomllib (kept 3.10-compatible).
+# `^[ \t]*` on the header/keys tolerates TOML's optional leading indentation: the
+# scan stops at the next (possibly indented) `[...]` table header and matches the
+# first (possibly indented) `version =` inside `[project]`.
+_PYPROJECT_VERSION_RE = re.compile(
+    r"^[ \t]*\[project\](?:(?!^[ \t]*\[).)*?^[ \t]*version[ \t]*=[ \t]*[\"']([^\"']+)[\"']",
+    re.MULTILINE | re.DOTALL,
+)
+
+
+def _version_from_pyproject() -> str | None:
+    path = os.path.join(repo_root(), "pyproject.toml")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        return None
+    m = _PYPROJECT_VERSION_RE.search(text)
+    return m.group(1) if m else None
+
+
+def _resolve_version() -> str:
+    """Read the declared version dynamically — pyproject is the single source of
+    truth. Prefer the installed-distribution metadata; fall back to parsing
+    `pyproject.toml [project] version` for a source checkout (no installed dist).
+    """
+    try:
+        return importlib.metadata.version(_DIST_NAME)
+    except importlib.metadata.PackageNotFoundError:
+        pass
+    return _version_from_pyproject() or "0+unknown"
+
+
+VERSION = _resolve_version()
 
 
 def _color() -> tuple[str, str, str, str]:
