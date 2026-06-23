@@ -30,5 +30,8 @@ score/
 # CI / coverage
 .coverage
 
+# stray scratch logs from render/check runs (e.g. OpenSCAD convex-hull warnings)
+*.log
+
 # local project config (not committed)
 /3d.yaml
