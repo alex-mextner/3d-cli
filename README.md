@@ -489,6 +489,39 @@ per-OS install command (e.g. `brew install --cask orcaslicer`) — never broken.
 OpenSCAD libraries auto-install on the first run, python deps resolve via uv/`.venv`
 per-call, and `3d doctor` prints the exact install command for anything still missing.
 
+#### Contributing — install the repo-dev pre-commit gate
+
+A fresh clone has **no** dev pre-commit gate until you wire it in (git never tracks
+`.git/hooks/`). The gate (ruff → pytest → mypy via `3d test`) lives as a **tracked**
+source at [`scripts/hooks/pre-commit`](scripts/hooks/pre-commit); install it once:
+
+```bash
+scripts/install-dev-hooks.sh        # copies the tracked hook into .git/hooks/pre-commit
+```
+
+It is idempotent (safe to re-run) and the installed hook blocks any commit whose
+`3d test` fails. The hook runs the **whole** gate (ruff + pytest + mypy over the
+working tree, not just staged files), so commits take as long as `3d test` does —
+and, like any working-tree gate, it judges your working tree, not the exact staged
+snapshot (an unstaged fix can green a commit; an unrelated unstaged break can block
+one). It also fails **closed**: in a partial/sparse checkout without `./bin/3d` it
+blocks the commit rather than passing silently. Bypass in an emergency with
+`git commit --no-verify` (discouraged).
+
+This repo-dev gate is **distinct from** the `3d init` user-facing pre-commit template
+([`assets/templates/pre-commit`](assets/templates/pre-commit)): that one gates a *user's*
+`.scad` project via `3d check` in the project `3d init` scaffolds, while this one gates
+*this* repo's own Python source. They never collide — they live in different repos.
+
+If your machine uses a global `core.hooksPath` composing dispatcher (e.g. agent-tools'
+`~/.config/git/hooks`), that composer already runs the repo-local `.git/hooks/pre-commit`
+as its first stage, so the tracked hook carries no dispatcher line of its own and needs no
+extra wiring. If instead your existing `.git/hooks/pre-commit` calls a global-hooks
+dispatcher inline (the case when a *local* `core.hooksPath = .git/hooks` bypasses the
+composer), the installer **preserves that dispatcher prefix** and splices the dev gate in
+below it, so your secret-scan and the dev gate both keep running. An existing, differing
+hook is backed up to `.git/hooks/pre-commit.bak` first.
+
 ### Web dashboard
 
 | Command | What |
