@@ -102,16 +102,45 @@ fi
 # up-to-date branch above must still repair a cleared bit.
 chmod +x "$DEST"
 
-# Warn (don't fail) if a core.hooksPath is configured that ISN'T this repo's own
-# hooks dir. git then runs hooks ONLY from that path; .git/hooks/pre-commit fires
-# only if it points at a composing dispatcher that re-invokes the repo-local hook
-# (the agent-tools pattern). A husky/lefthook/pre-commit-framework setup points it
-# elsewhere and would silently skip this gate — say so instead of claiming success.
+# Warn (don't fail) if a core.hooksPath would keep this gate from firing.
+# git runs hooks ONLY from core.hooksPath when it's set. Two traps:
+#   - A RELATIVE value like ".git/hooks" is resolved relative to the dir hooks run
+#     in (the worktree root). In a LINKED WORKTREE `.git` is a FILE, so
+#     "<worktree>/.git/hooks" doesn't exist and the gate is silently bypassed —
+#     even though it works in the main checkout. Only the ABSOLUTE common hooks dir
+#     ($HOOKS_DIR) is safe everywhere.
+#   - A path elsewhere (husky/lefthook/pre-commit) skips us entirely unless it's a
+#     composing dispatcher that re-invokes the repo-local hook (the agent-tools
+#     pattern).
 HOOKS_PATH="$(git config --get core.hooksPath || true)"
-if [ -n "$HOOKS_PATH" ]; then
+# Normalize a trailing slash so an absolute path equivalent to the common hooks dir
+# isn't flagged just for a cosmetic "…/.git/hooks/".
+HOOKS_PATH_NORM="${HOOKS_PATH%/}"
+if [ -n "$HOOKS_PATH" ] && [ "$HOOKS_PATH_NORM" != "${HOOKS_DIR%/}" ]; then
     case "$HOOKS_PATH" in
-        ".git/hooks"|"$HOOKS_DIR") : ;;   # points at us — fine
+        /*)
+            # Absolute, but not our hooks dir — a foreign tool or composer.
+            echo "[install-dev-hooks] WARNING: core.hooksPath=$HOOKS_PATH is set." >&2
+            echo "  git runs hooks from there, so $DEST fires ONLY if that path is a" >&2
+            echo "  composing dispatcher that re-invokes the repo-local hook. If you use" >&2
+            echo "  husky/lefthook/pre-commit, wire '3d test' into that tool instead." >&2
+            ;;
+        .git/hooks|./.git/hooks)
+            # Relative .git/hooks: fine in the main checkout, but a linked worktree
+            # resolves it against the worktree root where .git is a FILE, so the gate
+            # is bypassed there. Warn HARD only if a linked worktree actually exists.
+            if [ "$(git worktree list 2>/dev/null | wc -l)" -gt 1 ]; then
+                echo "[install-dev-hooks] WARNING: core.hooksPath=$HOOKS_PATH is RELATIVE and you have linked worktrees." >&2
+                echo "  It is silently BYPASSED in a worktree (.git is a file there), so commits" >&2
+                echo "  there skip the gate. Set it absolute:  git config core.hooksPath '$HOOKS_DIR'" >&2
+                echo "  — or unset it and let the default/global composer run $DEST." >&2
+            else
+                echo "[install-dev-hooks] note: core.hooksPath=$HOOKS_PATH is RELATIVE — fine here, but it" >&2
+                echo "  would be bypassed in a linked worktree. Prefer:  git config core.hooksPath '$HOOKS_DIR'" >&2
+            fi
+            ;;
         *)
+            # Some other relative/foreign value.
             echo "[install-dev-hooks] WARNING: core.hooksPath=$HOOKS_PATH is set." >&2
             echo "  git runs hooks from there, so $DEST fires ONLY if that path is a" >&2
             echo "  composing dispatcher that re-invokes the repo-local hook. If you use" >&2
