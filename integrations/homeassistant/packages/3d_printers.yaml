@@ -1,10 +1,10 @@
 # 3D printer monitoring, commands, and alerts.
 # Router static leases:
-# - K1 SE: 192.168.0.34 / fc:ee:28:06:85:b6
-# - U1:    192.168.0.63 / 40:d9:5a:e3:18:c8
+# - K1 SE: 192.168.0.27 / fc:ee:28:06:85:b6
+# - U1:    192.168.0.26 / 40:d9:5a:e3:18:c8
 
 rest:
-  - resource: "http://192.168.0.34:7125/printer/objects/query?print_stats&virtual_sdcard&display_status&toolhead&extruder&heater_bed&fan_feedback&system_stats&webhooks&filament_switch_sensor%20filament_sensor&filament_switch_sensor%20filament_sensor_2&temperature_sensor%20mcu_temp"
+  - resource: "http://192.168.0.27:7125/printer/objects/query?print_stats&virtual_sdcard&display_status&toolhead&extruder&heater_bed&fan_feedback&system_stats&webhooks&filament_switch_sensor%20filament_sensor&filament_switch_sensor%20filament_sensor_2&temperature_sensor%20mcu_temp"
     scan_interval: 15
     timeout: 10
     sensor:
@@ -26,7 +26,7 @@ rest:
           - filament_switch_sensor filament_sensor_2
           - temperature_sensor mcu_temp
 
-  - resource: "http://192.168.0.63:7125/printer/objects/query?print_stats&virtual_sdcard&display_status&toolhead&extruder&extruder1&extruder2&extruder3&heater_bed&fan&fan_generic%20cavity_fan&temperature_sensor%20cavity&system_stats&webhooks&filament_motion_sensor%20e0_filament&filament_motion_sensor%20e1_filament&filament_motion_sensor%20e2_filament&filament_motion_sensor%20e3_filament"
+  - resource: "http://192.168.0.26:7125/printer/objects/query?print_stats&virtual_sdcard&display_status&toolhead&extruder&extruder1&extruder2&extruder3&heater_bed&fan&fan_generic%20cavity_fan&temperature_sensor%20cavity&system_stats&webhooks&filament_motion_sensor%20e0_filament&filament_motion_sensor%20e1_filament&filament_motion_sensor%20e2_filament&filament_motion_sensor%20e3_filament"
     scan_interval: 15
     timeout: 10
     sensor:
@@ -56,33 +56,33 @@ rest:
 
 rest_command:
   printer_k1_se_pause:
-    url: "http://192.168.0.34:7125/printer/print/pause"
+    url: "http://192.168.0.27:7125/printer/print/pause"
     method: post
   printer_k1_se_resume:
-    url: "http://192.168.0.34:7125/printer/print/resume"
+    url: "http://192.168.0.27:7125/printer/print/resume"
     method: post
   printer_k1_se_cancel:
-    url: "http://192.168.0.34:7125/printer/print/cancel"
+    url: "http://192.168.0.27:7125/printer/print/cancel"
     method: post
   printer_k1_se_emergency_stop:
-    url: "http://192.168.0.34:7125/printer/emergency_stop"
+    url: "http://192.168.0.27:7125/printer/emergency_stop"
     method: post
   printer_k1_se_fans_off:
-    url: "http://192.168.0.34:7125/printer/gcode/script"
+    url: "http://192.168.0.27:7125/printer/gcode/script"
     method: post
     content_type: "application/json"
     payload: '{"script": "M107\nM106 S0\nSET_PIN PIN=fan0 VALUE=0"}'
   printer_u1_pause:
-    url: "http://192.168.0.63:7125/printer/print/pause"
+    url: "http://192.168.0.26:7125/printer/print/pause"
     method: post
   printer_u1_resume:
-    url: "http://192.168.0.63:7125/printer/print/resume"
+    url: "http://192.168.0.26:7125/printer/print/resume"
     method: post
   printer_u1_cancel:
-    url: "http://192.168.0.63:7125/printer/print/cancel"
+    url: "http://192.168.0.26:7125/printer/print/cancel"
     method: post
   printer_u1_emergency_stop:
-    url: "http://192.168.0.63:7125/printer/emergency_stop"
+    url: "http://192.168.0.26:7125/printer/emergency_stop"
     method: post
 
 script:

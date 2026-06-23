@@ -12,8 +12,8 @@ webrtc:
 
 streams:
   k1se_camera:
-    - http://192.168.0.34:8080/?action=stream
-    - http://192.168.0.34/webcam/?action=stream
+    - http://192.168.0.27:8080/?action=stream
+    - http://192.168.0.27/webcam/?action=stream
   u1_camera:
     - ffmpeg:http://u1-camera-proxy:8090/u1.mjpeg#video=h264
     - http://u1-camera-proxy:8090/u1.mjpeg
