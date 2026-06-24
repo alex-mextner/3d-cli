@@ -152,6 +152,8 @@ template:
         state: >
           {% set print_stats = state_attr('sensor.printer_k1_se_raw', 'print_stats') or {} %}
           {{ print_stats.get('state', states('sensor.printer_k1_se_raw')) }}
+        attributes:
+          last_seen: "{{ states.sensor.printer_k1_se_raw.last_updated.isoformat() }}"
 
       - name: "Printer K1 SE Progress"
         unique_id: printer_k1_se_progress
@@ -265,6 +267,8 @@ template:
         state: >
           {% set print_stats = state_attr('sensor.printer_u1_raw', 'print_stats') or {} %}
           {{ print_stats.get('state', states('sensor.printer_u1_raw')) }}
+        attributes:
+          last_seen: "{{ states.sensor.printer_u1_raw.last_updated.isoformat() }}"
 
       - name: "Printer U1 Progress"
         unique_id: printer_u1_progress
