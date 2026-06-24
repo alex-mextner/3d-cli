@@ -41,6 +41,14 @@ START_MONITOR_CLIENT_ID = os.environ.get(
     "686f6d65617373697374616e742d676f327274632d75310000000000000000",
 )
 START_MONITOR_DOMAIN = os.environ.get("U1_CAMERA_START_MONITOR_DOMAIN", "wan")
+START_MONITOR_DOMAINS = [
+    domain.strip()
+    for domain in os.environ.get(
+        "U1_CAMERA_START_MONITOR_DOMAINS",
+        f"{START_MONITOR_DOMAIN},lan",
+    ).split(",")
+    if domain.strip()
+]
 
 
 class FrameCache:
@@ -102,6 +110,17 @@ def source_url_with_cache_bust() -> str:
 
 
 def fetch_frame() -> bytes:
+    try:
+        return _fetch_frame_once()
+    except urllib.error.HTTPError as err:
+        if START_MONITOR and err.code == HTTPStatus.NOT_FOUND:
+            start_monitor_all()
+            time.sleep(2.0)
+            return _fetch_frame_once()
+        raise
+
+
+def _fetch_frame_once() -> bytes:
     request = urllib.request.Request(
         source_url_with_cache_bust(),
         headers={"Cache-Control": "no-cache", "Pragma": "no-cache"},
@@ -135,7 +154,7 @@ class CameraMonitorKeepalive:
     def _run(self) -> None:
         while True:
             try:
-                start_monitor()
+                start_monitor_all()
                 with self._lock:
                     self._started_at = time.time()
                     self._error = ""
@@ -147,13 +166,18 @@ class CameraMonitorKeepalive:
             time.sleep(START_MONITOR_INTERVAL)
 
 
-def start_monitor() -> None:
+def start_monitor_all() -> None:
+    for domain in START_MONITOR_DOMAINS:
+        start_monitor(domain)
+
+
+def start_monitor(domain: str) -> None:
     request_id = int(time.time() * 1000)
     camera_request = {
         "jsonrpc": "2.0",
         "method": "camera.start_monitor",
         "params": {
-            "domain": START_MONITOR_DOMAIN,
+            "domain": domain,
             "interval": 0,
             "expect_pw": True,
             "clientid": START_MONITOR_CLIENT_ID,
@@ -206,6 +230,7 @@ class Handler(BaseHTTPRequestHandler):
         body = (
             f"frame={bool(frame)} stale_for={stale_for:.1f} error={error} "
             f"monitor_keepalive={START_MONITOR} monitor_age={monitor_age:.1f} "
+            f"monitor_domains={','.join(START_MONITOR_DOMAINS)} "
             f"monitor_error={monitor_error}\n"
         ).encode()
         self.send_response(status)
