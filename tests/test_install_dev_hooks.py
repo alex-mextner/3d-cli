@@ -82,6 +82,12 @@ def _git_env(home: Path) -> dict[str, str]:
         "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR",
         "GIT_OBJECT_DIRECTORY", "GIT_NAMESPACE", "GIT_CONFIG",
         "GIT_CONFIG_COUNT",
+        # GIT_TEMPLATE_DIR seeds every `git init` with template files — including a
+        # hooks/pre-commit. Left set, the first install would find a foreign pre-commit,
+        # back it up (breaking the "no .bak" idempotency assertion), and a failing/hanging
+        # template hook could even run during the linked-worktree seed commit. (We also
+        # pass `--template=` to git init below so a global init.templateDir can't seed.)
+        "GIT_TEMPLATE_DIR",
     ):
         env.pop(var, None)
     # GIT_CONFIG_KEY_<n> / GIT_CONFIG_VALUE_<n> pairs (consumed via GIT_CONFIG_COUNT) can
@@ -110,7 +116,7 @@ def _make_repo(root: Path) -> tuple[Path, dict[str, str]]:
     repo.mkdir()
     env = _git_env(home)
 
-    _run_git(repo, env, "init", "-q")
+    _run_git(repo, env, "init", "-q", "--template=")
     _run_git(repo, env, "config", "user.email", "test@example.com")
     _run_git(repo, env, "config", "user.name", "Test")
     # Belt-and-suspenders: ensure no hooksPath leaks into the repo config.
@@ -440,7 +446,7 @@ def test_installed_hook_fails_closed_without_bin_3d(repo_env: tuple[Path, dict[s
     # (fail closed) rather than silently pass.
     bare = repo.parent / "no-bin"
     bare.mkdir()
-    _run_git(bare, env, "init", "-q")
+    _run_git(bare, env, "init", "-q", "--template=")
     res = subprocess.run(
         ["bash", str(dest)], cwd=bare, env=env, capture_output=True, text=True,
     )
@@ -456,7 +462,7 @@ def test_installed_hook_runs_bin_3d_when_present(repo_env: tuple[Path, dict[str,
     # A repo whose ./bin/3d records that it was invoked: the hook must call it.
     runner = repo.parent / "with-bin"
     runner.mkdir()
-    _run_git(runner, env, "init", "-q")
+    _run_git(runner, env, "init", "-q", "--template=")
     (runner / "bin").mkdir()
     marker = runner / "ran"
     stub = runner / "bin" / "3d"
@@ -485,7 +491,7 @@ def test_installed_hook_blocks_commit_when_gate_fails(repo_env: tuple[Path, dict
     # cannot prove this; this one returns 1.
     runner = repo.parent / "failing-gate"
     runner.mkdir()
-    _run_git(runner, env, "init", "-q")
+    _run_git(runner, env, "init", "-q", "--template=")
     (runner / "bin").mkdir()
     stub = runner / "bin" / "3d"
     stub.write_text('#!/bin/sh\necho "GATE-FAILED-MARKER" >&2\nexit 1\n')
