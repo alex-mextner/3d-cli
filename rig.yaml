@@ -6,6 +6,11 @@
 # Apply: rig apply.  Drift: rig status.
 
 version: 1
+agent_hooks:
+  # 3d-cli works hands-on directly on main (no subagent swarms) — exempt from the
+  # orchestrator-stays-thin hook (default true / opt-out). See rig-cli PR #104,
+  # docs/config-schema.md#agent_hooks, Alex tg#5743.
+  orchestrator_only: false
 ci:
   enabled: true
   target: .github/workflows
