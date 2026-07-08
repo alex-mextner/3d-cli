@@ -3,9 +3,8 @@
 # 3d-cli REPO-DEV pre-commit gate (TRACKED source of truth).
 #
 # Runs the repo's own Python dev gate before each commit: ruff -> pytest -> mypy
-# (via `3d test`, which delegates to tests/run_gate.py through the same
-# .venv/uv/system tiers as every other command). The commit is blocked if any
-# step fails.
+# (via `dev run test`, which reads rig.yaml scripts.test and delegates to
+# tests/run_gate.py). The commit is blocked if any step fails.
 #
 # This is DISTINCT from the `3d init` user-facing template
 # (assets/templates/pre-commit): that one gates a *user's* .scad project via
@@ -19,17 +18,16 @@ set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)" || exit 1
 
-echo "=== 3d-cli pre-commit: ruff -> pytest -> mypy (via 3d test) ==="
+echo "=== 3d-cli pre-commit: ruff -> pytest -> mypy (via dev run test) ==="
 
-# Use the repo-local launcher; the gate resolves ruff/pytest/mypy through its own
-# .venv/uv tiers, so no extra activation is needed here. Fail CLOSED if the launcher
-# is missing — a gate that silently passes when it can't run its checks is worse than
-# no gate. (We've already cd'd to the repo root, so ./bin/3d should always be present.)
-if [ ! -x "./bin/3d" ]; then
-    echo "[pre-commit] ./bin/3d not found or not executable in $(pwd) — cannot run the dev gate." >&2
-    echo "  Fix the checkout, or bypass once with: git commit --no-verify" >&2
+# Use the project-scoped dev runner; rig.yaml scripts.test owns the actual command.
+# Fail CLOSED if dev is missing — a gate that silently passes when it can't run its checks
+# is worse than no gate.
+if ! command -v dev >/dev/null 2>&1; then
+    echo "[pre-commit] dev CLI not found — cannot run the repo dev gate." >&2
+    echo "  Install/apply the agent-tools dev CLI and make sure git hooks can find it on PATH." >&2
     exit 1
 fi
-./bin/3d test
+dev run test
 
 echo "=== pre-commit checks passed — commit allowed ==="

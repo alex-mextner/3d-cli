@@ -128,13 +128,6 @@ def _make_repo(root: Path) -> tuple[Path, dict[str, str]]:
     (repo / "scripts" / "hooks").mkdir(parents=True)
     shutil.copy2(_INSTALLER, repo / "scripts" / "install-dev-hooks.sh")
     shutil.copy2(_TRACKED_HOOK, repo / "scripts" / "hooks" / "pre-commit")
-    # The fail-closed hook needs a bin/3d to probe for; default to an executable stub so
-    # the hook's own `[ -x ./bin/3d ]` gate passes where a test doesn't care about it.
-    bin_dir = repo / "bin"
-    bin_dir.mkdir()
-    stub = bin_dir / "3d"
-    stub.write_text("#!/bin/sh\nexit 0\n")
-    stub.chmod(0o755)
     return repo, env
 
 
@@ -161,6 +154,55 @@ def _assert_valid_bash(hook: Path) -> None:
         ["bash", "-n", str(hook)], capture_output=True, text=True,
     )
     assert res.returncode == 0, f"spliced hook is not valid bash:\n{res.stderr}"
+
+
+def _install_fake_dev(
+    root: Path,
+    env: dict[str, str],
+    *,
+    exit_code: int = 0,
+    marker: Path | None = None,
+    run_log: Path | None = None,
+    stderr: str = "",
+) -> None:
+    fake_bin = root / "fake-bin"
+    fake_bin.mkdir(exist_ok=True)
+    dev = fake_bin / "dev"
+    dev.write_text(
+        "#!/bin/sh\n"
+        'if [ -n "${DEV_RUN_LOG:-}" ]; then printf "%s\\n" "$*" >> "$DEV_RUN_LOG"; fi\n'
+        'if [ -n "${DEV_MARKER:-}" ]; then touch "$DEV_MARKER"; fi\n'
+        'if [ -n "${DEV_STDERR:-}" ]; then printf "%s\\n" "$DEV_STDERR" >&2; fi\n'
+        'exit "${DEV_EXIT_CODE:-0}"\n'
+    )
+    dev.chmod(0o755)
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env.get('PATH', '')}"
+    env["DEV_EXIT_CODE"] = str(exit_code)
+    if marker is not None:
+        env["DEV_MARKER"] = str(marker)
+    else:
+        env.pop("DEV_MARKER", None)
+    if run_log is not None:
+        env["DEV_RUN_LOG"] = str(run_log)
+    else:
+        env.pop("DEV_RUN_LOG", None)
+    if stderr:
+        env["DEV_STDERR"] = stderr
+    else:
+        env.pop("DEV_STDERR", None)
+
+
+def _restrict_path_to_tools(root: Path, env: dict[str, str], tools: tuple[str, ...]) -> None:
+    path_dir = root / "path-bin"
+    path_dir.mkdir(exist_ok=True)
+    for tool in tools:
+        resolved = shutil.which(tool)
+        if resolved is None:
+            raise AssertionError(f"{tool} must be available to run this hook test")
+        link = path_dir / tool
+        if not link.exists():
+            link.symlink_to(resolved)
+    env["PATH"] = str(path_dir)
 
 
 @pytest.fixture()
@@ -268,7 +310,7 @@ def test_dispatcher_block_is_preserved_on_splice(repo_env: tuple[Path, dict[str,
     assert "global-git-hooks-dispatcher" in out  # dispatcher prefix preserved
     assert out.count("global-git-hooks-dispatcher") == 1  # preserved once, not duplicated
     assert "|| exit $?" in out
-    assert "3d test" in out  # body replaced by the current tracked gate
+    assert "dev run test" in out  # body replaced by the current tracked gate
     assert "old gate" not in out  # the stale body is gone
     # Expected layout: shebang from the tracked source, then the dispatcher block, then
     # the tracked body.
@@ -280,7 +322,7 @@ def test_dispatcher_block_is_preserved_on_splice(repo_env: tuple[Path, dict[str,
     # fail here even while the substring asserts above passed.
     _assert_valid_bash(dest)
     # End-to-end: run the spliced hook. Provide a no-op run-global-hooks so the dispatcher
-    # line's `|| exit $?` succeeds, then the tracked body invokes ./bin/3d (the repo stub).
+    # line's `|| exit $?` succeeds, then the tracked body invokes dev run test.
     # The stub lands at the SAME path the dispatcher line resolves —
     # ${XDG_CONFIG_HOME:-$HOME/.config}/git — which _git_env pins under the throwaway HOME.
     gdir = Path(env["XDG_CONFIG_HOME"]) / "git"
@@ -288,6 +330,7 @@ def test_dispatcher_block_is_preserved_on_splice(repo_env: tuple[Path, dict[str,
     rgh = gdir / "run-global-hooks"
     rgh.write_text("#!/bin/sh\nexit 0\n")
     rgh.chmod(0o755)
+    _install_fake_dev(repo, env)
     run = subprocess.run(["bash", str(dest)], cwd=repo, env=env, capture_output=True, text=True)
     assert run.returncode == 0, f"spliced hook failed to run:\n{run.stdout}\n{run.stderr}"
 
@@ -437,39 +480,39 @@ def test_custom_repo_hooks_path_still_lands_in_common_dir_and_warns(
 
 # --- fail-closed pre-commit hook ---------------------------------------------------
 
-def test_installed_hook_fails_closed_without_bin_3d(repo_env: tuple[Path, dict[str, str]]) -> None:
+def test_installed_hook_fails_closed_without_dev(repo_env: tuple[Path, dict[str, str]]) -> None:
     repo, env = repo_env
     assert _install(repo, env).returncode == 0
     dest = _common_hooks_dir(repo, env) / "pre-commit"
 
-    # Run the installed hook in a clean checkout that has NO ./bin/3d: it must refuse
+    # Run the installed hook in a clean checkout that has no dev CLI: it must refuse
     # (fail closed) rather than silently pass.
-    bare = repo.parent / "no-bin"
+    bare = repo.parent / "no-dev"
     bare.mkdir()
     _run_git(bare, env, "init", "-q", "--template=")
+    _restrict_path_to_tools(bare, env, ("bash", "git"))
     res = subprocess.run(
         ["bash", str(dest)], cwd=bare, env=env, capture_output=True, text=True,
     )
     assert res.returncode == 1
-    assert "./bin/3d not found" in res.stderr
+    assert "dev CLI not found" in res.stderr
+    assert "git hooks can find it on PATH" in res.stderr
 
 
-def test_installed_hook_runs_bin_3d_when_present(repo_env: tuple[Path, dict[str, str]]) -> None:
+def test_installed_hook_runs_dev_run_test_when_present(repo_env: tuple[Path, dict[str, str]]) -> None:
     repo, env = repo_env
     assert _install(repo, env).returncode == 0
     dest = _common_hooks_dir(repo, env) / "pre-commit"
 
-    # A repo whose ./bin/3d records that it was invoked: the hook must call it.
-    runner = repo.parent / "with-bin"
+    # A repo whose dev CLI records that it was invoked: the hook must call it.
+    runner = repo.parent / "with-dev"
     runner.mkdir()
     _run_git(runner, env, "init", "-q", "--template=")
-    (runner / "bin").mkdir()
     marker = runner / "ran"
-    stub = runner / "bin" / "3d"
-    stub.write_text(f'#!/bin/sh\ntouch "{marker}"\nexit 0\n')
-    stub.chmod(0o755)
+    run_log = runner / "dev.log"
+    _install_fake_dev(runner, env, marker=marker, run_log=run_log)
     # Stage a change so the run mirrors a real `git commit` (the hook fires with an index
-    # populated), even though this hook gates on `3d test`, not on staged content.
+    # populated), even though this hook gates on `dev run test`, not on staged content.
     (runner / "file.txt").write_text("change\n")
     _run_git(runner, env, "add", "file.txt")
 
@@ -477,7 +520,8 @@ def test_installed_hook_runs_bin_3d_when_present(repo_env: tuple[Path, dict[str,
         ["bash", str(dest)], cwd=runner, env=env, capture_output=True, text=True,
     )
     assert res.returncode == 0, res.stderr
-    assert marker.exists(), "the installed hook must invoke ./bin/3d (the dev gate)"
+    assert marker.exists(), "the installed hook must invoke dev (the dev gate)"
+    assert run_log.read_text().strip() == "run test"
 
 
 def test_installed_hook_blocks_commit_when_gate_fails(repo_env: tuple[Path, dict[str, str]]) -> None:
@@ -485,17 +529,14 @@ def test_installed_hook_blocks_commit_when_gate_fails(repo_env: tuple[Path, dict
     assert _install(repo, env).returncode == 0
     dest = _common_hooks_dir(repo, env) / "pre-commit"
 
-    # The central gate behavior: ./bin/3d is present but the dev gate FAILS (non-zero).
+    # The central gate behavior: dev is present but the dev gate FAILS (non-zero).
     # The hook must propagate that failure so the commit is blocked — a hook that swallowed
     # a failing gate and exited 0 would let broken code land. A stub that always exit 0
     # cannot prove this; this one returns 1.
     runner = repo.parent / "failing-gate"
     runner.mkdir()
     _run_git(runner, env, "init", "-q", "--template=")
-    (runner / "bin").mkdir()
-    stub = runner / "bin" / "3d"
-    stub.write_text('#!/bin/sh\necho "GATE-FAILED-MARKER" >&2\nexit 1\n')
-    stub.chmod(0o755)
+    _install_fake_dev(runner, env, exit_code=1, stderr="GATE-FAILED-MARKER")
 
     res = subprocess.run(
         ["bash", str(dest)], cwd=runner, env=env, capture_output=True, text=True,

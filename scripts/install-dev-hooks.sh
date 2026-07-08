@@ -4,7 +4,7 @@
 # fresh clone (or another machine). Idempotent: safe to run repeatedly.
 #
 # Installs the tracked repo-dev gate (scripts/hooks/pre-commit: ruff -> pytest ->
-# mypy via `3d test`) into <common-git-dir>/hooks/pre-commit.
+# mypy via `dev run test`) into <common-git-dir>/hooks/pre-commit.
 #
 # Dispatcher coexistence: if the EXISTING hook already calls a global-git-hooks
 # dispatcher inline (the agent-tools secret-scan line), that prefix is PRESERVED
@@ -123,7 +123,7 @@ if [ -n "$HOOKS_PATH" ] && [ "$HOOKS_PATH_NORM" != "${HOOKS_DIR%/}" ]; then
             echo "[install-dev-hooks] WARNING: core.hooksPath=$HOOKS_PATH is set." >&2
             echo "  git runs hooks from there, so $DEST fires ONLY if that path is a" >&2
             echo "  composing dispatcher that re-invokes the repo-local hook. If you use" >&2
-            echo "  husky/lefthook/pre-commit, wire '3d test' into that tool instead." >&2
+            echo "  husky/lefthook/pre-commit, wire 'dev run test' into that tool instead." >&2
             ;;
         .git/hooks|./.git/hooks)
             # Relative .git/hooks: fine in the main checkout, but a linked worktree
@@ -144,7 +144,7 @@ if [ -n "$HOOKS_PATH" ] && [ "$HOOKS_PATH_NORM" != "${HOOKS_DIR%/}" ]; then
             echo "[install-dev-hooks] WARNING: core.hooksPath=$HOOKS_PATH is set." >&2
             echo "  git runs hooks from there, so $DEST fires ONLY if that path is a" >&2
             echo "  composing dispatcher that re-invokes the repo-local hook. If you use" >&2
-            echo "  husky/lefthook/pre-commit, wire '3d test' into that tool instead." >&2
+            echo "  husky/lefthook/pre-commit, wire 'dev run test' into that tool instead." >&2
             ;;
     esac
 fi

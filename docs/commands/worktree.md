@@ -2,7 +2,7 @@
 
 `3d worktree` creates agent git worktrees with the project dev environment already
 bootstrapped. It exists because raw `git worktree add` leaves a fresh checkout without the
-right `.venv`, so pre-commit hooks and `3d test` can fail before `ruff`, `pytest`, or
+right `.venv`, so pre-commit hooks and `dev run test` can fail before `ruff`, `pytest`, or
 `mypy` are even available.
 
 ## Usage

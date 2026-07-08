@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 
 # preprocess_reference imports cv2 + PIL at module load; both live in the OPTIONAL
-# `preprocess` extra, not in the `dev`/test tier that `3d test` resolves. Skip the whole
+# `preprocess` extra, not in the `dev`/test tier that `dev run test` resolves. Skip the whole
 # module when they are absent so the mandatory test gate stays green in a clean env.
 pytest.importorskip("cv2")
 pytest.importorskip("PIL")

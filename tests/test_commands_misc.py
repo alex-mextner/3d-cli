@@ -14,7 +14,6 @@ from commands.collision import run as collision_run
 from commands.fit_camera import run as fit_run
 from commands.preprocess import run as preprocess_run
 from commands.lint import run as lint_run
-from commands.test import run as _test_run
 from commands.compare import run as compare_run
 from errors import InputNotFound, UsageError
 
@@ -453,28 +452,6 @@ def test_lint_rule(monkeypatch: Any, tmp_path: pathlib.Path) -> None:
 def test_lint_rule_needs_value() -> None:
     with pytest.raises(UsageError):
         lint_run(["file.py", "--rule"])
-
-
-# --- test ---
-
-
-def test_test_help() -> None:
-    assert _test_run(["--help"]) == 0
-
-
-def test_test_runs(monkeypatch: Any) -> None:
-    monkeypatch.setattr("commands.test.exec_tool", lambda d, s, a: 0)
-    assert _test_run([]) == 0
-
-
-def test_test_forwards_args(monkeypatch: Any) -> None:
-    called: list[list[str]] = []
-    def capture(d, s, a):
-        called.append(a)
-        return 0
-    monkeypatch.setattr("commands.test.exec_tool", capture)
-    assert _test_run(["-k", "registry"]) == 0
-    assert "-k" in called[0]
 
 
 # --- compare ---

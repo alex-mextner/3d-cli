@@ -97,7 +97,6 @@ For a practical figure-by-figure image backplate loop, see
 | `inventory` | [inventory.md](inventory.md) | Maintain a local materials and parts inventory. |
 | `ollama` | [ollama.md](ollama.md) | Validate local Ollama settings and print a dry-run generate request. |
 | `web` | [web.md](web.md) | Local FastAPI/SSE/three.js dashboard. |
-| `test` | [test.md](test.md) | Ruff, pytest, and mypy gate. |
 | `worktree` | [worktree.md](worktree.md) | Create agent git worktrees with a bootstrapped dev `.venv`. |
 
 ## Adding Or Changing A Command
@@ -155,10 +154,10 @@ offline help.
 For docs/help changes, run the command help smoke tests when possible:
 
 ```bash
-./bin/3d test -q
+dev run test -- -q
 ```
 
-For code changes, keep the usual red/green loop and run the full `3d test` gate before
+For code changes, keep the usual red/green loop and run the full `dev run test` gate before
 claiming the work is complete. Before committing, self-review the diff and run the
 repository-required peer review:
 

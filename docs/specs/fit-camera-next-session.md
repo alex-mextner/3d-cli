@@ -133,7 +133,7 @@ docs/notes/active-worktrees-2026-06-06.md     — worktree status snapshot
 ## Test gate (must pass before any merge)
 
 ```bash
-3d test   # ruff + pytest + mypy — all must pass, zero warnings
+dev run test   # ruff + pytest + mypy — all must pass, zero warnings
 ```
 
 Current: 250+ tests, 0 skipped on the worktrees this session.

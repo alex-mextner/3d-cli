@@ -1,7 +1,7 @@
 # `3d lint` — advisory repository and model lint rules
 
 Runs lightweight advisory lint rules. This is not the full acceptance gate; use
-`3d test` for the repository gate and `3d check` for geometry/printability acceptance.
+`dev run test` for the repository gate and `3d check` for geometry/printability acceptance.
 
 ## Usage
 

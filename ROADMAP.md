@@ -69,7 +69,7 @@ code is what AI agents, version control, and shell pipes all operate on natively
   subprocess via `asyncio`, async SSE).
 - 📋 **Tests** — pytest (unit: bbox→camera, axis-math, score/IoU, strength formulas,
   `3d.yaml` loader, log adapters) + CLI smoke harness (`--help` + runs on `examples/`)
-  + mypy in the test gate. A `3d test` / CI-ready run.
+  + mypy in the test gate. A `dev run test` / CI-ready run.
 - ✅ **Commit discipline** — ATOMIC commits; run multi-model read-only review through
   `review -m codex -m gemini -m oc:fireworks/accounts/fireworks/routers/kimi-k2p6-turbo`
   before EVERY commit, read findings, fix real issues, then commit; **push to
@@ -1126,7 +1126,7 @@ The CLI work now has its own repo and this ROADMAP as the single source. Pick up
 
 **Immediate next work queue:**
 1. Finish `roadmap/fit-camera-proof`: boundary/Chamfer metrics, JSON schema, proof panel with the
-   original reference image, full `3d test`, visual inspection, baseline `review -m codex -m gemini
+   original reference image, full `dev run test`, visual inspection, baseline `review -m codex -m gemini
    -m oc:fireworks/accounts/fireworks/routers/kimi-k2p6-turbo`; use the independent non-Codex
    fallback bar only if a baseline reviewer is unavailable, then atomic commit, merge, push, drop
    worktree.

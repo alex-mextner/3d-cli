@@ -31,7 +31,7 @@ The CLI is now a **thin typed Python dispatcher + command-registry**:
 | `lib/common.sh` (sourced helpers) | `lib/cli/env.py` | typed, importable, mypy-clean. |
 | `lib/pyrun` (bash python runner) | `lib/cli/pyrun.py` | same .venv → uv → system resolution. |
 | ad-hoc `echo "Error: …"` + `exit N` | `lib/errors.py` (structured `ThreeDError` types) | rich WHAT/WHY/HOW/accepted-values/install messages; the dispatcher renders them and maps exit codes. |
-| (none) | `lib/cli/registry.py`, `lib/cli/imaging.py`, `tests/` + `3d test` | registry/alias resolution, ImageMagick orchestration + pure score math, ruff + pytest + mypy gate. |
+| (none) | `lib/cli/registry.py`, `lib/cli/imaging.py`, `tests/` + `dev run test` | registry/alias resolution, ImageMagick orchestration + pure score math, ruff + pytest + mypy gate. |
 
 The heavy python tools (`render.py`, `mesh_check.py`, `collision_*.py`, `printability_mesh.py`,
 `fit_camera.py`, `preprocess_reference.py`, `match_loop.py`) were **kept as-is** and are invoked
@@ -72,7 +72,7 @@ in the project's JSON config — nothing project-specific is compiled in.
 | `3d slice` | slice a model to G-code via OrcaSlicer / Bambu Studio / PrusaSlicer (per-slicer invocation; core `-g`/`--slice` flags verified, `--printer` best-effort); `--check` is a sliceability gate that discards the G-code. |
 | `3d libs` | OpenSCAD library info: `path` / `list` (BOSL2, NopSCADlib auto-install on first run). |
 | `3d fit-camera` | (see above) camera-pose fit to a reference photo by silhouette IoU. |
-| `3d test` | run the test gate: ruff, pytest (unit + CLI smoke), then mypy. |
+| `dev run test` | run the repo test gate: ruff, pytest (unit + CLI smoke), then mypy. |
 | `3d compare` | segmented model/reference comparison that prints IoU + SSIM/DSSIM and writes mask/render/diff/collage artifacts. |
 | `3d init` | scaffold a `3d.yaml` project skeleton and optional agent-support files. |
 | `3d projects` | register / list / unregister project directories for `3d web` and cross-project tooling. |
