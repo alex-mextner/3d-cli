@@ -2,9 +2,11 @@
 # =============================================================================
 # 3d-cli REPO-DEV pre-commit gate (TRACKED source of truth).
 #
-# Runs the repo's own Python dev gate before each commit: ruff -> pytest -> mypy
-# (via `dev run test`, which reads rig.yaml scripts.test and delegates to
-# tests/run_gate.py). The commit is blocked if any step fails.
+# Runs the repo's own Python dev gate before each commit: ruff -> pytest -> mypy.
+# Prefer `dev run test` (the primary runner surface). If the external dev CLI is
+# unavailable or cannot execute the repo script, fall back to the literal
+# rig.yaml scripts.test command. The commit is blocked if any step fails or no
+# runner can execute checks.
 #
 # This is DISTINCT from the `3d init` user-facing template
 # (assets/templates/pre-commit): that one gates a *user's* .scad project via
@@ -18,16 +20,73 @@ set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)" || exit 1
 
-echo "=== 3d-cli pre-commit: ruff -> pytest -> mypy (via dev run test) ==="
+echo "=== 3d-cli pre-commit: ruff -> pytest -> mypy ==="
 
 # Use the project-scoped dev runner; rig.yaml scripts.test owns the actual command.
-# Fail CLOSED if dev is missing — a gate that silently passes when it can't run its checks
-# is worse than no gate.
-if ! command -v dev >/dev/null 2>&1; then
-    echo "[pre-commit] dev CLI not found — cannot run the repo dev gate." >&2
-    echo "  Install/apply the agent-tools dev CLI and make sure git hooks can find it on PATH." >&2
+if command -v dev >/dev/null 2>&1; then
+    set +e
+    dev run --repo-only test
+    dev_rc=$?
+    set -e
+    if [ "$dev_rc" -eq 0 ]; then
+        exit 0
+    fi
+    if [ "$dev_rc" -ne 2 ] && [ "$dev_rc" -ne 127 ]; then
+        exit "$dev_rc"
+    fi
+    echo "[pre-commit] dev CLI could not execute repo-local scripts.test (exit $dev_rc); falling back to rig.yaml scripts.test." >&2
+else
+    echo "[pre-commit] dev CLI not found; falling back to rig.yaml scripts.test." >&2
+fi
+
+python_bin=".venv/bin/python"
+if [ ! -x "$python_bin" ] && command -v python3 >/dev/null 2>&1; then
+    python_bin="$(command -v python3)"
+fi
+if [ ! -x "$python_bin" ]; then
+    echo "[pre-commit] neither .venv/bin/python nor python3 is available; cannot read rig.yaml." >&2
     exit 1
 fi
-dev run test
+
+"$python_bin" - <<'PY'
+from __future__ import annotations
+
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any, cast
+
+root = Path.cwd()
+rig_path = root / "rig.yaml"
+
+
+try:
+    text = rig_path.read_text(encoding="utf-8")
+except Exception as exc:
+    print(f"[pre-commit] failed to read {rig_path}: {exc}", file=sys.stderr)
+    sys.exit(1)
+
+try:
+    import yaml
+except ImportError:
+    print("[pre-commit] PyYAML is required to read rig.yaml; run `uv sync --extra dev` first.", file=sys.stderr)
+    sys.exit(1)
+
+try:
+    rig = cast(dict[str, Any], yaml.safe_load(text))
+except Exception as exc:
+    print(f"[pre-commit] failed to parse {rig_path}: {exc}", file=sys.stderr)
+    sys.exit(1)
+scripts = rig.get("scripts") if isinstance(rig, dict) else None
+script: object = scripts.get("test") if isinstance(scripts, dict) else None
+
+if not isinstance(script, str) or not script.strip():
+    print("[pre-commit] rig.yaml must define a non-empty scripts.test command.", file=sys.stderr)
+    sys.exit(1)
+
+print("[pre-commit] running rig.yaml scripts.test fallback.", flush=True)
+result = subprocess.run(script, cwd=root, shell=True, executable="/bin/sh")
+sys.exit(result.returncode)
+PY
 
 echo "=== pre-commit checks passed — commit allowed ==="
