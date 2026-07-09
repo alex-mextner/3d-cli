@@ -69,6 +69,7 @@ def test_real_discovery_finds_core_commands() -> None:
     reg = discover()
     for name in ("render", "export", "check", "mesh", "slice", "doctor", "libs", "score"):
         assert reg.resolve(name) is not None, f"{name} not discovered"
+    assert reg.resolve("test") is None, "test is an internal dev script, not a product command"
     # the documented aliases resolve to their canonical commands.
     assert reg.resolve("acceptance") is reg.resolve("check")
     assert reg.resolve("multi") is not None

@@ -41,7 +41,7 @@ user tasks, not one command's exit code:
   asking for behavior outside the documented command surface.
 
 ## Green main, always
-- If `3d test` shows failures after your change — even in "unrelated" files — your change caused it
+- If `dev run test` shows failures after your change — even in "unrelated" files — your change caused it
   (leaked fixtures, polluted globals, import side effects). Fix before committing.
 - **Never delete a failing test** to go green. Investigate the root cause. If the test itself is
   wrong, raise it explicitly before changing it.
@@ -49,12 +49,12 @@ user tasks, not one command's exit code:
   from (b) behavior changed (that's a regression, not a fix).
 
 ## The gate
-`3d test` = ruff + pytest + mypy. Pytest includes unit tests, CLI smoke tests, and any e2e tests
-under `tests/e2e/`; do not maintain a separate e2e matrix outside the gate. Unit-test the pure
-functions (bbox→camera, axis math, score/IoU, strength formulas, `3d.yaml`/object-model loader,
-selector resolution, op-DAG recompute, log adapters). CLI smoke harness: `3d <cmd> --help` for every
-registered command + safe commands on `examples/`. Skip gracefully when an external tool is absent
-(don't fail the suite for a missing optional dependency).
+`dev run test` = ruff + pytest + mypy. Pytest includes unit tests, CLI smoke tests, and any e2e
+tests under `tests/e2e/`; do not maintain a separate e2e matrix outside the gate. Unit-test the
+pure functions (bbox→camera, axis math, score/IoU, strength formulas, `3d.yaml`/object-model
+loader, selector resolution, op-DAG recompute, log adapters). CLI smoke harness: `3d <cmd> --help`
+for every registered command + safe commands on `examples/`. Skip gracefully when an external tool
+is absent (don't fail the suite for a missing optional dependency).
 
 `tests/e2e/test_cli_matrix.py` is the breadth guard: it discovers registered commands and checks
 their help through the real dispatcher. `tests/e2e/test_cli_stories.py` and

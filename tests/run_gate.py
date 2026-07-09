@@ -1,7 +1,6 @@
-"""run_gate.py — the `3d test` gate: ruff, pytest, then mypy; all must pass.
+"""run_gate.py — the `dev run test` gate: ruff, pytest, then mypy; all must pass.
 
-Invoked by the `test` command through pyrun so ruff/pytest/mypy resolve via the same
-.venv/uv/system tiers as every other python tool. Extra argv is forwarded to pytest.
+Invoked by rig.yaml scripts.test through the dev runner. Extra argv is forwarded to pytest.
 Pytest covers unit tests, CLI smoke tests, and any e2e tests under tests/e2e/.
 """
 from __future__ import annotations

@@ -108,6 +108,12 @@ def test_usage_contains_version() -> None:
     assert "z" in text
 
 
+def test_real_help_does_not_advertise_internal_test_command() -> None:
+    text = usage(dispatch.discover())
+    assert "  test        " not in text
+    assert "3d test" not in text
+
+
 def test_usage_shows_aliases() -> None:
     reg = Registry()
     reg.add(Command(name="check", summary="s", run=lambda argv: 0, group="G", aliases=("acceptance",)))
@@ -149,6 +155,27 @@ def test_main_unknown_command(monkeypatch: Any, capsys: Any) -> None:
     captured = capsys.readouterr()
     assert rc == 2
     assert "unknown command" in captured.err
+
+
+def test_main_test_command_points_to_dev_runner(monkeypatch: Any, capsys: Any) -> None:
+    monkeypatch.setattr("cli.dispatch.export_openscadpath", lambda: None)
+    monkeypatch.setattr("cli.dispatch.maybe_bootstrap", lambda: None)
+    rc = main(["test", "-k", "registry"])
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "dev run test" in captured.err
+    assert "dev run test -- -k registry" in captured.err
+    assert "agent-tools dev CLI" in captured.err
+
+
+def test_main_test_command_without_args_omits_invocation_hint(monkeypatch: Any, capsys: Any) -> None:
+    monkeypatch.setattr("cli.dispatch.export_openscadpath", lambda: None)
+    monkeypatch.setattr("cli.dispatch.maybe_bootstrap", lambda: None)
+    rc = main(["test"])
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "dev run test" in captured.err
+    assert "For this invocation" not in captured.err
 
 
 def test_main_routes_command(monkeypatch: Any) -> None:

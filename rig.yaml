@@ -6,6 +6,11 @@
 # Apply: rig apply.  Drift: rig status.
 
 version: 1
+scripts:
+  test: >-
+    uv run --with ruff --with pytest --with pytest-cov --with pytest-timeout --with mypy
+    --with fastapi --with uvicorn --with markdown --with pyyaml --with httpx
+    python tests/run_gate.py
 ci:
   enabled: true
   target: .github/workflows

@@ -74,8 +74,8 @@ orchestration + the pure score math).
 ## Testing
 
 ```bash
-3d test            # ruff, pytest (unit + CLI smoke harness), then mypy — all must pass
-3d test -k errors  # forward args to pytest
+dev run test              # ruff, pytest (unit + CLI smoke harness), then mypy — all must pass
+dev run test -- -k errors  # forward args to pytest
 ```
 
 Unit tests live in `tests/` (registry/alias resolution, errors formatting, score IoU/AE
@@ -84,8 +84,8 @@ coverage that calls `bin/3d`: every new command, flag, alias, shell-facing workf
 docs/help behavior needs at least one e2e test. Unit tests are still required for pure
 logic. `tests/test_cli_smoke.py` runs `3d <cmd> --help` for EVERY registered command and
 the safe commands on `examples/cube.scad` (skipping when a tool is absent). `tests/e2e/`
-is part of the normal pytest sweep run by `3d test`; do not maintain a separate matrix.
-`tests/test_imports.py` enforces the stdlib-only rule. `3d test` also runs ruff over
+is part of the normal pytest sweep run by `dev run test`; do not maintain a separate matrix.
+`tests/test_imports.py` enforces the stdlib-only rule. `dev run test` also runs ruff over
 `lib/ + tests/` and mypy over `bin/3d + lib/ + tests/` — keep both clean.
 
 ## Agent worktrees
@@ -100,7 +100,7 @@ cd ~/.config/superpowers/worktrees/3d-cli/roadmap-my-task
 
 `3d worktree create` runs `uv sync --extra dev` in the new checkout and verifies that
 `.venv/bin/ruff`, `.venv/bin/pytest`, and `.venv/bin/mypy` exist. This prevents the common
-failure where a fresh worktree has only runtime deps, then pre-commit or `3d test` fails
+failure where a fresh worktree has only runtime deps, then pre-commit or `dev run test` fails
 because `ruff`/`pytest`/`mypy` are missing. Use `--path DIR` only when the default
 `~/.config/superpowers/worktrees/3d-cli/<branch>` location is unsuitable. Use raw git
 worktree commands only when repairing `3d worktree` itself.
@@ -189,7 +189,7 @@ or delete the worktree.
   Third-party libs without stubs (trimesh, manifold3d, open3d, cv2, scipy, pyvista) are
   handled by `mypy.ini` (`ignore_missing_imports` per module) — never a blanket
   `ignore_errors`, which would fake "clean". The full lint gate is `uv run ruff check
-  lib/ tests/ && uv run mypy lib/ tests/` (also run by `3d test`).
+  lib/ tests/ && uv run mypy lib/ tests/` (also run by `dev run test`).
 - **Async where it genuinely helps.** Independent OpenSCAD renders (multi-angle batches,
   fit-camera candidate evals, match-loop candidate evals) run concurrently via `asyncio`
   + `asyncio.create_subprocess_exec` / `gather`, bounded by a semaphore (~`os.cpu_count()`).
@@ -258,7 +258,7 @@ skills (`atomic-commits`, `ai-review-before-commit`, `pre-commit-gate`,
   first-class commands (also reachable as the corresponding `check` selectors).
 - `setup` and `libs install` are **removed** (the first-run bootstrap + `3d doctor`'s
   per-item install commands replace them); `libs path` / `libs list` stay (info). `doctor`
-  stays (read-only). `3d test` runs the test gate.
+  stays (read-only). The repo test gate lives in `rig.yaml` and runs through `dev run test`.
 - `web` starts the local dashboard (FastAPI + SSE + three.js SPA) — one **thin frontend**
   over the same `lib/` core (architecture §10). `commands/web.py` is the registry command
   (stdlib-only at top level; lazy-imports the optional web tier and raises a structured
@@ -274,6 +274,6 @@ Run the full list, not a subset:
   PNG must visibly show the **cavity** — "a PNG exists" is not proof it cut.
 - `3d check examples/cube.scad` runs all gates by default; `--mesh` alone runs only mesh.
 - First-run bootstrap: `rm ~/.config/3d-cli/.bootstrapped` then any `3d` cmd re-bootstraps.
-- `3d test` green (ruff + pytest + mypy); aliases still work; the smoke harness covers every
+- `dev run test` green (ruff + pytest + mypy); aliases still work; the smoke harness covers every
   command's `--help`.
 - Everything committed atomically, codex-reviewed, and PUSHED to origin.

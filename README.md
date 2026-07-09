@@ -474,7 +474,6 @@ per-OS install command (e.g. `brew install --cask orcaslicer`) — never broken.
 | `3d printers list\|show` | inspect printer names, bed volumes, and nozzle metadata. |
 | `3d metrics list\|show` | inspect persisted command metrics JSONL records. |
 | `3d doctor` | report present/missing deps + the exact install command per OS (read-only). |
-| `3d test [pytest-args]` | run the test gate: ruff, pytest (unit + CLI smoke harness), then mypy. |
 
 ```bash
 3d init my-bracket --no-input
@@ -482,31 +481,42 @@ per-OS install command (e.g. `brew install --cask orcaslicer`) — never broken.
 3d materials list
 3d printers list
 3d doctor                 # PASS/MISSING table (read-only)
-3d test                   # ruff + pytest + mypy — all must pass
-3d test -k registry       # forward args to pytest
 ```
 
 OpenSCAD libraries auto-install on the first run, python deps resolve via uv/`.venv`
 per-call, and `3d doctor` prints the exact install command for anything still missing.
 
+Repository development commands live in `rig.yaml` scripts:
+
+```bash
+dev run test              # ruff + pytest + mypy — all must pass
+dev run test -- -k registry
+```
+
 #### Contributing — install the repo-dev pre-commit gate
 
 A fresh clone has **no** dev pre-commit gate until you wire it in (git never tracks
-`.git/hooks/`). The gate (ruff → pytest → mypy via `3d test`) lives as a **tracked**
+`.git/hooks/`). The gate (ruff → pytest → mypy via `dev run test`) lives as a **tracked**
 source at [`scripts/hooks/pre-commit`](scripts/hooks/pre-commit); install it once:
 
 ```bash
 scripts/install-dev-hooks.sh        # copies the tracked hook into .git/hooks/pre-commit
 ```
 
-It is idempotent (safe to re-run) and the installed hook blocks any commit whose
-`3d test` fails. The hook runs the **whole** gate (ruff + pytest + mypy over the
-working tree, not just staged files), so commits take as long as `3d test` does —
-and, like any working-tree gate, it judges your working tree, not the exact staged
-snapshot (an unstaged fix can green a commit; an unrelated unstaged break can block
-one). It also fails **closed**: in a partial/sparse checkout without `./bin/3d` it
-blocks the commit rather than passing silently. Bypass in an emergency with
-`git commit --no-verify` (discouraged).
+It is idempotent (safe to re-run) and the installed hook blocks any commit whose repo
+test gate fails. The hook prefers `dev run test`, so `rig.yaml` scripts remain the
+primary development runner surface. If the external agent-tools `dev` runner is missing
+from the PATH that Git hooks receive, or cannot execute this repo's test script, the hook
+falls back to reading `rig.yaml` with Python/PyYAML and running the literal
+`scripts.test` command. The hook still fails **closed** when neither path can execute the
+checks. In a fresh clone/worktree, run `uv sync --extra dev` first so `.venv/bin/python`,
+PyYAML, ruff, pytest, and mypy are available; the fallback also expects `uv` to be on the
+hook PATH because `scripts.test` is a `uv run ...` command.
+
+The hook runs the **whole** gate (ruff + pytest + mypy over the working tree, not just
+staged files), so commits take as long as `dev run test` does — and, like any
+working-tree gate, it judges your working tree, not the exact staged snapshot (an
+unstaged fix can green a commit; an unrelated unstaged break can block one).
 
 This repo-dev gate is **distinct from** the `3d init` user-facing pre-commit template
 ([`assets/templates/pre-commit`](assets/templates/pre-commit)): that one gates a *user's*
@@ -581,7 +591,7 @@ lib/errors.py       structured CLI error types (WHAT/WHY/remediation/accepted/in
 lib/commands/*.py   one self-registering module per subcommand (drop a file = add a command)
 lib/*.py            heavy python tools (render/mesh/collision/printability/preprocess/match/fit)
 lib/web/            the web dashboard app (FastAPI + SSE + three.js SPA)
-tests/              ruff + pytest unit tests + the CLI smoke harness + mypy gate (`3d test`)
+tests/              ruff + pytest unit tests + the CLI smoke harness + mypy gate (`dev run test`)
 docs/commands/      per-command documentation fragments
 docs/critic-prompts.md  the vision-critic prompt patterns
 libs/               OpenSCAD libraries cloned on demand (gitignored)

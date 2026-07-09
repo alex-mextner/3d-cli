@@ -15,11 +15,12 @@ from __future__ import annotations
 import importlib.metadata
 import os
 import re
+import shlex
 import sys
 
 from cli.env import export_openscadpath, maybe_bootstrap, repo_root
 from cli.registry import Registry, discover
-from errors import ThreeDError
+from errors import ThreeDError, UsageError
 
 # Distribution name as declared in pyproject `[project] name`.
 _DIST_NAME = "3d-cli"
@@ -107,6 +108,22 @@ def _suggest(reg: Registry, cmd: str) -> list[str]:
     return [n for n in reg.names() if prefix and prefix in n.lower()]
 
 
+def _test_command_migration_error(argv: list[str]) -> UsageError:
+    remediation = [
+        "Run 'dev run test' for the full repo gate.",
+        "Pass pytest args after '--': 'dev run test -- <pytest args>'.",
+        "The 'dev' command is provided by the agent-tools dev CLI; ensure it is installed on PATH.",
+    ]
+    if argv:
+        args = " ".join(shlex.quote(arg) for arg in argv)
+        remediation.append(f"For this invocation: 'dev run test -- {args}'.")
+    return UsageError(
+        "`3d test` moved to rig.yaml scripts and is no longer a product CLI command",
+        command="test",
+        remediation=remediation,
+    )
+
+
 def main(argv: list[str]) -> int:
     # 1. startup (must run before any subprocess so OpenSCAD/children inherit the path).
     export_openscadpath()
@@ -124,6 +141,10 @@ def main(argv: list[str]) -> int:
     if cmd in ("version", "-v", "--version"):
         print(f"3d v{VERSION}")
         return 0
+    if cmd == "test":
+        err = _test_command_migration_error(rest)
+        sys.stderr.write(err.render() + "\n")
+        return err.exit_code
 
     resolved = reg.resolve(cmd)
     if resolved is None:

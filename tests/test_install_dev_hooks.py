@@ -19,6 +19,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -128,13 +129,6 @@ def _make_repo(root: Path) -> tuple[Path, dict[str, str]]:
     (repo / "scripts" / "hooks").mkdir(parents=True)
     shutil.copy2(_INSTALLER, repo / "scripts" / "install-dev-hooks.sh")
     shutil.copy2(_TRACKED_HOOK, repo / "scripts" / "hooks" / "pre-commit")
-    # The fail-closed hook needs a bin/3d to probe for; default to an executable stub so
-    # the hook's own `[ -x ./bin/3d ]` gate passes where a test doesn't care about it.
-    bin_dir = repo / "bin"
-    bin_dir.mkdir()
-    stub = bin_dir / "3d"
-    stub.write_text("#!/bin/sh\nexit 0\n")
-    stub.chmod(0o755)
     return repo, env
 
 
@@ -161,6 +155,57 @@ def _assert_valid_bash(hook: Path) -> None:
         ["bash", "-n", str(hook)], capture_output=True, text=True,
     )
     assert res.returncode == 0, f"spliced hook is not valid bash:\n{res.stderr}"
+
+
+def _install_fake_dev(
+    root: Path,
+    env: dict[str, str],
+    *,
+    exit_code: int = 0,
+    marker: Path | None = None,
+    run_log: Path | None = None,
+    stderr: str = "",
+) -> None:
+    fake_bin = root / "fake-bin"
+    fake_bin.mkdir(exist_ok=True)
+    dev = fake_bin / "dev"
+    dev.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "has-script" ]; then shift; printf "%s\\n" "has-script $*" >> "${DEV_RUN_LOG:-/dev/null}"; exit "${DEV_PROBE_EXIT_CODE:-0}"; fi\n'
+        'if [ -n "${DEV_RUN_LOG:-}" ]; then printf "%s\\n" "$*" >> "$DEV_RUN_LOG"; fi\n'
+        'if [ -n "${DEV_MARKER:-}" ]; then touch "$DEV_MARKER"; fi\n'
+        'if [ -n "${DEV_STDERR:-}" ]; then printf "%s\\n" "$DEV_STDERR" >&2; fi\n'
+        'exit "${DEV_EXIT_CODE:-0}"\n'
+    )
+    dev.chmod(0o755)
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env.get('PATH', '')}"
+    env["DEV_EXIT_CODE"] = str(exit_code)
+    env["DEV_PROBE_EXIT_CODE"] = "0"
+    if marker is not None:
+        env["DEV_MARKER"] = str(marker)
+    else:
+        env.pop("DEV_MARKER", None)
+    if run_log is not None:
+        env["DEV_RUN_LOG"] = str(run_log)
+    else:
+        env.pop("DEV_RUN_LOG", None)
+    if stderr:
+        env["DEV_STDERR"] = stderr
+    else:
+        env.pop("DEV_STDERR", None)
+
+
+def _restrict_path_to_tools(root: Path, env: dict[str, str], tools: tuple[str, ...]) -> None:
+    path_dir = root / "path-bin"
+    path_dir.mkdir(exist_ok=True)
+    for tool in tools:
+        resolved = shutil.which(tool)
+        if resolved is None:
+            raise AssertionError(f"{tool} must be available to run this hook test")
+        link = path_dir / tool
+        if not link.exists():
+            link.symlink_to(resolved)
+    env["PATH"] = str(path_dir)
 
 
 @pytest.fixture()
@@ -268,7 +313,7 @@ def test_dispatcher_block_is_preserved_on_splice(repo_env: tuple[Path, dict[str,
     assert "global-git-hooks-dispatcher" in out  # dispatcher prefix preserved
     assert out.count("global-git-hooks-dispatcher") == 1  # preserved once, not duplicated
     assert "|| exit $?" in out
-    assert "3d test" in out  # body replaced by the current tracked gate
+    assert "dev run --repo-only test" in out  # body replaced by the current tracked gate
     assert "old gate" not in out  # the stale body is gone
     # Expected layout: shebang from the tracked source, then the dispatcher block, then
     # the tracked body.
@@ -280,7 +325,7 @@ def test_dispatcher_block_is_preserved_on_splice(repo_env: tuple[Path, dict[str,
     # fail here even while the substring asserts above passed.
     _assert_valid_bash(dest)
     # End-to-end: run the spliced hook. Provide a no-op run-global-hooks so the dispatcher
-    # line's `|| exit $?` succeeds, then the tracked body invokes ./bin/3d (the repo stub).
+    # line's `|| exit $?` succeeds, then the tracked body invokes dev run test.
     # The stub lands at the SAME path the dispatcher line resolves —
     # ${XDG_CONFIG_HOME:-$HOME/.config}/git — which _git_env pins under the throwaway HOME.
     gdir = Path(env["XDG_CONFIG_HOME"]) / "git"
@@ -288,6 +333,7 @@ def test_dispatcher_block_is_preserved_on_splice(repo_env: tuple[Path, dict[str,
     rgh = gdir / "run-global-hooks"
     rgh.write_text("#!/bin/sh\nexit 0\n")
     rgh.chmod(0o755)
+    _install_fake_dev(repo, env)
     run = subprocess.run(["bash", str(dest)], cwd=repo, env=env, capture_output=True, text=True)
     assert run.returncode == 0, f"spliced hook failed to run:\n{run.stdout}\n{run.stderr}"
 
@@ -435,41 +481,116 @@ def test_custom_repo_hooks_path_still_lands_in_common_dir_and_warns(
     assert "WARNING: core.hooksPath=.githooks is set" in res.stderr
 
 
-# --- fail-closed pre-commit hook ---------------------------------------------------
+# --- repo-dev pre-commit hook ------------------------------------------------------
 
-def test_installed_hook_fails_closed_without_bin_3d(repo_env: tuple[Path, dict[str, str]]) -> None:
-    repo, env = repo_env
-    assert _install(repo, env).returncode == 0
-    dest = _common_hooks_dir(repo, env) / "pre-commit"
-
-    # Run the installed hook in a clean checkout that has NO ./bin/3d: it must refuse
-    # (fail closed) rather than silently pass.
-    bare = repo.parent / "no-bin"
-    bare.mkdir()
-    _run_git(bare, env, "init", "-q", "--template=")
-    res = subprocess.run(
-        ["bash", str(dest)], cwd=bare, env=env, capture_output=True, text=True,
+def _install_fake_rig_test_gate(
+    root: Path,
+    env: dict[str, str],
+    *,
+    run_log: Path | None = None,
+    exit_code: int = 0,
+    extra_gate_args: tuple[str, ...] = (),
+    create_venv: bool = True,
+    with_uv: bool = False,
+) -> None:
+    script = (
+        "uv run --with ruff --with pytest --with mypy "
+        f"python tests/run_gate.py {' '.join(extra_gate_args)}"
+    ).strip()
+    fake_bin = root / "fake-bin"
+    fake_bin.mkdir(exist_ok=True)
+    if with_uv:
+        uv = fake_bin / "uv"
+        uv.write_text(
+            "#!/bin/sh\n"
+            'if [ -n "${UV_RUN_LOG:-}" ]; then printf "%s\\n" "$*" >> "$UV_RUN_LOG"; fi\n'
+            'exit "${UV_EXIT_CODE:-0}"\n',
+            encoding="utf-8",
+        )
+        uv.chmod(0o755)
+    if create_venv:
+        venv_bin = root / ".venv" / "bin"
+        venv_bin.mkdir(parents=True, exist_ok=True)
+        python = venv_bin / "python"
+        if not python.exists():
+            python.symlink_to(sys.executable)
+    tests_dir = root / "tests"
+    tests_dir.mkdir(exist_ok=True)
+    (tests_dir / "run_gate.py").write_text(
+        "from __future__ import annotations\n"
+        "import os\n"
+        "import pathlib\n"
+        "import sys\n"
+        "log = os.environ.get('RUN_GATE_LOG')\n"
+        "if log:\n"
+        "    pathlib.Path(log).write_text(' '.join(['run_gate.py', *sys.argv[1:]]).strip() + '\\n', encoding='utf-8')\n"
+        "sys.exit(int(os.environ.get('RUN_GATE_EXIT_CODE', '0')))\n",
+        encoding="utf-8",
     )
-    assert res.returncode == 1
-    assert "./bin/3d not found" in res.stderr
+    fake_pythonpath = root / "fake-pythonpath"
+    fake_pythonpath.mkdir(exist_ok=True)
+    (fake_pythonpath / "yaml.py").write_text(
+        "from __future__ import annotations\n"
+        "def safe_load(text: str) -> dict[str, dict[str, str]]:\n"
+        f"    return {{'scripts': {{'test': {script!r}}}}}\n",
+        encoding="utf-8",
+    )
+    env["PYTHONPATH"] = f"{fake_pythonpath}{os.pathsep}{env.get('PYTHONPATH', '')}"
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env.get('PATH', '')}"
+    env["UV_EXIT_CODE"] = str(exit_code)
+    if run_log is not None:
+        env["UV_RUN_LOG"] = str(run_log)
+        env["RUN_GATE_LOG"] = str(run_log)
+    else:
+        env.pop("UV_RUN_LOG", None)
+        env.pop("RUN_GATE_LOG", None)
+    env["RUN_GATE_EXIT_CODE"] = str(exit_code)
+    (root / "rig.yaml").write_text(
+        "scripts:\n"
+        "  test: >-\n"
+        f"    {script}\n",
+        encoding="utf-8",
+    )
 
 
-def test_installed_hook_runs_bin_3d_when_present(repo_env: tuple[Path, dict[str, str]]) -> None:
+def test_installed_hook_falls_back_to_rig_script_without_dev(repo_env: tuple[Path, dict[str, str]]) -> None:
     repo, env = repo_env
     assert _install(repo, env).returncode == 0
     dest = _common_hooks_dir(repo, env) / "pre-commit"
 
-    # A repo whose ./bin/3d records that it was invoked: the hook must call it.
-    runner = repo.parent / "with-bin"
+    # A fresh checkout can have the repo-local uv/Python test gate without the external
+    # agent-tools `dev` CLI. The hook must still run checks by executing rig.yaml
+    # scripts.test, not block before any gate can run.
+    runner = repo.parent / "no-dev"
     runner.mkdir()
     _run_git(runner, env, "init", "-q", "--template=")
-    (runner / "bin").mkdir()
+    _restrict_path_to_tools(runner, env, ("bash", "git", "python3"))
+    (runner / "path-bin" / "python3").unlink()
+    (runner / "path-bin" / "python3").symlink_to(sys.executable)
+    run_log = runner / "uv.log"
+    _install_fake_rig_test_gate(runner, env, run_log=run_log, with_uv=True)
+    res = subprocess.run(
+        ["bash", str(dest)], cwd=runner, env=env, capture_output=True, text=True,
+    )
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert "falling back to rig.yaml scripts.test" in res.stderr
+    assert "python tests/run_gate.py" in run_log.read_text(encoding="utf-8").strip()
+
+
+def test_installed_hook_runs_dev_run_test_when_present(repo_env: tuple[Path, dict[str, str]]) -> None:
+    repo, env = repo_env
+    assert _install(repo, env).returncode == 0
+    dest = _common_hooks_dir(repo, env) / "pre-commit"
+
+    # A repo whose dev CLI records that it was invoked: the hook must call it.
+    runner = repo.parent / "with-dev"
+    runner.mkdir()
+    _run_git(runner, env, "init", "-q", "--template=")
     marker = runner / "ran"
-    stub = runner / "bin" / "3d"
-    stub.write_text(f'#!/bin/sh\ntouch "{marker}"\nexit 0\n')
-    stub.chmod(0o755)
+    run_log = runner / "dev.log"
+    _install_fake_dev(runner, env, marker=marker, run_log=run_log)
     # Stage a change so the run mirrors a real `git commit` (the hook fires with an index
-    # populated), even though this hook gates on `3d test`, not on staged content.
+    # populated), even though this hook gates on `dev run test`, not on staged content.
     (runner / "file.txt").write_text("change\n")
     _run_git(runner, env, "add", "file.txt")
 
@@ -477,7 +598,58 @@ def test_installed_hook_runs_bin_3d_when_present(repo_env: tuple[Path, dict[str,
         ["bash", str(dest)], cwd=runner, env=env, capture_output=True, text=True,
     )
     assert res.returncode == 0, res.stderr
-    assert marker.exists(), "the installed hook must invoke ./bin/3d (the dev gate)"
+    assert marker.exists(), "the installed hook must invoke dev (the dev gate)"
+    assert run_log.read_text().splitlines() == ["run --repo-only test"]
+
+
+def test_installed_hook_falls_back_when_dev_runner_cannot_execute(
+    repo_env: tuple[Path, dict[str, str]],
+) -> None:
+    repo, env = repo_env
+    assert _install(repo, env).returncode == 0
+    dest = _common_hooks_dir(repo, env) / "pre-commit"
+
+    runner = repo.parent / "dev-127"
+    runner.mkdir()
+    _run_git(runner, env, "init", "-q", "--template=")
+    _install_fake_dev(runner, env, exit_code=2, stderr="DEV-UNUSABLE")
+    run_log = runner / "uv.log"
+    _install_fake_rig_test_gate(runner, env, run_log=run_log, with_uv=True)
+
+    res = subprocess.run(
+        ["bash", str(dest)], cwd=runner, env=env, capture_output=True, text=True,
+    )
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert "DEV-UNUSABLE" in res.stderr
+    assert "dev CLI could not execute repo-local scripts.test (exit 2); falling back" in res.stderr
+    assert "python tests/run_gate.py" in run_log.read_text(encoding="utf-8").strip()
+
+
+def test_installed_hook_runs_literal_rig_script_with_extra_args(
+    repo_env: tuple[Path, dict[str, str]],
+) -> None:
+    repo, env = repo_env
+    assert _install(repo, env).returncode == 0
+    dest = _common_hooks_dir(repo, env) / "pre-commit"
+
+    runner = repo.parent / "venv-extra-args"
+    runner.mkdir()
+    _run_git(runner, env, "init", "-q", "--template=")
+    _restrict_path_to_tools(runner, env, ("bash", "git", "python3"))
+    run_log = runner / "run-gate.log"
+    _install_fake_rig_test_gate(
+        runner,
+        env,
+        run_log=run_log,
+        extra_gate_args=("--strict", "--fast"),
+        with_uv=True,
+    )
+
+    res = subprocess.run(
+        ["bash", str(dest)], cwd=runner, env=env, capture_output=True, text=True,
+    )
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert "python tests/run_gate.py --strict --fast" in run_log.read_text(encoding="utf-8").strip()
 
 
 def test_installed_hook_blocks_commit_when_gate_fails(repo_env: tuple[Path, dict[str, str]]) -> None:
@@ -485,17 +657,14 @@ def test_installed_hook_blocks_commit_when_gate_fails(repo_env: tuple[Path, dict
     assert _install(repo, env).returncode == 0
     dest = _common_hooks_dir(repo, env) / "pre-commit"
 
-    # The central gate behavior: ./bin/3d is present but the dev gate FAILS (non-zero).
+    # The central gate behavior: dev is present but the dev gate FAILS (non-zero).
     # The hook must propagate that failure so the commit is blocked — a hook that swallowed
     # a failing gate and exited 0 would let broken code land. A stub that always exit 0
     # cannot prove this; this one returns 1.
     runner = repo.parent / "failing-gate"
     runner.mkdir()
     _run_git(runner, env, "init", "-q", "--template=")
-    (runner / "bin").mkdir()
-    stub = runner / "bin" / "3d"
-    stub.write_text('#!/bin/sh\necho "GATE-FAILED-MARKER" >&2\nexit 1\n')
-    stub.chmod(0o755)
+    _install_fake_dev(runner, env, exit_code=1, stderr="GATE-FAILED-MARKER")
 
     res = subprocess.run(
         ["bash", str(dest)], cwd=runner, env=env, capture_output=True, text=True,
@@ -504,3 +673,23 @@ def test_installed_hook_blocks_commit_when_gate_fails(repo_env: tuple[Path, dict
     # error producing some other non-zero) — the stub's marker must reach stderr.
     assert res.returncode == 1, "a failing dev gate must block the commit (exit 1)"
     assert "GATE-FAILED-MARKER" in res.stderr, "the gate's own failure must have propagated"
+
+
+def test_installed_hook_fails_closed_when_no_runner_can_execute(
+    repo_env: tuple[Path, dict[str, str]],
+) -> None:
+    repo, env = repo_env
+    assert _install(repo, env).returncode == 0
+    dest = _common_hooks_dir(repo, env) / "pre-commit"
+
+    runner = repo.parent / "no-runner"
+    runner.mkdir()
+    _run_git(runner, env, "init", "-q", "--template=")
+    _restrict_path_to_tools(runner, env, ("bash", "git", "python3"))
+
+    res = subprocess.run(
+        ["bash", str(dest)], cwd=runner, env=env, capture_output=True, text=True,
+    )
+    assert res.returncode == 1
+    assert "falling back to rig.yaml scripts.test" in res.stderr
+    assert "failed to read" in res.stderr
