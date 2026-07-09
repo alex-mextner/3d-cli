@@ -1,6 +1,6 @@
 [project]
 name = "3d-cli"
-version = "0.2.1"
+version = "0.2.2"
 description = "Scriptable, AI-assisted CLI + web toolkit for parametric 3D FDM modeling, verification, matching and print prep (OpenSCAD-first)."
 readme = "README.md"
 requires-python = ">=3.10"
