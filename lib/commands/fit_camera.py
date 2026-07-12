@@ -57,6 +57,8 @@ Options:
   --seed N              RNG seed for reproducibility (default 7)
   --el-range lo,hi      elevation search range in degrees (default -45,85); -89,89 restores full sphere
   --draw-axes           overlay PCA principal axis + bbox contour of both silhouettes
+  --seed-from-viewbank  prepend a coarse az/el view-bank pose grid to the search (opt-in,
+                       OFF by default); avoids wrong azimuth basins on symmetric subjects
   --spatial-report DIR  write contour metrics + proof_panel.png for spatial diagnostics
   --trace FILE          write best-candidate trace JSONL for demo/video tooling
   --objective NAME      area-iou (default) or contour edge F1/SDF/Chamfer/p95
@@ -69,6 +71,7 @@ Examples:
   3d fit-camera model.scad ref.jpg --out match/camera.json --draw-axes
   3d fit-camera examples/cube.scad ref.png --rand 8 --refine 3   # quick smoke
   3d fit-camera model.scad ref.jpg --el-range -20,75 --seed 11
+  3d fit-camera model.scad ref.jpg --seed-from-viewbank
   3d fit-camera model.scad mask.png --mask-polarity light --backplate ref.jpg --objective contour --spatial-report match/spatial --trace match/trace.jsonl
   3d fit-camera model.scad mask.png --mask-polarity light --proof-reference ref.jpg --search-mode proof --out match/camera.json"""
 
@@ -91,7 +94,7 @@ _VALUE_FLAGS = {
     "--trace",
     "--objective",
 }
-_BOOL_FLAGS = {"--draw-axes"}
+_BOOL_FLAGS = {"--draw-axes", "--seed-from-viewbank"}
 
 
 def run(argv: list[str]) -> int:

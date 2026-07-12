@@ -27,6 +27,7 @@ Optimises an [OpenSCAD](GLOSSARY.md#openscad) camera vector so that the rendered
 | `--seed N` | `7` | RNG seed for reproducibility |
 | `--el-range lo,hi` | `-45,85` | Elevation search range in degrees; use `-89,89` to search the full sphere |
 | `--draw-axes` | off | Overlay PCA principal axis + bbox contour of both silhouettes |
+| `--seed-from-viewbank` | off | Prepend a coarse azimuth/elevation view-bank pose grid to the search (opt-in). Ported from `tools/spatial_fit_experiment.py`'s view-bank retrieval; helps the search avoid wrong azimuth basins on near-symmetric subjects. Default behaviour is unchanged when the flag is absent. |
 | `--objective NAME` | `area-iou` | Optimizer objective: `area-iou` or experimental `contour` |
 | `--spatial-report DIR` | none | Write `spatial_metrics.json`, `edge_overlay.png`, and `proof_panel.png` with contour-first diagnostics |
 | `--trace FILE` | none | Write best-candidate JSONL trace for experiment/demo video tooling |
@@ -36,6 +37,7 @@ Optimises an [OpenSCAD](GLOSSARY.md#openscad) camera vector so that the rendered
 3d fit-camera model.scad ref.jpg --out match/camera.json --draw-axes
 3d fit-camera examples/cube.scad ref.png --rand 8 --refine 3   # quick smoke
 3d fit-camera model.scad ref.jpg --el-range -20,75 --seed 11
+3d fit-camera model.scad ref.jpg --seed-from-viewbank
 3d fit-camera model.scad mask.png --mask-polarity light --backplate ref.jpg --objective contour --spatial-report match/spatial --trace match/trace.jsonl
 3d fit-camera model.scad mask.png --mask-polarity light --proof-reference ref.jpg --search-mode proof --out match/camera.json
 ```
