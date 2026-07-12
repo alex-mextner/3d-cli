@@ -93,7 +93,7 @@ For a practical figure-by-figure image backplate loop, see
 | `projects` | [projects.md](projects.md) | Register/list/remove project directories used by `3d web`. |
 | `workspaces` | [workspaces.md](workspaces.md) | Create/list/read web dashboard workspace metadata. |
 | `materials` | [materials.md](materials.md) | Inspect the merged FDM material registry. |
-| `metrics` | [metrics.md](metrics.md) | Inspect persisted command metrics JSONL records. |
+| `metrics` | [metrics.md](metrics.md) | Inspect persisted metrics; compute geometry (mesh) + perceptual (image) batteries. |
 | `hardware` | [hardware.md](hardware.md) | List or validate local machine/toolchain capabilities. |
 | `inventory` | [inventory.md](inventory.md) | Maintain a local materials and parts inventory. |
 | `ollama` | [ollama.md](ollama.md) | Validate local Ollama settings and print a dry-run generate request. |

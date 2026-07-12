@@ -25,17 +25,30 @@ from errors import UsageError
 
 USAGE = """3d metrics <subcommand>
   Inspect the longitudinal metrics store under ~/.local/share/3d-cli/metrics/
-  (or $XDG_DATA_HOME/3d-cli/metrics/).
+  (or $XDG_DATA_HOME/3d-cli/metrics/), or compute the geometry / perceptual batteries.
 
 Subcommands:
   list                         show command JSONL files, record counts, and latest timestamp
   show [--limit N]             print metrics records as deterministic JSON lines
        [--command NAME]        restrict records to one command JSONL file
+  geometry A B [options]       3D shape battery between two meshes/STLs:
+                               F-score@tau (primary), Chamfer L1/L2, Hausdorff,
+                               normal consistency, volumetric IoU. B is the target.
+       [--samples N]           area-weighted samples per mesh (default 50000)
+       [--tau-frac F]          F-score tau as fraction of target bbox diag (default 0.01)
+       [--voxel-res R]         voxel grid resolution for volumetric IoU (default 48)
+       [--seed S] [--json] [--no-store]
+  perceptual A B [options]     image battery: PSNR (dB, high best), LPIPS (0 best),
+                               CLIP-sim (0..100, high best). Missing wheel -> reported
+                               unavailable with its install command, never a fake score.
+       [--metrics psnr,lpips,clip] [--json] [--no-store]
 
 Examples:
   3d metrics list
   3d metrics show --limit 20
-  3d metrics show --command render --limit 5"""
+  3d metrics show --command render --limit 5
+  3d metrics geometry candidate.stl target.stl --samples 100000 --json
+  3d metrics perceptual render.png photo.jpg --metrics psnr,lpips"""
 
 
 def _print_usage() -> None:
@@ -120,6 +133,21 @@ def _show(argv: list[str]) -> int:
     return 0
 
 
+def _geometry(argv: list[str]) -> int:
+    """Run the geometry battery tool (trimesh/scipy/numpy) in a resolved runtime."""
+    from cli.pyrun import run_tool  # lazy: keep command discovery import-light
+
+    return run_tool("trimesh,scipy,numpy,rtree", "geometry/mesh_metrics.py", argv)
+
+
+def _perceptual(argv: list[str]) -> int:
+    """Run the perceptual battery tool. PSNR needs numpy/ImageMagick; LPIPS/CLIP are
+    optional wheels that degrade to a reported-unavailable entry, never a fake score."""
+    from cli.pyrun import run_tool  # lazy: keep command discovery import-light
+
+    return run_tool("numpy", "perceptual_metrics.py", argv)
+
+
 def run(argv: list[str]) -> int:
     if not argv:
         _print_usage()
@@ -138,10 +166,14 @@ def run(argv: list[str]) -> int:
         return _list()
     if sub == "show":
         return _show(argv[1:])
+    if sub == "geometry":
+        return _geometry(argv[1:])
+    if sub == "perceptual":
+        return _perceptual(argv[1:])
     raise UsageError(
         f"unknown subcommand '{sub}'",
         command="metrics",
-        remediation=["Use `list` or `show` — see `3d metrics --help`."],
+        remediation=["Use `list`, `show`, `geometry`, or `perceptual` — see `3d metrics --help`."],
     )
 
 

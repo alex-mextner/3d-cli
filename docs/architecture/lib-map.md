@@ -42,6 +42,7 @@ rendering, slicing support, and verification:
 - `frame_check.py`
 - `export_formats.py`
 - `import_formats.py`
+- `lib/geometry/mesh_metrics.py`
 - `mesh_check.py`
 - `niche_fit.py`
 - `orca_project_3mf.py`
@@ -103,6 +104,7 @@ orchestration:
 - `preprocess_reference.py`
 - `proxy_align.py`
 - `refmatch.py`
+- `perceptual_metrics.py`
 - `spatial_fit_metrics.py`
 - `lib/cli/imaging.py`
 
@@ -156,6 +158,8 @@ Every current root Python module is listed here so future additions are intentio
 - `mask_geometry.py` — lightweight mask coverage, bounding-box, and centroid metadata.
 - `materials.py` — compatibility wrapper re-exporting `registries.materials`.
 - `mesh_check.py` — mesh verification implementation.
+- `lib/geometry/mesh_metrics.py` — pinned-convention 3D shape metrics (Chamfer, F-score@tau, Hausdorff, normal consistency, volumetric IoU) between two meshes; backs `3d metrics geometry`.
+- `perceptual_metrics.py` — perceptual/semantic image metrics (PSNR, LPIPS, CLIP-sim) with explicit senses and graceful degradation; backs `3d metrics perceptual`.
 - `metrics.py` — compatibility wrapper re-exporting `registries.metrics`.
 - `object_model.py` — semantic object-model structures.
 - `ollama.py` — local Ollama endpoint validation and dry-run request planning.
