@@ -6,6 +6,10 @@
 # Apply: rig apply.  Drift: rig status.
 
 version: 1
+# The repo-dev pre-commit hook (scripts/install-dev-hooks.sh) runs `dev run test`,
+# which executes this script. Without it `dev run test` exits 2 and blocks every commit.
+scripts:
+  test: ./bin/3d test   # ruff -> pytest (unit + smoke + e2e) -> mypy; the full gate
 agent_hooks:
   # 3d-cli works hands-on directly on main (no subagent swarms) — exempt from the
   # orchestrator-stays-thin hook (default true / opt-out). See rig-cli PR #104,
