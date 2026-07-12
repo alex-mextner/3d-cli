@@ -65,6 +65,15 @@ def log(msg: str) -> None:
 
 
 # ── rendering + geometry ─────────────────────────────────────────────────────
+def _unlink_quiet(path: str) -> None:
+    """Remove `path` if present; a lock/permission/race error is swallowed (best-effort
+    cleanup must never crash the render loop)."""
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
 def model_centroid(scad_path: str, tmp: str) -> list[float]:
     """Return the bbox centroid of a model via a temp binary-STL export."""
     stl = os.path.join(tmp, "centroid.stl")
@@ -105,18 +114,36 @@ def render_blockout(
         center = model_centroid(scad, tmp)
     cam = cam_from_params([az, el, WORKING_DISTANCE, 0.0, 0.0], center)
     out = os.path.join(tmp, f"{name}.png")
+    # Remove any stale output FIRST (fixed name is reused across candidates): a failed
+    # render must NOT fall through to the previous candidate's PNG and be scored as this
+    # one. Mirrors the safe pattern in fit_camera.render_to_array.
+    _unlink_quiet(out)
     cam_arg = ",".join(f"{v:.3f}" for v in cam)
     try:
-        subprocess.run(
+        proc = subprocess.run(
             [OPENSCAD, "--render", "-o", out, f"--camera={cam_arg}",
              f"--imgsize={size[0]},{size[1]}", scad],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120,
         )
     except subprocess.TimeoutExpired:
+        _unlink_quiet(out)
         return None
-    if not os.path.exists(out):
+    # A render FAILS on a nonzero rc, an absent output, or a 0-byte stub. Remove the output
+    # so no partial/stale PNG survives on disk for a path-based reader (e.g. _veto_candidate
+    # reads veto_cand.png by path) to score as a successful render.
+    if proc.returncode != 0 or not _nonempty_file(out):
+        _unlink_quiet(out)
         return None
     return np.asarray(Image.open(out).convert("RGB").resize(size), dtype=np.int16)
+
+
+def _nonempty_file(path: str) -> bool:
+    """True iff `path` exists and is non-empty; a vanished/unstattable path is False
+    (fail-closed), never raising even under a TOCTOU race."""
+    try:
+        return os.path.isfile(path) and os.path.getsize(path) > 0
+    except OSError:
+        return False
 
 
 def boundary_loss(
@@ -208,9 +235,13 @@ def _veto_candidate(
     backend: Backend, expected: dict[str, float], features: Sequence[CriticalFeature],
 ) -> VetoResult:
     arr = render_blockout(cand, az, el, size, tmp, name="veto_cand")
+    if arr is None:
+        # The candidate render FAILED. Fail closed directly — do NOT read veto_cand.png
+        # back by path (a nonzero-rc partial file could otherwise be scored as a render).
+        observed: dict[str, float | None] = {f.name: None for f in features}
+        return evaluate(observed, expected, features)
     veto_png = os.path.join(tmp, "veto_cand.png")
-    if arr is not None:
-        Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8), "RGB").save(veto_png)
+    Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8), "RGB").save(veto_png)
     observed = perceive(backend, veto_png, features)
     return evaluate(observed, expected, features)
 
@@ -234,7 +265,12 @@ def write_recovery_panel(
     model_mask = array_to_mask(model_rgb) if model_rgb is not None else np.zeros_like(refm)
     ref_img = Image.fromarray(np.clip(reference_rgb, 0, 255).astype(np.uint8), "RGB")
     mask_img = Image.fromarray((refm * 255).astype(np.uint8), "L").convert("RGB")
-    model_img = Image.fromarray(np.clip(model_rgb, 0, 255).astype(np.uint8), "RGB")
+    # A None model_rgb means the final render FAILED. Emit a diagnostic placeholder cell
+    # instead of crashing (np.clip(None) throws) so the panel + result.json still land.
+    if model_rgb is not None:
+        model_img: Image.Image = Image.fromarray(np.clip(model_rgb, 0, 255).astype(np.uint8), "RGB")
+    else:
+        model_img = _text_cell(w, h, "recovered render", ["RENDER FAILED", "no model image"])
     edge_img = Image.fromarray(_edge_overlay(model_mask, refm), "RGB")
     metrics_img = _text_cell(w, h, "metrics", _metrics_lines(metrics))
     status_img = _text_cell(w, h, "result", [f"status: {status}", veto_line,
@@ -315,6 +351,10 @@ def recover(
 
     log("[stage] final semantic veto")
     final_png = os.path.join(out_dir, "recovered_render.png")
+    # Remove any stale render from a prior run in a reused --out dir FIRST: if this run's
+    # final render failed (model_rgb is None) the veto must fail closed on an ABSENT file,
+    # not pass against last run's leftover PNG.
+    _unlink_quiet(final_png)
     if model_rgb is not None:
         Image.fromarray(np.clip(model_rgb, 0, 255).astype(np.uint8), "RGB").save(final_png)
     veto = run_veto(backend, final_png, expected, features)
@@ -337,7 +377,9 @@ def recover(
         "spatial_metrics": metrics,
         "recovery_status": status,
         "proof_panel": panel_png,
-        "recovered_render": final_png,
+        # Honest schema: null when the final render failed and no PNG was written, rather
+        # than pointing at an absent path the docs promise exists.
+        "recovered_render": final_png if os.path.exists(final_png) else None,
         "changelog": changelog,
     }
     return result

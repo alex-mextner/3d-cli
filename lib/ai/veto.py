@@ -23,6 +23,9 @@
 #   - STDLIB-ONLY (parsing + a Backend handle). Safe to import anywhere.
 #   - `perceive()` never raises on a garbled model reply: an unparseable feature is
 #     reported as `None` and treated as a veto FAILURE (fail-closed), never a silent pass.
+#   - A MISSING or EMPTY (0-byte) image is likewise fail-closed: `perceive()` does NOT call
+#     the backend (a text-only reply would silently pass on a render that never existed) and
+#     returns every feature as `None`, so the veto FAILS.
 # ─────────────────────────────────────────────────────────────────────────────
 from __future__ import annotations
 
@@ -129,11 +132,23 @@ def perceive(
     *,
     timeout: float = 300.0,
 ) -> dict[str, float | None]:
-    """Ask the backend to read the critical features from `image`."""
-    prompt = build_veto_prompt(features)
+    """Ask the backend to read the critical features from `image`.
+
+    Fail-CLOSED on a missing or empty image: the veto reads a RENDER, so if the render
+    does not exist (or is a 0-byte stub left by a failed render) the backend must NOT be
+    asked (a text-only reply — e.g. a MockBackend's canned response — would silently PASS
+    on a render that was never produced, exactly the silent-pass this module forbids).
+    Return every feature as `None` so `evaluate()` reports it unreadable and the veto
+    FAILS."""
     img_path = pathlib.Path(image)
-    images = [img_path] if img_path.exists() else None
-    reply = backend.complete("", prompt, images=images, timeout=timeout)
+    try:
+        usable = img_path.is_file() and img_path.stat().st_size > 0
+    except OSError:
+        usable = False  # a vanished/unstattable path is fail-closed, never raises
+    if not usable:
+        return {f.name: None for f in features}
+    prompt = build_veto_prompt(features)
+    reply = backend.complete("", prompt, images=[img_path], timeout=timeout)
     return parse_features(reply, features)
 
 

@@ -69,7 +69,10 @@ This is a **closed parametric-recovery loop, synthetic-proven** — not photo→
 - `proof_panel.png` — the 6-artifact panel: reference, reference mask, recovered render,
   contour error map (reference red, model cyan), boundary metrics, and the proof-status
   cell (status + veto verdict).
-- `recovered_render.png` — the recovered model rendered in the reference frame.
+- `recovered_render.png` — the recovered model rendered in the reference frame. If the
+  final render FAILS, this file is not written and `result.json` reports
+  `recovered_render: null` with `recovery_status: failed` (the veto fails closed on the
+  absent render — never a silent pass against a stale PNG).
 - `reference.png`, `reference_mask.png` — the human-inspectable inputs.
 - `changelog.md` — one line per accepted refine step (param, old→new, loss, veto verdict).
 - `result.json` — `recovered_params`, `pose`, `fit_status`, `veto`, `spatial_metrics`,
