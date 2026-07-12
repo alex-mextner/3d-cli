@@ -1,0 +1,8 @@
+{
+  "id": "budget-zero-calls",
+  "description": "A case whose backend-call budget is zero, exercising the budget-exhausted stop.",
+  "prompt": "Model a cube, but the budget forbids any backend call.",
+  "expected_status": "failure",
+  "budget": {"max_rounds": 1, "max_renders": 0, "max_backend_calls": 0},
+  "mock_response": "```scad\ncube(10);\n```"
+}

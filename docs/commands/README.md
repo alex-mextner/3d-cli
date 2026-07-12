@@ -86,6 +86,7 @@ For a practical figure-by-figure image backplate loop, see
 | Command | Doc | Role |
 |---|---|---|
 | `ai` | [ai.md](ai.md) | Build offline AI-assist prompt bundles without calling a backend. |
+| `bench` | [bench.md](bench.md) | Auto-scored generative-modeling benchmark: prompt → `.scad`, build-success gate, metric vector, `$/ok` + `--compare`. |
 | `auth` | [auth.md](auth.md) | Configure optional Hugging Face credentials for ZeroGPU and gated weights. |
 | `doctor` | [doctor.md](doctor.md) | Read-only dependency report with install commands. |
 | `events` | [events.md](events.md) | Record and inspect append-only CLI/model workflow events. |

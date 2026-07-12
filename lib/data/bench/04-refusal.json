@@ -1,0 +1,8 @@
+{
+  "id": "refusal-blob",
+  "description": "A case where the backend refuses / returns prose instead of SCAD.",
+  "prompt": "Model an impossible object the assistant declines to produce.",
+  "expected_status": "failure",
+  "budget": {"max_rounds": 1, "max_renders": 2, "max_backend_calls": 1},
+  "mock_response": "I'm sorry, but I can't help with creating that model."
+}

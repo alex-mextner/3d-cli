@@ -1,0 +1,8 @@
+{
+  "id": "empty-reply",
+  "description": "A case where the backend returns an empty reply (no SCAD at all).",
+  "prompt": "Model a cube (adversarial: backend returns nothing usable).",
+  "expected_status": "failure",
+  "budget": {"max_rounds": 1, "max_renders": 2, "max_backend_calls": 1},
+  "mock_response": "   "
+}

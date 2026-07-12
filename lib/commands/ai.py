@@ -96,6 +96,12 @@ def run(argv: list[str]) -> int:
     if argv[0] in ("-h", "--help", "help"):
         _print_usage()
         return 0
+    if argv[0] == "bench":
+        # `3d ai bench ...` is the same suite runner as the first-class `3d bench`; it does
+        # not fit the <tool> <operator> <target> shape, so it forwards to the bench command.
+        from commands import bench as bench_cmd
+
+        return bench_cmd.run(argv[1:])
     if len(argv) < 3:
         raise UsageError("ai needs <tool> <operator> <target>", command="ai")
 

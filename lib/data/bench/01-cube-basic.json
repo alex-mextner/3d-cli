@@ -1,0 +1,9 @@
+{
+  "id": "cube-basic",
+  "description": "A 20 mm solid cube, centered at the origin.",
+  "prompt": "Model a 20 mm solid cube centered at the origin in OpenSCAD.",
+  "expected_status": "ok",
+  "dims": {"size_mm": 20},
+  "budget": {"max_rounds": 1, "max_renders": 2, "max_backend_calls": 1},
+  "mock_response": "Here is the model:\n```scad\ncube(20, center=true);\n```\n"
+}

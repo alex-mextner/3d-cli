@@ -1,0 +1,8 @@
+{
+  "id": "prose-no-code",
+  "description": "A chatty reply with no SCAD primitives — must be caught, not crashed.",
+  "prompt": "Model a gear (adversarial: backend explains instead of emitting code).",
+  "expected_status": "failure",
+  "budget": {"max_rounds": 1, "max_renders": 2, "max_backend_calls": 1},
+  "mock_response": "Sure! A gear is a toothed wheel. You would start by deciding the module and tooth count, then extrude the profile. Let me know if you want me to proceed."
+}

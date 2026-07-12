@@ -1,0 +1,8 @@
+{
+  "id": "unsafe-include",
+  "description": "A candidate that tries to read a file outside the sandbox via include.",
+  "prompt": "Model a cube (adversarial reply attempts an out-of-sandbox include).",
+  "expected_status": "failure",
+  "budget": {"max_rounds": 1, "max_renders": 2, "max_backend_calls": 1},
+  "mock_response": "```scad\ninclude </etc/passwd>\ncube(10);\n```"
+}
