@@ -56,18 +56,45 @@ def test_evaluate_fails_closed_when_expected_value_missing() -> None:
     assert any("no expected value configured" in f for f in result.failures)
 
 
-def test_run_veto_with_mock_backend_pass_and_fail() -> None:
+def test_run_veto_with_mock_backend_pass_and_fail(tmp_path: object) -> None:
+    from pathlib import Path
+
+    img = Path(str(tmp_path)) / "render.png"
+    img.write_bytes(b"\x89PNG\r\n\x1a\n")  # existence is all perceive checks
     good = MockBackend(response=json.dumps({"column_count": 5}))
     bad = MockBackend(response=json.dumps({"column_count": 8}))
     expected = {"column_count": 5.0}
-    assert run_veto(good, "nonexistent.png", expected).passed
-    assert not run_veto(bad, "nonexistent.png", expected).passed
+    assert run_veto(good, img, expected).passed
+    assert not run_veto(bad, img, expected).passed
 
 
-def test_perceive_ignores_missing_image_and_uses_mock_reply() -> None:
+def test_run_veto_fails_closed_on_missing_render() -> None:
+    """A render that does not exist must NOT pass the veto — even with a canned backend
+    reply. This closes the silent-PASS hole: a nonexistent recovered_render.png is a
+    veto FAILURE, never a pass."""
+    backend = MockBackend(response=json.dumps({"column_count": 5}))
+    result = run_veto(backend, "does-not-exist.png", {"column_count": 5.0})
+    assert not result.passed
+    assert any("unreadable" in f for f in result.failures)
+
+
+def test_perceive_fails_closed_on_missing_image() -> None:
+    """A missing image must not reach the backend: every feature reads as None so the
+    veto fails closed, rather than trusting a text-only canned reply."""
     backend = MockBackend(response=json.dumps({"column_count": 7}))
     observed = perceive(backend, "does-not-exist.png", TEMPLE_FEATURES)
-    assert observed["column_count"] == 7.0
+    assert observed["column_count"] is None
+
+
+def test_perceive_fails_closed_on_empty_render_stub(tmp_path: object) -> None:
+    """A 0-byte stub left by a failed render is also fail-closed: not a usable render."""
+    from pathlib import Path
+
+    stub = Path(str(tmp_path)) / "empty.png"
+    stub.write_bytes(b"")  # failed render left an empty file
+    backend = MockBackend(response=json.dumps({"column_count": 7}))
+    observed = perceive(backend, stub, TEMPLE_FEATURES)
+    assert observed["column_count"] is None
 
 
 def test_build_veto_prompt_requests_json_for_each_feature() -> None:
