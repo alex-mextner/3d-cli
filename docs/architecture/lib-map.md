@@ -147,6 +147,7 @@ Every current root Python module is listed here so future additions are intentio
 - `frame_check.py` — render framing checks.
 - `hardware.py` — local machine and toolchain capability reporting.
 - `hf_auth.py` — optional Hugging Face token loading, validation, and secure storage.
+- `img3d_loop.py` — closed image→3D parametric-recovery loop: generate a blockout, view-bank contour fit, monotonic boundary refine with a semantic-feature veto dispose-gate, proof-status gate, and the synthetic parametric-recovery milestone (the `3d recover-blockout` backend).
 - `import_formats.py` — import wrapper generation and conversion-plan helpers.
 - `inventory.py` — compatibility wrapper re-exporting `registries.inventory`.
 - `kinematics.py` — project joint spec validation and deterministic summaries.
