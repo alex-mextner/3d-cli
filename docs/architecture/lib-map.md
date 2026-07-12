@@ -43,6 +43,7 @@ rendering, slicing support, and verification:
 - `export_formats.py`
 - `import_formats.py`
 - `mesh_check.py`
+- `niche_fit.py`
 - `orca_project_3mf.py`
 - `packing.py`
 - `printability_mesh.py`
@@ -159,6 +160,7 @@ Every current root Python module is listed here so future additions are intentio
 - `object_model.py` — semantic object-model structures.
 - `ollama.py` — local Ollama endpoint validation and dry-run request planning.
 - `opdag.py` — operation graph validation, dependency ordering, and query helpers.
+- `niche_fit.py` — cavity/niche clearance math and parametric insert `.scad` emission.
 - `packing.py` — deterministic 2D print-bed layout planning helpers.
 - `printing.py` — compatibility wrapper re-exporting `slicing.printing`.
 - `preprocess_reference.py` — reference image preprocessing.
