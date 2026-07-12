@@ -362,6 +362,55 @@ def anchor_camera_samples(
     return out
 
 
+def viewbank_anchor_samples(
+    lo: Sequence[float],
+    hi: Sequence[float],
+    diag: float,
+    refm: Any,
+    render_size: tuple[int, int],
+    *,
+    az_step: int = 30,
+    elevations: Sequence[float] = (0.0, 10.0, 20.0, 30.0),
+    dist_mult: float = 2.0,
+) -> list[list[float]]:
+    """Coarse azimuth/elevation VIEW-BANK seeds for the random search (opt-in).
+
+    Ported from tools/spatial_fit_experiment.py::evaluate_view_bank_retrieval: sweep a
+    coarse az/el grid at a fixed bbox-derived framing and let the normal loss ranking
+    surface the best pose. The harness proved this recovers the right azimuth basin but
+    only ever lived in the experiment; wiring it here as `--seed-from-viewbank` stops the
+    free search from landing in a wrong basin on near-symmetric subjects. The look-at pan
+    is seeded from the reference-mask centroid, matching anchor_camera_samples."""
+    if not 5 <= len(lo) <= 6:
+        raise ValueError(
+            f"viewbank_anchor_samples expects a 5- or 6-parameter search space, got {len(lo)}")
+    w, h = render_size
+    bbox = _mask_bbox_xywh(refm)
+    if bbox is None:
+        ref_cx, ref_cy = w / 2.0, h / 2.0
+    else:
+        x, y, bw, bh = bbox
+        ref_cx, ref_cy = x + bw / 2.0, y + bh / 2.0
+    panx_hint = ((ref_cx / max(1.0, w)) - 0.5) * diag
+    panz_hint = (0.5 - (ref_cy / max(1.0, h))) * diag
+    dist = max(lo[2], min(hi[2], diag * dist_mult))
+    out: list[list[float]] = []
+    for az in range(-180, 180, az_step):
+        for el in elevations:
+            sample = [
+                max(lo[0], min(hi[0], float(az))),
+                max(lo[1], min(hi[1], float(el))),
+                dist,
+                max(lo[3], min(hi[3], panx_hint)),
+            ]
+            if len(lo) == 6:
+                sample.extend([max(lo[4], min(hi[4], 0.0)), max(lo[5], min(hi[5], panz_hint))])
+            else:
+                sample.append(max(lo[4], min(hi[4], panz_hint)))
+            out.append(sample)
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # Diagnostic overlays                                                          #
 # --------------------------------------------------------------------------- #
@@ -501,6 +550,11 @@ def main() -> None:
     ap.add_argument("--draw-axes", action="store_true",
                     help="overlay PCA principal axis + bbox contour of both silhouettes")
     ap.add_argument(
+        "--seed-from-viewbank", action="store_true",
+        help="prepend a coarse az/el view-bank pose grid to the search (opt-in; helps "
+             "the search avoid wrong azimuth basins on near-symmetric subjects). OFF by default.",
+    )
+    ap.add_argument(
         "--spatial-report",
         default=None,
         help="write contour-first metrics and proof panel into this directory",
@@ -613,7 +667,15 @@ def main() -> None:
     anchors = stratified_samples(anchor_pool, anchor_budget)
     random_count = max(0, effective_rand - len(anchors))
     random_samples = [[rng.uniform(lo[k], hi[k]) for k in range(n_params)] for _ in range(random_count)]
-    samples = anchors + random_samples
+    viewbank_seeds = (
+        viewbank_anchor_samples(lo, hi, diag, refm, (ow, oh))
+        if args.seed_from_viewbank
+        else []
+    )
+    samples = viewbank_seeds + anchors + random_samples
+    if viewbank_seeds:
+        print(f"  view-bank seeds={len(viewbank_seeds)} "
+              "(tools/spatial_fit_experiment.evaluate_view_bank_retrieval)", flush=True)
     print(f"  anchors={len(anchors)} random={len(random_samples)}", flush=True)
     losses = eval_losses(args.model, samples, center, ow, oh, refm, tmp, args.objective)
     for i, (p, loss_val) in enumerate(zip(samples, losses)):
