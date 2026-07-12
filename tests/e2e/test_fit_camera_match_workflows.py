@@ -385,6 +385,37 @@ def test_match_explains_when_no_tunable_constants_exist(tmp_path: Path) -> None:
     assert "Traceback" not in result.stdout + result.stderr
 
 
+def test_match_help_documents_the_backend_flag(tmp_path: Path) -> None:
+    """The `--backend` selector must be discoverable in `3d match --help`."""
+    result = run_cli(tmp_path, "match", "--help")
+
+    assert result.returncode == 0
+    assert "--backend" in result.stdout
+    assert "claude|codex|opencode|ollama|mock" in result.stdout
+
+
+def test_match_drives_the_mock_backend_end_to_end(tmp_path: Path) -> None:
+    """A user selects `--backend mock` and the loop drives that backend without any
+    network/model call. Runs even without OpenSCAD: the verify step degrades to a
+    None score, so the round reverts, but the mock critic is exercised through bin/3d."""
+    reference = tmp_path / "ref.pgm"
+    model = tmp_path / "part.scad"
+    write_pgm(reference, ["000", "010", "000"])
+    model.write_text("width = 4;\ncube([width, 4, 4]);\n", encoding="utf-8")
+
+    result = run_cli(
+        tmp_path, "match", str(model), str(reference),
+        "--rounds", "1", "--backend", "mock",
+        env_extra={"THREED_AI_MOCK_RESPONSE": '{"param":"width","target":30}'},
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "backend=mock" in result.stdout
+    assert "CRITIC: mock" in result.stdout
+    assert ">>> MATCH-LOOP:" in result.stdout
+    assert "Traceback" not in result.stdout + result.stderr
+
+
 def test_match_failure_can_be_redirected_into_a_handoff_log(tmp_path: Path) -> None:
     """A user captures match-loop diagnostics as a handoff artifact for model cleanup."""
     reference = tmp_path / "ref.pgm"

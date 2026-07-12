@@ -36,7 +36,9 @@ USAGE = """3d match <assembly.scad> <reference> [options]
 
 Options:
   --rounds N            max rounds (default 8)
-  --dry-run            skip the codex critic; synthesise deterministic edits (smoke test)
+  --dry-run            skip the AI critic; synthesise deterministic edits (smoke test)
+  --backend NAME        AI critic backend: claude|codex|opencode|ollama|mock
+                        (default: ai.json `backend`, else first available)
   --constants FILE      file holding the tunable constants (default: the assembly)
   --params a,b,c        restrict which constants the critic may tune
   --metric iou|ae       primary metric (default iou)
@@ -49,6 +51,7 @@ Options:
 
 Examples:
   3d match model.scad ref.jpg --rounds 2 --dry-run
+  3d match model.scad ref.jpg --rounds 8 --backend codex
   3d match model.scad ref.jpg --rounds 8 --ortho --cam 130,-600,52,130,0,52"""
 
 
