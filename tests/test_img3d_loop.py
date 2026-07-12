@@ -20,13 +20,24 @@ import pytest
 np = pytest.importorskip("numpy")
 pytest.importorskip("PIL")
 
-# fit_camera (imported transitively by img3d_loop) resolves openscad at import time and
-# sys.exits if it is absent; point it at any existing binary so the import is safe.
-os.environ.setdefault("OPENSCAD", sys.executable)
+# fit_camera (imported transitively by img3d_loop) resolves openscad at IMPORT time and
+# sys.exits if it is absent, so point OPENSCAD at any existing binary FOR THE DURATION OF
+# THE IMPORT only. Restoring it immediately keeps an openscad-less CI able to import the
+# pure helpers WITHOUT the stub leaking into os.environ — where it would be inherited by
+# the real `bin/3d render` subprocesses that later e2e tests spawn (a python interpreter
+# fed OpenSCAD's flags fails every render). Do NOT hoist this into a module-level
+# setdefault: that mutates the process env for the whole pytest run.
+_prev_openscad = os.environ.get("OPENSCAD")
+os.environ["OPENSCAD"] = sys.executable
 
 import img3d_loop  # noqa: E402
 from ai.backends import MockBackend  # noqa: E402
 from ai.blockout import BlockoutParams  # noqa: E402
+
+if _prev_openscad is None:
+    os.environ.pop("OPENSCAD", None)
+else:
+    os.environ["OPENSCAD"] = _prev_openscad
 
 
 def _fake_proc(returncode: int) -> subprocess.CompletedProcess[bytes]:

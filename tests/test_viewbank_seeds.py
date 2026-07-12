@@ -13,11 +13,22 @@ import pytest
 np = pytest.importorskip("numpy")
 pytest.importorskip("PIL")
 
-# fit_camera resolves an openscad path at import time; point it at any existing binary so
-# importing the pure sample-grid helper never sys.exits when openscad is absent.
-os.environ.setdefault("OPENSCAD", sys.executable)
+# fit_camera resolves an openscad path at IMPORT time and sys.exits if it is absent, so
+# point OPENSCAD at any existing binary FOR THE DURATION OF THE IMPORT only. Restoring it
+# immediately keeps an openscad-less CI able to import the pure sample-grid helper WITHOUT
+# the stub leaking into os.environ — where it would be inherited by the real `bin/3d
+# render` subprocesses that later e2e tests spawn (a python interpreter fed OpenSCAD's
+# flags fails every render). Do NOT hoist this into a module-level setdefault: that mutates
+# the process env for the whole pytest run.
+_prev_openscad = os.environ.get("OPENSCAD")
+os.environ["OPENSCAD"] = sys.executable
 
 from fit_camera import viewbank_anchor_samples  # noqa: E402
+
+if _prev_openscad is None:
+    os.environ.pop("OPENSCAD", None)
+else:
+    os.environ["OPENSCAD"] = _prev_openscad
 
 LO5 = [-180.0, -45.0, 50.0, -100.0, -100.0]
 HI5 = [180.0, 85.0, 300.0, 100.0, 100.0]
