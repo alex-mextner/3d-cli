@@ -37,11 +37,15 @@ import argparse
 import json
 import math
 import os
+import pathlib
 import re
-import shutil
 import subprocess
 import sys
 from typing import Any
+
+from ai.backends import Backend, resolve_backend
+from ai import load_backend_config
+from errors import ThreeDError
 
 REPO_ROOT = os.environ.get("REPO_ROOT") or os.path.abspath(
     os.path.join(os.path.dirname(__file__), ".."))
@@ -261,26 +265,41 @@ def params_block(constants: str, tunables: list[str]) -> str:
     return "\n".join(rows)
 
 
-def critic_codex(
+def build_critic_prompt(
+    constants: str, tunables: list[str], best: float | None,
+    metric: str | None, better: str | None, changelog: str,
+) -> str:
+    return CRITIC_PROMPT.format(
+        best=("inf" if best is None or math.isinf(best) else f"{best:.4f}"),
+        metric=metric or "IoU", better=better or "higher",
+        changelog=changelog_text(changelog), params=params_block(constants, tunables))
+
+
+def critic_backend(
+    backend: Backend,
     constants: str, tunables: list[str], best: float | None,
     metric: str | None, better: str | None, work: str, changelog: str,
     timeout: float = 1200,
 ) -> str | dict[str, Any] | None:
+    """Ask the selected AI backend for ONE parameter edit (or CONVERGED).
+
+    Backend-agnostic replacement for the old codex-only critic. When `backend` is the
+    CodexBackend the invocation is identical to before (prompt on stdin, `-i overlay`,
+    same output parsing), so codex behavior is preserved; any other backend is now a
+    first-class alternative. A missing binary / timeout / transport failure is caught
+    and reported as a no-improve round (matching the old codex-absent degrade)."""
     overlay = os.path.join(work, "overlay.png")
-    prompt = CRITIC_PROMPT.format(
-        best=("inf" if best is None or math.isinf(best) else f"{best:.4f}"),
-        metric=metric or "IoU", better=better or "higher",
-        changelog=changelog_text(changelog), params=params_block(constants, tunables))
-    if not shutil.which("codex"):
-        log("    CRITIC: codex not on PATH — treating as no-improve")
-        return None
-    cmd = ["codex", "exec", "--sandbox", "read-only"]
-    if os.path.exists(overlay):
-        cmd += ["-i", overlay]
-    log("    CRITIC: codex exec (read-only) …")
-    rc, out = run(cmd, timeout=timeout, stdin=prompt)
-    if rc == 124:
-        log("    CRITIC: codex TIMEOUT")
+    prompt = build_critic_prompt(constants, tunables, best, metric, better, changelog)
+    images = [pathlib.Path(overlay)] if os.path.exists(overlay) else None
+    if images and not backend.supports_images:
+        log(f"    CRITIC: WARNING — backend '{backend.name}' cannot see images; the "
+            "overlay is NOT sent. The critique is text-only (metrics + changelog); pick "
+            "an image-capable backend (codex, ollama) for vision-guided edits.")
+    log(f"    CRITIC: {backend.name} …")
+    try:
+        out = backend.complete("", prompt, images=images, timeout=timeout)
+    except ThreeDError as e:
+        log(f"    CRITIC: {backend.name} unusable ({e.message}) — treating as no-improve")
         return None
     return parse_critic_output(out)
 
@@ -323,7 +342,10 @@ def main() -> int:
     ap.add_argument("reference")
     ap.add_argument("--rounds", type=int, default=8)
     ap.add_argument("--dry-run", action="store_true",
-                    help="skip codex; synth edits to exercise the machinery")
+                    help="skip the AI critic; synth edits to exercise the machinery")
+    ap.add_argument("--backend", default=None,
+                    help="AI critic backend (claude|codex|opencode|ollama|mock); "
+                         "default: ai.json, else first available")
     ap.add_argument("--constants", default=None,
                     help="file holding the tunable constants (default: the assembly)")
     ap.add_argument("--metric", choices=["iou", "ae"], default="iou")
@@ -371,6 +393,16 @@ def main() -> int:
         + (" …" if len(tunables) > 12 else ""))
     log(f"  rounds={args.rounds} metric={args.metric} margin={args.margin} "
         f"dry_run={args.dry_run}")
+
+    backend: Backend | None = None
+    if not args.dry_run:
+        try:
+            backend = resolve_backend(args.backend, config=load_backend_config())
+        except ThreeDError as e:
+            log(e.render(color=False))
+            log("  (or run with --dry-run to exercise the loop without an AI backend)")
+            return e.exit_code
+        log(f"  backend={backend.name}")
     log("=" * 70)
 
     log("[round 0] baseline VERIFY")
@@ -396,7 +428,9 @@ def main() -> int:
         if args.dry_run:
             edit = critic_dry(constants, tunables, rnd - 1)
         else:
-            edit = critic_codex(constants, tunables, best, metric, better, work, changelog)
+            assert backend is not None  # set above for the non-dry-run path
+            edit = critic_backend(
+                backend, constants, tunables, best, metric, better, work, changelog)
 
         if edit == "CONVERGED":
             log("  CRITIC -> CONVERGED")
