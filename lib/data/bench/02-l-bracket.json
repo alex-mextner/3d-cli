@@ -1,0 +1,9 @@
+{
+  "id": "l-bracket",
+  "description": "An L-shaped bracket, 40x40x10 mm, made by subtracting a corner cube.",
+  "prompt": "Model an L-shaped bracket 40x40x10 mm by subtracting a 20x20 corner from a cube.",
+  "expected_status": "ok",
+  "dims": {"footprint_mm": 40, "thickness_mm": 10},
+  "budget": {"max_rounds": 1, "max_renders": 2, "max_backend_calls": 1},
+  "mock_response": "```scad\ndifference() {\n  cube([40, 40, 10]);\n  translate([20, 20, -1]) cube([21, 21, 12]);\n}\n```"
+}

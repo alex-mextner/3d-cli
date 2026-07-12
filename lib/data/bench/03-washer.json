@@ -1,0 +1,9 @@
+{
+  "id": "washer",
+  "description": "A flat washer: 20 mm outer diameter, 8 mm bore, 3 mm thick.",
+  "prompt": "Model a flat washer, 20 mm outer diameter, 8 mm bore, 3 mm thick, in OpenSCAD.",
+  "expected_status": "ok",
+  "dims": {"od_mm": 20, "bore_mm": 8, "thickness_mm": 3},
+  "budget": {"max_rounds": 1, "max_renders": 2, "max_backend_calls": 1},
+  "mock_response": "```scad\ndifference() {\n  cylinder(h=3, d=20, $fn=64);\n  translate([0, 0, -1]) cylinder(h=5, d=8, $fn=64);\n}\n```"
+}
