@@ -39,8 +39,30 @@ The label is both printed and used as the process exit code:
 | `--backend NAME` | auto (claude-first) | AI backend that writes the `.scad`: `claude`, `codex`, `opencode`, `ollama`, `mock`. |
 | `--config PATH` | `~/.config/3d-cli/ai.json` | AI config JSON (also `$THREED_AI_CONFIG`). |
 | `--rounds N` | `3` | Maximum generate->fix rounds. |
+| `--visual-review` | off | After each candidate renders, score the render against a reference image with the VLM judge (`3d judge`). Requires `--reference`. Opt-in; default OFF leaves the pipeline byte-identical. |
+| `--reference PATH` | none | Reference image the render is reviewed against (required with `--visual-review`; a `--spec` `"reference"` key also supplies it). |
+| `--visual-threshold F` | `3.0` | Minimum judge mean on the 0-4 rubric for a render to count as `ok`. |
 | `-o, --out FILE` | `generated.scad` | Output `.scad` path. |
 | `--json` | off | Print the JSON summary instead of the text report. |
+
+## Visual review (opt-in)
+
+By default the loop is geometry-only: a candidate is `ok` when it renders, is manifold +
+printable, and declares every requested dimension. That says nothing about whether the model
+actually *looks like* the thing you asked for. `--visual-review --reference photo.jpg` adds one
+more gate: after each candidate renders, its PNG is scored against the reference image by the
+same VLM-as-a-judge that powers [`3d judge`](judge.md) (anchored 0-4 rubric). Two effects:
+
+- **A visually-wrong render can no longer be `ok`.** If the judge mean is below
+  `--visual-threshold` (default `3.0`), a geometrically-valid candidate is downgraded to
+  `diagnostic` — the geometry gates are untouched, visual review is purely additional.
+- **The critique steers the next round.** The judge's per-dimension scores and rationale are
+  threaded into the next round's prompt, so the backend refines toward the reference instead of
+  drifting. A blind (text-only) or unrunnable judge is inconclusive: it downgrades `ok` but adds
+  no critique, and is surfaced as a `visual SKIP` gate row — never silently passed as a score.
+
+When `--visual-review` is absent nothing changes: the judge is never imported or called, no
+reference is needed, and the output is identical to the geometry-only pipeline.
 
 ## JSON summary
 
@@ -76,6 +98,18 @@ real scan: a dimension only counts when it appears as a **top-level** constant a
 3d generate "a round coaster with a rim" --dim diameter=90 --dim rim=3 --rounds 4
 3d generate --spec bracket.json -o bracket.scad --json
 3d generate "cube" --dim size=20 --backend codex
+# review each render against a reference photo and refine toward it
+3d generate "a teapot" --dim height=90 --visual-review --reference teapot.jpg --visual-threshold 2.5
+```
+
+A `--spec` JSON may also carry the reference so the whole request lives in one file:
+
+```json
+{
+  "description": "a teapot",
+  "reference": "teapot.jpg",
+  "dims": {"height": 90, "spout_len": 40}
+}
 ```
 
 A `--spec` JSON file supplies the dims (and an optional description); `--dim` flags and a
