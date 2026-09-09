@@ -119,8 +119,11 @@ def _resolve_backends(opts: _Opts) -> list[Any]:
     from ai.backends import resolve_backend
 
     cfg = load_backend_config(opts.config)
+    # `judge` always attaches images, so the auto-pick (no --backend) prefers a sighted
+    # backend over a text-only one. An explicit --backend is honored verbatim (a blind
+    # choice is still surfaced by the judge's BLIND label).
     if not opts.backends:
-        return [resolve_backend(config=cfg)]
+        return [resolve_backend(config=cfg, prefer_vision=True)]
     return [resolve_backend(name, config=cfg) for name in opts.backends]
 
 

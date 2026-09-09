@@ -78,6 +78,7 @@ class _FakeVisionBackend(Backend):
         self._constant = responses if isinstance(responses, str) else None
         self._queue = list(responses) if isinstance(responses, list) else []
         self.calls = 0
+        self.temperatures: list[float | None] = []  # per-call temperature (transport proof)
 
     def available(self) -> bool:
         return True
@@ -88,8 +89,10 @@ class _FakeVisionBackend(Backend):
         user: str,
         images: list[pathlib.Path] | None = None,
         timeout: float = 1200.0,
+        temperature: float | None = None,
     ) -> str:
         self.calls += 1
+        self.temperatures.append(temperature)
         if self._constant is not None:
             return self._constant
         if not self._queue:
@@ -310,6 +313,31 @@ def test_judge_blind_backend_is_never_a_real_visual_score() -> None:
     assert result.judges[0].blind is True
     assert result.judges[0].supports_images is False
     assert any("BLIND" in n for n in result.notes)
+
+
+def test_judge_threads_canonical_temp0_then_stability_temp01() -> None:
+    # The reproducibility split must reach the TRANSPORT: the canonical read at temp 0.0,
+    # every stability sample at temp 0.1 (metadata-only enforcement was the Codex finding).
+    b = _FakeVisionBackend(_score_json(3, 3, 3, 3), name="temp")
+    judge(_RENDER, _REFERENCE, backend=b, judges=1, stability_n=3)
+    assert b.calls == 4  # 1 canonical + 3 stability
+    assert b.temperatures[0] == 0.0  # canonical is greedy/deterministic
+    assert b.temperatures[1:] == [0.1, 0.1, 0.1]  # stability samples near-greedy
+
+
+def test_judge_auto_resolve_prefers_a_sighted_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    # judge always attaches images, so its backend=None auto-resolve must ask the resolver
+    # to prefer a sighted backend (prefer_vision=True), not silently accept a blind one.
+    seen: dict[str, object] = {}
+
+    def _fake_resolve(name: object = None, **kwargs: object) -> Backend:
+        seen["name"] = name
+        seen.update(kwargs)
+        return _FakeVisionBackend(_score_json(3, 3, 3, 3), name="auto")
+
+    monkeypatch.setattr("ai.judge.resolve_backend", _fake_resolve)
+    judge(_RENDER, _REFERENCE, backend=None, judges=1, stability_n=0)
+    assert seen["prefer_vision"] is True
 
 
 def test_judge_excludes_blind_judge_from_sighted_aggregate() -> None:

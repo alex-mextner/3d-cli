@@ -14,17 +14,23 @@
 #   `3d help`/`render` guarantee (see tests/test_imports.py for the contract).
 #
 # HOW IT'S REACHED
-#   `resolve_backend(name, config=...)` picks a backend by explicit name, else the
-#   `ai.json` `backend` field, else the first AVAILABLE one in BACKEND_ORDER, else a
-#   structured MissingDependency. In a test/mock context ($THREED_AI_MOCK_RESPONSE
-#   set, or backend=="mock") it returns the deterministic MockBackend — never a
-#   network call. IMPORTANT: the auto-pick order starts at `claude`, NOT `codex`:
-#   there is deliberately no hard codex dependency.
+#   `resolve_backend(name, config=..., prefer_vision=...)` picks a backend by explicit
+#   name, else the `ai.json` `backend` field, else the first AVAILABLE one in
+#   BACKEND_ORDER, else a structured MissingDependency. In a test/mock context
+#   ($THREED_AI_MOCK_RESPONSE set, or backend=="mock") it returns the deterministic
+#   MockBackend — never a network call. IMPORTANT: the auto-pick order starts at
+#   `claude`, NOT `codex`: there is deliberately no hard codex dependency. A caller that
+#   will pass IMAGES sets `prefer_vision=True` so the auto-pick prefers a sighted
+#   (supports_images=True) backend over a blind one instead of silently landing on a
+#   text-only model; if none is sighted it falls back but surfaces that on stderr.
 #
 # INVARIANTS
 #   - `complete()` returns the model's text (stdout+stderr merged, since several CLIs
 #     log to stderr and print the answer there too). It raises MissingDependency if
 #     the backend binary is absent and BackendError on timeout.
+#   - `complete()` takes an optional `temperature`; only OllamaBackend (HTTP `options`)
+#     and MockBackend (records it) honor it. The CLI backends (claude/codex/opencode)
+#     have no temperature flag and accept-but-ignore it — never faked (see each backend).
 #   - MockBackend NEVER touches the network and is fully deterministic.
 # ─────────────────────────────────────────────────────────────────────────────
 from __future__ import annotations
@@ -125,11 +131,19 @@ class Backend(abc.ABC):
         user: str,
         images: list[pathlib.Path] | None = None,
         timeout: float = DEFAULT_TIMEOUT,
+        temperature: float | None = None,
     ) -> str:
         """Return the model's text completion for the system+user prompt.
 
         `images` are optional local paths for vision-capable backends; a backend that
         cannot consume them degrades gracefully (ignores them, noting it on stderr).
+
+        `temperature` requests a sampling temperature (0 = greedy/deterministic). A backend
+        that has NO transport knob for it (the CLI backends claude/codex/opencode expose no
+        temperature flag in their print/exec surface) accepts the argument but cannot honor
+        it — the value is ignored, NOT faked. Only OllamaBackend (raw HTTP `options`) and
+        MockBackend (records it) actually consume it. `None` means "leave the backend
+        default untouched" so an unset temperature never forces a value on a backend.
         """
 
     def _require_binary(self, binary: str) -> None:
@@ -148,6 +162,9 @@ class ClaudeBackend(Backend):
     Print mode takes a single prompt argument, so system+user are folded together.
     Image attachments are NOT supported via `-p`: if `images` are passed they are
     ignored (with a one-line note on stderr) rather than failing the run.
+
+    `temperature` is accepted for interface parity but CANNOT be honored: the `claude -p`
+    surface exposes no temperature flag, so the value is ignored (never silently faked).
     """
 
     name = "claude"
@@ -161,6 +178,7 @@ class ClaudeBackend(Backend):
         user: str,
         images: list[pathlib.Path] | None = None,
         timeout: float = DEFAULT_TIMEOUT,
+        temperature: float | None = None,
     ) -> str:
         self._require_binary("claude")
         if images:
@@ -192,7 +210,12 @@ class CodexBackend(Backend):
         user: str,
         images: list[pathlib.Path] | None = None,
         timeout: float = DEFAULT_TIMEOUT,
+        temperature: float | None = None,
     ) -> str:
+        # `temperature` is accepted for interface parity but not honored: `codex exec` has
+        # no stable temperature flag (only generic `-c key=value` overrides whose sampling
+        # key is version-dependent and often ignored by reasoning models), so wiring one
+        # would be a silent no-op at best. Left unhonored rather than faked.
         self._require_binary("codex")
         cmd = ["codex", "exec", "--sandbox", "read-only"]
         for img in images or []:
@@ -205,7 +228,10 @@ class CodexBackend(Backend):
 class OpencodeBackend(Backend):
     """`opencode run <prompt>` non-interactive mode. Best-effort image support: the
     CLI does not take image flags in its stable surface, so `images` are ignored with
-    a note. Availability is by `shutil.which`."""
+    a note. Availability is by `shutil.which`.
+
+    `temperature` is accepted for interface parity but not honored: `opencode run` exposes
+    no temperature flag, so the value is ignored (never faked)."""
 
     name = "opencode"
 
@@ -218,6 +244,7 @@ class OpencodeBackend(Backend):
         user: str,
         images: list[pathlib.Path] | None = None,
         timeout: float = DEFAULT_TIMEOUT,
+        temperature: float | None = None,
     ) -> str:
         self._require_binary("opencode")
         if images:
@@ -276,6 +303,7 @@ class OllamaBackend(Backend):
         user: str,
         images: list[pathlib.Path] | None = None,
         timeout: float = DEFAULT_TIMEOUT,
+        temperature: float | None = None,
     ) -> str:
         if not self.model:
             raise BackendError(
@@ -294,6 +322,11 @@ class OllamaBackend(Backend):
         encoded = self._encode_images(images)
         if encoded:
             body["images"] = encoded
+        # Ollama HONORS temperature via the `/api/generate` `options` block. A None temp
+        # leaves the server/model default untouched (no forced value). setdefault so a
+        # future `options` key is not clobbered.
+        if temperature is not None:
+            body.setdefault("options", {})["temperature"] = float(temperature)
         return self._post_generate(body, timeout)
 
     @staticmethod
@@ -336,6 +369,11 @@ class MockBackend(Backend):
         if response is None:
             response = os.environ.get(MOCK_RESPONSE_ENV)
         self.response = response if response is not None else "MOCK: no response configured"
+        # Records the temperature of the MOST RECENT complete() call (None until called),
+        # plus the full history, so a test can assert the transport actually received the
+        # canonical/stability temperatures the judge intends.
+        self.last_temperature: float | None = None
+        self.temperatures: list[float | None] = []
 
     def available(self) -> bool:
         return True
@@ -346,7 +384,10 @@ class MockBackend(Backend):
         user: str,
         images: list[pathlib.Path] | None = None,
         timeout: float = DEFAULT_TIMEOUT,
+        temperature: float | None = None,
     ) -> str:
+        self.last_temperature = temperature
+        self.temperatures.append(temperature)
         return self.response
 
 
@@ -365,7 +406,10 @@ def _construct(name: str, config: dict[str, Any] | None) -> Backend:
 
 
 def resolve_backend(
-    name: str | None = None, *, config: dict[str, Any] | None = None,
+    name: str | None = None,
+    *,
+    config: dict[str, Any] | None = None,
+    prefer_vision: bool = False,
 ) -> Backend:
     """Pick a Backend.
 
@@ -376,8 +420,18 @@ def resolve_backend(
          mock. This test/offline hook OVERRIDES a configured `backend`, so a stray
          `ai.json` cannot make the suite hit a real model.
       3. `config["backend"]` — honored like an explicit name.
-      4. no selection — the first AVAILABLE backend in BACKEND_ORDER (claude-first).
+      4. no selection — the first AVAILABLE backend in BACKEND_ORDER (claude-first),
+         EXCEPT when `prefer_vision` is set (see below).
       5. nothing available — a structured MissingDependency listing install options.
+
+    `prefer_vision` (opt-in per call, for a caller that WILL pass images): among the
+    available backends it prefers the first `supports_images=True` one over a blind
+    (text-only) one, so a vision task does not silently auto-pick a sighted-blind backend
+    while a sighted one is installed. It only reshapes the AUTO-PICK path (step 4) — an
+    explicit `name` / config `backend` is still honored verbatim (the judge/veto already
+    label a blind explicit choice). If NO available backend is sighted, it falls back to
+    the first available one but SURFACES that on stderr rather than going silently blind.
+    The default (prefer_vision=False) keeps the claude-first order unchanged.
 
     An unknown name raises InvalidArgument.
     """
@@ -406,10 +460,36 @@ def resolve_backend(
             )
         return backend
 
-    for candidate in BACKEND_ORDER:
-        backend = _construct(candidate, config)
-        if backend.available():
-            return backend
+    if not prefer_vision:
+        # Default path: first available in BACKEND_ORDER, EARLY-RETURN so a cheap head
+        # backend (claude) never triggers the availability probes of later ones — notably
+        # OllamaBackend.available()'s socket probe. Preserves the original short-circuit.
+        for candidate in BACKEND_ORDER:
+            backend = _construct(candidate, config)
+            if backend.available():
+                return backend
+    else:
+        # Vision path: return the first AVAILABLE + sighted backend, else fall back to the
+        # first available blind one but SURFACE it. NOTE: `supports_images` is a TRANSPORT
+        # capability (Ollama can carry images WITH a vision model) — it does not prove the
+        # configured model actually sees; the judge/veto still label a weak read.
+        first_available: Backend | None = None
+        for candidate in BACKEND_ORDER:
+            backend = _construct(candidate, config)
+            if not backend.available():
+                continue
+            if backend.supports_images:
+                return backend
+            if first_available is None:
+                first_available = backend
+        if first_available is not None:
+            print(
+                "    resolve_backend: vision requested but no image-capable backend is "
+                f"available; falling back to BLIND '{first_available.name}' (text-only). "
+                "Install codex or a vision Ollama model for a sighted judge.",
+                file=sys.stderr, flush=True,
+            )
+            return first_available
 
     raise MissingDependency(
         "any AI backend (claude, codex, opencode, ollama)",

@@ -28,12 +28,12 @@
 #     field (if any) is ignored.
 #   - Parsing, stability, and cross-judge math are PURE functions (no backend, no I/O) so
 #     they are unit-testable in isolation.
-#   - CAVEAT (honest): `ai.backends.Backend.complete()` does not (yet) expose a temperature
-#     knob, so the temp-0 / temp-0.1 split is recorded as INTENDED metadata, not enforced
-#     at the transport. The N-sample stability machinery is wired and correct the moment a
-#     temperature-capable backend arrives; today the stability signal reflects whatever
-#     nondeterminism the chosen backend exhibits across N identical calls. See
-#     docs/commands/judge.md "Limitations".
+#   - `ai.backends.Backend.complete()` now takes a `temperature`, and this harness threads
+#     temp-0 for the canonical read and temp-0.1 for the N stability samples to the
+#     TRANSPORT. It is honored by temperature-capable backends (ollama HTTP `options`);
+#     the CLI backends (claude/codex/opencode) accept-but-ignore it (no temperature flag),
+#     so on those the stability signal still reflects only whatever nondeterminism the
+#     backend exhibits across N calls. See docs/commands/judge.md "Limitations".
 # ─────────────────────────────────────────────────────────────────────────────
 from __future__ import annotations
 
@@ -151,10 +151,10 @@ class JudgeResult:
             "per_dim_range": dict(self.per_dim_range),
             "supports_images": self.supports_images,
             "blind": self.blind,
-            # Intended temperatures for the canonical vs stability runs. Recorded for audit;
-            # NOT yet enforced at the transport (Backend.complete has no temperature knob).
-            "intended_canonical_temp": CANONICAL_TEMP,
-            "intended_stability_temp": STABILITY_TEMP,
+            # Temperatures threaded to the transport for the canonical vs stability runs
+            # (honored by temperature-capable backends; accept-but-ignored by the CLI ones).
+            "canonical_temp": CANONICAL_TEMP,
+            "stability_temp": STABILITY_TEMP,
         }
 
 
@@ -425,8 +425,9 @@ def _score_once(
     images: list[pathlib.Path],
     rubric: Sequence[RubricDimension],
     timeout: float,
+    temperature: float | None,
 ) -> RubricScore:
-    text = backend.complete(system, user, images=images, timeout=timeout)
+    text = backend.complete(system, user, images=images, timeout=timeout, temperature=temperature)
     return parse_rubric_response(text, rubric)
 
 
@@ -450,10 +451,14 @@ def _run_judge(
     images = [reference_img, render_img]
     blind = not backend.supports_images
 
-    canonical = _score_once(backend, system, user, images, rubric, timeout)
+    # The canonical read is at temp 0 (deterministic logged score); the N stability samples
+    # are at temp 0.1 so the FlipFlop detector measures near-greedy nondeterminism. These
+    # temperatures are now threaded to the TRANSPORT (honored by temperature-capable
+    # backends such as ollama; the CLI backends accept-but-ignore, never fake).
+    canonical = _score_once(backend, system, user, images, rubric, timeout, CANONICAL_TEMP)
     samples: list[RubricScore] = []
     for _ in range(max(0, stability_n)):
-        samples.append(_score_once(backend, system, user, images, rubric, timeout))
+        samples.append(_score_once(backend, system, user, images, rubric, timeout, STABILITY_TEMP))
     # The canonical (logged) score is part of the stability set: a canonical that
     # diverges from the samples IS instability, and this also stops stability_n=1 from
     # trivially reporting "stable" off a single sample compared to nothing.
@@ -479,8 +484,11 @@ def _resolve_judges(
     yields one judge; a sequence is truncated/kept as the distinct judge panel. A `str`
     (or a sequence of str) is a backend NAME resolved via `resolve_backend` — without this
     guard a bare `"claude"` would be iterated character by character (str is a Sequence)."""
+    # Auto-resolve is a VISION task (the judge always attaches images), so prefer a sighted
+    # backend over a text-only one. An explicit NAME is honored as-is (the caller asked for
+    # it; the blind labelling below still surfaces a text-only choice).
     if backend is None:
-        return [resolve_backend()]
+        return [resolve_backend(prefer_vision=True)]
     if isinstance(backend, str):
         return [resolve_backend(backend)]
     if isinstance(backend, Backend):
@@ -617,7 +625,10 @@ def _pairwise_pref(
     """One comparative call. Returns (actual_winner_label, margin, raw_slot) where the raw
     slot ('first'/'second'/'tie') is mapped back to the caller's A/B label so the two
     presentation orders can be compared on the SAME axis."""
-    text = backend.complete(system, user, images=[reference_img, first, second], timeout=timeout)
+    text = backend.complete(
+        system, user, images=[reference_img, first, second],
+        timeout=timeout, temperature=CANONICAL_TEMP,
+    )
     slot, margin = parse_pairwise_response(text)
     actual = {"first": first_label, "second": second_label, "tie": "tie"}[slot]
     return actual, margin, slot
@@ -639,7 +650,12 @@ def judge_pairwise(
     favoured the first-shown one (position bias, arXiv:2406.07791): the verdict is forced to
     `tie` and `position_consistent` is False. `margin` (0-4) is the averaged confidence gap
     only when the orders agree."""
-    b = resolve_backend(backend) if isinstance(backend, str) else (backend or resolve_backend())
+    # Pairwise always attaches the reference + both renders, so an auto-resolve prefers a
+    # sighted backend; an explicit name is honored verbatim (blind is still surfaced below).
+    if isinstance(backend, str):
+        b = resolve_backend(backend)
+    else:
+        b = backend or resolve_backend(prefer_vision=True)
     rub = tuple(rubric) if rubric else DEFAULT_RUBRIC
     ref = pathlib.Path(reference_img).expanduser()
     a_path = pathlib.Path(render_a).expanduser()

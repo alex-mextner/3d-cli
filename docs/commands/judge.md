@@ -39,14 +39,20 @@ always recomputed** from the per-dimension scores; a model's own "mean" field is
   is always `SINGLE_JUDGE=true` → `low-confidence`.
 - **Blind (text-only) surfacing.** A backend whose `supports_images` is `False` cannot see
   the images. It is excluded from the visual aggregate and, if no sighted judge remains, the
-  verdict is `LABEL=blind` — **never** reported as a real visual score.
+  verdict is `LABEL=blind` — **never** reported as a real visual score. When there is **no
+  selection at all** (no `--backend` *and* no `backend` set in `ai.json`) the auto-pick now
+  **prefers a sighted backend** over a text-only one (it only lands blind if none is
+  installed, and says so on stderr). An explicit `--backend` **or** a configured `ai.json`
+  `backend` is honored verbatim — a blind choice is still surfaced by the `blind` label.
 
-> **Limitation (honest):** `ai.backends.Backend.complete()` does not yet expose a
-> temperature knob, so the temp-0 / temp-0.1 split is recorded as *intended* metadata, not
-> enforced at the transport. The N-sample stability machinery is wired and correct the
-> moment a temperature-capable backend lands; today the stability signal reflects whatever
-> nondeterminism the chosen backend shows across N calls. A judge that "runs" on a mock is
-> not evidence it judges *real* renders well — that needs a human-labelled photo set.
+> **Temperature (now threaded to the transport):** `ai.backends.Backend.complete()` takes a
+> `temperature`, and the harness sends the canonical read at **temp 0** and the N stability
+> samples at **temp 0.1**. This is honored by temperature-capable backends (**Ollama**, via
+> the HTTP `options` block); the **CLI backends** (`claude`, `codex`, `opencode`) expose no
+> temperature flag, so they accept-but-ignore it — the value is never faked. On those
+> backends the stability signal still reflects only whatever nondeterminism they show across
+> N calls. A judge that "runs" on a mock is not evidence it judges *real* renders well —
+> that needs a human-labelled photo set.
 
 ## Options
 
