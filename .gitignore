@@ -3,6 +3,9 @@
 __pycache__/
 *.pyc
 
+# macOS Finder metadata
+.DS_Store
+
 # OpenSCAD libraries are cloned on demand (first-run bootstrap), not vendored.
 libs/*/
 
