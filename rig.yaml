@@ -7,7 +7,15 @@
 
 version: 1
 scripts:
+  # UV_PROJECT_ENVIRONMENT=.venv pins uv to THIS tree's OWN environment so a leaked absolute
+  # UV_PROJECT_ENVIRONMENT from another agent's session can't make uv borrow a sibling
+  # worktree's .venv and silently test the wrong deps. The value is RELATIVE on purpose: uv
+  # resolves it against the project root it discovers, and both callers of this script — the
+  # `dev` runner and the pre-commit hook — invoke it with cwd == the tree root (command
+  # substitution like `$(git rev-parse ...)` is rejected by the dev command allowlist, so a
+  # relative pin is both the safe and the correct choice here).
   test: >-
+    UV_PROJECT_ENVIRONMENT=.venv
     uv run --with ruff --with pytest --with pytest-cov --with pytest-timeout --with mypy
     --with fastapi --with uvicorn --with markdown --with pyyaml --with httpx
     python tests/run_gate.py
