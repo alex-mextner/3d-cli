@@ -1,0 +1,1 @@
+Low-poly cat reconstruction reference assets. Binary masks are generated from the supplied reference renders for deterministic silhouette checks; `reference_profiles.json` stores a compact low-resolution silhouette profile used by the Blender fitting loop.
