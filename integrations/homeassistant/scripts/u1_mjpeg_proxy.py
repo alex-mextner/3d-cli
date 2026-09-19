@@ -12,6 +12,8 @@ import urllib.parse
 import urllib.request
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import re
+from u1_print_inspector import Inspector, overlay
 
 
 SOURCE_URL = os.environ.get(
@@ -51,6 +53,10 @@ START_MONITOR_DOMAINS = [
 ]
 
 
+_source = urllib.parse.urlsplit(SOURCE_URL)
+inspector = Inspector(os.environ.get("U1_PRINTER_URL", f"{_source.scheme}://{_source.netloc}"))
+
+
 class FrameCache:
     def __init__(self) -> None:
         self._condition = threading.Condition()
@@ -80,6 +86,9 @@ class FrameCache:
             started = time.monotonic()
             try:
                 frame = fetch_frame()
+                # Render once per camera fetch, shared by all JPEG/MJPEG viewers.
+                # Do not silently present an undecorated image as an enriched feed.
+                frame = overlay(frame, inspector.snapshot())
                 with self._condition:
                     self._frame = frame
                     self._updated_at = time.time()
@@ -209,14 +218,40 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "U1MJPEG/1.0"
 
     def do_GET(self) -> None:  # noqa: N802
-        if self.path.startswith("/health"):
+        parsed = urllib.parse.urlsplit(self.path)
+        if parsed.path == "/status.json":
+            self._json_response(200, inspector.snapshot())
+            return
+        if parsed.path.startswith("/layers/"):
+            match = re.fullmatch(r"/layers/([1-9][0-9]{0,5})", parsed.path)
+            args = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+            job = args.get("job", [""])[0]
+            if (not match or int(match[1]) > 100000 or set(args) - {"job"}
+                    or len(args.get("job", [])) > 1
+                    or (job and not re.fullmatch(r"[a-f0-9]{64}", job))):
+                self._json_response(400, {"error": "invalid_layer_request"})
+                return
+            status, data = inspector.layer(int(match[1]), job or None)
+            self._json_response(status, data)
+            return
+        if parsed.path == "/health":
             self._health()
-        elif self.path.startswith("/u1.jpg"):
+        elif parsed.path == "/u1.jpg":
             self._snapshot()
-        elif self.path.startswith("/u1.mjpeg"):
+        elif parsed.path == "/u1.mjpeg":
             self._mjpeg()
         else:
             self.send_error(HTTPStatus.NOT_FOUND, "not found")
+
+    def _json_response(self, status: int, data: dict) -> None:
+        body = json.dumps(data, ensure_ascii=False, allow_nan=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     def log_message(self, fmt: str, *args: object) -> None:
         print(f"{self.address_string()} - {fmt % args}", flush=True)
@@ -241,8 +276,8 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _snapshot(self) -> None:
-        frame, _, error = cache.get()
-        if not frame:
+        frame, updated_at, error = cache.get()
+        if not frame or time.time() - updated_at > 15:
             self.send_error(HTTPStatus.BAD_GATEWAY, error or "no frame")
             return
 
@@ -264,7 +299,10 @@ class Handler(BaseHTTPRequestHandler):
         while True:
             frame, updated_at, _ = cache.wait_for_frame(last_seen, timeout=2.0)
             if not frame:
+                time.sleep(0.5)
                 continue
+            if time.time() - updated_at > 15:
+                return  # Close stale streams instead of presenting old frames as live.
             last_seen = updated_at
             try:
                 self.wfile.write(
@@ -282,6 +320,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
+    inspector.start()
     keepalive.start()
     cache.start()
     server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)

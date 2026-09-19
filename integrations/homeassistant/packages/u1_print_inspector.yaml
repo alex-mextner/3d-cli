@@ -1,0 +1,11 @@
+# Local read-only inspector, accessed only through authenticated HA services.
+# No REST sensor: avoid recording high-frequency raw telemetry into the HA DB.
+rest_command:
+  u1_inspector_status:
+    url: "http://u1-camera-proxy:8090/status.json"
+    method: get
+    timeout: 10
+  u1_inspect_layer:
+    url: "http://u1-camera-proxy:8090/layers/{{ layer | int(-1) }}?job={{ job | default('') | urlencode }}"
+    method: get
+    timeout: 10
