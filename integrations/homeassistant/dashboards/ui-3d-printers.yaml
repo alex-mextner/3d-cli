@@ -177,6 +177,12 @@ views:
                 media: video
             style: "video {aspect-ratio: 16/9; object-fit: contain; background: #111;}"
 
+          - type: custom:u1-share-card
+            title: Поделиться камерой U1
+            entity: camera.u1_camera
+            public_url: https://spry-gazelle-4693.dataplicity.io
+            refresh: 5
+
       - type: grid
         cards:
           - type: history-graph
