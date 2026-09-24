@@ -344,7 +344,9 @@ template:
       - name: "Printer K1 SE Online"
         unique_id: printer_k1_se_online
         device_class: connectivity
-        state: "{{ states('sensor.k1se_85b6_system') not in ['unknown', 'unavailable'] }}"
+        # sensor.k1se_85b6_system / _model keep a cached static value while the
+        # printer is off, so use a live telemetry sensor instead.
+        state: "{{ states('sensor.k1se_85b6_nozzle_temperature') not in ['unknown', 'unavailable'] }}"
 
       - name: "Printer K1 SE Printing"
         unique_id: printer_k1_se_printing
