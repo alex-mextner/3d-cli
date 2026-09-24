@@ -3,7 +3,7 @@
 Instructions for AI agents (and humans) working in this repository. English only.
 
 > **Portable dev rules live in the global agent-tools skills:**
-> github.com/alex-mextner/agent-tools (`skills/universal/` + `skills/by-type/cli`).
+> git.hyperide.ai/ultrabricks/agent-tools (`skills/universal/` + `skills/by-type/cli`).
 > They cover the stack-agnostic discipline this file used to spell out at length — atomic
 > commits, push-regularly, AI review before commit, dead-code investigation, visual-proof
 > cycle, GAN critic loop, and the CLI-shaped skills `self-registering-commands`,
@@ -237,7 +237,7 @@ skills (`atomic-commits`, `ai-review-before-commit`, `pre-commit-gate`,
   feature branch, open a PR".)
 - **Review model roster + minimum bar.** The pre-commit `review` runner's baseline for
   this repo is `review -m codex -m gemini -m oc:fireworks/accounts/fireworks/routers/kimi-k2p6-turbo`
-  (install/update from `https://github.com/alex-mextner/review-cli`). The minimum bar for
+  (install/update from `https://git.hyperide.ai/ultrabricks/review-cli`). The minimum bar for
   THIS repo is Codex plus at least one independent non-Codex reviewer from a different
   provider/model family — a second Codex run does not count. If no independent non-Codex
   reviewer is available, record the provider-wide blocker; never silently treat

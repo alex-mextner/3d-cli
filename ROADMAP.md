@@ -13,7 +13,7 @@ FDM lifecycle — idea/spec → AI-assisted **parametric** modeling (OpenSCAD-fi
 matching, animation, simulation → **material procurement/inventory** → print prep → **printing,
 live monitoring & failure recovery** (Klipper/Moonraker, OctoPrint, Bambu, Prusa) — plus live
 observation of AI agents doing the work. Its own repo
-([github.com/alex-mextner/3d-cli](https://github.com/alex-mextner/3d-cli)), installed as a standard Python package exposing the `3d`
+([git.hyperide.ai/ultrabricks/3d-cli](https://git.hyperide.ai/ultrabricks/3d-cli)), installed as a standard Python package exposing the `3d`
 console-script (pipx / uv tool / pip — see §29), not a manual symlink.
 
 ## 0a. Design influences & philosophy (the meta-thinking)
