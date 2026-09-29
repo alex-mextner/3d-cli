@@ -258,3 +258,7 @@ OpenSCAD's 6-param `eye→center` vector camera form (`--camera=ex,ey,ez,cx,cy,c
 ### Wonder3D
 <a id="wonder3d"></a>
 Cross-domain multi-view normal-map diffusion for single-image 3D; its normal maps are useful as a critic channel. https://github.com/xxlong0/Wonder3D
+
+### WriteText
+<a id="writetext"></a>
+OpenSCAD library shipped in `openscad-libs/WriteText/`: raised/engraved lettering around cylinder and cone walls using native `text()` (any system font, Cyrillic included). Successor of Write.scad by HarlanDMii (CC BY 3.0). https://www.thingiverse.com/thing:16193

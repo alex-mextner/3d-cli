@@ -85,6 +85,8 @@ These modules model project state, user config, and local registries:
 - `procurement.py`
 - `lib/registries/printers.py`
 - `lib/registries/projects.py`
+- `lib/registries/openscad_libs.py` — known OpenSCAD libraries + install/uninstall into
+  OpenSCAD's user library folder (backs `3d openscad libs`)
 - `project.py`
 - `reporting.py`
 - `workspaces.py`

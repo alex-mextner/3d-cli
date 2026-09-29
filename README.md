@@ -567,6 +567,21 @@ auto-exported by the CLI — so `include <BOSL2/std.scad>` just resolves, no man
 # re-install: rm ~/.config/3d-cli/.bootstrapped && 3d help
 ```
 
+Those feed `3d`'s own renders. For `.scad` files you open in the OpenSCAD app or render
+with a bare `openscad` from any directory, install libraries into OpenSCAD's **user
+library folder** (macOS `~/Documents/OpenSCAD/libraries`), which OpenSCAD always searches:
+
+```bash
+3d openscad libs list                   # known libraries + where OpenSCAD finds them
+3d openscad libs WriteText install      # text on cylinders/cones, Cyrillic OK
+3d openscad libs WriteText uninstall
+```
+
+`WriteText` ships in this repo (`openscad-libs/WriteText/`): native-`text()` lettering
+wrapped around cylinder and cone walls, the successor of
+[Write.scad by HarlanDMii](https://www.thingiverse.com/thing:16193) (CC BY 3.0). See
+[docs/commands/openscad.md](docs/commands/openscad.md).
+
 ## Configuration & state
 
 `3d` keeps all its state under one config dir and one data dir (ROADMAP §23):
@@ -595,6 +610,7 @@ tests/              ruff + pytest unit tests + the CLI smoke harness + mypy gate
 docs/commands/      per-command documentation fragments
 docs/critic-prompts.md  the vision-critic prompt patterns
 libs/               OpenSCAD libraries cloned on demand (gitignored)
+openscad-libs/      OpenSCAD libraries shipped with 3d (WriteText), installed by `3d openscad libs`
 examples/cube.scad  trivial test part
 pyproject.toml      python deps (uv project: core + optional extras preprocess/viz/web/dev)
 uv.lock             locked dependency set (uv sync)
