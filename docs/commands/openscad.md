@@ -39,7 +39,7 @@ ship a library that lives in this repo, so `3d` does it directly (stdlib + `git`
 | `--git URL` | Install a library that is not in the registry from a git repository; `<name>` becomes the folder name used in `use <name/...>` |
 | `--ref REF` | Git branch or tag to install instead of the default branch (git libraries only) |
 | `--dir DIR` | Library folder to use instead of the user library folder (e.g. a folder on your `OPENSCADPATH`); pass the same `--dir` to `uninstall`/`update`/`where` |
-| `--force` | Reinstall, or replace an existing folder of the same name |
+| `--force` | Reinstall, or replace an existing folder of the same name. The new copy is fetched first: if that fails, the existing install stays as it was |
 
 ```bash
 3d openscad libs list
@@ -79,10 +79,18 @@ ref, or the repo path it was copied from), commit, time, and the list of files c
   added is kept and reported. This also works where macOS privacy protection denies
   listing `~/Documents` to the terminal.
 - `update` re-clones git libraries (same URL/ref) or re-copies repo libraries, dropping
-  files that disappeared upstream.
+  files that disappeared upstream and keeping files you added.
+- `update` and `install --force` fetch the new copy before touching the old one: it is
+  built with its manifest in a hidden `.<name>.3d-staging-*` folder next to the library,
+  then renamed into place. If the clone fails (offline, dead URL, a `--ref` that does not
+  exist) the command exits non-zero and the installed files and manifest stay exactly as
+  they were. Once the new copy is in place, a folder 3d did not install (replaced with
+  `--force`) is deleted; a 3d install loses only its recorded files, and files you added
+  move into the new copy. Should one clash with a file the new version ships, the previous
+  copy (holding yours) stays in the staging folder and its path is printed.
 - Git libraries are shallow-cloned into a temporary folder under
   `~/.local/share/3d-cli/openscad-libs/` (honors `$XDG_DATA_HOME`); their files, minus
-  hidden folders such as `.git`/`.github`, are copied into the library folder and the
+  hidden folders such as `.git`/`.github`, are copied into the staging folder and the
   clone is removed.
 - Library names must be a single folder name (letters, digits, `.`, `_`, `+`, `-`); `/`
   and `..` are rejected, so nothing outside the library folder is ever written or deleted.

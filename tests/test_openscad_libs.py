@@ -2,6 +2,7 @@
 may touch."""
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -81,6 +82,126 @@ def test_uninstall_removes_only_recorded_files(tmp_path: Path) -> None:
     assert count >= 3
     assert leftovers == [str(path)]
     assert [p.name for p in path.iterdir()] == ["my-notes.txt"]
+
+
+def test_failed_reinstall_leaves_the_install_and_its_manifest_untouched(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    res = ol.install(ol.resolve_spec("WriteText"), tmp_path / "libs")
+    before = {p.name: p.read_bytes() for p in res.path.iterdir()}
+    monkeypatch.setattr(ol, "repo_root", lambda: str(tmp_path / "no-checkout"))  # source gone
+
+    with pytest.raises(ThreeDError, match="missing from this 3d checkout"):
+        ol.update("WriteText", tmp_path / "libs")
+    with pytest.raises(ThreeDError, match="missing from this 3d checkout"):
+        ol.install(ol.resolve_spec("WriteText"), tmp_path / "libs", force=True)
+
+    assert {p.name: p.read_bytes() for p in res.path.iterdir()} == before
+    assert os.listdir(tmp_path / "libs") == ["WriteText"]  # no staging folder left behind
+
+
+def _interrupt_landing(monkeypatch: pytest.MonkeyPatch, dest: Path, *, also_restore: bool = False) -> None:
+    """Make os.rename raise KeyboardInterrupt when the staged new copy is renamed onto
+    `dest` (the old copy is already aside), and with `also_restore` when the old copy is
+    renamed back too (a second Ctrl-C)."""
+    real_rename = os.rename
+
+    def rename(src: str | Path, dst: str | Path) -> None:
+        staged = Path(src).parent.name.startswith(f".{dest.name}.3d-staging-")
+        if Path(dst) == dest and staged and (Path(src).name == dest.name or also_restore):
+            raise KeyboardInterrupt
+        real_rename(src, dst)
+
+    monkeypatch.setattr(ol.os, "rename", rename)
+
+
+def test_interrupted_swap_puts_the_old_install_back(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    res = ol.install(ol.resolve_spec("WriteText"), tmp_path)
+    before = {p.name: p.read_bytes() for p in res.path.iterdir()}
+    _interrupt_landing(monkeypatch, res.path)
+
+    with pytest.raises(KeyboardInterrupt):
+        ol.install(ol.resolve_spec("WriteText"), tmp_path, force=True)
+    monkeypatch.undo()
+
+    assert {p.name: p.read_bytes() for p in res.path.iterdir()} == before
+    assert os.listdir(tmp_path) == ["WriteText"]
+
+
+def test_swap_that_cannot_be_undone_says_where_the_old_install_is(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    res = ol.install(ol.resolve_spec("WriteText"), tmp_path)
+    before = {p.name: p.read_bytes() for p in res.path.iterdir()}
+    _interrupt_landing(monkeypatch, res.path, also_restore=True)
+
+    with pytest.raises(ThreeDError, match="the previous copy is at ") as err:
+        ol.install(ol.resolve_spec("WriteText"), tmp_path, force=True)
+    monkeypatch.undo()
+
+    kept = Path(str(err.value).rsplit("the previous copy is at ", 1)[1])
+    assert {p.name: p.read_bytes() for p in kept.iterdir()} == before
+
+
+def test_forced_reinstall_over_a_link_replaces_the_link_not_what_it_points_to(tmp_path: Path) -> None:
+    real = ol.install(ol.resolve_spec("WriteText"), tmp_path / "elsewhere")
+    (real.path / "notes.txt").write_text("keep me\n", encoding="utf-8")
+    before = {p.name: p.read_bytes() for p in real.path.iterdir()}
+    (tmp_path / "libs").mkdir()
+    (tmp_path / "libs" / "WriteText").symlink_to(real.path)
+
+    again = ol.install(ol.resolve_spec("WriteText"), tmp_path / "libs", force=True)
+
+    assert not again.path.is_symlink() and (again.path / "WriteText.scad").is_file()
+    assert {p.name: p.read_bytes() for p in real.path.iterdir()} == before
+    assert os.listdir(tmp_path / "libs") == ["WriteText"]
+
+
+def test_reinstall_keeps_files_and_folders_you_added(tmp_path: Path) -> None:
+    res = ol.install(ol.resolve_spec("WriteText"), tmp_path)
+    (res.path / "notes.txt").write_text("keep me\n", encoding="utf-8")
+    (res.path / "mine").mkdir()
+    (res.path / "mine" / "part.scad").write_text("cube(1);\n", encoding="utf-8")
+    (res.path / "scratch").mkdir()
+
+    again = ol.install(ol.resolve_spec("WriteText"), tmp_path, force=True)
+
+    assert (again.path / "notes.txt").read_text(encoding="utf-8") == "keep me\n"
+    assert (again.path / "mine" / "part.scad").read_text(encoding="utf-8") == "cube(1);\n"
+    assert (again.path / "scratch").is_dir()
+    assert (again.path / "WriteText.scad").is_file()
+    assert again.kept is None
+    assert os.listdir(tmp_path) == ["WriteText"]
+
+
+def test_reinstall_sets_aside_your_file_when_the_new_copy_ships_one_of_the_same_name(tmp_path: Path) -> None:
+    res = ol.install(ol.resolve_spec("WriteText"), tmp_path)
+    manifest_path = res.path / ol.MANIFEST
+    # As if README.md were new upstream and the user had written their own before updating.
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["files"].remove("README.md")
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    (res.path / "README.md").write_text("my readme\n", encoding="utf-8")
+
+    again = ol.update("WriteText", tmp_path)
+
+    assert (again.path / "README.md").read_text(encoding="utf-8") != "my readme\n"
+    assert again.kept is not None
+    assert (again.kept / "README.md").read_text(encoding="utf-8") == "my readme\n"
+    assert "README.md" in json.loads((again.path / ol.MANIFEST).read_text(encoding="utf-8"))["files"]
+
+
+def test_a_library_named_previous_can_be_reinstalled(tmp_path: Path) -> None:
+    spec = ol.LibSpec(name="previous", summary="", homepage="", local="openscad-libs/WriteText")
+    ol.install(spec, tmp_path)
+
+    again = ol.install(spec, tmp_path, force=True)
+
+    assert (again.path / "WriteText.scad").is_file()
+    assert again.kept is None
+    assert os.listdir(tmp_path) == ["previous"]
 
 
 def test_uninstall_of_a_foreign_folder_is_refused(tmp_path: Path) -> None:

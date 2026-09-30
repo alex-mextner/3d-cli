@@ -8,8 +8,10 @@ file:// repository (no network).
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 from .workflow_helper import isolated_env, require_binary, require_working_openscad, run_cli, run_shell
@@ -95,9 +97,9 @@ def test_installed_writetext_renders_cyrillic_with_plain_openscad_and_no_warning
     assert out.stat().st_size > 10_000
 
 
-def test_user_installs_updates_and_uninstalls_a_git_library(tmp_path: Path) -> None:
-    """A library outside the registry installs from a git URL, `update` pulls new commits
-    (and drops files deleted upstream), and `uninstall` keeps files the user added."""
+def _git_lib_repo(tmp_path: Path) -> tuple[Path, Callable[..., None]]:
+    """A local git repository `MyLib-src` with one commit (mylib.scad, old.scad) tagged v1,
+    and a runner for further git commands in it."""
     git = require_binary("git")
     repo = tmp_path / "MyLib-src"
     repo.mkdir()
@@ -113,6 +115,20 @@ def test_user_installs_updates_and_uninstalls_a_git_library(tmp_path: Path) -> N
     (repo / "old.scad").write_text("// dropped later\n", encoding="utf-8")
     sh("add", ".")
     sh("commit", "-q", "-m", "v1")
+    sh("tag", "v1")
+    return repo, sh
+
+
+def _snapshot(folder: Path) -> dict[str, bytes]:
+    """Every file under `folder` (manifest included) with its bytes."""
+    return {p.relative_to(folder).as_posix(): p.read_bytes() for p in folder.rglob("*") if p.is_file()}
+
+
+def test_user_installs_updates_and_uninstalls_a_git_library(tmp_path: Path) -> None:
+    """A library outside the registry installs from a git URL, `update` pulls new commits
+    (dropping files deleted upstream, keeping files the user added), and `uninstall` keeps
+    files the user added."""
+    repo, sh = _git_lib_repo(tmp_path)
     url = repo.as_uri()
     lib = _user_libs(tmp_path) / "MyLib"
 
@@ -122,6 +138,7 @@ def test_user_installs_updates_and_uninstalls_a_git_library(tmp_path: Path) -> N
     assert (lib / "mylib.scad").read_text(encoding="utf-8").startswith("module one()")
     assert not (lib / ".git").exists()
 
+    (lib / "notes.txt").write_text("mine\n", encoding="utf-8")
     (repo / "mylib.scad").write_text("module two() { cube(2); }\n", encoding="utf-8")
     (repo / "old.scad").unlink()
     sh("commit", "-q", "-am", "v2")
@@ -129,12 +146,63 @@ def test_user_installs_updates_and_uninstalls_a_git_library(tmp_path: Path) -> N
     assert updated.returncode == 0, updated.stderr
     assert "module two()" in (lib / "mylib.scad").read_text(encoding="utf-8")
     assert not (lib / "old.scad").exists()
+    assert (lib / "notes.txt").read_text(encoding="utf-8") == "mine\n"
+    manifest = json.loads((lib / ".3d-openscad-lib.json").read_text(encoding="utf-8"))
+    assert manifest["files"] == ["mylib.scad"]
 
-    (lib / "notes.txt").write_text("mine\n", encoding="utf-8")
     removed = run_cli(tmp_path, "openscad", "libs", "MyLib", "uninstall")
     assert removed.returncode == 0, removed.stderr
     assert f"kept {lib}" in removed.stdout
     assert sorted(p.name for p in lib.iterdir()) == ["notes.txt"]
+
+
+def test_failed_update_or_forced_reinstall_leaves_the_working_git_library_untouched(tmp_path: Path) -> None:
+    """Issue #48: `update` and `install --force` fetch the replacement before touching the
+    install. A --ref that does not exist, or a source that is gone (offline, dead URL),
+    exits non-zero and leaves every installed file and the manifest byte-for-byte as it was."""
+    repo, sh = _git_lib_repo(tmp_path)
+    url = repo.as_uri()
+    libs = _user_libs(tmp_path)
+    lib = libs / "MyLib"
+    installed = run_cli(tmp_path, "openscad", "libs", "MyLib", "install", "--git", url, "--ref", "v1")
+    assert installed.returncode == 0, installed.stderr
+    (lib / "notes.txt").write_text("mine\n", encoding="utf-8")
+    before = _snapshot(lib)
+    assert {"mylib.scad", "old.scad", "notes.txt", ".3d-openscad-lib.json"} <= before.keys()
+
+    def fails(*argv: str) -> None:
+        res = run_cli(tmp_path, "openscad", "libs", "MyLib", *argv)
+        assert res.returncode != 0, (argv, res.stdout)
+        assert "git clone" in res.stderr, (argv, res.stderr)
+        assert _snapshot(lib) == before, argv
+        assert sorted(p.name for p in libs.iterdir()) == ["MyLib"], argv  # no staging debris
+
+    fails("install", "--git", url, "--ref", "no-such-tag", "--force")
+    sh("tag", "-d", "v1")
+    fails("update")  # the recorded --ref no longer exists upstream
+    repo.rename(tmp_path / "moved-away")
+    fails("update")  # the recorded URL no longer answers
+    fails("install", "--git", url, "--force")
+
+
+def test_update_that_ships_a_file_you_wrote_keeps_yours_and_says_where(tmp_path: Path) -> None:
+    """A file the user added to the install is also added upstream later: `update` installs
+    the upstream one and keeps the user's in the previous copy, printing where it is."""
+    repo, sh = _git_lib_repo(tmp_path)
+    lib = _user_libs(tmp_path) / "MyLib"
+    assert run_cli(tmp_path, "openscad", "libs", "MyLib", "install", "--git", repo.as_uri()).returncode == 0
+    (lib / "extra.scad").write_text("// mine\n", encoding="utf-8")
+    (repo / "extra.scad").write_text("// upstream\n", encoding="utf-8")
+    sh("add", "extra.scad")
+    sh("commit", "-q", "-m", "v2")
+
+    updated = run_cli(tmp_path, "openscad", "libs", "MyLib", "update")
+
+    assert updated.returncode == 0, updated.stderr
+    assert (lib / "extra.scad").read_text(encoding="utf-8") == "// upstream\n"
+    kept = re.search(r"kept the previous copy at (.+?): it still holds", updated.stdout)
+    assert kept is not None, updated.stdout
+    assert (Path(kept[1]) / "extra.scad").read_text(encoding="utf-8") == "// mine\n"
 
 
 def test_user_sees_search_order_and_is_warned_when_openscadpath_shadows_an_install(tmp_path: Path) -> None:

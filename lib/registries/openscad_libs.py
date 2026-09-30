@@ -18,8 +18,12 @@ HOW: every install writes a manifest `.3d-openscad-lib.json` into the library fo
   listing the files it copied. Uninstall deletes exactly those files and nothing else, so
   a hand-installed library of the same name is never clobbered, and removal works even
   where directory listing is denied (macOS privacy protection on ~/Documents).
-  Git libraries are shallow-cloned into a temporary folder under the 3d data dir; their
-  files (minus hidden folders such as .git/.github) are copied over and the clone removed.
+  Git libraries are shallow-cloned into a temporary folder under the 3d data dir. The new
+  files (minus hidden folders such as .git/.github) and manifest are staged in a hidden
+  folder next to the destination and only then renamed into place (the old folder renamed
+  aside first, and back if that fails), so a failed clone or copy (offline, bad --ref)
+  never touches a working install. Files the user added to a 3d install move into the
+  new copy.
 
 INVARIANTS: stdlib-only; command modules reach it lazily. Errors are lib/errors.py types.
 """
@@ -298,14 +302,20 @@ class InstallResult:
     source: str
     commit: str | None
     already: bool = False
+    kept: Path | None = None  # replaced copy left in place: it still holds files 3d did not install
 
 
 def install(spec: LibSpec, target_dir: Path | None = None, force: bool = False) -> InstallResult:
     """Copy `spec` into `target_dir` (default: the user library folder) as `<name>/`.
-    Idempotent: an existing 3d-managed install is left alone unless `force`."""
+    Idempotent: an existing 3d-managed install is left alone unless `force`.
+
+    Transactional: the new copy and its manifest are built in a hidden staging folder inside
+    `target_dir` (same filesystem), then renamed into place. A failed clone (offline, dead
+    URL, bad --ref) or copy raises before the existing folder is touched."""
     base = target_dir or user_library_dir()
     dest = base / spec.name
-    if dest.exists():
+    replace_foreign = False  # --force over a folder 3d did not install: it may be deleted
+    if os.path.lexists(dest):
         manifest = read_manifest(dest)
         if manifest is None and not force:
             raise UsageError(
@@ -316,29 +326,59 @@ def install(spec: LibSpec, target_dir: Path | None = None, force: bool = False) 
         if manifest is not None and not force:
             return InstallResult(dest, len(_manifest_files(manifest)), _source(manifest),
                                  _str(manifest, "commit"), already=True)
-        if manifest is not None:
-            _remove_files(dest, _manifest_files(manifest) + [MANIFEST])
-        else:
-            try:
-                shutil.rmtree(dest)
-            except OSError as exc:
-                raise ThreeDError(
-                    f"cannot remove the existing {dest}: {exc}",
-                    command=ERR_CTX,
-                    remediation=[f"Delete {dest} by hand (Finder / a terminal with disk access), then retry."],
-                ) from exc
+        replace_foreign = manifest is None
 
+    try:
+        base.mkdir(parents=True, exist_ok=True)
+        stage = Path(tempfile.mkdtemp(prefix=f".{spec.name}.3d-staging-", dir=base))
+    except OSError as exc:
+        raise _fs_error(f"create a staging folder in {base}", exc) from exc
+    # The new copy and, once swapped out, the one it replaces (names differ by construction).
+    new, previous = stage / spec.name, stage / f"{spec.name}.previous"
+    try:
+        manifest_data = _build(spec, new)
+        try:
+            if os.path.lexists(dest):
+                os.rename(dest, previous)
+            os.rename(new, dest)
+        except OSError as exc:
+            raise _fs_error(f"move the new {spec.name} into {dest}", exc) from exc
+    except BaseException as exc:
+        if os.path.lexists(previous):
+            _put_back(previous, dest, exc)  # raises, keeping `stage`, unless it is back at dest
+        shutil.rmtree(stage, ignore_errors=True)
+        raise
+    try:
+        kept = _retire(previous, dest, replace_foreign) if os.path.lexists(previous) else None
+    except BaseException as exc:  # e.g. Ctrl-C while moving your files over
+        if not os.path.lexists(previous):
+            raise
+        raise ThreeDError(
+            f"{spec.name} was replaced, but tidying up the previous copy stopped "
+            f"({str(exc) or type(exc).__name__}); files you added may still be at {previous}",
+            command=ERR_CTX,
+            remediation=[f"Move what you need from {previous} into {dest}, then delete {stage}."],
+        ) from exc
+    if kept is None:
+        shutil.rmtree(stage, ignore_errors=True)
+    return InstallResult(dest, len(_manifest_files(manifest_data)), _source(manifest_data),
+                         _str(manifest_data, "commit"), kept=kept)
+
+
+def _build(spec: LibSpec, into: Path) -> dict[str, object]:
+    """Fetch `spec` and put its files plus manifest into the fresh folder `into`; returns the
+    manifest. Touches nothing else, so any failure here leaves an existing install as is."""
     if spec.git:
         try:
-            stage_root = paths.data_dir() / "openscad-libs"
-            stage_root.mkdir(parents=True, exist_ok=True)
-            tmp = Path(tempfile.mkdtemp(prefix=f"{spec.name}-", dir=stage_root))
+            clone_root = paths.data_dir() / "openscad-libs"
+            clone_root.mkdir(parents=True, exist_ok=True)
+            tmp = Path(tempfile.mkdtemp(prefix=f"{spec.name}-", dir=clone_root))
         except OSError as exc:
             raise _fs_error(f"create a staging folder under {paths.data_dir()}", exc) from exc
         try:
             src = tmp / spec.name
             commit: str | None = _stage_git(spec, src)
-            return _copy_in(spec, src, dest, commit)
+            return _copy_in(spec, src, into, commit)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
     assert spec.local is not None
@@ -349,19 +389,12 @@ def install(spec: LibSpec, target_dir: Path | None = None, force: bool = False) 
             command=ERR_CTX,
             remediation=["Update 3d-cli (git pull) or reinstall it."],
         )
-    return _copy_in(spec, src, dest, None)
+    return _copy_in(spec, src, into, None)
 
 
-def _copy_in(spec: LibSpec, src: Path, dest: Path, commit: str | None) -> InstallResult:
-    """Copy the library files from src to dest and record them in the manifest."""
+def _copy_in(spec: LibSpec, src: Path, into: Path, commit: str | None) -> dict[str, object]:
+    """Copy the library files from src into `into` and write their manifest there."""
     files = _source_files(src)
-    try:
-        for rel in files:
-            (dest / rel).parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src / rel, dest / rel)
-    except OSError as exc:
-        _remove_files(dest, [rel.as_posix() for rel in files])
-        raise _fs_error(f"install {spec.name} into {dest}", exc) from exc
     manifest_data: dict[str, object] = {
         "name": spec.name,
         "git": spec.git,
@@ -373,11 +406,91 @@ def _copy_in(spec: LibSpec, src: Path, dest: Path, commit: str | None) -> Instal
         "files": [rel.as_posix() for rel in files],
     }
     try:
-        (dest / MANIFEST).write_text(json.dumps(manifest_data, indent=2) + "\n", encoding="utf-8")
+        into.mkdir(parents=True, exist_ok=True)
+        for rel in files:
+            (into / rel).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src / rel, into / rel)
+        (into / MANIFEST).write_text(json.dumps(manifest_data, indent=2) + "\n", encoding="utf-8")
     except OSError as exc:
-        _remove_files(dest, [rel.as_posix() for rel in files])
-        raise _fs_error(f"write {dest / MANIFEST}", exc) from exc
-    return InstallResult(dest, len(files), _source(manifest_data), commit)
+        raise _fs_error(f"stage {spec.name} in {into}", exc) from exc
+    return manifest_data
+
+
+def _put_back(previous: Path, dest: Path, exc: BaseException) -> None:
+    """Undo a swap that failed or was interrupted (Ctrl-C) after the old library was renamed
+    to `previous`: rename it back to `dest`. If that is impossible, raise an error saying
+    where it is, so a replaced library is never left behind silently."""
+    try:
+        if not os.path.lexists(dest):
+            os.rename(previous, dest)
+            return
+        problem = f"the new {dest.name} is already in place"
+    except BaseException as restore_exc:  # a second Ctrl-C included
+        problem = f"it could not be put back ({str(restore_exc) or type(restore_exc).__name__})"
+    raise ThreeDError(
+        f"replacing {dest} failed ({str(exc) or type(exc).__name__}) and {problem}; "
+        f"the previous copy is at {previous}",
+        command=ERR_CTX,
+        remediation=[f"Move {previous} back to {dest} (or copy what you need from it), "
+                     f"then delete {previous.parent}."],
+    ) from exc
+
+
+def _retire(previous: Path, dest: Path, replace_foreign: bool) -> Path | None:
+    """Dispose of the copy `dest` replaced, now at `previous`. A link or file there is
+    unlinked (never what a link points to). A 3d install, judged by the manifest inside it
+    (so a concurrent update is retired by what it really installed), loses only its recorded
+    files; everything you added moves into the new install unless the new library ships the
+    same path. A folder 3d did not install is deleted only when --force asked to replace it.
+    Returns `previous` if anything had to stay there, else None."""
+    try:
+        if previous.is_symlink() or not previous.is_dir():
+            previous.unlink()
+            return None
+    except OSError:
+        return previous
+    manifest = read_manifest(previous)
+    if manifest is None:
+        if replace_foreign:
+            shutil.rmtree(previous, ignore_errors=True)
+        return previous if os.path.lexists(previous) else None
+    try:
+        if not _remove_files(previous, _manifest_files(manifest) + [MANIFEST]):
+            return None  # it held only what 3d installed and is gone
+    except ThreeDError:
+        return previous
+    _move_into(previous, dest)
+    for root, dirs, _ in os.walk(previous, topdown=False):
+        for d in dirs:
+            try:
+                (Path(root) / d).rmdir()
+            except OSError:
+                pass
+    try:
+        previous.rmdir()
+    except OSError:
+        return previous
+    return None
+
+
+def _move_into(src_root: Path, dest: Path) -> None:
+    """Move everything under `src_root` to the same relative path under `dest`: a whole
+    folder (empty ones too) where `dest` has none of that name, else descend into it. Paths
+    `dest` already has stay where they are."""
+    for root, dirs, names in os.walk(src_root):
+        descend: list[str] = []
+        for n in dirs + names:
+            yours = Path(root) / n
+            target = dest / yours.relative_to(src_root)
+            if not os.path.lexists(target):
+                try:
+                    os.rename(yours, target)
+                except OSError:
+                    pass
+            elif (n in dirs and target.is_dir() and not target.is_symlink()
+                  and not yours.is_symlink()):
+                descend.append(n)
+        dirs[:] = descend
 
 
 def _manifest_files(manifest: dict[str, object]) -> list[str]:
@@ -424,7 +537,8 @@ def uninstall(name: str, target_dir: Path | None = None) -> tuple[Path, int, lis
 
 def update(name: str, target_dir: Path | None = None) -> InstallResult:
     """Reinstall from the recorded source (git: a fresh clone of the same URL/ref; repo
-    libraries: this checkout). Files dropped upstream are removed too."""
+    libraries: this checkout). Files dropped upstream are removed too; files you added are
+    kept. If the source cannot be fetched the current install is left exactly as it was."""
     dest = installed_dir(name, target_dir)
     manifest = read_manifest(dest) or {}
     git = _str(manifest, "git")

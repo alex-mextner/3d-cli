@@ -44,7 +44,8 @@ Options:
   --ref REF    git branch or tag to install instead of the default branch (git only)
   --dir DIR    library folder to use instead of the user library folder (e.g. a folder
                on your OPENSCADPATH); pass the same --dir to uninstall/update/where
-  --force      reinstall, or replace an existing folder of the same name
+  --force      reinstall, or replace an existing folder of the same name. The new copy
+               is fetched first: if that fails, the existing install stays as it was
 
 <name> is a single folder name (letters, digits, '.', '_', '+', '-'). Known libraries:
 WriteText (text on cylinders/cones with native fonts, Cyrillic included; after Write.scad
@@ -158,6 +159,7 @@ def _install(name: str, opts: _Opts) -> int:
             print(f"  refresh it: 3d openscad libs {spec.name} update")
     else:
         print(f"installed {spec.name} -> {res.path} ({res.files} files from {res.source}{_rev(res.commit)})")
+        _print_kept(res.kept)
     shadow = ol.locate(spec.name)
     if opts.dir is None and shadow is not None and shadow != res.path:
         print(f"warning: OpenSCAD loads {spec.name} from {shadow} first (OPENSCADPATH); "
@@ -181,7 +183,14 @@ def _update(name: str, opts: _Opts) -> int:
 
     res = ol.update(name, opts.dir)
     print(f"updated {res.path.name} -> {res.path} ({res.files} files from {res.source}{_rev(res.commit)})")
+    _print_kept(res.kept)
     return 0
+
+
+def _print_kept(kept: Path | None) -> None:
+    if kept is not None:
+        print(f"  kept the previous copy at {kept}: it still holds files 3d did not install "
+              f"(for example ones the new version replaced); move what you need, then delete {kept.parent}")
 
 
 def _where(name: str, opts: _Opts) -> int:
