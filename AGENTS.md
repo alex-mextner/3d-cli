@@ -263,7 +263,9 @@ skills (`atomic-commits`, `ai-review-before-commit`, `pre-commit-gate`,
   (`3d openscad libs <name> install|uninstall|update|where`, `list`, `path`) for models
   used outside `3d` (OpenSCAD app, bare `openscad`). Registry + manifest logic lives in
   `lib/registries/openscad_libs.py`; libraries shipped by this repo live in `openscad-libs/`
-  (e.g. `WriteText`, the CC BY successor of Write.scad). See `docs/commands/openscad.md`.
+  (e.g. `WriteText`, the CC BY successor of Write.scad). Every mutation of a library runs
+  under `library_lock(name)` (per-library flock), which also proves staging leftovers stale;
+  a new mutating path must take it. See `docs/commands/openscad.md`.
 - `web` starts the local dashboard (FastAPI + SSE + three.js SPA) — one **thin frontend**
   over the same `lib/` core (architecture §10). `commands/web.py` is the registry command
   (stdlib-only at top level; lazy-imports the optional web tier and raises a structured

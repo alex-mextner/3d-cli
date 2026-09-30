@@ -25,17 +25,32 @@ HOW: every install writes a manifest `.3d-openscad-lib.json` into the library fo
   never touches a working install. Files the user added to a 3d install move into the
   new copy.
 
+  Every install, update and uninstall of a library holds an exclusive per-library lock
+  (<3d data dir>/openscad-libs/locks/<name>.lock, flock), so overlapping runs wait for each
+  other instead of interleaving; the OS drops the lock when the process ends, SIGKILL
+  included, so a dead run never blocks the next. The same lock proves leftovers stale:
+  a `.<name>.3d-staging-*` folder or a clone folder seen while holding it belongs to no
+  live run. sweep_stale() deletes those holding only a half-built copy or a download and
+  keeps (and reports) any that holds more than that, such as a previous copy of the library.
+  A replaced library folder keeps the group and mode (and on macOS the ACL) of the one it
+  replaces.
+
 INVARIANTS: stdlib-only; command modules reach it lazily. Errors are lib/errors.py types.
 """
 from __future__ import annotations
 
+import errno
 import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -106,11 +121,15 @@ def known_lib(name: str) -> LibSpec | None:
 _SAFE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]*")
 
 
+def _is_safe_name(name: str) -> bool:
+    return bool(_SAFE_NAME.fullmatch(name)) and ".." not in name
+
+
 def canonical_name(name: str) -> str:
     """The library folder name for `name`: the registry spelling for known libraries,
     else `name` itself. It must be one plain path component — never `..`, a separator or
     an absolute path — because it is joined onto the library folder we write and delete in."""
-    if not _SAFE_NAME.fullmatch(name) or ".." in name:
+    if not _is_safe_name(name):
         raise InvalidArgument(
             "library",
             name,
@@ -221,6 +240,229 @@ def _fs_error(action: str, exc: OSError) -> ThreeDError:
     )
 
 
+# ---------------------------------------------------------------------------
+# One mutation of a library at a time.
+# ---------------------------------------------------------------------------
+def _lock_path(name: str) -> Path:
+    """One lock file per library, whatever folder it is installed in; lower-cased because
+    `WriteText` and `writetext` are the same folder on a case-insensitive filesystem. On
+    Linux that also makes the two distinct libraries `Foo` and `foo` wait for each other:
+    harmless, and the alternative (a per-platform key) is not worth a second code path."""
+    return paths.data_dir() / "openscad-libs" / "locks" / f"{canonical_name(name).lower()}.lock"
+
+
+def _lock_error(action: str, path: Path, exc: OSError) -> ThreeDError:
+    return ThreeDError(
+        f"cannot {action} {path}: {exc}",
+        command=ERR_CTX,
+        remediation=[f"Make {path.parent} writable, or point XDG_DATA_HOME at a folder that is."],
+    )
+
+
+def _lock(fd: int, wait: bool) -> bool:
+    """Take the exclusive lock on the open file `fd`. With `wait` off, return False when
+    another open of the file holds it; with `wait` on, block until it is free."""
+    if sys.platform == "win32":  # no blocking byte-range lock that Ctrl-C can interrupt
+        import msvcrt
+
+        while True:
+            os.lseek(fd, 0, os.SEEK_SET)
+            try:
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                return True
+            except OSError as exc:
+                if exc.errno not in (errno.EACCES, errno.EDEADLOCK):
+                    raise  # not contention: a structured error, not an endless retry
+                if not wait:
+                    return False
+                time.sleep(0.2)
+    import fcntl
+
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
+    except BlockingIOError:
+        return False
+    return True
+
+
+def _open_locked(name: str, wait: bool) -> tuple[int, bool]:
+    """Open the lock file of `name` and try to lock it; returns (fd, whether it is held)."""
+    path = _lock_path(name)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)  # not inheritable: children never hold it
+    except OSError as exc:
+        raise _lock_error("create the lock file", path, exc) from exc
+    try:
+        held = _lock(fd, wait=False)
+        if not held and wait:
+            print(f"waiting for another `3d openscad libs` run on {name} to finish ...",
+                  file=sys.stderr, flush=True)
+            held = _lock(fd, wait=True)
+    except OSError as exc:
+        os.close(fd)
+        raise _lock_error("lock", path, exc) from exc
+    except BaseException:  # Ctrl-C while waiting
+        os.close(fd)
+        raise
+    return fd, held
+
+
+@contextmanager
+def library_lock(name: str, *, wait: bool = True) -> Iterator[bool]:
+    """Hold the exclusive lock of library `name` for the block. Every run by this user
+    that changes `name` (in any --dir) queues here; the lock file is in the user's own
+    data dir, so another user's runs on a shared --dir are not covered. With `wait` (the default) a busy lock is
+    waited for and announced on stderr, and the block always runs holding it; with `wait`
+    off a busy lock yields False and the block holds nothing. The lock is an flock on a
+    file that stays in place: the OS releases it when the holder exits, however it dies, so
+    a killed run never leaves a stale lock."""
+    fd, held = _open_locked(name, wait)
+    try:
+        yield held
+    finally:
+        os.close(fd)  # releases the lock
+
+
+# ---------------------------------------------------------------------------
+# Leftovers of interrupted installs.
+# ---------------------------------------------------------------------------
+_MKDTEMP_SUFFIX = "[a-z0-9_]{8}"  # the part tempfile.mkdtemp appends to a prefix
+
+
+@dataclass(frozen=True)
+class Stale:
+    """What sweep_stale found. `removed` held only a half-built copy or a download. `kept`
+    hold more than that (a previous copy of the library, files you added, anything 3d did
+    not create) and were not touched. `stuck` should have been removed but could not be."""
+
+    removed: tuple[Path, ...] = ()
+    kept: tuple[Path, ...] = ()
+    stuck: tuple[tuple[Path, str], ...] = ()  # (path, why it could not be removed)
+
+
+@dataclass(frozen=True)
+class Leftover:
+    """A staging folder in a library folder that no running 3d owns."""
+
+    path: Path
+    name: str
+    half_built: bool  # holds only a half-built new copy; False: it holds more, never deleted by 3d
+
+
+def _name_match(pattern: str) -> re.Pattern[str]:
+    """Library folders are case-insensitive on macOS and Windows, so `mylib` and `MyLib`
+    (custom --git names; registry names are canonical) are one library there, and their
+    leftovers must match alike. On Linux they are two libraries and must not."""
+    return re.compile(pattern, re.IGNORECASE if sys.platform in ("darwin", "win32") else 0)
+
+
+def _staging_folders(base: Path, name: str | None = None) -> list[tuple[str, Path]]:
+    """(library name, path) of the hidden `.<name>.3d-staging-*` folders in `base`: those of
+    `name`, or of every library with a valid folder name when `name` is None."""
+    pattern = _name_match(rf"\.({re.escape(name) if name else '.+'})\.3d-staging-{_MKDTEMP_SUFFIX}")
+    try:
+        entries = sorted(os.listdir(base))
+    except OSError:  # missing, or listing denied by macOS privacy protection
+        return []
+    found: list[tuple[str, Path]] = []
+    for entry in entries:
+        match = pattern.fullmatch(entry)
+        if (match and _is_safe_name(match[1])
+                and (base / entry).is_dir() and not (base / entry).is_symlink()):
+            found.append((match[1], base / entry))
+    return found
+
+
+def _clone_folders(name: str) -> list[Path]:
+    """The `<name>-*` folders git libraries are cloned into under the 3d data dir."""
+    root = paths.data_dir() / "openscad-libs"
+    pattern = _name_match(rf"{re.escape(name)}-{_MKDTEMP_SUFFIX}")
+    try:
+        entries = sorted(os.listdir(root))
+    except OSError:
+        return []
+    return [root / e for e in entries
+            if pattern.fullmatch(e) and (root / e).is_dir() and not (root / e).is_symlink()]
+
+
+def _holds_only_new_copy(stage: Path, name: str) -> bool:
+    """True if the staging folder holds nothing but a half-built new `<name>`: no previous
+    copy, and no file the new copy's own manifest does not list (a folder with no manifest
+    qualifies only if it holds no file at all). Such a folder is 3d's own work in progress
+    and safe to delete. Anything else, a stray .DS_Store or a note you left in the copy
+    included, makes it False: that folder is kept, not deleted."""
+    try:
+        if set(os.listdir(stage)) - {name}:
+            return False
+        copy = stage / name
+        if not os.path.lexists(copy):
+            return True
+        if copy.is_symlink() or not copy.is_dir():
+            return False
+        manifest = read_manifest(copy)
+        known = {*_manifest_files(manifest), MANIFEST} if manifest else set()
+        for root, dirs, files in os.walk(copy):
+            if any((Path(root) / d).is_symlink() for d in dirs):
+                return False
+            if any((Path(root) / f).relative_to(copy).as_posix() not in known for f in files):
+                return False
+        return True
+    except OSError:
+        return False
+
+
+def sweep_stale(name: str, target_dir: Path | None = None) -> Stale:
+    """Delete what an interrupted install or update of `name` left behind: the staging
+    folders in `target_dir` (default: the user library folder) that hold only a half-built
+    copy, and the git clone folders. A staging folder that holds anything more is kept.
+    Runs under the library lock (waiting for a live run to end first) and lists the folders
+    only once it holds it, so a folder it touches cannot belong to a running install."""
+    folder = canonical_name(name)
+    base = target_dir or user_library_dir()
+    removed: list[Path] = []
+    kept: list[Path] = []
+    stuck: list[tuple[Path, str]] = []
+
+    def delete(path: Path) -> None:
+        try:
+            shutil.rmtree(path)
+        except OSError as exc:
+            stuck.append((path, str(exc)))
+        else:
+            removed.append(path)
+
+    with library_lock(folder):
+        for lib, stage in _staging_folders(base, folder):
+            if _holds_only_new_copy(stage, lib):
+                delete(stage)
+            else:
+                kept.append(stage)
+        for clone in _clone_folders(folder):
+            delete(clone)
+    return Stale(tuple(removed), tuple(kept), tuple(stuck))
+
+
+def find_leftovers(base: Path) -> list[Leftover]:
+    """Staging folders in `base` that no running 3d owns, for `list` to report. Never
+    waits and never deletes: a library whose lock is held is being worked on right now,
+    so its staging folder is skipped, and so is one whose lock file cannot be used (nobody
+    can tell whether it is stale)."""
+    by_lock: dict[str, list[tuple[str, Path]]] = {}
+    for lib, stage in _staging_folders(base):
+        by_lock.setdefault(lib.lower(), []).append((lib, stage))  # one lock per library, as in _lock_path
+    out: list[Leftover] = []
+    for key in sorted(by_lock):
+        try:
+            with library_lock(by_lock[key][0][0], wait=False) as free:
+                if free:
+                    out += [Leftover(stage, lib, _holds_only_new_copy(stage, lib))
+                            for lib, stage in by_lock[key]]
+        except ThreeDError:
+            continue
+    return out
+
+
 _GIT_REPO_VARS = frozenset({"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR",
                             "GIT_OBJECT_DIRECTORY", "GIT_NAMESPACE", "GIT_PREFIX"})
 
@@ -311,7 +553,15 @@ def install(spec: LibSpec, target_dir: Path | None = None, force: bool = False) 
 
     Transactional: the new copy and its manifest are built in a hidden staging folder inside
     `target_dir` (same filesystem), then renamed into place. A failed clone (offline, dead
-    URL, bad --ref) or copy raises before the existing folder is touched."""
+    URL, bad --ref) or copy raises before the existing folder is touched. Runs under the
+    library lock: a concurrent install/update/uninstall of the same library waits."""
+    with library_lock(spec.name):
+        return _install_locked(spec, target_dir, force)
+
+
+def _install_locked(spec: LibSpec, target_dir: Path | None, force: bool) -> InstallResult:
+    """install() with the library lock already held (update() reads the manifest and
+    installs under one hold, and flock does not nest)."""
     base = target_dir or user_library_dir()
     dest = base / spec.name
     replace_foreign = False  # --force over a folder 3d did not install: it may be deleted
@@ -337,6 +587,7 @@ def install(spec: LibSpec, target_dir: Path | None = None, force: bool = False) 
     new, previous = stage / spec.name, stage / f"{spec.name}.previous"
     try:
         manifest_data = _build(spec, new)
+        _carry_over_attrs(dest, new)
         try:
             if os.path.lexists(dest):
                 os.rename(dest, previous)
@@ -393,7 +644,9 @@ def _build(spec: LibSpec, into: Path) -> dict[str, object]:
 
 
 def _copy_in(spec: LibSpec, src: Path, into: Path, commit: str | None) -> dict[str, object]:
-    """Copy the library files from src into `into` and write their manifest there."""
+    """Copy the library files from src into `into` and write their manifest there. The
+    manifest goes in first: a run killed mid-copy leaves a folder whose every file the
+    manifest lists, which is how sweep_stale tells it from one that also holds yours."""
     files = _source_files(src)
     manifest_data: dict[str, object] = {
         "name": spec.name,
@@ -407,13 +660,56 @@ def _copy_in(spec: LibSpec, src: Path, into: Path, commit: str | None) -> dict[s
     }
     try:
         into.mkdir(parents=True, exist_ok=True)
+        (into / MANIFEST).write_text(json.dumps(manifest_data, indent=2) + "\n", encoding="utf-8")
         for rel in files:
             (into / rel).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src / rel, into / rel)
-        (into / MANIFEST).write_text(json.dumps(manifest_data, indent=2) + "\n", encoding="utf-8")
     except OSError as exc:
         raise _fs_error(f"stage {spec.name} in {into}", exc) from exc
     return manifest_data
+
+
+def _carry_over_attrs(old: Path, new: Path) -> None:
+    """Give the fresh folder `new` the group and mode (and, on macOS, the ACL) of the library
+    folder `old` it is about to replace, so a permission you set on the folder itself survives
+    an update. Each attribute is best effort and independent: one that cannot be copied (a
+    group you are not in, setgid for it, no ACL support) is skipped, never an error and never
+    a reason to skip the others. Times, flags and extended attributes are not copied. A link
+    or file at `old` has nothing worth carrying."""
+    try:
+        st = os.lstat(old)
+    except OSError:
+        return
+    if not stat.S_ISDIR(st.st_mode):
+        return
+    try:
+        if hasattr(os, "chown") and os.lstat(new).st_gid != st.st_gid:
+            os.chown(new, -1, st.st_gid)
+    except OSError:
+        pass
+    mode = stat.S_IMODE(st.st_mode)
+    for wanted in (mode, mode & 0o777):  # chown may have cleared setgid; without it: plain bits
+        try:
+            os.chmod(new, wanted)
+            break
+        except OSError:
+            continue
+    if sys.platform == "darwin":
+        _copy_macos_acl(old, new)
+
+
+def _copy_macos_acl(old: Path, new: Path) -> None:
+    """macOS ACL entries are not visible to the xattr API; move them with the system tools."""
+    try:
+        listing = subprocess.run(["/bin/ls", "-led", str(old.absolute())], capture_output=True,
+                                 text=True, check=False, timeout=30).stdout
+        entries = [m[1] for line in listing.splitlines()[1:]
+                   if (m := re.fullmatch(r" *\d+: (.+)", line))]
+        if entries:
+            subprocess.run(["/bin/chmod", "-E", str(new.absolute())], input="\n".join(entries) + "\n",
+                           text=True, capture_output=True, check=False, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        pass
 
 
 def _put_back(previous: Path, dest: Path, exc: BaseException) -> None:
@@ -527,26 +823,31 @@ def installed_dir(name: str, target_dir: Path | None = None) -> Path:
 
 
 def uninstall(name: str, target_dir: Path | None = None) -> tuple[Path, int, list[str]]:
-    """Remove a 3d-managed install. Returns (path, files removed, leftover dirs)."""
-    dest = installed_dir(name, target_dir)
-    manifest = read_manifest(dest) or {}
-    files = _manifest_files(manifest)
-    leftovers = _remove_files(dest, files + [MANIFEST])
-    return dest, len(files), leftovers
+    """Remove a 3d-managed install. Returns (path, files removed, leftover dirs). Runs
+    under the library lock."""
+    with library_lock(canonical_name(name)):
+        dest = installed_dir(name, target_dir)
+        manifest = read_manifest(dest) or {}
+        files = _manifest_files(manifest)
+        leftovers = _remove_files(dest, files + [MANIFEST])
+        return dest, len(files), leftovers
 
 
 def update(name: str, target_dir: Path | None = None) -> InstallResult:
     """Reinstall from the recorded source (git: a fresh clone of the same URL/ref; repo
     libraries: this checkout). Files dropped upstream are removed too; files you added are
-    kept. If the source cannot be fetched the current install is left exactly as it was."""
-    dest = installed_dir(name, target_dir)
-    manifest = read_manifest(dest) or {}
-    git = _str(manifest, "git")
-    if git:
-        spec = resolve_spec(dest.name, git=git, ref=_str(manifest, "ref"))
-    else:
-        spec = resolve_spec(dest.name)
-    return install(spec, target_dir, force=True)
+    kept. If the source cannot be fetched the current install is left exactly as it was.
+    Runs under the library lock, from reading the recorded source to the swap."""
+    folder = canonical_name(name)
+    with library_lock(folder):
+        dest = installed_dir(name, target_dir)
+        manifest = read_manifest(dest) or {}
+        git = _str(manifest, "git")
+        if git:
+            spec = resolve_spec(dest.name, git=git, ref=_str(manifest, "ref"))
+        else:
+            spec = resolve_spec(dest.name)
+        return _install_locked(spec, target_dir, force=True)
 
 
 def unmanaged_dirs(base: Path) -> list[str] | None:

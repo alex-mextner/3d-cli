@@ -47,6 +47,11 @@ Options:
   --force      reinstall, or replace an existing folder of the same name. The new copy
                is fetched first: if that fails, the existing install stays as it was
 
+Runs that change one library queue behind each other (per-library lock). install, update
+and uninstall first remove what a killed run left behind (hidden .<name>.3d-staging-*
+folders and git clones), keeping and naming any staging folder that holds more than a
+half-built copy (for example your previous copy of the library); list reports such folders.
+
 <name> is a single folder name (letters, digits, '.', '_', '+', '-'). Known libraries:
 WriteText (text on cylinders/cones with native fonts, Cyrillic included; after Write.scad
 by HarlanDMii, https://www.thingiverse.com/thing:16193), BOSL2, NopSCADlib,
@@ -66,6 +71,9 @@ Examples:
   3d openscad libs WriteText uninstall --dir ~/scad-libs"""
 
 _CTX = "openscad libs"
+# What `list` and the sweep say about a staging folder that holds more than a half-built copy.
+_MORE = "holds more than a half-built copy of {name} (your previous copy with files you added?)"
+_ADVICE = "look through it, then delete it yourself"
 _ACTIONS = ("install", "uninstall", "remove", "update", "where", "path")
 
 
@@ -130,6 +138,14 @@ def _print_list() -> int:
     if others:
         print()
         print("Also in the user library folder (not installed by 3d): " + ", ".join(others))
+    left = ol.find_leftovers(user)
+    if left:
+        print()
+        print("Left behind by an earlier install or update (no 3d process is working on them):")
+        for item in left:
+            what = (f"half-built copy of {item.name}: the next install, update or uninstall of it "
+                    "removes it" if item.half_built else f"{_MORE.format(name=item.name)}: {_ADVICE}")
+            print(f"  {item.path}  {what}")
     print()
     print("Install one:  3d openscad libs <name> install")
     return 0
@@ -145,10 +161,26 @@ def _print_path() -> int:
     return 0
 
 
+def _sweep(name: str, opts: _Opts) -> None:
+    """Before changing library `name`: delete what an interrupted install or update left
+    behind for it, and say what was removed or kept."""
+    from registries import openscad_libs as ol  # lazy
+
+    folder = ol.canonical_name(name)
+    stale = ol.sweep_stale(folder, opts.dir)
+    for path in stale.removed:
+        print(f"removed {path}: left by an interrupted install of {folder}")
+    for path in stale.kept:
+        print(f"kept {path}: it {_MORE.format(name=folder)}; {_ADVICE}")
+    for path, why in stale.stuck:
+        print(f"could not remove {path} ({why}); delete it yourself")
+
+
 def _install(name: str, opts: _Opts) -> int:
     from registries import openscad_libs as ol  # lazy
 
     spec = ol.resolve_spec(name, git=opts.git, ref=opts.ref)
+    _sweep(spec.name, opts)
     res = ol.install(spec, opts.dir, force=opts.force)
     if res.already:
         print(f"{spec.name} is already installed at {res.path} ({res.source})")
@@ -171,6 +203,7 @@ def _install(name: str, opts: _Opts) -> int:
 def _uninstall(name: str, opts: _Opts) -> int:
     from registries import openscad_libs as ol  # lazy
 
+    _sweep(name, opts)
     path, count, leftovers = ol.uninstall(name, opts.dir)
     print(f"uninstalled {path.name}: removed {count} files from {path}")
     for d in leftovers:
@@ -181,6 +214,7 @@ def _uninstall(name: str, opts: _Opts) -> int:
 def _update(name: str, opts: _Opts) -> int:
     from registries import openscad_libs as ol  # lazy
 
+    _sweep(name, opts)
     res = ol.update(name, opts.dir)
     print(f"updated {res.path.name} -> {res.path} ({res.files} files from {res.source}{_rev(res.commit)})")
     _print_kept(res.kept)

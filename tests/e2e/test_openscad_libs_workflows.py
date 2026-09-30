@@ -8,13 +8,25 @@ file:// repository (no network).
 from __future__ import annotations
 
 import json
+import os
 import re
+import stat
 import subprocess
 import sys
 from collections.abc import Callable
 from pathlib import Path
 
-from .workflow_helper import isolated_env, require_binary, require_working_openscad, run_cli, run_shell
+import pytest
+
+from .workflow_helper import (
+    REPO_ROOT,
+    THREED,
+    isolated_env,
+    require_binary,
+    require_working_openscad,
+    run_cli,
+    run_shell,
+)
 
 
 def _user_libs(tmp_path: Path) -> Path:
@@ -240,3 +252,183 @@ def test_user_manages_a_library_in_a_custom_folder_with_dir(tmp_path: Path) -> N
     assert escape.returncode == 2
     assert "no '/', no '..'" in escape.stderr
     assert not (tmp_path / "home" / "Documents" / "OpenSCAD" / "evil").exists()
+
+
+_HOLD_LOCK = """
+import sys, time
+sys.path.insert(0, sys.argv[1])
+from registries import openscad_libs as ol
+with ol.library_lock("WriteText"):
+    print("locked", flush=True)
+    time.sleep(600)
+"""
+
+# A `3d openscad libs WriteText install --force` that stops dead (to be SIGKILLed) at a chosen
+# point: "staging" once the new copy is built, "swap" between renaming the old library aside
+# and moving the new one in.
+_STALLED_INSTALL = """
+import os, sys, time
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from registries import openscad_libs as ol
+point, base = sys.argv[2], Path(sys.argv[3])
+if point == "staging":
+    real_build = ol._build
+    def build(spec, into):
+        manifest = real_build(spec, into)
+        print("stalled", flush=True)
+        time.sleep(600)
+        return manifest
+    ol._build = build
+else:
+    real_rename = os.rename
+    def rename(src, dst):
+        if Path(dst) == base / "WriteText" and Path(src).name == "WriteText":
+            print("stalled", flush=True)
+            time.sleep(600)
+        real_rename(src, dst)
+    os.rename = rename
+ol.install(ol.resolve_spec("WriteText"), base, force=True)
+"""
+
+
+def _stall(tmp_path: Path, script: str, *args: str) -> subprocess.Popen[str]:
+    """Start `script` (python -c) with the 3d lib dir first, and return once it printed a line."""
+    proc = subprocess.Popen(
+        [sys.executable, "-c", script, str(REPO_ROOT / "lib"), *args],
+        cwd=tmp_path, env=isolated_env(tmp_path), stdout=subprocess.PIPE, text=True,
+    )
+    assert proc.stdout is not None
+    assert proc.stdout.readline().strip() in ("locked", "stalled")
+    return proc
+
+
+def _stop(proc: subprocess.Popen[str]) -> None:
+    """SIGKILL: the process gets no chance to clean up or release anything."""
+    proc.kill()
+    proc.wait(timeout=30)
+
+
+def test_second_run_waits_for_the_one_in_flight_and_a_killed_run_blocks_nobody(tmp_path: Path) -> None:
+    """Issue #49: `uninstall` started while another run holds the library waits (and says
+    so) instead of interleaving. SIGKILLing the holder frees it at once: no stale lock."""
+    lib = _user_libs(tmp_path) / "WriteText"
+    assert run_cli(tmp_path, "openscad", "libs", "WriteText", "install").returncode == 0
+    holder = _stall(tmp_path, _HOLD_LOCK)
+    try:
+        waiting = subprocess.Popen(
+            [sys.executable, str(THREED), "openscad", "libs", "WriteText", "uninstall"],
+            cwd=tmp_path, env=isolated_env(tmp_path),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        try:
+            assert waiting.stderr is not None
+            notice = waiting.stderr.readline()  # blocks until it is queued behind the holder
+            assert "waiting for another `3d openscad libs` run on WriteText" in notice, notice
+            assert waiting.poll() is None, "uninstall ran while another run held the library"
+            assert lib.is_dir()
+            _stop(holder)
+            out, rest = waiting.communicate(timeout=60)
+            err = notice + rest
+        finally:
+            if waiting.poll() is None:
+                waiting.kill()
+                waiting.communicate()
+    finally:
+        _stop(holder)
+
+    assert waiting.returncode == 0, err
+    assert "waiting for another `3d openscad libs` run on WriteText" in err
+    assert "uninstalled WriteText: removed" in out
+    assert not lib.exists()
+    again = run_cli(tmp_path, "openscad", "libs", "WriteText", "install", timeout=60)
+    assert again.returncode == 0, again.stderr
+    assert "waiting" not in again.stderr
+
+
+def test_install_killed_while_staging_is_reported_by_list_and_swept_by_the_next_update(tmp_path: Path) -> None:
+    """Issue #50: a SIGKILLed update leaves its half-built copy in a hidden folder. `list`
+    reports it (deleting nothing); the next `update` removes it; the installed library and
+    its files are never touched."""
+    libs = _user_libs(tmp_path)
+    lib = libs / "WriteText"
+    assert run_cli(tmp_path, "openscad", "libs", "WriteText", "install").returncode == 0
+    before = _snapshot(lib)
+    stalled = _stall(tmp_path, _STALLED_INSTALL, "staging", str(libs))
+    _stop(stalled)
+    (leftover,) = [p for p in libs.iterdir() if ".3d-staging-" in p.name]
+    assert (leftover / "WriteText" / "WriteText.scad").is_file()
+
+    listed = run_cli(tmp_path, "openscad", "libs", "list")
+    assert listed.returncode == 0, listed.stderr
+    assert f"{leftover}  half-built copy of WriteText" in listed.stdout
+    assert leftover.is_dir()
+
+    updated = run_cli(tmp_path, "openscad", "libs", "WriteText", "update")
+    assert updated.returncode == 0, updated.stderr
+    assert f"removed {leftover}: left by an interrupted install of WriteText" in updated.stdout
+    assert [p.name for p in libs.iterdir()] == ["WriteText"]
+    assert _snapshot(lib).keys() == before.keys()
+    assert "half-built" not in run_cli(tmp_path, "openscad", "libs", "list").stdout
+
+
+def test_install_killed_between_the_renames_keeps_the_previous_library_and_says_so(tmp_path: Path) -> None:
+    """Issue #50: SIGKILL after the old library was set aside but before the new one moved
+    in leaves no library, and the old one (with the user's files) in the staging folder. The
+    next install must not delete it: it reports the folder, then installs afresh."""
+    libs = _user_libs(tmp_path)
+    lib = libs / "WriteText"
+    assert run_cli(tmp_path, "openscad", "libs", "WriteText", "install").returncode == 0
+    (lib / "notes.txt").write_text("mine\n", encoding="utf-8")
+    stalled = _stall(tmp_path, _STALLED_INSTALL, "swap", str(libs))
+    _stop(stalled)
+    assert not lib.exists()
+    (leftover,) = [p for p in libs.iterdir() if ".3d-staging-" in p.name]
+
+    listed = run_cli(tmp_path, "openscad", "libs", "list")
+    assert f"{leftover}  holds more than a half-built copy of WriteText" in listed.stdout
+
+    installed = run_cli(tmp_path, "openscad", "libs", "WriteText", "install")
+
+    assert installed.returncode == 0, installed.stderr
+    assert f"kept {leftover}: it holds more than a half-built copy of WriteText" in installed.stdout
+    assert (lib / "WriteText.scad").is_file()
+    assert (leftover / "WriteText.previous" / "notes.txt").read_text(encoding="utf-8") == "mine\n"
+    assert (leftover / "WriteText.previous" / "WriteText.scad").is_file()
+
+
+def test_update_keeps_the_permissions_of_the_library_folder(tmp_path: Path) -> None:
+    """Issue #50: `update` replaces the library folder; a group-write bit set on it must survive."""
+    lib = _user_libs(tmp_path) / "WriteText"
+    assert run_cli(tmp_path, "openscad", "libs", "WriteText", "install").returncode == 0
+    os.chmod(lib, 0o770)
+
+    updated = run_cli(tmp_path, "openscad", "libs", "WriteText", "update")
+
+    assert updated.returncode == 0, updated.stderr
+    assert stat.S_IMODE(os.lstat(lib).st_mode) == 0o770
+
+
+@pytest.mark.skipif(sys.platform == "win32" or os.geteuid() == 0, reason="needs a folder that even its owner cannot empty")
+def test_leftover_that_cannot_be_removed_is_reported_and_the_update_still_succeeds(tmp_path: Path) -> None:
+    """Issue #50: a leftover the sweep is not allowed to delete is named, not silently skipped or
+    mislabelled as your previous copy; the command goes on with its own work."""
+    libs = _user_libs(tmp_path)
+    lib = libs / "WriteText"
+    assert run_cli(tmp_path, "openscad", "libs", "WriteText", "install").returncode == 0
+    stalled = _stall(tmp_path, _STALLED_INSTALL, "staging", str(libs))
+    _stop(stalled)
+    (leftover,) = [p for p in libs.iterdir() if ".3d-staging-" in p.name]
+    locked = leftover / "WriteText"
+    os.chmod(locked, 0o500)  # its files cannot be unlinked
+    try:
+        updated = run_cli(tmp_path, "openscad", "libs", "WriteText", "update")
+    finally:
+        os.chmod(locked, 0o700)
+
+    assert updated.returncode == 0, updated.stderr
+    assert f"could not remove {leftover} (" in updated.stdout
+    assert "delete it yourself" in updated.stdout
+    assert "kept " not in updated.stdout  # not mislabelled as a folder that holds your files
+    assert leftover.is_dir()
+    assert (lib / "WriteText.scad").is_file()
