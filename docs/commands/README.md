@@ -79,6 +79,7 @@ For a practical figure-by-figure image backplate loop, see
 | Command | Doc | Role |
 |---|---|---|
 | `libs` | [libs.md](libs.md) | OpenSCAD library path/list info; install is automatic on first run. |
+| `openscad` | [openscad.md](openscad.md) | Install OpenSCAD libraries (WriteText, BOSL2, …) into OpenSCAD's user library folder for plain `openscad`. |
 | `printers` | [printers.md](printers.md) | Inspect the merged printer registry. |
 | `procurement` | [procurement.md](procurement.md) | Build deterministic purchase plans from local BOM and inventory files. |
 

@@ -24,3 +24,5 @@ export $(3d libs path)
 
 - `libs install` was removed — libraries auto-install on first run.
 - To force a re-install: `rm ~/.config/3d-cli/.bootstrapped && 3d help`
+- To install a library where the OpenSCAD app and a bare `openscad` find it (user library
+  folder), use [`3d openscad libs <name> install`](openscad.md).

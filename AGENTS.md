@@ -259,6 +259,11 @@ skills (`atomic-commits`, `ai-review-before-commit`, `pre-commit-gate`,
 - `setup` and `libs install` are **removed** (the first-run bootstrap + `3d doctor`'s
   per-item install commands replace them); `libs path` / `libs list` stay (info). `doctor`
   stays (read-only). The repo test gate lives in `rig.yaml` and runs through `dev run test`.
+- `openscad libs` installs OpenSCAD libraries into OpenSCAD's **user library folder**
+  (`3d openscad libs <name> install|uninstall|update|where`, `list`, `path`) for models
+  used outside `3d` (OpenSCAD app, bare `openscad`). Registry + manifest logic lives in
+  `lib/registries/openscad_libs.py`; libraries shipped by this repo live in `openscad-libs/`
+  (e.g. `WriteText`, the CC BY successor of Write.scad). See `docs/commands/openscad.md`.
 - `web` starts the local dashboard (FastAPI + SSE + three.js SPA) — one **thin frontend**
   over the same `lib/` core (architecture §10). `commands/web.py` is the registry command
   (stdlib-only at top level; lazy-imports the optional web tier and raises a structured

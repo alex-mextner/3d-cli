@@ -42,6 +42,12 @@ def isolated_env(tmp_path: Path) -> dict[str, str]:
     )
     env.pop("PYTHONPATH", None)
     env.pop("HF_TOKEN", None)
+    env.pop("OPENSCADPATH", None)
+    # A git hook (the pre-commit gate) exports GIT_INDEX_FILE/GIT_DIR; left set, a test's
+    # `git init/add/commit` in a temp repo would write into the host repo's index instead.
+    for var in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR",
+                "GIT_OBJECT_DIRECTORY", "GIT_NAMESPACE", "GIT_PREFIX"):
+        env.pop(var, None)
     return env
 
 

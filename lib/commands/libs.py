@@ -56,7 +56,10 @@ def run(argv: list[str]) -> int:
         raise UsageError(
             "'install' was removed — libraries auto-install on first run.",
             command="libs",
-            remediation=["To force a re-install: rm ~/.config/3d-cli/.bootstrapped && 3d help"],
+            remediation=[
+                "To force a re-install: rm ~/.config/3d-cli/.bootstrapped && 3d help",
+                "To install a library for plain OpenSCAD: 3d openscad libs <name> install",
+            ],
         )
     if sub == "path":
         print(f"OPENSCADPATH={os.environ.get('OPENSCADPATH', libs_dir)}")
