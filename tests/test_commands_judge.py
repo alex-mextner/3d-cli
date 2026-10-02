@@ -92,7 +92,10 @@ def test_judge_sighted_path_emits_numbers_and_ok(
         def __init__(self, name: str) -> None:
             self.name = name
 
-        def complete(self, system: str, user: str, images: Any = None, timeout: float = 1200.0) -> str:
+        def complete(
+            self, system: str, user: str, images: Any = None,
+            timeout: float = 1200.0, temperature: float | None = None,
+        ) -> str:
             return _CANNED  # silhouette=3 feature=2 structural=4 detail=3 -> mean 3.0
 
     monkeypatch.setattr(

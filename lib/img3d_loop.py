@@ -43,6 +43,7 @@ from typing import Any, Sequence
 import numpy as np
 from PIL import Image, ImageDraw
 
+from ai import load_backend_config
 from ai.backends import Backend, MockBackend, resolve_backend
 from ai.blockout import CONTINUOUS_TUNABLES, BlockoutParams, params_from_dict, render_scad, with_values
 from ai.veto import FEATURE_SPECS, CriticalFeature, VetoResult, evaluate, perceive, run_veto
@@ -509,7 +510,11 @@ def _run_reference(
 ) -> dict[str, Any]:
     reference_rgb = np.asarray(Image.open(reference).convert("RGB").resize(size), dtype=np.int16)
     refm = _reference_mask(reference, size)
-    backend = resolve_backend(backend_name)
+    # The veto READS the reference image, so this is a vision task: honor ai.json (e.g. an
+    # ollama vision model) and prefer a sighted backend over a text-only one on auto-pick.
+    # An explicit --backend name still selects that backend; config is loaded the same way
+    # `commands/judge` does (fail-closed on a malformed ai.json — the shared parse contract).
+    backend = resolve_backend(backend_name, config=load_backend_config(), prefer_vision=True)
     perceived = perceive(backend, reference, FEATURE_SPECS[template])
     if perceived["column_count"] is None:
         raise SystemExit("img3d-loop: veto backend could not read column_count from reference")
