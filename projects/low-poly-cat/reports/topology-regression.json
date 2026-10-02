@@ -1,0 +1,40 @@
+{
+  "tests": [
+    {
+      "name": "closed_cube",
+      "passed": true,
+      "boundary": 0
+    },
+    {
+      "name": "missing_cap",
+      "passed": true,
+      "boundary": 4
+    },
+    {
+      "name": "inverted_shell",
+      "passed": true,
+      "boundary": 0
+    },
+    {
+      "name": "coincident_material_seams",
+      "passed": true,
+      "boundary": 0
+    },
+    {
+      "name": "separate_material_deformation",
+      "passed": true,
+      "boundary": 8
+    },
+    {
+      "name": "disconnected_closed_shells",
+      "passed": true,
+      "boundary": 0
+    },
+    {
+      "name": "one_reversed_face",
+      "passed": true,
+      "boundary": 0
+    }
+  ],
+  "passed": 7
+}

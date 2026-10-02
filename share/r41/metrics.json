@@ -1,0 +1,57 @@
+{
+  "run": "fit_r41",
+  "views": {
+    "front": {
+      "center_mae": 0.07822116457202351,
+      "width_mae": 0.13326392503904216,
+      "render_bbox": [
+        169,
+        111,
+        594,
+        947
+      ],
+      "render_size": [
+        800,
+        1000
+      ],
+      "bbox_aspect": 0.5083732057416268,
+      "reference_bbox_aspect": 0.46122448979591835,
+      "registered_pixel_iou": 0.7436266958207027
+    },
+    "threequarter": {
+      "center_mae": 0.026410669530970297,
+      "width_mae": 0.06392051557465091,
+      "render_bbox": [
+        102,
+        110,
+        577,
+        953
+      ],
+      "render_size": [
+        800,
+        1000
+      ],
+      "bbox_aspect": 0.5634638196915777,
+      "reference_bbox_aspect": 0.5691056910569106,
+      "registered_pixel_iou": 0.8410022394050788
+    },
+    "side": {
+      "center_mae": 0.06560560933234053,
+      "width_mae": 0.06602134524695953,
+      "render_bbox": [
+        20,
+        106,
+        652,
+        951
+      ],
+      "render_size": [
+        800,
+        1000
+      ],
+      "bbox_aspect": 0.7479289940828402,
+      "reference_bbox_aspect": 0.7024793388429752,
+      "registered_pixel_iou": 0.7686588047171697
+    }
+  },
+  "profile_error_mean": 0.07224053821599782
+}

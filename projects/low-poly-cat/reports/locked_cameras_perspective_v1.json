@@ -1,0 +1,72 @@
+{
+  "model": "/Users/ultra/xp/3d-cli/projects/low-poly-cat/source/cat_fit_r41.blend",
+  "projection": "PERSP",
+  "views": {
+    "front": {
+      "camera": {
+        "distance": 0.5,
+        "lens": 114.61158382734955,
+        "shift_x": -0.02,
+        "shift_y": -0.05,
+        "angle": 28.25
+      },
+      "strict_iou": 0.7474184717352673,
+      "reference_bbox": [
+        6,
+        8,
+        119,
+        253
+      ],
+      "render_bbox": [
+        9,
+        0,
+        126,
+        251
+      ]
+    },
+    "threequarter": {
+      "camera": {
+        "distance": 0.5,
+        "lens": 113.51788439413303,
+        "shift_x": -0.06,
+        "shift_y": -0.05,
+        "angle": 36
+      },
+      "strict_iou": 0.8511344770337577,
+      "reference_bbox": [
+        8,
+        6,
+        148,
+        252
+      ],
+      "render_bbox": [
+        5,
+        0,
+        148,
+        252
+      ]
+    },
+    "side": {
+      "camera": {
+        "distance": 0.3,
+        "lens": 79.85490597784519,
+        "shift_x": -0.09,
+        "shift_y": 0.07,
+        "angle": 28.25
+      },
+      "strict_iou": 0.8234692331009397,
+      "reference_bbox": [
+        4,
+        11,
+        174,
+        253
+      ],
+      "render_bbox": [
+        0,
+        2,
+        177,
+        256
+      ]
+    }
+  }
+}

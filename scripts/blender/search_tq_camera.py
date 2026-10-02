@@ -1,0 +1,12 @@
+import bpy,math,numpy as np,json,sys
+from pathlib import Path
+from mathutils import Vector
+P=Path('/Users/ultra/xp/3d-cli/projects/low-poly-cat'); out=Path(sys.argv[sys.argv.index('--')+1]); out.parent.mkdir(parents=True,exist_ok=True)
+im=bpy.data.images.load(str(P/'refs/mask_threequarter.png'),check_existing=False); ref=np.flipud(np.array(im.pixels[:],np.float32).reshape(im.size[1],im.size[0],4))[:,:,0]>.5; bpy.data.images.remove(im)
+s=bpy.context.scene;s.render.engine='BLENDER_WORKBENCH';s.display.shading.light='STUDIO';s.display.shading.color_type='MATERIAL';s.display.shading.show_shadows=False;s.display.shading.show_cavity=False;r=(.2**2+.32**2)**.5
+def look(c,t):c.rotation_euler=(Vector(t)-c.location).to_track_quat('-Z','Y').to_euler()
+def reg(mask):
+ y,x=np.where(mask);ry,rx=np.where(ref);a=(x.min(),y.min(),x.max()+1,y.max()+1);b=(rx.min(),ry.min(),rx.max()+1,ry.max()+1);crop=mask[a[1]:a[3],a[0]:a[2]];sc=(b[3]-b[1])/crop.shape[0];nw=max(1,round(crop.shape[1]*sc));yi=np.minimum(crop.shape[0]-1,(np.arange(b[3]-b[1])/sc).astype(int));xi=np.minimum(crop.shape[1]-1,(np.arange(nw)/sc).astype(int));rs=crop[yi[:,None],xi[None,:]];p=np.zeros_like(ref);xx=round((b[0]+b[2]-nw)/2);xa=max(0,xx);xb=min(ref.shape[1],xx+nw);p[b[1]:b[3],xa:xb]=rs[:,xa-xx:xa-xx+xb-xa];return float(np.logical_and(p,ref).sum()/np.logical_or(p,ref).sum())
+def score(a):
+ loc=(r*math.sin(math.radians(a)),r*math.cos(math.radians(a)),.1);bpy.ops.object.camera_add(location=loc);c=bpy.context.object;c.data.type='ORTHO';c.data.ortho_scale=.18;look(c,(0,.01,.08));s.camera=c;s.render.resolution_x=157;s.render.resolution_y=256;s.render.resolution_percentage=100;tmp=P/'reports/_tq.png';s.render.filepath=str(tmp);bpy.ops.render.render(write_still=True);im=bpy.data.images.load(str(tmp),check_existing=False);q=np.flipud(np.array(im.pixels[:],np.float32).reshape(im.size[1],im.size[0],4));bpy.data.images.remove(im);bpy.data.objects.remove(c,do_unlink=True);return reg(q[:,:,:3].max(2)>.03)
+vals={a:score(a) for a in np.arange(20,36.01,.5)};best=max(vals,key=vals.get);out.write_text(json.dumps({'params':{'tq_angle':float(best)},'scores':{str(k):v for k,v in vals.items()}},indent=2));print('BEST_TQ',best,vals[best])

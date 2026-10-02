@@ -1,0 +1,428 @@
+{
+  "source": "/Users/ultra/xp/3d-cli/projects/low-poly-cat/source/cat_fit_r13.blend",
+  "weld_tolerance_mm": 9.999999999999999e-05,
+  "parts": {
+    "Haunch_Left": {
+      "objects": [
+        "Haunch_Left_MASTER"
+      ],
+      "vertices": 42,
+      "faces": 80,
+      "faces_before_weld": 80,
+      "boundary_edges": 0,
+      "non_two_face_edges": 0,
+      "inconsistent_winding_edges": 0,
+      "degenerate_faces": 0,
+      "components": 1,
+      "signed_volume_mm3": 43435.6344517949,
+      "finite": true,
+      "boundary_length_mm": 0,
+      "boundary_segments_mm": [],
+      "nonadjacent_overlap_candidates": 0,
+      "weld_removed_faces": 0,
+      "topology_ok": true
+    },
+    "Foreleg_Left": {
+      "objects": [
+        "Foreleg_Left_MASTER"
+      ],
+      "vertices": 48,
+      "faces": 92,
+      "faces_before_weld": 92,
+      "boundary_edges": 0,
+      "non_two_face_edges": 0,
+      "inconsistent_winding_edges": 0,
+      "degenerate_faces": 0,
+      "components": 1,
+      "signed_volume_mm3": 9155.447554162194,
+      "finite": true,
+      "boundary_length_mm": 0,
+      "boundary_segments_mm": [],
+      "nonadjacent_overlap_candidates": 0,
+      "weld_removed_faces": 0,
+      "topology_ok": true
+    },
+    "Front_paw_Left": {
+      "objects": [
+        "Front_paw_Left_MASTER"
+      ],
+      "vertices": 32,
+      "faces": 60,
+      "faces_before_weld": 60,
+      "boundary_edges": 0,
+      "non_two_face_edges": 0,
+      "inconsistent_winding_edges": 0,
+      "degenerate_faces": 0,
+      "components": 1,
+      "signed_volume_mm3": 1276.685169130802,
+      "finite": true,
+      "boundary_length_mm": 0,
+      "boundary_segments_mm": [],
+      "nonadjacent_overlap_candidates": 0,
+      "weld_removed_faces": 0,
+      "topology_ok": true
+    },
+    "Hind_paw_Left": {
+      "objects": [
+        "Hind_paw_Left_MASTER"
+      ],
+      "vertices": 32,
+      "faces": 60,
+      "faces_before_weld": 60,
+      "boundary_edges": 0,
+      "non_two_face_edges": 0,
+      "inconsistent_winding_edges": 0,
+      "degenerate_faces": 0,
+      "components": 1,
+      "signed_volume_mm3": 2841.3384923291937,
+      "finite": true,
+      "boundary_length_mm": 0,
+      "boundary_segments_mm": [],
+      "nonadjacent_overlap_candidates": 0,
+      "weld_removed_faces": 0,
+      "topology_ok": true
+    },
+    "Haunch_Right": {
+      "objects": [
+        "Haunch_Right_MASTER"
+      ],
+      "vertices": 42,
+      "faces": 80,
+      "faces_before_weld": 80,
+      "boundary_edges": 0,
+      "non_two_face_edges": 0,
+      "inconsistent_winding_edges": 0,
+      "degenerate_faces": 0,
+      "components": 1,
+      "signed_volume_mm3": 35291.453753228474,
+      "finite": true,
+      "boundary_length_mm": 0,
+      "boundary_segments_mm": [],
+      "nonadjacent_overlap_candidates": 0,
+      "weld_removed_faces": 0,
+      "topology_ok": true
+    },
+    "Foreleg_Right": {
+      "objects": [
+        "Foreleg_Right_MASTER"
+      ],
+      "vertices": 48,
+      "faces": 92,
+      "faces_before_weld": 92,
+      "boundary_edges": 0,
+      "non_two_face_edges": 0,
+      "inconsistent_winding_edges": 0,
+      "degenerate_faces": 0,
+      "components": 1,
+      "signed_volume_mm3": 9155.447550468054,
+      "finite": true,
+      "boundary_length_mm": 0,
+      "boundary_segments_mm": [],
+      "nonadjacent_overlap_candidates": 0,
+      "weld_removed_faces": 0,
+      "topology_ok": true
+    },
+    "Front_paw_Right": {
+      "objects": [
+        "Front_paw_Right_MASTER"
+      ],
+      "vertices": 32,
+      "faces": 60,
+      "faces_before_weld": 60,
+      "boundary_edges": 0,
+      "non_two_face_edges": 0,
+      "inconsistent_winding_edges": 0,
+      "degenerate_faces": 0,
+      "components": 1,
+      "signed_volume_mm3": 1276.6851833374917,
+      "finite": true,
+      "boundary_length_mm": 0,
+      "boundary_segments_mm": [],
+      "nonadjacent_overlap_candidates": 0,
+      "weld_removed_faces": 0,
+      "topology_ok": true
+    },
+    "Hind_paw_Right": {
+      "objects": [
+        "Hind_paw_Right_MASTER"
+      ],
+      "vertices": 32,
+      "faces": 60,
+      "faces_before_weld": 60,
+      "boundary_edges": 0,
+      "non_two_face_edges": 0,
+      "inconsistent_winding_edges": 0,
+      "degenerate_faces": 0,
+      "components": 1,
+      "signed_volume_mm3": 2841.338464757216,
+      "finite": true,
+      "boundary_length_mm": 0,
+      "boundary_segments_mm": [],
+      "nonadjacent_overlap_candidates": 0,
+      "weld_removed_faces": 0,
+      "topology_ok": true
+    },
+    "Curled_tail": {
+      "objects": [
+        "Curled_tail_MASTER"
+      ],
+      "vertices": 80,
+      "faces": 156,
+      "faces_before_weld": 156,
+      "boundary_edges": 0,
+      "non_two_face_edges": 0,
+      "inconsistent_winding_edges": 0,
+      "degenerate_faces": 0,
+      "components": 1,
+      "signed_volume_mm3": 7906.165053106394,
+      "finite": true,
+      "boundary_length_mm": 0,
+      "boundary_segments_mm": [],
+      "nonadjacent_overlap_candidates": 0,
+      "weld_removed_faces": 0,
+      "topology_ok": true
+    },
+    "Rounded_Torso": {
+      "objects": [
+        "Rounded_Torso_MASTER"
+      ],
+      "vertices": 114,
+      "faces": 224,
+      "faces_before_weld": 224,
+      "boundary_edges": 0,
+      "non_two_face_edges": 0,
+      "inconsistent_winding_edges": 0,
+      "degenerate_faces": 0,
+      "components": 1,
+      "signed_volume_mm3": 262271.2480091661,
+      "finite": true,
+      "boundary_length_mm": 0,
+      "boundary_segments_mm": [],
+      "nonadjacent_overlap_candidates": 0,
+      "weld_removed_faces": 0,
+      "topology_ok": true
+    },
+    "Sculpted_Head": {
+      "objects": [
+        "Sculpted_Head_MASTER"
+      ],
+      "vertices": 159,
+      "faces": 314,
+      "faces_before_weld": 314,
+      "boundary_edges": 0,
+      "non_two_face_edges": 0,
+      "inconsistent_winding_edges": 0,
+      "degenerate_faces": 0,
+      "components": 1,
+      "signed_volume_mm3": 47686.297941864825,
+      "finite": true,
+      "boundary_length_mm": 0,
+      "boundary_segments_mm": [],
+      "nonadjacent_overlap_candidates": 0,
+      "weld_removed_faces": 0,
+      "topology_ok": true
+    },
+    "Thick_Ear_Left": {
+      "objects": [
+        "Thick_Ear_Left_MASTER"
+      ],
+      "vertices": 10,
+      "faces": 16,
+      "faces_before_weld": 16,
+      "boundary_edges": 0,
+      "non_two_face_edges": 0,
+      "inconsistent_winding_edges": 0,
+      "degenerate_faces": 0,
+      "components": 1,
+      "signed_volume_mm3": 1382.9267691788136,
+      "finite": true,
+      "boundary_length_mm": 0,
+      "boundary_segments_mm": [],
+      "nonadjacent_overlap_candidates": 0,
+      "weld_removed_faces": 0,
+      "topology_ok": true
+    },
+    "Thick_Ear_Right": {
+      "objects": [
+        "Thick_Ear_Right_MASTER"
+      ],
+      "vertices": 10,
+      "faces": 16,
+      "faces_before_weld": 16,
+      "boundary_edges": 0,
+      "non_two_face_edges": 0,
+      "inconsistent_winding_edges": 0,
+      "degenerate_faces": 0,
+      "components": 1,
+      "signed_volume_mm3": 1382.9266226724883,
+      "finite": true,
+      "boundary_length_mm": 0,
+      "boundary_segments_mm": [],
+      "nonadjacent_overlap_candidates": 0,
+      "weld_removed_faces": 0,
+      "topology_ok": true
+    },
+    "Pink_Nose_MASTER": {
+      "objects": [
+        "Pink_Nose_MASTER"
+      ],
+      "vertices": 7,
+      "faces": 10,
+      "faces_before_weld": 10,
+      "boundary_edges": 0,
+      "non_two_face_edges": 0,
+      "inconsistent_winding_edges": 0,
+      "degenerate_faces": 0,
+      "components": 1,
+      "signed_volume_mm3": 34.88613222862829,
+      "finite": true,
+      "boundary_length_mm": 0,
+      "boundary_segments_mm": [],
+      "nonadjacent_overlap_candidates": 0,
+      "weld_removed_faces": 0,
+      "topology_ok": true
+    },
+    "Recessed_Philtrum_MASTER": {
+      "objects": [
+        "Recessed_Philtrum_MASTER"
+      ],
+      "vertices": 14,
+      "faces": 24,
+      "faces_before_weld": 24,
+      "boundary_edges": 0,
+      "non_two_face_edges": 0,
+      "inconsistent_winding_edges": 0,
+      "degenerate_faces": 0,
+      "components": 1,
+      "signed_volume_mm3": 0.33702246552152154,
+      "finite": true,
+      "boundary_length_mm": 0,
+      "boundary_segments_mm": [],
+      "nonadjacent_overlap_candidates": 0,
+      "weld_removed_faces": 0,
+      "topology_ok": true
+    },
+    "Mouth_Left_MASTER": {
+      "objects": [
+        "Mouth_Left_MASTER"
+      ],
+      "vertices": 20,
+      "faces": 36,
+      "faces_before_weld": 36,
+      "boundary_edges": 0,
+      "non_two_face_edges": 0,
+      "inconsistent_winding_edges": 0,
+      "degenerate_faces": 0,
+      "components": 1,
+      "signed_volume_mm3": 0.5544041524584422,
+      "finite": true,
+      "boundary_length_mm": 0,
+      "boundary_segments_mm": [],
+      "nonadjacent_overlap_candidates": 0,
+      "weld_removed_faces": 0,
+      "topology_ok": true
+    },
+    "Mouth_Right_MASTER": {
+      "objects": [
+        "Mouth_Right_MASTER"
+      ],
+      "vertices": 20,
+      "faces": 36,
+      "faces_before_weld": 36,
+      "boundary_edges": 0,
+      "non_two_face_edges": 0,
+      "inconsistent_winding_edges": 0,
+      "degenerate_faces": 0,
+      "components": 1,
+      "signed_volume_mm3": 0.5717743950819386,
+      "finite": true,
+      "boundary_length_mm": 0,
+      "boundary_segments_mm": [],
+      "nonadjacent_overlap_candidates": 0,
+      "weld_removed_faces": 0,
+      "topology_ok": true
+    },
+    "Inset_Eye_Left": {
+      "objects": [
+        "Inset_Eye_Left_MASTER"
+      ],
+      "vertices": 114,
+      "faces": 128,
+      "faces_before_weld": 128,
+      "boundary_edges": 0,
+      "non_two_face_edges": 0,
+      "inconsistent_winding_edges": 0,
+      "degenerate_faces": 0,
+      "components": 1,
+      "signed_volume_mm3": 62.028229497113145,
+      "finite": true,
+      "boundary_length_mm": 0,
+      "boundary_segments_mm": [],
+      "nonadjacent_overlap_candidates": 0,
+      "weld_removed_faces": 0,
+      "topology_ok": true
+    },
+    "Pupil_Left_DECOR": {
+      "objects": [
+        "Pupil_Left_DECOR"
+      ],
+      "vertices": 62,
+      "faces": 72,
+      "faces_before_weld": 72,
+      "boundary_edges": 0,
+      "non_two_face_edges": 0,
+      "inconsistent_winding_edges": 0,
+      "degenerate_faces": 0,
+      "components": 1,
+      "signed_volume_mm3": 0.9307685958687814,
+      "finite": true,
+      "boundary_length_mm": 0,
+      "boundary_segments_mm": [],
+      "nonadjacent_overlap_candidates": 0,
+      "weld_removed_faces": 0,
+      "topology_ok": true
+    },
+    "Inset_Eye_Right": {
+      "objects": [
+        "Inset_Eye_Right_MASTER"
+      ],
+      "vertices": 114,
+      "faces": 128,
+      "faces_before_weld": 128,
+      "boundary_edges": 0,
+      "non_two_face_edges": 0,
+      "inconsistent_winding_edges": 0,
+      "degenerate_faces": 0,
+      "components": 1,
+      "signed_volume_mm3": 62.02822946374976,
+      "finite": true,
+      "boundary_length_mm": 0,
+      "boundary_segments_mm": [],
+      "nonadjacent_overlap_candidates": 0,
+      "weld_removed_faces": 0,
+      "topology_ok": true
+    },
+    "Pupil_Right_DECOR": {
+      "objects": [
+        "Pupil_Right_DECOR"
+      ],
+      "vertices": 62,
+      "faces": 72,
+      "faces_before_weld": 72,
+      "boundary_edges": 0,
+      "non_two_face_edges": 0,
+      "inconsistent_winding_edges": 0,
+      "degenerate_faces": 0,
+      "components": 1,
+      "signed_volume_mm3": 0.9307685958689771,
+      "finite": true,
+      "boundary_length_mm": 0,
+      "boundary_segments_mm": [],
+      "nonadjacent_overlap_candidates": 0,
+      "weld_removed_faces": 0,
+      "topology_ok": true
+    }
+  },
+  "topology_ok": true,
+  "scope": "Closed logical shells after coincident seam weld; does NOT certify self-intersections, thickness, print union, appearance or reference match."
+}

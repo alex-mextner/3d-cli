@@ -1,0 +1,34 @@
+{
+  "cases": [
+    {
+      "name": "regressions",
+      "exit": 1,
+      "expected": 0,
+      "passed": false,
+      "log": "/Users/ultra/xp/3d-cli/projects/low-poly-cat/reports/gate-run-1789338354/regressions.log"
+    },
+    {
+      "name": "v15_export_blocked",
+      "exit": 1,
+      "expected": 1,
+      "passed": true,
+      "log": "/Users/ultra/xp/3d-cli/projects/low-poly-cat/reports/gate-run-1789338354/v15_export_blocked.log"
+    },
+    {
+      "name": "unapproved_release_blocked",
+      "exit": 1,
+      "expected": 1,
+      "passed": true,
+      "log": "/Users/ultra/xp/3d-cli/projects/low-poly-cat/reports/gate-run-1789338354/unapproved_release_blocked.log"
+    },
+    {
+      "name": "clean_native_roundtrip",
+      "exit": 1,
+      "expected": 0,
+      "passed": false,
+      "log": "/Users/ultra/xp/3d-cli/projects/low-poly-cat/reports/gate-run-1789338354/clean_native_roundtrip.log"
+    }
+  ],
+  "all_passed": false,
+  "artifacts": []
+}

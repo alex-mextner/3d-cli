@@ -1,0 +1,82 @@
+{
+  "source": "/Users/ultra/xp/3d-cli/projects/low-poly-cat/source/cat_clean_restart.blend",
+  "scope": "BVH screen excluding triangles sharing a vertex. Not an exact all-intersections proof.",
+  "objects": {
+    "Haunch_Left_MASTER": {
+      "nonadjacent_triangle_overlap_candidates": 0,
+      "sample_pairs": []
+    },
+    "Foreleg_Left_MASTER": {
+      "nonadjacent_triangle_overlap_candidates": 0,
+      "sample_pairs": []
+    },
+    "Front_paw_Left_MASTER": {
+      "nonadjacent_triangle_overlap_candidates": 0,
+      "sample_pairs": []
+    },
+    "Hind_paw_Left_MASTER": {
+      "nonadjacent_triangle_overlap_candidates": 0,
+      "sample_pairs": []
+    },
+    "Haunch_Right_MASTER": {
+      "nonadjacent_triangle_overlap_candidates": 0,
+      "sample_pairs": []
+    },
+    "Foreleg_Right_MASTER": {
+      "nonadjacent_triangle_overlap_candidates": 0,
+      "sample_pairs": []
+    },
+    "Front_paw_Right_MASTER": {
+      "nonadjacent_triangle_overlap_candidates": 0,
+      "sample_pairs": []
+    },
+    "Hind_paw_Right_MASTER": {
+      "nonadjacent_triangle_overlap_candidates": 0,
+      "sample_pairs": []
+    },
+    "Curled_tail_MASTER": {
+      "nonadjacent_triangle_overlap_candidates": 0,
+      "sample_pairs": []
+    },
+    "Rounded_Torso_MASTER": {
+      "nonadjacent_triangle_overlap_candidates": 0,
+      "sample_pairs": []
+    },
+    "Sculpted_Head_MASTER": {
+      "nonadjacent_triangle_overlap_candidates": 0,
+      "sample_pairs": []
+    },
+    "Inset_Eye_Left_MASTER": {
+      "nonadjacent_triangle_overlap_candidates": 0,
+      "sample_pairs": []
+    },
+    "Inset_Eye_Right_MASTER": {
+      "nonadjacent_triangle_overlap_candidates": 0,
+      "sample_pairs": []
+    },
+    "Thick_Ear_Left_MASTER": {
+      "nonadjacent_triangle_overlap_candidates": 0,
+      "sample_pairs": []
+    },
+    "Thick_Ear_Right_MASTER": {
+      "nonadjacent_triangle_overlap_candidates": 0,
+      "sample_pairs": []
+    },
+    "Pink_Nose_MASTER": {
+      "nonadjacent_triangle_overlap_candidates": 0,
+      "sample_pairs": []
+    },
+    "Recessed_Philtrum_MASTER": {
+      "nonadjacent_triangle_overlap_candidates": 0,
+      "sample_pairs": []
+    },
+    "Mouth_Left_MASTER": {
+      "nonadjacent_triangle_overlap_candidates": 0,
+      "sample_pairs": []
+    },
+    "Mouth_Right_MASTER": {
+      "nonadjacent_triangle_overlap_candidates": 0,
+      "sample_pairs": []
+    }
+  }
+}

@@ -1,0 +1,69 @@
+{
+  "model": "/Users/ultra/xp/3d-cli/projects/low-poly-cat/source/cat_fit_r41.blend",
+  "projection": "ORTHO",
+  "views": {
+    "front": {
+      "camera": {
+        "scale": 0.16274999999999998,
+        "shift_x": -0.020625,
+        "shift_y": -0.030937500000000003,
+        "angle": 28.25
+      },
+      "strict_iou": 0.7536188776521912,
+      "reference_bbox": [
+        6,
+        8,
+        119,
+        253
+      ],
+      "render_bbox": [
+        7,
+        7,
+        126,
+        243
+      ]
+    },
+    "threequarter": {
+      "camera": {
+        "scale": 0.16124999999999998,
+        "shift_x": -0.0584375,
+        "shift_y": -0.048125,
+        "angle": 32.5625
+      },
+      "strict_iou": 0.8625419079548918,
+      "reference_bbox": [
+        8,
+        6,
+        148,
+        252
+      ],
+      "render_bbox": [
+        6,
+        4,
+        146,
+        245
+      ]
+    },
+    "side": {
+      "camera": {
+        "scale": 0.16274999999999998,
+        "shift_x": -0.1065625,
+        "shift_y": -0.01375,
+        "angle": 28.25
+      },
+      "strict_iou": 0.810689431946917,
+      "reference_bbox": [
+        4,
+        11,
+        174,
+        253
+      ],
+      "render_bbox": [
+        9,
+        13,
+        177,
+        252
+      ]
+    }
+  }
+}

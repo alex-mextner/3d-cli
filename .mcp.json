@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "blender-local": {
+      "command": "/Users/ultra/xp/3d-cli/.mcp-venv/bin/python",
+      "args": [
+        "/Users/ultra/xp/3d-cli/scripts/blender/mcp_server_entry.py"
+      ]
+    }
+  }
+}

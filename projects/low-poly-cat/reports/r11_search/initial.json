@@ -1,0 +1,25 @@
+{
+  "params": {
+    "head_x": 1.0,
+    "head_y": 1.0,
+    "ear_x": 1.0,
+    "ear_y": 1.0,
+    "ear_sep": 0.0,
+    "torso_x": 1.0,
+    "torso_y": 1.0,
+    "torso_shift_y": 0.0,
+    "haunch_x": 1.0,
+    "haunch_y": 1.0,
+    "haunch_sep": 1.0,
+    "haunch_shift_y": 0.0,
+    "fore_sep": 1.0,
+    "tail_x": 0.0,
+    "tail_y": 0.0
+  },
+  "score": {
+    "front": 0.7290731571884689,
+    "threequarter": 0.8432529717060104,
+    "side": 0.7550870972714661,
+    "mean": 0.7758044087219819
+  }
+}

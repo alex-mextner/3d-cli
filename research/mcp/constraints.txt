@@ -1,0 +1,2 @@
+# Vendored server imports mcp.server.fastmcp; SDK v2 breaks it.
+mcp>=1.2,<2
