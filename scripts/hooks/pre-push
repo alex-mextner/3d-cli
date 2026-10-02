@@ -3,17 +3,32 @@
 
 Accessed via: ``scripts/install_pre_push_hook.py`` installs this repository-scoped
 hook at the effective local or worktree hooks path. The installer records any
-predecessor as the adjacent ``pre-push.previous`` file.
+predecessor as the adjacent ``pre-push.previous`` file plus ``pre-push.3d-antislop.json``
+metadata.
 
 Invariants: the predecessor receives Git's exact stdin and argv once; a nonzero
-predecessor exit blocks the push; advisory failure never changes that result.
+predecessor exit blocks the push; advisory failure never changes that result. A
+recorded predecessor that is missing, dangling, non-regular, non-executable, or
+whose content no longer matches the SHA-256 recorded at install time blocks the
+push rather than silently skipping the gate — only metadata that explicitly
+records no predecessor (``predecessor: null``) may omit it. Missing or malformed
+installation metadata also blocks the push: this shim is only ever installed
+together with its metadata, so their absence means the layout is not the one the
+installer produced.
 Unsupported layouts are rejected by the installer before this hook replaces them.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import subprocess
 import sys
 from pathlib import Path
+from typing import NoReturn
+
+
+_METADATA_NAME = "pre-push.3d-antislop.json"
+_PREDECESSOR_NAME = "pre-push.previous"
 
 
 def _run(command: list[str], payload: bytes, *, advisory: bool) -> int:
@@ -27,15 +42,42 @@ def _run(command: list[str], payload: bytes, *, advisory: bool) -> int:
         return 127
 
 
-def _predecessor(installed: Path) -> Path | None:
-    predecessor = installed.with_name("pre-push.previous")
-    if not predecessor.exists():
-        return None
-    if not predecessor.is_file() or not predecessor.stat().st_mode & 0o111:
-        print(f"ERROR pre-push predecessor is not executable: {predecessor}", file=sys.stderr)
-        raise RuntimeError
-    return predecessor
+def _fail(message: str) -> NoReturn:
+    print(f"ERROR pre-push installation: {message}", file=sys.stderr)
+    raise RuntimeError(message)
 
+
+def _read_metadata(metadata_path: Path) -> dict[str, object]:
+    try:
+        value = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        _fail(f"cannot read installation metadata at {metadata_path}: {exc}")
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        _fail(f"malformed installation metadata at {metadata_path}: {exc}")
+    if not isinstance(value, dict):
+        _fail(f"malformed installation metadata at {metadata_path}")
+    return value
+
+
+def _predecessor(installed: Path) -> Path | None:
+    metadata = _read_metadata(installed.with_name(_METADATA_NAME))
+    required = {"version", "shim_sha256", "predecessor", "predecessor_sha256"}
+    if set(metadata) != required or metadata["version"] != 1:
+        _fail(f"unsupported installation metadata schema at {installed.with_name(_METADATA_NAME)}")
+    predecessor_field = metadata["predecessor"]
+    predecessor_hash = metadata["predecessor_sha256"]
+    if predecessor_field is None and predecessor_hash is None:
+        return None
+    if predecessor_field != _PREDECESSOR_NAME or not isinstance(predecessor_hash, str):
+        _fail(f"unsupported predecessor reference in installation metadata: {predecessor_field!r}")
+    predecessor = installed.with_name(_PREDECESSOR_NAME)
+    if not predecessor.is_file():
+        _fail(f"recorded pre-push predecessor is missing or dangling: {predecessor}")
+    if not predecessor.stat().st_mode & 0o111:
+        _fail(f"pre-push predecessor is not executable: {predecessor}")
+    if hashlib.sha256(predecessor.read_bytes()).hexdigest() != predecessor_hash:
+        _fail(f"pre-push predecessor does not match the identity recorded at install time: {predecessor}")
+    return predecessor
 
 
 def _analyzer_path() -> Path | None:

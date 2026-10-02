@@ -520,6 +520,145 @@ def test_unlaunchable_preserved_gate_blocks_push(tmp_path: Path) -> None:
     assert gate.returncode == 127
     assert b"ERROR pre-push predecessor unavailable" in gate.stderr
 
+def test_recorded_predecessor_missing_or_dangling_fails_closed(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    env = _repo_env(home)
+    remote = tmp_path / "remote.git"
+    repo = tmp_path / "repo"
+    scripts = repo / "scripts"
+    hooks = scripts / "hooks"
+    scripts.mkdir(parents=True)
+    hooks.mkdir()
+    assert _git(tmp_path, "init", "--bare", str(remote), env=env).returncode == 0
+    assert _git(tmp_path, "init", str(repo), env=env).returncode == 0
+    assert _git(repo, "config", "user.name", "Test Author", env=env).returncode == 0
+    assert _git(repo, "config", "user.email", "author@example.test", env=env).returncode == 0
+    assert _git(repo, "remote", "add", "origin", str(remote), env=env).returncode == 0
+    shutil.copy2(_ROOT / "scripts" / "outgoing_antislop.py", scripts / "outgoing_antislop.py")
+    shutil.copy2(_ROOT / "scripts" / "hooks" / "pre-push", hooks / "pre-push")
+    shutil.copy2(_ROOT / "scripts" / "install_pre_push_hook.py", scripts / "install_pre_push_hook.py")
+    existing = repo / ".git" / "hooks" / "pre-push"
+    existing.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    existing.chmod(0o755)
+    installed = subprocess.run(
+        [sys.executable, str(scripts / "install_pre_push_hook.py")],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    assert installed.returncode == 0, installed.stderr
+    previous = repo / ".git" / "hooks" / "pre-push.previous"
+    assert previous.is_file()
+    metadata_path = repo / ".git" / "hooks" / "pre-push.3d-antislop.json"
+    assert '"predecessor": "pre-push.previous"' in metadata_path.read_text(encoding="utf-8")
+    before = _git(tmp_path, "ls-remote", str(remote), env=env).stdout
+    previous.unlink()
+    (repo / "candidate.py").write_text("def pending() -> None:\n    pass\n", encoding="utf-8")
+    _commit(repo, "candidate", env)
+    pushed = _git(repo, "push", "origin", "HEAD:refs/heads/topic", env=env)
+    assert pushed.returncode != 0
+    assert "candidate.py" not in pushed.stderr
+    assert "ERROR" in pushed.stderr
+    after = _git(tmp_path, "ls-remote", str(remote), env=env).stdout
+    assert before == after
+    assert "refs/heads/topic" not in after
+
+    previous.symlink_to(repo / ".git" / "hooks" / "nonexistent-target")
+    dangling = _git(repo, "push", "origin", "HEAD:refs/heads/topic", env=env)
+    assert dangling.returncode != 0
+    after_dangling = _git(tmp_path, "ls-remote", str(remote), env=env).stdout
+    assert before == after_dangling
+
+
+def test_missing_or_malformed_installation_metadata_fails_closed(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    env = _repo_env(home)
+    remote = tmp_path / "remote.git"
+    repo = tmp_path / "repo"
+    scripts = repo / "scripts"
+    hooks = scripts / "hooks"
+    scripts.mkdir(parents=True)
+    hooks.mkdir()
+    assert _git(tmp_path, "init", "--bare", str(remote), env=env).returncode == 0
+    assert _git(tmp_path, "init", str(repo), env=env).returncode == 0
+    assert _git(repo, "config", "user.name", "Test Author", env=env).returncode == 0
+    assert _git(repo, "config", "user.email", "author@example.test", env=env).returncode == 0
+    assert _git(repo, "remote", "add", "origin", str(remote), env=env).returncode == 0
+    shutil.copy2(_ROOT / "scripts" / "outgoing_antislop.py", scripts / "outgoing_antislop.py")
+    shutil.copy2(_ROOT / "scripts" / "hooks" / "pre-push", hooks / "pre-push")
+    shutil.copy2(_ROOT / "scripts" / "install_pre_push_hook.py", scripts / "install_pre_push_hook.py")
+    installed = subprocess.run(
+        [sys.executable, str(scripts / "install_pre_push_hook.py")],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    assert installed.returncode == 0, installed.stderr
+    metadata_path = repo / ".git" / "hooks" / "pre-push.3d-antislop.json"
+    assert metadata_path.is_file()
+    before = _git(tmp_path, "ls-remote", str(remote), env=env).stdout
+    metadata_path.unlink()
+    (repo / "candidate.py").write_text("def pending() -> None:\n    pass\n", encoding="utf-8")
+    _commit(repo, "candidate", env)
+    pushed = _git(repo, "push", "origin", "HEAD:refs/heads/topic", env=env)
+    assert pushed.returncode != 0
+    assert "candidate.py" not in pushed.stderr
+    assert "ERROR" in pushed.stderr
+    after = _git(tmp_path, "ls-remote", str(remote), env=env).stdout
+    assert before == after
+
+    metadata_path.write_text("{not json", encoding="utf-8")
+    malformed = _git(repo, "push", "origin", "HEAD:refs/heads/topic", env=env)
+    assert malformed.returncode != 0
+    after_malformed = _git(tmp_path, "ls-remote", str(remote), env=env).stdout
+    assert before == after_malformed
+
+
+def test_recorded_no_predecessor_allows_normal_push_and_advisory(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    env = _repo_env(home)
+    remote = tmp_path / "remote.git"
+    repo = tmp_path / "repo"
+    scripts = repo / "scripts"
+    hooks = scripts / "hooks"
+    scripts.mkdir(parents=True)
+    hooks.mkdir()
+    assert _git(tmp_path, "init", "--bare", str(remote), env=env).returncode == 0
+    assert _git(tmp_path, "init", str(repo), env=env).returncode == 0
+    assert _git(repo, "config", "user.name", "Test Author", env=env).returncode == 0
+    assert _git(repo, "config", "user.email", "author@example.test", env=env).returncode == 0
+    assert _git(repo, "remote", "add", "origin", str(remote), env=env).returncode == 0
+    shutil.copy2(_ROOT / "scripts" / "outgoing_antislop.py", scripts / "outgoing_antislop.py")
+    shutil.copy2(_ROOT / "scripts" / "hooks" / "pre-push", hooks / "pre-push")
+    shutil.copy2(_ROOT / "scripts" / "install_pre_push_hook.py", scripts / "install_pre_push_hook.py")
+    installed = subprocess.run(
+        [sys.executable, str(scripts / "install_pre_push_hook.py")],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    assert installed.returncode == 0, installed.stderr
+    metadata_path = repo / ".git" / "hooks" / "pre-push.3d-antislop.json"
+    metadata = metadata_path.read_text(encoding="utf-8")
+    assert '"predecessor": null' in metadata
+    assert '"predecessor_sha256": null' in metadata
+    assert not (repo / ".git" / "hooks" / "pre-push.previous").exists()
+    (repo / "candidate.py").write_text("def pending() -> None:\n    pass\n", encoding="utf-8")
+    _commit(repo, "candidate", env)
+    pushed = _git(repo, "push", "origin", "HEAD:refs/heads/topic", env=env)
+    assert pushed.returncode == 0, pushed.stderr
+    assert "candidate.py" in pushed.stderr
+
+
 
 def test_preserved_dispatcher_is_not_run_twice(tmp_path: Path) -> None:
     home = tmp_path / "home"
