@@ -1,115 +1,139 @@
 #!/usr/bin/env python3
-"""Install the tracked warning-only pre-push shim without replacing gate logic.
+"""Install the repository's warning-only pre-push hook without losing its gate.
 
-Accessed via: ``python scripts/install_pre_push_hook.py`` from a checkout before
-its first push. The shim is copied to the current worktree's Git hooks directory
-and, when distinct, the common Git hooks directory. This supports both the
-installed global composer variants.
+Accessed via: ``python scripts/install_pre_push_hook.py`` from this checkout.
+The installer targets only the effective local/worktree hook directory. On first
+installation it records the executable predecessor as ``pre-push.previous`` and
+writes adjacent metadata containing both SHA-256 values.
 
-Assumptions: Git can resolve the worktree's and common Git directories; an
-existing hook may be a dispatcher or repository gate and is copied to the stable
-``pre-push.previous`` chain target before replacement.
-
-Past bugs: linked worktrees and local/global hook composers can select different
-Git hook directories. This installer provisions both locations without replacing
-either existing chain.
+Invariants: no global Git configuration is read or changed; repeat installation
+only replaces the recorded shim; unknown or altered layouts fail before mutation.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
+
+_METADATA_NAME = "pre-push.3d-antislop.json"
+_PREDECESSOR_NAME = "pre-push.previous"
+
+
+def _git_env() -> dict[str, str]:
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    return env
 
 
 def _git(repo: Path, *args: str) -> str:
-    result = subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True, check=False)
+    result = subprocess.run(
+        ["git", *args], cwd=repo, env=_git_env(), capture_output=True, text=True, check=False
+    )
     if result.returncode != 0:
         detail = result.stderr.strip() or "git command failed"
         raise RuntimeError(detail)
     return result.stdout.strip()
 
 
-def _configured_hooks_path(root: Path, scope: str) -> Path | None:
+def _git_optional(repo: Path, *args: str) -> str | None:
     result = subprocess.run(
-        ["git", "config", scope, "--get", "core.hooksPath"],
-        cwd=root,
-        capture_output=True,
-        text=True,
-        check=False,
+        ["git", *args], cwd=repo, env=_git_env(), capture_output=True, text=True, check=False
     )
-    if result.returncode != 0 or not result.stdout.strip():
-        return None
-    configured = Path(result.stdout.strip()).expanduser()
-    return (root / configured).resolve() if not configured.is_absolute() else configured.resolve()
+    return result.stdout.strip() if result.returncode == 0 and result.stdout.strip() else None
 
 
-def _local_hooks_path(root: Path) -> Path | None:
-    return _configured_hooks_path(root, "--worktree") or _configured_hooks_path(root, "--local")
+def _effective_hooks_dir(root: Path) -> Path:
+    configured = _git_optional(root, "config", "--worktree", "--get", "core.hooksPath")
+    if configured is None:
+        configured = _git_optional(root, "config", "--local", "--get", "core.hooksPath")
+    if configured is None and _git_optional(root, "config", "--global", "--get", "core.hooksPath") is not None:
+        raise RuntimeError("unsupported global core.hooksPath without local or worktree override")
+    if configured is not None:
+        path = Path(configured).expanduser()
+        return (root / path).resolve() if not path.is_absolute() else path.resolve()
+    return Path(_git(root, "rev-parse", "--git-path", "hooks")).resolve()
 
 
-def _report_global_hooks_path(root: Path, hook_dirs: list[Path]) -> None:
-    configured_hooks = _configured_hooks_path(root, "--global")
-    if configured_hooks is None or configured_hooks in hook_dirs:
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _metadata_path(destination: Path) -> Path:
+    return destination.with_name(_METADATA_NAME)
+
+
+def _read_metadata(path: Path) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"unsupported pre-push installation metadata at {path}: {exc}") from exc
+    if not isinstance(value, dict):
+        raise RuntimeError(f"unsupported pre-push installation metadata at {path}")
+    return value
+
+
+def _validate_recorded_installation(destination: Path, metadata_path: Path) -> None:
+    metadata = _read_metadata(metadata_path)
+    required = {"version", "shim_sha256", "predecessor", "predecessor_sha256"}
+    if set(metadata) != required or metadata["version"] != 1:
+        raise RuntimeError(f"unsupported pre-push installation metadata at {metadata_path}")
+    if not isinstance(metadata["shim_sha256"], str) or _sha256(destination) != metadata["shim_sha256"]:
+        raise RuntimeError("unsupported pre-push layout: installed shim differs from recorded metadata")
+    predecessor = metadata["predecessor"]
+    predecessor_hash = metadata["predecessor_sha256"]
+    if predecessor is None and predecessor_hash is None:
+        if destination.with_name(_PREDECESSOR_NAME).exists():
+            raise RuntimeError("unsupported pre-push layout: unexpected predecessor file")
         return
-    destination = configured_hooks / "pre-push"
-    if _looks_like_global_composer(destination):
-        print(f"[install-pre-push-hook] retained global composer at {destination}")
-    else:
-        print(f"[install-pre-push-hook] did not modify global core.hooksPath at {configured_hooks}")
+    if predecessor != _PREDECESSOR_NAME or not isinstance(predecessor_hash, str):
+        raise RuntimeError("unsupported pre-push installation metadata")
+    predecessor_path = destination.with_name(_PREDECESSOR_NAME)
+    if not predecessor_path.is_file() or _sha256(predecessor_path) != predecessor_hash:
+        raise RuntimeError("unsupported pre-push layout: recorded predecessor differs from metadata")
 
 
-
-def _looks_like_global_composer(destination: Path) -> bool:
-    if not destination.is_file():
-        return False
-    try:
-        content = destination.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return False
-    return "rev-parse --absolute-git-dir" in content and "hooks/pre-push" in content
-def _looks_like_antislop_shim(destination: Path) -> bool:
-    if not destination.is_file():
-        return False
-    try:
-        content = destination.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return False
-    return "outgoing_antislop.py" in content and "WARN anti-slop" in content
+def _atomic_write(path: Path, content: bytes, mode: int) -> None:
+    temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+    temporary.write_bytes(content)
+    temporary.chmod(mode)
+    os.replace(temporary, path)
 
 
-
-
-
-def _numbered_backup_path(destination: Path) -> Path:
-    candidate = destination.with_name(f"{destination.name}.bak")
-    index = 1
-    while candidate.exists():
-        candidate = destination.with_name(f"{destination.name}.bak.{index}")
-        index += 1
-    return candidate
-
-
-def _install_destination(destination: Path, source: Path, source_bytes: bytes) -> None:
+def _install(destination: Path, source: Path) -> None:
+    source_bytes = source.read_bytes()
+    metadata_path = _metadata_path(destination)
+    predecessor_path = destination.with_name(_PREDECESSOR_NAME)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    if (
-        destination.exists()
-        and destination.read_bytes() != source_bytes
-        and not _looks_like_antislop_shim(destination)
-    ):
-        previous = destination.with_name("pre-push.previous")
-        if not previous.exists():
-            shutil.copy2(destination, previous)
-            print(f"[install-pre-push-hook] preserved existing hook at {previous}")
-        else:
-            backup = _numbered_backup_path(destination)
-            shutil.copy2(destination, backup)
-            print(f"[install-pre-push-hook] preserved additional hook at {backup}")
-    temporary = destination.with_name(f".{destination.name}.tmp-{os.getpid()}")
-    temporary.write_bytes(source_bytes)
-    temporary.chmod((source.stat().st_mode & 0o777) | 0o755)
-    os.replace(temporary, destination)
+    if metadata_path.exists():
+        if not destination.is_file():
+            raise RuntimeError("unsupported pre-push layout: metadata exists without an installed shim")
+        _validate_recorded_installation(destination, metadata_path)
+    else:
+        if predecessor_path.exists():
+            raise RuntimeError("unsupported pre-push layout: predecessor exists without installation metadata")
+        if destination.exists():
+            if not destination.is_file():
+                raise RuntimeError("unsupported pre-push layout: existing hook is not a regular file")
+            if not os.access(destination, os.X_OK):
+                raise RuntimeError("unsupported pre-push layout: existing hook is not executable")
+            if destination.read_bytes() == source_bytes:
+                raise RuntimeError("unsupported pre-push layout: unrecorded anti-slop shim")
+            shutil.copy2(destination, predecessor_path)
+            print(f"[install-pre-push-hook] preserved existing hook at {predecessor_path}")
+    _atomic_write(destination, source_bytes, (source.stat().st_mode & 0o777) | 0o755)
+    predecessor_hash = _sha256(predecessor_path) if predecessor_path.exists() else None
+    metadata = {
+        "version": 1,
+        "shim_sha256": _sha256(destination),
+        "predecessor": _PREDECESSOR_NAME if predecessor_hash is not None else None,
+        "predecessor_sha256": predecessor_hash,
+    }
+    _atomic_write(metadata_path, (json.dumps(metadata, sort_keys=True) + "\n").encode(), 0o600)
     print(f"[install-pre-push-hook] installed {destination}")
 
 
@@ -118,22 +142,9 @@ def install(repo: Path) -> Path:
     source = root / "scripts" / "hooks" / "pre-push"
     if not source.is_file():
         raise RuntimeError(f"tracked hook source missing: {source}")
-    worktree_hooks = (Path(_git(root, "rev-parse", "--absolute-git-dir")) / "hooks").resolve()
-    common = Path(_git(root, "rev-parse", "--git-common-dir"))
-    if not common.is_absolute():
-        common = (root / common).resolve()
-    hook_dirs = [worktree_hooks]
-    common_hooks = (common / "hooks").resolve()
-    if common_hooks != worktree_hooks:
-        hook_dirs.append(common_hooks)
-    configured_hooks = _local_hooks_path(root)
-    if configured_hooks is not None and configured_hooks not in hook_dirs:
-        hook_dirs.append(configured_hooks)
-    source_bytes = source.read_bytes()
-    _report_global_hooks_path(root, hook_dirs)
-    for hook_dir in hook_dirs:
-        _install_destination(hook_dir / "pre-push", source, source_bytes)
-    return worktree_hooks / "pre-push"
+    destination = _effective_hooks_dir(root) / "pre-push"
+    _install(destination, source)
+    return destination
 
 
 def main() -> int:

@@ -128,6 +128,18 @@ def test_new_branch_uses_remote_tracking_baseline_without_scanning_history(tmp_p
     assert "candidate.py" in pushed.stderr
     assert "legacy.py" not in pushed.stderr
 
+    already_remote = _git(repo, "push", "origin", "HEAD:refs/heads/already-remote", env=env)
+    assert already_remote.returncode == 0, already_remote.stderr
+    assert "candidate.py" not in already_remote.stderr
+
+    assert _git(repo, "switch", "--orphan", "orphan", env=env).returncode == 0
+    orphan = repo / "orphan.py"
+    orphan.write_text("def orphan() -> None:\n    pass\n", encoding="utf-8")
+    _commit(repo, "orphan candidate", env)
+    orphan_push = _git(repo, "push", "origin", "HEAD:refs/heads/orphan", env=env)
+    assert orphan_push.returncode == 0, orphan_push.stderr
+    assert "orphan.py" in orphan_push.stderr
+
 
 def test_body_only_placeholder_change_is_reported(tmp_path: Path) -> None:
     home = tmp_path / "home"
@@ -216,6 +228,96 @@ def test_installer_wires_local_core_hooks_path(tmp_path: Path) -> None:
     pushed = _git(repo, "push", "origin", "HEAD:refs/heads/topic", env=env)
     assert pushed.returncode == 0, pushed.stderr
     assert "candidate.py" in pushed.stderr
+
+
+
+def test_installer_refuses_ambiguous_existing_predecessor_chain(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    env = _repo_env(home)
+    repo = tmp_path / "repo"
+    scripts = repo / "scripts"
+    hooks = scripts / "hooks"
+    scripts.mkdir(parents=True)
+    hooks.mkdir()
+    assert _git(tmp_path, "init", str(repo), env=env).returncode == 0
+    shutil.copy2(_ROOT / "scripts" / "outgoing_antislop.py", scripts / "outgoing_antislop.py")
+    shutil.copy2(_ROOT / "scripts" / "hooks" / "pre-push", hooks / "pre-push")
+    shutil.copy2(_ROOT / "scripts" / "install_pre_push_hook.py", scripts / "install_pre_push_hook.py")
+    destination = repo / ".git" / "hooks" / "pre-push"
+    previous = repo / ".git" / "hooks" / "pre-push.previous"
+    destination.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    previous.write_text("#!/bin/sh\nexit 23\n", encoding="utf-8")
+    destination.chmod(0o755)
+    previous.chmod(0o755)
+    result = subprocess.run(
+        [sys.executable, str(scripts / "install_pre_push_hook.py")],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    assert result.returncode == 2
+    assert "unsupported" in result.stderr
+    assert destination.read_text(encoding="utf-8") == "#!/bin/sh\nexit 0\n"
+    assert previous.read_text(encoding="utf-8") == "#!/bin/sh\nexit 23\n"
+
+
+def test_installer_refuses_nonexecutable_predecessor(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    env = _repo_env(home)
+    repo = tmp_path / "repo"
+    scripts = repo / "scripts"
+    hooks = scripts / "hooks"
+    scripts.mkdir(parents=True)
+    hooks.mkdir()
+    assert _git(tmp_path, "init", str(repo), env=env).returncode == 0
+    shutil.copy2(_ROOT / "scripts" / "outgoing_antislop.py", scripts / "outgoing_antislop.py")
+    shutil.copy2(_ROOT / "scripts" / "hooks" / "pre-push", hooks / "pre-push")
+    shutil.copy2(_ROOT / "scripts" / "install_pre_push_hook.py", scripts / "install_pre_push_hook.py")
+    destination = repo / ".git" / "hooks" / "pre-push"
+    destination.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    before = destination.read_bytes()
+    result = subprocess.run(
+        [sys.executable, str(scripts / "install_pre_push_hook.py")],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    assert result.returncode == 2
+    assert "not executable" in result.stderr
+    assert destination.read_bytes() == before
+
+
+def test_installer_refuses_unrecorded_global_hooks_path(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".gitconfig").write_text("[core]\n\thooksPath = global-hooks\n", encoding="utf-8")
+    env = _repo_env(home)
+    repo = tmp_path / "repo"
+    scripts = repo / "scripts"
+    hooks = scripts / "hooks"
+    scripts.mkdir(parents=True)
+    hooks.mkdir()
+    assert _git(tmp_path, "init", str(repo), env=env).returncode == 0
+    shutil.copy2(_ROOT / "scripts" / "outgoing_antislop.py", scripts / "outgoing_antislop.py")
+    shutil.copy2(_ROOT / "scripts" / "hooks" / "pre-push", hooks / "pre-push")
+    shutil.copy2(_ROOT / "scripts" / "install_pre_push_hook.py", scripts / "install_pre_push_hook.py")
+    result = subprocess.run(
+        [sys.executable, str(scripts / "install_pre_push_hook.py")],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    assert result.returncode == 2
+    assert "global core.hooksPath" in result.stderr
+    assert not (repo / ".git" / "hooks" / "pre-push").exists()
 
 
 def test_linked_worktree_hooks_path_is_wired(tmp_path: Path) -> None:
@@ -416,7 +518,7 @@ def test_unlaunchable_preserved_gate_blocks_push(tmp_path: Path) -> None:
         check=False,
     )
     assert gate.returncode == 127
-    assert b"ERROR pre-push stage unavailable" in gate.stderr
+    assert b"ERROR pre-push predecessor unavailable" in gate.stderr
 
 
 def test_preserved_dispatcher_is_not_run_twice(tmp_path: Path) -> None:
@@ -452,8 +554,8 @@ def test_preserved_dispatcher_is_not_run_twice(tmp_path: Path) -> None:
     existing.write_text(
         '#!/bin/sh\n'
         '# global-git-hooks-dispatcher\n'
-        'D="${XDG_CONFIG_HOME}/git/run-global-hooks"\n'
-        '$D pre-push "$@" || exit $?\n',
+        '"${XDG_CONFIG_HOME}/git/run-global-hooks" pre-push "$@" && '
+        'printf gate > "$DISPATCH_GATE" && exit 23\n',
         encoding="utf-8",
     )
     existing.chmod(0o755)
@@ -466,26 +568,7 @@ def test_preserved_dispatcher_is_not_run_twice(tmp_path: Path) -> None:
         text=True,
     )
     assert installed.returncode == 0, installed.stderr
-    existing.write_text(
-        '#!/bin/sh\n'
-        '# global-git-hooks-dispatcher\n'
-        'printf gate > "$DISPATCH_GATE"\n'
-        '"${XDG_CONFIG_HOME}/git/run-global-hooks" pre-push "$@" || exit $?\n'
-        '# second dispatcher version\n',
-        encoding="utf-8",
-    )
-    existing.chmod(0o755)
-    reinstalled = subprocess.run(
-        [sys.executable, str(scripts / "install_pre_push_hook.py")],
-        cwd=repo,
-        env=env,
-        capture_output=True,
-        check=False,
-        text=True,
-    )
-    assert reinstalled.returncode == 0, reinstalled.stderr
     dispatch_marker = tmp_path / f"global-hooks-dispatched.pre-push.{os.getpid()}"
-    dispatch_marker.write_text("current", encoding="utf-8")
     env["GLOBAL_HOOKS_DISPATCH_MARKER"] = str(dispatch_marker)
     invoked = subprocess.run(
         [str(repo / ".git" / "hooks" / "pre-push")],
@@ -495,180 +578,12 @@ def test_preserved_dispatcher_is_not_run_twice(tmp_path: Path) -> None:
         capture_output=True,
         check=False,
     )
-    assert invoked.returncode == 0, invoked.stderr
+    assert invoked.returncode == 23
     assert dispatch_gate.read_text(encoding="utf-8") == "gate"
+    assert dispatch_marker.is_file()
     assert runner_log.read_text(encoding="utf-8").splitlines() == ["pre-push"]
 
 
-def test_reinstall_preserves_later_gate_in_backup_chain(tmp_path: Path) -> None:
-    home = tmp_path / "home"
-    home.mkdir()
-    env = _repo_env(home)
-    repo = tmp_path / "repo"
-    scripts = repo / "scripts"
-    hooks = scripts / "hooks"
-    scripts.mkdir(parents=True)
-    hooks.mkdir()
-    assert _git(tmp_path, "init", str(repo), env=env).returncode == 0
-    shutil.copy2(_ROOT / "scripts" / "outgoing_antislop.py", scripts / "outgoing_antislop.py")
-    shutil.copy2(_ROOT / "scripts" / "hooks" / "pre-push", hooks / "pre-push")
-    shutil.copy2(_ROOT / "scripts" / "install_pre_push_hook.py", scripts / "install_pre_push_hook.py")
-    first_marker = tmp_path / "first.marker"
-    second_marker = tmp_path / "second.marker"
-    env["FIRST_MARKER"] = str(first_marker)
-    env["SECOND_MARKER"] = str(second_marker)
-    destination = repo / ".git" / "hooks" / "pre-push"
-    destination.write_text(
-        '#!/bin/sh\nprintf first > "$FIRST_MARKER"\nexit 0\n',
-        encoding="utf-8",
-    )
-    destination.chmod(0o755)
-    first_install = subprocess.run(
-        [sys.executable, str(scripts / "install_pre_push_hook.py")],
-        cwd=repo,
-        env=env,
-        capture_output=True,
-        check=False,
-        text=True,
-    )
-    assert first_install.returncode == 0, first_install.stderr
-    destination.write_text(
-        '#!/bin/sh\nprintf second > "$SECOND_MARKER"\nexit 23\n',
-        encoding="utf-8",
-    )
-    destination.chmod(0o755)
-    second_install = subprocess.run(
-        [sys.executable, str(scripts / "install_pre_push_hook.py")],
-        cwd=repo,
-        env=env,
-        capture_output=True,
-        check=False,
-        text=True,
-    )
-    assert second_install.returncode == 0, second_install.stderr
-    invoked = subprocess.run(
-        [str(destination)],
-        cwd=repo,
-        env=env,
-        input=b"",
-        capture_output=True,
-        check=False,
-    )
-    assert invoked.returncode == 23
-    assert first_marker.read_text(encoding="utf-8") == "first"
-    assert second_marker.read_text(encoding="utf-8") == "second"
-
-
-
-def test_reinstall_upgrades_existing_antislop_shim_without_chaining_it(tmp_path: Path) -> None:
-    home = tmp_path / "home"
-    home.mkdir()
-    env = _repo_env(home)
-    repo = tmp_path / "repo"
-    scripts = repo / "scripts"
-    hooks = scripts / "hooks"
-    scripts.mkdir(parents=True)
-    hooks.mkdir()
-    assert _git(tmp_path, "init", str(repo), env=env).returncode == 0
-    shutil.copy2(_ROOT / "scripts" / "outgoing_antislop.py", scripts / "outgoing_antislop.py")
-    source = hooks / "pre-push"
-    shutil.copy2(_ROOT / "scripts" / "hooks" / "pre-push", source)
-    shutil.copy2(_ROOT / "scripts" / "install_pre_push_hook.py", scripts / "install_pre_push_hook.py")
-    first_install = subprocess.run(
-        [sys.executable, str(scripts / "install_pre_push_hook.py")],
-        cwd=repo,
-        env=env,
-        capture_output=True,
-        check=False,
-        text=True,
-    )
-    assert first_install.returncode == 0, first_install.stderr
-    global_hooks = tmp_path / "global-hooks"
-    global_hooks.mkdir()
-    assert _git(repo, "config", "--global", "core.hooksPath", str(global_hooks), env=env).returncode == 0
-    source.write_text(source.read_text(encoding="utf-8") + "\n# upgraded shim\n", encoding="utf-8")
-    second_install = subprocess.run(
-        [sys.executable, str(scripts / "install_pre_push_hook.py")],
-        cwd=repo,
-        env=env,
-        capture_output=True,
-        check=False,
-        text=True,
-    )
-    assert not (global_hooks / "pre-push").exists()
-    assert second_install.returncode == 0, second_install.stderr
-    destination = repo / ".git" / "hooks" / "pre-push"
-    assert destination.read_text(encoding="utf-8").endswith("# upgraded shim\n")
-    assert not (repo / ".git" / "hooks" / "pre-push.previous").exists()
-    assert not list((repo / ".git" / "hooks").glob("pre-push.bak*"))
-    invoked = subprocess.run(
-        [str(destination)],
-        cwd=repo,
-        env=env,
-        input=b"",
-        capture_output=True,
-        check=False,
-    )
-    assert invoked.returncode == 0, invoked.stderr
-
-def test_linked_worktree_installs_hook_where_global_composer_looks(tmp_path: Path) -> None:
-    home = tmp_path / "home"
-    home.mkdir()
-    env = _repo_env(home)
-    remote = tmp_path / "remote.git"
-    repo = tmp_path / "repo"
-    assert _git(tmp_path, "init", "--bare", str(remote), env=env).returncode == 0
-    assert _git(tmp_path, "init", str(repo), env=env).returncode == 0
-    assert _git(repo, "config", "user.name", "Test Author", env=env).returncode == 0
-    assert _git(repo, "config", "user.email", "author@example.test", env=env).returncode == 0
-    assert _git(repo, "remote", "add", "origin", str(remote), env=env).returncode == 0
-    (repo / "seed.py").write_text("value = 1\n", encoding="utf-8")
-    _commit(repo, "initial", env)
-
-    linked = tmp_path / "linked"
-    assert _git(repo, "worktree", "add", "-b", "linked", str(linked), env=env).returncode == 0
-    scripts = linked / "scripts"
-    (scripts / "hooks").mkdir(parents=True)
-    shutil.copy2(_ROOT / "scripts" / "outgoing_antislop.py", scripts / "outgoing_antislop.py")
-    shutil.copy2(_ROOT / "scripts" / "hooks" / "pre-push", scripts / "hooks" / "pre-push")
-    shutil.copy2(
-        _ROOT / "scripts" / "install_pre_push_hook.py",
-        scripts / "install_pre_push_hook.py",
-    )
-
-    global_hooks = tmp_path / "global-hooks"
-    global_hooks.mkdir()
-    composer = global_hooks / "pre-push"
-    composer.write_text(
-        "#!/bin/sh\n"
-        'git_dir="$(git rev-parse --absolute-git-dir)" || exit 1\n'
-        'exec "$git_dir/hooks/pre-push" "$@"\n',
-        encoding="utf-8",
-    )
-    composer.chmod(0o755)
-    assert _git(repo, "config", "--global", "core.hooksPath", str(global_hooks), env=env).returncode == 0
-
-    installed = subprocess.run(
-        [sys.executable, str(scripts / "install_pre_push_hook.py")],
-        cwd=linked,
-        env=env,
-        capture_output=True,
-        check=False,
-        text=True,
-    )
-    assert installed.returncode == 0, installed.stderr
-    linked_git_dir = Path(
-        _git(linked, "rev-parse", "--absolute-git-dir", env=env).stdout.strip()
-    )
-    assert (linked_git_dir / "hooks" / "pre-push").is_file()
-    assert (repo / ".git" / "hooks" / "pre-push").is_file()
-
-    (linked / "candidate.py").write_text("def pending() -> None:\n    pass\n", encoding="utf-8")
-    assert _git(linked, "add", "candidate.py", env=env).returncode == 0
-    assert _git(linked, "commit", "-m", "candidate", env=env).returncode == 0
-    pushed = _git(linked, "push", "origin", "HEAD:refs/heads/linked", env=env)
-    assert pushed.returncode == 0, pushed.stderr
-    assert "candidate.py" in pushed.stderr
 
 
 def test_installer_preserves_existing_hook_and_installed_shim_runs(tmp_path: Path) -> None:
@@ -705,6 +620,8 @@ def test_installer_preserves_existing_hook_and_installed_shim_runs(tmp_path: Pat
     assert installed == (hooks / "pre-push").read_text(encoding="utf-8")
     previous = repo / ".git" / "hooks" / "pre-push.previous"
     assert previous.read_text(encoding="utf-8") == '#!/bin/sh\nprintf gate > "$GATE_MARKER"\nexit 23\n'
+    metadata = (repo / ".git" / "hooks" / "pre-push.3d-antislop.json").read_text(encoding="utf-8")
+    assert '"predecessor": "pre-push.previous"' in metadata
     remote = tmp_path / "remote.git"
     assert _git(tmp_path, "init", "--bare", str(remote), env=env).returncode == 0
     assert _git(repo, "config", "user.name", "Test Author", env=env).returncode == 0
@@ -725,6 +642,42 @@ def test_installer_preserves_existing_hook_and_installed_shim_runs(tmp_path: Pat
     )
     assert second.returncode == 0, second.stderr
     assert not (repo / ".git" / "hooks" / "pre-push.bak").exists()
+
+
+
+def test_installer_ignores_inherited_git_overrides(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    env = _repo_env(home)
+    repo = tmp_path / "repo"
+    other = tmp_path / "other"
+    scripts = repo / "scripts"
+    hooks = scripts / "hooks"
+    scripts.mkdir(parents=True)
+    hooks.mkdir()
+    assert _git(tmp_path, "init", str(repo), env=env).returncode == 0
+    assert _git(tmp_path, "init", str(other), env=env).returncode == 0
+    shutil.copy2(_ROOT / "scripts" / "outgoing_antislop.py", scripts / "outgoing_antislop.py")
+    shutil.copy2(_ROOT / "scripts" / "hooks" / "pre-push", hooks / "pre-push")
+    shutil.copy2(_ROOT / "scripts" / "install_pre_push_hook.py", scripts / "install_pre_push_hook.py")
+    other_config = (other / ".git" / "config").read_bytes()
+    poisoned = env | {
+        "GIT_DIR": str(other / ".git"),
+        "GIT_WORK_TREE": str(other),
+        "GIT_INDEX_FILE": str(other / ".git" / "index"),
+        "GIT_CONFIG_GLOBAL": str(other / ".git" / "config"),
+    }
+    installed = subprocess.run(
+        [sys.executable, str(scripts / "install_pre_push_hook.py")],
+        cwd=repo,
+        env=poisoned,
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    assert installed.returncode == 0, installed.stderr
+    assert (repo / ".git" / "hooks" / "pre-push").is_file()
+    assert (other / ".git" / "config").read_bytes() == other_config
 
 
 def test_installed_shim_runs_global_dispatcher_and_advisory_stage(tmp_path: Path) -> None:
@@ -761,6 +714,12 @@ def test_installed_shim_runs_global_dispatcher_and_advisory_stage(tmp_path: Path
     assert _git(repo, "remote", "add", "origin", str(remote), env=env).returncode == 0
     (repo / "candidate.py").write_text("def pending() -> None:\n    pass\n", encoding="utf-8")
     _commit(repo, "candidate", env)
+    predecessor = repo / ".git" / "hooks" / "pre-push"
+    predecessor.write_text(
+        '#!/bin/sh\n"${XDG_CONFIG_HOME}/git/run-global-hooks" pre-push "$@" || exit $?\nexit 0\n',
+        encoding="utf-8",
+    )
+    predecessor.chmod(0o755)
     installed = subprocess.run(
         [sys.executable, str(scripts / "install_pre_push_hook.py")],
         cwd=repo,
@@ -770,7 +729,6 @@ def test_installed_shim_runs_global_dispatcher_and_advisory_stage(tmp_path: Path
         text=True,
     )
     assert installed.returncode == 0, installed.stderr
-    env["GLOBAL_HOOKS_DISPATCH_MARKER"] = ""
     pushed = _git(repo, "push", "origin", "HEAD:refs/heads/topic", env=env)
     assert pushed.returncode == 0, pushed.stderr
     assert runner_log.read_text(encoding="utf-8").splitlines() == ["pre-push"]

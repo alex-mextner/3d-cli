@@ -136,6 +136,22 @@ def _comparison_base(repo: Path, update: RefUpdate, remote_name: str | None) -> 
     if not _is_zero_sha(update.remote_sha):
         return update.remote_sha
     if remote_name is not None and _REMOTE_NAME_RE.fullmatch(remote_name):
+        contains_result = _run_git(
+            repo,
+            [
+                "for-each-ref",
+                "--contains",
+                update.local_sha,
+                "--format=%(refname)",
+                f"refs/remotes/{remote_name}/",
+            ],
+            check=False,
+        )
+        if contains_result.returncode == 0 and any(
+            ref_name.startswith(f"refs/remotes/{remote_name}/")
+            for ref_name in contains_result.stdout.decode("utf-8", "replace").splitlines()
+        ):
+            return update.local_sha
         head_ref = f"refs/remotes/{remote_name}/HEAD"
         head_result = _run_git(repo, ["symbolic-ref", "--quiet", head_ref], check=False)
         if head_result.returncode == 0:
@@ -328,7 +344,7 @@ def _stdlib_diagnostics(source: str, path: str, changed_lines: set[int]) -> None
             for token in tokenize.generate_tokens(io.StringIO(source).readline)
             if token.type == tokenize.COMMENT and _TYPE_IGNORE_RE.search(token.string)
         }
-    except (tokenize.TokenError, IndentationError):
+    except (tokenize.TokenError, SyntaxError):
         comment_lines = set()
     for line_number in sorted(comment_lines & changed_lines):
         _report(
@@ -407,6 +423,7 @@ def _analyze_change(
 def analyze(payload: bytes, repo: Path, remote_name: str | None = None) -> None:
     updates = _parse_updates(payload)
     scopes: dict[tuple[str, str], ChangeScope] = {}
+    baseline_cache: dict[tuple[str | None, str], str | None] = {}
     with tempfile.TemporaryDirectory(prefix="3d-antislop-") as temp_dir:
         temp_root = Path(temp_dir)
         for update in updates:
@@ -429,7 +446,23 @@ def analyze(payload: bytes, repo: Path, remote_name: str | None = None) -> None:
                     "Next: inspect the remote ref before pushing"
                 )
                 continue
-            old = _comparison_base(repo, update, remote_name)
+            if _is_zero_sha(update.remote_sha):
+                baseline_key = (remote_name, update.local_sha)
+                if baseline_key in baseline_cache:
+                    old = baseline_cache[baseline_key]
+                else:
+                    try:
+                        old = _comparison_base(repo, update, remote_name)
+                    except GitError as exc:
+                        _warn(f"{update.remote_ref}: cannot determine outgoing baseline ({exc}). Next: inspect the ref diff locally")
+                        continue
+                    baseline_cache[baseline_key] = old
+            else:
+                try:
+                    old = _comparison_base(repo, update, remote_name)
+                except GitError as exc:
+                    _warn(f"{update.remote_ref}: cannot determine outgoing baseline ({exc}). Next: inspect the ref diff locally")
+                    continue
             if old is None:
                 continue
             try:
