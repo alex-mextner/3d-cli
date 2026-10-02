@@ -1,0 +1,302 @@
+#!/usr/bin/env python3
+"""Run the warning-only analyzer without weakening existing pre-push gates.
+
+Accessed via: ``scripts/install_pre_push_hook.py`` installs this file into the
+worktree and common Git hooks directories when they differ. It retains the
+``global-git-hooks-dispatcher`` capability marker because the agent-tools retrofit
+must recognize this hook as already composed.
+
+Assumptions: Git supplies four-field ref-update records on stdin; the optional
+``pre-push.previous`` file is the hook displaced by installation; the global
+dispatcher marker is touched by a nested dispatcher invocation.
+
+Past bugs: replacing a dispatcher-only hook without chaining it silently dropped
+protect-main and secret-scan. This shim runs the displaced hook, runs the global
+dispatcher when the displaced hook did not, and only then runs advisory analysis.
+"""
+from __future__ import annotations
+
+import os
+import re
+import shlex
+import subprocess
+import tempfile
+import sys
+from pathlib import Path
+
+
+def _installed_hooks_dir() -> Path:
+    return Path(__file__).resolve().parent
+
+
+def _run_with_payload(
+    command: list[str],
+    payload: bytes,
+    *,
+    advisory: bool,
+    env: dict[str, str],
+) -> int:
+    try:
+        return subprocess.run(command, input=payload, check=False, env=env).returncode
+    except OSError as exc:
+        if advisory:
+            print(f"WARN anti-slop: could not run {' '.join(command)} ({exc}); continuing", file=sys.stderr)
+            return 0
+        print(f"ERROR pre-push stage unavailable: {' '.join(command)} ({exc})", file=sys.stderr)
+        return 127
+
+
+
+
+def _line_invokes_global_dispatcher(line: str, variables: set[str] | frozenset[str] = frozenset()) -> bool:
+    for segment in re.split(r";|&&|\|\|", line):
+        try:
+            tokens = shlex.split(segment, comments=True)
+        except ValueError:
+            continue
+        index = 0
+        while index < len(tokens) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", tokens[index]):
+            index += 1
+        if index < len(tokens) and tokens[index] == "exec":
+            index += 1
+        if index >= len(tokens):
+            continue
+        command = tokens[index]
+        if command == "run-global-hooks" or command.endswith("/run-global-hooks"):
+            return True
+        variable = re.fullmatch(r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))", command)
+        if variable and (variable.group(1) or variable.group(2)) in variables:
+            return True
+    return False
+
+
+def _dispatcher_variables(content: str) -> set[str]:
+    variables: set[str] = set()
+    for line in content.splitlines():
+        for segment in re.split(r";|&&|\|\|", line):
+            try:
+                tokens = shlex.split(segment, comments=True)
+            except ValueError:
+                continue
+            index = 0
+            assignments: list[tuple[str, str]] = []
+            while index < len(tokens):
+                match = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*)=(.*)", tokens[index])
+                if match is None:
+                    break
+                assignments.append((match.group(1), match.group(2)))
+                index += 1
+            if index == len(tokens):
+                candidates = assignments
+            elif index < len(tokens) and tokens[index] == "exec":
+                candidates = assignments
+            else:
+                candidates = []
+            for name, value in candidates:
+                if value == "run-global-hooks" or value.endswith("/run-global-hooks"):
+                    variables.add(name)
+    return variables
+
+def _runs_global_dispatcher(hook: Path) -> bool:
+    try:
+        content = hook.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    variables: set[str] = set()
+    heredoc: str | None = None
+    for line in content.splitlines():
+        stripped = line.strip()
+        if heredoc is not None:
+            if stripped == heredoc:
+                heredoc = None
+            continue
+        match = re.search(r"<<-?\s*['\"]?([A-Za-z_][A-Za-z0-9_]*)['\"]?", line)
+        if match:
+            heredoc = match.group(1)
+        if _line_invokes_global_dispatcher(line, variables):
+            return True
+        for segment in re.split(r";|&&|\|\|", line):
+            try:
+                tokens = shlex.split(segment, comments=True)
+            except ValueError:
+                continue
+            if len(tokens) != 1:
+                continue
+            assignment = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*)=(.*)", tokens[0])
+            if assignment and (
+                assignment.group(2) == "run-global-hooks"
+                or assignment.group(2).endswith("/run-global-hooks")
+            ):
+                variables.add(assignment.group(1))
+    return False
+
+
+def _defines_dispatcher_variable(line: str, variables: set[str]) -> bool:
+    try:
+        tokens = shlex.split(line, comments=True)
+    except ValueError:
+        return False
+    if len(tokens) != 1:
+        return False
+    match = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*)=.*", tokens[0])
+    return match is not None and match.group(1) in variables
+
+
+def _is_dispatcher_only(hook: Path) -> bool:
+    try:
+        content = hook.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    variables = _dispatcher_variables(content)
+    meaningful = [line.strip() for line in content.splitlines() if line.strip() and not line.lstrip().startswith("#")]
+    if meaningful and meaningful[0].startswith("#!"):
+        meaningful = meaningful[1:]
+    return bool(meaningful) and all(
+        _line_invokes_global_dispatcher(line, variables)
+        or _defines_dispatcher_variable(line, variables)
+        or line in {"exit 0", "|| exit $?"}
+        for line in meaningful
+    )
+
+
+def _preserved_hooks(hook_dirs: list[Path]) -> list[Path]:
+    candidates = [
+        candidate
+        for hooks_dir in hook_dirs
+        for candidate in (hooks_dir / "pre-push.previous", *hooks_dir.glob("pre-push.bak*"))
+    ]
+
+    def order(path: Path) -> tuple[int, str]:
+        if path.name == "pre-push.previous":
+            return (-1, str(path))
+        suffix = path.name.removeprefix("pre-push.bak")
+        if not suffix:
+            return (0, str(path))
+        try:
+            return (int(suffix.removeprefix(".")), str(path))
+        except ValueError:
+            return (999_999, str(path))
+
+    return sorted(
+        (path for path in candidates if path.is_file() and os.access(path, os.X_OK)),
+        key=order,
+    )
+
+
+def main() -> int:
+    payload = sys.stdin.buffer.read()
+    installed = _installed_hooks_dir()
+    hook_dirs = [installed]
+    try:
+        common_result = subprocess.run(
+            ["git", "rev-parse", "--git-common-dir"],
+            capture_output=True,
+            check=False,
+            text=True,
+        )
+        if common_result.returncode == 0 and common_result.stdout.strip():
+            common = Path(common_result.stdout.strip())
+            if not common.is_absolute():
+                common = (Path.cwd() / common).resolve()
+            common_hooks = (common / "hooks").resolve()
+            if common_hooks != installed:
+                hook_dirs.append(common_hooks)
+    except OSError:
+        pass
+    preserved = _preserved_hooks(hook_dirs)
+    raw_depth = os.environ.get("GLOBAL_HOOKS_DISPATCH_DEPTH")
+    if raw_depth is None:
+        depth = 0
+    else:
+        try:
+            depth = int(raw_depth)
+        except ValueError:
+            print("ERROR pre-push invalid dispatcher depth; refusing to bypass preserved gates", file=sys.stderr)
+            return 125
+        if depth < 0:
+            print("ERROR pre-push invalid dispatcher depth; refusing to bypass preserved gates", file=sys.stderr)
+            return 125
+    if depth > 0:
+        print("ERROR pre-push dispatcher recursion detected; refusing to bypass preserved gates", file=sys.stderr)
+        return 125
+    marker = os.environ.get("GLOBAL_HOOKS_DISPATCH_MARKER")
+    marker_owned = not marker
+    if marker_owned:
+        marker_fd, marker = tempfile.mkstemp(prefix="3d-global-hooks-")
+        os.close(marker_fd)
+    assert marker is not None
+    Path(marker).unlink(missing_ok=True)
+    child_env = os.environ.copy()
+    child_env["GLOBAL_HOOKS_DISPATCH_DEPTH"] = "1"
+    child_env["GLOBAL_HOOKS_DISPATCH_MARKER"] = marker
+    dispatchers = [path for path in preserved if _runs_global_dispatcher(path)]
+    has_gate_bearing_dispatcher = any(not _is_dispatcher_only(path) for path in dispatchers)
+    dispatcher_seen = False
+    try:
+        for previous in preserved:
+            is_dispatcher = _runs_global_dispatcher(previous)
+            dispatcher_only = is_dispatcher and _is_dispatcher_only(previous)
+            if dispatcher_only and (has_gate_bearing_dispatcher or dispatcher_seen):
+                continue
+            previous_rc = _run_with_payload(
+                [str(previous), *sys.argv[1:]],
+                payload,
+                advisory=False,
+                env=child_env,
+            )
+            if previous_rc != 0:
+                return previous_rc
+            dispatcher_seen = dispatcher_seen or (is_dispatcher and Path(marker).exists())
+        if not Path(marker).exists() and not dispatcher_seen:
+            raw_config_home = os.environ.get("XDG_CONFIG_HOME")
+            if raw_config_home is None:
+                config_home = str(Path.home() / ".config")
+            elif not raw_config_home or not Path(raw_config_home).is_absolute():
+                print("ERROR pre-push XDG_CONFIG_HOME must be an absolute non-empty path", file=sys.stderr)
+                return 127
+            else:
+                config_home = raw_config_home
+            runner = Path(config_home) / "git" / "run-global-hooks"
+            if not runner.is_file() or not os.access(runner, os.X_OK):
+                print(f"ERROR pre-push global dispatcher unavailable: {runner}", file=sys.stderr)
+                return 127
+            dispatcher_rc = _run_with_payload(
+                [str(runner), "pre-push", *sys.argv[1:]],
+                payload,
+                advisory=False,
+                env=child_env,
+            )
+            if dispatcher_rc != 0:
+                return dispatcher_rc
+            if not Path(marker).exists():
+                print("ERROR pre-push global dispatcher returned success without proving dispatch", file=sys.stderr)
+                return 127
+        try:
+            root_result = subprocess.run(
+                ["git", "rev-parse", "--show-toplevel"],
+                capture_output=True,
+                check=False,
+                text=True,
+            )
+        except OSError as exc:
+            print(f"WARN anti-slop: cannot resolve repository root ({exc}); skipped without blocking", file=sys.stderr)
+            return 0
+        if root_result.returncode != 0:
+            print("WARN anti-slop: cannot resolve repository root; skipped without blocking", file=sys.stderr)
+            return 0
+        analyzer = Path(root_result.stdout.strip()) / "scripts" / "outgoing_antislop.py"
+        analyzer_rc = _run_with_payload(
+            [sys.executable, str(analyzer), *sys.argv[1:]],
+            payload,
+            advisory=True,
+            env=child_env,
+        )
+        if analyzer_rc != 0:
+            print(f"WARN anti-slop: analyzer exited {analyzer_rc}; advisory result ignored", file=sys.stderr)
+        return 0
+    finally:
+        Path(marker).unlink(missing_ok=True)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
