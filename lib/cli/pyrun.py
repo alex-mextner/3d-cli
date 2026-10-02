@@ -22,6 +22,7 @@ import sys
 from functools import lru_cache
 
 from cli.env import repo_root
+from cli.venv_paths import executable
 from errors import MissingDependency, UsageError
 
 # Keep this table in sync when a new bare `deps` package imports under a non-obvious
@@ -96,8 +97,8 @@ def tool_argv(deps: str, script: str, args: list[str]) -> list[str]:
     root = repo_root()
     script_path = script if os.path.isabs(script) else os.path.join(root, "lib", script)
 
-    venv_py = os.path.join(root, ".venv", "bin", "python")
-    if os.access(venv_py, os.X_OK) and _venv_has_deps(venv_py, deps):
+    venv_py = os.fspath(executable(root, "python"))
+    if os.path.isfile(venv_py) and os.access(venv_py, os.X_OK) and _venv_has_deps(venv_py, deps):
         return [venv_py, script_path, *args]
 
     if not os.environ.get("PY3D_NO_UV") and shutil.which("uv"):
@@ -132,6 +133,8 @@ def exec_tool(deps: str, script: str, args: list[str]) -> int:
     On platforms without os.execvp this falls back to run_tool + sys.exit.
     """
     argv = tool_argv(deps, script, args)
+    if sys.platform == "win32":
+        return subprocess.run(argv).returncode
     try:
         os.execvp(argv[0], argv)
     except OSError:

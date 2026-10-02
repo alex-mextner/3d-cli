@@ -17,6 +17,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Tested local B-rep worker; base CLI remains usable on Python 3.10.
+solid = ["cadquery-ocp==8.0.1.0.0; python_version >= '3.11' and python_version < '3.15'"]
 # Reference pre-processing (`3d preprocess`). Heavy "best path" tiers (rembg / Depth-Anything
 # via transformers+torch / SAM2) stay import-guarded and out of the lock — install ad hoc.
 preprocess = ["opencv-python-headless>=4.8", "pillow>=10.0"]

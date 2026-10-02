@@ -9,6 +9,7 @@ from typing import Any
 
 from cli.env import install_cmd, repo_root
 from cli.registry import Command
+from cli.venv_paths import executable
 from errors import InvalidArgument, MissingDependency, UsageError
 
 USAGE = """3d worktree <subcommand> [options]
@@ -19,7 +20,7 @@ Subcommands:
   create <branch> [--path DIR] [--base REF] [--json] [--no-sync]
       create a git worktree and run `uv sync --extra dev` in it
   doctor [DIR] [--json]
-      verify DIR (default cwd) has .venv/bin/{ruff,pytest,mypy}
+      verify DIR has platform-native venv tools (.venv/Scripts on Windows)
   list [--json]
       list git worktrees known to this repository
 
@@ -120,7 +121,7 @@ def _parse_create(argv: list[str]) -> tuple[str, Path, str, bool, bool]:
 
 
 def _dev_tool_status(path: Path) -> dict[str, bool]:
-    return {tool: (path / ".venv" / "bin" / tool).exists() for tool in DEV_TOOLS}
+    return {tool: executable(path, tool).is_file() for tool in DEV_TOOLS}
 
 
 def _print_json(payload: dict[str, Any]) -> None:
@@ -147,7 +148,7 @@ def _raise_missing_dev_tools(path: Path, missing: list[str]) -> None:
         "agent worktree dev environment is incomplete",
         command="worktree",
         remediation=[
-            f"Missing tools in {path / '.venv' / 'bin'}: {', '.join(missing)}",
+            f"Missing tools in {executable(path, 'python').parent}: {', '.join(missing)}",
             f"Inspect the worktree:  cd {path}",
             "Retry bootstrap:  uv sync --extra dev",
             "Then verify:  3d worktree doctor .",

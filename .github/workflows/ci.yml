@@ -35,3 +35,23 @@ jobs:
         run: uv run pytest tests/ --cov=lib --cov-fail-under=80 -q
       - name: Run mypy
         run: uv run mypy lib/ tests/
+
+  local-cad:
+    name: Local CAD (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+      - name: Install the actual local CAD backend
+        run: uv sync --frozen --python 3.12 --extra dev --extra solid
+      - name: Require OpenCASCADE (no skipped geometry tier)
+        run: uv run python -c "import OCP; import trimesh; import scipy"
+      - name: Test native CAD and process boundaries
+        run: uv run pytest tests/test_qymcad_solid_windows.py tests/test_solid_publication.py tests/test_solid_review.py tests/test_imports.py tests/test_commands_worktree.py tests/test_cli_pyrun.py -q

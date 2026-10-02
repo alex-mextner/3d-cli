@@ -175,3 +175,10 @@ reviewer commands and the minimum independent-reviewer bar.
 
 Some task slices may require additional reviewers or narrower commands; follow the slice
 instructions when they are stricter than the repository baseline.
+
+## Local CAD extensions
+
+| Command | Documentation | Capability |
+|---|---|---|
+| `solid` | [solid.md](solid.md) | Closed STL shell to validated faceted STEP, locally. |
+| `qymcad` | [qymcad.md](qymcad.md) | Discover and explicitly launch the local QymCAD GUI. |
