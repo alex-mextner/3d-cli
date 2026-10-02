@@ -13,7 +13,7 @@ from errors import MissingDependency, UsageError
 
 
 def test_tool_argv_venv(monkeypatch: Any, tmp_path: Any) -> None:
-    venv_py = tmp_path / ".venv" / "bin" / "python"
+    venv_py = tmp_path / ".venv" / ("Scripts" if os.name == "nt" else "bin") / ("python.exe" if os.name == "nt" else "python")
     venv_py.parent.mkdir(parents=True, exist_ok=True)
     venv_py.write_text("")
     venv_py.chmod(0o755)
@@ -27,7 +27,7 @@ def test_tool_argv_venv(monkeypatch: Any, tmp_path: Any) -> None:
 def test_tool_argv_prefers_venv_for_empty_deps_even_if_nonempty_deps_would_fail(
     monkeypatch: Any, tmp_path: Any
 ) -> None:
-    venv_py = tmp_path / ".venv" / "bin" / "python"
+    venv_py = tmp_path / ".venv" / ("Scripts" if os.name == "nt" else "bin") / ("python.exe" if os.name == "nt" else "python")
     venv_py.parent.mkdir(parents=True, exist_ok=True)
     venv_py.write_text("")
     venv_py.chmod(0o755)
@@ -137,7 +137,7 @@ def test_tool_argv_uv(monkeypatch: Any, tmp_path: Any) -> None:
 
 
 def test_tool_argv_uses_complete_venv_for_required_deps(monkeypatch: Any, tmp_path: Any) -> None:
-    venv_py = tmp_path / ".venv" / "bin" / "python"
+    venv_py = tmp_path / ".venv" / ("Scripts" if os.name == "nt" else "bin") / ("python.exe" if os.name == "nt" else "python")
     venv_py.parent.mkdir(parents=True, exist_ok=True)
     venv_py.write_text("")
     venv_py.chmod(0o755)
@@ -151,7 +151,7 @@ def test_tool_argv_uses_complete_venv_for_required_deps(monkeypatch: Any, tmp_pa
 
 
 def test_tool_argv_skips_incomplete_venv_for_required_deps(monkeypatch: Any, tmp_path: Any) -> None:
-    venv_py = tmp_path / ".venv" / "bin" / "python"
+    venv_py = tmp_path / ".venv" / ("Scripts" if os.name == "nt" else "bin") / ("python.exe" if os.name == "nt" else "python")
     venv_py.parent.mkdir(parents=True, exist_ok=True)
     venv_py.write_text("")
     venv_py.chmod(0o755)
@@ -192,7 +192,7 @@ def test_tool_argv_uses_system_python_for_empty_deps_without_venv_or_uv(
 def test_tool_argv_uses_system_python_when_venv_incomplete_and_uv_disabled(
     monkeypatch: Any, tmp_path: Any
 ) -> None:
-    venv_py = tmp_path / ".venv" / "bin" / "python"
+    venv_py = tmp_path / ".venv" / ("Scripts" if os.name == "nt" else "bin") / ("python.exe" if os.name == "nt" else "python")
     venv_py.parent.mkdir(parents=True, exist_ok=True)
     venv_py.write_text("")
     venv_py.chmod(0o755)
@@ -241,3 +241,17 @@ def test_exec_tool_oserror_falls_back(monkeypatch: Any) -> None:
     import subprocess
     monkeypatch.setattr(subprocess, "run", lambda argv: subprocess.CompletedProcess(argv, 0))
     assert pyrun.exec_tool("", "s.py", []) == 0
+
+
+def test_exec_tool_waits_for_windows_child_and_preserves_exit_code(monkeypatch: Any) -> None:
+    monkeypatch.setattr(pyrun.sys, "platform", "win32")
+    expected = [r"C:\path with spaces\python.exe", "script.py", "bad mesh.stl"]
+    monkeypatch.setattr(pyrun, "tool_argv", lambda deps, script, args: expected)
+    def forbidden_exec(*args: Any) -> None:
+        pytest.fail("Windows must not use execvp with space-containing arguments")
+    def run_child(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+        assert argv == expected
+        return subprocess.CompletedProcess(argv, 19)
+    monkeypatch.setattr(os, "execvp", forbidden_exec)
+    monkeypatch.setattr(subprocess, "run", run_child)
+    assert pyrun.exec_tool("", "script.py", ["bad mesh.stl"]) == 19

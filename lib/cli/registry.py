@@ -68,6 +68,7 @@ class Command:
     group: str = "META"
     usage: str = ""
     aliases: tuple[str, ...] = field(default_factory=tuple)
+    bootstrap_openscad: bool = True
 
 
 class Registry:

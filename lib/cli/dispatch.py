@@ -127,13 +127,15 @@ def _test_command_migration_error(argv: list[str]) -> UsageError:
 def main(argv: list[str]) -> int:
     # 1. startup (must run before any subprocess so OpenSCAD/children inherit the path).
     export_openscadpath()
-    maybe_bootstrap()
 
     # 2. registry.
     reg = discover()
 
     cmd = argv[0] if argv else "help"
     rest = argv[1:]
+    resolved = reg.resolve(cmd)
+    if resolved is None or resolved.bootstrap_openscad:
+        maybe_bootstrap()
 
     if cmd in ("help", "-h", "--help"):
         print(usage(reg))
@@ -146,7 +148,6 @@ def main(argv: list[str]) -> int:
         sys.stderr.write(err.render() + "\n")
         return err.exit_code
 
-    resolved = reg.resolve(cmd)
     if resolved is None:
         bold, _cyan, red, z = _color()
         sys.stderr.write(f"{red}3d: unknown command '{cmd}'{z}\n")

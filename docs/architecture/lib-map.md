@@ -178,6 +178,10 @@ Every current root Python module is listed here so future additions are intentio
 - `project.py` — project model and discovery.
 - `projects_registry.py` — compatibility wrapper re-exporting `registries.projects`.
 - `reporting.py` — deterministic gate and metric artifact report composition.
+- `solid_conversion.py` — local faceted STL-to-B-rep construction, geometry checks and STEP readback.
+- `solid_job.py` — bounded geometry worker invocation and acknowledged no-clobber STEP publication.
+- `solid_artifacts.py` — staging cleanup with warnings that cannot reverse a committed result.
+- `qymcad_tools.py` — explicit external QymCAD discovery and startup diagnostics.
 - `workspaces.py` — web dashboard workspace metadata registry.
 - `refmatch.py` — image/reference matching helpers.
 - `render.py` — OpenSCAD render and section implementation.

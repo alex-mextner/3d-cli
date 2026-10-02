@@ -39,6 +39,9 @@ preprocess = [
     { name = "opencv-python-headless" },
     { name = "pillow" },
 ]
+solid = [
+    { name = "cadquery-ocp", marker = "python_full_version >= '3.11' and python_full_version < '3.15'" },
+]
 viz = [
     { name = "pyvista" },
 ]
@@ -50,6 +53,7 @@ web = [
 
 [package.metadata]
 requires-dist = [
+    { name = "cadquery-ocp", marker = "python_full_version >= '3.11' and python_full_version < '3.15' and extra == 'solid'", specifier = "==8.0.1.0.0" },
     { name = "fastapi", marker = "extra == 'dev'", specifier = ">=0.110" },
     { name = "fastapi", marker = "extra == 'web'", specifier = ">=0.110" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.27" },
@@ -72,7 +76,7 @@ requires-dist = [
     { name = "uvicorn", marker = "extra == 'dev'", specifier = ">=0.27" },
     { name = "uvicorn", marker = "extra == 'web'", specifier = ">=0.27" },
 ]
-provides-extras = ["preprocess", "viz", "web", "dev"]
+provides-extras = ["solid", "preprocess", "viz", "web", "dev"]
 
 [[package]]
 name = "annotated-doc"
@@ -153,6 +157,45 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/9a/8e/82a0fe20a541c03148528be8cac2408564a6c9a0cc7e9171802bc1d26985/attrs-26.1.0.tar.gz", hash = "sha256:d03ceb89cb322a8fd706d4fb91940737b6642aa36998fe130a9bc96c985eff32", size = 952055, upload-time = "2026-03-19T14:22:25.026Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/64/b4/17d4b0b2a2dc85a6df63d1157e028ed19f90d4cd97c36717afef2bc2f395/attrs-26.1.0-py3-none-any.whl", hash = "sha256:c647aa4a12dfbad9333ca4e71fe62ddc36f4e63b2d260a37a8b83d2f043ac309", size = 67548, upload-time = "2026-03-19T14:22:23.645Z" },
+]
+
+[[package]]
+name = "cadquery-ocp"
+version = "8.0.1.0.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "cadquery-ocp-proxy" },
+    { name = "vtk" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/2e/66/b196c57d91fdc4aee840f2be8e6337968b27d67418b8a03aec7b4106fbad/cadquery_ocp-8.0.1.0.0-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:69dfbbf87189a573557438b8e4ba07167a3112da72c57f1d3fb8ffa1f6504c36", size = 62680691, upload-time = "2026-09-05T11:26:52.313Z" },
+    { url = "https://files.pythonhosted.org/packages/50/e5/c4963ba913821c237330ae119bb53bd31eb6d4ab26b1dcc120a7697c2848/cadquery_ocp-8.0.1.0.0-cp311-cp311-macosx_11_0_x86_64.whl", hash = "sha256:e5e1ede8c7353ec0cc7bf20000b6b321647cb2d78d79d1c37bcff42ecfd0b89f", size = 67325473, upload-time = "2026-09-05T11:26:55.895Z" },
+    { url = "https://files.pythonhosted.org/packages/e9/65/23912e5f24d70bc352a68bf67383fab47464fc60e15ac670b6cb512d7e55/cadquery_ocp-8.0.1.0.0-cp311-cp311-manylinux_2_28_aarch64.whl", hash = "sha256:c92fc54c2efacc311943217c7c3f5b20d36f6445abd1764020c47a5ff1e95fa5", size = 61551477, upload-time = "2026-09-05T11:26:59.473Z" },
+    { url = "https://files.pythonhosted.org/packages/f3/49/0352effcf9181d21c08dbb4ef00d82901eb303c2da3dda11c3da7c31f3f8/cadquery_ocp-8.0.1.0.0-cp311-cp311-manylinux_2_28_x86_64.whl", hash = "sha256:cc6a26a513a0094d018582e1d5fc6dc4196eec665e9d300bd8383107e39ef868", size = 66923321, upload-time = "2026-09-05T11:27:02.981Z" },
+    { url = "https://files.pythonhosted.org/packages/50/90/8b56ba4484c44b3d34487fe71f9a2db0b2139fbac09692519900a748bdfe/cadquery_ocp-8.0.1.0.0-cp311-cp311-win_amd64.whl", hash = "sha256:3cf20493816d8ce8aff1d5c631ca94f8ee304e1bb142494d66773a3521ee8bfe", size = 47637329, upload-time = "2026-09-05T11:27:06.191Z" },
+    { url = "https://files.pythonhosted.org/packages/ef/b6/4ad1f51161ae618d00cd53439cc75b0528522744cebda9c87abc311206f8/cadquery_ocp-8.0.1.0.0-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:b19e479129d734cc6ff70cbf8a570fda165ba7b6d3b83eb8472cae4e0bc5bc52", size = 63264689, upload-time = "2026-09-05T11:27:09.756Z" },
+    { url = "https://files.pythonhosted.org/packages/e9/cf/86bcef746b24d74b2d70909d51d5cee9a899d3cadbf4082f714fb07fb3eb/cadquery_ocp-8.0.1.0.0-cp312-cp312-macosx_11_0_x86_64.whl", hash = "sha256:2fb36e055ab905d0af1de604e2a5d2b5f99dc190cc0ba40e0f5cd8188899bb90", size = 68118643, upload-time = "2026-09-05T11:27:13.24Z" },
+    { url = "https://files.pythonhosted.org/packages/9d/c3/d336ac896411a58113a0e937e8fb090cc37c92b96f4fd3303819dd07d4d3/cadquery_ocp-8.0.1.0.0-cp312-cp312-manylinux_2_28_aarch64.whl", hash = "sha256:531b0e3ac0423f5436eae3dc7595f1288023bdefe45c33b56cf7ba2764ae16bc", size = 61762762, upload-time = "2026-09-05T11:27:16.676Z" },
+    { url = "https://files.pythonhosted.org/packages/40/6f/4c12a85966bf92291a5e1909364260aab0725f43d0e3eafd5bc864f5aa5a/cadquery_ocp-8.0.1.0.0-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:4565c08a536ca6d70772ada154591714179136e6bcc55e399659afe34c67bd8c", size = 67130381, upload-time = "2026-09-05T11:27:20.006Z" },
+    { url = "https://files.pythonhosted.org/packages/fb/dd/8b486cae59fa68058ce1056b9aa023032e6d21a266cbd605b00c902df62b/cadquery_ocp-8.0.1.0.0-cp312-cp312-win_amd64.whl", hash = "sha256:903b85482e41809be6493f0a721fe1b0a7b3f5eb4d3c3de3e17630e1508d0a4c", size = 47854816, upload-time = "2026-09-05T11:27:23.715Z" },
+    { url = "https://files.pythonhosted.org/packages/3c/d1/e3dacc223744e058ca51177395b322d4c029fbe5e6e7a911ec9eef46c285/cadquery_ocp-8.0.1.0.0-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:6320b11f7b07734a1f13800ea9f6e502783797330b5c78c26d90d905144e7618", size = 63265571, upload-time = "2026-09-05T11:27:27.055Z" },
+    { url = "https://files.pythonhosted.org/packages/d6/b9/1e7a54ccb15ad60acca6a46796a9f79b78960895033357c9d77faf4742a6/cadquery_ocp-8.0.1.0.0-cp313-cp313-macosx_11_0_x86_64.whl", hash = "sha256:55b72debce8bfef4c7f612fc9b762145c6a59784de60fa178b2d8c7f0cec5454", size = 68116429, upload-time = "2026-09-05T11:27:30.428Z" },
+    { url = "https://files.pythonhosted.org/packages/7b/9a/03b121101d59237cb9648b4c51aef3a22f9c9e0d24180a61e9e06f66c437/cadquery_ocp-8.0.1.0.0-cp313-cp313-manylinux_2_28_aarch64.whl", hash = "sha256:6fb697006c73864122ab93a66659b983e061362a86a24a15022c42e4ab0c93be", size = 61745913, upload-time = "2026-09-05T11:27:33.696Z" },
+    { url = "https://files.pythonhosted.org/packages/3f/89/143e25a76a814a9622c5411e0a5a8f176977bcdce0acf1f5178a5155ce86/cadquery_ocp-8.0.1.0.0-cp313-cp313-manylinux_2_28_x86_64.whl", hash = "sha256:93e4eacac5e0504bc9157a10a134b7dce7719eb4999d79af25d34b35e8d9ab03", size = 67119012, upload-time = "2026-09-05T11:27:38.299Z" },
+    { url = "https://files.pythonhosted.org/packages/8c/61/98e9efa6e3872929d5a5f3ff2447a56ccf3ae0a038495410ed6b970796cb/cadquery_ocp-8.0.1.0.0-cp313-cp313-win_amd64.whl", hash = "sha256:111d71bd5882351570625e35bc982ea3888430e7754fac33975717c796942ae8", size = 47855881, upload-time = "2026-09-05T11:27:41.778Z" },
+    { url = "https://files.pythonhosted.org/packages/ed/91/62e5673598d24e29464c53b8884809f7019078872e13a85bf8aecfb2383f/cadquery_ocp-8.0.1.0.0-cp314-cp314-macosx_11_0_arm64.whl", hash = "sha256:b404b2361d28665c3e09a4e3afd1c9022030455e5f1c7afe2b41e3ac25044f5a", size = 63326008, upload-time = "2026-09-05T11:27:45.482Z" },
+    { url = "https://files.pythonhosted.org/packages/6b/6b/ad638fdd482cb0fd1f90bc2e3f4f960a1ff6c57fa2e69660bc6d46daff2a/cadquery_ocp-8.0.1.0.0-cp314-cp314-macosx_11_0_x86_64.whl", hash = "sha256:e21a03b5d1602e7d3aca67822aa1ac656f1ec67e75b4a2e44b3aa3df1ebe266a", size = 68120255, upload-time = "2026-09-05T11:27:48.949Z" },
+    { url = "https://files.pythonhosted.org/packages/91/ee/fdcf1fb1ebe1a90f4f12877a2a6471c9436144539adad61d40b493a7781d/cadquery_ocp-8.0.1.0.0-cp314-cp314-manylinux_2_28_aarch64.whl", hash = "sha256:68efbde1dc7e4519fb78add28f73ab623f3fa48b5ed4c820884f203d1b8e14df", size = 61944094, upload-time = "2026-09-05T11:27:52.595Z" },
+    { url = "https://files.pythonhosted.org/packages/d5/8c/31b43a86e53de77a913b270cdf338c9e353cd412e2bb7e127d4d51b5bd98/cadquery_ocp-8.0.1.0.0-cp314-cp314-manylinux_2_28_x86_64.whl", hash = "sha256:cb2699b200541ad957fa517afd9522d391c6ce78dbbaa3f63d6c466794c1c8e9", size = 67135065, upload-time = "2026-09-05T11:27:56.381Z" },
+    { url = "https://files.pythonhosted.org/packages/ad/be/753191f20d66fd9c24d942727df68c623e618659348e42fdec43f81e3ea2/cadquery_ocp-8.0.1.0.0-cp314-cp314-win_amd64.whl", hash = "sha256:e68fd378338107daffe5a8a99d8a508b451f31719c85420f8b0a2ba28cd37770", size = 48084272, upload-time = "2026-09-05T11:27:59.542Z" },
+]
+
+[[package]]
+name = "cadquery-ocp-proxy"
+version = "8.0.1.0.0"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/15/36/4a8dbfdf4ab61a7841c36398615c6ab3d3c932d4254b978963690650feea/cadquery_ocp_proxy-8.0.1.0.0-py3-none-any.whl", hash = "sha256:d6a6909a73d2300ca4581ff762ccf0137993ac75c57a2dc82e12bffa3a12b680", size = 3249, upload-time = "2026-09-05T11:31:29.25Z" },
 ]
 
 [[package]]
@@ -298,7 +341,7 @@ resolution-markers = [
     "python_full_version < '3.11'",
 ]
 dependencies = [
-    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" } },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/66/54/eb9bfc647b19f2009dd5c7f5ec51c4e6ca831725f1aea7a993034f483147/contourpy-1.3.2.tar.gz", hash = "sha256:b6945942715a034c671b7fc54f9588126b0b8bf23db2696e3ca8328f3ff0ab54", size = 13466130, upload-time = "2025-04-15T17:47:53.79Z" }
 wheels = [
@@ -370,7 +413,7 @@ resolution-markers = [
     "python_full_version == '3.11.*'",
 ]
 dependencies = [
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" } },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/58/01/1253e6698a07380cd31a736d248a3f2a50a7c88779a1813da27503cadc2a/contourpy-1.3.3.tar.gz", hash = "sha256:083e12155b210502d0bca491432bb04d56dc3432f95a979b429f2848c3dbe880", size = 13466174, upload-time = "2025-07-26T12:03:12.549Z" }
 wheels = [
@@ -605,7 +648,7 @@ name = "exceptiongroup"
 version = "1.3.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "typing-extensions", marker = "python_full_version < '3.11'" },
+    { name = "typing-extensions" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/50/79/66800aadf48771f6b62f7eb014e352e5d06856655206165d775e675a02c9/exceptiongroup-1.3.1.tar.gz", hash = "sha256:8b412432c6055b0b7d14c310000ae93352ed6754f70fa8f7c34141f91c4e3219", size = 30371, upload-time = "2025-11-21T23:01:54.787Z" }
 wheels = [
@@ -1865,7 +1908,7 @@ resolution-markers = [
     "python_full_version < '3.11'",
 ]
 dependencies = [
-    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" } },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/0f/37/6964b830433e654ec7485e45a00fc9a27cf868d622838f6b6d9c5ec0d532/scipy-1.15.3.tar.gz", hash = "sha256:eae3cf522bc7df64b42cad3925c876e1b0b6c35c1337c93e12c0f366f55b0eaf", size = 59419214, upload-time = "2025-05-08T16:13:05.955Z" }
 wheels = [
@@ -1926,7 +1969,7 @@ resolution-markers = [
     "python_full_version == '3.11.*'",
 ]
 dependencies = [
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" } },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/7a/97/5a3609c4f8d58b039179648e62dd220f89864f56f7357f5d4f45c29eb2cc/scipy-1.17.1.tar.gz", hash = "sha256:95d8e012d8cb8816c226aef832200b1d45109ed4464303e997c5b13122b297c0", size = 30573822, upload-time = "2026-02-23T00:26:24.851Z" }
 wheels = [
