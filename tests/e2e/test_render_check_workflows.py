@@ -2,7 +2,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .workflow_helper import png_size, require_working_openscad, run_cli, run_shell
+from .workflow_helper import (
+    png_colour_counts,
+    png_size,
+    require_working_openscad,
+    run_cli,
+    run_shell,
+)
 
 
 def _asymmetric_model(path: Path) -> None:
@@ -36,7 +42,11 @@ def test_render_view_produces_a_named_png_a_user_can_inspect(tmp_path: Path) -> 
 
     assert result.returncode == 0, result.stderr
     assert out.exists()
-    assert out.stat().st_size > 1_000
+    # The model is on screen: background plus a real share of model pixels (a blank frame
+    # is one colour). Not a byte-size floor — a flat-shaded side view compresses to <1 KB.
+    colours = png_colour_counts(out)
+    background = colours.most_common(1)[0][0]
+    assert sum(n for c, n in colours.items() if c != background) >= 0.05 * 320 * 240
     assert png_size(out) == (320, 240)
 
 
