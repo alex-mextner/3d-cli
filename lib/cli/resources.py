@@ -18,10 +18,11 @@ Stdlib-only: imported by the dispatcher on every invocation.
 from __future__ import annotations
 
 import os
+import sys
 from collections.abc import MutableMapping
 
 ENV_MAX_WORKERS = "THREED_MAX_WORKERS"
-DEFAULT_CAP = 6
+DEFAULT_MAX_WORKERS = 6
 
 # native thread pools started by numpy/scipy/BLAS/numba/open3d; each defaults to one thread per core
 THREAD_VARS = (
@@ -35,19 +36,24 @@ THREAD_VARS = (
 )
 
 
+def _override(env: MutableMapping[str, str]) -> int | None:
+    """THREED_MAX_WORKERS as an integer >= 1, or None when unset/empty/unusable"""
+    raw = env.get(ENV_MAX_WORKERS, "").strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        return None
+    return value if value >= 1 else None
+
+
 def max_workers(env: MutableMapping[str, str] | None = None, cpu_count: int | None = None) -> int:
     """Upper bound for parallel workers/threads of one `3d` run."""
     env = os.environ if env is None else env
-    raw = env.get(ENV_MAX_WORKERS, "").strip()
-    if raw:
-        try:
-            value = int(raw)
-        except ValueError:
-            value = 0
-        if value >= 1:
-            return value
+    value = _override(env)
+    if value is not None:
+        return value
     cpus = cpu_count if cpu_count is not None else (os.cpu_count() or 2)
-    return max(1, min(DEFAULT_CAP, cpus // 2))
+    return max(1, min(DEFAULT_MAX_WORKERS, cpus // 2))
 
 
 def pool_size(tasks: int, requested: int | None = None, env: MutableMapping[str, str] | None = None) -> int:
@@ -57,10 +63,15 @@ def pool_size(tasks: int, requested: int | None = None, env: MutableMapping[str,
     return max(1, min(tasks, want))
 
 
-def cap_threads(env: MutableMapping[str, str] | None = None) -> MutableMapping[str, str]:
-    """Cap native thread pools in `env` (default `os.environ`) at `max_workers()`; keeps values already set."""
+def cap_threads(env: MutableMapping[str, str] | None = None) -> None:
+    """Cap native thread pools in `env` (default `os.environ`) at `max_workers()`; keeps values
+    already set (an empty value counts as unset: OpenBLAS would read it as one thread per core).
+    Called once per `3d` run by the dispatcher, so an unusable THREED_MAX_WORKERS is reported here."""
     env = os.environ if env is None else env
+    if env.get(ENV_MAX_WORKERS, "").strip() and _override(env) is None:
+        print(f"3d: ignoring {ENV_MAX_WORKERS}={env[ENV_MAX_WORKERS]!r} (not an integer >= 1); "
+              f"using {max_workers(env)} workers", file=sys.stderr)
     n = str(max_workers(env))
     for var in THREAD_VARS:
-        env.setdefault(var, n)
-    return env
+        if not env.get(var, "").strip():
+            env[var] = n

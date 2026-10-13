@@ -76,9 +76,6 @@ def _on_path(name: str) -> bool:
 
 
 OPENSCAD = find_openscad()
-# Bound concurrent openscad renders so the parallel random-search batch can't fork
-# hundreds of processes or take the whole shared machine (cli.resources: <= 6 by default).
-_RENDER_LIMIT = max_workers()
 MAX_PROOF_ANCHOR_SAMPLES = 720
 
 
@@ -111,7 +108,9 @@ async def eval_losses_async(
     This is the parallel core: the random-search samples (and each refine iteration's
     candidate set) are independent renders, so we gather them under a CPU-bound semaphore
     instead of rendering one-at-a-time."""
-    sem = asyncio.Semaphore(_RENDER_LIMIT)
+    # bounded so the random-search batch can't fork hundreds of openscad processes or take
+    # the whole shared machine (cli.resources: <= 6 by default, THREED_MAX_WORKERS)
+    sem = asyncio.Semaphore(max_workers())
 
     async def one(i: int, p: list[float]) -> float:
         out = os.path.join(tmp, f"cand_{i}.png")
@@ -653,7 +652,7 @@ def main() -> None:
     # concurrently (CPU-bound semaphore), then reduce. Same RNG seed => same samples =>
     # reproducible, just faster than one-render-at-a-time.
     effective_rand = max(args.rand, 240) if args.search_mode == "proof" else args.rand
-    print(f"random search ({effective_rand} samples, mode={args.search_mode}, up to {_RENDER_LIMIT} parallel renders)...",
+    print(f"random search ({effective_rand} samples, mode={args.search_mode}, up to {max_workers()} parallel renders)...",
           flush=True)
     n_params = len(lo)
     anchor_pool = (
