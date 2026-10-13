@@ -547,7 +547,7 @@ def ensure(path: str, image: str | None = None, sizes: list[Thumb] | None = None
         if out and out != path:
             import shutil
 
-            shutil.copyfile(path, out)
+            shutil.copy2(path, out)          # keep mode + mtime like splice() does
         return before
     bad = [t for t in todo if t.fmt not in WRITABLE]
     if bad:

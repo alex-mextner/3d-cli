@@ -62,7 +62,8 @@ def run(argv: list[str]) -> int:
         import gcode_thumbnails  # lazy; stdlib-only for check
 
         return gcode_thumbnails.main(argv)
-    return exec_tool("numpy,pillow" if "--image" in rest else "numpy", "gcode_thumbnails.py", argv)
+    # Pillow always: --image needs it to read, and a `/JPG` size in the profile needs it to write.
+    return exec_tool("numpy,pillow", "gcode_thumbnails.py", argv)
 
 
 COMMAND = Command(

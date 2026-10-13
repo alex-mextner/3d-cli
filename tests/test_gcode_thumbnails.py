@@ -155,6 +155,33 @@ def test_out_leaves_source_untouched(tmp_path: Path) -> None:
     assert gt.check(str(tmp_path / "b.gcode")).ok
 
 
+def test_out_of_an_already_complete_file_keeps_its_mtime(tmp_path: Path) -> None:
+    # A copy stamped "now" would look newer than its project and pass a staleness check.
+    g = make_gcode(tmp_path / "a.gcode")
+    gt.ensure(str(g))
+    os.utime(g, (1_700_000_000, 1_700_000_000))
+    out = tmp_path / "b.gcode"
+    gt.ensure(str(g), out=str(out))
+    assert out.read_bytes() == g.read_bytes()
+    assert out.stat().st_mtime == 1_700_000_000
+
+
+def test_add_always_provisions_pillow_for_jpg_profiles(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # A `; thumbnails = 300x300/JPG` profile is encoded through Pillow even without --image.
+    from commands import gcode_thumbnails as cmd
+
+    seen: list[str] = []
+
+    def fake_exec_tool(deps: str, script: str, args: list[str]) -> int:
+        seen.append(deps)
+        return 0
+
+    monkeypatch.setattr(cmd, "exec_tool", fake_exec_tool)
+    g = make_gcode(tmp_path / "a.gcode", spec="300x300/JPG")
+    assert cmd.run(["add", str(g)]) == 0
+    assert seen == ["numpy,pillow"]
+
+
 def test_ensure_refuses_when_the_file_is_replaced_while_rendering(tmp_path: Path) -> None:
     g = make_gcode(tmp_path / "a.gcode")
     fresh = make_gcode(tmp_path / "fresh.gcode", body="G90\nG1 X1 Y1 E1\n").read_bytes()
