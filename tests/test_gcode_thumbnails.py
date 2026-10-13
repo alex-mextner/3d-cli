@@ -108,6 +108,18 @@ def test_ensure_is_idempotent_and_keeps_mtime(tmp_path: Path) -> None:
     assert g.read_bytes() == once
 
 
+def test_replace_redraws_every_size_without_duplicating_blocks(tmp_path: Path) -> None:
+    g = make_gcode(tmp_path / "a.gcode")
+    gt.ensure(str(g))
+    first = g.read_text(encoding="ascii")
+    c = gt.ensure(str(g), replace=True, source=lambda p: np.full((10, 10, 4), 255, np.uint8))
+    text = g.read_text(encoding="ascii")
+    assert c.added == [gt.Thumb(48, 48, "PNG"), gt.Thumb(96, 96, "PNG")]
+    assert text.count("; THUMBNAIL_BLOCK_START") == 2 and text != first
+    assert text.split("; THUMBNAIL_BLOCK_END\n\n")[-1] == first.split("; THUMBNAIL_BLOCK_END\n\n")[-1]
+    assert text.startswith(HEADER[: HEADER.index("; external")] + "; THUMBNAIL_BLOCK_START")
+
+
 def test_ensure_adds_only_the_missing_size_after_existing_blocks(tmp_path: Path) -> None:
     g = make_gcode(tmp_path / "a.gcode", spec="48x48/PNG")
     gt.ensure(str(g))
@@ -141,6 +153,22 @@ def test_out_leaves_source_untouched(tmp_path: Path) -> None:
     gt.ensure(str(g), out=str(tmp_path / "b.gcode"))
     assert g.read_bytes() == before
     assert gt.check(str(tmp_path / "b.gcode")).ok
+
+
+def test_ensure_refuses_when_the_file_is_replaced_while_rendering(tmp_path: Path) -> None:
+    g = make_gcode(tmp_path / "a.gcode")
+    fresh = make_gcode(tmp_path / "fresh.gcode", body="G90\nG1 X1 Y1 E1\n").read_bytes()
+
+    def reslice_lands(path: str) -> np.ndarray:
+        pic = gt.render_gcode(path, size=96)
+        tmp = tmp_path / "landing"
+        tmp.write_bytes(fresh)
+        os.replace(tmp, path)  # e.g. deliver.sh copying a new slice over it
+        return pic
+
+    with pytest.raises(gt.ThumbnailError, match="changed"):
+        gt.ensure(str(g), source=reslice_lands)
+    assert g.read_bytes() == fresh
 
 
 def test_toolpaths_skip_hidden_features_and_follow_tools_and_arcs() -> None:

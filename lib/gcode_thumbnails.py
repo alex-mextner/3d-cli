@@ -200,12 +200,16 @@ def block(thumb: Thumb, data: bytes) -> str:
             f"{rows}; {tag} end\n; THUMBNAIL_BLOCK_END\n\n")
 
 
+def _first_command(head: bytes) -> int:
+    m = re.search(rb"(?m)^[GMT]\d", head)
+    return m.start() if m else len(head)
+
+
 def insert_offset(head: bytes) -> int:
     """Byte offset for new blocks: after existing thumbnail blocks, else after the
     `; HEADER_BLOCK_END` line and its blank line (Orca's place), else the file start.
     Always before the first G/M command."""
-    first_cmd = re.search(rb"(?m)^[GMT]\d", head)
-    limit = first_cmd.start() if first_cmd else len(head)
+    limit = _first_command(head)
     ends = [m.end() for m in re.finditer(rb"; THUMBNAIL_BLOCK_END\r?\n(\r?\n)?", head[:limit])]
     if ends:
         return ends[-1]
@@ -213,24 +217,46 @@ def insert_offset(head: bytes) -> int:
     return m.end() if m else 0
 
 
-def splice(path: str, text: str, out: str | None = None) -> None:
+def strip_blocks(head: bytes) -> bytes:
+    """The head without its THUMBNAIL_BLOCKs (those before the first command)."""
+    limit = _first_command(head)
+    pre = re.sub(rb"; THUMBNAIL_BLOCK_START\r?\n.*?; THUMBNAIL_BLOCK_END\r?\n(\r?\n)?", b"", head[:limit], flags=re.S)
+    return pre + head[limit:]
+
+
+def _ident(st: os.stat_result) -> tuple[int, int, int]:
+    return st.st_ino, st.st_size, st.st_mtime_ns
+
+
+def splice(path: str, text: str, out: str | None = None, expect: os.stat_result | None = None,
+           replace: bool = False) -> None:
     """Write `text` into the G-code at insert_offset(); atomic replace (or write to `out`).
+    `replace` drops the existing thumbnail blocks first.
     Mode and mtime of the source are kept: the toolpath is the same slice, and a staleness
-    check (G-code older than its project) must not be fooled by adding a picture."""
+    check (G-code older than its project) must not be fooled by adding a picture.
+    Refuses when the file is not the one `expect` describes, or changes while being copied:
+    a re-slice landing meanwhile must not be overwritten by the old toolpath."""
     dst = out or path
     with open(path, "rb") as src:
-        off = insert_offset(src.read(HEAD_BYTES))
-        src.seek(0)
+        st = os.fstat(src.fileno())
+        if expect is not None and _ident(st) != _ident(expect):
+            raise ThumbnailError(f"{path} changed since it was checked; run again")
+        head = src.read(HEAD_BYTES)
+        if replace:
+            head = strip_blocks(head)
+        off = insert_offset(head)
         fd, tmp = tempfile.mkstemp(prefix=".thumbs-", dir=os.path.dirname(os.path.abspath(dst)))
         try:
             with os.fdopen(fd, "wb") as w:
-                w.write(src.read(off))
+                w.write(head[:off])
                 w.write(text.encode("ascii"))
+                w.write(head[off:])
                 while chunk := src.read(1 << 22):
                     w.write(chunk)
-            st = os.stat(path)
             os.chmod(tmp, st.st_mode & 0o7777)
             os.utime(tmp, ns=(st.st_atime_ns, st.st_mtime_ns))
+            if _ident(os.stat(path)) != _ident(st):
+                raise ThumbnailError(f"{path} changed while thumbnails were being added; run again")
             os.replace(tmp, dst)
         except BaseException:
             if os.path.exists(tmp):
@@ -415,6 +441,7 @@ def render_gcode(path: str, size: int = 600) -> Image:
     head, tail = _head_tail(path)
     colours = (_config_value("filament_colour", head, tail) or _config_value("extruder_colour", head, tail) or "")
     palette = np.array([_hex_rgb(c) for c in re.split(r"[;,]", colours) if c.strip()] or [(200, 200, 200)], np.float64)
+    palette = 45.0 + palette * (210.0 / 255.0)  # lift near-black filament so shading still shows the form
     width = float(_config_value("outer_wall_line_width", head, tail) or _config_value("line_width", head, tail) or 0.42)
     with open(path, "rb") as f:
         seg = toolpaths(f)
@@ -440,31 +467,42 @@ def render_gcode(path: str, size: int = 600) -> Image:
     res = max((extent + 2 * margin) / size, 0.4 * width)
     side = int(math.ceil((extent + 2 * margin) / res))
 
+    # sample every segment at half-pixel steps; float32 / int32 per point keeps a 115 MB G-code under ~1 GB
     seg_len = np.hypot(x1 - x0, y1 - y0)
     steps = np.maximum(1, np.ceil(seg_len / (0.5 * res)).astype(np.int64))
-    idx = np.repeat(np.arange(n), steps + 1)
-    start = np.repeat(np.cumsum(steps + 1) - (steps + 1), steps + 1)
-    t = (np.arange(len(idx)) - start) / steps[idx]
-    px, py = x0[idx] + (x1 - x0)[idx] * t, y0[idx] + (y1 - y0)[idx] * t
-    u, v, d = project(px, py, z[idx])
-    col = palette[np.minimum(tool[idx].astype(np.int64), len(palette) - 1)]
+    idx = np.repeat(np.arange(n, dtype=np.int32), steps + 1)
+    t = (np.arange(len(idx)) - np.repeat(np.cumsum(steps + 1) - (steps + 1), steps + 1)).astype(np.float32)
+    t /= steps[idx].astype(np.float32)
+    px = (x0[idx] + (x1 - x0)[idx] * t).astype(np.float32)
+    py = (y0[idx] + (y1 - y0)[idx] * t).astype(np.float32)
+    del t
+    u, v, d = project(px, py, z[idx].astype(np.float32))
+    del px, py
+    ti = np.minimum(tool[idx], len(palette) - 1).astype(np.int16)
+    del idx
+    iu0 = np.floor((u - umin + margin + (extent - (umax - umin)) / 2) / res).astype(np.int32)
+    iv0 = np.floor((v - vmin + margin + (extent - (vmax - vmin)) / 2) / res).astype(np.int32)
+    del u, v
+    d = d.astype(np.float32)
 
-    cu = (u - umin + margin + (extent - (umax - umin)) / 2) / res
-    cv = (v - vmin + margin + (extent - (vmax - vmin)) / 2) / res
-    zbuf = np.full(side * side, np.inf)
-    rgb = np.zeros((side * side, 3))
+    zbuf = np.full(side * side, np.inf, np.float32)
+    tbuf = np.zeros(side * side, np.int16)
     r_px = max(0.0, 0.5 * width / res - 0.5)
     offs = [(dx, dy) for dx in range(-2, 3) for dy in range(-2, 3) if dx * dx + dy * dy <= r_px * r_px + 0.25]
-    for dx, dy in offs:
-        iu, iv = np.floor(cu + dx).astype(np.int64), np.floor(cv + dy).astype(np.int64)
+
+    def pixels(dx: int, dy: int) -> tuple[np.ndarray, np.ndarray]:
+        iu, iv = iu0 + dx, iv0 + dy
         ok = (iu >= 0) & (iu < side) & (iv >= 0) & (iv < side)
-        np.minimum.at(zbuf, iv[ok] * side + iu[ok], d[ok])
+        return iv[ok] * side + iu[ok], ok
+
     for dx, dy in offs:
-        iu, iv = np.floor(cu + dx).astype(np.int64), np.floor(cv + dy).astype(np.int64)
-        ok = (iu >= 0) & (iu < side) & (iv >= 0) & (iv < side)
-        pix = iv[ok] * side + iu[ok]
-        win = d[ok] <= zbuf[pix] + 1e-9
-        rgb[pix[win]] = col[ok][win]
+        pix, ok = pixels(dx, dy)
+        np.minimum.at(zbuf, pix, d[ok])
+    for dx, dy in offs:  # the nearest sample of each pixel gives its tool colour
+        pix, ok = pixels(dx, dy)
+        win = d[ok] <= zbuf[pix]
+        tbuf[pix[win]] = ti[ok][win]
+    rgb = palette[tbuf]
 
     zb = zbuf.reshape(side, side)
     filled = np.isfinite(zb)
@@ -493,15 +531,17 @@ def render_gcode(path: str, size: int = 600) -> Image:
 
 
 def ensure(path: str, image: str | None = None, sizes: list[Thumb] | None = None, out: str | None = None,
-           source: Callable[[str], Image] | None = None) -> ThumbCheck:
+           source: Callable[[str], Image] | None = None, replace: bool = False) -> ThumbCheck:
     """Add every missing required thumbnail (or `sizes`, when the G-code declares none).
-    No-op (file untouched) when check() already passes. Returns the check after writing,
-    with `.added` listing what was inserted."""
+    No-op (file untouched) when check() already passes. `replace` redraws every size,
+    dropping the existing blocks. Returns the check after writing, with `.added` listing
+    what was inserted."""
     before = check(path)
-    want = before.required or list(sizes or [])
+    seen = os.stat(path)
+    want = before.required or list(sizes or []) or (list(before.present) if replace else [])
     if not want and not before.present:
         raise ThumbnailError(f"{path}: no `; thumbnails =` spec in the G-code; pass sizes (e.g. --size 300x300/PNG)")
-    have = set(before.present)
+    have = set() if replace else set(before.present)
     todo = [t for t in want if t not in have]
     if not todo:
         if out and out != path:
@@ -515,7 +555,7 @@ def ensure(path: str, image: str | None = None, sizes: list[Thumb] | None = None
     biggest = max(max(t.width, t.height) for t in todo)
     pic = load_image(image) if image else (source or (lambda p: render_gcode(p, size=2 * biggest)))(path)
     text = "".join(block(t, encode(fit(pic, t.width, t.height), t.fmt)) for t in todo)
-    splice(path, text, out)
+    splice(path, text, out, expect=seen, replace=replace)
     after = check(out or path)
     after.added = todo
     return after
@@ -546,6 +586,7 @@ def main(argv: list[str] | None = None) -> int:
     pa.add_argument("--image")
     pa.add_argument("--size", action="append", default=[])
     pa.add_argument("--out")
+    pa.add_argument("--replace", action="store_true", help="redraw all sizes, dropping existing thumbnails")
     pa.add_argument("--preview", help="also save the source picture (PNG) here")
     pa.add_argument("--json", action="store_true")
     a = ap.parse_args(argv)
@@ -566,7 +607,7 @@ def main(argv: list[str] | None = None) -> int:
                         with open(keep, "wb") as fh:
                             fh.write(encode_png(pic))
                         return pic
-                results.append(ensure(p, image=a.image, sizes=sizes, out=a.out, source=src))
+                results.append(ensure(p, image=a.image, sizes=sizes, out=a.out, source=src, replace=a.replace))
     except (ThumbnailError, InputNotFound) as e:
         print(f"gcode-thumbnails: {e}", file=sys.stderr)
         return 2

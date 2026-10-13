@@ -40,6 +40,7 @@ rendering, slicing support, and verification:
 - `fit_camera.py`
 - `fit_camera_math.py`
 - `frame_check.py`
+- `gcode_thumbnails.py`
 - `export_formats.py`
 - `import_formats.py`
 - `lib/geometry/mesh_metrics.py`
@@ -148,6 +149,7 @@ Every current root Python module is listed here so future additions are intentio
 - `export_formats.py` — export format registry, selector parsing, and dry-run export planning.
 - `fit_camera.py` — camera fitting implementation.
 - `fit_camera_math.py` — import-light camera pose and proof-status math helpers.
+- `gcode_thumbnails.py` — printer-screen thumbnail blocks in G-code: stdlib-only check against the profile's `thumbnails` spec, Orca-format block writer, z-buffered toolpath preview render (numpy); backs `3d gcode-thumbnails`.
 - `frame_check.py` — render framing checks.
 - `hardware.py` — local machine and toolchain capability reporting.
 - `hf_auth.py` — optional Hugging Face token loading, validation, and secure storage.
