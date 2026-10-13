@@ -61,6 +61,7 @@ Target package: `lib/geometry/`, with subpackages only when a real boundary appe
 ### Slicing / Print Workflow
 
 - `lib/slicing/printing.py`
+- `lib/slicing/head_sequence.py` — per-object, per-layer toolhead check of sliced G-code against the project 3MF's mixed-filament patterns (`slice-check --check head-sequence`; `preflight_check()` exposed for the future print-preflight `head_sequence` check, #96).
 
 Target package: `lib/slicing/` for slicer orchestration, dry-run print planning, printer
 job state, and future sender integrations.

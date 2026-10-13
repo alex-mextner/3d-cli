@@ -75,6 +75,7 @@ For a practical figure-by-figure image backplate loop, see
 | `gcode-thumbnails` | [gcode-thumbnails.md](gcode-thumbnails.md) | Check/add the printer-screen preview thumbnails a G-code carries (Orca CLI writes none). |
 | `print` | [print.md](print.md) | Validate print fields and emit deterministic dry-run job plans. |
 | `slice` | [slice.md](slice.md) | Slice STL/3MF/SCAD to G-code or run the sliceability gate. |
+| `slice-check` | [slice-check.md](slice-check.md) | Headless 3MF open/plates/slice gate, plus offline G-code checks (`--check head-sequence`). |
 
 ### Libraries
 
