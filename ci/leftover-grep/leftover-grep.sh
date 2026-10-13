@@ -85,7 +85,11 @@ while IFS=$'\t' read -r file ln text; do
   printf '%s' "$text" | grep -qE '^(<{7}|={7}|>{7})( |$)' && report BLOCK "$file" "$ln" "merge-marker" "$text"
   # console.log/debug
   if printf '%s' "$text" | grep -qE 'console\.(log|debug)\('; then
-    [ "$ALLOW_CONSOLE" = "1" ] && report WARN "$file" "$ln" "console" "$text" || report BLOCK "$file" "$ln" "console" "$text"
+    if [ "$ALLOW_CONSOLE" = "1" ]; then
+      report WARN "$file" "$ln" "console" "$text"
+    else
+      report BLOCK "$file" "$ln" "console" "$text"
+    fi
   fi
   # TODO/FIXME without a tracker reference
   if printf '%s' "$text" | grep -qE '(TODO|FIXME)'; then

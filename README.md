@@ -489,14 +489,14 @@ per-call, and `3d doctor` prints the exact install command for anything still mi
 Repository development commands live in `rig.yaml` scripts:
 
 ```bash
-dev run test              # ruff + pytest + mypy — all must pass
+dev run test              # ruff + shellcheck + pytest + mypy — all must pass
 dev run test -- -k registry
 ```
 
 #### Contributing — install the repo-dev pre-commit gate
 
 A fresh clone has **no** dev pre-commit gate until you wire it in (git never tracks
-`.git/hooks/`). The gate (ruff → pytest → mypy via `dev run test`) lives as a **tracked**
+`.git/hooks/`). The gate (ruff → shellcheck → pytest → mypy via `dev run test`) lives as a **tracked**
 source at [`scripts/hooks/pre-commit`](scripts/hooks/pre-commit); install it once:
 
 ```bash
@@ -511,9 +511,11 @@ falls back to reading `rig.yaml` with Python/PyYAML and running the literal
 `scripts.test` command. The hook still fails **closed** when neither path can execute the
 checks. In a fresh clone/worktree, run `uv sync --extra dev` first so `.venv/bin/python`,
 PyYAML, ruff, pytest, and mypy are available; the fallback also expects `uv` to be on the
-hook PATH because `scripts.test` is a `uv run ...` command.
+hook PATH because `scripts.test` is a `uv run ...` command. `shellcheck` is a system binary
+(`brew install shellcheck` / `sudo apt-get install shellcheck`); without it the local gate
+prints a SKIP line for that step, while CI installs it and always runs it.
 
-The hook runs the **whole** gate (ruff + pytest + mypy over the working tree, not just
+The hook runs the **whole** gate (ruff + shellcheck + pytest + mypy over the working tree, not just
 staged files), so commits take as long as `dev run test` does — and, like any
 working-tree gate, it judges your working tree, not the exact staged snapshot (an
 unstaged fix can green a commit; an unrelated unstaged break can block one).
@@ -606,7 +608,7 @@ lib/errors.py       structured CLI error types (WHAT/WHY/remediation/accepted/in
 lib/commands/*.py   one self-registering module per subcommand (drop a file = add a command)
 lib/*.py            heavy python tools (render/mesh/collision/printability/preprocess/match/fit)
 lib/web/            the web dashboard app (FastAPI + SSE + three.js SPA)
-tests/              ruff + pytest unit tests + the CLI smoke harness + mypy gate (`dev run test`)
+tests/              ruff + shellcheck + pytest unit tests + the CLI smoke harness + mypy gate (`dev run test`)
 docs/commands/      per-command documentation fragments
 docs/critic-prompts.md  the vision-critic prompt patterns
 libs/               OpenSCAD libraries cloned on demand (gitignored)

@@ -3,8 +3,8 @@
 # install-dev-hooks.sh — wire this repo's TRACKED dev pre-commit gate into a
 # fresh clone (or another machine). Idempotent: safe to run repeatedly.
 #
-# Installs the tracked repo-dev gate (scripts/hooks/pre-commit: ruff -> pytest ->
-# mypy via `dev run test`) into <common-git-dir>/hooks/pre-commit.
+# Installs the tracked repo-dev gate (scripts/hooks/pre-commit: ruff -> shellcheck ->
+# pytest -> mypy via `dev run test`) into <common-git-dir>/hooks/pre-commit.
 #
 # Dispatcher coexistence: if the EXISTING hook already calls a global-git-hooks
 # dispatcher inline (the agent-tools secret-scan line), that prefix is PRESERVED

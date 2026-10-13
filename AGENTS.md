@@ -74,7 +74,7 @@ orchestration + the pure score math).
 ## Testing
 
 ```bash
-dev run test              # ruff, pytest (unit + CLI smoke harness), then mypy — all must pass
+dev run test              # ruff, shellcheck, pytest (unit + CLI smoke harness), then mypy — all must pass
 dev run test -- -k errors  # forward args to pytest
 ```
 
@@ -87,8 +87,10 @@ the safe commands on `examples/cube.scad` (skipping when a tool is absent). `tes
 is part of the normal pytest sweep run by `dev run test`; do not maintain a separate matrix.
 `tests/test_imports.py` enforces the stdlib-only rule. `dev run test` also runs ruff over
 `lib/ + tests/` (rules in `pyproject.toml` `[tool.ruff.lint]`: the defaults plus `PERF`, `C4`,
-`SIM`, `B`, `UP`; any ignore is a per-line `# noqa: CODE — reason`) and mypy over
-`bin/3d + lib/ + tests/` — keep both clean.
+`SIM`, `B`, `UP`; any ignore is a per-line `# noqa: CODE — reason`), shellcheck over every
+git-tracked shell script (`*.sh` and sh/bash-shebang files; SKIPped with an install hint when
+the binary is missing locally, always run in CI), and mypy over `bin/3d + lib/ + tests/` —
+keep all of them clean.
 
 ## Agent worktrees
 
