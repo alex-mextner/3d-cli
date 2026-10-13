@@ -51,6 +51,7 @@ rendering, slicing support, and verification:
 - `render.py`
 - `strength.py`
 - `usdz.py`
+- `visible_faces.py`
 - `video.py`
 
 Target package: `lib/geometry/`, with subpackages only when a real boundary appears
@@ -172,6 +173,7 @@ Every current root Python module is listed here so future additions are intentio
 - `printing.py` — compatibility wrapper re-exporting `slicing.printing`.
 - `preprocess_reference.py` — reference image preprocessing.
 - `printability_mesh.py` — printability mesh checks.
+- `visible_faces.py` — visible-face gate: per-layer unsupported pieces on a declared visible half-space of the unioned part (manifold3d), and Support moves / sagging islands in the sliced G-code (scipy raster); bridges inside declared openings allowed up to a span.
 - `procurement.py` — deterministic local BOM and inventory purchase-plan helpers.
 - `proxy_align.py` — generated proxy mesh to CAD mesh alignment and proof artifacts.
 - `printers.py` — compatibility wrapper re-exporting `registries.printers`.
