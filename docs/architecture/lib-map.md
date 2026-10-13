@@ -60,6 +60,10 @@ Target package: `lib/geometry/`, with subpackages only when a real boundary appe
 ### Slicing / Print Workflow
 
 - `lib/slicing/printing.py`
+- `lib/printer_ops/` — real-printer control behind `3d printer` / `3d print-preflight`:
+  adapter contract + status model (`base.py`), stdlib WebSocket client (`ws.py`),
+  `moonraker.py` (Klipper/Moonraker, Snapmaker U1), `creality.py` (Creality K1 stock
+  firmware), `devices.py` (`printer-devices.yaml`), `preflight.py` (pre-print checks).
 
 Target package: `lib/slicing/` for slicer orchestration, dry-run print planning, printer
 job state, and future sender integrations.

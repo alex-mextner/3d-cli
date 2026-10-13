@@ -839,6 +839,17 @@ The go-to install is the standard Python mechanism, not `ln -s bin/3d`.
 ## 31. `3d print` — drive, monitor & recover real prints (printer integrations)
 `3d` covers the WHOLE lifecycle: idea → spec → **procurement/materials (§32)** → model → verify →
 pack/slice → **print → monitor → recover** → report. `3d print` is the execution end.
+Epic: [#90](https://github.com/alex-mextner/3d-cli/issues/90).
+- 🚧 **`3d printer` v1** ([#94](https://github.com/alex-mextner/3d-cli/issues/94)) — `list | status |
+  upload | start --yes | cancel --yes` over configured devices (`printer-devices.yaml`,
+  [#91](https://github.com/alex-mextner/3d-cli/issues/91)); adapters **moonraker** (Snapmaker U1 head
+  map via `print_task_config`, [#92](https://github.com/alex-mextner/3d-cli/issues/92)) and
+  **creality-stock** (K1 family: HTTP upload + ws:9999, [#93](https://github.com/alex-mextner/3d-cli/issues/93));
+  safety rules [#95](https://github.com/alex-mextner/3d-cli/issues/95); `3d print-preflight`
+  ([#96](https://github.com/alex-mextner/3d-cli/issues/96)) gates `start`. Next: pause/resume/history/
+  slots/snapshot ([#97](https://github.com/alex-mextner/3d-cli/issues/97)), more adapters
+  ([#98](https://github.com/alex-mextner/3d-cli/issues/98)), durable job ledger
+  ([#68](https://github.com/alex-mextner/3d-cli/issues/68)).
 - 📋 **Printer integrations** — pluggable backends (registry, §3): **Klipper/Moonraker** (primary;
   Mainsail/Fluidd ecosystem), **OctoPrint** (REST), **Bambu** (LAN/MQTT), **PrusaLink/PrusaConnect**.
   Each backend implements a common interface (discover, status, upload, start/pause/resume/cancel,

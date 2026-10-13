@@ -73,6 +73,8 @@ For a practical figure-by-figure image backplate loop, see
 |---|---|---|
 | `gcode-thumbnails` | [gcode-thumbnails.md](gcode-thumbnails.md) | Check/add the printer-screen preview thumbnails a G-code carries (Orca CLI writes none). |
 | `print` | [print.md](print.md) | Validate print fields and emit deterministic dry-run job plans. |
+| `printer` | [printer.md](printer.md) | Drive configured printers (Moonraker, Creality stock): list, status, upload, start `--yes`, cancel `--yes`. |
+| `print-preflight` | [print-preflight.md](print-preflight.md) | Read-only pre-print checks: thumbnails, loaded colours vs G-code, halves, printer free. |
 | `slice` | [slice.md](slice.md) | Slice STL/3MF/SCAD to G-code or run the sliceability gate. |
 
 ### Libraries

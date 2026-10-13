@@ -1,8 +1,9 @@
 # `3d print`
 
 `3d print` validates the fields needed for a future printer job and emits a deterministic
-dry-run plan as JSON. It does not contact a printer, upload files, or start hardware yet;
-the command is a safe planning surface for scripts, agents, and CI.
+dry-run plan as JSON. It does not contact a printer, upload files, or start hardware;
+the command is a safe planning surface for scripts, agents, and CI. To upload and start a
+sliced G-code on a real printer, use [`3d printer`](printer.md).
 
 ## Usage
 
