@@ -12,7 +12,7 @@ import sys
 import types
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import pytest
 
@@ -376,14 +376,19 @@ def test_thumbnails_unverified_when_checker_missing(tmp_path: Path, monkeypatch:
 
 
 def test_thumbnails_use_the_gcode_thumbnails_checker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    class Thumb(NamedTuple):  # same fields as gcode_thumbnails.Thumb (width, height, fmt)
+        width: int
+        height: int
+        fmt: str
+
     t = types.SimpleNamespace
     calls: list[str] = []
 
     def check(path: str) -> Any:
         calls.append(path)
         if path.endswith("good.gcode"):
-            return t(ok=True, present=[t(w=48, h=48), t(w=300, h=300)], missing=[], reason="")
-        return t(ok=False, present=[], missing=[t(w=300, h=300)], reason="missing required thumbnails")
+            return t(ok=True, present=[Thumb(48, 48, "PNG"), Thumb(300, 300, "PNG")], missing=[], reason="")
+        return t(ok=False, present=[], missing=[Thumb(300, 300, "PNG")], reason="missing 300x300/PNG")
 
     monkeypatch.setitem(sys.modules, "gcode_thumbnails", types.SimpleNamespace(check=check))
     good = preflight.check_thumbnails(gcode(tmp_path, name="good.gcode"))

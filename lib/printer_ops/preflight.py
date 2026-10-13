@@ -123,12 +123,11 @@ def check_thumbnails(path: Path) -> Check:
         return Check("thumbnails", WARN, "UNVERIFIED: the thumbnail checker (lib/gcode_thumbnails.py) is not installed")
     r = thumb_check(str(path))
     if r.ok:
-        sizes = ", ".join(f"{t.w}x{t.h}" for t in r.present) or "present"
+        sizes = ", ".join(f"{t.width}x{t.height}" for t in r.present) or "present"
         return Check("thumbnails", PASS, sizes)
-    missing = ", ".join(f"{t.w}x{t.h}" for t in getattr(r, "missing", [])) or ""
-    reason = getattr(r, "reason", "") or "missing"
-    return Check("thumbnails", FAIL, f"{reason}{' (missing ' + missing + ')' if missing else ''}; "
-                 "fix: 3d gcode-thumbnails add FILE")
+    # ThumbCheck.reason already names what is missing ("missing 48x48/PNG"); the list is the fallback.
+    reason = r.reason or "missing " + (", ".join(str(t) for t in r.missing) or "thumbnails")
+    return Check("thumbnails", FAIL, f"{reason}; fix: 3d gcode-thumbnails add FILE")
 
 
 def check_printer_free(status: PrinterStatus) -> Check:
