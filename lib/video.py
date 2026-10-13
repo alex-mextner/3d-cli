@@ -20,6 +20,7 @@ import subprocess
 import struct
 import sys
 
+from cli.resources import pool_size
 from errors import GateFailure, InputNotFound, InvalidArgument, UsageError
 
 CommandRunner = Callable[[list[str]], int]
@@ -286,8 +287,7 @@ def _render_jobs(plan: TurntablePlan, bin3d: str) -> list[RenderJob]:
 def _parallelism(total: int, jobs: int | None) -> int:
     if total <= 0:
         return 1
-    requested = jobs if jobs is not None else (os.cpu_count() or 1)
-    return max(1, min(total, requested))
+    return pool_size(total, jobs)
 
 
 def _check_render_result(frame: VideoFrame, code: int) -> None:

@@ -35,6 +35,7 @@ import sys
 import tempfile
 from typing import Any, Sequence
 
+from cli.resources import max_workers
 from fit_camera_math import cam_from_params, fit_status_from_spatial_metrics, stratified_samples
 
 try:
@@ -76,8 +77,8 @@ def _on_path(name: str) -> bool:
 
 OPENSCAD = find_openscad()
 # Bound concurrent openscad renders so the parallel random-search batch can't fork
-# hundreds of processes; one per CPU is a good default for CGAL-bound renders.
-_RENDER_LIMIT = max(1, os.cpu_count() or 4)
+# hundreds of processes or take the whole shared machine (cli.resources: <= 6 by default).
+_RENDER_LIMIT = max_workers()
 MAX_PROOF_ANCHOR_SAMPLES = 720
 
 
