@@ -31,6 +31,7 @@ explain why the command exists, what its inputs mean, and how it fits into the l
 | `fit-niche` | [fit-niche.md](fit-niche.md) | Generate a parametric insert/plug that mates into a described cavity with FDM clearances. |
 | `import` | [import.md](import.md) | Generate OpenSCAD wrappers or conversion plans for imported model formats. |
 | `pack` | [pack.md](pack.md) | Plan deterministic print-bed layouts from explicit part footprints. |
+| `props` | [props.md](props.md) | Snap-off support ribs for a part printed standing, with the height/base stability gate. |
 | `validate` | [validate.md](validate.md) | Fast OpenSCAD parse check without rendering. |
 | `params` | [params.md](params.md) | Extract Customizer-style parameters. |
 | `om` | [om.md](om.md) | Query `.scad` object-model annotations as JSON. |

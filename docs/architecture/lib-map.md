@@ -49,6 +49,7 @@ rendering, slicing support, and verification:
 - `packing.py`
 - `printability_mesh.py`
 - `render.py`
+- `standing_props.py`
 - `strength.py`
 - `usdz.py`
 - `video.py`
@@ -182,6 +183,7 @@ Every current root Python module is listed here so future additions are intentio
 - `refmatch.py` — image/reference matching helpers.
 - `render.py` — OpenSCAD render and section implementation.
 - `spatial_fit_metrics.py` — contour-first camera-fit diagnostics and warning metrics.
+- `standing_props.py` — snap-off props for a part printed standing (the `3d props` backend): per-station back profile from manifold3d slices, sloped ribs with a straight inner edge behind the hindmost back point, tabs, foot strip, keep-out of the part dilated by the gap, height/base stability ratio; reads STL/3MF (core + production components, Orca part extruders) and writes a 3MF with the props as an extra part of the object.
 - `strength.py` — deterministic structural-check dry-run report helpers.
 - `usdz.py` — USDZ export helpers.
 - `video.py` — video turntable and progress-frame planning / encoding helpers.
