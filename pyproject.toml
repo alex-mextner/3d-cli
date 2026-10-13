@@ -19,7 +19,7 @@ dependencies = [
 [project.optional-dependencies]
 # Reference pre-processing (`3d preprocess`). Heavy "best path" tiers (rembg / Depth-Anything
 # via transformers+torch / SAM2) stay import-guarded and out of the lock — install ad hoc.
-preprocess = ["opencv-python-headless>=4.8", "pillow>=10.0"]
+preprocess = ["opencv-python-headless>=4.8", "pillow>=12.3.0"]
 # Collision visualization (`3d collision --viz`).
 viz = ["pyvista>=0.43"]
 # Web dashboard (`3d web`). markdown degrades gracefully; fastapi+uvicorn serve. (pyyaml is core.)
