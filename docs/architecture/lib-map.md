@@ -39,6 +39,7 @@ rendering, slicing support, and verification:
 - `collision_viz.py`
 - `fit_camera.py`
 - `fit_camera_math.py`
+- `fit_check.py`
 - `frame_check.py`
 - `export_formats.py`
 - `import_formats.py`
@@ -148,6 +149,7 @@ Every current root Python module is listed here so future additions are intentio
 - `export_formats.py` — export format registry, selector parsing, and dry-run export planning.
 - `fit_camera.py` — camera fitting implementation.
 - `fit_camera_math.py` — import-light camera pose and proof-status math helpers.
+- `fit_check.py` — already-printed insert vs its socket: printed-size lock and per-layer clearance (manifold3d slices, shapely distances); backs `3d fit-check`.
 - `frame_check.py` — render framing checks.
 - `hardware.py` — local machine and toolchain capability reporting.
 - `hf_auth.py` — optional Hugging Face token loading, validation, and secure storage.
