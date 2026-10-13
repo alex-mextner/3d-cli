@@ -44,6 +44,7 @@ explain why the command exists, what its inputs mean, and how it fits into the l
 | `check` | [check.md](check.md) | Master acceptance gate; runs all applicable gates by default. |
 | `mesh` | [mesh.md](mesh.md) | Watertight/manifold/self-intersection/volume checks. |
 | `halves-check` | [halves-check.md](halves-check.md) | Paired halves of a split part: cut faces, dowel holes, size and islands match in the assembly frame. |
+| `fit-check` | [fit-check.md](fit-check.md) | Already-printed insert vs its socket: locked printed size, no overlap, gap per side all the way up. |
 | `printability` | [printability.md](printability.md) | FDM wall, min-feature, overhang, and orientation checks. |
 | `visible-faces` | [visible-faces.md](visible-faces.md) | Visible side of a decorative part prints clean: no unsupported layer piece (mesh) and no support or sagging island (G-code). |
 | `collision` | [collision.md](collision.md) | Static, frame, and visualization collision checks from JSON config. |
