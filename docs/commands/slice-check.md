@@ -22,6 +22,9 @@ Verifies a [`.3mf`](GLOSSARY.md#3mf) (or `.stl`) **without a GUI**, using an Orc
 | `--datadir DIR` | throwaway temp dir | Slicer config dir for the slice step. The default lets upstream OrcaSlicer self-initialise its bundled profiles. |
 | `--timeout SECS` | `420` | Per-slicer-call timeout. |
 | `--printer NAME` | — | Informational only; recorded in the report. |
+| `--gcode FILE` | — | Sliced plate G-code of this project 3MF, for offline `--check`s. |
+| `--check NAME` | — | Run an offline G-code check instead of OPEN/PLATES/SLICE (no slicer needed; repeatable). Available: `head-sequence`. |
+| `--json` | off | Machine-readable result (only with `--check`). |
 
 ```bash
 3d slice-check model.3mf                 # open + plate count + slice all plates
@@ -29,6 +32,30 @@ Verifies a [`.3mf`](GLOSSARY.md#3mf) (or `.stl`) **without a GUI**, using an Orc
 3d slice-check model.3mf --plates 4      # also assert exactly 4 plates
 3d slice-check model.3mf --slicer "/Applications/OrcaSlicer.app/Contents/MacOS/OrcaSlicer"
 ```
+
+### `--check head-sequence`
+
+```bash
+3d slice-check plate.3mf --gcode plate.gcode --check head-sequence --json
+```
+
+Every object must print, layer by layer, on exactly the heads its parts' filaments call for.
+A physical filament prints on its own head; a mixed filament (`mixed_filament_definitions`,
+virtual id = physical count + 1 + row) with a manual pattern (`…,cm1,14`) prints one pattern
+digit per layer, at any starting phase. Raft layers (`raft_layers`) are skipped. Ratio rows
+(`…,cm0`, Local-Z) have no per-layer pattern: such objects are reported `local-z`, not checked.
+Heads are read from `T<n>` (`T255`/`T1000` Bambu pseudo-changes ignored), objects from
+`EXCLUDE_OBJECT_START NAME=`, layers from `;LAYER_CHANGE`, and only extruding `G1` moves
+with X/Y count. Per object it reports ok/FAIL/local-z, heads, patterns and layer count; exit 1
+on any FAIL. On a single-plate project, a project object absent from the G-code is a FAIL;
+G-code with no extrusion inside object labels is a FAIL. A non-project input (STL, bare 3MF,
+corrupt metadata) exits 2 with a usage error.
+
+Why: a plate-level "heads used == heads planned" check stays green when a mix is printed with
+another row's recipe (Snapmaker Orca 2.4.0 printed a 1:1 mix cube entirely in filament 1 on a
+mixed-layer-height plate). For `3d print-preflight` (#96, not yet landed) the check is exposed
+as `slicing.head_sequence.preflight_check(gcode, source_3mf)` → check `head_sequence` (SKIP
+when there are no mixed rows and every object is single-head).
 
 ## How the checks work
 
