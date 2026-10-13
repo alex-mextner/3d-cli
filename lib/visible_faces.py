@@ -41,6 +41,7 @@ import re
 import sys
 import xml.etree.ElementTree as ET
 import zipfile
+from array import array
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -411,12 +412,62 @@ def mesh_report(name: str, solid: Any, spec: FaceSpec, layer: float = LAYER,
 
 
 # ---------------------------------------------------------------- G-code pass
+class Layer:
+    """one object layer of extrusion, kept compact: a big plate is millions of moves, and a
+    float array of samples per move took 5 GB. Straight moves are stored as (x, y, nx, ny)
+    plus their sample count and expanded on demand (`points()`, one layer at a time); arcs
+    (rare) keep their samples."""
+
+    __slots__ = ("arcs", "counts", "moves")
+
+    def __init__(self) -> None:
+        self.moves = array("d")                    # x, y, nx, ny per straight move
+        self.counts = array("q")                   # samples - 1 per straight move
+        self.arcs: list[np.ndarray] = []
+
+    def add_move(self, x: float, y: float, nx: float, ny: float) -> None:
+        self.moves.extend((x, y, nx, ny))
+        self.counts.append(max(1, int(math.hypot(nx - x, ny - y) / (PX / 2))))
+
+    def points(self) -> np.ndarray:
+        """(n, 2) samples every PX/2 along each move (straight moves first, then arcs)"""
+        parts = list(self.arcs)
+        if self.counts:
+            m = np.frombuffer(self.moves, float).reshape(-1, 4)
+            parts.insert(0, _segments(m, np.frombuffer(self.counts, np.int64)))
+        return np.vstack(parts)
+
+    def bounds(self) -> tuple[np.ndarray, np.ndarray]:
+        """exact min / max of points() without expanding the moves: the samples of a move
+        are monotone between its first (x) and last (x + (nx - x)) sample"""
+        lo, hi = [], []
+        if self.counts:
+            m = np.frombuffer(self.moves, float).reshape(-1, 4)
+            ends = np.vstack((m[:, :2], m[:, :2] + (m[:, 2:] - m[:, :2])))
+            lo.append(ends.min(0))
+            hi.append(ends.max(0))
+        for a in self.arcs:
+            lo.append(a.min(0))
+            hi.append(a.max(0))
+        return np.min(lo, axis=0), np.max(hi, axis=0)
+
+
 @dataclass
 class GObject:
     name: str
     spec: FaceSpec
-    layers: dict[float, list[np.ndarray]] = field(default_factory=dict)
+    layers: dict[float, Layer] = field(default_factory=dict)
     support: list[tuple[str, np.ndarray, float]] = field(default_factory=list)   # (type, points, z)
+
+    def layer(self, z: float) -> Layer:
+        lay = self.layers.get(z)
+        if lay is None:
+            lay = self.layers[z] = Layer()
+        return lay
+
+    def bounds(self) -> tuple[np.ndarray, np.ndarray]:
+        b = [lay.bounds() for lay in self.layers.values()]
+        return np.min([q[0] for q in b], axis=0), np.max([q[1] for q in b], axis=0)
 
 
 _WORD = re.compile(r"([XYZEIJ])\s*(-?(?:\d+\.?\d*|\.\d+))", re.IGNORECASE)
@@ -441,6 +492,17 @@ def _segment(x: float, y: float, nx: float, ny: float) -> np.ndarray:
     n = max(1, int(math.hypot(nx - x, ny - y) / (PX / 2)))
     s = np.linspace(0.0, 1.0, n + 1)
     return np.c_[x + (nx - x) * s, y + (ny - y) * s]
+
+
+def _segments(m: np.ndarray, n: np.ndarray) -> np.ndarray:
+    """_segment() of every move (rows x, y, nx, ny; n = samples - 1) at once, bit for bit:
+    np.linspace(0, 1, n + 1) is arange(n + 1) * (1 / n) with its last value set to 1"""
+    cnt = n + 1
+    end = np.cumsum(cnt)
+    t = (np.arange(end[-1]) - np.repeat(end - cnt, cnt)) * np.repeat(1.0 / n, cnt)
+    t[end - 1] = 1.0
+    x, y = np.repeat(m[:, 0], cnt), np.repeat(m[:, 1], cnt)
+    return np.c_[x + np.repeat(m[:, 2] - m[:, 0], cnt) * t, y + np.repeat(m[:, 3] - m[:, 1], cnt) * t]
 
 
 def parse_gcode(path: str, specs: Specs) -> tuple[dict[str, GObject], list[str]]:
@@ -505,13 +567,13 @@ def parse_gcode(path: str, specs: Specs) -> tuple[dict[str, GObject], list[str]]
                 continue
             code = line.split(";", 1)[0]
             if word == "G92":
-                w = dict((k.upper(), float(v)) for k, v in _WORD.findall(code))
+                w = {k.upper(): float(v) for k, v in _WORD.findall(code)}
                 if "E" in w:
                     e_last = w["E"]
                 continue
             if word not in ("G0", "G1", "G2", "G3", "G00", "G01", "G02", "G03"):
                 continue
-            w = dict((k.upper(), float(v)) for k, v in _WORD.findall(code))
+            w = {k.upper(): float(v) for k, v in _WORD.findall(code)}
             nx, ny = w.get("X", x), w.get("Y", y)
             if "Z" in w:
                 z = w["Z"]
@@ -525,22 +587,34 @@ def parse_gcode(path: str, specs: Specs) -> tuple[dict[str, GObject], list[str]]
             if extr and (cur is not None or outside) and (nx != x or ny != y or arc):
                 lz = zc if zc is not None else round(z, 3)
                 t = typ.lower()
-                if t.startswith("support") or (not outside and t not in SKIP_TYPES):
+                if t.startswith("support"):
+                    pts = (_arc(x, y, nx, ny, w.get("I", 0.0), w.get("J", 0.0), word in ("G2", "G02")) if arc
+                           else _segment(x, y, nx, ny))
+                    (orphans if cur is None else cur.support).append((typ, pts, lz))
+                elif cur is not None and t not in SKIP_TYPES:
                     if arc:
-                        pts = _arc(x, y, nx, ny, w.get("I", 0.0), w.get("J", 0.0), word in ("G2", "G02"))
+                        cur.layer(lz).arcs.append(_arc(x, y, nx, ny, w.get("I", 0.0), w.get("J", 0.0),
+                                                       word in ("G2", "G02")))
                     else:
-                        pts = _segment(x, y, nx, ny)
-                    if t.startswith("support"):
-                        (orphans if cur is None else cur.support).append((typ, pts, lz))
-                    elif cur is not None:
-                        cur.layers.setdefault(lz, []).append(pts)
+                        cur.layer(lz).add_move(x, y, nx, ny)
             x, y = nx, ny
     for o in objs.values():
         if o.layers:
-            allp = np.vstack([np.vstack(v) for v in o.layers.values()])
-            lo, hi = allp.min(0) - 1.0, allp.max(0) + 1.0
+            lo, hi = o.bounds()
+            lo, hi = lo - 1.0, hi + 1.0
             o.support += [s for s in orphans if ((s[1] >= lo) & (s[1] <= hi)).all(1).any()]
     return objs, seen
+
+
+def _fill_holes(a: np.ndarray) -> np.ndarray:
+    """ndimage.binary_fill_holes(a) with one labelling instead of an iterated propagation:
+    a hole is a background region (4-connected, as there) that does not reach the raster edge"""
+    from scipy import ndimage
+    lab, n = ndimage.label(~a)
+    keep = np.ones(n + 1, bool)
+    keep[lab[0]] = keep[lab[-1]] = keep[lab[:, 0]] = keep[lab[:, -1]] = False
+    keep[0] = True
+    return keep[lab]
 
 
 def gcode_report(o: GObject, layer: float = LAYER, min_area: float = MIN_AREA,
@@ -563,56 +637,76 @@ def gcode_report(o: GObject, layer: float = LAYER, min_area: float = MIN_AREA,
         vis = spec.first_visible(pts, z - zoff)
         if vis is not None:
             rep["support"].append(dict(type=typ, x=round(float(vis[0]), 2), y=round(float(vis[1]), 2), z=z))
-    allp = np.vstack([np.vstack(o.layers[k]) for k in zs])
+    lo, hi = o.bounds()
     # margin wider than the closing: erosion treats outside the raster as empty, so a margin
     # under CLOSE_PX would eat the outermost lines of the footprint (false islands at the edge)
     margin = (LINE_PX + CLOSE_PX + STEP_PX + 4) * PX
-    x0, y0 = allp.min(0) - margin
-    W, H = ((allp.max(0) + margin - (x0, y0)) / PX).astype(int) + 1
+    x0, y0 = lo - margin
+    W, H = ((hi + margin - (x0, y0)) / PX).astype(int) + 1
     if W * H > MAX_RASTER_PIXELS:
         rep.update(status="FAIL", error=f"object raster {W}x{H} px at {PX} mm is too large")
         return rep
     org = np.array([x0, y0])
     ui = spec.visible.u
     m1 = int(round(ANCHOR_MM / PX))
-    prev_body: np.ndarray | None = None
+    # Each layer is processed in its own window: its cells + `crop` px, inside the raster. The
+    # closed layer (dilation LINE_PX + CLOSE_PX) stays inside the window with an empty ring
+    # around it, so closing, hole filling, the skin erosion and the labels in the window equal
+    # those on the whole raster (outside the window the layer is empty in both).
+    crop = LINE_PX + CLOSE_PX + 2
+    size = np.array([W, H])
+    prev_body: np.ndarray | None = None          # the whole raster: the next layer's footprint
     zprev = 0.0
     for k in zs:
-        g = np.zeros((W, H), bool)
-        ij = ((np.vstack(o.layers[k]) - org) / PX).astype(int)
-        g[ij[:, 0], ij[:, 1]] = True
+        ij = ((o.layers[k].points() - org) / PX).astype(int)
+        a0, a1 = np.maximum(ij.min(0) - crop, 0), np.minimum(ij.max(0) + crop + 1, size)
+        win = (slice(a0[0], a1[0]), slice(a0[1], a1[1]))
+        g = np.zeros(a1 - a0, bool)
+        g[ij[:, 0] - a0[0], ij[:, 1] - a0[1]] = True
+        del ij
         g = ndimage.binary_dilation(g, iterations=LINE_PX)
-        body = ndimage.binary_fill_holes(ndimage.binary_closing(g, iterations=CLOSE_PX))
+        body_w = _fill_holes(ndimage.binary_closing(g, iterations=CLOSE_PX))
+        body = np.zeros((W, H), bool)
+        body[win] = body_w
         if prev_body is not None:
             # a skipped layer: nothing carries this one
-            foot = prev_body if k - zprev <= 1.5 * layer else np.zeros_like(g)
-            # only islands reaching the skin of this layer count: a top skin over infill or a
-            # ceiling over an enclosed void is inside the part and never seen
-            skin = body & ~ndimage.binary_erosion(body, iterations=SKIN_PX)
-            un = g & ~ndimage.binary_dilation(foot, iterations=STEP_PX)
+            carried = k - zprev <= 1.5 * layer
+            foot = prev_body if carried else np.zeros_like(body)
+            un = g
+            if carried:
+                # the footprint grown by STEP_PX, in the window (from the footprint around it)
+                b0, b1 = np.maximum(a0 - STEP_PX, 0), np.minimum(a1 + STEP_PX, size)
+                grown = ndimage.binary_dilation(foot[b0[0]:b1[0], b0[1]:b1[1]], iterations=STEP_PX)
+                d0, d1 = a0 - b0, a1 - b0
+                un = g & ~grown[d0[0]:d1[0], d0[1]:d1[1]]
             lab, n = ndimage.label(un)
-            for q in range(1, n + 1):
-                mask = lab == q
-                if not (skin & mask).any():
-                    continue
-                cells = np.argwhere(mask)
-                a = len(cells) * PX * PX
-                cx, cy = cells.mean(0) * PX + org
-                if a <= min_area or not spec.visible_at(cx, cy, k - zoff):
-                    continue
-                ia, ib = cells[:, ui].min(), cells[:, ui].max()
-                ua, ub = ia * PX + org[ui], ib * PX + org[ui]
-                va, vb = cells[:, 1 - ui].min(), cells[:, 1 - ui].max()
+            if n:
+                # only islands reaching the skin of this layer count: a top skin over infill or a
+                # ceiling over an enclosed void is inside the part and never seen
+                skin = body_w & ~ndimage.binary_erosion(body_w, iterations=SKIN_PX)
+                on_skin = np.zeros(n + 1, bool)
+                on_skin[lab[skin]] = True
+                for q, box_ in enumerate(ndimage.find_objects(lab), start=1):
+                    if not on_skin[q]:
+                        continue
+                    cells = np.argwhere(lab[box_] == q) + (box_[0].start + a0[0], box_[1].start + a0[1])
+                    a = len(cells) * PX * PX
+                    cx, cy = cells.mean(0) * PX + org
+                    if a <= min_area or not spec.visible_at(cx, cy, k - zoff):
+                        continue
+                    ia, ib = cells[:, ui].min(), cells[:, ui].max()
+                    ua, ub = ia * PX + org[ui], ib * PX + org[ui]
+                    va, vb = cells[:, 1 - ui].min(), cells[:, 1 - ui].max()
 
-                lo_end, hi_end = (max(ia - m1, 0), ia), (ib + 1, ib + 1 + m1)
-                vband = slice(va, vb + 1)
-                anchored = all(foot[(slice(*e), vband) if ui == 0 else (vband, slice(*e))].any()
-                               for e in (lo_end, hi_end))
-                rec = dict(area_mm2=round(a, 3), x=round(float(cx), 2), y=round(float(cy), 2), z=k)
-                if anchored and ub - ua <= bar_span and spec.opening_for(ua, ub, k - zoff):
-                    rep["bridges"].append(dict(rec, span_mm=round(float(ub - ua), 2)))
-                else:
-                    rep["islands"].append(rec)
+                    lo_end, hi_end = (max(ia - m1, 0), ia), (ib + 1, ib + 1 + m1)
+                    vband = slice(va, vb + 1)
+                    anchored = all(foot[(slice(*e), vband) if ui == 0 else (vband, slice(*e))].any()
+                                   for e in (lo_end, hi_end))
+                    rec = dict(area_mm2=round(a, 3), x=round(float(cx), 2), y=round(float(cy), 2), z=k)
+                    if anchored and ub - ua <= bar_span and spec.opening_for(ua, ub, k - zoff):
+                        rep["bridges"].append(dict(rec, span_mm=round(float(ub - ua), 2)))
+                    else:
+                        rep["islands"].append(rec)
         prev_body, zprev = body, k
     rep["islands"].sort(key=lambda r: -r["area_mm2"])
     rep["status"] = "FAIL" if rep["islands"] or rep["support"] else "PASS"

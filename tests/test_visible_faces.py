@@ -199,7 +199,7 @@ def test_gcode_arcs_and_absolute_extrusion_are_followed(tmp_path: Path) -> None:
                  "G1 X20 Y0\nG1 X30 Y0 E5\n")   # no E advance: a travel in absolute mode
     objs, seen = vf.parse_gcode(str(p), vf.build_specs(["all"], [], []))
     assert seen == ["plate"]
-    pts = np.vstack(objs["plate"].layers[0.2])
+    pts = objs["plate"].layers[0.2].points()
     assert np.allclose(np.hypot(pts[:, 0], pts[:, 1]), 10.0, atol=1e-6)    # the full circle, nothing else
     assert pts[:, 1].min() < -9.9 and pts[:, 1].max() > 9.9
 
