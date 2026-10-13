@@ -481,6 +481,49 @@ def test_custom_repo_hooks_path_still_lands_in_common_dir_and_warns(
     assert "WARNING: core.hooksPath=.githooks is set" in res.stderr
 
 
+def test_hooks_path_that_does_not_exist_warns_that_no_hook_runs(
+    repo_env: tuple[Path, dict[str, str]], tmp_path: Path,
+) -> None:
+    repo, env = repo_env
+    # A config carried over from another machine (a macOS /Users/... path on Linux):
+    # git silently runs no hooks from a directory that isn't there.
+    missing = tmp_path / "Users" / "someone" / "repo" / ".git" / "hooks"
+    _run_git(repo, env, "config", "core.hooksPath", str(missing))
+
+    res = _install(repo, env)
+    assert res.returncode == 0, res.stderr
+    assert (_common_hooks_dir(repo, env) / "pre-commit").exists()
+    assert f"WARNING: core.hooksPath={missing} does not exist" in res.stderr
+    assert "git runs NO hooks" in res.stderr
+
+
+def test_home_relative_hooks_path_that_exists_is_not_reported_missing(
+    repo_env: tuple[Path, dict[str, str]],
+) -> None:
+    repo, env = repo_env
+    # git expands `~/` in core.hooksPath; the installer must look at the same directory.
+    (Path(env["HOME"]) / ".config" / "git" / "hooks").mkdir(parents=True)
+    _run_git(repo, env, "config", "core.hooksPath", "~/.config/git/hooks")
+
+    res = _install(repo, env)
+    assert res.returncode == 0, res.stderr
+    assert "does not exist" not in res.stderr
+    assert "WARNING: core.hooksPath=~/.config/git/hooks is set" in res.stderr
+
+
+def test_relative_hooks_path_not_yet_created_keeps_the_foreign_path_warning(
+    repo_env: tuple[Path, dict[str, str]],
+) -> None:
+    repo, env = repo_env
+    _run_git(repo, env, "config", "core.hooksPath", ".githooks")      # not mkdir'd
+
+    res = _install(repo, env)
+    assert res.returncode == 0, res.stderr
+    assert "does not exist" not in res.stderr
+    assert "WARNING: core.hooksPath=.githooks is set" in res.stderr
+
+
+
 # --- repo-dev pre-commit hook ------------------------------------------------------
 
 def _install_fake_rig_test_gate(

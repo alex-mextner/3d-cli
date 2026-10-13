@@ -112,6 +112,15 @@ available subagent quota is full, do not drop the task or continue as if it were
 record it in the active worktree/status note or roadmap queue with the intended branch
 name, scope, dependencies, and launch order, then start it when capacity frees up.
 
+**Never use `git stash` while other worktrees of this repo are active.** The stash is one
+stack shared by every worktree: three agents stashing and popping around concurrent rebases
+each popped another's entry, and three ports landed in the wrong branches (2026-10-13). To
+park unfinished work, make a WIP commit on your own branch (amend or squash it later), or
+save `git diff --binary HEAD > ~/.cache/3d-cli-recovery/<worktree>-<time>.patch` (not
+`/tmp`, a tmpfs wiped on reboot) and apply it back in the same worktree. Dropped stash
+entries survive as dangling commits (`git fsck --no-reflog | grep commit`); never run
+`git stash clear` while recovering.
+
 ## User proof/reporting requirements
 
 The project owner wants progress reports in Telegram for this workstream. When reporting
