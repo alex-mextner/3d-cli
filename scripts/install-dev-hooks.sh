@@ -116,7 +116,17 @@ HOOKS_PATH="$(git config --get core.hooksPath || true)"
 # Normalize a trailing slash so an absolute path equivalent to the common hooks dir
 # isn't flagged just for a cosmetic "…/.git/hooks/".
 HOOKS_PATH_NORM="${HOOKS_PATH%/}"
-if [ -n "$HOOKS_PATH" ] && [ "$HOOKS_PATH_NORM" != "${HOOKS_DIR%/}" ]; then
+# `--path` expands `~/` the way git does when it reads the value. Only an ABSOLUTE value is
+# checked for existence: a relative one resolves against wherever git runs the hook, and
+# the relative-path cases below already warn about it.
+HOOKS_PATH_EXPANDED="$(git config --path --get core.hooksPath || true)"
+if [ -n "$HOOKS_PATH" ] && [ "${HOOKS_PATH_EXPANDED#/}" != "$HOOKS_PATH_EXPANDED" ] && [ ! -d "$HOOKS_PATH_EXPANDED" ]; then
+    # A config copied from another machine (e.g. a macOS /Users/... path on Linux) names a
+    # directory that doesn't exist here; git then runs NO hooks at all, silently.
+    echo "[install-dev-hooks] WARNING: core.hooksPath=$HOOKS_PATH does not exist on this machine —" >&2
+    echo "  git runs NO hooks from a missing directory, so this gate never fires. Fix with:" >&2
+    echo "    git config core.hooksPath '$HOOKS_DIR'   (or: git config --unset core.hooksPath)" >&2
+elif [ -n "$HOOKS_PATH" ] && [ "$HOOKS_PATH_NORM" != "${HOOKS_DIR%/}" ]; then
     case "$HOOKS_PATH" in
         /*)
             # Absolute, but not our hooks dir — a foreign tool or composer.
