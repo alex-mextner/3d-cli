@@ -43,6 +43,7 @@ rendering, slicing support, and verification:
 - `export_formats.py`
 - `import_formats.py`
 - `lib/geometry/mesh_metrics.py`
+- `halves_check.py`
 - `mesh_check.py`
 - `niche_fit.py`
 - `orca_project_3mf.py`
@@ -161,6 +162,7 @@ Every current root Python module is listed here so future additions are intentio
 - `mask_geometry.py` — lightweight mask coverage, bounding-box, and centroid metadata.
 - `materials.py` — compatibility wrapper re-exporting `registries.materials`.
 - `mesh_check.py` — mesh verification implementation.
+- `halves_check.py` — paired-halves gate: loads pairs marked in 3MF object metadata (or STL pairs), maps both halves into the assembly frame, rasterises their cut faces and compares outline, dowel holes, size and islands; backs `3d halves-check`.
 - `lib/geometry/mesh_metrics.py` — pinned-convention 3D shape metrics (Chamfer, F-score@tau, Hausdorff, normal consistency, volumetric IoU) between two meshes; backs `3d metrics geometry`.
 - `perceptual_metrics.py` — perceptual/semantic image metrics (PSNR, LPIPS, CLIP-sim) with explicit senses and graceful degradation; backs `3d metrics perceptual`.
 - `metrics.py` — compatibility wrapper re-exporting `registries.metrics`.
