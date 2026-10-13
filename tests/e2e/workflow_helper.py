@@ -8,6 +8,8 @@ import struct
 import subprocess
 import sys
 import tempfile
+import zlib
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -217,3 +219,50 @@ def png_size(path: Path) -> tuple[int, int]:
     assert data[:8] == b"\x89PNG\r\n\x1a\n"
     width, height = struct.unpack(">II", data[16:24])
     return width, height
+
+
+def png_colour_counts(path: Path) -> Counter[bytes]:
+    """Pixel count per colour of an 8-bit, non-interlaced RGB/RGBA PNG (what OpenSCAD writes).
+
+    Stdlib only: the gate has no Pillow. Used to tell a real render (model pixels on the
+    background) from a blank frame — file size can't: a flat-shaded side view of a box
+    compresses to well under 1 KB."""
+    data = path.read_bytes()
+    assert data[:8] == b"\x89PNG\r\n\x1a\n"
+    pos, idat = 8, b""
+    width = height = channels = 0
+    while pos < len(data):
+        (length,) = struct.unpack(">I", data[pos:pos + 4])
+        kind, body = data[pos + 4:pos + 8], data[pos + 8:pos + 8 + length]
+        if kind == b"IHDR":
+            width, height, depth, colour_type, _, _, interlace = struct.unpack(">IIBBBBB", body)
+            assert depth == 8 and colour_type in (2, 6) and interlace == 0, "only 8-bit RGB/RGBA, non-interlaced"
+            channels = 3 if colour_type == 2 else 4
+        elif kind == b"IDAT":
+            idat += body
+        pos += 12 + length
+    raw = zlib.decompress(idat)
+    stride = width * channels
+    prev = bytearray(stride)
+    counts: Counter[bytes] = Counter()
+    for row in range(height):
+        start = row * (stride + 1)
+        kind_byte, line = raw[start], bytearray(raw[start + 1:start + 1 + stride])
+        for i in range(stride):
+            left = line[i - channels] if i >= channels else 0
+            up = prev[i]
+            up_left = prev[i - channels] if i >= channels else 0
+            if kind_byte == 1:
+                line[i] = (line[i] + left) & 0xFF
+            elif kind_byte == 2:
+                line[i] = (line[i] + up) & 0xFF
+            elif kind_byte == 3:
+                line[i] = (line[i] + (left + up) // 2) & 0xFF
+            elif kind_byte == 4:
+                p = left + up - up_left
+                pa, pb, pc = abs(p - left), abs(p - up), abs(p - up_left)
+                pred = left if pa <= pb and pa <= pc else (up if pb <= pc else up_left)
+                line[i] = (line[i] + pred) & 0xFF
+        counts.update(bytes(line[i:i + channels]) for i in range(0, stride, channels))
+        prev = line
+    return counts
