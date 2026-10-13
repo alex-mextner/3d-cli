@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from typing import Sequence
+from collections.abc import Sequence
 
 MIN_EDGE_F1_PROOF = 0.35
 MIN_EDGE_F1_OK = 0.50

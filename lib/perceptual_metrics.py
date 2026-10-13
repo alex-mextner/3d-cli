@@ -30,6 +30,7 @@ INVARIANTS:
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import subprocess
@@ -86,10 +87,8 @@ def psnr_images(path_a: str, path_b: str) -> dict[str, Any]:
         raw = (proc.stderr or proc.stdout).strip()
     finally:
         if is_temp:
-            try:
+            with contextlib.suppress(OSError):
                 os.remove(resized)
-            except OSError:
-                pass
     value = _parse_psnr(raw)
     return {"value": value, "sense": SENSE_HIGHER, "unit": "dB", "capped": value >= PSNR_CAP_DB}
 
@@ -134,10 +133,8 @@ def _resize_to_match(magick: str, ref: str, other: str) -> tuple[str, bool]:
     subprocess.run([magick, other, "-resize", f"{dims}!", out], capture_output=True, text=True)
     if os.path.isfile(out) and os.path.getsize(out) > 0:
         return out, True
-    try:
+    with contextlib.suppress(OSError):
         os.remove(out)
-    except OSError:
-        pass
     return other, False
 
 

@@ -40,7 +40,7 @@ from __future__ import annotations
 import importlib
 import pkgutil
 from dataclasses import dataclass, field
-from typing import Callable
+from collections.abc import Callable
 
 # A command's entry point: argv (everything after the subcommand name) -> exit code.
 RunFn = Callable[[list[str]], int]

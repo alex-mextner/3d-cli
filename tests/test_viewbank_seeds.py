@@ -53,7 +53,7 @@ def test_five_param_samples_have_five_coords_all_in_bounds() -> None:
     seeds = viewbank_anchor_samples(LO5, HI5, 100.0, _mask(True), (60, 40))
     for sample in seeds:
         assert len(sample) == 5
-        for value, lo, hi in zip(sample, LO5, HI5):
+        for value, lo, hi in zip(sample, LO5, HI5, strict=True):
             assert lo <= value <= hi
 
 
@@ -61,7 +61,7 @@ def test_six_param_samples_have_six_coords_all_in_bounds() -> None:
     seeds = viewbank_anchor_samples(LO6, HI6, 100.0, _mask(True), (60, 40))
     for sample in seeds:
         assert len(sample) == 6
-        for value, lo, hi in zip(sample, LO6, HI6):
+        for value, lo, hi in zip(sample, LO6, HI6, strict=True):
             assert lo <= value <= hi
 
 

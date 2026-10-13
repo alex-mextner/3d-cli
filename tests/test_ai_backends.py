@@ -194,7 +194,7 @@ def test_ollama_available_requires_a_model_even_with_reachable_server(
 ) -> None:
     # Pretend the socket always connects; availability must still be False without a model.
     class _Sock:
-        def __enter__(self) -> "_Sock":
+        def __enter__(self) -> _Sock:
             return self
 
         def __exit__(self, *a: object) -> None:

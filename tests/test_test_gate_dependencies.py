@@ -121,6 +121,11 @@ def test_dev_extra_keeps_ci_coverage_dependencies_installable() -> None:
     assert "pytest-cov" in dev
 
 
+def test_ruff_selects_the_perf_and_bug_class_rule_families() -> None:
+    selected = set(_pyproject_list("tool.ruff.lint.select"))
+    assert {"E4", "E7", "E9", "F", "PERF", "C4", "SIM", "B", "UP"} <= selected
+
+
 def test_agenttools_dev_runner_appends_extra_args_when_available(tmp_path: Path) -> None:
     pytest.importorskip("agenttools_dev.cli", reason="agent-tools dev CLI is supplied by the broader dev-cli work")
 

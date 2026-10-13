@@ -120,9 +120,7 @@ def _build(d: pathlib.Path, root: pathlib.Path) -> Project:
     anims: list[str] = []
     for sub in (d, d / "previews", d / "animations", d / "anim"):
         if sub.is_dir():
-            for f in sub.iterdir():
-                if f.suffix.lower() in _VIDEO_EXT:
-                    anims.append(str(f))
+            anims.extend(str(f) for f in sub.iterdir() if f.suffix.lower() in _VIDEO_EXT)
     try:
         rel = str(d.relative_to(root)) if d != root else "."
     except ValueError:

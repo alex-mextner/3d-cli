@@ -56,7 +56,7 @@ def validate_endpoint(endpoint: str, *, flag: str = "--endpoint") -> str:
     parsed = urlparse(candidate)
     hostname = parsed.hostname
     try:
-        parsed.port
+        _ = parsed.port  # the property raises ValueError on a malformed/out-of-range port
     except ValueError as e:
         raise InvalidArgument(
             flag,

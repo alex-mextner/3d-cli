@@ -86,7 +86,9 @@ logic. `tests/test_cli_smoke.py` runs `3d <cmd> --help` for EVERY registered com
 the safe commands on `examples/cube.scad` (skipping when a tool is absent). `tests/e2e/`
 is part of the normal pytest sweep run by `dev run test`; do not maintain a separate matrix.
 `tests/test_imports.py` enforces the stdlib-only rule. `dev run test` also runs ruff over
-`lib/ + tests/` and mypy over `bin/3d + lib/ + tests/` — keep both clean.
+`lib/ + tests/` (rules in `pyproject.toml` `[tool.ruff.lint]`: the defaults plus `PERF`, `C4`,
+`SIM`, `B`, `UP`; any ignore is a per-line `# noqa: CODE — reason`) and mypy over
+`bin/3d + lib/ + tests/` — keep both clean.
 
 ## Agent worktrees
 

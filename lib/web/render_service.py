@@ -58,7 +58,7 @@ async def _run(cmd: list[str], *, timeout: float = 180.0) -> tuple[int, str]:
     except asyncio.TimeoutError:
         proc.kill()
         await proc.wait()
-        raise RenderError(f"render timed out after {timeout}s: {' '.join(cmd[:3])} …")
+        raise RenderError(f"render timed out after {timeout}s: {' '.join(cmd[:3])} …") from None
     return proc.returncode or 0, (out_b or b"").decode("utf-8", errors="replace")
 
 

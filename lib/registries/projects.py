@@ -52,11 +52,11 @@ def _load_raw() -> list[dict[str, Any]]:
     entries = doc.get("projects")
     if not isinstance(entries, list):
         return []
-    out: list[dict[str, Any]] = []
-    for e in entries:
-        if isinstance(e, dict) and isinstance(e.get("path"), str):
-            out.append({"path": e["path"], "added": e.get("added")})
-    return out
+    return [
+        {"path": e["path"], "added": e.get("added")}
+        for e in entries
+        if isinstance(e, dict) and isinstance(e.get("path"), str)
+    ]
 
 
 def _save_raw(entries: list[dict[str, Any]]) -> None:

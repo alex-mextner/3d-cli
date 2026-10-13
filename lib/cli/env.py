@@ -14,6 +14,7 @@ heavy python work runs through `cli.pyrun`.
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import pathlib
 import shutil
@@ -351,10 +352,8 @@ def maybe_bootstrap() -> None:
             "-c", "http.lowSpeedTime=20",
             "clone", "--depth", "1", url, dst,
         ]
-        try:
+        with contextlib.suppress(OSError):  # non-fatal
             subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except OSError:
-            pass  # non-fatal
 
     try:
         paths.config_dir().mkdir(parents=True, exist_ok=True)

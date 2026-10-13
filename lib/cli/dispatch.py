@@ -12,6 +12,7 @@ call `main(sys.argv[1:])`.
 """
 from __future__ import annotations
 
+import contextlib
 import importlib.metadata
 import os
 import re
@@ -167,10 +168,8 @@ def main(argv: list[str]) -> int:
         return e.exit_code
     except BrokenPipeError:
         # downstream closed the pipe (e.g. `| head`): exit quietly.
-        try:
+        with contextlib.suppress(Exception):
             sys.stdout.close()
-        except Exception:
-            pass
         return 0
     except KeyboardInterrupt:
         return 130

@@ -167,9 +167,12 @@ def require_cli_python_deps(tmp_path: Path, deps: list[str], imports: list[str])
     """Skip unless the CLI can resolve Python deps through .venv, uv, or system python."""
     env = isolated_env(tmp_path)
     venv_python = REPO_ROOT / ".venv" / "bin" / "python"
-    if venv_python.exists() and os.access(venv_python, os.X_OK):
-        if _python_imports(str(venv_python), imports, cwd=tmp_path, env=env):
-            return
+    if (
+        venv_python.exists()
+        and os.access(venv_python, os.X_OK)
+        and _python_imports(str(venv_python), imports, cwd=tmp_path, env=env)
+    ):
+        return
 
     uv = shutil.which("uv")
     if uv is not None:

@@ -13,7 +13,8 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any
+from collections.abc import Mapping
 
 from errors import InputNotFound, InvalidArgument, UsageError
 
@@ -41,25 +42,25 @@ def load_graph(path: str) -> OperationGraph:
         with open(path, encoding="utf-8") as f:
             payload = json.load(f)
     except FileNotFoundError:
-        raise InputNotFound(path, command="opdag")
+        raise InputNotFound(path, command="opdag") from None
     except IsADirectoryError:
         raise UsageError(
             f"expected a graph JSON file, got a directory: {path}",
             command="opdag",
             remediation=["Pass a file created from `3d opdag template`, not a directory."],
-        )
+        ) from None
     except (OSError, UnicodeDecodeError) as e:
         raise UsageError(
             f"could not read graph JSON file {path}: {getattr(e, 'strerror', None) or e}",
             command="opdag",
             remediation=["Check file permissions and pass a readable graph JSON file."],
-        )
+        ) from e
     except json.JSONDecodeError as e:
         raise UsageError(
             f"invalid JSON in {path}: line {e.lineno}, column {e.colno}",
             command="opdag",
             remediation=["Use `3d opdag template` to see the expected operation graph shape."],
-        )
+        ) from e
     return parse_graph(payload)
 
 

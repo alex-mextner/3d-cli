@@ -21,11 +21,11 @@ HEAVY = ["trimesh", "manifold3d", "numpy", "scipy", "cv2", "rtree", "pyvista", "
 
 
 def _command_module_names() -> list[str]:
-    names = []
-    for fn in sorted(os.listdir(_COMMANDS_DIR)):
-        if fn.endswith(".py") and not fn.startswith("_"):
-            names.append("commands." + fn[:-3])
-    return names
+    return [
+        "commands." + fn[:-3]
+        for fn in sorted(os.listdir(_COMMANDS_DIR))
+        if fn.endswith(".py") and not fn.startswith("_")
+    ]
 
 
 def test_command_modules_import_stdlib_only() -> None:

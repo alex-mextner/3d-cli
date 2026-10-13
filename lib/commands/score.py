@@ -21,6 +21,7 @@ ROADMAP §7 / §13.4: "Compute axes/contours by math (OpenCV/ImageMagick: PCA, i
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import subprocess
 
@@ -173,7 +174,7 @@ def run(argv: list[str]) -> int:  # noqa: C901  (faithful port of the bash flow)
     try:
         ae_int = int(round(float(ae_tok)))
     except ValueError:
-        raise GateFailure(f"score: compare AE failed: {ae_raw}", command="score")
+        raise GateFailure(f"score: compare AE failed: {ae_raw}", command="score") from None
 
     inter = float(_m([mr, "-threshold", "50%", mf, "-threshold", "50%",
                       "-compose", "multiply", "-composite", "-format", "%[fx:mean]", "info:"], "inter"))
@@ -193,10 +194,8 @@ def run(argv: list[str]) -> int:  # noqa: C901  (faithful port of the bash flow)
     except GateFailure:
         overlay = "(overlay-failed)"
     for f in (ref_red, ren_cyan):
-        try:
+        with contextlib.suppress(OSError):
             os.remove(f)
-        except OSError:
-            pass
 
     print(f"AE={ae_int}")
     print(f"AE_NORM={metrics['AE_NORM']:.6f}")

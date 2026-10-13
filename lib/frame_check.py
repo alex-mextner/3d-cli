@@ -32,7 +32,7 @@ import pathlib
 import subprocess
 import sys
 import tempfile
-from typing import Callable
+from collections.abc import Callable
 
 import numpy as np
 import trimesh

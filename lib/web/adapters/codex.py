@@ -64,7 +64,7 @@ class CodexAdapter(LogAdapter):
     @staticmethod
     def _peek_cwd(f: pathlib.Path) -> str | None:
         try:
-            with open(f, "r", encoding="utf-8", errors="replace") as fh:
+            with open(f, encoding="utf-8", errors="replace") as fh:
                 line = fh.readline()
                 obj = json.loads(line)
             p = obj.get("payload")
@@ -147,11 +147,9 @@ def _content_text(content: object) -> str:
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        parts: list[str] = []
-        for b in content:
-            if isinstance(b, dict) and isinstance(b.get("text"), str):
-                parts.append(b["text"])
-        return "\n".join(parts)
+        return "\n".join(
+            b["text"] for b in content if isinstance(b, dict) and isinstance(b.get("text"), str)
+        )
     return ""
 
 

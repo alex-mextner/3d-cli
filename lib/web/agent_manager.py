@@ -14,6 +14,7 @@ Adapters do the format-specific work; this layer is format-agnostic.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
 import pathlib
 import time
@@ -62,9 +63,10 @@ class AgentManager:
         for proj in self._project_paths:
             for c in candidates:
                 cr = c
-                if cr == proj or cr.startswith(proj + "/") or proj.startswith(cr + "/"):
-                    if best is None or len(proj) > len(best):
-                        best = proj
+                if (cr == proj or cr.startswith(proj + "/") or proj.startswith(cr + "/")) and (
+                    best is None or len(proj) > len(best)
+                ):
+                    best = proj
         return best
 
     # -- discovery + lifecycle ----------------------------------------------
@@ -133,10 +135,8 @@ class AgentManager:
 
     async def _fanout(self, ev: AgentEvent) -> None:
         for q in list(self._subscribers):
-            try:
+            with contextlib.suppress(asyncio.QueueFull):
                 q.put_nowait(ev)
-            except asyncio.QueueFull:
-                pass
 
     # -- subscription (SSE) --------------------------------------------------
     def subscribe(self) -> AsyncGenerator[AgentEvent, None]:
@@ -206,7 +206,5 @@ class AgentManager:
                 ts.task.cancel()
         for ts in self._sessions.values():
             if ts.task:
-                try:
+                with contextlib.suppress(asyncio.CancelledError, Exception):
                     await ts.task
-                except (asyncio.CancelledError, Exception):
-                    pass

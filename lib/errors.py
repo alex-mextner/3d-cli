@@ -23,7 +23,7 @@ Exit-code contract (preserved from the bash era):
 from __future__ import annotations
 
 import os
-from typing import Sequence
+from collections.abc import Sequence
 
 
 class ThreeDError(Exception):
@@ -66,8 +66,7 @@ class ThreeDError(Exception):
         z = "\033[0m" if color else ""
 
         lines = [f"{red}{bold}{self._header()}{z}"]
-        for step in self.remediation:
-            lines.append(f"  {dim}->{z} {step}")
+        lines.extend(f"  {dim}->{z} {step}" for step in self.remediation)
         return "\n".join(lines)
 
 
