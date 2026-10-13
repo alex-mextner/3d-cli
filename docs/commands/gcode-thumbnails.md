@@ -6,7 +6,7 @@ A printer screen (Snapmaker U1, any Klipper/Moonraker host, Creality K1 stock fi
 
 ```
 3d gcode-thumbnails check <file.gcode>... [--json]
-3d gcode-thumbnails add   <file.gcode>... [--image PNG] [--size WxH/FMT]... [--out FILE] [--preview PNG] [--json]
+3d gcode-thumbnails add   <file.gcode>... [--image PNG] [--size WxH/FMT]... [--out FILE] [--replace] [--preview PNG] [--json]
 ```
 
 | Subcommand / option | What |
@@ -17,6 +17,7 @@ A printer screen (Snapmaker U1, any Klipper/Moonraker host, Creality K1 stock fi
 | `--size WxH[/FMT]` | Sizes for a G-code without a `; thumbnails =` spec (repeatable). |
 | `--out FILE` | Write the result to `FILE`, leave the input untouched (one input only). |
 | `--preview PNG` | Also save the full-size G-code render. |
+| `--replace` | Redraw every size, dropping the thumbnail blocks already in the head (e.g. after a better `--image`). |
 | `--json` | List of `{path, ok, reason, required, present, missing, added}`. |
 
 ```bash

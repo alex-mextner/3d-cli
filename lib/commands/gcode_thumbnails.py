@@ -34,7 +34,7 @@ USAGE = """3d gcode-thumbnails <check|add> <file.gcode>... [options]
     --size WxH[/FMT]       sizes for a G-code without a `; thumbnails =` spec (repeatable)
     --out FILE             write the result there instead of in place (one input only)
     --preview PNG          also save the full-size G-code render
-  --json                   machine-readable result list
+    --replace              redraw every size, dropping the thumbnails already there
 
 Examples:
   3d gcode-thumbnails check print/u1_trees.gcode
