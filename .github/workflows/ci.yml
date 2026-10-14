@@ -26,11 +26,17 @@ jobs:
       - name: Install system deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y openscad imagemagick
+          sudo apt-get install -y openscad imagemagick shellcheck
       - name: Sync dependencies
         run: uv sync --all-extras
       - name: Run ruff
         run: uv run ruff check lib/ tests/
+      - name: Run shellcheck
+        # Same file discovery as the local gate (tests/run_gate.py); `command -v` fails the
+        # step if the binary is missing here, where the local gate would only SKIP.
+        run: |
+          command -v shellcheck
+          uv run python -c 'import sys; sys.path.insert(0, "tests"); import run_gate; sys.exit(run_gate.run_shellcheck("."))'
       - name: Run pytest with coverage
         run: uv run pytest tests/ --cov=lib --cov-fail-under=80 -q
       - name: Run mypy

@@ -136,8 +136,7 @@ def _render_text(result: Any) -> str:
         # so a downstream consumer keying on MEAN (and ignoring LABEL) cannot swallow it as
         # a genuine score. The real numbers stay in --json, guarded by the blind flags.
         lines.append("MEAN=NA")
-        for key in result.per_dim:
-            lines.append(f"DIM.{key}=NA")
+        lines.extend(f"DIM.{key}=NA" for key in result.per_dim)
     else:
         lines.append(f"MEAN={result.mean}")
         for key, val in result.per_dim.items():
@@ -147,8 +146,7 @@ def _render_text(result: Any) -> str:
     lines.append(f"STABILITY_UNSTABLE={str(result.stability_unstable).lower()}")
     lines.append(f"CROSS_JUDGE_SPREAD={_na(result.cross_judge_spread)}")
     lines.append(f"JUDGES={len(result.judges)}")
-    for note in result.notes:
-        lines.append(f"NOTE: {note}")
+    lines.extend(f"NOTE: {note}" for note in result.notes)
     return "\n".join(lines)
 
 

@@ -31,6 +31,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import shutil
@@ -38,7 +39,8 @@ import struct
 import subprocess
 import sys
 import tempfile
-from typing import Any, Sequence
+from typing import Any
+from collections.abc import Sequence
 
 import numpy as np
 from PIL import Image, ImageDraw
@@ -68,10 +70,8 @@ def log(msg: str) -> None:
 def _unlink_quiet(path: str) -> None:
     """Remove `path` if present; a lock/permission/race error is swallowed (best-effort
     cleanup must never crash the render loop)."""
-    try:
+    with contextlib.suppress(OSError):
         os.remove(path)
-    except OSError:
-        pass
 
 
 def model_centroid(scad_path: str, tmp: str) -> list[float]:

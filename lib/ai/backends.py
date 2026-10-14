@@ -314,7 +314,7 @@ class OllamaBackend(Backend):
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 payload = json.loads(resp.read().decode("utf-8"))
-        except (urllib.error.URLError, TimeoutError, socket.timeout) as e:
+        except (urllib.error.URLError, TimeoutError) as e:
             raise BackendError(
                 f"ollama request to {url} failed: {e}",
                 command="ai",

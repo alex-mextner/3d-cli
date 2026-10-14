@@ -3,7 +3,8 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from typing import Any, Sequence
+from typing import Any
+from collections.abc import Sequence
 
 from errors import UsageError
 
@@ -112,8 +113,9 @@ def render_text(report: ReportSummary) -> str:
             lines.append(f"- {gate.name} {gate.status} ({gate.source}){detail}")
     if report.values:
         lines.extend(["", "Values:"])
-        for value in report.values:
-            lines.append(f"- {value.name}={_format_value(value.value)} ({value.source})")
+        lines.extend(
+            f"- {value.name}={_format_value(value.value)} ({value.source})" for value in report.values
+        )
     return "\n".join(lines) + "\n"
 
 
@@ -194,14 +196,18 @@ def _parse_record(path: str, record: Any) -> tuple[list[GateSummary], list[Repor
 
     raw_metrics = record.get("metrics")
     if isinstance(raw_metrics, dict):
-        for name in sorted(raw_metrics):
-            if _is_scalar(raw_metrics[name]):
-                values.append(ReportValue(str(name), raw_metrics[name], path))
+        values.extend(
+            ReportValue(str(name), raw_metrics[name], path)
+            for name in sorted(raw_metrics)
+            if _is_scalar(raw_metrics[name])
+        )
     raw_values = record.get("values")
     if isinstance(raw_values, dict):
-        for name in sorted(raw_values):
-            if _is_scalar(raw_values[name]):
-                values.append(ReportValue(str(name), raw_values[name], path))
+        values.extend(
+            ReportValue(str(name), raw_values[name], path)
+            for name in sorted(raw_values)
+            if _is_scalar(raw_values[name])
+        )
     elif isinstance(raw_values, list):
         for item in raw_values:
             value = _value_from_mapping(path, item)

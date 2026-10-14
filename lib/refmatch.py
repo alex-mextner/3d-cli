@@ -34,7 +34,6 @@ import json
 import os
 import subprocess
 from dataclasses import dataclass
-from typing import Optional
 
 # --------------------------------------------------------------------------- #
 # Tuning constants (degenerate-fit rejection thresholds).
@@ -98,7 +97,7 @@ def _bin_3d() -> str:
     return os.path.join(_repo_root(), "bin", "3d")
 
 
-def _find_magick() -> Optional[str]:
+def _find_magick() -> str | None:
     """Resolve the ImageMagick driver without importing cli.env (keeps refmatch
     standalone-importable). Mirrors cli.env.find_magick."""
     import shutil
@@ -120,7 +119,7 @@ def _magick_compare(magick: str) -> list[str]:
     return [magick, "compare"] if magick else ["compare"]
 
 
-def _find_openscad() -> Optional[str]:
+def _find_openscad() -> str | None:
     import shutil
 
     env = os.environ.get("OPENSCAD")
@@ -176,10 +175,7 @@ def _is_valid_png(path: str) -> bool:
     mgk = _find_magick()
     if mgk is None:
         return False
-    if mgk == "magick":
-        cmd = ["magick", "identify", path]
-    else:
-        cmd = ["identify", path]
+    cmd = ["magick", "identify", path] if mgk == "magick" else ["identify", path]
     r = subprocess.run(cmd, capture_output=True, text=True)
     return r.returncode == 0
 

@@ -165,8 +165,7 @@ def _resolve_inputs(opts: _Options) -> tuple[str, dict[str, str]]:
             description = spec_desc
         dims.update(spec_dims)
 
-    for name, value in opts.dims:
-        dims[name] = value
+    dims.update(opts.dims)
 
     if not description:
         raise UsageError(
@@ -187,7 +186,8 @@ def _load_spec(path: str) -> tuple[str | None, dict[str, str]]:
     if not os.path.isfile(path):
         raise InputNotFound(path, command="generate")
     try:
-        data = json.loads(open(path, encoding="utf-8").read())
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
     except (OSError, json.JSONDecodeError) as exc:
         raise UsageError(
             f"could not read spec JSON: {exc}",

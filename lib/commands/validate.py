@@ -17,6 +17,7 @@ ROADMAP §3: "Core command surface: export (mesh-validated, nonzero on bad geome
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import subprocess
 import tempfile
@@ -81,10 +82,8 @@ def run(argv: list[str]) -> int:
                 sys.stderr.write(f"    {line}\n")
             return 1
     finally:
-        try:
+        with contextlib.suppress(OSError):
             os.remove(tmp)
-        except OSError:
-            pass
 
 
 COMMAND = Command(

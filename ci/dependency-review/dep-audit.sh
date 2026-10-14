@@ -87,5 +87,9 @@ if [ "$missing" -gt 0 ]; then
   note "FAIL — $missing detected ecosystem(s) had no usable scanner (fail-closed). Install the tool(s) above, or set DEP_AUDIT_ALLOW_MISSING=1."
   exit 1
 fi
-[ "$rc" = "0" ] && note "PASS — no advisories at $LEVEL+." || note "FAIL — advisories at $LEVEL+ above."
+if [ "$rc" = "0" ]; then
+  note "PASS — no advisories at $LEVEL+."
+else
+  note "FAIL — advisories at $LEVEL+ above."
+fi
 exit "$rc"

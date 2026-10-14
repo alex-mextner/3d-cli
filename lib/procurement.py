@@ -11,7 +11,8 @@ import math
 import os
 import pathlib
 from dataclasses import dataclass
-from typing import Any, Iterable, Mapping
+from typing import Any
+from collections.abc import Iterable, Mapping
 
 from errors import InputNotFound, MissingDependency, UsageError
 

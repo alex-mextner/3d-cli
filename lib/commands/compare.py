@@ -115,7 +115,7 @@ def run(argv: list[str]) -> int:  # noqa: C901  (flat arg parse + report)
             model, reference, outdir, fit_rand=fit_rand, fit_refine=fit_refine
         )
     except (RuntimeError, refmatch.MagickError) as exc:
-        raise GateFailure(f"compare: {exc}", command="compare")
+        raise GateFailure(f"compare: {exc}", command="compare") from exc
 
     print(f"IoU={res.iou:.4f}")
     print(f"SSIM={res.ssim:.4f}")

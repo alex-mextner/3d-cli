@@ -67,7 +67,7 @@ def write_orca_3mf(path: Path, objects: Sequence[tuple[str, Sequence[tuple[str, 
     root_res, items, cfg = [], [], ['<?xml version="1.0" encoding="UTF-8"?>', "<config>"]
     files: dict[str, str] = {}
     pid = 1
-    for n, ((name, parts), (dx, dy)) in enumerate(zip(objects, offsets), start=1):
+    for n, ((name, parts), (dx, dy)) in enumerate(zip(objects, offsets, strict=True), start=1):
         sub = f"3D/Objects/object_{n}.model"
         meshes, comps, part_cfg = [], [], []
         for pname, m, ext in parts:

@@ -369,10 +369,12 @@ def collect_progress_frames(frames_dir: str, pattern: str) -> list[str]:
     """Collect existing progress frames from a directory using a case-insensitive glob."""
     if not os.path.isdir(frames_dir):
         raise UsageError(f"frames directory not found: {frames_dir}", command="video")
-    paths: list[str] = []
-    for entry in os.scandir(frames_dir):
-        if entry.is_file() and fnmatch.fnmatch(entry.name.lower(), pattern.lower()):
-            paths.append(entry.path)
+    pat = pattern.lower()
+    paths = [
+        entry.path
+        for entry in os.scandir(frames_dir)
+        if entry.is_file() and fnmatch.fnmatch(entry.name.lower(), pat)
+    ]
     paths.sort(key=_natural_key)
     if not paths:
         raise UsageError(

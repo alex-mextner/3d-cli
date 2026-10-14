@@ -23,6 +23,7 @@ command -v gh >/dev/null 2>&1 || { echo "gh CLI not found" >&2; exit 2; }
 
 # Paginate reviewThreads and count the unresolved ones. Using {owner}/{repo} placeholders
 # lets gh fill the current repo; override with GH_REPO / --repo if needed.
+# shellcheck disable=SC2016  # $owner/$name/... are GraphQL variables, not shell expansions
 QUERY='query($owner:String!,$name:String!,$pr:Int!,$endCursor:String){
   repository(owner:$owner,name:$name){
     pullRequest(number:$pr){

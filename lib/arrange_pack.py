@@ -202,7 +202,7 @@ def centering_offset(plate: Plate, *, bed: float) -> tuple[float, float]:
 # --------------------------------------------------------------------------------------
 def _load_meshes(
     inputs: list[str], *, min_volume: float
-) -> list[tuple[str, "trimesh.Trimesh"]]:
+) -> list[tuple[str, trimesh.Trimesh]]:
     """Load inputs (.3mf scene or .stl files) and split each into connected bodies.
 
     Returns a list of (name, mesh) where each mesh is a single connected body laid out in
@@ -244,8 +244,8 @@ def _load_meshes(
 
 
 def _split_bodies(
-    mesh: "trimesh.Trimesh", *, base: str, min_volume: float
-) -> tuple[list["trimesh.Trimesh"], list[DroppedBody]]:
+    mesh: trimesh.Trimesh, *, base: str, min_volume: float
+) -> tuple[list[trimesh.Trimesh], list[DroppedBody]]:
     """Split a mesh into connected components, filtering out degenerate / tiny bodies.
 
     Returns (kept_bodies, dropped). A body is dropped when `degenerate_reason` flags it
@@ -298,7 +298,7 @@ def _log_dropped(dropped: list[DroppedBody]) -> None:
         )
 
 
-def _lay_flat(mesh: "trimesh.Trimesh") -> tuple["trimesh.Trimesh", float, float]:
+def _lay_flat(mesh: trimesh.Trimesh) -> tuple[trimesh.Trimesh, float, float]:
     """Translate a copy so its min corner sits at the XY origin and min-Z = 0.
 
     Returns (flattened_mesh, width_x, depth_y). The part is NOT reoriented (no minimal-bbox
@@ -311,7 +311,7 @@ def _lay_flat(mesh: "trimesh.Trimesh") -> tuple["trimesh.Trimesh", float, float]
     return m, float(ext[0]), float(ext[1])
 
 
-def _np_translation(dx: float, dy: float) -> "np.ndarray":
+def _np_translation(dx: float, dy: float) -> np.ndarray:
     import numpy as np
 
     t = np.eye(4)
@@ -324,7 +324,7 @@ def _np_translation(dx: float, dy: float) -> "np.ndarray":
 # Single multi-plate Orca project 3MF (all plates in one file)
 # --------------------------------------------------------------------------------------
 def _placed_vertices(
-    body: "trimesh.Trimesh", *, dx: float, dy: float
+    body: trimesh.Trimesh, *, dx: float, dy: float
 ) -> list[tuple[float, float, float]]:
     """Vertices of `body` shifted to its in-plate (dx, dy) origin, as plain float tuples."""
     verts = body.vertices
@@ -333,7 +333,7 @@ def _placed_vertices(
 
 def _write_single_project(
     plates: list[Plate],
-    flat_by_index: dict[int, "trimesh.Trimesh"],
+    flat_by_index: dict[int, trimesh.Trimesh],
     *,
     bed: float,
     out_path: str,
@@ -448,7 +448,7 @@ def _verify_project(
 # --------------------------------------------------------------------------------------
 def _write_plate(
     plate: Plate,
-    flat_by_index: dict[int, "trimesh.Trimesh"],
+    flat_by_index: dict[int, trimesh.Trimesh],
     *,
     bed: float,
     out_path: str,

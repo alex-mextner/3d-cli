@@ -37,7 +37,7 @@ def test_version_matches_pyproject_no_drift() -> None:
     # Drift guard: the version the CLI reports MUST equal pyproject's declared
     # version. Pinned to the checkout path (the dist isn't installed in CI).
     assert _version_from_pyproject() == _pyproject_version()
-    assert VERSION == _pyproject_version()
+    assert _pyproject_version() == VERSION
 
 
 def test_version_is_not_the_stale_hardcoded_literal() -> None:

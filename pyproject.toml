@@ -1,6 +1,6 @@
 [project]
 name = "3d-cli"
-version = "0.4.1"
+version = "0.4.2"
 description = "Scriptable, AI-assisted CLI + web toolkit for parametric 3D FDM modeling, verification, matching and print prep (OpenSCAD-first)."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -54,3 +54,12 @@ omit = [
 # Until the restructure, `lib/` is not yet an importable package, so treat as a non-package
 # project (no build backend) — see §29.
 package = false
+
+[tool.ruff]
+target-version = "py310"
+
+[tool.ruff.lint]
+# E4/E7/E9/F are ruff's defaults; PERF/C4/SIM/B/UP added per the machine-resources rule
+# (AGENTS.md in garage-band): catch slow idioms and bug-class patterns at the gate.
+# E501 is deliberately not selected (long lines are allowed).
+select = ["E4", "E7", "E9", "F", "PERF", "C4", "SIM", "B", "UP"]

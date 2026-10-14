@@ -105,7 +105,7 @@ def _fmt(value: object) -> str:
     return str(value)
 
 
-def _print_case_row(case: "CaseResult") -> None:
+def _print_case_row(case: CaseResult) -> None:
     exp = "" if case.matched_expectation else f" (expected {case.expected_status.value})"
     stop = f" stop={case.stop_reason}" if case.stop_reason else ""
     cols = ",".join(k for k, v in case.columns.items() if v.available) or "-"
@@ -113,7 +113,7 @@ def _print_case_row(case: "CaseResult") -> None:
           f"  build={_fmt(case.build_success)} cols={cols}{exp}")
 
 
-def _print_report(report: "SuiteReport") -> None:
+def _print_report(report: SuiteReport) -> None:
     print(f"BENCH backend={report.backend} cases={report.n_cases}")
     print(f"  build-success-rate: {_fmt(report.build_success_rate)} "
           f"(attempted {report.build_attempted})")

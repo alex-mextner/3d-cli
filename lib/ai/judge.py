@@ -40,7 +40,8 @@ from __future__ import annotations
 import json
 import pathlib
 from dataclasses import asdict, dataclass, field
-from typing import Any, Sequence
+from typing import Any
+from collections.abc import Sequence
 
 from ai.backends import Backend, resolve_backend
 from errors import ThreeDError
@@ -224,8 +225,9 @@ def build_system_prompt(rubric: Sequence[RubricDimension]) -> str:
         "",
         "Dimensions (key: 0 anchor / 2 anchor / 4 anchor):",
     ]
-    for d in rubric:
-        lines.append(f"  - {d.key} ({d.label}): 0={d.anchor_0}; 2={d.anchor_2}; 4={d.anchor_4}")
+    lines.extend(
+        f"  - {d.key} ({d.label}): 0={d.anchor_0}; 2={d.anchor_2}; 4={d.anchor_4}" for d in rubric
+    )
     keys = ", ".join(f'"{d.key}"' for d in rubric)
     lines += [
         "",
@@ -306,18 +308,17 @@ def _extract_json_object(text: str) -> dict[str, Any]:
             if depth == 0:
                 start = i
             depth += 1
-        elif ch == "}":
-            if depth > 0:
-                depth -= 1
-                if depth == 0 and start >= 0:
-                    chunk = text[start : i + 1]
-                    try:
-                        obj = json.loads(chunk)
-                    except json.JSONDecodeError:
-                        start = -1
-                        continue
-                    if isinstance(obj, dict):
-                        return obj
+        elif ch == "}" and depth > 0:
+            depth -= 1
+            if depth == 0 and start >= 0:
+                chunk = text[start : i + 1]
+                try:
+                    obj = json.loads(chunk)
+                except json.JSONDecodeError:
+                    start = -1
+                    continue
+                if isinstance(obj, dict):
+                    return obj
     raise JudgeError(
         "judge response contained no parseable JSON object",
         command="judge",
@@ -451,9 +452,10 @@ def _run_judge(
     blind = not backend.supports_images
 
     canonical = _score_once(backend, system, user, images, rubric, timeout)
-    samples: list[RubricScore] = []
-    for _ in range(max(0, stability_n)):
-        samples.append(_score_once(backend, system, user, images, rubric, timeout))
+    samples: list[RubricScore] = [
+        _score_once(backend, system, user, images, rubric, timeout)
+        for _ in range(max(0, stability_n))
+    ]
     # The canonical (logged) score is part of the stability set: a canonical that
     # diverges from the samples IS instability, and this also stops stability_n=1 from
     # trivially reporting "stable" off a single sample compared to nothing.

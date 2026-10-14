@@ -225,11 +225,11 @@ def _components(mask: np.ndarray, grid: Grid, min_px: float, connectivity: int) 
     area = ndimage.sum(np.ones_like(lab), lab, idx)
     cen = ndimage.center_of_mass(np.ones_like(lab), lab, idx)
     border = set(np.unique(np.r_[lab[0], lab[-1], lab[:, 0], lab[:, -1]]).tolist())
-    for k, a, c in zip(idx, area, cen):
+    for k, a, c in zip(idx, area, cen, strict=True):
         if a < min_px:
             continue
         u, w = grid.uw(c[0], c[1])
-        out.append(dict(label=int(k), area_mm2=float(a) * grid.res ** 2, u=u, w=w, border=int(k) in border))
+        out.append({"label": int(k), "area_mm2": float(a) * grid.res ** 2, "u": u, "w": w, "border": int(k) in border})
     return lab, out
 
 
@@ -255,8 +255,8 @@ def check_pair(pair: Pair, opts: Options) -> dict:
     n = n / np.linalg.norm(n)
     d = float(pair.offset)
     e1, e2 = plane_basis(n)
-    rep: dict = dict(pair=pair.pair_id, a=pair.a.name, b=pair.b.name, file=pair.source,
-                     plane=[*map(float, n), d], failures=[], warnings=[])
+    rep: dict = {"pair": pair.pair_id, "a": pair.a.name, "b": pair.b.name, "file": pair.source,
+                     "plane": [*map(float, n), d], "failures": [], "warnings": []}
     fails: list[str] = rep["failures"]
     # each half on its own side of the cut
     for half, sign in ((pair.a, 1.0), (pair.b, -1.0)):
@@ -265,7 +265,7 @@ def check_pair(pair: Pair, opts: Options) -> dict:
             fails.append(f"side: {half.name} reaches {-s.min():.2f} mm across the cut plane onto the other half's side")
     segs = [[section_segments(V, F, n, d + sign * opts.probe) for V, F in hh.meshes]
             for hh, sign in ((pair.a, 1.0), (pair.b, -1.0))]
-    for hf, sg in zip((pair.a, pair.b), segs):
+    for hf, sg in zip((pair.a, pair.b), segs, strict=True):
         if not sum(len(x) for x in sg):
             fails.append(f"face: {hf.name} has no cut face at the plane (n={n.round(4).tolist()}, d={d:.3f})")
     if any(not sum(len(x) for x in sg) for sg in segs):
@@ -309,15 +309,15 @@ def check_pair(pair: Pair, opts: Options) -> dict:
         rep[key] = [round(float(np.ptp(P @ e1)), 3), round(float(np.ptp(P @ e2)), 3)]
     # dowel holes
     ha, hb = holes_of(A, grid, opts.min_area), holes_of(B, grid, opts.min_area)
-    rep["holes_a"] = [dict(u=round(h["u"], 3), w=round(h["w"], 3), d=round(h["d"], 3)) for h in ha]
-    rep["holes_b"] = [dict(u=round(h["u"], 3), w=round(h["w"], 3), d=round(h["d"], 3)) for h in hb]
+    rep["holes_a"] = [{"u": round(h["u"], 3), "w": round(h["w"], 3), "d": round(h["d"], 3)} for h in ha]
+    rep["holes_b"] = [{"u": round(h["u"], 3), "w": round(h["w"], 3), "d": round(h["d"], 3)} for h in hb]
     from scipy.optimize import linear_sum_assignment
 
     pairs = []
     cost = np.array([[np.hypot(b_["u"] - a_["u"], b_["w"] - a_["w"]) for b_ in hb] for a_ in ha]).reshape(len(ha), len(hb))
-    for i, j in zip(*linear_sum_assignment(cost)):        # best overall matching, not greedy
+    for i, j in zip(*linear_sum_assignment(cost), strict=True):        # best overall matching, not greedy
         h, off = ha[i], float(cost[i, j])
-        pairs.append(dict(u=round(h["u"], 3), w=round(h["w"], 3), offset_mm=round(off, 3), d_a=round(h["d"], 3), d_b=round(hb[j]["d"], 3)))
+        pairs.append({"u": round(h["u"], 3), "w": round(h["w"], 3), "offset_mm": round(off, 3), "d_a": round(h["d"], 3), "d_b": round(hb[j]["d"], 3)})
     rep["hole_pairs"] = pairs
     if len(ha) != len(hb):
         fails.append(f"dowels: {len(ha)} holes in {pair.a.name} vs {len(hb)} in {pair.b.name}")
@@ -679,8 +679,8 @@ def check_inputs(inputs: Sequence[str], stl_pairs: Sequence[Sequence[str]] = (),
         fail = True
         warnings.append("no paired halves found (--require-pairs)")
     status = "ERROR" if errors else ("FAIL" if fail else "PASS")
-    return dict(status=status, exit_code=2 if errors else (1 if fail else 0), tol_mm=opts.tol,
-                pairs=reports, warnings=warnings, errors=errors)
+    return {"status": status, "exit_code": 2 if errors else (1 if fail else 0), "tol_mm": opts.tol,
+                "pairs": reports, "warnings": warnings, "errors": errors}
 
 
 def main(argv: list[str]) -> int:
@@ -716,7 +716,7 @@ def main(argv: list[str]) -> int:
                           strict_names=a.strict_names, require_pairs=a.require_pairs)
     status, reports, warnings, errors = result["status"], result["pairs"], result["warnings"], result["errors"]
     if a.json:
-        print(json.dumps(dict(status=status, tol_mm=opts.tol, pairs=reports, warnings=warnings, errors=errors), indent=1))
+        print(json.dumps({"status": status, "tol_mm": opts.tol, "pairs": reports, "warnings": warnings, "errors": errors}, indent=1))
     else:
         print(f"halves-check: tol {opts.tol} mm, raster {opts.res} mm")
         if reports:

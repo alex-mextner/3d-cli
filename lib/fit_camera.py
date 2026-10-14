@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import math
 import os
@@ -33,7 +34,8 @@ import struct
 import subprocess
 import sys
 import tempfile
-from typing import Any, Sequence
+from typing import Any
+from collections.abc import Sequence
 
 from cli.resources import max_workers
 from fit_camera_math import cam_from_params, fit_status_from_spatial_metrics, stratified_samples
@@ -43,10 +45,10 @@ try:
     from PIL import Image, ImageDraw
 except Exception as e:  # pragma: no cover - import guard
     sys.stderr.write(
-        "fit-camera: missing python deps (numpy, pillow): %s\n"
+        f"fit-camera: missing python deps (numpy, pillow): {e}\n"
         "  Bootstrap a venv:  python3 -m venv .venv && "
         ".venv/bin/pip install numpy pillow\n"
-        "  or install uv so `3d` can resolve deps per-call.\n" % e
+        "  or install uv so `3d` can resolve deps per-call.\n"
     )
     sys.exit(127)
 
@@ -118,10 +120,8 @@ async def eval_losses_async(
         if png is None:
             return 9.0
         a = np.asarray(Image.open(png).convert("RGB").resize((w, h)), dtype=np.int16)
-        try:
+        with contextlib.suppress(OSError):
             os.remove(png)
-        except OSError:
-            pass
         rm = array_to_mask(a)
         # Reject degenerate camera poses DURING search, not only after.
         # A silhouette that fills <8% or >92% of the frame is almost certainly a
@@ -157,7 +157,7 @@ def model_bbox(
     stl = os.path.join(tmp, "bbox.stl")
     r = sh([OPENSCAD, "--export-format", "binstl", "-o", stl, model])
     if not os.path.exists(stl) or os.path.getsize(stl) < 84:
-        sys.stderr.write("fit-camera: bbox STL export failed:\n%s\n" % (r.stderr or "")[:400])
+        sys.stderr.write("fit-camera: bbox STL export failed:\n{}\n".format((r.stderr or "")[:400]))
         return None, None
     with open(stl, "rb") as f:
         f.read(80)  # header
@@ -258,9 +258,9 @@ def require_spatial_metrics() -> None:
         import spatial_fit_metrics  # noqa: F401
     except Exception as exc:
         sys.stderr.write(
-            "fit-camera: missing python deps for contour/spatial report (scipy): %s\n"
+            f"fit-camera: missing python deps for contour/spatial report (scipy): {exc}\n"
             "  Bootstrap the worktree: uv sync --extra dev --extra preprocess\n"
-            "  or install scipy in the active Python environment.\n" % exc
+            "  or install scipy in the active Python environment.\n"
         )
         sys.exit(127)
 
@@ -489,7 +489,7 @@ def write_spatial_panel(
     panel = Image.new("RGB", (w * 4, h + header_h), "white")
     draw = ImageDraw.Draw(panel)
     labels = ("reference", "mask", "fitted render", "contour overlay")
-    for idx, (img, label) in enumerate(zip((ref, mask, fit, edge), labels)):
+    for idx, (img, label) in enumerate(zip((ref, mask, fit, edge), labels, strict=True)):
         x = idx * w
         draw.text((x + 8, 6), label, fill=(20, 20, 20))
         panel.paste(img, (x, header_h))
@@ -678,7 +678,7 @@ def main() -> None:
               "(tools/spatial_fit_experiment.evaluate_view_bank_retrieval)", flush=True)
     print(f"  anchors={len(anchors)} random={len(random_samples)}", flush=True)
     losses = eval_losses(args.model, samples, center, ow, oh, refm, tmp, args.objective)
-    for i, (p, loss_val) in enumerate(zip(samples, losses)):
+    for i, (p, loss_val) in enumerate(zip(samples, losses, strict=True)):
         if loss_val < best_l:
             best_l, best_p = loss_val, p
             if args.objective == "area-iou":
@@ -730,7 +730,7 @@ def main() -> None:
             cl = eval_losses(args.model, cands, center, ow, oh, refm, tmp, args.objective)
             # same fixed order as the sequential version (+step before -step) so ties
             # resolve identically.
-            for q, cand_loss in zip(cands, cl):
+            for q, cand_loss in zip(cands, cl, strict=True):
                 if cand_loss < best_l - 1e-4:
                     best_l, best_p, improved = cand_loss, q, True
                     if args.trace:
@@ -832,6 +832,7 @@ def main() -> None:
             ["azim", "elev", "dist", "panx", "pany", "panz"] if len(best_p) == 6
             else ["azim", "elev", "dist", "panx", "panz"],
             [round(x, 3) for x in best_p],
+            strict=True,
         )),
         "center": [round(x, 3) for x in center],
         "iou": round(iou_best, 4),
