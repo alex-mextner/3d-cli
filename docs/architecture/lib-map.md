@@ -75,6 +75,12 @@ Target package: `lib/geometry/`, with subpackages only when a real boundary appe
   `move_bounds.py` (G-code moves and arc extremes vs axis travel / printable area).
 - `lib/slicing/head_sequence.py` — per-object, per-layer toolhead check of sliced G-code against the project 3MF's mixed-filament patterns (`slice-check --check head-sequence`; `preflight_check()` is the `head seq` gate of `print-preflight`, #103).
 - `lib/slicing/slice_warnings.py` — the slicer's warnings for one G-code (Orca-family CLI log, result.json, slice_info of a sliced 3MF) in `NAME.slice-warnings.json` with the G-code's SHA-256 and a reason per accepted warning; backs `3d slice-warnings` and the `slicer warn` gate of `print-preflight`.
+- `lib/printops/` — PrintOps (epic #154) behind `3d printops` and the 3d-api service
+  (`services/3d-api/`): `db.py` (SQLite + `migrations/NNNN_<slice>.sql`), `events.py`
+  (append-only event log + in-process bus), `tokens.py` (bearer tokens, sha256 file),
+  `spoolman.py` (Spoolman v0.27 Protocol, urllib client, extra-field registry), `client.py`
+  (HTTP client for frontends), `settings.py`, `backup.py`, `deploy.py`; `api/` is the FastAPI
+  app (auto-includes `routes_*.py`), `cli/` the self-registering `3d printops` subs.
 
 Target package: `lib/slicing/` for slicer orchestration, dry-run print planning, printer
 job state, and future sender integrations.

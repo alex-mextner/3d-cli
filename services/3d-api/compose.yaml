@@ -1,0 +1,60 @@
+# PrintOps on the Odroid: Spoolman v0.27.0 + 3d-api, compose project `printops`
+# (separate from the Home Assistant compose project; deploy with `3d printops deploy`).
+#
+#   docker compose -p printops -f services/3d-api/compose.yaml up -d --build
+#
+# Paths default to the Odroid layout (/home/ultra is bind-mounted from the WD HDD
+# /mnt/wd500/odroid-rt/ultra); override with PRINTOPS_DATA_DIR / PRINTOPS_BACKUP_DIR.
+# Ports are published on all host interfaces: the Odroid sits behind the home router's NAT,
+# so that means LAN + tailnet (remote access is Tailscale-only). Spoolman has no auth — never
+# port-forward 7912; 3d-api requires bearer tokens on everything but /v1/health.
+name: printops
+
+services:
+  spoolman:
+    image: ghcr.io/donkie/spoolman:0.27.0   # multi-arch (amd64, arm64, arm/v7)
+    container_name: printops-spoolman
+    restart: unless-stopped
+    environment:
+      TZ: Europe/Belgrade
+      PUID: "1000"                           # = ultra; Spoolman's entrypoint drops root to this uid
+      PGID: "1000"
+      SPOOLMAN_DIR_DATA: /home/app/.local/share/spoolman
+    volumes:
+      - ${PRINTOPS_DATA_DIR:-/home/ultra/printops/data}/spoolman:/home/app/.local/share/spoolman
+    ports:
+      - "7912:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      start_period: 40s
+      retries: 3
+
+  api:
+    build:
+      context: ../..
+      dockerfile: services/3d-api/Dockerfile
+      args:
+        PRINTOPS_VERSION: ${PRINTOPS_VERSION:-dev}
+    image: printops/3d-api:local          # one tag, rebuilt in place (no per-deploy image pile-up)
+    container_name: printops-api
+    restart: unless-stopped
+    depends_on:
+      spoolman:
+        condition: service_healthy
+    environment:
+      TZ: Europe/Belgrade
+      SPOOLMAN_URL: http://spoolman:8000
+      PRINTOPS_DB: /data/printops.db
+      PRINTOPS_TOKENS_FILE: /data/tokens.json
+      PRINTOPS_BACKUP_DIR: /backup
+      SPOOLMAN_DB: /spoolman-data/spoolman.db
+    volumes:
+      - ${PRINTOPS_DATA_DIR:-/home/ultra/printops/data}/api:/data
+      # read for `3d printops backup` only (SQLite online backup); Spoolman stays the writer
+      - ${PRINTOPS_DATA_DIR:-/home/ultra/printops/data}/spoolman:/spoolman-data
+      # inside Home Assistant's config dir, so HA's automatic daily backup carries the snapshots
+      - ${PRINTOPS_BACKUP_DIR:-/home/ultra/homeassistant/printops-backup}:/backup
+    ports:
+      - "8765:8765"
