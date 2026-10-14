@@ -87,6 +87,7 @@ Target package: `lib/geometry/`, with subpackages only when a real boundary appe
   `spoolman.py` (Spoolman v0.27 Protocol, urllib client, extra-field registry), `client.py`
   (HTTP client for frontends), `settings.py`, `backup.py`, `deploy.py`; `api/` is the FastAPI
   app (auto-includes `routes_*.py`), `cli/` the self-registering `3d printops` subs.
+- `lib/profiles/` — slicer user presets kept in the repo `profiles/` (#180, PrintOps D10), behind `3d profiles`: `slicers.py` (OrcaSlicer / Snapmaker Orca / Bambu Studio data dirs, running check), `preset.py` (preset JSON / `.info` formats, slicer-local keys), `sync.py` (three-way repo <-> slicer sync, base snapshot, backups), `values.py` (`apply_values`, the calibration write path).
 
 Target package: `lib/slicing/` for slicer orchestration, dry-run print planning, printer
 job state, and future sender integrations.
