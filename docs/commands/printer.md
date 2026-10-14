@@ -16,6 +16,7 @@ Epic: [#90](https://github.com/alex-mextner/3d-cli/issues/90).
 3d printer start NAME FILE.gcode --yes [--as REMOTE] [--source-3mf X.3mf] [--bridge-max MM] [--force] [--secs S]
 3d printer cancel NAME --yes
 3d printer watch NAME... | --all [--tg] [--steer SESSION] [--exec CMD] [--min-severity LEVEL] ...
+3d printer vision NAME [--interval S] [--once] [--dry-run] ...  |  vision eval ...  |  vision fetch-model
 ```
 
 | Subcommand | What |
@@ -26,6 +27,7 @@ Epic: [#90](https://github.com/alex-mextner/3d-cli/issues/90).
 | `start NAME FILE --yes` | Start a file that was uploaded before. Runs [`3d print-preflight`](print-preflight.md) first. |
 | `cancel NAME --yes` | Cancel the running or paused job. |
 | `watch NAME...` | Stay subscribed (read-only) and report anomalies as events — see [Watching printers](#watching-printers). |
+| `vision NAME` | Watch the camera for failed prints (spaghetti, stale/dark camera, the U1's own NPU verdicts) — see [Camera failure detection](#camera-failure-detection). |
 
 Options:
 
@@ -213,6 +215,23 @@ journalctl --user -fu '3d-printer-watch@*'
 (`ExecStart=3d printer watch %i $WATCH_ARGS`, `Restart=always`) and
 `~/.config/3d-cli/watch/NAME.env` with the other flags, then runs `systemctl --user daemon-reload`.
 Flags with spaces (an `--exec` command) belong in `printer-devices.yaml` instead.
+
+## Camera failure detection
+
+`3d printer vision NAME` (shorthand for `vision run NAME`) polls the printer camera every 10 s,
+scores each frame with Obico's open spaghetti detector on the CPU (weights downloaded on first
+use into `~/.cache/3d-cli/vision/models/`, sha256-pinned) and sends `vision_spaghetti`,
+`vision_camera_stale`, `vision_camera_dark` and `printer_noodle_verdict` events through the same
+dispatcher and sinks as `watch` (the device's `watch:` block). It never pauses or cancels.
+`vision eval` replays recorded footage and prints precision/recall; `vision fetch-model`
+downloads the weights. Python deps come from the `vision` extra (numpy, OpenCV, onnxruntime).
+
+U1 camera in short: no stream on stock firmware (`/webcam/` → 502); `unisrv` rewrites
+`/server/files/camera/monitor.jpg` at ~2 fps while a client sends `camera.start_monitor` (vision
+does, once a minute); the Fluidd camera entry `/api/ingress/u1_printer/u1-camera/...` is a Home
+Assistant ingress path that works only through HA, served by `u1-camera-proxy` on the Odroid
+(needs a font present on that host). Details: [printer-vision.md](printer-vision.md); research
+and numbers on real U1 footage: [docs/research/printer-vision.md](../research/printer-vision.md).
 
 ## Safety
 
