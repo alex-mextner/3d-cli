@@ -232,7 +232,7 @@
 6. `voice` — «I loaded white PLA into U1 head 4»:
    - резолвим filament (material=PLA, цвет ≈ #FFFFFF через Spoolman search с color similarity, v0.26) и кандидатов spool (не в принтере, ближе по складу, наименьший остаток);
    - ставим `location=PRN:U1/T3`;
-   - на U1 вызываем `SET_SPOOL_ID LANE=E3 SPOOL_ID=n` (extended) или `filament_detect/set` + `SET_GCODE_VARIABLE` `spool_id` для T3 (сток или макросы);
+   - на U1 с extended FW вызываем `SET_SPOOL_ID LANE=E3 SPOOL_ID=n`; на стоке (пока действует D4) в принтер ничего не пишем — `filament_detect/set` есть только в extended FW, а `SET_PRINT_FILAMENT_CONFIG` — отдельный тикет с подтверждением;
    - через несколько секунд сверяем с `filament_detect.info[3]` (`MAIN_TYPE`, `RGB_1`, `CARD_UID`).
 
 **Правило одного писателя**: если на U1 включён Moonraker `[spoolman]`, PrintOps **не делает** `/use` для заданий U1 и только сверяет по оценке G-code. Иначе расход спишется дважды. Для K1 SE и Bambu писатель — PrintOps (или выбранный мост, но не оба одновременно).

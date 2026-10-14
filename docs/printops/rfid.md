@@ -257,16 +257,19 @@ pn532_spi:
             root["uid"] = x;
             root["reader_id"] = "${station_id}";
       - http_request.post:          # 2) операция в 3d-api (3d-api сам ходит в Spoolman/принтеры)
-          url: ${api_base}/station/scan
+          url: ${api_base}/v1/tags/scan    # контракт plan.md §11.1
           capture_response: true
-          request_headers: { Content-Type: application/json }
+          request_headers:
+            Content-Type: application/json
+            Authorization: !secret printops_station_token_header   # "Bearer <токен scope station>"
           json: |-
             static const char* OPS[] = {"load","unload","dry_in","dry_out","store","weigh","note"};
             root["station"] = "${station_id}";
             root["uid"] = x;
             root["op"] = OPS[id(op_idx)];
-            root["target_idx"] = id(target_idx);
-            root["gross_g"] = id(scale_g).state;
+            // target_idx → {printer, slot} | location по списку из /v1/station/config
+            root["target"] = id(target_idx);
+            root["weight_g"] = id(scale_g).state;
           on_response:
             then:
               - lambda: |-
@@ -338,11 +341,14 @@ display:
 
 ### 3.5 Интеграция с HA
 1. ESPHome‑устройство подключается к HA через native API. Оно шлёт `esphome.spool_station` (журнал, уведомления) и при желании `homeassistant.tag_scanned`, чтобы в HA появились сущности `tag`.
-2. Автоматизация HA на `tag_scanned` с `tag_id` вида `sp-*` или `cell-*` (касание телефоном с HA Companion) вызывает `rest_command` к 3d-api `/station/scan` с `source=phone`. Затем HA присылает actionable notification «Загрузить в U1/e? · В сушилку · В ячейку», и ответ уходит в 3d-api. Это даёт «станцию в кармане» без железа.
+2. Автоматизация HA на `tag_scanned` с `tag_id` вида `sp-*` или `cell-*` (касание телефоном с HA Companion) вызывает `rest_command` к 3d-api `POST /v1/tags/scan` (bearer-токен клиента `ha`) с `source=phone`. Затем HA присылает actionable notification «Загрузить в U1/e? · В сушилку · В ячейку», и ответ уходит в 3d-api. Это даёт «станцию в кармане» без железа.
 3. 3d-api — источник правды по операциям. Spoolman хранит катушки, UID, `location`, вес. Журнал сушки ведёт 3d-api.
 4. Сенсоры HA читают из 3d-api `GET /api/v1/printers/{p}/slots`: что стоит в слотах, остаток, «катушка в сушилке N ч».
 
 ### 3.6 Эндпоинты 3d-api (предложение)
+
+Канонический контракт — [plan.md §11.1](plan.md): `POST /v1/tags/scan {uid, payload?, op, printer?, slot?, location?, weight_g?}` с bearer-токеном scope `station`. Ниже — исходный набросок; при расхождении прав plan.md. `target` из конфига станции 3d-api разворачивает в `printer`/`slot`/`location`. Нужен контрактный тест «станция → 3d-api» с аутентификацией.
+
 | Метод | Путь | Назначение |
 |---|---|---|
 | GET | `/api/v1/station/config?station=` | Операции, список целей (printers/slots, dryers), коды проблем |

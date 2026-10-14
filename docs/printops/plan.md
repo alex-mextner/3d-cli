@@ -179,7 +179,7 @@ anomaly(id, at, kind, subject, evidence, status open|ack|resolved)
 Каждые N минут и на каждое событие `3d-api` сводит независимые сигналы по каждой катушке и слоту:
 1. **Идентичность в слоте:** RFID принтера (U1 `filament_detect`/`print_task_config`, Bambu `tag_uid`/`tray_uuid`, CFS `rfid`=material id) ↔ привязка в учёте ↔ голос, станция, скан. Расхождение → `anomaly(slot_mismatch)` и вопрос пользователю. RFID побеждает в идентичности, только если метка уникальна (Bambu tray_uuid — да, CFS — нет).
 2. **Цвет и тип** в слоте (`print_task_config.filament_color_rgba`, AMS `color`) ↔ filament катушки: ΔE2000 > порога → anomaly.
-3. **Расход:** оценка из G-code по инструменту (до печати) → факт по Moonraker history `filament_weights`/`usedMaterialLength`/Bambu remain (после). Взвешивание (`/measure`) — абсолютная привязка, сбрасывает накопленную ошибку. Каждый ledger-ряд несёт `confidence`, остаток показывается как интервал.
+3. **Расход:** оценка из G-code по инструменту (до печати; Moonraker history `filament_weights` и Bambu 3MF — тоже **оценки** слайсера из метаданных файла, а не факт) → наблюдаемый расход после печати: `filament_used`/`usedMaterialLength`/Bambu remain с учётом отмены или сбоя (отменённое на первом слое задание не списывает полную оценку). Взвешивание (`/measure`) — абсолютная привязка, сбрасывает накопленную ошибку. Каждый ledger-ряд несёт `source` и `confidence`, остаток показывается как интервал. Тесты учёта покрывают отменённые и упавшие задания.
 4. **Аномалии:** расход ≫ оценки (сопли, пробка, недоэкструзия по факту), остаток < 0, катушка одновременно в двух местах, «печать на неизвестной катушке», катушка в сушилке дольше X, принтер печатает материалом, которого по учёту нет.
 5. **Учёт ошибок пользователя:** голосовые поправки — тоже события. Повторяющееся расхождение источника X → понижение его доверия (простая байесовская оценка по каждому источнику).
 
@@ -262,7 +262,7 @@ incident(
 ## 9. Гейты, линтеры, хуки против типичных ошибок
 
 ### 9.1 Новые проверки `print-preflight` (lib/printer_ops/preflight.py → модуль `printops_checks`)
-Каждая проверка возвращает `Check(name, level PASS|WARN|FAIL|UNVERIFIED, evidence)`. Уровни задаются политикой. Без данных учёта — `UNVERIFIED`, а не PASS (как в #66).
+Каждая проверка возвращает `Check(name, status PASS|WARN|FAIL|UNVERIFIED, detail)` — поля как у существующего `Check` в `lib/printer_ops/preflight.py`. Уровни задаются политикой. Без данных учёта — `UNVERIFIED`, а не PASS (как в #66). **Миграция:** сейчас `Report.overall` знает только FAIL и WARN и всё остальное сводит к PASS, поэтому UNVERIFIED дал бы PASS. Нужно добавить UNVERIFIED в агрегацию (не ниже WARN; блокирует ли старт — решает политика) и регрессионный тест «UNVERIFIED не даёт overall PASS».
 
 | Проверка | Вход | FAIL, если |
 |---|---|---|
@@ -404,7 +404,7 @@ GET  /v1/events (SSE) | WS /v1/ws
 
 ## 14. Перенос: 3d-lib, 3d-bot, HA
 
-1. **3d-lib (§29):** `lib/` → `packages/3d-lib/src/threed/` (uv workspace, hatchling). Импорты `from registries.x` → `from threed.registries.x` (codemod через ast-grep). `bin/3d` → console-script `3d = threed.cli.dispatch:main`. `3d-api` и `3d-bot` зависят от `threed` как от workspace-пакета. Внешних потребителей нет, поэтому переходим чисто, без шимов.
+1. **3d-lib (§29):** `lib/` → `packages/3d-lib/src/threed/` (uv workspace, hatchling). Импорты `from registries.x` → `from threed.registries.x` (codemod через ast-grep). `bin/3d` → console-script `3d = threed.cli.dispatch:console_main`: новая обёртка без аргументов, которая вызывает `main(sys.argv[1:])` (нынешний `main(argv)` требует аргумент, его передаёт `bin/3d`). Тест: установленный `3d --version` из каталога вне checkout. `3d-api` и `3d-bot` зависят от `threed` как от workspace-пакета. Внешних потребителей нет, поэтому переходим чисто, без шимов.
 2. **3d-bot (D1):** исходник не найден. Варианты: (a) пользователь укажет, где он (другая машина или приватный репо под иным именем); (b) пишем новый `projects/3d-bot` (Telegram на базе tg-cli / watch-sinks: кнопки «загрузил / снял / сушка / инцидент», уведомления и подтверждения из `3d-api`).
 3. **HA:** §3.1. Порядок: коммит грязных правок на Odroid → `filter-repo` → merge в 3d-cli → `.gitignore` в HA-репо → первый `3d ha deploy --dry-run` (diff должен быть пустым) → настоящий деплой.
 4. **Babushkin-dom queue:** формат `queue.json`/`plates.json` импортируется в PrintOps jobs и owned spools (`3d printops import-queue`). `queue_report.py` начинает читать из `3d-api`.
