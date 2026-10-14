@@ -105,13 +105,17 @@ def halves_metadata(pair: str, side: int, local_to_asm: np.ndarray, local_min: S
     return meta
 
 
-def write_orca_3mf(path: Path, objects: Sequence[dict[str, object]], unit: str = "millimeter") -> Path:
+def write_orca_3mf(path: Path, objects: Sequence[dict[str, object]], unit: str = "millimeter",
+                   child_unit: str | None = None) -> Path:
     """objects: {name, parts: [Mesh in plate coords, mm], meta: {key: value} | absent}; `unit` = the
-    3MF model unit the coordinates are written in (metadata stays in mm).
+    3MF model unit the coordinates are written in (metadata stays in mm); `child_unit` = the unit
+    of the 3D/Objects/*.model files (default: `unit`).
 
     Each object's local frame is its plate coordinates minus the footprint centre (the
     build item translation), as Orca writes it."""
-    k = {"millimeter": 1.0, "inch": 25.4}[unit]
+    units = {"millimeter": 1.0, "inch": 25.4}
+    child_unit = child_unit or unit
+    k, kc = units[unit], units[child_unit]
     comps, cfg, build, files = [], [], [], {}
     pid = 1
     for oi, obj in enumerate(objects):
@@ -123,11 +127,11 @@ def write_orca_3mf(path: Path, objects: Sequence[dict[str, object]], unit: str =
         chunks, cc = [], []
         for V, F in parts:
             pc = (V.min(0) + V.max(0)) / 2
-            chunks.append(_mesh_xml(pid, (V - pc) / k, F))
+            chunks.append(_mesh_xml(pid, (V - pc) / kc, F))
             cc.append(f'<component p:path="/3D/Objects/object_{oi + 1}.model" objectid="{pid}" transform="{_tr(((pc - oc) / k).tolist())}"/>')
             pid += 1
         files[f"3D/Objects/object_{oi + 1}.model"] = (
-            f'<?xml version="1.0" encoding="UTF-8"?><model unit="{unit}" '
+            f'<?xml version="1.0" encoding="UTF-8"?><model unit="{child_unit}" '
             'xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02"><resources>'
             + "".join(chunks) + "</resources><build/></model>")
         oid = 1000 + oi

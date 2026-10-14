@@ -150,15 +150,24 @@ def _required(head: str, tail: str) -> list[Thumb]:
 _BLOCK = re.compile(r"(thumbnail(?:_[A-Za-z0-9]+)?) begin([;/\+=\w\s]+?); \1 end")
 
 
+def _is_base64(data: str) -> bool:
+    try:
+        base64.b64decode(data.encode("ascii"), validate=True)
+    except (UnicodeEncodeError, ValueError):
+        return False
+    return True
+
+
 def _present(head: str) -> list[Thumb]:
-    """Valid blocks exactly as Moonraker parses them: header `WxH LEN` and LEN base64 chars."""
+    """Valid blocks: header `WxH LEN`, LEN payload chars (Moonraker's check), and a payload that
+    really is ASCII base64 — a corrupt image passes Moonraker's count but no printer can show it."""
     out: list[Thumb] = []
     tag_fmt = {v: k for k, v in TAGS.items()}
     for m in _BLOCK.finditer(head):
         lines = re.split(r"\r?\n", m.group(2).replace("; ", ""))
         info = [int(x) for x in re.findall(r"\d+", lines[0])]
         data = "".join(lines[1:-1])
-        if len(info) != 3 or len(data) != info[2]:
+        if len(info) != 3 or len(data) != info[2] or not _is_base64(data):
             continue
         out.append(Thumb(info[0], info[1], tag_fmt.get(m.group(1), m.group(1).partition("_")[2].upper())))
     return out

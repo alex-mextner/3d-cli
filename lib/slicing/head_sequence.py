@@ -1,7 +1,9 @@
 """Head-sequence check: does each object print, layer by layer, on the heads its filaments call for?
 
 WHAT: for an Orca-family plate project 3MF and its sliced G-code, every object must print
-  each layer on exactly the heads its parts' filaments call for. A physical filament prints
+  each layer only on heads its parts' filaments call for on that layer (a subset, not
+  equality: a part of a multi-part object may end below the others, so a planned head can
+  legitimately be absent from a layer; a head that is NOT planned is the failure). A physical filament prints
   on its own head; a mixed filament (Full Spectrum / Snapmaker Orca
   `mixed_filament_definitions`) with a manual pattern prints one pattern character per
   layer, at any starting phase. Raft layers (`raft_layers`) print in the support filament
@@ -155,6 +157,8 @@ def _phase_count(mixed: list[int], pat: dict[int, str]) -> int:
     return n
 
 
+# Subset (<=), not equality: the 3MF gives no per-part height, so a shorter part's head may
+# legitimately vanish from upper layers. A wrong head on a layer is what this catches.
 def _follows(layers: dict[int, set[int]], keys: list[int], fixed: set[int], mixed: list[int], pat: dict[int, str]) -> bool:
     for phases in itertools.product(*[range(len(pat[e])) for e in mixed]):
         if all(

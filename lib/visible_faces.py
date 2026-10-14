@@ -316,7 +316,10 @@ def load_3mf(path: str) -> list[tuple[str, list[Mesh]]]:
                 V = np.array([[float(v.get(k, "0")) for k in "xyz"] for v in vs], float).reshape(-1, 3)
                 F = np.array([[int(t.get(k, "0")) for k in ("v1", "v2", "v3")] for t in ts], np.int64).reshape(-1, 3)
                 if len(F):
-                    # transforms (translations included) are in model units: scale after applying them
+                    # a production-extension model file may declare its own unit: bring its vertices
+                    # to the root unit, in which the transforms (translations included) are written,
+                    # then scale the result to mm
+                    V = V * (UNITS.get(model(part).get("unit", "millimeter"), 1.0) / scale)
                     out.append((((V @ tf[:3, :3].T) + tf[:3, 3]) * scale, F))
         comps = o.find(f"{{{CORE}}}components")
         for c in comps if comps is not None else []:

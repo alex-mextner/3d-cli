@@ -220,6 +220,28 @@ def test_3mf_rotation_and_units_follow_the_spec(tmp_path: Path) -> None:
     assert res["status"] == "FAIL" and 97.9 < res["mesh"][0]["pieces"][0]["bbox"][1] < 100.0
 
 
+def test_3mf_child_model_with_its_own_unit_is_converted(tmp_path: Path) -> None:
+    import zipfile
+    core = "http://schemas.microsoft.com/3dmanufacturing/core/2015/02"
+    prod = "http://schemas.microsoft.com/3dmanufacturing/production/2015/06"
+    tet = ('<mesh><vertices><vertex x="0" y="0" z="0"/><vertex x="1" y="0" z="0"/>'
+           '<vertex x="0" y="1" z="0"/><vertex x="0" y="0" z="1"/></vertices><triangles>'
+           '<triangle v1="0" v2="2" v3="1"/><triangle v1="0" v2="1" v3="3"/>'
+           '<triangle v1="1" v2="2" v3="3"/><triangle v1="0" v2="3" v3="2"/></triangles></mesh>')
+    path = tmp_path / "child_inch.3mf"
+    with zipfile.ZipFile(path, "w") as z:
+        z.writestr("3D/3dmodel.model",
+                   f'<model unit="millimeter" xmlns="{core}" xmlns:p="{prod}"><resources>'
+                   '<object id="2" name="T"><components><component p:path="/3D/Objects/o.model" objectid="1" '
+                   'transform="1 0 0 0 1 0 0 0 1 10 0 0"/></components></object></resources>'
+                   '<build><item objectid="2"/></build></model>')
+        z.writestr("3D/Objects/o.model",
+                   f'<model unit="inch" xmlns="{core}"><resources><object id="1">{tet}</object></resources></model>')
+    [(name, [(V, _F)])] = vf.load_3mf(str(path))
+    assert name == "T"
+    assert V.min(0) == pytest.approx([10, 0, 0]) and V.max(0) == pytest.approx([35.4, 25.4, 25.4])
+
+
 def test_mesh_pattern_matching_no_part_fails(tmp_path: Path) -> None:
     stl = write_stl(tmp_path / "wall.stl", slab())
     res = vf.check([str(stl)], None, vf.build_specs(["WAL_TYPO:y<2.5", "wall:y<2.5"], [], []), vf.Options())

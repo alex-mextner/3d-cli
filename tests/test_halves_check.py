@@ -208,6 +208,14 @@ def test_inch_unit_project_is_measured_in_millimetres(tmp_path: Path) -> None:
     assert 2.5 <= hc.check_pair(hc.load_3mf(bad)[0][0], hc.Options())["max_dev_mm"] <= 3.5
 
 
+def test_child_model_with_its_own_unit_is_converted(tmp_path: Path) -> None:
+    path = write_orca_3mf(tmp_path / "mixed.3mf", pair_objects("T", half_mesh(1), half_mesh(2)),
+                          unit="millimeter", child_unit="inch")
+    rep = hc.check_pair(hc.load_3mf(path)[0][0], hc.Options())
+    assert rep["status"] == "PASS", rep["failures"]
+    assert rep["face_size_a"] == pytest.approx([32.0, 46.0], abs=0.1)
+
+
 @pytest.mark.parametrize("cut2", [None, "0 0 0 0", "0 1 0 nan"])
 def test_cut_plane_must_be_given_and_valid_on_both_halves(tmp_path: Path, cut2: str | None) -> None:
     objs = pair_objects("T", half_mesh(1), half_mesh(2))

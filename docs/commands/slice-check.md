@@ -39,7 +39,9 @@ Verifies a [`.3mf`](GLOSSARY.md#3mf) (or `.stl`) **without a GUI**, using an Orc
 3d slice-check plate.3mf --gcode plate.gcode --check head-sequence --json
 ```
 
-Every object must print, layer by layer, on exactly the heads its parts' filaments call for.
+Every object must print, layer by layer, only on heads its parts' filaments call for on that
+layer. A planned head missing from a layer is not a FAIL (the 3MF carries no per-part height, so
+a shorter part's head legitimately disappears); an unplanned head on a layer is.
 A physical filament prints on its own head; a mixed filament (`mixed_filament_definitions`,
 virtual id = physical count + 1 + row) with a manual pattern (`…,cm1,14`) prints one pattern
 digit per layer, at any starting phase. Raft layers (`raft_layers`) are skipped. Ratio rows

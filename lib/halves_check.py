@@ -415,15 +415,20 @@ class _Package:
     def __init__(self, path: str):
         self.zf = zipfile.ZipFile(path)
         self.models: dict[str, dict[str, ET.Element]] = {}
-        unit = ET.fromstring(self.zf.read("3D/3dmodel.model")).get("unit", "millimeter")
+        self.part_scale: dict[str, float] = {}         # model part -> its own unit in mm
+        self.scale = self._unit("3D/3dmodel.model", ET.fromstring(self.zf.read("3D/3dmodel.model")))
+
+    def _unit(self, part: str, root: ET.Element) -> float:
+        unit = root.get("unit", "millimeter")
         if unit not in UNITS:
-            raise MetadataError(f"unknown 3MF model unit {unit!r}")
-        self.scale = UNITS[unit]                       # model units -> mm (the metadata is in mm)
+            raise MetadataError(f"unknown 3MF model unit {unit!r} in {part}")
+        return UNITS[unit]
 
     def objects(self, part: str) -> dict[str, ET.Element]:
         part = part.lstrip("/")
         if part not in self.models:
             root = ET.fromstring(self.zf.read(part))
+            self.part_scale[part] = self._unit(part, root)
             self.models[part] = {o.get("id", ""): o for o in root.iter(f"{{{CORE}}}object")}
         return self.models[part]
 
@@ -441,6 +446,9 @@ class _Package:
                 F = np.array([[int(t.get(k, "0")) for k in ("v1", "v2", "v3")] for t in mesh.iter(f"{{{CORE}}}triangle")], np.int64).reshape(-1, 3)
             except ValueError as e:
                 raise MetadataError(f"object {oid}: mesh vertex/triangle attribute is not numeric ({e})") from e
+            # a production-extension model file may declare its own unit: bring its vertices to the
+            # root model's unit, in which the component transforms are written
+            V = V * (self.part_scale[part.lstrip("/")] / self.scale)
             out.append((V @ M[:3, :3].T + M[:3, 3], F))
         for c in obj.iter(f"{{{CORE}}}component"):
             sub = c.get(f"{{{PROD}}}path") or part
