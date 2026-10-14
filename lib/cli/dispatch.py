@@ -20,6 +20,7 @@ import shlex
 import sys
 
 from cli.env import export_openscadpath, maybe_bootstrap, repo_root
+from cli.resources import cap_threads
 from cli.registry import Registry, discover
 from errors import ThreeDError, UsageError
 
@@ -126,8 +127,10 @@ def _test_command_migration_error(argv: list[str]) -> UsageError:
 
 
 def main(argv: list[str]) -> int:
-    # 1. startup (must run before any subprocess so OpenSCAD/children inherit the path).
+    # 1. startup (must run before any subprocess so OpenSCAD/children inherit the path and
+    #    the native thread caps: numpy/scipy/BLAS/numba otherwise start a thread per core).
     export_openscadpath()
+    cap_threads()
     maybe_bootstrap()
 
     # 2. registry.
