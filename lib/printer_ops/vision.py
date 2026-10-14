@@ -32,7 +32,7 @@ import json
 import re
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -208,8 +208,9 @@ class NpuVerdict:
 
 
 def _line_ts(h: str, m: str, s: str, frac: str, now: float) -> float:
-    """klippy.log carries only the time of day (printer clock, UTC on the U1): attach today's
-    date, or yesterday's when that would land in the future (a line from before midnight)."""
+    """klippy.log carries only the time of day (printer clock, UTC on the U1): attach the date of
+    `now` (the printer's clock), or the day before when that would land in the future (a line
+    from before midnight)."""
     today = datetime.fromtimestamp(now, timezone.utc)
     t = today.replace(
         hour=int(h),
@@ -237,17 +238,28 @@ def parse_klippy_verdicts(text: str, now: float | None = None) -> list[NpuVerdic
         if not isinstance(result, dict):
             continue
         ts = _line_ts(m.group(1), m.group(2), m.group(3), m.group(4), now)
-        out.extend(
-            NpuVerdict(
-                ts,
-                label,
-                float(v.get("obj_probs") or 0.0),
-                float(v.get("obj_areas") or 0.0),
-                int(v.get("obj_cnts") or 0),
-            )
-            for label, v in result.items()
-            if isinstance(v, dict) and "obj_probs" in v
-        )
+        for label, v in result.items():
+            if not isinstance(v, dict) or "obj_probs" not in v:
+                continue
+            try:  # firmware-controlled values: a malformed one skips the entry, not the loop
+                out.append(
+                    NpuVerdict(
+                        ts,
+                        label,
+                        float(v.get("obj_probs") or 0.0),
+                        float(v.get("obj_areas") or 0.0),
+                        int(v.get("obj_cnts") or 0),
+                    )
+                )
+            except (TypeError, ValueError):
+                continue
+    # The log is chronological; only the date is guessed. A line dated after a later line is
+    # from an earlier day (a tail spanning midnight or a day of silence), not "just now".
+    later = None
+    for i in range(len(out) - 1, -1, -1):
+        while later is not None and out[i].ts > later + 1:
+            out[i] = replace(out[i], ts=out[i].ts - 86400)
+        later = out[i].ts
     return out
 
 
@@ -306,7 +318,14 @@ class KlippyLogTap:
             data = data.split(b"\n", 1)[1] if b"\n" in data else b""
         self.offset = end
         complete, _, self._partial = (self._partial + data).rpartition(b"\n")
-        return parse_klippy_verdicts(complete.decode("utf-8", "replace"), now)
+        # klippy.log times are the printer's clock; the monitor compares them with the host's.
+        # Date the lines by the printer's own `Date:` header and shift them onto the host clock,
+        # so a skewed printer clock neither hides nor replays verdicts.
+        host_now = time.time() if now is None else now
+        printer_now = _http_date(headers.get("date"))
+        skew = 0.0 if printer_now is None or now is not None else printer_now - host_now
+        verdicts = parse_klippy_verdicts(complete.decode("utf-8", "replace"), host_now + skew)
+        return [replace(v, ts=v.ts - skew) for v in verdicts] if skew else verdicts
 
 
 # ---- per-frame score -> failure level ---------------------------------------------------------

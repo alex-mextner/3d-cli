@@ -36,7 +36,8 @@ from the device's `watch:` block in `printer-devices.yaml`).
 | `vision_camera_stale` | warning | printing, but the picture has not changed (or could not be fetched) for 120 s |
 | `vision_camera_dark` | warning | printing with a mean brightness below 20/255 (light off, lens covered) |
 
-Each event fires once per episode and carries the saved frame path in `data.frame` (with boxes).
+Each event fires once per episode. Camera events (`vision_*`) carry the saved frame path in
+`data.frame` (with boxes); `printer_noodle_verdict` comes from the log and has no frame.
 Nothing is sent to the printer except `camera.start_monitor`: vision never pauses or cancels.
 Decide on the event (`3d printer status`, Fluidd), then pause yourself.
 

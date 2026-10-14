@@ -30,6 +30,7 @@ import json
 import os
 import shutil
 import sys
+import tempfile
 import time
 import urllib.request
 from dataclasses import dataclass, field
@@ -93,7 +94,10 @@ def ensure_model(
 
     path = models_dir() / spec.name
     if path.is_file():
-        return path
+        if _sha256(path) == spec.sha256:
+            return path
+        # Corrupted or replaced cache file: never hand it to onnxruntime; fetch a fresh copy.
+        print(f"vision: {path} fails its sha256 check; re-downloading", file=sys.stderr)
     if not fetch:
         raise MissingDependency(
             f"spaghetti model {spec.name}",
@@ -102,14 +106,21 @@ def ensure_model(
             command="printer vision",
         )
     path.parent.mkdir(parents=True, exist_ok=True)
-    part = path.with_suffix(".part")
+    # A per-process temp name: concurrent first runs / fetch-model must not share one .part.
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{spec.name}.", suffix=".part")
+    os.close(fd)
+    part = Path(tmp)
     print(
         f"vision: downloading {spec.url} ({spec.size / 1e6:.0f} MB, {spec.licence}; {spec.source})",
         file=sys.stderr,
         flush=True,
     )
-    with opener(spec.url, timeout=60) as r, open(part, "wb") as out:
-        shutil.copyfileobj(r, out, 1 << 20)
+    try:
+        with opener(spec.url, timeout=60) as r, open(part, "wb") as out:
+            shutil.copyfileobj(r, out, 1 << 20)
+    except BaseException:
+        part.unlink(missing_ok=True)
+        raise
     got = _sha256(part)
     if got != spec.sha256:
         part.unlink(missing_ok=True)

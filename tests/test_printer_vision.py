@@ -482,3 +482,41 @@ def test_get_turns_http_protocol_errors_into_oserror(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(http.client, "HTTPConnection", Conn)
     with pytest.raises(OSError, match="IncompleteRead"):
         vision._get("http://127.0.0.1:1/x.jpg", 1.0)
+
+
+def test_ensure_model_refetches_a_corrupted_cache_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import vision_detect
+
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    good = b"weights"
+    spec = vision_detect.ModelSpec(
+        "m.onnx", "https://example.invalid/m.onnx", hashlib.sha256(good).hexdigest(),
+        len(good), "AGPL-3.0", "https://example.invalid",
+    )
+    models = tmp_path / "3d-cli" / "vision" / "models"
+    models.mkdir(parents=True)
+    (models / "m.onnx").write_bytes(b"bit-rotted")
+    path = vision_detect.ensure_model(spec, opener=lambda url, timeout: io.BytesIO(good))
+    assert path.read_bytes() == good
+    assert [p.name for p in models.iterdir()] == ["m.onnx"]  # no temp file left behind
+
+
+def test_malformed_npu_values_are_skipped_not_fatal() -> None:
+    text = (
+        "13:46:00.000:[defect_detection] response info: {'result': {'noodle': {'obj_probs': 'x'}}}\n"
+        "13:46:05.000:[defect_detection] response info: {'result': {'noodle': {'obj_probs': 0.9}}}"
+    )
+    assert [v.prob for v in parse_klippy_verdicts(text, NOW)] == [0.9]
+
+
+def test_a_verdict_older_than_a_later_line_is_dated_a_day_earlier() -> None:
+    # NOW is 13:50: an old 13:48 line followed by a 13:30 line must be from yesterday.
+    text = (
+        "13:48:00.000:[defect_detection] response info: {'result': {'noodle': {'obj_probs': 0.9}}}\n"
+        "13:30:00.000:[defect_detection] response info: {'result': {'noodle': {'obj_probs': 0.1}}}"
+    )
+    old, new = parse_klippy_verdicts(text, NOW)
+    assert NOW - old.ts > 86000
+    assert NOW - new.ts == 20 * 60
