@@ -1,7 +1,8 @@
 """watch_run.py — `3d printer watch`: live streams, reconnects, heartbeat, user systemd service.
 
 WHAT: one thread per printer keeps a websocket open and feeds its detector (watch.py); the
-  events go through one Dispatcher (watch_sinks.py) to stdout/exec/tg/steer.
+  events go through one Dispatcher (watch_sinks.py) to stdout/exec/steer and the agent
+  sessions registered with `3d printer subscribe` (subscriptions.py).
   moonraker       ws://host:port/websocket, JSON-RPC: server.info, printer.objects.list,
                   printer.objects.subscribe (re-sent after notify_klippy_ready), then
                   notify_status_update / notify_gcode_response / notify_klippy_* pushes.
@@ -53,7 +54,7 @@ if TYPE_CHECKING:
 UNIT_NAME = "3d-printer-watch@.service"
 # printer-devices.yaml `<name>.watch:` keys and their CLI flags.
 # `vision` belongs to `3d printer vision` (issue #150), which shares the same sinks; watch ignores it.
-WATCH_KEYS = ("tg", "steer", "exec", "stdout", "min_severity", "stall_minutes", "heat_timeout_minutes",
+WATCH_KEYS = ("tg_fallback", "steer", "exec", "stdout", "min_severity", "stall_minutes", "heat_timeout_minutes",
               "milestones", "dedup_minutes", "vision")
 
 USAGE = """3d printer watch NAME... | --all [options]
@@ -69,11 +70,17 @@ Sinks (several at once; per printer also from printer-devices.yaml `<name>.watch
   stdout JSONL (default)  {"ts","printer","kind","severity","text","key","data"} per line
   --exec CMD              run `sh -c CMD` per event: event JSON on stdin, env
                           PRINTER_EVENT_PRINTER/KIND/SEVERITY/TEXT (repeatable)
-  --tg                    one-line phone message per batch via the `tg` CLI
   --steer TARGET          message into a live omp session (tg-ctl omp-live, like omp-steer):
                           TARGET = sessionId (prefix), pid, or a unique title substring;
                           `all` = every session. Resolved at each delivery (repeatable)
   --no-stdout             no JSONL on stdout
+  subscribers             every agent session registered with `3d printer subscribe`
+                          (no flag; see `3d printer subscribe --help`)
+  printer agent           warning+ events no live agent took go to a temporary omp agent
+                          for that printer (`3d printer agent --help`); no flag
+  tg (emergency)          yaml `watch.tg_fallback: true` only: warning+ events NO agent could take
+                          (the printer agent did not start) go to the phone, marked
+                          «агент недоступен». The watcher never messages the user otherwise.
 
 Options:
   --all                    every printer in printer-devices.yaml
@@ -84,12 +91,12 @@ Options:
   --dedup-min N            drop a repeated event key within N minutes (default 10)
   --heartbeat FILE         heartbeat JSON (default ~/.local/state/3d-cli/watch/<names>.json)
   --duration S             stop after S seconds (demo / smoke test)
-  --dry-run                tg/steer/exec print what they would send (stderr) instead
+  --dry-run                steer/exec/subscribers/agent/tg print what they would send (stderr)
   --install-service        write the user systemd unit for each NAME (other flags go to
                            ~/.config/3d-cli/watch/NAME.env) and print the enable command
 
-Delivery: events arriving within 2 s are batched into one tg/steer message; tg and steer
-send at most 6 messages per 10 min (critical events always go through). Severity:
+Delivery: events arriving within 2 s are batched into one message; steer and tg send at
+most 6 messages per 10 min (critical events always go through). Severity:
 critical = needs a decision now (error, exception, homing lost, filament runout while
 printing, Klipper shutdown); warning = paused/cancelled/bed off/temperature/stall;
 info = started/resumed/complete/snapshot/milestones.
@@ -98,19 +105,23 @@ Config (printer-devices.yaml):
   u1:
     adapter: moonraker
     host: 192.168.0.26
-    watch: {tg: true, steer: 01a12cd6, min_severity: info, stall_minutes: 20}
+    watch: {steer: 01a12cd6, tg_fallback: true, min_severity: info, stall_minutes: 20}
 
 Examples:
   3d printer watch u1 --duration 20
-  3d printer watch u1 k1se --steer 01a12cd6 --tg
+  3d printer watch u1 k1se --steer 01a12cd6
   3d printer watch --all --min-severity warning --exec 'logger -t printer'
-  3d printer watch u1 --install-service --steer 01a12cd6 --tg
+  3d printer watch u1 --install-service
   systemctl --user enable --now 3d-printer-watch@u1"""
 
 _VALUE = {"--exec", "--steer", "--min-severity", "--stall-min", "--heat-timeout-min", "--milestones",
           "--dedup-min", "--heartbeat", "--duration"}
-_FLAGS = {"--all", "--tg", "--no-stdout", "--dry-run", "--install-service"}
+_FLAGS = {"--all", "--no-stdout", "--dry-run", "--install-service"}
 _REPEAT = {"--exec", "--steer"}
+# Removed when tg became emergency-only. Units installed before still pass them in WATCH_ARGS
+# (and old yaml has `tg:`): rejecting them would crash-loop the service and leave the printer
+# unwatched, so they are read as `tg_fallback: true` with a warning.
+_DEPRECATED_TG = {"--tg", "--tg-always"}
 
 
 def _log(msg: str) -> None:
@@ -135,7 +146,12 @@ def parse_args(argv: list[str]) -> tuple[list[str], dict[str, Any]]:
             opts["tokens"] += [a, argv[i + 1]]
             i += 2
             continue
-        if a in _FLAGS:
+        if a in _DEPRECATED_TG:
+            _log(f"{a} is deprecated: tg is now emergency-only (`watch.tg_fallback: true` in "
+                 "printer-devices.yaml); treating it as that. Remove it from the unit's WATCH_ARGS.")
+            opts["--tg"] = True
+            opts["tokens"].append("--tg")   # --install-service keeps the fallback in WATCH_ARGS
+        elif a in _FLAGS:
             opts[a] = True
             if a not in ("--install-service", "--all"):
                 opts["tokens"].append(a)
@@ -181,6 +197,10 @@ def _milestones(value: Any, what: str) -> tuple[float, ...]:
 def settings_for(device: Device, opts: dict[str, Any]) -> dict[str, Any]:
     """`<name>.watch` from printer-devices.yaml overlaid with CLI flags -> validated settings."""
     cfg = dict(device.watch or {})
+    legacy_tg = cfg.pop("tg", None)
+    if legacy_tg not in (None, False):
+        _log(f"{device.source}: {device.name}.watch.tg is deprecated (tg is emergency-only now); "
+             "treating it as `tg_fallback: true` — rename the key.")
     unknown = sorted(set(cfg) - set(WATCH_KEYS))
     if unknown:
         raise InvalidArgument(f"{device.name}.watch", ", ".join(unknown), WATCH_KEYS, command="printer",
@@ -195,7 +215,8 @@ def settings_for(device: Device, opts: dict[str, Any]) -> dict[str, Any]:
     sinks: dict[str, Any] = {
         "exec": [*_strs(cfg.get("exec"), f"{where}.exec"), *opts.get("--exec", [])],
         "steer": [*_strs(cfg.get("steer"), f"{where}.steer"), *opts.get("--steer", [])],
-        "tg": bool(cfg.get("tg")) or bool(opts.get("--tg")),
+        "tg_fallback": _bool(cfg.get("tg_fallback", False), f"{where}.tg_fallback")
+        or legacy_tg not in (None, False) or bool(opts.get("--tg")),
         "stdout": bool(cfg.get("stdout", True)) and not opts.get("--no-stdout"),
     }
     return {
@@ -218,6 +239,12 @@ def _strs(value: Any, what: str) -> list[str]:
     if isinstance(value, list) and all(isinstance(v, str) for v in value):
         return list(value)
     raise InvalidArgument(what, str(value), ["a string or a list of strings"], command="printer")
+
+
+def _bool(value: Any, what: str) -> bool:
+    if not isinstance(value, bool):
+        raise InvalidArgument(what, str(value), ["true", "false"], command="printer")
+    return value
 
 
 # ---- heartbeat ------------------------------------------------------------------------------

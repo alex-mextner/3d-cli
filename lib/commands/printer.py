@@ -1,4 +1,4 @@
-"""3d printer — drive configured physical printers: list, status, upload, start, cancel, watch, vision.
+"""3d printer — drive configured physical printers: list, status, upload, start, cancel, watch, vision, subscribe, agent.
 
 WHAT: talks to the printers named in printer-devices.yaml through a protocol adapter —
   `moonraker` (Klipper/Moonraker, Snapmaker U1) or `creality-stock` (Creality K1 family on
@@ -43,12 +43,17 @@ USAGE = """3d printer <subcommand> [args]
                                        `3d print-preflight` first
   cancel NAME --yes                    cancel the running/paused job
   watch NAME...|--all [options]        live read-only subscription: anomaly events to
-                                       stdout JSONL / --exec / --tg / --steer SESSION
+                                       stdout JSONL / --exec / --steer SESSION / subscribers
                                        (see `3d printer watch --help`)
   vision NAME [options]                camera failure detection (spaghetti, stale/dark camera)
                                        into the same event sinks as watch; also
                                        `vision eval --pos P.. --neg N..`, `vision fetch-model`
                                        (see docs/commands/printer-vision.md)
+  subscribe --session ID [..]          printer alerts go to that omp session (it looks at the
+                                       frame, tells the user only if real); `unsubscribe`,
+                                       `subscriptions [list|test]` (see `3d printer subscribe --help`)
+  agent list|stop|handoff              the temporary per-printer omp agent that gets the alerts
+                                       no live subscriber took (see `3d printer agent --help`)
 
 Options:
   --json             status as JSON (normalized state + raw firmware payload)
@@ -79,9 +84,12 @@ Examples:
   3d printer start u1 out/base.gcode --yes --source-3mf print/base.3mf
   3d printer start k1se out/roof.gcode --yes --force
   3d printer cancel k1se --yes
-  3d printer watch u1 k1se --steer 01a12cd6 --tg
+  3d printer watch u1 k1se --steer 01a12cd6
   3d printer vision u1 --once --save /tmp/u1.jpg
-  3d printer vision u1"""
+  3d printer vision u1
+  3d printer subscribe --session 01a12cd6 --printer u1,k1se
+  3d printer subscriptions
+  3d printer agent list"""
 
 _VALUE = {"--secs", "--as", "--source-3mf", "--bridge-max"}
 _FLAGS = {"--json", "--yes", "--force"}
@@ -381,14 +389,23 @@ def run(argv: list[str]) -> int:
         return watch(rest)
     if sub == "vision":
         return _cmd_vision(rest)
+    if sub in ("subscribe", "unsubscribe", "subscriptions"):
+        from printer_ops.subscriptions import run as subscriptions
+
+        return subscriptions(sub, rest)
+    if sub == "agent":
+        from printer_ops.printer_agent import run as agent
+
+        return agent(rest)
     raise UsageError(f"unknown subcommand '{sub}'", command="printer",
-                     remediation=["Use list, status, upload, start, cancel, watch or vision — see `3d printer --help`."])
+                     remediation=["Use list, status, upload, start, cancel, watch, vision, subscribe, unsubscribe, "
+                                  "subscriptions or agent — see `3d printer --help`."])
 
 
 COMMAND = Command(
     name="printer",
     group="SLICING",
-    summary="drive configured printers: list / status / upload / start --yes / cancel --yes / watch / vision",
+    summary="drive configured printers: list / status / upload / start --yes / cancel --yes / watch / vision / subscribe / agent",
     usage=USAGE,
     run=run,
 )
