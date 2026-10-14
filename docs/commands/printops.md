@@ -38,6 +38,10 @@ service is never exposed to the internet.
 3d printops loc tree|add|show|set|mv|archive|unarchive|label|resolve|sync-fleet|resync …
 3d printops spool ls|show|receive|move|load|unload|use|measure|empty|import-owned …
 3d printops tare ls|add|show …
+3d printops dry start DRYER SPOOL_ID... [--temp C] [--hours H] [--rh PCT] [--weights ID=G,...] [--note TEXT]
+3d printops dry finish SESSION_ID [--rh PCT] [--weights ID=G,...]
+3d printops dry ls [--open] [--spool ID] [--limit N]
+3d printops dry due [--all] [--check]
 ```
 
 | Subcommand | What |
@@ -50,6 +54,7 @@ service is never exposed to the internet.
 | `loc` | The location tree: warehouse cells, dry boxes, dryers and the printer slots from `fleet/printers.yaml`; moves re-sync Spoolman's `location`; printable QR label sheets. |
 | `spool` | Spool lifecycle — receive → store/move → load into a printer slot → unload → empty — with remaining as an interval (ledger), weighing and the idempotent `gen/plates.json` import. See [printops-spool.md](printops-spool.md). |
 | `tare` | The sourced empty-spool weight DB (SpoolmanDB seed + own weighings) and the tare chain of a spool. See [printops-spool.md](printops-spool.md#3d-printops-tare). |
+| `dry` | Drying sessions (start / finish / ls) and the spools due for drying by the `drying:` policy in `fleet/policy.yaml`. |
 
 Subcommands are self-registering modules in `lib/printops/cli/<sub>.py`; later PrintOps slices
 add theirs there.
@@ -200,6 +205,65 @@ REST (scope `read` for GET, `write` otherwise; paths go into the URL as they are
 `kind`, `capacity`, `humidity_sensor_entity`, `tag_uid`, `qr`, `note`, `archived: false`),
 `DELETE /v1/locations/{ref}` (archive; 409 while not empty), `POST /v1/locations/sync-fleet`,
 `POST /v1/locations/resync`. Events: `location.created|updated|moved|archived` (subject `location:<id>`).
+### `dry`
+
+Drying sessions record which spools went into which dryer location (kind `dryer` or `dry_box`,
+e.g. `dryer:1`), at what temperature and for how long ([#162](https://github.com/alex-mextner/3d-cli/issues/162)).
+`ls`/`due` need the `read` scope, the rest `write`; every subcommand takes `--json`, `--api`, `--token`.
+
+- `start DRYER SPOOL_ID...` — open a session. Without `--temp`/`--hours` the spools' recipes decide:
+  the **lowest** recommended temperature (nothing softens) and the **longest** time; a spool rated
+  more than 5 °C away from the session temperature gets a warning. Emits `drying.started`.
+  `3d printops dry start dryer:1 12 13`
+- `finish SESSION_ID` — close it: every spool gets Spoolman `last_dried_at` = now and
+  `dry_state` = `fresh`; emits `drying.finished` (`trigger: finish`). When target time elapses on a
+  still-open session, 3d-api emits `drying.finished` (`trigger: timer`) once, as the "take them
+  out" reminder.
+  `3d printops dry finish 4`
+- `--temp C`, `--hours H` — session temperature (20..150 °C) and target time (≤ 96 h).
+  `3d printops dry start dryer:1 21 --temp 80 --hours 12`
+- `--weights ID=G,...` — gross scale weights per spool, before (`start`) or after (`finish`). The
+  difference is written as a ledger **note** (water lost — not filament usage: no Spoolman `/use`,
+  no remaining-weight anchor).
+  `3d printops dry finish 4 --weights 21=1171.5`
+- `--rh PCT` — dryer humidity before/after. Default: read from the dryer location's Home Assistant
+  humidity sensor when one is set (`3d printops loc` `--humidity-sensor`) and 3d-api has
+  `PRINTOPS_HA_URL` configured (read-only `GET /api/states/<entity>`).
+  `3d printops dry start dryer:1 12 --rh 48`
+- `--note TEXT` — free text kept with the session.
+- `ls [--open] [--spool ID] [--limit N]` — sessions, newest first.
+  `3d printops dry ls --open`
+- `due [--all] [--check]` — spools due (or wet) for drying, with the reason. Read-only; `--all`
+  shows every active spool, `--check` first runs the periodic check now.
+  `3d printops dry due --all --json | jq '.spools[] | {spool_id, state, reasons}'`
+
+```
+due     spool 14 (Elegoo PETG PETG Rapid black)  [medium]  @ WH:A/S2/B3  opened 41.2 d ago ≥ 30 d (medium)
+wet     spool 3 (Polymaker PA6-CF PA6-CF)  [extreme]  dried 7.5 d ago ≥ 2 × 3 d (extreme)
+```
+
+**How "due" is decided.** `fleet/policy.yaml` → `drying:` gives every hygroscopic class
+(`low|medium|high|extreme`) three limits: `max_days_opened` (days since Spoolman `opened_at` for a
+spool we never dried), `max_days_since_dried` (days since `last_dried_at`) and `max_rh` (% RH of the
+spool's storage location — its own or nearest ancestor's `humidity_sensor_entity`, read from Home
+Assistant). The class comes from the filament's material (`materials:` table: PLA low, PETG/ABS/ASA
+medium, TPU/PC/PP/PET-CF high, PA*/PVA/BVOH extreme; unknown → `default_class`), overridden by the
+filament extra field `hygroscopic_class`; temperature/time likewise by `drying_temp_c` /
+`drying_hours`. The material recipes cite their sources in the file (Bambu Lab's material table,
+Prusa's drying KB); the day/RH limits are house policy.
+
+| `dry_state` | When |
+|---|---|
+| `fresh` | dried less than `fresh_days` ago |
+| `ok` | within every limit |
+| `due` | a day limit reached, or the storage RH above the class `max_rh` |
+| `wet` | exposure ≥ limit × `wet_factor` |
+| *(unknown)* | never opened and never dried per Spoolman — left untouched |
+
+Every `check_every_min` 3d-api writes changed `dry_state` values to Spoolman and emits
+`drying.due` when a spool **enters** `due` or `wet`. `due`/`wet` are sticky: only a finished
+drying session (or a human editing `dry_state` in Spoolman) clears them. Spools in an open
+session show as `drying` and are never flagged.
 
 ## Exit codes
 
