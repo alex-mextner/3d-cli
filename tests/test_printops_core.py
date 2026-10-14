@@ -48,9 +48,10 @@ def test_open_db_sets_wal_foreign_keys_and_rows(tmp_path: Path) -> None:
 
 def test_migrate_applies_core_once_and_is_idempotent(tmp_path: Path) -> None:
     conn = db.open_db(tmp_path / "p.db")
-    assert db.migrate(conn) == [1]
+    applied = db.migrate(conn)  # every slice adds its own migration: core first, then in order
+    assert applied[0] == 1 and applied == sorted(applied) == [m.version for m in db.discover_migrations()]
     assert db.migrate(conn) == []
-    row = conn.execute("SELECT version, name FROM schema_migrations").fetchone()
+    row = conn.execute("SELECT version, name FROM schema_migrations ORDER BY version").fetchone()
     assert (row["version"], row["name"]) == (1, "core")
 
 
@@ -394,7 +395,7 @@ def test_health_is_public_and_reports_db_spoolman_and_fields(printops_client: An
     r = printops_client.get("/v1/health")
     body = r.json()
     assert r.status_code == 200 and body["status"] == "ok" and body["version"] == "test"
-    assert body["db"]["ok"] and body["db"]["migrations"] == [1]
+    assert body["db"]["ok"] and body["db"]["migrations"] == [m.version for m in db.discover_migrations()]
     assert body["spoolman"]["version"] == "0.27.0"
     assert body["spoolman"]["extra_fields"]["status"] == "ok"
     assert body["spoolman"]["extra_fields"]["missing"] == []
