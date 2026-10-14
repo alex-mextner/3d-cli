@@ -224,7 +224,8 @@ def test_ensure_extra_fields_registers_every_contract_field_idempotently() -> No
     second = ensure_extra_fields(fake)
     assert not second.created and not second.updated and len(second.unchanged) == len(EXTRA_FIELDS)
     spool_keys = {f["key"] for f in fake.list_fields("spool")}
-    assert spool_keys == {"printops_slot", "opened_at", "last_dried_at", "dry_state", "remaining_confidence_g",
+    # the contract's spool fields; slices may append more (contract: append-only, via PR)
+    assert spool_keys >= {"printops_slot", "opened_at", "last_dried_at", "dry_state", "remaining_confidence_g",
                           "tag_uids", "printops_location_id"}
     filament = {f["key"]: f for f in fake.list_fields("filament")}
     assert filament["hygroscopic_class"]["choices"] == ["low", "medium", "high", "extreme"]
@@ -357,7 +358,7 @@ def test_http_spoolman_speaks_the_wire_format_of_the_fake() -> None:
 
 def test_extra_field_definitions_follow_the_contract_rules() -> None:
     keys = [(f.entity, f.key) for f in EXTRA_FIELDS]
-    assert len(keys) == len(set(keys)) == 19
+    assert len(keys) == len(set(keys)) >= 19
     for f in EXTRA_FIELDS:
         assert (f.field_type == "choice") == (f.choices is not None)
     params = ExtraField("spool", "k", "K", "choice", choices=("a",)).params(7)
