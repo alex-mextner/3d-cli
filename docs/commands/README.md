@@ -80,6 +80,7 @@ Every gate from model to printer, in order: [Print pipeline](../workflows/print-
 | `gcode-thumbnails` | [gcode-thumbnails.md](gcode-thumbnails.md) | Check/add the printer-screen preview thumbnails a G-code carries (Orca CLI writes none). |
 | `print` | [print.md](print.md) | Validate print fields and emit deterministic dry-run job plans. |
 | `gcode-bounds` | [gcode-bounds.md](gcode-bounds.md) | Check every G-code move (arc bulges too) against axis travel and the printable area; offline. |
+| `gcode-resume` | [gcode-resume.md](gcode-resume.md) | Resume a stopped multi-head print above the last intact layer (no Z homing); offline. |
 | `gcode-overhangs` | [gcode-overhangs.md](gcode-overhangs.md) | Find extrusion printed on nothing, per object and layer (the slicer is silent with supports off); offline. |
 | `printer` | [printer.md](printer.md) | Drive configured printers (Moonraker, Creality stock): list, status, upload, start `--yes`, cancel `--yes`, `watch` (read-only anomaly events to stdout/exec/tg/omp session). |
 | `print-preflight` | [print-preflight.md](print-preflight.md) | Read-only pre-print checks: every G-code gate (bounds, overhangs, slicer warnings, head sequence, thumbnails, visible faces), loaded colours vs G-code, halves, printer free. |

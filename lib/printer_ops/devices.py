@@ -20,6 +20,8 @@ ENTRY:
   FAILs print-preflight, so `3d printer start` needs --force for it.
   Optional `watch: {tg: true, steer: <omp session>, exec: CMD, min_severity: warning, ...}`
   configures `3d printer watch` for this printer (keys: printer_ops/watch_run.py WATCH_KEYS).
+  Optional `resume:` holds the printer-specific values of `3d gcode-resume` (ResumeProfile:
+  off-bed purge macro and lengths, travel clearance, start commands); every key is required.
 
 Only devices listed here are ever contacted — no LAN discovery (issue #62 network modes).
 """
@@ -44,6 +46,17 @@ u1:
   host: 192.168.0.26
   port: 7125
   model: Snapmaker U1
+  resume:                   # `3d gcode-resume` (Snapmaker/u1-klipper@10f2f69 macros)
+    purge_macro: SM_PRINT_PREEXTRUDE_FILAMENT  # INDEX=n FORCE=1 LENGTH RETRACT_LENGTH: off-bed purge
+    purge_mm: 30            # header purge per head (cold since the pause, up to 10 mm retracted)
+    purge_retract_mm: 0.5   # the macro's RETRACT_LENGTH: mm a head is left retracted after a purge
+    no_tower_prime_mm: 12   # --no-tower: off-bed prime per tool change on top of the un-retract
+    clearance_mm: 5         # above everything printed before any X/Y move of the header
+    tower_margin_mm: 3      # --no-tower: margin around the prime tower kept free of travels
+    filament_diameter_mm: 1.75
+    min_print_temp: 170     # an M109 at or above this is a print (not standby) temperature
+    default_accel: 10000    # M204 S when the G-code set none before the cut
+    start_commands: [DEFECT_DETECTION_START]   # after the bed is hot, before the heads purge
 k1se:
   adapter: creality-stock   # Creality K1 family on stock firmware (HTTP + ws:9999)
   host: 192.168.0.27
@@ -57,6 +70,25 @@ class DeviceConfigError(ThreeDError):
 
 
 @dataclass(frozen=True)
+class ResumeProfile:
+    """The `resume:` block of a device: printer-specific values of `3d gcode-resume`."""
+    purge_macro: str              # off-bed purge macro, called `<macro> INDEX=n FORCE=1 LENGTH= RETRACT_LENGTH=`
+    purge_mm: float               # header purge per head
+    purge_retract_mm: float       # mm the purge macro leaves the head retracted
+    no_tower_prime_mm: float      # --no-tower: off-bed prime per tool change
+    clearance_mm: float           # Z above everything printed before any X/Y move of the header
+    tower_margin_mm: float        # --no-tower: margin around the prime tower
+    filament_diameter_mm: float
+    min_print_temp: float         # an M109 at or above this is a print temperature
+    default_accel: float          # M204 S when the G-code set none before the cut
+    start_commands: tuple[str, ...]  # emitted once the bed is hot, before the heads purge
+
+
+_RESUME_NUMBERS = ("purge_mm", "purge_retract_mm", "no_tower_prime_mm", "clearance_mm", "tower_margin_mm",
+                   "filament_diameter_mm", "min_print_temp", "default_accel")
+
+
+@dataclass(frozen=True)
 class Device:
     name: str
     adapter: str
@@ -67,6 +99,7 @@ class Device:
     ws_port: int | None = None  # creality-stock only: WebSocket port (default 9999)
     axis_limits: Limits | None = None  # real X/Y travel ((xmin, xmax), (ymin, ymax)), for print-preflight
     trusted_macros: frozenset[str] = frozenset()  # macros print-preflight may treat as staying on the bed
+    resume: ResumeProfile | None = None  # `3d gcode-resume` values
     watch: dict[str, Any] = field(default_factory=dict, hash=False, compare=False)  # `3d printer watch` settings
 
 
@@ -110,6 +143,29 @@ def _trusted_macros(value: Any, name: str, path: Path) -> frozenset[str]:
     return frozenset(v.strip().upper() for v in value)
 
 
+def _resume(value: Any, name: str, path: Path) -> ResumeProfile:
+    keys = ("purge_macro", *_RESUME_NUMBERS, "start_commands")
+    if not isinstance(value, dict) or set(value) != set(keys):
+        raise InvalidArgument(f"{name}.resume", str(value), [f"a mapping with exactly the keys {', '.join(keys)}"],
+                              command="printer", extra=f"Fix {path}; see `3d gcode-resume --help`.")
+    macro, cmds = value["purge_macro"], value["start_commands"]
+    if not isinstance(macro, str) or not re.fullmatch(r"[A-Z][A-Z0-9_]*", macro):
+        raise InvalidArgument(f"{name}.resume.purge_macro", str(macro), ["an upper-case macro name"],
+                              command="printer", extra=f"Fix {path}.")
+    for key in _RESUME_NUMBERS:
+        v = value[key]
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0:
+            raise InvalidArgument(f"{name}.resume.{key}", str(v), ["a number >= 0"], command="printer",
+                                  extra=f"Fix {path}.")
+    if not isinstance(cmds, list) or not all(isinstance(c, str) and c.strip() for c in cmds):
+        raise InvalidArgument(f"{name}.resume.start_commands", str(cmds), ["a list of G-code lines, may be []"],
+                              command="printer", extra=f"Fix {path}.")
+    f = {k: float(value[k]) for k in _RESUME_NUMBERS}
+    return ResumeProfile(macro, f["purge_mm"], f["purge_retract_mm"], f["no_tower_prime_mm"], f["clearance_mm"],
+                         f["tower_margin_mm"], f["filament_diameter_mm"], f["min_print_temp"], f["default_accel"],
+                         tuple(c.strip() for c in cmds))
+
+
 def _parse(path: Path, data: Any) -> dict[str, Device]:
     if data is None:
         return {}
@@ -138,12 +194,13 @@ def _parse(path: Path, data: Any) -> dict[str, Device]:
         model = spec.get("model")
         limits = _axis_limits(spec["axis_limits"], name, path) if "axis_limits" in spec else None
         trusted = _trusted_macros(spec["trusted_macros"], name, path) if "trusted_macros" in spec else frozenset()
+        resume = _resume(spec["resume"], name, path) if "resume" in spec else None
         watch = spec.get("watch") or {}
         if not isinstance(watch, dict):
             raise InvalidArgument(f"{name}.watch", str(watch), ["a mapping, e.g. {tg: true, min_severity: warning}"],
                                   command="printer", extra=f"Fix {path}.")
         out[name] = Device(name, adapter, host, port, str(model) if model else None, path, ws_port, limits,
-                           trusted, dict(watch))
+                           trusted, resume, dict(watch))
     return out
 
 
