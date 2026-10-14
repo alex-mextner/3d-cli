@@ -309,6 +309,12 @@ skills (`atomic-commits`, `ai-review-before-commit`, `pre-commit-gate`,
   (stdlib-only at top level; lazy-imports the optional web tier and raises a structured
   `MissingDependency` if fastapi/uvicorn are absent); the app lives in `lib/web/`. Config is
   `~/.config/3d-cli/web.json` — the same dir as the bootstrap marker. See `docs/commands/web.md`.
+- `printer` drives real printers listed in `~/.config/3d-cli/printer-devices.yaml` through
+  `lib/printer_ops/` adapters (`moonraker`, `creality-stock`); `printers` (plural) stays the
+  MODEL registry. Every hardware write is an explicit subcommand: `upload` never starts,
+  `start`/`cancel` need `--yes`, `start` refuses busy printers and runs `print-preflight`
+  (FAIL blocks unless `--force`). Tests use the loopback fakes in `tests/printer_fakes.py`;
+  agents never point tests or ad-hoc runs at real printers. See `docs/commands/printer.md`.
 
 ## Verification before "done"
 
