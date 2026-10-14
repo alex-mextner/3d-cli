@@ -10,6 +10,7 @@ import copy
 import json
 import socket
 import threading
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -339,3 +340,129 @@ def write_devices(config_home: Path, moon: FakeMoonraker | None = None, k1: Fake
     path = d / "printer-devices.yaml"
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path
+
+
+U1_OBJECTS = ["webhooks", "print_stats", "virtual_sdcard", "display_status", "pause_resume", "idle_timeout",
+              "toolhead", "exception_manager", "extruder", "extruder1", "heater_bed",
+              "filament_motion_sensor e0_filament", "gcode_macro PAUSE"]
+
+
+def u1_ws_status(state: str = "printing", **over: Any) -> dict[str, Any]:
+    """Full subscribe-result status of a U1 in `state` (fields as printer.objects.subscribe returns)."""
+    status: dict[str, Any] = {
+        "webhooks": {"state": "ready", "state_message": "Printer is ready"},
+        "print_stats": {"state": state, "filename": "part-0123456789abcdef.gcode", "message": "",
+                        "info": {"total_layer": 1193, "current_layer": 828}, "exception": {}},
+        "pause_resume": {"is_paused": state == "paused"},
+        "virtual_sdcard": {"progress": 0.62, "file_position": 577487, "is_active": state == "printing"},
+        "display_status": {"progress": 0.62, "message": None},
+        "idle_timeout": {"state": "Printing"},
+        "toolhead": {"homed_axes": "xyz"},
+        "exception_manager": {"exceptions": []},
+        "extruder": {"temperature": 220.0, "target": 220.0},
+        "extruder1": {"temperature": 33.0, "target": 0.0},
+        "heater_bed": {"temperature": 65.0, "target": 65.0},
+        "filament_motion_sensor e0_filament": {"filament_detected": True, "enabled": True},
+    }
+    for obj, fields in over.items():
+        status[obj.replace("__", " ")].update(fields)
+    return status
+
+
+@dataclass
+class FakeMoonrakerWS:
+    """Moonraker's /websocket: answers server.info / printer.objects.list / .subscribe, then
+    pushes `pushes` (JSON-RPC notifications) one by one. Records every request method so
+    tests can prove the watcher only ever asks read-only questions."""
+
+    status: dict[str, Any] = field(default_factory=u1_ws_status)
+    objects: list[str] = field(default_factory=lambda: list(U1_OBJECTS))
+    pushes: list[dict[str, Any]] = field(default_factory=list)
+    klippy_state: str = "ready"
+    push_gap_s: float = 0.05
+    methods: list[str] = field(default_factory=list)
+    subscribed: list[dict[str, Any]] = field(default_factory=list)
+    port: int = 0
+
+    def _session(self, conn: socket.socket) -> None:
+        buf = b""
+        while b"\r\n\r\n" not in buf:
+            chunk = conn.recv(4096)
+            if not chunk:
+                return
+            buf += chunk
+        head, buf = buf.split(b"\r\n\r\n", 1)
+        key = [ln.split(b":", 1)[1].strip() for ln in head.split(b"\r\n") if ln.lower().startswith(b"sec-websocket-key")][0]
+        conn.sendall(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+                     b"Sec-WebSocket-Accept: " + accept_key(key.decode()).encode() + b"\r\n\r\n")
+
+        def send(obj: Any) -> None:
+            conn.sendall(encode_frame(OP_TEXT, json.dumps(obj).encode(), mask=False))
+
+        conn.settimeout(0.05)
+        pending = list(self.pushes)
+        subscribed = False  # pushes start after subscribe (or after server.info when klippy is not ready)
+        next_push = 0.0
+        while True:
+            frame = parse_frame(buf)
+            if frame is None:
+                if subscribed and pending and time.monotonic() >= next_push:
+                    send(pending.pop(0))
+                    next_push = time.monotonic() + self.push_gap_s
+                try:
+                    chunk = conn.recv(4096)
+                except TimeoutError:
+                    continue
+                except OSError:
+                    return
+                if not chunk:
+                    return
+                buf += chunk
+                continue
+            _, op, data, used = frame
+            buf = buf[used:]
+            if op == OP_CLOSE:
+                return
+            req = json.loads(data.decode())
+            method = req.get("method")
+            self.methods.append(method)
+            if method == "server.info":
+                send({"jsonrpc": "2.0", "id": req["id"], "result": {"klippy_state": self.klippy_state}})
+                subscribed = subscribed or self.klippy_state != "ready"
+            elif method == "printer.objects.list":
+                send({"jsonrpc": "2.0", "id": req["id"], "result": {"objects": self.objects}})
+            elif method == "printer.objects.subscribe":
+                self.subscribed.append(req["params"]["objects"])
+                send({"jsonrpc": "2.0", "id": req["id"], "result": {"eventtime": 1.0, "status": self.status}})
+                subscribed = True
+            else:
+                send({"jsonrpc": "2.0", "id": req.get("id"), "error": {"code": -32601, "message": "not found"}})
+
+    @contextmanager
+    def serve(self) -> Iterator[FakeMoonrakerWS]:
+        lsock = socket.socket()
+        lsock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        lsock.bind(("127.0.0.1", 0))
+        lsock.listen(8)
+        self.port = lsock.getsockname()[1]
+        stop = threading.Event()
+
+        def accept_loop() -> None:
+            lsock.settimeout(0.2)
+            while not stop.is_set():
+                try:
+                    conn, _ = lsock.accept()
+                except OSError:
+                    continue
+                threading.Thread(target=self._serve_conn, args=(conn,), daemon=True).start()
+
+        threading.Thread(target=accept_loop, daemon=True).start()
+        try:
+            yield self
+        finally:
+            stop.set()
+            lsock.close()
+
+    def _serve_conn(self, conn: socket.socket) -> None:
+        with conn:
+            self._session(conn)

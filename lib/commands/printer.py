@@ -1,4 +1,4 @@
-"""3d printer — drive configured physical printers: list, status, upload, start, cancel.
+"""3d printer — drive configured physical printers: list, status, upload, start, cancel, watch.
 
 WHAT: talks to the printers named in printer-devices.yaml through a protocol adapter —
   `moonraker` (Klipper/Moonraker, Snapmaker U1) or `creality-stock` (Creality K1 family on
@@ -42,6 +42,9 @@ USAGE = """3d printer <subcommand> [args]
                                        start a file that was uploaded before; runs
                                        `3d print-preflight` first
   cancel NAME --yes                    cancel the running/paused job
+  watch NAME...|--all [options]        live read-only subscription: anomaly events to
+                                       stdout JSONL / --exec / --tg / --steer SESSION
+                                       (see `3d printer watch --help`)
 
 Options:
   --json             status as JSON (normalized state + raw firmware payload)
@@ -68,7 +71,8 @@ Examples:
   3d printer start u1 out/part.gcode --yes
   3d printer start u1 out/base.gcode --yes --source-3mf print/base.3mf
   3d printer start k1se out/roof.gcode --yes --force
-  3d printer cancel k1se --yes"""
+  3d printer cancel k1se --yes
+  3d printer watch u1 k1se --steer 01a12cd6 --tg"""
 
 _VALUE = {"--secs", "--as", "--source-3mf"}
 _FLAGS = {"--json", "--yes", "--force"}
@@ -346,14 +350,18 @@ def run(argv: list[str]) -> int:
         return _cmd_start(rest)
     if sub == "cancel":
         return _cmd_cancel(rest)
+    if sub == "watch":
+        from printer_ops.watch_run import run as watch
+
+        return watch(rest)
     raise UsageError(f"unknown subcommand '{sub}'", command="printer",
-                     remediation=["Use list, status, upload, start or cancel — see `3d printer --help`."])
+                     remediation=["Use list, status, upload, start, cancel or watch — see `3d printer --help`."])
 
 
 COMMAND = Command(
     name="printer",
     group="SLICING",
-    summary="drive configured printers: list / status / upload / start --yes / cancel --yes",
+    summary="drive configured printers: list / status / upload / start --yes / cancel --yes / watch",
     usage=USAGE,
     run=run,
 )

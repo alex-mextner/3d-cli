@@ -44,6 +44,12 @@ def data_dir() -> pathlib.Path:
     return _xdg_root("XDG_DATA_HOME", (".local", "share")) / APP_DIRNAME
 
 
+def state_dir() -> pathlib.Path:
+    """`~/.local/state/3d-cli/` (or `$XDG_STATE_HOME/3d-cli`). Holds runtime state such as
+    `3d printer watch` heartbeat files. Not auto-created."""
+    return _xdg_root("XDG_STATE_HOME", (".local", "state")) / APP_DIRNAME
+
+
 def legacy_config_dir() -> pathlib.Path:
     """The pre-§23 `~/.config/3d/` location, kept only so migration can find it."""
     return _xdg_root("XDG_CONFIG_HOME", (".config",)) / _LEGACY_DIRNAME

@@ -18,13 +18,15 @@ ENTRY:
   Optional `trusted_macros: [PAUSE, START_PRINT]` names macros (commands whose bodies the
   bounds check cannot see) known to keep the head on the bed; any other macro in a G-code
   FAILs print-preflight, so `3d printer start` needs --force for it.
+  Optional `watch: {tg: true, steer: <omp session>, exec: CMD, min_severity: warning, ...}`
+  configures `3d printer watch` for this printer (keys: printer_ops/watch_run.py WATCH_KEYS).
 
 Only devices listed here are ever contacted — no LAN discovery (issue #62 network modes).
 """
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -65,6 +67,7 @@ class Device:
     ws_port: int | None = None  # creality-stock only: WebSocket port (default 9999)
     axis_limits: Limits | None = None  # real X/Y travel ((xmin, xmax), (ymin, ymax)), for print-preflight
     trusted_macros: frozenset[str] = frozenset()  # macros print-preflight may treat as staying on the bed
+    watch: dict[str, Any] = field(default_factory=dict, hash=False, compare=False)  # `3d printer watch` settings
 
 
 def user_path() -> Path:
@@ -135,8 +138,12 @@ def _parse(path: Path, data: Any) -> dict[str, Device]:
         model = spec.get("model")
         limits = _axis_limits(spec["axis_limits"], name, path) if "axis_limits" in spec else None
         trusted = _trusted_macros(spec["trusted_macros"], name, path) if "trusted_macros" in spec else frozenset()
+        watch = spec.get("watch") or {}
+        if not isinstance(watch, dict):
+            raise InvalidArgument(f"{name}.watch", str(watch), ["a mapping, e.g. {tg: true, min_severity: warning}"],
+                                  command="printer", extra=f"Fix {path}.")
         out[name] = Device(name, adapter, host, port, str(model) if model else None, path, ws_port, limits,
-                           trusted)
+                           trusted, dict(watch))
     return out
 
 
