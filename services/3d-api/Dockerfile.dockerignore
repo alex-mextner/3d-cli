@@ -1,0 +1,8 @@
+# Build context is the repo root; ship only what 3d-api needs.
+*
+!bin/3d
+!lib/
+!fleet/
+!pyproject.toml
+**/__pycache__
+**/*.pyc

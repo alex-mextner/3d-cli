@@ -1,0 +1,7 @@
+[Unit]
+Description=PrintOps: snapshot the PrintOps + Spoolman SQLite DBs into Home Assistant's backed-up config dir
+Documentation=https://github.com/alex-mextner/3d-cli/blob/main/services/3d-api/README.md
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/docker exec printops-api 3d printops backup
