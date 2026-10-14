@@ -83,6 +83,10 @@ def _get(
         )
         r = conn.getresponse()
         return r.status, r.read(), {k.lower(): v for k, v in r.getheaders()}
+    except http.client.HTTPException as exc:
+        # IncompleteRead (monitor.jpg rewritten mid-response) etc. are not OSErrors; callers
+        # retry/wrap OSError only, so convert here instead of crashing the live loop.
+        raise OSError(f"{type(exc).__name__}: {exc}") from exc
     finally:
         conn.close()
 

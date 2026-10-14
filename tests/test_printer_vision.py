@@ -467,3 +467,18 @@ def test_printer_vision_routes_to_tool(
     assert calls == [
         ("numpy,opencv-python-headless,onnxruntime", "vision_detect.py", expected)
     ]
+
+
+def test_get_turns_http_protocol_errors_into_oserror(monkeypatch: pytest.MonkeyPatch) -> None:
+    import http.client
+
+    class Conn:
+        def __init__(self, *a: Any, **k: Any) -> None: ...
+        def request(self, *a: Any, **k: Any) -> None: ...
+        def getresponse(self) -> Any:
+            raise http.client.IncompleteRead(b"\xff\xd8", 100)
+        def close(self) -> None: ...
+
+    monkeypatch.setattr(http.client, "HTTPConnection", Conn)
+    with pytest.raises(OSError, match="IncompleteRead"):
+        vision._get("http://127.0.0.1:1/x.jpg", 1.0)
