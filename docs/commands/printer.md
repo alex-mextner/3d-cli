@@ -173,6 +173,10 @@ stored 165–168 bytes more than it received
 ([#99](https://github.com/alex-mextner/3d-cli/issues/99)). The stored size is always compared
 with the local file.
 
+A rooted K1 with the Creality Helper Script runs Moonraker on `:7125` and can use the
+`moonraker` adapter instead. The stock `:80`/`:9999` stack keeps running next to it. See
+[K1 SE: root + Helper Script](../printers/k1se-root-upgrade.md).
+
 ## Watching printers
 
 `3d printer watch` keeps a WebSocket open to each printer and turns what it pushes into
