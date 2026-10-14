@@ -95,13 +95,16 @@ def test_cancel_after_macro_error_names_the_macro() -> None:
     assert "INNER_PREEXTRUDE_FILAMENT" in ev[0].data["reason"]
 
 
-def test_homing_lost_while_paused_is_critical_once() -> None:
+def test_homing_lost_while_paused_is_critical_once_after_confirmation() -> None:
     d, _ = started()
     d.on_status({"print_stats": {"state": "paused"}}, 1010.0)
-    ev = d.on_status({"toolhead": {"homed_axes": ""}}, 1020.0)
+    assert d.on_status({"toolhead": {"homed_axes": ""}}, 1020.0) == []    # held
+    assert d.tick(1025.0) == []
+    ev = d.tick(1030.0)
     assert kinds(ev) == [("homing_lost", CRITICAL)]
     assert "XYZ" in ev[0].text and "re-home" in ev[0].text
-    assert d.on_status({"toolhead": {"homed_axes": "x"}}, 1030.0) == []
+    assert d.on_status({"toolhead": {"homed_axes": "x"}}, 1040.0) == []
+    assert d.tick(1060.0) == []
 
 
 def test_homing_lost_found_at_watch_start_while_paused() -> None:
@@ -117,9 +120,41 @@ def test_homing_is_not_an_anomaly_when_idle() -> None:
 def test_bed_target_dropped_to_zero_while_paused() -> None:
     d, _ = started()
     d.on_status({"print_stats": {"state": "paused"}}, 1010.0)
-    ev = d.on_status({"heater_bed": {"target": 0.0}}, 1020.0)
+    assert d.on_status({"heater_bed": {"target": 0.0}}, 1020.0) == []
+    ev = d.on_status({"heater_bed": {"temperature": 60.0}}, 1031.0)
     assert kinds(ev) == [("bed_off", WARNING)]
     assert "was 65C" in ev[0].text
+
+
+def test_bed_off_mid_print_fires_after_confirmation() -> None:
+    d, _ = started()  # printing at 62%
+    assert d.on_status({"heater_bed": {"target": 0.0}}, 1010.0) == []
+    assert kinds(d.tick(1020.0)) == [("bed_off", WARNING)]
+
+
+def test_bed_off_cleared_within_the_delay_is_dropped() -> None:
+    d, _ = started()
+    d.on_status({"heater_bed": {"target": 0.0}}, 1010.0)
+    d.on_status({"heater_bed": {"target": 65.0}}, 1015.0)
+    assert d.tick(1030.0) == []
+
+
+@pytest.mark.parametrize("end", ["complete", "cancelled", "standby"])
+def test_moonraker_end_macro_bed_off_and_motors_off_then_job_end_is_silent(end: str) -> None:
+    d, _ = started()  # printing at 62%: PRINT_END/CANCEL_PRINT runs before the state changes
+    out = d.on_status({"heater_bed": {"target": 0.0}}, 1010.0)
+    out += d.on_status({"toolhead": {"homed_axes": ""}}, 1011.0)
+    out += d.on_status({"print_stats": {"state": end}}, 1013.0)
+    out += d.tick(1030.0) + d.tick(1060.0)
+    assert [k for k, _ in kinds(out)] == ["state"]
+
+
+def test_moonraker_end_of_print_at_full_progress_is_silent_even_if_state_lags() -> None:
+    d, _ = started()
+    d.on_status({"virtual_sdcard": {"progress": 1.0, "file_position": 9281802}}, 1010.0)
+    out = d.on_status({"heater_bed": {"target": 0.0}, "toolhead": {"homed_axes": ""}}, 1011.0)
+    out += d.tick(1030.0)
+    assert out == []
 
 
 def test_cold_bed_found_at_watch_start_while_paused() -> None:
@@ -277,11 +312,75 @@ def test_k1_pause_error_and_homing() -> None:
     assert kinds(d.on_push(k1(), 1000.0)) == [("snapshot", INFO)]
     ev = d.on_push({"state": 5, "deviceState": 0}, 1010.0)
     assert kinds(ev) == [("state", WARNING)] and "layer 40/120" in ev[0].text
-    ev = d.on_push({"autohome": "X:0 Y:0 Z:0"}, 1020.0)
+    assert d.on_push({"autohome": "X:0 Y:0 Z:0"}, 1020.0) == []
+    ev = d.on_push({"layer": 40}, 1031.0)
     assert kinds(ev) == [("homing_lost", CRITICAL)]
-    ev = d.on_push({"err": {"errcode": 2052, "key": 12, "value": "nozzle"}}, 1030.0)
+    ev = d.on_push({"err": {"errcode": 2052, "key": 12, "value": "nozzle"}}, 1040.0)
     assert ("exception", CRITICAL) in kinds(ev)
     assert "2052" in ev[0].text
+
+
+def test_k1_end_print_at_100_percent_is_silent() -> None:
+    """END_PRINT on the K1 SE: bed target 0 and M84 while state is still 1 at 100 %."""
+    d = CrealityDetector("k1se")
+    d.on_push(k1(printProgress=99), 1000.0)
+    out = d.on_push({"printProgress": 100, "targetBedTemp0": 0}, 1010.0)
+    out += d.on_push({"autohome": "X:0 Y:0 Z:0"}, 1011.0)
+    out += d.on_push({"state": 2, "deviceState": 0}, 1012.0)
+    out += d.tick(1030.0)
+    assert kinds(out) == [("state", INFO)] and "COMPLETE" in out[0].text
+
+
+def test_k1_cancel_macro_below_end_progress_is_silent_when_the_job_ends() -> None:
+    d = CrealityDetector("k1se")
+    d.on_push(k1(), 1000.0)  # printing at 37 %
+    out = d.on_push({"targetBedTemp0": 0, "autohome": "X:0 Y:0 Z:0"}, 1010.0)
+    out += d.on_push({"state": 4, "deviceState": 0}, 1014.0)
+    out += d.tick(1030.0)
+    assert [k for k, _ in kinds(out)] == ["state"]
+
+
+def test_k1_bed_off_mid_print_still_fires() -> None:
+    d = CrealityDetector("k1se")
+    d.on_push(k1(), 1000.0)
+    assert d.on_push({"targetBedTemp0": 0}, 1010.0) == []
+    assert kinds(d.tick(1021.0)) == [("bed_off", WARNING)]
+
+
+def k1_starting() -> CrealityDetector:
+    """A K1 that this watcher saw go idle -> printing (START_PRINT running, 0 %)."""
+    d = CrealityDetector("k1se")
+    d.on_push(k1_state(0, 0), 1000.0)
+    ev = d.on_push({"state": 1, "deviceState": 1, "printFileName": "/usr/data/printer_data/gcodes/k1_ovl1_v4.gcode",
+                    "printProgress": 0}, 1010.0)
+    assert "started printing" in ev[0].text
+    return d
+
+
+def test_k1_start_print_zeroing_targets_for_30s_is_silent() -> None:
+    """K1 stock START_PRINT zeroes bed and nozzle targets while probing, ~30 s later 60/225 again."""
+    d = k1_starting()
+    out = d.on_push({"targetBedTemp0": 0, "targetNozzleTemp": 0}, 1020.0)
+    out += d.tick(1035.0)
+    out += d.on_push({"targetBedTemp0": 60, "targetNozzleTemp": 225}, 1050.0)
+    out += d.tick(1200.0)
+    assert out == []
+
+
+def test_k1_bed_off_held_through_the_start_phase_still_fires() -> None:
+    d = k1_starting()
+    assert d.on_push({"targetBedTemp0": 0}, 1020.0) == []
+    assert d.tick(1080.0) == []                       # 60 s: still inside the start hold
+    assert kinds(d.tick(1111.0)) == [("bed_off", WARNING)]
+
+
+def test_start_phase_by_time_since_started_even_above_start_progress() -> None:
+    d = MoonrakerDetector("u1")
+    d.on_status(u1_ws_status("standby"), 1000.0)
+    d.on_status({"print_stats": {"state": "printing"}, "virtual_sdcard": {"progress": 0.05}}, 1010.0)
+    assert d.on_status({"heater_bed": {"target": 0.0}}, 1100.0) == []
+    assert d.tick(1120.0) == []                       # a mid-print hold (10 s) would have fired
+    assert kinds(d.tick(1191.0)) == [("bed_off", WARNING)]
 
 
 def test_k1_filament_sensor_change_while_printing() -> None:
@@ -617,7 +716,7 @@ def test_moonraker_stream_end_to_end_is_read_only(fake_ws: FakeMoonrakerWS, tmp_
     got: list[Event] = []
     stop = threading.Event()
     hb = watch_run.Heartbeat(tmp_path / "hb.json")
-    st = watch_run.stream_for(dev, got.append, stop, hb, WatchLimits())
+    st = watch_run.stream_for(dev, got.append, stop, hb, WatchLimits(confirm_s=0))
     st.start()
     _wait_for(lambda: any(e.kind == "bed_off" for e in got))
     stop.set()
@@ -707,9 +806,10 @@ def test_cli_watch_duration_prints_jsonl(fake_ws: FakeMoonrakerWS, env: Path,
     p.write_text(f"u1: {{adapter: moonraker, host: 127.0.0.1, port: {fake_ws.port}}}\n")
     assert watch_run.run(["u1", "--duration", "1.5", "--min-severity", "warning"]) == 0
     rows = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
-    assert [r["kind"] for r in rows] == ["exception", "state", "gcode_error", "homing_lost", "bed_off"]
+    # homing_lost / bed_off are held 10 s (end-macro confirmation, #190): a 1.5 s run does not reach them
+    assert [r["kind"] for r in rows] == ["exception", "state", "gcode_error"]
     beat = json.loads((env.parent / "state" / "3d-cli" / "watch" / "u1.json").read_text())
-    assert beat["sinks"]["stdout"]["delivered"] == 5
+    assert beat["sinks"]["stdout"]["delivered"] == 3
 
 
 def test_write_devices_fixture_still_loads(env: Path) -> None:

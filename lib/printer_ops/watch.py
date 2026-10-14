@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import datetime
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -79,6 +80,19 @@ class WatchLimits:
     drift_c: float = 15.0          # after reaching: off target by more than this ...
     drift_hold_s: float = 60.0     # ... for this long is a drift
     milestones: tuple[float, ...] = ()  # progress fractions (0..1) to report, e.g. (0.5, 0.9)
+    # A job's end macro (END_PRINT / PRINT_END / CANCEL_PRINT) turns the bed off and disables the
+    # motors (M84) while the firmware still says printing/paused. Bed-off and homing-lost seen
+    # during a job are therefore held this long and dropped if the job ends meanwhile, and
+    # ignored outright at or above `end_progress`.
+    confirm_s: float = 10.0
+    end_progress: float = 0.99
+    # The start macro does the same in reverse: K1 stock START_PRINT zeroes the bed and nozzle
+    # targets for ~30 s of probing/calibration and homes again. In the start phase (progress at
+    # most `start_progress`, or less than `start_phase_s` after "started printing") the hold is
+    # `start_confirm_s`, and a target restored or axes re-homed meanwhile drops the event.
+    start_confirm_s: float = 90.0
+    start_progress: float = 0.01
+    start_phase_s: float = 600.0
 
 
 @dataclass
@@ -117,6 +131,13 @@ def _fmt_t(v: float | None) -> str:
     return "-" if v is None else f"{v:.0f}"
 
 
+def _heater_off(name: str) -> Callable[[Frame], bool]:
+    """Still-true check for a held bed_off: the heater's target is still 0 (or gone)."""
+    def check(f: Frame) -> bool:
+        return not (f.heaters.get(name) or (None, None))[1]
+    return check
+
+
 class _Detector:
     """Generic, firmware-independent rules over successive Frames."""
 
@@ -134,6 +155,9 @@ class _Detector:
         self.connected: bool | None = None
         self.last_message: float | None = None
         self._job_state: str | None = None  # last printing/paused/idle/... state (never unknown/busy)
+        # kind -> (detected at, hold seconds, event, still-true check): job-time events awaiting confirmation
+        self._held: dict[str, tuple[float, float, Event, Callable[[Frame], bool]]] = {}
+        self._job_started: float | None = None  # when this watcher saw the job start printing
 
     # ---- helpers ------------------------------------------------------------------------
     def _context(self, f: Frame | None = None) -> dict[str, Any]:
@@ -194,6 +218,32 @@ class _Detector:
         out += self._homing_rules(prev, f, now)
         out += self._heater_rules(prev, f, now)
         out += self._progress_rules(prev, f, now)
+        out += self._release_held(now)
+        return out
+
+    def _hold(self, kind: str, event: Event, still: Callable[[Frame], bool], f: Frame, now: float,
+              first: bool) -> list[Event]:
+        """A job-time anomaly: report at once when found at watch start (a steady state, not a
+        start/end macro), drop it at the very end of a print, otherwise confirm it after the hold."""
+        lim = self.limits
+        if first:
+            return [event]
+        if f.state == PRINTING and f.progress is not None and f.progress >= lim.end_progress:
+            return []
+        starting = (f.progress is None or f.progress <= lim.start_progress
+                    or (self._job_started is not None and now - self._job_started < lim.start_phase_s))
+        self._held[kind] = (now, lim.start_confirm_s if starting else lim.confirm_s, event, still)
+        return []
+
+    def _release_held(self, now: float) -> list[Event]:
+        out: list[Event] = []
+        f = self.frame
+        for kind, (since, hold_s, event, still) in list(self._held.items()):
+            if f is None or f.state not in JOB_ACTIVE or not still(f):
+                del self._held[kind]  # the job ended (end/cancel macro) or the condition cleared
+            elif now - since >= hold_s:
+                del self._held[kind]
+                out.append(event)
         return out
 
     def _snapshot_event(self, f: Frame, now: float) -> Event:
@@ -227,6 +277,7 @@ class _Detector:
                 return [self._state_event(before, f, INFO, "resumed printing", "", now)]
             self._milestones_done.clear()
             self._reason = None
+            self._job_started = now
             return [self._state_event(before, f, INFO, "started printing", "", now)]
         if f.state == PAUSED:
             return [self._state_event(before, f, WARNING, "PAUSED" + why, "check the camera, then resume or cancel", now)]
@@ -257,10 +308,13 @@ class _Detector:
             return []
         was = prev.homed if prev is not None else None
         if prev is not None and (was is None or set("xyz") - set(was.lower())):
-            return []  # already reported (or never known as homed)
-        return [self._event("homing_lost", CRITICAL, f"{f.state} but axes {''.join(lost).upper()} are NOT homed "
+            return []  # already reported or held (or never known as homed)
+        event = self._event("homing_lost", CRITICAL, f"{f.state} but axes {''.join(lost).upper()} are NOT homed "
                             f"(homed_axes {f.homed!r})", hint="do not resume blindly: re-home first (Z/X crash risk)",
-                            now=now, data={"homed_axes": f.homed, "was": was})]
+                            now=now, data={"homed_axes": f.homed, "was": was})
+        return self._hold("homing_lost", event, lambda fr: bool(fr.homed is not None
+                                                                and set("xyz") - set(fr.homed.lower())),
+                          f, now, first=prev is None)
 
     def _heater_rules(self, prev: Frame | None, f: Frame, now: float) -> list[Event]:
         out: list[Event] = []
@@ -277,7 +331,9 @@ class _Detector:
             if tgt != h.target:
                 old = h.target
                 if self._is_bed(name) and old > 0 and tgt == 0 and f.state in JOB_ACTIVE:
-                    out.append(self._bed_off_event(name, old, now))
+                    out += self._hold("bed_off", self._bed_off_event(name, old, now),
+                                      _heater_off(name),
+                                      f, now, first=False)
                 h.target, h.since, h.reached, h.off_since = tgt, now, False, None
                 h.reach_alerted = h.drift_alerted = False
             if tgt <= 0 or temp is None:
@@ -359,7 +415,7 @@ class _Detector:
         """Time-based checks between pushes (stall, heaters that never report again)."""
         if self.frame is None:
             return []
-        return self._heater_rules(self.frame, self.frame, now) + self._stall_check(now)
+        return self._heater_rules(self.frame, self.frame, now) + self._stall_check(now) + self._release_held(now)
 
     def on_connection(self, up: bool, reason: str, now: float) -> list[Event]:
         was = self.connected
