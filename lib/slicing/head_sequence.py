@@ -29,6 +29,8 @@ import zipfile
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
 
+from gcode_labels import LAYER_MARKERS, ObjectLabels, undecorated
+
 # Bambu emits T255 / T1000 as pseudo tool changes; real heads are below this.
 _MAX_HEAD_INDEX = 255
 _TOOL_RE = re.compile(r"^T(\d+)")
@@ -37,7 +39,6 @@ _PLATER_ID_RE = re.compile(rb'key="plater_id"\s+value="(\d+)"', re.IGNORECASE)
 # object (~144 combinations), so this only rejects adversarial/garbled patterns.
 _MAX_PHASE_COMBINATIONS = 100_000
 _EXTRUDE_RE = re.compile(r"E[\d.]")
-_DECORATION_RE = re.compile(r"_id_\d+_copy_\d+$")
 
 
 @dataclass
@@ -119,23 +120,23 @@ def read_object_extruders(zf: zipfile.ZipFile) -> dict[str, list[int]]:
 
 def heads_by_layer(lines: Iterable[str]) -> dict[str, dict[int, set[int]]]:
     """Object name -> layer index -> 1-based heads that extruded with XY motion on that layer."""
-    tool, layer, cur = 1, -1, None  # single-head printers never emit T
+    tool, layer = 1, -1  # single-head printers never emit T
+    labels = ObjectLabels()
     seen: dict[str, dict[int, set[int]]] = collections.defaultdict(
         lambda: collections.defaultdict(set)
     )
-    for line in lines:
-        if line.startswith(";LAYER_CHANGE"):
+    for raw in lines:
+        line = raw.lstrip()
+        if line.startswith(LAYER_MARKERS):
             layer += 1
         elif (m := _TOOL_RE.match(line)) and int(m.group(1)) < _MAX_HEAD_INDEX:
             tool = int(m.group(1)) + 1
-        elif line.startswith("EXCLUDE_OBJECT_START"):
-            cur = line.split("NAME=", 1)[1].strip() if "NAME=" in line else None
-        elif line.startswith("EXCLUDE_OBJECT_END"):
-            cur = None
-        elif cur and line.startswith("G1"):
+        elif labels.feed(line):
+            continue
+        elif labels.current and line.startswith("G1"):
             code = line.split(";", 1)[0]
             if _EXTRUDE_RE.search(code) and ("X" in code or "Y" in code):
-                seen[cur][layer].add(tool)
+                seen[labels.current][layer].add(tool)
     return seen
 
 
@@ -155,13 +156,13 @@ def _alnum_prefix_ends(gname: str, n: str) -> bool:
 
 
 def _match_object(gname: str, objs: dict[str, list[int]]) -> str | None:
-    """G-code labels decorate project names (`<name>_id_0_copy_0`, spaces as `_`). An exact
-    match of the undecorated label wins; otherwise the LONGEST project name whose
-    alphanumerics prefix the label's and end at a separator, so neither `AB_id_0` nor
-    `A1_id_0` is ever attributed to a sibling object `A`."""
-    plain = _DECORATION_RE.sub("", gname)
+    """G-code labels decorate project names (`<name>_id_0_copy_0` with spaces as `_`, Bambu's
+    `<name> id:0 copy 0`). An exact match of the undecorated label wins; otherwise the LONGEST
+    project name whose alphanumerics prefix the label's and end at a separator, so neither
+    `AB_id_0` nor `A1_id_0` is ever attributed to a sibling object `A`."""
+    plain = undecorated(gname)
     for k in objs:
-        if k.replace(" ", "_") == plain:
+        if plain in (k, k.replace(" ", "_")):
             return k
     best: str | None = None
     best_len = 0
@@ -240,7 +241,7 @@ def check(project_3mf: str, gcode: str) -> HeadSequenceReport:
             ObjectResult(
                 "(G-code)",
                 "FAIL",
-                detail="no extrusion inside EXCLUDE_OBJECT labels; cannot attribute heads",
+                detail="no extrusion inside object labels; cannot attribute heads",
             )
         )
     matched: set[str] = set()

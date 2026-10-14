@@ -41,8 +41,9 @@ Options:
                            other bed axis: x for y<V/all, y for x<V)
   --openings [OBJ:]FILE    JSON [[u0, u1, z0, z1], ...]: openings (windows) where short
                            bridges are allowed
-  --gcode PLATE.gcode      also check the sliced plate (objects from EXCLUDE_OBJECT_START;
-                           a file without them is one object named `plate`)
+  --gcode PLATE.gcode      also check the sliced plate (objects from EXCLUDE_OBJECT_START or
+                           Bambu `; start printing object` labels; a file without them is one
+                           object named `plate`)
   --layer MM               layer height (default 0.12)
   --min-area MM2           smallest piece / island reported (default 0.5)
   --bar-span MM            longest bridge allowed in an opening (default 10)

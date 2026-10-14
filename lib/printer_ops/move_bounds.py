@@ -14,8 +14,10 @@ WHAT, on every G0/G1/G2/G3 (absolute or G91-relative XY, G92 offsets; arcs by th
     EXTRUDING path (lines and arcs, not just their points) through `; bed_exclude_area` —
     only on the plate section: from the first layer change to the last object end or last
     slicer-feature move (a final prime tower often follows the last object), skipping
-    `;TYPE:Custom` blocks, because vendor start/end/toolchange G-code parks and purges where
-    it likes. The axis-travel check still covers those.
+    `;TYPE:Custom` blocks (Bambu Studio tags only its end G-code so: there everything
+    outside its object blocks, wipe tower and feature runs, see _BambuMoves), because vendor
+    start/end/toolchange G-code parks and purges where it likes. The axis-travel check still
+    covers those.
   Each known coordinate is checked on its own axis even while the other axis is unknown.
   Arcs given by R, arcs in the XZ/YZ planes (G18/G19) and relative moves from an unknown
   position are counted as UNVERIFIED. Line numbers (`N12 G1 ...*45`), Klipper
@@ -48,6 +50,9 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from gcode_labels import LAYER_MARKERS as _LAYER_MARKERS
+from gcode_labels import ObjectLabels, feature
+
 Range = tuple[float, float]
 Limits = tuple[Range, Range]  # ((xmin, xmax), (ymin, ymax))
 Polygon = list[tuple[float, float]]
@@ -55,7 +60,6 @@ Polygon = list[tuple[float, float]]
 EPS = 1e-6
 _MOVE = re.compile(r"G0*([0-3])(?![\d.])")
 _WORD = re.compile(r"([A-Z])\s*([-+]?(?:\d+\.?\d*|\.\d+))")
-_LAYER_MARKERS = (";LAYER_CHANGE", "; CHANGE_LAYER")
 _LINE_NO = re.compile(r"^[Nn]\d+\s*")
 MAX_CHORDS = 100_000  # chord simulation budget per arc (r * sweep / 1 mm)
 # Commands this checker models itself (they move or change coordinates)
@@ -118,6 +122,8 @@ _INERT = frozenset(
         "EXCLUDE_OBJECT_DEFINE",
         "EXCLUDE_OBJECT_START",
         "EXCLUDE_OBJECT_END",
+        "M624",  # Bambu's EXCLUDE_OBJECT_START / _END (gcode_labels)
+        "M625",
         "SET_VELOCITY_LIMIT",
         "SET_PRESSURE_ADVANCE",
         "SET_PRINT_STATS_INFO",
@@ -285,44 +291,110 @@ class _Plate:
     end: float  # last line of the plate section (inf: to the end of the file)
     typed: bool  # the slicer tags features with `;TYPE:` comments
     config: dict[str, str]
+    bambu: bool = False  # Bambu Studio labels: slicer moves are told by _BambuMoves
+
+
+class _BambuMoves:
+    """Bambu Studio tags only its end G-code `; FEATURE: Custom`, so which moves are the
+    slicer's comes from its own labels: an object block (gcode_labels), the wipe tower, and a
+    `; FEATURE:` run, which a layer change, an object end or the tower end closes (the
+    layer-change timelapse / clog-detect G-code that follows parks at the waste chute). Vendor
+    G-code inside those is not: a tool change's filament change (`; CP TOOLCHANGE START` ..
+    `; CP TOOLCHANGE WIPE`, the trip to the chute) and the firmware-conditional `M622 J<flag>`
+    .. `M623` blocks (timelapse, clog detection), which Bambu also inserts mid-object."""
+
+    __slots__ = ("change", "conditional", "feature", "labels", "tower")
+
+    def __init__(self) -> None:
+        self.labels = ObjectLabels()
+        self.tower = self.change = self.feature = False
+        self.conditional = 0  # open M622 .. M623 blocks
+
+    def feed(self, line: str) -> None:
+        if self.labels.feed(line):
+            if self.labels.current is None:
+                self.feature = False
+            return
+        c0 = line[:1]
+        if c0 in ("M", "m"):
+            word = line.split(";", 1)[0].split(None, 1)[0].upper()
+            if word == "M622":
+                self.conditional += 1
+            elif word == "M623":
+                self.conditional = max(0, self.conditional - 1)
+        elif c0 == ";":
+            if line.startswith(_LAYER_MARKERS):
+                self.feature = False
+            elif (tag := feature(line)) is not None:
+                self.feature = tag != "Custom"
+            elif line.startswith("; WIPE_TOWER_START"):
+                self.tower = True
+            elif line.startswith("; WIPE_TOWER_END"):
+                self.tower = self.feature = False
+            elif line.startswith("; CP TOOLCHANGE START"):
+                self.change = True
+            elif line.startswith("; CP TOOLCHANGE WIPE"):
+                self.change = False
+
+    @property
+    def slicer(self) -> bool:
+        return (
+            not self.change
+            and not self.conditional
+            and (self.labels.current is not None or self.tower or self.feature)
+        )
 
 
 def _scan_plate(path: Path) -> _Plate:
     """Pass 1: where the plate section starts and ends, plus the area config.
 
     The section ends at the later of the last object end and the last move of a slicer
-    feature: a prime tower is often printed AFTER the last EXCLUDE_OBJECT_END on the final
-    layer, and it must stay on the bed too. Vendor G-code is tagged `;TYPE:Custom`."""
+    feature: a prime tower is often printed AFTER the last object on the final layer, and it
+    must stay on the bed too. Vendor G-code is tagged `;TYPE:Custom` (Bambu: _BambuMoves)."""
     first_layer: int | None = None
     last_obj: int | None = None
     last_feature: int | None = None
     ftype: str | None = None
     typed = False
     config: dict[str, str] = {}
+    moves = _BambuMoves()
     with open(path, encoding="utf-8", errors="replace") as fh:
         for n, line in enumerate(fh, 1):
             if line[:1] in (" ", "\t"):
                 line = line.lstrip()
             c0 = line[:1]
+            in_object = moves.labels.current is not None
+            moves.feed(line)
+            if in_object and moves.labels.current is None:
+                last_obj = n
             if c0 == ";":
                 if line.startswith(";TYPE:"):
                     ftype, typed = line[6:].strip(), True
                 elif first_layer is None and line.startswith(_LAYER_MARKERS):
                     first_layer = n
-                elif line.startswith("; stop printing object"):
-                    last_obj = n
                 elif line.startswith(("; printable_area =", "; bed_exclude_area =")):
                     key, _, value = line[1:].partition("=")
                     config.setdefault(key.strip(), value.strip())
-            elif c0 in ("G", "g") or (
-                c0 in ("N", "n") and _LINE_NO.sub("", line)[:1] in ("G", "g")
+            elif (
+                c0 in ("G", "g")
+                or (c0 in ("N", "n") and _LINE_NO.sub("", line)[:1] in ("G", "g"))
+            ) and (
+                first_layer is not None
+                and (
+                    moves.slicer
+                    if moves.labels.bambu
+                    else ftype not in (None, "Custom")
+                )
             ):
-                if first_layer is not None and ftype not in (None, "Custom"):
-                    last_feature = n
-            elif c0 == "E" and line.startswith("EXCLUDE_OBJECT_END"):
-                last_obj = n
+                last_feature = n
     ends = [v for v in (last_obj, last_feature) if v is not None]
-    return _Plate(first_layer, float(max(ends)) if ends else math.inf, typed, config)
+    return _Plate(
+        first_layer,
+        float(max(ends)) if ends else math.inf,
+        typed,
+        config,
+        moves.labels.bambu,
+    )
 
 
 Point = tuple[float, float]
@@ -653,10 +725,13 @@ def check_bounds(path: Path, axis_limits: Limits | None = None) -> BoundsReport:
         if in_plate:
             area([(nx_, ny_)], Move(x, y, nx_, ny_), False, n)
 
+    moves = _BambuMoves()
     with open(path, encoding="utf-8", errors="replace") as fh:
         for n, line in enumerate(fh, 1):
             if line[:1] in (" ", "\t"):
                 line = line.lstrip()
+            if plate.bambu:
+                moves.feed(line)
             c0 = line[:1]
             if c0 == ";":
                 if line.startswith(";TYPE:"):
@@ -672,7 +747,11 @@ def check_bounds(path: Path, axis_limits: Limits | None = None) -> BoundsReport:
             in_plate = (
                 plate.first_layer is not None
                 and plate.first_layer <= n <= plate.end
-                and not (plate.typed and ftype in (None, "Custom"))
+                and (
+                    moves.slicer
+                    if plate.bambu
+                    else not (plate.typed and ftype in (None, "Custom"))
+                )
             )
             word = command_word(line)
             if word is None:
