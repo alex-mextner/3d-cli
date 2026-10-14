@@ -73,12 +73,13 @@ def k1(env: Path) -> Iterator[FakeCreality]:
 
 
 @pytest.fixture()
-def thumbs_ok(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Command tests check printer logic, not thumbnails: pin the thumbnail check to PASS."""
+def gates_ok(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Command tests check printer logic, not the G-code gates with their own tests
+    (thumbnails, overhangs, slicer warnings): pin those to PASS."""
+    monkeypatch.setattr(preflight, "check_thumbnails", lambda p: preflight.Check("thumbnails", "PASS", "stub"))
+    monkeypatch.setattr(preflight, "check_overhangs", lambda p: preflight.Check("overhangs", "PASS", "stub"))
     monkeypatch.setattr(
-        preflight,
-        "check_thumbnails",
-        lambda p: preflight.Check("thumbnails", "PASS", "stub"),
+        preflight, "check_slice_warnings", lambda o, g: preflight.Check("slicer warn", "PASS", "stub")
     )
 
 
@@ -676,7 +677,7 @@ def test_cmd_start_refused_when_file_not_uploaded(
 
 
 def test_cmd_start_refuses_a_same_size_file_with_other_content(
-    moon: FakeMoonraker, env: Path, tmp_path: Path, thumbs_ok: None
+    moon: FakeMoonraker, env: Path, tmp_path: Path, gates_ok: None
 ) -> None:
     """Review #132: a stale/overwritten remote file of the same length must not be started.
     (a) the local file changed after upload: its content-addressed name is no longer there;
@@ -702,7 +703,7 @@ def test_cmd_start_refused_on_preflight_fail_and_forced(
     moon: FakeMoonraker,
     env: Path,
     tmp_path: Path,
-    thumbs_ok: None,
+    gates_ok: None,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     g = gcode(
@@ -730,7 +731,7 @@ def test_cmd_start_happy_path_k1(
     k1: FakeCreality,
     env: Path,
     tmp_path: Path,
-    thumbs_ok: None,
+    gates_ok: None,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     g = gcode(tmp_path, "G28\nG1 X1\n", "roof.gcode")
@@ -746,7 +747,7 @@ def test_cmd_start_happy_path_k1(
 
 
 def test_cmd_start_k1_without_ack_reports_unknown(
-    k1: FakeCreality, env: Path, tmp_path: Path, thumbs_ok: None
+    k1: FakeCreality, env: Path, tmp_path: Path, gates_ok: None
 ) -> None:
     g = gcode(tmp_path, "G28\nG1 X1\n", "roof.gcode")
     k1.files[safe_remote_name(g)] = g.stat().st_size
@@ -761,7 +762,7 @@ def test_cmd_start_failure_is_reported_unknown_not_resent(
     moon: FakeMoonraker,
     env: Path,
     tmp_path: Path,
-    thumbs_ok: None,
+    gates_ok: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     g = gcode(tmp_path)
@@ -783,7 +784,7 @@ def test_cmd_start_status_failure_after_ack_is_unknown(
     moon: FakeMoonraker,
     env: Path,
     tmp_path: Path,
-    thumbs_ok: None,
+    gates_ok: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Review #132: the start was acknowledged, then the printer went quiet — still UNKNOWN."""
@@ -826,7 +827,7 @@ def test_cmd_preflight_with_printer_fails_on_colour(
     moon: FakeMoonraker,
     env: Path,
     tmp_path: Path,
-    thumbs_ok: None,
+    gates_ok: None,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     from commands.print_preflight import run
@@ -1231,7 +1232,7 @@ def test_cmd_start_k1_refuses_a_plate_that_leaves_the_axis(
     k1: FakeCreality,
     env: Path,
     tmp_path: Path,
-    thumbs_ok: None,
+    gates_ok: None,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     g = gcode(
@@ -1625,7 +1626,7 @@ def test_trusted_macros_come_from_the_device_config(env: Path, tmp_path: Path) -
 
 
 def test_cmd_start_refuses_an_untrusted_macro_without_force(
-    moon: FakeMoonraker, env: Path, tmp_path: Path, thumbs_ok: None
+    moon: FakeMoonraker, env: Path, tmp_path: Path, gates_ok: None
 ) -> None:
     g = gcode(tmp_path, U1_GCODE.replace("G28\n", "G28\nWIPE_NOZZLE\n"))
     moon.put(safe_remote_name(g), g.read_bytes())
@@ -1681,7 +1682,7 @@ def test_cmd_start_unknown_state_after_ack_is_unknown(
     moon: FakeMoonraker,
     env: Path,
     tmp_path: Path,
-    thumbs_ok: None,
+    gates_ok: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     g = gcode(tmp_path)
@@ -1707,7 +1708,7 @@ def test_cmd_start_preflights_the_same_bytes_it_compared(
     moon: FakeMoonraker,
     env: Path,
     tmp_path: Path,
-    thumbs_ok: None,
+    gates_ok: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Review #132: the slicer rewrites FILE after the hash check; preflight must still see the

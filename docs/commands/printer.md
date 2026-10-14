@@ -41,7 +41,9 @@ Options:
   `3d printer start u1 out/part.gcode --yes`
 - `--force` — start even when preflight reports FAIL; the failing checks are printed as `FORCED`.
   `3d printer start k1se out/roof.gcode --yes --force`
-- `--source-3mf FILE` — the 3MF the G-code was sliced from; preflight then runs `3d halves-check`.
+- `--source-3mf FILE` — the project 3MF the G-code was sliced from; preflight then runs the
+  head-sequence check on it and `3d halves-check` (without it, the head-sequence check uses
+  `NAME.3mf` next to `NAME.gcode` when present).
   `3d printer start u1 out/base.gcode --yes --source-3mf print/base.3mf`
 
 ## Examples
@@ -114,8 +116,11 @@ with the local file.
    matches a stale upload; a missing file or a size difference refuses the start. Where the
    firmware can return the file (Moonraker), `start` reads it back and compares the SHA-256;
    different bytes refuse the start. The state is read again right before the start request.
-4. `start` runs `3d print-preflight` — including the move-bounds check against the printer's
-   axis limits and the macro check ([`3d gcode-bounds`](gcode-bounds.md)); a FAIL blocks the
+4. `start` runs `3d print-preflight` — every G-code gate: the move-bounds check against the
+   printer's axis limits and the macro check ([`3d gcode-bounds`](gcode-bounds.md)), the
+   overhang check ([`3d gcode-overhangs`](gcode-overhangs.md)), the slicer-warnings record
+   next to the G-code ([`3d slice-warnings`](slice-warnings.md)), the head-sequence check
+   (project 3MF from `--source-3mf` or next to the G-code), thumbnails; a FAIL blocks the
    start unless `--force`.
 5. `upload` refuses while a Creality printer is busy (the firmware does not protect the
    running job), and on any printer refuses to overwrite the file being printed.

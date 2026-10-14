@@ -43,6 +43,7 @@ rendering, slicing support, and verification:
 - `fit_camera_math.py`
 - `fit_check.py`
 - `frame_check.py`
+- `gcode_overhangs.py`
 - `gcode_thumbnails.py`
 - `export_formats.py`
 - `import_formats.py`
@@ -71,7 +72,8 @@ Target package: `lib/geometry/`, with subpackages only when a real boundary appe
   `moonraker.py` (Klipper/Moonraker, Snapmaker U1), `creality.py` (Creality K1 stock
   firmware), `devices.py` (`printer-devices.yaml`), `preflight.py` (pre-print checks),
   `move_bounds.py` (G-code moves and arc extremes vs axis travel / printable area).
-- `lib/slicing/head_sequence.py` — per-object, per-layer toolhead check of sliced G-code against the project 3MF's mixed-filament patterns (`slice-check --check head-sequence`; `preflight_check()` exposed for the future print-preflight `head_sequence` check, #96).
+- `lib/slicing/head_sequence.py` — per-object, per-layer toolhead check of sliced G-code against the project 3MF's mixed-filament patterns (`slice-check --check head-sequence`; `preflight_check()` is the `head seq` gate of `print-preflight`, #103).
+- `lib/slicing/slice_warnings.py` — the slicer's warnings for one G-code (Orca-family CLI log, result.json, slice_info of a sliced 3MF) in `NAME.slice-warnings.json` with the G-code's SHA-256 and a reason per accepted warning; backs `3d slice-warnings` and the `slicer warn` gate of `print-preflight`.
 
 Target package: `lib/slicing/` for slicer orchestration, dry-run print planning, printer
 job state, and future sender integrations.
@@ -161,7 +163,8 @@ Every current root Python module is listed here so future additions are intentio
 - `export_formats.py` — export format registry, selector parsing, and dry-run export planning.
 - `fit_camera.py` — camera fitting implementation.
 - `fit_camera_math.py` — import-light camera pose and proof-status math helpers.
-- `fit_check.py` — already-printed insert vs its socket: printed-size lock and per-layer clearance (manifold3d slices, shapely distances); backs `3d fit-check`.
+- `fit_check.py` — already-printed insert vs its socket: printed-size lock, per-layer clearance (manifold3d slices, shapely distances) and the open path along the insertion direction; backs `3d fit-check`.
+- `gcode_overhangs.py` — extrusion printed on nothing per object and layer of a sliced G-code (numpy/scipy raster of each layer's carrier, sparse reach/bridge/step-out tests on the pixels that stick out, layers split over forked workers); backs `3d gcode-overhangs` and the `overhangs` gate of `print-preflight`.
 - `gcode_thumbnails.py` — printer-screen thumbnail blocks in G-code: stdlib-only check against the profile's `thumbnails` spec, Orca-format block writer, z-buffered toolpath preview render (numpy); backs `3d gcode-thumbnails`.
 - `frame_check.py` — render framing checks.
 - `hardware.py` — local machine and toolchain capability reporting.

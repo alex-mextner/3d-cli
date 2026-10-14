@@ -245,24 +245,32 @@ def splice(path: str, text: str, out: str | None = None, expect: os.stat_result 
     Mode and mtime of the source are kept: the toolpath is the same slice, and a staleness
     check (G-code older than its project) must not be fooled by adding a picture.
     Refuses when the file is not the one `expect` describes, or changes while being copied:
-    a re-slice landing meanwhile must not be overwritten by the old toolpath."""
+    a re-slice landing meanwhile must not be overwritten by the old toolpath.
+    A current NAME.slice-warnings.json (`3d slice-warnings`) follows the edit: the toolpath,
+    and so the slicer's warnings, are unchanged."""
+    import hashlib
+
     dst = out or path
+    src_sha, dst_sha = hashlib.sha256(), hashlib.sha256()
     with open(path, "rb") as src:
         st = os.fstat(src.fileno())
         if expect is not None and _ident(st) != _ident(expect):
             raise ThumbnailError(f"{path} changed since it was checked; run again")
         head = src.read(HEAD_BYTES)
+        src_sha.update(head)
         if replace:
             head = strip_blocks(head)
         off = insert_offset(head)
         fd, tmp = tempfile.mkstemp(prefix=".thumbs-", dir=os.path.dirname(os.path.abspath(dst)))
         try:
             with os.fdopen(fd, "wb") as w:
-                w.write(head[:off])
-                w.write(text.encode("ascii"))
-                w.write(head[off:])
+                for part in (head[:off], text.encode("ascii"), head[off:]):
+                    w.write(part)
+                    dst_sha.update(part)
                 while chunk := src.read(1 << 22):
                     w.write(chunk)
+                    src_sha.update(chunk)
+                    dst_sha.update(chunk)
             os.chmod(tmp, st.st_mode & 0o7777)
             os.utime(tmp, ns=(st.st_atime_ns, st.st_mtime_ns))
             if _ident(os.stat(path)) != _ident(st):
@@ -272,6 +280,11 @@ def splice(path: str, text: str, out: str | None = None, expect: os.stat_result 
             if os.path.exists(tmp):
                 os.unlink(tmp)
             raise
+    from pathlib import Path
+
+    from slicing.slice_warnings import follow_edit
+
+    follow_edit(Path(path), Path(dst), src_sha.hexdigest(), dst_sha.hexdigest(), "gcode-thumbnails add")
 
 
 # ---------------------------------------------------------------- images
