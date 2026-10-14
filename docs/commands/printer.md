@@ -13,7 +13,7 @@ Epic: [#90](https://github.com/alex-mextner/3d-cli/issues/90).
 3d printer list
 3d printer status NAME [--json] [--secs S]
 3d printer upload NAME FILE.gcode [--as REMOTE]
-3d printer start NAME FILE.gcode --yes [--as REMOTE] [--source-3mf X.3mf] [--force] [--secs S]
+3d printer start NAME FILE.gcode --yes [--as REMOTE] [--source-3mf X.3mf] [--bridge-max MM] [--force] [--secs S]
 3d printer cancel NAME --yes
 3d printer watch NAME... | --all [--tg] [--steer SESSION] [--exec CMD] [--min-severity LEVEL] ...
 3d printer vision NAME [--interval S] [--once] [--dry-run] ...  |  vision eval ...  |  vision fetch-model
@@ -43,6 +43,8 @@ Options:
   `3d printer upload k1se "out/roof left.gcode" --as roof_left.gcode`
 - `--yes` — required by `start` and `cancel`: you confirm the physical action.
   `3d printer start u1 out/part.gcode --yes`
+- `--bridge-max MM` — preflight overhangs gate: longest bridge; overrides the printer's `bridge_max_mm`.
+  `3d printer start u1 out/porch.gcode --yes --bridge-max 25`
 - `--force` — start even when preflight reports FAIL; the failing checks are printed as `FORCED`.
   `3d printer start k1se out/roof.gcode --yes --force`
 - `--source-3mf FILE` — the project 3MF the G-code was sliced from; preflight then runs the
@@ -85,6 +87,7 @@ k1se:
   model: Creality K1 SE     # port defaults to 80, ws_port to 9999
   axis_limits: {x: [-5, 229], y: [-0.5, 227]}
   trusted_macros: [START_PRINT, END_PRINT, PAUSE]
+  bridge_max_mm: 15         # longest clean bridge, from a bridge test print
 ```
 
 `axis_limits` is the real X/Y travel (Klipper `stepper_x`/`stepper_y` `position_min`/`position_max`;
@@ -100,6 +103,10 @@ commands) whose bodies you know keep the head on the bed and leave the coordinat
 (G90/G91, G92, SET_GCODE_OFFSET) as they found them. The bounds check cannot see inside a
 macro, so any macro in the G-code that is not listed makes preflight FAIL and `start` needs
 `--force`. With `--printer A --axis-limits B` only A's list counts.
+
+`bridge_max_mm` is the longest span this printer bridges cleanly (measure it with a bridge test
+print). The preflight overhangs gate counts uncarried runs up to it as bridges; `--bridge-max`
+overrides it, and without either the limit is 15 mm. The gate's line names where the limit came from.
 
 ## Adapters
 

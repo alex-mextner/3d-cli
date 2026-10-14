@@ -22,11 +22,15 @@ ENTRY:
   configures `3d printer watch` for this printer (keys: printer_ops/watch_run.py WATCH_KEYS).
   Optional `resume:` holds the printer-specific values of `3d gcode-resume` (ResumeProfile:
   off-bed purge macro and lengths, travel clearance, start commands); every key is required.
+  Optional `bridge_max_mm: 25` is the longest span this printer bridges cleanly (measure it
+  with a bridge test); the print-preflight overhangs gate uses it unless --bridge-max is
+  given (default 15).
 
 Only devices listed here are ever contacted — no LAN discovery (issue #62 network modes).
 """
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -62,7 +66,8 @@ k1se:
   host: 192.168.0.27
   model: Creality K1 SE
   axis_limits: {{x: [-5, 229], y: [-0.5, 227]}}   # stepper_x/y position_min/max, printer.cfg
-  trusted_macros: [START_PRINT, END_PRINT, PAUSE]  # vendor macros known to stay on the bed"""
+  trusted_macros: [START_PRINT, END_PRINT, PAUSE]  # vendor macros known to stay on the bed
+  bridge_max_mm: 15         # longest clean bridge (mm), from a bridge test print"""
 
 
 class DeviceConfigError(ThreeDError):
@@ -101,6 +106,7 @@ class Device:
     trusted_macros: frozenset[str] = frozenset()  # macros print-preflight may treat as staying on the bed
     resume: ResumeProfile | None = None  # `3d gcode-resume` values
     watch: dict[str, Any] = field(default_factory=dict, hash=False, compare=False)  # `3d printer watch` settings
+    bridge_max_mm: float | None = None  # longest clean bridge, for the print-preflight overhangs gate
 
 
 def user_path() -> Path:
@@ -166,6 +172,13 @@ def _resume(value: Any, name: str, path: Path) -> ResumeProfile:
                          tuple(c.strip() for c in cmds))
 
 
+def _bridge_max(value: Any, name: str, path: Path) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not (value > 0 and math.isfinite(value)):
+        raise InvalidArgument(f"{name}.bridge_max_mm", str(value), ["a number of mm > 0, e.g. 25"],
+                              command="printer", extra=f"Fix {path}.")
+    return float(value)
+
+
 def _parse(path: Path, data: Any) -> dict[str, Device]:
     if data is None:
         return {}
@@ -194,13 +207,14 @@ def _parse(path: Path, data: Any) -> dict[str, Device]:
         model = spec.get("model")
         limits = _axis_limits(spec["axis_limits"], name, path) if "axis_limits" in spec else None
         trusted = _trusted_macros(spec["trusted_macros"], name, path) if "trusted_macros" in spec else frozenset()
+        bridge = _bridge_max(spec["bridge_max_mm"], name, path) if "bridge_max_mm" in spec else None
         resume = _resume(spec["resume"], name, path) if "resume" in spec else None
         watch = spec.get("watch") or {}
         if not isinstance(watch, dict):
             raise InvalidArgument(f"{name}.watch", str(watch), ["a mapping, e.g. {tg: true, min_severity: warning}"],
                                   command="printer", extra=f"Fix {path}.")
         out[name] = Device(name, adapter, host, port, str(model) if model else None, path, ws_port, limits,
-                           trusted, resume, dict(watch))
+                           trusted, resume, dict(watch), bridge)
     return out
 
 

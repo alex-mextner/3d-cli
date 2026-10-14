@@ -24,7 +24,7 @@ from cli.registry import Command
 from errors import GateFailure, InputNotFound, UsageError
 
 USAGE = """3d print-preflight FILE.gcode [--printer NAME] [--axis-limits X0:X1,Y0:Y1|NAME] [--source-3mf FILE.3mf]
-                   [--visible [OBJ:]SPEC]... [--json] [--secs S]
+                   [--visible [OBJ:]SPEC]... [--bridge-max MM] [--json] [--secs S]
   Read-only checks before a print. `3d printer start` runs the same checks and refuses on FAIL.
   Every G-code gate runs; one whose input is missing is SKIP and says what to pass.
 
@@ -39,7 +39,8 @@ USAGE = """3d print-preflight FILE.gcode [--printer NAME] [--axis-limits X0:X1,Y
                through `; bed_exclude_area` (vendor `;TYPE:Custom` blocks exempt)
   macros       every macro the G-code calls is in the printer's trusted_macros
   overhangs    `3d gcode-overhangs`: no object prints more than 100 mm2 on nothing (FAIL);
-               small ceilings and edge step-outs are WARN
+               small ceilings and edge step-outs are WARN; bridges up to --bridge-max, else the
+               printer's bridge_max_mm (--printer / --axis-limits NAME), else 15 mm
   slicer warn  NAME.slice-warnings.json (`3d slice-warnings record`) exists, matches the
                G-code's SHA-256, and every warning in it is accepted with a reason
   head seq     every object prints each layer on the heads its filaments call for (#103);
@@ -54,6 +55,8 @@ Options:
                           from printer-devices.yaml (no network); overrides --printer's limits
   --source-3mf FILE       the project 3MF the G-code was sliced from: head-sequence + halves-check
   --visible [OBJ:]SPEC    visible side for `3d visible-faces --gcode` (x<V, y>V, all; repeatable)
+  --bridge-max MM         longest span the overhangs gate counts as a bridge; overrides the
+                          printer's bridge_max_mm in printer-devices.yaml (default 15)
   --json                  JSON report on stdout
   --secs S                Creality: seconds to listen for pushed state (default 3)
 
@@ -86,7 +89,7 @@ def run(argv: list[str]) -> int:
     i = 0
     while i < len(argv):
         a = argv[i]
-        if a in ("--printer", "--source-3mf", "--secs", "--axis-limits", "--visible"):
+        if a in ("--printer", "--source-3mf", "--secs", "--axis-limits", "--visible", "--bridge-max"):
             if i + 1 >= len(argv):
                 raise UsageError(f"{a} needs a value", command="print-preflight")
             if a == "--visible":
@@ -114,9 +117,10 @@ def run(argv: list[str]) -> int:
 
     from printer_ops.preflight import FAIL, run_preflight
 
-    from printer_ops import adapter_by_name, limits_from_option, trusted_macros_for
+    from printer_ops import adapter_by_name, bridge_max_for, device_for, limits_from_option, trusted_macros_for
 
     status = None
+    device = None if "--printer" in opts else device_for(opts.get("--axis-limits"))
     limits, limits_source = None, "no --printer or --axis-limits given"
     trusted = frozenset() if "--printer" in opts else trusted_macros_for(opts.get("--axis-limits"))
     if "--axis-limits" in opts:
@@ -124,12 +128,14 @@ def run(argv: list[str]) -> int:
     if "--printer" in opts:
         adapter = adapter_by_name(opts["--printer"], secs=opts.get("--secs"), command="print-preflight")
         trusted = adapter.trusted_macros  # this printer's macros only, whatever --axis-limits names
+        device = adapter.device
         status = adapter.status()
         if "--axis-limits" not in opts:
             limits, limits_source = adapter.axis_limits()
 
+    bridge, bridge_source = bridge_max_for(opts.get("--bridge-max"), device, command="print-preflight")
     report = run_preflight(gcode, status=status, source_3mf=source, axis_limits=limits, limits_source=limits_source,
-                           trusted_macros=trusted, visible=visible)
+                           trusted_macros=trusted, visible=visible, bridge_max=bridge, bridge_source=bridge_source)
     print(json.dumps(report.to_json(), indent=1) if "--json" in opts else report.render())
     if report.overall == FAIL:
         raise GateFailure("preflight FAIL", command="print-preflight", silent=True)

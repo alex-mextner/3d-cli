@@ -279,16 +279,21 @@ def _tail(text: str) -> str:
     return (text.strip().splitlines() or ["no output"])[-1]
 
 
-def check_overhangs(gcode: Path) -> Check:
+def check_overhangs(gcode: Path, bridge_max: float | None = None, bridge_source: str = "default") -> Check:
     """`3d gcode-overhangs`: no object prints more than the limit on nothing (FAIL); small
-    ceilings and edge step-outs are WARN, listed per object."""
+    ceilings and edge step-outs are WARN, listed per object. `bridge_source` says where
+    `bridge_max` came from (--bridge-max, the printer's bridge_max_mm, default)."""
     from cli.pyrun import tool_argv
     from errors import MissingDependency
     from gcode_overhangs import format_lines
 
     try:
         r = subprocess.run(
-            tool_argv("numpy,scipy", "gcode_overhangs.py", [str(gcode), "--json"]),
+            tool_argv(
+                "numpy,scipy",
+                "gcode_overhangs.py",
+                [str(gcode), "--json"] + ([] if bridge_max is None else ["--bridge-max", f"{bridge_max:g}"]),
+            ),
             capture_output=True,
             text=True,
             timeout=900,
@@ -305,9 +310,8 @@ def check_overhangs(gcode: Path) -> Check:
             FAIL,
             f"gcode-overhangs could not run (exit {r.returncode}): {_tail(r.stderr)}",
         )
-    return Check(
-        "overhangs", str(payload.get("status", FAIL)), str(payload.get("detail", "")), format_lines(payload)
-    )
+    detail = f"{payload.get('detail', '')} (bridge limit from {bridge_source})"
+    return Check("overhangs", str(payload.get("status", FAIL)), detail, format_lines(payload))
 
 
 def check_slice_warnings(origin: Path, gcode: Path) -> Check:
@@ -573,6 +577,8 @@ def run_preflight(
     trusted_macros: frozenset[str] = frozenset(),
     origin: Path | None = None,
     visible: Sequence[str] = (),
+    bridge_max: float | None = None,
+    bridge_source: str = "default",
 ) -> Report:
     """`limits_source` names where `axis_limits` came from, or why they are unknown.
     `origin` is where the G-code lives when `gcode` is a snapshot copy (`printer start`): the
@@ -587,7 +593,7 @@ def run_preflight(
             check_bounds(gcode, axis_limits), axis_limits, limits_source, trusted_macros
         )
     )
-    report.checks.append(check_overhangs(gcode))
+    report.checks.append(check_overhangs(gcode, bridge_max, bridge_source))
     report.checks.append(check_slice_warnings(origin or gcode, gcode))
     project, project_source = find_project_3mf(origin or gcode, source_3mf)
     report.checks.append(check_head_sequence(gcode, project, project_source))
