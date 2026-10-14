@@ -388,7 +388,9 @@ def _blocked_path(
         if z1 > z0 and not shrunk.is_empty():
             slabs.append(Manifold.extrude(shrunk, z1 - z0).translate((0.0, 0.0, z0)))
 
-    z = lo_z + step
+    # first cut just above the bottom (not a whole step up): a thin undercut right over the
+    # insert's foot would otherwise fall between the bottom and the first slab
+    z = lo_z + min(step, 0.01)
     while z < hi_z:
         # the part of the insert that has passed height z on its way out
         behind = (

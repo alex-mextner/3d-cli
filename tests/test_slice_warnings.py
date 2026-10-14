@@ -131,6 +131,29 @@ def test_an_acceptance_needs_a_reason_and_a_known_id(tmp_path: Path) -> None:
         accept_warning(gcode, "wdeadbeef", "a reason")
 
 
+def test_a_hand_edited_acceptance_without_a_reason_stays_open(tmp_path: Path) -> None:
+    gcode, log, _, _ = _slice(tmp_path)
+    record(gcode, logs=[("slice.log", LOG)])
+    side = sidecar_path(gcode)
+    data = json.loads(side.read_text())
+    for w, acc in zip(data["warnings"], [{"reason": ""}, {"x": "y"}, {"reason": 123}, {"reason": None}], strict=False):
+        w["accepted"] = acc
+    side.write_text(json.dumps(data))
+    status, _, lines = evaluate(gcode)
+    assert status == "FAIL" and all(line.startswith("OPEN ") for line in lines)
+
+
+def test_concurrent_acceptances_are_all_kept(tmp_path: Path) -> None:
+    from concurrent.futures import ProcessPoolExecutor
+
+    gcode, log, _, _ = _slice(tmp_path)
+    rec = record(gcode, logs=[("slice.log", LOG)])
+    with ProcessPoolExecutor(len(rec.warnings)) as pool:
+        list(pool.map(accept_warning, [gcode] * len(rec.warnings), [w.id for w in rec.warnings],
+                      [f"checked {w.id}" for w in rec.warnings]))
+    assert evaluate(gcode)[0] == "PASS"
+
+
 def test_ids_ignore_plate_prefix_and_source_line_of_the_logger() -> None:
     assert warning_id("warning", "plate 1: found NON_CRITICAL slicing warnings: Floating regions") == warning_id(
         "warning", "Floating regions"

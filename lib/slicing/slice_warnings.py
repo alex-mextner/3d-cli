@@ -29,12 +29,16 @@ Stdlib only (print-preflight and `3d slice-warnings` import it in-process).
 from __future__ import annotations
 
 import datetime as _dt
+import fcntl
 import hashlib
 import json
+import os
 import re
+import tempfile
 import xml.etree.ElementTree as ET
 import zipfile
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -217,6 +221,10 @@ def warnings_of(data: dict[str, object]) -> list[SlicerWarning]:
     for w in items if isinstance(items, list) else []:
         if isinstance(w, dict):
             acc = w.get("accepted")
+            # an acceptance counts only with a real reason; a hand-edited or blank one stays open
+            reason = acc.get("reason") if isinstance(acc, dict) else None
+            if not (isinstance(reason, str) and len(" ".join(reason.split())) >= 3):
+                acc = None
             out.append(
                 SlicerWarning(
                     id=str(w.get("id", "")),
@@ -231,9 +239,26 @@ def warnings_of(data: dict[str, object]) -> list[SlicerWarning]:
 
 
 def _write(path: Path, data: dict[str, object]) -> None:
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(data, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
-    tmp.replace(path)
+    fd, name = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)
+    tmp = Path(name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(data, indent=1, ensure_ascii=False) + "\n")
+        tmp.replace(path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+@contextmanager
+def _locked(path: Path) -> Iterator[None]:
+    """Serialise read-modify-write of one sidecar across processes."""
+    with open(path.with_name(path.name + ".lock"), "a") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
 
 
 @dataclass
@@ -340,18 +365,19 @@ def _reason(reason: str) -> str:
 def accept_warning(gcode: Path, wid: str, reason: str) -> SlicerWarning:
     """Store `reason` with warning `wid` in the sidecar of `gcode` (which must be current)."""
     side = sidecar_path(gcode)
-    data = load(side)
-    if data.get("gcode_sha256") != sha256_file(gcode):
-        raise SidecarError(
-            f"{side.name} is stale: {gcode.name} changed since the warnings were recorded; record them again"
-        )
-    items = warnings_of(data)
-    for w in items:
-        if w.id == wid:
-            w.accepted = {"reason": _reason(reason), "at": _now()}
-            data["warnings"] = [asdict(x) for x in items]
-            _write(side, data)
-            return w
+    with _locked(side):
+        data = load(side)
+        if data.get("gcode_sha256") != sha256_file(gcode):
+            raise SidecarError(
+                f"{side.name} is stale: {gcode.name} changed since the warnings were recorded; record them again"
+            )
+        items = warnings_of(data)
+        for w in items:
+            if w.id == wid:
+                w.accepted = {"reason": _reason(reason), "at": _now()}
+                data["warnings"] = [asdict(x) for x in items]
+                _write(side, data)
+                return w
     raise SidecarError(f"{side.name} has no warning {wid}; ids: {', '.join(x.id for x in items) or 'none'}")
 
 

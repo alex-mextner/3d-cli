@@ -508,26 +508,19 @@ def _runs_bridged(
 
 
 def _components(fi: NDArray[np.intp], fj: NDArray[np.intp]) -> tuple[int, NDArray[np.intp]]:
-    """8-connected components of a sparse pixel set: (count, label per pixel)."""
-    import numpy as np
-    from scipy.sparse import coo_matrix
-    from scipy.sparse.csgraph import connected_components
+    """8-connected components of a pixel set: (count, 0-based label per pixel).
 
-    stride = int(fj.max()) + 3
-    ids = fi.astype(np.int64) * stride + (fj + 1)
-    order = np.argsort(ids)
-    sid = ids[order]
-    rows, cols = [], []
-    for off in (1, stride - 1, stride, stride + 1):
-        pos = np.searchsorted(sid, sid + off)
-        hit = pos < len(sid)
-        hit[hit] = sid[pos[hit]] == sid[hit] + off
-        rows.append(order[hit])
-        cols.append(order[pos[hit]])
-    r, c = np.concatenate(rows), np.concatenate(cols)
-    graph = coo_matrix((np.ones(len(r), dtype=np.int8), (r, c)), shape=(len(fi), len(fi)))
-    n, labels = connected_components(graph, directed=False)
-    return int(n), labels
+    Labelled on a dense mask of the set's bounding box: one bool + one int32 per cell, so a
+    fully unsupported bed-sized layer stays at tens of MB instead of a sparse edge graph.
+    """
+    import numpy as np
+    from scipy import ndimage
+
+    i0, j0 = int(fi.min()), int(fj.min())
+    mask = np.zeros((int(fi.max()) - i0 + 1, int(fj.max()) - j0 + 1), dtype=bool)
+    mask[fi - i0, fj - j0] = True
+    lab, n = ndimage.label(mask, structure=np.ones((3, 3), dtype=bool), output=np.int32)
+    return int(n), lab[fi - i0, fj - j0].astype(np.intp) - 1
 
 
 @dataclass
