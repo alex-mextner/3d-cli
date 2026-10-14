@@ -17,6 +17,10 @@ printed size and the designed clearance per side, both in the ASSEMBLY frame:
           intersected too, so a shelf thinner than --step cannot hide an interference.
   depth   the socket depth (its top found to ~0.001 mm) is reported, and FAILs when below
           --min-depth. Tolerances are tested on unrounded measurements.
+  open    the insert can go in: swept along its insertion direction (--open above, the
+          default, or below) out of the socket, it meets no socket material — a socket
+          capped over the insert, or narrower above it (an undercut), FAILs. `--open none`
+          for an insert captured between parts (closed in by a mating half).
 
 Sections are taken with manifold3d and read into shapely even-odd (outer rings and holes).
 The clearance per layer is the smallest distance from the insert to the socket wall around
@@ -46,6 +50,10 @@ STEP = 0.25
 OVERLAP_AREA = 1e-4  # mm2: a section overlap smaller than this is numeric noise
 OVERLAP_VOLUME = 1e-3  # mm3: the same for the solids (touching faces leave slivers)
 FIRST_LAYER = 0.05  # mm above the insert's bottom: off its flat bottom face
+OPEN_DIRECTIONS = ("above", "below", "none")
+OPEN_SHRINK = (
+    0.02  # mm the insert's outline is shrunk for the path: contact faces are not a cap
+)
 
 SPEC_KEYS = {
     "name",
@@ -58,6 +66,7 @@ SPEC_KEYS = {
     "gap_tol",
     "step",
     "min_depth",
+    "open",
 }
 DEFAULT_KEYS = SPEC_KEYS - {"name", "insert", "socket", "printed_size"}
 
@@ -78,6 +87,7 @@ class Fit:
     gap_tol: float = GAP_TOL
     step: float = STEP
     min_depth: float | None = None
+    open: str = "above"
     socket_name: str = ""
 
     def __post_init__(self) -> None:
@@ -152,7 +162,7 @@ def load_spec(path: str) -> list[Fit]:
     """read a fits spec (YAML or JSON):
 
         gap: 0.15                  # optional defaults for every fit: gap, any_turn,
-        fits:                      #   size_tol, gap_tol, step, min_depth
+        fits:                      #   size_tol, gap_tol, step, min_depth, open
           - name: PFL
             insert: out/assembly/PFL__DOOR.stl          # path, comma list or list; globs ok
             socket: [out/assembly/BASE2__*.stl]
@@ -222,6 +232,7 @@ def load_spec(path: str) -> list[Fit]:
                 gap_tol=merged.get("gap_tol", GAP_TOL),
                 step=merged.get("step", STEP),
                 min_depth=merged.get("min_depth"),
+                open=merged.get("open", "above"),
                 where=where,
             )
         )
@@ -240,10 +251,15 @@ def make_fit(
     gap_tol: Any = GAP_TOL,
     step: Any = STEP,
     min_depth: Any = None,
+    open: Any = "above",
     where: str = "",
 ) -> Fit:
     """validate the numbers of one fit; `where` prefixes error messages"""
     pre = f"{where}: " if where else ""
+    if open not in OPEN_DIRECTIONS:
+        raise FitError(
+            f"{pre}open must be one of {', '.join(OPEN_DIRECTIONS)}, got {open!r}"
+        )
     return Fit(
         insert=insert,
         socket=socket,
@@ -259,6 +275,7 @@ def make_fit(
         min_depth=None
         if min_depth is None
         else _number(min_depth, f"{pre}min depth", positive=True),
+        open=open,
     )
 
 
@@ -350,6 +367,55 @@ def _socket_top(
     return z_in
 
 
+def _blocked_path(
+    insert: Any, socket: Any, direction: str, step: float
+) -> tuple[float, float, float] | None:
+    """Socket material in the way of the insert moving out along +Z (`above`) or -Z (`below`),
+    outside the insert itself (an overlap is reported on its own): (volume mm3, z low, z high),
+    or None when the path is clear. The swept insert is built in
+    slabs of `step`: each slab carries the outline of the insert part already behind it (an
+    under-estimate of the sweep by at most one step, so a wall that hugs a widening insert at
+    the set gap is not a false cap), and beyond the insert the full outline runs past the socket."""
+    from manifold3d import JoinType, Manifold, OpType
+
+    lo_z, hi_z = insert.bounding_box()[2], insert.bounding_box()[5]
+    s_lo, s_hi = socket.bounding_box()[2], socket.bounding_box()[5]
+    up = direction == "above"
+    slabs = []
+
+    def slab(outline: Any, z0: float, z1: float) -> None:
+        shrunk = outline.offset(-OPEN_SHRINK, JoinType.Miter)
+        if z1 > z0 and not shrunk.is_empty():
+            slabs.append(Manifold.extrude(shrunk, z1 - z0).translate((0.0, 0.0, z0)))
+
+    z = lo_z + step
+    while z < hi_z:
+        # the part of the insert that has passed height z on its way out
+        behind = (
+            insert.trim_by_plane((0.0, 0.0, -1.0), -z)
+            if up
+            else insert.trim_by_plane((0.0, 0.0, 1.0), z)
+        )
+        if up:
+            slab(behind.project(), z, min(z + step, hi_z))
+        else:
+            slab(behind.project(), max(lo_z, z - step), z)
+        z += step
+    full = insert.project()
+    if up:
+        slab(full, hi_z, max(s_hi, hi_z) + 1.0)
+    else:
+        slab(full, min(s_lo, lo_z) - 1.0, lo_z)
+    if not slabs:
+        return None
+    hit = (Manifold.batch_boolean(slabs, OpType.Add) ^ socket) - insert
+    volume = float(hit.volume())
+    if volume <= OVERLAP_VOLUME:
+        return None
+    box = hit.bounding_box()
+    return volume, box[2], box[5]
+
+
 def check_fit(fit: Fit) -> dict[str, Any]:
     """measure one insert/socket pair; returns the JSON-ready result (ok + errors).
     Tolerances are tested on the unrounded measurements; only the report is rounded."""
@@ -412,6 +478,11 @@ def check_fit(fit: Fit) -> dict[str, Any]:
         p for p in (insert ^ socket).decompose() if p.volume() > OVERLAP_VOLUME / 100
     ]
     overlap_volume = float(sum(p.volume() for p in pieces))
+    blocked = (
+        None
+        if fit.open == "none"
+        else _blocked_path(insert, socket, fit.open, fit.step)
+    )
     if overlap_layers:
         shown = ", ".join(f"{z:.2f}" for z, _ in overlap_layers[:5]) + (
             ", …" if len(overlap_layers) > 5 else ""
@@ -438,6 +509,12 @@ def check_fit(fit: Fit) -> dict[str, Any]:
             f"socket gap off {_fmt_mm(fit.gap)}±{_fmt_mm(fit.gap_tol)} mm at {len(off_gap_layers)} of "
             f"{len(layers)} layers: {_layer_list(off_gap_layers)}"
         )
+    if blocked is not None:
+        vol, z_lo, z_hi = blocked
+        errors.append(
+            f"not open {fit.open}: {vol:.3g} mm³ of socket in the insert's way out at z {z_lo:.2f}–{z_hi:.2f} "
+            "(capped or undercut); `open: none` for an insert captured between parts"
+        )
     if fit.min_depth is not None and depth is not None and depth < fit.min_depth:
         errors.append(
             f"socket only {depth:.2f} mm deep, less than the required {_fmt_mm(fit.min_depth)} mm"
@@ -460,6 +537,8 @@ def check_fit(fit: Fit) -> dict[str, Any]:
         "gap_tol_mm": fit.gap_tol,
         "step_mm": fit.step,
         "min_depth_mm": fit.min_depth,
+        "open": fit.open,
+        "open_blocked_mm3": None if blocked is None else round(blocked[0], 4),
         "gap_mm": min(gaps) if gaps else None,
         "gap_max_mm": max(gaps) if gaps else None,
         "socket_depth_mm": None if depth is None else round(depth, 2),
@@ -490,7 +569,16 @@ def _line(r: dict[str, Any]) -> str:
             f"gap {_fmt_mm(r['gap_mm'])}–{_fmt_mm(r['gap_max_mm'])} mm (set {_fmt_mm(r['gap_set_mm'])}"
             f"±{_fmt_mm(r['gap_tol_mm'])}) over {_fmt_mm(r['socket_depth_mm'])} mm"
         )
-    return f"fit {r['insert']} ↔ {r['socket']}: {r['status']}: size {size} mm{printed}, {gap}"
+    open_ = (
+        "open: not checked (captured)"
+        if r["open"] == "none"
+        else (
+            f"open {r['open']}"
+            if r["open_blocked_mm3"] is None
+            else f"NOT open {r['open']}"
+        )
+    )
+    return f"fit {r['insert']} ↔ {r['socket']}: {r['status']}: size {size} mm{printed}, {gap}, {open_}"
 
 
 def run_fits(fits: list[Fit], as_json: bool) -> int:
@@ -555,6 +643,11 @@ def main(argv: list[str]) -> int:
     ap.add_argument(
         "--min-depth", help="FAIL when the socket is shallower than this, mm"
     )
+    ap.add_argument(
+        "--open",
+        choices=OPEN_DIRECTIONS,
+        help="insertion direction the socket must be open to (default above; none = captured)",
+    )
     ap.add_argument("--spec", help="YAML/JSON file listing many fits")
     ap.add_argument("--json", action="store_true", help="JSON report on stdout")
     a = ap.parse_args(argv)
@@ -573,6 +666,7 @@ def main(argv: list[str]) -> int:
                     ("--gap-tol", a.gap_tol),
                     ("--step", a.step),
                     ("--min-depth", a.min_depth),
+                    ("--open", a.open),
                 )
                 if v
             ]
@@ -610,6 +704,7 @@ def main(argv: list[str]) -> int:
                     gap_tol=GAP_TOL if a.gap_tol is None else a.gap_tol,
                     step=STEP if a.step is None else a.step,
                     min_depth=a.min_depth,
+                    open=a.open or "above",
                 )
             ]
     except FitError as e:
