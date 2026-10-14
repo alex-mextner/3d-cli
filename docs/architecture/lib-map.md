@@ -17,6 +17,8 @@ compatibility wrappers.
 - `lib/cli/env.py` owns tool discovery, install hints, and `OPENSCADPATH` export.
 - `lib/cli/pyrun.py` runs heavier bundled Python tools through the selected Python tier.
 - `lib/cli/paths.py` contains shared path helpers.
+- `lib/cli/resources.py` sizes every worker pool and caps native thread pools
+  (`THREED_MAX_WORKERS`, default `min(6, cores / 2)`); the dispatcher applies it first.
 - `lib/errors.py` defines structured CLI errors and exit-code mapping.
 
 ### Commands

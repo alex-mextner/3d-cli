@@ -20,6 +20,7 @@ import subprocess
 import struct
 import sys
 
+from cli.resources import pool_size
 from errors import GateFailure, InputNotFound, InvalidArgument, UsageError
 
 CommandRunner = Callable[[list[str]], int]
@@ -283,13 +284,6 @@ def _render_jobs(plan: TurntablePlan, bin3d: str) -> list[RenderJob]:
     return jobs
 
 
-def _parallelism(total: int, jobs: int | None) -> int:
-    if total <= 0:
-        return 1
-    requested = jobs if jobs is not None else (os.cpu_count() or 1)
-    return max(1, min(total, requested))
-
-
 def _check_render_result(frame: VideoFrame, code: int) -> None:
     if code != 0:
         raise GateFailure(
@@ -353,7 +347,7 @@ def render_turntable_frames(
     """Render each planned turntable frame through `3d render`."""
     os.makedirs(plan.outdir, exist_ok=True)
     jobs_to_run = _render_jobs(plan, bin3d)
-    workers = _parallelism(len(jobs_to_run), jobs)
+    workers = pool_size(len(jobs_to_run), jobs)
     if runner is None:
         asyncio.run(_render_async(jobs_to_run, workers))
     else:

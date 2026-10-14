@@ -591,6 +591,12 @@ wrapped around cylinder and cone walls, the successor of
 - **`~/.local/share/3d-cli/`** — generated state, including the longitudinal metrics store.
   (Honors `$XDG_DATA_HOME`.)
 
+**Machine budget.** A `3d` run uses at most `THREED_MAX_WORKERS` parallel workers (default
+`min(6, cores / 2)`) for concurrent renders and frames, and caps the native thread pools of
+numpy/scipy/BLAS/numba (`OMP_NUM_THREADS` and friends) at the same number unless you set
+them yourself, so it shares a workstation politely. `THREED_MAX_WORKERS=12 3d render model.scad
+--multi` lets one run take more.
+
 ## Layout
 
 ```
@@ -599,6 +605,7 @@ lib/cli/dispatch.py routing + registry build + structured-error rendering
 lib/cli/registry.py the command registry (Command + discover()) — the plugin extension point
 lib/cli/env.py      tool discovery, OS/install table, OPENSCADPATH export, first-run bootstrap
 lib/cli/paths.py    the single source of truth for config/data dirs (~/.config/3d-cli, …)
+lib/cli/resources.py the machine budget: worker-pool size + native thread caps (THREED_MAX_WORKERS)
 lib/cli/pyrun.py    run a lib/*.py tool with its deps (.venv -> uv -> system python3)
 lib/cli/imaging.py  ImageMagick orchestration + the pure score (IoU/AE) math
 lib/project.py      the 3d.yaml project model + loader (the project spine, §5/§15)
