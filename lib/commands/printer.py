@@ -1,4 +1,4 @@
-"""3d printer — drive configured physical printers: list, status, upload, start, cancel, watch.
+"""3d printer — drive configured physical printers: list, status, upload, start, cancel, watch, vision.
 
 WHAT: talks to the printers named in printer-devices.yaml through a protocol adapter —
   `moonraker` (Klipper/Moonraker, Snapmaker U1) or `creality-stock` (Creality K1 family on
@@ -45,6 +45,10 @@ USAGE = """3d printer <subcommand> [args]
   watch NAME...|--all [options]        live read-only subscription: anomaly events to
                                        stdout JSONL / --exec / --tg / --steer SESSION
                                        (see `3d printer watch --help`)
+  vision NAME [options]                camera failure detection (spaghetti, stale/dark camera)
+                                       into the same event sinks as watch; also
+                                       `vision eval --pos P.. --neg N..`, `vision fetch-model`
+                                       (see docs/commands/printer-vision.md)
 
 Options:
   --json             status as JSON (normalized state + raw firmware payload)
@@ -72,7 +76,9 @@ Examples:
   3d printer start u1 out/base.gcode --yes --source-3mf print/base.3mf
   3d printer start k1se out/roof.gcode --yes --force
   3d printer cancel k1se --yes
-  3d printer watch u1 k1se --steer 01a12cd6 --tg"""
+  3d printer watch u1 k1se --steer 01a12cd6 --tg
+  3d printer vision u1 --once --save /tmp/u1.jpg
+  3d printer vision u1"""
 
 _VALUE = {"--secs", "--as", "--source-3mf"}
 _FLAGS = {"--json", "--yes", "--force"}
@@ -332,6 +338,18 @@ def _cmd_cancel(argv: list[str]) -> int:
     return 0
 
 
+VISION_DEPS = "numpy,opencv-python-headless,onnxruntime"
+
+
+def _cmd_vision(argv: list[str]) -> int:
+    """`vision NAME ...` is shorthand for `vision run NAME ...`; eval/fetch-model pass through."""
+    if argv and argv[0] not in ("eval", "fetch-model", "run", "-h", "--help"):
+        argv = ["run", *argv]
+    from cli.pyrun import exec_tool
+
+    return exec_tool(VISION_DEPS, "vision_detect.py", argv)
+
+
 def run(argv: list[str]) -> int:
     if not argv:
         print(USAGE)
@@ -354,14 +372,16 @@ def run(argv: list[str]) -> int:
         from printer_ops.watch_run import run as watch
 
         return watch(rest)
+    if sub == "vision":
+        return _cmd_vision(rest)
     raise UsageError(f"unknown subcommand '{sub}'", command="printer",
-                     remediation=["Use list, status, upload, start, cancel or watch — see `3d printer --help`."])
+                     remediation=["Use list, status, upload, start, cancel, watch or vision — see `3d printer --help`."])
 
 
 COMMAND = Command(
     name="printer",
     group="SLICING",
-    summary="drive configured printers: list / status / upload / start --yes / cancel --yes / watch",
+    summary="drive configured printers: list / status / upload / start --yes / cancel --yes / watch / vision",
     usage=USAGE,
     run=run,
 )

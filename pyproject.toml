@@ -1,6 +1,6 @@
 [project]
 name = "3d-cli"
-version = "0.6.0"
+version = "0.7.0"
 description = "Scriptable, AI-assisted CLI + web toolkit for parametric 3D FDM modeling, verification, matching and print prep (OpenSCAD-first)."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -26,6 +26,8 @@ viz = ["pyvista>=0.43"]
 web = ["fastapi>=0.110", "uvicorn>=0.27", "markdown>=3.5"]
 # Insert/socket section distances (`3d fit-check`).
 fit = ["shapely>=2.0"]
+# Camera failure detection (`3d printer vision`): onnxruntime runs the downloaded detector on the CPU.
+vision = ["onnxruntime>=1.17", "opencv-python-headless>=4.8"]
 # Test gate (`dev run test`): pytest + mypy (+ web deps/httpx for the web TestClient).
 dev = ["pytest>=8.0", "pytest-cov>=5.0", "pytest-timeout>=2.0", "mypy>=1.8", "httpx>=0.27", "ruff>=0.5.0", "fastapi>=0.110", "uvicorn>=0.27", "markdown>=3.5", "shapely>=2.0"]
 
