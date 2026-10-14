@@ -229,7 +229,8 @@ def _cmd_start(argv: list[str]) -> int:
             command="printer", remediation=[f"Upload it first: 3d printer upload {name} {file}"],
         )
 
-    report = run_preflight(local, status=st, source_3mf=source)
+    limits, limits_source = adapter.axis_limits()
+    report = run_preflight(local, status=st, source_3mf=source, axis_limits=limits, limits_source=limits_source)
     print(report.render())
     if report.overall == FAIL:
         if "--force" not in opts:

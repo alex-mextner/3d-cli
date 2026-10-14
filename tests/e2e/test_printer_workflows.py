@@ -97,3 +97,59 @@ def test_printer_without_config_explains_how_to_add_one(tmp_path: Path) -> None:
     assert result.returncode == 2
     assert "no printers configured" in result.stderr and "printer-devices.yaml" in result.stderr
     assert "adapter: moonraker" in result.stderr
+
+
+K1_EDGE_PLATE = """;TYPE:Custom
+G28
+G90
+;LAYER_CHANGE
+;TYPE:Outer wall
+EXCLUDE_OBJECT_START NAME=base
+G1 X62.83 Y2.774
+G17
+G3 Z1.36 I-.359 J-1.79 P1  F30000
+G1 X46.468 Y6.057
+EXCLUDE_OBJECT_END NAME=base
+; printable_area = 0x0,220x0,220x220,0x220
+"""
+
+
+def _k1_config(tmp_path: Path) -> None:
+    """A k1se entry with its axis limits; the address is unroutable on purpose: these
+    commands must never connect."""
+    cfg = tmp_path / "xdg-config" / "3d-cli"
+    cfg.mkdir(parents=True, exist_ok=True)
+    (cfg / "printer-devices.yaml").write_text(
+        "k1se:\n  adapter: creality-stock\n  host: 192.0.2.1\n"
+        "  axis_limits: {x: [-5, 229], y: [-0.5, 227]}\n", encoding="utf-8")
+
+
+def test_gcode_bounds_catches_the_k1_zhop_arc_offline(tmp_path: Path) -> None:
+    """A plate whose z-hop arc reaches Y -0.84 is caught before it reaches the K1 SE
+    (limit -0.5), with no printer contacted; the same plate passes the area-only check
+    when it is moved 5 mm away from the edge."""
+    (tmp_path / "edge.gcode").write_text(K1_EDGE_PLATE, encoding="utf-8")
+    (tmp_path / "moved.gcode").write_text(K1_EDGE_PLATE.replace("Y2.774", "Y7.774"), encoding="utf-8")
+    _k1_config(tmp_path)
+
+    by_name = run_cli(tmp_path, "gcode-bounds", "edge.gcode", "--printer", "k1se")
+    by_spec = run_cli(tmp_path, "gcode-bounds", "edge.gcode", "--axis-limits", "-5:229,-0.5:227", "--json")
+    moved = run_cli(tmp_path, "gcode-bounds", "moved.gcode", "--printer", "k1se")
+    unknown = run_cli(tmp_path, "gcode-bounds", "moved.gcode")
+
+    assert by_name.returncode == 1, by_name.stderr
+    assert "FAIL  axis travel" in by_name.stdout and "line 9 (62.47, -0.84)" in by_name.stdout
+    checks = {c["name"]: c["status"] for c in json.loads(by_spec.stdout)["checks"]}
+    assert by_spec.returncode == 1 and checks == {"axis travel": "FAIL", "print area": "FAIL"}
+    assert moved.returncode == 0, moved.stdout + moved.stderr
+    assert "STATUS: PASS" in moved.stdout
+    assert unknown.returncode == 0 and "SKIP  axis travel" in unknown.stdout
+
+
+def test_print_preflight_includes_the_bounds_checks(tmp_path: Path) -> None:
+    """The same arc fails the full preflight when the limits are given by printer name."""
+    (tmp_path / "edge.gcode").write_text(K1_EDGE_PLATE, encoding="utf-8")
+    _k1_config(tmp_path)
+    result = run_cli(tmp_path, "print-preflight", "edge.gcode", "--axis-limits", "k1se")
+    assert result.returncode == 1
+    assert "axis travel" in result.stdout and "-0.84" in result.stdout and "STATUS: FAIL" in result.stdout

@@ -76,6 +76,10 @@ class FakeMoonraker:
     requests: list[Recorded] = field(default_factory=list)
     upload_reply: dict[str, Any] | None = None   # override the upload JSON
     stored_size_delta: int = 0                    # pretend the printer stored N extra bytes
+    settings: dict[str, Any] = field(default_factory=lambda: {
+        "stepper_x": {"position_min": -2.0, "position_max": 272.0},
+        "stepper_y": {"position_max": 274.0},
+    })                                            # Klipper configfile.settings
     port: int = 0
 
     def writes(self) -> list[Recorded]:
@@ -99,7 +103,9 @@ class FakeMoonraker:
             def do_GET(self) -> None:
                 u = urlsplit(self.path)
                 fake.requests.append(Recorded("GET", u.path, parse_qs(u.query)))
-                if u.path == "/printer/objects/query":
+                if u.path == "/printer/objects/query" and "configfile" in parse_qs(u.query, keep_blank_values=True):
+                    self._reply({"result": {"eventtime": 1.0, "status": {"configfile": {"settings": fake.settings}}}})
+                elif u.path == "/printer/objects/query":
                     self._reply({"result": {"eventtime": 1.0, "status": fake.status}})
                 elif u.path == "/server/files/list":
                     self._reply({"result": [{"path": n, "size": s, "modified": 1.0} for n, s in fake.files.items()]})
@@ -310,7 +316,8 @@ def write_devices(config_home: Path, moon: FakeMoonraker | None = None, k1: Fake
         lines += ["u1:", "  adapter: moonraker", "  host: 127.0.0.1", f"  port: {moon.port}", "  model: Snapmaker U1"]
     if k1 is not None:
         lines += ["k1se:", "  adapter: creality-stock", "  host: 127.0.0.1", f"  port: {k1.http_port}",
-                  f"  ws_port: {k1.ws_port}", "  model: Creality K1 SE"]
+                  f"  ws_port: {k1.ws_port}", "  model: Creality K1 SE",
+                  "  axis_limits: {x: [-5, 229], y: [-0.5, 227]}"]
     path = d / "printer-devices.yaml"
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path

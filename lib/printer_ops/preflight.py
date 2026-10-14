@@ -2,12 +2,15 @@
 
 WHAT (issue https://github.com/alex-mextner/3d-cli/issues/96), one PASS/WARN/FAIL/SKIP line each:
   - thumbnails   the G-code carries the preview images its `; thumbnails =` spec asks for
-                 (lib/gcode_thumbnails.py check(); WARN "UNVERIFIED" when that module is absent);
+                 (lib/gcode_thumbnails.py check(), the `3d gcode-thumbnails` checker);
   - printer      the target printer is free (not printing/paused/busy/unknown);
   - slot Tn      for every tool the G-code uses: the printer's head is loaded, and its colour
                  and material equal the G-code's `; filament_colour` / `; filament_type`
                  (needs per-head data: Moonraker printers exposing print_task_config, i.e. U1);
-  - halves       `3d halves-check <3mf> --json` when the source 3MF is given.
+  - halves       `3d halves-check <3mf> --json` when the source 3MF is given;
+  - axis travel  every move (arcs by their real extremes) inside the printer's X/Y limits,
+                 start/end G-code included; SKIP when the limits are unknown (move_bounds.py);
+  - print area   plate moves inside the G-code's `; printable_area`, outside `; bed_exclude_area`.
 
 WHY: wrong colour in a head, a used head that is empty (the U1's broken T2), missing
   previews and halves that no longer fit were all caught by hand on recent jobs — after
@@ -23,10 +26,20 @@ import json
 import re
 import subprocess
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from printer_ops.base import PrinterStatus
+from printer_ops.move_bounds import (
+    BoundsReport,
+    Limits,
+    Violation,
+    check_bounds,
+    fmt_area,
+    fmt_extent,
+    fmt_limits,
+)
 
 PASS, WARN, FAIL, SKIP = "PASS", "WARN", "FAIL", "SKIP"
 _CONFIG_LINE = re.compile(r"^;\s*([a-z_ \[\]0-9]+?)\s*=\s*(.*)$")
@@ -45,6 +58,7 @@ class Check:
 class Report:
     file: str
     checks: list[Check] = field(default_factory=list)
+    title: str = "PREFLIGHT"
 
     @property
     def overall(self) -> str:
@@ -56,7 +70,7 @@ class Report:
                 "checks": [{"name": c.name, "status": c.status, "detail": c.detail} for c in self.checks]}
 
     def render(self) -> str:
-        lines = [f"PREFLIGHT {self.file}"]
+        lines = [f"{self.title} {self.file}"]
         lines += [f"  {c.status:<4}  {c.name:<11} {c.detail}" for c in self.checks]
         lines.append(f"STATUS: {self.overall}")
         return "\n".join(lines)
@@ -116,11 +130,8 @@ def read_gcode_meta(path: Path) -> GcodeMeta:
 
 
 def check_thumbnails(path: Path) -> Check:
-    try:
-        # lib/gcode_thumbnails.py ships separately (`3d gcode-thumbnails`); absent -> UNVERIFIED.
-        from gcode_thumbnails import check as thumb_check  # type: ignore[import-not-found,unused-ignore]
-    except ImportError:
-        return Check("thumbnails", WARN, "UNVERIFIED: the thumbnail checker (lib/gcode_thumbnails.py) is not installed")
+    from gcode_thumbnails import check as thumb_check  # lazy: keeps `3d help` import-light
+
     r = thumb_check(str(path))
     if r.ok:
         sizes = ", ".join(f"{t.width}x{t.height}" for t in r.present) or "present"
@@ -189,12 +200,65 @@ def check_halves(source: Path) -> Check:
     return Check("halves", FAIL, f"halves-check could not run (exit {rc}): {tail}")
 
 
-def run_preflight(gcode: Path, *, status: PrinterStatus | None = None, source_3mf: Path | None = None) -> Report:
+def _first(violations: Sequence[Violation], count: int, where: str = "outside") -> str:
+    shown = ", ".join(str(v) for v in violations)
+    return f"{count} point(s) {where}: {shown}{', ...' if count > len(violations) else ''}"
+
+
+def check_moves(rep: BoundsReport, axis_limits: Limits | None, limits_source: str) -> list[Check]:
+    out: list[Check] = []
+    if axis_limits is None:
+        why = f"{limits_source}; " if limits_source else ""
+        out.append(Check("axis travel", SKIP, f"printer axis limits unknown ({why}pass --axis-limits "
+                         "X0:X1,Y0:Y1 or set axis_limits in printer-devices.yaml)"))
+    elif rep.axis_out_count:
+        out.append(Check("axis travel", FAIL, f"{fmt_limits(axis_limits)} ({limits_source}): "
+                         + _first(rep.axis_out, rep.axis_out_count)))
+    else:
+        out.append(Check("axis travel", PASS, f"all moves {fmt_extent(rep.all_extent)} within "
+                         f"{fmt_limits(axis_limits)} ({limits_source})"))
+
+    if not rep.plate_found:
+        out.append(Check("print area", WARN, "UNVERIFIED: no ;LAYER_CHANGE / ; CHANGE_LAYER markers, "
+                         "the plate section cannot be told from start/end G-code"))
+    else:
+        # bed_exclude_area is evaluated on its own: a missing printable_area must not hide it
+        parts = []
+        if rep.area_out_count and rep.printable_area:
+            parts.append(f"printable_area {fmt_area(rep.printable_area)}: "
+                         + _first(rep.area_out, rep.area_out_count))
+        if rep.excluded_in_count and rep.exclude_area:
+            parts.append(f"bed_exclude_area {fmt_area(rep.exclude_area)}: "
+                         + _first(rep.excluded_in, rep.excluded_in_count, "inside"))
+        if parts:
+            out.append(Check("print area", FAIL, f"plate moves {fmt_extent(rep.plate_extent)}; " + "; ".join(parts)))
+        elif rep.printable_area is None:
+            out.append(Check("print area", WARN, "UNVERIFIED: the G-code has no `; printable_area`"))
+        else:
+            out.append(Check("print area", PASS, f"plate moves {fmt_extent(rep.plate_extent)} within "
+                             f"{fmt_area(rep.printable_area)}"))
+
+    if rep.unverified_count:
+        more = ", ..." if rep.unverified_count > len(rep.unverified) else ""
+        out.append(Check("unverified", WARN, f"{rep.unverified_count} move(s) only partly checked: "
+                         + ", ".join(rep.unverified) + more))
+    return out
+
+
+def bounds_report(gcode: Path, axis_limits: Limits | None, limits_source: str) -> Report:
+    """Only the move-bounds checks (`3d gcode-bounds`)."""
+    return Report(str(gcode), check_moves(check_bounds(gcode, axis_limits), axis_limits, limits_source), "BOUNDS")
+
+
+def run_preflight(gcode: Path, *, status: PrinterStatus | None = None, source_3mf: Path | None = None,
+                  axis_limits: Limits | None = None, limits_source: str = "") -> Report:
+    """`limits_source` names where `axis_limits` came from, or why they are unknown."""
     report = Report(str(gcode))
     report.checks.append(check_thumbnails(gcode))
     if status is not None:
         report.checks.append(check_printer_free(status))
         report.checks.extend(check_slots(read_gcode_meta(gcode), status))
+    report.checks.extend(check_moves(check_bounds(gcode, axis_limits), axis_limits, limits_source))
     if source_3mf is not None:
         report.checks.append(check_halves(source_3mf))
     return report

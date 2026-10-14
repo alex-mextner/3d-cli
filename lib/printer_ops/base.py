@@ -25,6 +25,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from errors import InvalidArgument, ThreeDError
+from printer_ops.move_bounds import Limits
 
 # Normalized states. BUSY_STATES block start/upload-overwrite; unknown counts as busy so a
 # printer we cannot read is never treated as free.
@@ -114,6 +115,13 @@ class Adapter:
         self.name = name
         self.host = host
         self.port = port
+        self.configured_limits: Limits | None = None  # axis_limits from printer-devices.yaml
+
+    def axis_limits(self) -> tuple[Limits | None, str]:
+        """Real X/Y travel and where it came from; (None, reason) when unknown. Read-only."""
+        if self.configured_limits is not None:
+            return self.configured_limits, "printer-devices.yaml"
+        return None, f"no axis_limits for {self.name} in printer-devices.yaml"
 
     def status(self) -> PrinterStatus:
         raise self._unsupported("status")

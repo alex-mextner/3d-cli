@@ -72,14 +72,20 @@ k1se:
   adapter: creality-stock   # Creality K1 family on stock firmware
   host: 192.168.0.27
   model: Creality K1 SE     # port defaults to 80, ws_port to 9999
+  axis_limits: {x: [-5, 229], y: [-0.5, 227]}
 ```
+
+`axis_limits` is the real X/Y travel (Klipper `stepper_x`/`stepper_y` `position_min`/`position_max`;
+for the K1 SE from CrealityOfficial K1_Series_Klipper `config/K1_SE_CR4CU220812S12/printer.cfg`).
+[`3d gcode-bounds`](gcode-bounds.md) and the preflight check every move against it. Moonraker
+printers without `axis_limits` report them from their own Klipper config.
 
 ## Adapters
 
 | Adapter | Printers | Transport |
 |---|---|---|
 | `moonraker` | Klipper/Moonraker: Snapmaker U1 and others | HTTP: `/printer/objects/query`, `/server/files/upload` (`print=false`), `/printer/print/start`, `/printer/print/cancel`. On the U1, `print_task_config` gives the colour and material in each head; a head without filament (the broken T2) shows as `empty`. |
-| `creality-stock` | Creality K1 / K1 SE on stock firmware (no Moonraker) | HTTP `POST /upload/<name>` with only the `file` field; WebSocket `:9999` for state, file list, `opGcodeFile` start and `stop`. The heartbeat is answered automatically. |
+| `creality-stock` | Creality K1 / K1 SE on stock firmware (no Moonraker) | HTTP `POST /upload/<name>` with only the `file` field; WebSocket `:9999` for state, file list, `opGcodeFile` start and `stop`. The heartbeat is answered automatically. States: 0 idle, 1 printing, 2 complete (seen on our K1 SE); 5 paused, 4 stopped, 7 cancel finishing, `withSelfTest` 1–99 self-test (from the [ha_creality_ws](https://github.com/3dg1luk43/ha_creality_ws/blob/a8e5491809227ff3ce72bc6b317cc75075e19b9f/custom_components/ha_creality_ws/utils.py#L640-L690) integration). A non-zero `err` code shows as `error` unless the printer is busy. |
 
 The Creality upload sends **only** the `file` field: with an extra `path` field the K1 SE
 stored 165–168 bytes more than it received
@@ -96,7 +102,8 @@ with the local file.
 3. `start` refuses while the printer is printing, paused, busy, or its state cannot be read,
    and when the file on the printer is missing or differs in size from the local file. The
    state is read again right before the start request.
-4. `start` runs `3d print-preflight`; a FAIL blocks the start unless `--force`.
+4. `start` runs `3d print-preflight` — including the move-bounds check against the printer's
+   axis limits ([`3d gcode-bounds`](gcode-bounds.md)); a FAIL blocks the start unless `--force`.
 5. `upload` refuses while a Creality printer is busy (the firmware does not protect the
    running job), and on any printer refuses to overwrite the file being printed.
 6. If a start or upload request times out, the result is reported as UNKNOWN (after checking

@@ -11,21 +11,26 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from printer_ops.base import Adapter
     from printer_ops.devices import Device
+    from printer_ops.move_bounds import Limits
 
 
 def make_adapter(device: Device, **options: Any) -> Adapter:
     """Adapter instance for a configured device. `options` pass adapter-specific knobs
     (e.g. listen_s for the Creality WebSocket window)."""
+    adapter: Adapter
     if device.adapter == "moonraker":
         from printer_ops.moonraker import MoonrakerAdapter
 
-        return MoonrakerAdapter(device.name, device.host, device.port,
-                                **{k: v for k, v in options.items() if k in ("timeout", "upload_timeout")})
-    from printer_ops.creality import CrealityStockAdapter
+        adapter = MoonrakerAdapter(device.name, device.host, device.port,
+                                   **{k: v for k, v in options.items() if k in ("timeout", "upload_timeout")})
+    else:
+        from printer_ops.creality import CrealityStockAdapter
 
-    if device.ws_port is not None:
-        options.setdefault("ws_port", device.ws_port)
-    return CrealityStockAdapter(device.name, device.host, device.port, **options)
+        if device.ws_port is not None:
+            options.setdefault("ws_port", device.ws_port)
+        adapter = CrealityStockAdapter(device.name, device.host, device.port, **options)
+    adapter.configured_limits = device.axis_limits
+    return adapter
 
 
 def adapter_by_name(name: str, *, secs: str | None = None, command: str = "printer") -> Adapter:
@@ -41,3 +46,26 @@ def adapter_by_name(name: str, *, secs: str | None = None, command: str = "print
 
             raise InvalidArgument("--secs", secs, ["a number of seconds, e.g. 3"], command=command) from None
     return make_adapter(get_device(name), **options)
+
+
+def limits_from_option(value: str, *, command: str) -> tuple[Limits | None, str]:
+    """`--axis-limits` / `--printer` for offline bounds checks -> (limits, source or reason).
+
+    Accepts `X0:X1,Y0:Y1` or a printer name, whose `axis_limits` come from
+    printer-devices.yaml. Never contacts the printer."""
+    from printer_ops.devices import get_device
+    from printer_ops.move_bounds import parse_limits
+
+    try:
+        return parse_limits(value), "--axis-limits"
+    except ValueError:
+        if ":" in value or "," in value:
+            from errors import InvalidArgument
+
+            raise InvalidArgument("--axis-limits", value, ["X0:X1,Y0:Y1 with min < max, e.g. -5:229,-0.5:227",
+                                                           "a printer name from `3d printer list`"],
+                                  command=command) from None
+    device = get_device(value)
+    if device.axis_limits is None:
+        return None, f"no axis_limits for {device.name} in {device.source}"
+    return device.axis_limits, f"{device.name} in {device.source}"

@@ -7,19 +7,18 @@ Issues: https://github.com/alex-mextner/3d-cli/issues/90 (epic), #91-#96, #99.
 from __future__ import annotations
 
 import json
+import math
 import socket
-import sys
-import types
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any
 
 import pytest
 
 from errors import InputNotFound, InvalidArgument, UsageError
 from printer_fakes import FakeCreality, FakeMoonraker, k1_state, u1_status, write_devices
 from printer_ops import base as pbase
-from printer_ops import creality, devices, moonraker, preflight, ws
+from printer_ops import creality, devices, moonraker, move_bounds, preflight, ws
 from printer_ops.base import PrinterCommError, PrinterRefused, PrinterStatus, safe_remote_name
 
 U1_GCODE = """; HEADER_BLOCK_START
@@ -268,11 +267,12 @@ def test_creality_status_merges_deltas_and_answers_heartbeat(k1: FakeCreality) -
 
 
 @pytest.mark.parametrize("state, device_state, norm", [
-    (0, 0, "idle"), (1, 1, "printing"), (2, 0, "complete"), (0, 1, "busy"), (4, 0, "idle"), (5, 1, "busy")])
+    (0, 0, "idle"), (1, 1, "printing"), (2, 0, "complete"), (0, 1, "busy"), (4, 0, "cancelled"),
+    (5, 1, "paused"), (3, 0, "idle"), (3, 1, "busy")])
 def test_creality_state_mapping(state: int, device_state: int, norm: str) -> None:
     st = creality.parse_status(k1_state(state, device_state))
     assert st.state == norm
-    if state == 4:
+    if (state, device_state) == (3, 0):
         assert "not mapped" in (st.message or "")
 
 
@@ -369,33 +369,15 @@ def test_printer_free_check() -> None:
     assert preflight.check_printer_free(moonraker.parse_status(u1_status("complete"))).status == "PASS"
 
 
-def test_thumbnails_unverified_when_checker_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setitem(sys.modules, "gcode_thumbnails", None)  # import -> ImportError
-    c = preflight.check_thumbnails(gcode(tmp_path))
-    assert c.status == "WARN" and "UNVERIFIED" in c.detail
+def test_thumbnails_use_the_real_gcode_thumbnails_checker(tmp_path: Path) -> None:
+    """U1_GCODE asks for 48x48 and 300x300 previews and carries none: FAIL naming them."""
+    bad = preflight.check_thumbnails(gcode(tmp_path))
+    assert bad.status == "FAIL" and "48x48" in bad.detail and "gcode-thumbnails add" in bad.detail
 
-
-def test_thumbnails_use_the_gcode_thumbnails_checker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    class Thumb(NamedTuple):  # same fields as gcode_thumbnails.Thumb (width, height, fmt)
-        width: int
-        height: int
-        fmt: str
-
-    t = types.SimpleNamespace
-    calls: list[str] = []
-
-    def check(path: str) -> Any:
-        calls.append(path)
-        if path.endswith("good.gcode"):
-            return t(ok=True, present=[Thumb(48, 48, "PNG"), Thumb(300, 300, "PNG")], missing=[], reason="")
-        return t(ok=False, present=[], missing=[Thumb(300, 300, "PNG")], reason="missing 300x300/PNG")
-
-    monkeypatch.setitem(sys.modules, "gcode_thumbnails", types.SimpleNamespace(check=check))
-    good = preflight.check_thumbnails(gcode(tmp_path, name="good.gcode"))
-    bad = preflight.check_thumbnails(gcode(tmp_path, name="bad.gcode"))
+    png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+    blocks = "".join(f"; thumbnail begin {s}x{s} {len(png)}\n; {png}\n; thumbnail end\n" for s in (48, 300))
+    good = preflight.check_thumbnails(gcode(tmp_path, blocks + U1_GCODE, "good.gcode"))
     assert (good.status, good.detail) == ("PASS", "48x48, 300x300")
-    assert bad.status == "FAIL" and "300x300" in bad.detail and "gcode-thumbnails add" in bad.detail
-    assert len(calls) == 2
 
 
 @pytest.mark.parametrize("rc, out, status", [
@@ -558,3 +540,446 @@ def test_cmd_preflight_with_printer_fails_on_colour(moon: FakeMoonraker, env: Pa
         run([str(gcode(tmp_path)), "--printer", "u1"])
     assert "G-code #FFFFFF, loaded #FFFF00" in capsys.readouterr().out
     assert moon.writes() == []
+
+
+# ---- move_bounds.py (issue #101) ----------------------------------------------------------
+
+K1_LIMITS = ((-5.0, 229.0), (-0.5, 227.0))
+K1_FOOTER = "; printable_area = 0x0,220x0,220x220,0x220\n; bed_exclude_area = 0x0\n"
+
+
+def plate(body: str, *, start: str = "G28\nG90\n", end: str = "", footer: str = K1_FOOTER) -> str:
+    """A minimal Orca-shaped file: start G-code, one object on the plate, end G-code, config."""
+    return (f";TYPE:Custom\n{start};LAYER_CHANGE\n;Z:0.2\n;TYPE:Outer wall\nEXCLUDE_OBJECT_START NAME=a\n"
+            f"{body}EXCLUDE_OBJECT_END NAME=a\n;TYPE:Custom\n{end}{footer}")
+
+
+def bounds(tmp_path: Path, text: str, limits: Any = K1_LIMITS) -> Any:
+    return move_bounds.check_bounds(gcode(tmp_path, text, "b.gcode"), limits)
+
+
+def test_k1_spiral_zhop_arc_reaches_y_minus_084_and_fails(tmp_path: Path) -> None:
+    """The arc that faulted the K1 SE ("Y out of range"): both end points are on the bed."""
+    # like a real plate: travel to the wipe end, then the z-hop arc (no extrusion from an unknown spot)
+    rep = bounds(tmp_path, plate("G1 X62.83 Y2.774\nG17\nG3 Z1.36 I-.359 J-1.79 P1  F30000\nG1 X46.468 Y6.057\n"))
+    assert rep.axis_out_count == 1 and rep.axis_out[0].line == 10
+    assert rep.axis_out[0].y == pytest.approx(0.984 - math.hypot(0.359, 1.79), abs=1e-3)
+    assert rep.axis_out[0].y == pytest.approx(-0.84, abs=0.01)
+    assert rep.area_out_count == 1
+    checks = preflight.check_moves(rep, K1_LIMITS, "test")
+    assert [(c.name, c.status) for c in checks] == [("axis travel", "FAIL"), ("print area", "FAIL")]
+    assert "line 10 (62.47, -0.84)" in checks[0].detail
+
+
+@pytest.mark.parametrize("start, end, ij, cw, want", [
+    ((1, 0), (0, 1), (-1, 0), False, {(1, 0), (0, 1)}),                 # ccw quarter: no extra extreme
+    ((1, 0), (0, 1), (-1, 0), True, {(1, 0), (0, 1), (0, -1), (-1, 0)}),  # cw: the long way round
+    ((1, 0), (-1, 0), (-1, 0), False, {(1, 0), (-1, 0), (0, 1)}),        # ccw half through +Y
+    ((1, 0), (-1, 0), (-1, 0), True, {(1, 0), (-1, 0), (0, -1)}),        # cw half through -Y
+    ((1, 0), (1, 0), (-1, 0), True, {(1, 0), (0, 1), (-1, 0), (0, -1)}),  # full circle
+])
+def test_arc_points_cover_the_real_extremes(start: tuple[float, float], end: tuple[float, float],
+                                            ij: tuple[float, float], cw: bool, want: set[Any]) -> None:
+    pts = move_bounds.arc_points(start[0], start[1], end[0], end[1], ij[0], ij[1], cw)
+    assert {(round(x, 6) + 0.0, round(y, 6) + 0.0) for x, y in pts} == want
+
+
+def test_relative_moves_g92_and_g28(tmp_path: Path) -> None:
+    body = ("G1 X100 Y100\nG91\nG1 X10 Y-150\nG90\n"     # relative: (110, -50)
+            "G1 X50 Y50\nG92 X0 Y0\nG1 X-60 Y10\n")      # G92: G-code -60 is machine -10
+    rep = bounds(tmp_path, plate(body))
+    assert [(v.x, v.y) for v in rep.axis_out] == [(110.0, -50.0), (-10.0, 60.0)]
+    rep = bounds(tmp_path, plate("G1 X1 Y1\n", start="G28\nG91\nG1 X-500\nG90\n"))
+    assert rep.axis_out_count == 0  # after G28 the position is unknown: a relative move is not checkable
+    assert rep.unverified_count == 1 and "unknown position" in rep.unverified[0]
+
+
+def test_a_known_axis_is_checked_while_the_other_is_unknown(tmp_path: Path) -> None:
+    """Review finding: `G1 X300` right after G28 (Y unknown) must still fail on X."""
+    rep = bounds(tmp_path, plate("G1 X10 Y10\n", start="G28\nG90\nG1 X300\nG1 X10 Y10\n"))
+    assert rep.axis_out_count == 1 and str(rep.axis_out[0]) == "line 4 (300.00, ?)"
+
+
+@pytest.mark.parametrize("home, bad", [("G28 Z", 1), ("G28 Z0", 1), ("G28 X", 0), ("G28 Y", 1), ("G28", 0)])
+def test_g28_forgets_only_the_homed_axes(tmp_path: Path, home: str, bad: int) -> None:
+    """`G28 Z` keeps X and Y known, so a later `G1 X300` is still checked; homing X forgets X
+    and makes the relative move uncheckable."""
+    rep = bounds(tmp_path, plate(f"G1 X10 Y10\n{home}\nG91\nG1 X290\nG90\nG1 X10 Y10\n"))
+    assert rep.axis_out_count == bad
+
+
+def test_extruding_path_through_the_exclude_area_fails_travel_does_not(tmp_path: Path) -> None:
+    """Review finding: both end points may be outside `bed_exclude_area` while the line or the
+    arc between them deposits plastic inside it; travel moves over it are harmless."""
+    p1s = "; printable_area = 0x0,256x0,256x256,0x256\n; bed_exclude_area = 0x0,18x0,18x28,0x28\n"
+    body = ("M83\nG1 X30 Y40\n"
+            "G1 X10 Y10 E1\n"            # ends inside: FAIL
+            "G0 X30 Y40\nG1 X18 Y28 E1\n"  # touches the corner only: allowed
+            "G1 X18 Y40 E1\n"            # along the edge line, outside: allowed
+            "G0 X10 Y10\nG0 X30 Y10\n"     # travel through it: allowed
+            "G0 X10 Y35\nG1 X25 Y10 E1\n")  # both ends outside, crosses the corner: FAIL
+    rep = bounds(tmp_path, plate(body, footer=p1s), None)
+    assert [v.line for v in rep.excluded_in] == [10, 17]
+    excl = [(0.0, 0.0), (18.0, 0.0), (18.0, 28.0), (0.0, 28.0)]
+    for v in rep.excluded_in:  # each reported point is a place where plastic lands inside the area
+        assert v.x is not None and v.y is not None
+        assert move_bounds.inside(v.x, v.y, excl, boundary=False)
+    checks = preflight.check_moves(rep, None, "")
+    assert checks[0].status == "SKIP" and checks[1].status == "FAIL" and "bed_exclude_area" in checks[1].detail
+    square = "; printable_area = 0x0,256x0,256x256,0x256\n; bed_exclude_area = 112x112,116x112,116x116,112x116\n"
+    rep = bounds(tmp_path, plate("M83\nG1 X120 Y100\nG3 X120 Y100 I-20 J0 E5\n", footer=square), None)
+    assert rep.excluded_in_count == 1  # full circle r=20 about (100,100) passes (114.1, 114.1)
+    rep = bounds(tmp_path, plate("M83\nG1 X120 Y100\nG3 X120 Y100 I-20 J0\n", footer=square), None)
+    assert rep.excluded_in_count == 0  # same circle as a travel (z-hop): allowed
+
+
+def test_absolute_extrusion_counts_only_increasing_e(tmp_path: Path) -> None:
+    p1s = "; printable_area = 0x0,256x0,256x256,0x256\n; bed_exclude_area = 0x0,18x0,18x28,0x28\n"
+    body = "M82\nG92 E0\nG1 X30 Y40\nG1 X10 Y10 E5\nG1 X30 Y40 E4\nG1 X10 Y10 E4\n"
+    rep = bounds(tmp_path, plate(body, footer=p1s), None)
+    assert [v.line for v in rep.excluded_in] == [11]  # E5 extrudes; E4 (retract) and E4 again do not
+
+
+SQUARE = "; printable_area = 0x0,256x0,256x256,0x256\n; bed_exclude_area = 112x112,116x112,116x116,112x116\n"
+
+
+@pytest.mark.parametrize("body", [
+    # relative E between absolute moves still advances E: the last move extrudes 0 -> 5
+    "M82\nG92 E0\nG1 X100 Y100 E10\nM83\nG1 E-10\nM82\nG1 X114 Y114 E5\n",
+    # a straight line through two opposite corners: no proper edge crossing, interior entered
+    "M83\nG1 X100 Y100\nG1 X200 Y200 E1\n",
+])
+def test_exclude_area_regressions_from_review(tmp_path: Path, body: str) -> None:
+    rep = bounds(tmp_path, plate(body, footer=SQUARE), None)
+    assert rep.excluded_in_count == 1
+
+
+def test_exclude_area_thinner_than_any_sampling_step_is_still_hit_by_an_arc(tmp_path: Path) -> None:
+    """Review case: the circle r=100 about (100,100) passes x=199.94 at y=103.5, inside a
+    0.04 x 0.2 mm rectangle a 5-degree chord would miss."""
+    thin = ("; printable_area = 0x0,256x0,256x256,0x256\n"
+            "; bed_exclude_area = 199.92x103.4,199.96x103.4,199.96x103.6,199.92x103.6\n")
+    rep = bounds(tmp_path, plate("M83\nG1 X200 Y100\nG3 X200 Y100 I-100 J0 E10\n", footer=thin), None)
+    assert rep.excluded_in_count == 1
+
+
+@pytest.mark.parametrize("area, body", [
+    ("0x0,100x0,100x30,30x30,30x100,0x100", "G1 X10 Y90\nG1 X90 Y10 E1\n"),    # line cuts the L's notch
+    ("100x0,200x100,100x200,0x100", "G1 X180 Y100\nG3 X180 Y100 I-80 J0 E1\n"),  # circle bulges out at 45°
+])
+def test_non_rectangular_printable_area_follows_the_whole_path(tmp_path: Path, area: str, body: str) -> None:
+    """Review case: both end points (and the arc's cardinal extremes) are inside the polygon,
+    but the path between them leaves it."""
+    rep = bounds(tmp_path, plate(body, footer=f"; printable_area = {area}\n"), None)
+    assert rep.area_out_count == 1
+
+
+def test_move_cuts_are_exact_on_a_square() -> None:
+    sq = [(112.0, 112.0), (116.0, 112.0), (116.0, 116.0), (112.0, 116.0)]
+    assert move_bounds.Move(100, 100, 200, 200).first_inside(sq) == pytest.approx((114.0, 114.0))
+    assert move_bounds.Move(100, 112, 200, 112).first_inside(sq) is None   # along an edge
+    assert move_bounds.Move(100, 100, 112, 112).first_inside(sq) is None   # ends on a corner
+
+
+def test_area_check_covers_only_the_plate_but_axis_check_covers_everything(tmp_path: Path) -> None:
+    # start G-code parks off the bed; the plate travels in first, then extrudes
+    text = plate("G1 X10 Y10\nG1 X20 Y20 E1\n", start="G28\nG1 X-3 Y-0.4\n", end="G1 X228 Y226\n")
+    rep = bounds(tmp_path, text)
+    assert rep.area_out_count == 0 and rep.axis_out_count == 0
+    rep = bounds(tmp_path, plate("G1 X10 Y10 E1\n", end="G1 X230 Y100\n"))
+    assert rep.axis_out_count == 1 and rep.area_out_count == 0
+
+
+def test_prime_tower_after_last_object_is_still_on_the_plate(tmp_path: Path) -> None:
+    text = plate("G1 X10 Y10 E1\n", end=";TYPE:Prime tower\nG1 X-1.47 Y100 E1\n;TYPE:Custom\nG1 X5 Y200\n")
+    rep = bounds(tmp_path, text, None)
+    assert [(v.line, v.x) for v in rep.area_out] == [(12, -1.47)]
+
+
+def test_custom_blocks_inside_the_plate_are_exempt_from_the_area_check(tmp_path: Path) -> None:
+    rep = bounds(tmp_path, plate("G1 X10 Y10 E1\n;TYPE:Custom\nG1 X-2 Y5\n;TYPE:Inner wall\nG1 X20 Y20 E1\n"))
+    assert rep.area_out_count == 0 and rep.axis_out_count == 0
+
+
+def test_offset_printable_area(tmp_path: Path) -> None:
+    u1 = "; printable_area = 0.5x1,270.5x1,270.5x271,0.5x271\n"
+    rep = bounds(tmp_path, plate("G1 X0.5 Y1 E1\nG1 X0.4 Y100 E1\nG1 X100 Y271.2 E1\n", footer=u1), None)
+    assert [(v.x, v.y) for v in rep.area_out] == [(0.4, 100.0), (100.0, 271.2)]
+
+
+def test_r_arcs_and_other_planes_are_unverified(tmp_path: Path) -> None:
+    rep = bounds(tmp_path, plate("G1 X10 Y10\nG2 X20 Y10 R5\nG18\nG2 X30 Y10 I5 K0\nG17\n"))
+    assert rep.unverified_count == 2
+    names = [c.name for c in preflight.check_moves(rep, K1_LIMITS, "t")]
+    assert names[-1] == "unverified"
+
+
+def test_missing_markers_and_area_are_warnings_not_pass(tmp_path: Path) -> None:
+    rep = bounds(tmp_path, "G1 X10 Y10\n" + K1_FOOTER)
+    assert preflight.check_moves(rep, K1_LIMITS, "t")[1].status == "WARN"
+    rep = bounds(tmp_path, plate("G1 X10 Y10 E1\n", footer=""))
+    assert preflight.check_moves(rep, K1_LIMITS, "t")[1].status == "WARN"
+
+
+def test_parse_limits_and_polygon() -> None:
+    assert move_bounds.parse_limits("-5:229,-0.5:227") == K1_LIMITS
+    for bad in ("1:2", "5:1,0:1", "a:b,c:d", "1:2,3"):
+        with pytest.raises(ValueError):
+            move_bounds.parse_limits(bad)
+    assert move_bounds.parse_polygon("0x0") is None
+    assert move_bounds.parse_polygon("0x0,1x0,1x1") == [(0, 0), (1, 0), (1, 1)]
+
+
+def test_device_axis_limits_and_limits_from_option(env: Path) -> None:
+    from printer_ops import limits_from_option
+
+    (env / "3d-cli").mkdir(parents=True)
+    (env / "3d-cli" / "printer-devices.yaml").write_text(
+        "k1se: {adapter: creality-stock, host: h, axis_limits: {x: [-5, 229], y: [-0.5, 227]}}\n"
+        "u1: {adapter: moonraker, host: h}\n", encoding="utf-8")
+    assert limits_from_option("k1se", command="t")[0] == K1_LIMITS
+    assert limits_from_option("-1:2,-3:4", command="t") == (((-1.0, 2.0), (-3.0, 4.0)), "--axis-limits")
+    lim, why = limits_from_option("u1", command="t")
+    assert lim is None and "no axis_limits for u1" in why
+    with pytest.raises(InvalidArgument):
+        limits_from_option("5:1,0:1", command="t")
+    (env / "3d-cli" / "printer-devices.yaml").write_text(
+        "k1se: {adapter: creality-stock, host: h, axis_limits: {x: [229, -5], y: [0, 1]}}\n", encoding="utf-8")
+    with pytest.raises(InvalidArgument):
+        devices.load_devices()
+
+
+def test_moonraker_reports_klipper_axis_limits(moon: FakeMoonraker) -> None:
+    a = moonraker.MoonrakerAdapter("u1", "127.0.0.1", moon.port)
+    assert a.axis_limits() == (((-2.0, 272.0), (0.0, 274.0)), "Klipper stepper_x/stepper_y")
+    moon.settings = {}
+    lim, why = a.axis_limits()
+    assert lim is None and "position_max" in why
+    a.configured_limits = K1_LIMITS
+    assert a.axis_limits() == (K1_LIMITS, "printer-devices.yaml")
+
+
+@pytest.mark.parametrize("fields, norm", [
+    ({"state": 5, "deviceState": 0}, "paused"),
+    ({"state": 4, "deviceState": 0}, "cancelled"),
+    ({"state": 7, "deviceState": 0}, "busy"),
+    ({"state": 0, "deviceState": 0, "withSelfTest": 40}, "busy"),
+    ({"state": 0, "deviceState": 0, "err": {"errcode": 2001, "key": 1, "value": ""}}, "error"),
+    ({"state": 1, "deviceState": 1, "err": {"errcode": 2001, "key": 1, "value": ""}}, "printing"),
+])
+def test_creality_extra_state_codes(fields: dict[str, Any], norm: str) -> None:
+    st = creality.parse_status({**k1_state(), **fields})
+    assert st.state == norm
+
+
+def test_cmd_start_k1_refuses_a_plate_that_leaves_the_axis(k1: FakeCreality, env: Path, tmp_path: Path,
+                                                           thumbs_ok: None, capsys: pytest.CaptureFixture[str]) -> None:
+    g = gcode(tmp_path, plate("G1 X62.83 Y2.774 E1\nG3 Z1.36 I-.359 J-1.79 P1\n"), "edge.gcode")
+    k1.files["edge.gcode"] = g.stat().st_size
+    write_devices(env, k1=k1)
+    with pytest.raises(PrinterRefused, match="preflight FAIL"):
+        printer("start", "k1se", str(g), "--yes", "--secs", "0.3")
+    assert k1.writes() == []
+    assert "axis travel" in capsys.readouterr().out
+
+
+# ---- third review round ---------------------------------------------------------------------
+
+def test_set_gcode_offset_shifts_later_moves(tmp_path: Path) -> None:
+    """Klipper applies SET_GCODE_OFFSET to every later move: G-code X10 becomes machine X240."""
+    rep = bounds(tmp_path, plate("G1 X10 Y10\nSET_GCODE_OFFSET X=230 MOVE=0\nG1 X10 Y10 E1\n"))
+    assert [(v.x, v.y) for v in rep.axis_out] == [(240.0, 10.0)]
+    rep = bounds(tmp_path, plate("G1 X10 Y10\nSET_GCODE_OFFSET X_ADJUST=-20 MOVE=1\n"))
+    assert [(v.x, v.y) for v in rep.axis_out] == [(-10.0, 10.0)]  # MOVE=1: the head moves there now
+    rep = bounds(tmp_path, plate("G1 X10 Y10\nSET_GCODE_OFFSET X=5\nG92 X0\nG1 X10 Y10 E1\n"))
+    assert rep.axis_out_count == 0 and rep.plate_extent is not None and rep.plate_extent[1] == 20.0
+
+
+def test_extruding_move_from_an_exempt_custom_block_checks_its_start(tmp_path: Path) -> None:
+    """The custom block parks at X-3; the first wall line starts there: plastic outside 0..220."""
+    body = ";TYPE:Custom\nG1 X-3 Y10\n;TYPE:Outer wall\nM83\nG1 X10 Y10 E1\n"
+    rep = bounds(tmp_path, plate(body), None)
+    assert [(v.x, v.y) for v in rep.area_out] == [(-3.0, 10.0)]
+    travel = ";TYPE:Custom\nG1 X-3 Y10\n;TYPE:Outer wall\nG1 X10 Y10\n"  # a travel from there is fine
+    assert bounds(tmp_path, plate(travel), None).area_out_count == 0
+
+
+def test_plate_move_with_one_axis_unknown(tmp_path: Path) -> None:
+    rep = bounds(tmp_path, plate("G1 X-3\nG1 X10\n", start="G28\n"), None)
+    assert [(v.x, v.y) for v in rep.area_out] == [(-3.0, None)]  # provably outside 0..220
+    assert rep.unverified_count == 1  # X10 alone cannot prove containment
+
+
+def test_exclude_area_fails_even_without_printable_area(tmp_path: Path) -> None:
+    footer = "; bed_exclude_area = 0x0,18x0,18x28,0x28\n"
+    rep = bounds(tmp_path, plate("M83\nG1 X30 Y40\nG1 X10 Y10 E1\n", footer=footer), None)
+    checks = preflight.check_moves(rep, None, "")
+    assert checks[1].status == "FAIL" and "bed_exclude_area" in checks[1].detail
+
+
+@pytest.mark.parametrize("reply", [{"status": ["bad"]}, {"status": {"configfile": "bad"}},
+                                   {"status": {"configfile": {"settings": {"stepper_x": [], "stepper_y": {}}}}}])
+def test_moonraker_malformed_config_gives_unknown_limits(moon: FakeMoonraker, reply: dict[str, Any],
+                                                         monkeypatch: pytest.MonkeyPatch) -> None:
+    a = moonraker.MoonrakerAdapter("u1", "127.0.0.1", moon.port)
+    monkeypatch.setattr(a, "_get", lambda path: reply)
+    lim, why = a.axis_limits()
+    assert lim is None and "position_max" in why
+
+
+# ---- fourth review round --------------------------------------------------------------------
+
+def test_line_numbered_gcode_is_checked(tmp_path: Path) -> None:
+    rep = bounds(tmp_path, plate("N1 G1 X10 Y10*33\nN2 G1 X300 Y10*12\n"))
+    assert [(v.x, v.y) for v in rep.axis_out] == [(300.0, 10.0)]
+
+
+def test_restore_gcode_state_restores_relative_mode(tmp_path: Path) -> None:
+    body = "G1 X200 Y10\nG91\nSAVE_GCODE_STATE NAME=a\nG90\nRESTORE_GCODE_STATE NAME=a\nG1 X100\nG90\n"
+    rep = bounds(tmp_path, plate(body))
+    assert [(v.x, v.y) for v in rep.axis_out] == [(300.0, 10.0)]  # X100 is relative again
+    moved = "G1 X10 Y10\nSAVE_GCODE_STATE NAME=p\nG1 X-4.9 Y10\nG1 X300\nRESTORE_GCODE_STATE NAME=p MOVE=1\nG91\nG1 X-20\nG90\n"
+    rep = bounds(tmp_path, plate(moved))
+    assert [(v.x, v.y) for v in rep.axis_out] == [(300.0, 10.0), (-10.0, 10.0)]  # MOVE=1 went back to X10
+
+
+def test_restore_of_an_unknown_state_is_unverified(tmp_path: Path) -> None:
+    rep = bounds(tmp_path, plate("G1 X10 Y10\nRESTORE_GCODE_STATE NAME=macro\nG91\nG1 X10\nG90\n"))
+    assert rep.unverified_count >= 1 and "outside this file" in rep.unverified[0]
+
+
+@pytest.mark.parametrize("body, out", [
+    ("G1 X10 Y90\nG1 X90 Y10\n", 1),            # travel line through the L's notch
+    ("G1 X35 Y20\nG3 X35 Y20 I-15 J0\n", 1),    # travel circle about (20,20) r=15 crosses the notch corner
+    ("G1 X25 Y15\nG3 X25 Y15 I-10 J0\n", 0),    # circle r=10 stays in the L's corner square
+    (";TYPE:Custom\nG1 X50 Y50\n;TYPE:Inner wall\nG1 X10 Y10\n", 0),  # enters from a vendor park spot
+])
+def test_travel_cutting_a_concave_printable_area_fails(tmp_path: Path, body: str, out: int) -> None:
+    """Review case: a travel that starts and ends inside an L-shaped area but leaves it between."""
+    l_shape = "; printable_area = 0x0,100x0,100x30,30x30,30x100,0x100\n"
+    rep = bounds(tmp_path, plate(body, footer=l_shape), None)
+    assert rep.area_out_count == out
+
+
+# ---- fifth review round ---------------------------------------------------------------------
+
+def test_restore_gcode_state_restores_the_extruder_coordinate(tmp_path: Path) -> None:
+    body = ("M82\nG92 E0\nG1 X100 Y100\nSAVE_GCODE_STATE NAME=a\nG1 E10\n"
+            "RESTORE_GCODE_STATE NAME=a\nG1 X114 Y114 E1\n")
+    rep = bounds(tmp_path, plate(body, footer=SQUARE), None)
+    assert rep.excluded_in_count == 1  # E back to 0, so E1 extrudes into the excluded square
+
+
+def test_saved_state_names_are_case_sensitive(tmp_path: Path) -> None:
+    body = ("G1 X10 Y10\nSET_GCODE_OFFSET X=230\nSAVE_GCODE_STATE NAME=foo\nSET_GCODE_OFFSET X=0\n"
+            "SAVE_GCODE_STATE NAME=FOO\nRESTORE_GCODE_STATE NAME=foo\nG1 X10 Y10\n")
+    rep = bounds(tmp_path, plate(body))
+    assert [(v.x, v.y) for v in rep.axis_out] == [(240.0, 10.0)]
+
+
+def test_g92_at_an_unknown_position_makes_later_moves_unverified(tmp_path: Path) -> None:
+    rep = bounds(tmp_path, plate("G1 X10 Y10\n", start="G28\nG90\nG92 X0 Y0\n"))
+    assert rep.axis_out_count == 0 and rep.unverified_count >= 1
+    assert "G92 offset" in rep.unverified[0]
+
+
+# ---- sixth review round ---------------------------------------------------------------------
+
+def test_clockwise_arc_ending_on_the_start_angle_is_a_full_turn(tmp_path: Path) -> None:
+    """Klipper plans `G2 X15 Y10 I10 J0` from (10,10) as a full clockwise turn about (20,10):
+    it reaches X30 before ending at X15."""
+    rep = bounds(tmp_path, plate("G1 X10 Y10\nG2 X15 Y10 I10 J0\n"), ((0.0, 29.0), (0.0, 29.0)))
+    assert rep.axis_out_count == 1 and rep.axis_out[0].x == pytest.approx(30.0)
+    a0, sweep = move_bounds.arc_sweep(10, 10, 15, 10, 10, 0, False)
+    assert sweep == 0.0  # the same command counter-clockwise does not turn at all
+
+
+def test_set_gcode_offset_e_shifts_the_extruder_coordinate(tmp_path: Path) -> None:
+    body = "M82\nG92 E0\nG1 X10 Y10 E10\nSET_GCODE_OFFSET E=10\nG1 X14 Y14 E5\n"
+    excl = "; printable_area = 0x0,256x0,256x256,0x256\n; bed_exclude_area = 12x12,16x12,16x16,12x16\n"
+    rep = bounds(tmp_path, plate(body, footer=excl), None)
+    assert rep.excluded_in_count == 1  # logical E is 0 after the offset: E5 extrudes
+
+
+def test_indented_final_feature_is_still_on_the_plate(tmp_path: Path) -> None:
+    text = plate("G1 X10 Y10 E1\n", end=";TYPE:Prime tower\n  G1 X226 Y10 E2\n")
+    rep = bounds(tmp_path, text, None)
+    assert [(v.x, v.y) for v in rep.area_out] == [(226.0, 10.0)]
+
+
+# ---- seventh review round -------------------------------------------------------------------
+
+def test_indented_feature_comment_puts_the_move_on_the_plate(tmp_path: Path) -> None:
+    text = (";TYPE:Custom\nG28\nG90\n;LAYER_CHANGE\n  ;TYPE:Outer wall\nG1 X10 Y10\nG1 X225 Y10 E1\n"
+            "EXCLUDE_OBJECT_END NAME=a\n" + K1_FOOTER)
+    rep = bounds(tmp_path, text, None)
+    assert [(v.x, v.y) for v in rep.area_out] == [(225.0, 10.0)]
+
+
+def test_first_extrusion_after_homing_still_checks_its_end_against_the_exclude_area(tmp_path: Path) -> None:
+    rep = bounds(tmp_path, plate("M83\nG1 X114 Y114 E1\n", start="G28\nG90\n", footer=SQUARE), None)
+    assert rep.excluded_in_count == 1 and rep.unverified_count == 1
+
+
+def test_offset_and_restore_moves_are_checked_against_the_area(tmp_path: Path) -> None:
+    small = "; printable_area = 0x0,20x0,20x20,0x20\n"
+    body = "G1 X10 Y10\nSET_GCODE_OFFSET X=15 MOVE=1\nSET_GCODE_OFFSET X=0 MOVE=1\n"
+    rep = bounds(tmp_path, plate(body, footer=small), None)
+    assert [(v.x, v.y) for v in rep.area_out] == [(25.0, 10.0)]
+    l_shape = "; printable_area = 0x0,100x0,100x30,30x30,30x100,0x100\n"
+    body = "G1 X10 Y90\nSAVE_GCODE_STATE NAME=s\nG1 X10 Y10\nG1 X90 Y10\nRESTORE_GCODE_STATE NAME=s MOVE=1\n"
+    rep = bounds(tmp_path, plate(body, footer=l_shape), None)
+    assert rep.area_out_count == 1  # the restore travel from (90,10) back to (10,90) cuts the notch
+
+
+@pytest.mark.parametrize("body", [
+    "M82\nG92 E10\nG1 X100 Y100\nSET_GCODE_OFFSET E=-10 MOVE=1\nG1 X114 Y114 E15\n",
+    "M82\nG92 E0\nM221 S200\nG1 X10 Y10\nSET_GCODE_OFFSET E=-10\nG1 X14 Y14 E7\n",
+])
+def test_unknown_logical_e_counts_e_words_as_extrusion(tmp_path: Path, body: str) -> None:
+    excl = SQUARE if "X114" in body else SQUARE.replace("112x112,116x112,116x116,112x116", "12x12,16x12,16x16,12x16")
+    assert bounds(tmp_path, plate(body, footer=excl), None).excluded_in_count == 1
+
+
+def test_firmware_arc_chords_through_an_exclude_area_fail(tmp_path: Path) -> None:
+    """Review case: a 0.5 mm semicircle is ONE 1 mm chord in Klipper, straight through (100,100)."""
+    tiny = ("; printable_area = 0x0,256x0,256x256,0x256\n"
+            "; bed_exclude_area = 99.9x99.9,100.1x99.9,100.1x100.1,99.9x100.1\n")
+    rep = bounds(tmp_path, plate("M83\nG1 X100.5 Y100\nG3 X99.5 Y100 I-0.5 J0 E1\n", footer=tiny), None)
+    assert rep.excluded_in_count == 1
+    chords = move_bounds.Move.arc_move(100.5, 100, 99.5, 100, -0.5, 0, False).chords()
+    assert chords is not None and len(chords) == 1
+
+
+# ---- eighth review round --------------------------------------------------------------------
+
+def test_tool_change_and_activate_extruder_reset_the_extruder_coordinate(tmp_path: Path) -> None:
+    excl = SQUARE.replace("112x112,116x112,116x116,112x116", "12x12,16x12,16x16,12x16")
+    for switch in ("ACTIVATE_EXTRUDER EXTRUDER=extruder1", "T1"):
+        body = f"M82\nG92 E0\nG1 X10 Y10 E10\n{switch}\nG1 X14 Y14 E5\n"
+        assert bounds(tmp_path, plate(body, footer=excl), None).excluded_in_count == 1, switch
+
+
+def test_extrusion_in_place_inside_the_exclude_area_fails(tmp_path: Path) -> None:
+    excl = SQUARE.replace("112x112,116x112,116x116,112x116", "12x12,16x12,16x16,12x16")
+    rep = bounds(tmp_path, plate("M83\nG1 X14 Y14\nG1 E10\n", footer=excl), None)
+    assert [(v.x, v.y) for v in rep.excluded_in] == [(14.0, 14.0)]
+
+
+def test_huge_and_helical_arcs_near_the_exclude_area_are_unverified_not_simulated(tmp_path: Path) -> None:
+    huge = "M83\nG1 X100 Y100\nG2 X100 Y100 I100000000 J0 E1\n"
+    # inside the circle's bounding box, off its (nearly vertical, x≈100) ideal path near the start
+    far = "; printable_area = 0x0,256x0,256x256,0x256\n; bed_exclude_area = 200x0,201x0,201x1,200x1\n"
+    rep = bounds(tmp_path, plate(huge, footer=far), None)
+    assert any("chords not reproduced" in u for u in rep.unverified)
+    tiny = ("; printable_area = 0x0,256x0,256x256,0x256\n"
+            "; bed_exclude_area = 100.85x100.35,100.86x100.35,100.86x100.36,100.85x100.36\n")
+    rep = bounds(tmp_path, plate("M83\nG1 X101 Y100\nG3 X99 Y100 Z4 I-1 J0 E1\n", footer=tiny), None)
+    assert rep.excluded_in_count == 0 and any("chords not reproduced" in u for u in rep.unverified)
+
+
+def test_quoted_and_malformed_offset_values(tmp_path: Path) -> None:
+    rep = bounds(tmp_path, plate('G1 X10 Y10\nSET_GCODE_OFFSET X="230"\nG1 X10 Y10\n'))
+    assert [(v.x, v.y) for v in rep.axis_out] == [(240.0, 10.0)]
+    rep = bounds(tmp_path, plate("G1 X10 Y10\nSET_GCODE_OFFSET X=abc\nG1 X10 Y10\n"))
+    assert rep.axis_out_count == 0 and any("non-numeric" in u for u in rep.unverified)

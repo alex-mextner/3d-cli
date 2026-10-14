@@ -46,6 +46,7 @@ from printer_ops.base import (
     http_json,
     http_upload,
 )
+from printer_ops.move_bounds import Limits
 
 _STATE = {
     "standby": IDLE,
@@ -156,6 +157,23 @@ class MoonrakerAdapter(Adapter):
         if not isinstance(status, dict):
             raise self._comm_error("objects/query", f"no 'status' in reply: {str(result)[:200]}")
         return parse_status(status)
+
+    def axis_limits(self) -> tuple[Limits | None, str]:
+        """Configured limits win; otherwise Klipper's own stepper_x/stepper_y position_min/max."""
+        if self.configured_limits is not None:
+            return self.configured_limits, "printer-devices.yaml"
+        try:
+            result = self._get("/printer/objects/query?configfile=settings")
+        except PrinterCommError as exc:
+            return None, f"Klipper config unreadable: {exc.message}"
+        try:
+            settings = result["status"]["configfile"]["settings"]
+            sx, sy = settings["stepper_x"], settings["stepper_y"]
+            lim = ((float(sx.get("position_min", 0.0)), float(sx["position_max"])),
+                   (float(sy.get("position_min", 0.0)), float(sy["position_max"])))
+        except (KeyError, TypeError, ValueError, AttributeError):
+            return None, "Klipper config has no stepper_x/stepper_y position_max"
+        return lim, "Klipper stepper_x/stepper_y"
 
     def list_files(self, expect: tuple[str, int] | None = None) -> dict[str, RemoteFile]:
         result = self._get("/server/files/list?root=gcodes")

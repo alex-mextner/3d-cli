@@ -846,8 +846,10 @@ Epic: [#90](https://github.com/alex-mextner/3d-cli/issues/90).
   map via `print_task_config`, [#92](https://github.com/alex-mextner/3d-cli/issues/92)) and
   **creality-stock** (K1 family: HTTP upload + ws:9999, [#93](https://github.com/alex-mextner/3d-cli/issues/93));
   safety rules [#95](https://github.com/alex-mextner/3d-cli/issues/95); `3d print-preflight`
-  ([#96](https://github.com/alex-mextner/3d-cli/issues/96)) gates `start`. Next: pause/resume/history/
-  slots/snapshot ([#97](https://github.com/alex-mextner/3d-cli/issues/97)), more adapters
+  ([#96](https://github.com/alex-mextner/3d-cli/issues/96)) gates `start`, including `3d gcode-bounds`
+  (every move and arc extreme vs axis travel / printable area, [#101](https://github.com/alex-mextner/3d-cli/issues/101)).
+  Next: start waits for the printer to really start ([#100](https://github.com/alex-mextner/3d-cli/issues/100)),
+  pause/resume/history/slots/snapshot ([#97](https://github.com/alex-mextner/3d-cli/issues/97)), more adapters
   ([#98](https://github.com/alex-mextner/3d-cli/issues/98)), durable job ledger
   ([#68](https://github.com/alex-mextner/3d-cli/issues/68)).
 - 📋 **Printer integrations** — pluggable backends (registry, §3): **Klipper/Moonraker** (primary;

@@ -13,7 +13,8 @@ ENTRY:
   u1:   {adapter: moonraker, host: 192.168.0.26, port: 7125, model: Snapmaker U1}
   k1se: {adapter: creality-stock, host: 192.168.0.27, model: Creality K1 SE}
   `port` defaults to 7125 (moonraker) / 80 (creality-stock HTTP); creality-stock also takes
-  `ws_port` (default 9999).
+  `ws_port` (default 9999). Optional `axis_limits: {x: [min, max], y: [min, max]}` is the
+  real X/Y travel used by `3d print-preflight` (Moonraker printers report it themselves).
 
 Only devices listed here are ever contacted — no LAN discovery (issue #62 network modes).
 """
@@ -25,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from errors import InvalidArgument, MissingDependency, ThreeDError, UsageError
+from printer_ops.move_bounds import Limits
 
 FILENAME = "printer-devices.yaml"
 ADAPTERS = ("moonraker", "creality-stock")
@@ -40,7 +42,8 @@ u1:
 k1se:
   adapter: creality-stock   # Creality K1 family on stock firmware (HTTP + ws:9999)
   host: 192.168.0.27
-  model: Creality K1 SE"""
+  model: Creality K1 SE
+  axis_limits: {{x: [-5, 229], y: [-0.5, 227]}}   # stepper_x/y position_min/max, printer.cfg"""
 
 
 class DeviceConfigError(ThreeDError):
@@ -56,6 +59,7 @@ class Device:
     model: str | None
     source: Path
     ws_port: int | None = None  # creality-stock only: WebSocket port (default 9999)
+    axis_limits: Limits | None = None  # real X/Y travel ((xmin, xmax), (ymin, ymax)), for print-preflight
 
 
 def user_path() -> Path:
@@ -72,6 +76,23 @@ def _port(value: Any, key: str, path: Path) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or not 0 < value < 65536:
         raise InvalidArgument(key, str(value), ["an integer 1-65535"], command="printer", extra=f"Fix {path}.")
     return value
+
+
+def _axis_limits(value: Any, name: str, path: Path) -> Limits:
+    """`{x: [-5, 229], y: [-0.5, 227]}` -> ((-5.0, 229.0), (-0.5, 227.0))."""
+    bad = InvalidArgument(f"{name}.axis_limits", str(value), ["{x: [min, max], y: [min, max]} with min < max"],
+                          command="printer", extra=f"Fix {path}.")
+    if not isinstance(value, dict):
+        raise bad
+    out = []
+    for axis in ("x", "y"):
+        pair = value.get(axis)
+        if (not isinstance(pair, list) or len(pair) != 2
+                or not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in pair)
+                or not pair[0] < pair[1]):
+            raise bad
+        out.append((float(pair[0]), float(pair[1])))
+    return (out[0], out[1])
 
 
 def _parse(path: Path, data: Any) -> dict[str, Device]:
@@ -100,7 +121,8 @@ def _parse(path: Path, data: Any) -> dict[str, Device]:
         port = _port(spec.get("port", DEFAULT_PORT[adapter]), f"{name}.port", path)
         ws_port = _port(spec["ws_port"], f"{name}.ws_port", path) if "ws_port" in spec else None
         model = spec.get("model")
-        out[name] = Device(name, adapter, host, port, str(model) if model else None, path, ws_port)
+        limits = _axis_limits(spec["axis_limits"], name, path) if "axis_limits" in spec else None
+        out[name] = Device(name, adapter, host, port, str(model) if model else None, path, ws_port, limits)
     return out
 
 

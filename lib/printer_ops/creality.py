@@ -14,10 +14,13 @@ PAST BUG (issue https://github.com/alex-mextner/3d-cli/issues/99): sending the e
   into it) in 4 of 4 uploads; with only `file` it was byte-identical in 5 of 5. Files of about
   170 bytes or less keep the trailer anyway — so the stored size is ALWAYS compared.
 
-STATE CODES (observed on a K1 SE, 2026-10): state 0 idle, 1 printing, 2 complete;
-  deviceState 0 idle, 1 busy. Other codes are unverified: with deviceState 0 they are reported
-  as idle with the raw code in the message (the proven start rule of garage-band
-  gen/k1_print.py: refuse while deviceState != 0 or state == 1).
+STATE CODES: observed on our K1 SE (2026-10): state 0 idle, 1 printing, 2 complete;
+  deviceState 0 idle, 1 busy. From ha_creality_ws derive_print_state (K1-family Home Assistant
+  integration, https://github.com/3dg1luk43/ha_creality_ws/blob/a8e5491809227ff3ce72bc6b317cc75075e19b9f/custom_components/ha_creality_ws/utils.py#L640-L690):
+  5 paused, 4 stopped (after a cancel), 7 a cancel still finishing (busy), withSelfTest 1..99
+  self-test running (busy). Busy states win over a non-zero err code — a stale error must
+  never make a printing machine look free. Any other code with deviceState 0 is reported as
+  idle with the raw code in the message.
 
 UPLOAD WHILE BUSY: refused — overwriting the file being printed is unsafe and the firmware
   does not check it.
@@ -35,8 +38,12 @@ from urllib.parse import quote
 
 from printer_ops.base import (
     BUSY,
+    BUSY_STATES,
+    CANCELLED,
     COMPLETE,
+    ERROR,
     IDLE,
+    PAUSED,
     PRINTING,
     UNKNOWN,
     Adapter,
@@ -80,25 +87,38 @@ def merge_messages(msgs: list[str]) -> dict[str, Any]:
 def parse_status(s: dict[str, Any], info: dict[str, Any] | None = None) -> PrinterStatus:
     st, ds = _int(s.get("state")), _int(s.get("deviceState"))
     message = None
+    self_test = _int(s.get("withSelfTest"))
     if not s:
         state = UNKNOWN
         message = "the printer pushed no state on ws:9999 within the listen window"
     elif st == 1:
         state = PRINTING
+    elif st == 5:
+        state = PAUSED
+    elif st == 7:
+        state, message = BUSY, "state 7: a cancel is still finishing"
+    elif self_test is not None and 1 <= self_test <= 99:
+        state, message = BUSY, f"self-test running ({self_test}%)"
     elif ds not in (0, None):
         state = BUSY
     elif st == 0:
         state = IDLE
     elif st == 2:
         state = COMPLETE
+    elif st == 4:
+        state = CANCELLED
     elif ds == 0:
         state = IDLE
         message = f"state code {st} is not mapped; deviceState 0 (device idle)"
     else:
         state = UNKNOWN
     err = s.get("err")
-    if isinstance(err, dict) and _int(err.get("errcode")):
-        message = f"err {err.get('errcode')} {err.get('key', '')} {err.get('value', '')}".strip()
+    errcode = _int(err.get("errcode")) if isinstance(err, dict) else _int(err)
+    if errcode:
+        detail = f" {err.get('key', '')} {err.get('value', '')}".rstrip() if isinstance(err, dict) else ""
+        message = f"err {errcode}{detail}"
+        if state not in BUSY_STATES:
+            state = ERROR
     progress = _num(s.get("printProgress"))
     temps = {
         "nozzle": (_num(s.get("nozzleTemp")), _num(s.get("targetNozzleTemp"))),
