@@ -1,0 +1,162 @@
+"""Unit tests for the head-sequence check (slicing.head_sequence) — synthetic 3MF + G-code."""
+from __future__ import annotations
+
+import zipfile
+from pathlib import Path
+
+import pytest
+
+from errors import GateFailure, UsageError
+from head_sequence_fixtures import gcode, project_3mf
+from slicing.head_sequence import check, heads_by_layer, preflight_check, read_recipes
+
+
+def _by_name(report):
+    return {o.name: o for o in report.objects}
+
+
+def test_pattern_followed_at_phase_one_ok_and_wrong_head_fails(tmp_path: Path) -> None:
+    proj = project_3mf(tmp_path / "p.3mf", {"A": 5, "B": 5})
+    # A starts at phase 1 of "14" (head 4 first); B prints head 1 on every layer.
+    layers = [{"A": 4 if i % 2 == 0 else 1, "B": 1} for i in range(6)]
+    report = check(str(proj), str(gcode(tmp_path / "p.gcode", layers)))
+    objs = _by_name(report)
+    assert objs["A"].status == "ok"
+    assert objs["B"].status == "FAIL"
+    assert objs["B"].patterns == ["14"]
+    assert report.failures == 1
+    assert report.to_dict()["status"] == "FAIL"
+
+
+def test_single_wrong_layer_fails(tmp_path: Path) -> None:
+    proj = project_3mf(tmp_path / "p.3mf", {"A": 5})
+    layers = [{"A": 1 if i % 2 == 0 else 4} for i in range(6)]
+    layers[3] = {"A": 2}
+    assert check(str(proj), str(gcode(tmp_path / "p.gcode", layers))).failures == 1
+
+
+def test_raft_layers_in_support_filament_are_skipped(tmp_path: Path) -> None:
+    proj = project_3mf(tmp_path / "p.3mf", {"A": 5}, raft_layers=4)
+    layers = [{"A": 3}] * 4 + [{"A": 1 if i % 2 == 0 else 4} for i in range(4)]
+    report = check(str(proj), str(gcode(tmp_path / "p.gcode", layers)))
+    assert _by_name(report)["A"].status == "ok"
+    assert _by_name(report)["A"].layers == 4
+
+
+def test_ratio_row_reported_local_z_not_failed(tmp_path: Path) -> None:
+    proj = project_3mf(tmp_path / "p.3mf", {"C": 6})
+    report = check(str(proj), str(gcode(tmp_path / "p.gcode", [{"C": 2}, {"C": 2}])))
+    assert _by_name(report)["C"].status == "local-z"
+    assert report.failures == 0
+
+
+def test_bambu_pseudo_tool_changes_are_not_heads() -> None:
+    lines = [";LAYER_CHANGE", "T2", "EXCLUDE_OBJECT_START NAME=A", "T255", "T1000",
+             "G1 X1 Y1 E0.2", "EXCLUDE_OBJECT_END NAME=A"]
+    assert heads_by_layer(lines)["A"][0] == {3}
+
+
+def test_moves_and_retracts_do_not_count() -> None:
+    lines = [";LAYER_CHANGE", "EXCLUDE_OBJECT_START NAME=A", "T1", "G1 X1 Y1 F3000",
+             "G1 E-0.5", "G1 X2 Y2 ; E1 in a comment", "EXCLUDE_OBJECT_END NAME=A"]
+    assert "A" not in heads_by_layer(lines)
+
+
+def test_recipes_virtual_ids_follow_physical(tmp_path: Path) -> None:
+    proj = project_3mf(tmp_path / "p.3mf", {"A": 1}, raft_layers=2)
+    with zipfile.ZipFile(proj) as zf:
+        assert read_recipes(zf) == ({5: "14", 6: ""}, 2)
+
+
+def test_unknown_object_fails(tmp_path: Path) -> None:
+    proj = project_3mf(tmp_path / "p.3mf", {"A": 1})
+    report = check(str(proj), str(gcode(tmp_path / "p.gcode", [{"Zed": 1}])))
+    assert [o.status for o in report.objects if o.name.startswith("Zed")] == ["FAIL"]
+
+
+def test_single_plate_object_missing_from_gcode_fails(tmp_path: Path) -> None:
+    proj = project_3mf(tmp_path / "p.3mf", {"A": 5, "B": 5})
+    report = check(str(proj), str(gcode(tmp_path / "p.gcode", [{"A": 1}, {"A": 4}])))
+    assert _by_name(report)["B"].status == "FAIL"
+    assert "not printed" in _by_name(report)["B"].detail
+
+
+def test_gcode_without_object_labels_fails(tmp_path: Path) -> None:
+    proj = project_3mf(tmp_path / "p.3mf", {"A": 5})
+    g = tmp_path / "p.gcode"
+    g.write_text(";LAYER_CHANGE\nT0\nG1 X1 Y1 E1\n")
+    assert check(str(proj), str(g)).failures == 1
+
+
+def test_prefix_overlapping_names_match_longest(tmp_path: Path) -> None:
+    proj = project_3mf(tmp_path / "p.3mf", {"A": 1, "AB": 5})
+    report = check(str(proj), str(gcode(tmp_path / "p.gcode", [{"A": 1, "AB": 1}, {"A": 1, "AB": 1}])))
+    assert _by_name(report)["A"].status == "ok"
+    assert _by_name(report)["AB"].status == "FAIL"
+
+
+def test_phase_explosion_is_bounded(tmp_path: Path) -> None:
+    row = "1,4,1,1,50,0,g,w,m2,z0,xa0,xb0,d0,o0,u701,cm1," + "1234" * 5
+    proj = project_3mf(tmp_path / "p.3mf", {"A": 5}, mixed=";".join([row] * 6))
+    # Object A uses all six virtual rows (20^6 phase combinations).
+    with zipfile.ZipFile(proj) as zf:
+        ms = zf.read("Metadata/model_settings.config").decode()
+        cfg = zf.read("Metadata/project_settings.config")
+    parts = "".join(f'<part id="{i}"><metadata key="extruder" value="{5 + i}"/></part>' for i in range(6))
+    ms = ms.replace('<part id="1"><metadata key="extruder" value="5"/></part>', parts)
+    with zipfile.ZipFile(proj, "w") as zf:
+        zf.writestr("Metadata/project_settings.config", cfg)
+        zf.writestr("Metadata/model_settings.config", ms)
+    report = check(str(proj), str(gcode(tmp_path / "p.gcode", [{"A": 1}])))
+    assert _by_name(report)["A"].status == "FAIL"
+    assert "combinations" in _by_name(report)["A"].detail
+
+
+@pytest.mark.parametrize("kind", ["stl", "bare3mf", "corrupt"])
+def test_cli_rejects_non_project_input(tmp_path: Path, kind: str) -> None:
+    from commands.slice_check import run
+
+    inp = tmp_path / ("m.stl" if kind == "stl" else "m.3mf")
+    if kind == "bare3mf":
+        with zipfile.ZipFile(inp, "w") as zf:
+            zf.writestr("3D/3dmodel.model", "<model/>")
+    elif kind == "corrupt":
+        with zipfile.ZipFile(inp, "w") as zf:
+            zf.writestr("Metadata/project_settings.config", "{not json")
+            zf.writestr("Metadata/model_settings.config", "<config/>")
+    else:
+        inp.write_text("solid x\nendsolid x\n")
+    g = gcode(tmp_path / "p.gcode", [{"A": 1}])
+    with pytest.raises(UsageError):
+        run([str(inp), "--gcode", str(g), "--check", "head-sequence"])
+
+
+def test_preflight_skip_when_no_mixed_and_single_head(tmp_path: Path) -> None:
+    proj = project_3mf(tmp_path / "p.3mf", {"A": 2}, mixed="")
+    result = preflight_check(str(gcode(tmp_path / "p.gcode", [{"A": 2}])), str(proj))
+    assert result["check"] == "head_sequence"
+    assert result["status"] == "SKIP"
+
+
+def test_preflight_pass(tmp_path: Path) -> None:
+    proj = project_3mf(tmp_path / "p.3mf", {"A": 5})
+    g = gcode(tmp_path / "p.gcode", [{"A": 1}, {"A": 4}])
+    assert preflight_check(str(g), str(proj))["status"] == "PASS"
+
+
+def test_cli_requires_gcode_with_check(tmp_path: Path) -> None:
+    from commands.slice_check import run
+
+    proj = project_3mf(tmp_path / "p.3mf", {"A": 5})
+    with pytest.raises(UsageError):
+        run([str(proj), "--check", "head-sequence"])
+
+
+def test_cli_fail_raises_gate_failure(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    from commands.slice_check import run
+
+    proj = project_3mf(tmp_path / "p.3mf", {"B": 5})
+    g = gcode(tmp_path / "p.gcode", [{"B": 1}, {"B": 1}])
+    with pytest.raises(GateFailure):
+        run([str(proj), "--gcode", str(g), "--check", "head-sequence"])
+    assert "FAIL B" in capsys.readouterr().out

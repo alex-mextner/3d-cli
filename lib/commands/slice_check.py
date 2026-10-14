@@ -45,6 +45,7 @@ Examples:
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import re
 import shutil
@@ -89,6 +90,14 @@ Options:
   --timeout SECS    per-slicer-call timeout (default 420).
   --printer NAME    informational; recorded in the report (profile selection is embedded
                     in a project 3MF).
+
+Offline G-code checks (no slicer needed; replaces OPEN/PLATES/SLICE for this run):
+  --gcode FILE      the sliced plate G-code of this project 3MF.
+  --check NAME      run an offline check (repeatable). Available:
+                    head-sequence — each object prints, layer by layer, on the heads its
+                    filaments call for (mixed-filament manual patterns at any phase; raft
+                    layers skipped; ratio/Local-Z rows reported `local-z`, not checked).
+  --json            machine-readable result (only with --check).
 
 Env:
   SLICER=/path/to/binary   force a specific slicer (same as --slicer).
@@ -296,6 +305,9 @@ class _Opts:
         self.datadir: str | None = None
         self.timeout = 420
         self.printer = ""
+        self.gcode: str | None = None
+        self.checks: list[str] = []
+        self.json = False
 
 
 def _parse(argv: list[str]) -> _Opts:
@@ -325,9 +337,25 @@ def _parse(argv: list[str]) -> _Opts:
         elif a == "--printer":
             opts.printer = _value(rest, i, a)
             i += 2
+        elif a == "--gcode":
+            opts.gcode = _value(rest, i, a)
+            i += 2
+        elif a == "--check":
+            name = _value(rest, i, a)
+            if name not in _OFFLINE_CHECKS:
+                raise InvalidArgument(a, name, list(_OFFLINE_CHECKS), command="slice-check")
+            opts.checks.append(name)
+            i += 2
+        elif a == "--json":
+            opts.json = True
+            i += 1
         else:
             print(USAGE)
             raise UsageError(f"unknown option '{a}'", command="slice-check")
+    if opts.checks and not opts.gcode:
+        raise UsageError("--check requires --gcode PLATE.gcode", command="slice-check")
+    if opts.json and not opts.checks:
+        raise UsageError("--json is only supported with --check", command="slice-check")
     return opts
 
 
@@ -356,6 +384,8 @@ def run(argv: list[str]) -> int:
     opts = _parse(argv)
     if not os.path.isfile(opts.inp):
         raise InputNotFound(opts.inp, command="slice-check")
+    if opts.checks:
+        return _run_offline_checks(opts)
 
     binary = _find_info_binary(opts.slicer)
     if binary is None:
@@ -367,6 +397,32 @@ def run(argv: list[str]) -> int:
         )
 
     return _verify(opts, binary)
+
+
+# Checks that read an existing project 3MF + its sliced G-code; no slicer binary needed.
+_OFFLINE_CHECKS = ("head-sequence",)
+
+
+def _run_offline_checks(opts: _Opts) -> int:
+    from slicing.head_sequence import ProjectError, check, format_lines
+
+    assert opts.gcode is not None
+    if not os.path.isfile(opts.gcode):
+        raise InputNotFound(opts.gcode, command="slice-check")
+    try:
+        report = check(opts.inp, opts.gcode)
+    except ProjectError as exc:
+        raise UsageError(str(exc), command="slice-check") from exc
+    if opts.json:
+        print(json.dumps({"checks": [report.to_dict()]}, indent=2))
+    else:
+        print(f"slice-check head-sequence: {os.path.basename(opts.inp)} vs {os.path.basename(opts.gcode)}")
+        for line in format_lines(report):
+            print(f"  {line}")
+    if report.failures:
+        raise GateFailure(f"head-sequence: {report.failures} object(s) off their recipes",
+                          command="slice-check", silent=True)
+    return 0
 
 
 def _verify(opts: _Opts, binary: str) -> int:
