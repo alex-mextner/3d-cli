@@ -10,6 +10,9 @@ import pytest
 
 _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 os.environ.setdefault("REPO_ROOT", _REPO)
+# The repo's fleet/printers.yaml names the real printers on the LAN: no test may reach them by
+# accident. Tests that want a fleet pass THREED_FLEET=<file> (printops.fleet; `3d` children inherit this).
+os.environ["THREED_FLEET"] = ""
 _LIB = os.path.join(_REPO, "lib")
 if _LIB not in sys.path:
     sys.path.insert(0, _LIB)
