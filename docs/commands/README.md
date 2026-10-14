@@ -31,6 +31,7 @@ explain why the command exists, what its inputs mean, and how it fits into the l
 | `fit-niche` | [fit-niche.md](fit-niche.md) | Generate a parametric insert/plug that mates into a described cavity with FDM clearances. |
 | `import` | [import.md](import.md) | Generate OpenSCAD wrappers or conversion plans for imported model formats. |
 | `pack` | [pack.md](pack.md) | Plan deterministic print-bed layouts from explicit part footprints. |
+| `props` | [props.md](props.md) | Snap-off support ribs for a part printed standing, with the height/base stability gate. |
 | `validate` | [validate.md](validate.md) | Fast OpenSCAD parse check without rendering. |
 | `params` | [params.md](params.md) | Extract Customizer-style parameters. |
 | `om` | [om.md](om.md) | Query `.scad` object-model annotations as JSON. |
@@ -43,7 +44,10 @@ explain why the command exists, what its inputs mean, and how it fits into the l
 |---|---|---|
 | `check` | [check.md](check.md) | Master acceptance gate; runs all applicable gates by default. |
 | `mesh` | [mesh.md](mesh.md) | Watertight/manifold/self-intersection/volume checks. |
+| `halves-check` | [halves-check.md](halves-check.md) | Paired halves of a split part: cut faces, dowel holes, size and islands match in the assembly frame. |
+| `fit-check` | [fit-check.md](fit-check.md) | Already-printed insert vs its socket: locked printed size, no overlap, gap per side all the way up. |
 | `printability` | [printability.md](printability.md) | FDM wall, min-feature, overhang, and orientation checks. |
+| `visible-faces` | [visible-faces.md](visible-faces.md) | Visible side of a decorative part prints clean: no unsupported layer piece (mesh) and no support or sagging island (G-code). |
 | `collision` | [collision.md](collision.md) | Static, frame, and visualization collision checks from JSON config. |
 | `kinematics` | [kinematics.md](kinematics.md) | Validate project joint specs and emit deterministic JSON. |
 | `lint` | [lint.md](lint.md) | Advisory repository and OpenSCAD model lint rules. |
@@ -77,6 +81,7 @@ For a practical figure-by-figure image backplate loop, see
 | `printer` | [printer.md](printer.md) | Drive configured printers (Moonraker, Creality stock): list, status, upload, start `--yes`, cancel `--yes`. |
 | `print-preflight` | [print-preflight.md](print-preflight.md) | Read-only pre-print checks: thumbnails, loaded colours vs G-code, halves, printer free. |
 | `slice` | [slice.md](slice.md) | Slice STL/3MF/SCAD to G-code or run the sliceability gate. |
+| `slice-check` | [slice-check.md](slice-check.md) | Headless 3MF open/plates/slice gate, plus offline G-code checks (`--check head-sequence`). |
 
 ### Libraries
 

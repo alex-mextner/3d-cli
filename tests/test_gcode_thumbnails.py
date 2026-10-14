@@ -81,6 +81,15 @@ def test_check_missing_file_raises_input_not_found(tmp_path: Path) -> None:
         gt.check(str(tmp_path / "nope.gcode"))
 
 
+def test_corrupt_payload_is_not_a_present_thumbnail() -> None:
+    good = base64.b64encode(b"\x89PNG\r\n\x1a\n").decode()
+    block = "; thumbnail begin 48x48 {n}\n; {d}\n; thumbnail end\n"
+    assert gt._present(block.format(n=len(good), d=good)) == [gt.Thumb(48, 48, "PNG")]
+    # Moonraker's length check alone accepts both: non-ASCII and non-base64 payloads of the declared length.
+    assert gt._present(block.format(n=4, d="éééé")) == []
+    assert gt._present(block.format(n=5, d="ab_cd")) == []
+
+
 def test_ensure_writes_orca_blocks_after_header_that_moonraker_parses(tmp_path: Path) -> None:
     g = make_gcode(tmp_path / "a.gcode")
     c = gt.ensure(str(g))
