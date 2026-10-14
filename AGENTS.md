@@ -74,9 +74,38 @@ orchestration + the pure score math).
 ## Testing
 
 ```bash
-dev run test              # ruff, shellcheck, pytest (unit + CLI smoke harness), then mypy — all must pass
+dev run test              # FULL gate: ruff, shellcheck, pytest (whole suite), then mypy — all must pass
 dev run test -- -k errors  # forward args to pytest
+dev run test -- --fast    # FAST gate (what pre-commit runs): pytest limited to the changed files' tests
 ```
+
+**Fast vs full.** The pre-commit hook runs the fast gate: ruff, shellcheck and mypy in full,
+but pytest only on the test files the staged and unstaged changes can affect —
+`tests/run_gate.py` maps each changed `lib/` module to `tests/test_<module>.py`,
+`tests/test_<package>_<module>.py`, `tests/e2e/test_<module>_workflows.py` and every test that
+imports it (directly, via `importlib.import_module("…")`, or through a `tests/` helper such as
+`*_fixtures.py`; a renamed module counts under its old and new name), runs changed test files
+themselves, maps gate files (`bin/3d`, `rig.yaml`, the hook) through `PATH_TESTS`, and always
+adds the `SMOKE_TESTS` contracts (`test_imports.py`, `test_architecture_structure.py`); any
+`conftest.py` change runs the whole suite. A one-module commit finishes in well
+under two minutes. The **full suite** (about 4500 tests, roughly 10 minutes) runs in CI with
+coverage on every PR, and `gh ship` refuses to merge until that CI run is green — so a test
+the fast selection misses (a module that reaches it only through another `lib/` module, a
+command exercised only by name through `bin/3d`, a `lib/data` file; see #153) still blocks the
+merge. Run the full gate yourself with
+`dev run test` (under the machine lock, or on a Runpod pod — see Machine resources) before
+asking for review of a cross-cutting change. pytest's `tmp_path` dirs live in
+`$XDG_CACHE_HOME/3d-cli/pytest` (default `~/.cache/3d-cli/pytest`), not `/tmp`, which is a RAM
+tmpfs on the shared workstation (`tests/conftest.py`; `--basetemp` still overrides).
+
+**Tests that run git get a clean `GIT_*` environment — always.** A git hook exports
+`GIT_DIR`, `GIT_INDEX_FILE` and friends for the repo being committed, and every subprocess
+inherits them: on 2026-10-14 a test's `git init` in `tmp_path`, run by the pre-commit hook in
+a linked worktree, set `core.bare=true` in the main checkout's shared `.git/config`, and its
+`git add` replaced the commit's index. `tests/conftest.py` now strips the repo-locating
+variables (`GIT_REPO_ENV`, the `git rev-parse --local-env-vars` list) at import and for every
+test; never re-export them in a test, and give any subprocess env you build by hand the
+same treatment. `tests/test_conftest.py` pins this with a throwaway checkout.
 
 Unit tests live in `tests/` (registry/alias resolution, errors formatting, score IoU/AE
 math, param parsing, env helpers). User-visible command behavior must also have e2e
@@ -141,9 +170,9 @@ desktop. `lib/cli/resources.py` is the ONE place that sizes parallelism:
 - `tests/conftest.py` applies the same caps to the suite, and `pytest -n auto`
   (pytest-xdist, if installed) gets `max_workers()` workers instead of one per core.
 
-Heavy runs on the shared machine (a full `dev run test`, a commit — the pre-commit hook runs
-the whole suite — big mesh/G-code checks) go one at a time under the machine lock with a
-memory cap, `flock /tmp/3d-cli-heavy.lock systemd-run --user --scope -q -p MemoryMax=6G
+Heavy runs on the shared machine (a full `dev run test`, big mesh/G-code checks) go one at a
+time under the machine lock with a memory cap, `flock /tmp/3d-cli-heavy.lock systemd-run
+--user --scope -q -p MemoryMax=6G
 -p MemorySwapMax=0 -p CPUQuota=600% nice -n 10 <cmd>`. With the load average above ~12, run a
 full suite on a Runpod pod instead (`runpod-run --cpu cpu3c-8 --apt openscad,imagemagick --
 uv run pytest tests -q`, skill `runpod-offload`). A slow tool is a bug: profile it
