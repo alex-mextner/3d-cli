@@ -560,6 +560,8 @@ def test_install_service_writes_unit_and_env(env: Path, monkeypatch: pytest.Monk
     assert watch_run.run(["u1", "k1se", "--install-service", "--steer", "01a12cd6", "--tg"]) == 0
     unit = (env / "systemd" / "user" / "3d-printer-watch@.service").read_text()
     assert "ExecStart=/opt/bin/3d printer watch %i $WATCH_ARGS" in unit and "Restart=always" in unit
+    assert f"EnvironmentFile=-{env / '3d-cli' / 'watch'}/%i.env" in unit
+    assert f"Environment=XDG_CONFIG_HOME={env}" in unit
     assert (env / "3d-cli" / "watch" / "u1.env").read_text().splitlines()[-1] == "WATCH_ARGS=--steer 01a12cd6 --tg"
     assert (env / "3d-cli" / "watch" / "k1se.env").is_file()
     assert "systemctl --user enable --now 3d-printer-watch@u1" in capsys.readouterr().out
