@@ -160,3 +160,16 @@ def test_cli_fail_raises_gate_failure(tmp_path: Path, capsys: pytest.CaptureFixt
     with pytest.raises(GateFailure):
         run([str(proj), "--gcode", str(g), "--check", "head-sequence"])
     assert "FAIL B" in capsys.readouterr().out
+
+
+def test_label_matches_its_own_object_not_a_longer_digit_sibling() -> None:
+    """now_grey_plus: `grph_14_—_тёмно-серый_14_id_5_copy_0` was attributed to `grph_141`
+    (alphanumerics `grph1414…` start with `grph141`), so grph_14 read as not printed."""
+    from slicing.head_sequence import _match_object
+
+    objs = {f"grph_{n} — тёмно-серый {n}": [1] for n in ("1", "14", "141", "1141", "11411")}
+    for n in ("1", "14", "141", "1141", "11411"):
+        assert _match_object(f"grph_{n}_—_тёмно-серый_{n}_id_0_copy_0", objs) == f"grph_{n} — тёмно-серый {n}"
+    assert _match_object("A_id_0_copy_0", {"A": [1], "AB": [2]}) == "A"
+    assert _match_object("AB_id_0_copy_0", {"A": [1], "AB": [2]}) == "AB"
+    assert _match_object("A1_id_0_copy_0", {"A": [1]}) is None

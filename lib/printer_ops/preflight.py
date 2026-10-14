@@ -10,7 +10,19 @@ WHAT (issue https://github.com/alex-mextner/3d-cli/issues/96), one PASS/WARN/FAI
   - halves       `3d halves-check <3mf> --json` when the source 3MF is given;
   - axis travel  every move (arcs by their real extremes) inside the printer's X/Y limits,
                  start/end G-code included; SKIP when the limits are unknown (move_bounds.py);
-  - print area   plate moves inside the G-code's `; printable_area`, outside `; bed_exclude_area`.
+  - print area   plate moves inside the G-code's `; printable_area`, outside `; bed_exclude_area`;
+  - overhangs    no object prints a layer on nothing: per layer, extrusion the layer below
+                 does not carry under the 45-degree rule and no short bridge reaches
+                 (lib/gcode_overhangs.py, `3d gcode-overhangs`, run as a subprocess: numpy);
+                 FAIL blocks the start, WARN (small ceilings, edge step-outs) is shown;
+  - slicer warn  every warning the slicer printed for this G-code is recorded in
+                 NAME.slice-warnings.json (same SHA-256) and resolved or accepted with a reason
+                 (slicing/slice_warnings.py, `3d slice-warnings`);
+  - head seq     every object prints each layer on its recipe's heads (slicing/head_sequence.py,
+                 issue #103) — needs the project 3MF: --source-3mf or NAME.3mf next to the G-code;
+  - visible      `3d visible-faces --gcode` when --visible specs are given.
+  A gate whose input is absent (no project 3MF, no --visible spec) is a SKIP that says what
+  is missing; it never passes silently.
 
 WHY: wrong colour in a head, a used head that is empty (the U1's broken T2), missing
   previews and halves that no longer fit were all caught by hand on recent jobs — after
@@ -53,6 +65,9 @@ class Check:
     name: str
     status: str
     detail: str
+    lines: list[str] = field(
+        default_factory=list
+    )  # per-object breakdown under the check line
 
 
 @dataclass
@@ -71,14 +86,21 @@ class Report:
             "file": self.file,
             "overall": self.overall,
             "checks": [
-                {"name": c.name, "status": c.status, "detail": c.detail}
+                {
+                    "name": c.name,
+                    "status": c.status,
+                    "detail": c.detail,
+                    "lines": c.lines,
+                }
                 for c in self.checks
             ],
         }
 
     def render(self) -> str:
         lines = [f"{self.title} {self.file}"]
-        lines += [f"  {c.status:<4}  {c.name:<11} {c.detail}" for c in self.checks]
+        for c in self.checks:
+            lines.append(f"  {c.status:<4}  {c.name:<11} {c.detail}")
+            lines += [f"{'':19}{line}" for line in c.lines]
         lines.append(f"STATUS: {self.overall}")
         return "\n".join(lines)
 
@@ -253,6 +275,142 @@ def check_halves(source: Path) -> Check:
     return Check("halves", FAIL, f"halves-check could not run (exit {rc}): {tail}")
 
 
+def _tail(text: str) -> str:
+    return (text.strip().splitlines() or ["no output"])[-1]
+
+
+def check_overhangs(gcode: Path) -> Check:
+    """`3d gcode-overhangs`: no object prints more than the limit on nothing (FAIL); small
+    ceilings and edge step-outs are WARN, listed per object."""
+    from cli.pyrun import tool_argv
+    from errors import MissingDependency
+    from gcode_overhangs import format_lines
+
+    try:
+        r = subprocess.run(
+            tool_argv("numpy,scipy", "gcode_overhangs.py", [str(gcode), "--json"]),
+            capture_output=True,
+            text=True,
+            timeout=900,
+        )
+    except MissingDependency as exc:
+        return Check("overhangs", FAIL, f"could not run: {exc}")
+    try:
+        payload = json.loads(r.stdout)
+    except ValueError:
+        payload = None
+    if r.returncode not in (0, 1) or not isinstance(payload, dict):
+        return Check(
+            "overhangs",
+            FAIL,
+            f"gcode-overhangs could not run (exit {r.returncode}): {_tail(r.stderr)}",
+        )
+    return Check(
+        "overhangs", str(payload.get("status", FAIL)), str(payload.get("detail", "")), format_lines(payload)
+    )
+
+
+def check_slice_warnings(origin: Path, gcode: Path) -> Check:
+    """Every slicer warning for this exact G-code recorded and accepted (`3d slice-warnings`)."""
+    from slicing.slice_warnings import evaluate
+
+    status, detail, lines = evaluate(origin, gcode)
+    return Check("slicer warn", status, detail, lines)
+
+
+def find_project_3mf(gcode: Path, source: Path | None) -> tuple[Path | None, str]:
+    """The plate project 3MF: --source-3mf, else NAME.3mf next to NAME.gcode."""
+    if source is not None:
+        return source, f"--source-3mf {source.name}"
+    sibling = gcode.with_suffix(".3mf")
+    if sibling.is_file():
+        return sibling, f"{sibling.name} next to the G-code"
+    return None, ""
+
+
+def check_head_sequence(
+    gcode: Path, project: Path | None, project_source: str
+) -> Check:
+    """Issue #103: every object prints each layer on the heads its filaments call for."""
+    if project is None:
+        return Check(
+            "head seq",
+            SKIP,
+            "no project 3MF: pass --source-3mf FILE.3mf or keep NAME.3mf next to NAME.gcode",
+        )
+    from slicing.head_sequence import ProjectError, preflight_check
+
+    try:
+        result = preflight_check(str(gcode), str(project))
+    except ProjectError as exc:
+        return Check("head seq", SKIP, f"{project_source}: {exc}")
+    objects = result.get("objects")
+    objs = (
+        [o for o in objects if isinstance(o, dict)] if isinstance(objects, list) else []
+    )
+    status = str(result.get("status", FAIL))
+    if status == SKIP:
+        return Check(
+            "head seq",
+            SKIP,
+            f"nothing to sequence: no mixed filaments and every object on one head "
+            f"({len(objs)} object(s), {project_source})",
+        )
+    if status == FAIL:
+        lines = [
+            f"{o.get('status')} {o.get('name')}: {o.get('detail') or 'heads ' + str(o.get('heads'))}"
+            for o in objs
+            if o.get("status") != "ok"
+        ]
+        return Check(
+            "head seq",
+            FAIL,
+            f"{result.get('failures')} object(s) off their recipes ({project_source})",
+            lines,
+        )
+    return Check(
+        "head seq",
+        PASS,
+        f"{len(objs)} object(s) on their recipes, {result.get('mixed_rows')} mixed row(s) "
+        f"({project_source})",
+    )
+
+
+def check_visible(gcode: Path, specs: Sequence[str]) -> Check:
+    """`3d visible-faces --gcode`: no support / sag on the declared visible sides."""
+    if not specs:
+        return Check(
+            "visible",
+            SKIP,
+            "no --visible spec: the visible side is a design input "
+            "(e.g. --visible 'WALL*:y<104.8')",
+        )
+    argv = [
+        sys.executable,
+        str(_BIN_3D),
+        "visible-faces",
+        "--gcode",
+        str(gcode),
+        "--json",
+    ]
+    for spec in specs:
+        argv += ["--visible", spec]
+    r = subprocess.run(argv, capture_output=True, text=True, timeout=900)
+    if r.returncode == 0:
+        return Check("visible", PASS, f"visible sides clean ({', '.join(specs)})")
+    if r.returncode == 1:
+        return Check(
+            "visible",
+            FAIL,
+            f"visible-faces FAIL ({', '.join(specs)}); see 3d visible-faces --gcode {gcode}",
+        )
+    return Check(
+        "visible",
+        FAIL,
+        f"visible-faces could not run (exit {r.returncode}): {_tail(r.stderr)}",
+    )
+
+
 def _first(violations: Sequence[Violation], count: int, where: str = "outside") -> str:
     shown = ", ".join(str(v) for v in violations)
     return (
@@ -413,8 +571,12 @@ def run_preflight(
     axis_limits: Limits | None = None,
     limits_source: str = "",
     trusted_macros: frozenset[str] = frozenset(),
+    origin: Path | None = None,
+    visible: Sequence[str] = (),
 ) -> Report:
-    """`limits_source` names where `axis_limits` came from, or why they are unknown."""
+    """`limits_source` names where `axis_limits` came from, or why they are unknown.
+    `origin` is where the G-code lives when `gcode` is a snapshot copy (`printer start`): the
+    sibling NAME.3mf and NAME.slice-warnings.json are looked up there."""
     report = Report(str(gcode))
     report.checks.append(check_thumbnails(gcode))
     if status is not None:
@@ -425,6 +587,11 @@ def run_preflight(
             check_bounds(gcode, axis_limits), axis_limits, limits_source, trusted_macros
         )
     )
+    report.checks.append(check_overhangs(gcode))
+    report.checks.append(check_slice_warnings(origin or gcode, gcode))
+    project, project_source = find_project_3mf(origin or gcode, source_3mf)
+    report.checks.append(check_head_sequence(gcode, project, project_source))
+    report.checks.append(check_visible(gcode, visible))
     if source_3mf is not None:
         report.checks.append(check_halves(source_3mf))
     return report

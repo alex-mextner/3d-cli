@@ -38,6 +38,14 @@ searches project and installed-slicer profile folders for a complete machine/pro
 set and passes those files to the slicer. If any piece is missing, the error explains which
 forms are accepted and how to export the profiles from the slicer GUI.
 
+## Slicer warnings
+
+When G-code is kept (not `--dry-run`), `3d slice` records every warning and error the slicer
+printed — its log, the Orca-family `result.json` and, for a `.gcode.3mf`, its `slice_info` —
+in `NAME.slice-warnings.json` next to the G-code, with the G-code's SHA-256, and lists the
+open ones. [`3d print-preflight`](print-preflight.md) and `3d printer start` FAIL until each
+is resolved or accepted with a reason ([`3d slice-warnings accept`](slice-warnings.md)).
+
 ## Environment
 
 - `SLICER=/path/to/binary` forces a specific slicer.

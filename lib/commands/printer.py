@@ -53,7 +53,8 @@ Options:
                      always ends in -<sha256[:16]>.gcode; give start the same --as
   --yes              required for start and cancel: you confirm the physical action
   --force            start even when preflight FAILs (the failing checks are printed)
-  --source-3mf FILE  the 3MF the G-code was sliced from; enables the halves-check
+  --source-3mf FILE  the project 3MF the G-code was sliced from: head-sequence check + halves-check
+                     (without it the head-sequence check uses NAME.3mf next to the G-code)
 
 Safety: start refuses while the printer is printing, paused, busy or unreadable, and when
 the content-addressed remote file is missing, differs in size, or (Moonraker, read back)
@@ -276,8 +277,9 @@ def _start_snapshot(name: str, file: str, original: Path, local: Path, source: P
     print(f"remote file {remote}: {identity}")
 
     limits, limits_source = adapter.axis_limits()
+    # the snapshot lives in a temp dir: NAME.3mf and NAME.slice-warnings.json sit next to the original
     report = run_preflight(local, status=st, source_3mf=source, axis_limits=limits, limits_source=limits_source,
-                           trusted_macros=adapter.trusted_macros)
+                           trusted_macros=adapter.trusted_macros, origin=original)
     report.file = f"{original} (snapshot)"
     print(report.render())
     if report.overall == FAIL:
