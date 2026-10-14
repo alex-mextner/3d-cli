@@ -43,6 +43,7 @@ rendering, slicing support, and verification:
 - `fit_camera_math.py`
 - `fit_check.py`
 - `frame_check.py`
+- `gcode_resume.py`
 - `gcode_overhangs.py`
 - `gcode_thumbnails.py`
 - `export_formats.py`
@@ -164,6 +165,7 @@ Every current root Python module is listed here so future additions are intentio
 - `fit_camera.py` — camera fitting implementation.
 - `fit_camera_math.py` — import-light camera pose and proof-status math helpers.
 - `fit_check.py` — already-printed insert vs its socket: printed-size lock, per-layer clearance (manifold3d slices, shapely distances) and the open path along the insertion direction; backs `3d fit-check`.
+- `gcode_resume.py` — resume a stopped multi-head Orca print above a layer (layer walk, machine state at a byte, resume header from the device's `resume:` profile, per-head retraction tracking, `--no-tower` off-bed purges); stdlib-only; backs `3d gcode-resume`.
 - `gcode_overhangs.py` — extrusion printed on nothing per object and layer of a sliced G-code (numpy/scipy raster of each layer's carrier, sparse reach/bridge/step-out tests on the pixels that stick out, layers split over forked workers); backs `3d gcode-overhangs` and the `overhangs` gate of `print-preflight`.
 - `gcode_thumbnails.py` — printer-screen thumbnail blocks in G-code: stdlib-only check against the profile's `thumbnails` spec, Orca-format block writer, z-buffered toolpath preview render (numpy); backs `3d gcode-thumbnails`.
 - `frame_check.py` — render framing checks.

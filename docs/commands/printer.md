@@ -86,6 +86,9 @@ for the K1 SE from CrealityOfficial K1_Series_Klipper `config/K1_SE_CR4CU220812S
 [`3d gcode-bounds`](gcode-bounds.md) and the preflight check every move against it. Moonraker
 printers without `axis_limits` report them from their own Klipper config.
 
+`resume:` holds the printer-specific values of [`3d gcode-resume`](gcode-resume.md) (off-bed
+purge macro and lengths, travel clearance, start commands); see that page for the keys.
+
 `trusted_macros` names the macros (vendor start/end, pause, toolchange `T0`…`Tn`, timelapse
 commands) whose bodies you know keep the head on the bed and leave the coordinate modes
 (G90/G91, G92, SET_GCODE_OFFSET) as they found them. The bounds check cannot see inside a
