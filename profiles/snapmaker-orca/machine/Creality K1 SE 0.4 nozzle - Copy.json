@@ -1,0 +1,9 @@
+{
+    "from": "User",
+    "host_type": "crealityprint",
+    "inherits": "Creality K1 SE 0.4 nozzle",
+    "is_custom_defined": "0",
+    "name": "Creality K1 SE 0.4 nozzle - Copy",
+    "printer_settings_id": "Creality K1 SE 0.4 nozzle - Copy",
+    "version": "2.3.1.10"
+}
