@@ -39,18 +39,23 @@ rendering, slicing support, and verification:
 - `collision_viz.py`
 - `fit_camera.py`
 - `fit_camera_math.py`
+- `fit_check.py`
 - `frame_check.py`
+- `gcode_thumbnails.py`
 - `export_formats.py`
 - `import_formats.py`
 - `lib/geometry/mesh_metrics.py`
+- `halves_check.py`
 - `mesh_check.py`
 - `niche_fit.py`
 - `orca_project_3mf.py`
 - `packing.py`
 - `printability_mesh.py`
 - `render.py`
+- `standing_props.py`
 - `strength.py`
 - `usdz.py`
+- `visible_faces.py`
 - `video.py`
 
 Target package: `lib/geometry/`, with subpackages only when a real boundary appears
@@ -59,6 +64,7 @@ Target package: `lib/geometry/`, with subpackages only when a real boundary appe
 ### Slicing / Print Workflow
 
 - `lib/slicing/printing.py`
+- `lib/slicing/head_sequence.py` — per-object, per-layer toolhead check of sliced G-code against the project 3MF's mixed-filament patterns (`slice-check --check head-sequence`; `preflight_check()` exposed for the future print-preflight `head_sequence` check, #96).
 
 Target package: `lib/slicing/` for slicer orchestration, dry-run print planning, printer
 job state, and future sender integrations.
@@ -148,6 +154,8 @@ Every current root Python module is listed here so future additions are intentio
 - `export_formats.py` — export format registry, selector parsing, and dry-run export planning.
 - `fit_camera.py` — camera fitting implementation.
 - `fit_camera_math.py` — import-light camera pose and proof-status math helpers.
+- `fit_check.py` — already-printed insert vs its socket: printed-size lock and per-layer clearance (manifold3d slices, shapely distances); backs `3d fit-check`.
+- `gcode_thumbnails.py` — printer-screen thumbnail blocks in G-code: stdlib-only check against the profile's `thumbnails` spec, Orca-format block writer, z-buffered toolpath preview render (numpy); backs `3d gcode-thumbnails`.
 - `frame_check.py` — render framing checks.
 - `hardware.py` — local machine and toolchain capability reporting.
 - `hf_auth.py` — optional Hugging Face token loading, validation, and secure storage.
@@ -161,6 +169,7 @@ Every current root Python module is listed here so future additions are intentio
 - `mask_geometry.py` — lightweight mask coverage, bounding-box, and centroid metadata.
 - `materials.py` — compatibility wrapper re-exporting `registries.materials`.
 - `mesh_check.py` — mesh verification implementation.
+- `halves_check.py` — paired-halves gate: loads pairs marked in 3MF object metadata (or STL pairs), maps both halves into the assembly frame, rasterises their cut faces and compares outline, dowel holes, size and islands; backs `3d halves-check`.
 - `lib/geometry/mesh_metrics.py` — pinned-convention 3D shape metrics (Chamfer, F-score@tau, Hausdorff, normal consistency, volumetric IoU) between two meshes; backs `3d metrics geometry`.
 - `perceptual_metrics.py` — perceptual/semantic image metrics (PSNR, LPIPS, CLIP-sim) with explicit senses and graceful degradation; backs `3d metrics perceptual`.
 - `metrics.py` — compatibility wrapper re-exporting `registries.metrics`.
@@ -172,6 +181,7 @@ Every current root Python module is listed here so future additions are intentio
 - `printing.py` — compatibility wrapper re-exporting `slicing.printing`.
 - `preprocess_reference.py` — reference image preprocessing.
 - `printability_mesh.py` — printability mesh checks.
+- `visible_faces.py` — visible-face gate: per-layer unsupported pieces on a declared visible half-space of the unioned part (manifold3d), and Support moves / sagging islands in the sliced G-code (scipy raster); bridges inside declared openings allowed up to a span.
 - `procurement.py` — deterministic local BOM and inventory purchase-plan helpers.
 - `proxy_align.py` — generated proxy mesh to CAD mesh alignment and proof artifacts.
 - `printers.py` — compatibility wrapper re-exporting `registries.printers`.
@@ -182,6 +192,7 @@ Every current root Python module is listed here so future additions are intentio
 - `refmatch.py` — image/reference matching helpers.
 - `render.py` — OpenSCAD render and section implementation.
 - `spatial_fit_metrics.py` — contour-first camera-fit diagnostics and warning metrics.
+- `standing_props.py` — snap-off props for a part printed standing (the `3d props` backend): per-station back profile from manifold3d slices, sloped ribs with a straight inner edge behind the hindmost back point, tabs, foot strip, keep-out of the part dilated by the gap, height/base stability ratio; reads STL/3MF (core + production components, Orca part extruders) and writes a 3MF with the props as an extra part of the object.
 - `strength.py` — deterministic structural-check dry-run report helpers.
 - `usdz.py` — USDZ export helpers.
 - `video.py` — video turntable and progress-frame planning / encoding helpers.
