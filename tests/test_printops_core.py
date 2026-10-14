@@ -48,9 +48,10 @@ def test_open_db_sets_wal_foreign_keys_and_rows(tmp_path: Path) -> None:
 
 def test_migrate_applies_core_once_and_is_idempotent(tmp_path: Path) -> None:
     conn = db.open_db(tmp_path / "p.db")
-    assert db.migrate(conn) == [1]
+    shipped = [m.version for m in db.discover_migrations()]
+    assert shipped[:1] == [1] and db.migrate(conn) == shipped  # later slices append theirs
     assert db.migrate(conn) == []
-    row = conn.execute("SELECT version, name FROM schema_migrations").fetchone()
+    row = conn.execute("SELECT version, name FROM schema_migrations WHERE version = 1").fetchone()
     assert (row["version"], row["name"]) == (1, "core")
 
 
@@ -223,7 +224,8 @@ def test_ensure_extra_fields_registers_every_contract_field_idempotently() -> No
     second = ensure_extra_fields(fake)
     assert not second.created and not second.updated and len(second.unchanged) == len(EXTRA_FIELDS)
     spool_keys = {f["key"] for f in fake.list_fields("spool")}
-    assert spool_keys == {"printops_slot", "opened_at", "last_dried_at", "dry_state", "remaining_confidence_g",
+    # the #158 contract set; slices may only APPEND fields, so >= rather than ==
+    assert spool_keys >= {"printops_slot", "opened_at", "last_dried_at", "dry_state", "remaining_confidence_g",
                           "tag_uids", "printops_location_id"}
     filament = {f["key"]: f for f in fake.list_fields("filament")}
     assert filament["hygroscopic_class"]["choices"] == ["low", "medium", "high", "extreme"]
@@ -356,7 +358,20 @@ def test_http_spoolman_speaks_the_wire_format_of_the_fake() -> None:
 
 def test_extra_field_definitions_follow_the_contract_rules() -> None:
     keys = [(f.entity, f.key) for f in EXTRA_FIELDS]
-    assert len(keys) == len(set(keys)) == 19
+    assert len(keys) == len(set(keys))
+    # The #158 contract, frozen: slices may only APPEND (renaming/retyping would orphan data).
+    assert [(f.entity, f.key, f.field_type) for f in EXTRA_FIELDS[:19]] == [
+        ("spool", "printops_slot", "text"), ("spool", "opened_at", "datetime"),
+        ("spool", "last_dried_at", "datetime"), ("spool", "dry_state", "choice"),
+        ("spool", "remaining_confidence_g", "float"), ("spool", "tag_uids", "text"),
+        ("spool", "printops_location_id", "integer"),
+        ("filament", "nozzle_temp_min", "integer"), ("filament", "nozzle_temp_max", "integer"),
+        ("filament", "bed_temp_min", "integer"), ("filament", "bed_temp_max", "integer"),
+        ("filament", "abrasive", "boolean"), ("filament", "hygroscopic_class", "choice"),
+        ("filament", "drying_temp_c", "integer"), ("filament", "drying_hours", "float"),
+        ("filament", "measured_hex", "text"), ("filament", "max_volumetric_mm3_s", "float"),
+        ("vendor", "spool_tare_g", "float"), ("vendor", "spool_kind", "choice"),
+    ]
     for f in EXTRA_FIELDS:
         assert (f.field_type == "choice") == (f.choices is not None)
     params = ExtraField("spool", "k", "K", "choice", choices=("a",)).params(7)
@@ -394,7 +409,7 @@ def test_health_is_public_and_reports_db_spoolman_and_fields(printops_client: An
     r = printops_client.get("/v1/health")
     body = r.json()
     assert r.status_code == 200 and body["status"] == "ok" and body["version"] == "test"
-    assert body["db"]["ok"] and body["db"]["migrations"] == [1]
+    assert body["db"]["ok"] and body["db"]["migrations"] == [m.version for m in db.discover_migrations()]
     assert body["spoolman"]["version"] == "0.27.0"
     assert body["spoolman"]["extra_fields"]["status"] == "ok"
     assert body["spoolman"]["extra_fields"]["missing"] == []
