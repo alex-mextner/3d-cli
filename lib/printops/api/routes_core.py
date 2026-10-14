@@ -1,5 +1,6 @@
 """routes_core.py — 3d-api core endpoints: health, the event log (JSON + SSE), and the WebSocket.
 
+  GET /v1/live     no auth. Liveness: 200 {"ok": true} when the API serves and its DB opens.
   GET /v1/health   no auth. 200 {"status": "ok"|"degraded", db, spoolman, version};
                    503 when the PrintOps DB itself is unusable.
   GET /v1/events   scope read. `Accept: application/json` → one page
@@ -69,6 +70,14 @@ def _spoolman_health(state: ApiState) -> dict[str, Any]:
     return {"ok": not missing, "version": info.get("version"), "extra_fields": fields}
 
 
+@router.get("/v1/live")
+def live(request: Request) -> JSONResponse:
+    """Liveness for the container healthcheck: the API serves and its DB opens. No Spoolman call,
+    so a slow or down Spoolman never marks the API itself unhealthy (that is /v1/health's job)."""
+    db = _db_health(get_state(request))
+    return JSONResponse({"ok": db["ok"]}, status_code=200 if db["ok"] else 503)
+
+
 @router.get("/v1/health")
 def health(request: Request) -> JSONResponse:
     state = get_state(request)
@@ -104,7 +113,11 @@ async def _follow(state: ApiState, cursor: int | None,
     """Every event after `cursor` (None = after the current newest) while `authorized()` holds;
     None = heartbeat. Ends (returns) as soon as the token is no longer valid."""
     listener = ev.BUS.listener()  # before the first read, so no wake-up can slip between
-    conn = open_db(state.settings.db_path)
+    try:
+        conn = open_db(state.settings.db_path)
+    except BaseException:
+        listener.close()
+        raise
     try:
         if cursor is None:
             cursor = await run_in_threadpool(ev.latest_id, conn)
@@ -157,7 +170,11 @@ async def list_events(
 
     cursor = since
     last_event_id = request.headers.get("last-event-id")
-    if cursor is None and last_event_id and last_event_id.isdigit() and int(last_event_id) <= ev.MAX_CURSOR:
+    # len() first: int() of thousands of digits raises (CPython's int-conversion limit);
+    # isascii(): isdigit() also accepts '²', which int() rejects
+    if (cursor is None and last_event_id and len(last_event_id) <= 19 and last_event_id.isascii()
+            and last_event_id.isdigit()
+            and int(last_event_id) <= ev.MAX_CURSOR):
         cursor = int(last_event_id)
 
     token = bearer_token(request.headers.get("authorization")) or ""

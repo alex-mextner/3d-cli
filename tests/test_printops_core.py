@@ -400,6 +400,49 @@ def test_health_is_public_and_reports_db_spoolman_and_fields(printops_client: An
     assert body["spoolman"]["extra_fields"]["missing"] == []
 
 
+def test_liveness_never_calls_spoolman(printops_client: Any, fake_spoolman: FakeSpoolman) -> None:
+    fake_spoolman.down = True
+    calls = len(fake_spoolman.calls)
+    r = printops_client.get("/v1/live")
+    assert r.status_code == 200 and r.json() == {"ok": True} and len(fake_spoolman.calls) == calls
+
+
+@pytest.mark.parametrize("header", ["9" * 5000, "\u00b2"])
+def test_malformed_last_event_id_is_ignored_not_a_500(live_api: LiveApi, header: str) -> None:
+    import http.client
+
+    conn = http.client.HTTPConnection(live_api.url.removeprefix("http://"), timeout=10)
+    conn.putrequest("GET", "/v1/events")
+    conn.putheader("Authorization", f"Bearer {live_api.tokens['read']}")
+    conn.putheader("Last-Event-ID", header.encode("latin-1"))
+    conn.endheaders()
+    resp = conn.getresponse()
+    try:
+        assert resp.status == 200 and resp.readline().decode().strip() == "retry: 3000"
+    finally:
+        conn.close()
+
+
+def test_failed_stream_setup_does_not_leak_listeners(printops_settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
+    from printops.api import routes_core
+    from printops.api.state import ApiState
+    from printops.tokens import TokenStore
+
+    def boom(_path: Any) -> sqlite3.Connection:
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(routes_core, "open_db", boom)
+    state = ApiState(settings=printops_settings, spoolman=None, tokens=TokenStore(printops_settings.tokens_file))
+
+    async def attempt() -> None:
+        with pytest.raises(sqlite3.OperationalError):
+            await routes_core._follow(state, 0, lambda: True).__anext__()
+
+    for _ in range(3):
+        asyncio.run(attempt())
+    assert events.BUS.listener_count() == 0
+
+
 def test_health_is_degraded_when_spoolman_is_down(printops_client: Any, fake_spoolman: FakeSpoolman) -> None:
     fake_spoolman.down = True
     body = printops_client.get("/v1/health").json()

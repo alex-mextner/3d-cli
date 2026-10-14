@@ -35,10 +35,8 @@ RUN chmod 0755 /app/bin/3d && ln -s /app/bin/3d /usr/local/bin/3d
 
 USER printops
 EXPOSE 8765
-# Liveness only (HTTP 200 = the API serves and its DB works). A "degraded" body (Spoolman down,
-# field conflict) stays healthy on purpose: Spoolman has its own healthcheck, and readiness is
-# what `3d printops health` / `deploy` check (status "ok"). The 18 s budget outlasts a stalled
-# Spoolman probe inside /v1/health (10 s client timeout), so a hung Spoolman cannot fail liveness.
-HEALTHCHECK --interval=30s --timeout=20s --start-period=20s --retries=3 \
-    CMD ["python", "-c", "import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8765/v1/health', timeout=18).status == 200 else 1)"]
+# Liveness only (/v1/live: API serves + DB opens; never calls Spoolman). Readiness, incl.
+# Spoolman and the extra fields, is /v1/health, checked by `3d printops health` / `deploy`.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
+    CMD ["python", "-c", "import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8765/v1/live', timeout=8).status == 200 else 1)"]
 CMD ["python", "-m", "uvicorn", "--factory", "printops.api.app:app_from_env", "--host", "0.0.0.0", "--port", "8765", "--no-server-header"]
