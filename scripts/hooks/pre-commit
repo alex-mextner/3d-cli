@@ -2,7 +2,9 @@
 # =============================================================================
 # 3d-cli REPO-DEV pre-commit gate (TRACKED source of truth).
 #
-# Runs the repo's own dev gate before each commit: ruff -> shellcheck -> pytest -> mypy.
+# Runs the repo's own dev gate before each commit: ruff -> shellcheck -> pytest -> mypy,
+# with pytest limited to the tests the changed files can affect (`tests/run_gate.py --fast`);
+# the full suite runs in CI (which `gh ship` waits for) and on demand via `dev run test`.
 # Prefer `dev run test` (the primary runner surface). If the external dev CLI is
 # unavailable or cannot execute the repo script, fall back to the literal
 # rig.yaml scripts.test command. The commit is blocked if any step fails or no
@@ -20,12 +22,24 @@ set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)" || exit 1
 
-echo "=== 3d-cli pre-commit: ruff -> shellcheck -> pytest -> mypy ==="
+echo "=== 3d-cli pre-commit: ruff -> shellcheck -> pytest (changed files) -> mypy ==="
+
+# The installed hook is shared by every worktree; a branch cut before the fast gate has a
+# run_gate.py that would hand `--fast` to pytest as an unknown option, so it gets the full gate.
+gate_args=""
+if [ -f tests/run_gate.py ] && [[ "$(< tests/run_gate.py)" == *'FAST_FLAG = "--fast"'* ]]; then
+    gate_args="--fast"
+fi
+export PRECOMMIT_GATE_ARGS="$gate_args"
 
 # Use the project-scoped dev runner; rig.yaml scripts.test owns the actual command.
 if command -v dev >/dev/null 2>&1; then
     set +e
-    dev run --repo-only test
+    if [ -n "$gate_args" ]; then
+        dev run --repo-only test -- "$gate_args"
+    else
+        dev run --repo-only test
+    fi
     dev_rc=$?
     set -e
     if [ "$dev_rc" -eq 0 ]; then
@@ -51,6 +65,7 @@ fi
 "$python_bin" - <<'PY'
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -84,8 +99,9 @@ if not isinstance(script, str) or not script.strip():
     print("[pre-commit] rig.yaml must define a non-empty scripts.test command.", file=sys.stderr)
     sys.exit(1)
 
-print("[pre-commit] running rig.yaml scripts.test fallback.", flush=True)
-result = subprocess.run(script, cwd=root, shell=True, executable="/bin/sh")
+gate_args = os.environ.get("PRECOMMIT_GATE_ARGS", "")
+print(f"[pre-commit] running rig.yaml scripts.test fallback {gate_args}".rstrip() + ".", flush=True)
+result = subprocess.run(f"{script} {gate_args}".rstrip(), cwd=root, shell=True, executable="/bin/sh")
 sys.exit(result.returncode)
 PY
 

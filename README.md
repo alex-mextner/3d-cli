@@ -489,14 +489,15 @@ per-call, and `3d doctor` prints the exact install command for anything still mi
 Repository development commands live in `rig.yaml` scripts:
 
 ```bash
-dev run test              # ruff + shellcheck + pytest + mypy — all must pass
+dev run test              # full gate: ruff + shellcheck + pytest (whole suite) + mypy — all must pass
 dev run test -- -k registry
+dev run test -- --fast    # fast gate (what pre-commit runs): pytest only on the changed files' tests
 ```
 
 #### Contributing — install the repo-dev pre-commit gate
 
 A fresh clone has **no** dev pre-commit gate until you wire it in (git never tracks
-`.git/hooks/`). The gate (ruff → shellcheck → pytest → mypy via `dev run test`) lives as a **tracked**
+`.git/hooks/`). The gate (ruff → shellcheck → pytest → mypy via `dev run test -- --fast`) lives as a **tracked**
 source at [`scripts/hooks/pre-commit`](scripts/hooks/pre-commit); install it once:
 
 ```bash
@@ -515,10 +516,16 @@ hook PATH because `scripts.test` is a `uv run ...` command. `shellcheck` is a sy
 (`brew install shellcheck` / `sudo apt-get install shellcheck`); without it the local gate
 prints a SKIP line for that step, while CI installs it and always runs it.
 
-The hook runs the **whole** gate (ruff + shellcheck + pytest + mypy over the working tree, not just
-staged files), so commits take as long as `dev run test` does — and, like any
-working-tree gate, it judges your working tree, not the exact staged snapshot (an
-unstaged fix can green a commit; an unrelated unstaged break can block one).
+The hook runs the **fast** gate: ruff, shellcheck and mypy in full, but pytest only on the
+tests the changed (staged and unstaged) files can affect plus a small smoke set, so a commit
+touching one module takes well under two minutes. `tests/run_gate.py` does the selection: a
+changed `lib/` module selects its namesake tests and every test that imports it (directly or
+through a `tests/` helper), a changed test file runs itself, and gate files map through
+`PATH_TESTS`. The **full** suite runs in CI with coverage on every PR, and `gh ship` merges
+only after that run is green; run it locally with `dev run test`. Like any working-tree gate,
+the hook judges your working tree, not the exact staged snapshot (an unstaged fix can green a
+commit; an unrelated unstaged break can block one). pytest's `tmp_path` dirs go to
+`$XDG_CACHE_HOME/3d-cli/pytest` (default `~/.cache/3d-cli/pytest`) instead of `/tmp`.
 
 This repo-dev gate is **distinct from** the `3d init` user-facing pre-commit template
 ([`assets/templates/pre-commit`](assets/templates/pre-commit)): that one gates a *user's*
