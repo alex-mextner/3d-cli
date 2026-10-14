@@ -31,7 +31,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from typing import Mapping
+from collections.abc import Mapping
 
 
 @dataclass(frozen=True)

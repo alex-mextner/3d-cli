@@ -59,9 +59,11 @@ def test_package_init_files_import_stdlib_or_local_modules_only() -> None:
             else:
                 continue
 
-            for name in imported:
-                if name not in stdlib and name not in allowed_external:
-                    offenders.append(f"{path.relative_to(ROOT)} imports {name}")
+            offenders.extend(
+                f"{path.relative_to(ROOT)} imports {name}"
+                for name in imported
+                if name not in stdlib and name not in allowed_external
+            )
 
     assert not offenders, "__init__.py files must stay import-light: " + ", ".join(offenders)
 

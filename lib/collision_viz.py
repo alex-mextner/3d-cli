@@ -101,12 +101,12 @@ def render_phase(
             continue
         pl.add_mesh(section_clip(to_pv(m)), color=(0.78, 0.80, 0.83),
                     opacity=0.30, show_edges=False, name=f"part_{p}")
-    for (a, b, kind, vol, dist, pt, imesh) in intended_rows:
+    for (_a, _b, _kind, _vol, _dist, pt, imesh) in intended_rows:
         if imesh is not None:
             pl.add_mesh(to_pv(imesh), color=(0.20, 0.65, 0.30), opacity=0.55)
         elif pt is not None:
             pl.add_mesh(pv.Sphere(radius=1.2, center=pt), color=(0.20, 0.65, 0.30), opacity=0.6)
-    for (a, b, kind, vol, dist, pt, imesh) in flagged:
+    for (_a, _b, _kind, _vol, _dist, pt, imesh) in flagged:
         if imesh is not None:
             pl.add_mesh(to_pv(imesh), color=(0.95, 0.05, 0.05), opacity=1.0,
                         show_edges=True, edge_color=(0.4, 0, 0))
@@ -117,7 +117,7 @@ def render_phase(
              f"(EPS={cfg.eps} mm^3   touch_tol={cfg.touch_tol} mm)", ""]
     if flagged:
         lines.append("RED = BUG (unintended):")
-        for (a, b, kind, vol, dist, pt, imesh) in flagged:
+        for (a, b, kind, vol, dist, _pt, _imesh) in flagged:
             if kind == "interpenetration":
                 lines.append(f"  {a}/{b}: interpenetration  {vol:.0f} mm^3")
             else:
@@ -126,7 +126,7 @@ def render_phase(
         lines.append("RED = BUG: none in this phase")
     lines.append("")
     lines.append("GREEN = intended contact:")
-    for (a, b, kind, vol, dist, pt, imesh) in intended_rows:
+    for (a, b, kind, vol, dist, _pt, _imesh) in intended_rows:
         note = (f"{vol:.0f} mm^3" if kind == "interpenetration" else f"d={dist:.3f} mm")
         lines.append(f"  {a}/{b}  ({note})")
     pl.add_text("\n".join(lines), position="upper_left", font_size=11,

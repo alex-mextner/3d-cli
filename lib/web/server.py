@@ -30,7 +30,7 @@ import contextlib
 import json
 import pathlib
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Annotated, Any
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import (
@@ -203,7 +203,7 @@ def create_app(cfg: webconfig.WebConfig) -> FastAPI:
     # ---- model STL + previews -------------------------------------------
     @app.get("/api/model.stl")
     async def api_model(
-        path: str = Query(...), D: list[str] | None = Query(default=None)
+        path: str = Query(...), D: Annotated[list[str] | None, Query()] = None
     ) -> FileResponse:
         p = _safe_scad(path, root)
         try:
@@ -252,7 +252,7 @@ def create_app(cfg: webconfig.WebConfig) -> FastAPI:
     # ---- render SSE (param-change re-render progress) -------------------
     @app.get("/api/render-sse")
     async def api_render_sse(
-        path: str = Query(...), D: list[str] | None = Query(default=None)
+        path: str = Query(...), D: Annotated[list[str] | None, Query()] = None
     ) -> StreamingResponse:
         p = _safe_scad(path, root)
         defines = _parse_defines(D)

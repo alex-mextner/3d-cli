@@ -30,6 +30,7 @@ their transforms, i.e. bed coordinates), the G-code pass in bed coordinates.
 
 Exit: 0 PASS, 1 FAIL, 2 usage / load error.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -46,29 +47,41 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
+import contextlib
 
-MIN_AREA = 0.5          # mm²: smaller pieces / islands are noise
-LAYER = 0.12            # mm
-BAR_SPAN = 10.0         # mm: longest bridge allowed inside a declared opening
-REACH_PAD = 0.10        # mm added to layer x tan 45 (stair quantisation of a 45 slope)
-SLIVER = 0.05           # mm: a piece that vanishes under offset(-SLIVER) is a CSG sliver
-PLANES = (0.0013, -0.0097, 0.0113)   # three slice planes per layer (absorb CSG hairlines)
-OPENING_TOL = 0.3       # mm slack around a declared opening
-PX = 0.05               # G-code raster pixel, mm
-LINE_PX = 4             # half line width in px (0.4 mm line)
-CLOSE_PX = 24           # closing of a layer into its footprint
-SKIN_PX = 12            # outer skin band (0.6 mm)
-STEP_PX = 7             # allowed step-out per layer (0.35 mm)
-ANCHOR_MM = 1.0         # a G-code bridge is anchored within this distance past each end
+MIN_AREA = 0.5  # mm²: smaller pieces / islands are noise
+LAYER = 0.12  # mm
+BAR_SPAN = 10.0  # mm: longest bridge allowed inside a declared opening
+REACH_PAD = 0.10  # mm added to layer x tan 45 (stair quantisation of a 45 slope)
+SLIVER = 0.05  # mm: a piece that vanishes under offset(-SLIVER) is a CSG sliver
+PLANES = (
+    0.0013,
+    -0.0097,
+    0.0113,
+)  # three slice planes per layer (absorb CSG hairlines)
+OPENING_TOL = 0.3  # mm slack around a declared opening
+PX = 0.05  # G-code raster pixel, mm
+LINE_PX = 4  # half line width in px (0.4 mm line)
+CLOSE_PX = 24  # closing of a layer into its footprint
+SKIN_PX = 12  # outer skin band (0.6 mm)
+STEP_PX = 7  # allowed step-out per layer (0.35 mm)
+ANCHOR_MM = 1.0  # a G-code bridge is anchored within this distance past each end
 MAX_RASTER_PIXELS = 60_000_000
 SKIP_TYPES = ("brim", "skirt", "skirt/brim", "prime tower", "wipe tower", "custom")
 BIG = 1e4
 
 CORE = "http://schemas.microsoft.com/3dmanufacturing/core/2015/02"
 PROD = "http://schemas.microsoft.com/3dmanufacturing/production/2015/06"
-UNITS = {"micron": 0.001, "millimeter": 1.0, "centimeter": 10.0, "inch": 25.4, "foot": 304.8, "meter": 1000.0}
+UNITS = {
+    "micron": 0.001,
+    "millimeter": 1.0,
+    "centimeter": 10.0,
+    "inch": 25.4,
+    "foot": 304.8,
+    "meter": 1000.0,
+}
 
-Mesh = tuple[np.ndarray, np.ndarray]          # (V float (n,3), F int (m,3))
+Mesh = tuple[np.ndarray, np.ndarray]  # (V float (n,3), F int (m,3))
 
 
 class InputError(ValueError):
@@ -79,6 +92,7 @@ class InputError(ValueError):
 @dataclass(frozen=True)
 class Visible:
     """visible half-space `axis < value` / `axis > value`; axis None = every face is visible"""
+
     axis: str | None
     less: bool = True
     value: float = 0.0
@@ -95,10 +109,16 @@ class Visible:
         return c < self.value if self.less else c > self.value
 
     def text(self) -> str:
-        return "all" if self.axis is None else f"{self.axis}{'<' if self.less else '>'}{self.value:g}"
+        return (
+            "all"
+            if self.axis is None
+            else f"{self.axis}{'<' if self.less else '>'}{self.value:g}"
+        )
 
 
-_VIS_RE = re.compile(r"^\s*([xy])\s*([<>])\s*([-+]?(?:\d+\.?\d*|\.\d+))\s*$", re.IGNORECASE)
+_VIS_RE = re.compile(
+    r"^\s*([xy])\s*([<>])\s*([-+]?(?:\d+\.?\d*|\.\d+))\s*$", re.IGNORECASE
+)
 
 
 def parse_visible(spec: str) -> Visible:
@@ -106,15 +126,19 @@ def parse_visible(spec: str) -> Visible:
         return Visible(None)
     m = _VIS_RE.match(spec)
     if not m:
-        raise InputError(f"--visible {spec!r}: expected x<V, x>V, y<V, y>V or all (V in mm)")
+        raise InputError(
+            f"--visible {spec!r}: expected x<V, x>V, y<V, y>V or all (V in mm)"
+        )
     return Visible(m.group(1).lower(), m.group(2) == "<", float(m.group(3)))
 
 
 @dataclass
 class FaceSpec:
     visible: Visible
-    hidden: list[np.ndarray] = field(default_factory=list)                      # (u, z) polygons
-    openings: list[tuple[float, float, float, float]] = field(default_factory=list)  # u0, u1, z0, z1
+    hidden: list[np.ndarray] = field(default_factory=list)  # (u, z) polygons
+    openings: list[tuple[float, float, float, float]] = field(
+        default_factory=list
+    )  # u0, u1, z0, z1
 
     def hidden_at(self, z: float) -> list[tuple[float, float]]:
         """u intervals of the hidden polygons on the line at height z (even-odd scanline)"""
@@ -124,7 +148,10 @@ class FaceSpec:
             hit = (p[:, 1] <= z) != (q[:, 1] <= z)
             if not hit.any():
                 continue
-            us = np.sort(p[hit, 0] + (z - p[hit, 1]) * (q[hit, 0] - p[hit, 0]) / (q[hit, 1] - p[hit, 1]))
+            us = np.sort(
+                p[hit, 0]
+                + (z - p[hit, 1]) * (q[hit, 0] - p[hit, 0]) / (q[hit, 1] - p[hit, 1])
+            )
             out += [(float(us[i]), float(us[i + 1])) for i in range(0, len(us) - 1, 2)]
         return out
 
@@ -157,8 +184,12 @@ class FaceSpec:
         return free[0] if len(free) else None
 
     def opening_for(self, ua: float, ub: float, z: float) -> bool:
-        return any(o0 - OPENING_TOL <= ua and ub <= o1 + OPENING_TOL and z0 <= z <= z1 + OPENING_TOL
-                   for o0, o1, z0, z1 in self.openings)
+        return any(
+            o0 - OPENING_TOL <= ua
+            and ub <= o1 + OPENING_TOL
+            and z0 <= z <= z1 + OPENING_TOL
+            for o0, o1, z0, z1 in self.openings
+        )
 
 
 def _array(q: Any) -> np.ndarray:
@@ -171,12 +202,16 @@ def _array(q: Any) -> np.ndarray:
 def load_hidden(path: str) -> list[np.ndarray]:
     data = _load_json(path, "--hidden")
     if not isinstance(data, list):
-        raise InputError(f"--hidden {path}: expected a JSON list of polygons [[[u, z], ...], ...]")
+        raise InputError(
+            f"--hidden {path}: expected a JSON list of polygons [[[u, z], ...], ...]"
+        )
     polys = []
     for i, q in enumerate(data):
         a = _array(q)
         if a.ndim != 2 or a.shape[1] != 2 or len(a) < 3 or not np.isfinite(a).all():
-            raise InputError(f"--hidden {path}: polygon {i} must be a list of >= 3 [u, z] points")
+            raise InputError(
+                f"--hidden {path}: polygon {i} must be a list of >= 3 [u, z] points"
+            )
         polys.append(a)
     return polys
 
@@ -189,7 +224,9 @@ def load_openings(path: str) -> list[tuple[float, float, float, float]]:
     for i, o in enumerate(data):
         a = _array(o)
         if a.shape != (4,) or not np.isfinite(a).all() or a[0] > a[1] or a[2] > a[3]:
-            raise InputError(f"--openings {path}: entry {i} must be [u0, u1, z0, z1] with u0 <= u1, z0 <= z1")
+            raise InputError(
+                f"--openings {path}: entry {i} must be [u0, u1, z0, z1] with u0 <= u1, z0 <= z1"
+            )
         out.append((float(a[0]), float(a[1]), float(a[2]), float(a[3])))
     return out
 
@@ -218,12 +255,17 @@ def _split_target(arg: str, is_spec: bool) -> tuple[str | None, str]:
 @dataclass
 class Specs:
     """--visible/--hidden/--openings, each either a default or bound to an object pattern"""
+
     visible: list[tuple[str | None, Visible]] = field(default_factory=list)
     hidden: list[tuple[str | None, list[np.ndarray]]] = field(default_factory=list)
-    openings: list[tuple[str | None, list[tuple[float, float, float, float]]]] = field(default_factory=list)
+    openings: list[tuple[str | None, list[tuple[float, float, float, float]]]] = field(
+        default_factory=list
+    )
 
     @staticmethod
-    def _pick(entries: list[tuple[str | None, Any]], names: list[str]) -> tuple[bool, Any]:
+    def _pick(
+        entries: list[tuple[str | None, Any]], names: list[str]
+    ) -> tuple[bool, Any]:
         for pat, val in entries:
             if pat is not None and any(fnmatch.fnmatchcase(n, pat) for n in names):
                 return True, val
@@ -236,7 +278,11 @@ class Specs:
         found, vis = self._pick(self.visible, names)
         if not found:
             return None
-        return FaceSpec(vis, self._pick(self.hidden, names)[1] or [], self._pick(self.openings, names)[1] or [])
+        return FaceSpec(
+            vis,
+            self._pick(self.hidden, names)[1] or [],
+            self._pick(self.openings, names)[1] or [],
+        )
 
     def patterns(self) -> list[str]:
         return [p for p, _ in self.visible if p is not None]
@@ -252,6 +298,7 @@ def object_names(name: str) -> list[str]:
 # ---------------------------------------------------------------- mesh loading
 def _stl(path: str) -> Mesh:
     import trimesh
+
     try:
         t = trimesh.load(path, force="mesh", process=False)
     except Exception as e:  # trimesh raises many types for a broken file
@@ -313,18 +360,30 @@ def load_3mf(path: str) -> list[tuple[str, list[Mesh]]]:
             vs = m.find(f"{{{CORE}}}vertices")
             ts = m.find(f"{{{CORE}}}triangles")
             if vs is not None and ts is not None:
-                V = np.array([[float(v.get(k, "0")) for k in "xyz"] for v in vs], float).reshape(-1, 3)
-                F = np.array([[int(t.get(k, "0")) for k in ("v1", "v2", "v3")] for t in ts], np.int64).reshape(-1, 3)
+                V = np.array(
+                    [[float(v.get(k, "0")) for k in "xyz"] for v in vs], float
+                ).reshape(-1, 3)
+                F = np.array(
+                    [[int(t.get(k, "0")) for k in ("v1", "v2", "v3")] for t in ts],
+                    np.int64,
+                ).reshape(-1, 3)
                 if len(F):
                     # a production-extension model file may declare its own unit: bring its vertices
                     # to the root unit, in which the transforms (translations included) are written,
                     # then scale the result to mm
-                    V = V * (UNITS.get(model(part).get("unit", "millimeter"), 1.0) / scale)
+                    V = V * (
+                        UNITS.get(model(part).get("unit", "millimeter"), 1.0) / scale
+                    )
                     out.append((((V @ tf[:3, :3].T) + tf[:3, 3]) * scale, F))
         comps = o.find(f"{{{CORE}}}components")
         for c in comps if comps is not None else []:
             sub = c.get(f"{{{PROD}}}path") or part
-            out += meshes(sub, c.get("objectid", ""), tf @ _transform(c.get("transform")), depth + 1)
+            out += meshes(
+                sub,
+                c.get("objectid", ""),
+                tf @ _transform(c.get("transform")),
+                depth + 1,
+            )
         return out
 
     items = []
@@ -344,21 +403,36 @@ def load_3mf(path: str) -> list[tuple[str, list[Mesh]]]:
 def union_solid(meshes: list[Mesh]) -> Any:
     """outer solid: union of the volumes (interfaces between colours are not surfaces)"""
     from manifold3d import Error, Manifold, Mesh as MMesh, OpType
+
     ms = []
     for V, F in meshes:
-        m = Manifold(MMesh(vert_properties=np.asarray(V, np.float32), tri_verts=np.asarray(F, np.uint32)))
+        m = Manifold(
+            MMesh(
+                vert_properties=np.asarray(V, np.float32),
+                tri_verts=np.asarray(F, np.uint32),
+            )
+        )
         if m.status() != Error.NoError:
-            raise InputError(f"a volume is not a closed manifold mesh ({m.status()}); repair it first (3d mesh)")
+            raise InputError(
+                f"a volume is not a closed manifold mesh ({m.status()}); repair it first (3d mesh)"
+            )
         ms.append(m)
     return Manifold.batch_boolean(ms, OpType.Add)
 
 
 # ---------------------------------------------------------------- mesh pass
-def mesh_report(name: str, solid: Any, spec: FaceSpec, layer: float = LAYER,
-                min_area: float = MIN_AREA, bar_span: float = BAR_SPAN) -> dict[str, Any]:
+def mesh_report(
+    name: str,
+    solid: Any,
+    spec: FaceSpec,
+    layer: float = LAYER,
+    min_area: float = MIN_AREA,
+    bar_span: float = BAR_SPAN,
+) -> dict[str, Any]:
     """layer by layer, the part of a layer on the visible side not carried by the layer below
     grown by the self-supporting reach; every piece over min_area is a sag or a bridge"""
     from manifold3d import CrossSection, JoinType
+
     reach = layer + REACH_PAD
     x0b, y0b, z0b, x1b, y1b, z1b = solid.bounding_box()
     # layers from the bed (z 0) up: a part that starts above the bed has nothing under its
@@ -370,12 +444,17 @@ def mesh_report(name: str, solid: Any, spec: FaceSpec, layer: float = LAYER,
     else:
         edge = vis_ax.value + 0.02 if vis_ax.less else vis_ax.value - 0.02
         lo = edge - 2 * BIG if vis_ax.less else edge
-        face = CrossSection.square((2 * BIG, 2 * BIG)).translate((lo, -BIG) if vis_ax.axis == "x" else (-BIG, lo))
+        face = CrossSection.square((2 * BIG, 2 * BIG)).translate(
+            (lo, -BIG) if vis_ax.axis == "x" else (-BIG, lo)
+        )
 
     def strip(a: float, b: float, w: float = 2 * BIG, c: float = -BIG) -> Any:
         """band a <= u <= b across the face (v from c, width w)"""
-        return (CrossSection.square((b - a, w)).translate((a, c)) if ui == 0
-                else CrossSection.square((w, b - a)).translate((c, a)))
+        return (
+            CrossSection.square((b - a, w)).translate((a, c))
+            if ui == 0
+            else CrossSection.square((w, b - a)).translate((c, a))
+        )
 
     pieces: list[dict[str, Any]] = []
     bridges: list[dict[str, Any]] = []
@@ -399,19 +478,38 @@ def mesh_report(name: str, solid: Any, spec: FaceSpec, layer: float = LAYER,
                 va, vb = (by0, by1) if ui == 0 else (bx0, bx1)
                 span = (ub - ua) + 2 * reach
                 # a bridge: the layer below carries both of its ends (0.4 mm probes past the reach)
-                ends = all(not (prev ^ strip(ue, ue + 0.4, vb - va + 0.2, va - 0.1)).is_empty()
-                           for ue in (ua - reach - 0.4, ub + reach))
-                rec = dict(area_mm2=round(g.area(), 3), x=round((bx0 + bx1) / 2, 2), y=round((by0 + by1) / 2, 2),
-                           z=round(z, 3), bbox=[round(bx0, 2), round(by0, 2), round(bx1, 2), round(by1, 2)])
+                ends = all(
+                    not (prev ^ strip(ue, ue + 0.4, vb - va + 0.2, va - 0.1)).is_empty()
+                    for ue in (ua - reach - 0.4, ub + reach)
+                )
+                rec = {
+                    "area_mm2": round(g.area(), 3),
+                    "x": round((bx0 + bx1) / 2, 2),
+                    "y": round((by0 + by1) / 2, 2),
+                    "z": round(z, 3),
+                    "bbox": [
+                        round(bx0, 2),
+                        round(by0, 2),
+                        round(bx1, 2),
+                        round(by1, 2),
+                    ],
+                }
                 if spec.opening_for(ua, ub, z) and ends and span <= bar_span:
                     bridges.append(dict(rec, span_mm=round(span, 2)))
                 else:
                     pieces.append(rec)
         prev = cur
     pieces.sort(key=lambda r: -r["area_mm2"])
-    return dict(name=name, kind="mesh", status="FAIL" if pieces else "PASS", visible=vis_ax.text(),
-                layers=len(zs), pieces=pieces, bridges=bridges,
-                total_area_mm2=round(sum(p["area_mm2"] for p in pieces), 3))
+    return {
+        "name": name,
+        "kind": "mesh",
+        "status": "FAIL" if pieces else "PASS",
+        "visible": vis_ax.text(),
+        "layers": len(zs),
+        "pieces": pieces,
+        "bridges": bridges,
+        "total_area_mm2": round(sum(p["area_mm2"] for p in pieces), 3),
+    }
 
 
 # ---------------------------------------------------------------- G-code pass
@@ -424,8 +522,8 @@ class Layer:
     __slots__ = ("arcs", "counts", "moves")
 
     def __init__(self) -> None:
-        self.moves = array("d")                    # x, y, nx, ny per straight move
-        self.counts = array("q")                   # samples - 1 per straight move
+        self.moves = array("d")  # x, y, nx, ny per straight move
+        self.counts = array("q")  # samples - 1 per straight move
         self.arcs: list[np.ndarray] = []
 
     def add_move(self, x: float, y: float, nx: float, ny: float) -> None:
@@ -460,7 +558,9 @@ class GObject:
     name: str
     spec: FaceSpec
     layers: dict[float, Layer] = field(default_factory=dict)
-    support: list[tuple[str, np.ndarray, float]] = field(default_factory=list)   # (type, points, z)
+    support: list[tuple[str, np.ndarray, float]] = field(
+        default_factory=list
+    )  # (type, points, z)
 
     def layer(self, z: float) -> Layer:
         lay = self.layers.get(z)
@@ -476,14 +576,16 @@ class GObject:
 _WORD = re.compile(r"([XYZEIJ])\s*(-?(?:\d+\.?\d*|\.\d+))", re.IGNORECASE)
 
 
-def _arc(x: float, y: float, nx: float, ny: float, i: float, j: float, cw: bool) -> np.ndarray:
+def _arc(
+    x: float, y: float, nx: float, ny: float, i: float, j: float, cw: bool
+) -> np.ndarray:
     cx, cy = x + i, y + j
     r = math.hypot(i, j)
     a0, a1 = math.atan2(y - cy, x - cx), math.atan2(ny - cy, nx - cx)
     sweep = (a0 - a1) if cw else (a1 - a0)
     sweep %= 2 * math.pi
     if sweep < 1e-9:
-        sweep = 2 * math.pi                        # start == end: a full circle
+        sweep = 2 * math.pi  # start == end: a full circle
     n = max(2, int(r * sweep / (PX / 2)) + 1)
     t = np.linspace(0.0, sweep, n) * (-1 if cw else 1) + a0
     pts = np.c_[cx + r * np.cos(t), cy + r * np.sin(t)]
@@ -505,7 +607,10 @@ def _segments(m: np.ndarray, n: np.ndarray) -> np.ndarray:
     t = (np.arange(end[-1]) - np.repeat(end - cnt, cnt)) * np.repeat(1.0 / n, cnt)
     t[end - 1] = 1.0
     x, y = np.repeat(m[:, 0], cnt), np.repeat(m[:, 1], cnt)
-    return np.c_[x + np.repeat(m[:, 2] - m[:, 0], cnt) * t, y + np.repeat(m[:, 3] - m[:, 1], cnt) * t]
+    return np.c_[
+        x + np.repeat(m[:, 2] - m[:, 0], cnt) * t,
+        y + np.repeat(m[:, 3] - m[:, 1], cnt) * t,
+    ]
 
 
 def parse_gcode(path: str, specs: Specs) -> tuple[dict[str, GObject], list[str]]:
@@ -524,7 +629,9 @@ def parse_gcode(path: str, specs: Specs) -> tuple[dict[str, GObject], list[str]]
         if label not in gated:
             seen.append(label)
             spec = specs.resolve(object_names(label))
-            gated[label] = objs.setdefault(label, GObject(label, spec)) if spec else None
+            gated[label] = (
+                objs.setdefault(label, GObject(label, spec)) if spec else None
+            )
         return gated[label]
 
     cur = enter("plate")
@@ -532,7 +639,7 @@ def parse_gcode(path: str, specs: Specs) -> tuple[dict[str, GObject], list[str]]
     x = y = 0.0
     e_abs, e_last = False, 0.0
     try:
-        fh = open(path, encoding="utf-8", errors="replace")
+        fh = open(path, encoding="utf-8", errors="replace")  # noqa: SIM115 — `with fh:` below; open errors map to InputError here
     except OSError as e:
         raise InputError(f"{path}: {e.strerror}") from e
     with fh:
@@ -543,10 +650,8 @@ def parse_gcode(path: str, specs: Specs) -> tuple[dict[str, GObject], list[str]]
             if line[0] == ";":
                 body = line[1:].strip()
                 if body.startswith("Z:") or body.startswith("Z_HEIGHT:"):
-                    try:
+                    with contextlib.suppress(ValueError):
                         zc = round(float(body.split(":", 1)[1]), 3)
-                    except ValueError:
-                        pass
                 elif body.startswith("TYPE:") or body.startswith("FEATURE:"):
                     typ = body.split(":", 1)[1].strip()
                 continue
@@ -591,13 +696,33 @@ def parse_gcode(path: str, specs: Specs) -> tuple[dict[str, GObject], list[str]]
                 lz = zc if zc is not None else round(z, 3)
                 t = typ.lower()
                 if t.startswith("support"):
-                    pts = (_arc(x, y, nx, ny, w.get("I", 0.0), w.get("J", 0.0), word in ("G2", "G02")) if arc
-                           else _segment(x, y, nx, ny))
+                    pts = (
+                        _arc(
+                            x,
+                            y,
+                            nx,
+                            ny,
+                            w.get("I", 0.0),
+                            w.get("J", 0.0),
+                            word in ("G2", "G02"),
+                        )
+                        if arc
+                        else _segment(x, y, nx, ny)
+                    )
                     (orphans if cur is None else cur.support).append((typ, pts, lz))
                 elif cur is not None and t not in SKIP_TYPES:
                     if arc:
-                        cur.layer(lz).arcs.append(_arc(x, y, nx, ny, w.get("I", 0.0), w.get("J", 0.0),
-                                                       word in ("G2", "G02")))
+                        cur.layer(lz).arcs.append(
+                            _arc(
+                                x,
+                                y,
+                                nx,
+                                ny,
+                                w.get("I", 0.0),
+                                w.get("J", 0.0),
+                                word in ("G2", "G02"),
+                            )
+                        )
                     else:
                         cur.layer(lz).add_move(x, y, nx, ny)
             x, y = nx, ny
@@ -605,7 +730,9 @@ def parse_gcode(path: str, specs: Specs) -> tuple[dict[str, GObject], list[str]]
         if o.layers:
             lo, hi = o.bounds()
             lo, hi = lo - 1.0, hi + 1.0
-            o.support += [s for s in orphans if ((s[1] >= lo) & (s[1] <= hi)).all(1).any()]
+            o.support += [
+                s for s in orphans if ((s[1] >= lo) & (s[1] <= hi)).all(1).any()
+            ]
     return objs, seen
 
 
@@ -613,6 +740,7 @@ def _fill_holes(a: np.ndarray) -> np.ndarray:
     """ndimage.binary_fill_holes(a) with one labelling instead of an iterated propagation:
     a hole is a background region (4-connected, as there) that does not reach the raster edge"""
     from scipy import ndimage
+
     lab, n = ndimage.label(~a)
     keep = np.ones(n + 1, bool)
     keep[lab[0]] = keep[lab[-1]] = keep[lab[:, 0]] = keep[lab[:, -1]] = False
@@ -620,14 +748,29 @@ def _fill_holes(a: np.ndarray) -> np.ndarray:
     return keep[lab]
 
 
-def gcode_report(o: GObject, layer: float = LAYER, min_area: float = MIN_AREA,
-                 bar_span: float = BAR_SPAN) -> dict[str, Any]:
+def gcode_report(
+    o: GObject,
+    layer: float = LAYER,
+    min_area: float = MIN_AREA,
+    bar_span: float = BAR_SPAN,
+) -> dict[str, Any]:
     from scipy import ndimage
+
     spec = o.spec
-    rep: dict[str, Any] = dict(name=o.name, kind="gcode", visible=spec.visible.text(), layers=len(o.layers),
-                               support=[], islands=[], bridges=[])
+    rep: dict[str, Any] = {
+        "name": o.name,
+        "kind": "gcode",
+        "visible": spec.visible.text(),
+        "layers": len(o.layers),
+        "support": [],
+        "islands": [],
+        "bridges": [],
+    }
     if not o.layers:
-        rep.update(status="FAIL", error="no extrusion of this object in the G-code (truncated slice?)")
+        rep.update(
+            status="FAIL",
+            error="no extrusion of this object in the G-code (truncated slice?)",
+        )
         return rep
     zs = sorted(o.layers)
     # support below the object's first own layer is the raft; over a raft the G-code z is
@@ -639,7 +782,14 @@ def gcode_report(o: GObject, layer: float = LAYER, min_area: float = MIN_AREA,
             continue
         vis = spec.first_visible(pts, z - zoff)
         if vis is not None:
-            rep["support"].append(dict(type=typ, x=round(float(vis[0]), 2), y=round(float(vis[1]), 2), z=z))
+            rep["support"].append(
+                {
+                    "type": typ,
+                    "x": round(float(vis[0]), 2),
+                    "y": round(float(vis[1]), 2),
+                    "z": z,
+                }
+            )
     lo, hi = o.bounds()
     # margin wider than the closing: erosion treats outside the raster as empty, so a margin
     # under CLOSE_PX would eat the outermost lines of the footprint (false islands at the edge)
@@ -647,7 +797,9 @@ def gcode_report(o: GObject, layer: float = LAYER, min_area: float = MIN_AREA,
     x0, y0 = lo - margin
     W, H = ((hi + margin - (x0, y0)) / PX).astype(int) + 1
     if W * H > MAX_RASTER_PIXELS:
-        rep.update(status="FAIL", error=f"object raster {W}x{H} px at {PX} mm is too large")
+        rep.update(
+            status="FAIL", error=f"object raster {W}x{H} px at {PX} mm is too large"
+        )
         return rep
     org = np.array([x0, y0])
     ui = spec.visible.u
@@ -658,7 +810,7 @@ def gcode_report(o: GObject, layer: float = LAYER, min_area: float = MIN_AREA,
     # those on the whole raster (outside the window the layer is empty in both).
     crop = LINE_PX + CLOSE_PX + 2
     size = np.array([W, H])
-    prev_body: np.ndarray | None = None          # the whole raster: the next layer's footprint
+    prev_body: np.ndarray | None = None  # the whole raster: the next layer's footprint
     zprev = 0.0
     for k in zs:
         ij = ((o.layers[k].points() - org) / PX).astype(int)
@@ -679,9 +831,11 @@ def gcode_report(o: GObject, layer: float = LAYER, min_area: float = MIN_AREA,
             if carried:
                 # the footprint grown by STEP_PX, in the window (from the footprint around it)
                 b0, b1 = np.maximum(a0 - STEP_PX, 0), np.minimum(a1 + STEP_PX, size)
-                grown = ndimage.binary_dilation(foot[b0[0]:b1[0], b0[1]:b1[1]], iterations=STEP_PX)
+                grown = ndimage.binary_dilation(
+                    foot[b0[0] : b1[0], b0[1] : b1[1]], iterations=STEP_PX
+                )
                 d0, d1 = a0 - b0, a1 - b0
-                un = g & ~grown[d0[0]:d1[0], d0[1]:d1[1]]
+                un = g & ~grown[d0[0] : d1[0], d0[1] : d1[1]]
             lab, n = ndimage.label(un)
             if n:
                 # only islands reaching the skin of this layer count: a top skin over infill or a
@@ -692,7 +846,10 @@ def gcode_report(o: GObject, layer: float = LAYER, min_area: float = MIN_AREA,
                 for q, box_ in enumerate(ndimage.find_objects(lab), start=1):
                     if not on_skin[q]:
                         continue
-                    cells = np.argwhere(lab[box_] == q) + (box_[0].start + a0[0], box_[1].start + a0[1])
+                    cells = np.argwhere(lab[box_] == q) + (
+                        box_[0].start + a0[0],
+                        box_[1].start + a0[1],
+                    )
                     a = len(cells) * PX * PX
                     cx, cy = cells.mean(0) * PX + org
                     if a <= min_area or not spec.visible_at(cx, cy, k - zoff):
@@ -703,11 +860,26 @@ def gcode_report(o: GObject, layer: float = LAYER, min_area: float = MIN_AREA,
 
                     lo_end, hi_end = (max(ia - m1, 0), ia), (ib + 1, ib + 1 + m1)
                     vband = slice(va, vb + 1)
-                    anchored = all(foot[(slice(*e), vband) if ui == 0 else (vband, slice(*e))].any()
-                                   for e in (lo_end, hi_end))
-                    rec = dict(area_mm2=round(a, 3), x=round(float(cx), 2), y=round(float(cy), 2), z=k)
-                    if anchored and ub - ua <= bar_span and spec.opening_for(ua, ub, k - zoff):
-                        rep["bridges"].append(dict(rec, span_mm=round(float(ub - ua), 2)))
+                    anchored = all(
+                        foot[
+                            (slice(*e), vband) if ui == 0 else (vband, slice(*e))
+                        ].any()
+                        for e in (lo_end, hi_end)
+                    )
+                    rec = {
+                        "area_mm2": round(a, 3),
+                        "x": round(float(cx), 2),
+                        "y": round(float(cy), 2),
+                        "z": k,
+                    }
+                    if (
+                        anchored
+                        and ub - ua <= bar_span
+                        and spec.opening_for(ua, ub, k - zoff)
+                    ):
+                        rep["bridges"].append(
+                            dict(rec, span_mm=round(float(ub - ua), 2))
+                        )
                     else:
                         rep["islands"].append(rec)
         prev_body, zprev = body, k
@@ -724,7 +896,9 @@ class Options:
     bar_span: float = BAR_SPAN
 
 
-def check(parts: list[str], gcode: str | None, specs: Specs, opts: Options) -> dict[str, Any]:
+def check(
+    parts: list[str], gcode: str | None, specs: Specs, opts: Options
+) -> dict[str, Any]:
     """run both passes; parts are STL groups (`a.stl,b.stl` = one part) or 3MF files"""
     mesh: list[dict[str, Any]] = []
     skipped: list[str] = []
@@ -734,78 +908,157 @@ def check(parts: list[str], gcode: str | None, specs: Specs, opts: Options) -> d
         if len(files) == 1 and files[0].lower().endswith(".3mf"):
             named = load_3mf(files[0])
         else:
-            named = [(os.path.splitext(os.path.basename(files[0]))[0], [_stl(f) for f in files])]
+            named = [
+                (
+                    os.path.splitext(os.path.basename(files[0]))[0],
+                    [_stl(f) for f in files],
+                )
+            ]
         for name, meshes in named:
             names.append(name)
             spec = specs.resolve(object_names(name))
             if spec is None:
                 skipped.append(name)
                 continue
-            mesh.append(mesh_report(name, union_solid(meshes), spec, opts.layer, opts.min_area, opts.bar_span))
+            mesh.append(
+                mesh_report(
+                    name,
+                    union_solid(meshes),
+                    spec,
+                    opts.layer,
+                    opts.min_area,
+                    opts.bar_span,
+                )
+            )
     gc: list[dict[str, Any]] = []
     # an object-bound --visible must match something: in the G-code when one is given (a planned
     # object missing from the slice), else among the mesh parts (a typo would silently skip it)
     if gcode:
         objs, seen = parse_gcode(gcode, specs)
-        gc = [gcode_report(o, opts.layer, opts.min_area, opts.bar_span) for o in objs.values()]
+        gc = [
+            gcode_report(o, opts.layer, opts.min_area, opts.bar_span)
+            for o in objs.values()
+        ]
         skipped += [s for s in seen if s not in objs]
         for pat in specs.patterns():
-            if not any(fnmatch.fnmatchcase(n, pat) for s in seen for n in object_names(s)):
-                gc.append(dict(name=pat, kind="gcode", status="FAIL", visible="", layers=0, support=[],
-                               islands=[], bridges=[], error="no object in the G-code matches this name"))
+            if not any(
+                fnmatch.fnmatchcase(n, pat) for s in seen for n in object_names(s)
+            ):
+                gc.append(
+                    {
+                        "name": pat,
+                        "kind": "gcode",
+                        "status": "FAIL",
+                        "visible": "",
+                        "layers": 0,
+                        "support": [],
+                        "islands": [],
+                        "bridges": [],
+                        "error": "no object in the G-code matches this name",
+                    }
+                )
     else:
-        for pat in specs.patterns():
-            if not any(fnmatch.fnmatchcase(n, pat) for s in names for n in object_names(s)):
-                mesh.append(dict(name=pat, kind="mesh", status="FAIL", visible="", layers=0, pieces=[],
-                                 bridges=[], total_area_mm2=0.0, error="no part matches this name"))
+        mesh.extend(
+            {
+                "name": pat,
+                "kind": "mesh",
+                "status": "FAIL",
+                "visible": "",
+                "layers": 0,
+                "pieces": [],
+                "bridges": [],
+                "total_area_mm2": 0.0,
+                "error": "no part matches this name",
+            }
+            for pat in specs.patterns()
+            if not any(
+                fnmatch.fnmatchcase(n, pat) for s in names for n in object_names(s)
+            )
+        )
     if not mesh and not gc:
-        raise InputError("nothing to check: no part or G-code object has a --visible side "
-                         f"(objects seen: {', '.join(skipped) or 'none'})")
+        raise InputError(
+            "nothing to check: no part or G-code object has a --visible side "
+            f"(objects seen: {', '.join(skipped) or 'none'})"
+        )
     status = "FAIL" if any(r["status"] == "FAIL" for r in mesh + gc) else "PASS"
-    return dict(status=status, layer_mm=opts.layer, min_area_mm2=opts.min_area, bar_span_mm=opts.bar_span,
-                reach_mm=round(opts.layer + REACH_PAD, 3), mesh=mesh, gcode=gc, skipped=skipped)
+    return {
+        "status": status,
+        "layer_mm": opts.layer,
+        "min_area_mm2": opts.min_area,
+        "bar_span_mm": opts.bar_span,
+        "reach_mm": round(opts.layer + REACH_PAD, 3),
+        "mesh": mesh,
+        "gcode": gc,
+        "skipped": skipped,
+    }
 
 
 def _bridge_note(br: list[dict[str, Any]]) -> str:
-    return (f"; bridges in openings: {len(br)}, longest {max(b['span_mm'] for b in br):.1f} mm") if br else ""
+    return (
+        (
+            f"; bridges in openings: {len(br)}, longest {max(b['span_mm'] for b in br):.1f} mm"
+        )
+        if br
+        else ""
+    )
 
 
 def text_report(res: dict[str, Any]) -> list[str]:
     out = []
     if res["mesh"]:
         nf = sum(r["status"] == "FAIL" for r in res["mesh"])
-        out.append(f"visible-faces (mesh, layer {res['layer_mm']} mm): {'PASS' if not nf else f'FAIL in {nf} parts'}")
+        out.append(
+            f"visible-faces (mesh, layer {res['layer_mm']} mm): {'PASS' if not nf else f'FAIL in {nf} parts'}"
+        )
         for r in res["mesh"]:
             if r.get("error"):
                 out.append(f"  {r['name']:8s} FAIL {r['error']}")
             elif r["pieces"]:
-                out.append(f"  {r['name']:8s} FAIL {len(r['pieces'])} unsupported pieces on the visible side "
-                           f"({r['visible']}), {r['total_area_mm2']:.1f} mm² in all{_bridge_note(r['bridges'])}")
+                out.append(
+                    f"  {r['name']:8s} FAIL {len(r['pieces'])} unsupported pieces on the visible side "
+                    f"({r['visible']}), {r['total_area_mm2']:.1f} mm² in all{_bridge_note(r['bridges'])}"
+                )
                 for p in r["pieces"][:15]:
                     b = p["bbox"]
-                    out.append(f"           {p['area_mm2']:6.2f} mm² at x {p['x']:.1f} y {p['y']:.1f} z {p['z']:.2f} "
-                               f"(x {b[0]:.1f}..{b[2]:.1f}, y {b[1]:.1f}..{b[3]:.1f})")
+                    out.append(
+                        f"           {p['area_mm2']:6.2f} mm² at x {p['x']:.1f} y {p['y']:.1f} z {p['z']:.2f} "
+                        f"(x {b[0]:.1f}..{b[2]:.1f}, y {b[1]:.1f}..{b[3]:.1f})"
+                    )
                 if len(r["pieces"]) > 15:
-                    out.append(f"           ... {len(r['pieces']) - 15} more (--json lists all)")
+                    out.append(
+                        f"           ... {len(r['pieces']) - 15} more (--json lists all)"
+                    )
             else:
-                out.append(f"  {r['name']:8s} PASS ({r['layers']} layers, no unsupported piece over "
-                           f"{res['min_area_mm2']} mm² on the visible side ({r['visible']}){_bridge_note(r['bridges'])})")
+                out.append(
+                    f"  {r['name']:8s} PASS ({r['layers']} layers, no unsupported piece over "
+                    f"{res['min_area_mm2']} mm² on the visible side ({r['visible']}){_bridge_note(r['bridges'])})"
+                )
     if res["gcode"]:
         nf = sum(r["status"] == "FAIL" for r in res["gcode"])
-        out.append(f"visible-faces (G-code): {'PASS' if not nf else f'FAIL in {nf} objects'}")
+        out.append(
+            f"visible-faces (G-code): {'PASS' if not nf else f'FAIL in {nf} objects'}"
+        )
         for r in res["gcode"]:
             if r.get("error"):
                 out.append(f"  {r['name']:8s} FAIL {r['error']}")
             elif r["status"] == "FAIL":
-                out.append(f"  {r['name']:8s} FAIL {len(r['support'])} support moves and {len(r['islands'])} "
-                           f"unsupported islands on the visible side ({r['visible']}){_bridge_note(r['bridges'])}")
-                for s in r["support"][:5]:
-                    out.append(f"           support ({s['type']}) at x {s['x']:.1f} y {s['y']:.1f} z {s['z']:.2f}")
-                for i in r["islands"][:10]:
-                    out.append(f"           island {i['area_mm2']:6.2f} mm² at x {i['x']:.1f} y {i['y']:.1f} z {i['z']:.2f}")
+                out.append(
+                    f"  {r['name']:8s} FAIL {len(r['support'])} support moves and {len(r['islands'])} "
+                    f"unsupported islands on the visible side ({r['visible']}){_bridge_note(r['bridges'])}"
+                )
+                out.extend(
+                    f"           support ({s['type']}) at x {s['x']:.1f} y {s['y']:.1f} z {s['z']:.2f}"
+                    for s in r["support"][:5]
+                )
+                out.extend(
+                    f"           island {i['area_mm2']:6.2f} mm² at x {i['x']:.1f} y {i['y']:.1f} z {i['z']:.2f}"
+                    for i in r["islands"][:10]
+                )
             else:
-                out.append(f"  {r['name']:8s} PASS ({r['layers']} layers: no support, no island without the layer "
-                           f"below on the visible side ({r['visible']}){_bridge_note(r['bridges'])})")
+                out.append(
+                    f"  {r['name']:8s} PASS ({r['layers']} layers: no support, no island without the layer "
+                    f"below on the visible side ({r['visible']}){_bridge_note(r['bridges'])})"
+                )
     if res["skipped"]:
         out.append(f"not gated (no --visible for them): {', '.join(res['skipped'])}")
     out.append(f">>> VISIBLE-FACES: {res['status']}")
@@ -827,12 +1080,16 @@ def build_specs(visible: list[str], hidden: list[str], openings: list[str]) -> S
 
 
 def main(argv: list[str]) -> int:
-    ap = argparse.ArgumentParser(prog="3d visible-faces",
-                                 description="no unsupported layer piece or support on the visible side of a part")
+    ap = argparse.ArgumentParser(
+        prog="3d visible-faces",
+        description="no unsupported layer piece or support on the visible side of a part",
+    )
     ap.add_argument("parts", nargs="*", help="PART.stl[,VOLUME2.stl...] or PLATE.3mf")
     ap.add_argument("--visible", action="append", default=[], metavar="[OBJ:]SPEC")
     ap.add_argument("--hidden", action="append", default=[], metavar="[OBJ:]POLYS.json")
-    ap.add_argument("--openings", action="append", default=[], metavar="[OBJ:]OPENINGS.json")
+    ap.add_argument(
+        "--openings", action="append", default=[], metavar="[OBJ:]OPENINGS.json"
+    )
     ap.add_argument("--gcode", metavar="PLATE.gcode")
     ap.add_argument("--layer", type=float, default=LAYER)
     ap.add_argument("--min-area", type=float, default=MIN_AREA)
@@ -840,16 +1097,31 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--json", action="store_true")
     a = ap.parse_args(argv)
     try:
-        bad = [f"--{k} {v}" for k, v in (("layer", a.layer), ("min-area", a.min_area), ("bar-span", a.bar_span))
-               if not (math.isfinite(v) and v > 0)]
+        bad = [
+            f"--{k} {v}"
+            for k, v in (
+                ("layer", a.layer),
+                ("min-area", a.min_area),
+                ("bar-span", a.bar_span),
+            )
+            if not (math.isfinite(v) and v > 0)
+        ]
         if bad:
-            raise InputError("invalid option: " + "; ".join(bad) + " (must be finite and > 0)")
+            raise InputError(
+                "invalid option: " + "; ".join(bad) + " (must be finite and > 0)"
+            )
         if not a.visible:
-            raise InputError("--visible is required (e.g. --visible 'y<4.8', --visible 'WALL:x>2', --visible all)")
+            raise InputError(
+                "--visible is required (e.g. --visible 'y<4.8', --visible 'WALL:x>2', --visible all)"
+            )
         if not a.parts and not a.gcode:
             raise InputError("give a part (STL/3MF) and/or --gcode PLATE.gcode")
-        res = check(a.parts, a.gcode, build_specs(a.visible, a.hidden, a.openings),
-                    Options(a.layer, a.min_area, a.bar_span))
+        res = check(
+            a.parts,
+            a.gcode,
+            build_specs(a.visible, a.hidden, a.openings),
+            Options(a.layer, a.min_area, a.bar_span),
+        )
     except InputError as e:
         print(f"visible-faces: error: {e}", file=sys.stderr)
         return 2

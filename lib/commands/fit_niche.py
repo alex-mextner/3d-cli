@@ -152,7 +152,8 @@ def _build_spec(opts: dict[str, object]) -> NicheSpec:
         if not os.path.isfile(spec_path):
             raise InputNotFound(spec_path, command="fit-niche")
         try:
-            data = json.loads(open(spec_path, encoding="utf-8").read())
+            with open(spec_path, encoding="utf-8") as fh:
+                data = json.load(fh)
         except (OSError, json.JSONDecodeError) as exc:
             raise UsageError(
                 f"could not read spec JSON: {exc}", command="fit-niche",

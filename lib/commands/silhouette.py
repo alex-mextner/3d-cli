@@ -18,6 +18,7 @@ ROADMAP §7 / §8: "Compute axes/contours by math (OpenCV/ImageMagick: PCA, imag
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import subprocess
 import tempfile
@@ -128,10 +129,8 @@ def run(argv: list[str]) -> int:
         print(f"silhouette: {inp} -> {out}  ({dims})")
         return 0
     finally:
-        try:
+        with contextlib.suppress(OSError):
             os.remove(render)
-        except OSError:
-            pass
 
 
 COMMAND = Command(

@@ -29,7 +29,6 @@ from __future__ import annotations
 
 import json
 import os
-import socket
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -231,7 +230,7 @@ class CrealityStockAdapter(Adapter):
         url = f"http://{self.host}:{self.port}/upload/{quote(remote_name)}"
         try:
             status, data = http_upload(url, local, remote_name, {}, timeout=self.upload_timeout)
-        except (socket.timeout, TimeoutError) as exc:
+        except TimeoutError as exc:
             status, data = -1, repr(exc).encode()
         except OSError as exc:
             raise self._comm_error("upload", exc) from exc

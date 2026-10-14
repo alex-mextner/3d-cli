@@ -10,7 +10,8 @@ import datetime
 import json
 import os
 import pathlib
-from typing import Any, Sequence
+from typing import Any
+from collections.abc import Sequence
 
 from cli import paths
 from errors import ThreeDError, UsageError

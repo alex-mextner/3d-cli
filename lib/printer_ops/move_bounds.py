@@ -39,15 +39,17 @@ LIMITATIONS: positions are G-code coordinates; firmware-side tool offsets (toolc
 
 Reference: garage-band babushkin-dom gen/move_bounds.py (same rules, project-local).
 """
+
 from __future__ import annotations
 
+import itertools
 import math
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
 Range = tuple[float, float]
-Limits = tuple[Range, Range]          # ((xmin, xmax), (ymin, ymax))
+Limits = tuple[Range, Range]  # ((xmin, xmax), (ymin, ymax))
 Polygon = list[tuple[float, float]]
 
 EPS = 1e-6
@@ -57,21 +59,76 @@ _LAYER_MARKERS = (";LAYER_CHANGE", "; CHANGE_LAYER")
 _LINE_NO = re.compile(r"^[Nn]\d+\s*")
 MAX_CHORDS = 100_000  # chord simulation budget per arc (r * sweep / 1 mm)
 # Commands this checker models itself (they move or change coordinates)
-_MODELED = frozenset({
-    "G0", "G1", "G2", "G3", "G17", "G18", "G19", "G28", "G90", "G91", "G92", "M82", "M83", "M221",
-    "ACTIVATE_EXTRUDER", "SET_GCODE_OFFSET", "SAVE_GCODE_STATE", "RESTORE_GCODE_STATE",
-})
+_MODELED = frozenset(
+    {
+        "G0",
+        "G1",
+        "G2",
+        "G3",
+        "G17",
+        "G18",
+        "G19",
+        "G28",
+        "G90",
+        "G91",
+        "G92",
+        "M82",
+        "M83",
+        "M221",
+        "ACTIVATE_EXTRUDER",
+        "SET_GCODE_OFFSET",
+        "SAVE_GCODE_STATE",
+        "RESTORE_GCODE_STATE",
+    }
+)
 # Stock Klipper/Marlin commands that neither move X/Y nor change coordinates. Anything else is a
 # macro (or a command this checker does not model): its moves are invisible here.
-_INERT = frozenset({
-    "G4", "G10", "G11", "G21", "M17", "M18", "M73", "M84", "M104", "M105", "M106", "M107", "M109",
-    "M110", "M112", "M114", "M115", "M117", "M118", "M140", "M141", "M190", "M191", "M204", "M205",
-    "M220", "M400", "M486", "M900",
-    "EXCLUDE_OBJECT", "EXCLUDE_OBJECT_DEFINE", "EXCLUDE_OBJECT_START", "EXCLUDE_OBJECT_END",
-    "SET_VELOCITY_LIMIT", "SET_PRESSURE_ADVANCE", "SET_PRINT_STATS_INFO", "SET_FAN_SPEED",
-    "SET_HEATER_TEMPERATURE", "SET_TEMPERATURE_FAN_TARGET", "TEMPERATURE_WAIT", "SET_RETRACTION",
-    "SET_IDLE_TIMEOUT",
-})
+_INERT = frozenset(
+    {
+        "G4",
+        "G10",
+        "G11",
+        "G21",
+        "M17",
+        "M18",
+        "M73",
+        "M84",
+        "M104",
+        "M105",
+        "M106",
+        "M107",
+        "M109",
+        "M110",
+        "M112",
+        "M114",
+        "M115",
+        "M117",
+        "M118",
+        "M140",
+        "M141",
+        "M190",
+        "M191",
+        "M204",
+        "M205",
+        "M220",
+        "M400",
+        "M486",
+        "M900",
+        "EXCLUDE_OBJECT",
+        "EXCLUDE_OBJECT_DEFINE",
+        "EXCLUDE_OBJECT_START",
+        "EXCLUDE_OBJECT_END",
+        "SET_VELOCITY_LIMIT",
+        "SET_PRESSURE_ADVANCE",
+        "SET_PRINT_STATS_INFO",
+        "SET_FAN_SPEED",
+        "SET_HEATER_TEMPERATURE",
+        "SET_TEMPERATURE_FAN_TARGET",
+        "TEMPERATURE_WAIT",
+        "SET_RETRACTION",
+        "SET_IDLE_TIMEOUT",
+    }
+)
 _GM_WORD = re.compile(r"([GM])0*(\d+)(?![\d.])")
 
 
@@ -88,6 +145,8 @@ def command_word(line: str) -> str | None:
         if m:
             return m.group(1) + m.group(2)
     return token
+
+
 _KEEP = 5  # violations kept per kind (the count is always exact)
 
 
@@ -116,8 +175,12 @@ class BoundsReport:
     excluded_in_count: int = 0
     unverified: list[str] = field(default_factory=list)  # "line N why" (first few)
     unverified_count: int = 0
-    macros: dict[str, list[int]] = field(default_factory=dict)  # name -> [count, first line]
-    plate_extent: tuple[float, float, float, float] | None = None  # xmin, xmax, ymin, ymax
+    macros: dict[str, list[int]] = field(
+        default_factory=dict
+    )  # name -> [count, first line]
+    plate_extent: tuple[float, float, float, float] | None = (
+        None  # xmin, xmax, ymin, ymax
+    )
     all_extent: tuple[float, float, float, float] | None = None
 
 
@@ -152,11 +215,18 @@ def parse_limits(text: str) -> Limits:
     return (out[0], out[1])
 
 
-def _on_segment(px: float, py: float, a: tuple[float, float], b: tuple[float, float]) -> bool:
+def _on_segment(
+    px: float, py: float, a: tuple[float, float], b: tuple[float, float]
+) -> bool:
     (ax, ay), (bx, by) = a, b
-    if abs((bx - ax) * (py - ay) - (by - ay) * (px - ax)) > EPS * max(1.0, math.hypot(bx - ax, by - ay)):
+    if abs((bx - ax) * (py - ay) - (by - ay) * (px - ax)) > EPS * max(
+        1.0, math.hypot(bx - ax, by - ay)
+    ):
         return False
-    return min(ax, bx) - EPS <= px <= max(ax, bx) + EPS and min(ay, by) - EPS <= py <= max(ay, by) + EPS
+    return (
+        min(ax, bx) - EPS <= px <= max(ax, bx) + EPS
+        and min(ay, by) - EPS <= py <= max(ay, by) + EPS
+    )
 
 
 def inside(px: float, py: float, poly: Polygon, *, boundary: bool) -> bool:
@@ -173,7 +243,9 @@ def inside(px: float, py: float, poly: Polygon, *, boundary: bool) -> bool:
     return hit
 
 
-def arc_sweep(x0: float, y0: float, x1: float, y1: float, i: float, j: float, cw: bool) -> tuple[float, float]:
+def arc_sweep(
+    x0: float, y0: float, x1: float, y1: float, i: float, j: float, cw: bool
+) -> tuple[float, float]:
     """(start angle, signed sweep) the way Klipper's gcode_arcs.py plans G2/G3: the
     counter-clockwise angle between the radius vectors is in [0, 2π); clockwise subtracts 2π,
     so a clockwise arc whose end lies on the start's angle is a full turn; a counter-clockwise
@@ -190,7 +262,9 @@ def arc_sweep(x0: float, y0: float, x1: float, y1: float, i: float, j: float, cw
     return a0, ccw
 
 
-def arc_points(x0: float, y0: float, x1: float, y1: float, i: float, j: float, cw: bool) -> list[tuple[float, float]]:
+def arc_points(
+    x0: float, y0: float, x1: float, y1: float, i: float, j: float, cw: bool
+) -> list[tuple[float, float]]:
     """End points plus every axis-aligned extreme the arc passes, about centre (x0+i, y0+j)."""
     cx, cy = x0 + i, y0 + j
     r = math.hypot(i, j)
@@ -207,9 +281,9 @@ def arc_points(x0: float, y0: float, x1: float, y1: float, i: float, j: float, c
 
 @dataclass
 class _Plate:
-    first_layer: int | None   # first layer-change line (1-based)
-    end: float                 # last line of the plate section (inf: to the end of the file)
-    typed: bool                # the slicer tags features with `;TYPE:` comments
+    first_layer: int | None  # first layer-change line (1-based)
+    end: float  # last line of the plate section (inf: to the end of the file)
+    typed: bool  # the slicer tags features with `;TYPE:` comments
     config: dict[str, str]
 
 
@@ -240,7 +314,9 @@ def _scan_plate(path: Path) -> _Plate:
                 elif line.startswith(("; printable_area =", "; bed_exclude_area =")):
                     key, _, value = line[1:].partition("=")
                     config.setdefault(key.strip(), value.strip())
-            elif c0 in ("G", "g") or (c0 in ("N", "n") and _LINE_NO.sub("", line)[:1] in ("G", "g")):
+            elif c0 in ("G", "g") or (
+                c0 in ("N", "n") and _LINE_NO.sub("", line)[:1] in ("G", "g")
+            ):
                 if first_layer is not None and ftype not in (None, "Custom"):
                     last_feature = n
             elif c0 == "E" and line.startswith("EXCLUDE_OBJECT_END"):
@@ -264,7 +340,9 @@ class Move:
     arc: tuple[float, float, float, float, float] | None = None  # cx, cy, r, a0, sweep
 
     @classmethod
-    def arc_move(cls, x0: float, y0: float, x1: float, y1: float, i: float, j: float, cw: bool) -> Move:
+    def arc_move(
+        cls, x0: float, y0: float, x1: float, y1: float, i: float, j: float, cw: bool
+    ) -> Move:
         a0, sweep = arc_sweep(x0, y0, x1, y1, i, j, cw)
         return cls(x0, y0, x1, y1, (x0 + i, y0 + j, math.hypot(i, j), a0, sweep))
 
@@ -280,11 +358,14 @@ class Move:
         if segments > MAX_CHORDS:
             return None
         pts = [self.at(k / segments) for k in range(segments)] + [(self.x1, self.y1)]
-        return [Move(a[0], a[1], b[0], b[1]) for a, b in zip(pts, pts[1:])]
+        return [Move(a[0], a[1], b[0], b[1]) for a, b in itertools.pairwise(pts)]
 
     def at(self, t: float) -> Point:
         if self.arc is None:
-            return (self.x0 + (self.x1 - self.x0) * t, self.y0 + (self.y1 - self.y0) * t)
+            return (
+                self.x0 + (self.x1 - self.x0) * t,
+                self.y0 + (self.y1 - self.y0) * t,
+            )
         cx, cy, r, a0, sweep = self.arc
         return (cx + r * math.cos(a0 + sweep * t), cy + r * math.sin(a0 + sweep * t))
 
@@ -293,7 +374,15 @@ class Move:
             pts = [(self.x0, self.y0), (self.x1, self.y1)]
         else:
             cx, cy, _, _, sweep = self.arc
-            pts = arc_points(self.x0, self.y0, self.x1, self.y1, cx - self.x0, cy - self.y0, sweep < 0)
+            pts = arc_points(
+                self.x0,
+                self.y0,
+                self.x1,
+                self.y1,
+                cx - self.x0,
+                cy - self.y0,
+                sweep < 0,
+            )
         xs, ys = [q[0] for q in pts], [q[1] for q in pts]
         return (min(xs), max(xs), min(ys), max(ys))
 
@@ -312,7 +401,10 @@ class Move:
                     t, u = (qx * sy - qy * sx) / den, (qx * ry - qy * rx) / den
                     if -EPS <= t <= 1 + EPS and -EPS <= u <= 1 + EPS:
                         ts.add(min(max(t, 0.0), 1.0))
-                elif abs(qx * ry - qy * rx) <= EPS * max(1.0, math.hypot(rx, ry)) and rx * rx + ry * ry > 0:
+                elif (
+                    abs(qx * ry - qy * rx) <= EPS * max(1.0, math.hypot(rx, ry))
+                    and rx * rx + ry * ry > 0
+                ):
                     rr = rx * rx + ry * ry  # collinear: the overlap's ends
                     for px, py in ((cx_, cy_), (dx_, dy_)):
                         t = ((px - self.x0) * rx + (py - self.y0) * ry) / rr
@@ -321,7 +413,11 @@ class Move:
             else:
                 acx, acy, r, a0, sweep = self.arc
                 fx, fy = cx_ - acx, cy_ - acy
-                qa, qb, qc = sx * sx + sy * sy, 2 * (fx * sx + fy * sy), fx * fx + fy * fy - r * r
+                qa, qb, qc = (
+                    sx * sx + sy * sy,
+                    2 * (fx * sx + fy * sy),
+                    fx * fx + fy * fy - r * r,
+                )
                 if qa <= 0:
                     continue
                 disc = qb * qb - 4 * qa * qc
@@ -331,7 +427,13 @@ class Move:
                 for u in ((-qb - root) / (2 * qa), (-qb + root) / (2 * qa)):
                     if -EPS <= u <= 1 + EPS:
                         ang = math.atan2(fy + u * sy, fx + u * sx)
-                        t = ((ang - a0) * (1 if sweep >= 0 else -1)) % (2 * math.pi) / abs(sweep) if sweep else 0.0
+                        t = (
+                            ((ang - a0) * (1 if sweep >= 0 else -1))
+                            % (2 * math.pi)
+                            / abs(sweep)
+                            if sweep
+                            else 0.0
+                        )
                         if t <= 1 + EPS:
                             ts.add(min(t, 1.0))
         return sorted(ts)
@@ -340,7 +442,11 @@ class Move:
         """A point inside every stretch between two boundary contacts: each stretch is wholly
         inside, wholly outside, or on the boundary, so testing these points is exact."""
         ts = self.cuts(poly)
-        return [self.at((t0 + t1) / 2) for t0, t1 in zip(ts, ts[1:]) if t1 - t0 > 1e-12]
+        return [
+            self.at((t0 + t1) / 2)
+            for t0, t1 in itertools.pairwise(ts)
+            if t1 - t0 > 1e-12
+        ]
 
     def first_outside(self, poly: Polygon) -> Point | None:
         for q in [(self.x0, self.y0), *self._pieces(poly), (self.x1, self.y1)]:
@@ -359,12 +465,22 @@ def is_axis_rectangle(poly: Polygon) -> bool:
     """4 corners joined by horizontal/vertical edges: points + arc extremes decide containment."""
     if len(poly) != 4:
         return False
-    return all(abs(poly[k][0] - poly[(k + 1) % 4][0]) < EPS or abs(poly[k][1] - poly[(k + 1) % 4][1]) < EPS
-               for k in range(4))
+    return all(
+        abs(poly[k][0] - poly[(k + 1) % 4][0]) < EPS
+        or abs(poly[k][1] - poly[(k + 1) % 4][1]) < EPS
+        for k in range(4)
+    )
 
 
-def _bbox_overlap(a: tuple[float, float, float, float], b: tuple[float, float, float, float]) -> bool:
-    return a[0] <= b[1] + EPS and b[0] <= a[1] + EPS and a[2] <= b[3] + EPS and b[2] <= a[3] + EPS
+def _bbox_overlap(
+    a: tuple[float, float, float, float], b: tuple[float, float, float, float]
+) -> bool:
+    return (
+        a[0] <= b[1] + EPS
+        and b[0] <= a[1] + EPS
+        and a[2] <= b[3] + EPS
+        and b[2] <= a[3] + EPS
+    )
 
 
 def _poly_bbox(poly: Polygon) -> tuple[float, float, float, float]:
@@ -390,14 +506,30 @@ def check_bounds(path: Path, axis_limits: Limits | None = None) -> BoundsReport:
     # G92 offsets (machine = gcode + G92 offset + SET_GCODE_OFFSET); None = set at an unknown position
     ox: float | None = 0.0
     oy: float | None = 0.0
-    sx = sy = 0.0          # Klipper SET_GCODE_OFFSET X/Y (survives G28, like Klipper's homing_position)
-    e: float | None = 0.0  # logical E for M82 extrusion detection; None = unknown (E offset, M221)
-    rel = False            # G91
-    abs_e = True           # M82 (absolute E) vs M83; E is relative when G91 or M83
+    sx = sy = (
+        0.0  # Klipper SET_GCODE_OFFSET X/Y (survives G28, like Klipper's homing_position)
+    )
+    e: float | None = (
+        0.0  # logical E for M82 extrusion detection; None = unknown (E offset, M221)
+    )
+    rel = False  # G91
+    abs_e = True  # M82 (absolute E) vs M83; E is relative when G91 or M83
     plane = 17
     # SAVE_GCODE_STATE name -> (G91, M82, G92 x/y, SET_GCODE_OFFSET x/y, position x/y, E)
-    saved: dict[str, tuple[bool, bool, float | None, float | None, float, float,
-                           float | None, float | None, float | None]] = {}
+    saved: dict[
+        str,
+        tuple[
+            bool,
+            bool,
+            float | None,
+            float | None,
+            float,
+            float,
+            float | None,
+            float | None,
+            float | None,
+        ],
+    ] = {}
     plate_ext = [math.inf, -math.inf, math.inf, -math.inf]
     all_ext = [math.inf, -math.inf, math.inf, -math.inf]
 
@@ -437,12 +569,21 @@ def check_bounds(path: Path, axis_limits: Limits | None = None) -> BoundsReport:
         other polygon follows the path piece by piece (a line can cut an L-shape's notch) —
         for travels too, unless the travel starts outside (entering from a vendor park spot)."""
         for px, py in pts:
-            plate_ext[:] = [min(plate_ext[0], px), max(plate_ext[1], px),
-                            min(plate_ext[2], py), max(plate_ext[3], py)]
+            plate_ext[:] = [
+                min(plate_ext[0], px),
+                max(plate_ext[1], px),
+                min(plate_ext[2], py),
+                max(plate_ext[3], py),
+            ]
         if rep.printable_area is None:
             return
-        if move is not None and not rect_area and (
-                extruding or inside(move.x0, move.y0, rep.printable_area, boundary=True)):
+        if (
+            move is not None
+            and not rect_area
+            and (
+                extruding or inside(move.x0, move.y0, rep.printable_area, boundary=True)
+            )
+        ):
             out = move.first_outside(rep.printable_area)
             if out is not None:
                 area_violation(n, out[0], out[1])
@@ -458,11 +599,14 @@ def check_bounds(path: Path, axis_limits: Limits | None = None) -> BoundsReport:
         area's bounding range); otherwise containment cannot be established -> UNVERIFIED."""
         if area_box is None:
             return
-        if (px is not None and not area_box[0] - EPS <= px <= area_box[1] + EPS) or \
-                (py is not None and not area_box[2] - EPS <= py <= area_box[3] + EPS):
+        if (px is not None and not area_box[0] - EPS <= px <= area_box[1] + EPS) or (
+            py is not None and not area_box[2] - EPS <= py <= area_box[3] + EPS
+        ):
             area_violation(n, px, py)
         elif px is not None or py is not None:
-            unverified(n, "plate move with one axis unknown; printable area not checked")
+            unverified(
+                n, "plate move with one axis unknown; printable area not checked"
+            )
 
     def excluded_hit(n: int, q: Point) -> None:
         rep.excluded_in_count += 1
@@ -483,7 +627,9 @@ def check_bounds(path: Path, axis_limits: Limits | None = None) -> BoundsReport:
         if chords is None or (helical and chords):
             # Klipper counts Z travel into the segment count of a helical arc, and a huge arc
             # would need millions of chords: the printed chords are not reproduced here
-            unverified(n, "arc next to bed_exclude_area: firmware chords not reproduced")
+            unverified(
+                n, "arc next to bed_exclude_area: firmware chords not reproduced"
+            )
             return
         for chord in chords:
             q = chord.first_inside(rep.exclude_area)
@@ -491,7 +637,9 @@ def check_bounds(path: Path, axis_limits: Limits | None = None) -> BoundsReport:
                 excluded_hit(n, q)
                 return
 
-    def physical_move(nx_: float | None, ny_: float | None, n: int, in_plate: bool) -> None:
+    def physical_move(
+        nx_: float | None, ny_: float | None, n: int, in_plate: bool
+    ) -> None:
         """A toolhead move made by a macro command (SET_GCODE_OFFSET / RESTORE_GCODE_STATE
         MOVE=1): a travel from the current position, checked like any travel."""
         if nx_ is None and ny_ is None:
@@ -514,12 +662,18 @@ def check_bounds(path: Path, axis_limits: Limits | None = None) -> BoundsReport:
                 if line.startswith(";TYPE:"):
                     ftype = line[6:].strip()
                 continue
-            if c0 in ("N", "n"):  # line-numbered G-code: `N12 G1 X10*45` (Klipper accepts it)
+            if c0 in (
+                "N",
+                "n",
+            ):  # line-numbered G-code: `N12 G1 X10*45` (Klipper accepts it)
                 line = _LINE_NO.sub("", line).split("*", 1)[0]
                 c0 = line[:1]
             # plate = slicer-generated moves; vendor `;TYPE:Custom` blocks inside it are exempt
-            in_plate = (plate.first_layer is not None and plate.first_layer <= n <= plate.end
-                        and not (plate.typed and ftype in (None, "Custom")))
+            in_plate = (
+                plate.first_layer is not None
+                and plate.first_layer <= n <= plate.end
+                and not (plate.typed and ftype in (None, "Custom"))
+            )
             word = command_word(line)
             if word is None:
                 continue
@@ -535,7 +689,9 @@ def check_bounds(path: Path, axis_limits: Limits | None = None) -> BoundsReport:
                 head_m = code.split(" ", 1)[0]
                 if head_m in ("M82", "M83"):
                     abs_e = head_m == "M82"
-                elif head_m == "M221":  # extrusion factor scales logical E offsets: E unknown until G92 E
+                elif (
+                    head_m == "M221"
+                ):  # extrusion factor scales logical E offsets: E unknown until G92 E
                     e = None
                 continue
             if c0 in ("A", "a") and line[:17].upper() == "ACTIVATE_EXTRUDER":
@@ -545,14 +701,28 @@ def check_bounds(path: Path, axis_limits: Limits | None = None) -> BoundsReport:
                 raw = line.split(";", 1)[0].strip()
                 cmd = raw.upper()
                 # Klipper upper-cases parameter NAMES only; values (state names) keep their case
-                params = {k.upper(): v.strip("\"'")
-                          for k, v in re.findall(r"([A-Za-z_]+)\s*=\s*(\"[^\"]*\"|'[^']*'|\S+)", raw)}
+                params = {
+                    k.upper(): v.strip("\"'")
+                    for k, v in re.findall(
+                        r"([A-Za-z_]+)\s*=\s*(\"[^\"]*\"|'[^']*'|\S+)", raw
+                    )
+                }
                 move_flag = params.get("MOVE", "0") not in ("0", "0.0")
                 if cmd.startswith("SET_GCODE_OFFSET"):
                     try:
-                        nsx = float(params["X"]) if "X" in params else sx + float(params.get("X_ADJUST", 0))
-                        nsy = float(params["Y"]) if "Y" in params else sy + float(params.get("Y_ADJUST", 0))
-                    except ValueError:  # malformed: the firmware rejects it; our offsets become unknown
+                        nsx = (
+                            float(params["X"])
+                            if "X" in params
+                            else sx + float(params.get("X_ADJUST", 0))
+                        )
+                        nsy = (
+                            float(params["Y"])
+                            if "Y" in params
+                            else sy + float(params.get("Y_ADJUST", 0))
+                        )
+                    except (
+                        ValueError
+                    ):  # malformed: the firmware rejects it; our offsets become unknown
                         unverified(n, "SET_GCODE_OFFSET with a non-numeric value")
                         ox = oy = None
                         continue
@@ -562,14 +732,30 @@ def check_bounds(path: Path, axis_limits: Limits | None = None) -> BoundsReport:
                         physical_move(tx, ty, n, in_plate)
                         x, y = tx, ty
                     sx, sy = nsx, nsy
-                    if "E" in params or "E_ADJUST" in params:  # logical E shifts (MOVE, M221 dependent)
+                    if (
+                        "E" in params or "E_ADJUST" in params
+                    ):  # logical E shifts (MOVE, M221 dependent)
                         e = None
                 elif cmd.startswith("SAVE_GCODE_STATE"):
-                    saved[params.get("NAME", "default")] = (rel, abs_e, ox, oy, sx, sy, x, y, e)
+                    saved[params.get("NAME", "default")] = (
+                        rel,
+                        abs_e,
+                        ox,
+                        oy,
+                        sx,
+                        sy,
+                        x,
+                        y,
+                        e,
+                    )
                 elif cmd.startswith("RESTORE_GCODE_STATE"):
                     state = saved.get(params.get("NAME", "default"))
-                    if state is None:  # saved in a macro we cannot see: modes and offsets unknown
-                        unverified(n, "RESTORE_GCODE_STATE of a state saved outside this file")
+                    if (
+                        state is None
+                    ):  # saved in a macro we cannot see: modes and offsets unknown
+                        unverified(
+                            n, "RESTORE_GCODE_STATE of a state saved outside this file"
+                        )
                         x = y = ox = oy = e = None
                     else:
                         rel, abs_e, ox, oy, sx, sy, kx, ky, e = state
@@ -580,7 +766,10 @@ def check_bounds(path: Path, axis_limits: Limits | None = None) -> BoundsReport:
             if c0 not in ("G", "g"):
                 continue
             code = line.split(";", 1)[0].strip().upper()
-            if code.startswith(("G90", "G91", "G92", "G17", "G18", "G19", "G28")) and not code[3:4].isdigit():
+            if (
+                code.startswith(("G90", "G91", "G92", "G17", "G18", "G19", "G28"))
+                and not code[3:4].isdigit()
+            ):
                 head = code[:3]
                 if head == "G90":
                     rel = False
@@ -588,7 +777,9 @@ def check_bounds(path: Path, axis_limits: Limits | None = None) -> BoundsReport:
                     rel = True
                 elif head in ("G17", "G18", "G19"):
                     plane = int(head[1:])
-                elif head == "G28":  # homing resets the G92 offset; the homed position is unknown here
+                elif (
+                    head == "G28"
+                ):  # homing resets the G92 offset; the homed position is unknown here
                     named = _axes(code[3:])
                     if not named or "X" in named:
                         x, ox = None, 0.0
@@ -596,37 +787,59 @@ def check_bounds(path: Path, axis_limits: Limits | None = None) -> BoundsReport:
                         y, oy = None, 0.0
                 else:  # G92: the current machine position gets new G-code coordinates (bare G92: all 0)
                     words = dict(_WORD.findall(code[3:]))
-                    if "X" in words or not words:  # at an unknown position the offset becomes unknown
-                        ox = x - float(words.get("X", 0)) - sx if x is not None else None
+                    if (
+                        "X" in words or not words
+                    ):  # at an unknown position the offset becomes unknown
+                        ox = (
+                            x - float(words.get("X", 0)) - sx if x is not None else None
+                        )
                     if "Y" in words or not words:
-                        oy = y - float(words.get("Y", 0)) - sy if y is not None else None
+                        oy = (
+                            y - float(words.get("Y", 0)) - sy if y is not None else None
+                        )
                     if "E" in words or not words:
                         e = float(words.get("E", 0))
                 continue
             m = _MOVE.match(code)
             if not m:
                 continue
-            words = dict(_WORD.findall(code[m.end():]))
+            words = dict(_WORD.findall(code[m.end() :]))
             g = int(m.group(1))
             extruding = False
             if "E" in words:
                 ev = float(words["E"])
-                if rel or not abs_e:  # relative E still advances the absolute position (Klipper)
+                if (
+                    rel or not abs_e
+                ):  # relative E still advances the absolute position (Klipper)
                     extruding, e = ev > EPS, (e + ev if e is not None else None)
                 else:  # absolute E: with the logical E unknown, any E word counts as extruding
                     extruding, e = (ev > e + EPS) if e is not None else True, ev
             nx, ny = x, y
             if "X" in words:
                 v = float(words["X"])
-                nx = (x + v if x is not None else None) if rel else (v + ox + sx if ox is not None else None)
+                nx = (
+                    (x + v if x is not None else None)
+                    if rel
+                    else (v + ox + sx if ox is not None else None)
+                )
             if "Y" in words:
                 v = float(words["Y"])
-                ny = (y + v if y is not None else None) if rel else (v + oy + sy if oy is not None else None)
+                ny = (
+                    (y + v if y is not None else None)
+                    if rel
+                    else (v + oy + sy if oy is not None else None)
+                )
             moved = "X" in words or "Y" in words or g in (2, 3)
             if not moved:
                 # extrusion in place (a prime blob, an un-retract): plastic at the current spot
-                if (extruding and in_plate and rep.exclude_area and x is not None and y is not None
-                        and inside(x, y, rep.exclude_area, boundary=False)):
+                if (
+                    extruding
+                    and in_plate
+                    and rep.exclude_area
+                    and x is not None
+                    and y is not None
+                    and inside(x, y, rep.exclude_area, boundary=False)
+                ):
                     excluded_hit(n, (x, y))
                 continue
             if ("X" in words and nx is None) or ("Y" in words and ny is None):
@@ -635,7 +848,10 @@ def check_bounds(path: Path, axis_limits: Limits | None = None) -> BoundsReport:
                 # an axis is still unknown (start, after G28): check what IS known
                 if g in (2, 3):
                     unverified(n, "arc from an unknown position")
-                px_, py_ = (nx if "X" in words else None), (ny if "Y" in words else None)
+                px_, py_ = (
+                    (nx if "X" in words else None),
+                    (ny if "Y" in words else None),
+                )
                 axis(px_, py_, n)
                 if in_plate:
                     area_partial(px_, py_, n)
@@ -643,11 +859,18 @@ def check_bounds(path: Path, axis_limits: Limits | None = None) -> BoundsReport:
                 continue
             pts: list[Point]
             move: Move | None
-            if x is None or y is None:  # from an unknown position to a known point: the point only
+            if (
+                x is None or y is None
+            ):  # from an unknown position to a known point: the point only
                 pts, move = [(nx, ny)], None
                 if in_plate and extruding:
-                    unverified(n, "extrusion from an unknown position; only its end point checked")
-                    if rep.exclude_area and inside(nx, ny, rep.exclude_area, boundary=False):
+                    unverified(
+                        n,
+                        "extrusion from an unknown position; only its end point checked",
+                    )
+                    if rep.exclude_area and inside(
+                        nx, ny, rep.exclude_area, boundary=False
+                    ):
                         excluded_hit(n, (nx, ny))
             elif g in (2, 3) and (plane != 17 or "R" in words):
                 unverified(n, "arc by R or outside the XY plane (end point only)")
@@ -674,7 +897,11 @@ def check_bounds(path: Path, axis_limits: Limits | None = None) -> BoundsReport:
 
 
 def fmt_extent(e: tuple[float, float, float, float] | None) -> str:
-    return "no XY moves" if e is None else f"x {e[0]:.2f}..{e[1]:.2f}, y {e[2]:.2f}..{e[3]:.2f}"
+    return (
+        "no XY moves"
+        if e is None
+        else f"x {e[0]:.2f}..{e[1]:.2f}, y {e[2]:.2f}..{e[3]:.2f}"
+    )
 
 
 def fmt_area(poly: Polygon) -> str:

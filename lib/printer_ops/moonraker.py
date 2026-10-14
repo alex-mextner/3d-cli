@@ -26,7 +26,6 @@ from __future__ import annotations
 import hashlib
 import http.client
 import json
-import socket
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlsplit
@@ -192,7 +191,7 @@ class MoonrakerAdapter(Adapter):
         try:
             status, data = http_upload(url, local, remote_name, {"root": "gcodes", "print": "false"},
                                        timeout=self.upload_timeout)
-        except (socket.timeout, TimeoutError) as exc:
+        except TimeoutError as exc:
             return self._reconcile_after_timeout(remote_name, size, exc)
         except OSError as exc:
             raise self._comm_error("upload", exc) from exc

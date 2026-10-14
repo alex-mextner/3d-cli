@@ -36,6 +36,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
 from __future__ import annotations
 
+import contextlib
 import json
 import pathlib
 import re
@@ -85,7 +86,7 @@ class Budget:
     max_backend_calls: int = 1
 
     @classmethod
-    def from_mapping(cls, raw: Any) -> "Budget":
+    def from_mapping(cls, raw: Any) -> Budget:
         if not isinstance(raw, dict):
             return cls()
         return cls(
@@ -447,7 +448,7 @@ def _perceptual_column(scad_png: pathlib.Path, ref: pathlib.Path) -> MetricColum
 
 def advisory_judge(
     render_png: pathlib.Path, ref: pathlib.Path,
-    backend: "Backend | str | None" = None, *, judges: int = 1, stability_n: int = 0,
+    backend: Backend | str | None = None, *, judges: int = 1, stability_n: int = 0,
 ) -> MetricColumn:
     """The VLM-judge column — ADVISORY ONLY (one column, never the pass/fail gate). Every
     judge failure mode (a blind/mock backend, a malformed non-rubric reply, a missing
@@ -713,24 +714,21 @@ def _persist(report: SuiteReport, *, data_dir: pathlib.Path | None) -> None:
     convention = {"harness": "ai.bench", "gate0": "openscad_render_success",
                   "judge": "advisory_only", "backend": report.backend}
     for r in report.results:
-        try:
+        # per-case store failure must not abort the suite
+        with contextlib.suppress(Exception):
             append_record(
                 command=STORE_COMMAND, tool="ai.bench", backend=report.backend,
                 inputs={"case_id": r.case_id, "expected_status": r.expected_status.value},
                 metrics={**r.to_jsonable(), "convention": convention},
                 wall_time=r.wall_time, data_dir=data_dir,
             )
-        except Exception:
-            pass  # per-case store failure must not abort the suite
-    try:
+    with contextlib.suppress(Exception):
         append_record(
             command=STORE_COMMAND, tool="ai.bench", backend=report.backend,
             inputs={"suite": True, "n_cases": report.n_cases},
             metrics={**report.to_jsonable(), "suite": True, "convention": convention},
             wall_time=report.total_wall_time, data_dir=data_dir,
         )
-    except Exception:
-        pass
 
 
 def run_suite(cases: list[BenchCase], *, backend_name: str | None,

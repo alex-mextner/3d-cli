@@ -176,7 +176,7 @@ def dims_present_in_scad(scad: str, dims: dict[str, str]) -> dict[str, bool]:
     """
     clean = _strip_comments(scad)
     assign = {name: re.compile(rf"^[ \t]*{re.escape(name)}[ \t]*=[ \t]*[^=]") for name in dims}
-    present = {name: False for name in dims}
+    present = dict.fromkeys(dims, False)
     depth = 0
     for line in clean.splitlines():
         if depth == 0:

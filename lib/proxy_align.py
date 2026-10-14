@@ -103,7 +103,7 @@ def _components(mesh: trimesh.Trimesh) -> int:
 
 def _euler_number(mesh: trimesh.Trimesh) -> int | None:
     try:
-        value = getattr(mesh, "euler_number")
+        value = mesh.euler_number
         return int(value)
     except Exception:
         return None
@@ -574,7 +574,7 @@ def write_proof(cad: MeshCloud, proxy: MeshCloud, best: Candidate, gate: Quality
     status_color = (45, 120, 45) if gate.status == "ok" else (180, 115, 20) if gate.status == "warning" else (180, 45, 45)
     for title, axes, x in (("XY", (0, 1), 24), ("XZ", (0, 2), 324), ("YZ", (1, 2), 624)):
         cad_mask, proxy_mask = _projection_masks(cad, proxy, best, axes, size=PROOF_MASK_SIZE)
-        nearest = getattr(getattr(Image, "Resampling", Image), "NEAREST")
+        nearest = getattr(Image, "Resampling", Image).NEAREST
         panel = _mask_overlay_image(cad_mask, proxy_mask).resize((270, 270), nearest)
         image.paste(panel, (x, 90))
         score = _score_by_name(gate, title)

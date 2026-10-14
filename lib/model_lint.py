@@ -4,7 +4,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, replace
 from enum import Enum
-from typing import Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 
 from errors import InputNotFound, InvalidArgument
 
@@ -207,8 +207,7 @@ def lint_source(
         level = active_levels.get(lint_rule.id, lint_rule.default_level)
         if level == Level.OFF:
             continue
-        for finding in lint_rule.check(context):
-            findings.append(replace(finding, level=level))
+        findings.extend(replace(finding, level=level) for finding in lint_rule.check(context))
     findings.sort(key=lambda finding: (finding.path, finding.line, finding.column, finding.rule_id))
     return LintReport(path=path, findings=findings)
 
@@ -298,22 +297,20 @@ def _extract_identifier(value: str) -> str | None:
     summary="semantic comment tags must be part of the known object-model skeleton",
 )
 def _unknown_model_tags(context: LintContext) -> list[LintFinding]:
-    findings: list[LintFinding] = []
     accepted = ", ".join("@" + tag for tag in sorted(KNOWN_MODEL_TAGS))
-    for tag in context.tags:
-        if tag.tag not in KNOWN_MODEL_TAGS:
-            findings.append(
-                LintFinding(
-                    path=tag.path,
-                    line=tag.line,
-                    column=tag.column,
-                    rule_id="object-model/unknown-tag",
-                    level=Level.WARN,
-                    message=f"unknown model tag '@{tag.tag}'",
-                    hint=f"Use one of: {accepted}.",
-                )
-            )
-    return findings
+    return [
+        LintFinding(
+            path=tag.path,
+            line=tag.line,
+            column=tag.column,
+            rule_id="object-model/unknown-tag",
+            level=Level.WARN,
+            message=f"unknown model tag '@{tag.tag}'",
+            hint=f"Use one of: {accepted}.",
+        )
+        for tag in context.tags
+        if tag.tag not in KNOWN_MODEL_TAGS
+    ]
 
 
 @rule(
@@ -322,21 +319,19 @@ def _unknown_model_tags(context: LintContext) -> list[LintFinding]:
     summary="model comment tags need a value so later tools can address them",
 )
 def _missing_tag_values(context: LintContext) -> list[LintFinding]:
-    findings: list[LintFinding] = []
-    for tag in context.tags:
-        if tag.tag in KNOWN_MODEL_TAGS and not tag.value:
-            findings.append(
-                LintFinding(
-                    path=tag.path,
-                    line=tag.line,
-                    column=tag.column,
-                    rule_id="object-model/tag-missing-value",
-                    level=Level.WARN,
-                    message=f"@{tag.tag} is missing a value",
-                    hint=f"Add a value, for example `// @{tag.tag} body-shell`.",
-                )
-            )
-    return findings
+    return [
+        LintFinding(
+            path=tag.path,
+            line=tag.line,
+            column=tag.column,
+            rule_id="object-model/tag-missing-value",
+            level=Level.WARN,
+            message=f"@{tag.tag} is missing a value",
+            hint=f"Add a value, for example `// @{tag.tag} body-shell`.",
+        )
+        for tag in context.tags
+        if tag.tag in KNOWN_MODEL_TAGS and not tag.value
+    ]
 
 
 @rule(

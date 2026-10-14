@@ -1,4 +1,4 @@
-"""run_gate.py — the `dev run test` gate: ruff, pytest, then mypy; all must pass.
+"""run_gate.py — the `dev run test` gate: ruff, shellcheck, pytest, then mypy; all must pass.
 
 Invoked by rig.yaml scripts.test through the dev runner. Extra argv is forwarded to pytest.
 Pytest covers unit tests, CLI smoke tests, and any e2e tests under tests/e2e/.
@@ -6,8 +6,57 @@ Pytest covers unit tests, CLI smoke tests, and any e2e tests under tests/e2e/.
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
+
+SHELLCHECK_INSTALL = "brew install shellcheck  /  sudo apt-get install shellcheck"
+
+
+def shell_files(root: str) -> list[str]:
+    """Git-tracked shell scripts: `*.sh` plus any other file with an sh/bash shebang."""
+    listed = subprocess.run(
+        ["git", "ls-files", "-z"], cwd=root, capture_output=True, check=True,
+    ).stdout.decode("utf-8").split("\0")
+    found: list[str] = []
+    for rel in filter(None, listed):
+        path = os.path.join(root, rel)
+        if not os.path.isfile(path):
+            continue  # deleted in the working tree but still in the index
+        if rel.endswith(".sh"):
+            found.append(rel)
+            continue
+        with open(path, "rb") as fh:
+            first = fh.readline(128)
+        if _is_shell_shebang(first):
+            found.append(rel)
+    return found
+
+
+def _is_shell_shebang(line: bytes) -> bool:
+    """True for `#!/bin/sh`, `#!/bin/bash -e`, `#!/usr/bin/env bash` and the like."""
+    if not line.startswith(b"#!"):
+        return False
+    words = line[2:].split()
+    if not words:
+        return False
+    interp = os.path.basename(words[0])
+    if interp == b"env" and len(words) > 1:
+        interp = words[1]
+    return interp in (b"sh", b"bash")
+
+
+def run_shellcheck(root: str) -> int:
+    """Lint the tracked shell scripts; a missing binary is a loud SKIP, not a failure (CI installs it)."""
+    exe = shutil.which("shellcheck")
+    if exe is None:
+        print(f"SKIP shellcheck: binary not found — install it ({SHELLCHECK_INSTALL}); CI runs it.",
+              flush=True)
+        return 0
+    files = shell_files(root)
+    if not files:
+        return 0
+    return subprocess.run([exe, *files], cwd=root).returncode
 
 
 def main(argv: list[str]) -> int:
@@ -20,6 +69,9 @@ def main(argv: list[str]) -> int:
         [sys.executable, "-m", "ruff", "check", os.path.join(root, "lib"), os.path.join(root, "tests")],
         cwd=root, env=env,
     ).returncode
+
+    print("=== shellcheck ===", flush=True)
+    rc_shellcheck = run_shellcheck(root)
 
     print("=== pytest (unit + CLI smoke + e2e) ===", flush=True)
     rc_pytest = subprocess.run(
@@ -38,12 +90,13 @@ def main(argv: list[str]) -> int:
         cwd=root, env=env,
     ).returncode
 
-    ok = rc_ruff == 0 and rc_pytest == 0 and rc_mypy == 0
+    ok = rc_ruff == 0 and rc_shellcheck == 0 and rc_pytest == 0 and rc_mypy == 0
     print()
     if ok:
         print(">>> TEST: PASS")
     else:
-        print(f">>> TEST: FAIL (ruff rc={rc_ruff}, pytest rc={rc_pytest}, mypy rc={rc_mypy})")
+        print(f">>> TEST: FAIL (ruff rc={rc_ruff}, shellcheck rc={rc_shellcheck}, "
+              f"pytest rc={rc_pytest}, mypy rc={rc_mypy})")
     return 0 if ok else 1
 
 

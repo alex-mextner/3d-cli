@@ -58,7 +58,7 @@ from __future__ import annotations
 import math
 import zipfile
 from dataclasses import dataclass
-from typing import Sequence
+from collections.abc import Sequence
 from xml.sax.saxutils import quoteattr
 
 # OPC / 3MF entry paths (mirror bbs_3mf.cpp constants).

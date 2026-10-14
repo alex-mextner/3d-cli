@@ -44,7 +44,8 @@ import tempfile
 import zlib
 from array import array
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, BinaryIO, Callable, NamedTuple
+from typing import TYPE_CHECKING, BinaryIO, NamedTuple
+from collections.abc import Callable
 
 from errors import InputNotFound
 

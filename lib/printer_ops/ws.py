@@ -144,7 +144,7 @@ class WebSocket:
                 self._sock.settimeout(left)
                 try:
                     chunk = self._sock.recv(65536)
-                except (socket.timeout, TimeoutError):
+                except TimeoutError:
                     continue  # the deadline check above decides
                 except ConnectionError as exc:  # reset by the firmware: same as a close
                     raise WebSocketClosed(f"connection lost: {exc}") from exc

@@ -14,7 +14,7 @@ def _doc(name: str) -> str:
 
 
 def test_render_usage_keeps_section_headers_and_options_aligned() -> None:
-    usage = cast(str, getattr(importlib.import_module("commands.render"), "USAGE"))
+    usage = cast(str, importlib.import_module("commands.render").USAGE)
     assert "\n  --colorscheme NAME" in usage
     assert "\n  --render" in usage
     assert "\nSection options:" in usage

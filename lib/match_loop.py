@@ -34,6 +34,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import math
 import os
@@ -161,15 +162,11 @@ def parse_score(
     iou: float | None = None
     ae: float | None = None
     for m in re.finditer(r"(?im)\bIoU\s*=\s*([0-9.eE+-]+)", out):
-        try:
+        with contextlib.suppress(ValueError):
             iou = float(m.group(1))
-        except ValueError:
-            pass
     for m in re.finditer(r"(?im)\bAE\s*=\s*([0-9.eE+-]+)", out):
-        try:
+        with contextlib.suppress(ValueError):
             ae = float(m.group(1))
-        except ValueError:
-            pass
     if prefer == "iou" and iou is not None:
         return iou, "IoU", "higher"
     if prefer == "ae" and ae is not None:

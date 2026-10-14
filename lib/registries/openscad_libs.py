@@ -50,7 +50,7 @@ import sys
 import tempfile
 import time
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -458,7 +458,7 @@ def find_leftovers(base: Path) -> list[Leftover]:
                 if free:
                     out += [Leftover(stage, lib, _holds_only_new_copy(stage, lib))
                             for lib, stage in by_lock[key]]
-        except ThreeDError:
+        except ThreeDError:  # noqa: PERF203 — a busy lock skips just this group; keep sweeping
             continue
     return out
 
@@ -522,7 +522,7 @@ def _remove_files(lib_dir: Path, files: list[str]) -> list[str]:
     for rel in inside:
         try:
             (lib_dir / rel).unlink()
-        except FileNotFoundError:
+        except FileNotFoundError:  # noqa: PERF203 — per-file: already gone is fine, others raise
             pass
         except OSError as exc:
             raise _fs_error(f"remove {lib_dir / rel}", exc) from exc
@@ -530,7 +530,7 @@ def _remove_files(lib_dir: Path, files: list[str]) -> list[str]:
     for d in sorted(dirs, key=lambda p: len(p.parts), reverse=True) + [lib_dir]:
         try:
             d.rmdir()
-        except FileNotFoundError:
+        except FileNotFoundError:  # noqa: PERF203 — per-dir: gone is fine, non-empty is a leftover
             pass
         except OSError:
             leftovers.append(str(d))
@@ -758,10 +758,8 @@ def _retire(previous: Path, dest: Path, replace_foreign: bool) -> Path | None:
     _move_into(previous, dest)
     for root, dirs, _ in os.walk(previous, topdown=False):
         for d in dirs:
-            try:
+            with suppress(OSError):
                 (Path(root) / d).rmdir()
-            except OSError:
-                pass
     try:
         previous.rmdir()
     except OSError:
@@ -779,10 +777,8 @@ def _move_into(src_root: Path, dest: Path) -> None:
             yours = Path(root) / n
             target = dest / yours.relative_to(src_root)
             if not os.path.lexists(target):
-                try:
+                with suppress(OSError):
                     os.rename(yours, target)
-                except OSError:
-                    pass
             elif (n in dirs and target.is_dir() and not target.is_symlink()
                   and not yours.is_symlink()):
                 descend.append(n)

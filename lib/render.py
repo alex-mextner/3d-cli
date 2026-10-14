@@ -6,7 +6,7 @@ Owns everything the `render` command surface needs:
     diagonals 3-4/front-left/front-right/rear-left/rear-right);
   - a single CGAL render (--render) with a locked 6-param VECTOR camera;
   - --multi: render all standard angles concurrently (asyncio.gather, bounded by a
-    semaphore ~ os.cpu_count());
+    semaphore of cli.resources.max_workers(): <= 6, THREED_MAX_WORKERS overrides);
   - --section: a TRUE cross-section that cuts ARBITRARY geometry (export STL once, then
     difference(import, halfspace) with color OUTSIDE the cut so the cut face takes the
     part colour), plus the richer per-part `-D cut=true` assembly colour mode.
@@ -38,6 +38,7 @@ import tempfile
 from typing import Any
 
 from axis import VIEW_DIRECTIONS, VIEW_NAMES
+from cli.resources import pool_size
 
 # ---------------------------------------------------------------------------
 # named-view direction table.  Each value is the eye DIRECTION from the look-at
@@ -274,7 +275,7 @@ async def _render_one_async(
 
 async def _render_multi_async(cmds: list[tuple[str, str, list[str]]]) -> list[tuple[str, int, str]]:
     """cmds = [(label, out, argv), ...]; run with a bounded semaphore."""
-    limit = max(1, min(len(cmds), os.cpu_count() or 4))
+    limit = pool_size(len(cmds))
     sem = asyncio.Semaphore(limit)
     tasks = [_render_one_async(argv, sem, label) for (label, _out, argv) in cmds]
     return await asyncio.gather(*tasks)

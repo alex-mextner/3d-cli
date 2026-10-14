@@ -24,11 +24,11 @@ module costs nothing; `pxr` is the `usd-core` pip package.
 from __future__ import annotations
 
 import re
-from typing import Any, Tuple
+from typing import Any
 
 from errors import MissingDependency
 
-RGB = Tuple[float, float, float]
+RGB = tuple[float, float, float]
 
 
 def _sanitize_prim_name(name: str) -> str:
@@ -99,7 +99,7 @@ def mesh_to_usdz(
 
     # force="mesh" collapses a multi-body Scene into one Trimesh, so .vertices/.faces
     # exist; trimesh's stub types load() as the abstract Geometry, hence the Any cast.
-    mesh: "Any" = trimesh.load(stl_path, force="mesh")
+    mesh: Any = trimesh.load(stl_path, force="mesh")
     if getattr(mesh, "is_empty", False) or len(mesh.faces) == 0:
         raise ValueError(f"empty mesh (no faces): {stl_path}")
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
-from typing import Iterable, Sequence
+from collections.abc import Iterable, Sequence
 
 from errors import InvalidArgument, UsageError
 
@@ -184,6 +184,5 @@ def format_advice(advice: OverlayAdvice) -> str:
         f"  AE={advice.ae}",
         f"  mismatch_ratio={advice.mismatch_ratio:.6f}",
     ]
-    for step in advice.next_steps:
-        lines.append(f"  - {step}")
+    lines.extend(f"  - {step}" for step in advice.next_steps)
     return "\n".join(lines)

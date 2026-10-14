@@ -44,6 +44,7 @@ Examples:
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -288,10 +289,8 @@ def _cleanup(*paths: str) -> None:
         if os.path.isdir(p):
             shutil.rmtree(p, ignore_errors=True)
         else:
-            try:
+            with contextlib.suppress(OSError):
                 os.remove(p)
-            except OSError:
-                pass
 
 
 # ---------------------------------------------------------------------------

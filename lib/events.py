@@ -17,7 +17,8 @@ import datetime
 import json
 import pathlib
 import uuid
-from typing import Any, Mapping
+from typing import Any
+from collections.abc import Mapping
 
 from cli import paths
 from errors import InvalidArgument, UsageError

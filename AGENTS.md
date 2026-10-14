@@ -74,7 +74,7 @@ orchestration + the pure score math).
 ## Testing
 
 ```bash
-dev run test              # ruff, pytest (unit + CLI smoke harness), then mypy — all must pass
+dev run test              # ruff, shellcheck, pytest (unit + CLI smoke harness), then mypy — all must pass
 dev run test -- -k errors  # forward args to pytest
 ```
 
@@ -86,7 +86,11 @@ logic. `tests/test_cli_smoke.py` runs `3d <cmd> --help` for EVERY registered com
 the safe commands on `examples/cube.scad` (skipping when a tool is absent). `tests/e2e/`
 is part of the normal pytest sweep run by `dev run test`; do not maintain a separate matrix.
 `tests/test_imports.py` enforces the stdlib-only rule. `dev run test` also runs ruff over
-`lib/ + tests/` and mypy over `bin/3d + lib/ + tests/` — keep both clean.
+`lib/ + tests/` (rules in `pyproject.toml` `[tool.ruff.lint]`: the defaults plus `PERF`, `C4`,
+`SIM`, `B`, `UP`; any ignore is a per-line `# noqa: CODE — reason`), shellcheck over every
+git-tracked shell script (`*.sh` and sh/bash-shebang files; SKIPped with an install hint when
+the binary is missing locally, always run in CI), and mypy over `bin/3d + lib/ + tests/` —
+keep all of them clean.
 
 ## Agent worktrees
 
@@ -120,6 +124,30 @@ save `git diff --binary HEAD > ~/.cache/3d-cli-recovery/<worktree>-<time>.patch`
 `/tmp`, a tmpfs wiped on reboot) and apply it back in the same worktree. Dropped stash
 entries survive as dangling commits (`git fsck --no-reflog | grep commit`); never run
 `git stash clear` while recovering.
+
+## Machine resources
+
+`3d` runs on a shared workstation (16 cores) next to other agents, slicers and the owner's
+desktop. `lib/cli/resources.py` is the ONE place that sizes parallelism:
+
+- `max_workers()` — `THREED_MAX_WORKERS` when set (integer >= 1), else
+  `min(6, cpu_count // 2)`. Every worker pool / semaphore (render `--multi`, fit-camera
+  candidate renders, video frames) takes its size from `pool_size()`/`max_workers()`;
+  never size a pool from `os.cpu_count()` directly. An explicit `--jobs N` still wins.
+- `cap_threads()` — the dispatcher sets `OMP_NUM_THREADS`, `OPENBLAS_NUM_THREADS`,
+  `MKL_NUM_THREADS`, `BLIS_NUM_THREADS`, `VECLIB_MAXIMUM_THREADS`, `NUMEXPR_NUM_THREADS`,
+  `NUMBA_NUM_THREADS` to `max_workers()` before any subprocess (values already set win), so
+  numpy/scipy/trimesh in every `lib/*.py` tool stop starting a thread per core.
+- `tests/conftest.py` applies the same caps to the suite, and `pytest -n auto`
+  (pytest-xdist, if installed) gets `max_workers()` workers instead of one per core.
+
+Heavy runs on the shared machine (a full `dev run test`, a commit — the pre-commit hook runs
+the whole suite — big mesh/G-code checks) go one at a time under the machine lock with a
+memory cap, `flock /tmp/3d-cli-heavy.lock systemd-run --user --scope -q -p MemoryMax=6G
+-p MemorySwapMax=0 -p CPUQuota=600% nice -n 10 <cmd>`. With the load average above ~12, run a
+full suite on a Runpod pod instead (`runpod-run --cpu cpu3c-8 --apt openscad,imagemagick --
+uv run pytest tests -q`, skill `runpod-offload`). A slow tool is a bug: profile it
+(`py-spy record`, cProfile) and fix the algorithm before adding hardware.
 
 ## User proof/reporting requirements
 
@@ -201,7 +229,8 @@ or delete the worktree.
   lib/ tests/ && uv run mypy lib/ tests/` (also run by `dev run test`).
 - **Async where it genuinely helps.** Independent OpenSCAD renders (multi-angle batches,
   fit-camera candidate evals, match-loop candidate evals) run concurrently via `asyncio`
-  + `asyncio.create_subprocess_exec` / `gather`, bounded by a semaphore (~`os.cpu_count()`).
+  + `asyncio.create_subprocess_exec` / `gather`, bounded by a semaphore of
+  `cli.resources.max_workers()` (see "Machine resources"; never `os.cpu_count()`).
   Keep a correct, ordered single-render path; do NOT async-ify trivially-sequential code.
 - Run a bundled python tool through `cli.pyrun` (`exec_tool`/`run_tool("<deps>",
   "tool.py", args)`) — it resolves `.venv` → `uv` → system, the same tiers as the old

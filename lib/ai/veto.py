@@ -33,7 +33,8 @@ import json
 import pathlib
 import re
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Mapping, Sequence
+from typing import TYPE_CHECKING
+from collections.abc import Mapping, Sequence
 
 if TYPE_CHECKING:
     from ai.backends import Backend
@@ -91,8 +92,7 @@ def build_veto_prompt(features: Sequence[CriticalFeature]) -> str:
         "You are the semantic feature CRITIC for a 3D reconstruction loop.",
         "Look at the attached image of a building and report these features:",
     ]
-    for feat in features:
-        lines.append(f"  - {feat.name}: {feat.description}")
+    lines.extend(f"  - {feat.name}: {feat.description}" for feat in features)
     keys = ", ".join(f'"{f.name}": <number>' for f in features)
     lines.append(
         "Respond with ONLY a single-line strict JSON object, no prose, no code fences:"
@@ -126,7 +126,7 @@ def parse_features(text: str, features: Sequence[CriticalFeature]) -> dict[str, 
 
 
 def perceive(
-    backend: "Backend",
+    backend: Backend,
     image: str | pathlib.Path,
     features: Sequence[CriticalFeature],
     *,
@@ -183,7 +183,7 @@ def evaluate(
 
 
 def run_veto(
-    backend: "Backend",
+    backend: Backend,
     image: str | pathlib.Path,
     expected: Mapping[str, float],
     features: Sequence[CriticalFeature] = TEMPLE_FEATURES,

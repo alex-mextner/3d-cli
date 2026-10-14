@@ -156,8 +156,8 @@ def test_gcode_chamfer_step_passes_and_a_hidden_side_step_passes(tmp_path: Path)
 def test_gcode_object_pattern_that_matches_nothing_fails(tmp_path: Path) -> None:
     res = _gcode_check(tmp_path, gcode(slab_layers(3)), visible="ROOF:all")
     assert res["status"] == "FAIL"
-    assert res["gcode"] == [dict(name="ROOF", kind="gcode", status="FAIL", visible="", layers=0, support=[],
-                                 islands=[], bridges=[], error="no object in the G-code matches this name")]
+    assert res["gcode"] == [{"name": "ROOF", "kind": "gcode", "status": "FAIL", "visible": "", "layers": 0, "support": [],
+                                 "islands": [], "bridges": [], "error": "no object in the G-code matches this name"}]
     assert res["skipped"] == ["SLAB_id_0_copy_0"]
 
 

@@ -121,6 +121,52 @@ def test_dev_extra_keeps_ci_coverage_dependencies_installable() -> None:
     assert "pytest-cov" in dev
 
 
+def test_ruff_selects_the_perf_and_bug_class_rule_families() -> None:
+    selected = set(_pyproject_list("tool.ruff.lint.select"))
+    assert {"E4", "E7", "E9", "F", "PERF", "C4", "SIM", "B", "UP"} <= selected
+
+
+def _run_gate_module() -> Any:
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("run_gate_under_test", ROOT / "tests" / "run_gate.py")
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_gate_shellchecks_every_tracked_shell_script() -> None:
+    if not (ROOT / ".git").exists():
+        pytest.skip("shell-file discovery uses git ls-files")
+    files = set(_run_gate_module().shell_files(str(ROOT)))
+    assert {
+        "scripts/install-dev-hooks.sh",
+        "scripts/hooks/pre-commit",
+        "assets/templates/pre-commit",
+        "ci/secret-scan/secret-scan.sh",
+    } <= files
+    assert not any(f.endswith(".py") for f in files)
+
+
+def test_gate_skips_shellcheck_loudly_when_binary_missing(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    gate = _run_gate_module()
+    monkeypatch.setattr(gate.shutil, "which", lambda _name: None)
+    assert gate.run_shellcheck(str(ROOT)) == 0
+    out = capsys.readouterr().out
+    assert "SKIP shellcheck" in out
+    assert "brew install shellcheck" in out
+    assert "apt-get install shellcheck" in out
+
+
+def test_ci_installs_and_runs_shellcheck() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    assert re.search(r"apt-get install -y[^\n]*\bshellcheck\b", workflow)
+    assert "Run shellcheck" in workflow
+
+
 def test_agenttools_dev_runner_appends_extra_args_when_available(tmp_path: Path) -> None:
     pytest.importorskip("agenttools_dev.cli", reason="agent-tools dev CLI is supplied by the broader dev-cli work")
 

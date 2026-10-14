@@ -189,7 +189,7 @@ def props(part: Any, k: int, *, spacing: float = 50.0, height: float = 0.6, angl
         # tabs where the back reaches the rib, aimed at the bottom, middle and top of the rib;
         # each embeds into the back as sampled at its own height (not the station's t_max,
         # which a back up to TAB_REACH lower would never meet), and none dips under the bed
-        near = {float(z): t for t, z in zip(filled, zs) if t >= t_max - TAB_REACH}
+        near = {float(z): t for t, z in zip(filled, zs, strict=True) if t >= t_max - TAB_REACH}
         for target in (z0 + TAB_LOW, z0 + hr / 2, z0 + hr - TAB_HIGH):
             zt = min(near, key=lambda z: abs(z - target))
             ya, yb = sorted(((near[zt] - TAB_EMBED) * k, (tin + TAB_EMBED) * k))
@@ -202,10 +202,10 @@ def props(part: Any, k: int, *, spacing: float = 50.0, height: float = 0.6, angl
     bed = part.slice(z0 + BED_SLICE)
     depth = (bed.bounds()[3] - bed.bounds()[1]) if not bed.is_empty() else 0.0
     ratio = H / max(depth + reach, 1e-3)                      # nothing to stand on: huge ratio, FAIL
-    info: dict[str, Any] = dict(stations=len(ribs), station_x=[round(x, 2) for x in used],
-                                height=round(float(hr), 1), reach=round(float(reach), 1),
-                                depth=round(float(depth), 1), tabs=len(tabs), ratio=round(float(ratio), 2),
-                                max_ratio=max_ratio, ok=bool(ratio <= max_ratio))
+    info: dict[str, Any] = {"stations": len(ribs), "station_x": [round(x, 2) for x in used],
+                                "height": round(float(hr), 1), "reach": round(float(reach), 1),
+                                "depth": round(float(depth), 1), "tabs": len(tabs), "ratio": round(float(ratio), 2),
+                                "max_ratio": max_ratio, "ok": bool(ratio <= max_ratio)}
     if not ribs:
         return PropsResult(None, [], info)
     ta = t_max_all + gap + FOOT_OFFSET
@@ -404,7 +404,7 @@ def write_3mf(path: str, objs: list[Obj]) -> None:
         cfg.append(f'    <metadata key="name" value={quoteattr(o.name)}/>')
         if o.extruder is not None:
             cfg.append(f'    <metadata key="extruder" value="{o.extruder}"/>')
-        for i, b in zip(ids, o.bodies):
+        for i, b in zip(ids, o.bodies, strict=True):
             cfg.append(f'    <part id="{i}" subtype="normal_part">')
             cfg.append(f'      <metadata key="name" value={quoteattr(b.name)}/>')
             if b.extruder is not None:

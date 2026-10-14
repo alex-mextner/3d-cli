@@ -23,6 +23,7 @@ ROADMAP §4: "3d slice <stl|3mf|scad> [-o] [--printer] [--profile]. Always runs 
 """
 from __future__ import annotations
 
+import contextlib
 import glob
 import os
 import re
@@ -208,10 +209,8 @@ def run(argv: list[str]) -> int:
         print("================================================================")
         return 1
     finally:
-        try:
+        with contextlib.suppress(OSError):
             os.remove(log)
-        except OSError:
-            pass
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 

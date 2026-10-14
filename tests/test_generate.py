@@ -195,7 +195,7 @@ def test_openscad_absent_yields_diagnostic_without_calling_gates(
     result = design.generate(_request(tmp_path))
     assert result.status == "diagnostic"
     assert result.dims_present_in_scad == {"width": True}
-    assert any("skip" == g.status for g in result.gate_results)
+    assert any(g.status == "skip" for g in result.gate_results)
     assert (tmp_path / "out.scad").exists()
 
 

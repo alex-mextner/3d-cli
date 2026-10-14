@@ -17,6 +17,7 @@ WHY: a plate-level "set of heads used == set planned" check stays green when a m
 
 Ported from babushkin-dom gen/head_sequence.py. Stdlib only.
 """
+
 from __future__ import annotations
 
 import collections
@@ -66,7 +67,9 @@ class HeadSequenceReport:
     def to_dict(self) -> dict[str, object]:
         return {
             "check": "head-sequence",
-            "status": "FAIL" if self.failures else ("PASS" if self.applicable else "SKIP"),
+            "status": "FAIL"
+            if self.failures
+            else ("PASS" if self.applicable else "SKIP"),
             "failures": self.failures,
             "mixed_rows": self.mixed_rows,
             "raft_layers": self.raft_layers,
@@ -116,7 +119,9 @@ def read_object_extruders(zf: zipfile.ZipFile) -> dict[str, list[int]]:
 def heads_by_layer(lines: Iterable[str]) -> dict[str, dict[int, set[int]]]:
     """Object name -> layer index -> 1-based heads that extruded with XY motion on that layer."""
     tool, layer, cur = 1, -1, None  # single-head printers never emit T
-    seen: dict[str, dict[int, set[int]]] = collections.defaultdict(lambda: collections.defaultdict(set))
+    seen: dict[str, dict[int, set[int]]] = collections.defaultdict(
+        lambda: collections.defaultdict(set)
+    )
     for line in lines:
         if line.startswith(";LAYER_CHANGE"):
             layer += 1
@@ -159,10 +164,21 @@ def _phase_count(mixed: list[int], pat: dict[int, str]) -> int:
 
 # Subset (<=), not equality: the 3MF gives no per-part height, so a shorter part's head may
 # legitimately vanish from upper layers. A wrong head on a layer is what this catches.
-def _follows(layers: dict[int, set[int]], keys: list[int], fixed: set[int], mixed: list[int], pat: dict[int, str]) -> bool:
+def _follows(
+    layers: dict[int, set[int]],
+    keys: list[int],
+    fixed: set[int],
+    mixed: list[int],
+    pat: dict[int, str],
+) -> bool:
     for phases in itertools.product(*[range(len(pat[e])) for e in mixed]):
         if all(
-            layers[k] <= fixed | {int(pat[e][(i + p) % len(pat[e])]) for e, p in zip(mixed, phases)}
+            layers[k]
+            <= fixed
+            | {
+                int(pat[e][(i + p) % len(pat[e])])
+                for e, p in zip(mixed, phases, strict=True)
+            }
             for i, k in enumerate(keys)
         ):
             return True
@@ -173,12 +189,21 @@ class ProjectError(ValueError):
     """The input is not a readable Orca-family project 3MF (missing/malformed metadata)."""
 
 
-def _read_project(project_3mf: str) -> tuple[dict[int, str], int, dict[str, list[int]], int]:
+def _read_project(
+    project_3mf: str,
+) -> tuple[dict[int, str], int, dict[str, list[int]], int]:
     try:
         with zipfile.ZipFile(project_3mf) as zf:
             pat, raft = read_recipes(zf)
             objs = read_object_extruders(zf)
-            plates = len(set(_PLATER_ID_RE.findall(zf.read("Metadata/model_settings.config")))) or 1
+            plates = (
+                len(
+                    set(
+                        _PLATER_ID_RE.findall(zf.read("Metadata/model_settings.config"))
+                    )
+                )
+                or 1
+            )
     except (zipfile.BadZipFile, KeyError, ValueError, ET.ParseError, TypeError) as exc:
         raise ProjectError(
             f"{project_3mf}: not a readable Orca-family project 3MF "
@@ -194,8 +219,13 @@ def check(project_3mf: str, gcode: str) -> HeadSequenceReport:
         seen = heads_by_layer(fh)
     results: list[ObjectResult] = []
     if not seen:
-        results.append(ObjectResult("(G-code)", "FAIL",
-                                    detail="no extrusion inside EXCLUDE_OBJECT labels; cannot attribute heads"))
+        results.append(
+            ObjectResult(
+                "(G-code)",
+                "FAIL",
+                detail="no extrusion inside EXCLUDE_OBJECT labels; cannot attribute heads",
+            )
+        )
     matched: set[str] = set()
     for gname, layers in seen.items():
         key = _match_object(gname, objs)
@@ -205,25 +235,40 @@ def check(project_3mf: str, gcode: str) -> HeadSequenceReport:
         matched.add(key)
         ex = objs[key]
         if any(e in pat and not pat[e] for e in ex):
-            results.append(ObjectResult(key, "local-z", ex, detail="ratio row, not checked"))
+            results.append(
+                ObjectResult(key, "local-z", ex, detail="ratio row, not checked")
+            )
             continue
         mixed = [e for e in ex if e in pat]
         fixed = {e for e in ex if e not in pat}
         keys = sorted(layers)[raft:]
         if _phase_count(mixed, pat) > _MAX_PHASE_COMBINATIONS:
-            results.append(ObjectResult(key, "FAIL", ex, [pat[e] for e in mixed], len(keys),
-                                        detail=f"more than {_MAX_PHASE_COMBINATIONS} pattern phase combinations"))
+            results.append(
+                ObjectResult(
+                    key,
+                    "FAIL",
+                    ex,
+                    [pat[e] for e in mixed],
+                    len(keys),
+                    detail=f"more than {_MAX_PHASE_COMBINATIONS} pattern phase combinations",
+                )
+            )
             continue
         ok = _follows(layers, keys, fixed, mixed, pat)
-        results.append(ObjectResult(key, "ok" if ok else "FAIL", ex, [pat[e] for e in mixed], len(keys)))
+        results.append(
+            ObjectResult(
+                key, "ok" if ok else "FAIL", ex, [pat[e] for e in mixed], len(keys)
+            )
+        )
     # A single-plate project's G-code must print every object; on a multi-plate project the
     # other plates' objects are legitimately absent, and model_settings does not say which.
     if plates == 1 and seen:
-        for key in objs:
-            if key not in matched:
-                results.append(ObjectResult(key, "FAIL", objs[key], detail="not printed in the G-code"))
+        results.extend(
+            ObjectResult(key, "FAIL", objs[key], detail="not printed in the G-code")
+            for key in objs
+            if key not in matched
+        )
     return HeadSequenceReport(results, len(pat), raft)
-
 
 
 def format_lines(report: HeadSequenceReport) -> list[str]:
@@ -232,7 +277,9 @@ def format_lines(report: HeadSequenceReport) -> list[str]:
         if o.status == "local-z" or o.detail:
             out.append(f"{o.status:<4} {o.name}: {o.detail}")
         else:
-            out.append(f"{o.status:<4} {o.name}: heads {o.heads}, patterns {o.patterns}, {o.layers} layers")
+            out.append(
+                f"{o.status:<4} {o.name}: heads {o.heads}, patterns {o.patterns}, {o.layers} layers"
+            )
     out.append(f"objects off their recipes: {report.failures}")
     return out
 

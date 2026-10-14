@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import getpass
 import json
 import os
@@ -120,20 +121,16 @@ def save_hf_token(token: str, username: str) -> Path:
 
 def _write_auth_data(path: Path, data: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, mode=stat.S_IRWXU, exist_ok=True)
-    try:
+    with contextlib.suppress(OSError):
         os.chmod(path.parent, stat.S_IRWXU)
-    except OSError:
-        pass
     fd, tmp_name = tempfile.mkstemp(prefix=".auth.", suffix=".tmp", dir=path.parent)
     tmp = Path(tmp_name)
     os.chmod(tmp, stat.S_IRUSR | stat.S_IWUSR)
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
         handle.write(json.dumps(data, indent=2, sort_keys=True) + "\n")
     os.replace(tmp, path)
-    try:
+    with contextlib.suppress(OSError):
         os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
-    except OSError:
-        pass
 
 
 def delete_hf_token() -> bool:

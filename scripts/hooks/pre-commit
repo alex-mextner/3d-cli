@@ -2,7 +2,7 @@
 # =============================================================================
 # 3d-cli REPO-DEV pre-commit gate (TRACKED source of truth).
 #
-# Runs the repo's own Python dev gate before each commit: ruff -> pytest -> mypy.
+# Runs the repo's own dev gate before each commit: ruff -> shellcheck -> pytest -> mypy.
 # Prefer `dev run test` (the primary runner surface). If the external dev CLI is
 # unavailable or cannot execute the repo script, fall back to the literal
 # rig.yaml scripts.test command. The commit is blocked if any step fails or no
@@ -20,7 +20,7 @@ set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)" || exit 1
 
-echo "=== 3d-cli pre-commit: ruff -> pytest -> mypy ==="
+echo "=== 3d-cli pre-commit: ruff -> shellcheck -> pytest -> mypy ==="
 
 # Use the project-scoped dev runner; rig.yaml scripts.test owns the actual command.
 if command -v dev >/dev/null 2>&1; then

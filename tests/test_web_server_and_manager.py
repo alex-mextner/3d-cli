@@ -53,7 +53,7 @@ def test_server_smoke(tmp_path: pathlib.Path) -> None:
 
 
 def test_associate_by_cwd(tmp_path: pathlib.Path) -> None:
-    proj = str((tmp_path / "p1"))
+    proj = str(tmp_path / "p1")
     (tmp_path / "p1").mkdir()
     mgr = AgentManager([], [proj])
     assert mgr.associate([], proj + "/sub/file.scad") == proj
@@ -90,9 +90,9 @@ def test_manager_streams_events_to_subscriber() -> None:
         await mgr.refresh()
         agen = mgr.subscribe()  # queue created first
         await mgr.start_tail("stub:s", from_start=True)
-        got: list[AgentEvent] = []
-        for _ in range(2):
-            got.append(await asyncio.wait_for(agen.__anext__(), timeout=3))
+        got: list[AgentEvent] = [
+            await asyncio.wait_for(agen.__anext__(), timeout=3) for _ in range(2)
+        ]
         await agen.aclose()
         # association happened from the tool_use path
         ts: TrackedSession = mgr._sessions["stub:s"]

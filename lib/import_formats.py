@@ -265,7 +265,6 @@ def render_plan(plan: ImportPlan) -> str:
     if plan.output_path:
         lines.append(f"output: {plan.output_path}")
     lines.append("steps:")
-    for step in plan.steps:
-        lines.append(f"  - {step}")
+    lines.extend(f"  - {step}" for step in plan.steps)
     lines.append(f"note: {plan.format.note}")
     return "\n".join(lines)

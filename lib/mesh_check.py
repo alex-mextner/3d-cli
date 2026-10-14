@@ -79,11 +79,11 @@ def export_scad_to_stl(scad_path: str, defines: list[str]) -> tuple[str, str]:
 def openscad_warning_grep(log: str) -> list[str]:
     """Return list of real WARNING:/ERROR: lines from an openscad log.
     grep ERROR: WITH the colon to avoid matching 'NoError' (AGENTS.md footgun)."""
-    hits: list[str] = []
-    for line in log.splitlines():
-        if re.search(r"\bERROR:", line) or re.search(r"\bWARNING:", line):
-            hits.append(line.strip())
-    return hits
+    return [
+        line.strip()
+        for line in log.splitlines()
+        if re.search(r"\bERROR:", line) or re.search(r"\bWARNING:", line)
+    ]
 
 
 def check_with_trimesh(mesh_path: str) -> dict[str, Any]:

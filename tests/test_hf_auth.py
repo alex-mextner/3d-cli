@@ -15,7 +15,7 @@ class _Response:
     def __init__(self, body: bytes) -> None:
         self.body = body
 
-    def __enter__(self) -> "_Response":
+    def __enter__(self) -> _Response:
         return self
 
     def __exit__(self, *_args: object) -> None:

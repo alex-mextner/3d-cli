@@ -72,7 +72,7 @@ in the project's JSON config — nothing project-specific is compiled in.
 | `3d slice` | slice a model to G-code via OrcaSlicer / Bambu Studio / PrusaSlicer (per-slicer invocation; core `-g`/`--slice` flags verified, `--printer` best-effort); `--check` is a sliceability gate that discards the G-code. |
 | `3d libs` | OpenSCAD library info: `path` / `list` (BOSL2, NopSCADlib auto-install on first run). |
 | `3d fit-camera` | (see above) camera-pose fit to a reference photo by silhouette IoU. |
-| `dev run test` | run the repo test gate: ruff, pytest (unit + CLI smoke), then mypy. |
+| `dev run test` | run the repo test gate: ruff, shellcheck, pytest (unit + CLI smoke), then mypy. |
 | `3d compare` | segmented model/reference comparison that prints IoU + SSIM/DSSIM and writes mask/render/diff/collage artifacts. |
 | `3d init` | scaffold a `3d.yaml` project skeleton and optional agent-support files. |
 | `3d projects` | register / list / unregister project directories for `3d web` and cross-project tooling. |

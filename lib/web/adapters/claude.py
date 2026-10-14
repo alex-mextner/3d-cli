@@ -88,7 +88,7 @@ class ClaudeAdapter(LogAdapter):
     def _peek_cwd(f: pathlib.Path) -> str | None:
         """Cheaply read the cwd from the first lines that carry it."""
         try:
-            with open(f, "r", encoding="utf-8", errors="replace") as fh:
+            with open(f, encoding="utf-8", errors="replace") as fh:
                 for _ in range(8):
                     line = fh.readline()
                     if not line:

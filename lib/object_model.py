@@ -89,11 +89,7 @@ def parse_scad_annotations(text: str, *, source: str | None = None) -> ObjectMod
 
 def select_nodes(model: ObjectModel, selector: str) -> list[ObjectNode]:
     parsed = _parse_selector(selector)
-    matched: list[ObjectNode] = []
-    for node in model.nodes:
-        if _matches(node, parsed):
-            matched.append(node)
-    return matched
+    return [node for node in model.nodes if _matches(node, parsed)]
 
 
 def model_to_dict(model: ObjectModel, nodes: list[ObjectNode] | tuple[ObjectNode, ...]) -> dict[str, Any]:
@@ -102,8 +98,7 @@ def model_to_dict(model: ObjectModel, nodes: list[ObjectNode] | tuple[ObjectNode
     styles: list[dict[str, Any]] = []
     for node in nodes:
         node_ref = node.id if node.id is not None else f"node-{node.index}"
-        for anchor in node.anchors:
-            anchors.append(_anchor_to_dict(anchor, node_ref))
+        anchors.extend(_anchor_to_dict(anchor, node_ref) for anchor in node.anchors)
         if node.style:
             styles.append({"node": node_ref, "style": dict(sorted(node.style.items()))})
     return {
