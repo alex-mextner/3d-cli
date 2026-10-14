@@ -1,6 +1,7 @@
 # `3d printer` — drive the printers on your LAN
 
-`3d printer` talks to the physical printers listed in `printer-devices.yaml`: it reads their
+`3d printer` talks to the physical printers of the fleet registry
+[`fleet/printers.yaml`](../../fleet/printers.yaml) and of `printer-devices.yaml`: it reads their
 state, stores G-code on them, starts an uploaded file after an explicit `--yes`, and cancels
 a job. `3d printers` (plural) is a different command: it lists printer **models** and their
 build volumes; `3d printer` is about the machines themselves.
@@ -10,7 +11,7 @@ Epic: [#90](https://github.com/alex-mextner/3d-cli/issues/90).
 ## Usage
 
 ```
-3d printer list
+3d printer list [--json]
 3d printer status NAME [--json] [--secs S]
 3d printer upload NAME FILE.gcode [--as REMOTE]
 3d printer start NAME FILE.gcode --yes [--as REMOTE] [--source-3mf X.3mf] [--bridge-max MM] [--force] [--secs S]
@@ -21,7 +22,7 @@ Epic: [#90](https://github.com/alex-mextner/3d-cli/issues/90).
 
 | Subcommand | What |
 |---|---|
-| `list` | Configured printers: name, adapter, address, model, and the file each came from. |
+| `list` | Every fleet and configured printer: owner, access, model, address, heads (an unusable head with its reason), and where the device settings came from when a user/project file overrides the fleet. |
 | `status NAME` | State, current file and progress, temperatures, and (U1) what each head holds. |
 | `upload NAME FILE` | Store the file on the printer and verify its size there. Never starts a print. |
 | `start NAME FILE --yes` | Start a file that was uploaded before. Runs [`3d print-preflight`](print-preflight.md) first. |
@@ -31,8 +32,11 @@ Epic: [#90](https://github.com/alex-mextner/3d-cli/issues/90).
 
 Options:
 
-- `--json` — `status` as JSON: normalized `state`, `raw_state`, `filename`, `progress` (0..1),
-  `temps`, `slots`, and the raw firmware payload.
+- `--json` — `list` as JSON (one object per printer: `name`, `model`, `owner`, `access`, `adapter`,
+  `address`, `settings`, `fleet`, `heads[]` with `nozzle`/`usable`/`reason`, `ams`, `enclosure`,
+  `chamber_heater`, `plates`; `null` = not known), or `status` as JSON: normalized `state`,
+  `raw_state`, `filename`, `progress` (0..1), `temps`, `slots`, and the raw firmware payload.
+  `3d printer list --json | jq '.[] | {name, access, heads: [.heads[] | select(.usable | not)]}'`
   `3d printer status u1 --json | jq '.slots[] | {label, color, material}'`
 - `--secs S` — Creality printers push their state over a WebSocket; listen this long (default 3).
   `3d printer status k1se --secs 5`
@@ -56,6 +60,7 @@ Options:
 
 ```bash
 3d printer list
+3d printer list --json | jq '.[] | {name, access, heads: [.heads[] | select(.usable | not)]}'
 3d printer status u1
 3d printer status k1se --secs 5
 3d printer status u1 --json | jq '.slots[] | {label, color, material}'
@@ -69,11 +74,47 @@ Options:
 3d printer watch u1 k1se --steer 01a12cd6 --tg
 ```
 
+## Fleet registry
+
+[`fleet/printers.yaml`](../../fleet/printers.yaml) in the 3d-cli repo lists every printer we
+print on — ours, the neighbour's, Boris's, the hackspace's — and is checked by
+[`3d lint --printops`](lint.md) (issue [#157](https://github.com/alex-mextner/3d-cli/issues/157)).
+Per printer:
+
+| Key | Values |
+|---|---|
+| `model` | a model from [`3d printers list`](printers.md) |
+| `owner` | `own`, `neighbour`, `boris`, `hackerspace` |
+| `access` | `full` (3d may upload/start/cancel), `read-only` (status only: `upload`, `start`, `cancel` are refused), `offline` (never contacted: no device settings allowed; every contacting command refuses it) |
+| `adapter`, `host`, `port`, `ws_port`, `axis_limits`, `trusted_macros`, `bridge_max_mm`, `resume` | the device settings below; `adapter` and `host` are required unless `offline` |
+| `heads` | in tool order: `label` T1..Tn ↔ `index` 0..n-1, `extruder` (Klipper object), `nozzle` {`diameter_mm`, `material` brass/stainless/hardened/ruby/tungsten, `type` std/hf}, `usable` (false needs `reason`) |
+| `ams` | units feeding the heads `{id, kind ams/ams_lite/ams_2_pro/ams_ht/cfs/other, slots}`; `[]` = none |
+| `enclosure`, `chamber_heater` | `none`/`partial`/`full`; `true`/`false` |
+| `plates` | `smooth_pei`, `textured_pei`, `cool_plate`, `engineering_plate`, `high_temp_plate`, `epoxy`, `glass` |
+| `notes`, `sources` | free text; where the facts come from |
+
+A key that is not known is left out (shown as `null`/`-`), never guessed.
+`THREED_FLEET=FILE` reads another fleet file, `THREED_FLEET=` (empty) disables it.
+
+```
+$ 3d printer list
+  NAME          OWNER        ACCESS    MODEL                ADDRESS                         HEADS
+  a1mini        boris        offline   Bambu Lab A1 mini    - (never contacted)             T1
+  k1se          own          full      Creality K1 SE       creality-stock 192.168.0.27:80  T1
+  p1s           neighbour    offline   Bambu Lab P1S        - (never contacted)             T1
+  u1            own          full      Snapmaker U1         moonraker 192.168.0.26:7125     T1 | T2 UNUSABLE | T3 | T4
+      T2: head T2 does not work (babushkin-dom gen/queue.json: «слот 2 — заглушка, голова T2 не работает»; …)
+  xecut-a1      hackerspace  offline   Bambu Lab A1         - (never contacted)             T1
+  xecut-cr200b  hackerspace  offline   Creality CR-200B Pro - (never contacted)             T1
+```
+
 ## Configuring printers
 
-`~/.config/3d-cli/printer-devices.yaml` (honours `XDG_CONFIG_HOME`); a `./printer-devices.yaml`
-in the current directory overrides entries by name. Only printers listed here are ever
-contacted — there is no network discovery.
+The device settings of the fleet's `full`/`read-only` printers are the base layer;
+`~/.config/3d-cli/printer-devices.yaml` (honours `XDG_CONFIG_HOME`) and then a
+`./printer-devices.yaml` in the current directory replace a printer's device settings by name
+(whole entry). Only printers listed in these files are ever contacted — there is no network
+discovery.
 
 ```yaml
 u1:
@@ -248,6 +289,12 @@ and numbers on real U1 footage: [docs/research/printer-vision.md](../research/pr
    failed request, or an unreadable state right after an acknowledged start is reported as
    UNKNOWN; uploads that time out are checked against the printer's file list. Nothing is
    resent automatically: check `3d printer status NAME` first.
+7. An `offline` fleet printer (someone else's) is never contacted: `status`, `upload`, `start`
+   and `cancel` refuse it by name. Its static profile (`axis_limits`, `trusted_macros`,
+   `bridge_max_mm` in the fleet file) still serves the G-code gates:
+   `3d print-preflight X.gcode --printer a1mini` (state checks are left out) and
+   `--axis-limits a1mini`. A `read-only` printer answers `status` but refuses `upload`, `start`
+   and `cancel` before any request is sent.
 
-Exit codes: 0 done; 1 refused by a safety rule, preflight FAIL, or printer unreachable;
-2 usage error, unknown printer, bad config, or missing file.
+Exit codes: 0 done; 1 refused by a safety rule (incl. offline/read-only printer), preflight FAIL,
+or printer unreachable; 2 usage error, unknown printer, bad config or fleet file, or missing file.

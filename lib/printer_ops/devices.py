@@ -6,6 +6,7 @@ machine on the LAN ("u1" at 192.168.0.26 speaking Moonraker). `model:` links a d
 model entry. Issue https://github.com/alex-mextner/3d-cli/issues/91.
 
 FILES (later wins per name, whole-entry replace):
+  0. <repo>/fleet/printers.yaml              (base layer, printops.fleet; offline entries skipped)
   1. ~/.config/3d-cli/printer-devices.yaml   (XDG_CONFIG_HOME honoured)
   2. ./printer-devices.yaml                  (project-local override)
 
@@ -25,6 +26,10 @@ ENTRY:
   Optional `bridge_max_mm: 25` is the longest span this printer bridges cleanly (measure it
   with a bridge test); the print-preflight overhangs gate uses it unless --bridge-max is
   given (default 15).
+  Optional `access: full | read-only` (default full): `3d printer upload/start/cancel`
+  refuse a read-only printer. An offline fleet printer is never contacted: get_device refuses
+  it, except get_device(name, offline_ok=True) for the G-code gates, which returns its static
+  profile (axis_limits, trusted_macros, bridge_max_mm) as a Device with adapter/access `offline`.
 
 Only devices listed here are ever contacted — no LAN discovery (issue #62 network modes).
 """
@@ -34,10 +39,14 @@ import math
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from errors import InvalidArgument, MissingDependency, ThreeDError, UsageError
+from printer_ops.base import PrinterRefused
 from printer_ops.move_bounds import Limits
+
+if TYPE_CHECKING:
+    from printops.fleet import Fleet, FleetPrinter
 
 FILENAME = "printer-devices.yaml"
 ADAPTERS = ("moonraker", "creality-stock")
@@ -107,6 +116,7 @@ class Device:
     resume: ResumeProfile | None = None  # `3d gcode-resume` values
     watch: dict[str, Any] = field(default_factory=dict, hash=False, compare=False)  # `3d printer watch` settings
     bridge_max_mm: float | None = None  # longest clean bridge, for the print-preflight overhangs gate
+    access: str = "full"  # full | read-only | offline (static profile only, never contacted)
 
 
 def user_path() -> Path:
@@ -213,9 +223,28 @@ def _parse(path: Path, data: Any) -> dict[str, Device]:
         if not isinstance(watch, dict):
             raise InvalidArgument(f"{name}.watch", str(watch), ["a mapping, e.g. {tg: true, min_severity: warning}"],
                                   command="printer", extra=f"Fix {path}.")
+        access = spec.get("access", "full")
+        if access not in ("full", "read-only"):
+            raise InvalidArgument(f"{name}.access", str(access), ["full", "read-only"], command="printer",
+                                  extra=f"Fix {path}.")
         out[name] = Device(name, adapter, host, port, str(model) if model else None, path, ws_port, limits,
-                           trusted, resume, dict(watch), bridge)
+                           trusted, resume, dict(watch), bridge, str(access))
     return out
+
+
+def fleet_devices(fleet: Fleet | None) -> dict[str, Device]:
+    """The printers of fleet/printers.yaml that 3d may contact, as Devices (offline ones are not)."""
+    return _parse(fleet.path, fleet.device_specs()) if fleet is not None else {}
+
+
+def offline_device(printer: FleetPrinter) -> Device:
+    """The static profile of an offline fleet printer (no address: never contacted)."""
+    d, name, path = printer.device, printer.name, printer.source
+    limits = _axis_limits(d["axis_limits"], name, path) if "axis_limits" in d else None
+    trusted = _trusted_macros(d["trusted_macros"], name, path) if "trusted_macros" in d else frozenset()
+    bridge = _bridge_max(d["bridge_max_mm"], name, path) if "bridge_max_mm" in d else None
+    return Device(name, "offline", "", 0, printer.model, path, None, limits, trusted, bridge_max_mm=bridge,
+                  access="offline")
 
 
 def load_devices(cwd: Path | None = None) -> dict[str, Device]:
@@ -224,7 +253,9 @@ def load_devices(cwd: Path | None = None) -> dict[str, Device]:
     except ImportError as exc:  # pragma: no cover - pyyaml is a core dependency
         raise MissingDependency("pyyaml", install="uv sync", degrades="printer-devices.yaml cannot be read",
                                 command="printer") from exc
-    devices: dict[str, Device] = {}
+    from printops.fleet import load_fleet
+
+    devices = fleet_devices(load_fleet())
     for path in search_paths(cwd):
         if not path.is_file():
             continue
@@ -236,8 +267,22 @@ def load_devices(cwd: Path | None = None) -> dict[str, Device]:
     return devices
 
 
-def get_device(name: str, cwd: Path | None = None) -> Device:
+def get_device(name: str, cwd: Path | None = None, *, offline_ok: bool = False) -> Device:
+    """Device `name`. An offline fleet printer is refused, unless `offline_ok` (callers that only
+    read its static profile, never contact it)."""
     devices = load_devices(cwd)
+    if name not in devices:
+        from printops.fleet import load_fleet
+
+        fleet = load_fleet()
+        offline = fleet.printers.get(name) if fleet is not None else None
+        if offline is not None:
+            if offline_ok:
+                return offline_device(offline)
+            raise PrinterRefused(
+                f"{name} ({offline.model}, owner {offline.owner}) is an offline fleet printer: 3d never contacts it",
+                command="printer",
+                remediation=["Run its jobs by hand; `3d printer list` shows which printers 3d can drive."])
     if not devices:
         raise UsageError(
             "no printers configured",

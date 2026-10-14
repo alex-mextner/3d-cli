@@ -118,6 +118,12 @@ def run(argv: list[str]) -> int:
     from printer_ops.preflight import FAIL, run_preflight
 
     from printer_ops import adapter_by_name, bridge_max_for, device_for, limits_from_option, trusted_macros_for
+    from printer_ops.devices import get_device
+
+    printer = opts.get("--printer")
+    if printer is not None and get_device(printer, offline_ok=True).access == "offline":
+        del opts["--printer"]  # an offline fleet printer is never contacted: its static profile only
+        opts.setdefault("--axis-limits", printer)
 
     status = None
     device = None if "--printer" in opts else device_for(opts.get("--axis-limits"))
