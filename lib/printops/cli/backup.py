@@ -33,7 +33,7 @@ def _one(label: str, src: Path, target: Path, is_db: bool) -> Snapshot | str:
     """The snapshot, or a failure message (every item is attempted even if one fails)."""
     try:
         return snapshot_db(src, target) if is_db else copy_file(src, target)
-    except BackupError as e:
+    except (BackupError, OSError) as e:  # one unreadable/unwritable item must not skip the rest
         return f"{label}: {e}"
 
 

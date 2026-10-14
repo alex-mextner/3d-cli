@@ -101,6 +101,7 @@ in access logs).
 
 | Endpoint | Scope | |
 |---|---|---|
+| `GET /v1/live` | — | liveness (container healthcheck): `{ok}`, DB only, never calls Spoolman |
 | `GET /v1/health` | — | `{status: ok\|degraded, version, db, spoolman{version, extra_fields}}`; 503 only if the DB is broken |
 | `GET /v1/events` | read | SSE stream (`id`/`event`/`data`, `: ping` every 15 s; resumes from `since` or `Last-Event-ID`); with `Accept: application/json` a page `{events, cursor}` by `since`/`limit` or `last` |
 | `WS /v1/ws` | read | auth message, then `{type: "event", event}` frames |
