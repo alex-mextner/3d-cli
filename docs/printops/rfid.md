@@ -144,7 +144,7 @@
 1. Сканируем метку катушки.
 2. Сканируем метку слота (наклейка на держателе: `slot:u1/e2`, `slot:k1se/0`) или выбираем принтер и слот энкодером.
 3. 3d-api записывает `spool → printer/slot` и по возможности пушит данные в принтер:
-   - U1: `SET_PRINT_FILAMENT_CONFIG` через Moonraker `/printer/gcode/script`;
+   - U1 на стоке: **ничего не пишем** (решение D4: только чтение). `SET_PRINT_FILAMENT_CONFIG` — отдельный тикет с явным подтверждением, не путь по умолчанию;
    - K1 SE: Moonraker (если доступен) или только учёт [INFERENCE];
    - Bambu: MQTT `ams_filament_setting` при Developer Mode, а без него только учёт.
 4. Выгрузка: «unload» или вставка новой катушки в тот же слот автоматически закрывает предыдущую привязку.
@@ -175,7 +175,7 @@ Moonraker‑интеграция Spoolman держит **один** активн
 | `note` | проблема: «путается», «влажный», «ломкий»; выбор из списка энкодером | spool_uid, code |
 | `bind` | новая метка → создать или привязать spool (UID в Spoolman) + записать NDEF | uid, spool_id |
 
-UX: энкодер выбирает операцию, кнопка OK подтверждает, кнопка BACK отменяет. Касание катушкой, потом при необходимости вторым касанием цель. Перед отправкой экран показывает «PLA Black eSUN · 642 g · A‑2‑03».
+UX: энкодер выбирает операцию, кнопка OK подтверждает, кнопка BACK отменяет. Касание катушкой, потом при необходимости вторым касанием цель. Перед отправкой экран показывает «PLA Black eSUN · 642 g · A‑2‑03». **Мутация уходит только по OK**: касание лишь выбирает катушку; запрос несёт одноразовый `nonce`, 3d-api отбрасывает повторы (replay).
 
 ### 3.2 Выбор ридера (статус в ESPHome)
 | Ридер | Протоколы чипа | ESPHome | Итог |
@@ -210,7 +210,7 @@ Spoolman wiki пришла к той же развилке: PN532 или RC522 �
 ```yaml
 substitutions:
   station_id: "spool-station-1"
-  api_base: "http://3d-api.lan:8080/api/v1"     # 3d-api
+  api_base: "https://3d-api.lan:8443"           # 3d-api; пути ниже — /v1/... (plan.md §11.1)
   spoolman: "http://spoolman.lan:7912/api/v1"
 
 esphome:
@@ -239,7 +239,7 @@ i2c: { sda: GPIO8, scl: GPIO9 }
 
 http_request:
   timeout: 5s
-  verify_ssl: false
+  verify_ssl: true              # токен станции не уходит по plain HTTP; CA 3d-api прошит в прошивку
 
 pn532_spi:
   id: nfc
@@ -305,10 +305,10 @@ sensor:
     on_anticlockwise: [ lambda: 'id(op_idx) = (id(op_idx) + 6) % 7;' ]
 
 binary_sensor:
-  - platform: gpio            # кнопка энкодера: выбор цели (printer/slot или ячейка)
+  - platform: gpio            # кнопка энкодера OK: подтверждение — здесь (а не в on_tag) отправляется POST /v1/tags/scan
     pin: { number: GPIO15, mode: INPUT_PULLUP, inverted: true }
     name: "OK"
-    on_click: [ lambda: 'id(target_idx) = (id(target_idx) + 1) % 8;' ]
+    on_click: [ script.execute: send_scan ]   # набросок: тело запроса как выше, перенесённое из on_tag в script
   - platform: gpio            # TARE (пустая платформа)
     pin: { number: GPIO16, mode: INPUT_PULLUP, inverted: true }
     name: "Tare"
@@ -347,13 +347,13 @@ display:
 
 ### 3.6 Эндпоинты 3d-api (предложение)
 
-Канонический контракт — [plan.md §11.1](plan.md): `POST /v1/tags/scan {uid, payload?, op, printer?, slot?, location?, weight_g?}` с bearer-токеном scope `station`. Ниже — исходный набросок; при расхождении прав plan.md. `target` из конфига станции 3d-api разворачивает в `printer`/`slot`/`location`. Нужен контрактный тест «станция → 3d-api» с аутентификацией.
+Канонический контракт — [plan.md §11.1](plan.md): `POST /v1/tags/scan {uid, payload?, op, printer?, slot?, location?, weight_g?, nonce}` по HTTPS с проверкой сертификата и bearer-токеном узкого scope `station` (только операции станции). Таблица ниже — **исходный набросок, заменён этим контрактом**: префикс `/api/v1` и `/station/scan` не использовать; при расхождении прав plan.md. `target` из конфига станции 3d-api разворачивает в `printer`/`slot`/`location`. Нужны контрактные тесты «станция → 3d-api»: аутентификация, отказ plain HTTP и неверного сертификата, отказ повтора `nonce`.
 
 | Метод | Путь | Назначение |
 |---|---|---|
 | GET | `/api/v1/station/config?station=` | Операции, список целей (printers/slots, dryers), коды проблем |
 | POST | `/api/v1/station/scan` | Единая точка входа: `{station, uid, op, target, gross_g, source}`. 3d-api: (1) резолвит UID → spool через Spoolman `GET /spool?tag=` или → cell по своей таблице; (2) выполняет op; (3) возвращает короткую строку для экрана |
-| POST | `/api/v1/spools/{id}/load` | `{printer, slot}`: привязка и push в принтер (U1 `SET_PRINT_FILAMENT_CONFIG`, Bambu MQTT при Developer Mode) |
+| POST | `/api/v1/spools/{id}/load` | `{printer, slot}`: привязка; push в принтер — только Bambu MQTT при Developer Mode (D7: сейчас ручной режим), U1 сток — нет (D4) |
 | POST | `/api/v1/spools/{id}/unload` | Снять привязку |
 | POST | `/api/v1/spools/{id}/dry` | `{dryer, action: start|stop, temp_c, weight_g}` → drying_log |
 | POST | `/api/v1/spools/{id}/location` | `{cell}`: в Spoolman `PATCH /spool/{id}` `location` |

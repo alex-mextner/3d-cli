@@ -134,7 +134,7 @@
 
 **Деплой `3d ha deploy [--dry-run] [--host odroid]`:**
 1. `rsync --checksum` файлов из манифеста в `/home/ultra/homeassistant/…` (те же пути, что сейчас).
-2. В HA-репозитории эти пути переходят в `.gitignore` с комментарием «source of truth: 3d-cli integrations/homeassistant». В `/config/.3d-cli-deployed` пишется SHA коммита 3d-cli и время деплоя.
+2. Cutover в HA-репозитории (по D9 — submodule): добавить 3d-cli submodule'ом, старые tracked-пути убрать `git rm --cached` и закоммитить (сам `.gitignore` уже tracked-файлы не игнорирует), затем добавить их в `.gitignore` с комментарием «source of truth: 3d-cli integrations/homeassistant». Проверка: после деплоя `git status` HA-репо чистый. В `/config/.3d-cli-deployed` пишется SHA коммита 3d-cli и время деплоя.
 3. Сниппеты `configuration.yaml` не копируются, только сверяются: деплой падает, если в живом конфиге нет ingress, dashboard или resources (`lovelace` и `ingress` в packages не выносятся [INFERENCE]).
 4. Compose: в главный `ha.docker-compose.yaml` добавляется `include: [3d.docker-compose.yaml]` (Compose ≥ 2.20) или `-f`. Проверить версию docker compose на Odroid.
 5. `docker exec homeassistant-homeassistant-1 python -m homeassistant --script check_config -c /config`, затем `homeassistant.reload_all` через API. `docker compose up -d` перезапускает только изменённые 3D-сервисы.
@@ -492,7 +492,7 @@ GET  /v1/events (SSE) | WS /v1/ws
 | # | Вопрос | Рекомендация | Решение |
 |---|---|---|---|
 | **D1** | `projects/3d-bot` не найден. Где исходник, или пишем новый? | Если исходника нет — новый тонкий бот поверх `3d-api` (Фаза 4) | новый бот поверх 3d-api |
-| **D2** | Spoolman + своя DB или только своя DB | Spoolman + PrintOps DB (одна точка записи — `3d-api`) | Spoolman без форка: всё про катушку (адрес, сушка last_dried, заметка) — через extra fields Spoolman; остальное — небольшая своя БД 3d-api |
+| **D2** | Spoolman + своя DB или только своя DB | Spoolman + PrintOps DB (одна точка записи — `3d-api`) | Spoolman без форка: всё про катушку — в Spoolman. Адрес — в каноническом `Spool.location` (путь, oss.md §9.2; не дублировать в extra), сушка `last_dried` и заметки — extra fields; остальное — небольшая своя БД 3d-api |
 | **D3** | Где живёт `3d-api` и данные | Odroid (compose рядом с HA, SQLite на HDD, бэкап) | Odroid |
 | **D4** | Ставить ли на U1 extended firmware paxx12 (Spoolman SpoolLink, OpenRFID, запись `filament_detect`)? Риск для гарантии и стабильности | Сначала прочитать `filament_detect` на стоке (фаза 1). Решать после, отдельным тикетом | paxx12 — отдельно, позже, после текущего проекта (на стоке только читаем filament_detect) |
 | **D5** | Пауза принтера при FAIL-гейте, если старт был не через нас | Только уведомление; авто-пауза — opt-in для 3 «опасных» проверок и только на своих принтерах | серьёзные FAIL при старте мимо нас → пауза + звонок через call-cli + tg |
