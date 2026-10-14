@@ -695,6 +695,49 @@ def test_installed_hook_runs_literal_rig_script_with_extra_args(
     assert "python tests/run_gate.py --strict --fast" in run_log.read_text(encoding="utf-8").strip()
 
 
+def _mark_gate_fast_capable(runner: Path) -> None:
+    """Give the runner's tests/run_gate.py the line the hook looks for to pass `--fast`."""
+    gate = runner / "tests" / "run_gate.py"
+    gate.parent.mkdir(exist_ok=True)
+    existing = gate.read_text(encoding="utf-8") if gate.exists() else ""
+    gate.write_text(existing + 'FAST_FLAG = "--fast"\n', encoding="utf-8")
+
+
+def test_installed_hook_runs_the_fast_gate_through_dev(repo_env: tuple[Path, dict[str, str]]) -> None:
+    repo, env = repo_env
+    assert _install(repo, env).returncode == 0
+    dest = _common_hooks_dir(repo, env) / "pre-commit"
+
+    runner = repo.parent / "dev-fast"
+    runner.mkdir()
+    _run_git(runner, env, "init", "-q", "--template=")
+    _mark_gate_fast_capable(runner)
+    run_log = runner / "dev.log"
+    _install_fake_dev(runner, env, run_log=run_log)
+
+    res = subprocess.run(["bash", str(dest)], cwd=runner, env=env, capture_output=True, text=True)
+    assert res.returncode == 0, res.stderr
+    assert run_log.read_text().splitlines() == ["run --repo-only test -- --fast"]
+
+
+def test_installed_hook_fallback_appends_fast_to_the_rig_script(repo_env: tuple[Path, dict[str, str]]) -> None:
+    repo, env = repo_env
+    assert _install(repo, env).returncode == 0
+    dest = _common_hooks_dir(repo, env) / "pre-commit"
+
+    runner = repo.parent / "no-dev-fast"
+    runner.mkdir()
+    _run_git(runner, env, "init", "-q", "--template=")
+    _restrict_path_to_tools(runner, env, ("bash", "git", "python3"))
+    run_log = runner / "uv.log"
+    _install_fake_rig_test_gate(runner, env, run_log=run_log, extra_gate_args=("-x",), with_uv=True)
+    _mark_gate_fast_capable(runner)
+
+    res = subprocess.run(["bash", str(dest)], cwd=runner, env=env, capture_output=True, text=True)
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert "python tests/run_gate.py -x --fast" in run_log.read_text(encoding="utf-8").strip()
+
+
 def test_installed_hook_blocks_commit_when_gate_fails(repo_env: tuple[Path, dict[str, str]]) -> None:
     repo, env = repo_env
     assert _install(repo, env).returncode == 0

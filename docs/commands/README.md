@@ -82,7 +82,7 @@ Every gate from model to printer, in order: [Print pipeline](../workflows/print-
 | `gcode-bounds` | [gcode-bounds.md](gcode-bounds.md) | Check every G-code move (arc bulges too) against axis travel and the printable area; offline. |
 | `gcode-resume` | [gcode-resume.md](gcode-resume.md) | Resume a stopped multi-head print above the last intact layer (no Z homing); offline. |
 | `gcode-overhangs` | [gcode-overhangs.md](gcode-overhangs.md) | Find extrusion printed on nothing, per object and layer (the slicer is silent with supports off); offline. |
-| `printer` | [printer.md](printer.md) | Drive configured printers (Moonraker, Creality stock): list, status, upload, start `--yes`, cancel `--yes`. |
+| `printer` | [printer.md](printer.md) | Drive configured printers (Moonraker, Creality stock): list, status, upload, start `--yes`, cancel `--yes`, `watch` (read-only anomaly events to stdout/exec/tg/omp session), `vision` (camera spaghetti detection into the same events). |
 | `print-preflight` | [print-preflight.md](print-preflight.md) | Read-only pre-print checks: every G-code gate (bounds, overhangs, slicer warnings, head sequence, thumbnails, visible faces), loaded colours vs G-code, halves, printer free. |
 | `slice` | [slice.md](slice.md) | Slice STL/3MF/SCAD to G-code or run the sliceability gate; records the slicer's warnings next to the G-code. |
 | `slice-check` | [slice-check.md](slice-check.md) | Headless 3MF open/plates/slice gate, plus offline G-code checks (`--check head-sequence`). |
@@ -162,6 +162,8 @@ Global state uses one config directory and one data directory:
 - `~/.config/3d-cli/` or `$XDG_CONFIG_HOME/3d-cli/`: bootstrap marker, `web.json`,
   projects registry, and user registry overrides.
 - `~/.local/share/3d-cli/` or `$XDG_DATA_HOME/3d-cli/`: generated state such as metrics.
+- `~/.local/state/3d-cli/` or `$XDG_STATE_HOME/3d-cli/`: runtime state such as the
+  `3d printer watch` heartbeat files.
 
 `3d web` is an optional frontend over the same core. The command module lazy-imports the
 web tier so missing `fastapi`/`uvicorn` affects only `3d web`, not the CLI dispatcher or

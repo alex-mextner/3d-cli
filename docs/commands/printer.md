@@ -13,8 +13,10 @@ Epic: [#90](https://github.com/alex-mextner/3d-cli/issues/90).
 3d printer list
 3d printer status NAME [--json] [--secs S]
 3d printer upload NAME FILE.gcode [--as REMOTE]
-3d printer start NAME FILE.gcode --yes [--as REMOTE] [--source-3mf X.3mf] [--force] [--secs S]
+3d printer start NAME FILE.gcode --yes [--as REMOTE] [--source-3mf X.3mf] [--bridge-max MM] [--force] [--secs S]
 3d printer cancel NAME --yes
+3d printer watch NAME... | --all [--tg] [--steer SESSION] [--exec CMD] [--min-severity LEVEL] ...
+3d printer vision NAME [--interval S] [--once] [--dry-run] ...  |  vision eval ...  |  vision fetch-model
 ```
 
 | Subcommand | What |
@@ -24,6 +26,8 @@ Epic: [#90](https://github.com/alex-mextner/3d-cli/issues/90).
 | `upload NAME FILE` | Store the file on the printer and verify its size there. Never starts a print. |
 | `start NAME FILE --yes` | Start a file that was uploaded before. Runs [`3d print-preflight`](print-preflight.md) first. |
 | `cancel NAME --yes` | Cancel the running or paused job. |
+| `watch NAME...` | Stay subscribed (read-only) and report anomalies as events — see [Watching printers](#watching-printers). |
+| `vision NAME` | Watch the camera for failed prints (spaghetti, stale/dark camera, the U1's own NPU verdicts) — see [Camera failure detection](#camera-failure-detection). |
 
 Options:
 
@@ -39,6 +43,8 @@ Options:
   `3d printer upload k1se "out/roof left.gcode" --as roof_left.gcode`
 - `--yes` — required by `start` and `cancel`: you confirm the physical action.
   `3d printer start u1 out/part.gcode --yes`
+- `--bridge-max MM` — preflight overhangs gate: longest bridge; overrides the printer's `bridge_max_mm`.
+  `3d printer start u1 out/porch.gcode --yes --bridge-max 25`
 - `--force` — start even when preflight reports FAIL; the failing checks are printed as `FORCED`.
   `3d printer start k1se out/roof.gcode --yes --force`
 - `--source-3mf FILE` — the project 3MF the G-code was sliced from; preflight then runs the
@@ -59,6 +65,8 @@ Options:
 3d printer start u1 out/base.gcode --yes --source-3mf print/base.3mf
 3d printer start k1se out/roof.gcode --yes --force
 3d printer cancel k1se --yes
+3d printer watch u1 --duration 20
+3d printer watch u1 k1se --steer 01a12cd6 --tg
 ```
 
 ## Configuring printers
@@ -79,6 +87,7 @@ k1se:
   model: Creality K1 SE     # port defaults to 80, ws_port to 9999
   axis_limits: {x: [-5, 229], y: [-0.5, 227]}
   trusted_macros: [START_PRINT, END_PRINT, PAUSE]
+  bridge_max_mm: 15         # longest clean bridge, from a bridge test print
 ```
 
 `axis_limits` is the real X/Y travel (Klipper `stepper_x`/`stepper_y` `position_min`/`position_max`;
@@ -95,6 +104,10 @@ commands) whose bodies you know keep the head on the bed and leave the coordinat
 macro, so any macro in the G-code that is not listed makes preflight FAIL and `start` needs
 `--force`. With `--printer A --axis-limits B` only A's list counts.
 
+`bridge_max_mm` is the longest span this printer bridges cleanly (measure it with a bridge test
+print). The preflight overhangs gate counts uncarried runs up to it as bridges; `--bridge-max`
+overrides it, and without either the limit is 15 mm. The gate's line names where the limit came from.
+
 ## Adapters
 
 | Adapter | Printers | Transport |
@@ -106,6 +119,109 @@ The Creality upload sends **only** the `file` field: with an extra `path` field 
 stored 165–168 bytes more than it received
 ([#99](https://github.com/alex-mextner/3d-cli/issues/99)). The stored size is always compared
 with the local file.
+
+## Watching printers
+
+`3d printer watch` keeps a WebSocket open to each printer and turns what it pushes into
+events ([#145](https://github.com/alex-mextner/3d-cli/issues/145)). It only reads: the
+frames it sends are Moonraker's `server.info`, `printer.objects.list` and
+`printer.objects.subscribe`, and the `ok` the K1 expects for its heartbeat.
+
+```
+3d printer watch NAME... | --all [options]
+```
+
+| Event `kind` | Severity | When |
+|---|---|---|
+| `snapshot` | info | First reading after start: state, file, progress, heated heaters. |
+| `state` | info / warning / critical | Started, resumed, complete (info); paused, cancelled, job ended without completing (warning); error (critical). Found paused/in error at start: reported too. Pause/cancel/error text carries the last error seen in the 5 min before. |
+| `exception` | critical (warning for level ≤ 1) | U1 `print_stats.exception` / `exception_manager` (e.g. code 2 "detected noodle" from defect detection, id 532); K1 `err.errcode`. |
+| `gcode_error` | critical while a job is active, else warning | A G-code response starting with `!!` — e.g. `!! Error evaluating 'gcode_macro INNER_PREEXTRUDE_FILAMENT:gcode'`. |
+| `gcode_warning` | warning | `// Warning…` / `Warning:` responses. |
+| `filament` | critical while printing, warning while paused | Moonraker `filament_switch_sensor`/`filament_motion_sensor` goes from detected to not detected; K1 `materialStatus` changes (raw value reported). |
+| `homing_lost` | critical | Printing/paused and `homed_axes` (K1: `autohome`) loses X, Y or Z — resuming would move unhomed axes. |
+| `bed_off` | warning | Bed target dropped to 0 while printing/paused (or 0 at start while paused). |
+| `temperature` | warning (critical when drifting while printing) | A heater target not reached after `--heat-timeout-min`; or, after reaching, more than 15 °C off for 60 s. |
+| `stall` | warning (info when it moves again) | Printing, but file position/progress/layer unchanged for `--stall-min`. |
+| `klippy` | critical (shutdown/error, or any loss during a job) / info (ready again) | Klipper shutdown, error, disconnect. |
+| `connection` | warning / info | Cannot connect, connection lost (once; reconnects with 2–60 s backoff), reconnected. |
+| `milestone` | info | Progress passed a `--milestones` percentage. |
+
+Each event is one JSON line on stdout:
+`{"ts", "printer", "kind", "severity", "text", "key", "data"}` — `text` is one phone-first line
+(what happened, where in the job, what to decide), `data` has state, file, progress, layer and
+the kind's details.
+
+Sinks — several at once:
+
+- stdout JSONL (default; `--no-stdout` turns it off).
+- `--exec CMD` — `sh -c CMD` per event; the event JSON on stdin and `PRINTER_EVENT_PRINTER`,
+  `_KIND`, `_SEVERITY`, `_TEXT` in the environment. Repeatable.
+- `--tg` — one message per batch through the `tg` CLI.
+- `--steer TARGET` — one message per batch into a live omp session through
+  `tg-ctl omp-live send` (the bridge `omp-steer` uses: a busy session gets it as a steer, an
+  idle one as an aside that starts a turn). TARGET is a sessionId or its prefix (survives
+  `omp -r`), a pid, or a unique title substring; several matches are refused, `all` broadcasts.
+  `omp-steer list` shows the sessions. Repeatable.
+- `--dry-run` — exec/tg/steer print what they would send to stderr instead.
+
+Delivery rules: events below `--min-severity` (default `info`) are dropped; the same event
+key within `--dedup-min` (default 10) is dropped; events arriving within 2 s go out as one
+tg/steer message, most severe first; tg and steer send at most 6 messages per 10 minutes —
+critical events always go through, and the next message says how many were held back.
+
+Other options: `--all`, `--stall-min N` (15), `--heat-timeout-min N` (10), `--milestones 50,90`,
+`--heartbeat FILE`, `--duration S` (stop after S seconds).
+
+Per-printer settings can live in `printer-devices.yaml`; flags add to / override them:
+
+```yaml
+u1:
+  adapter: moonraker
+  host: 192.168.0.26
+  watch:
+    steer: 01a12cd6          # or a list; also `exec: CMD` / a list
+    tg: true
+    min_severity: info
+    stall_minutes: 20
+    heat_timeout_minutes: 10
+    milestones: [50, 90]
+    dedup_minutes: 10
+```
+
+Heartbeat: `~/.local/state/3d-cli/watch/<names>.json` (`--heartbeat` overrides), rewritten
+every 15 s with each printer's connection, state, last-message age, last event and the
+per-sink delivered/failed/suppressed counters.
+
+As a user service:
+
+```bash
+3d printer watch u1 k1se --install-service --steer 01a12cd6 --tg
+systemctl --user enable --now 3d-printer-watch@u1 3d-printer-watch@k1se
+journalctl --user -fu '3d-printer-watch@*'
+```
+
+`--install-service` writes `~/.config/systemd/user/3d-printer-watch@.service`
+(`ExecStart=3d printer watch %i $WATCH_ARGS`, `Restart=always`) and
+`~/.config/3d-cli/watch/NAME.env` with the other flags, then runs `systemctl --user daemon-reload`.
+Flags with spaces (an `--exec` command) belong in `printer-devices.yaml` instead.
+
+## Camera failure detection
+
+`3d printer vision NAME` (shorthand for `vision run NAME`) polls the printer camera every 10 s,
+scores each frame with Obico's open spaghetti detector on the CPU (weights downloaded on first
+use into `~/.cache/3d-cli/vision/models/`, sha256-pinned) and sends `vision_spaghetti`,
+`vision_camera_stale`, `vision_camera_dark` and `printer_noodle_verdict` events through the same
+dispatcher and sinks as `watch` (the device's `watch:` block). It never pauses or cancels.
+`vision eval` replays recorded footage and prints precision/recall; `vision fetch-model`
+downloads the weights. Python deps come from the `vision` extra (numpy, OpenCV, onnxruntime).
+
+U1 camera in short: no stream on stock firmware (`/webcam/` → 502); `unisrv` rewrites
+`/server/files/camera/monitor.jpg` at ~2 fps while a client sends `camera.start_monitor` (vision
+does, once a minute); the Fluidd camera entry `/api/ingress/u1_printer/u1-camera/...` is a Home
+Assistant ingress path that works only through HA, served by `u1-camera-proxy` on the Odroid
+(needs a font present on that host). Details: [printer-vision.md](printer-vision.md); research
+and numbers on real U1 footage: [docs/research/printer-vision.md](../research/printer-vision.md).
 
 ## Safety
 

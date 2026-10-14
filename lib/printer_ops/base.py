@@ -22,7 +22,10 @@ import re
 import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from printer_ops.devices import Device
 from urllib.parse import urlsplit
 
 from errors import InvalidArgument, ThreeDError
@@ -118,6 +121,7 @@ class Adapter:
         self.port = port
         self.configured_limits: Limits | None = None  # axis_limits from printer-devices.yaml
         self.trusted_macros: frozenset[str] = frozenset()  # trusted_macros from printer-devices.yaml
+        self.device: Device | None = None  # its printer-devices.yaml entry (make_adapter sets it)
 
     def axis_limits(self) -> tuple[Limits | None, str]:
         """Real X/Y travel and where it came from; (None, reason) when unknown. Read-only."""

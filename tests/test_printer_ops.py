@@ -77,7 +77,7 @@ def gates_ok(monkeypatch: pytest.MonkeyPatch) -> None:
     """Command tests check printer logic, not the G-code gates with their own tests
     (thumbnails, overhangs, slicer warnings): pin those to PASS."""
     monkeypatch.setattr(preflight, "check_thumbnails", lambda p: preflight.Check("thumbnails", "PASS", "stub"))
-    monkeypatch.setattr(preflight, "check_overhangs", lambda p: preflight.Check("overhangs", "PASS", "stub"))
+    monkeypatch.setattr(preflight, "check_overhangs", lambda p, *_: preflight.Check("overhangs", "PASS", "stub"))
     monkeypatch.setattr(
         preflight, "check_slice_warnings", lambda o, g: preflight.Check("slicer warn", "PASS", "stub")
     )
@@ -1621,6 +1621,37 @@ def test_trusted_macros_come_from_the_device_config(env: Path, tmp_path: Path) -
         "k1se: {adapter: creality-stock, host: h, trusted_macros: PAUSE}\n",
         encoding="utf-8",
     )
+    with pytest.raises(InvalidArgument):
+        devices.load_devices()
+
+
+def test_bridge_limit_comes_from_flag_then_device_then_default(env: Path, tmp_path: Path) -> None:
+    from overhang_fixtures import bridge
+    from overhang_fixtures import plate as overhang_plate
+
+    from printer_ops import bridge_max_for, device_for
+
+    (env / "3d-cli").mkdir(parents=True)
+    (env / "3d-cli" / "printer-devices.yaml").write_text(
+        "u1: {adapter: moonraker, host: h, bridge_max_mm: 25}\nk1se: {adapter: creality-stock, host: h}\n",
+        encoding="utf-8",
+    )
+    u1 = device_for("u1")
+    assert bridge_max_for("30", u1, command="t") == (30.0, "--bridge-max")
+    assert bridge_max_for(None, u1, command="t")[0] == 25.0
+    assert bridge_max_for(None, device_for("k1se"), command="t") == (15.0, "default")
+    assert bridge_max_for(None, device_for("-5:229,-0.5:227"), command="t") == (15.0, "default")
+    with pytest.raises(InvalidArgument):
+        bridge_max_for("0", u1, command="t")
+    with pytest.raises(InvalidArgument):
+        bridge_max_for("inf", u1, command="t")
+    # a 20 mm span (the U1 porch door case): FAIL at the default, PASS with the printer's 25
+    g = overhang_plate(tmp_path / "door.gcode", {"DOOR": bridge(gap=20.0)})
+    at_default = preflight.check_overhangs(g)
+    at_u1 = preflight.check_overhangs(g, 25.0, "u1 in printer-devices.yaml")
+    assert at_default.status == "FAIL" and "bridge limit from default" in at_default.detail
+    assert at_u1.status == "PASS" and "bridge limit from u1 in printer-devices.yaml" in at_u1.detail
+    (env / "3d-cli" / "printer-devices.yaml").write_text("u1: {adapter: moonraker, host: h, bridge_max_mm: -1}\n")
     with pytest.raises(InvalidArgument):
         devices.load_devices()
 
