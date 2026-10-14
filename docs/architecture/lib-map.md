@@ -60,6 +60,7 @@ rendering, slicing support, and verification:
 - `strength.py`
 - `usdz.py`
 - `visible_faces.py`
+- `vision_geometry.py`
 - `video.py`
 
 Target package: `lib/geometry/`, with subpackages only when a real boundary appears
