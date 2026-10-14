@@ -595,7 +595,7 @@ wrapped around cylinder and cone walls, the successor of
 `min(6, cores / 2)`) for concurrent renders and frames, and caps the native thread pools of
 numpy/scipy/BLAS/numba (`OMP_NUM_THREADS` and friends) at the same number unless you set
 them yourself, so it shares a workstation politely. `THREED_MAX_WORKERS=12 3d render model.scad
---multi` lets one run take more; an explicit `--jobs N` (video frames) wins over it.
+--multi` lets one run take more.
 
 ## Layout
 
