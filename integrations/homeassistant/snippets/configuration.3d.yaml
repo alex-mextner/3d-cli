@@ -1,0 +1,36 @@
+# 3D fragments of the HA repo's configuration.yaml (source of truth for these keys).
+# configuration.yaml is shared with non-3D config, so these are not copied: `3d ha deploy`
+# checks that the live file contains every mapping key and list item below with equal values
+# and stops otherwise. Both keys stay in configuration.yaml, next to the non-3D ingress panels,
+# Lovelace resources and dashboards they are mixed with.
+ingress:
+  k1_se_printer:
+    require_admin: true
+    title: K1 SE
+    icon: mdi:printer-3d
+    url: http://printer-proxy:8080/k1se
+    work_mode: ingress
+    ui_mode: normal
+  u1_printer:
+    require_admin: true
+    title: U1
+    icon: mdi:printer-3d-nozzle
+    url: http://printer-proxy:8080/u1
+    work_mode: ingress
+    ui_mode: normal
+lovelace:
+  resources:
+    - url: /local/u1-share/u1-inspector-card.js?v=20260919b
+      type: module
+    - url: /local/u1-share/u1-share-card.js?v=20260919a
+      type: module
+    # custom:webrtc-camera, used only by the 3D dashboard (version pinned in vendor.lock).
+    - url: /webrtc/webrtc-camera.js?v=3.6.1
+      type: module
+  dashboards:
+    3d-printers:
+      mode: yaml
+      title: 3D Printers
+      icon: mdi:printer-3d
+      show_in_sidebar: true
+      filename: ui-3d-printers.yaml
