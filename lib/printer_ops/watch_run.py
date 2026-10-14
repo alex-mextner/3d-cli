@@ -472,7 +472,11 @@ def stream_for(device: Device, submit: Callable[[Event], None], stop: threading.
 
 # ---- systemd user service ------------------------------------------------------------------
 
-def unit_text(exe: str) -> str:
+def unit_text(exe: str, env_dir: Path) -> str:
+    """The user unit template. `env_dir` and XDG_CONFIG_HOME are pinned to what the installing
+    shell used, so the service reads the same printer-devices.yaml and NAME.env."""
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    pin = f"Environment=XDG_CONFIG_HOME={xdg}\n" if xdg else ""
     return f"""[Unit]
 Description=3d printer watch %i (printer anomaly events, read-only)
 Documentation=https://github.com/alex-mextner/3d-cli/blob/main/docs/commands/printer.md
@@ -482,7 +486,7 @@ After=network-online.target
 Type=simple
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 Environment=PYTHONUNBUFFERED=1
-EnvironmentFile=-%h/.config/3d-cli/watch/%i.env
+{pin}EnvironmentFile=-{env_dir}/%i.env
 ExecStart={exe} printer watch %i $WATCH_ARGS
 Restart=always
 RestartSec=15
@@ -509,10 +513,10 @@ def install_service(names: list[str], forwarded: list[str]) -> int:
     unit_dir = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "systemd" / "user"
     unit_dir.mkdir(parents=True, exist_ok=True)
     unit = unit_dir / UNIT_NAME
-    unit.write_text(unit_text(exe), encoding="utf-8")
-    print(f"wrote {unit}")
     env_dir = config_dir() / "watch"
     env_dir.mkdir(parents=True, exist_ok=True)
+    unit.write_text(unit_text(exe, env_dir), encoding="utf-8")
+    print(f"wrote {unit}")
     for d in devices:
         env = env_dir / f"{d.name}.env"
         env.write_text(f"# flags for `3d printer watch {d.name}` (3d-printer-watch@{d.name}.service)\n"

@@ -13,6 +13,8 @@ Parts of one assembly are often printed days apart, on different printers, while
 3d fit-check --insert out/assembly/PFL__DOOR.stl --socket 'out/assembly/BASE2__*.stl' --gap 0.2 --printed-size 46.275,75.446,15.311
 3d fit-check --insert KEY1.stl --socket BASE1.stl,BASE2.stl --gap 0.15 --printed-size 28,14,4.3 --any-turn --name KEY1
 3d fit-check --insert plug.stl --socket plate.stl --gap 0.2 --gap-tol 0.05 --size-tol 0.05 --step 0.1 --min-depth 3.5
+3d fit-check --insert magnet.stl --socket 'HALF_*.stl' --gap 0.1 --open none
+3d fit-check --insert foot.stl --socket base.stl --gap 0.2 --open below
 3d fit-check --spec fits.yaml
 3d fit-check --spec fits.yaml --json | jq '.fits[] | {insert, status, gap_mm, socket_depth_mm}'
 ```
@@ -28,6 +30,7 @@ Insert and socket meshes (STL/3MF/OBJ, closed manifolds) must already be placed 
 | gap | at a layer with socket material within 2·gap+1 mm of the insert, the clearance differs from `--gap` by more than `--gap-tol` |
 | socket | no socket section lies within 2·gap+1 mm of the insert at any layer |
 | depth | the socket is shallower than `--min-depth` (only when given) |
+| open | moved out along its insertion direction (`--open above`, the default, or `below`), the insert meets socket material outside itself: a roof over the socket, or a shoulder above a wider foot (an undercut). The path is the insert swept in `--step` slabs (each slab carries the outline of the insert part already past it, shrunk 0.02 mm so contact faces do not count) and then its full outline past the socket's end. `--open none` skips it for an insert captured between parts. |
 
 The layers start 0.05 mm above the insert's bottom and go up every `--step` mm to the insert's top. At each one the insert and the socket are sliced (manifold3d, rings combined even-odd), the socket is cut to the part within 2·gap+1 mm of the insert, and the **clearance** is the shapely distance from the insert section to that part — the gap on the tightest side. Every layer with socket material that close is checked, so a second pocket higher up, a lip or a shelf obeys the same gap; layers with nothing that close (an opening in the wall, above the socket) are skipped. A clearance is only sampled at the layers, but the insert and socket solids are also intersected as a whole, so a shelf thinner than `--step` cannot hide an interference. The **socket depth** runs from the insert's bottom to the top of the highest socket layer, found to ~0.001 mm by bisection; a socket whose upper part was flared beyond 2·gap+1 mm reads as shallower — guard that with `--min-depth`. Tolerances are tested on the unrounded measurements; the report shows them rounded. Without `--printed-size` the size is reported but not checked.
 
@@ -43,13 +46,14 @@ The layers start 0.05 mm above the insert's bottom and go up every `--step` mm t
 - `--gap-tol MM` — clearance tolerance, e.g. `--gap-tol 0.05` (default 0.03)
 - `--step MM` — layer step up the socket, e.g. `--step 0.1` (default 0.25)
 - `--min-depth MM` — FAIL when the socket is shallower, e.g. `--min-depth 3.5` (default: not checked)
+- `--open DIR` — the direction the socket must be open to: `above` (default), `below`, or `none` for a captured insert (a magnet closed in by a mating half), e.g. `--open none`
 - `--spec FILE` — many fits from a YAML/JSON file, e.g. `--spec fits.yaml`; takes no pair flags
-- `--json` — JSON report on stdout: `status` and `fits[]` with `insert`, `socket`, `insert_files`, `socket_files`, `status`, `insert_size_mm`, `printed_size_mm`, `any_turn`, `size_tol_mm`, `gap_set_mm`, `gap_tol_mm`, `step_mm`, `min_depth_mm`, `gap_mm` (min), `gap_max_mm`, `socket_depth_mm`, `overlap_z_mm`, `overlap_volume_mm3` (insert ∩ socket solids), `layers` (`z`, `gap` per socket layer) and `errors`
+- `--json` — JSON report on stdout: `status` and `fits[]` with `insert`, `socket`, `insert_files`, `socket_files`, `status`, `insert_size_mm`, `printed_size_mm`, `any_turn`, `size_tol_mm`, `gap_set_mm`, `gap_tol_mm`, `step_mm`, `min_depth_mm`, `open`, `open_blocked_mm3` (socket volume in the insert's way out; null when open or not checked), `gap_mm` (min), `gap_max_mm`, `socket_depth_mm`, `overlap_z_mm`, `overlap_volume_mm3` (insert ∩ socket solids), `layers` (`z`, `gap` per socket layer) and `errors`
 
 ## Fits spec
 
 ```yaml
-gap: 0.15                 # optional defaults for every fit: gap, any_turn, size_tol, gap_tol, step, min_depth
+gap: 0.15                 # optional defaults for every fit: gap, any_turn, size_tol, gap_tol, step, min_depth, open
 any_turn: true
 fits:
   - name: PFL
@@ -70,7 +74,7 @@ Paths are relative to the spec file. Unknown keys are an error (a typo must not 
 ## Exit codes
 
 - `0` — `PASS`
-- `1` — `FAIL` (a fit's size, overlap, gap, socket or depth check failed)
+- `1` — `FAIL` (a fit's size, overlap, gap, socket, depth or open check failed)
 - `2` — usage / spec / load error (missing file, glob matching nothing, bad number, mesh that is not a closed manifold)
 
 ## Related

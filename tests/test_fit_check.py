@@ -241,3 +241,106 @@ def test_wrapper_reads_equals_form_path_flags() -> None:
     from commands.fit_check import _path_values
     assert _path_values(["--insert=a.stl,b.stl", "--socket", "s.stl", "--gap=0.2", "--spec"]) == {
         "--insert": ["a.stl,b.stl"], "--socket": ["s.stl"]}
+
+
+def test_socket_capped_above_the_insert_is_not_open(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """a rebuild closes the pocket with a 1 mm roof over the insert: it can never be dropped in"""
+    ins = write_insert(tmp_path / "ins.stl")
+    capped = write_manifold(
+        tmp_path / "capped.stl", box(40.0, 30.0, 8.0) - box(20.4, 10.4, 5.2, z0=2.0)
+    )  # pocket 2..7.2, roof 7.2..8
+    rc, rep = _json(
+        capsys, "--insert", str(ins), "--socket", str(capped), "--gap", "0.2"
+    )
+    fit = rep["fits"][0]
+    assert rc == 1 and fit["open"] == "above" and fit["open_blocked_mm3"] > 100
+    assert fit["errors"][-1].startswith("not open above: ")
+    assert "z 7.20–8.00" in fit["errors"][-1]
+
+    rc, out, _ = _run(
+        capsys,
+        "--insert",
+        str(ins),
+        "--socket",
+        str(capped),
+        "--gap",
+        "0.2",
+        "--open",
+        "none",
+    )
+    assert rc == 0 and "open: not checked (captured)" in out
+    rc, rep = _json(
+        capsys,
+        "--insert",
+        str(ins),
+        "--socket",
+        str(capped),
+        "--gap",
+        "0.2",
+        "--open",
+        "below",
+    )
+    assert rc == 1 and rep["fits"][0]["errors"][-1].startswith("not open below: ")
+
+
+def test_undercut_shoulder_over_a_wide_foot_is_not_open(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """a T insert (wide foot, narrow stem) in a socket that hugs it: the foot cannot pass the shoulders"""
+    write_manifold(
+        tmp_path / "t.stl", box(20.0, 10.0, 2.0, z0=2.0) + box(10.0, 10.0, 3.0, z0=4.0)
+    )
+    socket = (
+        box(40.0, 30.0, 6.0)
+        - box(20.4, 10.4, 2.0, z0=2.0)
+        - box(10.4, 10.4, 3.0, z0=4.0)
+    )
+    write_manifold(tmp_path / "sock.stl", socket)
+    rc, rep = _json(
+        capsys,
+        "--insert",
+        str(tmp_path / "t.stl"),
+        "--socket",
+        str(tmp_path / "sock.stl"),
+        "--gap",
+        "0.2",
+        "--gap-tol",
+        "10",
+    )
+    fit = rep["fits"][0]
+    assert rc == 1 and fit["overlap_volume_mm3"] == pytest.approx(0, abs=1e-3)
+    assert (
+        fit["errors"] == [e for e in fit["errors"] if e.startswith("not open above: ")]
+        and fit["errors"]
+    )
+
+
+def test_widening_insert_in_a_stepped_pocket_is_open(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """the reverse T (narrow stem down, wide head up) drops into its stepped pocket: no false cap"""
+    write_manifold(
+        tmp_path / "t.stl", box(10.0, 10.0, 2.0, z0=2.0) + box(20.0, 10.0, 3.0, z0=4.0)
+    )
+    socket = (
+        box(40.0, 30.0, 6.0)
+        - box(10.4, 10.4, 2.0, z0=2.0)
+        - box(20.4, 10.4, 3.0, z0=4.0)
+    )
+    write_manifold(tmp_path / "sock.stl", socket)
+    rc, rep = _json(
+        capsys,
+        "--insert",
+        str(tmp_path / "t.stl"),
+        "--socket",
+        str(tmp_path / "sock.stl"),
+        "--gap",
+        "0.2",
+        "--gap-tol",
+        "10",
+    )
+    fit = rep["fits"][0]
+    assert rc == 0, fit["errors"]
+    assert fit["open_blocked_mm3"] is None

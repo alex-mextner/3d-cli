@@ -30,6 +30,10 @@ USAGE = """3d fit-check --insert A.stl[,B.stl] --socket S1.stl[,S2.stl] --gap MM
             layers), and wherever socket material lies within 2*gap+1 mm of the
             insert the clearance stays at --gap +- --gap-tol
     depth   reported; FAIL below --min-depth
+    open    the insert can go in: moved out along its insertion direction (--open
+            above, default; below) it meets no socket material — a roof over the
+            socket or a shoulder over a wider foot (undercut) FAILs; --open none for an
+            insert captured between parts
   No socket around the insert = FAIL. Comma-join, repeat or glob the parts of one side.
 
 Options:
@@ -43,6 +47,8 @@ Options:
   --gap-tol MM          clearance tolerance (default 0.03)
   --step MM             slice step up the socket (default 0.25)
   --min-depth MM        FAIL when the socket is shallower (default: not checked)
+  --open DIR            insertion direction the socket must be open to: above
+                        (default), below, or none (captured insert, not checked)
   --spec FILE           YAML/JSON with many fits (see docs/commands/fit-check.md);
                         paths relative to the spec file
   --json                JSON report on stdout instead of the text lines
@@ -53,6 +59,8 @@ Examples:
   3d fit-check --insert out/assembly/PFL__DOOR.stl --socket 'out/assembly/BASE2__*.stl' --gap 0.2 --printed-size 46.275,75.446,15.311
   3d fit-check --insert KEY1.stl --socket BASE1.stl,BASE2.stl --gap 0.15 --printed-size 28,14,4.3 --any-turn --name KEY1
   3d fit-check --insert plug.stl --socket plate.stl --gap 0.2 --gap-tol 0.05 --size-tol 0.05 --step 0.1 --min-depth 3.5
+  3d fit-check --insert magnet.stl --socket 'HALF_*.stl' --gap 0.1 --open none
+  3d fit-check --insert foot.stl --socket base.stl --gap 0.2 --open below
   3d fit-check --spec fits.yaml
   3d fit-check --spec fits.yaml --json | jq '.fits[] | {insert, status, gap_mm, socket_depth_mm}'"""
 

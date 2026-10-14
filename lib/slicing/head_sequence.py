@@ -37,6 +37,7 @@ _PLATER_ID_RE = re.compile(rb'key="plater_id"\s+value="(\d+)"', re.IGNORECASE)
 # object (~144 combinations), so this only rejects adversarial/garbled patterns.
 _MAX_PHASE_COMBINATIONS = 100_000
 _EXTRUDE_RE = re.compile(r"E[\d.]")
+_DECORATION_RE = re.compile(r"_id_\d+_copy_\d+$")
 
 
 @dataclass
@@ -142,15 +143,31 @@ def _norm(s: str) -> str:
     return re.sub(r"[^A-Za-z0-9]", "", s)
 
 
+def _alnum_prefix_ends(gname: str, n: str) -> bool:
+    """True when `n` (ASCII alphanumerics, as `_norm` keeps) is a prefix of `gname`'s ASCII
+    alphanumerics that ends at a word boundary: `grph_14_id_5` starts with `grph14`, not
+    with `grph141`."""
+    kept = [(i, ch) for i, ch in enumerate(gname) if ch.isascii() and ch.isalnum()]
+    if len(kept) < len(n) or "".join(ch for _, ch in kept[: len(n)]) != n:
+        return False
+    end = kept[len(n) - 1][0] + 1
+    return end == len(gname) or not (gname[end].isascii() and gname[end].isalnum())
+
+
 def _match_object(gname: str, objs: dict[str, list[int]]) -> str | None:
-    """G-code labels decorate project names (`<name>_id_0_copy_0`); match the LONGEST project name
-    that is an alphanumeric prefix, so `AB_id_0` is never attributed to a sibling object `A`."""
-    g = _norm(gname)
+    """G-code labels decorate project names (`<name>_id_0_copy_0`, spaces as `_`). An exact
+    match of the undecorated label wins; otherwise the LONGEST project name whose
+    alphanumerics prefix the label's and end at a separator, so neither `AB_id_0` nor
+    `A1_id_0` is ever attributed to a sibling object `A`."""
+    plain = _DECORATION_RE.sub("", gname)
+    for k in objs:
+        if k.replace(" ", "_") == plain:
+            return k
     best: str | None = None
     best_len = 0
     for k in objs:
         n = _norm(k.split(" — ")[0])
-        if n and g.startswith(n) and len(n) > best_len:
+        if n and len(n) > best_len and _alnum_prefix_ends(gname, n):
             best, best_len = k, len(n)
     return best
 

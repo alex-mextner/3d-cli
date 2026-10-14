@@ -66,7 +66,7 @@ D=~/.cache/3d-cli/vision/data
 3d printer vision eval --pos $D/eval/pos_spaghetti --neg $D/mp4/*.mp4 $D/eval/neg_*
 ```
 
-Per frame (3d-cli 0.7.0, `eval`, 4,101 frames, 0.136 s/frame on the CPU):
+Per frame (`3d printer vision eval`, 2026-10-14, 4,101 frames, 0.136 s/frame on the CPU):
 
 | p threshold | precision | recall | false-positive rate (fp) |
 |---|---|---|---|

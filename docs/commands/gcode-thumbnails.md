@@ -44,6 +44,8 @@ Exactly Orca's own block (GCode/Thumbnails.hpp), right after `; HEADER_BLOCK_END
 
 PNG uses the tag `thumbnail`, JPG `thumbnail_JPG` (on a white background). QOI, BTT_TFT and ColPic are refused with an error. Moonraker validates the `LEN` field against the data and makes its own 32×32 (the Snapmaker U1 build also lists a 96×96) from the largest image.
 
+Adding thumbnails changes the file's SHA-256 but not its toolpath: a `NAME.slice-warnings.json` ([`3d slice-warnings`](slice-warnings.md)) that matched the G-code before is rewritten for the new hash (with `--out`, written next to the output) and notes the step under `post_processed`. A stale or absent record is left alone.
+
 ## The picture drawn from the G-code
 
 Without `--image`, every visible extrusion move (walls, surfaces, bridges, brim, support; not sparse/internal infill, prime tower, skirt or custom start G-code) is drawn in a true isometric view from the front right, z-buffered, in each tool's `filament_colour`, shaded from screen-space normals with darkened silhouette edges, on a transparent background — what the file actually prints, at about 10 s and 1.5 GB for a 115 MB U1 G-code.

@@ -73,15 +73,19 @@ For a practical figure-by-figure image backplate loop, see
 
 ### Slicing
 
+Every gate from model to printer, in order: [Print pipeline](../workflows/print-pipeline.md).
+
 | Command | Doc | Role |
 |---|---|---|
 | `gcode-thumbnails` | [gcode-thumbnails.md](gcode-thumbnails.md) | Check/add the printer-screen preview thumbnails a G-code carries (Orca CLI writes none). |
 | `print` | [print.md](print.md) | Validate print fields and emit deterministic dry-run job plans. |
 | `gcode-bounds` | [gcode-bounds.md](gcode-bounds.md) | Check every G-code move (arc bulges too) against axis travel and the printable area; offline. |
+| `gcode-overhangs` | [gcode-overhangs.md](gcode-overhangs.md) | Find extrusion printed on nothing, per object and layer (the slicer is silent with supports off); offline. |
 | `printer` | [printer.md](printer.md) | Drive configured printers (Moonraker, Creality stock): list, status, upload, start `--yes`, cancel `--yes`, `watch` (read-only anomaly events to stdout/exec/tg/omp session), `vision` (camera spaghetti detection into the same events). |
-| `print-preflight` | [print-preflight.md](print-preflight.md) | Read-only pre-print checks: thumbnails, loaded colours vs G-code, halves, printer free. |
-| `slice` | [slice.md](slice.md) | Slice STL/3MF/SCAD to G-code or run the sliceability gate. |
+| `print-preflight` | [print-preflight.md](print-preflight.md) | Read-only pre-print checks: every G-code gate (bounds, overhangs, slicer warnings, head sequence, thumbnails, visible faces), loaded colours vs G-code, halves, printer free. |
+| `slice` | [slice.md](slice.md) | Slice STL/3MF/SCAD to G-code or run the sliceability gate; records the slicer's warnings next to the G-code. |
 | `slice-check` | [slice-check.md](slice-check.md) | Headless 3MF open/plates/slice gate, plus offline G-code checks (`--check head-sequence`). |
+| `slice-warnings` | [slice-warnings.md](slice-warnings.md) | Record the slicer's warnings for a G-code (`NAME.slice-warnings.json`, SHA-256 bound) and accept each with a reason. |
 
 ### Libraries
 
