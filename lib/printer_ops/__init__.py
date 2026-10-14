@@ -31,6 +31,7 @@ def make_adapter(device: Device, **options: Any) -> Adapter:
         adapter = CrealityStockAdapter(device.name, device.host, device.port, **options)
     adapter.configured_limits = device.axis_limits
     adapter.trusted_macros = device.trusted_macros
+    adapter.device = device
     return adapter
 
 
@@ -85,3 +86,38 @@ def trusted_macros_for(spec: str | None) -> frozenset[str]:
         return frozenset()
     except ValueError:
         return get_device(spec).trusted_macros
+
+
+def bridge_max_for(flag: str | None, device: Device | None, *, command: str) -> tuple[float, str]:
+    """The overhangs gate's bridge limit and where it came from: --bridge-max, else the
+    printer's `bridge_max_mm` in printer-devices.yaml, else the default."""
+    import math
+
+    from errors import InvalidArgument
+    from gcode_overhangs import BRIDGE_MAX_MM
+
+    if flag is not None:
+        try:
+            value = float(flag)
+        except ValueError:
+            value = -1.0
+        if not (value > 0 and math.isfinite(value)):
+            raise InvalidArgument("--bridge-max", flag, ["a number of mm > 0, e.g. 25"], command=command)
+        return value, "--bridge-max"
+    if device is not None and device.bridge_max_mm is not None:
+        return device.bridge_max_mm, f"{device.name} in {device.source}"
+    return BRIDGE_MAX_MM, "default"
+
+
+def device_for(spec: str | None) -> Device | None:
+    """The device named by --axis-limits NAME (None for an X0:X1,Y0:Y1 spec or no option)."""
+    from printer_ops.devices import get_device
+    from printer_ops.move_bounds import parse_limits
+
+    if spec is None or ":" in spec or "," in spec:
+        return None  # X0:X1,Y0:Y1 (malformed ones are reported by limits_from_option)
+    try:
+        parse_limits(spec)
+        return None
+    except ValueError:
+        return get_device(spec)

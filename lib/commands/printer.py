@@ -38,7 +38,7 @@ USAGE = """3d printer <subcommand> [args]
   list                                 configured printers (name, adapter, address, model)
   status NAME [--json] [--secs S]      state, job, progress, temperatures, loaded heads
   upload NAME FILE.gcode [--as REMOTE] store the file on the printer; never starts a print
-  start NAME FILE.gcode --yes [--as REMOTE] [--source-3mf X.3mf] [--force] [--secs S]
+  start NAME FILE.gcode --yes [--as REMOTE] [--source-3mf X.3mf] [--bridge-max MM] [--force] [--secs S]
                                        start a file that was uploaded before; runs
                                        `3d print-preflight` first
   cancel NAME --yes                    cancel the running/paused job
@@ -55,6 +55,8 @@ Options:
   --force            start even when preflight FAILs (the failing checks are printed)
   --source-3mf FILE  the project 3MF the G-code was sliced from: head-sequence check + halves-check
                      (without it the head-sequence check uses NAME.3mf next to the G-code)
+  --bridge-max MM    preflight overhangs gate: longest bridge; overrides the printer's
+                     bridge_max_mm in printer-devices.yaml (default 15)
 
 Safety: start refuses while the printer is printing, paused, busy or unreadable, and when
 the content-addressed remote file is missing, differs in size, or (Moonraker, read back)
@@ -75,7 +77,7 @@ Examples:
   3d printer cancel k1se --yes
   3d printer watch u1 k1se --steer 01a12cd6 --tg"""
 
-_VALUE = {"--secs", "--as", "--source-3mf"}
+_VALUE = {"--secs", "--as", "--source-3mf", "--bridge-max"}
 _FLAGS = {"--json", "--yes", "--force"}
 
 
@@ -225,7 +227,7 @@ def _cmd_start(argv: list[str]) -> int:
     import tempfile
     from pathlib import Path
 
-    (name, file), opts = _parse(argv, {"--yes", "--force", "--as", "--source-3mf", "--secs"}, 2, "start")
+    (name, file), opts = _parse(argv, {"--yes", "--force", "--as", "--source-3mf", "--secs", "--bridge-max"}, 2, "start")
     if "--yes" not in opts:
         raise UsageError(
             "start is a physical action and needs --yes",
@@ -247,6 +249,7 @@ def _cmd_start(argv: list[str]) -> int:
 def _start_snapshot(name: str, file: str, original: Path, local: Path, source: Path | None,
                     opts: dict[str, str]) -> int:
     from printer_ops.base import UNKNOWN, PrinterCommError, PrinterRefused, file_sha256, safe_remote_name
+    from printer_ops import bridge_max_for
     from printer_ops.preflight import FAIL, run_preflight
 
     remote = safe_remote_name(local, opts.get("--as"))  # content-addressed: <stem>-<sha256[:16]>.gcode
@@ -277,9 +280,11 @@ def _start_snapshot(name: str, file: str, original: Path, local: Path, source: P
     print(f"remote file {remote}: {identity}")
 
     limits, limits_source = adapter.axis_limits()
+    bridge, bridge_source = bridge_max_for(opts.get("--bridge-max"), adapter.device, command="printer")
     # the snapshot lives in a temp dir: NAME.3mf and NAME.slice-warnings.json sit next to the original
     report = run_preflight(local, status=st, source_3mf=source, axis_limits=limits, limits_source=limits_source,
-                           trusted_macros=adapter.trusted_macros, origin=original)
+                           trusted_macros=adapter.trusted_macros, origin=original,
+                           bridge_max=bridge, bridge_source=bridge_source)
     report.file = f"{original} (snapshot)"
     print(report.render())
     if report.overall == FAIL:
