@@ -67,6 +67,9 @@ USAGE = """3d slice <model.stl|.3mf|.scad> [options]
 Options:
   -o, --out PATH        output .gcode (default: <model>.gcode). The slicer writes
                         into a scratch dir first; on success, 3d moves the result here.
+                        The slicer's warnings go to NAME.slice-warnings.json with the
+                        G-code's SHA-256 (`3d slice-warnings`); print-preflight FAILs
+                        until each is resolved or accepted with a reason.
   --dry-run             sliceability gate: slice to temp, verify G-code was produced,
                         report OK/FAIL + est. time/filament, then discard the G-code.
   --check               deprecated compatibility alias for --dry-run.
@@ -196,6 +199,7 @@ def run(argv: list[str]) -> int:
                 os.makedirs(os.path.dirname(final_out) or ".", exist_ok=True)
                 shutil.move(produced, final_out)
                 print(f"STATUS: PASS - sliced OK -> {final_out} ({size} bytes)")
+                _record_warnings(final_out, log_text, tmpdir)
             if est_time:
                 print(f"  {est_time}")
             if est_fil:
@@ -212,6 +216,28 @@ def run(argv: list[str]) -> int:
         with contextlib.suppress(OSError):
             os.remove(log)
         shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def _record_warnings(gcode: str, log_text: str, outdir: str) -> None:
+    """NAME.slice-warnings.json for the kept G-code (`3d slice-warnings`): print-preflight
+    refuses a G-code whose slicer warnings were never recorded or accepted."""
+    from pathlib import Path
+
+    from slicing.slice_warnings import record
+
+    out = Path(gcode)
+    result = Path(outdir) / "result.json"
+    rec = record(
+        out,
+        logs=[("slicer log", log_text)],
+        results=[result] if result.is_file() else [],
+        sliced_3mfs=[out] if out.name.lower().endswith(".3mf") else [],
+    )
+    print(f"  slicer warnings: {len(rec.warnings)} recorded in {rec.path.name}, {len(rec.open)} open")
+    for w in rec.open:
+        print(f"    {w.id}  {w.level}: {' '.join(w.message.split())[:160]}")
+    if rec.open:
+        print(f"  resolve or accept each before printing: 3d slice-warnings accept {gcode} ID 'reason'")
 
 
 def _parse(argv: list[str]) -> _Options:
