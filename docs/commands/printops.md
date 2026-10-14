@@ -35,6 +35,8 @@ service is never exposed to the internet.
 3d printops token revoke NAME [--file PATH | --ssh HOST]
 3d printops deploy [--dry-run] [--host USER@HOST] [--dir DIR] [--backup-dir DIR] [--api URL]
 3d printops backup [--dest DIR] [--spoolman-db PATH]
+3d printops spool ls|show|receive|move|load|unload|use|measure|empty|import-owned …
+3d printops tare ls|add|show …
 ```
 
 | Subcommand | What |
@@ -44,6 +46,8 @@ service is never exposed to the internet.
 | `token` | Mint, list and revoke 3d-api bearer tokens. Only sha256 is stored; `create` prints the token once. |
 | `deploy` | Ship Spoolman + 3d-api to the Odroid as the compose project `printops`, install the backup timer, wait until healthy. |
 | `backup` | Consistent snapshots of the PrintOps DB, tokens file and Spoolman DB (runs daily on the Odroid). |
+| `spool` | Spool lifecycle — receive → store/move → load into a printer slot → unload → empty — with remaining as an interval (ledger), weighing and the idempotent `gen/plates.json` import. See [printops-spool.md](printops-spool.md). |
+| `tare` | The sourced empty-spool weight DB (SpoolmanDB seed + own weighings) and the tare chain of a spool. See [printops-spool.md](printops-spool.md#3d-printops-tare). |
 
 Subcommands are self-registering modules in `lib/printops/cli/<sub>.py`; later PrintOps slices
 add theirs there.
