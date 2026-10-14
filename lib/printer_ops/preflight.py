@@ -205,7 +205,25 @@ def _first(violations: Sequence[Violation], count: int, where: str = "outside") 
     return f"{count} point(s) {where}: {shown}{', ...' if count > len(violations) else ''}"
 
 
-def check_moves(rep: BoundsReport, axis_limits: Limits | None, limits_source: str) -> list[Check]:
+def check_macros(rep: BoundsReport, trusted: frozenset[str]) -> list[Check]:
+    """Macros hide their moves. Untrusted ones FAIL (start needs --force); the printer's
+    `trusted_macros` (printer-devices.yaml) names the ones known to stay on the bed."""
+    if not rep.macros:
+        return []
+
+    def fmt(names: list[str]) -> str:
+        return ", ".join(f"{k}×{rep.macros[k][0]} (line {rep.macros[k][1]})" for k in names)
+
+    untrusted = sorted(k for k in rep.macros if k not in trusted)
+    if untrusted:
+        return [Check("macros", FAIL, f"moves inside these commands are not checked: {fmt(untrusted)}; "
+                      "if they stay on the bed add them to trusted_macros for this printer in "
+                      "printer-devices.yaml, otherwise --force")]
+    return [Check("macros", PASS, "all trusted (printer-devices.yaml): " + fmt(sorted(rep.macros)))]
+
+
+def check_moves(rep: BoundsReport, axis_limits: Limits | None, limits_source: str,
+                trusted_macros: frozenset[str] = frozenset()) -> list[Check]:
     out: list[Check] = []
     if axis_limits is None:
         why = f"{limits_source}; " if limits_source else ""
@@ -242,23 +260,27 @@ def check_moves(rep: BoundsReport, axis_limits: Limits | None, limits_source: st
         more = ", ..." if rep.unverified_count > len(rep.unverified) else ""
         out.append(Check("unverified", WARN, f"{rep.unverified_count} move(s) only partly checked: "
                          + ", ".join(rep.unverified) + more))
+    out.extend(check_macros(rep, trusted_macros))
     return out
 
 
-def bounds_report(gcode: Path, axis_limits: Limits | None, limits_source: str) -> Report:
+def bounds_report(gcode: Path, axis_limits: Limits | None, limits_source: str,
+                  trusted_macros: frozenset[str] = frozenset()) -> Report:
     """Only the move-bounds checks (`3d gcode-bounds`)."""
-    return Report(str(gcode), check_moves(check_bounds(gcode, axis_limits), axis_limits, limits_source), "BOUNDS")
+    rep = check_bounds(gcode, axis_limits)
+    return Report(str(gcode), check_moves(rep, axis_limits, limits_source, trusted_macros), "BOUNDS")
 
 
 def run_preflight(gcode: Path, *, status: PrinterStatus | None = None, source_3mf: Path | None = None,
-                  axis_limits: Limits | None = None, limits_source: str = "") -> Report:
+                  axis_limits: Limits | None = None, limits_source: str = "",
+                  trusted_macros: frozenset[str] = frozenset()) -> Report:
     """`limits_source` names where `axis_limits` came from, or why they are unknown."""
     report = Report(str(gcode))
     report.checks.append(check_thumbnails(gcode))
     if status is not None:
         report.checks.append(check_printer_free(status))
         report.checks.extend(check_slots(read_gcode_meta(gcode), status))
-    report.checks.extend(check_moves(check_bounds(gcode, axis_limits), axis_limits, limits_source))
+    report.checks.extend(check_moves(check_bounds(gcode, axis_limits), axis_limits, limits_source, trusted_macros))
     if source_3mf is not None:
         report.checks.append(check_halves(source_3mf))
     return report

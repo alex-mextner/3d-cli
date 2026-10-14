@@ -15,6 +15,9 @@ ENTRY:
   `port` defaults to 7125 (moonraker) / 80 (creality-stock HTTP); creality-stock also takes
   `ws_port` (default 9999). Optional `axis_limits: {x: [min, max], y: [min, max]}` is the
   real X/Y travel used by `3d print-preflight` (Moonraker printers report it themselves).
+  Optional `trusted_macros: [PAUSE, START_PRINT]` names macros (commands whose bodies the
+  bounds check cannot see) known to keep the head on the bed; any other macro in a G-code
+  FAILs print-preflight, so `3d printer start` needs --force for it.
 
 Only devices listed here are ever contacted — no LAN discovery (issue #62 network modes).
 """
@@ -43,7 +46,8 @@ k1se:
   adapter: creality-stock   # Creality K1 family on stock firmware (HTTP + ws:9999)
   host: 192.168.0.27
   model: Creality K1 SE
-  axis_limits: {{x: [-5, 229], y: [-0.5, 227]}}   # stepper_x/y position_min/max, printer.cfg"""
+  axis_limits: {{x: [-5, 229], y: [-0.5, 227]}}   # stepper_x/y position_min/max, printer.cfg
+  trusted_macros: [START_PRINT, END_PRINT, PAUSE]  # vendor macros known to stay on the bed"""
 
 
 class DeviceConfigError(ThreeDError):
@@ -60,6 +64,7 @@ class Device:
     source: Path
     ws_port: int | None = None  # creality-stock only: WebSocket port (default 9999)
     axis_limits: Limits | None = None  # real X/Y travel ((xmin, xmax), (ymin, ymax)), for print-preflight
+    trusted_macros: frozenset[str] = frozenset()  # macros print-preflight may treat as staying on the bed
 
 
 def user_path() -> Path:
@@ -95,6 +100,13 @@ def _axis_limits(value: Any, name: str, path: Path) -> Limits:
     return (out[0], out[1])
 
 
+def _trusted_macros(value: Any, name: str, path: Path) -> frozenset[str]:
+    if not isinstance(value, list) or not all(isinstance(v, str) and v.strip() for v in value):
+        raise InvalidArgument(f"{name}.trusted_macros", str(value), ["a list of macro names, e.g. [PAUSE]"],
+                              command="printer", extra=f"Fix {path}.")
+    return frozenset(v.strip().upper() for v in value)
+
+
 def _parse(path: Path, data: Any) -> dict[str, Device]:
     if data is None:
         return {}
@@ -122,7 +134,9 @@ def _parse(path: Path, data: Any) -> dict[str, Device]:
         ws_port = _port(spec["ws_port"], f"{name}.ws_port", path) if "ws_port" in spec else None
         model = spec.get("model")
         limits = _axis_limits(spec["axis_limits"], name, path) if "axis_limits" in spec else None
-        out[name] = Device(name, adapter, host, port, str(model) if model else None, path, ws_port, limits)
+        trusted = _trusted_macros(spec["trusted_macros"], name, path) if "trusted_macros" in spec else frozenset()
+        out[name] = Device(name, adapter, host, port, str(model) if model else None, path, ws_port, limits,
+                           trusted)
     return out
 
 

@@ -261,8 +261,31 @@ class CrealityStockAdapter(Adapter):
         return UploadResult(remote_name, size, verified=True, note=note)
 
     def start(self, remote_name: str) -> None:
+        """Send opGcodeFile and wait for the printer to report THIS file as its job in the
+        printing state (state 1). The pushed snapshot from before the request cannot fake it:
+        start runs only on a printer that is not printing; a cancel finishing (state 7) or a
+        pause (5) on the same file name is no acknowledgement either.
+        No such acknowledgement within confirm_s — socket closed, silence, or another file —
+        raises PrinterCommError: the start may or may not have happened (outcome UNKNOWN)."""
         cmd = {"method": "set", "params": {"opGcodeFile": f"printprt:{GCODE_DIR}/{remote_name}"}}
-        self._send(cmd, self.confirm_s, lambda m: remote_name in m and "printFileName" in m)
+        seen: dict[str, Any] = {}
+        ack = False
+
+        def acked(m: str) -> bool:
+            nonlocal ack
+            seen.update(merge_messages([m]))
+            ack = (os.path.basename(str(seen.get("printFileName") or "")) == remote_name
+                   and _int(seen.get("state")) == 1)
+            return ack
+
+        self._send(cmd, self.confirm_s, acked)
+        if not ack:
+            last = f"state={seen.get('state')} deviceState={seen.get('deviceState')} " \
+                   f"file={seen.get('printFileName') or '-'}"
+            raise self._comm_error(
+                f"start of {remote_name}",
+                f"no acknowledgement within {self.confirm_s:g} s (connection closed or no running "
+                f"state for this file; last seen {last})")
 
     def cancel(self) -> None:
         self._send({"method": "set", "params": {"stop": 1}}, 2.0)

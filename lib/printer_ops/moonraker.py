@@ -23,11 +23,13 @@ UPLOAD SAFETY: `print=false` is always sent and a response claiming print_starte
 """
 from __future__ import annotations
 
+import hashlib
+import http.client
 import json
 import socket
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 from printer_ops.base import (
     CANCELLED,
@@ -229,7 +231,28 @@ class MoonrakerAdapter(Adapter):
                          "Retry the upload only after confirming the file is absent or incomplete."],
         ) from exc
 
+    def remote_sha256(self, remote_name: str) -> str | None:
+        """Read the stored file back (GET /server/files/gcodes/<name>) and hash it: the exact
+        bytes `start` would print, not just a matching name and size."""
+        url = self.base + "/server/files/gcodes/" + quote(remote_name, safe="/")
+        parts = urlsplit(url)
+        h = hashlib.sha256()
+        conn = http.client.HTTPConnection(parts.hostname or "", parts.port or 80, timeout=self.upload_timeout)
+        try:
+            conn.request("GET", parts.path)
+            r = conn.getresponse()
+            if r.status != 200:
+                raise self._comm_error(f"read back {remote_name}", f"HTTP {r.status}")
+            for chunk in iter(lambda: r.read(1 << 20), b""):
+                h.update(chunk)
+        except (OSError, http.client.HTTPException) as exc:  # IncompleteRead is not an OSError
+            raise self._comm_error(f"read back {remote_name}", exc) from exc
+        finally:
+            conn.close()
+        return h.hexdigest()
+
     def start(self, remote_name: str) -> None:
+        # Moonraker answers only after Klipper accepted the request: the HTTP 200 is the ack
         self._post("/printer/print/start?filename=" + quote(remote_name, safe=""))
 
     def cancel(self) -> None:

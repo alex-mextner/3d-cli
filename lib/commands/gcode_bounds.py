@@ -29,9 +29,12 @@ USAGE = """3d gcode-bounds FILE.gcode [--printer NAME | --axis-limits X0:X1,Y0:Y
                `; bed_exclude_area`; vendor `;TYPE:Custom` blocks (parking, purging) are exempt
   unverified   WARN for moves only partly checked: arcs by R or in the XZ/YZ plane, relative
                moves from an unknown position (after G28). A known axis is always checked.
+  macros       FAIL for macros (any command but moves and stock non-moving ones) that the
+               printer's trusted_macros in printer-devices.yaml does not list: their bodies
+               are invisible here and may move anywhere
 
 Options:
-  --printer NAME       take axis_limits from that printer in printer-devices.yaml
+  --printer NAME       take axis_limits and trusted_macros from that printer in printer-devices.yaml
   --axis-limits SPEC   X/Y travel as X0:X1,Y0:Y1 (or a printer name); wins over --printer
   --json               JSON report on stdout
 
@@ -79,7 +82,7 @@ def run(argv: list[str]) -> int:
     if not gcode.is_file():
         raise InputNotFound(str(gcode), command="gcode-bounds")
 
-    from printer_ops import limits_from_option
+    from printer_ops import limits_from_option, trusted_macros_for
     from printer_ops.preflight import FAIL, bounds_report
 
     spec = opts.get("--axis-limits") or opts.get("--printer")
@@ -87,7 +90,9 @@ def run(argv: list[str]) -> int:
         limits, source = None, "no --printer or --axis-limits given"
     else:
         limits, source = limits_from_option(spec, command="gcode-bounds")
-    report = bounds_report(gcode, limits, source)
+    # the macros of the printer the file is for; --axis-limits NAME only when no --printer
+    trusted = trusted_macros_for(opts.get("--printer") or opts.get("--axis-limits"))
+    report = bounds_report(gcode, limits, source, trusted)
     print(json.dumps(report.to_json(), indent=1) if "--json" in opts else report.render())
     if report.overall == FAIL:
         raise GateFailure("gcode-bounds FAIL", command="gcode-bounds", silent=True)

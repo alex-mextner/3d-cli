@@ -32,7 +32,10 @@ Options:
   `3d printer status u1 --json | jq '.slots[] | {label, color, material}'`
 - `--secs S` — Creality printers push their state over a WebSocket; listen this long (default 3).
   `3d printer status k1se --secs 5`
-- `--as REMOTE` — the file name on the printer (default: the local name with spaces turned into `_`).
+- `--as REMOTE` — the name stem on the printer (default: the local name with spaces turned into `_`).
+  The stored name always gets the first 16 hex digits of the file's SHA-256 appended
+  (`roof_left-1a2b3c4d5e6f7a8b.gcode`), so `start` finds exactly the bytes that were uploaded; pass the
+  same `--as` to `start`.
   `3d printer upload k1se "out/roof left.gcode" --as roof_left.gcode`
 - `--yes` — required by `start` and `cancel`: you confirm the physical action.
   `3d printer start u1 out/part.gcode --yes`
@@ -73,12 +76,19 @@ k1se:
   host: 192.168.0.27
   model: Creality K1 SE     # port defaults to 80, ws_port to 9999
   axis_limits: {x: [-5, 229], y: [-0.5, 227]}
+  trusted_macros: [START_PRINT, END_PRINT, PAUSE]
 ```
 
 `axis_limits` is the real X/Y travel (Klipper `stepper_x`/`stepper_y` `position_min`/`position_max`;
 for the K1 SE from CrealityOfficial K1_Series_Klipper `config/K1_SE_CR4CU220812S12/printer.cfg`).
 [`3d gcode-bounds`](gcode-bounds.md) and the preflight check every move against it. Moonraker
 printers without `axis_limits` report them from their own Klipper config.
+
+`trusted_macros` names the macros (vendor start/end, pause, toolchange `T0`…`Tn`, timelapse
+commands) whose bodies you know keep the head on the bed and leave the coordinate modes
+(G90/G91, G92, SET_GCODE_OFFSET) as they found them. The bounds check cannot see inside a
+macro, so any macro in the G-code that is not listed makes preflight FAIL and `start` needs
+`--force`. With `--printer A --axis-limits B` only A's list counts.
 
 ## Adapters
 
@@ -99,16 +109,21 @@ with the local file.
 1. `upload` only stores the file. On Moonraker it sends `print=false` and fails loudly if the
    reply says a print was started or queued.
 2. `start` and `cancel` need `--yes`. Without it nothing is sent to the printer.
-3. `start` refuses while the printer is printing, paused, busy, or its state cannot be read,
-   and when the file on the printer is missing or differs in size from the local file. The
-   state is read again right before the start request.
+3. `start` refuses while the printer is printing, paused, busy, or its state cannot be read.
+   The file name on the printer carries the content hash, so a re-sliced local file never
+   matches a stale upload; a missing file or a size difference refuses the start. Where the
+   firmware can return the file (Moonraker), `start` reads it back and compares the SHA-256;
+   different bytes refuse the start. The state is read again right before the start request.
 4. `start` runs `3d print-preflight` — including the move-bounds check against the printer's
-   axis limits ([`3d gcode-bounds`](gcode-bounds.md)); a FAIL blocks the start unless `--force`.
+   axis limits and the macro check ([`3d gcode-bounds`](gcode-bounds.md)); a FAIL blocks the
+   start unless `--force`.
 5. `upload` refuses while a Creality printer is busy (the firmware does not protect the
    running job), and on any printer refuses to overwrite the file being printed.
-6. If a start or upload request times out, the result is reported as UNKNOWN (after checking
-   the printer's file list for uploads). Nothing is resent automatically: check
-   `3d printer status NAME` first.
+6. `start` succeeds only when the printer acknowledges it: Moonraker's HTTP reply, or on
+   Creality a pushed state naming this file as running within 15 s. No acknowledgement, a
+   failed request, or an unreadable state right after an acknowledged start is reported as
+   UNKNOWN; uploads that time out are checked against the printer's file list. Nothing is
+   resent automatically: check `3d printer status NAME` first.
 
 Exit codes: 0 done; 1 refused by a safety rule, preflight FAIL, or printer unreachable;
 2 usage error, unknown printer, bad config, or missing file.

@@ -72,7 +72,8 @@ class _Server(ThreadingHTTPServer):
 @dataclass
 class FakeMoonraker:
     status: dict[str, Any] = field(default_factory=u1_status)
-    files: dict[str, int] = field(default_factory=dict)
+    files: dict[str, int] = field(default_factory=dict)        # name -> listed size
+    contents: dict[str, bytes] = field(default_factory=dict)   # name -> bytes served on read-back
     requests: list[Recorded] = field(default_factory=list)
     upload_reply: dict[str, Any] | None = None   # override the upload JSON
     stored_size_delta: int = 0                    # pretend the printer stored N extra bytes
@@ -84,6 +85,11 @@ class FakeMoonraker:
 
     def writes(self) -> list[Recorded]:
         return [r for r in self.requests if r.method == "POST"]
+
+    def put(self, name: str, data: bytes) -> None:
+        """A file already stored on the printer (listed size = its length)."""
+        self.files[name] = len(data)
+        self.contents[name] = data
 
     def handler(self) -> type[BaseHTTPRequestHandler]:
         fake = self
@@ -109,6 +115,12 @@ class FakeMoonraker:
                     self._reply({"result": {"eventtime": 1.0, "status": fake.status}})
                 elif u.path == "/server/files/list":
                     self._reply({"result": [{"path": n, "size": s, "modified": 1.0} for n, s in fake.files.items()]})
+                elif u.path.startswith("/server/files/gcodes/") and unquote(u.path[21:]) in fake.contents:
+                    data = fake.contents[unquote(u.path[21:])]
+                    self.send_response(200)
+                    self.send_header("Content-Length", str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
                 else:
                     self._reply({"error": {"code": 404, "message": "not found"}}, 404)
 
@@ -122,6 +134,7 @@ class FakeMoonraker:
                     rec.fields = multipart_parts(body, self.headers["Content-Type"])
                     filename = self._filename(body)
                     fake.files[filename] = len(rec.fields["file"]) + fake.stored_size_delta
+                    fake.contents[filename] = rec.fields["file"]
                     self._reply(fake.upload_reply or {"result": {
                         "item": {"path": filename, "root": "gcodes"},
                         "print_started": False, "print_queued": False, "action": "create_file"}}, 201)
@@ -169,6 +182,7 @@ class FakeCreality:
     http_requests: list[Recorded] = field(default_factory=list)
     ws_received: list[str] = field(default_factory=list)
     stored_size_delta: int = 0
+    start_reply: str = "ack"  # "ack": push the running state; "silent": say nothing; "close": hang up
     http_port: int = 0
     ws_port: int = 0
 
@@ -266,8 +280,11 @@ class FakeCreality:
                 push({"retGcodeFileInfo2": listing})
             elif "opGcodeFile" in params:
                 path = params["opGcodeFile"].split(":", 1)[1]
-                self.state.update(state=1, deviceState=1, printFileName=path)
-                push({"state": 1, "deviceState": 1, "printFileName": path})
+                if self.start_reply == "close":
+                    return  # hang up without a word (the start may or may not have happened)
+                if self.start_reply == "ack":
+                    self.state.update(state=1, deviceState=1, printFileName=path)
+                    push({"state": 1, "deviceState": 1, "printFileName": path})
             elif params.get("stop") == 1:
                 self.state.update(state=4, deviceState=0)
                 push({"state": 4, "deviceState": 0})
@@ -313,7 +330,8 @@ def write_devices(config_home: Path, moon: FakeMoonraker | None = None, k1: Fake
     d.mkdir(parents=True, exist_ok=True)
     lines = []
     if moon is not None:
-        lines += ["u1:", "  adapter: moonraker", "  host: 127.0.0.1", f"  port: {moon.port}", "  model: Snapmaker U1"]
+        lines += ["u1:", "  adapter: moonraker", "  host: 127.0.0.1", f"  port: {moon.port}", "  model: Snapmaker U1",
+                  "  trusted_macros: [T0, T1, T2, T3]"]  # the U1's toolchange macros, as in a real config
     if k1 is not None:
         lines += ["k1se:", "  adapter: creality-stock", "  host: 127.0.0.1", f"  port: {k1.http_port}",
                   f"  ws_port: {k1.ws_port}", "  model: Creality K1 SE",

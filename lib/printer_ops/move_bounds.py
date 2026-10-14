@@ -20,6 +20,13 @@ WHAT, on every G0/G1/G2/G3 (absolute or G91-relative XY, G92 offsets; arcs by th
   Arcs given by R, arcs in the XZ/YZ planes (G18/G19) and relative moves from an unknown
   position are counted as UNVERIFIED. Line numbers (`N12 G1 ...*45`), Klipper
   SET_GCODE_OFFSET and SAVE/RESTORE_GCODE_STATE are followed.
+  MACROS: any command that is neither modeled here nor a stock command that cannot move X/Y
+  (`_INERT`) is a macro whose body is invisible — PAUSE, TIMELAPSE_TAKE_FRAME, `Tn` (on
+  Klipper every tool change is a macro), `G1_WIPE`-style names. Each is recorded (rep.macros)
+  and afterwards the position and E are unknown. print-preflight FAILs on macros the
+  printer's `trusted_macros` list does not name. Trusting a macro means: it keeps the head
+  on the bed AND leaves G90/G91, G92 and SET_GCODE_OFFSET as it found them (the Klipper
+  SAVE/RESTORE_GCODE_STATE convention) — the checker keeps those modes across it.
 
 LIMITATIONS: positions are G-code coordinates; firmware-side tool offsets (toolchanger
   heads) and macro bodies are not visible here. Before the first X/Y move and after G28 of
@@ -48,8 +55,39 @@ _MOVE = re.compile(r"G0*([0-3])(?![\d.])")
 _WORD = re.compile(r"([A-Z])\s*([-+]?(?:\d+\.?\d*|\.\d+))")
 _LAYER_MARKERS = (";LAYER_CHANGE", "; CHANGE_LAYER")
 _LINE_NO = re.compile(r"^[Nn]\d+\s*")
-_TOOL = re.compile(r"^[Tt]\d+\s*(;|$)")
 MAX_CHORDS = 100_000  # chord simulation budget per arc (r * sweep / 1 mm)
+# Commands this checker models itself (they move or change coordinates)
+_MODELED = frozenset({
+    "G0", "G1", "G2", "G3", "G17", "G18", "G19", "G28", "G90", "G91", "G92", "M82", "M83", "M221",
+    "ACTIVATE_EXTRUDER", "SET_GCODE_OFFSET", "SAVE_GCODE_STATE", "RESTORE_GCODE_STATE",
+})
+# Stock Klipper/Marlin commands that neither move X/Y nor change coordinates. Anything else is a
+# macro (or a command this checker does not model): its moves are invisible here.
+_INERT = frozenset({
+    "G4", "G10", "G11", "G21", "M17", "M18", "M73", "M84", "M104", "M105", "M106", "M107", "M109",
+    "M110", "M112", "M114", "M115", "M117", "M118", "M140", "M141", "M190", "M191", "M204", "M205",
+    "M220", "M400", "M486", "M900",
+    "EXCLUDE_OBJECT", "EXCLUDE_OBJECT_DEFINE", "EXCLUDE_OBJECT_START", "EXCLUDE_OBJECT_END",
+    "SET_VELOCITY_LIMIT", "SET_PRESSURE_ADVANCE", "SET_PRINT_STATS_INFO", "SET_FAN_SPEED",
+    "SET_HEATER_TEMPERATURE", "SET_TEMPERATURE_FAN_TARGET", "TEMPERATURE_WAIT", "SET_RETRACTION",
+    "SET_IDLE_TIMEOUT",
+})
+_GM_WORD = re.compile(r"([GM])0*(\d+)(?![\d.])")
+
+
+def command_word(line: str) -> str | None:
+    """`G01 X1` / `G1X1` -> "G1", `T2` -> "T2", `MY_MACRO A=1` / `G1_WIPE` -> the macro name,
+    comment/blank -> None. A name with "_" is always an extended command (a macro), even when
+    it starts like a G/M code. Tool changes keep their number: on Klipper every `Tn` is a macro."""
+    code = line.split(";", 1)[0].strip()
+    if not code:
+        return None
+    token = code.split(None, 1)[0].upper()
+    if "_" not in token:
+        m = _GM_WORD.match(token)
+        if m:
+            return m.group(1) + m.group(2)
+    return token
 _KEEP = 5  # violations kept per kind (the count is always exact)
 
 
@@ -78,6 +116,7 @@ class BoundsReport:
     excluded_in_count: int = 0
     unverified: list[str] = field(default_factory=list)  # "line N why" (first few)
     unverified_count: int = 0
+    macros: dict[str, list[int]] = field(default_factory=dict)  # name -> [count, first line]
     plate_extent: tuple[float, float, float, float] | None = None  # xmin, xmax, ymin, ymax
     all_extent: tuple[float, float, float, float] | None = None
 
@@ -481,8 +520,15 @@ def check_bounds(path: Path, axis_limits: Limits | None = None) -> BoundsReport:
             # plate = slicer-generated moves; vendor `;TYPE:Custom` blocks inside it are exempt
             in_plate = (plate.first_layer is not None and plate.first_layer <= n <= plate.end
                         and not (plate.typed and ftype in (None, "Custom")))
-            if c0 in ("T", "t") and _TOOL.match(line):  # tool change: a new extruder, E restarts
-                e = None
+            word = command_word(line)
+            if word is None:
+                continue
+            if word not in _MODELED:
+                if word not in _INERT:
+                    # a macro: its body may move the head anywhere, extrude, or change E
+                    seen_macro = rep.macros.setdefault(word, [0, n])
+                    seen_macro[0] += 1
+                    x = y = e = None
                 continue
             if c0 in ("M", "m"):
                 code = line.split(";", 1)[0].strip().upper()

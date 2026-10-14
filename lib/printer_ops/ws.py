@@ -121,7 +121,10 @@ class WebSocket:
         return cls(sock, leftover)
 
     def send_text(self, text: str) -> None:
-        self._sock.sendall(encode_frame(OP_TEXT, text.encode(), mask=True))
+        try:
+            self._sock.sendall(encode_frame(OP_TEXT, text.encode(), mask=True))
+        except ConnectionError as exc:  # reset / broken pipe: the firmware dropped the socket
+            raise WebSocketClosed(f"connection lost: {exc}") from exc
 
     def recv(self, timeout: float) -> str | None:
         """Next text/binary message, or None when `timeout` elapses before one is complete.
@@ -143,6 +146,8 @@ class WebSocket:
                     chunk = self._sock.recv(65536)
                 except (socket.timeout, TimeoutError):
                     continue  # the deadline check above decides
+                except ConnectionError as exc:  # reset by the firmware: same as a close
+                    raise WebSocketClosed(f"connection lost: {exc}") from exc
                 if not chunk:
                     raise WebSocketClosed("connection closed by peer")
                 self._buf += chunk
@@ -150,7 +155,10 @@ class WebSocket:
             fin, op, data, used = frame
             self._buf = self._buf[used:]
             if op == OP_PING:
-                self._sock.sendall(encode_frame(OP_PONG, data, mask=True))
+                try:
+                    self._sock.sendall(encode_frame(OP_PONG, data, mask=True))
+                except ConnectionError as exc:
+                    raise WebSocketClosed(f"connection lost: {exc}") from exc
                 continue
             if op == OP_PONG:
                 continue

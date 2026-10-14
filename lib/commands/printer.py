@@ -46,14 +46,17 @@ USAGE = """3d printer <subcommand> [args]
 Options:
   --json             status as JSON (normalized state + raw firmware payload)
   --secs S           Creality: seconds to listen on ws:9999 for pushed state (default 3)
-  --as REMOTE        remote file name (default: local name, spaces -> _)
+  --as REMOTE        remote name stem (default: local name, spaces -> _); the stored name
+                     always ends in -<sha256[:16]>.gcode; give start the same --as
   --yes              required for start and cancel: you confirm the physical action
   --force            start even when preflight FAILs (the failing checks are printed)
   --source-3mf FILE  the 3MF the G-code was sliced from; enables the halves-check
 
 Safety: start refuses while the printer is printing, paused, busy or unreadable, and when
-the remote file is missing or differs in size from FILE.gcode. A start whose outcome is
-unknown is never resent. Creality upload is refused while the printer is busy.
+the content-addressed remote file is missing, differs in size, or (Moonraker, read back)
+differs in SHA-256 from FILE.gcode. Untrusted macros fail preflight. A start counts only
+when the printer acknowledges it; otherwise, or when the state after it is unreadable, the
+outcome is UNKNOWN and nothing is resent. Creality upload is refused while the printer is busy.
 
 Examples:
   3d printer list
@@ -164,10 +167,23 @@ def _local(path: str) -> Path:
 
 
 def _cmd_upload(argv: list[str]) -> int:
-    from printer_ops.base import PrinterRefused, safe_remote_name
+    import shutil
+    import tempfile
+    from pathlib import Path
 
     (name, file), opts = _parse(argv, {"--as", "--secs"}, 2, "upload")
-    local = _local(file)
+    original = _local(file)
+    # The bytes named by the hash are the bytes sent: hash and upload one snapshot, so a
+    # slicer rewriting FILE meanwhile cannot store other content under this name.
+    with tempfile.TemporaryDirectory(prefix="3d-upload-") as tmp:
+        local = Path(tmp) / original.name
+        shutil.copyfile(original, local)
+        return _upload_snapshot(name, file, local, opts)
+
+
+def _upload_snapshot(name: str, file: str, local: Path, opts: dict[str, str]) -> int:
+    from printer_ops.base import PrinterRefused, safe_remote_name
+
     remote = safe_remote_name(local, opts.get("--as"))
     adapter = _adapter(name, opts)
     st = adapter.status()
@@ -182,7 +198,8 @@ def _cmd_upload(argv: list[str]) -> int:
     print(f"uploaded {res.name} to {name}: {res.size} B, size verified on the printer. NOT started.")
     if res.note:
         print(f"note: {res.note}")
-    print(f"Start it with:  3d printer start {name} {file} --yes")
+    print(f"Start it with:  3d printer start {name} {file} --yes"
+          + (f" --as {opts['--as']}" if "--as" in opts else ""))
     return 0
 
 
@@ -199,10 +216,9 @@ def _refuse_if_busy(name: str, st: PrinterStatus, when: str) -> None:
 
 
 def _cmd_start(argv: list[str]) -> int:
+    import shutil
+    import tempfile
     from pathlib import Path
-
-    from printer_ops.base import PrinterCommError, PrinterRefused, safe_remote_name
-    from printer_ops.preflight import FAIL, run_preflight
 
     (name, file), opts = _parse(argv, {"--yes", "--force", "--as", "--source-3mf", "--secs"}, 2, "start")
     if "--yes" not in opts:
@@ -211,11 +227,24 @@ def _cmd_start(argv: list[str]) -> int:
             command="printer",
             remediation=[f"Confirm explicitly: 3d printer start {name} {file} --yes"],
         )
-    local = _local(file)
+    original = _local(file)
     source = Path(opts["--source-3mf"]) if "--source-3mf" in opts else None
     if source is not None and not source.is_file():
         raise InputNotFound(str(source), command="printer")
-    remote = safe_remote_name(local, opts.get("--as"))
+    # One immutable snapshot: the name hash, the read-back comparison and the preflight all see
+    # the same bytes even if a slicer rewrites FILE meanwhile.
+    with tempfile.TemporaryDirectory(prefix="3d-start-") as tmp:
+        local = Path(tmp) / original.name
+        shutil.copyfile(original, local)
+        return _start_snapshot(name, file, original, local, source, opts)
+
+
+def _start_snapshot(name: str, file: str, original: Path, local: Path, source: Path | None,
+                    opts: dict[str, str]) -> int:
+    from printer_ops.base import UNKNOWN, PrinterCommError, PrinterRefused, file_sha256, safe_remote_name
+    from printer_ops.preflight import FAIL, run_preflight
+
+    remote = safe_remote_name(local, opts.get("--as"))  # content-addressed: <stem>-<sha256[:16]>.gcode
     size = local.stat().st_size
     adapter = _adapter(name, opts)
 
@@ -226,11 +255,26 @@ def _cmd_start(argv: list[str]) -> int:
         got = "absent" if stored is None else f"{stored.size} B"
         raise PrinterRefused(
             f"{remote} on {name} is {got}; local {file} is {size} B — start refused",
-            command="printer", remediation=[f"Upload it first: 3d printer upload {name} {file}"],
+            command="printer", remediation=[f"Upload it first: 3d printer upload {name} {file}"
+                                            + (f" --as {opts['--as']}" if "--as" in opts else "")],
         )
+    # Identity of what will be printed with what is checked below: the read-back hash where
+    # the firmware can return the file, else the hash in the name plus the size.
+    remote_hash = adapter.remote_sha256(remote)
+    local_hash = file_sha256(local)
+    if remote_hash is not None and remote_hash != local_hash:
+        raise PrinterRefused(
+            f"{remote} on {name} has different content than {file} "
+            f"(printer sha256 {remote_hash[:12]}…, local {local_hash[:12]}…) — start refused",
+            command="printer", remediation=[f"Upload it again: 3d printer upload {name} {file}"],
+        )
+    identity = "read-back sha256 matches" if remote_hash else "content hash in the file name + size"
+    print(f"remote file {remote}: {identity}")
 
     limits, limits_source = adapter.axis_limits()
-    report = run_preflight(local, status=st, source_3mf=source, axis_limits=limits, limits_source=limits_source)
+    report = run_preflight(local, status=st, source_3mf=source, axis_limits=limits, limits_source=limits_source,
+                           trusted_macros=adapter.trusted_macros)
+    report.file = f"{original} (snapshot)"
     print(report.render())
     if report.overall == FAIL:
         if "--force" not in opts:
@@ -240,16 +284,29 @@ def _cmd_start(argv: list[str]) -> int:
         print(f"FORCED: starting despite preflight FAIL ({forced})")
 
     _refuse_if_busy(name, adapter.status(), "state changed during preflight")
+    dont_resend = [f"Do NOT resend blindly. Check: 3d printer status {name}"]
     try:
         adapter.start(remote)
     except PrinterCommError as exc:
         raise PrinterCommError(
             f"start request for {remote} on {name} failed: outcome UNKNOWN ({exc.message})",
-            command="printer",
-            remediation=[f"Do NOT resend blindly. Check: 3d printer status {name}"],
+            command="printer", remediation=dont_resend,
         ) from exc
-    after = adapter.status()
-    print(f"start sent: {remote} on {name}")
+    print(f"start acknowledged by {name}: {remote}")
+    try:
+        after = adapter.status()
+    except PrinterCommError as exc:
+        raise PrinterCommError(
+            f"start of {remote} on {name} was acknowledged, but the state after it is unreadable: "
+            f"outcome UNKNOWN ({exc.message})",
+            command="printer", remediation=dont_resend,
+        ) from exc
+    if after.state == UNKNOWN:
+        raise PrinterCommError(
+            f"start of {remote} on {name} was acknowledged, but the printer's state is unknown "
+            f"[{after.raw_state}]: outcome UNKNOWN",
+            command="printer", remediation=dont_resend,
+        )
     print(_render_status(name, adapter, after))
     return 0
 

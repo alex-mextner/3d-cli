@@ -18,6 +18,7 @@ and refuses on FAIL unless `--force`. Issue: [#96](https://github.com/alex-mextn
 | `halves` | `--source-3mf` | `3d halves-check FILE.3mf` failed or could not run. |
 | `axis travel` | always (SKIP when the limits are unknown) | A move, or the bulge of an arc, leaves the printer's X/Y travel anywhere in the file. See [`3d gcode-bounds`](gcode-bounds.md). |
 | `print area` | always | A plate move leaves the G-code's `; printable_area`, or an extruding path crosses `; bed_exclude_area`. |
+| `macros` | when the G-code calls macros | A macro (PAUSE, a vendor toolchange, …) is not in the printer's `trusted_macros`: its moves cannot be checked. |
 
 Tool numbering: G-code `Tn` and the *n*-th entry of `; filament_colour` are head index *n*,
 which the U1 screen calls T*n+1*. Used tools are read from `; filament used [mm]` (non-zero

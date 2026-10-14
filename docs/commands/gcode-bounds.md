@@ -22,6 +22,7 @@ showed nothing wrong.
 | `axis travel` | Every G0/G1/G2/G3 in the file, start and end G-code included. | A point is outside the printer's X/Y limits. SKIP when the limits are unknown. |
 | `print area` | Moves from the first layer change to the end of the last object or slicer feature (a prime tower printed after the last object counts). Vendor `;TYPE:Custom` blocks (parking, purging, tool changes) are skipped. | A point is outside the G-code's `; printable_area`, or an extruding line or arc passes through `; bed_exclude_area` (even with both end points outside it; travel over it is allowed). WARN `UNVERIFIED` when the file has no layer markers or no printable area. |
 | `unverified` | Only shown when needed. | WARN: moves only partly checked — an arc given by `R` or in the XZ/YZ plane (`G18`/`G19`), or a relative move from an unknown position. |
+| `macros` | Only shown when the G-code calls macros — any command other than the moves above and stock commands that cannot move X/Y (`SET_VELOCITY_LIMIT`, `M104`, `EXCLUDE_OBJECT_*`, …). | FAIL: a macro not listed in the printer's `trusted_macros` (`printer-devices.yaml`, via `--printer NAME`). Its body may move the head anywhere, and after it the position counts as unknown. PASS lists the trusted ones. |
 
 How moves are followed: absolute (`G90`) and relative (`G91`) X/Y, `G92` coordinate offsets,
 and `G2`/`G3` arcs about `I`/`J` with their real extreme points; an arc whose start equals

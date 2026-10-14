@@ -30,6 +30,7 @@ def make_adapter(device: Device, **options: Any) -> Adapter:
             options.setdefault("ws_port", device.ws_port)
         adapter = CrealityStockAdapter(device.name, device.host, device.port, **options)
     adapter.configured_limits = device.axis_limits
+    adapter.trusted_macros = device.trusted_macros
     return adapter
 
 
@@ -69,3 +70,18 @@ def limits_from_option(value: str, *, command: str) -> tuple[Limits | None, str]
     if device.axis_limits is None:
         return None, f"no axis_limits for {device.name} in {device.source}"
     return device.axis_limits, f"{device.name} in {device.source}"
+
+
+def trusted_macros_for(spec: str | None) -> frozenset[str]:
+    """The `trusted_macros` of the printer named by --printer / --axis-limits NAME; nothing
+    when no printer is named (an X0:X1,Y0:Y1 spec or no option). Never contacts the printer."""
+    from printer_ops.devices import get_device
+    from printer_ops.move_bounds import parse_limits
+
+    if spec is None:
+        return frozenset()
+    try:
+        parse_limits(spec)
+        return frozenset()
+    except ValueError:
+        return get_device(spec).trusted_macros

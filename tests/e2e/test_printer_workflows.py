@@ -57,15 +57,36 @@ def test_printer_upload_stores_without_starting_then_start_needs_yes(tmp_path: P
     assert writes_before_start == ["/server/files/upload"]
     assert started.returncode == 0, started.stdout + started.stderr
     assert "PREFLIGHT part.gcode" in started.stdout and "slot T3" in started.stdout
-    assert "start sent: part.gcode on u1" in started.stdout
+    assert "read-back sha256 matches" in started.stdout
+    assert "start acknowledged by u1: part-" in started.stdout
     assert [r.path for r in moon.writes()] == ["/server/files/upload", "/printer/print/start"]
+
+
+def test_printer_start_refuses_a_same_size_stale_file_on_the_printer(tmp_path: Path) -> None:
+    """The user re-slices part.gcode after uploading it; the new file happens to have the same
+    length. Starting it must not print the stale copy that is still on the printer."""
+    moon = FakeMoonraker()
+    part = tmp_path / "part.gcode"
+    part.write_text(U1_GCODE, encoding="utf-8")
+    with moon.serve():
+        write_devices(tmp_path / "xdg-config", moon=moon)
+        up = run_cli(tmp_path, "printer", "upload", "u1", "part.gcode")
+        resliced = U1_GCODE.replace("G1 X10 E1", "G1 X19 E1")
+        assert len(resliced) == len(U1_GCODE)
+        part.write_text(resliced, encoding="utf-8")
+        started = run_cli(tmp_path, "printer", "start", "u1", "part.gcode", "--yes", "--force")
+
+    assert up.returncode == 0, up.stderr
+    assert started.returncode == 1
+    assert "absent" in started.stderr and "Upload it first" in started.stderr
+    assert [r.path for r in moon.writes()] == ["/server/files/upload"]
 
 
 def test_printer_start_refuses_a_busy_k1_and_sends_nothing(tmp_path: Path) -> None:
     """Starting a second job on a printing K1 SE is refused before any frame is sent."""
     k1 = FakeCreality(state=k1_state(1, 1, "pfl.gcode"))
     (tmp_path / "roof.gcode").write_text("G28\n", encoding="utf-8")
-    k1.files["roof.gcode"] = 4
+    k1.files["roof-0000000000000000.gcode"] = 4  # busy check comes before any file lookup
     with k1.serve():
         write_devices(tmp_path / "xdg-config", k1=k1)
         result = run_cli(tmp_path, "printer", "start", "k1se", "roof.gcode", "--yes", "--secs", "0.5")

@@ -14,6 +14,7 @@ INVARIANTS: stdlib only. Adapters never start a print from `upload`; every hardw
 """
 from __future__ import annotations
 
+import hashlib
 import http.client
 import json
 import os
@@ -116,6 +117,7 @@ class Adapter:
         self.host = host
         self.port = port
         self.configured_limits: Limits | None = None  # axis_limits from printer-devices.yaml
+        self.trusted_macros: frozenset[str] = frozenset()  # trusted_macros from printer-devices.yaml
 
     def axis_limits(self) -> tuple[Limits | None, str]:
         """Real X/Y travel and where it came from; (None, reason) when unknown. Read-only."""
@@ -133,7 +135,14 @@ class Adapter:
     def upload(self, local: Path, remote_name: str) -> UploadResult:
         raise self._unsupported("upload")
 
+    def remote_sha256(self, remote_name: str) -> str | None:
+        """SHA-256 of the stored file, read back from the printer; None when the firmware
+        offers no way to read a file back (identity then rests on the hashed name + size)."""
+        return None
+
     def start(self, remote_name: str) -> None:
+        """Start a stored file. Returns only once the printer ACKNOWLEDGED the start; no
+        acknowledgement raises PrinterCommError (outcome UNKNOWN, never resent)."""
         raise self._unsupported("start")
 
     def cancel(self) -> None:
@@ -157,16 +166,32 @@ class Adapter:
         )
 
 
+def file_sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def safe_remote_name(local: Path, override: str | None = None) -> str:
-    """Remote file name: --as override or the local basename with spaces -> '_' (Orca's
-    safe_filename). Only [A-Za-z0-9_.+-] and a .gcode suffix — no paths, no query chars."""
+    """Content-addressed remote file name: `<stem>-<first 16 hex of SHA-256>.gcode`.
+
+    The stem is the --as override or the local basename with spaces -> '_' (Orca's
+    safe_filename). Upload and start derive the same name from the same bytes, so `start`
+    can never pick up a stale or overwritten file that merely has the same name and size —
+    changed content gets a different name. 64 bits guard against accidental mismatches (a
+    re-slice, a stale upload); where the firmware can return the file (Moonraker) start also
+    compares the full SHA-256. Only [A-Za-z0-9_.+-] and a .gcode suffix."""
     name = override or local.name.replace(" ", "_")
     if not SAFE_NAME.fullmatch(name):
         raise InvalidArgument(
             "remote name", name, ["letters, digits, _ . + - ending in .gcode (no folders)"],
             command="printer", extra="Rename the file or pass --as NAME.gcode.",
         )
-    return name
+    tag = file_sha256(local)[:16]
+    stem = name[: -len(".gcode")]
+    return name if stem.endswith(f"-{tag}") else f"{stem}-{tag}.gcode"
 
 
 # ---- stdlib HTTP helpers ------------------------------------------------------------------

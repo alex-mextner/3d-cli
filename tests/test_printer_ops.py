@@ -307,13 +307,35 @@ def test_creality_start_and_stop_frames(k1: FakeCreality) -> None:
     ]
 
 
+@pytest.mark.parametrize("reply", ["silent", "close"])
+def test_creality_start_without_acknowledgement_is_an_error(k1: FakeCreality, reply: str) -> None:
+    """Review #132: a closed socket or silence after opGcodeFile is not a successful start."""
+    k1.start_reply = reply
+    with pytest.raises(PrinterCommError, match="no acknowledgement"):
+        k1_adapter(k1).start("roof.gcode")
+
+
+def test_creality_start_ack_must_name_this_file_in_a_running_state(k1: FakeCreality) -> None:
+    """The pushed snapshot of a COMPLETED earlier run of the same file is no acknowledgement."""
+    k1.state = k1_state(2, 0, "roof.gcode")
+    k1.start_reply = "silent"
+    with pytest.raises(PrinterCommError, match="no acknowledgement"):
+        k1_adapter(k1).start("roof.gcode")
+
+
 # ---- base.py ----------------------------------------------------------------------------
 
-def test_safe_remote_name_replaces_spaces_and_rejects_paths(tmp_path: Path) -> None:
-    assert safe_remote_name(tmp_path / "roof left.gcode") == "roof_left.gcode"
+def test_safe_remote_name_is_content_addressed_and_rejects_paths(tmp_path: Path) -> None:
+    g = gcode(tmp_path, "G28\n", "roof left.gcode")
+    tag = pbase.file_sha256(g)[:16]
+    assert safe_remote_name(g) == f"roof_left-{tag}.gcode"
+    assert safe_remote_name(g, "roof.gcode") == f"roof-{tag}.gcode"
+    assert safe_remote_name(g, f"roof-{tag}.gcode") == f"roof-{tag}.gcode"  # not tagged twice
+    g.write_text("G28\nG1 X1\n", encoding="utf-8")
+    assert safe_remote_name(g) != f"roof_left-{tag}.gcode"  # new content, new name
     for bad in ("../x.gcode", "a/b.gcode", "x.gcode?print=true", "x.stl"):
         with pytest.raises(InvalidArgument):
-            safe_remote_name(tmp_path / "ok.gcode", bad)
+            safe_remote_name(g, bad)
 
 
 def test_busy_states_include_unknown() -> None:
@@ -419,8 +441,9 @@ def test_cmd_list_without_config_prints_example(env: Path, capsys: pytest.Captur
 def test_cmd_upload_never_starts(moon: FakeMoonraker, env: Path, tmp_path: Path,
                                  capsys: pytest.CaptureFixture[str]) -> None:
     write_devices(env, moon=moon)
-    assert printer("upload", "u1", str(gcode(tmp_path, name="my part.gcode"))) == 0
-    assert "my_part.gcode" in moon.files
+    g = gcode(tmp_path, name="my part.gcode")
+    assert printer("upload", "u1", str(g)) == 0
+    assert safe_remote_name(g) in moon.files and safe_remote_name(g).startswith("my_part-")
     assert [r.path for r in moon.writes()] == ["/server/files/upload"]
     assert "NOT started" in capsys.readouterr().out
 
@@ -435,10 +458,11 @@ def test_cmd_upload_refused_while_creality_busy(k1: FakeCreality, env: Path, tmp
 
 def test_cmd_upload_refused_over_the_running_file_on_moonraker(moon: FakeMoonraker, env: Path,
                                                                 tmp_path: Path) -> None:
-    moon.status = u1_status("printing", "part.gcode")
+    g = gcode(tmp_path)
+    moon.status = u1_status("printing", safe_remote_name(g))
     write_devices(env, moon=moon)
     with pytest.raises(PrinterRefused, match="overwrite the file being printed"):
-        printer("upload", "u1", str(gcode(tmp_path)))
+        printer("upload", "u1", str(g))
     assert moon.writes() == []
 
 
@@ -452,7 +476,7 @@ def test_cmd_start_needs_yes_and_contacts_nothing(moon: FakeMoonraker, env: Path
 @pytest.mark.parametrize("state", ["printing", "paused"])
 def test_cmd_start_refused_when_busy(moon: FakeMoonraker, env: Path, tmp_path: Path, state: str) -> None:
     g = gcode(tmp_path)
-    moon.files["part.gcode"] = g.stat().st_size
+    moon.put(safe_remote_name(g), g.read_bytes())
     moon.status = u1_status(state, "other.gcode")
     write_devices(env, moon=moon)
     with pytest.raises(PrinterRefused, match=f"is {state}"):
@@ -467,10 +491,32 @@ def test_cmd_start_refused_when_file_not_uploaded(moon: FakeMoonraker, env: Path
     assert moon.writes() == []
 
 
+def test_cmd_start_refuses_a_same_size_file_with_other_content(moon: FakeMoonraker, env: Path,
+                                                               tmp_path: Path, thumbs_ok: None) -> None:
+    """Review #132: a stale/overwritten remote file of the same length must not be started.
+    (a) the local file changed after upload: its content-addressed name is no longer there;
+    (b) the stored bytes under the right name differ: the read-back hash catches it."""
+    g = gcode(tmp_path)
+    write_devices(env, moon=moon)
+    assert printer("upload", "u1", str(g)) == 0
+    original = g.read_bytes()
+    g.write_bytes(original.replace(b"X10", b"X99"))  # same length, different content
+    with pytest.raises(PrinterRefused, match="absent"):
+        printer("start", "u1", str(g), "--yes")
+
+    g.write_bytes(original)
+    tampered = original.replace(b"X20", b"X88")
+    assert len(tampered) == len(original)
+    moon.put(safe_remote_name(g), tampered)
+    with pytest.raises(PrinterRefused, match="different content"):
+        printer("start", "u1", str(g), "--yes", "--force")
+    assert [r.path for r in moon.writes()] == ["/server/files/upload"]
+
+
 def test_cmd_start_refused_on_preflight_fail_and_forced(moon: FakeMoonraker, env: Path, tmp_path: Path,
                                                         thumbs_ok: None, capsys: pytest.CaptureFixture[str]) -> None:
     g = gcode(tmp_path, U1_GCODE.replace("#1B5E20;#FFFFFF\n; filament_type", "#FF0000;#FFFFFF\n; filament_type"))
-    moon.files["part.gcode"] = g.stat().st_size
+    moon.put(safe_remote_name(g), g.read_bytes())
     write_devices(env, moon=moon)
     with pytest.raises(PrinterRefused, match="preflight FAIL"):
         printer("start", "u1", str(g), "--yes")
@@ -479,25 +525,39 @@ def test_cmd_start_refused_on_preflight_fail_and_forced(moon: FakeMoonraker, env
 
     assert printer("start", "u1", str(g), "--yes", "--force") == 0
     out = capsys.readouterr().out
-    assert "FORCED" in out and "slot T2" in out
-    assert [(r.path, r.query) for r in moon.writes()] == [("/printer/print/start", {"filename": ["part.gcode"]})]
+    assert "FORCED" in out and "slot T2" in out and "read-back sha256 matches" in out
+    assert [(r.path, r.query) for r in moon.writes()] == [
+        ("/printer/print/start", {"filename": [safe_remote_name(g)]})]
 
 
 def test_cmd_start_happy_path_k1(k1: FakeCreality, env: Path, tmp_path: Path, thumbs_ok: None,
                                  capsys: pytest.CaptureFixture[str]) -> None:
     g = gcode(tmp_path, "G28\nG1 X1\n", "roof.gcode")
-    k1.files["roof.gcode"] = g.stat().st_size
+    remote = safe_remote_name(g)
+    k1.files[remote] = g.stat().st_size
     write_devices(env, k1=k1)
     assert printer("start", "k1se", str(g), "--yes", "--secs", "0.3") == 0
     assert [c["params"] for c in k1.ws_commands() if c.get("method") == "set"] == [
-        {"opGcodeFile": "printprt:/usr/data/printer_data/gcodes/roof.gcode"}]
-    assert "start sent" in capsys.readouterr().out
+        {"opGcodeFile": f"printprt:/usr/data/printer_data/gcodes/{remote}"}]
+    out = capsys.readouterr().out
+    assert "start acknowledged" in out and "content hash in the file name + size" in out
+
+
+def test_cmd_start_k1_without_ack_reports_unknown(k1: FakeCreality, env: Path, tmp_path: Path,
+                                                  thumbs_ok: None) -> None:
+    g = gcode(tmp_path, "G28\nG1 X1\n", "roof.gcode")
+    k1.files[safe_remote_name(g)] = g.stat().st_size
+    k1.start_reply = "close"
+    write_devices(env, k1=k1)
+    with pytest.raises(PrinterCommError, match="outcome UNKNOWN") as info:
+        printer("start", "k1se", str(g), "--yes", "--secs", "0.3")
+    assert "Do NOT resend" in info.value.render(color=False)
 
 
 def test_cmd_start_failure_is_reported_unknown_not_resent(moon: FakeMoonraker, env: Path, tmp_path: Path,
                                                           thumbs_ok: None, monkeypatch: pytest.MonkeyPatch) -> None:
     g = gcode(tmp_path)
-    moon.files["part.gcode"] = g.stat().st_size
+    moon.put(safe_remote_name(g), g.read_bytes())
     write_devices(env, moon=moon)
     calls: list[str] = []
 
@@ -508,7 +568,27 @@ def test_cmd_start_failure_is_reported_unknown_not_resent(moon: FakeMoonraker, e
     monkeypatch.setattr(moonraker.MoonrakerAdapter, "start", boom)
     with pytest.raises(PrinterCommError, match="outcome UNKNOWN"):
         printer("start", "u1", str(g), "--yes")
-    assert calls == ["part.gcode"]
+    assert calls == [safe_remote_name(g)]
+
+
+def test_cmd_start_status_failure_after_ack_is_unknown(moon: FakeMoonraker, env: Path, tmp_path: Path,
+                                                       thumbs_ok: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review #132: the start was acknowledged, then the printer went quiet — still UNKNOWN."""
+    g = gcode(tmp_path)
+    moon.put(safe_remote_name(g), g.read_bytes())
+    write_devices(env, moon=moon)
+    real_status = moonraker.MoonrakerAdapter.status
+
+    def status(self: moonraker.MoonrakerAdapter) -> PrinterStatus:
+        if any(r.path == "/printer/print/start" for r in moon.writes()):
+            raise self._comm_error("objects/query", TimeoutError("timed out"))
+        return real_status(self)
+
+    monkeypatch.setattr(moonraker.MoonrakerAdapter, "status", status)
+    with pytest.raises(PrinterCommError, match="acknowledged.*outcome UNKNOWN") as info:
+        printer("start", "u1", str(g), "--yes")
+    assert "Do NOT resend" in info.value.render(color=False)
+    assert len([r for r in moon.writes() if r.path == "/printer/print/start"]) == 1
 
 
 def test_cmd_cancel_needs_yes_and_an_active_job(moon: FakeMoonraker, env: Path) -> None:
@@ -775,7 +855,7 @@ def test_creality_extra_state_codes(fields: dict[str, Any], norm: str) -> None:
 def test_cmd_start_k1_refuses_a_plate_that_leaves_the_axis(k1: FakeCreality, env: Path, tmp_path: Path,
                                                            thumbs_ok: None, capsys: pytest.CaptureFixture[str]) -> None:
     g = gcode(tmp_path, plate("G1 X62.83 Y2.774 E1\nG3 Z1.36 I-.359 J-1.79 P1\n"), "edge.gcode")
-    k1.files["edge.gcode"] = g.stat().st_size
+    k1.files[safe_remote_name(g)] = g.stat().st_size
     write_devices(env, k1=k1)
     with pytest.raises(PrinterRefused, match="preflight FAIL"):
         printer("start", "k1se", str(g), "--yes", "--secs", "0.3")
@@ -983,3 +1063,168 @@ def test_quoted_and_malformed_offset_values(tmp_path: Path) -> None:
     assert [(v.x, v.y) for v in rep.axis_out] == [(240.0, 10.0)]
     rep = bounds(tmp_path, plate("G1 X10 Y10\nSET_GCODE_OFFSET X=abc\nG1 X10 Y10\n"))
     assert rep.axis_out_count == 0 and any("non-numeric" in u for u in rep.unverified)
+
+
+# ---- review #132: macros hide moves -------------------------------------------------------
+
+def test_macros_are_recorded_and_fail_unless_trusted(tmp_path: Path) -> None:
+    """WIPE_NOZZLE may run `G1 X300` inside: its body is invisible, so an untrusted macro FAILs."""
+    rep = bounds(tmp_path, plate("G1 X10 Y10 E1\nWIPE_NOZZLE\nG1 X20 Y20\nwipe_nozzle SPEED=5\n"
+                                 "SET_VELOCITY_LIMIT ACCEL=5000\nM600\nG4 P10\n"))
+    assert rep.macros == {"WIPE_NOZZLE": [2, 9], "M600": [1, 13]}
+    macros = preflight.check_macros(rep, frozenset())
+    assert [c.status for c in macros] == ["FAIL"] and "WIPE_NOZZLE×2 (line 9)" in macros[0].detail
+    assert preflight.check_macros(rep, frozenset({"WIPE_NOZZLE", "M600"}))[0].status == "PASS"
+    assert preflight.check_macros(bounds(tmp_path, plate("G1 X10 Y10 E1\n")), frozenset()) == []
+
+
+def test_position_and_e_are_unknown_after_a_macro(tmp_path: Path) -> None:
+    rep = bounds(tmp_path, plate("G1 X10 Y10\nPARK_HEAD\nG91\nG1 X5\nG90\n"))
+    assert rep.unverified_count == 1 and "unknown position" in rep.unverified[0]
+
+
+def test_command_word_normalizes() -> None:
+    cw = move_bounds.command_word
+    assert [cw("G01 X1"), cw("g1"), cw("M0104 S200"), cw("T12"), cw("my_macro A=1"), cw("  ; x"), cw("")] == [
+        "G1", "G1", "M104", "T12", "MY_MACRO", None, None]
+
+
+def test_trusted_macros_come_from_the_device_config(env: Path, tmp_path: Path) -> None:
+    from commands.gcode_bounds import run
+    from errors import GateFailure
+    from printer_ops import trusted_macros_for
+
+    (env / "3d-cli").mkdir(parents=True)
+    (env / "3d-cli" / "printer-devices.yaml").write_text(
+        "k1se: {adapter: creality-stock, host: h, axis_limits: {x: [-5, 229], y: [-0.5, 227]},"
+        " trusted_macros: [pause, START_PRINT]}\n", encoding="utf-8")
+    assert trusted_macros_for("k1se") == {"PAUSE", "START_PRINT"}
+    assert trusted_macros_for("-5:229,-0.5:227") == frozenset() and trusted_macros_for(None) == frozenset()
+    g = gcode(tmp_path, plate("G1 X10 Y10 E1\nPAUSE\nG1 X20 Y20\n"), "p.gcode")
+    assert run([str(g), "--printer", "k1se"]) == 0
+    with pytest.raises(GateFailure):
+        run([str(g), "--axis-limits", "-5:229,-0.5:227"])
+    (env / "3d-cli" / "printer-devices.yaml").write_text(
+        "k1se: {adapter: creality-stock, host: h, trusted_macros: PAUSE}\n", encoding="utf-8")
+    with pytest.raises(InvalidArgument):
+        devices.load_devices()
+
+
+def test_cmd_start_refuses_an_untrusted_macro_without_force(moon: FakeMoonraker, env: Path, tmp_path: Path,
+                                                            thumbs_ok: None) -> None:
+    g = gcode(tmp_path, U1_GCODE.replace("G28\n", "G28\nWIPE_NOZZLE\n"))
+    moon.put(safe_remote_name(g), g.read_bytes())
+    write_devices(env, moon=moon)
+    with pytest.raises(PrinterRefused, match="preflight FAIL"):
+        printer("start", "u1", str(g), "--yes")
+    assert moon.writes() == []
+    assert printer("start", "u1", str(g), "--yes", "--force") == 0
+
+
+# ---- review #132, second round ------------------------------------------------------------
+
+def test_g1_and_t_lookalike_macros_are_macros(tmp_path: Path) -> None:
+    cw = move_bounds.command_word
+    assert [cw("G1_WIPE"), cw("M104_MOVE S1"), cw("G1X10Y10"), cw("T0"), cw("G38.2 X1")] == [
+        "G1_WIPE", "M104_MOVE", "G1", "T0", "G38.2"]
+    rep = bounds(tmp_path, plate("G1 X10 Y10 E1\nG1_WIPE\nT0\n"))
+    assert set(rep.macros) == {"G1_WIPE", "T0"}
+
+
+def test_printer_trust_is_not_borrowed_from_axis_limits_printer(env: Path, tmp_path: Path) -> None:
+    from commands.gcode_bounds import run
+    from errors import GateFailure
+
+    (env / "3d-cli").mkdir(parents=True)
+    (env / "3d-cli" / "printer-devices.yaml").write_text(
+        "a: {adapter: moonraker, host: h, axis_limits: {x: [0, 300], y: [0, 300]}}\n"
+        "b: {adapter: moonraker, host: h, axis_limits: {x: [0, 300], y: [0, 300]}, trusted_macros: [WIPE]}\n",
+        encoding="utf-8")
+    g = gcode(tmp_path, plate("G1 X10 Y10 E1\nWIPE\n"), "w.gcode")
+    assert run([str(g), "--axis-limits", "b"]) == 0
+    with pytest.raises(GateFailure):
+        run([str(g), "--printer", "a", "--axis-limits", "b"])
+
+
+def test_creality_cancel_finishing_on_the_same_file_is_no_ack(k1: FakeCreality) -> None:
+    k1.state = k1_state(7, 1, "roof.gcode")
+    k1.start_reply = "silent"
+    with pytest.raises(PrinterCommError, match="no acknowledgement"):
+        k1_adapter(k1).start("roof.gcode")
+
+
+def test_cmd_start_unknown_state_after_ack_is_unknown(moon: FakeMoonraker, env: Path, tmp_path: Path,
+                                                      thumbs_ok: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    g = gcode(tmp_path)
+    moon.put(safe_remote_name(g), g.read_bytes())
+    write_devices(env, moon=moon)
+    real_status = moonraker.MoonrakerAdapter.status
+
+    def status(self: moonraker.MoonrakerAdapter) -> PrinterStatus:
+        st = real_status(self)
+        if any(r.path == "/printer/print/start" for r in moon.writes()):
+            st.state, st.raw_state = "unknown", "klippy:shutdown"
+        return st
+
+    monkeypatch.setattr(moonraker.MoonrakerAdapter, "status", status)
+    with pytest.raises(PrinterCommError, match="state is unknown.*outcome UNKNOWN") as info:
+        printer("start", "u1", str(g), "--yes")
+    assert "Do NOT resend" in info.value.render(color=False)
+
+
+def test_cmd_start_preflights_the_same_bytes_it_compared(moon: FakeMoonraker, env: Path, tmp_path: Path,
+                                                         thumbs_ok: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review #132: the slicer rewrites FILE after the hash check; preflight must still see the
+    bytes that are on the printer (here: off the axis), not the new safe-looking file."""
+    a = U1_GCODE.replace("G1 X30 Y30 E1", "G1 X300 Y30 E1")
+    g = gcode(tmp_path, a)
+    moon.put(safe_remote_name(g), g.read_bytes())
+    write_devices(env, moon=moon)
+    real_hash = moonraker.MoonrakerAdapter.remote_sha256
+
+    def hash_then_rewrite(self: moonraker.MoonrakerAdapter, name: str) -> str | None:
+        digest = real_hash(self, name)
+        g.write_text(a.replace("X300", "X030"), encoding="utf-8")  # same length, now in bounds
+        return digest
+
+    monkeypatch.setattr(moonraker.MoonrakerAdapter, "remote_sha256", hash_then_rewrite)
+    with pytest.raises(PrinterRefused, match="preflight FAIL"):
+        printer("start", "u1", str(g), "--yes")
+    assert moon.writes() == []
+
+
+def test_ws_connection_reset_counts_as_closed() -> None:
+    a, b = socket.socketpair()
+    try:
+        client = ws.WebSocket(a)
+        b.close()
+        with pytest.raises(ws.WebSocketClosed):
+            client.recv(1.0)
+        with pytest.raises(ws.WebSocketClosed):
+            for _ in range(50):  # the first sends may still be buffered by the kernel
+                client.send_text("x" * 65536)
+    finally:
+        a.close()
+
+
+def test_cmd_upload_sends_the_bytes_it_named(moon: FakeMoonraker, env: Path, tmp_path: Path,
+                                             monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review #132: a rewrite of FILE between naming and sending must not store other bytes
+    under the first content's hash."""
+    g = gcode(tmp_path)
+    original = g.read_bytes()
+    write_devices(env, moon=moon)
+    real_status = moonraker.MoonrakerAdapter.status
+
+    def status_then_rewrite(self: moonraker.MoonrakerAdapter) -> PrinterStatus:
+        st = real_status(self)
+        g.write_bytes(original.replace(b"X10", b"X99"))  # same length, other content
+        return st
+
+    monkeypatch.setattr(moonraker.MoonrakerAdapter, "status", status_then_rewrite)
+    assert printer("upload", "u1", str(g)) == 0
+    import hashlib
+
+    (stored_name,) = moon.contents
+    assert moon.contents[stored_name] == original
+    assert stored_name == f"part-{hashlib.sha256(original).hexdigest()[:16]}.gcode"

@@ -31,6 +31,7 @@ USAGE = """3d print-preflight FILE.gcode [--printer NAME] [--axis-limits X0:X1,Y
                stays inside the printer's X/Y limits; SKIP when the limits are unknown
   print area   plate moves stay inside the G-code's `; printable_area`; no extruding path
                through `; bed_exclude_area` (vendor `;TYPE:Custom` blocks exempt)
+  macros       every macro the G-code calls is in the printer's trusted_macros
 
 Options:
   --printer NAME       a printer from printer-devices.yaml (see `3d printer list`); its state
@@ -93,19 +94,22 @@ def run(argv: list[str]) -> int:
 
     from printer_ops.preflight import FAIL, run_preflight
 
-    from printer_ops import adapter_by_name, limits_from_option
+    from printer_ops import adapter_by_name, limits_from_option, trusted_macros_for
 
     status = None
     limits, limits_source = None, "no --printer or --axis-limits given"
+    trusted = frozenset() if "--printer" in opts else trusted_macros_for(opts.get("--axis-limits"))
     if "--axis-limits" in opts:
         limits, limits_source = limits_from_option(opts["--axis-limits"], command="print-preflight")
     if "--printer" in opts:
         adapter = adapter_by_name(opts["--printer"], secs=opts.get("--secs"), command="print-preflight")
+        trusted = adapter.trusted_macros  # this printer's macros only, whatever --axis-limits names
         status = adapter.status()
         if "--axis-limits" not in opts:
             limits, limits_source = adapter.axis_limits()
 
-    report = run_preflight(gcode, status=status, source_3mf=source, axis_limits=limits, limits_source=limits_source)
+    report = run_preflight(gcode, status=status, source_3mf=source, axis_limits=limits, limits_source=limits_source,
+                           trusted_macros=trusted)
     print(json.dumps(report.to_json(), indent=1) if "--json" in opts else report.render())
     if report.overall == FAIL:
         raise GateFailure("preflight FAIL", command="print-preflight", silent=True)
