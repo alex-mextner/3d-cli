@@ -8,7 +8,8 @@ MODEL (plan §5.3, migration 0020): remaining = the newest anchor (a weighing, a
 received with a known net, `empty`) + Σ deltas booked after it. Each row carries confidence_g
 (± grams, σ); the half-width of the interval is the root-sum-square of the anchor's σ and every
 later delta's σ, so a weighing resets the accumulated error. A spool with no anchor yet has an
-unknown remaining: the interval is [0, Spoolman's remaining] and it is flagged `anchored=False`.
+unknown remaining: the interval is [0, Spoolman's remaining] and it is flagged `anchored=False`;
+with no Spoolman remaining either (no label net known) it is `bounded=False` and shown as unknown.
 
 INVARIANTS:
   - The ledger is append-only (DB triggers); a mistake is fixed by booking a correction.
@@ -69,6 +70,9 @@ class Interval:
     anchor_source: str | None
     last_weighed_at: str | None
     deltas: int  # delta rows booked since the anchor
+    bounded: bool = (
+        True  # False: no anchor and no Spoolman remaining, so not even an upper bound
+    )
 
     @property
     def lo(self) -> float:
@@ -85,6 +89,7 @@ class Interval:
             "lo_g": round(self.lo, 1),
             "hi_g": round(self.hi, 1),
             "anchored": self.anchored,
+            "bounded": self.bounded,
             "anchor_at": self.anchor_at,
             "anchor_source": self.anchor_source,
             "last_weighed_at": self.last_weighed_at,
@@ -93,6 +98,8 @@ class Interval:
 
     def text(self) -> str:
         if not self.anchored:
+            if not self.bounded:
+                return "unknown (never weighed)"
             return f"≤{self.hi:.0f} g (never weighed)"
         return f"{self.mid:.0f} ± {self.sigma:.0f} g ({self.lo:.0f}–{self.hi:.0f})"
 
@@ -184,6 +191,7 @@ def estimate(
             anchor_source=None,
             last_weighed_at=weighed,
             deltas=n_deltas,
+            bounded=fallback_g is not None,
         )
     var += float(anchor["confidence_g"]) ** 2
     return Interval(

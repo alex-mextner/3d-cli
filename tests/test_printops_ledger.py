@@ -384,3 +384,11 @@ def test_datalint_runs_every_rule_module_and_survives_a_crash(
     )
     found = datalint.run(ctx)
     assert any(f.rule == "spools/crashed" and "bad rule" in f.message for f in found)
+
+
+def test_spool_without_any_weight_is_unknown_not_zero(printops_db: sqlite3.Connection, sm: FakeSpoolman) -> None:
+    """An imported spool with no label net: Spoolman has no remaining, so nothing bounds it."""
+    sp = _spool(sm, weight=None)
+    est = ledger.remaining(printops_db, sm, sp["id"])
+    assert "remaining_weight" not in sp and not est.bounded
+    assert est.text() == "unknown (never weighed)" and est.to_dict()["bounded"] is False

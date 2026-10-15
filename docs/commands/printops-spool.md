@@ -22,6 +22,8 @@ with its own uncertainty, so remaining is always shown as an **interval**.
   `--scale-sigma`). The jump between the old estimate and the weighing is stored on the
   anchor row (`drift`), printed by `measure`, and is what reconcile learns from.
 - A spool never anchored shows `≤N g (never weighed)` where N is Spoolman's remaining.
+  With no Spoolman remaining either (no label net, e.g. an `import-owned` spool) it shows
+  `unknown (never weighed)`.
 - The ledger is append-only (DB triggers): a wrong booking is fixed by booking a correction
   (`use ID -12`).
 
