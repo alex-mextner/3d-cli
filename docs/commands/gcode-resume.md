@@ -101,8 +101,9 @@ per-change purge lines stay no-ops.
 ## Assumptions
 
 Orca / Snapmaker Orca G-code: `;LAYER_CHANGE` `;Z:` … `;AFTER_LAYER_CHANGE` per layer,
-`EXCLUDE_OBJECT` blocks, `M83` relative E (M82 is refused), absolute X/Y (relative X/Y
-under `G91` and `G92 Z` in the layers are refused: the tower, arc and Z checks could not track them), bare `T<n>` tool changes,
+`EXCLUDE_OBJECT` blocks, `M83` relative E (M82 is refused), absolute X/Y and I/J arcs
+(relative X/Y under `G91`, radius-form `G2/G3 R` arcs and `G92 X/Y/Z` offsets are refused: the
+tower, arc and Z checks could not track them), bare `T<n>` tool changes,
 `; EXECUTABLE_BLOCK_START/END`, statistics before `; CONFIG_BLOCK_START`. Logical tools map 1:1
 to heads, as in the original job.
 

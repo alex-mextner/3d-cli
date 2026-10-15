@@ -57,9 +57,10 @@ CMD = "gcode-resume"
 HEADER_START = "; ===== RESUME of"
 HEADER_END = "; ===== end of resume header: original G-code follows ====="
 
-NUM = re.compile(rb"([XYZEFIJ])(-?\d*\.?\d+)")
+NUM = re.compile(rb"([XYZEFIJR])(-?\d*\.?\d+)")
 TOOL = re.compile(rb"^T(\d+)\s*$")
 Z_MARGIN = 1.0  # mm kept below stepper_z.position_max (head G-code offsets, bed mesh)
+TOWER_CLEARANCE = 2.0  # mm above the old prime tower top for every X/Y move over it
 
 
 def _bad(msg: str) -> UsageError:
@@ -499,23 +500,27 @@ class Resume:
 
 
 def _refuse_untracked_moves(w: Walk) -> None:
-    """fail-closed on what the passes do not track (issue #238 review 8): relative X/Y (G91) would make the tower
-    area, the arc starts and the tower-crossing checks unknown, and G92 Z would shift every Z the safety checks see"""
+    """fail-closed on what the passes do not track: relative X/Y (G91) and radius-form arcs would make the tower
+    area, the arc paths and the tower-crossing checks unknown, and G92 X/Y/Z would shift the coordinates the safety
+    checks compare"""
     rel = False
     for i in range(w.exec_lo, w.exec_hi):
         line = w.lines[i]
-        if i < w.layers[0]["start"]:  # start G-code: only its Z offset matters (it is not copied)
-            if line.startswith(b"G92") and "Z" in words(line):
-                raise _bad(f"line {i + 1}: G92 Z (Z offset) is not supported")
+        if i < w.layers[0]["start"]:  # start G-code: only its offsets matter (it is not copied)
+            if line.startswith(b"G92") and {"X", "Y", "Z"} & set(words(line)):
+                raise _bad(f"line {i + 1}: G92 X/Y/Z (coordinate offset) is not supported")
             continue
         if line.startswith(b"G91"):
             rel = True
         elif line.startswith(b"G90"):
             rel = False
-        elif line.startswith(b"G92") and "Z" in words(line):
-            raise _bad(f"line {i + 1}: G92 Z (Z offset) is not supported")
-        elif rel and (m := move(line)) is not None and ("X" in m or "Y" in m):
-            raise _bad(f"line {i + 1}: relative X/Y move (G91) is not supported")
+        elif line.startswith(b"G92") and {"X", "Y", "Z"} & set(words(line)):
+            raise _bad(f"line {i + 1}: G92 X/Y/Z (coordinate offset) is not supported")
+        elif (m := move(line)) is not None:
+            if rel and ("X" in m or "Y" in m):
+                raise _bad(f"line {i + 1}: relative X/Y move (G91) is not supported")
+            if "arc" in m and ("R" in m or not ("I" in m or "J" in m)):
+                raise _bad(f"line {i + 1}: radius-form arc (G2/G3 R) is not supported: its centre is not tracked")
 
 
 def build(
@@ -623,11 +628,11 @@ def build(
     z_lim = profile.z_max_mm - Z_MARGIN  # highest G-code Z the header and the tower lifts may use
     tower_top_eff = tower_top if tower_top is not None else max(LR["z"], z_seen or 0.0)  # no tower: unused
     # everything already standing on the bed: the part, whatever the paused job reached, the old tower
-    z_need = max(LR["z"] + 0.6, z_seen or 0.0, tower_top_eff + 2.0 if tower else 0.0)
+    z_need = max(LR["z"] + 0.6, z_seen or 0.0, tower_top_eff + TOWER_CLEARANCE if tower else 0.0)
     z_travel = min(z_need + profile.clearance_mm, z_lim)
     if z_travel < z_need:
         raise _bad(f"no room above the part: needs Z {z_need:.2f}, axis limit {fmt(profile.z_max_mm)} - {fmt(Z_MARGIN)}")
-    tower_safe_z = tower_top_eff + 2.0
+    tower_safe_z = tower_top_eff + TOWER_CLEARANCE
     out_r: dict[int, float] = {}
     purged: dict[int, float] = {}  # filament the off-bed purges consume: counted in the statistics
     out: list[bytes] = []
@@ -1037,7 +1042,9 @@ def z_range_check(out: list[bytes], z_hi: float) -> None:
         elif code.startswith(b"G90"):
             rel = False
         elif code.startswith(b"G92"):
-            z = words(code).get("Z", z)
+            if {"X", "Y", "Z"} & set(words(code)):  # a coordinate offset would hide the real Z
+                raise GateFailure(f"output line {n}: coordinate offset {code.decode()} after the RESUME marker",
+                                  command=CMD)
         elif code.startswith(b"G28"):
             z = None
         else:

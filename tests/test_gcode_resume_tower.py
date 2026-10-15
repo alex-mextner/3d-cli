@@ -17,7 +17,7 @@ import pytest
 import yaml
 
 import gcode_resume as gr
-from errors import GateFailure, UsageError
+from errors import GateFailure, ThreeDError, UsageError
 from gcode_resume_fixtures import U1_RESUME_YAML
 from printer_ops import devices
 
@@ -215,7 +215,9 @@ def test_tower_at_z_ceiling_refused() -> None:
 @pytest.mark.parametrize(("old", "new", "match"), [
     ("G1 X90 Y40 E1\n", "G91\nG1 X1 E0.1\nG90\nG1 X90 Y40 E1\n", "relative X/Y"),   # G91 extrusion (tower or not)
     ("G1 X90 Y40 E1\n", "G91\nG2 X1 Y1 I1 J0\nG90\nG1 X90 Y40 E1\n", "relative X/Y"),  # G91 arc travel
-    ("G92 E0\n", "G92 Z0.5 E0\n", "G92 Z"),
+    ("G92 E0\n", "G92 Z0.5 E0\n", "G92 X/Y/Z"),
+    ("G92 E0\n", "G92 X0 Y0 E0\n", "G92 X/Y/Z"),
+    ("G1 X90 Y40 E1\n", "G2 X40 Y210 R90\nG1 X90 Y40 E1\n", "radius-form arc"),
 ])
 def test_untracked_moves_are_refused(old: str, new: str, match: str) -> None:
     # issue #238 review 8: relative X/Y and G92 Z are not tracked by the tower/arc/Z passes: fail closed
@@ -241,5 +243,19 @@ def test_tower_top_must_be_a_real_height(bad: float) -> None:
 
 def test_g92_z_in_the_start_gcode_is_refused() -> None:
     # review: the start G-code is not copied, so a Z offset there would silently change the frame
-    with pytest.raises(UsageError, match="G92 Z"):
+    with pytest.raises(UsageError, match="G92 X/Y/Z"):
         run(synthetic().replace("G90\nM83\nT0", "G90\nG92 Z10\nM83\nT0", 1), layer=3, tower_top=0.4)
+
+
+def test_start_commands_cannot_offset_z() -> None:
+    # review: a profile start command `G92 Z274` after the lift would make the final Z pass see a fake frame
+    profile = dataclasses.replace(PROFILE, start_commands=("G92 Z274",))
+    with pytest.raises(GateFailure, match="coordinate offset"):
+        gr.build(gr.Walk(synthetic().encode().split(b"\n")), profile, name="in.gcode", layer=3, tower_top=0.4)
+
+
+def test_z_max_must_be_finite() -> None:
+    data = yaml.safe_load(U1_RESUME_YAML)
+    data["u1"]["resume"]["z_max_mm"] = math.inf
+    with pytest.raises(ThreeDError, match="z_max_mm"):
+        devices._parse(Path("x.yaml"), data)

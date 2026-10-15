@@ -172,8 +172,8 @@ def _resume(value: Any, name: str, path: Path) -> ResumeProfile:
                               command="printer", extra=f"Fix {path}.")
     for key in _RESUME_NUMBERS:
         v = value[key]
-        if isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0:
-            raise InvalidArgument(f"{name}.resume.{key}", str(v), ["a number >= 0"], command="printer",
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not (math.isfinite(v) and v >= 0):
+            raise InvalidArgument(f"{name}.resume.{key}", str(v), ["a finite number >= 0"], command="printer",
                                   extra=f"Fix {path}.")
     if not isinstance(cmds, list) or not all(isinstance(c, str) and c.strip() for c in cmds):
         raise InvalidArgument(f"{name}.resume.start_commands", str(cmds), ["a list of G-code lines, may be []"],
