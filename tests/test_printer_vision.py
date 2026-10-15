@@ -24,6 +24,7 @@ from printer_ops import vision
 from printer_ops.base import PrinterCommError
 from printer_ops.vision import (
     CRITICAL,
+    EOI_TAIL_MAX,
     WARNING,
     FailureTracker,
     Frame,
@@ -33,10 +34,15 @@ from printer_ops.vision import (
     NpuVerdict,
     VisionMonitor,
     is_complete_jpeg,
+    jpeg_frame,
     parse_klippy_verdicts,
 )
 
-JPEG = b"\xff\xd8" + b"\x00" * 64 + b"\xff\xd9"
+# SOI, APP0 (16-byte segment), SOS (8-byte header), scan data with a stuffed 0xFF, EOI.
+JPEG = (
+    b"\xff\xd8\xff\xe0\x00\x10" + b"\x00" * 14 + b"\xff\xda\x00\x08" + b"\x00" * 6
+    + b"\x12\x34\xff\x00\x56" * 8 + b"\xff\xd9"
+)
 NOW = datetime(2026, 10, 14, 13, 50, tzinfo=timezone.utc).timestamp()
 
 # verbatim lines from the U1's klippy.log (2026-10-14)
@@ -82,7 +88,7 @@ class FakeCam:
             def do_GET(self) -> None:
                 path = self.path.split("?", 1)[0]
                 fake.requests.append(("GET", path, self.headers.get("Range")))
-                if path == "/server/files/camera/monitor.jpg":
+                if path in ("/server/files/camera/monitor.jpg", "/webcam/"):
                     code, body = fake.replies.pop(0) if fake.replies else (200, JPEG)
                     self._send(
                         code, body, {"Last-Modified": "Wed, 14 Oct 2026 13:40:07 GMT"}
@@ -132,6 +138,50 @@ def test_complete_jpeg_needs_soi_and_eoi() -> None:
     assert is_complete_jpeg(JPEG)
     assert not is_complete_jpeg(JPEG[:-2])
     assert not is_complete_jpeg(b"<html>502</html>")
+
+
+def test_streamer_frame_accepts_encoder_padding_after_eoi() -> None:
+    # K1 SE mjpg-streamer: 25 filler bytes after FFD9 (captured 2026-10-15).
+    padded = JPEG + b"\x14E\x14\x00Q" * 5
+    assert is_complete_jpeg(padded, EOI_TAIL_MAX)
+    assert jpeg_frame(padded, EOI_TAIL_MAX) == JPEG  # filler dropped: frozen camera hashes same
+    assert not is_complete_jpeg(JPEG + b"\x14" * 200, EOI_TAIL_MAX)
+    assert jpeg_frame(JPEG + b"\x14\xff\xd9", EOI_TAIL_MAX) == JPEG  # FFD9 in filler ignored
+
+
+def test_in_place_file_rejects_a_tail_after_eoi() -> None:
+    # A half-rewritten monitor.jpg can end in the old frame's EOI plus leftover bytes.
+    assert not is_complete_jpeg(JPEG + b"\x14E\x14\x00Q")
+    assert is_complete_jpeg(JPEG + b"\x00" * 2000)  # zero fill is still fine
+
+
+def test_markers_inside_segment_payloads_do_not_count() -> None:
+    # FFD9 in a COM payload of a file cut before its scan.
+    assert not is_complete_jpeg(b"\xff\xd8\xff\xfe\x00\x06\xff\xd9\x00\x00", EOI_TAIL_MAX)
+    # Fake SOS and EOI both inside a COM payload, no real scan.
+    assert not is_complete_jpeg(
+        b"\xff\xd8\xff\xfe\x00\x0a\xff\xda\x11\x22\xff\xd9\x33\x44", EOI_TAIL_MAX
+    )
+    # A truncated scan never reaches EOI.
+    assert not is_complete_jpeg(JPEG[:-6], EOI_TAIL_MAX)
+
+
+def test_grab_from_a_streamer_drops_encoder_padding() -> None:
+    with FakeCam(replies=[(200, JPEG + b"\x14E\x14\x00Q" * 5)]).serve() as fake:
+        url = f"http://127.0.0.1:{fake.port}/webcam/?action=snapshot"
+        frame = MoonrakerCamera("127.0.0.1", fake.port, snapshot=url, retry_delay=0).grab()
+    assert frame.jpeg == JPEG
+
+
+def test_full_u1_monitor_url_is_still_treated_as_an_in_place_file() -> None:
+    url = "http://192.168.0.26:7125/server/files/camera/monitor.jpg"
+    assert MoonrakerCamera("192.168.0.26", snapshot=url).tail_max == 0
+    proxied = "http://printer/moonraker/server/files/camera/monitor.jpg"
+    assert MoonrakerCamera("printer", snapshot=proxied).tail_max == 0
+
+
+def test_tem_marker_in_scan_is_standalone() -> None:
+    assert jpeg_frame(JPEG[:-2] + b"\xff\x01" + JPEG[-2:]) == JPEG[:-2] + b"\xff\x01\xff\xd9"
 
 
 def test_grab_retries_500_and_truncated_frames_then_returns_the_complete_one() -> None:
