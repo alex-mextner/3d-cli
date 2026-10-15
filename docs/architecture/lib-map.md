@@ -86,6 +86,11 @@ Target package: `lib/geometry/`, with subpackages only when a real boundary appe
   empty-spool weight DB + per-spool tare chain), `importers.py` (`gen/plates.json` → import
   items); `datalint.py` runs every `lint_<slice>.py` data rule (`lint_spools.py`) for
   `GET /v1/lint` / `3d lint --printops`.
+  Incidents (#165): `incidents.py` (structured incidents, lifecycle, rates per kg / print-hour),
+  `incident_context.py` (auto-context: printer status, G-code state at the cursor via
+  `gcode_resume.state_at`, slot spool → lot, drying), `exposure.py` (printing exposure per head
+  from Moonraker job history / manual rows), `watch_incidents.py` (drafts from `3d printer watch`
+  events), `printer_read.py` (read-only printer access: status, Moonraker GET, G-code download).
 
 Target package: `lib/slicing/` for slicer orchestration, dry-run print planning, printer
 job state, and future sender integrations.
@@ -176,7 +181,7 @@ Every current root Python module is listed here so future additions are intentio
 - `fit_camera.py` — camera fitting implementation.
 - `fit_camera_math.py` — import-light camera pose and proof-status math helpers.
 - `fit_check.py` — already-printed insert vs its socket: printed-size lock, per-layer clearance (manifold3d slices, shapely distances) and the open path along the insertion direction; backs `3d fit-check`.
-- `gcode_resume.py` — resume a stopped multi-head Orca print above a layer (layer walk, machine state at a byte, resume header from the device's `resume:` profile, per-head retraction tracking, `--no-tower` off-bed purges); stdlib-only; backs `3d gcode-resume`.
+- `gcode_resume.py` — resume a stopped multi-head Orca print above a layer (layer walk, machine state at a byte, resume header from the device's `resume:` profile, per-head retraction tracking, `--no-tower` off-bed purges); stdlib-only; backs `3d gcode-resume`. Its per-line parser (`advance`) and the streamed `state_at` (machine state at a printer's byte cursor or a layer) also give PrintOps incidents their G-code context.
 - `gcode_overhangs.py` — extrusion printed on nothing per object and layer of a sliced G-code (numpy/scipy raster of each layer's carrier, sparse reach/bridge/step-out tests on the pixels that stick out, layers split over forked workers); backs `3d gcode-overhangs` and the `overhangs` gate of `print-preflight`.
 - `gcode_thumbnails.py` — printer-screen thumbnail blocks in G-code: stdlib-only check against the profile's `thumbnails` spec, Orca-format block writer, z-buffered toolpath preview render (numpy); backs `3d gcode-thumbnails`.
 - `frame_check.py` — render framing checks.

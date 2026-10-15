@@ -9,6 +9,7 @@ from typing import Any
 from errors import UsageError
 from printops.cli import Sub
 from printops.cli._common import Parsed, api_errors, client, parse
+from printops.client import ApiClient
 
 USAGE = """3d printops incidents report KIND --severity S [--printer P] [--head T3] [--spool ID] [--at ISO]
                               [--note TEXT] [--tag T]... [--photo URL]... [--set FIELD=VALUE]... [--draft] [--no-context]
@@ -87,6 +88,18 @@ Examples:
 
 COMMON_VALUES = {"--api", "--token"}
 COMMON_FLAGS = {"--json"}
+# Calls that read a printer and possibly scan a 130 MB G-code server-side (incident_context
+# DEADLINE_S = 120 s) or page through job history: the client's 10 s default would give up
+# while 3d-api still completes the write.
+SLOW_TIMEOUT_S = 180.0
+
+
+def _slow(p: Parsed, sub: str) -> ApiClient:
+    api = client(p, sub)
+    api.timeout = SLOW_TIMEOUT_S
+    return api
+
+
 REPEATED = {"--tag", "--untag", "--photo", "--set"}
 NUMERIC = {
     "spool_id", "filament_id", "vendor_id", "layer", "z_mm", "nozzle_temp", "bed_temp", "chamber_temp",
@@ -172,24 +185,22 @@ def incident_lines(inc: dict[str, Any], *, full: bool = False) -> list[str]:
     head = (f"#{inc['id']} [{inc['status']}] {inc['at'][:16].replace('T', ' ')}  {inc['kind']} ({inc['severity']})  "
             f"{where}{spool}")
     lines = [head]
-    if full or inc.get("layer") is not None or inc.get("nozzle_temp") is not None:
-        bits = []
-        if inc.get("job_file"):
-            bits.append(f"job {inc['job_file']}" + (f" ({inc['job_id']})" if inc.get("job_id") else ""))
-        if inc.get("layer") is not None:
-            bits.append(f"layer {inc['layer']}" + (f" z {inc['z_mm']:g}" if inc.get("z_mm") is not None else ""))
-        if inc.get("feature"):
-            bits.append(inc["feature"])
-        temps = [f"{k} {_fmt(inc.get(f), ' °C')}" for k, f in (("nozzle", "nozzle_temp"), ("bed", "bed_temp"),
-                                                                ("chamber", "chamber_temp")) if inc.get(f) is not None]
-        bits += temps
-        for label, key, unit in (("speed", "speed_mm_s", " mm/s"), ("flow", "volumetric_mm3_s", " mm³/s"),
-                                 ("fan", "fan_pct", " %"), ("dried", "days_since_dried", " d ago"),
-                                 ("dry-box RH", "dry_box_rh", " %"), ("room RH", "room_rh", " %")):
-            if inc.get(key) is not None:
-                bits.append(f"{label} {_fmt(inc[key], unit)}")
-        if bits:
-            lines.append("    " + ", ".join(bits))
+    bits = []
+    if inc.get("job_file"):
+        bits.append(f"job {inc['job_file']}" + (f" ({inc['job_id']})" if inc.get("job_id") else ""))
+    if inc.get("layer") is not None:
+        bits.append(f"layer {inc['layer']}" + (f" z {inc['z_mm']:g}" if inc.get("z_mm") is not None else ""))
+    if inc.get("feature"):
+        bits.append(inc["feature"])
+    for label, key, unit in (("nozzle", "nozzle_temp", " °C"), ("bed", "bed_temp", " °C"),
+                             ("chamber", "chamber_temp", " °C"), ("speed", "speed_mm_s", " mm/s"),
+                             ("flow", "volumetric_mm3_s", " mm³/s"), ("fan", "fan_pct", " %"),
+                             ("dried", "days_since_dried", " d ago"), ("dry-box RH", "dry_box_rh", " %"),
+                             ("room RH", "room_rh", " %")):
+        if inc.get(key) is not None:
+            bits.append(f"{label} {_fmt(inc[key], unit)}")
+    if bits:
+        lines.append("    " + ", ".join(bits))
     if inc.get("status") == "resolved":
         lines.append(f"    resolved {inc['resolved_at'][:16].replace('T', ' ')}: {inc['resolution_kind']}"
                      + (f" — {inc['resolution_text']}" if inc.get("resolution_text") else ""))
@@ -203,6 +214,12 @@ def incident_lines(inc: dict[str, Any], *, full: bool = False) -> list[str]:
         for photo in inc.get("photos") or []:
             lines.append(f"    photo: {photo}")
         ctx = inc.get("context") or {}
+        gcode = ctx.get("gcode") or {}
+        if gcode.get("found"):
+            lines.append(f"    G-code: {gcode.get('how') or gcode.get('path')}"
+                         + (f", line {gcode['line']}" if gcode.get("line") else ""))
+        elif gcode:
+            lines.append(f"    G-code: not available ({gcode.get('why')})")
         for key, src in sorted((ctx.get("sources") or {}).items()):
             lines.append(f"    {key:<17} ← {src}")
         lines += [f"    warning: {w}" for w in ctx.get("warnings") or []]
@@ -210,8 +227,16 @@ def incident_lines(inc: dict[str, Any], *, full: bool = False) -> list[str]:
     return lines
 
 
-def _rate(v: Any, unit: str) -> str:
-    return "      -" if v is None else f"{v:7.3f}/{unit}"
+def _rate(v: Any, unit: str, digits: int) -> str:
+    return f"{'-':>8}/{unit}" if v is None else f"{v:8.{digits}f}/{unit}"
+
+
+def _per_kg(v: Any) -> str:
+    return _rate(v, "kg", 3)
+
+
+def _per_hour(v: Any) -> str:
+    return _rate(v, "h", 4)
 
 
 def stats_lines(out: dict[str, Any]) -> list[str]:
@@ -219,12 +244,12 @@ def stats_lines(out: dict[str, Any]) -> list[str]:
     kind = f", kind {out['kind']}" if out.get("kind") else ""
     o = out["overall"]
     lines = [f"incidents by {out['by']}{since}{kind}: {o['incidents']} incident(s), "
-             f"{_fmt(o['kg'], ' kg')} / {o['hours']:g} h printed; overall {_rate(o['per_kg'], 'kg').strip()}  "
-             f"{_rate(o['per_hour'], 'h').strip()}"]
+             f"{_fmt(o['kg'], ' kg')} / {o['hours']:g} h printed; overall {_per_kg(o['per_kg']).strip()}  "
+             f"{_per_hour(o['per_hour']).strip()}"]
     for g in out["groups"]:
         kinds = ", ".join(f"{k} {n}" for k, n in g["kinds"].items())
         low = "  (little exposure)" if g["low_exposure"] and g["incidents"] else ""
-        line = (f"  {_rate(g['per_kg'], 'kg')}  {_rate(g['per_hour'], 'h')}  {g['incidents']:3d} in "
+        line = (f"  {_per_kg(g['per_kg'])}  {_per_hour(g['per_hour'])}  {g['incidents']:3d} in "
                 f"{_fmt(g['kg'], ' kg'):>9} / {g['hours']:6.1f} h  {g['label']}{low}")
         if kinds:
             line += f"  [{kinds}]"
@@ -275,7 +300,7 @@ def _report(rest: list[str], sub: str) -> int:
     if "--no-context" in p.flags:
         body["auto_context"] = False
     with api_errors(sub):
-        out = client(p, sub).post("/v1/incidents", body)
+        out = _slow(p, sub).post("/v1/incidents", body)
     ctx = out["context"]
     _print("--json" in p.flags, out, [
         "recorded " + incident_lines(out["incident"])[0], *incident_lines(out["incident"])[1:],
@@ -347,7 +372,7 @@ def _exposure(argv: list[str]) -> int:
         if (limit := p.int_opt("--limit", sub)) is not None:
             body["limit"] = limit
         with api_errors(sub):
-            out = client(p, sub).post("/v1/exposure/sync", body)
+            out = _slow(p, sub).post("/v1/exposure/sync", body)
         lines = [f"{out['printer']}: {out['jobs_seen']} job(s) read, {len(out['added'])} exposure row(s) added, "
                  f"{out['already_synced']} already synced, {out['in_progress']} still printing"]
         for r in out["added"]:
@@ -427,8 +452,8 @@ def run(argv: list[str]) -> int:
     if verb == "context":
         p = parse(rest, sub, values={*COMMON_VALUES, "--head", "--spool"}, flags=COMMON_FLAGS, n_pos=1)
         with api_errors(sub):
-            out = client(p, sub).get("/v1/incidents/context", printer=p.pos[0], head=p.opts.get("--head"),
-                                     spool=p.int_opt("--spool", sub))
+            out = _slow(p, sub).get("/v1/incidents/context", printer=p.pos[0], head=p.opts.get("--head"),
+                                    spool=p.int_opt("--spool", sub))
         _print("--json" in p.flags, out, context_lines(out))
         return 0
     if verb == "from-watch":
@@ -442,7 +467,7 @@ def run(argv: list[str]) -> int:
         if not isinstance(event, dict):
             raise UsageError("stdin must be one JSON object (a watch event)", command=f"printops {sub}")
         with api_errors(sub):
-            out = client(p, sub).post("/v1/incidents/from-watch", event)
+            out = _slow(p, sub).post("/v1/incidents/from-watch", event)
         inc = out.get("incident")
         lines = [f"{out['reason']}" + (f": {incident_lines(inc)[0]}" if inc else "")]
         _print("--json" in p.flags, out, lines)

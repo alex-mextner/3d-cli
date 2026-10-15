@@ -42,6 +42,7 @@ service is never exposed to the internet.
 3d printops dry finish SESSION_ID [--rh PCT] [--weights ID=G,...]
 3d printops dry ls [--open] [--spool ID] [--limit N]
 3d printops dry due [--all] [--check]
+3d printops incidents report|ls|show|edit|confirm|resolve|dismiss|stats|context|from-watch|exposure …
 ```
 
 | Subcommand | What |
@@ -55,6 +56,7 @@ service is never exposed to the internet.
 | `spool` | Spool lifecycle — receive → store/move → load into a printer slot → unload → empty — with remaining as an interval (ledger), weighing and the idempotent `gen/plates.json` import. See [printops-spool.md](printops-spool.md). |
 | `tare` | The sourced empty-spool weight DB (SpoolmanDB seed + own weighings) and the tare chain of a spool. See [printops-spool.md](printops-spool.md#3d-printops-tare). |
 | `dry` | Drying sessions (start / finish / ls) and the spools due for drying by the `drying:` policy in `fleet/policy.yaml`. |
+| `incidents` | Print incidents with an auto-filled snapshot (job, layer, G-code temperatures/speed/flow, spool, lot, drying), drafts from `3d printer watch`, rates per kg and per print-hour by vendor/filament/lot/printer/head. See [printops-incidents.md](printops-incidents.md). |
 
 Subcommands are self-registering modules in `lib/printops/cli/<sub>.py`; later PrintOps slices
 add theirs there.

@@ -73,6 +73,12 @@ class Readers:
     cache_dir: Path | None = None
     humidity: HaStates | None = None
     deadline_s: float = DEADLINE_S
+    # an absolute time.monotonic() end for the G-code scan, overriding deadline_s (watch drafts)
+    deadline_at: float | None = None
+
+    def scan_deadline(self) -> float:
+        """time.monotonic() at which a G-code scan starting now gives up."""
+        return self.deadline_at if self.deadline_at is not None else time.monotonic() + self.deadline_s
 
     @classmethod
     def from_env(cls, settings: Settings, env: Mapping[str, str] | None = None) -> Readers:
@@ -231,6 +237,18 @@ def job_of(status: PrinterStatus) -> Job:
     )
 
 
+def current_job_file(printer: str, readers: Readers) -> str | None:
+    """The file the printer is on (printing, or the job its error/pause interrupted) from one
+    status read; None for an unknown, offline or unreadable printer."""
+    try:
+        device = printer_read.device_for(printer).device
+        if device is None:
+            return None
+        return readers.status(device).filename or None
+    except (LookupError, printer_read.PrinterReadError):
+        return None
+
+
 def _match_head(printer: FleetPrinter, head: str) -> str:
     for h in printer.heads:
         if h.label.casefold() == head.casefold():
@@ -357,7 +375,7 @@ def _from_gcode(
         ctx.warnings.append(f"G-code not available ({how}): no temperatures/speed/feature from it")
         ctx.gcode = {"file": job.filename, "found": False, "why": how}
         return
-    deadline = time.monotonic() + readers.deadline_s
+    deadline = readers.scan_deadline()
     try:
         if job.file_position is not None:
             cur = state_at(path, byte=job.file_position, deadline=deadline)
@@ -375,6 +393,9 @@ def _from_gcode(
         return
     st = cur.state
     tool = head.index if head is not None else st["tool"]
+    if head is not None and st["tool"] is not None and head.index != st["tool"]:
+        ctx.warnings.append(f"{head.label} is not printing at this point (active tool T{st['tool']}): its "
+                            "temperature is the G-code's standby target; speed/flow/feature are the active tool's")
     if head is None and st["tool"] is not None and fleet_printer is not None:
         match = next((h for h in fleet_printer.heads if h.index == st["tool"]), None)
         if match is not None:

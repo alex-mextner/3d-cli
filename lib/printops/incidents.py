@@ -350,6 +350,17 @@ def by_source_key(conn: sqlite3.Connection, key: str) -> Incident | None:
     return Incident.from_row(row) if row else None
 
 
+def by_evidence_key(conn: sqlite3.Connection, printer: str, key: str) -> Incident | None:
+    """The incident, in any status, whose evidence holds the watch event `key` — an event merged
+    into a draft has no source_key of its own, and the draft may be confirmed or dismissed since."""
+    row = conn.execute(
+        "SELECT incident.* FROM incident, json_each(incident.context, '$.evidence') AS ev "
+        "WHERE incident.printer = ? AND json_extract(ev.value, '$.key') = ? LIMIT 1",
+        (printer, key),
+    ).fetchone()
+    return Incident.from_row(row) if row else None
+
+
 def _summary(inc: Incident) -> dict[str, Any]:
     return {
         "id": inc.id, "status": inc.status, "kind": inc.kind, "severity": inc.severity,
@@ -519,15 +530,44 @@ def dismiss(conn: sqlite3.Connection, incident_id: int, *, actor: str, reason: s
         return get(conn, incident_id)
 
 
-def attach_evidence(conn: sqlite3.Connection, inc: Incident, evidence: Mapping[str, Any], *, actor: str) -> Incident:
-    """Append one more piece of evidence (another watch event of the same failure) to a draft."""
-    ctx = dict(inc.context)
-    ctx["evidence"] = [*ctx.get("evidence", []), dict(evidence)]
+def attach_evidence(
+    conn: sqlite3.Connection,
+    inc: Incident,
+    evidence: Mapping[str, Any],
+    *,
+    actor: str,
+    photos: Sequence[str] = (),
+    upgrade: Mapping[str, Any] | None = None,
+) -> Incident | None:
+    """Append one more piece of evidence (another watch event of the same failure) to a draft;
+    None when evidence with the same `key` is already there. The check reads the stored row inside
+    the write transaction, so two deliveries of one event cannot both append. 409 when the
+    incident is no longer a draft (confirmed or dismissed since it was read). In the same
+    transaction `photos` are added and, while the draft's kind is still `other`, the `upgrade`
+    changes (a more specific kind) applied — a concurrent confirm is never overwritten."""
+    key = evidence.get("key")
+    requested = _check_changes({**({"add_photos": list(photos)} if photos else {}), **(upgrade or {})})
     with db.transaction(conn):
+        stored = get(conn, inc.id)
+        if stored.status != "draft":
+            raise IncidentError(409, f"incident #{inc.id} is {stored.status}, no longer a draft")
+        ctx = dict(stored.context)
+        known = ctx.get("evidence", [])
+        if key is not None and any(isinstance(e, dict) and e.get("key") == key for e in known):
+            return None
+        ctx["evidence"] = [*known, dict(evidence)]
         conn.execute("UPDATE incident SET context = ?, updated_at = ? WHERE id = ?",
                      (json.dumps(ctx, sort_keys=True, default=str), db.utc_now(), inc.id))
-        ev.emit(conn, "incident.updated", f"incident:{inc.id}",
-                {"id": inc.id, "evidence": evidence.get("kind")}, actor)
+        # a kind already refined (by an earlier event or a human) is not overwritten
+        applied = requested if stored.kind == "other" else {k: v for k, v in requested.items() if k == "add_photos"}
+        ch = _apply_lists(stored, applied)
+        diff = {k: v for k, v in ch.items() if getattr(stored, k) != v}
+        if diff:
+            _write(conn, stored, diff)
+        payload: dict[str, Any] = {"id": inc.id, "evidence": evidence.get("kind")}
+        if diff:
+            payload["changes"] = {k: {"from": getattr(stored, k), "to": v} for k, v in diff.items()}
+        ev.emit(conn, "incident.updated", f"incident:{inc.id}", payload, actor)
         return get(conn, inc.id)
 
 

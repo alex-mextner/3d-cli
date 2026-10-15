@@ -31,10 +31,12 @@ from __future__ import annotations
 import contextlib
 import math
 import re
+import threading
 import time
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from errors import GateFailure, UsageError
 
@@ -315,6 +317,60 @@ class Cursor:
     state: dict[str, Any]
 
 
+# Per-file checkpoints of `state_at`: the state just before every ;LAYER_CHANGE a scan passed, so
+# the next question about the same file (another incident during the same print) resumes at the
+# nearest layer instead of re-reading from byte 0. Keyed by (path, size, mtime); the few most
+# recently used files, each within _CHECKPOINT_ENTRIES_PER_FILE state entries so no file (many
+# layer markers, ever more tools) grows the cache without bound; later layers then scan from the
+# last checkpoint. A state only grows along the file and checkpoints fill a prefix of its layers,
+# so (checkpoints + 1) × the current state's size bounds what one more checkpoint brings the total to.
+class _Checkpoint(NamedTuple):
+    line: int  # 0-based line of the ;LAYER_CHANGE
+    layers: int  # ;LAYER_CHANGE markers before it
+    z: float | None  # the previous layer's ;Z:
+    state: dict[str, Any]
+
+
+_CHECKPOINTS: OrderedDict[tuple[str, int, int], dict[int, _Checkpoint]] = OrderedDict()
+_CHECKPOINT_FILES = 4
+_CHECKPOINT_ENTRIES_PER_FILE = 1 << 17  # ~4000 layers of a usual ~30-entry state
+_CHECKPOINT_LOCK = threading.Lock()
+
+
+def _checkpoints(path: Path) -> dict[int, _Checkpoint]:
+    st = path.stat()
+    key = (str(path.resolve()), st.st_size, st.st_mtime_ns)
+    with _CHECKPOINT_LOCK:
+        if key in _CHECKPOINTS:
+            _CHECKPOINTS.move_to_end(key)
+        else:
+            while len(_CHECKPOINTS) >= _CHECKPOINT_FILES:
+                _CHECKPOINTS.popitem(last=False)  # the least recently used file
+            _CHECKPOINTS[key] = {}
+        return _CHECKPOINTS[key]
+
+
+def _state_entries(st: dict[str, Any]) -> int:
+    return len(st) + sum(len(v) for v in st.values() if isinstance(v, dict))
+
+
+def _nearest_checkpoint(
+    marks: dict[int, _Checkpoint], *, byte: int | None, layer: int | None
+) -> tuple[int, _Checkpoint] | None:
+    """(byte offset, checkpoint) of the latest checkpoint at or before `byte`, or before layer
+    `layer` begins; None when the scan has to start at byte 0."""
+    with _CHECKPOINT_LOCK:
+        if byte is not None:
+            usable = [offset for offset in marks if offset <= byte]
+        else:
+            target = layer if layer is not None else 0
+            usable = [offset for offset, mark in marks.items() if mark.layers < target]
+        if not usable:
+            return None
+        offset = max(usable)
+        return offset, marks[offset]
+
+
 def state_at(
     path: Path,
     *,
@@ -322,24 +378,33 @@ def state_at(
     layer: int | None = None,
     deadline: float | None = None,
 ) -> Cursor:
-    """Stream `path` once (constant memory: a 130 MB plate never sits in RAM) and return the
-    state at the line holding `byte` (a printer's file position), or — with `layer` — right
-    after the first extruding move of that layer (its ;LAYER_CHANGE when it extrudes nothing).
+    """Stream `path` (constant memory: a 130 MB plate never sits in RAM) and return the state
+    at the line holding `byte` (a printer's file position), or — with `layer` — right after
+    the first extruding move of that layer (its ;LAYER_CHANGE when it extrudes nothing). A
+    scan resumes from the nearest layer checkpoint an earlier scan of the same file left.
     Absolute E (M82) is tracked, not refused: only resuming needs relative E. ValueError when
     the file ends first or `deadline` (time.monotonic()) passes."""
     if (byte is None) == (layer is None):
         raise ValueError("state_at needs exactly one of byte= or layer=")
-    st = initial_state()
-    n_layer, z, offset, i = 0, None, 0, -1
+    marks = _checkpoints(path)
+    if (nearest := _nearest_checkpoint(marks, byte=byte, layer=layer)) is not None:
+        offset, mark = nearest
+        first, n_layer, z, st = mark.line, mark.layers, mark.z, _copy_state(mark.state)
+    else:
+        offset, first, n_layer, z, st = 0, 0, 0, None, initial_state()
     found: tuple[int, int, int] | None = None  # (line, byte, extrusions) at the layer marker
     with path.open("rb") as fh:
-        for i, raw in enumerate(fh):
-            if deadline is not None and not i % 65536 and time.monotonic() > deadline:
+        fh.seek(offset)
+        for i, raw in enumerate(fh, start=first):
+            if deadline is not None and not (i - first) % 65536 and time.monotonic() > deadline:
                 raise ValueError(f"G-code scan of {path.name} exceeded its time budget at line {i + 1}")
             line = raw[:-1] if raw.endswith(b"\n") else raw
             if byte is not None and offset + len(raw) > byte:
                 return Cursor(n_layer, z, i, offset, _copy_state(st))
             if line.startswith(b";LAYER_CHANGE"):
+                with _CHECKPOINT_LOCK:
+                    if offset not in marks and (len(marks) + 1) * _state_entries(st) <= _CHECKPOINT_ENTRIES_PER_FILE:
+                        marks[offset] = _Checkpoint(i, n_layer, z, _copy_state(st))
                 if found is not None:  # layer `layer` printed nothing: its start is the answer
                     return Cursor(n_layer, z, found[0], found[1], _copy_state(st))
                 n_layer, z = n_layer + 1, None

@@ -82,6 +82,7 @@ class FakeMoonraker:
         "stepper_x": {"position_min": -2.0, "position_max": 272.0},
         "stepper_y": {"position_max": 274.0},
     })                                            # Klipper configfile.settings
+    history: list[dict[str, Any]] = field(default_factory=list)  # Moonraker job history, newest first
     port: int = 0
 
     def writes(self) -> list[Recorded]:
@@ -114,6 +115,11 @@ class FakeMoonraker:
                     self._reply({"result": {"eventtime": 1.0, "status": {"configfile": {"settings": fake.settings}}}})
                 elif u.path == "/printer/objects/query":
                     self._reply({"result": {"eventtime": 1.0, "status": fake.status}})
+                elif u.path == "/server/history/list":
+                    q = parse_qs(u.query)
+                    start, limit = int(q.get("start", ["0"])[0]), int(q.get("limit", ["50"])[0])
+                    self._reply({"result": {"count": len(fake.history),
+                                            "jobs": fake.history[start:start + limit]}})
                 elif u.path == "/server/files/list":
                     self._reply({"result": [{"path": n, "size": s, "modified": 1.0} for n, s in fake.files.items()]})
                 elif u.path.startswith("/server/files/gcodes/") and unquote(u.path[21:]) in fake.contents:
