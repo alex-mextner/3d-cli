@@ -371,9 +371,10 @@ def u1_ws_status(state: str = "printing", **over: Any) -> dict[str, Any]:
 
 @dataclass
 class FakeMoonrakerWS:
-    """Moonraker's /websocket: answers server.info / printer.objects.list / .subscribe, then
-    pushes `pushes` (JSON-RPC notifications) one by one. Records every request method so
-    tests can prove the watcher only ever asks read-only questions."""
+    """Moonraker's /websocket: answers server.info / printer.objects.list / .subscribe and
+    server.files.metadata (from `metadata`, else "not found"), then pushes `pushes` (JSON-RPC
+    notifications) one by one. Records every request method so tests can prove the watcher
+    only ever asks read-only questions."""
 
     status: dict[str, Any] = field(default_factory=u1_ws_status)
     objects: list[str] = field(default_factory=lambda: list(U1_OBJECTS))
@@ -382,6 +383,8 @@ class FakeMoonrakerWS:
     push_gap_s: float = 0.05
     methods: list[str] = field(default_factory=list)
     subscribed: list[dict[str, Any]] = field(default_factory=list)
+    metadata: dict[str, dict[str, Any]] = field(default_factory=dict)  # filename -> metadata result
+    metadata_silent: bool = False  # never answer server.files.metadata (a hung endpoint)
     port: int = 0
 
     def _session(self, conn: socket.socket) -> None:
@@ -435,6 +438,10 @@ class FakeMoonrakerWS:
                 self.subscribed.append(req["params"]["objects"])
                 send({"jsonrpc": "2.0", "id": req["id"], "result": {"eventtime": 1.0, "status": self.status}})
                 subscribed = True
+            elif method == "server.files.metadata" and self.metadata_silent:
+                pass
+            elif method == "server.files.metadata" and req["params"]["filename"] in self.metadata:
+                send({"jsonrpc": "2.0", "id": req["id"], "result": self.metadata[req["params"]["filename"]]})
             else:
                 send({"jsonrpc": "2.0", "id": req.get("id"), "error": {"code": -32601, "message": "not found"}})
 
