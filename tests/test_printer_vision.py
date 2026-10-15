@@ -438,9 +438,16 @@ def test_evaluate_scores_a_directory_in_order(tmp_path: Path) -> None:
         seen.append(round(float(img.mean())))
         return FrameScore(0.0)
 
-    (res,) = vision_detect.evaluate([(tmp_path, "neg")], score)
-    assert len(res.scores) == 3
-    assert seen == [0, 60, 120]
+    starts: list[int] = []
+    # the same path twice is still two prints: the scorer is told before each
+    res = vision_detect.evaluate(
+        [(tmp_path, "neg"), (tmp_path, "neg")],
+        score,
+        new_print=lambda: starts.append(len(seen)),
+    )
+    assert [len(r.scores) for r in res] == [3, 3]
+    assert seen == [0, 60, 120] * 2
+    assert starts == [0, 3]
 
 
 @pytest.mark.parametrize(

@@ -575,14 +575,14 @@ class VisionMonitor:
         history; pause/resume of the same file keeps it. -> True when a new print started, so
         the caller can reset its own per-print state (the scorer's bed-change references)."""
         prev = self.job
-        new = state == PRINTING and (
+        started = state == PRINTING and (
             prev is None or prev[1] != filename or prev[0] not in (PRINTING, PAUSED)
         )
-        if new:
+        if started:
             self.tracker.reset_print()
             self.raw_tracker.reset_print()
         self.job = (state, filename)
-        return new
+        return started
 
     @property
     def printing(self) -> bool:

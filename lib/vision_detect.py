@@ -806,14 +806,18 @@ def evaluate(
     params: TrackerParams | None = None,
     lead_in: int = 0,
     prepare: Any = None,
+    new_print: Any = None,
 ) -> list[SeqResult]:
     """Score every frame of every source in order; each source is one print, so the tracker
-    restarts per source (with a clean long-term baseline, the worst case). `lead_in` healthy
+    restarts per source (with a clean long-term baseline, the worst case) and `new_print()` runs
+    first (the scorer's bed-change references). `lead_in` healthy
     frames (score 0) go first, as if the print had run fine before the clip starts: a failure
     clip then meets the tracker the way a live failure does, after warm-up. `prepare(source,
     frame name)` runs before each frame (replays set the print position there)."""
     out = []
     for path, label in sources:
+        if new_print is not None:
+            new_print()
         tracker = FailureTracker(params or TrackerParams())
         for _ in range(lead_in):
             tracker.update(0.0)
@@ -1023,12 +1027,8 @@ def run_eval(args: argparse.Namespace) -> int:
         cfg, verify=not args.no_verify, camera=cam, scene=args.scene
     )
     replays = {str(p): load_replay(p) for p, _ in sources}
-    current: list[Path] = []
 
     def prepare(path: Path, name: str) -> None:
-        if current != [path]:  # each source is its own print
-            current[:] = [path]
-            scorer.reset_print()
         ctx, ts = replays[str(path)].get(name, (None, None))
         scorer.context, scorer.now = ctx, ts
 
@@ -1039,7 +1039,8 @@ def run_eval(args: argparse.Namespace) -> int:
         every=args.every,
         params=TrackerParams(warmup=args.warmup),
         lead_in=args.lead_in,
-        prepare=prepare if scorer.geometry is not None else None,
+        prepare=prepare if cam is not None else None,  # replay times + print position
+        new_print=scorer.reset_print,
     )
     # --every N keeps one frame in N, so each scored frame stands for N capture intervals
     m = metrics(results, interval_s=args.interval * args.every)
