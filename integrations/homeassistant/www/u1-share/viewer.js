@@ -23,6 +23,8 @@ async function frame() {
   try {
     // Never append a timestamp to the signed path: newer HA signs query parameters.
     // No ambient login may mask an expired signature; every fetch is anonymous.
+    // codeql[js/client-side-request-forgery] share.path passed validateSignedPath(): same-origin
+    // /api/camera_proxy/camera.<id> with only an authSig parameter, nothing else is fetched.
     const response = await fetch(share.path, { cache: "no-store", credentials: "omit", redirect: "error",
       referrerPolicy: "no-referrer", signal: aborter.signal });
     if ([401, 403, 404].includes(response.status)) {
