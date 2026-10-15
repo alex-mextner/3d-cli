@@ -160,6 +160,8 @@ def test_user_sees_the_swapped_spool_in_slots_and_acks_the_anomaly(
 
 
 def test_anomalies_usage_errors(tmp_path: Path, live: LiveApi) -> None:
+    """The user mistypes an anomaly id or a status filter: the CLI exits 2 with a message that
+    names the mistake, instead of calling the API with garbage."""
     bad_id = run_cli(
         tmp_path, "printops", "anomalies", "ack", "x", env_extra=_env(live)
     )
