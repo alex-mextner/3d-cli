@@ -169,6 +169,8 @@ Every current root Python module is listed here so future additions are intentio
 - `gcode_overhangs.py` — extrusion printed on nothing per object and layer of a sliced G-code (numpy/scipy raster of each layer's carrier, sparse reach/bridge/step-out tests on the pixels that stick out, layers split over forked workers); backs `3d gcode-overhangs` and the `overhangs` gate of `print-preflight`.
 - `gcode_thumbnails.py` — printer-screen thumbnail blocks in G-code: stdlib-only check against the profile's `thumbnails` spec, Orca-format block writer, z-buffered toolpath preview render (numpy); backs `3d gcode-thumbnails`.
 - `frame_check.py` — render framing checks.
+- `ha_deploy.py` — `3d ha deploy`: manifest/snippet/compose/vendor checks for `integrations/homeassistant/`, plan from a host probe, backup → submodule checkout → symlinks/copies → check_config → reloads → service recreate → post-checks with rollback, HA-repo deploy PR.
+- `ha_deploy_probe.py` — stdlib-only, read-only probe that `3d ha deploy` runs with the HA host's `python3` over ssh (git/submodule state, dest hashes, compose hashes and mounts, vendor versions, HA API/dashboard/go2rtc signals).
 - `hardware.py` — local machine and toolchain capability reporting.
 - `hf_auth.py` — optional Hugging Face token loading, validation, and secure storage.
 - `img3d_loop.py` — closed image→3D parametric-recovery loop: generate a blockout, view-bank contour fit, monotonic boundary refine with a semantic-feature veto dispose-gate, proof-status gate, and the synthetic parametric-recovery milestone (the `3d recover-blockout` backend).

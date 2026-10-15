@@ -185,8 +185,9 @@ class GateFailure(ThreeDError):
 
     exit_code = 1
 
-    def __init__(self, message: str, *, command: str | None = None, silent: bool = False) -> None:
-        super().__init__(message, command=command)
+    def __init__(self, message: str, *, command: str | None = None, silent: bool = False,
+                 remediation: Sequence[str] | None = None) -> None:
+        super().__init__(message, command=command, remediation=remediation)
         self.silent = silent
 
     def render(self, *, color: bool | None = None) -> str:

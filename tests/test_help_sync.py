@@ -27,6 +27,8 @@ def test_updated_help_examples_are_reflected_in_command_docs() -> None:
         "doctor": ("3d doctor | grep MISSING", "run before CI"),
         "export": ("3d export --list-formats", "3d export model.scad --plan --format glb"),
         "init": ("anchors:", "gates:"),
+        "ha": ("3d ha deploy [--dry-run] [--host H] [--ref REF] [--ha-dir DIR] [--source DIR]", "--dry-run",
+               "--host H", "--ref REF", "--ha-dir DIR", "--source DIR"),
         "lint": (
             "3d lint bracket.scad --strict --error naming/id-kebab",
             "3d lint bracket.scad --format json | jq '.files[].findings[].rule_id'",
