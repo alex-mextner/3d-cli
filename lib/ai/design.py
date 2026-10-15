@@ -54,6 +54,12 @@ _FENCE_RE = re.compile(r"```(?:scad|openscad)?[ \t]*\r?\n(.*?)```", re.DOTALL | 
 # Status ranking so the retry loop can keep the BEST candidate monotonically.
 _STATUS_RANK = {"failure": 0, "diagnostic": 1, "ok": 2}
 
+# Default visual-review pass bar on the judge's 0-4 anchored rubric mean (public: the
+# generate command reads it to fill an unset --visual-threshold). A candidate
+# whose render scores below this against the reference is NOT allowed to reach `ok` (its
+# geometry may be valid while it looks nothing like the reference). Opt-in only.
+DEFAULT_VISUAL_THRESHOLD = 3.0
+
 _STYLE_SYSTEM = """
 You are generating ONE self-contained OpenSCAD (.scad) file from a description.
 HARD RULES:
@@ -80,6 +86,12 @@ class GenerateRequest:
     backend: str | None = None
     model: str | None = None
     config_path: str | None = None
+    # Opt-in visual review (default OFF — the non-visual path is byte-identical to before).
+    # When `visual_review` is True the candidate render is scored against `reference` by the
+    # VLM judge; a score below `visual_threshold` blocks `ok` and its critique is fed back.
+    reference: str | None = None
+    visual_review: bool = False
+    visual_threshold: float = DEFAULT_VISUAL_THRESHOLD
 
 
 @dataclass(slots=True)
@@ -283,13 +295,154 @@ class _CandidateEval:
     error_text: str  # what to feed back to the model on the next round (empty if clean)
 
 
-def evaluate_scad(scad_path: str, dims: dict[str, str], scad_src: str) -> _CandidateEval:
+# ── visual review (opt-in) ───────────────────────────────────────────────────
+@dataclass(frozen=True, slots=True)
+class _VisualReview:
+    """Resolved config for the opt-in visual-review gate (built only when enabled)."""
+
+    reference: str
+    threshold: float
+    backend: str | None
+    config_path: str | None
+
+
+@dataclass(slots=True)
+class _VisualOutcome:
+    """One candidate's visual verdict against the reference image."""
+
+    passed: bool           # render meets the threshold AND a sighted judge was available
+    blind: bool            # no sighted judge (or the judge could not run) — inconclusive
+    gate: GateResult       # the `visual` gate row for the summary
+    critique: str          # feedback for the next round (empty when passed)
+
+
+def _run_visual_review(review: _VisualReview, render_png: str) -> _VisualOutcome:
+    """Score the candidate render against the reference with the VLM judge (lazy import).
+
+    Kept cheap for an inner loop (one sighted judge, no stability resampling). A judge
+    failure never crashes the generate loop: it degrades to a blind/inconclusive outcome
+    with a note, mirroring the advisory-judge discipline in ai.bench."""
+    from ai import load_backend_config  # lazy: keep design.py import-light
+    from ai.backends import resolve_backend
+    from ai.judge import judge
+
+    try:
+        backend = resolve_backend(review.backend, config=load_backend_config(review.config_path))
+        score = judge(render_png, review.reference, backend=backend, judges=1, stability_n=0)
+    except Exception as exc:  # judge is an ADDITIONAL gate; its failure must not crash the loop
+        note = f"visual review could not run: {exc}"
+        return _VisualOutcome(False, True, GateResult("visual", "skip", note), "")
+    return _outcome_from_score(score, review.threshold)
+
+
+def _outcome_from_score(score: Any, threshold: float) -> _VisualOutcome:
+    """Map a VisualScore into a pass/blind/fail outcome + a critique for the next round."""
+    if score.blind:
+        note = "no sighted judge (blind) — visual review inconclusive"
+        return _VisualOutcome(False, True, GateResult("visual", "skip", note), "")
+    passed = score.mean >= threshold
+    detail = f"mean {score.mean}/4 vs threshold {threshold:g}"
+    gate = GateResult("visual", "pass" if passed else "fail", detail)
+    critique = "" if passed else _visual_critique(score, threshold)
+    return _VisualOutcome(passed, False, gate, critique)
+
+
+def _visual_critique(score: Any, threshold: float) -> str:
+    """Build the feedback text the next prompt round sees from a below-threshold score."""
+    lines = [
+        f"VISUAL-REVIEW: the render scored mean {score.mean}/4 against the reference "
+        f"(threshold {threshold:g}); it does not yet match the reference well enough.",
+        "Per-dimension scores (0-4): "
+        + ", ".join(f"{k}={v}" for k, v in score.per_dim.items()),
+    ]
+    rationales = _judge_rationales(score)
+    if rationales:
+        lines.append("Judge critique:")
+        lines += [f"  - {r}" for r in rationales]
+    lines.append("Revise the geometry so the render better reproduces the reference image.")
+    return "\n".join(lines)
+
+
+def _judge_rationales(score: Any) -> list[str]:
+    """Pull each sighted judge's free-text `rationale` (if any) out of its raw reply."""
+    import json as _json
+
+    out: list[str] = []
+    for jr in getattr(score, "judges", []):
+        if getattr(jr, "blind", False):
+            continue
+        raw = getattr(getattr(jr, "canonical", None), "raw", "") or ""
+        try:
+            start, end = raw.index("{"), raw.rindex("}") + 1
+            obj = _json.loads(raw[start:end])
+        except (ValueError, _json.JSONDecodeError):
+            continue
+        rationale = obj.get("rationale") if isinstance(obj, dict) else None
+        if isinstance(rationale, str) and rationale.strip():
+            out.append(rationale.strip())
+    return out
+
+
+def _apply_visual(
+    status: str, gates: list[GateResult], error_text: str, outcome: _VisualOutcome
+) -> tuple[str, list[GateResult], str]:
+    """Fold the visual outcome into the geometry verdict. Visual review is an ADDITIONAL
+    gate: it can only DOWNGRADE `ok` (never upgrade), and it never touches the geometry
+    gates. A blind/inconclusive verdict downgrades `ok` (we cannot confirm the look) but
+    feeds no critique; a below-threshold verdict downgrades `ok` and feeds its critique."""
+    gates = [*gates, outcome.gate]
+    if outcome.passed:
+        return status, gates, error_text
+    if status == "ok":
+        status = "diagnostic"
+    if not outcome.blind:
+        error_text = _join_errors(error_text, outcome.critique)
+    return status, gates, error_text
+
+
+def _join_errors(base: str, extra: str) -> str:
+    parts = [p for p in (base.strip(), extra.strip()) if p]
+    return "\n\n".join(parts)
+
+
+def _build_review(req: GenerateRequest) -> _VisualReview | None:
+    """Build the visual-review config from the request, or None when it is disabled.
+
+    The reference-presence check lives in the command (exit 2 on a missing reference); by
+    the time a request reaches here with `visual_review` set, `reference` is populated."""
+    if not req.visual_review:
+        return None
+    if not req.reference:
+        raise UsageError(
+            "visual review requires a reference image",
+            command="generate",
+            remediation=["Pass --reference PATH (or a 'reference' key in --spec)."],
+        )
+    return _VisualReview(
+        reference=req.reference,
+        threshold=req.visual_threshold,
+        backend=req.backend,
+        config_path=req.config_path,
+    )
+
+
+def evaluate_scad(
+    scad_path: str,
+    dims: dict[str, str],
+    scad_src: str,
+    review: _VisualReview | None = None,
+) -> _CandidateEval:
     """Validate -> render -> check the written .scad and decide its per-candidate status.
 
     - OpenSCAD absent  -> `diagnostic` (wrote the file, verification skipped).
     - validate/render fail -> `failure` for this candidate (no valid render).
     - renders + all HARD gates pass + all dims present -> `ok`.
     - renders but a gate warns/fails/skips or a dim is missing -> `diagnostic`.
+
+    When `review` is set (opt-in) the candidate render is additionally scored against the
+    reference by the VLM judge; a below-threshold or inconclusive verdict downgrades `ok`
+    to `diagnostic` and its critique is threaded back into `error_text`. With `review` None
+    the behaviour is byte-identical to before (the judge is never imported or called).
     """
     present = dims_present_in_scad(scad_src, dims)
     missing = [n for n, ok in present.items() if not ok]
@@ -299,16 +452,21 @@ def evaluate_scad(scad_path: str, dims: dict[str, str], scad_src: str) -> _Candi
         gates = [GateResult("verification", "skip", note)]
         if missing:
             gates.append(GateResult("dims", "warn", f"missing: {', '.join(missing)}"))
+        if review is not None:
+            gates.append(GateResult("visual", "skip", "no render — visual review skipped"))
         return _CandidateEval("diagnostic", gates, "")
 
     v_rc, v_log = _run_3d(["validate", scad_path])
     if v_rc != 0:
         return _CandidateEval("failure", [GateResult("validate", "fail", _tail(v_log))], v_log)
 
+    visual: _VisualOutcome | None = None
     with tempfile.TemporaryDirectory(prefix="3d_generate_render.") as td:
         png = os.path.join(td, "render.png")
         r_rc, r_log = _run_3d(["render", scad_path, "--view", "iso", "--size", "480x360", "-o", png])
         rendered = r_rc == 0 and os.path.isfile(png) and os.path.getsize(png) > 0
+        if rendered and review is not None:
+            visual = _run_visual_review(review, png)  # judge while the PNG still exists
     if not rendered:
         return _CandidateEval("failure", [GateResult("render", "fail", _tail(r_log))], v_log + "\n" + r_log)
 
@@ -319,6 +477,8 @@ def evaluate_scad(scad_path: str, dims: dict[str, str], scad_src: str) -> _Candi
 
     status = _candidate_status(gates, missing)
     error_text = "" if status == "ok" else c_log
+    if visual is not None:
+        status, gates, error_text = _apply_visual(status, gates, error_text, visual)
     return _CandidateEval(status, gates, error_text)
 
 
@@ -354,6 +514,8 @@ def generate(req: GenerateRequest) -> GenerateResult:
     # must win — both handled inside resolve_backend when given the un-defaulted config.
     backend = resolve_backend(req.backend, config=load_backend_config(req.config_path))
 
+    review_cfg = _build_review(req)
+
     best: GenerateResult | None = None
     best_src = ""
     prev_scad: str | None = None
@@ -366,7 +528,7 @@ def generate(req: GenerateRequest) -> GenerateResult:
         scad_src = extract_scad(backend.complete(system, user))
         _write(req.out_path, scad_src)
 
-        ev = evaluate_scad(req.out_path, req.dims, scad_src)
+        ev = evaluate_scad(req.out_path, req.dims, scad_src, review=review_cfg)
         candidate = GenerateResult(
             status=ev.status, rounds=round_no, winning_round=round_no, scad_path=req.out_path,
             gate_results=ev.gate_results, requested_dims=dict(req.dims),
