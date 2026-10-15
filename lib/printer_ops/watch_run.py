@@ -374,6 +374,7 @@ class MoonrakerStream(_Stream):
 
     def _detector(self, limits: WatchLimits) -> MoonrakerDetector:
         self.mr = MoonrakerDetector(self.device.name, limits)
+        self._meta_retry_at: dict[str, float] = {}  # filename -> monotonic time of the next metadata try
         return self.mr
 
     def session(self) -> None:
@@ -438,17 +439,20 @@ class MoonrakerStream(_Stream):
 
     def _fetch_file_body(self, ws: WebSocket, filename: str | None) -> None:
         """server.files.metadata (read-only) -> the G-code body bounds that make job progress
-        exclude a slicer header/footer (#255). Asked once per file; an error records "unknown".
-        Known bounds re-evaluate the current status, so held events see the body progress."""
-        if not filename or filename in self.mr.file_body:
+        exclude a slicer header/footer (#255). Asked once per job; after an error it is asked
+        again at most once a minute (whole-file progress meanwhile). Known bounds re-evaluate
+        the current status, so held events see the body progress."""
+        now = time.monotonic()
+        if not filename or now < self._meta_retry_at.get(filename, 0.0):
             return
         try:
             meta = self._call(ws, "server.files.metadata", {"filename": filename})
         except _RpcError as exc:
-            _log(f"{self.device.name}: no metadata for {filename} ({exc}); progress over the whole file")
-            meta = None
+            _log(f"{self.device.name}: no metadata for {filename} ({exc}); whole-file progress, retry in 60 s")
+            self._meta_retry_at[filename] = now + 60.0
+            return
         self.mr.set_file_body(filename, meta)
-        if self.mr.file_body.get(filename) is not None:
+        if self.mr.file_body is not None and self.mr.file_body[1] is not None:
             self.emit(self.mr.on_status({}, time.time()))
 
     def _on_text(self, msg: str) -> None:

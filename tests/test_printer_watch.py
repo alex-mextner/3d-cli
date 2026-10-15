@@ -164,11 +164,14 @@ K1_FILE = "k1se_combo_black_pla-20682d5df58b5076.gcode"
 
 
 def k1_moonraker(pos: int, meta: dict[str, Any] | None = K1_META) -> MoonrakerDetector:
+    """A K1 on Moonraker printing K1_FILE at byte `pos`, metadata applied as the stream does it:
+    after the first status (a new job forgets older bounds), then a re-evaluation."""
     d = MoonrakerDetector("k1se")
+    d.on_status(u1_ws_status("printing", print_stats={"filename": K1_FILE, "info": {}},
+                             virtual_sdcard={"file_position": pos, "progress": pos / 336882}), 1000.0, full=True)
     if meta is not None:
         d.set_file_body(K1_FILE, meta)
-    d.on_status(u1_ws_status("printing", print_stats={"filename": K1_FILE, "info": {}},
-                             virtual_sdcard={"file_position": pos, "progress": pos / 336882}), 1000.0)
+        d.on_status({}, 1000.5)
     return d
 
 
@@ -214,6 +217,30 @@ def test_last_layer_counts_as_the_end() -> None:
     d.on_status({"print_stats": {"info": {"total_layer": 1193, "current_layer": 1193}}}, 1001.0)
     out = d.on_status({"heater_bed": {"target": 0.0}}, 1002.0) + d.tick(1030.0)
     assert out == []
+
+
+def test_body_bounds_are_fetched_again_for_a_new_job_with_the_same_file_name() -> None:
+    d = k1_moonraker(300000)
+    assert d.wants_file_body() is None
+    d.on_status({"print_stats": {"state": "complete"}}, 1100.0)
+    d.on_status({"print_stats": {"state": "printing"}, "virtual_sdcard": {"file_position": 100}}, 1200.0)
+    assert d.wants_file_body() == K1_FILE                         # a re-slice may share the name
+
+
+def test_late_metadata_drops_an_end_macro_event_held_on_whole_file_progress() -> None:
+    d = k1_moonraker(318598, meta=None)                           # 94.6 % by bytes
+    assert d.on_status({"heater_bed": {"target": 0.0}}, 1001.0) == []  # held: not "at the end" yet
+    d.set_file_body(K1_FILE, K1_META)
+    d.on_status({}, 1002.0)                                       # what the stream does after metadata
+    assert d.tick(1030.0) == []
+
+
+def test_non_integer_layer_fields_are_ignored_not_fatal() -> None:
+    d, _ = started()
+    d.on_status({"print_stats": {"info": {"total_layer": "1193", "current_layer": "1193"}}}, 1001.0)
+    assert d.frame is not None and d.frame.layer is None and d.frame.total_layer is None
+    d.on_status({"heater_bed": {"target": 0.0}}, 1002.0)
+    assert kinds(d.tick(1013.0)) == [("bed_off", WARNING)]
 
 
 def test_cold_bed_found_at_watch_start_while_paused() -> None:
