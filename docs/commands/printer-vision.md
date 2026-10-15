@@ -100,7 +100,7 @@ u1:
   adapter: moonraker
   host: 192.168.0.26
   watch:
-    tg: true
+    tg_fallback: true        # emergency only: the phone gets what no agent could take
     vision:
       snapshot: /server/files/camera/monitor.jpg   # default for Moonraker printers
       keepalive: true                              # default: on for the U1 monitor.jpg only
