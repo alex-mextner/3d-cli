@@ -45,6 +45,15 @@ rest_command:
   printer_u1_emergency_stop:
     url: "http://192.168.0.26:7125/printer/emergency_stop"
     method: post
+  # K1 SE (rooted, Helper Script Moonraker): real Klipper e-stop and USB camera restart;
+  # state/pause/resume/stop entities stay on ha_creality_ws (ws :9999).
+  printer_k1se_emergency_stop:
+    url: "http://192.168.0.27:7125/printer/emergency_stop"
+    method: post
+  printer_k1se_restart_camera:
+    url: "http://192.168.0.27:7125/printer/gcode/script?script=RESTART_CAMERA"
+    method: post
+    timeout: 30
 
 script:
   printer_send_notification:
