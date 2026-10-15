@@ -25,7 +25,6 @@ STATE CODES: observed on our K1 SE (2026-10): state 0 idle, 1 printing, 2 comple
 UPLOAD WHILE BUSY: refused — overwriting the file being printed is unsafe and the firmware
   does not check it.
 """
-
 from __future__ import annotations
 
 import json
@@ -84,9 +83,7 @@ def merge_messages(msgs: list[str]) -> dict[str, Any]:
     return state
 
 
-def parse_status(
-    s: dict[str, Any], info: dict[str, Any] | None = None
-) -> PrinterStatus:
+def parse_status(s: dict[str, Any], info: dict[str, Any] | None = None) -> PrinterStatus:
     st, ds = _int(s.get("state")), _int(s.get("deviceState"))
     message = None
     self_test = _int(s.get("withSelfTest"))
@@ -117,11 +114,7 @@ def parse_status(
     err = s.get("err")
     errcode = _int(err.get("errcode")) if isinstance(err, dict) else _int(err)
     if errcode:
-        detail = (
-            f" {err.get('key', '')} {err.get('value', '')}".rstrip()
-            if isinstance(err, dict)
-            else ""
-        )
+        detail = f" {err.get('key', '')} {err.get('value', '')}".rstrip() if isinstance(err, dict) else ""
         message = f"err {errcode}{detail}"
         if state not in BUSY_STATES:
             state = ERROR
@@ -133,9 +126,7 @@ def parse_status(
     return PrinterStatus(
         state=state,
         raw_state=f"state={s.get('state')} deviceState={s.get('deviceState')}",
-        filename=os.path.basename(str(s["printFileName"]))
-        if s.get("printFileName")
-        else None,
+        filename=os.path.basename(str(s["printFileName"])) if s.get("printFileName") else None,
         progress=progress / 100.0 if progress is not None else None,
         temps={k: v for k, v in temps.items() if v != (None, None)},
         message=message,
@@ -148,19 +139,9 @@ class CrealityStockAdapter(Adapter):
     kind = "creality-stock"
     upload_while_busy = False
 
-    def __init__(
-        self,
-        name: str,
-        host: str,
-        port: int = 80,
-        *,
-        ws_port: int = 9999,
-        listen_s: float = 3.0,
-        files_listen_s: float = 5.0,
-        confirm_s: float = 15.0,
-        timeout: float = 10.0,
-        upload_timeout: float = 600.0,
-    ) -> None:
+    def __init__(self, name: str, host: str, port: int = 80, *, ws_port: int = 9999,
+                 listen_s: float = 3.0, files_listen_s: float = 5.0, confirm_s: float = 15.0,
+                 timeout: float = 10.0, upload_timeout: float = 600.0) -> None:
         super().__init__(name, host, port)
         self.ws_port = ws_port
         self.listen_s = listen_s
@@ -176,9 +157,7 @@ class CrealityStockAdapter(Adapter):
         except OSError as exc:
             raise self._comm_error(f"ws://{self.host}:{self.ws_port}", exc) from exc
 
-    def _collect(
-        self, ws: WebSocket, secs: float, until: Callable[[str], bool] | None = None
-    ) -> list[str]:
+    def _collect(self, ws: WebSocket, secs: float, until: Callable[[str], bool] | None = None) -> list[str]:
         """Read pushed messages for `secs`, answering heart_beat; stop early when until(msg)."""
         msgs: list[str] = []
         deadline = time.monotonic() + secs
@@ -197,12 +176,7 @@ class CrealityStockAdapter(Adapter):
                 break
         return msgs
 
-    def _send(
-        self,
-        payload: dict[str, Any],
-        secs: float,
-        until: Callable[[str], bool] | None = None,
-    ) -> list[str]:
+    def _send(self, payload: dict[str, Any], secs: float, until: Callable[[str], bool] | None = None) -> list[str]:
         ws = self._connect()
         try:
             ws.send_text(json.dumps(payload))
@@ -214,9 +188,7 @@ class CrealityStockAdapter(Adapter):
 
     def info(self) -> dict[str, Any]:
         try:
-            body = http_json(
-                "GET", f"http://{self.host}:{self.port}/info", timeout=self.timeout
-            )
+            body = http_json("GET", f"http://{self.host}:{self.port}/info", timeout=self.timeout)
         except (OSError, ValueError) as exc:
             raise self._comm_error("GET /info", exc) from exc
         return body if isinstance(body, dict) else {}
@@ -237,9 +209,7 @@ class CrealityStockAdapter(Adapter):
         info = self.info()
         return parse_status(self.pushed_state(), info)
 
-    def list_files(
-        self, expect: tuple[str, int] | None = None
-    ) -> dict[str, RemoteFile]:
+    def list_files(self, expect: tuple[str, int] | None = None) -> dict[str, RemoteFile]:
         """Merge every retGcodeFileInfo2 snapshot seen in the window: right after an upload
         some snapshots still lack the new file. `expect=(name, size)` stops early on a match."""
         files: dict[str, RemoteFile] = {}
@@ -254,26 +224,16 @@ class CrealityStockAdapter(Adapter):
             for e in entries if isinstance(entries, list) else []:
                 if isinstance(e, dict) and e.get("name"):
                     files[e["name"]] = RemoteFile(e["name"], _int(e.get("file_size")))
-            return (
-                expect is not None
-                and (got := files.get(expect[0])) is not None
-                and got.size == expect[1]
-            )
+            return expect is not None and (got := files.get(expect[0])) is not None and got.size == expect[1]
 
-        self._send(
-            {"method": "get", "params": {"reqGcodeFile": 1}},
-            self.files_listen_s,
-            absorb,
-        )
+        self._send({"method": "get", "params": {"reqGcodeFile": 1}}, self.files_listen_s, absorb)
         return files
 
     def upload(self, local: Path, remote_name: str) -> UploadResult:
         size = local.stat().st_size
         url = f"http://{self.host}:{self.port}/upload/{quote(remote_name)}"
         try:
-            status, data = http_upload(
-                url, local, remote_name, {}, timeout=self.upload_timeout
-            )
+            status, data = http_upload(url, local, remote_name, {}, timeout=self.upload_timeout)
         except TimeoutError as exc:
             status, data = -1, repr(exc).encode()
         except OSError as exc:
@@ -289,11 +249,8 @@ class CrealityStockAdapter(Adapter):
                 raise self._comm_error("upload", f"printer replied {data[:300]!r}")
         remote = self.list_files(expect=(remote_name, size)).get(remote_name)
         if remote is None:
-            outcome = (
-                "timed out and the file is not listed — outcome UNKNOWN"
-                if status == -1
-                else "the file is not in the printer's list after upload"
-            )
+            outcome = "timed out and the file is not listed — outcome UNKNOWN" if status == -1 else \
+                "the file is not in the printer's list after upload"
             raise PrinterCommError(
                 f"{self.name}: upload of {remote_name}: {outcome}",
                 command="printer",
@@ -301,15 +258,9 @@ class CrealityStockAdapter(Adapter):
             )
         if remote.size != size:
             raise self._comm_error(
-                "upload",
-                f"size mismatch: local {size} B, printer {remote.size} B "
-                "(stock K1 firmware keeps a multipart tail on very small files)",
-            )
-        note = (
-            "upload response timed out; size verified from the file list"
-            if status == -1
-            else ""
-        )
+                "upload", f"size mismatch: local {size} B, printer {remote.size} B "
+                "(stock K1 firmware keeps a multipart tail on very small files)")
+        note = "upload response timed out; size verified from the file list" if status == -1 else ""
         return UploadResult(remote_name, size, verified=True, note=note)
 
     def start(self, remote_name: str) -> None:
@@ -319,33 +270,25 @@ class CrealityStockAdapter(Adapter):
         pause (5) on the same file name is no acknowledgement either.
         No such acknowledgement within confirm_s — socket closed, silence, or another file —
         raises PrinterCommError: the start may or may not have happened (outcome UNKNOWN)."""
-        cmd = {
-            "method": "set",
-            "params": {"opGcodeFile": f"printprt:{GCODE_DIR}/{remote_name}"},
-        }
+        cmd = {"method": "set", "params": {"opGcodeFile": f"printprt:{GCODE_DIR}/{remote_name}"}}
         seen: dict[str, Any] = {}
         ack = False
 
         def acked(m: str) -> bool:
             nonlocal ack
             seen.update(merge_messages([m]))
-            ack = (
-                os.path.basename(str(seen.get("printFileName") or "")) == remote_name
-                and _int(seen.get("state")) == 1
-            )
+            ack = (os.path.basename(str(seen.get("printFileName") or "")) == remote_name
+                   and _int(seen.get("state")) == 1)
             return ack
 
         self._send(cmd, self.confirm_s, acked)
         if not ack:
-            last = (
-                f"state={seen.get('state')} deviceState={seen.get('deviceState')} "
-                f"file={seen.get('printFileName') or '-'}"
-            )
+            last = f"state={seen.get('state')} deviceState={seen.get('deviceState')} " \
+                   f"file={seen.get('printFileName') or '-'}"
             raise self._comm_error(
                 f"start of {remote_name}",
                 f"no acknowledgement within {self.confirm_s:g} s (connection closed or no running "
-                f"state for this file; last seen {last})",
-            )
+                f"state for this file; last seen {last})")
 
     def cancel(self) -> None:
         self._send({"method": "set", "params": {"stop": 1}}, 2.0)

@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import math
 import os
 import sqlite3
 from collections.abc import AsyncIterator, Mapping
@@ -64,7 +65,19 @@ class ReconcileSettings:
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> ReconcileSettings:
         env = os.environ if env is None else env
-        poll = float(env.get("PRINTOPS_POLL_S") or DEFAULT_POLL_S)
+        try:
+            poll = float(env.get("PRINTOPS_POLL_S") or DEFAULT_POLL_S)
+        except ValueError:
+            poll = math.nan
+        if not math.isfinite(
+            poll
+        ):  # nan/inf/garbage would kill or freeze the poller tasks
+            log.warning(
+                "PRINTOPS_POLL_S=%r is not a finite number; using %ss",
+                env.get("PRINTOPS_POLL_S"),
+                DEFAULT_POLL_S,
+            )
+            poll = DEFAULT_POLL_S
         if 0 < poll < MIN_POLL_S:
             log.warning(
                 "PRINTOPS_POLL_S=%s is below the %ss per-printer floor; using %ss",
@@ -305,7 +318,7 @@ def _views(
     for name, printer in printers.items():
         if only is not None and name != only:
             continue
-        anomalies = rc.list_anomalies(conn, scope=name, limit=1000)
+        anomalies = rc.list_anomalies(conn, scope=name, limit=ev.MAX_PAGE)
         out.append(
             printer_view(printer, rec.reading(name), binds, anomalies, spools_error)
         )

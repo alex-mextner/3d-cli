@@ -111,7 +111,8 @@ def u1_slots(status: dict[str, Any]) -> tuple[LiveSlot, ...]:
         )
         # The U1 shows white (FFFFFFFF) for a head whose filament it knows nothing about: a
         # colour without a material is a default, not a reading.
-        color = s.color if material else None
+        # parse_hex also drops malformed values ("GGGGGG") so ΔE never sees a non-colour.
+        color = parse_hex(s.color) if material else None
         out.append(
             LiveSlot(
                 head=s.label,

@@ -595,6 +595,26 @@ def test_ack_then_manual_resolve_and_reopen(
 # ---- settings + background tasks --------------------------------------------------------------
 
 
+def test_non_finite_poll_interval_falls_back_to_default() -> None:
+    for raw in ("nan", "inf", "-inf", "fast"):
+        assert (
+            routes.ReconcileSettings.from_env({"PRINTOPS_POLL_S": raw}).poll_s
+            == routes.DEFAULT_POLL_S
+        )
+
+
+def test_malformed_printer_colour_is_dropped_not_compared() -> None:
+    status = {
+        "print_task_config": {
+            "filament_exist": [True],
+            "filament_type": ["PLA"],
+            "filament_color_rgba": ["GGGGGGFF"],
+        }
+    }
+    (t1,) = u1_slots(status)
+    assert (t1.material, t1.color) == ("PLA", None)
+
+
 def test_poll_interval_has_a_floor_and_zero_disables() -> None:
     assert routes.ReconcileSettings.from_env({}).poll_s == routes.DEFAULT_POLL_S
     assert (
