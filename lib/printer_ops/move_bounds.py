@@ -111,6 +111,7 @@ _INERT = frozenset(
         "M204",
         "M205",
         "M220",
+        "M221",  # extrusion factor (flow tiles of `3d calibrate gen flow`)
         "M400",
         "M486",
         "M900",
@@ -128,6 +129,11 @@ _INERT = frozenset(
         "SET_RETRACTION",
         "SET_IDLE_TIMEOUT",
     }
+)
+# TUNING_TOWER re-runs its COMMAND at every new Z; only a SET_PRESSURE_ADVANCE tower is inert
+# (`3d calibrate gen pa`) — another COMMAND could move the head, so it stays a macro.
+_INERT_TOWER = re.compile(
+    r"\s*TUNING_TOWER\s+COMMAND=SET_PRESSURE_ADVANCE\s", re.IGNORECASE
 )
 _GM_WORD = re.compile(r"([GM])0*(\d+)(?![\d.])")
 
@@ -678,7 +684,7 @@ def check_bounds(path: Path, axis_limits: Limits | None = None) -> BoundsReport:
             if word is None:
                 continue
             if word not in _MODELED:
-                if word not in _INERT:
+                if word not in _INERT and not _INERT_TOWER.match(line):
                     # a macro: its body may move the head anywhere, extrude, or change E
                     seen_macro = rep.macros.setdefault(word, [0, n])
                     seen_macro[0] += 1

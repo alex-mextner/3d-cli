@@ -13,7 +13,8 @@ Talks to 3d-api like [`3d printops`](printops.md) (`PRINTOPS_API`, `PRINTOPS_TOK
 3d calibrate show ID
 3d calibrate check FILE.gcode --printer P [--spools T1=ID,…] [--plate PLATE]
                    [--accept calibration:KIND[,…] --reason TEXT]
-  common: [--json] [--api URL] [--token TOKEN]
+3d calibrate gen pa|flow|shaper --printer P -o OUT [--material PLA] [--color #RRGGBB] [--nozzle-temp C]
+  common (all but gen): [--json] [--api URL] [--token TOKEN]
 ```
 
 ## Why
@@ -123,6 +124,26 @@ The text report collapses the `assumed` kinds into one PASS line; `--json` lists
 FAIL exits 1. `--accept calibration:<kind> --reason "…"` turns that kind's FAIL into WARN and
 logs a `calibration.accepted` event (who, which G-code SHA, why); it needs a token with the
 `write` scope. print-preflight's PrintOps checks (#164) call the same endpoint.
+
+## `gen` — calibration prints ([#168](https://github.com/alex-mextner/3d-cli/issues/168))
+
+Local, no API. Slices with the Orca CLI (`SLICER=/path/to/orca` to force one) from the printer
+model's Orca system presets (`slicing/calibration_gen.py` `PRESETS`; today the Creality K1 SE),
+`inherits` resolved, plus per-test overrides; then adds thumbnails and a slice-warnings record,
+so `3d print-preflight FILE --printer P` can PASS it.
+
+- `pa` — hollow 40×40×30 mm single-wall tower, ACCEL=500, SQUARE_CORNER_VELOCITY=1, 100 mm/s
+  walls, slicer PA off; `TUNING_TOWER COMMAND=SET_PRESSURE_ADVANCE PARAMETER=ADVANCE START=0
+  FACTOR=0.005` after `START_PRINT` ([Klipper method](https://www.klipper3d.org/Pressure_Advance.html);
+  our own code, no Ellis pattern). PA = best height (mm) × 0.005. The stock PA is restored before `END_PRINT`.
+- `flow` — 5 tiles, one object each; `M221 S90…S110` after each `EXCLUDE_OBJECT_START`. The
+  report prints the resulting flow_ratio per tile (preset ratio × factor).
+- `shaper` — a text file of console commands (G28, ACCELEROMETER_QUERY, MEASURE_AXES_NOISE,
+  SHAPER_CALIBRATE per axis, SAVE_CONFIG) for printers with an accelerometer (K1 SE: ADXL345).
+
+`TUNING_TOWER` and `M221` are inert for the macro check (they never move the head). Orca's
+`calc_exclude_triangles` error is accepted in the sidecar only when the machine has no bed
+exclude area.
 
 ## Events
 
