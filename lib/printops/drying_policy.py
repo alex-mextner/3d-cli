@@ -21,6 +21,7 @@ not PC). Filament extra fields `hygroscopic_class`, `drying_temp_c`, `drying_hou
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -117,14 +118,23 @@ class DryingPolicy:
 
 
 def _number(value: Any) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+        and value > 0
+    )
 
 
 def _num(
     where: str, value: Any, *, lo: float, hi: float | None = None, lo_open: bool = False
 ) -> float:
-    if not isinstance(value, (int, float)) or isinstance(value, bool):
-        raise PolicyError(f"{where} must be a number, got {value!r}")
+    if (
+        not isinstance(value, (int, float))
+        or isinstance(value, bool)
+        or not math.isfinite(value)
+    ):
+        raise PolicyError(f"{where} must be a finite number, got {value!r}")
     if (value <= lo if lo_open else value < lo) or (hi is not None and value > hi):
         bound = f"> {lo}" if lo_open else f"≥ {lo}"
         raise PolicyError(

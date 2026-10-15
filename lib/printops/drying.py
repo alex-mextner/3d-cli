@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import datetime
 import sqlite3
+import threading
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from typing import Any
@@ -45,6 +46,10 @@ STATES = ("fresh", "ok", "due", "wet")
 ALERT_STATES = ("due", "wet")
 # Recipe temperatures further apart than this from the session temperature earn a warning.
 TEMP_TOLERANCE_C = 5
+# 3d-api is one process and the single Spoolman writer: this lock serializes session start /
+# finish with the periodic check, so a check never interleaves with a finish (stale `due` over
+# a fresh `fresh`) and two finishes of one session never both write Spoolman.
+STATE_LOCK = threading.RLock()
 
 
 class DryingError(ValueError):
@@ -267,7 +272,13 @@ def _label(spool: Mapping[str, Any]) -> str:
     )
 
 
-def start(
+def start(*args: Any, **kwargs: Any) -> tuple[Session, list[str]]:
+    """Open a drying session (see `_start`); serialized with finish and the check."""
+    with STATE_LOCK:
+        return _start(*args, **kwargs)
+
+
+def _start(
     conn: sqlite3.Connection,
     spoolman: Spoolman,
     policy: DryingPolicy,
@@ -380,7 +391,14 @@ def start(
     return session, warnings
 
 
-def finish(
+def finish(*args: Any, **kwargs: Any) -> tuple[Session, list[str]]:
+    """Close a session (see `_finish`); serialized with start and the check, so a second
+    finish of the same session sees it closed BEFORE touching Spoolman."""
+    with STATE_LOCK:
+        return _finish(*args, **kwargs)
+
+
+def _finish(
     conn: sqlite3.Connection,
     spoolman: Spoolman,
     *,
@@ -539,6 +557,9 @@ class Assessment:
     label: str
     state: str  # fresh | ok | due | wet | unknown | drying
     stored_state: str | None  # Spoolman dry_state before this assessment
+    stored_dried_at: (
+        str | None
+    )  # Spoolman last_dried_at the assessment was based on (raw)
     hygroscopic_class: str
     recipe: str
     clock: str | None  # "dried" | "opened" | None
@@ -579,6 +600,9 @@ def assess(
         label=_label(spool),
         state="unknown",
         stored_state=stored,
+        stored_dried_at=str(extra["last_dried_at"])
+        if extra.get("last_dried_at")
+        else None,
         hygroscopic_class=recipe.hygroscopic_class,
         recipe=recipe.origin,
         clock=None,
@@ -744,7 +768,21 @@ def check(
     actor: str = "drying-check",
 ) -> CheckReport:
     """Assess all spools, write changed `dry_state` to Spoolman, emit `drying.due` on entering due/wet."""
-    assessments = assess_all(conn, spoolman, policy, humidity=humidity, now=now)
+    with STATE_LOCK:
+        assessments = assess_all(conn, spoolman, policy, humidity=humidity, now=now)
+        return apply_states(conn, spoolman, assessments, actor=actor)
+
+
+def apply_states(
+    conn: sqlite3.Connection,
+    spoolman: Spoolman,
+    assessments: list[Assessment],
+    *,
+    actor: str,
+) -> CheckReport:
+    """Write the assessed states. Each spool is re-read first: if its dry_state or last_dried_at
+    moved since it was assessed, or it went into a dryer, the assessment is stale and skipped
+    (a stale `due` must never overwrite the `fresh` a finished session just wrote)."""
     report = CheckReport(
         checked=len(assessments),
         changed=[],
@@ -752,14 +790,28 @@ def check(
         errors=[],
         assessments=assessments,
     )
+    drying_now = spools_drying(conn)
     for a in assessments:
         if a.state not in STATES or a.state == a.stored_state:
             continue
         try:
+            current = decoded_extra(spoolman.get("spool", a.spool_id))
+            stored_now = (
+                current.get("dry_state") if current.get("dry_state") in STATES else None
+            )
+            dried_now = (
+                str(current["last_dried_at"]) if current.get("last_dried_at") else None
+            )
+            if (
+                stored_now != a.stored_state
+                or dried_now != a.stored_dried_at
+                or a.spool_id in drying_now
+            ):
+                continue
             spoolman.update(
                 "spool", a.spool_id, {"extra": {"dry_state": encode_extra(a.state)}}
             )
-        except SpoolmanError as e:
+        except SpoolmanError as e:  # noqa: PERF203 — one failing spool must not stop the rest
             report.errors.append(f"spool {a.spool_id}: {e.message}")
             continue
         report.changed.append(
