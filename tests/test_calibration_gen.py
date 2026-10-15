@@ -281,3 +281,37 @@ def test_missing_preset_option_is_a_gen_error() -> None:
         cg._first({}, "retraction_speed")
     with pytest.raises(cg.GenError, match="filament_diameter"):
         cg._first({"filament_diameter": ["x"]}, "filament_diameter")
+
+
+def test_temp_steps_and_refusals() -> None:
+    assert cg.temp_steps("PLA") == [230, 225, 220, 215, 210, 205, 200]
+    assert cg.temp_steps("PETG")[0] == 250
+    with pytest.raises(cg.GenError, match="no temperature range"):
+        cg.temp_steps("TPU")
+    with pytest.raises(cg.GenError, match="--nozzle-temp"):
+        cg.generate("temp", "Creality K1 SE", "", Path("x.gcode"), temp=215)
+
+
+def test_temp_tower_labels_stand_on_each_block_floor() -> None:
+    steps = cg.temp_steps("PLA")
+    boxes = cg.temp_tower_boxes(steps, 110, 110)
+    bz = cg.TEMP_BASE[2]
+    floors = [bz + i * cg.TEMP_BLOCK_H for i in range(len(steps))]
+    labels = [b for b in boxes if b[5] - b[2] == pytest.approx(cg.TEMP_EMBOSS)]
+    assert {b[2] for b in labels} == set(floors)  # one label per block, on its floor
+    gap_x0 = 110 - (2 * cg.TEMP_PILLAR + cg.TEMP_GAP) / 2 + cg.TEMP_PILLAR
+    assert all(gap_x0 <= b[0] and b[3] <= gap_x0 + cg.TEMP_GAP for b in labels)  # inside the gap
+    assert max(b[5] for b in boxes) == pytest.approx(bz + len(steps) * cg.TEMP_BLOCK_H)
+
+
+def test_temp_changes_on_first_layer_of_each_block() -> None:
+    steps = [230, 225, 220]
+    bz, h = cg.TEMP_BASE[2], cg.TEMP_BLOCK_H
+    zs = [round(0.2 * i, 2) for i in range(1, int((bz + 3 * h) / 0.2) + 1)]
+    text = "\n".join(f";LAYER_CHANGE\n;Z:{z}\nG1 X1 E1" for z in zs)
+    lines = cg.temp_changes(text, steps).splitlines()
+    changes = [(lines[i - 1], ln) for i, ln in enumerate(lines) if ln.startswith("M104")]
+    assert [c[1].split()[1] for c in changes] == ["S225", "S220"]
+    assert [float(c[0][3:]) for c in changes] == [pytest.approx(bz + h + 0.2), pytest.approx(bz + 2 * h + 0.2)]
+    with pytest.raises(cg.GenError, match="temperature changes"):
+        cg.temp_changes("G1 X1 E1", steps)

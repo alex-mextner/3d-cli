@@ -33,7 +33,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-KINDS = ("pa", "flow", "combo", "shaper")
+KINDS = ("pa", "flow", "combo", "temp", "shaper")
 SLICE_TIMEOUT_S = 600
 
 
@@ -165,9 +165,17 @@ class ProfileIndex:
         return data
 
 
+Box = tuple[float, float, float, float, float, float]  # x0, y0, z0, x1, y1, z1
+
+
 def box_stl(x0: float, y0: float, z0: float, x1: float, y1: float, z1: float) -> str:
     """An ASCII STL of one axis-aligned box (outward winding)."""
-    v = [(x, y, z) for z in (z0, z1) for y in (y0, y1) for x in (x0, x1)]
+    return boxes_stl([(x0, y0, z0, x1, y1, z1)])
+
+
+def boxes_stl(boxes: list[Box]) -> str:
+    """One ASCII STL solid made of axis-aligned boxes (outward winding). Boxes may touch;
+    the slicer unions the shells of one object layer by layer."""
     tris = [
         (0, 2, 1),
         (1, 2, 3),
@@ -183,10 +191,12 @@ def box_stl(x0: float, y0: float, z0: float, x1: float, y1: float, z1: float) ->
         (3, 7, 5),
     ]
     out = ["solid box"]
-    for a, b, c in tris:
-        out.append("facet normal 0 0 0\nouter loop")
-        out += [f"vertex {v[i][0]:g} {v[i][1]:g} {v[i][2]:g}" for i in (a, b, c)]
-        out.append("endloop\nendfacet")
+    for x0, y0, z0, x1, y1, z1 in boxes:
+        v = [(x, y, z) for z in (z0, z1) for y in (y0, y1) for x in (x0, x1)]
+        for a, b, c in tris:
+            out.append("facet normal 0 0 0\nouter loop")
+            out += [f"vertex {v[i][0]:g} {v[i][1]:g} {v[i][2]:g}" for i in (a, b, c)]
+            out.append("endloop\nendfacet")
     out.append("endsolid box\n")
     return "\n".join(out)
 
@@ -690,7 +700,9 @@ def gen_combo(
     # The sliced footer is authoritative (the K1 preset leaves the option at Orca's default).
     rel_e = re.search(r"^; use_relative_e_distances = (\d)", text, re.M)
     if rel_e is None or rel_e.group(1) != "1":
-        raise GenError(f"{p.machine}: combo writes relative-E (M83) lines; the slice is not relative-E")
+        raise GenError(
+            f"{p.machine}: combo writes relative-E (M83) lines; the slice is not relative-E"
+        )
     diameter = _first(fpre, "filament_diameter")
     layer_h = _first(proc, "initial_layer_print_height")
     ratio = _first(fpre, "filament_flow_ratio")
@@ -738,6 +750,151 @@ def gen_combo(
             "--values pressure_advance=VALUE --method pa_lines",
             f"Back: flow tiles printed at PA {p.stock_pa:g} (stock).",
             *flow_notes(ratio),
+        ],
+    )
+
+
+# Temperature tower: one block per temperature, hottest at the bottom (the first layers need the
+# best adhesion). A block is two pillars joined by a bridge slab at its top: the gap shows
+# stringing, the slab bridging, the outer walls surface and layer bonding. The block's
+# temperature stands up from its floor in the gap (the base plate, then the slab below), so a
+# label never overhangs and is printed at its own block's temperature; read it from the front.
+TEMP_RANGES = {
+    "PLA": (230, 200),
+    "PLA+": (230, 200),
+    "PETG": (250, 220),
+}  # bottom, top (°C)
+TEMP_STEP = 5
+TEMP_BLOCK_H = 8.0
+TEMP_PILLAR = 9.0  # pillar width and depth (mm)
+TEMP_GAP = (
+    14.0  # gap between the pillars = bridge length; under print-preflight's 15 mm limit
+)
+TEMP_SLAB_H = 1.6
+TEMP_BASE = (44.0, 20.0, 1.0)  # base plate under the tower for adhesion (x, y, z)
+TEMP_DIGIT = (
+    2.0,
+    4.0,
+    0.8,
+    0.8,
+)  # digit width, depth (along y), gap; stroke width (mm)
+TEMP_EMBOSS = 0.6  # label height above the floor (mm)
+
+
+def temp_steps(material: str) -> list[int]:
+    if material not in TEMP_RANGES:
+        raise GenError(
+            f"no temperature range for {material!r} (known: {', '.join(TEMP_RANGES)})"
+        )
+    hot, cold = TEMP_RANGES[material]
+    return list(range(hot, cold - 1, -TEMP_STEP))
+
+
+def digit_boxes(digits: str, x0: float, y0: float, z_floor: float) -> list[Box]:
+    """Seven-segment `digits` lying on a floor at z_floor, raised TEMP_EMBOSS, read from the
+    front (digit 'up' = +y), lower-left corner at (x0, y0)."""
+    w, h, gap, s = TEMP_DIGIT
+    out: list[Box] = []
+    for k, ch in enumerate(digits):
+        ox = x0 + k * (w + gap)
+        for seg in _DIGITS[ch]:
+            (ax, ay), (bx, by) = _SEG[seg]
+            xa, xb = sorted((ox + ax * w, ox + bx * w))
+            ya, yb = sorted((y0 + ay * h / 2, y0 + by * h / 2))
+            # a stroke is the segment grown by half the stroke width on every side
+            out.append(
+                (
+                    xa - s / 2,
+                    ya - s / 2,
+                    z_floor,
+                    xb + s / 2,
+                    yb + s / 2,
+                    z_floor + TEMP_EMBOSS,
+                )
+            )
+    return out
+
+
+def temp_tower_boxes(steps: list[int], cx: float, cy: float) -> list[Box]:
+    bx, by, bz = TEMP_BASE
+    width = 2 * TEMP_PILLAR + TEMP_GAP
+    x0, y0 = cx - width / 2, cy - TEMP_PILLAR / 2
+    boxes: list[Box] = [(cx - bx / 2, cy - by / 2, 0.0, cx + bx / 2, cy + by / 2, bz)]
+    w, h, gap, s = TEMP_DIGIT
+    label_w = 3 * w + 2 * gap
+    lx = x0 + TEMP_PILLAR + (TEMP_GAP - label_w) / 2
+    ly = y0 + (TEMP_PILLAR - h) / 2
+    for i, t in enumerate(steps):
+        z0 = bz + i * TEMP_BLOCK_H
+        top = z0 + TEMP_BLOCK_H
+        boxes.extend(
+            (px, y0, z0, px + TEMP_PILLAR, y0 + TEMP_PILLAR, top - TEMP_SLAB_H)
+            for px in (x0, x0 + TEMP_PILLAR + TEMP_GAP)
+        )
+        boxes.append((x0, y0, top - TEMP_SLAB_H, x0 + width, y0 + TEMP_PILLAR, top))
+        boxes += digit_boxes(str(t), lx, ly, z0)
+    return boxes
+
+
+def temp_changes(text: str, steps: list[int]) -> str:
+    """`M104 S<t>` on the first layer of each block above the first (Orca marks every layer
+    with `;Z:<height>` after `;LAYER_CHANGE`); the first block prints at the slice's own
+    temperature, which gen_temp sets to steps[0]."""
+    bz = TEMP_BASE[2]
+    starts = [bz + i * TEMP_BLOCK_H for i in range(1, len(steps))]
+    lines = text.split("\n")
+    out: list[str] = []
+    nxt = 0
+    for line in lines:
+        out.append(line)
+        m = re.match(r";Z:([\d.]+)\s*$", line)
+        if m and nxt < len(starts) and float(m.group(1)) > starts[nxt] + 1e-6:
+            out.append(
+                f"M104 S{steps[nxt + 1]} ; 3d calibrate gen temp: block {nxt + 2}"
+            )
+            nxt += 1
+    if nxt != len(starts):
+        raise GenError(
+            f"post-process: {nxt} of {len(starts)} temperature changes placed (no ;Z: markers?)"
+        )
+    return "\n".join(out)
+
+
+def gen_temp(
+    slicer: str,
+    idx: ProfileIndex,
+    p: Presets,
+    material: str,
+    color: str,
+    out: Path,
+    temp: int | None,
+) -> Generated:
+    if temp is not None:
+        raise GenError(
+            f"gen temp prints its own range ({', '.join(f'{m} {a}->{b}' for m, (a, b) in TEMP_RANGES.items())}); "
+            "drop --nozzle-temp"
+        )
+    steps = temp_steps(material)
+    boxes = temp_tower_boxes(steps, p.bed[0] / 2, p.bed[1] / 2)
+    fil = _filament_overrides(color, steps[0])
+    proc = {"brim_type": "no_brim", "sparse_infill_density": "15%", "wall_loops": 2}
+    text, log = slice_models(
+        slicer, idx, p, material, {"temp_tower.stl": boxes_stl(boxes)}, proc, fil
+    )
+    text = temp_changes(text, steps)
+    publish(text, out)
+    finish(out, log, idx.flat(p.vendor, "machine", p.machine))
+    blocks = ", ".join(f"{i + 1}: {t} °C" for i, t in enumerate(steps))
+    return Generated(
+        "temp",
+        [out],
+        [
+            f"{len(steps)} blocks of {TEMP_BLOCK_H:g} mm, bottom to top: {blocks}; each block is labelled.",
+            "Per block look at stringing in the gap, the bridge underside, wall surface and layer bonding "
+            "(try to break the top blocks). min = coldest block that still bonds and bridges, max = hottest "
+            "without stringing or droop, best = the cleanest.",
+            "Record: 3d calibrate record temp_tower --filament ID --values nozzle_temp_min=MIN,"
+            "nozzle_temp_best=BEST,nozzle_temp_max=MAX --method temp_tower",
         ],
     )
 
@@ -796,4 +953,6 @@ def generate(
         return gen_pa(slicer, idx, p, material, color, out, temp)
     if kind == "combo":
         return gen_combo(slicer, idx, p, material, color, out, temp)
+    if kind == "temp":
+        return gen_temp(slicer, idx, p, material, color, out, temp)
     return gen_flow(slicer, idx, p, material, color, out, temp)
