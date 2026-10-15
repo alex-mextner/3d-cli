@@ -242,6 +242,36 @@ incident(
 - `fault(id, printer_id, component, at, symptom, root_cause, status, fixed_by_maintenance_id)`. Пример: «U1 T2 не работает» сейчас живёт текстом в `queue.json`/`plates.json`. Нужно перенести в fault + `head.usable=false`, это нужно планировщику и #112.
 - **Регламент ТО** (`fleet/maintenance-rules.yaml`): каждые N часов, M метров или K смен голов → задача ТО (смазка направляющих, чистка сопел, проверка ремней, PTFE). Счётчики считаются по истории заданий.
 
+### 7.4 Журнал изменений настроек принтеров (settings history, #264)
+Требование: append-only история **всех** изменений калибровок и настроек принтера — что, старое → новое значение, когда, кто и какой командой, источник, привязка к принтеру/голове/столу/катушке, откат.
+
+**Чего не хватает в #167/#227 и #166.** `calibration` (#227) хранит измерение, но строка мутабельна (`status`, `superseded_by`); «старое значение» есть только в `applied_to`, а его сейчас никто не пишет (apply не реализован); нет PID, firmware/конфигов, `trusted_macros`/fleet, профилей слайсера; нет источника `backup`; нет команды-инициатора; нет отката. `maintenance.kind = firmware_update` (#166) — только заметка, без diff и хешей. События `events` append-only, но вида `settings.changed` нет, и нет запроса «история принтера».
+
+**Схема** (миграция `settings_change`, триггеры запрещают UPDATE/DELETE, как у `events`):
+```
+settings_change(id, uid UNIQUE,                     -- uid (UUIDv7) = ключ идемпотентного импорта
+  at, recorded_at, printer, head?, plate?, nozzle_install_id?, spool_id?, filament_id?, lot_nr?,
+  kind,        -- flow_ratio|pressure_advance|input_shaper|z_offset|bed_mesh|pid_hotend|pid_bed|… (каталог §7.2)
+               -- | firmware | config_file | trusted_macros | fleet | slicer_profile | other
+  key,         -- input_shaper.shaper_freq_x, printer.cfg, fleet/printers.yaml#k1se.adapter, …
+  old, new,    -- JSON; для config_file — {sha256, bytes}
+  status,      -- measured | measured_not_applied | applied | restored | observed (дрейф) | rolled_back
+  source,      -- accelerometer | photo | vlm | manual | backup | firmware_auto | drift_scan | import
+  actor, command,                  -- токен/пользователь и argv команды
+  evidence[],                      -- фото, логи, gcode path + sha256
+  calibration_id?, maintenance_id?, reverts?)        -- reverts = id отменяемой записи
+config_blob(sha256 PK, content)                      -- содержимое конфигов, content-addressed; путь — в settings_change.key
+```
+Одно действие может дать несколько строк (например, `shaper_freq_x` и `shaper_freq_y`), их связывает общий `command` и `at`.
+
+**Откат** — это не правка истории, а новая запись: `3d settings rollback <id>` берёт `old` записи `<id>`, применяет его тем же путём с подтверждением (§8.2 п.4: diff профиля, `SAVE_CONFIG` только idle + `--yes`, конфиг — запись блоба по sha256) и пишет строку `status=applied, source=manual, reverts=<id>`. Перед применением живое значение (или sha256 файла) сверяется с `new` записи `<id>`: если после неё было другое изменение, откат отказывает с diff (409), перезапись только с явным `--force`.
+
+**Кто пишет:** `3d calibrate record|apply` (#227, #168/#249, #257) — measured / applied со ссылкой на `calibration_id`; `3d printops maintenance` (#166) с `firmware_update` — снимок конфигов до/после; `drift_scan` в `3d-api` (раз в час, только чтение: Moonraker `/server/files/config/*`, K1 stock — по SSH/HTTP при доступе) — изменённый sha256 даёт `observed` с diff; правки `fleet/*.yaml` и `printer-devices.yaml` (`trusted_macros`, адаптер) — через `3d fleet`/`3d printer` или по git-хуку; применение профиля Orca — diff JSON.
+
+**Чтение:** `3d settings history --printer P [--kind K] [--since D]`, `GET /v1/settings/history?printer=&kind=&since=&cursor=` (новые сверху, курсор по `id`, scope `read`); событие `settings.changed` (§11.2). Ответ по умолчанию — метаданные и sha256 без содержимого конфигов; содержимое и diff — `GET /v1/settings/blobs/{sha256}` со scope `printer-control`. Секреты (`api_key`, `token`, `password`, `[secrets]`-ссылки Moonraker) вырезаются до сохранения блоба.
+
+**Без 3d-api:** CLI дописывает те же записи в `~/.local/share/3d/printer-history/<printer>.jsonl` (одна строка — одна запись, `uid` обязателен) под `flock` на файл, одним `write` с `O_APPEND` + `fsync`. `3d settings import <file>` идемпотентно переносит их в БД по `uid`, пересчитывает sha256 приложенного содержимого конфигов и отвергает несовпадающие; битая строка (обрыв записи) не пропускается молча, а останавливает импорт с номером строки.
+
 ---
 
 ## 8. Защита от забытых калибровок + streamline
@@ -339,7 +369,8 @@ POST /v1/spools/{id}/notes                 POST /v1/incidents   GET /v1/incident
 GET  /v1/locations (дерево)   GET /v1/locations/{path}/contents
 POST /v1/drying/sessions {dryer, spools[], temp, hours}   POST /v1/drying/sessions/{id}/finish
 GET/POST /v1/jobs (очередь)  PATCH /v1/jobs/{id} (порядок/принтер)  POST /v1/jobs/{id}/preflight  POST /v1/jobs/{id}/start (confirm token)
-GET  /v1/history?printer=&since=
+GET  /v1/history?printer=&since=          история заданий (§15 п.16)
+GET  /v1/settings/history?printer=&kind=&since=&cursor=   GET /v1/settings/blobs/{sha256}   POST /v1/settings/{id}/rollback   # §7.4
 POST /v1/preflight (gcode + printer → checks; stateless)
 GET  /v1/calibrations/required?printer=&slot=&spool=   POST /v1/calibrations/runs   POST /v1/calibrations/{id}/result|apply
 GET/POST /v1/purchases       GET /v1/shops/search?q=&material=&color=
@@ -350,7 +381,7 @@ GET  /v1/events (SSE) | WS /v1/ws
 ```
 
 ### 11.2 События
-`printer.state_changed`, `job.queued|started|finished|failed`, `slot.loaded|unloaded|mismatch`, `spool.low|moved|measured|empty`, `drying.started|finished|due`, `calibration.required|recorded|applied`, `maintenance.due`, `incident.created`, `preflight.failed`, `anomaly.opened|resolved`, `shop.stock_changed|price_changed`. Доставка: SSE и WS, пуш в HA (`POST /api/events/printops_*` с long-lived token) и watch-sinks (tg, exec).
+`printer.state_changed`, `job.queued|started|finished|failed`, `slot.loaded|unloaded|mismatch`, `spool.low|moved|measured|empty`, `drying.started|finished|due`, `calibration.required|recorded|applied`, `settings.changed` (§7.4), `maintenance.due`, `incident.created`, `preflight.failed`, `anomaly.opened|resolved`, `shop.stock_changed|price_changed`. Доставка: SSE и WS, пуш в HA (`POST /api/events/printops_*` с long-lived token) и watch-sinks (tg, exec).
 
 ### 11.3 Голосовые интенты (RU)
 | Фраза | Интент | Разрешение |
