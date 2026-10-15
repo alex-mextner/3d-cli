@@ -49,11 +49,15 @@ def undecorated(label: str) -> str:
 
 
 def feature(line: str) -> str | None:
-    """`;TYPE:Support` / `; FEATURE: Support` -> 'Support'; None for any other line."""
-    if line.startswith(";TYPE:"):
-        return line[6:].strip()
-    if line.startswith("; FEATURE:"):
-        return line[10:].strip()
+    """`;TYPE:Support` / `; FEATURE: Support` (any spacing after `;`) -> 'Support'; None for
+    any other line."""
+    if not line.startswith(";"):
+        return None
+    body = line[1:].lstrip()
+    if body.startswith("TYPE:"):
+        return body[5:].strip()
+    if body.startswith("FEATURE:"):
+        return body[8:].strip()
     return None
 
 

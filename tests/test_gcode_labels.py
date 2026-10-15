@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 import gcode_overhangs as go
 import visible_faces as vf
 from gcode_labels import ObjectLabels, feature, line_width, undecorated
@@ -169,6 +171,20 @@ def test_visible_faces_names_bambu_objects() -> None:
         "SW",
         "SW — SW",
     ]
+
+
+@pytest.mark.parametrize(
+    "tag", [";TYPE:Support", "; TYPE:Support", ";FEATURE:Support", "; FEATURE: Support"]
+)
+def test_every_feature_tag_spelling_marks_support(tag: str, tmp_path: Path) -> None:
+    """Slicers differ in the space after `;`; visible faces must still see the support."""
+    assert feature(tag) == "Support"
+    path = tmp_path / "s.gcode"
+    path.write_text(
+        f";Z:0.2\n;TYPE:Outer wall\nG1 X1 Y1 E1\n{tag}\nG1 X2 Y1 E1\n", encoding="utf-8"
+    )
+    objs, _ = vf.parse_gcode(str(path), vf.build_specs(["plate:all"], [], []))
+    assert len(objs["plate"].support) == 1
 
 
 def test_print_area_skips_bambu_vendor_moves_but_not_the_plate(tmp_path: Path) -> None:
