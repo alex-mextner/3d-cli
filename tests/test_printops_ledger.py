@@ -396,7 +396,7 @@ def test_spool_without_any_weight_is_unknown_not_zero(
     assert est.text() == "unknown (never weighed)" and est.to_dict()["bounded"] is False
 
 
-# -- review round 3 (PR #216) ---------------------------------------------------------------------
+# -- malformed extras, estimate cost, vendor parsing ----------------------------------------------
 
 
 def test_lint_spools_survives_a_malformed_opened_at(

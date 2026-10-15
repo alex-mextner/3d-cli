@@ -422,7 +422,7 @@ def test_import_validates_every_item_before_writing(
     assert po.get("/v1/spools")["spools"] == []
 
 
-# -- review round 3 (PR #216) ---------------------------------------------------------------------
+# -- slot spelling, validation before writes, concurrency -----------------------------------------
 
 
 def test_unload_canonicalises_the_slot_like_load(
@@ -538,15 +538,12 @@ def test_empty_and_move_recheck_archived_under_the_write_lock(
     )
 
 
-# -- delta review of round 3 (PR #216) ------------------------------------------------------------
-
-
 @pytest.mark.parametrize(
     "field, value",
     [("remaining_confidence_g", -1), ("density", 0), ("diameter", -1.75)],
 )
 def test_import_rejects_bad_confidence_density_diameter_before_writing(
-    po: ApiClient, fake_spoolman: FakeSpoolman, field: str, value: float
+    po: ApiClient, fake_spoolman: FakeSpoolman, field: str, value: int | float
 ) -> None:
     good = {"external_key": "bd:a", "material": "PLA", "name": "белый"}
     bad = {
@@ -559,6 +556,7 @@ def test_import_rejects_bad_confidence_density_diameter_before_writing(
     before = len(fake_spoolman.writes())
     err = _err(po.post, "/v1/spools/import", {"items": [good, bad], "dry_run": False})
     assert err.status == 422 and field in err.message, err.message
+    assert "finite number" in err.message  # the value check, not "unknown field"
     assert len(fake_spoolman.writes()) == before
 
 
@@ -570,3 +568,17 @@ def test_unload_from_a_printer_that_left_the_fleet_ignores_case(
         "spool", sid, {"extra": {"printops_slot": json.dumps("k2/T1")}}
     )
     assert po.post("/v1/printers/k2/slots/t1/unload", {})["slot"] is None
+
+
+def test_load_sees_an_occupant_whose_slot_differs_in_case(
+    po: ApiClient, fake_spoolman: FakeSpoolman
+) -> None:
+    """A spool hand-set to `u1/t1` in Spoolman still occupies u1/T1."""
+    a = po.post("/v1/spools", GREEN)["id"]
+    b = po.post(
+        "/v1/spools", {**GREEN, "name": "RAPID PLA+ White", "color_hex": "#FFFFFF"}
+    )["id"]
+    fake_spoolman.update("spool", a, {"extra": {"printops_slot": json.dumps("u1/t1")}})
+    busy = _err(po.post, "/v1/printers/u1/slots/T1/load", {"spool_id": b})
+    assert busy.status == 409 and f"spool #{a}" in busy.message
+    assert po.get(f"/v1/spools/{b}")["slot"] is None
