@@ -826,3 +826,66 @@ def test_check_lowering_wet_to_due_does_not_alert(
     report = drying.check(printops_db, registered, dpolicy, now=NOW)
     assert report.changed == [{"spool_id": petg, "from": "wet", "to": "due"}] and report.alerts == []
     assert "drying.due" not in kinds(printops_db)
+
+
+# -- review fixes: stale check writes, concurrent finish, non-finite policy numbers ---------
+def test_a_stale_check_never_overwrites_a_finished_session(
+        registered: FakeSpoolman, printops_db: sqlite3.Connection, dpolicy: DryingPolicy) -> None:
+    locations.add(printops_db, "dryer:1", "dryer", actor="t")
+    petg = add_spool(registered, "PETG", opened=iso(40, datetime.datetime.now(UTC)))
+    stale = drying.assess_all(printops_db, registered, dpolicy)  # says due …
+    session, _ = drying.start(printops_db, registered, dpolicy, dryer="dryer:1", spool_ids=[petg], actor="t")
+    drying.finish(printops_db, registered, session_id=session.id, actor="t")  # … but it was just dried
+    report = drying.apply_states(printops_db, registered, stale, actor="t")
+    assert report.changed == [] and report.alerts == []
+    assert spool_extra(registered, petg)["dry_state"] == "fresh"
+    assert "drying.due" not in kinds(printops_db)
+
+
+def test_concurrent_finishes_write_spoolman_once(
+        registered: FakeSpoolman, printops_db: sqlite3.Connection, dpolicy: DryingPolicy,
+        printops_settings: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    from printops.db import open_db
+
+    locations.add(printops_db, "dryer:1", "dryer", actor="t")
+    spool = add_spool(registered, "PLA")
+    session, _ = drying.start(printops_db, registered, dpolicy, dryer="dryer:1", spool_ids=[spool], actor="t")
+    real_update = registered.update
+    writes: list[str] = []
+
+    def slow_update(entity: Any, item_id: int, data: Any) -> Any:
+        writes.append(threading.current_thread().name)
+        time.sleep(0.2)  # wide window for the other finish to interleave
+        return real_update(entity, item_id, data)
+
+    monkeypatch.setattr(registered, "update", slow_update)
+    outcomes: dict[str, str] = {}
+
+    def finish(name: str) -> None:
+        conn = open_db(printops_settings.db_path)
+        try:
+            drying.finish(conn, registered, session_id=session.id, actor=name)
+            outcomes[name] = "ok"
+        except drying.SessionConflict:
+            outcomes[name] = "conflict"
+        finally:
+            conn.close()
+
+    threads = [threading.Thread(target=finish, args=(n,), name=n) for n in ("a", "b")]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(10)
+    assert sorted(outcomes.values()) == ["conflict", "ok"]
+    winner = next(n for n, o in outcomes.items() if o == "ok")
+    assert writes == [winner]
+    assert spool_extra(registered, spool)["last_dried_at"] == drying.get_session(printops_db, session.id).ended_at
+
+
+@pytest.mark.parametrize("bad", [".nan", ".inf"])
+def test_policy_rejects_non_finite_numbers(tmp_path: Path, bad: str) -> None:
+    broken = tmp_path / "policy.yaml"
+    broken.write_text(_policy_text().replace("medium:  {max_days_opened: 30", f"medium:  {{max_days_opened: {bad}"),
+                      encoding="utf-8")
+    problems = policy.check(broken)
+    assert problems and "classes.medium.max_days_opened must be a finite number" in problems[0], problems
