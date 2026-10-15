@@ -86,6 +86,9 @@ def test_resume_output_passes_gcode_bounds_for_the_u1(tmp_path: Path) -> None:
     assert built.returncode == 0, built.stderr
     bounds = run_cli(tmp_path, "gcode-bounds", str(tmp_path / "resume.gcode"), "--printer", "u1")
     assert bounds.returncode == 0, bounds.stdout + bounds.stderr
+    assert "PASS  axis travel" in bounds.stdout and "PASS  macros" in bounds.stdout
+    assert "FAIL" not in bounds.stdout  # the synthetic plate has no printable_area: WARN, not PASS
+    assert "RETRACT_LENGTH" not in (tmp_path / "resume.gcode").read_text(encoding="ascii")
 
 
 def test_resume_past_the_z_ceiling_writes_nothing(tmp_path: Path) -> None:
