@@ -510,7 +510,8 @@ def test_k1_runout_persisting_into_the_next_job_is_reported_again() -> None:
     assert kinds(d.tick(1021.0)) == [("filament", CRITICAL)]
     d.on_push({"state": 4, "deviceState": 0}, 1030.0)          # cancelled, sensor still 1
     d.on_push({"state": 1, "deviceState": 1, "printProgress": 37}, 1100.0)  # job B
-    assert kinds(d.tick(1800.0)) == [("filament", CRITICAL)]
+    d.tick(1800.0)                                               # job B's start phase over: held
+    assert kinds(d.tick(1811.0)) == [("filament", CRITICAL)]
 
 
 def test_k1_recovered_start_flicker_does_not_explain_a_later_pause() -> None:
@@ -520,6 +521,40 @@ def test_k1_recovered_start_flicker_does_not_explain_a_later_pause() -> None:
     ev = d.on_push({"state": 5, "deviceState": 0}, 1060.0)
     state = [e for e in ev if e.kind == "state"][0]
     assert "filament" not in state.text
+
+
+def test_k1_runout_on_the_push_that_starts_the_job_waits_for_the_start_phase() -> None:
+    d = CrealityDetector("k1se")
+    d.on_push(k1_state(0, 0) | {"materialDetect": 1, "materialStatus": 0}, 1000.0)
+    d.on_push({"state": 1, "deviceState": 1, "materialStatus": 1}, 1010.0)  # no printProgress in this delta
+    assert d.tick(1030.0) == []
+    assert d.on_push({"materialStatus": 0}, 1040.0) == []
+    assert d.tick(1700.0) == []
+
+
+def test_k1_runout_with_progress_stuck_at_zero_fires_after_the_start_phase() -> None:
+    d = k1_starting()
+    d.on_push({"materialDetect": 1, "materialStatus": 1}, 1020.0)
+    assert d.tick(1600.0) == []                                  # 590 s after the start
+    assert d.tick(1611.0) == []                                  # start phase over: held now
+    assert kinds(d.tick(1622.0)) == [("filament", CRITICAL)]
+
+
+def test_k1_runout_with_unknown_start_and_stuck_progress_is_not_hidden_forever() -> None:
+    d = CrealityDetector("k1se")
+    d.on_push(k1(printProgress=0), 1000.0)  # attached to a running job at 0 %
+    d.on_push({"materialStatus": 1}, 1010.0)
+    assert d.tick(1500.0) == []
+    d.tick(1611.0)                                               # waited start_phase_s: held
+    assert kinds(d.tick(1622.0)) == [("filament", CRITICAL)]
+
+
+def test_k1_runout_while_paused_mid_job_is_a_warning() -> None:
+    d = CrealityDetector("k1se")
+    d.on_push(k1(), 1000.0)
+    d.on_push({"state": 5, "deviceState": 0}, 1010.0)
+    d.on_push({"materialStatus": 1}, 1020.0)
+    assert kinds(d.tick(1031.0)) == [("filament", WARNING)]
 
 
 def test_k1_cancel_and_complete() -> None:

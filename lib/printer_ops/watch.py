@@ -87,9 +87,10 @@ class WatchLimits:
     confirm_s: float = 10.0
     end_progress: float = 0.99
     # The start macro does the same in reverse: K1 stock START_PRINT zeroes the bed and nozzle
-    # targets for ~30 s of probing/calibration and homes again. In the start phase (progress at
-    # most `start_progress`, or less than `start_phase_s` after "started printing") the hold is
-    # `start_confirm_s`, and a target restored or axes re-homed meanwhile drops the event.
+    # targets for ~30 s of probing/calibration and homes again. In the start phase (less than
+    # `start_phase_s` after this watcher saw "started printing"; for a job already running when
+    # the watcher started, progress at most `start_progress`) the hold is `start_confirm_s`,
+    # and a target restored or axes re-homed meanwhile drops the event.
     start_confirm_s: float = 90.0
     start_progress: float = 0.01
     start_phase_s: float = 600.0
@@ -247,21 +248,25 @@ class _Detector:
         return f.state in JOB_ACTIVE and f.progress is not None and f.progress >= self.limits.end_progress
 
     def _in_start_phase(self, f: Frame, now: float) -> bool:
-        """Start macro window: progress at most `start_progress`, or soon after this watcher saw
-        the job start. Unknown progress alone is not a start phase."""
+        """Start macro window: the first `start_phase_s` after this watcher saw the job start;
+        for a job already running when the watcher started, progress at most `start_progress`.
+        Unknown progress alone is not a start phase."""
         lim = self.limits
-        seen_start = self._job_started is not None and now - self._job_started < lim.start_phase_s
-        return seen_start or (f.progress is not None and f.progress <= lim.start_progress)
+        if self._job_started is not None:
+            return now - self._job_started < lim.start_phase_s
+        return f.progress is not None and f.progress <= lim.start_progress
 
     def _hold(self, kind: str, event: Event, still_true: Callable[[Frame], bool], f: Frame, now: float,
-              *, found_at_start: bool) -> list[Event]:
+              *, found_at_start: bool, hold_s: float | None = None) -> list[Event]:
         """A job-time anomaly: dropped at the very end of a print (end macro), reported at once
-        when found at watch start (a steady state), otherwise confirmed after the hold."""
+        when found at watch start (a steady state), otherwise confirmed after the hold (default:
+        the start or mid-print hold by phase)."""
         if self._at_end(f):
             return []
         if found_at_start:
             return [event]
-        hold_s = self.limits.start_confirm_s if self._in_start_phase(f, now) else self.limits.confirm_s
+        if hold_s is None:
+            hold_s = self.limits.start_confirm_s if self._in_start_phase(f, now) else self.limits.confirm_s
         self._held[kind] = _Held(now, hold_s, event, still_true)
         return []
 
@@ -666,6 +671,7 @@ class CrealityDetector(_Detector):
         self.state: dict[str, Any] = {}
         self._err: int | None = None
         self._runout_reported = False  # this job's runout already held or reported
+        self._runout_waiting: float | None = None  # since when a start-phase runout waits
 
     def frame_from_state(self) -> Frame:
         from printer_ops.creality import parse_status
@@ -739,23 +745,36 @@ class CrealityDetector(_Detector):
         held like bed_off/homing_lost. While the sensor reports a runout its reason stays
         current, so a firmware runout pause is reported at once by the state event with it."""
         if not self._runout():
-            self._runout_reported = False  # re-armed on recovery
+            self._runout_reported, self._runout_waiting = False, None  # re-armed on recovery
             if self._reason and self._reason[0] == self._RUNOUT_REASON:
                 self._reason = None  # a recovered flicker must not explain a later pause
             return []
         if f.state not in JOB_ACTIVE:
-            self._runout_reported = False  # re-armed for the next job; the reason may explain this end
+            self._runout_reported, self._runout_waiting = False, None  # re-armed for the next job
             return []
+        if self._runout_reported:
+            self._note_reason(self._RUNOUT_REASON, now)
+            return []
+        if f.state == PRINTING and self._starting(f, now):
+            self._runout_waiting = self._runout_waiting or now
+            return []  # a start-macro flip: no event, no reason for an unrelated pause
         self._note_reason(self._RUNOUT_REASON, now)
-        if self._runout_reported or (f.state == PRINTING and self._in_start_phase(f, now)):
-            return []
-        self._runout_reported = True
+        self._runout_reported, self._runout_waiting = True, None
         event = self._event("filament", CRITICAL if f.state == PRINTING else WARNING,
                             "filament runout: the sensor reports no filament (materialStatus 1)",
                             hint="reload filament, then resume on the printer", now=now,
                             data={"materialStatus": 1})
         return self._hold("filament", event, lambda _f: self._runout(), f, now,
-                          found_at_start=self.frame is None and f.state == PAUSED)
+                          found_at_start=self.frame is None and f.state == PAUSED,
+                          hold_s=self.limits.confirm_s)  # the start phase was already waited out
+
+    def _starting(self, f: Frame, now: float) -> bool:
+        """Start phase for the runout rule. `_material_rules` runs before `_evaluate` records
+        a start, so a push that turns idle into printing counts as starting too. The wait is
+        capped at `start_phase_s`, so a progress stuck at 0 % cannot hide a runout forever."""
+        if self._runout_waiting is not None and now - self._runout_waiting >= self.limits.start_phase_s:
+            return False
+        return self._job_state not in JOB_ACTIVE or self._in_start_phase(f, now)
 
 
 __all__ = [

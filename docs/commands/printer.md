@@ -205,8 +205,9 @@ motors (`M84`) while the printer still reports printing or paused. So `bed_off` 
 are ignored ([#190](https://github.com/alex-mextner/3d-cli/issues/190)). Found already at
 watch start (a paused job), they are reported at once. Start macros do the same in reverse —
 the K1's stock `START_PRINT` zeroes the bed and nozzle targets for about 30 s while probing — so
-in the start phase (progress at most 1 %, or the first 10 minutes after the watcher saw the job
-start) the hold is 90 s, and a restored target or re-homed axes drop the event.
+in the start phase (the first 10 minutes after the watcher saw the job start; for a job already
+running when the watcher started, progress at most 1 %) the hold is 90 s, and a restored target
+or re-homed axes drop the event.
 
 Each event is one JSON line on stdout:
 `{"ts", "printer", "kind", "severity", "text", "key", "data"}` — `text` is one phone-first line
