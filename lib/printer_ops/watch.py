@@ -665,8 +665,7 @@ class CrealityDetector(_Detector):
         super().__init__(printer, limits)
         self.state: dict[str, Any] = {}
         self._err: int | None = None
-        self._runout_reported = False             # this runout already held or reported
-        self._runout_deferred: float | None = None  # first seen during the start phase (deferred)
+        self._runout_reported = False  # this job's runout already held or reported
 
     def frame_from_state(self) -> Frame:
         from printer_ops.creality import parse_status
@@ -713,11 +712,19 @@ class CrealityDetector(_Detector):
                             hint="see the printer screen; resume/cancel only after a look", now=now,
                             key=f"{self.printer}:exception:err{code}", data={"err": err})]
 
+    def tick(self, now: float) -> list[Event]:
+        """Also re-check a runout that waited for the start phase to end between pushes."""
+        early = self._material_rules(self.frame, now) if self.frame is not None else []
+        return early + super().tick(now)
+
+    _RUNOUT_REASON = "filament not detected by the runout sensor"
+
     def _runout(self) -> bool:
         """The filament sensor reports no filament: materialDetect 1 (sensor on) and
         materialStatus 1. The K1's own web UI shows "Consumable not detected" with Resume/Stop
-        for a non-zero materialStatus (app.*.js, printStatus.notTestMaterial), and
-        ha_creality_ws maps 0 -> normal, 1 -> runout (sensor.py filament_status, a8e5491)."""
+        when materialStatus is set (app.*.js, printStatus.notTestMaterial), and ha_creality_ws
+        maps 0 -> normal, 1 -> runout (sensor.py filament_status, a8e5491); other values are
+        not documented anywhere, so only 1 counts."""
         if self.state.get("materialDetect") != 1:
             return False
         try:
@@ -727,21 +734,22 @@ class CrealityDetector(_Detector):
 
     def _material_rules(self, f: Frame, now: float) -> list[Event]:
         """Runout during a job. The start macro can flip the sensor for a while (seen on the K1
-        SE at 0 % of k1_slate, 2026-10-15, the print went on), so a runout in the start phase is
-        deferred until the start phase ends and dropped if the sensor recovers; otherwise it is
-        held like bed_off/homing_lost. A runout pause still reports at once: the pause event
-        carries "filament not detected" as its reason."""
+        SE at 0 % of k1_slate, 2026-10-15, the print went on), so a runout in the start phase
+        waits until the start phase ends and is dropped if the sensor recovers; otherwise it is
+        held like bed_off/homing_lost. While the sensor reports a runout its reason stays
+        current, so a firmware runout pause is reported at once by the state event with it."""
         if not self._runout():
-            self._runout_reported, self._runout_deferred = False, None
+            self._runout_reported = False  # re-armed on recovery
+            if self._reason and self._reason[0] == self._RUNOUT_REASON:
+                self._reason = None  # a recovered flicker must not explain a later pause
             return []
-        if f.state not in JOB_ACTIVE or self._runout_reported:
+        if f.state not in JOB_ACTIVE:
+            self._runout_reported = False  # re-armed for the next job; the reason may explain this end
             return []
-        if self._runout_deferred is None:
-            self._note_reason("filament not detected by the runout sensor", now)
-        if f.state == PRINTING and self._in_start_phase(f, now):
-            self._runout_deferred = self._runout_deferred or now
+        self._note_reason(self._RUNOUT_REASON, now)
+        if self._runout_reported or (f.state == PRINTING and self._in_start_phase(f, now)):
             return []
-        self._runout_reported, self._runout_deferred = True, None
+        self._runout_reported = True
         event = self._event("filament", CRITICAL if f.state == PRINTING else WARNING,
                             "filament runout: the sensor reports no filament (materialStatus 1)",
                             hint="reload filament, then resume on the printer", now=now,

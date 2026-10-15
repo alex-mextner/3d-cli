@@ -473,6 +473,14 @@ def test_k1_runout_that_outlasts_the_start_phase_fires() -> None:
     assert kinds(d.on_push({"layer": 4}, 1711.0)) == [("filament", CRITICAL)]
 
 
+def test_k1_deferred_runout_is_rechecked_by_ticks_without_pushes() -> None:
+    d = k1_starting()
+    d.on_push({"materialDetect": 1, "materialStatus": 1, "printProgress": 5, "layer": 3}, 1500.0)
+    assert d.tick(1600.0) == []                                  # still within 10 min of the start
+    assert d.tick(1615.0) == []                                  # start phase over: held now
+    assert kinds(d.tick(1626.0)) == [("filament", CRITICAL)]
+
+
 def test_k1_runout_pause_reports_the_reason_at_once() -> None:
     d = CrealityDetector("k1se")
     d.on_push(k1(), 1000.0)
@@ -493,6 +501,25 @@ def test_k1_material_status_ignored_when_the_sensor_is_off() -> None:
     d.on_push(k1(materialDetect=0), 1000.0)
     d.on_push({"materialStatus": 1}, 1010.0)
     assert d.tick(1100.0) == []
+
+
+def test_k1_runout_persisting_into_the_next_job_is_reported_again() -> None:
+    d = CrealityDetector("k1se")
+    d.on_push(k1(), 1000.0)
+    d.on_push({"materialStatus": 1}, 1010.0)
+    assert kinds(d.tick(1021.0)) == [("filament", CRITICAL)]
+    d.on_push({"state": 4, "deviceState": 0}, 1030.0)          # cancelled, sensor still 1
+    d.on_push({"state": 1, "deviceState": 1, "printProgress": 37}, 1100.0)  # job B
+    assert kinds(d.tick(1800.0)) == [("filament", CRITICAL)]
+
+
+def test_k1_recovered_start_flicker_does_not_explain_a_later_pause() -> None:
+    d = k1_starting()
+    d.on_push({"materialDetect": 1, "materialStatus": 1}, 1020.0)
+    d.on_push({"materialStatus": 0}, 1050.0)
+    ev = d.on_push({"state": 5, "deviceState": 0}, 1060.0)
+    state = [e for e in ev if e.kind == "state"][0]
+    assert "filament" not in state.text
 
 
 def test_k1_cancel_and_complete() -> None:
