@@ -3,7 +3,7 @@
 # Safe while a print runs: it never POSTs, never writes to the printer, and paces requests.
 #   scripts/u1-moonraker-backup.sh [HOST] [--logs] [--camera]
 # Used before a firmware change: docs/printers/u1-paxx12-upgrade.md.
-# Output: ~/.cache/u1-fw/backup-<UTC timestamp>/ with config/, logs/ (opt), camera/ (opt),
+# Output: ~/.cache/u1-fw/backup-<UTC timestamp>-XXXX/ (0700) with config/, logs/ (opt), camera/ (opt),
 # db/<namespace>.json, history.json, objects.json, server-*.json, and SHA256SUMS.
 set -euo pipefail
 
@@ -19,8 +19,18 @@ for a in "$@"; do
   esac
 done
 base="http://$host:7125"
-out="$HOME/.cache/u1-fw/backup-$(date -u +%Y%m%dT%H%M%SZ)"
+umask 077   # config, history, logs and camera frames are private to the caller
+mkdir -p "$HOME/.cache/u1-fw"
+# mktemp gives every run its own directory, so two runs in the same second never mix files.
+out=$(mktemp -d "$HOME/.cache/u1-fw/backup-$(date -u +%Y%m%dT%H%M%SZ)-XXXX")
 mkdir -p "$out"/{config,db}
+
+# Names come from the printer over plain HTTP: refuse anything that could leave $out.
+safe_rel() {
+  case "/$1/" in
+    *"/../"*|*"/./"*|//*) echo "unsafe path from printer: $1" >&2; exit 3 ;;
+  esac
+}
 
 get() { curl -fsS -m 120 "$base$1"; sleep 0.3; }   # pacing: the printer may be printing
 urlenc() { python3 -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1]))' "$1"; }
@@ -38,7 +48,8 @@ get "/printer/objects/query?$objs" > "$out/objects.json"
 # Moonraker database namespaces (webcams, fluidd, moonraker, gcode_metadata, ...).
 for ns in $(python3 -c 'import json,sys;print(" ".join(json.load(open(sys.argv[1]))["result"]["namespaces"]))' \
             "$out/server-database-list.json"); do
-  get "/server/database/item?namespace=$ns" > "$out/db/$ns.json"
+  case "$ns" in *[!A-Za-z0-9_.-]*|.|..) echo "unsafe namespace from printer: $ns" >&2; exit 3 ;; esac
+  get "/server/database/item?namespace=$(urlenc "$ns")" > "$out/db/$ns.json"
 done
 
 # Print history (all jobs, paged).
@@ -62,6 +73,7 @@ dump_root() {   # $1 = Moonraker root
   get "/server/files/list?root=$root" > "$out/$root.list.json"
   python3 -c 'import json,sys;[print(f["path"]) for f in json.load(open(sys.argv[1]))["result"]]' \
     "$out/$root.list.json" | while IFS= read -r p; do
+      safe_rel "$p"
       mkdir -p "$out/$root/$(dirname "$p")"
       get "/server/files/$root/$(urlenc "$p" | sed 's#%2F#/#g')" > "$out/$root/$p"
     done

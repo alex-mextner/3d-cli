@@ -75,7 +75,7 @@ scripts/u1-moonraker-backup.sh                    # config + DB + history + obje
 scripts/u1-moonraker-backup.sh --logs --camera    # + ~300 MB logs + timelapses; run when idle
 ```
 
-It writes `~/.cache/u1-fw/backup-<UTC>/` with:
+It writes `~/.cache/u1-fw/backup-<UTC>-XXXX/` (mode 0700, unique per run) with:
 
 | Item | Why |
 |---|---|
