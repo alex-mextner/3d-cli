@@ -122,7 +122,7 @@ class _Heater:
     drift_alerted: bool = False     # drift reported; re-armed when back within tolerance
 
 
-def _count(v: Any) -> bool:
+def _is_count(v: Any) -> bool:
     """A non-negative int (not a bool): byte offsets and layer numbers from the printer."""
     return isinstance(v, int) and not isinstance(v, bool) and v >= 0
 
@@ -551,7 +551,7 @@ class MoonrakerDetector(_Detector):
         meta: dict[str, Any] = metadata if isinstance(metadata, dict) else {}
         start, end = meta.get("gcode_start_byte"), meta.get("gcode_end_byte")
         bounds = (start, end) if isinstance(start, int) and isinstance(end, int) else None
-        if bounds is not None and _count(bounds[0]) and bounds[0] < bounds[1]:
+        if bounds is not None and _is_count(bounds[0]) and _is_count(bounds[1]) and bounds[0] < bounds[1]:
             self.file_body = (filename, bounds)
         else:
             self.file_body = (filename, None)
@@ -590,8 +590,8 @@ class MoonrakerDetector(_Detector):
             state=state, raw_state=raw if klippy == "ready" else f"klippy:{klippy}",
             filename=ps.get("filename") or None,
             progress=float(progress) if progress is not None else None,
-            layer=info.get("current_layer") if _count(info.get("current_layer")) else None,
-            total_layer=info.get("total_layer") if _count(info.get("total_layer")) else None,
+            layer=info.get("current_layer") if _is_count(info.get("current_layer")) else None,
+            total_layer=info.get("total_layer") if _is_count(info.get("total_layer")) else None,
             heaters=heaters, homed=homed,
             stall_marker=(vsd.get("file_position"), progress, info.get("current_layer")),
             message=ps.get("message") or None,

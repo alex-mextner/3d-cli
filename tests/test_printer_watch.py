@@ -206,6 +206,15 @@ def test_metadata_without_body_bounds_is_remembered_as_unknown() -> None:
     assert d.frame is not None and d.frame.progress == pytest.approx(150000 / 336882)
 
 
+@pytest.mark.parametrize("bad", [{"gcode_start_byte": 0, "gcode_end_byte": True},
+                                 {"gcode_start_byte": False, "gcode_end_byte": 318620},
+                                 {"gcode_start_byte": 318620, "gcode_end_byte": 14042},
+                                 {"gcode_start_byte": -1, "gcode_end_byte": 318620}])
+def test_malformed_body_bounds_are_not_used(bad: dict[str, Any]) -> None:
+    d = k1_moonraker(150000, meta=bad)
+    assert d.frame is not None and d.frame.progress == pytest.approx(150000 / 336882)
+
+
 def test_mid_print_bed_off_with_body_progress_still_fires() -> None:
     d = k1_moonraker(150000)
     d.on_status({"heater_bed": {"target": 0.0}}, 1500.0)
@@ -1064,6 +1073,23 @@ def test_moonraker_stream_reads_body_bounds_once_per_file(tmp_path: Path) -> Non
     assert mr.frame.progress > 0.999                              # body progress, not 94.6 %
     assert mr._held == {}                                         # END_PRINT bed-off dropped
     assert [e.kind for e in got] == ["snapshot"]
+
+
+def test_metadata_reply_for_a_job_that_ended_meanwhile_is_discarded(tmp_path: Path) -> None:
+    dev = devices.Device("k1se", "moonraker", "127.0.0.1", 1, None, tmp_path)
+    st = watch_run.stream_for(dev, lambda e: None, threading.Event(), watch_run.Heartbeat(None), WatchLimits())
+    mr = st.mr  # type: ignore[attr-defined]
+    mr.on_status(u1_ws_status("printing", print_stats={"filename": K1_FILE}), 1000.0, full=True)
+
+    def call(ws: Any, method: str, params: dict[str, Any] | None = None) -> Any:
+        # while job A's metadata is in flight, A completes and a re-slice B starts, same name
+        mr.on_status({"print_stats": {"state": "complete"}}, 1001.0)
+        mr.on_status({"print_stats": {"state": "printing"}}, 1002.0)
+        return K1_META
+
+    st._call = call  # type: ignore[attr-defined]
+    st._fetch_file_body(None, K1_FILE)  # type: ignore[attr-defined]
+    assert mr.file_body is None and mr.wants_file_body() == K1_FILE   # B asks for its own bounds
 
 
 def test_moonraker_stream_survives_a_hung_metadata_endpoint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
