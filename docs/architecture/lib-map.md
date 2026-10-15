@@ -212,6 +212,7 @@ Every current root Python module is listed here so future additions are intentio
 - `vision_detect.py` — pixel half of `3d printer vision`: Obico ONNX spaghetti scorer (weights downloaded at runtime, sha256-pinned), `FrameScorer` (ROI/ignore masks + stage-2 verifier), brightness check, live camera loop, `record` and `eval` on recorded footage; decision logic and camera/klippy.log access live in `printer_ops/vision.py`.
 - `vision_verify.py` — stage 2 of `3d printer vision`: zero-shot CLIP ViT-B/32 (ONNX, sha256-pinned) on crops of the detector's boxes → verified score q.
 - `vision_geometry.py` — printer camera model (pinhole/fisheye), bed/volume/silhouette masks at the current Z, calibration fit CLI; the U1 calibration ships in `lib/data/vision/`.
+- `vision_ghost.py` — 3D ghost of the rest of a print over a printer camera frame: collects a job's walls from one G-code pass, paints them through a `vision_geometry` camera into a sparse per-frame blend table (used by the U1 camera proxy).
 - `vision_scene.py` — opt-in bed-change detectors for `3d printer vision --scene` (foreign object, moved part, no growth).
 - `lib/geometry/mesh_metrics.py` — pinned-convention 3D shape metrics (Chamfer, F-score@tau, Hausdorff, normal consistency, volumetric IoU) between two meshes; backs `3d metrics geometry`.
 - `perceptual_metrics.py` — perceptual/semantic image metrics (PSNR, LPIPS, CLIP-sim) with explicit senses and graceful degradation; backs `3d metrics perceptual`.
