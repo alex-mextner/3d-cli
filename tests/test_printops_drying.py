@@ -22,7 +22,7 @@ from printops.client import ApiClient, ApiError
 from printops.drying_policy import DryingPolicy
 from printops.drying_policy import parse as parse_drying
 from printops.homeassistant import HaError, HaStates
-from printops.spoolman import decode_extra, encode_extra, ensure_extra_fields
+from printops.spoolman import SpoolmanError, decode_extra, encode_extra, ensure_extra_fields
 
 UTC = datetime.timezone.utc
 NOW = datetime.datetime(2026, 10, 14, 12, 0, tzinfo=UTC)
@@ -889,3 +889,106 @@ def test_policy_rejects_non_finite_numbers(tmp_path: Path, bad: str) -> None:
                       encoding="utf-8")
     problems = policy.check(broken)
     assert problems and "classes.medium.max_days_opened must be a finite number" in problems[0], problems
+
+
+def test_finish_failing_midway_restores_already_updated_spools(
+    api_client: ApiClient,
+    fake_spoolman: FakeSpoolman,
+    printops_db: sqlite3.Connection,
+    dryer: locations.Location,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = add_spool(fake_spoolman, "PETG", opened=iso(40))
+    second = add_spool(fake_spoolman, "PLA")
+    session_id = api_client.post(
+        "/v1/drying/sessions", {"dryer": "dryer:1", "spools": [first, second]}
+    )["session"]["id"]
+    before = dict(fake_spoolman.get("spool", first)["extra"])
+    real_update = fake_spoolman.update
+
+    def flaky(entity: Any, item_id: int, data: Any) -> Any:
+        if item_id == second and "last_dried_at" in data.get("extra", {}):
+            raise SpoolmanError("Spoolman is unreachable", status=502)
+        return real_update(entity, item_id, data)
+
+    monkeypatch.setattr(fake_spoolman, "update", flaky)
+    with pytest.raises(ApiError) as e:
+        api_client.post(f"/v1/drying/sessions/{session_id}/finish", {})
+    assert e.value.status == 502
+    assert drying.get_session(printops_db, session_id).ended_at is None
+    assert fake_spoolman.get("spool", first)["extra"] == before
+
+
+def test_timer_reaches_old_sessions_beyond_the_list_cap(
+    registered: FakeSpoolman, printops_db: sqlite3.Connection, dpolicy: DryingPolicy
+) -> None:
+    locations.add(printops_db, "dryer:1", "dryer", actor="test")
+    spool = add_spool(registered, "PLA")
+    oldest, _ = drying.start(
+        printops_db,
+        registered,
+        dpolicy,
+        dryer="dryer:1",
+        spool_ids=[spool],
+        actor="t",
+        hours=1,
+    )
+    printops_db.executemany(
+        "INSERT INTO drying_session (dryer_location_id, started_at, temp_c, target_h, source, actor)"
+        " SELECT dryer_location_id, started_at, temp_c, 96, source, actor FROM drying_session WHERE id = ?",
+        [(oldest.id,)] * 1000,
+    )
+    later = drying.parse_ts(oldest.started_at) + datetime.timedelta(hours=2)
+    fired = drying.fire_timers(printops_db, now=later)
+    assert [e.payload["session_id"] for e in fired] == [oldest.id]
+
+
+def test_start_rejects_non_ascii_digit_dryer_as_unknown_location(
+    api_client: ApiClient, fake_spoolman: FakeSpoolman, dryer: locations.Location
+) -> None:
+    spool = add_spool(fake_spoolman, "PETG")
+    with pytest.raises(ApiError) as e:
+        api_client.post("/v1/drying/sessions", {"dryer": "²", "spools": [spool]})
+    assert e.value.status == 404
+
+
+
+
+def test_ha_redirect_is_refused_and_the_token_never_leaves_ha() -> None:
+    seen: list[str | None] = []
+
+    class Sink(BaseHTTPRequestHandler):
+        def log_message(self, *_: Any) -> None:
+            return
+
+        def do_GET(self) -> None:  # noqa: N802 — http.server's naming
+            seen.append(self.headers.get("Authorization"))
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b'{"state": "40"}')
+
+    sink = ThreadingHTTPServer(("127.0.0.1", 0), Sink)
+    target = f"http://127.0.0.1:{sink.server_address[1]}/api/states/sensor.x"
+
+    class Redirector(BaseHTTPRequestHandler):
+        def log_message(self, *_: Any) -> None:
+            return
+
+        def do_GET(self) -> None:  # noqa: N802 — http.server's naming
+            self.send_response(302)
+            self.send_header("Location", target)
+            self.end_headers()
+
+    ha = ThreadingHTTPServer(("127.0.0.1", 0), Redirector)
+    for server in (sink, ha):
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        with pytest.raises(HaError):
+            HaStates(f"http://127.0.0.1:{ha.server_address[1]}", "ha-secret").numeric(
+                "sensor.dryer_rh"
+            )
+    finally:
+        for server in (sink, ha):
+            server.shutdown()
+            server.server_close()
+    assert seen == []

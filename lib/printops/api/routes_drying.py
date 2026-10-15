@@ -161,7 +161,9 @@ def start_session(
     spoolman: Annotated[Spoolman, Depends(get_spoolman)],
 ) -> dict[str, Any]:
     policy = load_policy()
-    dryer: str | int = int(body.dryer) if body.dryer.isdigit() else body.dryer
+    dryer: str | int = (
+        int(body.dryer) if body.dryer.isascii() and body.dryer.isdigit() else body.dryer
+    )
     with _domain_errors():
         session, warnings = drying.start(
             conn,

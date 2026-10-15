@@ -27,6 +27,7 @@ INVARIANTS:
 
 from __future__ import annotations
 
+import contextlib
 import datetime
 import sqlite3
 import threading
@@ -424,17 +425,7 @@ def _finish(
             conn, locations.get(conn, session.dryer_location_id), humidity, warnings
         )
     ended_at = utc_now()
-    for sid in ids:
-        spoolman.update(
-            "spool",
-            sid,
-            {
-                "extra": {
-                    "last_dried_at": encode_extra(ended_at),
-                    "dry_state": encode_extra("fresh"),
-                }
-            },
-        )
+    _mark_fresh(spoolman, ids, ended_at)
 
     with transaction(conn):
         changed = conn.execute(
@@ -482,6 +473,36 @@ def _finish(
     return done, warnings
 
 
+_FRESH_KEYS = ("last_dried_at", "dry_state")
+
+
+def _mark_fresh(spoolman: Spoolman, ids: Sequence[int], ended_at: str) -> None:
+    """Stamp every spool fresh, or none: Spoolman has no multi-spool transaction, so a failure
+    midway puts back the extras of the spools already stamped before re-raising (best effort —
+    a restore that also fails leaves that spool fresh, the same state a retry would write)."""
+    stamped: list[tuple[int, dict[str, Any]]] = []
+    try:
+        for sid in ids:
+            extra = spoolman.get("spool", sid).get("extra") or {}
+            prior = {k: extra.get(k) for k in _FRESH_KEYS}
+            spoolman.update(
+                "spool",
+                sid,
+                {
+                    "extra": {
+                        "last_dried_at": encode_extra(ended_at),
+                        "dry_state": encode_extra("fresh"),
+                    }
+                },
+            )
+            stamped.append((sid, prior))
+    except SpoolmanError:
+        for sid, prior in stamped:
+            with contextlib.suppress(SpoolmanError):
+                spoolman.update("spool", sid, {"extra": prior})
+        raise
+
+
 def _loss(s: SessionSpool) -> float | None:
     if s.weight_before is None or s.weight_after is None:
         return None
@@ -509,8 +530,14 @@ def fire_timers(
     """`drying.finished` {trigger: timer} for open sessions whose target_h elapsed (once each)."""
     moment = _now(now)
     fired: list[events.Event] = []
-    for session in list_sessions(conn, open_only=True, limit=1000):
-        if session.timer_event_id is not None or parse_ts(session.ends_at) > moment:
+    open_ids = [
+        int(r["id"])
+        for r in conn.execute(
+            "SELECT id FROM drying_session WHERE ended_at IS NULL AND timer_event_id IS NULL ORDER BY id"
+        )
+    ]
+    for session in (get_session(conn, sid) for sid in open_ids):
+        if parse_ts(session.ends_at) > moment:
             continue
         with transaction(conn):
             row = conn.execute(
