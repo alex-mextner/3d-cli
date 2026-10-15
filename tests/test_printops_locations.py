@@ -358,3 +358,78 @@ def test_api_materialises_fleet_slots_on_first_request(api_client: ApiClient, tm
     with pytest.raises(ApiError) as e:
         api_client.post("/v1/locations/sync-fleet")
     assert e.value.status == 409
+
+
+# ------------------------------------------------------------- races, outages, path reuse
+def test_a_stale_location_object_cannot_create_a_parent_cycle(conn: sqlite3.Connection, sm: FakeSpoolman) -> None:
+    t = _tree(conn, "WH:A", "WH:A/X", "WH:B")
+    stale = t["WH:A"]
+    locs.move(conn, sm, locs.get(conn, "WH:A"), "WH:B/A", actor="other request")
+    with pytest.raises(locs.LocationError, match="own subtree"):
+        locs.move(conn, sm, stale, "WH:B/A/X/Y", actor="t")
+    assert [a.path for a in locs.ancestors(conn, locs.get(conn, "WH:B/A/X"))] == ["WH:B/A", "WH:B"]
+
+
+def test_hand_typed_spools_follow_a_move_made_while_spoolman_was_down(conn: sqlite3.Connection,
+                                                                     sm: FakeSpoolman) -> None:
+    t = _tree(conn, "WH:A", "WH:A/S1")
+    typed = _spool(sm, "WH:A/S1")  # no printops_location_id
+    sm.down = True
+    res = locs.move(conn, sm, t["WH:A/S1"], "WH:A/S2", actor="t")
+    sm.down = False
+    assert res.spoolman.failed[0]["spool_id"] is None
+    assert [s["id"] for s in locs.contents(conn, sm, locs.get(conn, "WH:A/S2"))] == [typed]
+    assert locs.resolve(conn, "WH:A/S1").path == "WH:A/S2"
+    with pytest.raises(locs.LocationError, match="may still name it; run `3d printops loc resync`"):
+        locs.add(conn, "WH:A/S1", "shelf", actor="t")
+    assert locs.resync(conn, sm).updated == [typed]
+    spool = sm.get("spool", typed)
+    assert spool["location"] == "WH:A/S2" and spool["extra"]["printops_location_id"] == str(t["WH:A/S1"].id)
+    assert locs.add(conn, "WH:A/S1", "shelf", actor="t").path == "WH:A/S1"  # alias forgotten after resync
+
+
+def test_a_printed_label_keeps_pointing_at_its_location_after_the_path_is_reused(conn: sqlite3.Connection,
+                                                                                 sm: FakeSpoolman) -> None:
+    t = _tree(conn, "WH:A", "WH:B")
+    first = locs.update(conn, t["WH:A"], {"qr": "cell:WH:A"}, actor="label")
+    locs.move(conn, sm, first, "WH:B/A", actor="t")
+    second = locs.add(conn, "WH:A", "warehouse", actor="t")
+    assert locs.resolve(conn, "cell:WH:A").id == first.id  # the sticker on the moved box
+    assert locs.resolve(conn, "WH:A").id == second.id  # a typed path: its current holder
+    locs.update(conn, second, {"qr": "cell:WH:A"}, actor="label")
+    assert locs.resolve(conn, "cell:WH:A").id == second.id  # its own, current label wins
+
+
+def test_archive_rechecks_children_under_the_write_lock(conn: sqlite3.Connection, sm: FakeSpoolman,
+                                                        printops_settings: Any) -> None:
+    from printops.db import open_db
+
+    leaf = _tree(conn, "WH:A")["WH:A"]
+
+    class ChildAppears(FakeSpoolman):
+        def find(self, entity: Any, params: Any = None) -> list[dict[str, Any]]:
+            other = open_db(printops_settings.db_path)
+            try:
+                locs.add(other, "WH:A/late", "shelf", actor="other request")
+            finally:
+                other.close()
+            return super().find(entity, params)
+
+    with pytest.raises(locs.LocationError, match="1 active child"):
+        locs.archive(conn, ChildAppears(), leaf, actor="t")
+    assert not locs.get(conn, "WH:A").archived
+
+
+def test_fleet_shrink_with_spoolman_down_keeps_the_slot_and_reads_still_work(
+        api_client: ApiClient, fake_spoolman: FakeSpoolman, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    f = tmp_path / "fleet.yaml"
+    f.write_text(FLEET, encoding="utf-8")
+    monkeypatch.setenv("THREED_FLEET", str(f))
+    api_client.get("/v1/locations")
+    f.write_text(FLEET.split("boris:")[0], encoding="utf-8")
+    fake_spoolman.down = True
+    flat = api_client.get("/v1/locations", flat="true")["locations"]
+    assert "slot:boris/T1" in [loc["path"] for loc in flat]
+    fake_spoolman.down = False
+    report = api_client.post("/v1/locations/sync-fleet")
+    assert "slot:boris" in report["archived"]

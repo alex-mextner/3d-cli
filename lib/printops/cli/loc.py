@@ -343,7 +343,8 @@ def run(argv: list[str]) -> int:
         return 0
     print(f"Spoolman: {len(res['updated'])} spool(s) re-synced" + "".join(f"\n  #{i}" for i in res["updated"]))
     for f in res["failed"]:
-        print(f"FAILED spool #{f['spool_id']}: {f['error']}", file=sys.stderr)
+        what = f"spool #{f['spool_id']}" if f["spool_id"] is not None else "listing spools"
+        print(f"FAILED ({what}): {f['error']}", file=sys.stderr)
     return 1 if res["failed"] else 0
 
 

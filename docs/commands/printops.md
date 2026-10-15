@@ -145,16 +145,21 @@ deploy) and on `loc sync-fleet`; slots that left the fleet are archived once emp
 field `printops_location_id` = the location id (both written in one PATCH). `show` lists the
 spools whose id points at the location, plus spools without an id whose `location` string was
 typed to the path in the Spoolman UI. `mv` renames the whole subtree in one DB transaction,
-then rewrites both fields for every spool inside; if Spoolman is down then, the move stays,
-the failure is printed (exit 1), and `loc resync` repairs the drift later. `archive` refuses a
-location that still holds spools or active children; archived rows keep their id (it is on
-printed tags) and `unarchive` revives them.
+remembers every old path as a former path of its location, then runs `resync`; if Spoolman is
+down then, the move stays, the failure is printed (exit 1), spools still naming an old path
+keep counting as inside the moved location, and `loc resync` repairs them later. `resync`
+writes path + id onto every spool that belongs to a location (drifted strings, hand-typed or
+former paths), then forgets former paths no spool names any more; until then no other location
+can take such a path (409, "run `3d printops loc resync` first"). `archive` refuses a
+location that still holds spools or active children (or when Spoolman cannot be asked);
+archived rows keep their id (it is on printed tags) and `unarchive` revives them.
 
 **Labels.** `label` renders a printable sheet locally (PDF or SVG, stdlib only): per location a
 QR code and the path, kind and `loc-<id>`. The QR text follows decision D8: `cell:<path>`, or
 the path itself for `dryer:` and `slot:` locations. Printing records the payload on the
 location (`qr`); after a later move `tree`/`show` flag the label as `STALE`, and `resolve`
-still maps the old sticker to the moved cell. Default sheet: A4, 3 × 8 labels of 70 × 37 mm.
+maps a scanned label to the location that printed it, even if another location has since taken
+the old path (a typed path means its current holder). Default sheet: A4, 3 × 8 labels of 70 × 37 mm.
 
 **NTAG213 on a cell** (written by `3d printops tag`, #175; `label --ntag` prints the bytes):
 the NDEF TLV `03 <len> <message> FE`, ≤ 144 bytes for any 64-char path —
