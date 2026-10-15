@@ -1,0 +1,32 @@
+{
+    "from": "User",
+    "infill_wall_overlap": "5%",
+    "inherits": "0.28mm Standard @Snapmaker U1 (0.4 nozzle)",
+    "initial_layer_print_height": "0.25",
+    "initial_layer_speed": [
+        "150"
+    ],
+    "inner_wall_speed": [
+        "300"
+    ],
+    "internal_solid_infill_speed": [
+        "300"
+    ],
+    "ironing_flow": "15%",
+    "ironing_type": "top",
+    "is_custom_defined": "0",
+    "layer_height": "0.32",
+    "name": "0.32mm Standard @Snapmaker U1 (0.4 nozzle)",
+    "print_settings_id": "0.32mm Standard @Snapmaker U1 (0.4 nozzle)",
+    "seam_position": "aligned_back",
+    "seam_slope_type": "all",
+    "sparse_infill_speed": [
+        "300"
+    ],
+    "top_surface_speed": [
+        "150"
+    ],
+    "version": "2.3.3.3",
+    "wall_generator": "arachne",
+    "wall_sequence": "inner-outer-inner wall"
+}
