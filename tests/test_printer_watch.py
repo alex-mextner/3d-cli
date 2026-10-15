@@ -400,6 +400,27 @@ def test_unknown_progress_mid_job_uses_the_short_hold() -> None:
     assert kinds(d.tick(1021.0)) == [("bed_off", WARNING)]
 
 
+def test_paused_at_end_progress_end_macro_is_silent() -> None:
+    d, _ = started()
+    d.on_status({"print_stats": {"state": "paused"}, "virtual_sdcard": {"progress": 0.995, "file_position": 3}},
+                1001.0)
+    out = d.on_status({"heater_bed": {"target": 0.0}, "toolhead": {"homed_axes": ""}}, 1002.0)
+    out += d.tick(1030.0)
+    assert out == []
+
+
+def test_watch_started_during_the_end_macro_reports_no_anomaly() -> None:
+    _, ev = started(virtual_sdcard={"progress": 1.0}, toolhead={"homed_axes": ""}, heater_bed={"target": 0.0})
+    assert kinds(ev) == [("snapshot", INFO)]
+
+
+def test_homing_lost_re_homed_within_the_hold_is_dropped() -> None:
+    d, _ = started()
+    assert d.on_status({"toolhead": {"homed_axes": ""}}, 1010.0) == []
+    assert d.on_status({"toolhead": {"homed_axes": "xyz"}}, 1015.0) == []
+    assert d.tick(1030.0) == []
+
+
 def test_k1_filament_sensor_change_while_printing() -> None:
     d = CrealityDetector("k1se")
     d.on_push(k1(), 1000.0)

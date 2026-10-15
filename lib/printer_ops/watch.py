@@ -241,20 +241,26 @@ class _Detector:
         return out
 
     def _at_end(self, f: Frame) -> bool:
-        return f.state == PRINTING and f.progress is not None and f.progress >= self.limits.end_progress
+        """The job is in its end macro: still printing/paused by state, but at `end_progress`."""
+        return f.state in JOB_ACTIVE and f.progress is not None and f.progress >= self.limits.end_progress
+
+    def _in_start_phase(self, f: Frame, now: float) -> bool:
+        """Start macro window: progress at most `start_progress`, or soon after this watcher saw
+        the job start. Unknown progress alone is not a start phase."""
+        lim = self.limits
+        seen_start = self._job_started is not None and now - self._job_started < lim.start_phase_s
+        return seen_start or (f.progress is not None and f.progress <= lim.start_progress)
 
     def _hold(self, kind: str, event: Event, still_true: Callable[[Frame], bool], f: Frame, now: float,
-              *, first: bool) -> list[Event]:
-        """A job-time anomaly: report at once when found at watch start (a steady state, not a
-        start/end macro), drop it at the very end of a print, otherwise confirm it after the hold."""
-        lim = self.limits
-        if first:
-            return [event]
+              *, found_at_start: bool) -> list[Event]:
+        """A job-time anomaly: dropped at the very end of a print (end macro), reported at once
+        when found at watch start (a steady state), otherwise confirmed after the hold."""
         if self._at_end(f):
             return []
-        seen_start = self._job_started is not None and now - self._job_started < lim.start_phase_s
-        starting = seen_start or (f.progress is not None and f.progress <= lim.start_progress)
-        self._held[kind] = _Held(now, lim.start_confirm_s if starting else lim.confirm_s, event, still_true)
+        if found_at_start:
+            return [event]
+        hold_s = self.limits.start_confirm_s if self._in_start_phase(f, now) else self.limits.confirm_s
+        self._held[kind] = _Held(now, hold_s, event, still_true)
         return []
 
     def _release_held(self, now: float) -> list[Event]:
@@ -334,7 +340,7 @@ class _Detector:
         event = self._event("homing_lost", CRITICAL, f"{f.state} but axes {lost.upper()} are NOT homed "
                             f"(homed_axes {f.homed!r})", hint="do not resume blindly: re-home first (Z/X crash risk)",
                             now=now, data={"homed_axes": f.homed, "was": was})
-        return self._hold("homing_lost", event, _unhomed, f, now, first=prev is None)
+        return self._hold("homing_lost", event, _unhomed, f, now, found_at_start=prev is None)
 
     def _heater_rules(self, prev: Frame | None, f: Frame, now: float) -> list[Event]:
         out: list[Event] = []
@@ -346,14 +352,14 @@ class _Detector:
                 h = self._heaters[name] = _Heater(target=tgt, since=now,
                                                   reached=tgt > 0 and temp is not None and abs(temp - tgt) <= lim.reach_tol_c)
                 if prev is None and self._is_bed(name) and tgt == 0 and f.state == PAUSED:
-                    out.append(self._bed_off_event(name, None, now))
+                    out += self._hold("bed_off", self._bed_off_event(name, None, now), _heater_off(name),
+                                      f, now, found_at_start=True)
                 continue
             if tgt != h.target:
                 old = h.target
                 if self._is_bed(name) and old > 0 and tgt == 0 and f.state in JOB_ACTIVE:
-                    out += self._hold("bed_off", self._bed_off_event(name, old, now),
-                                      _heater_off(name),
-                                      f, now, first=False)
+                    out += self._hold("bed_off", self._bed_off_event(name, old, now), _heater_off(name),
+                                      f, now, found_at_start=False)
                 h.target, h.since, h.reached, h.off_since = tgt, now, False, None
                 h.reach_alerted = h.drift_alerted = False
             if tgt <= 0 or temp is None:
