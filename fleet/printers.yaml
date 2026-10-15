@@ -58,6 +58,7 @@ u1:
     filament_diameter_mm: 1.75
     min_print_temp: 170
     default_accel: 10000
+    z_max_mm: 275           # stepper_z.position_max (Snapmaker/u1-klipper); resume Z stays 1 mm below
     start_commands: [DEFECT_DETECTION_START]
   # extruder..extruder3 and nozzle_diameter 0.4 each: live configfile, 2026-10-14
   heads:
