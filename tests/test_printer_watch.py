@@ -576,7 +576,7 @@ def test_steer_resolves_one_session(target: str) -> None:
     send = [c for c, _ in run.calls if c[2] == "send"]
     assert len(send) == 1
     assert send[0][3:7] == ["433553", "--request-id", send[0][5], "--session"] and send[0][7] == "01a12cd6-7b39"
-    assert send[0][-1].startswith("[3d printer watch] [CRITICAL] u1:")
+    assert send[0][-1].startswith(f"[3d printer watch -> steer {target}] u1 ")
     assert "3d printer status u1" in send[0][-1]
 
 
@@ -615,16 +615,17 @@ def test_exec_sink_really_runs_a_shell(tmp_path: Path) -> None:
     assert (tmp_path / "ev.json.kind").read_text().strip() == "state"
 
 
-def test_sinks_from_settings_and_for_devices_validates(tmp_path: Path) -> None:
-    spec = {"stdout": True, "exec": ["logger"], "tg": True, "steer": ["01a12cd6"]}
+def test_sinks_from_settings_and_for_devices_validates(env: Path) -> None:
+    tmp_path = env
+    spec = {"stdout": True, "exec": ["logger"], "tg_fallback": True, "steer": ["01a12cd6"]}
     assert [s.ident for s in sinks_for(spec)] == ["stdout", "exec:logger", "tg", "steer:01a12cd6"]
     dry = sinks_for({**spec, "stdout": False}, dry_run=True)
     assert [s.ident for s in dry] == ["exec:logger", "tg", "steer:01a12cd6"]
     assert all(type(s).__name__ == "DryRunSink" for s in dry)
     dev = devices.Device("u1", "moonraker", "h", 7125, None, tmp_path,
-                         watch={"tg": True, "steer": "01a12cd6", "min_severity": "warning", "dedup_minutes": 1})
+                         watch={"tg_fallback": True, "steer": "01a12cd6", "min_severity": "warning", "dedup_minutes": 1})
     d = Dispatcher.for_devices([dev], dry_run=True)
-    assert sorted(d.routes) == ["stdout", "steer:01a12cd6", "tg"]
+    assert sorted(d.routes) == ["printer-agent", "stdout", "steer:01a12cd6", "subscriptions", "tg"]
     assert d.min_severity["u1"] == WARNING and d.dedup_s["u1"] == 60
     bad = devices.Device("u1", "moonraker", "h", 7125, None, tmp_path, watch={"min_severity": "warnig"})
     with pytest.raises(InvalidArgument):
@@ -651,14 +652,21 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("XDG_CONFIG_HOME", str(cfg))
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     monkeypatch.chdir(tmp_path)
+
+    def no_agent(self: object, printer: str, events: list[Event], on_unreached: object = None) -> str:
+        raise RuntimeError("tests never start a real omp printer agent")
+
+    from printer_ops import printer_agent
+
+    monkeypatch.setattr(printer_agent.PrinterAgents, "deliver", no_agent)
     return cfg
 
 
 def test_device_watch_key_is_parsed_and_validated(env: Path) -> None:
     p = env / "3d-cli" / "printer-devices.yaml"
     p.parent.mkdir(parents=True)
-    p.write_text("u1: {adapter: moonraker, host: h, watch: {tg: true, min_severity: warning}}\n")
-    assert devices.load_devices()["u1"].watch == {"tg": True, "min_severity": "warning"}
+    p.write_text("u1: {adapter: moonraker, host: h, watch: {tg_fallback: true, min_severity: warning}}\n")
+    assert devices.load_devices()["u1"].watch == {"tg_fallback": True, "min_severity": "warning"}
     p.write_text("u1: {adapter: moonraker, host: h, watch: yes}\n")
     with pytest.raises(InvalidArgument):
         devices.load_devices()
@@ -666,10 +674,10 @@ def test_device_watch_key_is_parsed_and_validated(env: Path) -> None:
 
 def test_settings_merge_yaml_and_flags(tmp_path: Path) -> None:
     dev = devices.Device("u1", "moonraker", "h", 7125, None, tmp_path,
-                         watch={"tg": True, "stall_minutes": 20, "milestones": [50, 90]})
+                         watch={"tg_fallback": True, "stall_minutes": 20, "milestones": [50, 90]})
     _, opts = watch_run.parse_args(["u1", "--steer", "abc", "--min-severity", "warning", "--no-stdout"])
     s = watch_run.settings_for(dev, opts)
-    assert s["sinks"] == {"exec": [], "steer": ["abc"], "tg": True, "stdout": False}
+    assert s["sinks"] == {"exec": [], "steer": ["abc"], "tg_fallback": True, "stdout": False}
     assert s["min_severity"] == WARNING
     assert s["limits"].stall_s == 1200 and s["limits"].milestones == (0.5, 0.9)
 
@@ -678,6 +686,10 @@ def test_settings_reject_bad_values(tmp_path: Path) -> None:
     dev = devices.Device("u1", "moonraker", "h", 7125, None, tmp_path, watch={"bogus": 1})
     with pytest.raises(InvalidArgument):
         watch_run.settings_for(dev, watch_run.parse_args(["u1"])[1])
+    for watch in ({"tg_fallback": "yes"},):
+        dev = devices.Device("u1", "moonraker", "h", 7125, None, tmp_path, watch=watch)
+        with pytest.raises(InvalidArgument):
+            watch_run.settings_for(dev, {})
     dev = devices.Device("u1", "moonraker", "h", 7125, None, tmp_path)
     with pytest.raises(InvalidArgument):
         watch_run.settings_for(dev, watch_run.parse_args(["u1", "--min-severity", "loud"])[1])
@@ -710,12 +722,12 @@ def test_install_service_writes_unit_and_env(env: Path, monkeypatch: pytest.Monk
     p.parent.mkdir(parents=True)
     p.write_text("u1: {adapter: moonraker, host: h}\nk1se: {adapter: creality-stock, host: h}\n")
     monkeypatch.setattr(watch_run.shutil, "which", lambda name: "/opt/bin/3d" if name == "3d" else None)
-    assert watch_run.run(["u1", "k1se", "--install-service", "--steer", "01a12cd6", "--tg"]) == 0
+    assert watch_run.run(["u1", "k1se", "--install-service", "--steer", "01a12cd6"]) == 0
     unit = (env / "systemd" / "user" / "3d-printer-watch@.service").read_text()
     assert "ExecStart=/opt/bin/3d printer watch %i $WATCH_ARGS" in unit and "Restart=always" in unit
     assert f"EnvironmentFile=-{env / '3d-cli' / 'watch'}/%i.env" in unit
     assert f"Environment=XDG_CONFIG_HOME={env}" in unit
-    assert (env / "3d-cli" / "watch" / "u1.env").read_text().splitlines()[-1] == "WATCH_ARGS=--steer 01a12cd6 --tg"
+    assert (env / "3d-cli" / "watch" / "u1.env").read_text().splitlines()[-1] == "WATCH_ARGS=--steer 01a12cd6"
     assert (env / "3d-cli" / "watch" / "k1se.env").is_file()
     assert "systemctl --user enable --now 3d-printer-watch@u1" in capsys.readouterr().out
 

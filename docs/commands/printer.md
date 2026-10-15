@@ -15,8 +15,12 @@ Epic: [#90](https://github.com/alex-mextner/3d-cli/issues/90).
 3d printer upload NAME FILE.gcode [--as REMOTE]
 3d printer start NAME FILE.gcode --yes [--as REMOTE] [--source-3mf X.3mf] [--bridge-max MM] [--force] [--secs S]
 3d printer cancel NAME --yes
-3d printer watch NAME... | --all [--tg] [--steer SESSION] [--exec CMD] [--min-severity LEVEL] ...
+3d printer watch NAME... | --all [--steer SESSION] [--exec CMD] [--min-severity LEVEL] ...
 3d printer vision NAME [--interval S] [--once] [--dry-run] ...  |  vision eval ...  |  vision fetch-model
+3d printer subscribe --session ID [--printer P,P] [--kinds K,K] [--min-severity LEVEL] ...
+3d printer unsubscribe --session ID | --id SUBID | --all
+3d printer subscriptions [list | test PRINTER] [--json]
+3d printer agent list [--json] | stop PRINTER | handoff PRINTER --summary TEXT
 ```
 
 | Subcommand | What |
@@ -28,6 +32,8 @@ Epic: [#90](https://github.com/alex-mextner/3d-cli/issues/90).
 | `cancel NAME --yes` | Cancel the running or paused job. |
 | `watch NAME...` | Stay subscribed (read-only) and report anomalies as events — see [Watching printers](#watching-printers). |
 | `vision NAME` | Watch the camera for failed prints (spaghetti, stale/dark camera, the U1's own NPU verdicts) — see [Camera failure detection](#camera-failure-detection). |
+| `subscribe` / `unsubscribe` / `subscriptions` | Route printer alerts to an AI agent first: it looks at the frame and tells the user only if the failure is real — see [printer-subscribe.md](printer-subscribe.md). |
+| `agent list` / `stop` / `handoff` | The temporary per-printer omp agent (tmux) that gets the warning+ alerts no live subscriber took — see [printer-subscribe.md#the-temporary-printer-agent](printer-subscribe.md#the-temporary-printer-agent). |
 
 Options:
 
@@ -66,7 +72,11 @@ Options:
 3d printer start k1se out/roof.gcode --yes --force
 3d printer cancel k1se --yes
 3d printer watch u1 --duration 20
-3d printer watch u1 k1se --steer 01a12cd6 --tg
+3d printer watch u1 k1se --steer 01a12cd6
+3d printer subscribe --session 01a12cd6 --printer u1,k1se
+3d printer subscribe --session 01a12cd6 --printer u1 --kinds 'vision_*,printer_noodle_verdict'
+3d printer subscriptions
+3d printer agent list
 ```
 
 ## Configuring printers
@@ -167,13 +177,23 @@ Sinks — several at once:
 - stdout JSONL (default; `--no-stdout` turns it off).
 - `--exec CMD` — `sh -c CMD` per event; the event JSON on stdin and `PRINTER_EVENT_PRINTER`,
   `_KIND`, `_SEVERITY`, `_TEXT` in the environment. Repeatable.
-- `--tg` — one message per batch through the `tg` CLI.
-- `--steer TARGET` — one message per batch into a live omp session through
+- `--steer TARGET` — one message per batch (the same evidence-aware text a
+  [subscriber](printer-subscribe.md#what-the-agent-receives) gets, every frame path included) into a live omp session through
   `tg-ctl omp-live send` (the bridge `omp-steer` uses: a busy session gets it as a steer, an
   idle one as an aside that starts a turn). TARGET is a sessionId or its prefix (survives
   `omp -r`), a pid, or a unique title substring; several matches are refused, `all` broadcasts.
   `omp-steer list` shows the sessions. Repeatable.
-- `--dry-run` — exec/tg/steer print what they would send to stderr instead.
+- [Subscriptions](printer-subscribe.md) — no flag: every watcher also delivers to the agent
+  sessions registered with `3d printer subscribe` (re-read when the registry changes).
+- [The temporary printer agent](printer-subscribe.md#the-temporary-printer-agent) — no flag:
+  warning+ events that no live agent (`--steer`, a subscriber) took go to a per-printer omp
+  agent in tmux, which judges them and decides itself whether to tell the user.
+- tg — **emergency only**, yaml `watch.tg_fallback: true` (no CLI flag): one message per batch
+  through the `tg` CLI, marked «агент недоступен», carrying only the warning+ events no agent
+  could take (the printer agent did not start). The watcher never messages the user otherwise.
+  The old `--tg` / `--tg-always` flags and `tg:` key are read as `tg_fallback: true` with a
+  deprecation warning.
+- `--dry-run` — exec/steer/subscriptions/agent/tg print what they would send to stderr instead.
 
 Delivery rules: events below `--min-severity` (default `info`) are dropped; the same event
 key within `--dedup-min` (default 10) is dropped; events arriving within 2 s go out as one
@@ -191,7 +211,7 @@ u1:
   host: 192.168.0.26
   watch:
     steer: 01a12cd6          # or a list; also `exec: CMD` / a list
-    tg: true
+    tg_fallback: true        # emergency: phone gets only what NO agent could take
     min_severity: info
     stall_minutes: 20
     heat_timeout_minutes: 10
@@ -206,7 +226,8 @@ per-sink delivered/failed/suppressed counters.
 As a user service:
 
 ```bash
-3d printer watch u1 k1se --install-service --steer 01a12cd6 --tg
+3d printer watch u1 k1se --install-service
+3d printer subscribe --session 01a12cd6 --printer u1,k1se
 systemctl --user enable --now 3d-printer-watch@u1 3d-printer-watch@k1se
 journalctl --user -fu '3d-printer-watch@*'
 ```

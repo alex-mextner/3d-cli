@@ -18,7 +18,7 @@ ENTRY:
   Optional `trusted_macros: [PAUSE, START_PRINT]` names macros (commands whose bodies the
   bounds check cannot see) known to keep the head on the bed; any other macro in a G-code
   FAILs print-preflight, so `3d printer start` needs --force for it.
-  Optional `watch: {tg: true, steer: <omp session>, exec: CMD, min_severity: warning, ...}`
+  Optional `watch: {steer: <omp session>, tg_fallback: true, exec: CMD, min_severity: warning, ...}`
   configures `3d printer watch` for this printer (keys: printer_ops/watch_run.py WATCH_KEYS).
   Optional `resume:` holds the printer-specific values of `3d gcode-resume` (ResumeProfile:
   off-bed purge macro and lengths, travel clearance, start commands); every key is required.
@@ -211,7 +211,7 @@ def _parse(path: Path, data: Any) -> dict[str, Device]:
         resume = _resume(spec["resume"], name, path) if "resume" in spec else None
         watch = spec.get("watch") or {}
         if not isinstance(watch, dict):
-            raise InvalidArgument(f"{name}.watch", str(watch), ["a mapping, e.g. {tg: true, min_severity: warning}"],
+            raise InvalidArgument(f"{name}.watch", str(watch), ["a mapping, e.g. {tg_fallback: true, min_severity: warning}"],
                                   command="printer", extra=f"Fix {path}.")
         out[name] = Device(name, adapter, host, port, str(model) if model else None, path, ws_port, limits,
                            trusted, resume, dict(watch), bridge)

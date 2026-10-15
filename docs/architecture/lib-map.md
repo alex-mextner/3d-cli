@@ -72,7 +72,13 @@ Target package: `lib/geometry/`, with subpackages only when a real boundary appe
   adapter contract + status model (`base.py`), stdlib WebSocket client (`ws.py`),
   `moonraker.py` (Klipper/Moonraker, Snapmaker U1), `creality.py` (Creality K1 stock
   firmware), `devices.py` (`printer-devices.yaml`), `preflight.py` (pre-print checks),
-  `move_bounds.py` (G-code moves and arc extremes vs axis travel / printable area).
+  `move_bounds.py` (G-code moves and arc extremes vs axis travel / printable area),
+  `watch.py` / `watch_run.py` / `watch_sinks.py` (`3d printer watch`: detectors, streams,
+  the event Dispatcher and its staged sinks; agents first, `tg` only as the emergency
+  `watch.tg_fallback`), `subscriptions.py` (`3d printer subscribe`: the agent-subscription
+  registry `subscriptions.yaml` and the `SubscriptionSink` every watcher adds), and
+  `printer_agent.py` (`3d printer agent`: the temporary per-printer omp agent in tmux for
+  alerts no live subscriber took, and its handoff).
 - `lib/slicing/head_sequence.py` — per-object, per-layer toolhead check of sliced G-code against the project 3MF's mixed-filament patterns (`slice-check --check head-sequence`; `preflight_check()` is the `head seq` gate of `print-preflight`, #103).
 - `lib/slicing/slice_warnings.py` — the slicer's warnings for one G-code (Orca-family CLI log, result.json, slice_info of a sliced 3MF) in `NAME.slice-warnings.json` with the G-code's SHA-256 and a reason per accepted warning; backs `3d slice-warnings` and the `slicer warn` gate of `print-preflight`.
 
