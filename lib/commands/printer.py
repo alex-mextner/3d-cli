@@ -353,7 +353,9 @@ def _cmd_cancel(argv: list[str]) -> int:
     return 0
 
 
-VISION_DEPS = "numpy,opencv-python-headless,onnxruntime"
+# Everything vision_detect.py imports: outside the repo's .venv, `uv run --with` gets only these
+# (no project deps), and printer-devices.yaml (pyyaml) and the camera geometry (scipy) need theirs.
+VISION_DEPS = "numpy,opencv-python-headless,onnxruntime,pyyaml,scipy"
 
 
 def _cmd_vision(argv: list[str]) -> int:

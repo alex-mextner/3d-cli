@@ -474,9 +474,41 @@ def test_printer_vision_routes_to_tool(
 
     monkeypatch.setattr(cli.pyrun, "exec_tool", fake_exec)
     assert printer.run(["vision", *argv]) == 0
-    assert calls == [
-        ("numpy,opencv-python-headless,onnxruntime", "vision_detect.py", expected)
-    ]
+    assert calls == [(printer.VISION_DEPS, "vision_detect.py", expected)]
+
+
+def test_vision_deps_cover_every_third_party_import() -> None:
+    """`3d printer vision` runs outside the repo's .venv as `uv run --with VISION_DEPS`, which
+    installs nothing else: every third-party module the vision code imports must be listed
+    (0.12.0 shipped without pyyaml, so printer-devices.yaml could not be read)."""
+    import ast
+    import sys as _sys
+
+    from commands import printer
+
+    lib = Path(__file__).resolve().parents[1] / "lib"
+    local = {p.stem for p in lib.iterdir()} | {"printer_ops", "cli", "errors"}
+    dist = {"cv2": "opencv-python-headless", "yaml": "pyyaml"}
+    dev_only = {"tokenizers"}  # vision_verify's prompt regeneration, a dev command
+    files = [
+        lib / f"{m}.py"
+        for m in ("vision_detect", "vision_verify", "vision_geometry", "vision_scene")
+    ] + sorted((lib / "printer_ops").glob("*.py"))
+    needed: set[str] = set()
+    for f in files:
+        for node in ast.walk(ast.parse(f.read_text())):
+            if isinstance(node, ast.Import):
+                tops = [a.name.split(".")[0] for a in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                tops = [node.module.split(".")[0]]
+            else:
+                continue
+            needed |= {
+                dist.get(t, t)
+                for t in tops
+                if t not in _sys.stdlib_module_names and t not in local and t not in dev_only
+            }
+    assert needed <= set(printer.VISION_DEPS.split(","))
 
 
 def test_get_turns_http_protocol_errors_into_oserror(monkeypatch: pytest.MonkeyPatch) -> None:
