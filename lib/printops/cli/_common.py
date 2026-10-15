@@ -26,43 +26,45 @@ class Parsed:
 
 
 def parse(argv: list[str], sub: str, *, values: Set[str] = frozenset(), flags: Set[str] = frozenset(),
-          n_pos: int | tuple[int, int] = 0) -> Parsed:
-    """Split argv into positionals, `--opt VALUE` and `--flag`; unknown options are errors."""
+          n_pos: int | tuple[int, int] = 0, prefix: str = "printops") -> Parsed:
+    """Split argv into positionals, `--opt VALUE` and `--flag`; unknown options are errors.
+    `prefix` names the top-level command in messages (`3d calibrate` reuses this parser)."""
+    cmd = f"{prefix} {sub}"
     out = Parsed()
     i = 0
     while i < len(argv):
         a = argv[i]
         if a in values:
             if i + 1 >= len(argv):
-                raise UsageError(f"{a} needs a value", command=f"printops {sub}")
+                raise UsageError(f"{a} needs a value", command=cmd)
             out.opts[a] = argv[i + 1]
             i += 2
             continue
         if a in flags:
             out.flags.add(a)
         elif a.startswith("--"):
-            raise UsageError(f"unknown option {a} for `printops {sub}`", command=f"printops {sub}",
-                             remediation=[f"See `3d printops {sub} --help`."])
+            raise UsageError(f"unknown option {a} for `{cmd}`", command=cmd,
+                             remediation=[f"See `3d {cmd} --help`."])
         else:
             out.pos.append(a)
         i += 1
     lo, hi = (n_pos, n_pos) if isinstance(n_pos, int) else n_pos
     if not lo <= len(out.pos) <= hi:
         want = str(lo) if lo == hi else f"{lo}-{hi}"
-        raise UsageError(f"`printops {sub}` takes {want} positional argument(s), got {len(out.pos)}: {out.pos}",
-                         command=f"printops {sub}", remediation=[f"See `3d printops {sub} --help`."])
+        raise UsageError(f"`{cmd}` takes {want} positional argument(s), got {len(out.pos)}: {out.pos}",
+                         command=cmd, remediation=[f"See `3d {cmd} --help`."])
     return out
 
 
-def client(p: Parsed, sub: str) -> ApiClient:
+def client(p: Parsed, sub: str, *, prefix: str = "printops") -> ApiClient:
     try:
         return ApiClient.from_config(api=p.opts.get("--api"), token=p.opts.get("--token"))
     except ApiConfigError as e:
-        raise UsageError(str(e), command=f"printops {sub}") from e
+        raise UsageError(str(e), command=f"{prefix} {sub}") from e
 
 
 @contextmanager
-def api_errors(sub: str) -> Iterator[None]:
+def api_errors(sub: str, *, prefix: str = "printops") -> Iterator[None]:
     """Render ApiError as a structured CLI error (exit 1) with the likely fix."""
     try:
         yield
@@ -75,4 +77,4 @@ def api_errors(sub: str) -> Iterator[None]:
             fix.append("This token lacks the scope; mint one with the needed --scopes.")
         elif e.status == 0:
             fix.append("Check PRINTOPS_API and that 3d-api is running (`3d printops deploy --dry-run` shows where).")
-        raise ThreeDError(e.message, command=f"printops {sub}", remediation=fix) from e
+        raise ThreeDError(e.message, command=f"{prefix} {sub}", remediation=fix) from e

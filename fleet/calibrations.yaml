@@ -1,0 +1,211 @@
+# fleet/calibrations.yaml — the calibration catalog (PrintOps plan §7.2, issue #167).
+#
+# Read by lib/printops/calibration_catalog.py (schema + typed loader; tests keep this file valid).
+# 3d-api's requirement engine (lib/printops/calibrations.py) uses it to decide, for a printer
+# head and the spool loaded on it, which calibrations a print needs and whether a current record
+# exists. How strictly a missing one is enforced lives in fleet/policy.yaml `calibrations:`.
+#
+# Per kind:
+#   title           human name
+#   scope           what a record is bound to: printer | head (implies printer) | nozzle (the
+#                   nozzle installed on the head) | plate (build plate of the printer) | filament
+#                   (Spoolman filament: vendor + material + product). A record matches a print
+#                   only when every scope dimension matches.
+#   lot_sensitive   true: a record for another lot of the same filament still applies, but the
+#                   requirement reports `new_lot` (policy decides warn/block/off)
+#   baseline        required: a scope without any record is missing (new material/vendor/…);
+#                   assumed: no record = the printer's factory state, required again only after
+#                   an invalidation (maintenance, nozzle swap, …)
+#   invalidated_by  maintenance triggers (event `calibration.invalidated`, emitted by #166) that
+#                   make older records of this kind on that printer/head stale:
+#                   nozzle_swap | nozzle_diameter | extruder | ptfe | hotend | kinematics | belts |
+#                   plate | head_swap | move | repair
+#   methods         how a value is obtained (free names; `3d calibrate gen` implements some)
+#   values          what a result records: {name: {type number|string, min, max, unit, optional}}
+#   order           value names that must be non-decreasing (e.g. temp min ≤ best ≤ max)
+#   gcode           footer checks of the `calibration_current` gate: value name →
+#                   {key: G-code footer key, compare eq|le, tolerance, enabled_by: footer key that
+#                   must be truthy for the G-code to carry the value at all}
+#   apply           where an accepted value goes (#168 `3d calibrate apply`): orca:<profile key> |
+#                   klipper:<command> | journal
+#   estimate        rough cost of one run on one head, for `3d calibrate plan` (house estimates)
+#   models          printer models this kind exists for (omit = every model)
+#   sources         where the method / numbers come from
+
+kinds:
+  flow_ratio:
+    title: Flow ratio
+    scope: [head, nozzle, filament]
+    lot_sensitive: true
+    baseline: required
+    invalidated_by: [nozzle_swap, nozzle_diameter, hotend]
+    methods: [orca_flow_tiles, u1_auto_flow, manual]
+    values:
+      flow_ratio: {type: number, min: 0.5, max: 1.5}
+    gcode:
+      flow_ratio: {key: filament_flow_ratio, compare: eq, tolerance: 0.0015}
+    apply: [orca:filament_flow_ratio]
+    estimate: {minutes: 30, grams: 10}
+    sources:
+      - https://github.com/SoftFever/OrcaSlicer/wiki/Calibration
+      - "U1 firmware macro SM_PRINT_FLOW_CALIBRATE (fleet/printers.yaml trusted_macros)"
+
+  pressure_advance:
+    title: Pressure advance (K)
+    scope: [head, nozzle, filament]
+    lot_sensitive: false
+    baseline: required
+    invalidated_by: [nozzle_swap, nozzle_diameter, hotend, extruder, ptfe]
+    methods: [pa_pattern, pa_tower, k1_auto, manual]
+    values:
+      pressure_advance: {type: number, min: 0, max: 2}
+      smooth_time: {type: number, min: 0, max: 0.2, unit: s, optional: true}
+    gcode:
+      pressure_advance:
+        key: pressure_advance
+        compare: eq
+        tolerance: 0.0005
+        enabled_by: enable_pressure_advance
+    apply: [orca:pressure_advance, klipper:SET_PRESSURE_ADVANCE]
+    estimate: {minutes: 15, grams: 5}
+    sources:
+      - https://github.com/AndrewEllis93/Ellis-PA-Pattern
+      - https://www.klipper3d.org/Pressure_Advance.html
+
+  temp_tower:
+    title: Temperature tower
+    scope: [filament]
+    lot_sensitive: true
+    baseline: required
+    invalidated_by: []
+    methods: [temp_tower, manual]
+    values:
+      nozzle_temp_min: {type: number, min: 150, max: 350, unit: °C}
+      nozzle_temp_best: {type: number, min: 150, max: 350, unit: °C}
+      nozzle_temp_max: {type: number, min: 150, max: 350, unit: °C}
+    order: [nozzle_temp_min, nozzle_temp_best, nozzle_temp_max]
+    apply: [orca:nozzle_temperature]
+    estimate: {minutes: 45, grams: 15}
+    sources:
+      - https://github.com/SoftFever/OrcaSlicer/wiki/Calibration
+
+  max_volumetric_speed:
+    title: Max volumetric speed
+    scope: [head, nozzle, filament]
+    lot_sensitive: false
+    baseline: required
+    invalidated_by: [nozzle_swap, nozzle_diameter, hotend]
+    methods: [orca_mvs_test, manual]
+    values:
+      max_volumetric_speed: {type: number, min: 1, max: 100, unit: mm³/s}
+    gcode:
+      max_volumetric_speed: {key: filament_max_volumetric_speed, compare: le, tolerance: 0.05}
+    apply: [orca:filament_max_volumetric_speed]
+    estimate: {minutes: 20, grams: 20}
+    sources:
+      - https://github.com/SoftFever/OrcaSlicer/wiki/Calibration
+
+  retraction:
+    title: Retraction
+    scope: [head, filament]
+    lot_sensitive: false
+    baseline: required
+    invalidated_by: [ptfe, hotend, extruder]
+    methods: [retraction_tower, manual]
+    values:
+      retraction_length: {type: number, min: 0, max: 10, unit: mm}
+      retraction_speed: {type: number, min: 1, max: 200, unit: mm/s, optional: true}
+    apply: [orca:filament_retraction_length]
+    estimate: {minutes: 20, grams: 5}
+    sources:
+      - https://github.com/SoftFever/OrcaSlicer/wiki/Calibration
+
+  input_shaper:
+    title: Input shaper
+    scope: [printer]
+    lot_sensitive: false
+    baseline: assumed
+    invalidated_by: [kinematics, belts, move, repair]
+    methods: [klipper_shaper_calibrate, k1_auto, u1_auto]
+    values:
+      shaper_type_x: {type: string}
+      shaper_freq_x: {type: number, min: 5, max: 200, unit: Hz}
+      shaper_type_y: {type: string}
+      shaper_freq_y: {type: number, min: 5, max: 200, unit: Hz}
+    apply: [klipper:SAVE_CONFIG]
+    estimate: {minutes: 10, grams: 0}
+    sources:
+      - https://www.klipper3d.org/Measuring_Resonances.html
+
+  z_offset:
+    title: Z offset
+    scope: [printer, plate]
+    lot_sensitive: false
+    baseline: assumed
+    invalidated_by: [nozzle_swap, nozzle_diameter, plate, hotend, head_swap, repair]
+    methods: [klipper_probe_calibrate, u1_auto, k1_auto, manual]
+    values:
+      z_offset: {type: number, min: -5, max: 5, unit: mm}
+    apply: [klipper:SAVE_CONFIG]
+    estimate: {minutes: 5, grams: 0}
+    sources:
+      - https://www.klipper3d.org/Probe_Calibrate.html
+
+  bed_mesh:
+    title: Bed mesh
+    scope: [printer, plate]
+    lot_sensitive: false
+    baseline: assumed
+    invalidated_by: [plate, move, kinematics, repair]
+    methods: [klipper_bed_mesh_calibrate, u1_auto, k1_auto]
+    values:
+      profile: {type: string, optional: true}
+      range_mm: {type: number, min: 0, max: 5, unit: mm, optional: true}
+    apply: [klipper:SAVE_CONFIG]
+    estimate: {minutes: 5, grams: 0}
+    sources:
+      - https://www.klipper3d.org/Bed_Mesh.html
+
+  head_offsets:
+    title: Tool-head XY/Z offsets
+    scope: [printer]
+    lot_sensitive: false
+    baseline: assumed
+    invalidated_by: [head_swap, nozzle_swap, hotend, repair]
+    methods: [snapmaker_head_calibration]
+    values:
+      note: {type: string, optional: true}
+    apply: [journal]
+    estimate: {minutes: 15, grams: 2}
+    models: [Snapmaker U1]
+    sources:
+      - https://wiki.snapmaker.com/en/FAQ/u1
+
+  rotation_distance:
+    title: Rotation distance (e-steps)
+    scope: [head]
+    lot_sensitive: false
+    baseline: assumed
+    invalidated_by: [extruder]
+    methods: [mark_100mm]
+    values:
+      rotation_distance: {type: number, min: 1, max: 100, unit: mm}
+    apply: [klipper:SAVE_CONFIG]
+    estimate: {minutes: 10, grams: 3}
+    sources:
+      - https://www.klipper3d.org/Rotation_Distance.html
+
+  belt_tension:
+    title: Belt tension
+    scope: [printer]
+    lot_sensitive: false
+    baseline: assumed
+    invalidated_by: [belts, kinematics]
+    methods: [frequency_meter]
+    values:
+      freq_a_hz: {type: number, min: 20, max: 300, unit: Hz, optional: true}
+      freq_b_hz: {type: number, min: 20, max: 300, unit: Hz, optional: true}
+    apply: [journal]
+    estimate: {minutes: 10, grams: 0}
+    sources:
+      - https://www.klipper3d.org/Measuring_Resonances.html
