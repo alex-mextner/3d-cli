@@ -405,3 +405,49 @@ def test_orphan_symlink_into_the_submodule_blocks(
         "old.yaml: tracked symlink into 3d-cli/ that the manifest doesn't list"
         in capsys.readouterr().out
     )
+
+
+def test_failed_reload_rolls_back_and_reloads_the_old_files(world: World, monkeypatch: pytest.MonkeyPatch) -> None:
+    assert _deploy(world) == 0
+    old = world.sha
+    world.commit_src("packages/3d_printers.yaml", _package("v4"), "v4")
+    monkeypatch.setenv("FAKE_CURL_RC", "22")
+    with pytest.raises(GateFailure, match="reload or service restart failed; rolled back"):
+        _deploy(world)
+    assert git(world.ha / "3d-cli", "rev-parse", "HEAD") == old
+    assert "v4" not in (world.ha / "packages/3d_printers.yaml").read_text()
+    assert world.sha not in (world.ha / ".3d-cli-deployed").read_text()
+    assert not (world.ha / ".git/3d-ha-deploy.lock").exists()
+
+
+def test_staged_live_edit_blocks_but_the_previous_deploys_own_copy_does_not(
+        world: World, capsys: pytest.CaptureFixture[str]) -> None:
+    assert _deploy(world) == 0  # stages the cutover, including the www copy
+    world.commit_src("www/card/card.js", "export const v = 2;\n", "card v2")
+    capsys.readouterr()
+    assert _deploy(world, dry_run=True) == 0
+    assert "www/card/card.js: content changes (copy)" in capsys.readouterr().out
+
+    (world.ha / "www/card/card.js").write_text("export const hotfix = 1;\n")
+    git(world.ha, "add", "www/card/card.js")
+    with pytest.raises(GateFailure, match="blocking problem"):
+        _deploy(world, dry_run=True)
+    assert "www/card/card.js: live file has uncommitted edits" in capsys.readouterr().out
+
+
+def test_a_second_deploy_waits_for_the_lock(world: World, capsys: pytest.CaptureFixture[str]) -> None:
+    (world.ha / ".git/3d-ha-deploy.lock").mkdir()
+    with pytest.raises(GateFailure, match="another `3d ha deploy` holds"):
+        _deploy(world)
+    assert not (world.ha / "packages/3d_printers.yaml").is_symlink()
+    assert _deploy(world, dry_run=True) == 0  # a dry run never takes the lock
+    assert (world.ha / ".git/3d-ha-deploy.lock").is_dir()  # and never removes someone else's
+
+
+def test_option_like_host_is_rejected() -> None:
+    from errors import InvalidArgument
+
+    with pytest.raises(InvalidArgument) as err:
+        ha_deploy.Host("-oProxyCommand=touch /tmp/x")
+    assert any("may not start with '-'" in step for step in err.value.remediation)
+    assert ha_deploy.Host("ultra@h")._argv("true")[-3:] == ["--", "ultra@h", "true"]

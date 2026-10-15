@@ -348,8 +348,8 @@ def probe(args: ProbeArgs) -> dict[str, object]:
         if marker and marker.strip().startswith("{")
         else None,
         "dests": {d: _dest_state(repo, d) for d in dests},
-        "unstaged": (
-            _git(repo, "diff", "--name-only", "--", *own_dests) or ""
+        "edited": (
+            _git(repo, "diff", "HEAD", "--name-only", "--", *own_dests) or ""
         ).splitlines(),
         "tracked_links": _tracked_links(repo, sub),
         "copy_dirs": copy_dirs,

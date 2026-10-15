@@ -23,6 +23,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import secrets
 import shlex
 import subprocess
 import time
@@ -122,7 +123,7 @@ class Manifest:
         )
 
 
-def _req_str(data: dict[str, object], key: str, where: str) -> str:
+def _require_str(data: dict[str, object], key: str, where: str) -> str:
     value = data.get(key)
     if not isinstance(value, str) or not value:
         raise GateFailure(
@@ -140,7 +141,7 @@ def load_manifest(text: str) -> Manifest:
     if not isinstance(repo_raw, dict):
         raise GateFailure(f"{MANIFEST}: ha_repo must be a mapping", command=CMD)
     s = {
-        k: _req_str(repo_raw, k, "ha_repo")
+        k: _require_str(repo_raw, k, "ha_repo")
         for k in (
             "host",
             "dir",
@@ -173,7 +174,7 @@ def load_manifest(text: str) -> Manifest:
         where = f"files[{i}]"
         if not isinstance(raw, dict):
             raise GateFailure(f"{MANIFEST}: {where} must be a mapping", command=CMD)
-        src, dest, mode = (_req_str(raw, k, where) for k in ("src", "dest", "mode"))
+        src, dest, mode = (_require_str(raw, k, where) for k in ("src", "dest", "mode"))
         if mode not in ("symlink", "copy"):
             raise GateFailure(
                 f"{MANIFEST}: {where}.mode={mode!r}; accepted: symlink, copy",
@@ -404,6 +405,9 @@ class Host:
     """Runs commands on the HA host over ssh, or locally for `--host local`."""
 
     def __init__(self, target: str) -> None:
+        if not target or target.startswith("-"):
+            raise InvalidArgument("--host", target, ["local", "[user@]host"], command=CMD,
+                                  extra="A host may not start with '-' (ssh would read it as an option).")
         self.target = target
         self.local = target == "local"
 
@@ -416,6 +420,7 @@ class Host:
             "BatchMode=yes",
             "-o",
             "ConnectTimeout=15",
+            "--",
             self.target,
             remote_cmd,
         ]
@@ -439,6 +444,20 @@ class Host:
                 command=CMD,
             )
         return proc
+
+    def lock(self, ha_dir: str) -> str:
+        """Take the host-wide deploy lock (a directory in the HA repo's .git); one deploy at a time,
+        so a rollback can never restore an older backup over a newer deploy."""
+        path = f"{ha_dir}/.git/3d-ha-deploy.lock"
+        proc = self.sh(f"mkdir {_q(path)} && printf '%s\\n' \"$$\" > {_q(path + '/owner')}", check=False)
+        if proc.returncode != 0:
+            raise GateFailure(f"another `3d ha deploy` holds {self.target}:{path}", command=CMD,
+                              remediation=["Wait for it to finish. If none is running (a crashed deploy), "
+                                           f"remove the directory: ssh {self.target} rm -r {path}"])
+        return path
+
+    def unlock(self, path: str) -> None:
+        self.sh(f"rm -rf {_q(path)}", check=False)
 
     def probe(self, args: ProbeArgs) -> dict[str, object]:
         payload = json.dumps(args)
@@ -650,7 +669,9 @@ def build_plan(
 
     # Files.
     dests = _as_dict(state.get("dests"))
-    unstaged = set(map(str, _as_list(state.get("unstaged"))))
+    # Staged or unstaged differences from HEAD; a copy that the previous deploy wrote (it matches
+    # the live submodule commit) is the deploy's own pending change, not a live edit.
+    edited = set(map(str, _as_list(state.get("edited"))))
     for entry in manifest.files:
         new_hash = _sha256(source.read(f"{INTEGRATION}/{entry.src}"))
         st = _as_dict(dests.get(entry.dest))
@@ -661,7 +682,9 @@ def build_plan(
             )
             continue
         content = st.get("sha256") != new_hash
-        if kind == "file" and entry.dest in unstaged and content:
+        previous = source.read_at(live_sha, f"{INTEGRATION}/{entry.src}") if live_sha else None
+        own_copy = previous is not None and st.get("sha256") == _sha256(previous)
+        if kind == "file" and entry.dest in edited and content and not own_copy:
             plan.problems.append(
                 f"{entry.dest}: live file has uncommitted edits that are not in 3d-cli "
                 f"{source.sha[:12]}; move them into {INTEGRATION}/{entry.src} first"
@@ -761,11 +784,8 @@ def build_plan(
     compose_changed = live_sha is not None and compose_hash != _sha256(
         source.read(COMPOSE)
     )
-    wanted = _as_dict(compose.get("wanted"))
     running = _as_dict(compose.get("running"))
-    drift = [
-        s for s in services if _as_dict(running.get(s)).get("hash") != wanted.get(s)
-    ]
+    drift = running_mismatch(compose, services)
     if compose_changed:
         plan.compose_up = [s for s in services if s not in recreate]
     elif drift:
@@ -829,7 +849,7 @@ def _compose_cmd(compose: dict[str, object]) -> str:
 def _backup(host: Host, manifest: Manifest, plan: Plan) -> str:
     r = manifest.ha_repo
     stamp = time.strftime("%Y%m%dT%H%M%S")
-    name = f"{stamp}-{plan.sha[:12]}"
+    name = f"{stamp}-{plan.sha[:12]}-{os.getpid()}-{secrets.token_hex(3)}"
     paths = [f.dest for f in manifest.files] + [
         r.configuration,
         r.compose_file,
@@ -871,9 +891,19 @@ def _converge_script(manifest: Manifest, plan: Plan) -> str:
     return "\n".join(lines)
 
 
+def _checkout_script(manifest: Manifest, plan: Plan, sha: str) -> str:
+    sub = f"{plan.ha_dir}/{manifest.ha_repo.submodule}"
+    return f"git -C {_q(sub)} checkout --quiet --detach {_q(sha)}"
+
+
 def _bump_script(manifest: Manifest, plan: Plan, sha: str) -> str:
     sub = f"{plan.ha_dir}/{manifest.ha_repo.submodule}"
-    return f"git -C {_q(sub)} fetch --quiet origin\ngit -C {_q(sub)} checkout --quiet --detach {_q(sha)}"
+    return f"git -C {_q(sub)} fetch --quiet origin\n" + _checkout_script(manifest, plan, sha)
+
+
+def _up_script(compose: dict[str, object], services: list[str], *, force: bool) -> str:
+    flags = "up -d --no-deps --force-recreate " if force else "up -d --no-deps "
+    return f"{_compose_cmd(compose)} {flags}" + " ".join(_q(s) for s in services)
 
 
 def _reload_script(plan: Plan, services: list[str], ha_url: str) -> str:
@@ -894,7 +924,7 @@ def _restore(
     lines += [f"rm -f {_q(d)}" for d in created]
     lines.append(f"tar -xzf {_q(backup)}")
     if plan.live_sha and plan.bump:
-        lines.append(_bump_script(manifest, plan, plan.live_sha).split("\n", 1)[1])
+        lines.append(_checkout_script(manifest, plan, plan.live_sha))
     host.sh("\n".join(lines))
 
 
@@ -932,7 +962,7 @@ def post_check_failures(
     return failures
 
 
-def _running_mismatch(compose: dict[str, object], services: list[str]) -> list[str]:
+def running_mismatch(compose: dict[str, object], services: list[str]) -> list[str]:
     wanted = _as_dict(compose.get("wanted"))
     running = _as_dict(compose.get("running"))
     return [
@@ -950,7 +980,7 @@ def apply(
     host: Host,
     manifest: Manifest,
     plan: Plan,
-    args: ProbeArgs,
+    vendor: dict[str, dict[str, str]],
     services: list[str],
     log: list[str],
 ) -> Outcome:
@@ -960,59 +990,50 @@ def apply(
     created = [c.entry.dest for c in plan.converge if c.reason == "missing"]
 
     def rollback(reason: str, detail: str, *, runtime_touched: bool) -> GateFailure:
-        """Restore the backup; when reloads/recreates already ran, run them again on the old files."""
+        """Restore the backup; when reloads/recreates may have run, run them again on the old files."""
         _restore(host, manifest, plan, backup, created)
         if runtime_touched and plan.reloads:
             host.sh(_reload_script(plan, plan.reloads, r.ha_url), check=False)
         if runtime_touched and plan.recreate:
-            host.sh(
-                f"{_compose_cmd(plan.compose)} up -d --no-deps --force-recreate "
-                + " ".join(_q(s) for s in plan.recreate),
-                check=False,
-            )
+            host.sh(_up_script(plan.compose, plan.recreate, force=True), check=False)
         if runtime_touched and plan.compose_up:
-            host.sh(
-                f"{_compose_cmd(plan.compose)} up -d --no-deps "
-                + " ".join(_q(s) for s in plan.compose_up),
-                check=False,
-            )
+            host.sh(_up_script(plan.compose, plan.compose_up, force=False), check=False)
         return GateFailure(
             f"{reason}; rolled back to the backup",
             command=CMD,
             remediation=[detail[-3000:], f"backup: {backup}"],
         )
 
-    if plan.fast_forward:
-        host.sh(f"git -C {_q(plan.ha_dir)} merge --ff-only --quiet origin/main")
-        log.append("HA checkout fast-forwarded to origin/main")
-    if plan.bump:
-        host.sh(_bump_script(manifest, plan, plan.sha))
-        log.append(f"submodule -> {plan.sha[:12]}")
-    if plan.converge:
-        host.sh(_converge_script(manifest, plan))
-        log.append(f"converged {len(plan.converge)} path(s)")
+    try:
+        if plan.fast_forward:
+            host.sh(f"git -C {_q(plan.ha_dir)} merge --ff-only --quiet origin/main")
+            log.append("HA checkout fast-forwarded to origin/main")
+        if plan.bump:
+            host.sh(_bump_script(manifest, plan, plan.sha))
+            log.append(f"submodule -> {plan.sha[:12]}")
+        if plan.converge:
+            host.sh(_converge_script(manifest, plan))
+            log.append(f"converged {len(plan.converge)} path(s)")
+    except GateFailure as exc:
+        raise rollback("applying the files failed", exc.message, runtime_touched=False) from exc
     ok, out = _check_config(host, manifest)
     if not ok:
         raise rollback("check_config failed", out, runtime_touched=False)
     log.append("check_config: " + (out.splitlines()[-1] if out else "OK"))
-    if plan.reloads:
-        host.sh(_reload_script(plan, plan.reloads, r.ha_url))
-        log.append("reloaded: " + ", ".join(plan.reloads))
-    if plan.recreate:
-        host.sh(
-            f"{_compose_cmd(plan.compose)} up -d --no-deps --force-recreate "
-            + " ".join(_q(s) for s in plan.recreate)
-        )
-        log.append("recreated: " + ", ".join(plan.recreate))
-    if plan.compose_up:
-        host.sh(
-            f"{_compose_cmd(plan.compose)} up -d --no-deps "
-            + " ".join(_q(s) for s in plan.compose_up)
-        )
-        log.append("compose up -d: " + ", ".join(plan.compose_up))
+    try:
+        if plan.reloads:
+            host.sh(_reload_script(plan, plan.reloads, r.ha_url))
+            log.append("reloaded: " + ", ".join(plan.reloads))
+        if plan.recreate:
+            host.sh(_up_script(plan.compose, plan.recreate, force=True))
+            log.append("recreated: " + ", ".join(plan.recreate))
+        if plan.compose_up:
+            host.sh(_up_script(plan.compose, plan.compose_up, force=False))
+            log.append("compose up -d: " + ", ".join(plan.compose_up))
+    except GateFailure as exc:
+        raise rollback("reload or service restart failed", exc.message, runtime_touched=True) from exc
 
-    signals_args = args.copy()
-    signals_args["mode"] = "signals"
+    signals_args = probe_args(manifest, plan.ha_dir, plan.sha, services, vendor, mode="signals")
     after: dict[str, object] = {}
     failures: list[str] = ["post-checks did not run"]
     for _ in range(6):  # entities settle within a few polls after a reload or recreate
@@ -1022,7 +1043,7 @@ def apply(
         failures = post_check_failures(plan.signals, after)
         failures += [
             f"{s}: running container differs from the compose config"
-            for s in _running_mismatch(_as_dict(result.get("compose")), services)
+            for s in running_mismatch(_as_dict(result.get("compose")), services)
         ]
         if not failures:
             break
@@ -1241,37 +1262,41 @@ def deploy(opts: Options, repo_root: Path) -> int:
     ha_dir = opts.ha_dir or manifest.ha_repo.dir
     services = compose_services(source)
     vendor = vendor_pins(source)
-    args = probe_args(manifest, ha_dir, sha, services, vendor)
-    state = host.probe(args)
-    plan = build_plan(manifest, source, state, ha_dir, services, vendor)
     target = f"{host.target}:{ha_dir}"
-    print(render_plan(plan, ("DRY " if opts.dry_run else "") + target), flush=True)
-    if plan.problems:
-        raise GateFailure(
-            f"{len(plan.problems)} blocking problem(s); nothing was changed",
-            command=CMD,
-        )
-    if plan.restart:
-        raise GateFailure(
-            "this change needs a Home Assistant restart; deploy never restarts HA",
-            command=CMD,
-            remediation=[
-                "Ask the HA owner for a restart window, or move the change to a "
-                "reloadable domain."
-            ],
-        )
-    if opts.dry_run:
-        print(f"summary: {len(plan.changes())} change(s)")
-        return 0
-    if not plan.changes():
-        print("summary: 0 changes; nothing to deploy")
-        return 0
-    log: list[str] = []
+    lock = None if opts.dry_run else host.lock(ha_dir)
     try:
-        outcome = apply(host, manifest, plan, args, services, log)
+        state = host.probe(probe_args(manifest, ha_dir, sha, services, vendor))
+        plan = build_plan(manifest, source, state, ha_dir, services, vendor)
+        print(render_plan(plan, ("DRY " if opts.dry_run else "") + target), flush=True)
+        if plan.problems:
+            raise GateFailure(
+                f"{len(plan.problems)} blocking problem(s); nothing was changed",
+                command=CMD,
+            )
+        if plan.restart:
+            raise GateFailure(
+                "this change needs a Home Assistant restart; deploy never restarts HA",
+                command=CMD,
+                remediation=[
+                    "Ask the HA owner for a restart window, or move the change to a "
+                    "reloadable domain."
+                ],
+            )
+        if opts.dry_run:
+            print(f"summary: {len(plan.changes())} change(s)")
+            return 0
+        if not plan.changes():
+            print("summary: 0 changes; nothing to deploy")
+            return 0
+        log: list[str] = []
+        try:
+            outcome = apply(host, manifest, plan, vendor, services, log)
+        finally:
+            for line in log:
+                print(f"  {line}", flush=True)
     finally:
-        for line in log:
-            print(f"  {line}", flush=True)
+        if lock:
+            host.unlock(lock)
     print(f"deployed 3d-cli {sha[:12]} (backup {outcome.backup})")
     if outcome.pr_url:
         print(f"HA repo PR: {outcome.pr_url} — merge it to record the pointer in main")

@@ -230,6 +230,7 @@ esac
 """
 FAKE_CURL = """#!/bin/bash
 echo "curl ${*: -1}" >> "$FAKE_LOG"
+exit "${FAKE_CURL_RC:-0}"
 """
 FAKE_GH = """#!/bin/bash
 echo "gh $*" >> "$FAKE_LOG"

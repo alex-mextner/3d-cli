@@ -25,7 +25,8 @@ Issue: [#156](https://github.com/alex-mextner/3d-cli/issues/156).
 - `--dry-run` — print the plan and stop. Exit 0 when nothing blocks, with or without changes.
   `3d ha deploy --dry-run` right after a deploy prints `changes (0):`.
 - `--host H` — ssh target of the HA host (default `ha_repo.host` from the manifest,
-  `ultra@192.168.0.39`). `local` runs everything on this machine (tests use it).
+  `ultra@192.168.0.39`). `local` runs everything on this machine (tests use it). A value
+  starting with `-` is refused (ssh would read it as an option).
 - `--ref REF` — the 3d-cli commit to deploy. Default `origin/main` (fetched first). The HA
   host fetches it from GitHub, so it has to be pushed.
   `3d ha deploy --ref 96c0165 --dry-run`
@@ -62,12 +63,16 @@ when a changed file is not mounted by the service it lists.
    `python3` over ssh). It blocks — nothing changes — on: files under
    `integrations/homeassistant/` missing from the manifest or vice versa; tracked symlinks into
    the submodule or files next to the `www` copies that the manifest doesn't list; a live dest
-   with uncommitted edits that 3d-cli doesn't have; local edits inside the submodule; a
+   with staged or unstaged edits that 3d-cli doesn't have (a copy the previous deploy wrote
+   doesn't count); local edits inside the submodule; a
    `configuration.yaml` without the snippet keys; a compose file that doesn't include the 3D
    file or redefines its services; `vendor.lock` drift; a `--ref` the host can't fetch; no
    `HA_TOKEN` in the HA repo's `.env`. A package change in a domain without a reload service
    (for example `homeassistant:` or a `sensor` platform other than rest/template/command_line)
    stops the deploy as well: it would need an HA restart, and the deploy never restarts HA.
+   A real deploy holds a lock (`.git/3d-ha-deploy.lock` in the HA repo) from the probe to the
+   end, so a rollback can never restore an older backup over a newer deploy. A crashed deploy
+   leaves it behind; the error names the directory to remove.
 2. **Backup**: a tar of every touched path to `~/.cache/ha-deploy-backups/` on the host, plus
    a JSON note with the previous submodule commit.
 3. **Apply**: fast-forward the HA checkout when a merged deploy PR is the only difference to
@@ -79,7 +84,8 @@ when a changed file is not mounted by the service it lists.
    (`template.reload`, `rest.reload`, `automation.reload`, …). Identical bytes reload nothing.
 6. **Services**: `docker compose up -d --no-deps --force-recreate` for the services of changed
    files (single-file bind mounts keep the old inode), `up -d` when the 3D compose file changed
-   or a running container differs from the compose config.
+   or a running container differs from the compose config. A failing reload or `up` restores
+   the backup and runs the same reloads/recreates on the old files.
 7. **Post-checks**, repeated for up to 30 s: every `sensor.printer_*`/`binary_sensor.printer_*`
    that was available before still is, the dashboard answers 200, go2rtc still has the
    `u1_camera` stream with producers, and the 3D containers match the compose config. A
