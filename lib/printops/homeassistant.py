@@ -24,6 +24,11 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+from printops.client import NoRedirect
+
+# Never follow a redirect: urllib would replay the HA bearer token to the new host.
+_OPENER = urllib.request.build_opener(NoRedirect)
+
 ENTITY_RE = re.compile(r"^[a-z_]+\.[a-z0-9_]+$")
 
 
@@ -77,7 +82,7 @@ class HaStates:
             },
         )
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:  # noqa: S310 — operator-configured URL
+            with _OPENER.open(req, timeout=self.timeout) as resp:  # noqa: S310 — operator-configured URL
                 body = json.loads(resp.read() or b"null")
         except urllib.error.HTTPError as e:
             what = "not found" if e.code == 404 else f"HTTP {e.code}"
