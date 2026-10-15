@@ -122,6 +122,11 @@ class _Heater:
     drift_alerted: bool = False     # drift reported; re-armed when back within tolerance
 
 
+def _is_count(v: Any) -> bool:
+    """A non-negative int (not a bool): byte offsets and layer numbers from the printer."""
+    return isinstance(v, int) and not isinstance(v, bool) and v >= 0
+
+
 def _short(name: str | None, n: int = 48) -> str:
     if not name:
         return "-"
@@ -244,7 +249,8 @@ class _Detector:
         return out
 
     def _at_end(self, f: Frame) -> bool:
-        """The job is in its end macro: still printing/paused by state, but at `end_progress`."""
+        """The job is in its end macro: still printing/paused by state, but at `end_progress`.
+        (Not "on the last layer": a one-layer print or a long top layer would hide real faults.)"""
         return f.state in JOB_ACTIVE and f.progress is not None and f.progress >= self.limits.end_progress
 
     def _in_start_phase(self, f: Frame, now: float) -> bool:
@@ -526,6 +532,41 @@ class MoonrakerDetector(_Detector):
         self.klippy: str | None = None
         self._exceptions_seen: set[str] = set()
         self._sensors: dict[str, bool] = {}
+        # The current job's G-code body bounds (gcode_start_byte, gcode_end_byte) from Moonraker
+        # file metadata: (filename, bounds or None when the metadata has none). Forgotten when a
+        # job starts, since a re-sliced file may be uploaded under the same name.
+        self.file_body: tuple[str, tuple[int, int] | None] | None = None
+        self.jobs = 0  # jobs seen starting; keys per-job state such as the stream's metadata retry
+
+    def wants_file_body(self) -> str | None:
+        """The current job's file whose body bounds are not known yet (the stream fetches them
+        with server.files.metadata and calls `set_file_body`)."""
+        name = (self.status.get("print_stats") or {}).get("filename")
+        if not name or (self.file_body is not None and self.file_body[0] == name):
+            return None
+        return str(name)
+
+    def set_file_body(self, filename: str, metadata: Any) -> None:
+        """Record `gcode_start_byte`/`gcode_end_byte` of a server.files.metadata result."""
+        meta: dict[str, Any] = metadata if isinstance(metadata, dict) else {}
+        start, end = meta.get("gcode_start_byte"), meta.get("gcode_end_byte")
+        bounds = (start, end) if isinstance(start, int) and isinstance(end, int) else None
+        if bounds is not None and _is_count(bounds[0]) and _is_count(bounds[1]) and bounds[0] < bounds[1]:
+            self.file_body = (filename, bounds)
+        else:
+            self.file_body = (filename, None)
+
+    def _progress(self, filename: str | None, vsd: dict[str, Any]) -> float | None:
+        """Job progress over the G-code body, as Mainsail/Fluidd show it. virtual_sdcard counts
+        the whole file, so a slicer footer (Orca's config block, ~5 % of a small K1 file) puts
+        END_PRINT at 94.6 % (#255) and a thumbnail header makes the job start at 4 %."""
+        body = self.file_body[1] if self.file_body is not None and self.file_body[0] == filename else None
+        pos = vsd.get("file_position")
+        if body is not None and isinstance(pos, (int, float)) and not isinstance(pos, bool):
+            start, end = body
+            return min(1.0, max(0.0, (pos - start) / (end - start)))
+        progress = vsd.get("progress")
+        return float(progress) if isinstance(progress, (int, float)) and not isinstance(progress, bool) else None
 
     def frame_from_status(self) -> Frame:
         s = self.status
@@ -534,7 +575,7 @@ class MoonrakerDetector(_Detector):
         klippy = (s.get("webhooks") or {}).get("state", "ready")
         state = _MR_STATE.get(raw, UNKNOWN) if klippy == "ready" else UNKNOWN
         vsd = s.get("virtual_sdcard") or {}
-        progress = vsd.get("progress")
+        progress = self._progress(ps.get("filename") or None, vsd)
         if progress is None:
             progress = (s.get("display_status") or {}).get("progress")
         info_obj = ps.get("info")
@@ -549,7 +590,8 @@ class MoonrakerDetector(_Detector):
             state=state, raw_state=raw if klippy == "ready" else f"klippy:{klippy}",
             filename=ps.get("filename") or None,
             progress=float(progress) if progress is not None else None,
-            layer=info.get("current_layer"), total_layer=info.get("total_layer"),
+            layer=info.get("current_layer") if _is_count(info.get("current_layer")) else None,
+            total_layer=info.get("total_layer") if _is_count(info.get("total_layer")) else None,
             heaters=heaters, homed=homed,
             stall_marker=(vsd.get("file_position"), progress, info.get("current_layer")),
             message=ps.get("message") or None,
@@ -562,6 +604,11 @@ class MoonrakerDetector(_Detector):
         if full:
             self.status = {}
         _merge(self.status, delta)
+        ps = self.status.get("print_stats") or {}
+        if self._job_state not in JOB_ACTIVE and ps.get("state") in ("printing", "paused"):
+            # a new job (it may even start paused): its file may be a re-slice under the same name
+            self.file_body = None
+            self.jobs += 1
         out: list[Event] = []
         out += self._klippy_from_webhooks(now)
         out += self._exception_rules(now)
