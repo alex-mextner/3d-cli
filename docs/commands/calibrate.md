@@ -70,16 +70,22 @@ printers are `off`, decision D7). Precedence and schema: `lib/printops/calibrati
 
 ## `plan`
 
+Real output (scratch 3d-api with the babushkin-dom spools, a PLA loaded on the K1 SE, nothing
+recorded yet):
+
 ```
-$ 3d calibrate plan --printer u1
-u1: 2 FAIL, 4 WARN, 1 UNVERIFIED; ~145 min, ~55 g
-  FAIL       T1   flow_ratio            new_material_type  no PETG recorded yet (Elegoo PETG Black)
-  FAIL       T1   pressure_advance      new_material_type  no PETG recorded yet (Elegoo PETG Black)
-  WARN       T3   flow_ratio            new_lot            lot L2 is new; #4 was measured on lot L1 (2026-10-14)
-  ...
-  UNVERIFIED T4   flow_ratio            no_spool           no spool bound to u1/T4 (`3d printops spool load`)
-  skipped T2: head T2 does not work (…)
+$ 3d calibrate plan --printer k1se
+k1se: 2 FAIL, 3 WARN; ~130 min, ~55 g
+  FAIL       T1   flow_ratio            new_material_type  no PLA recorded yet (жёлтый)
+  FAIL       T1   pressure_advance      new_material_type  no PLA recorded yet (жёлтый)
+  WARN       T1   max_volumetric_speed  new_material_type  no PLA recorded yet (жёлтый)
+  WARN       T1   retraction            new_material_type  no PLA recorded yet (жёлтый)
+  WARN       T1   temp_tower            new_material_type  no PLA recorded yet (жёлтый)
 ```
+
+On the U1 the broken head is listed as `skipped T2: head T2 does not work (…)`; a head without a
+bound spool shows `UNVERIFIED … no_spool`; a nozzle swap logged by maintenance shows
+`FAIL T3 pressure_advance invalidated #4 predates nozzle_swap on 2026-10-15: …`.
 
 The estimate adds up the catalog's minutes and grams of every FAIL/WARN item. `--all` also
 lists PASS items. `plan` is a report and exits 0.
@@ -111,6 +117,8 @@ Reads the G-code's `; key = value` settings (head and tail), the used tools (`; 
 - `; enable_pressure_advance = 0` leaves K to the firmware: PASS when the record was applied to
   Klipper, WARN otherwise.
 - A tool on a head the printer does not have, or on an unusable head, is UNVERIFIED.
+
+The text report collapses the `assumed` kinds into one PASS line; `--json` lists every item.
 
 FAIL exits 1. `--accept calibration:<kind> --reason "…"` turns that kind's FAIL into WARN and
 logs a `calibration.accepted` event (who, which G-code SHA, why); it needs a token with the

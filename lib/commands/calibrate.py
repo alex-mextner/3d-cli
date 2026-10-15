@@ -284,8 +284,13 @@ def _check(argv: list[str]) -> int:
         print(json.dumps(data, indent=2, ensure_ascii=False))
     else:
         print(f"CALIBRATION {data['printer']} {path}")
-        for item in _sorted(data["items"]):
+        assumed = [i for i in data["items"] if i["status"] == "assumed"]
+        for item in _sorted([i for i in data["items"] if i["status"] != "assumed"]):
             print(_item_line(item))
+        if assumed:
+            kinds = sorted({str(i["kind"]) for i in assumed})
+            print(f"  {'PASS':<10} {'-':<4} factory state assumed (never recorded, no maintenance since): "
+                  f"{', '.join(kinds)}")
         print(f"STATUS: {data['overall']}")
     if data["overall"] == "FAIL":
         raise GateFailure("calibration_current: FAIL", command=f"{PREFIX} check", silent=True)
