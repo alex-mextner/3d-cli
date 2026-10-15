@@ -1063,18 +1063,23 @@ def gen_shaper(p: Presets, out: Path) -> Generated:
     px, py, pz = p.probe_point
     lines = [
         f"# {p.machine}: input shaper calibration with the built-in ADXL345 (console commands,",
-        "# run on an idle, homed printer; each SHAPER_CALIBRATE shakes the head for ~1 min).",
+        "# run on an idle printer; the sweeps shake the head for ~5 min).",
         "G28",
+        # A hot nozzle keeps the hotend fan running, and its vibration swamps the resonance
+        # (K1 SE: G28 heats the nozzle to 140 °C for its probe; it cools in ~6 min).
+        "M104 S0",
+        "M107",
+        "TEMPERATURE_WAIT SENSOR=extruder MAXIMUM=38",
         "ACCELEROMETER_QUERY",
         "MEASURE_AXES_NOISE",
         f"# resonance_tester probe point from printer.cfg: {px:g},{py:g},{pz:g}",
-        "SHAPER_CALIBRATE AXIS=X",
-        "SHAPER_CALIBRATE AXIS=Y",
+        # One run for both axes: Creality's Klipper writes an AXIS=Y result into X as well.
+        "SHAPER_CALIBRATE",
         "# Read the recommended shaper_type/shaper_freq per axis from the console, then:",
         "#   3d calibrate record input_shaper --printer PRINTER --method klipper_shaper_calibrate \\",
         "#     --values shaper_type_x=T,shaper_freq_x=F,shaper_type_y=T,shaper_freq_y=F",
-        "# SAVE_CONFIG writes them to printer.cfg and restarts Klipper (only when idle).",
-        "SAVE_CONFIG",
+        "# Then SAVE_CONFIG while idle (it restarts Klipper). Creality's SHAPER_CALIBRATE already",
+        "# writes printer.cfg itself (CXSAVE_CONFIG) without applying the values until a restart.",
     ]
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text("\n".join(lines) + "\n")

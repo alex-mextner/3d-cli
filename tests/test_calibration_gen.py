@@ -94,13 +94,16 @@ def test_shaper_commands_for_k1se(tmp_path: Path) -> None:
     res = cg.generate("shaper", "Creality K1 SE", "", out)
     text = out.read_text()
     assert res.files == [out]
-    for cmd in (
+    cmds = [ln for ln in text.splitlines() if ln and not ln.startswith("#")]
+    assert cmds == [
         "G28",
-        "SHAPER_CALIBRATE AXIS=X",
-        "SHAPER_CALIBRATE AXIS=Y",
-        "SAVE_CONFIG",
-    ):
-        assert f"\n{cmd}\n" in f"\n{text}"
+        "M104 S0",
+        "M107",
+        "TEMPERATURE_WAIT SENSOR=extruder MAXIMUM=38",  # hotend fan off before measuring
+        "ACCELEROMETER_QUERY",
+        "MEASURE_AXES_NOISE",
+        "SHAPER_CALIBRATE",  # both axes: Creality's AXIS=Y would overwrite X
+    ]
 
 
 def test_unknown_model_and_kind() -> None:
