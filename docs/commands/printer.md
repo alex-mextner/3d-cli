@@ -189,7 +189,7 @@ frames it sends are Moonraker's `server.info`, `printer.objects.list` and
 | `exception` | critical (warning for level ≤ 1) | U1 `print_stats.exception` / `exception_manager` (e.g. code 2 "detected noodle" from defect detection, id 532); K1 `err.errcode`. |
 | `gcode_error` | critical while a job is active, else warning | A G-code response starting with `!!` — e.g. `!! Error evaluating 'gcode_macro INNER_PREEXTRUDE_FILAMENT:gcode'`. |
 | `gcode_warning` | warning | `// Warning…` / `Warning:` responses. |
-| `filament` | critical while printing, warning while paused | Moonraker `filament_switch_sensor`/`filament_motion_sensor` goes from detected to not detected; K1 `materialStatus` changes (raw value reported). |
+| `filament` | critical while printing, warning while paused | Moonraker `filament_switch_sensor`/`filament_motion_sensor` goes from detected to not detected; K1 runout sensor reports no filament (`materialDetect` 1 and `materialStatus` 1 — the K1's own UI: «Consumable not detected»). The K1 event is held 10 s and dropped if the sensor recovers; in the start phase it waits until the start phase ends ([#242](https://github.com/alex-mextner/3d-cli/issues/242)). A runout pause is reported at once by the `state` event, which carries the reason. |
 | `homing_lost` | critical | Printing/paused and `homed_axes` (K1: `autohome`) loses X, Y or Z — resuming would move unhomed axes. Held 10 s, see below. |
 | `bed_off` | warning | Bed target dropped to 0 while printing/paused (or 0 at start while paused). Held 10 s, see below. |
 | `temperature` | warning (critical when drifting while printing) | A heater target not reached after `--heat-timeout-min`; or, after reaching, more than 15 °C off for 60 s. |

@@ -437,11 +437,62 @@ def test_homing_lost_found_at_watch_start_while_printing_is_held() -> None:
     assert d.tick(1030.0) == []
 
 
-def test_k1_filament_sensor_change_while_printing() -> None:
+def test_k1_runout_mid_print_is_critical_after_confirmation() -> None:
+    d = CrealityDetector("k1se")
+    d.on_push(k1(), 1000.0)  # printing at 37 %, filament present
+    assert d.on_push({"materialStatus": 1}, 1010.0) == []
+    ev = d.on_push({"layer": 41}, 1021.0)
+    assert kinds(ev) == [("filament", CRITICAL)] and "no filament" in ev[0].text
+    assert d.on_push({"layer": 42}, 1040.0) == []             # reported once
+
+
+def test_k1_runout_flicker_mid_print_is_dropped() -> None:
     d = CrealityDetector("k1se")
     d.on_push(k1(), 1000.0)
-    ev = d.on_push({"materialStatus": 1}, 1010.0)
-    assert kinds(ev) == [("filament", WARNING)] and "materialStatus 0->1" in ev[0].text
+    d.on_push({"materialStatus": 1}, 1010.0)
+    d.on_push({"materialStatus": 0}, 1013.0)
+    assert d.tick(1030.0) == []
+
+
+def test_k1_sensor_flip_during_start_macro_is_silent() -> None:
+    """k1_slate, 2026-10-15: materialStatus 0->1 at 0 % about 90 s after start, print went on."""
+    d = k1_starting()
+    d.on_push({"materialDetect": 1, "materialStatus": 0}, 1011.0)
+    out = d.on_push({"materialStatus": 1}, 1100.0)
+    out += d.tick(1250.0)
+    out += d.on_push({"materialStatus": 0}, 1300.0)
+    out += d.on_push({"printProgress": 5, "layer": 3}, 2000.0) + d.tick(2100.0)
+    assert [e for e in out if e.kind == "filament"] == []
+
+
+def test_k1_runout_that_outlasts_the_start_phase_fires() -> None:
+    d = k1_starting()
+    d.on_push({"materialDetect": 1, "materialStatus": 1}, 1020.0)
+    assert d.tick(1500.0) == []                                  # deferred while starting
+    assert d.on_push({"printProgress": 5, "layer": 3}, 1700.0) == []   # start over: held
+    assert kinds(d.on_push({"layer": 4}, 1711.0)) == [("filament", CRITICAL)]
+
+
+def test_k1_runout_pause_reports_the_reason_at_once() -> None:
+    d = CrealityDetector("k1se")
+    d.on_push(k1(), 1000.0)
+    d.on_push({"materialStatus": 1}, 1010.0)
+    ev = d.on_push({"state": 5, "deviceState": 0}, 1012.0)
+    state = [e for e in ev if e.kind == "state"][0]
+    assert state.severity == WARNING and "filament not detected" in state.text
+
+
+def test_k1_runout_paused_at_watch_start_is_reported_at_once() -> None:
+    d = CrealityDetector("k1se")
+    ev = d.on_push(k1(state=5, deviceState=0, materialStatus=1), 1000.0)
+    assert ("filament", WARNING) in kinds(ev)
+
+
+def test_k1_material_status_ignored_when_the_sensor_is_off() -> None:
+    d = CrealityDetector("k1se")
+    d.on_push(k1(materialDetect=0), 1000.0)
+    d.on_push({"materialStatus": 1}, 1010.0)
+    assert d.tick(1100.0) == []
 
 
 def test_k1_cancel_and_complete() -> None:

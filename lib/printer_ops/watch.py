@@ -665,7 +665,8 @@ class CrealityDetector(_Detector):
         super().__init__(printer, limits)
         self.state: dict[str, Any] = {}
         self._err: int | None = None
-        self._material: int | None = None
+        self._runout_reported = False             # this runout already held or reported
+        self._runout_deferred: float | None = None  # first seen during the start phase (deferred)
 
     def frame_from_state(self) -> Frame:
         from printer_ops.creality import parse_status
@@ -712,22 +713,41 @@ class CrealityDetector(_Detector):
                             hint="see the printer screen; resume/cancel only after a look", now=now,
                             key=f"{self.printer}:exception:err{code}", data={"err": err})]
 
-    def _material_rules(self, f: Frame, now: float) -> list[Event]:
+    def _runout(self) -> bool:
+        """The filament sensor reports no filament: materialDetect 1 (sensor on) and
+        materialStatus 1. The K1's own web UI shows "Consumable not detected" with Resume/Stop
+        for a non-zero materialStatus (app.*.js, printStatus.notTestMaterial), and
+        ha_creality_ws maps 0 -> normal, 1 -> runout (sensor.py filament_status, a8e5491)."""
         if self.state.get("materialDetect") != 1:
-            return []
+            return False
         try:
-            status = int(self.state.get("materialStatus"))  # type: ignore[arg-type]
+            return int(self.state.get("materialStatus")) == 1  # type: ignore[arg-type]
         except (TypeError, ValueError):
+            return False
+
+    def _material_rules(self, f: Frame, now: float) -> list[Event]:
+        """Runout during a job. The start macro can flip the sensor for a while (seen on the K1
+        SE at 0 % of k1_slate, 2026-10-15, the print went on), so a runout in the start phase is
+        deferred until the start phase ends and dropped if the sensor recovers; otherwise it is
+        held like bed_off/homing_lost. A runout pause still reports at once: the pause event
+        carries "filament not detected" as its reason."""
+        if not self._runout():
+            self._runout_reported, self._runout_deferred = False, None
             return []
-        before, self._material = self._material, status
-        if before is None or status == before or f.state not in JOB_ACTIVE:
+        if f.state not in JOB_ACTIVE or self._runout_reported:
             return []
-        # Meaning of non-zero materialStatus is not documented by Creality; 0 is what a
-        # printing K1 SE with filament reports (2026-10), so report the raw change.
-        self._note_reason(f"filament sensor materialStatus {before}->{status}", now)
-        return [self._event("filament", WARNING, f"filament sensor changed: materialStatus {before}->{status}",
-                            hint="check the spool/runout sensor", now=now,
-                            data={"materialStatus": status, "was": before})]
+        if self._runout_deferred is None:
+            self._note_reason("filament not detected by the runout sensor", now)
+        if f.state == PRINTING and self._in_start_phase(f, now):
+            self._runout_deferred = self._runout_deferred or now
+            return []
+        self._runout_reported, self._runout_deferred = True, None
+        event = self._event("filament", CRITICAL if f.state == PRINTING else WARNING,
+                            "filament runout: the sensor reports no filament (materialStatus 1)",
+                            hint="reload filament, then resume on the printer", now=now,
+                            data={"materialStatus": 1})
+        return self._hold("filament", event, lambda _f: self._runout(), f, now,
+                          found_at_start=self.frame is None and f.state == PAUSED)
 
 
 __all__ = [
