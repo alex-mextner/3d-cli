@@ -398,14 +398,25 @@ def test_lint_endpoint(po: ApiClient) -> None:
     )
 
 
-def test_import_validates_every_item_before_writing(po: ApiClient, fake_spoolman: FakeSpoolman) -> None:
-    good = {"external_key": "bd:owned:белый", "material": "PLA", "name": "белый", "color_hex": "#FFFFFF",
-            "location": "WH:default"}
-    for bad, status in (({**good, "external_key": "bd:x", "location": "WH:nowhere"}, 404),
-                        ({**good, "external_key": "bd:y", "material": "Unobtainium"}, 422),
-                        (good, 422)):  # duplicate key in one batch
+def test_import_validates_every_item_before_writing(
+    po: ApiClient, fake_spoolman: FakeSpoolman
+) -> None:
+    good = {
+        "external_key": "bd:owned:белый",
+        "material": "PLA",
+        "name": "белый",
+        "color_hex": "#FFFFFF",
+        "location": "WH:default",
+    }
+    for bad, status in (
+        ({**good, "external_key": "bd:x", "location": "WH:nowhere"}, 404),
+        ({**good, "external_key": "bd:y", "material": "Unobtainium"}, 422),
+        (good, 422),
+    ):  # duplicate key in one batch
         before = len(fake_spoolman.writes())
-        err = _err(po.post, "/v1/spools/import", {"items": [good, bad], "dry_run": False})
+        err = _err(
+            po.post, "/v1/spools/import", {"items": [good, bad], "dry_run": False}
+        )
         assert err.status == status, err.message
         assert len(fake_spoolman.writes()) == before
     assert po.get("/v1/spools")["spools"] == []
@@ -437,7 +448,9 @@ def test_import_checks_numbers_before_the_first_write(
         {"external_key": "bd:d", "material": "PLA", "name": "x", "spool_kind": "glass"},
     ):
         before = len(fake_spoolman.writes())
-        err = _err(po.post, "/v1/spools/import", {"items": [good, bad], "dry_run": False})
+        err = _err(
+            po.post, "/v1/spools/import", {"items": [good, bad], "dry_run": False}
+        )
         assert err.status == 422, err.message
         assert len(fake_spoolman.writes()) == before
     assert po.get("/v1/spools")["spools"] == []
@@ -484,7 +497,9 @@ def test_unload_with_weighing_leaves_the_slot_when_spoolman_fails(
         raise SpoolmanError("Spoolman 500", status=500)
 
     monkeypatch.setattr(fake_spoolman, "measure", boom)  # the weighing's Spoolman write
-    err = _err(po.post, "/v1/printers/u1/slots/T3/unload", {"to": "WH:A/S1", "gross_g": 974})
+    err = _err(
+        po.post, "/v1/printers/u1/slots/T3/unload", {"to": "WH:A/S1", "gross_g": 974}
+    )
     assert err.status == 502
     monkeypatch.undo()
     still = po.get(f"/v1/spools/{sid}")
@@ -518,4 +533,40 @@ def test_empty_and_move_recheck_archived_under_the_write_lock(
     monkeypatch.undo()
     rows = po.get(f"/v1/spools/{sid}/ledger")["rows"]
     assert [r["source"] for r in rows] == ["receive"]
-    assert not _events(printops_db, "spool.empty") and not _events(printops_db, "spool.moved")
+    assert not _events(printops_db, "spool.empty") and not _events(
+        printops_db, "spool.moved"
+    )
+
+
+# -- delta review of round 3 (PR #216) ------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "field, value",
+    [("remaining_confidence_g", -1), ("density", 0), ("diameter", -1.75)],
+)
+def test_import_rejects_bad_confidence_density_diameter_before_writing(
+    po: ApiClient, fake_spoolman: FakeSpoolman, field: str, value: float
+) -> None:
+    good = {"external_key": "bd:a", "material": "PLA", "name": "белый"}
+    bad = {
+        "external_key": "bd:b",
+        "material": "PLA",
+        "name": "x",
+        "remaining_g": 100,
+        field: value,
+    }
+    before = len(fake_spoolman.writes())
+    err = _err(po.post, "/v1/spools/import", {"items": [good, bad], "dry_run": False})
+    assert err.status == 422 and field in err.message, err.message
+    assert len(fake_spoolman.writes()) == before
+
+
+def test_unload_from_a_printer_that_left_the_fleet_ignores_case(
+    po: ApiClient, fake_spoolman: FakeSpoolman
+) -> None:
+    sid = po.post("/v1/spools", GREEN)["id"]
+    fake_spoolman.update(
+        "spool", sid, {"extra": {"printops_slot": json.dumps("k2/T1")}}
+    )
+    assert po.post("/v1/printers/k2/slots/t1/unload", {})["slot"] is None

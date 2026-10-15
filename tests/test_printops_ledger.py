@@ -386,7 +386,9 @@ def test_datalint_runs_every_rule_module_and_survives_a_crash(
     assert any(f.rule == "spools/crashed" and "bad rule" in f.message for f in found)
 
 
-def test_spool_without_any_weight_is_unknown_not_zero(printops_db: sqlite3.Connection, sm: FakeSpoolman) -> None:
+def test_spool_without_any_weight_is_unknown_not_zero(
+    printops_db: sqlite3.Connection, sm: FakeSpoolman
+) -> None:
     """An imported spool with no label net: Spoolman has no remaining, so nothing bounds it."""
     sp = _spool(sm, weight=None)
     est = ledger.remaining(printops_db, sm, sp["id"])
@@ -401,7 +403,10 @@ def test_lint_spools_survives_a_malformed_opened_at(
     printops_db: sqlite3.Connection, sm: FakeSpoolman
 ) -> None:
     sp = _spool(sm)
-    bad = {**sp, "extra": {**(sp.get("extra") or {}), "opened_at": "2026-10-14 not json"}}
+    bad = {
+        **sp,
+        "extra": {**(sp.get("extra") or {}), "opened_at": "2026-10-14 not json"},
+    }
     ctx = datalint.LintContext(
         conn=printops_db,
         spoolman=sm,
@@ -472,10 +477,32 @@ def test_parse_bought_knows_multi_word_vendors() -> None:
         "PLA",
     )
     # matched by vendor key, kept as spelled in the source
-    assert parse_bought("BAMBU-LAB PETG HF (x, 1 дин)", vendors)["vendor"] == "BAMBU-LAB"
+    assert (
+        parse_bought("BAMBU-LAB PETG HF (x, 1 дин)", vendors)["vendor"] == "BAMBU-LAB"
+    )
     # an unknown vendor: the first word, as before
-    assert parse_bought("Elegoo RAPID PLA+ Green (Game Centar, 1499 дин)", vendors)[
-        "vendor"
-    ] == "Elegoo"
+    assert (
+        parse_bought("Elegoo RAPID PLA+ Green (Game Centar, 1499 дин)", vendors)[
+            "vendor"
+        ]
+        == "Elegoo"
+    )
     # a known vendor needs a word boundary: "eSunny" is not eSun
     assert parse_bought("eSunny PLA (x, 1 дин)", vendors)["vendor"] == "eSunny"
+
+
+def test_a_note_never_counts_as_a_weighing(printops_db: sqlite3.Connection) -> None:
+    with db.transaction(printops_db):
+        ledger.anchor(printops_db, 1, 500.0, "manual", 20.0, actor="t")
+        ledger._insert(
+            printops_db,
+            spool_id=1,
+            kind="note",
+            delta_g=0.0,
+            anchor_g=None,
+            source="weigh",
+            confidence_g=0.0,
+            actor="t",
+            note="scale was off, not weighed",
+        )
+    assert ledger.estimate(printops_db, 1).last_weighed_at is None

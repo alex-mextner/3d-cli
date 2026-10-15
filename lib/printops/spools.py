@@ -249,10 +249,7 @@ class Receive:
             raise SpoolError(422, f"unknown receive field(s): {', '.join(unknown)}")
         for k, v in known.items():
             want = _RECEIVE_TYPES.get(k, str)
-            # bool is an int subclass: `true` is no filament id or price
-            if v is None or (
-                isinstance(v, want) and (want is bool or not isinstance(v, bool))
-            ):
+            if v is None or _matches_type(v, want):
                 continue
             names = {
                 int: "an integer",
@@ -264,16 +261,34 @@ class Receive:
             raise SpoolError(422, f"receive field {k} must be {what}, got {v!r}")
         return cls(**known)
 
-    def check(self) -> None:
-        """The value checks a receive needs before its first write (422)."""
-        for name in ("net_g", "remaining_g", "price", "tare_g"):
+    def check_values(self) -> None:
+        """The value checks a receive needs before its first write (422); the JSON types are
+        checked by from_dict. Every number a later step would refuse is refused here, so an
+        import never fails half-way (after Spoolman already holds some of its spools)."""
+        for name in (
+            "net_g",
+            "remaining_g",
+            "remaining_confidence_g",
+            "price",
+            "tare_g",
+        ):
             v = getattr(self, name)
             if v is not None and (not math.isfinite(v) or v < 0):
                 raise SpoolError(422, f"{name} must be a finite number ≥ 0, got {v}")
+        for name in ("density", "diameter"):
+            v = getattr(self, name)
+            if v is not None and (not math.isfinite(v) or v <= 0):
+                raise SpoolError(422, f"{name} must be a finite number > 0, got {v}")
         if self.spool_kind is not None and self.spool_kind not in tares.SPOOL_KINDS:
             raise SpoolError(
                 422, f"spool_kind must be one of {', '.join(tares.SPOOL_KINDS)}"
             )
+
+
+def _matches_type(v: Any, want: type | tuple[type, ...]) -> bool:
+    """`v` has JSON type `want`. bool is an int subclass in Python, but `true` is no filament
+    id or price: a bool matches only where bool itself is wanted."""
+    return isinstance(v, want) and (want is bool or not isinstance(v, bool))
 
 
 # JSON types of the non-string Receive fields (int counts as a number)
@@ -375,7 +390,7 @@ def _resolve_filament(ctx: Ctx, r: Receive) -> tuple[JSON, bool]:
 def receive(ctx: Ctx, r: Receive) -> dict[str, Any]:
     """Create the spool in Spoolman (filament/vendor matched or created), place it, anchor the
     ledger when the net is known, record the tare. Returns the spool view (+ `created` flags)."""
-    r.check()
+    r.check_values()
     loc = (
         _storage(ctx.conn, r.location, "receive into storage, then `load`")
         if r.location
@@ -633,7 +648,10 @@ def check_slot(printer: str, head: str, *, usable: bool = True) -> SlotRef:
 
 
 def spool_in_slot(sm: Spoolman, slot: SlotRef) -> list[JSON]:
-    return [sp for sp in all_spools(sm) if slot_of(sp) == slot.key]
+    """Spools whose `printops_slot` is `slot` (case-insensitive: a slot of a printer that
+    left the fleet cannot be canonicalised by check_slot)."""
+    key = slot.key.casefold()
+    return [sp for sp in all_spools(sm) if slot_of(sp).casefold() == key]
 
 
 def load(
@@ -704,13 +722,16 @@ def unload(
     With `gross_g` the weighing is committed BEFORE the unload (its own transaction): a
     weighing that fails (no tare, Spoolman down) leaves the slot as it was, and an unload that
     fails after it leaves a correctly weighed spool still loaded — retry the unload alone. One
-    transaction cannot cover both, because each is its own Spoolman write."""
+    transaction cannot cover both, because each is its own Spoolman write. Residual race: a
+    request that moves the spool between the two steps wins; the unload then answers 404 and
+    the weighing (still true) stays booked."""
     try:
         slot = check_slot(printer, head, usable=False)
     except SpoolError as e:
         if e.status not in (404, 503):
             raise
-        # a printer/head that left the fleet (or no readable fleet) can still be emptied
+        # a printer/head that left the fleet (or no readable fleet) can still be emptied; the
+        # raw name matches the stored slot case-insensitively (spool_in_slot)
         slot = SlotRef(printer, head)
     loc = (
         _storage(
@@ -734,10 +755,11 @@ def unload(
         spool_id = int(bound[0]["id"])
     with db.transaction(ctx.conn):
         placed: list[JSON] = []
-        # >1 only if Spoolman was edited by hand; unload them all
+        # read the slot again under the write lock: the weighing above committed on its own,
+        # so the slot may have changed since. >1 only if Spoolman was edited by hand; unload all
         for sp in _bound(ctx, slot, spool_id):
             sid = int(sp["id"])
-            _emit_unloaded(ctx, sid, slot.key, loc.path if loc else None, "unloaded")
+            _emit_unloaded(ctx, sid, slot_of(sp), loc.path if loc else None, "unloaded")
             placed.append(_place(ctx, sid, loc, {"printops_slot": ""}))
     out = view(ctx.conn, placed[-1])
     if gross_g is not None:
@@ -982,7 +1004,7 @@ def import_spools(
                 422, f"external_key {r.external_key!r} appears twice in the import"
             )
         seen.add(r.external_key)
-        r.check()
+        r.check_values()
         if r.filament_id is None:
             _filament_spec(r)
         if r.location:

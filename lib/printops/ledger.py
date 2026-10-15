@@ -173,7 +173,8 @@ def estimate(
         (spool_id, anchor["id"] if anchor is not None else 0),
     ).fetchone()
     w = conn.execute(
-        "SELECT at FROM ledger WHERE spool_id = ? AND source = 'weigh' ORDER BY id DESC LIMIT 1",
+        "SELECT at FROM ledger WHERE spool_id = ? AND source = 'weigh' AND kind != 'note'"
+        " ORDER BY id DESC LIMIT 1",
         (spool_id,),
     ).fetchone()
     weighed = None if w is None else str(w["at"])

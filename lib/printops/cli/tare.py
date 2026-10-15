@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
-from typing import Any
+from typing import Any, NamedTuple
 
 from errors import UsageError
 from printops.cli import Sub
@@ -60,14 +60,21 @@ def run(argv: list[str]) -> int:
             command="printops tare",
             remediation=["Run `3d printops tare --help`."],
         )
-    p, res, text = handler(rest, f"tare {action}")
+    answer = handler(rest, f"tare {action}")
     print(
-        json.dumps(res, indent=2, ensure_ascii=False) if "--json" in p.flags else text
+        json.dumps(answer.body, indent=2, ensure_ascii=False)
+        if "--json" in answer.parsed.flags
+        else answer.text
     )
     return 0
 
 
-Answer = tuple[Parsed, Any, str]  # (parsed argv, API JSON, human text)
+class Answer(NamedTuple):
+    """What an action returns: its parsed argv, the API's JSON body and the human text."""
+
+    parsed: Parsed
+    body: Any
+    text: str
 
 
 def _ls(rest: list[str], sub: str) -> Answer:
@@ -75,7 +82,7 @@ def _ls(rest: list[str], sub: str) -> Answer:
     api = client(p, sub)
     with api_errors(sub):
         res = api.get("/v1/tares", vendor=p.pos[0] if p.pos else None)
-    return p, res, "\n".join(fmt_row(t) for t in res["tares"]) or "no tares"
+    return Answer(p, res, "\n".join(fmt_row(t) for t in res["tares"]) or "no tares")
 
 
 def _add(rest: list[str], sub: str) -> Answer:
@@ -105,7 +112,7 @@ def _add(rest: list[str], sub: str) -> Answer:
     api = client(p, sub)
     with api_errors(sub):
         res = api.post("/v1/tares", body)
-    return p, res, "added " + fmt_row(res)
+    return Answer(p, res, "added " + fmt_row(res))
 
 
 def _show(rest: list[str], sub: str) -> Answer:
@@ -121,7 +128,7 @@ def _show(rest: list[str], sub: str) -> Answer:
     )
     if res.get("candidates") and not t:
         text += "\n" + "\n".join("  " + fmt_row(c) for c in res["candidates"])
-    return p, res, text
+    return Answer(p, res, text)
 
 
 ACTIONS: dict[str, Callable[[list[str], str], Answer]] = {
