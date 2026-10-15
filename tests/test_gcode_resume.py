@@ -27,6 +27,9 @@ def _u1_profile() -> ResumeProfile:
 PROFILE = _u1_profile()
 
 
+TOWER_TOP = 0.8  # old prime tower top in most tests: layer 4, so a resume at layer 5 continues the tower
+
+
 def _walk() -> gr.Walk:
     return gr.Walk(synthetic_gcode().encode().split(b"\n"))
 
@@ -58,32 +61,33 @@ def test_resume_block_rejects_bad_values(key: str, value: object) -> None:
 
 
 def test_resume_passes_the_independent_checks() -> None:
-    res = gr.build(_walk(), PROFILE, name="plate.gcode", layer=5)
+    res = gr.build(_walk(), PROFILE, name="plate.gcode", layer=5, tower_top=TOWER_TOP)
     zr = 5 * LAYER_H
     check = check_resume(_text(res), zr)
     assert check.problems == []
-    assert check.z_travel == pytest.approx(zr + 0.6 + PROFILE.clearance_mm)
+    assert check.z_travel == pytest.approx(max(zr + 0.6, TOWER_TOP + 2) + PROFILE.clearance_mm)
     assert check.tower_extrusions > 0
     assert (res.layer, res.kept_layer, res.tools) == (5, 4, [0, 1])
 
 
 def test_header_uses_the_profile_values() -> None:
-    text = _text(gr.build(_walk(), PROFILE, name="plate.gcode", layer=5))
+    text = _text(gr.build(_walk(), PROFILE, name="plate.gcode", layer=5, tower_top=TOWER_TOP))
     header = text[text.index("; ===== RESUME of"):text.index(gr.HEADER_END)]
     assert "DEFECT_DETECTION_START" in header
-    assert "SM_PRINT_PREEXTRUDE_FILAMENT INDEX=0 FORCE=1 TEMP=210 LENGTH=30 RETRACT_LENGTH=0.5" in header
-    assert "SM_PRINT_PREEXTRUDE_FILAMENT INDEX=1 FORCE=1 TEMP=215 LENGTH=30 RETRACT_LENGTH=0.5" in header
+    assert "SM_PRINT_PREEXTRUDE_FILAMENT INDEX=0 FORCE=1 TEMP=210 LENGTH=30\n" in header
+    assert "SM_PRINT_PREEXTRUDE_FILAMENT INDEX=1 FORCE=1 TEMP=215 LENGTH=30\n" in header
     assert "M204 S10000" in header                    # the plate sets no M204: profile default_accel
     assert "G28" not in header
-    other = ResumeProfile("MY_PURGE", 7, 0.25, 3, 9, 1, 1.75, 170, 4000, ())
-    text2 = _text(gr.build(_walk(), other, name="plate.gcode", layer=5))
-    assert "MY_PURGE INDEX=0 FORCE=1 TEMP=210 LENGTH=7 RETRACT_LENGTH=0.25" in text2
+    other = ResumeProfile("MY_PURGE", 7, 0.25, 3, 9, 1, 1.75, 170, 4000, 275, ())
+    text2 = _text(gr.build(_walk(), other, name="plate.gcode", layer=5, tower_top=TOWER_TOP))
+    assert "MY_PURGE INDEX=0 FORCE=1 TEMP=210 LENGTH=7\n" in text2
+    assert "RETRACT_LENGTH" not in text2
     assert "DEFECT_DETECTION_START" not in text2.split(gr.HEADER_END)[0]
-    assert check_resume(text2, 1.0).z_travel == pytest.approx(1.0 + 0.6 + 9)
+    assert check_resume(text2, 1.0).z_travel == pytest.approx(TOWER_TOP + 2 + 9)
 
 
 def test_body_starts_at_the_resume_layer_and_drops_the_preamble_object_end() -> None:
-    res = gr.build(_walk(), PROFILE, name="plate.gcode", layer=5)
+    res = gr.build(_walk(), PROFILE, name="plate.gcode", layer=5, tower_top=TOWER_TOP)
     body = _text(res).split(gr.HEADER_END)[1]
     assert body.lstrip("\n").startswith(";LAYER_CHANGE\n;Z:1.0")
     first_layer = body.split(";AFTER_LAYER_CHANGE")[0]
@@ -92,13 +96,13 @@ def test_body_starts_at_the_resume_layer_and_drops_the_preamble_object_end() -> 
 
 
 def test_only_objects_still_printed_are_defined() -> None:
-    text = _text(gr.build(_walk(), PROFILE, name="plate.gcode", layer=5))
+    text = _text(gr.build(_walk(), PROFILE, name="plate.gcode", layer=5, tower_top=TOWER_TOP))
     assert "EXCLUDE_OBJECT_DEFINE NAME=box" in text
     assert "NAME=gone" not in text
 
 
 def test_no_tower_purges_off_the_bed_after_every_tool_change() -> None:
-    res = gr.build(_walk(), PROFILE, name="plate.gcode", layer=5, no_tower=True)
+    res = gr.build(_walk(), PROFILE, name="plate.gcode", layer=5, tower_top=TOWER_TOP, no_tower=True)
     text = _text(res)
     check = check_resume(text, 5 * LAYER_H, no_tower=True)
     assert check.problems == []
@@ -106,11 +110,11 @@ def test_no_tower_purges_off_the_bed_after_every_tool_change() -> None:
     tool_changes = [ln for ln in body.split("\n") if ln in ("T0", "T1")]
     purges = [ln for ln in body.split("\n") if ln.startswith("SM_PRINT_PREEXTRUDE_FILAMENT")]
     assert len(tool_changes) == len(purges) == LAYERS - 5 + 1
-    assert all("FORCE=1" in p and "RETRACT_LENGTH=0.5" in p for p in purges)
+    assert all("FORCE=1" in p and "RETRACT_LENGTH" not in p for p in purges)
 
 
 def test_top_z_resumes_at_the_first_layer_above_the_measured_top() -> None:
-    res = gr.build(_walk(), PROFILE, name="plate.gcode", top_z=0.79)
+    res = gr.build(_walk(), PROFILE, name="plate.gcode", top_z=0.79, tower_top=TOWER_TOP)
     assert res.layer == 4
     assert res.gap == pytest.approx(0.01)
 
@@ -128,7 +132,7 @@ def test_paused_at_lifts_the_travel_and_refuses_layers_above_the_pause() -> None
 @pytest.mark.parametrize("layer", [1, LAYERS + 1])
 def test_resume_layer_out_of_range(layer: int) -> None:
     with pytest.raises(UsageError, match="out of range"):
-        gr.build(_walk(), PROFILE, name="plate.gcode", layer=layer)
+        gr.build(_walk(), PROFILE, name="plate.gcode", layer=layer, tower_top=TOWER_TOP)
 
 
 def _edited(old: str, new: str) -> gr.Walk:
@@ -140,17 +144,19 @@ def _edited(old: str, new: str) -> gr.Walk:
 def test_relative_descent_below_the_resume_layer_is_refused() -> None:
     w = _edited("G1 X38 Y20 E1.0", "G91\nG1 Z-5\nG90\nG1 X38 Y20 E1.0")
     with pytest.raises(GateFailure, match="below the resume layer"):
-        gr.build(w, PROFILE, name="plate.gcode", layer=5)
+        gr.build(w, PROFILE, name="plate.gcode", layer=5, tower_top=TOWER_TOP)
 
 
-def test_arcs_after_the_cut_are_refused() -> None:
-    w = _edited("G1 X38 Y20 E1.0", "G2 X38 Y20 I1 J0 E1.0")
-    with pytest.raises(UsageError, match="arcs"):
-        gr.build(w, PROFILE, name="plate.gcode", layer=5)
+def test_extruding_arc_from_a_moved_start_is_refused() -> None:
+    # with the tower moves dropped the head is not where the original arc starts: its I/J centre would shift
+    w = _edited("G1 X20 Y40 F12000", "G2 X20 Y40 I1 J0 E1.0")
+    with pytest.raises(UsageError, match="extruding arc"):
+        gr.build(w, PROFILE, name="plate.gcode", layer=5, tower_top=TOWER_TOP, no_tower=True)
+    gr.build(w, PROFILE, name="plate.gcode", layer=5, tower_top=TOWER_TOP)  # tower kept: the arc start is exact
 
 
 def test_no_tower_keeps_every_layer_height() -> None:
-    text = _text(gr.build(_walk(), PROFILE, name="plate.gcode", layer=5, no_tower=True))
+    text = _text(gr.build(_walk(), PROFILE, name="plate.gcode", layer=5, tower_top=TOWER_TOP, no_tower=True))
     body = text.split(gr.HEADER_END)[1]
     for n in range(6, LAYERS + 1):
         layer = body.split(f";Z:{round(n * LAYER_H, 3)}")[1].split(";TYPE:Inner wall")[0]
@@ -158,7 +164,7 @@ def test_no_tower_keeps_every_layer_height() -> None:
 
 
 def test_source_name_cannot_inject_gcode_lines() -> None:
-    text = _text(gr.build(_walk(), PROFILE, name="plate.gcode\nG28 Z", layer=5))
+    text = _text(gr.build(_walk(), PROFILE, name="plate.gcode\nG28 Z", layer=5, tower_top=TOWER_TOP))
     assert "\nG28 Z" not in text
     assert "plate.gcode?G28 Z" in text
 
@@ -166,7 +172,7 @@ def test_source_name_cannot_inject_gcode_lines() -> None:
 def test_statistics_count_the_purges_so_preflight_sees_every_head(tmp_path: Path) -> None:
     from printer_ops.preflight import read_gcode_meta
 
-    res = gr.build(_walk(), PROFILE, name="plate.gcode", layer=LAYERS)
+    res = gr.build(_walk(), PROFILE, name="plate.gcode", layer=LAYERS, tower_top=TOWER_TOP)
     out = tmp_path / "resume.gcode"
     out.write_bytes(b"\n".join(res.lines))
     stats = next(ln for ln in _text(res).split("\n") if ln.startswith("; filament used [mm] ="))
@@ -188,7 +194,7 @@ def _assert_progress_restarts(text: str) -> None:
 
 
 def test_progress_is_rescaled_to_the_resume_file() -> None:
-    text = _text(gr.build(_walk(), PROFILE, name="plate.gcode", layer=5))
+    text = _text(gr.build(_walk(), PROFILE, name="plate.gcode", layer=5, tower_top=TOWER_TOP))
     _assert_progress_restarts(text)
 
 
@@ -215,12 +221,25 @@ real = pytest.mark.skipif(not REAL_GCODE.is_file(), reason=f"real U1 plate not p
 @real
 @pytest.mark.parametrize("no_tower", [False, True])
 def test_real_u1_plate_resume_passes_the_checks(no_tower: bool) -> None:
+    # the 2026-10-14 now_grey_plus failure (issue #238): paused at layer 858, resumed at 817 below the old tower top
     w = gr.Walk.read(REAL_GCODE)
-    res = gr.build(w, PROFILE, name=REAL_GCODE.name, layer=603, no_tower=no_tower)
-    check = check_resume(_text(res), res.z, no_tower=no_tower)
+    paused = w.offsets[w.layers[857]["start"] + 50]
+    res = gr.build(w, PROFILE, name=REAL_GCODE.name, layer=817, paused_at=paused, no_tower=no_tower)
+    text = _text(res)
+    check = check_resume(text, res.z, no_tower=no_tower)
     assert check.problems == []
-    assert res.tools == [2, 3] and res.active == 2
+    assert res.pause_layer == 858
     assert check.body_min_z >= res.z
+    assert "RETRACT_LENGTH" not in text
+    tower_top = w.layers[857]["z"]
+    layer_z, feat = res.z, None
+    for line in text.split(gr.HEADER_END)[1].split("\n"):   # no tower extrusion below the old tower top
+        if line.startswith(";Z:"):
+            layer_z = float(line[3:])
+        elif line.startswith(";TYPE:"):
+            feat = line[6:]
+        elif feat == "Prime tower" and (m := gr.move(line.encode())) and m.get("E", 0) > 0 and ("X" in m or "Y" in m):
+            assert layer_z > tower_top, line
     if not no_tower:
         assert check.tower_extrusions > 0
-    _assert_progress_restarts(_text(res))
+    _assert_progress_restarts(text)

@@ -38,25 +38,31 @@ Build options:
   --printer NAME       printer from printer-devices.yaml whose `resume:` block gives the purge
                        macro and lengths, clearance and start commands (required to build)
   --paused-at BYTE     file_position at the pause: lifts travel Z above what was printed and
-                       refuses a resume layer above the paused one
+                       refuses a resume layer above the paused one; its layer Z is the old tower top
+  --tower-top Z        height of the old prime tower still on the bed (default: Z of the
+                       --paused-at layer; one of the two is required when the plate has a tower).
+                       Below it the tower is not printed: heads purge off the bed, tool changes
+                       and travels are lifted 2 mm over it; the tower resumes above it
   --no-tower           drop the prime tower; purge off the bed after every tool change
   --home-xy            add G28 X Y (only if X/Y lost their homing; Z is never homed)
   -o, --out FILE       output (default: <FILE>_resume_L<N>.gcode next to the input)
 
 printer-devices.yaml `resume:` keys (all required): purge_macro, purge_mm, purge_retract_mm,
   no_tower_prime_mm, clearance_mm, tower_margin_mm, filament_diameter_mm, min_print_temp,
-  default_accel, start_commands. See `3d printer --help` for the file.
+  default_accel, z_max_mm, start_commands. The purge macro gets INDEX FORCE TEMP LENGTH only
+  (never RETRACT_LENGTH: the U1 macro cancels the job on it, issue #238). Every Z of the output
+  stays within 0..z_max_mm-1 or nothing is written (exit 1). See `3d printer --help` for the file.
 
-Exit: 0 written / reported, 1 internal check failed, 2 usage error, bad G-code, unknown printer
+Exit: 0 written / reported, 1 safety check failed (Z range, tower crossing; nothing written), 2 usage error, bad G-code, unknown printer
   or missing file.
 
 Examples:
   3d gcode-resume print/plate.gcode --where 41236998
   3d gcode-resume print/plate.gcode --table 840:860
   3d gcode-resume print/plate.gcode --printer u1 --top-z 170.2 --paused-at 41236998
-  3d gcode-resume print/plate.gcode --printer u1 --layer 851 --no-tower -o print/plate_resume.gcode"""
+  3d gcode-resume print/plate.gcode --printer u1 --layer 851 --tower-top 171.4 --no-tower -o print/plate_resume.gcode"""
 
-_VALUE_OPTS = ("--where", "--table", "--top-z", "--layer", "--paused-at", "--printer", "-o", "--out")
+_VALUE_OPTS = ("--where", "--table", "--top-z", "--layer", "--paused-at", "--tower-top", "--printer", "-o", "--out")
 _FLAGS = ("--no-tower", "--home-xy")
 
 
@@ -128,8 +134,10 @@ def run(argv: list[str]) -> int:
                          command="gcode-resume", remediation=["Add one; the keys are listed in `3d gcode-resume --help`."])
     top_z, layer = _number(opts, "--top-z", float), _number(opts, "--layer", int)
     paused = _number(opts, "--paused-at", int)
+    tower_top = _number(opts, "--tower-top", float)
     res = gr.build(gr.Walk.read(gcode), device.resume, name=gcode.name, top_z=top_z,
                    layer=None if layer is None else int(layer), paused_at=None if paused is None else int(paused),
+                   tower_top=None if tower_top is None else float(tower_top),
                    no_tower="--no-tower" in opts, home_xy="--home-xy" in opts)
     dest = Path(opts["--out"]) if "--out" in opts else gcode.with_name(f"{gcode.stem}_resume_L{res.layer}.gcode")
     if dest.exists() and dest.samefile(gcode):
