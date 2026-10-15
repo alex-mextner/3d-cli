@@ -32,6 +32,7 @@ import datetime
 import json
 import os
 import sqlite3
+import tempfile
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -261,8 +262,18 @@ def read_snapshot(path: Path) -> dict[str, Any]:
 
 
 def write_snapshot(path: Path, data: Mapping[str, Any]) -> None:
-    """Atomic write (the slicer hook may read it at any moment)."""
+    """Atomic write (the slicer hook may read it at any moment). Each writer gets its own temp
+    file, so concurrent refreshes never share one: the last replace wins whole. A writer killed
+    mid-write can leave a `<name>.*.tmp` behind; readers never see it."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(data, indent=1, sort_keys=True) + "\n", encoding="utf-8")
-    tmp.replace(path)
+    fd, name = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)
+    tmp = Path(name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            # mkstemp's 0600 would hide the cache file from other local readers
+            os.fchmod(f.fileno(), 0o644)
+            f.write(json.dumps(data, indent=1, sort_keys=True) + "\n")
+        tmp.replace(path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
