@@ -4,7 +4,9 @@ WHAT: one thread per printer keeps a websocket open and feeds its detector (watc
   events go through one Dispatcher (watch_sinks.py) to stdout/exec/steer and the agent
   sessions registered with `3d printer subscribe` (subscriptions.py).
   moonraker       ws://host:port/websocket, JSON-RPC: server.info, printer.objects.list,
-                  printer.objects.subscribe (re-sent after notify_klippy_ready), then
+                  printer.objects.subscribe (re-sent after notify_klippy_ready),
+                  server.files.metadata (once per job file: the G-code body bounds that job
+                  progress is measured over, #255), then
                   notify_status_update / notify_gcode_response / notify_klippy_* pushes.
   creality-stock  ws://host:9999 pushes JSON state deltas; "heart_beat" is answered "ok".
   A stream with no data for `silence_s` is treated as dead (Moonraker pushes proc stats every
@@ -369,9 +371,11 @@ class _Stream:
 class MoonrakerStream(_Stream):
     _ids = 0               # JSON-RPC request counter (per session)
     _need_sub = False      # (re)subscribe at the next loop turn: connect / notify_klippy_ready
+    rpc_timeout_s = 15.0   # a JSON-RPC request without a reply for this long times out
 
     def _detector(self, limits: WatchLimits) -> MoonrakerDetector:
         self.mr = MoonrakerDetector(self.device.name, limits)
+        self._meta_retry_at: dict[tuple[str, int], float] = {}  # (file, job) -> next metadata try
         return self.mr
 
     def session(self) -> None:
@@ -392,6 +396,7 @@ class MoonrakerStream(_Stream):
                 if msg is not None:
                     self.received()
                     self._on_text(msg)
+                    self._fetch_file_body(ws, self.mr.wants_file_body())
                 self.idle_checks()
         finally:
             ws.close()
@@ -404,7 +409,7 @@ class MoonrakerStream(_Stream):
         if params is not None:
             req["params"] = params
         ws.send_text(json.dumps(req))
-        deadline = time.monotonic() + 15.0
+        deadline = time.monotonic() + self.rpc_timeout_s
         while (left := deadline - time.monotonic()) > 0 and not self.stop.is_set():
             msg = ws.recv(min(left, 1.0))
             if msg is None:
@@ -416,7 +421,7 @@ class MoonrakerStream(_Stream):
                     raise _RpcError(f"{method}: {obj['error']}")
                 return obj.get("result")
             self._on_rpc(obj)
-        raise WebSocketError(f"{method}: no reply within 15 s")
+        raise _RpcTimeout(f"{method}: no reply within {self.rpc_timeout_s:g} s")
 
     def _subscribe(self, ws: WebSocket) -> None:
         try:
@@ -428,7 +433,31 @@ class MoonrakerStream(_Stream):
             return
         status = result.get("status") if isinstance(result, dict) else None
         if isinstance(status, dict):
+            # The subscription is live now: pushes that arrive while a later call waits for its
+            # reply are evaluated at once, so the full status goes in first.
             self.emit(self.mr.on_status(status, time.time(), full=True))
+            self._fetch_file_body(ws, self.mr.wants_file_body())
+
+    def _fetch_file_body(self, ws: WebSocket, filename: str | None) -> None:
+        """server.files.metadata (read-only) -> the G-code body bounds that make job progress
+        exclude a slicer header/footer (#255). Asked once per job; after an error it is asked
+        again at most once a minute (whole-file progress meanwhile). Known bounds re-evaluate
+        the current status, so held events see the body progress."""
+        now = time.monotonic()
+        key = (filename or "", self.mr.jobs)  # a new job with the same file name asks at once
+        if not filename or now < self._meta_retry_at.get(key, 0.0):
+            return
+        try:
+            meta = self._call(ws, "server.files.metadata", {"filename": filename})
+        except (_RpcError, _RpcTimeout) as exc:  # optional data: never a reason to reconnect
+            _log(f"{self.device.name}: no metadata for {filename} ({exc}); whole-file progress, retry in 60 s")
+            self._meta_retry_at = {key: now + 60.0}  # only the current job's backoff matters
+            return
+        if self.mr.jobs != key[1]:
+            return  # a new job started while waiting (maybe a re-slice under the same name): ask again
+        self.mr.set_file_body(filename, meta)
+        if self.mr.file_body is not None and self.mr.file_body[1] is not None:
+            self.emit(self.mr.on_status({}, time.time()))
 
     def _on_text(self, msg: str) -> None:
         try:
@@ -459,6 +488,11 @@ class MoonrakerStream(_Stream):
 
 class _RpcError(Exception):
     pass
+
+
+class _RpcTimeout(WebSocketError):
+    """No reply to a JSON-RPC request within `rpc_timeout_s` (the socket itself still works).
+    A WebSocketError, so a required call still ends the session and reconnects."""
 
 
 class CrealityStream(_Stream):
