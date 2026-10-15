@@ -9,6 +9,10 @@ WHAT: `read_printer(device)` makes exactly one read-only request to a fleet prin
     (CARD_UID 0 = no tag; stock firmware reads only signed Snapmaker tags, plan §10.1). paxx12
     extended firmware keeps these keys and adds CARD_TYPE/CARD_EVENT_TIME (runbook
     docs/printers/u1-paxx12-upgrade.md), so the same parser serves both.
+  - moonraker without print_task_config (rooted K1 SE, Creality Helper Script Moonraker): the
+    same request also names the K1's `filament_switch_sensor filament_sensor` / `filament_sensor_2`
+    (Moonraker answers {} for objects a printer lacks); the single head is present when an enabled
+    switch detects filament, unknown (None) when no switch is enabled.
   - creality-stock (K1 SE): one ws:9999 connection listened to for `listen_s`. Without a CFS
     the printer reports no material or colour, only its runout switch: `materialDetect` 1 = the
     switch is enabled, then `materialStatus` 0 = filament present, 1 = runout (mapping of
@@ -40,7 +44,14 @@ from printops.color import parse_hex
 from printops.db import utc_now
 
 READERS = ("moonraker", "creality-stock")
-U1_QUERY = "webhooks&print_stats&virtual_sdcard&print_task_config&filament_detect"
+K1_SENSORS = (
+    "filament_switch_sensor filament_sensor",
+    "filament_switch_sensor filament_sensor_2",
+)
+MOONRAKER_QUERY = (
+    "webhooks&print_stats&virtual_sdcard&print_task_config&filament_detect&"
+    + "&".join(s.replace(" ", "%20") for s in K1_SENSORS)
+)
 _UNKNOWN = {"", "NONE", "NULL", "UNKNOWN"}
 
 
@@ -141,6 +152,21 @@ def k1_slots(pushed: dict[str, Any], heads: tuple[str, ...]) -> tuple[LiveSlot, 
     return (LiveSlot(head=heads[0], present=present, source="materialStatus"),)
 
 
+def switch_slots(
+    status: dict[str, Any], heads: tuple[str, ...]
+) -> tuple[LiveSlot, ...]:
+    """Moonraker filament_switch_sensor objects -> the single head's LiveSlot (presence only)."""
+    if not heads:
+        return ()
+    enabled = [
+        v
+        for k, v in status.items()
+        if k in K1_SENSORS and isinstance(v, dict) and v.get("enabled")
+    ]
+    present = any(v.get("filament_detected") for v in enabled) if enabled else None
+    return (LiveSlot(head=heads[0], present=present, source="filament_switch_sensor"),)
+
+
 def read_printer(
     device: Device,
     heads: tuple[str, ...],
@@ -156,9 +182,13 @@ def read_printer(
     adapter = make_adapter(device, **options)
     try:
         if isinstance(adapter, MoonrakerAdapter):
-            raw = adapter.query(U1_QUERY)
+            raw = adapter.query(MOONRAKER_QUERY)
             st = moonraker_status(raw)
-            slots = u1_slots(raw)
+            slots = (
+                u1_slots(raw)
+                if raw.get("print_task_config")
+                else switch_slots(raw, heads)
+            )
         elif isinstance(adapter, CrealityStockAdapter):
             raw = adapter.pushed_state()
             st = creality_status(raw)

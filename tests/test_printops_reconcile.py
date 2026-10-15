@@ -26,7 +26,7 @@ from printops.api import routes_reconcile as routes
 from printops.color import delta_e2000, hex_delta_e, parse_hex, srgb_to_lab
 from printops.db import migrate, open_db
 from printops.fleet import load_fleet
-from printops.slots import LiveSlot, Reading, k1_slots, u1_slots
+from printops.slots import LiveSlot, Reading, k1_slots, switch_slots, u1_slots
 from printops.spoolman import encode_extra, ensure_extra_fields
 
 # Sharma, Wu, Dalal (2005), Table 1: all 34 CIEDE2000 test pairs (L1, a1, b1), (L2, a2, b2), ΔE00.
@@ -195,6 +195,36 @@ def test_k1_slot_presence_comes_from_the_runout_switch(
 ) -> None:
     (t1,) = k1_slots(pushed, ("T1",))
     assert (t1.head, t1.present, t1.material, t1.color) == ("T1", present, None, None)
+
+
+_S1, _S2 = (
+    "filament_switch_sensor filament_sensor",
+    "filament_switch_sensor filament_sensor_2",
+)
+
+
+@pytest.mark.parametrize(
+    ("status", "present"),
+    [
+        # live K1 SE on Moonraker, 2026-10-16: both switches enabled and detecting
+        (
+            {
+                _S1: {"filament_detected": True, "enabled": True},
+                _S2: {"filament_detected": True, "enabled": True},
+            },
+            True,
+        ),
+        ({_S1: {"filament_detected": False, "enabled": True}, _S2: {}}, False),
+        ({_S1: {"filament_detected": True, "enabled": False}}, None),
+        ({"print_task_config": {}, _S1: {}}, None),
+    ],
+)
+def test_moonraker_switch_sensor_gives_the_single_heads_presence(
+    status: dict[str, Any], present: bool | None
+) -> None:
+    (t1,) = switch_slots(status, ("T1",))
+    assert (t1.head, t1.present, t1.material) == ("T1", present, None)
+    assert switch_slots(status, ()) == ()
 
 
 # ---- fixtures ---------------------------------------------------------------------------------

@@ -279,8 +279,9 @@ session show as `drying` and are never flagged.
 
 3d-api reads every contactable fleet printer (`fleet/printers.yaml`, access not `offline`)
 READ-ONLY in the background — Snapmaker U1: one Moonraker `objects/query` of
-`print_task_config` + `filament_detect`; K1 SE: one ws:9999 listen (no CFS, so only the runout
-switch: filament present or not) — one request per printer every `PRINTOPS_POLL_S` seconds
+`print_task_config` + `filament_detect`; K1 SE (rooted, Moonraker) the same query also names its
+`filament_switch_sensor` objects (no CFS, so only filament present or not; on `creality-stock` one
+ws:9999 listen gives the runout switch) — one request per printer every `PRINTOPS_POLL_S` seconds
 (default 30, never below 10). `slots` shows that cached reading; it never contacts a printer.
 Offline printers (other people's) are listed with their heads and bound spools only.
 
