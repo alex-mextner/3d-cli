@@ -152,3 +152,18 @@ def test_read_only_printer_answers_status_but_refuses_upload(tmp_path: Path) -> 
     )
     assert cancel.returncode == 1 and "u1 is read-only" in cancel.stderr
     assert moon.writes() == []
+
+
+def test_gcode_bounds_trusts_the_offline_p1s_stock_bambu_commands(tmp_path: Path) -> None:
+    """The user lints a plate sliced for the neighbour's P1S (#142): the stock Bambu firmware
+    commands and the out-of-bed wipe/purge moves pass, without 3d ever contacting the printer."""
+    cmds = ["G29", "G29.1", "G29.2", "G380", "M1002", "M201", "M201.2", "M203", "M290", "M412", "M500", "M620", "M620.1", "M621", "M622", "M622.1", "M623", "M624", "M625", "M710", "M73.2", "M960", "M970.3", "M971", "M974", "M975", "M981", "M991", "T1000", "T255"]
+    gcode = tmp_path / "p1s.gcode"
+    gcode.write_text("\n".join(["G28", "G90", "G1 X18 Y-3 F12000", *cmds, "G1 X240 Y265", "G1 X128 Y128"]) + "\n",
+                     encoding="utf-8")
+    done = run_cli(tmp_path, "gcode-bounds", str(gcode), "--printer", "p1s", "--json", env_extra=REPO)
+
+    assert done.returncode == 0, done.stdout + done.stderr
+    checks = {c["name"]: c for c in json.loads(done.stdout)["checks"]}
+    assert checks["axis travel"]["status"] == "PASS" and "p1s in" in checks["axis travel"]["detail"]
+    assert checks["macros"]["status"] == "PASS" and "M620×1" in checks["macros"]["detail"]

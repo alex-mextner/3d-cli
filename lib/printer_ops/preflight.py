@@ -424,7 +424,7 @@ def _first(violations: Sequence[Violation], count: int, where: str = "outside") 
 
 def check_macros(rep: BoundsReport, trusted: frozenset[str]) -> list[Check]:
     """Macros hide their moves. Untrusted ones FAIL (start needs --force); the printer's
-    `trusted_macros` (printer-devices.yaml) names the ones known to stay on the bed."""
+    `trusted_macros` (fleet/printers.yaml or printer-devices.yaml) names the ones known to stay on the bed."""
     if not rep.macros:
         return []
 
@@ -441,14 +441,14 @@ def check_macros(rep: BoundsReport, trusted: frozenset[str]) -> list[Check]:
                 FAIL,
                 f"moves inside these commands are not checked: {fmt(untrusted)}; "
                 "if they stay on the bed add them to trusted_macros for this printer in "
-                "printer-devices.yaml, otherwise --force",
+                "fleet/printers.yaml or printer-devices.yaml, otherwise --force",
             )
         ]
     return [
         Check(
             "macros",
             PASS,
-            "all trusted (printer-devices.yaml): " + fmt(sorted(rep.macros)),
+            "all trusted (the printer's trusted_macros): " + fmt(sorted(rep.macros)),
         )
     ]
 
@@ -467,7 +467,7 @@ def check_moves(
                 "axis travel",
                 SKIP,
                 f"printer axis limits unknown ({why}pass --axis-limits "
-                "X0:X1,Y0:Y1 or set axis_limits in printer-devices.yaml)",
+                "X0:X1,Y0:Y1 or set axis_limits in fleet/printers.yaml or printer-devices.yaml)",
             )
         )
     elif rep.axis_out_count:
