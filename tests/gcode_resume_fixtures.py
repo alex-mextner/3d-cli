@@ -19,6 +19,8 @@ U1_RESUME_YAML = """u1:
   adapter: moonraker
   host: 127.0.0.1
   model: Snapmaker U1
+  axis_limits: {x: [0, 271], y: [0, 335]}
+  trusted_macros: [DEFECT_DETECTION_START, SM_PRINT_PREEXTRUDE_FILAMENT, SET_PRINT_STATS_INFO, T0, T1, T2, T3]
   resume:
     purge_macro: SM_PRINT_PREEXTRUDE_FILAMENT
     purge_mm: 30
@@ -29,6 +31,7 @@ U1_RESUME_YAML = """u1:
     filament_diameter_mm: 1.75
     min_print_temp: 170
     default_accel: 10000
+    z_max_mm: 275
     start_commands: [DEFECT_DETECTION_START]
 """
 

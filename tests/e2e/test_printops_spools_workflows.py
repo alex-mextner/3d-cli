@@ -152,8 +152,8 @@ def test_spool_story_receive_load_print_unload_weigh_empty(
         "spool.moved",
         "slot.loaded",
         "spool.used",
+        "spool.measured",  # unload --gross weighs first, then unloads
         "slot.unloaded",
-        "spool.measured",
         "spool.empty",
     ]
 
@@ -264,7 +264,34 @@ def test_import_owned_dry_run_apply_rerun_and_lint(
     assert "ELEGOO" in tare_ls.stdout and "154 ± 10 g" in tare_ls.stdout
 
 
+def test_import_owned_splits_a_multi_word_vendor_by_the_tare_db(
+    tmp_path: Path, shop: LiveApi
+) -> None:
+    """`Bambu Lab …` is vendor "Bambu Lab", not "Bambu": the CLI knows 3d-api's tare-DB vendors."""
+    plates = tmp_path / "proj" / "gen" / "plates.json"
+    plates.parent.mkdir(parents=True)
+    plates.write_text(
+        json.dumps(
+            {
+                "owned": {"чёрный": "#000000"},
+                "bought": {
+                    "чёрный": "Bambu Lab PLA Basic Black (Game Centar, 2990 дин)"
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    dry = _cli(tmp_path, shop, "printops", "spool", "import-owned", str(plates))
+    assert dry.returncode == 0, dry.stderr
+    assert "Bambu Lab (NEW vendor) PLA 'PLA Basic Black' #000000" in dry.stdout, (
+        dry.stdout
+    )
+
+
 def test_lint_printops_without_api_skips_data_rules(tmp_path: Path) -> None:
+    """A user lints the repo fleet on a laptop with no 3d-api configured: the fleet rules run,
+    and the report says the spool data rules were skipped (and why) instead of failing."""
     out = run_cli(
         tmp_path,
         "lint",

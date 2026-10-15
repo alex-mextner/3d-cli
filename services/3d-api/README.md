@@ -38,6 +38,11 @@ no port forwards for these ports, so that means the LAN plus the Tailscale tailn
 access is via Tailscale only** (`http://100.116.57.66:8765`, `http://100.116.57.66:7912`);
 never add a router port-forward or a public reverse proxy for them.
 
+Accepted risk: Spoolman's REST API has no auth, so any LAN/tailnet client can change spools
+directly, bypassing 3d-api's token scopes. This is deliberate (plan §5.1, D4): Moonraker's
+`[spoolman]` on the U1 and the Spoolman web UI need direct LAN access. 3d-api treats
+Spoolman as the source of truth and reconciles against it rather than assuming exclusivity.
+
 ## Volumes (on the WD HDD)
 
 `/home/ultra` on the Odroid is a bind mount of `/mnt/wd500/odroid-rt/ultra` (the WD 500 GB HDD,

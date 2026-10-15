@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import datetime
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -79,6 +80,20 @@ class WatchLimits:
     drift_c: float = 15.0          # after reaching: off target by more than this ...
     drift_hold_s: float = 60.0     # ... for this long is a drift
     milestones: tuple[float, ...] = ()  # progress fractions (0..1) to report, e.g. (0.5, 0.9)
+    # A job's end macro (END_PRINT / PRINT_END / CANCEL_PRINT) turns the bed off and disables the
+    # motors (M84) while the firmware still says printing/paused. Bed-off and homing-lost seen
+    # during a job are therefore held this long and dropped if the job ends meanwhile, and
+    # ignored outright at or above `end_progress`.
+    confirm_s: float = 10.0
+    end_progress: float = 0.99
+    # The start macro does the same in reverse: K1 stock START_PRINT zeroes the bed and nozzle
+    # targets for ~30 s of probing/calibration and homes again. In the start phase (less than
+    # `start_phase_s` after this watcher saw "started printing"; for a job already running when
+    # the watcher started, progress at most `start_progress`) the hold is `start_confirm_s`,
+    # and a target restored or axes re-homed meanwhile drops the event.
+    start_confirm_s: float = 90.0
+    start_progress: float = 0.01
+    start_phase_s: float = 600.0
 
 
 @dataclass
@@ -117,6 +132,35 @@ def _fmt_t(v: float | None) -> str:
     return "-" if v is None else f"{v:.0f}"
 
 
+def _heater_off(name: str) -> Callable[[Frame], bool]:
+    """Still-true check for a held bed_off: the heater still reports a 0 target. A heater
+    missing from the frame (objects reset after a firmware restart) is unknown, not off."""
+    def check(f: Frame) -> bool:
+        reading = f.heaters.get(name)
+        return reading is not None and not reading[1]
+    return check
+
+
+def _axes_missing(homed: str | None) -> str:
+    """Axes of X/Y/Z missing from `homed_axes` ("" when all homed or when homing is unknown)."""
+    return "" if homed is None else "".join(sorted(set("xyz") - set(homed.lower())))
+
+
+def _unhomed(f: Frame) -> bool:
+    """Still-true check for a held homing_lost."""
+    return bool(_axes_missing(f.homed))
+
+
+@dataclass
+class _Held:
+    """A job-time event awaiting confirmation (see WatchLimits.confirm_s)."""
+
+    since: float
+    hold_s: float
+    event: Event
+    still_true: Callable[[Frame], bool]
+
+
 class _Detector:
     """Generic, firmware-independent rules over successive Frames."""
 
@@ -134,6 +178,8 @@ class _Detector:
         self.connected: bool | None = None
         self.last_message: float | None = None
         self._job_state: str | None = None  # last printing/paused/idle/... state (never unknown/busy)
+        self._held: dict[str, _Held] = {}  # kind -> event awaiting confirmation
+        self._job_started: float | None = None  # when this watcher saw the job start printing
 
     # ---- helpers ------------------------------------------------------------------------
     def _context(self, f: Frame | None = None) -> dict[str, Any]:
@@ -194,6 +240,45 @@ class _Detector:
         out += self._homing_rules(prev, f, now)
         out += self._heater_rules(prev, f, now)
         out += self._progress_rules(prev, f, now)
+        out += self._release_held(now)
+        return out
+
+    def _at_end(self, f: Frame) -> bool:
+        """The job is in its end macro: still printing/paused by state, but at `end_progress`."""
+        return f.state in JOB_ACTIVE and f.progress is not None and f.progress >= self.limits.end_progress
+
+    def _in_start_phase(self, f: Frame, now: float) -> bool:
+        """Start macro window: the first `start_phase_s` after this watcher saw the job start;
+        for a job already running when the watcher started, progress at most `start_progress`.
+        Unknown progress alone is not a start phase."""
+        lim = self.limits
+        if self._job_started is not None:
+            return now - self._job_started < lim.start_phase_s
+        return f.progress is not None and f.progress <= lim.start_progress
+
+    def _hold(self, kind: str, event: Event, still_true: Callable[[Frame], bool], f: Frame, now: float,
+              *, found_at_start: bool, hold_s: float | None = None) -> list[Event]:
+        """A job-time anomaly: dropped at the very end of a print (end macro), reported at once
+        when found at watch start (a steady state), otherwise confirmed after the hold (default:
+        the start or mid-print hold by phase)."""
+        if self._at_end(f):
+            return []
+        if found_at_start:
+            return [event]
+        if hold_s is None:
+            hold_s = self.limits.start_confirm_s if self._in_start_phase(f, now) else self.limits.confirm_s
+        self._held[kind] = _Held(now, hold_s, event, still_true)
+        return []
+
+    def _release_held(self, now: float) -> list[Event]:
+        out: list[Event] = []
+        f = self.frame
+        for kind, held in list(self._held.items()):
+            if f is None or f.state not in JOB_ACTIVE or self._at_end(f) or not held.still_true(f):
+                del self._held[kind]  # the job ended or reached its end macro, or the condition cleared
+            elif now - held.since >= held.hold_s:
+                del self._held[kind]
+                out.append(held.event)
         return out
 
     def _snapshot_event(self, f: Frame, now: float) -> Event:
@@ -227,6 +312,7 @@ class _Detector:
                 return [self._state_event(before, f, INFO, "resumed printing", "", now)]
             self._milestones_done.clear()
             self._reason = None
+            self._job_started = now
             return [self._state_event(before, f, INFO, "started printing", "", now)]
         if f.state == PAUSED:
             return [self._state_event(before, f, WARNING, "PAUSED" + why, "check the camera, then resume or cancel", now)]
@@ -250,17 +336,20 @@ class _Detector:
                            data={"from": before, "to": f.state, "reason": self._recent_reason(now, f)})
 
     def _homing_rules(self, prev: Frame | None, f: Frame, now: float) -> list[Event]:
-        if f.homed is None or f.state not in JOB_ACTIVE:
+        if f.state not in JOB_ACTIVE:
             return []
-        lost = sorted(set("xyz") - set(f.homed.lower()))
+        lost = _axes_missing(f.homed)
         if not lost:
             return []
         was = prev.homed if prev is not None else None
-        if prev is not None and (was is None or set("xyz") - set(was.lower())):
-            return []  # already reported (or never known as homed)
-        return [self._event("homing_lost", CRITICAL, f"{f.state} but axes {''.join(lost).upper()} are NOT homed "
+        if prev is not None and (was is None or _axes_missing(was)):
+            return []  # already reported or held (or never known as homed)
+        event = self._event("homing_lost", CRITICAL, f"{f.state} but axes {lost.upper()} are NOT homed "
                             f"(homed_axes {f.homed!r})", hint="do not resume blindly: re-home first (Z/X crash risk)",
-                            now=now, data={"homed_axes": f.homed, "was": was})]
+                            now=now, data={"homed_axes": f.homed, "was": was})
+        # Found at watch start while paused: a steady state, report now. While printing it may
+        # be a start macro re-homing, so it is held like any other.
+        return self._hold("homing_lost", event, _unhomed, f, now, found_at_start=prev is None and f.state == PAUSED)
 
     def _heater_rules(self, prev: Frame | None, f: Frame, now: float) -> list[Event]:
         out: list[Event] = []
@@ -272,12 +361,14 @@ class _Detector:
                 h = self._heaters[name] = _Heater(target=tgt, since=now,
                                                   reached=tgt > 0 and temp is not None and abs(temp - tgt) <= lim.reach_tol_c)
                 if prev is None and self._is_bed(name) and tgt == 0 and f.state == PAUSED:
-                    out.append(self._bed_off_event(name, None, now))
+                    out += self._hold("bed_off", self._bed_off_event(name, None, now), _heater_off(name),
+                                      f, now, found_at_start=True)
                 continue
             if tgt != h.target:
                 old = h.target
                 if self._is_bed(name) and old > 0 and tgt == 0 and f.state in JOB_ACTIVE:
-                    out.append(self._bed_off_event(name, old, now))
+                    out += self._hold("bed_off", self._bed_off_event(name, old, now), _heater_off(name),
+                                      f, now, found_at_start=False)
                 h.target, h.since, h.reached, h.off_since = tgt, now, False, None
                 h.reach_alerted = h.drift_alerted = False
             if tgt <= 0 or temp is None:
@@ -359,7 +450,7 @@ class _Detector:
         """Time-based checks between pushes (stall, heaters that never report again)."""
         if self.frame is None:
             return []
-        return self._heater_rules(self.frame, self.frame, now) + self._stall_check(now)
+        return self._heater_rules(self.frame, self.frame, now) + self._stall_check(now) + self._release_held(now)
 
     def on_connection(self, up: bool, reason: str, now: float) -> list[Event]:
         was = self.connected
@@ -579,7 +670,8 @@ class CrealityDetector(_Detector):
         super().__init__(printer, limits)
         self.state: dict[str, Any] = {}
         self._err: int | None = None
-        self._material: int | None = None
+        self._runout_reported = False  # this job's runout already held or reported
+        self._runout_waiting: float | None = None  # since when a start-phase runout waits
 
     def frame_from_state(self) -> Frame:
         from printer_ops.creality import parse_status
@@ -626,22 +718,63 @@ class CrealityDetector(_Detector):
                             hint="see the printer screen; resume/cancel only after a look", now=now,
                             key=f"{self.printer}:exception:err{code}", data={"err": err})]
 
-    def _material_rules(self, f: Frame, now: float) -> list[Event]:
+    def tick(self, now: float) -> list[Event]:
+        """Also re-check a runout that waited for the start phase to end between pushes."""
+        early = self._material_rules(self.frame, now) if self.frame is not None else []
+        return early + super().tick(now)
+
+    _RUNOUT_REASON = "filament not detected by the runout sensor"
+
+    def _runout(self) -> bool:
+        """The filament sensor reports no filament: materialDetect 1 (sensor on) and
+        materialStatus 1. The K1's own web UI shows "Consumable not detected" with Resume/Stop
+        when materialStatus is set (app.*.js, printStatus.notTestMaterial), and ha_creality_ws
+        maps 0 -> normal, 1 -> runout (sensor.py filament_status, a8e5491); other values are
+        not documented anywhere, so only 1 counts."""
         if self.state.get("materialDetect") != 1:
-            return []
+            return False
         try:
-            status = int(self.state.get("materialStatus"))  # type: ignore[arg-type]
+            return int(self.state.get("materialStatus")) == 1  # type: ignore[arg-type]
         except (TypeError, ValueError):
+            return False
+
+    def _material_rules(self, f: Frame, now: float) -> list[Event]:
+        """Runout during a job. The start macro can flip the sensor for a while (seen on the K1
+        SE at 0 % of k1_slate, 2026-10-15, the print went on), so a runout in the start phase
+        waits until the start phase ends and is dropped if the sensor recovers; otherwise it is
+        held like bed_off/homing_lost. While the sensor reports a runout its reason stays
+        current, so a firmware runout pause is reported at once by the state event with it."""
+        if not self._runout():
+            self._runout_reported, self._runout_waiting = False, None  # re-armed on recovery
+            if self._reason and self._reason[0] == self._RUNOUT_REASON:
+                self._reason = None  # a recovered flicker must not explain a later pause
             return []
-        before, self._material = self._material, status
-        if before is None or status == before or f.state not in JOB_ACTIVE:
+        if f.state not in JOB_ACTIVE:
+            self._runout_reported, self._runout_waiting = False, None  # re-armed for the next job
             return []
-        # Meaning of non-zero materialStatus is not documented by Creality; 0 is what a
-        # printing K1 SE with filament reports (2026-10), so report the raw change.
-        self._note_reason(f"filament sensor materialStatus {before}->{status}", now)
-        return [self._event("filament", WARNING, f"filament sensor changed: materialStatus {before}->{status}",
-                            hint="check the spool/runout sensor", now=now,
-                            data={"materialStatus": status, "was": before})]
+        if self._runout_reported:
+            self._note_reason(self._RUNOUT_REASON, now)
+            return []
+        if f.state == PRINTING and self._starting(f, now):
+            self._runout_waiting = self._runout_waiting or now
+            return []  # a start-macro flip: no event, no reason for an unrelated pause
+        self._note_reason(self._RUNOUT_REASON, now)
+        self._runout_reported, self._runout_waiting = True, None
+        event = self._event("filament", CRITICAL if f.state == PRINTING else WARNING,
+                            "filament runout: the sensor reports no filament (materialStatus 1)",
+                            hint="reload filament, then resume on the printer", now=now,
+                            data={"materialStatus": 1})
+        return self._hold("filament", event, lambda _f: self._runout(), f, now,
+                          found_at_start=self.frame is None and f.state == PAUSED,
+                          hold_s=self.limits.confirm_s)  # the start phase was already waited out
+
+    def _starting(self, f: Frame, now: float) -> bool:
+        """Start phase for the runout rule. `_material_rules` runs before `_evaluate` records
+        a start, so a push that turns idle into printing counts as starting too. The wait is
+        capped at `start_phase_s`, so a progress stuck at 0 % cannot hide a runout forever."""
+        if self._runout_waiting is not None and now - self._runout_waiting >= self.limits.start_phase_s:
+            return False
+        return self._job_state not in JOB_ACTIVE or self._in_start_phase(f, now)
 
 
 __all__ = [

@@ -14,7 +14,9 @@ MIXED_ROWS = (
 )
 
 
-def project_3mf(path: Path, objects: dict[str, int], *, raft_layers: int = 0, mixed: str = MIXED_ROWS) -> Path:
+def project_3mf(path: Path, objects: dict[str, int | list[int]], *, raft_layers: int = 0,
+                mixed: str = MIXED_ROWS) -> Path:
+    """objects: name -> extruder of its one part, or a list (one part per extruder)."""
     cfg = {
         "filament_colour": ["#FF0000", "#00FF00", "#0000FF", "#FFFFFF"],
         "mixed_filament_definitions": mixed,
@@ -22,7 +24,11 @@ def project_3mf(path: Path, objects: dict[str, int], *, raft_layers: int = 0, mi
     }
     objs = "".join(
         f'<object id="{i}"><metadata key="name" value="{name}"/>'
-        f'<part id="1"><metadata key="extruder" value="{ex}"/></part></object>'
+        + "".join(
+            f'<part id="{j}"><metadata key="extruder" value="{e}"/></part>'
+            for j, e in enumerate([ex] if isinstance(ex, int) else ex, start=1)
+        )
+        + "</object>"
         for i, (name, ex) in enumerate(objects.items(), start=1)
     )
     with zipfile.ZipFile(path, "w") as zf:

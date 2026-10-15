@@ -38,6 +38,7 @@ def test_resume_a_stopped_two_head_plate_above_the_measured_top(tmp_path: Path) 
     assert f"wrote {out}" in built.stdout
     text = out.read_text(encoding="ascii")
     assert "SM_PRINT_PREEXTRUDE_FILAMENT INDEX=0 FORCE=1" in text
+    assert "RETRACT_LENGTH" not in text  # the U1 macro cancels the job on it (issue #238)
     assert "DEFECT_DETECTION_START" in text
     check = check_resume(text, 0.8, no_tower=True)
     assert check.problems == []
@@ -65,7 +66,42 @@ def test_resume_never_overwrites_the_original(tmp_path: Path) -> None:
     cfg = tmp_path / "xdg-config" / "3d-cli"
     cfg.mkdir(parents=True)
     (cfg / "printer-devices.yaml").write_text(U1_RESUME_YAML, encoding="utf-8")
-    result = run_cli(tmp_path, "gcode-resume", str(plate), "--printer", "u1", "--layer", "4", "-o", str(plate))
+    result = run_cli(tmp_path, "gcode-resume", str(plate), "--printer", "u1", "--layer", "4", "--tower-top", "1.2",
+                     "-o", str(plate))
     assert result.returncode == 2
     assert "the original must stay" in result.stderr
     assert plate.read_text(encoding="ascii") == synthetic_gcode()
+
+
+def test_resume_output_passes_gcode_bounds_for_the_u1(tmp_path: Path) -> None:
+    """The resume file is what goes to the printer: `3d gcode-bounds --printer u1` must pass it
+    (every move inside the U1 travel, only trusted macros) before anyone uploads it (issue #238)."""
+    plate = tmp_path / "plate.gcode"
+    plate.write_text(synthetic_gcode(), encoding="ascii")
+    cfg = tmp_path / "xdg-config" / "3d-cli"
+    cfg.mkdir(parents=True)
+    (cfg / "printer-devices.yaml").write_text(U1_RESUME_YAML, encoding="utf-8")
+    built = run_cli(tmp_path, "gcode-resume", str(plate), "--printer", "u1", "--layer", "4", "--tower-top", "1.2",
+                    "-o", str(tmp_path / "resume.gcode"))
+    assert built.returncode == 0, built.stderr
+    bounds = run_cli(tmp_path, "gcode-bounds", str(tmp_path / "resume.gcode"), "--printer", "u1")
+    assert bounds.returncode == 0, bounds.stdout + bounds.stderr
+    assert "PASS  axis travel" in bounds.stdout and "PASS  macros" in bounds.stdout
+    assert "FAIL" not in bounds.stdout  # the synthetic plate has no printable_area: WARN, not PASS
+    assert "RETRACT_LENGTH" not in (tmp_path / "resume.gcode").read_text(encoding="ascii")
+
+
+def test_resume_past_the_z_ceiling_writes_nothing(tmp_path: Path) -> None:
+    """An old tower near the top of the Z axis leaves no headroom: the command refuses (exit 1)
+    and no file reaches the printer."""
+    plate = tmp_path / "plate.gcode"
+    plate.write_text(synthetic_gcode(), encoding="ascii")
+    cfg = tmp_path / "xdg-config" / "3d-cli"
+    cfg.mkdir(parents=True)
+    (cfg / "printer-devices.yaml").write_text(U1_RESUME_YAML.replace("z_max_mm: 275", "z_max_mm: 3"),
+                                              encoding="utf-8")
+    out = tmp_path / "resume.gcode"
+    result = run_cli(tmp_path, "gcode-resume", str(plate), "--printer", "u1", "--layer", "4", "--tower-top", "1.5",
+                     "-o", str(out))
+    assert result.returncode == 2 and "no room above the part" in result.stderr
+    assert not out.exists()

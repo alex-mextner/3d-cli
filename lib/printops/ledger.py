@@ -8,7 +8,8 @@ MODEL (plan §5.3, migration 0020): remaining = the newest anchor (a weighing, a
 received with a known net, `empty`) + Σ deltas booked after it. Each row carries confidence_g
 (± grams, σ); the half-width of the interval is the root-sum-square of the anchor's σ and every
 later delta's σ, so a weighing resets the accumulated error. A spool with no anchor yet has an
-unknown remaining: the interval is [0, Spoolman's remaining] and it is flagged `anchored=False`.
+unknown remaining: the interval is [0, Spoolman's remaining] and it is flagged `anchored=False`;
+with no Spoolman remaining either (no label net known) it is `bounded=False` and shown as unknown.
 
 INVARIANTS:
   - The ledger is append-only (DB triggers); a mistake is fixed by booking a correction.
@@ -69,6 +70,9 @@ class Interval:
     anchor_source: str | None
     last_weighed_at: str | None
     deltas: int  # delta rows booked since the anchor
+    bounded: bool = (
+        True  # False: no anchor and no Spoolman remaining, so not even an upper bound
+    )
 
     @property
     def lo(self) -> float:
@@ -85,6 +89,7 @@ class Interval:
             "lo_g": round(self.lo, 1),
             "hi_g": round(self.hi, 1),
             "anchored": self.anchored,
+            "bounded": self.bounded,
             "anchor_at": self.anchor_at,
             "anchor_source": self.anchor_source,
             "last_weighed_at": self.last_weighed_at,
@@ -93,6 +98,8 @@ class Interval:
 
     def text(self) -> str:
         if not self.anchored:
+            if not self.bounded:
+                return "unknown (never weighed)"
             return f"≤{self.hi:.0f} g (never weighed)"
         return f"{self.mid:.0f} ± {self.sigma:.0f} g ({self.lo:.0f}–{self.hi:.0f})"
 
@@ -151,29 +158,27 @@ def estimate(
 ) -> Interval:
     """The remaining interval from the ledger alone. `fallback_g` (Spoolman's remaining) bounds a
     spool that has no anchor yet; without it an unanchored spool is [0, 0]."""
-    # One pass over the spool's rows (index ledger_spool_id), newest first: the deltas until the
-    # newest anchor, and the newest weighing (which may lie further back than that anchor).
-    anchor: sqlite3.Row | None = None
-    weighed: str | None = None
-    total = var = 0.0
-    n_deltas = 0
-    rows = conn.execute(
-        "SELECT id, at, kind, delta_g, anchor_g, source, confidence_g FROM ledger"
-        " WHERE spool_id = ? AND kind != 'note' ORDER BY id DESC",
+    # Three indexed lookups, none reading history older than the newest anchor: the newest
+    # anchor (partial index ledger_anchor), the deltas booked since it, and the newest
+    # weighing (partial index ledger_weigh; it may lie further back than that anchor).
+    anchor = conn.execute(
+        "SELECT id, at, anchor_g, source, confidence_g FROM ledger"
+        " WHERE spool_id = ? AND kind = 'anchor' ORDER BY id DESC LIMIT 1",
         (spool_id,),
-    )
-    for row in rows:
-        if weighed is None and row["source"] == "weigh":
-            weighed = str(row["at"])
-        if anchor is None:
-            if row["kind"] == "anchor":
-                anchor = row
-            else:
-                total += float(row["delta_g"])
-                var += float(row["confidence_g"]) ** 2
-                n_deltas += 1
-        if anchor is not None and weighed is not None:
-            break
+    ).fetchone()
+    since = conn.execute(
+        "SELECT COUNT(*) AS n, COALESCE(SUM(delta_g), 0) AS total,"
+        " COALESCE(SUM(confidence_g * confidence_g), 0) AS var FROM ledger"
+        " WHERE spool_id = ? AND id > ? AND kind = 'delta'",
+        (spool_id, anchor["id"] if anchor is not None else 0),
+    ).fetchone()
+    w = conn.execute(
+        "SELECT at FROM ledger WHERE spool_id = ? AND source = 'weigh' AND kind != 'note'"
+        " ORDER BY id DESC LIMIT 1",
+        (spool_id,),
+    ).fetchone()
+    weighed = None if w is None else str(w["at"])
+    total, var, n_deltas = float(since["total"]), float(since["var"]), int(since["n"])
     if anchor is None:
         hi = max(0.0, float(fallback_g or 0.0))
         return Interval(
@@ -184,6 +189,7 @@ def estimate(
             anchor_source=None,
             last_weighed_at=weighed,
             deltas=n_deltas,
+            bounded=fallback_g is not None,
         )
     var += float(anchor["confidence_g"]) ** 2
     return Interval(

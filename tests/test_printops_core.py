@@ -48,10 +48,10 @@ def test_open_db_sets_wal_foreign_keys_and_rows(tmp_path: Path) -> None:
 
 def test_migrate_applies_core_once_and_is_idempotent(tmp_path: Path) -> None:
     conn = db.open_db(tmp_path / "p.db")
-    applied = db.migrate(conn)  # every slice adds its own migration: core first, then in order
-    assert applied[0] == 1 and applied == sorted(applied) == [m.version for m in db.discover_migrations()]
+    shipped = [m.version for m in db.discover_migrations()]
+    assert shipped[:1] == [1] and db.migrate(conn) == shipped  # later slices append theirs
     assert db.migrate(conn) == []
-    row = conn.execute("SELECT version, name FROM schema_migrations ORDER BY version").fetchone()
+    row = conn.execute("SELECT version, name FROM schema_migrations WHERE version = 1").fetchone()
     assert (row["version"], row["name"]) == (1, "core")
 
 
@@ -102,6 +102,21 @@ def test_transaction_rolls_back_on_error_and_is_not_reentrant(printops_db: sqlit
     assert events.latest_id(printops_db) == 0
     with db.transaction(printops_db), pytest.raises(RuntimeError, match="re-entrant"), db.transaction(printops_db):
         pass
+
+
+def test_commit_time_failure_rolls_back_and_frees_the_connection(tmp_path: Path) -> None:
+    mdir = _write_migrations(tmp_path / "m", {"0001_x.sql": (
+        "CREATE TABLE parent (id INTEGER PRIMARY KEY);\n"
+        "CREATE TABLE child (id INTEGER PRIMARY KEY, "
+        "p INTEGER REFERENCES parent(id) DEFERRABLE INITIALLY DEFERRED);")})
+    conn = db.open_db(tmp_path / "p.db")
+    db.migrate(conn, mdir)
+    with pytest.raises(sqlite3.IntegrityError), db.transaction(conn):
+        conn.execute("INSERT INTO child (p) VALUES (42)")  # violation surfaces at COMMIT
+    assert not conn.in_transaction
+    assert conn.execute("SELECT COUNT(*) FROM child").fetchone()[0] == 0
+    with db.transaction(conn):
+        conn.execute("INSERT INTO parent (id) VALUES (1)")
 
 
 def test_shipped_migrations_use_reserved_names() -> None:
@@ -224,7 +239,7 @@ def test_ensure_extra_fields_registers_every_contract_field_idempotently() -> No
     second = ensure_extra_fields(fake)
     assert not second.created and not second.updated and len(second.unchanged) == len(EXTRA_FIELDS)
     spool_keys = {f["key"] for f in fake.list_fields("spool")}
-    # the contract's spool fields; slices may append more (contract: append-only, via PR)
+    # the #158 contract set; slices may only APPEND fields, so >= rather than ==
     assert spool_keys >= {"printops_slot", "opened_at", "last_dried_at", "dry_state", "remaining_confidence_g",
                           "tag_uids", "printops_location_id"}
     filament = {f["key"]: f for f in fake.list_fields("filament")}
@@ -358,7 +373,20 @@ def test_http_spoolman_speaks_the_wire_format_of_the_fake() -> None:
 
 def test_extra_field_definitions_follow_the_contract_rules() -> None:
     keys = [(f.entity, f.key) for f in EXTRA_FIELDS]
-    assert len(keys) == len(set(keys)) >= 19
+    assert len(keys) == len(set(keys))
+    # The #158 contract, frozen: slices may only APPEND (renaming/retyping would orphan data).
+    assert [(f.entity, f.key, f.field_type) for f in EXTRA_FIELDS[:19]] == [
+        ("spool", "printops_slot", "text"), ("spool", "opened_at", "datetime"),
+        ("spool", "last_dried_at", "datetime"), ("spool", "dry_state", "choice"),
+        ("spool", "remaining_confidence_g", "float"), ("spool", "tag_uids", "text"),
+        ("spool", "printops_location_id", "integer"),
+        ("filament", "nozzle_temp_min", "integer"), ("filament", "nozzle_temp_max", "integer"),
+        ("filament", "bed_temp_min", "integer"), ("filament", "bed_temp_max", "integer"),
+        ("filament", "abrasive", "boolean"), ("filament", "hygroscopic_class", "choice"),
+        ("filament", "drying_temp_c", "integer"), ("filament", "drying_hours", "float"),
+        ("filament", "measured_hex", "text"), ("filament", "max_volumetric_mm3_s", "float"),
+        ("vendor", "spool_tare_g", "float"), ("vendor", "spool_kind", "choice"),
+    ]
     for f in EXTRA_FIELDS:
         assert (f.field_type == "choice") == (f.choices is not None)
     params = ExtraField("spool", "k", "K", "choice", choices=("a",)).params(7)
@@ -443,6 +471,18 @@ def test_failed_stream_setup_does_not_leak_listeners(printops_settings: Settings
     for _ in range(3):
         asyncio.run(attempt())
     assert events.BUS.listener_count() == 0
+
+
+def test_db_lost_after_startup_is_503_not_500(printops_client: Any, printops_app: Any) -> None:
+    """A DB that is unusable at startup fails create_app loudly (by design: no half-migrated
+    service). This covers the other case: the data dir goes away while the API runs."""
+    from dataclasses import replace
+
+    state = printops_app.state.printops
+    state.settings = replace(state.settings, db_path=Path("/proc/printops-nope/printops.db"))
+    assert printops_client.get("/v1/live").status_code == 503
+    body = printops_client.get("/v1/health")
+    assert body.status_code == 503 and body.json()["db"]["ok"] is False
 
 
 def test_health_is_degraded_when_spoolman_is_down(printops_client: Any, fake_spoolman: FakeSpoolman) -> None:
@@ -659,6 +699,54 @@ def test_parse_sse_frames_skip_comments_and_join_data() -> None:
     lines = iter(["retry: 3000", "", ": ping", "", "id: 7", "event: a.b", "data: {\"x\":", "data: 1}", ""])
     frames = list(parse_sse(lines))
     assert frames[-1] == {"id": "7", "event": "a.b", "data": "{\"x\":\n1}"}
+
+
+def test_explicit_api_and_token_win_over_a_broken_yaml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from printops.client import ApiConfigError
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    monkeypatch.delenv("PRINTOPS_API", raising=False)
+    monkeypatch.delenv("PRINTOPS_TOKEN", raising=False)
+    (tmp_path / "3d-cli").mkdir()
+    (tmp_path / "3d-cli" / "printops.yaml").write_text("api: [broken\n", encoding="utf-8")
+    client = ApiClient.from_config(api="http://x:1", token="po_t")
+    assert (client.base_url, client.token) == ("http://x:1", "po_t")
+    with pytest.raises(ApiConfigError, match="not valid YAML"):
+        ApiClient.from_config()
+
+
+def test_heartbeats_keep_coming_while_unrelated_commits_wake_the_bus(
+        printops_settings: Settings, printops_db: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch) -> None:
+    from printops.api import routes_core
+    from printops.api.state import ApiState
+    from printops.tokens import TokenStore
+
+    monkeypatch.setattr(routes_core, "HEARTBEAT_S", 0.2)
+    state = ApiState(settings=printops_settings, spoolman=None, tokens=TokenStore(printops_settings.tokens_file))
+
+    async def scenario() -> int:
+        stream = routes_core._follow(state, None, lambda: True)
+
+        async def churn() -> None:
+            while True:
+                with db.transaction(printops_db):
+                    pass  # a commit without events still publishes a wake-up
+                await asyncio.sleep(0.05)
+
+        task = asyncio.create_task(churn())
+        pings = 0
+        try:
+            loop = asyncio.get_running_loop()
+            end = loop.time() + 1.0
+            while loop.time() < end:
+                item = await asyncio.wait_for(stream.__anext__(), 1.0)
+                pings += item is None
+        finally:
+            task.cancel()
+            await stream.aclose()
+        return pings
+
+    assert asyncio.run(scenario()) >= 3
 
 
 def test_client_config_from_env_then_yaml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
