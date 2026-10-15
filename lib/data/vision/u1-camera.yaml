@@ -1,25 +1,25 @@
 # Snapmaker U1 chamber camera: default for devices with model 'Snapmaker U1'.
-# Preliminary fit; see docs/research/printer-vision-geometry.md.
+# Refit over the full print height (issue #262); see docs/research/printer-vision-geometry.md.
 camera:
   width: 1920
   height: 1080
-  fx: 1270.5622139008667
-  fy: 1270.5622139008667
-  cx: 960.0
-  cy: 540.0
+  fx: 1192.0381720170556
+  fy: 1192.0381720170556
+  cx: 916.9054219569559
+  cy: 538.0771441137222
   dist:
-  - -0.11853983621449399
+  - 0.02844906944723158
   - 0.0
   - 0.0
   - 0.0
   rvec:
-  - 1.5306454024303382
-  - 0.7702918310925067
-  - -0.7276765695741904
+  - 1.5619383455629712
+  - 0.8267423449626278
+  - -0.7107183596071989
   tvec:
-  - -143.03542813213843
-  - -11.50630030233323
-  - 273.1451973339296
+  - -146.10021078007796
+  - -24.78487834918319
+  - 255.43969456978792
   bed:
   - 0.0
   - 0.0
@@ -28,12 +28,32 @@ camera:
   bed_moves_z: true
   model: fisheye
 fit:
-  source: refined edge lines (plate right edge, GFT wall top/base) + prime-tower corners,
-    u1_walls_main_v3 frames at gcode Z 3.62, 6.5, 10.7, 12.38
+  source: 'region fit, then a top-edge polish, from the edge-line fit (u1-camera-features.yaml):
+    the walls of u1_walls_main_v3 up to each frame''s layer are painted far-to-near; Powell
+    maximises the IoU of the visible green (T2) wall surfaces with the green pixels (pose,
+    focal, cx/cy, k1), then refines the pose against IoU plus the distance of the current
+    layer''s visible top outline to the green parts'' upper boundary'
+  # frames under ~/.cache/3d-cli/vision/data (like the features file); u1live/ are live
+  # captures with the printer's layer read just before and after the frame
+  frames:
+  - {frame: u1raw/20261014T191744Z.jpg, layer: 82, z: 10.58}
+  - {frame: u1raw/20261014T202724Z.jpg, layer: 108, z: 13.7}
+  - {frame: u1raw/20261014T225354Z.jpg, layer: 164, z: 20.42}
+  - {frame: u1raw/20261015T002954Z.jpg, layer: 195, z: 24.14}
+  - {frame: u1raw/20261015T010814Z.jpg, layer: 211, z: 26.06}
+  - {frame: walls/20261015T040554Z.jpg, layer: 285, z: 34.94}
+  - {frame: walls/20261015T054254Z.jpg, layer: 327, z: 39.98}
+  - {frame: walls/20261015T071554Z.jpg, layer: 369, z: 45.02}
+  - {frame: u1live/L667_a.jpg, layer: 667, z: 80.78}
+  - {frame: u1live/L667_b.jpg, layer: 667, z: 80.78}
+  - {frame: u1live/L729.jpg, layer: 729, z: 88.22}
+  - {frame: u1live/L739.jpg, layer: 739, z: 89.42}
+  green_iou:
+    previous: [0.336, 0.408, 0.413, 0.392, 0.395, 0.521, 0.458, 0.428, 0.319, 0.323, 0.336, 0.333]
+    refit: [0.395, 0.524, 0.562, 0.617, 0.652, 0.688, 0.686, 0.656, 0.502, 0.482, 0.561, 0.571]
+  top_edge_median_px:
+    previous: [12.1, 21.9, 20.5, 21.5, 22.5, 13.6, 24.2, 14.5, 7.2, null, 25.0, 24.8]
+    refit: [12.2, 12.3, 12.3, 5.5, 5.0, 13.1, 6.5, 5.4, 2.3, null, 3.3, 3.2]
   features: u1-camera-features.yaml
-  rms_px: 9.16
-  status: 'preliminary (pose/focal/k1 only): 5-10 px at the prime tower and far walls,
-    20-30 px at the front-right part nearest the camera'
-  plate_mm:
-    x1: 277.0
-    y0: -12.5
+  status: 'current-layer top outline within ~2-4 px median at Z 80-90 and ~5-13 px at Z 10-45;
+    the toolhead hides the top in the second Z 80 frame (no measurement)'
