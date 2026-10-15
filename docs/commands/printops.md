@@ -42,6 +42,8 @@ service is never exposed to the internet.
 3d printops dry finish SESSION_ID [--rh PCT] [--weights ID=G,...]
 3d printops dry ls [--open] [--spool ID] [--limit N]
 3d printops dry due [--all] [--check]
+3d printops gates snapshot [--out FILE] [--api URL] [--token TOKEN]
+3d printops gates state PRINTER [--json] [--api URL] [--token TOKEN]
 ```
 
 | Subcommand | What |
@@ -55,6 +57,7 @@ service is never exposed to the internet.
 | `spool` | Spool lifecycle — receive → store/move → load into a printer slot → unload → empty — with remaining as an interval (ledger), weighing and the idempotent `gen/plates.json` import. See [printops-spool.md](printops-spool.md). |
 | `tare` | The sourced empty-spool weight DB (SpoolmanDB seed + own weighings) and the tare chain of a spool. See [printops-spool.md](printops-spool.md#3d-printops-tare). |
 | `dry` | Drying sessions (start / finish / ls) and the spools due for drying by the `drying:` policy in `fleet/policy.yaml`. |
+| `gates` | The PrintOps state the material gates of [`3d print-preflight`](print-preflight.md#printops-material-gates) read (spool per slot, filament data, remaining interval, drying), and its offline snapshot for the slicer hook. |
 
 Subcommands are self-registering modules in `lib/printops/cli/<sub>.py`; later PrintOps slices
 add theirs there.
@@ -264,6 +267,28 @@ Every `check_every_min` 3d-api writes changed `dry_state` values to Spoolman and
 `drying.due` when a spool **enters** `due` or `wet`. `due`/`wet` are sticky: only a finished
 drying session (or a human editing `dry_state` in Spoolman) clears them. Spools in an open
 session show as `drying` and are never flagged.
+
+### `gates`
+
+The material gates of [`3d print-preflight`](print-preflight.md#printops-material-gates)
+([#164](https://github.com/alex-mextner/3d-cli/issues/164)) read one fleet printer's PrintOps
+state: fleet facts (heads, nozzles, enclosure, plates) and, per G-code tool, the spool bound to
+its slot with the Spoolman filament data and its PrintOps extra fields (`nozzle_temp_min/max`,
+`bed_temp_min/max`, `abrasive`, `measured_hex`), the ledger's remaining interval and the drying
+assessment. Read-only, scope `read`.
+
+- `snapshot [--out FILE]` — save every printer's state for `3d print-preflight --offline` (the
+  slicer post-processing hook runs without a network). Default path `$PRINTOPS_SNAPSHOT`, else
+  `~/.cache/3d-cli/printops-snapshot.json`; preflight WARNs once it is older than
+  `gates.snapshot_max_age_h` (fleet/policy.yaml). Refresh after loading spools.
+  `3d printops gates snapshot`
+- `state PRINTER [--json]` — one printer: tool → slot → spool, remaining, drying.
+  `3d printops gates state u1 --json | jq '.tools[] | {slot, spool: .spool.label}'`
+
+REST: `GET /v1/gates/state?printer=NAME` (404 unknown printer, 503 no fleet file, 502 Spoolman),
+`GET /v1/gates/snapshot` → `{version, taken_at, api, printers: {name: state}}`. State schema:
+`lib/printops/gates.py`. Later slices add keys (maintenance #166, calibrations #167); a gate reads
+an absent key as "not known" (UNVERIFIED).
 
 ## Exit codes
 

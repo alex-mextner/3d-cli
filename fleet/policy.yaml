@@ -1,7 +1,8 @@
 # fleet/policy.yaml — PrintOps policy, one top-level section per concern.
-# Schema: lib/printops/policy.py (sections) + the section's parser (drying: lib/printops/drying_policy.py).
-# Checked by tests/test_printops_drying.py; 3d-api re-reads it on every drying check.
-# Later slices add `gates:` (#164) and `calibrations:` (#167) as their own sections.
+# Schema: lib/printops/policy.py (sections) + the section's parser (drying: lib/printops/drying_policy.py,
+# gates: lib/printops/gates_policy.py).
+# Checked by tests/test_printops_drying.py and tests/test_printops_gates.py; 3d-api re-reads it on every
+# drying check, `3d print-preflight` on every run. `calibrations:` (#167) comes as its own section.
 
 drying:
   # How often 3d-api re-assesses every spool and updates Spoolman `dry_state` (+ `drying.due`).
@@ -60,3 +61,65 @@ drying:
     PAHT:   {class: extreme, temp_c: 80, hours: 12, source: bambu}
     PVA:    {class: extreme, temp_c: 55, hours: 8,  source: bambu}
     BVOH:   {class: extreme, temp_c: 55, hours: 8,  source: bambu}
+
+gates:
+  # PrintOps material gates of `3d print-preflight` (#164, plan §9.1, docs/commands/print-preflight.md).
+  # An offline snapshot (`3d printops gates snapshot`) older than this is a WARN: refresh it.
+  snapshot_max_age_h: 24
+  # block: a hard finding FAILs (preflight exit 1, `3d printer start` refuses);
+  # warn: the same finding is a WARN; off: the check does not run.
+  # D6 (type/vendor change blocks, lot warns) lives in loaded_filament_match (type) and, for
+  # flow/PA, in calibration_current (#167).
+  levels:
+    printer_profile_match: block   # G-code sliced for another printer model
+    nozzle_compat: block           # abrasive filament on a soft nozzle; nozzle diameter differs
+    filament_temp_range: block     # nozzle/bed temperature outside the loaded filament's window
+    loaded_filament_match: block   # loaded spool's type differs (FAIL); colour ΔE; vendor (WARN)
+    slot_binding_known: warn       # a used head has no spool in the ledger: usage not booked
+    filament_sufficient: block     # the spool's remaining interval is below what the plate needs
+    drying_due: warn               # the loaded spool is due/wet per `drying:` above
+    maintenance_due: block         # the head is broken (fleet usable: false), open faults
+    enclosure_material: warn       # ABS/ASA/PC/PA on an open printer
+    plate_material: warn           # the G-code's plate is not on hand, or a bad material/plate pair
+  # Per-printer overrides, e.g. `k1se: {drying_due: off}`.
+  printers: {}
+  # Spoolman `material` spellings → G-code `filament_type` (Orca's names).
+  material_aliases:
+    PLA+: PLA
+    PLA-PLUS: PLA
+    PETG-HF: PETG
+  # CIEDE2000 between the G-code's filament_colour and the loaded spool (measured_hex, else the
+  # Spoolman filament colour). ~2 is a just-noticeable difference; 25+ is another colour.
+  colour:
+    warn_delta_e: 10
+    fail_delta_e: 25
+    projects:
+      - match: "*/babushkin-dom/*"
+        warn_delta_e: 6
+        fail_delta_e: 15
+        why: "facade palette: mixes are tuned to ΔE 4-9 between neighbouring colours (print/QUEUE.md)"
+  filament_sufficient:
+    # Start-macro purge outside the G-code's counted extrusion (U1 SM_PRINT_PREEXTRUDE_FILAMENT
+    # 30 mm ≈ 0.1 g; K1 START_PRINT line ≈ 0.5 g) rounded up; Orca's per-filament `filament used [g]`
+    # already counts the prime tower and flushes [INFERENCE: Orca PrintStatistics].
+    purge_g_per_tool: 2
+    margin_g: 5
+    margin_pct: 5
+  nozzle_compat:
+    # Nozzle materials that stand abrasive filament (fleet NOZZLE_MATERIALS).
+    abrasive_ok: [hardened, ruby, tungsten]
+    # Tokens of a material/type name that mean abrasive (PLA-CF, PA12 GF, glow-in-the-dark, wood).
+    abrasive_markers: [CF, GF, AF, CARBON, GLOW, WOOD, METAL]
+  enclosure_material:
+    # Warp / fume-prone materials that want a closed, warm chamber (Prusa KB material guides).
+    materials: [ABS, ASA, PC, PA, PA6, PA11, PA12, PAHT, PPS, HIPS]
+  plate_material:
+    - materials: [PETG]
+      plates: [smooth_pei, high_temp_plate]
+      why: "PETG bonds to smooth PEI and can tear it out: use glue stick as a separator or a textured plate (https://help.prusa3d.com/article/petg_2059)"
+    - materials: [TPU]
+      plates: [smooth_pei, high_temp_plate]
+      why: "TPU bonds too strongly to smooth PEI: use a separator or a textured plate (https://help.prusa3d.com/article/flexible-materials_2057)"
+    - materials: [ABS, ASA, PC, PA, PA6, PA11, PA12, PAHT]
+      plates: [cool_plate]
+      why: "the Cool Plate is for low bed temperatures (PLA/TPU); high-temperature materials do not stick (https://wiki.bambulab.com/en/general/filament-guide-material-table)"

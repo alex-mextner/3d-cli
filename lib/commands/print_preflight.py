@@ -9,8 +9,11 @@ WHAT: every offline G-code gate, then the printer-side checks: thumbnails presen
   G-code); the declared visible sides are clean (`3d visible-faces --gcode`, with --visible);
   with --printer, the printer is free and every head the G-code uses is loaded with the
   colour/material the G-code expects (per-head data from Moonraker print_task_config, i.e. the
-  Snapmaker U1); with --source-3mf, `3d halves-check` on the source 3MF. One
-  PASS/WARN/FAIL/SKIP line per check; a SKIP names the missing input.
+  Snapmaker U1); with --source-3mf, `3d halves-check` on the source 3MF; the PrintOps material
+  gates (issue #164: filament temperature window, loaded spool, remaining weight, drying,
+  nozzle, maintenance, enclosure, plate, printer profile) against 3d-api's state or an offline
+  snapshot. One PASS/WARN/FAIL/SKIP/UNVERIFIED line per check; a SKIP names the missing input,
+  an UNVERIFIED names the missing PrintOps data.
 
 WHY: `3d printer start` runs exactly this and refuses on FAIL (issue
   https://github.com/alex-mextner/3d-cli/issues/96); running it alone answers "is this file
@@ -24,7 +27,8 @@ from cli.registry import Command
 from errors import GateFailure, InputNotFound, UsageError
 
 USAGE = """3d print-preflight FILE.gcode [--printer NAME] [--axis-limits X0:X1,Y0:Y1|NAME] [--source-3mf FILE.3mf]
-                   [--visible [OBJ:]SPEC]... [--bridge-max MM] [--json] [--secs S]
+                   [--visible [OBJ:]SPEC]... [--bridge-max MM] [--printops-api URL] [--offline]
+                   [--printops-snapshot FILE] [--json] [--secs S]
   Read-only checks before a print. `3d printer start` runs the same checks and refuses on FAIL.
   Every G-code gate runs; one whose input is missing is SKIP and says what to pass.
 
@@ -48,6 +52,26 @@ USAGE = """3d print-preflight FILE.gcode [--printer NAME] [--axis-limits X0:X1,Y
   visible      (--visible) `3d visible-faces --gcode`: no support / sag on visible sides
   halves       (--source-3mf) `3d halves-check FILE.3mf` passes
 
+  PrintOps material gates (issue #164) for the target printer: --printer / --axis-limits NAME,
+  else the one fleet printer whose model is the G-code's `; printer_model`. Without PrintOps
+  data a check is UNVERIFIED (never PASS). Levels (block → FAIL, warn → WARN, off) and limits:
+  fleet/policy.yaml `gates:`.
+  printops               where the PrintOps state came from (3d-api, snapshot + age, fleet only)
+  printer_profile_match  `; printer_model` is the target printer's model
+  nozzle_compat          `; nozzle_diameter` = the installed nozzle; abrasive filament only on
+                         hardened/ruby/tungsten nozzles
+  filament_temp_range    nozzle/bed temperatures (footer + M104/M109/M140/M190) inside the
+                         loaded filament's nozzle_temp_min..max / bed_temp_min..max
+  loaded_filament_match  the slot's spool: material = `; filament_type` (FAIL), colour ΔE2000
+                         vs `; filament_colour` (WARN/FAIL, thresholds per project), vendor (WARN)
+  slot_binding_known     every used slot has a spool in the ledger (WARN: usage not booked)
+  filament_sufficient    `; filament used [g]` + purge + margin vs the spool's remaining
+                         interval: FAIL above it, WARN "weigh" inside it
+  drying_due             the spool's drying state: wet FAIL, due WARN
+  maintenance_due        the head is usable (fleet/printers.yaml), no open faults
+  enclosure_material     ABS/ASA/PC/PA... on an open printer (WARN)
+  plate_material         `; curr_bed_type` is a plate on hand; no bad material/plate pair (WARN)
+
 Options:
   --printer NAME          a printer from printer-devices.yaml (see `3d printer list`); its state
                           is read (never changed); Moonraker printers also report axis limits
@@ -57,10 +81,16 @@ Options:
   --visible [OBJ:]SPEC    visible side for `3d visible-faces --gcode` (x<V, y>V, all; repeatable)
   --bridge-max MM         longest span the overhangs gate counts as a bridge; overrides the
                           printer's bridge_max_mm in printer-devices.yaml (default 15)
+  --printops-api URL      3d-api for the PrintOps gates (default: $PRINTOPS_API, else `api:` in
+                          ~/.config/3d-cli/printops.yaml; token from $PRINTOPS_TOKEN / that file)
+  --offline               no network at all: the printer is not contacted (its fleet profile is
+                          used) and the PrintOps state comes from the snapshot file
+  --printops-snapshot F   snapshot for --offline (default: $PRINTOPS_SNAPSHOT, else
+                          ~/.cache/3d-cli/printops-snapshot.json; `3d printops gates snapshot`)
   --json                  JSON report on stdout
   --secs S                Creality: seconds to listen for pushed state (default 3)
 
-Exit: 0 PASS or WARN, 1 FAIL, 2 usage / missing file.
+Exit: 0 PASS or WARN (UNVERIFIED lines included), 1 FAIL, 2 usage / missing file.
 
 Examples:
   3d print-preflight out/part.gcode
@@ -70,7 +100,9 @@ Examples:
   3d print-preflight out/roof.gcode --axis-limits -5:229,-0.5:227
   3d print-preflight print/k1se/k1_base_4_v3.gcode --axis-limits k1se
   3d print-preflight out/walls.gcode --visible 'WALL*:y<104.8'
-  3d print-preflight out/part.gcode --printer u1 --json | jq '.checks[] | select(.status=="FAIL")'"""
+  3d print-preflight out/part.gcode --printer u1 --json | jq '.checks[] | select(.status=="FAIL")'
+  3d print-preflight out/part.gcode --printer u1 --printops-api http://192.168.0.39:8765
+  3d print-preflight out/part.gcode --offline     # slicer hook: PrintOps snapshot, no network"""
 
 
 def run(argv: list[str]) -> int:
@@ -89,7 +121,8 @@ def run(argv: list[str]) -> int:
     i = 0
     while i < len(argv):
         a = argv[i]
-        if a in ("--printer", "--source-3mf", "--secs", "--axis-limits", "--visible", "--bridge-max"):
+        if a in ("--printer", "--source-3mf", "--secs", "--axis-limits", "--visible", "--bridge-max",
+                 "--printops-api", "--printops-snapshot"):
             if i + 1 >= len(argv):
                 raise UsageError(f"{a} needs a value", command="print-preflight")
             if a == "--visible":
@@ -98,7 +131,7 @@ def run(argv: list[str]) -> int:
                 opts[a] = argv[i + 1]
             i += 2
             continue
-        if a == "--json":
+        if a in ("--json", "--offline"):
             opts[a] = "1"
         elif a.startswith("--"):
             raise UsageError(f"unknown option {a}", command="print-preflight",
@@ -116,14 +149,19 @@ def run(argv: list[str]) -> int:
         raise InputNotFound(str(source), command="print-preflight")
 
     from printer_ops.preflight import FAIL, run_preflight
+    from printer_ops.printops_checks import context_from_options
 
     from printer_ops import adapter_by_name, bridge_max_for, device_for, limits_from_option, trusted_macros_for
     from printer_ops.devices import get_device
 
     printer = opts.get("--printer")
-    if printer is not None and get_device(printer, offline_ok=True).access == "offline":
-        del opts["--printer"]  # an offline fleet printer is never contacted: its static profile only
+    offline = "--offline" in opts
+    if printer is not None and (offline or get_device(printer, offline_ok=True).access == "offline"):
+        del opts["--printer"]  # an offline fleet printer, or --offline: never contacted, static profile only
         opts.setdefault("--axis-limits", printer)
+    printops = context_from_options(printer, opts.get("--axis-limits"), api=opts.get("--printops-api"),
+                                    offline=offline, snapshot=opts.get("--printops-snapshot"),
+                                    command="print-preflight")
 
     status = None
     device = None if "--printer" in opts else device_for(opts.get("--axis-limits"))
@@ -141,7 +179,8 @@ def run(argv: list[str]) -> int:
 
     bridge, bridge_source = bridge_max_for(opts.get("--bridge-max"), device, command="print-preflight")
     report = run_preflight(gcode, status=status, source_3mf=source, axis_limits=limits, limits_source=limits_source,
-                           trusted_macros=trusted, visible=visible, bridge_max=bridge, bridge_source=bridge_source)
+                           trusted_macros=trusted, visible=visible, bridge_max=bridge, bridge_source=bridge_source,
+                           printops=printops)
     print(json.dumps(report.to_json(), indent=1) if "--json" in opts else report.render())
     if report.overall == FAIL:
         raise GateFailure("preflight FAIL", command="print-preflight", silent=True)
@@ -152,7 +191,7 @@ COMMAND = Command(
     name="print-preflight",
     group="SLICING",
     summary="read-only checks before a print: every G-code gate (bounds, overhangs, slicer warnings, heads, "
-    "thumbnails) + printer state",
+    "thumbnails) + printer state + PrintOps material gates",
     usage=USAGE,
     run=run,
 )

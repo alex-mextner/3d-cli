@@ -20,9 +20,13 @@ WHAT (issue https://github.com/alex-mextner/3d-cli/issues/96), one PASS/WARN/FAI
                  (slicing/slice_warnings.py, `3d slice-warnings`);
   - head seq     every object prints each layer on its recipe's heads (slicing/head_sequence.py,
                  issue #103) — needs the project 3MF: --source-3mf or NAME.3mf next to the G-code;
-  - visible      `3d visible-faces --gcode` when --visible specs are given.
+  - visible      `3d visible-faces --gcode` when --visible specs are given;
+  - printops     the PrintOps material gates (printops_checks.py, issue #164) when a
+                 PrintopsContext is given: filament temperatures, loaded spool, remaining
+                 weight, drying, nozzle, maintenance, enclosure, plate, printer profile.
   A gate whose input is absent (no project 3MF, no --visible spec) is a SKIP that says what
-  is missing; it never passes silently.
+  is missing; it never passes silently. A PrintOps gate without PrintOps data is UNVERIFIED
+  (shown, counted under STATUS, never PASS; it does not block on its own).
 
 WHY: wrong colour in a head, a used head that is empty (the U1's broken T2), missing
   previews and halves that no longer fit were all caught by hand on recent jobs — after
@@ -42,6 +46,7 @@ import sys
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from printer_ops.base import PrinterStatus
 from printer_ops.move_bounds import (
@@ -54,7 +59,10 @@ from printer_ops.move_bounds import (
     fmt_limits,
 )
 
-PASS, WARN, FAIL, SKIP = "PASS", "WARN", "FAIL", "SKIP"
+if TYPE_CHECKING:
+    from printer_ops.printops_checks import PrintopsContext
+
+PASS, WARN, FAIL, SKIP, UNVERIFIED = "PASS", "WARN", "FAIL", "SKIP", "UNVERIFIED"
 _CONFIG_LINE = re.compile(r"^;\s*([a-z_ \[\]0-9]+?)\s*=\s*(.*)$")
 _TOOL_LINE = re.compile(r"^T(\d+)\s*(?:;.*)?$")
 _BIN_3D = Path(__file__).resolve().parents[2] / "bin" / "3d"
@@ -101,7 +109,11 @@ class Report:
         for c in self.checks:
             lines.append(f"  {c.status:<4}  {c.name:<11} {c.detail}")
             lines += [f"{'':19}{line}" for line in c.lines]
-        lines.append(f"STATUS: {self.overall}")
+        unverified = sum(c.status == UNVERIFIED for c in self.checks)
+        lines.append(
+            f"STATUS: {self.overall}"
+            + (f" ({unverified} unverified)" if unverified else "")
+        )
         return "\n".join(lines)
 
 
@@ -579,6 +591,7 @@ def run_preflight(
     visible: Sequence[str] = (),
     bridge_max: float | None = None,
     bridge_source: str = "default",
+    printops: PrintopsContext | None = None,
 ) -> Report:
     """`limits_source` names where `axis_limits` came from, or why they are unknown.
     `origin` is where the G-code lives when `gcode` is a snapshot copy (`printer start`): the
@@ -600,4 +613,8 @@ def run_preflight(
     report.checks.append(check_visible(gcode, visible))
     if source_3mf is not None:
         report.checks.append(check_halves(source_3mf))
+    if printops is not None:
+        from printer_ops.printops_checks import run_checks
+
+        report.checks.extend(run_checks(gcode, printops, origin=origin or gcode).checks)
     return report
