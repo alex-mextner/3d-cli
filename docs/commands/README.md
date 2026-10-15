@@ -82,8 +82,10 @@ Every gate from model to printer, in order: [Print pipeline](../workflows/print-
 | `gcode-bounds` | [gcode-bounds.md](gcode-bounds.md) | Check every G-code move (arc bulges too) against axis travel and the printable area; offline. |
 | `gcode-resume` | [gcode-resume.md](gcode-resume.md) | Resume a stopped multi-head print above the last intact layer (no Z homing); offline. |
 | `gcode-overhangs` | [gcode-overhangs.md](gcode-overhangs.md) | Find extrusion printed on nothing, per object and layer (the slicer is silent with supports off); offline. |
-| `printer` | [printer.md](printer.md) | Drive configured printers (Moonraker, Creality stock): list, status, upload, start `--yes`, cancel `--yes`, `watch` (read-only anomaly events to stdout/exec/tg/omp session). |
+| `printer` | [printer.md](printer.md) | Drive configured printers (Moonraker, Creality stock): list, status, upload, start `--yes`, cancel `--yes`, `watch` (read-only anomaly events to stdout/exec/omp session), `vision` (camera spaghetti detection into the same events), `subscribe` / `agent` (alerts go to an AI agent, never straight to the user, [printer-subscribe.md](printer-subscribe.md)). |
 | `print-preflight` | [print-preflight.md](print-preflight.md) | Read-only pre-print checks: every G-code gate (bounds, overhangs, slicer warnings, head sequence, thumbnails, visible faces), loaded colours vs G-code, halves, printer free. |
+| `printops` | [printops.md](printops.md) | PrintOps through 3d-api (Spoolman + PrintOps DB on the Odroid): health, event log, tokens, deploy, backup; spools + ledger + weighing ([printops-spool.md](printops-spool.md)). |
+| `profiles` | [profiles.md](profiles.md) | Keep OrcaSlicer / Snapmaker Orca / Bambu Studio user presets in the repo `profiles/`; three-way status/diff/sync, backups, refuses while the slicer runs. |
 | `slice` | [slice.md](slice.md) | Slice STL/3MF/SCAD to G-code or run the sliceability gate; records the slicer's warnings next to the G-code. |
 | `slice-check` | [slice-check.md](slice-check.md) | Headless 3MF open/plates/slice gate, plus offline G-code checks (`--check head-sequence`). |
 | `slice-warnings` | [slice-warnings.md](slice-warnings.md) | Record the slicer's warnings for a G-code (`NAME.slice-warnings.json`, SHA-256 bound) and accept each with a reason. |

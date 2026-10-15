@@ -1,0 +1,504 @@
+# PrintOps: самокорректирующаяся система печати для парка принтеров — исследование и план
+
+Срез на 2026-10-14. Только чтение: код не менялся, принтерам ничего не отправлялось, HA только читался.
+Сопутствующие отчёты: **[oss.md](oss.md)** (разбор OSS/SaaS, ~45 КБ, со ссылками) и **[rfid.md](rfid.md)** (RFID/NFC и станция на ESPHome).
+Непроверенное помечено **[INFERENCE]**.
+
+---
+
+## 0. Коротко
+
+- В репозиториях нет ни учёта катушек, ни очереди, ни сушки, ни `3d-bot`/`3d-lib`/`3d-api`. Ближе всего к этому: `3d inventory` (плоский JSON без катушек и адресов), `3d procurement` (офлайн-план закупок по BOM), `3d printer` + `print-preflight` (U1 и K1 SE; гейт сверяет цвет и материал слотов с G-code) и ручной `gen/queue.json` в babushkin-dom.
+- **`projects/3d-bot` нигде не найден**: ни в `~/xp`, ни на Odroid, ни в бэкапе MSI, ни на GitHub. Это решение **D1**.
+- Всё 3D-шное в HA уже версионируется, но в **чужом публичном** репозитории `alex-mextner/ha-configs-rs-bg-stanka_vraza`. На Odroid лежат незакоммиченные правки `packages/3d_printers.yaml` от 2026-10-14 и три `.bak`. Перенос в 3d-cli нужно делать с сохранением истории.
+- Рекомендуемая архитектура: **Spoolman** хранит vendor/filament/spool, **PrintOps DB** (SQLite в `3d-api`) хранит всё остальное: адреса склада, ledger расхода, сушки, инциденты, принтеры и их компоненты, калибровки, ТО, очередь и историю, закупки. Пишет в Spoolman один писатель — `3d-api`. Решения D2 и D3.
+- Гейты: существующий `print-preflight` расширяется проверками «материал против учёта»: температура, тип/цвет/партия в голове, сушка, остаток, сопло, калибровки, ТО. Они срабатывают на трёх рубежах: при слайсе (Orca post-processing), при отправке (`3d printer start` и `3d-api`) и при старте не через нас (watch → уведомление или пауза по политике).
+
+---
+
+## 1. Что уже есть (prior work)
+
+### 1.1 GitHub, alex-mextner/*
+Поиск `gh search issues` по ключам inventory, spool, filament, queue, history, drying, 3d-bot, 3d-lib, 3d-api, spoolman, smart speaker, home assistant, склад, катушк, сушк, очеред, колонк. По русским ключам ничего нет. Spoolman упоминается только в #71 (архитектурный зонтик) и косвенно.
+
+| Где | Что | Статус |
+|---|---|---|
+| 3d-cli [#90](https://github.com/alex-mextner/3d-cli/issues/90) | Epic: операции с принтерами (status/upload/start/control/preflight) | open |
+| 3d-cli [#91](https://github.com/alex-mextner/3d-cli/issues/91), [#93](https://github.com/alex-mextner/3d-cli/issues/93), [#94](https://github.com/alex-mextner/3d-cli/issues/94), [#95](https://github.com/alex-mextner/3d-cli/issues/95), [#96](https://github.com/alex-mextner/3d-cli/issues/96), [#101](https://github.com/alex-mextner/3d-cli/issues/101) | printer-devices.yaml, Creality stock, v1 commands, safety, preflight (слоты против `filament_colour`), gcode-bounds | closed (PR [#132](https://github.com/alex-mextner/3d-cli/pull/132) merged) |
+| 3d-cli [#92](https://github.com/alex-mextner/3d-cli/issues/92) | Moonraker-адаптер U1 (слоты из `print_task_config`) | open (основное влито в #132) |
+| 3d-cli [#97](https://github.com/alex-mextner/3d-cli/issues/97) | printer v2: pause/resume/**history**/**slots**/snapshot | open |
+| 3d-cli [#98](https://github.com/alex-mextner/3d-cli/issues/98) | адаптеры Bambu LAN/MQTT, PrusaLink, OctoPrint | open |
+| 3d-cli [#100](https://github.com/alex-mextner/3d-cli/issues/100) | start ждёт реального старта | open |
+| 3d-cli [#68](https://github.com/alex-mextner/3d-cli/issues/68) | durable intent + сверка с живым состоянием при upload/start (**ledger заданий**) | open |
+| 3d-cli [#142](https://github.com/alex-mextner/3d-cli/issues/142) | offline-записи в printer-devices (принтеры, под которые только слайсим) | open |
+| 3d-cli [#145](https://github.com/alex-mextner/3d-cli/issues/145) / PR [#151](https://github.com/alex-mextner/3d-cli/pull/151) | `3d printer watch`: события аномалий → stdout/exec/tg/omp | PR open (ветка feat/printer-watch, +2.5k строк, `lib/printer_ops/watch*.py`) |
+| 3d-cli [#150](https://github.com/alex-mextner/3d-cli/issues/150) | printer vision: спагетти, залипшая камера, NPU-вердикты U1 → watch | open (ветка feat/printer-vision) |
+| 3d-cli [#138](https://github.com/alex-mextner/3d-cli/issues/138) / PR [#144](https://github.com/alex-mextner/3d-cli/pull/144) | gcode-resume | PR open |
+| 3d-cli [#102](https://github.com/alex-mextner/3d-cli/issues/102), [#112](https://github.com/alex-mextner/3d-cli/issues/112), [#114](https://github.com/alex-mextner/3d-cli/issues/114), [#116](https://github.com/alex-mextner/3d-cli/issues/116) | print-pipeline из babushkin-dom; цвета столов → рабочие головы; plate-view с таблицей заправки; colour-mix | open |
+| 3d-cli [#152](https://github.com/alex-mextner/3d-cli/issues/152) | bridge_max_mm на принтер | open |
+| garage-band [#23](https://github.com/alex-mextner/garage-band/issues/23) | babushkin-dom v5 (3 филамента на U1) | open |
+| aisis [#3](https://github.com/alex-mextner/aisis/issues/3) | эпик «локальная голосовая колонка» | open |
+| aisis [#8](https://github.com/alex-mextner/aisis/issues/8) | голосовые аккаунты, привязанные к пользователям HA | open |
+| esphome-ir [#14](https://github.com/alex-mextner/esphome-ir/issues/14), [#15](https://github.com/alex-mextner/esphome-ir/issues/15) | своё wake-word «эй Милош» | open |
+| ha-configs-rs-bg-stanka_vraza | живой HA-репозиторий Odroid (PUBLIC); 3D-коммиты: f4e5132 «add 3d printer monitoring and ingress proxy» … 51485cf «K1 SE online sensor…» | см. §3 |
+| ultra-3d-printer | KlipperScreen-тикеты (#7, #19 closed) | не про учёт |
+
+### 1.2 ROADMAP 3d-cli
+- §31 `3d print`: в планах «Multi-printer / queue … assign by capability» и «Material check against registry + inventory (§32) before starting».
+- §32 «Material procurement & inventory»: учёт катушек (material/color/brand/remaining g/location), списание по оценке слайсера, `3d materials inventory list|add|use`, ссылки на закупку. **Не реализовано**: есть только `3d inventory` (materials|parts, плоский `inventory.json`) и `3d procurement` (BOM → shortage, без сети).
+- §29: перевести `lib/` в импортируемый пакет `threed` с console-script. Не сделано (`[tool.uv] package = false`, `bin/3d` добавляет `lib/` в `sys.path`).
+
+### 1.3 Тикеты `task` (HYP)
+По spool/катушк/склад/филамент/очеред/сушк/3d-bot/3d-lib/3d-api/spoolman/колонк/speaker тикетов нет. По printer: HYP-1679/1681/1699/1700 отменены, их перенесли в GitHub (#90, #107, #142, #145). HYP-1678 про Orca Local-Z к теме не относится.
+
+### 1.4 Архив omp (prompts/recaps)
+В истории промптов про учёт, очередь, сушку, бота, API и колонку ничего нет. Есть только контекст babushkin-dom («докупить три катушки», «не нити, а филамент» → garage-band AGENTS.md) и переезд HA/ботов на Odroid (2026-10-07…10).
+
+### 1.5 Связанная прошлая проектная работа (в HA-репозитории)
+`docs/3d-printing-product-vision-and-journey.md` v0.1 от 2026-09-19 описывает цепочку `Request → Spec → Model → SliceArtifact → Quote → Order → ProductionAttempt → QCReport → Fulfilment`. Там уже есть принцип «G-code hash ≠ attempt id» и вывод, что HA — это адаптер, а не БД заказов. Этот документ стоит перенести в 3d-cli, а PrintOps job/attempt должен совпадать с его `ProductionAttempt`.
+
+---
+
+## 2. Состояние репозитория 3d-cli
+
+| Вопрос | Факт |
+|---|---|
+| 3d-lib отделён? | **Нет.** `lib/` — плоский набор модулей в `sys.path` (`from registries.inventory import …`), его кладёт туда `bin/3d`. Пакета, `pyproject` и build backend нет (ROADMAP §29: «activate after lib/ → threed»). `libs/` — это BOSL2 и NopSCADlib (OpenSCAD), к Python-либе не относится. |
+| projects/3d-bot | **Не найден.** В `3d-cli/projects/` лежит только `low-poly-cat`. `find` по `~` (до глубины 6–7), Odroid `/home/ultra`, `/mnt/{wd500,storage,msi-backup-ro}` и `gh search code` ничего не дали. Боты на Odroid: только `hypercal-bot`. |
+| Принтеры: устройства | `~/.config/3d-cli/printer-devices.yaml` — **вне репозитория**: u1 (moonraker 192.168.0.26:7125, axis_limits, 30 trusted_macros, bridge_max_mm 25) и k1se (creality-stock 192.168.0.27). Модели — `lib/data/printers.yaml` (Bambu A1/A1 mini, Prusa…; U1 и K1 SE нет, см. [#84](https://github.com/alex-mextner/3d-cli/issues/84)). |
+| printer_ops | `base.py` (PrinterStatus, `Slot{index,label,present,color,material,vendor,sub_type}`, safety-состояния), `moonraker.py` (U1 `print_task_config` → слоты; `filament_detect` **не читается**), `creality.py`/`ws.py` (K1 stock), `preflight.py`: thumbnails, printer_free, **slots** (цвет/материал против G-code), halves, overhangs, slice_warnings, head_sequence, visible, macros, moves. |
+| watch / vision / gcode-resume | Ветки feat/printer-watch (PR #151), feat/printer-vision и feat/gcode-resume (PR #144) не влиты. watch даёт event-bus аномалий: это готовый источник событий для PrintOps. |
+| Материалы | `lib/data/materials.yaml` + user/project-слои: свойства для прочности и массы, без температурных окон, абразивности и гигроскопичности. |
+| inventory/procurement | `3d inventory` (materials/parts, name/quantity/unit/location/notes); `3d procurement` (BOM + inventory → план покупок; без цен и сети). |
+| Очередь и заправка (babushkin-dom) | `gen/queue.json`: printers[] → entries{file, status printed/now/queued/waiting/tester, load {T1:"синий",…}, what}. `gen/plates.json`: heads, owned (катушки на руках с hex), plates (recipes Full Spectrum), bought. `gen/queue_report.py` берёт время и граммы из футера G-code и генерирует QUEUE.md, README и shopping_list.md. `docs/full-spectrum/tools/load.json` — заправка для инструмента смешивания. **Это рабочий прототип очереди и закупок; его модель стоит перенести в PrintOps как есть.** |
+| Web | `lib/web/server.py`: FastAPI `3d web`, 18 эндпоинтов, SSE. Стек тот же, что для `3d-api`. |
+| lint | `3d lint` (repo-правила и правила моделей .scad). Отдельный dev-gate: ruff, mypy, pytest, shellcheck (CI/pre-commit). |
+
+---
+
+## 3. Home Assistant (Odroid 192.168.0.39, `/home/ultra/homeassistant`): 3D-артефакты
+
+Это git-репозиторий `origin = github.com/alex-mextner/ha-configs-rs-bg-stanka_vraza` (**PUBLIC**). `main` = `origin/main`, но рабочее дерево грязное.
+
+| Артефакт | Что | Версионирование |
+|---|---|---|
+| `packages/3d_printers.yaml` (507 строк) | REST-сенсор `printer_u1_raw` (Moonraker), `rest_command` pause/resume/cancel/estop U1, скрипты K1/U1 (pause/resume/cancel/estop/fans_off), `script.printer_send_notification`, ~30 template-сенсоров (status/progress/remaining/file/layer/temps/filament_used/z/fan/active_tool) и binary (online/printing/paused/problem) для K1 SE и U1, 6 автоматизаций (уведомления о состоянии, вентиляторы K1 после печати, offline, перегрев K1/U1) | tracked; **M** (незакоммиченные правки 2026-10-14: slicer-ETA для U1, `completed`/`stopped` для ha_creality_ws, `not_from unavailable`), плюс 3 untracked `.bak-20261014-*` |
+| `packages/u1_print_inspector.yaml` | `rest_command` u1_inspector_status / u1_inspect_layer → `u1-camera-proxy:8090` | tracked |
+| `ui-3d-printers.yaml` (232 строки) | YAML-дашборд «3D Printers» (`/3d-printers/overview`): gauge, entities K1/U1, кнопки, `custom:webrtc-camera` u1_camera, `custom:u1-inspector-card`, `custom:u1-share-card` (public_url dataplicity), history-graph, ссылки на ingress | tracked |
+| `configuration.yaml` (фрагменты) | `ingress:` k1_se_printer → `printer-proxy:8080/k1se`, u1_printer → `/u1`; `lovelace.dashboards.3d-printers` (mode yaml); `lovelace.resources` u1-inspector-card.js, u1-share-card.js | tracked (файл общий) |
+| `scripts/u1_mjpeg_proxy.py` (332) | MJPEG-прокси камеры U1, поллинг monitor.jpg, «будильник» монитора через Moonraker MQTT publish, оверлей | tracked |
+| `scripts/u1_print_inspector.py` (372), `scripts/u1_gcode_index.py` (256) | read-only инспектор: телеметрия Moonraker, индекс G-code по слоям, `/status.json`, `/layers/N` | tracked |
+| `scripts/u1_share.py` (362), `requirements/u1-share.txt` | подписанные ссылки на камеру с истечением | tracked |
+| `www/u1-share/*` (6 файлов) | карточки Lovelace и viewer для публичных ссылок | tracked |
+| `tests/u1_print_inspector/*` | pytest + browser checks | tracked |
+| `docs/u1-camera-sharing.md`, `docs/u1-print-inspector*.md`, `docs/3d-printing-product-vision-and-journey.md` | документация | tracked |
+| `printer-proxy.nginx.conf` (98) | nginx для ingress: K1 web + ws 9999 (sub_filter), U1 Fluidd, `/u1/go2rtc`, `/u1/u1-camera` | tracked |
+| `go2rtc.yaml` | потоки `k1se_camera` (mjpeg :8080), `u1_camera` (ffmpeg h264 из u1-camera-proxy); целиком 3D-шный | tracked |
+| `ha.docker-compose.yaml` (сервисы) | `go2rtc` (alexxit/go2rtc:1.9.9), `printer-proxy` (nginx:1.27-alpine), `u1-camera-proxy` (образ HA, `python /config/scripts/u1_mjpeg_proxy.py`, env U1_CAMERA_*) | tracked (файл общий) |
+| `custom_components/moonraker` | копия [marcolivierarsenault/moonraker-home-assistant](https://github.com/marcolivierarsenault/moonraker-home-assistant) 1.13.4 (submodule `submodules/moonraker-home-assistant`); config entry «Snapmaker U1» | tracked (копия) и submodule |
+| `custom_components/ha_creality_ws` | [3dg1luk43/ha_creality_ws](https://github.com/3dg1luk43/ha_creality_ws) v0.9.7 (submodule); config entry «Creality K1 SE»; `www/k_printer_card.js` | **IGNORED** в custom_components, pin только через submodule |
+| config entries (`.storage`) | `go2rtc`, `generic` «u1_camera_proxy», `moonraker` «Snapmaker U1», `ha_creality_ws` «Creality K1 SE» | UI-конфиг, не в git (`.storage`) |
+| automations.yaml, scripts.yaml | 3D-шного нет (все автоматизации в пакете) | — |
+| cron, systemd на хосте | 3D-шного нет | — |
+
+### 3.1 Предлагаемая раскладка в монорепо
+
+```
+3d-cli/
+  packages/3d-lib/            # python-пакет `threed` (бывший lib/): geometry, gcode, printer_ops, printops-domain
+  apps/cli/                   # bin/3d + lib/commands (или оставить в корне до §29)
+  services/3d-api/            # FastAPI + SQLite (PrintOps), Dockerfile, compose-фрагмент
+  projects/3d-bot/            # Telegram-бот (D1: откуда брать / писать заново)
+  integrations/
+    homeassistant/
+      packages/3d_printers.yaml, u1_print_inspector.yaml, printops.yaml (новый)
+      dashboards/ui-3d-printers.yaml
+      scripts/u1_mjpeg_proxy.py, u1_print_inspector.py, u1_gcode_index.py, u1_share.py
+      www/u1-share/*, www/printops/* (новые карточки)
+      custom_sentences/ru/printops.yaml   # голосовые интенты Assist
+      custom_components/printops/         # фаза 4: своя интеграция
+      proxy/printer-proxy.nginx.conf
+      go2rtc/go2rtc.yaml
+      compose/3d.docker-compose.yaml      # go2rtc, printer-proxy, u1-camera-proxy, 3d-api, spoolman
+      snippets/configuration.3d.yaml      # ingress + lovelace dashboard/resources (проверяются линтером)
+      vendor.lock                         # пины: moonraker-home-assistant 1.13.4, ha_creality_ws v0.9.7, webrtc 3.6.1
+      tests/u1_print_inspector/*
+      docs/*.md
+      deploy.py                           # `3d ha deploy`
+    esphome/spool-station.yaml            # станция NFC/весы (§10)
+    orca/post-process.sh                  # хук гейта при экспорте G-code (§9)
+  fleet/printers.yaml                     # бывший ~/.config/3d-cli/printer-devices.yaml + головы/сопла/AMS (§7)
+```
+
+**Перенос с историей:** `git filter-repo --paths-from-file 3d-paths.txt` по клону HA-репозитория, затем `git merge --allow-unrelated-histories` в 3d-cli под `integrations/homeassistant/`. **До этого** нужно закоммитить текущие правки на Odroid (`3d_printers.yaml` M) и убрать `.bak`.
+
+**Деплой `3d ha deploy [--dry-run] [--host odroid]`:**
+1. `rsync --checksum` файлов из манифеста в `/home/ultra/homeassistant/…` (те же пути, что сейчас).
+2. Cutover в HA-репозитории (по D9 — submodule): добавить 3d-cli submodule'ом, старые tracked-пути убрать `git rm --cached` и закоммитить (сам `.gitignore` уже tracked-файлы не игнорирует), затем добавить их в `.gitignore` с комментарием «source of truth: 3d-cli integrations/homeassistant». Проверка: после деплоя `git status` HA-репо чистый. В `/config/.3d-cli-deployed` пишется SHA коммита 3d-cli и время деплоя.
+3. Сниппеты `configuration.yaml` не копируются, только сверяются: деплой падает, если в живом конфиге нет ingress, dashboard или resources (`lovelace` и `ingress` в packages не выносятся [INFERENCE]).
+4. Compose: в главный `ha.docker-compose.yaml` добавляется `include: [3d.docker-compose.yaml]` (Compose ≥ 2.20) или `-f`. Проверить версию docker compose на Odroid.
+5. `docker exec homeassistant-homeassistant-1 python -m homeassistant --script check_config -c /config`, затем `homeassistant.reload_all` через API. `docker compose up -d` перезапускает только изменённые 3D-сервисы.
+6. Проверки после деплоя: сущности `sensor.printer_*` не `unavailable`, `/3d-printers/overview` отдаётся, go2rtc отдаёт `u1_camera`.
+
+---
+
+## 4. OSS: выводы (подробности и ссылки — [oss.md](oss.md))
+
+- **Spoolman** ([Donkie/Spoolman](https://github.com/Donkie/Spoolman), MIT, ★2.9k, v0.27.0 от 2026-09-25): vendor/filament/spool, REST + WS, `PUT /spool/{id}/use` и `/measure`, extra-поля, `lot_nr`, Prometheus, с v0.27 реестр NFC по UID. **Пробелы:** `location` — плоская строка ≤64 символов (вложенные локации — open [#1202](https://github.com/Donkie/Spoolman/issues/1202)); сушки нет (PR #711 в draft); закупок нет (#207); принтеров, заданий и аудита нет; **авторизации нет**.
+- **Moonraker `[spoolman]`** держит одну активную катушку и каждые 5 с делает `/use`. Мульти-тул — через `SET_ACTIVE_SPOOL` в T-макросах. history хранит `spool_ids` и `filament_weights` по инструментам.
+- **U1**: сток читает только проприетарные метки Snapmaker (`filament_detect`, 4 канала FM175xx). [Extended firmware paxx12](https://github.com/paxx12-snapmaker-u1/SnapmakerU1-Extended-Firmware) (GPL-3.0, ★1.05k) даёт Spoolman SpoolLink (`SET_SPOOL_ID LANE=E0..E3`), OpenRFID (Bambu/Creality/OpenSpool/TigerTag…) и `POST /printer/filament_detect/set`. → решение **D4**.
+- **K1 SE stock**: ws:9999 (`usedMaterialLength`, `materialStatus`), без Moonraker. Без root Spoolman на принтере не поставить, только серверный адаптер. CFS — только с апгрейд-китом.
+- **Bambu**: [ha-bambulab](https://github.com/greghesp/ha-bambulab) (MIT) отдаёт по треям AMS тип, цвет, remain, tag_uid, tray_uuid. Влажности у AMS lite нет. Метки подписаны RSA. Мосты в Spoolman: OpenSpoolMan, bambu-spoolman, SpoolmanSync. Принтеры чужие (сосед, Борис), нужно их согласие и LAN-доступ или облачный read-only.
+- **OctoPrint SpoolManager/FilamentManager** заброшены. **Bambuddy** (AGPL) — только Bambu. **FDM Monster** — без филамента. **Printago, Filarack, SimplyPrint** покрывают больше, но проприетарные. **Готового OSS на весь наш парк нет.**
+- **Метки**: для своих меток — NTAG215 + OpenSpool JSON (читают U1-extended, телефоны, PN532). OpenPrintTag (Prusa, NFC-V) сильнее по модели, но нужен ридер ISO15693 (подробнее в §10).
+
+---
+
+## 5. Архитектура и модель данных PrintOps
+
+### 5.1 Хранилища
+- **Spoolman** (docker на Odroid, в LAN, без внешнего доступа) — источник правды для vendor, filament и spool (identity, `remaining`, `lot_nr`, `price`, `location`-строка).
+- **PrintOps DB** (SQLite WAL на HDD Odroid, владелец — `3d-api`). Ссылается на `spoolman_spool_id` и `spoolman_filament_id`. Все изменения идут через события (append-only `events`) и проекции.
+- **Правило одного писателя:** в Spoolman пишет только `3d-api`, кроме Moonraker `[spoolman]` на U1, если его включат (D4). Тогда `3d-api` по заданиям U1 не делает `/use`, а только сверяет.
+- **Альтернатива (D2):** своё хранилище с экспортом и импортом в формате Spoolman. Плюс — одна БД и транзакции. Минус — теряем Fluidd, SpoolLink, Disane87-HA и Bambu-мосты.
+
+### 5.2 Сущности (PrintOps)
+```
+location(id, path "WH:A/S2/B3/04", kind warehouse|shelf|box|slot|printer_slot|dryer|dry_box, parent_id, tag_uid?, qr?, capacity, humidity_sensor_entity?)
+spool_state(spool_id, location_id, bound_printer_slot?, opened_at, last_dried_at, dry_state, confidence, updated_at)   # проекция
+ledger(id, at, spool_id, delta_g, source gcode_estimate|moonraker_live|printer_reported|weigh|voice|manual|purge, confidence, job_id?, note)
+drying_session(id, dryer_id, started_at, ended_at, temp_c, target_h, rh_before, rh_after, source) + drying_spool(session_id, spool_id, weight_before, weight_after)
+purchase(id, shop, ordered_at, received_at, total, currency) + purchase_line(purchase_id, filament_id, qty, unit_price, url) → received spools
+printer(id, model, adapter, host, …) + head/nozzle/ams-slot components (§7)
+job(id, printer_id, artifact_sha256, file, source 3d|slicer|touchscreen|cloud, queued_at, started_at, ended_at, status, attempt_of?, order_ref?) + job_tool(job_id, tool, slot, spool_id, g_est, g_reported, mm_reported)
+incident(…) (§6), calibration(…) (§7–8), maintenance(…) (§7)
+anomaly(id, at, kind, subject, evidence, status open|ack|resolved)
+```
+
+### 5.3 Самокоррекция (reconcile)
+Каждые N минут и на каждое событие `3d-api` сводит независимые сигналы по каждой катушке и слоту:
+1. **Идентичность в слоте:** RFID принтера (U1 `filament_detect`/`print_task_config`, Bambu `tag_uid`/`tray_uuid`, CFS `rfid`=material id) ↔ привязка в учёте ↔ голос, станция, скан. Расхождение → `anomaly(slot_mismatch)` и вопрос пользователю. RFID побеждает в идентичности, только если метка уникальна (Bambu tray_uuid — да, CFS — нет).
+2. **Цвет и тип** в слоте (`print_task_config.filament_color_rgba`, AMS `color`) ↔ filament катушки: ΔE2000 > порога → anomaly.
+3. **Расход:** оценка из G-code по инструменту (до печати; Moonraker history `filament_weights` и Bambu 3MF — тоже **оценки** слайсера из метаданных файла, а не факт) → наблюдаемый расход после печати: `filament_used`/`usedMaterialLength`/Bambu remain с учётом отмены или сбоя (отменённое на первом слое задание не списывает полную оценку). Взвешивание (`/measure`) — абсолютная привязка, сбрасывает накопленную ошибку. Каждый ledger-ряд несёт `source` и `confidence`, остаток показывается как интервал. Тесты учёта покрывают отменённые и упавшие задания.
+4. **Аномалии:** расход ≫ оценки (сопли, пробка, недоэкструзия по факту), остаток < 0, катушка одновременно в двух местах, «печать на неизвестной катушке», катушка в сушилке дольше X, принтер печатает материалом, которого по учёту нет.
+5. **Учёт ошибок пользователя:** голосовые поправки — тоже события. Повторяющееся расхождение источника X → понижение его доверия (простая байесовская оценка по каждому источнику).
+
+### 5.4 Адаптеры парка
+`klipper-moonraker` (U1, хакспейс-Klipper), `creality-ws` (K1 SE stock), `bambu-mqtt` (P1S, A1 mini; LAN developer mode или чтение через ha-bambulab), `ha-bridge` (любой принтер, который уже есть в HA), `offline` (принтеры хакспейса без сети: задания и расход вручную или по G-code). Общий интерфейс — существующий `printer_ops.base.Adapter`, расширенный на history/slots/events.
+
+---
+
+## 6. Структурированные заметки и инциденты по филаментам и катушкам
+
+**Цель:** систематически анализировать проблемы по филаменту, производителю, партии, принтеру и голове.
+
+```
+incident(
+  id, at, reported_by (voice|telegram|cli|station|watch|vision), confidence,
+  kind ∈ {clog, stringing, oozing_blobs, warping, delamination/layer_split, under_extrusion, over_extrusion,
+          moisture_popping, brittleness/snap, poor_bed_adhesion, layer_shift, colour_off, runout, tangle,
+          heat_creep, nozzle_drag, other},
+  severity ∈ {cosmetic, part_lost, print_lost, hardware_risk},
+  printer_id, head/slot, spool_id, filament_id, vendor_id, lot_nr,      # снимок на момент инцидента
+  job_id, layer, z_mm, feature (wall/infill/bridge/support…),
+  nozzle_temp, bed_temp, chamber_temp, speed_mm_s, volumetric_mm3_s, fan_pct,   # из G-code/телеметрии на момент
+  days_since_dried, dry_box_rh, room_rh,
+  resolution_kind ∈ {dried, temp_change, speed_change, retraction_change, cleaned_nozzle, replaced_nozzle,
+                     glue/plate, recalibrated, discarded_spool, none},
+  resolution_text, resolved_at, photos[], linked_calibration_id?, tags[]
+)
+```
+- **Автозаполнение контекста:** при создании (голосом «на U1 голова 3 пошли сопли») `3d-api` сам подтягивает текущий job, слой, температуры и скорость по G-code-индексу (переиспользовать `u1_gcode_index.py`), катушку и партию из привязки, часы с последней сушки и влажность бокса.
+- **Автоинциденты:** из watch (runout, ошибки экструдера, перегрев) и vision (спагетти) → `incident(draft)` с подтверждением.
+- **Аналитика:** `3d printops incidents stats --by vendor|filament|lot|printer|head --since 90d` — частоты на кг или час печати, а не абсолютные числа. «Партия X: 3 пробки на 1,2 кг против 0,2 в среднем у вендора». Карточка в HA, оценка вендоров (vendor scorecard) идёт в подбор при закупке (§13).
+- **Свободные заметки** к катушке и филаменту (`note`) остаются отдельно. Инцидент — это структура, заметка — просто текст.
+
+---
+
+## 7. Модель и БД принтеров (парк): компоненты, калибровки, поломки, ТО
+
+### 7.1 Статика (git, `fleet/printers.yaml`) и динамика (DB)
+- **YAML (переносится из `~/.config/3d-cli/printer-devices.yaml` и закрывает #142, #84):** id, model, adapter/host/ports, owner (свой / сосед / Борис / хакспейс), access (full | read-only | offline), axis_limits, trusted_macros, bridge_max_mm, **topology**: heads[] (label T1..T4 ↔ index 0..3, extruder name), ams[] (unit → slots), enclosure, chamber_heater, bed plates.
+- **DB, события компонентов:** nozzle installs (head, diameter, material brass|hardened|ruby|tungsten, type std|HF, installed_at, removed_at, reason), PTFE/hotend/extruder gear, plates; счётчики (часы печати, метры филамента, количество смен голов — по истории заданий).
+
+### 7.2 Каталог калибровок (декларативно, `fleet/calibrations.yaml`)
+| Калибровка | Скоуп | Триггеры инвалидации | Как получить | Куда применять |
+|---|---|---|---|---|
+| Flow ratio | head × filament (× lot по политике) × nozzle | новый filament, новая партия (policy), замена сопла, смена диаметра | Orca-style flow-тест (модель + per-object flow), U1 `SM_PRINT_FLOW_CALIBRATE` (авто) | профиль филамента Orca (`filament_flow_ratio`) |
+| Pressure advance / K | head × filament × nozzle | то же + замена экструдера/PTFE | PA pattern / tower (Klipper `TUNING_TOWER`), K1 — K-factor | Orca `pressure_advance` и/или Klipper `SET_PRESSURE_ADVANCE` + сохранение |
+| Temp tower | filament (× lot) | новый filament | башня + `M104` по высоте (пост-процесс) | диапазон в filament (min/max/opt) |
+| Max volumetric speed | filament × hotend | новый filament, HF-сопло | тест расхода | Orca `filament_max_volumetric_speed` |
+| Retraction | head × filament | замена PTFE/hotend | тест ретракта | профиль |
+| Input shaper | printer | ремонт кинематики, ремни, перенос | Klipper `SHAPER_CALIBRATE` / K1 auto | `SAVE_CONFIG` (с подтверждением) |
+| Z-offset / bed mesh | printer × plate | замена стола/сопла, ремонт | Klipper, U1 auto | Klipper |
+| Смещения голов U1 (XY/Z) | U1 | снятие/замена любой головы, удар | калибровка Snapmaker | прошивка (D: только по процедуре вендора) |
+| Rotation distance / e-steps | head | замена шестерни или мотора экструдера | отметка 100 мм | Klipper cfg |
+| Ремни, натяжение | printer | ТО, шум | частотомер или приложение | журнал |
+
+Запись: `calibration(id, kind, scope{printer,head,nozzle_install_id,filament_id,lot_nr}, at, method, gcode_sha, values{…}, evidence[photos, VLM-оценка], applied_to[{target, before, after, at, confirmed_by}], valid_until?, superseded_by)`.
+
+### 7.3 Поломки и ТО
+- `maintenance(id, printer_id, component, kind clean|lube|replace|tighten|repair|firmware_update, at, by, parts_used[spare_part_id], notes, triggers_calibrations[])` — после записи сами создаются требования калибровок (§8).
+- `fault(id, printer_id, component, at, symptom, root_cause, status, fixed_by_maintenance_id)`. Пример: «U1 T2 не работает» сейчас живёт текстом в `queue.json`/`plates.json`. Нужно перенести в fault + `head.usable=false`, это нужно планировщику и #112.
+- **Регламент ТО** (`fleet/maintenance-rules.yaml`): каждые N часов, M метров или K смен голов → задача ТО (смазка направляющих, чистка сопел, проверка ремней, PTFE). Счётчики считаются по истории заданий.
+
+---
+
+## 8. Защита от забытых калибровок + streamline
+
+### 8.1 Правило
+Для задания (G-code × printer × slot → spool → filament/lot × nozzle install) движок берёт из каталога нужные калибровки по каждой используемой голове. Затем ищет действующую запись: тот же scope, не инвалидированную maintenance или nozzle swap, в пределах `valid_until`. Политика (`fleet/policy.yaml`) для каждого вида калибровки и принтера: `block | warn | off`. Дефолты: новый **тип** материала на голове → block; новый **вендор/филамент** → block для flow/PA; новая **партия** → warn; после ремонта или замены сопла → block для затронутых калибровок; input shaper после ремонта кинематики → block.
+Обход: `--accept calibration:<kind> --reason "…"` попадает в журнал и в паспорт детали.
+
+### 8.2 Streamline (`3d calibrate`)
+1. `3d calibrate plan --printer u1 --head T3 [--spool 42]` → список нужного с оценкой времени и грамм.
+2. `3d calibrate gen <kind> …` → G-code. Orca CLI не умеет калибровочные мастера из GUI [INFERENCE], поэтому свои генераторы: PA pattern (порт [Ellis PA pattern](https://github.com/AndrewEllis93/Ellis-PA-Pattern), MIT [INFERENCE]), flow-плитки (модели + `3d slice` с per-object `filament_flow_ratio`), temp tower (модель + пост-процесс `M104` по Z). Каждый G-code проходит `print-preflight` и привязывается к `calibration_run`.
+3. Проведение: CLI, Telegram или голос («напечатал, выбирай»). Камера U1 и vision-ветка делают снимок результата, VLM предлагает лучшую полосу или плитку, пользователь подтверждает. Варианты: «3», «чуть выше 3».
+4. Применение — **только с подтверждением**: (a) профиль Orca (user filament JSON в репо или в `~/.config/OrcaSlicer`, diff показывается), (b) Klipper: `SET_PRESSURE_ADVANCE` на сессию или `SAVE_CONFIG` через Moonraker `printer.gcode.script` (перезапуск Klipper; только когда принтер idle и с явным `--yes`), (c) U1 stock — только профиль слайсера.
+5. Запись результата закрывает требование. Следующий `print-preflight` видит запись и проверяет, что значения в G-code **совпадают** с калибровкой (Orca пишет `; pressure_advance = …`, `; filament_flow_ratio = …` в футер).
+
+---
+
+## 9. Гейты, линтеры, хуки против типичных ошибок
+
+### 9.1 Новые проверки `print-preflight` (lib/printer_ops/preflight.py → модуль `printops_checks`)
+Каждая проверка возвращает `Check(name, status PASS|WARN|FAIL|UNVERIFIED, detail)` — поля как у существующего `Check` в `lib/printer_ops/preflight.py`. Уровни задаются политикой. Без данных учёта — `UNVERIFIED`, а не PASS (как в #66). **Миграция:** сейчас `Report.overall` знает только FAIL и WARN и всё остальное сводит к PASS, поэтому UNVERIFIED дал бы PASS. Нужно добавить UNVERIFIED в агрегацию (не ниже WARN; блокирует ли старт — решает политика) и регрессионный тест «UNVERIFIED не даёт overall PASS».
+
+| Проверка | Вход | FAIL, если |
+|---|---|---|
+| `filament_temp_range` | G-code: `M104/M109 S` по T, `M140/M190`, футер `nozzle_temperature`, `bed_temperature` ↔ filament (min/max из temp tower или вендора; U1 tag `HOTEND_MIN/MAX_TEMP`) | сопло или стол вне окна (по каждой голове, с учётом first-layer) |
+| `loaded_filament_match` (расширяет `check_slots`) | футер `filament_type`, `filament_colour`, `filament_vendor`, `filament_settings_id` по экструдеру ↔ привязанная катушка в учёте ↔ RFID и цвет принтера | тип не совпадает (FAIL); цвет ΔE > порога (FAIL или WARN по проекту); вендор или партия другие (WARN и проверка калибровок) |
+| `slot_binding_known` | каждый используемый T | на слоте нет привязанной катушки → WARN «расход не учтётся» |
+| `filament_sufficient` | граммы по T из футера + prime tower/purge + запас ↔ остаток из ledger (интервал) | остаток < нужного (FAIL); в зоне неопределённости — WARN «взвесить» |
+| `drying_due` | класс гигроскопичности материала (PLA мягко; PETG, TPU, PA, PC, PVA строго) ↔ last_dried_at, открыта с…, RH бокса | просрочено по политике |
+| `nozzle_compat` | abrasive-флаг филамента (CF/GF/glow/wood/metal) ↔ материал сопла на голове; `nozzle_diameter` в G-code ↔ установленное | CF на латуни; диаметр не совпадает |
+| `calibration_current` | §8 | нет действующей калибровки или значения в G-code ≠ записанным |
+| `maintenance_due` | открытые fault и просроченное ТО, «после ремонта» | голова неисправна или после ремонта нет калибровок |
+| `enclosure_material` | ABS/ASA/PC ↔ enclosure и chamber принтера | WARN |
+| `plate_material` | тип стола ↔ материал (PETG на гладком PEI без клея и т.п.) | WARN |
+| `printer_profile_match` | `printer_model`/`printer_settings_id` в G-code ↔ целевой принтер | FAIL (G-code K1 на U1 и т.п.) |
+
+Плюс существующие: thumbnails, printer_free, overhangs, slice_warnings, head_sequence, visible, macros, moves.
+
+### 9.2 Три рубежа
+1. **При слайсе:** скрипт Orca post-processing (`integrations/orca/post-process.sh` → `3d print-preflight --printer <из футера> --offline`). Ошибка видна прямо в Orca при экспорте [INFERENCE: Orca показывает stderr и ненулевой код скрипта].
+2. **При отправке:** `3d printer start` и `POST /v1/jobs/{id}/start` в `3d-api`. FAIL блокирует, обход через `--accept … --reason`.
+3. **Старт не через нас** (Orca «Print», тачскрин, Bambu Handy). watch видит `printing` → `3d-api` скачивает файл (Moonraker `/server/files/gcodes`, K1 HTTP) → preflight → уведомление в HA, Telegram и колонку. Если FAIL, по политике (D5) `PAUSE` в первые N слоёв — только для своих принтеров и только для проверок `nozzle_compat`/`filament_temp_range`/`loaded_filament_match(type)`.
+
+### 9.3 Линтеры данных (`3d lint --printops`, CI и cron в `3d-api`)
+Катушка в двух местах; адрес не существует; слот принтера по RFID ≠ учёту; filament без температурного окна или абразивности; катушка без `spool_weight` (тара); остаток < 0; давно не взвешивали (дрейф ledger); `printers.yaml` ↔ живой topology (число голов, сопла); сниппеты HA ↔ живой `configuration.yaml`; `vendor.lock` ↔ версии submodule на Odroid.
+
+### 9.4 Репо-гейт
+dev-gate (ruff/mypy/pytest/shellcheck) расширяется на `services/3d-api`, `integrations/homeassistant` (yamllint + `check_config` в docker в CI [INFERENCE: образ HA тяжёлый, только в CI, не pre-commit]) и `integrations/esphome` (`esphome config`, ср. esphome-light [#12](https://github.com/alex-mextner/esphome-light/issues/12)).
+
+---
+
+## 10. RFID/NFC катушек и станция на ESPHome
+
+Подробности — в **[rfid.md](rfid.md)**: матрица совместимости, BOM с ценами, скетч ESPHome YAML (не компилировался), альтернативы.
+
+### 10.1 Совместимость меток (выводы)
+- **U1, судя по всему, на стоковой прошивке** [INFERENCE: в живом `filament_detect` нет полей extended-прошивки; все 4 канала сейчас пусты]. Ридер — 2× FM17580, по 2 антенны на чип, всего 4 канала e0..e3. Работает только ISO14443A/B; NFC-V (OpenPrintTag) аппаратно не поддерживается.
+- Сток U1 понимает только **MIFARE Classic 1K Snapmaker с подписью RSA-2048** (`OFFICIAL=true`). Ключи секторов выводятся из UID через HKDF, соли лежат в открытом коде [u1-klipper](https://github.com/Snapmaker/u1-klipper). Чужие и неподписанные метки он игнорирует целиком, не отдаёт даже `CARD_UID`; NTAG тоже игнорирует.
+- На **paxx12 extended FW** U1 читает NTAG213/215/216 в формате OpenSpool, понимает чужие метки через OpenRFID и связывается со Spoolman.
+- **K1 SE:** ридера нет, он появляется только с CFS-китом. Метки CFS не подписаны, поэтому свои метки там можно писать.
+- **Bambu AMS / AMS lite:** принимают только подписанные метки Bambu. Слот под нашу катушку назначается по MQTT, для этого нужны LAN-only и Developer Mode.
+- **OpenPrintTag** (Prusa, ISO15693, MIT) не читает ни один принтер из парка.
+- **Spoolman v0.27** умеет нативно привязывать метку по аппаратному UID: `POST /api/v1/tag/scan`, привязка к spool и filament, есть гайд по ESPHome. Содержимое меток он не разбирает.
+
+### 10.2 Своя маркировка
+- Катушки без меток: **2× NTAG215 (25 мм, по одной на каждую щёчку)**. Сначала запись URI HA-tag `sp-<spoolman_id>`, затем OpenSpool JSON (парсер paxx12 такой порядок выдерживает, проверено по коду). Плюс бумажный QR как дубль.
+- Вендорские метки (Bambu, Creality, Snapmaker, Prusament) не трогаем и привязываем **по UID** в Spoolman.
+- Ячейки склада, сушилки и слоты принтеров: **NTAG213 + QR** с ID `cell:A-2-03`, `dryer:1`, `slot:u1/e2`. Таблица ячеек живёт в 3d-api, в `Spoolman.location` пишется строка-путь.
+- Принтер без ридера (K1 SE; U1 на стоке для наших катушек; Bambu для чужих катушек) — схема «скан-скан»: метка катушки, затем метка слота (или выбор энкодером), затем `POST /v1/tags/scan op=load`. Для U1 3d-api может дополнительно записать слот в принтер через `SET_PRINT_FILAMENT_CONFIG`. Это запись в принтер, она пока не тестировалась и пойдёт отдельным тикетом с подтверждением.
+
+### 10.3 Станция ESPHome
+- ESP32-S3 + **PN532** (официальный `pn532_spi`, чтение и запись NDEF; RC522 отдаёт только UID; PN7160 не умеет NFC-V; у PN5180 нет официального компонента) + OLED SSD1306 или TFT ST7789 + энкодер EC11 + 2–3 кнопки + HX711 с тензобалкой на 5 кг.
+- Операции: load, unload, to_dryer, from_dryer, store (скан ячейки), weigh, incident, info.
+- События уходят в `3d-api` (`/v1/tags/scan`), а в HA — как `esphome.spool_station` и `tag_scanned`. Вес отправляется в Spoolman через `/measure`, тару тот вычитает сам.
+- **Цена:** ≈ **6–7 тыс. RSD (50–60 €)** в сербских магазинах (Elektro Modul, Elektroleum — проверено) или ≈ **25–35 $** на AliExpress [INFERENCE]. Метки: ≈0,1 $/шт на Ali, 70–100 RSD/шт в Сербии.
+- **Альтернативы:** телефон с HA Companion (касание метки → actionable notification «в U1/eN · в сушку · в ячейку»; бесплатно, сразу, но без весов и медленнее), QR + камера телефона (бесплатно, но ещё медленнее). Встроенные ридеры принтеров для наших меток бесполезны без paxx12.
+- **Рекомендация:** сначала телефон + NTAG и QR. Тикет 21 (схема меток) можно поднять в Фазу 1, сразу за тикетом 6: это почти бесплатно. Станцию (тикет 22) строить, когда заработает ledger: её главная ценность — весы и одно касание вместо 5 действий. PN5180 и OpenPrintTag отложить.
+
+---
+
+## 11. 3d-api: REST, события, голос
+
+Сервис FastAPI (стек `3d web`) в контейнере на Odroid рядом с HA. Хранилище — SQLite и Spoolman. Авторизация — bearer-токены на клиента (ha, station, bot, cli, voice) со scope: read, write, printer-control. Наружу сервис не публикуется; удалённый доступ — через Tailscale.
+
+### 11.1 REST (v1)
+```
+GET  /v1/printers                          парк + состояние + слоты (адаптеры)
+GET  /v1/printers/{p}/slots                слот → катушка (учёт) + RFID/цвет (принтер) + mismatch
+POST /v1/printers/{p}/slots/{s}/load       {spool_id | query:{material,color,vendor}} → bind (или кандидаты для уточнения)
+POST /v1/printers/{p}/slots/{s}/unload     {to_location?, weight_g?}
+GET/POST /v1/printers/{p}/maintenance | faults | calibrations
+GET  /v1/spools?material=&color=&location= (Spoolman + PrintOps-состояние)
+POST /v1/spools/{id}/move {location}       POST /v1/spools/{id}/measure {gross_g}
+POST /v1/spools/{id}/notes                 POST /v1/incidents   GET /v1/incidents/stats?by=
+GET  /v1/locations (дерево)   GET /v1/locations/{path}/contents
+POST /v1/drying/sessions {dryer, spools[], temp, hours}   POST /v1/drying/sessions/{id}/finish
+GET/POST /v1/jobs (очередь)  PATCH /v1/jobs/{id} (порядок/принтер)  POST /v1/jobs/{id}/preflight  POST /v1/jobs/{id}/start (confirm token)
+GET  /v1/history?printer=&since=
+POST /v1/preflight (gcode + printer → checks; stateless)
+GET  /v1/calibrations/required?printer=&slot=&spool=   POST /v1/calibrations/runs   POST /v1/calibrations/{id}/result|apply
+GET/POST /v1/purchases       GET /v1/shops/search?q=&material=&color=
+POST /v1/tags/scan {uid, payload?, op, printer?, slot?, location?, weight_g?}   # станция/телефон
+POST /v1/intents {text, speaker?} → {intent, slots, resolution, confirm_prompt, confirm_id}
+POST /v1/intents/{confirm_id}/confirm
+GET  /v1/events (SSE) | WS /v1/ws
+```
+
+### 11.2 События
+`printer.state_changed`, `job.queued|started|finished|failed`, `slot.loaded|unloaded|mismatch`, `spool.low|moved|measured|empty`, `drying.started|finished|due`, `calibration.required|recorded|applied`, `maintenance.due`, `incident.created`, `preflight.failed`, `anomaly.opened|resolved`, `shop.stock_changed|price_changed`. Доставка: SSE и WS, пуш в HA (`POST /api/events/printops_*` с long-lived token) и watch-sinks (tg, exec).
+
+### 11.3 Голосовые интенты (RU)
+| Фраза | Интент | Разрешение |
+|---|---|---|
+| «Загрузил белый PLA в U1 голову 4» | `LoadSpool(printer=u1, slot=T4, color=white, material=PLA)` | кандидаты со склада. Если один — bind и «Записал: Elegoo PLA+ белый, партия …», если несколько — уточнение. Через 10 с сверка с RFID T4 (index 3!) |
+| «Снял катушку с K1, положи на полку B3» | `UnloadSpool` + `MoveSpool` | |
+| «Поставил зелёный PETG сушиться на 6 часов» | `StartDrying` | таймер, событие `drying.finished` |
+| «На U1 голова 3 пробка» | `ReportIncident(kind=clog)` | контекст подтягивается сам |
+| «Сколько осталось белого PLA?» | `QueryStock` | сумма по катушкам с интервалом |
+| «Что печатает U1 / когда закончит?» | `QueryPrinter` | |
+| «Откалибровал поток, лучшая 3» | `CalibrationResult` | |
+Канал: HA Assist (whisper и openwakeword уже стоят) → `custom_sentences/ru/printops.yaml` + `intent_script` → `rest_command` → `/v1/intents`. Вариант: YandexDialogs (уже в submodules) для Яндекс Станции. Свободная речь → LLM-парсер в `3d-api` (Ollama на Odroid) со строгой JSON-схемой. **Мутации — только после подтверждения** («да»), кроме записей в журнал.
+
+---
+
+## 12. Home Assistant: вкладка «3D Printers»
+
+- **Фаза 1 (без кода в HA):** `packages/printops.yaml`: REST-сенсоры из `3d-api` (`/v1/printers`, `/v1/spools/summary`, `/v1/anomalies`) и `rest_command` (load, unload, move, dry, incident, measure).
+- **Фаза 4:** своя интеграция `custom_components/printops` (WS-подписка на `/v1/ws`, без поллинга):
+  - `sensor.printops_<printer>_<slot>_spool` (материал, цвет, остаток г ± интервал, партия, дни с сушки), `binary_sensor.printops_<printer>_<slot>_mismatch`;
+  - `sensor.printops_stock_<material>_<color>`, `sensor.printops_low_stock_count`, `sensor.printops_drying_active`;
+  - `sensor.printops_queue_<printer>` (следующее задание, ETA), `sensor.printops_<printer>_maintenance_due`, `calibration_required`;
+  - сервисы `printops.load_spool|unload_spool|move_spool|start_drying|report_incident|measure`.
+- **Карточки в существующей вкладке** (`ui-3d-printers.yaml`, секция Overview + новый view «Склад»):
+  1. «Заправка» на каждый принтер: головы/AMS-слоты с цветом, материалом, остатком, mismatch-бейджем и кнопками (снять, взвесить, проблема).
+  2. «Очередь» — список заданий с принтером, ETA и граммами, кнопка «preflight».
+  3. «Склад» — дерево адресов (WH:A/S2/B3) с катушками и фильтром, low-stock.
+  4. «Сушка» — активные сессии с таймером, просроченные катушки, RH боксов.
+  5. «Калибровки и ТО» — что требуется до следующей печати.
+  6. «Инциденты» — последние и топ по вендорам и партиям.
+  7. Существующие камера, u1-inspector и share-карточки остаются.
+- Карточки — Lit/vanilla JS в `www/printops/`, по образцу `u1-share` (тот же resource_mode yaml).
+- **Уведомления:** существующий `script.printer_send_notification` получает события `preflight.failed`, `slot.mismatch`, `drying.finished`, `spool.low`, `calibration.required`.
+
+---
+
+## 13. Поиск в магазинах (Белград)
+
+| Магазин | Платформа (проверено 2026-10-14) | Способ |
+|---|---|---|
+| 3dfilamenti.rs | WordPress 6.8.2 + **WooCommerce 9.9.5**; **Store API открыт**: `GET /wp-json/wc/store/v1/products?search=pla` отдаёт JSON (товары, вариации, цены, stock) | HTTP-клиент, без браузера |
+| 3dmarket.rs (Voxellab) | HTTP 403, **Cloudflare challenge** | headless-браузер (agent-browser/Playwright) раз в N часов; или попросить у магазина фид или прайс; [INFERENCE] платформа за CF не определена |
+| gamecentar.rs (Game Centar) | HTTP 403, **Cloudflare** | то же; Elegoo RAPID PLA+ там уже покупали (queue_report.py CHECKED) |
+
+- `shops/<shop>.py`: адаптер `search(query) → [Offer{shop, title, vendor, material, color_name, color_hex?, diameter, weight_g, price_rsd, in_stock, url, fetched_at}]` + нормализатор (материал, цвет, вес из названия и вариаций).
+- Кэш `shop_offer` в PrintOps DB с TTL. Изменения цены или наличия → события `shop.*`. Сопоставление с `filament` (vendor + material + color) для «где купить ещё такую же». Для CF-магазинов — бюджет запросов и робот-этикет (robots.txt, 1 запрос в несколько секунд).
+- Связь с закупками: low-stock или прогноз (§17) → `3d procurement --shops` → корзина по магазинам с ценами и наличием → `purchase` (ordered) → приёмка (received) → катушки в Spoolman и адрес на складе.
+- Правило проекта «реальный магазин, артикул, URL, цена, без заглушек» (ROADMAP §32) соблюдается автоматически.
+
+---
+
+## 14. Перенос: 3d-lib, 3d-bot, HA
+
+1. **3d-lib (§29):** `lib/` → `packages/3d-lib/src/threed/` (uv workspace, hatchling). Импорты `from registries.x` → `from threed.registries.x` (codemod через ast-grep). `bin/3d` → console-script `3d = threed.cli.dispatch:console_main`: новая обёртка без аргументов, которая вызывает `main(sys.argv[1:])` (нынешний `main(argv)` требует аргумент, его передаёт `bin/3d`). Тест: установленный `3d --version` из каталога вне checkout. `3d-api` и `3d-bot` зависят от `threed` как от workspace-пакета. Внешних потребителей нет, поэтому переходим чисто, без шимов.
+2. **3d-bot (D1):** исходник не найден. Варианты: (a) пользователь укажет, где он (другая машина или приватный репо под иным именем); (b) пишем новый `projects/3d-bot` (Telegram на базе tg-cli / watch-sinks: кнопки «загрузил / снял / сушка / инцидент», уведомления и подтверждения из `3d-api`).
+3. **HA:** §3.1. Порядок: коммит грязных правок на Odroid → `filter-repo` → merge в 3d-cli → `.gitignore` в HA-репо → первый `3d ha deploy --dry-run` (diff должен быть пустым) → настоящий деплой.
+4. **Babushkin-dom queue:** формат `queue.json`/`plates.json` импортируется в PrintOps jobs и owned spools (`3d printops import-queue`). `queue_report.py` начинает читать из `3d-api`.
+
+---
+
+## 15. Фазы и GitHub-issues (3d-cli)
+
+**Фаза 0 — фундамент (без функциональности для пользователя)**
+1. *Monorepo: lib/ → importable `threed` package (uv workspace), console-script `3d`* — `uv run 3d --version` работает из любого cwd; `bin/3d`-симлинк убран; весь dev-gate зелёный.
+2. *HA 3D artifacts move into 3d-cli with history (integrations/homeassistant) + `3d ha deploy`* — `git log` в 3d-cli показывает историю f4e5132…51485cf; `deploy --dry-run` на Odroid даёт 0 изменений; после деплоя `check_config` OK, сущности `sensor.printer_*` не unavailable.
+3. *fleet/printers.yaml: printer topology (heads/nozzles/AMS), owners/access, offline entries (#142, #84)* — `3d printer list` показывает 5+ принтеров, в том числе offline; U1 T2 помечен неисправным.
+
+**Фаза 1 — учёт катушек и склад**
+
+4. *Spoolman on Odroid (compose) + 3d-api skeleton (FastAPI, SQLite, tokens, /v1/events)* — `docker compose up` поднимает оба сервиса; healthcheck; бэкап SQLite в существующий бэкап-контур.
+5. *Locations tree + addressing labels (WH:zone/shelf/box/slot), print QR/NFC labels* — `3d printops loc add|tree|label`; путь ≤ 64 символов синхронизирован в Spoolman.location.
+6. *Spool lifecycle: receive → store → load into slot → unload → empty; ledger with confidence* — CLI и REST; остаток показывается интервалом; импорт текущих катушек (owned из babushkin-dom).
+7. *Slot reconciliation: U1 print_task_config/filament_detect, K1 ws, Bambu tray → mismatch anomalies* — подмена катушки в тесте с фейковым адаптером → `slot.mismatch`.
+8. *Drying sessions + policy (hygroscopic classes) + dry-box RH sensor link* — `drying.due` при просрочке.
+9. *Weighing: /measure with vendor tare DB* — после взвешивания ledger сбрасывается на абсолют.
+
+**Фаза 2 — гейты, калибровки, ТО, инциденты**
+
+10. *print-preflight: material gates (temp range, loaded match, sufficient, drying, nozzle compat, profile match)* — тест-G-code на каждое FAIL-условие; без данных учёта — UNVERIFIED.
+11. *Incidents: model, auto-context, stats by vendor/lot/printer* — `incident stats --by lot` на фикстурах.
+12. *Fleet components & maintenance log + rules → maintenance.due* — замена сопла инвалидирует flow/PA этой головы.
+13. *Calibration catalog + requirement engine + `calibration_current` gate* — новая партия → WARN, новый материал → FAIL до записи калибровки.
+14. *`3d calibrate`: PA pattern / flow / temp tower generators, guided run, apply with confirmation* — сгенерированный G-code проходит preflight; apply в Orca-профиль показывает diff; `SAVE_CONFIG` только при idle и `--yes`.
+15. *Three-tier gating: Orca post-processing hook + start gate + post-start watch check (policy-driven pause)* — старт с тачскрина с CF-на-латуни → уведомление, пауза — по политике.
+
+**Фаза 3 — очередь, история, голос, HA**
+
+16. *Fleet job ledger (#68) + history ingestion (Moonraker history, K1 ws, Bambu MQTT) + job_tool usage*.
+17. *Queue: enqueue/reorder/assign + babushkin-dom queue.json import; queue_report.py reads from 3d-api*.
+18. *Voice intents: HA custom_sentences + /v1/intents (rule-based + LLM fallback) + confirmations* — 7 фраз из §11.3 проходят e2e в HA Assist.
+19. *HA: packages/printops.yaml (REST) + dashboard cards (slots, queue, stock, drying, calibrations, incidents)*.
+20. *HA custom_component printops (WS push, entities, services)*.
+
+**Фаза 4 — RFID/NFC, станция, магазины, бот**
+
+21. *NFC tag scheme for own spools + location tags; `3d printops tag write|read`*.
+22. *ESPHome spool station (reader + buttons/encoder + display + HX711) → /v1/tags/scan*.
+23. *Shop adapters: 3dfilamenti (Woo Store API), 3dmarket & gamecentar (browser, CF) + offer cache + procurement --shops*.
+24. *3d-bot: Telegram buttons and confirmations over 3d-api* (D1).
+25. *Bambu adapters for P1S / A1 mini (read-only by default, with owner consent)*, плюс #98.
+
+---
+
+## 16. Lint wiring (сводно)
+- `3d lint --printops` (данные, §9.3) — локально, в cron `3d-api` (раз в час → `anomaly`) и в CI на фикстурах.
+- dev-gate: `services/3d-api` (ruff, mypy, pytest), `integrations/homeassistant` (yamllint, сверка сниппетов, тесты u1_inspector), `integrations/esphome` (`esphome config`).
+- Pre-push/CI: тест «деплой-манифест HA ↔ файлы в репо» (никаких сирот).
+- Политики гейтов (`fleet/policy.yaml`) проверяются схемой.
+
+---
+
+## 17. Дальнейшие возможности (фаза 5: все F1–F16, решение D11)
+
+| # | Возможность | Зависит от | Оценка сложности |
+|---|---|---|---|
+| F1 | **Планировщик парка**: стол → принтер по заправке (минимум перезаправок; переиспользует #112 и recipes Full Spectrum), времени, ночным окнам (тихие часы, без присмотра — только «надёжные» столы), занятости | 16, 17, 7 | высокая |
+| F2 | **Себестоимость детали**: г × цена катушки (из purchase) + электричество (кВт·ч из HA power-сенсора розетки или номинал × время × тариф) + износ (амортизация на час и сопла на кг) + доля неудач; отчёт по проекту | 6, 16 | средняя |
+| F3 | **Паспорт детали**: G-code sha, принтер, головы → катушки и партии, калибровки, preflight-результаты, фото первого и последнего слоя, инциденты; QR на изделии | 16, 13 | средняя |
+| F4 | **Учёт перепечаток**: attempt → attempt с причиной (связь с incident), статистика first-attempt yield по принтеру, материалу и проекту | 11, 16 | низкая |
+| F5 | **Прогноз расхода и заблаговременная закупка**: расход по скользящему окну + очередь → дата исчерпания по цвету и материалу; заказ с учётом сроков доставки магазина | 6, 17, 23 | средняя |
+| F6 | **Остаток по весу**: база тар катушек (вендор и тип катушки, картон или пластик), станция-весы | 9, 22 | низкая |
+| F7 | **Датчик влажности в сухом боксе** (ESPHome SHT4x/BME280) + правила сушки (RH > X% → в сушку) | 8 | низкая |
+| F8 | **Каталог измеренных цветов**: колориметр (например TCS34725/AS7341 на станции) или фото с эталонной картой (ColorChecker) → `filament.measured_hex` с доверием; используют colour-mix #116 и подбор | 22 | средняя |
+| F9 | **Партии и сроки**: lot, дата производства и вскрытия, деградация (PVA/PA), FIFO-подсказки | 6 | низкая |
+| F10 | **Счётчики пробега → регламент ТО** | 12, 16 | низкая |
+| F11 | **Склад запчастей** (сопла, PTFE, ремни, стол): parts в той же адресации, списание по maintenance, low-stock | 5, 12 | низкая |
+| F12 | **Сравнение принтеров на одинаковых тестерах**: эталонные тестеры (bridge, overhang, tolerances, ΔE) → результаты по принтеру и голове, регресс после ТО | 13, 14 | средняя |
+| F13 | **Проверки до, во время и после печати**: чистый стол по камере перед стартом (vision #150, U1 DETECT_BED_PLATE), первый слой (#135 по G-code + по камере), вес детали после печати против ожидаемого (станция-весы) → incident | 22, #150 | средняя |
+| F14 | **Интерфейсы**: голос (§11.3), HA-вкладка (§12), Telegram-кнопки (3d-bot) — для всех операций | 18–20, 24 | средняя |
+| F15 | Метрики Prometheus/Grafana (Spoolman уже отдаёт), годовой отчёт по пластику | 4 | низкая |
+| F16 | Связь с product vision (§1.5): Order → ProductionAttempt = PrintOps job | 16 | — |
+
+---
+
+## 18. Решения пользователя
+
+Принятые решения (tg#21166, 2026-10-14; D11 — tg#21173) — в колонке «Решение»; они имеют приоритет над рекомендациями и текстом выше.
+
+| # | Вопрос | Рекомендация | Решение |
+|---|---|---|---|
+| **D1** | `projects/3d-bot` не найден. Где исходник, или пишем новый? | Если исходника нет — новый тонкий бот поверх `3d-api` (Фаза 4) | новый бот поверх 3d-api |
+| **D2** | Spoolman + своя DB или только своя DB | Spoolman + PrintOps DB (одна точка записи — `3d-api`) | Spoolman без форка: всё про катушку — в Spoolman. Адрес — в каноническом `Spool.location` (путь, oss.md §9.2; не дублировать в extra), сушка `last_dried` и заметки — extra fields; остальное — небольшая своя БД 3d-api |
+| **D3** | Где живёт `3d-api` и данные | Odroid (compose рядом с HA, SQLite на HDD, бэкап) | Odroid |
+| **D4** | Ставить ли на U1 extended firmware paxx12 (Spoolman SpoolLink, OpenRFID, запись `filament_detect`)? Риск для гарантии и стабильности | Сначала прочитать `filament_detect` на стоке (фаза 1). Решать после, отдельным тикетом | paxx12 — отдельно, позже, после текущего проекта (на стоке только читаем filament_detect) |
+| **D5** | Пауза принтера при FAIL-гейте, если старт был не через нас | Только уведомление; авто-пауза — opt-in для 3 «опасных» проверок и только на своих принтерах | серьёзные FAIL при старте мимо нас → пауза + звонок через call-cli + tg |
+| **D6** | Политика калибровок (новая партия: block или warn) | Тип и вендор — block; партия — warn | тип/вендор — block, партия — warn |
+| **D7** | Bambu P1S (сосед) и A1 mini (Борис): какой доступ (LAN dev mode / облако read-only / вручную)? Нужно согласие владельцев | Read-only через ha-bambulab или ручной режим | доступа к чужим принтерам нет — только ручной режим |
+| **D8** | Метки и станция: NTAG215 (OpenSpool + URI HA-tag) на свои катушки, NTAG213 + QR на ячейки; станцию ESP32 + PN532 + весы (~6–7 тыс. RSD) строить сразу или после телефонного варианта? | Сначала телефон (HA Companion) + метки; станцию — после того, как заработает ledger (Фаза 4) | метки NTAG215 (катушки) и NTAG213+QR (ячейки); телефон через HA Companion (URI HA-tag) и бот; станция позже |
+| **D9** | HA-репо публичный: переносить 3D-историю в 3d-cli (тоже public) — ок? Есть ли в ней секреты (dataplicity URL, IP)? | Перед переносом прогнать gitleaks по отфильтрованной истории | источник всего 3D — 3d-cli (integrations/homeassistant); HA-репо подключает его submodule'ом |
+| **D10** | Применение калибровок: писать прямо в Orca-профили пользователя или в профили в репо | Профили в репо + синк в Orca | профили в 3d-cli `profiles/` + `3d profiles sync` для Orca, Snapmaker Orca и Bambu Studio (двусторонний, с diff) |
+| **D11** | Приоритеты «дальнейших возможностей» F1–F16 | — | все F1–F16 — фаза 5, после фаз 0–4; тикеты #193–#211 (метка `phase:5`, эпик #154) |

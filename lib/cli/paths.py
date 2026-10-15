@@ -15,6 +15,7 @@ PAST BUG / migration: the dir was renamed `3d` -> `3d-cli`. `migrate_legacy_conf
 a pre-existing `~/.config/3d/` into place once, so an existing user does not silently
 re-trigger the OpenSCAD-library bootstrap (env.py gates on a marker FILE inside this dir).
 """
+
 from __future__ import annotations
 
 import os
@@ -48,6 +49,13 @@ def state_dir() -> pathlib.Path:
     """`~/.local/state/3d-cli/` (or `$XDG_STATE_HOME/3d-cli`). Holds runtime state such as
     `3d printer watch` heartbeat files. Not auto-created."""
     return _xdg_root("XDG_STATE_HOME", (".local", "state")) / APP_DIRNAME
+
+
+def cache_dir() -> pathlib.Path:
+    """`~/.cache/3d-cli/` (or `$XDG_CACHE_HOME/3d-cli`). Re-downloadable or regenerable files:
+    model weights (`vision/models`), evidence frames of `3d printer vision`, and the
+    slicer-profile backups of `3d profiles sync`. Not auto-created."""
+    return _xdg_root("XDG_CACHE_HOME", (".cache",)) / APP_DIRNAME
 
 
 def legacy_config_dir() -> pathlib.Path:

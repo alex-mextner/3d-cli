@@ -86,6 +86,13 @@ def _parse_create(argv: list[str]) -> tuple[str, Path, str, bool, bool]:
             remediation=["Example:  3d worktree create roadmap/e2e-expansion --base main"],
         )
     branch = argv[0]
+    if branch.startswith("-"):
+        # A flag in the branch position would reach `git worktree add` as a ref.
+        raise UsageError(
+            f"create needs a branch name before options, got {branch!r}",
+            command="worktree",
+            remediation=["Example:  3d worktree create roadmap/e2e-expansion --base main"],
+        )
     path: Path | None = None
     base = "main"
     sync = True
@@ -156,6 +163,9 @@ def _raise_missing_dev_tools(path: Path, missing: list[str]) -> None:
 
 
 def _create(argv: list[str]) -> int:
+    if argv and argv[0] in ("-h", "--help"):
+        _print_usage()
+        return 0
     branch, path, base, sync, as_json = _parse_create(argv)
     if sync:
         _require_uv()

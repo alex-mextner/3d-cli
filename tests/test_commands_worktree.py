@@ -150,3 +150,19 @@ def test_worktree_list_json(monkeypatch: Any) -> None:
 def test_worktree_unknown_subcommand() -> None:
     with pytest.raises(UsageError):
         worktree.run(["bogus"])
+
+
+@pytest.mark.parametrize("flag", ["--help", "-h"])
+def test_worktree_create_help_prints_usage_without_git(monkeypatch: Any, flag: str) -> None:
+    def no_git(args: list[str]) -> subprocess.CompletedProcess[str]:
+        raise AssertionError(f"git must not run for create {flag}: {args}")
+
+    monkeypatch.setattr(worktree, "_run_git", no_git)
+    assert worktree.run(["create", flag]) == 0
+
+
+def test_worktree_create_rejects_flag_as_branch(monkeypatch: Any) -> None:
+    monkeypatch.setattr(worktree, "_run_git", lambda args: pytest.fail(f"git ran: {args}"))
+    with pytest.raises(UsageError) as excinfo:
+        worktree.run(["create", "--base", "main"])
+    assert excinfo.value.exit_code == 2

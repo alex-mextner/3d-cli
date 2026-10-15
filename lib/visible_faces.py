@@ -49,6 +49,8 @@ from typing import Any
 import numpy as np
 import contextlib
 
+from gcode_labels import ObjectLabels, feature, undecorated
+
 MIN_AREA = 0.5  # mm²: smaller pieces / islands are noise
 LAYER = 0.12  # mm
 BAR_SPAN = 10.0  # mm: longest bridge allowed inside a declared opening
@@ -290,8 +292,8 @@ class Specs:
 
 def object_names(name: str) -> list[str]:
     """names an object pattern is matched against: the full slicer label, the part before
-    Orca's `_—_` separator and the label without its `_id_N_copy_M` suffix"""
-    out = [name, name.split("_—_")[0], re.sub(r"_id_\d+_copy_\d+$", "", name)]
+    Orca's `_—_` (Bambu's ` — `) separator and the label without its id/copy suffix"""
+    out = [name, re.split("_—_| — ", name)[0], undecorated(name)]
     return list(dict.fromkeys(out))
 
 
@@ -615,15 +617,17 @@ def _segments(m: np.ndarray, n: np.ndarray) -> np.ndarray:
 
 def parse_gcode(path: str, specs: Specs) -> tuple[dict[str, GObject], list[str]]:
     """extrusion per gated object and layer (sampled every PX/2 along each move), plus its
-    support moves. Objects come from EXCLUDE_OBJECT_START/END; a file without them is one
-    object named `plate`. Support printed outside any object block is given to every gated
-    object whose extrusion bbox (+1 mm) it touches. Returns (gated objects, all labels seen)."""
+    support moves. Objects come from the G-code's object labels (gcode_labels: EXCLUDE_OBJECT,
+    Bambu `; start printing object` blocks, ...); a file without them is one object named
+    `plate`. Support printed outside any object block is given to every gated object whose
+    extrusion bbox (+1 mm) it touches. Returns (gated objects, all labels seen)."""
     objs: dict[str, GObject] = {}
     seen: list[str] = []
     gated: dict[str, GObject | None] = {}
     orphans: list[tuple[str, np.ndarray, float]] = []
     marked = False
     cur: GObject | None = None
+    labels = ObjectLabels()
 
     def enter(label: str) -> GObject | None:
         if label not in gated:
@@ -647,29 +651,28 @@ def parse_gcode(path: str, specs: Specs) -> tuple[dict[str, GObject], list[str]]
             line = raw.strip()
             if not line:
                 continue
+            if labels.feed(line):
+                if labels.current is not None:
+                    if not marked:
+                        marked = True
+                        plate = objs.pop("plate", None)
+                        gated.pop("plate", None)
+                        seen.remove("plate")
+                        if plate is not None:
+                            orphans += plate.support
+                    cur = enter(labels.current)
+                elif marked:
+                    cur = None
+                continue
             if line[0] == ";":
                 body = line[1:].strip()
                 if body.startswith("Z:") or body.startswith("Z_HEIGHT:"):
                     with contextlib.suppress(ValueError):
                         zc = round(float(body.split(":", 1)[1]), 3)
-                elif body.startswith("TYPE:") or body.startswith("FEATURE:"):
-                    typ = body.split(":", 1)[1].strip()
+                elif (tag := feature(line)) is not None:
+                    typ = tag
                 continue
             word = line.split(None, 1)[0].upper()
-            if word == "EXCLUDE_OBJECT_START":
-                m = re.search(r"NAME=(\"[^\"]*\"|\S+)", line)
-                if not marked:
-                    marked = True
-                    plate = objs.pop("plate", None)
-                    gated.pop("plate", None)
-                    seen.remove("plate")
-                    if plate is not None:
-                        orphans += plate.support
-                cur = enter(m.group(1).strip('"') if m else "?")
-                continue
-            if word == "EXCLUDE_OBJECT_END":
-                cur = None
-                continue
             if word in ("M82", "M83"):
                 e_abs = word == "M82"
                 continue

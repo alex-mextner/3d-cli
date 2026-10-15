@@ -6,6 +6,7 @@ machine on the LAN ("u1" at 192.168.0.26 speaking Moonraker). `model:` links a d
 model entry. Issue https://github.com/alex-mextner/3d-cli/issues/91.
 
 FILES (later wins per name, whole-entry replace):
+  0. <repo>/fleet/printers.yaml              (base layer, printops.fleet; offline entries skipped)
   1. ~/.config/3d-cli/printer-devices.yaml   (XDG_CONFIG_HOME honoured)
   2. ./printer-devices.yaml                  (project-local override)
 
@@ -18,13 +19,17 @@ ENTRY:
   Optional `trusted_macros: [PAUSE, START_PRINT]` names macros (commands whose bodies the
   bounds check cannot see) known to keep the head on the bed; any other macro in a G-code
   FAILs print-preflight, so `3d printer start` needs --force for it.
-  Optional `watch: {tg: true, steer: <omp session>, exec: CMD, min_severity: warning, ...}`
+  Optional `watch: {steer: <omp session>, tg_fallback: true, exec: CMD, min_severity: warning, ...}`
   configures `3d printer watch` for this printer (keys: printer_ops/watch_run.py WATCH_KEYS).
   Optional `resume:` holds the printer-specific values of `3d gcode-resume` (ResumeProfile:
   off-bed purge macro and lengths, travel clearance, start commands); every key is required.
   Optional `bridge_max_mm: 25` is the longest span this printer bridges cleanly (measure it
   with a bridge test); the print-preflight overhangs gate uses it unless --bridge-max is
   given (default 15).
+  Optional `access: full | read-only` (default full): `3d printer upload/start/cancel`
+  refuse a read-only printer. An offline fleet printer is never contacted: get_device refuses
+  it, except get_device(name, offline_ok=True) for the G-code gates, which returns its static
+  profile (axis_limits, trusted_macros, bridge_max_mm) as a Device with adapter/access `offline`.
 
 Only devices listed here are ever contacted — no LAN discovery (issue #62 network modes).
 """
@@ -32,12 +37,16 @@ from __future__ import annotations
 
 import math
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from errors import InvalidArgument, MissingDependency, ThreeDError, UsageError
+from printer_ops.base import PrinterRefused
 from printer_ops.move_bounds import Limits
+
+if TYPE_CHECKING:
+    from printops.fleet import Fleet, FleetPrinter
 
 FILENAME = "printer-devices.yaml"
 ADAPTERS = ("moonraker", "creality-stock")
@@ -51,15 +60,16 @@ u1:
   port: 7125
   model: Snapmaker U1
   resume:                   # `3d gcode-resume` (Snapmaker/u1-klipper@10f2f69 macros)
-    purge_macro: SM_PRINT_PREEXTRUDE_FILAMENT  # INDEX=n FORCE=1 LENGTH RETRACT_LENGTH: off-bed purge
+    purge_macro: SM_PRINT_PREEXTRUDE_FILAMENT  # INDEX=n FORCE=1 LENGTH: off-bed purge (never RETRACT_LENGTH)
     purge_mm: 30            # header purge per head (cold since the pause, up to 10 mm retracted)
-    purge_retract_mm: 0.5   # the macro's RETRACT_LENGTH: mm a head is left retracted after a purge
+    purge_retract_mm: 0.5   # the macro's default RETRACT_LENGTH: mm a head is left retracted after a purge
     no_tower_prime_mm: 12   # --no-tower: off-bed prime per tool change on top of the un-retract
     clearance_mm: 5         # above everything printed before any X/Y move of the header
-    tower_margin_mm: 3      # --no-tower: margin around the prime tower kept free of travels
+    tower_margin_mm: 3      # margin around the prime tower kept free of low travels
     filament_diameter_mm: 1.75
     min_print_temp: 170     # an M109 at or above this is a print (not standby) temperature
     default_accel: 10000    # M204 S when the G-code set none before the cut
+    z_max_mm: 275           # stepper_z.position_max: every resume Z stays 1 mm below it (fail-closed)
     start_commands: [DEFECT_DETECTION_START]   # after the bed is hot, before the heads purge
 k1se:
   adapter: creality-stock   # Creality K1 family on stock firmware (HTTP + ws:9999)
@@ -77,20 +87,21 @@ class DeviceConfigError(ThreeDError):
 @dataclass(frozen=True)
 class ResumeProfile:
     """The `resume:` block of a device: printer-specific values of `3d gcode-resume`."""
-    purge_macro: str              # off-bed purge macro, called `<macro> INDEX=n FORCE=1 LENGTH= RETRACT_LENGTH=`
+    purge_macro: str              # off-bed purge macro, called `<macro> INDEX=n FORCE=1 LENGTH=`
     purge_mm: float               # header purge per head
-    purge_retract_mm: float       # mm the purge macro leaves the head retracted
+    purge_retract_mm: float       # mm the purge macro leaves the head retracted (its default; never passed)
     no_tower_prime_mm: float      # --no-tower: off-bed prime per tool change
     clearance_mm: float           # Z above everything printed before any X/Y move of the header
-    tower_margin_mm: float        # --no-tower: margin around the prime tower
+    tower_margin_mm: float        # margin around the (old) prime tower
     filament_diameter_mm: float
     min_print_temp: float         # an M109 at or above this is a print temperature
     default_accel: float          # M204 S when the G-code set none before the cut
+    z_max_mm: float               # stepper_z.position_max: the output never goes above it - 1 mm
     start_commands: tuple[str, ...]  # emitted once the bed is hot, before the heads purge
 
 
 _RESUME_NUMBERS = ("purge_mm", "purge_retract_mm", "no_tower_prime_mm", "clearance_mm", "tower_margin_mm",
-                   "filament_diameter_mm", "min_print_temp", "default_accel")
+                   "filament_diameter_mm", "min_print_temp", "default_accel", "z_max_mm")
 
 
 @dataclass(frozen=True)
@@ -107,6 +118,7 @@ class Device:
     resume: ResumeProfile | None = None  # `3d gcode-resume` values
     watch: dict[str, Any] = field(default_factory=dict, hash=False, compare=False)  # `3d printer watch` settings
     bridge_max_mm: float | None = None  # longest clean bridge, for the print-preflight overhangs gate
+    access: str = "full"  # full | read-only | offline (static profile only, never contacted)
 
 
 def user_path() -> Path:
@@ -160,8 +172,8 @@ def _resume(value: Any, name: str, path: Path) -> ResumeProfile:
                               command="printer", extra=f"Fix {path}.")
     for key in _RESUME_NUMBERS:
         v = value[key]
-        if isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0:
-            raise InvalidArgument(f"{name}.resume.{key}", str(v), ["a number >= 0"], command="printer",
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not (math.isfinite(v) and v >= 0):
+            raise InvalidArgument(f"{name}.resume.{key}", str(v), ["a finite number >= 0"], command="printer",
                                   extra=f"Fix {path}.")
     if not isinstance(cmds, list) or not all(isinstance(c, str) and c.strip() for c in cmds):
         raise InvalidArgument(f"{name}.resume.start_commands", str(cmds), ["a list of G-code lines, may be []"],
@@ -169,7 +181,7 @@ def _resume(value: Any, name: str, path: Path) -> ResumeProfile:
     f = {k: float(value[k]) for k in _RESUME_NUMBERS}
     return ResumeProfile(macro, f["purge_mm"], f["purge_retract_mm"], f["no_tower_prime_mm"], f["clearance_mm"],
                          f["tower_margin_mm"], f["filament_diameter_mm"], f["min_print_temp"], f["default_accel"],
-                         tuple(c.strip() for c in cmds))
+                         f["z_max_mm"], tuple(c.strip() for c in cmds))
 
 
 def _bridge_max(value: Any, name: str, path: Path) -> float:
@@ -211,11 +223,30 @@ def _parse(path: Path, data: Any) -> dict[str, Device]:
         resume = _resume(spec["resume"], name, path) if "resume" in spec else None
         watch = spec.get("watch") or {}
         if not isinstance(watch, dict):
-            raise InvalidArgument(f"{name}.watch", str(watch), ["a mapping, e.g. {tg: true, min_severity: warning}"],
+            raise InvalidArgument(f"{name}.watch", str(watch), ["a mapping, e.g. {tg_fallback: true, min_severity: warning}"],
                                   command="printer", extra=f"Fix {path}.")
+        access = spec.get("access", "full")
+        if access not in ("full", "read-only"):
+            raise InvalidArgument(f"{name}.access", str(access), ["full", "read-only"], command="printer",
+                                  extra=f"Fix {path}.")
         out[name] = Device(name, adapter, host, port, str(model) if model else None, path, ws_port, limits,
-                           trusted, resume, dict(watch), bridge)
+                           trusted, resume, dict(watch), bridge, str(access))
     return out
+
+
+def fleet_devices(fleet: Fleet | None) -> dict[str, Device]:
+    """The printers of fleet/printers.yaml that 3d may contact, as Devices (offline ones are not)."""
+    return _parse(fleet.path, fleet.device_specs()) if fleet is not None else {}
+
+
+def offline_device(printer: FleetPrinter) -> Device:
+    """The static profile of an offline fleet printer (no address: never contacted)."""
+    d, name, path = printer.device, printer.name, printer.source
+    limits = _axis_limits(d["axis_limits"], name, path) if "axis_limits" in d else None
+    trusted = _trusted_macros(d["trusted_macros"], name, path) if "trusted_macros" in d else frozenset()
+    bridge = _bridge_max(d["bridge_max_mm"], name, path) if "bridge_max_mm" in d else None
+    return Device(name, "offline", "", 0, printer.model, path, None, limits, trusted, bridge_max_mm=bridge,
+                  access="offline")
 
 
 def load_devices(cwd: Path | None = None) -> dict[str, Device]:
@@ -224,7 +255,10 @@ def load_devices(cwd: Path | None = None) -> dict[str, Device]:
     except ImportError as exc:  # pragma: no cover - pyyaml is a core dependency
         raise MissingDependency("pyyaml", install="uv sync", degrades="printer-devices.yaml cannot be read",
                                 command="printer") from exc
-    devices: dict[str, Device] = {}
+    from printops.fleet import load_fleet
+
+    fleet = load_fleet()
+    devices = fleet_devices(fleet)
     for path in search_paths(cwd):
         if not path.is_file():
             continue
@@ -233,11 +267,37 @@ def load_devices(cwd: Path | None = None) -> dict[str, Device]:
         except yaml.YAMLError as exc:
             raise DeviceConfigError(f"{path}: invalid YAML: {exc}", command="printer") from exc
         devices.update(_parse(path, data))
+    # An override replaces device settings, never the fleet's access (D7): an offline printer
+    # stays out of the contactable set, a read-only one stays read-only. The model is the
+    # printer's identity: an override without `model:` keeps the fleet's (vision calibration).
+    for name, printer in (fleet.printers if fleet is not None else {}).items():
+        if name not in devices:
+            continue
+        if printer.access == "offline":
+            del devices[name]
+            continue
+        device = devices[name]
+        devices[name] = replace(device, model=device.model or printer.model,
+                                access=device.access if printer.access == "full" else printer.access)
     return devices
 
 
-def get_device(name: str, cwd: Path | None = None) -> Device:
+def get_device(name: str, cwd: Path | None = None, *, offline_ok: bool = False) -> Device:
+    """Device `name`. An offline fleet printer is refused, unless `offline_ok` (callers that only
+    read its static profile, never contact it)."""
     devices = load_devices(cwd)
+    if name not in devices:
+        from printops.fleet import load_fleet
+
+        fleet = load_fleet()
+        offline = fleet.printers.get(name) if fleet is not None else None
+        if offline is not None:
+            if offline_ok:
+                return offline_device(offline)
+            raise PrinterRefused(
+                f"{name} ({offline.model}, owner {offline.owner}) is an offline fleet printer: 3d never contacts it",
+                command="printer",
+                remediation=["Run its jobs by hand; `3d printer list` shows which printers 3d can drive."])
     if not devices:
         raise UsageError(
             "no printers configured",
