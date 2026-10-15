@@ -280,7 +280,7 @@ def slice_models(
 def insert_after(
     text: str,
     pattern: str,
-    lines: list[str],
+    lines: list[str] | None = None,
     *,
     every: bool = False,
     render: Callable[[re.Match[str]], list[str]] | None = None,
@@ -294,7 +294,7 @@ def insert_after(
     for m in hits:
         end = text.index("\n", m.end()) + 1
         out.append(text[last:end])
-        out.append("".join(f"{line}\n" for line in (render(m) if render else lines)))
+        out.append("".join(f"{line}\n" for line in (render(m) if render else lines or [])))
         last = end
     out.append(text[last:])
     return "".join(out)
@@ -333,6 +333,14 @@ def publish(text: str, out: Path) -> None:
 
 
 def finish(gcode: Path, log: str, machine: dict[str, Any]) -> None:
+    try:
+        _finish(gcode, log, machine)
+    except BaseException:
+        gcode.unlink(missing_ok=True)  # a G-code without thumbnails/sidecar must not stay behind
+        raise
+
+
+def _finish(gcode: Path, log: str, machine: dict[str, Any]) -> None:
     """Thumbnails, then the slice-warnings sidecar for the final bytes (print-preflight checks both).
     The empty-exclude-area error is accepted with its reason only when the machine has none."""
     from gcode_thumbnails import ensure
@@ -349,7 +357,7 @@ def finish(gcode: Path, log: str, machine: dict[str, Any]) -> None:
 
 def _filament_overrides(color: str, temp: int | None) -> dict[str, Any]:
     over: dict[str, Any] = {"filament_colour": color} if color else {}
-    if temp:
+    if temp is not None:
         over |= {"nozzle_temperature": temp, "nozzle_temperature_initial_layer": temp}
     return over
 
@@ -378,8 +386,6 @@ def gen_pa(
         "bottom_shell_layers": 3,
         "outer_wall_speed": PA_SPEED,
         "inner_wall_speed": PA_SPEED,
-        "default_jerk": PA_SCV,
-        "default_acceleration": PA_ACCEL,
         "brim_type": "no_brim",
         "skirt_loops": 0,
     }
@@ -450,7 +456,6 @@ def gen_flow(
     text = insert_after(
         text,
         r"^EXCLUDE_OBJECT_START NAME=flow_([mp])(\d+)\S*$",
-        [],
         every=True,
         render=factor,
     )

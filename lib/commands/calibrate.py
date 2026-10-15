@@ -101,9 +101,7 @@ def _int(raw: str, what: str, sub: str) -> int:
     try:
         return int(raw)
     except ValueError as e:
-        raise UsageError(
-            f"{what} must be an integer, got {raw!r}", command=f"{PREFIX} {sub}"
-        ) from e
+        raise UsageError(f"{what} must be an integer, got {raw!r}", command=f"{PREFIX} {sub}") from e
 
 
 def _pairs(raw: str, opt: str, sub: str) -> list[tuple[str, str]]:
@@ -111,9 +109,7 @@ def _pairs(raw: str, opt: str, sub: str) -> list[tuple[str, str]]:
     for part in raw.split(","):
         key, sep, value = part.partition("=")
         if not sep or not key.strip() or not value.strip():
-            raise UsageError(
-                f"{opt} wants NAME=VALUE pairs, got {part!r}", command=f"{PREFIX} {sub}"
-            )
+            raise UsageError(f"{opt} wants NAME=VALUE pairs, got {part!r}", command=f"{PREFIX} {sub}")
         out.append((key.strip(), value.strip()))
     return out
 
@@ -139,52 +135,31 @@ def _item_line(item: dict[str, Any]) -> str:
 
 
 def _sorted(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return sorted(
-        items,
-        key=lambda i: (LEVEL_ORDER.get(i["level"], 9), _where(i), i.get("kind") or ""),
-    )
+    return sorted(items, key=lambda i: (LEVEL_ORDER.get(i["level"], 9), _where(i), i.get("kind") or ""))
 
 
 def _plan(argv: list[str]) -> int:
     from printops.cli._common import api_errors, client, parse
 
-    p = parse(
-        argv,
-        "plan",
-        values={"--printer", "--head", "--spool", "--plate"} | COMMON_VALUES,
-        flags={"--all"} | COMMON_FLAGS,
-        prefix=PREFIX,
-    )
+    p = parse(argv, "plan", values={"--printer", "--head", "--spool", "--plate"} | COMMON_VALUES,
+              flags={"--all"} | COMMON_FLAGS, prefix=PREFIX)
     printer = p.opts.get("--printer")
     if not printer:
         raise UsageError("--printer is required", command=f"{PREFIX} plan")
     spool = _int(p.opts["--spool"], "--spool", "plan") if "--spool" in p.opts else None
     with api_errors("plan", prefix=PREFIX):
         data = client(p, "plan", prefix=PREFIX).get(
-            "/v1/calibrations/required",
-            printer=printer,
-            head=p.opts.get("--head"),
-            spool=spool,
-            plate=p.opts.get("--plate"),
-            all="true" if "--all" in p.flags else None,
+            "/v1/calibrations/required", printer=printer, head=p.opts.get("--head"), spool=spool,
+            plate=p.opts.get("--plate"), all="true" if "--all" in p.flags else None,
         )
     if "--json" in p.flags:
         print(json.dumps(data, indent=2, ensure_ascii=False))
         return 0
     items = _sorted(data["items"])
-    counts = {
-        lv: sum(1 for i in items if i["level"] == lv)
-        for lv in ("FAIL", "WARN", "UNVERIFIED")
-    }
-    summary = (
-        ", ".join(f"{n} {lv}" for lv, n in counts.items() if n) or "nothing needed"
-    )
+    counts = {lv: sum(1 for i in items if i["level"] == lv) for lv in ("FAIL", "WARN", "UNVERIFIED")}
+    summary = ", ".join(f"{n} {lv}" for lv, n in counts.items() if n) or "nothing needed"
     est = data["estimate"]
-    cost = (
-        f"; ~{est['minutes']:g} min, ~{est['grams']:g} g"
-        if est["minutes"] or est["grams"]
-        else ""
-    )
+    cost = f"; ~{est['minutes']:g} min, ~{est['grams']:g} g" if est["minutes"] or est["grams"] else ""
     print(f"{data['printer']}: {summary}{cost}")
     for item in items:
         print(_item_line(item))
@@ -196,60 +171,26 @@ def _plan(argv: list[str]) -> int:
 def _record(argv: list[str]) -> int:
     from printops.cli._common import api_errors, client, parse
 
-    p = parse(
-        argv,
-        "record",
-        values={
-            "--printer",
-            "--head",
-            "--spool",
-            "--filament",
-            "--lot",
-            "--plate",
-            "--values",
-            "--method",
-            "--note",
-            "--evidence",
-            "--valid-until",
-        }
-        | COMMON_VALUES,
-        flags=COMMON_FLAGS,
-        n_pos=1,
-        prefix=PREFIX,
-    )
+    p = parse(argv, "record", values={"--printer", "--head", "--spool", "--filament", "--lot", "--plate",
+                                      "--values", "--method", "--note", "--evidence", "--valid-until"}
+              | COMMON_VALUES, flags=COMMON_FLAGS, n_pos=1, prefix=PREFIX)
     if "--values" not in p.opts:
-        raise UsageError(
-            "--values is required, e.g. --values pressure_advance=0.035",
-            command=f"{PREFIX} record",
-        )
+        raise UsageError("--values is required, e.g. --values pressure_advance=0.035", command=f"{PREFIX} record")
     if "--spool" in p.opts and "--filament" in p.opts:
-        raise UsageError(
-            "pass --spool or --filament, not both", command=f"{PREFIX} record"
-        )
+        raise UsageError("pass --spool or --filament, not both", command=f"{PREFIX} record")
     body: dict[str, Any] = {
         "kind": p.pos[0],
-        "values": {
-            k: _value(v) for k, v in _pairs(p.opts["--values"], "--values", "record")
-        },
+        "values": {k: _value(v) for k, v in _pairs(p.opts["--values"], "--values", "record")},
     }
-    for opt, key in (
-        ("--printer", "printer"),
-        ("--head", "head"),
-        ("--lot", "lot_nr"),
-        ("--plate", "plate"),
-        ("--method", "method"),
-        ("--note", "note"),
-        ("--valid-until", "valid_until"),
-    ):
+    for opt, key in (("--printer", "printer"), ("--head", "head"), ("--lot", "lot_nr"), ("--plate", "plate"),
+                     ("--method", "method"), ("--note", "note"), ("--valid-until", "valid_until")):
         if opt in p.opts:
             body[key] = p.opts[opt]
     for opt, key in (("--spool", "spool_id"), ("--filament", "filament_id")):
         if opt in p.opts:
             body[key] = _int(p.opts[opt], opt, "record")
     if "--evidence" in p.opts:
-        body["evidence"] = [
-            e.strip() for e in p.opts["--evidence"].split(",") if e.strip()
-        ]
+        body["evidence"] = [e.strip() for e in p.opts["--evidence"].split(",") if e.strip()]
     with api_errors("record", prefix=PREFIX):
         rec = client(p, "record", prefix=PREFIX).post("/v1/calibrations", body)
     if "--json" in p.flags:
@@ -260,48 +201,29 @@ def _record(argv: list[str]) -> int:
 
 
 def _record_line(rec: dict[str, Any]) -> str:
-    where = (
-        "/".join(x for x in (rec.get("printer"), rec.get("head")) if x) or "any printer"
-    )
+    where = "/".join(x for x in (rec.get("printer"), rec.get("head")) if x) or "any printer"
     fil = rec.get("filament") or {}
-    what = " ".join(
-        str(x) for x in (fil.get("vendor"), fil.get("name") or fil.get("material")) if x
-    )
+    what = " ".join(str(x) for x in (fil.get("vendor"), fil.get("name") or fil.get("material")) if x)
     lot = f" lot {fil['lot_nr']}" if fil.get("lot_nr") else ""
-    vals = ", ".join(
-        f"{k}={v:g}" if isinstance(v, (int, float)) else f"{k}={v}"
-        for k, v in (rec.get("values") or {}).items()
-    )
+    vals = ", ".join(f"{k}={v:g}" if isinstance(v, (int, float)) else f"{k}={v}"
+                     for k, v in (rec.get("values") or {}).items())
     sup = f" superseded by #{rec['superseded_by']}" if rec.get("superseded_by") else ""
-    return (
-        f"{rec['kind']} {where}"
-        + (f" {what}{lot}" if what else "")
-        + (f": {vals}" if vals else "")
-        + f" [{rec['status']}, {rec['method']}, "
-        f"{(rec.get('recorded_at') or rec['created_at'])[:10]}]{sup}"
-    )
+    return (f"{rec['kind']} {where}" + (f" {what}{lot}" if what else "")
+            + (f": {vals}" if vals else "") + f" [{rec['status']}, {rec['method']}, "
+            f"{(rec.get('recorded_at') or rec['created_at'])[:10]}]{sup}")
 
 
 def _ls(argv: list[str]) -> int:
     from printops.cli._common import api_errors, client, parse
 
-    p = parse(
-        argv,
-        "ls",
-        values={"--printer", "--head", "--kind", "--status", "--limit"} | COMMON_VALUES,
-        flags={"--all"} | COMMON_FLAGS,
-        prefix=PREFIX,
-    )
+    p = parse(argv, "ls", values={"--printer", "--head", "--kind", "--status", "--limit"} | COMMON_VALUES,
+              flags={"--all"} | COMMON_FLAGS, prefix=PREFIX)
     limit = _int(p.opts["--limit"], "--limit", "ls") if "--limit" in p.opts else 50
     with api_errors("ls", prefix=PREFIX):
         data = client(p, "ls", prefix=PREFIX).get(
-            "/v1/calibrations",
-            printer=p.opts.get("--printer"),
-            head=p.opts.get("--head"),
-            kind=p.opts.get("--kind"),
-            status=p.opts.get("--status"),
-            current=None if "--all" in p.flags or "--status" in p.opts else "true",
-            limit=limit,
+            "/v1/calibrations", printer=p.opts.get("--printer"), head=p.opts.get("--head"),
+            kind=p.opts.get("--kind"), status=p.opts.get("--status"),
+            current=None if "--all" in p.flags or "--status" in p.opts else "true", limit=limit,
         )
     if "--json" in p.flags:
         print(json.dumps(data, indent=2, ensure_ascii=False))
@@ -317,9 +239,7 @@ def _ls(argv: list[str]) -> int:
 def _show(argv: list[str]) -> int:
     from printops.cli._common import api_errors, client, parse
 
-    p = parse(
-        argv, "show", values=COMMON_VALUES, flags=COMMON_FLAGS, n_pos=1, prefix=PREFIX
-    )
+    p = parse(argv, "show", values=COMMON_VALUES, flags=COMMON_FLAGS, n_pos=1, prefix=PREFIX)
     cal_id = _int(p.pos[0], "ID", "show")
     with api_errors("show", prefix=PREFIX):
         rec = client(p, "show", prefix=PREFIX).get(f"/v1/calibrations/{cal_id}")
@@ -332,10 +252,7 @@ def _spool_map(raw: str) -> dict[str, int]:
     for head, sid in _pairs(raw, "--spools", "check"):
         label = head.upper()
         if not (label.startswith("T") and label[1:].isdigit() and int(label[1:]) >= 1):
-            raise UsageError(
-                f"--spools: {head!r} is not a head label like T1",
-                command=f"{PREFIX} check",
-            )
+            raise UsageError(f"--spools: {head!r} is not a head label like T1", command=f"{PREFIX} check")
         out[str(int(label[1:]) - 1)] = _int(sid, "--spools spool id", "check")
     return out
 
@@ -362,15 +279,8 @@ def gcode_inputs(path: Path) -> dict[str, Any]:
 def _check(argv: list[str]) -> int:
     from printops.cli._common import api_errors, client, parse
 
-    p = parse(
-        argv,
-        "check",
-        values={"--printer", "--spools", "--plate", "--accept", "--reason"}
-        | COMMON_VALUES,
-        flags=COMMON_FLAGS,
-        n_pos=1,
-        prefix=PREFIX,
-    )
+    p = parse(argv, "check", values={"--printer", "--spools", "--plate", "--accept", "--reason"} | COMMON_VALUES,
+              flags=COMMON_FLAGS, n_pos=1, prefix=PREFIX)
     printer = p.opts.get("--printer")
     if not printer:
         raise UsageError("--printer is required", command=f"{PREFIX} check")
@@ -379,17 +289,10 @@ def _check(argv: list[str]) -> int:
         raise InputNotFound(str(path), command=f"{PREFIX} check")
     accept = [a.strip() for a in p.opts.get("--accept", "").split(",") if a.strip()]
     if accept and not p.opts.get("--reason", "").strip():
-        raise UsageError(
-            "--accept needs --reason (it is logged)", command=f"{PREFIX} check"
-        )
-    body = {
-        **gcode_inputs(path),
-        "printer": printer,
-        "plate": p.opts.get("--plate"),
-        "spools": _spool_map(p.opts["--spools"]) if "--spools" in p.opts else {},
-        "accept": accept,
-        "reason": p.opts.get("--reason"),
-    }
+        raise UsageError("--accept needs --reason (it is logged)", command=f"{PREFIX} check")
+    body = {**gcode_inputs(path), "printer": printer, "plate": p.opts.get("--plate"),
+            "spools": _spool_map(p.opts["--spools"]) if "--spools" in p.opts else {},
+            "accept": accept, "reason": p.opts.get("--reason")}
     with api_errors("check", prefix=PREFIX):
         data = client(p, "check", prefix=PREFIX).post("/v1/calibrations/check", body)
     if "--json" in p.flags:
@@ -401,15 +304,11 @@ def _check(argv: list[str]) -> int:
             print(_item_line(item))
         if assumed:
             kinds = sorted({str(i["kind"]) for i in assumed})
-            print(
-                f"  {'PASS':<10} {'-':<4} factory state assumed (never recorded, no maintenance since): "
-                f"{', '.join(kinds)}"
-            )
+            print(f"  {'PASS':<10} {'-':<4} factory state assumed (never recorded, no maintenance since): "
+                  f"{', '.join(kinds)}")
         print(f"STATUS: {data['overall']}")
     if data["overall"] == "FAIL":
-        raise GateFailure(
-            "calibration_current: FAIL", command=f"{PREFIX} check", silent=True
-        )
+        raise GateFailure("calibration_current: FAIL", command=f"{PREFIX} check", silent=True)
     return 0
 
 
@@ -423,7 +322,11 @@ def _gen(argv: list[str]) -> int:
         n_pos=1,
         prefix=PREFIX,
     )
+    from slicing.calibration_gen import KINDS, GenError, generate
+
     kind = p.pos[0]
+    if kind not in KINDS:
+        raise UsageError(f"unknown kind {kind!r} (accepted: {', '.join(KINDS)})", command=f"{PREFIX} gen")
     printer = p.opts.get("--printer")
     if not printer:
         raise UsageError("--printer is required", command=f"{PREFIX} gen")
@@ -445,7 +348,6 @@ def _gen(argv: list[str]) -> int:
 
     from cli.env import find_slicer
     from printops.fleet import load_fleet
-    from slicing.calibration_gen import GenError, generate
 
     fleet = load_fleet()
     entry = fleet.printers.get(printer) if fleet else None
@@ -482,14 +384,7 @@ def _gen(argv: list[str]) -> int:
     return 0
 
 
-SUBS = {
-    "plan": _plan,
-    "record": _record,
-    "ls": _ls,
-    "show": _show,
-    "check": _check,
-    "gen": _gen,
-}
+SUBS = {"plan": _plan, "record": _record, "ls": _ls, "show": _show, "check": _check, "gen": _gen}
 
 
 def run(argv: list[str]) -> int:
@@ -501,11 +396,8 @@ def run(argv: list[str]) -> int:
         return 0
     fn = SUBS.get(argv[0])
     if fn is None:
-        raise UsageError(
-            f"unknown calibrate subcommand {argv[0]!r}; accepted: {', '.join(SUBS)}",
-            command=PREFIX,
-            remediation=["Run `3d calibrate --help`."],
-        )
+        raise UsageError(f"unknown calibrate subcommand {argv[0]!r}; accepted: {', '.join(SUBS)}",
+                         command=PREFIX, remediation=["Run `3d calibrate --help`."])
     return fn(argv[1:])
 
 
