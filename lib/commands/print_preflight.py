@@ -85,7 +85,7 @@ Options:
   --printops-api URL      3d-api for the PrintOps gates (default: $PRINTOPS_API, else `api:` in
                           ~/.config/3d-cli/printops.yaml; token from $PRINTOPS_TOKEN / that file)
   --offline               no network at all: the printer is not contacted (its fleet profile is
-                          used) and the PrintOps state comes from the snapshot file
+                          used) and the PrintOps state comes from the snapshot file; not with --printops-api
   --printops-snapshot F   snapshot for --offline (default: $PRINTOPS_SNAPSHOT, else
                           ~/.cache/3d-cli/printops-snapshot.json; `3d printops gates snapshot`)
   --json                  JSON report on stdout

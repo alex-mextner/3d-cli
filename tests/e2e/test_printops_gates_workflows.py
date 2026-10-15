@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 
 import pytest
+from printer_fakes import FakeMoonraker, write_devices
 from printops_fixtures import LiveApi
 
 from printops.client import ApiClient
@@ -227,3 +228,88 @@ def test_preflight_reads_3d_api_then_the_offline_snapshot(
             env_extra={"THREED_FLEET": str(fleet)},
         ).stdout
     )
+
+
+def test_printer_start_refuses_a_plate_sliced_for_another_printer(
+    tmp_path: Path, fleet: Path
+) -> None:
+    """The user starts a K1 SE plate on the U1 by mistake: `3d printer start` runs the PrintOps
+    gates like print-preflight does and refuses before any start request. With 3d-api configured
+    but down, the right plate still starts (forced past the plain G-code gates): PrintOps state
+    degrades to fleet facts, it never blocks on its own."""
+    moon = FakeMoonraker()
+    good = _plate(tmp_path / "plate.gcode")
+    wrong = tmp_path / "k1.gcode"
+    wrong.write_text(
+        good.read_text(encoding="utf-8").replace(
+            "; printer_model = Snapmaker U1", "; printer_model = Creality K1 SE"
+        ),
+        encoding="utf-8",
+    )
+    env = {"THREED_FLEET": str(fleet)}
+    down = {**env, "PRINTOPS_API": "http://127.0.0.1:9", "PRINTOPS_TOKEN": "x"}
+    with moon.serve():
+        write_devices(tmp_path / "xdg-config", moon=moon)
+        ups = [
+            run_cli(tmp_path, "printer", "upload", "u1", p.name, env_extra=env)
+            for p in (good, wrong)
+        ]
+        refused = run_cli(
+            tmp_path, "printer", "start", "u1", wrong.name, "--yes", env_extra=env
+        )
+        sent_after_refusal = [r.path for r in moon.writes()]
+        started = run_cli(
+            tmp_path,
+            "printer",
+            "start",
+            "u1",
+            good.name,
+            "--yes",
+            "--force",
+            env_extra=down,
+        )
+
+    assert all(u.returncode == 0 for u in ups), [u.stderr for u in ups]
+    assert refused.returncode == 1 and "preflight FAIL; start refused" in refused.stderr
+    assert (
+        "FAIL  printer_profile_match sliced for 'Creality K1 SE', but u1 is a 'Snapmaker U1'"
+        in refused.stdout
+    )
+    assert "/printer/print/start" not in sent_after_refusal
+    assert started.returncode == 0, started.stderr
+    assert (
+        "3d-api http://127.0.0.1:9:" in started.stdout
+        and "fleet facts only" in started.stdout
+    )
+    forced = next(
+        line for line in started.stdout.splitlines() if line.startswith("FORCED:")
+    )
+    assert not any(g in forced for g in PRINTOPS_GATES), forced
+    assert [r.path for r in moon.writes()].count("/printer/print/start") == 1
+
+
+def test_offline_preflight_with_an_explicit_api_is_a_usage_error(
+    tmp_path: Path, fleet: Path
+) -> None:
+    """The slicer hook mode promises no network: asking for --offline and a 3d-api URL at once
+    is refused with exit 2 before anything is contacted; $PRINTOPS_API alone does not trip it."""
+    plate = _plate(tmp_path / "plate.gcode")
+    env = {"THREED_FLEET": str(fleet), "PRINTOPS_API": "http://127.0.0.1:9"}
+    both = run_cli(
+        tmp_path,
+        "print-preflight",
+        plate.name,
+        "--offline",
+        "--printops-api",
+        "http://127.0.0.1:9",
+        env_extra=env,
+    )
+    env_only = run_cli(
+        tmp_path, "print-preflight", plate.name, "--offline", env_extra=env
+    )
+
+    assert both.returncode == 2
+    assert "--offline reads the snapshot and never calls 3d-api" in both.stderr
+    assert both.stdout == ""
+    assert env_only.returncode in (0, 1), env_only.stderr
+    assert "no PrintOps snapshot" in env_only.stdout

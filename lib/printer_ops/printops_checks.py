@@ -119,9 +119,12 @@ class JobFacts:
         out: list[float | None] = []
         for v in raw.replace(";", ",").split(","):
             try:
-                out.append(float(v))
+                n = float(v)
             except ValueError:  # noqa: PERF203 — a non-number entry is unknown, keep the rest
                 out.append(None)
+                continue
+            # NaN/inf compare false both ways and would slip past every range check: unknown
+            out.append(n if math.isfinite(n) else None)
         return out
 
     @staticmethod
@@ -190,10 +193,10 @@ def read_job(path: Path) -> JobFacts:
                     nozzle[tool] = max(nozzle.get(tool, 0.0), s)
     job = JobFacts(str(path), config, [], nozzle, bed)
     amounts = job.num_list("filament used [mm]") or job.num_list("filament used [g]")
-    if amounts:
-        job.used_tools = [i for i, a in enumerate(amounts) if a]
-    else:
-        job.used_tools = sorted(tool_lines) or [0]
+    # an all-zero/unreadable usage footer names no tool: fall back to the tool changes seen
+    job.used_tools = (
+        [i for i, a in enumerate(amounts) if a] or sorted(tool_lines) or [0]
+    )
     return job
 
 
@@ -371,6 +374,11 @@ def context_from_options(
     from errors import UsageError
     from printops.client import ApiConfigError, load_config
 
+    if offline and api:
+        raise UsageError(
+            "--offline reads the snapshot and never calls 3d-api: drop --printops-api or --offline",
+            command=command,
+        )
     try:
         env_api, env_token = (None, None) if offline else load_config()
     except ApiConfigError as e:
@@ -486,6 +494,15 @@ class _Ctx:
     @property
     def known(self) -> bool:
         return self.state.get("bindings") == "ledger"
+
+    @property
+    def unbound_reason(self) -> str:
+        """Why a used slot has no spool to check: unbound in the ledger, or no ledger at all."""
+        return (
+            "no spool bound to this slot"
+            if self.known
+            else "spool not known (no PrintOps state)"
+        )
 
     def tools(
         self,
@@ -678,12 +695,7 @@ def check_temps(c: _Ctx) -> list[Finding]:
     for t, slot, entry, _head in c.tools():
         spool = (entry or {}).get("spool")
         if spool is None:
-            why = (
-                "no spool bound to this slot"
-                if c.known
-                else "spool not known (no PrintOps state)"
-            )
-            out.append(_f(name, "unknown", why, t, slot))
+            out.append(_f(name, "unknown", c.unbound_reason, t, slot))
             continue
         problems: list[tuple[str, str]] = []
         unknown: list[str] = []
@@ -750,12 +762,7 @@ def check_loaded(c: _Ctx) -> list[Finding]:
     for t, slot, entry, _head in c.tools():
         spool = (entry or {}).get("spool")
         if spool is None:
-            why = (
-                "no spool bound to this slot"
-                if c.known
-                else "spool not known (no PrintOps state)"
-            )
-            out.append(_f(name, "unknown", why, t, slot))
+            out.append(_f(name, "unknown", c.unbound_reason, t, slot))
             continue
         who = spool.get("label") or f"spool #{spool.get('id')}"
         want_type = c.policy.material(c.job.text("filament_type", t))
@@ -881,12 +888,9 @@ def check_sufficient(c: _Ctx) -> list[Finding]:
         need = grams + p.purge_g_per_tool + max(p.margin_g, grams * p.margin_pct / 100)
         rem = (spool or {}).get("remaining")
         if spool is None or not isinstance(rem, dict):
-            why = (
-                "no spool bound to this slot"
-                if c.known
-                else "spool not known (no PrintOps state)"
+            out.append(
+                _f(name, "unknown", f"needs {need:.0f} g; {c.unbound_reason}", t, slot)
             )
-            out.append(_f(name, "unknown", f"needs {need:.0f} g; {why}", t, slot))
             continue
         lo, hi = float(rem.get("lo_g") or 0), float(rem.get("hi_g") or 0)
         weigh = f" — weigh it: 3d printops spool measure {spool.get('id')} GROSS_G"
@@ -925,12 +929,7 @@ def check_drying(c: _Ctx) -> list[Finding]:
     for t, slot, entry, _head in c.tools():
         spool = (entry or {}).get("spool")
         if spool is None:
-            why = (
-                "no spool bound to this slot"
-                if c.known
-                else "spool not known (no PrintOps state)"
-            )
-            out.append(_f(name, "unknown", why, t, slot))
+            out.append(_f(name, "unknown", c.unbound_reason, t, slot))
             continue
         d = spool.get("drying") or {}
         state = d.get("state")

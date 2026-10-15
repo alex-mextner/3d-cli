@@ -6,7 +6,9 @@ from __future__ import annotations
 
 import datetime
 import json
+import re
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -14,10 +16,12 @@ import pytest
 import yaml
 from printops_fakes import FakeSpoolman
 
+from errors import UsageError
 from printer_ops import preflight
 from printer_ops.printops_checks import (
     PrintopsContext,
     ciede2000,
+    context_from_options,
     delta_e,
     read_job,
     run_checks,
@@ -290,6 +294,49 @@ def test_read_job_per_tool_values_and_body_temperatures(tmp_path: Path) -> None:
     # `M109 S140` before the first `Tn` (start-macro nozzle wipe) is attributed to no tool
     assert job.body_nozzle_max == {0: 215, 2: 240, 3: 250}
     assert job.body_bed_max == 65 and job.grams(2) == 50
+
+
+@pytest.mark.parametrize("used", ["0.00, 0.00, 0.00, 0.00", "nan, N/A, inf, -inf"])
+def test_usage_footer_naming_no_tool_falls_back_to_tool_changes(
+    tmp_path: Path, used: str
+) -> None:
+    path = gcode(tmp_path)
+    text = path.read_text(encoding="utf-8")
+    for key in ("filament used [mm]", "filament used [g]"):
+        text = re.sub(
+            rf"^; {re.escape(key)} = .*$", f"; {key} = {used}", text, flags=re.M
+        )
+    path.write_text(text, encoding="utf-8")
+    assert read_job(path).used_tools == [0, 2]
+    checks = run(path, good_state())
+    assert "nozzle_compat" in checks and "filament_temp_range" in checks
+
+
+def test_non_finite_footer_numbers_are_unknown_not_pass(tmp_path: Path) -> None:
+    path = gcode(tmp_path, nozzle_temp="nan", first_layer="inf")
+    path.write_text(
+        path.read_text(encoding="utf-8").replace(
+            "; filament used [g] = 20.00, 0.00, 50.00, 0.00",
+            "; filament used [g] = NaN, 0.00, NaN, 0.00",
+        ),
+        encoding="utf-8",
+    )
+    job = read_job(path)
+    assert job.num("nozzle_temperature", 0) is None and job.grams(0) is None
+    checks = run(path, good_state())
+    assert checks["filament_sufficient"].status != "PASS"
+
+
+def test_offline_with_an_explicit_api_is_a_usage_error() -> None:
+    with pytest.raises(UsageError, match="--offline reads the snapshot"):
+        context_from_options(
+            "u1",
+            None,
+            api="http://h:8765",
+            offline=True,
+            snapshot=None,
+            command="print-preflight",
+        )
 
 
 def test_ciede2000_matches_sharma_reference_pairs() -> None:
@@ -671,6 +718,21 @@ def test_broken_snapshot_is_reported(tmp_path: Path) -> None:
     path.write_text(json.dumps({"version": 9}), encoding="utf-8")
     with pytest.raises(gates.SnapshotError, match="not a version-1 PrintOps snapshot"):
         gates.read_snapshot(path)
+
+
+def test_concurrent_snapshot_writers_never_share_a_temp_file(tmp_path: Path) -> None:
+    path = tmp_path / "cache" / "snap.json"
+    snaps = [
+        {"version": 1, "taken_at": f"2026-10-15T0{i}:00:00Z", "printers": {}}
+        for i in range(8)
+    ]
+    with ThreadPoolExecutor(8) as pool:
+        list(pool.map(lambda s: gates.write_snapshot(path, s), snaps * 4))
+    assert gates.read_snapshot(path) in snaps
+    assert [p.name for p in path.parent.iterdir()] == ["snap.json"]
+    assert (
+        path.stat().st_mode & 0o777 == 0o644
+    )  # readable like any cache file, not mkstemp's 0600
 
 
 # -- 3d-api state ------------------------------------------------------------------------------

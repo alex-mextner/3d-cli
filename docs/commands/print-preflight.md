@@ -80,7 +80,7 @@ Options:
 - `--json` — JSON report (`checks[]` with `name`, `status`, `detail`, `lines`): `3d print-preflight out/part.gcode --printer u1 --json | jq '.checks[] | select(.status=="FAIL")'`
 - `--secs S` — Creality: seconds to listen for pushed state: `3d print-preflight out/roof.gcode --printer k1se --secs 5`
 - `--printops-api URL` — 3d-api for the PrintOps gates (default `$PRINTOPS_API`, else `printops.yaml`): `3d print-preflight out/part.gcode --printer u1 --printops-api http://192.168.0.39:8765`
-- `--offline` — no network: no printer contact, PrintOps state from the snapshot (the slicer hook mode): `3d print-preflight out/part.gcode --offline`
+- `--offline` — no network: no printer contact, PrintOps state from the snapshot (the slicer hook mode); together with `--printops-api` it is a usage error: `3d print-preflight out/part.gcode --offline`
 - `--printops-snapshot FILE` — the snapshot for `--offline`: `3d print-preflight out/part.gcode --offline --printops-snapshot ~/snap.json`
 
 Exit: 0 PASS or WARN (UNVERIFIED lines included), 1 FAIL, 2 usage error or missing file.
