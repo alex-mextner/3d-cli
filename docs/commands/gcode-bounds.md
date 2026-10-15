@@ -45,6 +45,11 @@ contacted, but their `axis_limits` and `trusted_macros` still serve this check:
 X 0..256, Y −3..265) instead of FAILing on them
 ([#142](https://github.com/alex-mextner/3d-cli/issues/142)).
 
+Which file wins: for a `full`/`read-only` printer a `printer-devices.yaml` entry with the same
+name replaces the fleet's settings (whole entry). An offline printer's profile comes only from
+`fleet/printers.yaml`: a `printer-devices.yaml` entry with its name is ignored, so change the
+fleet file to change its limits or trusted commands.
+
 Options:
 
 - `--printer NAME` — `3d gcode-bounds print/k1se/base.gcode --printer k1se`

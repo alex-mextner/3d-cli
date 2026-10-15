@@ -124,7 +124,8 @@ The device settings of the fleet's `full`/`read-only` printers are the base laye
 `~/.config/3d-cli/printer-devices.yaml` (honours `XDG_CONFIG_HOME`) and then a
 `./printer-devices.yaml` in the current directory replace a printer's device settings by name
 (whole entry). Only printers listed in these files are ever contacted — there is no network
-discovery.
+discovery. An override never loosens the fleet's `access`: an entry named like an offline printer is
+ignored, and one named like a read-only printer stays read-only.
 
 ```yaml
 u1:
