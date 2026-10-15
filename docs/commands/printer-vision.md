@@ -16,7 +16,9 @@ from the device's `watch:` block in `printer-devices.yaml`).
 3d printer vision fetch-model
 ```
 
-- `NAME` — a Moonraker printer from `3d printer list` (the Creality K1 SE has no camera).
+- `NAME` — a Moonraker printer from `3d printer list` (the rooted K1 SE runs Moonraker
+  and its USB webcam is served by mjpg-streamer; `fleet/printers.yaml` sets its `watch.vision.snapshot`
+  to `http://192.168.0.27:8080/?action=snapshot`, a full URL fetched directly).
 - `--interval` — seconds between frames (default 10; the thresholds were tuned for 10 s).
 - `--once` — score the current frame, print one JSON verdict and exit; `--save` also writes the
   frame (with detection boxes when there are any).

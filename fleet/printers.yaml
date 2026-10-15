@@ -84,8 +84,12 @@ k1se:
   model: Creality K1 SE
   owner: own
   access: full
-  adapter: creality-stock   # Creality K1 SE (K1SE-85B6), stock firmware: HTTP upload + ws:9999
+  # Rooted 2026-10-15 + Creality Helper Script Moonraker (runbook: issue #221,
+  # https://github.com/alex-mextner/3d-cli/issues/221). The stock HTTP + ws:9999 stack still runs, but there is
+  # no automatic fallback: if Moonraker is down, set `adapter: creality-stock` in a printer-devices.yaml override by hand.
+  adapter: moonraker
   host: 192.168.0.27
+  port: 7125
   # stepper_x/y position_min/max: CrealityOfficial/K1_Series_Klipper config/K1_SE_CR4CU220812S12/printer.cfg
   axis_limits: {x: [-5, 229], y: [-0.5, 227]}
   # Stock K1 SE macros (CrealityOfficial K1_Series_Klipper gcode_macro.cfg); PAUSE parks at
@@ -93,6 +97,8 @@ k1se:
   trusted_macros: [START_PRINT, END_PRINT, PAUSE]
   watch:
     tg_fallback: true       # `3d printer watch`: tg only for warning+ events that no subscribed agent took
+    vision:                 # `3d printer vision k1se`: Helper Script mjpg-streamer on the USB webcam
+      snapshot: "http://192.168.0.27:8080/?action=snapshot"
   heads:
     - {label: T1, index: 0, extruder: extruder, nozzle: {diameter_mm: 0.4, material: hardened, type: std}, usable: true}
   ams: []                   # live ws: cfsConnect 0
