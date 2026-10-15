@@ -2,7 +2,8 @@
 
 Background for [`3d printer vision`](../commands/printer-vision.md), issue
 [#150](https://github.com/alex-mextner/3d-cli/issues/150). Printers: Snapmaker U1 (camera) and
-Creality K1 SE (no camera unless the optional K1 AI Camera is fitted).
+Creality K1 SE (no camera at the time of this research; since 2026-10-15 it is rooted, runs
+Moonraker and has a USB webcam on mjpg-streamer `:8080`).
 
 ## Snapmaker U1 camera facts
 

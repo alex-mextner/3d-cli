@@ -110,7 +110,7 @@ A key that is not known is left out (shown as `null`/`-`), never guessed.
 $ 3d printer list
   NAME          OWNER        ACCESS    MODEL                ADDRESS                         HEADS
   a1mini        boris        offline   Bambu Lab A1 mini    - (never contacted)             T1
-  k1se          own          full      Creality K1 SE       creality-stock 192.168.0.27:80  T1
+  k1se          own          full      Creality K1 SE       moonraker 192.168.0.27:7125     T1
   p1s           neighbour    offline   Bambu Lab P1S        - (never contacted)             T1
   u1            own          full      Snapmaker U1         moonraker 192.168.0.26:7125     T1 | T2 UNUSABLE | T3 | T4
       T2: head T2 does not work (babushkin-dom gen/queue.json: «слот 2 — заглушка, голова T2 не работает»; …)
@@ -135,8 +135,8 @@ u1:
   port: 7125                # default 7125
   model: Snapmaker U1
 k1se:
-  adapter: creality-stock   # Creality K1 family on stock firmware
-  host: 192.168.0.27
+  adapter: creality-stock   # Creality K1 family on stock firmware (the fleet's rooted K1 SE uses
+  host: 192.168.0.27        # moonraker:7125; this whole entry replaces it, dropping its watch.vision)
   model: Creality K1 SE     # port defaults to 80, ws_port to 9999
   axis_limits: {x: [-5, 229], y: [-0.5, 227]}
   trusted_macros: [START_PRINT, END_PRINT, PAUSE]
@@ -173,12 +173,23 @@ stored 165–168 bytes more than it received
 ([#99](https://github.com/alex-mextner/3d-cli/issues/99)). The stored size is always compared
 with the local file.
 
+A rooted K1 with the Creality Helper Script runs Moonraker on `:7125` and can use the
+`moonraker` adapter instead. The stock `:80`/`:9999` stack keeps running next to it. See
+[K1 SE: root + Helper Script](../printers/k1se-root-upgrade.md).
+
 ## Watching printers
 
 `3d printer watch` keeps a WebSocket open to each printer and turns what it pushes into
 events ([#145](https://github.com/alex-mextner/3d-cli/issues/145)). It only reads: the
-frames it sends are Moonraker's `server.info`, `printer.objects.list` and
-`printer.objects.subscribe`, and the `ok` the K1 expects for its heartbeat.
+frames it sends are Moonraker's `server.info`, `printer.objects.list`,
+`printer.objects.subscribe` and `server.files.metadata` (once per job file), and the `ok` the
+K1 expects for its heartbeat.
+
+Moonraker progress is measured over the G-code body (the file metadata's `gcode_start_byte` ..
+`gcode_end_byte`), as Mainsail and Fluidd show it: `virtual_sdcard` counts the whole file, so a
+slicer's config footer put `END_PRINT` of a small K1 print at 94.6 %
+([#255](https://github.com/alex-mextner/3d-cli/issues/255)). Without metadata the whole-file
+progress is used.
 
 ```
 3d printer watch NAME... | --all [options]
@@ -203,8 +214,10 @@ frames it sends are Moonraker's `server.info`, `printer.objects.list` and
 End macros (`END_PRINT`, `PRINT_END`, `CANCEL_PRINT`) switch the bed off and disable the
 motors (`M84`) while the printer still reports printing or paused. So `bed_off` and
 `homing_lost` that appear during a job are held for 10 s and dropped if the job ends
-(complete, cancelled, idle) or the condition clears meanwhile; at 99 % progress or more they
-are ignored ([#190](https://github.com/alex-mextner/3d-cli/issues/190)). Found already at
+(complete, cancelled, idle) or the condition clears meanwhile; at 99 % progress or more (body
+progress on Moonraker, see above) they are ignored
+([#190](https://github.com/alex-mextner/3d-cli/issues/190),
+[#255](https://github.com/alex-mextner/3d-cli/issues/255)). Found already at
 watch start (a paused job), they are reported at once. Start macros do the same in reverse —
 the K1's stock `START_PRINT` zeroes the bed and nozzle targets for about 30 s while probing — so
 in the start phase (the first 10 minutes after the watcher saw the job start; for a job already

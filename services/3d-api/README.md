@@ -114,6 +114,28 @@ in access logs).
 Slices add `lib/printops/api/routes_<slice>.py` (auto-included) and
 `lib/printops/migrations/NNNN_<slice>.sql` from their reserved range.
 
+## API (drying, #162)
+
+| Endpoint | Scope | |
+|---|---|---|
+| `POST /v1/drying/sessions` | write | `{dryer, spools[], temp_c?, hours?, rh_before?, weights_before?{id: g}, source?, note?}` → 201 `{session, warnings}` |
+| `POST /v1/drying/sessions/{id}/finish` | write | `{rh_after?, weights_after?}` → Spoolman `last_dried_at` + `dry_state=fresh`; weights → ledger notes |
+| `GET /v1/drying/sessions` | read | `?open=true&spool=ID&limit=N` → `{sessions}` |
+| `GET /v1/drying/sessions/{id}` | read | one session |
+| `GET /v1/drying/due` | read | `?all=true` → `{checked, spools[assessment]}`; writes nothing |
+| `POST /v1/drying/check` | write | run the periodic check now → `{checked, changed, alerts, errors, due}` |
+
+A background task (router lifespan) fires session timers every minute (`drying.finished`,
+`trigger: timer`) and every `drying.check_every_min` of `fleet/policy.yaml` updates Spoolman
+`dry_state` and emits `drying.due`. The policy file is re-read each time (image path
+`/app/fleet/policy.yaml`, override with `PRINTOPS_POLICY`).
+
+**Humidity (read-only Home Assistant).** A location's `humidity_sensor_entity` is read with
+`GET /api/states/<entity>` when `PRINTOPS_HA_URL` is set (compose passes it through from the
+deploy environment, e.g. `PRINTOPS_HA_URL=http://192.168.0.39:8123`) and an HA long-lived token
+is in `/home/ultra/printops/data/api/ha_token` (`PRINTOPS_HA_TOKEN_FILE`, mode 0600) or
+`PRINTOPS_HA_TOKEN`. Nothing is ever written to HA. Unset → humidity is simply unknown.
+
 ## Operations
 
 ```

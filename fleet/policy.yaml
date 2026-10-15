@@ -1,0 +1,62 @@
+# fleet/policy.yaml — PrintOps policy, one top-level section per concern.
+# Schema: lib/printops/policy.py (sections) + the section's parser (drying: lib/printops/drying_policy.py).
+# Checked by tests/test_printops_drying.py; 3d-api re-reads it on every drying check.
+# Later slices add `gates:` (#164) and `calibrations:` (#167) as their own sections.
+
+drying:
+  # How often 3d-api re-assesses every spool and updates Spoolman `dry_state` (+ `drying.due`).
+  check_every_min: 30
+  # Dried less than this many days ago → `fresh`; afterwards `ok` until a limit below is hit.
+  fresh_days: 3
+  # Exposure ≥ limit × wet_factor → `wet` instead of `due` (drying.due is emitted for both).
+  wet_factor: 2.0
+  # Materials not in the table below.
+  default_class: medium
+
+  # House policy (not from a vendor): exposure limits per hygroscopic class.
+  #   max_days_opened       days since `opened_at` for a spool never dried by us
+  #   max_days_since_dried  days since `last_dried_at`
+  #   max_rh                storage location RH (%, from its HA humidity sensor) above which the
+  #                         spool is due at once
+  # The class ordering follows Prusa's KB (PLA barely affected; polyamide, PP, PVA, BVOH highly
+  # hygroscopic → dry before every print or store dry) and Bambu's table ("drying requirement
+  # before use" Recommended vs Required; desiccant during use Optional vs Required).
+  classes:
+    low:     {max_days_opened: 90, max_days_since_dried: 60, max_rh: 50}
+    medium:  {max_days_opened: 30, max_days_since_dried: 30, max_rh: 40}
+    high:    {max_days_opened: 7,  max_days_since_dried: 14, max_rh: 30}
+    extreme: {max_days_opened: 1,  max_days_since_dried: 3,  max_rh: 20}
+
+  sources:
+    bambu: https://wiki.bambulab.com/en/general/filament-guide-material-table
+    prusa: https://help.prusa3d.com/article/drying-filament_332086
+
+  # Drying recipe per material (Spoolman filament `material`, upper-case). Where both sources
+  # give numbers: the LOWER temperature (stay under the softening point in a static dryer) and
+  # the LONGER time. Bambu numbers are its "blast drying oven" column.
+  #   PLA   bambu 55 °C/8 h, prusa 45 °C/6 h        PETG  bambu 70/8, prusa 55/6
+  #   TPU   bambu 70/8, prusa 60/4-6                 ASA   bambu 80/8, prusa 80/4
+  #   PC    bambu 80/8, prusa (PC Blend) 85/5        PA*   bambu 80/8-12 (PA, PA-CF/GF, PAHT)
+  #   PA11  bambu PA 80/8-12, prusa (PA11-CF) 90/6   PP    prusa (PP CF/GF) 70/2-4
+  #   PET-CF bambu 80/8-12                           PVA   bambu 55/8 (BVOH grouped with PVA)
+  #   PVB   prusa 45/8                               ABS   bambu 80/8
+  # Override per filament with Spoolman filament extra fields hygroscopic_class / drying_temp_c /
+  # drying_hours (e.g. PETG HF: bambu marks drying "Required" → class high).
+  materials:
+    PLA:    {class: low,     temp_c: 45, hours: 8,  source: bambu+prusa}
+    PVB:    {class: medium,  temp_c: 45, hours: 8,  source: prusa}
+    PETG:   {class: medium,  temp_c: 55, hours: 8,  source: bambu+prusa}
+    ABS:    {class: medium,  temp_c: 80, hours: 8,  source: bambu}
+    ASA:    {class: medium,  temp_c: 80, hours: 8,  source: bambu+prusa}
+    TPU:    {class: high,    temp_c: 60, hours: 8,  source: bambu+prusa}
+    PC:     {class: high,    temp_c: 80, hours: 8,  source: bambu+prusa}
+    PP:     {class: high,    temp_c: 70, hours: 4,  source: prusa}
+    PET-CF: {class: high,    temp_c: 80, hours: 12, source: bambu}
+    PET-GF: {class: high,    temp_c: 80, hours: 12, source: bambu}
+    PA:     {class: extreme, temp_c: 80, hours: 12, source: bambu}
+    PA6:    {class: extreme, temp_c: 80, hours: 12, source: bambu}
+    PA11:   {class: extreme, temp_c: 80, hours: 12, source: bambu+prusa}
+    PA12:   {class: extreme, temp_c: 80, hours: 12, source: bambu}
+    PAHT:   {class: extreme, temp_c: 80, hours: 12, source: bambu}
+    PVA:    {class: extreme, temp_c: 55, hours: 8,  source: bambu}
+    BVOH:   {class: extreme, temp_c: 55, hours: 8,  source: bambu}

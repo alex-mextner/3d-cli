@@ -1,0 +1,18 @@
+{
+    "enable_pressure_advance": [
+        "1"
+    ],
+    "filament_flow_ratio": [
+        "0.931"
+    ],
+    "filament_settings_id": [
+        "Black PLA babushkin @K1SE"
+    ],
+    "from": "User",
+    "inherits": "Creality Generic PLA @K1-all",
+    "name": "Black PLA babushkin @K1SE",
+    "pressure_advance": [
+        "0.04"
+    ],
+    "version": "2.3.3.3"
+}

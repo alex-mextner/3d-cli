@@ -64,7 +64,7 @@ class Transport(Protocol):
                      timeout: float) -> AbstractContextManager[Iterator[str]]: ...
 
 
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
+class NoRedirect(urllib.request.HTTPRedirectHandler):
     """urllib would replay `Authorization: Bearer` to wherever a redirect points; 3d-api never
     redirects, so any 3xx is surfaced as an error instead of followed."""
 
@@ -73,7 +73,7 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-_OPENER = urllib.request.build_opener(_NoRedirect)
+_OPENER = urllib.request.build_opener(NoRedirect)
 
 
 class UrllibTransport:
