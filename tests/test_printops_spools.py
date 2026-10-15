@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from fleet_fixtures import write_policy_for_fleet
 from printops_fakes import FakeSpoolman
 
 from printops import locations
@@ -59,6 +60,7 @@ def po(
     fleet = tmp_path / "fleet.yaml"
     fleet.write_text(FLEET, encoding="utf-8")
     monkeypatch.setenv("THREED_FLEET", str(fleet))
+    monkeypatch.setenv("PRINTOPS_POLICY", str(write_policy_for_fleet(tmp_path / "policy.yaml", fleet)))
     locations.add(printops_db, "WH:default", "warehouse", actor="test")
     locations.add(printops_db, "WH:A", "zone", actor="test")
     locations.add(printops_db, "WH:A/S1", "shelf", actor="test")

@@ -8,7 +8,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from fleet_fixtures import REPO_FLEET
+from fleet_fixtures import REPO_FLEET, write_policy_for_fleet
 from printops_fixtures import LiveApi
 
 from printops import db, locations
@@ -37,6 +37,7 @@ def shop(tmp_path: Path, live_api: LiveApi, monkeypatch: pytest.MonkeyPatch) -> 
     fleet = tmp_path / "fleet.yaml"
     fleet.write_text(FLEET, encoding="utf-8")
     monkeypatch.setenv("THREED_FLEET", str(fleet))  # the API runs in this process
+    monkeypatch.setenv("PRINTOPS_POLICY", str(write_policy_for_fleet(tmp_path / "policy.yaml", fleet)))
     conn = db.open_db(live_api.settings.db_path)
     try:
         locations.add(conn, "WH:default", "warehouse", actor="e2e")
