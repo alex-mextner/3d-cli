@@ -43,10 +43,13 @@ from __future__ import annotations
 import contextlib
 import math
 import re
-from itertools import islice
+import threading
+import time
+from collections import OrderedDict
 from dataclasses import dataclass
+from itertools import islice
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from errors import GateFailure, UsageError
 
@@ -79,7 +82,12 @@ def words(line: bytes) -> dict[str, float]:
 def move(line: bytes) -> dict[str, float] | None:
     """G0/G1/G2/G3 line -> dict of X/Y/Z/E/F (and I/J) floats, arcs with "arc": 2 (cw) or 3 (ccw); else None.
     Snapmaker Orca writes spiral z-hop travels as G2/G3 (`G3 Z.. I.. J.. P1`)."""
-    if not (line[:1] == b"G" and line[1:2] and line[1:2] in b"0123" and (len(line) == 2 or line[2:3] in b" \t;")):
+    if not (
+        line[:1] == b"G"
+        and line[1:2]
+        and line[1:2] in b"0123"
+        and (len(line) == 2 or line[2:3] in b" \t;")
+    ):
         return None
     m = {chr(k[0]): float(v) for k, v in NUM.findall(line.split(b";", 1)[0])}
     if line[1:2] in b"23":
@@ -202,24 +210,7 @@ class Walk:
     ) -> tuple[dict[str, Any], dict[int, Any]]:
         """machine state just before line `stop`; with snap_from, also the retraction of the head a line acts on
         for every E move / tool change at or after snap_from (a forward pass to the end)"""
-        st: dict[str, Any] = {
-            "tool": None,
-            "temp": {},
-            "bed": None,
-            "fan": {},
-            "vel": None,
-            "accel": None,
-            "pa": {},
-            "purifier": None,
-            "r": {},
-            "rel": False,
-            "obj": None,
-            "feature": None,
-            "m73": None,
-            "zmax": 0.0,
-            "z": None,
-            "f": None,
-        }
+        st = initial_state()
         snaps: dict[int, Any] = {}
         end = len(self.lines) if snap_from is not None else stop
         cut = None
@@ -228,76 +219,263 @@ class Walk:
                 cut = _copy_state(st)
                 if snap_from is None:
                     break
-            line = self.lines[i]
-            c = line[:1]
-            if c == b"G":
-                m = move(line)
-                if m is None:
-                    if line.startswith(b"G91"):
-                        st["rel"] = True
-                    elif line.startswith(b"G90"):
-                        st["rel"] = False
-                    continue
-                if "F" in m:
-                    st["f"] = m["F"]
-                if "Z" in m:
-                    st["z"] = (st["z"] or 0.0) + m["Z"] if st["rel"] else m["Z"]
-                    st["zmax"] = max(st["zmax"], st["z"])
-                if "E" in m and st["tool"] is not None:
-                    t = st["tool"]
-                    if snap_from is not None and i >= snap_from:
-                        snaps[i] = st["r"].get(t, 0.0)
-                    e = m["E"]
-                    st["r"][t] = round(
-                        st["r"].get(t, 0.0) - e
-                        if e < 0
-                        else max(0.0, st["r"].get(t, 0.0) - e),
-                        5,
-                    )
-            elif c == b"T":
-                mt = TOOL.match(line)
-                if mt:
-                    if snap_from is not None and i >= snap_from:
-                        snaps[i] = dict(st["r"])
-                    st["tool"] = int(mt.group(1))
-            elif c == b"M":
-                w = words(line)
-                code = int(w.get("M", -1))
-                if code in (104, 109) and "S" in w:
-                    tt = int(w["T"]) if "T" in w else st["tool"]
-                    st["temp"][tt] = w["S"]
-                elif code in (140, 190) and "S" in w:
-                    st["bed"] = w["S"]
-                elif code == 106:
-                    st["fan"][int(w.get("P", 0))] = w.get("S", 255.0)
-                elif code == 107:
-                    st["fan"][int(w.get("P", 0))] = 0.0
-                elif code == 204:
-                    st["accel"] = line.split(b";")[0].strip()
-                elif code == 73 and "P" in w:
-                    st["m73"] = (int(w["P"]), int(w.get("R", 0)))
-                elif code == 82:
-                    raise _bad(f"line {i + 1}: M82 absolute E is not supported")
-            elif c == b"E":
-                if line.startswith(b"EXCLUDE_OBJECT_START"):
-                    st["obj"] = obj_name(line)
-                elif line.startswith(b"EXCLUDE_OBJECT_END"):
-                    st["obj"] = None
-            elif c == b"S":
-                if line.startswith(b"SET_VELOCITY_LIMIT"):
-                    st["vel"] = line.split(b";")[0].strip()
-                elif (
-                    line.startswith(b"SET_PRESSURE_ADVANCE")
-                    and b"EXTRUDER=" not in line
-                ):
-                    st["pa"][st["tool"]] = words(line.replace(b"ADVANCE=", b"A"))["A"]
-                elif line.startswith(b"SET_PURIFIER_MODE"):
-                    st["purifier"] = line.split(b";")[0].strip()
-            elif c == b";" and line.startswith(b";TYPE:"):
-                st["feature"] = line[6:].strip().decode()
+            snap = advance(st, self.lines[i])
+            if st["e_abs"]:
+                raise _bad(f"line {i + 1}: M82 absolute E is not supported")
+            if snap is not None and snap_from is not None and i >= snap_from:
+                snaps[i] = snap
         if cut is None:
             cut = _copy_state(st)
         return cut, snaps
+
+
+def initial_state() -> dict[str, Any]:
+    """The machine state before the first G-code line, as `advance` keeps it."""
+    return {
+        "tool": None,
+        "temp": {},  # target °C per tool (M104/M109)
+        "bed": None,
+        "chamber": None,  # M141/M191 target
+        "fan": {},  # M106 P index -> 0..255
+        "vel": None,
+        "accel": None,
+        "pa": {},
+        "purifier": None,
+        "r": {},  # mm retracted from primed, per tool (relative E)
+        "rel": False,
+        "obj": None,
+        "feature": None,  # last ;TYPE:
+        "width": None,  # last ;WIDTH: (mm)
+        "height": None,  # last ;HEIGHT: (mm)
+        "m73": None,
+        "zmax": 0.0,
+        "z": None,
+        "f": None,  # modal feed rate, mm/min
+        "fe": None,  # feed rate of the last extruding X/Y move, mm/min
+        "extrusions": 0,  # extruding X/Y moves so far
+        "e_abs": False,  # M82 in force
+        "e_pos": 0.0,  # E axis position (absolute bookkeeping)
+    }
+
+
+def advance(st: dict[str, Any], line: bytes) -> Any:
+    """Apply one G-code line (no trailing newline) to `st`. Returns the retraction snapshot the
+    line acts on — the active head's mm retracted before an E move, every head's before a tool
+    change — else None. The one per-line parser behind Walk.state and state_at."""
+    c = line[:1]
+    if c == b"G":
+        m = move(line)
+        if m is None:
+            if line.startswith(b"G91"):
+                st["rel"] = True
+            elif line.startswith(b"G90"):
+                st["rel"] = False
+            elif line.startswith(b"G92") and "E" in (w := words(line)):
+                st["e_pos"] = w["E"]
+            return None
+        if "F" in m:
+            st["f"] = m["F"]
+        if "Z" in m:
+            st["z"] = (st["z"] or 0.0) + m["Z"] if st["rel"] else m["Z"]
+            st["zmax"] = max(st["zmax"], st["z"])
+        if "E" not in m:
+            return None
+        e = m["E"]
+        delta = e - st["e_pos"] if st["e_abs"] else e
+        st["e_pos"] = e if st["e_abs"] else st["e_pos"] + e
+        if delta > 0 and ("X" in m or "Y" in m):
+            st["fe"] = st["f"]
+            st["extrusions"] += 1
+        if st["tool"] is None:
+            return None
+        t = st["tool"]
+        snap = st["r"].get(t, 0.0)
+        st["r"][t] = round(
+            st["r"].get(t, 0.0) - e if e < 0 else max(0.0, st["r"].get(t, 0.0) - e),
+            5,
+        )
+        return snap
+    if c == b"T":
+        mt = TOOL.match(line)
+        if mt:
+            snapshot = dict(st["r"])
+            st["tool"] = int(mt.group(1))
+            return snapshot
+    elif c == b"M":
+        w = words(line)
+        code = int(w.get("M", -1))
+        if code in (104, 109) and "S" in w:
+            tt = int(w["T"]) if "T" in w else st["tool"]
+            st["temp"][tt] = w["S"]
+        elif code in (140, 190) and "S" in w:
+            st["bed"] = w["S"]
+        elif code in (141, 191) and "S" in w:
+            st["chamber"] = w["S"]
+        elif code == 106:
+            st["fan"][int(w.get("P", 0))] = w.get("S", 255.0)
+        elif code == 107:
+            st["fan"][int(w.get("P", 0))] = 0.0
+        elif code == 204:
+            st["accel"] = line.split(b";")[0].strip()
+        elif code == 73 and "P" in w:
+            st["m73"] = (int(w["P"]), int(w.get("R", 0)))
+        elif code in (82, 83):
+            st["e_abs"] = code == 82
+    elif c == b"E":
+        if line.startswith(b"EXCLUDE_OBJECT_START"):
+            st["obj"] = obj_name(line)
+        elif line.startswith(b"EXCLUDE_OBJECT_END"):
+            st["obj"] = None
+    elif c == b"S":
+        if line.startswith(b"SET_VELOCITY_LIMIT"):
+            st["vel"] = line.split(b";")[0].strip()
+        elif line.startswith(b"SET_PRESSURE_ADVANCE") and b"EXTRUDER=" not in line:
+            st["pa"][st["tool"]] = words(line.replace(b"ADVANCE=", b"A"))["A"]
+        elif line.startswith(b"SET_PURIFIER_MODE"):
+            st["purifier"] = line.split(b";")[0].strip()
+    elif c == b";":
+        if line.startswith(b";TYPE:"):
+            st["feature"] = line[6:].strip().decode(errors="replace")
+        elif line.startswith(b";WIDTH:"):
+            with contextlib.suppress(ValueError):
+                st["width"] = float(line[7:])
+        elif line.startswith(b";HEIGHT:"):
+            with contextlib.suppress(ValueError):
+                st["height"] = float(line[8:])
+    return None
+
+
+@dataclass
+class Cursor:
+    """Where a `state_at` scan stopped and the machine state in force there."""
+
+    layer: int  # ;LAYER_CHANGE markers seen (1-based layer; 0 = start G-code)
+    z: float | None  # that layer's ;Z:
+    line: int  # 0-based line number
+    byte: int  # byte offset of that line
+    state: dict[str, Any]
+
+
+# Per-file checkpoints of `state_at`: the state just before every ;LAYER_CHANGE a scan passed, so
+# the next question about the same file (another incident during the same print) resumes at the
+# nearest layer instead of re-reading from byte 0. Keyed by (path, size, mtime); the few most
+# recently used files, each within _CHECKPOINT_ENTRIES_PER_FILE state entries so no file (many
+# layer markers, ever more tools) grows the cache without bound; later layers then scan from the
+# last checkpoint. A state only grows along the file and checkpoints fill a prefix of its layers,
+# so (checkpoints + 1) × the current state's size bounds what one more checkpoint brings the total to.
+class _Checkpoint(NamedTuple):
+    line: int  # 0-based line of the ;LAYER_CHANGE
+    layers: int  # ;LAYER_CHANGE markers before it
+    z: float | None  # the previous layer's ;Z:
+    state: dict[str, Any]
+
+
+_CHECKPOINTS: OrderedDict[tuple[str, int, int], dict[int, _Checkpoint]] = OrderedDict()
+_CHECKPOINT_FILES = 4
+_CHECKPOINT_ENTRIES_PER_FILE = 1 << 17  # ~4000 layers of a usual ~30-entry state
+_CHECKPOINT_LOCK = threading.Lock()
+
+
+def _checkpoints(path: Path) -> dict[int, _Checkpoint]:
+    st = path.stat()
+    key = (str(path.resolve()), st.st_size, st.st_mtime_ns)
+    with _CHECKPOINT_LOCK:
+        if key in _CHECKPOINTS:
+            _CHECKPOINTS.move_to_end(key)
+        else:
+            while len(_CHECKPOINTS) >= _CHECKPOINT_FILES:
+                _CHECKPOINTS.popitem(last=False)  # the least recently used file
+            _CHECKPOINTS[key] = {}
+        return _CHECKPOINTS[key]
+
+
+def _state_entries(st: dict[str, Any]) -> int:
+    return len(st) + sum(len(v) for v in st.values() if isinstance(v, dict))
+
+
+def _nearest_checkpoint(
+    marks: dict[int, _Checkpoint], *, byte: int | None, layer: int | None
+) -> tuple[int, _Checkpoint] | None:
+    """(byte offset, checkpoint) of the latest checkpoint at or before `byte`, or before layer
+    `layer` begins; None when the scan has to start at byte 0."""
+    with _CHECKPOINT_LOCK:
+        if byte is not None:
+            usable = [offset for offset in marks if offset <= byte]
+        else:
+            target = layer if layer is not None else 0
+            usable = [offset for offset, mark in marks.items() if mark.layers < target]
+        if not usable:
+            return None
+        offset = max(usable)
+        return offset, marks[offset]
+
+
+def state_at(
+    path: Path,
+    *,
+    byte: int | None = None,
+    layer: int | None = None,
+    deadline: float | None = None,
+) -> Cursor:
+    """Stream `path` (constant memory: a 130 MB plate never sits in RAM) and return the state
+    at the line holding `byte` (a printer's file position), or — with `layer` — right after
+    the first extruding move of that layer (its ;LAYER_CHANGE when it extrudes nothing). A
+    scan resumes from the nearest layer checkpoint an earlier scan of the same file left.
+    Absolute E (M82) is tracked, not refused: only resuming needs relative E. ValueError when
+    the file ends first or `deadline` (time.monotonic()) passes."""
+    if (byte is None) == (layer is None):
+        raise ValueError("state_at needs exactly one of byte= or layer=")
+    marks = _checkpoints(path)
+    if (nearest := _nearest_checkpoint(marks, byte=byte, layer=layer)) is not None:
+        offset, mark = nearest
+        first, n_layer, z, st = mark.line, mark.layers, mark.z, _copy_state(mark.state)
+    else:
+        offset, first, n_layer, z, st = 0, 0, 0, None, initial_state()
+    found: tuple[int, int, int] | None = (
+        None  # (line, byte, extrusions) at the layer marker
+    )
+    with path.open("rb") as fh:
+        fh.seek(offset)
+        for i, raw in enumerate(fh, start=first):
+            # every 4096 lines: long lines must not carry a scan far past its deadline
+            if (
+                deadline is not None
+                and not (i - first) % 4096
+                and time.monotonic() > deadline
+            ):
+                raise ValueError(
+                    f"G-code scan of {path.name} exceeded its time budget at line {i + 1}"
+                )
+            line = raw[:-1] if raw.endswith(b"\n") else raw
+            if byte is not None and offset + len(raw) > byte:
+                return Cursor(n_layer, z, i, offset, _copy_state(st))
+            if line.startswith(b";LAYER_CHANGE"):
+                with _CHECKPOINT_LOCK:
+                    if (
+                        offset not in marks
+                        and (len(marks) + 1) * _state_entries(st)
+                        <= _CHECKPOINT_ENTRIES_PER_FILE
+                    ):
+                        marks[offset] = _Checkpoint(i, n_layer, z, _copy_state(st))
+                if (
+                    found is not None
+                ):  # layer `layer` printed nothing: its start is the answer
+                    return Cursor(n_layer, z, found[0], found[1], _copy_state(st))
+                n_layer, z = n_layer + 1, None
+                if n_layer == layer:
+                    found = (i, offset, st["extrusions"])
+            elif line.startswith(b";Z:") and z is None and n_layer:
+                with contextlib.suppress(ValueError):
+                    z = float(line[3:])
+            advance(st, line)
+            if found is not None and st["extrusions"] > found[2]:
+                return Cursor(n_layer, z, i, offset, _copy_state(st))
+            offset += len(raw)
+    if found is not None:
+        return Cursor(n_layer, z, found[0], found[1], _copy_state(st))
+    if byte is not None:
+        raise ValueError(f"byte {byte} is past the end of {path.name} ({offset} bytes)")
+    raise ValueError(f"{path.name} has {n_layer} layer(s); no layer {layer}")
 
 
 def extruder_name(t: int) -> str:
@@ -325,7 +503,11 @@ def tower_bbox(w: Walk, margin: float, purge_macro: str) -> Box | None:
     x: float | None = None
     y: float | None = None
     rel = False
-    resetters = (b"G28", purge_macro.encode(), b"MOVE_TO")  # the firmware moves the head on these
+    resetters = (
+        b"G28",
+        purge_macro.encode(),
+        b"MOVE_TO",
+    )  # the firmware moves the head on these
     for line in w.lines[w.exec_lo : w.exec_hi]:
         if line.startswith(b";TYPE:"):
             feature = line[6:].strip()
@@ -341,7 +523,11 @@ def tower_bbox(w: Walk, margin: float, purge_macro: str) -> Box | None:
             continue
         nx = _axis(x, m, "X", rel)
         ny = _axis(y, m, "Y", rel)
-        if feature == b"Prime tower" and m.get("E", 0) > 0 and ("X" in m or "Y" in m or "arc" in m):
+        if (
+            feature == b"Prime tower"
+            and m.get("E", 0) > 0
+            and ("X" in m or "Y" in m or "arc" in m)
+        ):
             pts: list[tuple[float | None, float | None]] = [(x, y), (nx, ny)]
             if "arc" in m and x is not None and y is not None and not rel:
                 pts += arc_points(x, y, m)
@@ -362,7 +548,12 @@ def path_hits_box(p: tuple[float, float], m: dict[str, float], box: Box) -> bool
         return seg_hits_box(p, q, box)
     pts = arc_points(p[0], p[1], m)
     xs, ys = [a for a, _ in pts], [b for _, b in pts]
-    return min(xs) <= box[2] and max(xs) >= box[0] and min(ys) <= box[3] and max(ys) >= box[1]
+    return (
+        min(xs) <= box[2]
+        and max(xs) >= box[0]
+        and min(ys) <= box[3]
+        and max(ys) >= box[1]
+    )
 
 
 def seg_hits_box(p: tuple[float, float], q: tuple[float, float], box: Box) -> bool:
@@ -506,9 +697,13 @@ def _refuse_untracked_moves(w: Walk) -> None:
     rel = False
     for i in range(w.exec_lo, w.exec_hi):
         line = w.lines[i]
-        if i < w.layers[0]["start"]:  # start G-code: only its offsets matter (it is not copied)
+        if (
+            i < w.layers[0]["start"]
+        ):  # start G-code: only its offsets matter (it is not copied)
             if line.startswith(b"G92") and {"X", "Y", "Z"} & set(words(line)):
-                raise _bad(f"line {i + 1}: G92 X/Y/Z (coordinate offset) is not supported")
+                raise _bad(
+                    f"line {i + 1}: G92 X/Y/Z (coordinate offset) is not supported"
+                )
             continue
         if line.startswith(b"G91"):
             rel = True
@@ -520,7 +715,9 @@ def _refuse_untracked_moves(w: Walk) -> None:
             if rel and ("X" in m or "Y" in m):
                 raise _bad(f"line {i + 1}: relative X/Y move (G91) is not supported")
             if "arc" in m and ("R" in m or not ("I" in m or "J" in m)):
-                raise _bad(f"line {i + 1}: radius-form arc (G2/G3 R) is not supported: its centre is not tracked")
+                raise _bad(
+                    f"line {i + 1}: radius-form arc (G2/G3 R) is not supported: its centre is not tracked"
+                )
 
 
 def build(
@@ -540,7 +737,9 @@ def build(
         raise _bad("give exactly one of --top-z, --layer")
     lines = w.lines
     exec_end = w.exec_hi
-    name = re.sub(r"[\x00-\x1f\x7f]", "?", name)  # goes into a G-code comment: no line breaks
+    name = re.sub(
+        r"[\x00-\x1f\x7f]", "?", name
+    )  # goes into a G-code comment: no line breaks
     purge = profile.purge_macro
     if layer is not None:
         rl = layer
@@ -606,7 +805,9 @@ def build(
     if tower_top is None and pause_layer is not None:
         tower_top = w.layers[pause_layer - 1]["z"]
     if tower and tower_top is None:
-        raise _bad("the old prime tower height is unknown: give --paused-at BYTE or --tower-top Z")
+        raise _bad(
+            "the old prime tower height is unknown: give --paused-at BYTE or --tower-top Z"
+        )
     first_xy, obj = None, None  # first X/Y move the body keeps: the header goes there
     for line in lines[i1:exec_end]:
         if line.startswith(b"EXCLUDE_OBJECT_START"):
@@ -625,16 +826,26 @@ def build(
             break
     if first_xy is None or "X" not in first_xy or "Y" not in first_xy:
         raise _bad("no X/Y start move found after the cut")
-    z_lim = profile.z_max_mm - Z_MARGIN  # highest G-code Z the header and the tower lifts may use
-    tower_top_eff = tower_top if tower_top is not None else max(LR["z"], z_seen or 0.0)  # no tower: unused
+    z_lim = (
+        profile.z_max_mm - Z_MARGIN
+    )  # highest G-code Z the header and the tower lifts may use
+    tower_top_eff = (
+        tower_top if tower_top is not None else max(LR["z"], z_seen or 0.0)
+    )  # no tower: unused
     # everything already standing on the bed: the part, whatever the paused job reached, the old tower
-    z_need = max(LR["z"] + 0.6, z_seen or 0.0, tower_top_eff + TOWER_CLEARANCE if tower else 0.0)
+    z_need = max(
+        LR["z"] + 0.6, z_seen or 0.0, tower_top_eff + TOWER_CLEARANCE if tower else 0.0
+    )
     z_travel = min(z_need + profile.clearance_mm, z_lim)
     if z_travel < z_need:
-        raise _bad(f"no room above the part: needs Z {z_need:.2f}, axis limit {fmt(profile.z_max_mm)} - {fmt(Z_MARGIN)}")
+        raise _bad(
+            f"no room above the part: needs Z {z_need:.2f}, axis limit {fmt(profile.z_max_mm)} - {fmt(Z_MARGIN)}"
+        )
     tower_safe_z = tower_top_eff + TOWER_CLEARANCE
     out_r: dict[int, float] = {}
-    purged: dict[int, float] = {}  # filament the off-bed purges consume: counted in the statistics
+    purged: dict[
+        int, float
+    ] = {}  # filament the off-bed purges consume: counted in the statistics
     out: list[bytes] = []
     emit = out.append
 
@@ -666,7 +877,10 @@ def build(
         )
     )
     tower_note = (
-        "replaced by off-bed purges (--no-tower)" if no_tower else "none" if not tower
+        "replaced by off-bed purges (--no-tower)"
+        if no_tower
+        else "none"
+        if not tower
         else f"off-bed purges up to the old tower top Z {fmt(tower_top_eff)}, tower continued above it"
     )
     put(
@@ -703,7 +917,9 @@ def build(
         put(f"; off-bed purge of T{t} ({purge}): plastic must come out here")
         # never RETRACT_LENGTH=: the U1 macro does `| abs` on the raw string -> TypeError -> CANCEL_PRINT -> M84
         # (seen 2026-10-14, issue #238); its default leaves the head purge_retract_mm back
-        put(f"{purge} INDEX={t} FORCE=1 TEMP={fmt(print_temp[t])} LENGTH={fmt(profile.purge_mm)}")
+        put(
+            f"{purge} INDEX={t} FORCE=1 TEMP={fmt(print_temp[t])} LENGTH={fmt(profile.purge_mm)}"
+        )
         put("G90")
         put("M83")
         want = st["r"].get(t, 0.0)
@@ -736,7 +952,11 @@ def build(
     # progress of the resumed job: P restarts at 0 against r0, the slicer's minutes left at the cut (R stays as is)
     left = st["m73"][1] if st["m73"] else 0
     r0 = next(
-        (int(words(x).get("R", 0)) for x in islice(lines, i0, exec_end) if x.startswith(b"M73 ") and b"R" in x),
+        (
+            int(words(x).get("R", 0))
+            for x in islice(lines, i0, exec_end)
+            if x.startswith(b"M73 ") and b"R" in x
+        ),
         left,
     )
 
@@ -754,11 +974,17 @@ def build(
     tool, obj, rel = A, None, False
     orig_f = cur_f = st["f"]  # modal F of the original stream / of the output
     dropped = 0
-    zmin_body = cur_z = first_xy.get("Z", LR["z"])  # modal Z of the output, relative moves included
-    used: dict[int, float] = dict(purged)  # preflight reads the heads in use from these statistics
+    zmin_body = cur_z = first_xy.get(
+        "Z", LR["z"]
+    )  # modal Z of the output, relative moves included
+    used: dict[int, float] = dict(
+        purged
+    )  # preflight reads the heads in use from these statistics
     changes = 0
     last_xy: tuple[float, float] | None = (first_xy["X"], first_xy["Y"])
-    oxy: tuple[float, float] | None = None  # X/Y of the original stream (None: unknown, e.g. after T<n>)
+    oxy: tuple[float, float] | None = (
+        None  # X/Y of the original stream (None: unknown, e.g. after T<n>)
+    )
     tower_hits: list[int] = []
     tower_lifts = 0
     pending_z = None
@@ -770,7 +996,11 @@ def build(
 
     layer_z = LR["z"]
     purge_b = purge.encode()
-    resetters = (purge_b, b"MOVE_TO", b"G28")  # the firmware moves the head: X/Y unknown after these
+    resetters = (
+        purge_b,
+        b"MOVE_TO",
+        b"G28",
+    )  # the firmware moves the head: X/Y unknown after these
     for i in range(i0, exec_end + 1):
         line = lines[i]
         m = move(line)
@@ -826,8 +1056,12 @@ def build(
             if skip:
                 # the tower prime goes, so every pick purges off the bed; the slicer writes no
                 # purge line when it switches back to the job's starting head
-                put("; below the old tower top: prime off the bed instead of on the tower")
-                put(f"{purge} INDEX={tool} FORCE=1 LENGTH={fmt(out_r.get(tool, 0.0) + profile.no_tower_prime_mm)}")
+                put(
+                    "; below the old tower top: prime off the bed instead of on the tower"
+                )
+                put(
+                    f"{purge} INDEX={tool} FORCE=1 LENGTH={fmt(out_r.get(tool, 0.0) + profile.no_tower_prime_mm)}"
+                )
                 used[tool] = used.get(tool, 0.0) + profile.no_tower_prime_mm
                 out_r[tool] = profile.purge_retract_mm
             continue
@@ -838,7 +1072,9 @@ def build(
         if m is not None:
             if "F" in m:
                 orig_f = m["F"]
-            arc_start = oxy  # where the original arc starts (its I/J are relative to it)
+            arc_start = (
+                oxy  # where the original arc starts (its I/J are relative to it)
+            )
             if "X" in m or "Y" in m:
                 if rel:
                     oxy = None
@@ -846,29 +1082,51 @@ def build(
                     nx = m.get("X", oxy[0] if oxy else math.nan)
                     ny = m.get("Y", oxy[1] if oxy else math.nan)
                     oxy = None if math.isnan(nx + ny) else (nx, ny)
-            if "arc" in m and not rel and (
-                arc_start is None or last_xy is None or math.dist(arc_start, last_xy) > 1e-3
+            if (
+                "arc" in m
+                and not rel
+                and (
+                    arc_start is None
+                    or last_xy is None
+                    or math.dist(arc_start, last_xy) > 1e-3
+                )
             ):
                 # the output head is not where the original arc starts (resume point, a dropped tower move): its
                 # I/J centre would shift, so a travel arc goes straight to its end point instead
                 if m.get("E", 0) > 0:
-                    raise _bad(f"line {i + 1}: extruding arc from a position the resume changed")
+                    raise _bad(
+                        f"line {i + 1}: extruding arc from a position the resume changed"
+                    )
                 m = {k: v for k, v in m.items() if k in {"X", "Y", "Z", "E", "F"}}
-                line = ("G1 " + " ".join(f"{k}{fmt(v)}" for k, v in m.items()) + " ; was an arc").encode()
-            if skip and tower and not rel and (
-                obj is None
-                or (
-                    "E" not in m
-                    and "X" in m
-                    and "Y" in m
-                    and tower[0] <= m["X"] <= tower[2]
-                    and tower[1] <= m["Y"] <= tower[3]
+                line = (
+                    "G1 "
+                    + " ".join(f"{k}{fmt(v)}" for k, v in m.items())
+                    + " ; was an arc"
+                ).encode()
+            if (
+                skip
+                and tower
+                and not rel
+                and (
+                    obj is None
+                    or (
+                        "E" not in m
+                        and "X" in m
+                        and "Y" in m
+                        and tower[0] <= m["X"] <= tower[2]
+                        and tower[1] <= m["Y"] <= tower[3]
+                    )
                 )
             ):
                 dropped += 1  # tower move, tower travel or tower wipe
                 if "Z" in m and (obj is not None or not ("X" in m or "Y" in m)):
-                    pending_z = m["Z"]  # a layer change or lift on a dropped line still sets the modal Z
-                if m.get("E", 0) < 0 and out_r.get(tool, 0.0) < snaps[i] - m["E"] - 1e-4:
+                    pending_z = m[
+                        "Z"
+                    ]  # a layer change or lift on a dropped line still sets the modal Z
+                if (
+                    m.get("E", 0) < 0
+                    and out_r.get(tool, 0.0) < snaps[i] - m["E"] - 1e-4
+                ):
                     # the park retraction happens here, while the head is still at print temperature
                     correct(
                         out_r.get(tool, 0.0) - (snaps[i] - m["E"]),
@@ -896,7 +1154,9 @@ def build(
                 if e > 0 and ("X" in m or "Y" in m):
                     used[tool] = used.get(tool, 0.0) + e
             if "F" not in m and orig_f is not None and cur_f != orig_f:
-                put(f"G1 F{fmt(orig_f)}")  # a dropped or inserted line had changed the feed rate
+                put(
+                    f"G1 F{fmt(orig_f)}"
+                )  # a dropped or inserted line had changed the feed rate
             cur_f = orig_f
             z_after = (cur_z + m["Z"] if rel else m["Z"]) if "Z" in m else cur_z
             if "Z" in m:
@@ -910,17 +1170,23 @@ def build(
                 if (
                     skip
                     and tower
-                    and (last_xy is None or not known or path_hits_box(last_xy, m, tower))
+                    and (
+                        last_xy is None or not known or path_hits_box(last_xy, m, tower)
+                    )
                     and min(cur_z, z_after) < tower_safe_z - 1e-6
                 ):
                     if m.get("E", 0) > 0:
-                        tower_hits.append(i + 1)  # an extrusion over the old tower: should not exist
+                        tower_hits.append(
+                            i + 1
+                        )  # an extrusion over the old tower: should not exist
                     else:
                         # travel (straight or a G2/G3 spiral hop) from an unknown point (after a pick/purge) or
                         # across the tower that still stands: go over it in a straight line, then down to the
                         # travel's own Z
                         put(f"G1 Z{fmt(tower_safe_z)} F600 ; over the old tower")
-                        xy = " ".join(f"{k}{fmt(m[k])}" for k in ("X", "Y", "E") if k in m)
+                        xy = " ".join(
+                            f"{k}{fmt(m[k])}" for k in ("X", "Y", "E") if k in m
+                        )
                         if xy:
                             put(f"G1 {xy} F{fmt(orig_f or 12000)}")
                         put(f"G1 Z{fmt(z_after)} F600")
@@ -1042,9 +1308,13 @@ def z_range_check(out: list[bytes], z_hi: float) -> None:
         elif code.startswith(b"G90"):
             rel = False
         elif code.startswith(b"G92"):
-            if {"X", "Y", "Z"} & set(words(code)):  # a coordinate offset would hide the real Z
-                raise GateFailure(f"output line {n}: coordinate offset {code.decode()} after the RESUME marker",
-                                  command=CMD)
+            if {"X", "Y", "Z"} & set(
+                words(code)
+            ):  # a coordinate offset would hide the real Z
+                raise GateFailure(
+                    f"output line {n}: coordinate offset {code.decode()} after the RESUME marker",
+                    command=CMD,
+                )
         elif code.startswith(b"G28"):
             z = None
         else:
@@ -1052,8 +1322,10 @@ def z_range_check(out: list[bytes], z_hi: float) -> None:
             if m is not None and "Z" in m:
                 if rel:
                     if z is None:
-                        raise GateFailure(f"output line {n}: relative Z move from an unknown Z: {code.decode()}",
-                                          command=CMD)
+                        raise GateFailure(
+                            f"output line {n}: relative Z move from an unknown Z: {code.decode()}",
+                            command=CMD,
+                        )
                     z += m["Z"]
                 else:
                     z = m["Z"]

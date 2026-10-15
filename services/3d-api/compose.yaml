@@ -54,11 +54,18 @@ services:
       # Empty URL = humidity unknown. Token: an HA long-lived token in <data>/api/ha_token (0600).
       PRINTOPS_HA_URL: ${PRINTOPS_HA_URL:-}
       PRINTOPS_HA_TOKEN_FILE: /data/ha_token
+      # Incident auto-context (#165): G-code dirs inside the container (the host's
+      # PRINTOPS_GCODE_HOST_DIR is mounted read-only at /gcodes); FETCH=1 downloads the job's file
+      # from a Moonraker printer once (read-only GET) into /data/gcode-cache, off by default.
+      PRINTOPS_GCODE_DIRS: ${PRINTOPS_GCODE_DIRS:-/gcodes}
+      PRINTOPS_GCODE_FETCH: ${PRINTOPS_GCODE_FETCH:-}
     volumes:
       - ${PRINTOPS_DATA_DIR:-/home/ultra/printops/data}/api:/data
       # read for `3d printops backup` only (SQLite online backup); Spoolman stays the writer
       - ${PRINTOPS_DATA_DIR:-/home/ultra/printops/data}/spoolman:/spoolman-data
       # inside Home Assistant's config dir, so HA's automatic daily backup carries the snapshots
       - ${PRINTOPS_BACKUP_DIR:-/home/ultra/homeassistant/printops-backup}:/backup
+      # sliced plates for the incident auto-context (read-only)
+      - ${PRINTOPS_GCODE_HOST_DIR:-/home/ultra/printops/gcodes}:/gcodes:ro
     ports:
       - "8765:8765"
