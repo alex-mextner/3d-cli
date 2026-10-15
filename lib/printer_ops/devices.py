@@ -60,15 +60,16 @@ u1:
   port: 7125
   model: Snapmaker U1
   resume:                   # `3d gcode-resume` (Snapmaker/u1-klipper@10f2f69 macros)
-    purge_macro: SM_PRINT_PREEXTRUDE_FILAMENT  # INDEX=n FORCE=1 LENGTH RETRACT_LENGTH: off-bed purge
+    purge_macro: SM_PRINT_PREEXTRUDE_FILAMENT  # INDEX=n FORCE=1 LENGTH: off-bed purge (never RETRACT_LENGTH)
     purge_mm: 30            # header purge per head (cold since the pause, up to 10 mm retracted)
-    purge_retract_mm: 0.5   # the macro's RETRACT_LENGTH: mm a head is left retracted after a purge
+    purge_retract_mm: 0.5   # the macro's default RETRACT_LENGTH: mm a head is left retracted after a purge
     no_tower_prime_mm: 12   # --no-tower: off-bed prime per tool change on top of the un-retract
     clearance_mm: 5         # above everything printed before any X/Y move of the header
-    tower_margin_mm: 3      # --no-tower: margin around the prime tower kept free of travels
+    tower_margin_mm: 3      # margin around the prime tower kept free of low travels
     filament_diameter_mm: 1.75
     min_print_temp: 170     # an M109 at or above this is a print (not standby) temperature
     default_accel: 10000    # M204 S when the G-code set none before the cut
+    z_max_mm: 275           # stepper_z.position_max: every resume Z stays 1 mm below it (fail-closed)
     start_commands: [DEFECT_DETECTION_START]   # after the bed is hot, before the heads purge
 k1se:
   adapter: creality-stock   # Creality K1 family on stock firmware (HTTP + ws:9999)
@@ -86,20 +87,21 @@ class DeviceConfigError(ThreeDError):
 @dataclass(frozen=True)
 class ResumeProfile:
     """The `resume:` block of a device: printer-specific values of `3d gcode-resume`."""
-    purge_macro: str              # off-bed purge macro, called `<macro> INDEX=n FORCE=1 LENGTH= RETRACT_LENGTH=`
+    purge_macro: str              # off-bed purge macro, called `<macro> INDEX=n FORCE=1 LENGTH=`
     purge_mm: float               # header purge per head
-    purge_retract_mm: float       # mm the purge macro leaves the head retracted
+    purge_retract_mm: float       # mm the purge macro leaves the head retracted (its default; never passed)
     no_tower_prime_mm: float      # --no-tower: off-bed prime per tool change
     clearance_mm: float           # Z above everything printed before any X/Y move of the header
-    tower_margin_mm: float        # --no-tower: margin around the prime tower
+    tower_margin_mm: float        # margin around the (old) prime tower
     filament_diameter_mm: float
     min_print_temp: float         # an M109 at or above this is a print temperature
     default_accel: float          # M204 S when the G-code set none before the cut
+    z_max_mm: float               # stepper_z.position_max: the output never goes above it - 1 mm
     start_commands: tuple[str, ...]  # emitted once the bed is hot, before the heads purge
 
 
 _RESUME_NUMBERS = ("purge_mm", "purge_retract_mm", "no_tower_prime_mm", "clearance_mm", "tower_margin_mm",
-                   "filament_diameter_mm", "min_print_temp", "default_accel")
+                   "filament_diameter_mm", "min_print_temp", "default_accel", "z_max_mm")
 
 
 @dataclass(frozen=True)
@@ -179,7 +181,7 @@ def _resume(value: Any, name: str, path: Path) -> ResumeProfile:
     f = {k: float(value[k]) for k in _RESUME_NUMBERS}
     return ResumeProfile(macro, f["purge_mm"], f["purge_retract_mm"], f["no_tower_prime_mm"], f["clearance_mm"],
                          f["tower_margin_mm"], f["filament_diameter_mm"], f["min_print_temp"], f["default_accel"],
-                         tuple(c.strip() for c in cmds))
+                         f["z_max_mm"], tuple(c.strip() for c in cmds))
 
 
 def _bridge_max(value: Any, name: str, path: Path) -> float:
