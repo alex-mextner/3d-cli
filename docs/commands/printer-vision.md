@@ -30,7 +30,7 @@ from the device's `watch:` block in `printer-devices.yaml`).
 - `--scene` — also run the bed-change detectors (`vision_foreign_object`, `vision_part_moved`,
   `vision_no_growth`). Off by default: they are still noisy (see
   [printer-vision-tuning.md](../research/printer-vision-tuning.md)). Same as `scene: true` in the
-  device's `watch: vision:` block.
+  device's `watch: vision:` block. Needs the camera calibration (a usage error without it).
 - `eval` — replay footage: each `--pos`/`--neg` path is a directory of frames, one image, or a
   video (a U1 timelapse `.mp4`); each path counts as one print. Prints per-frame
   precision/recall/false-positive rate at several score thresholds, and whether the live
