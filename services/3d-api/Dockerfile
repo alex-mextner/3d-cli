@@ -30,6 +30,7 @@ COPY pyproject.toml /app/pyproject.toml
 COPY bin/3d /app/bin/3d
 COPY lib/ /app/lib/
 # fleet/printers.yaml: printer slots (slot:<printer>/<head>) are materialised from it.
+# fleet/policy.yaml (drying classes, later gates/calibrations): printops.policy reads /app/fleet.
 COPY fleet/ /app/fleet/
 # `3d printops token|backup …` inside the container (docker exec printops-api 3d printops …).
 RUN chmod 0755 /app/bin/3d && ln -s /app/bin/3d /usr/local/bin/3d
