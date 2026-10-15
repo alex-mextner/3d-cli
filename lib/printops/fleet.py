@@ -142,9 +142,10 @@ class Fleet:
     printers: dict[str, FleetPrinter]
 
     def device_specs(self) -> dict[str, dict[str, Any]]:
-        """printer-devices.yaml-shaped entries of the printers 3d may contact (not offline)."""
+        """printer-devices.yaml-shaped entries of the printers 3d may contact (not offline);
+        `model` rides along (printer vision picks its bundled camera calibration by it)."""
         return {
-            name: {**p.device, "access": p.access}
+            name: {**p.device, "model": p.model, "access": p.access}
             for name, p in self.printers.items()
             if p.contactable
         }
