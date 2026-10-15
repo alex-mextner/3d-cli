@@ -378,6 +378,7 @@ def _heads(value: Any, bad: list[str]) -> tuple[Head, ...]:
             bad.append(
                 f"{where}.extruder: must be a Klipper object name, e.g. extruder1"
             )
+            extruder = None  # reported above; keep it out of the duplicate check
         usable = h.get("usable", True)
         reason = h.get("reason")
         if not isinstance(usable, bool):

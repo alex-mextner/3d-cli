@@ -37,7 +37,7 @@ from __future__ import annotations
 
 import math
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -255,7 +255,8 @@ def load_devices(cwd: Path | None = None) -> dict[str, Device]:
                                 command="printer") from exc
     from printops.fleet import load_fleet
 
-    devices = fleet_devices(load_fleet())
+    fleet = load_fleet()
+    devices = fleet_devices(fleet)
     for path in search_paths(cwd):
         if not path.is_file():
             continue
@@ -264,6 +265,15 @@ def load_devices(cwd: Path | None = None) -> dict[str, Device]:
         except yaml.YAMLError as exc:
             raise DeviceConfigError(f"{path}: invalid YAML: {exc}", command="printer") from exc
         devices.update(_parse(path, data))
+    # An override replaces device settings, never the fleet's access (D7): an offline printer
+    # stays out of the contactable set, a read-only one stays read-only.
+    for name, printer in (fleet.printers if fleet is not None else {}).items():
+        if name not in devices or printer.access == "full":
+            continue
+        if printer.access == "offline":
+            del devices[name]
+        else:
+            devices[name] = replace(devices[name], access=printer.access)
     return devices
 
 

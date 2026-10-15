@@ -121,14 +121,20 @@ def run(argv: list[str]) -> int:
     from printer_ops.devices import get_device
 
     printer = opts.get("--printer")
-    if printer is not None and get_device(printer, offline_ok=True).access == "offline":
-        del opts["--printer"]  # an offline fleet printer is never contacted: its static profile only
-        opts.setdefault("--axis-limits", printer)
+    profile = get_device(printer, offline_ok=True) if printer is not None else None
+    if profile is not None and profile.access == "offline":
+        # an offline fleet printer is never contacted: its static profile stands in for --printer,
+        # an explicit --axis-limits replaces only its limits
+        del opts["--printer"]
+        opts.setdefault("--axis-limits", profile.name)
+    else:
+        profile = None
 
     status = None
-    device = None if "--printer" in opts else device_for(opts.get("--axis-limits"))
+    device = profile or (None if "--printer" in opts else device_for(opts.get("--axis-limits")))
     limits, limits_source = None, "no --printer or --axis-limits given"
-    trusted = frozenset() if "--printer" in opts else trusted_macros_for(opts.get("--axis-limits"))
+    trusted = profile.trusted_macros if profile else \
+        frozenset() if "--printer" in opts else trusted_macros_for(opts.get("--axis-limits"))
     if "--axis-limits" in opts:
         limits, limits_source = limits_from_option(opts["--axis-limits"], command="print-preflight")
     if "--printer" in opts:

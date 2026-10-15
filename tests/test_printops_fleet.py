@@ -192,3 +192,31 @@ def test_device_access_is_validated(env: Path) -> None:
     with pytest.raises(InvalidArgument) as info:
         devices.load_devices()
     assert info.value.exit_code == 2 and "full, read-only" in info.value.message
+
+
+def test_device_override_cannot_loosen_fleet_access(env: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A user/project printer-devices.yaml entry replaces device settings, never the fleet's access:
+    an offline printer stays uncontactable, a read-only one stays read-only (decision D7)."""
+    moon = FakeMoonraker(port=7001)
+    _use(monkeypatch, write_fleet(tmp_path / "fleet.yaml", u1_entry(moon, access="read-only")))
+    (tmp_path / "printer-devices.yaml").write_text(
+        "p1s: {adapter: moonraker, host: 127.0.0.1}\nu1: {adapter: moonraker, host: 127.0.0.1, port: 7002}\n",
+        encoding="utf-8")
+    d = devices.load_devices()
+    assert "p1s" not in d
+    assert (d["u1"].port, d["u1"].access) == (7002, "read-only")  # settings replaced, access kept
+    with pytest.raises(PrinterRefused, match="offline fleet printer"):
+        devices.get_device("p1s")
+
+
+def test_non_string_extruder_is_a_schema_problem_not_a_crash(tmp_path: Path) -> None:
+    import yaml
+
+    data = yaml.safe_load("x:\n  model: Snapmaker U1\n  owner: own\n  access: offline\n"
+                          "  heads: [{label: T1, index: 0, extruder: [extruder]}, {label: T2, index: 1, extruder: {a: 1}}]\n")
+    printers, problems = validate(data, tmp_path / "f.yaml")
+    assert printers == {}
+    assert [p.message for p in problems] == [
+        "x.heads[0].extruder: must be a Klipper object name, e.g. extruder1",
+        "x.heads[1].extruder: must be a Klipper object name, e.g. extruder1",
+    ]

@@ -116,6 +116,19 @@ def test_preflight_on_an_offline_bambu_uses_its_static_profile(tmp_path: Path) -
     assert "printer" not in checks  # state never read
 
 
+def test_preflight_offline_printer_with_explicit_limits_keeps_its_profile(tmp_path: Path) -> None:
+    """The user narrows the A1 mini's travel with --axis-limits for one check: the printer's
+    trusted Bambu commands still apply; only the limits are replaced."""
+    gcode = tmp_path / "a1.gcode"
+    gcode.write_text("G28\nM620 S0A\nG1 X10 Y20 F3000\nM621 S0A\nM1002 gcode_claim_action : 2\n", encoding="utf-8")
+    done = run_cli(tmp_path, "print-preflight", str(gcode), "--printer", "a1mini", "--axis-limits", "0:180,0:180",
+                   "--json", env_extra=REPO)
+
+    checks = {c["name"]: c for c in json.loads(done.stdout)["checks"]}
+    assert checks["axis travel"]["status"] == "PASS" and "--axis-limits" in checks["axis travel"]["detail"]
+    assert checks["macros"]["status"] == "PASS", checks["macros"]["detail"]
+
+
 def test_read_only_printer_answers_status_but_refuses_upload(tmp_path: Path) -> None:
     """A printer marked read-only can be watched, never written: upload is refused before any
     request reaches it."""
