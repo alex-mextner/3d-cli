@@ -1,7 +1,6 @@
 # 3d-api — the PrintOps HTTP service (FastAPI + SQLite), built from the 3d-cli repo root:
 #   docker compose -p printops -f services/3d-api/compose.yaml up -d --build
-# Build context = repo root; Dockerfile.dockerignore keeps it to bin/3d, lib/, pyproject.toml
-# (fleet/ joins once #157 adds it: add `COPY fleet/ /app/fleet/` then).
+# Build context = repo root; Dockerfile.dockerignore keeps it to bin/3d, lib/, fleet/, pyproject.toml.
 FROM python:3.12-slim-bookworm
 
 ARG PRINTOPS_VERSION=dev
@@ -30,6 +29,8 @@ WORKDIR /app
 COPY pyproject.toml /app/pyproject.toml
 COPY bin/3d /app/bin/3d
 COPY lib/ /app/lib/
+# fleet/printers.yaml: printer slots (slot:<printer>/<head>) are materialised from it.
+COPY fleet/ /app/fleet/
 # `3d printops token|backup …` inside the container (docker exec printops-api 3d printops …).
 RUN chmod 0755 /app/bin/3d && ln -s /app/bin/3d /usr/local/bin/3d
 
