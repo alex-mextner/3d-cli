@@ -16,7 +16,7 @@ Epic: [#90](https://github.com/alex-mextner/3d-cli/issues/90).
 3d printer start NAME FILE.gcode --yes [--as REMOTE] [--source-3mf X.3mf] [--bridge-max MM] [--force] [--secs S]
 3d printer cancel NAME --yes
 3d printer watch NAME... | --all [--steer SESSION] [--exec CMD] [--min-severity LEVEL] ...
-3d printer vision NAME [--interval S] [--once] [--dry-run] ...  |  vision eval ...  |  vision fetch-model
+3d printer vision NAME [--interval S] [--once] [--dry-run] [--scene] ...  |  vision eval ...  |  vision record NAME DIR  |  vision fetch-model
 3d printer subscribe --session ID [--printer P,P] [--kinds K,K] [--min-severity LEVEL] ...
 3d printer unsubscribe --session ID | --id SUBID | --all
 3d printer subscriptions [list | test PRINTER] [--json]
@@ -230,19 +230,24 @@ Flags with spaces (an `--exec` command) belong in `printer-devices.yaml` instead
 ## Camera failure detection
 
 `3d printer vision NAME` (shorthand for `vision run NAME`) polls the printer camera every 10 s,
-scores each frame with Obico's open spaghetti detector on the CPU (weights downloaded on first
-use into `~/.cache/3d-cli/vision/models/`, sha256-pinned) and sends `vision_spaghetti`,
-`vision_camera_stale`, `vision_camera_dark` and `printer_noodle_verdict` events through the same
+scores each frame with Obico's open spaghetti detector on the CPU, drops boxes outside the
+current print's bed volume (camera calibration; the U1's ships with 3d-cli), and checks each
+remaining box with a zero-shot CLIP verifier, so textured walls do not count as spaghetti
+(weights downloaded on first use into `~/.cache/3d-cli/vision/models/`, sha256-pinned). It sends
+`vision_spaghetti`, `vision_spaghetti_vetoed` (info), `vision_camera_stale`, `vision_camera_dark`
+and `printer_noodle_verdict` events, plus the opt-in `--scene` bed-change events, through the same
 dispatcher and sinks as `watch` (the device's `watch:` block). It never pauses or cancels.
-`vision eval` replays recorded footage and prints precision/recall; `vision fetch-model`
-downloads the weights. Python deps come from the `vision` extra (numpy, OpenCV, onnxruntime).
+`vision record` saves frames with print context, `vision eval` replays footage and prints
+precision/recall, and `vision fetch-model` downloads the weights. Python deps come from the
+`vision` extra (numpy, OpenCV, onnxruntime).
 
 U1 camera in short: no stream on stock firmware (`/webcam/` → 502); `unisrv` rewrites
 `/server/files/camera/monitor.jpg` at ~2 fps while a client sends `camera.start_monitor` (vision
 does, once a minute); the Fluidd camera entry `/api/ingress/u1_printer/u1-camera/...` is a Home
 Assistant ingress path that works only through HA, served by `u1-camera-proxy` on the Odroid
 (needs a font present on that host). Details: [printer-vision.md](printer-vision.md); research
-and numbers on real U1 footage: [docs/research/printer-vision.md](../research/printer-vision.md).
+and numbers on real U1 footage: [docs/research/printer-vision.md](../research/printer-vision.md),
+verifier and threshold tuning: [printer-vision-tuning.md](../research/printer-vision-tuning.md).
 
 ## Safety
 

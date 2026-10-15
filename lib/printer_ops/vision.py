@@ -324,8 +324,63 @@ class KlippyLogTap:
         host_now = time.time() if now is None else now
         printer_now = _http_date(headers.get("date"))
         skew = 0.0 if printer_now is None or now is not None else printer_now - host_now
-        verdicts = parse_klippy_verdicts(complete.decode("utf-8", "replace"), host_now + skew)
+        verdicts = parse_klippy_verdicts(
+            complete.decode("utf-8", "replace"), host_now + skew
+        )
         return [replace(v, ts=v.ts - skew) for v in verdicts] if skew else verdicts
+
+
+@dataclass(frozen=True)
+class PrintContext:
+    """Where the print is, for the camera masks (vision_geometry.py): the current file, gcode Z,
+    toolhead XY and the object footprints Klipper's exclude_object knows (convex hulls, mm)."""
+
+    filename: str | None
+    z: float
+    x: float
+    y: float
+    objects: tuple[tuple[tuple[float, float], ...], ...] = ()
+
+
+@dataclass
+class ContextTap:
+    """One read-only Moonraker query per frame: gcode_move, toolhead, print_stats, exclude_object."""
+
+    host: str
+    port: int = 7125
+    timeout: float = 5.0
+
+    @property
+    def url(self) -> str:
+        return (
+            f"http://{self.host}:{self.port}/printer/objects/query?"
+            "gcode_move=gcode_position&toolhead=position&print_stats=filename"
+            "&exclude_object=objects"
+        )
+
+    def poll(self) -> PrintContext:
+        try:
+            status, data, _ = _get(self.url, self.timeout)
+            if status != 200:
+                raise OSError(f"HTTP {status}")
+            st = json.loads(data)["result"]["status"]
+            gz = st["gcode_move"]["gcode_position"]
+            pos = st["toolhead"]["position"]
+            objects = tuple(
+                tuple((float(x), float(y)) for x, y in o.get("polygon") or [])
+                for o in (st.get("exclude_object") or {}).get("objects") or []
+            )
+            return PrintContext(
+                (st.get("print_stats") or {}).get("filename"),
+                float(gz[2]),
+                float(pos[0]),
+                float(pos[1]),
+                tuple(o for o in objects if len(o) >= 3),
+            )
+        except (OSError, ValueError, KeyError, IndexError, TypeError) as exc:
+            raise PrinterCommError(
+                f"print position from {self.host}: {exc}", command="printer vision"
+            ) from exc
 
 
 # ---- per-frame score -> failure level ---------------------------------------------------------
@@ -341,6 +396,19 @@ class Box:
 
 
 @dataclass
+class Finding:
+    """A non-spaghetti detector result for one frame (vision_scene.py: foreign object, moved part,
+    stalled growth). Present while the condition holds; VisionMonitor turns it into one event per
+    episode. `image`: an extra evidence JPEG saved next to the frame."""
+
+    kind: str
+    severity: str
+    text: str
+    data: dict[str, Any] = field(default_factory=dict)
+    image: bytes | None = None
+
+
+@dataclass
 class FrameScore:
     """What the pixel side (vision_detect.py) reports for one frame."""
 
@@ -349,6 +417,18 @@ class FrameScore:
     luma: float = (
         128.0  # mean brightness 0..255 (classic check: lights off / lens covered)
     )
+    # Stage 2 (vision_verify.py): failure probability of the strongest boxes (in `boxes` order,
+    # which is strongest first) and q = sum(conf x probability). q None = no verifier ran, so
+    # the tracker falls back to the raw p.
+    probs: list[float] = field(default_factory=list)
+    q: float | None = None
+    masked: int = 0  # stage-1 boxes dropped by the static mask / bed-volume ROI
+    findings: list[Finding] = field(default_factory=list)
+
+    @property
+    def signal(self) -> float:
+        """What the trend tracker consumes: the verified score when there is one."""
+        return self.p if self.q is None else self.q
 
 
 @dataclass(frozen=True)
@@ -374,7 +454,10 @@ class TrackerParams:
     prior_frames: int = 100
 
 
-WARNING, CRITICAL = "warning", "critical"
+INFO, WARNING, CRITICAL = "info", "warning", "critical"
+# Verified q below this share of the raw p = the verifier disagrees with the detector. Measured
+# 2026-10-14 on the U1: real spaghetti q/p 0.6-1.0, speckled-wall false positives 0.02-0.17.
+VETO_RATIO = 0.3
 
 
 @dataclass
@@ -451,7 +534,7 @@ class _Edge:
     episode: int = 0
 
     def rise(self, level: str | None) -> bool:
-        rank = {None: 0, WARNING: 1, CRITICAL: 2}
+        rank = {None: 0, INFO: 1, WARNING: 2, CRITICAL: 3}
         fired = rank[level] > rank[self.active]
         if self.active is None and level is not None:
             self.episode += 1
@@ -468,7 +551,10 @@ class VisionMonitor:
     annotate: Callable[[bytes, FrameScore], bytes] | None = None
     evidence_dir: Path | None = None
     limits: MonitorLimits = field(default_factory=MonitorLimits)
+    # on FrameScore.signal (the verified score when stage 2 runs)
     tracker: FailureTracker = field(default_factory=FailureTracker)
+    # The raw stage-1 trend, kept only to report what the verifier vetoed (info events).
+    raw_tracker: FailureTracker = field(default_factory=FailureTracker)
     job: tuple[str, str | None] | None = None  # (state, filename) last seen
     last_change: float | None = None  # when the frame last changed
     last_digest: int | None = None
@@ -476,9 +562,11 @@ class VisionMonitor:
         None  # the strongest recent hit of the printer's detector
     )
     _spaghetti: _Edge = field(default_factory=_Edge)
+    _vetoed: _Edge = field(default_factory=_Edge)
     _stale: _Edge = field(default_factory=_Edge)
     _dark: _Edge = field(default_factory=_Edge)
     _npu: _Edge = field(default_factory=_Edge)
+    _findings: dict[str, _Edge] = field(default_factory=dict)  # per Finding.kind
 
     def set_job(self, state: str, filename: str | None) -> None:
         """A new print (another file, or printing again after a stop) starts a fresh per-print
@@ -488,6 +576,7 @@ class VisionMonitor:
             prev is None or prev[1] != filename or prev[0] not in (PRINTING, PAUSED)
         ):
             self.tracker.reset_print()
+            self.raw_tracker.reset_print()
         self.job = (state, filename)
 
     @property
@@ -508,7 +597,9 @@ class VisionMonitor:
             self.last_change = now
         events: list[Any] = []
         if not self.printing:
-            for edge in (self._stale, self._dark, self._spaghetti):
+            for edge in (self._stale, self._dark, self._spaghetti, self._vetoed):
+                edge.rise(None)
+            for edge in self._findings.values():
                 edge.rise(None)
             self.last_change = self.last_digest = (
                 None  # idle frames are not fetched: restart the clock
@@ -544,7 +635,22 @@ class VisionMonitor:
                     {"luma": round(s.luma, 1)},
                 )
             )
-        level = self.tracker.update(s.p)
+        level = self.tracker.update(s.signal)
+        raw = self.raw_tracker.update(s.p) if s.q is not None else None
+        data = {
+            "p": round(s.p, 3),
+            "q": None if s.q is None else round(s.q, 3),
+            "trend": round(self.tracker.adjusted, 3),
+            "boxes": [
+                {**{k: round(v, 4) for k, v in vars(b).items()}, "verified": prob}
+                for b, prob in zip(
+                    s.boxes,
+                    [round(x, 3) for x in s.probs]
+                    + [None] * (len(s.boxes) - len(s.probs)),
+                    strict=True,
+                )
+            ],
+        }
         if self._spaghetti.rise(level) and level is not None:
             what = (
                 "print looks like spaghetti"
@@ -556,18 +662,66 @@ class VisionMonitor:
                     "vision_spaghetti",
                     level,
                     self._spaghetti,
-                    f"{what} on camera (score {s.p:.2f}, trend {self.tracker.adjusted:.2f}, "
-                    f"{len(s.boxes)} region(s)); look at the frame and pause if it is real",
+                    f"{what} on camera ({self._describe(s)}, trend {self.tracker.adjusted:.2f}); "
+                    "look at the frame and pause if it is real",
                     frame,
                     s,
-                    {
-                        "p": round(s.p, 3),
-                        "trend": round(self.tracker.adjusted, 3),
-                        "boxes": [vars(b) for b in s.boxes],
-                    },
+                    data,
                 )
             )
+        # The detector alone would have alerted but the verifier disagrees (it confirms less
+        # than VETO_RATIO of the raw score): an info event (to subscribers that asked for info)
+        # so an agent can audit the veto; never a warning. A verified failure whose trend just
+        # lags the raw one is not a veto.
+        vetoed = (
+            INFO
+            if raw is not None
+            and level is None
+            and s.q is not None
+            and s.q < VETO_RATIO * s.p
+            else None
+        )
+        if self._vetoed.rise(vetoed) and vetoed is not None:
+            events.append(
+                self._event(
+                    "vision_spaghetti_vetoed",
+                    INFO,
+                    self._vetoed,
+                    f"the spaghetti detector fires but the verifier sees no loose filament "
+                    f"({self._describe(s)}, raw trend {self.raw_tracker.adjusted:.2f}); "
+                    "probably texture, not a failure",
+                    frame,
+                    s,
+                    {**data, "raw_trend": round(self.raw_tracker.adjusted, 3)},
+                )
+            )
+        events += self._finding_events(frame, s)
         return s, events
+
+    def _finding_events(self, frame: Frame, s: FrameScore) -> list[Any]:
+        """One event per episode of each Finding kind; a kind absent from this frame clears."""
+        active = {f.kind: f for f in s.findings}
+        out = []
+        for kind in sorted(set(self._findings) | set(active)):
+            edge = self._findings.setdefault(kind, _Edge())
+            f = active.get(kind)
+            if edge.rise(None if f is None else f.severity) and f is not None:
+                out.append(
+                    self._event(
+                        kind, f.severity, edge, f.text, frame, s, dict(f.data), f.image
+                    )
+                )
+        return out
+
+    @staticmethod
+    def _describe(s: FrameScore) -> str:
+        if s.q is None:
+            return f"score {s.p:.2f}, {len(s.boxes)} region(s)"
+        sure = sum(x >= 0.5 for x in s.probs)
+        return (
+            f"verified score {s.q:.2f} of raw {s.p:.2f}: {sure} of {len(s.probs)} checked "
+            "region(s) look like loose filament"
+        )
 
     def npu(self, verdicts: list[NpuVerdict], now: float) -> list[Any]:
         """The printer's own detector: one warning per noodle episode, while printing."""
@@ -611,11 +765,18 @@ class VisionMonitor:
         frame: Frame | None,
         score: FrameScore | None,
         data: dict[str, Any],
+        image: bytes | None = None,
     ) -> Any:
         from printer_ops.watch import Event
 
         if frame is not None and self.evidence_dir is not None:
             data["frame"] = str(self._save(kind, frame, score))
+            if (
+                image is not None
+            ):  # e.g. reference | now | changed pixels, next to the frame
+                path = Path(data["frame"]).with_suffix(".evidence.jpg")
+                path.write_bytes(image)
+                data["evidence"] = str(path)
         ts = frame.ts if frame is not None else time.time()
         return Event(
             self.printer,

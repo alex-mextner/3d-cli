@@ -405,7 +405,7 @@ def test_fresh_frame_hint_follows_the_installed_vision_command(
 ) -> None:
     monkeypatch.setattr(subscriptions, "has_vision", lambda: True)
     assert (
-        "take one with `3d printer vision u1 --once --save /tmp/u1-now.jpg`"
+        "take one with `3d printer vision u1 --once --save ~/.cache/3d-cli/vision/now/u1.jpg`"
         in agent_message([noodle()], [make(session="x")])
     )
     monkeypatch.setattr(subscriptions, "has_vision", lambda: False)
