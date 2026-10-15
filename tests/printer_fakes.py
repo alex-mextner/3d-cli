@@ -384,6 +384,7 @@ class FakeMoonrakerWS:
     methods: list[str] = field(default_factory=list)
     subscribed: list[dict[str, Any]] = field(default_factory=list)
     metadata: dict[str, dict[str, Any]] = field(default_factory=dict)  # filename -> metadata result
+    metadata_silent: bool = False  # never answer server.files.metadata (a hung endpoint)
     port: int = 0
 
     def _session(self, conn: socket.socket) -> None:
@@ -437,6 +438,8 @@ class FakeMoonrakerWS:
                 self.subscribed.append(req["params"]["objects"])
                 send({"jsonrpc": "2.0", "id": req["id"], "result": {"eventtime": 1.0, "status": self.status}})
                 subscribed = True
+            elif method == "server.files.metadata" and self.metadata_silent:
+                pass
             elif method == "server.files.metadata" and req["params"]["filename"] in self.metadata:
                 send({"jsonrpc": "2.0", "id": req["id"], "result": self.metadata[req["params"]["filename"]]})
             else:

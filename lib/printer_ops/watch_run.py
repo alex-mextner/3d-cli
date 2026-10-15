@@ -371,10 +371,11 @@ class _Stream:
 class MoonrakerStream(_Stream):
     _ids = 0               # JSON-RPC request counter (per session)
     _need_sub = False      # (re)subscribe at the next loop turn: connect / notify_klippy_ready
+    rpc_timeout_s = 15.0   # a JSON-RPC request without a reply for this long times out
 
     def _detector(self, limits: WatchLimits) -> MoonrakerDetector:
         self.mr = MoonrakerDetector(self.device.name, limits)
-        self._meta_retry_at: dict[str, float] = {}  # filename -> monotonic time of the next metadata try
+        self._meta_retry_at: dict[tuple[str, int], float] = {}  # (file, job) -> next metadata try
         return self.mr
 
     def session(self) -> None:
@@ -408,7 +409,7 @@ class MoonrakerStream(_Stream):
         if params is not None:
             req["params"] = params
         ws.send_text(json.dumps(req))
-        deadline = time.monotonic() + 15.0
+        deadline = time.monotonic() + self.rpc_timeout_s
         while (left := deadline - time.monotonic()) > 0 and not self.stop.is_set():
             msg = ws.recv(min(left, 1.0))
             if msg is None:
@@ -420,7 +421,7 @@ class MoonrakerStream(_Stream):
                     raise _RpcError(f"{method}: {obj['error']}")
                 return obj.get("result")
             self._on_rpc(obj)
-        raise WebSocketError(f"{method}: no reply within 15 s")
+        raise _RpcTimeout(f"{method}: no reply within {self.rpc_timeout_s:g} s")
 
     def _subscribe(self, ws: WebSocket) -> None:
         try:
@@ -443,13 +444,14 @@ class MoonrakerStream(_Stream):
         again at most once a minute (whole-file progress meanwhile). Known bounds re-evaluate
         the current status, so held events see the body progress."""
         now = time.monotonic()
-        if not filename or now < self._meta_retry_at.get(filename, 0.0):
+        key = (filename or "", self.mr.jobs)  # a new job with the same file name asks at once
+        if not filename or now < self._meta_retry_at.get(key, 0.0):
             return
         try:
             meta = self._call(ws, "server.files.metadata", {"filename": filename})
-        except _RpcError as exc:
+        except (_RpcError, _RpcTimeout) as exc:  # optional data: never a reason to reconnect
             _log(f"{self.device.name}: no metadata for {filename} ({exc}); whole-file progress, retry in 60 s")
-            self._meta_retry_at[filename] = now + 60.0
+            self._meta_retry_at = {key: now + 60.0}
             return
         self.mr.set_file_body(filename, meta)
         if self.mr.file_body is not None and self.mr.file_body[1] is not None:
@@ -484,6 +486,11 @@ class MoonrakerStream(_Stream):
 
 class _RpcError(Exception):
     pass
+
+
+class _RpcTimeout(WebSocketError):
+    """No reply to a JSON-RPC request within 15 s (the socket itself still works). A
+    WebSocketError, so a required call still ends the session and reconnects."""
 
 
 class CrealityStream(_Stream):

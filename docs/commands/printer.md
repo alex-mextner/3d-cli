@@ -211,8 +211,8 @@ End macros (`END_PRINT`, `PRINT_END`, `CANCEL_PRINT`) switch the bed off and dis
 motors (`M84`) while the printer still reports printing or paused. So `bed_off` and
 `homing_lost` that appear during a job are held for 10 s and dropped if the job ends
 (complete, cancelled, idle) or the condition clears meanwhile; at 99 % progress or more (body
-progress on Moonraker, see above), or on the last layer when the printer reports layers, they
-are ignored ([#190](https://github.com/alex-mextner/3d-cli/issues/190),
+progress on Moonraker, see above) they are ignored
+([#190](https://github.com/alex-mextner/3d-cli/issues/190),
 [#255](https://github.com/alex-mextner/3d-cli/issues/255)). Found already at
 watch start (a paused job), they are reported at once. Start macros do the same in reverse —
 the K1's stock `START_PRINT` zeroes the bed and nozzle targets for about 30 s while probing — so

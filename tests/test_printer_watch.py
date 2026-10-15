@@ -212,11 +212,20 @@ def test_mid_print_bed_off_with_body_progress_still_fires() -> None:
     assert kinds(d.tick(1511.0)) == [("bed_off", WARNING)]
 
 
-def test_last_layer_counts_as_the_end() -> None:
+def test_last_layer_alone_is_not_the_end() -> None:
+    """A one-layer print or a long top layer: a bed switched off there is still a fault."""
     d, _ = started()
     d.on_status({"print_stats": {"info": {"total_layer": 1193, "current_layer": 1193}}}, 1001.0)
-    out = d.on_status({"heater_bed": {"target": 0.0}}, 1002.0) + d.tick(1030.0)
-    assert out == []
+    d.on_status({"heater_bed": {"target": 0.0}}, 1002.0)
+    assert kinds(d.tick(1013.0)) == [("bed_off", WARNING)]
+
+
+def test_body_bounds_are_forgotten_when_a_new_job_starts_paused() -> None:
+    d = k1_moonraker(300000)
+    jobs = d.jobs
+    d.on_status({"print_stats": {"state": "complete"}}, 1100.0)
+    d.on_status({"print_stats": {"state": "paused"}}, 1200.0)
+    assert d.wants_file_body() == K1_FILE and d.jobs == jobs + 1
 
 
 def test_body_bounds_are_fetched_again_for_a_new_job_with_the_same_file_name() -> None:
@@ -1055,6 +1064,20 @@ def test_moonraker_stream_reads_body_bounds_once_per_file(tmp_path: Path) -> Non
     assert mr.frame.progress > 0.999                              # body progress, not 94.6 %
     assert mr._held == {}                                         # END_PRINT bed-off dropped
     assert [e.kind for e in got] == ["snapshot"]
+
+
+def test_moonraker_stream_survives_a_hung_metadata_endpoint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(watch_run.MoonrakerStream, "rpc_timeout_s", 0.5)
+    fake = FakeMoonrakerWS(metadata_silent=True, pushes=[
+        {"jsonrpc": "2.0", "method": "notify_status_update", "params": [{"print_stats": {"state": "paused"}}, 2.0]},
+    ])
+    with fake.serve():
+        got = _run_stream(fake, tmp_path, lambda: False)  # runs ~5 s (the _wait_for timeout)
+    kinds_seen = [e.kind for e in got]
+    assert "connection" not in kinds_seen                         # no reconnect for optional data
+    assert kinds_seen == ["snapshot", "state"]
+    assert fake.methods.count("server.files.metadata") == 1       # retried no sooner than in 60 s
+    assert fake.methods.count("server.info") == 1
 
 
 def test_stream_reports_unreachable_printer(tmp_path: Path) -> None:

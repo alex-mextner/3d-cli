@@ -249,13 +249,9 @@ class _Detector:
         return out
 
     def _at_end(self, f: Frame) -> bool:
-        """The job is in its end macro: still printing/paused by state, but at `end_progress`
-        or on its last layer (when the printer reports layers)."""
-        if f.state not in JOB_ACTIVE:
-            return False
-        if f.progress is not None and f.progress >= self.limits.end_progress:
-            return True
-        return bool(f.layer and f.total_layer and f.layer >= f.total_layer)
+        """The job is in its end macro: still printing/paused by state, but at `end_progress`.
+        (Not "on the last layer": a one-layer print or a long top layer would hide real faults.)"""
+        return f.state in JOB_ACTIVE and f.progress is not None and f.progress >= self.limits.end_progress
 
     def _in_start_phase(self, f: Frame, now: float) -> bool:
         """Start macro window: the first `start_phase_s` after this watcher saw the job start;
@@ -540,6 +536,7 @@ class MoonrakerDetector(_Detector):
         # file metadata: (filename, bounds or None when the metadata has none). Forgotten when a
         # job starts, since a re-sliced file may be uploaded under the same name.
         self.file_body: tuple[str, tuple[int, int] | None] | None = None
+        self.jobs = 0  # jobs seen starting; keys per-job state such as the stream's metadata retry
 
     def wants_file_body(self) -> str | None:
         """The current job's file whose body bounds are not known yet (the stream fetches them
@@ -608,8 +605,10 @@ class MoonrakerDetector(_Detector):
             self.status = {}
         _merge(self.status, delta)
         ps = self.status.get("print_stats") or {}
-        if self._job_state not in JOB_ACTIVE and ps.get("state") == "printing":
-            self.file_body = None  # a new job: its file may be a re-slice under the same name
+        if self._job_state not in JOB_ACTIVE and ps.get("state") in ("printing", "paused"):
+            # a new job (it may even start paused): its file may be a re-slice under the same name
+            self.file_body = None
+            self.jobs += 1
         out: list[Event] = []
         out += self._klippy_from_webhooks(now)
         out += self._exception_rules(now)
