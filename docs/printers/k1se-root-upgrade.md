@@ -70,17 +70,18 @@ curl -s http://192.168.0.27:4408/release_info.json > "$D/fluidd-release_info.jso
 uv run python - "$D" <<'EOF'
 import sys, json, time; sys.path.insert(0, "lib")
 from printer_ops.ws import WebSocket
-ws = WebSocket.connect("192.168.0.27", 9999, timeout=5)
-for p in ("ReqPrinterPara", "reqGcodeFile"):
-    ws.send_text(json.dumps({"method": "get", "params": {p: 1}}))
-out, t = {}, time.time()
-while time.time() - t < 8:
-    m = ws.recv(1.0)
-    if m:
-        try: d = json.loads(m)
-        except ValueError: continue
-        if isinstance(d, dict): out.update(d)
-json.dump(out, open(sys.argv[1] + "/ws-ReqPrinterPara.json", "w"), indent=1, sort_keys=True)
+with WebSocket.connect("192.168.0.27", 9999, timeout=5) as ws:
+    for p in ("ReqPrinterPara", "reqGcodeFile"):
+        ws.send_text(json.dumps({"method": "get", "params": {p: 1}}))
+    out, t = {}, time.time()
+    while time.time() - t < 8:
+        m = ws.recv(1.0)
+        if m:
+            try: d = json.loads(m)
+            except ValueError: continue
+            if isinstance(d, dict): out.update(d)
+with open(sys.argv[1] + "/ws-ReqPrinterPara.json", "w") as f:
+    json.dump(out, f, indent=1, sort_keys=True)
 EOF
 (cd "$D" && sha256sum * > SHA256SUMS)
 ```
@@ -93,13 +94,27 @@ The K1 runs dropbear, which has no `sftp-server`, so `scp` needs `-O` (legacy pr
 `tar` over `ssh` works without it. Password: `creality_2023`.
 
 ```bash
+( set -euo pipefail    # subshell: a failed step aborts the backup, not your shell
 K=root@192.168.0.27
 B=~/.cache/k1-root/backup-$(date -u +%Y%m%dT%H%M%SZ); mkdir -p "$B"
-ssh $K 'cat /usr/data/printer_data/config/printer.cfg' > "$B/printer.cfg"      # quick check that ssh works
-ssh $K 'tar czf - -C /usr/data printer_data/config creality/userdata 2>/dev/null' > "$B/usr-data-config.tgz"
-ssh $K 'ls -la /usr/data /usr/data/printer_data /etc/init.d; df -h; uname -a; cat /etc/os-release 2>/dev/null; v4l2-ctl --list-devices 2>&1; ls /dev/video*' > "$B/inventory.txt"
-(cd "$B" && sha256sum * > SHA256SUMS && tar tzf usr-data-config.tgz | wc -l)
+ssh $K 'cat /usr/data/printer_data/config/printer.cfg' > "$B/printer.cfg"
+grep -q '^#\*# \[' "$B/printer.cfg"                     # SAVE_CONFIG block present (mesh/shaper/PID)
+ssh $K 'cd /usr/data && ls -d printer_data/config creality/userdata 2>/dev/null' > "$B/paths.txt"
+ssh $K "tar czf - -C /usr/data $(tr '\n' ' ' < "$B/paths.txt")" > "$B/usr-data-config.tgz"
+tar tzf "$B/usr-data-config.tgz" > "$B/usr-data-config.list"   # fails on a broken archive
+grep -qx 'printer_data/config/printer.cfg' "$B/usr-data-config.list"
+grep -qx 'printer_data/config/gcode_macro.cfg' "$B/usr-data-config.list"
+ssh $K 'ls -la /usr/data /usr/data/printer_data /etc/init.d; df -h; uname -a; cat /etc/os-release; v4l2-ctl --list-devices; ls /dev/video*' > "$B/inventory.txt" 2>&1 || true
+(cd "$B" && sha256sum * > SHA256SUMS)
+echo "backup OK: $B ($(wc -l < "$B/usr-data-config.list") entries; paths: $(tr '\n' ' ' < "$B/paths.txt"))"
+)
 ```
+
+Do not start §4.2 unless the last line prints `backup OK`. A stock K1 SE that finished its
+first self-check has a `#*# SAVE_CONFIG` block. If the `grep` stops the backup there, look at
+`printer.cfg` before going on. `paths.txt` records whether `creality/userdata` exists on this
+firmware. If it is missing, the screen Z-offset lives elsewhere: note the value shown on the
+screen by hand.
 
 | Item | Why |
 |---|---|
@@ -139,8 +154,12 @@ Root has to be enabled again after a full factory reset.
    ```
 3. Put the script in `/usr/data/helper-script` (the path is hard-coded in the script):
    - **Online:** `git clone --depth 1 https://github.com/Guilouz/Creality-Helper-Script.git /usr/data/helper-script`.
-     On an SSL error, run `git config --global http.sslVerify false` first; this is the wiki's own advice.
-   - **Offline:** `scp -O ~/.cache/k1-root/helper-script-b46787a.tar.gz root@192.168.0.27:/usr/data/` then
+     The wiki suggests `git config --global http.sslVerify false` on an SSL error. **Don't do that:**
+     the script runs as root and its Moonraker step `git pull`s again, so this would let anyone on
+     the path swap the code. Check `date` first (a wrong clock is the usual cause). If TLS still
+     fails, use the offline archive below; its SHA-256 is in §2.
+   - **Offline:** `scp -O ~/.cache/k1-root/helper-script-b46787a.tar.gz root@192.168.0.27:/usr/data/`, check
+     `sha256sum /usr/data/helper-script-b46787a.tar.gz` against §2, then
      `cd /usr/data && tar xzf helper-script-b46787a.tar.gz`. The script then has no `.git`, so it skips self-update.
 4. `sh /usr/data/helper-script/helper.sh`. It detects the model through
    `get_sn_mac.sh model`, matching `K1`, and opens the **K1 SERIES** menus.
@@ -198,7 +217,9 @@ Then `/etc/init.d/S50usb_camera restart` and check `http://192.168.0.27:8080/?ac
 and `http://192.168.0.27:4408/webcam/?action=stream`.
 
 Register it with Moonraker so Fluidd shows it: uncomment the `[webcam Camera]` block in
-`/usr/data/printer_data/config/moonraker.conf`, set both URLs to `192.168.0.27:8080`, then
+`/usr/data/printer_data/config/moonraker.conf` and set
+`stream_url: http://192.168.0.27:8080/?action=stream` and
+`snapshot_url: http://192.168.0.27:8080/?action=snapshot`, then
 `/etc/init.d/S56moonraker_service restart`.
 
 ### 4.4 Remote reboot and camera restart
@@ -286,6 +307,6 @@ runs `3d printer watch k1se $WATCH_ARGS` and picks up the new adapter from the y
 - [ ] `RESTART_CAMERA` brings the stream back within ~5 s
 - [ ] After the yaml switch: `3d printer status k1se` → `moonraker  192.168.0.27:7125`, state `standby`, temperatures plausible; file count from `/server/files/list` matches the 107 from the baseline `[INFERENCE: Moonraker's gcodes root is the stock upload dir]`
 - [ ] `3d print-preflight` on a K1 G-code reports limits `x[-5,229] y[-0.5,227]` from `printer-devices.yaml`
-- [ ] Small test print uploaded with `3d printer start k1se … --yes`. Before it starts, check that the Z-offset on the screen equals the backup value; then check first-layer height
+- [ ] Test print: `3d printer upload k1se out/<small>.gcode`. Then check that the Z-offset on the screen equals the backup value. Only then `3d printer start k1se out/<small>.gcode --yes`, and check the first-layer height
 - [ ] `systemctl --user status 3d-printer-watch@k1se` is active, no error events
 - [ ] Reboot the printer once (power switch): Moonraker, nginx, camera and ws :9999 all come back without manual steps
