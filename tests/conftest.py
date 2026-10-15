@@ -23,6 +23,9 @@ from cli.resources import cap_threads, max_workers  # noqa: E402  (lib/ is on sy
 # before any subprocess, so `3d` children started by the e2e tests inherit the caps too
 cap_threads()
 
+# PrintOps shared fixtures (tmp DB, FakeSpoolman, 3d-api TestClient, api_client, live_api).
+pytest_plugins = ["printops_fixtures"]
+
 
 def cache_temproot(environ: Mapping[str, str]) -> str:
     """`<XDG cache>/3d-cli/pytest`: $XDG_CACHE_HOME when absolute (the XDG spec ignores a
