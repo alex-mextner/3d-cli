@@ -1,0 +1,172 @@
+# fleet/printers.yaml — every printer we print on: ours, the neighbour's, Boris's, the hackspace's.
+#
+# Read by lib/printops/fleet.py (schema + typed loader) and, for printers 3d may contact, by
+# lib/printer_ops/devices.py as the BASE layer of the device registry: an entry with the same
+# name in ~/.config/3d-cli/printer-devices.yaml or ./printer-devices.yaml replaces the device
+# part (adapter/host/ports/axis_limits/...) of that printer, exactly as before (issue #157).
+#
+# Keys (docs/commands/printer.md "Fleet registry"):
+#   model         a printer MODEL name from lib/data/printers.yaml (`3d printers list`)
+#   owner         own | neighbour | boris | hackerspace
+#   access        full (3d may upload/start/cancel) | read-only (status/watch only) |
+#                 offline (never contacted: no adapter/host; jobs and usage are entered by hand —
+#                 decision D7 for other people's printers)
+#   adapter, host, port, ws_port, axis_limits, trusted_macros, bridge_max_mm, resume
+#                 device settings, see `3d printer --help`; required for full/read-only
+#   heads         label T1..Tn <-> index 0..n-1, `extruder` = Klipper object name,
+#                 nozzle {diameter_mm, material brass|stainless|hardened|ruby|tungsten, type std|hf},
+#                 usable (false needs `reason`)
+#   ams           filament units feeding the heads: {id, kind, slots}; [] = none
+#   enclosure     none | partial | full;  chamber_heater: true | false
+#   plates        build plates on hand: smooth_pei | textured_pei | cool_plate | engineering_plate |
+#                 high_temp_plate | epoxy | glass
+#   sources       where the facts come from (URLs / repo paths / live reads); notes: free text
+# A key that is not known yet is left out (unknown), never guessed.
+
+u1:
+  model: Snapmaker U1
+  owner: own
+  access: full
+  adapter: moonraker        # Klipper + Moonraker
+  host: 192.168.0.26
+  port: 7125
+  # stepper_x/y position_min/max read from the printer (Moonraker configfile), 2026-10-13
+  axis_limits: {x: [0, 271], y: [0, 335]}
+  # Vendor firmware macros found in every Snapmaker Orca plate printed so far (babushkin-dom
+  # print/, 2026-10-14). Their bodies are the printer's own config and are NOT checked by 3d;
+  # listing them means "trusted to stay on the bed". Remove one to make preflight FAIL on it.
+  trusted_macros: [PRINT_START, PRINT_END, BED_MESH_CALIBRATE, DETECT_BED_PLATE,
+    DEFECT_DETECTION_START, DEFECT_DETECTION_DETECT, DEFECT_DETECTION_DETECT_BED,
+    DEFECT_DETECT_NOODLE_FIRST, FINELY_CLEAN_NOZZLE_STAGE_1, FINELY_CLEAN_NOZZLE_STAGE_2,
+    ROUGHLY_CLEAN_NOZZLE, ROUGHLY_CLEAN_NOZZLE_WITH_DISCARD, MOVE_TO_DISCARD_FILAMENT_POSITION,
+    MOVE_TO_XY_IDLE_POSITION_EXTRUDER, SM_PRINT_AUTO_FEED, SM_PRINT_CHECK_SWITCH_EXTRUDER,
+    SM_PRINT_EXTRUDER_PREHEAT, SM_PRINT_FLOW_CALIBRATE, SM_PRINT_PREEXTRUDE_FILAMENT,
+    SET_PURIFIER_MODE, TIMELAPSE_START, TIMELAPSE_STOP, TIMELAPSE_TAKE_FRAME, WAIT_CHAMBER_TEMP,
+    T0, T1, T2, T3]
+  # longest clean bridge for the print-preflight overhangs gate (default 15):
+  # tester u1_bridge_span A, 17,2/20,5 мм
+  bridge_max_mm: 25
+  resume:                   # `3d gcode-resume` (Snapmaker/u1-klipper@10f2f69 macros, docs/commands/gcode-resume.md)
+    purge_macro: SM_PRINT_PREEXTRUDE_FILAMENT
+    purge_mm: 30
+    purge_retract_mm: 0.5
+    no_tower_prime_mm: 12
+    clearance_mm: 5
+    tower_margin_mm: 3
+    filament_diameter_mm: 1.75
+    min_print_temp: 170
+    default_accel: 10000
+    start_commands: [DEFECT_DETECTION_START]
+  # extruder..extruder3 and nozzle_diameter 0.4 each: live configfile, 2026-10-14
+  heads:
+    - {label: T1, index: 0, extruder: extruder, nozzle: {diameter_mm: 0.4, material: stainless, type: std}, usable: true}
+    - label: T2
+      index: 1
+      extruder: extruder1
+      nozzle: {diameter_mm: 0.4, material: stainless, type: std}
+      usable: false
+      reason: "head T2 does not work (babushkin-dom gen/queue.json: «слот 2 — заглушка, голова T2 не работает»; gen/plates.json: «T2 is broken»)"
+    - {label: T3, index: 2, extruder: extruder2, nozzle: {diameter_mm: 0.4, material: stainless, type: std}, usable: true}
+    - {label: T4, index: 3, extruder: extruder3, nozzle: {diameter_mm: 0.4, material: stainless, type: std}, usable: true}
+  ams: []                   # one spool per head on the built-in feeders, no AMS-like unit
+  enclosure: partial        # side panels + front door; the optional Top Cover closes the top
+  chamber_heater: false     # live `heaters`: bed + 4 extruders; only `temperature_sensor cavity`
+  plates: [textured_pei]
+  sources:
+    - https://www.snapmaker.com/snapmaker-u1/specs
+    - https://wiki.snapmaker.com/en/FAQ/u1
+    - live Moonraker GET /printer/objects/query?extruder..extruder3&heaters&configfile=settings (2026-10-14)
+
+k1se:
+  model: Creality K1 SE
+  owner: own
+  access: full
+  adapter: creality-stock   # Creality K1 SE (K1SE-85B6), stock firmware: HTTP upload + ws:9999
+  host: 192.168.0.27
+  # stepper_x/y position_min/max: CrealityOfficial/K1_Series_Klipper config/K1_SE_CR4CU220812S12/printer.cfg
+  axis_limits: {x: [-5, 229], y: [-0.5, 227]}
+  # Stock K1 SE macros (CrealityOfficial K1_Series_Klipper gcode_macro.cfg); PAUSE parks at
+  # Z50, X max-10, Y max/2 (inside the axis limits). Bodies are NOT checked by 3d.
+  trusted_macros: [START_PRINT, END_PRINT, PAUSE]
+  heads:
+    - {label: T1, index: 0, extruder: extruder, nozzle: {diameter_mm: 0.4, material: hardened, type: std}, usable: true}
+  ams: []                   # live ws: cfsConnect 0
+  enclosure: none           # open die-cast frame
+  chamber_heater: false     # live ws: boxTemp 0, targetBoxTemp 0
+  sources:
+    - https://www.creality.com/support/creality-k1-se-3d-printer
+    - "live ws:9999 status (2026-10-14): one nozzleTemp, cfsConnect 0"
+
+p1s:
+  model: Bambu Lab P1S
+  owner: neighbour
+  access: offline
+  # Never contacted; static profile for `3d print-preflight --printer p1s`. X/Y travel from the
+  # Bambu Studio 02.08.00.05 "Bambu Lab P1S 0.4 nozzle" templates: printable_area 0..256, literal
+  # moves X 3..240, Y -3 (wipe, change_filament/start/end) .. 265 (rear purge chute).
+  axis_limits: {x: [0, 256], y: [-3, 265]}
+  # Bambu firmware commands of those templates + the slicer-body ones seen in the A1 mini
+  # G-code (same firmware family [INFERENCE]: M201, M203, M624, M625, M981, M1003); T0..T3 = AMS slots.
+  trusted_macros: [G29, G29.1, G29.2, G380, M73.2, M201, M201.2, M203, M221, M290, M412, M500, M620,
+    M620.1, M620.11, M621, M622, M622.1, M623, M624, M625, M628, M629, M710, M960, M970.3, M971, M974,
+    M975, M981, M991, M1002, M1003, M1004, T0, T1, T2, T3, T255, T1000]
+  heads:
+    - {label: T1, index: 0, usable: true}
+  enclosure: full
+  chamber_heater: false
+  notes: "Neighbour's printer: printed babushkin-dom roofs/gutters/chimney with one Elegoo PLA Matte Grey spool (gen/plates_p1s.json, BambuSlice). AMS and nozzle not known."
+  sources:
+    - ~/xp/garage-band/projects/babushkin-dom/gen/queue.json (printer P1S)
+    - "https://wiki.bambulab.com/en/x1/manual/x1e-faq (P1 series: no chamber heating unit)"
+
+a1mini:
+  model: Bambu Lab A1 mini
+  owner: boris
+  access: offline
+  # Never contacted; static profile for `3d print-preflight --printer a1mini`. X -13.5 = waste
+  # chute (change_filament), X 187 / Y 178 timelapse park, Y -4 start: Bambu Studio 02.08.00.05
+  # "Bambu Lab A1 mini 0.4 nozzle" templates; babushkin-dom print/a1mini/*.gcode moves span
+  # exactly x -13.5..187, y -4..186.
+  axis_limits: {x: [-13.5, 187], y: [-4, 186]}
+  # Every Bambu firmware command in those templates and G-codes that is not a modelled move;
+  # T0..T3 = AMS lite slots.
+  trusted_macros: [G29, G29.1, G29.2, G39, G39.3, G39.4, G380, G392, M73.2, M201, M201.2, M203, M211,
+    M221, M412, M500, M620, M620.1, M620.3, M620.10, M620.11, M621, M622, M622.1, M623, M624, M625,
+    M628, M629, M630, M960, M970, M970.3, M971, M974, M975, M981, M982.2, M983, M984, M991, M1002,
+    M1003, M1004, M1006, M1007, M9833, M9833.2, T0, T1, T2, T3, T255, T1000]
+  heads:
+    - {label: T1, index: 0, usable: true}
+  ams:
+    - {id: ams-lite, kind: ams_lite, slots: 4}
+  enclosure: none
+  chamber_heater: false
+  notes: "Boris's printer (gen/plates.json: «A1 mini Бориса (AMS lite)»); his spools: светло-серый, оранжевый, бледно-красный. Nozzle not known."
+  sources:
+    - ~/xp/garage-band/projects/babushkin-dom/gen/plates.json
+    - https://bambulab.com/en/a1-mini/tech-specs
+
+xecut-a1:
+  model: Bambu Lab A1
+  owner: hackerspace
+  access: offline
+  heads:
+    - {label: T1, index: 0, usable: true}
+  enclosure: none
+  chamber_heater: false
+  notes: "Xecut hackspace, Belgrade. Inventory lists ABS, PLA, PETG for it. AMS lite, nozzle and plates not known."
+  sources:
+    - https://xecut.me/en/inventory/ (2026-10-14)
+
+xecut-cr200b:
+  model: Creality CR-200B Pro
+  owner: hackerspace
+  access: offline
+  heads:
+    - {label: T1, index: 0, usable: true}
+  ams: []
+  enclosure: full
+  chamber_heater: false
+  notes: "Xecut hackspace, Belgrade: Klipper firmware, «Requires setup and calibration» (inventory)."
+  sources:
+    - https://xecut.me/en/inventory/ (2026-10-14)
+    - https://www.creality.com/products/cr-200b-pro-3d-printer

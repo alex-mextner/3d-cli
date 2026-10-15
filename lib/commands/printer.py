@@ -20,7 +20,7 @@ INVARIANTS: stdlib-only at import time (registry contract); printer_ops is impor
 """
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from cli.registry import Command
 from errors import InputNotFound, UsageError
@@ -29,13 +29,18 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from printer_ops.base import Adapter, PrinterStatus
+    from printer_ops.devices import Device
+    from printops.fleet import FleetPrinter
 
 USAGE = """3d printer <subcommand> [args]
   Drive the printers configured in printer-devices.yaml (user: ~/.config/3d-cli/,
-  project: ./printer-devices.yaml). Adapters: moonraker (Klipper/Moonraker, Snapmaker U1),
-  creality-stock (Creality K1 family on stock firmware).
+  project: ./printer-devices.yaml) on top of the fleet registry fleet/printers.yaml in the
+  3d-cli repo. Adapters: moonraker (Klipper/Moonraker, Snapmaker U1), creality-stock
+  (Creality K1 family on stock firmware). Fleet printers with access `offline` (other
+  people's) are listed but never contacted; `read-only` ones refuse upload/start/cancel.
 
-  list                                 configured printers (name, adapter, address, model)
+  list [--json]                        every fleet + configured printer: owner, access,
+                                       model, address, heads (unusable ones with reason)
   status NAME [--json] [--secs S]      state, job, progress, temperatures, loaded heads
   upload NAME FILE.gcode [--as REMOTE] store the file on the printer; never starts a print
   start NAME FILE.gcode --yes [--as REMOTE] [--source-3mf X.3mf] [--bridge-max MM] [--force] [--secs S]
@@ -56,7 +61,7 @@ USAGE = """3d printer <subcommand> [args]
                                        no live subscriber took (see `3d printer agent --help`)
 
 Options:
-  --json             status as JSON (normalized state + raw firmware payload)
+  --json             list/status as JSON (status: normalized state + raw firmware payload)
   --secs S           Creality: seconds to listen on ws:9999 for pushed state (default 3)
   --as REMOTE        remote name stem (default: local name, spaces -> _); the stored name
                      always ends in -<sha256[:16]>.gcode; give start the same --as
@@ -75,6 +80,7 @@ outcome is UNKNOWN and nothing is resent. Creality upload is refused while the p
 
 Examples:
   3d printer list
+  3d printer list --json | jq '.[] | {name, access, heads: [.heads[] | select(.usable | not)]}'
   3d printer status u1
   3d printer status k1se --secs 5
   3d printer status u1 --json | jq '.slots[] | {label, color, material}'
@@ -121,9 +127,19 @@ def _parse(argv: list[str], allowed: set[str], n_pos: int, sub: str) -> tuple[li
     return pos, opts
 
 
-def _adapter(name: str, opts: dict[str, str]) -> Adapter:
+def _adapter(name: str, opts: dict[str, str], *, write: bool = False) -> Adapter:
+    """Adapter of printer `name`; `write` (upload/start/cancel) refuses a read-only printer."""
     from printer_ops import adapter_by_name
 
+    if write:
+        from printer_ops.base import PrinterRefused
+        from printer_ops.devices import get_device
+
+        device = get_device(name)
+        if device.access != "full":
+            raise PrinterRefused(f"{name} is {device.access} in {device.source}: upload/start/cancel refused",
+                                 command="printer",
+                                 remediation=[f"Only read it: 3d printer status {name}"])
     return adapter_by_name(name, secs=opts.get("--secs"))
 
 
@@ -150,18 +166,60 @@ def _render_status(name: str, adapter: Adapter, st: PrinterStatus) -> str:
     return "\n".join(lines)
 
 
-def _cmd_list() -> int:
-    from printer_ops.devices import EXAMPLE, load_devices, search_paths
+def _list_row(name: str, printer: FleetPrinter | None, device: Device | None) -> dict[str, Any]:
+    """One `printer list` entry: fleet facts (owner, topology) + the device that would be contacted."""
+    from dataclasses import asdict
 
+    return {
+        "name": name,
+        "model": (device.model if device else None) or (printer.model if printer else None),
+        "owner": printer.owner if printer else None,
+        "access": device.access if device else printer.access if printer else None,
+        "adapter": device.adapter if device else None,
+        "address": f"{device.host}:{device.port}" if device else None,
+        "settings": str(device.source) if device else None,
+        "fleet": str(printer.source) if printer else None,
+        "heads": [asdict(h) for h in printer.heads] if printer else [],
+        "ams": [asdict(u) for u in printer.ams] if printer and printer.ams is not None else None,
+        "enclosure": printer.enclosure if printer else None,
+        "chamber_heater": printer.chamber_heater if printer else None,
+        "plates": list(printer.plates) if printer and printer.plates is not None else None,
+    }
+
+
+def _cmd_list(argv: list[str]) -> int:
+    import json
+
+    from printer_ops.devices import EXAMPLE, load_devices, search_paths
+    from printops.fleet import fleet_path, load_fleet
+
+    _, opts = _parse(argv, {"--json"}, 0, "list")
+    fleet = load_fleet()
+    printers = fleet.printers if fleet else {}
     devices = load_devices()
-    if not devices:
+    rows = [_list_row(n, printers.get(n), devices.get(n)) for n in sorted(set(printers) | set(devices))]
+    if "--json" in opts:
+        print(json.dumps(rows, indent=1, ensure_ascii=False))
+        return 0
+    if not rows:
         print("No printers configured. Looked in:")
-        for p in search_paths():
+        for p in [fleet_path(), *search_paths()]:
             print(f"  {p}")
         print("\nCreate one of them, e.g.:\n" + EXAMPLE)
         return 0
-    for d in sorted(devices.values(), key=lambda d: d.name):
-        print(f"  {d.name:<10} {d.adapter:<15} {d.host}:{d.port:<6} {d.model or '-':<16} {d.source}")
+    print(f"  {'NAME':<13} {'OWNER':<12} {'ACCESS':<9} {'MODEL':<20} {'ADDRESS':<31} HEADS")
+    for r in rows:
+        address = f"{r['adapter']} {r['address']}" if r["adapter"] else "- (never contacted)"
+        heads = " | ".join(h["label"] + ("" if h["usable"] else " UNUSABLE") for h in r["heads"]) or "-"
+        print(f"  {r['name']:<13} {r['owner'] or '-':<12} {r['access']:<9} {r['model'] or '-':<20} "
+              f"{address:<31} {heads}")
+        for h in r["heads"]:
+            if not h["usable"]:
+                print(f"      {h['label']}: {h['reason']}")
+        if r["settings"] and r["settings"] != r["fleet"]:
+            print(f"      device settings: {r['settings']}")
+    if fleet is not None:
+        print(f"\nfleet: {fleet.path}")
     return 0
 
 
@@ -206,7 +264,7 @@ def _upload_snapshot(name: str, file: str, local: Path, opts: dict[str, str]) ->
     from printer_ops.base import PrinterRefused, safe_remote_name
 
     remote = safe_remote_name(local, opts.get("--as"))
-    adapter = _adapter(name, opts)
+    adapter = _adapter(name, opts, write=True)
     st = adapter.status()
     if st.busy and (not adapter.upload_while_busy or st.filename == remote):
         why = "it would overwrite the file being printed" if st.filename == remote else \
@@ -268,7 +326,7 @@ def _start_snapshot(name: str, file: str, original: Path, local: Path, source: P
 
     remote = safe_remote_name(local, opts.get("--as"))  # content-addressed: <stem>-<sha256[:16]>.gcode
     size = local.stat().st_size
-    adapter = _adapter(name, opts)
+    adapter = _adapter(name, opts, write=True)
 
     st = adapter.status()
     _refuse_if_busy(name, st, "before preflight")
@@ -343,7 +401,7 @@ def _cmd_cancel(argv: list[str]) -> int:
     if "--yes" not in opts:
         raise UsageError("cancel stops a physical job and needs --yes", command="printer",
                          remediation=[f"Confirm explicitly: 3d printer cancel {name} --yes"])
-    adapter = _adapter(name, opts)
+    adapter = _adapter(name, opts, write=True)
     st = adapter.status()
     if st.state not in ACTIVE_JOB_STATES:
         raise PrinterRefused(f"{name} is {st.state} [{st.raw_state}]: no job to cancel", command="printer")
@@ -377,7 +435,7 @@ def run(argv: list[str]) -> int:
         print(USAGE)
         return 0
     if sub == "list":
-        return _cmd_list()
+        return _cmd_list(rest)
     if sub == "status":
         return _cmd_status(rest)
     if sub == "upload":

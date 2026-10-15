@@ -9,6 +9,7 @@ from cli.registry import Command
 from errors import GateFailure, InvalidArgument, UsageError
 
 USAGE = """3d lint [--all | paths...] [options]
+       3d lint --printops [--live] [--fleet FILE] [--json]
   Run advisory lint rules over repository Python files and OpenSCAD model metadata.
 
 Repository options:
@@ -24,14 +25,24 @@ Model options:
   --error ID            set a model rule to error level for this run
   --list-rules          print registered model rules
 
+PrintOps data options (fleet/printers.yaml rules fleet/schema, fleet/device, fleet/model-known):
+  --printops            lint the PrintOps data files instead of code
+  --live                also compare heads/nozzles with each reachable printer (rule
+                        fleet/live-topology; READ-ONLY: one GET / ws status read per printer,
+                        offline printers are never contacted; unreachable = warning)
+  --fleet FILE          lint FILE instead of <repo>/fleet/printers.yaml
+
 Exit 0 = no findings, 1 = findings, 2 = invalid invocation.
+(--printops: 1 only for errors; warnings are printed but pass.)
 
 Examples:
   3d lint --all
   3d lint lib/preprocess_reference.py
   3d lint --all --rule no-subject-leakage --json
   3d lint examples/cube.scad --format json
-  3d lint bracket.scad --strict --error naming/id-kebab"""
+  3d lint bracket.scad --strict --error naming/id-kebab
+  3d lint --printops
+  3d lint --printops --live --json"""
 
 REPO_RULES = frozenset({"no-subject-leakage"})
 
@@ -51,6 +62,11 @@ def run(argv: list[str]) -> int:
     if options["list_rules"]:
         _print_model_rules()
         return 0
+    if options["printops"]:
+        return _run_printops_lint(options)
+    if options["live"] or options["fleet"] is not None:
+        raise UsageError("--live and --fleet need --printops", command="lint",
+                         remediation=["Run `3d lint --printops --live` or `3d lint --printops --fleet FILE`."])
 
     paths = options["paths"]
     scan_all = options["scan_all"]
@@ -78,6 +94,9 @@ def _parse_args(argv: list[str]) -> dict[str, Any]:
         "overrides": {},
         "model_flag_seen": False,
         "help": False,
+        "printops": False,
+        "live": False,
+        "fleet": None,
     }
     i = 0
     while i < len(argv):
@@ -122,6 +141,12 @@ def _parse_args(argv: list[str]) -> dict[str, Any]:
             options["model_flag_seen"] = True
             options["list_rules"] = True
             i += 1
+        elif arg in ("--printops", "--live"):
+            options[arg[2:]] = True
+            i += 1
+        elif arg == "--fleet":
+            options["fleet"] = Path(_need_value(argv, i, "--fleet"))
+            i += 2
         elif arg.startswith("-"):
             raise UsageError(
                 f"unknown option '{arg}'",
@@ -192,6 +217,26 @@ def _validate_path_mix(paths: list[Path], options: dict[str, Any]) -> None:
             command="lint",
             remediation=["Use repository lint options for Python files, or pass a .scad model."],
         )
+
+
+def _run_printops_lint(options: dict[str, Any]) -> int:
+    if options["paths"] or options["scan_all"] or options["model_flag_seen"] or options["rule_ids"]:
+        raise UsageError("--printops lints the PrintOps data files; it takes no paths, --all, --rule or model options",
+                         command="lint", remediation=["Run `3d lint --printops [--live] [--fleet FILE] [--json]`."])
+    from printops.fleet_lint import ERROR, lint_fleet
+
+    path, findings = lint_fleet(options["fleet"], live=options["live"])
+    errors = sum(1 for f in findings if f.level == ERROR)
+    warnings = len(findings) - errors
+    if options["json_output"]:
+        summary = {"file": str(path) if path else None, "live": options["live"], "errors": errors, "warnings": warnings}
+        print(json.dumps({"summary": summary, "findings": [f.as_dict() for f in findings]}, indent=2, sort_keys=True))
+    else:
+        for f in findings:
+            print(f"  {f.level.upper():<5} {f.rule:<20} {f.message}")
+        live = ", live" if options["live"] else ""
+        print(f"lint --printops: {'FAIL' if errors else 'PASS'} ({path}{live}: {errors} error(s), {warnings} warning(s))")
+    return 1 if errors else 0
 
 
 def _run_repository_lint(options: dict[str, Any]) -> int:
