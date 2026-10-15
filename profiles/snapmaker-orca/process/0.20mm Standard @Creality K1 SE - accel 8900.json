@@ -1,0 +1,11 @@
+{
+    "default_acceleration": "8000",
+    "from": "User",
+    "inherits": "0.20mm Standard @Creality K1 SE",
+    "inner_wall_acceleration": "6000",
+    "name": "0.20mm Standard @Creality K1 SE - accel 8900",
+    "outer_wall_acceleration": "5000",
+    "print_settings_id": "0.20mm Standard @Creality K1 SE - accel 8900",
+    "travel_acceleration": "8000",
+    "version": "2.3.3.3"
+}
