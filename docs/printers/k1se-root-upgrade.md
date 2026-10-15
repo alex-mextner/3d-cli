@@ -45,8 +45,8 @@ another OK.
 | `fluidd-v1.37.6.zip` | Fluidd latest (2026-09-23). The Helper Script downloads this from GitHub; this copy is for an offline printer. SHA-256 `9fe5bcd4a443f4cccd20cef222e70cc334a874070b21d116097a28405b0ed456` |
 | `wiki/` | [Helper Script Wiki](https://guilouz.github.io/Creality-Helper-Script-Wiki/) source (2026-04-14) |
 | `stock-baseline-20261014T233804Z/` | read-only snapshot from §3.1 |
-| `ipk/` | mjpg-streamer 1.0.0-6 `.ipk` files (5), fetched over **HTTPS** from `bin.entware.net`, with `SHA256SUMS`, for §4.3. On 2026-10-15 the printer's `mjpg_streamer`, `input_uvc.so` and `output_http.so` (installed over HTTP) had the same SHA-256 as the copies in these packages |
-| `SHA256SUMS` | checksums for the two archives |
+| `ipk/` | mjpg-streamer 1.0.0-6 `.ipk` files (5) plus their dependencies `libjpeg-turbo` 3.1.1-1, `libv4l` 1.30.1-1 and `libiconv-full` 1.18-1, fetched over **HTTPS** from `bin.entware.net`, with `SHA256SUMS`, for §4.3. On 2026-10-15 the printer's `mjpg_streamer`, `input_uvc.so` and `output_http.so` (installed over HTTP) had the same SHA-256 as the copies in these packages |
+| `SHA256SUMS` | checksums for the two archives (`helper-script-b46787a.tar.gz`, `fluidd-v1.37.6.zip`); the `.ipk` files have their own `ipk/SHA256SUMS` |
 
 **The printer needs internet for the install.** The Moonraker and Nginx builds ship inside the
 Helper Script repo (`files/moonraker/{moonraker,nginx}.tar.gz`), but the Moonraker step then
@@ -161,6 +161,9 @@ Root has to be enabled again after a full factory reset.
    ~28 s to send its banner, so set `ConnectTimeout` ≥ 60. Use one multiplexed connection
    (`ControlMaster=auto`, `ControlPersist`) so each later command does not wait again. Without
    `sshpass`, use `SSH_ASKPASS=<script echoing the password> SSH_ASKPASS_REQUIRE=force`.
+   Right after the backup, **harden root**: `creality_2023` is public, so anyone on the LAN can
+   log in. Run `passwd` (store the new password in the password manager), put the PC's public key
+   in `/root/.ssh/authorized_keys`, and from then on log in with the key.
 2. Check that the printer has internet and the Creality preinstalls are in place:
    ```sh
    ping -c1 github.com && date
@@ -210,7 +213,7 @@ Install, in this order (Install menu numbers as of `b46787a`):
 
 | # | Component | Install? | Notes |
 |---|---|---|---|
-| 1 | **Moonraker and Nginx** | **yes** | Extracts the bundled tarballs, then `git pull`s Moonraker (internet). Moonraker on `:7125`, nginx `:4408` (Fluidd) / `:4409` (Mainsail), `/webcam/` → `127.0.0.1:8080`. `trusted_clients` includes `192.168.0.0/16`, so the LAN needs no API key. Also installs host-control shims (`sudo`, `systemctl`, `supervisorctl`) so Moonraker can reboot the machine. Does **not** touch Creality `web-server`. |
+| 1 | **Moonraker and Nginx** | **yes** | Extracts the bundled tarballs, then `git pull`s Moonraker (internet). Moonraker on `:7125`, nginx `:4408` (Fluidd) / `:4409` (Mainsail), `/webcam/` → `127.0.0.1:8080`. `trusted_clients` includes `192.168.0.0/16`, so the whole LAN gets full printer control (G-code, reboot) without an API key. **Narrow it** (§4.2a). Also installs host-control shims (`sudo`, `systemctl`, `supervisorctl`) so Moonraker can reboot the machine. Does **not** touch Creality `web-server`. |
 | 2 | **Fluidd (port 4408)** | **yes** | Same UI as on the U1. Needs GitHub. **Then run `chmod -R a+rX /usr/data/fluidd`.** The v1.37.6 zip unpacks as 0600/0700 and nginx (user `www-data`) answers 403 until you do. Offline: `scp -O ~/.cache/k1-root/fluidd-v1.37.6.zip root@…:/usr/data/`, then `mkdir -p /usr/data/fluidd && unzip /usr/data/fluidd-v1.37.6.zip -d /usr/data/fluidd && chmod -R a+rX /usr/data/fluidd && /etc/init.d/S50nginx restart` |
 | 3 | Mainsail (4409) | no | one UI is enough |
 | 4 | **Entware** | **yes** | prerequisite for the camera (`opkg`); needs internet. Already present on our image |
@@ -229,6 +232,47 @@ are both served by that `web-server` (same `Server: libhv/1.3.3` header). Removi
 install Guppy Screen** (it stops the same stock stack). Both are the only Helper scripts that
 touch `web-server` (`grep web-server scripts/*.sh`), so with the selection above **ws :9999 stays up**.
 
+### 4.2a Lock down Moonraker
+
+In `/usr/data/printer_data/config/moonraker.conf`, replace the whole `trusted_clients` list
+with the hosts that need control, one full address per line, and turn off proxy headers.
+Moonraker listens on `0.0.0.0:7125`, and with the default `use_xheaders: True` any LAN host could
+claim a trusted address in `X-Real-IP`/`X-Forwarded-For`:
+```ini
+[server]
+use_xheaders: False
+
+[authorization]
+trusted_clients:
+    127.0.0.1
+    192.168.0.38
+    192.168.0.11
+```
+`192.168.0.38`/`192.168.0.11` are the PC (wired/Wi-Fi). Add the HA host's address as one more
+line, then `/etc/init.d/S56moonraker_service restart` and confirm
+`curl -s http://192.168.0.27:7125/access/info` reports `"trusted": true` from the PC and the HA
+host, and `false` (or 401 on control calls) from any other LAN device.
+
+nginx (`/usr/data/nginx/nginx/nginx.conf`, the file `S50nginx` starts it with; Fluidd `:4408` and Mainsail `:4409`) proxies to Moonraker from
+`127.0.0.1`, which stays trusted, so any LAN host reaching `:4408` would control the printer too.
+At the top of both `server { … }` blocks add the same hosts and a deny, then
+`/etc/init.d/S50nginx restart`:
+```nginx
+allow 192.168.0.38;
+allow 192.168.0.11;
+deny all;
+```
+plus an `allow` line for the HA host (it pulls `:4408/webcam/`). Check from another LAN device that
+`:4408` and `:4409` answer 403 and from the PC that Fluidd still loads.
+
+Residual exposure, accepted: mjpg-streamer on `:8080` has no authentication, so every LAN host can
+watch the camera (view only, no control). 3d-cli vision and HA use it directly. On a LAN with
+untrusted devices, drop it at the printer:
+`iptables -I INPUT 1 -p tcp --dport 8080 -j DROP`, then one
+`iptables -I INPUT 1 -p tcp --dport 8080 -s <host> -j ACCEPT` per allowed host (PC, HA). `-I … 1`
+puts them ahead of any existing broad ACCEPT; check the order with `iptables -S INPUT`, confirm
+another LAN device gets no stream, and re-apply from an init script after reboot.
+
 ### 4.3 USB camera (mjpg-streamer)
 
 On the K1 model the Helper Script copies `files/services/S50usb_camera-dual` to
@@ -238,8 +282,8 @@ Then it runs `opkg install mjpg-streamer mjpg-streamer-input-http mjpg-streamer-
 **As of 2026-10-15 that fails** with `Unknown package 'mjpg-streamer'`: the packages are gone from
 the `mipselsf-k3.4` index, but the `.ipk` files are still on the server. Entware's own index is
 plain HTTP, so don't fetch these on the printer. Push the HTTPS-fetched, checksummed copies from
-`~/.cache/k1-root/ipk/` (§2) and install them by explicit name; opkg resolves the dependencies
-(`libjpeg-turbo`, `libv4l`, `libiconv-full`) from the index:
+`~/.cache/k1-root/ipk/` (§2), dependencies (`libjpeg-turbo`, `libv4l`, `libiconv-full`) included,
+and install them all by explicit file name so opkg takes nothing from the HTTP index:
 ```sh
 # on the PC
 (cd ~/.cache/k1-root/ipk && sha256sum -c SHA256SUMS)
@@ -248,6 +292,8 @@ scp -O ~/.cache/k1-root/ipk/*.ipk ~/.cache/k1-root/ipk/SHA256SUMS root@192.168.0
 # on the printer
 set -e; cd /usr/data/ipk && sha256sum -c SHA256SUMS
 V=1.0.0-6_mipsel-3.4
+/opt/bin/opkg install ./libiconv-full_1.18-1_mipsel-3.4.ipk ./libjpeg-turbo_3.1.1-1_mipsel-3.4.ipk \
+  ./libv4l_1.30.1-1_mipsel-3.4.ipk
 /opt/bin/opkg install ./mjpg-streamer_$V.ipk ./mjpg-streamer-input-uvc_$V.ipk ./mjpg-streamer-input-http_$V.ipk \
   ./mjpg-streamer-output-http_$V.ipk ./mjpg-streamer-www_$V.ipk
 cd / && rm -rf /usr/data/ipk && /etc/init.d/S50usb_camera start
