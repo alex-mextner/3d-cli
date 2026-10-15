@@ -157,6 +157,65 @@ def test_moonraker_end_of_print_at_full_progress_is_silent_even_if_state_lags() 
     assert out == []
 
 
+# k1se_combo_black_pla-20682d5df58b5076.gcode on the K1 SE (Moonraker metadata, 2026-10-15):
+# 336882 bytes, body 14042..318620, END_PRINT at byte 318598, Orca config footer after it.
+K1_META = {"size": 336882, "gcode_start_byte": 14042, "gcode_end_byte": 318620, "slicer": "Snapmaker Orca"}
+K1_FILE = "k1se_combo_black_pla-20682d5df58b5076.gcode"
+
+
+def k1_moonraker(pos: int, meta: dict[str, Any] | None = K1_META) -> MoonrakerDetector:
+    d = MoonrakerDetector("k1se")
+    if meta is not None:
+        d.set_file_body(K1_FILE, meta)
+    d.on_status(u1_ws_status("printing", print_stats={"filename": K1_FILE, "info": {}},
+                             virtual_sdcard={"file_position": pos, "progress": pos / 336882}), 1000.0)
+    return d
+
+
+def test_k1_moonraker_end_print_before_a_long_config_footer_is_silent() -> None:
+    """#255: END_PRINT ran at 94.6 % by bytes; the watcher reported bed_off 12 s before complete."""
+    d = k1_moonraker(300000)
+    out = d.on_status({"virtual_sdcard": {"file_position": 318598, "progress": 0.9457}}, 1500.0)
+    assert d.frame is not None and d.frame.progress is not None and d.frame.progress > 0.999
+    out += d.on_status({"heater_bed": {"target": 0.0}}, 1503.0)
+    out += d.on_status({"toolhead": {"homed_axes": ""}}, 1505.0)
+    out += d.tick(1515.0)
+    out += d.on_status({"print_stats": {"state": "complete"}}, 1525.0)
+    assert [e.kind for e in out] == ["state"]
+
+
+def test_body_progress_starts_at_zero_after_a_thumbnail_header() -> None:
+    d = k1_moonraker(14042)
+    assert d.frame is not None and d.frame.progress == 0.0
+
+
+def test_without_metadata_whole_file_progress_is_kept_and_mid_print_bed_off_fires() -> None:
+    d = k1_moonraker(150000, meta=None)
+    assert d.frame is not None and d.frame.progress == pytest.approx(150000 / 336882)
+    assert d.wants_file_body() == K1_FILE
+    d.on_status({"heater_bed": {"target": 0.0}}, 1500.0)
+    assert kinds(d.tick(1511.0)) == [("bed_off", WARNING)]
+
+
+def test_metadata_without_body_bounds_is_remembered_as_unknown() -> None:
+    d = k1_moonraker(150000, meta={"size": 336882})
+    assert d.wants_file_body() is None
+    assert d.frame is not None and d.frame.progress == pytest.approx(150000 / 336882)
+
+
+def test_mid_print_bed_off_with_body_progress_still_fires() -> None:
+    d = k1_moonraker(150000)
+    d.on_status({"heater_bed": {"target": 0.0}}, 1500.0)
+    assert kinds(d.tick(1511.0)) == [("bed_off", WARNING)]
+
+
+def test_last_layer_counts_as_the_end() -> None:
+    d, _ = started()
+    d.on_status({"print_stats": {"info": {"total_layer": 1193, "current_layer": 1193}}}, 1001.0)
+    out = d.on_status({"heater_bed": {"target": 0.0}}, 1002.0) + d.tick(1030.0)
+    assert out == []
+
+
 def test_cold_bed_found_at_watch_start_while_paused() -> None:
     _, ev = started("paused", heater_bed={"target": 0.0, "temperature": 30.0})
     assert ("bed_off", WARNING) in kinds(ev)
@@ -901,7 +960,8 @@ def test_moonraker_stream_end_to_end_is_read_only(fake_ws: FakeMoonrakerWS, tmp_
     stop.set()
     st.join(5)
     assert [e.kind for e in got] == ["snapshot", "exception", "state", "gcode_error", "homing_lost", "bed_off"]
-    assert fake_ws.methods == ["server.info", "printer.objects.list", "printer.objects.subscribe"]
+    assert fake_ws.methods == ["server.info", "printer.objects.list", "printer.objects.subscribe",
+                               "server.files.metadata"]
     assert "filament_motion_sensor e0_filament" in fake_ws.subscribed[0]
     hb.write({}, {})
     beat = json.loads((tmp_path / "hb.json").read_text())
@@ -932,7 +992,8 @@ def test_moonraker_stream_subscribes_once_klippy_is_ready(tmp_path: Path) -> Non
     fake = FakeMoonrakerWS(klippy_state="startup", pushes=[{"jsonrpc": "2.0", "method": "notify_klippy_ready"}])
     with fake.serve():
         got = _run_stream(fake, tmp_path, lambda: "printer.objects.subscribe" in fake.methods)
-    assert fake.methods == ["server.info", "printer.objects.list", "printer.objects.subscribe"]
+    assert fake.methods == ["server.info", "printer.objects.list", "printer.objects.subscribe",
+                            "server.files.metadata"]
     assert "snapshot" in [e.kind for e in got]
 
 
@@ -941,7 +1002,32 @@ def test_moonraker_stream_resubscribes_after_firmware_restart(tmp_path: Path) ->
     with fake.serve():
         _run_stream(fake, tmp_path, lambda: fake.methods.count("printer.objects.subscribe") == 2)
     assert fake.methods == ["server.info", "printer.objects.list", "printer.objects.subscribe",
-                            "printer.objects.list", "printer.objects.subscribe"]
+                            "server.files.metadata", "printer.objects.list", "printer.objects.subscribe"]
+
+
+def test_moonraker_stream_reads_body_bounds_once_per_file(tmp_path: Path) -> None:
+    status = u1_ws_status("printing", print_stats={"filename": K1_FILE},
+                          virtual_sdcard={"file_position": 318598, "progress": 0.9457})
+    fake = FakeMoonrakerWS(status=status, metadata={K1_FILE: K1_META}, pushes=[
+        {"jsonrpc": "2.0", "method": "notify_status_update", "params": [{"heater_bed": {"target": 0.0}}, 2.0]},
+        {"jsonrpc": "2.0", "method": "notify_proc_stat_update", "params": [{}]},
+    ])
+    with fake.serve():
+        dev = devices.Device("k1se", "moonraker", "127.0.0.1", fake.port, None, tmp_path)
+        stop = threading.Event()
+        got: list[Event] = []
+        st = watch_run.stream_for(dev, got.append, stop, watch_run.Heartbeat(None), WatchLimits())
+        st.start()
+        _wait_for(lambda: len(fake.methods) >= 4)
+        time.sleep(0.4)  # both pushes delivered
+        stop.set()
+        st.join(5)
+    assert fake.methods == ["server.info", "printer.objects.list", "printer.objects.subscribe",
+                            "server.files.metadata"]
+    mr = st.mr  # type: ignore[attr-defined]
+    assert mr.frame.progress > 0.999                              # body progress, not 94.6 %
+    assert mr._held == {}                                         # END_PRINT bed-off dropped
+    assert [e.kind for e in got] == ["snapshot"]
 
 
 def test_stream_reports_unreachable_printer(tmp_path: Path) -> None:

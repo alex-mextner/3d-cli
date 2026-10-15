@@ -4,7 +4,9 @@ WHAT: one thread per printer keeps a websocket open and feeds its detector (watc
   events go through one Dispatcher (watch_sinks.py) to stdout/exec/steer and the agent
   sessions registered with `3d printer subscribe` (subscriptions.py).
   moonraker       ws://host:port/websocket, JSON-RPC: server.info, printer.objects.list,
-                  printer.objects.subscribe (re-sent after notify_klippy_ready), then
+                  printer.objects.subscribe (re-sent after notify_klippy_ready),
+                  server.files.metadata (once per job file: the G-code body bounds that job
+                  progress is measured over, #255), then
                   notify_status_update / notify_gcode_response / notify_klippy_* pushes.
   creality-stock  ws://host:9999 pushes JSON state deltas; "heart_beat" is answered "ok".
   A stream with no data for `silence_s` is treated as dead (Moonraker pushes proc stats every
@@ -392,6 +394,7 @@ class MoonrakerStream(_Stream):
                 if msg is not None:
                     self.received()
                     self._on_text(msg)
+                    self._fetch_file_body(ws, self.mr.wants_file_body())
                 self.idle_checks()
         finally:
             ws.close()
@@ -428,7 +431,25 @@ class MoonrakerStream(_Stream):
             return
         status = result.get("status") if isinstance(result, dict) else None
         if isinstance(status, dict):
+            # The subscription is live now: pushes that arrive while a later call waits for its
+            # reply are evaluated at once, so the full status goes in first.
             self.emit(self.mr.on_status(status, time.time(), full=True))
+            self._fetch_file_body(ws, self.mr.wants_file_body())
+
+    def _fetch_file_body(self, ws: WebSocket, filename: str | None) -> None:
+        """server.files.metadata (read-only) -> the G-code body bounds that make job progress
+        exclude a slicer header/footer (#255). Asked once per file; an error records "unknown".
+        Known bounds re-evaluate the current status, so held events see the body progress."""
+        if not filename or filename in self.mr.file_body:
+            return
+        try:
+            meta = self._call(ws, "server.files.metadata", {"filename": filename})
+        except _RpcError as exc:
+            _log(f"{self.device.name}: no metadata for {filename} ({exc}); progress over the whole file")
+            meta = None
+        self.mr.set_file_body(filename, meta)
+        if self.mr.file_body.get(filename) is not None:
+            self.emit(self.mr.on_status({}, time.time()))
 
     def _on_text(self, msg: str) -> None:
         try:

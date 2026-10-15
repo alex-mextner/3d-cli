@@ -244,8 +244,13 @@ class _Detector:
         return out
 
     def _at_end(self, f: Frame) -> bool:
-        """The job is in its end macro: still printing/paused by state, but at `end_progress`."""
-        return f.state in JOB_ACTIVE and f.progress is not None and f.progress >= self.limits.end_progress
+        """The job is in its end macro: still printing/paused by state, but at `end_progress`
+        or on its last layer (when the printer reports layers)."""
+        if f.state not in JOB_ACTIVE:
+            return False
+        if f.progress is not None and f.progress >= self.limits.end_progress:
+            return True
+        return bool(f.layer and f.total_layer and f.layer >= f.total_layer)
 
     def _in_start_phase(self, f: Frame, now: float) -> bool:
         """Start macro window: the first `start_phase_s` after this watcher saw the job start;
@@ -526,6 +531,33 @@ class MoonrakerDetector(_Detector):
         self.klippy: str | None = None
         self._exceptions_seen: set[str] = set()
         self._sensors: dict[str, bool] = {}
+        # filename -> (gcode_start_byte, gcode_end_byte) from Moonraker file metadata, or None
+        # when the metadata has no body bounds (then virtual_sdcard progress is used as is)
+        self.file_body: dict[str, tuple[int, int] | None] = {}
+
+    def wants_file_body(self) -> str | None:
+        """The current job's file whose body bounds are not known yet (the stream fetches them
+        with server.files.metadata and calls `set_file_body`)."""
+        name = (self.status.get("print_stats") or {}).get("filename")
+        return name if name and name not in self.file_body else None
+
+    def set_file_body(self, filename: str, metadata: Any) -> None:
+        """Record `gcode_start_byte`/`gcode_end_byte` of a server.files.metadata result."""
+        start = metadata.get("gcode_start_byte") if isinstance(metadata, dict) else None
+        end = metadata.get("gcode_end_byte") if isinstance(metadata, dict) else None
+        ok = isinstance(start, int) and isinstance(end, int) and 0 <= start < end
+        self.file_body[filename] = (start, end) if ok else None  # type: ignore[assignment]
+
+    def _progress(self, filename: str | None, vsd: dict[str, Any]) -> Any:
+        """Job progress over the G-code body, as Mainsail/Fluidd show it. virtual_sdcard counts
+        the whole file, so a slicer footer (Orca's config block, ~5 % of a small K1 file) puts
+        END_PRINT at 94.6 % (#255) and a thumbnail header makes the job start at 4 %."""
+        body = self.file_body.get(filename) if filename else None
+        pos = vsd.get("file_position")
+        if body is not None and isinstance(pos, (int, float)) and not isinstance(pos, bool):
+            start, end = body
+            return min(1.0, max(0.0, (pos - start) / (end - start)))
+        return vsd.get("progress")
 
     def frame_from_status(self) -> Frame:
         s = self.status
@@ -534,7 +566,7 @@ class MoonrakerDetector(_Detector):
         klippy = (s.get("webhooks") or {}).get("state", "ready")
         state = _MR_STATE.get(raw, UNKNOWN) if klippy == "ready" else UNKNOWN
         vsd = s.get("virtual_sdcard") or {}
-        progress = vsd.get("progress")
+        progress = self._progress(ps.get("filename") or None, vsd)
         if progress is None:
             progress = (s.get("display_status") or {}).get("progress")
         info_obj = ps.get("info")
