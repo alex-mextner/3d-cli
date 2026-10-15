@@ -227,8 +227,25 @@ def validate(data: Any, path: Path) -> tuple[dict[str, FleetPrinter], list[Probl
         return {}, [Problem("", "top level must be a mapping of printer name -> entry")]
     printers: dict[str, FleetPrinter] = {}
     problems: list[Problem] = []
+    keys: dict[str, list[Any]] = {}
+    for raw_name in data:
+        keys.setdefault(str(raw_name), []).append(raw_name)
+    for (
+        name,
+        raws,
+    ) in keys.items():  # `1:` and `'1':` are one name: neither may silently win
+        if len(raws) > 1:
+            problems.append(
+                Problem(
+                    name,
+                    f"{name}: duplicate printer name (YAML keys "
+                    f"{' and '.join(map(repr, raws))} are the same name)",
+                )
+            )
     for raw_name, spec in data.items():
         name = str(raw_name)
+        if len(keys[name]) > 1:
+            continue
         found: list[str] = []
         printer = _entry(name, spec, path, found)
         problems.extend(

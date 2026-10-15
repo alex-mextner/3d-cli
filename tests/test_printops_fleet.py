@@ -220,3 +220,12 @@ def test_non_string_extruder_is_a_schema_problem_not_a_crash(tmp_path: Path) -> 
         "x.heads[0].extruder: must be a Klipper object name, e.g. extruder1",
         "x.heads[1].extruder: must be a Klipper object name, e.g. extruder1",
     ]
+
+
+def test_printer_names_that_collide_as_strings_are_reported(tmp_path: Path) -> None:
+    import yaml
+
+    entry = "{model: Snapmaker U1, owner: own, access: offline, heads: [{label: T1, index: 0}]}"
+    printers, problems = validate(yaml.safe_load(f"1: {entry}\n'1': {entry}\n"), tmp_path / "f.yaml")
+    assert [p.message for p in problems] == ["1: duplicate printer name (YAML keys 1 and '1' are the same name)"]
+    assert printers == {}
