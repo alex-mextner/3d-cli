@@ -745,7 +745,11 @@ def _cli(argv: list[str]) -> int:
 
         i = rest.index("--overlay")
         frame, z, out = rest[i + 1], float(rest[i + 2]), rest[i + 3]
-        img = overlay(cv2.imread(frame), cam, z, [])
+        bgr = cv2.imread(frame)
+        if bgr is None:
+            print(f"cannot read the overlay frame {frame}", file=sys.stderr)
+            return 1
+        img = overlay(bgr, cam, z, [])
         for c in corr:
             if abs(c.z - z) < 0.05:
                 uv = cam.project(np.array([[c.x, c.y, c.h]]), c.z)[0]

@@ -251,6 +251,11 @@ class FrameScorer:
         self.now: float | None = None  # frame time for replays; None = wall clock
         self.roi: np.ndarray | None = None
 
+    def reset_print(self) -> None:
+        """A new print: forget the bed-change references (no-op without geometry)."""
+        if self.geometry is not None:
+            self.geometry.reset_print()
+
     def _allowed(self, b: Box) -> bool:
         cx, cy = (b.x1 + b.x2) / 2, (b.y1 + b.y2) / 2
         if self.roi is not None:
@@ -359,17 +364,19 @@ class PrintGeometry:
             ),
         }
 
+    def reset_print(self) -> None:
+        """A new print started (possibly the same file again): drop every bed-change reference."""
+        for w in (self.scene, self.growth):
+            if w is not None:
+                w.reset()
+
     def update(
         self, bgr: np.ndarray, ctx: PrintContext, now: float
     ) -> tuple[np.ndarray, list[Finding]]:
         """(ROI for the stage-1 boxes, Findings of the bed-change detectors) for one frame."""
-        if (
-            ctx.filename != self.file
-        ):  # a new print: no reference frames from the old one
+        if ctx.filename != self.file:  # another file: no reference frames from the old one
             self.file = ctx.filename
-            for w in (self.scene, self.growth):
-                if w is not None:
-                    w.reset()
+            self.reset_print()
         m = self.masks(ctx, bgr.shape[:2])
         findings: list[Finding] = []
         if (
@@ -514,6 +521,13 @@ def build_scorer(
         if camera is not None and cfg.get("geometry", True)
         else None
     )
+    if bed_change and geometry is None:
+        raise UsageError(
+            "the bed-change detectors (--scene / watch.vision.scene) need the camera "
+            "calibration and `geometry: true`",
+            command="printer vision",
+            remediation=["Drop --scene, or see docs/research/printer-vision-geometry.md."],
+        )
     return FrameScorer(ObicoScorer(ensure_model()), verifier, polys, geometry)
 
 
@@ -566,7 +580,8 @@ def run_live(args: argparse.Namespace) -> int:
         report: dict[str, Any] = {"printer": device.name}
         try:
             st = adapter.status()
-            monitor.set_job(st.state, st.filename)
+            if monitor.set_job(st.state, st.filename):
+                scorer.reset_print()  # the same file printed again is a new print too
             report.update(state=st.state, file=st.filename)
         except PrinterCommError as exc:
             report["error"] = str(exc)
@@ -983,7 +998,9 @@ def run_eval(args: argparse.Namespace) -> int:
             command="printer vision eval",
         )
     cam = None
+    cfg: dict[str, Any] = {}
     if args.printer:
+        from printer_ops.devices import get_device
         from vision_geometry import load_calibration
 
         cam = load_calibration(args.printer)
@@ -996,10 +1013,22 @@ def run_eval(args: argparse.Namespace) -> int:
                     "with 3d-cli for devices with `model: Snapmaker U1`."
                 ],
             )
-    scorer = build_scorer({}, verify=not args.no_verify, camera=cam, scene=args.scene)
+        # the device's live `watch: vision:` settings (ignore polygons, verify, scene), so eval
+        # scores what the live loop would
+        vision_cfg = (
+            getattr(get_device(args.printer), "watch", None) or {}
+        ).get("vision")
+        cfg = vision_cfg if isinstance(vision_cfg, dict) else {}
+    scorer = build_scorer(
+        cfg, verify=not args.no_verify, camera=cam, scene=args.scene
+    )
     replays = {str(p): load_replay(p) for p, _ in sources}
+    current: list[Path] = []
 
     def prepare(path: Path, name: str) -> None:
+        if current != [path]:  # each source is its own print
+            current[:] = [path]
+            scorer.reset_print()
         ctx, ts = replays[str(path)].get(name, (None, None))
         scorer.context, scorer.now = ctx, ts
 
@@ -1010,9 +1039,10 @@ def run_eval(args: argparse.Namespace) -> int:
         every=args.every,
         params=TrackerParams(warmup=args.warmup),
         lead_in=args.lead_in,
-        prepare=prepare if cam is not None else None,
+        prepare=prepare if scorer.geometry is not None else None,
     )
-    m = metrics(results, interval_s=args.interval)
+    # --every N keeps one frame in N, so each scored frame stands for N capture intervals
+    m = metrics(results, interval_s=args.interval * args.every)
     n = m["frames"]["pos"] + m["frames"]["neg"]
     m["seconds_per_frame"] = round((time.time() - t0) / max(1, n), 3)
     if args.json:

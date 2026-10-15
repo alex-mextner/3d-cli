@@ -335,13 +335,15 @@ def test_monitor_reports_the_printers_own_noodle_verdict_once_per_episode() -> N
 
 def test_a_new_print_restarts_the_per_print_history_but_a_pause_does_not() -> None:
     mon = VisionMonitor("u1", _Scores([]))
-    mon.set_job("printing", "a.gcode")
+    assert mon.set_job("printing", "a.gcode") is True
     mon.tracker.frames = 50
-    mon.set_job("paused", "a.gcode")
-    mon.set_job("printing", "a.gcode")
+    assert mon.set_job("paused", "a.gcode") is False
+    assert mon.set_job("printing", "a.gcode") is False
     assert mon.tracker.frames == 50
-    mon.set_job("printing", "b.gcode")
+    assert mon.set_job("printing", "b.gcode") is True
     assert mon.tracker.frames == 0
+    mon.set_job("complete", "b.gcode")
+    assert mon.set_job("printing", "b.gcode") is True  # the same file printed again
 
 
 # ---- vision_detect helpers ----------------------------------------------------------------------

@@ -160,6 +160,37 @@ def test_bed_change_detectors_are_opt_in(
     assert (scorer.geometry.scene is not None, scorer.geometry.growth is not None) == (on, on)
 
 
+def test_scene_without_geometry_is_a_usage_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    import vision_detect
+    from errors import UsageError
+
+    monkeypatch.setattr(vision_detect, "ensure_model", lambda: "model.onnx")
+    with pytest.raises(UsageError, match="calibration"):
+        vision_detect.build_scorer({}, verify=False, camera=None, scene=True)
+    with pytest.raises(UsageError, match="calibration"):
+        vision_detect.build_scorer({"scene": True, "geometry": False}, verify=False, camera=object())
+
+
+def test_a_reprint_drops_the_bed_change_references(monkeypatch: pytest.MonkeyPatch) -> None:
+    pytest.importorskip("numpy")
+    import vision_detect
+
+    resets: list[str] = []
+
+    class _Watch:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def reset(self) -> None:
+            resets.append(self.name)
+
+    geo = vision_detect.PrintGeometry(object(), scene=False, growth=False)
+    geo.scene, geo.growth = _Watch("scene"), _Watch("growth")  # type: ignore[assignment]
+    scorer = vision_detect.FrameScorer(_Detector([]), geometry=geo)  # type: ignore[arg-type]
+    scorer.reset_print()
+    assert resets == ["scene", "growth"]
+
+
 def test_crop_box_is_square_inside_the_frame_and_has_context() -> None:
     np = pytest.importorskip("numpy")
     import vision_verify

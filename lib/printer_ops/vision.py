@@ -526,6 +526,9 @@ class MonitorLimits:
     npu_quiet_s: float = 300.0  # no NPU hit for this long ends a noodle episode
 
 
+_RANK: dict[str | None, int] = {None: 0, INFO: 1, WARNING: 2, CRITICAL: 3}
+
+
 @dataclass
 class _Edge:
     """Edge-triggered condition: fires once per episode, re-arms when it clears."""
@@ -534,8 +537,7 @@ class _Edge:
     episode: int = 0
 
     def rise(self, level: str | None) -> bool:
-        rank = {None: 0, INFO: 1, WARNING: 2, CRITICAL: 3}
-        fired = rank[level] > rank[self.active]
+        fired = _RANK[level] > _RANK[self.active]
         if self.active is None and level is not None:
             self.episode += 1
         self.active = level
@@ -568,16 +570,19 @@ class VisionMonitor:
     _npu: _Edge = field(default_factory=_Edge)
     _findings: dict[str, _Edge] = field(default_factory=dict)  # per Finding.kind
 
-    def set_job(self, state: str, filename: str | None) -> None:
+    def set_job(self, state: str, filename: str | None) -> bool:
         """A new print (another file, or printing again after a stop) starts a fresh per-print
-        history; pause/resume of the same file keeps it."""
+        history; pause/resume of the same file keeps it. -> True when a new print started, so
+        the caller can reset its own per-print state (the scorer's bed-change references)."""
         prev = self.job
-        if state == PRINTING and (
+        new = state == PRINTING and (
             prev is None or prev[1] != filename or prev[0] not in (PRINTING, PAUSED)
-        ):
+        )
+        if new:
             self.tracker.reset_print()
             self.raw_tracker.reset_print()
         self.job = (state, filename)
+        return new
 
     @property
     def printing(self) -> bool:
