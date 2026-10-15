@@ -124,15 +124,21 @@ def config_path() -> Path:
     return paths.config_dir() / "printops.yaml"
 
 
-def load_config(env: Mapping[str, str] | None = None) -> tuple[str | None, str | None]:
-    """(api_url, token) from env, then ~/.config/3d-cli/printops.yaml."""
+def load_config(env: Mapping[str, str] | None = None, *, api: str | None = None,
+                token: str | None = None) -> tuple[str | None, str | None]:
+    """(api_url, token): explicit args, then env, then ~/.config/3d-cli/printops.yaml (read only
+    when something is still missing, so explicit values work even with a broken file)."""
     env = os.environ if env is None else env
-    api, token = env.get("PRINTOPS_API") or None, env.get("PRINTOPS_TOKEN") or None
+    api = api or env.get("PRINTOPS_API") or None
+    token = token or env.get("PRINTOPS_TOKEN") or None
     cfg = config_path()
     if (api is None or token is None) and cfg.is_file():
         import yaml
 
-        data = yaml.safe_load(cfg.read_text(encoding="utf-8")) or {}
+        try:
+            data = yaml.safe_load(cfg.read_text(encoding="utf-8")) or {}
+        except yaml.YAMLError as e:
+            raise ApiConfigError(f"{cfg} is not valid YAML: {e}") from e
         if not isinstance(data, dict):
             raise ApiConfigError(f"{cfg} must be a mapping with `api:` and `token:` keys")
         api = api or (str(data["api"]) if data.get("api") else None)
@@ -172,14 +178,13 @@ class ApiClient:
     @classmethod
     def from_config(cls, *, api: str | None = None, token: str | None = None,
                     transport: Transport | None = None) -> ApiClient:
-        env_api, env_token = load_config()
-        url = api or env_api
+        url, tok = load_config(api=api, token=token)
         if not url:
             raise ApiConfigError(
                 "no 3d-api URL: set PRINTOPS_API=http://192.168.0.39:8765 or `api:` in "
                 f"{config_path()} (or pass --api)"
             )
-        return cls(url, token or env_token, transport)
+        return cls(url, tok, transport)
 
     def _headers(self, extra: Mapping[str, str] | None = None) -> dict[str, str]:
         h = {"Accept": "application/json"}

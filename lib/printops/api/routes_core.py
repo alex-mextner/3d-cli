@@ -23,7 +23,7 @@ import asyncio
 import contextlib
 import json
 import sqlite3
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
@@ -109,7 +109,7 @@ def _authorized(state: ApiState, token: str, scope: str) -> Callable[[], bool]:
 
 
 async def _follow(state: ApiState, cursor: int | None,
-                  authorized: Callable[[], bool]) -> AsyncIterator[ev.Event | None]:
+                  authorized: Callable[[], bool]) -> AsyncGenerator[ev.Event | None, None]:
     """Every event after `cursor` (None = after the current newest) while `authorized()` holds;
     None = heartbeat. Ends (returns) as soon as the token is no longer valid."""
     listener = ev.BUS.listener()  # before the first read, so no wake-up can slip between
@@ -121,6 +121,8 @@ async def _follow(state: ApiState, cursor: int | None,
     try:
         if cursor is None:
             cursor = await run_in_threadpool(ev.latest_id, conn)
+        loop = asyncio.get_running_loop()
+        next_ping = loop.time() + HEARTBEAT_S
         while True:
             if not authorized():
                 return
@@ -132,8 +134,14 @@ async def _follow(state: ApiState, cursor: int | None,
                 yield event
             if len(batch) == STREAM_BATCH:
                 continue
-            if not await listener.wait(HEARTBEAT_S) and authorized():
+            # Wake-ups also come from commits without events; they must not postpone the ping.
+            now = loop.time()
+            if now >= next_ping:
+                if not authorized():
+                    return
                 yield None
+                next_ping = now + HEARTBEAT_S
+            await listener.wait(max(0.0, next_ping - loop.time()))
     finally:
         listener.close()
         conn.close()

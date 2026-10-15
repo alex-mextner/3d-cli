@@ -104,6 +104,21 @@ def test_transaction_rolls_back_on_error_and_is_not_reentrant(printops_db: sqlit
         pass
 
 
+def test_commit_time_failure_rolls_back_and_frees_the_connection(tmp_path: Path) -> None:
+    mdir = _write_migrations(tmp_path / "m", {"0001_x.sql": (
+        "CREATE TABLE parent (id INTEGER PRIMARY KEY);\n"
+        "CREATE TABLE child (id INTEGER PRIMARY KEY, "
+        "p INTEGER REFERENCES parent(id) DEFERRABLE INITIALLY DEFERRED);")})
+    conn = db.open_db(tmp_path / "p.db")
+    db.migrate(conn, mdir)
+    with pytest.raises(sqlite3.IntegrityError), db.transaction(conn):
+        conn.execute("INSERT INTO child (p) VALUES (42)")  # violation surfaces at COMMIT
+    assert not conn.in_transaction
+    assert conn.execute("SELECT COUNT(*) FROM child").fetchone()[0] == 0
+    with db.transaction(conn):
+        conn.execute("INSERT INTO parent (id) VALUES (1)")
+
+
 def test_shipped_migrations_use_reserved_names() -> None:
     for mig in db.discover_migrations():
         assert mig.path.name == f"{mig.version:04d}_{mig.name}.sql"
@@ -672,6 +687,54 @@ def test_parse_sse_frames_skip_comments_and_join_data() -> None:
     lines = iter(["retry: 3000", "", ": ping", "", "id: 7", "event: a.b", "data: {\"x\":", "data: 1}", ""])
     frames = list(parse_sse(lines))
     assert frames[-1] == {"id": "7", "event": "a.b", "data": "{\"x\":\n1}"}
+
+
+def test_explicit_api_and_token_win_over_a_broken_yaml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from printops.client import ApiConfigError
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    monkeypatch.delenv("PRINTOPS_API", raising=False)
+    monkeypatch.delenv("PRINTOPS_TOKEN", raising=False)
+    (tmp_path / "3d-cli").mkdir()
+    (tmp_path / "3d-cli" / "printops.yaml").write_text("api: [broken\n", encoding="utf-8")
+    client = ApiClient.from_config(api="http://x:1", token="po_t")
+    assert (client.base_url, client.token) == ("http://x:1", "po_t")
+    with pytest.raises(ApiConfigError, match="not valid YAML"):
+        ApiClient.from_config()
+
+
+def test_heartbeats_keep_coming_while_unrelated_commits_wake_the_bus(
+        printops_settings: Settings, printops_db: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch) -> None:
+    from printops.api import routes_core
+    from printops.api.state import ApiState
+    from printops.tokens import TokenStore
+
+    monkeypatch.setattr(routes_core, "HEARTBEAT_S", 0.2)
+    state = ApiState(settings=printops_settings, spoolman=None, tokens=TokenStore(printops_settings.tokens_file))
+
+    async def scenario() -> int:
+        stream = routes_core._follow(state, None, lambda: True)
+
+        async def churn() -> None:
+            while True:
+                with db.transaction(printops_db):
+                    pass  # a commit without events still publishes a wake-up
+                await asyncio.sleep(0.05)
+
+        task = asyncio.create_task(churn())
+        pings = 0
+        try:
+            loop = asyncio.get_running_loop()
+            end = loop.time() + 1.0
+            while loop.time() < end:
+                item = await asyncio.wait_for(stream.__anext__(), 1.0)
+                pings += item is None
+        finally:
+            task.cancel()
+            await stream.aclose()
+        return pings
+
+    assert asyncio.run(scenario()) >= 3
 
 
 def test_client_config_from_env_then_yaml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
