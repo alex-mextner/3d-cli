@@ -383,6 +383,23 @@ def test_start_phase_by_time_since_started_even_above_start_progress() -> None:
     assert kinds(d.tick(1191.0)) == [("bed_off", WARNING)]
 
 
+def test_held_bed_off_dropped_when_progress_reaches_the_end_before_release() -> None:
+    d, _ = started()
+    d.on_status({"virtual_sdcard": {"progress": 0.98, "file_position": 1}}, 1000.5)
+    assert d.on_status({"heater_bed": {"target": 0.0}}, 1001.0) == []      # held at 98 %
+    d.on_status({"virtual_sdcard": {"progress": 1.0, "file_position": 2}}, 1003.0)
+    assert d.tick(1020.0) == []
+
+
+def test_unknown_progress_mid_job_uses_the_short_hold() -> None:
+    d = MoonrakerDetector("u1")
+    status = u1_ws_status("printing")
+    del status["virtual_sdcard"], status["display_status"]
+    d.on_status(status, 1000.0)  # attached mid-job, firmware reports no progress
+    assert d.on_status({"heater_bed": {"target": 0.0}}, 1010.0) == []
+    assert kinds(d.tick(1021.0)) == [("bed_off", WARNING)]
+
+
 def test_k1_filament_sensor_change_while_printing() -> None:
     d = CrealityDetector("k1se")
     d.on_push(k1(), 1000.0)
