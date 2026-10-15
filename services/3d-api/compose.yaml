@@ -50,6 +50,10 @@ services:
       PRINTOPS_TOKENS_FILE: /data/tokens.json
       PRINTOPS_BACKUP_DIR: /backup
       SPOOLMAN_DB: /spoolman-data/spoolman.db
+      # Read-only Home Assistant REST for dry-box humidity sensors (printops.homeassistant).
+      # Empty URL = humidity unknown. Token: an HA long-lived token in <data>/api/ha_token (0600).
+      PRINTOPS_HA_URL: ${PRINTOPS_HA_URL:-}
+      PRINTOPS_HA_TOKEN_FILE: /data/ha_token
     volumes:
       - ${PRINTOPS_DATA_DIR:-/home/ultra/printops/data}/api:/data
       # read for `3d printops backup` only (SQLite online backup); Spoolman stays the writer
