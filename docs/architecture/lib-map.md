@@ -44,6 +44,7 @@ rendering, slicing support, and verification:
 - `fit_check.py`
 - `frame_check.py`
 - `gcode_resume.py`
+- `gcode_labels.py`
 - `gcode_overhangs.py`
 - `gcode_thumbnails.py`
 - `export_formats.py`
@@ -72,9 +73,22 @@ Target package: `lib/geometry/`, with subpackages only when a real boundary appe
   adapter contract + status model (`base.py`), stdlib WebSocket client (`ws.py`),
   `moonraker.py` (Klipper/Moonraker, Snapmaker U1), `creality.py` (Creality K1 stock
   firmware), `devices.py` (`printer-devices.yaml`), `preflight.py` (pre-print checks),
-  `move_bounds.py` (G-code moves and arc extremes vs axis travel / printable area).
+  `move_bounds.py` (G-code moves and arc extremes vs axis travel / printable area),
+  `watch.py` / `watch_run.py` / `watch_sinks.py` (`3d printer watch`: detectors, streams,
+  the event Dispatcher and its staged sinks; agents first, `tg` only as the emergency
+  `watch.tg_fallback`), `subscriptions.py` (`3d printer subscribe`: the agent-subscription
+  registry `subscriptions.yaml` and the `SubscriptionSink` every watcher adds), and
+  `printer_agent.py` (`3d printer agent`: the temporary per-printer omp agent in tmux for
+  alerts no live subscriber took, and its handoff).
 - `lib/slicing/head_sequence.py` — per-object, per-layer toolhead check of sliced G-code against the project 3MF's mixed-filament patterns (`slice-check --check head-sequence`; `preflight_check()` is the `head seq` gate of `print-preflight`, #103).
 - `lib/slicing/slice_warnings.py` — the slicer's warnings for one G-code (Orca-family CLI log, result.json, slice_info of a sliced 3MF) in `NAME.slice-warnings.json` with the G-code's SHA-256 and a reason per accepted warning; backs `3d slice-warnings` and the `slicer warn` gate of `print-preflight`.
+- `lib/printops/` — PrintOps (epic #154) behind `3d printops` and the 3d-api service
+  (`services/3d-api/`): `db.py` (SQLite + `migrations/NNNN_<slice>.sql`), `events.py`
+  (append-only event log + in-process bus), `tokens.py` (bearer tokens, sha256 file),
+  `spoolman.py` (Spoolman v0.27 Protocol, urllib client, extra-field registry), `client.py`
+  (HTTP client for frontends), `settings.py`, `backup.py`, `deploy.py`; `api/` is the FastAPI
+  app (auto-includes `routes_*.py`), `cli/` the self-registering `3d printops` subs.
+- `lib/profiles/` — slicer user presets kept in the repo `profiles/` (#180, PrintOps D10), behind `3d profiles`: `slicers.py` (OrcaSlicer / Snapmaker Orca / Bambu Studio data dirs, running check), `preset.py` (preset JSON / `.info` formats, slicer-local keys), `sync.py` (three-way repo <-> slicer sync, base snapshot, backups), `values.py` (`apply_values`, the calibration write path).
 
 Target package: `lib/slicing/` for slicer orchestration, dry-run print planning, printer
 job state, and future sender integrations.
@@ -166,6 +180,7 @@ Every current root Python module is listed here so future additions are intentio
 - `fit_camera_math.py` — import-light camera pose and proof-status math helpers.
 - `fit_check.py` — already-printed insert vs its socket: printed-size lock, per-layer clearance (manifold3d slices, shapely distances) and the open path along the insertion direction; backs `3d fit-check`.
 - `gcode_resume.py` — resume a stopped multi-head Orca print above a layer (layer walk, machine state at a byte, resume header from the device's `resume:` profile, per-head retraction tracking, `--no-tower` off-bed purges); stdlib-only; backs `3d gcode-resume`.
+- `gcode_labels.py` — the slicer's own labels in a G-code: object labels in both dialects (Klipper `EXCLUDE_OBJECT_*`, Bambu Studio `; start printing object` / `M624`…`M625` blocks named by their `; printing object` comment, `M486`, PrusaSlicer comments), layer-change markers, feature tags and line widths; stdlib-only; the one parser behind head-sequence, overhangs, visible-faces and the print-area plate section.
 - `gcode_overhangs.py` — extrusion printed on nothing per object and layer of a sliced G-code (numpy/scipy raster of each layer's carrier, sparse reach/bridge/step-out tests on the pixels that stick out, layers split over forked workers); backs `3d gcode-overhangs` and the `overhangs` gate of `print-preflight`.
 - `gcode_thumbnails.py` — printer-screen thumbnail blocks in G-code: stdlib-only check against the profile's `thumbnails` spec, Orca-format block writer, z-buffered toolpath preview render (numpy); backs `3d gcode-thumbnails`.
 - `frame_check.py` — render framing checks.
@@ -184,7 +199,10 @@ Every current root Python module is listed here so future additions are intentio
 - `materials.py` — compatibility wrapper re-exporting `registries.materials`.
 - `mesh_check.py` — mesh verification implementation.
 - `halves_check.py` — paired-halves gate: loads pairs marked in 3MF object metadata (or STL pairs), maps both halves into the assembly frame, rasterises their cut faces and compares outline, dowel holes, size and islands; backs `3d halves-check`.
-- `vision_detect.py` — pixel half of `3d printer vision`: Obico ONNX spaghetti scorer (weights downloaded at runtime, sha256-pinned), brightness check, live camera loop and `eval` on recorded footage; decision logic and camera/klippy.log access live in `printer_ops/vision.py`.
+- `vision_detect.py` — pixel half of `3d printer vision`: Obico ONNX spaghetti scorer (weights downloaded at runtime, sha256-pinned), `FrameScorer` (ROI/ignore masks + stage-2 verifier), brightness check, live camera loop, `record` and `eval` on recorded footage; decision logic and camera/klippy.log access live in `printer_ops/vision.py`.
+- `vision_verify.py` — stage 2 of `3d printer vision`: zero-shot CLIP ViT-B/32 (ONNX, sha256-pinned) on crops of the detector's boxes → verified score q.
+- `vision_geometry.py` — printer camera model (pinhole/fisheye), bed/volume/silhouette masks at the current Z, calibration fit CLI; the U1 calibration ships in `lib/data/vision/`.
+- `vision_scene.py` — opt-in bed-change detectors for `3d printer vision --scene` (foreign object, moved part, no growth).
 - `lib/geometry/mesh_metrics.py` — pinned-convention 3D shape metrics (Chamfer, F-score@tau, Hausdorff, normal consistency, volumetric IoU) between two meshes; backs `3d metrics geometry`.
 - `perceptual_metrics.py` — perceptual/semantic image metrics (PSNR, LPIPS, CLIP-sim) with explicit senses and graceful degradation; backs `3d metrics perceptual`.
 - `metrics.py` — compatibility wrapper re-exporting `registries.metrics`.

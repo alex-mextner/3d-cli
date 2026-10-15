@@ -13,6 +13,9 @@ import pytest
 
 _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 os.environ.setdefault("REPO_ROOT", _REPO)
+# The repo's fleet/printers.yaml names the real printers on the LAN: no test may reach them by
+# accident. Tests that want a fleet pass THREED_FLEET=<file> (printops.fleet; `3d` children inherit this).
+os.environ["THREED_FLEET"] = ""
 _LIB = os.path.join(_REPO, "lib")
 if _LIB not in sys.path:
     sys.path.insert(0, _LIB)
@@ -22,6 +25,9 @@ from cli.resources import cap_threads, max_workers  # noqa: E402  (lib/ is on sy
 # before any test imports numpy/scipy (their thread pools are sized at first import) and
 # before any subprocess, so `3d` children started by the e2e tests inherit the caps too
 cap_threads()
+
+# PrintOps shared fixtures (tmp DB, FakeSpoolman, 3d-api TestClient, api_client, live_api).
+pytest_plugins = ["printops_fixtures"]
 
 
 def cache_temproot(environ: Mapping[str, str]) -> str:

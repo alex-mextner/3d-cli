@@ -55,6 +55,8 @@ from printer_ops.move_bounds import (
 )
 
 PASS, WARN, FAIL, SKIP = "PASS", "WARN", "FAIL", "SKIP"
+# Where a printer's axis_limits / trusted_macros live (named in the hints below).
+PROFILE_FILES = "fleet/printers.yaml or printer-devices.yaml"
 _CONFIG_LINE = re.compile(r"^;\s*([a-z_ \[\]0-9]+?)\s*=\s*(.*)$")
 _TOOL_LINE = re.compile(r"^T(\d+)\s*(?:;.*)?$")
 _BIN_3D = Path(__file__).resolve().parents[2] / "bin" / "3d"
@@ -424,7 +426,7 @@ def _first(violations: Sequence[Violation], count: int, where: str = "outside") 
 
 def check_macros(rep: BoundsReport, trusted: frozenset[str]) -> list[Check]:
     """Macros hide their moves. Untrusted ones FAIL (start needs --force); the printer's
-    `trusted_macros` (printer-devices.yaml) names the ones known to stay on the bed."""
+    `trusted_macros` (PROFILE_FILES) names the ones known to stay on the bed."""
     if not rep.macros:
         return []
 
@@ -441,14 +443,14 @@ def check_macros(rep: BoundsReport, trusted: frozenset[str]) -> list[Check]:
                 FAIL,
                 f"moves inside these commands are not checked: {fmt(untrusted)}; "
                 "if they stay on the bed add them to trusted_macros for this printer in "
-                "printer-devices.yaml, otherwise --force",
+                f"{PROFILE_FILES}, otherwise --force",
             )
         ]
     return [
         Check(
             "macros",
             PASS,
-            "all trusted (printer-devices.yaml): " + fmt(sorted(rep.macros)),
+            f"all in the printer's trusted_macros ({PROFILE_FILES}): " + fmt(sorted(rep.macros)),
         )
     ]
 
@@ -467,7 +469,7 @@ def check_moves(
                 "axis travel",
                 SKIP,
                 f"printer axis limits unknown ({why}pass --axis-limits "
-                "X0:X1,Y0:Y1 or set axis_limits in printer-devices.yaml)",
+                f"X0:X1,Y0:Y1 or set axis_limits in {PROFILE_FILES})",
             )
         )
     elif rep.axis_out_count:
