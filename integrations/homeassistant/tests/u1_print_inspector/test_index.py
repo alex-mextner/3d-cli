@@ -55,7 +55,7 @@ def test_gcode_cursor_is_explicit_estimate():
     assert d['operation']['label']=='Глажка'
     assert d['operation']['estimated'] is True
     assert d['operation']['source']=='gcode_cursor'
-    assert d['physical_tool']==2 and d['material']=='PETG'
+    assert d['physical_tool']==2 and d['head']=='T3' and d['material']=='PETG'
 
 
 @pytest.mark.parametrize('s,label',[('complete','Печать завершена'),('paused','Пауза'),('cancelled','Печать отменена'),('error','Ошибка печати'),('standby','Ожидание')])
@@ -133,8 +133,23 @@ def test_layer_out_of_range():
 
 
 def test_gcode_tool_interval_does_not_leak():
-    i=idx();assert i.at(SAMPLE.index(b'T2\n')).operation=='Смена инструмента: T2'
+    i=idx();assert i.at(SAMPLE.index(b'T2\n')).operation=='Смена головки'
     assert i.at(SAMPLE.index(b'G1 X4')).operation is None
+
+
+def test_tool_change_names_mapped_head():
+    st=state();st['virtual_sdcard']['file_position']=SAMPLE.index(b'T2\n')
+    st['print_stats']['info']['current_layer']=2
+    assert enrich(st,idx())['operation']['label']=='Смена головки → T3'
+    st['print_task_config']['extruder_map_table']=[0,1,3,2]
+    assert enrich(st,idx())['operation']['label']=='Смена головки → T4'
+
+
+@pytest.mark.parametrize('index_state,word',[('indexing','загружается'),('unavailable','недоступна')])
+def test_no_index_shows_printer_layer(index_state,word):
+    d=enrich(state(),None,index_state=index_state)
+    assert d['operation']['label']=='Печать слоя 1' and d['operation']['source']=='printer_layer'
+    assert word in d['operation']['note']
 
 
 def test_absolute_relative_extrusion_and_resets():

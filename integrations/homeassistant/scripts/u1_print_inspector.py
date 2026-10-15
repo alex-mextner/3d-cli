@@ -21,7 +21,7 @@ import time
 from urllib.parse import quote, urlencode, urlsplit
 from urllib.request import build_opener, ProxyHandler, HTTPRedirectHandler, Request
 
-from u1_gcode_index import GCodeIndex, MAX_BYTES, describe_feature
+from u1_gcode_index import GCodeIndex, MAX_BYTES, TOOL_CHANGE, describe_feature
 
 # Source: Snapmaker/u1-klipper, klippy/extras/machine_state_manager.py.
 # Unknown codes remain unknown; they must never be guessed from motion speed.
@@ -67,6 +67,11 @@ def integer(value, default=None):
 
 def bounded_text(value, length=120):
     return re.sub(r"[\x00-\x1f\x7f]", " ", str(value or ""))[:length]
+
+
+def head_name(physical: int | None) -> str | None:
+    """The U1 labels its heads T1..T4 on the screen and bodies; Klipper indexes them 0..3."""
+    return None if physical is None else f"T{physical + 1}"
 
 
 def safe_filename(filename: str) -> str:
@@ -136,13 +141,22 @@ def enrich(status: dict, index: GCodeIndex | None, *, stale=False, index_state="
     elif state == "printing":
         if cursor and (cursor.operation or cursor.feature):
             label = cursor.operation or describe_feature(cursor.feature)["label"]
+            if cursor.operation == TOOL_CHANGE and cursor.tool is not None:
+                # G-code T-numbers are slicer slots; extruder_map_table says which head prints each.
+                table = (status.get("print_task_config") or {}).get("extruder_map_table") or []
+                mapped = integer(table[cursor.tool]) if cursor.tool < len(table) else None
+                label += f" → {head_name(cursor.tool if mapped is None else mapped)}"
             source, estimate = "gcode_cursor", True
             note = "По позиции G-code; очередь движений может опережать физическое выполнение."
             if cursor.layer != layer:
                 note += f" Позиция относится к слою {cursor.layer}, принтер сообщил {layer}."
         else:
-            label, source = "Печать · операция не определена", "layer_only" if plan else "unknown"
-            note = "Показан план слоя; текущая операция не подтверждена." if plan else "Ожидание доступной разметки G-code."
+            # No cursor: the printer's own layer number is still a fact worth showing.
+            label = f"Печать слоя {layer}" if layer else "Печать"
+            source = "layer_only" if plan else "printer_layer" if layer else "unknown"
+            note = {"indexing": "Разметка G-code загружается; тип траектории появится после индексации.",
+                    "ready": "Показан план слоя; позиция в G-code не сопоставлена."}.get(
+                index_state, "Разметка G-code недоступна; тип траектории не определяется.")
     remaining = None
     remaining_source = None
     if state == "complete":
@@ -157,7 +171,7 @@ def enrich(status: dict, index: GCodeIndex | None, *, stale=False, index_state="
         "state": state, "state_label": STATES.get(state, "Недоступно"),
         "operation": {"label": label, "source": source, "estimated": estimate, "note": note},
         "layer": layer, "total_layers": total, "gcode_layer": cursor.layer if cursor else None,
-        "progress_percent": progress, "physical_tool": physical, "material": material,
+        "progress_percent": progress, "physical_tool": physical, "head": head_name(physical), "material": material,
         "temperatures": {"nozzle": finite(ext.get("temperature")), "nozzle_target": finite(ext.get("target")),
                          "bed": finite(bed.get("temperature")), "bed_target": finite(bed.get("target"))},
         "elapsed_seconds": finite(ps.get("print_duration")), "remaining_seconds": remaining,
@@ -217,8 +231,9 @@ class Inspector:
         with self._open("/server/files/gcodes/" + url, timeout=25) as response:
             declared = integer(response.headers.get("Content-Length"))
             if declared is not None and declared > MAX_BYTES:
-                raise ValueError("G-code exceeds 128 MiB limit")
-            parsed = GCodeIndex.parse(response, deadline=time.monotonic() + 45)
+                raise ValueError("G-code exceeds indexing size limit")
+            # ~0.8 MB/s on the ODROID-N2+; budget 4x slower so a busy host still finishes.
+            parsed = GCodeIndex.parse(response, deadline=time.monotonic() + 60 + expected_size / (256 * 1024))
         if parsed.size != expected_size:
             raise ValueError("G-code changed during download; retry required")
         return parsed
@@ -257,6 +272,8 @@ class Inspector:
                                 self.index_state = "unavailable"
                                 self.index_error = type(exc).__name__ + ": indexing unavailable"
                                 self.signature = None
+                                # A failed index costs minutes of CPU; do not retry it every 30 s.
+                                self.next_metadata = time.monotonic() + 600
                     self.future = None
                 if filename and self.future is None and time.monotonic() >= self.next_metadata:
                     self.next_metadata = time.monotonic() + 30
@@ -340,9 +357,8 @@ def overlay(frame: bytes, data: dict) -> bytes:
         second.append(f"Слой {data['layer']}/{data.get('total_layers') or '?'}")
     if data.get("progress_percent") is not None:
         second.append(f"{data['progress_percent']:g}%")
-    if data.get("physical_tool") is not None:
-        tool = data["physical_tool"]
-        second.append(f"Головка {tool + 1} (T{tool})")
+    if data.get("head"):
+        second.append(f"Головка {data['head']}")
     if data.get("material") not in (None, "NONE", ""):
         second.append(data["material"])
     if (remaining := data.get("remaining_seconds")) and data["state"] == "printing":

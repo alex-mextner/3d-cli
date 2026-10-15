@@ -90,12 +90,12 @@ class U1InspectorCard extends HTMLElement {
       if (changedJob) { this._follow = true; this._generation++; }
       this._data = data; this._error.textContent = '';
       this._op.textContent = `${data.operation?.estimated ? '≈ ' : ''}${data.operation?.label || 'Не определено'}`;
-      const sources = {gcode_cursor:'По позиции G-code (оценка; возможен сдвиг из-за буфера)',firmware_action:'Сообщено прошивкой U1',firmware_state:'Сообщено прошивкой U1',printer_state:'Состояние принтера',layer_only:'Доступен только план слоя',unknown:'Операция не подтверждена',stale:'Нет свежей телеметрии'};
+      const sources = {gcode_cursor:'По позиции G-code (оценка; возможен сдвиг из-за буфера)',firmware_action:'Сообщено прошивкой U1',firmware_state:'Сообщено прошивкой U1',printer_state:'Состояние принтера',layer_only:'Доступен только план слоя',printer_layer:'Слой сообщён принтером',unknown:'Операция не подтверждена',stale:'Нет свежей телеметрии'};
       this._source.textContent = [sources[data.operation?.source], data.operation?.note].filter(Boolean).join('. ');
       const stamp = data.observed_at ? new Date(data.observed_at*1000).toLocaleTimeString() : '—';
       this._fresh.textContent = data.stale ? 'Связь потеряна. Значения ниже — последние известные.' : `Данные ${stamp} · обновление каждые 5 секунд`;
       this._metrics.layer.textContent = `${data.layer ?? '—'} / ${data.total_layers ?? '—'}`;
-      this._metrics.tool.textContent = [data.physical_tool == null ? null : `${data.physical_tool+1} (T${data.physical_tool})`,data.material === 'NONE' ? null : data.material].filter(Boolean).join(' · ') || '—';
+      this._metrics.tool.textContent = [data.head,data.material === 'NONE' ? null : data.material].filter(Boolean).join(' · ') || '—';
       for (const key of ['nozzle','bed']) {
         const t = data.temperatures || {}; this._metrics[key].textContent = t[key] == null ? '—' : `${Math.round(t[key])} / ${t[key+'_target'] ?? '—'} °C`;
       }

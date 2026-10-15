@@ -20,7 +20,7 @@ ingress:
     ui_mode: normal
 lovelace:
   resources:
-    - url: /local/u1-share/u1-inspector-card.js?v=20260919b
+    - url: /local/u1-share/u1-inspector-card.js?v=20261015a
       type: module
     - url: /local/u1-share/u1-share-card.js?v=20260919a
       type: module

@@ -80,7 +80,10 @@ views:
 
           # Rooted K1 SE: the USB webcam is served by mjpg-streamer (:8080, also :4408/webcam/),
           # go2rtc stream k1se_camera. ha_creality_ws's own camera entity (Creality WebRTC :8000)
-          # no longer gets frames and is hidden in the entity registry.
+          # no longer gets frames and is hidden in the entity registry. mjpg-streamer sends JPEG,
+          # which WebRTC/MSE reject ("codecs not matched"); MJPEG mode relays the frames over the
+          # HA websocket unchanged, so phones play it without an ffmpeg transcode on the Odroid.
+          # Controls sit top-right: the bottom edge is left to the picture.
           - type: custom:webrtc-camera
             title: K1 SE Camera
             server: http://go2rtc:1984/
@@ -89,18 +92,13 @@ views:
             background: true
             streams:
               - url: k1se_camera
-                name: WebRTC
-                mode: webrtc
-                media: video
-              - url: k1se_camera
-                name: MSE
-                mode: mse
-                media: video
-              - url: k1se_camera
                 name: MJPEG
                 mode: mjpeg
                 media: video
-            style: "video {aspect-ratio: 16/9; object-fit: contain; background: #111;}"
+            style: >-
+              video {aspect-ratio: 16/9; object-fit: contain; background: #111;}
+              .controls {top: 32px; right: 8px; bottom: auto; left: auto; gap: 6px; padding: 2px 6px; border-radius: 8px; background: rgba(0,0,0,.45);}
+              .space, .stream, .play {display: none !important;}
 
       - type: grid
         cards:
@@ -180,6 +178,8 @@ views:
                   confirmation:
                     text: Emergency stop U1?
 
+          # The proxy bakes the inspector status into the bottom band of every frame, so the
+          # player controls move top-right; the stream is switched via the mode label (top-right).
           - type: custom:webrtc-camera
             title: U1 Camera
             server: http://go2rtc:1984/
@@ -199,7 +199,10 @@ views:
                 name: MJPEG
                 mode: mjpeg
                 media: video
-            style: "video {aspect-ratio: 16/9; object-fit: contain; background: #111;}"
+            style: >-
+              video {aspect-ratio: 16/9; object-fit: contain; background: #111;}
+              .controls {top: 32px; right: 8px; bottom: auto; left: auto; gap: 6px; padding: 2px 6px; border-radius: 8px; background: rgba(0,0,0,.45);}
+              .space, .stream {display: none !important;}
 
           - type: custom:u1-inspector-card
             title: Что делает U1
