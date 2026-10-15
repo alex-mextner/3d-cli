@@ -45,6 +45,7 @@ another OK.
 | `fluidd-v1.37.6.zip` | Fluidd latest (2026-09-23). The Helper Script downloads this from GitHub; this copy is for an offline printer. SHA-256 `9fe5bcd4a443f4cccd20cef222e70cc334a874070b21d116097a28405b0ed456` |
 | `wiki/` | [Helper Script Wiki](https://guilouz.github.io/Creality-Helper-Script-Wiki/) source (2026-04-14) |
 | `stock-baseline-20261014T233804Z/` | read-only snapshot from §3.1 |
+| `ipk/` | mjpg-streamer 1.0.0-6 `.ipk` files (5), fetched over **HTTPS** from `bin.entware.net`, with `SHA256SUMS`, for §4.3. On 2026-10-15 the printer's `mjpg_streamer`, `input_uvc.so` and `output_http.so` (installed over HTTP) had the same SHA-256 as the copies in these packages |
 | `SHA256SUMS` | checksums for the two archives |
 
 **The printer needs internet for the install.** The Moonraker and Nginx builds ship inside the
@@ -63,10 +64,11 @@ The stock firmware has no API that returns `printer.cfg`. `:80/downloads/` lists
 its tuning, plus the file list:
 
 ```bash
+( set -euo pipefail
 cd ~/xp/3d-cli
 D=~/.cache/k1-root/stock-baseline-$(date -u +%Y%m%dT%H%M%SZ); mkdir -p "$D"
-curl -s http://192.168.0.27/info > "$D/info.json"
-curl -s http://192.168.0.27:4408/release_info.json > "$D/fluidd-release_info.json"
+curl -fsS --max-time 10 http://192.168.0.27/info > "$D/info.json"
+curl -fsS --max-time 10 http://192.168.0.27:4408/release_info.json > "$D/fluidd-release_info.json" || true  # absent after root
 uv run python - "$D" <<'EOF'
 import sys, json, time; sys.path.insert(0, "lib")
 from printer_ops.ws import WebSocket
@@ -74,38 +76,47 @@ with WebSocket.connect("192.168.0.27", 9999, timeout=5) as ws:
     for p in ("ReqPrinterPara", "reqGcodeFile"):
         ws.send_text(json.dumps({"method": "get", "params": {p: 1}}))
     out, t = {}, time.time()
-    while time.time() - t < 8:
+    while time.time() - t < 8 and not ("modelVersion" in out and "retGcodeFileInfo2" in out):
         m = ws.recv(1.0)
         if m:
             try: d = json.loads(m)
             except ValueError: continue
             if isinstance(d, dict): out.update(d)
-with open(sys.argv[1] + "/ws-ReqPrinterPara.json", "w") as f:
+if "modelVersion" not in out or "retGcodeFileInfo2" not in out:
+    sys.exit("ws :9999 gave no ReqPrinterPara/reqGcodeFile answer: printer busy or rebooting?")
+with open(sys.argv[1] + "/ws-baseline.json", "w") as f:
     json.dump(out, f, indent=1, sort_keys=True)
 EOF
-(cd "$D" && sha256sum * > SHA256SUMS)
+(cd "$D" && sha256sum -- * > SHA256SUMS)
+echo "baseline OK: $D"
+)
 ```
 
-Both are `get` requests only. Baseline: `~/.cache/k1-root/stock-baseline-20261014T233804Z/`.
+Both are `get` requests only. The script fails rather than save an empty snapshot. Baselines:
+`stock-baseline-20261014T233804Z/` and `stock-baseline-20261015T124325Z/` (both taken with an
+earlier version of this script, so their ws file is called `ws-ReqPrinterPara.json`).
 
 ### 3.2 Full backup over SSH (right after root, before running the Helper Script)
 
 The K1 runs dropbear, which has no `sftp-server`, so `scp` needs `-O` (legacy protocol).
-`tar` over `ssh` works without it. Password: `creality_2023`.
+`tar` over `ssh` works without it. Password: `creality_2023`. Dropbear takes **~28 s** to send
+its banner, so every call shares one multiplexed connection (you type the password once):
 
 ```bash
 ( set -euo pipefail    # subshell: a failed step aborts the backup, not your shell
-K=root@192.168.0.27
+k1() { ssh -o ConnectTimeout=90 -o ControlMaster=auto -o ControlPersist=30m \
+         -o "ControlPath=$HOME/.ssh/cm-k1-%r@%h" root@192.168.0.27 "$@"; }
 B=~/.cache/k1-root/backup-$(date -u +%Y%m%dT%H%M%SZ); mkdir -p "$B"
-ssh $K 'cat /usr/data/printer_data/config/printer.cfg' > "$B/printer.cfg"
+k1 'cat /usr/data/printer_data/config/printer.cfg' > "$B/printer.cfg"
 grep -q '^#\*# \[' "$B/printer.cfg"                     # SAVE_CONFIG block present (mesh/shaper/PID)
-ssh $K 'cd /usr/data && ls -d printer_data/config creality/userdata 2>/dev/null' > "$B/paths.txt"
-ssh $K "tar czf - -C /usr/data $(tr '\n' ' ' < "$B/paths.txt")" > "$B/usr-data-config.tgz"
+k1 'cd /usr/data && for p in printer_data/config creality/userdata; do [ -d "$p" ] && echo "$p"; done; true' > "$B/paths.txt"
+grep -qx 'printer_data/config' "$B/paths.txt"
+k1 'tar czf - -C /usr/data -T -' < "$B/paths.txt" > "$B/usr-data-config.tgz"
 tar tzf "$B/usr-data-config.tgz" > "$B/usr-data-config.list"   # fails on a broken archive
 grep -qx 'printer_data/config/printer.cfg' "$B/usr-data-config.list"
 grep -qx 'printer_data/config/gcode_macro.cfg' "$B/usr-data-config.list"
-ssh $K 'ls -la /usr/data /usr/data/printer_data /etc/init.d; df -h; uname -a; cat /etc/os-release; v4l2-ctl --list-devices; ls /dev/video*' > "$B/inventory.txt" 2>&1 || true
-(cd "$B" && sha256sum * > SHA256SUMS)
+k1 'ls -la /usr/data /usr/data/printer_data /etc/init.d; df -h; uname -a; cat /etc/os-release; v4l2-ctl --list-devices; ls /dev/video*' > "$B/inventory.txt" 2>&1 || true
+(cd "$B" && sha256sum -- * > SHA256SUMS)
 echo "backup OK: $B ($(wc -l < "$B/usr-data-config.list") entries; paths: $(tr '\n' ' ' < "$B/paths.txt"))"
 )
 ```
@@ -155,15 +166,19 @@ Root has to be enabled again after a full factory reset.
    ping -c1 github.com && date
    ls -d /usr/data/moonraker /usr/data/nginx /usr/data/fluidd /usr/share/fluidd /etc/init.d/S50nginx /etc/init.d/S56moonraker_service 2>&1
    ```
-3. Put the script in `/usr/data/helper-script` (the path is hard-coded in the script):
-   - **Online:** `git clone --depth 1 https://github.com/Guilouz/Creality-Helper-Script.git /usr/data/helper-script`.
-     The wiki suggests `git config --global http.sslVerify false` on an SSL error. **Don't do that:**
-     the script runs as root and its Moonraker step `git pull`s again, so this would let anyone on
-     the path swap the code. Check `date` first (a wrong clock is the usual cause). If TLS still
-     fails, use the offline archive below; its SHA-256 is in §2.
-   - **Offline:** `scp -O ~/.cache/k1-root/helper-script-b46787a.tar.gz root@192.168.0.27:/usr/data/`, check
+3. Get the script to `b46787a` in `/usr/data/helper-script` (the path is hard-coded in the script):
+   - **Directory already exists** (it does on our factory image, see step 5): update in place.
+     `cd /usr/data/helper-script && git fetch origin main && git reset --hard origin/main && git clean -fdx`.
+     Don't clone over it or untar on top of it.
+   - **Fresh, online:** `git clone --depth 1 https://github.com/Guilouz/Creality-Helper-Script.git /usr/data/helper-script`.
+   - **Fresh, offline:** `scp -O ~/.cache/k1-root/helper-script-b46787a.tar.gz root@192.168.0.27:/usr/data/`, check
      `sha256sum /usr/data/helper-script-b46787a.tar.gz` against §2, then
      `cd /usr/data && tar xzf helper-script-b46787a.tar.gz`. The script then has no `.git`, so it skips self-update.
+
+   The wiki suggests `git config --global http.sslVerify false` on an SSL error. **Don't do that:**
+   the script runs as root and its Moonraker step `git pull`s again, so this would let anyone on
+   the path swap the code. Check `date` first (a wrong clock is the usual cause). If TLS still
+   fails, use the offline archive.
 4. `sh /usr/data/helper-script/helper.sh`. It detects the model through
    `get_sn_mac.sh model`, matching `K1`, and opens the **K1 SERIES** menus.
 5. **Our factory image already contains a Helper install.** On 2026-10-15 the K1 SE had an old
@@ -221,14 +236,21 @@ On the K1 model the Helper Script copies `files/services/S50usb_camera-dual` to
 `/dev/video4`, 1280×720, 15 fps, `:8080`** (and `/dev/video6` → `:8081` for a second camera).
 Then it runs `opkg install mjpg-streamer mjpg-streamer-input-http mjpg-streamer-input-uvc mjpg-streamer-output-http mjpg-streamer-www`.
 **As of 2026-10-15 that fails** with `Unknown package 'mjpg-streamer'`: the packages are gone from
-the `mipselsf-k3.4` index, but the `.ipk` files are still on the server. Install them by file;
-opkg resolves the dependencies (`libjpeg-turbo`, `libv4l`, `libiconv-full`) from the index:
+the `mipselsf-k3.4` index, but the `.ipk` files are still on the server. Entware's own index is
+plain HTTP, so don't fetch these on the printer. Push the HTTPS-fetched, checksummed copies from
+`~/.cache/k1-root/ipk/` (§2) and install them by explicit name; opkg resolves the dependencies
+(`libjpeg-turbo`, `libv4l`, `libiconv-full`) from the index:
 ```sh
-cd /tmp && U=http://bin.entware.net/mipselsf-k3.4
-for p in mjpg-streamer mjpg-streamer-input-uvc mjpg-streamer-input-http mjpg-streamer-output-http mjpg-streamer-www; do
-  wget -q "$U/${p}_1.0.0-6_mipsel-3.4.ipk"; done
-/opt/bin/opkg install /tmp/mjpg-streamer*_1.0.0-6_mipsel-3.4.ipk && rm -f /tmp/mjpg-streamer*.ipk
-/etc/init.d/S50usb_camera start
+# on the PC
+(cd ~/.cache/k1-root/ipk && sha256sum -c SHA256SUMS)
+ssh root@192.168.0.27 'rm -rf /usr/data/ipk && mkdir /usr/data/ipk'
+scp -O ~/.cache/k1-root/ipk/*.ipk ~/.cache/k1-root/ipk/SHA256SUMS root@192.168.0.27:/usr/data/ipk/
+# on the printer
+set -e; cd /usr/data/ipk && sha256sum -c SHA256SUMS
+V=1.0.0-6_mipsel-3.4
+/opt/bin/opkg install ./mjpg-streamer_$V.ipk ./mjpg-streamer-input-uvc_$V.ipk ./mjpg-streamer-input-http_$V.ipk \
+  ./mjpg-streamer-output-http_$V.ipk ./mjpg-streamer-www_$V.ipk
+cd / && rm -rf /usr/data/ipk && /etc/init.d/S50usb_camera start
 ```
 camera-streamer is not offered and has no mipsel build, so mjpg-streamer is the option here.
 Our webcam enumerates as `GENERAL WEBCAM` on `/dev/video4` and offers MJPG up to 2560×1440,
@@ -300,7 +322,10 @@ k1se:
     tg_fallback: true
 ```
 
-Delete the override as soon as the fleet change is on `main`.
+The override covers only device keys (connection, `axis_limits`, `trusted_macros`, `watch`,
+`resume`, `bridge_max_mm`). `heads`, `ams`, `enclosure` and `sources` belong to the fleet
+profile and still come from `fleet/printers.yaml`: `3d printer list` shows `k1se … T1` with the
+override in place. Delete the override as soon as the fleet change is on `main`.
 
 Klipper reports the same limits (checked 2026-10-15):
 `curl -s 'http://192.168.0.27:7125/printer/objects/query?configfile=settings' | jq '.result.status.configfile.settings|{stepper_x,stepper_y}|map_values({position_min,position_max})'`
