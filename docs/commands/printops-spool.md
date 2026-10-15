@@ -83,8 +83,11 @@ Every action takes `--json` (the API answer), `--api URL`, `--token TOKEN`.
   its reason, e.g. U1 T2), an occupied slot unless `--replace-to LOCATION` says where the
   current spool goes, an archived spool. Offline printers (other people's, D7) are recorded
   by hand like any other. `3d printops spool load 7 u1/T3`
-- `unload` — take the spool out (to `--to LOCATION`, else no location), `--gross G` weighs it
-  on the way. `3d printops spool unload u1/T3 --to WH:A/S1 --gross 974`
+- `unload` — take the spool out (to `--to LOCATION`, else no location); the slot is spelled as
+  for `load` (`u1/t3` = `u1/T3`, `ams1/02` = `ams1/2`), and a head marked unusable can still be
+  emptied. `--gross G` weighs it first: a weighing that fails leaves it loaded; an unload that
+  fails after a good weighing leaves it weighed and loaded (run `unload` again).
+  `3d printops spool unload u1/T3 --to WH:A/S1 --gross 974`
 - `use` — book usage: Spoolman `/use` + a ledger row, atomically (a Spoolman error books
   nothing). `3d printops spool use 7 12.4 --source gcode_estimate --job u1-2026-10-14-01`
 - `measure` — weigh the spool **with** its empty spool on it. Prints the new interval and how
@@ -93,7 +96,9 @@ Every action takes `--json` (the API answer), `--api URL`, `--token TOKEN`.
   `3d printops spool empty 7 --note "ran out on plate 7"`
 - `import-owned` — spools from a project's `gen/plates.json`: one per `owned` entry
   (colour name → hex), PLA unless `bought` names the product (vendor, PLA+/PETG/…, price in
-  дин). No guessed vendor or net: such spools show "never weighed". Prints the plan — `+`
+  дин). The vendor is the longest vendor of the tare DB (`3d printops tare ls`) the product
+  starts with (`Bambu Lab PLA Basic` → `Bambu Lab`), else its first word. No guessed vendor
+  or net: such spools show "never weighed". Prints the plan — `+`
   create (marking NEW vendor/filament), `=` already imported (with fields that drifted from the
   source, never overwritten) — and writes nothing without `--apply`. Keyed by
   `<project>:owned:<name>` in the spool extra field `external_key`, so a re-run changes nothing.

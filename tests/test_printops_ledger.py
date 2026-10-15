@@ -392,3 +392,90 @@ def test_spool_without_any_weight_is_unknown_not_zero(printops_db: sqlite3.Conne
     est = ledger.remaining(printops_db, sm, sp["id"])
     assert "remaining_weight" not in sp and not est.bounded
     assert est.text() == "unknown (never weighed)" and est.to_dict()["bounded"] is False
+
+
+# -- review round 3 (PR #216) ---------------------------------------------------------------------
+
+
+def test_lint_spools_survives_a_malformed_opened_at(
+    printops_db: sqlite3.Connection, sm: FakeSpoolman
+) -> None:
+    sp = _spool(sm)
+    bad = {**sp, "extra": {**(sp.get("extra") or {}), "opened_at": "2026-10-14 not json"}}
+    ctx = datalint.LintContext(
+        conn=printops_db,
+        spoolman=sm,
+        spools=[bad],
+        now=datetime.datetime.now(datetime.timezone.utc),
+    )
+    found = {(f.rule, f.subject) for f in lint_spools.lint(ctx)}
+    assert ("spools/not-weighed", f"spool:{sp['id']}") in found
+
+
+def _vm_steps(conn: sqlite3.Connection, spool_id: int) -> int:
+    steps = 0
+
+    def tick() -> int:
+        nonlocal steps
+        steps += 1
+        return 0
+
+    conn.set_progress_handler(tick, 1)
+    try:
+        ledger.estimate(conn, spool_id)
+    finally:
+        conn.set_progress_handler(None, 1)
+    return steps
+
+
+def test_estimate_does_not_scan_history_older_than_the_anchor(
+    printops_db: sqlite3.Connection,
+) -> None:
+    """A never-weighed spool: the rows before its newest anchor are not read."""
+
+    def history(spool_id: int, old_rows: int) -> None:
+        with db.transaction(printops_db):
+            for _ in range(old_rows):
+                ledger.anchor(printops_db, spool_id, 500.0, "manual", 20.0, actor="t")
+            ledger.anchor(printops_db, spool_id, 400.0, "manual", 20.0, actor="t")
+            for source, delta in (("gcode_estimate", -10.0), ("purge", -2.0)):
+                ledger._insert(
+                    printops_db,
+                    spool_id=spool_id,
+                    kind="delta",
+                    delta_g=delta,
+                    anchor_g=None,
+                    source=source,
+                    confidence_g=1.0,
+                    actor="t",
+                )
+
+    history(1, 5)
+    history(2, 3000)
+    short, long = _vm_steps(printops_db, 1), _vm_steps(printops_db, 2)
+    assert long < short * 2, (short, long)
+    est = ledger.estimate(printops_db, 2)
+    assert (est.mid, est.deltas, est.anchor_source, est.last_weighed_at) == (
+        388.0,
+        2,
+        "manual",
+        None,
+    )
+
+
+def test_parse_bought_knows_multi_word_vendors() -> None:
+    vendors = ["Bambu Lab", "Das Filament", "eSun"]
+    got = parse_bought("Bambu Lab PLA Basic Black (Game Centar, 2990 дин)", vendors)
+    assert (got["vendor"], got["product"], got["material"]) == (
+        "Bambu Lab",
+        "PLA Basic Black",
+        "PLA",
+    )
+    # matched by vendor key, kept as spelled in the source
+    assert parse_bought("BAMBU-LAB PETG HF (x, 1 дин)", vendors)["vendor"] == "BAMBU-LAB"
+    # an unknown vendor: the first word, as before
+    assert parse_bought("Elegoo RAPID PLA+ Green (Game Centar, 1499 дин)", vendors)[
+        "vendor"
+    ] == "Elegoo"
+    # a known vendor needs a word boundary: "eSunny" is not eSun
+    assert parse_bought("eSunny PLA (x, 1 дин)", vendors)["vendor"] == "eSunny"

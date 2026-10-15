@@ -158,29 +158,26 @@ def estimate(
 ) -> Interval:
     """The remaining interval from the ledger alone. `fallback_g` (Spoolman's remaining) bounds a
     spool that has no anchor yet; without it an unanchored spool is [0, 0]."""
-    # One pass over the spool's rows (index ledger_spool_id), newest first: the deltas until the
-    # newest anchor, and the newest weighing (which may lie further back than that anchor).
-    anchor: sqlite3.Row | None = None
-    weighed: str | None = None
-    total = var = 0.0
-    n_deltas = 0
-    rows = conn.execute(
-        "SELECT id, at, kind, delta_g, anchor_g, source, confidence_g FROM ledger"
-        " WHERE spool_id = ? AND kind != 'note' ORDER BY id DESC",
+    # Three indexed lookups, none reading history older than the newest anchor: the newest
+    # anchor (partial index ledger_anchor), the deltas booked since it, and the newest
+    # weighing (partial index ledger_weigh; it may lie further back than that anchor).
+    anchor = conn.execute(
+        "SELECT id, at, anchor_g, source, confidence_g FROM ledger"
+        " WHERE spool_id = ? AND kind = 'anchor' ORDER BY id DESC LIMIT 1",
         (spool_id,),
-    )
-    for row in rows:
-        if weighed is None and row["source"] == "weigh":
-            weighed = str(row["at"])
-        if anchor is None:
-            if row["kind"] == "anchor":
-                anchor = row
-            else:
-                total += float(row["delta_g"])
-                var += float(row["confidence_g"]) ** 2
-                n_deltas += 1
-        if anchor is not None and weighed is not None:
-            break
+    ).fetchone()
+    since = conn.execute(
+        "SELECT COUNT(*) AS n, COALESCE(SUM(delta_g), 0) AS total,"
+        " COALESCE(SUM(confidence_g * confidence_g), 0) AS var FROM ledger"
+        " WHERE spool_id = ? AND id > ? AND kind = 'delta'",
+        (spool_id, anchor["id"] if anchor is not None else 0),
+    ).fetchone()
+    w = conn.execute(
+        "SELECT at FROM ledger WHERE spool_id = ? AND source = 'weigh' ORDER BY id DESC LIMIT 1",
+        (spool_id,),
+    ).fetchone()
+    weighed = None if w is None else str(w["at"])
+    total, var, n_deltas = float(since["total"]), float(since["var"]), int(since["n"])
     if anchor is None:
         hi = max(0.0, float(fallback_g or 0.0))
         return Interval(

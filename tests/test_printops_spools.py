@@ -173,8 +173,8 @@ def test_full_lifecycle_receive_store_load_use_unload_weigh_empty(
         "spool.moved",
         "slot.loaded",
         "spool.used",
+        "spool.measured",  # unload --gross weighs first, then unloads
         "slot.unloaded",
-        "spool.measured",
         "spool.empty",
     ]
     _, subject, payload = next(e for e in _events(printops_db, "slot.loaded"))
@@ -409,3 +409,113 @@ def test_import_validates_every_item_before_writing(po: ApiClient, fake_spoolman
         assert err.status == status, err.message
         assert len(fake_spoolman.writes()) == before
     assert po.get("/v1/spools")["spools"] == []
+
+
+# -- review round 3 (PR #216) ---------------------------------------------------------------------
+
+
+def test_unload_canonicalises_the_slot_like_load(
+    po: ApiClient, fake_spoolman: FakeSpoolman
+) -> None:
+    a = po.post("/v1/spools", GREEN)["id"]
+    po.post("/v1/printers/u1/slots/T3/load", {"spool_id": a})
+    assert po.post("/v1/printers/u1/slots/t3/unload", {})["slot"] is None
+    po.post("/v1/printers/p1s/slots/ams1/2/load", {"spool_id": a})
+    assert po.post("/v1/printers/p1s/slots/ams1/02/unload", {})["slot"] is None
+    # an unusable head can still be emptied (the spool got there by hand in Spoolman)
+    fake_spoolman.update("spool", a, {"extra": {"printops_slot": json.dumps("u1/T2")}})
+    assert po.post("/v1/printers/u1/slots/T2/unload", {})["slot"] is None
+
+
+def test_import_checks_numbers_before_the_first_write(
+    po: ApiClient, fake_spoolman: FakeSpoolman
+) -> None:
+    good = {"external_key": "bd:a", "material": "PLA", "name": "белый"}
+    for bad in (
+        {"external_key": "bd:b", "material": "PLA", "name": "x", "price": -5},
+        {"external_key": "bd:c", "material": "PLA", "name": "x", "net_g": -1},
+        {"external_key": "bd:d", "material": "PLA", "name": "x", "spool_kind": "glass"},
+    ):
+        before = len(fake_spoolman.writes())
+        err = _err(po.post, "/v1/spools/import", {"items": [good, bad], "dry_run": False})
+        assert err.status == 422, err.message
+        assert len(fake_spoolman.writes()) == before
+    assert po.get("/v1/spools")["spools"] == []
+
+
+def test_ledger_of_an_unknown_spool_is_404(po: ApiClient) -> None:
+    assert _err(po.get, "/v1/spools/999/ledger").status == 404
+
+
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        ("material", 7),
+        ("name", ["x"]),
+        ("net_g", "1000"),
+        ("price", True),
+        ("opened", "yes"),
+        ("filament_id", True),
+        ("filament_id", 1.5),
+    ],
+)
+def test_receive_rejects_wrong_field_types_with_422(
+    po: ApiClient, field: str, value: Any
+) -> None:
+    body = {"material": "PLA", "name": "белый", field: value}
+    err = _err(po.post, "/v1/spools", body)
+    assert err.status == 422 and field in err.message
+    imp = _err(po.post, "/v1/spools/import", {"items": [{**body, "external_key": "k"}]})
+    assert imp.status == 422 and field in imp.message
+
+
+def test_unload_with_weighing_leaves_the_slot_when_spoolman_fails(
+    po: ApiClient,
+    fake_spoolman: FakeSpoolman,
+    printops_db: sqlite3.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from printops.spoolman import SpoolmanError
+
+    sid = po.post("/v1/spools", GREEN)["id"]
+    po.post("/v1/printers/u1/slots/T3/load", {"spool_id": sid})
+
+    def boom(*args: Any, **kwargs: Any) -> Any:
+        raise SpoolmanError("Spoolman 500", status=500)
+
+    monkeypatch.setattr(fake_spoolman, "measure", boom)  # the weighing's Spoolman write
+    err = _err(po.post, "/v1/printers/u1/slots/T3/unload", {"to": "WH:A/S1", "gross_g": 974})
+    assert err.status == 502
+    monkeypatch.undo()
+    still = po.get(f"/v1/spools/{sid}")
+    assert still["slot"] == "u1/T3" and still["location"] == "slot:u1/T3"
+    assert [r["source"] for r in still["ledger"]] == ["receive"]
+    assert not _events(printops_db, "slot.unloaded")
+
+
+@pytest.mark.parametrize("action", ["empty", "move"])
+def test_empty_and_move_recheck_archived_under_the_write_lock(
+    po: ApiClient,
+    fake_spoolman: FakeSpoolman,
+    printops_db: sqlite3.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+    action: str,
+) -> None:
+    """Another writer empties the spool while this request waits for the write lock."""
+    from printops import db
+
+    sid = po.post("/v1/spools", GREEN)["id"]
+    real = db.transaction
+
+    def racing(conn: sqlite3.Connection) -> Any:
+        fake_spoolman.update("spool", sid, {"archived": True})
+        return real(conn)
+
+    monkeypatch.setattr(db, "transaction", racing)
+    body = {"location": "WH:A/S1"} if action == "move" else {}
+    err = _err(po.post, f"/v1/spools/{sid}/{action}", body)
+    assert err.status == 409 and "archived" in err.message
+    monkeypatch.undo()
+    rows = po.get(f"/v1/spools/{sid}/ledger")["rows"]
+    assert [r["source"] for r in rows] == ["receive"]
+    assert not _events(printops_db, "spool.empty") and not _events(printops_db, "spool.moved")

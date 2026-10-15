@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from typing import Any
 
 from errors import UsageError
 from printops.cli import Sub
-from printops.cli._common import api_errors, client, parse
+from printops.cli._common import Parsed, api_errors, client, parse
 
 USAGE = """3d printops tare <action> [args] [--json] [--api URL] [--token TOKEN]
   Empty-spool weights (tares) used to turn a scale reading into remaining filament. Each entry
@@ -52,64 +53,82 @@ def run(argv: list[str]) -> int:
         print(USAGE)
         return 0 if argv else 1
     action, rest = argv[0], argv[1:]
-    sub = f"tare {action}"
-    if action == "ls":
-        p = parse(rest, sub, values=VALUES, flags={"--json"}, n_pos=(0, 1))
-        api = client(p, sub)
-        with api_errors(sub):
-            res = api.get("/v1/tares", vendor=p.pos[0] if p.pos else None)
-        text = "\n".join(fmt_row(t) for t in res["tares"]) or "no tares"
-    elif action == "add":
-        p = parse(
-            rest,
-            sub,
-            values=VALUES | {"--source", "--kind", "--net", "--sigma", "--note"},
-            flags={"--json"},
-            n_pos=2,
-        )
-        body: dict[str, Any] = {
-            "vendor": p.pos[0],
-            "tare_g": _num(p.pos[1], "GRAMS", sub),
-        }
-        if "--source" not in p.opts:
-            raise UsageError(
-                "tare add needs --source (where the weight comes from)",
-                command=f"printops {sub}",
-            )
-        body["source"] = p.opts["--source"]
-        for opt, key in (("--kind", "spool_kind"), ("--note", "note")):
-            if opt in p.opts:
-                body[key] = p.opts[opt]
-        for opt, key in (("--net", "net_g"), ("--sigma", "sigma_g")):
-            if opt in p.opts:
-                body[key] = _num(p.opts[opt], opt, sub)
-        api = client(p, sub)
-        with api_errors(sub):
-            res = api.post("/v1/tares", body)
-        text = "added " + fmt_row(res)
-    elif action == "show":
-        p = parse(rest, sub, values=VALUES, flags={"--json"}, n_pos=1)
-        api = client(p, sub)
-        with api_errors(sub):
-            res = api.get(f"/v1/spools/{_int(p.pos[0], sub)}/tare")
-        t = res.get("tare")
-        text = (
-            f"tare {t['tare_g']:g} ± {t['sigma_g']:g} g  from {t['origin']}: {t['source']}"
-            if t
-            else f"no tare: {res.get('reason')}"
-        )
-        if res.get("candidates") and not t:
-            text += "\n" + "\n".join("  " + fmt_row(c) for c in res["candidates"])
-    else:
+    handler = ACTIONS.get(action)
+    if handler is None:
         raise UsageError(
-            f"unknown tare action {action!r}; accepted: ls, add, show",
+            f"unknown tare action {action!r}; accepted: {', '.join(ACTIONS)}",
             command="printops tare",
             remediation=["Run `3d printops tare --help`."],
         )
+    p, res, text = handler(rest, f"tare {action}")
     print(
         json.dumps(res, indent=2, ensure_ascii=False) if "--json" in p.flags else text
     )
     return 0
+
+
+Answer = tuple[Parsed, Any, str]  # (parsed argv, API JSON, human text)
+
+
+def _ls(rest: list[str], sub: str) -> Answer:
+    p = parse(rest, sub, values=VALUES, flags={"--json"}, n_pos=(0, 1))
+    api = client(p, sub)
+    with api_errors(sub):
+        res = api.get("/v1/tares", vendor=p.pos[0] if p.pos else None)
+    return p, res, "\n".join(fmt_row(t) for t in res["tares"]) or "no tares"
+
+
+def _add(rest: list[str], sub: str) -> Answer:
+    p = parse(
+        rest,
+        sub,
+        values=VALUES | {"--source", "--kind", "--net", "--sigma", "--note"},
+        flags={"--json"},
+        n_pos=2,
+    )
+    body: dict[str, Any] = {
+        "vendor": p.pos[0],
+        "tare_g": _num(p.pos[1], "GRAMS", sub),
+    }
+    if "--source" not in p.opts:
+        raise UsageError(
+            "tare add needs --source (where the weight comes from)",
+            command=f"printops {sub}",
+        )
+    body["source"] = p.opts["--source"]
+    for opt, key in (("--kind", "spool_kind"), ("--note", "note")):
+        if opt in p.opts:
+            body[key] = p.opts[opt]
+    for opt, key in (("--net", "net_g"), ("--sigma", "sigma_g")):
+        if opt in p.opts:
+            body[key] = _num(p.opts[opt], opt, sub)
+    api = client(p, sub)
+    with api_errors(sub):
+        res = api.post("/v1/tares", body)
+    return p, res, "added " + fmt_row(res)
+
+
+def _show(rest: list[str], sub: str) -> Answer:
+    p = parse(rest, sub, values=VALUES, flags={"--json"}, n_pos=1)
+    api = client(p, sub)
+    with api_errors(sub):
+        res = api.get(f"/v1/spools/{_int(p.pos[0], sub)}/tare")
+    t = res.get("tare")
+    text = (
+        f"tare {t['tare_g']:g} ± {t['sigma_g']:g} g  from {t['origin']}: {t['source']}"
+        if t
+        else f"no tare: {res.get('reason')}"
+    )
+    if res.get("candidates") and not t:
+        text += "\n" + "\n".join("  " + fmt_row(c) for c in res["candidates"])
+    return p, res, text
+
+
+ACTIONS: dict[str, Callable[[list[str], str], Answer]] = {
+    "ls": _ls,
+    "add": _add,
+    "show": _show,
+}
 
 
 def _num(raw: str, what: str, sub: str) -> float:
