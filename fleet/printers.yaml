@@ -96,6 +96,8 @@ k1se:
   trusted_macros: [START_PRINT, END_PRINT, PAUSE]
   watch:
     tg_fallback: true       # `3d printer watch`: tg only for warning+ events that no subscribed agent took
+    vision:                 # `3d printer vision k1se`: Helper Script mjpg-streamer on the USB webcam
+      snapshot: "http://192.168.0.27:8080/?action=snapshot"
   heads:
     - {label: T1, index: 0, extruder: extruder, nozzle: {diameter_mm: 0.4, material: hardened, type: std}, usable: true}
   ams: []                   # live ws: cfsConnect 0
