@@ -266,14 +266,17 @@ def load_devices(cwd: Path | None = None) -> dict[str, Device]:
             raise DeviceConfigError(f"{path}: invalid YAML: {exc}", command="printer") from exc
         devices.update(_parse(path, data))
     # An override replaces device settings, never the fleet's access (D7): an offline printer
-    # stays out of the contactable set, a read-only one stays read-only.
+    # stays out of the contactable set, a read-only one stays read-only. The model is the
+    # printer's identity: an override without `model:` keeps the fleet's (vision calibration).
     for name, printer in (fleet.printers if fleet is not None else {}).items():
-        if name not in devices or printer.access == "full":
+        if name not in devices:
             continue
         if printer.access == "offline":
             del devices[name]
-        else:
-            devices[name] = replace(devices[name], access=printer.access)
+            continue
+        device = devices[name]
+        devices[name] = replace(device, model=device.model or printer.model,
+                                access=device.access if printer.access == "full" else printer.access)
     return devices
 
 
