@@ -138,8 +138,8 @@ Kinds: `warehouse zone shelf box slot dryer dry_box`; `printer ams printer_slot`
 the fleet. **Printer slots** are not added by hand: `slot:<printer>` (kind `printer`),
 `slot:<printer>/<head>` (e.g. `slot:u1/T3`, capacity 1; an unusable head keeps the fleet's
 reason in its note) and, for AMS-like units, `slot:<printer>/<unit>/<n>` follow
-`fleet/printers.yaml`: 3d-api re-syncs them on the first request after the file changed (a
-deploy) and on `loc sync-fleet`; slots that left the fleet are archived once empty.
+`fleet/printers.yaml`: 3d-api re-syncs them on the first write request after the file changed
+(a deploy) and on `loc sync-fleet` (reads never sync: run `loc sync-fleet` after a deploy); slots that left the fleet are archived once empty.
 
 **Spoolman link.** A spool stored in a location has Spoolman `location` = the path and the extra
 field `printops_location_id` = the location id (both written in one PATCH). `show` lists the

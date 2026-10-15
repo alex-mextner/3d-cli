@@ -16,8 +16,8 @@
 
 Paths contain `:` and `/` and go into the URL as they are (`/v1/locations/WH:A/S2/contents`);
 the segment `contents` is reserved by the grammar so the routes never clash. Printer slots
-follow the fleet file automatically: the first request after the file changed (a deploy)
-re-syncs them.
+follow the fleet file automatically: the first write request after the file changed (a deploy)
+re-syncs them. Reads never sync — a read token must not create or archive locations.
 """
 from __future__ import annotations
 
@@ -40,8 +40,11 @@ Writer = Annotated[TokenRecord, Depends(require("write"))]
 Sm = Annotated[Spoolman, Depends(get_spoolman)]
 
 
-def _ensure_fleet(request: Request, conn: Db) -> sqlite3.Connection:
-    """Dependency: re-sync printer slots when the fleet file changed since the last sync."""
+def _ensure_fleet(request: Request, conn: Db, who: Writer) -> sqlite3.Connection:
+    """Dependency of write routes: re-sync printer slots when the fleet file changed since the last sync.
+
+    Authenticated as `write` before syncing, and never wired into reads: a sync creates, revives and
+    archives locations, which a read-scoped (or anonymous) request must not be able to trigger."""
     from printops.fleet import FleetError
 
     try:
@@ -73,7 +76,7 @@ def _get(conn: sqlite3.Connection, ref: str) -> locs.Location:
 
 
 @router.get("/v1/locations")
-def list_locations(conn: Conn, who: Reader, flat: bool = False, archived: bool = False) -> dict[str, Any]:
+def list_locations(conn: Db, who: Reader, flat: bool = False, archived: bool = False) -> dict[str, Any]:
     rows = locs.all_locations(conn, include_archived=archived)
     if flat:
         return {"locations": [r.to_dict() for r in rows]}
@@ -81,7 +84,7 @@ def list_locations(conn: Conn, who: Reader, flat: bool = False, archived: bool =
 
 
 @router.get("/v1/locations/resolve")
-def resolve(conn: Conn, who: Reader, q: Annotated[str, Query(min_length=1, max_length=200)]) -> dict[str, Any]:
+def resolve(conn: Db, who: Reader, q: Annotated[str, Query(min_length=1, max_length=200)]) -> dict[str, Any]:
     try:
         return locs.resolve(conn, q).to_dict()
     except locs.LocationNotFound as e:
@@ -132,7 +135,7 @@ def resync(conn: Conn, who: Writer, sp: Sm) -> dict[str, Any]:
 
 
 @router.get("/v1/locations/{ref:path}/contents")
-def contents(conn: Conn, who: Reader, sp: Sm, ref: str, recursive: bool = False) -> dict[str, Any]:
+def contents(conn: Db, who: Reader, sp: Sm, ref: str, recursive: bool = False) -> dict[str, Any]:
     loc = _get(conn, ref)
     try:
         spools = locs.contents(conn, sp, loc, recursive=recursive)
@@ -142,7 +145,7 @@ def contents(conn: Conn, who: Reader, sp: Sm, ref: str, recursive: bool = False)
 
 
 @router.get("/v1/locations/{ref:path}")
-def show(conn: Conn, who: Reader, ref: str) -> dict[str, Any]:
+def show(conn: Db, who: Reader, ref: str) -> dict[str, Any]:
     loc = _get(conn, ref)
     return {**loc.to_dict(),
             "ancestors": [a.to_dict() for a in locs.ancestors(conn, loc)],

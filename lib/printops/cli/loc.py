@@ -38,7 +38,7 @@ USAGE = """3d printops loc tree [ROOT] [--archived] [--json]
   Printer slots slot:<printer>/<head> (and slot:<printer>/<ams>/<n>) come from
   fleet/printers.yaml and follow it automatically. REF = path or numeric id.
   Kinds: warehouse zone shelf box slot dryer dry_box (printer, ams, printer_slot: fleet only).
-  Reads need a token with `read`; changes need `write`.
+  Reads need a token with `read`; changes need `write` — so does `label` (it records what was printed).
 
 Actions:
   tree        the tree (or the subtree under ROOT) with kind, capacity, sensor, label state

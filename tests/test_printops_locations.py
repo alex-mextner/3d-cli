@@ -13,7 +13,7 @@ from printops import events
 from printops import locations as locs
 from printops.client import ApiClient, ApiError
 from printops.fleet import load_fleet
-from printops.spoolman import ensure_extra_fields
+from printops.spoolman import Entity, ensure_extra_fields
 
 FLEET = """\
 u1:
@@ -178,21 +178,21 @@ def test_place_spool_writes_path_id_and_caller_extras_in_one_patch(conn: sqlite3
     loc = _tree(conn, "WH:A")["WH:A"]
     sid = _spool(sm)
     before = len(sm.writes())
-    spool = locs.place_spool(sm, sid, loc, extra={"printops_slot": "", "dry_state": "ok"})
+    spool = locs.place_spool(conn, sm, sid, loc, extra={"printops_slot": "", "dry_state": "ok"})
     assert sm.writes()[before:] == [("PATCH", f"/spool/{sid}")]
     assert spool["location"] == "WH:A"
     assert spool["extra"]["printops_location_id"] == str(loc.id) and spool["extra"]["dry_state"] == '"ok"'
-    cleared = locs.place_spool(sm, sid, None)
+    cleared = locs.place_spool(conn, sm, sid, None)
     assert cleared["location"] == "" and "printops_location_id" not in cleared["extra"]
 
 
 def test_contents_by_id_or_by_hand_typed_location(conn: sqlite3.Connection, sm: FakeSpoolman) -> None:
     t = _tree(conn, "WH:A", "WH:A/S1")
     bound = _spool(sm)
-    locs.place_spool(sm, bound, t["WH:A/S1"])
+    locs.place_spool(conn, sm, bound, t["WH:A/S1"])
     by_hand = _spool(sm, "wh:a/s1")  # typed in the Spoolman UI, no id
     elsewhere = _spool(sm)
-    locs.place_spool(sm, elsewhere, t["WH:A"])
+    locs.place_spool(conn, sm, elsewhere, t["WH:A"])
     sm.update("spool", elsewhere, {"location": "WH:A/S1"})  # a stale string: the id wins
     assert {s["id"] for s in locs.contents(conn, sm, t["WH:A/S1"])} == {bound, by_hand}
     assert {s["id"] for s in locs.contents(conn, sm, t["WH:A"], recursive=True)} == {bound, by_hand, elsewhere}
@@ -201,7 +201,7 @@ def test_contents_by_id_or_by_hand_typed_location(conn: sqlite3.Connection, sm: 
 def test_move_renames_subtree_and_resyncs_spoolman(conn: sqlite3.Connection, sm: FakeSpoolman) -> None:
     t = _tree(conn, "WH:A", "WH:A/S1", "WH:A/S1/B1", "WH:B")
     deep = _spool(sm)
-    locs.place_spool(sm, deep, t["WH:A/S1/B1"])
+    locs.place_spool(conn, sm, deep, t["WH:A/S1/B1"])
     typed = _spool(sm, "WH:A/S1")
     res = locs.move(conn, sm, t["WH:A/S1"], "WH:B/S9", actor="t")
     assert res.renamed == [("WH:A/S1", "WH:B/S9"), ("WH:A/S1/B1", "WH:B/S9/B1")]
@@ -231,7 +231,7 @@ def test_move_refusals(conn: sqlite3.Connection, sm: FakeSpoolman, src: str, dst
 def test_move_with_spoolman_down_commits_and_resync_repairs(conn: sqlite3.Connection, sm: FakeSpoolman) -> None:
     t = _tree(conn, "WH:A", "WH:A/S1")
     sid = _spool(sm)
-    locs.place_spool(sm, sid, t["WH:A/S1"])
+    locs.place_spool(conn, sm, sid, t["WH:A/S1"])
     sm.down = True
     res = locs.move(conn, sm, t["WH:A/S1"], "WH:A/S2", actor="t")
     assert res.spoolman.failed and res.spoolman.failed[0]["spool_id"] is None
@@ -247,16 +247,16 @@ def test_archive_refuses_children_spools_and_blind_checks(conn: sqlite3.Connecti
     with pytest.raises(locs.LocationError, match="1 active child"):
         locs.archive(conn, sm, t["WH:A"], actor="t")
     sid = _spool(sm)
-    locs.place_spool(sm, sid, t["WH:A/S1"])
+    locs.place_spool(conn, sm, sid, t["WH:A/S1"])
     with pytest.raises(locs.LocationError, match=f"still holds 1 spool.*#{sid}") as e:
         locs.archive(conn, sm, t["WH:A/S1"], actor="t")
     assert e.value.status == 409
     with pytest.raises(locs.LocationError, match="Spoolman is not configured"):
         locs.archive(conn, None, t["WH:A/S1"], actor="t")
-    locs.place_spool(sm, sid, None)
+    locs.place_spool(conn, sm, sid, None)
     assert locs.archive(conn, sm, t["WH:A/S1"], actor="t").archived
     with pytest.raises(locs.LocationError, match="archived"):
-        locs.place_spool(sm, sid, locs.get(conn, "WH:A/S1"))
+        locs.place_spool(conn, sm, sid, locs.get(conn, "WH:A/S1"))
     assert events.last(conn, 1)[0].kind == "location.archived"
 
 
@@ -276,7 +276,7 @@ def test_sync_fleet_creates_is_idempotent_archives_gone_and_revives(conn: sqlite
     assert locs.get(conn, "slot:u1/T1").source == "fleet"
     assert not locs.sync_fleet(conn, locs.fleet_slots(_fleet(tmp_path)), sm).changed
     sid = _spool(sm)
-    locs.place_spool(sm, sid, locs.get(conn, "slot:u1/T2"))
+    locs.place_spool(conn, sm, sid, locs.get(conn, "slot:u1/T2"))
     gone = FLEET.split("boris:")[0].replace("    - {label: T2, index: 1, usable: false, reason: \"head T2 does not work\"}\n", "")
     second = locs.sync_fleet(conn, locs.fleet_slots(_fleet(tmp_path, gone)), sm)
     # deepest first (children before their parent); same depth in path order, case-insensitive
@@ -318,9 +318,7 @@ def test_api_tree_show_contents_move_archive(api_client: ApiClient, fake_spoolma
     s1 = api_client.post("/v1/locations", {"path": "WH:A/S1", "kind": "shelf", "capacity": 4})
     ensure_extra_fields(fake_spoolman)
     sid = _spool(fake_spoolman)
-    locs.place_spool(fake_spoolman, sid, locs.Location(**{k: s1[k] for k in (
-        "id", "path", "kind", "parent_id", "tag_uid", "qr", "capacity", "humidity_sensor_entity", "note", "source",
-        "archived", "created_at", "updated_at")}))
+    fake_spoolman.update("spool", sid, {"location": "WH:A/S1", "extra": {"printops_location_id": str(s1["id"])}})
     tree = api_client.get("/v1/locations")
     assert tree["count"] == 2 and tree["tree"][0]["children"][0]["path"] == "WH:A/S1"
     shown = api_client.get("/v1/locations/WH:A/S1")
@@ -348,11 +346,13 @@ def test_api_tree_show_contents_move_archive(api_client: ApiClient, fake_spoolma
     assert api_client.get("/v1/locations", flat="true")["locations"][1]["capacity"] == 4
 
 
-def test_api_materialises_fleet_slots_on_first_request(api_client: ApiClient, tmp_path: Path,
-                                                       monkeypatch: pytest.MonkeyPatch) -> None:
+def test_api_materialises_fleet_slots_on_first_write_never_on_reads(api_client: ApiClient, tmp_path: Path,
+                                                                     monkeypatch: pytest.MonkeyPatch) -> None:
     f = tmp_path / "fleet.yaml"
     f.write_text(FLEET, encoding="utf-8")
     monkeypatch.setenv("THREED_FLEET", str(f))
+    assert api_client.get("/v1/locations", flat="true")["locations"] == []  # a read token cannot mutate the tree
+    api_client.post("/v1/locations", {"path": "WH:A", "kind": "warehouse"})
     paths = [loc["path"] for loc in api_client.get("/v1/locations", flat="true")["locations"]]
     assert "slot:u1/T2" in paths and "slot:boris/lite/2" in paths
     assert api_client.post("/v1/locations/sync-fleet") == {"created": [], "revived": [], "updated": [],
@@ -412,15 +412,16 @@ def test_archive_rechecks_children_under_the_write_lock(conn: sqlite3.Connection
     class ChildAppears(FakeSpoolman):
         def find(self, entity: Any, params: Any = None) -> list[dict[str, Any]]:
             other = open_db(printops_settings.db_path)
-            try:
-                locs.add(other, "WH:A/late", "shelf", actor="other request")
+            try:  # the flag is already set: the other request cannot slip a child in
+                with pytest.raises(locs.LocationError, match="parent 'WH:A' of 'WH:A/late' is archived"):
+                    locs.add(other, "WH:A/late", "shelf", actor="other request")
             finally:
                 other.close()
             return super().find(entity, params)
 
-    with pytest.raises(locs.LocationError, match="1 active child"):
-        locs.archive(conn, ChildAppears(), leaf, actor="t")
-    assert not locs.get(conn, "WH:A").archived
+    assert locs.archive(conn, ChildAppears(), leaf, actor="t").archived
+    with pytest.raises(locs.LocationNotFound):
+        locs.get(conn, "WH:A/late")
 
 
 def test_fleet_shrink_with_spoolman_down_keeps_the_slot_and_reads_still_work(
@@ -428,9 +429,10 @@ def test_fleet_shrink_with_spoolman_down_keeps_the_slot_and_reads_still_work(
     f = tmp_path / "fleet.yaml"
     f.write_text(FLEET, encoding="utf-8")
     monkeypatch.setenv("THREED_FLEET", str(f))
-    api_client.get("/v1/locations")
+    api_client.post("/v1/locations/sync-fleet")
     f.write_text(FLEET.split("boris:")[0], encoding="utf-8")
     fake_spoolman.down = True
+    api_client.post("/v1/locations", {"path": "WH:A", "kind": "warehouse"})  # the lazy sync cannot prove boris empty
     flat = api_client.get("/v1/locations", flat="true")["locations"]
     assert "slot:boris/T1" in [loc["path"] for loc in flat]
     fake_spoolman.down = False
@@ -460,7 +462,7 @@ def test_resync_does_not_undo_a_placement_made_after_its_listing(conn: sqlite3.C
     class PlacedMeanwhile(FakeSpoolman):
         def find(self, entity: Any, params: Any = None) -> list[dict[str, Any]]:
             rows = sm.find(entity, params)
-            locs.place_spool(sm, sid, t["WH:B"])  # another request, after the snapshot
+            locs.place_spool(conn, sm, sid, t["WH:B"])  # another request, after the snapshot
             return rows
 
         def get(self, entity: Any, item_id: int) -> dict[str, Any]:
@@ -471,3 +473,58 @@ def test_resync_does_not_undo_a_placement_made_after_its_listing(conn: sqlite3.C
 
     assert locs.resync(conn, PlacedMeanwhile()).updated == []
     assert sm.get("spool", sid)["location"] == "WH:B"
+
+
+def test_a_placement_racing_an_archive_is_undone(conn: sqlite3.Connection, sm: FakeSpoolman,
+                                                 monkeypatch: pytest.MonkeyPatch) -> None:
+    t = _tree(conn, "WH:A", "WH:A/S1")
+    sid = _spool(sm, "WH:A")
+    real_update = sm.update
+
+    def archive_then_patch(kind: Entity, id_: int, body: dict[str, Any]) -> Any:
+        monkeypatch.setattr(sm, "update", real_update)
+        assert locs.archive(conn, sm, t["WH:A/S1"], actor="t").archived  # empty at its check: the PATCH is not in yet
+        return real_update(kind, id_, body)
+
+    monkeypatch.setattr(sm, "update", archive_then_patch)
+    with pytest.raises(locs.LocationError, match="archived meanwhile") as e:
+        locs.place_spool(conn, sm, sid, t["WH:A/S1"])
+    assert e.value.status == 409
+    assert sm.get("spool", sid)["location"] == "WH:A"  # put back where it was
+
+
+def test_an_archive_racing_a_placement_is_undone(conn: sqlite3.Connection, sm: FakeSpoolman,
+                                                 monkeypatch: pytest.MonkeyPatch) -> None:
+    t = _tree(conn, "WH:A", "WH:A/S1")
+    sid = _spool(sm)
+    real_find = sm.find
+
+    def place_then_list(kind: Entity, params: Any = None) -> Any:
+        sm.update("spool", sid, {"location": "WH:A/S1"})  # landed after the flag, before the emptiness check
+        return real_find(kind) if params is None else real_find(kind, params)
+
+    monkeypatch.setattr(sm, "find", place_then_list)
+    with pytest.raises(locs.LocationError, match="still holds 1 spool"):
+        locs.archive(conn, sm, t["WH:A/S1"], actor="t")
+    assert not locs.get(conn, "WH:A/S1").archived
+
+
+def test_resync_keeps_a_former_path_a_spool_was_just_placed_by(conn: sqlite3.Connection, sm: FakeSpoolman,
+                                                               monkeypatch: pytest.MonkeyPatch) -> None:
+    t = _tree(conn, "WH:A", "WH:B", "WH:B/S1")
+    sm.down = True
+    locs.move(conn, sm, t["WH:B/S1"], "WH:B/S9", actor="t")  # WH:B/S1 is now a former path
+    sm.down = False
+    sid = _spool(sm)
+    locs.place_spool(conn, sm, sid, t["WH:A"])
+    sm.update("spool", sid, {"location": "WH:A/x"})  # drifted: resync will look at it
+    real_get = sm.get
+
+    def hand_typed_meanwhile(kind: Entity, id_: int) -> Any:
+        sm.update("spool", id_, {"location": "WH:B/S1", "extra": {"printops_location_id": None}})
+        return real_get(kind, id_)
+
+    monkeypatch.setattr(sm, "get", hand_typed_meanwhile)
+    locs.resync(conn, sm)
+    monkeypatch.setattr(sm, "get", real_get)
+    assert {s["id"] for s in locs.contents(conn, sm, locs.get(conn, "WH:B/S9"))} == {sid}

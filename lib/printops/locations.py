@@ -452,16 +452,29 @@ def contents(conn: sqlite3.Connection, spoolman: Spoolman, loc: Location, *, rec
     return spools_in(conn, spoolman.find("spool"), locs)
 
 
-def place_spool(spoolman: Spoolman, spool_id: int, loc: Location | None, *,
+def place_spool(conn: sqlite3.Connection, spoolman: Spoolman, spool_id: int, loc: Location | None, *,
                 extra: Mapping[str, Any] | None = None) -> JSON:
     """Put a spool in `loc` (None = nowhere) in ONE Spoolman PATCH: `location` = path and extra
-    `printops_location_id` = id, plus the caller's other extra fields (python values)."""
-    if loc is not None and loc.archived:
-        raise LocationError(f"location {loc.path!r} is archived", status=409)
+    `printops_location_id` = id, plus the caller's other extra fields (python values).
+
+    `loc` is re-read from the DB (the caller's object may be stale). `_archive` sets the flag
+    before its emptiness check, so a placement racing an archive is either seen by that check or
+    sees the flag here after its PATCH — then the spool is put back where it was and 409 raised."""
+    if loc is not None:
+        loc = get(conn, loc.id)
+        if loc.archived:
+            raise LocationError(f"location {loc.path!r} is archived", status=409)
+        before = spoolman.get("spool", spool_id)
     fields = {k: encode_extra(v) if v is not None else None for k, v in (extra or {}).items()}
     fields[LOCATION_EXTRA] = None if loc is None else encode_extra(loc.id)
     body: dict[str, Any] = {"location": "" if loc is None else spoolman_path(loc), "extra": fields}
-    return spoolman.update("spool", spool_id, body)
+    placed = spoolman.update("spool", spool_id, body)
+    if loc is not None and get(conn, loc.id).archived:
+        prev_extra = (before.get("extra") or {}).get(LOCATION_EXTRA)
+        spoolman.update("spool", spool_id, {"location": before.get("location") or "",
+                                            "extra": {LOCATION_EXTRA: prev_extra}})
+        raise LocationError(f"location {loc.path!r} was archived meanwhile; spool #{spool_id} left where it was", status=409)
+    return placed
 
 
 @dataclass
@@ -498,6 +511,8 @@ def resync(conn: sqlite3.Connection, spoolman: Spoolman) -> SyncReport:
             # stale snapshot. The remaining window is one GET→PATCH round trip.
             fresh = spoolman.get("spool", int(s["id"]))
             if _owner_id(fresh, by_text) != loc.id:
+                # placed elsewhere since the listing: whatever path it names now must survive the alias cleanup
+                still_named.add(str(fresh.get("location") or "").strip().lower())
                 continue
             loc = get(conn, loc.id)  # and the path as it is now: a concurrent move may have renamed it
             spoolman.update("spool", int(s["id"]), {"location": loc.path, "extra": {LOCATION_EXTRA: encode_extra(loc.id)}})
@@ -603,21 +618,34 @@ def _archive(conn: sqlite3.Connection, spoolman: Spoolman | None, loc: Location,
     _refuse_children(conn, loc)
     if spoolman is None:
         raise LocationError("Spoolman is not configured: cannot check the location is empty", status=503)
-    try:
-        inside = contents(conn, spoolman, loc)
-    except SpoolmanError as e:
-        raise LocationError(f"cannot check {loc.path!r} is empty: {e.message}", status=503) from e
-    if inside:
-        raise LocationError(f"location {loc.path!r} still holds {len(inside)} spool(s) "
-                            f"(#{', #'.join(str(s['id']) for s in inside[:5])}); move them out first", status=409)
+    # Flag first, then prove emptiness, undoing on failure: place_spool re-checks the flag after
+    # its PATCH, so a racing placement is caught by one side or the other (no compare-and-set in Spoolman).
     with db.transaction(conn):
         cur = get(conn, loc.id)  # re-check under the write lock: a child may have been added meanwhile
         if cur.archived:
             return cur
         _refuse_children(conn, cur)
         conn.execute("UPDATE location SET archived = 1, updated_at = ? WHERE id = ?", (db.utc_now(), cur.id))
+    try:
+        inside = contents(conn, spoolman, cur)
+    except SpoolmanError as e:
+        _unarchive_flag(conn, cur.id)
+        raise LocationError(f"cannot check {loc.path!r} is empty: {e.message}", status=503) from e
+    except BaseException:
+        _unarchive_flag(conn, cur.id)
+        raise
+    if inside:
+        _unarchive_flag(conn, cur.id)
+        raise LocationError(f"location {loc.path!r} still holds {len(inside)} spool(s) "
+                            f"(#{', #'.join(str(s['id']) for s in inside[:5])}); move them out first", status=409)
+    with db.transaction(conn):
         events.emit(conn, "location.archived", f"location:{cur.id}", {"path": cur.path}, actor)
     return get(conn, loc.id)
+
+
+def _unarchive_flag(conn: sqlite3.Connection, loc_id: int) -> None:
+    with db.transaction(conn):
+        conn.execute("UPDATE location SET archived = 0, updated_at = ? WHERE id = ?", (db.utc_now(), loc_id))
 
 
 # -- fleet printer slots ------------------------------------------------------------------
