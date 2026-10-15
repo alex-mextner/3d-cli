@@ -21,6 +21,7 @@ UPLOAD SAFETY: `print=false` is always sent and a response claiming print_starte
   to time out after the whole file arrived (issue #68), so the file list is re-read and a
   matching size counts as verified; otherwise the outcome is UNKNOWN and never retried.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -58,7 +59,11 @@ _STATE = {
     "error": ERROR,
 }
 _HEATERS = ("extruder", "extruder1", "extruder2", "extruder3", "heater_bed")
-_QUERY = "webhooks&print_stats&virtual_sdcard&display_status&" + "&".join(_HEATERS) + "&print_task_config"
+_QUERY = (
+    "webhooks&print_stats&virtual_sdcard&display_status&"
+    + "&".join(_HEATERS)
+    + "&print_task_config"
+)
 
 
 def _rgba_to_hex(value: Any) -> str | None:
@@ -79,15 +84,17 @@ def parse_slots(cfg: dict[str, Any]) -> list[Slot]:
         return []
     slots = []
     for i, present in enumerate(exists):
-        slots.append(Slot(
-            index=i,
-            label=f"T{i + 1}",
-            present=bool(present),
-            color=_rgba_to_hex(_at(cfg.get("filament_color_rgba"), i)),
-            material=_at(cfg.get("filament_type"), i),
-            vendor=_at(cfg.get("filament_vendor"), i),
-            sub_type=_at(cfg.get("filament_sub_type"), i),
-        ))
+        slots.append(
+            Slot(
+                index=i,
+                label=f"T{i + 1}",
+                present=bool(present),
+                color=_rgba_to_hex(_at(cfg.get("filament_color_rgba"), i)),
+                material=_at(cfg.get("filament_type"), i),
+                vendor=_at(cfg.get("filament_vendor"), i),
+                sub_type=_at(cfg.get("filament_sub_type"), i),
+            )
+        )
     return slots
 
 
@@ -111,7 +118,10 @@ def parse_status(status: dict[str, Any]) -> PrinterStatus:
     for h in _HEATERS:
         obj = status.get(h)
         if isinstance(obj, dict) and obj:
-            temps["bed" if h == "heater_bed" else h] = (obj.get("temperature"), obj.get("target"))
+            temps["bed" if h == "heater_bed" else h] = (
+                obj.get("temperature"),
+                obj.get("target"),
+            )
     return PrinterStatus(
         state=state,
         raw_state=raw_state,
@@ -126,10 +136,19 @@ def parse_status(status: dict[str, Any]) -> PrinterStatus:
 
 class MoonrakerAdapter(Adapter):
     kind = "moonraker"
-    upload_while_busy = True  # other files may be stored while printing; never the active one
+    upload_while_busy = (
+        True  # other files may be stored while printing; never the active one
+    )
 
-    def __init__(self, name: str, host: str, port: int = 7125, *, timeout: float = 10.0,
-                 upload_timeout: float = 600.0) -> None:
+    def __init__(
+        self,
+        name: str,
+        host: str,
+        port: int = 7125,
+        *,
+        timeout: float = 10.0,
+        upload_timeout: float = 600.0,
+    ) -> None:
         super().__init__(name, host, port)
         self.timeout = timeout
         self.upload_timeout = upload_timeout
@@ -152,12 +171,18 @@ class MoonrakerAdapter(Adapter):
             raise self._comm_error(f"POST {path}", exc) from exc
         return body.get("result", body) if isinstance(body, dict) else body
 
-    def status(self) -> PrinterStatus:
-        result = self._get("/printer/objects/query?" + _QUERY)
+    def query(self, objects: str) -> dict[str, Any]:
+        """One read-only `objects/query` (e.g. "print_stats&filament_detect") -> its status dict."""
+        result = self._get("/printer/objects/query?" + objects)
         status = result.get("status") if isinstance(result, dict) else None
         if not isinstance(status, dict):
-            raise self._comm_error("objects/query", f"no 'status' in reply: {str(result)[:200]}")
-        return parse_status(status)
+            raise self._comm_error(
+                "objects/query", f"no 'status' in reply: {str(result)[:200]}"
+            )
+        return status
+
+    def status(self) -> PrinterStatus:
+        return parse_status(self.query(_QUERY))
 
     def axis_limits(self) -> tuple[Limits | None, str]:
         """Configured limits win; otherwise Klipper's own stepper_x/stepper_y position_min/max."""
@@ -170,13 +195,17 @@ class MoonrakerAdapter(Adapter):
         try:
             settings = result["status"]["configfile"]["settings"]
             sx, sy = settings["stepper_x"], settings["stepper_y"]
-            lim = ((float(sx.get("position_min", 0.0)), float(sx["position_max"])),
-                   (float(sy.get("position_min", 0.0)), float(sy["position_max"])))
+            lim = (
+                (float(sx.get("position_min", 0.0)), float(sx["position_max"])),
+                (float(sy.get("position_min", 0.0)), float(sy["position_max"])),
+            )
         except (KeyError, TypeError, ValueError, AttributeError):
             return None, "Klipper config has no stepper_x/stepper_y position_max"
         return lim, "Klipper stepper_x/stepper_y"
 
-    def list_files(self, expect: tuple[str, int] | None = None) -> dict[str, RemoteFile]:
+    def list_files(
+        self, expect: tuple[str, int] | None = None
+    ) -> dict[str, RemoteFile]:
         result = self._get("/server/files/list?root=gcodes")
         files: dict[str, RemoteFile] = {}
         for e in result if isinstance(result, list) else []:
@@ -189,8 +218,13 @@ class MoonrakerAdapter(Adapter):
         size = local.stat().st_size
         url = self.base + "/server/files/upload"
         try:
-            status, data = http_upload(url, local, remote_name, {"root": "gcodes", "print": "false"},
-                                       timeout=self.upload_timeout)
+            status, data = http_upload(
+                url,
+                local,
+                remote_name,
+                {"root": "gcodes", "print": "false"},
+                timeout=self.upload_timeout,
+            )
         except TimeoutError as exc:
             return self._reconcile_after_timeout(remote_name, size, exc)
         except OSError as exc:
@@ -207,27 +241,41 @@ class MoonrakerAdapter(Adapter):
                 f"{self.name}: Moonraker reports the upload STARTED or QUEUED a print although "
                 "print=false was sent",
                 command="printer",
-                remediation=[f"Check the printer now: 3d printer status {self.name}",
-                             f"Cancel if unintended: 3d printer cancel {self.name} --yes"],
+                remediation=[
+                    f"Check the printer now: 3d printer status {self.name}",
+                    f"Cancel if unintended: 3d printer cancel {self.name} --yes",
+                ],
             )
         remote = self.list_files().get(remote_name)
         if remote is None:
-            raise self._comm_error("upload", f"{remote_name} missing from the file list after upload")
+            raise self._comm_error(
+                "upload", f"{remote_name} missing from the file list after upload"
+            )
         if remote.size != size:
-            raise self._comm_error("upload", f"size mismatch: local {size} B, printer {remote.size} B")
+            raise self._comm_error(
+                "upload", f"size mismatch: local {size} B, printer {remote.size} B"
+            )
         return UploadResult(remote_name, size, verified=True)
 
-    def _reconcile_after_timeout(self, remote_name: str, size: int, exc: BaseException) -> UploadResult:
+    def _reconcile_after_timeout(
+        self, remote_name: str, size: int, exc: BaseException
+    ) -> UploadResult:
         remote = self.list_files().get(remote_name)
         if remote is not None and remote.size == size:
-            return UploadResult(remote_name, size, verified=True,
-                                note="upload response timed out; size verified from the printer's file list")
+            return UploadResult(
+                remote_name,
+                size,
+                verified=True,
+                note="upload response timed out; size verified from the printer's file list",
+            )
         raise PrinterCommError(
             f"{self.name}: upload of {remote_name} timed out and the printer does not list it with "
             f"the expected size ({size} B; listed: {remote.size if remote else 'absent'}) — outcome UNKNOWN",
             command="printer",
-            remediation=[f"Re-read before retrying: 3d printer status {self.name}",
-                         "Retry the upload only after confirming the file is absent or incomplete."],
+            remediation=[
+                f"Re-read before retrying: 3d printer status {self.name}",
+                "Retry the upload only after confirming the file is absent or incomplete.",
+            ],
         ) from exc
 
     def remote_sha256(self, remote_name: str) -> str | None:
@@ -236,7 +284,9 @@ class MoonrakerAdapter(Adapter):
         url = self.base + "/server/files/gcodes/" + quote(remote_name, safe="/")
         parts = urlsplit(url)
         h = hashlib.sha256()
-        conn = http.client.HTTPConnection(parts.hostname or "", parts.port or 80, timeout=self.upload_timeout)
+        conn = http.client.HTTPConnection(
+            parts.hostname or "", parts.port or 80, timeout=self.upload_timeout
+        )
         try:
             conn.request("GET", parts.path)
             r = conn.getresponse()
@@ -244,7 +294,10 @@ class MoonrakerAdapter(Adapter):
                 raise self._comm_error(f"read back {remote_name}", f"HTTP {r.status}")
             for chunk in iter(lambda: r.read(1 << 20), b""):
                 h.update(chunk)
-        except (OSError, http.client.HTTPException) as exc:  # IncompleteRead is not an OSError
+        except (
+            OSError,
+            http.client.HTTPException,
+        ) as exc:  # IncompleteRead is not an OSError
             raise self._comm_error(f"read back {remote_name}", exc) from exc
         finally:
             conn.close()

@@ -111,6 +111,20 @@ in access logs).
 | `GET /v1/events` | read | SSE stream (`id`/`event`/`data`, `: ping` every 15 s; resumes from `since` or `Last-Event-ID`); with `Accept: application/json` a page `{events, cursor}` by `since`/`limit` or `last` |
 | `WS /v1/ws` | read | auth message, then `{type: "event", event}` frames |
 
+## API (reconcile, #161)
+
+| Endpoint | Scope | |
+|---|---|---|
+| `GET /v1/printers` | read | fleet printers + latest live reading + per slot: printer material/colour/tag, bound spools, anomalies |
+| `GET /v1/printers/{name}` / `…/{name}/slots` | read | one printer / just its slots (404 unknown) |
+| `GET /v1/anomalies` | read | `status=open,ack` (default) \| `resolved` \| `all`, `printer=`, `limit=` |
+| `POST /v1/anomalies/{id}/ack` / `…/resolve` | write | `{note?}`; 409 when the status does not allow it |
+
+A background poller reads each contactable fleet printer (U1 Moonraker, K1 SE ws) READ-ONLY, one
+request per `PRINTOPS_POLL_S` seconds per printer (default 30, floor 10, `0` = off) and
+reconciles slots with Spoolman bindings; `PRINTOPS_COLOR_DE_MAX` (default 15) is the CIEDE2000
+colour threshold. API requests only show the cached reading — they never reach a printer.
+
 Slices add `lib/printops/api/routes_<slice>.py` (auto-included) and
 `lib/printops/migrations/NNNN_<slice>.sql` from their reserved range.
 
