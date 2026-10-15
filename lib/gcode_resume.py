@@ -31,6 +31,7 @@ from __future__ import annotations
 import contextlib
 import math
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -168,24 +169,7 @@ class Walk:
     ) -> tuple[dict[str, Any], dict[int, Any]]:
         """machine state just before line `stop`; with snap_from, also the retraction of the head a line acts on
         for every E move / tool change at or after snap_from (a forward pass to the end)"""
-        st: dict[str, Any] = {
-            "tool": None,
-            "temp": {},
-            "bed": None,
-            "fan": {},
-            "vel": None,
-            "accel": None,
-            "pa": {},
-            "purifier": None,
-            "r": {},
-            "rel": False,
-            "obj": None,
-            "feature": None,
-            "m73": None,
-            "zmax": 0.0,
-            "z": None,
-            "f": None,
-        }
+        st = initial_state()
         snaps: dict[int, Any] = {}
         end = len(self.lines) if snap_from is not None else stop
         cut = None
@@ -194,76 +178,185 @@ class Walk:
                 cut = _copy_state(st)
                 if snap_from is None:
                     break
-            line = self.lines[i]
-            c = line[:1]
-            if c == b"G":
-                m = move(line)
-                if m is None:
-                    if line.startswith(b"G91"):
-                        st["rel"] = True
-                    elif line.startswith(b"G90"):
-                        st["rel"] = False
-                    continue
-                if "F" in m:
-                    st["f"] = m["F"]
-                if "Z" in m:
-                    st["z"] = (st["z"] or 0.0) + m["Z"] if st["rel"] else m["Z"]
-                    st["zmax"] = max(st["zmax"], st["z"])
-                if "E" in m and st["tool"] is not None:
-                    t = st["tool"]
-                    if snap_from is not None and i >= snap_from:
-                        snaps[i] = st["r"].get(t, 0.0)
-                    e = m["E"]
-                    st["r"][t] = round(
-                        st["r"].get(t, 0.0) - e
-                        if e < 0
-                        else max(0.0, st["r"].get(t, 0.0) - e),
-                        5,
-                    )
-            elif c == b"T":
-                mt = TOOL.match(line)
-                if mt:
-                    if snap_from is not None and i >= snap_from:
-                        snaps[i] = dict(st["r"])
-                    st["tool"] = int(mt.group(1))
-            elif c == b"M":
-                w = words(line)
-                code = int(w.get("M", -1))
-                if code in (104, 109) and "S" in w:
-                    tt = int(w["T"]) if "T" in w else st["tool"]
-                    st["temp"][tt] = w["S"]
-                elif code in (140, 190) and "S" in w:
-                    st["bed"] = w["S"]
-                elif code == 106:
-                    st["fan"][int(w.get("P", 0))] = w.get("S", 255.0)
-                elif code == 107:
-                    st["fan"][int(w.get("P", 0))] = 0.0
-                elif code == 204:
-                    st["accel"] = line.split(b";")[0].strip()
-                elif code == 73 and "P" in w:
-                    st["m73"] = (int(w["P"]), int(w.get("R", 0)))
-                elif code == 82:
-                    raise _bad(f"line {i + 1}: M82 absolute E is not supported")
-            elif c == b"E":
-                if line.startswith(b"EXCLUDE_OBJECT_START"):
-                    st["obj"] = obj_name(line)
-                elif line.startswith(b"EXCLUDE_OBJECT_END"):
-                    st["obj"] = None
-            elif c == b"S":
-                if line.startswith(b"SET_VELOCITY_LIMIT"):
-                    st["vel"] = line.split(b";")[0].strip()
-                elif (
-                    line.startswith(b"SET_PRESSURE_ADVANCE")
-                    and b"EXTRUDER=" not in line
-                ):
-                    st["pa"][st["tool"]] = words(line.replace(b"ADVANCE=", b"A"))["A"]
-                elif line.startswith(b"SET_PURIFIER_MODE"):
-                    st["purifier"] = line.split(b";")[0].strip()
-            elif c == b";" and line.startswith(b";TYPE:"):
-                st["feature"] = line[6:].strip().decode()
+            snap = advance(st, self.lines[i])
+            if st["e_abs"]:
+                raise _bad(f"line {i + 1}: M82 absolute E is not supported")
+            if snap is not None and snap_from is not None and i >= snap_from:
+                snaps[i] = snap
         if cut is None:
             cut = _copy_state(st)
         return cut, snaps
+
+
+def initial_state() -> dict[str, Any]:
+    """The machine state before the first G-code line, as `advance` keeps it."""
+    return {
+        "tool": None,
+        "temp": {},  # target °C per tool (M104/M109)
+        "bed": None,
+        "chamber": None,  # M141/M191 target
+        "fan": {},  # M106 P index -> 0..255
+        "vel": None,
+        "accel": None,
+        "pa": {},
+        "purifier": None,
+        "r": {},  # mm retracted from primed, per tool (relative E)
+        "rel": False,
+        "obj": None,
+        "feature": None,  # last ;TYPE:
+        "width": None,  # last ;WIDTH: (mm)
+        "height": None,  # last ;HEIGHT: (mm)
+        "m73": None,
+        "zmax": 0.0,
+        "z": None,
+        "f": None,  # modal feed rate, mm/min
+        "fe": None,  # feed rate of the last extruding X/Y move, mm/min
+        "extrusions": 0,  # extruding X/Y moves so far
+        "e_abs": False,  # M82 in force
+        "e_pos": 0.0,  # E axis position (absolute bookkeeping)
+    }
+
+
+def advance(st: dict[str, Any], line: bytes) -> Any:
+    """Apply one G-code line (no trailing newline) to `st`. Returns the retraction snapshot the
+    line acts on — the active head's mm retracted before an E move, every head's before a tool
+    change — else None. The one per-line parser behind Walk.state and state_at."""
+    c = line[:1]
+    if c == b"G":
+        m = move(line)
+        if m is None:
+            if line.startswith(b"G91"):
+                st["rel"] = True
+            elif line.startswith(b"G90"):
+                st["rel"] = False
+            elif line.startswith(b"G92") and "E" in (w := words(line)):
+                st["e_pos"] = w["E"]
+            return None
+        if "F" in m:
+            st["f"] = m["F"]
+        if "Z" in m:
+            st["z"] = (st["z"] or 0.0) + m["Z"] if st["rel"] else m["Z"]
+            st["zmax"] = max(st["zmax"], st["z"])
+        if "E" not in m:
+            return None
+        e = m["E"]
+        delta = e - st["e_pos"] if st["e_abs"] else e
+        st["e_pos"] = e if st["e_abs"] else st["e_pos"] + e
+        if delta > 0 and ("X" in m or "Y" in m):
+            st["fe"] = st["f"]
+            st["extrusions"] += 1
+        if st["tool"] is None:
+            return None
+        t = st["tool"]
+        snap = st["r"].get(t, 0.0)
+        st["r"][t] = round(
+            st["r"].get(t, 0.0) - e if e < 0 else max(0.0, st["r"].get(t, 0.0) - e),
+            5,
+        )
+        return snap
+    if c == b"T":
+        mt = TOOL.match(line)
+        if mt:
+            snapshot = dict(st["r"])
+            st["tool"] = int(mt.group(1))
+            return snapshot
+    elif c == b"M":
+        w = words(line)
+        code = int(w.get("M", -1))
+        if code in (104, 109) and "S" in w:
+            tt = int(w["T"]) if "T" in w else st["tool"]
+            st["temp"][tt] = w["S"]
+        elif code in (140, 190) and "S" in w:
+            st["bed"] = w["S"]
+        elif code in (141, 191) and "S" in w:
+            st["chamber"] = w["S"]
+        elif code == 106:
+            st["fan"][int(w.get("P", 0))] = w.get("S", 255.0)
+        elif code == 107:
+            st["fan"][int(w.get("P", 0))] = 0.0
+        elif code == 204:
+            st["accel"] = line.split(b";")[0].strip()
+        elif code == 73 and "P" in w:
+            st["m73"] = (int(w["P"]), int(w.get("R", 0)))
+        elif code in (82, 83):
+            st["e_abs"] = code == 82
+    elif c == b"E":
+        if line.startswith(b"EXCLUDE_OBJECT_START"):
+            st["obj"] = obj_name(line)
+        elif line.startswith(b"EXCLUDE_OBJECT_END"):
+            st["obj"] = None
+    elif c == b"S":
+        if line.startswith(b"SET_VELOCITY_LIMIT"):
+            st["vel"] = line.split(b";")[0].strip()
+        elif line.startswith(b"SET_PRESSURE_ADVANCE") and b"EXTRUDER=" not in line:
+            st["pa"][st["tool"]] = words(line.replace(b"ADVANCE=", b"A"))["A"]
+        elif line.startswith(b"SET_PURIFIER_MODE"):
+            st["purifier"] = line.split(b";")[0].strip()
+    elif c == b";":
+        if line.startswith(b";TYPE:"):
+            st["feature"] = line[6:].strip().decode(errors="replace")
+        elif line.startswith(b";WIDTH:"):
+            with contextlib.suppress(ValueError):
+                st["width"] = float(line[7:])
+        elif line.startswith(b";HEIGHT:"):
+            with contextlib.suppress(ValueError):
+                st["height"] = float(line[8:])
+    return None
+
+
+@dataclass
+class Cursor:
+    """Where a `state_at` scan stopped and the machine state in force there."""
+
+    layer: int  # ;LAYER_CHANGE markers seen (1-based layer; 0 = start G-code)
+    z: float | None  # that layer's ;Z:
+    line: int  # 0-based line number
+    byte: int  # byte offset of that line
+    state: dict[str, Any]
+
+
+def state_at(
+    path: Path,
+    *,
+    byte: int | None = None,
+    layer: int | None = None,
+    deadline: float | None = None,
+) -> Cursor:
+    """Stream `path` once (constant memory: a 130 MB plate never sits in RAM) and return the
+    state at the line holding `byte` (a printer's file position), or — with `layer` — right
+    after the first extruding move of that layer (its ;LAYER_CHANGE when it extrudes nothing).
+    Absolute E (M82) is tracked, not refused: only resuming needs relative E. ValueError when
+    the file ends first or `deadline` (time.monotonic()) passes."""
+    if (byte is None) == (layer is None):
+        raise ValueError("state_at needs exactly one of byte= or layer=")
+    st = initial_state()
+    n_layer, z, offset, i = 0, None, 0, -1
+    found: tuple[int, int, int] | None = None  # (line, byte, extrusions) at the layer marker
+    with path.open("rb") as fh:
+        for i, raw in enumerate(fh):
+            if deadline is not None and not i % 65536 and time.monotonic() > deadline:
+                raise ValueError(f"G-code scan of {path.name} exceeded its time budget at line {i + 1}")
+            line = raw[:-1] if raw.endswith(b"\n") else raw
+            if byte is not None and offset + len(raw) > byte:
+                return Cursor(n_layer, z, i, offset, _copy_state(st))
+            if line.startswith(b";LAYER_CHANGE"):
+                if found is not None:  # layer `layer` printed nothing: its start is the answer
+                    return Cursor(n_layer, z, found[0], found[1], _copy_state(st))
+                n_layer, z = n_layer + 1, None
+                if n_layer == layer:
+                    found = (i, offset, st["extrusions"])
+            elif line.startswith(b";Z:") and z is None and n_layer:
+                with contextlib.suppress(ValueError):
+                    z = float(line[3:])
+            advance(st, line)
+            if found is not None and st["extrusions"] > found[2]:
+                return Cursor(n_layer, z, i, offset, _copy_state(st))
+            offset += len(raw)
+    if found is not None:
+        return Cursor(n_layer, z, found[0], found[1], _copy_state(st))
+    if byte is not None:
+        raise ValueError(f"byte {byte} is past the end of {path.name} ({offset} bytes)")
+    raise ValueError(f"{path.name} has {n_layer} layer(s); no layer {layer}")
 
 
 def extruder_name(t: int) -> str:
