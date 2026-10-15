@@ -139,9 +139,10 @@ so `3d print-preflight FILE --printer P` can PASS it.
 - `flow` — 5 tiles, one object each; `M221 S90…S110` after each `EXCLUDE_OBJECT_START`. The
   report prints the resulting flow_ratio per tile (preset ratio × factor).
 - `combo` — one plate for the [express calibration](../printops/express-calibration.md) of a new
-  spool. Front: 17 PA lines on the bare plate right after `START_PRINT`, PA 0…0.080 in steps of
-  0.005, each labelled with seven-segment digits = PA × 1000; a line is 20 mm slow (20 mm/s),
-  50 mm fast (120 mm/s), 20 mm slow, with `SET_PRESSURE_ADVANCE` before it. Back: the 5 flow
+  spool. Front: PA lines on the bare plate right after `START_PRINT`, by default PA 0…0.10 in steps
+  of 0.01 (PETG 0…0.15), or `--pa-range LOW:HIGH --pa-step S` for a fine pass; each is labelled
+  with seven-segment digits = PA × 1000 (with a point: `42.5` = 0.0425); a line is 6 mm slow
+  (20 mm/s), 14 mm fast (120 mm/s), 6 mm slow, with `SET_PRESSURE_ADVANCE` before it. Back: the 5 flow
   tiles (20×20×3 mm). PA, M221 and the acceleration are global, so the block starts with `M221 S100`
   and ends at the stock PA and the process acceleration; it needs a relative-E slice; each tile re-sets its `M221` whenever the slicer enters it, and `END_PRINT` is
   preceded by `M221 S100` and the stock PA. The temperature tower stays a separate print.
@@ -151,6 +152,16 @@ so `3d print-preflight FILE --printer P` can PASS it.
   floor in the gap (seven-segment digits, no overhang). `M104 S<t>` goes on the first layer of
   each block (after Orca's `;Z:` marker); the first block prints at the slice's own temperature.
   `--nozzle-temp` is refused. K1 SE, PLA: ~43 min, ~8 g.
+- `plate1` — the filament plate of the calibration series (`lib/slicing/calibration_plate.py`,
+  `lib/slicing/calibration_plates/filament.py`): PA lines, a max-volumetric-speed strip (label =
+  mm³/s), flow tiles (15×15 mm, 5 solid layers), bridges 8/11/14 mm, overhangs 45–60°, a retraction
+  tower (0.4–1.2 mm, its own retractions rescaled per block) and a temperature tower (230→200 °C,
+  0.3 mm layers). Objects set their parameter on entry and restore it on exit; the temperature
+  tower prints last, alone (`print_sequence` by object), `extruder_clearance_radius` behind the
+  rest and under `extruder_clearance_height_to_rod`. `--only`/`--skip` pick tests (`pa`, `mvs`,
+  `flow`, `bridge`, `overhang`, `retraction`, `temp`); the layout is packed again, so a skipped test
+  leaves no hole. Next to the G-code: `NAME.json`, the map object → parameters, bbox, Z bands,
+  labelled items, how to read it, the `record` command. K1 SE, PLA: ~25 min (all tests).
 - `shaper` — a text file of console commands (G28, ACCELEROMETER_QUERY, MEASURE_AXES_NOISE,
   SHAPER_CALIBRATE per axis, SAVE_CONFIG) for printers with an accelerometer (K1 SE: ADXL345).
 
