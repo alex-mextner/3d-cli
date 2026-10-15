@@ -62,9 +62,13 @@ def feature(line: str) -> str | None:
 
 
 def line_width(line: str) -> str | None:
-    """`;WIDTH:0.45` / `; WIDTH:0.45` / `; LINE_WIDTH: 0.45` -> '0.45'; None for any other line."""
-    if line.startswith((";WIDTH:", "; WIDTH:", "; LINE_WIDTH:")):
-        return line.split(":", 1)[1].strip()
+    """`;WIDTH:0.45` / `; LINE_WIDTH: 0.45` (any spacing after `;`) -> '0.45'; None for any
+    other line."""
+    if not line.startswith(";"):
+        return None
+    body = line[1:].lstrip()
+    if body.startswith(("WIDTH:", "LINE_WIDTH:")):
+        return body.split(":", 1)[1].strip()
     return None
 
 
@@ -118,7 +122,8 @@ class ObjectLabels:
         return True
 
     def _bambu_start(self, label_id: int) -> bool:
-        name = self._pending or self._bambu_names.get(label_id) or f"object {label_id}"
+        # a block id keeps the name it got first: a stray name comment cannot rename it
+        name = self._bambu_names.get(label_id) or self._pending or f"object {label_id}"
         self._bambu_names[label_id] = name
         self._pending = None
         return self._start(name)
@@ -139,10 +144,14 @@ class ObjectLabels:
             self.labeled = self.labeled or bool(self._bambu_ids)
             return False
         if line.startswith(_PRINTING):
-            self._pending = line[len(_PRINTING) :].strip()
+            name = line[len(_PRINTING) :].strip()
+            # Bambu writes the NEXT block's name inside the current block; its own name
+            # repeated there names nothing new
+            if name != self.current:
+                self._pending = name
             if self._klipper or self.bambu:
                 return False
-            return self._start(self._pending)
+            return self._start(name)
         # `; stop printing object [NAME]`: ends a PrusaSlicer-style label only; inside a Bambu
         # block it comes before the layer change that still belongs to the object
         if self._klipper or self.bambu:
@@ -184,12 +193,13 @@ class ObjectLabels:
             label_id = self._mask_label(code[1] if len(code) > 1 else "")
             return self._bambu_start(label_id) if label_id is not None else False
         if word == "M625":
-            return self._stop()
+            # outside a Bambu file (no header, no block) M625 is not a label
+            return self._stop() if self.bambu else False
         return False
 
     def _mask_label(self, mask: str) -> int | None:
         """`M624 BAAAAAAAAAA=` -> the label id of the mask's single bit (index into the header's
-        `; model label id:` list); None for a mask that names no single object."""
+        `; model label id:` list); None for a mask that names no single header object."""
         try:
             bits = int.from_bytes(base64.b64decode(mask, validate=True), "little")
         except (binascii.Error, ValueError):
@@ -197,4 +207,4 @@ class ObjectLabels:
         if bits <= 0 or bits & (bits - 1):
             return None
         k = bits.bit_length() - 1
-        return self._bambu_ids[k] if k < len(self._bambu_ids) else k
+        return self._bambu_ids[k] if k < len(self._bambu_ids) else None

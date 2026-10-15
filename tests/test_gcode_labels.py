@@ -246,3 +246,75 @@ def test_print_area_does_not_trust_an_unclosed_vendor_block(
     rep = check_bounds(path)
     assert [v.line for v in rep.area_out] == [13]
     assert rep.unverified_count == 1 and "left open" in rep.unverified[0]
+
+
+_HDR = "; model label id: 8,12"
+
+
+def test_unclosed_vendor_block_at_end_of_file_is_unverified(tmp_path: Path) -> None:
+    """A truncated M622 block runs to EOF: no later boundary closes it, so the off-bed extrusion
+    inside it must still be reported, not silently exempted."""
+    path = tmp_path / "eof.gcode"
+    path.write_text(
+        "; model label id: 8\n; printable_area = 0x0,180x0,180x180,0x180\nG90\nM83\n"
+        "; CHANGE_LAYER\nG1 X10 Y10\nM622 J1\nG1 X-4 Y10 E1\n",
+        encoding="utf-8",
+    )
+    rep = check_bounds(path)
+    assert rep.unverified_count == 1 and "end of file" in rep.unverified[0]
+
+
+def test_bambu_conditional_blocks_are_not_untrusted_macros() -> None:
+    rep = check_bounds(BAMBU)
+    assert not {"M622", "M622.1", "M623"} & set(rep.macros)
+
+
+def test_m625_outside_a_bambu_file_is_not_a_label() -> None:
+    labels = ObjectLabels()
+    for line in ["G90", "M625", "G1 X1 Y1 E1"]:
+        labels.feed(line)
+    assert not labels.labeled and labels.current is None
+
+
+def test_stray_bambu_name_comment_does_not_name_the_next_block() -> None:
+    lines = [
+        _HDR,
+        "; printing object A id:0 copy 0",
+        "; start printing object, unique label id: 8",
+        "M624 AQAAAAAAAAA=",
+        "; printing object A id:0 copy 0",  # A's own name repeated inside A
+        "; stop printing object, unique label id: 8",
+        "M625",
+        "; start printing object, unique label id: 12",
+        "M624 AgAAAAAAAAA=",
+    ]
+    assert _trace(lines)[-1] == "object 12"
+
+
+def test_known_bambu_block_keeps_its_first_name() -> None:
+    lines = [
+        _HDR,
+        "; printing object A id:0 copy 0",
+        "M624 AQAAAAAAAAA=",
+        "M625",
+        "; printing object B id:1 copy 0",  # its block was cut
+        "M624 AQAAAAAAAAA=",  # A again
+    ]
+    assert _trace(lines)[-1] == "A id:0 copy 0"
+
+
+def test_mask_bit_beyond_the_header_names_no_object() -> None:
+    assert _trace([_HDR, "M624 AAEAAAAAAAA="])[-1] is None
+
+
+@pytest.mark.parametrize(
+    "line", [";LINE_WIDTH:0.45", ";  WIDTH:0.45", "; LINE_WIDTH: 0.45"]
+)
+def test_line_width_tolerates_any_spacing(line: str) -> None:
+    assert line_width(line) == "0.45"
+
+
+def test_m622_outside_a_bambu_file_stays_an_untrusted_macro(tmp_path: Path) -> None:
+    path = tmp_path / "k.gcode"
+    path.write_text("G90\nM83\nG1 X10 Y10\nM622 J1\nG1 X20 Y10 E1\n", encoding="utf-8")
+    assert "M622" in check_bounds(path).macros

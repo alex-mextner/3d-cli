@@ -87,6 +87,9 @@ _MODELED = frozenset(
 )
 # Stock Klipper/Marlin commands that neither move X/Y nor change coordinates. Anything else is a
 # macro (or a command this checker does not model): its moves are invisible here.
+# Bambu's firmware-conditional block (_BambuMoves); the moves inside are tracked. Inert only
+# in a Bambu file: elsewhere an M622 is a user macro that may move the head.
+_BAMBU_INERT = frozenset(("M622", "M622.1", "M623"))
 _INERT = frozenset(
     {
         "G4",
@@ -322,6 +325,10 @@ class _BambuMoves:
         self.conditional = 0
         return unbalanced
 
+    def at_eof(self) -> bool:
+        """End of file: True when a vendor block is still open (unbalanced)."""
+        return self._boundary()
+
     def feed(self, line: str) -> bool:
         """Track one line; True when it closed an unbalanced vendor block."""
         if self.labels.feed(line):
@@ -373,6 +380,7 @@ def _scan_plate(path: Path) -> _Plate:
     typed = False
     config: dict[str, str] = {}
     moves = _BambuMoves()
+    n = 0  # the line number after the loop, also for an empty file
     with open(path, encoding="utf-8", errors="replace") as fh:
         for n, line in enumerate(fh, 1):
             if line[:1] in (" ", "\t"):
@@ -776,7 +784,7 @@ def check_bounds(path: Path, axis_limits: Limits | None = None) -> BoundsReport:
             if word is None:
                 continue
             if word not in _MODELED:
-                if word not in _INERT:
+                if word not in _INERT and not (plate.bambu and word in _BAMBU_INERT):
                     # a macro: its body may move the head anywhere, extrude, or change E
                     seen_macro = rep.macros.setdefault(word, [0, n])
                     seen_macro[0] += 1
@@ -986,6 +994,13 @@ def check_bounds(path: Path, axis_limits: Limits | None = None) -> BoundsReport:
                 if extruding and move is not None and rep.exclude_area:
                     excluded(move, n, g in (2, 3) and "Z" in words)
             x, y = nx, ny
+    # a vendor block still open at end of file exempted every move after its start
+    if plate.bambu and moves.at_eof():
+        unverified(
+            n,
+            "Bambu M622 conditional / CP TOOLCHANGE (tool change) block still open at end of file;"
+            " print area not checked inside it",
+        )
 
     if plate_ext[0] <= plate_ext[1]:
         rep.plate_extent = (plate_ext[0], plate_ext[1], plate_ext[2], plate_ext[3])
