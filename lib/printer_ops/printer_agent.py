@@ -83,7 +83,8 @@ def agent_dir(printer: str) -> Path:
 
 
 def session_name(printer: str) -> str:
-    return SESSION_PREFIX + printer
+    # tmux rewrites `.` and `:` in session names, so `-t =NAME` would never match them
+    return SESSION_PREFIX + printer.replace(".", "_").replace(":", "_")
 
 
 def find_tool(name: str) -> str | None:
@@ -144,6 +145,28 @@ def agent_alert(events: list[Event], printer: str) -> str:
                       [f"Event history: {agent_dir(printer) / 'events.jsonl'}. You stay running for the next alert."])
 
 
+class _Pending:
+    """Alerts awaiting a starting agent. Settled exactly once: delivered (or the agent took
+    them as its opening prompt), or handed to `on_unreached`."""
+
+    def __init__(self, events: list[Event], on_unreached: Callable[[list[Event]], None] | None) -> None:
+        self.events = events
+        self.on_unreached = on_unreached
+        self.thread: threading.Thread | None = None
+        self._lock = threading.Lock()
+        self._settled = False
+
+    def settle(self) -> bool:
+        """-> True for the first caller (it owns the events)."""
+        with self._lock:
+            first, self._settled = not self._settled, True
+            return first
+
+    def give_up(self) -> None:
+        if self.settle() and self.on_unreached is not None:
+            self.on_unreached(self.events)
+
+
 class PrinterAgents:
     """Start, find, message and stop the per-printer temporary agents."""
 
@@ -161,7 +184,7 @@ class PrinterAgents:
         self.sleep = sleep
         self.ready_timeout_s = ready_timeout_s
         self.start_every_s = start_every_s
-        self.waiting: list[threading.Thread] = []
+        self.waiting: list[_Pending] = []
         self.scope = scope   # start the tmux server in its own systemd scope, outside the watcher unit
 
     # ---- tmux -----------------------------------------------------------------------------
@@ -248,12 +271,11 @@ class PrinterAgents:
     def stop(self, printer: str, *, release: bool = True) -> bool:
         """Kill the agent's tmux session. `release` frees the restart-limit slot: the limit guards
         against crash-looping starts, not against a new agent after a deliberate stop/handoff."""
+        if release:  # before the kill: `agent handoff` runs inside the session it kills
+            self.state.set_agent(printer, start_claimed=None)
         stopped = self._tmux("kill-session", "-t", f"={session_name(printer)}").returncode == 0
-        fields: dict[str, Any] = {"start_claimed": None} if release else {}
         if stopped:
-            fields["stopped"] = iso(self.clock())
-        if fields:
-            self.state.set_agent(printer, **fields)
+            self.state.set_agent(printer, stopped=iso(self.clock()))
         return stopped
 
     def deliver(self, printer: str, events: list[Event],
@@ -289,28 +311,34 @@ class PrinterAgents:
 
     def _await(self, printer: str, events: list[Event], on_unreached: Callable[[list[Event]], None] | None,
                *, send: bool) -> None:
+        w = _Pending(events, on_unreached)
+
         def wait() -> None:
             try:
                 h = self._wait_ready(printer)
-                if send:
+                if send and w.settle():
                     self.live.send(h, agent_alert(events, printer))
                 _log(f"{printer}: the agent is up (pid {h.get('pid')})")
             except Exception as exc:  # never raised: the events go to the fallback instead
                 _log(f"{printer}: {exc}")
                 self.state.set_agent(printer, last_error=str(exc), last_error_ts=iso(self.clock()))
-                if on_unreached is not None:
-                    on_unreached(events)
+                w.give_up()
+            w.settle()
 
-        # not a daemon: a watcher that exits while an agent starts still delivers or falls back
-        t = threading.Thread(target=wait, name=f"printer-agent-{printer}")
-        self.waiting.append(t)
-        t.start()
+        # a daemon: `join` (Dispatcher.close) hands what is still pending at its deadline to the
+        # fallback, so shutdown stays within its budget and nothing is silently dropped
+        w.thread = threading.Thread(target=wait, name=f"printer-agent-{printer}", daemon=True)
+        self.waiting = [p for p in self.waiting if p.thread is not None and p.thread.is_alive()]
+        self.waiting.append(w)
+        w.thread.start()
 
     def join(self, timeout: float | None = None) -> None:
         """Wait for the background readiness checks (tests, shutdown); `timeout` is the total."""
         deadline = None if timeout is None else time.monotonic() + timeout
-        for t in list(self.waiting):
-            t.join(None if deadline is None else max(0.0, deadline - time.monotonic()))
+        for w in list(self.waiting):
+            if w.thread is not None:
+                w.thread.join(None if deadline is None else max(0.0, deadline - time.monotonic()))
+            w.give_up()   # still starting at the deadline: the fallback gets the alert now
 
     def request_handoff(self, printer: str, subscriber: dict[str, Any],
                         hosts: list[dict[str, Any]] | None = None) -> bool:
@@ -319,13 +347,15 @@ class PrinterAgents:
             return False
         h = self.host(printer, hosts)
         asked = f"{h.get('sessionId')}->{subscriber.get('sessionId')}" if h is not None else ""
-        if h is None or self.state.agent(printer).get("handoff_asked") == asked:
+        before = self.state.agent(printer).get("handoff_asked")
+        before = before if isinstance(before, list) else []
+        if h is None or asked in before:
             return False  # asked once per (agent, subscriber): a new subscriber asks again
         self.live.send(h, (
             f"[3d printer agent] Session {subscriber.get('sessionId')} (pid {subscriber.get('pid')}, "
             f"{subscriber.get('title')!r}) has subscribed to {printer} alerts and takes over now. Run exactly once:\n"
             f"3d printer agent handoff {printer} --summary '<alerts seen, your verdicts, what you told the user>'"))
-        self.state.set_agent(printer, handoff_asked=asked, handoff_asked_ts=iso(self.clock()))
+        self.state.set_agent(printer, handoff_asked=[*before, asked], handoff_asked_ts=iso(self.clock()))
         return True
 
 
@@ -474,7 +504,7 @@ def cmd_handoff(argv: list[str]) -> int:
     for h in targets.values():
         agents.live.send(h, text)
         print(f"handed over {printer} to session {h.get('sessionId')} (pid {h.get('pid')})")
-    agents.state.set_agent(printer, handed_over=iso(agents.clock()))
+    agents.state.set_agent(printer, handed_over=iso(agents.clock()), stopped=iso(agents.clock()))
     agents.stop(printer)  # last: this command usually runs inside that very tmux session
     return 0
 

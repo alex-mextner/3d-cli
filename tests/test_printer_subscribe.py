@@ -645,7 +645,7 @@ def test_a_slow_agent_start_never_blocks_the_dispatcher(xdg: Path) -> None:
     e1, e2 = noodle(), noodle(printer="k1se", sev=CRITICAL)
     assert d.process([e1]) == [e1]
     assert d.process([e2]) == [e2] and len(run.news()) == 2
-    assert all(t.is_alive() for t in a.waiting)
+    assert all(w.thread is not None and w.thread.is_alive() for w in a.waiting)
     gate.set()
     run.hosts += [
         {"pid": 1, "sessionId": "a", "cwd": run.tmux[session_name(p)]}
@@ -678,7 +678,7 @@ def test_full_subscriber_triggers_handoff_once(xdg: Path) -> None:
         "Session 01a12cd6-7b39 (pid 433553" in ask[-1]
         and "3d printer agent handoff u1 --summary" in ask[-1]
     )
-    assert DeliveryState().agent("u1")["handoff_asked"] == f"{agent_host['sessionId']}->01a12cd6-7b39"
+    assert DeliveryState().agent("u1")["handoff_asked"] == [f"{agent_host['sessionId']}->01a12cd6-7b39"]
 
 
 @pytest.mark.parametrize(
@@ -1218,3 +1218,48 @@ def test_agent_handoff_without_omp_live_keeps_the_agent(cli_agents: Fake, capsys
     monkeypatch.setattr(OmpLive, "sessions", down)
     assert printer_agent.run(["handoff", "u1", "--summary", "x"]) == 1
     assert "the temporary agent stays" in capsys.readouterr().err and cli_agents.tmux
+
+
+def test_a_dead_steer_target_never_counts_as_taken() -> None:
+    """Failed sends do not use the rate budget, so a stale --steer keeps falling through to
+    the temporary agent instead of being 'rate-limited' into swallowing alerts."""
+    agent_stage = Recorder(stage=LAST_RESORT)
+    d = Dispatcher(dedup_s=0)
+    d.add("u1", [SteerSink("deadbeef", runner=Fake()), agent_stage])
+    for i in range(9):
+        d.process([noodle(f"/{i}")])
+    assert len(agent_stage.got) == 9
+
+
+def test_handoff_asks_each_subscriber_once(xdg: Path) -> None:
+    run = Fake()
+    a = agents(run)
+    d = agent_dir("u1")
+    d.mkdir(parents=True)
+    run.hosts.append({"pid": 777, "sessionId": "agent-u1", "cwd": str(d)})
+    for _ in range(3):
+        a.request_handoff("u1", MAIN)
+        a.request_handoff("u1", OTHER)
+    assert len([c for c in run.sends() if c[3] == "777"]) == 2
+
+
+def test_shutdown_hands_still_pending_alerts_to_the_fallback_within_the_budget(xdg: Path) -> None:
+    run = Fake(agent_comes_up=False)
+    gate = threading.Event()
+
+    def hold(_: float) -> None:
+        gate.wait(5)
+
+    a = PrinterAgents(runner=run, tmux="tmux", omp="omp", sleep=hold, ready_timeout_s=3600)
+    fell: list[list[Event]] = []
+    a.deliver("u1", [noodle()], fell.append)
+    a.join(0.2)
+    assert [[e.kind for e in b] for b in fell] == [["vision_spaghetti"]]
+    run.hosts.append({"pid": 5, "sessionId": "late", "cwd": str(agent_dir("u1"))})  # comes up late:
+    gate.set()
+    a.join(10)
+    assert len(fell) == 1 and run.sends() == []   # settled once: no second delivery
+
+
+def test_dotted_printer_names_get_a_tmux_safe_session() -> None:
+    assert session_name("k1.se") == "3d-printer-agent-k1_se"

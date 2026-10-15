@@ -279,6 +279,7 @@ class _Route:
     printers: set[str] = field(default_factory=set)
     sent: deque[float] = field(default_factory=deque)
     held: int = 0   # events suppressed by the rate limit since the last delivery
+    last_ok: bool = False   # the last delivery attempt reached its target
 
 
 class Dispatcher:
@@ -370,10 +371,10 @@ class Dispatcher:
             mine = [e for e in events if e.printer in route.printers]
             if route.sink.stage != FIRST:
                 left = [e for e in mine if id(e) not in taken]
-                if route.sink.stage == FALLBACK:  # what no agent is meant to take (info) is no emergency
-                    left = [e for e in left if severity_rank(e.severity) >= severity_rank(WARNING)]
                 if route.sink.stage == FALLBACK:
                     route.sink.stats.left_to_agent += len(mine) - len(left)
+                    # what no agent is meant to take (info) is no emergency
+                    left = [e for e in left if severity_rank(e.severity) >= severity_rank(WARNING)]
                 mine = left
             if not mine:
                 continue
@@ -393,18 +394,21 @@ class Dispatcher:
             if len(route.sent) >= limit and not critical:
                 route.held += len(events)
                 sink.stats.suppressed += len(events)
-                # a live --steer agent that is only rate-limited still has them (its next message
-                # counts them): no temporary agent for a printer whose agent is fine
-                return events if sink.agent else []
-            route.sent.append(now)
+                # a --steer agent that is only rate-limited and was reached last time still has
+                # them (its next message counts them); a dead one does not
+                return events if sink.agent and route.last_ok else []
         try:
             got = sink.deliver(events, suppressed=route.held)
         except Exception as exc:  # a sink must never kill the watcher
+            route.last_ok = False
             sink.stats.failed += len(events)
             sink.stats.last_error = f"{exc.__class__.__name__}: {exc}"
             _log(f"sink {sink.ident} failed: {sink.stats.last_error}")
             return []
         route.held = 0
+        if sink.rate is not None:
+            route.sent.append(now)   # only real sends use the budget: a dead target never "rate-limits"
+        route.last_ok = True
         reached = events if got is None else list(got)
         sink.stats.delivered += len(reached)
         return reached
