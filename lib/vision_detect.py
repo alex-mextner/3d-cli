@@ -459,8 +459,8 @@ def _device_camera(device: Any, args: argparse.Namespace) -> Any:
             f"{device.name}: no camera access for adapter {device.adapter}",
             command="printer vision",
             remediation=[
-                "Only Moonraker printers are supported (the K1 SE has no camera "
-                "without Creality's AI camera accessory)."
+                "Only Moonraker printers are supported; a rooted K1 SE needs its "
+                "Moonraker entry (adapter: moonraker, port 7125), not creality-stock."
             ],
         )
     cfg = (getattr(device, "watch", None) or {}).get("vision") or {}

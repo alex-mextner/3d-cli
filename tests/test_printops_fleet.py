@@ -260,10 +260,12 @@ def test_override_without_model_keeps_the_fleet_model(env: Path, tmp_path: Path,
 
 def test_repo_fleet_watch_settings_reach_the_devices(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """u1/k1se `watch:` moved from ~/.config into the repo fleet; `3d printer watch` reads
-    Device.watch (key tg_fallback, printer_ops/watch_run.py WATCH_KEYS)."""
+    Device.watch (key tg_fallback, printer_ops/watch_run.py WATCH_KEYS), and `3d printer vision`
+    reads its `vision.snapshot` (the rooted K1 SE's mjpg-streamer; the U1 uses its default)."""
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
     monkeypatch.chdir(tmp_path)
     _use(monkeypatch, REPO_FLEET)
     d = devices.load_devices()
     assert d["u1"].watch == {"tg_fallback": True}
-    assert d["k1se"].watch == {"tg_fallback": True}
+    assert d["k1se"].watch == {"tg_fallback": True,
+                               "vision": {"snapshot": "http://192.168.0.27:8080/?action=snapshot"}}

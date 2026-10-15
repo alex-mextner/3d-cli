@@ -110,7 +110,7 @@ A key that is not known is left out (shown as `null`/`-`), never guessed.
 $ 3d printer list
   NAME          OWNER        ACCESS    MODEL                ADDRESS                         HEADS
   a1mini        boris        offline   Bambu Lab A1 mini    - (never contacted)             T1
-  k1se          own          full      Creality K1 SE       creality-stock 192.168.0.27:80  T1
+  k1se          own          full      Creality K1 SE       moonraker 192.168.0.27:7125     T1
   p1s           neighbour    offline   Bambu Lab P1S        - (never contacted)             T1
   u1            own          full      Snapmaker U1         moonraker 192.168.0.26:7125     T1 | T2 UNUSABLE | T3 | T4
       T2: head T2 does not work (babushkin-dom gen/queue.json: «слот 2 — заглушка, голова T2 не работает»; …)
@@ -135,8 +135,8 @@ u1:
   port: 7125                # default 7125
   model: Snapmaker U1
 k1se:
-  adapter: creality-stock   # Creality K1 family on stock firmware
-  host: 192.168.0.27
+  adapter: creality-stock   # Creality K1 family on stock firmware (the fleet's rooted K1 SE uses
+  host: 192.168.0.27        # moonraker:7125; this whole entry replaces it, dropping its watch.vision)
   model: Creality K1 SE     # port defaults to 80, ws_port to 9999
   axis_limits: {x: [-5, 229], y: [-0.5, 227]}
   trusted_macros: [START_PRINT, END_PRINT, PAUSE]
