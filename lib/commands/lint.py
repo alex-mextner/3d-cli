@@ -9,7 +9,7 @@ from cli.registry import Command
 from errors import GateFailure, InvalidArgument, UsageError
 
 USAGE = """3d lint [--all | paths...] [options]
-       3d lint --printops [--live] [--fleet FILE] [--json]
+       3d lint --printops [--live] [--fleet FILE] [--weigh-days N] [--api URL] [--token TOKEN] [--json]
   Run advisory lint rules over repository Python files and OpenSCAD model metadata.
 
 Repository options:
@@ -31,6 +31,13 @@ PrintOps data options (fleet/printers.yaml rules fleet/schema, fleet/device, fle
                         fleet/live-topology; READ-ONLY: one GET / ws status read per printer,
                         offline printers are never contacted; unreachable = warning)
   --fleet FILE          lint FILE instead of <repo>/fleet/printers.yaml
+  Spool data rules (spools/remaining-negative error, spools/no-tare, spools/not-weighed warn;
+  plus every other PrintOps slice's rules) run in 3d-api on the live Spoolman + PrintOps DB
+  (GET /v1/lint, read-only) whenever 3d-api is configured ($PRINTOPS_API/$PRINTOPS_TOKEN or
+  ~/.config/3d-cli/printops.yaml); otherwise they are skipped with a note.
+  --weigh-days N        spools/not-weighed: last weighing older than N days (default 30)
+  --api URL             3d-api for the data rules (default: $PRINTOPS_API)
+  --token TOKEN         its bearer token, scope read (default: $PRINTOPS_TOKEN)
 
 Exit 0 = no findings, 1 = findings, 2 = invalid invocation.
 (--printops: 1 only for errors; warnings are printed but pass.)
@@ -67,6 +74,9 @@ def run(argv: list[str]) -> int:
     if options["live"] or options["fleet"] is not None:
         raise UsageError("--live and --fleet need --printops", command="lint",
                          remediation=["Run `3d lint --printops --live` or `3d lint --printops --fleet FILE`."])
+    if options["weigh_days"] is not None or options["api"] is not None or options["token"] is not None:
+        raise UsageError("--weigh-days, --api and --token need --printops", command="lint",
+                         remediation=["Run `3d lint --printops --weigh-days 14`."])
 
     paths = options["paths"]
     scan_all = options["scan_all"]
@@ -97,6 +107,9 @@ def _parse_args(argv: list[str]) -> dict[str, Any]:
         "printops": False,
         "live": False,
         "fleet": None,
+        "weigh_days": None,
+        "api": None,
+        "token": None,
     }
     i = 0
     while i < len(argv):
@@ -146,6 +159,15 @@ def _parse_args(argv: list[str]) -> dict[str, Any]:
             i += 1
         elif arg == "--fleet":
             options["fleet"] = Path(_need_value(argv, i, "--fleet"))
+            i += 2
+        elif arg == "--weigh-days":
+            raw = _need_value(argv, i, "--weigh-days")
+            if not raw.isdigit() or int(raw) < 1:
+                raise UsageError(f"--weigh-days needs a whole number of days >= 1, got {raw!r}", command="lint")
+            options["weigh_days"] = int(raw)
+            i += 2
+        elif arg in ("--api", "--token"):
+            options[arg[2:]] = _need_value(argv, i, arg)
             i += 2
         elif arg.startswith("-"):
             raise UsageError(
@@ -226,17 +248,40 @@ def _run_printops_lint(options: dict[str, Any]) -> int:
     from printops.fleet_lint import ERROR, lint_fleet
 
     path, findings = lint_fleet(options["fleet"], live=options["live"])
+    data_findings, data_note = _printops_data_findings(options)
+    findings = [*findings, *data_findings]
     errors = sum(1 for f in findings if f.level == ERROR)
     warnings = len(findings) - errors
     if options["json_output"]:
-        summary = {"file": str(path) if path else None, "live": options["live"], "errors": errors, "warnings": warnings}
+        summary = {"file": str(path) if path else None, "live": options["live"], "errors": errors, "warnings": warnings,
+                   "data": data_note}
         print(json.dumps({"summary": summary, "findings": [f.as_dict() for f in findings]}, indent=2, sort_keys=True))
     else:
         for f in findings:
             print(f"  {f.level.upper():<5} {f.rule:<20} {f.message}")
         live = ", live" if options["live"] else ""
+        print(f"  data rules: {data_note}")
         print(f"lint --printops: {'FAIL' if errors else 'PASS'} ({path}{live}: {errors} error(s), {warnings} warning(s))")
     return 1 if errors else 0
+
+
+def _printops_data_findings(options: dict[str, Any]) -> tuple[list[Any], str]:
+    """(findings, one-line note) from 3d-api GET /v1/lint. Not configured -> skipped (the note
+    says so); unreachable or refused -> one `printops/api` error, since the data went unchecked."""
+    from printops.client import ApiClient, ApiConfigError, ApiError
+    from printops.fleet_lint import ERROR, Finding
+
+    try:
+        api = ApiClient.from_config(api=options["api"], token=options["token"])
+    except ApiConfigError:
+        return [], "skipped (no 3d-api configured: set PRINTOPS_API and PRINTOPS_TOKEN, or pass --api/--token)"
+    try:
+        res = api.get("/v1/lint", weigh_days=options["weigh_days"])
+    except ApiError as e:
+        return ([Finding("printops/api", ERROR, api.base_url, f"spool data rules not run: {e.message}")],
+                f"FAILED ({api.base_url})")
+    found = [Finding(str(f["rule"]), str(f["level"]), str(f["subject"]), str(f["message"])) for f in res["findings"]]
+    return found, f"{api.base_url}: {res['spools']} spool(s), rules {', '.join(res['rules'])}"
 
 
 def _run_repository_lint(options: dict[str, Any]) -> int:
