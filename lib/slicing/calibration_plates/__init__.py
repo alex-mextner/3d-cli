@@ -10,7 +10,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
 from ..calibration_plate import Plate, PlateContext
-from . import filament
+from . import dense, filament
 
 
 @dataclass(frozen=True)
@@ -21,17 +21,22 @@ class PlateDef:
 
 PLATES: dict[str, PlateDef] = {
     filament.PLATE_ID: PlateDef(filament.build, filament.TESTS),
+    dense.PLATE_ID: PlateDef(dense.build, dense.TESTS),
 }
 
 
-def resolve_tests(plate_id: str, only: frozenset[str], skip: frozenset[str]) -> frozenset[str] | None:
+def resolve_tests(
+    plate_id: str, only: frozenset[str], skip: frozenset[str]
+) -> frozenset[str] | None:
     """--only/--skip test ids -> the set to print (None: all). Unknown ids are an error."""
     from ..calibration_gen import GenError
 
     known = PLATES[plate_id].tests
     unknown = sorted((only | skip) - set(known))
     if unknown:
-        raise GenError(f"{plate_id} has no test {', '.join(unknown)} (tests: {', '.join(known)})")
+        raise GenError(
+            f"{plate_id} has no test {', '.join(unknown)} (tests: {', '.join(known)})"
+        )
     if not only and not skip:
         return None
     chosen = frozenset(only or known) - skip

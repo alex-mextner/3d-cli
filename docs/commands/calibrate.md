@@ -13,7 +13,7 @@ Talks to 3d-api like [`3d printops`](printops.md) (`PRINTOPS_API`, `PRINTOPS_TOK
 3d calibrate show ID
 3d calibrate check FILE.gcode --printer P [--spools T1=ID,…] [--plate PLATE]
                    [--accept calibration:KIND[,…] --reason TEXT]
-3d calibrate gen pa|flow|combo|temp|shaper --printer P -o OUT [--material PLA] [--color #RRGGBB] [--nozzle-temp C]
+3d calibrate gen pa|flow|combo|temp|shaper|plate1|dense --printer P -o OUT [--material PLA] [--color #RRGGBB] [--nozzle-temp C]
   common (all but gen): [--json] [--api URL] [--token TOKEN]
 ```
 
@@ -162,8 +162,22 @@ so `3d print-preflight FILE --printer P` can PASS it.
   `flow`, `bridge`, `overhang`, `retraction`, `temp`); the layout is packed again, so a skipped test
   leaves no hole. Next to the G-code: `NAME.json`, the map object → parameters, bbox, Z bands,
   labelled items, how to read it, the `record` command. K1 SE, PLA: ~25 min (all tests).
-- `shaper` — a text file of console commands (G28, ACCELEROMETER_QUERY, MEASURE_AXES_NOISE,
-  SHAPER_CALIBRATE per axis, SAVE_CONFIG) for printers with an accelerometer (K1 SE: ADXL345).
+- `dense` — one K1 SE bed (`lib/slicing/calibration_plates/dense.py`, fixed layout for 220×220):
+  plate1's tests without PA/flow (MVS strip, bridges 11/14 and 22 mm, overhangs 50–60°, retraction
+  tower = the stringing test, temperature tower last and alone) plus mechanics: a ringing tube
+  (2 walls, ACCEL 2000→12000 in 2 mm bands, walls at 150 mm/s: ripple spacing s gives f = 150/s Hz),
+  a VFA tube (wall speed 50→300 mm/s in the same bands, ACCEL 6000), a 50×50 frame (size; skew from
+  the diagonals), pins printed in place (gaps 0.1–0.5), hinges (0.3/0.4), M3/M4 holes, slots for a
+  2 mm insert with the insert, Ø1–4 holes, thin walls 0.3–1.0 along X and Y, first-layer patches
+  and a top-surface patch. Ringing and VFA print by layer: their bands rewrite only their own lines,
+  and after each visit the engine re-sends the slicer's acceleration and fan and balances any
+  extrusion a band changed. Labels are one-layer digits on the bed. The 22 mm bridge needs
+  `print-preflight --bridge-max 25`. K1 SE, PLA: ~44 min + START_PRINT, ~13 g; OpenSCAD on PATH.
+- `shaper` — a text file of console commands for printers with an accelerometer (K1 SE: ADXL345):
+  G28, nozzle and part fan off, `TEMPERATURE_WAIT SENSOR=extruder MAXIMUM=38` (a hot nozzle keeps
+  the hotend fan on, and its vibration masks the resonance; the K1's G28 heats it to 140 °C),
+  ACCELEROMETER_QUERY, MEASURE_AXES_NOISE, one `SHAPER_CALIBRATE` for both axes (Creality's fork
+  copies an `AXIS=Y` result into X). No SAVE_CONFIG: check the values first, then save.
 
 `TUNING_TOWER` and `M221` are inert for the macro check (they never move the head). Orca's
 `calc_exclude_triangles` error is accepted in the sidecar only when the machine has no bed
