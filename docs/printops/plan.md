@@ -272,6 +272,44 @@ config_blob(sha256 PK, content)                      -- содержимое к�
 
 **Без 3d-api:** CLI дописывает те же записи в `~/.local/share/3d/printer-history/<printer>.jsonl` (одна строка — одна запись, `uid` обязателен) под `flock` на файл, одним `write` с `O_APPEND` + `fsync`. `3d settings import <file>` идемпотентно переносит их в БД по `uid`, пересчитывает sha256 приложенного содержимого конфигов и отвергает несовпадающие; битая строка (обрыв записи) не пропускается молча, а останавливает импорт с номером строки.
 
+### 7.5 Задачи принтера (printer todo, #281–#285)
+Требование (tg#22149): у каждого принтера один список дел — какие калибровки нужны (никогда не делались, устарели, сброшены заменой сопла или ремонтом), механические действия после калибровки, ремонт и ручные задачи. По каждой задаче: что, зачем, блокирует ли печать, когда удобно (простой или перед печатью), сколько займёт, нужен ли человек, источник, статус. Каналы: CLI, бот, HA (сенсор и `todo`-сущность), `3d-api`.
+
+**Решение: расширяем модель #166, а не заводим параллельную.** В #166 уже есть `fault` («что сломано»), `maintenance` («что сделано»), `maintenance_due` (напоминания по регламенту), у #167 (PR #227) — движок требований калибровок. Не хватает одного *списка действий* со сроком, длительностью, «нужен человек», областью блокировки и зависимостями, плюс ручных задач. Поэтому добавляем одну таблицу `printer_task` в домен #166 (миграция рядом с `0070_maintenance`, модуль `lib/printops/printer_tasks.py`) с тем же словарём printer / head / component, теми же событиями и идемпотентностью по внешнему ключу (как `fault.external_key`). Источники правды остаются прежними: задача ссылается на них и закрывается записью, которая её выполнила.
+```
+printer_task(id, uid UNIQUE, printer, head?, slot?, component?,
+  type        calibration | inspect | maintenance | repair | setup | other,
+  title, why,                          -- что и зачем
+  blocks      none | printer | head | slot   (head/slot — из полей задачи),
+  when        idle | before_print | any,   when_note?,
+  duration_min?, needs_human,
+  source      manual | calibration | maintenance_rule | fault | calibration_followup | import,
+  source_key?,                         -- полный scope, всегда с принтером: 'calib:k1se/T1/flow_ratio/nozzle:<install_id>/filament:<id>[/lot:<lot>]',
+                                       -- 'rule:u1/<rule_id>/<head|->/<baseline_id>', 'fault:<external_key|fault_id>'; UNIQUE среди открытых (closed_at IS NULL)
+  depends_on[task_id], refs[], calibration_kinds[], spool_id?,
+  status      open | in_progress | snoozed | done | dismissed,  snoozed_until?,
+  closed_at?, closed_by?, note?, calibration_id?, maintenance_id?, fault_id?,
+  created_at, updated_at)
+printer_idle_notice(printer, idle_since, sent_at, task_ids[])  PK (printer, idle_since)
+```
+
+**Откуда берутся задачи (материализуются, идемпотентно по `source_key`):**
+- `calibration` — движок требований #167: каждый вид из каталога, чей статус не `current`/`assumed` (`new_*`, `invalidated` после замены сопла или ремонта, `expired`), по голове × катушке. Ключ включает весь scope записи калибровки (§7.2: nozzle install, filament, партия по политике), поэтому новое сопло даёт новую задачу, а не воскрешает закрытую. Закрывается событием `calibration.recorded` с тем же scope. Ключ уникален только среди открытых задач: та же потребность после закрытия (например, `expired`) открывает новую строку, история остаётся. Дата «когда делали» — из журнала настроек (§7.4, #264).
+- `maintenance_rule` — `maintenance.due` (#166); закрывается `maintenance.logged` с этим `rule_id`.
+- `fault` — открытый fault → задача `repair` с областью блокировки (U1 T2 → `blocks=head`); закрывается `fault.closed`. Доступность головы определяет открытый fault, а не fleet: `usable: false` в `fleet/printers.yaml` только засевает fault (#166, `fleet:u1/T2`). После `fault.closed` (ремонт записан через maintenance) голова снова печатает. Устаревший `usable: false` в fleet показывает `3d lint --printops`, его правят в том же PR, что и ремонт.
+- `calibration_followup` — механика после калибровки: `3d calibrate record --followup "…"` или правило `followups:` в `fleet/calibrations.yaml` (например, пики шейпера 13–17 Гц → проверка стола и ремней).
+- `manual` — CLI, бот, HA, `3d-api`; `import` — из буфера JSONL.
+
+Производную задачу нельзя закрыть через `done`: CLI отказывает и называет команду, которая записывает работу (`3d calibrate record`, `3d printops maint log --rule`, `3d printops maint fault close`). Иначе следующий проход движка открыл бы её снова. Закрыть без работы — только `dismiss --reason`. Задача с открытой зависимостью показывается как «ждёт» (шейпер K1 ждёт проверки механики X). События: `printer_task.opened|updated|closed|accepted|idle_window`.
+
+**Каналы.** CLI `3d printer todo list [PRINTER] [--all] [--json] | add PRINTER --title … [--why --type --blocks head:T2 --when idle --duration 20 --human --depends-on ID] | done ID [--note] | dismiss ID --reason | snooze ID --until | import FILE`. REST — §11.1. HA — сенсор `sensor.printops_<printer>_tasks` и `todo.printops_<printer>` (§12, #285). Бот — `/todo` и кнопки «готово / отложить» (#284).
+
+**Preflight (#282).** Проверка `maintenance_due` из #164 (PR #226) обобщается в `printer_tasks` — одна проверка, без второй рядом: каждая открытая задача принтера — WARN (id, длительность, нужен ли человек); задача с `blocks`, совпадающим с заданием, — FAIL (`printer` — всегда, `head`/`slot` — только если G-code их использует). Без `3d-api` (буфер JSONL) голова с `usable: false` в fleet — FAIL, как раньше; с `3d-api` её блокирует открытый fault. Калибровочные задачи сюда не попадают: их уже отражает `calibration_current` со своей политикой. Обход: `3d printer start --force` снимает все FAIL, как сейчас. Точечный обход — новый флаг `--accept printer_task:<id>[,…] --reason …` у `3d printer start` и `print-preflight` (синтаксис как у `3d calibrate check --accept calibration:<kind>` в #227) — снимает только названные задачи, остальные FAIL продолжают блокировать. Каждое принятие пишется событием `printer_task.accepted` с причиной и argv.
+
+**Уведомление о простое (#283).** Если принтер простаивает дольше `idle_notify_after_min` (по умолчанию 20; `fleet/policy.yaml`, секция `printer_tasks:`), `3d-api` (или `3d printer watch`, когда API недоступен) шлёт в Telegram одно сообщение «Сейчас удобно: …» со списком открытых задач с `when ∈ {idle, any}`, без отложенных и без открытых зависимостей; ниже — что откроется следом. Одно сообщение на период простоя: ключ `(printer, idle_since)` в `printer_idle_notice`, поэтому переподключения и рестарты не дают повтора; тот же набор задач в течение `renotify_after_h` (24) не повторяется. Тихие часы (`quiet_hours`, по умолчанию 22:00–09:00 Europe/Belgrade) переносят сообщение на их конец, если простой ещё идёт.
+
+**Буфер без 3d-api.** Пока нет `3d-api`, задачи пишутся в `~/.local/share/3d/printer-todo/<printer>.jsonl`: одна строка — одна операция, схема `printops.printer_task/1`, `flock` на файл, `O_APPEND` + `fsync` (как буфер §7.4). Поля строки: `uid` (UUIDv7, ключ идемпотентного импорта), `schema`, `op` (`open | update | done | dismiss | snooze`), `task_uid` (у `open` совпадает с `uid`), `printer`, `printer_model`, `head`, `slot`, `component`, `type`, `title`, `why`, `calibration_kinds`, `spools[{name, spool_id}]`, `blocks{scope, head, slot}`, `when`, `when_note`, `duration_min`, `needs_human`, `source`, `source_key`, `depends_on[task_uid]`, `refs`, `status`, `at`, `recorded_at`, `actor`, `note`. `3d printer todo import FILE` проигрывает операции по порядку. Повторный импорт добавляет 0 строк. Задача `calibration` из буфера сливается с производной задачей с тем же scope (`uid` из буфера остаётся в `refs`); катушка, известная только по имени, привязывается к `spool_id` из Spoolman при импорте. Буфер от 2026-10-15: `k1se.jsonl` (6 задач: проверка механики X → холодный `SHAPER_CALIBRATE AXIS=X`, PA и flow для bordeaux / Snapdragon / Ultramarine, верхняя камера #263) и `u1.jsonl` (4 задачи: первые калибровки после очереди дома, T2 неисправна (`blocks=head`, `source_key fault:fleet:u1/T2`), этикетка слота T3 `#FFFFFF NONE` вместо `#1B5E20` (`blocks=slot`), высота камеры для призрака #261).
+
 ---
 
 ## 8. Защита от забытых калибровок + streamline
@@ -530,7 +568,7 @@ Telegram и камера (#276) работают с той же сессией. 
 | `drying_due` | класс гигроскопичности материала (PLA мягко; PETG, TPU, PA, PC, PVA строго) ↔ last_dried_at, открыта с…, RH бокса | просрочено по политике |
 | `nozzle_compat` | abrasive-флаг филамента (CF/GF/glow/wood/metal) ↔ материал сопла на голове; `nozzle_diameter` в G-code ↔ установленное | CF на латуни; диаметр не совпадает |
 | `calibration_current` | §8 | нет действующей калибровки или значения в G-code ≠ записанным |
-| `maintenance_due` | открытые fault и просроченное ТО, «после ремонта» | голова неисправна или после ремонта нет калибровок |
+| `printer_tasks` (было `maintenance_due`, §7.5, #282) | открытые задачи принтера: fault → repair, просроченное ТО, ручные и после калибровки; `usable: false` в fleet | голова неисправна; задача с `blocks` = printer или с используемой головой/слотом (остальные открытые — WARN) |
 | `enclosure_material` | ABS/ASA/PC ↔ enclosure и chamber принтера | WARN |
 | `plate_material` | тип стола ↔ материал (PETG на гладком PEI без клея и т.п.) | WARN |
 | `printer_profile_match` | `printer_model`/`printer_settings_id` в G-code ↔ целевой принтер | FAIL (G-code K1 на U1 и т.п.) |
@@ -590,6 +628,7 @@ GET  /v1/printers/{p}/slots                слот → катушка (учёт
 POST /v1/printers/{p}/slots/{s}/load       {spool_id | query:{material,color,vendor}} → bind (или кандидаты для уточнения)
 POST /v1/printers/{p}/slots/{s}/unload     {to_location?, weight_g?}
 GET/POST /v1/printers/{p}/maintenance | faults | calibrations
+GET  /v1/tasks?printer=&status=   GET/POST /v1/printers/{p}/tasks   POST /v1/tasks/{id}/done|dismiss|snooze   # §7.5
 GET  /v1/spools?material=&color=&location= (Spoolman + PrintOps-состояние)
 POST /v1/spools/{id}/move {location}       POST /v1/spools/{id}/measure {gross_g}
 POST /v1/spools/{id}/notes                 POST /v1/incidents   GET /v1/incidents/stats?by=
@@ -608,7 +647,7 @@ GET  /v1/events (SSE) | WS /v1/ws
 ```
 
 ### 11.2 События
-`printer.state_changed`, `job.queued|started|finished|failed`, `slot.loaded|unloaded|mismatch`, `spool.low|moved|measured|empty`, `drying.started|finished|due`, `calibration.required|recorded|applied`, `settings.changed` (§7.4), `maintenance.due`, `incident.created`, `preflight.failed`, `anomaly.opened|resolved`, `shop.stock_changed|price_changed`. Доставка: SSE и WS, пуш в HA (`POST /api/events/printops_*` с long-lived token) и watch-sinks (tg, exec).
+`printer.state_changed`, `job.queued|started|finished|failed`, `slot.loaded|unloaded|mismatch`, `spool.low|moved|measured|empty`, `drying.started|finished|due`, `calibration.required|recorded|applied`, `settings.changed` (§7.4), `maintenance.due`, `printer_task.opened|updated|closed|accepted|idle_window` (§7.5), `incident.created`, `preflight.failed`, `anomaly.opened|resolved`, `shop.stock_changed|price_changed`. Доставка: SSE и WS, пуш в HA (`POST /api/events/printops_*` с long-lived token) и watch-sinks (tg, exec).
 
 ### 11.3 Голосовые интенты (RU)
 | Фраза | Интент | Разрешение |
@@ -630,18 +669,19 @@ GET  /v1/events (SSE) | WS /v1/ws
 - **Фаза 4:** своя интеграция `custom_components/printops` (WS-подписка на `/v1/ws`, без поллинга):
   - `sensor.printops_<printer>_<slot>_spool` (материал, цвет, остаток г ± интервал, партия, дни с сушки), `binary_sensor.printops_<printer>_<slot>_mismatch`;
   - `sensor.printops_stock_<material>_<color>`, `sensor.printops_low_stock_count`, `sensor.printops_drying_active`;
-  - `sensor.printops_queue_<printer>` (следующее задание, ETA), `sensor.printops_<printer>_maintenance_due`, `calibration_required`;
+  - `sensor.printops_queue_<printer>` (следующее задание, ETA), `sensor.printops_<printer>_tasks` (открытые, блокирующие, следующая на простой; §7.5), `calibration_required`;
+  - `todo.printops_<printer>` (`TodoListEntity`: отметка = `POST /v1/tasks/{id}/done`, новый пункт = ручная задача; #285);
   - сервисы `printops.load_spool|unload_spool|move_spool|start_drying|report_incident|measure`.
 - **Карточки в существующей вкладке** (`ui-3d-printers.yaml`, секция Overview + новый view «Склад»):
   1. «Заправка» на каждый принтер: головы/AMS-слоты с цветом, материалом, остатком, mismatch-бейджем и кнопками (снять, взвесить, проблема).
   2. «Очередь» — список заданий с принтером, ETA и граммами, кнопка «preflight».
   3. «Склад» — дерево адресов (WH:A/S2/B3) с катушками и фильтром, low-stock.
   4. «Сушка» — активные сессии с таймером, просроченные катушки, RH боксов.
-  5. «Калибровки и ТО» — что требуется до следующей печати.
+  5. «Калибровки и ТО» — задачи принтера (§7.5): что требуется до следующей печати и что удобно сделать в простой.
   6. «Инциденты» — последние и топ по вендорам и партиям.
   7. Существующие камера, u1-inspector и share-карточки остаются.
 - Карточки — Lit/vanilla JS в `www/printops/`, по образцу `u1-share` (тот же resource_mode yaml).
-- **Уведомления:** существующий `script.printer_send_notification` получает события `preflight.failed`, `slot.mismatch`, `drying.finished`, `spool.low`, `calibration.required`.
+- **Уведомления:** существующий `script.printer_send_notification` получает события `preflight.failed`, `slot.mismatch`, `drying.finished`, `spool.low`, `calibration.required`, `printer_task.idle_window`.
 
 ---
 
@@ -693,6 +733,8 @@ GET  /v1/events (SSE) | WS /v1/ws
 13. *Calibration catalog + requirement engine + `calibration_current` gate* — новая партия → WARN, новый материал → FAIL до записи калибровки.
 14. *`3d calibrate`: PA pattern / flow / temp tower generators, guided run, apply with confirmation* — сгенерированный G-code проходит preflight; apply в Orca-профиль показывает diff; `SAVE_CONFIG` только при idle и `--yes`.
 15. *Three-tier gating: Orca post-processing hook + start gate + post-start watch check (policy-driven pause)* — старт с тачскрина с CF-на-латуни → уведомление, пауза — по политике.
+
+15a. *Printer tasks: `printer_task` + derivation, `3d printer todo`, REST, JSONL import (#281); `printer_tasks` preflight check (#282); idle-window notifier (#283); HA sensor + todo (#285); 3d-bot `/todo` (#284)* — импорт буфера 2026-10-15 даёт 10 открытых задач; печать U1 с T2 → FAIL; одно сообщение на период простоя.
 
 **Приоритет фазы 2 после текущей очереди мержа:** *calibration plates v2* (§8.3, эпик [#268](https://github.com/alex-mextner/3d-cli/issues/268)) — новая катушка: ≤ 2 стола, каждый заполнен на ≥ 70–80 %, все филаментные калибровки; время — настраиваемый `--max-time`; печатается только недостающее; `--skip/--only`; фото → vision → подтверждение → apply с откатом.
 
