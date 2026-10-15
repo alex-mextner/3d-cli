@@ -301,7 +301,12 @@ class _BambuMoves:
     layer-change timelapse / clog-detect G-code that follows parks at the waste chute). Vendor
     G-code inside those is not: a tool change's filament change (`; CP TOOLCHANGE START` ..
     `; CP TOOLCHANGE WIPE`, the trip to the chute) and the firmware-conditional `M622 J<flag>`
-    .. `M623` blocks (timelapse, clog detection), which Bambu also inserts mid-object."""
+    .. `M623` blocks (timelapse, clog detection), which Bambu also inserts mid-object.
+
+    Neither kind of vendor block ever holds an object label or a layer change (all
+    babushkin-dom A1 mini plates), so one still open there is unbalanced (truncated or edited
+    G-code): it is closed, and `feed` returns True so the caller reports it, instead of
+    exempting every later move from the print area."""
 
     __slots__ = ("change", "conditional", "feature", "labels", "tower")
 
@@ -310,11 +315,19 @@ class _BambuMoves:
         self.tower = self.change = self.feature = False
         self.conditional = 0  # open M622 .. M623 blocks
 
-    def feed(self, line: str) -> None:
+    def _boundary(self) -> bool:
+        """A label or layer change: close any vendor block left open; True when one was."""
+        unbalanced = self.change or self.conditional > 0
+        self.change = False
+        self.conditional = 0
+        return unbalanced
+
+    def feed(self, line: str) -> bool:
+        """Track one line; True when it closed an unbalanced vendor block."""
         if self.labels.feed(line):
             if self.labels.current is None:
                 self.feature = False
-            return
+            return self._boundary()
         c0 = line[:1]
         if c0 in ("M", "m"):
             word = line.split(";", 1)[0].split(None, 1)[0].upper()
@@ -325,7 +338,8 @@ class _BambuMoves:
         elif c0 == ";":
             if line.startswith(_LAYER_MARKERS):
                 self.feature = False
-            elif (tag := feature(line)) is not None:
+                return self._boundary()
+            if (tag := feature(line)) is not None:
                 self.feature = tag != "Custom"
             elif line.startswith("; WIPE_TOWER_START"):
                 self.tower = True
@@ -333,8 +347,9 @@ class _BambuMoves:
                 self.tower = self.feature = False
             elif line.startswith("; CP TOOLCHANGE START"):
                 self.change = True
-            elif line.startswith("; CP TOOLCHANGE WIPE"):
+            elif line.startswith(("; CP TOOLCHANGE WIPE", "; CP TOOLCHANGE END")):
                 self.change = False
+        return False
 
     @property
     def slicer(self) -> bool:
@@ -730,8 +745,12 @@ def check_bounds(path: Path, axis_limits: Limits | None = None) -> BoundsReport:
         for n, line in enumerate(fh, 1):
             if line[:1] in (" ", "\t"):
                 line = line.lstrip()
-            if plate.bambu:
-                moves.feed(line)
+            if plate.bambu and moves.feed(line):
+                unverified(
+                    n,
+                    "Bambu M622 / CP TOOLCHANGE block left open before this line;"
+                    " print area not checked inside it",
+                )
             c0 = line[:1]
             if c0 == ";":
                 if line.startswith(";TYPE:"):

@@ -51,10 +51,11 @@ def test_klipper_labels_win_over_the_comments_the_same_slicer_writes() -> None:
         "; printing object A id:0 copy 0",
     ]:
         labels.feed(line)
+    # a DEFINE opens no block: until the first START the file still reads as one plate
     assert (
         labels.defined == ["A_id_0_copy_0"]
         and labels.current is None
-        and labels.labeled
+        and not labels.labeled
     )
     assert _trace(
         [
@@ -212,3 +213,36 @@ def test_print_area_skips_bambu_vendor_moves_but_not_the_plate(tmp_path: Path) -
     rep = check_bounds(bad)
     # the tower travel from X-2 and the extrusion leaving it (both plate), the object's last line
     assert sorted(v.line for v in rep.area_out) == [7, 8, 17]
+
+
+def test_overhangs_without_an_object_block_still_check_the_plate(
+    tmp_path: Path,
+) -> None:
+    """A DEFINE or a cancel without any START block must not leave every line ownerless."""
+    path = tmp_path / "p.gcode"
+    path.write_text(
+        "EXCLUDE_OBJECT_DEFINE NAME=A\nEXCLUDE_OBJECT NAME=A\n;LAYER_CHANGE\n;Z:0.2\n"
+        "G90\nM83\nG1 X10 Y10\nG1 X20 Y10 E1\n",
+        encoding="utf-8",
+    )
+    assert set(go.parse(str(path)).objects) == {"plate"}
+
+
+@pytest.mark.parametrize("opener", ["M622 J1", "; CP TOOLCHANGE START"])
+def test_print_area_does_not_trust_an_unclosed_vendor_block(
+    opener: str, tmp_path: Path
+) -> None:
+    """A truncated M622 / tool change block ends at the next object label: the object's moves
+    are checked again and the open block is reported unverified."""
+    path = tmp_path / "open.gcode"
+    path.write_text(
+        "; model label id: 8\n; printable_area = 0x0,180x0,180x180,0x180\nG90\nM83\n"
+        f"; CHANGE_LAYER\n{opener}\nG1 X-13 F3000\n"  # line 6: never closed
+        "; printing object A id:0 copy 0\n; start printing object, unique label id: 8\nM624 AQAAAAAAAAA=\n"
+        "; FEATURE: Outer wall\nG1 X10 Y10\nG1 X-4 Y10 E1\n"  # line 13: off the bed
+        "; stop printing object, unique label id: 8\nM625\n",
+        encoding="utf-8",
+    )
+    rep = check_bounds(path)
+    assert [v.line for v in rep.area_out] == [13]
+    assert rep.unverified_count == 1 and "left open" in rep.unverified[0]

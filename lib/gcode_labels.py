@@ -36,7 +36,7 @@ _STOP = "; stop printing object"
 _BAMBU_START = "; start printing object, unique label id:"
 _BAMBU_STOP = "; stop printing object, unique label id:"
 _BAMBU_IDS = "; model label id:"
-_COMMENT_LABELS = (_PRINTING, _STOP, _BAMBU_START, _BAMBU_IDS)
+_COMMENT_LABELS = (_PRINTING, _STOP, _BAMBU_START, _BAMBU_STOP, _BAMBU_IDS)
 _NAME = re.compile(r"NAME=(\"[^\"]*\"|'[^']*'|\S+)", re.IGNORECASE)
 _M486_S = re.compile(r"\bS\s*([-+]?\d+)", re.IGNORECASE)
 # `<name>_id_0_copy_0` (EXCLUDE_OBJECT, spaces as `_`) and `<name> id:0 copy 0` (comments)
@@ -153,7 +153,8 @@ class ObjectLabels:
         head = line[:21].upper()
         if not head.startswith("EXCLUDE_OBJECT"):
             return False
-        self._klipper = self.labeled = True
+        # a DEFINE or a cancel opens no block: until a START the file still prints as one plate
+        self._klipper = True
         if head.startswith("EXCLUDE_OBJECT_DEFINE"):
             m = _NAME.search(line)
             if m:
@@ -177,9 +178,8 @@ class ObjectLabels:
             n = int(m.group(1))
             return self._stop() if n < 0 else self._start(f"object {n}")
         if word == "M624":
-            if (
-                self.current is not None
-            ):  # already opened by its `; start printing object` comment
+            # already opened by its `; start printing object` comment
+            if self.current is not None:
                 return True
             label_id = self._mask_label(code[1] if len(code) > 1 else "")
             return self._bambu_start(label_id) if label_id is not None else False
