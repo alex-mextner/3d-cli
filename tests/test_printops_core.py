@@ -473,6 +473,18 @@ def test_failed_stream_setup_does_not_leak_listeners(printops_settings: Settings
     assert events.BUS.listener_count() == 0
 
 
+def test_db_lost_after_startup_is_503_not_500(printops_client: Any, printops_app: Any) -> None:
+    """A DB that is unusable at startup fails create_app loudly (by design: no half-migrated
+    service). This covers the other case: the data dir goes away while the API runs."""
+    from dataclasses import replace
+
+    state = printops_app.state.printops
+    state.settings = replace(state.settings, db_path=Path("/proc/printops-nope/printops.db"))
+    assert printops_client.get("/v1/live").status_code == 503
+    body = printops_client.get("/v1/health")
+    assert body.status_code == 503 and body.json()["db"]["ok"] is False
+
+
 def test_health_is_degraded_when_spoolman_is_down(printops_client: Any, fake_spoolman: FakeSpoolman) -> None:
     fake_spoolman.down = True
     body = printops_client.get("/v1/health").json()

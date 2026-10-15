@@ -52,7 +52,7 @@ def _db_health(state: ApiState) -> dict[str, Any]:
             return {"ok": True, "migrations": versions, "last_event_id": ev.latest_id(conn)}
         finally:
             conn.close()
-    except sqlite3.Error as e:
+    except (sqlite3.Error, OSError) as e:  # OSError: open_db's mkdir on an unwritable data dir
         return {"ok": False, "error": str(e)}
 
 
@@ -190,10 +190,12 @@ async def list_events(
 
     async def stream() -> AsyncIterator[str]:
         yield "retry: 3000\n\n"
-        async for event in _follow(state, cursor, authorized):
-            if await request.is_disconnected():
-                return
-            yield ": ping\n\n" if event is None else _sse_frame(event)
+        # aclosing: on disconnect, release the bus listener + DB connection now, not at GC
+        async with contextlib.aclosing(_follow(state, cursor, authorized)) as events_:
+            async for event in events_:
+                if await request.is_disconnected():
+                    return
+                yield ": ping\n\n" if event is None else _sse_frame(event)
         # The token was revoked: end the stream; a reconnect then gets a 401.
         yield f"event: auth_revoked\ndata: {json.dumps({'name': who.name})}\n\n"
 
@@ -234,11 +236,12 @@ async def websocket_events(ws: WebSocket) -> None:
     authorized = _authorized(state, str(token), "read")
 
     async def pump() -> None:
-        async for event in _follow(state, cursor, authorized):
-            if event is not None:
-                await ws.send_json({"type": "event", "event": event.to_dict()})
-            else:
-                await ws.send_json({"type": "ping"})
+        async with contextlib.aclosing(_follow(state, cursor, authorized)) as events_:
+            async for event in events_:
+                if event is not None:
+                    await ws.send_json({"type": "event", "event": event.to_dict()})
+                else:
+                    await ws.send_json({"type": "ping"})
         await ws.send_json({"type": "auth_revoked"})
         await _ws_close(ws, 4401, "token revoked")
 
