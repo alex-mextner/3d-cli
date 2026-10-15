@@ -132,9 +132,11 @@ def _fmt_t(v: float | None) -> str:
 
 
 def _heater_off(name: str) -> Callable[[Frame], bool]:
-    """Still-true check for a held bed_off: the heater's target is still 0 (or gone)."""
+    """Still-true check for a held bed_off: the heater still reports a 0 target. A heater
+    missing from the frame (objects reset after a firmware restart) is unknown, not off."""
     def check(f: Frame) -> bool:
-        return not f.heaters.get(name, (None, None))[1]
+        reading = f.heaters.get(name)
+        return reading is not None and not reading[1]
     return check
 
 
@@ -340,7 +342,9 @@ class _Detector:
         event = self._event("homing_lost", CRITICAL, f"{f.state} but axes {lost.upper()} are NOT homed "
                             f"(homed_axes {f.homed!r})", hint="do not resume blindly: re-home first (Z/X crash risk)",
                             now=now, data={"homed_axes": f.homed, "was": was})
-        return self._hold("homing_lost", event, _unhomed, f, now, found_at_start=prev is None)
+        # Found at watch start while paused: a steady state, report now. While printing it may
+        # be a start macro re-homing, so it is held like any other.
+        return self._hold("homing_lost", event, _unhomed, f, now, found_at_start=prev is None and f.state == PAUSED)
 
     def _heater_rules(self, prev: Frame | None, f: Frame, now: float) -> list[Event]:
         out: list[Event] = []

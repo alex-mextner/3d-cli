@@ -421,6 +421,22 @@ def test_homing_lost_re_homed_within_the_hold_is_dropped() -> None:
     assert d.tick(1030.0) == []
 
 
+def test_held_bed_off_dropped_when_a_full_status_reset_loses_the_heater() -> None:
+    d, _ = started()
+    d.on_status({"heater_bed": {"target": 0.0}}, 1010.0)
+    status = u1_ws_status("printing")
+    del status["heater_bed"]
+    d.on_status(status, 1012.0, full=True)
+    assert d.tick(1030.0) == []
+
+
+def test_homing_lost_found_at_watch_start_while_printing_is_held() -> None:
+    d, ev = started(toolhead={"homed_axes": ""})  # e.g. a start macro re-homing
+    assert kinds(ev) == [("snapshot", INFO)]
+    d.on_status({"toolhead": {"homed_axes": "xyz"}}, 1005.0)
+    assert d.tick(1030.0) == []
+
+
 def test_k1_filament_sensor_change_while_printing() -> None:
     d = CrealityDetector("k1se")
     d.on_push(k1(), 1000.0)
