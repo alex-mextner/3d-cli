@@ -140,7 +140,8 @@ def test_conflict_is_shown_as_a_diff_and_left_alone(tmp_path: Path) -> None:
 def test_named_slicer_that_is_not_installed_is_reported(tmp_path: Path) -> None:
     """The user names a slicer that never ran on this machine, a slicer the tool does not
     know, and a preset that does not exist: each is refused with exit 2 and a message saying
-    what is missing and what is accepted."""
+    what is missing and what is accepted. Asking for the status of the missing slicer is not
+    reported as clean, since nothing was compared."""
     _, _, env = _setup(tmp_path)
     result = run_cli(
         tmp_path, "profiles", "sync", "--slicer", "bambu", "--yes", env_extra=env
@@ -151,6 +152,19 @@ def test_named_slicer_that_is_not_installed_is_reported(tmp_path: Path) -> None:
     assert bad.returncode == 2 and "orca, snapmaker-orca, bambu, all" in bad.stderr
     missing = run_cli(tmp_path, "profiles", "diff", "No Such Preset", env_extra=env)
     assert missing.returncode == 2 and "no preset named" in missing.stderr
+    status = run_cli(
+        tmp_path, "profiles", "status", "--slicer", "bambu", "--json", env_extra=env
+    )
+    report = json.loads(status.stdout)
+    assert report["clean"] is False
+    assert report["slicers"][0] == {
+        "slicer": "bambu",
+        "found": False,
+        "checked": False,
+        "user_dir": None,
+        "repo_dir": None,
+        "items": [],
+    }
 
 
 def test_help_and_docs_list_the_same_flags(tmp_path: Path) -> None:

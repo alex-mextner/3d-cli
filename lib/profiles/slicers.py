@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from cli.env import repo_root
+from errors import ThreeDError
 
 KINDS = ("filament", "process", "machine")
 
@@ -103,8 +104,25 @@ def _preset_folder(data_dir: Path, slicer: Slicer) -> str:
     return folder if isinstance(folder, str) else ""
 
 
+def is_plain_name(name: str) -> bool:
+    """One file-name segment: not empty, not `.`/`..`, no path separator or NUL."""
+    return (
+        bool(name) and name not in (".", "..") and not any(c in name for c in "/\\\0")
+    )
+
+
 def user_presets_dir(data_dir: Path, slicer: Slicer) -> Path:
-    return data_dir / "user" / (_preset_folder(data_dir, slicer) or "default")
+    folder = _preset_folder(data_dir, slicer) or "default"
+    if not is_plain_name(folder):
+        conf = data_dir / f"{slicer.app_name}.conf"
+        raise ThreeDError(
+            f"{conf}: app.preset_folder {folder!r} is not a folder name under {data_dir / 'user'}",
+            command="profiles",
+            remediation=[
+                "Fix preset_folder in the slicer's settings file (empty means `default`)."
+            ],
+        )
+    return data_dir / "user" / folder
 
 
 def running_processes(slicer: Slicer) -> list[str] | None:

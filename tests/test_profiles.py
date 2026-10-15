@@ -107,6 +107,30 @@ def test_user_presets_dir_follows_preset_folder(env: Path) -> None:
     assert pair.repo_dir == env / "repo" / "profiles" / "snapmaker-orca"
 
 
+@pytest.mark.parametrize("folder", ["/tmp/other", "../../other", "..", "a/b"])
+def test_preset_folder_that_leaves_the_user_dir_is_refused(
+    env: Path, folder: str
+) -> None:
+    data = env / "xdg-config" / "Snapmaker_Orca"
+    (data / "user").mkdir(parents=True)
+    (data / "Snapmaker_Orca.conf").write_text(
+        json.dumps({"app": {"preset_folder": folder}}), encoding="utf-8"
+    )
+    with pytest.raises(ThreeDError, match="is not a folder name"):
+        sync.find_pair(slicers.SLICERS["snapmaker-orca"])
+
+
+def test_second_sync_is_refused_while_the_lock_is_held(env: Path) -> None:
+    with (
+        sync.exclusive(),
+        pytest.raises(GateFailure, match="another `3d profiles sync` is running"),
+        sync.exclusive(),
+    ):
+        pass
+    with sync.exclusive():  # released again
+        pass
+
+
 def test_flatpak_data_dir_is_found(env: Path) -> None:
     flat = (
         env
@@ -371,3 +395,9 @@ def test_apply_values_rejects_bad_targets(env: Path) -> None:
         apply_values("orca", "filament", "My PLA", {"print_host": "1.2.3.4"})
     with pytest.raises(InvalidArgument, match="name"):
         apply_values("orca", "filament", "My PLA", {"name": "Other"})
+    victim = env / "victim.json"
+    victim.write_text(slicer_json(PLA_FILAMENT), encoding="utf-8")
+    for name in ("../../../../victim", "..", "base/../My PLA"):
+        with pytest.raises(InvalidArgument, match="a preset name"):
+            apply_values("orca", "filament", name, {"pressure_advance": 0.03})
+    assert victim.read_text(encoding="utf-8") == slicer_json(PLA_FILAMENT)

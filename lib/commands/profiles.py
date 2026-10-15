@@ -38,8 +38,8 @@ Options:
   --json        (status) machine-readable output
 
 Before a push, the replaced slicer files are copied to ~/.cache/3d-cli/profiles-backup/<time>/.
-The last-sync snapshot is ~/.config/3d-cli/profiles-sync.json. Exit: 0 ok, 1 conflicts left or
-slicer running, 2 bad arguments.
+The last-sync snapshot is ~/.config/3d-cli/profiles-sync.json. Exit: 0 ok; 1 conflicts left,
+changes skipped, slicer running or another sync running; 2 bad arguments.
 
 Examples:
   3d profiles status
@@ -57,7 +57,7 @@ SUBCOMMAND_FLAGS = {
 }
 
 
-@dataclass
+@dataclass(slots=True)
 class Options:
     slicer: str = "all"
     name: str | None = None
@@ -74,13 +74,15 @@ class Row:
     slicer: slicers.Slicer
     pair: sync.Pair | None
     items: list[sync.Item] = field(default_factory=list)
+    # The slicer was not found although it was named, or the repo holds presets for it:
+    # nothing could be compared, so the status cannot be clean.
+    unchecked: bool = False
 
     def header(self) -> str:
         if self.pair is None:
             looked = ", ".join(str(p) for p in slicers.data_dir_candidates(self.slicer))
-            return (
-                f"{self.slicer.id}: {self.slicer.label} not found (looked in {looked})"
-            )
+            note = "; its repo presets were not compared" if self.unchecked else ""
+            return f"{self.slicer.id}: {self.slicer.label} not found (looked in {looked}){note}"
         return f"{self.slicer.id}: {self.pair.user_dir} <-> {self.pair.repo_dir}"
 
 
@@ -124,15 +126,20 @@ def _parse(argv: list[str], sub: str) -> Options:
 def _rows(selected: str, state: sync.State) -> list[Row]:
     rows = []
     for slicer in slicers.SLICERS.values():
-        if selected in ("all", slicer.id):
-            pair = sync.find_pair(slicer)
+        if selected not in ("all", slicer.id):
+            continue
+        pair = sync.find_pair(slicer)
+        if pair is not None:
+            rows.append(Row(slicer, pair, sync.status(pair, state)))
+        else:
+            repo_presets = sync.scan_repo(slicers.profiles_root() / slicer.id)
             rows.append(
-                Row(slicer, pair, sync.status(pair, state) if pair is not None else [])
+                Row(slicer, None, unchecked=selected == slicer.id or bool(repo_presets))
             )
     return rows
 
 
-def _indent(text: str) -> str:
+def _indent_block(text: str) -> str:
     return "".join(f"    {line}" for line in text.splitlines(keepends=True)).rstrip(
         "\n"
     )
@@ -151,7 +158,7 @@ def _print_plan(rows: list[Row], *, conflict_diffs: bool) -> tuple[int, int]:
                 continue
             conflicts += 1
             if conflict_diffs and row.pair is not None:
-                print(_indent(sync.item_diff(item, row.slicer.id)))
+                print(_indent_block(sync.item_diff(item, row.slicer.id)))
         if row.pair is not None:
             print(f"  {sum(1 for i in row.items if i.action == 'same')} in sync")
     return changes, conflicts
@@ -164,6 +171,7 @@ def _run_status(opts: Options) -> int:
             {
                 "slicer": row.slicer.id,
                 "found": row.pair is not None,
+                "checked": not row.unchecked,
                 "user_dir": str(row.pair.user_dir) if row.pair else None,
                 "repo_dir": str(row.pair.repo_dir) if row.pair else None,
                 "items": [
@@ -178,15 +186,20 @@ def _run_status(opts: Options) -> int:
             }
             for row in rows
         ]
-        clean = all(i.action == "same" for row in rows for i in row.items)
+        clean = not any(row.unchecked for row in rows) and all(
+            i.action == "same" for row in rows for i in row.items
+        )
         print(json.dumps({"clean": clean, "slicers": out}, indent=2))
         return 0
     changes, conflicts = _print_plan(rows, conflict_diffs=False)
-    print(
-        "clean"
-        if not changes and not conflicts
-        else f"{changes} to sync, {conflicts} conflict(s)"
-    )
+    unchecked = sum(1 for row in rows if row.unchecked)
+    if not changes and not conflicts and not unchecked:
+        print("clean")
+    else:
+        print(
+            f"{changes} to sync, {conflicts} conflict(s)"
+            + (f", {unchecked} slicer(s) not checked" if unchecked else "")
+        )
     return 0
 
 
@@ -223,6 +236,11 @@ def _confirm(count: int) -> None:
 
 
 def _run_sync(opts: Options) -> int:
+    with sync.exclusive():
+        return _sync_locked(opts)
+
+
+def _sync_locked(opts: Options) -> int:
     directions = ("pull",) if opts.pull else ("push",) if opts.push else sync.DIRECTIONS
     state = sync.State.load()
     rows = _rows(opts.slicer, state)

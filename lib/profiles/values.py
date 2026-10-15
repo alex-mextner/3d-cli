@@ -70,6 +70,14 @@ def preset_path(
         raise InvalidArgument(
             flag="kind", got=kind, accepted=list(slicers.KINDS), command="profiles"
         )
+    if not slicers.is_plain_name(name):
+        raise InvalidArgument(
+            flag="name",
+            got=name,
+            accepted=["a preset name (the file name without .json)"],
+            command="profiles",
+            extra="a preset name cannot contain a path separator or be . / ..",
+        )
     root = (profiles_dir or slicers.profiles_root()) / slicer / kind
     for path in (root / f"{name}.json", root / "base" / f"{name}.json"):
         if path.is_file():

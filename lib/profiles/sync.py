@@ -15,12 +15,15 @@ Every write into a slicer dir first copies the files it replaces or removes to
 from __future__ import annotations
 
 import difflib
+import fcntl
 import hashlib
 import json
 import os
 import shutil
+import tempfile
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -112,20 +115,23 @@ def repo_entry(root: Path, rel: str) -> Entry | None:
                 "and a push keeps the slicer's values."
             ],
         )
-    info = _read_text(path.with_suffix(".info"))
-    return Entry(rel, raw, preset.portable_info(info) if info is not None else None)
+    return Entry(rel, raw, _portable_info_beside(path))
 
 
 def slicer_entry(user_dir: Path, rel: str) -> Entry | None:
     path = user_dir / rel
     if not path.is_file():
         return None
-    info = _read_text(path.with_suffix(".info"))
     return Entry(
         rel,
         preset.portable_json(path.read_bytes(), where=str(path)),
-        preset.portable_info(info) if info is not None else None,
+        _portable_info_beside(path),
     )
+
+
+def _portable_info_beside(preset_path: Path) -> bytes | None:
+    info = _read_text(preset_path.with_suffix(".info"))
+    return preset.portable_info(info) if info is not None else None
 
 
 def _scan(root: Path, read: Callable[[Path, str], Entry | None]) -> dict[str, Entry]:
@@ -199,6 +205,26 @@ def plan(
 
 def state_path() -> Path:
     return config_dir() / "profiles-sync.json"
+
+
+@contextmanager
+def exclusive() -> Iterator[None]:
+    """Hold the sync lock: two syncs at once would each load the base snapshot and the
+    later save would drop the other's recorded bases."""
+    lock_path = config_dir() / "profiles-sync.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a") as handle:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise GateFailure(
+                f"another `3d profiles sync` is running (lock {lock_path})",
+                command="profiles",
+            ) from None
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
 
 
 @dataclass
@@ -283,9 +309,16 @@ class Applied:
 
 def _write_atomic(path: Path, data: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.3d-tmp")
-    tmp.write_bytes(data)
-    os.replace(tmp, path)
+    fd, tmp = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".3d-tmp", dir=path.parent
+    )
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
 
 
 def _remove(path: Path) -> None:

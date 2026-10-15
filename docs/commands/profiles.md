@@ -15,8 +15,9 @@ Issue: [#180](https://github.com/alex-mextner/3d-cli/issues/180), PrintOps decis
 3d profiles sync [--slicer S] [--pull | --push] [--dry-run] [--yes] [--force]
 ```
 
-- `status` — per preset, what a sync would do; ends with `clean` when both sides match.
-  Writes nothing.
+- `status` — per preset, what a sync would do; ends with `clean` when both sides match. A
+  slicer that is not found counts as not checked — and keeps the status from being clean — when
+  it was named with `--slicer` or the repo holds presets for it. Writes nothing.
 - `diff [NAME]` — unified diff repo -> slicer of every preset that differs, or only of `NAME`
   (the file name without `.json`, or its `<kind>/<file>` path).
 - `sync` — apply pulls and pushes. Without `--yes` it asks first on a terminal and refuses
@@ -28,10 +29,11 @@ Issue: [#180](https://github.com/alex-mextner/3d-cli/issues/180), PrintOps decis
 - `--dry-run` — print the plan, write nothing.
 - `--yes` — apply without asking.
 - `--force` — write into a slicer's presets even while it runs.
-- `--json` — `status` as JSON: `{"clean": bool, "slicers": [{"slicer", "found", "user_dir",
-  "repo_dir", "items": [{"rel", "name", "action", "reason"}]}]}`.
+- `--json` — `status` as JSON: `{"clean": bool, "slicers": [{"slicer", "found", "checked",
+  "user_dir", "repo_dir", "items": [{"rel", "name", "action", "reason"}]}]}`.
 
-Exit codes: 0 ok; 1 conflicts were left, the slicer is running, or the prompt was declined;
+Exit codes: 0 ok; 1 conflicts were left, a file changed on disk while the sync ran (skipped,
+run it again), the slicer is running, another sync holds the lock, or the prompt was declined;
 2 bad arguments (or `sync` needs `--yes` without a terminal).
 
 Examples:
@@ -101,6 +103,12 @@ and Bambu Studio, a tab in current upstream OrcaSlicer) and sorted key order.
 - A sync that would push into a slicer refuses while that slicer runs (it rewrites presets from
   memory when the user saves), checked with `ps` before anything is written; `--force` skips the
   check. Pulls only read the slicer dir.
+- One sync at a time: `sync` holds `~/.config/3d-cli/profiles-sync.lock` from reading the
+  base snapshot to saving it; a second sync started meanwhile exits 1.
+- Each preset is re-read right before it is written; one that changed on disk after the plan
+  is skipped, not overwritten.
+- A `preset_folder` in the slicer's settings that is not a plain folder name (a path, `..`) is
+  refused, so a sync never writes outside `<data>/user/`.
 
 ## Library: `apply_values`
 
@@ -116,5 +124,5 @@ the unified diff (`""` when nothing changed); `dry_run=True` returns the diff wi
 Values are stored as the slicer stores them: strings, and a scalar given for an option the
 preset holds as a list (per extruder) is written to every element; a new per-extruder option
 must be passed as a list. The preset identity (`name`, `from`, `inherits`, `version`) and the
-connection keys are refused. Run `3d profiles sync --push` afterwards to put the change into the
-slicer.
+connection keys are refused, and so is a `name` that is a path (`/`, `\`, `.`, `..`). Run
+`3d profiles sync --push` afterwards to put the change into the slicer.
