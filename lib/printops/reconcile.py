@@ -361,63 +361,65 @@ def _event_payload(row_id: int, f: Finding) -> dict[str, Any]:
 
 
 def sync(
-    conn: sqlite3.Connection, scope: str, findings: Sequence[Finding], *, live_ok: bool
+    conn: sqlite3.Connection,
+    scope: str,
+    findings: Sequence[Finding],
+    *,
+    live_ok: bool,
+    now: str,
 ) -> SyncResult:
-    """Make the open/ack anomalies of `scope` match `findings` (one transaction)."""
+    """Make the open/ack anomalies of `scope` match `findings`, inside the caller's
+    transaction (a reconcile pass commits every scope together)."""
     res = SyncResult()
-    now = utc_now()
     wanted = {f.dedupe_key: f for f in findings}
-    with transaction(conn):
-        live = {
-            r["dedupe_key"]: r
-            for r in conn.execute(
-                "SELECT * FROM anomaly WHERE scope = ? AND status IN ('open', 'ack')",
-                (scope,),
-            )
-        }
-        for key, f in wanted.items():
-            row = live.get(key)
-            evidence = json.dumps(f.evidence, sort_keys=True, separators=(",", ":"))
-            if row is not None:
-                conn.execute(
-                    "UPDATE anomaly SET last_seen_at = ?, evidence = ? WHERE id = ?",
-                    (now, evidence, row["id"]),
-                )
-                res.seen.append(int(row["id"]))
-                continue
-            cur = conn.execute(
-                "INSERT INTO anomaly (at, kind, subject, scope, evidence, status, dedupe_key, last_seen_at)"
-                " VALUES (?, ?, ?, ?, ?, 'open', ?, ?)",
-                (now, f.kind, f.subject, scope, evidence, key, now),
-            )
-            row_id = int(cur.lastrowid or 0)
-            res.opened.append(row_id)
-            ev.emit(conn, "anomaly.opened", f.subject, _event_payload(row_id, f), ACTOR)
-            if f.kind in SLOT_MISMATCH_KINDS:
-                ev.emit(
-                    conn, "slot.mismatch", f.subject, _event_payload(row_id, f), ACTOR
-                )
-        for key, row in live.items():
-            if key in wanted or (row["kind"] in LIVE_KINDS and not live_ok):
-                continue
+    live = {
+        r["dedupe_key"]: r
+        for r in conn.execute(
+            "SELECT * FROM anomaly WHERE scope = ? AND status IN ('open', 'ack')",
+            (scope,),
+        )
+    }
+    for key, f in wanted.items():
+        row = live.get(key)
+        evidence = json.dumps(f.evidence, sort_keys=True, separators=(",", ":"))
+        if row is not None:
             conn.execute(
-                "UPDATE anomaly SET status = 'resolved', resolved_at = ?, resolved_by = ? WHERE id = ?",
-                (now, ACTOR, row["id"]),
+                "UPDATE anomaly SET last_seen_at = ?, evidence = ? WHERE id = ?",
+                (now, evidence, row["id"]),
             )
-            res.resolved.append(int(row["id"]))
-            ev.emit(
-                conn,
-                "anomaly.resolved",
-                row["subject"],
-                {
-                    "anomaly_id": int(row["id"]),
-                    "kind": row["kind"],
-                    "scope": scope,
-                    "by": ACTOR,
-                    "why": "condition no longer seen",
-                },
-                ACTOR,
-            )
+            res.seen.append(int(row["id"]))
+            continue
+        cur = conn.execute(
+            "INSERT INTO anomaly (at, kind, subject, scope, evidence, status, dedupe_key, last_seen_at)"
+            " VALUES (?, ?, ?, ?, ?, 'open', ?, ?)",
+            (now, f.kind, f.subject, scope, evidence, key, now),
+        )
+        row_id = int(cur.lastrowid or 0)
+        res.opened.append(row_id)
+        ev.emit(conn, "anomaly.opened", f.subject, _event_payload(row_id, f), ACTOR)
+        if f.kind in SLOT_MISMATCH_KINDS:
+            ev.emit(conn, "slot.mismatch", f.subject, _event_payload(row_id, f), ACTOR)
+    for key, row in live.items():
+        if key in wanted or (row["kind"] in LIVE_KINDS and not live_ok):
+            continue
+        conn.execute(
+            "UPDATE anomaly SET status = 'resolved', resolved_at = ?, resolved_by = ? WHERE id = ?",
+            (now, ACTOR, row["id"]),
+        )
+        res.resolved.append(int(row["id"]))
+        ev.emit(
+            conn,
+            "anomaly.resolved",
+            row["subject"],
+            {
+                "anomaly_id": int(row["id"]),
+                "kind": row["kind"],
+                "scope": scope,
+                "by": ACTOR,
+                "why": "condition no longer seen",
+            },
+            ACTOR,
+        )
     return res
 
 
@@ -558,18 +560,22 @@ class Reconciler:
         binds = bindings(self.spoolman.find("spool"))
         with self._lock:
             readings = dict(self.readings)
-        out: dict[str, SyncResult] = {}
+        # findings first, outside the write lock; then the whole pass in ONE transaction, so a
+        # failure on any scope leaves no half-applied pass (and listeners wake once, at COMMIT)
+        scopes: list[tuple[str, list[Finding], bool]] = []
+        for name, printer in self.printers.items():
+            reading = readings.get(name)
+            findings = compare_printer(printer, reading, binds, self.max_delta_e)
+            scopes.append((name, findings, reading is not None and reading.ok))
+        scopes.append((FLEET_SCOPE, compare_unknown(self.fleet, binds), True))
         conn = open_db(self.db_path)
         try:
-            for name, printer in self.printers.items():
-                reading = readings.get(name)
-                findings = compare_printer(printer, reading, binds, self.max_delta_e)
-                out[name] = sync(
-                    conn, name, findings, live_ok=reading is not None and reading.ok
-                )
-            out[FLEET_SCOPE] = sync(
-                conn, FLEET_SCOPE, compare_unknown(self.fleet, binds), live_ok=True
-            )
+            now = utc_now()
+            with transaction(conn):
+                out = {
+                    scope: sync(conn, scope, findings, live_ok=live_ok, now=now)
+                    for scope, findings, live_ok in scopes
+                }
         finally:
             conn.close()
         self.last_error = None

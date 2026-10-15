@@ -411,6 +411,39 @@ def test_unreadable_printer_keeps_live_anomalies_open(
     assert last is not None and last.error == "connection refused"
 
 
+def test_a_pass_that_fails_on_one_scope_commits_no_scope(
+    tmp_path: Path,
+    spoolman: FakeSpoolman,
+    moon: FakeMoonraker,
+    fleet_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """u1 has a type mismatch and a spool is bound to a printer outside the fleet. When writing
+    the fleet scope fails, the u1 anomaly written earlier in the same pass is rolled back too."""
+    add_spool(spoolman, material="PLA", color="000000", slot="u1/T1")
+    add_spool(spoolman, slot="x1c/T1")
+    rec = make_reconciler(tmp_path, spoolman, fleet_file)
+    set_u1_head(moon, 0, material="PETG", rgba="000000FF")
+    emit = ev.emit
+
+    def failing(conn: Any, kind: str, subject: str, payload: Any, actor: str) -> Any:
+        if payload.get("scope") == rc.FLEET_SCOPE:
+            raise RuntimeError("disk full")
+        return emit(conn, kind, subject, payload, actor)
+
+    monkeypatch.setattr(rc.ev, "emit", failing)
+    with pytest.raises(RuntimeError):
+        rec.poll("u1")
+    assert open_anomalies(rec) == [] and all_events(rec) == []
+
+    monkeypatch.setattr(rc.ev, "emit", emit)
+    rec.reconcile()
+    assert {(a["scope"], a["kind"]) for a in open_anomalies(rec)} >= {
+        ("u1", "type_mismatch")
+    }
+    assert rc.FLEET_SCOPE in {a["scope"] for a in open_anomalies(rec)}
+
+
 def test_k1_runout_switch_reports_empty_slot_with_a_bound_spool(
     tmp_path: Path, spoolman: FakeSpoolman, monkeypatch: pytest.MonkeyPatch
 ) -> None:
