@@ -190,6 +190,9 @@ EXTRA_FIELDS: tuple[ExtraField, ...] = (
     ExtraField("filament", "max_volumetric_mm3_s", "Max volumetric speed", "float", unit="mm³/s"),
     ExtraField("vendor", "spool_tare_g", "Empty spool weight (tare)", "float", unit="g"),
     ExtraField("vendor", "spool_kind", "Spool kind", "choice", choices=("cardboard", "plastic", "refill")),
+    # #160: key of the source record a spool was imported from ("babushkin-dom:owned:белый"),
+    # so re-running an import changes nothing.
+    ExtraField("spool", "external_key", "PrintOps import key", "text"),
 )
 
 # PrintOps fields sort after any fields the user added by hand in the Spoolman UI.
