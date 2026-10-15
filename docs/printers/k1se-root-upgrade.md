@@ -261,7 +261,7 @@ database had a stale `K1 SE Camera` entry pointing at `192.168.0.34`. Check
 ### 4.4 Remote reboot and camera restart
 
 - Klipper restart: `POST http://192.168.0.27:7125/printer/firmware_restart` (or Fluidd).
-- Whole printer: `POST /machine/reboot` through the shims installed in step 1 `[INFERENCE: verify once while idle]`.
+- Whole printer: `POST /machine/reboot` through the shims installed in step 1. Verified 2026-10-15 while idle: the OS reboots, and after ~70 s Moonraker reports `klippy_state: ready` with Fluidd, camera, `:80` and ws `:9999` back. The watcher first reports `Klipper SHUTDOWN: MCU 'rpi' shutdown: Force shutdown command` and `DISCONNECTED`, then `Klipper ready again`. **Warn whoever watches the alerts before you reboot.**
 - Camera: put this in `printer_data/config/camera-control.cfg` and add `[include camera-control.cfg]`
   after the other includes in `printer.cfg` (needs Gcode Shell Command). Then `POST /printer/restart`:
   ```ini
@@ -355,4 +355,4 @@ runs `3d printer watch k1se $WATCH_ARGS` and picks up the new adapter from the y
 - [ ] `3d print-preflight` on a K1 G-code reports limits `x[-5,229] y[-0.5,227]` from `printer-devices.yaml`
 - [ ] Test print: `3d printer upload k1se out/<small>.gcode`. Then check that the Z-offset on the screen equals the backup value. Only then `3d printer start k1se out/<small>.gcode --yes`, and check the first-layer height
 - [ ] `systemctl --user status 3d-printer-watch@k1se` is active, no error events
-- [ ] Reboot the printer once (power switch): Moonraker, nginx, camera and ws :9999 all come back without manual steps
+- [ ] Reboot the printer once (`POST /machine/reboot` or the power switch): Moonraker, nginx, camera and ws :9999 all come back without manual steps
