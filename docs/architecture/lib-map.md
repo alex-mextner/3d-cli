@@ -54,6 +54,7 @@ rendering, slicing support, and verification:
 - `niche_fit.py`
 - `orca_project_3mf.py`
 - `packing.py`
+- `prep_mesh.py`
 - `printability_mesh.py`
 - `render.py`
 - `standing_props.py`
@@ -199,6 +200,7 @@ Every current root Python module is listed here so future additions are intentio
 - `packing.py` — deterministic 2D print-bed layout planning helpers.
 - `printing.py` — compatibility wrapper re-exporting `slicing.printing`.
 - `preprocess_reference.py` — reference image preprocessing.
+- `prep_mesh.py` — the `3d prep` backend: mesh repair (merge/dedup/degenerate/winding/normals/fill-holes), convex-hull-normal + axis auto-orientation scored by bed-aware support overhang, and repaired+oriented STL / single-plate 3MF export; reuses `printability_mesh` + `mesh_check` for the final verdict.
 - `printability_mesh.py` — printability mesh checks.
 - `visible_faces.py` — visible-face gate: per-layer unsupported pieces on a declared visible half-space of the unioned part (manifold3d), and Support moves / sagging islands in the sliced G-code (scipy raster); bridges inside declared openings allowed up to a span.
 - `procurement.py` — deterministic local BOM and inventory purchase-plan helpers.
