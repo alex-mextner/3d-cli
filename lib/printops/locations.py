@@ -226,7 +226,9 @@ def resolve(conn: sqlite3.Connection, scanned: str) -> Location:
     if low.startswith(TAG_PREFIX) and rest.isascii() and rest.isdigit() and len(rest) < 19:
         return get(conn, int(rest))
     if text.isascii() and text.isdigit() and len(text) < 19:
-        return get(conn, int(text))
+        # a compact all-digit NFC UID ("04123456789012") wins over an id of the same digits
+        row = conn.execute("SELECT * FROM location WHERE tag_uid = ?", (text,)).fetchone()
+        return Location.from_row(row) if row is not None else get(conn, int(text))
     if low.startswith(QR_PREFIX) or low.split(":", 1)[0] in SELF_ID_SCHEMES:
         printed = [Location.from_row(r) for r in conn.execute("SELECT * FROM location WHERE qr = ?", (text,))]
         # the location whose current label this is, else the one that printed it most recently
@@ -398,7 +400,7 @@ def update(conn: sqlite3.Connection, loc: Location, changes: Mapping[str, Any], 
     if not clean:
         return loc
     with db.transaction(conn):
-        if "archived" in clean and loc.archived:
+        if "archived" in clean and get(conn, loc.id).archived:  # fresh: `loc` may predate an archive
             _active_parent(conn, loc.path)
         sets = ", ".join(f"{k} = ?" for k in clean)
         try:
@@ -491,6 +493,13 @@ def resync(conn: sqlite3.Connection, spoolman: Spoolman) -> SyncReport:
         if loc is None or (s.get("location") == loc.path and _spool_location_id(s) == loc.id):
             continue
         try:
+            # Spoolman has no compare-and-set: re-read the spool right before the write so a
+            # placement made since the listing (another request) is not overwritten from the
+            # stale snapshot. The remaining window is one GET→PATCH round trip.
+            fresh = spoolman.get("spool", int(s["id"]))
+            if _owner_id(fresh, by_text) != loc.id:
+                continue
+            loc = get(conn, loc.id)  # and the path as it is now: a concurrent move may have renamed it
             spoolman.update("spool", int(s["id"]), {"location": loc.path, "extra": {LOCATION_EXTRA: encode_extra(loc.id)}})
             report.updated.append(int(s["id"]))
         except SpoolmanError as e:

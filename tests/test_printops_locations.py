@@ -327,8 +327,11 @@ def test_api_tree_show_contents_move_archive(api_client: ApiClient, fake_spoolma
     assert shown["ancestors"][0]["path"] == "WH:A" and shown["qr_payload"] == "cell:WH:A/S1"
     assert [s["id"] for s in api_client.get("/v1/locations/WH:A/S1/contents")["spools"]] == [sid]
     assert api_client.get(f"/v1/locations/resolve?q=loc-{s1['id']}")["path"] == "WH:A/S1"
-    moved = api_client.patch("/v1/locations/WH:A/S1", {"path": "WH:A/S2", "note": "by the door"})
-    assert moved["location"]["note"] == "by the door" and moved["spoolman"]["updated"] == [sid]
+    with pytest.raises(ApiError) as e:
+        api_client.patch("/v1/locations/WH:A/S1", {"path": "WH:A/S2", "note": "by the door"})
+    assert e.value.status == 422 and "separate PATCH" in e.value.message
+    moved = api_client.patch("/v1/locations/WH:A/S1", {"path": "WH:A/S2"})
+    assert moved["location"]["path"] == "WH:A/S2" and moved["spoolman"]["updated"] == [sid]
     assert fake_spoolman.get("spool", sid)["location"] == "WH:A/S2"
     with pytest.raises(ApiError) as e:
         api_client.delete("/v1/locations/WH:A/S2")
@@ -433,3 +436,38 @@ def test_fleet_shrink_with_spoolman_down_keeps_the_slot_and_reads_still_work(
     fake_spoolman.down = False
     report = api_client.post("/v1/locations/sync-fleet")
     assert "slot:boris" in report["archived"]
+
+
+def test_unarchive_through_a_stale_object_still_checks_the_parent(conn: sqlite3.Connection, sm: FakeSpoolman) -> None:
+    t = _tree(conn, "WH:A", "WH:A/X")
+    stale = t["WH:A/X"]  # archived=False in memory
+    locs.archive(conn, sm, t["WH:A/X"], actor="t")
+    locs.archive(conn, sm, t["WH:A"], actor="t")
+    with pytest.raises(locs.LocationError, match="parent 'WH:A' of 'WH:A/X' is archived"):
+        locs.update(conn, stale, {"archived": False}, actor="t")
+
+
+def test_compact_digit_uid_resolves_to_its_tag_not_an_id(conn: sqlite3.Connection) -> None:
+    loc = locs.update(conn, _tree(conn, "WH:A")["WH:A"], {"tag_uid": "04123456789012"}, actor="t")
+    assert locs.resolve(conn, "04123456789012").id == loc.id
+    assert locs.resolve(conn, str(loc.id)).id == loc.id
+
+
+def test_resync_does_not_undo_a_placement_made_after_its_listing(conn: sqlite3.Connection, sm: FakeSpoolman) -> None:
+    t = _tree(conn, "WH:A", "WH:B")
+    sid = _spool(sm, "WH:A")  # hand-typed: resync would adopt it into WH:A
+
+    class PlacedMeanwhile(FakeSpoolman):
+        def find(self, entity: Any, params: Any = None) -> list[dict[str, Any]]:
+            rows = sm.find(entity, params)
+            locs.place_spool(sm, sid, t["WH:B"])  # another request, after the snapshot
+            return rows
+
+        def get(self, entity: Any, item_id: int) -> dict[str, Any]:
+            return sm.get(entity, item_id)
+
+        def update(self, entity: Any, item_id: int, data: Any) -> dict[str, Any]:
+            return sm.update(entity, item_id, data)
+
+    assert locs.resync(conn, PlacedMeanwhile()).updated == []
+    assert sm.get("spool", sid)["location"] == "WH:B"

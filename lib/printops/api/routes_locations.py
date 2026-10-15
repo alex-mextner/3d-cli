@@ -158,6 +158,9 @@ def patch(request: Request, conn: Conn, who: Writer, ref: str,
     new_path = changes.pop("path", None)
     if new_path is not None and not isinstance(new_path, str):
         raise HTTPException(422, "path must be a string")
+    if new_path is not None and changes:
+        # two transactions (update, then move + Spoolman re-sync) could half-apply; keep them apart
+        raise HTTPException(422, "move (path) and attribute changes go in separate PATCH requests")
     result: dict[str, Any] = {"renamed": [], "spoolman": {"updated": [], "failed": []}}
     try:
         if changes:

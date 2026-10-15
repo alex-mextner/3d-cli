@@ -15,6 +15,7 @@ from typing import Any
 from errors import ThreeDError, UsageError
 from printops.cli import Sub
 from printops.cli._common import Parsed, api_errors, client, parse
+from printops.client import ApiError
 
 ACTIONS = ("tree", "add", "show", "set", "mv", "archive", "unarchive", "label", "resolve", "sync-fleet", "resync")
 
@@ -177,6 +178,15 @@ def _sheet(p: Parsed) -> Any:
     return sheet
 
 
+def _record_label(api: Any, loc_id: int, path: str, payload: str) -> bool:
+    try:
+        api.patch(f"/v1/locations/{loc_id}", {"qr": payload})
+    except ApiError as e:
+        print(f"could not record the printed label of {path}: {e.message}", file=sys.stderr)
+        return False
+    return True
+
+
 def _label(p: Parsed) -> int:
     from printops.labels import Label, ntag213_ndef, render_pdf, render_svg_pages
 
@@ -197,22 +207,27 @@ def _label(p: Parsed) -> int:
                 chosen.update({d["id"]: d for k, d in sorted(flat.items()) if k.startswith(prefix)})
         labels = [Label(loc["id"], loc["path"], loc["kind"], loc["qr_payload"])
                   for loc in sorted(chosen.values(), key=lambda x: x["path"].lower())]
+        try:  # render first: a label that cannot fit must not leave a half-written sheet behind
+            rendered: list[str | bytes] = [render_pdf(labels, sheet)] if fmt == "pdf" else list(render_svg_pages(labels, sheet))
+        except ValueError as e:
+            raise UsageError(str(e), command="printops loc label") from e
+        files = [out if i == 0 else out.with_name(f"{out.stem}-{i + 1}{out.suffix}") for i in range(len(rendered))]
         out.parent.mkdir(parents=True, exist_ok=True)
-        if fmt == "pdf":
-            out.write_bytes(render_pdf(labels, sheet))
-            files = [out]
-        else:
-            pages = render_svg_pages(labels, sheet)
-            files = [out if i == 0 else out.with_name(f"{out.stem}-{i + 1}{out.suffix}") for i in range(len(pages))]
-            for f, doc in zip(files, pages, strict=True):
+        for f, doc in zip(files, rendered, strict=True):
+            if isinstance(doc, bytes):
+                f.write_bytes(doc)
+            else:
                 f.write_text(doc, encoding="utf-8")
-        for lb in labels:
-            api.patch(f"/v1/locations/{lb.loc_id}", {"qr": lb.payload})
     print(f"wrote {len(labels)} label(s) on {len(files)} page(s): {', '.join(str(f) for f in files)}")
+    # remember what is printed, so `show` can flag the sticker once it goes stale
+    unrecorded = [lb.path for lb in labels if not _record_label(api, lb.loc_id, lb.path, lb.payload)]
     if "--ntag" in p.flags:
         for lb in labels:
             print(f"ntag213 {lb.path}  {ntag213_ndef(lb).hex()}")
-    return 0
+    if unrecorded:
+        print(f"{len(unrecorded)} label(s) printed but not recorded; re-run the same `loc label` to record them",
+              file=sys.stderr)
+    return 1 if unrecorded else 0
 
 
 def run(argv: list[str]) -> int:
