@@ -479,35 +479,49 @@ def test_printer_vision_routes_to_tool(
 
 def test_vision_deps_cover_every_third_party_import() -> None:
     """`3d printer vision` runs outside the repo's .venv as `uv run --with VISION_DEPS`, which
-    installs nothing else: every third-party module the vision code imports must be listed
-    (0.12.0 shipped without pyyaml, so printer-devices.yaml could not be read)."""
+    installs nothing else: every third-party module reachable from vision_detect.py (following
+    its imports of other lib/ modules) must be listed (0.12.0 shipped without pyyaml, so
+    printer-devices.yaml could not be read)."""
     import ast
     import sys as _sys
 
     from commands import printer
 
     lib = Path(__file__).resolve().parents[1] / "lib"
-    local = {p.stem for p in lib.iterdir()} | {"printer_ops", "cli", "errors"}
     dist = {"cv2": "opencv-python-headless", "yaml": "pyyaml"}
     dev_only = {"tokenizers"}  # vision_verify's prompt regeneration, a dev command
-    files = [
-        lib / f"{m}.py"
-        for m in ("vision_detect", "vision_verify", "vision_geometry", "vision_scene")
-    ] + sorted((lib / "printer_ops").glob("*.py"))
+
+    def local_file(module: str) -> Path | None:
+        base = lib.joinpath(*module.split("."))
+        for f in (base.with_suffix(".py"), base / "__init__.py"):
+            if f.is_file():
+                return f
+        return None
+
     needed: set[str] = set()
-    for f in files:
+    todo, seen = [lib / "vision_detect.py"], set()
+    while todo:
+        f = todo.pop()
+        if f in seen:
+            continue
+        seen.add(f)
         for node in ast.walk(ast.parse(f.read_text())):
             if isinstance(node, ast.Import):
-                tops = [a.name.split(".")[0] for a in node.names]
+                mods = [a.name for a in node.names]
             elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
-                tops = [node.module.split(".")[0]]
+                mods = [node.module] + [f"{node.module}.{a.name}" for a in node.names]
             else:
                 continue
-            needed |= {
-                dist.get(t, t)
-                for t in tops
-                if t not in _sys.stdlib_module_names and t not in local and t not in dev_only
-            }
+            for m in mods:
+                top = m.split(".")[0]
+                if (sub := local_file(m)) is not None:
+                    todo.append(sub)
+                elif (
+                    local_file(top) is None
+                    and top not in _sys.stdlib_module_names
+                    and top not in dev_only
+                ):
+                    needed.add(dist.get(top, top))
     assert needed <= set(printer.VISION_DEPS.split(","))
 
 
