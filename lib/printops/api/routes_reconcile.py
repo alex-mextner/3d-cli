@@ -86,12 +86,19 @@ class ReconcileSettings:
                 MIN_POLL_S,
             )
             poll = MIN_POLL_S
-        return cls(
-            poll_s=max(poll, 0.0),
-            max_delta_e=float(
-                env.get("PRINTOPS_COLOR_DE_MAX") or rc.DEFAULT_MAX_DELTA_E
-            ),
-        )
+        try:
+            de_max = float(env.get("PRINTOPS_COLOR_DE_MAX") or rc.DEFAULT_MAX_DELTA_E)
+        except ValueError:
+            de_max = math.nan
+        # nan disables every `de > max` check; negative flags identical colours
+        if not math.isfinite(de_max) or de_max < 0:
+            log.warning(
+                "PRINTOPS_COLOR_DE_MAX=%r is not a finite non-negative number; using %s",
+                env.get("PRINTOPS_COLOR_DE_MAX"),
+                rc.DEFAULT_MAX_DELTA_E,
+            )
+            de_max = rc.DEFAULT_MAX_DELTA_E
+        return cls(poll_s=max(poll, 0.0), max_delta_e=de_max)
 
 
 def pollable(printer: FleetPrinter) -> bool:
@@ -208,12 +215,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                     )
                 )
             )
-        tasks.append(asyncio.create_task(follow_events(rec, state.settings.db_path)))
         log.info(
             "slot poller: %s every %ss",
             ", ".join(names) or "no pollable printers",
             cfg.poll_s,
         )
+    if fleet is not None:
+        # binding changes reconcile against cached readings; no printer contact
+        tasks.append(asyncio.create_task(follow_events(rec, state.settings.db_path)))
     try:
         yield
     finally:

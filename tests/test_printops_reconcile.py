@@ -661,6 +661,14 @@ def test_poll_interval_has_a_floor_and_zero_disables() -> None:
     )
 
 
+@pytest.mark.parametrize("raw", ["oops", "nan", "inf", "-1"])
+def test_bad_colour_threshold_falls_back_to_default(raw: str) -> None:
+    assert (
+        routes.ReconcileSettings.from_env({"PRINTOPS_COLOR_DE_MAX": raw}).max_delta_e
+        == rc.DEFAULT_MAX_DELTA_E
+    )
+
+
 def test_poller_reads_once_per_interval_and_events_trigger_a_reconcile(
     tmp_path: Path, spoolman: FakeSpoolman, moon: FakeMoonraker, fleet_file: Path
 ) -> None:
