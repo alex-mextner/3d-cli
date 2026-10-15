@@ -84,8 +84,9 @@ k1se:
   model: Creality K1 SE
   owner: own
   access: full
-  # Rooted 2026-10-15 + Creality Helper Script Moonraker (docs/printers/k1se-root-upgrade.md);
-  # the stock HTTP + ws:9999 stack still runs (adapter creality-stock works as a fallback).
+  # Rooted 2026-10-15 + Creality Helper Script Moonraker (runbook: issue #221,
+  # https://github.com/alex-mextner/3d-cli/issues/221). The stock HTTP + ws:9999 stack still runs, but there is
+  # no automatic fallback: if Moonraker is down, set `adapter: creality-stock` in a printer-devices.yaml override by hand.
   adapter: moonraker
   host: 192.168.0.27
   port: 7125
