@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily PrintOps DB snapshot, before Home Assistant's automatic backup (~04:45-05:15)
+
+[Timer]
+OnCalendar=*-*-* 04:15:00
+Persistent=true
+RandomizedDelaySec=5min
+
+[Install]
+WantedBy=timers.target
