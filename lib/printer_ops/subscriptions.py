@@ -385,7 +385,9 @@ def has_vision() -> bool:
 
 def fresh_frame_hint(printer: str) -> str:
     if has_vision():
-        return f"take one with `3d printer vision {printer} --once --save /tmp/{printer}-now.jpg`"
+        # Not /tmp: it is tmpfs on the user's machine, and evidence frames belong in the cache.
+        return (f"take one with `3d printer vision {printer} --once "
+                f"--save ~/.cache/3d-cli/vision/now/{printer}.jpg`")
     return ("this 3d has no `3d printer vision` (#150) to grab one: judge from the event data and "
             f"`3d printer status {printer}`, and if still unsure tell the user it is unconfirmed")
 

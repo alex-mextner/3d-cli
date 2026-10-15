@@ -335,13 +335,15 @@ def test_monitor_reports_the_printers_own_noodle_verdict_once_per_episode() -> N
 
 def test_a_new_print_restarts_the_per_print_history_but_a_pause_does_not() -> None:
     mon = VisionMonitor("u1", _Scores([]))
-    mon.set_job("printing", "a.gcode")
+    assert mon.set_job("printing", "a.gcode") is True
     mon.tracker.frames = 50
-    mon.set_job("paused", "a.gcode")
-    mon.set_job("printing", "a.gcode")
+    assert mon.set_job("paused", "a.gcode") is False
+    assert mon.set_job("printing", "a.gcode") is False
     assert mon.tracker.frames == 50
-    mon.set_job("printing", "b.gcode")
+    assert mon.set_job("printing", "b.gcode") is True
     assert mon.tracker.frames == 0
+    mon.set_job("complete", "b.gcode")
+    assert mon.set_job("printing", "b.gcode") is True  # the same file printed again
 
 
 # ---- vision_detect helpers ----------------------------------------------------------------------
@@ -436,9 +438,16 @@ def test_evaluate_scores_a_directory_in_order(tmp_path: Path) -> None:
         seen.append(round(float(img.mean())))
         return FrameScore(0.0)
 
-    (res,) = vision_detect.evaluate([(tmp_path, "neg")], score)
-    assert len(res.scores) == 3
-    assert seen == [0, 60, 120]
+    starts: list[int] = []
+    # the same path twice is still two prints: the scorer is told before each
+    res = vision_detect.evaluate(
+        [(tmp_path, "neg"), (tmp_path, "neg")],
+        score,
+        new_print=lambda: starts.append(len(seen)),
+    )
+    assert [len(r.scores) for r in res] == [3, 3]
+    assert seen == [0, 60, 120] * 2
+    assert starts == [0, 3]
 
 
 @pytest.mark.parametrize(
@@ -448,6 +457,7 @@ def test_evaluate_scores_a_directory_in_order(tmp_path: Path) -> None:
         (["run", "u1"], ["run", "u1"]),
         (["eval", "--pos", "a"], ["eval", "--pos", "a"]),
         (["fetch-model"], ["fetch-model"]),
+        (["record", "u1", "/tmp/rec"], ["record", "u1", "/tmp/rec"]),
     ],
 )
 def test_printer_vision_routes_to_tool(

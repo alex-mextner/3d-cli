@@ -111,7 +111,7 @@ idle one as an aside that starts a turn:
   frames: /home/me/.cache/3d-cli/vision/evidence/u1-20261014T101500Z-vision_spaghetti.jpg /home/me/.cache/3d-cli/vision/evidence/u1-20261014T101500Z-diff.png
   data: {"p":0.832,"trend":0.41,"boxes":[...]}
 What to do:
-1. Open every frame above with your read tool. No frame or too old: u1: take one with `3d printer vision u1 --once --save /tmp/u1-now.jpg`. Printer state: `3d printer status u1`.
+1. Open every frame above with your read tool. No frame or too old: u1: take one with `3d printer vision u1 --once --save ~/.cache/3d-cli/vision/now/u1.jpg`. Printer state: `3d printer status u1`.
 2. Judge whether this is a REAL print failure (spaghetti/noodle, detached or knocked-over part, blob on the nozzle, layer shift, printing in air) or a false alarm (normal print, reflections, lighting, purge line, supports, empty bed).
 3. Real: tell the user via `tg` — a short Russian message with the frame: `tg --photo FRAME "<printer>: <что видно>, <что советуешь>"`. False alarm: do not message the user.
 4. Never pause, cancel or send G-code without the user's explicit ok.
