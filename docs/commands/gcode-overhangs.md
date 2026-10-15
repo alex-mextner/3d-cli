@@ -22,11 +22,13 @@ gate, so [`3d printer start`](printer.md) refuses such a plate unless `--force`.
 
 ## What is measured
 
-Objects come from the slicer's labels (`EXCLUDE_OBJECT_START`, `M486`, `; printing object …`);
-a file without labels is one object, `plate`. Extrusion before the first layer marker (a purge
-line in the start G-code), skirt, brim, prime/wipe tower, ironing and `;TYPE:Custom` blocks are
+Objects come from the slicer's labels (`EXCLUDE_OBJECT_START`; Bambu Studio's
+`; start printing object, unique label id: N` / `M624` … `M625` blocks, named by their
+`; printing object NAME` comment; `M486`; `; printing object …`); a file without labels is one
+object, `plate`. Extrusion before the first layer marker (a purge line in the start G-code),
+skirt, brim, prime/wipe tower, ironing and custom blocks (`;TYPE:` or Bambu `; FEATURE:`) are
 ignored; support and raft lines carry the object but are not checked themselves. Lines are
-rasterised at 0.1 mm (coarser for very large objects) with their `;WIDTH:`.
+rasterised at 0.1 mm (coarser for very large objects) with their `;WIDTH:` (Bambu `; LINE_WIDTH:`).
 
 | Term | Definition |
 |---|---|

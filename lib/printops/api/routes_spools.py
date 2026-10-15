@@ -46,7 +46,9 @@ def _call(fn: Callable[[], Any]) -> Any:
     try:
         return fn()
     except spools.SpoolError as e:
-        return JSONResponse({"detail": e.message, "info": e.detail}, status_code=e.status)
+        return JSONResponse(
+            {"detail": e.message, "info": e.detail}, status_code=e.status
+        )
     except (tares.TareError, ledger.LedgerError) as e:
         return JSONResponse({"detail": str(e), "info": {}}, status_code=422)
 
@@ -134,13 +136,17 @@ def show(
 
 
 @router.get("/v1/spools/{spool_id}/ledger", response_model=None)
-def spool_ledger(conn: Db, who: Reader, spool_id: int) -> Any:
-    est = ledger.estimate(conn, spool_id)
-    return {
-        "spool_id": spool_id,
-        "rows": [r.to_dict() for r in ledger.history(conn, spool_id)],
-        "remaining": est.to_dict() if est.anchored else None,
-    }
+def spool_ledger(conn: Db, sm: Sm, who: Reader, spool_id: int) -> Any:
+    def go() -> Any:
+        spools.get_spool(sm, spool_id)  # 404 for a spool Spoolman does not know
+        est = ledger.estimate(conn, spool_id)
+        return {
+            "spool_id": spool_id,
+            "rows": [r.to_dict() for r in ledger.history(conn, spool_id)],
+            "remaining": est.to_dict() if est.anchored else None,
+        }
+
+    return _call(go)
 
 
 @router.get("/v1/spools/{spool_id}/tare", response_model=None)
@@ -196,9 +202,7 @@ def measure(conn: Db, sm: Sm, who: Writer, spool_id: int, body: JsonBody) -> Any
 
 
 @router.post("/v1/spools/{spool_id}/empty", response_model=None)
-def empty(
-    conn: Db, sm: Sm, who: Writer, spool_id: int, body: OptBody = None
-) -> Any:
+def empty(conn: Db, sm: Sm, who: Writer, spool_id: int, body: OptBody = None) -> Any:
     return _call(
         lambda: spools.empty(
             _ctx(conn, sm, who), spool_id, note=_str(body or {}, "note")
