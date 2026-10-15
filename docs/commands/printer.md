@@ -191,7 +191,7 @@ frames it sends are Moonraker's `server.info`, `printer.objects.list` and
 | `exception` | critical (warning for level ≤ 1) | U1 `print_stats.exception` / `exception_manager` (e.g. code 2 "detected noodle" from defect detection, id 532); K1 `err.errcode`. |
 | `gcode_error` | critical while a job is active, else warning | A G-code response starting with `!!` — e.g. `!! Error evaluating 'gcode_macro INNER_PREEXTRUDE_FILAMENT:gcode'`. |
 | `gcode_warning` | warning | `// Warning…` / `Warning:` responses. |
-| `filament` | critical while printing, warning while paused | Moonraker `filament_switch_sensor`/`filament_motion_sensor` goes from detected to not detected; K1 `materialStatus` changes (raw value reported). |
+| `filament` | critical while printing, warning while paused | Moonraker `filament_switch_sensor`/`filament_motion_sensor` goes from detected to not detected; K1 runout sensor reports no filament (`materialDetect` 1 and `materialStatus` 1 — the K1's own UI: «Consumable not detected»). The K1 event is held 10 s and dropped if the sensor recovers; in the start phase it waits until the start phase ends ([#242](https://github.com/alex-mextner/3d-cli/issues/242)). A runout pause is reported at once by the `state` event, which carries the reason. |
 | `homing_lost` | critical | Printing/paused and `homed_axes` (K1: `autohome`) loses X, Y or Z — resuming would move unhomed axes. Held 10 s, see below. |
 | `bed_off` | warning | Bed target dropped to 0 while printing/paused (or 0 at start while paused). Held 10 s, see below. |
 | `temperature` | warning (critical when drifting while printing) | A heater target not reached after `--heat-timeout-min`; or, after reaching, more than 15 °C off for 60 s. |
@@ -207,8 +207,9 @@ motors (`M84`) while the printer still reports printing or paused. So `bed_off` 
 are ignored ([#190](https://github.com/alex-mextner/3d-cli/issues/190)). Found already at
 watch start (a paused job), they are reported at once. Start macros do the same in reverse —
 the K1's stock `START_PRINT` zeroes the bed and nozzle targets for about 30 s while probing — so
-in the start phase (progress at most 1 %, or the first 10 minutes after the watcher saw the job
-start) the hold is 90 s, and a restored target or re-homed axes drop the event.
+in the start phase (the first 10 minutes after the watcher saw the job start; for a job already
+running when the watcher started, progress at most 1 %) the hold is 90 s, and a restored target
+or re-homed axes drop the event.
 
 Each event is one JSON line on stdout:
 `{"ts", "printer", "kind", "severity", "text", "key", "data"}` — `text` is one phone-first line
