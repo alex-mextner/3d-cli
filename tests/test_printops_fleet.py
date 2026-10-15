@@ -229,3 +229,12 @@ def test_printer_names_that_collide_as_strings_are_reported(tmp_path: Path) -> N
     printers, problems = validate(yaml.safe_load(f"1: {entry}\n'1': {entry}\n"), tmp_path / "f.yaml")
     assert [p.message for p in problems] == ["1: duplicate printer name (YAML keys 1 and '1' are the same name)"]
     assert printers == {}
+
+
+def test_fleet_devices_carry_the_fleet_model(env: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Device.model comes from the fleet entry: `printer vision` picks its bundled camera
+    calibration by it, so a fleet-only printer must not lose it."""
+    _use(monkeypatch, write_fleet(tmp_path / "fleet.yaml", u1_entry(FakeMoonraker(port=7001)),
+                                                      k1_entry(FakeCreality(http_port=8001, ws_port=9001))))
+    d = devices.load_devices()
+    assert (d["u1"].model, d["k1se"].model) == ("Snapmaker U1", "Creality K1 SE")
