@@ -371,8 +371,13 @@ def _exposure(argv: list[str]) -> int:
         body = {"printer": p.pos[0]}
         if (limit := p.int_opt("--limit", sub)) is not None:
             body["limit"] = limit
+        api = _slow(p, sub)
+        # 3d-api pages the history 50 jobs at a time, 5 s apart, each GET up to 10 s
+        # (printops.exposure PAGE / PACE_S): wait for every page, not just the first few
+        pages = -(-(limit or 50) // 50)
+        api.timeout = max(SLOW_TIMEOUT_S, 30.0 + 15.0 * pages)
         with api_errors(sub):
-            out = _slow(p, sub).post("/v1/exposure/sync", body)
+            out = api.post("/v1/exposure/sync", body)
         lines = [f"{out['printer']}: {out['jobs_seen']} job(s) read, {len(out['added'])} exposure row(s) added, "
                  f"{out['already_synced']} already synced, {out['in_progress']} still printing"]
         for r in out["added"]:

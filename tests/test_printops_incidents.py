@@ -639,6 +639,17 @@ def test_a_delayed_event_older_than_the_draft_still_joins_it(
     assert late.merged and late.incident is not None and late.incident.id == first.incident.id
 
 
+def test_a_camera_detection_merged_into_a_stall_draft_keeps_its_tags(
+    fleet: Path, sm: FakeSpoolman, printops_db: sqlite3.Connection
+) -> None:
+    rd, _ = readers_for(u1_status("printing", "plate.gcode", 0.3), ())
+    watch_incidents.draft_from_watch(printops_db, sm, watch_event("stall", "warning"), readers=rd, actor="watch")
+    seen = watch_incidents.draft_from_watch(printops_db, sm, watch_event("vision_spaghetti", key="u1:v:1", p=0.9),
+                                            readers=rd, actor="vision")
+    assert seen.merged and seen.incident is not None
+    assert {"vision", "spaghetti", "stall"} <= set(seen.incident.tags)
+
+
 def test_a_delayed_event_of_the_previous_job_does_not_join_the_new_jobs_draft(
     fleet: Path, sm: FakeSpoolman, printops_db: sqlite3.Connection
 ) -> None:

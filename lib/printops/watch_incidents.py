@@ -211,8 +211,11 @@ def _join_open_draft(conn: sqlite3.Connection, printer: str, job_file: str | Non
     draft = _open_draft(conn, printer, job_file, at)
     if draft is None:
         return None
-    upgrade = ({"kind": found.kind, "confidence": found.confidence, "add_tags": list(found.tags)}
-               if found.kind != "other" else None)
+    # tags always join (a camera's `vision`/`spaghetti` on a stall draft); kind and confidence
+    # only refine a draft that is still `other`
+    upgrade: dict[str, Any] = {"add_tags": [found.reporter, *found.tags]}
+    if found.kind != "other":
+        upgrade.update(kind=found.kind, confidence=found.confidence)
     try:
         merged = incidents.attach_evidence(conn, draft, evidence, actor=actor, photos=photos, upgrade=upgrade)
     except IncidentError as e:

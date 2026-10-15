@@ -396,7 +396,8 @@ def state_at(
     with path.open("rb") as fh:
         fh.seek(offset)
         for i, raw in enumerate(fh, start=first):
-            if deadline is not None and not (i - first) % 65536 and time.monotonic() > deadline:
+            # every 4096 lines: long lines must not carry a scan far past its deadline
+            if deadline is not None and not (i - first) % 4096 and time.monotonic() > deadline:
                 raise ValueError(f"G-code scan of {path.name} exceeded its time budget at line {i + 1}")
             line = raw[:-1] if raw.endswith(b"\n") else raw
             if byte is not None and offset + len(raw) > byte:

@@ -559,7 +559,8 @@ def attach_evidence(
         conn.execute("UPDATE incident SET context = ?, updated_at = ? WHERE id = ?",
                      (json.dumps(ctx, sort_keys=True, default=str), db.utc_now(), inc.id))
         # a kind already refined (by an earlier event or a human) is not overwritten
-        applied = requested if stored.kind == "other" else {k: v for k, v in requested.items() if k == "add_photos"}
+        additive = ("add_photos", "add_tags")
+        applied = requested if stored.kind == "other" else {k: v for k, v in requested.items() if k in additive}
         ch = _apply_lists(stored, applied)
         diff = {k: v for k, v in ch.items() if getattr(stored, k) != v}
         if diff:
