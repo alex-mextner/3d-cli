@@ -35,7 +35,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 from urllib.parse import urlsplit
 
 from printer_ops.base import PAUSED, PRINTING, PrinterCommError
@@ -567,6 +567,32 @@ class FailureTracker:
 # ---- one monitoring step ----------------------------------------------------------------------
 
 
+# Every label the U1 camera detector (unisrv `camera.detect_capture`) reports, from Snapmaker
+# u1-klipper defect_detection.py and the U1's klippy.log (2026-10-16):
+#   print-time check, request labels ['noodle'] (+ 'residue' when enabled): response_callback
+#     pauses on noodle (CONFIRM_NOODLE, exception code 2) and residue (code 3);
+#   start-of-print clean-bed check (DEFECT_DETECTION_DETECT_BED), request ['item']: the answer
+#     also carries nozzle, legend_text and extrusion_line; only item decides (dirty bed, code 1);
+#   nozzle check, request ['nozzle']: detect_dirty_nozzle reads a HIGH prob as "found, clean".
+# A dirty-bed `item` makes the firmware pause at once (exception code 1), which `printer watch`
+# reports as an exception; this event only adds the detector's own numbers.
+class NpuLabel(NamedTuple):
+    defect: bool
+    meaning: str
+    firmware: str  # what the U1 does about it, for the event text
+
+
+NPU_LABELS: dict[str, NpuLabel] = {
+    "noodle": NpuLabel(True, "loose filament (spaghetti)", "the U1 pauses itself after several hits"),
+    "residue": NpuLabel(True, "residue on the print", "the U1 pauses itself after several hits"),
+    "item": NpuLabel(True, "a foreign object on the bed", "the U1 pauses the start (dirty bed)"),
+    "nozzle": NpuLabel(False, "the nozzle itself", "no action"),
+    "legend_text": NpuLabel(False, "the markings printed on the build plate", "no action"),
+    "extrusion_line": NpuLabel(False, "a purge/extrusion line on the bed", "no action"),
+}
+UNKNOWN_NPU_LABEL = NpuLabel(True, "a label this firmware version did not document", "check the camera")
+
+
 @dataclass(frozen=True)
 class MonitorLimits:
     stale_s: float = 120.0  # printing, but the frame has not changed for this long
@@ -575,11 +601,11 @@ class MonitorLimits:
     )
     npu_threshold: float = 0.83  # the U1's own threshold at sensitivity "low"
     npu_quiet_s: float = 300.0  # no NPU hit for this long ends a noodle episode
-    # NPU labels that are not defects. "nozzle" is the firmware's nozzle check: a high prob
-    # means the nozzle was found (clean), defect_detection.detect_dirty_nozzle; it shows up at
-    # every U1 print start (#306). A denylist, so a defect label added by a firmware update
-    # still reaches the agent.
-    npu_ignored_labels: frozenset[str] = frozenset({"nozzle"})
+    # NPU labels that are not defects (NPU_LABELS); unknown labels still count, so a defect
+    # class added by a firmware update reaches the agent.
+    npu_ignored_labels: frozenset[str] = frozenset(
+        label for label, spec in NPU_LABELS.items() if not spec.defect
+    )
 
 
 _RANK: dict[str | None, int] = {None: 0, INFO: 1, WARNING: 2, CRITICAL: 3}
@@ -800,13 +826,14 @@ class VisionMonitor:
         ):
             return []
         top = self.last_npu
+        spec = NPU_LABELS.get(top.label, UNKNOWN_NPU_LABEL)
         return [
             self._event(
                 "printer_noodle_verdict",
                 WARNING,
                 self._npu,
-                f"printer's own AI camera sees {top.label} (p {top.prob:.2f}, "
-                f"{top.area * 100:.0f}% of the frame); the U1 pauses itself after several hits",
+                f"printer's own AI camera sees {top.label}: {spec.meaning} "
+                f"(p {top.prob:.2f}, {top.area * 100:.0f}% of the frame); {spec.firmware}",
                 None,
                 None,
                 {

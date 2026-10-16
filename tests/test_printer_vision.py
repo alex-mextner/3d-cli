@@ -417,10 +417,47 @@ def test_the_log_parser_normalises_labels() -> None:
     assert [v.label for v in parse_klippy_verdicts(line, now=NOW)] == ["nozzle", "7"]
 
 
-@pytest.mark.parametrize("label", ["residue", "spaghetti"])  # a defect label a firmware update may add
-def test_other_npu_labels_still_count(label: str) -> None:
+@pytest.mark.parametrize("label", ["noodle", "residue", "item", "spaghetti"])  # spaghetti: a label a firmware update may add
+def test_defect_and_unknown_npu_labels_count(label: str) -> None:
     mon = _printing_monitor()
     assert [e.data["label"] for e in mon.npu([NpuVerdict(NOW, label, 0.9, 0.1, 1)], NOW)] == [label]
+
+
+# The clean-bed check at the start of u1_night_v4 (U1 klippy.log, 2026-10-16 10:27:32).
+U1_BED_CHECK = ("10:27:32.402:[defect_detection] response info: {'id': 3367, 'jsonrpc': '2.0', 'result': {"
+                "'extrusion_line': {'obj_areas': 0.0, 'obj_cnts': 0, 'obj_probs': 0.0, 'obj_weighted_probs': 0.0}, "
+                "'item': {'obj_areas': 0.0, 'obj_cnts': 0, 'obj_probs': 0.0, 'obj_weighted_probs': 0.0}, "
+                "'legend_text': {'obj_areas': 0.0885, 'obj_cnts': 4, 'obj_probs': 0.9507, 'obj_weighted_probs': 0.9487}, "
+                "'nozzle': {'obj_areas': 0.0011, 'obj_cnts': 5, 'obj_probs': 0.9316, 'obj_weighted_probs': 0.93}}}")
+
+
+def test_the_clean_bed_check_of_a_clean_plate_raises_nothing() -> None:
+    """#324: legend_text (the plate's printed markings) p 0.95 and nozzle p 0.93 are no defects."""
+    mon = _printing_monitor()
+    verdicts = parse_klippy_verdicts(U1_BED_CHECK, now=NOW)
+    assert sorted(v.label for v in verdicts) == ["extrusion_line", "item", "legend_text", "nozzle"]
+    assert mon.npu(verdicts, NOW) == []
+    for label in ("legend_text", "extrusion_line", "nozzle"):
+        assert mon.npu([NpuVerdict(NOW + 1, label, 0.99, 0.5, 9)], NOW + 1) == []
+
+
+def test_a_dirty_bed_verdict_says_what_it_is() -> None:
+    mon = _printing_monitor()
+    ev = mon.npu([NpuVerdict(NOW, "item", 0.9, 0.05, 1)], NOW)
+    assert len(ev) == 1 and "a foreign object on the bed" in ev[0].text
+    assert "dirty bed" in ev[0].text and "several hits" not in ev[0].text
+
+
+def test_a_dirty_bed_is_not_hidden_by_a_stronger_plate_marking_in_the_same_answer() -> None:
+    mon = _printing_monitor()
+    ev = mon.npu([NpuVerdict(NOW, "legend_text", 0.95, 0.09, 4), NpuVerdict(NOW, "item", 0.9, 0.05, 1)], NOW)
+    assert [(e.data["label"], e.data["hits"]) for e in ev] == [("item", 1)]
+
+
+def test_an_unknown_label_says_so() -> None:
+    mon = _printing_monitor()
+    ev = mon.npu([NpuVerdict(NOW, "spaghetti", 0.9, 0.05, 1)], NOW)
+    assert "did not document" in ev[0].text and "check the camera" in ev[0].text
 
 
 def test_a_new_print_restarts_the_per_print_history_but_a_pause_does_not() -> None:
