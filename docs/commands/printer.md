@@ -23,6 +23,9 @@ Epic: [#90](https://github.com/alex-mextner/3d-cli/issues/90).
 3d printer unsubscribe --session ID | --id SUBID | --all
 3d printer subscriptions [list | test PRINTER] [--json]
 3d printer agent list [--json] | stop PRINTER | handoff PRINTER --summary TEXT
+3d printer todo list [PRINTER] [--all] [--json] | add PRINTER --title TEXT [options] | done ID [--note TEXT]
+3d printer todo dismiss ID --reason TEXT | snooze ID [--until DATE] [--reason TEXT] | reopen ID
+3d printer todo import FILE... [--dry-run] [--json]
 ```
 
 | Subcommand | What |
@@ -37,6 +40,7 @@ Epic: [#90](https://github.com/alex-mextner/3d-cli/issues/90).
 | `bed status` / `reference` / `monitor` | Is the bed clear, is the build plate on — from the camera against an empty-bed reference; also the `bed` start gate and the `bed_clear` event — see [Bed state](#bed-state). |
 | `subscribe` / `unsubscribe` / `subscriptions` | Route printer alerts to an AI agent first: it looks at the frame and tells the user only if the failure is real — see [printer-subscribe.md](printer-subscribe.md). |
 | `agent list` / `stop` / `handoff` | The temporary per-printer omp agent (tmux) that gets the warning+ alerts no live subscriber took — see [printer-subscribe.md#the-temporary-printer-agent](printer-subscribe.md#the-temporary-printer-agent). |
+| `todo …` | The to-do list of each printer: needed calibrations, due maintenance, repairs of open faults, manual tasks — see [To-do list](#to-do-list-3d-printer-todo). |
 
 Options:
 
@@ -84,7 +88,102 @@ Options:
 3d printer subscribe --session 01a12cd6 --printer u1 --kinds 'vision_*,printer_noodle_verdict'
 3d printer subscriptions
 3d printer agent list
+3d printer todo list
+3d printer todo add k1se --title "Check X belt tension" --type inspect --when idle --duration 15
+3d printer todo done 12 --note "belts re-tensioned"
 ```
+
+## To-do list (`3d printer todo`)
+
+One list per printer of what to do on it (plan §7.5, issue
+[#281](https://github.com/alex-mextner/3d-cli/issues/281)): what, why, whether it blocks printing,
+when it suits (idle / before a print / any time), how long it takes, whether a human is needed,
+where it comes from and its status. Served by 3d-api (`/v1/printers/{p}/tasks`, `/v1/tasks/…`,
+see services/3d-api/README.md); Home Assistant shows the same list
+([#285](https://github.com/alex-mextner/3d-cli/issues/285)).
+
+```
+3d printer todo list [PRINTER] [--all] [--json]
+3d printer todo add PRINTER --title TEXT [--why TEXT] [--type T] [--head H] [--slot S] [--component C]
+                   [--blocks none|printer|head[:H]|slot[:S]] [--when idle|before_print|any] [--when-note TEXT]
+                   [--duration MIN] [--no-human] [--depends-on ID,..] [--ref R,..] [--kinds K,..] [--spool ID]
+                   [--followup] [--json]
+3d printer todo done ID [--note TEXT]
+3d printer todo dismiss ID --reason TEXT
+3d printer todo snooze ID [--until DATE] [--reason TEXT]
+3d printer todo reopen ID
+3d printer todo import FILE... [--dry-run] [--json]
+```
+
+Where tasks come from (`source`):
+
+| Source | Opens when | Closes when |
+|---|---|---|
+| `fault` | a fault is open (`3d printops maint fault …`, the U1 T2 fault seeded from the fleet file): a repair task that **blocks its head** (or the whole printer for a fault without a head) | the fault closes: fixed → done, wontfix → dismissed |
+| `maintenance_rule` | a rule of `fleet/maintenance-rules.yaml` is announced due (`3d printops maint due --check`) | the rule's maintenance is logged (`3d printops maint log P[/H] --rule ID`) |
+| `calibration` | a calibration kind is not current for the head and its loaded spool ([`3d calibrate plan`](calibrate.md): never done, new filament/vendor/lot/nozzle, invalidated by a nozzle swap or repair, expired) — one task per kind × head × nozzle × filament (× lot when the kind is lot-sensitive) | a record makes it current ([`3d calibrate record`](calibrate.md)) |
+| `manual`, `calibration_followup` | `add` (`--followup`: a mechanical action after a calibration) | `done` |
+| `import` | `import` of a JSONL buffer | `done` |
+
+The first three are **derived**: 3d-api materialises them on every tasks request and every 15
+minutes, keyed by `source_key` (the printer and the full scope, e.g.
+`calib:k1se/T1/flow_ratio/nozzle:4/filament:12/lot:A7`, `rule:u1/hotend-wipe/T1/0`,
+`fault:fleet:u1/T2`). `done` refuses them and names the command that records the work — the
+record closes the task, otherwise the next pass would open it again. `dismiss --reason` drops one
+without the work and stays dismissed for that key; a new nozzle or another spool is a new key, so a
+new task. When the need goes away for another reason (another spool loaded, the head no longer
+usable, the rule deleted) the task is dismissed by `derive`. A head whose spool is unknown
+(Spoolman unreachable, nothing bound) keeps its calibration tasks as they are.
+
+`list` shows open tasks first (blocking ones on top), then snoozed ones; a task with an open
+dependency (`--depends-on`) is `WAITING`. `--all` adds done and dismissed ones. A snoozed task
+opens again at `--until`; without `--until` it waits for `reopen`.
+
+```
+$ 3d printer todo list u1
+u1: 2 open, 2 blocking
+  #1     OPEN      u1/T2      repair      Repair u1/T2: head T2 does not work
+         why: open fault #1 since 2026-10-15; prints using this head are refused until it is fixed
+         BLOCKS head T2 · any time · human · from fault — closes with: 3d printops maint fault close 1 --fixed-by MAINT_ID (after `3d printops maint log …`)
+  #11    OPEN      u1/T3      setup       Fix slot T3 filament label: shows '#FFFFFF NONE', loaded spool is green #1B5E20
+         BLOCKS slot T3 · any time · human · from import
+```
+
+**Without 3d-api** (no `PRINTOPS_API`/`api:` configured, or it does not answer) `add`, `done`,
+`dismiss` and `snooze` append the operation to `~/.local/share/3d-cli/printer-todo/<printer>.jsonl`
+(`$XDG_DATA_HOME/3d-cli/printer-todo`, next to the other 3d-cli state files; one
+line per operation, schema `printops.printer_task/1`, `flock` + one `O_APPEND` write + `fsync`)
+and say so on stderr; `list` then shows the buffer (name tasks by their uid prefix). `import`
+without FILE takes every file of that directory (task buffers and the `<printer>.notices.jsonl`
+idle-notice journals). The first buffers (2026-10-15/16) were written to `~/.local/share/3d/printer-todo/`
+(`$XDG_DATA_HOME/3d/printer-todo`); the first `3d printer todo` that touches the buffer moves that
+directory, notice journals included, to the new place once, under `flock`, and says so on stderr.
+If both directories hold something, the command stops (exit 1) and lists the `3d printer todo
+import FILE` commands that merge both into 3d-api (by uid, nothing doubles; an explicit FILE never
+triggers the move, so these run), any non-buffer entry to check by hand, and the `mv` that sets the
+old directory aside afterwards (nothing is deleted). If neither directory exists, nothing happens.
+`import` replays buffer files into 3d-api in order, each operation once by its `uid` — importing a
+file twice adds nothing. Each file is one transaction: a line that is not JSON or names an unknown
+schema stops that file's import with its line number and nothing of that file is imported; with
+several files, the ones before it stay imported (a re-run skips them by uid). An `open` whose
+`source_key` matches an open task (e.g. `fault:fleet:u1/T2`) merges into it (the buffer uid joins
+`refs`); a spool named only by its filament name is bound to the one Spoolman spool of exactly
+that filament name, else to the one whose filament name contains it (`Snapdragon` →
+`жёлтый Snapdragon`, reported as a warning); otherwise it stays unbound with a warning.
+`--dry-run` runs the import and rolls it back. The same command moves
+idle notices (`printops.idle_notice/1`, #283) into 3d-api.
+
+- `--blocks head:T2` — what the task keeps from printing (`head`/`slot` take the head/slot from the
+  option or `--head`/`--slot`); the print preflight check that enforces it is #282.
+  `3d printer todo add u1 --title "Fix T3 label" --type setup --blocks slot:T3 --head T3`
+- `--depends-on ID,..` — tasks that must be done first.
+  `3d printer todo add k1se --title "Cold SHAPER_CALIBRATE X" --type calibration --depends-on 9 --no-human`
+- `--until DATE` — ISO date or date-time (a date = its midnight UTC).
+  `3d printer todo snooze 4 --until 2026-10-25 --reason "after the house queue"`
+- `--json` — the API objects (`list`: `{printer, summary, tasks, sync}` for one printer, `{tasks}` for all).
+  `3d printer todo list u1 --json | jq '.tasks[] | select(.blocks != "none") | {id, title, blocks}'`
+- `--dry-run` — `import` only: report what would happen, change nothing.
+  `3d printer todo import ~/.local/share/3d-cli/printer-todo/k1se.jsonl --dry-run`
 
 ## Fleet registry
 
