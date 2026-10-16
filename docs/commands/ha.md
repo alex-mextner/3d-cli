@@ -92,7 +92,8 @@ when a changed file is not mounted by the service it lists.
    regression restores the backup and runs the same reloads/recreates on the old files.
 8. **Record**: `.3d-cli-deployed` in the HA repo gets the SHA, time and backup path. The
    deployed paths are staged in the HA checkout and committed on a branch
-   `3d-deploy/<sha12>` (the HA repo's pre-commit hook runs on it), which is pushed through
+   `3d-deploy/<sha12>` built on `origin/main`, never on the live HEAD, so local commits nobody
+   pushed are not published with it (the HA repo's pre-commit hook runs on it), which is pushed through
    this machine and opened as a PR in the HA repo; older open `3d-deploy/*` PRs are closed as
    superseded. `main` on the host is not moved: the live checkout runs ahead of `main` until
    the PR merges, and `--dry-run` reports `pointer not yet merged` meanwhile instead of

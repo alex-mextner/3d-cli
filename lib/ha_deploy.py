@@ -1068,9 +1068,15 @@ def apply(
 
 
 def record(host: Host, manifest: Manifest, plan: Plan, log: list[str]) -> str | None:
-    """Stage the deployed paths, commit them on a branch (not main) and open the HA-repo PR."""
+    """Stage the deployed paths, commit them on a branch (not main) and open the HA-repo PR.
+
+    The PR commit is built on origin/main, never on the live HEAD: the live checkout may carry
+    local commits nobody pushed, and a branch built on them would publish them with the PR.
+    .gitmodules is taken from the working tree only while origin/main lacks the submodule
+    entry (the cutover); otherwise unrelated local .gitmodules edits would ride along.
+    """
     r = manifest.ha_repo
-    paths = [r.submodule, ".gitmodules", *(f.dest for f in manifest.files)]
+    paths = [r.submodule, *(f.dest for f in manifest.files)]
     branch = f"{BRANCH_PREFIX}{plan.sha[:12]}"
     msg = (
         f"3d ha deploy: 3d-cli {plan.sha[:12]}\n\n"
@@ -1084,24 +1090,27 @@ def record(host: Host, manifest: Manifest, plan: Plan, log: list[str]) -> str | 
 cd {_q(plan.ha_dir)}
 export PATH="$HOME/.local/bin:$PATH"
 # The real index carries the deployed paths so main fast-forwards once the PR is merged.
-git add -A -- {quoted}
+git add -A -- {quoted} .gitmodules
 tmp=$(mktemp)
 rm -f "$tmp"
 trap 'rm -f "$tmp"' EXIT
 export GIT_INDEX_FILE="$tmp"
-git read-tree HEAD
+git read-tree origin/main
 git add -A -- {quoted}
+if ! git config --blob origin/main:.gitmodules --get {_q(f"submodule.{r.submodule}.path")} >/dev/null 2>&1; then
+  git add -- .gitmodules
+fi
 tree=$(git write-tree)
-if [ "$tree" = "$(git rev-parse 'HEAD^{{tree}}')" ]; then echo NOCHANGE; exit 0; fi
+if [ "$tree" = "$(git rev-parse 'origin/main^{{tree}}')" ]; then echo NOCHANGE; exit 0; fi
 hooks=$(git config core.hooksPath || echo .git/hooks)
 if [ -x "$hooks/pre-commit" ]; then "$hooks/pre-commit" >&2; fi
-commit=$(printf '%s\\n' {_q(msg)} | git commit-tree "$tree" -p HEAD)
+commit=$(printf '%s\\n' {_q(msg)} | git commit-tree "$tree" -p origin/main)
 git update-ref {_q("refs/heads/" + branch)} "$commit"
 echo "$commit"
 """
     out = host.sh(script).stdout.strip().splitlines()
     if not out or out[-1] == "NOCHANGE":
-        log.append("HA repo: nothing to record (HEAD already has this state)")
+        log.append("HA repo: nothing to record (origin/main already has this state)")
         return None
     commit = out[-1]
     url = publish(host, manifest, plan, branch, commit, msg)

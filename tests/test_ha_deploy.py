@@ -451,3 +451,19 @@ def test_option_like_host_is_rejected() -> None:
         ha_deploy.Host("-oProxyCommand=touch /tmp/x")
     assert any("may not start with '-'" in step for step in err.value.remediation)
     assert ha_deploy.Host("ultra@h")._argv("true")[-3:] == ["--", "ultra@h", "true"]
+
+
+def test_deploy_pr_is_built_on_origin_main_not_on_unpushed_local_commits(world: World) -> None:
+    """The live checkout may carry commits nobody pushed (other sessions' work, local .gitmodules
+    edits); the deploy PR branch must contain only origin/main plus the deployed paths."""
+    (world.ha / "local-only.txt").write_text("not for publishing\n", encoding="utf-8")
+    git(world.ha, "add", "local-only.txt")
+    git(world.ha, "commit", "-q", "-m", "local work nobody pushed")
+    local = git(world.ha, "rev-parse", "HEAD")
+    assert _deploy(world) == 0
+    pushed = git(world.origin, "rev-parse", f"refs/heads/3d-deploy/{world.sha[:12]}")
+    assert git(world.origin, "rev-parse", f"{pushed}^") == git(world.origin, "rev-parse", "main")
+    assert local not in git(world.origin, "rev-list", "--all").split()
+    names = git(world.origin, "ls-tree", "-r", "--name-only", pushed).splitlines()
+    assert "local-only.txt" not in names
+    assert "packages/3d_printers.yaml" in names
