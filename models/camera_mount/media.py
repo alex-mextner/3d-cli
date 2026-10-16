@@ -6,11 +6,11 @@ WHAT: renders from camera_mount.scad (printer and C920 scene models included):
     with the camera in its cradle, hub), top views, and the camera's own view of each bed;
   - anim-<printer>.mp4 / .gif: the installation (beam from segments -> hub -> feet -> onto the
     printer -> camera head -> top view), 10 s at 24 fps; the GIF is kept under 8 MB for Telegram;
-  - mount-<printer>.glb (colored, metres, for a phone viewer) and .3mf (millimetres).
+  - mount-<printer>.usdz (iPhone AR Quick Look: coloured, Y-up, real scale) and .3mf (mm).
 WHY a separate script: hundreds of OpenSCAD frames are a heavy job; it runs on a Runpod pod
   (README.ru.md §8), not on the shared workstation, and needs only OpenSCAD, ffmpeg and Xvfb.
 
-Usage (inside `xvfb-run -a`):  python3 models/camera_mount/media.py OUTDIR [--only stills,anim,glb]
+Usage:  python3 models/camera_mount/media.py OUTDIR [--only stills,anim,viewer]
 Env: OPENSCAD = OpenSCAD binary with the manifold backend (default: `openscad`).
 """
 
@@ -289,59 +289,48 @@ def animation(pr: str, out: Path, jobs: int) -> tuple[Path, Path]:
     return mp4, gif
 
 
-GLB_GROUPS = {  # part -> RGBA
-    "glb_printer": (150, 156, 166, 255),
-    "glb_mount": (232, 115, 42, 255),
-    "glb_c920": (30, 30, 32, 255),
+VIEWER_PARTS = {  # camera_mount.scad part -> diffuse colour
+    "viewer_printer": (0.59, 0.61, 0.65),
+    "viewer_mount": (0.91, 0.45, 0.16),
+    "viewer_c920": (0.12, 0.12, 0.13),
 }
 
 
 def viewer_models(pr: str, out: Path) -> list[Path]:
+    """mount-<pr>.usdz for an iPhone (AR Quick Look: one coloured mesh per part, Y-up, real
+    scale) and mount-<pr>.3mf (millimetres, for a slicer or a desktop viewer)."""
     import trimesh
 
+    sys.path.insert(0, str(HERE.parents[1] / "lib"))
+    from usdz import UsdzPart, meshes_to_usdz
+
+    parts = []
     scene = trimesh.Scene()
-    for part, rgba in GLB_GROUPS.items():
+    for part, color in VIEWER_PARTS.items():
         stl = out / f"{pr}-{part}.stl"
         subprocess.run(
-            [
-                OPENSCAD,
-                "--backend=manifold",
-                "-o",
-                str(stl),
-                "-D",
-                f'part="{part}"',
-                "-D",
-                f'printer="{pr}"',
-                str(SCAD),
-            ],
+            [OPENSCAD, "--backend=manifold", "-o", str(stl), "-D", f'part="{part}"',
+             "-D", f'printer="{pr}"', str(SCAD)],
             check=True,
             capture_output=True,
         )
-        mesh = trimesh.load(stl, force="mesh")
-        mesh.visual.face_colors = rgba
-        scene.add_geometry(
-            mesh,
-            node_name=part.removeprefix("glb_"),
-            geom_name=part.removeprefix("glb_"),
-        )
-        stl.unlink()
-    glb = out / f"mount-{pr}.glb"
-    # glTF is metres and Y-up; OpenSCAD is millimetres and Z-up: without the turn a phone
-    # viewer shows the printer lying on its back
-    metres = scene.copy()
-    metres.apply_transform(trimesh.transformations.rotation_matrix(-math.pi / 2, (1, 0, 0)))
-    metres.apply_scale(0.001)
-    glb.write_bytes(metres.export(file_type="glb"))
+        name = part.removeprefix("viewer_")
+        parts.append(UsdzPart(str(stl), color, name))
+        scene.add_geometry(trimesh.load(stl, force="mesh"), node_name=name, geom_name=name)
+    usdz = out / f"mount-{pr}.usdz"
+    meshes_to_usdz(parts, str(usdz))
     tmf = out / f"mount-{pr}.3mf"
     tmf.write_bytes(scene.export(file_type="3mf"))
-    return [glb, tmf]
+    for p in parts:
+        Path(p.path).unlink()
+    return [usdz, tmf]
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("out", type=Path)
     ap.add_argument(
-        "--only", default="stills,anim,glb", help="comma list of stills, anim, glb"
+        "--only", default="stills,anim,viewer", help="comma list of stills, anim, viewer"
     )
     # the CPUs this process may use (a container's os.cpu_count() reports the whole host)
     ap.add_argument("-j", "--jobs", type=int, default=len(os.sched_getaffinity(0)))
@@ -351,7 +340,7 @@ def main() -> int:
     facts = scene_facts()
     print("facts", facts, flush=True)
     made: list[Path] = []
-    if "glb" in only:
+    if "viewer" in only:
         for pr in PRINTERS:
             made += viewer_models(pr, args.out)
     if "stills" in only:

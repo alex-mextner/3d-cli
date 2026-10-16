@@ -187,20 +187,20 @@ G-code лежит в `~/.cache/k1-calib/camera-mount/`, файлы металл�
 
 ![кадр C920 на K1 SE](img/scene-camera-view-k1se.png) ![кадр C920 на U1](img/scene-camera-view-u1.png)
 
-**3D для телефона.** `viewer/mount-k1se.glb` и `viewer/mount-u1.glb` — принтер, крепление и камера в цвете. Открываются в просмотрщике файлов iOS, Google Files, Windows 3D Viewer и на [gltf-viewer](https://gltf-viewer.donmccurdy.com/). Рядом лежат `.3mf` той же сцены в миллиметрах для слайсера.
+**3D для iPhone.** `viewer/mount-k1se.usdz` и `viewer/mount-u1.usdz` — принтер, крепление и камера, у каждой части свой цвет, масштаб реальный. Файл открывается тапом в «Сообщениях» или «Файлах» (AR Quick Look): модель можно крутить или поставить в AR на стол в натуральную величину. Рядом `.3mf` той же сцены в миллиметрах, для слайсера.
 
-**Анимация установки** (MP4 и GIF до 8 МБ для Telegram): балку собирают из сегментов, потом ставят хаб и ножки, мост опускается на принтер, ставится головка с камерой, и в конце вид сверху. `media.py` рендерит её вместе со всеми картинками этого раздела и GLB/3MF. Сотни кадров OpenSCAD — тяжёлая задача, поэтому её запускают на поде Runpod, а не на рабочей машине. Нужен OpenSCAD со встроенным manifold (nightly) и ffmpeg:
+**Анимация установки** (MP4 и GIF до 8 МБ для Telegram): балку собирают из сегментов, потом ставят хаб и ножки, мост опускается на принтер, ставится головка с камерой, и в конце вид сверху. `media.py` рендерит её вместе со всеми картинками этого раздела и USDZ/3MF. Сотни кадров OpenSCAD — тяжёлая задача, поэтому её запускают на поде Runpod, а не на рабочей машине. Нужен OpenSCAD со встроенным manifold (nightly) и ffmpeg:
 
 ```bash
 OPENSCAD=/path/to/openscad python3 models/camera_mount/media.py OUTDIR            # всё
-OPENSCAD=/path/to/openscad python3 models/camera_mount/media.py OUTDIR --only glb # только GLB/3MF
+OPENSCAD=/path/to/openscad python3 models/camera_mount/media.py OUTDIR --only viewer # только USDZ/3MF
 ```
 
 ## 9. Файлы
 
 - `camera_mount.scad` — параметрическая модель: `part=` выбирает деталь, стол или вид, `printer=` — `k1se` или `u1`.
 - `build.py` — пересобирает все STL (`stl/`, `stl/plates/`, `stl/fit/`) и картинки (`img/`, кроме `scene-*`).
-- `media.py` — сцена с принтерами: картинки `img/scene-*`, анимации, `viewer/*.glb` и `viewer/*.3mf`.
+- `media.py` — сцена с принтерами: картинки `img/scene-*`, анимации, `viewer/*.usdz` и `viewer/*.3mf`.
 - `fits.yaml` — посадки для `3d fit-check --spec`: шип ножки ↔ башмак, стойка ↔ хаб и кронштейн.
 - Проверки:
   - `3d check camera_mount.scad -D 'part="hub"'` — каждая деталь PASS;
