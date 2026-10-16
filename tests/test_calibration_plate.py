@@ -396,3 +396,18 @@ def test_pack_places_sections_without_overlap() -> None:
     assert rects["t"][1] >= max(r[3] for k, r in rects.items() if k != "t") + 45
     with pytest.raises(cg.GenError, match="no room"):
         filament.pack([sec("huge", 300, 10)], (220.0, 220.0), 45.0)
+
+
+@pytest.mark.parametrize("only", [{"pa"}, {"mvs"}, {"temp"}, {"pa", "mvs", "temp"}])
+def test_plate1_needs_a_test_sliced_by_layer(orca: str, only: set[str]) -> None:
+    ctx = cp.make_context("Creality K1 SE", orca, "PLA", "#E8732A", None, frozenset(only))
+    with pytest.raises(cg.GenError, match="must keep one of flow, bridge, overhang, retraction"):
+        filament.build(ctx)
+
+
+def test_plate1_single_sliced_tests_build(orca: str, tmp_path: Path) -> None:
+    for test in filament.LAYER_TESTS:
+        ctx = cp.make_context("Creality K1 SE", orca, "PLA", "#E8732A", None, frozenset({test}))
+        out = tmp_path / f"{test}.gcode"
+        cp.build_plate(ctx, filament.build(ctx), orca, out)
+        assert out.is_file()

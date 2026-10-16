@@ -585,7 +585,17 @@ def _temp(ctx: PlateContext) -> Section:
     return Section("temp", bx, by, True, build)
 
 
+# The tests Orca slices by layer: the plate needs at least one, the hand-written lines (pa, mvs)
+# and the sequential tower (temp) are spliced into that slice.
+LAYER_TESTS = ("flow", "bridge", "overhang", "retraction")
+
+
 def build(ctx: PlateContext) -> Plate:
+    if not any(ctx.wants(t) for t in LAYER_TESTS):
+        raise GenError(
+            f"{PLATE_ID}: --only/--skip must keep one of {', '.join(LAYER_TESTS)} (the plate is sliced "
+            "around them); alone, PA lines are `gen combo` and the temperature tower `gen temp`"
+        )
     makers = {
         "pa": _pa,
         "mvs": _mvs,

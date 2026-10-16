@@ -323,9 +323,12 @@ def _check(argv: list[str]) -> int:
 
 def _float(raw: str, opt: str) -> float:
     try:
-        return float(raw)
+        value = float(raw)
     except ValueError as e:
         raise UsageError(f"{opt} wants a number, got {raw!r}", command=f"{PREFIX} gen") from e
+    if value != value or value in (float("inf"), float("-inf")):
+        raise UsageError(f"{opt} wants a finite number, got {raw!r}", command=f"{PREFIX} gen")
+    return value
 
 
 def _pa_range(raw: str) -> tuple[float, float]:
