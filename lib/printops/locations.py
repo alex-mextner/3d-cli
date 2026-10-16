@@ -21,9 +21,12 @@ INVARIANTS:
     manual add/move/archive under it is refused.
   - Spoolman holds, per spool, `location` = path and extra `printops_location_id` = id; both are
     written together by `place_spool`, and `resync` repairs any drift (e.g. after a move whose
-    Spoolman writes failed half-way). A spool "is in" a location when its
-    printops_location_id is that id, or — set by hand in the Spoolman UI — it has no id and
-    its `location` string equals the path.
+    Spoolman writes failed). A spool "is in" a location when its printops_location_id is that
+    id, or — set by hand in the Spoolman UI — it has no id and its `location` string is the
+    location's path or a former path of it (`location_alias`, kept from a move until resync
+    finds no spool naming it; meanwhile no other location may take that path).
+  - A printed label belongs to the location that printed it (`qr`): `resolve` maps a scanned
+    label to it even after a move and a reuse of the old path.
   - Archiving refuses a location that still holds spools or active children; archived rows stay
     (their ids are on printed NFC tags) and can be revived with `update(..., archived=False)`.
 """
@@ -212,27 +215,43 @@ def get(conn: sqlite3.Connection, path_or_id: str | int) -> Location:
 
 def resolve(conn: sqlite3.Connection, scanned: str) -> Location:
     """A location from anything a person or reader may hand us: its path or id, a QR/NFC text
-    (`cell:<path>`, `dryer:1`, `slot:u1/T3`), an HA tag id `loc-<id>`, or an NTAG UID."""
-    s = scanned.strip()
-    if s.lower().startswith(QR_PREFIX):
-        s = s[len(QR_PREFIX):]
-    elif s.lower().startswith(TAG_PREFIX) and s[len(TAG_PREFIX):].isdigit():
-        s = s[len(TAG_PREFIX):]
-    loc = find(conn, s) if s else None
-    if loc is None and s:
-        try:
-            uid = _check_tag_uid(s)
-        except LocationError:
-            uid = None
-        if uid is not None:
-            row = conn.execute("SELECT * FROM location WHERE tag_uid = ?", (uid,)).fetchone()
-            loc = None if row is None else Location.from_row(row)
-        if loc is None:  # a label printed before a move still carries the old path
-            row = conn.execute("SELECT * FROM location WHERE qr = ? ORDER BY archived, id", (scanned.strip(),)).fetchone()
-            loc = None if row is None else Location.from_row(row)
-    if loc is None:
-        raise LocationNotFound(scanned)
-    return loc
+    (`cell:<path>`, `dryer:1`, `slot:u1/T3`), an HA tag id `loc-<id>`, or an NTAG UID.
+
+    A scanned label belongs to the location that printed it (`qr`), even after that location
+    moved and another one took over the old path; a typed path means the current holder of
+    the path, then the location that used to have it (`location_alias`)."""
+    text = scanned.strip()
+    low = text.lower()
+    rest = text[len(TAG_PREFIX):]
+    if low.startswith(TAG_PREFIX) and rest.isascii() and rest.isdigit() and len(rest) < 19:
+        return get(conn, int(rest))
+    if text.isascii() and text.isdigit() and len(text) < 19:
+        # a compact all-digit NFC UID ("04123456789012") wins over an id of the same digits
+        row = conn.execute("SELECT * FROM location WHERE tag_uid = ?", (text,)).fetchone()
+        return Location.from_row(row) if row is not None else get(conn, int(text))
+    if low.startswith(QR_PREFIX) or low.split(":", 1)[0] in SELF_ID_SCHEMES:
+        printed = [Location.from_row(r) for r in conn.execute("SELECT * FROM location WHERE qr = ?", (text,))]
+        # the location whose current label this is, else the one that printed it most recently
+        printed.sort(key=lambda r: (qr_payload(r.path) == text, not r.archived, r.updated_at), reverse=True)
+        if printed:
+            return printed[0]
+    path = text[len(QR_PREFIX):] if low.startswith(QR_PREFIX) else text
+    if path:
+        row = conn.execute("SELECT * FROM location WHERE path = ?", (path,)).fetchone()
+        if row is None:
+            row = conn.execute("SELECT location.* FROM location_alias JOIN location ON location.id = location_id"
+                               " WHERE location_alias.path = ?", (path,)).fetchone()
+        if row is not None:
+            return Location.from_row(row)
+    try:
+        uid = _check_tag_uid(text)
+    except LocationError:
+        uid = None
+    if uid is not None:
+        row = conn.execute("SELECT * FROM location WHERE tag_uid = ?", (uid,)).fetchone()
+        if row is not None:
+            return Location.from_row(row)
+    raise LocationNotFound(scanned)
 
 
 def all_locations(conn: sqlite3.Connection, *, include_archived: bool = False) -> list[Location]:
@@ -339,6 +358,7 @@ def add(conn: sqlite3.Connection, path: str, kind: str, *, actor: str, capacity:
     if kind in ("printer", "ams", "printer_slot"):
         raise LocationError(f"kind {kind!r} is only for fleet printer slots (slot:…)")
     with db.transaction(conn):
+        _refuse_pending_alias(conn, p, None)
         loc = _insert(conn, p, kind, _active_parent(conn, p), capacity=_check_capacity(capacity),
                       humidity_sensor_entity=_check_entity(humidity_sensor_entity), tag_uid=_check_tag_uid(tag_uid),
                       note=note or None, source="manual")
@@ -380,7 +400,7 @@ def update(conn: sqlite3.Connection, loc: Location, changes: Mapping[str, Any], 
     if not clean:
         return loc
     with db.transaction(conn):
-        if "archived" in clean and loc.archived:
+        if "archived" in clean and get(conn, loc.id).archived:  # fresh: `loc` may predate an archive
             _active_parent(conn, loc.path)
         sets = ", ".join(f"{k} = ?" for k in clean)
         try:
@@ -404,39 +424,63 @@ def _spool_location_id(spool: Mapping[str, Any]) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
-def spools_in(spools: Iterable[Mapping[str, Any]], locs: Sequence[Location]) -> list[JSON]:
+def _owners(conn: sqlite3.Connection) -> tuple[dict[int, Location], dict[str, int]]:
+    """(id → location incl. archived, lower-case path text → location id). A former path
+    (`location_alias`) names the location that moved away from it; a current path wins."""
+    by_id = {loc.id: loc for loc in all_locations(conn, include_archived=True)}
+    by_text = {str(r["path"]).lower(): int(r["location_id"])
+               for r in conn.execute("SELECT path, location_id FROM location_alias")}
+    by_text.update({loc.path.lower(): loc.id for loc in by_id.values()})
+    return by_id, by_text
+
+
+def _owner_id(spool: Mapping[str, Any], by_text: Mapping[str, int]) -> int | None:
+    lid = _spool_location_id(spool)
+    return lid if lid is not None else by_text.get(str(spool.get("location") or "").strip().lower())
+
+
+def spools_in(conn: sqlite3.Connection, spools: Iterable[Mapping[str, Any]], locs: Sequence[Location]) -> list[JSON]:
     """The spools stored in any of `locs` (see the module invariant for "stored in")."""
+    _, by_text = _owners(conn)
     ids = {loc.id for loc in locs}
-    paths = {loc.path.lower() for loc in locs}
-    out: list[JSON] = []
-    for s in spools:
-        sid = _spool_location_id(s)
-        if sid in ids or (sid is None and str(s.get("location") or "").lower() in paths):
-            out.append(dict(s))
-    return out
+    return [dict(s) for s in spools if _owner_id(s, by_text) in ids]
 
 
 def contents(conn: sqlite3.Connection, spoolman: Spoolman, loc: Location, *, recursive: bool = False) -> list[JSON]:
     """Active (non-archived) Spoolman spools in `loc` (and, recursive, below it)."""
     locs = subtree(conn, loc) if recursive else [loc]
-    return spools_in(spoolman.find("spool"), locs)
+    return spools_in(conn, spoolman.find("spool"), locs)
 
 
-def place_spool(spoolman: Spoolman, spool_id: int, loc: Location | None, *,
+def place_spool(conn: sqlite3.Connection, spoolman: Spoolman, spool_id: int, loc: Location | None, *,
                 extra: Mapping[str, Any] | None = None) -> JSON:
     """Put a spool in `loc` (None = nowhere) in ONE Spoolman PATCH: `location` = path and extra
-    `printops_location_id` = id, plus the caller's other extra fields (python values)."""
-    if loc is not None and loc.archived:
-        raise LocationError(f"location {loc.path!r} is archived", status=409)
+    `printops_location_id` = id, plus the caller's other extra fields (python values).
+
+    `loc` is re-read from the DB (the caller's object may be stale). `_archive` sets the flag
+    before its emptiness check, so a placement racing an archive is either seen by that check or
+    sees the flag here after its PATCH — then the spool is put back where it was and 409 raised."""
+    if loc is not None:
+        loc = get(conn, loc.id)
+        if loc.archived:
+            raise LocationError(f"location {loc.path!r} is archived", status=409)
+        before = spoolman.get("spool", spool_id)
     fields = {k: encode_extra(v) if v is not None else None for k, v in (extra or {}).items()}
     fields[LOCATION_EXTRA] = None if loc is None else encode_extra(loc.id)
     body: dict[str, Any] = {"location": "" if loc is None else spoolman_path(loc), "extra": fields}
-    return spoolman.update("spool", spool_id, body)
+    placed = spoolman.update("spool", spool_id, body)
+    if loc is not None and get(conn, loc.id).archived:
+        prev_extra = (before.get("extra") or {}).get(LOCATION_EXTRA)
+        spoolman.update("spool", spool_id, {"location": before.get("location") or "",
+                                            "extra": {LOCATION_EXTRA: prev_extra}})
+        raise LocationError(f"location {loc.path!r} was archived meanwhile; spool #{spool_id} left where it was", status=409)
+    return placed
 
 
 @dataclass
 class SyncReport:
-    """Spoolman writes of a move/resync: spools updated, and ones whose PATCH failed."""
+    """Spoolman writes of a move/resync: spools updated, and failures (`spool_id` None = the
+    spool list itself could not be read)."""
     updated: list[int] = field(default_factory=list)
     failed: list[dict[str, Any]] = field(default_factory=list)
 
@@ -444,21 +488,53 @@ class SyncReport:
         return {"updated": self.updated, "failed": self.failed}
 
 
-def resync(conn: sqlite3.Connection, spoolman: Spoolman, spools: Iterable[Mapping[str, Any]] | None = None) -> SyncReport:
-    """Rewrite Spoolman `location` of every spool whose printops_location_id names an existing
-    location but whose string differs from that location's path."""
+def resync(conn: sqlite3.Connection, spoolman: Spoolman) -> SyncReport:
+    """Make every spool that belongs to a location carry exactly that location's path and id:
+    spools whose string drifted (a move whose Spoolman writes failed) and spools located by a
+    typed path or a former path get both fields rewritten. Former paths no spool still names
+    are then forgotten. Never raises SpoolmanError: failures are in the report."""
     report = SyncReport()
-    paths = {loc.id: loc.path for loc in all_locations(conn, include_archived=True)}
-    for s in spoolman.find("spool") if spools is None else spools:
-        lid = _spool_location_id(s)
-        if lid is None or lid not in paths or s.get("location") == paths[lid]:
+    by_id, by_text = _owners(conn)
+    try:
+        spools = spoolman.find("spool", {"allow_archived": "true"})
+    except SpoolmanError as e:
+        report.failed.append({"spool_id": None, "error": e.message})
+        return report
+    still_named: set[str] = set()
+    for s in spools:
+        loc = by_id.get(_owner_id(s, by_text) or -1)
+        if loc is None or (s.get("location") == loc.path and _spool_location_id(s) == loc.id):
             continue
         try:
-            spoolman.update("spool", int(s["id"]), {"location": paths[lid]})
+            # Spoolman has no compare-and-set: re-read the spool right before the write so a
+            # placement made since the listing (another request) is not overwritten from the
+            # stale snapshot. The remaining window is one GET→PATCH round trip.
+            fresh = spoolman.get("spool", int(s["id"]))
+            if _owner_id(fresh, by_text) != loc.id:
+                # placed elsewhere since the listing: whatever path it names now must survive the alias cleanup
+                still_named.add(str(fresh.get("location") or "").strip().lower())
+                continue
+            loc = get(conn, loc.id)  # and the path as it is now: a concurrent move may have renamed it
+            spoolman.update("spool", int(s["id"]), {"location": loc.path, "extra": {LOCATION_EXTRA: encode_extra(loc.id)}})
             report.updated.append(int(s["id"]))
         except SpoolmanError as e:
             report.failed.append({"spool_id": int(s["id"]), "error": e.message})
+            still_named.add(str(s.get("location") or "").strip().lower())
+    with db.transaction(conn):
+        for row in conn.execute("SELECT path FROM location_alias").fetchall():
+            if str(row["path"]).lower() not in still_named:
+                conn.execute("DELETE FROM location_alias WHERE path = ?", (row["path"],))
     return report
+
+
+def _refuse_pending_alias(conn: sqlite3.Connection, path: str, owner_id: int | None) -> None:
+    """A former path of another location may still be written on spools in Spoolman; taking it
+    over would silently hand those spools to the new location."""
+    row = conn.execute("SELECT location_id FROM location_alias WHERE path = ?", (path,)).fetchone()
+    if row is not None and int(row["location_id"]) != owner_id:
+        holder = get(conn, int(row["location_id"]))
+        raise LocationError(f"{path!r} was the path of location #{holder.id} (now {holder.path!r}) and spools in "
+                            "Spoolman may still name it; run `3d printops loc resync` (Spoolman up) first", status=409)
 
 
 # -- move / archive -----------------------------------------------------------------------
@@ -475,21 +551,24 @@ class MoveResult:
 
 def move(conn: sqlite3.Connection, spoolman: Spoolman | None, loc: Location, new_path: str, *,
          actor: str) -> MoveResult:
-    """Rename/re-parent `loc` and its whole subtree to `new_path`, then re-sync Spoolman's
-    `location` of every spool inside. The DB move is one transaction; Spoolman writes follow it
-    (a failed one is reported, and `resync` repairs it). Emits `location.moved`."""
+    """Rename/re-parent `loc` and its whole subtree to `new_path`, then `resync` Spoolman. The DB
+    move is one transaction that re-reads `loc` under the write lock (a concurrent move cannot
+    make a cycle) and records every old path as a `location_alias`, so spools still naming an
+    old path stay in the moved location until resync rewrites them — also when Spoolman is down
+    now (the failure is reported; run resync later). Emits `location.moved`."""
     new = check_path(new_path)
-    _refuse_fleet(loc.path, "move")
     _refuse_fleet(new, "move into")
-    if loc.archived:
-        raise LocationError(f"location {loc.path!r} is archived; unarchive it before moving", status=409)
-    old = loc.path
-    if new == old:
-        return MoveResult(loc, [], SyncReport())
-    if new.lower().startswith(old.lower() + "/"):
-        raise LocationError(f"cannot move {old!r} into its own subtree ({new!r})", status=409)
     with db.transaction(conn):
-        nodes = subtree(conn, loc)
+        cur = get(conn, loc.id)
+        _refuse_fleet(cur.path, "move")
+        if cur.archived:
+            raise LocationError(f"location {cur.path!r} is archived; unarchive it before moving", status=409)
+        old = cur.path
+        if new == old:
+            return MoveResult(cur, [], SyncReport())
+        if new.lower().startswith(old.lower() + "/"):
+            raise LocationError(f"cannot move {old!r} into its own subtree ({new!r})", status=409)
+        nodes = subtree(conn, cur)
         renamed = [(n.path, new + n.path[len(old):]) for n in nodes]
         too_long = [p for _, p in renamed if len(p) > MAX_PATH]
         if too_long:
@@ -497,46 +576,25 @@ def move(conn: sqlite3.Connection, spoolman: Spoolman | None, loc: Location, new
                                 f"e.g. {too_long[0]!r}")
         parent = _active_parent(conn, new)
         clash = find(conn, new)
-        if clash is not None and clash.id != loc.id:
+        if clash is not None and clash.id != cur.id:
             raise LocationError(f"location {clash.path!r} already exists (id {clash.id})", status=409)
+        for n, (_, new_p) in zip(nodes, renamed, strict=True):
+            _refuse_pending_alias(conn, new_p, n.id)
         now = db.utc_now()
         # One pass is enough: the new root is free (checked above) and every new path lies under
         # it, so no rewritten path can collide with a row outside the subtree, and a case-only
         # rename only "collides" with the row itself.
-        for n, (_, new_p) in zip(nodes, renamed, strict=True):
+        for n, (old_p, new_p) in zip(nodes, renamed, strict=True):
             conn.execute("UPDATE location SET path = ?, updated_at = ? WHERE id = ?", (new_p, now, n.id))
-        conn.execute("UPDATE location SET parent_id = ? WHERE id = ?", (parent.id if parent else None, loc.id))
-        moved = get(conn, loc.id)
-        events.emit(conn, "location.moved", f"location:{loc.id}",
-                    {"from": old, "to": moved.path, "subtree": len(nodes)}, actor)
-    report = SyncReport()
-    if spoolman is not None:
-        moved_nodes = [get(conn, n.id) for n in nodes]
-        try:
-            inside = spools_in(spoolman.find("spool"), [*moved_nodes, *nodes])
-        except SpoolmanError as e:  # the move is committed; `resync` repairs once Spoolman is back
-            report.failed.append({"spool_id": None, "error": e.message})
-            inside = []
-        ids = {n.id for n in nodes}
-        by_id = {n.id: n for n in moved_nodes}
-        for s in inside:
-            lid = _spool_location_id(s)
-            target = by_id[lid] if lid in ids else _by_old_path(nodes, moved_nodes, str(s.get("location") or ""))
-            if target is None:
-                continue
-            try:
-                place_spool(spoolman, int(s["id"]), target)
-                report.updated.append(int(s["id"]))
-            except SpoolmanError as e:
-                report.failed.append({"spool_id": int(s["id"]), "error": e.message})
+            conn.execute("INSERT OR REPLACE INTO location_alias (path, location_id, retired_at) VALUES (?, ?, ?)",
+                         (old_p, n.id, now))
+        for _, new_p in renamed:  # a current path is never also an alias (moving back, case-only renames)
+            conn.execute("DELETE FROM location_alias WHERE path = ?", (new_p,))
+        conn.execute("UPDATE location SET parent_id = ? WHERE id = ?", (parent.id if parent else None, cur.id))
+        events.emit(conn, "location.moved", f"location:{cur.id}", {"from": old, "to": new, "subtree": len(nodes)},
+                    actor)
+    report = resync(conn, spoolman) if spoolman is not None else SyncReport()
     return MoveResult(get(conn, loc.id), renamed, report)
-
-
-def _by_old_path(old_nodes: Sequence[Location], new_nodes: Sequence[Location], path: str) -> Location | None:
-    for o, n in zip(old_nodes, new_nodes, strict=True):
-        if o.path.lower() == path.lower():
-            return n
-    return None
 
 
 def archive(conn: sqlite3.Connection, spoolman: Spoolman | None, loc: Location, *, actor: str) -> Location:
@@ -546,24 +604,48 @@ def archive(conn: sqlite3.Connection, spoolman: Spoolman | None, loc: Location, 
     return _archive(conn, spoolman, loc, actor=actor)
 
 
-def _archive(conn: sqlite3.Connection, spoolman: Spoolman | None, loc: Location, *, actor: str) -> Location:
-    if loc.archived:
-        return loc
+def _refuse_children(conn: sqlite3.Connection, loc: Location) -> None:
     kids = children(conn, loc)
     if kids:
         raise LocationError(f"location {loc.path!r} has {len(kids)} active child location(s) "
                             f"({', '.join(k.path for k in kids[:3])}{'…' if len(kids) > 3 else ''}); archive them first",
                             status=409)
+
+
+def _archive(conn: sqlite3.Connection, spoolman: Spoolman | None, loc: Location, *, actor: str) -> Location:
+    if loc.archived:
+        return loc
+    _refuse_children(conn, loc)
     if spoolman is None:
         raise LocationError("Spoolman is not configured: cannot check the location is empty", status=503)
-    inside = contents(conn, spoolman, loc)
+    # Flag first, then prove emptiness, undoing on failure: place_spool re-checks the flag after
+    # its PATCH, so a racing placement is caught by one side or the other (no compare-and-set in Spoolman).
+    with db.transaction(conn):
+        cur = get(conn, loc.id)  # re-check under the write lock: a child may have been added meanwhile
+        if cur.archived:
+            return cur
+        _refuse_children(conn, cur)
+        conn.execute("UPDATE location SET archived = 1, updated_at = ? WHERE id = ?", (db.utc_now(), cur.id))
+    try:
+        inside = contents(conn, spoolman, cur)
+    except SpoolmanError as e:
+        _unarchive_flag(conn, cur.id)
+        raise LocationError(f"cannot check {loc.path!r} is empty: {e.message}", status=503) from e
+    except BaseException:
+        _unarchive_flag(conn, cur.id)
+        raise
     if inside:
+        _unarchive_flag(conn, cur.id)
         raise LocationError(f"location {loc.path!r} still holds {len(inside)} spool(s) "
                             f"(#{', #'.join(str(s['id']) for s in inside[:5])}); move them out first", status=409)
     with db.transaction(conn):
-        conn.execute("UPDATE location SET archived = 1, updated_at = ? WHERE id = ?", (db.utc_now(), loc.id))
-        events.emit(conn, "location.archived", f"location:{loc.id}", {"path": loc.path}, actor)
+        events.emit(conn, "location.archived", f"location:{cur.id}", {"path": cur.path}, actor)
     return get(conn, loc.id)
+
+
+def _unarchive_flag(conn: sqlite3.Connection, loc_id: int) -> None:
+    with db.transaction(conn):
+        conn.execute("UPDATE location SET archived = 0, updated_at = ? WHERE id = ?", (db.utc_now(), loc_id))
 
 
 # -- fleet printer slots ------------------------------------------------------------------

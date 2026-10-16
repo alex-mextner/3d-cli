@@ -44,7 +44,7 @@ def _spool_in(live: LiveApi, path: str) -> int:
     sid = int(sm.create("spool", {"filament_id": fid})["id"])
     conn = open_db(live.settings.db_path)
     try:
-        locations.place_spool(sm, sid, locations.get(conn, path))
+        locations.place_spool(conn, sm, sid, locations.get(conn, path))
     finally:
         conn.close()
     return sid
@@ -113,11 +113,13 @@ def test_user_prints_a_label_sheet_and_scans_a_label_back(tmp_path: Path, live_a
 
 def test_printer_slots_come_from_the_fleet_file(tmp_path: Path, live_api: LiveApi,
                                                 monkeypatch: pytest.MonkeyPatch) -> None:
-    """With fleet/printers.yaml in place the printer slots appear by themselves, unusable heads
+    """With fleet/printers.yaml in place `sync-fleet` materialises the printer slots, unusable heads
     carry their reason, and they cannot be moved by hand."""
     fleet = tmp_path / "printers.yaml"
     fleet.write_text(FLEET, encoding="utf-8")
     monkeypatch.setenv("THREED_FLEET", str(fleet))  # read by the in-process 3d-api
+    code, out, _ = _loc(tmp_path, live_api, "sync-fleet")  # a deploy's first step; reads never sync
+    assert code == 0 and "slot:u1/T2" in out
     code, tree, _ = _loc(tmp_path, live_api, "tree", "slot:u1", "--json")
     assert code == 0
     (u1,) = json.loads(tree)

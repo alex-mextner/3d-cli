@@ -121,3 +121,20 @@ def test_probe_live_counts_creality_nozzles_read_only(tmp_path: Path) -> None:
         topo = probe_live(dev)
     assert topo.extruders == ("extruder",)
     assert k1.writes() == []
+
+
+def test_live_lint_checks_heads_without_extruder_by_tool_order(tmp_path: Path) -> None:
+    """A head with no `extruder:` is still compared: Klipper names tool i `extruder`, `extruder1`, …"""
+    fleet = tmp_path / "fleet.yaml"
+    fleet.write_text("u1:\n  model: Snapmaker U1\n  owner: own\n  access: full\n  adapter: moonraker\n"
+                     "  host: 127.0.0.1\n  port: 7001\n"
+                     "  heads: [{label: T1, index: 0, nozzle: {diameter_mm: 0.4}}, {label: T2, index: 1}]\n",
+                     encoding="utf-8")
+
+    def probe(device: devices.Device) -> LiveTopology:
+        return LiveTopology(("extruder",), {"extruder": 0.6})
+
+    _, findings = lint_fleet(fleet, live=True, probe=probe)
+    msgs = [f.message for f in findings]
+    assert "u1.T1: nozzle 0.4 mm in the fleet, 0.6 mm in the printer config (extruder)" in msgs
+    assert "u1.T2: extruder 'extruder1' is not on the printer" in msgs
