@@ -582,13 +582,15 @@ def test_non_lot_sensitive_kind_supersedes_across_lots(ctx: cal.Ctx) -> None:
 
 def test_values_must_be_finite_numbers_and_numeric_text_is_accepted(ctx: cal.Ctx) -> None:
     spool(ctx.spoolman, "Elegoo", "PLA", "PLA Grey", slot="u1/T1")
-    for bad in ("nan", "inf", float("nan"), float("-inf")):
+    for bad in ("nan", "inf", float("nan"), float("-inf"), 10**400):
         with pytest.raises(cal.CalibrationError, match="finite number"):
             record(ctx, "flow_ratio", {"flow_ratio": bad}, printer="u1", head="T1")
     rec = record(ctx, "flow_ratio", {"flow_ratio": "0.97"}, printer="u1", head="T1")  # CLI sends text
     assert rec.values == {"flow_ratio": 0.97}
     with pytest.raises(CatalogError, match="finite numbers"):
         parse(_kind_body(values={"v": {"type": "number", "min": 0, "max": float("inf")}}))
+    with pytest.raises(CatalogError, match="finite numbers"):
+        parse(_kind_body(values={"v": {"type": "number", "min": 0, "max": 10**400}}))
 
 
 def test_invalidation_in_the_same_millisecond_still_counts(ctx: cal.Ctx, monkeypatch: pytest.MonkeyPatch) -> None:
