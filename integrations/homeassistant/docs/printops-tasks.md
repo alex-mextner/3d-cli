@@ -15,6 +15,14 @@ Assistant. Source: `packages/printops_tasks.yaml`.
 | `rest_command.printops_task_snooze` | `task`, `until?` (ISO date/time; none = until reopened), `reason?` |
 | `rest_command.printops_task_add` | `printer`, `title`, `why?` → a manual task |
 | `script.printops_todo_sync` | `printer`: makes the to-do list equal to 3d-api's open tasks |
+| `input_text.printops_task`, `script.printops_task_action` | the task number the dashboard buttons act on; `action: done\|snooze`, `days?` (snooze for N days, none = until reopened). A refusal (derived task, unknown id) becomes a persistent notification. |
+
+## Dashboard: 3D Printers → Overview → «Калибровки и ТО»
+
+Built-in cards only: per printer a markdown card (open / blocking / waiting / snoozed counts, then
+every task with its number, what it blocks, what it waits for, duration) and the `todo-list` card
+(tick = done). Below them the task-number field and three buttons: **Done**, **Snooze 1 day**,
+**Snooze** (until reopened with `3d printer todo reopen ID`).
 
 ## Why a Local To-do list plus a sync script
 
@@ -39,8 +47,11 @@ integration (plan §12 phase 4).
 
 ## One-time setup (before the first deploy of this package)
 
-1. A 3d-api token with scopes `read,write`:
-   `3d printops token create ha-tasks --scopes read,write --ssh ultra@192.168.0.39`.
+1. A dedicated 3d-api token, issued **at deploy time** (after the merge), with the scopes the
+   package needs and nothing more: `read` (`GET /v1/printers/{p}/tasks`) and `write`
+   (`POST /v1/tasks/{id}/done|snooze`, `POST /v1/printers/{p}/tasks`); never `printer-control`:
+   `3d printops token create ha-printer-tasks --scopes read,write --ssh ultra@192.168.0.39`
+   (printed once). Revoke with `3d printops token revoke ha-printer-tasks`.
 2. In the HA repo's `secrets.yaml`: `printops_api_auth: "Bearer <token>"`. Without it the HA
    configuration check fails and `3d ha deploy` rolls back.
 3. Settings → Devices & services → Add integration → **Local To-do**, list name `printops_k1se`;

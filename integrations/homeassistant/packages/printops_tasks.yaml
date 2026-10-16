@@ -1,5 +1,5 @@
 # Printer to-do lists from 3d-api (3d-cli #285; tasks: #281, docs/commands/printer.md).
-# Needs in the HA repo's secrets.yaml:  printops_api_auth: "Bearer <3d-api token, scopes read,write>"
+# Needs in the HA repo's secrets.yaml:  printops_api_auth: "Bearer <3d-api token ha-printer-tasks, scopes read,write>"
 # and one Local To-do list per printer, named "printops_k1se" / "printops_u1" (entities
 # todo.printops_k1se / todo.printops_u1): see docs/printops-tasks.md.
 #
@@ -66,7 +66,67 @@ rest_command:
        "refs": ["home-assistant"]}
     timeout: 20
 
+input_text:
+  # The task number the dashboard's Done / Snooze buttons act on (the cards show the numbers).
+  printops_task:
+    name: "PrintOps: task #"
+    icon: mdi:pound
+    min: 0
+    max: 12  # characters (input_text bounds are lengths)
+    pattern: "[0-9]*"
+
 script:
+  printops_task_action:
+    alias: "PrintOps: done / snooze the task in input_text.printops_task"
+    mode: queued
+    fields:
+      action:
+        description: "done or snooze"
+        example: snooze
+        required: true
+      days:
+        description: "snooze: days from now; empty = until reopened (`3d printer todo reopen ID`)"
+        example: 1
+    sequence:
+      - variables:
+          task: "{{ states('input_text.printops_task') | trim }}"
+          until: "{{ (now() + timedelta(days=days | int(0))).date() | string if days is defined and days | int(0) > 0 else none }}"
+          problem: >-
+            {{ 'type a task number first (the cards show them as #N)' if not (task | string | regex_match('^[0-9]+$'))
+               else 'unknown action ' ~ (action | string) ~ ': use done or snooze' if action not in ['done', 'snooze']
+               else '' }}
+      - if: "{{ problem == '' }}"
+        then:
+          - action: "rest_command.printops_task_{{ action }}"
+            continue_on_error: true  # 3d-api down raises; the notification below says so
+            data:
+              task: "{{ task }}"
+              until: "{{ until }}"
+            response_variable: res
+      - variables:
+          ok: "{{ problem == '' and res is defined and res.status == 200 }}"
+          message: >-
+            {{ problem if problem
+               else '3d-api did not answer (http://192.168.0.39:8765)' if res is not defined
+               else res.content.detail if res.content is mapping and 'detail' in res.content
+               else 'HTTP ' ~ res.status ~ ': ' ~ (res.content | string) }}
+      - if: "{{ ok }}"
+        then:
+          - action: input_text.set_value
+            target:
+              entity_id: input_text.printops_task
+            data:
+              value: ""
+          - action: homeassistant.update_entity
+            target:
+              entity_id: [sensor.printops_k1se_tasks, sensor.printops_u1_tasks]
+        else:
+          - action: persistent_notification.create
+            data:
+              notification_id: "printops_task_{{ task }}"
+              title: "PrintOps: task #{{ task }} unchanged"
+              message: "{{ message }}"
+
   printops_todo_sync:
     alias: "PrintOps: to-do list of a printer ↔ 3d-api"
     mode: queued
@@ -206,7 +266,7 @@ automation:
     actions:
       - repeat:
           for_each: >-
-            {{ [trigger.entity_id | regex_replace('^(sensor|todo)\.printops_|_tasks$', '')]
+            {{ [trigger.entity_id | regex_replace('^(sensor|todo)[.]printops_|_tasks$', '')]
                if trigger.entity_id is defined and trigger.entity_id else ['k1se', 'u1'] }}
           sequence:
             - action: script.printops_todo_sync

@@ -48,6 +48,9 @@ def _env(states: dict[str, dict[str, Any]]) -> Any:
     )
     env.filters["tojson"] = lambda value: json.dumps(value, ensure_ascii=False)
     env.tests["match"] = lambda value, find="": bool(re.match(find, str(value)))
+    env.filters["regex_match"] = lambda value, find="", ignorecase=False: bool(
+        re.match(find, str(value))
+    )
     env.globals["states"] = lambda eid: states.get(eid, {}).get("state", "unknown")
     env.globals["state_attr"] = lambda eid, attr: (
         states.get(eid, {}).get("attributes", {}).get(attr)
@@ -315,3 +318,96 @@ def test_rest_commands_send_json_bodies(package: dict[str, Any]) -> None:
 
 def render_text(env: Any, template: str, variables: dict[str, Any]) -> str:
     return str(env.from_string(template).render(**variables))
+
+
+DASHBOARD = PACKAGE.parents[1] / "dashboards" / "ui-3d-printers.yaml"
+
+
+def _tasks_section() -> list[dict[str, Any]]:
+    data = yaml.safe_load(DASHBOARD.read_text(encoding="utf-8"))
+    for section in data["views"][0]["sections"]:
+        cards = section["cards"]
+        if cards and cards[0].get("heading") == "Калибровки и ТО":
+            return list(cards)
+    raise AssertionError("no «Калибровки и ТО» section on the 3D Printers overview")
+
+
+def test_the_dashboard_lists_each_printers_tasks_with_done_and_snooze(
+    package: dict[str, Any],
+) -> None:
+    cards = _tasks_section()
+    assert [c["entity"] for c in cards if c["type"] == "todo-list"] == [
+        "todo.printops_k1se",
+        "todo.printops_u1",
+    ]
+    md = {c["title"]: c["content"] for c in cards if c["type"] == "markdown"}
+    states = {
+        "sensor.printops_u1_tasks": {
+            "state": "2",
+            "attributes": {
+                "summary": {"open": 2, "blocking": 2, "waiting": 0, "snoozed": 1},
+                "tasks": TASKS,
+            },
+        }
+    }
+    text = render_text(_env(states), md["U1"], {})
+    assert "**2** open · **2** blocking · 0 waiting · 1 snoozed" in text
+    assert "- **#1** Repair u1/T2: head T2 does not work — ⛔ blocks head T2" in text
+    assert "- **#12** Camera height · ⏳ waits for #9 · 20 min" in text
+    assert "- **#4** PA bordeaux · 💤 snoozed" in text
+    assert render_text(_env({}), md["K1 SE"], {}).strip() == "3d-api: no data"
+    buttons = [b for c in cards if c["type"] == "horizontal-stack" for b in c["cards"]]
+    actions = [
+        (b["tap_action"]["perform_action"], b["tap_action"]["data"]) for b in buttons
+    ]
+    assert actions == [
+        ("script.printops_task_action", {"action": "done"}),
+        ("script.printops_task_action", {"action": "snooze", "days": 1}),
+        ("script.printops_task_action", {"action": "snooze"}),
+    ]
+    assert (
+        "printops_task" in package["input_text"]
+        and "printops_task_action" in package["script"]
+    )
+
+
+def test_the_action_script_snoozes_until_a_date_or_until_reopened(
+    package: dict[str, Any],
+) -> None:
+    import datetime
+
+    env = _env({"input_text.printops_task": {"state": " 12 "}})
+    env.globals["now"] = lambda: datetime.datetime(2026, 10, 16, 18, 0)
+    env.globals["timedelta"] = datetime.timedelta
+    variables = package["script"]["printops_task_action"]["sequence"][0]["variables"]
+    assert render(env, variables["task"], {}) == 12
+    assert render_text(env, variables["until"], {"days": 1}) == "2026-10-17"
+    assert (
+        render_text(env, variables["until"], {}) == "None"
+    )  # HA renders it native: null → until reopened
+    assert (
+        render_text(env, variables["until"], {"days": "tomorrow"}) == "None"
+    )  # not a number: no past-date snooze
+    assert render_text(env, variables["problem"], {"task": 12, "action": "done"}) == ""
+    assert render_text(
+        env, variables["problem"], {"task": "", "action": "done"}
+    ).startswith("type a task number")
+    assert (
+        render_text(env, variables["problem"], {"task": 12, "action": "doen"})
+        == "unknown action doen: use done or snooze"
+    )
+    seq = package["script"]["printops_task_action"]["sequence"]
+    message = seq[2]["variables"]["message"]
+    assert (
+        render_text(
+            env,
+            message,
+            {"problem": "", "res": {"status": 409, "content": {"detail": "derived"}}},
+        )
+        == "derived"
+    )
+    assert (
+        render_text(env, message, {"problem": ""})
+        == "3d-api did not answer (http://192.168.0.39:8765)"
+    )
+    assert seq[1]["then"][0]["continue_on_error"] is True
