@@ -29,7 +29,9 @@ USAGE = """3d calibrate plan --printer P [--head T] [--spool ID] [--plate PLATE]
 3d calibrate show ID
 3d calibrate check FILE.gcode --printer P [--spools T1=ID,…] [--plate PLATE]
                    [--accept calibration:KIND[,…] --reason TEXT]
-3d calibrate gen pa|flow|combo|temp|shaper --printer P -o OUT [--material PLA] [--color #RRGGBB] [--nozzle-temp C]
+3d calibrate gen pa|flow|combo|temp|shaper|plate1 --printer P -o OUT [--material PLA] [--color #RRGGBB]
+[--nozzle-temp C] [--only T,…] [--skip T,…]
+                 [--pa-range LOW:HIGH] [--pa-step S]
   common (all but gen): [--json] [--api URL] [--token TOKEN]
 
   Calibrations per printer head and filament (fleet/calibrations.yaml: flow_ratio, pressure_advance,
@@ -53,7 +55,9 @@ Subcommands:
           layer (SET_PRESSURE_ADVANCE per line, labels = PA × 1000) plus the flow tiles, for the
           express calibration of a new spool; temp = temperature tower, one labelled 8 mm block per
           5 °C (PLA 230→200, PETG 250→220, M104 per block); shaper = SHAPER_CALIBRATE console commands
-          (printers with an accelerometer). The G-code gets thumbnails and a slice-warnings record,
+          (printers with an accelerometer); plate1 = the filament plate: every test of a new spool on
+          one bed, each object with its own setting (docs/printops/express-calibration.md), plus a
+          JSON map object → parameters, bbox, how to read it. The G-code gets thumbnails and a slice-warnings record,
           ready for `3d print-preflight`. Local only; set SLICER=/path/to/orca if needed.
 
 Options:
@@ -77,7 +81,13 @@ Options:
   --material M       gen: filament preset material (default PLA)
   --color #RRGGBB    gen: filament colour written to the G-code (loaded_filament_match)
   --nozzle-temp C    gen: nozzle temperature instead of the preset's (not for temp: it prints its range)
-  -o, --out FILE     gen: output .gcode (shaper: a .txt of console commands)
+  -o, --out FILE     gen: output .gcode (shaper: a .txt of console commands; plates also write OUT.json)
+  --only T,…         gen plateN: print only these tests (plate1: pa, mvs, flow, bridge, overhang,
+                     retraction, temp); the rest leave no hole, the layout is packed again
+  --skip T,…         gen plateN: print all tests but these
+  --pa-range LOW:HIGH gen combo/plateN: PA line range (default by material: PLA 0:0.10, PETG 0:0.15)
+  --pa-step S        gen combo/plateN: PA line step (default 0.01; a fine pass: --pa-range 0.03:0.05
+                     --pa-step 0.0025, labels like 42.5 = 0.0425)
   --json             print the API's JSON
   --api URL          3d-api base URL (default: $PRINTOPS_API, else ~/.config/3d-cli/printops.yaml)
   --token TOKEN      bearer token (default: $PRINTOPS_TOKEN, else the same file)
@@ -94,7 +104,8 @@ Examples:
   3d calibrate gen pa --printer k1se --color '#E8732A' -o k1se_pa_orange.gcode
   3d calibrate gen flow --printer k1se --color '#000000' -o k1se_flow_black.gcode
   3d calibrate gen combo --printer k1se --color '#000000' -o k1se_combo_black.gcode
-  3d calibrate gen temp --printer k1se --color '#E8732A' -o k1se_temp_orange.gcode"""
+  3d calibrate gen temp --printer k1se --color '#E8732A' -o k1se_temp_orange.gcode
+  3d calibrate gen plate1 --printer k1se --color '#E8732A' --skip pa,flow -o k1se_plate1_orange.gcode"""
 
 PREFIX = "calibrate"
 COMMON_VALUES = {"--api", "--token"}
@@ -310,21 +321,43 @@ def _check(argv: list[str]) -> int:
     return 0
 
 
+def _float(raw: str, opt: str) -> float:
+    try:
+        value = float(raw)
+    except ValueError as e:
+        raise UsageError(f"{opt} wants a number, got {raw!r}", command=f"{PREFIX} gen") from e
+    if value != value or value in (float("inf"), float("-inf")):
+        raise UsageError(f"{opt} wants a finite number, got {raw!r}", command=f"{PREFIX} gen")
+    return value
+
+
+def _pa_range(raw: str) -> tuple[float, float]:
+    lo, sep, hi = raw.partition(":")
+    if not sep:
+        raise UsageError(f"--pa-range wants LOW:HIGH (e.g. 0.03:0.05), got {raw!r}", command=f"{PREFIX} gen")
+    return _float(lo, "--pa-range"), _float(hi, "--pa-range")
+
+
+def _ids(raw: str) -> frozenset[str]:
+    return frozenset(t.strip() for t in raw.split(",") if t.strip())
+
+
 def _gen(argv: list[str]) -> int:
     from printops.cli._common import parse
 
     p = parse(
         argv,
         "gen",
-        values={"--printer", "--material", "--color", "--nozzle-temp", "-o", "--out"},
+        values={"--printer", "--material", "--color", "--nozzle-temp", "-o", "--out", "--only", "--skip",
+                "--pa-range", "--pa-step"},
         n_pos=1,
         prefix=PREFIX,
     )
-    from slicing.calibration_gen import KINDS, GenError, generate
+    from slicing.calibration_gen import GenError, all_kinds, generate
 
     kind = p.pos[0]
-    if kind not in KINDS:
-        raise UsageError(f"unknown kind {kind!r} (accepted: {', '.join(KINDS)})", command=f"{PREFIX} gen")
+    if kind not in all_kinds():
+        raise UsageError(f"unknown kind {kind!r} (accepted: {', '.join(all_kinds())})", command=f"{PREFIX} gen")
     printer = p.opts.get("--printer")
     if not printer:
         raise UsageError("--printer is required", command=f"{PREFIX} gen")
@@ -370,6 +403,10 @@ def _gen(argv: list[str]) -> int:
             material=p.opts.get("--material", "PLA").upper(),
             color=color,
             temp=temp,
+            only=_ids(p.opts.get("--only", "")),
+            skip=_ids(p.opts.get("--skip", "")),
+            pa_range=_pa_range(p.opts["--pa-range"]) if "--pa-range" in p.opts else None,
+            pa_step=_float(p.opts["--pa-step"], "--pa-step") if "--pa-step" in p.opts else None,
         )
     except GenError as e:
         raise UsageError(str(e), command=f"{PREFIX} gen") from e
