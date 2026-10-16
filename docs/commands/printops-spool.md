@@ -97,9 +97,12 @@ Every action takes `--json` (the API answer), `--api URL`, `--token TOKEN`.
 - `load` — bind to a printer head (`u1/T3`) or AMS slot (`p1s/ams1/2`): Spoolman extra
   `printops_slot` = `u1/T3`, location `slot:u1/T3`, `opened_at` if unset. Refused: an unknown
   printer/slot, a head [`fleet/printers.yaml`](../../fleet/printers.yaml) marks unusable (with
-  its reason, e.g. U1 T2), an occupied slot unless `--replace-to LOCATION` says where the
-  current spool goes, an archived spool. Offline printers (other people's, D7) are recorded
-  by hand like any other. `3d printops spool load 7 u1/T3`
+  its reason, e.g. U1 T2), a head with open faults (`3d printops maint fault open PRINTER/HEAD`;
+  the refusal lists them, and loads work again once all are closed with `maint fault close`;
+  printer-wide faults do not block loads), an occupied
+  slot unless `--replace-to LOCATION` says where the current spool goes, an archived spool.
+  Offline printers (other people's, D7) are recorded by hand like any other.
+  `3d printops spool load 7 u1/T3`
 - `unload` — take the spool out (to `--to LOCATION`, else no location); the slot is spelled as
   for `load` (`u1/t3` = `u1/T3`, `ams1/02` = `ams1/2`), and a head marked unusable can still be
   emptied. `--gross G` weighs it first: a weighing that fails leaves it loaded; an unload that

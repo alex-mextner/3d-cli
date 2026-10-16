@@ -17,7 +17,7 @@
 
 An AMS slot is addressed as `/v1/printers/p1s/slots/ams1/2/load` (the path segment `{s:path}`).
 Domain logic: printops.spools / ledger / tares. Errors: SpoolError.status with {"detail": message,
-"info": {...}} (409 occupied / unusable head / no tare, 404 unknown, 422 invalid, 502 Spoolman).
+"info": {...}} (409 occupied / unusable or faulted head / no tare, 404 unknown, 422 invalid, 502 Spoolman).
 """
 
 from __future__ import annotations
