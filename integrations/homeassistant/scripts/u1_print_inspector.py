@@ -188,7 +188,7 @@ class NoRedirect(HTTPRedirectHandler):
 
 
 class Inspector:
-    def __init__(self, printer_url: str, interval: float = 2.0):
+    def __init__(self, printer_url: str, interval: float = 2.0, ghosts=None):
         origin = urlsplit(printer_url)
         if origin.scheme not in ("http", "https") or not origin.hostname or origin.username or origin.password:
             raise ValueError("Inspector requires a fixed HTTP(S) printer origin without credentials")
@@ -201,6 +201,9 @@ class Inspector:
         self.status: dict = {}
         self.updated = 0.0
         self.index: GCodeIndex | None = None
+        # Walls of the indexed job for the camera ghost (u1_ghost.GhostRenderer), same lifetime as index.
+        self.ghosts = ghosts
+        self.shell = None
         self.index_state = "waiting"
         self.index_error = None
         self.filename = ""
@@ -232,11 +235,13 @@ class Inspector:
             declared = integer(response.headers.get("Content-Length"))
             if declared is not None and declared > MAX_BYTES:
                 raise ValueError("G-code exceeds indexing size limit")
+            builder = self.ghosts.new_builder() if self.ghosts is not None else None
             # ~0.8 MB/s on the ODROID-N2+; budget 4x slower so a busy host still finishes.
-            parsed = GCodeIndex.parse(response, deadline=time.monotonic() + 60 + expected_size / (256 * 1024))
+            parsed = GCodeIndex.parse(response, deadline=time.monotonic() + 60 + expected_size / (256 * 1024),
+                                      shell=builder)
         if parsed.size != expected_size:
             raise ValueError("G-code changed during download; retry required")
-        return parsed
+        return parsed, builder.finish() if builder is not None else None
 
     def start(self):
         threading.Thread(target=self._run, name="u1-inspector", daemon=True).start()
@@ -258,14 +263,15 @@ class Inspector:
                         (old_cursor is not None and new_cursor is not None and new_cursor < old_cursor)))
                     self.status, self.updated = status, time.time()
                     if filename != self.filename or restarted:
-                        self.filename, self.index, self.signature = filename, None, None
+                        self.filename, self.index, self.shell, self.signature = filename, None, None, None
                         self.index_state, self.index_error, self.next_metadata = "waiting", None, 0
                 if self.future and self.future.done():
                     try:
-                        index = self.future.result()
+                        index, shell = self.future.result()
                         with self.lock:
                             if self.future_name == self.filename and self.future_signature == self.signature:
                                 self.index, self.index_state, self.index_error = index, "ready", None
+                                self.shell = shell
                     except Exception as exc:
                         with self.lock:
                             if self.future_name == self.filename:
@@ -285,7 +291,7 @@ class Inspector:
                     signature = (filename, size, meta.get("modified"), meta.get("uuid"))
                     with self.lock:
                         if signature != self.signature:
-                            self.signature, self.index = signature, None
+                            self.signature, self.index, self.shell = signature, None, None
                             self.index_state = "indexing"
                             self.future_name, self.future_signature = filename, signature
                             self.future = self.executor.submit(self._load_index, filename, size)
@@ -313,6 +319,19 @@ class Inspector:
             data["recent_events"] = copy.deepcopy(self.events[-8:])
             return data
 
+    def ghost_source(self, data: dict):
+        """(job, shell, layer) the camera ghost may draw for this snapshot; Nones unless the
+        printer is running exactly the indexed file (its cursor maps into the index) and fresh."""
+        with self.lock:
+            index, shell = self.index, self.shell
+        if (shell is None or index is None or data.get("stale")
+                or data.get("state") not in ("printing", "paused")
+                or data.get("job_fingerprint") != index.sha256
+                or data.get("gcode_layer") is None
+                or not isinstance(data.get("layer"), int)):
+            return None, None, None
+        return index.sha256, shell, data["layer"]
+
     def layer(self, number: int, expected_job: str | None = None):
         with self.lock:
             if self.index is None:
@@ -332,8 +351,11 @@ def _font(size):
     return ImageFont.truetype(path, size=size)
 
 
-def overlay(frame: bytes, data: dict) -> bytes:
-    """Bake the same status into JPEG and MJPEG. No filenames in guest images."""
+def overlay(frame: bytes, data: dict, ghost=None) -> bytes:
+    """Bake the same status into JPEG and MJPEG. No filenames in guest images.
+
+    `ghost(shape)` may return a vision_ghost.Ghost for an (H, W) frame; it is blended under
+    the status band."""
     from PIL import Image, ImageDraw
     with Image.open(io.BytesIO(frame)) as original:
         original.load()
@@ -341,6 +363,10 @@ def overlay(frame: bytes, data: dict) -> bytes:
             raise ValueError("Camera frame exceeds rendering limit")
         image = original.convert("RGBA")
     w, h = image.size
+    if ghost is not None and (layer_ghost := ghost((h, w))) is not None:
+        import numpy as np
+        rgb = np.array(image.convert("RGB"))
+        image = Image.fromarray(layer_ghost.blend(rgb)).convert("RGBA")
     unit = max(14, round(w / 42))
     margin = max(10, round(w * .018))
     line_h = int(unit * 1.5)
