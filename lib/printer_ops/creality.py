@@ -194,8 +194,8 @@ class CrealityStockAdapter(Adapter):
         return body if isinstance(body, dict) else {}
 
     # ---- operations -----------------------------------------------------------------------
-    def status(self) -> PrinterStatus:
-        info = self.info()
+    def pushed_state(self) -> dict[str, Any]:
+        """What the printer pushes on ws:9999 within listen_s, merged (one read-only connection)."""
         ws = self._connect()
         try:
             msgs = self._collect(ws, self.listen_s)
@@ -203,7 +203,11 @@ class CrealityStockAdapter(Adapter):
             raise self._comm_error("ws", exc) from exc
         finally:
             ws.close()
-        return parse_status(merge_messages(msgs), info)
+        return merge_messages(msgs)
+
+    def status(self) -> PrinterStatus:
+        info = self.info()
+        return parse_status(self.pushed_state(), info)
 
     def list_files(self, expect: tuple[str, int] | None = None) -> dict[str, RemoteFile]:
         """Merge every retGcodeFileInfo2 snapshot seen in the window: right after an upload

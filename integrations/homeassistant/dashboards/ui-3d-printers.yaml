@@ -1,0 +1,259 @@
+title: 3D Printers
+views:
+  - title: Overview
+    path: overview
+    icon: mdi:printer-3d
+    type: sections
+    max_columns: 3
+    sections:
+      - type: grid
+        cards:
+          - type: gauge
+            name: K1 SE Progress
+            entity: sensor.printer_k1_se_progress
+            min: 0
+            max: 100
+            severity:
+              green: 0
+              yellow: 70
+              red: 95
+
+          - type: entities
+            title: K1 SE
+            show_header_toggle: false
+            entities:
+              - entity: binary_sensor.printer_k1_se_online
+                name: Online
+              - entity: sensor.printer_k1_se_status
+                name: Status
+              - entity: sensor.printer_k1_se_file
+                name: File
+              - entity: sensor.printer_k1_se_remaining
+                name: Remaining
+              - entity: sensor.printer_k1_se_layer
+                name: Layer
+              - entity: sensor.printer_k1_se_total_layers
+                name: Total layers
+              - entity: sensor.printer_k1_se_nozzle_temperature
+                name: Nozzle
+              - entity: sensor.printer_k1_se_nozzle_target
+                name: Nozzle target
+              - entity: sensor.printer_k1_se_bed_temperature
+                name: Bed
+              - entity: sensor.printer_k1_se_bed_target
+                name: Bed target
+              - entity: sensor.printer_k1_se_filament_used
+                name: Filament
+              - entity: sensor.printer_k1_se_z_position
+                name: Z
+
+          - type: horizontal-stack
+            cards:
+              - type: button
+                name: Pause
+                icon: mdi:pause
+                tap_action:
+                  action: call-service
+                  service: script.printer_k1_se_pause
+              - type: button
+                name: Resume
+                icon: mdi:play
+                tap_action:
+                  action: call-service
+                  service: script.printer_k1_se_resume
+              - type: button
+                name: Cancel
+                icon: mdi:stop
+                tap_action:
+                  action: call-service
+                  service: script.printer_k1_se_cancel
+                  confirmation:
+                    text: Cancel K1 SE print?
+              - type: button
+                name: E-Stop
+                icon: mdi:alert-octagon
+                tap_action:
+                  action: call-service
+                  service: script.printer_k1_se_emergency_stop
+                  confirmation:
+                    text: Emergency stop K1 SE?
+
+          # Rooted K1 SE: the USB webcam is served by mjpg-streamer (:8080, also :4408/webcam/),
+          # go2rtc stream k1se_camera. ha_creality_ws's own camera entity (Creality WebRTC :8000)
+          # no longer gets frames and is hidden in the entity registry. mjpg-streamer sends JPEG,
+          # which WebRTC/MSE reject ("codecs not matched"); MJPEG mode relays the frames over the
+          # HA websocket unchanged, so phones play it without an ffmpeg transcode on the Odroid.
+          # Controls sit top-right: the bottom edge is left to the picture.
+          - type: custom:webrtc-camera
+            title: K1 SE Camera
+            server: http://go2rtc:1984/
+            muted: true
+            ui: true
+            background: true
+            streams:
+              - url: k1se_camera
+                name: MJPEG
+                mode: mjpeg
+                media: video
+            style: >-
+              video {aspect-ratio: 16/9; object-fit: contain; background: #111;}
+              .controls {top: 32px; right: 8px; bottom: auto; left: auto; gap: 6px; padding: 2px 6px; border-radius: 8px; background: rgba(0,0,0,.45);}
+              .space, .stream, .play {display: none !important;}
+
+      - type: grid
+        cards:
+          - type: gauge
+            name: U1 Progress
+            entity: sensor.printer_u1_progress
+            min: 0
+            max: 100
+            severity:
+              green: 0
+              yellow: 70
+              red: 95
+
+          - type: entities
+            title: U1
+            show_header_toggle: false
+            entities:
+              - entity: binary_sensor.printer_u1_online
+                name: Online
+              - entity: sensor.printer_u1_status
+                name: Status
+              - entity: sensor.printer_u1_file
+                name: File
+              - entity: sensor.printer_u1_remaining
+                name: Remaining
+              - entity: sensor.printer_u1_active_tool
+                name: Active tool
+              - entity: sensor.printer_u1_layer
+                name: Layer
+              - entity: sensor.printer_u1_total_layers
+                name: Total layers
+              - entity: sensor.printer_u1_nozzle_temperature
+                name: Nozzle
+              - entity: sensor.printer_u1_nozzle_target
+                name: Nozzle target
+              - entity: sensor.printer_u1_bed_temperature
+                name: Bed
+              - entity: sensor.printer_u1_bed_target
+                name: Bed target
+              - entity: sensor.printer_u1_cavity_temperature
+                name: Cavity
+              - entity: sensor.printer_u1_filament_used
+                name: Filament
+              - entity: sensor.printer_u1_z_position
+                name: Z
+              - entity: sensor.printer_u1_fan_speed
+                name: Fan
+
+          - type: horizontal-stack
+            cards:
+              - type: button
+                name: Pause
+                icon: mdi:pause
+                tap_action:
+                  action: call-service
+                  service: script.printer_u1_pause
+              - type: button
+                name: Resume
+                icon: mdi:play
+                tap_action:
+                  action: call-service
+                  service: script.printer_u1_resume
+              - type: button
+                name: Cancel
+                icon: mdi:stop
+                tap_action:
+                  action: call-service
+                  service: script.printer_u1_cancel
+                  confirmation:
+                    text: Cancel U1 print?
+              - type: button
+                name: E-Stop
+                icon: mdi:alert-octagon
+                tap_action:
+                  action: call-service
+                  service: script.printer_u1_emergency_stop
+                  confirmation:
+                    text: Emergency stop U1?
+
+          # The proxy bakes the inspector status into the bottom band of every frame, so the
+          # player controls move top-right; the stream is switched via the mode label (top-right).
+          - type: custom:webrtc-camera
+            title: U1 Camera
+            server: http://go2rtc:1984/
+            muted: true
+            ui: true
+            background: true
+            streams:
+              - url: u1_camera
+                name: WebRTC
+                mode: webrtc
+                media: video
+              - url: u1_camera
+                name: MSE
+                mode: mse
+                media: video
+              - url: u1_camera
+                name: MJPEG
+                mode: mjpeg
+                media: video
+            style: >-
+              video {aspect-ratio: 16/9; object-fit: contain; background: #111;}
+              .controls {top: 32px; right: 8px; bottom: auto; left: auto; gap: 6px; padding: 2px 6px; border-radius: 8px; background: rgba(0,0,0,.45);}
+              .space, .stream {display: none !important;}
+
+          - type: custom:u1-inspector-card
+            title: Что делает U1
+
+          - type: custom:u1-share-card
+            title: Поделиться камерой U1
+            entity: camera.u1_camera
+            public_url: https://spry-gazelle-4693.dataplicity.io
+            refresh: 5
+
+      - type: grid
+        cards:
+          - type: history-graph
+            title: K1 SE Temperatures
+            entities:
+              - entity: sensor.printer_k1_se_nozzle_temperature
+                name: Nozzle
+              - entity: sensor.printer_k1_se_nozzle_target
+                name: Nozzle target
+              - entity: sensor.printer_k1_se_bed_temperature
+                name: Bed
+              - entity: sensor.printer_k1_se_bed_target
+                name: Bed target
+            hours_to_show: 12
+            refresh_interval: 0
+
+          - type: history-graph
+            title: U1 Temperatures
+            entities:
+              - entity: sensor.printer_u1_nozzle_temperature
+                name: Nozzle
+              - entity: sensor.printer_u1_nozzle_target
+                name: Nozzle target
+              - entity: sensor.printer_u1_bed_temperature
+                name: Bed
+              - entity: sensor.printer_u1_bed_target
+                name: Bed target
+              - entity: sensor.printer_u1_cavity_temperature
+                name: Cavity
+            hours_to_show: 12
+            refresh_interval: 0
+
+          - type: entities
+            title: Links
+            show_header_toggle: false
+            entities:
+              - type: weblink
+                name: K1 SE Web UI
+                url: /k1_se_printer
+                icon: mdi:web
+              - type: weblink
+                name: U1 Web UI
+                url: /u1_printer
+                icon: mdi:web

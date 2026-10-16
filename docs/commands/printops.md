@@ -42,6 +42,9 @@ service is never exposed to the internet.
 3d printops dry finish SESSION_ID [--rh PCT] [--weights ID=G,...]
 3d printops dry ls [--open] [--spool ID] [--limit N]
 3d printops dry due [--all] [--check]
+3d printops slots [PRINTER] [--json] [--api URL] [--token TOKEN]
+3d printops anomalies [--status open,ack|resolved|all] [--printer NAME] [--limit N] [--json]
+3d printops anomalies ack|resolve ID [--note TEXT]
 ```
 
 | Subcommand | What |
@@ -55,6 +58,8 @@ service is never exposed to the internet.
 | `spool` | Spool lifecycle — receive → store/move → load into a printer slot → unload → empty — with remaining as an interval (ledger), weighing and the idempotent `gen/plates.json` import. See [printops-spool.md](printops-spool.md). |
 | `tare` | The sourced empty-spool weight DB (SpoolmanDB seed + own weighings) and the tare chain of a spool. See [printops-spool.md](printops-spool.md#3d-printops-tare). |
 | `dry` | Drying sessions (start / finish / ls) and the spools due for drying by the `drying:` policy in `fleet/policy.yaml`. |
+| `slots` | Every fleet printer slot by slot: what the printer reports loaded (live, read by 3d-api's poller), the spool bound to it in Spoolman, open anomalies. |
+| `anomalies` | Slot reconciliation anomalies (type/colour/tag mismatch, empty slot with a spool, unknown filament, impossible bindings); `ack` / `resolve` them. |
 
 Subcommands are self-registering modules in `lib/printops/cli/<sub>.py`; later PrintOps slices
 add theirs there.
@@ -269,6 +274,67 @@ Every `check_every_min` 3d-api writes changed `dry_state` values to Spoolman and
 `drying.due` when a spool **enters** `due` or `wet`. `due`/`wet` are sticky: only a finished
 drying session (or a human editing `dry_state` in Spoolman) clears them. Spools in an open
 session show as `drying` and are never flagged.
+
+### `slots`
+
+3d-api reads every contactable fleet printer (`fleet/printers.yaml`, access not `offline`)
+READ-ONLY in the background — Snapmaker U1: one Moonraker `objects/query` of
+`print_task_config` + `filament_detect`; K1 SE (rooted, Moonraker) the same query also names its
+`filament_switch_sensor` objects (no CFS, so only filament present or not; on `creality-stock` one
+ws:9999 listen gives the runout switch) — one request per printer every `PRINTOPS_POLL_S` seconds
+(default 30, never below 10). `slots` shows that cached reading; it never contacts a printer.
+Offline printers (other people's) are listed with their heads and bound spools only.
+
+- `PRINTER` — one fleet printer (`GET /v1/printers/PRINTER`).
+  `3d printops slots u1`
+- `--json` — the raw API body: per slot `printer {present, material, color, vendor, sub_type, tag_uid}`, `spools [...]`, `anomalies [...]`.
+  `3d printops slots --json | jq '.printers[].slots[] | select(.anomalies != [])'`
+
+```
+u1  Snapmaker U1  [full]  printing 16% u1_walls_main_v3-de0f43df5562b59c.gcode  (read 2026-10-14T20:51:31.780Z)
+  T1     printer: PLA #000000 Snapmaker  |  spool 3 Elegoo PLA Black PLA #1A1A1A 830 g
+  T2 (unusable: head T2 does not work …) printer: empty  |  no spool
+  T3     printer: loaded (type unknown)  |  no spool  !unbound_filament #4
+  T4     printer: PLA #FFFFFF Snapmaker  |  spool 5 Elegoo PLA White PLA #F4F4F4 610 g
+```
+
+### `anomalies`
+
+Each reconcile pass (after every poll, and right after `slot.loaded` / `slot.unloaded` /
+`spool.*` events) compares each slot with the spools whose Spoolman extra field
+`printops_slot` names it (`u1/T3`):
+
+| Kind | When |
+|---|---|
+| `type_mismatch` | printer material ≠ spool filament material (case/space-insensitive) |
+| `color_mismatch` | CIEDE2000 between the printer colour and the spool colour (filament `measured_hex`, else `color_hex` / nearest of `multi_color_hexes`) > `PRINTOPS_COLOR_DE_MAX` (default 15) |
+| `tag_mismatch` | the slot read an RFID UID that is not in the spool's `tag_uids` |
+| `empty_with_spool` | the printer says the slot is empty but a spool is bound to it |
+| `unbound_filament` | filament is loaded but no spool is bound to the slot |
+| `multiple_spools` | two or more spools bound to one slot |
+| `unusable_head` | a spool bound to a head the fleet marks `usable: false` |
+| `unknown_slot` | `printops_slot` names a printer or head not in the fleet |
+| `location_conflict` | the spool's Spoolman location is set and is not `slot:<printer>/<head>` |
+
+A new anomaly emits `anomaly.opened` (and `slot.mismatch` for the slot kinds); one that is no
+longer seen is resolved by `reconcile` (`anomaly.resolved`). Printer-side kinds stay open while
+the printer is unreadable. `ack` = "known, leave it" until it clears; `resolve` closes it now —
+if the condition is still there, the next pass opens a new one.
+
+- `--status S` — `open,ack` (default), `resolved`, `all`, or a comma list.
+  `3d printops anomalies --status all`
+- `--printer NAME` — one printer's anomalies (`fleet` = bindings to printers not in the fleet).
+  `3d printops anomalies --printer u1`
+- `--limit N` — newest N (default 200, max 1000).
+  `3d printops anomalies --status resolved --limit 20`
+- `--note TEXT` — reason stored with `ack` / `resolve` (and in the event).
+  `3d printops anomalies ack 7 --note "T3 is PLA-CF on purpose"`
+- `--json` — raw JSON.
+  `3d printops anomalies --json | jq '.anomalies[] | select(.kind == "color_mismatch") | .evidence.delta_e2000'`
+
+```
+#4  2026-10-14T20:51:32.010Z  unbound_filament  slot:u1/T3  printer: loaded  [open]
+```
 
 ## Exit codes
 
