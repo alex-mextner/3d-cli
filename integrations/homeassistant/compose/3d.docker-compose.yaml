@@ -5,6 +5,10 @@
 # at the cutover; `3d ha deploy` recreates a service when a file it mounts changes.
 services:
   go2rtc:
+    # Preserve callbacks to HA after HA leaves the bridge network.
+    extra_hosts:
+      - "homeassistant:host-gateway"
+      - "homeassistant.local:host-gateway"
     image: alexxit/go2rtc:1.9.9
     user: "1000:1000"
     volumes:
@@ -19,6 +23,10 @@ services:
       - ha-net
 
   printer-proxy:
+    # Preserve callbacks to HA after HA leaves the bridge network.
+    extra_hosts:
+      - "homeassistant:host-gateway"
+      - "homeassistant.local:host-gateway"
     image: nginx:1.27-alpine
     volumes:
       - /home/ultra/homeassistant/printer-proxy.nginx.conf:/etc/nginx/nginx.conf:ro
@@ -29,6 +37,10 @@ services:
       - ha-net
 
   u1-camera-proxy:
+    # Preserve callbacks to HA after HA leaves the bridge network.
+    extra_hosts:
+      - "homeassistant:host-gateway"
+      - "homeassistant.local:host-gateway"
     image: ghcr.io/home-assistant/home-assistant:stable
     user: "1000:1000"
     command: ["python", "/config/scripts/u1_mjpeg_proxy.py"]
