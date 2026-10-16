@@ -110,6 +110,9 @@ def todo(tmp_path: Path, live_api: LiveApi, monkeypatch: pytest.MonkeyPatch) -> 
 def test_user_works_the_u1_list_and_imports_the_buffer(
     todo: Any, tmp_path: Path
 ) -> None:
+    """The user sees the U1's broken T2 as a repair task blocking the head, is told the command
+    that records the repair when ticking it off, adds a check with a dependent shaper run,
+    finishes the check, and imports yesterday's buffer (dry run first; twice adds nothing)."""
     code, out, err = todo("list", "u1")
     assert code == 0, err
     assert out.startswith("u1: 1 open, 1 blocking")
@@ -205,6 +208,8 @@ def test_user_works_the_u1_list_and_imports_the_buffer(
 def test_without_3d_api_the_buffer_takes_the_operations_and_import_moves_them(
     todo: Any, tmp_path: Path
 ) -> None:
+    """With 3d-api down the user adds and finishes a task: both go to the JSONL buffer with a
+    note saying so; once 3d-api is back the buffer import brings them in."""
     code, out, err = todo(
         "add",
         "u1",
@@ -255,8 +260,8 @@ def test_without_3d_api_the_buffer_takes_the_operations_and_import_moves_them(
 def test_the_old_buffer_directory_moves_once_and_a_second_one_stops_with_import_commands(
     todo: Any, tmp_path: Path
 ) -> None:
-    """The 2026-10-15/16 buffers sit in ~/.local/share/3d/printer-todo: the first offline `list`
-    moves them (notice journal included) to ~/.local/share/3d-cli/printer-todo and says so; when
+    """The 2026-10-15/16 buffers sit in the old ~/.local/share/3d directory: the first offline
+    listing moves them (notice journal included) under ~/.local/share/3d-cli and says so; when
     both directories hold files the command stops and names the imports that merge them."""
     old = tmp_path / "xdg-data" / "3d" / "printer-todo"
     new = tmp_path / "xdg-data" / "3d-cli" / "printer-todo"
