@@ -1,0 +1,25 @@
+# Third-party Home Assistant integrations the 3D config depends on. They stay vendored in the
+# HA repo as submodules (path below); this file pins them. `3d ha deploy` reads the live
+# custom_components/<domain>/manifest.json version and the submodule commit and stops on any
+# mismatch. Verified live on the Odroid 2026-10-14; ha_creality_ws 0.9.9 (HACS update) 2026-10-16.
+moonraker-home-assistant:
+  repo: https://github.com/marcolivierarsenault/moonraker-home-assistant
+  submodule: submodules/moonraker-home-assistant
+  commit: a632a695828fd5a237373114d0616850467f9ef5
+  domain: moonraker
+  version: 1.13.4
+  used_by: U1 (config entry "Snapmaker U1")
+ha_creality_ws:
+  repo: https://github.com/3dg1luk43/ha_creality_ws
+  submodule: submodules/ha_creality_ws
+  commit: a8e5491809227ff3ce72bc6b317cc75075e19b9f
+  domain: ha_creality_ws
+  version: 0.9.9
+  used_by: K1 SE (config entry "Creality K1 SE"), www/k_printer_card.js
+webrtc:
+  repo: https://github.com/AlexxIT/WebRTC
+  submodule: submodules/webrtc-camera
+  commit: ec268cd05e8c09280e2bcdd4b40c22146cca8361
+  domain: webrtc
+  version: v3.6.1
+  used_by: custom:webrtc-camera card on the 3D dashboard (u1_camera)

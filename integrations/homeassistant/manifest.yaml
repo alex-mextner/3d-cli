@@ -1,0 +1,69 @@
+# Deploy manifest for `3d ha deploy` (docs/commands/ha.md).
+#
+# This directory is the source of truth for every 3D artifact of the Home Assistant config.
+# The HA repo (ha_repo.dir on ha_repo.host) carries 3d-cli as a git submodule at
+# ha_repo.submodule and points at it:
+#   symlink — dest is a relative symlink into the submodule (HA and the containers mount the
+#             whole HA repo, so the link resolves inside them);
+#   copy    — dest is a tracked byte-identical copy. Used for www/: HA serves /local/* only
+#             from files whose resolved path stays inside /config/www (a symlink that leaves
+#             www answers 404, verified on HA 2026.9.3).
+# services: compose services that must be recreated when the file content changes (single-file
+#           bind mounts pin the old inode; the camera proxy loads its Python once).
+# Packages are reloaded per top-level domain (see RELOADABLE in lib/ha_deploy.py); a domain
+# that has no reload service stops the deploy, because applying it needs an HA restart.
+#
+# Every file under integrations/homeassistant/ is either a `files` src or listed in
+# `internal`; `3d ha deploy` and tests/test_ha_deploy.py fail on orphans either way.
+ha_repo:
+  host: ultra@192.168.0.39
+  dir: /home/ultra/homeassistant
+  github: alex-mextner/ha-configs-rs-bg-stanka_vraza
+  submodule: 3d-cli
+  submodule_url: https://github.com/alex-mextner/3d-cli.git
+  container: homeassistant-homeassistant-1
+  # Path (relative to the HA repo) that ha.docker-compose.yaml must list under `include:`.
+  compose_include: 3d-cli/integrations/homeassistant/compose/3d.docker-compose.yaml
+  compose_file: ha.docker-compose.yaml
+  configuration: configuration.yaml
+  deployed_marker: .3d-cli-deployed
+  backups: ~/.cache/ha-deploy-backups
+  # Entities checked after a deploy: none that was available before may become unavailable.
+  entity_prefixes: [sensor.printer_, binary_sensor.printer_]
+  # URLs as seen from the HA host.
+  ha_url: http://127.0.0.1:8123
+  dashboard_path: /3d-printers/overview
+  go2rtc_api: http://127.0.0.1:1984
+  go2rtc_stream: u1_camera
+
+files:
+  - {src: packages/3d_printers.yaml, dest: packages/3d_printers.yaml, mode: symlink}
+  - {src: packages/u1_print_inspector.yaml, dest: packages/u1_print_inspector.yaml, mode: symlink}
+  - {src: dashboards/ui-3d-printers.yaml, dest: ui-3d-printers.yaml, mode: symlink}
+  - {src: scripts/u1_mjpeg_proxy.py, dest: scripts/u1_mjpeg_proxy.py, mode: symlink, services: [u1-camera-proxy]}
+  - {src: scripts/u1_print_inspector.py, dest: scripts/u1_print_inspector.py, mode: symlink, services: [u1-camera-proxy]}
+  - {src: scripts/u1_gcode_index.py, dest: scripts/u1_gcode_index.py, mode: symlink, services: [u1-camera-proxy]}
+  - {src: scripts/u1_share.py, dest: scripts/u1_share.py, mode: symlink}
+  - {src: requirements/u1-share.txt, dest: requirements/u1-share.txt, mode: symlink}
+  - {src: proxy/printer-proxy.nginx.conf, dest: printer-proxy.nginx.conf, mode: symlink, services: [printer-proxy]}
+  - {src: go2rtc/go2rtc.yaml, dest: go2rtc.yaml, mode: symlink, services: [go2rtc]}
+  - {src: docs/u1-camera-sharing.md, dest: docs/u1-camera-sharing.md, mode: symlink}
+  - {src: docs/u1-print-inspector.md, dest: docs/u1-print-inspector.md, mode: symlink}
+  - {src: docs/u1-print-inspector-verification.md, dest: docs/u1-print-inspector-verification.md, mode: symlink}
+  - {src: docs/3d-printing-product-vision-and-journey.md, dest: docs/3d-printing-product-vision-and-journey.md, mode: symlink}
+  - {src: www/u1-share/share-common.js, dest: www/u1-share/share-common.js, mode: copy}
+  - {src: www/u1-share/u1-inspector-card.js, dest: www/u1-share/u1-inspector-card.js, mode: copy}
+  - {src: www/u1-share/u1-share-card.js, dest: www/u1-share/u1-share-card.js, mode: copy}
+  - {src: www/u1-share/viewer.css, dest: www/u1-share/viewer.css, mode: copy}
+  - {src: www/u1-share/viewer.html, dest: www/u1-share/viewer.html, mode: copy}
+  - {src: www/u1-share/viewer.js, dest: www/u1-share/viewer.js, mode: copy}
+
+# Not deployed as files: read by `3d ha deploy` itself, included by compose from the
+# submodule path, or tests that run in the 3d-cli gate.
+internal:
+  - manifest.yaml
+  - vendor.lock
+  - .yamllint
+  - snippets/
+  - compose/
+  - tests/
