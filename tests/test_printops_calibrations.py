@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import datetime
 import json
 import re
@@ -142,7 +143,8 @@ def test_catalog_checks_result_values(repo_files: None) -> None:
     with pytest.raises(CatalogError, match="required"):
         catalog.kinds["flow_ratio"].check_values({})
     with pytest.raises(CatalogError, match="must be a number"):
-        catalog.kinds["flow_ratio"].check_values({"flow_ratio": "0.9"})
+        catalog.kinds["flow_ratio"].check_values({"flow_ratio": "ninety"})
+    assert catalog.kinds["flow_ratio"].check_values({"flow_ratio": "0.9"}) == {"flow_ratio": 0.9}
 
 
 def _levels(**over: str) -> dict[str, Any]:
@@ -560,3 +562,55 @@ def test_lint_rules(ctx: cal.Ctx, tmp_path: Path, monkeypatch: pytest.MonkeyPatc
 
     monkeypatch.setenv("PRINTOPS_CALIBRATIONS", str(tmp_path / "missing.yaml"))
     assert [f.rule for f in lint_calibrations.lint(lctx)] == ["calibrations/catalog"]
+
+
+def test_non_lot_sensitive_kind_supersedes_across_lots(ctx: cal.Ctx) -> None:
+    """PA is not lot-sensitive: a new lot of the same filament supersedes the old record."""
+    sm = ctx.spoolman
+    first = spool(sm, "Elegoo", "PLA", "PLA Grey", lot="L1", slot="u1/T1")
+    old = record(ctx, "pressure_advance", {"pressure_advance": 0.03}, printer="u1", head="T1")
+    old_flow = record(ctx, "flow_ratio", {"flow_ratio": 0.96}, printer="u1", head="T1")
+    unbind(sm, first)
+    spool(sm, "Elegoo", "PLA", "PLA Grey", lot="L2", slot="u1/T1")
+    new = record(ctx, "pressure_advance", {"pressure_advance": 0.035}, printer="u1", head="T1")
+    record(ctx, "flow_ratio", {"flow_ratio": 0.95}, printer="u1", head="T1")
+    assert cal.get(ctx.conn, old.id).superseded_by == new.id
+    assert cal.get(ctx.conn, old_flow.id).superseded_by is None  # flow is lot-sensitive: both stay
+    current = cal.list_calibrations(ctx.conn, kind="pressure_advance", current=True)
+    assert [c.id for c in current] == [new.id]
+
+
+def test_values_must_be_finite_numbers_and_numeric_text_is_accepted(ctx: cal.Ctx) -> None:
+    spool(ctx.spoolman, "Elegoo", "PLA", "PLA Grey", slot="u1/T1")
+    for bad in ("nan", "inf", float("nan"), float("-inf")):
+        with pytest.raises(cal.CalibrationError, match="finite number"):
+            record(ctx, "flow_ratio", {"flow_ratio": bad}, printer="u1", head="T1")
+    rec = record(ctx, "flow_ratio", {"flow_ratio": "0.97"}, printer="u1", head="T1")  # CLI sends text
+    assert rec.values == {"flow_ratio": 0.97}
+    with pytest.raises(CatalogError, match="finite numbers"):
+        parse(_kind_body(values={"v": {"type": "number", "min": 0, "max": float("inf")}}))
+
+
+def test_invalidation_in_the_same_millisecond_still_counts(ctx: cal.Ctx, monkeypatch: pytest.MonkeyPatch) -> None:
+    spool(ctx.spoolman, "Elegoo", "PLA", "PLA Grey", slot="u1/T1")
+    monkeypatch.setattr(db, "utc_now", lambda: "2026-10-16T10:00:00.000Z")
+    record(ctx, "pressure_advance", {"pressure_advance": 0.03}, printer="u1", head="T1")
+    invalidate(ctx.conn, "u1", "T1", "ptfe")
+    k = by_kind(cal.requirements(ctx, "u1", head="T1", now="2026-10-16T10:00:00.000Z"))
+    assert k["pressure_advance"].status == "invalidated"
+
+
+def test_plate_scoped_kind_needs_the_plate_when_the_printer_has_several(ctx: cal.Ctx) -> None:
+    k1 = ctx.fleet.printers["k1se"]
+    fleet = dataclasses.replace(ctx.fleet, printers={**ctx.fleet.printers,
+                                                     "k1se": dataclasses.replace(k1, plates=("smooth_pei", "textured_pei"))})
+    c2 = dataclasses.replace(ctx, fleet=fleet)
+    record(c2, "z_offset", {"z_offset": -0.05}, printer="k1se", plate="smooth_pei", method="manual")
+    z = next(r for r in cal.requirements(c2, "k1se").items if r.kind is not None and r.kind.id == "z_offset")
+    assert (z.status, z.level) == ("no_plate", "UNVERIFIED")
+    z = next(r for r in cal.requirements(c2, "k1se", plate="smooth_pei").items
+             if r.kind is not None and r.kind.id == "z_offset")
+    assert z.status == "current"
+    z = next(r for r in cal.requirements(c2, "k1se", plate="textured_pei").items
+             if r.kind is not None and r.kind.id == "z_offset")
+    assert z.status != "current"  # the smooth-PEI record says nothing about textured PEI

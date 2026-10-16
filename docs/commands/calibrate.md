@@ -25,7 +25,7 @@ A flow ratio or pressure advance measured for one filament on one head is wrong 
 material, vendor or nozzle; after a nozzle swap or PTFE change every old value is stale. Nothing
 in the slicer stops a print with someone else's numbers. 3d-api keeps every calibration with the
 exact scope it was measured on and answers, for the spool loaded on a head right now, what is
-missing — and print-preflight's `calibration_current` gate refuses a G-code whose footer carries
+missing — and the `calibration_current` gate (`3d calibrate check`) refuses a G-code whose footer carries
 other values than the recorded ones.
 
 ## The catalog: `fleet/calibrations.yaml`
@@ -66,6 +66,7 @@ it (`3d printops spool load`) and the nozzle on it (#166's nozzle installs when 
 | `expired` | past the record's `valid_until` | warn |
 | `gcode_mismatch` | (gate) the G-code carries another value than the record | block |
 | `no_spool` | the kind needs a filament and no spool is bound to the head | UNVERIFIED |
+| `no_plate` | the kind is per plate, the printer has several and no `--plate` was given | UNVERIFIED |
 
 block = FAIL, warn = WARN, off = not reported. Overrides per kind (`temp_tower` only warns,
 `max_volumetric_speed` and `retraction` warn) and per printer (the neighbours' and hackspace
@@ -125,7 +126,8 @@ The text report collapses the `assumed` kinds into one PASS line; `--json` lists
 
 FAIL exits 1. `--accept calibration:<kind> --reason "…"` turns that kind's FAIL into WARN and
 logs a `calibration.accepted` event (who, which G-code SHA, why); it needs a token with the
-`write` scope. print-preflight's PrintOps checks (#164) call the same endpoint.
+`write` scope. `3d print-preflight` does not run this gate yet: it joins print-preflight with
+the PrintOps checks of [#164](https://github.com/alex-mextner/3d-cli/issues/164), which call the same endpoint.
 
 ## `gen` — calibration prints ([#168](https://github.com/alex-mextner/3d-cli/issues/168))
 
