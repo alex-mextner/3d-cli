@@ -56,6 +56,7 @@ run in CI by `tests/e2e/test_printops_fleet_workflows.py` on the repo file and o
 | `fleet/device` | the device settings are valid `printer-devices.yaml` settings |
 | `fleet/model-known` | `model` is in [`3d printers list`](printers.md) |
 | `fleet/live-topology` | `--live` only: head count = the printer's extruders, each head's `extruder` exists, nozzle diameters match the printer config. Read-only: one Moonraker `GET /printer/objects/query?configfile=settings` or one Creality status read per printer; offline printers are never probed; an unreachable printer is a warning |
+| `maintenance/rules-schema` | [`fleet/maintenance-rules.yaml`](../../fleet/maintenance-rules.yaml) (see [printops-maint.md](printops-maint.md#maintenance-rules-and-due)) parses; rule ids unique, printers in the fleet file, components/tasks/scopes/thresholds known with limits > 0, a `source` per rule; `invalidates:` maps each component × kind once to a known calibration trigger. No file = no rules; `THREED_MAINTENANCE_RULES=<path>` lints another one |
 
 Rules over the live data (Spoolman + the PrintOps DB) run inside 3d-api (`GET /v1/lint`,
 read-only) whenever a 3d-api is configured; without one they are skipped and the report says
@@ -68,6 +69,8 @@ Each PrintOps slice adds its rules as `lib/printops/lint_<slice>.py`
 | `spools/remaining-negative` | error | the spool ledger books more than the spool had (estimates over-count, or the spool was swapped): weigh it |
 | `spools/no-tare` | warn | no empty-spool weight anywhere in the tare chain ([printops-spool.md](printops-spool.md#tares-empty-spool-weights)), so it cannot be weighed |
 | `spools/not-weighed` | warn | never weighed, or last weighed more than `--weigh-days` days ago; a sealed, unused spool received with a known net is exempt |
+| `maintenance/open-fault` | warn | a fault is open on a printer or head (the head counts as unusable until it is closed) |
+| `maintenance/fleet-drift` | warn | `fleet/printers.yaml` disagrees with the recorded state: an open fault on a `usable: true` head, a closed seeded fault on a `usable: false` head, or a nozzle other than the last recorded swap |
 
 ```bash
 3d lint --printops

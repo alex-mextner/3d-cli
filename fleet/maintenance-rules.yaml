@@ -1,0 +1,113 @@
+# fleet/maintenance-rules.yaml — when our printers need maintenance, and which maintenance
+# invalidates calibrations (plan §7.3, issue #166).
+#
+# Read by lib/printops/maintenance_rules.py (schema + typed loader); 3d-api checks the rules every
+# `check_every_min` and emits `maintenance.due`; `3d printops maint due` shows them, `3d lint
+# --printops` checks this file (rule maintenance/rules-schema). Docs: docs/commands/printops-maint.md.
+#
+# rules[]:
+#   id         lower-case letters, digits, '-'; `3d printops maint log PRINTER --rule ID` records it
+#   title      what to do
+#   printers   fleet/printers.yaml names
+#   component  nozzle hotend ptfe extruder plate belts kinematics fan head other printer
+#   task       clean lube replace tighten repair inspect firmware_update move
+#   scope      printer (default) | head (one item per head)
+#   every      one or more thresholds; due when ANY is reached since the rule was last logged:
+#              print_hours, filament_m, tool_changes, jobs (counters: Moonraker job history,
+#              per printer; per-head counters and tool changes come with the job ledger #170),
+#              days (calendar)
+#   source     where the interval comes from (vendor doc URL, …) — required, never a guess
+#   note       optional
+# A rule never logged has no baseline: its counters count from the printer's first job and its
+# `days` are unknown, so it is due until it is logged once (use --at for work done earlier).
+#
+# invalidates[]: maintenance (component × kinds `when`) → calibration trigger, the name the
+# calibration catalog (fleet/calibrations.yaml `invalidates_on`, #167) lists. A nozzle swap
+# (`3d printops maint nozzle swap`) always fires nozzle_swap (+ nozzle_diameter when the diameter
+# changes); it is not configured here.
+
+check_every_min: 60
+soon_fraction: 0.9
+
+invalidates:
+  - {component: hotend, when: [replace, repair], trigger: hotend}
+  - {component: ptfe, when: [replace], trigger: ptfe}
+  - {component: extruder, when: [replace, repair], trigger: extruder}
+  - {component: head, when: [replace, repair], trigger: head_swap}
+  - {component: belts, when: [replace, tighten], trigger: belts}
+  - {component: kinematics, when: [replace, repair], trigger: kinematics}
+  - {component: plate, when: [replace], trigger: plate}
+  - {component: printer, when: [repair], trigger: repair}
+  - {component: printer, when: [move], trigger: move}
+
+rules:
+  # Snapmaker U1 — vendor schedule "U1 core components maintenance guide" (Maintenance Overview).
+  - id: u1-linear-shafts
+    title: clean and lubricate the linear shafts / linear bearings (light lithium grease; no WD-40)
+    printers: [u1]
+    component: kinematics
+    task: lube
+    # Monthly per the vendor; the filament alternative is community advice for heavy use:
+    # "every 3 or 4 rolls … clean and lubricate the linear steel rods and lead screws" (3 rolls ≈ 1000 m PLA 1.75).
+    every: {days: 30, filament_m: 1000}
+    source: "https://wiki.snapmaker.com/en/snapmaker_u1/troubleshooting/Core_Components_Maintenance_Guide (Monthly); https://www.reddit.com/r/snapmaker/comments/1svqq1x/supplied_greases_new_u1/ (3-4 rolls)"
+  - id: u1-x-carbon-rods
+    title: clean the X carbon rods and bushings with IPA — NEVER grease them
+    printers: [u1]
+    component: kinematics
+    task: clean
+    every: {days: 30}
+    source: https://wiki.snapmaker.com/en/snapmaker_u1/troubleshooting/Core_Components_Maintenance_Guide (Monthly)
+  - id: u1-belt-tension
+    title: check the XY timing belt tension and clean the belts
+    printers: [u1]
+    component: belts
+    task: inspect
+    every: {days: 30}
+    source: https://wiki.snapmaker.com/en/snapmaker_u1/troubleshooting/Core_Components_Maintenance_Guide (Monthly)
+  - id: u1-lead-screws
+    title: clean and lubricate the Z lead screws / nuts (light lithium grease on the threads)
+    printers: [u1]
+    component: kinematics
+    task: lube
+    every: {days: 90}
+    source: https://wiki.snapmaker.com/en/snapmaker_u1/troubleshooting/Core_Components_Maintenance_Guide (Quarterly)
+  - id: u1-steel-pins
+    title: clean and lubricate the toolhead steel pins / steel balls
+    printers: [u1]
+    component: head
+    task: lube
+    every: {days: 90}
+    source: https://wiki.snapmaker.com/en/snapmaker_u1/troubleshooting/Core_Components_Maintenance_Guide (Quarterly)
+  - id: u1-pogo-pins
+    title: clean the toolhead pogo pins with alcohol (no hard objects)
+    printers: [u1]
+    component: head
+    task: clean
+    every: {days: 120}
+    source: https://wiki.snapmaker.com/en/snapmaker_u1/troubleshooting/Core_Components_Maintenance_Guide (Every 4–6 months)
+
+  # Creality K1 SE — K1-series vendor tips (K1/K1C maintenance page; same frame family). Stock
+  # firmware keeps no job history 3d can read, so print_hours stay unknown until the job ledger
+  # (#170); the vendor gives no calendar interval for these.
+  - id: k1se-z-lead-screws
+    title: check and lubricate the Z lead screws (remove dust first, thin layer of the supplied grease)
+    printers: [k1se]
+    component: kinematics
+    task: lube
+    every: {print_hours: 300}
+    source: https://wiki.creality.com/en/k1-flagship-series/k1c/maintenance-tips (§3.1 every 300 printing hours)
+  - id: k1se-rods
+    title: check the X optical shaft and the Y/Z rods for dust; clean with IPA
+    printers: [k1se]
+    component: kinematics
+    task: clean
+    every: {print_hours: 300}
+    source: https://wiki.creality.com/en/k1-flagship-series/k1c/maintenance-tips (§1.1, §2.1 every 300 printing hours)
+  - id: k1se-y-rust
+    title: rust-prevention treatment of the Y-axis rods
+    printers: [k1se]
+    component: kinematics
+    task: inspect
+    every: {days: 180}
+    source: https://wiki.creality.com/en/k1-flagship-series/k1c/maintenance-tips (§2.1 every six months)

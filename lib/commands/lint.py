@@ -25,7 +25,8 @@ Model options:
   --error ID            set a model rule to error level for this run
   --list-rules          print registered model rules
 
-PrintOps data options (fleet/printers.yaml rules fleet/schema, fleet/device, fleet/model-known):
+PrintOps data options (fleet/printers.yaml rules fleet/schema, fleet/device, fleet/model-known;
+fleet/maintenance-rules.yaml rule maintenance/rules-schema):
   --printops            lint the PrintOps data files instead of code
   --live                also compare heads/nozzles with each reachable printer (rule
                         fleet/live-topology; READ-ONLY: one GET / ws status read per printer,
@@ -246,10 +247,12 @@ def _run_printops_lint(options: dict[str, Any]) -> int:
         raise UsageError("--printops lints the PrintOps data files; it takes no paths, --all, --rule or model options",
                          command="lint", remediation=["Run `3d lint --printops [--live] [--fleet FILE] [--json]`."])
     from printops.fleet_lint import ERROR, lint_fleet
+    from printops.maintenance_rules import lint_rules_file
 
     path, findings = lint_fleet(options["fleet"], live=options["live"])
+    _, rules_findings = lint_rules_file(fleet=options["fleet"])
     data_findings, data_note = _printops_data_findings(options)
-    findings = [*findings, *data_findings]
+    findings = [*findings, *rules_findings, *data_findings]
     errors = sum(1 for f in findings if f.level == ERROR)
     warnings = len(findings) - errors
     if options["json_output"]:

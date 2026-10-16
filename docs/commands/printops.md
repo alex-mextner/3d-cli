@@ -45,6 +45,7 @@ service is never exposed to the internet.
 3d printops slots [PRINTER] [--json] [--api URL] [--token TOKEN]
 3d printops anomalies [--status open,ack|resolved|all] [--printer NAME] [--limit N] [--json]
 3d printops anomalies ack|resolve ID [--note TEXT]
+3d printops maint components|nozzle swap|log|history|due|fault ls|open|close|sync-fleet …
 ```
 
 | Subcommand | What |
@@ -60,6 +61,7 @@ service is never exposed to the internet.
 | `dry` | Drying sessions (start / finish / ls) and the spools due for drying by the `drying:` policy in `fleet/policy.yaml`. |
 | `slots` | Every fleet printer slot by slot: what the printer reports loaded (live, read by 3d-api's poller), the spool bound to it in Spoolman, open anomalies. |
 | `anomalies` | Slot reconciliation anomalies (type/colour/tag mismatch, empty slot with a spool, unknown filament, impossible bindings); `ack` / `resolve` them. |
+| `maint` | Printer components (nozzle per head, PTFE, hotend, plates, …) seeded from `fleet/printers.yaml`, nozzle swaps and component work that invalidate calibrations, the maintenance log, faults (the U1's broken T2), and the due rules of `fleet/maintenance-rules.yaml` from Moonraker job history. See [printops-maint.md](printops-maint.md). |
 
 Subcommands are self-registering modules in `lib/printops/cli/<sub>.py`; later PrintOps slices
 add theirs there.

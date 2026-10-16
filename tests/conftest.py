@@ -16,6 +16,9 @@ os.environ.setdefault("REPO_ROOT", _REPO)
 # The repo's fleet/printers.yaml names the real printers on the LAN: no test may reach them by
 # accident. Tests that want a fleet pass THREED_FLEET=<file> (printops.fleet; `3d` children inherit this).
 os.environ["THREED_FLEET"] = ""
+# Same for fleet/maintenance-rules.yaml (its due check reads printer job history): tests pass
+# THREED_MAINTENANCE_RULES=<file> (printops.maintenance_rules).
+os.environ["THREED_MAINTENANCE_RULES"] = ""
 _LIB = os.path.join(_REPO, "lib")
 if _LIB not in sys.path:
     sys.path.insert(0, _LIB)
