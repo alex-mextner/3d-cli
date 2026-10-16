@@ -167,6 +167,16 @@ The catalog `fleet/calibrations.yaml` (override `PRINTOPS_CALIBRATIONS`), the po
 a broken file answers 503 and shows in `3d lint --printops` (`calibrations/*`). Maintenance (#166)
 invalidates records with `calibration.invalidated` events. Details: docs/commands/calibrate.md.
 
+## API (settings history, #264)
+
+| Endpoint | Scope | |
+|---|---|---|
+| `POST /v1/settings/import` | write | `{lines[], file?, spools?{uid: spool_id}, methods?{uid: method}, dry_run?}` — one offline buffer file (schema `printops.settings_change/1`) → `{file, dry_run, lines, counts{imported, calibrations, skipped, refused}, results[], unused_uids}`; idempotent by uid; a torn line → 422 with its number; `settings.changed` per row, `calibration.recorded` per record |
+| `GET /v1/settings/history` | read | `?printer=&kind=&since=&limit=N` → `{changes}` newest change first |
+
+Table `settings_change` (migration 0100) is append-only (UPDATE/DELETE abort). Which buffer lines
+become calibration records and how they are bound to a spool: docs/commands/settings.md.
+
 ## API (incidents, #165)
 
 `/v1/incidents` (report with auto-context, list, show, edit, confirm, resolve, dismiss),

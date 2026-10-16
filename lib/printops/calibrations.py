@@ -7,7 +7,9 @@ RECORDS (table `calibration`, migration 0080): a row is created `planned` when a
 becomes `recorded` with its result values; a manual entry is created recorded. The scope
 (printer, head, nozzle, plate, filament + lot) is SNAPSHOT at creation — the dimensions the
 catalog (fleet/calibrations.yaml) lists for the kind, nothing else. A newer record for the
-identical scope supersedes the older one (`superseded_by`).
+identical scope supersedes the older one (`superseded_by`). Past records imported from the
+settings-history buffer (#264, printops.settings_history) keep their measurement time as
+`recorded_at`, and superseding between them follows that time (`insert_past`).
 
 REQUIREMENT ENGINE (plan §8.1): for a printer head and the spool bound to it (Spoolman
 `printops_slot`, #160) every catalog kind of the printer's model gets a status:
@@ -54,7 +56,7 @@ import json
 import re
 import sqlite3
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from printops import db
@@ -628,6 +630,82 @@ def record(ctx: Ctx, req: RunRequest, result: Mapping[str, Any]) -> Calibration:
     with db.transaction(ctx.conn):
         cal_id = _insert(ctx, snap, req)
         return _apply_result(ctx, get(ctx.conn, cal_id), result)
+
+
+# -- past records (settings-history import, #264) ---------------------------------------------
+
+
+@dataclass(frozen=True)
+class PastRecord:
+    """A calibration measured before 3d-api knew of it (a line of the settings-history buffer):
+    the scope request, the values, when and by whom, and where it was applied."""
+
+    req: RunRequest
+    values: Mapping[str, Any]
+    at: str  # db.utc_now() format: when it was measured
+    by: str
+    evidence: list[Any]
+    applied_to: list[dict[str, Any]]
+    nozzle_diameter_mm: float | None
+
+
+@dataclass(frozen=True)
+class PreparedRecord:
+    snap: _Snapshot
+    past: PastRecord
+    values: dict[str, Any]
+
+
+def prepare_past(ctx: Ctx, past: PastRecord) -> PreparedRecord:
+    """Resolve the scope (fleet and Spoolman reads, no DB writes) and check the values.
+
+    The nozzle is the entry's diameter (none named: unknown), with the head's material and type
+    from the fleet when the diameters agree, and never an install id: the install on the head now may postdate the
+    measurement. A later nozzle swap voids the record through its invalidation event instead."""
+    snap = _snapshot(ctx, past.req)
+    try:
+        values = snap.kind.check_values(dict(past.values))
+    except CatalogError as e:
+        raise CalibrationError(422, str(e)) from e
+    if snap.nozzle is not None and past.nozzle_diameter_mm is None:
+        snap = replace(snap, nozzle=None)  # the line names no nozzle: unknown, never today's
+    elif snap.nozzle is not None:
+        n, d = snap.nozzle, past.nozzle_diameter_mm
+        same = n.diameter_mm is None or d == n.diameter_mm
+        snap = replace(snap, nozzle=Nozzle(None, d, n.material if same else None, n.type if same else None))
+    return PreparedRecord(snap, past, values)
+
+
+def insert_past(ctx: Ctx, prep: PreparedRecord) -> Calibration:
+    """Insert a prepared past record as `recorded`, inside the caller's transaction.
+
+    Unlike record(): created_at/recorded_at are the measurement time (invalidation events are
+    compared with it), and superseding follows that time, not insertion order — the record
+    supersedes older current records of its scope and is superseded by a newer one already
+    present, so importing an old buffer never displaces a later calibration."""
+    past = prep.past
+    cal_id = _insert(ctx, prep.snap, past.req)
+    ctx.conn.execute(
+        """UPDATE calibration SET status = 'recorded', values_json = ?, evidence = ?, applied_to = ?,
+               created_at = ?, created_by = ?, recorded_at = ?, recorded_by = ? WHERE id = ?""",
+        (json.dumps(prep.values, sort_keys=True), json.dumps(past.evidence), json.dumps(past.applied_to),
+         past.at, past.by, past.at, past.by, cal_id),
+    )
+    new = get(ctx.conn, cal_id)
+    kind = prep.snap.kind
+    same = [c for c in list_calibrations(ctx.conn, kind=kind.id, current=True, limit=1000)
+            if c.id != cal_id and _same_scope(c, new, kind.lot_sensitive)]
+    older = [c for c in same if (c.recorded_at or "") <= past.at]
+    newer = sorted((c for c in same if (c.recorded_at or "") > past.at), key=lambda c: c.recorded_at or "")
+    for c in older:
+        ctx.conn.execute("UPDATE calibration SET superseded_by = ? WHERE id = ?", (cal_id, c.id))
+    if newer:
+        ctx.conn.execute("UPDATE calibration SET superseded_by = ? WHERE id = ?", (newer[0].id, cal_id))
+        new = get(ctx.conn, cal_id)
+    ev.emit(ctx.conn, "calibration.recorded", f"calibration:{cal_id}",
+            {**_event_scope(new), "values": prep.values, "superseded": [c.id for c in older],
+             "imported": True}, ctx.actor)
+    return new
 
 
 # -- invalidation -----------------------------------------------------------------------------
