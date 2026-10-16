@@ -167,6 +167,24 @@ The catalog `fleet/calibrations.yaml` (override `PRINTOPS_CALIBRATIONS`), the po
 a broken file answers 503 and shows in `3d lint --printops` (`calibrations/*`). Maintenance (#166)
 invalidates records with `calibration.invalidated` events. Details: docs/commands/calibrate.md.
 
+## API (incidents, #165)
+
+`/v1/incidents` (report with auto-context, list, show, edit, confirm, resolve, dismiss),
+`/v1/incidents/stats` (rates per kg / print-hour), `/v1/incidents/context`,
+`/v1/incidents/from-watch` and `/v1/exposure` (+ `/sync`): see
+[docs/commands/printops-incidents.md](../../docs/commands/printops-incidents.md#rest).
+
+**Printers (read-only).** The auto-context reads the printer named in a report: one status read
+and, for Moonraker, one `GET /server/history/list`. `POST /v1/exposure/sync` pages through
+Moonraker job history (≤ 1 request / 5 s). Offline fleet printers are never contacted.
+
+**G-code for the context.** `PRINTOPS_GCODE_DIRS` (`:`-separated, inside the container) is
+searched for the job's file; compose mounts the host's `PRINTOPS_GCODE_HOST_DIR` (default
+`/home/ultra/printops/gcodes`) read-only at `/gcodes`, the default dir. `PRINTOPS_GCODE_FETCH=1`
+lets 3d-api download a Moonraker job's file once (`GET /server/files/gcodes/…`) into
+`/data/gcode-cache/`; off by default. Without the G-code an incident still gets job, layer, the
+live heater targets, the spool and its lot.
+
 ## Operations
 
 ```
