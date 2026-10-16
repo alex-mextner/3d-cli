@@ -496,3 +496,18 @@ def test_fleet_slicer_key(tmp_path: Path) -> None:
     with pytest.raises(FleetError) as err:
         load_fleet(bad)
     assert any("slicer.filament: unknown key" in r for r in err.value.remediation)
+
+
+def test_user_preset_roots_follow_the_profiles_resolver(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Repo profiles first, then the slicer's logged-in preset folder (XDG config, preset_folder)."""
+    monkeypatch.delenv("ORCA_USER_PRESETS", raising=False)
+    repo = tmp_path / "profiles" / "snapmaker-orca"
+    (repo / "filament").mkdir(parents=True)
+    monkeypatch.setenv("THREED_PROFILES_DIR", str(tmp_path / "profiles"))
+    xdg = tmp_path / "xdg"
+    data = xdg / "Snapmaker_Orca"
+    (data / "user" / "12345" / "filament").mkdir(parents=True)
+    (data / "Snapmaker_Orca.conf").write_text(json.dumps({"app": {"preset_folder": "12345"}}))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    assert cg.user_preset_roots() == [repo, data / "user" / "12345"]

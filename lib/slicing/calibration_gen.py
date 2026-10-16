@@ -201,19 +201,19 @@ def profile_roots(slicer: str) -> list[Path]:
 
 def user_preset_roots() -> list[Path]:
     """Where user presets live, first wins: the repo's profiles (decision D10, synced to the
-    slicers by `3d profiles sync`), then the slicers' own user folders. Each holds
-    filament/, process/, machine/ directly (no vendor level)."""
+    slicers by `3d profiles sync`), then the Orca-family slicers' own user preset folders, found
+    the way `3d profiles` finds them (XDG/Flatpak/macOS data dir, the logged-in `preset_folder`).
+    Each holds filament/, process/, machine/ directly (no vendor level)."""
     env = os.environ.get("ORCA_USER_PRESETS")
     if env:
         return [Path(p) for p in env.split(os.pathsep) if Path(p).is_dir()]
-    from cli.env import repo_root
+    from profiles.slicers import SLICERS, find_data_dir, profiles_root, user_presets_dir
 
-    home = Path.home()
-    roots = [Path(repo_root()) / "profiles" / "snapmaker-orca"]
-    roots += [
-        home / ".config" / app / "user" / "default"
-        for app in ("Snapmaker_Orca", "OrcaSlicer")
-    ]
+    roots = [profiles_root() / sid for sid in ("snapmaker-orca", "orca")]
+    for sid in ("snapmaker-orca", "orca"):
+        data = find_data_dir(SLICERS[sid])
+        if data is not None:
+            roots.append(user_presets_dir(data, SLICERS[sid]))
     return [r for r in roots if r.is_dir()]
 
 
