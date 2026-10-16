@@ -152,6 +152,11 @@ class Adapter:
     def cancel(self) -> None:
         raise self._unsupported("cancel")
 
+    def run_gcode(self, script: str) -> None:
+        """Run a G-code script (lines joined by newlines; the bed-clear acknowledgement,
+        printer_ops/bed.py, is the only caller). Returns once the printer acknowledged it."""
+        raise self._unsupported("run_gcode")
+
     def _unsupported(self, op: str) -> UnsupportedOperation:
         return UnsupportedOperation(
             f"adapter '{self.kind}' (printer {self.name}) does not support {op}",
