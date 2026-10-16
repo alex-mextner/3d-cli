@@ -1072,8 +1072,8 @@ def record(host: Host, manifest: Manifest, plan: Plan, log: list[str]) -> str | 
 
     The PR commit is built on origin/main, never on the live HEAD: the live checkout may carry
     local commits nobody pushed, and a branch built on them would publish them with the PR.
-    .gitmodules is taken from the working tree only while origin/main lacks the submodule
-    entry (the cutover); otherwise unrelated local .gitmodules edits would ride along.
+    .gitmodules is never taken from the working tree (it may hold other sessions' edits): at
+    the cutover the branch gets origin/main's .gitmodules plus only this submodule's stanza.
     """
     r = manifest.ha_repo
     paths = [r.submodule, *(f.dest for f in manifest.files)]
@@ -1090,7 +1090,7 @@ def record(host: Host, manifest: Manifest, plan: Plan, log: list[str]) -> str | 
 cd {_q(plan.ha_dir)}
 export PATH="$HOME/.local/bin:$PATH"
 # The real index carries the deployed paths so main fast-forwards once the PR is merged.
-git add -A -- {quoted} .gitmodules
+git add -A -- {quoted}
 tmp=$(mktemp)
 rm -f "$tmp"
 trap 'rm -f "$tmp"' EXIT
@@ -1098,7 +1098,13 @@ export GIT_INDEX_FILE="$tmp"
 git read-tree origin/main
 git add -A -- {quoted}
 if ! git config --blob origin/main:.gitmodules --get {_q(f"submodule.{r.submodule}.path")} >/dev/null 2>&1; then
-  git add -- .gitmodules
+  # Cutover: origin/main's .gitmodules plus only this submodule's stanza.
+  gm=$(mktemp)
+  git show origin/main:.gitmodules > "$gm" 2>/dev/null || : > "$gm"
+  git config -f "$gm" {_q(f"submodule.{r.submodule}.path")} {_q(r.submodule)}
+  git config -f "$gm" {_q(f"submodule.{r.submodule}.url")} {_q(r.submodule_url)}
+  git update-index --add --cacheinfo "100644,$(git hash-object -w "$gm"),.gitmodules"
+  rm -f "$gm"
 fi
 tree=$(git write-tree)
 if [ "$tree" = "$(git rev-parse 'origin/main^{{tree}}')" ]; then echo NOCHANGE; exit 0; fi

@@ -467,3 +467,23 @@ def test_deploy_pr_is_built_on_origin_main_not_on_unpushed_local_commits(world: 
     names = git(world.origin, "ls-tree", "-r", "--name-only", pushed).splitlines()
     assert "local-only.txt" not in names
     assert "packages/3d_printers.yaml" in names
+
+
+def test_deploy_never_publishes_local_gitmodules_edits(world: World) -> None:
+    """At the cutover (origin/main has no 3d-cli stanza yet) the PR gets origin/main's
+    .gitmodules plus only that stanza; another session's uncommitted submodule entry in the
+    working tree stays local and is not staged by the deploy either."""
+    other = world.root / "origin-edit"
+    git(world.root, "clone", "-q", str(world.origin), str(other))
+    git(other, "config", "-f", ".gitmodules", "--remove-section", "submodule.3d-cli")
+    git(other, "commit", "-q", "-am", "main without the 3d-cli stanza")
+    git(other, "push", "-q", "origin", "HEAD:main")
+    git(world.ha, "fetch", "-q", "origin")
+    git(world.ha, "config", "-f", ".gitmodules", "submodule.other.path", "other")
+    git(world.ha, "config", "-f", ".gitmodules", "submodule.other.url", "https://example.invalid/other.git")
+    assert _deploy(world) == 0
+    pushed = git(world.origin, "rev-parse", f"refs/heads/3d-deploy/{world.sha[:12]}")
+    gitmodules = git(world.origin, "show", f"{pushed}:.gitmodules")
+    assert '[submodule "3d-cli"]' in gitmodules
+    assert "other" not in gitmodules
+    assert ".gitmodules" not in git(world.ha, "diff", "--cached", "--name-only").splitlines()
