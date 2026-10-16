@@ -39,6 +39,7 @@ ha_repo:
 files:
   - {src: packages/3d_printers.yaml, dest: packages/3d_printers.yaml, mode: symlink}
   - {src: packages/u1_print_inspector.yaml, dest: packages/u1_print_inspector.yaml, mode: symlink}
+  - {src: packages/printops_tasks.yaml, dest: packages/printops_tasks.yaml, mode: symlink}
   - {src: dashboards/ui-3d-printers.yaml, dest: ui-3d-printers.yaml, mode: symlink}
   - {src: scripts/u1_mjpeg_proxy.py, dest: scripts/u1_mjpeg_proxy.py, mode: symlink, services: [u1-camera-proxy]}
   - {src: scripts/u1_print_inspector.py, dest: scripts/u1_print_inspector.py, mode: symlink, services: [u1-camera-proxy]}
@@ -51,6 +52,7 @@ files:
   - {src: docs/u1-camera-sharing.md, dest: docs/u1-camera-sharing.md, mode: symlink}
   - {src: docs/u1-print-inspector.md, dest: docs/u1-print-inspector.md, mode: symlink}
   - {src: docs/u1-print-inspector-verification.md, dest: docs/u1-print-inspector-verification.md, mode: symlink}
+  - {src: docs/printops-tasks.md, dest: docs/printops-tasks.md, mode: symlink}
   - {src: docs/3d-printing-product-vision-and-journey.md, dest: docs/3d-printing-product-vision-and-journey.md, mode: symlink}
   - {src: www/u1-share/share-common.js, dest: www/u1-share/share-common.js, mode: copy}
   - {src: www/u1-share/u1-inspector-card.js, dest: www/u1-share/u1-inspector-card.js, mode: copy}

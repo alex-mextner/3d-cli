@@ -1,0 +1,214 @@
+# Printer to-do lists from 3d-api (3d-cli #285; tasks: #281, docs/commands/printer.md).
+# Needs in the HA repo's secrets.yaml:  printops_api_auth: "Bearer <3d-api token, scopes read,write>"
+# and one Local To-do list per printer, named "printops_k1se" / "printops_u1" (entities
+# todo.printops_k1se / todo.printops_u1): see docs/printops-tasks.md.
+#
+#   sensor.printops_<printer>_tasks  state = open tasks (not snoozed); attributes summary {open,
+#                                    blocking, waiting, snoozed, needs_human, next_idle} and tasks[]
+#   rest_command.printops_task_done|snooze|add
+#   todo.printops_<printer>          kept equal to the open tasks by script.printops_todo_sync:
+#                                    ticking an item closes the task in 3d-api (a derived task
+#                                    refuses: a persistent notification names the command that
+#                                    records the work and the item unticks); a new item becomes a
+#                                    manual task.
+rest:
+  - resource: "http://192.168.0.39:8765/v1/printers/k1se/tasks"
+    headers:
+      Authorization: !secret printops_api_auth
+    scan_interval: 60
+    timeout: 20
+    sensor:
+      - name: "printops_k1se_tasks"
+        unique_id: printops_k1se_tasks
+        icon: mdi:clipboard-list-outline
+        unit_of_measurement: "tasks"
+        value_template: "{{ value_json.summary.open }}"
+        json_attributes: [printer, summary, tasks]
+  - resource: "http://192.168.0.39:8765/v1/printers/u1/tasks"
+    headers:
+      Authorization: !secret printops_api_auth
+    scan_interval: 60
+    timeout: 20
+    sensor:
+      - name: "printops_u1_tasks"
+        unique_id: printops_u1_tasks
+        icon: mdi:clipboard-list-outline
+        unit_of_measurement: "tasks"
+        value_template: "{{ value_json.summary.open }}"
+        json_attributes: [printer, summary, tasks]
+
+rest_command:
+  printops_task_done:
+    url: "http://192.168.0.39:8765/v1/tasks/{{ task }}/done"
+    method: post
+    headers:
+      Authorization: !secret printops_api_auth
+    content_type: "application/json"
+    payload: '{"note": {{ note | default("done in Home Assistant") | tojson }}}'
+    timeout: 20
+  printops_task_snooze:
+    url: "http://192.168.0.39:8765/v1/tasks/{{ task }}/snooze"
+    method: post
+    headers:
+      Authorization: !secret printops_api_auth
+    content_type: "application/json"
+    payload: >-
+      {"until": {{ (until | default(none)) | tojson }}, "reason": {{ reason | default("snoozed in Home Assistant") | tojson }}}
+    timeout: 20
+  printops_task_add:
+    url: "http://192.168.0.39:8765/v1/printers/{{ printer }}/tasks"
+    method: post
+    headers:
+      Authorization: !secret printops_api_auth
+    content_type: "application/json"
+    payload: >-
+      {"title": {{ title | tojson }}, "why": {{ (why | default(none)) | tojson }}, "source": "manual",
+       "refs": ["home-assistant"]}
+    timeout: 20
+
+script:
+  printops_todo_sync:
+    alias: "PrintOps: to-do list of a printer ↔ 3d-api"
+    mode: queued
+    max: 10
+    fields:
+      printer:
+        description: "Fleet printer name (k1se, u1)"
+        example: u1
+        required: true
+    sequence:
+      - variables:
+          todo_list: "todo.printops_{{ printer }}"
+          sensor: "sensor.printops_{{ printer }}_tasks"
+      # No list yet, or 3d-api not read yet: nothing to compare with.
+      - condition: template
+        value_template: "{{ states(todo_list) not in ['unknown', 'unavailable'] and has_value(sensor) }}"
+      - action: todo.get_items
+        target:
+          entity_id: "{{ todo_list }}"
+        data:
+          status: [needs_action, completed]
+        response_variable: got
+      - variables:
+          items: "{{ got[todo_list]['items'] }}"
+          # A synced item carries its task id as the first word of the description: "#12 · …".
+          marked: >-
+            {{ items | selectattr('description', 'defined') | selectattr('description', 'match', '#[0-9]+') | list }}
+          unmarked: >-
+            {{ items | rejectattr('uid', 'in', marked | map(attribute='uid') | list) | list }}
+          tasks: >-
+            {{ state_attr(sensor, 'tasks') | default([], true) | selectattr('status', 'in', ['open', 'in_progress']) | list }}
+          # ids are compared as numbers: HA renders a variable that looks like a number ("12") as one
+          open_ids: "{{ tasks | map(attribute='id') | map('int') | list }}"
+          shown: >-
+            {{ marked | map(attribute='description') | map('regex_findall', '^#([0-9]+)') | sum(start=[]) | map('int') | list }}
+          to_add: >-
+            {% set ns = namespace(out=[]) %}
+            {% for t in tasks if (t.id | int) not in shown %}{% set ns.out = ns.out + [t] %}{% endfor %}
+            {{ ns.out }}
+      # An item a person added in HA → a manual task (the next sync shows it with its id).
+      - repeat:
+          for_each: "{{ unmarked }}"
+          sequence:
+            - action: rest_command.printops_task_add
+              data:
+                printer: "{{ printer }}"
+                title: "{{ repeat.item.summary }}"
+                why: "{{ repeat.item.description | default(none) }}"
+              response_variable: added
+            - if: "{{ added.status == 201 }}"
+              then:
+                - action: todo.remove_item
+                  target:
+                    entity_id: "{{ todo_list }}"
+                  data:
+                    item: "{{ repeat.item.uid }}"
+                - action: homeassistant.update_entity
+                  target:
+                    entity_id: "{{ sensor }}"
+      # A synced item: ticked → done in 3d-api; gone from 3d-api → removed here.
+      - repeat:
+          for_each: "{{ marked }}"
+          sequence:
+            - variables:
+                tid: "{{ (repeat.item.description | regex_findall('^#([0-9]+)'))[0] | int }}"
+            - choose:
+                - conditions: "{{ repeat.item.status == 'completed' and tid in open_ids }}"
+                  sequence:
+                    - action: rest_command.printops_task_done
+                      data:
+                        task: "{{ tid }}"
+                      response_variable: res
+                    - if: "{{ res.status == 200 }}"
+                      then:
+                        - action: todo.remove_item
+                          target:
+                            entity_id: "{{ todo_list }}"
+                          data:
+                            item: "{{ repeat.item.uid }}"
+                        - action: homeassistant.update_entity
+                          target:
+                            entity_id: "{{ sensor }}"
+                      else:
+                        - action: persistent_notification.create
+                          data:
+                            notification_id: "printops_task_{{ tid }}"
+                            title: "PrintOps: task #{{ tid }} stays open"
+                            message: >-
+                              {{ res.content.detail if res.content is mapping and 'detail' in res.content
+                                 else 'HTTP ' ~ res.status ~ ': ' ~ (res.content | string) }}
+                        - action: todo.update_item
+                          target:
+                            entity_id: "{{ todo_list }}"
+                          data:
+                            item: "{{ repeat.item.uid }}"
+                            status: needs_action
+                - conditions: "{{ tid not in open_ids }}"
+                  sequence:
+                    - action: todo.remove_item
+                      target:
+                        entity_id: "{{ todo_list }}"
+                      data:
+                        item: "{{ repeat.item.uid }}"
+      # An open task not on the list yet → an item.
+      - repeat:
+          for_each: "{{ to_add }}"
+          sequence:
+            - action: todo.add_item
+              target:
+                entity_id: "{{ todo_list }}"
+              data:
+                item: "{{ repeat.item.title }}"
+                description: >-
+                  #{{ repeat.item.id }}
+                  {{- ' · BLOCKS ' ~ {'head': 'head ' ~ repeat.item.head, 'slot': 'slot ' ~ repeat.item.slot}.get(repeat.item.blocks,
+                  'the printer') if repeat.item.blocks != 'none' else '' }}
+                  {{- ' · ' ~ {'idle': 'when idle', 'before_print': 'before a print'}.get(repeat.item.when, 'any time') }}
+                  {{- ' · ' ~ repeat.item.duration_min ~ ' min' if repeat.item.duration_min else '' }}
+                  {{- ' · waits for #' ~ (repeat.item.waiting_on | join(', #')) if repeat.item.waiting_on else '' }}
+                  {{- '\n' ~ repeat.item.why if repeat.item.why else '' }}
+                  {{- '\nCloses with: ' ~ repeat.item.done_hint if repeat.item.done_hint else '' }}
+
+automation:
+  - id: printops_todo_sync
+    alias: "PrintOps: printer to-do lists ↔ 3d-api"
+    mode: queued
+    max: 10
+    triggers:
+      # state and attribute changes of the sensors (3d-api read) and of the lists (an item
+      # ticked or added changes the open count = the todo state)
+      - trigger: state
+        entity_id: [sensor.printops_k1se_tasks, sensor.printops_u1_tasks, todo.printops_k1se, todo.printops_u1]
+      - trigger: homeassistant
+        event: start
+      - trigger: time_pattern
+        minutes: "/10"
+    actions:
+      - repeat:
+          for_each: >-
+            {{ [trigger.entity_id | regex_replace('^(sensor|todo)\.printops_|_tasks$', '')]
+               if trigger.entity_id is defined and trigger.entity_id else ['k1se', 'u1'] }}
+          sequence:
+            - action: script.printops_todo_sync
+              data:
+                printer: "{{ repeat.item }}"
