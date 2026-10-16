@@ -217,7 +217,7 @@ def test_without_3d_api_the_buffer_takes_the_operations_and_import_moves_them(
         offline=True,
     )
     assert code == 0, err
-    path = tmp_path / "xdg-data" / "3d" / "printer-todo" / "u1.jsonl"
+    path = tmp_path / "xdg-data" / "3d-cli" / "printer-todo" / "u1.jsonl"
     assert f"3d-api is not configured: open recorded in the buffer {path}" in err
     [line] = path.read_text(encoding="utf-8").splitlines()
     rec = json.loads(line)
@@ -250,3 +250,58 @@ def test_without_3d_api_the_buffer_takes_the_operations_and_import_moves_them(
         "done by hand",
         "import",
     )
+
+
+def test_the_old_buffer_directory_moves_once_and_a_second_one_stops_with_import_commands(
+    todo: Any, tmp_path: Path
+) -> None:
+    """The 2026-10-15/16 buffers sit in ~/.local/share/3d/printer-todo: the first offline `list`
+    moves them (notice journal included) to ~/.local/share/3d-cli/printer-todo and says so; when
+    both directories hold files the command stops and names the imports that merge them."""
+    old = tmp_path / "xdg-data" / "3d" / "printer-todo"
+    new = tmp_path / "xdg-data" / "3d-cli" / "printer-todo"
+    old.mkdir(parents=True)
+    (old / "u1.jsonl").write_text(
+        "".join(json.dumps(r) + "\n" for r in BUFFER), encoding="utf-8"
+    )
+    (old / "u1.notices.jsonl").write_text("", encoding="utf-8")
+
+    code, out, err = todo("list", "u1", offline=True)
+    assert code == 0, err
+    assert f"moved the printer-todo buffers from {old} to {new}" in err
+    assert f"showing the buffer {new}" in err and "Fix slot T3 filament label" in out
+    assert (
+        sorted(p.name for p in new.iterdir()) == ["u1.jsonl", "u1.notices.jsonl"]
+        and not old.exists()
+    )
+    code, out, err = todo("list", "u1", offline=True)
+    assert code == 0 and "moved" not in err
+
+    code, out, err = todo("import", "--dry-run")
+    assert code == 0, err
+    assert (
+        f"DRY RUN (rolled back) {new / 'u1.jsonl'}: 2 lines — 1 created, 1 merged"
+        in out
+    )
+
+    old.mkdir(parents=True)
+    (old / "k1se.jsonl").write_text("", encoding="utf-8")
+    code, out, err = todo("import")
+    assert code == 1
+    assert f"printer-todo buffers exist in both {old} (old location) and {new}" in err
+    assert (
+        f"3d printer todo import {old / 'k1se.jsonl'}" in err
+        and f"3d printer todo import {new / 'u1.jsonl'}" in err
+    )
+    assert (old / "k1se.jsonl").is_file() and (new / "u1.jsonl").is_file()
+    before = (new / "u1.jsonl").read_bytes()
+    code, out, err = todo("add", "u1", "--title", "t", offline=True)
+    assert code == 1 and "exist in both" in err
+    assert (new / "u1.jsonl").read_bytes() == before and (
+        old / "k1se.jsonl"
+    ).read_text() == ""
+    assert f"mv {old} {old}.imported" in err and "rm -r" not in err
+    # the remedy itself runs during the conflict: an explicit FILE never triggers the move
+    code, out, err = todo("import", str(old / "k1se.jsonl"))
+    assert code == 0, err
+    assert f"{old / 'k1se.jsonl'}: 0 lines" in out

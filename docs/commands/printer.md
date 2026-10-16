@@ -148,12 +148,22 @@ u1: 2 open, 2 blocking
 ```
 
 **Without 3d-api** (no `PRINTOPS_API`/`api:` configured, or it does not answer) `add`, `done`,
-`dismiss` and `snooze` append the operation to `~/.local/share/3d/printer-todo/<printer>.jsonl`
-(`$XDG_DATA_HOME/3d/printer-todo`; one line per operation, schema `printops.printer_task/1`,
-`flock` + one `O_APPEND` write + `fsync`) and say so on stderr; `list` then shows the buffer
-(name tasks by their uid prefix). `import` replays buffer files into 3d-api in order, each
-operation once by its `uid` — importing a file twice adds nothing; a line that is not JSON or names
-an unknown schema stops the import with its line number and nothing is imported. An `open` whose
+`dismiss` and `snooze` append the operation to `~/.local/share/3d-cli/printer-todo/<printer>.jsonl`
+(`$XDG_DATA_HOME/3d-cli/printer-todo`, next to the other 3d-cli state files; one
+line per operation, schema `printops.printer_task/1`, `flock` + one `O_APPEND` write + `fsync`)
+and say so on stderr; `list` then shows the buffer (name tasks by their uid prefix). `import`
+without FILE takes every file of that directory (task buffers and the `<printer>.notices.jsonl`
+idle-notice journals). The first buffers (2026-10-15/16) were written to `~/.local/share/3d/printer-todo/`
+(`$XDG_DATA_HOME/3d/printer-todo`); the first `3d printer todo` that touches the buffer moves that
+directory, notice journals included, to the new place once, under `flock`, and says so on stderr.
+If both directories hold something, the command stops (exit 1) and lists the `3d printer todo
+import FILE` commands that merge both into 3d-api (by uid, nothing doubles; an explicit FILE never
+triggers the move, so these run), any non-buffer entry to check by hand, and the `mv` that sets the
+old directory aside afterwards (nothing is deleted). If neither directory exists, nothing happens.
+`import` replays buffer files into 3d-api in order, each operation once by its `uid` — importing a
+file twice adds nothing. Each file is one transaction: a line that is not JSON or names an unknown
+schema stops that file's import with its line number and nothing of that file is imported; with
+several files, the ones before it stay imported (a re-run skips them by uid). An `open` whose
 `source_key` matches an open task (e.g. `fault:fleet:u1/T2`) merges into it (the buffer uid joins
 `refs`); a spool named only by its filament name is bound to the one Spoolman spool of exactly
 that filament name, else to the one whose filament name contains it (`Snapdragon` →
@@ -171,7 +181,7 @@ idle notices (`printops.idle_notice/1`, #283) into 3d-api.
 - `--json` — the API objects (`list`: `{printer, summary, tasks, sync}` for one printer, `{tasks}` for all).
   `3d printer todo list u1 --json | jq '.tasks[] | select(.blocks != "none") | {id, title, blocks}'`
 - `--dry-run` — `import` only: report what would happen, change nothing.
-  `3d printer todo import ~/.local/share/3d/printer-todo/k1se.jsonl --dry-run`
+  `3d printer todo import ~/.local/share/3d-cli/printer-todo/k1se.jsonl --dry-run`
 
 ## Fleet registry
 

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import getpass
 import json
+import shlex
 import sys
 import urllib.parse
 from collections.abc import Callable, Mapping
@@ -37,7 +38,8 @@ USAGE = """3d printer todo <action> [args] [--api URL] [--token TOKEN]
   snooze ID [--until DATE] [--reason T] hide it until DATE (ISO date/time); without --until
                                         until `reopen`
   reopen ID                             a snoozed/done/dismissed task back to open
-  import FILE... [--dry-run] [--json]   replay buffer files into 3d-api (by uid: twice adds 0)
+  import [FILE...] [--dry-run] [--json] replay buffer files into 3d-api (by uid: twice adds 0);
+                                        no FILE = every file of the buffer directory
 
 add options:
   --why TEXT           why it is needed
@@ -55,7 +57,9 @@ add options:
 
 ID is the task number (or its uid; offline, the uid or a unique uid prefix from `list`).
 --json prints the API (or buffer) objects. 3d-api: --api URL / PRINTOPS_API, --token / PRINTOPS_TOKEN.
-Buffer: ~/.local/share/3d/printer-todo/<printer>.jsonl ($XDG_DATA_HOME/3d/printer-todo).
+Buffer: ~/.local/share/3d-cli/printer-todo/<printer>.jsonl ($XDG_DATA_HOME/3d-cli/printer-todo).
+Buffers in the old ~/.local/share/3d/printer-todo are moved there once, on first use; if both
+directories hold files the command stops and names the `import` commands that merge them.
 
 Examples:
   3d printer todo list
@@ -66,8 +70,8 @@ Examples:
   3d printer todo done 12 --note "belts re-tensioned"
   3d printer todo dismiss 7 --reason "camera mount postponed to #263"
   3d printer todo snooze 4 --until 2026-10-25 --reason "after the house queue"
-  3d printer todo import ~/.local/share/3d/printer-todo/k1se.jsonl --dry-run
-  3d printer todo import ~/.local/share/3d/printer-todo/*.jsonl"""
+  3d printer todo import --dry-run
+  3d printer todo import ~/.local/share/3d-cli/printer-todo/k1se.jsonl"""
 
 COMMON_VALUES = frozenset({"--api", "--token"})
 COMMON_FLAGS = frozenset({"--json"})
@@ -196,12 +200,37 @@ def _show(t: Mapping[str, Any], verb: str, p: Parsed) -> None:
 
 
 # -- buffer (offline) ----------------------------------------------------------------------------
+def _migrated_buffer_dir() -> Path:
+    """The buffer directory, after the one-time move of the old ~/.local/share/3d/printer-todo
+    (printops.printer_task_buffer.migrate_legacy)."""
+    try:
+        moved = buf.migrate_legacy()
+    except buf.MigrationConflict as e:
+        fix = [f"3d {CMD} todo import {shlex.quote(str(f))}" for f in e.files]
+        fix += [
+            f"check by hand (not a buffer file): {shlex.quote(str(o))}" for o in e.other
+        ]
+        fix.append(
+            f"once every import succeeded, move the old directory aside (nothing is deleted): "
+            f"mv {shlex.quote(str(e.old))} {shlex.quote(str(e.old) + '.imported')}"
+        )
+        raise ThreeDError(
+            f"{e}: merge both into 3d-api, then move the old directory aside",
+            command=f"{CMD} todo",
+            remediation=fix,
+        ) from e
+    if moved:
+        print(
+            f"moved the printer-todo buffers from {moved[0]} to {moved[1]} (one-time move to the "
+            "3d-cli data directory)",
+            file=sys.stderr,
+        )
+    return buf.buffer_dir()
+
+
 def _buffer_tasks(printer: str | None) -> list[dict[str, Any]]:
-    files = (
-        [buf.buffer_path(printer)]
-        if printer
-        else sorted(buf.buffer_dir().glob("*.jsonl"))
-    )
+    directory = _migrated_buffer_dir()
+    files = [buf.buffer_path(printer)] if printer else sorted(directory.glob("*.jsonl"))
     out: list[dict[str, Any]] = []
     for path in files:
         try:
@@ -286,6 +315,7 @@ def _append(
         "actor": _actor(),
     }
     buf.parse_lines([json.dumps(record)])  # never write a line the import would refuse
+    _migrated_buffer_dir()  # an old-location buffer moves first, so this line joins it
     path = buf.append(printer, record)
     print(
         f"3d-api {why}: {op} recorded in the buffer {path} (task {task_uid}); "
@@ -564,13 +594,21 @@ def _import(argv: list[str], sub: str) -> int:
         sub,
         values=COMMON_VALUES,
         flags=COMMON_FLAGS | {"--dry-run"},
-        n_pos=(1, 100),
+        n_pos=(0, 100),
         prefix=CMD,
     )
     api = client(p, sub, prefix=CMD)
+    if p.pos:
+        files = [Path(name).expanduser() for name in p.pos]
+    else:  # no FILE: every file of the buffer directory (task buffers and notice journals); an
+        # explicit FILE skips the move, so the conflict's import commands stay runnable
+        files = sorted(_migrated_buffer_dir().glob("*.jsonl"))
+        if not files:
+            raise InputNotFound(
+                str(buf.buffer_dir() / "*.jsonl"), command=f"{CMD} {sub}"
+            )
     reports = []
-    for name in p.pos:
-        path = Path(name).expanduser()
+    for path in files:
         if not path.is_file():
             raise InputNotFound(f"no buffer file {path}", command=f"{CMD} {sub}")
         lines = path.read_text(encoding="utf-8").splitlines()
