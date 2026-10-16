@@ -4,12 +4,20 @@ ACCESSED VIA: `3d printer todo` (printops.todo_cli) appends here when 3d-api can
 reads it back for an offline `list`; `printops.printer_tasks.import_lines` (3d-api,
 `POST /v1/tasks/import`) parses the same lines to replay them into the DB.
 
-FORMAT: `~/.local/share/3d/printer-todo/<printer>.jsonl` (`$XDG_DATA_HOME/3d/printer-todo`), one
+FORMAT: `<data_dir>/printer-todo/<printer>.jsonl` — `cli.paths.data_dir()`, i.e.
+`~/.local/share/3d-cli/printer-todo/` (`$XDG_DATA_HOME/3d-cli/printer-todo`) — one
 operation per line. Schema `printops.printer_task/1`: `uid` (UUIDv7, the import idempotency key),
 `op` (open | update | done | dismiss | snooze), `task_uid` (= `uid` for `open`), `printer` and the
 task fields of an open/update. Schema `printops.idle_notice/1`: one state of an idle period
 (#283). A line that is not JSON or names another schema stops the parse with its line number —
-a torn write is never skipped silently.
+a torn write is never skipped silently. The idle-notice journal `<printer>.notices.jsonl` (#283)
+lives in the same directory.
+
+OLD LOCATION: the first buffers (2026-10-15/16) were written to `~/.local/share/3d/printer-todo`
+(`$XDG_DATA_HOME/3d/printer-todo`). `migrate_legacy()` (called by the CLI before it touches the
+buffer) moves that whole directory — task buffers and notice journals — to the new place, once,
+under `flock`: only the old directory has files → rename; both have files → MigrationConflict
+naming the import commands; neither → nothing.
 
 WRITES: one `write` of the whole line with O_APPEND under `flock` on the file, then `fsync`, so
 two writers never interleave and a crash loses at most the line being written.
@@ -66,8 +74,82 @@ def utc_now() -> str:
 
 
 def buffer_dir() -> Path:
-    base = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
-    return Path(base) / "3d" / "printer-todo"
+    from cli.paths import data_dir
+
+    return data_dir() / "printer-todo"
+
+
+def legacy_buffer_dir() -> Path:
+    """Where the first buffers were written (2026-10-15/16), before the buffer moved under
+    cli.paths.data_dir(): `~/.local/share/3d/printer-todo` (`$XDG_DATA_HOME/3d/printer-todo`).
+    Same XDG base as data_dir(), so old and new sit on one filesystem and the move is a rename."""
+    from cli.paths import data_dir
+
+    return data_dir().parent / "3d" / "printer-todo"
+
+
+class MigrationConflict(Exception):
+    """Both the old and the new buffer directory hold entries: which one is current cannot be
+    decided here. `files` = the *.jsonl of both, to import into 3d-api (by uid, nothing doubles)."""
+
+    def __init__(self, old: Path, new: Path) -> None:
+        self.old, self.new = old, new
+        self.files = [
+            p for d in (old, new) if d.is_dir() for p in sorted(d.glob("*.jsonl"))
+        ]
+        self.other = [
+            p
+            for d in (old, new)
+            if d.is_dir()
+            for p in sorted(d.iterdir())
+            if p not in self.files
+        ]
+        if os.path.lexists(new) and not new.is_dir():
+            self.other.append(new)
+        super().__init__(
+            f"printer-todo buffers exist in both {old} (old location) and {new}"
+        )
+
+
+def _has_entries(directory: Path) -> bool:
+    """Any entry counts (files, subdirectories, symlinks), and so does a non-directory at the
+    path: a populated location is never treated as empty, so nothing is overwritten or skipped."""
+    if not os.path.lexists(directory):
+        return False
+    return not directory.is_dir() or any(directory.iterdir())
+
+
+def migrate_legacy() -> tuple[Path, Path] | None:
+    """Move the old buffer directory to buffer_dir() once; (old, new) when moved, None when there
+    was nothing to move; MigrationConflict when both hold entries. The flock serialises
+    concurrent migrations; a writer that slips a file into the new directory meanwhile makes the
+    rename fail, which is reported as the same conflict."""
+    import fcntl
+
+    new, old = buffer_dir(), legacy_buffer_dir()
+    if not _has_entries(old):
+        return None
+    new.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(
+        new.parent / ".printer-todo.migrate.lock", os.O_WRONLY | os.O_CREAT, 0o644
+    )
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        if not _has_entries(old):  # another process moved it while this one waited
+            return None
+        if _has_entries(new):
+            raise MigrationConflict(old, new)
+        try:
+            os.rename(
+                old, new
+            )  # POSIX: replaces an empty new directory, fails on a populated one
+        except OSError as e:
+            if _has_entries(new):
+                raise MigrationConflict(old, new) from e
+            raise
+    finally:
+        os.close(fd)  # releases the flock
+    return old, new
 
 
 def buffer_path(printer: str) -> Path:

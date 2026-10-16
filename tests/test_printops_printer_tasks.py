@@ -652,12 +652,89 @@ def test_append_writes_whole_lines_and_replay_follows_the_ops(env: Path) -> None
     for raw in K1SE:
         buf.append("k1se", json.loads(raw))
     path = buf.buffer_path("k1se")
-    assert path == env / "data" / "3d" / "printer-todo" / "k1se.jsonl"
+    assert path == env / "data" / "3d-cli" / "printer-todo" / "k1se.jsonl"
     tasks = buf.replay(buf.read(path))
     assert tasks[U_X]["status"] == "done" and tasks[U_BORDEAUX]["status"] == "snoozed"
     assert tasks[U_SHAPER]["depends_on"] == [U_STIFF]
     with pytest.raises(buf.BufferError, match="not a fleet printer name"):
         buf.buffer_path("../etc")
+
+
+def test_migration_with_neither_directory_does_nothing(env: Path) -> None:
+    new, old = buf.buffer_dir(), buf.legacy_buffer_dir()
+    assert (new, old) == (
+        env / "data" / "3d-cli" / "printer-todo",
+        env / "data" / "3d" / "printer-todo",
+    )
+    assert buf.migrate_legacy() is None
+    assert not new.exists() and not old.exists()
+
+
+def test_migration_with_only_the_old_directory_moves_it_with_the_notice_journal(
+    env: Path,
+) -> None:
+    new, old = buf.buffer_dir(), buf.legacy_buffer_dir()
+    old.mkdir(parents=True)
+    (old / "k1se.jsonl").write_text(K1SE[0] + "\n", encoding="utf-8")
+    (old / "k1se.notices.jsonl").write_text("", encoding="utf-8")
+    new.mkdir(parents=True)  # an empty new directory does not count as "both"
+    assert buf.migrate_legacy() == (old, new)
+    assert sorted(p.name for p in new.iterdir()) == ["k1se.jsonl", "k1se.notices.jsonl"]
+    assert not old.exists()
+    assert buf.migrate_legacy() is None  # once
+    assert (
+        buf.replay(buf.read(buf.buffer_path("k1se")))[U_X]["title"]
+        == "X mechanics check"
+    )
+
+
+def test_migration_with_both_directories_stops_with_the_import_commands(
+    env: Path,
+) -> None:
+    new, old = buf.buffer_dir(), buf.legacy_buffer_dir()
+    old.mkdir(parents=True)
+    (old / "k1se.jsonl").write_text(K1SE[0] + "\n", encoding="utf-8")
+    buf.append("u1", json.loads(U1[1]))
+    with pytest.raises(buf.MigrationConflict) as e:
+        buf.migrate_legacy()
+    assert e.value.files == [old / "k1se.jsonl", new / "u1.jsonl"]
+    assert (old / "k1se.jsonl").is_file() and (
+        new / "u1.jsonl"
+    ).is_file()  # nothing moved
+
+
+def test_migration_counts_any_entry_and_reports_a_racing_writer_as_a_conflict(
+    env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    new, old = buf.buffer_dir(), buf.legacy_buffer_dir()
+    (old / "archive").mkdir(
+        parents=True
+    )  # only a subdirectory: still a populated old directory
+    (new / "backup").mkdir(
+        parents=True
+    )  # same on the new side: a conflict, nothing overwritten
+    with pytest.raises(buf.MigrationConflict) as e:
+        buf.migrate_legacy()
+    assert e.value.files == [] and e.value.other == [old / "archive", new / "backup"]
+    (new / "backup").rmdir()
+    new.rmdir()
+    new.write_text("", encoding="utf-8")  # a stray file where the directory belongs
+    with pytest.raises(buf.MigrationConflict) as e:
+        buf.migrate_legacy()
+    assert e.value.other == [old / "archive", new]
+    new.unlink()
+    new.mkdir()  # empty again: the move goes ahead until a writer slips in
+
+    def racing_rename(
+        src: object, dst: object
+    ) -> None:  # a writer appends to `new` mid-move
+        (new / "u1.notices.jsonl").write_text("", encoding="utf-8")
+        raise OSError(39, "Directory not empty")
+
+    monkeypatch.setattr(buf.os, "rename", racing_rename)
+    with pytest.raises(buf.MigrationConflict):
+        buf.migrate_legacy()
+    assert (old / "archive").is_dir()
 
 
 @pytest.mark.parametrize(
