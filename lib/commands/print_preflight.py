@@ -36,7 +36,8 @@ USAGE = """3d print-preflight FILE.gcode [--printer NAME] [--axis-limits X0:X1,Y
   axis travel  every G0-G3 move (arcs by their real extremes, start/end G-code included)
                stays inside the printer's X/Y limits; SKIP when the limits are unknown
   print area   plate moves stay inside the G-code's `; printable_area`; no extruding path
-               through `; bed_exclude_area` (vendor `;TYPE:Custom` blocks exempt)
+               through `; bed_exclude_area` (vendor `;TYPE:Custom` blocks exempt; Bambu:
+               everything outside its object blocks, wipe tower and features)
   macros       every macro the G-code calls is in the printer's trusted_macros
   overhangs    `3d gcode-overhangs`: no object prints more than 100 mm2 on nothing (FAIL);
                small ceilings and edge step-outs are WARN; bridges up to --bridge-max, else the
@@ -121,14 +122,20 @@ def run(argv: list[str]) -> int:
     from printer_ops.devices import get_device
 
     printer = opts.get("--printer")
-    if printer is not None and get_device(printer, offline_ok=True).access == "offline":
-        del opts["--printer"]  # an offline fleet printer is never contacted: its static profile only
-        opts.setdefault("--axis-limits", printer)
+    profile = get_device(printer, offline_ok=True) if printer is not None else None
+    if profile is not None and profile.access == "offline":
+        # an offline fleet printer is never contacted: its static profile stands in for --printer,
+        # an explicit --axis-limits replaces only its limits
+        del opts["--printer"]
+        opts.setdefault("--axis-limits", profile.name)
+    else:
+        profile = None
 
     status = None
-    device = None if "--printer" in opts else device_for(opts.get("--axis-limits"))
+    device = profile or (None if "--printer" in opts else device_for(opts.get("--axis-limits")))
     limits, limits_source = None, "no --printer or --axis-limits given"
-    trusted = frozenset() if "--printer" in opts else trusted_macros_for(opts.get("--axis-limits"))
+    trusted = profile.trusted_macros if profile else \
+        frozenset() if "--printer" in opts else trusted_macros_for(opts.get("--axis-limits"))
     if "--axis-limits" in opts:
         limits, limits_source = limits_from_option(opts["--axis-limits"], command="print-preflight")
     if "--printer" in opts:

@@ -47,7 +47,8 @@ virtual id = physical count + 1 + row) with a manual pattern (`…,cm1,14`) prin
 digit per layer, at any starting phase. Raft layers (`raft_layers`) are skipped. Ratio rows
 (`…,cm0`, Local-Z) have no per-layer pattern: such objects are reported `local-z`, not checked.
 Heads are read from `T<n>` (`T255`/`T1000` Bambu pseudo-changes ignored), objects from
-`EXCLUDE_OBJECT_START NAME=`, layers from `;LAYER_CHANGE`, and only extruding `G1` moves
+`EXCLUDE_OBJECT_START NAME=` or Bambu Studio's `; start printing object` / `M624` blocks, layers
+from `;LAYER_CHANGE` (Bambu `; CHANGE_LAYER`), and only extruding `G1` moves
 with X/Y count. Per object it reports ok/FAIL/local-z, heads, patterns and layer count; exit 1
 on any FAIL. On a single-plate project, a project object absent from the G-code is a FAIL;
 G-code with no extrusion inside object labels is a FAIL. A non-project input (STL, bare 3MF,

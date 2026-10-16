@@ -201,16 +201,20 @@ def _live(
                 )
             )
         for h in heads:
-            if h.extruder and h.extruder not in topo.extruders:
+            # no `extruder:` in the fleet -> Klipper's own naming for tool i: extruder, extruder1, ...
+            extruder = h.extruder or (
+                "extruder" if h.index == 0 else f"extruder{h.index}"
+            )
+            if extruder not in topo.extruders:
                 out.append(
                     Finding(
                         "fleet/live-topology",
                         ERROR,
                         name,
-                        f"{name}.{h.label}: extruder {h.extruder!r} is not on the printer",
+                        f"{name}.{h.label}: extruder {extruder!r} is not on the printer",
                     )
                 )
-            live_mm = topo.nozzle_mm.get(h.extruder or "")
+            live_mm = topo.nozzle_mm.get(extruder)
             if (
                 h.nozzle is not None
                 and live_mm is not None
@@ -222,7 +226,7 @@ def _live(
                         ERROR,
                         name,
                         f"{name}.{h.label}: nozzle {h.nozzle.diameter_mm} mm in the fleet, "
-                        f"{live_mm} mm in the printer config ({h.extruder})",
+                        f"{live_mm} mm in the printer config ({extruder})",
                     )
                 )
     return out

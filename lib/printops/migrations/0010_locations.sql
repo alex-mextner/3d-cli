@@ -23,3 +23,14 @@ CREATE TABLE location (
 );
 
 CREATE INDEX location_parent ON location (parent_id);
+
+-- Former paths of moved locations. Spools whose Spoolman `location` was typed by hand (no
+-- printops_location_id) and stickers printed before a move still name the old path; this
+-- keeps them attached to the location that moved, until `resync` rewrites the spools.
+CREATE TABLE location_alias (
+    path TEXT NOT NULL COLLATE NOCASE PRIMARY KEY,
+    location_id INTEGER NOT NULL REFERENCES location (id) ON DELETE CASCADE,
+    retired_at TEXT NOT NULL
+);
+
+CREATE INDEX location_alias_location ON location_alias (location_id);
