@@ -445,6 +445,19 @@ def test_a_dirty_bed_verdict_says_what_it_is() -> None:
     mon = _printing_monitor()
     ev = mon.npu([NpuVerdict(NOW, "item", 0.9, 0.05, 1)], NOW)
     assert len(ev) == 1 and "a foreign object on the bed" in ev[0].text
+    assert "dirty bed" in ev[0].text and "several hits" not in ev[0].text
+
+
+def test_a_dirty_bed_is_not_hidden_by_a_stronger_plate_marking_in_the_same_answer() -> None:
+    mon = _printing_monitor()
+    ev = mon.npu([NpuVerdict(NOW, "legend_text", 0.95, 0.09, 4), NpuVerdict(NOW, "item", 0.9, 0.05, 1)], NOW)
+    assert [(e.data["label"], e.data["hits"]) for e in ev] == [("item", 1)]
+
+
+def test_an_unknown_label_says_so() -> None:
+    mon = _printing_monitor()
+    ev = mon.npu([NpuVerdict(NOW, "spaghetti", 0.9, 0.05, 1)], NOW)
+    assert "did not document" in ev[0].text and "check the camera" in ev[0].text
 
 
 def test_a_new_print_restarts_the_per_print_history_but_a_pause_does_not() -> None:
