@@ -22,22 +22,10 @@ HERE = Path(__file__).resolve().parent
 SCAD = HERE / "camera_mount.scad"
 
 PARTS = [
-    "hub",
-    "foot",
-    "shoe_k1",
-    "shoe_u1",
-    "post",
-    "arm",
-    "cam_plate",
-    "knob_m5",
-    "knob_m4",
-    "pin_knob",
-    "pi_tray",
-    "cable_clip",
-    "led_ring",
-    "dowel",
+    "hub", "beam_a", "beam_b", "foot", "shoe_k1", "shoe_u1", "post", "arm", "cam_plate",
+    "wedge", "hanger", "pin_long", "pin_short", "pi_tray", "cable_clip", "led_ring", "dowel",
 ]
-PLATES = ["plate_hub", "plate_small", "plate_extras", "plate_led"]
+PLATES = ["plate_hub", "plate_beam", "plate_small", "plate_extras", "plate_led"]
 FITS = ["fit_foot", "fit_shoe_k1", "fit_shoe_u1", "fit_hub", "fit_post", "fit_arm"]
 
 # (output name, part, printer, camera "ex,ey,ez,cx,cy,cz" or a --view preset)
@@ -51,6 +39,7 @@ RENDERS = [
     ("plate_hub", "plate_hub", "k1se", "top"),
     ("plate_small", "plate_small", "k1se", "top"),
     ("plate_extras", "plate_extras", "k1se", "top"),
+    ("plate_beam", "plate_beam", "k1se", "top"),
     ("plate_led", "plate_led", "k1se", "top"),
     ("part-shoe_k1", "fit_shoe_k1", "k1se", "iso"),
     ("part-shoe_u1", "fit_shoe_u1", "k1se", "iso"),

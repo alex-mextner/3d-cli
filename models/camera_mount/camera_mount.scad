@@ -1,21 +1,26 @@
 // Top-down Logitech C920 mount for the Creality K1 SE and the Snapmaker U1 (issue #338).
 //
-// WHAT: a 20x20 aluminium square tube (two halves) laid diagonally across the printer top.
-//   Four printed feet clamp on the tube once and never move; a lift-off shoe under each foot
-//   indexes it to the printer (K1 SE: a V-lip that drops into an inner top corner; U1: a peg
-//   that drops into a Top Cover silicone pad). The centre hub joins the halves around an open
-//   window; the C920 looks down through it from a post with 10 mm pin detents and a
-//   three-screw spring tilt plate. Optional: Pi Zero W tray, cable clips, a 4-LED diffuse ring.
+// WHAT: an all-printed bridge, no metal: a 20x20 printed beam (four segments joined by square
+//   tenons and snap pins) laid diagonally across the printer top. Four feet are clamped on the
+//   beam once by printed wedges and never move; a lift-off shoe under each
+//   foot indexes it to the printer (K1 SE: lips that drop into an inner top corner; U1: a peg
+//   that drops into a Top Cover silicone pad). The centre hub joins the beam halves around an
+//   open window; the C920 looks down through it from a post with 10 mm snap-pin detents and a
+//   tilt plate that hangs by gravity on three printed hangers set by wedges (no springs). The
+//   camera's own clip slides into a printed cradle — no 1/4" screw. Optional: Pi Zero W tray,
+//   cable clips, a 4-LED diffuse ring.
 // WHY this shape: the bridge rests on two kinematic points (two opposite corners or two pads),
-//   so it lands in the same place every time without tools; all four feet stay on the tube,
+//   so it lands in the same place every time without tools; all four feet stay on the beam,
 //   so moving the rig between printers changes no setting — only which pair of shoes is on.
+//   Everything is plastic because the load is one webcam (README.ru.md §1 has the sag sum).
 // Every dimension marked MEASURE is an estimate until the user measures it (README.ru.md, §2).
 //
 // Usage: openscad -D 'part="hub"' -o hub.stl camera_mount.scad   (see PARTS below)
 
-part = "assembly";   // PARTS: assembly | exploded | hub | foot | shoe_k1 | shoe_u1 | post | arm
-                     //   | cam_plate | knob_m5 | knob_m4 | pin_knob | pi_tray | cable_clip
-                     //   | led_ring | dowel | plate_hub | plate_small | plate_extras | plate_led | fit_*
+part = "assembly";   // PARTS: assembly | exploded | detail | hub | beam_a | beam_b | foot
+                     //   | shoe_k1 | shoe_u1 | post | arm | cam_plate | wedge | hanger
+                     //   | pin_long | pin_short | pi_tray | cable_clip | led_ring | dowel
+                     //   | plate_hub | plate_beam | plate_small | plate_extras | plate_led | fit_*
 printer = "k1se";    // assembly view: k1se | u1
 pin_hole = 5;        // post hole the height pin goes through, counted from the post bottom:
                      // 2 (camera highest) .. 5 (camera lowest)
@@ -24,17 +29,24 @@ $fn = 64;
 eps = 0.01;
 fit = 0.2;           // clearance per side for printed sliding fits
 
-// ---------- bought parts ----------
-tube = 20;           // aluminium square tube 20x20x1.5 (two halves)
-tube_gap = 0.4;      // tube clearance per socket (total)
-tube_half = 300;     // length of one tube half
+// ---------- printed beam ----------
+tube = 20;           // beam section 20x20 (the name stays from the metal-tube version)
+tube_gap = 0.4;      // beam clearance per socket (total)
+tube_half = 300;     // one beam half, hub socket floor to the outer end
 tg = tube + tube_gap;
-m5_d = 5.6;   m5_nut_af = 8.3; m5_nut_h = 4.4; m5_head_af = 8.3; m5_head_h = 3.8;
-m4_d = 4.5;   m4_nut_af = 7.2; m4_nut_h = 3.4; m4_head_af = 7.2; m4_head_h = 3.0;
-tripod_d = 6.8;      // 1/4"-20 camera screw clearance
-spring_d = 9;        // bed-levelling spring seat diameter
-spring_gap = 12;     // arm-to-plate gap with the springs half compressed
+seg_joint = 180;     // segment joint, from the hub centre (clear of every foot and of the hub)
+tenon = 12;          // square tenon on segment A (flush with the underside), 25 mm into segment B
+tenon_len = 25;
+tenon_fit = 0.12;    // per side: tight, so the joint has no play under the camera's weight
 
+// ---------- printed fasteners ----------
+// one wedge for every clamp: 1:7.5 taper (7.6 degrees, under PLA's ~17-degree friction angle),
+// so a pushed-in wedge stays put; truncated ends, no knife edge
+wedge_len = 45; wedge_w = 6.6; wedge_h0 = 2.5; wedge_h1 = 8.5;
+wslot_w = wedge_w + 0.4;   // slot / window width for the wedge
+pin_s = 5.5;         // snap pin section (square, printed flat)
+pin_hole_s = pin_s + 0.6;
+hanger = [16, 8];    // tilt hanger bar section (across, thick)
 // ---------- printer interfaces (MEASURE) ----------
 k1_outer = 355;      // K1 SE top frame outer size (spec 355x355x482)
 k1_rim = 25;         // MEASURE K1-1: top rail width, outer edge to inner edge
@@ -51,14 +63,14 @@ u1_rim_to_bed = 330; // MEASURE U1-4: rim top to bed at Z max (estimate)
 // ---------- feet and shoes ----------
 wall = 5;            // sleeve side walls
 bot_wall = 4;        // sleeve wall under the tube
-top_wall = 11;       // sleeve wall over the tube (holds the M5 nut under a peaked roof)
+top_wall = 11;       // sleeve wall over the beam (the clamp wedge slot runs under it)
 foot_len = 30;       // sleeve length along the tube
 foot_base = 2;       // extra height under the sleeve
 key = 12;            // square key on the foot bottom
 key_h = 9;
-// tube channel: 45-degree chamfers in all four corners keep every bridge over it at 14.4 mm
-// (the K1 SE bridge limit is 15), whichever way up the part prints; the tube sits on the two
-// lower chamfers (a V seat that centres it) and the M5 clamp presses it down into them
+// beam channel: 45-degree chamfers in all four corners keep every bridge over it at 14.4 mm
+// (the K1 SE bridge limit is 15), whichever way up the part prints; the beam sits on the two
+// lower chamfers (a V seat that centres it) and the clamp wedge presses it down into them
 ch = 3;
 chan_h = 26;
 tube_seat = ch - (tg - tube) / 2;   // tube underside above the channel floor
@@ -100,21 +112,26 @@ led_r = win_r + ring_w / 2;               // LED ring dowel circle
 led_ang = [45, 135, 225, 315];
 
 // ---------- arm, tilt plate, camera ----------
-arm_t = 10;
+arm_t = 12;
 boss = [post[0] + 2 * fit + 10, post[1] + 2 * fit + 10];
 boss_h = 25;
 sock_d = 22;         // post depth in the arm boss
 tilt_r = 26;         // tilt screw circle
 tilt_ang = [135, 15, 255];
+tilt_gap = 10;       // arm underside to plate top, wedges at mid travel
 pad_r = 36;
 plate_t = 6;
 cam_yaw = -45;       // tab direction (hub frame); image x then runs along the printer X
-cam_axis_off = 29;   // MEASURE C-2: C920 lens axis to the clip-base face (spec: 43.3 with clip, body 29)
-tab_w = 30; tab_t = 5;
-tab_screw_z = 35;    // tripod screw below the plate
-tab_len = tab_screw_z + 10;
-cam_lens_below_screw = 15; // MEASURE C-1: lens face below the tripod screw axis
-
+cam_axis_off = 29;   // MEASURE C-2: C920 lens axis to the clip-foot face (spec: 43.3 with clip, body 29)
+clip_w = 31;         // MEASURE C-3: width of the C920 clip foot (the part with the 1/4" socket)
+clip_l = 40;         // MEASURE C-3: length of the clip foot along its slide
+clip_t = 4;          // MEASURE C-3: thickness of the clip foot at its side edges
+cam_lens_below_floor = 5; // MEASURE C-1: lens face below the clip foot's lower edge
+tab_t = 5;
+rail = 3;            // cradle rail wall
+lip = 2.5;           // cradle lip over the foot edges
+tab_w = clip_w + 2 * (fit + rail + 1);
+tab_len = clip_l + 4;
 // post placement for the assembly view
 post_bottom_z = hub_z + pc_pin_z - post_pitch * pin_hole;
 // usable holes: the post stays 30+ mm in the channel and never reaches below the printer top
@@ -122,8 +139,9 @@ assert(pin_hole == floor(pin_hole) && post_bottom_z >= 0 && post_bottom_z <= hub
        str("pin_hole ", pin_hole, " is out of range: a whole hole number 2..5"));
 assert(printer == "k1se" || printer == "u1", str("printer \"", printer, "\" is not k1se or u1"));
 arm_bot_z = post_bottom_z + post_len - sock_d + boss_h;
-plate_top_z = arm_bot_z - spring_gap;
-lens_z = plate_top_z - plate_t - tab_screw_z - cam_lens_below_screw;
+plate_top_z = arm_bot_z - tilt_gap;
+slot_floor_z = plate_top_z - plate_t - tab_len;   // the clip foot's lower edge rests here
+lens_z = slot_floor_z - cam_lens_below_floor;
 
 // ---------- design invariants (3d check --consistency) ----------
 k1_pin_d = (k1_outer / 2 - k1_rim) * sqrt(2) + k1_s;
@@ -132,6 +150,22 @@ assert(sock_x0 + tube_half >= u1_pin_d + foot_len / 2 + 10, "tube half too short
 assert(sock_x0 + tube_half >= k1_pin_d + foot_len / 2 + 10, "tube half too short for the K1 SE corners");
 assert(2 * hub_half <= 210, "hub does not fit the K1 SE bed");
 assert(peg_d < u1_hole_d && peg_len > 1, "U1 peg must enter the pad hole");
+// the joint pin head must not block a foot sliding on from the outer end, and segment A must
+// leave the hub socket before the joint
+assert(seg_joint + tenon_len + 10 < min(k1_pin_d, u1_pin_d) - foot_len / 2, "beam joint under a foot");
+assert(seg_joint > hub_half + 20, "beam joint inside the hub");
+assert(sock_x0 + tube_half - seg_joint <= 200 && seg_joint + tenon_len - sock_x0 <= 200, "beam segment longer than the K1 SE bed");
+// sag of the printed beam at the hub, simply supported on the U1 pads (the longer span):
+// centre load = C920 162 g + post, arm, plate, screws ~150 g + LED ring ~60 g = 3.7 N;
+// section = 4 perimeters (1.8 mm shell) + 25 % infill; printed PLA E ~ 2500 MPa (low end)
+beam_shell = 1.8;
+beam_I = (pow(tube, 4) - pow(tube - 2 * beam_shell, 4)) / 12 + 0.25 * pow(tube - 2 * beam_shell, 4) / 12;
+beam_w = 1.24e-3 * 9.81e-3 * (tube * tube - pow(tube - 2 * beam_shell, 2) * 0.75);   // N/mm
+span = 2 * u1_pin_d;
+sag = 3.7 * pow(span, 3) / (48 * 2500 * beam_I) + 5 * beam_w * pow(span, 4) / (384 * 2500 * beam_I);
+assert(sag < 2, str("beam sags ", sag, " mm"));
+echo(str("beam: I = ", round(beam_I), " mm4, sag at the hub on the U1 span ", round(span), " mm = ",
+         round(sag * 100) / 100, " mm, bending stress ", round(3.7 * span / 4 * (tube / 2) / beam_I * 100) / 100, " MPa"));
 // every ray from the lens to the far bed corner (U1 270 mm bed + 10 mm) clears the hub window
 // at the hub's underside and the LED ring's bore at the ring's underside (the rays spread
 // downward, so the lowest plane of each opening is the binding one)
@@ -151,29 +185,54 @@ module tube_channel(len) {
         [tg / 2 - ch, chan_h], [-tg / 2 + ch, chan_h], [-tg / 2, chan_h - ch], [-tg / 2, ch]]);
 }
 
-module knob(d, h, af, pocket, hole) {
-    difference() {
-        cylinder(d = d, h = h);
-        for (i = [0 : 7]) rotate(i * 45) translate([d / 2 + 1, 0, -1]) cylinder(d = 5, h = h + 2, $fn = 24);
-        translate([0, 0, -eps]) hex(af, pocket);
-        translate([0, 0, -1]) cylinder(d = hole, h = h + 2, $fn = 24);
-        translate([0, 0, h - 0.8]) difference() {   // soften the top edge
-            cylinder(d = d + 2, h = 1);
-            cylinder(d1 = d, d2 = d - 1.6, h = 0.8 + eps);
+// clamp slot for a wedge across the beam (y), its floor on the beam's top face (z_beam_top):
+// the wedge pushed in along y presses the beam down into the V seat
+module wedge_slot(z_beam_top) {
+    translate([-wslot_w / 2, -50, z_beam_top - 0.5]) cube([wslot_w, 100, wedge_h1 - 1]);
+}
+
+// wedge, printed on its side: length along x, taper in y, width = extrusion height
+module wedge() {
+    linear_extrude(wedge_w) polygon([[0, 0], [wedge_len, 0], [wedge_len, wedge_h1], [0, wedge_h0]]);
+    // grip: a tab on the thick end
+    translate([wedge_len - eps, -2, 0]) cube([6, wedge_h1 + 4, wedge_w]);
+}
+
+// tilt hanger, printed flat: a T head that carries the plate from below, a bar up through the
+// plate and the arm, a window above the arm for the wedge. In use the bar's long axis is z.
+hanger_len = plate_t + tilt_gap + arm_t + wedge_h1 + 8;
+hanger_win_z = plate_t + tilt_gap + arm_t - 3;   // window bottom, from the head's top face
+module hanger_part() {
+    linear_extrude(hanger[1]) difference() {
+        union() {
+            translate([-4, -13]) square([4 + eps, 26]);                 // head
+            translate([0, -hanger[0] / 2]) square([hanger_len, hanger[0]]);
         }
+        translate([hanger_win_z, -wslot_w / 2]) square([wedge_h1 + 3 + 2, wslot_w]);
     }
 }
 
-// vertical M5 clamp: a bolt hole from the top into the tube channel, and a nut slot that opens
-// into the channel roof and out of the -y side, so the nut drops in before the tube goes in.
-// The slot has a 45-degree peaked roof: no bridge over the nut when the part prints upright,
-// and no ceiling at all when it prints upside down (the feet).
-module m5_clamp(z_cav_top, h_total) {
-    w = m5_nut_af + 0.2;
-    translate([0, 0, z_cav_top - 1]) cylinder(d = m5_d, h = h_total, $fn = 24);
-    // the slot runs to the far chamfer, so no stub of channel roof is left hanging past it
-    translate([0, tg / 2 - ch, z_cav_top - eps]) rotate([90, 0, 0]) linear_extrude(50 + tg / 2 - ch)
-        polygon([[-w / 2, 0], [w / 2, 0], [w / 2, m5_nut_h], [0, m5_nut_h + w / 2], [-w / 2, m5_nut_h]]);
+// snap pin, printed flat: head, square shank, the last 10 mm split into two barbed prongs
+module snap_pin(L) {
+    linear_extrude(pin_s) difference() {
+        union() {
+            translate([-8, -6]) square([8, 12]);
+            translate([-eps, -pin_s / 2]) square([L - 3, pin_s]);
+            for (s = [-1, 1]) polygon([[L - 7, s * pin_s / 2], [L - 3, s * (pin_s / 2 + 0.8)],
+                                       [L, s * (pin_s / 2 - 0.6)], [L, 0], [L - 7, 0]]);
+        }
+        translate([L - 11, -0.75]) square([12, 1.5]);
+    }
+}
+
+// hole for a tilt hanger bar (bar across = tangential), through a plate of thickness h
+module hanger_hole(h) {
+    translate([-hanger[1] / 2 - fit, -hanger[0] / 2 - fit, -1]) cube([hanger[1] + 2 * fit, hanger[0] + 2 * fit, h + 2]);
+}
+
+// square hole for a snap pin along x, centred on (y, z)
+module pin_hole_x(x0, len, y, z) {
+    translate([x0, y - pin_hole_s / 2, z - pin_hole_s / 2]) cube([len, pin_hole_s, pin_hole_s]);
 }
 
 // ================= hub =================
@@ -191,11 +250,11 @@ module hub() {
         for (sx = [-1, 1]) {
             x0 = sx > 0 ? sock_x0 : -hub_half - 1;
             translate([x0, 0, bot_wall]) tube_channel(sock_len + 1);
-            translate([sx * (sock_x0 + sock_len / 2), 0, 0]) m5_clamp(bot_wall + chan_h, top_wall + 2);
+            translate([sx * (sock_x0 + sock_len / 2), 0, 0]) wedge_slot(bot_wall + tube_seat + tube);
         }
         // post channel and the height-pin hole along x
         translate([-post[0] / 2 - fit, pc_y0, -1]) cube([post[0] + 2 * fit, post[1] + 2 * fit, pc_h + 2]);
-        translate([-pc_w / 2 - 1, post_y, pc_pin_z]) rotate([0, 90, 0]) cylinder(d = m4_d + 0.1, h = pc_w + 2, $fn = 24);
+        pin_hole_x(-pc_w / 2 - 1, pc_w + 2, post_y, pc_pin_z);
         // LED ring dowels (snug)
         for (a = led_ang) rotate(a) translate([led_r, 0, -eps]) cylinder(d = 5.5, h = 8, $fn = 24);
     }
@@ -212,7 +271,7 @@ module foot() {
             translate([-key / 2, -key / 2, -key_h]) cube([key, key, key_h + eps]);
         }
         translate([-foot_len / 2 - 1, 0, foot_base + bot_wall]) tube_channel(foot_len + 2);
-        m5_clamp(foot_base + bot_wall + chan_h, top_wall + 2);
+        wedge_slot(foot_base + bot_wall + tube_seat + tube);
     }
 }
 
@@ -260,14 +319,14 @@ module post_part() {
     difference() {
         translate([-post[0] / 2, -post[1] / 2, 0]) cube([post[0], post[1], post_len]);
         for (z = [post_pitch : post_pitch : post_len - post_pitch / 2])
-            translate([-post[0] / 2 - 1, 0, z]) rotate([0, 90, 0]) cylinder(d = m4_d, h = post[0] + 2, $fn = 24);
+            pin_hole_x(-post[0] / 2 - 1, post[0] + 2, 0, z);
         for (z = [post_pitch * 5 : post_pitch * 5 : post_len - 1])   // depth marks every 50 mm
             translate([-post[0] / 2 - 1, -post[1] / 2 - eps, z - 0.5]) cube([post[0] + 2, 0.6, 1]);
     }
 }
 
 // arm frame (hub frame shifted so the arm underside is z = 0): pad over the lens axis at the
-// origin, boss for the post at y = post_y, three M4 screws pointing down (heads on top)
+// origin, boss for the post at y = post_y, three square holes for the tilt hangers
 module arm() {
     difference() {
         union() {
@@ -278,38 +337,69 @@ module arm() {
             translate([-boss[0] / 2, post_y - boss[1] / 2, -boss_h]) cube([boss[0], boss[1], boss_h + eps]);
         }
         translate([-post[0] / 2 - fit, post_y - post[1] / 2 - fit, -boss_h - 1]) cube([post[0] + 2 * fit, post[1] + 2 * fit, sock_d + 1]);
-        translate([-boss[0] / 2 - 1, post_y, -boss_h + sock_d - post_pitch]) rotate([0, 90, 0]) cylinder(d = m4_d + 0.1, h = boss[0] + 2, $fn = 24);
-        for (a = tilt_ang) rotate(a) translate([tilt_r, 0, 0]) {
-            translate([0, 0, -1]) cylinder(d = m4_d, h = arm_t + 2, $fn = 24);
-            translate([0, 0, arm_t - m4_head_h - 0.3]) hex(m4_head_af + 0.2, m4_head_h + 1);
-            translate([0, 0, -eps]) cylinder(d = spring_d + 0.6, h = 1);
-        }
+        pin_hole_x(-boss[0] / 2 - 1, boss[0] + 2, post_y, -boss_h + sock_d - post_pitch);
+        for (a = tilt_ang) rotate(a) translate([tilt_r, 0, 0]) hanger_hole(arm_t);
         // the lens sits under this pad: mark its axis for alignment
         translate([0, 0, arm_t - 0.6]) cylinder(d = 3, h = 1, $fn = 16);
     }
 }
 
-// camera plate frame: plate top at z = 0, tab hangs below, lens axis at the origin
+// camera plate frame: plate top at z = 0, lens axis at the origin. The plate hangs on the
+// three tilt-screw heads (countersunk seats underneath); the tab below carries a cradle the
+// C920 clip foot slides down into: two rails with lips over the foot's side edges and two
+// 45-degree stops at the bottom (no bridge across the slot in either print or use).
 module cam_plate() {
+    slot_x = cam_axis_off;   // the foot's back face lies on the tab face here
     difference() {
         union() {
             hull() {
                 translate([0, 0, -plate_t]) cylinder(r = pad_r, h = plate_t);
-                // reaches past the tab under the gusset, so the gusset prints on the plate
-                rotate(cam_yaw) translate([cam_axis_off, -tab_w / 2, -plate_t]) cube([tab_t + 11, tab_w, plate_t]);
+                rotate(cam_yaw) translate([slot_x - clip_t - fit - lip, -tab_w / 2, -plate_t]) cube([clip_t + fit + lip + tab_t + 11, tab_w, plate_t]);
             }
-            rotate(cam_yaw) translate([cam_axis_off, -tab_w / 2, -plate_t - tab_len + eps]) cube([tab_t, tab_w, tab_len]);
+            rotate(cam_yaw) {
+                translate([slot_x, -tab_w / 2, -plate_t - tab_len + eps]) cube([tab_t, tab_w, tab_len]);
+                for (s = [-1, 1]) {
+                    // rail + lip, along the whole tab
+                    translate([slot_x - clip_t - fit - lip / 2, s * (tab_w / 2 - rail / 2 - 0.5), -plate_t - tab_len / 2 + eps])
+                        cube([clip_t + fit + lip + eps, rail + 1, tab_len], center = true);
+                    translate([slot_x - clip_t - fit - lip, s > 0 ? clip_w / 2 + fit - lip : -tab_w / 2, -plate_t - tab_len + eps])
+                        cube([lip, tab_w / 2 - clip_w / 2 - fit + lip, tab_len]);
+                    // bottom stop: a 45-degree ledge from each rail
+                    translate([slot_x - clip_t - fit, s * (clip_w / 2 + fit), -plate_t - tab_len]) rotate([90, 0, 0])
+                        linear_extrude(4, center = true) polygon([[0, 0], [clip_t + fit + eps, 0], [clip_t + fit + eps, clip_t + fit + 1], [0, 1]]);
+                }
+            }
             // gusset between tab and plate
-            rotate(cam_yaw) translate([cam_axis_off + tab_t - eps, 0, -plate_t]) rotate([90, 0, 0])
+            rotate(cam_yaw) translate([slot_x + tab_t - eps, 0, -plate_t]) rotate([90, 0, 0])
                 linear_extrude(4, center = true) polygon([[0, 0], [10, 0], [0, -14]]);
         }
-        for (a = tilt_ang) rotate(a) translate([tilt_r, 0, 0]) {
-            translate([0, 0, -plate_t - 1]) cylinder(d = m4_d + 0.6, h = plate_t + 2, $fn = 24);
-            translate([0, 0, -1 + eps]) cylinder(d = spring_d + 0.6, h = 1);
-        }
-        rotate(cam_yaw) translate([cam_axis_off - 1, 0, -plate_t - tab_screw_z]) rotate([0, 90, 0]) cylinder(d = tripod_d, h = tab_t + 2, $fn = 32);
+        // the slot itself: the clip foot slides down between the rails, under the lips
+        rotate(cam_yaw) translate([slot_x - clip_t - fit, -clip_w / 2 - fit, -plate_t - tab_len + 4])
+            cube([clip_t + fit + eps, clip_w + 2 * fit, tab_len]);
+        for (a = tilt_ang) rotate(a) translate([tilt_r, 0, -plate_t]) hanger_hole(plate_t);
         // axis mark on the plate: line it up with the arm mark
         translate([0, 0, -0.6]) cylinder(d = 3, h = 1, $fn = 16);
+    }
+}
+
+// ================= beam segments =================
+// segment frame = assembly frame of the +x half: beam underside at z = 0, centred on y = 0
+module beam_a() {   // hub socket floor .. joint, plus the tenon into segment B
+    translate([sock_x0, -tube / 2, 0]) cube([seg_joint - sock_x0, tube, tube]);
+    // the tenon is flush with the beam underside: it prints on the bed, and under sag it sits
+    // on the tension side, where the pin and the pocket walls hold it best
+    translate([seg_joint - eps, -tenon / 2, 0]) difference() {
+        cube([tenon_len + eps, tenon, tenon]);
+        translate([tenon_len / 2 - pin_hole_s / 2, (tenon - pin_hole_s) / 2, -1]) cube([pin_hole_s, pin_hole_s, tenon + 2]);
+    }
+}
+module beam_b() {   // joint .. outer end, with the tenon pocket and the vertical pin hole
+    difference() {
+        translate([seg_joint, -tube / 2, 0]) cube([sock_x0 + tube_half - seg_joint, tube, tube]);
+        // pocket open at the bottom, matching the flush tenon
+        translate([seg_joint - 1, -tenon / 2 - tenon_fit, -1])
+            cube([tenon_len + 1.5, tenon + 2 * tenon_fit, tenon + tenon_fit + 1]);
+        translate([seg_joint + tenon_len / 2 - pin_hole_s / 2, -pin_hole_s / 2, -1]) cube([pin_hole_s, pin_hole_s, tube + 2]);
     }
 }
 
@@ -402,16 +492,24 @@ module dowel() {
 }
 
 // ================= assembly views =================
-module c920() {   // dummy C920: clip base against the tab, body, lens
+module c920() {   // dummy C920: clip foot in the cradle, body, lens
     rotate(cam_yaw) {
-        color("dimgray") translate([cam_axis_off - 4, -16, -plate_t - tab_screw_z - 20]) cube([4, 32, 40]);
-        color("black") hull() for (s = [-1, 1]) translate([0, s * 32.5, -plate_t - tab_screw_z - cam_lens_below_screw])
+        color("dimgray") translate([cam_axis_off - clip_t, -clip_w / 2, slot_floor_z - plate_top_z]) cube([clip_t, clip_w, clip_l]);
+        color("black") hull() for (s = [-1, 1]) translate([0, s * 32.5, lens_z - plate_top_z])
             scale([14.5 / 12, 1, 1]) cylinder(r = 12, h = 24);
         color("silver") translate([0, 0, lens_z - plate_top_z - 0.5]) cylinder(d = 14, h = 1);
     }
 }
 
-// explode = 0 for the installed view; > 0 lifts parts apart along z for the exploded view
+module beam_half(e) {   // the +x half: two segments and the joint pin
+    color("orange") translate([e, 0, 0]) beam_a();
+    color("gold") translate([2 * e, 0, 0]) beam_b();
+    // the short pin standing in its vertical hole, head on top
+    color("darkorange") translate([seg_joint + tenon_len / 2 + 2 * e, -pin_s / 2, tube + e]) rotate([0, 90, 0])
+        rotate([0, 0, 180]) translate([0, 0, 0]) snap_pin(pin_short);
+}
+
+// explode = 0 for the installed view; > 0 pulls parts apart for the exploded view
 module mount_on(pr, explode = 0) {
     pin_d = pr == "u1" ? u1_pin_d : k1_pin_d;
     other_d = pr == "u1" ? k1_pin_d : u1_pin_d;
@@ -419,21 +517,23 @@ module mount_on(pr, explode = 0) {
     e = explode;
     rotate(ang) {
         color("orange") translate([0, 0, hub_z + 2 * e]) hub();
-        color("silver") for (sx = [-1, 1]) translate([sx > 0 ? sock_x0 + e : -sock_x0 - tube_half - e, -tube / 2, tube_bot + 2 * e])
-            difference() {
-                cube([tube_half, tube, tube]);
-                translate([-1, 1.5, 1.5]) cube([tube_half + 2, tube - 3, tube - 3]);
-            }
+        for (sx = [-1, 1]) mirror([sx > 0 ? 0 : 1, 0, 0]) translate([0, 0, tube_bot + 2 * e]) beam_half(e);
         for (sx = [-1, 1]) {
             translate([sx * pin_d, 0, foot_z + 2 * e]) color("orange") foot();
             translate([sx * pin_d, 0, 0]) rotate(sx > 0 ? 180 : 0) color("darkorange")
                 if (pr == "u1") shoe_u1(); else shoe_k1();
             translate([sx * other_d, 0, foot_z + 2 * e]) color("orange") foot();   // the other pair, shoes off
+            for (x = [pin_d, other_d, sock_x0 + sock_len / 2]) color("gold")
+                translate([sx * x - wedge_w / 2, -wedge_len / 2, tube_bot + tube + 3 * e]) wedge_along_y();
         }
         color("orange") translate([0, post_y, post_bottom_z + 3 * e]) post_part();
         color("orange") translate([0, 0, arm_bot_z + 4 * e]) arm();
         translate([0, 0, plate_top_z + 4 * e - (e > 0 ? e : 0)]) {
             color("orange") cam_plate();
+            for (a = tilt_ang) rotate(a) translate([tilt_r, 0, -plate_t - e]) {
+                color("gold") translate([hanger[1] / 2, 0, 0]) rotate([0, -90, 0]) hanger_part();
+                color("goldenrod") translate([-wedge_len / 2, -wedge_w / 2, plate_t + tilt_gap + arm_t + e]) wedge_along_x();
+            }
             c920();
         }
         color("orange", 0.9) translate([0, 0, hub_z + e]) led_ring();
@@ -469,25 +569,37 @@ module print_cam_plate() { rotate([180, 0, 0]) cam_plate(); }
 module print_led_ring() { rotate([180, 0, 0]) led_ring(); }
 // the post lies on its 12 mm side, so the pin holes are vertical
 module print_post() { translate([-post_len / 2, 0, post[0] / 2]) rotate([0, 90, 0]) post_part(); }
-module knob_m5() { knob(24, 10, m5_head_af, m5_head_h, m5_d); }
-module knob_m4() { knob(18, 9, m4_nut_af, m4_nut_h, m4_d); }
-module pin_knob() { knob(18, 9, m4_head_af, m4_head_h, m4_d); }
+// beam segments lie as installed (pin holes vertical), centred on the origin
+module print_beam_a() { translate([-(sock_x0 + seg_joint + tenon_len) / 2, 0, 0]) beam_a(); }
+module print_beam_b() { translate([-(seg_joint + sock_x0 + tube_half) / 2, 0, 0]) beam_b(); }
+// wedge as installed, flat side down: length along y (beam clamps) or x (tilt hangers)
+module wedge_along_y() { multmatrix([[0, 0, 1, 0], [1, 0, 0, 0], [0, 1, 0, 0]]) wedge(); }
+module wedge_along_x() { multmatrix([[1, 0, 0, 0], [0, 0, 1, 0], [0, 1, 0, 0]]) wedge(); }
+pin_long = pc_w + 8;          // hub post channel and arm boss
+pin_short = tube + 8;         // beam joints
 
 // ================= print plates (K1 SE bed 220 x 220; everything inside 210 x 210) =================
 module plate_hub() {
     hub();
     translate([0, -80, 0]) print_post();
-    for (x = [-88, -62]) translate([x, 90, 0]) pin_knob();   // height pin + arm pin
-    for (i = [0 : 3]) translate([70 + (i % 2) * 14, 82 + floor(i / 2) * 14, 0]) dowel();
+    for (i = [0 : 1]) translate([-95, 70 + i * 16, 0]) snap_pin(pin_long);   // height pin + arm pin
+    for (i = [0 : 3]) translate([84 + (i % 2) * 14, 82 + floor(i / 2) * 14, 0]) dowel();
+    for (y = [70, 86]) translate([18, y, 0]) wedge();   // the hub's two clamps
+}
+
+module plate_beam() {
+    for (i = [0 : 1]) translate([-15 + i * 30, 0, 0]) rotate(90) print_beam_b();
+    for (i = [0 : 1]) translate([-75 + i * 30, -25, 0]) rotate(90) print_beam_a();
+    for (i = [0 : 1]) translate([50, -60 + i * 16, 0]) snap_pin(pin_short);
+    for (y = [30, 58, 86]) translate([34, y, 0]) hanger_part();   // tilt hangers
+    for (y = [-30, -15, 0]) translate([35, y, 0]) wedge();         // their wedges
 }
 
 module plate_small() {
     for (i = [0 : 3]) translate([-90 + i * 40, -50, 0]) print_foot();
     for (x = [-70, 10]) translate([x, 50, 0]) print_shoe_k1();
     for (y = [60, 0]) translate([82, y, 0]) print_shoe_u1();
-    for (i = [0 : 5]) translate([-90 + i * 27, -90, 0]) knob_m5();
-    for (i = [0 : 2]) translate([82, -40 - i * 22, 0]) knob_m4();
-    translate([60, -40, 0]) knob_m4();   // the nut knob that keeps the height pin in
+    for (i = [0 : 3]) translate([-100 + (i % 2) * 60, -98 + floor(i / 2) * 16, 0]) wedge();   // feet clamps
 }
 
 module plate_extras() {
@@ -495,6 +607,7 @@ module plate_extras() {
     translate([20, 55, 0]) print_cam_plate();
     translate([40, -40, 0]) pi_tray();
     for (y = [60, 10, -40]) translate([92, y, 0]) cable_clip();
+
 }
 
 // ================= dispatch =================
@@ -507,28 +620,32 @@ else if (part == "detail") {
     ang = printer == "u1" ? -atan2(u1_pad_dy, u1_pad_dx) : -45;
     translate(c) {
         ghost(printer);
-        rotate(ang) translate([-pin_d, 0, 0]) {   // rear-left foot, its shoe and a tube stub
+        rotate(ang) translate([-pin_d, 0, 0]) {   // rear-left foot, its shoe and a beam stub
             color("orange") translate([0, 0, foot_z]) foot();
             color("darkorange") if (printer == "u1") shoe_u1(); else shoe_k1();
-            color("silver") translate([-40, -tube / 2, tube_bot]) cube([140, tube, tube]);
+            color("gold") translate([-40, -tube / 2, tube_bot]) cube([140, tube, tube]);
         }
     }
 }
 else if (part == "hub") hub();
+else if (part == "beam_a") print_beam_a();
+else if (part == "beam_b") print_beam_b();
 else if (part == "foot") print_foot();
 else if (part == "shoe_k1") print_shoe_k1();
 else if (part == "shoe_u1") print_shoe_u1();
 else if (part == "post") print_post();
 else if (part == "arm") print_arm();
 else if (part == "cam_plate") print_cam_plate();
-else if (part == "knob_m5") knob_m5();
-else if (part == "knob_m4") knob_m4();
-else if (part == "pin_knob") pin_knob();
+else if (part == "wedge") wedge();
+else if (part == "hanger") hanger_part();
+else if (part == "pin_long") snap_pin(pin_long);
+else if (part == "pin_short") snap_pin(pin_short);
 else if (part == "pi_tray") pi_tray();
 else if (part == "cable_clip") cable_clip();
 else if (part == "led_ring") print_led_ring();
 else if (part == "dowel") dowel();
 else if (part == "plate_hub") plate_hub();
+else if (part == "plate_beam") plate_beam();
 else if (part == "plate_small") plate_small();
 else if (part == "plate_extras") plate_extras();
 else if (part == "plate_led") print_led_ring();
