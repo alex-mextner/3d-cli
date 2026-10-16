@@ -524,10 +524,11 @@ class MonitorLimits:
     )
     npu_threshold: float = 0.83  # the U1's own threshold at sensitivity "low"
     npu_quiet_s: float = 300.0  # no NPU hit for this long ends a noodle episode
-    # Labels the U1 pauses on during a print: defect_detection.response_callback acts on
-    # "noodle" and "residue" only. "nozzle" is the nozzle check, where a high prob means the
-    # nozzle was found (clean) — it shows up at every print start and is not a defect (#306).
-    npu_labels: frozenset[str] = frozenset({"noodle", "residue"})
+    # NPU labels that are not defects. "nozzle" is the firmware's nozzle check: a high prob
+    # means the nozzle was found (clean), defect_detection.detect_dirty_nozzle; it shows up at
+    # every U1 print start (#306). A denylist, so a defect label added by a firmware update
+    # still reaches the agent.
+    npu_ignored_labels: frozenset[str] = frozenset({"nozzle"})
 
 
 _RANK: dict[str | None, int] = {None: 0, INFO: 1, WARNING: 2, CRITICAL: 3}
@@ -734,7 +735,9 @@ class VisionMonitor:
 
     def npu(self, verdicts: list[NpuVerdict], now: float) -> list[Any]:
         """The printer's own detector: one warning per noodle episode, while printing."""
-        hits = [v for v in verdicts if v.label in self.limits.npu_labels and v.prob >= self.limits.npu_threshold]
+        ignored = self.limits.npu_ignored_labels
+        hits = [v for v in verdicts
+                if v.label.strip().lower() not in ignored and v.prob >= self.limits.npu_threshold]
         if hits:
             self.last_npu = max(hits, key=lambda v: v.prob)
         recent = (

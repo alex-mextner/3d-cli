@@ -333,13 +333,20 @@ def test_monitor_reports_the_printers_own_noodle_verdict_once_per_episode() -> N
     )  # below 0.83
 
 
+def _printing_monitor() -> VisionMonitor:
+    pytest.importorskip("printer_ops.watch")  # events are watch.Event, like the other npu tests
+    mon = VisionMonitor("u1", _Scores([]))
+    mon.set_job("printing", "a.gcode")
+    return mon
+
+
 def test_the_nozzle_check_label_is_not_a_noodle_verdict() -> None:
     """#306: at every U1 start the NPU reports label "nozzle" p 0.93 on 0.03 % of the frame —
     the firmware's nozzle check finding the nozzle, not a defect."""
-    pytest.importorskip("printer_ops.watch")
-    mon = VisionMonitor("u1", _Scores([]))
-    mon.set_job("printing", "a.gcode")
+    mon = _printing_monitor()
     assert mon.npu([NpuVerdict(NOW, "nozzle", 0.9287, 0.0003, 1)], NOW) == []
+    assert mon.npu([NpuVerdict(NOW + 1, " Nozzle ", 0.95, 0.0002, 1)], NOW + 1) == []
+    assert mon.last_npu is None                                 # nor does it start an episode
     mixed = mon.npu([NpuVerdict(NOW + 5, "nozzle", 0.95, 0.0002, 1),
                      NpuVerdict(NOW + 5, "noodle", 0.85, 0.0629, 1)], NOW + 5)
     assert [(e.kind, e.data["label"], e.data["hits"]) for e in mixed] == [
@@ -347,11 +354,10 @@ def test_the_nozzle_check_label_is_not_a_noodle_verdict() -> None:
     ]
 
 
-def test_a_residue_verdict_still_counts() -> None:
-    pytest.importorskip("printer_ops.watch")
-    mon = VisionMonitor("u1", _Scores([]))
-    mon.set_job("printing", "a.gcode")
-    assert [e.data["label"] for e in mon.npu([NpuVerdict(NOW, "residue", 0.9, 0.1, 1)], NOW)] == ["residue"]
+@pytest.mark.parametrize("label", ["residue", "spaghetti"])  # a defect label a firmware update may add
+def test_other_npu_labels_still_count(label: str) -> None:
+    mon = _printing_monitor()
+    assert [e.data["label"] for e in mon.npu([NpuVerdict(NOW, label, 0.9, 0.1, 1)], NOW)] == [label]
 
 
 def test_a_new_print_restarts_the_per_print_history_but_a_pause_does_not() -> None:

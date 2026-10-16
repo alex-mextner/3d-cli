@@ -49,7 +49,7 @@ from the device's `watch:` block in `printer-devices.yaml`).
 | `vision_spaghetti_vetoed` | info | the raw detector's trend would warn, but the verifier confirms less than 0.3 of it (texture, not filament) |
 | `vision_foreign_object`, `vision_part_moved` | warning | only with `--scene`: something new on the bed outside the parts / a part's silhouette changed |
 | `vision_no_growth` | info | only with `--scene`: the newest layers of a part look empty (under- or no extrusion) |
-| `printer_noodle_verdict` | warning | the U1's own NPU detector logs a `noodle` or `residue` verdict at or above 0.83 — the labels the firmware pauses on (once per episode, 5 min quiet ends it). The `nozzle` label is the firmware's nozzle check (high p = nozzle found) and raises nothing ([#306](https://github.com/alex-mextner/3d-cli/issues/306)) |
+| `printer_noodle_verdict` | warning | the U1's own NPU detector logs a defect verdict (`noodle`, `residue`, …) at or above 0.83 (once per episode, 5 min quiet ends it). The `nozzle` label is the firmware's nozzle check (high p = nozzle found) and raises nothing ([#306](https://github.com/alex-mextner/3d-cli/issues/306)) |
 | `vision_camera_stale` | warning | printing, but the picture has not changed (or could not be fetched) for 120 s |
 | `vision_camera_dark` | warning | printing with a mean brightness below 20/255 (light off, lens covered) |
 
