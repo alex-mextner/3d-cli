@@ -17,14 +17,19 @@ OBJECT HOOKS (the per-object parameter contract): every value a test changes is 
             object's own lines (between START and END only, never travels between objects)
     leave   before every EXCLUDE_OBJECT_END (restore: M221 S100, M220 S100, stock PA, ACCEL …)
     after   once, after the object's last EXCLUDE_OBJECT_END
-  Height-parameterised objects (temperature, retraction, speed by Z) go to the sequential phase:
-  there one object prints all its layers alone, so a temperature change never makes other
-  objects wait, and `before`/`after` can use M109.
+  After an object that ran a band, the slicer's own acceleration, square corner velocity and fan
+  (its last SET_VELOCITY_LIMIT / M106 values outside the band rewrites) are re-sent before
+  EXCLUDE_OBJECT_END: Orca writes them only on change, so the next object would otherwise
+  inherit the band's values. Per-object values (M221, ACCEL, wall speed, retraction, fan) work
+  by layer; a temperature change does not (the nozzle needs time), so temperature towers go to
+  the sequential phase, where one object prints all its layers alone and `before`/`after` can
+  use M109.
 K1 GANTRY: sequential objects must stay under extruder_clearance_height_to_rod and apart by
-  extruder_clearance_radius; Orca's sequential slice checks both and fails otherwise. The layer
-  objects are kept that radius away (in Y) from the sequential row, so the carriage never sweeps
-  over a finished tower while printing low objects, and the splice lifts above everything before
-  travelling to the first tower.
+  extruder_clearance_radius; Orca's sequential slice checks both and fails otherwise. Every layer
+  object taller than LOW_OBJECT_H is lower than the rod (the X beam passes over it) and at least
+  that radius (Euclidean, bbox to bbox) away from every sequential object, so the head never
+  reaches a finished object while it prints a tower; one-layer objects (patches, bed labels) lie
+  below the nozzle tip. The splice lifts above everything before travelling to the first tower.
 WHY: one 30–40 min plate replaces several separate calibration prints (express calibration of a
   new spool, docs/printops/express-calibration.md; issue #254 and its follow-up).
 """
@@ -33,6 +38,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
@@ -56,7 +62,6 @@ from slicing.calibration_gen import (
     finish,
     first_layer_extrusion,
     insert_before_end,
-    profile_roots,
     publish,
     require_relative_e,
     slice_models,
@@ -65,7 +70,8 @@ from slicing.calibration_gen import (
     text_width,
     Z_MOVE_F,
     TRAVEL_F,
-    presets_for,
+    PresetChoice,
+    chosen_presets,
 )
 
 Phase = Literal["layer", "sequential"]
@@ -182,7 +188,9 @@ class PlateContext:
     mach: dict[str, Any]
     ex: Extrusion  # first-layer line for hand-written G-code
     tests: frozenset[str] | None = None  # the plate's test ids to print (None: all)
-    pa: tuple[float, ...] = COMBO_PA_VALUES  # PA line values (material default or --pa-range)
+    pa: tuple[float, ...] = (
+        COMBO_PA_VALUES  # PA line values (material default or --pa-range)
+    )
 
     def wants(self, test: str) -> bool:
         return self.tests is None or test in self.tests
@@ -223,9 +231,9 @@ def make_context(
     temp: int | None,
     tests: frozenset[str] | None = None,
     pa: tuple[float, ...] = COMBO_PA_VALUES,
+    presets: PresetChoice | None = None,
 ) -> PlateContext:
-    p = presets_for(model)
-    idx = ProfileIndex(profile_roots(slicer))
+    p, idx = chosen_presets(model, slicer, material, presets)
     if material not in p.filament:
         raise GenError(
             f"no filament preset for {material!r} on {p.machine} (known: {', '.join(p.filament)})"
@@ -327,9 +335,58 @@ def label_width(text: str, size: tuple[float, float, float] = COMBO_LABEL) -> fl
     return text_width(text, w, gap)
 
 
-def apply_hooks(text: str, objects: tuple[PlateObject, ...]) -> str:
+_VLIMIT = re.compile(r"^SET_VELOCITY_LIMIT\b(.*)$")
+_VPARAM = re.compile(r"\b(ACCEL|ACCEL_TO_DECEL|SQUARE_CORNER_VELOCITY)=([\d.]+)")
+_FAN = re.compile(r"^M10([67])\b(?:.*\bS([\d.]+))?")
+
+
+class _SlicerState:
+    """The acceleration, square corner velocity and fan the slicer believes are set: its own
+    last SET_VELOCITY_LIMIT / M106 / M107 values, read before any band rewrites them."""
+
+    def __init__(self) -> None:
+        self.limits: dict[str, str] = {}
+        self.fan: str | None = None
+
+    def see(self, line: str) -> None:
+        if m := _VLIMIT.match(line):
+            self.limits.update(_VPARAM.findall(m.group(1)))
+        elif m := _FAN.match(line):
+            self.fan = "0" if m.group(1) == "7" else (m.group(2) or "255")
+
+    def resend(self) -> list[str]:
+        out = []
+        if self.limits:
+            out.append(
+                "SET_VELOCITY_LIMIT "
+                + " ".join(f"{k}={v}" for k, v in sorted(self.limits.items()))
+            )
+        if self.fan is not None:
+            out.append(f"M106 S{self.fan}")
+        return out
+
+
+_EWORD = re.compile(r" E(-?[\d.]+)")
+
+
+def _e(line: str) -> float:
+    m = (
+        _EWORD.search(line.partition(";")[0])
+        if line.startswith(("G1 ", "G0 "))
+        else None
+    )
+    return float(m.group(1)) if m else 0.0
+
+
+def apply_hooks(
+    text: str, objects: tuple[PlateObject, ...], retract_f: float = 2400.0
+) -> str:
     """Insert every object's before/enter/band/leave/after G-code and run band transforms on its
-    own lines (see the module docstring)."""
+    own lines (see the module docstring). Extrusion stays balanced across object boundaries:
+    the visit's first prime (the slicer's de-retraction before the first extruding move, which
+    undoes a retraction made outside the object) is never transformed, and whatever a transform
+    added to the extrusion (a scaled retraction) is undone before EXCLUDE_OBJECT_END, so the
+    travel to the next object starts with the filament where the slicer left it."""
     by = {o.name: o for o in objects}
     lines = text.split("\n")
     first: dict[str, int] = {}
@@ -346,7 +403,12 @@ def apply_hooks(text: str, objects: tuple[PlateObject, ...]) -> str:
     z = 0.0
     cur: PlateObject | None = None
     band: Band | None = None
+    banded = False  # a band ran during this visit of `cur`
+    e_shift = 0.0  # extrusion added by transforms during this visit
+    primed = False  # the visit's first extruding XY move has been seen
+    state = _SlicerState()
     for i, line in enumerate(lines):
+        state.see(line)
         if m := _ZMARK.match(line):
             z = float(m.group(1))
             out.append(line)
@@ -355,6 +417,7 @@ def apply_hooks(text: str, objects: tuple[PlateObject, ...]) -> str:
                 if nb is not band and nb is not None:
                     out += nb.gcode
                 band = nb
+                banded = banded or nb is not None
             continue
         if (m := _START.match(line)) and m.group(1) in by:
             cur = by[m.group(1)]
@@ -363,18 +426,31 @@ def apply_hooks(text: str, objects: tuple[PlateObject, ...]) -> str:
             out.append(line)
             out += cur.enter
             band = cur.band_at(z)
+            banded = band is not None
+            primed = False
             if band is not None:
                 out += band.gcode
             continue
         if (m := _END.match(line)) and cur is not None and m.group(1) == cur.name:
             out += cur.leave
+            if abs(e_shift) > 1e-6:
+                out.append(f"G1 E{-e_shift:.5f} F{retract_f:.0f}")
+            if banded:
+                out += state.resend()
             out.append(line)
             if last[cur.name] == i:
                 out += cur.after
-            cur, band = None, None
+            cur, band, banded, e_shift = None, None, False, 0.0
             continue
         if band is not None and band.transform is not None:
-            line = band.transform(line)
+            code = line.partition(";")[0]
+            xy = line.startswith("G1 ") and re.search(r" [XY]-?[\d.]", code) is not None
+            entry_prime = not primed and not xy and _e(line) > 0
+            if not entry_prime:
+                new = band.transform(line)
+                e_shift += _e(new) - _e(line)
+                line = new
+            primed = primed or (xy and _e(line) > 0)
         out.append(line)
     return "\n".join(out)
 
@@ -551,6 +627,46 @@ def bed_labels(
     )
 
 
+# One-layer objects (first-layer patches, bed labels) lie below the nozzle tip: the head passes
+# over them while it prints a tower.
+LOW_OBJECT_H = 0.6
+
+
+def _gap(a: Box, b: Box) -> float:
+    """XY distance between two bboxes (0 when they overlap)."""
+    dx = max(a[0] - b[3], b[0] - a[3], 0.0)
+    dy = max(a[1] - b[4], b[1] - a[4], 0.0)
+    return math.hypot(dx, dy)
+
+
+def _check_clearance(
+    layer: list[tuple[str, Box]], seq: list[tuple[str, Box]], rod: float, radius: float
+) -> None:
+    """K1 gantry rules (module docstring): towers under the rod; every layer object that is
+    not one layer thin under the rod and `radius` away from every tower."""
+    for name, bb in seq:
+        if bb[5] > rod:
+            raise GenError(
+                f"{name}: {bb[5]:g} mm is taller than the gantry rod clearance {rod:g} mm"
+            )
+    if not seq:
+        return
+    for name, bb in layer:
+        if bb[5] <= LOW_OBJECT_H:
+            continue
+        if bb[5] > rod:
+            raise GenError(
+                f"{name}: {bb[5]:g} mm is taller than the gantry rod clearance {rod:g} mm, "
+                "so the X beam would hit it while a tower prints"
+            )
+        for tower, tb in seq:
+            if (gap := _gap(bb, tb)) < radius:
+                raise GenError(
+                    f"{name} is {gap:.1f} mm from {tower}: keep {radius:g} mm "
+                    "(extruder_clearance_radius) between layer objects and towers"
+                )
+
+
 def build_plate(ctx: PlateContext, plate: Plate, slicer: str, out: Path) -> Generated:
     labels = bed_labels(ctx, plate.objects)
     if labels is not None:
@@ -567,20 +683,12 @@ def build_plate(ctx: PlateContext, plate: Plate, slicer: str, out: Path) -> Gene
         raise GenError(
             f"plate {plate.plate_id}: needs at least one layer object (it frames the print)"
         )
-    rod, radius = ctx.clearance()
-    for o in seq:
-        if o.bbox()[5] > rod:
-            raise GenError(
-                f"{o.name}: {o.bbox()[5]:g} mm is taller than the gantry rod clearance {rod:g} mm"
-            )
-    if seq:
-        low_y0 = min(o.bbox()[1] for o in seq)
-        front = max(o.bbox()[4] for o in layer)
-        if low_y0 - front < radius:
-            raise GenError(
-                f"layer objects end at y={front:g}, towers start at y={low_y0:g}: "
-                f"keep {radius:g} mm (extruder_clearance_radius) between them"
-            )
+    _check_clearance(
+        [(o.name, o.bbox()) for o in layer]
+        + [(c.name, c.bbox()) for c in plate.custom],
+        [(o.name, o.bbox()) for o in seq],
+        *ctx.clearance(),
+    )
     base_fil = _filament_overrides(ctx.color, ctx.temp)
     a_text, a_log = slice_models(
         slicer,
@@ -606,7 +714,7 @@ def build_plate(ctx: PlateContext, plate: Plate, slicer: str, out: Path) -> Gene
         )
         require_relative_e(b_text, ctx.p)
     text = splice(ctx, a_text, b_text, plate.custom)
-    text = apply_hooks(text, plate.objects)
+    text = apply_hooks(text, plate.objects, ctx.ex.retract_f)
     if seq:
         text = restore_prime(text, ctx.ex.retract_f)
     text = insert_before_end(text, list(plate.restore))
@@ -698,6 +806,12 @@ def write_map(
         "printer_model": ctx.p.machine,
         "material": ctx.material,
         "filament_preset": ctx.p.filament[ctx.material],
+        "presets": {
+            "machine": ctx.p.machine,
+            "process": ctx.p.process,
+            "filament": ctx.p.filament[ctx.material],
+            "chosen_by": dict(ctx.p.chosen_by),
+        },
         "color": ctx.color,
         "nozzle_temp": ctx.base_temp,
         "estimate_min": round(estimate / 60, 1),

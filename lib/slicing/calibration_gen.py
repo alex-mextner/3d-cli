@@ -29,7 +29,7 @@ import shutil
 import subprocess
 import tempfile
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -55,6 +55,8 @@ class Presets:
     has_accelerometer: bool
     probe_point: tuple[float, float, float]
     sources: tuple[str, ...] = field(default=())
+    # where each slicer preset name came from (kind, source), stamped into the G-code
+    chosen_by: tuple[tuple[str, str], ...] = ()
 
 
 # Creality K1 SE: presets as named in Orca's Creality profile folder; stock_pa, the ADXL345 on the
@@ -108,6 +110,78 @@ def presets_for(model: str) -> Presets:
     return p
 
 
+@dataclass(frozen=True)
+class PresetChoice:
+    """The slicer presets a calibration print uses — the ones the printer and the spool really
+    print with (user presets), never a silent fallback to the stock system presets."""
+
+    machine: str
+    process: str
+    filament: str
+    sources: tuple[tuple[str, str], ...] = ()  # (kind, where the name came from)
+
+
+def apply_choice(p: Presets, material: str, choice: PresetChoice) -> Presets:
+    return replace(
+        p,
+        machine=choice.machine,
+        process=choice.process,
+        filament={**p.filament, material: choice.filament},
+        chosen_by=choice.sources,
+    )
+
+
+def check_choice(idx: ProfileIndex, p: Presets, material: str) -> None:
+    """Every chosen preset exists, and the filament preset is for `material`."""
+    for kind, name in (
+        ("machine", p.machine),
+        ("process", p.process),
+        ("filament", p.filament[material]),
+    ):
+        idx.source(p.vendor, kind, name)
+    ftype = idx.flat(p.vendor, "filament", p.filament[material]).get("filament_type")
+    ftype = ftype[0] if isinstance(ftype, list) and ftype else ftype
+    if ftype and str(ftype).upper() != material.upper():
+        raise GenError(
+            f"filament preset {p.filament[material]!r} is {ftype}, not {material} (--material)"
+        )
+
+
+NO_PRESETS_HINT = (
+    "name the slicer presets the printer and spool print with: --machine-preset/--process-preset "
+    "(or `slicer: {machine, process}` in fleet/printers.yaml) and --filament-preset (the spool's "
+    "user preset, e.g. 'Orange PLA @K1SE'); calibrating with Orca's stock presets measures settings "
+    "you do not print with"
+)
+
+
+def chosen_presets(
+    model: str, slicer: str, material: str, choice: PresetChoice | None
+) -> tuple[Presets, ProfileIndex]:
+    """The printer model's facts with the chosen slicer presets, and an index that resolves
+    them (system + user presets). No choice is an error, not a fallback to the stock presets."""
+    if choice is None:
+        raise GenError("no slicer presets chosen: " + NO_PRESETS_HINT)
+    p = apply_choice(presets_for(model), material, choice)
+    idx = ProfileIndex(profile_roots(slicer), user_preset_roots())
+    check_choice(idx, p, material)
+    return p, idx
+
+
+def presets_stamp(p: Presets, material: str) -> str:
+    """A G-code comment naming the presets and where each came from (print-preflight and the
+    calibration history read the slicer's own *_settings_id keys; this keeps the reason)."""
+    by = dict(p.chosen_by)
+    names = {
+        "machine": p.machine,
+        "process": p.process,
+        "filament": p.filament[material],
+    }
+    return "; 3d calibrate presets: " + "; ".join(
+        f"{k}={v} ({by.get(k, 'default')})" for k, v in names.items()
+    )
+
+
 def profile_roots(slicer: str) -> list[Path]:
     """Where the Orca build keeps its system profiles: next to the binary (extracted AppImage,
     macOS bundle), then the per-user copies Orca writes on first start."""
@@ -125,12 +199,33 @@ def profile_roots(slicer: str) -> list[Path]:
     return [r for r in roots if r.is_dir()]
 
 
-class ProfileIndex:
-    """System presets by (vendor, kind, name) with `inherits` resolved (child keys win)."""
+def user_preset_roots() -> list[Path]:
+    """Where user presets live, first wins: the repo's profiles (decision D10, synced to the
+    slicers by `3d profiles sync`), then the Orca-family slicers' own user preset folders, found
+    the way `3d profiles` finds them (XDG/Flatpak/macOS data dir, the logged-in `preset_folder`).
+    Each holds filament/, process/, machine/ directly (no vendor level)."""
+    env = os.environ.get("ORCA_USER_PRESETS")
+    if env:
+        return [Path(p) for p in env.split(os.pathsep) if Path(p).is_dir()]
+    from profiles.slicers import SLICERS, find_data_dir, profiles_root, user_presets_dir
 
-    def __init__(self, roots: list[Path]) -> None:
+    roots = [profiles_root() / sid for sid in ("snapmaker-orca", "orca")]
+    for sid in ("snapmaker-orca", "orca"):
+        data = find_data_dir(SLICERS[sid])
+        if data is not None:
+            roots.append(user_presets_dir(data, SLICERS[sid]))
+    return [r for r in roots if r.is_dir()]
+
+
+class ProfileIndex:
+    """Orca presets by (vendor, kind, name) with `inherits` resolved (child keys win): the
+    vendor's system presets, plus user presets (any vendor) that inherit from them."""
+
+    def __init__(self, roots: list[Path], user_roots: list[Path] | None = None) -> None:
         self.roots = roots
+        self.user_roots = user_roots or []
         self._cache: dict[tuple[str, str], dict[str, dict[str, Any]]] = {}
+        self._user: dict[str, dict[str, tuple[dict[str, Any], Path]]] = {}
 
     def _index(self, vendor: str, kind: str) -> dict[str, dict[str, Any]]:
         key = (vendor, kind)
@@ -143,20 +238,44 @@ class ProfileIndex:
             self._cache[key] = found
         return self._cache[key]
 
+    def _user_index(self, kind: str) -> dict[str, tuple[dict[str, Any], Path]]:
+        if kind not in self._user:
+            found: dict[str, tuple[dict[str, Any], Path]] = {}
+            for root in reversed(self.user_roots):  # first root wins
+                for path in sorted((root / kind).glob("*.json")):
+                    data = json.loads(path.read_text())
+                    found[str(data.get("name", path.stem))] = (data, path)
+            self._user[kind] = found
+        return self._user[kind]
+
+    def source(self, vendor: str, kind: str, name: str) -> str:
+        """'system' or the user preset's file."""
+        if name in self._index(vendor, kind):
+            return "system"
+        if name in self._user_index(kind):
+            return str(self._user_index(kind)[name][1])
+        raise GenError(f"Orca {kind} preset {name!r} not found ({self._where(vendor)})")
+
+    def _where(self, vendor: str) -> str:
+        roots = [str(r / vendor) for r in self.roots] + [
+            str(r) for r in self.user_roots
+        ]
+        return "searched " + (", ".join(roots) or "no profile folder")
+
     def flat(
         self, vendor: str, kind: str, name: str, _seen: tuple[str, ...] = ()
     ) -> dict[str, Any]:
         index = self._index(vendor, kind)
-        if name not in index:
+        user = self._user_index(kind)
+        if name not in index and name not in user:
             raise GenError(
-                f"Orca {kind} preset {name!r} not found under {vendor} in "
-                f"{', '.join(map(str, self.roots)) or 'no profile folder'}"
+                f"Orca {kind} preset {name!r} not found ({self._where(vendor)})"
             )
         if name in _seen:
             raise GenError(
                 f"Orca {kind} preset {name!r}: `inherits` loop {' -> '.join((*_seen, name))}"
             )
-        data = dict(index[name])
+        data = dict(index[name]) if name in index else dict(user[name][0])
         parent = data.pop("inherits", None)
         if parent:
             base = self.flat(vendor, kind, str(parent), (*_seen, name))
@@ -248,8 +367,16 @@ def _apply_overrides(base: dict[str, Any], over: dict[str, Any]) -> dict[str, An
     return out
 
 
-def _write_preset(tmp: Path, kind: str, name: str, data: dict[str, Any]) -> Path:
+def _write_preset(
+    tmp: Path, kind: str, name: str, data: dict[str, Any], machine: str = ""
+) -> Path:
     data = dict(data, name=name, **{"from": "system", "instantiation": "true"})
+    if machine:
+        # The presets were chosen explicitly. Orca's CLI matches compatible_printers against the
+        # machine preset's own name, so a user machine ("… - Copy") would reject the system
+        # process/filament it inherits from; the user's slicer already accepts the combination.
+        data["compatible_printers"] = [machine]
+        data["compatible_printers_condition"] = ""
     path = tmp / f"{kind}.json"
     path.write_text(json.dumps(data, indent=1))
     return path
@@ -280,6 +407,7 @@ def slice_models(
             "process",
             p.process,
             _apply_overrides(idx.flat(p.vendor, "process", p.process), process_over),
+            p.machine,
         )
         fil_name = p.filament[material]
         filament = _write_preset(
@@ -287,6 +415,7 @@ def slice_models(
             "filament",
             fil_name,
             _apply_overrides(idx.flat(p.vendor, "filament", fil_name), filament_over),
+            p.machine,
         )
         stls = []
         for name, text in models.items():
@@ -322,7 +451,9 @@ def slice_models(
         result = tmp / "result.json"
         if result.is_file():
             log += "\n" + result.read_text()
-        return produced[0].read_text(), log
+        return produced[0].read_text().rstrip("\n") + "\n" + presets_stamp(
+            p, material
+        ) + "\n", log
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -1024,13 +1155,8 @@ def gen_temp(
     material: str,
     color: str,
     out: Path,
-    temp: int | None,
 ) -> Generated:
-    if temp is not None:
-        raise GenError(
-            f"gen temp prints its own range ({', '.join(f'{m} {a}->{b}' for m, (a, b) in TEMP_RANGES.items())}); "
-            "drop --nozzle-temp"
-        )
+    """The tower prints its own temperature range (generate() refuses --nozzle-temp)."""
     steps = temp_steps(material)
     boxes = temp_tower_boxes(steps, p.bed[0] / 2, p.bed[1] / 2)
     fil = _filament_overrides(color, steps[0])
@@ -1064,18 +1190,23 @@ def gen_shaper(p: Presets, out: Path) -> Generated:
     px, py, pz = p.probe_point
     lines = [
         f"# {p.machine}: input shaper calibration with the built-in ADXL345 (console commands,",
-        "# run on an idle, homed printer; each SHAPER_CALIBRATE shakes the head for ~1 min).",
+        "# run on an idle printer; the sweeps shake the head for ~5 min).",
         "G28",
+        # A hot nozzle keeps the hotend fan running, and its vibration swamps the resonance
+        # (K1 SE: G28 heats the nozzle to 140 °C for its probe; it cools in ~6 min).
+        "M104 S0",
+        "M107",
+        "TEMPERATURE_WAIT SENSOR=extruder MAXIMUM=38",
         "ACCELEROMETER_QUERY",
         "MEASURE_AXES_NOISE",
         f"# resonance_tester probe point from printer.cfg: {px:g},{py:g},{pz:g}",
-        "SHAPER_CALIBRATE AXIS=X",
-        "SHAPER_CALIBRATE AXIS=Y",
+        # One run for both axes: Creality's Klipper writes an AXIS=Y result into X as well.
+        "SHAPER_CALIBRATE",
         "# Read the recommended shaper_type/shaper_freq per axis from the console, then:",
         "#   3d calibrate record input_shaper --printer PRINTER --method klipper_shaper_calibrate \\",
         "#     --values shaper_type_x=T,shaper_freq_x=F,shaper_type_y=T,shaper_freq_y=F",
-        "# SAVE_CONFIG writes them to printer.cfg and restarts Klipper (only when idle).",
-        "SAVE_CONFIG",
+        "# Then SAVE_CONFIG while idle (it restarts Klipper). Creality's SHAPER_CALIBRATE already",
+        "# writes printer.cfg itself (CXSAVE_CONFIG) without applying the values until a restart.",
     ]
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text("\n".join(lines) + "\n")
@@ -1112,9 +1243,11 @@ def generate(
     skip: frozenset[str] = frozenset(),
     pa_range: tuple[float, float] | None = None,
     pa_step: float | None = None,
+    presets: PresetChoice | None = None,
 ) -> Generated:
     """One calibration print. `only`/`skip` pick the tests of a plate (plateN kinds only);
-    `pa_range`/`pa_step` set the PA line values (combo, plates) instead of the material's."""
+    `pa_range`/`pa_step` set the PA line values (combo, plates) instead of the material's;
+    `presets` are the slicer presets to slice with (required for everything but shaper)."""
     if kind not in all_kinds():
         raise GenError(f"unknown kind {kind!r} (accepted: {', '.join(all_kinds())})")
     if kind not in KINDS:  # a plate of the series (lib/slicing/calibration_plates)
@@ -1129,6 +1262,7 @@ def generate(
             temp,
             resolve_tests(kind, only, skip),
             pa_values(material, pa_range, pa_step),
+            presets,
         )
         return build_plate(ctx, PLATES[kind].build(ctx), slicer, out)
     if (pa_range is not None or pa_step is not None) and kind != "combo":
@@ -1139,10 +1273,12 @@ def generate(
         raise GenError(
             f"--only/--skip pick the tests of a plate; {kind!r} is a single test"
         )
-    p = presets_for(model)
     if kind == "shaper":
-        return gen_shaper(p, out)
-    idx = ProfileIndex(profile_roots(slicer))
+        return gen_shaper(presets_for(model), out)
+    if kind == "temp" and temp is not None:
+        ranges = ", ".join(f"{m} {a}->{b}" for m, (a, b) in TEMP_RANGES.items())
+        raise GenError(f"gen temp prints its own range ({ranges}); drop --nozzle-temp")
+    p, idx = chosen_presets(model, slicer, material, presets)
     if kind == "pa":
         return gen_pa(slicer, idx, p, material, color, out, temp)
     if kind == "combo":
@@ -1157,5 +1293,5 @@ def generate(
             pa_values(material, pa_range, pa_step),
         )
     if kind == "temp":
-        return gen_temp(slicer, idx, p, material, color, out, temp)
+        return gen_temp(slicer, idx, p, material, color, out)
     return gen_flow(slicer, idx, p, material, color, out, temp)
