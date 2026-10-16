@@ -1,7 +1,8 @@
-"""run_gate.py — the `dev run test` gate: ruff, shellcheck, pytest, then mypy; all must pass.
+"""run_gate.py — the `dev run test` gate: ruff, shellcheck, yamllint, pytest, then mypy; all must pass.
 
 Invoked by rig.yaml scripts.test through the dev runner. Extra argv is forwarded to pytest.
-Pytest covers unit tests, CLI smoke tests, and any e2e tests under tests/e2e/.
+Pytest covers unit tests, CLI smoke tests, any e2e tests under tests/e2e/, and the Home
+Assistant integration's own tests (integrations/homeassistant/tests/).
 
 `--fast` (what the pre-commit hook passes) swaps the full pytest sweep for the tests the
 changed files can affect plus a small smoke set; ruff, shellcheck and mypy still run in full.
@@ -16,6 +17,7 @@ import subprocess
 import sys
 
 SHELLCHECK_INSTALL = "brew install shellcheck  /  sudo apt-get install shellcheck"
+HA_INTEGRATION = "integrations/homeassistant"
 
 # scripts/hooks/pre-commit looks for this exact line to tell a --fast-capable gate apart
 # from an older branch's run_gate.py.
@@ -220,15 +222,24 @@ def main(argv: list[str]) -> int:
     print("=== shellcheck ===", flush=True)
     rc_shellcheck = run_shellcheck(root)
 
+    print("=== yamllint (integrations/homeassistant) ===", flush=True)
+    rc_yamllint = subprocess.run(
+        [sys.executable, "-m", "yamllint", "--strict", "."], cwd=os.path.join(root, HA_INTEGRATION), env=env,
+    ).returncode
+
+    ha_tests = os.path.join(root, HA_INTEGRATION, "tests")
     if fast:
-        selected = select_tests(root, changed_files(root))
+        changed = changed_files(root)
+        selected = select_tests(root, changed)
+        if any(rel.startswith(HA_INTEGRATION + "/") for rel in changed):
+            selected.append(f"{HA_INTEGRATION}/tests")
         print(f"=== pytest --fast: {len(selected)} test path(s) for the changed files "
               "(full suite: `dev run test`, CI) ===", flush=True)
         print("\n".join(f"  {rel}" for rel in selected), flush=True)
         test_targets = [os.path.join(root, rel) for rel in selected]
     else:
-        print("=== pytest (unit + CLI smoke + e2e) ===", flush=True)
-        test_targets = [os.path.join(root, "tests")]
+        print("=== pytest (unit + CLI smoke + e2e + HA integration) ===", flush=True)
+        test_targets = [os.path.join(root, "tests"), ha_tests]
     rc_pytest = subprocess.run(
         [sys.executable, "-m", "pytest", *test_targets, *pytest_args],
         cwd=root, env=env,
@@ -245,13 +256,13 @@ def main(argv: list[str]) -> int:
         cwd=root, env=env,
     ).returncode
 
-    ok = rc_ruff == 0 and rc_shellcheck == 0 and rc_pytest == 0 and rc_mypy == 0
+    ok = rc_ruff == 0 and rc_shellcheck == 0 and rc_yamllint == 0 and rc_pytest == 0 and rc_mypy == 0
     print()
     if ok:
         print(">>> TEST: PASS")
     else:
         print(f">>> TEST: FAIL (ruff rc={rc_ruff}, shellcheck rc={rc_shellcheck}, "
-              f"pytest rc={rc_pytest}, mypy rc={rc_mypy})")
+              f"yamllint rc={rc_yamllint}, pytest rc={rc_pytest}, mypy rc={rc_mypy})")
     return 0 if ok else 1
 
 

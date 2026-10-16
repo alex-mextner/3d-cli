@@ -1668,6 +1668,30 @@ def test_cmd_start_refuses_an_untrusted_macro_without_force(
     assert printer("start", "u1", str(g), "--yes", "--force") == 0
 
 
+def test_cmd_start_runs_the_printops_material_gates(
+    moon: FakeMoonraker, env: Path, tmp_path: Path, gates_ok: None, capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`start` runs the same PrintOps gates as `print-preflight --printer` (#164): a plate sliced
+    for another printer model is refused even without any 3d-api state (fleet facts only)."""
+    fleet = tmp_path / "fleet.yaml"  # the fleet profile only; the address comes from write_devices
+    fleet.write_text("u1:\n  model: Snapmaker U1\n  owner: own\n  access: full\n  adapter: moonraker\n"
+                     "  host: 127.0.0.1\n  port: 9\n  heads:\n"
+                     "    - {label: T1, index: 0, nozzle: {diameter_mm: 0.4, material: stainless, type: std}}\n"
+                     "  ams: []\n  enclosure: none\n  chamber_heater: false\n  plates: [textured_pei]\n")
+    monkeypatch.setenv("THREED_FLEET", str(fleet))
+    monkeypatch.delenv("PRINTOPS_API", raising=False)
+    g = gcode(tmp_path, U1_GCODE + "; printer_model = Creality K1 SE\n")
+    moon.put(safe_remote_name(g), g.read_bytes())
+    write_devices(env, moon=moon)
+    with pytest.raises(PrinterRefused, match="preflight FAIL"):
+        printer("start", "u1", str(g), "--yes")
+    out = capsys.readouterr().out
+    assert "printer_profile_match" in out and "'Creality K1 SE'" in out
+    assert "fleet facts only" in out
+    assert moon.writes() == []
+
+
 # ---- review #132, second round ------------------------------------------------------------
 
 

@@ -1,0 +1,14 @@
+# yamllint for the HA integration (run by tests/run_gate.py). HA config files are written
+# without `---` and carry long Jinja templates; everything else is the default ruleset.
+extends: default
+yaml-files:
+  - "*.yaml"
+  - "*.yml"
+  - vendor.lock
+rules:
+  document-start: disable
+  line-length:
+    max: 160
+    allow-non-breakable-inline-mappings: true
+  truthy:
+    check-keys: false

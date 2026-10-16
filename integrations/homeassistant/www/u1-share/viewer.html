@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta name="robots" content="noindex,nofollow,noarchive">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src blob:; base-uri 'none'; form-action 'none'; object-src 'none'">
+<title>Камера U1 · Временный просмотр</title>
+<link rel="stylesheet" href="./viewer.css">
+<script type="module" src="./viewer.js"></script>
+</head>
+<body>
+<main>
+<header><div><span class="eyebrow">U1 CAMERA</span><h1>Временный просмотр</h1></div><span id="badge">Подключение</span></header>
+<div id="stage"><img id="frame" alt="Изображение с камеры принтера U1" hidden><p id="empty">Загружаю изображение…</p></div>
+<div class="info"><p id="status" role="status" aria-live="polite"></p><p id="expires"></p></div>
+<footer><span>Только камера. Без доступа к управлению принтером.</span><button id="pause" type="button">Пауза</button></footer>
+<p class="privacy">Не пересылайте ссылку тем, кому не хотите показывать камеру. Срок ограничивает новые запросы, но не удаляет уже сохранённые изображения.</p>
+</main>
+</body>
+</html>
