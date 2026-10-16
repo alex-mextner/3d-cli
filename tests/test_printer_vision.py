@@ -333,6 +333,27 @@ def test_monitor_reports_the_printers_own_noodle_verdict_once_per_episode() -> N
     )  # below 0.83
 
 
+def test_the_nozzle_check_label_is_not_a_noodle_verdict() -> None:
+    """#306: at every U1 start the NPU reports label "nozzle" p 0.93 on 0.03 % of the frame —
+    the firmware's nozzle check finding the nozzle, not a defect."""
+    pytest.importorskip("printer_ops.watch")
+    mon = VisionMonitor("u1", _Scores([]))
+    mon.set_job("printing", "a.gcode")
+    assert mon.npu([NpuVerdict(NOW, "nozzle", 0.9287, 0.0003, 1)], NOW) == []
+    mixed = mon.npu([NpuVerdict(NOW + 5, "nozzle", 0.95, 0.0002, 1),
+                     NpuVerdict(NOW + 5, "noodle", 0.85, 0.0629, 1)], NOW + 5)
+    assert [(e.kind, e.data["label"], e.data["hits"]) for e in mixed] == [
+        ("printer_noodle_verdict", "noodle", 1)
+    ]
+
+
+def test_a_residue_verdict_still_counts() -> None:
+    pytest.importorskip("printer_ops.watch")
+    mon = VisionMonitor("u1", _Scores([]))
+    mon.set_job("printing", "a.gcode")
+    assert [e.data["label"] for e in mon.npu([NpuVerdict(NOW, "residue", 0.9, 0.1, 1)], NOW)] == ["residue"]
+
+
 def test_a_new_print_restarts_the_per_print_history_but_a_pause_does_not() -> None:
     mon = VisionMonitor("u1", _Scores([]))
     assert mon.set_job("printing", "a.gcode") is True
