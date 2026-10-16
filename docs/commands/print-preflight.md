@@ -17,6 +17,7 @@ input is missing is SKIP and its line says what to pass — it never passes sile
 |---|---|---|
 | `thumbnails` | always | The G-code lacks preview images its `; thumbnails =` spec asks for (fix: `3d gcode-thumbnails add FILE`). |
 | `printer` | `--printer` | The printer is printing, paused, busy, or its state cannot be read. |
+| `bed` | `--printer` with `watch.bed.enabled` (SKIP otherwise) | The camera sees objects on the bed or the build plate missing against the empty-bed reference; WARN when it cannot tell (no reference at this Z, plate out of view, camera down). See [Bed state](printer.md#bed-state). |
 | `slot Tn` | `--printer` on a printer with per-head data (Snapmaker U1) | Tool *n* is used by the G-code but head T*n+1* is empty, or its colour/material differs from `; filament_colour` / `; filament_type`. |
 | `axis travel` | always (SKIP when the limits are unknown) | A move, or the bulge of an arc, leaves the printer's X/Y travel anywhere in the file. See [`3d gcode-bounds`](gcode-bounds.md). |
 | `print area` | always | A plate move leaves the G-code's `; printable_area`, or an extruding path crosses `; bed_exclude_area` (vendor blocks exempt: `;TYPE:Custom`; on Bambu Studio G-code everything outside its object blocks, wipe tower and features — see [`3d gcode-bounds`](gcode-bounds.md)). |

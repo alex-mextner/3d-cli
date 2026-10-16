@@ -47,8 +47,10 @@ id is a hash of the three) and prints it. The output also shows whether the sess
 - `--kinds K,K` — only these event kinds, as fnmatch globs (repeatable; default: every kind).
   Camera kinds come from `3d printer vision` (`vision_*`, `printer_noodle_verdict`); watch kinds
   are listed in [printer.md](printer.md#watching-printers), for example `exception`, `state`
-  and `filament`.
+  and `filament`; the bed monitor sends `bed_clear`, `bed_occupied`, `plate_missing`,
+  `plate_present` (info: subscribe with `--min-severity info`, see [Bed state](printer.md#bed-state)).
   `3d printer subscribe --session 01a12cd6 --kinds 'vision_*,exception'`
+  `3d printer subscribe --session 01a12cd6 --kinds 'bed_*,plate_*' --min-severity info`
 - `--min-severity LEVEL` — `info` | `warning` | `critical` (default `warning`). The watcher's own
   `--min-severity` / `watch.min_severity` filters first.
   `3d printer subscribe --session 01a12cd6 --min-severity critical`

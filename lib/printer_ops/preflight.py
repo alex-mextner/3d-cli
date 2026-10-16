@@ -4,6 +4,8 @@ WHAT (issue https://github.com/alex-mextner/3d-cli/issues/96), one PASS/WARN/FAI
   - thumbnails   the G-code carries the preview images its `; thumbnails =` spec asks for
                  (lib/gcode_thumbnails.py check(), the `3d gcode-thumbnails` checker);
   - printer      the target printer is free (not printing/paused/busy/unknown);
+  - bed          (printers with `watch.bed.enabled`) the camera saw the bed clear with the plate
+                 on (printer_ops/bed.py, issue #303): objects or no plate FAIL, unknown WARN;
   - slot Tn      for every tool the G-code uses: the printer's head is loaded, and its colour
                  and material equal the G-code's `; filament_colour` / `; filament_type`
                  (needs per-head data: Moonraker printers exposing print_task_config, i.e. U1);
@@ -43,10 +45,10 @@ import json
 import re
 import subprocess
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from printer_ops.base import PrinterStatus
 from printer_ops.move_bounds import (
@@ -60,6 +62,7 @@ from printer_ops.move_bounds import (
 )
 
 if TYPE_CHECKING:
+    from printer_ops.devices import Device
     from printer_ops.printops_checks import PrintopsContext
 
 PASS, WARN, FAIL, SKIP, UNVERIFIED = "PASS", "WARN", "FAIL", "SKIP", "UNVERIFIED"
@@ -581,6 +584,52 @@ def bounds_report(
     )
 
 
+def check_bed_verdict(v: dict[str, Any]) -> Check:
+    """`bed_state.py status --json` (issue #303) -> the `bed` line."""
+    bed, plate = v.get("bed", "unknown"), v.get("plate", "unknown")
+    age = v.get("age_s")
+    when = f"{v.get('source', '?')}, {age:.0f} s ago" if isinstance(age, (int, float)) else str(v.get("source", "?"))
+    frame = [f"frame: {v['frame']}"] if v.get("frame") else []
+    why = str(v.get("reason") or "")
+    if plate == "missing":
+        return Check("bed", FAIL, f"build plate missing ({when}): {why}", frame)
+    if bed == "occupied":
+        return Check("bed", FAIL, f"objects on the bed ({when}): {why}", frame)
+    if bed == "clear" and plate == "present":
+        return Check("bed", PASS, f"clear, plate present ({when})", frame)
+    if bed == "clear":
+        return Check("bed", WARN, f"clear, plate not judged ({when}): {why}", frame)
+    return Check("bed", WARN, f"bed state {bed} ({when}): {why}", frame)
+
+
+def check_bed(device: Device, *, runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+              timeout: float = 90.0) -> Check:
+    """The camera `bed` line (printer_ops/bed.py): SKIP when the printer's bed monitor is off,
+    else the watcher's verdict when fresher than `stale_s` at the same Z, else a fresh one-shot
+    camera check (`bed_state.py status`). A check that cannot run is a WARN, never a crash."""
+    from printer_ops.bed import BED_DEPS, BED_TOOL, bed_config
+
+    cfg = bed_config(device)
+    if not cfg.enabled:
+        return Check("bed", SKIP, f"bed camera check off for {device.name} (watch.bed.enabled in {device.source})")
+    try:
+        from cli.pyrun import tool_argv
+
+        argv = tool_argv(BED_DEPS, BED_TOOL, ["status", device.name, "--json", "--max-age", f"{cfg.stale_s:g}"])
+        r = runner(argv, capture_output=True, text=True, timeout=timeout)
+    except Exception as exc:  # no runtime / timeout
+        return Check("bed", WARN, f"bed check could not run: {exc}")
+    try:
+        verdict = json.loads(r.stdout)
+    except ValueError:
+        tail = (r.stderr or r.stdout or "").strip().splitlines()[-1:] or ["no output"]
+        return Check("bed", WARN, f"bed check failed (exit {r.returncode}): {tail[0][:300]}")
+    if not isinstance(verdict, dict):
+        return Check("bed", WARN, f"bed check returned {str(verdict)[:200]}")
+    return check_bed_verdict(verdict)
+
+
+
 def run_preflight(
     gcode: Path,
     *,
@@ -593,16 +642,20 @@ def run_preflight(
     visible: Sequence[str] = (),
     bridge_max: float | None = None,
     bridge_source: str = "default",
+    bed: Check | None = None,
     printops: PrintopsContext | None = None,
 ) -> Report:
     """`limits_source` names where `axis_limits` came from, or why they are unknown.
     `origin` is where the G-code lives when `gcode` is a snapshot copy (`printer start`): the
-    sibling NAME.3mf and NAME.slice-warnings.json are looked up there."""
+    sibling NAME.3mf and NAME.slice-warnings.json are looked up there. `bed` is the camera
+    bed line (`check_bed` above), computed by the caller that knows the device."""
     report = Report(str(gcode))
     report.checks.append(check_thumbnails(gcode))
     if status is not None:
         report.checks.append(check_printer_free(status))
         report.checks.extend(check_slots(read_gcode_meta(gcode), status))
+    if bed is not None:
+        report.checks.append(bed)
     report.checks.extend(
         check_moves(
             check_bounds(gcode, axis_limits), axis_limits, limits_source, trusted_macros

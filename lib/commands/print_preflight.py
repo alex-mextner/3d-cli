@@ -34,6 +34,8 @@ USAGE = """3d print-preflight FILE.gcode [--printer NAME] [--axis-limits X0:X1,Y
 
   thumbnails   preview images required by the G-code's `; thumbnails =` spec are present
   printer      (--printer) the printer is not printing / paused / busy / unreadable
+  bed          (--printer with watch.bed.enabled) the camera sees the bed clear and the build
+               plate on: objects or no plate FAIL, cannot tell WARN (`3d printer bed --help`)
   slot Tn      (--printer, per-head printers such as the Snapmaker U1) each head the G-code
                uses is loaded, and its colour and material equal `; filament_colour` /
                `; filament_type` for that tool
@@ -184,10 +186,15 @@ def run(argv: list[str]) -> int:
         if "--axis-limits" not in opts:
             limits, limits_source = adapter.axis_limits()
 
+    bed = None
+    if "--printer" in opts and device is not None:
+        from printer_ops.preflight import check_bed
+
+        bed = check_bed(device)
     bridge, bridge_source = bridge_max_for(opts.get("--bridge-max"), device, command="print-preflight")
     report = run_preflight(gcode, status=status, source_3mf=source, axis_limits=limits, limits_source=limits_source,
                            trusted_macros=trusted, visible=visible, bridge_max=bridge, bridge_source=bridge_source,
-                           printops=printops)
+                           bed=bed, printops=printops)
     print(json.dumps(report.to_json(), indent=1) if "--json" in opts else report.render())
     if report.overall == FAIL:
         raise GateFailure("preflight FAIL", command="print-preflight", silent=True)
