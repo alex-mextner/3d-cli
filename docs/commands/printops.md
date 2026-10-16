@@ -48,6 +48,7 @@ service is never exposed to the internet.
 3d printops gates snapshot [--out FILE] [--api URL] [--token TOKEN]
 3d printops gates state PRINTER [--json] [--api URL] [--token TOKEN]
 3d printops incidents report|ls|show|edit|confirm|resolve|dismiss|stats|context|from-watch|exposure …
+3d printops maint components|nozzle swap|log|history|due|fault ls|open|close|sync-fleet …
 ```
 
 | Subcommand | What |
@@ -65,6 +66,7 @@ service is never exposed to the internet.
 | `anomalies` | Slot reconciliation anomalies (type/colour/tag mismatch, empty slot with a spool, unknown filament, impossible bindings); `ack` / `resolve` them. |
 | `gates` | The PrintOps state the material gates of [`3d print-preflight`](print-preflight.md#printops-material-gates) read (spool per slot, filament data, remaining interval, drying), and its offline snapshot for the slicer hook. |
 | `incidents` | Print incidents with an auto-filled snapshot (job, layer, G-code temperatures/speed/flow, spool, lot, drying), drafts from `3d printer watch`, rates per kg and per print-hour by vendor/filament/lot/printer/head. See [printops-incidents.md](printops-incidents.md). |
+| `maint` | Printer components (nozzle per head, PTFE, hotend, plates, …) seeded from `fleet/printers.yaml`, nozzle swaps and component work that invalidate calibrations, the maintenance log, faults (the U1's broken T2), and the due rules of `fleet/maintenance-rules.yaml` from Moonraker job history. See [printops-maint.md](printops-maint.md). |
 
 Subcommands are self-registering modules in `lib/printops/cli/<sub>.py`; later PrintOps slices
 add theirs there.
