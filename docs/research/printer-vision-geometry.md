@@ -37,26 +37,39 @@ python lib/vision_geometry.py fit points.yaml out.yaml --model fisheye --overlay
 the fit starts from a linear DLT, then fits pose + focal, then distortion; it needs >= 8 points
 that are not all at one world height.
 
-## Snapmaker U1 default (preliminary)
+## Snapmaker U1 default
 
-The camera sits low at the front-right corner (about X 305, Y -43 mm, ~11 mm above the nozzle
+The camera sits low at the front-right corner (about X 294, Y -24 mm, ~13 mm above the nozzle
 plane), looking diagonally across the bed towards the back-left; +Y runs to the right of the
 image, the prime tower is at the right, the toolhead docks top-right. Lens: wide, fitted as an
-equidistant fisheye (f ~1270 px, k1 -0.12).
+equidistant fisheye (f ~1190 px).
 
-The bundled model was fitted to refined image edges (plate right edge, the GFT wall's top and
+The first model was fitted to refined image edges (plate right edge, the GFT wall's top and
 base lines) and prime-tower corners in four frames of `u1_walls_main_v3` at gcode Z 3.62-12.38
-(features in `lib/data/vision/u1-camera-features.yaml`), rms 9.2 px. The physical plate edge
+(features in `lib/data/vision/u1-camera-features.yaml`), rms 9.2 px; the physical plate edge
 came out at X ~275-277 and Y ~-13 (the spring-steel sheet is 276 x 293 mm, larger than the
-printable 270 x 270).
+printable 270 x 270). Above Z ~12 it was an extrapolation: at Z 80 the current-layer outlines
+fell 30-60 px off the walls nearest the camera.
+
+The bundled model (issue #262) is refit over the whole height of the same job by region
+matching, not hand-picked points: for 12 frames from gcode Z 10.6 to 89.4 the job's G-code
+walls up to the frame's layer are painted far-to-near as vertical quads, the surfaces of the
+green tool (T2) are compared with the frame's green pixels (HSV hue 55-95, saturation >= 90),
+and Powell maximises the mean IoU over pose, focal length, principal point and k1, starting
+from the edge fit. A last pose-only pass adds the distance from the current layer's visible top
+outline to the green parts' upper boundary — the line a "printing now" overlay draws. Mean
+green IoU went from 0.39 to 0.58 (the ceiling is well below 1: lit faces lose saturation, the
+toolhead hides parts); the median distance of that top outline to the real top edge went from
+7-25 px to 2-4 px at Z 80-90 and to 5-13 px at Z 10-45. Frames, layers and both metrics per
+frame are listed under `fit:` in `u1-camera.yaml`.
 
 Known limits:
 
-- Accuracy is uneven: 5-10 px at the prime tower and the far walls, 20-30 px at the part nearest
-  the camera (front-right), where a mm is 10+ px. Pad masks accordingly (`pad_mm` >= 5).
-- The features used are mostly parallel to the Y axis, so camera distance vs focal length is
-  weakly constrained (a flat residual valley along the viewing diagonal). A better fit needs
-  correspondences along X (back wall, plate front edge) and frames at high Z.
-- Gcode Z range in the fit is 3.6-12.4 mm; above that the model is an extrapolation.
+- Residuals left: ~5-13 px at mid heights and on the walls nearest the camera, where a mm is
+  10+ px. Pad masks accordingly (`pad_mm` >= 3).
+- Focal length vs camera distance is still weakly constrained along the viewing diagonal; the
+  region fit trades them against k1 (it came out slightly positive). Frames of a job with parts
+  spread along X would pin it down.
+- One job, one lighting setup; the green segmentation needs a green part in view.
 - Walls frames are mapped to Z via `virtual_sdcard` progress, not checked for tool-change Z-hop.
 - The toolhead occludes the back half of the bed in many frames; masks do not model it.
