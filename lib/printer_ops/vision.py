@@ -567,6 +567,28 @@ class FailureTracker:
 # ---- one monitoring step ----------------------------------------------------------------------
 
 
+# Every label the U1 camera detector (unisrv `camera.detect_capture`) reports, from Snapmaker
+# u1-klipper defect_detection.py and the U1's klippy.log (2026-10-16):
+#   print-time check, request labels ['noodle'] (+ 'residue' when enabled): response_callback
+#     pauses on noodle (CONFIRM_NOODLE, exception code 2) and residue (code 3);
+#   start-of-print clean-bed check (DEFECT_DETECTION_DETECT_BED), request ['item']: the answer
+#     also carries nozzle, legend_text and extrusion_line; only item decides (dirty bed, code 1);
+#   nozzle check, request ['nozzle']: detect_dirty_nozzle reads a HIGH prob as "found, clean".
+# label -> (is a defect, meaning)
+NPU_LABELS: dict[str, tuple[bool, str]] = {
+    "noodle": (True, "loose filament (spaghetti)"),
+    "residue": (True, "residue on the print"),
+    "item": (True, "a foreign object on the bed"),
+    "nozzle": (False, "the nozzle itself (#306)"),
+    "legend_text": (False, "the markings printed on the build plate (#324)"),
+    "extrusion_line": (False, "a purge/extrusion line on the bed"),
+}
+
+
+def npu_meaning(label: str) -> str:
+    return NPU_LABELS.get(label, (True, "a label this firmware version did not document"))[1]
+
+
 @dataclass(frozen=True)
 class MonitorLimits:
     stale_s: float = 120.0  # printing, but the frame has not changed for this long
@@ -575,11 +597,11 @@ class MonitorLimits:
     )
     npu_threshold: float = 0.83  # the U1's own threshold at sensitivity "low"
     npu_quiet_s: float = 300.0  # no NPU hit for this long ends a noodle episode
-    # NPU labels that are not defects. "nozzle" is the firmware's nozzle check: a high prob
-    # means the nozzle was found (clean), defect_detection.detect_dirty_nozzle; it shows up at
-    # every U1 print start (#306). A denylist, so a defect label added by a firmware update
-    # still reaches the agent.
-    npu_ignored_labels: frozenset[str] = frozenset({"nozzle"})
+    # NPU labels that are not defects (NPU_LABELS); unknown labels still count, so a defect
+    # class added by a firmware update reaches the agent.
+    npu_ignored_labels: frozenset[str] = frozenset(
+        label for label, (defect, _) in NPU_LABELS.items() if not defect
+    )
 
 
 _RANK: dict[str | None, int] = {None: 0, INFO: 1, WARNING: 2, CRITICAL: 3}
@@ -805,8 +827,9 @@ class VisionMonitor:
                 "printer_noodle_verdict",
                 WARNING,
                 self._npu,
-                f"printer's own AI camera sees {top.label} (p {top.prob:.2f}, "
-                f"{top.area * 100:.0f}% of the frame); the U1 pauses itself after several hits",
+                f"printer's own AI camera sees {top.label}: {npu_meaning(top.label)} "
+                f"(p {top.prob:.2f}, {top.area * 100:.0f}% of the frame); the U1 pauses itself after "
+                "several hits",
                 None,
                 None,
                 {

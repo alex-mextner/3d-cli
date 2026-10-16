@@ -49,7 +49,7 @@ from the device's `watch:` block in `printer-devices.yaml`).
 | `vision_spaghetti_vetoed` | info | the raw detector's trend would warn, but the verifier confirms less than 0.3 of it (texture, not filament) |
 | `vision_foreign_object`, `vision_part_moved` | warning | only with `--scene`: something new on the bed outside the parts / a part's silhouette changed |
 | `vision_no_growth` | info | only with `--scene`: the newest layers of a part look empty (under- or no extrusion) |
-| `printer_noodle_verdict` | warning | the U1's own NPU detector logs a defect verdict (`noodle`, `residue`, …) at or above 0.83 (once per episode, 5 min quiet ends it). The `nozzle` label is the firmware's nozzle check (high p = nozzle found) and raises nothing ([#306](https://github.com/alex-mextner/3d-cli/issues/306)) |
+| `printer_noodle_verdict` | warning | the U1's own NPU detector logs a defect label (table below) at or above 0.83 (once per episode, 5 min quiet ends it) |
 | `vision_camera_stale` | warning | printing, but the picture has not changed (or could not be fetched) for 120 s |
 | `vision_camera_dark` | warning | printing with a mean brightness below 20/255 (light off, lens covered) |
 
@@ -57,6 +57,19 @@ Each event fires once per episode. Camera events (`vision_*`) carry the saved fr
 `data.frame` (with boxes); `printer_noodle_verdict` comes from the log and has no frame.
 Nothing is sent to the printer except `camera.start_monitor`: vision never pauses or cancels.
 Decide on the event (`3d printer status`, Fluidd), then pause yourself.
+
+Labels of the U1's own detector (unisrv `camera.detect_capture`), from Snapmaker u1-klipper
+`defect_detection.py` and the U1's `klippy.log`:
+
+| label | where it comes from | raises `printer_noodle_verdict` |
+|---|---|---|
+| `noodle` | print-time check (~40 s); the firmware pauses on it, exception code 2 | yes |
+| `residue` | print-time check when enabled; pause, code 3 | yes |
+| `item` | clean-bed check at the start (`DEFECT_DETECTION_DETECT_BED`): a foreign object, "dirty bed", code 1 | yes |
+| `nozzle` | in the clean-bed answer and the nozzle check; a high p means the nozzle was found clean | no ([#306](https://github.com/alex-mextner/3d-cli/issues/306)) |
+| `legend_text` | in the clean-bed answer: the markings printed on the build plate | no ([#324](https://github.com/alex-mextner/3d-cli/issues/324)) |
+| `extrusion_line` | in the clean-bed answer: a purge/extrusion line; the firmware ignores it | no |
+| anything else | a label a later firmware may add | yes (better a question than a miss) |
 
 ## How it decides
 
