@@ -207,7 +207,7 @@ views:
           # Semi-transparent 3D ghost of the layers still to print, baked into the stream by the proxy.
           - type: tile
             entity: input_boolean.u1_camera_ghost
-            name: Призрак остатка на камере
+            name: Призрак печати
             icon: mdi:cube-outline
             tap_action:
               action: toggle
