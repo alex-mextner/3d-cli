@@ -17,13 +17,15 @@
 //
 // Usage: openscad -D 'part="hub"' -o hub.stl camera_mount.scad   (see PARTS below)
 
-part = "assembly";   // PARTS: assembly | exploded | detail | hub | beam_a | beam_b | foot
+part = "assembly";   // PARTS: assembly | exploded | anim | pov | detail | detail_joint | detail_wedge
+                     //   | detail_tilt | glb_printer | glb_mount | glb_c920 | hub | beam_a | beam_b | foot
                      //   | shoe_k1 | shoe_u1 | post | arm | cam_plate | wedge | hanger
                      //   | pin_long | pin_short | pi_tray | cable_clip | led_ring | dowel
                      //   | plate_hub | plate_beam | plate_small | plate_extras | plate_led | fit_*
 printer = "k1se";    // assembly view: k1se | u1
 pin_hole = 5;        // post hole the height pin goes through, counted from the post bottom:
                      // 2 (camera highest) .. 5 (camera lowest)
+anim_t = 1;          // part="anim": installation progress 0..1 (1 = installed)
 
 $fn = 64;
 eps = 0.01;
@@ -491,72 +493,170 @@ module dowel() {
     cylinder(d = 5.6, h = 2 + led_t + 7.5, $fn = 24);
 }
 
-// ================= assembly views =================
-module c920() {   // dummy C920: clip foot in the cradle, body, lens
+// ================= scene: printer and camera models (views, animation, GLB; never printed) ==========
+// Simplified, at the real outer sizes: K1 SE 355 x 355 x 482 (Creality spec), U1 body 480 x 450
+// under the top plane (the U1-1 pad estimate + 25 mm; spec footprint 580 x 540 x 500 with the side
+// spool bays), bed at Z max. z = 0 is the printer top surface the shoes stand on.
+k1_h = 482;
+u1_h = 500;
+c_frame = "#2b2d31"; c_bed = "#3a3a3a"; c_pei = "#c9a227"; c_steel = "#b8bcc2";
+
+module k1se_model() {
+    o = k1_outer; pw = 28; base = 95;
+    color(c_frame) {
+        difference() {   // die-cast top frame
+            translate([-o / 2, -o / 2, -30]) cube([o, o, 30]);
+            translate([-o / 2 + k1_rim, -o / 2 + k1_rim, -31]) cube([o - 2 * k1_rim, o - 2 * k1_rim, 32]);
+        }
+        for (x = [-1, 1], y = [-1, 1]) translate([x * (o / 2 - pw / 2) - pw / 2, y * (o / 2 - pw / 2) - pw / 2, -k1_h]) cube([pw, pw, k1_h]);
+        translate([-o / 2, -o / 2, -k1_h]) cube([o, o, base]);                 // electronics base
+        for (x = [-1, 1]) translate([x * (o / 2 - pw / 2) - pw / 2, -o / 2, -k1_h + base + 150]) cube([pw, o, 22]);   // side crossbeams
+        translate([-o / 2, -o / 2, -k1_h + base]) cube([o, pw, 18]);           // front sill
+    }
+    color("#1b1b1b") translate([-60, -o / 2 - 2, -k1_h + 20]) cube([120, 3, 60]);   // screen
+    color(c_steel) for (dz = [0, 24]) translate([-o / 2 + pw, o / 2 - 70, -58 - dz]) rotate([0, 90, 0]) cylinder(d = 8, h = o - 2 * pw);
+    color("#222") translate([-28, o / 2 - 100, -120]) cube([56, 60, 80]);    // toolhead, parked at the back
+    color(c_bed) translate([-117.5, -117.5, -k1_rim_to_bed - 8]) cube([235, 235, 8]);
+    color(c_pei) translate([-110, -110, -k1_rim_to_bed]) cube([220, 220, 0.6]);
+}
+
+module u1_model() {
+    W = u1_outer[0]; D = u1_outer[1]; r = 24; open_m = 55;
+    module rbox(w, d, h) { hull() for (x = [-1, 1], y = [-1, 1]) translate([x * (w / 2 - r), y * (d / 2 - r), 0]) cylinder(r = r, h = h, $fn = 32); }
+    color("#e8e8e6") difference() {
+        translate([0, 0, -u1_h]) rbox(W, D, u1_h);
+        // chamber, open top; the cut stops 1 mm above the top so the camera-view render (eye just
+        // above the top) is never inside a subtracted volume, which OpenCSG previews as solid
+        translate([0, 0, -u1_h + 60]) rbox(W - 2 * open_m, D - 2 * open_m, u1_h - 59);
+        translate([-(W - 2 * open_m) / 2, -D / 2 - 1, -u1_h + 70]) cube([W - 2 * open_m, open_m + 2, u1_h - 110]);   // door opening
+    }
+    color("#2a2c30") translate([0, 0, -0.4]) difference() {   // dark top plane
+        rbox(W - 4, D - 4, 0.5);
+        translate([0, 0, -1]) rbox(W - 2 * open_m, D - 2 * open_m, 3);
+    }
+    color("#111") for (x = [-1, 1], y = [-1, 1]) translate([x * u1_pad_dx / 2, y * u1_pad_dy / 2, -0.2]) difference() {   // silicone pads
+        cylinder(d = u1_hole_d + 8, h = 0.4, $fn = 32);
+        translate([0, 0, -1]) cylinder(d = u1_hole_d, h = 2, $fn = 32);
+    }
+    color("#9ec9e8", 0.25) translate([-(W - 2 * open_m) / 2, -D / 2, -u1_h + 70]) cube([W - 2 * open_m, 3, u1_h - 110]);   // glass door
+    for (i = [0 : 3]) translate([-120 + i * 80, D / 2 - open_m - 35, -95]) {   // four toolheads in their docks
+        color("white") cube([60, 34, 70]);
+        color("#f2b705") translate([30, -0.5, 45]) rotate([90, 0, 0]) cylinder(d = 20, h = 1);
+    }
+    for (sy = [-1, 1]) color("#c9c9c9") translate([W / 2, sy * 95 - 40, -u1_h + 140]) cube([50, 80, 220]);   // side spool bays
+    color(c_bed) translate([-140, -140, -u1_rim_to_bed - 6.5]) cube([280, 280, 6.5]);
+    color(c_pei) translate([-135, -135, -u1_rim_to_bed]) cube([270, 270, 0.6]);
+}
+
+module printer_model(pr) { if (pr == "u1") u1_model(); else k1se_model(); }
+
+// Logitech C920 in the plate frame (plate top at z = 0): body 94 x 29 x 24 hanging lens-down,
+// the clip foot standing in the cradle, the hinge link between them
+module c920() {
+    lz = lens_z - plate_top_z;
     rotate(cam_yaw) {
-        color("dimgray") translate([cam_axis_off - clip_t, -clip_w / 2, slot_floor_z - plate_top_z]) cube([clip_t, clip_w, clip_l]);
-        color("black") hull() for (s = [-1, 1]) translate([0, s * 32.5, lens_z - plate_top_z])
-            scale([14.5 / 12, 1, 1]) cylinder(r = 12, h = 24);
-        color("silver") translate([0, 0, lens_z - plate_top_z - 0.5]) cylinder(d = 14, h = 1);
+        color("#1d1d1f") hull() for (s = [-1, 1]) translate([0, s * 32.5, lz]) scale([14.5 / 12, 1, 1]) cylinder(r = 12, h = 24);
+        color("#3b3b3d") translate([cam_axis_off - clip_t, -clip_w / 2, slot_floor_z - plate_top_z]) cube([clip_t, clip_w, clip_l]);
+        color("#3b3b3d") hull() {
+            translate([cam_axis_off - clip_t - 1, -12, lz + 18]) cube([1, 24, 10]);
+            translate([10, -12, lz + 22]) cube([1, 24, 2]);
+        }
+        color("#9a9a9a") translate([0, 0, lz - 0.4]) cylinder(d = 16, h = 0.6);
+        color("#05070a") translate([0, 0, lz - 0.6]) cylinder(d = 9, h = 0.4);
     }
 }
 
-module beam_half(e) {   // the +x half: two segments and the joint pin
+module beam_half(e = 0, slide = 0, pin_drop = 0, show_pin = true) {   // the +x half
     color("orange") translate([e, 0, 0]) beam_a();
-    color("gold") translate([2 * e, 0, 0]) beam_b();
+    color("gold") translate([2 * e + slide, 0, 0]) beam_b();
     // the short pin standing in its vertical hole, head on top
-    color("darkorange") translate([seg_joint + tenon_len / 2 + 2 * e, -pin_s / 2, tube + e]) rotate([0, 90, 0])
-        rotate([0, 0, 180]) translate([0, 0, 0]) snap_pin(pin_short);
+    if (show_pin) color("darkorange") translate([seg_joint + tenon_len / 2 + 2 * e + slide, -pin_s / 2, tube + e + pin_drop]) rotate([0, 90, 0])
+        rotate([0, 0, 180]) snap_pin(pin_short);
 }
 
-// explode = 0 for the installed view; > 0 pulls parts apart for the exploded view
-module mount_on(pr, explode = 0) {
+// smooth 0..1 progress of a phase that runs from t = a to t = b
+function ph(t, a, b) = let(x = min(1, max(0, (t - a) / (b - a)))) x * x * (3 - 2 * x);
+
+// The mount on printer `pr`. t < 1 plays the installation (anim_t): the beam is joined from its
+// segments, the hub and the feet go on, the bridge is lowered onto the printer, then the camera
+// head. explode > 0 pulls the parts apart (the exploded view). led: show the optional LED ring.
+module mount_scene(pr, t = 1, explode = 0, led = true, camera = true) {
     pin_d = pr == "u1" ? u1_pin_d : k1_pin_d;
     other_d = pr == "u1" ? k1_pin_d : u1_pin_d;
     ang = pr == "u1" ? -atan2(u1_pad_dy, u1_pad_dx) : -45;
     e = explode;
-    rotate(ang) {
+    p_seg = ph(t, 0.00, 0.10); p_pin = ph(t, 0.08, 0.14); p_hub = ph(t, 0.14, 0.24); p_hw = ph(t, 0.22, 0.28);
+    p_feet = ph(t, 0.28, 0.38); p_fw = ph(t, 0.36, 0.41); p_shoe = ph(t, 0.40, 0.46); p_low = ph(t, 0.46, 0.62);
+    p_head = ph(t, 0.62, 0.71); p_cam = ph(t, 0.72, 0.80);
+    rotate(ang) translate([0, 0, (1 - p_low) * 260]) {
         color("orange") translate([0, 0, hub_z + 2 * e]) hub();
-        for (sx = [-1, 1]) mirror([sx > 0 ? 0 : 1, 0, 0]) translate([0, 0, tube_bot + 2 * e]) beam_half(e);
+        for (sx = [-1, 1]) mirror([sx > 0 ? 0 : 1, 0, 0]) translate([(1 - p_hub) * 70, 0, tube_bot + 2 * e])
+            beam_half(e, (1 - p_seg) * 90, (1 - p_pin) * 45, t >= 0.06);
         for (sx = [-1, 1]) {
-            translate([sx * pin_d, 0, foot_z + 2 * e]) color("orange") foot();
-            translate([sx * pin_d, 0, 0]) rotate(sx > 0 ? 180 : 0) color("darkorange")
-                if (pr == "u1") shoe_u1(); else shoe_k1();
-            translate([sx * other_d, 0, foot_z + 2 * e]) color("orange") foot();   // the other pair, shoes off
-            for (x = [pin_d, other_d, sock_x0 + sock_len / 2]) color("gold")
-                translate([sx * x - wedge_w / 2, -wedge_len / 2, tube_bot + tube + 3 * e]) wedge_along_y();
-        }
-        color("orange") translate([0, post_y, post_bottom_z + 3 * e]) post_part();
-        color("orange") translate([0, 0, arm_bot_z + 4 * e]) arm();
-        translate([0, 0, plate_top_z + 4 * e - (e > 0 ? e : 0)]) {
-            color("orange") cam_plate();
-            for (a = tilt_ang) rotate(a) translate([tilt_r, 0, -plate_t - e]) {
-                color("gold") translate([hanger[1] / 2, 0, 0]) rotate([0, -90, 0]) hanger_part();
-                color("goldenrod") translate([-wedge_len / 2, -wedge_w / 2, plate_t + tilt_gap + arm_t + e]) wedge_along_x();
+            slide_in = (1 - p_feet) * (sock_x0 + tube_half + 30 - min(pin_d, other_d));
+            if (t >= 0.27) {
+                translate([sx * (pin_d + slide_in), 0, foot_z + 2 * e]) color("orange") foot();
+                translate([sx * (other_d + slide_in), 0, foot_z + 2 * e]) color("orange") foot();   // the other pair, shoes off
             }
-            c920();
+            if (t >= 0.39) translate([sx * pin_d, 0, -(1 - p_shoe) * 50]) rotate(sx > 0 ? 180 : 0) color("darkorange")
+                if (pr == "u1") shoe_u1(); else shoe_k1();
+            if (t >= 0.21) color("gold") translate([sx * (sock_x0 + sock_len / 2) - wedge_w / 2, -wedge_len / 2 - (1 - p_hw) * 60, tube_bot + tube + 3 * e]) wedge_along_y();
+            if (t >= 0.35) for (x = [pin_d, other_d]) color("gold")
+                translate([sx * x - wedge_w / 2, -wedge_len / 2 - (1 - p_fw) * 60, tube_bot + tube + 3 * e]) wedge_along_y();
         }
-        color("orange", 0.9) translate([0, 0, hub_z + e]) led_ring();
-        tray_x = -165;   // between the hub and the K1 SE foot: the same spot on both printers
-        color("orange") translate([tray_x, 0, tube_bot - snap_base + e]) pi_tray();
-        for (x = [-115, 115]) color("orange") translate([x, 0, tube_bot - snap_base + e]) cable_clip();
+        if (t >= 0.61) translate([0, 0, (1 - p_head) * 170]) {
+            color("orange") translate([0, post_y, post_bottom_z + 3 * e]) post_part();
+            color("orange") translate([0, 0, arm_bot_z + 4 * e]) arm();
+            translate([0, 0, plate_top_z + 4 * e - (e > 0 ? e : 0)]) {
+                color("orange") cam_plate();
+                for (a = tilt_ang) rotate(a) translate([tilt_r, 0, -plate_t - e]) {
+                    color("gold") translate([hanger[1] / 2, 0, 0]) rotate([0, -90, 0]) hanger_part();
+                    color("goldenrod") translate([-wedge_len / 2, -wedge_w / 2, plate_t + tilt_gap + arm_t + e]) wedge_along_x();
+                }
+                if (camera && t >= 0.71) translate([0, 0, (1 - p_cam) * 70]) c920();
+            }
+        }
+        if (led) color("orange", 0.9) translate([0, 0, hub_z + e]) led_ring();
+        if (t >= 0.36) {
+            tray_x = -165;   // between the hub and the K1 SE foot: the same spot on both printers
+            color("orange") translate([tray_x, 0, tube_bot - snap_base + e - (1 - p_fw) * 40]) pi_tray();
+            color("#2e7d32") translate([tray_x - 32.5, tg / 2 + snap_wall + 3, tube_bot - snap_base + 6 + e - (1 - p_fw) * 40]) cube([65, 30, 1.6]);   // Pi Zero W
+            for (x = [-115, 115]) color("orange") translate([x, 0, tube_bot - snap_base + e - (1 - p_fw) * 40]) cable_clip();
+        }
     }
 }
 
-module ghost(pr) {
-    color("slategray", 0.45) if (pr == "u1") {
-        difference() {
-            translate([-u1_outer[0] / 2, -u1_outer[1] / 2, -40]) cube([u1_outer[0], u1_outer[1], 40]);
-            translate([-u1_pad_dx / 2 + 20, -u1_pad_dy / 2 + 20, -41]) cube([u1_pad_dx - 40, u1_pad_dy - 40, 42]);
-            for (x = [-1, 1], y = [-1, 1]) translate([x * u1_pad_dx / 2, y * u1_pad_dy / 2, -u1_hole_depth]) cylinder(d = u1_hole_d, h = u1_hole_depth + 1);
+// the frame shown in the camera's own picture: the scene seen from the lens, with the C920's
+// field of view (2304 x 1536: 70.4 x 50.4 degrees). OpenSCAD's export camera has a fixed
+// 22.5-degree vertical field, so the scene is squeezed in x and y about the lens axis by
+// tan(11.25) / tan(25.2): the same picture a 50.4-degree camera at the lens takes.
+pov_k = tan(22.5 / 2) / tan(50.4 / 2);
+module camera_pov(pr) {
+    scale([pov_k, pov_k, 1]) { printer_model(pr); mount_scene(pr, camera = false); }
+}
+
+// close-ups for the guide and the animation stills
+module detail_joint() {   // segment A, B and the pin, pulled apart along the beam
+    color("orange") beam_a();
+    color("gold") translate([30, 0, 0]) beam_b();
+    color("darkorange") translate([seg_joint + tenon_len / 2 + 30, -pin_s / 2, tube + 25]) rotate([0, 90, 0]) rotate([0, 0, 180]) snap_pin(pin_short);
+}
+module detail_wedge() {   // a foot on a beam stub, its wedge half pushed in
+    color("gold") translate([-60, -tube / 2, tube_bot - foot_z]) cube([120, tube, tube]);
+    color("orange") foot();
+    color("goldenrod") translate([-wedge_w / 2, -wedge_len / 2 - 22, tube_bot - foot_z + tube]) wedge_along_y();
+}
+module detail_tilt() {   // arm, plate, hangers, wedges and the camera, nothing else
+    translate([0, 0, -plate_top_z]) {
+        color("orange") translate([0, 0, arm_bot_z]) arm();
+        translate([0, 0, plate_top_z]) {
+            color("orange") cam_plate();
+            for (a = tilt_ang) rotate(a) translate([tilt_r, 0, -plate_t]) {
+                color("gold") translate([hanger[1] / 2, 0, 0]) rotate([0, -90, 0]) hanger_part();
+                color("goldenrod") translate([-wedge_len / 2, -wedge_w / 2, plate_t + tilt_gap + arm_t]) wedge_along_x();
+            }
+            c920();
         }
-        translate([-135, -135, -u1_rim_to_bed - 6]) cube([270, 270, 6]);
-    } else {
-        difference() {
-            translate([-k1_outer / 2, -k1_outer / 2, -30]) cube([k1_outer, k1_outer, 30]);
-            translate([-k1_outer / 2 + k1_rim, -k1_outer / 2 + k1_rim, -31]) cube([k1_outer - 2 * k1_rim, k1_outer - 2 * k1_rim, 32]);
-        }
-        translate([-110, -110, -k1_rim_to_bed - 6]) cube([220, 220, 6]);
     }
 }
 
@@ -611,15 +711,24 @@ module plate_extras() {
 }
 
 // ================= dispatch =================
-if (part == "assembly") { ghost(printer); mount_on(printer); }
-else if (part == "exploded") mount_on(printer, 40);
+if (part == "assembly") { printer_model(printer); mount_scene(printer); }
+else if (part == "exploded") mount_scene(printer, explode = 40);
+else if (part == "anim") { printer_model(printer); mount_scene(printer, anim_t, led = false); }
+else if (part == "pov") camera_pov(printer);
+else if (part == "detail_joint") detail_joint();
+else if (part == "detail_wedge") detail_wedge();
+else if (part == "detail_tilt") detail_tilt();
+// GLB groups: one mesh per material, assembled in the same frame
+else if (part == "glb_printer") printer_model(printer);
+else if (part == "glb_mount") mount_scene(printer, camera = false);
+else if (part == "glb_c920") rotate(printer == "u1" ? -atan2(u1_pad_dy, u1_pad_dx) : -45) translate([0, 0, plate_top_z]) c920();
 // close-ups for the guide: the rear-left corner (K1 SE) or pad (U1) moved to the origin
 else if (part == "detail") {
     c = printer == "u1" ? [u1_pad_dx / 2, -u1_pad_dy / 2, 0] : [k1_outer / 2 - k1_rim, -(k1_outer / 2 - k1_rim), 0];
     pin_d = printer == "u1" ? u1_pin_d : k1_pin_d;
     ang = printer == "u1" ? -atan2(u1_pad_dy, u1_pad_dx) : -45;
     translate(c) {
-        ghost(printer);
+        printer_model(printer);
         rotate(ang) translate([-pin_d, 0, 0]) {   // rear-left foot, its shoe and a beam stub
             color("orange") translate([0, 0, foot_z]) foot();
             color("darkorange") if (printer == "u1") shoe_u1(); else shoe_k1();
