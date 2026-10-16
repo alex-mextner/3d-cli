@@ -383,6 +383,46 @@ def test_monitor_reports_the_printers_own_noodle_verdict_once_per_episode() -> N
     )  # below 0.83
 
 
+def _printing_monitor() -> VisionMonitor:
+    pytest.importorskip("printer_ops.watch")  # events are watch.Event, like the other npu tests
+    mon = VisionMonitor("u1", _Scores([]))
+    mon.set_job("printing", "a.gcode")
+    return mon
+
+
+def test_the_nozzle_check_label_is_not_a_noodle_verdict() -> None:
+    """#306: at every U1 start the NPU reports label "nozzle" p 0.93 on 0.03 % of the frame —
+    the firmware's nozzle check finding the nozzle, not a defect."""
+    mon = _printing_monitor()
+    assert mon.npu([NpuVerdict(NOW, "nozzle", 0.9287, 0.0003, 1)], NOW) == []
+    assert mon.npu([NpuVerdict(NOW + 1, "nozzle", 0.95, 0.0002, 1)], NOW + 1) == []
+    assert mon.last_npu is None                                 # nor does it start an episode
+    mixed = mon.npu([NpuVerdict(NOW + 5, "nozzle", 0.95, 0.0002, 1),
+                     NpuVerdict(NOW + 5, "noodle", 0.85, 0.0629, 1)], NOW + 5)
+    assert [(e.kind, e.data["label"], e.data["hits"]) for e in mixed] == [
+        ("printer_noodle_verdict", "noodle", 1)
+    ]
+
+
+def test_nozzle_verdicts_do_not_extend_a_noodle_episode() -> None:
+    mon = _printing_monitor()
+    assert len(mon.npu([NpuVerdict(NOW, "noodle", 0.9, 0.1, 1)], NOW)) == 1
+    mon.npu([NpuVerdict(NOW + 200, "nozzle", 0.95, 0.0002, 1)], NOW + 200)
+    mon.npu([], NOW + 400)                                     # 400 s after the last noodle: over
+    assert len(mon.npu([NpuVerdict(NOW + 410, "noodle", 0.9, 0.1, 1)], NOW + 410)) == 1
+
+
+def test_the_log_parser_normalises_labels() -> None:
+    line = "12:00:01.5:[defect_detection] response info: {'result': {' Nozzle ': {'obj_probs': 0.93, 'obj_areas': 0.0003, 'obj_cnts': 1}, 7: {'obj_probs': 0.9}}}"
+    assert [v.label for v in parse_klippy_verdicts(line, now=NOW)] == ["nozzle", "7"]
+
+
+@pytest.mark.parametrize("label", ["residue", "spaghetti"])  # a defect label a firmware update may add
+def test_other_npu_labels_still_count(label: str) -> None:
+    mon = _printing_monitor()
+    assert [e.data["label"] for e in mon.npu([NpuVerdict(NOW, label, 0.9, 0.1, 1)], NOW)] == [label]
+
+
 def test_a_new_print_restarts_the_per_print_history_but_a_pause_does_not() -> None:
     mon = VisionMonitor("u1", _Scores([]))
     assert mon.set_job("printing", "a.gcode") is True
