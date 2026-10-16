@@ -192,3 +192,78 @@ def test_device_access_is_validated(env: Path) -> None:
     with pytest.raises(InvalidArgument) as info:
         devices.load_devices()
     assert info.value.exit_code == 2 and "full, read-only" in info.value.message
+
+
+def test_device_override_cannot_loosen_fleet_access(env: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A user/project printer-devices.yaml entry replaces device settings, never the fleet's access:
+    an offline printer stays uncontactable, a read-only one stays read-only (decision D7)."""
+    moon = FakeMoonraker(port=7001)
+    _use(monkeypatch, write_fleet(tmp_path / "fleet.yaml", u1_entry(moon, access="read-only")))
+    (tmp_path / "printer-devices.yaml").write_text(
+        "p1s: {adapter: moonraker, host: 127.0.0.1}\nu1: {adapter: moonraker, host: 127.0.0.1, port: 7002}\n",
+        encoding="utf-8")
+    d = devices.load_devices()
+    assert "p1s" not in d
+    assert (d["u1"].port, d["u1"].access) == (7002, "read-only")  # settings replaced, access kept
+    with pytest.raises(PrinterRefused, match="offline fleet printer"):
+        devices.get_device("p1s")
+
+
+def test_non_string_extruder_is_a_schema_problem_not_a_crash(tmp_path: Path) -> None:
+    import yaml
+
+    data = yaml.safe_load("x:\n  model: Snapmaker U1\n  owner: own\n  access: offline\n"
+                          "  heads: [{label: T1, index: 0, extruder: [extruder]}, {label: T2, index: 1, extruder: {a: 1}}]\n")
+    printers, problems = validate(data, tmp_path / "f.yaml")
+    assert printers == {}
+    assert [p.message for p in problems] == [
+        "x.heads[0].extruder: must be a Klipper object name, e.g. extruder1",
+        "x.heads[1].extruder: must be a Klipper object name, e.g. extruder1",
+    ]
+
+
+def test_printer_names_that_collide_as_strings_are_reported(tmp_path: Path) -> None:
+    import yaml
+
+    entry = "{model: Snapmaker U1, owner: own, access: offline, heads: [{label: T1, index: 0}]}"
+    printers, problems = validate(yaml.safe_load(f"1: {entry}\n'1': {entry}\n"), tmp_path / "f.yaml")
+    assert [p.message for p in problems] == ["1: duplicate printer name (YAML keys 1 and '1' are the same name)"]
+    assert printers == {}
+
+
+def test_fleet_devices_carry_the_fleet_model(env: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Device.model comes from the fleet entry: `printer vision` picks its bundled camera
+    calibration by it, so a fleet-only printer must not lose it."""
+    fleet = write_fleet(
+        tmp_path / "fleet.yaml",
+        u1_entry(FakeMoonraker(port=7001)),
+        k1_entry(FakeCreality(http_port=8001, ws_port=9001)),
+    )
+    _use(monkeypatch, fleet)
+    d = devices.load_devices()
+    assert d["u1"].model == "Snapmaker U1"
+    assert d["k1se"].model == "Creality K1 SE"
+
+
+def test_override_without_model_keeps_the_fleet_model(env: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A printer-devices.yaml override replaces the connection settings; the model is the
+    printer's identity and stays the fleet's unless the override names one."""
+    _use(monkeypatch, write_fleet(tmp_path / "fleet.yaml", u1_entry(FakeMoonraker(port=7001)),
+                                  k1_entry(FakeCreality(http_port=8001, ws_port=9001))))
+    (tmp_path / "printer-devices.yaml").write_text(
+        "u1: {adapter: moonraker, host: 10.1.1.1}\nk1se: {adapter: creality-stock, host: 10.1.1.2, model: K1 SE custom}\n",
+        encoding="utf-8")
+    d = devices.load_devices()
+    assert (d["u1"].host, d["u1"].model) == ("10.1.1.1", "Snapmaker U1")
+    assert d["k1se"].model == "K1 SE custom"
+
+
+def test_repo_fleet_watch_settings_reach_the_devices(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """u1/k1se `watch:` moved from ~/.config into the repo fleet; `3d printer watch` reads
+    Device.watch (key tg_fallback, printer_ops/watch_run.py WATCH_KEYS)."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    monkeypatch.chdir(tmp_path)
+    _use(monkeypatch, REPO_FLEET)
+    d = devices.load_devices()
+    assert d["u1"].watch == {"tg_fallback": True}
+    assert d["k1se"].watch == {"tg_fallback": True}

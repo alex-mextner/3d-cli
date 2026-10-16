@@ -147,9 +147,10 @@ class Fleet:
     printers: dict[str, FleetPrinter]
 
     def device_specs(self) -> dict[str, dict[str, Any]]:
-        """printer-devices.yaml-shaped entries of the printers 3d may contact (not offline)."""
+        """printer-devices.yaml-shaped entries of the printers 3d may contact (not offline);
+        `model` rides along (printer vision picks its bundled camera calibration by it)."""
         return {
-            name: {**p.device, "access": p.access}
+            name: {**p.device, "model": p.model, "access": p.access}
             for name, p in self.printers.items()
             if p.contactable
         }
@@ -232,8 +233,25 @@ def validate(data: Any, path: Path) -> tuple[dict[str, FleetPrinter], list[Probl
         return {}, [Problem("", "top level must be a mapping of printer name -> entry")]
     printers: dict[str, FleetPrinter] = {}
     problems: list[Problem] = []
+    keys: dict[str, list[Any]] = {}
+    for raw_name in data:
+        keys.setdefault(str(raw_name), []).append(raw_name)
+    for (
+        name,
+        raws,
+    ) in keys.items():  # `1:` and `'1':` are one name: neither may silently win
+        if len(raws) > 1:
+            problems.append(
+                Problem(
+                    name,
+                    f"{name}: duplicate printer name (YAML keys "
+                    f"{' and '.join(map(repr, raws))} are the same name)",
+                )
+            )
     for raw_name, spec in data.items():
         name = str(raw_name)
+        if len(keys[name]) > 1:
+            continue
         found: list[str] = []
         printer = _entry(name, spec, path, found)
         problems.extend(
@@ -399,6 +417,7 @@ def _heads(value: Any, bad: list[str]) -> tuple[Head, ...]:
             bad.append(
                 f"{where}.extruder: must be a Klipper object name, e.g. extruder1"
             )
+            extruder = None  # reported above; keep it out of the duplicate check
         usable = h.get("usable", True)
         reason = h.get("reason")
         if not isinstance(usable, bool):

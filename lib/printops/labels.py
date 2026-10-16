@@ -138,8 +138,11 @@ def _layout(label: Label, x: float, y: float, w: float, h: float) -> _Placed:
         max_chars = max(1, int(tw / (size * COURIER_ADVANCE / PT_PER_MM)))
         lines = _wrap_path(label.path, max_chars)
         line_h = size / PT_PER_MM * 1.15
-        if len(lines) * line_h <= avail_h or size == 5.0:
+        if len(lines) * line_h <= avail_h:
             break
+    else:
+        raise ValueError(f"path {label.path!r} does not fit a {w:.1f} × {h:.1f} mm label even at 5 pt; "
+                         "use fewer rows/columns (--grid) or a smaller --margin")
     by = y + pad + size / PT_PER_MM
     for line in lines:
         texts.append(_Text(tx, by, size, True, line))

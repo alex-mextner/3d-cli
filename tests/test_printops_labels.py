@@ -132,3 +132,9 @@ def test_ntag213_image_holds_ha_tag_uri_and_payload_text() -> None:
     rec2 = msg[4 + uri_len:]
     assert rec2[0] == 0x51 and rec2[3:4] == b"T" and rec2[4:7] == b"\x02en"
     assert rec2[7:].decode() == "cell:" + path
+
+
+def test_a_path_that_cannot_fit_the_smallest_cells_is_refused_not_overflowed() -> None:
+    path = "W:" + "/".join(["abcdefg"] * 7) + "/a"
+    with pytest.raises(ValueError, match="does not fit"):
+        labels.layout([Label(1, path, "box", "cell:" + path)], Sheet(cols=8, rows=24))

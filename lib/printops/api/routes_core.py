@@ -23,7 +23,7 @@ import asyncio
 import contextlib
 import json
 import sqlite3
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
@@ -52,7 +52,7 @@ def _db_health(state: ApiState) -> dict[str, Any]:
             return {"ok": True, "migrations": versions, "last_event_id": ev.latest_id(conn)}
         finally:
             conn.close()
-    except sqlite3.Error as e:
+    except (sqlite3.Error, OSError) as e:  # OSError: open_db's mkdir on an unwritable data dir
         return {"ok": False, "error": str(e)}
 
 
@@ -109,7 +109,7 @@ def _authorized(state: ApiState, token: str, scope: str) -> Callable[[], bool]:
 
 
 async def _follow(state: ApiState, cursor: int | None,
-                  authorized: Callable[[], bool]) -> AsyncIterator[ev.Event | None]:
+                  authorized: Callable[[], bool]) -> AsyncGenerator[ev.Event | None, None]:
     """Every event after `cursor` (None = after the current newest) while `authorized()` holds;
     None = heartbeat. Ends (returns) as soon as the token is no longer valid."""
     listener = ev.BUS.listener()  # before the first read, so no wake-up can slip between
@@ -121,6 +121,8 @@ async def _follow(state: ApiState, cursor: int | None,
     try:
         if cursor is None:
             cursor = await run_in_threadpool(ev.latest_id, conn)
+        loop = asyncio.get_running_loop()
+        next_ping = loop.time() + HEARTBEAT_S
         while True:
             if not authorized():
                 return
@@ -132,8 +134,14 @@ async def _follow(state: ApiState, cursor: int | None,
                 yield event
             if len(batch) == STREAM_BATCH:
                 continue
-            if not await listener.wait(HEARTBEAT_S) and authorized():
+            # Wake-ups also come from commits without events; they must not postpone the ping.
+            now = loop.time()
+            if now >= next_ping:
+                if not authorized():
+                    return
                 yield None
+                next_ping = now + HEARTBEAT_S
+            await listener.wait(max(0.0, next_ping - loop.time()))
     finally:
         listener.close()
         conn.close()
@@ -182,10 +190,12 @@ async def list_events(
 
     async def stream() -> AsyncIterator[str]:
         yield "retry: 3000\n\n"
-        async for event in _follow(state, cursor, authorized):
-            if await request.is_disconnected():
-                return
-            yield ": ping\n\n" if event is None else _sse_frame(event)
+        # aclosing: on disconnect, release the bus listener + DB connection now, not at GC
+        async with contextlib.aclosing(_follow(state, cursor, authorized)) as events_:
+            async for event in events_:
+                if await request.is_disconnected():
+                    return
+                yield ": ping\n\n" if event is None else _sse_frame(event)
         # The token was revoked: end the stream; a reconnect then gets a 401.
         yield f"event: auth_revoked\ndata: {json.dumps({'name': who.name})}\n\n"
 
@@ -226,11 +236,12 @@ async def websocket_events(ws: WebSocket) -> None:
     authorized = _authorized(state, str(token), "read")
 
     async def pump() -> None:
-        async for event in _follow(state, cursor, authorized):
-            if event is not None:
-                await ws.send_json({"type": "event", "event": event.to_dict()})
-            else:
-                await ws.send_json({"type": "ping"})
+        async with contextlib.aclosing(_follow(state, cursor, authorized)) as events_:
+            async for event in events_:
+                if event is not None:
+                    await ws.send_json({"type": "event", "event": event.to_dict()})
+                else:
+                    await ws.send_json({"type": "ping"})
         await ws.send_json({"type": "auth_revoked"})
         await _ws_close(ws, 4401, "token revoked")
 
