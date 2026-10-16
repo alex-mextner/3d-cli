@@ -97,13 +97,26 @@ rules:
     task: lube
     every: {print_hours: 300}
     source: https://wiki.creality.com/en/k1-flagship-series/k1c/maintenance-tips (§3.1 every 300 printing hours)
+  - id: k1se-x-rods-bushings
+    title: "X axis: clean the rods and the graphite bushings with IPA; no thick grease (graphite clogs)"
+    printers: [k1se]
+    component: kinematics
+    task: clean
+    every: {print_hours: 200, days: 90}
+    source: https://wiki.creality.com/en/k1-flagship-series/k1c/maintenance-tips (§1.1 clean the X shaft with alcohol); the interval is ours, see note
+    note: >-
+      Shorter than Creality's 300 printing hours, and also calendar-bound: on 2026-10-16 the X axis
+      ran very stiff because thick grease on the rods had clogged the graphite bushings; flushing
+      rods and bushings with IPA (no grease) freed it (printer-history k1se.jsonl
+      uid bd1be79b-d5ae-4b54-a4ec-015003182cac). 200 h or 90 days, whichever comes first, catches
+      dust and grease build-up before the bushings bind, also when the printer stands idle.
   - id: k1se-rods
-    title: check the X optical shaft and the Y/Z rods for dust; clean with IPA
+    title: check the Y/Z rods for dust; clean with IPA (the X axis is k1se-x-rods-bushings)
     printers: [k1se]
     component: kinematics
     task: clean
     every: {print_hours: 300}
-    source: https://wiki.creality.com/en/k1-flagship-series/k1c/maintenance-tips (§1.1, §2.1 every 300 printing hours)
+    source: https://wiki.creality.com/en/k1-flagship-series/k1c/maintenance-tips (§2.1 every 300 printing hours)
   - id: k1se-y-rust
     title: rust-prevention treatment of the Y-axis rods
     printers: [k1se]

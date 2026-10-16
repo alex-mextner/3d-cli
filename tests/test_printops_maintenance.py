@@ -410,6 +410,41 @@ def test_the_repo_rules_file_validates_against_the_repo_fleet() -> None:
     assert rules.trigger_for("ptfe", "replace") == "ptfe" and rules.trigger_for("kinematics", "lube") is None
 
 
+def test_the_k1se_x_rods_rule_is_due_at_200_hours_or_90_days_whichever_first(conn: sqlite3.Connection,
+                                                                               fleet: Any) -> None:
+    """The K1 SE X axis (graphite bushings, IPA only) comes due by print hours or by the calendar."""
+    rules = mr.load_rules(REPO / "fleet" / "maintenance-rules.yaml")
+    rule = rules.get("k1se-x-rods-bushings")
+    assert rule is not None and rule.every == {"print_hours": 200.0, "days": 90.0}
+    assert (rule.component, rule.task, rule.scope) == ("kinematics", "clean", "printer")
+    assert rule.note is not None and "bd1be79b" in rule.note  # the 2026-10-16 stiff-X record
+
+    def status(hours: float, at: str) -> tuple[str, list[str]]:
+        conn.execute("DELETE FROM maintenance")
+        conn.commit()
+        mt.log_maintenance(conn, fleet, rules, "k1se", rule_id=rule.id, at=at, actor="t")
+        provider = FakeCounters({"*": Usage(print_hours=hours, source="fake")})
+        [item] = [i for i in mr.evaluate(conn, rules, fleet, provider, printer="k1se", now=NOW) if i.rule == rule.id]
+        return item.status, item.reasons
+
+    assert status(50, "2026-10-01") == ("ok", [])
+    assert status(205, "2026-10-01") == ("due", ["print_hours 205 ≥ 200"])  # hours first
+    assert status(10, "2026-07-01") == ("due", ["days 106.5 ≥ 90"])  # barely printed: the calendar first
+    assert status(185, "2026-10-01")[0] == "soon"  # 0.925 of 200 h
+
+    # logged with --rule (what `due` prints as log_command), Y/Z rod work leaves the X clock alone
+    conn.execute("DELETE FROM maintenance")
+    conn.commit()
+    mt.log_maintenance(conn, fleet, rules, "k1se", rule_id="k1se-rods", actor="t")
+    assert mr.baseline(conn, rule, "k1se", None) is None
+    # without --rule the shared component × kind restarts both clocks (documented: log with --rule)
+    plain = mt.log_maintenance(conn, fleet, rules, "k1se", component="kinematics", kind="clean", actor="t")
+    rods = rules.get("k1se-rods")
+    assert rods is not None
+    for r in (rule, rods):
+        assert mr.baseline(conn, r, "k1se", None)["id"] == plain["maintenance"]["id"]  # type: ignore[index]
+
+
 def test_rules_schema_reports_every_problem(tmp_path: Path) -> None:
     data = {
         "check_every_min": 0, "soon_fraction": 2, "extra": 1,

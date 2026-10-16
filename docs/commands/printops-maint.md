@@ -85,9 +85,15 @@ tool_changes, jobs, days}`, due when **any** is reached since the rule was last 
 source of each interval (the U1 rules follow Snapmaker's
 [core components maintenance guide](https://wiki.snapmaker.com/en/snapmaker_u1/troubleshooting/Core_Components_Maintenance_Guide),
 the K1 SE rules Creality's [K1-series maintenance tips](https://wiki.creality.com/en/k1-flagship-series/k1c/maintenance-tips)).
+An interval of our own says so in `source` and explains itself in `note` — e.g.
+`k1se-x-rods-bushings` (200 print hours or 90 days, after the 2026-10-16 stiff X axis: thick
+grease had clogged the graphite bushings; IPA only, no grease).
 
 A rule's **baseline** is the latest maintenance logged with `--rule ID`, or logged without a rule
-with the same component and kind (a `scope: head` rule: on the same head). A rule never logged
+with the same component and kind (a `scope: head` rule: on the same head). When two rules of a
+printer share component and kind (K1 SE `k1se-x-rods-bushings` and `k1se-rods`, both kinematics
+clean), a log without `--rule` restarts both — log such work with `--rule ID` (the `log` command
+`due` prints) so cleaning the Y/Z rods does not restart the stricter X clock. A rule never logged
 counts from the printer's first job and its days are unknown: it is due ("never logged") until
 logged once — use `--at` for work done earlier.
 
