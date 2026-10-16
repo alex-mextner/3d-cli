@@ -18,6 +18,10 @@ score/
 !examples/*.scad
 !docs/img/*.png
 !docs/img/*.svg
+# committed model artifacts: guide renders and printable STLs (models/<name>/build.py rebuilds them)
+!models/*/img/*.png
+!models/*/stl/*.stl
+!models/*/stl/*/*.stl
 
 # local tooling state
 .serena/
