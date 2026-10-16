@@ -281,7 +281,7 @@ def build_world(tmp_path: Path) -> World:
         (ha / dest).write_bytes((integ / rel).read_bytes())
     git(ha, "submodule", "add", "-q", str(src), "3d-cli")
     git(ha, "add", "-A")
-    git(ha, "add", "-f", "www/card/card.js")
+    git(ha, "add", "-f", "www/card/card.js")  # tracked despite www/*, as in the real repo
     git(ha, "commit", "-q", "-m", "ha config")
     git(tmp_path, "clone", "-q", "--bare", str(ha), str(origin))
     git(ha, "remote", "add", "origin", str(origin))

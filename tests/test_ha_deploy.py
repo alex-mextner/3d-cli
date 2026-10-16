@@ -513,3 +513,14 @@ def test_failed_record_is_retried_by_the_next_deploy_without_reapplying(
     out = capsys.readouterr().out
     assert "already holds this state -> https://github.com/test/ha/pull/7" in out
     assert git(world.origin, "rev-parse", branch) == pushed
+
+
+def test_unreachable_origin_blocks_instead_of_recording_on_a_stale_main(
+        world: World, capsys: pytest.CaptureFixture[str]) -> None:
+    """The deploy branch is built on origin/main; when the host can't fetch origin, the copy
+    it has may be stale, so the deploy stops before touching anything."""
+    git(world.ha, "remote", "set-url", "origin", str(world.root / "gone.git"))
+    with pytest.raises(GateFailure, match="blocking problem"):
+        _deploy(world)
+    assert "git fetch origin in the HA repo failed" in capsys.readouterr().out
+    assert not (world.ha / "packages/3d_printers.yaml").is_symlink()

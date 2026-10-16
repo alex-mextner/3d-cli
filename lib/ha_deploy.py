@@ -634,7 +634,9 @@ def build_plan(
     plan = Plan(sha=source.sha, live_sha=live_sha, ha_dir=ha_dir)
     plan.problems += manifest_orphans(manifest, source.files())
     if state.get("fetch_error"):
-        plan.warnings.append(
+        # origin/main is the base of the recorded PR commit and the fast-forward target; a
+        # stale copy would rebuild (and force-push) the deploy branch on an old main.
+        plan.problems.append(
             f"git fetch origin in the HA repo failed: {state['fetch_error']}"
         )
 
