@@ -4,6 +4,8 @@ What is mounted on each printer, what was done to it, what is broken, and what m
 due ([#166](https://github.com/alex-mextner/3d-cli/issues/166), plan §7.1/§7.3). Like every
 `3d printops` subcommand it is a thin client of **3d-api** (configuration:
 [printops.md](printops.md#configuration)); reads need a token with `read`, changes `write`.
+What is still to be done on a printer — repairs of open faults, due rules, needed calibrations,
+manual tasks — is one list: [`3d printer todo`](printer.md#to-do-list-3d-printer-todo).
 
 ```
 3d printops maint components PRINTER [--removed] [--json]
