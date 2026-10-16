@@ -170,6 +170,7 @@ def test_the_sync_plan_adds_open_tasks_closes_ticked_ones_and_turns_typed_items_
             "status": "needs_action",
             "description": "with IPA",
         },
+        {"uid": "e", "summary": "Ticked before the sync", "status": "completed"},
     ]
     v = _sync_vars(package, items)
     assert (
@@ -242,6 +243,18 @@ def test_the_refusal_of_a_derived_task_becomes_the_notification_text(
         {**v, "tid": "1", "res": {"status": 502, "content": "Bad Gateway"}},
     )
     assert raw == "HTTP 502: Bad Gateway"
+    ok = synced[1]["choose"][0]["sequence"][1]["if"]
+    assert render(v["_env"], ok, {"res": {"status": 200, "content": {}}}) is True
+    closed = {
+        "status": 409,
+        "content": {"detail": "task #12 is already done (2026-10-17)"},
+    }
+    assert (
+        render(v["_env"], ok, {"res": closed}) is True
+    )  # closed elsewhere since the poll: no notice
+    assert (
+        render(v["_env"], ok, {"res": res}) is False
+    )  # a derived task: notice + untick
 
 
 def test_item_descriptions_start_with_the_task_id_and_say_what_blocks(

@@ -154,8 +154,9 @@ script:
           # A synced item carries its task id as the first word of the description: "#12 · …".
           marked: >-
             {{ items | selectattr('description', 'defined') | selectattr('description', 'match', '#[0-9]+') | list }}
+          # typed in HA and still open: becomes a manual task (one ticked before the sync is left alone)
           unmarked: >-
-            {{ items | rejectattr('uid', 'in', marked | map(attribute='uid') | list) | list }}
+            {{ items | rejectattr('uid', 'in', marked | map(attribute='uid') | list) | selectattr('status', 'eq', 'needs_action') | list }}
           tasks: >-
             {{ state_attr(sensor, 'tasks') | default([], true) | selectattr('status', 'in', ['open', 'in_progress']) | list }}
           # ids are compared as numbers: HA renders a variable that looks like a number ("12") as one
@@ -199,7 +200,10 @@ script:
                       data:
                         task: "{{ tid }}"
                       response_variable: res
-                    - if: "{{ res.status == 200 }}"
+                    # 409 "already done/dismissed": closed elsewhere since the last poll — same outcome
+                    - if: >-
+                        {{ res.status == 200 or (res.status == 409 and res.content is mapping
+                           and 'already' in (res.content.detail | default('') | string)) }}
                       then:
                         - action: todo.remove_item
                           target:
