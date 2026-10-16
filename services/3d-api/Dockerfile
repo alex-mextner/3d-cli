@@ -17,7 +17,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 # Runtime deps only: FastAPI tier + pyyaml (lib/printops is stdlib + pyyaml otherwise).
 # `websockets`: plain uvicorn ships no WebSocket implementation, so WS /v1/ws would refuse upgrades.
-RUN pip install "fastapi>=0.110,<1" "uvicorn>=0.27,<1" "websockets>=12,<16" "pyyaml>=6,<7"
+# fastapi ≥ 0.115: include_router merges router lifespans (the slot poller of routes_reconcile.py).
+RUN pip install "fastapi>=0.115,<1" "uvicorn>=0.27,<1" "websockets>=12,<16" "pyyaml>=6,<7"
 
 # uid/gid 1000 = `ultra` on the Odroid, so bind-mounted data stays owned by the host user.
 RUN groupadd -g 1000 printops && useradd -u 1000 -g 1000 -m printops \
@@ -31,6 +32,7 @@ COPY bin/3d /app/bin/3d
 COPY lib/ /app/lib/
 # fleet/printers.yaml: printer slots (slot:<printer>/<head>) are materialised from it.
 # fleet/policy.yaml (drying classes, later gates/calibrations): printops.policy reads /app/fleet.
+# fleet/printers.yaml: the printers the slot poller reads (REPO_ROOT=/app → /app/fleet).
 COPY fleet/ /app/fleet/
 # `3d printops token|backup …` inside the container (docker exec printops-api 3d printops …).
 RUN chmod 0755 /app/bin/3d && ln -s /app/bin/3d /usr/local/bin/3d
