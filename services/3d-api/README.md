@@ -167,6 +167,25 @@ The catalog `fleet/calibrations.yaml` (override `PRINTOPS_CALIBRATIONS`), the po
 a broken file answers 503 and shows in `3d lint --printops` (`calibrations/*`). Maintenance (#166)
 invalidates records with `calibration.invalidated` events. Details: docs/commands/calibrate.md.
 
+## API (printer tasks, #281)
+
+| Endpoint | Scope | |
+|---|---|---|
+| `GET /v1/printers/{p}/tasks` | read | `?status=open` (default: open, in progress, snoozed) `\|all\|done\|dismissed\|…` → `{printer, summary{open, blocking, waiting, snoozed, needs_human, next_idle}, tasks, sync}` |
+| `POST /v1/printers/{p}/tasks` | write | `{title, why?, type?, head?, slot?, component?, blocks?, when?, when_note?, duration_min?, needs_human?, depends_on?[id], refs?, calibration_kinds?, spool_id?, note?, source?: manual\|calibration_followup}` → 201 task |
+| `GET /v1/tasks` | read | `?printer=&status=` → `{tasks}` |
+| `GET /v1/tasks/{id\|uid}` | read | one task (`waiting_on`, `done_hint` included) |
+| `POST /v1/tasks/{ref}/done` | write | `{note?}`; 409 for a derived task — the detail names the command that records the work |
+| `POST /v1/tasks/{ref}/dismiss` | write | `{reason}` |
+| `POST /v1/tasks/{ref}/snooze` | write | `{until?, reason?}` (no `until` = until reopened) |
+| `POST /v1/tasks/{ref}/reopen` | write | snoozed/done/dismissed → open |
+| `POST /v1/tasks/sync` | write | `?printer=` derive now → `{opened, closed, updated, errors}` |
+| `POST /v1/tasks/import` | write | `{lines: [JSONL buffer lines]}`, `?dry_run=true` rolls back → `{created, merged, applied, refused, notices, skipped, items, warnings}` |
+
+Open faults, due maintenance rules (`maintenance_due`) and the calibration requirements are
+materialised as tasks on every tasks request and every 15 minutes in the background (events
+`printer_task.opened|updated|closed`). Details: docs/commands/printer.md#to-do-list-3d-printer-todo.
+
 ## Operations
 
 ```

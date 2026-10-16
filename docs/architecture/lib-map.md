@@ -98,6 +98,10 @@ Target package: `lib/geometry/`, with subpackages only when a real boundary appe
   CIEDE2000), `reconcile.py` (Spoolman `printops_slot` bindings vs live slots → `anomaly` rows +
   `slot.mismatch` / `anomaly.*` events), `api/routes_reconcile.py` (`/v1/printers`,
   `/v1/anomalies`, background poller via router lifespan).
+  Printer tasks (#281): `printer_tasks.py` (printer_task rows, derivation from faults / due
+  rules / calibration requirements, the buffer import), `printer_task_buffer.py` (the offline
+  JSONL buffer `~/.local/share/3d/printer-todo/<printer>.jsonl`), `api/routes_tasks.py`
+  (`/v1/printers/{p}/tasks`, `/v1/tasks…`), `todo_cli.py` (`3d printer todo`).
 - `lib/profiles/` — slicer user presets kept in the repo `profiles/` (#180, PrintOps D10), behind `3d profiles`: `slicers.py` (OrcaSlicer / Snapmaker Orca / Bambu Studio data dirs, running check), `preset.py` (preset JSON / `.info` formats, slicer-local keys), `sync.py` (three-way repo <-> slicer sync, base snapshot, backups), `values.py` (`apply_values`, the calibration write path).
 
 Target package: `lib/slicing/` for slicer orchestration, dry-run print planning, printer

@@ -20,7 +20,8 @@ USAGE = """3d printops maint <action> [args] [--json] [--api URL] [--token TOKEN
   PRINTER/HEAD (u1, u1/T3). A nozzle swap and component replacements invalidate the head's
   calibrations (event calibration.invalidated, read by the calibration engine). Reads need the
   `read` scope, changes `write`. Printers are never contacted, except READ-ONLY job-history
-  reads (Moonraker GET /server/history) for the counters of `due`.
+  reads (Moonraker GET /server/history) for the counters of `due`. What is still to be done per
+  printer (open faults, due rules, needed calibrations, manual tasks): `3d printer todo list`.
 
 Actions:
   components PRINTER [--removed]

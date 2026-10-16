@@ -1,4 +1,4 @@
-"""3d printer — drive configured physical printers: list, status, upload, start, cancel, watch, vision, subscribe, agent.
+"""3d printer — drive configured physical printers: list, status, upload, start, cancel, watch, vision, subscribe, agent, todo.
 
 WHAT: talks to the printers named in printer-devices.yaml through a protocol adapter —
   `moonraker` (Klipper/Moonraker, Snapmaker U1) or `creality-stock` (Creality K1 family on
@@ -59,6 +59,10 @@ USAGE = """3d printer <subcommand> [args]
                                        `subscriptions [list|test]` (see `3d printer subscribe --help`)
   agent list|stop|handoff              the temporary per-printer omp agent that gets the alerts
                                        no live subscriber took (see `3d printer agent --help`)
+  todo list|add|done|dismiss|snooze|reopen|import
+                                       the printer's to-do list: needed calibrations, due
+                                       maintenance, repairs, manual tasks (3d-api; offline a
+                                       JSONL buffer — see `3d printer todo --help`)
 
 Options:
   --json             list/status as JSON (status: normalized state + raw firmware payload)
@@ -95,7 +99,8 @@ Examples:
   3d printer vision u1
   3d printer subscribe --session 01a12cd6 --printer u1,k1se
   3d printer subscriptions
-  3d printer agent list"""
+  3d printer agent list
+  3d printer todo list u1"""
 
 _VALUE = {"--secs", "--as", "--source-3mf", "--bridge-max"}
 _FLAGS = {"--json", "--yes", "--force"}
@@ -463,15 +468,19 @@ def run(argv: list[str]) -> int:
         from printer_ops.printer_agent import run as agent
 
         return agent(rest)
+    if sub == "todo":
+        from printops.todo_cli import run as todo
+
+        return todo(rest)
     raise UsageError(f"unknown subcommand '{sub}'", command="printer",
                      remediation=["Use list, status, upload, start, cancel, watch, vision, subscribe, unsubscribe, "
-                                  "subscriptions or agent — see `3d printer --help`."])
+                                  "subscriptions, agent or todo — see `3d printer --help`."])
 
 
 COMMAND = Command(
     name="printer",
     group="SLICING",
-    summary="drive configured printers: list / status / upload / start --yes / cancel --yes / watch / vision / subscribe / agent",
+    summary="drive configured printers: list / status / upload / start --yes / cancel --yes / watch / vision / subscribe / agent / todo",
     usage=USAGE,
     run=run,
 )
