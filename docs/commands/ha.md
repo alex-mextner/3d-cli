@@ -101,6 +101,8 @@ when a changed file is not mounted by the service it lists.
    the PR merges, and `--dry-run` reports `pointer not yet merged` meanwhile instead of
    failing. Merge it with a merge commit; the next deploy then fast-forwards the checkout
    without touching the working tree.
+   If a run fails after applying, for example at the PR step, run it again: with nothing
+   left to apply it only records the live state (branch + PR) and does not touch HA.
 
 ## Cutover (once)
 
