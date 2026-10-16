@@ -55,6 +55,42 @@ rest_command:
     method: post
     timeout: 30
 
+# Camera frames for the phone alerts (script.printer_send_notification). The iOS app attaches
+# only files it can download: /media/local/… goes through HA with the app's auth, while
+# /api/camera_proxy attachments are Android-only and /local (www) is public. camera.snapshot
+# cannot be trusted here: on a failed fetch it writes the camera's last cached frame or
+# nothing at all, without an error. A file counts only after a fresh HTTP 200 (the U1 proxy
+# answers 502 once its frame is older than 15 s, go2rtc errors without a source) whose body
+# starts with the JPEG marker FF D8, so the state is either the new file or "failed". The
+# fetch is capped at 5 s: the alert waits for it. Unique names (the phone downloads on
+# delivery); the newest 30 per printer are kept. /media is the HA container's own disk.
+# Refreshed only by homeassistant.update_entity from the script (and once at HA start).
+command_line:
+  - sensor:
+      name: "Printer U1 Alert Snapshot"
+      unique_id: printer_u1_alert_snapshot
+      icon: mdi:camera
+      scan_interval: 315360000
+      command_timeout: 10
+      command: >-
+        d=/media/printer-alerts; f=u1-$(date +%Y%m%d-%H%M%S)-$$.jpg; mkdir -p "$d" &&
+        if curl -fsS --connect-timeout 2 --max-time 5 -o "$d/$f" 'http://u1-camera-proxy:8090/u1.jpg'
+        && [ "$(head -c 2 "$d/$f" | od -An -tx1 | tr -d ' \n')" = ffd8 ];
+        then echo "printer-alerts/$f"; else rm -f "$d/$f"; echo failed; fi;
+        ls -1t "$d"/u1-*.jpg 2>/dev/null | tail -n +31 | xargs -r rm -f
+  - sensor:
+      name: "Printer K1 SE Alert Snapshot"
+      unique_id: printer_k1_se_alert_snapshot
+      icon: mdi:camera
+      scan_interval: 315360000
+      command_timeout: 10
+      command: >-
+        d=/media/printer-alerts; f=k1_se-$(date +%Y%m%d-%H%M%S)-$$.jpg; mkdir -p "$d" &&
+        if curl -fsS --connect-timeout 2 --max-time 5 -o "$d/$f" 'http://go2rtc:1984/api/frame.jpeg?src=k1se_camera'
+        && [ "$(head -c 2 "$d/$f" | od -An -tx1 | tr -d ' \n')" = ffd8 ];
+        then echo "printer-alerts/$f"; else rm -f "$d/$f"; echo failed; fi;
+        ls -1t "$d"/k1_se-*.jpg 2>/dev/null | tail -n +31 | xargs -r rm -f
+
 script:
   printer_send_notification:
     alias: Printer Send Notification
@@ -65,12 +101,35 @@ script:
         description: Notification title.
       message:
         description: Notification body.
+      printer:
+        description: >
+          u1 or k1_se. A fresh frame from that printer's camera is attached to the phone
+          notification; without one the alert goes out as text.
     sequence:
+      - variables:
+          started: "{{ now().timestamp() }}"
+          grabber: >-
+            {{ 'sensor.printer_' ~ printer ~ '_alert_snapshot'
+               if printer | default('') in ['u1', 'k1_se'] else '' }}
+          snapshot: ""
+      - if: "{{ grabber != '' }}"
+        then:
+          - action: homeassistant.update_entity
+            continue_on_error: true
+            target:
+              entity_id: "{{ grabber }}"
+          # Only a file this run wrote: the state changed after the start and names a file.
+          - variables:
+              snapshot: >-
+                {%- set s = states[grabber] -%}
+                {{ s.state if s and s.state.startswith('printer-alerts/')
+                   and s.last_changed.timestamp() >= started else '' }}
       - action: notify.mobile_app_echowhiskey536
         continue_on_error: true
         data:
           title: "{{ title }}"
           message: "{{ message }}"
+          data: "{{ {'image': '/media/local/' ~ snapshot} if snapshot else {} }}"
       - action: persistent_notification.create
         continue_on_error: true
         data:
@@ -394,6 +453,9 @@ template:
 automation:
   - alias: "3D Printer: K1 SE State Notification"
     id: printer_k1_se_state_notification
+    # The alert waits up to ~5 s for the camera frame; a state change meanwhile is queued, not
+    # dropped as in the default single mode.
+    mode: queued
     trigger:
       - platform: state
         entity_id: sensor.printer_k1_se_status
@@ -411,6 +473,7 @@ automation:
       - action: script.printer_send_notification
         data:
           title: "K1 SE: {{ trigger.to_state.state }}"
+          printer: k1_se
           message: >
             File: {{ states('sensor.printer_k1_se_file') }}.
             Progress: {{ states('sensor.printer_k1_se_progress') }}%.
@@ -419,6 +482,7 @@ automation:
 
   - alias: "3D Printer: U1 State Notification"
     id: printer_u1_state_notification
+    mode: queued  # see printer_k1_se_state_notification
     trigger:
       - platform: state
         entity_id: sensor.printer_u1_status
@@ -435,6 +499,7 @@ automation:
       - action: script.printer_send_notification
         data:
           title: "U1: {{ trigger.to_state.state }}"
+          printer: u1
           message: >
             File: {{ states('sensor.printer_u1_file') }}.
             Progress: {{ states('sensor.printer_u1_progress') }}%.
@@ -460,6 +525,7 @@ automation:
 
   - alias: "3D Printer: Offline Alert"
     id: printer_offline_alert
+    mode: queued  # both printers can drop off together
     trigger:
       - platform: state
         entity_id:
@@ -472,11 +538,18 @@ automation:
       - action: script.printer_send_notification
         data:
           title: "3D printer offline"
+          # Both cameras are served by the printer itself, so an offline printer usually has
+          # no fresh frame either; the alert then goes out without a picture. A sensor missing
+          # from this map gets no picture rather than another printer's.
+          printer: >-
+            {{ {'binary_sensor.printer_u1_online': 'u1',
+                'binary_sensor.printer_k1_se_online': 'k1_se'}.get(trigger.entity_id, '') }}
           message: >
             {{ trigger.to_state.attributes.friendly_name }} has been unavailable for 5 minutes.
 
   - alias: "3D Printer: K1 SE Temperature Overshoot"
     id: printer_k1_se_temperature_overshoot
+    mode: queued
     trigger:
       - platform: template
         value_template: >
@@ -491,12 +564,14 @@ automation:
       - action: script.printer_send_notification
         data:
           title: "K1 SE temperature alert"
+          printer: k1_se
           message: >
             Temperature overshoot: nozzle {{ states('sensor.printer_k1_se_nozzle_temperature') }}/{{ states('sensor.printer_k1_se_nozzle_target') }}°C,
             bed {{ states('sensor.printer_k1_se_bed_temperature') }}/{{ states('sensor.printer_k1_se_bed_target') }}°C.
 
   - alias: "3D Printer: U1 Temperature Overshoot"
     id: printer_u1_temperature_overshoot
+    mode: queued
     trigger:
       - platform: template
         value_template: >
@@ -511,6 +586,7 @@ automation:
       - action: script.printer_send_notification
         data:
           title: "U1 temperature alert"
+          printer: u1
           message: >
             Temperature overshoot: nozzle {{ states('sensor.printer_u1_nozzle_temperature') }}/{{ states('sensor.printer_u1_nozzle_target') }}°C,
             bed {{ states('sensor.printer_u1_bed_temperature') }}/{{ states('sensor.printer_u1_bed_target') }}°C.

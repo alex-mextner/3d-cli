@@ -65,6 +65,7 @@ def test_real_packages_only_need_reloads() -> None:
     assert restart == []
     assert reloads == {
         "automation.reload",
+        "command_line.reload",
         "rest.reload",
         "rest_command.reload",
         "script.reload",
