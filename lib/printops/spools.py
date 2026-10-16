@@ -13,7 +13,8 @@ INVARIANTS:
   - A spool sits in at most one printer slot and a slot holds at most one spool: `load` refuses
     an occupied slot unless told where the current spool goes (`replace_to`).
   - `load` refuses a head the fleet registry marks unusable (fleet/printers.yaml, #157), with
-    the fleet's reason.
+    the fleet's reason, and a head with open maintenance faults (#166, #233), naming them;
+    printer-wide faults (no head) and AMS slots are not gated.
   - Every mutation runs inside one PrintOps DB transaction that also holds the Spoolman write;
     a Spoolman failure rolls the DB rows and events back. (A DB failure after Spoolman accepted
     is the one non-atomic window; the event log then simply lacks the change.)
@@ -29,7 +30,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from printops import db, ledger, locations, tares
+from printops import db, ledger, locations, maintenance, tares
 from printops import events as ev
 from printops.spoolman import JSON, Spoolman, SpoolmanError, decode_extra, encode_extra
 
@@ -56,6 +57,12 @@ MANUAL_REMAINING_FRACTION = (
     0.10  # "about 600 g left" by eye: ±10 %, at least 20 g [assumption]
 )
 MANUAL_REMAINING_MIN_G = 20.0
+
+
+# A refused load names the oldest few open faults of the head, each symptom shortened: enough to
+# act on, bounded however many faults were opened (`maint fault ls` has them all).
+FAULTS_NAMED = 3
+FAULT_SYMPTOM_CHARS = 80
 
 
 class SpoolError(Exception):
@@ -609,6 +616,11 @@ class SlotRef:
     def path(self) -> str:
         return f"slot:{self.key}"
 
+    @property
+    def is_head(self) -> bool:
+        """A print head (`T3`), not an AMS-like slot (`ams1/2`)."""
+        return "/" not in self.head
+
 
 def check_slot(printer: str, head: str, *, usable: bool = True) -> SlotRef:
     """Validate a slot against the fleet registry: known printer, known head (or AMS slot),
@@ -665,6 +677,22 @@ def load(
     # the second sees the first's spool.
     with db.transaction(ctx.conn):
         sp = _live_spool(ctx, spool_id)
+        # db.transaction is BEGIN IMMEDIATE: this read holds the write lock, so a fault committed
+        # by a concurrent request is seen. Only head faults gate a load (a printer-wide fault —
+        # head NULL — and AMS slots do not).
+        faults = maintenance.list_faults(ctx.conn, slot.printer, head=slot.head) if slot.is_head else []
+        if faults:
+            named = [
+                {"id": fault["id"], "symptom": maintenance.one_line(fault["symptom"], FAULT_SYMPTOM_CHARS)}
+                for fault in faults[:FAULTS_NAMED]
+            ]
+            shown = "; ".join(f"#{n['id']} {n['symptom']}" for n in named)
+            more = f" (+{len(faults) - len(named)} more)" if len(faults) > len(named) else ""
+            raise SpoolError(
+                409,
+                f"{slot.key} has {len(faults)} open fault(s): {shown}{more} — close all of them before loading",
+                detail={"printer": slot.printer, "head": slot.head, "open_faults": len(faults), "faults": named},
+            )
         occupants = [
             o for o in spool_in_slot(ctx.spoolman, slot) if int(o["id"]) != spool_id
         ]

@@ -13,6 +13,7 @@ from typing import Any
 from errors import UsageError
 from printops.cli import Sub
 from printops.cli._common import Parsed, api_errors, client, parse
+from printops.maintenance import one_line
 
 USAGE = """3d printops maint <action> [args] [--json] [--api URL] [--token TOKEN]
   Printer components (nozzle per head, PTFE, hotend, extruder, plates, …), the maintenance log,
@@ -360,6 +361,9 @@ def _fault_id(raw: str, sub: str) -> int:
         raise UsageError(f"fault id must be a number, got {raw!r}", command=f"printops {sub}") from e
 
 
+FAULT_TEXT_CHARS = 300  # one terminal line per fault in `fault ls`; --json keeps the full text
+
+
 def _fault_line(f: dict[str, Any]) -> str:
     where = f"{f['printer']}/{f['head']}" if f["head"] else f["printer"]
     comp = f" [{f['component']}]" if f["component"] else ""
@@ -367,10 +371,11 @@ def _fault_line(f: dict[str, Any]) -> str:
     if f["status"] != "open":
         tail = f"  — {f['status']} {_day(f['closed_at'])}"
         if f["root_cause"]:
-            tail += f": {f['root_cause']}"
+            tail += f": {one_line(f['root_cause'], FAULT_TEXT_CHARS)}"
         if f["fixed_by_maintenance_id"]:
             tail += f" (maintenance #{f['fixed_by_maintenance_id']})"
-    return f"#{f['id']}  {f['status'].upper()}  {where}{comp}  {f['symptom']}  (since {_day(f['at'])}){tail}"
+    symptom = one_line(f["symptom"], FAULT_TEXT_CHARS)  # rows seeded or stored before validation too
+    return f"#{f['id']}  {f['status'].upper()}  {where}{comp}  {symptom}  (since {_day(f['at'])}){tail}"
 
 
 def _sync_fleet(argv: list[str], sub: str) -> int:

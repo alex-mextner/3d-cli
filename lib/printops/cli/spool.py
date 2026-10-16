@@ -34,7 +34,8 @@ Actions:
       store or move a spool (a loaded spool is unloaded on the way)
   load ID PRINTER/SLOT [--replace-to LOCATION]
       bind a spool to a printer head (u1/T3) or AMS slot (p1s/ams1/2); refuses heads the
-      fleet marks unusable and occupied slots (unless --replace-to says where the old spool goes)
+      fleet marks unusable or with an open fault, and occupied slots (unless --replace-to says
+      where the old spool goes)
   unload PRINTER/SLOT [--to LOCATION] [--gross G]
       take the spool out of a slot (even an unusable head); --gross weighs it first (a failed
       weighing leaves it loaded)
