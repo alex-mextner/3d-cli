@@ -18,7 +18,7 @@
 // Usage: openscad -D 'part="hub"' -o hub.stl camera_mount.scad   (see PARTS below)
 
 part = "assembly";   // PARTS: assembly | exploded | anim | pov | detail | detail_joint | detail_wedge
-                     //   | detail_tilt | glb_printer | glb_mount | glb_c920 | hub | beam_a | beam_b | foot
+                     //   | detail_tilt | viewer_printer | viewer_mount | viewer_c920 | hub | beam_a | beam_b | foot
                      //   | shoe_k1 | shoe_u1 | post | arm | cam_plate | wedge | hanger
                      //   | pin_long | pin_short | pi_tray | cable_clip | led_ring | dowel
                      //   | plate_hub | plate_beam | plate_small | plate_extras | plate_led | fit_*
@@ -493,7 +493,7 @@ module dowel() {
     cylinder(d = 5.6, h = 2 + led_t + 7.5, $fn = 24);
 }
 
-// ================= scene: printer and camera models (views, animation, GLB; never printed) ==========
+// ================= scene: printer and camera models (views, animation, phone viewer; never printed) ==========
 // Simplified, at the real outer sizes: K1 SE 355 x 355 x 482 (Creality spec), U1 body 480 x 450
 // under the top plane (the U1-1 pad estimate + 25 mm; spec footprint 580 x 540 x 500 with the side
 // spool bays), bed at Z max. z = 0 is the printer top surface the shoes stand on.
@@ -718,10 +718,10 @@ else if (part == "pov") camera_pov(printer);
 else if (part == "detail_joint") detail_joint();
 else if (part == "detail_wedge") detail_wedge();
 else if (part == "detail_tilt") detail_tilt();
-// GLB groups: one mesh per material, assembled in the same frame
-else if (part == "glb_printer") printer_model(printer);
-else if (part == "glb_mount") mount_scene(printer, camera = false);
-else if (part == "glb_c920") rotate(printer == "u1" ? -atan2(u1_pad_dy, u1_pad_dx) : -45) translate([0, 0, plate_top_z]) c920();
+// phone-viewer parts (media.py -> USDZ): one mesh per colour, assembled in the same frame
+else if (part == "viewer_printer") printer_model(printer);
+else if (part == "viewer_mount") mount_scene(printer, camera = false);
+else if (part == "viewer_c920") rotate(printer == "u1" ? -atan2(u1_pad_dy, u1_pad_dx) : -45) translate([0, 0, plate_top_z]) c920();
 // close-ups for the guide: the rear-left corner (K1 SE) or pad (U1) moved to the origin
 else if (part == "detail") {
     c = printer == "u1" ? [u1_pad_dx / 2, -u1_pad_dy / 2, 0] : [k1_outer / 2 - k1_rim, -(k1_outer / 2 - k1_rim), 0];
