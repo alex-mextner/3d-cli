@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="460" viewBox="0 0 900 460" font-family="sans-serif" font-size="15">
+  <rect width="900" height="460" fill="#ffffff"/>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#d1495b"/>
+    </marker>
+  </defs>
+  <!-- left: top view of the rear-left corner of the K1 SE top frame -->
+  <text x="20" y="28" font-size="18" font-weight="bold">K1 SE — вид сверху, задний левый угол</text>
+  <path d="M40,60 H400 V110 H90 V420 H40 Z" fill="#9aa5b1" stroke="#333"/>
+  <text x="110" y="92">верхняя рама (рельс)</text>
+  <text x="140" y="250" fill="#555">проём (внутри принтера)</text>
+  <!-- inner corner fillet -->
+  <path d="M90,126 Q90,110 106,110" fill="none" stroke="#d1495b" stroke-width="3"/>
+  <circle cx="98" cy="118" r="26" fill="none" stroke="#d1495b" stroke-dasharray="4 3"/>
+  <text x="128" y="150" fill="#d1495b">K1-2: радиус / форма внутреннего угла</text>
+  <text x="128" y="170" fill="#d1495b">(есть ли там литой «косынка»-уголок? фото сверху)</text>
+  <!-- rim width -->
+  <line x1="390" y1="60" x2="390" y2="110" stroke="#d1495b" stroke-width="2" marker-start="url(#a)" marker-end="url(#a)"/>
+  <text x="410" y="78" fill="#d1495b">K1-1: ширина рельса</text>
+  <text x="410" y="96" fill="#d1495b">(наружный край → внутренний)</text>
+  <!-- diagonal of the mount -->
+  <line x1="60" y1="80" x2="250" y2="270" stroke="#e8871e" stroke-width="10" opacity="0.6"/>
+  <text x="200" y="330" fill="#e8871e">труба моста идёт по диагонали:</text>
+  <text x="200" y="350" fill="#e8871e">задний левый → передний правый угол</text>
+
+  <!-- right: section through the rail -->
+  <text x="560" y="28" font-size="18" font-weight="bold">Разрез рельса (сбоку)</text>
+  <rect x="580" y="140" width="120" height="70" fill="#9aa5b1" stroke="#333"/>
+  <text x="595" y="180">рельс</text>
+  <text x="705" y="180">снаружи →</text>
+  <text x="440" y="250" fill="#555">← внутрь (проём)</text>
+  <rect x="560" y="126" width="90" height="14" fill="#e8871e"/>
+  <rect x="571" y="126" width="9" height="40" fill="#e8871e"/>
+  <text x="600" y="122" fill="#e8871e" font-size="13">башмак</text>
+  <text x="470" y="160" fill="#e8871e" font-size="13">губка ↘</text>
+  <line x1="560" y1="140" x2="560" y2="206" stroke="#d1495b" stroke-width="2" marker-start="url(#a)" marker-end="url(#a)"/>
+  <text x="480" y="300" fill="#d1495b">K1-3: на сколько мм вниз от верха рельса внутренняя</text>
+  <text x="480" y="320" fill="#d1495b">стенка гладкая и свободна (ни ремня, ни шкива,</text>
+  <text x="480" y="340" fill="#d1495b">ни кабеля в этом углу). Нужно ≥ 6 мм.</text>
+  <text x="480" y="390" fill="#d1495b">K1-4: стол опущен в Z = max (250): расстояние</text>
+  <text x="480" y="410" fill="#d1495b">от верха рельса до поверхности стола, мм</text>
+  <text x="480" y="440" fill="#333">+ одно фото верхней рамы сверху целиком</text>
+</svg>

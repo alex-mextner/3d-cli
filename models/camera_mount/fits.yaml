@@ -1,0 +1,25 @@
+# `3d fit-check --spec models/camera_mount/fits.yaml` — the printed sliding fits of the mount.
+# STLs come from `python3 models/camera_mount/build.py --stl` (assembly frame, insert home along z).
+gap: 0.2
+fits:
+  - name: foot key in the K1 SE shoe
+    insert: stl/fit/fit_foot.stl
+    socket: stl/fit/fit_shoe_k1.stl
+    printed_size: [30, 30.4, 52]
+    min_depth: 8
+  - name: foot key in the U1 shoe
+    insert: stl/fit/fit_foot.stl
+    socket: stl/fit/fit_shoe_u1.stl
+    printed_size: [30, 30.4, 52]
+    min_depth: 8
+  - name: post in the hub channel
+    insert: stl/fit/fit_post.stl
+    socket: stl/fit/fit_hub.stl
+    printed_size: [20, 12, 120]
+    min_depth: 30
+  - name: post in the arm boss
+    insert: stl/fit/fit_post.stl
+    socket: stl/fit/fit_arm.stl
+    printed_size: [20, 12, 120]
+    min_depth: 20
+    open: below
