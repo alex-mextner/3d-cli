@@ -9,3 +9,35 @@ rest_command:
     url: "http://u1-camera-proxy:8090/layers/{{ layer | int(-1) }}?job={{ job | default('') | urlencode }}"
     method: get
     timeout: 10
+  # Ghost of the rest of the print on the U1 camera (3d-cli #261); state lives in the proxy.
+  u1_camera_ghost_set:
+    url: "http://u1-camera-proxy:8090/ghost"
+    method: post
+    content_type: "application/json"
+    payload: '{"enabled": {{ enabled | bool | tojson }}}'
+    timeout: 10
+
+input_boolean:
+  u1_camera_ghost:
+    name: "U1: призрак остатка на камере"
+    icon: mdi:cube-outline
+    # No `initial:` — it would override the restored state on every HA start. A new helper
+    # starts off; turn it on once after the first deploy (input_boolean.turn_on).
+
+automation:
+  # The proxy forgets the switch when its container restarts (it starts with U1_GHOST, default
+  # on); re-sending every 5 minutes and at HA start brings it back to the switch position.
+  - id: u1_camera_ghost_sync
+    alias: "U1: призрак остатка → прокси камеры"
+    mode: restart
+    triggers:
+      - trigger: state
+        entity_id: input_boolean.u1_camera_ghost
+      - trigger: homeassistant
+        event: start
+      - trigger: time_pattern
+        minutes: "/5"
+    actions:
+      - action: rest_command.u1_camera_ghost_set
+        data:
+          enabled: "{{ is_state('input_boolean.u1_camera_ghost', 'on') }}"
