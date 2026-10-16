@@ -16,7 +16,9 @@ WHAT: builds the test geometry (plain boxes, written as STL), slices it with the
 WHY: Orca's calibration wizards are GUI-only; #168 (plan §8.2 step 2) wants generators that run
   from the CLI and go through the same preflight as any print.
 INVARIANTS: the printer must be a Klipper machine listed in PRESETS (the commands are Klipper's);
-  the slicer presets come from the installed Orca's system profiles, never from a hand-kept copy.
+  the slicer presets are the ones the printer and spool print with (#293): user presets from the
+  repo's profiles/ (D10, synced by `3d profiles sync`) or the slicer's own user folder, resolved
+  against the installed Orca's system profiles — never a silent fallback to stock presets.
 """
 
 from __future__ import annotations
@@ -131,8 +133,34 @@ def apply_choice(p: Presets, material: str, choice: PresetChoice) -> Presets:
     )
 
 
+_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def preset_name_problem(name: str) -> str | None:
+    """Why `name` cannot be a preset name: it is written into a G-code comment, so a line break or
+    another control character would turn the rest into commands the printer runs."""
+    if not name.strip():
+        return "empty preset name"
+    if _CONTROL.search(name):
+        return f"preset name {name!r} contains a control character (line break, tab, …)"
+    return None
+
+
+def _read_preset(path: Path) -> dict[str, Any]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError) as e:
+        raise GenError(f"slicer preset {path} is not readable JSON: {e}") from e
+    if not isinstance(data, dict):
+        raise GenError(f"slicer preset {path} is not a JSON object")
+    return data
+
+
 def check_choice(idx: ProfileIndex, p: Presets, material: str) -> None:
     """Every chosen preset exists, and the filament preset is for `material`."""
+    for name in (p.machine, p.process, p.filament[material]):
+        if (why := preset_name_problem(name)) is not None:
+            raise GenError(why)
     for kind, name in (
         ("machine", p.machine),
         ("process", p.process),
@@ -233,7 +261,7 @@ class ProfileIndex:
             found: dict[str, dict[str, Any]] = {}
             for root in reversed(self.roots):  # first root wins
                 for path in sorted((root / vendor / kind).glob("*.json")):
-                    data = json.loads(path.read_text())
+                    data = _read_preset(path)
                     found[str(data.get("name", path.stem))] = data
             self._cache[key] = found
         return self._cache[key]
@@ -243,7 +271,7 @@ class ProfileIndex:
             found: dict[str, tuple[dict[str, Any], Path]] = {}
             for root in reversed(self.user_roots):  # first root wins
                 for path in sorted((root / kind).glob("*.json")):
-                    data = json.loads(path.read_text())
+                    data = _read_preset(path)
                     found[str(data.get("name", path.stem))] = (data, path)
             self._user[kind] = found
         return self._user[kind]

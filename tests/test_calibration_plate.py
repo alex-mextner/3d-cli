@@ -526,3 +526,10 @@ def test_plate1_single_sliced_tests_build(orca: str, tmp_path: Path) -> None:
         out = tmp_path / f"{test}.gcode"
         cp.build_plate(ctx, filament.build(ctx), orca, out)
         assert out.is_file()
+
+
+def test_malformed_user_preset_is_a_gen_error(orca: str, tmp_path: Path) -> None:
+    (tmp_path / "user" / "filament").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "user" / "filament" / "broken.json").write_text("{not json")
+    with pytest.raises(cg.GenError, match="broken.json is not readable JSON"):
+        cg.generate("flow", "Creality K1 SE", orca, tmp_path / "f.gcode", presets=STOCK)

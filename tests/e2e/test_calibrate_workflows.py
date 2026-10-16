@@ -279,3 +279,60 @@ def test_calibrate_usage_errors(tmp_path: Path) -> None:
     )
     assert missing.returncode == 2
     assert "nope.gcode" in missing.stderr
+
+
+def test_gen_plate_with_the_printers_and_spools_presets(tmp_path: Path) -> None:
+    """The user generates a calibration plate for the orange spool: bin/3d takes the machine and
+    process presets from the printer's fleet entry and the filament preset from the flag, slices
+    with a (fake) Orca, and the G-code and its map name the presets; without a filament preset, or
+    with a preset name carrying a line break, the command refuses instead of slicing."""
+    from test_calibration_plate import FAKE, PRESETS
+
+    profiles = tmp_path / "profiles"
+    for (kind, name), data in PRESETS.items():
+        (profiles / "Creality" / kind).mkdir(parents=True, exist_ok=True)
+        (profiles / "Creality" / kind / f"{name}.json").write_text(json.dumps({"name": name, **data}))
+    user = tmp_path / "user"
+    for kind, data in (
+        ("machine", {"name": "K1 SE - Copy", "inherits": "Creality K1 SE 0.4 nozzle"}),
+        ("process", {"name": "Std 8900", "inherits": "0.20mm Standard @Creality K1 SE", "default_acceleration": "8000"}),
+        ("filament", {"name": "Orange PLA @K1SE", "inherits": "Creality Generic PLA @K1-all",
+                      "filament_flow_ratio": ["0.931"], "filament_type": ["PLA"]}),
+    ):
+        (user / kind).mkdir(parents=True, exist_ok=True)
+        (user / kind / f"{data['name']}.json").write_text(json.dumps(data))
+    orca = tmp_path / "orca"
+    orca.write_text(FAKE)
+    orca.chmod(0o755)
+    fleet = tmp_path / "fleet.yaml"
+    fleet.write_text(
+        "k1:\n  model: Creality K1 SE\n  owner: own\n  access: offline\n"
+        "  heads: [{label: T1, index: 0}]\n  slicer: {machine: K1 SE - Copy, process: Std 8900}\n",
+        encoding="utf-8",
+    )
+    env = {"THREED_FLEET": str(fleet), "ORCA_PROFILES": str(profiles), "ORCA_USER_PRESETS": str(user),
+           "SLICER": str(orca)}
+    out = tmp_path / "plate.gcode"
+
+    missing = run_cli(tmp_path, "calibrate", "gen", "plate1", "--printer", "k1", "-o", str(out), env_extra=env)
+    assert missing.returncode == 2
+    assert "no filament preset for k1" in missing.stderr
+    assert not out.exists()
+
+    newline = run_cli(tmp_path, "calibrate", "gen", "plate1", "--printer", "k1", "--filament-preset",
+                      "Orange PLA @K1SE\nM104 S300", "-o", str(out), env_extra=env)
+    assert newline.returncode == 2
+    assert "control character" in newline.stderr
+    assert not out.exists()
+
+    made = run_cli(tmp_path, "calibrate", "gen", "plate1", "--printer", "k1", "--filament-preset",
+                   "Orange PLA @K1SE", "--only", "bridge", "-o", str(out), env_extra=env)
+    assert made.returncode == 0, made.stderr
+    lines = out.read_text().splitlines()
+    assert "; default_acceleration = 8000" in lines
+    assert "; filament_flow_ratio = 0.931" in lines
+    assert ("; 3d calibrate presets: machine=K1 SE - Copy (fleet k1.slicer); process=Std 8900 (fleet k1.slicer); "
+            "filament=Orange PLA @K1SE (--filament-preset)") in lines
+    data = json.loads(out.with_suffix(".json").read_text())
+    assert data["presets"]["filament"] == "Orange PLA @K1SE"
+    assert [o["name"] for o in data["objects"]][-3:] == ["bridge_8", "bridge_11", "bridge_14"]

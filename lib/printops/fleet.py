@@ -329,6 +329,8 @@ def _slicer(value: Any, bad: list[str]) -> dict[str, str]:
     for key in SLICER_KEYS & set(value):
         if not isinstance(value[key], str) or not value[key].strip():
             bad.append(f"slicer.{key}: a preset name")
+        elif any(ord(c) < 32 or ord(c) == 127 for c in value[key]):
+            bad.append(f"slicer.{key}: control characters in a preset name")
         else:
             out[key] = value[key].strip()
     return out
