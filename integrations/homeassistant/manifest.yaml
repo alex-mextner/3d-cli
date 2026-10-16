@@ -43,6 +43,7 @@ files:
   - {src: scripts/u1_mjpeg_proxy.py, dest: scripts/u1_mjpeg_proxy.py, mode: symlink, services: [u1-camera-proxy]}
   - {src: scripts/u1_print_inspector.py, dest: scripts/u1_print_inspector.py, mode: symlink, services: [u1-camera-proxy]}
   - {src: scripts/u1_gcode_index.py, dest: scripts/u1_gcode_index.py, mode: symlink, services: [u1-camera-proxy]}
+  - {src: scripts/u1_ghost.py, dest: scripts/u1_ghost.py, mode: symlink, services: [u1-camera-proxy]}
   - {src: scripts/u1_share.py, dest: scripts/u1_share.py, mode: symlink}
   - {src: requirements/u1-share.txt, dest: requirements/u1-share.txt, mode: symlink}
   - {src: proxy/printer-proxy.nginx.conf, dest: printer-proxy.nginx.conf, mode: symlink, services: [printer-proxy]}

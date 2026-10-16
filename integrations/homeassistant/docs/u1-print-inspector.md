@@ -18,12 +18,23 @@ A layer answer is a **plan**, not a claim that every listed feature is currently
 
 `complete` means the printer reported completion. It does not certify dimensional accuracy, quality, successful collection or delivery.
 
+## Ghost of the rest of the print
+
+While a job prints, the proxy draws what is still to be printed over the camera image: a semi-transparent 3D ghost of every wall above the current layer, in the filament colour of its tool (3d-cli issue #261). The same G-code pass that builds the index collects the walls (outer and overhang walls, prime tower) with 3d-cli's `lib/vision_ghost.py`; the scripts are symlinks into the 3d-cli submodule, so the library is imported from `<3d-cli>/lib` next to them. The ghost is projected through the bundled U1 camera calibration (`lib/data/vision/u1-camera.yaml`, the same model `3d printer vision` uses).
+
+How it reads: the walls are painted as vertical quads in depth order, so a near ghost wall covers a far one. The printed part occludes too, but only where it can: seen from a camera below the current top it hides ghost walls behind it; the U1 camera sits ~13 mm above the nozzle plane, so every sight line to the ghost passes above the printed part and only the band printed now is painted (for its glow). Ghost walls take the filament colour washed towards a pale cyan (so they never pass for the real part), are shaded by how squarely they face the camera, fade from 80 % opacity near to 28 % far, get a 2 px light outline at silhouettes and depth steps and a light diagonal hatch; the band printed now glows amber.
+
+Cost: collecting the walls rides the existing index pass — on the ODROID-N2+ (HA container, 1 CPU) the 135 MB `u1_walls_main_v3` indexed in 122 s without and 142 s with the collector (718 k wall points), well inside the 60 s + 4 s/MiB deadline. The ghost is then rendered once per (job, layer, frame size) on its own worker thread and cached — about 2 s for layer 729 of that job; each frame only blends the cached table (about 20 ms at 1920 x 1080). While the next layer renders, the previous ghost stays up if it is at most 1 mm below the current layer (a few layers, under a pixel at this camera's scale); before the first render of a job the frame has no ghost. Fail-safe: no ghost when the switch is off, the library or calibration is missing, the shell was truncated, the snapshot is stale, the state is not printing/paused, or the printer's file cursor does not map into the indexed file — never a ghost of another job, nor one more than 1 mm behind the current layer.
+
+Switch: `input_boolean.u1_camera_ghost` (tile under the U1 camera on the 3D Printers dashboard) is the authority. An automation sends it to the proxy (`rest_command.u1_camera_ghost_set` → `POST /ghost`) on change, at HA start and every 5 minutes, because the proxy starts with `U1_GHOST` (default on) after a container restart. HA restores the helper's last state; a newly created helper starts off, so turn it on once after the first deploy. Public share links receive the same pixels, ghost included. Coordinates reach the ghost as absolute millimetres (G90/G91, G20/G21 and G92 are applied; G2/G3 arcs keep their curvature). The K1 SE has no ghost yet: it needs its own camera calibration and a frame path through a proxy like this one.
+
 ## Read-only API
 
 The proxy exposes these routes only on its existing internal Docker network:
 
 - `GET /status.json`: normalised current observation, source, staleness, active/last artifact fingerprint, index summary and current-layer plan.
 - `GET /layers/186?job=<gcode_sha256>`: the selected layer plan guarded by the current artifact identity. HTTP 409 means the artifact changed; 404 means no such layer; 503 means the index is not ready.
+- `GET /ghost`: the ghost switch and render state (`enabled`, last rendered `layer` and whether it produced a ghost `layer_has_ghost`, `rendering_layer`, `render_seconds`, last `error` with its message). `POST /ghost` with `{"enabled": true|false}` is the one write route; it only switches the drawing, never the printer.
 
 HA wraps them in `rest_command.u1_inspector_status` and `rest_command.u1_inspect_layer`. Both support service responses and were tested with the dedicated non-admin, read-only HA sharing account. A WS request looks like:
 
@@ -51,7 +62,7 @@ Current links are scoped to the **camera**, not to an order or print attempt. Un
 
 ## Files and deployment
 
-New Python modules: `scripts/u1_gcode_index.py`, `scripts/u1_print_inspector.py`. Updated proxy: `scripts/u1_mjpeg_proxy.py`. New UI: `www/u1-share/u1-inspector-card.js`. New HA package: `packages/u1_print_inspector.yaml`. Dashboard/resource registration is in the existing YAML files.
+New Python modules: `scripts/u1_gcode_index.py`, `scripts/u1_print_inspector.py`, `scripts/u1_ghost.py` (ghost worker; imports 3d-cli `lib/vision_ghost.py` and `lib/vision_geometry.py`). Updated proxy: `scripts/u1_mjpeg_proxy.py`. New UI: `www/u1-share/u1-inspector-card.js`. New HA package: `packages/u1_print_inspector.yaml`. Dashboard/resource registration is in the existing YAML files.
 
 The proxy uses Pillow from the existing HA container image. `/usr/share/fonts` on the host is mounted read-only for the existing DejaVu font; no font binary is distributed in the source bundle.
 
