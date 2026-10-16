@@ -1,8 +1,9 @@
 # fleet/policy.yaml — PrintOps policy, one top-level section per concern.
 # Schema: lib/printops/policy.py (sections) + the section's parser (drying: lib/printops/drying_policy.py,
-# gates: lib/printops/gates_policy.py).
-# Checked by tests/test_printops_drying.py and tests/test_printops_gates.py; 3d-api re-reads it on every
-# drying check, `3d print-preflight` on every run. `calibrations:` (#167) comes as its own section.
+# gates: lib/printops/gates_policy.py, calibrations: lib/printops/calibration_policy.py).
+# Checked by tests/test_printops_drying.py, tests/test_printops_gates.py and
+# tests/test_printops_calibrations.py; 3d-api re-reads it on every drying check and every calibration
+# requirement/gate request, `3d print-preflight` on every run.
 
 drying:
   # How often 3d-api re-assesses every spool and updates Spoolman `dry_state` (+ `drying.due`).
@@ -123,3 +124,33 @@ gates:
     - materials: [ABS, ASA, PC, PA, PA6, PA11, PA12, PAHT]
       plates: [cool_plate]
       why: "the Cool Plate is for low bed temperatures (PLA/TPU); high-temperature materials do not stick (https://wiki.bambulab.com/en/general/filament-guide-material-table)"
+
+calibrations:
+  # How strictly a missing or stale calibration is enforced (schema: lib/printops/calibration_policy.py;
+  # catalog of kinds: fleet/calibrations.yaml). block = print-preflight FAIL (bypass:
+  # `--accept calibration:<kind> --reason …`, logged), warn = WARN, off = not reported.
+  # Defaults are the user's decision D6: a new material TYPE or VENDOR/filament on a head blocks
+  # flow ratio and pressure advance; a new LOT only warns. After maintenance or a nozzle swap the
+  # affected calibrations block again.
+  levels:
+    new_material_type: block
+    new_vendor: block
+    new_filament: block
+    new_nozzle: block
+    new_lot: warn
+    invalidated: block
+    expired: warn
+    gcode_mismatch: block
+  kinds:
+    # A temperature tower is advice on top of the vendor's range (filament_temp_range, #164,
+    # checks the range itself): warn on a new filament, ignore a new lot.
+    temp_tower: {new_material_type: warn, new_vendor: warn, new_filament: warn, new_lot: off}
+    # Slicer presets carry vendor defaults for these; measure them, but do not stop a print.
+    max_volumetric_speed: warn
+    retraction: warn
+  printers:
+    # D7: other people's printers are never contacted and not ours to calibrate.
+    p1s: off
+    a1mini: off
+    xecut-a1: off
+    xecut-cr200b: off
