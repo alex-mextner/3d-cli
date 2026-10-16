@@ -5,9 +5,11 @@ Purpose:
   shows upright with proper shading (tap the file in Messages/Files and drag to spin).
 
 Accessed via:
-  `lib/commands/usdz.py` (the `3d usdz` command). Kept as a separate module so the
-  command stays import-light (stdlib-only at module top level — discovery imports every
-  command on every `3d` call); the heavy deps live behind the function here.
+  `lib/commands/usdz.py` (the `3d usdz` command, one mesh: mesh_to_usdz) and
+  models/camera_mount/media.py (an assembly, one colour per mesh: meshes_to_usdz).
+  Kept as a separate module so the command stays import-light (stdlib-only at module top
+  level — discovery imports every command on every `3d` call); the heavy deps live behind
+  the functions here.
 
 Invariants (the naive export gets these wrong — mirrored from
   garage-band/tools/mesh_to_usdz.py):
@@ -18,12 +20,15 @@ Invariants (the naive export gets these wrong — mirrored from
     * SetDefaultPrim is required or Quick Look refuses to show the scene.
     * Packaged via pxr UsdUtils.CreateNewUsdzPackage — NO dependency on a system `usdzip`.
 
-Heavy deps (trimesh, pxr) are imported LAZILY inside mesh_to_usdz so importing this
+Heavy deps (trimesh, pxr) are imported LAZILY inside meshes_to_usdz so importing this
 module costs nothing; `pxr` is the `usd-core` pip package.
 """
+
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Any
 
 from errors import MissingDependency
@@ -44,6 +49,15 @@ def _sanitize_prim_name(name: str) -> str:
     return cleaned
 
 
+@dataclass(frozen=True)
+class UsdzPart:
+    """One mesh of a USDZ scene: its file, its diffuse colour (0..1) and its prim name."""
+
+    path: str
+    color: RGB
+    name: str
+
+
 def mesh_to_usdz(
     stl_path: str,
     usdz_out: str,
@@ -62,6 +76,19 @@ def mesh_to_usdz(
     Raises:
         MissingDependency: if `trimesh` or `pxr` (usd-core) is not installed.
         ValueError:        if the mesh is empty / has no faces, or packaging fails.
+    """
+    return meshes_to_usdz([UsdzPart(stl_path, color, name)], usdz_out)
+
+
+def meshes_to_usdz(parts: Sequence[UsdzPart], usdz_out: str) -> int:
+    """Write several meshes, each with its own colour, as one USDZ scene (Y-up, mm,
+    UsdPreviewSurface per mesh). The meshes keep their shared frame, so an assembly exported
+    part by part lands as assembled. Returns the total face count.
+
+    Raises:
+        MissingDependency: if `trimesh` or `pxr` (usd-core) is not installed.
+        ValueError:        if there are no parts, a mesh is empty, two parts share a prim
+                           name, or packaging fails.
     """
     # Heavy deps, imported lazily so module import stays cheap and offline-safe.
     try:
@@ -97,20 +124,13 @@ def mesh_to_usdz(
 
     import numpy as np
 
-    # force="mesh" collapses a multi-body Scene into one Trimesh, so .vertices/.faces
-    # exist; trimesh's stub types load() as the abstract Geometry, hence the Any cast.
-    mesh: Any = trimesh.load(stl_path, force="mesh")
-    if getattr(mesh, "is_empty", False) or len(mesh.faces) == 0:
-        raise ValueError(f"empty mesh (no faces): {stl_path}")
-
-    # Z-up (model) -> Y-up (AR Quick Look): (x,y,z) -> (x, z, -y).
-    V = mesh.vertices.astype(float)
-    V = np.column_stack([V[:, 0], V[:, 2], -V[:, 1]])
-    F = mesh.faces.astype(int)
-    nfaces = int(len(F))
-
-    prim_name = _sanitize_prim_name(name)
+    if not parts:
+        raise ValueError("no meshes to write")
+    names = [_sanitize_prim_name(p.name) for p in parts]
+    if len(set(names)) != len(names):
+        raise ValueError(f"parts share a prim name: {names}")
     usdz_out = os.path.abspath(usdz_out)
+    total = 0
 
     with tempfile.TemporaryDirectory() as tmp:
         usdc = os.path.join(tmp, "scene.usdc")
@@ -118,26 +138,50 @@ def mesh_to_usdz(
         UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.y)
         UsdGeom.SetStageMetersPerUnit(stage, 0.001)  # models authored in mm
         UsdGeom.Xform.Define(stage, "/scene")
-        stage.SetDefaultPrim(stage.GetPrimAtPath("/scene"))  # Quick Look needs a default prim
+        stage.SetDefaultPrim(
+            stage.GetPrimAtPath("/scene")
+        )  # Quick Look needs a default prim
 
-        meshpath = f"/scene/{prim_name}"
-        prim = UsdGeom.Mesh.Define(stage, meshpath)
-        prim.CreatePointsAttr(Vt.Vec3fArray([Gf.Vec3f(*map(float, v)) for v in V]))
-        prim.CreateFaceVertexCountsAttr(Vt.IntArray([3] * nfaces))
-        prim.CreateFaceVertexIndicesAttr(Vt.IntArray([int(i) for f in F for i in f]))
-        prim.CreateSubdivisionSchemeAttr(UsdGeom.Tokens.none)
-        prim.CreateDisplayColorAttr(Vt.Vec3fArray([Gf.Vec3f(*color)]))  # fallback only
+        for part, prim_name in zip(parts, names, strict=True):
+            # force="mesh" collapses a multi-body Scene into one Trimesh, so .vertices/.faces
+            # exist; trimesh's stub types load() as the abstract Geometry, hence the Any cast.
+            mesh: Any = trimesh.load(part.path, force="mesh")
+            if getattr(mesh, "is_empty", False) or len(mesh.faces) == 0:
+                raise ValueError(f"empty mesh (no faces): {part.path}")
+            # Z-up (model) -> Y-up (AR Quick Look): (x,y,z) -> (x, z, -y).
+            V = mesh.vertices
+            V = np.ascontiguousarray(
+                np.column_stack([V[:, 0], V[:, 2], -V[:, 1]]), dtype=np.float32
+            )
+            F = np.ascontiguousarray(mesh.faces, dtype=np.int32)
+            total += len(F)
 
-        # UsdPreviewSurface — this is what Quick Look actually shades with.
-        mat = UsdShade.Material.Define(stage, f"/scene/mat_{prim_name}")
-        shader = UsdShade.Shader.Define(stage, f"/scene/mat_{prim_name}/surf")
-        shader.CreateIdAttr("UsdPreviewSurface")
-        shader.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(Gf.Vec3f(*color))
-        shader.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(0.55)
-        shader.CreateInput("metallic", Sdf.ValueTypeNames.Float).Set(0.0)
-        mat.CreateSurfaceOutput().ConnectToSource(shader.ConnectableAPI(), "surface")
-        binding = UsdShade.MaterialBindingAPI.Apply(prim.GetPrim())  # apply schema, then bind
-        binding.Bind(mat)
+            prim = UsdGeom.Mesh.Define(stage, f"/scene/{prim_name}")
+            prim.CreatePointsAttr(Vt.Vec3fArray.FromNumpy(V))
+            prim.CreateFaceVertexCountsAttr(
+                Vt.IntArray.FromNumpy(np.full(len(F), 3, dtype=np.int32))
+            )
+            prim.CreateFaceVertexIndicesAttr(Vt.IntArray.FromNumpy(F.ravel()))
+            prim.CreateSubdivisionSchemeAttr(UsdGeom.Tokens.none)
+            prim.CreateDisplayColorAttr(
+                Vt.Vec3fArray([Gf.Vec3f(*part.color)])
+            )  # fallback only
+
+            # UsdPreviewSurface — this is what Quick Look actually shades with.
+            mat = UsdShade.Material.Define(stage, f"/scene/mat_{prim_name}")
+            shader = UsdShade.Shader.Define(stage, f"/scene/mat_{prim_name}/surf")
+            shader.CreateIdAttr("UsdPreviewSurface")
+            shader.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(
+                Gf.Vec3f(*part.color)
+            )
+            shader.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(0.55)
+            shader.CreateInput("metallic", Sdf.ValueTypeNames.Float).Set(0.0)
+            mat.CreateSurfaceOutput().ConnectToSource(
+                shader.ConnectableAPI(), "surface"
+            )
+            UsdShade.MaterialBindingAPI.Apply(prim.GetPrim()).Bind(
+                mat
+            )  # apply schema, then bind
 
         stage.GetRootLayer().Save()
 
@@ -146,7 +190,7 @@ def mesh_to_usdz(
         if not ok or not os.path.isfile(usdz_out):
             raise ValueError(f"failed to write USDZ package: {usdz_out}")
 
-    return nfaces
+    return total
 
 
 if __name__ == "__main__":
@@ -158,7 +202,9 @@ if __name__ == "__main__":
         _sys.exit(1)
     _, _stl, _out, _r, _g, _b, _nm = _sys.argv
     try:
-        _nf = mesh_to_usdz(_stl, _out, color=(float(_r), float(_g), float(_b)), name=_nm)
+        _nf = mesh_to_usdz(
+            _stl, _out, color=(float(_r), float(_g), float(_b)), name=_nm
+        )
         print(f"output: {_out} ({_nf} faces) — iPhone/Mac AR Quick Look ready")
     except Exception as _exc:  # noqa: BLE001
         print(f"error: {_exc}", file=_sys.stderr)
