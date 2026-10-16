@@ -46,7 +46,7 @@ Issue: [#156](https://github.com/alex-mextner/3d-cli/issues/156).
 | `www/u1-share/*` | `www/u1-share/` | tracked copy |
 | `compose/3d.docker-compose.yaml` | — | `ha.docker-compose.yaml` lists it under `include:` |
 | `snippets/configuration.3d.yaml` | — | the 3D keys of `configuration.yaml` (ingress panels, Lovelace dashboard and resources); checked, never copied |
-| `vendor.lock` | — | pins of moonraker-home-assistant 1.13.4, ha_creality_ws v0.9.7, WebRTC v3.6.1; checked against the live `manifest.json` versions and submodule commits |
+| `vendor.lock` | — | pins of moonraker-home-assistant 1.13.4, ha_creality_ws 0.9.9, WebRTC v3.6.1; checked against the live `manifest.json` versions and submodule commits |
 | `manifest.yaml` | — | the table above, plus the HA-repo settings `3d ha deploy` uses |
 
 `tests/u1_print_inspector/` runs in the 3d-cli gate (`dev run test`), and `yamllint` checks
