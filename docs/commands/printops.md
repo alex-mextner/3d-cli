@@ -45,6 +45,8 @@ service is never exposed to the internet.
 3d printops slots [PRINTER] [--json] [--api URL] [--token TOKEN]
 3d printops anomalies [--status open,ack|resolved|all] [--printer NAME] [--limit N] [--json]
 3d printops anomalies ack|resolve ID [--note TEXT]
+3d printops gates snapshot [--out FILE] [--api URL] [--token TOKEN]
+3d printops gates state PRINTER [--json] [--api URL] [--token TOKEN]
 ```
 
 | Subcommand | What |
@@ -60,6 +62,7 @@ service is never exposed to the internet.
 | `dry` | Drying sessions (start / finish / ls) and the spools due for drying by the `drying:` policy in `fleet/policy.yaml`. |
 | `slots` | Every fleet printer slot by slot: what the printer reports loaded (live, read by 3d-api's poller), the spool bound to it in Spoolman, open anomalies. |
 | `anomalies` | Slot reconciliation anomalies (type/colour/tag mismatch, empty slot with a spool, unknown filament, impossible bindings); `ack` / `resolve` them. |
+| `gates` | The PrintOps state the material gates of [`3d print-preflight`](print-preflight.md#printops-material-gates) read (spool per slot, filament data, remaining interval, drying), and its offline snapshot for the slicer hook. |
 
 Subcommands are self-registering modules in `lib/printops/cli/<sub>.py`; later PrintOps slices
 add theirs there.
@@ -335,6 +338,28 @@ if the condition is still there, the next pass opens a new one.
 ```
 #4  2026-10-14T20:51:32.010Z  unbound_filament  slot:u1/T3  printer: loaded  [open]
 ```
+
+### `gates`
+
+The material gates of [`3d print-preflight`](print-preflight.md#printops-material-gates)
+([#164](https://github.com/alex-mextner/3d-cli/issues/164)) read one fleet printer's PrintOps
+state: fleet facts (heads, nozzles, enclosure, plates) and, per G-code tool, the spool bound to
+its slot with the Spoolman filament data and its PrintOps extra fields (`nozzle_temp_min/max`,
+`bed_temp_min/max`, `abrasive`, `measured_hex`), the ledger's remaining interval and the drying
+assessment. Read-only, scope `read`.
+
+- `snapshot [--out FILE]` — save every printer's state for `3d print-preflight --offline` (the
+  slicer post-processing hook runs without a network). Default path `$PRINTOPS_SNAPSHOT`, else
+  `~/.cache/3d-cli/printops-snapshot.json`; preflight WARNs once it is older than
+  `gates.snapshot_max_age_h` (fleet/policy.yaml). Refresh after loading spools.
+  `3d printops gates snapshot`
+- `state PRINTER [--json]` — one printer: tool → slot → spool, remaining, drying.
+  `3d printops gates state u1 --json | jq '.tools[] | {slot, spool: .spool.label}'`
+
+REST: `GET /v1/gates/state?printer=NAME` (404 unknown printer, 503 no fleet file, 502 Spoolman),
+`GET /v1/gates/snapshot` → `{version, taken_at, api, printers: {name: state}}`. State schema:
+`lib/printops/gates.py`. Later slices add keys (maintenance #166, calibrations #167); a gate reads
+an absent key as "not known" (UNVERIFIED).
 
 ## Exit codes
 

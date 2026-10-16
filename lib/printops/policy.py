@@ -28,6 +28,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # section name -> "module:function" (parser of that section's mapping). Slices append here.
 SECTION_PARSERS: dict[str, str] = {
     "drying": "printops.drying_policy:parse",
+    "gates": "printops.gates_policy:parse",
 }
 
 
