@@ -437,7 +437,8 @@ def state_at(
     with path.open("rb") as fh:
         fh.seek(offset)
         for i, raw in enumerate(fh, start=first):
-            # every 4096 lines: long lines must not carry a scan far past its deadline
+            # every 4096 lines (slicer lines are short, so this stays well inside the budget); a
+            # single pathological multi-MB line is not bounded — the file matched the printer's size
             if (
                 deadline is not None
                 and not (i - first) % 4096
