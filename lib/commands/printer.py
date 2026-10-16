@@ -323,6 +323,7 @@ def _start_snapshot(name: str, file: str, original: Path, local: Path, source: P
     from printer_ops.base import UNKNOWN, PrinterCommError, PrinterRefused, file_sha256, safe_remote_name
     from printer_ops import bridge_max_for
     from printer_ops.preflight import FAIL, run_preflight
+    from printer_ops.printops_checks import context_from_options
 
     remote = safe_remote_name(local, opts.get("--as"))  # content-addressed: <stem>-<sha256[:16]>.gcode
     size = local.stat().st_size
@@ -354,9 +355,13 @@ def _start_snapshot(name: str, file: str, original: Path, local: Path, source: P
     limits, limits_source = adapter.axis_limits()
     bridge, bridge_source = bridge_max_for(opts.get("--bridge-max"), adapter.device, command="printer")
     # the snapshot lives in a temp dir: NAME.3mf and NAME.slice-warnings.json sit next to the original
+    # plus the PrintOps material gates of `3d print-preflight --printer NAME` (live 3d-api state
+    # when configured, else fleet facts only)
+    printops = context_from_options(name, axis_limits=None, api=None, offline=False, snapshot=None,
+                                    command="printer")
     report = run_preflight(local, status=st, source_3mf=source, axis_limits=limits, limits_source=limits_source,
                            trusted_macros=adapter.trusted_macros, origin=original,
-                           bridge_max=bridge, bridge_source=bridge_source)
+                           bridge_max=bridge, bridge_source=bridge_source, printops=printops)
     report.file = f"{original} (snapshot)"
     print(report.render())
     if report.overall == FAIL:
