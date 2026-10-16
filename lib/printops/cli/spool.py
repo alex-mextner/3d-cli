@@ -36,7 +36,8 @@ Actions:
       bind a spool to a printer head (u1/T3) or AMS slot (p1s/ams1/2); refuses heads the
       fleet marks unusable and occupied slots (unless --replace-to says where the old spool goes)
   unload PRINTER/SLOT [--to LOCATION] [--gross G]
-      take the spool out of a slot, optionally weighing it on the way
+      take the spool out of a slot (even an unusable head); --gross weighs it first (a failed
+      weighing leaves it loaded)
   use ID GRAMS [--source S] [--confidence G] [--job JOB] [--note TEXT]
       book usage (Spoolman /use + ledger). Sources: gcode_estimate moonraker_live printer_reported
       voice manual purge (default manual); negative GRAMS gives grams back (correction)
@@ -46,7 +47,8 @@ Actions:
   empty ID [--note TEXT]
       the spool is used up: remaining 0, unloaded, archived
   import-owned FILE [--location LOC] [--project NAME] [--apply]
-      spools from a project's gen/plates.json `owned` (+ `bought`): DRY RUN by default (prints the
+      spools from a project's gen/plates.json `owned` (+ `bought`; the vendor is matched against
+      the tare DB's vendors, so "Bambu Lab …" splits right): DRY RUN by default (prints the
       diff); --apply creates them. Idempotent: keys already imported are left alone.
 
 Options:
@@ -481,13 +483,18 @@ def _import_owned(argv: list[str], sub: str) -> int:
         n_pos=1,
     )
     path = Path(p.pos[0]).expanduser()
+    api = client(p, sub)
+    with api_errors(sub):
+        vendors = {t["vendor"] for t in api.get("/v1/tares")["tares"]}
     try:
         items = plates_owned(
-            path, project=p.opts.get("--project"), location=p.opts.get("--location")
+            path,
+            project=p.opts.get("--project"),
+            location=p.opts.get("--location"),
+            vendors=vendors,
         )
     except ImportFormatError as e:
         raise UsageError(str(e), command=f"printops {sub}") from e
-    api = client(p, sub)
     with api_errors(sub):
         res = api.post(
             "/v1/spools/import", {"items": items, "dry_run": "--apply" not in p.flags}

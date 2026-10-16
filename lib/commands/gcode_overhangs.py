@@ -24,7 +24,8 @@ USAGE = """3d gcode-overhangs FILE.gcode [--max-unsupported MM2] [--bridge-max M
   Find extrusion printed on nothing, layer by layer, in a sliced G-code. Offline; never
   contacts a printer. `3d print-preflight` runs it as its `overhangs` gate.
 
-  objects     EXCLUDE_OBJECT / M486 / `; printing object` labels; unlabeled = one "plate"
+  objects     EXCLUDE_OBJECT / Bambu `; start printing object` (M624) / M486 / `; printing
+              object` labels; unlabeled = one "plate"
   carried     inside the layer below (its own lines plus support/raft, enclosed gaps up to
               --bridge-max wide filled) grown by dz * tan 45 + half a line width; the bed
               carries the first layer

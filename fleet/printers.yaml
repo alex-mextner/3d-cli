@@ -46,6 +46,8 @@ u1:
   # longest clean bridge for the print-preflight overhangs gate (default 15):
   # tester u1_bridge_span A, 17,2/20,5 мм
   bridge_max_mm: 25
+  watch:
+    tg_fallback: true       # `3d printer watch`: tg only for warning+ events that no subscribed agent took
   resume:                   # `3d gcode-resume` (Snapmaker/u1-klipper@10f2f69 macros, docs/commands/gcode-resume.md)
     purge_macro: SM_PRINT_PREEXTRUDE_FILAMENT
     purge_mm: 30
@@ -56,6 +58,7 @@ u1:
     filament_diameter_mm: 1.75
     min_print_temp: 170
     default_accel: 10000
+    z_max_mm: 275           # stepper_z.position_max (Snapmaker/u1-klipper); resume Z stays 1 mm below
     start_commands: [DEFECT_DETECTION_START]
   # extruder..extruder3 and nozzle_diameter 0.4 each: live configfile, 2026-10-14
   heads:
@@ -88,6 +91,8 @@ k1se:
   # Stock K1 SE macros (CrealityOfficial K1_Series_Klipper gcode_macro.cfg); PAUSE parks at
   # Z50, X max-10, Y max/2 (inside the axis limits). Bodies are NOT checked by 3d.
   trusted_macros: [START_PRINT, END_PRINT, PAUSE]
+  watch:
+    tg_fallback: true       # `3d printer watch`: tg only for warning+ events that no subscribed agent took
   heads:
     - {label: T1, index: 0, extruder: extruder, nozzle: {diameter_mm: 0.4, material: hardened, type: std}, usable: true}
   ams: []                   # live ws: cfsConnect 0

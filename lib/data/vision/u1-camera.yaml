@@ -1,0 +1,39 @@
+# Snapmaker U1 chamber camera: default for devices with model 'Snapmaker U1'.
+# Preliminary fit; see docs/research/printer-vision-geometry.md.
+camera:
+  width: 1920
+  height: 1080
+  fx: 1270.5622139008667
+  fy: 1270.5622139008667
+  cx: 960.0
+  cy: 540.0
+  dist:
+  - -0.11853983621449399
+  - 0.0
+  - 0.0
+  - 0.0
+  rvec:
+  - 1.5306454024303382
+  - 0.7702918310925067
+  - -0.7276765695741904
+  tvec:
+  - -143.03542813213843
+  - -11.50630030233323
+  - 273.1451973339296
+  bed:
+  - 0.0
+  - 0.0
+  - 270.0
+  - 270.0
+  bed_moves_z: true
+  model: fisheye
+fit:
+  source: refined edge lines (plate right edge, GFT wall top/base) + prime-tower corners,
+    u1_walls_main_v3 frames at gcode Z 3.62, 6.5, 10.7, 12.38
+  features: u1-camera-features.yaml
+  rms_px: 9.16
+  status: 'preliminary (pose/focal/k1 only): 5-10 px at the prime tower and far walls,
+    20-30 px at the front-right part nearest the camera'
+  plate_mm:
+    x1: 277.0
+    y0: -12.5

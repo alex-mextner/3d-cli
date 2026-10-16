@@ -53,7 +53,8 @@ def state_dir() -> pathlib.Path:
 
 def cache_dir() -> pathlib.Path:
     """`~/.cache/3d-cli/` (or `$XDG_CACHE_HOME/3d-cli`). Re-downloadable or regenerable files:
-    model weights (`vision/models`) and evidence frames of `3d printer vision`. Not auto-created."""
+    model weights (`vision/models`), evidence frames of `3d printer vision`, and the
+    slicer-profile backups of `3d profiles sync`. Not auto-created."""
     return _xdg_root("XDG_CACHE_HOME", (".cache",)) / APP_DIRNAME
 
 

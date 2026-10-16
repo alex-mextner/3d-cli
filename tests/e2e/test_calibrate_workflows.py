@@ -29,10 +29,27 @@ def _env(live: LiveApi, token: str = "rw") -> dict[str, str]:
 def _load(live: LiveApi, material: str, name: str, slot: str, lot: str = "L1") -> int:
     sm = live.spoolman
     vendor = sm.create("vendor", {"name": "Elegoo"})
-    fil = sm.create("filament", {"name": name, "vendor_id": vendor["id"], "material": material,
-                                 "density": 1.27, "diameter": 1.75, "weight": 1000})
-    return int(sm.create("spool", {"filament_id": fil["id"], "lot_nr": lot,
-                                   "extra": {"printops_slot": encode_extra(slot)}})["id"])
+    fil = sm.create(
+        "filament",
+        {
+            "name": name,
+            "vendor_id": vendor["id"],
+            "material": material,
+            "density": 1.27,
+            "diameter": 1.75,
+            "weight": 1000,
+        },
+    )
+    return int(
+        sm.create(
+            "spool",
+            {
+                "filament_id": fil["id"],
+                "lot_nr": lot,
+                "extra": {"printops_slot": encode_extra(slot)},
+            },
+        )["id"]
+    )
 
 
 def _gcode(path: Path, flow: str, pa: str) -> Path:
@@ -51,7 +68,9 @@ def _gcode(path: Path, flow: str, pa: str) -> Path:
     return path
 
 
-def test_new_material_fails_until_recorded_then_footer_must_match(tmp_path: Path, live_api: LiveApi) -> None:
+def test_new_material_fails_until_recorded_then_footer_must_match(
+    tmp_path: Path, live_api: LiveApi
+) -> None:
     """The user loads a PETG never printed on the K1 SE: plan and the gate block flow + PA; after
     recording both, the gate passes for a G-code sliced with those values and fails for one that
     still carries the profile's old flow ratio."""
@@ -64,17 +83,47 @@ def test_new_material_fails_until_recorded_then_footer_must_match(tmp_path: Path
     assert "flow_ratio" in plan.stdout and "new_material_type" in plan.stdout
 
     gcode = _gcode(tmp_path / "part.gcode", flow="0.95", pa="0.04")
-    blocked = run_cli(tmp_path, "calibrate", "check", str(gcode), "--printer", "k1se", env_extra=env)
+    blocked = run_cli(
+        tmp_path, "calibrate", "check", str(gcode), "--printer", "k1se", env_extra=env
+    )
     assert blocked.returncode == 1, blocked.stdout + blocked.stderr
     assert "STATUS: FAIL" in blocked.stdout
 
-    for kind, values in (("flow_ratio", "flow_ratio=0.95"), ("pressure_advance", "pressure_advance=0.04")):
-        rec = run_cli(tmp_path, "calibrate", "record", kind, "--printer", "k1se", "--head", "T1",
-                      "--values", values, "--note", "e2e", env_extra=env)
+    for kind, values in (
+        ("flow_ratio", "flow_ratio=0.95"),
+        ("pressure_advance", "pressure_advance=0.04"),
+    ):
+        rec = run_cli(
+            tmp_path,
+            "calibrate",
+            "record",
+            kind,
+            "--printer",
+            "k1se",
+            "--head",
+            "T1",
+            "--values",
+            values,
+            "--note",
+            "e2e",
+            env_extra=env,
+        )
         assert rec.returncode == 0, rec.stderr
-        assert rec.stdout.startswith("recorded #") and "Elegoo PETG Black lot L1" in rec.stdout
+        assert (
+            rec.stdout.startswith("recorded #")
+            and "Elegoo PETG Black lot L1" in rec.stdout
+        )
 
-    ok = run_cli(tmp_path, "calibrate", "check", str(gcode), "--printer", "k1se", "--json", env_extra=env)
+    ok = run_cli(
+        tmp_path,
+        "calibrate",
+        "check",
+        str(gcode),
+        "--printer",
+        "k1se",
+        "--json",
+        env_extra=env,
+    )
     assert ok.returncode == 0, ok.stdout + ok.stderr
     data = json.loads(ok.stdout)
     levels = {i["kind"]: i["level"] for i in data["items"]}
@@ -82,12 +131,25 @@ def test_new_material_fails_until_recorded_then_footer_must_match(tmp_path: Path
     assert data["file"] == "part.gcode" and len(data["gcode_sha"]) == 64
 
     stale = _gcode(tmp_path / "stale.gcode", flow="0.98", pa="0.04")
-    mismatch = run_cli(tmp_path, "calibrate", "check", str(stale), "--printer", "k1se", env_extra=env)
+    mismatch = run_cli(
+        tmp_path, "calibrate", "check", str(stale), "--printer", "k1se", env_extra=env
+    )
     assert mismatch.returncode == 1
     assert "filament_flow_ratio 0.98 ≠ recorded 0.95" in mismatch.stdout
 
-    accepted = run_cli(tmp_path, "calibrate", "check", str(stale), "--printer", "k1se",
-                       "--accept", "calibration:flow_ratio", "--reason", "flow test print", env_extra=env)
+    accepted = run_cli(
+        tmp_path,
+        "calibrate",
+        "check",
+        str(stale),
+        "--printer",
+        "k1se",
+        "--accept",
+        "calibration:flow_ratio",
+        "--reason",
+        "flow test print",
+        env_extra=env,
+    )
     assert accepted.returncode == 0, accepted.stdout + accepted.stderr
     assert "accepted by test-rw: flow test print" in accepted.stdout
 
@@ -96,48 +158,124 @@ def test_new_material_fails_until_recorded_then_footer_must_match(tmp_path: Path
 
     conn = db.open_db(live_api.settings.db_path)
     try:
-        kinds = [e.kind for e in events.last(conn, 50) if e.kind.startswith("calibration.")]
+        kinds = [
+            e.kind for e in events.last(conn, 50) if e.kind.startswith("calibration.")
+        ]
     finally:
         conn.close()
-    assert kinds == ["calibration.recorded", "calibration.recorded", "calibration.accepted"]
+    assert kinds == [
+        "calibration.recorded",
+        "calibration.recorded",
+        "calibration.accepted",
+    ]
 
 
-def test_lot_change_warns_and_maintenance_invalidates(tmp_path: Path, live_api: LiveApi) -> None:
+def test_lot_change_warns_and_maintenance_invalidates(
+    tmp_path: Path, live_api: LiveApi
+) -> None:
+    """The user loads a new lot of a PLA already calibrated on U1 T1: plan warns about flow only;
+    after a nozzle swap the maintenance event makes pressure advance a FAIL again."""
     spool = _load(live_api, "PLA", "PLA Grey", "u1/T1", lot="A")
     env = _env(live_api)
-    for kind, values in (("flow_ratio", "flow_ratio=0.97"), ("pressure_advance", "pressure_advance=0.025")):
-        assert run_cli(tmp_path, "calibrate", "record", kind, "--printer", "u1", "--head", "T1",
-                       "--values", values, env_extra=env).returncode == 0
+    for kind, values in (
+        ("flow_ratio", "flow_ratio=0.97"),
+        ("pressure_advance", "pressure_advance=0.025"),
+    ):
+        assert (
+            run_cli(
+                tmp_path,
+                "calibrate",
+                "record",
+                kind,
+                "--printer",
+                "u1",
+                "--head",
+                "T1",
+                "--values",
+                values,
+                env_extra=env,
+            ).returncode
+            == 0
+        )
     live_api.spoolman.update("spool", spool, {"lot_nr": "B"})
-    plan = run_cli(tmp_path, "calibrate", "plan", "--printer", "u1", "--head", "T1", "--json", env_extra=env)
+    plan = run_cli(
+        tmp_path,
+        "calibrate",
+        "plan",
+        "--printer",
+        "u1",
+        "--head",
+        "T1",
+        "--json",
+        env_extra=env,
+    )
     items = {i["kind"]: i for i in json.loads(plan.stdout)["items"]}
-    assert (items["flow_ratio"]["level"], items["flow_ratio"]["status"]) == ("WARN", "new_lot")
+    assert (items["flow_ratio"]["level"], items["flow_ratio"]["status"]) == (
+        "WARN",
+        "new_lot",
+    )
     assert "pressure_advance" not in items  # current, hidden without --all
 
     conn = db.open_db(live_api.settings.db_path)
     try:
-        events.emit(conn, "calibration.invalidated", "u1/T1",
-                    {"printer": "u1", "head": "T1", "trigger": "nozzle_swap", "kinds": None,
-                     "reason": "nozzle 0.4 → 0.4 hardened", "maintenance_id": 3, "nozzle_install_id": 9},
-                    "maintenance")
+        events.emit(
+            conn,
+            "calibration.invalidated",
+            "u1/T1",
+            {
+                "printer": "u1",
+                "head": "T1",
+                "trigger": "nozzle_swap",
+                "kinds": None,
+                "reason": "nozzle 0.4 → 0.4 hardened",
+                "maintenance_id": 3,
+                "nozzle_install_id": 9,
+            },
+            "maintenance",
+        )
     finally:
         conn.close()
-    plan = run_cli(tmp_path, "calibrate", "plan", "--printer", "u1", "--head", "T1", env_extra=env)
+    plan = run_cli(
+        tmp_path, "calibrate", "plan", "--printer", "u1", "--head", "T1", env_extra=env
+    )
     assert plan.returncode == 0
     line = next(ln for ln in plan.stdout.splitlines() if "pressure_advance" in ln)
     assert "FAIL" in line and "invalidated" in line and "nozzle_swap" in line
 
 
 def test_calibrate_usage_errors(tmp_path: Path) -> None:
+    """The user asks for help, mistypes a subcommand, accepts a FAIL without a reason and names a
+    missing G-code; each answer says what is wrong and how to call the command instead."""
     helped = run_cli(tmp_path, "calibrate", "--help")
-    assert helped.returncode == 0 and "3d calibrate plan --printer P" in helped.stdout
+    assert helped.returncode == 0
+    assert "3d calibrate plan --printer P" in helped.stdout
     bare = run_cli(tmp_path, "calibrate")
     assert bare.returncode == 1
+    assert "3d calibrate plan --printer P" in bare.stdout
     unknown = run_cli(tmp_path, "calibrate", "tune")
-    assert unknown.returncode == 2 and "unknown calibrate subcommand" in unknown.stderr
-    no_reason = run_cli(tmp_path, "calibrate", "check", __file__, "--printer", "u1", "--accept", "flow_ratio",
-                        env_extra={"PRINTOPS_API": "http://127.0.0.1:9"})
-    assert no_reason.returncode == 2 and "--accept needs --reason" in no_reason.stderr
-    missing = run_cli(tmp_path, "calibrate", "check", "nope.gcode", "--printer", "u1",
-                      env_extra={"PRINTOPS_API": "http://127.0.0.1:9"})
+    assert unknown.returncode == 2
+    assert "unknown calibrate subcommand" in unknown.stderr
+    no_reason = run_cli(
+        tmp_path,
+        "calibrate",
+        "check",
+        __file__,
+        "--printer",
+        "u1",
+        "--accept",
+        "flow_ratio",
+        env_extra={"PRINTOPS_API": "http://127.0.0.1:9"},
+    )
+    assert no_reason.returncode == 2
+    assert "--accept needs --reason" in no_reason.stderr
+    missing = run_cli(
+        tmp_path,
+        "calibrate",
+        "check",
+        "nope.gcode",
+        "--printer",
+        "u1",
+        env_extra={"PRINTOPS_API": "http://127.0.0.1:9"},
+    )
     assert missing.returncode == 2
+    assert "nope.gcode" in missing.stderr
