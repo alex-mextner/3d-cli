@@ -212,6 +212,35 @@ and acceleration measures settings you do not print with). The G-code ends with
 `calc_exclude_triangles` error is accepted in the sidecar only when the machine has no bed
 exclude area.
 
+### U1 plate 1: every test on a white underlay ([#320](https://github.com/alex-mextner/3d-cli/issues/320), [#322](https://github.com/alex-mextner/3d-cli/issues/322), [#308](https://github.com/alex-mextner/3d-cli/issues/308))
+
+The Snapmaker U1 plate is generated as a Snapmaker Orca project by
+`lib/slicing/calibration_plates/u1_underlay.py`. It is not a `gen` sub-plate: the K1 engine
+writes one object per STL, and the U1 needs each test as one object with white and black parts.
+
+```sh
+cd lib && uv run --project .. --with segno --with pillow \
+  python -m slicing.calibration_plates.u1_underlay -o ~/.cache/u1-calib/u1_plate1_underlay_bw.gcode [--date YYYY-MM-DD] [--preview-only]
+```
+
+- The underlay is 2 layers in white on T4 (G-code `T3`), with a 5 mm brim, part fan 0 and the bed
+  at 70 °C for the first layer. The tests are in black on T1 (`T0`) from layer 3. The G-code has
+  exactly one tool change, T4 → T1, above the underlay (#308), and no prime tower.
+- Each test is its own Orca object, so it has its own `EXCLUDE_OBJECT`. The test's white base
+  overlaps the underlay sheet by 0.05 mm so the perimeters fuse. Loose pieces (pins, the tab,
+  hinges, elephant-foot blocks) stand on white feet in cut-outs of the base.
+- Per-object parameters:
+  - ironing is an object setting;
+  - flow, ringing/VFA ACCEL and speed, retraction and temperature are G-code hooks on the black
+    visits; bands are chosen by the layer's mid height (#301);
+  - the temperature bands start above every other test;
+  - PA lines and the MVS strip are hand-written and run inside their own objects.
+- The map `NAME.json` lists each test's `read_by` (`camera_top` / `camera_side` / `manual`,
+  tg#22399), the hooks applied per object and layer, the per-layer tool and fan scan, and the
+  label (`C<date>P1` and its QR when `segno` is installed).
+- Before printing: `3d gcode-thumbnails add`, `3d slice-warnings record` with
+  `NAME.slice.log`, and `3d print-preflight --printer u1`.
+
 ## Events
 
 `calibration.planned`, `calibration.recorded` (with the superseded ids), `calibration.accepted`.
