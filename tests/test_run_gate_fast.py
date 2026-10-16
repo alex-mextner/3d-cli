@@ -172,7 +172,8 @@ def test_fast_main_runs_only_the_selection_and_keeps_pytest_args(
     assert any(cmd[1:3] == ["-m", "mypy"] for cmd in calls), "--fast still type-checks"
 
 
-def test_full_main_runs_the_whole_tests_dir(monkeypatch: pytest.MonkeyPatch, repo: Path) -> None:
+def test_full_main_runs_the_whole_tests_dir_and_the_ha_integration_tests(
+        monkeypatch: pytest.MonkeyPatch, repo: Path) -> None:
     calls: list[list[str]] = []
 
     def fake_run(cmd: list[str], **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
@@ -185,4 +186,5 @@ def test_full_main_runs_the_whole_tests_dir(monkeypatch: pytest.MonkeyPatch, rep
 
     assert run_gate.main(["-k", "registry"]) == 0
     pytest_cmd = next(cmd for cmd in calls if cmd[1:3] == ["-m", "pytest"])
-    assert pytest_cmd[3:] == [os.path.join(str(repo), "tests"), "-k", "registry"]
+    assert pytest_cmd[3:] == [os.path.join(str(repo), "tests"),
+                              os.path.join(str(repo), "integrations", "homeassistant", "tests"), "-k", "registry"]

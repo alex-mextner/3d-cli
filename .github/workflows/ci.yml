@@ -37,7 +37,9 @@ jobs:
         run: |
           command -v shellcheck
           uv run python -c 'import sys; sys.path.insert(0, "tests"); import run_gate; sys.exit(run_gate.run_shellcheck("."))'
+      - name: Run yamllint (Home Assistant integration)
+        run: uv run yamllint --strict -c integrations/homeassistant/.yamllint integrations/homeassistant
       - name: Run pytest with coverage
-        run: uv run pytest tests/ --cov=lib --cov-fail-under=80 -q
+        run: uv run pytest tests/ integrations/homeassistant/tests/ --cov=lib --cov-fail-under=80 -q
       - name: Run mypy
         run: uv run mypy lib/ tests/

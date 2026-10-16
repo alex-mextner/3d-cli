@@ -1,0 +1,61 @@
+# 3D services of the Home Assistant compose project (source of truth).
+# ha.docker-compose.yaml lists this file under `include:` from the 3d-cli submodule, so the
+# services join the same project and the ha-net network declared there. Host paths stay the
+# HA-repo paths (now symlinks into the submodule) so the service config hashes did not change
+# at the cutover; `3d ha deploy` recreates a service when a file it mounts changes.
+services:
+  go2rtc:
+    # Preserve callbacks to HA after HA leaves the bridge network.
+    extra_hosts:
+      - "homeassistant:host-gateway"
+      - "homeassistant.local:host-gateway"
+    image: alexxit/go2rtc:1.9.9
+    user: "1000:1000"
+    volumes:
+      - /home/ultra/homeassistant/go2rtc.yaml:/config/go2rtc.yaml:ro
+    ports:
+      - "1984:1984"
+      - "8554:8554"
+      - "8555:8555/tcp"
+      - "8555:8555/udp"
+    restart: unless-stopped
+    networks:
+      - ha-net
+
+  printer-proxy:
+    # Preserve callbacks to HA after HA leaves the bridge network.
+    extra_hosts:
+      - "homeassistant:host-gateway"
+      - "homeassistant.local:host-gateway"
+    image: nginx:1.27-alpine
+    volumes:
+      - /home/ultra/homeassistant/printer-proxy.nginx.conf:/etc/nginx/nginx.conf:ro
+    expose:
+      - "8080"
+    restart: unless-stopped
+    networks:
+      - ha-net
+
+  u1-camera-proxy:
+    # Preserve callbacks to HA after HA leaves the bridge network.
+    extra_hosts:
+      - "homeassistant:host-gateway"
+      - "homeassistant.local:host-gateway"
+    image: ghcr.io/home-assistant/home-assistant:stable
+    user: "1000:1000"
+    command: ["python", "/config/scripts/u1_mjpeg_proxy.py"]
+    environment:
+      - U1_CAMERA_URL=http://192.168.0.26:7125/server/files/camera/monitor.jpg
+      - U1_CAMERA_FPS=1.0
+      - U1_CAMERA_PORT=8090
+      - U1_CAMERA_START_MONITOR=true
+      - U1_CAMERA_START_MONITOR_URL=http://192.168.0.26:7125/server/mqtt/publish
+      - U1_CAMERA_START_MONITOR_INTERVAL=240
+    volumes:
+      - /usr/share/fonts:/usr/share/fonts:ro
+      - /home/ultra/homeassistant:/config:ro
+    expose:
+      - "8090"
+    restart: unless-stopped
+    networks:
+      - ha-net
