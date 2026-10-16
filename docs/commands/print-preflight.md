@@ -9,7 +9,8 @@ input is missing is SKIP and its line says what to pass — it never passes sile
 
 ```
 3d print-preflight FILE.gcode [--printer NAME] [--axis-limits X0:X1,Y0:Y1|NAME] [--source-3mf FILE.3mf]
-                   [--visible [OBJ:]SPEC]... [--json] [--secs S]
+                   [--visible [OBJ:]SPEC]... [--bridge-max MM] [--printops-api URL] [--offline]
+                   [--printops-snapshot FILE] [--json] [--secs S]
 ```
 
 | Check | When | FAIL means |
@@ -26,6 +27,45 @@ input is missing is SKIP and its line says what to pass — it never passes sile
 | `visible` | `--visible` (SKIP without: the visible side is a design input) | [`3d visible-faces --gcode`](visible-faces.md) finds support or sagging islands on a declared visible side. |
 | `halves` | `--source-3mf` | `3d halves-check FILE.3mf` failed or could not run. |
 
+### PrintOps material gates
+
+[#164](https://github.com/alex-mextner/3d-cli/issues/164), plan §9.1. They run for the target
+printer — `--printer`, `--axis-limits NAME`, else the one printer in `fleet/printers.yaml` whose
+`model` is the G-code's `; printer_model` — and compare the G-code's per-tool slicer settings
+with what PrintOps knows: the fleet topology and, from 3d-api, the spool bound to each slot
+(Spoolman filament + its PrintOps extra fields, the ledger's remaining interval, the drying
+assessment). Code: `lib/printer_ops/printops_checks.py`; state: `lib/printops/gates.py`.
+
+Levels: **PASS / WARN / FAIL / UNVERIFIED**. A check without the data it needs (no 3d-api, no
+spool bound, a filament without a temperature window) is **UNVERIFIED** and says what is
+missing — never PASS. UNVERIFIED does not block on its own; `STATUS:` counts them. A hard finding
+is FAIL under the policy level `block`, WARN under `warn`; `off` hides the check
+(`fleet/policy.yaml` → `gates:`, per printer under `gates.printers`).
+
+| Check | Default level | Hard finding (FAIL under `block`) | Soft (always WARN) |
+|---|---|---|---|
+| `printops` | — | — | where the state came from: live 3d-api, snapshot (WARN when older than `snapshot_max_age_h`), or fleet only (UNVERIFIED) |
+| `printer_profile_match` | block | `; printer_model` is not the target's model (a K1 SE G-code on the U1) | |
+| `nozzle_compat` | block | `; nozzle_diameter` ≠ the head's nozzle; abrasive filament (Spoolman `abrasive`, `; required_nozzle_HRC` > 0, or a CF/GF/GLOW/WOOD/METAL token in the material) on a nozzle outside `abrasive_ok` (hardened, ruby, tungsten) | |
+| `filament_temp_range` | block | `; nozzle_temperature`, `; nozzle_temperature_initial_layer` outside the filament's `nozzle_temp_min..max`; any body `M104/M109` for that tool above the max (standby temps below the min are fine); the plate's footer temps (`curr_bed_type` → `textured_plate_temp` …) or any `M140/M190` outside `bed_temp_min..max` | |
+| `loaded_filament_match` | block | the bound spool's `material` ≠ `; filament_type` (aliases: `gates.material_aliases`); colour ΔE2000 (spool `measured_hex`, else the filament colour, vs `; filament_colour`) above `fail_delta_e` | ΔE above `warn_delta_e`; vendor ≠ `; filament_vendor` (re-check flow/PA). Thresholds per project: `gates.colour.projects` (shell glob on the G-code path) |
+| `slot_binding_known` | warn | | no spool bound to a used slot: usage will not be booked; two spools bound to one slot |
+| `filament_sufficient` | block | `; filament used [g]` + `purge_g_per_tool` + max(`margin_g`, `margin_pct`) above the high end of the remaining interval | need inside the interval: weigh the spool (`3d printops spool measure ID GROSS_G`) |
+| `drying_due` | warn | the spool is `wet` | `due`, or in an open drying session |
+| `maintenance_due` | block | the head is `usable: false` in the fleet; an open fault on it (from #166) | maintenance due (from #166) |
+| `enclosure_material` | warn | a `gates.enclosure_material` material (ABS, ASA, PC, PA…) on a printer with `enclosure: none` | the same on `enclosure: partial` |
+| `plate_material` | warn | `; curr_bed_type` is not among the printer's `plates`; a `gates.plate_material` pairing (PETG/TPU on smooth PEI, ABS/PC/PA on the Cool Plate) | |
+
+Lot changes and calibration values (`; pressure_advance`, `; filament_flow_ratio`) are the
+`calibration_current` gate of the calibration engine ([#167](https://github.com/alex-mextner/3d-cli/issues/167)).
+
+**Where the state comes from.** `--printops-api URL`, else `$PRINTOPS_API`, else `api:` in
+`~/.config/3d-cli/printops.yaml` (token: `$PRINTOPS_TOKEN` / `token:`) → live
+`GET /v1/gates/state?printer=NAME` (scope `read`). `--offline` → the snapshot file written by
+[`3d printops gates snapshot`](printops.md#gates) (`--printops-snapshot`, `$PRINTOPS_SNAPSHOT`,
+default `~/.cache/3d-cli/printops-snapshot.json`), and the printer is not contacted (its fleet
+profile gives the axis limits). Neither → fleet facts only: the spool checks are UNVERIFIED.
+
 Tool numbering: G-code `Tn` and the *n*-th entry of `; filament_colour` are head index *n*,
 which the U1 screen calls T*n+1*. Used tools are read from `; filament used [mm]` (non-zero
 entries), else from `Tn` tool-change lines, else tool 0.
@@ -39,8 +79,11 @@ Options:
 - `--bridge-max MM` — longest span the overhangs gate counts as a bridge; overrides the printer's `bridge_max_mm`: `3d print-preflight out/porch.gcode --axis-limits u1 --bridge-max 25`
 - `--json` — JSON report (`checks[]` with `name`, `status`, `detail`, `lines`): `3d print-preflight out/part.gcode --printer u1 --json | jq '.checks[] | select(.status=="FAIL")'`
 - `--secs S` — Creality: seconds to listen for pushed state: `3d print-preflight out/roof.gcode --printer k1se --secs 5`
+- `--printops-api URL` — 3d-api for the PrintOps gates (default `$PRINTOPS_API`, else `printops.yaml`): `3d print-preflight out/part.gcode --printer u1 --printops-api http://192.168.0.39:8765`
+- `--offline` — no network: no printer contact, PrintOps state from the snapshot (the slicer hook mode); together with `--printops-api` it is a usage error: `3d print-preflight out/part.gcode --offline`
+- `--printops-snapshot FILE` — the snapshot for `--offline`: `3d print-preflight out/part.gcode --offline --printops-snapshot ~/snap.json`
 
-Exit: 0 PASS or WARN, 1 FAIL, 2 usage error or missing file.
+Exit: 0 PASS or WARN (UNVERIFIED lines included), 1 FAIL, 2 usage error or missing file.
 
 ## Examples
 
@@ -54,6 +97,8 @@ Exit: 0 PASS or WARN, 1 FAIL, 2 usage error or missing file.
 3d print-preflight print/k1se/k1_base_4_v3.gcode --axis-limits k1se
 3d print-preflight out/walls.gcode --visible 'WALL*:y<104.8'
 3d print-preflight out/part.gcode --printer u1 --json | jq '.checks[] | select(.status=="FAIL")'
+3d print-preflight out/part.gcode --printer u1 --printops-api http://192.168.0.39:8765
+3d print-preflight out/part.gcode --offline
 ```
 
 BASE4 of the babushkin-dom K1 SE queue, sliced before slicer warnings were recorded (offline,
