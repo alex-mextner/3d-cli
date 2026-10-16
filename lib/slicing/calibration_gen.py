@@ -769,6 +769,15 @@ _DIGITS = {
     "7": "abc",
     "8": "abcdefg",
     "9": "abcdfg",
+    # letters that seven segments draw unambiguously (codes of plate variants)
+    "A": "abcefg",
+    "C": "adef",
+    "E": "adefg",
+    "F": "aefg",
+    "H": "bcefg",
+    "L": "def",
+    "P": "abefg",
+    "U": "bcdef",
 }
 Point = tuple[float, float]
 DOT_W = 0.4  # length of the "." stroke (a short line on the baseline)
@@ -789,7 +798,11 @@ def pa_values(
         lo, hi = pa_range
     if step is not None:
         st = step
-    if not all(math.isfinite(v) for v in (lo, hi, st)) or not (0 <= lo < hi <= 2.0) or st <= 0:
+    if (
+        not all(math.isfinite(v) for v in (lo, hi, st))
+        or not (0 <= lo < hi <= 2.0)
+        or st <= 0
+    ):
         raise GenError(
             f"PA range {lo:g}:{hi:g} step {st:g}: need 0 <= low < high <= 2 and step > 0"
         )
@@ -1082,13 +1095,26 @@ def digit_boxes(
     digit: tuple[float, float, float, float] = TEMP_DIGIT,
     emboss: float = TEMP_EMBOSS,
 ) -> list[Box]:
-    """Seven-segment `digits` lying on a floor at z_floor, raised `emboss`, read from the
-    front (digit 'up' = +y), lower-left corner at (x0, y0). `digit` = width, depth, gap,
-    stroke width."""
+    """Seven-segment `digits` (and ".") lying on a floor at z_floor, raised `emboss`, read from
+    the front (digit 'up' = +y), lower-left corner at (x0, y0). `digit` = width, depth, gap,
+    stroke width; a "." is one stroke square on the baseline."""
     w, h, gap, s = digit
     out: list[Box] = []
-    for k, ch in enumerate(digits):
-        ox = x0 + k * (w + gap)
+    ox = x0
+    for ch in digits:
+        if ch == ".":
+            out.append(
+                (
+                    ox,
+                    y0 - s / 2,
+                    z_floor,
+                    ox + s,
+                    y0 + s / 2,
+                    z_floor + emboss,
+                )
+            )
+            ox += s + gap
+            continue
         for seg in _DIGITS[ch]:
             (ax, ay), (bx, by) = _SEG[seg]
             xa, xb = sorted((ox + ax * w, ox + bx * w))
@@ -1104,6 +1130,7 @@ def digit_boxes(
                     z_floor + emboss,
                 )
             )
+        ox += w + gap
     return out
 
 

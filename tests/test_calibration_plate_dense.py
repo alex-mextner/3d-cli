@@ -34,6 +34,7 @@ def test_hooks_resend_slicer_state_and_balance_extrusion() -> None:
         [
             "SET_VELOCITY_LIMIT ACCEL=5000 ACCEL_TO_DECEL=2500 SQUARE_CORNER_VELOCITY=7",
             "M106 S255",
+            ";Z:1.0",  # the layer below: the next one spans 1.0–1.2, inside the band
             ";Z:1.2",
             "EXCLUDE_OBJECT_START NAME=a.stl_id_0_copy_0",
             "G1 E.8 F2400",
@@ -128,6 +129,51 @@ def test_dense_plate_builds_every_test_and_maps_it(orca: str, tmp_path: Path) ->
 @needs_openscad
 def test_dense_plate_skips_tests(orca: str) -> None:  # noqa: F811
     ctx = cp.make_context(
-        "Creality K1 SE", orca, "PLA", "#E8732A", None, frozenset({"ringing", "vfa"}), presets=STOCK
+        "Creality K1 SE",
+        orca,
+        "PLA",
+        "#E8732A",
+        None,
+        frozenset({"ringing", "vfa"}),
+        presets=STOCK,
     )
     assert {o.name for o in dense.build(ctx).objects} == {"ringing_tower", "vfa_tube"}
+
+
+START = "EXCLUDE_OBJECT_START NAME=a.stl_id_0_copy_0"
+END = "EXCLUDE_OBJECT_END NAME=a.stl_id_0_copy_0"
+
+
+def _layers(*zs: float) -> list[str]:
+    out: list[str] = []
+    for z in zs:
+        out += [f";Z:{z:.1f}", START, "G1 X1 Y1 E.05", "G1 E-.8 F2400", END]
+    return out
+
+
+def test_band_switches_on_the_layer_its_geometry_starts() -> None:
+    # Orca's ;Z:3.0 heads the layer 2.8–3.0, which still belongs to the band below 3.0 (#301)
+    obj = cp.PlateObject(
+        "a",
+        "test",
+        ((0.0, 0.0, 0.0, 5.0, 5.0, 4.0),),
+        bands=(cp.Band(1.0, 3.0, ("BAND_A",)), cp.Band(3.0, 9.0, ("BAND_B",))),
+    )
+    text = "\n".join(_layers(2.6, 2.8, 3.0, 3.2, 3.4))
+    lines = cp.apply_hooks(text, (obj,)).split("\n")
+    heads = [lines[i + 1] for i, ln in enumerate(lines) if ln == START]
+    assert heads == ["BAND_A", "BAND_A", "BAND_A", "BAND_B", "BAND_B"]
+    # nothing but the band lines is added: no dwell, no wait, no extra extrusion
+    assert [ln for ln in lines if not ln.startswith("BAND")] == text.split("\n")
+
+
+def test_by_object_printing_restarts_the_layer_range() -> None:
+    obj = cp.PlateObject(
+        "a",
+        "test",
+        ((0.0, 0.0, 0.0, 5.0, 5.0, 4.0),),
+        bands=(cp.Band(0.0, 0.3, ("LOW",)),),
+    )
+    text = "\n".join(_layers(9.8, 10.0) + _layers(0.2))  # a later tower's first layer
+    lines = cp.apply_hooks(text, (obj,)).split("\n")
+    assert lines.count("LOW") == 1 and lines[lines.index("LOW") - 2] == ";Z:0.2"
