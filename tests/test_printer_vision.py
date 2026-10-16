@@ -345,13 +345,26 @@ def test_the_nozzle_check_label_is_not_a_noodle_verdict() -> None:
     the firmware's nozzle check finding the nozzle, not a defect."""
     mon = _printing_monitor()
     assert mon.npu([NpuVerdict(NOW, "nozzle", 0.9287, 0.0003, 1)], NOW) == []
-    assert mon.npu([NpuVerdict(NOW + 1, " Nozzle ", 0.95, 0.0002, 1)], NOW + 1) == []
+    assert mon.npu([NpuVerdict(NOW + 1, "nozzle", 0.95, 0.0002, 1)], NOW + 1) == []
     assert mon.last_npu is None                                 # nor does it start an episode
     mixed = mon.npu([NpuVerdict(NOW + 5, "nozzle", 0.95, 0.0002, 1),
                      NpuVerdict(NOW + 5, "noodle", 0.85, 0.0629, 1)], NOW + 5)
     assert [(e.kind, e.data["label"], e.data["hits"]) for e in mixed] == [
         ("printer_noodle_verdict", "noodle", 1)
     ]
+
+
+def test_nozzle_verdicts_do_not_extend_a_noodle_episode() -> None:
+    mon = _printing_monitor()
+    assert len(mon.npu([NpuVerdict(NOW, "noodle", 0.9, 0.1, 1)], NOW)) == 1
+    mon.npu([NpuVerdict(NOW + 200, "nozzle", 0.95, 0.0002, 1)], NOW + 200)
+    mon.npu([], NOW + 400)                                     # 400 s after the last noodle: over
+    assert len(mon.npu([NpuVerdict(NOW + 410, "noodle", 0.9, 0.1, 1)], NOW + 410)) == 1
+
+
+def test_the_log_parser_normalises_labels() -> None:
+    line = "12:00:01.5:[defect_detection] response info: {'result': {' Nozzle ': {'obj_probs': 0.93, 'obj_areas': 0.0003, 'obj_cnts': 1}, 7: {'obj_probs': 0.9}}}"
+    assert [v.label for v in parse_klippy_verdicts(line, now=NOW)] == ["nozzle", "7"]
 
 
 @pytest.mark.parametrize("label", ["residue", "spaghetti"])  # a defect label a firmware update may add

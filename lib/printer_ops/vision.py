@@ -245,7 +245,7 @@ def parse_klippy_verdicts(text: str, now: float | None = None) -> list[NpuVerdic
                 out.append(
                     NpuVerdict(
                         ts,
-                        label,
+                        str(label).strip().lower(),  # compared against fixed label names
                         float(v.get("obj_probs") or 0.0),
                         float(v.get("obj_areas") or 0.0),
                         int(v.get("obj_cnts") or 0),
@@ -736,8 +736,7 @@ class VisionMonitor:
     def npu(self, verdicts: list[NpuVerdict], now: float) -> list[Any]:
         """The printer's own detector: one warning per noodle episode, while printing."""
         ignored = self.limits.npu_ignored_labels
-        hits = [v for v in verdicts
-                if v.label.strip().lower() not in ignored and v.prob >= self.limits.npu_threshold]
+        hits = [v for v in verdicts if v.label not in ignored and v.prob >= self.limits.npu_threshold]
         if hits:
             self.last_npu = max(hits, key=lambda v: v.prob)
         recent = (
