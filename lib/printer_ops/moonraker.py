@@ -152,12 +152,16 @@ class MoonrakerAdapter(Adapter):
             raise self._comm_error(f"POST {path}", exc) from exc
         return body.get("result", body) if isinstance(body, dict) else body
 
-    def status(self) -> PrinterStatus:
-        result = self._get("/printer/objects/query?" + _QUERY)
+    def query(self, objects: str) -> dict[str, Any]:
+        """One read-only `objects/query` (e.g. "print_stats&filament_detect") -> its status dict."""
+        result = self._get("/printer/objects/query?" + objects)
         status = result.get("status") if isinstance(result, dict) else None
         if not isinstance(status, dict):
             raise self._comm_error("objects/query", f"no 'status' in reply: {str(result)[:200]}")
-        return parse_status(status)
+        return status
+
+    def status(self) -> PrinterStatus:
+        return parse_status(self.query(_QUERY))
 
     def axis_limits(self) -> tuple[Limits | None, str]:
         """Configured limits win; otherwise Klipper's own stepper_x/stepper_y position_min/max."""

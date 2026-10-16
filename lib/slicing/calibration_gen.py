@@ -761,11 +761,12 @@ def pa_values(
         lo, hi = pa_range
     if step is not None:
         st = step
-    if not (0 <= lo < hi <= 2.0) or st <= 0:
+    if not all(math.isfinite(v) for v in (lo, hi, st)) or not (0 <= lo < hi <= 2.0) or st <= 0:
         raise GenError(
             f"PA range {lo:g}:{hi:g} step {st:g}: need 0 <= low < high <= 2 and step > 0"
         )
-    n = round((hi - lo) / st) + 1
+    # whole steps that fit: never a line above HIGH (0.03:0.05 step 0.003 ends at 0.048)
+    n = math.floor((hi - lo) / st + 1e-9) + 1
     if n > PA_MAX_LINES:
         raise GenError(
             f"PA range {lo:g}:{hi:g} step {st:g} is {n} lines; at most {PA_MAX_LINES}"

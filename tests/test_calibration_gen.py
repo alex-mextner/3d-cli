@@ -450,3 +450,22 @@ def test_digit_paths_draw_a_decimal_point() -> None:
     ]
     assert len(dots) == 1 and dots[0][0][0] == pytest.approx(3.0)
     assert cg.text_width("2.5", 2, 1) == pytest.approx(2 + cg.DOT_W + 2 + 2)
+
+
+def test_pa_values_never_pass_high_and_reject_non_finite() -> None:
+    vals = cg.pa_values("PLA", (0.03, 0.05), 0.003)
+    assert vals[-1] <= 0.05 and vals[-1] == pytest.approx(0.048)
+    assert cg.pa_values("PLA", (0.03, 0.05), 0.0025)[-1] == pytest.approx(0.05)  # exact fit keeps HIGH
+    for bad in (float("nan"), float("inf")):
+        with pytest.raises(cg.GenError, match="need 0 <= low < high"):
+            cg.pa_values("PLA", (0.03, 0.05), bad)
+
+
+def test_cli_rejects_non_finite_numbers() -> None:
+    from commands.calibrate import _float
+    from errors import UsageError
+
+    for raw in ("nan", "inf", "-inf"):
+        with pytest.raises(UsageError, match="finite number"):
+            _float(raw, "--pa-step")
+    assert _float("0.0025", "--pa-step") == 0.0025

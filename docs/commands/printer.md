@@ -110,7 +110,7 @@ A key that is not known is left out (shown as `null`/`-`), never guessed.
 $ 3d printer list
   NAME          OWNER        ACCESS    MODEL                ADDRESS                         HEADS
   a1mini        boris        offline   Bambu Lab A1 mini    - (never contacted)             T1
-  k1se          own          full      Creality K1 SE       creality-stock 192.168.0.27:80  T1
+  k1se          own          full      Creality K1 SE       moonraker 192.168.0.27:7125     T1
   p1s           neighbour    offline   Bambu Lab P1S        - (never contacted)             T1
   u1            own          full      Snapmaker U1         moonraker 192.168.0.26:7125     T1 | T2 UNUSABLE | T3 | T4
       T2: head T2 does not work (babushkin-dom gen/queue.json: «слот 2 — заглушка, голова T2 не работает»; …)
@@ -135,8 +135,8 @@ u1:
   port: 7125                # default 7125
   model: Snapmaker U1
 k1se:
-  adapter: creality-stock   # Creality K1 family on stock firmware
-  host: 192.168.0.27
+  adapter: creality-stock   # Creality K1 family on stock firmware (the fleet's rooted K1 SE uses
+  host: 192.168.0.27        # moonraker:7125; this whole entry replaces it, dropping its watch.vision)
   model: Creality K1 SE     # port defaults to 80, ws_port to 9999
   axis_limits: {x: [-5, 229], y: [-0.5, 227]}
   trusted_macros: [START_PRINT, END_PRINT, PAUSE]
@@ -172,6 +172,10 @@ The Creality upload sends **only** the `file` field: with an extra `path` field 
 stored 165–168 bytes more than it received
 ([#99](https://github.com/alex-mextner/3d-cli/issues/99)). The stored size is always compared
 with the local file.
+
+A rooted K1 with the Creality Helper Script runs Moonraker on `:7125` and can use the
+`moonraker` adapter instead. The stock `:80`/`:9999` stack keeps running next to it. See
+[K1 SE: root + Helper Script](../printers/k1se-root-upgrade.md).
 
 ## Watching printers
 
@@ -328,8 +332,10 @@ verifier and threshold tuning: [printer-vision-tuning.md](../research/printer-vi
    printer's axis limits and the macro check ([`3d gcode-bounds`](gcode-bounds.md)), the
    overhang check ([`3d gcode-overhangs`](gcode-overhangs.md)), the slicer-warnings record
    next to the G-code ([`3d slice-warnings`](slice-warnings.md)), the head-sequence check
-   (project 3MF from `--source-3mf` or next to the G-code), thumbnails; a FAIL blocks the
-   start unless `--force`.
+   (project 3MF from `--source-3mf` or next to the G-code), thumbnails, and the PrintOps
+   material gates of `3d print-preflight --printer NAME` (live 3d-api state from
+   `$PRINTOPS_API` / `printops.yaml`, else fleet facts only); a FAIL blocks the start unless
+   `--force`.
 5. `upload` refuses while a Creality printer is busy (the firmware does not protect the
    running job), and on any printer refuses to overwrite the file being printed.
 6. `start` succeeds only when the printer acknowledges it: Moonraker's HTTP reply, or on

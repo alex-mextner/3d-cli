@@ -57,6 +57,16 @@ _VALUE_KEYS = ("type", "min", "max", "unit", "optional")
 _GCODE_KEYS = ("key", "compare", "tolerance", "enabled_by")
 
 
+
+def _finite_number(v: object) -> bool:
+    """A real number a float can hold: not bool, not NaN/inf, not an int too big for a float."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return False
+    try:
+        return math.isfinite(v)
+    except OverflowError:
+        return False
+
 class CatalogError(ValueError):
     """The catalog file is missing, not YAML, or breaks its schema."""
 
@@ -135,7 +145,7 @@ class Kind:
                     v = float(v)
                 except ValueError:
                     raise CatalogError(f"{self.id}: {name} must be a number, got {v!r}") from None
-            if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+            if not _finite_number(v):
                 raise CatalogError(f"{self.id}: {name} must be a finite number, got {v!r}")
             if (spec.min is not None and v < spec.min) or (spec.max is not None and v > spec.max):
                 raise CatalogError(
@@ -300,8 +310,7 @@ def _values(where: str, raw: Any) -> dict[str, ValueSpec]:
         lo: Any = spec.get("min")
         hi: Any = spec.get("max")
         if vtype == "number":
-            numbers = all(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
-                          for v in (lo, hi))
+            numbers = _finite_number(lo) and _finite_number(hi)
             if not numbers:
                 raise CatalogError(f"{w}: min and max are required for a number and must be finite numbers")
             if lo > hi:

@@ -511,3 +511,18 @@ def test_user_preset_roots_follow_the_profiles_resolver(tmp_path: Path, monkeypa
     monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     assert cg.user_preset_roots() == [repo, data / "user" / "12345"]
+
+
+@pytest.mark.parametrize("only", [{"pa"}, {"mvs"}, {"temp"}, {"pa", "mvs", "temp"}])
+def test_plate1_needs_a_test_sliced_by_layer(orca: str, only: set[str]) -> None:
+    ctx = cp.make_context("Creality K1 SE", orca, "PLA", "#E8732A", None, frozenset(only), presets=STOCK)
+    with pytest.raises(cg.GenError, match="must keep one of flow, bridge, overhang, retraction"):
+        filament.build(ctx)
+
+
+def test_plate1_single_sliced_tests_build(orca: str, tmp_path: Path) -> None:
+    for test in filament.LAYER_TESTS:
+        ctx = cp.make_context("Creality K1 SE", orca, "PLA", "#E8732A", None, frozenset({test}), presets=STOCK)
+        out = tmp_path / f"{test}.gcode"
+        cp.build_plate(ctx, filament.build(ctx), orca, out)
+        assert out.is_file()
