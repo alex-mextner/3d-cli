@@ -217,3 +217,27 @@ def test_bundled_u1_calibration_projects_bed_into_frame() -> None:
     corners = np.array([[x, y, 0.0] for x in (0, 270) for y in (0, 270)])
     uv = cam.project(corners, 0.5)
     assert np.isfinite(uv).all()
+
+
+def test_bundled_u1_calibration_is_pinned_over_the_full_height() -> None:
+    """The #262 refit, pinned: a sign or pose slip moves these pixels far past 2 px. The
+    references are the refit's own projections (its per-frame fit quality is in the yaml)."""
+    cam = vg.bundled_calibration("Snapmaker U1")
+    assert cam is not None and cam.model == "fisheye" and cam.bed_moves_z
+    eye = (
+        cam.camera_center()
+    )  # low at the front-right corner, a little above the nozzle plane
+    assert 280 < eye[0] < 310 and -45 < eye[1] < -5 and 5 < eye[2] < 25
+    pts = np.array([[135.0, 135.0, 0.0], [219.0, 217.0, 0.0], [219.0, 217.0, 40.0]])
+    expected = {
+        10.58: [[1137.1, 492.5], [1719.9, 513.1], [1729.6, 307.6]],
+        89.42: [[1120.1, 880.3], [1667.4, 889.2], [1698.7, 705.8]],
+    }
+    for z, uv in expected.items():
+        assert np.allclose(cam.project(pts, z), uv, atol=2.0)
+    data = yaml.safe_load(
+        (vg._BUILTIN_DIR / "u1-camera.yaml").read_text(encoding="utf-8")
+    )
+    fit = data["fit"]
+    assert len(fit["frames"]) == len(fit["green_iou"]["refit"]) == 12
+    assert np.mean(fit["green_iou"]["refit"]) > np.mean(fit["green_iou"]["previous"])

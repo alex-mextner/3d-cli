@@ -634,7 +634,9 @@ def build_plan(
     plan = Plan(sha=source.sha, live_sha=live_sha, ha_dir=ha_dir)
     plan.problems += manifest_orphans(manifest, source.files())
     if state.get("fetch_error"):
-        plan.warnings.append(
+        # origin/main is the base of the recorded PR commit and the fast-forward target; a
+        # stale copy would rebuild (and force-push) the deploy branch on an old main.
+        plan.problems.append(
             f"git fetch origin in the HA repo failed: {state['fetch_error']}"
         )
 
@@ -1068,9 +1070,15 @@ def apply(
 
 
 def record(host: Host, manifest: Manifest, plan: Plan, log: list[str]) -> str | None:
-    """Stage the deployed paths, commit them on a branch (not main) and open the HA-repo PR."""
+    """Stage the deployed paths, commit them on a branch (not main) and open the HA-repo PR.
+
+    The PR commit is built on origin/main, never on the live HEAD: the live checkout may carry
+    local commits nobody pushed, and a branch built on them would publish them with the PR.
+    .gitmodules is never taken from the working tree (it may hold other sessions' edits): at
+    the cutover the branch gets origin/main's .gitmodules plus only this submodule's stanza.
+    """
     r = manifest.ha_repo
-    paths = [r.submodule, ".gitmodules", *(f.dest for f in manifest.files)]
+    paths = [r.submodule, *(f.dest for f in manifest.files)]
     branch = f"{BRANCH_PREFIX}{plan.sha[:12]}"
     msg = (
         f"3d ha deploy: 3d-cli {plan.sha[:12]}\n\n"
@@ -1084,25 +1092,44 @@ def record(host: Host, manifest: Manifest, plan: Plan, log: list[str]) -> str | 
 cd {_q(plan.ha_dir)}
 export PATH="$HOME/.local/bin:$PATH"
 # The real index carries the deployed paths so main fast-forwards once the PR is merged.
-git add -A -- {quoted}
+# -f: manifest dests may sit under an ignored directory (www/* in the HA repo); they are
+# listed explicitly, and without -f `git add -A` refuses the whole pathspec.
+git add -A -f -- {quoted}
 tmp=$(mktemp)
 rm -f "$tmp"
 trap 'rm -f "$tmp"' EXIT
 export GIT_INDEX_FILE="$tmp"
-git read-tree HEAD
-git add -A -- {quoted}
+git read-tree origin/main
+git add -A -f -- {quoted}
+if ! git config --blob origin/main:.gitmodules --get {_q(f"submodule.{r.submodule}.path")} >/dev/null 2>&1; then
+  # Cutover: origin/main's .gitmodules plus only this submodule's stanza.
+  gm=$(mktemp)
+  git show origin/main:.gitmodules > "$gm" 2>/dev/null || : > "$gm"
+  git config -f "$gm" {_q(f"submodule.{r.submodule}.path")} {_q(r.submodule)}
+  git config -f "$gm" {_q(f"submodule.{r.submodule}.url")} {_q(r.submodule_url)}
+  git update-index --add --cacheinfo "100644,$(git hash-object -w "$gm"),.gitmodules"
+  rm -f "$gm"
+fi
 tree=$(git write-tree)
-if [ "$tree" = "$(git rev-parse 'HEAD^{{tree}}')" ]; then echo NOCHANGE; exit 0; fi
+if [ "$tree" = "$(git rev-parse 'origin/main^{{tree}}')" ]; then echo NOCHANGE; exit 0; fi
+# An earlier run already pushed this exact state (the probe fetched origin): keep its PR as is.
+if [ "$tree" = "$(git rev-parse -q --verify {_q(f"refs/remotes/origin/{branch}^{{tree}}")} 2>/dev/null)" ]; then
+  echo "RECORDED"; exit 0
+fi
 hooks=$(git config core.hooksPath || echo .git/hooks)
 if [ -x "$hooks/pre-commit" ]; then "$hooks/pre-commit" >&2; fi
-commit=$(printf '%s\\n' {_q(msg)} | git commit-tree "$tree" -p HEAD)
+commit=$(printf '%s\\n' {_q(msg)} | git commit-tree "$tree" -p origin/main)
 git update-ref {_q("refs/heads/" + branch)} "$commit"
 echo "$commit"
 """
     out = host.sh(script).stdout.strip().splitlines()
     if not out or out[-1] == "NOCHANGE":
-        log.append("HA repo: nothing to record (HEAD already has this state)")
+        log.append("HA repo: nothing to record (origin/main already has this state)")
         return None
+    if out[-1] == "RECORDED":
+        url = ensure_pr(manifest, branch, msg)
+        log.append(f"HA repo: {branch} already holds this state -> {url}")
+        return url
     commit = out[-1]
     url = publish(host, manifest, plan, branch, commit, msg)
     log.append(f"HA repo: {branch} {commit[:12]} -> {url}")
@@ -1147,6 +1174,12 @@ def publish(
     host.sh(
         f"git -C {_q(plan.ha_dir)} update-ref -d {_q(ref)} {_q(commit)}", check=False
     )
+    return ensure_pr(manifest, branch, msg)
+
+
+def ensure_pr(manifest: Manifest, branch: str, msg: str) -> str:
+    """The open PR for the pushed deploy branch (created when missing); closes older ones."""
+    r = manifest.ha_repo
     existing = _run(
         [
             "gh",
@@ -1286,7 +1319,18 @@ def deploy(opts: Options, repo_root: Path) -> int:
             print(f"summary: {len(plan.changes())} change(s)")
             return 0
         if not plan.changes():
-            print("summary: 0 changes; nothing to deploy")
+            # Live already runs this state. If the HA repo has no record of it (an earlier run
+            # failed after applying), only (re)create the deploy branch and PR.
+            url = None
+            if plan.live_sha:
+                record_log: list[str] = []
+                try:
+                    url = record(host, manifest, plan, record_log)
+                finally:
+                    for line in record_log:
+                        print(f"  {line}", flush=True)
+            print(f"summary: 0 changes; recorded the live state ({url})" if url
+                  else "summary: 0 changes; nothing to deploy")
             return 0
         log: list[str] = []
         try:

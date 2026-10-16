@@ -429,7 +429,7 @@ def test_staged_live_edit_blocks_but_the_previous_deploys_own_copy_does_not(
     assert "www/card/card.js: content changes (copy)" in capsys.readouterr().out
 
     (world.ha / "www/card/card.js").write_text("export const hotfix = 1;\n")
-    git(world.ha, "add", "www/card/card.js")
+    git(world.ha, "add", "-f", "www/card/card.js")
     with pytest.raises(GateFailure, match="blocking problem"):
         _deploy(world, dry_run=True)
     assert "www/card/card.js: live file has uncommitted edits" in capsys.readouterr().out
@@ -451,3 +451,76 @@ def test_option_like_host_is_rejected() -> None:
         ha_deploy.Host("-oProxyCommand=touch /tmp/x")
     assert any("may not start with '-'" in step for step in err.value.remediation)
     assert ha_deploy.Host("ultra@h")._argv("true")[-3:] == ["--", "ultra@h", "true"]
+
+
+def test_deploy_pr_is_built_on_origin_main_not_on_unpushed_local_commits(world: World) -> None:
+    """The live checkout may carry commits nobody pushed (other sessions' work, local .gitmodules
+    edits); the deploy PR branch must contain only origin/main plus the deployed paths."""
+    (world.ha / "local-only.txt").write_text("not for publishing\n", encoding="utf-8")
+    git(world.ha, "add", "local-only.txt")
+    git(world.ha, "commit", "-q", "-m", "local work nobody pushed")
+    local = git(world.ha, "rev-parse", "HEAD")
+    assert _deploy(world) == 0
+    pushed = git(world.origin, "rev-parse", f"refs/heads/3d-deploy/{world.sha[:12]}")
+    assert git(world.origin, "rev-parse", f"{pushed}^") == git(world.origin, "rev-parse", "main")
+    assert local not in git(world.origin, "rev-list", "--all").split()
+    names = git(world.origin, "ls-tree", "-r", "--name-only", pushed).splitlines()
+    assert "local-only.txt" not in names
+    assert "packages/3d_printers.yaml" in names
+
+
+def test_deploy_never_publishes_local_gitmodules_edits(world: World) -> None:
+    """At the cutover (origin/main has no 3d-cli stanza yet) the PR gets origin/main's
+    .gitmodules plus only that stanza; another session's uncommitted submodule entry in the
+    working tree stays local and is not staged by the deploy either."""
+    other = world.root / "origin-edit"
+    git(world.root, "clone", "-q", str(world.origin), str(other))
+    git(other, "config", "-f", ".gitmodules", "--remove-section", "submodule.3d-cli")
+    git(other, "commit", "-q", "-am", "main without the 3d-cli stanza")
+    git(other, "push", "-q", "origin", "HEAD:main")
+    git(world.ha, "fetch", "-q", "origin")
+    git(world.ha, "config", "-f", ".gitmodules", "submodule.other.path", "other")
+    git(world.ha, "config", "-f", ".gitmodules", "submodule.other.url", "https://example.invalid/other.git")
+    assert _deploy(world) == 0
+    pushed = git(world.origin, "rev-parse", f"refs/heads/3d-deploy/{world.sha[:12]}")
+    gitmodules = git(world.origin, "show", f"{pushed}:.gitmodules")
+    assert '[submodule "3d-cli"]' in gitmodules
+    assert "other" not in gitmodules
+    assert ".gitmodules" not in git(world.ha, "diff", "--cached", "--name-only").splitlines()
+
+
+def test_failed_record_is_retried_by_the_next_deploy_without_reapplying(
+        world: World, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """A deploy applied live but its HA-repo PR step failed (here gh). The next run sees 0
+    changes, applies nothing, and only records the live state; a third run finds the branch
+    already pushed and stays quiet."""
+    monkeypatch.setenv("FAKE_GH_RC", "1")
+    with pytest.raises(GateFailure):
+        _deploy(world)
+    assert (world.ha / "packages/3d_printers.yaml").is_symlink()  # applied
+    branch = f"refs/heads/3d-deploy/{world.sha[:12]}"
+    monkeypatch.delenv("FAKE_GH_RC")
+    checks_before = len([c for c in world.calls("docker") if " exec " in c])
+    capsys.readouterr()
+    assert _deploy(world) == 0
+    out = capsys.readouterr().out
+    assert "changes (0):" in out and "recorded the live state (https://github.com/test/ha/pull/7)" in out
+    assert "already holds this state" in out  # gh failed after the push; the PR is created now
+    assert len([c for c in world.calls("docker") if " exec " in c]) == checks_before  # no check_config
+    pushed = git(world.origin, "rev-parse", branch)
+    assert git(world.origin, "cat-file", "-p", f"{pushed}:www/card").count("card.js") == 1
+    assert _deploy(world) == 0
+    out = capsys.readouterr().out
+    assert "already holds this state -> https://github.com/test/ha/pull/7" in out
+    assert git(world.origin, "rev-parse", branch) == pushed
+
+
+def test_unreachable_origin_blocks_instead_of_recording_on_a_stale_main(
+        world: World, capsys: pytest.CaptureFixture[str]) -> None:
+    """The deploy branch is built on origin/main; when the host can't fetch origin, the copy
+    it has may be stale, so the deploy stops before touching anything."""
+    git(world.ha, "remote", "set-url", "origin", str(world.root / "gone.git"))
+    with pytest.raises(GateFailure, match="blocking problem"):
+        _deploy(world)
+    assert "git fetch origin in the HA repo failed" in capsys.readouterr().out
+    assert not (world.ha / "packages/3d_printers.yaml").is_symlink()

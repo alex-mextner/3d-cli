@@ -59,13 +59,58 @@ class Frame:
     modified: float | None  # Last-Modified of the snapshot, when the server sends it
 
 
-def is_complete_jpeg(data: bytes) -> bool:
-    """SOI at the start and EOI at the end: the cheap test for a half-written monitor.jpg."""
-    return (
-        len(data) > 4
-        and data[:2] == b"\xff\xd8"
-        and data.rstrip(b"\x00")[-2:] == b"\xff\xd9"
-    )
+# The K1 SE's mjpg-streamer (hardware encoder) pads frames with ~25 filler bytes after EOI.
+EOI_TAIL_MAX = 64
+
+
+def _jpeg_end(data: bytes) -> int | None:
+    """Index just past the EOI that closes the image, walking the marker segments by length
+    (so FFD9/FFDA bytes inside APP/COM payloads or an EXIF thumbnail never count), or None when
+    the data ends before EOI. Scan data byte-stuffs 0xFF, so there FFxx is a real marker."""
+    i, n, scanned = 2, len(data), False
+    while i + 1 < n:
+        if data[i] != 0xFF:
+            if not scanned:
+                return None  # garbage between header segments
+            i = data.find(b"\xff", i)  # skip entropy-coded scan data to the next 0xFF
+            if i == -1:
+                return None
+            continue
+        marker = data[i + 1]
+        if marker == 0xFF:  # fill byte before a marker
+            i += 1
+        elif marker in (0x00, 0x01) or 0xD0 <= marker <= 0xD7:  # stuffed 0xFF / TEM / RSTn
+            i += 2
+        elif marker == 0xD9:
+            return i + 2 if scanned else None
+        elif i + 3 >= n:
+            return None
+        else:
+            seg_end = i + 2 + int.from_bytes(data[i + 2 : i + 4], "big")
+            if seg_end > n:
+                return None
+            scanned = scanned or marker == 0xDA
+            i = seg_end
+    return None
+
+
+def jpeg_frame(data: bytes, tail_max: int = 0) -> bytes | None:
+    """The JPEG cut at its EOI, or None for a half-written monitor.jpg / non-JPEG body.
+
+    At most `tail_max` filler bytes (beyond a zero tail) may follow EOI. Keep it 0 for a file
+    rewritten in place: there an old padded frame's EOI+tail could close a half-new hybrid.
+    The filler is dropped so a frozen camera with varying padding hashes as the same frame."""
+    if len(data) <= 4 or data[:2] != b"\xff\xd8":
+        return None
+    end = _jpeg_end(data)
+    # monitor.jpg rewritten in place can carry a zero tail of any length
+    if end is None or len(data.rstrip(b"\x00")) - end > tail_max:
+        return None
+    return data[:end]
+
+
+def is_complete_jpeg(data: bytes, tail_max: int = 0) -> bool:
+    return jpeg_frame(data, tail_max) is not None
 
 
 def _get(
@@ -124,6 +169,11 @@ class MoonrakerCamera:
         self.keepalive_enabled = (
             snapshot == U1_MONITOR if keepalive is None else keepalive
         )
+        # A camera streamer (mjpg-streamer, ustreamer, go2rtc) sends whole in-memory frames, so
+        # encoder padding is safe there; a file under Moonraker's /server/files/ (the U1
+        # monitor.jpg) is rewritten in place, so a tail could belong to the previous frame.
+        in_place = "/server/files/" in urlsplit(self.url).path  # also behind a proxy prefix
+        self.tail_max = 0 if in_place else EOI_TAIL_MAX
         self._last_keepalive = float("-inf")
 
     def keepalive(self, now: float | None = None) -> bool:
@@ -174,10 +224,11 @@ class MoonrakerCamera:
             if status != 200:
                 last = f"HTTP {status}"
                 continue
-            if not is_complete_jpeg(data):
+            frame = jpeg_frame(data, self.tail_max)
+            if frame is None:
                 last = f"incomplete JPEG ({len(data)} bytes)"
                 continue
-            return Frame(ts, data, _http_date(headers.get("last-modified")))
+            return Frame(ts, frame, _http_date(headers.get("last-modified")))
         raise PrinterCommError(
             f"no camera frame from {self.url} after {GRAB_RETRIES} tries: {last}",
             command="printer vision",
@@ -245,7 +296,7 @@ def parse_klippy_verdicts(text: str, now: float | None = None) -> list[NpuVerdic
                 out.append(
                     NpuVerdict(
                         ts,
-                        label,
+                        str(label).strip().lower(),  # compared against fixed label names
                         float(v.get("obj_probs") or 0.0),
                         float(v.get("obj_areas") or 0.0),
                         int(v.get("obj_cnts") or 0),
@@ -524,6 +575,11 @@ class MonitorLimits:
     )
     npu_threshold: float = 0.83  # the U1's own threshold at sensitivity "low"
     npu_quiet_s: float = 300.0  # no NPU hit for this long ends a noodle episode
+    # NPU labels that are not defects. "nozzle" is the firmware's nozzle check: a high prob
+    # means the nozzle was found (clean), defect_detection.detect_dirty_nozzle; it shows up at
+    # every U1 print start (#306). A denylist, so a defect label added by a firmware update
+    # still reaches the agent.
+    npu_ignored_labels: frozenset[str] = frozenset({"nozzle"})
 
 
 _RANK: dict[str | None, int] = {None: 0, INFO: 1, WARNING: 2, CRITICAL: 3}
@@ -730,7 +786,8 @@ class VisionMonitor:
 
     def npu(self, verdicts: list[NpuVerdict], now: float) -> list[Any]:
         """The printer's own detector: one warning per noodle episode, while printing."""
-        hits = [v for v in verdicts if v.prob >= self.limits.npu_threshold]
+        ignored = self.limits.npu_ignored_labels
+        hits = [v for v in verdicts if v.label not in ignored and v.prob >= self.limits.npu_threshold]
         if hits:
             self.last_npu = max(hits, key=lambda v: v.prob)
         recent = (

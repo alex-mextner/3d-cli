@@ -234,6 +234,7 @@ exit "${FAKE_CURL_RC:-0}"
 """
 FAKE_GH = """#!/bin/bash
 echo "gh $*" >> "$FAKE_LOG"
+[ -n "${FAKE_GH_RC:-}" ] && exit "$FAKE_GH_RC"
 if [ "$1 $2" = "pr create" ]; then echo "https://github.com/test/ha/pull/7"; fi
 """
 
@@ -267,7 +268,8 @@ def build_world(tmp_path: Path) -> World:
     (ha / "configuration.yaml").write_text(CONFIGURATION, encoding="utf-8")
     (ha / "ha.docker-compose.yaml").write_text(HA_COMPOSE, encoding="utf-8")
     (ha / ".env").write_text('HA_TOKEN="secret-token"\n', encoding="utf-8")
-    (ha / ".gitignore").write_text(".env\n.3d-cli-deployed\n", encoding="utf-8")
+    # Like the real HA repo: www/ is ignored and its tracked files were added with -f.
+    (ha / ".gitignore").write_text(".env\n.3d-cli-deployed\nwww/*\n", encoding="utf-8")
     # Pre-cutover shape: the dests are regular files with the source's bytes.
     for rel, dest in (
         ("packages/3d_printers.yaml", "packages/3d_printers.yaml"),
@@ -279,6 +281,7 @@ def build_world(tmp_path: Path) -> World:
         (ha / dest).write_bytes((integ / rel).read_bytes())
     git(ha, "submodule", "add", "-q", str(src), "3d-cli")
     git(ha, "add", "-A")
+    git(ha, "add", "-f", "www/card/card.js")  # tracked despite www/*, as in the real repo
     git(ha, "commit", "-q", "-m", "ha config")
     git(tmp_path, "clone", "-q", "--bare", str(ha), str(origin))
     git(ha, "remote", "add", "origin", str(origin))

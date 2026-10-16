@@ -46,7 +46,7 @@ Issue: [#156](https://github.com/alex-mextner/3d-cli/issues/156).
 | `www/u1-share/*` | `www/u1-share/` | tracked copy |
 | `compose/3d.docker-compose.yaml` | — | `ha.docker-compose.yaml` lists it under `include:` |
 | `snippets/configuration.3d.yaml` | — | the 3D keys of `configuration.yaml` (ingress panels, Lovelace dashboard and resources); checked, never copied |
-| `vendor.lock` | — | pins of moonraker-home-assistant 1.13.4, ha_creality_ws v0.9.7, WebRTC v3.6.1; checked against the live `manifest.json` versions and submodule commits |
+| `vendor.lock` | — | pins of moonraker-home-assistant 1.13.4, ha_creality_ws 0.9.9, WebRTC v3.6.1; checked against the live `manifest.json` versions and submodule commits |
 | `manifest.yaml` | — | the table above, plus the HA-repo settings `3d ha deploy` uses |
 
 `tests/u1_print_inspector/` runs in the 3d-cli gate (`dev run test`), and `yamllint` checks
@@ -92,12 +92,17 @@ when a changed file is not mounted by the service it lists.
    regression restores the backup and runs the same reloads/recreates on the old files.
 8. **Record**: `.3d-cli-deployed` in the HA repo gets the SHA, time and backup path. The
    deployed paths are staged in the HA checkout and committed on a branch
-   `3d-deploy/<sha12>` (the HA repo's pre-commit hook runs on it), which is pushed through
+   `3d-deploy/<sha12>` built on `origin/main`, never on the live HEAD, so local commits nobody
+   pushed are not published with it. `.gitmodules` is never taken from the working tree: at the
+   cutover the branch gets origin/main's file plus only the 3d-cli stanza. The HA repo's
+   pre-commit hook runs on the commit, which is pushed through
    this machine and opened as a PR in the HA repo; older open `3d-deploy/*` PRs are closed as
    superseded. `main` on the host is not moved: the live checkout runs ahead of `main` until
    the PR merges, and `--dry-run` reports `pointer not yet merged` meanwhile instead of
    failing. Merge it with a merge commit; the next deploy then fast-forwards the checkout
    without touching the working tree.
+   If a run fails after applying, for example at the PR step, run it again: with nothing
+   left to apply it only records the live state (branch + PR) and does not touch HA.
 
 ## Cutover (once)
 

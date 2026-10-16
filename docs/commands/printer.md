@@ -332,8 +332,10 @@ verifier and threshold tuning: [printer-vision-tuning.md](../research/printer-vi
    printer's axis limits and the macro check ([`3d gcode-bounds`](gcode-bounds.md)), the
    overhang check ([`3d gcode-overhangs`](gcode-overhangs.md)), the slicer-warnings record
    next to the G-code ([`3d slice-warnings`](slice-warnings.md)), the head-sequence check
-   (project 3MF from `--source-3mf` or next to the G-code), thumbnails; a FAIL blocks the
-   start unless `--force`.
+   (project 3MF from `--source-3mf` or next to the G-code), thumbnails, and the PrintOps
+   material gates of `3d print-preflight --printer NAME` (live 3d-api state from
+   `$PRINTOPS_API` / `printops.yaml`, else fleet facts only); a FAIL blocks the start unless
+   `--force`.
 5. `upload` refuses while a Creality printer is busy (the firmware does not protect the
    running job), and on any printer refuses to overwrite the file being printed.
 6. `start` succeeds only when the printer acknowledges it: Moonraker's HTTP reply, or on

@@ -37,26 +37,72 @@ python lib/vision_geometry.py fit points.yaml out.yaml --model fisheye --overlay
 the fit starts from a linear DLT, then fits pose + focal, then distortion; it needs >= 8 points
 that are not all at one world height.
 
-## Snapmaker U1 default (preliminary)
+## Snapmaker U1 default
 
-The camera sits low at the front-right corner (about X 305, Y -43 mm, ~11 mm above the nozzle
+The camera sits low at the front-right corner (about X 294, Y -24 mm, ~13 mm above the nozzle
 plane), looking diagonally across the bed towards the back-left; +Y runs to the right of the
 image, the prime tower is at the right, the toolhead docks top-right. Lens: wide, fitted as an
-equidistant fisheye (f ~1270 px, k1 -0.12).
+equidistant fisheye (f ~1190 px).
 
-The bundled model was fitted to refined image edges (plate right edge, the GFT wall's top and
+The first model was fitted to refined image edges (plate right edge, the GFT wall's top and
 base lines) and prime-tower corners in four frames of `u1_walls_main_v3` at gcode Z 3.62-12.38
-(features in `lib/data/vision/u1-camera-features.yaml`), rms 9.2 px. The physical plate edge
+(features in `lib/data/vision/u1-camera-features.yaml`), rms 9.2 px; the physical plate edge
 came out at X ~275-277 and Y ~-13 (the spring-steel sheet is 276 x 293 mm, larger than the
-printable 270 x 270).
+printable 270 x 270). Above Z ~12 it was an extrapolation: at Z 80 the current-layer outlines
+fell 30-60 px off the walls nearest the camera.
+
+The bundled model (issue #262) is refit over the whole height of the same job by region
+matching, not hand-picked points: for 12 frames from gcode Z 10.6 to 89.4 the job's G-code
+walls up to the frame's layer are painted far-to-near as vertical quads, the surfaces of the
+green tool (T2) are compared with the frame's green pixels (HSV hue 55-95, saturation >= 90),
+and Powell maximises the mean IoU over pose, focal length, principal point and k1, starting
+from the edge fit. A last pose-only pass adds the distance from the current layer's visible top
+outline to the green parts' upper boundary — the line a "printing now" overlay draws. Mean
+green IoU went from 0.39 to 0.58 (the ceiling is well below 1: lit faces lose saturation, the
+toolhead hides parts); the median distance of that top outline to the real top edge went from
+7-25 px to 2-4 px at Z 80-90 and to 5-13 px at Z 10-45. Frames, layers and both metrics per
+frame are listed under `fit:` in `u1-camera.yaml`.
 
 Known limits:
 
-- Accuracy is uneven: 5-10 px at the prime tower and the far walls, 20-30 px at the part nearest
-  the camera (front-right), where a mm is 10+ px. Pad masks accordingly (`pad_mm` >= 5).
-- The features used are mostly parallel to the Y axis, so camera distance vs focal length is
-  weakly constrained (a flat residual valley along the viewing diagonal). A better fit needs
-  correspondences along X (back wall, plate front edge) and frames at high Z.
-- Gcode Z range in the fit is 3.6-12.4 mm; above that the model is an extrapolation.
+- Residuals left: ~5-13 px at mid heights and on the walls nearest the camera, where a mm is
+  10+ px. Pad masks accordingly (`pad_mm` >= 3).
+- Focal length vs camera distance is still weakly constrained along the viewing diagonal; the
+  region fit trades them against k1 (it came out slightly positive). Frames of a job with parts
+  spread along X would pin it down.
+- One job, one lighting setup; the green segmentation needs a green part in view.
 - Walls frames are mapped to Z via `virtual_sdcard` progress, not checked for tool-change Z-hop.
 - The toolhead occludes the back half of the bed in many frames; masks do not model it.
+
+## Ghost of the rest of the print (`lib/vision_ghost.py`)
+
+Issue #261. The same camera model draws what is still to be printed over the live frame — a
+semi-transparent 3D ghost of every wall above the current layer, for a camera feed such as the
+U1 camera proxy of the Home Assistant integration.
+
+- `ShellBuilder` collects a job's walls (outer/overhang walls, prime tower) while a caller streams
+  the G-code past it once (`comment()` per comment, `move()` per G0-G3 with layer, layer Z, tool,
+  feature, X/Y, whether it extrudes and, for G2/G3, `arc=(I, J, clockwise)`, sampled into
+  chords; a closed arc is a full circle); points closer than 0.5 mm merge; at 3 M points it
+  stops, also mid-path, and marks the `Shell` truncated (no ghost then). A 135 MB four-tool job
+  keeps ~0.93 M points (~8 MB).
+- `render(shell, cam, layer, shape)` paints vertical wall quads (the layers left every 2nd
+  layer, bands tiling the height) far-to-near into one id buffer with Pillow — a painter's
+  z-buffer; quads are ~1 mm wide, so per-quad depth order is enough. Printed walls are painted
+  only as occluders and only when the camera is below the current top: from above it (the U1
+  camera sits ~14 mm over the nozzle plane) every sight line to the ghost passes above the
+  printed part, so just the band printed now is painted, for its glow. Ghost walls take the
+  filament colour (dark ones lifted) washed 30 % towards pale cyan so they never pass for the
+  real part, shaded by how squarely the wall faces the camera, opacity 80 % near to 28 % far,
+  a 2 px light line at silhouettes and depth steps, a light diagonal hatch; the band printed
+  now glows amber.
+- The result is a `Ghost`: a sparse blend table (pixel index, inverse alpha, premultiplied
+  colour). `Ghost.blend(rgb)` applies it in place, so a camera feed renders once per layer
+  and blends every frame.
+
+Measured on `u1_walls_main_v3`, layer 729 of 1193, 1920 x 1080: `render` 0.55 s on the
+workstation and 1.9 s on the ODROID-N2+ (HA container, 2 CPUs); `blend` 5 ms / 20 ms.
+Collecting the shell inside a Python G-code pass adds ~22 s for 135 MB on the workstation (the
+camera proxy shares its index pass).
+Limits: walls only (no top-surface caps, so a ghost seen from above shows no lid), no toolhead
+model (the ghost is drawn over it), and alignment is only as good as the calibration.
