@@ -13,6 +13,7 @@ import urllib.request
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import re
+from u1_ghost import GhostRenderer
 from u1_print_inspector import Inspector, overlay
 
 
@@ -54,7 +55,9 @@ START_MONITOR_DOMAINS = [
 
 
 _source = urllib.parse.urlsplit(SOURCE_URL)
-inspector = Inspector(os.environ.get("U1_PRINTER_URL", f"{_source.scheme}://{_source.netloc}"))
+ghosts = GhostRenderer()
+inspector = Inspector(os.environ.get("U1_PRINTER_URL", f"{_source.scheme}://{_source.netloc}"),
+                      ghosts=ghosts)
 
 
 class FrameCache:
@@ -88,7 +91,10 @@ class FrameCache:
                 frame = fetch_frame()
                 # Render once per camera fetch, shared by all JPEG/MJPEG viewers.
                 # Do not silently present an undecorated image as an enriched feed.
-                frame = overlay(frame, inspector.snapshot())
+                data = inspector.snapshot()
+                job, shell, layer = inspector.ghost_source(data)
+                frame = overlay(frame, data,
+                                ghost=lambda shape: ghosts.ghost_for(job, shell, layer, shape))
                 with self._condition:
                     self._frame = frame
                     self._updated_at = time.time()
@@ -217,10 +223,31 @@ keepalive = CameraMonitorKeepalive()
 class Handler(BaseHTTPRequestHandler):
     server_version = "U1MJPEG/1.0"
 
+    def do_POST(self) -> None:  # noqa: N802
+        """`POST /ghost {"enabled": bool}`: HA's input_boolean.u1_camera_ghost switches the ghost."""
+        if urllib.parse.urlsplit(self.path).path != "/ghost":
+            self.send_error(HTTPStatus.NOT_FOUND, "not found")
+            return
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            if not 0 < length <= 1024:
+                raise ValueError("body size")
+            enabled = json.loads(self.rfile.read(length))["enabled"]
+            if not isinstance(enabled, bool):
+                raise ValueError("enabled must be a boolean")
+        except (ValueError, KeyError, TypeError):
+            self._json_response(400, {"error": "expected {\"enabled\": true|false}"})
+            return
+        ghosts.set_enabled(enabled)
+        self._json_response(200, ghosts.state())
+
     def do_GET(self) -> None:  # noqa: N802
         parsed = urllib.parse.urlsplit(self.path)
         if parsed.path == "/status.json":
             self._json_response(200, inspector.snapshot())
+            return
+        if parsed.path == "/ghost":
+            self._json_response(200, ghosts.state())
             return
         if parsed.path.startswith("/layers/"):
             match = re.fullmatch(r"/layers/([1-9][0-9]{0,5})", parsed.path)
