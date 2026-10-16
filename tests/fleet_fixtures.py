@@ -121,3 +121,21 @@ def write_fleet(path: Path, *entries: str) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("".join(entries) + OFFLINE, encoding="utf-8")
     return path
+
+
+REPO_POLICY = REPO_FLEET.with_name("policy.yaml")
+
+
+def write_policy_for_fleet(path: Path, fleet: Path) -> Path:
+    """The repo's fleet/policy.yaml with `calibrations.printers` cut down to the printers of the
+    test `fleet`: the calibrations lint rightly reports policy entries for printers the fleet
+    does not have, and a test fleet is a subset of the real one. Point PRINTOPS_POLICY here."""
+    import yaml
+
+    names = set(yaml.safe_load(fleet.read_text(encoding="utf-8")) or {})
+    data = yaml.safe_load(REPO_POLICY.read_text(encoding="utf-8"))
+    printers = data.get("calibrations", {}).get("printers")
+    if printers:
+        data["calibrations"]["printers"] = {k: v for k, v in printers.items() if k in names}
+    path.write_text(yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8")
+    return path

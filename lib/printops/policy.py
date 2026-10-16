@@ -29,6 +29,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 SECTION_PARSERS: dict[str, str] = {
     "drying": "printops.drying_policy:parse",
     "gates": "printops.gates_policy:parse",
+    "calibrations": "printops.calibration_policy:parse",
 }
 
 
