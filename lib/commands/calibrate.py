@@ -29,7 +29,7 @@ USAGE = """3d calibrate plan --printer P [--head T] [--spool ID] [--plate PLATE]
 3d calibrate show ID
 3d calibrate check FILE.gcode --printer P [--spools T1=ID,…] [--plate PLATE]
                    [--accept calibration:KIND[,…] --reason TEXT]
-3d calibrate gen pa|flow|shaper --printer P -o OUT [--material PLA] [--color #RRGGBB] [--nozzle-temp C]
+3d calibrate gen pa|flow|combo|temp|shaper --printer P -o OUT [--material PLA] [--color #RRGGBB] [--nozzle-temp C]
   common (all but gen): [--json] [--api URL] [--token TOKEN]
 
   Calibrations per printer head and filament (fleet/calibrations.yaml: flow_ratio, pressure_advance,
@@ -49,7 +49,10 @@ Subcommands:
           against the records. FAIL exits 1; --accept turns a FAIL into a logged WARN.
   gen     a calibration print for a Klipper printer, sliced with the Orca CLI from the printer's
           system presets: pa = hollow tower with Klipper TUNING_TOWER (PA = Z × 0.005); flow =
-          5 tiles at 90…110 % extrusion (M221 per tile); shaper = SHAPER_CALIBRATE console commands
+          5 tiles at 90…110 % extrusion (M221 per tile); combo = one plate: PA lines on the first
+          layer (SET_PRESSURE_ADVANCE per line, labels = PA × 1000) plus the flow tiles, for the
+          express calibration of a new spool; temp = temperature tower, one labelled 8 mm block per
+          5 °C (PLA 230→200, PETG 250→220, M104 per block); shaper = SHAPER_CALIBRATE console commands
           (printers with an accelerometer). The G-code gets thumbnails and a slice-warnings record,
           ready for `3d print-preflight`. Local only; set SLICER=/path/to/orca if needed.
 
@@ -73,7 +76,7 @@ Options:
   --limit N          ls: at most N records (default 50)
   --material M       gen: filament preset material (default PLA)
   --color #RRGGBB    gen: filament colour written to the G-code (loaded_filament_match)
-  --nozzle-temp C    gen: nozzle temperature instead of the preset's
+  --nozzle-temp C    gen: nozzle temperature instead of the preset's (not for temp: it prints its range)
   -o, --out FILE     gen: output .gcode (shaper: a .txt of console commands)
   --json             print the API's JSON
   --api URL          3d-api base URL (default: $PRINTOPS_API, else ~/.config/3d-cli/printops.yaml)
@@ -89,7 +92,9 @@ Examples:
   3d calibrate check plate.gcode --printer u1 --accept calibration:flow_ratio --reason "test cube, flow irrelevant"
   3d calibrate plan --printer u1 --json | jq '.items[] | {head, kind, status, level}'
   3d calibrate gen pa --printer k1se --color '#E8732A' -o k1se_pa_orange.gcode
-  3d calibrate gen flow --printer k1se --color '#000000' -o k1se_flow_black.gcode"""
+  3d calibrate gen flow --printer k1se --color '#000000' -o k1se_flow_black.gcode
+  3d calibrate gen combo --printer k1se --color '#000000' -o k1se_combo_black.gcode
+  3d calibrate gen temp --printer k1se --color '#E8732A' -o k1se_temp_orange.gcode"""
 
 PREFIX = "calibrate"
 COMMON_VALUES = {"--api", "--token"}

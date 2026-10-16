@@ -326,6 +326,8 @@ printer_idle_notice(printer, idle_since, state pending|sent|failed, claimed_at, 
 4. Применение — **только с подтверждением**: (a) профиль Orca (user filament JSON в репо или в `~/.config/OrcaSlicer`, diff показывается), (b) Klipper: `SET_PRESSURE_ADVANCE` на сессию или `SAVE_CONFIG` через Moonraker `printer.gcode.script` (перезапуск Klipper; только когда принтер idle и с явным `--yes`), (c) U1 stock — только профиль слайсера.
 5. Запись результата закрывает требование. Следующий `print-preflight` видит запись и проверяет, что значения в G-code **совпадают** с калибровкой (Orca пишет `; pressure_advance = …`, `; filament_flow_ratio = …` в футер).
 
+Экспресс-калибровка новой катушки (PA-линии + flow-плитки на одном столе, ≈30 мин, `3d calibrate gen combo`) — **[express-calibration.md](express-calibration.md)**.
+
 ### 8.3 Калибровочные столы v2: печатаем только недостающее, плотно, с машинным чтением фото
 Эпик [#268](https://github.com/alex-mextner/3d-cli/issues/268) (дочерний к [#154](https://github.com/alex-mextner/3d-cli/issues/154)). Приоритет — фаза 2, сразу после текущей очереди мержа: каталог калибровок [#227](https://github.com/alex-mextner/3d-cli/pull/227), `3d calibrate gen` [#249](https://github.com/alex-mextner/3d-cli/pull/249), комбо-стол и экспресс-калибровка [#257](https://github.com/alex-mextner/3d-cli/pull/257) ([#254](https://github.com/alex-mextner/3d-cli/issues/254)), фреймворк столов (по слоям + последовательная фаза, хуки объектов, зазор портала K1, карта стола NAME.json), журнал настроек [#264](https://github.com/alex-mextner/3d-cli/issues/264).
 
