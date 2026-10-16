@@ -1,8 +1,8 @@
 """gcode_overhangs.py — extrusion that nothing holds up, found in the sliced G-code itself.
 
-WHAT: for every object of a plate (EXCLUDE_OBJECT_START / M486 / `; printing object` labels; a
-  file without labels is one object, "plate"), layer by layer, the object's extrusion that no
-  material of the layer below carries:
+WHAT: for every object of a plate (gcode_labels: EXCLUDE_OBJECT, Bambu `; start printing object`
+  / M624 blocks, M486, `; printing object` labels; a file without labels is one object, "plate"),
+  layer by layer, the object's extrusion that no material of the layer below carries:
 
     carried   the layer below (the object's own extrusion plus its support/raft, closed
               and with enclosed gaps up to --bridge-max wide filled — infill under a top skin,
@@ -58,6 +58,8 @@ from collections import defaultdict
 from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from gcode_labels import LAYER_MARKERS, ObjectLabels, feature, line_width
+
 if TYPE_CHECKING:
     import numpy as np
     from numpy.typing import NDArray
@@ -80,7 +82,7 @@ _KEEP = 20  # islands listed per object (the total area counts all of them)
 _WORD = re.compile(r"([A-Z])\s*([-+]?(?:\d+\.?\d*|\.\d+))")
 _MOVE = re.compile(r"G0*([0-3])(?![\d.])")
 _CONFIG = re.compile(r"^;\s*([A-Za-z_][A-Za-z0-9_ \[\]]*?)\s*=\s*(.*)$")
-_NAME = re.compile(r"NAME=(\"[^\"]*\"|'[^']*'|\S+)", re.IGNORECASE)
+_LAYER_MARKERS = (*LAYER_MARKERS, ";LAYER:")  # + Cura
 _EXCLUDED_TYPES = ("skirt", "brim", "custom", "prime", "wipe", "purge", "ironing")
 _SUPPORT_TYPES = ("support", "raft")
 OWN, SUPPORT = 0, 1
@@ -182,27 +184,6 @@ def default_width(config: dict[str, str]) -> float:
     return (_float(config.get("nozzle_diameter")) or 0.4) * 1.125
 
 
-def _label(line: str, current: str | None) -> tuple[bool, str | None]:
-    """(is a label line, object now printing); None = between objects."""
-    up = line[:24].upper()
-    if up.startswith("EXCLUDE_OBJECT_START"):
-        m = _NAME.search(line)
-        return True, m.group(1).strip("\"'") if m else "?"
-    if up.startswith("EXCLUDE_OBJECT_END"):
-        return True, None
-    if up.startswith("M486"):
-        words = dict(_WORD.findall(line.split(";", 1)[0].upper()[4:]))
-        if "S" in words:
-            n = int(float(words["S"]))
-            return True, None if n < 0 else f"object {n}"
-        return True, current
-    if line.startswith("; printing object "):
-        return True, line[len("; printing object ") :].strip()
-    if line.startswith("; stop printing object"):
-        return True, None
-    return False, current
-
-
 def parse(path: str) -> Plate:
     """Every extruding XY line of the plate after the first layer marker (start G-code purges
     are not the plate; a file without markers is read from the start), per object and z."""
@@ -212,9 +193,8 @@ def parse(path: str) -> Plate:
     width_default = default_width(config)
     objects: dict[str, _Obj] = defaultdict(_Obj)
     pre: dict[str, _Obj] = defaultdict(_Obj)
-    defined: list[str] = []
-    labeled = marked = False
-    obj: str | None = None
+    labels = ObjectLabels()
+    marked = False
     ftype = ""
     width = width_default
     x: float | None = None  # unknown until the first absolute move, and again after G28
@@ -228,28 +208,17 @@ def parse(path: str) -> Plate:
             if not line:
                 continue
             c0 = line[0]
+            if labels.feed(line):
+                continue
             if c0 == ";":
-                if line.startswith(";TYPE:"):
-                    ftype = line[6:].strip().lower()
-                elif line.startswith((";WIDTH:", "; WIDTH:")):
-                    width = _float(line.split(":", 1)[1]) or width_default
-                elif line.startswith((";LAYER:", ";LAYER_CHANGE", "; CHANGE_LAYER")):
+                if (tag := feature(line)) is not None:
+                    ftype = tag.lower()
+                elif (w := line_width(line)) is not None:
+                    width = _float(w) or width_default
+                elif line.startswith(_LAYER_MARKERS):
                     marked = True
-                else:
-                    is_label, obj = _label(line, obj)
-                    labeled = labeled or is_label
                 continue
             up = line.split(";", 1)[0].strip().upper()
-            if up.startswith("EXCLUDE_OBJECT_DEFINE"):
-                m = _NAME.search(line)
-                if m:
-                    defined.append(m.group(1).strip("\"'"))
-                labeled = True
-                continue
-            if up.startswith(("EXCLUDE_OBJECT", "M486")):
-                is_label, obj = _label(line, obj)
-                labeled = labeled or is_label
-                continue
             if c0 in "Mm":
                 head = up.split(" ", 1)[0]
                 if head in ("M82", "M83"):
@@ -300,7 +269,7 @@ def parse(path: str) -> Plate:
                     extruding, e = ev > 1e-6, e + ev
                 else:
                     extruding, e = ev > e + 1e-6, ev
-            owner = obj if labeled else _PLATE
+            owner = labels.current if labels.labeled else _PLATE
             if (
                 extruding
                 and owner is not None
@@ -329,7 +298,7 @@ def parse(path: str) -> Plate:
         objects = pre
         every = [z for o in objects.values() for z in o.zs()]
         first_z = min(every) if every else None
-    return Plate(dict(objects), defined, config, first_z)
+    return Plate(dict(objects), labels.defined, config, first_z)
 
 
 class _Raster:

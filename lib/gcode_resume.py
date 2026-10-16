@@ -1,6 +1,6 @@
 """gcode_resume.py — resume a stopped multi-head print from a layer: a new G-code that continues the original above
 the last intact layer of a part still on the bed (no gluing, no Z homing). Issue
-https://github.com/alex-mextner/3d-cli/issues/138.
+https://github.com/alex-mextner/3d-cli/issues/138, #238.
 
 Ported from the babushkin-dom project's gen/resume_gcode.py (Snapmaker U1). Printer-specific values (the off-bed purge
 macro, purge lengths, travel clearance, start commands) come from the printer's `resume:` block in
@@ -14,11 +14,23 @@ Assumptions:
   `G28 Z` probes the bed with the nozzle, which the part on the bed forbids: no Z homing here.
 - U1 firmware Snapmaker/u1-klipper@10f2f69: SDCARD_PRINT_FILE runs TURN_OFF_HEATERS before the file (the header
   reheats the bed on its first line); `T<n>` moves X/Y only, at the current Z (so Z goes above everything first);
-  the purge macro with `INDEX=n FORCE=1` purges off the bed (LENGTH mm, RETRACT_LENGTH back) and sets the
-  once-per-job flag, so the original per-change purge lines stay no-ops.
+  the purge macro with `INDEX=n FORCE=1` purges off the bed (LENGTH mm, then purge_retract_mm back: its own
+  default; RETRACT_LENGTH is never passed) and sets the once-per-job flag, so the original per-change purge lines
+  stay no-ops.
 - Logical tools map 1:1 to the heads, as in the original job.
 - Filament state per head is tracked as "mm retracted from primed"; the header leaves every head exactly as the
   original left it at the cut, so the original un-retracts prime it back.
+
+- Z headroom: travels go over the old tower top + 2 mm and tool changes add the original 1.5 mm hop; with the
+  tower near the Z ceiling (resume.z_max_mm - 1 mm) there is no headroom left and a final pass over the finished
+  file refuses it (fail-closed: no Z above the limit or below the bed reaches the printer).
+
+Past bugs (issue #238, ported from babushkin-dom gen/resume_gcode.py): a resume below the old prime tower top
+continued the tower into it (41 layers of tower moves, spaghetti); now the layers below the old tower top print
+without the tower (off-bed purges, travels and tool changes lifted over it) and the tower resumes above it.
+RETRACT_LENGTH in the purge macro crashed the U1 macro (`| abs` on a string) and cancelled the job. Arcs (G2/G3
+spiral hops) are tracked; a travel arc whose start the resume moved becomes a straight G1. Orca's one-axis tower
+moves are followed with modal X/Y.
 
 Traps it guards: --no-tower purges after EVERY `T<n>` (the slicer writes no purge line when it switches back to the
 job's starting head, which then reached the model unprimed); the layer preamble ends the previous layer's object
@@ -31,6 +43,7 @@ from __future__ import annotations
 import contextlib
 import math
 import re
+from itertools import islice
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -44,9 +57,10 @@ CMD = "gcode-resume"
 HEADER_START = "; ===== RESUME of"
 HEADER_END = "; ===== end of resume header: original G-code follows ====="
 
-NUM = re.compile(rb"([XYZEF])(-?\d*\.?\d+)")
+NUM = re.compile(rb"([XYZEFIJR])(-?\d*\.?\d+)")
 TOOL = re.compile(rb"^T(\d+)\s*$")
-ARC = re.compile(rb"^G[23](?![0-9.])")
+Z_MARGIN = 1.0  # mm kept below stepper_z.position_max (head G-code offsets, bed mesh)
+TOWER_CLEARANCE = 2.0  # mm above the old prime tower top for every X/Y move over it
 
 
 def _bad(msg: str) -> UsageError:
@@ -63,12 +77,32 @@ def words(line: bytes) -> dict[str, float]:
 
 
 def move(line: bytes) -> dict[str, float] | None:
-    """G0/G1 line -> dict of X/Y/Z/E/F floats, else None"""
-    if not (
-        line.startswith((b"G1", b"G0")) and (len(line) == 2 or line[2:3] in b" \t;")
-    ):
+    """G0/G1/G2/G3 line -> dict of X/Y/Z/E/F (and I/J) floats, arcs with "arc": 2 (cw) or 3 (ccw); else None.
+    Snapmaker Orca writes spiral z-hop travels as G2/G3 (`G3 Z.. I.. J.. P1`)."""
+    if not (line[:1] == b"G" and line[1:2] and line[1:2] in b"0123" and (len(line) == 2 or line[2:3] in b" \t;")):
         return None
-    return {chr(k[0]): float(v) for k, v in NUM.findall(line.split(b";", 1)[0])}
+    m = {chr(k[0]): float(v) for k, v in NUM.findall(line.split(b";", 1)[0])}
+    if line[1:2] in b"23":
+        m["arc"] = int(line[1:2])
+    return m
+
+
+def arc_points(x0: float, y0: float, m: dict[str, float]) -> list[tuple[float, float]]:
+    """start, end and the axis-aligned extreme points of the arc move m starting at (x0, y0) (start == end: full
+    circle, as Klipper draws it)"""
+    x1, y1 = m.get("X", x0), m.get("Y", y0)
+    cx, cy = x0 + m.get("I", 0.0), y0 + m.get("J", 0.0)
+    r = math.hypot(x0 - cx, y0 - cy)
+    a0, a1 = math.atan2(y0 - cy, x0 - cx), math.atan2(y1 - cy, x1 - cx)
+    if m["arc"] == 2:
+        a0, a1 = a1, a0  # sweep counter-clockwise from a0 to a1
+    sweep = (a1 - a0) % (2 * math.pi) or 2 * math.pi
+    pts = [(x0, y0), (x1, y1)]
+    for k in range(4):
+        a = k * math.pi / 2
+        if (a - a0) % (2 * math.pi) <= sweep:
+            pts.append((cx + r * math.cos(a), cy + r * math.sin(a)))
+    return pts
 
 
 def obj_name(line: bytes) -> str | None:
@@ -273,20 +307,62 @@ def extruder_name(t: int) -> str:
 Box = tuple[float, float, float, float]
 
 
-def tower_bbox(w: Walk, margin: float) -> Box | None:
-    xs, ys = [], []
+def _axis(cur: float | None, m: dict[str, float], k: str, rel: bool) -> float | None:
+    """modal X or Y after the move m (None: unknown, a relative move from an unknown point)"""
+    if k not in m:
+        return cur
+    if rel:
+        return None if cur is None else cur + m[k]
+    return m[k]
+
+
+def tower_bbox(w: Walk, margin: float, purge_macro: str) -> Box | None:
+    """bounding box (+ margin) of every prime-tower extrusion segment, both ends, with modal X/Y (Orca writes
+    one-axis moves) and relative X/Y after G91"""
+    xs: list[float] = []
+    ys: list[float] = []
     feature = None
-    for line in w.lines[w.layers[0]["start"] : w.exec_hi]:
+    x: float | None = None
+    y: float | None = None
+    rel = False
+    resetters = (b"G28", purge_macro.encode(), b"MOVE_TO")  # the firmware moves the head on these
+    for line in w.lines[w.exec_lo : w.exec_hi]:
         if line.startswith(b";TYPE:"):
             feature = line[6:].strip()
-        elif feature == b"Prime tower":
-            m = move(line)
-            if m and m.get("E", 0) > 0 and "X" in m and "Y" in m:
-                xs.append(m["X"])
-                ys.append(m["Y"])
+            continue
+        if line.startswith(b"G91"):
+            rel = True
+        elif line.startswith(b"G90"):
+            rel = False
+        elif TOOL.match(line) or line.startswith(resetters):
+            x = y = None  # the firmware moved the head: position unknown
+        m = move(line)
+        if m is None:
+            continue
+        nx = _axis(x, m, "X", rel)
+        ny = _axis(y, m, "Y", rel)
+        if feature == b"Prime tower" and m.get("E", 0) > 0 and ("X" in m or "Y" in m or "arc" in m):
+            pts: list[tuple[float | None, float | None]] = [(x, y), (nx, ny)]
+            if "arc" in m and x is not None and y is not None and not rel:
+                pts += arc_points(x, y, m)
+            for px, py in pts:
+                if px is not None and py is not None:
+                    xs.append(px)
+                    ys.append(py)
+        x, y = nx, ny
     if not xs:
         return None
     return (min(xs) - margin, min(ys) - margin, max(xs) + margin, max(ys) + margin)
+
+
+def path_hits_box(p: tuple[float, float], m: dict[str, float], box: Box) -> bool:
+    """does the move m from point p cross the rectangle box? arcs by their bounding box (conservative)"""
+    q = (m.get("X", p[0]), m.get("Y", p[1]))
+    if "arc" not in m:
+        return seg_hits_box(p, q, box)
+    pts = arc_points(p[0], p[1], m)
+    xs, ys = [a for a, _ in pts], [b for _, b in pts]
+    return min(xs) <= box[2] and max(xs) >= box[0] and min(ys) <= box[3] and max(ys) >= box[1]
 
 
 def seg_hits_box(p: tuple[float, float], q: tuple[float, float], box: Box) -> bool:
@@ -423,6 +499,30 @@ class Resume:
         return "\n".join(out)
 
 
+def _refuse_untracked_moves(w: Walk) -> None:
+    """fail-closed on what the passes do not track: relative X/Y (G91) and radius-form arcs would make the tower
+    area, the arc paths and the tower-crossing checks unknown, and G92 X/Y/Z would shift the coordinates the safety
+    checks compare"""
+    rel = False
+    for i in range(w.exec_lo, w.exec_hi):
+        line = w.lines[i]
+        if i < w.layers[0]["start"]:  # start G-code: only its offsets matter (it is not copied)
+            if line.startswith(b"G92") and {"X", "Y", "Z"} & set(words(line)):
+                raise _bad(f"line {i + 1}: G92 X/Y/Z (coordinate offset) is not supported")
+            continue
+        if line.startswith(b"G91"):
+            rel = True
+        elif line.startswith(b"G90"):
+            rel = False
+        elif line.startswith(b"G92") and {"X", "Y", "Z"} & set(words(line)):
+            raise _bad(f"line {i + 1}: G92 X/Y/Z (coordinate offset) is not supported")
+        elif (m := move(line)) is not None:
+            if rel and ("X" in m or "Y" in m):
+                raise _bad(f"line {i + 1}: relative X/Y move (G91) is not supported")
+            if "arc" in m and ("R" in m or not ("I" in m or "J" in m)):
+                raise _bad(f"line {i + 1}: radius-form arc (G2/G3 R) is not supported: its centre is not tracked")
+
+
 def build(
     w: Walk,
     profile: ResumeProfile,
@@ -431,6 +531,7 @@ def build(
     top_z: float | None = None,
     layer: int | None = None,
     paused_at: int | None = None,
+    tower_top: float | None = None,
     no_tower: bool = False,
     home_xy: bool = False,
 ) -> Resume:
@@ -468,6 +569,7 @@ def build(
             raise _bad(
                 f"resume layer {rl} is above the paused layer {pause_layer}: nothing was printed there"
             )
+    _refuse_untracked_moves(w)
     st, snaps = w.state(i1, snap_from=i1)
     A = st["tool"]
     body_tools = {
@@ -493,9 +595,18 @@ def build(
         print_temp.setdefault(t, st["temp"][t])
         if print_temp[t] < hot:
             raise _bad(f"no print temperature for T{t}")
-    tower = tower_bbox(w, profile.tower_margin_mm) if no_tower else None
+    tower = tower_bbox(w, profile.tower_margin_mm, purge)
     if no_tower and tower is None:
         raise _bad("--no-tower: the G-code has no prime tower")
+    # the old prime tower still stands up to the paused layer: below its top the tower moves would run into it,
+    # so those layers print as --no-tower (purge off the bed, travel over it) and the tower resumes above it
+    for opt, v in (("--top-z", top_z), ("--tower-top", tower_top)):
+        if v is not None and not (math.isfinite(v) and v >= 0):
+            raise _bad(f"{opt} wants a finite Z >= 0, got {v}")
+    if tower_top is None and pause_layer is not None:
+        tower_top = w.layers[pause_layer - 1]["z"]
+    if tower and tower_top is None:
+        raise _bad("the old prime tower height is unknown: give --paused-at BYTE or --tower-top Z")
     first_xy, obj = None, None  # first X/Y move the body keeps: the header goes there
     for line in lines[i1:exec_end]:
         if line.startswith(b"EXCLUDE_OBJECT_START"):
@@ -514,7 +625,14 @@ def build(
             break
     if first_xy is None or "X" not in first_xy or "Y" not in first_xy:
         raise _bad("no X/Y start move found after the cut")
-    z_travel = max(LR["z"] + 0.6, z_seen or 0.0) + profile.clearance_mm
+    z_lim = profile.z_max_mm - Z_MARGIN  # highest G-code Z the header and the tower lifts may use
+    tower_top_eff = tower_top if tower_top is not None else max(LR["z"], z_seen or 0.0)  # no tower: unused
+    # everything already standing on the bed: the part, whatever the paused job reached, the old tower
+    z_need = max(LR["z"] + 0.6, z_seen or 0.0, tower_top_eff + TOWER_CLEARANCE if tower else 0.0)
+    z_travel = min(z_need + profile.clearance_mm, z_lim)
+    if z_travel < z_need:
+        raise _bad(f"no room above the part: needs Z {z_need:.2f}, axis limit {fmt(profile.z_max_mm)} - {fmt(Z_MARGIN)}")
+    tower_safe_z = tower_top_eff + TOWER_CLEARANCE
     out_r: dict[int, float] = {}
     purged: dict[int, float] = {}  # filament the off-bed purges consume: counted in the statistics
     out: list[bytes] = []
@@ -547,9 +665,13 @@ def build(
             else ""
         )
     )
+    tower_note = (
+        "replaced by off-bed purges (--no-tower)" if no_tower else "none" if not tower
+        else f"off-bed purges up to the old tower top Z {fmt(tower_top_eff)}, tower continued above it"
+    )
     put(
         f"; heads T{A} first, then {'/'.join(f'T{t}' for t in sorted(body_tools - {A})) or 'none'}; "
-        f"prime tower {'replaced by off-bed purges (--no-tower)' if no_tower else 'continued'}"
+        f"prime tower: {tower_note}"
     )
     put(
         "; start only with: CLEAR_PAUSE, then SDCARD_PRINT_FILE (printer homed xyz; never after CANCEL_PRINT)"
@@ -579,10 +701,9 @@ def build(
         put("M400")
         put(f"T{t}")
         put(f"; off-bed purge of T{t} ({purge}): plastic must come out here")
-        put(
-            f"{purge} INDEX={t} FORCE=1 TEMP={fmt(print_temp[t])} LENGTH={fmt(profile.purge_mm)}"
-            f" RETRACT_LENGTH={fmt(profile.purge_retract_mm)}"
-        )
+        # never RETRACT_LENGTH=: the U1 macro does `| abs` on the raw string -> TypeError -> CANCEL_PRINT -> M84
+        # (seen 2026-10-14, issue #238); its default leaves the head purge_retract_mm back
+        put(f"{purge} INDEX={t} FORCE=1 TEMP={fmt(print_temp[t])} LENGTH={fmt(profile.purge_mm)}")
         put("G90")
         put("M83")
         want = st["r"].get(t, 0.0)
@@ -612,9 +733,18 @@ def build(
         emit(st["vel"])
     put("M220 S100")
     put("M221 S100")
-    left = st["m73"][1] if st["m73"] else 0  # slicer minutes left at the cut: 0 % of the resume file
-    if st["m73"]:
-        put(f"M73 P0 R{left}")
+    # progress of the resumed job: P restarts at 0 against r0, the slicer's minutes left at the cut (R stays as is)
+    left = st["m73"][1] if st["m73"] else 0
+    r0 = next(
+        (int(words(x).get("R", 0)) for x in islice(lines, i0, exec_end) if x.startswith(b"M73 ") and b"R" in x),
+        left,
+    )
+
+    def m73(r: int) -> str:
+        return f"M73 P{max(0, min(100, round(100 * (1 - r / r0)))) if r0 else 100} R{r}"
+
+    if st["m73"] or r0:  # a plate without progress lines gets none
+        put(m73(r0))
     put(f"G1 X{fmt(first_xy['X'])} Y{fmt(first_xy['Y'])} F12000")
     put(f"G1 Z{fmt(first_xy.get('Z', LR['z']))} F600")
     if st["f"]:
@@ -624,13 +754,13 @@ def build(
     tool, obj, rel = A, None, False
     orig_f = cur_f = st["f"]  # modal F of the original stream / of the output
     dropped = 0
-    zmin_body = cur_z = first_xy.get(
-        "Z", LR["z"]
-    )  # modal Z of the output, relative moves included
+    zmin_body = cur_z = first_xy.get("Z", LR["z"])  # modal Z of the output, relative moves included
     used: dict[int, float] = dict(purged)  # preflight reads the heads in use from these statistics
     changes = 0
     last_xy: tuple[float, float] | None = (first_xy["X"], first_xy["Y"])
+    oxy: tuple[float, float] | None = None  # X/Y of the original stream (None: unknown, e.g. after T<n>)
     tower_hits: list[int] = []
+    tower_lifts = 0
     pending_z = None
 
     def correct(d: float, why: str) -> None:
@@ -638,13 +768,19 @@ def build(
         put(f"G1 E{fmt(d)} F1800 ; {why}")
         cur_f = 1800.0
 
+    layer_z = LR["z"]
+    purge_b = purge.encode()
+    resetters = (purge_b, b"MOVE_TO", b"G28")  # the firmware moves the head: X/Y unknown after these
     for i in range(i0, exec_end + 1):
         line = lines[i]
         m = move(line)
-        if ARC.match(line):
-            raise _bad(
-                f"line {i + 1}: G2/G3 arcs after the cut are not supported (slice without arc fitting)"
-            )
+        if line.startswith(b";Z:"):
+            layer_z = float(line[3:])
+        # below the old tower top (or everywhere with --no-tower) the tower is not printed
+        skip = tower is not None and (no_tower or layer_z <= tower_top_eff + 1e-6)
+        if line.startswith(b"M73 ") and b"R" in line:
+            put(m73(int(words(line).get("R", 0))))
+            continue
         if i0 < i < i1:  # preamble of the cut layer: belongs to the layer below
             if TOOL.match(line) or line.startswith(b"EXCLUDE_OBJECT_START"):
                 raise _bad(
@@ -667,6 +803,15 @@ def build(
             obj = None
         mt = TOOL.match(line)
         if mt:
+            if skip and cur_z < tower_safe_z - 1e-6:
+                # the firmware parks the old head by X first, then Y to the dock, at the current Z: lift above the
+                # old tower before it moves (the original 1.5 mm hop does not clear it)
+                put("G90")
+                put(f"G1 Z{fmt(tower_safe_z)} F600 ; tool change over the old tower")
+                if rel:
+                    put("G91")
+                cur_z = tower_safe_z
+                cur_f = 600.0
             want = snaps[i].get(tool, 0.0)
             if abs(out_r.get(tool, 0.0) - want) > 1e-4:
                 correct(
@@ -676,54 +821,54 @@ def build(
                 out_r[tool] = want
             tool = int(mt.group(1))
             changes += 1
-            last_xy = None  # the firmware parks/picks: position unknown here
+            last_xy = oxy = None  # the firmware parks/picks/purges: X/Y unknown here
             emit(line)
-            if no_tower:
+            if skip:
                 # the tower prime goes, so every pick purges off the bed; the slicer writes no
                 # purge line when it switches back to the job's starting head
-                put("; --no-tower: prime off the bed instead of on the tower")
-                put(
-                    f"{purge} INDEX={tool} FORCE=1 LENGTH="
-                    f"{fmt(out_r.get(tool, 0.0) + profile.no_tower_prime_mm)} "
-                    f"RETRACT_LENGTH={fmt(profile.purge_retract_mm)}"
-                )
+                put("; below the old tower top: prime off the bed instead of on the tower")
+                put(f"{purge} INDEX={tool} FORCE=1 LENGTH={fmt(out_r.get(tool, 0.0) + profile.no_tower_prime_mm)}")
                 used[tool] = used.get(tool, 0.0) + profile.no_tower_prime_mm
                 out_r[tool] = profile.purge_retract_mm
             continue
-        if line.startswith(b"M73 P"):
-            # the original's P counts from the first layer; the printer and its dashboards must
-            # show the progress of THIS file, so P is rescaled over the minutes left at the cut
-            r = int(words(line).get("R", 0))
-            put(f"M73 P{max(0, min(100, round(100 * (1 - r / left)))) if left else 100} R{r}")
-            continue
-        if no_tower and line.startswith(purge.encode()):
+        if line.startswith(resetters):
+            oxy = last_xy = None
+        if skip and line.startswith(purge_b):
             continue  # replaced by the purge after the T<n> above
         if m is not None:
             if "F" in m:
                 orig_f = m["F"]
-            if (
-                tower
-                and not rel
-                and (
-                    obj is None
-                    or (
-                        "E" not in m
-                        and "X" in m
-                        and "Y" in m
-                        and tower[0] <= m["X"] <= tower[2]
-                        and tower[1] <= m["Y"] <= tower[3]
-                    )
+            arc_start = oxy  # where the original arc starts (its I/J are relative to it)
+            if "X" in m or "Y" in m:
+                if rel:
+                    oxy = None
+                else:
+                    nx = m.get("X", oxy[0] if oxy else math.nan)
+                    ny = m.get("Y", oxy[1] if oxy else math.nan)
+                    oxy = None if math.isnan(nx + ny) else (nx, ny)
+            if "arc" in m and not rel and (
+                arc_start is None or last_xy is None or math.dist(arc_start, last_xy) > 1e-3
+            ):
+                # the output head is not where the original arc starts (resume point, a dropped tower move): its
+                # I/J centre would shift, so a travel arc goes straight to its end point instead
+                if m.get("E", 0) > 0:
+                    raise _bad(f"line {i + 1}: extruding arc from a position the resume changed")
+                m = {k: v for k, v in m.items() if k in {"X", "Y", "Z", "E", "F"}}
+                line = ("G1 " + " ".join(f"{k}{fmt(v)}" for k, v in m.items()) + " ; was an arc").encode()
+            if skip and tower and not rel and (
+                obj is None
+                or (
+                    "E" not in m
+                    and "X" in m
+                    and "Y" in m
+                    and tower[0] <= m["X"] <= tower[2]
+                    and tower[1] <= m["Y"] <= tower[3]
                 )
             ):
                 dropped += 1  # tower move, tower travel or tower wipe
-                if (
-                    "Z" in m
-                ):  # a layer change or lift on a dropped line still sets the modal Z
-                    pending_z = m["Z"]
-                if (
-                    m.get("E", 0) < 0
-                    and out_r.get(tool, 0.0) < snaps[i] - m["E"] - 1e-4
-                ):
+                if "Z" in m and (obj is not None or not ("X" in m or "Y" in m)):
+                    pending_z = m["Z"]  # a layer change or lift on a dropped line still sets the modal Z
+                if m.get("E", 0) < 0 and out_r.get(tool, 0.0) < snaps[i] - m["E"] - 1e-4:
                     # the park retraction happens here, while the head is still at print temperature
                     correct(
                         out_r.get(tool, 0.0) - (snaps[i] - m["E"]),
@@ -732,7 +877,11 @@ def build(
                     out_r[tool] = snaps[i] - m["E"]
                 continue
             if pending_z is not None and ("Z" not in m or rel):
+                if rel:  # pending_z is absolute
+                    put("G90")
                 put(f"G1 Z{fmt(pending_z)}")
+                if rel:
+                    put("G91")
                 cur_z = pending_z
                 zmin_body = min(zmin_body, cur_z)
             pending_z = None
@@ -747,27 +896,43 @@ def build(
                 if e > 0 and ("X" in m or "Y" in m):
                     used[tool] = used.get(tool, 0.0) + e
             if "F" not in m and orig_f is not None and cur_f != orig_f:
-                put(
-                    f"G1 F{fmt(orig_f)}"
-                )  # a dropped or inserted line had changed the feed rate
+                put(f"G1 F{fmt(orig_f)}")  # a dropped or inserted line had changed the feed rate
             cur_f = orig_f
+            z_after = (cur_z + m["Z"] if rel else m["Z"]) if "Z" in m else cur_z
             if "Z" in m:
-                cur_z = cur_z + m["Z"] if rel else m["Z"]
-                zmin_body = min(zmin_body, cur_z)
-            if "X" in m or "Y" in m:
+                zmin_body = min(zmin_body, z_after)
+            if ("X" in m or "Y" in m or "arc" in m) and not rel:
                 nxt = (
                     m.get("X", last_xy[0] if last_xy else math.nan),
                     m.get("Y", last_xy[1] if last_xy else math.nan),
                 )
+                known = last_xy is not None and not math.isnan(nxt[0] + nxt[1])
                 if (
-                    tower
-                    and not rel
-                    and last_xy
-                    and not math.isnan(nxt[0] + nxt[1])
-                    and seg_hits_box(last_xy, nxt, tower)
+                    skip
+                    and tower
+                    and (last_xy is None or not known or path_hits_box(last_xy, m, tower))
+                    and min(cur_z, z_after) < tower_safe_z - 1e-6
                 ):
-                    tower_hits.append(i + 1)
+                    if m.get("E", 0) > 0:
+                        tower_hits.append(i + 1)  # an extrusion over the old tower: should not exist
+                    else:
+                        # travel (straight or a G2/G3 spiral hop) from an unknown point (after a pick/purge) or
+                        # across the tower that still stands: go over it in a straight line, then down to the
+                        # travel's own Z
+                        put(f"G1 Z{fmt(tower_safe_z)} F600 ; over the old tower")
+                        xy = " ".join(f"{k}{fmt(m[k])}" for k in ("X", "Y", "E") if k in m)
+                        if xy:
+                            put(f"G1 {xy} F{fmt(orig_f or 12000)}")
+                        put(f"G1 Z{fmt(z_after)} F600")
+                        cur_f = 600.0
+                        cur_z = z_after
+                        tower_lifts += 1
+                        last_xy = None if math.isnan(nxt[0] + nxt[1]) else nxt
+                        continue
                 last_xy = None if math.isnan(nxt[0] + nxt[1]) else nxt
+            elif ("X" in m or "Y" in m) and rel:
+                last_xy = None
+            cur_z = z_after
         emit(line)
     # ---- stats + config block ----
     stats_end = w.config_start if w.config_start is not None else len(lines)
@@ -822,8 +987,13 @@ def build(
             command=CMD,
         )
     if tower_hits:
+        raise GateFailure(
+            f"{len(tower_hits)} extrusions cross the old tower area below its top (lines {tower_hits[:5]})",
+            command=CMD,
+        )
+    if tower_lifts:
         notes.append(
-            f"--no-tower: {len(tower_hits)} travels cross the tower area (lines {tower_hits[:5]}...)"
+            f"{tower_lifts} travels lifted to Z {fmt(tower_safe_z)} over the old tower (after a pick/purge or across it)"
         )
     if pause_layer is not None and rl < pause_layer - 40:
         notes.append(
@@ -835,6 +1005,7 @@ def build(
             f"layer {pause_layer} was paused part-way: its rest is skipped; if nothing below it failed, "
             "the printer's own RESUME continues exactly from the pause"
         )
+    z_range_check(out, z_lim)
     return Resume(
         lines=out,
         layer=rl,
@@ -854,3 +1025,43 @@ def build(
         notes=notes,
         line_from=i0 + 1,
     )
+
+
+def z_range_check(out: list[bytes], z_hi: float) -> None:
+    """fail-closed last pass over the finished resume file: absolute Z of every move after the RESUME marker
+    (G90/G91, G92 Z) must stay within 0..z_hi; otherwise refuse the whole file"""
+    z: float | None = None
+    rel = seen = False
+    for n, line in enumerate(out, 1):
+        if not seen:
+            seen = line.startswith(HEADER_START.encode())
+            continue
+        code = line.split(b";", 1)[0].strip()
+        if code.startswith(b"G91"):
+            rel = True
+        elif code.startswith(b"G90"):
+            rel = False
+        elif code.startswith(b"G92"):
+            if {"X", "Y", "Z"} & set(words(code)):  # a coordinate offset would hide the real Z
+                raise GateFailure(f"output line {n}: coordinate offset {code.decode()} after the RESUME marker",
+                                  command=CMD)
+        elif code.startswith(b"G28"):
+            z = None
+        else:
+            m = move(code)
+            if m is not None and "Z" in m:
+                if rel:
+                    if z is None:
+                        raise GateFailure(f"output line {n}: relative Z move from an unknown Z: {code.decode()}",
+                                          command=CMD)
+                    z += m["Z"]
+                else:
+                    z = m["Z"]
+                if not 0.0 <= z <= z_hi + 1e-6:
+                    raise GateFailure(
+                        f"output line {n}: Z {z:.3f} outside 0..{z_hi:g} (Z axis limit - {fmt(Z_MARGIN)}): "
+                        f"{code.decode()}; nothing written",
+                        command=CMD,
+                    )
+    if not seen:
+        raise GateFailure("internal: no RESUME marker in the output", command=CMD)

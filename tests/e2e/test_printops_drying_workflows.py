@@ -136,6 +136,8 @@ def test_dry_due_lists_overdue_spools_and_check_emits_drying_due(
 
 
 def test_dry_usage_errors_exit_2(tmp_path: Path, live_api: LiveApi) -> None:
+    """The user mistypes a scale reading and a subcommand; the CLI explains the expected
+    ID=GRAMS form and the valid subcommands, and `--help` shows how to start a session."""
     env = _env(live_api)
     bad_weights = run_cli(
         tmp_path,
@@ -150,9 +152,9 @@ def test_dry_usage_errors_exit_2(tmp_path: Path, live_api: LiveApi) -> None:
     )
     unknown = run_cli(tmp_path, "printops", "dry", "bake", env_extra=env)
     helped = run_cli(tmp_path, "printops", "dry", "--help", env_extra=env)
-    assert bad_weights.returncode == 2 and "ID=GRAMS" in bad_weights.stderr
-    assert unknown.returncode == 2 and "start, finish, ls, due" in unknown.stderr
-    assert (
-        helped.returncode == 0
-        and "3d printops dry start DRYER SPOOL_ID..." in helped.stdout
-    )
+    assert bad_weights.returncode == 2
+    assert "ID=GRAMS" in bad_weights.stderr
+    assert unknown.returncode == 2
+    assert "start, finish, ls, due" in unknown.stderr
+    assert helped.returncode == 0
+    assert "3d printops dry start DRYER SPOOL_ID..." in helped.stdout

@@ -1,0 +1,25 @@
+{
+    "from": "User",
+    "host_type": "crealityprint",
+    "inherits": "Creality K1 SE 0.4 nozzle",
+    "is_custom_defined": "0",
+    "machine_max_acceleration_extruding": [
+        "8900",
+        "8900"
+    ],
+    "machine_max_acceleration_travel": [
+        "8900",
+        "8900"
+    ],
+    "machine_max_acceleration_x": [
+        "8900",
+        "8900"
+    ],
+    "machine_max_acceleration_y": [
+        "8900",
+        "8900"
+    ],
+    "name": "Creality K1 SE 0.4 nozzle - Copy",
+    "printer_settings_id": "Creality K1 SE 0.4 nozzle - Copy",
+    "version": "2.3.1.10"
+}
