@@ -150,6 +150,41 @@ deploy environment, e.g. `PRINTOPS_HA_URL=http://192.168.0.39:8123`) and an HA l
 is in `/home/ultra/printops/data/api/ha_token` (`PRINTOPS_HA_TOKEN_FILE`, mode 0600) or
 `PRINTOPS_HA_TOKEN`. Nothing is ever written to HA. Unset → humidity is simply unknown.
 
+## API (calibrations, #167)
+
+| Endpoint | Scope | |
+|---|---|---|
+| `GET /v1/calibrations` | read | `?printer=&head=&kind=&status=&current=true&limit=N` → `{calibrations}` newest first |
+| `GET /v1/calibrations/required` | read | `?printer=P&head=T` (or `slot=T`) `&spool=ID&plate=&all=true` → `{printer, overall, items, skipped, estimate}` |
+| `POST /v1/calibrations/check` | read (write with `accept`) | `{printer, footer{key: value}, used_tools[], spools?{tool: id}, accept?["calibration:<kind>"], reason?, plate?, gcode_sha?, file?}` → the `calibration_current` gate `{overall, items}`; each acceptance → `calibration.accepted` |
+| `POST /v1/calibrations/runs` | write | `{kind, method, printer?, head?, spool_id?\|filament_id?, lot_nr?, plate?, params?, gcode_path?, gcode_sha?, note?}` → 201 planned calibration |
+| `POST /v1/calibrations/{id}/result` | write | `{values, evidence?, note?, valid_until?}` → recorded; supersedes the same scope; `calibration.recorded` |
+| `POST /v1/calibrations` | write | run fields + `{values, …}` → 201 recorded (manual entry) |
+| `GET /v1/calibrations/{id}` | read | one calibration |
+
+The catalog `fleet/calibrations.yaml` (override `PRINTOPS_CALIBRATIONS`), the policy section
+`calibrations:` of `fleet/policy.yaml` and `fleet/printers.yaml` are re-read on every request;
+a broken file answers 503 and shows in `3d lint --printops` (`calibrations/*`). Maintenance (#166)
+invalidates records with `calibration.invalidated` events. Details: docs/commands/calibrate.md.
+
+## API (incidents, #165)
+
+`/v1/incidents` (report with auto-context, list, show, edit, confirm, resolve, dismiss),
+`/v1/incidents/stats` (rates per kg / print-hour), `/v1/incidents/context`,
+`/v1/incidents/from-watch` and `/v1/exposure` (+ `/sync`): see
+[docs/commands/printops-incidents.md](../../docs/commands/printops-incidents.md#rest).
+
+**Printers (read-only).** The auto-context reads the printer named in a report: one status read
+and, for Moonraker, one `GET /server/history/list`. `POST /v1/exposure/sync` pages through
+Moonraker job history (≤ 1 request / 5 s). Offline fleet printers are never contacted.
+
+**G-code for the context.** `PRINTOPS_GCODE_DIRS` (`:`-separated, inside the container) is
+searched for the job's file; compose mounts the host's `PRINTOPS_GCODE_HOST_DIR` (default
+`/home/ultra/printops/gcodes`) read-only at `/gcodes`, the default dir. `PRINTOPS_GCODE_FETCH=1`
+lets 3d-api download a Moonraker job's file once (`GET /server/files/gcodes/…`) into
+`/data/gcode-cache/`; off by default. Without the G-code an incident still gets job, layer, the
+live heater targets, the spool and its lot.
+
 ## Operations
 
 ```

@@ -49,13 +49,38 @@ Issue: [#156](https://github.com/alex-mextner/3d-cli/issues/156).
 | `vendor.lock` | — | pins of moonraker-home-assistant 1.13.4, ha_creality_ws 0.9.9, WebRTC v3.6.1; checked against the live `manifest.json` versions and submodule commits |
 | `manifest.yaml` | — | the table above, plus the HA-repo settings `3d ha deploy` uses |
 
-`tests/u1_print_inspector/` runs in the 3d-cli gate (`dev run test`), and `yamllint` checks
-the whole directory (`.yamllint`).
+`tests/u1_print_inspector/` and `tests/test_printer_alerts.py` run in the 3d-cli gate
+(`dev run test`), and `yamllint` checks the whole directory (`.yamllint`).
 
 On the Odroid the compose overlay `/home/ultra/odroid-overlay/compose.odroid.yaml` mounts its
 own copy of `go2rtc.yaml` (different Tailscale WebRTC candidate), so a change to
 `go2rtc/go2rtc.yaml` does not reach the running go2rtc there; `3d ha deploy` prints a warning
 when a changed file is not mounted by the service it lists.
+
+### Printer alerts carry a camera frame
+
+Every alert in `packages/3d_printers.yaml` (state changes, offline, temperature overshoot)
+goes through `script.printer_send_notification` with `printer: u1` or `printer: k1_se`. The
+script refreshes that printer's frame grabber, a `command_line` sensor
+(`sensor.printer_u1_alert_snapshot`, `sensor.printer_k1_se_alert_snapshot`) whose command
+`curl -f`s a frame into `/media/printer-alerts/<printer>-<time>-<pid>.jpg` and reports the
+file, or `failed`:
+
+| Printer | Frame source |
+|---|---|
+| U1 | `http://u1-camera-proxy:8090/u1.jpg` (with the inspector overlay; 502 once the frame is older than 15 s) |
+| K1 SE | `http://go2rtc:1984/api/frame.jpeg?src=k1se_camera` (mjpg-streamer through go2rtc) |
+
+The phone notification gets `image: /media/local/…` only when the grabber's state changed
+during this run and names a file, so a dead camera never yields an old or missing picture:
+the alert then goes out as text (an offline printer has no camera either). `/media/local/…`
+is the attachment the iOS app can download: media_source answers it only with the app's HA
+auth (401 without), while `/api/camera_proxy/…` attachments work on Android only and
+`/local/…` (`www`) is public. `camera.snapshot` is not used because on a failed fetch it
+writes the camera's last cached frame, or nothing, without raising. The grabber keeps the
+newest 30 frames per printer; `/media` is the HA container's own disk, emptied when the
+container is recreated. `tests/test_printer_alerts.py` fails on an alert that names no
+printer and runs both grabber commands against a fake `curl`.
 
 ## What a deploy does
 
@@ -101,6 +126,8 @@ when a changed file is not mounted by the service it lists.
    the PR merges, and `--dry-run` reports `pointer not yet merged` meanwhile instead of
    failing. Merge it with a merge commit; the next deploy then fast-forwards the checkout
    without touching the working tree.
+   If a run fails after applying, for example at the PR step, run it again: with nothing
+   left to apply it only records the live state (branch + PR) and does not touch HA.
 
 ## Cutover (once)
 
