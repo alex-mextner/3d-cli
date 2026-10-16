@@ -23,6 +23,7 @@ score/
 !models/*/img/*.png
 !models/*/stl/*.stl
 !models/*/stl/*/*.stl
+!models/*/viewer/*.3mf
 
 # local tooling state
 .serena/
