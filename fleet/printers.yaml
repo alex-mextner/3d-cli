@@ -81,6 +81,11 @@ k1se:
   model: Creality K1 SE
   owner: own
   access: full
+  # The user presets this printer prints with (profiles/snapmaker-orca, #266): `3d calibrate gen`
+  # slices with them; accel 8900 = the 2026-10-15 shaper max_accel.
+  slicer:
+    machine: Creality K1 SE 0.4 nozzle - Copy
+    process: 0.20mm Standard @Creality K1 SE - accel 8900
   adapter: creality-stock   # Creality K1 SE (K1SE-85B6), stock firmware: HTTP upload + ws:9999
   host: 192.168.0.27
   # stepper_x/y position_min/max: CrealityOfficial/K1_Series_Klipper config/K1_SE_CR4CU220812S12/printer.cfg

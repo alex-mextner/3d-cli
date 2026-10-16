@@ -62,7 +62,6 @@ from slicing.calibration_gen import (
     finish,
     first_layer_extrusion,
     insert_before_end,
-    profile_roots,
     publish,
     require_relative_e,
     slice_models,
@@ -71,7 +70,8 @@ from slicing.calibration_gen import (
     text_width,
     Z_MOVE_F,
     TRAVEL_F,
-    presets_for,
+    PresetChoice,
+    chosen_presets,
 )
 
 Phase = Literal["layer", "sequential"]
@@ -231,9 +231,9 @@ def make_context(
     temp: int | None,
     tests: frozenset[str] | None = None,
     pa: tuple[float, ...] = COMBO_PA_VALUES,
+    presets: PresetChoice | None = None,
 ) -> PlateContext:
-    p = presets_for(model)
-    idx = ProfileIndex(profile_roots(slicer))
+    p, idx = chosen_presets(model, slicer, material, presets)
     if material not in p.filament:
         raise GenError(
             f"no filament preset for {material!r} on {p.machine} (known: {', '.join(p.filament)})"
@@ -806,6 +806,12 @@ def write_map(
         "printer_model": ctx.p.machine,
         "material": ctx.material,
         "filament_preset": ctx.p.filament[ctx.material],
+        "presets": {
+            "machine": ctx.p.machine,
+            "process": ctx.p.process,
+            "filament": ctx.p.filament[ctx.material],
+            "chosen_by": dict(ctx.p.chosen_by),
+        },
         "color": ctx.color,
         "nozzle_temp": ctx.base_temp,
         "estimate_min": round(estimate / 60, 1),

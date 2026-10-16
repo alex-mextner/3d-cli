@@ -13,7 +13,9 @@ Talks to 3d-api like [`3d printops`](printops.md) (`PRINTOPS_API`, `PRINTOPS_TOK
 3d calibrate show ID
 3d calibrate check FILE.gcode --printer P [--spools T1=ID,…] [--plate PLATE]
                    [--accept calibration:KIND[,…] --reason TEXT]
-3d calibrate gen pa|flow|combo|temp|shaper|plate1|dense --printer P -o OUT [--material PLA] [--color #RRGGBB] [--nozzle-temp C]
+3d calibrate gen pa|flow|combo|temp|shaper|plate1|dense --printer P -o OUT --filament-preset NAME
+                 [--machine-preset NAME] [--process-preset NAME] [--material PLA] [--color #RRGGBB]
+                 [--nozzle-temp C] [--only T,…] [--skip T,…] [--pa-range LOW:HIGH] [--pa-step S]
   common (all but gen): [--json] [--api URL] [--token TOKEN]
 ```
 
@@ -127,10 +129,17 @@ logs a `calibration.accepted` event (who, which G-code SHA, why); it needs a tok
 
 ## `gen` — calibration prints ([#168](https://github.com/alex-mextner/3d-cli/issues/168))
 
-Local, no API. Slices with the Orca CLI (`SLICER=/path/to/orca` to force one) from the printer
-model's Orca system presets (`slicing/calibration_gen.py` `PRESETS`; today the Creality K1 SE),
-`inherits` resolved, plus per-test overrides; then adds thumbnails and a slice-warnings record,
-so `3d print-preflight FILE --printer P` can PASS it.
+Local, no API. Slices with the Orca CLI (`SLICER=/path/to/orca` to force one) with the presets the
+printer and the spool really print with ([#293](https://github.com/alex-mextner/3d-cli/issues/293)):
+`--machine-preset`/`--process-preset` (default: the printer's `slicer: {machine, process}` in
+`fleet/printers.yaml`) and `--filament-preset` (the spool's preset; required). User presets are
+found in the repo's `profiles/snapmaker-orca/` (D10), then Orca's user folder, and inherit from the
+system presets of the printer model (`slicing/calibration_gen.py` `PRESETS`; today the Creality
+K1 SE). No preset → an error, never Orca's stock presets (a calibration sliced with stock flow, PA
+and acceleration measures settings you do not print with). The G-code ends with
+`; 3d calibrate presets: machine=… (source); process=…; filament=…`, plates also write them to
+`NAME.json`. Per-test overrides go on top; then thumbnails and a slice-warnings record, so
+`3d print-preflight FILE --printer P` can PASS it.
 
 - `pa` — hollow 40×40×30 mm single-wall tower, ACCEL=500, SQUARE_CORNER_VELOCITY=1, 100 mm/s
   walls, slicer PA off; `TUNING_TOWER COMMAND=SET_PRESSURE_ADVANCE PARAMETER=ADVANCE START=0

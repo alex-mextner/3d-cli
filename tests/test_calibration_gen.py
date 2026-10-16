@@ -11,6 +11,12 @@ import pytest
 from printer_ops.move_bounds import _INERT, _INERT_TOWER, command_word
 from slicing import calibration_gen as cg
 
+# The stock presets of the fake profile tree, named explicitly: generate() has no default.
+STOCK = cg.PresetChoice(
+    "Creality K1 SE 0.4 nozzle", "0.20mm Standard @Creality K1 SE", "Creality Generic PLA @K1-all",
+    (("machine", "test"), ("process", "test"), ("filament", "test")),
+)
+
 
 def test_box_stl_has_twelve_facets_spanning_the_box() -> None:
     stl = cg.box_stl(1, 2, 0, 11, 22, 5)
@@ -108,7 +114,7 @@ def test_shaper_commands_for_k1se(tmp_path: Path) -> None:
 
 def test_unknown_model_and_kind() -> None:
     with pytest.raises(cg.GenError, match="no calibration presets"):
-        cg.generate("pa", "Prusa MK4", "", Path("x.gcode"))
+        cg.generate("pa", "Prusa MK4", "", Path("x.gcode"), presets=STOCK)
     with pytest.raises(cg.GenError, match="unknown kind"):
         cg.generate("ringing", "Creality K1 SE", "", Path("x.gcode"))
 
@@ -181,6 +187,8 @@ def _fake_orca(
         d.mkdir(parents=True, exist_ok=True)
         (d / f"{name}.json").write_text(json.dumps({"name": name, **data}))
     monkeypatch.setenv("ORCA_PROFILES", str(root))
+    (tmp_path / "user").mkdir(exist_ok=True)
+    monkeypatch.setenv("ORCA_USER_PRESETS", str(tmp_path / "user"))
     body = FAKE_GCODE.replace("{end}", end).replace("{relative_e}", relative_e)
     script = tmp_path / "orca"
     script.write_text(f"""#!/usr/bin/env python3
@@ -204,7 +212,7 @@ def test_gen_pa_and_flow_end_to_end_with_a_fake_orca(
 
     orca = _fake_orca(tmp_path, monkeypatch)
     pa = tmp_path / "pa.gcode"
-    cg.generate("pa", "Creality K1 SE", orca, pa, color="#E8732A")
+    cg.generate("pa", "Creality K1 SE", orca, pa, color="#E8732A", presets=STOCK)
     lines = pa.read_text().splitlines()
     start = lines.index("START_PRINT EXTRUDER_TEMP=220 BED_TEMP=55")
     assert lines[start + 3].startswith("TUNING_TOWER COMMAND=SET_PRESSURE_ADVANCE")
@@ -213,7 +221,7 @@ def test_gen_pa_and_flow_end_to_end_with_a_fake_orca(
     assert evaluate(pa)[0] == "PASS"
 
     flow = tmp_path / "flow.gcode"
-    res = cg.generate("flow", "Creality K1 SE", orca, flow)
+    res = cg.generate("flow", "Creality K1 SE", orca, flow, presets=STOCK)
     text = flow.read_text()
     for name, pct in (
         ("flow_m10", 90),
@@ -235,7 +243,7 @@ def test_gen_without_end_print_fails_and_writes_nothing(
     orca = _fake_orca(tmp_path, monkeypatch, end="M84")
     out = tmp_path / "pa.gcode"
     with pytest.raises(cg.GenError, match="END_PRINT"):
-        cg.generate("pa", "Creality K1 SE", orca, out)
+        cg.generate("pa", "Creality K1 SE", orca, out, presets=STOCK)
     assert not out.exists()
 
 
@@ -271,7 +279,7 @@ def test_gen_combo_end_to_end_with_a_fake_orca(
 
     orca = _fake_orca(tmp_path, monkeypatch)
     out = tmp_path / "combo.gcode"
-    res = cg.generate("combo", "Creality K1 SE", orca, out, color="#000000")
+    res = cg.generate("combo", "Creality K1 SE", orca, out, color="#000000", presets=STOCK)
     lines = out.read_text().splitlines()
     start = lines.index("START_PRINT EXTRUDER_TEMP=220 BED_TEMP=55")
     end_pa = lines.index("; 3d calibrate gen combo: end of PA lines")
@@ -321,7 +329,7 @@ def test_record_hints_name_catalog_methods(
     notes = [
         n
         for k in ("pa", "flow", "combo")
-        for n in cg.generate(k, "Creality K1 SE", orca, tmp_path / f"{k}.gcode").notes
+        for n in cg.generate(k, "Creality K1 SE", orca, tmp_path / f"{k}.gcode", presets=STOCK).notes
     ]
     cg.generate("shaper", "Creality K1 SE", "", tmp_path / "s.txt")
     notes += (tmp_path / "s.txt").read_text().splitlines()
@@ -341,7 +349,7 @@ def test_gen_combo_refuses_absolute_extrusion(
     orca = _fake_orca(tmp_path, monkeypatch, relative_e="0")
     out = tmp_path / "combo.gcode"
     with pytest.raises(cg.GenError, match="relative-E"):
-        cg.generate("combo", "Creality K1 SE", orca, out)
+        cg.generate("combo", "Creality K1 SE", orca, out, presets=STOCK)
     assert not out.exists()
 
 

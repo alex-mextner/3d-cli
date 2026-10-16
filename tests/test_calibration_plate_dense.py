@@ -8,7 +8,7 @@ import shutil
 from pathlib import Path
 
 import pytest
-from test_calibration_plate import _ctx, _object_lines, orca  # noqa: F401  (fixture)
+from test_calibration_plate import STOCK, _ctx, _object_lines, orca  # noqa: F401  (fixture)
 
 from slicing import calibration_plate as cp
 from slicing.calibration_plates import PLATES, dense
@@ -128,6 +128,6 @@ def test_dense_plate_builds_every_test_and_maps_it(orca: str, tmp_path: Path) ->
 @needs_openscad
 def test_dense_plate_skips_tests(orca: str) -> None:  # noqa: F811
     ctx = cp.make_context(
-        "Creality K1 SE", orca, "PLA", "#E8732A", None, frozenset({"ringing", "vfa"})
+        "Creality K1 SE", orca, "PLA", "#E8732A", None, frozenset({"ringing", "vfa"}), presets=STOCK
     )
     assert {o.name for o in dense.build(ctx).objects} == {"ringing_tower", "vfa_tube"}
