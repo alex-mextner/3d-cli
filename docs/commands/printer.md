@@ -18,6 +18,7 @@ Epic: [#90](https://github.com/alex-mextner/3d-cli/issues/90).
 3d printer cancel NAME --yes
 3d printer watch NAME... | --all [--steer SESSION] [--exec CMD] [--min-severity LEVEL] ...
 3d printer vision NAME [--interval S] [--once] [--dry-run] [--scene] ...  |  vision eval ...  |  vision record NAME DIR  |  vision fetch-model
+3d printer bed status NAME [--json] [--max-age S]  |  bed reference NAME [--capture [--no-plate]]  |  bed monitor NAME
 3d printer subscribe --session ID [--printer P,P] [--kinds K,K] [--min-severity LEVEL] ...
 3d printer unsubscribe --session ID | --id SUBID | --all
 3d printer subscriptions [list | test PRINTER] [--json]
@@ -33,6 +34,7 @@ Epic: [#90](https://github.com/alex-mextner/3d-cli/issues/90).
 | `cancel NAME --yes` | Cancel the running or paused job. |
 | `watch NAME...` | Stay subscribed (read-only) and report anomalies as events — see [Watching printers](#watching-printers). |
 | `vision NAME` | Watch the camera for failed prints (spaghetti, stale/dark camera, the U1's own NPU verdicts) — see [Camera failure detection](#camera-failure-detection). |
+| `bed status` / `reference` / `monitor` | Is the bed clear, is the build plate on — from the camera against an empty-bed reference; also the `bed` start gate and the `bed_clear` event — see [Bed state](#bed-state). |
 | `subscribe` / `unsubscribe` / `subscriptions` | Route printer alerts to an AI agent first: it looks at the frame and tells the user only if the failure is real — see [printer-subscribe.md](printer-subscribe.md). |
 | `agent list` / `stop` / `handoff` | The temporary per-printer omp agent (tmux) that gets the warning+ alerts no live subscriber took — see [printer-subscribe.md#the-temporary-printer-agent](printer-subscribe.md#the-temporary-printer-agent). |
 
@@ -316,6 +318,69 @@ Assistant ingress path that works only through HA, served by `u1-camera-proxy` o
 and numbers on real U1 footage: [docs/research/printer-vision.md](../research/printer-vision.md),
 verifier and threshold tuning: [printer-vision-tuning.md](../research/printer-vision-tuning.md).
 
+## Bed state
+
+([#303](https://github.com/alex-mextner/3d-cli/issues/303)) After a job the parts stay on the bed
+until someone takes them off. The camera can see that, so nobody has to tell an agent «стол
+свободен», and a start onto old parts or onto the bare magnetic sheet is refused.
+
+- **Reference.** With the bed empty and the plate on, at the Z where the printer parks after a
+  job (U1 `PRINT_END`/`CANCEL_PRINT`: Z 200; K1 SE `END_PRINT`: half of Z max = 125):
+  `3d printer bed reference u1 --capture`. The bed moves in Z on both printers, so a reference
+  only counts within `z_tol_mm` (0.5) of the current Z. `--capture --no-plate` (plate off) adds the
+  bare-bed reference that makes the plate test reliable. `--capture --from FRAME.jpg --z 199.7`
+  stores a saved snapshot of the empty bed taken at that Z instead. Stored in
+  `~/.local/share/3d-cli/bed/NAME/`; `3d printer bed reference u1` lists them.
+- **Status.** `3d printer bed status u1` — `clear` / `occupied` / `unknown` and plate `present` /
+  `missing` / `unknown`, with the reason and an evidence frame (ROI cyan, changed pixels red) in
+  `~/.cache/3d-cli/vision/bed/`. `--max-age S` takes the watcher's last verdict when it was
+  confirmed within S seconds at the same Z, else one fresh frame is judged (it waits up to 6 s
+  for the camera to deliver a new frame; without one the camera may be frozen, so a clear-looking
+  frame reads `unknown`, while parts or a missing plate on it still count).
+- **How.** Frames are decoded at 480 px; the current one is mapped onto the reference colours by
+  a robust gain/offset fit (auto-exposure, room light) and a median detrend removes smooth light
+  gradients; a changed region of ≥ 200 px (or ≥ 8 % of the bed view) is `occupied`, under 100 px
+  and ≤ 3 % is `clear`, in between `unknown`. ROI: `watch.bed.roi` (a polygon of the bed, 0..1 of
+  the frame), else the camera calibration (bed plus 80 mm above it at the current Z), else the
+  whole frame. On the U1 at Z 200 only parts taller than a few cm show, and only the plate's front
+  edge is in view (about 2 % of the frame), so the plate verdict rests on that strip; the U1's
+  own `DETECT_BED_PLATE` still checks the plate at start. Below 2 % of the frame the surface
+  counts as out of view (plate `unknown`, the bed check WARNs).
+- **Monitor.** `3d printer watch` runs `bed monitor NAME` as a child for every Moonraker printer
+  with `watch.bed.enabled: true`. Nothing is grabbed while a job runs; otherwise one snapshot per
+  `interval_s` (1 s), identical bytes skipped, one reduced decode + one masked difference per new
+  frame; the bed is judged only after a change has settled for 3 frames (a hand in the chamber is
+  not judged), and once at start. Events (info, with `data.frame`): `bed_occupied` (parts after
+  a job, or put on), `bed_clear`, `plate_missing`, `plate_present` (after missing). Subscribe an
+  agent to them: `3d printer subscribe --session ID --kinds 'bed_*,plate_*' --min-severity info`.
+  The last verdict is in `~/.local/state/3d-cli/bed/NAME.json` and in the watch heartbeat.
+- **Start gate.** `3d printer start` and `3d print-preflight --printer` add a `bed` line: FAIL on
+  objects or a missing plate, PASS on a clear bed with the plate, WARN when the camera cannot
+  tell (no reference at this Z, stale, plate out of view, camera down); `--force` overrides.
+- **Clear acknowledgement** (`watch.bed.clear_ack`, off by default): after `bed_clear` the
+  printer makes one motor sound so the person at it knows the camera saw the empty bed. Neither
+  printer has a beeper, so the command is `STEPPER_BUZZ STEPPER=stepper_z` (Klipper: ±1 mm ×10,
+  ~10 s, net zero, works unhomed); a list of lines is allowed (the K1 SE can use shorter
+  `FORCE_MOVE` pulses). It is the only write the bed code makes: every command word must be in
+  `trusted_macros`, it is sent only when the printer reads idle/complete/cancelled right before,
+  once per `bed_clear`, at most once per `debounce_minutes` (10), never below `min_z_mm` (10).
+
+```yaml
+u1:
+  trusted_macros: [..., STEPPER_BUZZ]
+  watch:
+    bed:
+      enabled: true
+      clear_ack: {enabled: true, command: STEPPER_BUZZ STEPPER=stepper_z, debounce_minutes: 10, min_z_mm: 10}
+k1se:
+  watch:
+    bed:
+      enabled: true
+      roi: [[0.31, 0.48], [0.72, 0.27], [0.92, 0.55], [0.92, 0.97], [0.41, 0.97]]
+```
+
+A Home Assistant bed sensor is a follow-up: [#305](https://github.com/alex-mextner/3d-cli/issues/305).
+
 ## Safety
 
 ([#95](https://github.com/alex-mextner/3d-cli/issues/95))
@@ -332,10 +397,11 @@ verifier and threshold tuning: [printer-vision-tuning.md](../research/printer-vi
    printer's axis limits and the macro check ([`3d gcode-bounds`](gcode-bounds.md)), the
    overhang check ([`3d gcode-overhangs`](gcode-overhangs.md)), the slicer-warnings record
    next to the G-code ([`3d slice-warnings`](slice-warnings.md)), the head-sequence check
-   (project 3MF from `--source-3mf` or next to the G-code), thumbnails, and the PrintOps
+   (project 3MF from `--source-3mf` or next to the G-code), thumbnails, the PrintOps
    material gates of `3d print-preflight --printer NAME` (live 3d-api state from
-   `$PRINTOPS_API` / `printops.yaml`, else fleet facts only); a FAIL blocks the start unless
-   `--force`.
+   `$PRINTOPS_API` / `printops.yaml`, else fleet facts only), and on printers with
+   `watch.bed.enabled` the camera [bed check](#bed-state) (objects on the bed or the plate
+   missing); a FAIL blocks the start unless `--force`.
 5. `upload` refuses while a Creality printer is busy (the firmware does not protect the
    running job), and on any printer refuses to overwrite the file being printed.
 6. `start` succeeds only when the printer acknowledges it: Moonraker's HTTP reply, or on

@@ -83,6 +83,8 @@ class FakeMoonraker:
         "stepper_y": {"position_max": 274.0},
     })                                            # Klipper configfile.settings
     history: list[dict[str, Any]] = field(default_factory=list)  # Moonraker job history, newest first
+    camera: bytes | None = None                   # JPEG served at the U1 camera monitor.jpg path
+    camera_hits: int = 0                          # each hit gets new bytes (a COM counter), like a live camera
     port: int = 0
 
     def writes(self) -> list[Recorded]:
@@ -128,6 +130,15 @@ class FakeMoonraker:
                     self.send_header("Content-Length", str(len(data)))
                     self.end_headers()
                     self.wfile.write(data)
+                elif u.path == "/server/files/camera/monitor.jpg" and fake.camera is not None:
+                    fake.camera_hits += 1
+                    com = b"\xff\xfe\x00\x0a" + fake.camera_hits.to_bytes(8, "big")
+                    data = fake.camera[:2] + com + fake.camera[2:]
+                    self.send_response(200)
+                    self.send_header("Content-Type", "image/jpeg")
+                    self.send_header("Content-Length", str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
                 else:
                     self._reply({"error": {"code": 404, "message": "not found"}}, 404)
 
@@ -150,6 +161,8 @@ class FakeMoonraker:
                     self._reply({"result": "ok"})
                 elif u.path == "/printer/print/cancel":
                     fake.status["print_stats"].update(state="cancelled")
+                    self._reply({"result": "ok"})
+                elif u.path == "/printer/gcode/script":
                     self._reply({"result": "ok"})
                 else:
                     self._reply({"error": {"code": 404}}, 404)

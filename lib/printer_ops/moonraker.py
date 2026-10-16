@@ -8,6 +8,7 @@ https://github.com/alex-mextner/3d-cli/issues/92:
   upload  POST /server/files/upload   multipart root=gcodes, print=false, file
   start   POST /printer/print/start?filename=<name>
   cancel  POST /printer/print/cancel
+  gcode   POST /printer/gcode/script?script=<line>   (only the bed-clear ack, printer_ops/bed.py)
 
 SNAPMAKER U1: Klipper object `print_task_config` carries what each of the 4 heads holds —
   the same fields Snapmaker Orca's "Sync filament" reads (SSWCP.cpp:1658-1767):
@@ -260,6 +261,10 @@ class MoonrakerAdapter(Adapter):
 
     def cancel(self) -> None:
         self._post("/printer/print/cancel")
+
+    def run_gcode(self, script: str) -> None:
+        # Moonraker answers after Klipper ran the line (a long STEPPER_BUZZ takes ~10 s)
+        self._post("/printer/gcode/script?script=" + quote(script, safe=""))
 
 
 __all__ = ["MoonrakerAdapter", "parse_slots", "parse_status"]

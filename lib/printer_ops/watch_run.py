@@ -51,13 +51,15 @@ from printer_ops.watch import (
 from printer_ops.ws import WebSocket, WebSocketError
 
 if TYPE_CHECKING:
+    from printer_ops.bed import BedChild
     from printer_ops.devices import Device
 
 UNIT_NAME = "3d-printer-watch@.service"
 # printer-devices.yaml `<name>.watch:` keys and their CLI flags.
 # `vision` belongs to `3d printer vision` (issue #150), which shares the same sinks; watch ignores it.
+# `bed` starts the bed monitor child (printer_ops/bed.py, issue #303).
 WATCH_KEYS = ("tg_fallback", "steer", "exec", "stdout", "min_severity", "stall_minutes", "heat_timeout_minutes",
-              "milestones", "dedup_minutes", "vision")
+              "milestones", "dedup_minutes", "vision", "bed")
 
 USAGE = """3d printer watch NAME... | --all [options]
   Subscribe to the printers' live state (read-only) and report anomalies as events:
@@ -67,6 +69,9 @@ USAGE = """3d printer watch NAME... | --all [options]
   while printing/paused, no progress while printing, homing lost while paused/printing,
   Klipper shutdown/disconnect, connection loss. The first reading is reported as a
   `snapshot` plus anything already wrong. Runs until stopped (or --duration).
+  Printers with `watch.bed.enabled: true` also get the camera bed monitor (`3d printer bed
+  --help`): bed_clear / bed_occupied / plate_present / plate_missing (info) once the parts are
+  taken off, put on, or the plate goes missing; nothing is grabbed while a job runs.
 
 Sinks (several at once; per printer also from printer-devices.yaml `<name>.watch:`):
   stdout JSONL (default)  {"ts","printer","kind","severity","text","key","data"} per line
@@ -601,6 +606,24 @@ def default_heartbeat(names: list[str]) -> Path:
     return state_dir() / "watch" / ("+".join(names) + ".json")  # '+' never occurs in a printer name
 
 
+def _bed_children(devices: list[Device], submit: Callable[[Event], None], stop: threading.Event,
+                  heartbeat: Heartbeat) -> list[BedChild]:
+    """One started `bed_state.py monitor` child per Moonraker printer with watch.bed.enabled."""
+    from printer_ops.bed import BedChild, bed_config
+
+    out = []
+    for d in devices:
+        if not bed_config(d).enabled:
+            continue
+        if d.adapter != "moonraker":
+            _log(f"{d.name}: watch.bed needs a Moonraker printer (camera + toolhead Z); adapter {d.adapter} skipped")
+            continue
+        child = BedChild(d.name, submit, stop, on_state=lambda name, s: heartbeat.update(name, bed=s))
+        child.start()
+        out.append(child)
+    return out
+
+
 def run(argv: list[str]) -> int:
     if not argv or argv[0] in ("-h", "--help"):
         print(USAGE)
@@ -616,6 +639,10 @@ def run(argv: list[str]) -> int:
         return install_service(names, opts["tokens"])
     devices = [get_device(n) for n in names]
     settings = {d.name: settings_for(d, opts) for d in devices}
+    from printer_ops.bed import bed_config
+
+    for d in devices:
+        bed_config(d)  # a broken watch.bed fails here, before any stream starts
     duration = _number(opts["--duration"], "--duration") if "--duration" in opts else None
 
     from printer_ops.watch_sinks import Dispatcher
@@ -635,7 +662,9 @@ def run(argv: list[str]) -> int:
     streams = [stream_for(d, dispatcher.submit, stop, heartbeat, settings[d.name]["limits"]) for d in devices]
     for st in streams:
         st.start()
-    _log(f"watching {', '.join(names)} (sinks: {', '.join(dispatcher.routes)}; heartbeat {heartbeat.path})")
+    beds = _bed_children(devices, dispatcher.submit, stop, heartbeat)
+    _log(f"watching {', '.join(names)} (sinks: {', '.join(dispatcher.routes)}; heartbeat {heartbeat.path}"
+         + (f"; bed monitor: {', '.join(b.printer for b in beds)}" if beds else "") + ")")
     deadline = time.monotonic() + duration if duration is not None else None
     try:
         while not stop.is_set():
@@ -650,6 +679,8 @@ def run(argv: list[str]) -> int:
         stop.set()
         for st in streams:
             st.join(5.0)
+        for b in beds:
+            b.close()
         dispatcher.close()
         heartbeat.write(dispatcher.stats(), dispatcher.last_event)
     return 0

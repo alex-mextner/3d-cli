@@ -1,4 +1,4 @@
-"""3d printer — drive configured physical printers: list, status, upload, start, cancel, watch, vision, subscribe, agent.
+"""3d printer — drive configured physical printers: list, status, upload, start, cancel, watch, vision, bed, subscribe, agent.
 
 WHAT: talks to the printers named in printer-devices.yaml through a protocol adapter —
   `moonraker` (Klipper/Moonraker, Snapmaker U1) or `creality-stock` (Creality K1 family on
@@ -12,8 +12,8 @@ WHY: sending and starting a job was hand-written HTTP/WebSocket code per printer
 SAFETY (enforced here, before any write):
   - upload only stores the file; it never starts a print;
   - start and cancel need --yes; start refuses a printing/paused/busy/unreadable printer,
-    re-reads state immediately before the write, and runs `3d print-preflight` (FAIL blocks
-    unless --force);
+    re-reads state immediately before the write, and runs `3d print-preflight` plus the camera
+    `bed` check (printer_ops/bed.py; FAIL blocks unless --force);
   - a failed/timed-out start is reported as UNKNOWN and never resent automatically.
 
 INVARIANTS: stdlib-only at import time (registry contract); printer_ops is imported lazily.
@@ -45,7 +45,9 @@ USAGE = """3d printer <subcommand> [args]
   upload NAME FILE.gcode [--as REMOTE] store the file on the printer; never starts a print
   start NAME FILE.gcode --yes [--as REMOTE] [--source-3mf X.3mf] [--bridge-max MM] [--force] [--secs S]
                                        start a file that was uploaded before; runs
-                                       `3d print-preflight` first
+                                       `3d print-preflight` first, plus the camera bed check
+                                       (objects on the bed / plate missing FAIL) when the
+                                       printer has watch.bed.enabled
   cancel NAME --yes                    cancel the running/paused job
   watch NAME...|--all [options]        live read-only subscription: anomaly events to
                                        stdout JSONL / --exec / --steer SESSION / subscribers
@@ -54,6 +56,9 @@ USAGE = """3d printer <subcommand> [args]
                                        into the same event sinks as watch; also
                                        `vision eval --pos P.. --neg N..`, `vision record NAME DIR`,
                                        `vision fetch-model` (see docs/commands/printer-vision.md)
+  bed status|reference|monitor NAME    bed state from the camera: clear/occupied, build plate
+                                       present/missing; `reference NAME --capture` takes the
+                                       empty-bed reference (see `3d printer bed --help`)
   subscribe --session ID [..]          printer alerts go to that omp session (it looks at the
                                        frame, tells the user only if real); `unsubscribe`,
                                        `subscriptions [list|test]` (see `3d printer subscribe --help`)
@@ -355,13 +360,16 @@ def _start_snapshot(name: str, file: str, original: Path, local: Path, source: P
     limits, limits_source = adapter.axis_limits()
     bridge, bridge_source = bridge_max_for(opts.get("--bridge-max"), adapter.device, command="printer")
     # the snapshot lives in a temp dir: NAME.3mf and NAME.slice-warnings.json sit next to the original
+    from printer_ops.preflight import check_bed
+
     # plus the PrintOps material gates of `3d print-preflight --printer NAME` (live 3d-api state
     # when configured, else fleet facts only)
     printops = context_from_options(name, axis_limits=None, api=None, offline=False, snapshot=None,
                                     command="printer")
     report = run_preflight(local, status=st, source_3mf=source, axis_limits=limits, limits_source=limits_source,
                            trusted_macros=adapter.trusted_macros, origin=original,
-                           bridge_max=bridge, bridge_source=bridge_source, printops=printops)
+                           bridge_max=bridge, bridge_source=bridge_source, printops=printops,
+                           bed=check_bed(adapter.device) if adapter.device is not None else None)
     report.file = f"{original} (snapshot)"
     print(report.render())
     if report.overall == FAIL:
@@ -431,6 +439,13 @@ def _cmd_vision(argv: list[str]) -> int:
     return exec_tool(VISION_DEPS, "vision_detect.py", argv)
 
 
+def _cmd_bed(argv: list[str]) -> int:
+    from cli.pyrun import exec_tool
+    from printer_ops.bed import BED_DEPS, BED_TOOL
+
+    return exec_tool(BED_DEPS, BED_TOOL, argv)
+
+
 def run(argv: list[str]) -> int:
     if not argv:
         print(USAGE)
@@ -455,6 +470,8 @@ def run(argv: list[str]) -> int:
         return watch(rest)
     if sub == "vision":
         return _cmd_vision(rest)
+    if sub == "bed":
+        return _cmd_bed(rest)
     if sub in ("subscribe", "unsubscribe", "subscriptions"):
         from printer_ops.subscriptions import run as subscriptions
 
@@ -464,7 +481,7 @@ def run(argv: list[str]) -> int:
 
         return agent(rest)
     raise UsageError(f"unknown subcommand '{sub}'", command="printer",
-                     remediation=["Use list, status, upload, start, cancel, watch, vision, subscribe, unsubscribe, "
+                     remediation=["Use list, status, upload, start, cancel, watch, vision, bed, subscribe, unsubscribe, "
                                   "subscriptions or agent — see `3d printer --help`."])
 
 

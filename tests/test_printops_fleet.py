@@ -266,6 +266,7 @@ def test_repo_fleet_watch_settings_reach_the_devices(monkeypatch: pytest.MonkeyP
     monkeypatch.chdir(tmp_path)
     _use(monkeypatch, REPO_FLEET)
     d = devices.load_devices()
-    assert d["u1"].watch == {"tg_fallback": True}
-    assert d["k1se"].watch == {"tg_fallback": True,
-                               "vision": {"snapshot": "http://192.168.0.27:8080/?action=snapshot"}}
+    assert d["u1"].watch["tg_fallback"] is True and d["u1"].watch["bed"]["enabled"] is True
+    assert d["k1se"].watch["tg_fallback"] is True
+    assert d["k1se"].watch["vision"] == {"snapshot": "http://192.168.0.27:8080/?action=snapshot"}
+    assert d["k1se"].watch["bed"]["roi"][0] == [0.31, 0.48]
