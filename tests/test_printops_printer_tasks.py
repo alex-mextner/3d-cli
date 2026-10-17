@@ -8,6 +8,7 @@ import json
 import re
 import sqlite3
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -272,14 +273,37 @@ def by_key(
     }
 
 
-def kinds_open(
-    conn: sqlite3.Connection, printer: str, head: str
-) -> dict[str, dict[str, Any]]:
-    return {
-        t["calibration_kinds"][0]: t
-        for t in pt.list_tasks(conn, printer)
-        if t["source"] == "calibration" and t["head"] == head
+def calib_open(conn: sqlite3.Connection, printer: str) -> list[dict[str, Any]]:
+    return [t for t in pt.list_tasks(conn, printer) if t["source"] == "calibration"]
+
+
+FILAMENT_KINDS = [
+    "flow_ratio",
+    "pressure_advance",
+    "temp_tower",
+    "max_volumetric_speed",
+    "retraction",
+]
+
+
+def record(ctx: cal.Ctx, kind: str, sid: int, *, valid_until: str | None = None) -> int:
+    """A manual record of `kind` on k1se/T1 for spool `sid`, with the smallest valid values."""
+    values = {
+        name: "ok"
+        if spec.type == "string"
+        else (spec.min if spec.min is not None else spec.max or 1.0)
+        for name, spec in ctx.catalog.kinds[kind].values.items()
+        if not spec.optional
     }
+    rec = cal.record(
+        ctx,
+        cal.RunRequest(
+            kind=kind, method="manual", printer="k1se", head="T1", spool_id=sid
+        ),
+        {"values": values, **({"valid_until": valid_until} if valid_until else {})},
+    )
+    assert rec.status == "recorded"
+    return rec.id
 
 
 def ev(conn: sqlite3.Connection, kind: str) -> list[dict[str, Any]]:
@@ -444,56 +468,82 @@ def test_a_due_rule_is_one_task_per_printer_head_and_logging_it_closes_that_one(
 
 
 # -- derivation: calibrations --------------------------------------------------------------------
-def test_a_nozzle_swap_opens_flow_and_pa_tasks_recording_closes_them_and_a_new_swap_opens_new_ones(
+def test_one_calibration_task_per_head_lists_its_kinds_and_closes_when_every_one_is_current(
     conn: sqlite3.Connection, src: pt.Sources, ctx: cal.Ctx, fleet: Any
 ) -> None:
     sid = spool(ctx.spoolman, "Hyper PLA", slot="k1se/T1", lot="A1")
-    pt.sync(conn, src, "k1se")
-    first = kinds_open(conn, "k1se", "T1")
-    assert {"flow_ratio", "pressure_advance"} <= set(first)
-    flow = first["flow_ratio"]
-    assert flow["spool_id"] == sid and flow["blocks"] == "none" and flow["duration_min"]
+    rep = pt.sync(conn, src, "k1se")
+    [t] = calib_open(conn, "k1se")
+    assert rep.opened == [t["id"]] and t["source_key"] == "calib:k1se/T1"
+    assert t["calibration_kinds"] == FILAMENT_KINDS
+    assert [r["kind"] for r in t["requirements"]] == FILAMENT_KINDS
+    flow = t["requirements"][0]
     assert re.fullmatch(
-        r"calib:k1se/T1/flow_ratio/nozzle:\d+/filament:\d+/lot:A1", flow["source_key"]
+        r"calib:k1se/T1/flow_ratio/nozzle:\d+/filament:\d+/lot:A1", flow["key"]
+    )
+    assert flow["spool_id"] == sid and flow["reason"].startswith("new material type: ")
+    label = "Creality Hyper PLA lot A1"
+    assert (
+        flow["spool"] == label and t["title"] == f"Calibrate 5 kinds on T1 for {label}"
+    )
+    assert t["why"] == (
+        "Flow ratio, Pressure advance (K), Temperature tower, Max volumetric speed, Retraction"
+        f" — {flow['reason']}"
+    )  # one reason, five kinds: said once
+    assert t["spool_id"] == sid and t["spools"] == [{"name": label, "spool_id": sid}]
+    assert t["duration_min"] == 30 + 15 + 45 + 20 + 20 and t["blocks"] == "none"
+    assert t["done_hint"] == (
+        f"3d calibrate record <kind> --printer k1se --head T1 --spool {sid} "
+        f"(<kind>: {' | '.join(FILAMENT_KINDS)})"
+    )
+    assert pt.sync(conn, src, "k1se").changed == 0
+
+    record(ctx, "flow_ratio", sid)
+    rep = pt.sync(conn, src, "k1se")
+    assert rep.updated == [t["id"]] and rep.closed == []
+    less = pt.get(conn, t["id"])
+    assert less["calibration_kinds"] == FILAMENT_KINDS[1:]
+    assert less["title"] == f"Calibrate 4 kinds on T1 for {label}"
+
+    ids = [record(ctx, kind, sid) for kind in FILAMENT_KINDS[1:-1]]
+    pt.sync(conn, src, "k1se")
+    one = pt.get(conn, t["id"])
+    assert one["title"] == f"Calibrate Retraction on T1 for {label}"
+    assert (
+        one["done_hint"]
+        == f"3d calibrate record retraction --printer k1se --head T1 --spool {sid}"
+    )
+    ids.append(record(ctx, "retraction", sid))
+    rep = pt.sync(conn, src, "k1se")
+    done = pt.get(conn, t["id"])
+    assert rep.closed == [t["id"]] and (done["status"], done["closed_by"]) == (
+        "done",
+        "derive",
     )
     assert (
-        flow["done_hint"]
-        == f"3d calibrate record flow_ratio --printer k1se --head T1 --spool {sid}"
+        done["calibration_id"] == max(ids)
+        and "every calibration is current" in done["note"]
     )
-    for kind, values in (
-        ("flow_ratio", {"flow_ratio": 0.97}),
-        ("pressure_advance", {"pressure_advance": 0.03}),
-    ):
-        rec = cal.record(
-            ctx,
-            cal.RunRequest(
-                kind=kind, method="manual", printer="k1se", head="T1", spool_id=sid
-            ),
-            {"values": values},
-        )
-        assert rec.status == "recorded"
-    rep = pt.sync(conn, src, "k1se")
-    assert {first["flow_ratio"]["id"], first["pressure_advance"]["id"]} <= set(
-        rep.closed
-    )
-    closed = pt.get(conn, flow["id"])
-    assert closed["status"] == "done" and closed["calibration_id"] is not None
-    assert "flow_ratio" not in kinds_open(conn, "k1se", "T1")
+    assert calib_open(conn, "k1se") == []
 
     mt.swap_nozzle(conn, fleet, "k1se", "T1", reason="worn", actor="me")
     pt.sync(conn, src, "k1se")
-    after = kinds_open(conn, "k1se", "T1")
-    assert {"flow_ratio", "pressure_advance"} <= set(after)
-    assert (
-        after["flow_ratio"]["id"] != flow["id"]
-        and after["flow_ratio"]["source_key"] != flow["source_key"]
-    )
-    assert (
-        pt.get(conn, flow["id"])["status"] == "done"
-    )  # the closed task is history, never reopened
+    by_head = {t["head"]: t for t in calib_open(conn, "k1se")}
+    again, printer_wide = by_head["T1"], by_head[None]
+    assert (printer_wide["source_key"], printer_wide["title"]) == (
+        "calib:k1se/-",
+        "Calibrate Z offset",
+    )  # the swap invalidated a printer-level kind: the printer's own task
+    assert again["id"] != t["id"] and again["source_key"] == t["source_key"]
+    assert again["calibration_kinds"] == [
+        "flow_ratio",
+        "pressure_advance",
+        "max_volumetric_speed",
+    ]  # the nozzle-scoped kinds; the closed task is history, never reopened
+    assert pt.get(conn, t["id"])["status"] == "done"
 
 
-def test_another_spool_dismisses_the_old_spools_tasks_and_an_unknown_spool_leaves_them(
+def test_another_spool_rewrites_the_heads_task_and_an_unknown_spool_leaves_it(
     conn: sqlite3.Connection,
     src: pt.Sources,
     ctx: cal.Ctx,
@@ -502,7 +552,7 @@ def test_another_spool_dismisses_the_old_spools_tasks_and_an_unknown_spool_leave
 ) -> None:
     a = spool(ctx.spoolman, "Hyper PLA", slot="k1se/T1")
     pt.sync(conn, src, "k1se")
-    old = kinds_open(conn, "k1se", "T1")["pressure_advance"]
+    [old] = calib_open(conn, "k1se")
 
     def down(*_: Any, **__: Any) -> Any:
         raise SpoolmanError("connection refused")
@@ -513,12 +563,236 @@ def test_another_spool_dismisses_the_old_spools_tasks_and_an_unknown_spool_leave
     fake_spoolman.update("spool", a, {"extra": {"printops_slot": encode_extra("")}})
     assert (
         pt.sync(conn, src, "k1se").changed == 0
-    )  # nothing bound: unknown, not "no longer needed"
-    spool(ctx.spoolman, "Matte PLA", slot="k1se/T1")
+    )  # nothing bound: unknown, the entries stay as they were
+    assert pt.get(conn, old["id"])["requirements"] == old["requirements"]
+    b = spool(ctx.spoolman, "Matte PLA", slot="k1se/T1")
+    rep = pt.sync(conn, src, "k1se")
+    assert rep.updated == [old["id"]] and rep.opened == rep.closed == []
+    now = pt.get(conn, old["id"])
+    assert now["spool_id"] == b and now["title"].endswith("for Creality Matte PLA")
+    assert not {r["key"] for r in now["requirements"]} & {
+        r["key"] for r in old["requirements"]
+    }
+
+
+def test_a_persons_dismissal_sticks_for_the_keys_it_covered_and_a_new_nozzle_reopens(
+    conn: sqlite3.Connection, src: pt.Sources, ctx: cal.Ctx, fleet: Any
+) -> None:
+    spool(ctx.spoolman, "Hyper PLA", slot="k1se/T1")
     pt.sync(conn, src, "k1se")
-    gone = pt.get(conn, old["id"])
-    assert (gone["status"], gone["closed_by"]) == ("dismissed", "derive")
-    assert kinds_open(conn, "k1se", "T1")["pressure_advance"]["id"] != old["id"]
+    [t] = calib_open(conn, "k1se")
+    pt.dismiss(conn, t["id"], actor="me", reason="this spool prints fine on defaults")
+    assert pt.sync(conn, src, "k1se").opened == []
+    mt.swap_nozzle(conn, fleet, "k1se", "T1", reason="worn", actor="me")
+    pt.sync(conn, src, "k1se")
+    n = next(t for t in calib_open(conn, "k1se") if t["head"] == "T1")
+    assert n["calibration_kinds"] == [
+        "flow_ratio",
+        "pressure_advance",
+        "max_volumetric_speed",
+    ]  # new nozzle keys; temp tower and retraction keep the dismissal
+
+
+def test_a_dismissal_committed_while_a_pass_derives_is_not_undone(
+    conn: sqlite3.Connection,
+    src: pt.Sources,
+    ctx: cal.Ctx,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spool(ctx.spoolman, "Hyper PLA", slot="k1se/T1")
+    pt.sync(conn, src, "k1se")
+    [t] = calib_open(conn, "k1se")
+    derive = pt.derive
+
+    def racing(c: sqlite3.Connection, s: pt.Sources, printer: str) -> pt.Derivation:
+        d = derive(c, s, printer)  # read before the person's dismissal commits
+        pt.dismiss(conn, t["id"], actor="me", reason="not now")
+        return d
+
+    monkeypatch.setattr(pt, "derive", racing)
+    assert pt.sync(conn, src, "k1se").opened == []
+    assert calib_open(conn, "k1se") == []
+
+
+def test_a_spool_back_whose_kinds_were_dismissed_dismisses_the_other_spools_task(
+    conn: sqlite3.Connection,
+    src: pt.Sources,
+    ctx: cal.Ctx,
+    fake_spoolman: FakeSpoolman,
+) -> None:
+    def load(sid: int, slot: str) -> None:
+        fake_spoolman.update(
+            "spool", sid, {"extra": {"printops_slot": encode_extra(slot)}}
+        )
+
+    a = spool(ctx.spoolman, "Hyper PLA", slot="k1se/T1")
+    record(ctx, "flow_ratio", a)
+    pt.sync(conn, src, "k1se")
+    [ha] = calib_open(conn, "k1se")
+    pt.dismiss(conn, ha["id"], actor="me", reason="defaults are fine for a")
+    load(a, "")
+    b = spool(ctx.spoolman, "Matte PLA", slot="k1se/T1")
+    pt.sync(conn, src, "k1se")
+    [hb] = calib_open(conn, "k1se")
+    assert hb["spool_id"] == b and len(hb["requirements"]) == 5
+    load(b, "")
+    load(a, "k1se/T1")
+    rep = pt.sync(conn, src, "k1se")
+    gone = pt.get(conn, hb["id"])
+    assert rep.opened == [] and (gone["status"], gone["closed_by"]) == (
+        "dismissed",
+        "derive",
+    )  # nothing of spool b was recorded: not "done"
+    assert gone["calibration_id"] is None
+
+
+def test_a_new_lot_dismissal_sticks_after_newer_records_on_another_lot(
+    conn: sqlite3.Connection,
+    src: pt.Sources,
+    ctx: cal.Ctx,
+    fake_spoolman: FakeSpoolman,
+) -> None:
+    a1 = spool(ctx.spoolman, "Hyper PLA", slot="k1se/T1", lot="A1")
+    for kind in FILAMENT_KINDS:
+        record(ctx, kind, a1)
+    pt.sync(conn, src, "k1se")
+    assert calib_open(conn, "k1se") == []
+    fake_spoolman.update("spool", a1, {"extra": {"printops_slot": encode_extra("")}})
+    spool(ctx.spoolman, "Hyper PLA", slot="k1se/T1", lot="A2")
+    pt.sync(conn, src, "k1se")
+    [t] = calib_open(conn, "k1se")
+    assert {r["reason"].split(":")[0] for r in t["requirements"]} == {"new lot"}
+    pt.dismiss(
+        conn, t["id"], actor="me", reason="lots of this filament behave the same"
+    )
+    record(
+        ctx, "flow_ratio", a1
+    )  # newer than the dismissal, but for lot A1: still new_lot
+    assert pt.sync(conn, src, "k1se").opened == []
+    record(
+        ctx, "flow_ratio", a1, valid_until="2020-01-01"
+    )  # A2 flow: expired, by an A1 record
+    assert pt.sync(conn, src, "k1se").opened == []
+    assert calib_open(conn, "k1se") == []
+
+
+def test_a_record_measures_the_requirement_the_way_the_engine_matches_it() -> None:
+    flow = load_catalog().kinds["flow_ratio"]  # nozzle + filament, lot-sensitive
+    now = cal.Nozzle(7, 0.4, "hardened", "std")
+    a1 = cal.Filament(12, "Hyper PLA", "Creality", "PLA", "A1")
+
+    def req(nozzle: cal.Nozzle, fil: cal.Filament) -> Any:
+        return cal.Requirement(
+            kind=flow,
+            printer="k1se",
+            head="T1",
+            status="expired",
+            level=cal.FAIL,
+            detail="",
+            nozzle=nozzle,
+            filament=fil,
+        )
+
+    def rec(nozzle: cal.Nozzle | None, fil: cal.Filament) -> Any:
+        return SimpleNamespace(nozzle=nozzle, filament=fil)
+
+    r = req(now, a1)
+    assert pt._measures(rec(now, a1), r)
+    assert pt._measures(
+        rec(cal.Nozzle(None, 0.4, None, None), a1), r
+    )  # an imported past record: no install id, same diameter
+    assert not pt._measures(rec(cal.Nozzle(3, 0.4, "hardened", "std"), a1), r)
+    assert not pt._measures(
+        rec(now, cal.Filament(12, "Hyper PLA", "Creality", "PLA", "A2")), r
+    )  # another lot of a lot-sensitive kind
+    assert not pt._measures(
+        rec(now, cal.Filament(13, "Matte", "Creality", "PLA", "A1")), r
+    )
+
+
+def test_a_dismissal_stops_sticking_once_a_record_of_the_key_was_made() -> None:
+    reqs = [{"key": "calib:k1se/T1/retraction/filament:3"}]
+    gone = {
+        "status": "dismissed",
+        "closed_by": "me",
+        "closed_at": "2026-10-10T00:00:00.000Z",
+    }
+    tasks = [(gone, reqs)]
+    key = reqs[0]["key"]
+    assert pt._dismissed_by_person(tasks, key, None)
+    assert pt._dismissed_by_person(tasks, key, "2026-10-01T00:00:00.000Z")
+    assert not pt._dismissed_by_person(
+        tasks, key, "2026-10-12T00:00:00.000Z"
+    )  # recorded after, expired since: a new need
+    assert not pt._dismissed_by_person(
+        [({**gone, "closed_by": pt.DERIVE}, reqs)], key, None
+    )
+    assert not pt._dismissed_by_person(
+        tasks, "calib:k1se/T1/retraction/filament:4", None
+    )
+
+
+def test_the_per_kind_tasks_of_the_first_derivation_are_superseded_by_the_heads_task(
+    conn: sqlite3.Connection, src: pt.Sources, ctx: cal.Ctx, fleet: Any
+) -> None:
+    sid = spool(ctx.spoolman, "Hyper PLA", slot="k1se/T1")
+    d = pt.derive(conn, src, "k1se")
+    legacy: dict[str, dict[str, Any]] = {}
+    for r, _ in d.calibration[
+        "calib:k1se/T1"
+    ].missing:  # what #281 stored, one row per kind
+        legacy[r["kind"]] = pt._insert(
+            conn,
+            {
+                "printer": "k1se",
+                "head": "T1",
+                "type": "calibration",
+                "title": f"Calibrate {r['title']} on T1 for Hyper PLA",
+                "why": r["reason"],
+                "when": "idle",
+                "duration_min": r["minutes"],
+                "calibration_kinds": [r["kind"]],
+                "spools": [{"name": "Hyper PLA", "spool_id": sid}],
+                "spool_id": sid,
+                # a buffer line that echoed a per-kind key is an import task: superseded too
+                "source": "import" if r["kind"] == "temp_tower" else "calibration",
+                "source_key": r["key"],
+            },
+            actor=pt.DERIVE,
+        )
+    pt.dismiss(conn, legacy["retraction"]["id"], actor="me", reason="defaults are fine")
+    after_pa = pt.create(
+        conn,
+        fleet,
+        "k1se",
+        actor="me",
+        title="print the bracket",
+        depends_on=[legacy["pressure_advance"]["id"], legacy["flow_ratio"]["id"]],
+    )
+    rec = record(ctx, "flow_ratio", sid)
+    rep = pt.sync(conn, src, "k1se")
+    [head] = calib_open(conn, "k1se")
+    assert rep.opened == [head["id"]] and head["calibration_kinds"] == [
+        "pressure_advance",
+        "temp_tower",
+        "max_volumetric_speed",
+    ]  # flow is recorded, retraction a person dismissed
+    flow = pt.get(conn, legacy["flow_ratio"]["id"])
+    assert (flow["status"], flow["calibration_id"]) == ("done", rec)
+    for kind in ("pressure_advance", "temp_tower", "max_volumetric_speed"):
+        old = pt.get(conn, legacy[kind]["id"])
+        assert (old["status"], old["closed_by"]) == ("dismissed", "derive")
+        assert (
+            old["note"]
+            == f"superseded: one calibration task per head (task #{head['id']})"
+        )
+    assert pt.get(conn, legacy["retraction"]["id"])["closed_by"] == "me"
+    waiting = pt.get(
+        conn, after_pa["id"]
+    )  # PA now lives in the head's task: wait on that
+    assert waiting["depends_on"] == [head["id"], flow["id"]]
+    assert waiting["waiting_on"] == [head["id"]] and after_pa["id"] in rep.updated
+    assert pt.sync(conn, src, "k1se").changed == 0
 
 
 # -- done / dismiss / snooze / dependencies -------------------------------------------------------
