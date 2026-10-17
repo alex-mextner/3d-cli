@@ -250,6 +250,18 @@ _INSTALL: dict[str, dict[str, str]] = {
         "linux-dnf": "{sudo}dnf install -y ffmpeg",
         "linux-pacman": "{sudo}pacman -S --noconfirm ffmpeg",
     },
+    "mtools": {
+        "macos": "brew install mtools",
+        "linux-apt": "{sudo}apt-get install -y mtools  # or, without root: brew install mtools",
+        "linux-dnf": "{sudo}dnf install -y mtools  # or, without root: brew install mtools",
+        "linux-pacman": "{sudo}pacman -S --noconfirm mtools",
+    },
+    "xz": {
+        "macos": "brew install xz",
+        "linux-apt": "{sudo}apt-get install -y xz-utils  # or, without root: brew install xz",
+        "linux-dnf": "{sudo}dnf install -y xz",
+        "linux-pacman": "{sudo}pacman -S --noconfirm xz",
+    },
 }
 
 
