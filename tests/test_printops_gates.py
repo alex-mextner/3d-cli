@@ -95,6 +95,7 @@ def gcode(
     plate_temp: str = "65",
     hrc: str = "0,0,0,0",
     body: str = "T0\nM104 S215 T0\nG1 X1 E1\nT2\nM109 S215\nG1 X2 E1\nM104 S175 T2 ; cooldown\n",
+    extra: dict[str, str] | None = None,
 ) -> Path:
     """An Orca-shaped plate: start heat-up before any tool change, body, config footer."""
     mm = ", ".join(f"{g * 330:.2f}" for g in used_g)
@@ -113,6 +114,7 @@ def gcode(
         "required_nozzle_HRC": hrc,
         "textured_plate_temp": plate_temp,
         "textured_plate_temp_initial_layer": plate_temp,
+        **(extra or {}),
     }
     text = (
         "M140 S"
@@ -371,6 +373,7 @@ def test_matching_plate_passes_every_gate(tmp_path: Path) -> None:
             "maintenance_due": "UNVERIFIED",  # no maintenance records until #166 reports them
             "enclosure_material": "PASS",
             "plate_material": "PASS",
+            "preset_match": "UNVERIFIED",  # the u1 fleet entry names no `slicer:` presets
         }
     )
     assert "ΔE 0.0" in checks["loaded_filament_match"].detail
@@ -831,3 +834,110 @@ def test_api_state_needs_read_scope(
         headers={"Authorization": f"Bearer {printops_tokens['write']}"},
     )
     assert r.status_code == 403
+
+
+# -- preset_match (#293) ----------------------------------------------------------------------
+K1_FLEET = """\
+k1se:
+  model: Creality K1 SE
+  owner: own
+  access: offline
+  heads: [{label: T1, index: 0, nozzle: {diameter_mm: 0.4, material: hardened, type: std}, usable: true}]
+  slicer: {machine: K1 SE - Copy, process: Std 8900}
+k1bare:
+  model: Creality K1 SE
+  owner: own
+  access: offline
+  heads: [{label: T1, index: 0, usable: true}]
+"""
+
+
+def _k1_presets(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, accel: str = "8900") -> None:
+    """The fleet above, Orca's K1 SE system process preset and the user preset inheriting it."""
+    fleet = tmp_path / "k1.yaml"
+    fleet.write_text(K1_FLEET, encoding="utf-8")
+    monkeypatch.setenv("THREED_FLEET", str(fleet))
+    system = tmp_path / "profiles" / "Creality" / "process"
+    system.mkdir(parents=True)
+    (system / "0.20mm Standard @Creality K1 SE.json").write_text(
+        json.dumps({"name": "0.20mm Standard @Creality K1 SE", "default_acceleration": "12000",
+                    "outer_wall_acceleration": "5000"})
+    )
+    user = tmp_path / "user" / "process"
+    user.mkdir(parents=True)
+    (user / "Std 8900.json").write_text(
+        json.dumps({"name": "Std 8900", "inherits": "0.20mm Standard @Creality K1 SE",
+                    "default_acceleration": accel})
+    )
+    monkeypatch.setenv("ORCA_PROFILES", str(tmp_path / "profiles"))
+    monkeypatch.setenv("ORCA_USER_PRESETS", str(tmp_path / "user"))
+    monkeypatch.delenv("SLICER", raising=False)
+
+
+def _k1_gcode(tmp_path: Path, machine: str, process: str, accel: str = "8900") -> Path:
+    return gcode(
+        tmp_path,
+        model="Creality K1 SE",
+        types="PLA",
+        colours="#000000",
+        vendors="Elegoo",
+        used_g=(20.0,),
+        hrc="0",
+        body="M104 S215\nG1 X1 E1\n",
+        extra={"printer_settings_id": machine, "print_settings_id": process,
+               "default_acceleration": accel, "outer_wall_acceleration": "5000"},
+    )
+
+
+def _preset(path: Path, printer: str = "k1se") -> preflight.Check:
+    result = run_checks(path, PrintopsContext(printer=printer), now=NOW)
+    return {c.name: c for c in result.checks}["preset_match"]
+
+
+def test_preset_match_passes_on_the_fleet_presets_with_their_values(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _k1_presets(tmp_path, monkeypatch)
+    check = _preset(_k1_gcode(tmp_path, "K1 SE - Copy", "Std 8900"))
+    assert check.status == "PASS", check.detail
+    assert any("default_acceleration 8900 = preset" in ln for ln in check.lines)
+    assert any("outer_wall_acceleration 5000 = preset" in ln for ln in check.lines)
+
+
+def test_preset_match_fails_on_stock_presets(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The #293 bug: a calibration plate sliced with Orca's stock presets, not the user's."""
+    _k1_presets(tmp_path, monkeypatch)
+    check = _preset(
+        _k1_gcode(tmp_path, "Creality K1 SE 0.4 nozzle", "0.20mm Standard @Creality K1 SE", accel="12000")
+    )
+    assert check.status == "FAIL"
+    assert "sliced with machine preset 'Creality K1 SE 0.4 nozzle'" in "\n".join(check.lines)
+    assert any("the printer prints with 'Std 8900'" in ln for ln in check.lines)
+
+
+def test_preset_match_fails_on_an_unsaved_preset_edit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _k1_presets(tmp_path, monkeypatch)
+    check = _preset(_k1_gcode(tmp_path, "K1 SE - Copy", "Std 8900", accel="10000"))
+    assert check.status == "FAIL"
+    assert "default_acceleration 10000, the process preset 'Std 8900' has 8900" in check.detail
+
+
+def test_preset_match_unresolvable_preset_keeps_the_name_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _k1_presets(tmp_path, monkeypatch)
+    monkeypatch.setenv("ORCA_USER_PRESETS", str(tmp_path / "nowhere"))
+    check = _preset(_k1_gcode(tmp_path, "K1 SE - Copy", "Std 8900"))
+    assert check.status == "PASS"
+    assert any("process values not compared" in ln for ln in check.lines)
+
+
+def test_preset_match_without_fleet_presets_is_unverified_and_policy_can_warn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _k1_presets(tmp_path, monkeypatch)
+    path = _k1_gcode(tmp_path, "Creality K1 SE 0.4 nozzle", "0.20mm Standard @Creality K1 SE")
+    check = _preset(path, "k1bare")
+    assert check.status == "UNVERIFIED" and "no `slicer: {machine, process}` for k1bare" in check.detail
+    override(tmp_path, monkeypatch, preset_match="warn")
+    assert _preset(path).status == "WARN"
