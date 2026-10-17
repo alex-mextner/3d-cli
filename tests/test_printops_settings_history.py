@@ -395,8 +395,15 @@ def test_import_maps_calibrations_binds_spools_and_is_idempotent(
     }
 
     pa = cal.get(ctx.conn, got["u-pa"][1] or 0)
-    assert pa.values == {"pressure_advance": 0.05} and pa.method == "manual"
-    assert pa.params == {"settings_change_uid": "u-pa", "buffer_method": "pa_lines"}
+    # pa_lines is a catalog method (`3d calibrate gen pa|combo`): kept as the buffer wrote it.
+    assert pa.values == {"pressure_advance": 0.05} and pa.method == "pa_lines"
+    assert pa.params == {"settings_change_uid": "u-pa"}
+    flow = cal.get(ctx.conn, got["u-flow"][1] or 0)
+    assert flow.method == "manual"  # flow_tiles_m221 is not in the catalog
+    assert flow.params == {
+        "settings_change_uid": "u-flow",
+        "buffer_method": "flow_tiles_m221",
+    }
     assert (
         pa.recorded_at == "2026-10-15T20:03:08.000Z"
         and pa.created_by == "cli:ultra (agent test)"

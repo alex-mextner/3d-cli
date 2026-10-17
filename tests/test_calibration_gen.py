@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from calibration_fixtures import fake_orca
 from printer_ops.move_bounds import _INERT, _INERT_TOWER, command_word
 from slicing import calibration_gen as cg
 
@@ -111,9 +112,13 @@ def test_unknown_model_and_kind() -> None:
 
 def test_generator_commands_are_inert_for_preflight() -> None:
     assert command_word("M221 S95") in _INERT
-    assert _INERT_TOWER.match("TUNING_TOWER COMMAND=SET_PRESSURE_ADVANCE PARAMETER=ADVANCE START=0 FACTOR=0.005")
+    assert _INERT_TOWER.match(
+        "TUNING_TOWER COMMAND=SET_PRESSURE_ADVANCE PARAMETER=ADVANCE START=0 FACTOR=0.005"
+    )
     # any other tower command may move the head: it stays a macro
-    assert not _INERT_TOWER.match("TUNING_TOWER COMMAND=G1 PARAMETER=X START=0 FACTOR=1")
+    assert not _INERT_TOWER.match(
+        "TUNING_TOWER COMMAND=G1 PARAMETER=X START=0 FACTOR=1"
+    )
     assert "TUNING_TOWER" not in _INERT
 
 
@@ -124,41 +129,15 @@ def test_inherits_loop_is_an_error(tmp_path: Path) -> None:
         cg.ProfileIndex([tmp_path]).flat("Acme", "process", "a")
 
 
-FAKE_GCODE = """; thumbnails = 16x16/PNG
-START_PRINT EXTRUDER_TEMP=220 BED_TEMP=55
-{objects}{end}
-"""
-
-
-def _fake_orca(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, end: str = "END_PRINT") -> str:
-    """An Orca stand-in: writes plate_1.gcode with one EXCLUDE_OBJECT block per STL argument."""
-    root = tmp_path / "profiles"
-    for kind, name, data in (
-        ("machine", "Creality K1 SE 0.4 nozzle", {"bed_exclude_area": ["0x0"]}),
-        ("process", "0.20mm Standard @Creality K1 SE", {"default_acceleration": "12000", "default_jerk": "9"}),
-        ("filament", "Creality Generic PLA @K1-all", {"filament_flow_ratio": ["0.98"], "filament_colour": ["#FFFFFF"]}),
-    ):
-        d = root / "Creality" / kind
-        d.mkdir(parents=True, exist_ok=True)
-        (d / f"{name}.json").write_text(json.dumps({"name": name, **data}))
+def _fake_orca(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **kw: str) -> str:
+    root, script = fake_orca(tmp_path, **kw)
     monkeypatch.setenv("ORCA_PROFILES", str(root))
-    body = FAKE_GCODE.replace("{end}", end)
-    script = tmp_path / "orca"
-    script.write_text(f"""#!/usr/bin/env python3
-import sys, pathlib
-a = sys.argv[1:]
-out = pathlib.Path(a[a.index("--outputdir") + 1])
-objs = "".join(
-    f"EXCLUDE_OBJECT_START NAME={{pathlib.Path(s).name}}_id_{{i}}_copy_0\\nG1 X100 Y100 Z0.2 E1\\n"
-    f"EXCLUDE_OBJECT_END NAME={{pathlib.Path(s).name}}_id_{{i}}_copy_0\\n"
-    for i, s in enumerate(x for x in a if x.endswith(".stl")))
-(out / "plate_1.gcode").write_text({body!r}.replace("{{objects}}", objs))
-""")
-    script.chmod(0o755)
     return str(script)
 
 
-def test_gen_pa_and_flow_end_to_end_with_a_fake_orca(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_gen_pa_and_flow_end_to_end_with_a_fake_orca(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from slicing.slice_warnings import evaluate
 
     orca = _fake_orca(tmp_path, monkeypatch)
@@ -174,7 +153,13 @@ def test_gen_pa_and_flow_end_to_end_with_a_fake_orca(tmp_path: Path, monkeypatch
     flow = tmp_path / "flow.gcode"
     res = cg.generate("flow", "Creality K1 SE", orca, flow)
     text = flow.read_text()
-    for name, pct in (("flow_m10", 90), ("flow_m05", 95), ("flow_p00", 100), ("flow_p05", 105), ("flow_p10", 110)):
+    for name, pct in (
+        ("flow_m10", 90),
+        ("flow_m05", 95),
+        ("flow_p00", 100),
+        ("flow_p05", 105),
+        ("flow_p10", 110),
+    ):
         assert f"EXCLUDE_OBJECT_START NAME={name}.stl" in text
         assert f"M221 S{pct}" in text
     assert text.splitlines()[text.splitlines().index("END_PRINT") - 1] == "M221 S100"
@@ -182,7 +167,9 @@ def test_gen_pa_and_flow_end_to_end_with_a_fake_orca(tmp_path: Path, monkeypatch
     assert evaluate(flow)[0] == "PASS"
 
 
-def test_gen_without_end_print_fails_and_writes_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_gen_without_end_print_fails_and_writes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     orca = _fake_orca(tmp_path, monkeypatch, end="M84")
     out = tmp_path / "pa.gcode"
     with pytest.raises(cg.GenError, match="END_PRINT"):
@@ -190,7 +177,9 @@ def test_gen_without_end_print_fails_and_writes_nothing(tmp_path: Path, monkeypa
     assert not out.exists()
 
 
-def test_finish_accepts_the_empty_exclude_error_only_without_an_exclude_area(tmp_path: Path) -> None:
+def test_finish_accepts_the_empty_exclude_error_only_without_an_exclude_area(
+    tmp_path: Path,
+) -> None:
     from slicing.slice_warnings import load, warnings_of
 
     log = f"[2026-10-15 14:51:32.1] [0x1] [error] {cg.EMPTY_EXCLUDE_ERROR}\n"
@@ -201,3 +190,207 @@ def test_finish_accepts_the_empty_exclude_error_only_without_an_exclude_area(tmp
         cg.finish(gcode, log, {"bed_exclude_area": area})
         [w] = warnings_of(load(gcode.with_name("t.slice-warnings.json")))
         assert (w.accepted is not None) is accepted
+
+
+def test_digit_paths_chain_strokes() -> None:
+    [one] = cg.digit_paths("1", 0, 0, 2, 3, 1)
+    assert one == [(2, 3), (2, 1.5), (2, 0)]  # b then c, one stroke
+    eight = cg.digit_paths("8", 10, 0, 2, 3, 1)
+    assert sum(len(p) - 1 for p in eight) == 7
+    assert all(10 <= x <= 12 and 0 <= y <= 3 for p in eight for x, y in p)
+    two = cg.digit_paths("20", 0, 0, 2, 3, 1)
+    assert max(x for p in two for x, _ in p) == 5  # second digit starts at 2 + 1
+
+
+def test_gen_combo_end_to_end_with_a_fake_orca(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from slicing.slice_warnings import evaluate
+
+    orca = _fake_orca(tmp_path, monkeypatch)
+    out = tmp_path / "combo.gcode"
+    res = cg.generate("combo", "Creality K1 SE", orca, out, color="#000000")
+    lines = out.read_text().splitlines()
+    start = lines.index("START_PRINT EXTRUDER_TEMP=220 BED_TEMP=55")
+    end_pa = lines.index("; 3d calibrate gen combo: end of PA lines")
+    block = lines[start + 1 : end_pa]
+    assert block[1] == "M221 S100"  # flow factor reset before any PA line
+    pa_sets = [ln for ln in block if ln.startswith("SET_PRESSURE_ADVANCE ADVANCE=")]
+    tested = [
+        float(ln.split("=")[1])
+        for ln in pa_sets
+        if ln != "SET_PRESSURE_ADVANCE ADVANCE=0.04"
+    ]
+    assert tested == [v for v in cg.COMBO_PA_VALUES if v != 0.04]
+    # every tested value is followed by its slow-fast-slow line: 20 mm, 50 mm, 20 mm at 0.5 x 0.2 mm
+    i = block.index("SET_PRESSURE_ADVANCE ADVANCE=0.045")
+    moves = [ln for ln in block[i + 1 : i + 9] if " E" in ln and " X" in ln]
+    e_per_mm = 0.5 * 0.2 * 0.98 / (3.141592653589793 * 1.75**2 / 4)
+    assert [round(float(m.split(" E")[1].split()[0]), 4) for m in moves] == [
+        round(e_per_mm * d, 4) for d in cg.COMBO_SEGMENTS
+    ]
+    assert [m.split(" F")[1] for m in moves] == ["1200", "7200", "1200"]
+    # tiles print at stock PA, 100 % and the process's own acceleration
+    assert block[-3:] == [
+        "SET_PRESSURE_ADVANCE ADVANCE=0.04",
+        "M221 S100",
+        "SET_VELOCITY_LIMIT ACCEL=12000 ACCEL_TO_DECEL=6000",
+    ]
+    rest = lines[end_pa:]
+    assert (
+        sum(ln.startswith("M221 S") for ln in rest) == 6
+    )  # one per tile + the reset before END_PRINT
+    end = rest.index("END_PRINT")
+    assert rest[end - 2 : end] == ["M221 S100", "SET_PRESSURE_ADVANCE ADVANCE=0.04"]
+    assert "80=0.08" in res.notes[0]
+    assert evaluate(out)[0] == "PASS"
+
+
+def test_record_hints_name_catalog_methods(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every `--method M` the generators print is accepted by `3d calibrate record` for that kind."""
+    import re
+
+    from printops.calibration_catalog import load_catalog
+
+    kinds = load_catalog().kinds
+    orca = _fake_orca(tmp_path, monkeypatch)
+    notes = [
+        n
+        for k in ("pa", "flow", "combo", "temp")
+        for n in cg.generate(k, "Creality K1 SE", orca, tmp_path / f"{k}.gcode").notes
+    ]
+    cg.generate("shaper", "Creality K1 SE", "", tmp_path / "s.txt")
+    notes += (tmp_path / "s.txt").read_text().splitlines()
+    hints = [
+        (m.group(1), m.group(2))
+        for n in notes
+        for m in re.finditer(r"record (\w+) .*?--method (\w+)", n)
+    ]
+    assert {k for k, _ in hints} == {
+        "pressure_advance",
+        "flow_ratio",
+        "input_shaper",
+        "temp_tower",
+    }
+    for kind, method in hints:
+        assert method in kinds[kind].methods, (kind, method)
+
+
+def test_gen_combo_refuses_absolute_extrusion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    orca = _fake_orca(tmp_path, monkeypatch, relative_e="0")
+    out = tmp_path / "combo.gcode"
+    with pytest.raises(cg.GenError, match="relative-E"):
+        cg.generate("combo", "Creality K1 SE", orca, out)
+    assert not out.exists()
+
+
+def test_missing_preset_option_is_a_gen_error() -> None:
+    with pytest.raises(cg.GenError, match="retraction_speed"):
+        cg._first({}, "retraction_speed")
+    with pytest.raises(cg.GenError, match="filament_diameter"):
+        cg._first({"filament_diameter": ["x"]}, "filament_diameter")
+    for bad in ("nan", "inf", "-inf"):
+        with pytest.raises(cg.GenError, match="not finite"):
+            cg._first({"filament_diameter": [bad]}, "filament_diameter")
+
+
+@pytest.mark.parametrize(
+    ("option", "match"),
+    [
+        ({"accel": "0"}, "default_acceleration=0"),
+        ({"diameter": "nan"}, "not finite"),
+        ({"retract_speed": "0"}, "retraction_speed=0"),
+        ({"retract_length": "-0.8"}, "retraction_length=-0.8"),
+    ],
+)
+def test_gen_combo_refuses_unusable_preset_numbers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, option: dict[str, str], match: str
+) -> None:
+    """ACCEL=0 would stop Klipper after the PA lines; NaN would put `Enan` into the G-code."""
+    orca = _fake_orca(tmp_path, monkeypatch, **option)
+    out = tmp_path / "combo.gcode"
+    with pytest.raises(cg.GenError, match=match):
+        cg.generate("combo", "Creality K1 SE", orca, out)
+    assert not out.exists()
+
+
+def test_gen_combo_refuses_a_bed_it_does_not_fit_before_slicing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import dataclasses
+
+    small = dataclasses.replace(cg.PRESETS["Creality K1 SE"], bed=(120.0, 120.0))
+    monkeypatch.setitem(cg.PRESETS, "Creality K1 SE", small)
+    orca = _fake_orca(tmp_path, monkeypatch)
+    (tmp_path / "orca").write_text(
+        "#!/bin/sh\nexit 3\n"
+    )  # a slice would fail differently
+    with pytest.raises(cg.GenError, match="do not fit a 120x120 mm bed"):
+        cg.generate("combo", "Creality K1 SE", orca, tmp_path / "combo.gcode")
+
+
+@pytest.mark.parametrize("material", ["PLA", "PLA+"])
+def test_gen_temp_end_to_end_with_a_fake_orca(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, material: str
+) -> None:
+    from slicing.slice_warnings import evaluate
+
+    orca = _fake_orca(tmp_path, monkeypatch)
+    out = tmp_path / "temp.gcode"
+    res = cg.generate(
+        "temp", "Creality K1 SE", orca, out, material=material, color="#E8732A"
+    )
+    text = out.read_text()
+    changes = [ln.split()[1] for ln in text.splitlines() if ln.startswith("M104 S")]
+    assert changes == [f"S{t}" for t in cg.temp_steps(material)[1:]]
+    lines = text.splitlines()
+    first = lines.index("M104 S225 ; 3d calibrate gen temp: block 2")
+    assert lines[first - 1] == f";Z:{cg.TEMP_BASE[2] + cg.TEMP_BLOCK_H + 0.2:.1f}"
+    assert "; thumbnail begin 16x16" in text
+    assert evaluate(out)[0] == "PASS"
+    assert "1: 230 °C" in res.notes[0] and "--force" in res.notes[-1]
+
+
+def test_temp_steps_and_refusals() -> None:
+    assert cg.temp_steps("PLA") == [230, 225, 220, 215, 210, 205, 200]
+    assert cg.temp_steps("PETG")[0] == 250
+    with pytest.raises(cg.GenError, match="no temperature range"):
+        cg.temp_steps("TPU")
+    with pytest.raises(cg.GenError, match="--nozzle-temp"):
+        cg.generate("temp", "Creality K1 SE", "", Path("x.gcode"), temp=215)
+
+
+def test_temp_tower_labels_stand_on_each_block_floor() -> None:
+    steps = cg.temp_steps("PLA")
+    boxes = cg.temp_tower_boxes(steps, 110, 110)
+    bz = cg.TEMP_BASE[2]
+    floors = [bz + i * cg.TEMP_BLOCK_H for i in range(len(steps))]
+    labels = [b for b in boxes if b[5] - b[2] == pytest.approx(cg.TEMP_EMBOSS)]
+    assert {b[2] for b in labels} == set(floors)  # one label per block, on its floor
+    gap_x0 = 110 - (2 * cg.TEMP_PILLAR + cg.TEMP_GAP) / 2 + cg.TEMP_PILLAR
+    assert all(
+        gap_x0 <= b[0] and b[3] <= gap_x0 + cg.TEMP_GAP for b in labels
+    )  # inside the gap
+    assert max(b[5] for b in boxes) == pytest.approx(bz + len(steps) * cg.TEMP_BLOCK_H)
+
+
+def test_temp_changes_on_first_layer_of_each_block() -> None:
+    steps = [230, 225, 220]
+    bz, h = cg.TEMP_BASE[2], cg.TEMP_BLOCK_H
+    zs = [round(0.2 * i, 2) for i in range(1, int((bz + 3 * h) / 0.2) + 1)]
+    text = "\n".join(f";LAYER_CHANGE\n;Z:{z}\nG1 X1 E1" for z in zs)
+    lines = cg.temp_changes(text, steps).splitlines()
+    changes = [
+        (lines[i - 1], ln) for i, ln in enumerate(lines) if ln.startswith("M104")
+    ]
+    assert [c[1].split()[1] for c in changes] == ["S225", "S220"]
+    assert [float(c[0][3:]) for c in changes] == [
+        pytest.approx(bz + h + 0.2),
+        pytest.approx(bz + 2 * h + 0.2),
+    ]
+    with pytest.raises(cg.GenError, match="temperature changes"):
+        cg.temp_changes("G1 X1 E1", steps)

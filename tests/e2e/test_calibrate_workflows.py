@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 import pytest
+from calibration_fixtures import fake_orca
 from fleet_fixtures import REPO_FLEET
 from printops_fixtures import LiveApi
 
@@ -279,3 +280,76 @@ def test_calibrate_usage_errors(tmp_path: Path) -> None:
     )
     assert missing.returncode == 2
     assert "nope.gcode" in missing.stderr
+
+
+def test_gen_combo_and_temp_through_bin_3d(tmp_path: Path) -> None:
+    """The user generates the express-calibration combo plate and a temperature tower for the K1
+    SE: bin/3d slices with a (fake) Orca, post-processes, and prints the record hints."""
+    profiles, orca = fake_orca(tmp_path)
+    fleet = tmp_path / "fleet.yaml"
+    fleet.write_text(
+        "k1:\n  model: Creality K1 SE\n  owner: own\n  access: offline\n  heads: [{label: T1, index: 0}]\n",
+        encoding="utf-8",
+    )
+    env = {
+        "THREED_FLEET": str(fleet),
+        "ORCA_PROFILES": str(profiles),
+        "SLICER": str(orca),
+    }
+
+    combo = tmp_path / "combo.gcode"
+    made = run_cli(
+        tmp_path,
+        "calibrate",
+        "gen",
+        "combo",
+        "--printer",
+        "k1",
+        "--color",
+        "#000000",
+        "-o",
+        str(combo),
+        env_extra=env,
+    )
+    assert made.returncode == 0, made.stderr
+    text = combo.read_text()
+    assert "; 3d calibrate gen combo: end of PA lines" in text
+    assert "--method pa_lines" in made.stdout and "--method flow_tiles" in made.stdout
+    assert combo.with_name("combo.slice-warnings.json").exists()
+
+    temp = tmp_path / "temp.gcode"
+    made = run_cli(
+        tmp_path,
+        "calibrate",
+        "gen",
+        "temp",
+        "--printer",
+        "k1",
+        "--material",
+        "PLA+",
+        "-o",
+        str(temp),
+        env_extra=env,
+    )
+    assert made.returncode == 0, made.stderr
+    assert [
+        ln.split()[1] for ln in temp.read_text().splitlines() if ln.startswith("M104 S")
+    ] == ["S225", "S220", "S215", "S210", "S205", "S200"]
+    assert "--method temp_tower" in made.stdout
+
+    refused = run_cli(
+        tmp_path,
+        "calibrate",
+        "gen",
+        "temp",
+        "--printer",
+        "k1",
+        "--nozzle-temp",
+        "215",
+        "-o",
+        str(tmp_path / "t2.gcode"),
+        env_extra=env,
+    )
+    assert refused.returncode == 2
+    assert "drop --nozzle-temp" in refused.stderr
+    assert not (tmp_path / "t2.gcode").exists()
