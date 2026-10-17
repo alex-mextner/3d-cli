@@ -200,16 +200,16 @@ class PlateContext:
 
     @property
     def retract(self) -> float:
-        """The retraction Orca slices with: the filament preset's override (`nil` = unset) or
-        the machine's; positive, as length ratios are taken against it."""
+        """The retraction Orca slices the objects with: the filament preset's override (`nil`,
+        empty or absent = unset) or the machine's; positive, as length ratios are taken against
+        it. Hand-written blocks (`ex.retract`) use the machine's: each retracts and primes by the
+        same amount, so they stay balanced whatever the slice uses."""
         v = self.fil.get("filament_retraction_length")
         own = v[0] if isinstance(v, list) and v else v
-        if own is None or str(own).strip().lower() in ("", "nil"):
+        if own is None or own == [] or str(own).strip().lower() in ("", "nil"):
             r = _first(self.mach, "retraction_length")
         else:
-            r = _first(
-                {"filament_retraction_length": own}, "filament_retraction_length"
-            )
+            r = _first(self.fil, "filament_retraction_length")
         if r <= 0:
             raise GenError(f"preset values must be positive: retraction length {r:g}")
         return r
@@ -572,11 +572,14 @@ def build_plate(ctx: PlateContext, plate: Plate, slicer: str, out: Path) -> Gene
             f"{out}: the plate's map is NAME.json next to the G-code; name the G-code .gcode"
         )
     labels = bed_labels(ctx, plate.objects)
-    # Bed labels first, blocks taller than the first layer (the MVS strip) last: the hand-written
-    # travels run at first-layer height + lift and must never cross a finished taller block.
-    custom = (*((labels,) if labels is not None else ()), *plate.custom)
-    flat = tuple(c for c in custom if c.bbox()[5] <= ctx.ex.layer_h + 1e-6)
-    plate = replace(plate, custom=flat + tuple(c for c in custom if c not in flat))
+    # Bed labels first, blocks taller than the first layer (the MVS strip) last: hand-written
+    # travels run at first-layer height + lift and must never cross a finished taller block
+    # (Orca's own early travels do not know the strip: #397).
+    flat: list[CustomBlock] = []
+    tall: list[CustomBlock] = []
+    for c in (*((labels,) if labels is not None else ()), *plate.custom):
+        (flat if c.bbox()[5] <= ctx.ex.layer_h + 1e-6 else tall).append(c)
+    plate = replace(plate, custom=(*flat, *tall))
     names = [o.name for o in plate.objects] + [c.name for c in plate.custom]
     bad = [n for n in names if not _NAME.match(n)]
     if bad or len(set(names)) != len(names):

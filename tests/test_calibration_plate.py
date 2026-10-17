@@ -82,17 +82,23 @@ L += ["END_PRINT", "; estimated printing time (normal mode) = 10m 0s", "; use_re
 """
 
 
-@pytest.fixture
-def orca(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
+def write_fake_orca(tmp_path: Path) -> tuple[Path, Path]:
+    """PRESETS as Orca system profiles under tmp_path/profiles and FAKE as tmp_path/orca."""
     root = tmp_path / "profiles"
     for (kind, name), data in PRESETS.items():
         d = root / "Creality" / kind
         d.mkdir(parents=True, exist_ok=True)
         (d / f"{name}.json").write_text(json.dumps({"name": name, **data}))
-    monkeypatch.setenv("ORCA_PROFILES", str(root))
     script = tmp_path / "orca"
     script.write_text(FAKE)
     script.chmod(0o755)
+    return root, script
+
+
+@pytest.fixture
+def orca(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
+    root, script = write_fake_orca(tmp_path)
+    monkeypatch.setenv("ORCA_PROFILES", str(root))
     return str(script)
 
 
@@ -390,7 +396,7 @@ def test_pack_places_sections_without_overlap() -> None:
         return filament.Section(name, w, d, seq, lambda x, y: ((), ()))
 
     placed = filament.pack([sec("a", 80, 70), sec("b", 100, 10), sec("c", 90, 20), sec("t", 20, 10, True)],
-                           (220.0, 220.0), 45.0)
+                           (220.0, 220.0), 45.0, "plate1")
     rects = {s.test: (x, y, x + s.width, y + s.depth) for s, x, y in placed}
     assert rects["a"][:2] == (filament.MARGIN, filament.MARGIN)
     assert rects["b"][1] == filament.MARGIN  # next to a, not above it
@@ -398,8 +404,8 @@ def test_pack_places_sections_without_overlap() -> None:
         a, b = rects[p], rects[q]
         assert a[2] <= b[0] or b[2] <= a[0] or a[3] <= b[1] or b[3] <= a[1], (p, q)
     assert rects["t"][1] >= max(r[3] for k, r in rects.items() if k != "t") + 45
-    with pytest.raises(cg.GenError, match="no room"):
-        filament.pack([sec("huge", 300, 10)], (220.0, 220.0), 45.0)
+    with pytest.raises(cg.GenError, match="plate1: no room"):
+        filament.pack([sec("huge", 300, 10)], (220.0, 220.0), 45.0, "plate1")
 
 
 @pytest.mark.parametrize("only", [{"pa"}, {"mvs"}, {"temp"}, {"pa", "mvs", "temp"}])
@@ -439,8 +445,8 @@ def test_plate_refuses_a_json_output_and_a_zero_retraction(orca: str, tmp_path: 
 def test_retraction_tower_scales_from_the_filament_override(orca: str) -> None:
     ctx = _ctx(orca)
     assert ctx.retract == 0.8  # filament preset unset ("nil" or absent): the machine's
-    nil = dataclasses.replace(ctx, fil={**ctx.fil, "filament_retraction_length": ["nil"]})
-    assert nil.retract == 0.8
+    for unset in (["nil"], [], [""]):
+        assert dataclasses.replace(ctx, fil={**ctx.fil, "filament_retraction_length": unset}).retract == 0.8
     own = dataclasses.replace(ctx, fil={**ctx.fil, "filament_retraction_length": ["0.5"]})
     tower = next(o for o in filament.build(own).objects if o.name == "retraction_tower")
     assert tower.params["preset_retraction_mm"] == 0.5
@@ -452,6 +458,20 @@ def test_plate_notes_follow_the_chosen_tests(orca: str) -> None:
     ctx = cp.make_context("Creality K1 SE", orca, "PLA", "#E8732A", None, frozenset({"flow", "bridge"}))
     notes = filament.build(ctx).notes
     assert "temperature tower" not in notes[0] and "towers" not in notes[1]
+    ctx = cp.make_context("Creality K1 SE", orca, "PLA", "#E8732A", None, frozenset({"retraction"}))
+    notes = filament.build(ctx).notes
+    assert "temperature tower" not in notes[0] and "towers from the front" in notes[1]
+
+
+def test_a_material_without_a_pa_range_prints_the_plate_without_pa(
+    orca: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(cg, "PA_RANGES", {})
+    with pytest.raises(cg.GenError, match="no default PA range"):
+        cg.generate("plate1", "Creality K1 SE", orca, tmp_path / "a.gcode")
+    out = tmp_path / "b.gcode"
+    cg.generate("plate1", "Creality K1 SE", orca, out, skip=frozenset({"pa"}))
+    assert out.is_file()
 
 
 def test_pa_range_needs_the_pa_lines(orca: str, tmp_path: Path) -> None:
