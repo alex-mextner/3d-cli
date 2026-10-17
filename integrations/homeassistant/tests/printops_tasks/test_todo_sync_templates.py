@@ -7,6 +7,7 @@ a given list and sensor, without a running HA (the live check is in docs/printop
 from __future__ import annotations
 
 import ast
+import datetime
 import json
 import re
 from pathlib import Path
@@ -171,6 +172,14 @@ def test_the_sync_plan_adds_open_tasks_closes_ticked_ones_and_turns_typed_items_
             "description": "with IPA",
         },
         {"uid": "e", "summary": "Ticked before the sync", "status": "completed"},
+        # typed by a person: starts with "#12" but not in the generated "#N · " form
+        {
+            "uid": "f",
+            "summary": "Spare nozzles",
+            "status": "needs_action",
+            "description": "#12 buy spare nozzles",
+            "due": datetime.date(2026, 10, 20),
+        },
     ]
     v = _sync_vars(package, items)
     assert (
@@ -178,7 +187,10 @@ def test_the_sync_plan_adds_open_tasks_closes_ticked_ones_and_turns_typed_items_
         and v["sensor"] == "sensor.printops_u1_tasks"
     )
     assert [i["uid"] for i in v["marked"]] == ["a", "b"]
-    assert [i["uid"] for i in v["unmarked"]] == ["c", "d"]
+    assert [i["uid"] for i in v["unmarked"]] == ["c", "d", "f"]
+    assert all(
+        set(i) == {"uid", "summary", "status", "description"} for i in v["items"]
+    )  # `due` dropped
     assert v["open_ids"] == [1, 11, 12]  # the snoozed task is not on the list
     assert v["shown"] == [1, 7]
     assert [t["id"] for t in v["to_add"]] == [11, 12]
@@ -387,14 +399,17 @@ def test_the_dashboard_lists_each_printers_tasks_with_done_and_snooze(
 def test_the_action_script_snoozes_until_a_date_or_until_reopened(
     package: dict[str, Any],
 ) -> None:
-    import datetime
-
     env = _env({"input_text.printops_task": {"state": " 12 "}})
-    env.globals["now"] = lambda: datetime.datetime(2026, 10, 16, 18, 0)
+    late = datetime.timezone(
+        datetime.timedelta(hours=2)
+    )  # 23:30 CEST: a bare date would end at 02:00
+    env.globals["now"] = lambda: datetime.datetime(2026, 10, 16, 23, 30, tzinfo=late)
     env.globals["timedelta"] = datetime.timedelta
     variables = package["script"]["printops_task_action"]["sequence"][0]["variables"]
     assert render(env, variables["task"], {}) == 12
-    assert render_text(env, variables["until"], {"days": 1}) == "2026-10-17"
+    assert (
+        render_text(env, variables["until"], {"days": 1}) == "2026-10-17T23:30:00+02:00"
+    )
     assert (
         render_text(env, variables["until"], {}) == "None"
     )  # HA renders it native: null → until reopened
