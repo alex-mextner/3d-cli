@@ -44,8 +44,8 @@ def bearer_token(header: str | None) -> str | None:
     return value.strip() or None
 
 
-def authenticate(state: ApiState, header: str | None, scope: str) -> TokenRecord:
-    """The token record for an Authorization header, or HTTPException 401/403."""
+def authenticate(state: ApiState, header: str | None, *scopes: str) -> TokenRecord:
+    """The token record for an Authorization header carrying any of `scopes`, or HTTPException 401/403."""
     token = bearer_token(header)
     if token is None:
         raise HTTPException(401, "missing bearer token (Authorization: Bearer po_…)",
@@ -53,18 +53,20 @@ def authenticate(state: ApiState, header: str | None, scope: str) -> TokenRecord
     record = state.tokens.verify(token)
     if record is None:
         raise HTTPException(401, "unknown or revoked token", headers={"WWW-Authenticate": "Bearer"})
-    if scope not in record.scopes:
-        raise HTTPException(403, f"token {record.name!r} lacks scope {scope!r} (has: {', '.join(record.scopes)})")
+    if not set(scopes) & set(record.scopes):
+        want = " or ".join(repr(s) for s in scopes)
+        raise HTTPException(403, f"token {record.name!r} lacks scope {want} (has: {', '.join(record.scopes)})")
     return record
 
 
-def require(scope: str) -> Callable[[Request], TokenRecord]:
-    """Dependency factory: the caller's token must carry `scope`."""
-    if scope not in SCOPES:
-        raise ValueError(f"unknown scope {scope!r}; accepted: {', '.join(SCOPES)}")
+def require(*scopes: str) -> Callable[[Request], TokenRecord]:
+    """Dependency factory: the caller's token must carry at least one of `scopes`."""
+    unknown = [s for s in scopes if s not in SCOPES]
+    if not scopes or unknown:
+        raise ValueError(f"unknown scope(s) {unknown or scopes!r}; accepted: {', '.join(SCOPES)}")
 
     def dependency(request: Request) -> TokenRecord:
-        return authenticate(get_state(request), request.headers.get("authorization"), scope)
+        return authenticate(get_state(request), request.headers.get("authorization"), *scopes)
 
     return dependency
 

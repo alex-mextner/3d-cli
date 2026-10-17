@@ -620,7 +620,7 @@ dev-gate (ruff/mypy/pytest/shellcheck) расширяется на `services/3d-
 
 ## 11. 3d-api: REST, события, голос
 
-Сервис FastAPI (стек `3d web`) в контейнере на Odroid рядом с HA. Хранилище — SQLite и Spoolman. Авторизация — bearer-токены на клиента (ha, station, bot, cli, voice) со scope: read, write, printer-control. Наружу сервис не публикуется; удалённый доступ — через Tailscale.
+Сервис FastAPI (стек `3d web`) в контейнере на Odroid рядом с HA. Хранилище — SQLite и Spoolman. Авторизация — bearer-токены на клиента (ha, station, bot, cli, voice) со scope: read, write, printer-control, camera (узел камеры: только `PUT /v1/camera-nodes/{name}`, #341). Наружу сервис не публикуется; удалённый доступ — через Tailscale.
 
 ### 11.1 REST (v1)
 ```

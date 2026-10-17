@@ -32,6 +32,9 @@ work on older kernels that name the controls `exposure_absolute`, `focus_auto`, 
                 [--ctrl NAME=V[,NAME=V…]] [--frames N] [--skip K] [--average mean|median|none]
                 [--depth 8|16] [--led on|off] [--out FILE.png] [--json]
 3d camera serve [--device DEV|auto] [--port 8080] [--name N] [--config FILE] [--no-stream] [--bind ADDR]
+3d camera ls [--json] [--api URL] [--token T]
+3d camera show NAME [--json] [--api URL] [--token T]
+3d camera rm NAME [--api URL] [--token T]
 ```
 
 | Subcommand | What |
@@ -39,6 +42,7 @@ work on older kernels that name the controls `exposure_absolute`, `focus_auto`, 
 | `controls` | List every control (v4l2-ctl name, alias, type, range, step, default, current value, inactive flag, menu items) and the frame sizes per format. `--set` writes controls in the given order and prints what the camera reads back. |
 | `still` | Lock, stream, drop `--skip` frames, keep `--frames` frames, average them, and write `FILE.png` plus `FILE.json` (`topcam-still/1`: size, frames, temporal noise, requested lock, control read-back, source). |
 | `serve` | Run the camera-node HTTP service on this machine: the same code the Pi runs. Use it to test the node API against the C920 on the PC. |
+| `ls` / `show` / `rm` | The camera nodes registered with 3d-api: list (online + age), one record, forget one. See [the registry](#camera-node-registry-ls-show-rm). |
 
 | Option | What |
 |---|---|
@@ -73,6 +77,10 @@ work on older kernels that name the controls `exposure_absolute`, `focus_auto`, 
 3d camera still --camera topcam --res 2304x1296 --exposure 200 --ctrl sharpness=0 --led on
 3d camera still --camera http://192.168.0.50:8080 --frames 8 --average median --depth 16 --json
 3d camera serve --device /dev/video2 --port 8080 --name pc-c920 --no-stream
+3d camera ls
+3d camera ls --json --api http://192.168.0.39:8765 --token po_…
+3d camera show topcam --json
+3d camera rm old-topcam
 ```
 
 Exit codes: 0 success; 1 the camera or node refused or is unreachable (the message says
@@ -124,3 +132,68 @@ curl -o plate.pgm 'http://topcam.local:8080/still?fmt=pgm&focus=40&exposure=300&
 - With `api.url`, the node sends `PUT /v1/camera-nodes/{name}` every `interval_s` seconds with
   the bearer token from `token_file`. The body is `{url, hostname, stream_url, card, device,
   formats, led, version}`, so `--camera topcam` finds the node wherever DHCP put it.
+
+## Camera-node registry (`ls`, `show`, `rm`)
+
+A camera node (topcam on the Raspberry Pi Zero W, or `3d camera serve` on a PC) registers
+itself with 3d-api: every `api.interval_s` seconds (default 60) it sends
+`PUT /v1/camera-nodes/{name}` with its URL, preview stream, V4L2 card/device, formats, LED and
+version. The record is how `--camera NAME` finds the node after DHCP gives it a new address
+(no record, or 3d-api not configured → `http://NAME.local:8080`).
+
+A node is **online** when its last check-in is at most **180 s** old (three default
+intervals); `age_s` is the time since that check-in.
+
+### `ls`
+
+One line per node: `NAME  STATE  URL  CARD  VERSION`, STATE = `online 12s` / `offline 3h`.
+
+- `--json` — print the API body `{"items": [record, …]}` instead.
+  `3d camera ls --json | jq -r '.items[] | select(.online) | .url'`
+- `--api URL` — 3d-api base URL (default `$PRINTOPS_API`, else `api:` in
+  `~/.config/3d-cli/printops.yaml`).
+  `3d camera ls --api http://192.168.0.39:8765`
+- `--token T` — 3d-api token with scope `read` (default `$PRINTOPS_TOKEN`, else `token:` in the
+  same file).
+  `3d camera ls --api http://192.168.0.39:8765 --token po_…`
+
+### `show`
+
+The node's whole record: url, preview stream, hostname, card, device, formats, LED, version,
+first/last check-in, the address the last check-in came from and the token name that sent it.
+404 → `no camera node 'NAME'` (exit 1).
+
+- `--json` — the record as JSON.
+  `3d camera show topcam --json | jq .formats.YUYV`
+- `--api URL` / `--token T` — as for `ls` (scope `read`).
+  `3d camera show topcam --api http://192.168.0.39:8765 --token po_…`
+
+### `rm`
+
+Forget a node's record (e.g. a renamed or retired node). A node that is still running
+re-registers on its next check-in.
+
+- `--api URL` / `--token T` — as for `ls`; needs scope `write`.
+  `3d camera rm old-topcam --token po_…`
+
+### The node's token (scope `camera`)
+
+The token on the node's SD card gets only the `camera` scope: 3d-api accepts it for
+`PUT /v1/camera-nodes/{name}` and nothing else (every other route answers 403), so a lost card
+cannot read or change spools, printers or calibrations. **Name the token like the node**: a
+`camera`-only token may register only the node of its own name (403 for any other), so a lost
+card cannot point another node's record at a different address either. Node names for such a
+token are therefore lower-case (token names are `[a-z0-9][a-z0-9_.-]*`). Mint it on the Odroid
+(printed once):
+
+```
+3d printops token create topcam --scopes camera --ssh ultra@192.168.0.39
+```
+
+and put it in the node's `api.token_file` (mode 0600; the SD image build of
+[#343](https://github.com/alex-mextner/3d-cli/issues/343) writes it there for you).
+
+Rotate: `3d printops token revoke topcam --ssh ultra@192.168.0.39`, create again, rebuild or
+replace the token file on the node.
+
+API details (body schema, validation): services/3d-api/README.md, "API (camera nodes)".

@@ -2,7 +2,8 @@
 
 WHAT: `controls` lists/sets a camera's V4L2 controls, `still` takes N uncompressed frames with
   focus/exposure/gain/white balance locked and writes an averaged PNG + JSON read-back,
-  `serve` runs the camera-node HTTP service (`topcam.node`) on this machine.
+  `serve` runs the camera-node HTTP service (`topcam.node`) on this machine, `ls|show|rm`
+  read/forget the nodes registered with 3d-api (`topcam.registry`).
   --camera: `usb` / `usb:/dev/videoN` (UVC camera on this machine), `http://host:port`,
   `host:port`, or a node NAME (3d-api record, else NAME.local).
 WHY: calibration plates are read by machine (#273); the photo must be repeatable and lossless
@@ -26,6 +27,9 @@ USAGE = """3d camera controls [--camera C] [--set NAME=V[,NAME=V…]] [--json]
                 [--ctrl NAME=V[,NAME=V…]] [--frames N] [--skip K] [--average mean|median|none]
                 [--depth 8|16] [--led on|off] [--out FILE.png] [--json]
 3d camera serve [--device DEV|auto] [--port 8080] [--name N] [--config FILE] [--no-stream] [--bind ADDR]
+3d camera ls [--json] [--api URL] [--token T]
+3d camera show NAME [--json] [--api URL] [--token T]
+3d camera rm NAME [--api URL] [--token T]
 
   The top camera above the bed: a Raspberry Pi Zero W camera node (topcam) or the C920 on
   this PC. Stills are uncompressed YUYV (C920: up to 2304x1536) with the camera in manual
@@ -35,6 +39,9 @@ Subcommands:
   controls  list the camera's controls (v4l2-ctl names, short alias, range, value); --set writes
   still     lock, grab N frames, average, write FILE.png + FILE.json (controls read back after capture)
   serve     run the camera-node HTTP service here (the same code the Pi runs; see docs)
+  ls        camera nodes registered with 3d-api: name, online + age of last check-in, url, card, version
+  show      one node's 3d-api record (url, preview stream, formats, LED, last address, token)
+  rm        forget a node's 3d-api record (a running node re-registers within a minute)
 
 Options:
   --camera C       usb | usb:/dev/videoN | http://host:port | host:port | NAME (default usb)
@@ -60,6 +67,8 @@ Options:
   --config FILE    serve: node JSON config (keys in docs/commands/camera.md)
   --no-stream      serve: no ustreamer preview
   --bind ADDR      serve: listen address (default 0.0.0.0)
+  --api URL        ls/show/rm: 3d-api base URL (default $PRINTOPS_API or ~/.config/3d-cli/printops.yaml)
+  --token T        ls/show/rm: 3d-api token, scope read (rm: write) (default $PRINTOPS_TOKEN)
 
 Examples:
   3d camera controls --camera usb
@@ -68,7 +77,11 @@ Examples:
   3d camera still --camera usb --focus sweep:0-250:25 --focus-roi 0.2,0.2,0.8,0.8 --exposure 300
   3d camera still --camera topcam --res 2304x1296 --exposure 200 --ctrl sharpness=0 --led on
   3d camera still --camera http://192.168.0.50:8080 --frames 8 --average median --depth 16 --json
-  3d camera serve --device /dev/video2 --port 8080 --name pc-c920 --no-stream"""
+  3d camera serve --device /dev/video2 --port 8080 --name pc-c920 --no-stream
+  3d camera ls
+  3d camera ls --json --api http://192.168.0.39:8765 --token po_…
+  3d camera show topcam --json
+  3d camera rm old-topcam"""
 
 PREFIX = "camera"
 MAX_FRAMES = 32  # frames averaged per still/photo; all are held in memory
@@ -362,10 +375,31 @@ def _serve(argv: list[str]) -> int:
     return node.main(args)
 
 
+def _ls(argv: list[str]) -> int:
+    from topcam import registry
+
+    return registry.ls(argv)
+
+
+def _show(argv: list[str]) -> int:
+    from topcam import registry
+
+    return registry.show(argv)
+
+
+def _rm(argv: list[str]) -> int:
+    from topcam import registry
+
+    return registry.rm(argv)
+
+
 SUBCOMMANDS: dict[str, Callable[[list[str]], int]] = {
     "controls": _controls,
     "still": _still,
     "serve": _serve,
+    "ls": _ls,
+    "show": _show,
+    "rm": _rm,
 }
 
 
@@ -390,7 +424,7 @@ def run(argv: list[str]) -> int:
 COMMAND = Command(
     name="camera",
     group="PRINTING",
-    summary="top camera: controls, locked full-res stills, camera-node service",
-    usage="camera <controls|still|serve> [options]",
+    summary="top camera: controls, locked full-res stills, camera-node service and registry",
+    usage="camera <controls|still|serve|ls|show|rm> [options]",
     run=run,
 )

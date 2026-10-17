@@ -88,7 +88,7 @@ next to the targets), then `up -d`.
 ## Tokens
 
 Clients (HA, 3d-bot, the CLI, the ESPHome station, voice) each get their own bearer token
-with the scopes they need: `read`, `write`, `printer-control`. Only `sha256(token)` is stored,
+with the scopes they need: `read`, `write`, `printer-control`, `camera`. Only `sha256(token)` is stored,
 in `/home/ultra/printops/data/api/tokens.json` (mode 0600; `/data/tokens.json` in the
 container). 3d-api re-reads the file when it changes — no restart.
 
@@ -96,7 +96,13 @@ container). 3d-api re-reads the file when it changes — no restart.
 3d printops token create bot --scopes read,write --ssh ultra@192.168.0.39   # prints po_… once
 3d printops token list --ssh ultra@192.168.0.39
 3d printops token revoke bot --ssh ultra@192.168.0.39
+3d printops token create topcam --scopes camera --ssh ultra@192.168.0.39  # camera node (Pi SD card)
 ```
+
+`camera` is least privilege for a camera node: only `PUT /v1/camera-nodes/{name}` accepts it,
+and only for `{name}` = the token's name (mint it named like the node); every other route
+answers 403. The token goes into the node image with
+`3d camera image build --token-file FILE` (or `--token po_…`; docs/commands/camera.md).
 
 Use: `Authorization: Bearer po_…` on every request; for `WS /v1/ws` send
 `{"type": "auth", "token": "po_…"}` as the first message (tokens never go in URLs, which land
@@ -184,6 +190,23 @@ searched for the job's file; compose mounts the host's `PRINTOPS_GCODE_HOST_DIR`
 lets 3d-api download a Moonraker job's file once (`GET /server/files/gcodes/…`) into
 `/data/gcode-cache/`; off by default. Without the G-code an incident still gets job, layer, the
 live heater targets, the spool and its lot.
+
+## API (camera nodes, #341)
+
+| Endpoint | Scope | |
+|---|---|---|
+| `PUT /v1/camera-nodes/{name}` | camera (only `{name}` = token name) or write | `{url, stream_url?, hostname?, card?, device?, formats?{FOURCC: [[w, h]…]}, led?, version?}` → the record; first registration emits `camera.registered` |
+| `GET /v1/camera-nodes` | read | `{items}` by name, each with `online` and `age_s` |
+| `GET /v1/camera-nodes/{name}` | read | one record (404 unknown) |
+| `DELETE /v1/camera-nodes/{name}` | write | 204 (404 unknown) |
+
+A record: `name, url, stream_url, hostname, card, device, formats, led, version, first_seen,
+last_seen, last_addr` (remote address of the last PUT) `, updated_by` (its token name) `, age_s,
+online`. `online` = last PUT at most 180 s ago (3 × the node's default 60 s interval). Names follow
+the printer-name rule (`[A-Za-z0-9][A-Za-z0-9_.-]*`, ≤ 64); `url`/`stream_url` must be absolute
+http(s) URLs; text fields reject control characters; `formats` holds at most 16 FOURCCs × 64
+sizes (each 1..65535); unknown body keys → 422. Nodes send the body every `api.interval_s`
+(`topcam.node`); `3d camera ls|show|rm` read it.
 
 ## Operations
 

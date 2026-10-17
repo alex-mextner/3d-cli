@@ -36,6 +36,7 @@ Options:
 Examples:
   3d printops token create bot --scopes read,write --ssh ultra@192.168.0.39
   3d printops token create ha --scopes read --ssh ultra@192.168.0.39
+  3d printops token create topcam --scopes camera --ssh ultra@192.168.0.39
   3d printops token list --ssh ultra@192.168.0.39
   3d printops token revoke bot --ssh ultra@192.168.0.39
   3d printops token create cli --scopes read --file ./tokens.json"""
