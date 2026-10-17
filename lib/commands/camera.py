@@ -3,7 +3,8 @@
 WHAT: `controls` lists/sets a camera's V4L2 controls, `still` takes N uncompressed frames with
   focus/exposure/gain/white balance locked and writes an averaged PNG + JSON read-back,
   `serve` runs the camera-node HTTP service (`topcam.node`) on this machine, `ls|show|rm`
-  read/forget the nodes registered with 3d-api (`topcam.registry`).
+  read/forget the nodes registered with 3d-api (`topcam.registry`), `image build` writes a
+  ready-to-flash Raspberry Pi OS Lite SD image for the node (`topcam.image`).
   --camera: `usb` / `usb:/dev/videoN` (UVC camera on this machine), `http://host:port`,
   `host:port`, or a node NAME (3d-api record, else NAME.local).
 WHY: calibration plates are read by machine (#273); the photo must be repeatable and lossless
@@ -30,6 +31,11 @@ USAGE = """3d camera controls [--camera C] [--set NAME=V[,NAME=V…]] [--json]
 3d camera ls [--json] [--api URL] [--token T]
 3d camera show NAME [--json] [--api URL] [--token T]
 3d camera rm NAME [--api URL] [--token T]
+3d camera image build --wifi-ssid S (--wifi-psk P | --wifi-psk-file F) --api-url URL
+                (--token T | --token-file F) [--hostname topcam] [--wifi-country RS]
+                [--user topcam] [--ssh-key FILE.pub | --password-hash HASH | --no-ssh]
+                [--led-gpio N] [--still-lock focus=F,exposure=E,gain=G,wb=K]
+                [--base-image URL|FILE] [--out DIR] [--json]
 
   The top camera above the bed: a Raspberry Pi Zero W camera node (topcam) or the C920 on
   this PC. Stills are uncompressed YUYV (C920: up to 2304x1536) with the camera in manual
@@ -42,6 +48,8 @@ Subcommands:
   ls        camera nodes registered with 3d-api: name, online + age of last check-in, url, card, version
   show      one node's 3d-api record (url, preview stream, formats, LED, last address, token)
   rm        forget a node's 3d-api record (a running node re-registers within a minute)
+  image     `image build`: a Raspberry Pi OS Lite armhf SD image (Pi Zero W) that boots into
+            the node: Wi-Fi, NAME.local, SSH key, ustreamer, topcam.service, 3d-api registration
 
 Options:
   --camera C       usb | usb:/dev/videoN | http://host:port | host:port | NAME (default usb)
@@ -70,6 +78,31 @@ Options:
   --api URL        ls/show/rm: 3d-api base URL (default $PRINTOPS_API or ~/.config/3d-cli/printops.yaml)
   --token T        ls/show/rm: 3d-api token, scope read (rm: write) (default $PRINTOPS_TOKEN)
 
+Image build options (secrets are never printed; prefer the *-file forms, which keep them out of
+shell history and `ps`; a file's trailing newline is dropped):
+  --wifi-ssid S         Wi-Fi network name (required)
+  --wifi-psk P          Wi-Fi password, 8-63 characters or 64 hex digits
+  --wifi-psk-file F     read the Wi-Fi password from file F instead
+  --wifi-country CC     Wi-Fi regulatory country (default RS); without it the Pi's Wi-Fi stays blocked
+  --api-url URL         3d-api base URL the node registers with (required)
+  --token T             3d-api token for the node (written to /etc/topcam/token, mode 0600); a
+                        `camera` token registers only its own name: mint it as the --hostname
+  --token-file F        read the token from file F instead
+  --hostname H          host name and node name; the Pi answers as H.local (default topcam)
+  --user U              login user (default topcam; sudo without password, password locked)
+  --ssh-key FILE.pub    authorized SSH key (default ~/.ssh/id_ed25519.pub, else ~/.ssh/id_rsa.pub)
+  --password-hash HASH  crypt hash for the login user, e.g. "$(openssl passwd -6)"; with no
+                        SSH key this also enables SSH password login
+  --no-ssh              no SSH server at all (no key needed)
+  --led-gpio N          LED ring on BCM GPIO N (node led.gpio)
+  --still-lock K=V,…    node default still lock: focus (N|auto|sweep[:LO-HI[:STEP]]), exposure, gain, wb
+  --base-image URL|FILE base image: an .img/.img.xz file or URL (+ URL.sha256); default the latest
+                        Raspberry Pi OS Lite armhf, cached in ~/.cache/3d-cli/topcam-image/base
+  --out DIR             output dir (default ~/.cache/3d-cli/topcam-image; not inside the repo)
+  Writes DIR/H-<base>.img.xz (0600), its .sha256 and DIR/FLASH.md (how to flash and check).
+  No root needed: mtools edits the FAT boot partition (install: brew install mtools). Memory
+  stays small: xz -d -T1 streaming, xz -T<max_workers> --memlimit-compress=1500MiB.
+
 Examples:
   3d camera controls --camera usb
   3d camera controls --camera usb --set focus_auto=0,focus=40
@@ -81,7 +114,11 @@ Examples:
   3d camera ls
   3d camera ls --json --api http://192.168.0.39:8765 --token po_…
   3d camera show topcam --json
-  3d camera rm old-topcam"""
+  3d camera rm old-topcam
+  3d camera image build --wifi-ssid home --wifi-psk-file ~/.config/topcam/psk --api-url http://192.168.0.39:8765 --token-file ~/.config/topcam/token
+  3d camera image build --wifi-ssid home --wifi-psk 'correct horse' --wifi-country DE --api-url http://192.168.0.39:8765 --token po_abc --hostname topcam2 --user alex --ssh-key ~/.ssh/id_rsa.pub
+  3d camera image build --wifi-ssid home --wifi-psk-file psk.txt --api-url http://api.lan:8765 --token-file tok.txt --no-ssh --led-gpio 17 --still-lock focus=30,exposure=300,gain=0,wb=4500
+  3d camera image build --wifi-ssid home --wifi-psk-file psk.txt --api-url http://api.lan:8765 --token-file tok.txt --password-hash "$(openssl passwd -6)" --base-image ~/Downloads/2026-10-06-raspios-trixie-armhf-lite.img.xz --out ~/topcam-img --json"""
 
 PREFIX = "camera"
 MAX_FRAMES = 32  # frames averaged per still/photo; all are held in memory
@@ -393,6 +430,12 @@ def _rm(argv: list[str]) -> int:
     return registry.rm(argv)
 
 
+def _image(argv: list[str]) -> int:
+    from topcam import image
+
+    return image.run(argv)
+
+
 SUBCOMMANDS: dict[str, Callable[[list[str]], int]] = {
     "controls": _controls,
     "still": _still,
@@ -400,6 +443,7 @@ SUBCOMMANDS: dict[str, Callable[[list[str]], int]] = {
     "ls": _ls,
     "show": _show,
     "rm": _rm,
+    "image": _image,
 }
 
 
@@ -424,7 +468,7 @@ def run(argv: list[str]) -> int:
 COMMAND = Command(
     name="camera",
     group="PRINTING",
-    summary="top camera: controls, locked full-res stills, camera-node service and registry",
-    usage="camera <controls|still|serve|ls|show|rm> [options]",
+    summary="top camera: controls, locked full-res stills, camera-node service and registry, Pi SD image",
+    usage="camera <controls|still|serve|ls|show|rm|image build> [options]",
     run=run,
 )
