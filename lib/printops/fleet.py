@@ -78,6 +78,7 @@ FLEET_KEYS = frozenset(
         "plates",
         "notes",
         "sources",
+        "photo",
     }
 )
 _NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
@@ -130,6 +131,9 @@ class FleetPrinter:
     sources: tuple[str, ...]
     device: dict[str, Any]  # DEVICE_KEYS present in the entry, untouched
     source: Path
+    photo: dict[str, Any] | None = (
+        None  # top-camera photo settings (topcam.photo_config)
+    )
 
     @property
     def contactable(self) -> bool:
@@ -294,6 +298,11 @@ def _entry(name: str, spec: Any, path: Path, bad: list[str]) -> FleetPrinter | N
     if notes is not None and not isinstance(notes, str):
         bad.append("notes: must be text")
     sources = _strings(spec.get("sources", []), "sources", bad)
+    photo = spec.get("photo")
+    if photo is not None:
+        from topcam.photo_config import validate as validate_photo
+
+        bad.extend(validate_photo(photo))
     if bad:
         return None
     return FleetPrinter(
@@ -310,6 +319,7 @@ def _entry(name: str, spec: Any, path: Path, bad: list[str]) -> FleetPrinter | N
         sources,
         device,
         path,
+        dict(photo) if photo is not None else None,
     )
 
 

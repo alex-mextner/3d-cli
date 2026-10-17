@@ -152,9 +152,10 @@ class Adapter:
     def cancel(self) -> None:
         raise self._unsupported("cancel")
 
-    def run_gcode(self, script: str) -> None:
-        """Run a G-code script (lines joined by newlines; the bed-clear acknowledgement,
-        printer_ops/bed.py, is the only caller). Returns once the printer acknowledged it."""
+    def run_gcode(self, script: str, *, timeout: float = 120.0) -> None:
+        """Run a G-code script (lines joined by newlines; the bed-clear acknowledgement in
+        printer_ops/bed.py and the `3d calibrate photo` pose/light in topcam/photo.py). Returns
+        once the printer ran it, waiting at most `timeout` seconds."""
         raise self._unsupported("run_gcode")
 
     def _unsupported(self, op: str) -> UnsupportedOperation:

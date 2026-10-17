@@ -17,6 +17,7 @@ from typing import Any
 
 from cli.registry import Command
 from errors import GateFailure, InputNotFound, UsageError
+from topcam import photo_cli
 
 USAGE = """3d calibrate plan --printer P [--head T] [--spool ID] [--plate PLATE] [--all]
 3d calibrate record KIND --printer P [--head T] [--spool ID | --filament ID] [--lot LOT] [--plate PLATE]
@@ -75,6 +76,9 @@ Examples:
   3d calibrate check plate.gcode --printer u1
   3d calibrate check plate.gcode --printer u1 --accept calibration:flow_ratio --reason "test cube, flow irrelevant"
   3d calibrate plan --printer u1 --json | jq '.items[] | {head, kind, status, level}'"""
+
+USAGE += ("\n\nTop-camera photo (#342):\n" + photo_cli.USAGE + "\n\nSubcommands:\n" + photo_cli.HELP
+          + "\n\nOptions:\n" + photo_cli.OPTIONS + "\n\nExamples:\n" + photo_cli.EXAMPLES)
 
 PREFIX = "calibrate"
 COMMON_VALUES = {"--api", "--token"}
@@ -290,7 +294,8 @@ def _check(argv: list[str]) -> int:
     return 0
 
 
-SUBS = {"plan": _plan, "record": _record, "ls": _ls, "show": _show, "check": _check}
+SUBS = {"plan": _plan, "record": _record, "ls": _ls, "show": _show, "check": _check,
+        "photo": photo_cli.photo, "rectify": photo_cli.rectify}
 
 
 def run(argv: list[str]) -> int:

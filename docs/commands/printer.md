@@ -207,6 +207,7 @@ Per printer:
 | `enclosure`, `chamber_heater` | `none`/`partial`/`full`; `true`/`false` |
 | `plates` | `smooth_pei`, `textured_pei`, `cool_plate`, `engineering_plate`, `high_temp_plate`, `epoxy`, `glass` |
 | `notes`, `sources` | free text; where the facts come from |
+| `photo` | top-camera photo settings for `3d calibrate photo`: camera, lock, frames, light G-code, pose, scale reference ([calibrate.md](calibrate.md#photo--the-top-camera-photo-mode-342)) |
 
 A key that is not known is left out (shown as `null`/`-`), never guessed.
 `THREED_FLEET=FILE` reads another fleet file, `THREED_FLEET=` (empty) disables it.

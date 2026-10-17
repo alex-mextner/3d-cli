@@ -78,6 +78,8 @@ class FakeMoonraker:
     requests: list[Recorded] = field(default_factory=list)
     upload_reply: dict[str, Any] | None = None   # override the upload JSON
     stored_size_delta: int = 0                    # pretend the printer stored N extra bytes
+    scripts: list[str] = field(default_factory=list)  # G-code sent to /printer/gcode/script
+    home_on_g28: bool = True                      # a G28 script marks xyz homed (False: homing fails)
     settings: dict[str, Any] = field(default_factory=lambda: {
         "stepper_x": {"position_min": -2.0, "position_max": 272.0},
         "stepper_y": {"position_max": 274.0},
@@ -163,6 +165,9 @@ class FakeMoonraker:
                     fake.status["print_stats"].update(state="cancelled")
                     self._reply({"result": "ok"})
                 elif u.path == "/printer/gcode/script":
+                    fake.scripts.append(rec.query["script"][0])
+                    if fake.scripts[-1].strip().upper() == "G28" and fake.home_on_g28:
+                        fake.status.setdefault("toolhead", {})["homed_axes"] = "xyz"  # Klipper homes all
                     self._reply({"result": "ok"})
                 else:
                     self._reply({"error": {"code": 404}}, 404)
