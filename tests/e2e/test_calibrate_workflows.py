@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 
 import pytest
-from calibration_fixtures import fake_orca
+from calibration_fixtures import fake_orca, write_plate_orca
 from fleet_fixtures import REPO_FLEET
 from printops_fixtures import LiveApi
 
@@ -282,20 +282,16 @@ def test_calibrate_usage_errors(tmp_path: Path) -> None:
     assert "nope.gcode" in missing.stderr
 
 
+K1_FLEET = "k1:\n  model: Creality K1 SE\n  owner: own\n  access: offline\n  heads: [{label: T1, index: 0}]\n"
+
+
 def test_gen_combo_and_temp_through_bin_3d(tmp_path: Path) -> None:
     """The user generates the express-calibration combo plate and a temperature tower for the K1
     SE: bin/3d slices with a (fake) Orca, post-processes, and prints the record hints."""
     profiles, orca = fake_orca(tmp_path)
     fleet = tmp_path / "fleet.yaml"
-    fleet.write_text(
-        "k1:\n  model: Creality K1 SE\n  owner: own\n  access: offline\n  heads: [{label: T1, index: 0}]\n",
-        encoding="utf-8",
-    )
-    env = {
-        "THREED_FLEET": str(fleet),
-        "ORCA_PROFILES": str(profiles),
-        "SLICER": str(orca),
-    }
+    fleet.write_text(K1_FLEET, encoding="utf-8")
+    env = {"THREED_FLEET": str(fleet), "ORCA_PROFILES": str(profiles), "SLICER": str(orca)}
 
     combo = tmp_path / "combo.gcode"
     made = run_cli(
@@ -353,3 +349,39 @@ def test_gen_combo_and_temp_through_bin_3d(tmp_path: Path) -> None:
     assert refused.returncode == 2
     assert "drop --nozzle-temp" in refused.stderr
     assert not (tmp_path / "t2.gcode").exists()
+
+
+def test_gen_plate1_with_only_skip_and_a_fine_pa_range(tmp_path: Path) -> None:
+    """The user prints plate 1 for a new spool through bin/3d: a fine PA pass with flow only, then
+    the plate without PA and flow; the G-code and its map sit side by side, a `.json` output name
+    and a PA range on a plate without PA lines are refused."""
+    profiles, orca = write_plate_orca(tmp_path)
+    fleet = tmp_path / "fleet.yaml"
+    fleet.write_text(K1_FLEET, encoding="utf-8")
+    env = {"THREED_FLEET": str(fleet), "ORCA_PROFILES": str(profiles), "SLICER": str(orca)}
+
+    fine = tmp_path / "pa_fine.gcode"
+    made = run_cli(tmp_path, "calibrate", "gen", "plate1", "--printer", "k1", "--only", "pa,flow",
+                   "--pa-range", "0.03:0.05", "--pa-step", "0.0025", "-o", str(fine), env_extra=env)
+    assert made.returncode == 0, made.stderr
+    data = json.loads(fine.with_suffix(".json").read_text())
+    pa = next(o for o in data["objects"] if o["name"] == "pa_lines")
+    assert [it["params"]["pressure_advance"] for it in pa["items"]][:2] == [0.03, 0.0325]
+    assert len(pa["items"]) == 9
+    assert {o["name"] for o in data["objects"]} >= {"pa_lines", "flow_m10"}
+    assert "temp_tower" not in fine.read_text()
+
+    rest = tmp_path / "rest.gcode"
+    made = run_cli(tmp_path, "calibrate", "gen", "plate1", "--printer", "k1", "--skip", "pa,flow",
+                   "-o", str(rest), env_extra=env)
+    assert made.returncode == 0, made.stderr
+    text = rest.read_text()
+    assert "PA lines" not in text and "flow_m10" not in text and "temp_tower" in text
+
+    refused = run_cli(tmp_path, "calibrate", "gen", "plate1", "--printer", "k1", "--skip", "pa",
+                      "--pa-range", "0.03:0.05", "-o", str(tmp_path / "x.gcode"), env_extra=env)
+    assert refused.returncode != 0 and "skips them" in refused.stderr
+    as_json = run_cli(tmp_path, "calibrate", "gen", "plate1", "--printer", "k1", "-o",
+                      str(tmp_path / "plate.json"), env_extra=env)
+    assert as_json.returncode != 0 and ".gcode" in as_json.stderr
+    assert not (tmp_path / "plate.json").exists()

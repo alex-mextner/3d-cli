@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -222,8 +223,8 @@ def test_gen_combo_end_to_end_with_a_fake_orca(
         if ln != "SET_PRESSURE_ADVANCE ADVANCE=0.04"
     ]
     assert tested == [v for v in cg.COMBO_PA_VALUES if v != 0.04]
-    # every tested value is followed by its slow-fast-slow line: 20 mm, 50 mm, 20 mm at 0.5 x 0.2 mm
-    i = block.index("SET_PRESSURE_ADVANCE ADVANCE=0.045")
+    # every tested value is followed by its slow-fast-slow line (COMBO_SEGMENTS) at 0.5 x 0.2 mm
+    i = block.index("SET_PRESSURE_ADVANCE ADVANCE=0.05")
     moves = [ln for ln in block[i + 1 : i + 9] if " E" in ln and " X" in ln]
     e_per_mm = 0.5 * 0.2 * 0.98 / (3.141592653589793 * 1.75**2 / 4)
     assert [round(float(m.split(" E")[1].split()[0]), 4) for m in moves] == [
@@ -394,3 +395,73 @@ def test_temp_changes_on_first_layer_of_each_block() -> None:
     ]
     with pytest.raises(cg.GenError, match="temperature changes"):
         cg.temp_changes("G1 X1 E1", steps)
+
+
+def test_pa_values_default_and_fine_pass() -> None:
+    assert cg.pa_values("PLA") == tuple(round(0.01 * i, 2) for i in range(11))
+    assert cg.pa_values("PETG")[-1] == pytest.approx(0.15)
+    fine = cg.pa_values("PLA", (0.03, 0.05), 0.0025)
+    assert len(fine) == 9 and fine[1] == pytest.approx(0.0325)
+    with pytest.raises(cg.GenError, match="at most"):
+        cg.pa_values("PLA", (0.0, 1.0), 0.001)
+    with pytest.raises(cg.GenError, match="low < high"):
+        cg.pa_values("PLA", (0.05, 0.03), None)
+    assert [cg.pa_label(v) for v in (0.0, 0.04, 0.0425, 0.1)] == [
+        "0",
+        "40",
+        "42.5",
+        "100",
+    ]
+
+
+def test_pa_lines_are_short() -> None:
+    assert sum(cg.COMBO_SEGMENTS) == pytest.approx(26.0)
+    assert 5 <= cg.COMBO_SEGMENTS[0] <= 8 and 10 <= cg.COMBO_SEGMENTS[1] <= 15
+    ex = cg.Extrusion(0.2, 0.5, 0.033, 0.8, 2400, 0.4)
+    lines = cg.pa_lines(10.0, 10.0, ex, 0.04, 12000, values=(0.0, 0.0425))
+    i = lines.index("SET_PRESSURE_ADVANCE ADVANCE=0.0425")
+    travel = next(ln for ln in lines[i:] if ln.endswith(" F12000"))
+    m0 = re.search(r"X([\d.]+)", travel)
+    assert m0 is not None
+    x = float(m0.group(1))
+    segs = []
+    for ln in lines[lines.index(travel) + 1 :]:
+        if m := re.match(r"^G1 X([\d.]+) Y[\d.]+ E", ln):
+            segs.append(round(float(m.group(1)) - x, 3))
+            x = float(m.group(1))
+        elif segs:
+            break
+    assert segs == list(cg.COMBO_SEGMENTS)
+
+
+def test_digit_paths_draw_a_decimal_point() -> None:
+    paths = cg.digit_paths("2.5", 0, 0, 2, 3, 1)
+    dots = [
+        p
+        for p in paths
+        if len(p) == 2
+        and p[0][1] == 0
+        and p[1][1] == 0
+        and p[1][0] - p[0][0] == pytest.approx(cg.DOT_W)
+    ]
+    assert len(dots) == 1 and dots[0][0][0] == pytest.approx(3.0)
+    assert cg.text_width("2.5", 2, 1) == pytest.approx(2 + cg.DOT_W + 2 + 2)
+
+
+def test_pa_values_never_pass_high_and_reject_non_finite() -> None:
+    vals = cg.pa_values("PLA", (0.03, 0.05), 0.003)
+    assert vals[-1] <= 0.05 and vals[-1] == pytest.approx(0.048)
+    assert cg.pa_values("PLA", (0.03, 0.05), 0.0025)[-1] == pytest.approx(0.05)  # exact fit keeps HIGH
+    for bad in (float("nan"), float("inf")):
+        with pytest.raises(cg.GenError, match="need 0 <= low < high"):
+            cg.pa_values("PLA", (0.03, 0.05), bad)
+
+
+def test_cli_rejects_non_finite_numbers() -> None:
+    from commands.calibrate import _float
+    from errors import UsageError
+
+    for raw in ("nan", "inf", "-inf"):
+        with pytest.raises(UsageError, match="finite number"):
+            _float(raw, "--pa-step")
+    assert _float("0.0025", "--pa-step") == 0.0025
