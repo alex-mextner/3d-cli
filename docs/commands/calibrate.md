@@ -7,9 +7,9 @@ Talks to 3d-api like [`3d printops`](printops.md) (`PRINTOPS_API`, `PRINTOPS_TOK
 ```
 3d calibrate plan --printer P [--head T] [--spool ID] [--plate PLATE] [--all]
 3d calibrate record KIND --printer P [--head T] [--spool ID | --filament ID] [--lot LOT] [--plate PLATE]
-                    --values NAME=V[,NAME=V…] [--method M] [--note TEXT] [--evidence URL[,URL…]]
-                    [--valid-until DATE]
-3d calibrate ls [--printer P] [--head T] [--kind KIND] [--status planned|recorded|abandoned] [--all] [--limit N]
+                    [--mix KEY] --values NAME=V[,NAME=V…] [--method M] [--note TEXT]
+                    [--evidence URL[,URL…]] [--valid-until DATE]
+3d calibrate ls [--printer P] [--head T] [--kind KIND] [--mix KEY] [--status planned|recorded|abandoned] [--all] [--limit N]
 3d calibrate show ID
 3d calibrate check FILE.gcode --printer P [--spools T1=ID,…] [--plate PLATE]
                    [--accept calibration:KIND[,…] --reason TEXT]
@@ -42,10 +42,24 @@ other values than the recorded ones.
 | `head_offsets` (U1 only) | printer | — | assumed | head_swap, nozzle_swap, hotend, repair | — |
 | `rotation_distance` | head | — | assumed | extruder | — |
 | `belt_tension` | printer | — | assumed | belts, kinematics | — |
+| `filament_color` | filament | yes | required, policy `off` | — | — (read by the mix model, `3d mix`) |
+| `mix_color` | printer × mix | — | assumed | — | — (read by the mix check of a plate, #418) |
 
 *Baseline* `required`: a head without a record for the loaded filament needs one.
 *Baseline* `assumed`: no record means the factory state, which holds until maintenance invalidates
 it. The file's header documents every key (values with ranges, methods, apply targets, estimates).
+
+**Colour kinds** ([#412](https://github.com/alex-mextner/3d-cli/issues/412), plan §20.4) are never
+required before a print and never appear in `plan`: `filament_color` (the colour a filament really
+prints: the per-spool correction of the Spoolman hex) is `off` in `fleet/policy.yaml`, and the
+engine skips every `mix`-scoped kind. Their values have the type `color` (`#RRGGBB`, stored upper
+case). `mix_color` is keyed by `--mix`, the canonical key of a colour mix
+(`lib/printops/mix_key.py`): the layer height and the Spoolman filament ids of its layer cycle,
+reduced to the shortest repeating unit and rotated to the smallest id sequence compared as
+numbers (`h0.12:f3.f12.f7`; patterns `431` and `314` on the same filaments are one mix), or a
+Local-Z row's whole-percent shares by filament id (`h0.12:lz:f1=25,f4=75`). Any rotation is
+accepted and stored canonical; a newer record of the same printer and key supersedes the older,
+a record of another key never does.
 
 ## Requirement statuses and the policy
 
@@ -105,6 +119,9 @@ older one. Values are checked against the catalog (`flow_ratio=3` is refused: 0.
 3d calibrate record pressure_advance --printer u1 --head T3 --values pressure_advance=0.035 --method pa_pattern
 3d calibrate record input_shaper --printer k1se --values shaper_type_x=mzv,shaper_freq_x=54.2,shaper_type_y=ei,shaper_freq_y=41 --method k1_auto
 3d calibrate record temp_tower --filament 7 --lot B7 --values nozzle_temp_min=205,nozzle_temp_best=215,nozzle_temp_max=230
+3d calibrate record filament_color --spool 12 --values hex=#C8902A,spoolman_hex=#F6C700 --method mix_tester_photo
+3d calibrate record mix_color --printer u1 --mix h0.12:f3.f12.f7 --values hex=#B5654F,predicted_hex=#A86A55
+3d calibrate ls --kind mix_color --mix h0.12:f12.f7.f3
 ```
 
 Calibrations done before 3d-api knew of them (written to the offline settings-history buffer) are

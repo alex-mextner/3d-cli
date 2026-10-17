@@ -88,7 +88,7 @@ def test_committed_catalog_and_policy_are_valid(repo_files: None) -> None:
     catalog = load_catalog()
     assert {"flow_ratio", "pressure_advance", "temp_tower", "max_volumetric_speed", "retraction",
             "input_shaper", "z_offset", "bed_mesh", "head_offsets", "rotation_distance",
-            "belt_tension"} == set(catalog.kinds)
+            "belt_tension", "filament_color", "mix_color"} == set(catalog.kinds)
     assert policy.check() == []
     p = policy.section("calibrations")
     assert p.kind_names() <= set(catalog.kinds)
@@ -121,6 +121,9 @@ def _kind_body(**over: Any) -> dict[str, Any]:
     ({"invalidated_by": ["sneeze"]}, "unknown sneeze"),
     ({"values": {"v": {"type": "number", "min": 2, "max": 1}}}, "min > max"),
     ({"values": {"v": {"type": "string", "min": 1}}}, "numbers only"),
+    ({"values": {"v": {"type": "color", "max": 1}}}, "numbers only"),
+    ({"scope": ["head", "mix"], "baseline": "assumed"}, "mix goes with printer only"),
+    ({"scope": ["mix"], "baseline": "assumed"}, "mix goes with printer only"),
     ({"gcode": {"v": {"key": "x", "compare": "ne", "tolerance": 0}}}, "compare must be"),
     ({"apply": ["slicer:x"]}, "orca:<key>"),
     ({"colour": "red"}, "unknown key(s) colour"),
@@ -616,3 +619,100 @@ def test_plate_scoped_kind_needs_the_plate_when_the_printer_has_several(ctx: cal
     z = next(r for r in cal.requirements(c2, "k1se", plate="textured_pei").items
              if r.kind is not None and r.kind.id == "z_offset")
     assert z.status != "current"  # the smooth-PEI record says nothing about textured PEI
+
+
+# -- colour kinds (#412, plan §20.4) ------------------------------------------------------------
+
+
+def test_colour_values_are_normalised_hexes(repo_files: None) -> None:
+    catalog = load_catalog()
+    fc = catalog.kinds["filament_color"]
+    assert fc.check_values({"hex": "c8902a", "spoolman_hex": "#F6C700", "delta_e": "11.5"}) == {
+        "hex": "#C8902A", "spoolman_hex": "#F6C700", "delta_e": 11.5}
+    with pytest.raises(CatalogError, match="hex must be a colour #RRGGBB"):
+        fc.check_values({"hex": "yellow"})
+    for typo in ("#C8902A0", "C8902AFF", "f00", "##C8902A"):  # device forms are not typed colours
+        with pytest.raises(CatalogError, match="hex must be a colour #RRGGBB"):
+            fc.check_values({"hex": typo})
+    assert catalog.kinds["mix_color"].mix_scoped and not fc.mix_scoped
+    assert policy.section("calibrations").disabled("u1", "filament_color")
+
+
+def test_mix_color_records_are_keyed_by_the_canonical_mix(ctx: cal.Ctx) -> None:
+    """431 and 314 on the same filaments are one mix: the second record supersedes the first;
+    another mix and another printer keep their own records."""
+    first = record(ctx, "mix_color", {"hex": "#b5654f"}, printer="u1", mix="h0.12:f12.f7.f3")
+    assert first.mix == "h0.12:f3.f12.f7" and first.values == {"hex": "#B5654F"}
+    assert first.head is None and first.filament is None and first.nozzle is None
+    other = record(ctx, "mix_color", {"hex": "#9A9A9A"}, printer="u1", mix="h0.12:f1.f4")
+    k1 = record(ctx, "mix_color", {"hex": "#B0604A"}, printer="k1se", mix="h0.12:f3.f12.f7")
+    again = record(ctx, "mix_color", {"hex": "#B26250", "predicted_hex": "#A86A55",
+                                      "delta_e_predicted": 4.2}, printer="u1", mix="h0.12:f7.f3.f12")
+    assert cal.get(ctx.conn, first.id).superseded_by == again.id
+    assert cal.get(ctx.conn, other.id).superseded_by is None
+    assert cal.get(ctx.conn, k1.id).superseded_by is None
+    current = cal.list_calibrations(ctx.conn, kind="mix_color", mix="h0.12:f12.f7.f3", current=True)
+    assert [c.id for c in current] == [again.id, k1.id]  # newest first
+    assert again.to_dict()["mix"] == "h0.12:f3.f12.f7"
+    ev = json.loads(ctx.conn.execute(
+        "SELECT payload FROM events WHERE kind = 'calibration.recorded' ORDER BY id DESC").fetchone()[0])
+    assert ev["mix"] == "h0.12:f3.f12.f7" and ev["superseded"] == [first.id]
+
+
+def test_mix_scope_is_required_exactly_for_mix_kinds(ctx: cal.Ctx) -> None:
+    def err(**kw: Any) -> cal.CalibrationError:
+        with pytest.raises(cal.CalibrationError) as e:
+            cal.record(ctx, cal.RunRequest(**{"method": "manual", **kw}), {"values": {"hex": "#FFFFFF"}})
+        return e.value
+
+    assert "pass mix" in err(kind="mix_color", printer="u1").message
+    assert "pass printer" in err(kind="mix_color", mix="h0.12:f1.f4").message
+    spool(ctx.spoolman, "Elegoo", "PLA", "PLA Grey", slot="u1/T1")
+    assert "drop mix" in err(kind="filament_color", printer="u1", head="T1", mix="h0.12:f1.f4").message
+    # the key names the filaments: a head or spool on a mix record would be stored half
+    assert "drop head" in err(kind="mix_color", printer="u1", head="T1", mix="h0.12:f1.f4").message
+    assert "drop head" in err(kind="mix_color", printer="u1", spool_id=1, mix="h0.12:f1.f4").message
+    for bad in ("431", "h0.12:f1.x4", "h2:f1.f4", "h0.12:lz:f1=50,f4=40"):
+        with pytest.raises(cal.CalibrationError) as e:
+            cal.RunRequest.from_dict({"kind": "mix_color", "printer": "u1", "mix": bad})
+        assert e.value.status == 422, bad
+    with pytest.raises(cal.CalibrationError, match="not a mix key"):
+        cal.list_calibrations(ctx.conn, mix="431")
+
+
+def test_colour_kinds_never_enter_the_requirement_lists(ctx: cal.Ctx) -> None:
+    """filament_color is off by policy, mix-scoped kinds are skipped by the engine: a new spool
+    with no measured colour and a printer with no measured mix add nothing to plan or tasks."""
+    spool(ctx.spoolman, "Elegoo", "PLA", "PLA Grey", lot="L1", slot="u1/T1")
+    record(ctx, "mix_color", {"hex": "#808080"}, printer="u1", mix="h0.12:f1.f4")
+    kinds = {r.kind.id for r in cal.requirements(ctx, "u1").items if r.kind is not None}
+    assert "flow_ratio" in kinds and "input_shaper" in kinds
+    assert not kinds & {"filament_color", "mix_color"}
+
+
+def test_filament_color_record_is_per_filament_and_lot(ctx: cal.Ctx) -> None:
+    sid = spool(ctx.spoolman, "Elegoo", "PLA", "Snapdragon Yellow", lot="L1", slot="u1/T4")
+    rec = record(ctx, "filament_color", {"hex": "#E8B400", "spoolman_hex": "#F6C700"},
+                 spool_id=sid, method="mix_tester_photo")
+    assert rec.printer is None and rec.head is None and rec.mix is None
+    assert rec.filament is not None and rec.filament.lot_nr == "L1"
+    lot2 = spool(ctx.spoolman, "Elegoo", "PLA", "Snapdragon Yellow", lot="L2")
+    other_lot = record(ctx, "filament_color", {"hex": "#EDBA10"}, spool_id=lot2)
+    assert cal.get(ctx.conn, rec.id).superseded_by is None  # lot-sensitive: lots keep their own colour
+    assert other_lot.filament is not None and other_lot.filament.lot_nr == "L2"
+
+
+def test_rest_records_and_filters_mix_color(po: ApiClient, printops_client: Any,
+                                            printops_tokens: dict[str, str]) -> None:
+    rec = po.post("/v1/calibrations", {"kind": "mix_color", "printer": "u1", "mix": "h0.12:f4.f3.f1",
+                                       "method": "mix_tester_photo", "values": {"hex": "#b5654f"}})
+    assert rec["mix"] == "h0.12:f1.f4.f3" and rec["values"] == {"hex": "#B5654F"}
+    po.post("/v1/calibrations", {"kind": "mix_color", "printer": "u1", "mix": "h0.12:f1.f4",
+                                 "values": {"hex": "#808080"}})
+    listed = po.get("/v1/calibrations", kind="mix_color", mix="h0.12:f3.f1.f4")["calibrations"]
+    assert [c["id"] for c in listed] == [rec["id"]]
+    headers = {"Authorization": f"Bearer {printops_tokens['rw']}"}
+    bad = printops_client.post("/v1/calibrations", headers=headers,
+                               json={"kind": "mix_color", "printer": "u1", "mix": "431", "values": {"hex": "#FFFFFF"}})
+    assert bad.status_code == 422 and "not a mix key" in bad.text
+    assert printops_client.get("/v1/calibrations?mix=431", headers=headers).status_code == 422
