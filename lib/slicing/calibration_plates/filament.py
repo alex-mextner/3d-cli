@@ -29,6 +29,8 @@ from slicing.calibration_gen import (
     COMBO_SEGMENTS,
     COMBO_SPEEDS,
     FLOW_STEPS,
+    TRAVEL_F,
+    Z_MOVE_F,
     Box,
     GenError,
     TowerShape,
@@ -171,7 +173,7 @@ def pack(
                     among.append((s, x, y))
                     return
         raise GenError(
-            f"plate 1: no room left on the bed for {s.test} ({s.width:g} x {s.depth:g} mm)"
+            f"no room left on the bed for {s.test} ({s.width:g} x {s.depth:g} mm)"
         )
 
     front: list[tuple[Section, float, float]] = []
@@ -203,6 +205,7 @@ def _pa(ctx: PlateContext) -> Section:
             values=ctx.pa,
             pitch=PA_PITCH,
             segments=PA_SEGMENTS,
+            source=PLATE_ID,
         )
         half = ctx.ex.line_w / 2
         items = tuple(
@@ -228,7 +231,10 @@ def _pa(ctx: PlateContext) -> Section:
                 items,
                 {
                     "segments_mm": "/".join(f"{s:g}" for s in PA_SEGMENTS),
-                    "speeds_mm_s": "/".join(f"{v:g}" for v in (COMBO_SPEEDS[0], COMBO_SPEEDS[1], COMBO_SPEEDS[0])),
+                    "speeds_mm_s": "/".join(
+                        f"{v:g}"
+                        for v in (COMBO_SPEEDS[0], COMBO_SPEEDS[1], COMBO_SPEEDS[0])
+                    ),
                     "stock_pa": ctx.p.stock_pa,
                 },
                 "PA lines, front to back. Each line: slow - fast - slow. The right PA keeps the width even at "
@@ -256,10 +262,18 @@ def _mvs(ctx: PlateContext) -> Section:
         xs = [x0 + k * MVS_SEG_L for k in range(len(MVS_VALUES) + 1)]
         ys = [y0 + MVS_W / 2 + j * MVS_SPACING for j in range(MVS_LINES)]
         speeds = [v / (MVS_W * MVS_H) for v in MVS_VALUES]
-        out = [
-            f"G1 Z{ex.layer_h + ex.lift:.3f} F1200",
-            f"G1 X{xs[0]:.3f} Y{ys[0]:.3f} F12000",
-            f"G1 Z{ex.layer_h:.3f} F1200",
+        # Labels first, on the bare bed: after the strip the nozzle may not come down to the
+        # first-layer travel height again (the strip's top is above it).
+        label_y = y0 + strip_d + MVS_LABEL_GAP
+        out: list[str] = []
+        for k, mvs in enumerate(MVS_VALUES):
+            out += label_lines(
+                ctx, str(mvs), xs[k] + MVS_SEG_L / 2 - label_width(str(mvs)) / 2, label_y
+            )
+        out += [
+            f"G1 Z{ex.layer_h + ex.lift:.3f} F{Z_MOVE_F}",
+            f"G1 X{xs[0]:.3f} Y{ys[0]:.3f} F{TRAVEL_F}",
+            f"G1 Z{ex.layer_h:.3f} F{Z_MOVE_F}",
             f"G1 E{ex.retract:.3f} F{ex.retract_f:.0f}",
         ]
         x, y = xs[0], ys[0]
@@ -270,7 +284,7 @@ def _mvs(ctx: PlateContext) -> Section:
         for n, (z, h, test) in enumerate(layers):
             epm = ctx.e_per_mm(MVS_W, h)
             if n:
-                out.append(f"G1 Z{z:.3f} F1200")
+                out.append(f"G1 Z{z:.3f} F{Z_MOVE_F}")
                 rows.reverse()
             if test and n == 1:
                 out.append("M106 S255")
@@ -295,13 +309,8 @@ def _mvs(ctx: PlateContext) -> Section:
         out += [
             "M106 S0",
             f"G1 E-{ex.retract:.3f} F{ex.retract_f:.0f}",
-            f"G1 Z{top + ex.lift:.3f} F1200",
+            f"G1 Z{top + ex.lift:.3f} F{Z_MOVE_F}",
         ]
-        label_y = y0 + strip_d + MVS_LABEL_GAP
-        for k, v in enumerate(MVS_VALUES):
-            out += label_lines(
-                ctx, str(v), xs[k] + MVS_SEG_L / 2 - label_width(str(v)) / 2, label_y
-            )
         items = tuple(
             Item(
                 str(v),
@@ -562,7 +571,9 @@ def _temp(ctx: PlateContext) -> Section:
                 phase="sequential",
                 bands=bands,
                 before=(f"M109 S{steps[0]}",),
-                after=(f"M109 S{ctx.base_temp}",),
+                # no wait: the tower prints last, END_PRINT turns the heater off next; waiting
+                # here would only park the hot nozzle over the coldest (top) block
+                after=(f"M104 S{ctx.base_temp}",),
                 params={
                     "from_c": steps[0],
                     "to_c": steps[-1],
@@ -637,8 +648,13 @@ def build(ctx: PlateContext) -> Plate:
         notes=(
             "Tests: "
             + ", ".join(t for t in TESTS if ctx.wants(t))
-            + ". Order: hand-written lines and labels "
-            "(first layer) → objects by layer → the temperature tower alone, last.",
-            "Photograph the plate on the bed, top-down, light on, then the towers from the front.",
+            + ". Order: hand-written lines and labels (first layer) → objects by layer"
+            + (" → the temperature tower alone, last." if ctx.wants("temp") else "."),
+            "Photograph the plate on the bed, top-down, light on"
+            + (
+                ", then the towers from the front."
+                if ctx.wants("temp") or ctx.wants("retraction")
+                else "."
+            ),
         ),
     )

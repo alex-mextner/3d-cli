@@ -3,6 +3,7 @@ with a fake Orca CLI that writes Orca-shaped G-code (START_PRINT, EXCLUDE_OBJECT
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import re
 from pathlib import Path
@@ -193,7 +194,8 @@ def test_plate1_builds_splices_and_maps(orca: str, tmp_path: Path) -> None:
     assert sum(ln.startswith("START_PRINT") for ln in lines) == 1
     assert sum(ln.startswith("END_PRINT") for ln in lines) == 1
     start = next(i for i, ln in enumerate(lines) if ln.startswith("START_PRINT"))
-    assert lines[start + 1].startswith("; 3d calibrate gen combo: PA lines")
+    assert lines[start + 1] == "; 3d calibrate plate: object labels"
+    assert any(ln.startswith("; 3d calibrate plate1: PA lines") for ln in lines)
     blocks = [
         ln
         for ln in lines
@@ -202,9 +204,10 @@ def test_plate1_builds_splices_and_maps(orca: str, tmp_path: Path) -> None:
         and ln != cp.SPLICE_MARK
         and "undo" not in ln
     ]
+    # first-layer blocks first, the 0.8 mm MVS strip last: no hand-written travel crosses it
     assert blocks == [
-        "; 3d calibrate plate: max volumetric speed strip",
         "; 3d calibrate plate: object labels",
+        "; 3d calibrate plate: max volumetric speed strip",
     ]
     # the towers' object definitions joined the layer phase's, before START_PRINT
     defines = [
@@ -235,10 +238,11 @@ def test_plate1_builds_splices_and_maps(orca: str, tmp_path: Path) -> None:
         z = round(shape.block_floor(i) + 0.2, 2)
         sec = _section_at(text, "retraction_tower", z)
         assert f"G1 E-{0.56 * length / 0.8:.5f} F2400" in sec
-    # temperature tower: M109 hot start, one M104 per block, M109 back to the base temp
+    # temperature tower: M109 hot start, one M104 per block, back to the base temp without
+    # waiting (END_PRINT follows)
     tt = [ln for ln in lines[mark:] if re.match(r"^M10[49] S", ln)]
     steps = cg.temp_steps("PLA")
-    assert tt[0] == f"M109 S{steps[0]}" and tt[-1] == "M109 S220"
+    assert tt[0] == f"M109 S{steps[0]}" and tt[-1] == "M104 S220"
     assert list(dict.fromkeys(tt[1:-1])) == [f"M104 S{t}" for t in steps]
     # the layer phase's last retraction is undone on the tower's first layer
     assert any("undo the layer phase's last retraction" in ln for ln in lines[mark:])
@@ -255,7 +259,7 @@ def test_plate1_builds_splices_and_maps(orca: str, tmp_path: Path) -> None:
     data = json.loads(out.with_suffix(".json").read_text())
     assert data["gcode"] == out.name and data["plate"] == "plate1"
     names = [o["name"] for o in data["objects"]]
-    assert names[:3] == ["pa_lines", "mvs_strip", "labels"]
+    assert names[:3] == ["labels", "pa_lines", "mvs_strip"]
     assert data["print_order"][-1] == "sequential: temp_tower"
     pa = next(o for o in data["objects"] if o["name"] == "pa_lines")
     assert [it["params"]["pressure_advance"] for it in pa["items"]] == list(
@@ -411,3 +415,46 @@ def test_plate1_single_sliced_tests_build(orca: str, tmp_path: Path) -> None:
         out = tmp_path / f"{test}.gcode"
         cp.build_plate(ctx, filament.build(ctx), orca, out)
         assert out.is_file()
+
+
+def test_mvs_strip_never_comes_down_after_its_top(orca: str) -> None:
+    """The strip ends above its top: its labels print before it, so no travel goes into it."""
+    block = next(c for c in filament.build(_ctx(orca)).custom if c.name == "mvs_strip")
+    zs = [float(m.group(1)) for ln in block.lines if (m := re.match(r"^G1 Z([\d.]+)", ln))]
+    top = block.bbox()[5]
+    peak = zs.index(max(zs))
+    assert max(zs) > top and all(z >= top for z in zs[peak:])
+
+
+def test_plate_refuses_a_json_output_and_a_zero_retraction(orca: str, tmp_path: Path) -> None:
+    ctx = _ctx(orca)
+    with pytest.raises(cg.GenError, match=r"\.gcode"):
+        cp.build_plate(ctx, filament.build(ctx), orca, tmp_path / "plate1.json")
+    assert not (tmp_path / "plate1.json").exists()
+    zero = dataclasses.replace(ctx, mach={**ctx.mach, "retraction_length": ["0"]})
+    with pytest.raises(cg.GenError, match="retraction length 0"):
+        filament.build(zero)
+
+
+def test_retraction_tower_scales_from_the_filament_override(orca: str) -> None:
+    ctx = _ctx(orca)
+    assert ctx.retract == 0.8  # filament preset unset ("nil" or absent): the machine's
+    nil = dataclasses.replace(ctx, fil={**ctx.fil, "filament_retraction_length": ["nil"]})
+    assert nil.retract == 0.8
+    own = dataclasses.replace(ctx, fil={**ctx.fil, "filament_retraction_length": ["0.5"]})
+    tower = next(o for o in filament.build(own).objects if o.name == "retraction_tower")
+    assert tower.params["preset_retraction_mm"] == 0.5
+
+
+def test_plate_notes_follow_the_chosen_tests(orca: str) -> None:
+    full = filament.build(_ctx(orca)).notes
+    assert "temperature tower alone, last" in full[0] and "towers from the front" in full[1]
+    ctx = cp.make_context("Creality K1 SE", orca, "PLA", "#E8732A", None, frozenset({"flow", "bridge"}))
+    notes = filament.build(ctx).notes
+    assert "temperature tower" not in notes[0] and "towers" not in notes[1]
+
+
+def test_pa_range_needs_the_pa_lines(orca: str, tmp_path: Path) -> None:
+    with pytest.raises(cg.GenError, match="skips them"):
+        cg.generate("plate1", "Creality K1 SE", orca, tmp_path / "p.gcode", skip=frozenset({"pa"}),
+                    pa_range=(0.03, 0.05))
