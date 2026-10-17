@@ -77,7 +77,7 @@ Every gate from model to printer, in order: [Print pipeline](../workflows/print-
 
 | Command | Doc | Role |
 |---|---|---|
-| `calibrate` | [calibrate.md](calibrate.md) | Calibrations per head × filament via 3d-api: what is needed (new material/vendor blocks, new lot warns, maintenance invalidates), record values, the `calibration_current` G-code gate. |
+| `calibrate` | [calibrate.md](calibrate.md) | Calibrations per head × filament via 3d-api: what is needed (new material/vendor blocks, new lot warns, maintenance invalidates), record values, the `calibration_current` G-code gate; `gen` writes calibration prints locally (PA tower, flow tiles, shaper commands). |
 | `gcode-thumbnails` | [gcode-thumbnails.md](gcode-thumbnails.md) | Check/add the printer-screen preview thumbnails a G-code carries (Orca CLI writes none). |
 | `print` | [print.md](print.md) | Validate print fields and emit deterministic dry-run job plans. |
 | `gcode-bounds` | [gcode-bounds.md](gcode-bounds.md) | Check every G-code move (arc bulges too) against axis travel and the printable area; offline. |
