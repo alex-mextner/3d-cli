@@ -262,9 +262,15 @@ class MoonrakerAdapter(Adapter):
     def cancel(self) -> None:
         self._post("/printer/print/cancel")
 
-    def run_gcode(self, script: str) -> None:
-        # Moonraker answers after Klipper ran the line (a long STEPPER_BUZZ takes ~10 s)
-        self._post("/printer/gcode/script?script=" + quote(script, safe=""))
+    def run_gcode(self, script: str, *, timeout: float = 120.0) -> None:
+        """Run G-code lines (newline-separated) through `/printer/gcode/script`. Moonraker
+        answers when Klipper finished them (an `M400` at the end waits for the moves; a long
+        STEPPER_BUZZ takes ~10 s), so the read timeout is at least `timeout`."""
+        saved, self.timeout = self.timeout, max(self.timeout, timeout)
+        try:
+            self._post("/printer/gcode/script?script=" + quote(script, safe=""))
+        finally:
+            self.timeout = saved
 
 
 __all__ = ["MoonrakerAdapter", "parse_slots", "parse_status"]
