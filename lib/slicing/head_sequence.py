@@ -98,23 +98,35 @@ def read_recipes(zf: zipfile.ZipFile) -> tuple[dict[int, str], int]:
     return patterns, int(str(raft or "0"))
 
 
+def _object_head(obj_ex: ET.Element | None) -> int:
+    """Object-level extruder as a 1-based head; 0 or absent = the first filament."""
+    return (int(obj_ex.get("value", "1")) if obj_ex is not None else 1) or 1
+
+
 def read_object_extruders(zf: zipfile.ZipFile) -> dict[str, list[int]]:
-    """Object name -> sorted part extruders (object-level value when parts carry none)."""
+    """Object name -> sorted extruders of its parts.
+
+    Orca writes extruder 0 for "not set": a printed part with 0 or without the key inherits its
+    object, and an object with 0 or without the key prints with the first filament (the CLI
+    stamps every object loaded from an STL with 0). The object's value is parsed only when
+    a part inherits it.
+    """
     root = ET.fromstring(zf.read("Metadata/model_settings.config"))
     objs: dict[str, list[int]] = {}
     for obj in root.findall("object"):
         name_el = obj.find("metadata[@key='name']")
         if name_el is None:
             continue
-        ex = {
-            int(e.get("value", "1"))
-            for part in obj.findall("part")
-            for e in part.findall("metadata[@key='extruder']")
-        }
-        if not ex:
-            obj_ex = obj.find("metadata[@key='extruder']")
-            ex = {int(obj_ex.get("value", "1")) if obj_ex is not None else 1}
-        objs[name_el.get("value", "")] = sorted(ex)
+        obj_ex = obj.find("metadata[@key='extruder']")
+        ex: set[int] = set()
+        for part in obj.findall("part"):
+            part_exts = [int(e.get("value", "1")) for e in part.findall("metadata[@key='extruder']")]
+            if part_exts:
+                ex |= {v or _object_head(obj_ex) for v in part_exts}
+            # modifiers/blockers without a value print nothing of their own
+            elif part.get("subtype", "normal_part") == "normal_part":
+                ex.add(_object_head(obj_ex))
+        objs[name_el.get("value", "")] = sorted(ex or {_object_head(obj_ex)})
     return objs
 
 
