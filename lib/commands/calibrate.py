@@ -55,8 +55,8 @@ Subcommands:
           express calibration of a new spool; temp = temperature tower, one labelled 8 mm block per
           5 °C (PLA 230→200, PETG 250→220, M104 per block); shaper = SHAPER_CALIBRATE console commands
           (printers with an accelerometer). The G-code gets thumbnails and a slice-warnings record,
-          ready for `3d print-preflight` (temp: filament_temp_range FAILs when the spool's nozzle
-          window is narrower than the tower; start it with --force). Local only; set SLICER=/path/to/orca.
+          ready for `3d print-preflight` (temp: filament_temp_range FAILs when the tower's hottest
+          block is above the spool's nozzle window; start it with --force). Local only; set SLICER=/path/to/orca.
 
 Options:
   --printer P        fleet printer name (fleet/printers.yaml), e.g. u1, k1se
