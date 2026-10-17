@@ -39,7 +39,7 @@ kinds:
     lot_sensitive: true
     baseline: required
     invalidated_by: [nozzle_swap, nozzle_diameter, hotend]
-    methods: [orca_flow_tiles, u1_auto_flow, manual]
+    methods: [orca_flow_tiles, flow_tiles, u1_auto_flow, manual]  # flow_tiles: `3d calibrate gen flow|combo`
     values:
       flow_ratio: {type: number, min: 0.5, max: 1.5}
     gcode:
@@ -56,7 +56,7 @@ kinds:
     lot_sensitive: false
     baseline: required
     invalidated_by: [nozzle_swap, nozzle_diameter, hotend, extruder, ptfe]
-    methods: [pa_pattern, pa_tower, k1_auto, manual]
+    methods: [pa_pattern, pa_tower, pa_lines, k1_auto, manual]  # pa_tower / pa_lines: `3d calibrate gen pa|combo`
     values:
       pressure_advance: {type: number, min: 0, max: 2}
       smooth_time: {type: number, min: 0, max: 0.2, unit: s, optional: true}
