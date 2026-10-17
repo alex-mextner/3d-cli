@@ -202,6 +202,41 @@ def boxes_stl(boxes: list[Box]) -> str:
     return "\n".join(out)
 
 
+def prism_stl(profile: list[tuple[float, float]], y0: float, y1: float) -> str:
+    """An ASCII STL of a prism: a convex polygon in the x-z plane (`profile`, any winding)
+    extruded from y0 to y1. Every facet is turned to face away from the centroid."""
+    n = len(profile)
+    if n < 3:
+        raise GenError("prism profile needs at least 3 points")
+    front = [(x, y0, z) for x, z in profile]
+    back = [(x, y1, z) for x, z in profile]
+    tris = [(front[0], front[i], front[i + 1]) for i in range(1, n - 1)]
+    tris += [(back[0], back[i], back[i + 1]) for i in range(1, n - 1)]
+    for i in range(n):
+        j = (i + 1) % n
+        tris += [(front[i], front[j], back[j]), (front[i], back[j], back[i])]
+    cx = sum(p[0] for p in front) / n
+    cz = sum(p[2] for p in front) / n
+    centroid = (cx, (y0 + y1) / 2, cz)
+    out = ["solid prism"]
+    for a, b, c in tris:
+        u = [b[k] - a[k] for k in range(3)]
+        v = [c[k] - a[k] for k in range(3)]
+        nrm = (
+            u[1] * v[2] - u[2] * v[1],
+            u[2] * v[0] - u[0] * v[2],
+            u[0] * v[1] - u[1] * v[0],
+        )
+        mid = [(a[k] + b[k] + c[k]) / 3 - centroid[k] for k in range(3)]
+        if sum(nrm[k] * mid[k] for k in range(3)) < 0:
+            b, c = c, b
+        out.append("facet normal 0 0 0\nouter loop")
+        out += [f"vertex {q[0]:g} {q[1]:g} {q[2]:g}" for q in (a, b, c)]
+        out.append("endloop\nendfacet")
+    out.append("endsolid prism\n")
+    return "\n".join(out)
+
+
 def _orca_value(template: Any, value: Any) -> Any:
     """Orca stores filament options as one-element string lists, process options as strings."""
     return [str(value)] if isinstance(template, list) else str(value)
@@ -525,19 +560,25 @@ def flow_notes(ratio: float) -> list[str]:
 # Combo plate: PA lines on the first layer (front), flow tiles (back). Each line is slow-fast-slow;
 # at the right PA the width stays even across both speed changes (too low: blob/bulge after the
 # fast part, too high: thin gap at its start). Our own pattern, written from Klipper's
-# SET_PRESSURE_ADVANCE semantics; labels are seven-segment digits = PA x 1000.
-COMBO_PA_VALUES = tuple(round(i * 0.005, 3) for i in range(17))  # 0 .. 0.080
+# SET_PRESSURE_ADVANCE semantics; labels are seven-segment digits = PA x 1000 ("42.5" in a fine pass).
+# Default range per material: wide enough for an unknown spool; a fine pass narrows it with
+# --pa-range/--pa-step.
+PA_RANGES = {
+    "PLA": (0.0, 0.10, 0.01),
+    "PLA+": (0.0, 0.10, 0.01),
+    "PETG": (0.0, 0.15, 0.01),
+}
+PA_MAX_LINES = 31
 COMBO_PITCH = (
     5.0  # mm between PA lines: a 3 mm label plus a clear gap at 0.5 mm line width
 )
-COMBO_SEGMENTS = (20.0, 50.0, 20.0)  # slow, fast, slow (mm)
+# Short lines: the width change shows within millimetres of each speed change; the fast part
+# only needs room to reach COMBO_SPEEDS[1] at COMBO_ACCEL (~1.4 mm each way).
+COMBO_SEGMENTS = (6.0, 14.0, 6.0)  # slow, fast, slow (mm)
 COMBO_SPEEDS = (20.0, 120.0)  # slow, fast (mm/s)
 COMBO_LINE_W = 0.5
 COMBO_ACCEL = 5000
 COMBO_LABEL = (2.0, 3.0, 1.0)  # digit width, height, gap (mm): legible on a phone photo
-# label cell: headroom for 3 digits (COMBO_PA_VALUES need 2); the line starts 2 mm after it
-COMBO_LABEL_DIGITS = 3
-COMBO_LABEL_W = COMBO_LABEL_DIGITS * (COMBO_LABEL[0] + COMBO_LABEL[2]) + 2.0
 COMBO_TILE = (20.0, 20.0, 3.0)
 COMBO_TILE_GAP = 6.0
 # Layout as fractions of the bed depth: PA lines start near the front, tiles sit at the back,
@@ -572,16 +613,62 @@ _DIGITS = {
     "9": "abcdfg",
 }
 Point = tuple[float, float]
+DOT_W = 0.4  # length of the "." stroke (a short line on the baseline)
+
+
+def pa_values(
+    material: str,
+    pa_range: tuple[float, float] | None = None,
+    step: float | None = None,
+) -> tuple[float, ...]:
+    """PA values of the line test: the material's default range, or --pa-range/--pa-step."""
+    if material not in PA_RANGES and pa_range is None:
+        raise GenError(
+            f"no default PA range for {material!r} (known: {', '.join(PA_RANGES)}); pass --pa-range"
+        )
+    lo, hi, st = PA_RANGES.get(material, (0.0, 0.1, 0.01))
+    if pa_range is not None:
+        lo, hi = pa_range
+    if step is not None:
+        st = step
+    if not all(math.isfinite(v) for v in (lo, hi, st)) or not (0 <= lo < hi <= 2.0) or st <= 0:
+        raise GenError(
+            f"PA range {lo:g}:{hi:g} step {st:g}: need 0 <= low < high <= 2 and step > 0"
+        )
+    # whole steps that fit: never a line above HIGH (0.03:0.05 step 0.003 ends at 0.048)
+    n = math.floor((hi - lo) / st + 1e-9) + 1
+    if n > PA_MAX_LINES:
+        raise GenError(
+            f"PA range {lo:g}:{hi:g} step {st:g} is {n} lines; at most {PA_MAX_LINES}"
+        )
+    return tuple(round(lo + i * st, 5) for i in range(n))
+
+
+COMBO_PA_VALUES = pa_values("PLA")
+
+
+def pa_label(pa: float) -> str:
+    """PA x 1000, with a decimal point only when needed: 0.04 -> "40", 0.0425 -> "42.5"."""
+    return f"{round(pa * 1000, 2):g}"
+
+
+def text_width(text: str, w: float, gap: float) -> float:
+    """Width of `text` drawn by digit_paths (digits w, "." DOT_W, gap between glyphs)."""
+    return sum(DOT_W if ch == "." else w for ch in text) + gap * (len(text) - 1)
 
 
 def digit_paths(
     digits: str, x0: float, y0: float, w: float, h: float, gap: float
 ) -> list[list[Point]]:
-    """Polylines drawing `digits` with their lower-left corner at (x0, y0); strokes
+    """Polylines drawing `digits` (and ".") with their lower-left corner at (x0, y0); strokes
     that share an end are chained so each digit needs few retractions."""
     paths: list[list[Point]] = []
-    for k, ch in enumerate(digits):
-        ox = x0 + k * (w + gap)
+    ox = x0
+    for ch in digits:
+        if ch == ".":
+            paths.append([(ox, y0), (ox + DOT_W, y0)])
+            ox += DOT_W + gap
+            continue
         segs = [_SEG[s] for s in _DIGITS[ch]]
         while segs:
             a, b = segs.pop(0)
@@ -596,6 +683,7 @@ def digit_paths(
                         grew = True
                         break
             paths.append([(ox + px * w, y0 + py * h / 2) for px, py in path])
+        ox += w + gap
     return paths
 
 
@@ -633,7 +721,15 @@ def _path_gcode(path: list[Point], ex: Extrusion, speeds: list[float]) -> list[s
 
 
 def pa_lines(
-    x0: float, y0: float, ex: Extrusion, stock_pa: float, accel: float
+    x0: float,
+    y0: float,
+    ex: Extrusion,
+    stock_pa: float,
+    accel: float,
+    *,
+    values: tuple[float, ...] = COMBO_PA_VALUES,
+    pitch: float = COMBO_PITCH,
+    segments: tuple[float, float, float] = COMBO_SEGMENTS,
 ) -> list[str]:
     """The PA line block: per value a label (PA x 1000) at x0, then a slow-fast-slow line
     after SET_PRESSURE_ADVANCE. Ends with the stock PA, M221 S100 and the process's own
@@ -641,7 +737,7 @@ def pa_lines(
     Extrusion is relative (M83), as the slicer's body (gen_combo checks the preset)."""
     lw, lh, lgap = COMBO_LABEL
     slow, fast = COMBO_SPEEDS
-    xs = x0 + COMBO_LABEL_W
+    xs = x0 + pa_label_width(values) + 2.0
     out = [
         "; 3d calibrate gen combo: PA lines, label = PA x 1000; slow-fast-slow per line",
         "M221 S100",
@@ -651,13 +747,13 @@ def pa_lines(
         "M106 S0",
         f"G1 E-{ex.retract:.3f} F{ex.retract_f:.0f}",
     ]
-    for i, pa in enumerate(COMBO_PA_VALUES):
-        y = y0 + i * COMBO_PITCH
+    for i, pa in enumerate(values):
+        y = y0 + i * pitch
         out.append(f"SET_PRESSURE_ADVANCE ADVANCE={stock_pa:g}")
-        for path in digit_paths(str(round(pa * 1000)), x0, y - lh / 2, lw, lh, lgap):
+        for path in digit_paths(pa_label(pa), x0, y - lh / 2, lw, lh, lgap):
             out += _path_gcode(path, ex, [10.0] * (len(path) - 1))
         out.append(f"SET_PRESSURE_ADVANCE ADVANCE={pa:g}")
-        a, b, c = COMBO_SEGMENTS
+        a, b, c = segments
         line = [(xs, y), (xs + a, y), (xs + a + b, y), (xs + a + b + c, y)]
         out += _path_gcode(line, ex, [slow, fast, slow])
     out += [
@@ -668,6 +764,11 @@ def pa_lines(
         "; 3d calibrate gen combo: end of PA lines",
     ]
     return out
+
+
+def pa_label_width(values: tuple[float, ...]) -> float:
+    lw, _, lgap = COMBO_LABEL
+    return max(text_width(pa_label(v), lw, lgap) for v in values)
 
 
 def _first(preset: dict[str, Any], key: str) -> float:
@@ -684,6 +785,59 @@ def _first(preset: dict[str, Any], key: str) -> float:
     return n
 
 
+def process_accel(proc: dict[str, Any]) -> float:
+    """The process's acceleration, restored after hand-written blocks: Klipper refuses ACCEL <= 0
+    (Orca's 0 = "no acceleration control"), which would stop the print after the block."""
+    accel = _first(proc, "default_acceleration")
+    if accel <= 0:
+        raise GenError(f"preset values must be positive: default_acceleration={accel:g}")
+    return accel
+
+
+def require_relative_e(text: str, p: Presets) -> None:
+    """Hand-written blocks use relative E (M83); the sliced footer is authoritative (the K1
+    preset leaves the option at Orca's default)."""
+    rel_e = re.search(r"^; use_relative_e_distances = (\d)", text, re.M)
+    if rel_e is None or rel_e.group(1) != "1":
+        raise GenError(
+            f"{p.machine}: hand-written lines are relative-E (M83); the slice is not relative-E"
+        )
+
+
+def filament_area(fpre: dict[str, Any]) -> float:
+    diameter = _first(fpre, "filament_diameter")
+    if diameter <= 0:
+        raise GenError(
+            f"preset values must be positive: filament_diameter={diameter:g}"
+        )
+    return math.pi * diameter**2 / 4
+
+
+def first_layer_extrusion(
+    proc: dict[str, Any], fpre: dict[str, Any], mach: dict[str, Any]
+) -> Extrusion:
+    """Line parameters of hand-written first-layer G-code (PA lines, labels) from the presets."""
+    layer_h = _first(proc, "initial_layer_print_height")
+    ratio = _first(fpre, "filament_flow_ratio")
+    retract = _first(mach, "retraction_length")
+    retract_speed = _first(mach, "retraction_speed")
+    # F0 or a negative length would be invalid G-code right after START_PRINT; 0 mm is "no retraction"
+    if layer_h <= 0 or ratio <= 0 or retract_speed <= 0 or retract < 0:
+        raise GenError(
+            f"preset values must be positive: initial_layer_print_height={layer_h:g}, "
+            f"filament_flow_ratio={ratio:g}, retraction_speed={retract_speed:g}, "
+            f"retraction_length={retract:g} (>= 0)"
+        )
+    return Extrusion(
+        layer_h=layer_h,
+        line_w=COMBO_LINE_W,
+        e_per_mm=COMBO_LINE_W * layer_h * ratio / filament_area(fpre),
+        retract=retract,
+        retract_f=retract_speed * 60,
+        lift=COMBO_LIFT,
+    )
+
+
 def gen_combo(
     slicer: str,
     idx: ProfileIndex,
@@ -692,21 +846,21 @@ def gen_combo(
     color: str,
     out: Path,
     temp: int | None,
+    pa: tuple[float, ...] = COMBO_PA_VALUES,
 ) -> Generated:
     tx, ty, _ = COMBO_TILE
     n = len(FLOW_STEPS)
     tiles_w = n * tx + (n - 1) * COMBO_TILE_GAP
     tiles_y = p.bed[1] * COMBO_TILES_Y_FRAC
     lh = COMBO_LABEL[1]
-    block_w = COMBO_LABEL_W + sum(COMBO_SEGMENTS)
+    block_w = pa_label_width(pa) + 2.0 + sum(COMBO_SEGMENTS)
     pa_x0 = (p.bed[0] - block_w) / 2
     pa_y0 = p.bed[1] * COMBO_PA_Y_FRAC
     # Layout before slicing: a bed it does not fit fails at once, not after a slice.
     if (
         max(block_w, tiles_w) > p.bed[0]
         or tiles_y + ty > p.bed[1]
-        or pa_y0 + (len(COMBO_PA_VALUES) - 1) * COMBO_PITCH + lh
-        >= tiles_y - COMBO_CLEARANCE
+        or pa_y0 + (len(pa) - 1) * COMBO_PITCH + lh >= tiles_y - COMBO_CLEARANCE
     ):
         raise GenError(
             f"combo layout: the PA lines and flow tiles do not fit a {p.bed[0]:g}x{p.bed[1]:g} mm bed"
@@ -718,44 +872,12 @@ def gen_combo(
     proc = idx.flat(p.vendor, "process", p.process)
     fpre = _apply_overrides(idx.flat(p.vendor, "filament", p.filament[material]), fil)
     mach = idx.flat(p.vendor, "machine", p.machine)
-    # The sliced footer is authoritative (the K1 preset leaves the option at Orca's default).
-    rel_e = re.search(r"^; use_relative_e_distances = (\d)", text, re.M)
-    if rel_e is None or rel_e.group(1) != "1":
-        raise GenError(
-            f"{p.machine}: combo writes relative-E (M83) lines; the slice is not relative-E"
-        )
-    diameter = _first(fpre, "filament_diameter")
-    layer_h = _first(proc, "initial_layer_print_height")
+    require_relative_e(text, p)
+    ex = first_layer_extrusion(proc, fpre, mach)
     ratio = _first(fpre, "filament_flow_ratio")
-    accel = _first(proc, "default_acceleration")
-    retract = _first(mach, "retraction_length")
-    retract_speed = _first(mach, "retraction_speed")
-    # F0 or a negative length would be invalid G-code right after START_PRINT; 0 mm is "no retraction"
-    if (
-        diameter <= 0
-        or layer_h <= 0
-        or ratio <= 0
-        or accel <= 0
-        or retract_speed <= 0
-        or retract < 0
-    ):
-        raise GenError(
-            f"preset values must be positive: filament_diameter={diameter:g}, "
-            f"initial_layer_print_height={layer_h:g}, filament_flow_ratio={ratio:g}, "
-            f"default_acceleration={accel:g}, retraction_speed={retract_speed:g}, "
-            f"retraction_length={retract:g} (>= 0)"
-        )
-    ex = Extrusion(
-        layer_h=layer_h,
-        line_w=COMBO_LINE_W,
-        e_per_mm=COMBO_LINE_W * layer_h * ratio / (math.pi * diameter**2 / 4),
-        retract=retract,
-        retract_f=retract_speed * 60,
-        lift=COMBO_LIFT,
-    )
     # The PA block runs right after START_PRINT, before the slicer's first layer: the bed is hot,
     # the nozzle primed, and every line lies on the bare plate.
-    block = pa_lines(pa_x0, pa_y0, ex, p.stock_pa, accel)
+    block = pa_lines(pa_x0, pa_y0, ex, p.stock_pa, process_accel(proc), values=pa)
     text = insert_after(text, r"^START_PRINT\b.*$", block)
     text = flow_factors(text)
     text = insert_before_end(
@@ -763,12 +885,12 @@ def gen_combo(
     )
     publish(text, out)
     finish(out, log, mach)
-    labels = ", ".join(f"{round(v * 1000)}={v:g}" for v in COMBO_PA_VALUES)
+    labels = ", ".join(f"{pa_label(v)}={v:g}" for v in pa)
     return Generated(
         "combo",
         [out],
         [
-            f"Front: {len(COMBO_PA_VALUES)} PA lines, bottom to top (front to back), label = PA x 1000: {labels}.",
+            f"Front: {len(pa)} PA lines, bottom to top (front to back), label = PA x 1000: {labels}.",
             f"Each line: {COMBO_SEGMENTS[0]:g} mm at {COMBO_SPEEDS[0]:g} mm/s, {COMBO_SEGMENTS[1]:g} mm at "
             f"{COMBO_SPEEDS[1]:g} mm/s, {COMBO_SEGMENTS[2]:g} mm slow. Pick the line whose width stays even "
             "at both speed changes; Record: 3d calibrate record pressure_advance --printer PRINTER "
@@ -815,10 +937,18 @@ def temp_steps(material: str) -> list[int]:
     return list(range(hot, cold - 1, -TEMP_STEP))
 
 
-def digit_boxes(digits: str, x0: float, y0: float, z_floor: float) -> list[Box]:
-    """Seven-segment `digits` lying on a floor at z_floor, raised TEMP_EMBOSS, read from the
-    front (digit 'up' = +y), lower-left corner at (x0, y0)."""
-    w, h, gap, s = TEMP_DIGIT
+def digit_boxes(
+    digits: str,
+    x0: float,
+    y0: float,
+    z_floor: float,
+    digit: tuple[float, float, float, float] = TEMP_DIGIT,
+    emboss: float = TEMP_EMBOSS,
+) -> list[Box]:
+    """Seven-segment `digits` lying on a floor at z_floor, raised `emboss`, read from the
+    front (digit 'up' = +y), lower-left corner at (x0, y0). `digit` = width, depth, gap,
+    stroke width."""
+    w, h, gap, s = digit
     out: list[Box] = []
     for k, ch in enumerate(digits):
         ox = x0 + k * (w + gap)
@@ -834,30 +964,54 @@ def digit_boxes(digits: str, x0: float, y0: float, z_floor: float) -> list[Box]:
                     z_floor,
                     xb + s / 2,
                     yb + s / 2,
-                    z_floor + TEMP_EMBOSS,
+                    z_floor + emboss,
                 )
             )
     return out
 
 
-def temp_tower_boxes(steps: list[int], cx: float, cy: float) -> list[Box]:
-    bx, by, bz = TEMP_BASE
-    width = 2 * TEMP_PILLAR + TEMP_GAP
-    x0, y0 = cx - width / 2, cy - TEMP_PILLAR / 2
+@dataclass(frozen=True)
+class TowerShape:
+    """Temperature tower dimensions (mm); the default is `gen temp`'s full-size tower."""
+
+    pillar: float = TEMP_PILLAR
+    gap: float = TEMP_GAP
+    block_h: float = TEMP_BLOCK_H
+    slab_h: float = TEMP_SLAB_H
+    base: tuple[float, float, float] = TEMP_BASE
+    digit: tuple[float, float, float, float] = TEMP_DIGIT
+
+    def block_floor(self, i: int) -> float:
+        return self.base[2] + i * self.block_h
+
+
+FULL_TOWER = TowerShape()
+
+
+def temp_tower_boxes(
+    steps: list[int], cx: float, cy: float, shape: TowerShape = FULL_TOWER
+) -> list[Box]:
+    bx, by, bz = shape.base
+    width = 2 * shape.pillar + shape.gap
+    x0, y0 = cx - width / 2, cy - shape.pillar / 2
     boxes: list[Box] = [(cx - bx / 2, cy - by / 2, 0.0, cx + bx / 2, cy + by / 2, bz)]
-    w, h, gap, _ = TEMP_DIGIT
-    label_w = 3 * w + 2 * gap  # three digits: every TEMP_RANGES value is 100..999 °C
-    lx = x0 + TEMP_PILLAR + (TEMP_GAP - label_w) / 2
-    ly = y0 + (TEMP_PILLAR - h) / 2
-    for i, t in enumerate(steps):
-        z0 = bz + i * TEMP_BLOCK_H
-        top = z0 + TEMP_BLOCK_H
-        boxes.extend(
-            (px, y0, z0, px + TEMP_PILLAR, y0 + TEMP_PILLAR, top - TEMP_SLAB_H)
-            for px in (x0, x0 + TEMP_PILLAR + TEMP_GAP)
+    w, h, gap, _ = shape.digit
+    label_w = 3 * w + 2 * gap
+    if label_w > shape.gap or h > shape.pillar:
+        raise GenError(
+            f"temperature labels ({label_w:g} x {h:g} mm) do not fit the {shape.gap:g} mm gap"
         )
-        boxes.append((x0, y0, top - TEMP_SLAB_H, x0 + width, y0 + TEMP_PILLAR, top))
-        boxes += digit_boxes(str(t), lx, ly, z0)
+    lx = x0 + shape.pillar + (shape.gap - label_w) / 2
+    ly = y0 + (shape.pillar - h) / 2
+    for i, t in enumerate(steps):
+        z0 = shape.block_floor(i)
+        top = z0 + shape.block_h
+        boxes.extend(
+            (px, y0, z0, px + shape.pillar, y0 + shape.pillar, top - shape.slab_h)
+            for px in (x0, x0 + shape.pillar + shape.gap)
+        )
+        boxes.append((x0, y0, top - shape.slab_h, x0 + width, y0 + shape.pillar, top))
+        boxes += digit_boxes(str(t), lx, ly, z0, shape.digit)
     return boxes
 
 
@@ -961,6 +1115,15 @@ def gen_shaper(p: Presets, out: Path) -> Generated:
     )
 
 
+def all_kinds() -> tuple[str, ...]:
+    """Single tests (KINDS) and the plates of the series (calibration_plates.PLATES)."""
+    from slicing.calibration_plates import (
+        PLATES,
+    )  # lazy: the plate engine imports this module
+
+    return KINDS + tuple(PLATES)
+
+
 def generate(
     kind: str,
     model: str,
@@ -970,9 +1133,37 @@ def generate(
     material: str = "PLA",
     color: str = "",
     temp: int | None = None,
+    only: frozenset[str] = frozenset(),
+    skip: frozenset[str] = frozenset(),
+    pa_range: tuple[float, float] | None = None,
+    pa_step: float | None = None,
 ) -> Generated:
-    if kind not in KINDS:
-        raise GenError(f"unknown kind {kind!r} (accepted: {', '.join(KINDS)})")
+    """One calibration print. `only`/`skip` pick the tests of a plate (plateN kinds only);
+    `pa_range`/`pa_step` set the PA line values (combo, plates) instead of the material's."""
+    if kind not in all_kinds():
+        raise GenError(f"unknown kind {kind!r} (accepted: {', '.join(all_kinds())})")
+    if kind not in KINDS:  # a plate of the series (lib/slicing/calibration_plates)
+        from slicing.calibration_plate import build_plate, make_context
+        from slicing.calibration_plates import PLATES, resolve_tests
+
+        ctx = make_context(
+            model,
+            slicer,
+            material,
+            color,
+            temp,
+            resolve_tests(kind, only, skip),
+            pa_values(material, pa_range, pa_step),
+        )
+        return build_plate(ctx, PLATES[kind].build(ctx), slicer, out)
+    if (pa_range is not None or pa_step is not None) and kind != "combo":
+        raise GenError(
+            f"--pa-range/--pa-step set the PA lines of combo and the plates, not {kind!r}"
+        )
+    if only or skip:
+        raise GenError(
+            f"--only/--skip pick the tests of a plate; {kind!r} is a single test"
+        )
     p = presets_for(model)
     if kind == "shaper":
         return gen_shaper(p, out)
@@ -980,7 +1171,16 @@ def generate(
     if kind == "pa":
         return gen_pa(slicer, idx, p, material, color, out, temp)
     if kind == "combo":
-        return gen_combo(slicer, idx, p, material, color, out, temp)
+        return gen_combo(
+            slicer,
+            idx,
+            p,
+            material,
+            color,
+            out,
+            temp,
+            pa_values(material, pa_range, pa_step),
+        )
     if kind == "temp":
         return gen_temp(slicer, idx, p, material, color, out, temp)
     return gen_flow(slicer, idx, p, material, color, out, temp)
