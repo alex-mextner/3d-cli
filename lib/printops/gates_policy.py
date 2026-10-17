@@ -48,6 +48,7 @@ CHECKS: tuple[str, ...] = (
     "maintenance_due",
     "enclosure_material",
     "plate_material",
+    "preset_match",
 )
 LEVELS: tuple[str, ...] = ("block", "warn", "off")
 _TOP_KEYS = (

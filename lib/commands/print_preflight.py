@@ -74,6 +74,8 @@ USAGE = """3d print-preflight FILE.gcode [--printer NAME] [--axis-limits X0:X1,Y
   maintenance_due        the head is usable (fleet/printers.yaml), no open faults
   enclosure_material     ABS/ASA/PC/PA... on an open printer (WARN)
   plate_material         `; curr_bed_type` is a plate on hand; no bad material/plate pair (WARN)
+  preset_match           `; printer_settings_id`/`; print_settings_id` = the fleet `slicer:` presets;
+                         default/outer wall acceleration = the resolved process preset (#293)
 
 Options:
   --printer NAME          a printer from printer-devices.yaml (see `3d printer list`); its state

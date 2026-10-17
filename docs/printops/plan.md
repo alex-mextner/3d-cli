@@ -589,6 +589,7 @@ Telegram и камера (#276) работают с той же сессией. 
 | `printer_tasks` (было `maintenance_due`, §7.5, #282) | открытые задачи принтера: fault → repair, просроченное ТО, ручные и после калибровки; `usable: false` в fleet | голова неисправна; задача с `blocks` = printer или с используемой головой/слотом (остальные открытые — WARN) |
 | `enclosure_material` | ABS/ASA/PC ↔ enclosure и chamber принтера | WARN |
 | `plate_material` | тип стола ↔ материал (PETG на гладком PEI без клея и т.п.) | WARN |
+| `preset_match` (#293) | `printer_settings_id`/`print_settings_id` ↔ `slicer:` принтера во fleet; ускорения ↔ процесс-пресет | FAIL (стоковые пресеты Orca, несохранённая правка) |
 | `printer_profile_match` | `printer_model`/`printer_settings_id` в G-code ↔ целевой принтер | FAIL (G-code K1 на U1 и т.п.) |
 
 Плюс существующие: thumbnails, printer_free, overhangs, slice_warnings, head_sequence, visible, macros, moves.

@@ -21,6 +21,13 @@ WHAT: the G-code's per-tool facts (slicer footer + body temperatures) checked ag
                            reports them — #166)
     enclosure_material     materials of policy `enclosure_material` on an open/partial printer
     plate_material         `; curr_bed_type` is a plate on hand; no bad material/plate pair
+    preset_match           `; printer_settings_id` / `; print_settings_id` are the fleet entry's
+                           `slicer: {machine, process}` user presets (#293: a G-code sliced with
+                           Orca's stock presets prints settings nobody calibrated), and the
+                           footer's default/outer wall acceleration equal the resolved process
+                           preset when the presets are on this machine (Orca and user preset
+                           folders, slicing.calibration_gen); the filament preset joins when the
+                           spool binding names one (#294)
   calibration_current (#167) is added when the calibration engine lands.
 
 LEVELS: PASS / WARN / FAIL / UNVERIFIED. A check whose input is missing (no 3d-api, no spool
@@ -33,7 +40,8 @@ STATE SOURCES (printops.gates STATE): `--printops-api URL` / $PRINTOPS_API / pri
   neither → fleet facts only (spool checks UNVERIFIED). A given in-process state (3d-api) skips
   loading.
 
-INVARIANTS: read-only — never writes to a printer, Spoolman or 3d-api; stdlib + pyyaml.
+INVARIANTS: read-only — never writes to a printer, Spoolman or 3d-api; stdlib + pyyaml (preset_match
+  reads slicer preset JSON through slicing.calibration_gen, imported lazily).
 """
 
 from __future__ import annotations
@@ -105,6 +113,9 @@ class JobFacts:
         int, float
     ]  # highest M104/M109 S per tool (explicit T or after `Tn`)
     body_bed_max: float | None  # highest M140/M190 S
+    calibration_print: bool = (
+        False  # `3d calibrate gen` wrote it (its presets_stamp line)
+    )
 
     def str_list(self, key: str) -> list[str | None]:
         raw = self.config.get(key)
@@ -163,6 +174,7 @@ def read_job(path: Path) -> JobFacts:
     current: int | None = None
     nozzle: dict[int, float] = {}
     bed: float | None = None
+    calibration = False
     with open(path, encoding="utf-8", errors="replace") as fh:
         for raw in fh:
             c = raw[:1]
@@ -170,6 +182,8 @@ def read_job(path: Path) -> JobFacts:
                 m = _KEY_LINE.match(raw.rstrip("\n"))
                 if m:
                     config.setdefault(m.group(1).strip(), m.group(2).strip())
+                elif raw.startswith(CALIBRATION_STAMP):
+                    calibration = True
             elif c == "T":
                 t = _TOOL_LINE.match(raw.strip())
                 if t:
@@ -191,7 +205,7 @@ def read_job(path: Path) -> JobFacts:
                     tool is not None
                 ):  # an untargeted heat-up before the first `Tn` is start-macro territory
                     nozzle[tool] = max(nozzle.get(tool, 0.0), s)
-    job = JobFacts(str(path), config, [], nozzle, bed)
+    job = JobFacts(str(path), config, [], nozzle, bed, calibration)
     amounts = job.num_list("filament used [mm]") or job.num_list("filament used [g]")
     # an all-zero/unreadable usage footer names no tool: fall back to the tool changes seen
     job.used_tools = (
@@ -490,6 +504,8 @@ class _Ctx:
     state: Mapping[str, Any]
     policy: Any  # printops.gates_policy.GatesPolicy (imported lazily)
     origin: str
+    slicer: Mapping[str, str] = field(default_factory=dict)  # fleet `slicer:` presets
+    model: str = ""  # the fleet printer's model (resolves its vendor's Orca presets)
 
     @property
     def known(self) -> bool:
@@ -1092,6 +1108,130 @@ def check_plate(c: _Ctx) -> list[Finding]:
     ]
 
 
+# Process values the footer must carry from the fleet's process preset: Orca writes the
+# preset's value unless it was edited in the slicer without saving (the G-code then prints
+# settings the preset — and every calibration made with it — does not have).
+PRESET_VALUES = ("default_acceleration", "outer_wall_acceleration")
+# `3d calibrate gen` (slicing.calibration_gen.presets_stamp) marks its G-code with this line: a
+# calibration print sets its own accelerations on purpose, so only the preset names are compared.
+CALIBRATION_STAMP = "; 3d calibrate presets: "
+
+
+def _process_preset(model: str, name: str) -> tuple[dict[str, Any] | None, str]:
+    """The resolved process preset `name` (system + user presets), or None and why not."""
+    from cli.env import find_slicer
+    from errors import ThreeDError
+    from slicing.calibration_gen import (
+        GenError,
+        ProfileIndex,
+        presets_for,
+        profile_roots,
+        user_preset_roots,
+    )
+
+    slicer = find_slicer()
+    try:
+        vendor = presets_for(model).vendor
+        index = ProfileIndex(
+            profile_roots(slicer[1] if slicer else None), user_preset_roots()
+        )
+        return index.flat(vendor, "process", name), ""
+    except (
+        GenError,
+        ThreeDError,
+    ) as e:  # ThreeDError: a broken slicer preset_folder config
+        return None, str(e)
+
+
+def _preset_num(preset: dict[str, Any], key: str) -> float | None:
+    """A preset option as a finite number; None when absent or not a number."""
+    from slicing.calibration_gen import GenError, _first
+
+    try:
+        return _first(preset, key)
+    except GenError:
+        return None
+
+
+def check_preset_match(c: _Ctx) -> list[Finding]:
+    name = "preset_match"
+    if not c.slicer:
+        return [
+            _f(
+                name,
+                "unknown",
+                f"no `slicer: {{machine, process}}` for {c.state.get('printer')} in "
+                "fleet/printers.yaml: nothing to compare the G-code's presets with",
+            )
+        ]
+    out: list[Finding] = []
+    process_name_matched = False
+    for key, footer in (
+        ("machine", "printer_settings_id"),
+        ("process", "print_settings_id"),
+    ):
+        want = c.slicer.get(key)
+        if not want:
+            out.append(_f(name, "unknown", f"fleet `slicer:` has no {key} preset"))
+            continue
+        got = (c.job.config.get(footer) or "").strip().strip('"')
+        if not got:
+            out.append(_f(name, "unknown", f"the G-code has no `; {footer}`"))
+        elif got == want:
+            out.append(_f(name, "ok", f"{key} preset {got!r}"))
+            if key == "process":
+                process_name_matched = True
+        else:
+            out.append(
+                _f(
+                    name,
+                    "hard",
+                    f"sliced with {key} preset {got!r}, the printer prints with {want!r}",
+                    kind=key,
+                )
+            )
+    process = c.slicer.get("process")
+    if not (process and process_name_matched):
+        return out
+    # The names are the primary input; a value comparison that cannot run is a note under them
+    # (docs/commands/print-preflight.md), not an UNVERIFIED gate.
+    if c.job.calibration_print:
+        out.append(
+            _f(
+                name,
+                "ok",
+                "calibration print: it sets its own accelerations, values not compared",
+            )
+        )
+        return out
+    preset, why = _process_preset(c.model, process)
+    if preset is None:
+        out.append(_f(name, "ok", f"process values not compared: {why}"))
+        return out
+    for key in PRESET_VALUES:
+        want_n = _preset_num(preset, key)
+        if want_n is None:
+            continue
+        got_v = c.job.num(key, tool=0)
+        if got_v is None:
+            out.append(
+                _f(name, "unknown", f"the G-code has no `; {key}` (preset {want_n:g})")
+            )
+        elif math.isclose(got_v, want_n, rel_tol=1e-6):
+            out.append(_f(name, "ok", f"{key} {got_v:g} = preset"))
+        else:
+            out.append(
+                _f(
+                    name,
+                    "hard",
+                    f"{key} {got_v:g}, the process preset {process!r} has {want_n:g} "
+                    "(edited in the slicer and not saved?)",
+                    kind=key,
+                )
+            )
+    return out
+
+
 CHECKS = {
     "printer_profile_match": check_printer_profile,
     "nozzle_compat": check_nozzle,
@@ -1103,6 +1243,7 @@ CHECKS = {
     "maintenance_due": check_maintenance,
     "enclosure_material": check_enclosure,
     "plate_material": check_plate,
+    "preset_match": check_preset_match,
 }
 
 
@@ -1172,7 +1313,14 @@ def run_checks(
     src.check.detail = f"{fp.name} ({why}); {src.check.detail}"
     result.checks.append(src.check)
     result.source = src.check.detail
-    c = _Ctx(job, src.state, policy, str((origin or gcode).resolve()))
+    c = _Ctx(
+        job,
+        src.state,
+        policy,
+        str((origin or gcode).resolve()),
+        slicer=dict(fp.slicer),
+        model=fp.model,
+    )
     for name, fn in CHECKS.items():
         level = policy.level(name, fp.name)
         if level == "off":
