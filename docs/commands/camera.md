@@ -35,6 +35,7 @@ work on older kernels that name the controls `exposure_absolute`, `focus_auto`, 
 3d camera ls [--json] [--api URL] [--token T]
 3d camera show NAME [--json] [--api URL] [--token T]
 3d camera rm NAME [--api URL] [--token T]
+3d camera image build --wifi-ssid S (--wifi-psk P | --wifi-psk-file F) --api-url URL (--token T | --token-file F) [options]
 ```
 
 | Subcommand | What |
@@ -43,6 +44,7 @@ work on older kernels that name the controls `exposure_absolute`, `focus_auto`, 
 | `still` | Lock, stream, drop `--skip` frames, keep `--frames` frames, average them, and write `FILE.png` plus `FILE.json` (`topcam-still/1`: size, frames, temporal noise, requested lock, control read-back, source). |
 | `serve` | Run the camera-node HTTP service on this machine: the same code the Pi runs. Use it to test the node API against the C920 on the PC. |
 | `ls` / `show` / `rm` | The camera nodes registered with 3d-api: list (online + age), one record, forget one. See [the registry](#camera-node-registry-ls-show-rm). |
+| `image build` | Write a ready-to-flash Raspberry Pi OS Lite armhf SD image for the Pi Zero W node; see [below](#3d-camera-image-build--a-ready-to-flash-sd-image-for-the-camera-node). |
 
 | Option | What |
 |---|---|
@@ -190,10 +192,120 @@ token are therefore lower-case (token names are `[a-z0-9][a-z0-9_.-]*`). Mint it
 3d printops token create topcam --scopes camera --ssh ultra@192.168.0.39
 ```
 
-and put it in the node's `api.token_file` (mode 0600; the SD image build of
-[#343](https://github.com/alex-mextner/3d-cli/issues/343) writes it there for you).
+and pass it to the image build, which writes it to the node's `api.token_file`; `--token-file`
+keeps it out of shell history and `ps`:
+
+```
+3d camera image build --token-file ~/.config/3d-cli/topcam.token
+3d camera image build --token po_…
+```
 
 Rotate: `3d printops token revoke topcam --ssh ultra@192.168.0.39`, create again, rebuild or
 replace the token file on the node.
 
 API details (body schema, validation): services/3d-api/README.md, "API (camera nodes)".
+## `3d camera image build` — a ready-to-flash SD image for the camera node
+
+```
+3d camera image build --wifi-ssid S (--wifi-psk P | --wifi-psk-file F) --api-url URL
+                (--token T | --token-file F) [--hostname topcam] [--wifi-country RS]
+                [--user topcam] [--ssh-key FILE.pub | --password-hash HASH | --no-ssh]
+                [--led-gpio N] [--still-lock focus=F,exposure=E,gain=G,wb=K]
+                [--base-image URL|FILE] [--out DIR] [--json]
+```
+
+Builds a Raspberry Pi OS Lite **armhf** image (the Pi Zero W is ARMv6, so the 64-bit image
+does not boot) that comes up as the topcam camera node with no keyboard, screen or shell
+session: it joins Wi-Fi, answers as `HOSTNAME.local`, accepts your SSH key, installs
+`ustreamer`, runs `topcam.service` (`python3 -m topcam.node`) and registers with 3d-api every
+minute. Output, all in `--out DIR` (0700):
+
+- `HOSTNAME-<base>.img.xz` (0600) — the image; it holds the Wi-Fi password and the token.
+- `HOSTNAME-<base>.img.xz.sha256` — `sha256sum -c` format.
+- `FLASH.md` — how to write the card (Raspberry Pi Imager *Use custom*, or
+  `xzcat … | sudo dd of=/dev/sdX bs=4M conv=fsync status=progress` after an `lsblk` check),
+  what the first boot does (about 10-20 minutes on a Pi Zero W) and how to check the node
+  (`curl http://HOSTNAME.local:8080/health`, `3d camera controls --camera HOSTNAME`).
+
+The one command for a real card, with the secrets in files (not in shell history or `ps`):
+
+```bash
+mkdir -p -m 700 ~/.config/topcam   # private dir: the files below are readable only by you
+read -rsp 'Wi-Fi password: ' S && printf '%s' "$S" > ~/.config/topcam/psk; echo
+# the node's 3d-api token (`camera` scope, minted with `3d printops token create`):
+read -rsp 'node token: ' S && printf '%s' "$S" > ~/.config/topcam/token; unset S; echo
+3d camera image build --wifi-ssid home --wifi-psk-file ~/.config/topcam/psk \
+  --api-url http://192.168.0.39:8765 --token-file ~/.config/topcam/token
+```
+
+### Options
+
+| Option | Meaning | Example |
+|---|---|---|
+| `--wifi-ssid S` | Wi-Fi network name (required) | `--wifi-ssid home` |
+| `--wifi-psk P` | Wi-Fi password, 8-63 characters or 64 hex digits | `--wifi-psk 'correct horse'` |
+| `--wifi-psk-file F` | read the Wi-Fi password from a file (trailing newline dropped) | `--wifi-psk-file ~/.config/topcam/psk` |
+| `--wifi-country CC` | Wi-Fi regulatory country, default `RS`; without one the Pi's Wi-Fi stays rfkill-blocked | `--wifi-country DE` |
+| `--api-url URL` | 3d-api base URL the node registers with (required) | `--api-url http://192.168.0.39:8765` |
+| `--token T` | 3d-api token for the node, written to `/etc/topcam/token` (0600, service user); a `camera`-scope token may register only the node of its own name, so mint it with the same name as `--hostname` (`3d printops token create topcam --scopes camera`) | `--token po_abc` |
+| `--token-file F` | read the token from a file | `--token-file ~/.config/topcam/token` |
+| `--hostname H` | host name and node name (`H.local`, `--camera H`), default `topcam` | `--hostname topcam2` |
+| `--user U` | login user, default `topcam`; password locked, passwordless sudo | `--user alex` |
+| `--ssh-key FILE.pub` | authorized key; default `~/.ssh/id_ed25519.pub`, else `~/.ssh/id_rsa.pub`; with neither the build refuses unless `--password-hash` or `--no-ssh` | `--ssh-key ~/.ssh/id_rsa.pub` |
+| `--password-hash HASH` | crypt hash for the login user; with no SSH key it also enables SSH password login | `--password-hash "$(openssl passwd -6)"` |
+| `--no-ssh` | no SSH server at all | `--no-ssh` |
+| `--led-gpio N` | LED ring on BCM GPIO N (node `led.gpio`) | `--led-gpio 17` |
+| `--still-lock K=V,…` | the node's default still lock (`still.lock`): `focus` (`N`, `auto` or `sweep[:LO-HI[:STEP]]`), `exposure`, `gain`, `wb`; checked by the node's config parser | `--still-lock focus=30,exposure=300,gain=0,wb=4500` or `--still-lock focus=sweep:0-250:25,exposure=300` |
+| `--base-image URL\|FILE` | base image: a local `.img`/`.img.xz`, or a URL with a published `URL.sha256`; default the latest Raspberry Pi OS Lite armhf (`downloads.raspberrypi.com/raspios_lite_armhf_latest`) | `--base-image ~/Downloads/2026-10-06-raspios-trixie-armhf-lite.img.xz` |
+| `--out DIR` | output directory, default `~/.cache/3d-cli/topcam-image`; refused inside the repo | `--out ~/topcam-img` |
+| `--json` | print a JSON summary (secrets shown as `<redacted>`) | `--json \| jq -r .image` |
+
+### Examples
+
+```bash
+3d camera image build --wifi-ssid home --wifi-psk-file ~/.config/topcam/psk --api-url http://192.168.0.39:8765 --token-file ~/.config/topcam/token
+3d camera image build --wifi-ssid home --wifi-psk 'correct horse' --wifi-country DE --api-url http://192.168.0.39:8765 --token po_abc --hostname topcam2 --user alex --ssh-key ~/.ssh/id_rsa.pub
+3d camera image build --wifi-ssid home --wifi-psk-file psk.txt --api-url http://api.lan:8765 --token-file tok.txt --no-ssh --led-gpio 17 --still-lock focus=30,exposure=300,gain=0,wb=4500
+3d camera image build --wifi-ssid home --wifi-psk-file psk.txt --api-url http://api.lan:8765 --token-file tok.txt --password-hash "$(openssl passwd -6)" --base-image ~/Downloads/2026-10-06-raspios-trixie-armhf-lite.img.xz --out ~/topcam-img --json
+3d camera image build --wifi-ssid home --wifi-psk-file psk.txt --api-url http://api.lan:8765 --token-file tok.txt --json | jq -r .image
+```
+
+### How it works
+
+- **Base image.** The `*_latest` redirect is resolved to the versioned file, which is
+  downloaded once to `~/.cache/3d-cli/topcam-image/base/` and checked against the published
+  `URL.sha256`; later builds re-check and reuse it (offline, the newest cached base is used).
+- **No root.** The MBR is parsed in Python, only the image head (MBR + FAT boot partition,
+  ~520 MB) is extracted, and the boot files are written with mtools
+  (`mcopy -i head.img@@OFFSET`). Install mtools without sudo with `brew install mtools`
+  (or `apt-get install mtools`); when it is missing the command exits 127 with the install
+  command. The output is streamed as head + the untouched rest of the base image into `xz`,
+  so the 2.7 GB raw image is never written to disk.
+- **Memory.** Decompression is single-threaded (`xz -d -T1`, a few MB); compression uses
+  `xz -6 -T<max_workers>` with `--memlimit-compress=1500MiB` (`THREED_MAX_WORKERS` caps the
+  threads). A build fits a 2 GB cgroup:
+  `flock /tmp/3d-cli-heavy.lock systemd-run --user --scope -q -p MemoryMax=2G -p MemorySwapMax=0 nice -n 10 3d camera image build …`.
+- **First boot = cloud-init** (Raspberry Pi OS Trixie; older Bookworm images without a
+  cloud-init seed are refused). Boot partition files written:
+  - `user-data`: host name, the login user with the SSH key (replaces the default `pi`),
+    `enable_ssh`, the regulatory country via `raspi-config nonint do_wifi_country` before the
+    network is needed, `packages: [ustreamer, avahi-daemon, python3, raspi-utils, v4l-utils]`
+    (only `ustreamer` is not preinstalled), and `write_files` for
+    `/opt/topcam/topcam/` (every file in `topcam.node.NODE_FILES`: `__init__.py`, `v4l2.py`,
+    `focus.py`, `node.py`, byte-identical to `lib/topcam/`),
+    `/etc/topcam/config.json`, `/etc/topcam/token` (0600), `topcam.service`, the avahi service
+    `/etc/avahi/services/topcam.service` (`_http._tcp` port 8080, TXT `path=/health`) and the
+    first-boot script `/usr/local/sbin/topcam-firstboot`.
+  - `network-config`: netplan Wi-Fi for `wlan0` (NetworkManager) with SSID, password and
+    `regulatory-domain`.
+  - `meta-data`: a fresh `instance_id`; `cmdline.txt`: `cfg80211.ieee80211_regdom=CC`.
+- **Service user.** `topcam.service` runs as the system user `topcamd` in groups `video`
+  (`/dev/video*`) and `gpio` (`pinctrl` drives `/dev/gpiomem`, 0660 root:gpio on Raspberry Pi
+  OS), with `Restart=always`; nothing in the node needs root.
+- **Secrets.** Never printed or logged; `--json` shows `<redacted>`. They exist only in the
+  output image and in 0600 files inside a 0700 work dir that is deleted. On the Pi, the
+  first-boot script (run once by cloud-init after the package install; it retries the
+  `ustreamer` install while Wi-Fi comes up) creates `topcamd`, starts the node, then
+  replaces `user-data` and `network-config` on the FAT partition with secret-free stubs and
+  disables cloud-init (`/etc/cloud/cloud-init.disabled`); the password lives on only in
+  `/etc/netplan` and the token in `/etc/topcam/token`.
