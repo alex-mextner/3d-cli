@@ -34,7 +34,7 @@ USAGE = """3d calibrate plan --printer P [--head T] [--spool ID] [--plate PLATE]
 3d calibrate show ID
 3d calibrate check FILE.gcode --printer P [--spools T1=ID,…] [--plate PLATE]
                    [--accept calibration:KIND[,…] --reason TEXT]
-3d calibrate gen pa|flow|combo|temp|shaper|plate1|dense --printer P -o OUT [--material PLA] [--color #RRGGBB]
+3d calibrate gen pa|flow|combo|temp|shaper|plate1|dense|dense2 --printer P -o OUT [--material PLA] [--color #RRGGBB]
                  [--nozzle-temp C] [--only T,…] [--skip T,…] [--pa-range LOW:HIGH] [--pa-step S]
                  [--machine-preset NAME] [--process-preset NAME] --filament-preset NAME
   common (all but gen): [--json] [--api URL] [--token TOKEN]
@@ -63,7 +63,10 @@ Subcommands:
           (printers with an accelerometer); plate1 = the filament plate: every test of a new spool on
           one bed, each object with its own setting (docs/printops/express-calibration.md); dense =
           plate1's tests without PA/flow plus ringing (ACCEL by Z), VFA (speed by Z), size/skew,
-          fits, hinges, screw holes, thin walls, first-layer patches (K1 SE bed); plates add a
+          fits, hinges, screw holes, thin walls, first-layer patches (K1 SE bed); dense2 = what
+          dense left open: hole variants (plain/polyhole/arc fitting/hole compensation), ovality,
+          new fit/screw/slot/hinge/thin-wall values, elephant foot, bridge and overhang with a 3 mm
+          brim, MVS 24–32, a 7x7 grid with fiducials (K1 SE bed); plates add a
           JSON map object → parameters, bbox, how to read it. The G-code gets thumbnails and a slice-warnings record,
           ready for `3d print-preflight` (temp: filament_temp_range FAILs when the tower's hottest
           block is above the spool's nozzle window; start it with --force). Local only; set SLICER=/path/to/orca.
@@ -91,8 +94,8 @@ Options:
   --nozzle-temp C    gen: nozzle temperature instead of the preset's (not for temp: it prints its range)
   -o, --out FILE     gen: output .gcode (shaper: a .txt of console commands; plates also write OUT.json)
   --only T,…         gen plateN: print only these tests (plate1: pa, mvs, flow, bridge, overhang,
-                     retraction, temp; dense: see docs/commands/calibrate.md); plate1 packs again,
-                     dense keeps its fixed layout
+                     retraction, temp; dense, dense2: see docs/commands/calibrate.md); plate1
+                     packs again, dense and dense2 keep their fixed layout
   --skip T,…         gen plateN: print all tests but these
   --pa-range LOW:HIGH gen combo/plateN: PA line range (default by material: PLA 0:0.10, PETG 0:0.15)
   --pa-step S        gen combo/plateN: PA line step (default 0.01; a fine pass: --pa-range 0.03:0.05
@@ -121,7 +124,8 @@ Examples:
   3d calibrate gen temp --printer k1se --filament-preset 'Orange PLA @K1SE' -o k1se_temp_orange.gcode
   3d calibrate gen plate1 --printer k1se --filament-preset 'Orange PLA @K1SE' --skip pa,flow -o k1se_plate1_orange.gcode
   3d calibrate gen plate1 --printer k1se --filament-preset 'Orange PLA @K1SE' --only pa,flow --pa-range 0.03:0.05 --pa-step 0.0025 -o k1se_pa_fine.gcode
-  3d calibrate gen dense --printer k1se --filament-preset 'Orange PLA @K1SE' -o k1se_dense_orange.gcode"""
+  3d calibrate gen dense --printer k1se --filament-preset 'Orange PLA @K1SE' -o k1se_dense_orange.gcode
+  3d calibrate gen dense2 --printer k1se --filament-preset 'Orange PLA @K1SE' -o k1se_dense2_orange.gcode"""
 
 USAGE += (
     "\n\nTop-camera photo (#342):\n"
@@ -453,9 +457,13 @@ def _float(raw: str, opt: str) -> float:
     try:
         value = float(raw)
     except ValueError as e:
-        raise UsageError(f"{opt} wants a number, got {raw!r}", command=f"{PREFIX} gen") from e
+        raise UsageError(
+            f"{opt} wants a number, got {raw!r}", command=f"{PREFIX} gen"
+        ) from e
     if value != value or value in (float("inf"), float("-inf")):
-        raise UsageError(f"{opt} wants a finite number, got {raw!r}", command=f"{PREFIX} gen")
+        raise UsageError(
+            f"{opt} wants a finite number, got {raw!r}", command=f"{PREFIX} gen"
+        )
     return value
 
 
@@ -490,7 +498,9 @@ def _preset_choice(opts: dict[str, str], entry: FleetPrinter) -> PresetChoice:
             f"no {', '.join(missing)} preset for {entry.name}: {NO_PRESETS_HINT}",
             command=f"{PREFIX} gen",
         )
-    return PresetChoice(names["machine"], names["process"], names["filament"], tuple(sources))
+    return PresetChoice(
+        names["machine"], names["process"], names["filament"], tuple(sources)
+    )
 
 
 def _ids(raw: str) -> frozenset[str]:
