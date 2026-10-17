@@ -1157,7 +1157,7 @@ def generate(
         tests = resolve_tests(kind, only, skip)
         # PA values only when the plate prints PA lines: a material without a default PA range
         # can still print the other tests.
-        wants_pa = tests is None or "pa" in tests
+        wants_pa = "pa" in PLATES[kind].tests and (tests is None or "pa" in tests)
         if not wants_pa and (pa_range is not None or pa_step is not None):
             raise GenError(
                 "--pa-range/--pa-step set the PA lines; this plate skips them"

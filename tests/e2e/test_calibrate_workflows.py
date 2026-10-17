@@ -282,20 +282,16 @@ def test_calibrate_usage_errors(tmp_path: Path) -> None:
     assert "nope.gcode" in missing.stderr
 
 
+K1_FLEET = "k1:\n  model: Creality K1 SE\n  owner: own\n  access: offline\n  heads: [{label: T1, index: 0}]\n"
+
+
 def test_gen_combo_and_temp_through_bin_3d(tmp_path: Path) -> None:
     """The user generates the express-calibration combo plate and a temperature tower for the K1
     SE: bin/3d slices with a (fake) Orca, post-processes, and prints the record hints."""
     profiles, orca = fake_orca(tmp_path)
     fleet = tmp_path / "fleet.yaml"
-    fleet.write_text(
-        "k1:\n  model: Creality K1 SE\n  owner: own\n  access: offline\n  heads: [{label: T1, index: 0}]\n",
-        encoding="utf-8",
-    )
-    env = {
-        "THREED_FLEET": str(fleet),
-        "ORCA_PROFILES": str(profiles),
-        "SLICER": str(orca),
-    }
+    fleet.write_text(K1_FLEET, encoding="utf-8")
+    env = {"THREED_FLEET": str(fleet), "ORCA_PROFILES": str(profiles), "SLICER": str(orca)}
 
     combo = tmp_path / "combo.gcode"
     made = run_cli(
@@ -359,20 +355,11 @@ def test_gen_plate1_with_only_skip_and_a_fine_pa_range(tmp_path: Path) -> None:
     """The user prints plate 1 for a new spool through bin/3d: a fine PA pass with flow only, then
     the plate without PA and flow; the G-code and its map sit side by side, a `.json` output name
     and a PA range on a plate without PA lines are refused."""
-    from test_calibration_plate import FAKE, PRESETS
+    from test_calibration_plate import write_fake_orca
 
-    profiles = tmp_path / "profiles"
-    for (kind, name), data in PRESETS.items():
-        (profiles / "Creality" / kind).mkdir(parents=True, exist_ok=True)
-        (profiles / "Creality" / kind / f"{name}.json").write_text(json.dumps({"name": name, **data}))
-    orca = tmp_path / "orca"
-    orca.write_text(FAKE)
-    orca.chmod(0o755)
+    profiles, orca = write_fake_orca(tmp_path)
     fleet = tmp_path / "fleet.yaml"
-    fleet.write_text(
-        "k1:\n  model: Creality K1 SE\n  owner: own\n  access: offline\n  heads: [{label: T1, index: 0}]\n",
-        encoding="utf-8",
-    )
+    fleet.write_text(K1_FLEET, encoding="utf-8")
     env = {"THREED_FLEET": str(fleet), "ORCA_PROFILES": str(profiles), "SLICER": str(orca)}
 
     fine = tmp_path / "pa_fine.gcode"

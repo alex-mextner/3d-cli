@@ -174,7 +174,9 @@ so `3d print-preflight FILE --printer P` can PASS it.
   leaves no hole. Next to the G-code: `NAME.json`, the map object → parameters, bbox, Z bands,
   labelled items, how to read it, the `record` command. K1 SE, PLA: ~25 min (all tests).
   `--pa-range LOW:HIGH --pa-step S` set the PA lines (combo and plates; refused when `pa` is
-  skipped); `-o` must not end in `.json` (that name is the map's).
+  skipped); `-o` must not end in `.json` (that name is the map's). A plate keeps at least one
+  test Orca slices by layer (`flow`, `bridge`, `overhang`, `retraction`): for PA lines alone use
+  `gen combo --pa-range`.
 
   ```bash
   3d calibrate gen plate1 --printer k1se --color '#E8732A' --skip pa,flow -o k1se_plate1_orange.gcode

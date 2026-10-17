@@ -133,7 +133,7 @@ class Section:
 
 
 def pack(
-    sections: list[Section], bed: tuple[float, float], radius: float
+    sections: list[Section], bed: tuple[float, float], radius: float, plate: str
 ) -> list[tuple[Section, float, float]]:
     """Bottom-left skyline packing: each section at the lowest, then leftmost free spot. Front
     (layer) sections first; sequential ones behind the front's deepest point + `radius` and
@@ -173,7 +173,7 @@ def pack(
                     among.append((s, x, y))
                     return
         raise GenError(
-            f"no room left on the bed for {s.test} ({s.width:g} x {s.depth:g} mm)"
+            f"{plate}: no room left on the bed for {s.test} ({s.width:g} x {s.depth:g} mm)"
         )
 
     front: list[tuple[Section, float, float]] = []
@@ -619,7 +619,7 @@ def build(ctx: PlateContext) -> Plate:
     sections = [makers[t](ctx) for t in TESTS if ctx.wants(t)]
     objects: list[PlateObject] = []
     custom: list[CustomBlock] = []
-    for s, x, y in pack(sections, ctx.p.bed, ctx.clearance()[1]):
+    for s, x, y in pack(sections, ctx.p.bed, ctx.clearance()[1], PLATE_ID):
         objs, blocks = s.build(x, y)
         objects += objs
         custom += blocks
