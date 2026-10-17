@@ -57,6 +57,15 @@ is FAIL under the policy level `block`, WARN under `warn`; `off` hides the check
 | `maintenance_due` | block | the head is `usable: false` in the fleet; an open fault on it (from #166) | maintenance due (from #166) |
 | `enclosure_material` | warn | a `gates.enclosure_material` material (ABS, ASA, PC, PA…) on a printer with `enclosure: none` | the same on `enclosure: partial` |
 | `plate_material` | warn | `; curr_bed_type` is not among the printer's `plates`; a `gates.plate_material` pairing (PETG/TPU on smooth PEI, ABS/PC/PA on the Cool Plate) | |
+| `preset_match` | block | `; printer_settings_id` / `; print_settings_id` are not the fleet entry's `slicer: {machine, process}` presets (a plate sliced with Orca's stock presets, [#293](https://github.com/alex-mextner/3d-cli/issues/293)); `; default_acceleration` / `; outer_wall_acceleration` differ from the resolved process preset (an unsaved edit in the slicer) | |
+
+`preset_match` is UNVERIFIED when the fleet entry has no `slicer:` presets. It compares the
+process values only when the presets are on this machine (Orca's system profiles, the repo's
+`profiles/` and the slicers' user preset folders; `ORCA_PROFILES` / `ORCA_USER_PRESETS` point
+elsewhere); otherwise it says so under a PASS on the names. The filament preset joins when the
+spool binding names one ([#294](https://github.com/alex-mextner/3d-cli/issues/294)). To print a
+plate with other presets on purpose: `3d printer start … --force`, or `preset_match: warn` for
+the printer under `gates.printers` in fleet/policy.yaml.
 
 Nozzle hardness and filament abrasiveness are separate checks, applied only to tools used by
 the job. A positive `required_nozzle_HRC` is a minimum; `0` skips that numeric requirement.
