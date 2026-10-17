@@ -174,6 +174,7 @@ def test_full_lifecycle_receive_store_load_use_unload_weigh_empty(
         "spool.received",
         "spool.moved",
         "slot.loaded",
+        "slot.printer_write_failed",  # the fleet's u1 is 127.0.0.1:9, nothing listens (#400)
         "spool.used",
         "spool.measured",  # unload --gross weighs first, then unloads
         "slot.unloaded",

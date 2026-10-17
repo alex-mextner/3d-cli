@@ -92,11 +92,13 @@ Target package: `lib/geometry/`, with subpackages only when a real boundary appe
   `ledger.py` (append-only usage ledger → remaining as an interval), `tares.py` (sourced
   empty-spool weight DB + per-spool tare chain), `importers.py` (`gen/plates.json` → import
   items); `datalint.py` runs every `lint_<slice>.py` data rule (`lint_spools.py`) for
-  `GET /v1/lint` / `3d lint --printops`.
+  `GET /v1/lint` / `3d lint --printops`. `head_sync.py` (#400): after `load`, writes the
+  printer head to show the spool (`Adapter.set_head_filament`, U1 `SET_PRINT_FILAMENT_CONFIG`)
+  and puts back the current pressure-advance calibration the firmware's K reset drops.
   Slot reconciliation (#161): `slots.py` (read-only per-adapter slot readers: U1
   `print_task_config` + `filament_detect`, K1 SE ws runout switch), `color.py` (hex → CIELAB,
-  CIEDE2000), `reconcile.py` (Spoolman `printops_slot` bindings vs live slots → `anomaly` rows +
-  `slot.mismatch` / `anomaly.*` events), `api/routes_reconcile.py` (`/v1/printers`,
+  CIEDE2000), `reconcile.py` (Spoolman `printops_slot` bindings vs live slots, plus failed head
+  writes from the event log → `anomaly` rows + `slot.mismatch` / `anomaly.*` events), `api/routes_reconcile.py` (`/v1/printers`,
   `/v1/anomalies`, background poller via router lifespan).
   Incidents (#165): `incidents.py` (structured incidents, lifecycle, rates per kg / print-hour),
   `incident_context.py` (auto-context: printer status, G-code state at the cursor via

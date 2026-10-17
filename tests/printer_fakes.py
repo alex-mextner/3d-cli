@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import copy
 import json
+import shlex
 import socket
 import threading
 import time
@@ -21,6 +22,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 from printer_ops.ws import OP_CLOSE, OP_TEXT, accept_key, encode_frame, parse_frame
 
+FACTORY_K = 0.02  # what the fake firmware's FLOW_RESET_K sets (U1 filament_parameters default)
 U1_TASK_CONFIG: dict[str, Any] = {
     "filament_exist": [True, False, True, True],
     "filament_color_rgba": ["000000FF", "808080FF", "1B5E20FF", "FFFFFFFF"],
@@ -37,10 +39,10 @@ def u1_status(state: str = "standby", filename: str = "", progress: float = 0.0)
         "print_stats": {"state": state, "filename": filename, "message": ""},
         "virtual_sdcard": {"progress": progress, "is_active": state == "printing"},
         "display_status": {"progress": progress},
-        "extruder": {"temperature": 25.3, "target": 0.0},
-        "extruder1": {"temperature": 24.9, "target": 0.0},
-        "extruder2": {"temperature": 25.0, "target": 0.0},
-        "extruder3": {"temperature": 25.1, "target": 0.0},
+        "extruder": {"temperature": 25.3, "target": 0.0, "pressure_advance": FACTORY_K},
+        "extruder1": {"temperature": 24.9, "target": 0.0, "pressure_advance": FACTORY_K},
+        "extruder2": {"temperature": 25.0, "target": 0.0, "pressure_advance": FACTORY_K},
+        "extruder3": {"temperature": 25.1, "target": 0.0, "pressure_advance": FACTORY_K},
         "heater_bed": {"temperature": 30.0, "target": 0.0},
         "print_task_config": copy.deepcopy(U1_TASK_CONFIG),
     }
@@ -87,10 +89,40 @@ class FakeMoonraker:
     history: list[dict[str, Any]] = field(default_factory=list)  # Moonraker job history, newest first
     camera: bytes | None = None                   # JPEG served at the U1 camera monitor.jpg path
     camera_hits: int = 0                          # each hit gets new bytes (a COM counter), like a live camera
+    script_errors: dict[str, str] = field(default_factory=dict)  # G-code command -> Klipper error (HTTP 400)
+    ignored_commands: set[str] = field(default_factory=set)      # acknowledged but without effect
     port: int = 0
 
     def writes(self) -> list[Recorded]:
         return [r for r in self.requests if r.method == "POST"]
+
+    def run_script(self, script: str) -> str | None:
+        """What the U1 firmware does with the head-filament and pressure-advance commands
+        (u1-klipper print_task_config.py:585-711, flow_calibrator.py FLOW_RESET_K); the Klipper
+        error for a refused line, None when it ran."""
+        first = script.split(None, 1)
+        cmd = first[0].upper() if first else ""
+        if cmd in self.script_errors:
+            return self.script_errors[cmd]
+        if cmd in self.ignored_commands or cmd not in ("SET_PRINT_FILAMENT_CONFIG", "SET_PRESSURE_ADVANCE"):
+            return None
+        params = {k.upper(): v for k, _, v in (w.partition("=") for w in shlex.split(script)[1:])}
+        if cmd == "SET_PRINT_FILAMENT_CONFIG":
+            i = int(params["CONFIG_EXTRUDER"])
+            cfg = self.status["print_task_config"]
+            if cfg.get("filament_official", [False] * 4)[i] and params.get("FORCE") != "1":
+                return "[print_task_config] filament_config, official filament, not configurable!"
+            if "FILAMENT_TYPE" in params:
+                cfg["filament_vendor"][i] = params["VENDOR"]
+                cfg["filament_type"][i] = params["FILAMENT_TYPE"]
+                cfg["filament_sub_type"][i] = params["FILAMENT_SUBTYPE"]
+            if "FILAMENT_COLOR_RGBA" in params:
+                cfg["filament_color_rgba"][i] = params["FILAMENT_COLOR_RGBA"]
+            cfg.setdefault("filament_official", [False] * 4)[i] = False
+            self.status["extruder" if i == 0 else f"extruder{i}"]["pressure_advance"] = FACTORY_K
+        elif cmd == "SET_PRESSURE_ADVANCE":
+            self.status[params["EXTRUDER"]]["pressure_advance"] = float(params["ADVANCE"])
+        return None
 
     def put(self, name: str, data: bytes) -> None:
         """A file already stored on the printer (listed size = its length)."""
@@ -168,7 +200,11 @@ class FakeMoonraker:
                     fake.scripts.append(rec.query["script"][0])
                     if fake.scripts[-1].strip().upper() == "G28" and fake.home_on_g28:
                         fake.status.setdefault("toolhead", {})["homed_axes"] = "xyz"  # Klipper homes all
-                    self._reply({"result": "ok"})
+                    error = fake.run_script(fake.scripts[-1])
+                    if error is not None:
+                        self._reply({"error": {"code": 400, "message": error}}, 400)
+                    else:
+                        self._reply({"result": "ok"})
                 else:
                     self._reply({"error": {"code": 404}}, 404)
 
