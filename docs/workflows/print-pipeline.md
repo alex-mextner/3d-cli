@@ -18,6 +18,7 @@ model gates ──> slice ──> G-code gates ──> print-preflight ──> p
 | 2 | visible faces | [`3d visible-faces PART.stl --visible 'y<4.8'`](../commands/visible-faces.md) | support or sag on the side people look at |
 | 3 | fits and sockets | [`3d fit-check --spec fits.yaml`](../commands/fit-check.md) | an insert already printed no longer fits its socket (size, gap, overlap, depth), or the socket is **not open** along the insertion direction — capped over the insert or undercut (`open: none` for an insert captured between parts) |
 | 4 | halves | [`3d halves-check PLATE.3mf`](../commands/halves-check.md) | split halves that no longer mate |
+| 5 | mixed colour on walls | [`3d mix check PLATE.3mf`](../commands/mix.md) | a part in a mixed filament (layer pattern or Local-Z) lying with its coloured face horizontal: a layer mix reads only on walls, a flat top shows one filament |
 
 ## 2. Slice, and record what the slicer said
 
@@ -50,6 +51,7 @@ All of these run inside `3d print-preflight FILE.gcode`; each is also a command 
 | 2 | overhangs | [`3d gcode-overhangs FILE.gcode`](../commands/gcode-overhangs.md) | extrusion printed on nothing — a bottom that is not flat (the K1 overlay printed in the air), a cantilever, a span too long to bridge — which the slicer does not report with supports off |
 | 3 | slicer warnings | [`3d slice-warnings check FILE.gcode`](../commands/slice-warnings.md) | a slicer warning or error for this exact G-code that is neither resolved nor accepted with a reason; no record, or a record of another slice |
 | 4 | head sequence | [`3d slice-check PLATE.3mf --gcode FILE.gcode --check head-sequence`](../commands/slice-check.md) | an object printed on the wrong head on some layer (mixed-filament patterns); needs the project 3MF |
+| 4a | mix face | [`3d mix check PLATE.3mf`](../commands/mix.md) (the same check, on the project 3MF next to the G-code) | a part in a mixed filament whose top outweighs half its walls; needs the project 3MF |
 | 5 | thumbnails | [`3d gcode-thumbnails check FILE.gcode`](../commands/gcode-thumbnails.md) | missing printer-screen previews |
 | 6 | visible faces | [`3d visible-faces --gcode FILE.gcode --visible 'WALL*:y<104.8'`](../commands/visible-faces.md) | support or sagging islands on a visible side, in the real toolpaths |
 
@@ -63,5 +65,5 @@ All of these run inside `3d print-preflight FILE.gcode`; each is also a command 
 
 `print-preflight` adds the printer-side checks (printer free, loaded colours per head) and runs
 every G-code gate above. A gate whose input is missing is reported as SKIP with what to pass —
-the head-sequence gate needs the project 3MF (`--source-3mf`, or `NAME.3mf` next to
+the head-sequence and mix-face gates need the project 3MF (`--source-3mf`, or `NAME.3mf` next to
 `NAME.gcode`), the visible-faces gate needs `--visible` — never as a silent PASS.
