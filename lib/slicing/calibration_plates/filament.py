@@ -377,7 +377,7 @@ def _flow(ctx: PlateContext) -> Section:
     return Section("flow", n * tx + (n - 1) * TILE_GAP, LABEL_DY + ty, False, build)
 
 
-def _bridge() -> Section:
+def _bridge(gaps: tuple[int, ...] = BRIDGE_GAPS, prefix: str = "bridge") -> Section:
     px, py, pz = BRIDGE_PILLAR
 
     def build(
@@ -385,7 +385,7 @@ def _bridge() -> Section:
     ) -> tuple[tuple[PlateObject, ...], tuple[CustomBlock, ...]]:
         objs = []
         x, yb = x0, y0 + LABEL_DY
-        for g in BRIDGE_GAPS:
+        for g in gaps:
             w = 2 * px + g
             boxes = (
                 (x, yb, 0.0, x + px, yb + py, pz),
@@ -394,7 +394,7 @@ def _bridge() -> Section:
             )
             objs.append(
                 PlateObject(
-                    f"bridge_{g}",
+                    f"{prefix}_{g}",
                     "bridge",
                     boxes,
                     params={"bridge_mm": g},
@@ -413,21 +413,21 @@ def _bridge() -> Section:
             x += w + OBJ_GAP
         return tuple(objs), ()
 
-    width = sum(2 * px + g for g in BRIDGE_GAPS) + (len(BRIDGE_GAPS) - 1) * OBJ_GAP
-    return Section("bridge", width, LABEL_DY + py, False, build)
+    width = sum(2 * px + g for g in gaps) + (len(gaps) - 1) * OBJ_GAP
+    return Section(prefix, width, LABEL_DY + py, False, build)
 
 
 def _reach(a: float) -> float:
     return OVERHANG_H * math.tan(math.radians(a))
 
 
-def _overhang() -> Section:
+def _overhang(angles: tuple[int, ...] = OVERHANG_ANGLES) -> Section:
     def build(
         x0: float, y0: float
     ) -> tuple[tuple[PlateObject, ...], tuple[CustomBlock, ...]]:
         objs = []
         x, yb = x0, y0 + LABEL_DY
-        for a in OVERHANG_ANGLES:
+        for a in angles:
             reach = _reach(a)
             profile = [
                 (x, 0.0),
@@ -459,10 +459,7 @@ def _overhang() -> Section:
             x += OVERHANG_BASE + reach + OBJ_GAP
         return tuple(objs), ()
 
-    width = (
-        sum(OVERHANG_BASE + _reach(a) for a in OVERHANG_ANGLES)
-        + (len(OVERHANG_ANGLES) - 1) * OBJ_GAP
-    )
+    width = sum(OVERHANG_BASE + _reach(a) for a in angles) + (len(angles) - 1) * OBJ_GAP
     return Section("overhang", width, LABEL_DY + OVERHANG_DEPTH, False, build)
 
 

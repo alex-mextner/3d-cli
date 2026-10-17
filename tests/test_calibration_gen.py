@@ -12,6 +12,12 @@ from calibration_fixtures import fake_orca
 from printer_ops.move_bounds import _INERT, _INERT_TOWER, command_word
 from slicing import calibration_gen as cg
 
+# The stock presets of the fake profile tree, named explicitly: generate() has no default.
+STOCK = cg.PresetChoice(
+    "Creality K1 SE 0.4 nozzle", "0.20mm Standard @Creality K1 SE", "Creality Generic PLA @K1-all",
+    (("machine", "test"), ("process", "test"), ("filament", "test")),
+)
+
 
 def test_box_stl_has_twelve_facets_spanning_the_box() -> None:
     stl = cg.box_stl(1, 2, 0, 11, 22, 5)
@@ -95,18 +101,21 @@ def test_shaper_commands_for_k1se(tmp_path: Path) -> None:
     res = cg.generate("shaper", "Creality K1 SE", "", out)
     text = out.read_text()
     assert res.files == [out]
-    for cmd in (
+    cmds = [ln for ln in text.splitlines() if ln and not ln.startswith("#")]
+    assert cmds == [
         "G28",
-        "SHAPER_CALIBRATE AXIS=X",
-        "SHAPER_CALIBRATE AXIS=Y",
-        "SAVE_CONFIG",
-    ):
-        assert f"\n{cmd}\n" in f"\n{text}"
+        "M104 S0",
+        "M107",
+        "TEMPERATURE_WAIT SENSOR=extruder MAXIMUM=38",  # hotend fan off before measuring
+        "ACCELEROMETER_QUERY",
+        "MEASURE_AXES_NOISE",
+        "SHAPER_CALIBRATE",  # both axes: Creality's AXIS=Y would overwrite X
+    ]
 
 
 def test_unknown_model_and_kind() -> None:
     with pytest.raises(cg.GenError, match="no calibration presets"):
-        cg.generate("pa", "Prusa MK4", "", Path("x.gcode"))
+        cg.generate("pa", "Prusa MK4", "", Path("x.gcode"), presets=STOCK)
     with pytest.raises(cg.GenError, match="unknown kind"):
         cg.generate("ringing", "Creality K1 SE", "", Path("x.gcode"))
 
@@ -133,6 +142,8 @@ def test_inherits_loop_is_an_error(tmp_path: Path) -> None:
 def _fake_orca(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **kw: str) -> str:
     root, script = fake_orca(tmp_path, **kw)
     monkeypatch.setenv("ORCA_PROFILES", str(root))
+    (tmp_path / "user").mkdir(exist_ok=True)
+    monkeypatch.setenv("ORCA_USER_PRESETS", str(tmp_path / "user"))
     return str(script)
 
 
@@ -143,7 +154,7 @@ def test_gen_pa_and_flow_end_to_end_with_a_fake_orca(
 
     orca = _fake_orca(tmp_path, monkeypatch)
     pa = tmp_path / "pa.gcode"
-    cg.generate("pa", "Creality K1 SE", orca, pa, color="#E8732A")
+    cg.generate("pa", "Creality K1 SE", orca, pa, color="#E8732A", presets=STOCK)
     lines = pa.read_text().splitlines()
     start = lines.index("START_PRINT EXTRUDER_TEMP=220 BED_TEMP=55")
     assert lines[start + 3].startswith("TUNING_TOWER COMMAND=SET_PRESSURE_ADVANCE")
@@ -152,7 +163,7 @@ def test_gen_pa_and_flow_end_to_end_with_a_fake_orca(
     assert evaluate(pa)[0] == "PASS"
 
     flow = tmp_path / "flow.gcode"
-    res = cg.generate("flow", "Creality K1 SE", orca, flow)
+    res = cg.generate("flow", "Creality K1 SE", orca, flow, presets=STOCK)
     text = flow.read_text()
     for name, pct in (
         ("flow_m10", 90),
@@ -174,7 +185,7 @@ def test_gen_without_end_print_fails_and_writes_nothing(
     orca = _fake_orca(tmp_path, monkeypatch, end="M84")
     out = tmp_path / "pa.gcode"
     with pytest.raises(cg.GenError, match="END_PRINT"):
-        cg.generate("pa", "Creality K1 SE", orca, out)
+        cg.generate("pa", "Creality K1 SE", orca, out, presets=STOCK)
     assert not out.exists()
 
 
@@ -210,7 +221,7 @@ def test_gen_combo_end_to_end_with_a_fake_orca(
 
     orca = _fake_orca(tmp_path, monkeypatch)
     out = tmp_path / "combo.gcode"
-    res = cg.generate("combo", "Creality K1 SE", orca, out, color="#000000")
+    res = cg.generate("combo", "Creality K1 SE", orca, out, color="#000000", presets=STOCK)
     lines = out.read_text().splitlines()
     start = lines.index("START_PRINT EXTRUDER_TEMP=220 BED_TEMP=55")
     end_pa = lines.index("; 3d calibrate gen combo: end of PA lines")
@@ -260,7 +271,7 @@ def test_record_hints_name_catalog_methods(
     notes = [
         n
         for k in ("pa", "flow", "combo", "temp")
-        for n in cg.generate(k, "Creality K1 SE", orca, tmp_path / f"{k}.gcode").notes
+        for n in cg.generate(k, "Creality K1 SE", orca, tmp_path / f"{k}.gcode", presets=STOCK).notes
     ]
     cg.generate("shaper", "Creality K1 SE", "", tmp_path / "s.txt")
     notes += (tmp_path / "s.txt").read_text().splitlines()
@@ -285,7 +296,7 @@ def test_gen_combo_refuses_absolute_extrusion(
     orca = _fake_orca(tmp_path, monkeypatch, relative_e="0")
     out = tmp_path / "combo.gcode"
     with pytest.raises(cg.GenError, match="relative-E"):
-        cg.generate("combo", "Creality K1 SE", orca, out)
+        cg.generate("combo", "Creality K1 SE", orca, out, presets=STOCK)
     assert not out.exists()
 
 
@@ -315,7 +326,7 @@ def test_gen_combo_refuses_unusable_preset_numbers(
     orca = _fake_orca(tmp_path, monkeypatch, **option)
     out = tmp_path / "combo.gcode"
     with pytest.raises(cg.GenError, match=match):
-        cg.generate("combo", "Creality K1 SE", orca, out)
+        cg.generate("combo", "Creality K1 SE", orca, out, presets=STOCK)
     assert not out.exists()
 
 
@@ -331,7 +342,7 @@ def test_gen_combo_refuses_a_bed_it_does_not_fit_before_slicing(
         "#!/bin/sh\nexit 3\n"
     )  # a slice would fail differently
     with pytest.raises(cg.GenError, match="do not fit a 120x120 mm bed"):
-        cg.generate("combo", "Creality K1 SE", orca, tmp_path / "combo.gcode")
+        cg.generate("combo", "Creality K1 SE", orca, tmp_path / "combo.gcode", presets=STOCK)
 
 
 @pytest.mark.parametrize("material", ["PLA", "PLA+"])
@@ -343,7 +354,7 @@ def test_gen_temp_end_to_end_with_a_fake_orca(
     orca = _fake_orca(tmp_path, monkeypatch)
     out = tmp_path / "temp.gcode"
     res = cg.generate(
-        "temp", "Creality K1 SE", orca, out, material=material, color="#E8732A"
+        "temp", "Creality K1 SE", orca, out, material=material, color="#E8732A", presets=STOCK
     )
     text = out.read_text()
     changes = [ln.split()[1] for ln in text.splitlines() if ln.startswith("M104 S")]

@@ -16,15 +16,22 @@ from slicing import calibration_gen as cg
 from slicing import calibration_plate as cp
 from slicing.calibration_plates import PLATES, filament
 
+STOCK = cg.PresetChoice(
+    "Creality K1 SE 0.4 nozzle", "0.20mm Standard @Creality K1 SE", "Creality Generic PLA @K1-all",
+    (("machine", "test"), ("process", "test"), ("filament", "test")),
+)
+
+
 @pytest.fixture
 def orca(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
     root, script = write_plate_orca(tmp_path)
     monkeypatch.setenv("ORCA_PROFILES", str(root))
+    monkeypatch.setenv("ORCA_USER_PRESETS", str(tmp_path / "user"))
     return str(script)
 
 
 def _ctx(orca: str) -> cp.PlateContext:
-    return cp.make_context("Creality K1 SE", orca, "PLA", "#E8732A", None)
+    return cp.make_context("Creality K1 SE", orca, "PLA", "#E8732A", None, presets=STOCK)
 
 
 def _object_lines(text: str, name: str) -> list[list[str]]:
@@ -296,7 +303,7 @@ def test_only_skip_select_tests_and_pack_without_holes(orca: str, tmp_path: Path
     with pytest.raises(cg.GenError, match="leave no test"):
         resolve_tests("plate1", frozenset({"pa"}), frozenset({"pa"}))
 
-    ctx = cp.make_context("Creality K1 SE", orca, "PLA", "#E8732A", None, chosen)
+    ctx = cp.make_context("Creality K1 SE", orca, "PLA", "#E8732A", None, chosen, presets=STOCK)
     plate = filament.build(ctx)
     kinds = {o.kind for o in plate.objects} | {c.kind for c in plate.custom}
     assert "pressure_advance" not in kinds and "flow_ratio" not in kinds
@@ -329,19 +336,124 @@ def test_pack_places_sections_without_overlap() -> None:
         filament.pack([sec("huge", 300, 10)], (220.0, 220.0), 45.0, "plate1")
 
 
+def _user_presets(tmp_path: Path) -> None:
+    user = tmp_path / "user"
+    for kind, data in (
+        ("machine", {"name": "K1 SE - Copy", "inherits": "Creality K1 SE 0.4 nozzle"}),
+        ("process", {"name": "Std accel 8900", "inherits": "0.20mm Standard @Creality K1 SE",
+                     "default_acceleration": "8000"}),
+        ("filament", {"name": "Orange PLA @K1SE", "inherits": "Creality Generic PLA @K1-all",
+                      "filament_flow_ratio": ["0.931"], "pressure_advance": ["0.05"], "filament_type": ["PLA"]}),
+    ):
+        (user / kind).mkdir(parents=True, exist_ok=True)
+        (user / kind / f"{data['name']}.json").write_text(json.dumps(data))
+
+
+def test_user_presets_reach_the_gcode_and_the_map(orca: str, tmp_path: Path) -> None:
+    _user_presets(tmp_path)
+    choice = cg.PresetChoice("K1 SE - Copy", "Std accel 8900", "Orange PLA @K1SE",
+                             (("machine", "fleet k1se.slicer"), ("process", "fleet k1se.slicer"),
+                              ("filament", "--filament-preset")))
+    out = tmp_path / "u.gcode"
+    cg.generate("plate1", "Creality K1 SE", orca, out, presets=choice, only=frozenset({"bridge"}))
+    text = out.read_text()
+    for line in ("; default_acceleration = 8000", "; filament_flow_ratio = 0.931", "; pressure_advance = 0.05",
+                 "; printer_settings_id = K1 SE - Copy", "; print_settings_id = Std accel 8900",
+                 '; filament_settings_id = "Orange PLA @K1SE"',
+                 "; compatible_printers = ['K1 SE - Copy']"):  # Orca's CLI matches by the machine's name
+        assert line in text.splitlines(), line
+    assert ("; 3d calibrate presets: machine=K1 SE - Copy (fleet k1se.slicer); process=Std accel 8900 "
+            "(fleet k1se.slicer); filament=Orange PLA @K1SE (--filament-preset)") in text.splitlines()
+    data = json.loads(out.with_suffix(".json").read_text())
+    assert data["presets"] == {"machine": "K1 SE - Copy", "process": "Std accel 8900",
+                               "filament": "Orange PLA @K1SE",
+                               "chosen_by": {"machine": "fleet k1se.slicer", "process": "fleet k1se.slicer",
+                                             "filament": "--filament-preset"}}
+
+
+def test_no_presets_is_refused_not_stock(orca: str, tmp_path: Path) -> None:
+    with pytest.raises(cg.GenError, match="no slicer presets chosen"):
+        cg.generate("flow", "Creality K1 SE", orca, tmp_path / "f.gcode")
+    missing = cg.PresetChoice("Creality K1 SE 0.4 nozzle", "0.20mm Standard @Creality K1 SE", "No such PLA")
+    with pytest.raises(cg.GenError, match="'No such PLA' not found"):
+        cg.generate("flow", "Creality K1 SE", orca, tmp_path / "f.gcode", presets=missing)
+    _user_presets(tmp_path)
+    wrong = cg.PresetChoice("Creality K1 SE 0.4 nozzle", "0.20mm Standard @Creality K1 SE", "Orange PLA @K1SE")
+    with pytest.raises(cg.GenError, match="is PLA, not PETG"):
+        cg.generate("flow", "Creality K1 SE", orca, tmp_path / "f.gcode", material="PETG", presets=wrong)
+
+
+def test_cli_presets_from_flags_then_fleet(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+
+    from commands.calibrate import _preset_choice
+    from errors import UsageError
+
+    entry = SimpleNamespace(name="k1se", slicer={"machine": "M - Copy", "process": "P 8900"})
+    choice = _preset_choice({"--filament-preset": "Orange PLA @K1SE"}, entry)  # type: ignore[arg-type]
+    assert (choice.machine, choice.process, choice.filament) == ("M - Copy", "P 8900", "Orange PLA @K1SE")
+    assert dict(choice.sources) == {"machine": "fleet k1se.slicer", "process": "fleet k1se.slicer",
+                                    "filament": "--filament-preset"}
+    flagged = _preset_choice({"--filament-preset": "F", "--process-preset": "Other"}, entry)  # type: ignore[arg-type]
+    assert flagged.process == "Other" and dict(flagged.sources)["process"] == "--process-preset"
+    with pytest.raises(UsageError, match="no filament preset for k1se"):
+        _preset_choice({}, entry)  # type: ignore[arg-type]
+    bare = SimpleNamespace(name="u1", slicer={})
+    with pytest.raises(UsageError, match="no machine, process, filament preset for u1"):
+        _preset_choice({}, bare)  # type: ignore[arg-type]
+
+
+def test_fleet_slicer_key(tmp_path: Path) -> None:
+    from printops.fleet import load_fleet
+    from printops.fleet import FleetError
+
+    base = "k1:\n  model: Creality K1 SE\n  owner: own\n  access: offline\n  heads: [{label: T1, index: 0}]\n"
+    good = tmp_path / "good.yaml"
+    good.write_text(base + "  slicer: {machine: M - Copy, process: P 8900}\n")
+    fleet = load_fleet(good)
+    assert fleet is not None and fleet.printers["k1"].slicer == {"machine": "M - Copy", "process": "P 8900"}
+    bad = tmp_path / "bad.yaml"
+    bad.write_text(base + "  slicer: {machine: M, filament: F}\n")
+    with pytest.raises(FleetError) as err:
+        load_fleet(bad)
+    assert any("slicer.filament: unknown key" in r for r in err.value.remediation)
+
+
+def test_user_preset_roots_follow_the_profiles_resolver(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Repo profiles first, then the slicer's logged-in preset folder (XDG config, preset_folder)."""
+    monkeypatch.delenv("ORCA_USER_PRESETS", raising=False)
+    repo = tmp_path / "profiles" / "snapmaker-orca"
+    (repo / "filament").mkdir(parents=True)
+    monkeypatch.setenv("THREED_PROFILES_DIR", str(tmp_path / "profiles"))
+    xdg = tmp_path / "xdg"
+    data = xdg / "Snapmaker_Orca"
+    (data / "user" / "12345" / "filament").mkdir(parents=True)
+    (data / "Snapmaker_Orca.conf").write_text(json.dumps({"app": {"preset_folder": "12345"}}))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    assert cg.user_preset_roots() == [repo, data / "user" / "12345"]
+
+
 @pytest.mark.parametrize("only", [{"pa"}, {"mvs"}, {"temp"}, {"pa", "mvs", "temp"}])
 def test_plate1_needs_a_test_sliced_by_layer(orca: str, only: set[str]) -> None:
-    ctx = cp.make_context("Creality K1 SE", orca, "PLA", "#E8732A", None, frozenset(only))
+    ctx = cp.make_context("Creality K1 SE", orca, "PLA", "#E8732A", None, frozenset(only), presets=STOCK)
     with pytest.raises(cg.GenError, match="must keep one of flow, bridge, overhang, retraction"):
         filament.build(ctx)
 
 
 def test_plate1_single_sliced_tests_build(orca: str, tmp_path: Path) -> None:
     for test in filament.LAYER_TESTS:
-        ctx = cp.make_context("Creality K1 SE", orca, "PLA", "#E8732A", None, frozenset({test}))
+        ctx = cp.make_context("Creality K1 SE", orca, "PLA", "#E8732A", None, frozenset({test}), presets=STOCK)
         out = tmp_path / f"{test}.gcode"
         cp.build_plate(ctx, filament.build(ctx), orca, out)
         assert out.is_file()
+
+
+def test_malformed_user_preset_is_a_gen_error(orca: str, tmp_path: Path) -> None:
+    (tmp_path / "user" / "filament").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "user" / "filament" / "broken.json").write_text("{not json")
+    with pytest.raises(cg.GenError, match="broken.json is not readable JSON"):
+        cg.generate("flow", "Creality K1 SE", orca, tmp_path / "f.gcode", presets=STOCK)
 
 
 def test_mvs_strip_never_comes_down_after_its_top(orca: str) -> None:
@@ -376,10 +488,14 @@ def test_retraction_tower_scales_from_the_filament_override(orca: str) -> None:
 def test_plate_notes_follow_the_chosen_tests(orca: str) -> None:
     full = filament.build(_ctx(orca)).notes
     assert "temperature tower alone, last" in full[0] and "towers from the front" in full[1]
-    ctx = cp.make_context("Creality K1 SE", orca, "PLA", "#E8732A", None, frozenset({"flow", "bridge"}))
+    ctx = cp.make_context(
+        "Creality K1 SE", orca, "PLA", "#E8732A", None, frozenset({"flow", "bridge"}), presets=STOCK
+    )
     notes = filament.build(ctx).notes
     assert "temperature tower" not in notes[0] and "towers" not in notes[1]
-    ctx = cp.make_context("Creality K1 SE", orca, "PLA", "#E8732A", None, frozenset({"retraction"}))
+    ctx = cp.make_context(
+        "Creality K1 SE", orca, "PLA", "#E8732A", None, frozenset({"retraction"}), presets=STOCK
+    )
     notes = filament.build(ctx).notes
     assert "temperature tower" not in notes[0] and "towers from the front" in notes[1]
 
@@ -389,13 +505,13 @@ def test_a_material_without_a_pa_range_prints_the_plate_without_pa(
 ) -> None:
     monkeypatch.setattr(cg, "PA_RANGES", {})
     with pytest.raises(cg.GenError, match="no default PA range"):
-        cg.generate("plate1", "Creality K1 SE", orca, tmp_path / "a.gcode")
+        cg.generate("plate1", "Creality K1 SE", orca, tmp_path / "a.gcode", presets=STOCK)
     out = tmp_path / "b.gcode"
-    cg.generate("plate1", "Creality K1 SE", orca, out, skip=frozenset({"pa"}))
+    cg.generate("plate1", "Creality K1 SE", orca, out, skip=frozenset({"pa"}), presets=STOCK)
     assert out.is_file()
 
 
 def test_pa_range_needs_the_pa_lines(orca: str, tmp_path: Path) -> None:
     with pytest.raises(cg.GenError, match="skips them"):
         cg.generate("plate1", "Creality K1 SE", orca, tmp_path / "p.gcode", skip=frozenset({"pa"}),
-                    pa_range=(0.03, 0.05))
+                    pa_range=(0.03, 0.05), presets=STOCK)

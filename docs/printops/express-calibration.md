@@ -29,7 +29,7 @@
 `--skip pa,flow` / `--only temp,retraction` выбирают тесты стола (id: `pa`, `mvs`, `flow`, `bridge`,
 `overhang`, `retraction`, `temp`); пропущенные не печатаются и места не занимают — раскладка
 собирается заново от переднего края. Пример (оранжевый PLA, PA и flow уже напечатаны комбо-столом):
-`3d calibrate gen plate1 --printer k1se --color '#E8732A' --skip pa,flow -o k1se_plate1_orange.gcode`
+`3d calibrate gen plate1 --printer k1se --filament-preset 'Orange PLA @K1SE' --skip pa,flow -o k1se_plate1_orange.gcode`
 — ≈22 мин печати, ≈3 г; полный стол 1 — ≈25 мин.
 
 Размеры — минимально достаточные для оценки: плитки 15×15 мм × 5 слоёв по 0,2 (сплошные), мосты
@@ -58,10 +58,13 @@
    ```
    В списке будут `pressure_advance` и `flow_ratio` с уровнем FAIL или WARN. Если их нет —
    калибровка не нужна.
-2. **Стол.** Цвет катушки идёт в `filament_colour` G-кода, по нему `loaded_filament_match`
-   сверяет заправку:
+2. **Стол.** Нарезается пресетами, с которыми печатают принтер и катушка: `--filament-preset` —
+   пресет катушки (обязателен), машина и процесс — из `slicer:` принтера в `fleet/printers.yaml`
+   (или `--machine-preset`/`--process-preset`). Стоковые пресеты Orca не подставляются: без
+   пресета команда откажет ([#293](https://github.com/alex-mextner/3d-cli/issues/293)). Цвет
+   катушки идёт в `filament_colour` G-кода, по нему `loaded_filament_match` сверяет заправку:
    ```
-   3d calibrate gen combo --printer k1se --color '#000000' -o k1se_combo_black_pla.gcode
+   3d calibrate gen combo --printer k1se --filament-preset 'Black PLA babushkin @K1SE' -o k1se_combo_black_pla.gcode
    3d print-preflight k1se_combo_black_pla.gcode --printer k1se
    ```
    Нужен `STATUS: PASS`. Для другой температуры: `--nozzle-temp 215`. Для PETG: `--material PETG`.
