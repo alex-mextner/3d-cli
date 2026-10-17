@@ -70,6 +70,16 @@ def load_hf_token() -> HFTokenInfo | None:
     return HFTokenInfo(token=token, username=str(username) if username else None, source=str(auth_path()))
 
 
+def read_auth_section(name: str) -> dict[str, Any]:
+    """One provider's object from auth.json (e.g. "thingiverse"), {} when absent. Other
+    credential consumers (`3d models`) share this file and its 0600 handling."""
+    path = auth_path()
+    if path.is_file():
+        _ensure_private_auth_path(path)
+    section = _read_json(path).get(name)
+    return section if isinstance(section, dict) else {}
+
+
 def _ensure_private_auth_path(path: Path) -> None:
     try:
         os.chmod(path.parent, stat.S_IRWXU)

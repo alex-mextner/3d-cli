@@ -1,0 +1,30 @@
+{
+ "_note": "Shape from the Thingiverse API docs and public clients (no App Token available when recorded); values are illustrative.",
+ "total": 2,
+ "hits": [
+  {
+   "id": 5594736,
+   "name": "Spoon drawer pull",
+   "public_url": "https://www.thingiverse.com/thing:5594736",
+   "thumbnail": "https://cdn.thingiverse.com/assets/aa/bb/spoon_thumb.jpg",
+   "like_count": 42,
+   "collect_count": 10,
+   "creator": {
+    "id": 1,
+    "name": "spoonmaker",
+    "public_url": "https://www.thingiverse.com/spoonmaker"
+   }
+  },
+  {
+   "id": 4000001,
+   "name": "Fork pull",
+   "public_url": "https://www.thingiverse.com/thing:4000001",
+   "like_count": 3,
+   "creator": {
+    "id": 2,
+    "name": "forker",
+    "public_url": "https://www.thingiverse.com/forker"
+   }
+  }
+ ]
+}

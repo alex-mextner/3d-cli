@@ -1,0 +1,46 @@
+{
+ "_note": "Shape from Cults' published GraphQL examples (no API key available when recorded); values are illustrative.",
+ "data": {
+  "result": {
+   "total": 2,
+   "results": [
+    {
+     "identifier": "spoon-drawer-pull",
+     "name": "Spoon drawer pull",
+     "url": "https://cults3d.com/en/3d-model/home/spoon-drawer-pull",
+     "likesCount": 7,
+     "downloadsCount": 30,
+     "illustrationImageUrl": "https://files.cults3d.com/spoon-drawer-pull.jpg",
+     "creator": {
+      "nick": "kitchenfab",
+      "shortUrl": "https://cults3d.com/:kitchenfab"
+     },
+     "license": {
+      "name": "CC BY"
+     },
+     "price": {
+      "cents": 0
+     }
+    },
+    {
+     "identifier": "luxury-spoon-pull",
+     "name": "Luxury spoon pull",
+     "url": "https://cults3d.com/en/3d-model/home/luxury-spoon-pull",
+     "likesCount": 7,
+     "downloadsCount": 30,
+     "illustrationImageUrl": "https://files.cults3d.com/luxury-spoon-pull.jpg",
+     "creator": {
+      "nick": "paidmaker",
+      "shortUrl": "https://cults3d.com/:paidmaker"
+     },
+     "license": {
+      "name": "CC BY"
+     },
+     "price": {
+      "cents": 499
+     }
+    }
+   ]
+  }
+ }
+}
