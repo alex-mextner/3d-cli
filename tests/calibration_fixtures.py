@@ -161,6 +161,16 @@ else:
                 L += layer(i, n, cx, cy, z)
         z += h
 L += ["END_PRINT", "; estimated printing time (normal mode) = 10m 0s", "; use_relative_e_distances = 1"]
+# footer like Orca's: the settings and the preset names it sliced with
+mach = json.loads(pathlib.Path(a[a.index("--load-settings") + 1].split(";")[0]).read_text())
+fil = json.loads(pathlib.Path(a[a.index("--load-filaments") + 1]).read_text())
+first = lambda v: v[0] if isinstance(v, list) else v
+L += [f"; default_acceleration = {proc.get('default_acceleration')}",
+      f"; filament_flow_ratio = {first(fil.get('filament_flow_ratio'))}",
+      f"; pressure_advance = {first(fil.get('pressure_advance', '0'))}",
+      f"; printer_settings_id = {mach['name']}", f"; print_settings_id = {proc['name']}",
+      f'; filament_settings_id = "{fil["name"]}"',
+      f"; compatible_printers = {proc.get('compatible_printers')}"]
 (out / "plate_1.gcode").write_text("\n".join(L) + "\n")
 """
 
@@ -172,6 +182,7 @@ def write_plate_orca(tmp_path: Path) -> tuple[Path, Path]:
         d = root / PRESETS["Creality K1 SE"].vendor / kind
         d.mkdir(parents=True, exist_ok=True)
         (d / f"{name}.json").write_text(json.dumps({"name": name, **data}))
+    (tmp_path / "user").mkdir(exist_ok=True)  # ORCA_USER_PRESETS for the tests that set it
     script = tmp_path / "orca"
     script.write_text(PLATE_ORCA)
     script.chmod(0o755)
