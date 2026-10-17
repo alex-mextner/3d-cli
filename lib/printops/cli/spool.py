@@ -48,10 +48,16 @@ Actions:
       `receive` command per spool, and a table of the batch. Writes nothing.
   move ID LOCATION
       store or move a spool (a loaded spool is unloaded on the way)
-  load ID PRINTER/SLOT [--replace-to LOCATION]
+  load ID PRINTER/SLOT [--replace-to LOCATION] [--no-printer-write] [--force-official]
       bind a spool to a printer head (u1/T3) or AMS slot (p1s/ams1/2); refuses heads the
       fleet marks unusable or with an open fault, and occupied slots (unless --replace-to says
-      where the old spool goes)
+      where the old spool goes). Then the printer head is written to show the spool (Snapmaker
+      U1: colour, material, vendor; sub-type Basic) and read back; the U1 resets the head's
+      pressure advance on that write, so the current PA calibration of this head + spool is put
+      back (else the factory K stays, with a warning). Not while the printer prints; a head with
+      official RFID filament only with --force-official; --no-printer-write skips it. A failed
+      write keeps the binding, prints WARNING and opens a printer_write_failed anomaly — run the
+      same load again to retry
   unload PRINTER/SLOT [--to LOCATION] [--gross G]
       take the spool out of a slot (even an unusable head); --gross weighs it first (a failed
       weighing leaves it loaded)
@@ -71,6 +77,8 @@ Actions:
 Options:
   --json         print the API's JSON answer (scan / receive --from-photo: the proposal too)
   --yes          receive --from-photo: create without asking (after checking the proposal)
+  --no-printer-write  load: bind in Spoolman only, leave the printer head as it is
+  --force-official    load: also overwrite a head showing official Snapmaker RFID filament
   --api URL      3d-api base URL (default: $PRINTOPS_API, else ~/.config/3d-cli/printops.yaml)
   --token TOKEN  bearer token (default: $PRINTOPS_TOKEN, else the same file)
 
@@ -629,22 +637,63 @@ def _move(argv: list[str], sub: str) -> int:
     )
 
 
+LOAD_TIMEOUT_S = 60.0  # the answer waits for the printer head write (a few printer requests)
+
+
 def _load(argv: list[str], sub: str) -> int:
     p = parse(
-        argv, sub, values=COMMON_VALUES | {"--replace-to"}, flags=COMMON_FLAGS, n_pos=2
+        argv,
+        sub,
+        values=COMMON_VALUES | {"--replace-to"},
+        flags=COMMON_FLAGS | {"--no-printer-write", "--force-official"},
+        n_pos=2,
     )
     printer, head = _slot(p.pos[1], sub)
     body: dict[str, Any] = {"spool_id": _id(p.pos[0], sub)}
     if "--replace-to" in p.opts:
         body["replace_to"] = p.opts["--replace-to"]
-    return _post(
-        p,
-        sub,
-        client(p, sub),
-        f"/v1/printers/{printer}/slots/{head}/load",
-        body,
-        "loaded ",
-    )
+    if "--no-printer-write" in p.flags:
+        body["printer_write"] = False
+    if "--force-official" in p.flags:
+        body["force_official"] = True
+    api = client(p, sub)
+    api.timeout = max(api.timeout, LOAD_TIMEOUT_S)
+    with api_errors(sub):
+        res = api.post(f"/v1/printers/{printer}/slots/{head}/load", body)
+    _out(p, res, "loaded " + fmt_spool(res) + fmt_printer_write(res.get("printer_write")))
+    if "--json" not in p.flags:
+        for line in printer_write_warnings(res.get("printer_write")):
+            print(line, file=sys.stderr)
+    return 0
+
+
+def fmt_printer_write(pw: dict[str, Any] | None) -> str:
+    """The printer half of a load answer, one line."""
+    if not pw:
+        return ""
+    if pw["status"] == "written":
+        after = pw.get("after") or {}
+        pa = pw.get("pressure_advance") or {}
+        k = pa.get("k")
+        k_text = f"K={k:g}" if isinstance(k, (int, float)) else "K=?"
+        why = f"calibration #{pa['calibration_id']}" if pa.get("action") == "restored" else "factory"
+        return (
+            f"\n  printer head: {after.get('color')} {after.get('vendor')} {after.get('material')} "
+            f"{after.get('sub_type')} (read back), pressure advance {k_text} ({why})"
+        )
+    return f"\n  printer head: {pw['status']} — {pw.get('reason')}"
+
+
+def printer_write_warnings(pw: dict[str, Any] | None) -> list[str]:
+    if not pw:
+        return []
+    out = [f"WARNING: {w}" for w in pw.get("warnings") or []]
+    if pw["status"] == "failed":
+        out.append(
+            "WARNING: the spool is bound, but the printer head was NOT updated "
+            "(a printer_write_failed anomaly is open; run the same load again to retry)"
+        )
+    return out
 
 
 def _unload(argv: list[str], sub: str) -> int:

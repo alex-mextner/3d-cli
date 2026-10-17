@@ -9,7 +9,10 @@
   POST /v1/spools/{id}/use             {grams, source, confidence_g?, job_id?, note?}  write  Spoolman /use + ledger
   POST /v1/spools/{id}/measure         {gross_g, tare_g?, tare_source?, scale_sigma_g?, note?}  write  /measure + anchor
   POST /v1/spools/{id}/empty           {note?}                            write  anchor 0, archive
-  POST /v1/printers/{p}/slots/{s}/load    {spool_id, replace_to?}         write  s = head label (T3) or ams-id/n
+  POST /v1/printers/{p}/slots/{s}/load    {spool_id, replace_to?, printer_write? (default true),
+                                           force_official?}               write  s = head label (T3) or ams-id/n;
+                                           answer + printer_write {status written|skipped|failed, reason,
+                                           wanted, before, after, pressure_advance, warnings} (#400)
   POST /v1/printers/{p}/slots/{s}/unload  {to?, gross_g?, spool_id?}      write
   GET  /v1/tares?vendor=                                                   read   the tare DB
   POST /v1/tares                       {vendor, tare_g, source, spool_kind?, net_g?, sigma_g?, note?}  write
@@ -51,6 +54,13 @@ def _call(fn: Callable[[], Any]) -> Any:
         )
     except (tares.TareError, ledger.LedgerError) as e:
         return JSONResponse({"detail": str(e), "info": {}}, status_code=422)
+
+
+def _flag(body: dict[str, Any], key: str, *, default: bool) -> bool:
+    v = body.get(key, default)
+    if not isinstance(v, bool):
+        raise spools.SpoolError(422, f"{key} must be true or false")
+    return v
 
 
 def _ctx(conn: Any, sm: Spoolman, who: Principal) -> spools.Ctx:
@@ -217,7 +227,13 @@ def load(conn: Db, sm: Sm, who: Writer, printer: str, slot: str, body: JsonBody)
         if isinstance(sid, bool) or not isinstance(sid, int):
             raise spools.SpoolError(422, "spool_id (integer) is required")
         return spools.load(
-            _ctx(conn, sm, who), printer, slot, sid, replace_to=_str(body, "replace_to")
+            _ctx(conn, sm, who),
+            printer,
+            slot,
+            sid,
+            replace_to=_str(body, "replace_to"),
+            printer_write=_flag(body, "printer_write", default=True),
+            force_official=_flag(body, "force_official", default=False),
         )
 
     return _call(go)

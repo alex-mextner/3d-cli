@@ -52,7 +52,7 @@ log = logging.getLogger("printops.reconcile")
 
 MIN_POLL_S = 10.0
 DEFAULT_POLL_S = 30.0
-TRIGGER_KINDS = ("slot.loaded", "slot.unloaded")
+TRIGGER_KINDS = ("slot.loaded", "slot.unloaded", *rc.WRITE_EVENTS)
 TRIGGER_PREFIXES = ("spool.",)
 
 
