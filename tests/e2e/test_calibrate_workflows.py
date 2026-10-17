@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 
 import pytest
-from calibration_fixtures import fake_orca
+from calibration_fixtures import fake_orca, write_plate_orca
 from fleet_fixtures import REPO_FLEET
 from printops_fixtures import LiveApi
 
@@ -355,9 +355,7 @@ def test_gen_plate1_with_only_skip_and_a_fine_pa_range(tmp_path: Path) -> None:
     """The user prints plate 1 for a new spool through bin/3d: a fine PA pass with flow only, then
     the plate without PA and flow; the G-code and its map sit side by side, a `.json` output name
     and a PA range on a plate without PA lines are refused."""
-    from test_calibration_plate import write_fake_orca
-
-    profiles, orca = write_fake_orca(tmp_path)
+    profiles, orca = write_plate_orca(tmp_path)
     fleet = tmp_path / "fleet.yaml"
     fleet.write_text(K1_FLEET, encoding="utf-8")
     env = {"THREED_FLEET": str(fleet), "ORCA_PROFILES": str(profiles), "SLICER": str(orca)}
