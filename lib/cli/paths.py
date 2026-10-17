@@ -63,6 +63,12 @@ def legacy_config_dir() -> pathlib.Path:
     return _xdg_root("XDG_CONFIG_HOME", (".config",)) / _LEGACY_DIRNAME
 
 
+def legacy_data_dir() -> pathlib.Path:
+    """The pre-§23 `~/.local/share/3d/`: the settings-history buffer (#264) lived there and is
+    moved into `data_dir()` by printops.history_buffer."""
+    return _xdg_root("XDG_DATA_HOME", (".local", "share")) / _LEGACY_DIRNAME
+
+
 def migrate_legacy_config() -> None:
     """One-time move of `~/.config/3d/` -> `~/.config/3d-cli/` if the old dir exists and the
     new one does not. Best-effort and non-fatal: a failure just means the new dir starts

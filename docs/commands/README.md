@@ -87,6 +87,7 @@ Every gate from model to printer, in order: [Print pipeline](../workflows/print-
 | `print-preflight` | [print-preflight.md](print-preflight.md) | Read-only pre-print checks: every G-code gate (bounds, overhangs, slicer warnings, head sequence, thumbnails, visible faces), loaded colours vs G-code, halves, printer free. |
 | `printops` | [printops.md](printops.md) | PrintOps through 3d-api (Spoolman + PrintOps DB on the Odroid): health, event log, tokens, deploy, backup; spools + ledger + weighing ([printops-spool.md](printops-spool.md)). |
 | `profiles` | [profiles.md](profiles.md) | Keep OrcaSlicer / Snapmaker Orca / Bambu Studio user presets in the repo `profiles/`; three-way status/diff/sync, backups, refuses while the slicer runs. |
+| `settings` | [settings.md](settings.md) | Printer settings-change journal via 3d-api: import the offline `printer-history` buffers (calibration lines become `calibrate` records, idempotent by uid), history per printer. |
 | `slice` | [slice.md](slice.md) | Slice STL/3MF/SCAD to G-code or run the sliceability gate; records the slicer's warnings next to the G-code. |
 | `slice-check` | [slice-check.md](slice-check.md) | Headless 3MF open/plates/slice gate, plus offline G-code checks (`--check head-sequence`). |
 | `slice-warnings` | [slice-warnings.md](slice-warnings.md) | Record the slicer's warnings for a G-code (`NAME.slice-warnings.json`, SHA-256 bound) and accept each with a reason. |

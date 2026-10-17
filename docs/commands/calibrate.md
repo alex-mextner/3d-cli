@@ -104,6 +104,10 @@ older one. Values are checked against the catalog (`flow_ratio=3` is refused: 0.
 3d calibrate record temp_tower --filament 7 --lot B7 --values nozzle_temp_min=205,nozzle_temp_best=215,nozzle_temp_max=230
 ```
 
+Calibrations done before 3d-api knew of them (written to the offline settings-history buffer) are
+brought in by [`3d settings import`](settings.md): those records keep the time of the measurement,
+not the import time, and never supersede a later record of the same scope.
+
 ## `check` — the `calibration_current` gate
 
 Reads the G-code's `; key = value` settings (head and tail), the used tools (`; filament used
