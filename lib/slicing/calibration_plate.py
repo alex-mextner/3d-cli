@@ -183,7 +183,9 @@ class PlateContext:
     mach: dict[str, Any]
     ex: Extrusion  # first-layer line for hand-written G-code
     tests: frozenset[str] | None = None  # the plate's test ids to print (None: all)
-    pa: tuple[float, ...] = COMBO_PA_VALUES  # PA line values (material default or --pa-range)
+    pa: tuple[float, ...] = (
+        COMBO_PA_VALUES  # PA line values (material default or --pa-range)
+    )
 
     def wants(self, test: str) -> bool:
         return self.tests is None or test in self.tests
@@ -198,7 +200,19 @@ class PlateContext:
 
     @property
     def retract(self) -> float:
-        return _first(self.mach, "retraction_length")
+        """The retraction Orca slices with: the filament preset's override (`nil` = unset) or
+        the machine's; positive, as length ratios are taken against it."""
+        v = self.fil.get("filament_retraction_length")
+        own = v[0] if isinstance(v, list) and v else v
+        if own is None or str(own).strip().lower() in ("", "nil"):
+            r = _first(self.mach, "retraction_length")
+        else:
+            r = _first(
+                {"filament_retraction_length": own}, "filament_retraction_length"
+            )
+        if r <= 0:
+            raise GenError(f"preset values must be positive: retraction length {r:g}")
+        return r
 
     def e_per_mm(self, width: float, height: float) -> float:
         return (
@@ -553,9 +567,16 @@ def bed_labels(
 
 
 def build_plate(ctx: PlateContext, plate: Plate, slicer: str, out: Path) -> Generated:
+    if out.suffix.lower() == ".json":
+        raise GenError(
+            f"{out}: the plate's map is NAME.json next to the G-code; name the G-code .gcode"
+        )
     labels = bed_labels(ctx, plate.objects)
-    if labels is not None:
-        plate = replace(plate, custom=(*plate.custom, labels))
+    # Bed labels first, blocks taller than the first layer (the MVS strip) last: the hand-written
+    # travels run at first-layer height + lift and must never cross a finished taller block.
+    custom = (*((labels,) if labels is not None else ()), *plate.custom)
+    flat = tuple(c for c in custom if c.bbox()[5] <= ctx.ex.layer_h + 1e-6)
+    plate = replace(plate, custom=flat + tuple(c for c in custom if c not in flat))
     names = [o.name for o in plate.objects] + [c.name for c in plate.custom]
     bad = [n for n in names if not _NAME.match(n)]
     if bad or len(set(names)) != len(names):
