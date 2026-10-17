@@ -58,7 +58,7 @@ class TestClientTransport:
 
 def mint_tokens(path: Path) -> dict[str, str]:
     scopes = {"read": ("read",), "write": ("write",), "rw": ("read", "write"),
-              "all": ("read", "write", "printer-control")}
+              "all": ("read", "write", "printer-control"), "camera": ("camera",)}
     return {name: tokens.create(path, f"test-{name}", s)[0] for name, s in scopes.items()}
 
 

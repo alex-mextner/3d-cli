@@ -115,7 +115,7 @@ def test_printops_token_create_then_use_then_revoke(tmp_path: Path, live_api: Li
     assert "ha" in listed.stdout and "read" in listed.stdout
     assert revoked.returncode == 0 and "revoked 'ha'" in revoked.stdout
     assert after.returncode == 1 and "unknown or revoked token" in after.stderr
-    assert bad_scope.returncode == 2 and "accepted: read, write, printer-control" in bad_scope.stderr
+    assert bad_scope.returncode == 2 and "accepted: read, write, printer-control, camera" in bad_scope.stderr
 
 
 def test_printops_backup_writes_consistent_snapshots(tmp_path: Path, live_api: LiveApi) -> None:
