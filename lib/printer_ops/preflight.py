@@ -22,6 +22,8 @@ WHAT (issue https://github.com/alex-mextner/3d-cli/issues/96), one PASS/WARN/FAI
                  (slicing/slice_warnings.py, `3d slice-warnings`);
   - head seq     every object prints each layer on its recipe's heads (slicing/head_sequence.py,
                  issue #103) — needs the project 3MF: --source-3mf or NAME.3mf next to the G-code;
+  - mix face     every part in a mixed filament shows its colour on walls: FAIL when its top
+                 outweighs half its walls (slicing/mix_faces.py, issue #411; same project 3MF);
   - visible      `3d visible-faces --gcode` when --visible specs are given;
   - printops     the PrintOps material gates (printops_checks.py, issue #164) when a
                  PrintopsContext is given: filament temperatures, loaded spool, remaining
@@ -397,6 +399,26 @@ def check_head_sequence(
     )
 
 
+def check_mix_faces(project: Path | None, project_source: str) -> Check:
+    """Issue #411: a part in a mixed filament shows its colour on walls, not on a flat top."""
+    if project is None:
+        return Check(
+            "mix face",
+            SKIP,
+            "no project 3MF: pass --source-3mf FILE.3mf or keep NAME.3mf next to NAME.gcode",
+        )
+    from slicing.mix_faces import preflight_check
+
+    result = preflight_check(str(project))
+    lines = result.get("lines")
+    return Check(
+        "mix face",
+        str(result.get("status", FAIL)),
+        f"{result.get('detail')} ({project_source})",
+        [str(x) for x in lines] if isinstance(lines, list) else [],
+    )
+
+
 def check_visible(gcode: Path, specs: Sequence[str]) -> Check:
     """`3d visible-faces --gcode`: no support / sag on the declared visible sides."""
     if not specs:
@@ -665,6 +687,7 @@ def run_preflight(
     report.checks.append(check_slice_warnings(origin or gcode, gcode))
     project, project_source = find_project_3mf(origin or gcode, source_3mf)
     report.checks.append(check_head_sequence(gcode, project, project_source))
+    report.checks.append(check_mix_faces(project, project_source))
     report.checks.append(check_visible(gcode, visible))
     if source_3mf is not None:
         report.checks.append(check_halves(source_3mf))

@@ -84,6 +84,7 @@ Target package: `lib/geometry/`, with subpackages only when a real boundary appe
   `printer_agent.py` (`3d printer agent`: the temporary per-printer omp agent in tmux for
   alerts no live subscriber took, and its handoff).
 - `lib/slicing/head_sequence.py` — per-object, per-layer toolhead check of sliced G-code against the project 3MF's mixed-filament patterns (`slice-check --check head-sequence`; `preflight_check()` is the `head seq` gate of `print-preflight`, #103).
+- `lib/slicing/mix_faces.py` — every part printed in a mixed filament (pattern or Local-Z row) of an Orca-family project 3MF shows its colour on walls: face areas by normal in bed coordinates, FAIL when the top outweighs half the walls (`3d mix check`; `preflight_check()` is the `mix face` gate of `print-preflight`, #411).
 - `lib/slicing/slice_warnings.py` — the slicer's warnings for one G-code (Orca-family CLI log, result.json, slice_info of a sliced 3MF) in `NAME.slice-warnings.json` with the G-code's SHA-256 and a reason per accepted warning; backs `3d slice-warnings` and the `slicer warn` gate of `print-preflight`.
 - `lib/printops/` — PrintOps (epic #154) behind `3d printops` and the 3d-api service
   (`services/3d-api/`): `db.py` (SQLite + `migrations/NNNN_<slice>.sql`), `events.py`
