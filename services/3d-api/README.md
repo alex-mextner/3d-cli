@@ -160,10 +160,10 @@ is in `/home/ultra/printops/data/api/ha_token` (`PRINTOPS_HA_TOKEN_FILE`, mode 0
 
 | Endpoint | Scope | |
 |---|---|---|
-| `GET /v1/calibrations` | read | `?printer=&head=&kind=&status=&current=true&limit=N` → `{calibrations}` newest first |
+| `GET /v1/calibrations` | read | `?printer=&head=&kind=&status=&mix=&current=true&limit=N` → `{calibrations}` newest first; `mix` is a colour-mix key (any rotation, 422 when malformed) |
 | `GET /v1/calibrations/required` | read | `?printer=P&head=T` (or `slot=T`) `&spool=ID&plate=&all=true` → `{printer, overall, items, skipped, estimate}` |
 | `POST /v1/calibrations/check` | read (write with `accept`) | `{printer, footer{key: value}, used_tools[], spools?{tool: id}, accept?["calibration:<kind>"], reason?, plate?, gcode_sha?, file?}` → the `calibration_current` gate `{overall, items}`; each acceptance → `calibration.accepted` |
-| `POST /v1/calibrations/runs` | write | `{kind, method, printer?, head?, spool_id?\|filament_id?, lot_nr?, plate?, params?, gcode_path?, gcode_sha?, note?}` → 201 planned calibration |
+| `POST /v1/calibrations/runs` | write | `{kind, method, printer?, head?, spool_id?\|filament_id?, lot_nr?, plate?, mix?, params?, gcode_path?, gcode_sha?, note?}` → 201 planned calibration; `mix` (canonical key, `lib/printops/mix_key.py`) is required for `mix_color` and refused for every other kind |
 | `POST /v1/calibrations/{id}/result` | write | `{values, evidence?, note?, valid_until?}` → recorded; supersedes the same scope; `calibration.recorded` |
 | `POST /v1/calibrations` | write | run fields + `{values, …}` → 201 recorded (manual entry) |
 | `GET /v1/calibrations/{id}` | read | one calibration |
