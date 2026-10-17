@@ -285,28 +285,69 @@ def test_calibrate_usage_errors(tmp_path: Path) -> None:
 K1_FLEET = "k1:\n  model: Creality K1 SE\n  owner: own\n  access: offline\n  heads: [{label: T1, index: 0}]\n"
 
 
+def test_gen_plate_with_the_printers_and_spools_presets(tmp_path: Path) -> None:
+    """The user generates a calibration plate for the orange spool: bin/3d takes the machine and
+    process presets from the printer's fleet entry and the filament preset from the flag, slices
+    with a (fake) Orca, and the G-code and its map name the presets; without a filament preset, or
+    with a preset name carrying a line break, the command refuses instead of slicing."""
+    profiles, orca = write_plate_orca(tmp_path)
+    user = tmp_path / "user"
+    for kind, data in (
+        ("machine", {"name": "K1 SE - Copy", "inherits": "Creality K1 SE 0.4 nozzle"}),
+        ("process", {"name": "Std 8900", "inherits": "0.20mm Standard @Creality K1 SE", "default_acceleration": "8000"}),
+        ("filament", {"name": "Orange PLA @K1SE", "inherits": "Creality Generic PLA @K1-all",
+                      "filament_flow_ratio": ["0.931"], "filament_type": ["PLA"]}),
+    ):
+        (user / kind).mkdir(parents=True, exist_ok=True)
+        (user / kind / f"{data['name']}.json").write_text(json.dumps(data))
+    fleet = tmp_path / "fleet.yaml"
+    fleet.write_text(
+        "k1:\n  model: Creality K1 SE\n  owner: own\n  access: offline\n"
+        "  heads: [{label: T1, index: 0}]\n  slicer: {machine: K1 SE - Copy, process: Std 8900}\n",
+        encoding="utf-8",
+    )
+    env = {"THREED_FLEET": str(fleet), "ORCA_PROFILES": str(profiles), "ORCA_USER_PRESETS": str(user),
+           "SLICER": str(orca)}
+    out = tmp_path / "plate.gcode"
+
+    missing = run_cli(tmp_path, "calibrate", "gen", "plate1", "--printer", "k1", "-o", str(out), env_extra=env)
+    assert missing.returncode == 2
+    assert "no filament preset for k1" in missing.stderr
+    assert not out.exists()
+
+    newline = run_cli(tmp_path, "calibrate", "gen", "plate1", "--printer", "k1", "--filament-preset",
+                      "Orange PLA @K1SE\nM104 S300", "-o", str(out), env_extra=env)
+    assert newline.returncode == 2
+    assert "control character" in newline.stderr
+    assert not out.exists()
+
+    made = run_cli(tmp_path, "calibrate", "gen", "plate1", "--printer", "k1", "--filament-preset",
+                   "Orange PLA @K1SE", "--only", "bridge", "-o", str(out), env_extra=env)
+    assert made.returncode == 0, made.stderr
+    lines = out.read_text().splitlines()
+    assert "; default_acceleration = 8000" in lines
+    assert "; filament_flow_ratio = 0.931" in lines
+    assert ("; 3d calibrate presets: machine=K1 SE - Copy (fleet k1.slicer); process=Std 8900 (fleet k1.slicer); "
+            "filament=Orange PLA @K1SE (--filament-preset)") in lines
+    data = json.loads(out.with_suffix(".json").read_text())
+    assert data["presets"]["filament"] == "Orange PLA @K1SE"
+    assert [o["name"] for o in data["objects"]][-3:] == ["bridge_8", "bridge_11", "bridge_14"]
+
+
 def test_gen_combo_and_temp_through_bin_3d(tmp_path: Path) -> None:
     """The user generates the express-calibration combo plate and a temperature tower for the K1
     SE: bin/3d slices with a (fake) Orca, post-processes, and prints the record hints."""
     profiles, orca = fake_orca(tmp_path)
     fleet = tmp_path / "fleet.yaml"
     fleet.write_text(K1_FLEET, encoding="utf-8")
-    env = {"THREED_FLEET": str(fleet), "ORCA_PROFILES": str(profiles), "SLICER": str(orca)}
+    env = {"THREED_FLEET": str(fleet), "ORCA_PROFILES": str(profiles),
+           "ORCA_USER_PRESETS": str(tmp_path / "user"), "SLICER": str(orca)}
+    presets = ["--machine-preset", "Creality K1 SE 0.4 nozzle", "--process-preset",
+               "0.20mm Standard @Creality K1 SE", "--filament-preset", "Creality Generic PLA @K1-all"]
 
     combo = tmp_path / "combo.gcode"
-    made = run_cli(
-        tmp_path,
-        "calibrate",
-        "gen",
-        "combo",
-        "--printer",
-        "k1",
-        "--color",
-        "#000000",
-        "-o",
-        str(combo),
-        env_extra=env,
-    )
+    made = run_cli(tmp_path, "calibrate", "gen", "combo", "--printer", "k1", "--color", "#000000", *presets,
+                   "-o", str(combo), env_extra=env)
     assert made.returncode == 0, made.stderr
     text = combo.read_text()
     assert "; 3d calibrate gen combo: end of PA lines" in text
@@ -314,38 +355,16 @@ def test_gen_combo_and_temp_through_bin_3d(tmp_path: Path) -> None:
     assert combo.with_name("combo.slice-warnings.json").exists()
 
     temp = tmp_path / "temp.gcode"
-    made = run_cli(
-        tmp_path,
-        "calibrate",
-        "gen",
-        "temp",
-        "--printer",
-        "k1",
-        "--material",
-        "PLA+",
-        "-o",
-        str(temp),
-        env_extra=env,
-    )
+    made = run_cli(tmp_path, "calibrate", "gen", "temp", "--printer", "k1", "--material", "PLA+", *presets,
+                   "-o", str(temp), env_extra=env)
     assert made.returncode == 0, made.stderr
     assert [
         ln.split()[1] for ln in temp.read_text().splitlines() if ln.startswith("M104 S")
     ] == ["S225", "S220", "S215", "S210", "S205", "S200"]
     assert "--method temp_tower" in made.stdout
 
-    refused = run_cli(
-        tmp_path,
-        "calibrate",
-        "gen",
-        "temp",
-        "--printer",
-        "k1",
-        "--nozzle-temp",
-        "215",
-        "-o",
-        str(tmp_path / "t2.gcode"),
-        env_extra=env,
-    )
+    refused = run_cli(tmp_path, "calibrate", "gen", "temp", "--printer", "k1", "--nozzle-temp", "215", *presets,
+                      "-o", str(tmp_path / "t2.gcode"), env_extra=env)
     assert refused.returncode == 2
     assert "drop --nozzle-temp" in refused.stderr
     assert not (tmp_path / "t2.gcode").exists()
@@ -358,10 +377,13 @@ def test_gen_plate1_with_only_skip_and_a_fine_pa_range(tmp_path: Path) -> None:
     profiles, orca = write_plate_orca(tmp_path)
     fleet = tmp_path / "fleet.yaml"
     fleet.write_text(K1_FLEET, encoding="utf-8")
-    env = {"THREED_FLEET": str(fleet), "ORCA_PROFILES": str(profiles), "SLICER": str(orca)}
+    env = {"THREED_FLEET": str(fleet), "ORCA_PROFILES": str(profiles),
+           "ORCA_USER_PRESETS": str(tmp_path / "user"), "SLICER": str(orca)}
+    presets = ["--machine-preset", "Creality K1 SE 0.4 nozzle", "--process-preset",
+               "0.20mm Standard @Creality K1 SE", "--filament-preset", "Creality Generic PLA @K1-all"]
 
     fine = tmp_path / "pa_fine.gcode"
-    made = run_cli(tmp_path, "calibrate", "gen", "plate1", "--printer", "k1", "--only", "pa,flow",
+    made = run_cli(tmp_path, "calibrate", "gen", "plate1", "--printer", "k1", *presets, "--only", "pa,flow",
                    "--pa-range", "0.03:0.05", "--pa-step", "0.0025", "-o", str(fine), env_extra=env)
     assert made.returncode == 0, made.stderr
     data = json.loads(fine.with_suffix(".json").read_text())
@@ -372,16 +394,16 @@ def test_gen_plate1_with_only_skip_and_a_fine_pa_range(tmp_path: Path) -> None:
     assert "temp_tower" not in fine.read_text()
 
     rest = tmp_path / "rest.gcode"
-    made = run_cli(tmp_path, "calibrate", "gen", "plate1", "--printer", "k1", "--skip", "pa,flow",
+    made = run_cli(tmp_path, "calibrate", "gen", "plate1", "--printer", "k1", *presets, "--skip", "pa,flow",
                    "-o", str(rest), env_extra=env)
     assert made.returncode == 0, made.stderr
     text = rest.read_text()
     assert "PA lines" not in text and "flow_m10" not in text and "temp_tower" in text
 
-    refused = run_cli(tmp_path, "calibrate", "gen", "plate1", "--printer", "k1", "--skip", "pa",
+    refused = run_cli(tmp_path, "calibrate", "gen", "plate1", "--printer", "k1", *presets, "--skip", "pa",
                       "--pa-range", "0.03:0.05", "-o", str(tmp_path / "x.gcode"), env_extra=env)
     assert refused.returncode != 0 and "skips them" in refused.stderr
-    as_json = run_cli(tmp_path, "calibrate", "gen", "plate1", "--printer", "k1", "-o",
+    as_json = run_cli(tmp_path, "calibrate", "gen", "plate1", "--printer", "k1", *presets, "-o",
                       str(tmp_path / "plate.json"), env_extra=env)
     assert as_json.returncode != 0 and ".gcode" in as_json.stderr
     assert not (tmp_path / "plate.json").exists()

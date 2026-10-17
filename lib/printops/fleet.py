@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -79,8 +79,12 @@ FLEET_KEYS = frozenset(
         "notes",
         "sources",
         "photo",
+        "slicer",
     }
 )
+# `slicer:` the user presets this printer prints with (the repo's profiles/, `3d profiles sync`):
+# what `3d calibrate gen` slices with unless --machine-preset/--process-preset say otherwise.
+SLICER_KEYS = frozenset({"machine", "process"})
 _NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
 _HEAD_KEYS = frozenset({"label", "index", "extruder", "nozzle", "usable", "reason"})
 _NOZZLE_KEYS = frozenset({"diameter_mm", "material", "type"})
@@ -134,6 +138,7 @@ class FleetPrinter:
     photo: dict[str, Any] | None = (
         None  # top-camera photo settings (topcam.photo_config)
     )
+    slicer: dict[str, str] = field(default_factory=dict)  # SLICER_KEYS -> preset name
 
     @property
     def contactable(self) -> bool:
@@ -298,6 +303,7 @@ def _entry(name: str, spec: Any, path: Path, bad: list[str]) -> FleetPrinter | N
     if notes is not None and not isinstance(notes, str):
         bad.append("notes: must be text")
     sources = _strings(spec.get("sources", []), "sources", bad)
+    slicer = _slicer(spec.get("slicer", {}), bad)
     photo = spec.get("photo")
     if photo is not None:
         from topcam.photo_config import validate as validate_photo
@@ -319,8 +325,25 @@ def _entry(name: str, spec: Any, path: Path, bad: list[str]) -> FleetPrinter | N
         sources,
         device,
         path,
-        dict(photo) if photo is not None else None,
+        photo=dict(photo) if photo is not None else None,
+        slicer=slicer,
     )
+
+
+def _slicer(value: Any, bad: list[str]) -> dict[str, str]:
+    if not isinstance(value, dict):
+        bad.append("slicer: must be a mapping {machine: PRESET, process: PRESET}")
+        return {}
+    bad.extend(_unknown(value, SLICER_KEYS, "slicer."))
+    out: dict[str, str] = {}
+    for key in SLICER_KEYS & set(value):
+        if not isinstance(value[key], str) or not value[key].strip():
+            bad.append(f"slicer.{key}: a preset name")
+        elif any(ord(c) < 32 or ord(c) == 127 for c in value[key]):
+            bad.append(f"slicer.{key}: control characters in a preset name")
+        else:
+            out[key] = value[key].strip()
+    return out
 
 
 def _choice(
