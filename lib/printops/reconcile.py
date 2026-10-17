@@ -20,6 +20,13 @@ KINDS (evidence in anomaly.evidence):
     unknown_slot       printops_slot names a printer or head that is not in the fleet
     location_conflict  the spool's Spoolman location is set and is not this slot ("slot:u1/T3"),
                        i.e. the spool is in two places at once
+  write — from the event log (printops.head_sync, #400):
+    printer_write_failed  the latest head write of a slot (`slot.printer_written` /
+                       `slot.printer_write_failed`) failed for the spool still bound there. Clears
+                       on a later successful write, when the binding changes, or — for a failed
+                       filament write — when a live reading shows the head holding the spool's
+                       material and colour (set on the touchscreen). A failed pressure-advance
+                       restore clears only by writing again (re-run `spool load`) or by unbinding.
   slot.mismatch is emitted with every newly opened live kind and multiple_spools.
 
 LIFECYCLE: one open/ack anomaly per dedupe_key (kind + subject + the evidence that identifies
@@ -45,7 +52,7 @@ from printops import events as ev
 from printops.color import hex_delta_e, parse_hex
 from printops.db import open_db, transaction, utc_now
 from printops.fleet import Fleet, FleetPrinter
-from printops.slots import Reading
+from printops.slots import LiveSlot, Reading
 from printops.spoolman import Spoolman, decode_extra
 
 log = logging.getLogger("printops.reconcile")
@@ -64,7 +71,9 @@ BINDING_KINDS = (
     "unknown_slot",
     "location_conflict",
 )
-KINDS = LIVE_KINDS + BINDING_KINDS
+WRITE_KINDS = ("printer_write_failed",)
+KINDS = LIVE_KINDS + BINDING_KINDS + WRITE_KINDS
+WRITE_EVENTS = ("slot.printer_written", "slot.printer_write_failed")  # printops.head_sync
 SLOT_MISMATCH_KINDS = frozenset((*LIVE_KINDS, "multiple_spools"))
 STATUSES = ("open", "ack", "resolved")
 FLEET_SCOPE = "fleet"
@@ -162,6 +171,34 @@ def bindings(spools: Iterable[Mapping[str, Any]]) -> list[Binding]:
     ]
 
 
+@dataclass(frozen=True)
+class WriteFailure:
+    """The latest head write of a slot, when it failed (event `slot.printer_write_failed`)."""
+
+    slot: str  # "u1/T3"
+    spool_id: int
+    error: str
+    stage: str  # "filament" (head not written) | "pressure_advance" (written, K not restored)
+    at: str
+    event_id: int
+
+
+def write_failures(conn: sqlite3.Connection) -> dict[str, WriteFailure]:
+    """Slot → its latest head write, for the slots whose latest write failed."""
+    rows = conn.execute(
+        "SELECT e.* FROM events e JOIN (SELECT subject, MAX(id) AS id FROM events"
+        " WHERE kind IN (?, ?) GROUP BY subject) last ON e.id = last.id WHERE e.kind = ?",
+        (*WRITE_EVENTS, WRITE_EVENTS[1]),
+    )
+    out = {}
+    for r in rows:
+        p = json.loads(r["payload"])
+        slot = str(r["subject"]).removeprefix("slot:")
+        out[slot] = WriteFailure(slot, int(p.get("spool_id") or 0), str(p.get("error") or ""),
+                                 str(p.get("stage") or "filament"), str(r["at"]), int(r["id"]))
+    return out
+
+
 def _norm_material(m: str) -> str:
     return "".join(m.upper().replace("-", " ").replace("_", " ").split())
 
@@ -179,13 +216,24 @@ class Finding:
         return "|".join((self.kind, self.subject, *self.identity))
 
 
+def _head_matches(live: LiveSlot | None, b: Binding, max_delta_e: float) -> bool:
+    """The printer shows the bound spool's material and colour on this head."""
+    return bool(
+        live is not None and live.material and b.material and live.color and b.colors
+        and _norm_material(live.material) == _norm_material(b.material)
+        and min(hex_delta_e(live.color, c) for c in b.colors) <= max_delta_e
+    )
+
+
 def compare_printer(
     printer: FleetPrinter,
     reading: Reading | None,
     binds: Sequence[Binding],
     max_delta_e: float = DEFAULT_MAX_DELTA_E,
+    failures: Mapping[str, WriteFailure] | None = None,
 ) -> list[Finding]:
-    """Findings for one fleet printer. `reading` None/failed → binding checks only."""
+    """Findings for one fleet printer. `reading` None/failed → binding and write checks only.
+    `failures` = write_failures() (slot → latest failed head write)."""
     heads = {h.label: h for h in printer.heads}
     mine = [b for b in binds if b.printer == printer.name]
     by_head: dict[str, list[Binding]] = {}
@@ -239,6 +287,20 @@ def compare_printer(
                 {"spools": [b.to_dict() for b in bs]},
                 *sorted(b.spool_id for b in bs),
             )
+    live_ok = reading is not None and reading.ok
+    live_by_head = {s.head: s for s in reading.slots} if reading is not None and live_ok else {}
+    for b in mine:
+        f = (failures or {}).get(b.slot)
+        if f is None or f.spool_id != b.spool_id:
+            continue
+        if f.stage == "filament" and _head_matches(live_by_head.get(b.head), b, max_delta_e):
+            continue
+        add(
+            "printer_write_failed",
+            f"slot:{b.slot}",
+            {"spool": b.to_dict(), "error": f.error, "stage": f.stage, "at": f.at, "event_id": f.event_id},
+            b.spool_id,
+        )
 
     if reading is None or not reading.ok:
         return out
@@ -560,16 +622,17 @@ class Reconciler:
         binds = bindings(self.spoolman.find("spool"))
         with self._lock:
             readings = dict(self.readings)
-        # findings first, outside the write lock; then the whole pass in ONE transaction, so a
-        # failure on any scope leaves no half-applied pass (and listeners wake once, at COMMIT)
-        scopes: list[tuple[str, list[Finding], bool]] = []
-        for name, printer in self.printers.items():
-            reading = readings.get(name)
-            findings = compare_printer(printer, reading, binds, self.max_delta_e)
-            scopes.append((name, findings, reading is not None and reading.ok))
-        scopes.append((FLEET_SCOPE, compare_unknown(self.fleet, binds), True))
         conn = open_db(self.db_path)
         try:
+            failures = write_failures(conn)
+            # findings first, outside the write lock; then the whole pass in ONE transaction, so a
+            # failure on any scope leaves no half-applied pass (and listeners wake once, at COMMIT)
+            scopes: list[tuple[str, list[Finding], bool]] = []
+            for name, printer in self.printers.items():
+                reading = readings.get(name)
+                findings = compare_printer(printer, reading, binds, self.max_delta_e, failures)
+                scopes.append((name, findings, reading is not None and reading.ok))
+            scopes.append((FLEET_SCOPE, compare_unknown(self.fleet, binds), True))
             now = utc_now()
             with transaction(conn):
                 out = {

@@ -33,7 +33,7 @@ def _use(monkeypatch: pytest.MonkeyPatch, path: Path) -> Path:
 # ---- the repo fleet file ------------------------------------------------------------------
 
 
-def test_repo_fleet_has_every_printer_with_u1_t2_unusable() -> None:
+def test_repo_fleet_has_every_printer_with_all_u1_heads_usable() -> None:
     fleet = load_fleet(REPO_FLEET)
     assert fleet is not None
     p = fleet.printers
@@ -51,9 +51,7 @@ def test_repo_fleet_has_every_printer_with_u1_t2_unusable() -> None:
         ("T3", 2, "extruder2"),
         ("T4", 3, "extruder3"),
     ]
-    t2 = u1.heads[1]
-    assert not t2.usable and t2.reason and "queue.json" in t2.reason
-    assert all(h.usable for h in u1.heads if h.label != "T2")
+    assert all(h.usable for h in u1.heads)  # owner, 2026-10-20: all four heads work
     assert u1.device["bridge_max_mm"] == 25 and "resume" in u1.device
     assert set(fleet.device_specs()) == {
         "u1",

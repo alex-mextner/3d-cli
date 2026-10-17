@@ -8,7 +8,8 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from fleet_fixtures import REPO_FLEET, write_policy_for_fleet
+from fleet_fixtures import REPO_FLEET, u1_entry, write_fleet, write_policy_for_fleet
+from printer_fakes import FACTORY_K, FakeMoonraker
 from printops_fixtures import LiveApi
 
 from printops import db, locations
@@ -128,6 +129,7 @@ def test_spool_story_receive_load_print_unload_weigh_empty(
         and "HTTP 409" in broken.stderr
     )
     assert loaded.returncode == 0 and "in u1/T3" in loaded.stdout, loaded.stderr
+    assert "printer head: failed" in loaded.stdout and "the printer head was NOT updated" in loaded.stderr
     assert used.returncode == 0 and "900 ± 22 g (878–922)" in used.stdout, used.stderr
     assert (
         listed.stdout.startswith(f"#{sid}")
@@ -152,11 +154,47 @@ def test_spool_story_receive_load_print_unload_weigh_empty(
         "spool.received",
         "spool.moved",
         "slot.loaded",
+        "slot.printer_write_failed",  # the fleet's u1 is 127.0.0.1:9, nothing listens (#400)
         "spool.used",
         "spool.measured",  # unload --gross weighs first, then unloads
         "slot.unloaded",
         "spool.empty",
     ]
+
+
+def test_load_shows_the_spool_on_the_u1_head_and_no_printer_write_leaves_it(
+    tmp_path: Path, shop: LiveApi, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The owner loads a green spool into U1 T3: the printer head now says Elegoo PLA+ #4FE44D
+    (read back), the factory pressure advance stays with a WARNING (no calibration yet). A
+    second spool goes into T4 with --no-printer-write: the printer is not touched."""
+    moon = FakeMoonraker()
+    with moon.serve():
+        fleet = write_fleet(tmp_path / "fleet-moon.yaml", u1_entry(moon))
+        monkeypatch.setenv("THREED_FLEET", str(fleet))
+        monkeypatch.setenv("PRINTOPS_POLICY", str(write_policy_for_fleet(tmp_path / "policy-moon.yaml", fleet)))
+        ids = []
+        for name, color in (("RAPID PLA+ Green", "#4FE44D"), ("RAPID PLA+ White", "#FFFFFF")):
+            got = _cli(tmp_path, shop, "printops", "spool", "receive", "--vendor", "Elegoo", "--material",
+                       "PLA+", "--name", name, "--color", color, "--net", "1000", "--location", "WH:default",
+                       "--json")
+            assert got.returncode == 0, got.stderr
+            ids.append(str(json.loads(got.stdout)["id"]))
+        loaded = _cli(tmp_path, shop, "printops", "spool", "load", ids[0], "u1/T3")
+        quiet = _cli(tmp_path, shop, "printops", "spool", "load", ids[1], "u1/T4", "--no-printer-write")
+
+    assert loaded.returncode == 0, loaded.stderr
+    assert (
+        f"printer head: #4FE44D Elegoo PLA+ Basic (read back), pressure advance K={FACTORY_K:g} (factory)"
+        in loaded.stdout
+    )
+    assert f"WARNING: u1/T3 keeps the firmware's factory pressure advance K={FACTORY_K}" in loaded.stderr
+    cfg = moon.status["print_task_config"]
+    assert (cfg["filament_color_rgba"][2], cfg["filament_vendor"][2], cfg["filament_type"][2]) == (
+        "4FE44DFF", "Elegoo", "PLA+")
+    assert quiet.returncode == 0 and "in u1/T4" in quiet.stdout, quiet.stderr
+    assert "printer head: skipped" in quiet.stdout and "WARNING" not in quiet.stderr
+    assert len(moon.scripts) == 1 and moon.scripts[0].startswith("SET_PRINT_FILAMENT_CONFIG CONFIG_EXTRUDER=2 ")
 
 
 def test_a_fault_opened_from_the_cli_stops_loads_into_that_head_until_closed(

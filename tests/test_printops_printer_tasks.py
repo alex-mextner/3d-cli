@@ -12,7 +12,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from fleet_fixtures import REPO_FLEET
+from fleet_fixtures import write_fleet_with_synthetic_broken_t2
 from printops_fakes import FakeSpoolman
 
 from printops import calibrations as cal
@@ -191,7 +191,7 @@ U1 = [
 def env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     rules = tmp_path / "maintenance-rules.yaml"
     rules.write_text(RULES, encoding="utf-8")
-    monkeypatch.setenv("THREED_FLEET", str(REPO_FLEET))
+    monkeypatch.setenv("THREED_FLEET", str(write_fleet_with_synthetic_broken_t2(tmp_path / "fleet" / "printers.yaml")))
     monkeypatch.setenv("THREED_MAINTENANCE_RULES", str(rules))
     monkeypatch.delenv("PRINTOPS_POLICY", raising=False)
     monkeypatch.delenv("PRINTOPS_CALIBRATIONS", raising=False)
@@ -861,11 +861,11 @@ def test_manual_task_lifecycle_dependencies_and_snoozes(
         conn,
         shaper["id"],
         actor="me",
-        until="2026-10-20T09:00+02:00",
+        until="2099-10-20T09:00+02:00",
         reason="after the house queue",
     )
     assert (
-        sn["status"] == "snoozed" and sn["snoozed_until"] == "2026-10-20T07:00:00.000Z"
+        sn["status"] == "snoozed" and sn["snoozed_until"] == "2099-10-20T07:00:00.000Z"
     )
     with pytest.raises(pt.TaskError, match="not in the future"):
         pt.snooze(conn, shaper["id"], actor="me", until="2020-01-01")
@@ -873,7 +873,7 @@ def test_manual_task_lifecycle_dependencies_and_snoozes(
         conn,
         src,
         "k1se",
-        now=datetime.datetime(2026, 10, 21, tzinfo=datetime.timezone.utc),
+        now=datetime.datetime(2099, 10, 21, tzinfo=datetime.timezone.utc),
     )
     assert (
         shaper["id"] in rep.updated and pt.get(conn, shaper["id"])["status"] == "open"

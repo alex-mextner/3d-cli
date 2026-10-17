@@ -15,7 +15,8 @@ USAGE = """3d printops anomalies [--status open,ack|resolved|all] [--printer NAM
   Reconciliation anomalies: a printer slot that disagrees with the spool bound to it in Spoolman
   (type_mismatch, color_mismatch — CIEDE2000 above the threshold, tag_mismatch,
   empty_with_spool, unbound_filament) or a binding that cannot be right (multiple_spools,
-  unusable_head, unknown_slot, location_conflict). 3d-api opens and resolves them by itself;
+  unusable_head, unknown_slot, location_conflict), or a printer head that `spool load` could not
+  write (printer_write_failed; re-run the load to retry). 3d-api opens and resolves them by itself;
   `ack` marks one as known ("leave it") until it clears, `resolve` closes it now (if the
   condition is still there, the next pass opens a new one). Listing needs scope `read`,
   ack/resolve scope `write`.

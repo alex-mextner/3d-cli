@@ -63,7 +63,7 @@ service is never exposed to the internet.
 | `tare` | The sourced empty-spool weight DB (SpoolmanDB seed + own weighings) and the tare chain of a spool. See [printops-spool.md](printops-spool.md#3d-printops-tare). |
 | `dry` | Drying sessions (start / finish / ls) and the spools due for drying by the `drying:` policy in `fleet/policy.yaml`. |
 | `slots` | Every fleet printer slot by slot: what the printer reports loaded (live, read by 3d-api's poller), the spool bound to it in Spoolman, open anomalies. |
-| `anomalies` | Slot reconciliation anomalies (type/colour/tag mismatch, empty slot with a spool, unknown filament, impossible bindings); `ack` / `resolve` them. |
+| `anomalies` | Slot reconciliation anomalies (type/colour/tag mismatch, empty slot with a spool, unknown filament, impossible bindings, a printer head `spool load` could not write); `ack` / `resolve` them. |
 | `gates` | The PrintOps state the material gates of [`3d print-preflight`](print-preflight.md#printops-material-gates) read (spool per slot, filament data, remaining interval, drying), and its offline snapshot for the slicer hook. |
 | `incidents` | Print incidents with an auto-filled snapshot (job, layer, G-code temperatures/speed/flow, spool, lot, drying), drafts from `3d printer watch`, rates per kg and per print-hour by vendor/filament/lot/printer/head. See [printops-incidents.md](printops-incidents.md). |
 | `maint` | Printer components (nozzle per head, PTFE, hotend, plates, …) seeded from `fleet/printers.yaml`, nozzle swaps and component work that invalidate calibrations, the maintenance log, faults (the U1's broken T2), and the due rules of `fleet/maintenance-rules.yaml` from Moonraker job history. See [printops-maint.md](printops-maint.md). |
@@ -310,7 +310,7 @@ u1  Snapmaker U1  [full]  printing 16% u1_walls_main_v3-de0f43df5562b59c.gcode  
 ### `anomalies`
 
 Each reconcile pass (after every poll, and right after `slot.loaded` / `slot.unloaded` /
-`spool.*` events) compares each slot with the spools whose Spoolman extra field
+`slot.printer_written` / `slot.printer_write_failed` / `spool.*` events) compares each slot with the spools whose Spoolman extra field
 `printops_slot` names it (`u1/T3`):
 
 | Kind | When |
@@ -324,6 +324,7 @@ Each reconcile pass (after every poll, and right after `slot.loaded` / `slot.unl
 | `unusable_head` | a spool bound to a head the fleet marks `usable: false` |
 | `unknown_slot` | `printops_slot` names a printer or head not in the fleet |
 | `location_conflict` | the spool's Spoolman location is set and is not `slot:<printer>/<head>` |
+| `printer_write_failed` | the latest head write of `spool load` (event `slot.printer_write_failed`) failed for the spool still bound there. Clears after a successful write (run the load again), when the binding changes, or — for a failed filament write — when the printer shows the spool's material and colour (set on the touchscreen) |
 
 A new anomaly emits `anomaly.opened` (and `slot.mismatch` for the slot kinds); one that is no
 longer seen is resolved by `reconcile` (`anomaly.resolved`). Printer-side kinds stay open while

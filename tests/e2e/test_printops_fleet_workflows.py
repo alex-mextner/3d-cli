@@ -10,7 +10,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from fleet_fixtures import REPO_FLEET, u1_entry, write_fleet
+from fleet_fixtures import REPO_FLEET, u1_entry, write_fleet, write_fleet_with_synthetic_broken_t2
 from printer_fakes import FakeMoonraker
 
 from .workflow_helper import THREED, isolated_env, run_cli
@@ -23,12 +23,13 @@ def test_printer_list_shows_the_whole_fleet_with_the_broken_u1_head(
 ) -> None:
     """The user plans where to print: every printer they can use, whose it is, whether 3d may
     drive it, and which heads work — the U1's T2 is broken."""
-    listed = run_cli(tmp_path, "printer", "list", env_extra=REPO)
-    as_json = run_cli(tmp_path, "printer", "list", "--json", env_extra=REPO)
+    broken = {"THREED_FLEET": str(write_fleet_with_synthetic_broken_t2(tmp_path / "synthetic" / "printers.yaml"))}
+    listed = run_cli(tmp_path, "printer", "list", env_extra=broken)
+    as_json = run_cli(tmp_path, "printer", "list", "--json", env_extra=broken)
 
     assert listed.returncode == 0, listed.stderr
     assert "T1 | T2 UNUSABLE | T3 | T4" in listed.stdout
-    assert "T2: head T2 does not work" in listed.stdout
+    assert "T2: synthetic fixture fault: head T2 does not work" in listed.stdout
     assert "neighbour" in listed.stdout and "- (never contacted)" in listed.stdout
     rows = json.loads(as_json.stdout)
     assert len(rows) >= 5
@@ -45,7 +46,8 @@ def test_printer_list_shows_the_whole_fleet_with_the_broken_u1_head(
 
 def test_unusable_heads_pipe_through_jq_style_shell_chain(tmp_path: Path) -> None:
     """A shell script lists the broken heads of the fleet: `3d printer list --json | python`."""
-    env = isolated_env(tmp_path) | REPO
+    synthetic = write_fleet_with_synthetic_broken_t2(tmp_path / "synthetic" / "printers.yaml")
+    env = isolated_env(tmp_path) | {"THREED_FLEET": str(synthetic)}
     script = (
         f"{sys.executable} {THREED} printer list --json | {sys.executable} -c "
         "\"import json,sys; print(' '.join(r['name']+'/'+h['label'] for r in json.load(sys.stdin) "

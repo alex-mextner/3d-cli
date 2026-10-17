@@ -57,7 +57,7 @@ No tare → `measure` refuses (409) and says why; pass `--tare G` (recorded for 
 3d printops spool receive --from-photo IMG|TXT [any receive flag …] [--yes]
 3d printops spool scan IMG|TXT [IMG|TXT …] [--location LOC]
 3d printops spool move ID LOCATION
-3d printops spool load ID PRINTER/SLOT [--replace-to LOCATION]
+3d printops spool load ID PRINTER/SLOT [--replace-to LOCATION] [--no-printer-write] [--force-official]
 3d printops spool unload PRINTER/SLOT [--to LOCATION] [--gross G]
 3d printops spool use ID GRAMS [--source S] [--confidence G] [--job JOB] [--note TEXT]
 3d printops spool measure ID GROSS_G [--tare G [--tare-source TEXT]] [--scale-sigma G] [--note TEXT]
@@ -103,6 +103,38 @@ Every action takes `--json` (the API answer), `--api URL`, `--token TOKEN`.
   slot unless `--replace-to LOCATION` says where the current spool goes, an archived spool.
   Offline printers (other people's, D7) are recorded by hand like any other.
   `3d printops spool load 7 u1/T3`
+
+  **The printer head is written too** (issue [#400](https://github.com/alex-mextner/3d-cli/issues/400)),
+  after the binding is saved, so the printer screen and the preflight slot check see the spool.
+  Today that is the Snapmaker U1 (Moonraker with `print_task_config`): 3d-api sends one
+  `SET_PRINT_FILAMENT_CONFIG` for that head — colour = filament `color_hex` (else the first
+  `multi_color_hexes`), material = filament `material`, vendor = the Spoolman vendor (`Generic`
+  when none), sub-type `Basic` — and reads `print_task_config` back.
+
+  The U1 resets the head's pressure advance on every filament write (`FLOW_RESET_K`). So 3d-api
+  reads `extruderN.pressure_advance` afterwards. If `3d calibrate` has a **current**
+  `pressure_advance` record for this head and spool, its K goes back with `SET_PRESSURE_ADVANCE`
+  and is read back. If not, the factory K stays and the load prints a WARNING. That K lasts until
+  Klipper restarts (the firmware then re-applies its own stored K); a G-code with
+  `enable_pressure_advance = 1` sets its own K anyway.
+
+  Not written: AMS slots, offline printers, printers without per-head filament (K1 SE). Refused,
+  with a WARNING: a printer that is printing or paused (the K reset would hit the job), a head
+  holding official Snapmaker RFID filament (only with `--force-official`), a vendor/material with
+  `# ; * "` `'` (Klipper cannot carry them), a filament without colour or material in Spoolman.
+  A refused or failed write keeps the binding, opens a `printer_write_failed` anomaly
+  (`3d printops anomalies`) and exits 0; run the same `load` again to retry.
+  `3d printops spool load 7 u1/T3`
+
+  ```
+  loaded #7    Elegoo PLA+ RAPID PLA+ Green #4FE44D  in u1/T3  1000 ± 20 g (980–1020)
+    printer head: #4FE44D Elegoo PLA+ Basic (read back), pressure advance K=0.02 (factory)
+  WARNING: u1/T3 keeps the firmware's factory pressure advance K=0.02 (no current calibration for spool #7: pressure advance is new_material_type: no PLA+ recorded yet (Elegoo RAPID PLA+ Green lot L2409))
+  ```
+- `--no-printer-write` — bind in Spoolman only; the head stays as it is.
+  `3d printops spool load 7 u1/T3 --no-printer-write`
+- `--force-official` — also overwrite a head that shows official Snapmaker RFID filament.
+  `3d printops spool load 7 u1/T1 --force-official`
 - `unload` — take the spool out (to `--to LOCATION`, else no location); the slot is spelled as
   for `load` (`u1/t3` = `u1/T3`, `ams1/02` = `ams1/2`), and a head marked unusable can still be
   emptied. `--gross G` weighs it first: a weighing that fails leaves it loaded; an unload that
@@ -193,7 +225,7 @@ label.jpg  (OCR, turned 0°, score 87.8)
 | POST | `/v1/spools/{id}/use` | write | `{grams, source, confidence_g?, job_id?, note?}` |
 | POST | `/v1/spools/{id}/measure` | write | `{gross_g, tare_g?, tare_source?, scale_sigma_g?, note?}` |
 | POST | `/v1/spools/{id}/empty` | write | `{note?}` |
-| POST | `/v1/printers/{p}/slots/{s}/load` | write | `{spool_id, replace_to?}` (`s` = `T3` or `ams1/2`) |
+| POST | `/v1/printers/{p}/slots/{s}/load` | write | `{spool_id, replace_to?, printer_write? (true), force_official? (false)}` (`s` = `T3` or `ams1/2`); the answer adds `printer_write {status: written\|skipped\|failed, reason, wanted, before, after, pressure_advance {action: restored\|factory\|restore_failed, k, calibration_id}, warnings}` |
 | POST | `/v1/printers/{p}/slots/{s}/unload` | write | `{to?, gross_g?, spool_id?}` |
 | GET / POST | `/v1/tares` | read / write | `vendor` / `{vendor, tare_g, source, spool_kind?, net_g?, sigma_g?, note?}` |
 | GET | `/v1/lint` | read | `weigh_days` — the data rules below |
@@ -204,7 +236,10 @@ input, 502 Spoolman failed.
 
 Events: `spool.received`, `spool.moved`, `slot.loaded` / `slot.unloaded` (subject
 `slot:u1/T3`, payload `printer`, `head`, `spool_id`), `spool.used`, `spool.measured` (gross,
-tare and its source, net, ±, previous interval), `spool.empty`.
+tare and its source, net, ±, previous interval), `spool.empty`, and after a load
+`slot.printer_written` (payload `printer`, `head`, `spool_id`, `wanted`, `after`,
+`pressure_advance`) or `slot.printer_write_failed` (`wanted`, `error`, `stage` = `filament` |
+`pressure_advance`).
 
 Python API for other slices: `printops.ledger.book(conn, spoolman, spool_id, grams, source,
 confidence_g, job_id=None, note=None, *, actor)`, `ledger.remaining(conn, spoolman, spool_id)

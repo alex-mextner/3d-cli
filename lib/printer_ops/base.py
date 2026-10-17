@@ -109,6 +109,27 @@ class UploadResult:
     note: str = ""
 
 
+@dataclass(frozen=True)
+class HeadFilament:
+    """What a head should show it holds (the U1 touchscreen's per-head filament)."""
+
+    color: str     # "#RRGGBB"
+    material: str  # PLA, PETG, ... (the firmware's filament_type)
+    vendor: str
+    sub_type: str
+
+
+@dataclass
+class HeadWrite:
+    """Outcome of `Adapter.set_head_filament`, every field read back from the printer."""
+
+    index: int                       # 0-based head index (G-code tool number)
+    extruder: str                    # Klipper object of that head (extruder, extruder1, ...)
+    before: Slot                     # what the head showed before the write
+    after: Slot                      # what it shows after (matches the request)
+    pressure_advance: float | None   # the extruder's K after the write (the firmware may reset it)
+
+
 class Adapter:
     """Interface every printer backend implements. Unimplemented ops raise UnsupportedOperation."""
 
@@ -157,6 +178,17 @@ class Adapter:
         printer_ops/bed.py and the `3d calibrate photo` pose/light in topcam/photo.py). Returns
         once the printer ran it, waiting at most `timeout` seconds."""
         raise self._unsupported("run_gcode")
+
+    def set_head_filament(self, index: int, filament: HeadFilament, *,
+                          force_official: bool = False) -> HeadWrite:
+        """Make head `index` show `filament` on the printer, verified by reading it back.
+        `force_official` also overwrites a head whose filament came from an official RFID tag."""
+        raise self._unsupported("writing a head's filament")
+
+    def set_pressure_advance(self, index: int, advance: float, *,
+                             smooth_time: float | None = None) -> float:
+        """Set head `index`'s pressure advance; returns the K read back from the printer."""
+        raise self._unsupported("setting pressure advance")
 
     def _unsupported(self, op: str) -> UnsupportedOperation:
         return UnsupportedOperation(
