@@ -51,7 +51,7 @@ u1:
   watch:
     tg_fallback: true       # `3d printer watch`: tg only for warning+ events that no subscribed agent took
     bed:                    # camera bed state (#303, `3d printer bed --help`): bed_clear/bed_occupied, start gate
-      enabled: true         # ROI from the bundled camera calibration; reference at the PRINT_END park, Z 200
+      enabled: true         # ROI from the bundled camera calibration; references at the PRINT_END park (Z 200) and the post-G28 rest (Z 10); at Z >= ~215 the bed is out of the camera's view (#402)
       clear_ack:            # one motor sound after bed_clear; no beeper/M300 on the U1 (configfile, 2026-10-16)
         enabled: false      # to enable, also add STEPPER_BUZZ (Klipper built-in, net-zero ±1 mm) to trusted_macros
         command: STEPPER_BUZZ STEPPER=stepper_z

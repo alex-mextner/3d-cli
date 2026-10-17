@@ -438,13 +438,22 @@ verifier and threshold tuning: [printer-vision-tuning.md](../research/printer-vi
 until someone takes them off. The camera can see that, so nobody has to tell an agent «стол
 свободен», and a start onto old parts or onto the bare magnetic sheet is refused.
 
-- **Reference.** With the bed empty and the plate on, at the Z where the printer parks after a
-  job (U1 `PRINT_END`/`CANCEL_PRINT`: Z 200; K1 SE `END_PRINT`: half of Z max = 125):
-  `3d printer bed reference u1 --capture`. The bed moves in Z on both printers, so a reference
-  only counts within `z_tol_mm` (0.5) of the current Z. `--capture --no-plate` (plate off) adds the
-  bare-bed reference that makes the plate test reliable. `--capture --from FRAME.jpg --z 199.7`
-  stores a saved snapshot of the empty bed taken at that Z instead. Stored in
+- **Reference.** With the bed empty and the plate on, at each Z where the printer rests after a
+  job (U1: Z 200 after `PRINT_END`/`CANCEL_PRINT`, Z 10 after a `G28`; K1 SE `END_PRINT`: half of
+  Z max = 125): `3d printer bed reference u1 --capture`. The bed moves in Z on both printers. With
+  a camera calibration (the U1) a reference stands for any Z where the calibrated bed picture
+  moved under 1.5 px of the 480-px frame — the U1's `PRINT_END` park reads toolhead Z 199.7 or
+  200.3 depending on the job's mesh and Z offset, the same picture; without one (`watch.bed.roi`,
+  the K1 SE) only within `z_tol_mm` (0.5) of the current Z. `--capture --no-plate` (plate off)
+  adds the bare-bed reference that makes the plate test reliable. `--capture --from FRAME.jpg --z
+  199.7` stores a saved snapshot of the empty bed taken at that Z instead. Stored in
   `~/.local/share/3d-cli/bed/NAME/`; `3d printer bed reference u1` lists them.
+- **Out of view.** The calibration also says how much of the bed is in the frame: the U1 camera
+  sits about 12 mm above the bed's Z 0, so the lower the bed goes the less of it shows (Z 10: 98 %,
+  Z 200: 15 %, Z 215: under 10 %, Z 275 — where a home leaves it — none). Under 10 % the state is
+  `unknown`, "out of the camera's view … it sees the bed again at Z 210 or below", and no
+  reference is taken there: it would read every low part as a clear bed
+  ([#402](https://github.com/alex-mextner/3d-cli/issues/402)).
 - **Status.** `3d printer bed status u1` — `clear` / `occupied` / `unknown` and plate `present` /
   `missing` / `unknown`, with the reason and an evidence frame (ROI cyan, changed pixels red) in
   `~/.cache/3d-cli/vision/bed/`. `--max-age S` takes the watcher's last verdict when it was
@@ -457,20 +466,25 @@ until someone takes them off. The camera can see that, so nobody has to tell an 
   and ≤ 3 % is `clear`, in between `unknown`. ROI: `watch.bed.roi` (a polygon of the bed, 0..1 of
   the frame), else the camera calibration (bed plus 80 mm above it at the current Z), else the
   whole frame. On the U1 at Z 200 only parts taller than a few cm show, and only the plate's front
-  edge is in view (about 2 % of the frame), so the plate verdict rests on that strip; the U1's
-  own `DETECT_BED_PLATE` still checks the plate at start. Below 2 % of the frame the surface
-  counts as out of view (plate `unknown`, the bed check WARNs).
+  edge is in view (about 2 % of the frame), so the plate verdict rests on that strip and the
+  reason says how much of the bed the camera sees; the U1's own `DETECT_BED_PLATE` still checks
+  the plate at start. Below 2 % of the frame the surface counts as out of view (plate `unknown`,
+  the bed check WARNs).
 - **Monitor.** `3d printer watch` runs `bed monitor NAME` as a child for every Moonraker printer
   with `watch.bed.enabled: true`. Nothing is grabbed while a job runs; otherwise one snapshot per
   `interval_s` (1 s), identical bytes skipped, one reduced decode + one masked difference per new
   frame; the bed is judged only after a change has settled for 3 frames (a hand in the chamber is
   not judged), and once at start. Events (info, with `data.frame`): `bed_occupied` (parts after
-  a job, or put on), `bed_clear`, `plate_missing`, `plate_present` (after missing). Subscribe an
-  agent to them: `3d printer subscribe --session ID --kinds 'bed_*,plate_*' --min-severity info`.
+  a job, or put on), `bed_clear`, `plate_missing`, `plate_present` (after missing); and the
+  warning `bed_unknown` when the first verdict after a job cannot tell (out of view, no
+  reference at that Z, a small part or a shadow) — once per job, never silence. Warnings reach
+  the subscribed agent first and tg only as the watcher's no-subscriber fallback
+  (`watch.tg_fallback`). Subscribe an agent to them:
+  `3d printer subscribe --session ID --kinds 'bed_*,plate_*' --min-severity info`.
   The last verdict is in `~/.local/state/3d-cli/bed/NAME.json` and in the watch heartbeat.
 - **Start gate.** `3d printer start` and `3d print-preflight --printer` add a `bed` line: FAIL on
   objects or a missing plate, PASS on a clear bed with the plate, WARN when the camera cannot
-  tell (no reference at this Z, stale, plate out of view, camera down); `--force` overrides.
+  tell (no reference at this Z, out of view, stale, plate out of view, camera down); `--force` overrides.
 - **Clear acknowledgement** (`watch.bed.clear_ack`, off by default): after `bed_clear` the
   printer makes one motor sound so the person at it knows the camera saw the empty bed. Neither
   printer has a beeper, so the command is `STEPPER_BUZZ STEPPER=stepper_z` (Klipper: ±1 mm ×10,
