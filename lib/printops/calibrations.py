@@ -10,6 +10,8 @@ catalog (fleet/calibrations.yaml) lists for the kind, nothing else. A newer reco
 identical scope supersedes the older one (`superseded_by`). Past records imported from the
 settings-history buffer (#264, printops.settings_history) keep their measurement time as
 `recorded_at`, and superseding between them follows that time (`insert_past`).
+A colour-mix kind (scope printer + `mix`, #412, plan §20.4) is keyed by its canonical mix key
+(printops.mix_key, column `mix`, migration 0081): records of other mixes never supersede it.
 
 REQUIREMENT ENGINE (plan §8.1): for a printer head and the spool bound to it (Spoolman
 `printops_slot`, #160) every catalog kind of the printer's model gets a status:
@@ -25,6 +27,8 @@ REQUIREMENT ENGINE (plan §8.1): for a printer head and the spool bound to it (S
   new_material_type  no record for this material type at all
   no_spool           the kind needs a filament and no spool is bound to the head (UNVERIFIED)
 The policy (fleet/policy.yaml `calibrations:`) turns a reason into block (FAIL) / warn / off.
+Mix-scoped kinds are not in these lists: a printer has no single mix; the pre-print check of a
+plate's mixes looks their records up by key (#418).
 
 INVALIDATION (#166 contract): event kind `calibration.invalidated`, payload {printer, head|null,
 trigger, kinds|null, reason, maintenance_id|null, nozzle_install_id|null}. It voids every record
@@ -64,6 +68,7 @@ from printops import events as ev
 from printops.calibration_catalog import Catalog, CatalogError, Kind
 from printops.calibration_policy import CalibrationPolicy
 from printops.fleet import Fleet, FleetPrinter, Head
+from printops.mix_key import MixKeyError, canonical
 from printops.spoolman import JSON, Spoolman, SpoolmanError
 
 PASS, WARN, FAIL, UNVERIFIED, OFF = "PASS", "WARN", "FAIL", "UNVERIFIED", "OFF"
@@ -193,6 +198,7 @@ class Calibration:
     recorded_by: str | None
     valid_until: str | None
     superseded_by: int | None
+    mix: str | None = None
 
     @classmethod
     def from_row(cls, r: sqlite3.Row) -> Calibration:
@@ -224,6 +230,7 @@ class Calibration:
             recorded_by=r["recorded_by"],
             valid_until=r["valid_until"],
             superseded_by=r["superseded_by"],
+            mix=r["mix"],
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -232,6 +239,7 @@ class Calibration:
             "printer": self.printer, "head": self.head,
             "nozzle": self.nozzle.to_dict() if self.nozzle else None,
             "plate": self.plate,
+            "mix": self.mix,
             "filament": self.filament.to_dict() if self.filament else None,
             "method": self.method, "params": self.params,
             "gcode_path": self.gcode_path, "gcode_sha": self.gcode_sha,
@@ -253,6 +261,14 @@ def get(conn: sqlite3.Connection, cal_id: int) -> Calibration:
     return Calibration.from_row(row)
 
 
+def _mix_or_422(text: str | None) -> str | None:
+    """The canonical mix key, or a 422 that says what a key looks like."""
+    try:
+        return None if text is None else canonical(text)
+    except MixKeyError as e:
+        raise CalibrationError(422, str(e)) from e
+
+
 def list_calibrations(
     conn: sqlite3.Connection,
     *,
@@ -260,6 +276,7 @@ def list_calibrations(
     head: str | None = None,
     kind: str | None = None,
     status: str | None = None,
+    mix: str | None = None,
     current: bool = False,
     limit: int = 100,
 ) -> list[Calibration]:
@@ -268,7 +285,8 @@ def list_calibrations(
         raise CalibrationError(422, f"status must be one of {', '.join(STATUSES)}, got {status!r}")
     where: list[str] = ["1 = 1"]
     args: list[str | int] = []
-    for col, val in (("printer", printer), ("kind", kind), ("status", status)):
+    mix = _mix_or_422(mix)
+    for col, val in (("printer", printer), ("kind", kind), ("status", status), ("mix", mix)):
         if val is not None:
             where.append(f"{col} = ?")
             args.append(val)
@@ -391,6 +409,7 @@ class RunRequest:
     filament_id: int | None = None
     lot_nr: str | None = None
     plate: str | None = None
+    mix: str | None = None
     params: Mapping[str, Any] = field(default_factory=dict)
     gcode_path: str | None = None
     gcode_sha: str | None = None
@@ -422,11 +441,12 @@ class RunRequest:
         sha = text("gcode_sha")
         if sha is not None and not re.fullmatch(r"[0-9a-f]{64}", sha):
             raise CalibrationError(422, "gcode_sha must be a lower-case hex sha256")
-        known = {"kind", "method", "printer", "head", "spool_id", "filament_id", "lot_nr", "plate",
+        known = {"kind", "method", "printer", "head", "spool_id", "filament_id", "lot_nr", "plate", "mix",
                  "params", "gcode_path", "gcode_sha", "note", "values", "evidence", "valid_until"}
         unknown = sorted(str(k) for k in data if k not in known)
         if unknown:
             raise CalibrationError(422, f"unknown field(s) {', '.join(unknown)}")
+        mix = _mix_or_422(text("mix"))
         kind = text("kind", required=True)
         assert kind is not None
         return cls(
@@ -438,6 +458,7 @@ class RunRequest:
             filament_id=integer("filament_id"),
             lot_nr=text("lot_nr"),
             plate=text("plate"),
+            mix=mix,
             params=dict(params),
             gcode_path=text("gcode_path"),
             gcode_sha=sha,
@@ -454,6 +475,7 @@ class _Snapshot:
     plate: str | None
     filament: Filament | None
     spool_id: int | None
+    mix: str | None = None
 
 
 def _kind(catalog: Catalog, kind_id: str) -> Kind:
@@ -492,6 +514,16 @@ def _snapshot(ctx: Ctx, req: RunRequest) -> _Snapshot:
         nozzle = current_nozzle(ctx.conn, req.printer, head_obj)
     if "plate" in kind.scope and p is not None:
         plate = _plate(p, req.plate, required=True)
+    mix: str | None = None
+    if kind.mix_scoped:
+        if req.mix is None:
+            raise CalibrationError(422, f"{kind.id} is per colour mix: pass mix (e.g. h0.12:f3.f12.f7)")
+        if req.head is not None or req.spool_id is not None or req.filament_id is not None:
+            # the key names the filaments; a head or spool would be stored half (no filament)
+            raise CalibrationError(422, f"{kind.id} is per printer and mix: drop head, spool_id and filament_id")
+        mix = _mix_or_422(req.mix)  # requests built in code skip from_json
+    elif req.mix is not None:
+        raise CalibrationError(422, f"{kind.id} is not per colour mix: drop mix")
 
     filament: Filament | None = None
     spool_id = req.spool_id
@@ -512,7 +544,7 @@ def _snapshot(ctx: Ctx, req: RunRequest) -> _Snapshot:
                             _lot(req.lot_nr), filament.spool_id)
     if "filament" not in kind.scope:
         filament = None
-    return _Snapshot(kind, printer, head, nozzle, plate, filament, spool_id)
+    return _Snapshot(kind, printer, head, nozzle, plate, filament, spool_id, mix)
 
 
 def _insert(ctx: Ctx, snap: _Snapshot, req: RunRequest) -> int:
@@ -520,8 +552,8 @@ def _insert(ctx: Ctx, snap: _Snapshot, req: RunRequest) -> int:
     cur = ctx.conn.execute(
         """INSERT INTO calibration (kind, status, printer, head, nozzle_install_id, nozzle_diameter_mm,
                nozzle_material, nozzle_type, plate, filament_id, filament_name, vendor, material, lot_nr,
-               spool_id, method, params, gcode_path, gcode_sha, note, created_at, created_by)
-           VALUES (?, 'planned', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               spool_id, method, params, gcode_path, gcode_sha, note, created_at, created_by, mix)
+           VALUES (?, 'planned', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             snap.kind.id, snap.printer, snap.head,
             n.install_id if n else None, n.diameter_mm if n else None,
@@ -531,7 +563,7 @@ def _insert(ctx: Ctx, snap: _Snapshot, req: RunRequest) -> int:
             f.material if f else None, f.lot_nr if f else None,
             snap.spool_id, req.method,
             json.dumps(dict(req.params), sort_keys=True), req.gcode_path, req.gcode_sha, req.note,
-            db.utc_now(), ctx.actor,
+            db.utc_now(), ctx.actor, snap.mix,
         ),
     )
     return int(cur.lastrowid or 0)
@@ -542,6 +574,7 @@ def _event_scope(cal: Calibration) -> dict[str, Any]:
         "id": cal.id, "kind": cal.kind, "printer": cal.printer, "head": cal.head,
         "filament_id": cal.filament.filament_id if cal.filament else None,
         "lot_nr": cal.filament.lot_nr if cal.filament else None,
+        "mix": cal.mix,
         "method": cal.method,
     }
 
@@ -584,7 +617,7 @@ def _same_scope(a: Calibration, b: Calibration, lot_sensitive: bool) -> bool:
         a.nozzle is not None and b.nozzle is not None and a.nozzle.same(b.nozzle)
     )
     return (a.kind == b.kind and a.printer == b.printer and a.head == b.head and a.plate == b.plate
-            and same_fil and same_nozzle)
+            and a.mix == b.mix and same_fil and same_nozzle)
 
 
 def _apply_result(ctx: Ctx, cal: Calibration, result: Mapping[str, Any]) -> Calibration:
@@ -609,7 +642,8 @@ def _apply_result(ctx: Ctx, cal: Calibration, result: Mapping[str, Any]) -> Cali
         (json.dumps(values, sort_keys=True), json.dumps(evidence), now, ctx.actor, until, note, cal.id),
     )
     new = get(ctx.conn, cal.id)
-    older = [c for c in list_calibrations(ctx.conn, kind=cal.kind, current=True, limit=1000)
+    # a mix kind is filtered by its key in SQL: mixes are many, the 1000-row page must not cut them
+    older = [c for c in list_calibrations(ctx.conn, kind=cal.kind, mix=new.mix, current=True, limit=1000)
              if c.id != cal.id and _same_scope(c, new, _kind(ctx.catalog, cal.kind).lot_sensitive)]
     for c in older:
         ctx.conn.execute("UPDATE calibration SET superseded_by = ? WHERE id = ?", (cal.id, c.id))
@@ -699,7 +733,7 @@ def insert_past(ctx: Ctx, prep: PreparedRecord) -> Calibration:
         probe = new if (new.nozzle is None) == (c.nozzle is None) else replace(new, nozzle=c.nozzle)
         return _same_scope(c, probe, kind.lot_sensitive)
 
-    same = [c for c in list_calibrations(ctx.conn, kind=kind.id, current=True, limit=1000)
+    same = [c for c in list_calibrations(ctx.conn, kind=kind.id, mix=new.mix, current=True, limit=1000)
             if c.id != cal_id and overlaps(c)]
     older = [c for c in same if (c.recorded_at or "") <= past.at]
     newer = sorted((c for c in same if (c.recorded_at or "") > past.at), key=lambda c: c.recorded_at or "")
@@ -950,7 +984,7 @@ def _head_evals(ctx: Ctx, p: FleetPrinter, head: Head, bound: Bound, plate: str 
         _Eval(kind=k, printer=p.name, head=head.label, nozzle=nozzle, plate=plate,
               filament=bound.filament, filament_note=bound.note, plates_known=len(p.plates or ()))
         for k in ctx.catalog.kinds.values()
-        if k.applies_to(p.model) and ("head" in k.scope or "filament" in k.scope)
+        if k.applies_to(p.model) and ("head" in k.scope or "filament" in k.scope) and not k.mix_scoped
         and not ctx.policy.disabled(p.name, k.id)
     ]
 
@@ -960,7 +994,7 @@ def _printer_evals(ctx: Ctx, p: FleetPrinter, plate: str | None) -> list[_Eval]:
         _Eval(kind=k, printer=p.name, head=None, nozzle=None, plate=plate, filament=None,
               filament_note=None, plates_known=len(p.plates or ()))
         for k in ctx.catalog.kinds.values()
-        if k.applies_to(p.model) and "head" not in k.scope and "filament" not in k.scope
+        if k.applies_to(p.model) and "head" not in k.scope and "filament" not in k.scope and not k.mix_scoped
         and not ctx.policy.disabled(p.name, k.id)
     ]
 

@@ -28,9 +28,9 @@ if TYPE_CHECKING:  # registry contract: stdlib-only at import time
 
 USAGE = """3d calibrate plan --printer P [--head T] [--spool ID] [--plate PLATE] [--all]
 3d calibrate record KIND --printer P [--head T] [--spool ID | --filament ID] [--lot LOT] [--plate PLATE]
-                    --values NAME=V[,NAME=V…] [--method M] [--note TEXT] [--evidence URL[,URL…]]
-                    [--valid-until DATE]
-3d calibrate ls [--printer P] [--head T] [--kind KIND] [--status planned|recorded|abandoned] [--all] [--limit N]
+                    [--mix KEY] --values NAME=V[,NAME=V…] [--method M] [--note TEXT]
+                    [--evidence URL[,URL…]] [--valid-until DATE]
+3d calibrate ls [--printer P] [--head T] [--kind KIND] [--mix KEY] [--status planned|recorded|abandoned] [--all] [--limit N]
 3d calibrate show ID
 3d calibrate check FILE.gcode --printer P [--spools T1=ID,…] [--plate PLATE]
                    [--accept calibration:KIND[,…] --reason TEXT]
@@ -41,7 +41,8 @@ USAGE = """3d calibrate plan --printer P [--head T] [--spool ID] [--plate PLATE]
 
   Calibrations per printer head and filament (fleet/calibrations.yaml: flow_ratio, pressure_advance,
   temp_tower, max_volumetric_speed, retraction, input_shaper, z_offset, bed_mesh, head_offsets,
-  rotation_distance, belt_tension). 3d-api compares what is loaded on a head (the spool bound with
+  rotation_distance, belt_tension; colour: filament_color, mix_color — read by `3d mix`, never
+  required before a print). 3d-api compares what is loaded on a head (the spool bound with
   `3d printops spool load`) with the records: a new material type, vendor or filament blocks flow
   ratio and pressure advance, a new lot warns, a nozzle swap or maintenance makes old records stale
   (fleet/policy.yaml `calibrations:` sets block/warn/off per reason, kind and printer).
@@ -75,6 +76,9 @@ Options:
   --filament ID      record for a Spoolman filament without a spool (e.g. a temperature tower)
   --lot LOT          lot number of the record (default: the spool's Spoolman lot_nr)
   --plate PLATE      build plate (z_offset, bed_mesh); default: the printer's only plate
+  --mix KEY          record/ls: the colour mix of a mix_color record — layer height and the Spoolman
+                     filament ids of its layer cycle (h0.12:f3.f12.f7; 431 and 314 are one mix) or
+                     its Local-Z shares (h0.12:lz:f1=25,f4=75)
   --values N=V,…     result values, e.g. pressure_advance=0.035 or flow_ratio=0.97
   --method M         how it was measured (the kind's methods; default manual)
   --evidence URLs    photo URLs / notes kept with the record
@@ -112,6 +116,8 @@ Examples:
   3d calibrate record pressure_advance --printer u1 --head T3 --values pressure_advance=0.035 --method pa_pattern
   3d calibrate record flow_ratio --printer k1se --head T1 --values flow_ratio=0.97 --note "tiles 3/5"
   3d calibrate record temp_tower --filament 7 --values nozzle_temp_min=205,nozzle_temp_best=215,nozzle_temp_max=230
+  3d calibrate record filament_color --spool 12 --values hex=#C8902A,spoolman_hex=#F6C700 --method mix_tester_photo
+  3d calibrate record mix_color --printer u1 --mix h0.12:f3.f12.f7 --values hex=#B5654F,predicted_hex=#A86A55
   3d calibrate check plate.gcode --printer u1
   3d calibrate check plate.gcode --printer u1 --accept calibration:flow_ratio --reason "test cube, flow irrelevant"
   3d calibrate plan --printer u1 --json | jq '.items[] | {head, kind, status, level}'
@@ -242,6 +248,7 @@ def _record(argv: list[str]) -> int:
             "--filament",
             "--lot",
             "--plate",
+            "--mix",
             "--values",
             "--method",
             "--note",
@@ -273,6 +280,7 @@ def _record(argv: list[str]) -> int:
         ("--head", "head"),
         ("--lot", "lot_nr"),
         ("--plate", "plate"),
+        ("--mix", "mix"),
         ("--method", "method"),
         ("--note", "note"),
         ("--valid-until", "valid_until"),
@@ -299,6 +307,7 @@ def _record_line(rec: dict[str, Any]) -> str:
     where = (
         "/".join(x for x in (rec.get("printer"), rec.get("head")) if x) or "any printer"
     )
+    where += f" mix {rec['mix']}" if rec.get("mix") else ""
     fil = rec.get("filament") or {}
     what = " ".join(
         str(x) for x in (fil.get("vendor"), fil.get("name") or fil.get("material")) if x
@@ -324,7 +333,7 @@ def _ls(argv: list[str]) -> int:
     p = parse(
         argv,
         "ls",
-        values={"--printer", "--head", "--kind", "--status", "--limit"} | COMMON_VALUES,
+        values={"--printer", "--head", "--kind", "--mix", "--status", "--limit"} | COMMON_VALUES,
         flags={"--all"} | COMMON_FLAGS,
         prefix=PREFIX,
     )
@@ -335,6 +344,7 @@ def _ls(argv: list[str]) -> int:
             printer=p.opts.get("--printer"),
             head=p.opts.get("--head"),
             kind=p.opts.get("--kind"),
+            mix=p.opts.get("--mix"),
             status=p.opts.get("--status"),
             current=None if "--all" in p.flags or "--status" in p.opts else "true",
             limit=limit,
