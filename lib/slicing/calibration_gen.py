@@ -211,16 +211,18 @@ def presets_stamp(p: Presets, material: str) -> str:
     )
 
 
-def profile_roots(slicer: str) -> list[Path]:
-    """Where the Orca build keeps its system profiles: next to the binary (extracted AppImage,
-    macOS bundle), then the per-user copies Orca writes on first start."""
+def profile_roots(slicer: str | None) -> list[Path]:
+    """Where the Orca build keeps its system profiles: $ORCA_PROFILES, next to the binary
+    (extracted AppImage, macOS bundle; skipped without one), then the per-user copies Orca
+    writes on first start."""
     env = os.environ.get("ORCA_PROFILES")
     roots = [Path(env)] if env else []
-    exe = Path(slicer).resolve()
-    roots += [
-        exe.parent / "resources" / "profiles",
-        exe.parent.parent / "Resources" / "profiles",
-    ]
+    if slicer:
+        exe = Path(slicer).resolve()
+        roots += [
+            exe.parent / "resources" / "profiles",
+            exe.parent.parent / "Resources" / "profiles",
+        ]
     home = Path.home()
     roots += [
         home / ".config" / app / "system" for app in ("Snapmaker_Orca", "OrcaSlicer")

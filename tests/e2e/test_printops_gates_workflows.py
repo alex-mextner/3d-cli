@@ -354,5 +354,7 @@ def test_preflight_catches_a_plate_sliced_with_stock_presets(tmp_path: Path) -> 
     assert bad.returncode == 1, bad.stderr
     got = _checks(bad.stdout)["preset_match"]
     assert got["status"] == "FAIL"
-    assert "Creality K1 SE 0.4 nozzle" in json.dumps(got) and "K1 SE - Copy" in json.dumps(got)
+    assert got["detail"] == (
+        "sliced with machine preset 'Creality K1 SE 0.4 nozzle', the printer prints with 'K1 SE - Copy' (+1 more)"
+    ), got
     assert _checks(good.stdout)["preset_match"]["status"] == "PASS", good.stdout

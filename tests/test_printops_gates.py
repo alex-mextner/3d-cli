@@ -1202,21 +1202,32 @@ def _k1_presets(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, accel: str = "8
     )
     monkeypatch.setenv("ORCA_PROFILES", str(tmp_path / "profiles"))
     monkeypatch.setenv("ORCA_USER_PRESETS", str(tmp_path / "user"))
-    monkeypatch.delenv("SLICER", raising=False)
+    # no slicer binary: the system presets come from ORCA_PROFILES alone (CI has no Orca)
+    monkeypatch.setattr("cli.env.find_slicer", lambda: None)
 
 
-def _k1_gcode(tmp_path: Path, machine: str, process: str, accel: str = "8900") -> Path:
+def _k1_gcode(
+    tmp_path: Path,
+    machine: str,
+    process: str,
+    accel: str | None = "8900",
+    *,
+    name: str = "plate.gcode",
+    body: str = "M104 S215\nG1 X1 E1\n",
+) -> Path:
+    values = {"default_acceleration": accel, "outer_wall_acceleration": "5000"}
     return gcode(
         tmp_path,
+        name,
         model="Creality K1 SE",
         types="PLA",
         colours="#000000",
         vendors="Elegoo",
         used_g=(20.0,),
         hrc="0",
-        body="M104 S215\nG1 X1 E1\n",
+        body=body,
         extra={"printer_settings_id": machine, "print_settings_id": process,
-               "default_acceleration": accel, "outer_wall_acceleration": "5000"},
+               **{k: v for k, v in values.items() if v is not None}},
     )
 
 
@@ -1272,3 +1283,31 @@ def test_preset_match_without_fleet_presets_is_unverified_and_policy_can_warn(
     assert check.status == "UNVERIFIED" and "no `slicer: {machine, process}` for k1bare" in check.detail
     override(tmp_path, monkeypatch, preset_match="warn")
     assert _preset(path).status == "WARN"
+
+
+def test_preset_match_names_only_on_a_calibration_print(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`3d calibrate gen pa` sets every acceleration to 500 on purpose and stamps the G-code."""
+    _k1_presets(tmp_path, monkeypatch)
+    stamp = "; 3d calibrate presets: machine=K1 SE - Copy (fleet k1se.slicer); process=Std 8900 (fleet k1se.slicer)\n"
+    check = _preset(_k1_gcode(tmp_path, "K1 SE - Copy", "Std 8900", accel="500", body=stamp + "G1 X1 E1\n"))
+    assert check.status == "PASS", check.detail
+    assert any("calibration print" in ln for ln in check.lines)
+
+
+def test_preset_match_missing_inputs_are_unverified(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _k1_presets(tmp_path, monkeypatch)
+    no_accel = _preset(_k1_gcode(tmp_path, "K1 SE - Copy", "Std 8900", accel=None, name="a.gcode"))
+    assert no_accel.status == "UNVERIFIED"
+    assert "the G-code has no `; default_acceleration` (preset 8900)" in no_accel.detail
+    no_ids = _preset(gcode(tmp_path, "b.gcode", model="Creality K1 SE", extra={"printer_settings_id": ""}))
+    assert no_ids.status == "UNVERIFIED"
+    assert "no `; printer_settings_id`" in "\n".join([no_ids.detail, *no_ids.lines])
+    fleet = tmp_path / "k1.yaml"
+    fleet.write_text(
+        K1_FLEET.replace("slicer: {machine: K1 SE - Copy, process: Std 8900}", "slicer: {machine: K1 SE - Copy}"),
+        encoding="utf-8",
+    )
+    half = _preset(_k1_gcode(tmp_path, "K1 SE - Copy", "Std 8900", name="c.gcode"))
+    assert half.status == "UNVERIFIED" and "fleet `slicer:` has no process preset" in half.detail
