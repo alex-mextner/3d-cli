@@ -98,7 +98,8 @@ add theirs there.
 
 ### `token`
 
-Tokens carry independent scopes: `read`, `write`, `printer-control`. The tokens file on the
+Tokens carry independent scopes: `read`, `write`, `printer-control`, `camera` (`camera` is only
+accepted by `PUT /v1/camera-nodes/{name}` with `{name}` = the token name: the token a camera node keeps on its SD card). The tokens file on the
 Odroid is `/home/ultra/printops/data/api/tokens.json` (`/data/tokens.json` in the
 `printops-api` container); the API re-reads it on change, so no restart is needed.
 
@@ -107,6 +108,7 @@ Odroid is `/home/ultra/printops/data/api/tokens.json` (`/data/tokens.json` in th
 - `--ssh HOST` — run the command inside the `printops-api` container on HOST over ssh; the new
   token is printed locally and stored nowhere but as sha256 on the Odroid.
   `3d printops token create bot --scopes read,write --ssh ultra@192.168.0.39`
+  `3d printops token create topcam --scopes camera --ssh ultra@192.168.0.39`
   `3d printops token list --ssh ultra@192.168.0.39`
   `3d printops token revoke bot --ssh ultra@192.168.0.39`
 - `--file PATH` — operate on a local tokens file instead (tests, a local 3d-api).

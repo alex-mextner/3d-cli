@@ -13,7 +13,9 @@ INVARIANTS:
   - The file is written atomically (tmp + rename) with mode 0600.
   - `TokenStore` re-reads the file when its mtime/size changes, so a new or revoked token takes
     effect on the next request without restarting the API.
-  - Scopes are independent (`read`, `write`, `printer-control`); a route names the one it needs.
+  - Scopes are independent (`read`, `write`, `printer-control`, `camera`); a route names the
+    one(s) it accepts. `camera` is least-privilege for a camera node's SD card: only
+    `PUT /v1/camera-nodes/{name}` accepts it, so a stolen card can change nothing else.
 """
 from __future__ import annotations
 
@@ -32,7 +34,7 @@ from typing import Any
 
 from printops.db import utc_now
 
-SCOPES = ("read", "write", "printer-control")
+SCOPES = ("read", "write", "printer-control", "camera")
 TOKEN_PREFIX = "po_"
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,63}$")
 

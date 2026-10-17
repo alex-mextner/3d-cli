@@ -45,6 +45,8 @@ def isolated_env(tmp_path: Path) -> dict[str, str]:
     env.pop("PYTHONPATH", None)
     env.pop("HF_TOKEN", None)
     env.pop("OPENSCADPATH", None)
+    env.pop("PRINTOPS_API", None)  # a host 3d-api config must not reach a test's CLI
+    env.pop("PRINTOPS_TOKEN", None)
     # A git hook (the pre-commit gate) exports GIT_INDEX_FILE/GIT_DIR; left set, a test's
     # `git init/add/commit` in a temp repo would write into the host repo's index instead.
     for var in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR",
