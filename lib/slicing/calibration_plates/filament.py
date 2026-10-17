@@ -249,24 +249,30 @@ def _pa(ctx: PlateContext) -> Section:
     )
 
 
-def _mvs(ctx: PlateContext) -> Section:
+def _mvs(
+    ctx: PlateContext,
+    values: tuple[int, ...] = MVS_VALUES,
+    lines: int = MVS_LINES,
+    labels: bool = True,
+) -> Section:
     """A solid strip: first layer slow, then MVS_TEST_LAYERS layers whose speed per segment gives
-    MVS_VALUES mm³/s. Zigzag lines along X; segments keep their speed in both directions."""
-    strip_d = (MVS_LINES - 1) * MVS_SPACING + MVS_W
+    `values` mm³/s. Zigzag lines along X; segments keep their speed in both directions. Without
+    `labels` the caller labels the segments (Section.depth is then the strip alone)."""
+    strip_d = (lines - 1) * MVS_SPACING + MVS_W
     lh = COMBO_LABEL[1]
 
     def build(
         x0: float, y0: float
     ) -> tuple[tuple[PlateObject, ...], tuple[CustomBlock, ...]]:
         ex = ctx.ex
-        xs = [x0 + k * MVS_SEG_L for k in range(len(MVS_VALUES) + 1)]
-        ys = [y0 + MVS_W / 2 + j * MVS_SPACING for j in range(MVS_LINES)]
-        speeds = [v / (MVS_W * MVS_H) for v in MVS_VALUES]
+        xs = [x0 + k * MVS_SEG_L for k in range(len(values) + 1)]
+        ys = [y0 + MVS_W / 2 + j * MVS_SPACING for j in range(lines)]
+        speeds = [v / (MVS_W * MVS_H) for v in values]
         # Labels first, on the bare bed: after the strip the nozzle may not come down to the
         # first-layer travel height again (the strip's top is above it).
         label_y = y0 + strip_d + MVS_LABEL_GAP
         out: list[str] = []
-        for k, mvs in enumerate(MVS_VALUES):
+        for k, mvs in enumerate(values if labels else ()):
             out += label_lines(
                 ctx, str(mvs), xs[k] + MVS_SEG_L / 2 - label_width(str(mvs)) / 2, label_y
             )
@@ -296,9 +302,7 @@ def _mvs(ctx: PlateContext) -> Section:
                     y = ry
                 forward = abs(x - xs[0]) < 1e-6
                 order = (
-                    range(len(MVS_VALUES))
-                    if forward
-                    else range(len(MVS_VALUES) - 1, -1, -1)
+                    range(len(values)) if forward else range(len(values) - 1, -1, -1)
                 )
                 for k in order:
                     nx = xs[k + 1] if forward else xs[k]
@@ -317,7 +321,7 @@ def _mvs(ctx: PlateContext) -> Section:
                 (xs[k], y0, 0.0, xs[k + 1], y0 + strip_d, top),
                 {"max_volumetric_speed": v, "speed_mm_s": round(speeds[k], 1)},
             )
-            for k, v in enumerate(MVS_VALUES)
+            for k, v in enumerate(values)
         )
         return (), (
             CustomBlock(
@@ -330,7 +334,7 @@ def _mvs(ctx: PlateContext) -> Section:
                     "layer_mm": MVS_H,
                     "test_layers": MVS_TEST_LAYERS,
                 },
-                "Strip, left to right; label (behind it) = mm³/s. The top stays solid and glossy while the hotend "
+                f"Strip, left to right; label ({'behind' if labels else 'in front of'} it) = mm³/s. The top stays solid and glossy while the hotend "
                 "keeps up; past its limit the lines thin out, gaps and a matte, rough surface appear. "
                 "max_volumetric_speed = the last clean segment (use ~90 % of it in profiles).",
                 "3d calibrate record max_volumetric_speed --printer PRINTER --values max_volumetric_speed=VALUE "
@@ -339,7 +343,11 @@ def _mvs(ctx: PlateContext) -> Section:
         )
 
     return Section(
-        "mvs", len(MVS_VALUES) * MVS_SEG_L, strip_d + MVS_LABEL_GAP + lh, False, build
+        "mvs",
+        len(values) * MVS_SEG_L,
+        strip_d + (MVS_LABEL_GAP + lh if labels else 0.0),
+        False,
+        build,
     )
 
 
