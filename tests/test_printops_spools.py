@@ -195,6 +195,91 @@ def test_full_lifecycle_receive_store_load_use_unload_weigh_empty(
     assert show["ledger"][2]["gross_g"] == 974 and show["ledger"][2]["tare_g"] == 154
 
 
+def test_load_refuses_a_head_with_open_faults_until_all_are_closed(po: ApiClient) -> None:
+    """A fault opened from the CLI/voice stops loads into that head without editing the fleet file (#233)."""
+    spool = po.post("/v1/spools", GREEN)["id"]
+    loaded = po.post("/v1/spools", {**GREEN, "name": "RAPID PLA+ White", "color_hex": "#FFFFFF"})["id"]
+    po.post("/v1/printers/u1/slots/t3/load", {"spool_id": loaded})
+    clicks = po.post("/v1/printers/u1/faults", {"symptom": "extruder clicks", "head": "t3"})  # stored as T3
+    heater = po.post("/v1/printers/u1/faults", {"symptom": "heater fluctuates", "head": "T3"})
+
+    # a spool already in the head can still come out to service it
+    assert po.post("/v1/printers/u1/slots/T3/unload", {})["slot"] is None
+
+    refused = _err(po.post, "/v1/printers/u1/slots/t3/load", {"spool_id": spool})
+    assert refused.status == 409
+    assert f"#{clicks['id']} extruder clicks" in refused.message
+    assert f"#{heater['id']} heater fluctuates" in refused.message
+    assert po.get(f"/v1/spools/{spool}")["slot"] is None  # nothing was written to Spoolman
+    assert _err(po.post, "/v1/printers/u1/slots/T3/load", {"spool_id": 999}).status == 404  # spool first
+
+    replace = _err(po.post, "/v1/printers/u1/slots/T3/load", {"spool_id": spool, "replace_to": "WH:A/S1"})
+    assert replace.status == 409 and "open fault(s)" in replace.message  # the fault wins over replace_to
+    po.post("/v1/printers/u1/slots/T1/load", {"spool_id": spool})  # other heads stay usable
+    po.post("/v1/printers/u1/slots/T1/unload", {})
+    printer_wide = po.post("/v1/printers/u1/faults", {"symptom": "enclosure fan noisy"})
+    po.post("/v1/printers/u1/slots/T4/load", {"spool_id": spool})  # a printer-wide fault gates no head
+    po.post("/v1/printers/u1/slots/T4/unload", {})
+    po.post(f"/v1/faults/{printer_wide['id']}/close", {"status": "wontfix"})
+
+    po.post(f"/v1/faults/{clicks['id']}/close", {"status": "fixed", "root_cause": "gear cleaned"})
+    still = _err(po.post, "/v1/printers/u1/slots/T3/load", {"spool_id": spool})
+    assert still.status == 409 and f"#{heater['id']}" in still.message and f"#{clicks['id']} " not in still.message
+    po.post(f"/v1/faults/{heater['id']}/close", {"status": "wontfix", "root_cause": "within tolerance"})
+    assert po.post("/v1/printers/u1/slots/T3/load", {"spool_id": spool})["slot"] == "u1/T3"
+
+
+def test_an_ams_slot_loads_while_a_head_of_the_same_printer_has_a_fault(po: ApiClient) -> None:
+    """AMS slots are not heads: a fault on p1s T1 does not block p1s/ams1/2 (#233)."""
+    spool = po.post("/v1/spools", GREEN)["id"]
+    po.post("/v1/printers/p1s/faults", {"symptom": "nozzle clogged", "head": "T1"})
+    assert _err(po.post, "/v1/printers/p1s/slots/T1/load", {"spool_id": spool}).status == 409
+    assert po.post("/v1/printers/p1s/slots/ams1/2/load", {"spool_id": spool})["slot"] == "p1s/ams1/2"
+
+
+def test_a_load_refusal_names_the_oldest_faults_only(po: ApiClient) -> None:
+    """Four open faults: the refusal names three, shortened, and counts the rest."""
+    spool = po.post("/v1/spools", GREEN)["id"]
+    ids = [po.post("/v1/printers/u1/faults", {"symptom": f"problem {i} " + "x" * 200, "head": "T4"})["id"]
+           for i in range(4)]
+    refused = _err(po.post, "/v1/printers/u1/slots/T4/load", {"spool_id": spool})
+    assert "has 4 open fault(s)" in refused.message and "(+1 more)" in refused.message
+    assert f"#{ids[2]} problem 2" in refused.message and f"#{ids[3]} " not in refused.message
+    assert "x" * 81 not in refused.message
+
+
+def test_a_fault_symptom_with_control_characters_is_refused(po: ApiClient) -> None:
+    """Symptoms are echoed to terminals in refusals and `fault ls`: no escape sequences."""
+    bad = _err(po.post, "/v1/printers/u1/faults", {"symptom": "clicks\x1b]52;c;cGF3bmVk\x07", "head": "T3"})
+    assert bad.status == 422 and "control characters" in bad.message
+    c1 = _err(po.post, "/v1/printers/u1/faults", {"symptom": "clicks\x9b31m", "head": "T3"})  # C1 CSI
+    assert c1.status == 422
+    bidi = _err(po.post, "/v1/printers/u1/faults", {"symptom": "clicks \u202eskcilc", "head": "T3"})
+    assert bidi.status == 422
+    lone_cr = _err(po.post, "/v1/printers/u1/faults", {"symptom": "clicks\r#99  FIXED  u1/T3", "head": "T3"})
+    assert lone_cr.status == 422
+    fault = po.post("/v1/printers/u1/faults", {"symptom": "clicks\r\nthen stops", "head": "T3"})
+    assert fault["symptom"] == "clicks\nthen stops"  # CRLF stored as LF
+    closing = _err(po.post, f"/v1/faults/{fault['id']}/close", {"root_cause": "gear\x1b[2J"})
+    assert closing.status == 422 and "root_cause: control characters" in closing.message
+
+
+def test_a_load_refusal_prints_fault_text_on_one_line_without_escapes(
+    po: ApiClient, printops_db: sqlite3.Connection
+) -> None:
+    """A multi-line symptom, and a row stored before control characters were refused, still give a
+    one-line, escape-free refusal."""
+    spool = po.post("/v1/spools", GREEN)["id"]
+    multi = po.post("/v1/printers/u1/faults", {"symptom": "clicks\nthen\tstops", "head": "T3"})
+    old = po.post("/v1/printers/u1/faults", {"symptom": "placeholder", "head": "T3"})
+    printops_db.execute("UPDATE fault SET symptom = ? WHERE id = ?", ("old\x1b]52;c;cGF3bmVk\x07row", old["id"]))
+    printops_db.commit()
+    refused = _err(po.post, "/v1/printers/u1/slots/T3/load", {"spool_id": spool})
+    assert "\x1b" not in refused.message and "\x07" not in refused.message and "\n" not in refused.message
+    assert f"#{multi['id']} clicks then stops" in refused.message
+    assert f"#{old['id']} old ]52;c;cGF3bmVk row" in refused.message
+
+
 def test_load_refuses_unusable_heads_unknown_slots_and_occupied_slots(
     po: ApiClient, fake_spoolman: FakeSpoolman
 ) -> None:

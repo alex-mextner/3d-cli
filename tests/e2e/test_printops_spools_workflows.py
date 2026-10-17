@@ -159,6 +159,35 @@ def test_spool_story_receive_load_print_unload_weigh_empty(
     ]
 
 
+def test_a_fault_opened_from_the_cli_stops_loads_into_that_head_until_closed(
+    tmp_path: Path, shop: LiveApi
+) -> None:
+    """The owner hears T3 clicking, opens a fault on it; loading a spool there is refused with the
+    fault named, other heads still load, and once the fault is closed T3 takes the spool (#233)."""
+    got = _cli(tmp_path, shop, "printops", "spool", "receive", "--vendor", "Elegoo", "--material", "PLA+",
+               "--name", "RAPID PLA+ Green", "--color", "#4FE44D", "--net", "1000", "--location",
+               "WH:default", "--json")
+    assert got.returncode == 0, got.stderr
+    sid = str(json.loads(got.stdout)["id"])
+
+    opened = _cli(tmp_path, shop, "printops", "maint", "fault", "open", "u1/t3", "--symptom", "extruder clicks",
+                  "--json")
+    assert opened.returncode == 0, opened.stderr
+    fid = str(json.loads(opened.stdout)["id"])
+
+    refused = _cli(tmp_path, shop, "printops", "spool", "load", sid, "u1/t3")
+    assert refused.returncode != 0
+    assert "u1/T3" in refused.stderr and f"#{fid} extruder clicks" in refused.stderr
+    elsewhere = _cli(tmp_path, shop, "printops", "spool", "load", sid, "u1/T1")
+    assert elsewhere.returncode == 0, elsewhere.stderr
+
+    closed = _cli(tmp_path, shop, "printops", "maint", "fault", "close", fid, "--root-cause", "gear cleaned")
+    assert closed.returncode == 0, closed.stderr
+    moved = _cli(tmp_path, shop, "printops", "spool", "load", sid, "u1/t3", "--json")
+    assert moved.returncode == 0, moved.stderr
+    assert json.loads(moved.stdout)["slot"] == "u1/T3"
+
+
 def test_import_owned_dry_run_apply_rerun_and_lint(
     tmp_path: Path, shop: LiveApi
 ) -> None:

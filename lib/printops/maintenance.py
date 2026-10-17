@@ -32,6 +32,7 @@ import datetime
 import json
 import sqlite3
 import threading
+import unicodedata
 from collections.abc import Iterable, Sequence
 from dataclasses import asdict, dataclass, field
 from typing import Any
@@ -369,6 +370,26 @@ def log_maintenance(conn: sqlite3.Connection, fleet: Any, rules: Rules, printer:
 
 
 # -- faults ------------------------------------------------------------------------------------
+_BIDI = frozenset("\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069")
+
+
+def _printable(field_name: str, text: str) -> str:
+    """Fault text is echoed to terminals (fault ls, spool load refusals): CRLF/CR become LF; any
+    other C0/C1 control character (escape sequences, a lone CR that rewrites a line) or bidi
+    override is refused. Tab and LF are fine."""
+    text = text.replace("\r\n", "\n")
+    if any((unicodedata.category(c) == "Cc" and c not in "\t\n") or c in _BIDI for c in text):
+        raise MaintError(f"{field_name}: control characters are not allowed")
+    return text
+
+
+def one_line(text: str, limit: int) -> str:
+    """Fault text for a one-line message: whitespace and any control/format character (rows from
+    before `_printable`, or seeded from the fleet file) become single spaces; cut to `limit`."""
+    cleaned = "".join(" " if unicodedata.category(c) in ("Cc", "Cf") or c.isspace() else c for c in text)
+    return " ".join(cleaned.split())[:limit]
+
+
 def get_fault(conn: sqlite3.Connection, fault_id: int) -> dict[str, Any]:
     r = conn.execute("SELECT * FROM fault WHERE id = ?", (fault_id,)).fetchone()
     if r is None:
@@ -376,12 +397,18 @@ def get_fault(conn: sqlite3.Connection, fault_id: int) -> dict[str, Any]:
     return dict(r)
 
 
-def list_faults(conn: sqlite3.Connection, printer: str | None = None, *, status: str | None = "open") -> list[dict[str, Any]]:
+def list_faults(conn: sqlite3.Connection, printer: str | None = None, *, head: str | None = None,
+                status: str | None = "open") -> list[dict[str, Any]]:
+    """Faults, oldest first per printer. `head` (a canonical label, as `_head` stores it) narrows to
+    one head: an open fault there makes the head unusable (spool loads refuse it, #233)."""
     where: list[str] = []
     args: list[str] = []
     if printer is not None:
         where.append("printer = ?")
         args.append(printer)
+    if head is not None:
+        where.append("head = ?")
+        args.append(head)
     if status is not None:
         if status not in ("open", *FAULT_CLOSE):
             raise MaintError(f"status: {status!r} is not one of open, {', '.join(FAULT_CLOSE)}")
@@ -396,6 +423,7 @@ def open_fault(conn: sqlite3.Connection, fleet: Any, printer: str, *, symptom: s
     hd = _head(fleet, printer, head)
     if not isinstance(symptom, str) or not symptom.strip():
         raise MaintError("symptom: required (what is wrong, as observed)")
+    symptom = _printable("symptom", symptom)
     if component is not None and component not in COMPONENTS:
         raise MaintError(f"component: {component!r} is not one of {', '.join(COMPONENTS)}")
     when = norm_at(at)
@@ -451,6 +479,8 @@ def close_fault(conn: sqlite3.Connection, fault_id: int, *, actor: str, status: 
                 root_cause: str | None = None, fixed_by: int | None = None, printer: str | None = None) -> dict[str, Any]:
     if root_cause is not None and not root_cause.strip():
         root_cause = None
+    if root_cause is not None:
+        root_cause = _printable("root_cause", root_cause)
     with db.transaction(conn):
         return _close(conn, fault_id, printer=printer, status=status, root_cause=root_cause and root_cause.strip(),
                       fixed_by=fixed_by, actor=actor)
