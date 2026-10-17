@@ -132,6 +132,10 @@ def test_the_legacy_buffer_moves_imports_once_and_the_gate_sees_the_calibrations
 
 
 def test_a_repeated_spool_option_is_refused(tmp_path: Path) -> None:
+    """The user binds two refused lines by repeating --spool, as each refusal hint suggests; the
+    parser would keep only the last one, so the command stops and shows the comma-separated form
+    instead of silently dropping a binding."""
     res = run_cli(tmp_path, "settings", "import", "--spool", "a=1", "--spool", "b=2",
                   env_extra={"PRINTOPS_API": "http://127.0.0.1:9", "PRINTOPS_TOKEN": "x"})
-    assert res.returncode == 2 and "--spool given 2 times" in res.stderr
+    assert res.returncode == 2
+    assert "--spool given 2 times" in res.stderr and "--spool UID=…,UID=…" in res.stderr
