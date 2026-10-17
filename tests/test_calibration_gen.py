@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from calibration_fixtures import fake_orca
 from printer_ops.move_bounds import _INERT, _INERT_TOWER, command_word
 from slicing import calibration_gen as cg
 
@@ -128,78 +129,9 @@ def test_inherits_loop_is_an_error(tmp_path: Path) -> None:
         cg.ProfileIndex([tmp_path]).flat("Acme", "process", "a")
 
 
-FAKE_GCODE = """; thumbnails = 16x16/PNG
-START_PRINT EXTRUDER_TEMP=220 BED_TEMP=55
-{objects}{layers}{end}
-; use_relative_e_distances = {relative_e}
-"""
-# Orca's layer markers, 0.2 mm layers up to 60 mm (taller than any temperature tower)
-FAKE_LAYERS = "".join(
-    f";LAYER_CHANGE\n;Z:{i * 0.2:.1f}\nG1 X100 Y100 E0.1\n" for i in range(1, 301)
-)
-
-
-def _fake_orca(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    *,
-    end: str = "END_PRINT",
-    relative_e: str = "1",
-    accel: str = "12000",
-    diameter: str = "1.75",
-) -> str:
-    """An Orca stand-in: writes plate_1.gcode with one EXCLUDE_OBJECT block per STL argument."""
-    root = tmp_path / "profiles"
-    for kind, name, data in (
-        (
-            "machine",
-            "Creality K1 SE 0.4 nozzle",
-            {
-                "bed_exclude_area": ["0x0"],
-                "retraction_length": ["0.8"],
-                "retraction_speed": ["40"],
-            },
-        ),
-        (
-            "process",
-            "0.20mm Standard @Creality K1 SE",
-            {
-                "default_acceleration": accel,
-                "default_jerk": "9",
-                "initial_layer_print_height": "0.2",
-            },
-        ),
-        (
-            "filament",
-            "Creality Generic PLA @K1-all",
-            {
-                "filament_flow_ratio": ["0.98"],
-                "filament_colour": ["#FFFFFF"],
-                "filament_diameter": [diameter],
-            },
-        ),
-    ):
-        d = root / "Creality" / kind
-        d.mkdir(parents=True, exist_ok=True)
-        (d / f"{name}.json").write_text(json.dumps({"name": name, **data}))
+def _fake_orca(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **kw: str) -> str:
+    root, script = fake_orca(tmp_path, **kw)
     monkeypatch.setenv("ORCA_PROFILES", str(root))
-    body = (
-        FAKE_GCODE.replace("{end}", end)
-        .replace("{relative_e}", relative_e)
-        .replace("{layers}", FAKE_LAYERS)
-    )
-    script = tmp_path / "orca"
-    script.write_text(f"""#!/usr/bin/env python3
-import sys, pathlib
-a = sys.argv[1:]
-out = pathlib.Path(a[a.index("--outputdir") + 1])
-objs = "".join(
-    f"EXCLUDE_OBJECT_START NAME={{pathlib.Path(s).name}}_id_{{i}}_copy_0\\nG1 X100 Y100 Z0.2 E1\\n"
-    f"EXCLUDE_OBJECT_END NAME={{pathlib.Path(s).name}}_id_{{i}}_copy_0\\n"
-    for i, s in enumerate(x for x in a if x.endswith(".stl")))
-(out / "plate_1.gcode").write_text({body!r}.replace("{{objects}}", objs))
-""")
-    script.chmod(0o755)
     return str(script)
 
 
@@ -368,7 +300,12 @@ def test_missing_preset_option_is_a_gen_error() -> None:
 
 @pytest.mark.parametrize(
     ("option", "match"),
-    [({"accel": "0"}, "default_acceleration=0"), ({"diameter": "nan"}, "not finite")],
+    [
+        ({"accel": "0"}, "default_acceleration=0"),
+        ({"diameter": "nan"}, "not finite"),
+        ({"retract_speed": "0"}, "retraction_speed=0"),
+        ({"retract_length": "-0.8"}, "retraction_length=-0.8"),
+    ],
 )
 def test_gen_combo_refuses_unusable_preset_numbers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, option: dict[str, str], match: str
@@ -409,7 +346,7 @@ def test_gen_temp_end_to_end_with_a_fake_orca(
     )
     text = out.read_text()
     changes = [ln.split()[1] for ln in text.splitlines() if ln.startswith("M104 S")]
-    assert changes == ["S225", "S220", "S215", "S210", "S205", "S200"]
+    assert changes == [f"S{t}" for t in cg.temp_steps(material)[1:]]
     lines = text.splitlines()
     first = lines.index("M104 S225 ; 3d calibrate gen temp: block 2")
     assert lines[first - 1] == f";Z:{cg.TEMP_BASE[2] + cg.TEMP_BLOCK_H + 0.2:.1f}"

@@ -535,9 +535,8 @@ COMBO_SPEEDS = (20.0, 120.0)  # slow, fast (mm/s)
 COMBO_LINE_W = 0.5
 COMBO_ACCEL = 5000
 COMBO_LABEL = (2.0, 3.0, 1.0)  # digit width, height, gap (mm): legible on a phone photo
-COMBO_LABEL_DIGITS = (
-    3  # label cell width in digits (PA x 1000 up to 999); line starts 2 mm after it
-)
+# label cell: headroom for 3 digits (COMBO_PA_VALUES need 2); the line starts 2 mm after it
+COMBO_LABEL_DIGITS = 3
 COMBO_LABEL_W = COMBO_LABEL_DIGITS * (COMBO_LABEL[0] + COMBO_LABEL[2]) + 2.0
 COMBO_TILE = (20.0, 20.0, 3.0)
 COMBO_TILE_GAP = 6.0
@@ -729,18 +728,29 @@ def gen_combo(
     layer_h = _first(proc, "initial_layer_print_height")
     ratio = _first(fpre, "filament_flow_ratio")
     accel = _first(proc, "default_acceleration")
-    if diameter <= 0 or layer_h <= 0 or ratio <= 0 or accel <= 0:
+    retract = _first(mach, "retraction_length")
+    retract_speed = _first(mach, "retraction_speed")
+    # F0 or a negative length would be invalid G-code right after START_PRINT; 0 mm is "no retraction"
+    if (
+        diameter <= 0
+        or layer_h <= 0
+        or ratio <= 0
+        or accel <= 0
+        or retract_speed <= 0
+        or retract < 0
+    ):
         raise GenError(
             f"preset values must be positive: filament_diameter={diameter:g}, "
             f"initial_layer_print_height={layer_h:g}, filament_flow_ratio={ratio:g}, "
-            f"default_acceleration={accel:g}"
+            f"default_acceleration={accel:g}, retraction_speed={retract_speed:g}, "
+            f"retraction_length={retract:g} (>= 0)"
         )
     ex = Extrusion(
         layer_h=layer_h,
         line_w=COMBO_LINE_W,
         e_per_mm=COMBO_LINE_W * layer_h * ratio / (math.pi * diameter**2 / 4),
-        retract=_first(mach, "retraction_length"),
-        retract_f=_first(mach, "retraction_speed") * 60,
+        retract=retract,
+        retract_f=retract_speed * 60,
         lift=COMBO_LIFT,
     )
     # The PA block runs right after START_PRINT, before the slicer's first layer: the bed is hot,
@@ -910,8 +920,9 @@ def gen_temp(
             "without stringing or droop, best = the cleanest.",
             "Record: 3d calibrate record temp_tower --filament ID --values nozzle_temp_min=MIN,"
             "nozzle_temp_best=BEST,nozzle_temp_max=MAX --method temp_tower",
-            "The tower crosses the usual window: if the spool's filament has nozzle_temp_min/max set "
-            "narrower, print-preflight's filament_temp_range FAILs; check the rest and start with --force.",
+            f"print-preflight's filament_temp_range FAILs when {steps[0]} °C (the first block) is outside "
+            "the spool's nozzle_temp_min/max; the tower crosses the window on purpose: check the rest and "
+            "start with --force.",
         ],
     )
 
