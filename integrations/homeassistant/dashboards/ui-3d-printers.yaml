@@ -221,6 +221,77 @@ views:
             public_url: https://spry-gazelle-4693.dataplicity.io
             refresh: 5
 
+      # Printer to-do lists (3d-cli #285, packages/printops_tasks.yaml): tick an item = done; Done /
+      # Snooze act on the task number typed above them. Derived tasks refuse Done (a notification
+      # names the command that records the work).
+      - type: grid
+        cards:
+          - type: heading
+            heading: Калибровки и ТО
+            icon: mdi:clipboard-list-outline
+          - type: markdown
+            title: K1 SE
+            content: |
+              {% set s = state_attr('sensor.printops_k1se_tasks', 'summary') %}
+              {% if s is none %}3d-api: no data{% else -%}
+              **{{ s.open }}** open · **{{ s.blocking }}** blocking · {{ s.waiting }} waiting · {{ s.snoozed }} snoozed
+              {% for t in state_attr('sensor.printops_k1se_tasks', 'tasks') %}
+              - **#{{ t.id }}** {{ t.title }}{{
+                ' — ⛔ blocks ' ~ {'head': 'head ' ~ t.head, 'slot': 'slot ' ~ t.slot}.get(t.blocks, 'the printer')
+                if t.blocks != 'none' else '' }}{{
+                ' · ⏳ waits for #' ~ (t.waiting_on | join(', #')) if t.waiting_on else '' }}{{
+                ' · 💤 snoozed' if t.status == 'snoozed' else '' }}{{ ' · ' ~ t.duration_min ~ ' min' if t.duration_min else '' }}
+              {%- endfor %}{% endif %}
+          - type: todo-list
+            entity: todo.printops_k1se
+            hide_completed: true
+          - type: markdown
+            title: U1
+            content: |
+              {% set s = state_attr('sensor.printops_u1_tasks', 'summary') %}
+              {% if s is none %}3d-api: no data{% else -%}
+              **{{ s.open }}** open · **{{ s.blocking }}** blocking · {{ s.waiting }} waiting · {{ s.snoozed }} snoozed
+              {% for t in state_attr('sensor.printops_u1_tasks', 'tasks') %}
+              - **#{{ t.id }}** {{ t.title }}{{
+                ' — ⛔ blocks ' ~ {'head': 'head ' ~ t.head, 'slot': 'slot ' ~ t.slot}.get(t.blocks, 'the printer')
+                if t.blocks != 'none' else '' }}{{
+                ' · ⏳ waits for #' ~ (t.waiting_on | join(', #')) if t.waiting_on else '' }}{{
+                ' · 💤 snoozed' if t.status == 'snoozed' else '' }}{{ ' · ' ~ t.duration_min ~ ' min' if t.duration_min else '' }}
+              {%- endfor %}{% endif %}
+          - type: todo-list
+            entity: todo.printops_u1
+            hide_completed: true
+          - type: entities
+            entities:
+              - entity: input_text.printops_task
+          - type: horizontal-stack
+            cards:
+              - type: button
+                name: Done
+                icon: mdi:check
+                tap_action:
+                  action: perform-action
+                  perform_action: script.printops_task_action
+                  data:
+                    action: done
+              - type: button
+                name: Snooze 1 day
+                icon: mdi:sleep
+                tap_action:
+                  action: perform-action
+                  perform_action: script.printops_task_action
+                  data:
+                    action: snooze
+                    days: 1
+              - type: button
+                name: Snooze
+                icon: mdi:bell-sleep
+                tap_action:
+                  action: perform-action
+                  perform_action: script.printops_task_action
+                  data:
+                    action: snooze
+
       - type: grid
         cards:
           - type: history-graph
