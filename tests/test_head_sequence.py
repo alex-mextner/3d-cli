@@ -8,7 +8,13 @@ import pytest
 
 from errors import GateFailure, UsageError
 from head_sequence_fixtures import gcode, project_3mf
-from slicing.head_sequence import check, heads_by_layer, preflight_check, read_recipes
+from slicing.head_sequence import (
+    check,
+    heads_by_layer,
+    preflight_check,
+    read_object_extruders,
+    read_recipes,
+)
 
 
 def _by_name(report):
@@ -173,3 +179,50 @@ def test_label_matches_its_own_object_not_a_longer_digit_sibling() -> None:
     assert _match_object("A_id_0_copy_0", {"A": [1], "AB": [2]}) == "A"
     assert _match_object("AB_id_0_copy_0", {"A": [1], "AB": [2]}) == "AB"
     assert _match_object("A1_id_0_copy_0", {"A": [1]}) is None
+
+
+def _cli_project(path: Path, obj_extruder: str, part_extruder: str | None) -> Path:
+    """model_settings as the Orca CLI writes it for an STL: the extruder on the object, parts bare."""
+    part = (f'<metadata key="extruder" value="{part_extruder}"/>' if part_extruder is not None else "")
+    ms = (f'<config><object id="2"><metadata key="name" value="A.stl"/>'
+          f'<metadata key="extruder" value="{obj_extruder}"/><part id="1">{part}</part></object></config>')
+    with zipfile.ZipFile(path, "w") as zf:
+        zf.writestr("Metadata/project_settings.config", '{"filament_colour": ["#000000"]}')
+        zf.writestr("Metadata/model_settings.config", ms)
+    return path
+
+
+def test_extruder_zero_is_the_first_head(tmp_path: Path) -> None:
+    """Orca CLI projects from STL carry object extruder 0 (= default, filament 1); the G-code prints head 1."""
+    g = gcode(tmp_path / "p.gcode", [{"A.stl": 1}, {"A.stl": 1}])
+    for obj, part in (("0", None), ("0", "0")):
+        proj = _cli_project(tmp_path / "p.3mf", obj, part)
+        with zipfile.ZipFile(proj) as zf:
+            assert read_object_extruders(zf) == {"A.stl": [1]}
+        assert check(str(proj), str(g)).failures == 0
+
+
+def test_part_extruder_zero_inherits_the_object(tmp_path: Path) -> None:
+    proj = _cli_project(tmp_path / "p.3mf", "2", "0")
+    with zipfile.ZipFile(proj) as zf:
+        assert read_object_extruders(zf) == {"A.stl": [2]}
+    report = check(str(proj), str(gcode(tmp_path / "p.gcode", [{"A.stl": 1}])))
+    assert report.failures == 1
+
+
+def test_mixed_parts_inherit_per_part(tmp_path: Path) -> None:
+    """A bare or 0 printed part inherits the object next to a part set explicitly; a bare modifier adds nothing."""
+    parts = ('<part id="1"><metadata key="extruder" value="3"/></part>'
+             '<part id="2"><metadata key="extruder" value="0"/></part>'
+             '<part id="3" subtype="normal_part"></part>'
+             '<part id="4" subtype="modifier_part"></part>')
+    ms = (f'<config><object id="2"><metadata key="name" value="A"/>'
+          f'<metadata key="extruder" value="2"/>{parts}</object>'
+          f'<object id="4"><metadata key="name" value="B"/><metadata key="extruder" value="x"/>'
+          f'<part id="1"><metadata key="extruder" value="4"/></part></object>'
+          f'<object id="6"><metadata key="name" value="C"/><part id="1"></part></object></config>')
+    proj = tmp_path / "p.3mf"
+    with zipfile.ZipFile(proj, "w") as zf:
+        zf.writestr("Metadata/model_settings.config", ms)
+    with zipfile.ZipFile(proj) as zf:
+        assert read_object_extruders(zf) == {"A": [2, 3], "B": [4], "C": [1]}
