@@ -25,10 +25,13 @@ from printops.cli._common import Parsed, api_errors, client, parse
 from printops.client import ApiClient, ApiConfigError, ApiError
 
 CMD = "printer"
-USAGE = """3d printer todo <action> [args] [--api URL] [--token TOKEN]
+USAGE = """3d printer [-n PRINTER] todo|issues <action> [args] [--api URL] [--token TOKEN]
   The to-do list of each printer: calibrations it needs, due maintenance, repairs of open
   faults (these three are derived and close themselves when the work is recorded), and
   manual tasks. Served by 3d-api; without it the CLI keeps a JSONL buffer.
+  `issues` is the same command: a printer's problems are tasks of this list, not GitHub
+  tickets. `-n PRINTER` (before todo/issues) names the printer instead of the PRINTER argument;
+  for done/dismiss/snooze/reopen it checks that the task is on that printer.
 
   list [PRINTER] [--all] [--json]       open tasks (snoozed ones last); --all adds done/dismissed
   add PRINTER --title TEXT [options]    a manual task (options below)
@@ -64,6 +67,9 @@ directories hold files the command stops and names the `import` commands that me
 Examples:
   3d printer todo list
   3d printer todo list u1 --json | jq '.tasks[] | select(.blocks != "none") | {id, title, blocks}'
+  3d printer -n u1 issues list
+  3d printer -n k1se issues add --title "X belt squeaks" --type inspect --when idle
+  3d printer -n k1se issues done 12
   3d printer todo add k1se --title "Check X belt tension" --type inspect --when idle --duration 15
   3d printer todo add u1 --title "Fix T3 label" --type setup --blocks slot:T3 --head T3
   3d printer todo add k1se --title "Cold SHAPER_CALIBRATE X" --type calibration --depends-on 9 --no-human
@@ -326,7 +332,25 @@ def _append(
 
 
 # -- actions -------------------------------------------------------------------------------------
-def _list(argv: list[str], sub: str) -> int:
+def _one_printer(
+    pos: list[str], named: str | None, sub: str, *, required: bool
+) -> str | None:
+    """The printer of list/add: the positional PRINTER or `3d printer -n NAME`; both must agree."""
+    given = pos[0] if pos else None
+    if given and named and given != named:
+        raise UsageError(
+            f"two printers: -n {named} and {given}", command=f"{CMD} {sub}"
+        )
+    printer = given or named
+    if required and not printer:
+        raise UsageError(
+            "name the printer: PRINTER or `3d printer -n PRINTER …`",
+            command=f"{CMD} {sub}",
+        )
+    return printer
+
+
+def _list(argv: list[str], sub: str, named: str | None = None) -> int:
     p = parse(
         argv,
         sub,
@@ -335,7 +359,7 @@ def _list(argv: list[str], sub: str) -> int:
         n_pos=(0, 1),
         prefix=CMD,
     )
-    printer = p.pos[0] if p.pos else None
+    printer = _one_printer(p.pos, named, sub, required=False)
     status = "all" if "--all" in p.flags else None
     api = _api(p)
     err: ApiError | None = None
@@ -398,7 +422,7 @@ def _blocks(p: Parsed, sub: str) -> tuple[str, str | None, str | None]:
     return scope, head, slot
 
 
-def _add(argv: list[str], sub: str) -> int:
+def _add(argv: list[str], sub: str, named: str | None = None) -> int:
     p = parse(
         argv,
         sub,
@@ -420,10 +444,11 @@ def _add(argv: list[str], sub: str) -> int:
             "--spool",
         },
         flags=COMMON_FLAGS | {"--no-human", "--followup"},
-        n_pos=1,
+        n_pos=(0, 1),
         prefix=CMD,
     )
-    printer = p.pos[0]
+    printer = _one_printer(p.pos, named, sub, required=True)
+    assert printer is not None  # required=True raised otherwise
     if not p.opts.get("--title"):
         raise UsageError("--title is required (what to do)", command=f"{CMD} {sub}")
     scope, head, slot = _blocks(p, sub)
@@ -505,7 +530,7 @@ def _add(argv: list[str], sub: str) -> int:
     return _append(printer, "open", task_uid, fields, why)
 
 
-def _close(argv: list[str], sub: str, action: str) -> int:
+def _close(argv: list[str], sub: str, action: str, named: str | None = None) -> int:
     values = COMMON_VALUES | (
         {"--note"}
         if action == "done"
@@ -532,6 +557,8 @@ def _close(argv: list[str], sub: str, action: str) -> int:
     api = _api(p)
     if api is not None:
         try:
+            if named is not None:
+                _check_printer(api, ref, named, sub)
             task = api.post(f"/v1/tasks/{_q(ref)}/{action}", body)
         except ApiError as e:
             if not _offline(e):
@@ -555,6 +582,8 @@ def _close(argv: list[str], sub: str, action: str) -> int:
             command=f"{CMD} {sub}",
         )
     t = _find_offline(ref, sub)
+    if named is not None:
+        _same_printer(t, named, sub)
     if t["status"] in buf.CLOSED:
         raise ThreeDError(
             f"buffered task {t['uid']} is already {t['status']}", command=f"{CMD} {sub}"
@@ -588,7 +617,7 @@ def _close(argv: list[str], sub: str, action: str) -> int:
     return _append(str(t["printer"]), action, str(t["uid"]), fields, why)
 
 
-def _import(argv: list[str], sub: str) -> int:
+def _import(argv: list[str], sub: str, named: str | None = None) -> int:
     p = parse(
         argv,
         sub,
@@ -597,15 +626,34 @@ def _import(argv: list[str], sub: str) -> int:
         n_pos=(0, 100),
         prefix=CMD,
     )
+    if p.pos and named is not None:
+        raise UsageError(
+            "-n with FILE: a buffer file names its own printer; give one or the other",
+            command=f"{CMD} {sub}",
+        )
     api = client(p, sub, prefix=CMD)
     if p.pos:
         files = [Path(name).expanduser() for name in p.pos]
     else:  # no FILE: every file of the buffer directory (task buffers and notice journals); an
         # explicit FILE skips the move, so the conflict's import commands stay runnable
-        files = sorted(_migrated_buffer_dir().glob("*.jsonl"))
+        directory = _migrated_buffer_dir()
+        if (
+            named is not None
+        ):  # exactly that printer's buffer and notice journal (no glob: names may hold '.')
+            files = [
+                f
+                for f in (
+                    directory / f"{named}.jsonl",
+                    directory / f"{named}.notices.jsonl",
+                )
+                if f.is_file()
+            ]
+        else:
+            files = sorted(directory.glob("*.jsonl"))
         if not files:
             raise InputNotFound(
-                str(buf.buffer_dir() / "*.jsonl"), command=f"{CMD} {sub}"
+                str(directory / (f"{named}.jsonl" if named else "*.jsonl")),
+                command=f"{CMD} {sub}",
             )
     reports = []
     for path in files:
@@ -637,19 +685,43 @@ def _import(argv: list[str], sub: str) -> int:
     return 0
 
 
-ACTIONS: dict[str, Callable[[list[str], str], int]] = {
+def _same_printer(task: Mapping[str, Any], named: str, sub: str) -> None:
+    if task.get("printer") != named:
+        raise UsageError(
+            f"task {task.get('id') or task.get('uid')} is on {task.get('printer')}, not {named}",
+            command=f"{CMD} {sub}",
+        )
+
+
+def _check_printer(api: ApiClient, ref: str, named: str, sub: str) -> None:
+    """-n with done/dismiss/snooze/reopen: read the task first (needs the `read` scope)."""
+    try:
+        task = api.get(f"/v1/tasks/{_q(ref)}")
+    except ApiError as e:
+        if e.status == 403:
+            raise UsageError(
+                f"-n {named} checks the task's printer, which needs a token with the read scope",
+                command=f"{CMD} {sub}",
+                remediation=[f"Drop -n: `3d {CMD} todo {sub.split()[-1]} {ref}`."],
+            ) from e
+        raise
+    _same_printer(task, named, sub)
+
+
+ACTIONS: dict[str, Callable[[list[str], str, str | None], int]] = {
     "list": _list,
     "ls": _list,
     "add": _add,
-    "done": lambda a, s: _close(a, s, "done"),
-    "dismiss": lambda a, s: _close(a, s, "dismiss"),
-    "snooze": lambda a, s: _close(a, s, "snooze"),
-    "reopen": lambda a, s: _close(a, s, "reopen"),
+    "done": lambda a, s, n: _close(a, s, "done", n),
+    "dismiss": lambda a, s, n: _close(a, s, "dismiss", n),
+    "snooze": lambda a, s, n: _close(a, s, "snooze", n),
+    "reopen": lambda a, s, n: _close(a, s, "reopen", n),
     "import": _import,
 }
 
 
-def run(argv: list[str]) -> int:
+def run(argv: list[str], printer: str | None = None) -> int:
+    """`3d printer [-n PRINTER] todo|issues …`; `printer` is the -n NAME of `3d printer`."""
     if not argv or argv[0] in ("-h", "--help", "help"):
         print(USAGE)
         return 0 if argv else 1
@@ -667,4 +739,4 @@ def run(argv: list[str]) -> int:
                 "see `3d printer todo --help`."
             ],
         )
-    return handler(rest, _sub(action))
+    return handler(rest, _sub(action), printer)

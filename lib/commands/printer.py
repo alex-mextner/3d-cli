@@ -32,7 +32,7 @@ if TYPE_CHECKING:
     from printer_ops.devices import Device
     from printops.fleet import FleetPrinter
 
-USAGE = """3d printer <subcommand> [args]
+USAGE = """3d printer [-n NAME] <subcommand> [args]
   Drive the printers configured in printer-devices.yaml (user: ~/.config/3d-cli/,
   project: ./printer-devices.yaml) on top of the fleet registry fleet/printers.yaml in the
   3d-cli repo. Adapters: moonraker (Klipper/Moonraker, Snapmaker U1), creality-stock
@@ -64,10 +64,13 @@ USAGE = """3d printer <subcommand> [args]
                                        `subscriptions [list|test]` (see `3d printer subscribe --help`)
   agent list|stop|handoff              the temporary per-printer omp agent that gets the alerts
                                        no live subscriber took (see `3d printer agent --help`)
-  todo list|add|done|dismiss|snooze|reopen|import
+  todo list|add|done|dismiss|snooze|reopen|import   (alias: issues)
                                        the printer's to-do list: needed calibrations, due
                                        maintenance, repairs, manual tasks (3d-api; offline a
-                                       JSONL buffer — see `3d printer todo --help`)
+                                       JSONL buffer — see `3d printer todo --help`). A printer's
+                                       problems are tasks of this list, not GitHub tickets.
+  -n, --name NAME                      the printer for `todo`/`issues`:
+                                       `3d printer -n u1 issues list`
 
 Options:
   --json             list/status as JSON (status: normalized state + raw firmware payload)
@@ -105,7 +108,8 @@ Examples:
   3d printer subscribe --session 01a12cd6 --printer u1,k1se
   3d printer subscriptions
   3d printer agent list
-  3d printer todo list u1"""
+  3d printer todo list u1
+  3d printer -n k1se issues add --title "X belt squeaks" --type inspect"""
 
 _VALUE = {"--secs", "--as", "--source-3mf", "--bridge-max"}
 _FLAGS = {"--json", "--yes", "--force"}
@@ -455,10 +459,17 @@ def run(argv: list[str]) -> int:
     if not argv:
         print(USAGE)
         return 1
+    name, argv = _printer_name(argv)
+    if not argv:
+        print(USAGE)
+        return 1
     sub, rest = argv[0], argv[1:]
     if sub in ("-h", "--help", "help"):
         print(USAGE)
         return 0
+    if name is not None and sub not in ("todo", "issues"):
+        raise UsageError(f"-n/--name selects the printer for `todo`/`issues`; `{sub}` takes the printer as NAME",
+                         command="printer", remediation=[f"3d printer {sub} {name} …"])
     if sub == "list":
         return _cmd_list(rest)
     if sub == "status":
@@ -485,13 +496,29 @@ def run(argv: list[str]) -> int:
         from printer_ops.printer_agent import run as agent
 
         return agent(rest)
-    if sub == "todo":
+    if sub in ("todo", "issues"):
         from printops.todo_cli import run as todo
 
-        return todo(rest)
+        return todo(rest, printer=name)
     raise UsageError(f"unknown subcommand '{sub}'", command="printer",
                      remediation=["Use list, status, upload, start, cancel, watch, vision, bed, subscribe, unsubscribe, "
-                                  "subscriptions, agent or todo — see `3d printer --help`."])
+                                  "subscriptions, agent or todo (issues) — see `3d printer --help`."])
+
+
+def _printer_name(argv: list[str]) -> tuple[str | None, list[str]]:
+    """A leading `-n NAME` / `--name NAME` / `--name=NAME`: the printer, by its fleet name."""
+    if argv and argv[0].startswith("--name="):
+        name = argv[0].split("=", 1)[1]
+        if not name:
+            raise UsageError("--name= needs the printer name, e.g. `3d printer --name=u1 issues list`",
+                             command="printer")
+        return name, argv[1:]
+    if argv and argv[0] in ("-n", "--name"):
+        if len(argv) < 2 or argv[1].startswith("-"):
+            raise UsageError(f"{argv[0]} needs the printer name, e.g. `3d printer -n u1 issues list`",
+                             command="printer")
+        return argv[1], argv[2:]
+    return None, argv
 
 
 COMMAND = Command(
