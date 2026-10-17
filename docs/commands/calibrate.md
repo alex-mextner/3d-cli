@@ -126,6 +126,141 @@ logs a `calibration.accepted` event (who, which G-code SHA, why); it needs a tok
 `write` scope. `3d print-preflight` does not run this gate yet: it joins print-preflight with
 the PrintOps checks of [#164](https://github.com/alex-mextner/3d-cli/issues/164), which call the same endpoint.
 
+## `photo` — the top-camera photo mode ([#342](https://github.com/alex-mextner/3d-cli/issues/342))
+
+```bash
+3d calibrate photo --printer P [--camera C] [--res WxH] [--focus auto|N|sweep] [--focus-roi R] [--exposure E] [--gain G] [--wb K]
+                   [--ctrl N=V,…] [--frames N] [--skip K] [--average mean|median|none] [--led on|off]
+                   [--settle-ms MS] [--printer-light on|off] [--pose X,Y,Z[,F]] [--move --yes] [--home]
+                   [--manifest M | --fiducials ID:X,Y;… [--fiducial-size MM]] [--px-per-mm N]
+                   [--area X0,Y0,X1,Y1] [--scale-ref FILE] [--camera-height-mm H] [--no-rectify]
+                   [--out DIR] [--save] [--session ID] [--json]
+3d calibrate rectify PHOTO (--manifest M | --fiducials ID:X,Y;…) [--fiducial-size MM] [--px-per-mm N]
+                   [--area X0,Y0,X1,Y1] [--scale-ref FILE] [--camera-height-mm H] [--out DIR] [--json]
+```
+
+`photo` takes the plate photo the vision readout ([#273](https://github.com/alex-mextner/3d-cli/issues/273))
+measures, the same way every time. The camera is the top camera (`3d camera`, see
+[camera.md](camera.md)): a Pi Zero W camera node or the C920 on this PC. The steps:
+
+1. **Settings.** CLI options override the printer's `photo:` block in `fleet/printers.yaml`, which
+   overrides the defaults (`camera: topcam`, `res: 2304x1536`, `frames: 4`, `skip: 3`,
+   `average: mean`, `px_per_mm: 10`). The record lists where every value came from (`origin`).
+2. **Pose** (only with `--move --yes`). The printer must be idle (`printing`/`paused` is refused
+   before any G-code) and homed (`--home` sends `G28` first). The pose must lie inside the
+   printer's axis range. The move is `G90`, then Z first when it goes up (the bed moves away) or
+   last when it comes down, then `M400`, all through Moonraker `/printer/gcode/script`.
+3. **Light.** `--printer-light on` runs the fleet `printer_light.on` G-code and runs `.off` after
+   the photo, even when the capture fails. The light G-code differs per printer, so 3d never
+   guesses it. `--led on` switches the camera node's LED ring for the photo.
+4. **Capture.** The camera is reset to its defaults, then focus (`auto`, `N` or a `sweep`), exposure,
+   gain and white balance are locked before streaming starts, and after the frames it is reset to
+   its defaults again on any exit. N
+   uncompressed frames are averaged (`mean` or `median`) into `DIR/photo.png` (16-bit RGB). The
+   record keeps the temporal noise, mean level and the fraction of clipped pixels: if a lot is
+   clipped, lower `--exposure`.
+5. **Rectify.** The plate's ArUco fiducials (DICT_4X4_50, ids 0–3, plan §8.3.4) come from the
+   manifest (`calib-plate/1` `fiducials`) or `--fiducials`. At least 3 must be found (12 corners,
+   least-squares homography). The result is `DIR/rectified.png` in bed millimetres at `--px-per-mm`
+   with bed +Y up, plus `DIR/detections.png`. A marker lies axis-aligned with its top edge towards
+   bed +Y; a manifest `rotation_deg` turns it.
+6. **External scale.** Fiducials printed by the printer carry its own scale error, so they
+   cannot measure it. `--scale-ref FILE` names a rigid card with markers whose true centre
+   positions were measured with calipers:
+
+   ```json
+   {"schema": "scale-ref/1", "name": "steel card", "dictionary": "DICT_4X4_50", "marker_size_mm": 10,
+    "markers": {"40": [0, 0], "41": [100.02, 0], "42": [100.01, 59.98], "43": [0, 60.03]},
+    "thickness_mm": 0.5}
+   ```
+
+   The card's marker centres are measured in bed millimetres and fitted to the true positions
+   (affine with 3+ markers, isotropic with 2). The result is `true_mm_per_bed_mm` per axis:
+   multiply a length measured in the rectified image by it to get true millimetres. The card's
+   top surface sits `thickness_mm` above the bed and looks bigger by H/(H−t), so give
+   `--camera-height-mm` (or `photo.camera_height_mm`) for the correction. Without it the record
+   says `parallax_corrected: false` with the size of the error.
+
+`DIR/calib-photo.json` (`calib-photo/1`) holds the settings and their origin, the pose and light
+G-code sent, the camera source, the requested lock and the control read-back, the photo
+statistics, and the `calib-rectify/1` result (`fiducials_found`, `ids`, `missing`, `homography`
+from image px to bed mm, `residual_mm`, `area_mm`, `scale`). `--save` writes the effective
+non-default settings back as the printer's `photo:` block; other lines and comments stay as they
+are, and the file is re-validated first. `--session ID` uploads the photo to a calibration
+session (`POST /v1/calibration/sessions/{id}/photos`, multipart `file` + `source=camera` +
+`meta`). That endpoint comes with the session API ([#277](https://github.com/alex-mextner/3d-cli/issues/277)); until it is
+deployed the upload ends with the API's 404.
+
+`rectify` runs steps 5–6 on any photo: a phone shot, a Telegram picture, an older still.
+
+| Option | What |
+|---|---|
+| `--printer P` | fleet printer whose `photo:` block gives the defaults (required) |
+| `--camera C` | `usb`, `usb:/dev/videoN`, `http://host:port`, `host:port` or a node name |
+| `--res WxH` | still resolution (default 2304x1536) |
+| `--focus auto\|N\|sweep[:LO-HI[:STEP]]` | autofocus, a manual position, or the software focus sweep (sharpest position in `--focus-roi`, kept for the series; see camera.md) |
+| `--focus-roi R` | sweep region `X0,Y0,X1,Y1` as frame fractions |
+| `--exposure/--gain/--wb N` | the manual lock; exposure in 100 µs, white balance in K |
+| `--ctrl N=V,…` | any other control by v4l2-ctl name or alias |
+| `--frames N` | frames averaged (default 4); more than 8 become several node requests |
+| `--skip K` | frames dropped after streaming starts (default 3) |
+| `--average M` | `mean`, `median` or `none` |
+| `--led on\|off` | camera-node LED ring during the photo |
+| `--settle-ms MS` | wait after the LED switches |
+| `--printer-light on\|off` | fleet `printer_light` G-code before and after the photo |
+| `--pose X,Y,Z[,F]` | photo pose (mm, F in mm/min); used only with `--move` |
+| `--move` | move to the pose first (needs `--yes`) |
+| `--home` | home first when the printer is not homed |
+| `--yes` | confirm the move |
+| `--manifest M` | plate manifest with the fiducials |
+| `--fiducials L` | fiducials as `ID:X,Y;…` in bed mm |
+| `--fiducial-size MM` | marker size for `--fiducials` (default 10) |
+| `--px-per-mm N` | rectified resolution (default 10) |
+| `--area X0,Y0,X1,Y1` | rectified bed area (default the fiducials' bounding box + 10 mm) |
+| `--scale-ref FILE` | external scale reference (`scale-ref/1`) |
+| `--camera-height-mm H` | lens height above the bed, for the card's parallax |
+| `--no-rectify` | only capture |
+| `--out DIR` | output directory |
+| `--save` | store the settings as the printer's `photo:` block |
+| `--session ID` | upload to calibration session ID |
+
+The fleet block, with every key optional:
+
+```yaml
+k1se:
+  photo:
+    camera: topcam
+    res: 2304x1536
+    focus: 30
+    exposure: 300
+    gain: 0
+    wb: 4500
+    ctrl: {sharpness: 0}
+    frames: 8
+    average: median
+    led: on
+    printer_light: {on: "SET_PIN PIN=LED VALUE=1", off: "SET_PIN PIN=LED VALUE=0"}
+    pose: {x: 110, y: 220, z: 150, speed: 6000}
+    camera_height_mm: 300
+    px_per_mm: 10
+    scale_ref: scale-refs/steel-card.json   # relative to the fleet file
+```
+
+```bash
+3d calibrate photo --printer k1se --camera usb --fiducials '0:12,12;1:208,12;2:208,208;3:12,208' --out shot/
+3d calibrate photo --printer k1se --camera usb --focus sweep --focus-roi 0.1,0.1,0.9,0.9 --no-rectify
+3d calibrate photo --printer u1 --camera topcam --exposure 250 --wb 4500 --frames 8 --average median --led on
+3d calibrate photo --printer k1se --move --yes --pose 110,220,150,6000 --printer-light on --manifest plate1.json
+3d calibrate photo --printer k1se --manifest plate1.json --scale-ref fleet/scale-refs/steel-card.json --camera-height-mm 300
+3d calibrate photo --printer u1 --focus 30 --exposure 300 --gain 0 --wb 4500 --settle-ms 500 --save --no-rectify
+3d calibrate photo --printer u1 --manifest plate1.json --session 17 --json
+3d calibrate rectify phone.jpg --manifest plate1.json --px-per-mm 8 --area 0,0,220,220 --out rect/
+```
+
+Exit codes for `photo`/`rectify`: 0 rectified (or captured with `--no-rectify`); 1 fewer than 3
+fiducials, the scale card not seen, the printer busy or not homed, or the camera failed (the
+photo and the record are still written when the capture worked); 2 bad options.
+
 ## Events
 
 `calibration.planned`, `calibration.recorded` (with the superseded ids), `calibration.accepted`.

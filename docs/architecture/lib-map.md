@@ -103,6 +103,7 @@ Target package: `lib/geometry/`, with subpackages only when a real boundary appe
   `gcode_resume.state_at`, slot spool → lot, drying), `exposure.py` (printing exposure per head
   from Moonraker job history / manual rows), `watch_incidents.py` (drafts from `3d printer watch`
   events), `printer_read.py` (read-only printer access: status, Moonraker GET, G-code download).
+- `lib/topcam/` — the top camera (#340–#343): `v4l2.py` (pure-Python V4L2 controls + mmap YUYV capture, `locked()` resets to camera defaults), `focus.py` (focus modes, software sweep), `node.py` (the Pi Zero W camera-node HTTP service; `NODE_FILES` ship to the Pi), `client.py` (usb/node backends), `frames.py` (YUYV → RGB, averaging, PNG), `registry.py` (3d-api camera-node lookup), `photo.py`/`photo_config.py`/`photo_cli.py` (`3d calibrate photo|rectify`: pose, light, capture, fleet `photo:`).
 - `lib/profiles/` — slicer user presets kept in the repo `profiles/` (#180, PrintOps D10), behind `3d profiles`: `slicers.py` (OrcaSlicer / Snapmaker Orca / Bambu Studio data dirs, running check), `preset.py` (preset JSON / `.info` formats, slicer-local keys), `sync.py` (three-way repo <-> slicer sync, base snapshot, backups), `values.py` (`apply_values`, the calibration write path).
 
 Target package: `lib/slicing/` for slicer orchestration, dry-run print planning, printer
@@ -216,6 +217,7 @@ Every current root Python module is listed here so future additions are intentio
 - `halves_check.py` — paired-halves gate: loads pairs marked in 3MF object metadata (or STL pairs), maps both halves into the assembly frame, rasterises their cut faces and compares outline, dowel holes, size and islands; backs `3d halves-check`.
 - `vision_detect.py` — pixel half of `3d printer vision`: Obico ONNX spaghetti scorer (weights downloaded at runtime, sha256-pinned), `FrameScorer` (ROI/ignore masks + stage-2 verifier), brightness check, live camera loop, `record` and `eval` on recorded footage; decision logic and camera/klippy.log access live in `printer_ops/vision.py`.
 - `vision_verify.py` — stage 2 of `3d printer vision`: zero-shot CLIP ViT-B/32 (ONNX, sha256-pinned) on crops of the detector's boxes → verified score q.
+- `calib_rectify.py` — calibration photo → rectified bed-mm image: ArUco fiducials (DICT_4X4_50), homography, external scale reference (`3d calibrate photo|rectify`, #342).
 - `vision_geometry.py` — printer camera model (pinhole/fisheye), bed/volume/silhouette masks at the current Z, calibration fit CLI; the U1 calibration ships in `lib/data/vision/`.
 - `vision_ghost.py` — 3D ghost of the rest of a print over a printer camera frame: collects a job's walls from one G-code pass, paints them through a `vision_geometry` camera into a sparse per-frame blend table (used by the U1 camera proxy).
 - `vision_scene.py` — opt-in bed-change detectors for `3d printer vision --scene` (foreign object, moved part, no growth).
