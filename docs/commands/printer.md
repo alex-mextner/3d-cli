@@ -121,19 +121,23 @@ Where tasks come from (`source`):
 |---|---|---|
 | `fault` | a fault is open (`3d printops maint fault …`, the U1 T2 fault seeded from the fleet file): a repair task that **blocks its head** (or the whole printer for a fault without a head) | the fault closes: fixed → done, wontfix → dismissed |
 | `maintenance_rule` | a rule of `fleet/maintenance-rules.yaml` is announced due (`3d printops maint due --check`) | the rule's maintenance is logged (`3d printops maint log P[/H] --rule ID`) |
-| `calibration` | a calibration kind is not current for the head and its loaded spool ([`3d calibrate plan`](calibrate.md): never done, new filament/vendor/lot/nozzle, invalidated by a nozzle swap or repair, expired) — one task per kind × head × nozzle × filament (× lot when the kind is lot-sensitive) | a record makes it current ([`3d calibrate record`](calibrate.md)) |
+| `calibration` | a calibration kind is not current for the head and its loaded spool ([`3d calibrate plan`](calibrate.md): never done, new filament/vendor/lot/nozzle, invalidated by a nozzle swap or repair, expired) — **one task per head** listing every missing kind with its spool and reason (`requirements`) | nothing of the head is missing any more and a record ([`3d calibrate record`](calibrate.md)) satisfied what it covered; each record drops its kind from the task |
 | `manual`, `calibration_followup` | `add` (`--followup`: a mechanical action after a calibration) | `done` |
 | `import` | `import` of a JSONL buffer | `done` |
 
 The first three are **derived**: 3d-api materialises them on every tasks request and every 15
-minutes, keyed by `source_key` (the printer and the full scope, e.g.
-`calib:k1se/T1/flow_ratio/nozzle:4/filament:12/lot:A7`, `rule:u1/hotend-wipe/T1/0`,
+minutes, keyed by `source_key` (`calib:k1se/T1` — one per head, `rule:u1/hotend-wipe/T1/0`,
 `fault:fleet:u1/T2`). `done` refuses them and names the command that records the work — the
 record closes the task, otherwise the next pass would open it again. `dismiss --reason` drops one
-without the work and stays dismissed for that key; a new nozzle or another spool is a new key, so a
-new task. When the need goes away for another reason (another spool loaded, the head no longer
-usable, the rule deleted) the task is dismissed by `derive`. A head whose spool is unknown
-(Spoolman unreachable, nothing bound) keeps its calibration tasks as they are.
+without the work and stays dismissed for that need. A calibration task covers requirement keys
+with the full scope of the record (`calib:k1se/T1/flow_ratio/nozzle:4/filament:12/lot:A7`), and its
+dismissal sticks for exactly those keys: a new nozzle, another spool or lot, or an expiry after a
+record opens a new task with the new keys only. When the need goes away for another reason (the
+head no longer usable, the rule deleted) the task is dismissed by `derive`; another spool rewrites
+the head's calibration task. A kind the engine cannot decide (spool unknown: Spoolman unreachable,
+nothing bound) keeps its entry as it was. The per-kind calibration tasks of the first version
+(#281) are closed on the next pass: done when recorded, otherwise dismissed as `superseded`; a task
+that depended on one now depends on the head's task (a snooze on them is not carried over).
 
 `list` shows open tasks first (blocking ones on top), then snoozed ones; a task with an open
 dependency (`--depends-on`) is `WAITING`. `--all` adds done and dismissed ones. A snoozed task

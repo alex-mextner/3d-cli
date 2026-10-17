@@ -15,9 +15,18 @@ DERIVED TASKS (`sync`), materialised idempotently by `source_key` (unique among 
   maintenance_rule  a rule announced in `maintenance_due` (#166) whose baseline is still current →
                     maintenance task; done when maintenance for the rule is logged.
   calibration       every requirement of the engine (#167) that is not current/assumed (never
-                    done, new filament/vendor/lot/nozzle, invalidated, expired) → one task per
-                    kind × head scope; done when a record makes it current. A head whose spool is
-                    unknown (Spoolman down, nothing bound) leaves its calibration tasks as they are.
+                    done, new filament/vendor/lot/nozzle, invalidated, expired), gathered into ONE
+                    task per head (source_key 'calib:<printer>/<head|->', #387): `requirements` lists
+                    each missing kind with its spool and reason, the title and `why` summarise them,
+                    a recorded kind drops out, and the task is done when nothing of the head is
+                    missing any more and a record satisfied what it covered (when none did, e.g.
+                    the spool it was about was unloaded, it is dismissed as no longer needed).
+                    Kinds the engine cannot decide (spool unknown: Spoolman down, nothing bound)
+                    keep their entry as it was. A person's dismissal sticks for the requirement
+                    keys the task covered: another nozzle, spool or lot, or an expiry after a
+                    record, opens a new task. The per-kind tasks of the first derivation (#281,
+                    any source with such a key) are superseded on the next pass; a task that
+                    depended on one depends on the head's task instead, a snooze is not carried.
 A derived task whose need is gone for another reason (scope changed: another nozzle or spool;
 rule deleted; head no longer usable) is dismissed by `derive`; one a person dismissed stays
 dismissed for that key. Derived tasks refuse `done`: the record that does the work closes them
@@ -41,6 +50,7 @@ import math
 import sqlite3
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
+from types import SimpleNamespace
 from typing import Any
 
 from printops import db, events
@@ -68,7 +78,7 @@ UNCERTAIN = (
     "no_plate",
 )  # requirement statuses that say nothing about the need
 SATISFIED = ("current", "assumed")
-_JSON = ("depends_on", "refs", "calibration_kinds", "spools")
+_JSON = ("depends_on", "refs", "calibration_kinds", "spools", "requirements")
 _FIELDS = (
     "printer",
     "head",
@@ -89,6 +99,7 @@ _FIELDS = (
     "calibration_kinds",
     "spools",
     "spool_id",
+    "requirements",
     "note",
     "calibration_id",
     "maintenance_id",
@@ -224,13 +235,12 @@ def done_hint(task: Mapping[str, Any]) -> str | None:
     """The command that records the work behind a derived task (which closes it); None = `done` works."""
     src, printer, head = task.get("source"), task.get("printer"), task.get("head")
     if src == "calibration":
-        kind = (task.get("calibration_kinds") or ["KIND"])[0]
+        kinds = task.get("calibration_kinds") or ["KIND"]
         spool = f" --spool {task['spool_id']}" if task.get("spool_id") else ""
-        return (
-            f"3d calibrate record {kind} --printer {printer}"
-            + (f" --head {head}" if head else "")
-            + spool
-        )
+        where = f" --printer {printer}" + (f" --head {head}" if head else "") + spool
+        if len(kinds) == 1:
+            return f"3d calibrate record {kinds[0]}{where}"
+        return f"3d calibrate record <kind>{where} (<kind>: {' | '.join(kinds)})"
     if src == "maintenance_rule":
         rule = (
             str(task["source_key"]).split("/")[1] if task.get("source_key") else "RULE"
@@ -587,18 +597,16 @@ class Derivation:
         default_factory=dict
     )  # key -> (status, note, links)
     sources_ok: set[str] = field(default_factory=set)
-    uncertain: set[tuple[str | None, str]] = field(
-        default_factory=set
-    )  # (head, kind) the engine could not decide
+    calibration: dict[str, _HeadNeeds] = field(
+        default_factory=dict
+    )  # head task key -> the engine's verdicts; `_calibration_tasks` turns them into wants
+    kind_titles: dict[str, str] = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
 
     def authoritative(self, task: Mapping[str, Any]) -> bool:
-        if task["source"] not in self.sources_ok:
-            return False
-        if task["source"] == "calibration":
-            kinds = task["calibration_kinds"] or [""]
-            return (task["head"], kinds[0]) not in self.uncertain
-        return True
+        # A calibration task holding an undecided kind is wanted (its entry is kept), so the
+        # source that ran is authoritative for every other one.
+        return task["source"] in self.sources_ok
 
 
 def _fault_wants(conn: sqlite3.Connection, printer: str, d: Derivation) -> None:
@@ -701,7 +709,136 @@ def calibration_key(printer: str, req: Any) -> str:
     return key
 
 
+def calibration_task_key(printer: str, head: str | None) -> str:
+    """'calib:<printer>/<head|->' — the one calibration task of a head (#387). The requirement
+    keys it covers (`calibration_key`) extend it; a longer key on an open task is a per-kind task
+    of the first derivation (#281), superseded by the next pass."""
+    return f"calib:{printer}/{head or '-'}"
+
+
+def _per_kind(t: Mapping[str, Any]) -> bool:
+    """A calibration task of the first derivation (#281): one kind, the requirement key itself."""
+    key = t["source_key"] or ""
+    head = calibration_task_key(t["printer"], t["head"])
+    return key.startswith(head + "/") and len(t["calibration_kinds"]) == 1
+
+
+def _entry(
+    *,
+    key: str,
+    kind: str,
+    title: str,
+    reason: str | None,
+    spool_id: int | None,
+    spool: str | None,
+    minutes: int | None,
+) -> dict[str, Any]:
+    """One requirement a calibration task covers (a `requirements` item, migration 0072)."""
+    return {
+        "key": key,
+        "kind": kind,
+        "title": title,
+        "reason": reason,
+        "spool_id": spool_id,
+        "spool": spool,
+        "minutes": minutes,
+    }
+
+
+def _requirements_of(
+    t: Mapping[str, Any], titles: Mapping[str, str]
+) -> list[dict[str, Any]]:
+    """The requirement entries a calibration task covers; a per-kind task of #281 covers its key."""
+    if t["requirements"]:
+        return list(t["requirements"])
+    if not _per_kind(t):
+        return []
+    kind = t["calibration_kinds"][0]
+    return [
+        _entry(
+            key=t["source_key"],
+            kind=kind,
+            title=titles.get(kind, kind),
+            reason=t["why"],
+            spool_id=t["spool_id"],
+            spool=t["spools"][0]["name"] if t["spools"] else None,
+            minutes=t["duration_min"],
+        )
+    ]
+
+
+@dataclass
+class _HeadNeeds:
+    """The engine's verdicts for one head (None = the printer-level kinds)."""
+
+    head: str | None
+    # missing requirement entries, each with when its own record was measured (expired or
+    # invalidated; None = never measured in this scope)
+    missing: list[tuple[dict[str, Any], str | None]] = field(default_factory=list)
+    uncertain: set[str] = field(
+        default_factory=set
+    )  # kinds the engine could not decide
+
+
+def _calibration_want(
+    printer: str, head: str | None, key: str, reqs: list[dict[str, Any]]
+) -> Want:
+    spools: list[dict[str, Any]] = []
+    for r in reqs:
+        s = {"name": r["spool"], "spool_id": r["spool_id"]}
+        if r["spool"] and s not in spools:
+            spools.append(s)
+    ids = {s["spool_id"] for s in spools if s["spool_id"] is not None}
+    for_ = f" for {', '.join(s['name'] for s in spools)}" if spools else ""
+    if len(reqs) == 1:
+        title = f"Calibrate {reqs[0]['title']}" + (f" on {head}" if head else "") + for_
+    else:
+        title = f"Calibrate {len(reqs)} kinds on {head or printer}{for_}"
+    by_reason: dict[str, list[str]] = {}
+    for r in reqs:
+        by_reason.setdefault(str(r["reason"]), []).append(str(r["title"]))
+    minutes = sum(int(r["minutes"] or 0) for r in reqs)
+    return Want(
+        {
+            "printer": printer,
+            "head": head,
+            "type": "calibration",
+            "title": title,
+            "why": "; ".join(f"{', '.join(t)} — {why}" for why, t in by_reason.items()),
+            "blocks": "none",
+            "when": "idle",
+            "needs_human": True,
+            "duration_min": minutes or None,
+            "calibration_kinds": list(dict.fromkeys(r["kind"] for r in reqs)),
+            "spools": spools,
+            "spool_id": ids.pop() if len(ids) == 1 else None,
+            "requirements": reqs,
+            "source": "calibration",
+            "source_key": key,
+        }
+    )
+
+
+def _dismissed_by_person(
+    tasks: Sequence[tuple[Mapping[str, Any], list[dict[str, Any]]]],
+    key: str,
+    measured: str | None,
+) -> bool:
+    """A person dismissed the newest task (`tasks` newest first) that covered this requirement
+    key, and no record of it was made since: an expiry after a record is a new need."""
+    for t, reqs in tasks:
+        if any(r["key"] == key for r in reqs):
+            return (
+                t["status"] == "dismissed"
+                and t["closed_by"] != DERIVE
+                and (measured is None or measured <= t["closed_at"])
+            )
+    return False
+
+
 def _calibration_wants(ctx: Any, printer: str, d: Derivation) -> None:
+    """The engine's verdicts per head. No task reads: `_calibration_tasks` weighs them against
+    the task history inside the write transaction, so a dismissal racing the pass is seen."""
     from printops.calibrations import CalibrationError, requirements
 
     try:
@@ -709,48 +846,108 @@ def _calibration_wants(ctx: Any, printer: str, d: Derivation) -> None:
     except CalibrationError as e:
         d.errors.append(f"calibration: {e.message}")
         return
+    d.kind_titles = {k.id: k.title for k in ctx.catalog.kinds.values()}
     for r in rs.items:
         k = r.kind
         if k is None:
             continue
+        g = d.calibration.setdefault(
+            calibration_task_key(printer, r.head), _HeadNeeds(r.head)
+        )
         if r.status in UNCERTAIN:
-            d.uncertain.add((r.head, k.id))
+            g.uncertain.add(k.id)
             continue
         key = calibration_key(printer, r)
         if r.status in SATISFIED:
             rec = r.record.id if r.record is not None else None
-            d.satisfied[key] = (
+            d.satisfied[key] = (  # closes a per-kind task of #281 as done
                 "done",
                 f"calibration #{rec} recorded" if rec else None,
                 {"calibration_id": rec},
             )
             continue
         fil = r.filament
-        where = f" on {r.head}" if r.head else ""
-        d.want[key] = Want(
-            {
-                "printer": printer,
-                "head": r.head,
-                "type": "calibration",
-                "title": f"Calibrate {k.title}{where}"
-                + (f" for {fil.label()}" if fil else ""),
-                "why": f"{r.status.replace('_', ' ')}: {r.detail}",
-                "blocks": "none",
-                "when": "idle",
-                "needs_human": True,
-                "duration_min": max(1, math.ceil(k.estimate_minutes))
-                if k.estimate_minutes
-                else None,
-                "calibration_kinds": [k.id],
-                "spools": [{"name": fil.label(), "spool_id": fil.spool_id}]
-                if fil and fil.spool_id is not None
-                else [],
-                "spool_id": fil.spool_id if fil else None,
-                "source": "calibration",
-                "source_key": key,
-            }
+        entry = _entry(
+            key=key,
+            kind=k.id,
+            title=k.title,
+            reason=f"{r.status.replace('_', ' ')}: {r.detail}",
+            spool_id=fil.spool_id if fil else None,
+            spool=fil.label() if fil else None,
+            minutes=max(1, math.ceil(k.estimate_minutes))
+            if k.estimate_minutes
+            else None,
         )
+        # The record of an expired/invalidated verdict can be of another scope (another lot of
+        # the filament; new_lot / new_nozzle always are): only a record of this key counts.
+        own = r.record if r.status in ("expired", "invalidated") else None
+        if own is not None and calibration_key(printer, _scope_of(r, own)) != key:
+            own = None
+        g.missing.append((entry, own.recorded_at if own is not None else None))
     d.sources_ok.add("calibration")
+
+
+def _scope_of(req: Any, record: Any) -> SimpleNamespace:
+    """The requirement as `calibration_key` sees it, with the scope of `record` instead."""
+    return SimpleNamespace(
+        kind=req.kind, head=req.head, nozzle=record.nozzle, filament=record.filament
+    )
+
+
+def _calibration_tasks(conn: sqlite3.Connection, printer: str, d: Derivation) -> None:
+    """Per head: the want of its calibration task (missing entries a person has not dismissed,
+    plus the entries of undecided kinds an open task already had); and `done` for an open head
+    task nothing is wanted for once a record satisfies something it covered."""
+    past: dict[str | None, list[tuple[dict[str, Any], list[dict[str, Any]]]]] = {}
+    for r in conn.execute(
+        "SELECT * FROM printer_task WHERE printer = ? AND source_key LIKE 'calib:%' "
+        "ORDER BY id DESC",
+        (printer,),
+    ):
+        t = _row(r)
+        past.setdefault(t["head"], []).append((t, _requirements_of(t, d.kind_titles)))
+    for key, g in d.calibration.items():
+        tasks = past.get(g.head, [])
+        reqs = [
+            e
+            for e, measured in g.missing
+            if not _dismissed_by_person(tasks, e["key"], measured)
+        ]
+        seen = {e["key"] for e, _ in g.missing}
+        for t, covered in tasks:
+            if t["closed_at"] is None:
+                for entry in covered:
+                    if entry["kind"] in g.uncertain and entry["key"] not in seen:
+                        seen.add(entry["key"])
+                        reqs.append(entry)
+        if reqs:
+            d.want[key] = _calibration_want(printer, g.head, key, reqs)
+    for tasks in past.values():
+        for t, covered in tasks:
+            key = t["source_key"]
+            if (
+                t["closed_at"] is not None
+                or key != calibration_task_key(printer, t["head"])
+                or key in d.want
+            ):
+                continue
+            records = [
+                d.satisfied[e["key"]][2] for e in covered if e["key"] in d.satisfied
+            ]
+            if records:
+                ids = sorted(
+                    {
+                        x["calibration_id"]
+                        for x in records
+                        if x["calibration_id"] is not None
+                    }
+                )
+                d.satisfied[key] = (
+                    "done",
+                    "every calibration is current"
+                    + (f": {', '.join(f'#{i}' for i in ids)} recorded" if ids else ""),
+                    {"calibration_id": ids[-1] if ids else None},
+                )
 
 
 @dataclass
@@ -791,8 +988,19 @@ def derive(conn: sqlite3.Connection, sources: Sources, printer: str) -> Derivati
 
 
 def _refresh(t: Mapping[str, Any], w: Want) -> dict[str, Any]:
-    """Fields of an open derived task its source now describes differently (title/why/links)."""
-    keys = ("title", "why", "blocks", "head", "duration_min", "fault_id", "spool_id")
+    """Fields of an open derived task its source now describes differently (title/why/links/scope)."""
+    keys = (
+        "title",
+        "why",
+        "blocks",
+        "head",
+        "duration_min",
+        "fault_id",
+        "spool_id",
+        "calibration_kinds",
+        "spools",
+        "requirements",
+    )
     return {
         k: w.fields.get(k)
         for k in keys
@@ -844,7 +1052,12 @@ def sync(
 def _apply(
     conn: sqlite3.Connection, d: Derivation, printer: str, report: SyncReport
 ) -> None:
+    if (
+        "calibration" in d.sources_ok
+    ):  # inside the write lock: sees every committed dismissal
+        _calibration_tasks(conn, printer, d)
     open_by_key: dict[str, dict[str, Any]] = {}
+    per_kind: list[dict[str, Any]] = []  # calibration tasks of #281, one per kind
     for r in conn.execute(
         "SELECT * FROM printer_task WHERE printer = ? AND closed_at IS NULL "
         "AND source_key IS NOT NULL",
@@ -883,6 +1096,8 @@ def _apply(
                     changes=sorted(changes),
                 )
                 report.updated.append(int(t["id"]))
+        elif "calibration" in d.sources_ok and _per_kind(t):
+            per_kind.append(t)
         elif t["source"] in DERIVED and d.authoritative(t):
             _close(
                 conn,
@@ -900,12 +1115,65 @@ def _apply(
             (key,),
         ).fetchone()
         if (
-            last is not None
+            not w.fields.get(
+                "requirements"
+            )  # a calibration want left out what a person dismissed
+            and last is not None
             and last["status"] == "dismissed"
             and last["closed_by"] != DERIVE
         ):
             continue  # a person dismissed this need: it stays dismissed until its scope changes
         report.opened.append(int(_insert(conn, w.fields, actor=DERIVE)["id"]))
+    head_tasks: dict[str, Any] = {}
+    moved: dict[
+        int, int
+    ] = {}  # superseded task id -> the head task that still covers it
+    for t in per_kind:  # after the inserts: name the head's task that took over
+        head_key = calibration_task_key(printer, t["head"])
+        if head_key not in head_tasks:
+            head_tasks[head_key] = conn.execute(
+                "SELECT id FROM printer_task WHERE source_key = ? AND closed_at IS NULL",
+                (head_key,),
+            ).fetchone()
+        head_task = head_tasks[head_key]
+        _close(
+            conn,
+            t,
+            "dismissed",
+            actor=DERIVE,
+            note="superseded: one calibration task per head"
+            + (f" (task #{head_task['id']})" if head_task else ""),
+        )
+        report.closed.append(int(t["id"]))
+        head_want = d.want.get(head_key)
+        if (
+            head_task
+            and head_want
+            and any(
+                e["key"] == t["source_key"] for e in head_want.fields["requirements"]
+            )
+        ):
+            moved[int(t["id"])] = int(head_task["id"])
+    if moved:  # a task that waited on a superseded one waits on the head's task instead
+        for r in conn.execute(
+            "SELECT * FROM printer_task WHERE printer = ? AND closed_at IS NULL",
+            (printer,),
+        ).fetchall():
+            deps = [int(i) for i in json.loads(r["depends_on"] or "[]")]
+            if any(i in moved for i in deps):
+                _set(
+                    conn,
+                    int(r["id"]),
+                    {"depends_on": list(dict.fromkeys(moved.get(i, i) for i in deps))},
+                )
+                _emit(
+                    conn,
+                    "updated",
+                    get(conn, int(r["id"])),
+                    DERIVE,
+                    changes=["depends_on"],
+                )
+                report.updated.append(int(r["id"]))
 
 
 # -- buffer import -----------------------------------------------------------------------------
