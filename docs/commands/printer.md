@@ -25,7 +25,8 @@ Epic: [#90](https://github.com/alex-mextner/3d-cli/issues/90).
 3d printer agent list [--json] | stop PRINTER | handoff PRINTER --summary TEXT
 3d printer todo list [PRINTER] [--all] [--json] | add PRINTER --title TEXT [options] | done ID [--note TEXT]
 3d printer todo dismiss ID --reason TEXT | snooze ID [--until DATE] [--reason TEXT] | reopen ID
-3d printer todo import FILE... [--dry-run] [--json]
+3d printer todo import [FILE...] [--dry-run] [--json]
+3d printer -n PRINTER issues|todo list|add|done|dismiss|snooze|reopen|import …
 ```
 
 | Subcommand | What |
@@ -40,7 +41,7 @@ Epic: [#90](https://github.com/alex-mextner/3d-cli/issues/90).
 | `bed status` / `reference` / `monitor` | Is the bed clear, is the build plate on — from the camera against an empty-bed reference; also the `bed` start gate and the `bed_clear` event — see [Bed state](#bed-state). |
 | `subscribe` / `unsubscribe` / `subscriptions` | Route printer alerts to an AI agent first: it looks at the frame and tells the user only if the failure is real — see [printer-subscribe.md](printer-subscribe.md). |
 | `agent list` / `stop` / `handoff` | The temporary per-printer omp agent (tmux) that gets the warning+ alerts no live subscriber took — see [printer-subscribe.md#the-temporary-printer-agent](printer-subscribe.md#the-temporary-printer-agent). |
-| `todo …` | The to-do list of each printer: needed calibrations, due maintenance, repairs of open faults, manual tasks — see [To-do list](#to-do-list-3d-printer-todo). |
+| `todo …` (alias `issues`) | The to-do list of each printer: needed calibrations, due maintenance, repairs of open faults, manual tasks — see [To-do list](#to-do-list-3d-printer-todo). A printer's problems are tasks of this list, not GitHub tickets. |
 
 Options:
 
@@ -91,6 +92,7 @@ Options:
 3d printer todo list
 3d printer todo add k1se --title "Check X belt tension" --type inspect --when idle --duration 15
 3d printer todo done 12 --note "belts re-tensioned"
+3d printer -n u1 issues list
 ```
 
 ## To-do list (`3d printer todo`)
@@ -102,6 +104,13 @@ where it comes from and its status. Served by 3d-api (`/v1/printers/{p}/tasks`, 
 see services/3d-api/README.md); Home Assistant shows the same list
 ([#285](https://github.com/alex-mextner/3d-cli/issues/285)).
 
+`3d printer issues …` is the same command. A printer's problems (a broken head, a squeaking
+belt, a wrong slot label) are **tasks of this list, not GitHub tickets**: GitHub issues are for
+the 3d-cli software. `-n PRINTER` / `--name PRINTER` before `todo`/`issues` names the printer
+(its fleet name) instead of the PRINTER argument — `3d printer -n u1 issues list` equals
+`3d printer todo list u1`; with `done`/`dismiss`/`snooze`/`reopen` it refuses a task of another
+printer; with `import` and no FILE it imports only that printer's buffer files. Both forms stay.
+
 ```
 3d printer todo list [PRINTER] [--all] [--json]
 3d printer todo add PRINTER --title TEXT [--why TEXT] [--type T] [--head H] [--slot S] [--component C]
@@ -112,7 +121,8 @@ see services/3d-api/README.md); Home Assistant shows the same list
 3d printer todo dismiss ID --reason TEXT
 3d printer todo snooze ID [--until DATE] [--reason TEXT]
 3d printer todo reopen ID
-3d printer todo import FILE... [--dry-run] [--json]
+3d printer todo import [FILE...] [--dry-run] [--json]
+3d printer -n PRINTER issues list|add|done|… (the same, PRINTER named up front)
 ```
 
 Where tasks come from (`source`):

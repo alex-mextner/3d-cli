@@ -99,9 +99,12 @@ def todo(tmp_path: Path, live_api: LiveApi, monkeypatch: pytest.MonkeyPatch) -> 
         "PRINTOPS_TOKEN": live_api.tokens["rw"],
     }
 
-    def cli(*argv: str, offline: bool = False) -> tuple[int, str, str]:
+    def cli(
+        *argv: str, offline: bool = False, head: tuple[str, ...] = ("todo",)
+    ) -> tuple[int, str, str]:
+        """`3d printer <head…> <argv…>`; head = ("-n", "u1", "issues") for the -n form."""
         env = {**base, "PRINTOPS_API": "", "PRINTOPS_TOKEN": ""} if offline else online
-        r = run_cli(tmp_path, "printer", "todo", *argv, env_extra=env)
+        r = run_cli(tmp_path, "printer", *head, *argv, env_extra=env)
         return r.returncode, r.stdout, r.stderr
 
     return cli
@@ -310,3 +313,48 @@ def test_the_old_buffer_directory_moves_once_and_a_second_one_stops_with_import_
     code, out, err = todo("import", str(old / "k1se.jsonl"))
     assert code == 0, err
     assert f"{old / 'k1se.jsonl'}: 0 lines" in out
+
+
+def test_user_names_the_printer_up_front_with_the_issues_alias(todo: Any) -> None:
+    """The user treats a printer's problems as its issues: `3d printer -n u1 issues list` shows the
+    same list as the PRINTER argument form, adding with -n files the task on that printer, and
+    closing another printer's task through -n is refused before anything changes."""
+    u1 = ("-n", "u1", "issues")
+    code, out, err = todo("list", head=u1)
+    assert code == 0, err
+    code2, out2, _ = todo("list", "u1")
+    assert out == out2 and "#1     OPEN      u1/T2      repair" in out
+
+    code, out, err = todo("add", "--title", "Clean the T3 nozzle wiper", "--type", "maintenance", head=u1)
+    assert code == 0, err
+    assert out.startswith("added #2     OPEN      u1         maintenance Clean the T3 nozzle wiper")
+
+    code, out, err = todo("done", "2", head=("--name", "k1se", "issues"))
+    assert code == 2 and "task 2 is on u1, not k1se" in err
+    code, out, err = todo("list", "u1", "--json")
+    assert [t["status"] for t in json.loads(out)["tasks"] if t["id"] == 2] == ["open"]
+    code, out, err = todo("done", "2", "--note", "wiped", head=u1)
+    assert code == 0 and out.startswith("done #2     DONE")
+
+    code, out, err = todo("list", "k1se", head=u1)
+    assert code == 2 and "two printers: -n u1 and k1se" in err
+    code, out, err = todo("status", head=("-n", "u1"))
+    assert code == 2 and "-n/--name selects the printer for `todo`/`issues`" in err
+    code, out, err = todo("list", head=("--name=", "issues"))
+    assert code == 2 and "--name= needs the printer name" in err
+
+
+def test_import_with_a_named_printer_takes_only_its_buffer(todo: Any, tmp_path: Path) -> None:
+    """With buffers of two printers waiting, `3d printer -n u1 issues import` imports only the
+    U1's buffer (a dotted look-alike name such as u1.x is not swept in)."""
+    new = tmp_path / "xdg-data" / "3d-cli" / "printer-todo"
+    new.mkdir(parents=True)
+    (new / "u1.jsonl").write_text("".join(json.dumps(r) + "\n" for r in BUFFER), encoding="utf-8")
+    (new / "u1.x.jsonl").write_text("", encoding="utf-8")
+    (new / "k1se.jsonl").write_text("", encoding="utf-8")
+    code, out, err = todo("import", "--dry-run", head=("-n", "u1", "issues"))
+    assert code == 0, err
+    assert f"{new / 'u1.jsonl'}: 2 lines" in out
+    assert "k1se.jsonl" not in out and "u1.x.jsonl" not in out
+    code, out, err = todo("import", "--dry-run", head=("-n", "mk4", "issues"))
+    assert code == 2 and "mk4.jsonl" in err
