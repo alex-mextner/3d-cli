@@ -7,10 +7,11 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import sys
 from pathlib import Path
 
-from .workflow_helper import run_cli
+from .workflow_helper import agent_fakebin, agent_spawns, run_cli
 
 SESSIONS = [
     {"pid": 433553, "sessionId": "01a12cd6-7b39-7356", "cwd": "/tmp", "title": "MODEL: Finish 3D model"},
@@ -111,3 +112,72 @@ def test_subscribe_help_and_usage_errors_are_explicit(tmp_path: Path) -> None:
     assert "tmux -L 3d-printer-agent attach -t 3d-printer-agent-u1" in agent_help.stdout
     assert agents.returncode == 0 and agents.stdout.strip() == "no temporary printer agents"
     assert spawn.returncode == 2 and "unknown option --spawn" in spawn.stderr
+    assert agent_help.stdout.count("3d-printer-agent-<hash>") == 1   # the socket isolation is documented
+
+
+def _unreachable_u1(tmp_path: Path) -> None:
+    """u1 on a closed local port: the watch's first reading is a `cannot connect` WARNING, which no
+    subscriber takes, so it goes to the temporary printer agent."""
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    d = tmp_path / "xdg-config" / "3d-cli"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "printer-devices.yaml").write_text(f"u1:\n  adapter: moonraker\n  host: 127.0.0.1\n  port: {port}\n",
+                                            encoding="utf-8")
+
+
+def test_watch_under_pytest_never_starts_a_real_printer_agent(tmp_path: Path) -> None:
+    """#399: `3d printer watch` in a test started a real omp agent as 3d-printer-agent-u1 on the
+    production tmux server. Now the agent refuses under pytest: no tmux/omp/systemd-run runs (the
+    recording fakes first on PATH see nothing) and the refusal is logged; the watch carries on."""
+    _unreachable_u1(tmp_path)
+    watch = run_cli(tmp_path, "printer", "watch", "u1", "--duration", "4", "--heartbeat", str(tmp_path / "hb.json"))
+
+    assert watch.returncode == 0, watch.stderr[-2000:]
+    events = [json.loads(x) for x in watch.stdout.splitlines() if x.strip().startswith("{")]
+    assert any(e["kind"] == "connection" and e["severity"] == "warning" for e in events), watch.stdout
+    assert "printer-agent: u1: refusing to run the real tmux/omp for the temporary printer agent under a test" \
+        in watch.stderr, watch.stderr[-2000:]
+    assert agent_spawns(tmp_path) == []
+    assert not (tmp_path / "xdg-state" / "3d-cli" / "printer-agents" / "u1").exists()
+
+
+def test_the_test_override_runs_the_agent_on_its_own_tmux_server(tmp_path: Path) -> None:
+    """With THREED_TEST_REAL_PRINTER_AGENT=1 the spawn path runs — against the fake tmux/omp — and
+    every tmux call goes to a server named after the tmp state dir, under the tmp TMUX_TMPDIR,
+    never `-L 3d-printer-agent`. The fake tg-ctl reports the agent up once tmux created it."""
+    _unreachable_u1(tmp_path)
+    agent_cwd = tmp_path / "xdg-state" / "3d-cli" / "printer-agents" / "u1"
+    bindir = tmp_path / "tgbin"
+    bindir.mkdir()
+    tgctl = bindir / "tg-ctl"
+    tgctl.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os\n"
+        f"log = {str(tmp_path / 'agent-spawns.jsonl')!r}\n"
+        "rows = [json.loads(x) for x in open(log)] if os.path.exists(log) else []\n"
+        "up = any(r['argv'][0] == 'tmux' and 'new-session' in r['argv'] for r in rows)\n"
+        f"print(json.dumps([{{'pid': 4242, 'sessionId': 'agent', 'cwd': {str(agent_cwd)!r}, 'title': 'a'}}] if up else []))\n",
+        encoding="utf-8")
+    tgctl.chmod(0o755)
+    env = {"THREED_TEST_REAL_PRINTER_AGENT": "1", "PATH": f"{bindir}:{os.environ['PATH']}"}
+    watch = run_cli(tmp_path, "printer", "watch", "u1", "--duration", "4", "--heartbeat", str(tmp_path / "hb.json"),
+                    env_extra=env)
+    listed = run_cli(tmp_path, "printer", "agent", "list", env_extra=env)
+
+    assert watch.returncode == 0, watch.stderr[-2000:]
+    assert "printer-agent: u1: starting the u1 agent" in watch.stderr, watch.stderr[-2000:]
+    spawns = agent_spawns(tmp_path)
+    tmux = [r for r in spawns if r["argv"][0] == "tmux"]
+    sockets = {r["argv"][2] for r in tmux}
+    assert len(sockets) == 1 and all(r["argv"][1] == "-L" for r in tmux), spawns
+    (sock,) = sockets
+    assert sock.startswith("3d-printer-agent-") and sock != "3d-printer-agent"
+    assert {r["TMUX_TMPDIR"] for r in tmux} == {str(tmp_path / "tmux")}
+    (new,) = [r["argv"] for r in tmux if "new-session" in r["argv"]]
+    assert new[new.index("-s") + 1] == "3d-printer-agent-u1" and new[new.index("-c") + 1] == str(agent_cwd)
+    assert new[new.index("--") + 1] == str(agent_fakebin(tmp_path) / "omp")   # the fake omp, never a real one
+    assert [r["argv"][0] for r in spawns if r["argv"][0] != "tmux"] == ["systemd-run"]   # omp itself never ran
+    assert f"attach: tmux -L {sock} attach -t 3d-printer-agent-u1" in listed.stdout, listed.stdout + listed.stderr
+

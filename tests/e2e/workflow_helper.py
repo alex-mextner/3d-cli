@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import shutil
 import struct
@@ -11,16 +12,66 @@ import tempfile
 import zlib
 from collections import Counter
 from pathlib import Path
+from typing import TypedDict
 
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 THREED = REPO_ROOT / "bin" / "3d"
 CUBE = REPO_ROOT / "examples" / "cube.scad"
+# The binaries the temporary printer agent spawns (lib/printer_ops/printer_agent.py). Every CLI
+# run finds recording fakes of them first on PATH, so no test can ever start a real omp agent on
+# the production tmux server (#399: one ran ~21 h as 3d-printer-agent-u1).
+AGENT_SPAWN_BINARIES = ("tmux", "omp", "systemd-run")
+_AGENT_FAKE = """#!{python}
+import json, os, sys
+name = os.path.basename(sys.argv[0])
+with open({log!r}, "a", encoding="utf-8") as fh:
+    fh.write(json.dumps({{"argv": [name, *sys.argv[1:]], "TMUX_TMPDIR": os.environ.get("TMUX_TMPDIR")}}) + "\\n")
+args = sys.argv[1:]
+if name == "systemd-run":  # run the wrapped command (the fake tmux) so it is recorded too
+    while args and args[0].startswith("-"):
+        args = args[1:]
+    os.execvp(args[0], args)
+sys.exit(1 if name == "tmux" and "has-session" in args else 0)
+"""
+
+
+def agent_fakebin(tmp_path: Path) -> Path:
+    """The dir of recording fake tmux/omp/systemd-run; each call appends to agent_spawns()."""
+    bindir = tmp_path / "agent-fakebin"
+    if not bindir.is_dir():
+        bindir.mkdir(parents=True)
+        for name in AGENT_SPAWN_BINARIES:
+            fake = bindir / name
+            fake.write_text(_AGENT_FAKE.format(python=sys.executable, log=str(tmp_path / "agent-spawns.jsonl")),
+                            encoding="utf-8")
+            fake.chmod(0o755)
+    return bindir
+
+
+class AgentSpawn(TypedDict):
+    argv: list[str]           # [binary name, *args]
+    TMUX_TMPDIR: str | None   # where a real tmux would have put its socket
+
+
+def agent_spawns(tmp_path: Path) -> list[AgentSpawn]:
+    """Every tmux/omp/systemd-run invocation the CLI runs of `tmp_path` made, in order."""
+    log = tmp_path / "agent-spawns.jsonl"
+    if not log.is_file():
+        return []
+    return [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def _agent_fakes_first(env: dict[str, str], tmp_path: Path) -> None:
+    bindir = str(agent_fakebin(tmp_path))
+    parts = [p for p in env.get("PATH", "").split(os.pathsep) if p and p != bindir]
+    env["PATH"] = os.pathsep.join([bindir, *parts])
 
 
 def isolated_env(tmp_path: Path) -> dict[str, str]:
-    """Return an environment whose user config/data/cache cannot leak from the host."""
+    """Return an environment whose user config/data/cache/state cannot leak from the host, with
+    the printer agent's spawn binaries faked and tmux sockets in tmp_path."""
     config_home = tmp_path / "xdg-config"
     app_config = config_home / "3d-cli"
     app_config.mkdir(parents=True, exist_ok=True)
@@ -40,8 +91,14 @@ def isolated_env(tmp_path: Path) -> dict[str, str]:
             "XDG_CACHE_HOME": str(tmp_path / "xdg-cache"),
             "XDG_CONFIG_HOME": str(config_home),
             "XDG_DATA_HOME": str(tmp_path / "xdg-data"),
+            "XDG_STATE_HOME": str(tmp_path / "xdg-state"),
+            # any tmux server a test reaches (even a real one) lives here, never next to the user's
+            "TMUX_TMPDIR": str(tmp_path / "tmux"),
         }
     )
+    env.pop("TMUX", None)  # a test run inside tmux must not hand the CLI the user's server
+    env.pop("THREED_TEST_REAL_PRINTER_AGENT", None)  # only a test that fakes tmux/omp opts in
+    _agent_fakes_first(env, tmp_path)
     env.pop("PYTHONPATH", None)
     env.pop("HF_TOKEN", None)
     env.pop("OPENSCADPATH", None)
@@ -65,6 +122,7 @@ def run_cli(
     env = isolated_env(tmp_path)
     if env_extra:
         env.update(env_extra)
+        _agent_fakes_first(env, tmp_path)  # an env_extra PATH (a test's own fakes) keeps the agent fakes first
     return subprocess.run(
         [sys.executable, str(THREED), *argv],
         cwd=str(cwd or tmp_path),
