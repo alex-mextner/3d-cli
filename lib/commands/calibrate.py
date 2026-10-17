@@ -2,16 +2,19 @@
 
 WHAT: `plan` lists the calibrations a printer head needs for the spool loaded on it (plan §8.2
   step 1), `record` stores a measured value, `ls`/`show` list records, `check` runs the
-  `calibration_current` gate on a G-code (missing/stale calibration, footer values ≠ recorded).
+  `calibration_current` gate on a G-code (missing/stale calibration, footer values ≠ recorded),
+  `gen` writes a calibration print locally (PA tower, flow tiles; shaper console commands).
 WHY: a new material type or vendor on a head prints with someone else's flow and pressure
   advance; after a nozzle swap every old value is stale. Issue #167 (decision D6).
 INVARIANTS: stdlib-only at import time (registry contract); the domain logic runs in 3d-api
-  (printops.calibrations), this module only parses arguments and speaks HTTP.
+  (printops.calibrations), this module only parses arguments and speaks HTTP — except `gen`,
+  which slices locally (slicing.calibration_gen) and needs no API.
 """
 
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -27,7 +30,8 @@ USAGE = """3d calibrate plan --printer P [--head T] [--spool ID] [--plate PLATE]
 3d calibrate show ID
 3d calibrate check FILE.gcode --printer P [--spools T1=ID,…] [--plate PLATE]
                    [--accept calibration:KIND[,…] --reason TEXT]
-  common: [--json] [--api URL] [--token TOKEN]
+3d calibrate gen pa|flow|shaper --printer P -o OUT [--material PLA] [--color #RRGGBB] [--nozzle-temp C]
+  common (all but gen): [--json] [--api URL] [--token TOKEN]
 
   Calibrations per printer head and filament (fleet/calibrations.yaml: flow_ratio, pressure_advance,
   temp_tower, max_volumetric_speed, retraction, input_shaper, z_offset, bed_mesh, head_offsets,
@@ -44,6 +48,11 @@ Subcommands:
   check   the calibration_current gate for a G-code: every used head's requirements plus the
           footer values (`; pressure_advance`, `; filament_flow_ratio`, `; filament_max_volumetric_speed`)
           against the records. FAIL exits 1; --accept turns a FAIL into a logged WARN.
+  gen     a calibration print for a Klipper printer, sliced with the Orca CLI from the printer's
+          system presets: pa = hollow tower with Klipper TUNING_TOWER (PA = Z × 0.005); flow =
+          5 tiles at 90…110 % extrusion (M221 per tile); shaper = SHAPER_CALIBRATE console commands
+          (printers with an accelerometer). The G-code gets thumbnails and a slice-warnings record,
+          ready for `3d print-preflight`. Local only; set SLICER=/path/to/orca if needed.
 
 Options:
   --printer P        fleet printer name (fleet/printers.yaml), e.g. u1, k1se
@@ -63,6 +72,10 @@ Options:
   --accept LIST      check: calibration:<kind>[,…] to accept despite FAIL (needs --reason; logged)
   --reason TEXT      why the FAIL is accepted
   --limit N          ls: at most N records (default 50)
+  --material M       gen: filament preset material (default PLA)
+  --color #RRGGBB    gen: filament colour written to the G-code (loaded_filament_match)
+  --nozzle-temp C    gen: nozzle temperature instead of the preset's
+  -o, --out FILE     gen: output .gcode (shaper: a .txt of console commands)
   --json             print the API's JSON
   --api URL          3d-api base URL (default: $PRINTOPS_API, else ~/.config/3d-cli/printops.yaml)
   --token TOKEN      bearer token (default: $PRINTOPS_TOKEN, else the same file)
@@ -75,7 +88,9 @@ Examples:
   3d calibrate record temp_tower --filament 7 --values nozzle_temp_min=205,nozzle_temp_best=215,nozzle_temp_max=230
   3d calibrate check plate.gcode --printer u1
   3d calibrate check plate.gcode --printer u1 --accept calibration:flow_ratio --reason "test cube, flow irrelevant"
-  3d calibrate plan --printer u1 --json | jq '.items[] | {head, kind, status, level}'"""
+  3d calibrate plan --printer u1 --json | jq '.items[] | {head, kind, status, level}'
+  3d calibrate gen pa --printer k1se --color '#E8732A' -o k1se_pa_orange.gcode
+  3d calibrate gen flow --printer k1se --color '#000000' -o k1se_flow_black.gcode"""
 
 USAGE += ("\n\nTop-camera photo (#342):\n" + photo_cli.USAGE + "\n\nSubcommands:\n" + photo_cli.HELP
           + "\n\nOptions:\n" + photo_cli.OPTIONS + "\n\nExamples:\n" + photo_cli.EXAMPLES)
@@ -294,7 +309,79 @@ def _check(argv: list[str]) -> int:
     return 0
 
 
-SUBS = {"plan": _plan, "record": _record, "ls": _ls, "show": _show, "check": _check,
+def _gen(argv: list[str]) -> int:
+    from printops.cli._common import parse
+
+    p = parse(
+        argv,
+        "gen",
+        values={"--printer", "--material", "--color", "--nozzle-temp", "-o", "--out"},
+        n_pos=1,
+        prefix=PREFIX,
+    )
+    from slicing.calibration_gen import KINDS, GenError, generate
+
+    kind = p.pos[0]
+    if kind not in KINDS:
+        raise UsageError(f"unknown kind {kind!r} (accepted: {', '.join(KINDS)})", command=f"{PREFIX} gen")
+    printer = p.opts.get("--printer")
+    if not printer:
+        raise UsageError("--printer is required", command=f"{PREFIX} gen")
+    out = p.opts.get("-o") or p.opts.get("--out")
+    if not out:
+        raise UsageError(
+            "-o OUT is required (a .gcode, or .txt for shaper)", command=f"{PREFIX} gen"
+        )
+    color = p.opts.get("--color", "")
+    if color and not re.fullmatch(r"#[0-9A-Fa-f]{6}", color):
+        raise UsageError(
+            f"--color wants #RRGGBB, got {color!r}", command=f"{PREFIX} gen"
+        )
+    temp = (
+        _int(p.opts["--nozzle-temp"], "--nozzle-temp", "gen")
+        if "--nozzle-temp" in p.opts
+        else None
+    )
+
+    from cli.env import find_slicer
+    from printops.fleet import load_fleet
+
+    fleet = load_fleet()
+    entry = fleet.printers.get(printer) if fleet else None
+    if entry is None:
+        raise InputNotFound(
+            f"printer {printer!r} is not in fleet/printers.yaml",
+            command=f"{PREFIX} gen",
+        )
+    slicer = find_slicer()
+    # A forced SLICER ("custom") is taken as an Orca-family binary: the generator needs Orca's CLI.
+    if kind != "shaper" and (slicer is None or slicer[0] not in ("orca", "custom")):
+        raise UsageError(
+            "`calibrate gen` slices with the Orca CLI; none found (set SLICER=/path/to/orca)",
+            command=f"{PREFIX} gen",
+        )
+    try:
+        res = generate(
+            kind,
+            entry.model,
+            slicer[1] if slicer else "",
+            Path(out),
+            material=p.opts.get("--material", "PLA").upper(),
+            color=color,
+            temp=temp,
+        )
+    except GenError as e:
+        raise UsageError(str(e), command=f"{PREFIX} gen") from e
+    for f in res.files:
+        print(f"wrote {f}")
+    for note in res.notes:
+        print(f"  {note}")
+    if kind != "shaper":
+        print(f"  next: 3d print-preflight {out} --printer {printer}")
+    return 0
+
+
+SUBS = {"plan": _plan, "record": _record, "ls": _ls, "show": _show, "check": _check, "gen": _gen,
         "photo": photo_cli.photo, "rectify": photo_cli.rectify}
 
 
