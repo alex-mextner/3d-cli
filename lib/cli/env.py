@@ -3,8 +3,8 @@
 Pure-stdlib so it is safe to import from the dispatcher and any command module:
   - repo_root()                : the 3d-cli repo root (resolved through the bin/3d symlink).
   - export_openscadpath()      : prepend repo libs/ to OPENSCADPATH (subprocesses inherit it).
-  - find_openscad/magick/slicer: locate external tools (PATH + macOS app bundles).
-  - require_openscad/magick    : same, but raise MissingDependency with the OS install line.
+  - find_openscad/magick/tesseract/slicer: locate external tools (PATH + macOS app bundles).
+  - require_openscad/magick/tesseract    : same, but raise MissingDependency with the OS install line.
   - detect_os / install_cmd    : OS + per-OS install command (shared by doctor).
   - resolve_python / py_has_module : which python pyrun would use + import probe.
   - maybe_bootstrap()          : first-run OpenSCAD-library clone (idempotent, offline-safe).
@@ -144,6 +144,28 @@ def require_ffmpeg(command: str | None = None) -> str:
     return ffmpeg
 
 
+def find_tesseract() -> str | None:
+    w = shutil.which("tesseract")
+    if w:
+        return w
+    for p in ("/opt/homebrew/bin/tesseract", "/usr/local/bin/tesseract"):
+        if os.access(p, os.X_OK):
+            return p
+    return None
+
+
+def require_tesseract(command: str | None = None) -> str:
+    tess = find_tesseract()
+    if tess is None:
+        raise MissingDependency(
+            "tesseract (OCR)",
+            install=install_cmd("tesseract"),
+            degrades="spool label photos cannot be read; pass the label text as a .txt file instead",
+            command=command,
+        )
+    return tess
+
+
 # Slicer preference: OrcaSlicer > Bambu Studio > PrusaSlicer. Each is checked across
 # BOTH PATH and macOS bundles before falling to the next, so preference holds regardless
 # of install location. Returns (kind, path) or None.
@@ -249,6 +271,12 @@ _INSTALL: dict[str, dict[str, str]] = {
         "linux-apt": "{sudo}apt-get install -y ffmpeg",
         "linux-dnf": "{sudo}dnf install -y ffmpeg",
         "linux-pacman": "{sudo}pacman -S --noconfirm ffmpeg",
+    },
+    "tesseract": {
+        "macos": "brew install tesseract tesseract-lang",
+        "linux-apt": "{sudo}apt-get install -y tesseract-ocr tesseract-ocr-rus",
+        "linux-dnf": "{sudo}dnf install -y tesseract tesseract-langpack-rus",
+        "linux-pacman": "{sudo}pacman -S --noconfirm tesseract tesseract-data-eng tesseract-data-rus",
     },
 }
 

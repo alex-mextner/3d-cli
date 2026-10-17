@@ -2,7 +2,8 @@
 
 Part of [`3d printops`](printops.md) (configuration, tokens, service). Issues:
 [#160](https://github.com/alex-mextner/3d-cli/issues/160) (spool lifecycle + ledger),
-[#163](https://github.com/alex-mextner/3d-cli/issues/163) (weighing + tare DB). Plan §5.2–5.3, F6.
+[#163](https://github.com/alex-mextner/3d-cli/issues/163) (weighing + tare DB),
+[#379](https://github.com/alex-mextner/3d-cli/issues/379) (spool label photos). Plan §5.2–5.3, F6.
 
 A spool's identity, lot, price, remaining weight and location live in Spoolman; 3d-api is
 the only writer. On top of that 3d-api keeps a **ledger**: every change of remaining filament
@@ -53,6 +54,8 @@ No tare → `measure` refuses (409) and says why; pass `--tare G` (recorded for 
 3d printops spool receive (--filament-id N | --material M --name NAME [--vendor V] [--color #HEX] [--density D] [--diameter MM])
                           [--net G] [--remaining G [--confidence G]] [--tare G [--tare-source TEXT]]
                           [--spool-kind cardboard|plastic|refill] [--lot LOT] [--price P] [--location LOC] [--opened] [--comment TEXT]
+3d printops spool receive --from-photo IMG|TXT [any receive flag …] [--yes]
+3d printops spool scan IMG|TXT [IMG|TXT …] [--location LOC]
 3d printops spool move ID LOCATION
 3d printops spool load ID PRINTER/SLOT [--replace-to LOCATION]
 3d printops spool unload PRINTER/SLOT [--to LOCATION] [--gross G]
@@ -75,6 +78,20 @@ Every action takes `--json` (the API answer), `--api URL`, `--token TOKEN`.
   PLA 1.24, PETG 1.27, ABS 1.04, …; diameter 1.75). The location must be storage, not a
   printer slot. `--opened` sets `opened_at` now (drying policy reads it).
   `3d printops spool receive --vendor Elegoo --material PLA+ --name "RAPID PLA+ Green" --color #4FE44D --net 1000 --price 1499 --location WH:default`
+- `receive --from-photo IMG` — the same, filled from the spool label (see
+  [Label photos](#label-photos)): every flag you pass overrides what was read. The proposal is
+  printed first; the spool is created only after `y` at the terminal or `--yes` (without a
+  terminal and without `--yes` it exits 2 and writes nothing). With `--json` the proposal goes
+  to stderr and stdout carries `{"proposal": …, "spool": …}`. With `--filament-id` only the
+  spool facts of the label (net, lot, comment) are used.
+  `3d printops spool receive --from-photo ~/.cache/spool-labels/k1-black.jpg --name "чёрный (K1)" --location WH:default`
+- `scan` — read one or more label photos into proposals and write nothing: per photo every
+  read field with the label line it came from (the name is composed from them), the `receive`
+  command that creates it, and for a batch a table (`# photo vendor material colour net lot
+  missing`). A photo that cannot be read is reported as `FAILED` and the rest still come out
+  (exit 1). `--location` is added to every proposed command; `--json` gives `{"proposals":
+  [{fields, missing, ocr, receive, receive_command, text}], "failed": [{source, error}]}`.
+  `3d printops spool scan ~/.cache/spool-labels/*.jpg --location WH:default`
 - `move` — store or move to a location (`WH:A/S2/B3/04`, `cell:…`, a tag uid — see `3d printops loc`).
   A loaded spool is unloaded on the way. `3d printops spool move 7 WH:A/S1`
 - `load` — bind to a printer head (`u1/T3`) or AMS slot (`p1s/ams1/2`): Spoolman extra
@@ -103,6 +120,48 @@ Every action takes `--json` (the API answer), `--api URL`, `--token TOKEN`.
   source, never overwritten) — and writes nothing without `--apply`. Keyed by
   `<project>:owned:<name>` in the spool extra field `external_key`, so a re-run changes nothing.
   `3d printops spool import-owned ~/xp/garage-band/projects/babushkin-dom/gen/plates.json --location WH:default`
+
+### Label photos
+
+`scan` and `receive --from-photo` read the label with **tesseract** OCR and fixed rules — no
+LLM ([#363](https://github.com/alex-mextner/3d-cli/issues/363)); a vision model may add to this
+once the provider of [#364](https://github.com/alex-mextner/3d-cli/issues/364) exists.
+
+- **OCR** (`printops.ocr`): ImageMagick applies the EXIF orientation, greys and scales the photo
+  (≤ 2400 px); tesseract (`eng`, plus `rus` when installed) reads it turned 0/90/180/270° and the
+  turn with the most confident letters wins. Missing tesseract → exit 127 with the install line
+  (`brew install tesseract tesseract-lang`, `apt-get install tesseract-ocr tesseract-ocr-rus`).
+  A `.txt` file instead of a photo is taken as the label text (text copied with the phone's
+  Live Text, or OCR from elsewhere).
+- **Rules** (`printops.spool_label`): vendor = the longest known vendor name in the text
+  (a built-in list plus the tare DB vendors from `GET /v1/tares`; when 3d-api is unreachable,
+  the built-in list with a note); material PLA+ (also PLA Pro / PLA Plus), PETG, PCTG, ABS, ASA,
+  TPU, HIPS, PVA, PA, PC, PET, PLA; colour from a `Color:`/`Цвет:` line, else the first colour
+  word (English or Russian) → a nominal #hex (a `#RRGGBB` printed beside the word wins) and the
+  Russian name; name = product-line words (Silk, Matte, Rapid, High Speed, …) + the colour
+  (`Matte Black`); net = a weight in g/kg on a net/weight line (never a gross one),
+  100 g – 10 kg, `1.000 g` / `1,000 g` read as 1000 g; diameter
+  1.75 / 2.85 / 3.00 mm; nozzle and bed °C ranges by the words before them (else ≥ 150 °C is the
+  nozzle, ≤ 120 °C the bed); lot after `LOT` / `Batch` / `S/N` / `Партия`.
+- Nothing is guessed: what the label does not show stays empty and is listed as MISSING (no
+  default 1 kg net). The temperatures and the photo name go into the spool comment
+  (`from label k1.jpg; nozzle 190–220 °C; bed 50–60 °C`): 3d-api's receive has no
+  temperature fields.
+
+```
+$ 3d printops spool scan label.jpg --location WH:default
+label.jpg  (OCR, turned 0°, score 87.8)
+  vendor    eSUN                    "eSUN PLA+"
+  material  PLA+                    "eSUN PLA+"
+  colour    Black #000000 (чёрный)  "Color: Black"
+  name      Black
+  net       1000 g                  "Net Weight: 1KG"
+  diameter  1.75 mm                 "Diameter: 1.75mm +0.03mm"
+  nozzle    205–225 °C              "Printing Temp: 205-225°C"
+  bed       60–80 °C                "Bed Temp: 60-80°C"
+  lot       ES2408A12               "Batch No: ES2408A12"
+  → 3d printops spool receive --vendor eSUN --material PLA+ --name Black --color '#000000' --lot ES2408A12 --location WH:default --comment 'from label label.jpg; nozzle 205–225 °C; bed 60–80 °C' --diameter 1.75 --net 1000
+```
 
 ## `3d printops tare`
 

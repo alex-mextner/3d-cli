@@ -18,6 +18,7 @@ score/
 !examples/*.scad
 !docs/img/*.png
 !docs/img/*.svg
+!tests/data/spool_labels/*.png
 
 # local tooling state
 .serena/

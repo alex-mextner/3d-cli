@@ -37,6 +37,7 @@ from cli.env import (
     find_magick,
     find_openscad,
     find_slicer,
+    find_tesseract,
     install_cmd,
     py_has_module,
     pypkg_for,
@@ -51,8 +52,8 @@ USAGE = """3d doctor
   (OpenSCAD libraries auto-install on first run; python deps resolve via uv or a .venv.)
 
   Checks: openscad, imagemagick, ffmpeg, python3, uv/pip, the python mesh stack
-  (trimesh, manifold3d, numpy, scipy, rtree, pillow, opencv), and a slicer
-  (OrcaSlicer / Bambu Studio / PrusaSlicer).
+  (trimesh, manifold3d, numpy, scipy, rtree, pillow, opencv), a slicer
+  (OrcaSlicer / Bambu Studio / PrusaSlicer), and tesseract (optional: spool label photos).
 
 Examples:
   3d doctor
@@ -206,6 +207,14 @@ def run(argv: list[str]) -> int:  # noqa: C901
         passl(f"slicer ({sl[0]})", sl[1])
     else:
         miss("slicer", f"{install_cmd('slicer')}   [OrcaSlicer > Bambu Studio > PrusaSlicer]")
+
+    print()
+    print(f"{b}Spool label OCR (3d printops spool scan — OPTIONAL){z}")
+    tess = find_tesseract()
+    if tess:
+        passl("tesseract", tess)
+    else:
+        warn("tesseract", f"absent — only label photos need it ({install_cmd('tesseract')})")
 
     print()
     print(f"{b}OpenSCAD libraries{z}")
