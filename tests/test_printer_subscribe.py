@@ -93,7 +93,8 @@ class Fake:
         self.raw.append(cmd)
         if "tmux" in cmd:  # record tmux calls without the systemd-run scope and the own socket
             cmd = cmd[cmd.index("tmux"):]
-            assert cmd[1:3] == ["-L", "3d-printer-agent"]
+            # a tmp state dir never shares the production agents' tmux server (#399)
+            assert cmd[1] == "-L" and cmd[2] == printer_agent.tmux_socket() != printer_agent.TMUX_SOCKET
             cmd = [cmd[0], *cmd[3:]]
         self.calls.append(cmd)
         out, code = '{"ok":true}', 0
@@ -1263,3 +1264,58 @@ def test_shutdown_hands_still_pending_alerts_to_the_fallback_within_the_budget(x
 
 def test_dotted_printer_names_get_a_tmux_safe_session() -> None:
     assert session_name("k1.se") == "3d-printer-agent-k1_se"
+
+
+def test_the_real_tmux_is_refused_under_pytest(xdg: Path, monkeypatch: pytest.MonkeyPatch,
+                                               capsys: pytest.CaptureFixture[str]) -> None:
+    """#399: a watch run under pytest started a real omp agent. With the default (real) runner,
+    the agent refuses before any process is spawned, and the sink reports the alert unreached."""
+    def no_process(*a: Any, **kw: Any) -> None:
+        raise AssertionError(f"a real process was spawned: {a}")
+
+    monkeypatch.setattr(subprocess, "Popen", no_process)
+    with pytest.raises(RuntimeError, match="refusing to run the real tmux/omp .*PYTEST_CURRENT_TEST is set"):
+        PrinterAgents().deliver("u1", [noodle()])
+    with pytest.raises(RuntimeError, match="refusing"):
+        PrinterAgents().stop("u1")
+    assert PrinterAgents().running("u1") is False
+    assert PrinterAgentSink().deliver([noodle()]) == []
+    assert "u1: refusing to run the real tmux/omp" in capsys.readouterr().err
+    assert "refusing" in DeliveryState().agent("u1")["last_error"]
+    assert not agent_dir("u1").exists()
+
+
+def test_spawn_refusal_sees_pytest_env_and_tmp_dirs_unless_overridden(monkeypatch: pytest.MonkeyPatch) -> None:
+    import pwd
+
+    assert "PYTEST_CURRENT_TEST" in (printer_agent.spawn_refusal() or "")
+    monkeypatch.delenv("PYTEST_CURRENT_TEST")
+    monkeypatch.setenv("HOME", "/tmp/pytest-of-ultra/pytest-7/test_x0/home")
+    monkeypatch.setenv("XDG_STATE_HOME", "/srv/state")
+    assert printer_agent.spawn_refusal() == "HOME /tmp/pytest-of-ultra/pytest-7/test_x0/home is a pytest tmp dir"
+    monkeypatch.setenv("HOME", "/home/someone")
+    monkeypatch.setenv("XDG_STATE_HOME", "/tmp/pytest-of-ultra/pytest-7/test_x0/state")
+    assert "the state dir" in (printer_agent.spawn_refusal() or "")
+    monkeypatch.setenv(printer_agent.ALLOW_UNDER_TEST_ENV, "1")
+    assert printer_agent.spawn_refusal() is None
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "t")   # even with the override: never the production server
+    monkeypatch.setenv("XDG_STATE_HOME", str(Path(pwd.getpwuid(os.getuid()).pw_dir) / ".local" / "state"))
+    assert "the state dir is the production one" in (printer_agent.spawn_refusal() or "")
+    monkeypatch.delenv("PYTEST_CURRENT_TEST")
+    monkeypatch.delenv(printer_agent.ALLOW_UNDER_TEST_ENV)
+    monkeypatch.setenv("XDG_STATE_HOME", "/srv/state")
+    assert printer_agent.spawn_refusal() is None   # production: no pytest marker at all
+
+
+def test_tmux_socket_is_namespaced_by_the_state_dir(xdg: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only the real user's default state dir uses the production server name; any other state
+    dir gets its own server, stable for that dir, so same-named sessions never collide."""
+    import pwd
+
+    tmp_socket = printer_agent.tmux_socket()
+    assert tmp_socket.startswith("3d-printer-agent-") and tmp_socket == printer_agent.tmux_socket()
+    assert printer_agent.attach_hint("u1") == f"tmux -L {tmp_socket} attach -t 3d-printer-agent-u1"
+    monkeypatch.setenv("XDG_STATE_HOME", str(xdg / "other"))
+    assert printer_agent.tmux_socket() not in (tmp_socket, printer_agent.TMUX_SOCKET)
+    monkeypatch.setenv("XDG_STATE_HOME", str(Path(pwd.getpwuid(os.getuid()).pw_dir) / ".local" / "state"))
+    assert printer_agent.tmux_socket() == printer_agent.TMUX_SOCKET

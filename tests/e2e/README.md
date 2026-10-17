@@ -31,3 +31,10 @@ Every user-visible command change needs e2e consideration:
   profile guidance, and handoff files.
 - Unit tests still own pure logic. They do not replace a real `bin/3d` e2e story for
   command behavior.
+
+Every CLI run through `workflow_helper.run_cli`/`isolated_env` gets tmp `HOME` and XDG dirs
+(config, data, cache, state), a tmp `TMUX_TMPDIR`, and recording fakes of `tmux`, `omp` and
+`systemd-run` first on `PATH` (`agent_spawns(tmp_path)` lists what they were called with). A
+watch that hands an alert to the temporary printer agent therefore never reaches the user's
+tmux server or a real omp; the agent itself also refuses the real tmux under pytest unless a
+test sets `THREED_TEST_REAL_PRINTER_AGENT=1` (#399).
