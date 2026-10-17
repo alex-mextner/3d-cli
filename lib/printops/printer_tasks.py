@@ -50,7 +50,6 @@ import math
 import sqlite3
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
-from types import SimpleNamespace
 from typing import Any
 
 from printops import db, events
@@ -881,17 +880,28 @@ def _calibration_wants(ctx: Any, printer: str, d: Derivation) -> None:
         # The record of an expired/invalidated verdict can be of another scope (another lot of
         # the filament; new_lot / new_nozzle always are): only a record of this key counts.
         own = r.record if r.status in ("expired", "invalidated") else None
-        if own is not None and calibration_key(printer, _scope_of(r, own)) != key:
+        if own is not None and not _measures(own, r):
             own = None
         g.missing.append((entry, own.recorded_at if own is not None else None))
     d.sources_ok.add("calibration")
 
 
-def _scope_of(req: Any, record: Any) -> SimpleNamespace:
-    """The requirement as `calibration_key` sees it, with the scope of `record` instead."""
-    return SimpleNamespace(
-        kind=req.kind, head=req.head, nozzle=record.nozzle, filament=record.filament
-    )
+def _measures(record: Any, req: Any) -> bool:
+    """`record` is of the requirement's own scope, matched the way the engine matches: a nozzle
+    it does not know (an imported past record has no install id) is the same nozzle; the
+    filament is the same filament, and the same lot for a lot-sensitive kind."""
+    k = req.kind
+    if "nozzle" in k.scope and not (
+        record.nozzle is None or req.nozzle is None or record.nozzle.same(req.nozzle)
+    ):
+        return False
+    if "filament" in k.scope:
+        rf, f = record.filament, req.filament
+        if rf is None or f is None or rf.filament_id != f.filament_id:
+            return False
+        if k.lot_sensitive and rf.lot_nr != f.lot_nr:
+            return False
+    return True
 
 
 def _calibration_tasks(conn: sqlite3.Connection, printer: str, d: Derivation) -> None:

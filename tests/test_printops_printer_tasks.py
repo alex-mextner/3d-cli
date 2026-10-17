@@ -8,6 +8,7 @@ import json
 import re
 import sqlite3
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -673,6 +674,40 @@ def test_a_new_lot_dismissal_sticks_after_newer_records_on_another_lot(
     )  # A2 flow: expired, by an A1 record
     assert pt.sync(conn, src, "k1se").opened == []
     assert calib_open(conn, "k1se") == []
+
+
+def test_a_record_measures_the_requirement_the_way_the_engine_matches_it() -> None:
+    flow = load_catalog().kinds["flow_ratio"]  # nozzle + filament, lot-sensitive
+    now = cal.Nozzle(7, 0.4, "hardened", "std")
+    a1 = cal.Filament(12, "Hyper PLA", "Creality", "PLA", "A1")
+
+    def req(nozzle: cal.Nozzle, fil: cal.Filament) -> Any:
+        return cal.Requirement(
+            kind=flow,
+            printer="k1se",
+            head="T1",
+            status="expired",
+            level=cal.FAIL,
+            detail="",
+            nozzle=nozzle,
+            filament=fil,
+        )
+
+    def rec(nozzle: cal.Nozzle | None, fil: cal.Filament) -> Any:
+        return SimpleNamespace(nozzle=nozzle, filament=fil)
+
+    r = req(now, a1)
+    assert pt._measures(rec(now, a1), r)
+    assert pt._measures(
+        rec(cal.Nozzle(None, 0.4, None, None), a1), r
+    )  # an imported past record: no install id, same diameter
+    assert not pt._measures(rec(cal.Nozzle(3, 0.4, "hardened", "std"), a1), r)
+    assert not pt._measures(
+        rec(now, cal.Filament(12, "Hyper PLA", "Creality", "PLA", "A2")), r
+    )  # another lot of a lot-sensitive kind
+    assert not pt._measures(
+        rec(now, cal.Filament(13, "Matte", "Creality", "PLA", "A1")), r
+    )
 
 
 def test_a_dismissal_stops_sticking_once_a_record_of_the_key_was_made() -> None:
