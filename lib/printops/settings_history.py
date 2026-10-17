@@ -134,7 +134,10 @@ def instant(raw: Any) -> str:
     else:
         dt = datetime.datetime.fromisoformat(text.replace("Z", "+00:00"))
         dt = dt if dt.tzinfo else dt.replace(tzinfo=datetime.timezone.utc)
-    dt = dt.astimezone(datetime.timezone.utc)
+    try:
+        dt = dt.astimezone(datetime.timezone.utc)
+    except OverflowError as e:  # e.g. 9999-12-31T23:00-05:00 is past datetime.max in UTC
+        raise ValueError(f"{text} is out of the date range") from e
     return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
 
 
@@ -282,7 +285,7 @@ def _binding_of(d: Mapping[str, Any]) -> tuple[tuple[str, str], Binding] | None:
     new, printer, head = d.get("new"), d.get("printer"), d.get("head")
     if (
         d.get("kind") != "spool_binding"
-        or d.get("status") != "applied"
+        or str(d.get("status") or "").strip() != "applied"
         or not isinstance(new, dict)
         or not isinstance(printer, str)
         or not isinstance(head, str)
@@ -415,7 +418,7 @@ def _record_for(
 ) -> tuple[cal.PreparedRecord | None, str, str | None]:
     """The calibration record a line maps to (None + why when it is journal-only), and the uid of
     the spool_binding line the record's spool comes from (colour binding only)."""
-    status = d["status"]
+    status = str(d["status"]).strip()  # _plan validated the stripped value
     values = catalog_values(kind, d.get("new"))
     if status == "measured_not_applied":
         if not values or catalog_values(kind, d.get("old")) != values:
@@ -787,7 +790,10 @@ def import_lines(
         [p.result for p in ordered],
         sorted(u for u in {*overrides.spools, *overrides.methods} if u not in seen),
     )
-    todo = [p for p in ordered if p.result.outcome == "imported"]
+    # journal-only lines (spool bindings among them) first: a binding refused inside the
+    # transaction (reverts target missing, concurrent import) is then known before any
+    # calibration line that relies on it
+    todo = sorted((p for p in ordered if p.result.outcome == "imported"), key=lambda p: p.record is not None)
     if not todo:
         return report
     now = db.utc_now()

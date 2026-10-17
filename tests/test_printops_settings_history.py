@@ -734,7 +734,11 @@ def test_rest_import_history_and_scopes(
     done = api_client.post("/v1/settings/import", body)
     assert done["counts"]["calibrations"] == 4 and done["file"] == "k1se.jsonl"
     hist = api_client.get("/v1/settings/history", printer="k1se")["changes"]
-    assert [c["uid"] for c in hist][:3] == ["u-mvs22", "u-accel", "u-mvs20"]
+    uids = [c["uid"] for c in hist]
+    assert uids[0] == "u-mvs22" and set(uids[1:3]) == {
+        "u-accel",
+        "u-mvs20",
+    }  # same `at`: id breaks the tie
     assert (
         hist[0]["new"] == {"filament_max_volumetric_speed": 22}
         and hist[0]["calibration_id"] is not None
@@ -787,21 +791,104 @@ def test_rest_import_history_and_scopes(
     assert e.value.status == 422
 
 
-def test_a_respool_with_the_same_colour_binds_by_time(ctx: cal.Ctx, fake_spoolman: FakeSpoolman) -> None:
+def test_a_respool_with_the_same_colour_binds_by_time(
+    ctx: cal.Ctx, fake_spoolman: FakeSpoolman
+) -> None:
     first = add_spool(fake_spoolman, "PLA оранжевый", ORANGE)
     second = add_spool(fake_spoolman, "PLA оранжевый 2", ORANGE, slot="k1se/T1")
     bind = buffer(first)[5]
-    rebind = {**bind, "uid": "u-bind2", "at": "2026-10-20T10:00:00Z", "recorded_at": "2026-10-20T10:00:00Z",
-              "new": {**bind["new"], "spool_id": second}}
-    late_pa = {**buffer(first)[2], "uid": "u-pa-late", "at": "2026-10-21T10:00:00Z",
-               "recorded_at": "2026-10-21T10:00:00Z"}
-    got = outcomes(sh.import_lines(ctx, lines([bind, rebind, buffer(first)[2], late_pa])))
+    rebind = {
+        **bind,
+        "uid": "u-bind2",
+        "at": "2026-10-20T10:00:00Z",
+        "recorded_at": "2026-10-20T10:00:00Z",
+        "new": {**bind["new"], "spool_id": second},
+    }
+    late_pa = {
+        **buffer(first)[2],
+        "uid": "u-pa-late",
+        "at": "2026-10-21T10:00:00Z",
+        "recorded_at": "2026-10-21T10:00:00Z",
+    }
+    got = outcomes(
+        sh.import_lines(ctx, lines([bind, rebind, buffer(first)[2], late_pa]))
+    )
     assert cal.get(ctx.conn, got["u-pa"][1] or 0).filament.spool_id == first  # type: ignore[union-attr]
     assert cal.get(ctx.conn, got["u-pa-late"][1] or 0).filament.spool_id == second  # type: ignore[union-attr]
 
 
-def test_a_line_without_a_nozzle_records_an_unknown_nozzle(ctx: cal.Ctx, fake_spoolman: FakeSpoolman) -> None:
+def test_a_line_without_a_nozzle_records_an_unknown_nozzle(
+    ctx: cal.Ctx, fake_spoolman: FakeSpoolman
+) -> None:
     s = add_spool(fake_spoolman, "PLA оранжевый", ORANGE, slot="k1se/T1")
     pa = {**buffer(s)[2], "nozzle": None}
     got = outcomes(sh.import_lines(ctx, lines([buffer(s)[5], pa])))
     assert cal.get(ctx.conn, got["u-pa"][1] or 0).nozzle is None
+
+
+def test_an_import_without_a_nozzle_never_wins_over_a_newer_record(
+    ctx: cal.Ctx, fake_spoolman: FakeSpoolman
+) -> None:
+    s = add_spool(fake_spoolman, "PLA оранжевый", ORANGE, slot="k1se/T1")
+    newer = cal.record(
+        ctx,
+        cal.RunRequest(
+            kind="pressure_advance", method="manual", printer="k1se", head="T1"
+        ),
+        {"values": {"pressure_advance": 0.045}},
+    )
+    got = outcomes(
+        sh.import_lines(ctx, lines([buffer(s)[5], {**buffer(s)[2], "nozzle": None}]))
+    )
+    assert cal.get(ctx.conn, got["u-pa"][1] or 0).superseded_by == newer.id
+    pa = next(
+        r
+        for r in cal.requirements(ctx, "k1se", head="T1").items
+        if r.kind and r.kind.id == "pressure_advance"
+    )
+    assert pa.record is not None and pa.record.id == newer.id
+
+
+def test_a_binding_refused_in_the_transaction_never_binds_an_earlier_calibration_line(
+    ctx: cal.Ctx, fake_spoolman: FakeSpoolman
+) -> None:
+    s = add_spool(fake_spoolman, "PLA оранжевый", ORANGE, slot="k1se/T1")
+    binding = buffer(s)[5] | {
+        "reverts": "u-never-imported"
+    }  # refused only at execute time
+    got = outcomes(sh.import_lines(ctx, lines([buffer(s)[2], binding])))
+    assert got == {"u-pa": ("refused", None), "u-bind": ("refused", None)}
+    assert ctx.conn.execute("SELECT COUNT(*) FROM calibration").fetchone()[0] == 0
+
+
+def test_padded_status_huge_ints_and_out_of_range_times_are_handled_per_line(
+    ctx: cal.Ctx, fake_spoolman: FakeSpoolman
+) -> None:
+    s = add_spool(fake_spoolman, "PLA оранжевый", ORANGE, slot="k1se/T1")
+    got = outcomes(
+        sh.import_lines(
+            ctx,
+            lines(
+                [
+                    buffer(s)[5] | {"status": " applied "},
+                    buffer(s)[2] | {"status": "applied "},
+                ]
+            ),
+        )
+    )
+    assert got["u-pa"][0] == "imported" and got["u-pa"][1] is not None
+    edge = entry("u-edge", "firmware", "fw", "applied", {}) | {
+        "at": "9999-12-31T23:00:00-05:00"
+    }
+    res = sh.import_lines(ctx, lines([edge])).results[0]
+    assert res.outcome == "refused" and "out of the date range" in res.detail
+    with pytest.raises(hb.HistoryBufferError, match="out of the integer range"):
+        hb.parse_lines(
+            [
+                '{"uid": "a", "schema": "'
+                + hb.SCHEMA
+                + '", "spool_id": '
+                + "9" * 400
+                + "}"
+            ]
+        )

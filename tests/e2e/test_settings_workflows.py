@@ -129,3 +129,9 @@ def test_the_legacy_buffer_moves_imports_once_and_the_gate_sees_the_calibrations
         '{"pressure_advance": 0.05}' in hist.stdout
         and "user_visual_choice" in hist.stdout
     )
+
+
+def test_a_repeated_spool_option_is_refused(tmp_path: Path) -> None:
+    res = run_cli(tmp_path, "settings", "import", "--spool", "a=1", "--spool", "b=2",
+                  env_extra={"PRINTOPS_API": "http://127.0.0.1:9", "PRINTOPS_TOKEN": "x"})
+    assert res.returncode == 2 and "--spool given 2 times" in res.stderr

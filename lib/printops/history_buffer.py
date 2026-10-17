@@ -126,6 +126,13 @@ def _no_constant(name: str) -> Any:
     raise ValueError(f"{name} is not a JSON number")
 
 
+def _int64(text: str) -> int:
+    value = int(text)
+    if not -(2**63) <= value < 2**63:  # SQLite INTEGER; a float() of it could overflow too
+        raise ValueError(f"{text[:20]}… is out of the integer range")
+    return value
+
+
 def _finite(text: str) -> float:
     value = float(text)
     if not math.isfinite(
@@ -143,8 +150,8 @@ def parse_lines(raw_lines: Iterable[str]) -> list[Line]:
         if not text:
             continue
         try:
-            data = json.loads(text, parse_constant=_no_constant, parse_float=_finite)
-        except ValueError as e:  # JSONDecodeError, or NaN/Infinity/1e999 (unserialisable on the way out)
+            data = json.loads(text, parse_constant=_no_constant, parse_float=_finite, parse_int=_int64)
+        except ValueError as e:  # JSONDecodeError, or NaN/Infinity/1e999/huge ints (unstorable)
             if not isinstance(e, json.JSONDecodeError):
                 raise HistoryBufferError(str(e), line=n) from e
             raise HistoryBufferError(

@@ -693,8 +693,14 @@ def insert_past(ctx: Ctx, prep: PreparedRecord) -> Calibration:
     )
     new = get(ctx.conn, cal_id)
     kind = prep.snap.kind
+    def overlaps(c: Calibration) -> bool:
+        # an unknown nozzle on either side may be the same nozzle: order those by time too,
+        # or the import (higher id) would win over a newer record of the same head + filament
+        probe = new if (new.nozzle is None) == (c.nozzle is None) else replace(new, nozzle=c.nozzle)
+        return _same_scope(c, probe, kind.lot_sensitive)
+
     same = [c for c in list_calibrations(ctx.conn, kind=kind.id, current=True, limit=1000)
-            if c.id != cal_id and _same_scope(c, new, kind.lot_sensitive)]
+            if c.id != cal_id and overlaps(c)]
     older = [c for c in same if (c.recorded_at or "") <= past.at]
     newer = sorted((c for c in same if (c.recorded_at or "") > past.at), key=lambda c: c.recorded_at or "")
     for c in older:

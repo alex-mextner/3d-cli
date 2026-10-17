@@ -181,6 +181,14 @@ def _import(argv: list[str]) -> int:
         n_pos=(0, 1000),
         prefix=PREFIX,
     )
+    for opt in ("--spool", "--method"):
+        if (
+            argv.count(opt) > 1
+        ):  # the parser keeps only the last value: never drop one silently
+            raise UsageError(
+                f"{opt} given {argv.count(opt)} times; pass them once, comma-separated: {opt} UID=…,UID=…",
+                command=f"{PREFIX} import",
+            )
     spools = _spools(p.opts.get("--spool", ""))
     methods = _pairs(p.opts.get("--method", ""), "--method")
     files = _files(p.pos)
