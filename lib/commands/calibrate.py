@@ -31,8 +31,7 @@ USAGE = """3d calibrate plan --printer P [--head T] [--spool ID] [--plate PLATE]
 3d calibrate check FILE.gcode --printer P [--spools T1=ID,…] [--plate PLATE]
                    [--accept calibration:KIND[,…] --reason TEXT]
 3d calibrate gen pa|flow|combo|temp|shaper|plate1 --printer P -o OUT [--material PLA] [--color #RRGGBB]
-[--nozzle-temp C] [--only T,…] [--skip T,…]
-                 [--pa-range LOW:HIGH] [--pa-step S]
+                 [--nozzle-temp C] [--only T,…] [--skip T,…] [--pa-range LOW:HIGH] [--pa-step S]
   common (all but gen): [--json] [--api URL] [--token TOKEN]
 
   Calibrations per printer head and filament (fleet/calibrations.yaml: flow_ratio, pressure_advance,
@@ -107,7 +106,8 @@ Examples:
   3d calibrate gen flow --printer k1se --color '#000000' -o k1se_flow_black.gcode
   3d calibrate gen combo --printer k1se --color '#000000' -o k1se_combo_black.gcode
   3d calibrate gen temp --printer k1se --color '#E8732A' -o k1se_temp_orange.gcode
-  3d calibrate gen plate1 --printer k1se --color '#E8732A' --skip pa,flow -o k1se_plate1_orange.gcode"""
+  3d calibrate gen plate1 --printer k1se --color '#E8732A' --skip pa,flow -o k1se_plate1_orange.gcode
+  3d calibrate gen plate1 --printer k1se --only pa,flow --pa-range 0.03:0.05 --pa-step 0.0025 -o k1se_pa_fine.gcode"""
 
 USAGE += (
     "\n\nTop-camera photo (#342):\n"

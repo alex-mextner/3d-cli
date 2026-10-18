@@ -631,7 +631,11 @@ def pa_values(
         lo, hi = pa_range
     if step is not None:
         st = step
-    if not all(math.isfinite(v) for v in (lo, hi, st)) or not (0 <= lo < hi <= 2.0) or st <= 0:
+    if (
+        not all(math.isfinite(v) for v in (lo, hi, st))
+        or not (0 <= lo < hi <= 2.0)
+        or st <= 0
+    ):
         raise GenError(
             f"PA range {lo:g}:{hi:g} step {st:g}: need 0 <= low < high <= 2 and step > 0"
         )
@@ -730,16 +734,18 @@ def pa_lines(
     values: tuple[float, ...] = COMBO_PA_VALUES,
     pitch: float = COMBO_PITCH,
     segments: tuple[float, float, float] = COMBO_SEGMENTS,
+    source: str = "gen combo",
 ) -> list[str]:
     """The PA line block: per value a label (PA x 1000) at x0, then a slow-fast-slow line
     after SET_PRESSURE_ADVANCE. Ends with the stock PA, M221 S100 and the process's own
     acceleration (`accel`): all three are global and the slicer's body must not inherit them.
-    Extrusion is relative (M83), as the slicer's body (gen_combo checks the preset)."""
+    Extrusion is relative (M83), as the slicer's body (gen_combo checks the preset). `source`
+    names the generator in the block's comments (`gen combo`, `plate1`)."""
     lw, lh, lgap = COMBO_LABEL
     slow, fast = COMBO_SPEEDS
     xs = x0 + pa_label_width(values) + 2.0
     out = [
-        "; 3d calibrate gen combo: PA lines, label = PA x 1000; slow-fast-slow per line",
+        f"; 3d calibrate {source}: PA lines, label = PA x 1000; slow-fast-slow per line",
         "M221 S100",
         "G90",
         "M83",
@@ -761,7 +767,7 @@ def pa_lines(
         f"SET_PRESSURE_ADVANCE ADVANCE={stock_pa:g}",
         "M221 S100",
         f"SET_VELOCITY_LIMIT ACCEL={accel:g} ACCEL_TO_DECEL={accel / 2:g}",
-        "; 3d calibrate gen combo: end of PA lines",
+        f"; 3d calibrate {source}: end of PA lines",
     ]
     return out
 
@@ -790,7 +796,9 @@ def process_accel(proc: dict[str, Any]) -> float:
     (Orca's 0 = "no acceleration control"), which would stop the print after the block."""
     accel = _first(proc, "default_acceleration")
     if accel <= 0:
-        raise GenError(f"preset values must be positive: default_acceleration={accel:g}")
+        raise GenError(
+            f"preset values must be positive: default_acceleration={accel:g}"
+        )
     return accel
 
 
@@ -1141,14 +1149,22 @@ def generate(
         from slicing.calibration_plate import build_plate, make_context
         from slicing.calibration_plates import PLATES, resolve_tests
 
+        tests = resolve_tests(kind, only, skip)
+        # PA values only when the plate prints PA lines: a material without a default PA range
+        # can still print the other tests.
+        wants_pa = tests is None or "pa" in tests
+        if not wants_pa and (pa_range is not None or pa_step is not None):
+            raise GenError(
+                "--pa-range/--pa-step set the PA lines; this plate skips them"
+            )
         ctx = make_context(
             model,
             slicer,
             material,
             color,
             temp,
-            resolve_tests(kind, only, skip),
-            pa_values(material, pa_range, pa_step),
+            tests,
+            pa_values(material, pa_range, pa_step) if wants_pa else (),
         )
         return build_plate(ctx, PLATES[kind].build(ctx), slicer, out)
     if (pa_range is not None or pa_step is not None) and kind != "combo":

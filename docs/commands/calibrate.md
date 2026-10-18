@@ -13,7 +13,8 @@ Talks to 3d-api like [`3d printops`](printops.md) (`PRINTOPS_API`, `PRINTOPS_TOK
 3d calibrate show ID
 3d calibrate check FILE.gcode --printer P [--spools T1=ID,…] [--plate PLATE]
                    [--accept calibration:KIND[,…] --reason TEXT]
-3d calibrate gen pa|flow|combo|temp|shaper --printer P -o OUT [--material PLA] [--color #RRGGBB] [--nozzle-temp C]
+3d calibrate gen pa|flow|combo|temp|shaper|plate1 --printer P -o OUT [--material PLA] [--color #RRGGBB]
+                 [--nozzle-temp C] [--only T,…] [--skip T,…] [--pa-range LOW:HIGH] [--pa-step S]
   common (all but gen): [--json] [--api URL] [--token TOKEN]
 ```
 
@@ -171,6 +172,13 @@ so `3d print-preflight FILE --printer P` can PASS it.
   `flow`, `bridge`, `overhang`, `retraction`, `temp`); the layout is packed again, so a skipped test
   leaves no hole. Next to the G-code: `NAME.json`, the map object → parameters, bbox, Z bands,
   labelled items, how to read it, the `record` command. K1 SE, PLA: ~25 min (all tests).
+  `--pa-range LOW:HIGH --pa-step S` set the PA lines (combo and plates; refused when `pa` is
+  skipped); `-o` must not end in `.json` (that name is the map's).
+
+  ```bash
+  3d calibrate gen plate1 --printer k1se --color '#E8732A' --skip pa,flow -o k1se_plate1_orange.gcode
+  3d calibrate gen plate1 --printer k1se --only pa,flow --pa-range 0.03:0.05 --pa-step 0.0025 -o k1se_pa_fine.gcode
+  ```
 - `shaper` — a text file of console commands (G28, ACCELEROMETER_QUERY, MEASURE_AXES_NOISE,
   SHAPER_CALIBRATE per axis, SAVE_CONFIG) for printers with an accelerometer (K1 SE: ADXL345).
 
