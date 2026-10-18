@@ -36,7 +36,8 @@ USAGE = """3d print-preflight FILE.gcode [--printer NAME] [--axis-limits X0:X1,Y
   axis travel  every G0-G3 move (arcs by their real extremes, start/end G-code included)
                stays inside the printer's X/Y limits; SKIP when the limits are unknown
   print area   plate moves stay inside the G-code's `; printable_area`; no extruding path
-               through `; bed_exclude_area` (vendor `;TYPE:Custom` blocks exempt)
+               through `; bed_exclude_area` (vendor `;TYPE:Custom` blocks exempt; Bambu:
+               everything outside its object blocks, wipe tower and features)
   macros       every macro the G-code calls is in the printer's trusted_macros
   overhangs    `3d gcode-overhangs`: no object prints more than 100 mm2 on nothing (FAIL);
                small ceilings and edge step-outs are WARN; bridges up to --bridge-max, else the

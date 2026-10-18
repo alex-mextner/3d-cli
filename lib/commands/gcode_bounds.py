@@ -27,6 +27,7 @@ USAGE = """3d gcode-bounds FILE.gcode [--printer NAME | --axis-limits X0:X1,Y0:Y
   print area   moves from the first layer change to the end of the last object/feature
                inside the G-code's `; printable_area`, and no extruding line or arc through
                `; bed_exclude_area`; vendor `;TYPE:Custom` blocks (parking, purging) are exempt
+               (Bambu Studio: everything outside its object blocks, wipe tower and features)
   unverified   WARN for moves only partly checked: arcs by R or in the XZ/YZ plane, relative
                moves from an unknown position (after G28). A known axis is always checked.
   macros       FAIL for macros (any command but moves and stock non-moving ones) that the
