@@ -8,9 +8,20 @@ input is missing is SKIP and its line says what to pass — it never passes sile
 ## Usage
 
 ```
-3d print-preflight FILE.gcode [--printer NAME] [--axis-limits X0:X1,Y0:Y1|NAME] [--source-3mf FILE.3mf]
+3d print-preflight FILE.gcode|- [--printer NAME] [--axis-limits X0:X1,Y0:Y1|NAME] [--source-3mf FILE.3mf]
                    [--visible [OBJ:]SPEC]... [--bridge-max MM] [--printops-api URL] [--offline]
                    [--printops-snapshot FILE] [--json] [--secs S]
+```
+
+`-` reads the G-code from a pipe (`3d slice - | 3d print-preflight - --printer k1se | 3d printer
+start k1se - --yes`). The report goes to stderr and the G-code on to stdout, only when nothing
+FAILs, so the next command of the pipe gets nothing after a FAIL. With `--json` the JSON is
+stdout and nothing is passed on. A G-code that came from [`3d slice -`](slice.md) is found again
+in `~/.cache/3d-cli/pipe/` by its SHA-256, with its `NAME.slice-warnings.json` and source
+`NAME.3mf`, so the `slicer warn` and `head seq` gates run on it as on a file.
+
+```bash
+3d 3mf pick proj.3mf 'CN,SW*' | 3d 3mf arrange --printer u1 | 3d slice - | 3d print-preflight - --printer u1 > part.gcode
 ```
 
 | Check | When | FAIL means |

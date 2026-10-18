@@ -65,3 +65,18 @@ All of these run inside `3d print-preflight FILE.gcode`; each is also a command 
 every G-code gate above. A gate whose input is missing is reported as SKIP with what to pass —
 the head-sequence gate needs the project 3MF (`--source-3mf`, or `NAME.3mf` next to
 `NAME.gcode`), the visible-faces gate needs `--visible` — never as a silent PASS.
+
+## 5. The same chain in one pipe
+
+[`3d 3mf`](../commands/3mf.md) edits a project 3MF on the way (pick parts, turn them, pack them on
+one plate, check them), and every gate above still runs: `3d slice -` keeps the slicer-warnings
+record and the source 3MF next to the G-code it streams on, `3d print-preflight -` passes the
+G-code on only when nothing FAILs, and `3d printer start NAME -` runs the preflight again and
+uploads only after it passes. The first failing step stops the chain; the next one reports an
+empty stdin.
+
+```bash
+3d 3mf pick proj.3mf 'CN,SW*' | 3d 3mf orient --face-down top | 3d 3mf arrange --printer k1se \
+  | 3d 3mf check --printer k1se | 3d slice - | 3d print-preflight - --printer k1se \
+  | 3d printer start k1se - --yes
+```

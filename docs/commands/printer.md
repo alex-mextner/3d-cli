@@ -14,7 +14,7 @@ Epic: [#90](https://github.com/alex-mextner/3d-cli/issues/90).
 3d printer list [--json]
 3d printer status NAME [--json] [--secs S]
 3d printer upload NAME FILE.gcode [--as REMOTE]
-3d printer start NAME FILE.gcode --yes [--as REMOTE] [--source-3mf X.3mf] [--bridge-max MM] [--force] [--secs S]
+3d printer start NAME FILE.gcode|- --yes [--as REMOTE] [--source-3mf X.3mf] [--bridge-max MM] [--force] [--secs S]
 3d printer cancel NAME --yes
 3d printer watch NAME... | --all [--steer SESSION] [--exec CMD] [--min-severity LEVEL] ...
 3d printer vision NAME [--interval S] [--once] [--dry-run] [--scene] ...  |  vision eval ...  |  vision record NAME DIR  |  vision fetch-model
@@ -34,7 +34,7 @@ Epic: [#90](https://github.com/alex-mextner/3d-cli/issues/90).
 | `list` | Every fleet and configured printer: owner, access, model, address, heads (an unusable head with its reason), and where the device settings came from when a user/project file overrides the fleet. |
 | `status NAME` | State, current file and progress, temperatures, and (U1) what each head holds. |
 | `upload NAME FILE` | Store the file on the printer and verify its size there. Never starts a print. |
-| `start NAME FILE --yes` | Start a file that was uploaded before. Runs [`3d print-preflight`](print-preflight.md) first. |
+| `start NAME FILE --yes` | Start a file that was uploaded before. Runs [`3d print-preflight`](print-preflight.md) first. `FILE` `-` reads the G-code from a pipe (`3d slice - \| 3d print-preflight - \| 3d printer start k1se - --yes`): the same preflight runs, then — only when it passes, or with `--force` — the G-code is uploaded, verified on the printer (size, read-back SHA-256) and started. A FAIL sends nothing; an empty stdin (an earlier step failed) is an error. |
 | `cancel NAME --yes` | Cancel the running or paused job. |
 | `watch NAME...` | Stay subscribed (read-only) and report anomalies as events — see [Watching printers](#watching-printers). |
 | `vision NAME` | Watch the camera for failed prints (spaghetti, stale/dark camera, the U1's own NPU verdicts) — see [Camera failure detection](#camera-failure-detection). |
@@ -82,6 +82,7 @@ Options:
 3d printer start u1 out/part.gcode --yes
 3d printer start u1 out/base.gcode --yes --source-3mf print/base.3mf
 3d printer start k1se out/roof.gcode --yes --force
+3d slice part.3mf -o - | 3d print-preflight - --printer k1se | 3d printer start k1se - --yes
 3d printer cancel k1se --yes
 3d printer watch u1 --duration 20
 3d printer watch u1 k1se --steer 01a12cd6

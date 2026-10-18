@@ -23,14 +23,20 @@ INVARIANTS: stdlib-only at import time; printer_ops imported lazily inside run()
 """
 from __future__ import annotations
 
+import sys
+
 from cli.registry import Command
 from errors import GateFailure, InputNotFound, UsageError
 
-USAGE = """3d print-preflight FILE.gcode [--printer NAME] [--axis-limits X0:X1,Y0:Y1|NAME] [--source-3mf FILE.3mf]
+USAGE = """3d print-preflight FILE.gcode|- [--printer NAME] [--axis-limits X0:X1,Y0:Y1|NAME] [--source-3mf FILE.3mf]
                    [--visible [OBJ:]SPEC]... [--bridge-max MM] [--printops-api URL] [--offline]
                    [--printops-snapshot FILE] [--json] [--secs S]
   Read-only checks before a print. `3d printer start` runs the same checks and refuses on FAIL.
   Every G-code gate runs; one whose input is missing is SKIP and says what to pass.
+  `-` reads the G-code from a pipe (`3d slice - | 3d print-preflight - | 3d printer start NAME -
+  --yes`): the report goes to stderr and the G-code on to stdout, only when nothing FAILs (with
+  --json, the JSON is stdout and nothing is passed on). A G-code from `3d slice -` keeps its
+  slicer-warnings record and source 3MF in ~/.cache/3d-cli/pipe/, where this finds them.
 
   thumbnails   preview images required by the G-code's `; thumbnails =` spec are present
   printer      (--printer) the printer is not printing / paused / busy / unreadable
@@ -105,7 +111,8 @@ Examples:
   3d print-preflight out/walls.gcode --visible 'WALL*:y<104.8'
   3d print-preflight out/part.gcode --printer u1 --json | jq '.checks[] | select(.status=="FAIL")'
   3d print-preflight out/part.gcode --printer u1 --printops-api http://192.168.0.39:8765
-  3d print-preflight out/part.gcode --offline     # slicer hook: PrintOps snapshot, no network"""
+  3d print-preflight out/part.gcode --offline     # slicer hook: PrintOps snapshot, no network
+  3d slice part.3mf -o - | 3d print-preflight - --printer k1se > checked.gcode"""
 
 
 def run(argv: list[str]) -> int:
@@ -144,8 +151,15 @@ def run(argv: list[str]) -> int:
         i += 1
     if len(pos) != 1:
         raise UsageError(f"expected one G-code file, got {len(pos)}", command="print-preflight")
-    gcode = Path(pos[0])
-    if not gcode.is_file():
+    piped: bytes | None = None
+    if pos[0] == "-":
+        from cli.pipe import read_input, stash_gcode
+
+        # a piped G-code is stashed by its hash: the one `3d slice -` wrote keeps its
+        # NAME.slice-warnings.json and NAME.3mf siblings there
+        piped = read_input("-", command="print-preflight", what="G-code")
+        gcode = stash_gcode(piped)
+    elif not (gcode := Path(pos[0])).is_file():
         raise InputNotFound(str(gcode), command="print-preflight")
     source = Path(opts["--source-3mf"]) if "--source-3mf" in opts else None
     if source is not None and not source.is_file():
@@ -195,9 +209,18 @@ def run(argv: list[str]) -> int:
     report = run_preflight(gcode, status=status, source_3mf=source, axis_limits=limits, limits_source=limits_source,
                            trusted_macros=trusted, visible=visible, bridge_max=bridge, bridge_source=bridge_source,
                            bed=bed, printops=printops)
-    print(json.dumps(report.to_json(), indent=1) if "--json" in opts else report.render())
+    # stdin in, stdout not a terminal, no --json: the G-code goes on to the next command
+    # (`| 3d printer start NAME - --yes`) only when nothing FAILs; the report goes to stderr
+    passes_on = piped is not None and "--json" not in opts and not sys.stdout.isatty()
+    print(json.dumps(report.to_json(), indent=1) if "--json" in opts else report.render(),
+          file=sys.stderr if passes_on else sys.stdout)
     if report.overall == FAIL:
-        raise GateFailure("preflight FAIL", command="print-preflight", silent=True)
+        raise GateFailure("preflight FAIL — the G-code is not passed on" if passes_on else "preflight FAIL",
+                          command="print-preflight", silent=not passes_on)
+    if passes_on and piped is not None:
+        from cli.pipe import write_output
+
+        write_output(piped, "-", command="print-preflight", what="G-code")
     return 0
 
 

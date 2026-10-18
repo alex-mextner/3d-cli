@@ -77,6 +77,7 @@ Every gate from model to printer, in order: [Print pipeline](../workflows/print-
 
 | Command | Doc | Role |
 |---|---|---|
+| `3mf` | [3mf.md](3mf.md) | Edit a project 3MF in a shell pipe — `ls`, `pick` parts by name/id/glob, `orient` (a face down), `arrange` on one plate of a printer's bed, `check` — keeping presets and per-object settings; chains into `slice -`, `print-preflight -`, `printer start NAME -`. |
 | `calibrate` | [calibrate.md](calibrate.md) | Calibrations per head × filament via 3d-api: what is needed (new material/vendor blocks, new lot warns, maintenance invalidates), record values, the `calibration_current` G-code gate; `gen` writes calibration prints locally (PA tower, flow tiles, shaper commands). |
 | `gcode-thumbnails` | [gcode-thumbnails.md](gcode-thumbnails.md) | Check/add the printer-screen preview thumbnails a G-code carries (Orca CLI writes none). |
 | `print` | [print.md](print.md) | Validate print fields and emit deterministic dry-run job plans. |

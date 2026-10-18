@@ -19,6 +19,10 @@ compatibility wrappers.
 - `lib/cli/paths.py` contains shared path helpers.
 - `lib/cli/resources.py` sizes every worker pool and caps native thread pools
   (`THREED_MAX_WORKERS`, default `min(6, cores / 2)`); the dispatcher applies it first.
+- `lib/cli/pipe.py` is the stdin/stdout plumbing of the commands that chain in a shell pipe
+  (`-` = stdin, binary to stdout only when it is not a terminal) and the content-addressed
+  G-code stash (`~/.cache/3d-cli/pipe/<sha256[:16]>/`) that keeps a piped G-code's
+  slicer-warnings record and source 3MF where `print-preflight -` / `printer start NAME -` look.
 - `lib/errors.py` defines structured CLI errors and exit-code mapping.
 
 ### Commands
@@ -82,6 +86,7 @@ Target package: `lib/geometry/`, with subpackages only when a real boundary appe
   alerts no live subscriber took, and its handoff).
 - `lib/slicing/head_sequence.py` — per-object, per-layer toolhead check of sliced G-code against the project 3MF's mixed-filament patterns (`slice-check --check head-sequence`; `preflight_check()` is the `head seq` gate of `print-preflight`, #103).
 - `lib/slicing/slice_warnings.py` — the slicer's warnings for one G-code (Orca-family CLI log, result.json, slice_info of a sliced 3MF) in `NAME.slice-warnings.json` with the G-code's SHA-256 and a reason per accepted warning; backs `3d slice-warnings` and the `slicer warn` gate of `print-preflight`.
+- `lib/slicing/project_3mf.py` — edits an Orca/Bambu project 3MF in memory, keeping presets and per-object settings: list, pick objects (renumbering Orca's per-object files), orient (face down / rotate, drop to the bed), arrange onto one plate (the `arrange_pack` shelf packer), and the 3MF gates; the `3d 3mf` backend.
 - `lib/printops/` — PrintOps (epic #154) behind `3d printops` and the 3d-api service
   (`services/3d-api/`): `db.py` (SQLite + `migrations/NNNN_<slice>.sql`), `events.py`
   (append-only event log + in-process bus), `tokens.py` (bearer tokens, sha256 file),

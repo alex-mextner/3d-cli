@@ -351,6 +351,12 @@ skills (`atomic-commits`, `ai-review-before-commit`, `pre-commit-gate`,
   recorded in `NAME.slice-warnings.json` (`3d slice-warnings record`, or `3d slice`) and
   resolved or accepted with a reason. The full model → slice → G-code → start order is
   `docs/workflows/print-pipeline.md`.
+- `3mf` edits a project 3MF in a shell pipe (`ls`/`pick`/`orient`/`arrange`/`check`, backend
+  `lib/slicing/project_3mf.py`) and keeps presets and per-object settings; `slice -`,
+  `print-preflight -` and `printer start NAME -` continue the pipe (`lib/cli/pipe.py`: `-` =
+  stdin, binary only to a non-terminal stdout, human lines to stderr, a piped G-code stashed by
+  its SHA-256 with its slicer-warnings record and source 3MF). A command that streams a result
+  passes nothing on after a FAIL, and `printer start NAME -` uploads only after preflight passes.
 
 ## Verification before "done"
 

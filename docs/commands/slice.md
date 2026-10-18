@@ -7,12 +7,12 @@ Sends a model ([`.stl`](GLOSSARY.md#stl), [`.3mf`](GLOSSARY.md#3mf), or `.scad`)
 ## Usage
 
 ```
-3d slice <model.stl|.3mf|.scad> [options]
+3d slice <model.stl|.3mf|.scad|-> [options]
 ```
 
 | Option | Default | What |
 |---|---|---|
-| `-o, --out PATH` | `<model>.gcode` | Output `.gcode`. The slicer writes to a scratch dir first; on success the result is moved here. |
+| `-o, --out PATH` | `<model>.gcode`; stdout for a `-` model | Output `.gcode`. The slicer writes to a scratch dir first; on success the result is moved here. `-o -` writes it to stdout. |
 | `--dry-run` | off | Sliceability gate: slice to temp, verify G-code was produced, report OK/FAIL + est. time / filament, then discard the G-code. |
 | `--check` | — | Deprecated alias for `--dry-run`. |
 | `--list-profiles` | — | List slicer profile files 3d can see, then exit. |
@@ -45,6 +45,22 @@ printed — its log, the Orca-family `result.json` and, for a `.gcode.3mf`, its 
 in `NAME.slice-warnings.json` next to the G-code, with the G-code's SHA-256, and lists the
 open ones. [`3d print-preflight`](print-preflight.md) and `3d printer start` FAIL until each
 is resolved or accepted with a reason ([`3d slice-warnings accept`](slice-warnings.md)).
+
+## In a pipe
+
+`3d slice -` reads a 3MF from stdin — the output of [`3d 3mf`](3mf.md) — and writes the G-code to
+stdout (`-o -` does the same for a file model); the report goes to stderr. The 3MF must hold
+one plate (`3d 3mf arrange` puts the objects on one); more plates FAIL. The G-code is also kept
+in `~/.cache/3d-cli/pipe/<sha256[:16]>/NAME.gcode` (NAME = the objects' first words, which also
+names the file on the printer) with its `NAME.slice-warnings.json` and the source `NAME.3mf`, so
+[`3d print-preflight -`](print-preflight.md) and [`3d printer start PRINTER - --yes`](printer.md),
+receiving the same bytes, find the slicer-warnings record and the project for the head-sequence
+gate. Stash directories older than a week are removed.
+
+```bash
+3d 3mf pick proj.3mf 'CN,SW*' | 3d 3mf arrange --printer u1 | 3d slice - | 3d print-preflight - > part.gcode
+3d slice part.3mf -o - | 3d print-preflight - --printer k1se > checked.gcode
+```
 
 ## Environment
 

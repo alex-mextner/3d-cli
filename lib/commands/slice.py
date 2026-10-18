@@ -32,6 +32,7 @@ import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass
+from typing import BinaryIO
 
 from cli.registry import Command
 from errors import GateFailure, InputNotFound, InvalidArgument, MissingDependency, UsageError
@@ -59,14 +60,21 @@ AUTO_PROFILE_ACCEPTED = (
     "--profile machine.json,process.json,filament.json",
 )
 
-USAGE = """3d slice <model.stl|.3mf|.scad> [options]
+USAGE = """3d slice <model.stl|.3mf|.scad|-> [options]
   Slice a model to G-code with the installed slicer (OrcaSlicer > Bambu Studio >
   PrusaSlicer; auto-detected on PATH and macOS app bundles). A .scad input is
   exported to STL first (via '3d export').
 
+  `-` reads a 3MF from a pipe (`3d 3mf pick … | 3d slice -`) and writes the G-code to
+  stdout (so does `-o -`), the report to stderr; the 3MF must hold one plate. The G-code
+  is also kept in ~/.cache/3d-cli/pipe/<sha256[:16]>/ next to its NAME.slice-warnings.json
+  and the source NAME.3mf (NAME = the objects' names), where `3d print-preflight -` and
+  `3d printer start PRINTER -` find them.
+
 Options:
   -o, --out PATH        output .gcode (default: <model>.gcode). The slicer writes
                         into a scratch dir first; on success, 3d moves the result here.
+                        `-o -` writes it to stdout (default for a `-` model).
                         The slicer's warnings go to NAME.slice-warnings.json with the
                         G-code's SHA-256 (`3d slice-warnings`); print-preflight FAILs
                         until each is resolved or accepted with a reason.
@@ -98,7 +106,8 @@ Examples:
   3d slice part.scad --dry-run
   3d slice part.3mf --printer bambu-a1 --material pla --dry-run
   3d slice part.3mf --profile "machine.json,process.json,filament.json"
-  3d slice --list-profiles"""
+  3d slice --list-profiles
+  3d 3mf pick proj.3mf 'CN,SW*' | 3d slice - | 3d print-preflight - > part.gcode"""
 
 
 @dataclass(frozen=True)
@@ -149,10 +158,57 @@ def run(argv: list[str]) -> int:
         return 0
 
     opts = _parse(argv)
-    _validate_input(opts.inp)
-    if opts.profile:
-        _validate_profiles(opts.profile)
+    # `-o -`, or a model on stdin without -o: the G-code goes to stdout for the next command of
+    # a pipe, and every line of the report to stderr
+    stream = not opts.dry_run and (opts.out == "-" or (opts.inp == "-" and not opts.out))
+    if stream and sys.stdout.isatty():
+        raise UsageError("refusing to write G-code to the terminal", command="slice",
+                         remediation=["Pass -o FILE, or pipe it on: 3d slice - | 3d print-preflight -"])
+    stdin_dir = ""
+    try:
+        if opts.inp == "-":
+            stdin_dir = tempfile.mkdtemp(prefix="3dslice-stdin.")
+            opts = _stdin_model(opts, stdin_dir)
+        _validate_input(opts.inp)
+        if opts.profile:
+            _validate_profiles(opts.profile)
+        if not stream:
+            return _slice(opts, None)
+        gcode_out = sys.stdout.buffer
+        with contextlib.redirect_stdout(sys.stderr):
+            return _slice(opts, gcode_out)
+    finally:
+        if stdin_dir:
+            shutil.rmtree(stdin_dir, ignore_errors=True)
 
+
+def _stdin_model(opts: _Options, tmpdir: str) -> _Options:
+    """The 3MF on stdin as a file named after its objects: the stem names the G-code, and so
+    the G-code's name on the printer."""
+    import dataclasses
+
+    from cli.pipe import read_input
+
+    data = read_input("-", command="slice", what="3MF")
+    if not data.startswith(b"PK"):
+        raise UsageError("stdin is not a 3MF (zip)", command="slice",
+                         remediation=["Pipe a 3MF in (3d 3mf pick proj.3mf 'A*' | 3d slice -), or pass a file path."])
+    from slicing.project_3mf import Project, ProjectError
+
+    try:
+        names = [it.name.split()[0] for it in Project(data).items() if it.name.split()]
+    except ProjectError:
+        names = []  # the slicer reports a broken 3MF itself; the name is only a nicety
+    stem = re.sub(r"[^\w+.-]", "_", "+".join(dict.fromkeys(names))[:40]) or "pipe"
+    path = os.path.join(tmpdir, stem + ".3mf")
+    with open(path, "wb") as f:
+        f.write(data)
+    return dataclasses.replace(opts, inp=path)
+
+
+def _slice(opts: _Options, gcode_out: BinaryIO | None) -> int:
+    """Slice opts.inp to opts.out; with GCODE_OUT the G-code goes there instead (stdout of a
+    pipe), stashed with its slicer warnings and source 3MF (`cli.pipe.stash_gcode`)."""
     sl = _find_slicer()
     if sl is None:
         raise MissingDependency(
@@ -169,7 +225,7 @@ def run(argv: list[str]) -> int:
     log = tempfile.mktemp(prefix="3dslicelog.")
     try:
         work_input = _prepare_input(opts.inp, opts.defs, tmpdir)
-        final_out = opts.out or (opts.inp.rsplit(".", 1)[0] + ".gcode")
+        final_out = "stdout" if gcode_out is not None else opts.out or (opts.inp.rsplit(".", 1)[0] + ".gcode")
         prusa_out = os.path.join(tmpdir, "out.gcode")
 
         print("================================================================")
@@ -195,6 +251,8 @@ def run(argv: list[str]) -> int:
             size = os.path.getsize(produced)
             if opts.dry_run:
                 print(f"STATUS: PASS - sliceable ({size} bytes produced, discarded; --dry-run gate)")
+            elif gcode_out is not None:
+                return _stream_gcode(opts.inp, produced, tmpdir, log_text, gcode_out, est_time, est_fil)
             else:
                 os.makedirs(os.path.dirname(final_out) or ".", exist_ok=True)
                 shutil.move(produced, final_out)
@@ -216,6 +274,33 @@ def run(argv: list[str]) -> int:
         with contextlib.suppress(OSError):
             os.remove(log)
         shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def _stream_gcode(model: str, produced: str, tmpdir: str, log_text: str, gcode_out: BinaryIO,
+                  est_time: str, est_fil: str) -> int:
+    from cli.pipe import stash_gcode
+
+    plates = [p for p in glob.glob(os.path.join(tmpdir, "*.gcode")) if os.path.getsize(p) > 0]
+    if len(plates) > 1:
+        print(f"STATUS: FAIL - the 3MF sliced into {len(plates)} plates; a pipe carries one G-code")
+        print("  Put the objects on one plate first: 3d 3mf arrange --printer NAME")
+        print("================================================================")
+        return 1
+    with open(produced, "rb") as f:
+        data = f.read()
+    path = stash_gcode(data, os.path.splitext(os.path.basename(model))[0])
+    if model.lower().endswith(".3mf"):
+        # NAME.3mf next to NAME.gcode: print-preflight's head-sequence gate finds the project there
+        shutil.copyfile(model, path.with_suffix(".3mf"))
+    print(f"STATUS: PASS - sliced OK -> stdout ({len(data)} bytes; kept as {path})")
+    _record_warnings(str(path), log_text, tmpdir)
+    for line in (est_time, est_fil):
+        if line:
+            print(f"  {line}")
+    print("================================================================")
+    gcode_out.write(data)
+    gcode_out.flush()
+    return 0
 
 
 def _record_warnings(gcode: str, log_text: str, outdir: str) -> None:
@@ -242,7 +327,7 @@ def _record_warnings(gcode: str, log_text: str, outdir: str) -> None:
 
 def _parse(argv: list[str]) -> _Options:
     inp = argv[0]
-    if inp.startswith("-"):
+    if inp.startswith("-") and inp != "-":
         print(USAGE)
         raise UsageError(f"missing model before option '{inp}'", command="slice")
 
@@ -257,7 +342,7 @@ def _parse(argv: list[str]) -> _Options:
     while i < len(rest):
         a = rest[i]
         if a in ("-o", "--out"):
-            out = _value(rest, i, a)
+            out = "-" if rest[i + 1 : i + 2] == ["-"] else _value(rest, i, a)
             i += 2
         elif a == "--printer":
             printer = _value(rest, i, a)
