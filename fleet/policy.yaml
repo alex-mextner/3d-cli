@@ -82,6 +82,7 @@ gates:
     maintenance_due: block         # the head is broken (fleet usable: false), open faults
     enclosure_material: warn       # ABS/ASA/PC/PA on an open printer
     plate_material: warn           # the G-code's plate is not on hand, or a bad material/plate pair
+    preset_match: block            # not the printer's `slicer:` machine/process preset (#293)
   # Per-printer overrides, e.g. `k1se: {drying_due: off}`.
   printers: {}
   # Spoolman `material` spellings → G-code `filament_type` (Orca's names).
