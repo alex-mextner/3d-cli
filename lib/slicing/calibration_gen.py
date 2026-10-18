@@ -66,6 +66,7 @@ PRESETS: dict[str, Presets] = {
         process="0.20mm Standard @Creality K1 SE",
         filament={
             "PLA": "Creality Generic PLA @K1-all",
+            "PLA+": "Creality Generic PLA @K1-all",  # Creality ships no PLA+ preset; PLA's fits
             "PETG": "Creality Generic PETG @K1-all",
         },
         bed=(220.0, 220.0),
@@ -534,6 +535,10 @@ COMBO_SPEEDS = (20.0, 120.0)  # slow, fast (mm/s)
 COMBO_LINE_W = 0.5
 COMBO_ACCEL = 5000
 COMBO_LABEL = (2.0, 3.0, 1.0)  # digit width, height, gap (mm): legible on a phone photo
+COMBO_LABEL_DIGITS = (
+    3  # label cell width in digits (PA x 1000 up to 999); line starts 2 mm after it
+)
+COMBO_LABEL_W = COMBO_LABEL_DIGITS * (COMBO_LABEL[0] + COMBO_LABEL[2]) + 2.0
 COMBO_TILE = (20.0, 20.0, 3.0)
 COMBO_TILE_GAP = 6.0
 # Layout as fractions of the bed depth: PA lines start near the front, tiles sit at the back,
@@ -637,7 +642,7 @@ def pa_lines(
     Extrusion is relative (M83), as the slicer's body (gen_combo checks the preset)."""
     lw, lh, lgap = COMBO_LABEL
     slow, fast = COMBO_SPEEDS
-    xs = x0 + 3 * (lw + lgap) + 2.0
+    xs = x0 + COMBO_LABEL_W
     out = [
         "; 3d calibrate gen combo: PA lines, label = PA x 1000; slow-fast-slow per line",
         "M221 S100",
@@ -667,14 +672,17 @@ def pa_lines(
 
 
 def _first(preset: dict[str, Any], key: str) -> float:
-    """A numeric preset option (Orca keeps some as one-element lists)."""
+    """A finite numeric preset option (Orca keeps some as one-element lists)."""
     try:
         v = preset[key]
-        return float(v[0] if isinstance(v, list) else v)
+        n = float(v[0] if isinstance(v, list) else v)
     except (KeyError, IndexError, TypeError, ValueError) as e:
         raise GenError(
             f"Orca preset option {key!r} missing or not a number: {e}"
         ) from e
+    if not math.isfinite(n):
+        raise GenError(f"Orca preset option {key!r} is not finite: {n}")
+    return n
 
 
 def gen_combo(
@@ -690,6 +698,20 @@ def gen_combo(
     n = len(FLOW_STEPS)
     tiles_w = n * tx + (n - 1) * COMBO_TILE_GAP
     tiles_y = p.bed[1] * COMBO_TILES_Y_FRAC
+    lh = COMBO_LABEL[1]
+    block_w = COMBO_LABEL_W + sum(COMBO_SEGMENTS)
+    pa_x0 = (p.bed[0] - block_w) / 2
+    pa_y0 = p.bed[1] * COMBO_PA_Y_FRAC
+    # Layout before slicing: a bed it does not fit fails at once, not after a slice.
+    if (
+        max(block_w, tiles_w) > p.bed[0]
+        or tiles_y + ty > p.bed[1]
+        or pa_y0 + (len(COMBO_PA_VALUES) - 1) * COMBO_PITCH + lh
+        >= tiles_y - COMBO_CLEARANCE
+    ):
+        raise GenError(
+            f"combo layout: the PA lines and flow tiles do not fit a {p.bed[0]:g}x{p.bed[1]:g} mm bed"
+        )
     models = flow_models((p.bed[0] - tiles_w) / 2, tiles_y, COMBO_TILE, COMBO_TILE_GAP)
     fil = _filament_overrides(color, temp)
     text, log = slice_models(slicer, idx, p, material, models, FLOW_PROCESS, fil)
@@ -706,10 +728,12 @@ def gen_combo(
     diameter = _first(fpre, "filament_diameter")
     layer_h = _first(proc, "initial_layer_print_height")
     ratio = _first(fpre, "filament_flow_ratio")
-    if diameter <= 0 or layer_h <= 0 or ratio <= 0:
+    accel = _first(proc, "default_acceleration")
+    if diameter <= 0 or layer_h <= 0 or ratio <= 0 or accel <= 0:
         raise GenError(
             f"preset values must be positive: filament_diameter={diameter:g}, "
-            f"initial_layer_print_height={layer_h:g}, filament_flow_ratio={ratio:g}"
+            f"initial_layer_print_height={layer_h:g}, filament_flow_ratio={ratio:g}, "
+            f"default_acceleration={accel:g}"
         )
     ex = Extrusion(
         layer_h=layer_h,
@@ -719,18 +743,9 @@ def gen_combo(
         retract_f=_first(mach, "retraction_speed") * 60,
         lift=COMBO_LIFT,
     )
-    lw, lh, lgap = COMBO_LABEL
-    block_w = 3 * (lw + lgap) + 2.0 + sum(COMBO_SEGMENTS)
-    pa_x0 = (p.bed[0] - block_w) / 2
-    pa_y0 = p.bed[1] * COMBO_PA_Y_FRAC
-    if (
-        pa_y0 + (len(COMBO_PA_VALUES) - 1) * COMBO_PITCH + lh
-        >= tiles_y - COMBO_CLEARANCE
-    ):
-        raise GenError("combo layout: the PA lines run into the flow tiles on this bed")
     # The PA block runs right after START_PRINT, before the slicer's first layer: the bed is hot,
     # the nozzle primed, and every line lies on the bare plate.
-    block = pa_lines(pa_x0, pa_y0, ex, p.stock_pa, _first(proc, "default_acceleration"))
+    block = pa_lines(pa_x0, pa_y0, ex, p.stock_pa, accel)
     text = insert_after(text, r"^START_PRINT\b.*$", block)
     text = flow_factors(text)
     text = insert_before_end(
@@ -820,8 +835,8 @@ def temp_tower_boxes(steps: list[int], cx: float, cy: float) -> list[Box]:
     width = 2 * TEMP_PILLAR + TEMP_GAP
     x0, y0 = cx - width / 2, cy - TEMP_PILLAR / 2
     boxes: list[Box] = [(cx - bx / 2, cy - by / 2, 0.0, cx + bx / 2, cy + by / 2, bz)]
-    w, h, gap, s = TEMP_DIGIT
-    label_w = 3 * w + 2 * gap
+    w, h, gap, _ = TEMP_DIGIT
+    label_w = 3 * w + 2 * gap  # three digits: every TEMP_RANGES value is 100..999 °C
     lx = x0 + TEMP_PILLAR + (TEMP_GAP - label_w) / 2
     ly = y0 + (TEMP_PILLAR - h) / 2
     for i, t in enumerate(steps):
@@ -895,6 +910,8 @@ def gen_temp(
             "without stringing or droop, best = the cleanest.",
             "Record: 3d calibrate record temp_tower --filament ID --values nozzle_temp_min=MIN,"
             "nozzle_temp_best=BEST,nozzle_temp_max=MAX --method temp_tower",
+            "The tower crosses the usual window: if the spool's filament has nozzle_temp_min/max set "
+            "narrower, print-preflight's filament_temp_range FAILs; check the rest and start with --force.",
         ],
     )
 

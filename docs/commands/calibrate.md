@@ -156,7 +156,10 @@ so `3d print-preflight FILE --printer P` can PASS it.
   the gap shows stringing, the slab bridging. Each block's temperature stands 0.6 mm up from its
   floor in the gap (seven-segment digits, no overhang). `M104 S<t>` goes on the first layer of
   each block (after Orca's `;Z:` marker); the first block prints at the slice's own temperature.
-  `--nozzle-temp` is refused. K1 SE, PLA: ~43 min, ~8 g.
+  `--nozzle-temp` is refused. K1 SE, PLA: ~43 min, ~8 g. The tower is meant to cross the
+  usual window, so when the loaded spool's filament has `nozzle_temp_min/max` set narrower
+  than the tower, `print-preflight`'s `filament_temp_range` FAILs; read the other checks and
+  start it with `3d printer start … --force`.
 - `shaper` — a text file of console commands (G28, ACCELEROMETER_QUERY, MEASURE_AXES_NOISE,
   SHAPER_CALIBRATE per axis, SAVE_CONFIG) for printers with an accelerometer (K1 SE: ADXL345).
 
