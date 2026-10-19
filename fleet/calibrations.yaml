@@ -95,7 +95,7 @@ kinds:
     lot_sensitive: false
     baseline: required
     invalidated_by: [nozzle_swap, nozzle_diameter, hotend]
-    methods: [orca_mvs_test, manual]
+    methods: [orca_mvs_test, mvs_strip, manual]  # mvs_strip: `3d calibrate gen plate1`
     values:
       max_volumetric_speed: {type: number, min: 1, max: 100, unit: mm³/s}
     gcode:

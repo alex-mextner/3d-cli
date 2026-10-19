@@ -279,3 +279,26 @@ def test_calibrate_usage_errors(tmp_path: Path) -> None:
     )
     assert missing.returncode == 2
     assert "nope.gcode" in missing.stderr
+
+
+def test_gen_rejects_nonfinite_pa_step(tmp_path: Path) -> None:
+    """The user types `--pa-step nan`/`inf`: the CLI says the value must be finite and writes no
+    file, instead of dying in a traceback."""
+    out = tmp_path / "pa.gcode"
+    for bad in ("nan", "inf"):
+        res = run_cli(
+            tmp_path,
+            "calibrate",
+            "gen",
+            "pa",
+            "--printer",
+            "k1se",
+            "--pa-step",
+            bad,
+            "-o",
+            str(out),
+        )
+        assert res.returncode == 2
+        assert "--pa-step wants a finite number" in res.stderr
+        assert "Traceback" not in res.stderr
+    assert not out.exists()
