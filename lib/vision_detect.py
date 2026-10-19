@@ -41,7 +41,14 @@ LIB = Path(__file__).resolve().parent
 if str(LIB) not in sys.path:
     sys.path.insert(0, str(LIB))
 
-from printer_ops.vision import Box, FailureTracker, FrameScore, TrackerParams  # noqa: E402
+from printer_ops.vision import (  # noqa: E402
+    Box,
+    FailureTracker,
+    Finding,
+    FrameScore,
+    PrintContext,
+    TrackerParams,
+)
 
 if TYPE_CHECKING:
     import numpy as np
@@ -219,6 +226,182 @@ class ObicoScorer:
         return self.score_bgr(decode(jpeg))
 
 
+class FrameScorer:
+    """Stage 1 (Obico boxes) -> drop boxes outside the allowed area -> stage 2 (CLIP verifier),
+    plus the calibrated bed-change detectors.
+
+    `ignore`: static polygons (normalised) where print failures cannot be, e.g. the toolhead
+    dock or the purge chute. With a camera calibration (`geometry`) and the live print position
+    (`context`, set by the loop before each frame) the boxes must also lie in the bed volume,
+    and vision_scene's detectors add Findings. A box counts as inside when its centre is.
+    Without a verifier FrameScore.q stays None and the tracker uses the raw p."""
+
+    def __init__(
+        self,
+        detector: ObicoScorer,
+        verifier: Any = None,
+        ignore: list[list[tuple[float, float]]] | None = None,
+        geometry: PrintGeometry | None = None,
+    ) -> None:
+        self.detector = detector
+        self.verifier = verifier
+        self.ignore = ignore or []
+        self.geometry = geometry
+        self.context: PrintContext | None = None
+        self.now: float | None = None  # frame time for replays; None = wall clock
+        self.roi: np.ndarray | None = None
+
+    def _allowed(self, b: Box) -> bool:
+        cx, cy = (b.x1 + b.x2) / 2, (b.y1 + b.y2) / 2
+        if self.roi is not None:
+            rh, rw = self.roi.shape[:2]
+            row = max(0, min(rh - 1, int(cy * rh)))
+            col = max(0, min(rw - 1, int(cx * rw)))
+            if not self.roi[row, col]:
+                return False
+        return not any(_inside(cx, cy, poly) for poly in self.ignore)
+
+    def score_bgr(self, bgr: np.ndarray) -> FrameScore:
+        findings: list[Finding] = []
+        if self.geometry is not None and self.context is not None:
+            now = time.time() if self.now is None else self.now
+            self.roi, findings = self.geometry.update(bgr, self.context, now)
+        elif self.geometry is not None:
+            self.roi = (
+                None  # no print position this frame: never filter by a stale area
+            )
+        s = self.detector.score_bgr(bgr)
+        kept = [b for b in s.boxes if self._allowed(b)]
+        s = FrameScore(
+            p=float(sum(b.conf for b in kept)),
+            boxes=kept,
+            luma=s.luma,
+            masked=len(s.boxes) - len(kept),
+            findings=findings,
+        )
+        if self.verifier is not None:
+            from vision_verify import verified_score
+
+            s.probs = self.verifier.box_probs(bgr, kept) if kept else []
+            s.q = verified_score(kept, s.probs)
+        return s
+
+    def __call__(self, jpeg: bytes) -> FrameScore:
+        return self.score_bgr(decode(jpeg))
+
+
+# The U1 toolhead seen from the chamber camera: a ~60 mm block around the nozzle reaching
+# ~100 mm up; the reported XY lags the frame by up to ~0.5 s of travel, hence the margin.
+HEAD_HALF_MM = 30.0
+HEAD_SKEW_MM = 40.0
+HEAD_UP_MM = 100.0
+ROI_PAD_MM = 15.0  # calibration error is up to ~30 px near the camera (9 px RMS)
+ROI_ABOVE_MM = 40.0  # spaghetti tangles around the nozzle, above the part top
+ROI_GROW_PX = 40  # at 1920 px: boxes just outside the projected volume still count
+BAND_MM = (
+    4.0  # the newest layers; excluded from the change detector, checked for growth
+)
+
+
+class PrintGeometry:
+    """Camera calibration + live print position -> the box ROI and the bed-change Findings.
+    Static masks are cached per (file, 0.1 mm of Z); the toolhead box is per frame."""
+
+    def __init__(self, cam: Any, *, scene: bool = True, growth: bool = True) -> None:
+        from vision_scene import GrowthWatch, SceneWatch
+
+        self.cam = cam
+        self.scene = SceneWatch() if scene else None
+        self.growth = GrowthWatch() if growth else None
+        self.file: str | None = None
+        self._key: tuple[Any, ...] | None = None
+        self._masks: dict[str, np.ndarray] = {}
+
+    def masks(self, ctx: PrintContext, shape: tuple[int, int]) -> dict[str, np.ndarray]:
+        import cv2
+        import numpy as np
+        import vision_geometry as vg
+
+        key = (ctx.filename, round(ctx.z, 1), shape, ctx.objects)
+        if key != self._key:
+            objs = [[(float(x), float(y)) for x, y in o] for o in ctx.objects]
+            z = ctx.z
+            grow = max(1, round(ROI_GROW_PX * shape[1] / 1920))
+            roi = vg.volume_mask(
+                self.cam, z, shape, objs, pad_mm=ROI_PAD_MM, above_mm=ROI_ABOVE_MM
+            )
+            sil = vg.silhouette_mask(self.cam, z, shape, objs, pad_mm=3)
+            self._masks = {
+                "roi": cv2.dilate(roi, np.ones((grow, grow), np.uint8)),
+                "silhouette": sil,
+                "area": vg.bed_mask(self.cam, z, shape) | sil,
+                "band": vg.prism_mask(self.cam, z, shape, objs, z - BAND_MM, z),
+                "below": vg.prism_mask(
+                    self.cam, z, shape, objs, z - 4 * BAND_MM, z - 2 * BAND_MM
+                ),
+                "above": vg.prism_mask(
+                    self.cam, z, shape, objs, z + BAND_MM, z + 3 * BAND_MM
+                ),
+            }
+            self._key = key
+        head = [
+            (
+                ctx.x + dx * (HEAD_HALF_MM + HEAD_SKEW_MM),
+                ctx.y + dy * (HEAD_HALF_MM + HEAD_SKEW_MM),
+            )
+            for dx, dy in ((-1, -1), (1, -1), (1, 1), (-1, 1))
+        ]
+        return {
+            **self._masks,
+            "head": vg.prism_mask(
+                self.cam, ctx.z, shape, [head], ctx.z - 2.0, ctx.z + HEAD_UP_MM
+            ),
+        }
+
+    def update(
+        self, bgr: np.ndarray, ctx: PrintContext, now: float
+    ) -> tuple[np.ndarray, list[Finding]]:
+        """(ROI for the stage-1 boxes, Findings of the bed-change detectors) for one frame."""
+        if (
+            ctx.filename != self.file
+        ):  # a new print: no reference frames from the old one
+            self.file = ctx.filename
+            for w in (self.scene, self.growth):
+                if w is not None:
+                    w.reset()
+        m = self.masks(ctx, bgr.shape[:2])
+        findings: list[Finding] = []
+        if (
+            not ctx.objects
+        ):  # no footprints (no exclude_object in the G-code): ROI = bed only
+            return m["roi"], findings
+        free = 255 - m["head"]
+        if self.scene is not None:
+            findings += self.scene.update(
+                bgr, ctx.z, now, m["area"], m["silhouette"], m["head"] | m["band"]
+            )
+        if self.growth is not None:
+            findings += self.growth.update(
+                bgr,
+                ctx.z,
+                m["band"] & free,
+                m["below"] & free,
+                m["above"] & free,
+            )
+        return m["roi"], findings
+
+
+def _inside(x: float, y: float, poly: list[tuple[float, float]]) -> bool:
+    """Even-odd point-in-polygon (normalised coordinates)."""
+    hit = False
+    n = len(poly)
+    for i in range(n):
+        (x1, y1), (x2, y2) = poly[i], poly[(i + 1) % n]
+        if (y1 > y) != (y2 > y) and x < x1 + (y - y1) * (x2 - x1) / (y2 - y1):
+            hit = not hit
+    return hit
+
+
 def decode(jpeg: bytes) -> np.ndarray:
     import cv2
     import numpy as np
@@ -230,21 +413,26 @@ def decode(jpeg: bytes) -> np.ndarray:
 
 
 def annotate(jpeg: bytes, score: FrameScore) -> bytes:
-    """The frame with the detection boxes drawn (evidence for the event)."""
+    """The frame with the detection boxes drawn (evidence for the event): red = the verifier
+    says loose filament (>= 0.5) or did not run, yellow = it says texture/part; labels read
+    `confidence/verified`."""
     import cv2
 
     img = decode(jpeg)
     h, w = img.shape[:2]
-    for b in score.boxes:
+    for i, b in enumerate(score.boxes):
+        prob = score.probs[i] if i < len(score.probs) else None
+        colour = (0, 0, 255) if prob is None or prob >= 0.5 else (0, 215, 255)
+        label = f"{b.conf:.2f}" + ("" if prob is None else f"/{prob:.2f}")
         p1, p2 = (int(b.x1 * w), int(b.y1 * h)), (int(b.x2 * w), int(b.y2 * h))
-        cv2.rectangle(img, p1, p2, (0, 0, 255), max(2, w // 480))
+        cv2.rectangle(img, p1, p2, colour, max(2, w // 480))
         cv2.putText(
             img,
-            f"{b.conf:.2f}",
+            label,
             (p1[0], max(20, p1[1] - 6)),
             cv2.FONT_HERSHEY_SIMPLEX,
             max(0.6, w / 1600),
-            (0, 0, 255),
+            colour,
             2,
         )
     ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 85])
@@ -279,12 +467,58 @@ def _device_camera(device: Any, args: argparse.Namespace) -> Any:
     )
 
 
+def build_scorer(
+    cfg: dict[str, Any],
+    *,
+    verify: bool = True,
+    camera: Any = None,
+    scene: bool = False,
+) -> FrameScorer:
+    """The per-frame pipeline from a device's `watch: vision:` settings: `verify: false` turns
+    stage 2 off, `ignore:` lists polygons (normalised [x, y] points) whose boxes are dropped,
+    `geometry: false` ignores the camera calibration `camera` (vision_geometry.CameraModel).
+    `scene: true` (or `scene=True`, the --scene flag) adds the bed-change detectors
+    (foreign_object, part_moved, no_growth); off by default because on the U1 they still raise
+    ~139 and ~50 false findings per healthy printing day (docs/research/printer-vision-tuning.md)."""
+    from errors import UsageError
+
+    try:
+        polys = [
+            [(float(x), float(y)) for x, y in poly] for poly in cfg.get("ignore") or []
+        ]
+    except (TypeError, ValueError) as exc:
+        raise UsageError(
+            f"watch.vision.ignore must be a list of polygons of [x, y] pairs (0..1): {exc}",
+            command="printer vision",
+        ) from exc
+    verifier = None
+    if verify and cfg.get("verify", True):
+        from vision_verify import ClipVerifier, ensure_clip
+
+        verifier = ClipVerifier(ensure_clip(), threads=_threads())
+    bed_change = scene or bool(cfg.get("scene", False))
+    geometry = (
+        PrintGeometry(camera, scene=bed_change, growth=bed_change)
+        if camera is not None and cfg.get("geometry", True)
+        else None
+    )
+    return FrameScorer(ObicoScorer(ensure_model()), verifier, polys, geometry)
+
+
+def _calibration(device: Any, args: argparse.Namespace) -> Any:
+    if getattr(args, "no_geometry", False):
+        return None
+    from vision_geometry import load_calibration
+
+    return load_calibration(device.name)
+
+
 def run_live(args: argparse.Namespace) -> int:
     from cli.paths import cache_dir
     from printer_ops import make_adapter
     from printer_ops.base import PrinterCommError
     from printer_ops.devices import get_device
-    from printer_ops.vision import KlippyLogTap, VisionMonitor
+    from printer_ops.vision import ContextTap, KlippyLogTap, VisionMonitor
     from printer_ops.watch import severity_rank
     from printer_ops.watch_sinks import Dispatcher
 
@@ -292,7 +526,15 @@ def run_live(args: argparse.Namespace) -> int:
     camera = _device_camera(device, args)
     adapter = make_adapter(device)
     tap = None if args.no_npu else KlippyLogTap(device.host, device.port)
-    scorer = ObicoScorer(ensure_model())
+    cfg = (getattr(device, "watch", None) or {}).get("vision") or {}
+    cam = _calibration(device, args)
+    scorer = build_scorer(
+        cfg if isinstance(cfg, dict) else {},
+        verify=not args.no_verify,
+        camera=cam,
+        scene=args.scene,
+    )
+    where = ContextTap(device.host, device.port) if scorer.geometry else None
     evidence = (
         Path(args.evidence) if args.evidence else cache_dir() / "vision" / "evidence"
     )
@@ -326,6 +568,13 @@ def run_live(args: argparse.Namespace) -> int:
                 frame = camera.grab()
             except PrinterCommError as exc:
                 report["camera_error"] = str(exc)
+            if where is not None:
+                try:
+                    scorer.context = where.poll()
+                    report["z"] = round(scorer.context.z, 2)
+                except PrinterCommError as exc:
+                    scorer.context = None  # no masks this frame rather than stale ones
+                    report["context_error"] = str(exc)
         score, events = monitor.step(frame)
         if tap is not None:
             try:
@@ -340,11 +589,19 @@ def run_live(args: argparse.Namespace) -> int:
             if score is not None:
                 report.update(
                     p=round(score.p, 3),
+                    q=None if score.q is None else round(score.q, 3),
                     luma=round(score.luma, 1),
+                    masked=score.masked,
                     boxes=[
-                        {k: round(v, 3) for k, v in vars(b).items()}
-                        for b in score.boxes
+                        {
+                            **{k: round(v, 3) for k, v in vars(b).items()},
+                            "verified": round(score.probs[i], 3)
+                            if i < len(score.probs)
+                            else None,
+                        }
+                        for i, b in enumerate(score.boxes)
                     ],
+                    findings=[f.kind for f in score.findings],
                 )
             report["trend"] = round(monitor.tracker.adjusted, 3)
             report["events"] = [e.to_json() for e in events]
@@ -363,6 +620,9 @@ def run_live(args: argparse.Namespace) -> int:
                     {
                         **report,
                         "p": None if score is None else round(score.p, 3),
+                        "q": None
+                        if score is None or score.q is None
+                        else round(score.q, 3),
                         "trend": round(monitor.tracker.adjusted, 3),
                     }
                 ),
@@ -370,6 +630,90 @@ def run_live(args: argparse.Namespace) -> int:
                 flush=True,
             )
         time.sleep(max(0.5, args.interval - (time.time() - t0)))
+
+
+def run_record(args: argparse.Namespace) -> int:
+    """`vision record NAME DIR`: while the printer prints, save every frame plus where the print
+    is (gcode Z, toolhead XY, object footprints) to DIR/meta.jsonl. Read-only, like the live
+    loop. The folder is a test set for `vision eval`, which replays it with the calibrated
+    detectors. Stops after --max frames (default: never)."""
+    from printer_ops import make_adapter
+    from printer_ops.base import PRINTING, PrinterCommError
+    from printer_ops.devices import get_device
+    from printer_ops.vision import ContextTap
+
+    device = get_device(args.printer)
+    camera = _device_camera(device, args)
+    adapter = make_adapter(device)
+    where = ContextTap(device.host, device.port)
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    n, objects = 0, None
+    with (out / "meta.jsonl").open("a") as meta:
+        while args.max is None or n < args.max:
+            t0 = time.time()
+            try:
+                printing = adapter.status().state == PRINTING
+                if printing:
+                    camera.keepalive(t0)
+                    frame = camera.grab()
+                    ctx = where.poll()
+            except PrinterCommError as exc:
+                print(
+                    json.dumps({"t": round(t0, 1), "error": str(exc)}), file=sys.stderr
+                )
+                printing = False
+            if printing:
+                # millisecond suffix: two frames inside one second (--interval 0.5) must not collide
+                stamp = time.strftime("%Y%m%dT%H%M%S", time.gmtime(frame.ts))
+                name = f"{stamp}.{int(frame.ts * 1000) % 1000:03d}Z.jpg"
+                (out / name).write_bytes(frame.jpeg)
+                row: dict[str, Any] = {
+                    "frame": name,
+                    "t": round(frame.ts, 2),
+                    "file": ctx.filename,
+                    "z": ctx.z,
+                    "x": round(ctx.x, 2),
+                    "y": round(ctx.y, 2),
+                }
+                if ctx.objects != objects:  # footprints only when they change
+                    row["objects"] = objects = ctx.objects
+                meta.write(json.dumps(row) + "\n")
+                meta.flush()
+                n += 1
+            time.sleep(max(0.5, args.interval - (time.time() - t0)))
+    return 0
+
+
+def load_replay(path: Path) -> dict[str, tuple[PrintContext, float]]:
+    """frame name -> (PrintContext, frame time) from a `vision record` folder's meta.jsonl;
+    empty when the source is not such a folder."""
+    meta = path / "meta.jsonl" if path.is_dir() else None
+    if meta is None or not meta.is_file():
+        return {}
+    out: dict[str, tuple[PrintContext, float]] = {}
+    objects: tuple[tuple[tuple[float, float], ...], ...] = ()
+    for line in meta.read_text().splitlines():
+        try:
+            row = json.loads(line)
+            if "objects" in row:
+                objects = tuple(
+                    tuple((float(x), float(y)) for x, y in o) for o in row["objects"]
+                )
+            if "frame" not in row:
+                continue
+            ctx = PrintContext(
+                row.get("file"),
+                float(row["z"]),
+                float(row["x"]),
+                float(row["y"]),
+                objects,
+            )
+            frame_time = float(row["t"])
+        except (ValueError, KeyError, TypeError):
+            continue  # an error row or a torn last line
+        out[row["frame"]] = (ctx, frame_time)
+    return out
 
 
 # ---- evaluation on recorded footage ------------------------------------------------------------
@@ -411,9 +755,13 @@ def iter_frames(path: Path, every: int = 1) -> Any:
 class SeqResult:
     source: str
     label: str  # "pos" | "neg"
-    scores: list[float]
-    levels: list[str | None]
+    scores: list[float]  # raw stage-1 p
+    levels: list[str | None]  # the live tracker on the signal (q when verified, else p)
     names: list[str] = field(default_factory=list)
+    verified: list[float] | None = None  # stage-2 q per frame (None: no verifier)
+    findings: list[tuple[str, ...]] = field(
+        default_factory=list
+    )  # Finding kinds per frame
 
     @property
     def first_alert(self) -> int | None:
@@ -426,32 +774,52 @@ def evaluate(
     *,
     every: int = 1,
     params: TrackerParams | None = None,
+    lead_in: int = 0,
+    prepare: Any = None,
 ) -> list[SeqResult]:
     """Score every frame of every source in order; each source is one print, so the tracker
-    restarts per source (with a clean long-term baseline, the worst case)."""
+    restarts per source (with a clean long-term baseline, the worst case). `lead_in` healthy
+    frames (score 0) go first, as if the print had run fine before the clip starts: a failure
+    clip then meets the tracker the way a live failure does, after warm-up. `prepare(source,
+    frame name)` runs before each frame (replays set the print position there)."""
     out = []
     for path, label in sources:
         tracker = FailureTracker(params or TrackerParams())
-        scores, levels, names = [], [], []
+        for _ in range(lead_in):
+            tracker.update(0.0)
+        scores, levels, names, verified, found = [], [], [], [], []
         for name, img in iter_frames(path, every):
-            p = score_bgr(img).p
-            scores.append(p)
-            levels.append(tracker.update(p))
+            if prepare is not None:
+                prepare(path, name)
+            s = score_bgr(img)
+            scores.append(s.p)
+            if s.q is not None:
+                verified.append(s.q)
+            levels.append(tracker.update(s.signal))
             names.append(name)
-        out.append(SeqResult(str(path), label, scores, levels, names))
+            found.append(tuple(sorted(f.kind for f in s.findings)))
+        out.append(
+            SeqResult(
+                str(path),
+                label,
+                scores,
+                levels,
+                names,
+                verified if scores and len(verified) == len(scores) else None,
+                found,
+            )
+        )
     return out
 
 
-def metrics(
-    results: list[SeqResult], thresholds: tuple[float, ...] = (0.1, 0.2, 0.3, 0.5)
+def _table(
+    pos: list[float], neg: list[float], thresholds: tuple[float, ...]
 ) -> dict[str, Any]:
-    pos = [p for r in results if r.label == "pos" for p in r.scores]
-    neg = [p for r in results if r.label == "neg" for p in r.scores]
-    per_frame = {}
+    table = {}
     for t in thresholds:
         tp = sum(p >= t for p in pos)
         fp = sum(p >= t for p in neg)
-        per_frame[str(t)] = {
+        table[str(t)] = {
             "tp": tp,
             "fp": fp,
             "fn": len(pos) - tp,
@@ -460,12 +828,25 @@ def metrics(
             "recall": round(tp / len(pos), 4) if pos else None,
             "fpr": round(fp / len(neg), 5) if neg else None,
         }
+    return table
+
+
+def metrics(
+    results: list[SeqResult],
+    thresholds: tuple[float, ...] = (0.1, 0.2, 0.3, 0.5),
+    interval_s: float = 10.0,
+) -> dict[str, Any]:
+    pos = [p for r in results if r.label == "pos" for p in r.scores]
+    neg = [p for r in results if r.label == "neg" for p in r.scores]
     seqs = [
         {
             "source": r.source,
             "label": r.label,
             "frames": len(r.scores),
             "max_p": round(max(r.scores, default=0.0), 3),
+            "max_q": None
+            if r.verified is None
+            else round(max(r.verified, default=0.0), 3),
             "first_alert_frame": r.first_alert,
             "alert_frames": sum(lv is not None for lv in r.levels),
             "critical_frames": sum(lv == "critical" for lv in r.levels),
@@ -483,9 +864,30 @@ def metrics(
         ),
         reverse=True,
     )[:5]
-    return {
+    # False alarms per day of printing on healthy footage: every rising edge of the tracker.
+    neg_alerts = sum(
+        sum(
+            1
+            for i, lv in enumerate(r.levels)
+            if lv is not None and (i == 0 or r.levels[i - 1] is None)
+        )
+        for r in results
+        if r.label == "neg"
+    )
+    days = len(neg) * interval_s / 86400.0
+    # Bed-change detectors: episodes (rising edges) per kind on healthy footage.
+    finding_eps: dict[str, int] = {}
+    for r in results:
+        if r.label != "neg":
+            continue
+        prev: tuple[str, ...] = ()
+        for kinds in r.findings:
+            for k in set(kinds) - set(prev):
+                finding_eps[k] = finding_eps.get(k, 0) + 1
+            prev = kinds
+    out = {
         "frames": {"pos": len(pos), "neg": len(neg)},
-        "per_frame": per_frame,
+        "per_frame": _table(pos, neg, thresholds),
         "worst_negatives": [{"frame": n, "p": round(p, 3)} for p, n in worst],
         "sequences": seqs,
         "sequence_alerts": {
@@ -496,33 +898,60 @@ def metrics(
             ),
             "neg_total": len(neg_seq),
         },
+        "healthy_days": round(days, 3),
+        "false_alarms_per_day": round(neg_alerts / days, 2) if days else None,
+        "finding_alarms_per_day": {
+            k: round(v / days, 2) for k, v in sorted(finding_eps.items())
+        }
+        if days
+        else {},
     }
+    if results and all(r.verified is not None for r in results):
+        out["per_frame_verified"] = _table(
+            [q for r in results if r.label == "pos" for q in r.verified or []],
+            [q for r in results if r.label == "neg" for q in r.verified or []],
+            thresholds,
+        )
+    return out
 
 
 def _print_metrics(m: dict[str, Any]) -> None:
     print(f"frames: {m['frames']['pos']} positive, {m['frames']['neg']} negative")
-    print("per frame  threshold  precision  recall   FPR      (tp/fp/fn/tn)")
-    for t, r in m["per_frame"].items():
+    for key, name in (("per_frame", "p"), ("per_frame_verified", "q")):
+        if key not in m:
+            continue
         print(
-            f"           p>={t:<6} {r['precision']!s:<10} {r['recall']!s:<8} {r['fpr']!s:<8} "
-            f"({r['tp']}/{r['fp']}/{r['fn']}/{r['tn']})"
+            f"per frame ({name})  threshold  precision  recall   FPR      (tp/fp/fn/tn)"
         )
+        for t, r in m[key].items():
+            print(
+                f"               {name}>={t:<6} {r['precision']!s:<10} {r['recall']!s:<8} "
+                f"{r['fpr']!s:<8} ({r['tp']}/{r['fp']}/{r['fn']}/{r['tn']})"
+            )
     print(
-        "highest-scoring negative frames: "
+        "highest-scoring negative frames (p): "
         + ", ".join(f"{w['frame']} {w['p']}" for w in m["worst_negatives"])
     )
     print("sequences (tracker as in the live loop):")
     for s in m["sequences"]:
+        q = "" if s["max_q"] is None else f", max q {s['max_q']}"
         print(
-            f"  [{s['label']}] {Path(s['source']).name}: {s['frames']} frames, max p {s['max_p']}, "
-            f"first alert at frame {s['first_alert_frame']}, alert frames {s['alert_frames']} "
-            f"(critical {s['critical_frames']})"
+            f"  [{s['label']}] {Path(s['source']).name}: {s['frames']} frames, "
+            f"max p {s['max_p']}{q}, first alert at frame {s['first_alert_frame']}, "
+            f"alert frames {s['alert_frames']} (critical {s['critical_frames']})"
         )
     a = m["sequence_alerts"]
     print(
         f"alerts: {a['pos_detected']}/{a['pos_total']} failure sequences caught, "
-        f"{a['neg_false_alarms']}/{a['neg_total']} healthy sequences with a false alarm"
+        f"{a['neg_false_alarms']}/{a['neg_total']} healthy sequences with a false alarm; "
+        f"{m['false_alarms_per_day']} false alarms per printing day "
+        f"({m['healthy_days']} days of healthy frames at the live interval)"
     )
+    if m["finding_alarms_per_day"]:
+        print(
+            "bed-change findings per healthy printing day: "
+            + ", ".join(f"{k} {v}" for k, v in m["finding_alarms_per_day"].items())
+        )
 
 
 def run_eval(args: argparse.Namespace) -> int:
@@ -538,15 +967,37 @@ def run_eval(args: argparse.Namespace) -> int:
             + (f"; missing: {', '.join(missing)}" if missing else ""),
             command="printer vision eval",
         )
-    scorer = ObicoScorer(ensure_model())
+    cam = None
+    if args.printer:
+        from vision_geometry import load_calibration
+
+        cam = load_calibration(args.printer)
+        if cam is None:
+            raise UsageError(
+                f"no camera calibration for printer {args.printer}",
+                command="printer vision eval",
+                remediation=[
+                    "See docs/research/printer-vision-geometry.md; the U1 one ships "
+                    "with 3d-cli for devices with `model: Snapmaker U1`."
+                ],
+            )
+    scorer = build_scorer({}, verify=not args.no_verify, camera=cam, scene=args.scene)
+    replays = {str(p): load_replay(p) for p, _ in sources}
+
+    def prepare(path: Path, name: str) -> None:
+        ctx, ts = replays[str(path)].get(name, (None, None))
+        scorer.context, scorer.now = ctx, ts
+
     t0 = time.time()
     results = evaluate(
         sources,
         scorer.score_bgr,
         every=args.every,
         params=TrackerParams(warmup=args.warmup),
+        lead_in=args.lead_in,
+        prepare=prepare if cam is not None else None,
     )
-    m = metrics(results)
+    m = metrics(results, interval_s=args.interval)
     n = m["frames"]["pos"] + m["frames"]["neg"]
     m["seconds_per_frame"] = round((time.time() - t0) / max(1, n), 3)
     if args.json:
@@ -568,6 +1019,9 @@ def main(argv: list[str]) -> int:
     live.add_argument("--snapshot")
     live.add_argument("--no-keepalive", action="store_true")
     live.add_argument("--no-npu", action="store_true")
+    live.add_argument("--no-verify", action="store_true")
+    live.add_argument("--no-geometry", action="store_true")
+    live.add_argument("--scene", action="store_true")
     live.add_argument("--evidence")
     live.add_argument("--dry-run", action="store_true")
     live.add_argument("--min-severity")
@@ -577,14 +1031,31 @@ def main(argv: list[str]) -> int:
     ev.add_argument("--neg", nargs="*", default=[])
     ev.add_argument("--every", type=int, default=1)
     ev.add_argument("--warmup", type=int, default=TrackerParams().warmup)
+    ev.add_argument("--lead-in", type=int, default=0)
+    ev.add_argument("--interval", type=float, default=10.0)
+    ev.add_argument("--no-verify", action="store_true")
+    ev.add_argument("--scene", action="store_true")
+    ev.add_argument("--printer")
     ev.add_argument("--json", action="store_true")
+    rec = sub.add_parser("record")
+    rec.add_argument("printer")
+    rec.add_argument("out")
+    rec.add_argument("--interval", type=float, default=10.0)
+    rec.add_argument("--max", type=int)
+    rec.add_argument("--snapshot")
+    rec.add_argument("--no-keepalive", action="store_true")
     sub.add_parser("fetch-model")
     args = ap.parse_args(argv)
     if args.cmd == "fetch-model":
+        from vision_verify import ensure_clip
+
         print(ensure_model())
+        print(ensure_clip())
         return 0
     if args.cmd == "eval":
         return run_eval(args)
+    if args.cmd == "record":
+        return run_record(args)
     return run_live(args)
 
 
