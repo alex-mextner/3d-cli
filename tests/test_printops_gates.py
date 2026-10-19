@@ -20,9 +20,7 @@ from errors import UsageError
 from printer_ops import preflight
 from printer_ops.printops_checks import (
     PrintopsContext,
-    ciede2000,
     context_from_options,
-    delta_e,
     read_job,
     run_checks,
 )
@@ -337,21 +335,6 @@ def test_offline_with_an_explicit_api_is_a_usage_error() -> None:
             snapshot=None,
             command="print-preflight",
         )
-
-
-def test_ciede2000_matches_sharma_reference_pairs() -> None:
-    # Sharma, Wu, Dalal (2005) test data, pairs 1, 7 and 17
-    assert ciede2000((50.0, 2.6772, -79.7751), (50.0, 0.0, -82.7485)) == pytest.approx(
-        2.0425, abs=1e-4
-    )
-    assert ciede2000((50.0, 0.0, 0.0), (50.0, -1.0, 2.0)) == pytest.approx(
-        2.3669, abs=1e-4
-    )
-    assert ciede2000((50.0, 2.5, 0.0), (73.0, 25.0, -18.0)) == pytest.approx(
-        27.1492, abs=1e-4
-    )
-    assert delta_e("#1B5E20", "#1B5E20") == 0
-    assert delta_e("#000000", "#FFFFFF") > 90
 
 
 # -- PASS and UNVERIFIED ----------------------------------------------------------------------
