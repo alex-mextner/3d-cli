@@ -297,6 +297,7 @@ def test_gen_rejects_nonfinite_pa_step(tmp_path: Path) -> None:
             bad,
             "-o",
             str(out),
+            env_extra={"SLICER": "/bin/true"},
         )
         assert res.returncode == 2
         assert "--pa-step wants a finite number" in res.stderr
