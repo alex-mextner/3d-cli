@@ -13,7 +13,7 @@ Talks to 3d-api like [`3d printops`](printops.md) (`PRINTOPS_API`, `PRINTOPS_TOK
 3d calibrate show ID
 3d calibrate check FILE.gcode --printer P [--spools T1=ID,…] [--plate PLATE]
                    [--accept calibration:KIND[,…] --reason TEXT]
-3d calibrate gen pa|flow|shaper --printer P -o OUT [--material PLA] [--color #RRGGBB] [--nozzle-temp C]
+3d calibrate gen pa|flow|combo|shaper --printer P -o OUT [--material PLA] [--color #RRGGBB] [--nozzle-temp C]
   common (all but gen): [--json] [--api URL] [--token TOKEN]
 ```
 
@@ -138,6 +138,13 @@ so `3d print-preflight FILE --printer P` can PASS it.
   our own code, no Ellis pattern). PA = best height (mm) × 0.005. The stock PA is restored before `END_PRINT`.
 - `flow` — 5 tiles, one object each; `M221 S90…S110` after each `EXCLUDE_OBJECT_START`. The
   report prints the resulting flow_ratio per tile (preset ratio × factor).
+- `combo` — one plate for the [express calibration](../printops/express-calibration.md) of a new
+  spool. Front: 17 PA lines on the bare plate right after `START_PRINT`, PA 0…0.080 in steps of
+  0.005, each labelled with seven-segment digits = PA × 1000; a line is 20 mm slow (20 mm/s),
+  50 mm fast (120 mm/s), 20 mm slow, with `SET_PRESSURE_ADVANCE` before it. Back: the 5 flow
+  tiles (20×20×3 mm). PA, M221 and the acceleration are global, so the block starts with `M221 S100`
+  and ends at the stock PA and the process acceleration; it needs a relative-E slice; each tile re-sets its `M221` whenever the slicer enters it, and `END_PRINT` is
+  preceded by `M221 S100` and the stock PA. The temperature tower stays a separate print.
 - `shaper` — a text file of console commands (G28, ACCELEROMETER_QUERY, MEASURE_AXES_NOISE,
   SHAPER_CALIBRATE per axis, SAVE_CONFIG) for printers with an accelerometer (K1 SE: ADXL345).
 

@@ -257,6 +257,8 @@ incident(
 4. Применение — **только с подтверждением**: (a) профиль Orca (user filament JSON в репо или в `~/.config/OrcaSlicer`, diff показывается), (b) Klipper: `SET_PRESSURE_ADVANCE` на сессию или `SAVE_CONFIG` через Moonraker `printer.gcode.script` (перезапуск Klipper; только когда принтер idle и с явным `--yes`), (c) U1 stock — только профиль слайсера.
 5. Запись результата закрывает требование. Следующий `print-preflight` видит запись и проверяет, что значения в G-code **совпадают** с калибровкой (Orca пишет `; pressure_advance = …`, `; filament_flow_ratio = …` в футер).
 
+Экспресс-калибровка новой катушки (PA-линии + flow-плитки на одном столе, ≈30 мин, `3d calibrate gen combo`) — **[express-calibration.md](express-calibration.md)**.
+
 ---
 
 ## 9. Гейты, линтеры, хуки против типичных ошибок
