@@ -67,6 +67,12 @@ def test_parse_spec_orca_and_legacy_forms() -> None:
         gt.parse_spec("big")
 
 
+@pytest.mark.parametrize("spec", ["0x300/PNG", "300x0/PNG", "99999x32/PNG", "4097x32/PNG"])
+def test_parse_spec_rejects_sizes_outside_the_supported_range(spec: str) -> None:
+    with pytest.raises(gt.ThumbnailError, match="out of range"):
+        gt.parse_spec(spec)
+
+
 def test_check_reports_missing_profile_sizes(tmp_path: Path) -> None:
     g = make_gcode(tmp_path / "a.gcode")
     c = gt.check(str(g))
@@ -240,3 +246,8 @@ def test_fit_keeps_aspect_with_transparent_margins() -> None:
 def test_encode_png_round_trips_size() -> None:
     img = np.zeros((7, 5, 4), np.uint8)
     assert _png_size(gt.encode_png(img)) == (5, 7)
+
+
+def test_parse_spec_rejects_absurdly_long_digit_strings_as_thumbnail_error() -> None:
+    with pytest.raises(gt.ThumbnailError):
+        gt.parse_spec("9" * 5000 + "x32/PNG")

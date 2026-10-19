@@ -58,6 +58,7 @@ if TYPE_CHECKING:
 # Moonraker's metadata extractor reads the first and last MiB only (READ_SIZE in
 # moonraker/components/file_manager/metadata.py); a thumbnail further in is invisible.
 HEAD_BYTES = 1024 * 1024
+MAX_SIDE = 4096  # per-side bound for a requested thumbnail (a typo must not allocate gigabytes)
 ROW = 78  # base64 characters per comment line, as Orca writes them (Thumbnails.hpp max_row_length)
 
 # block tag per format, as Orca's compress_thumbnail_* tag() and Moonraker's parser expect
@@ -127,11 +128,14 @@ def parse_spec(spec: str, default_fmt: str = "PNG") -> list[Thumb]:
         item = item.strip()
         if not item:
             continue
-        m = re.fullmatch(r"(\d+)\s*[xX*]\s*(\d+)\s*(?:/\s*(\w+))?", item)
+        m = re.fullmatch(r"(\d{1,6})\s*[xX*]\s*(\d{1,6})\s*(?:/\s*(\w+))?", item)
         if not m:
             raise ThumbnailError(f"cannot parse thumbnail size {item!r} (expected WxH or WxH/FMT)")
         fmt = (m.group(3) or default_fmt).upper()
-        out.append(Thumb(int(m.group(1)), int(m.group(2)), "COLPIC" if fmt == "COLPIC" else fmt))
+        w, h = int(m.group(1)), int(m.group(2))
+        if not (1 <= w <= MAX_SIDE and 1 <= h <= MAX_SIDE):
+            raise ThumbnailError(f"thumbnail size {item!r} is out of range (1..{MAX_SIDE} px per side)")
+        out.append(Thumb(w, h, "COLPIC" if fmt == "COLPIC" else fmt))
     return out
 
 
