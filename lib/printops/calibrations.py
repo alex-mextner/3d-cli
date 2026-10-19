@@ -569,12 +569,14 @@ def _valid_until(value: Any) -> str | None:
     return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
 
 
-def _same_scope(a: Calibration, b: Calibration) -> bool:
+def _same_scope(a: Calibration, b: Calibration, lot_sensitive: bool) -> bool:
+    """Same scope = the newer record supersedes the older. The lot only separates records of a
+    lot-sensitive kind; for the others two lots of one filament are the same scope."""
     fa, fb = a.filament, b.filament
     same_fil = (fa is None and fb is None) or (
         fa is not None and fb is not None and fa.filament_id == fb.filament_id
         and (fa.filament_id is not None or _ci(fa.material, fb.material))
-        and fa.lot_nr == fb.lot_nr
+        and (not lot_sensitive or fa.lot_nr == fb.lot_nr)
     )
     same_nozzle = (a.nozzle is None and b.nozzle is None) or (
         a.nozzle is not None and b.nozzle is not None and a.nozzle.same(b.nozzle)
@@ -606,7 +608,7 @@ def _apply_result(ctx: Ctx, cal: Calibration, result: Mapping[str, Any]) -> Cali
     )
     new = get(ctx.conn, cal.id)
     older = [c for c in list_calibrations(ctx.conn, kind=cal.kind, current=True, limit=1000)
-             if c.id != cal.id and _same_scope(c, new)]
+             if c.id != cal.id and _same_scope(c, new, _kind(ctx.catalog, cal.kind).lot_sensitive)]
     for c in older:
         ctx.conn.execute("UPDATE calibration SET superseded_by = ? WHERE id = ?", (cal.id, c.id))
     ev.emit(ctx.conn, "calibration.recorded", f"calibration:{cal.id}",
@@ -720,6 +722,7 @@ class _Eval:
     plate: str | None
     filament: Filament | None
     filament_note: str | None
+    plates_known: int = 0  # how many plates the printer has (fleet); 0 = not known
 
 
 def _candidates(conn: sqlite3.Connection, e: _Eval) -> list[Calibration]:
@@ -761,15 +764,21 @@ def evaluate(conn: sqlite3.Connection, policy: CalibrationPolicy, e: _Eval,
             inv: Invalidation | None = None, level: str | None = None) -> Requirement:
         if level is None:
             level = _POLICY_LEVEL[policy.level(e.printer, k.id, status)]
-        return Requirement(k, e.printer, e.head, status, level, detail,
-                           record, inv, e.filament, e.nozzle)
+        return Requirement(kind=k, printer=e.printer, head=e.head, status=status, level=level,
+                           detail=detail, record=record, invalidation=inv, filament=e.filament,
+                           nozzle=e.nozzle)
 
     def stale(c: Calibration) -> Invalidation | None:
-        hits = [i for i in invs if i.at > (c.recorded_at or "") and i.hits(k, c.head)] if k.printer_scoped else []
+        # `>=`: timestamps have millisecond resolution, and an invalidation in the same instant as
+        # the recording must not be lost; a needless recalibration is the safe side.
+        hits = [i for i in invs if i.at >= (c.recorded_at or "") and i.hits(k, c.head)] if k.printer_scoped else []
         return hits[-1] if hits else None
 
     if "filament" in k.scope and e.filament is None:
         return req("no_spool", e.filament_note or "the loaded filament is unknown", level=UNVERIFIED)
+    if "plate" in k.scope and e.plate is None and e.plates_known > 1:
+        # a record for one plate says nothing about another: never take one as current
+        return req("no_plate", f"{e.printer} has {e.plates_known} plates: pass plate", level=UNVERIFIED)
 
     cands = _candidates(conn, e)
     nozzle_ok = [c for c in cands if "nozzle" not in k.scope or e.nozzle is None or c.nozzle is None
@@ -854,7 +863,8 @@ def worst(levels: Iterable[str]) -> str:
 def _head_evals(ctx: Ctx, p: FleetPrinter, head: Head, bound: Bound, plate: str | None) -> list[_Eval]:
     nozzle = current_nozzle(ctx.conn, p.name, head)
     return [
-        _Eval(k, p.name, head.label, nozzle, plate, bound.filament, bound.note)
+        _Eval(kind=k, printer=p.name, head=head.label, nozzle=nozzle, plate=plate,
+              filament=bound.filament, filament_note=bound.note, plates_known=len(p.plates or ()))
         for k in ctx.catalog.kinds.values()
         if k.applies_to(p.model) and ("head" in k.scope or "filament" in k.scope)
         and not ctx.policy.disabled(p.name, k.id)
@@ -863,7 +873,8 @@ def _head_evals(ctx: Ctx, p: FleetPrinter, head: Head, bound: Bound, plate: str 
 
 def _printer_evals(ctx: Ctx, p: FleetPrinter, plate: str | None) -> list[_Eval]:
     return [
-        _Eval(k, p.name, None, None, plate, None, None)
+        _Eval(kind=k, printer=p.name, head=None, nozzle=None, plate=plate, filament=None,
+              filament_note=None, plates_known=len(p.plates or ()))
         for k in ctx.catalog.kinds.values()
         if k.applies_to(p.model) and "head" not in k.scope and "filament" not in k.scope
         and not ctx.policy.disabled(p.name, k.id)

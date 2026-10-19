@@ -10,6 +10,7 @@ copies fleet/ next to lib/, as for fleet/policy.yaml).
 
 from __future__ import annotations
 
+import math
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -129,8 +130,13 @@ class Kind:
                     raise CatalogError(f"{self.id}: {name} must be a non-empty string, got {v!r}")
                 out[name] = v.strip()
                 continue
-            if isinstance(v, bool) or not isinstance(v, (int, float)):
-                raise CatalogError(f"{self.id}: {name} must be a number, got {v!r}")
+            if isinstance(v, str) and v.strip():  # CLI text: numbers arrive as strings
+                try:
+                    v = float(v)
+                except ValueError:
+                    raise CatalogError(f"{self.id}: {name} must be a number, got {v!r}") from None
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+                raise CatalogError(f"{self.id}: {name} must be a finite number, got {v!r}")
             if (spec.min is not None and v < spec.min) or (spec.max is not None and v > spec.max):
                 raise CatalogError(
                     f"{self.id}: {name}={v:g} is outside {spec.min:g}..{spec.max:g}"
@@ -294,9 +300,10 @@ def _values(where: str, raw: Any) -> dict[str, ValueSpec]:
         lo: Any = spec.get("min")
         hi: Any = spec.get("max")
         if vtype == "number":
-            numbers = all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in (lo, hi))
+            numbers = all(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+                          for v in (lo, hi))
             if not numbers:
-                raise CatalogError(f"{w}: min and max are required for a number and must be numbers")
+                raise CatalogError(f"{w}: min and max are required for a number and must be finite numbers")
             if lo > hi:
                 raise CatalogError(f"{w}: min > max")
         elif lo is not None or hi is not None:

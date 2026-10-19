@@ -99,13 +99,6 @@ def _pairs(raw: str, opt: str, sub: str) -> list[tuple[str, str]]:
     return out
 
 
-def _value(raw: str) -> float | str:
-    try:
-        return float(raw)
-    except ValueError:
-        return raw
-
-
 def _where(item: dict[str, Any]) -> str:
     if item.get("head"):
         return str(item["head"])
@@ -165,7 +158,7 @@ def _record(argv: list[str]) -> int:
         raise UsageError("pass --spool or --filament, not both", command=f"{PREFIX} record")
     body: dict[str, Any] = {
         "kind": p.pos[0],
-        "values": {k: _value(v) for k, v in _pairs(p.opts["--values"], "--values", "record")},
+        "values": dict(_pairs(p.opts["--values"], "--values", "record")),  # typed by the catalog
     }
     for opt, key in (("--printer", "printer"), ("--head", "head"), ("--lot", "lot_nr"), ("--plate", "plate"),
                      ("--method", "method"), ("--note", "note"), ("--valid-until", "valid_until")):
