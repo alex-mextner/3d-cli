@@ -69,7 +69,7 @@ kinds:
     apply: [orca:pressure_advance, klipper:SET_PRESSURE_ADVANCE]
     estimate: {minutes: 15, grams: 5}
     sources:
-      - https://github.com/AndrewEllis93/Ellis-PA-Pattern
+      - https://github.com/AndrewEllis93/Pressure_Linear_Advance_Tool
       - https://www.klipper3d.org/Pressure_Advance.html
 
   temp_tower:

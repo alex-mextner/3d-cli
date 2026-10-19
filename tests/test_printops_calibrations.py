@@ -560,4 +560,3 @@ def test_lint_rules(ctx: cal.Ctx, tmp_path: Path, monkeypatch: pytest.MonkeyPatc
 
     monkeypatch.setenv("PRINTOPS_CALIBRATIONS", str(tmp_path / "missing.yaml"))
     assert [f.rule for f in lint_calibrations.lint(lctx)] == ["calibrations/catalog"]
-
