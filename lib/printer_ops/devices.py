@@ -211,7 +211,7 @@ def _parse(path: Path, data: Any) -> dict[str, Device]:
         resume = _resume(spec["resume"], name, path) if "resume" in spec else None
         watch = spec.get("watch") or {}
         if not isinstance(watch, dict):
-            raise InvalidArgument(f"{name}.watch", str(watch), ["a mapping, e.g. {tg: true, min_severity: warning}"],
+            raise InvalidArgument(f"{name}.watch", str(watch), ["a mapping, e.g. {tg_fallback: true, min_severity: warning}"],
                                   command="printer", extra=f"Fix {path}.")
         out[name] = Device(name, adapter, host, port, str(model) if model else None, path, ws_port, limits,
                            trusted, resume, dict(watch), bridge)

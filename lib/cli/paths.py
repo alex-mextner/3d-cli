@@ -50,6 +50,12 @@ def state_dir() -> pathlib.Path:
     return _xdg_root("XDG_STATE_HOME", (".local", "state")) / APP_DIRNAME
 
 
+def cache_dir() -> pathlib.Path:
+    """`~/.cache/3d-cli/` (or `$XDG_CACHE_HOME/3d-cli`). Re-downloadable or regenerable files:
+    model weights (`vision/models`) and evidence frames of `3d printer vision`. Not auto-created."""
+    return _xdg_root("XDG_CACHE_HOME", (".cache",)) / APP_DIRNAME
+
+
 def legacy_config_dir() -> pathlib.Path:
     """The pre-§23 `~/.config/3d/` location, kept only so migration can find it."""
     return _xdg_root("XDG_CONFIG_HOME", (".config",)) / _LEGACY_DIRNAME
