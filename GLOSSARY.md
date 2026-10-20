@@ -89,6 +89,10 @@ LLMs flip answers ~46% and lose ~17% accuracy when challenged; the reason a crit
 <a id="forced-monotonic-loop"></a>
 An LLM edit loop that ACCEPTS a parameter change only if the score strictly improves (and gates pass), logging every attempt so a failed move is never retried; turns "an LLM fiddling with numbers" into reproducible convergence. https://arxiv.org/abs/2510.11498
 
+### Full Spectrum / mixed filament
+<a id="full-spectrum"></a>
+Snapmaker Orca's colour mixing on the U1: a *mixed filament* prints ONE physical filament per layer and alternates them from layer to layer by a manual pattern (`WR`, `431`) or by Local-Z ratio rows; the eye averages the stripes on walls only, a flat top shows its last layer. Rules for the patterns: [Layer rules (mix)](#layer-rules-mix). See [docs/commands/mix.md](docs/commands/mix.md).
+
 ### Hausdorff
 <a id="hausdorff"></a>
 Worst-case (max) surface deviation between two shapes. https://en.wikipedia.org/wiki/Hausdorff_distance
@@ -124,6 +128,10 @@ https://en.wikipedia.org/wiki/Jaccard_index
 <a id="jq"></a>
 Command-line JSON processor; the inspiration for `3d om` (pipeable filters over the object model). https://jqlang.github.io/jq/
 
+### Layer rules (mix)
+<a id="layer-rules-mix"></a>
+What a legal Full Spectrum layer sequence is: the *minor* (additional) colour is one thin layer between the others, never on two consecutive layers (a repeating pattern wraps: `GWG` repeats as `GWGGWG`, a double-thick G band); no colour band thicker than the run limit (default one layer); every layer of a mixed region at most the *layer cap* (0.12 mm; the first layer is exempt). One validator, `lib/slicing/mix_pattern.py`, behind `3d mix pattern|recipes|tester|check|gcode`. Pattern tokens: `1` = the row's component_a, `2` = component_b, `3`-`9` = that filament.
+
 ### LPIPS
 <a id="lpips"></a>
 Learned Perceptual Image Patch Similarity; perceptual image distance (Zhang et al. 2018). https://arxiv.org/abs/1801.03924
@@ -153,6 +161,10 @@ Diffusion-based monocular depth/normal estimation. https://github.com/prs-eth/Ma
 
 ### Materials registry
 Canonical `materials.yaml` storing per-material properties (density, anisotropy, color) used across the pipeline. https://pmc.ncbi.nlm.nih.gov/articles/PMC9230522/
+
+### Minor colour (mix)
+<a id="minor-colour"></a>
+In a layer mix, every colour that is not a strict majority (more than half) of the cycle — the *additional* colour. For a 1:1 mix both colours are minor. It must never be printed on consecutive layers; see [Layer rules (mix)](#layer-rules-mix).
 
 ### Mitsuba 3
 <a id="mitsuba"></a>

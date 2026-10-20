@@ -345,7 +345,7 @@ skills (`atomic-commits`, `ai-review-before-commit`, `pre-commit-gate`,
   (FAIL blocks unless `--force`). Tests use the loopback fakes in `tests/printer_fakes.py`;
   agents never point tests or ad-hoc runs at real printers. See `docs/commands/printer.md`.
 - `print-preflight` runs EVERY G-code gate (bounds, overhangs, slicer warnings, head
-  sequence, mix face, thumbnails, visible faces); a new G-code gate is added to
+  sequence, mix face, mix layers, thumbnails, visible faces); a new G-code gate is added to
   `printer_ops/preflight.run_preflight`, never left as a separate step, and a gate without
   its input is a SKIP that names it. Slicer warnings are never filtered away: every one is
   recorded in `NAME.slice-warnings.json` (`3d slice-warnings record`, or `3d slice`) and
