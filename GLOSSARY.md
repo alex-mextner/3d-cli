@@ -11,6 +11,14 @@ Modern print format that natively carries color, materials, and metadata (prefer
 ### AE
 Absolute Error; ImageMagick metric counting mismatched pixels (normalized = count/area). 0 = perfect match. https://imagemagick.org/script/compare.php
 
+### ARAP
+<a id="arap"></a>
+As-Rigid-As-Possible deformation: move handle vertices and let the rest follow while every small neighbourhood stays as close to a rigid motion as it can (alternating a per-vertex best-rotation fit and a sparse linear solve). Used by `3d mesh deform` `grab`. https://igl.ethz.ch/projects/ARAP/
+
+### Biharmonic deformation
+<a id="biharmonic-deformation"></a>
+Handle-based deformation that minimises the thin-plate (Laplacian-of-Laplacian) energy: a smooth, C1 pull with no bulge, linear in the handle motion. `3d mesh deform` uses it for `grab` (`solver: biharmonic`), as the ARAP starting point and in `fit_silhouette`.
+
 ### B-rep
 Boundary Representation; solid modeled by its bounding faces/edges/vertices (OCCT/CadQuery/build123d), as opposed to CSG. https://en.wikipedia.org/wiki/Boundary_representation
 
@@ -123,6 +131,10 @@ https://en.wikipedia.org/wiki/Jaccard_index
 ### jq
 <a id="jq"></a>
 Command-line JSON processor; the inspiration for `3d om` (pipeable filters over the object model). https://jqlang.github.io/jq/
+
+### Keep-out zone
+<a id="keep-out-zone"></a>
+A region of the mesh (eyes, cable notch, phone-contact corridor) that a `3d mesh deform` spec marks as protected: every op's displacement there is multiplied by `1 - weight`, fully-inside vertices stay bit-identical, and the final gate compares the output to the input (max displacement must be 0.0 mm).
 
 ### LPIPS
 <a id="lpips"></a>

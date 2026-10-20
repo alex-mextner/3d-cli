@@ -1,0 +1,87 @@
+# Fur relief for a standing figure — the Chekhov cat's fur.py / build_fur.py as a declarative spec.
+#
+#   3d mesh deform figure_smooth.stl examples/mesh-fit/cat-fur.yaml -o figure_fur.stl \
+#       --report fur.json --collage fur.png --verify-determinism
+#
+# The constants are the Chekhov print's choices (0.42 mm line, support-free FDM); the code behind the `fur` op
+# has none of them. `landmarks.json` next to this file is a SYNTHETIC stand-in (boxes around an ellipsoid
+# 70 x 90 x 90 mm centred on (0, 0, 45)) with the layout of the garage-band `landmarks_fur.json`: every
+# landmark with a "box" becomes the region lm_<name>, and `box: lm_<name>` reuses it with a margin / falloff.
+# For the real model point `landmarks.file` at the real landmarks_fur.json (and mind the y-ramp of the tail
+# fullness below, which is expressed in the figure's own frame).
+#
+# Project data this spec does not carry: the phone-contact corridor (28 phone slabs) and the "quiet points" left
+# by Chekhov's self-intersection pass. Add them as point regions
+#   {points: {file: quiet.json, radius: 2.0}, falloff: 2.5}
+# and list them under `keepout` (never moves) or inside `no_fur` (just no relief); re-run after a self-
+# intersection check the way build_fur.py loops.
+description: strand fur + fluffy bib clumps + tail fullness; overhang-safe; face, ears' fronts, cable notch and base untouched
+seed: 1
+landmarks: {file: landmarks.json, prefix: lm_}
+
+regions:
+  # ---- where fur is not allowed. Chekhov: eyes / nose / mouth weight 0 within 0.6 mm, full again at 2.5 mm
+  face_details:
+    union:
+      - {box: lm_eye_L, margin: 0.6, falloff: 1.9}
+      - {box: lm_eye_R, margin: 0.6, falloff: 1.9}
+      - {box: lm_nose, margin: 0.6, falloff: 1.9}
+      - {box: lm_mouth_chin, margin: 0.6, falloff: 1.9}
+  # ear fronts (normals facing -Y) stay smooth, the backs get fur: 90 % reduction
+  ear_front:
+    union:
+      - {product: [{box: lm_ear_L, falloff: 1.5}, {ramp: {quantity: ny, from: 0.0, to: -0.5, smooth_iters: 6}}], scale: 0.9}
+      - {product: [{box: lm_ear_R, falloff: 1.5}, {ramp: {quantity: ny, from: 0.0, to: -0.5, smooth_iters: 6}}], scale: 0.9}
+  # no relief on steep undersides (already at the 45 degree limit) nor on the first layers
+  not_underside: {ramp: {quantity: nz, from: -0.45, to: -0.28, smooth_iters: 6}}
+  above_base: {ramp: {quantity: z, from: 1.0, to: 3.0}}
+  # toes / creases: another surface within 1.3 mm in front of the vertex -> no relief (fades out by 2.8 mm)
+  open_surface: {gap: {min: 1.3, max: 2.8, rays: 7, cone_deg: 50}}
+  everything: {all: true}
+  fur_mask:
+    product:
+      - not_underside
+      - above_base
+      - open_surface
+      - {difference: [everything, face_details, ear_front]}
+
+  # ---- amplitude regions. Chekhov: body 0.35, head 0.25, tail 0.45 (boxes blend over 3 / 2 mm)
+  head: {box: lm_head, falloff: 3.0}
+  tail: {box: lm_tail, falloff: 2.0}
+  # white bib: chest, belly, forepaws get shorter, rounder clumps where the surface faces up or sideways
+  bib:
+    union:
+      - {box: lm_chest, falloff: 4.0}
+      - {box: lm_belly_lap, falloff: 4.0}
+      - {box: lm_front_paw_L, falloff: 4.0}
+      - {box: lm_front_paw_R, falloff: 4.0}
+  # tail fullness: an extra outward bulge on the upper half of the tail
+  tail_fullness:
+    product:
+      - tail
+      - {ramp: {quantity: y, from: 28.0, to: 40.0}}
+      - {ramp: {quantity: nz, from: -0.2, to: 0.15, smooth_iters: 6}}
+      - above_base
+      - open_surface
+
+  # ---- functional zone: the cable notch never moves
+  cable_zone: {box: lm_cable_notch, margin: 1.0, falloff: 2.0}
+
+keepout: [cable_zone]
+
+ops:
+  # Chekhov: pymeshlab isotropic remesh to 0.32 mm (>= 4 samples per 1.3 mm strand pitch). `refine` keeps every
+  # original vertex (keep-out stays bit-identical); engine: pymeshlab gives better triangles but moves vertices.
+  - {op: remesh, engine: refine, target_edge: 0.32}
+  - op: fur
+    region: fur_mask
+    flow: [0, 0, 1]            # strands run down the surface: across-flow is horizontal, so no overhang is created
+    amplitude: 0.35
+    amplitude_regions: [{region: head, amplitude: 0.25}, {region: tail, amplitude: 0.45}]
+    pitch: 1.9                 # across-strand cell (mm) ~ 1.2-1.4 mm visible pitch = 3 x the 0.42 mm line
+    length: 11.0               # along-strand cell (mm): long strands -> small z-gradient
+    fine: {pitch: 1.05, weight: 0.22}
+    warp: {scale: 14.0, strength: 1.6}
+    clumps: [{region: bib, amplitude: 0.40, pitch: 2.6, length: 5.0, nz: [-0.15, 0.05]}]
+    overhang_safe: {max_angle_deg: 45.0}
+  - {op: inflate, region: tail_fullness, amount: 0.9, normal_smoothing: 6}

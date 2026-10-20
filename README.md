@@ -114,6 +114,21 @@ Generate a full set of views for a catalog or documentation page.
 This produces `bracket_front.png`, `bracket_back.png`, `bracket_left.png`, `bracket_right.png`, `bracket_top.png`, `bracket_iso.png`
 concurrently — one command, six angles.
 
+### 6. Fur / fit a model without opening Blender
+
+Texture a smooth figure with print-safe fur, or push a feature toward a reference outline, from a spec file —
+deterministic, no GUI, protected zones (eyes, cable notch, phone corridor) provably untouched.
+
+```bash
+3d mesh deform figure.stl examples/mesh-fit/cat-fur.yaml -o figure_fur.stl \
+    --report fur.json --collage fur.png --verify-determinism     # exit 1 if a keep-out zone moved
+sha256sum figure_fur.stl                                          # same spec + seed => same hash, every run
+3d mesh fit-silhouette figure.stl fit.yaml -o figure_fit.stl      # per-iteration IoU table (heuristic)
+```
+
+The spec is the whole recipe: named regions with smooth falloff, `keepout:`, then ordered ops (`smooth`, `inflate`, `grab`
+with ARAP, `fur` with `overhang_safe`, `remesh`, ...). See [docs/commands/mesh.md](docs/commands/mesh.md).
+
 ## Shell composition — pipes, redirects, and conditionals
 
 Every `3d` command is a plain Unix tool: it reads files, writes files, prints text to stdout,
@@ -356,6 +371,7 @@ selection flags it runs ALL applicable gates; selectors run a subset; `--skip` e
 | `3d check … --collision cfg.json` / `--ref img` | supply data; the collision/silhouette gate then runs (never narrows the core set). |
 | `3d acceptance <assembly.scad>` | back-compat alias for `check` (all gates). |
 | `3d mesh <file.stl\|3mf\|.scad>` | watertight / manifold / self-intersection / volume (trimesh + open3d/manifold3d; falls back to openscad warnings). |
+| `3d mesh deform <mesh> <spec.yaml>` | deterministic, GUI-free sculpting from a spec: regions + keep-out zones, ARAP grab, smooth/inflate/crease, fur relief (overhang-safe), remesh; same spec = same SHA-256. `3d mesh fit-silhouette` = heuristic silhouette-IoU handle fit. |
 | `3d printability <file.scad>` | wall / min-feature / overhang / orientation (FDM, PLA/PETG). |
 | `3d collision <config.json>` | generic collision/penetration engine (static / `--frame` / `--viz`). |
 | `3d lint [--all \| paths...]` | advisory repository lint rules. |
@@ -366,6 +382,7 @@ selection flags it runs ALL applicable gates; selectors run a subset; `--skip` e
 3d check asm.scad --skip printability
 3d check asm.scad --collision verify/collision.json --ref ref.jpg
 3d mesh cube.stl
+3d mesh deform figure.stl examples/mesh-fit/cat-fur.yaml -o figure_fur.stl --verify-determinism
 3d collision verify/collision.json --frame           # per-frame timeline gate
 ```
 
