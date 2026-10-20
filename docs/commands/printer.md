@@ -236,8 +236,7 @@ $ 3d printer list
   a1mini        boris        offline   Bambu Lab A1 mini    - (never contacted)             T1
   k1se          own          full      Creality K1 SE       moonraker 192.168.0.27:7125     T1
   p1s           neighbour    offline   Bambu Lab P1S        - (never contacted)             T1
-  u1            own          full      Snapmaker U1         moonraker 192.168.0.26:7125     T1 | T2 UNUSABLE | T3 | T4
-      T2: head T2 does not work (babushkin-dom gen/queue.json: «слот 2 — заглушка, голова T2 не работает»; …)
+  u1            own          full      Snapmaker U1         moonraker 192.168.0.26:7125     T1 | T2 | T3 | T4
   xecut-a1      hackerspace  offline   Bambu Lab A1         - (never contacted)             T1
   xecut-cr200b  hackerspace  offline   Creality CR-200B Pro - (never contacted)             T1
 ```

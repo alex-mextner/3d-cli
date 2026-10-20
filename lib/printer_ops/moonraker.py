@@ -17,7 +17,7 @@ SNAPMAKER U1: Klipper object `print_task_config` carries what each of the 4 head
   the same fields Snapmaker Orca's "Sync filament" reads (SSWCP.cpp:1658-1767):
   filament_exist, filament_color_rgba ("RRGGBBAA"), filament_type, filament_vendor,
   filament_sub_type. Index i is G-code tool Ti and the printer's head label T(i+1). A head
-  with filament_exist=false (our broken T2) is reported as an empty slot. Non-U1 Klipper
+  with filament_exist=false (an unloaded head) is reported as an empty slot. Non-U1 Klipper
   printers simply lack the object and get no slots.
 
 HEAD FILAMENT WRITE (U1, issue #400): `set_head_filament` sends ONE line

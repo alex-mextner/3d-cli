@@ -302,7 +302,7 @@ Offline printers (other people's) are listed with their heads and bound spools o
 ```
 u1  Snapmaker U1  [full]  printing 16% u1_walls_main_v3-de0f43df5562b59c.gcode  (read 2026-10-14T20:51:31.780Z)
   T1     printer: PLA #000000 Snapmaker  |  spool 3 Elegoo PLA Black PLA #1A1A1A 830 g
-  T2 (unusable: head T2 does not work …) printer: empty  |  no spool
+  T2     printer: empty  |  no spool
   T3     printer: loaded (type unknown)  |  no spool  !unbound_filament #4
   T4     printer: PLA #FFFFFF Snapmaker  |  spool 5 Elegoo PLA White PLA #F4F4F4 610 g
 ```

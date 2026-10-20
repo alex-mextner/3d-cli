@@ -32,7 +32,7 @@ WHAT (issue https://github.com/alex-mextner/3d-cli/issues/96), one PASS/WARN/FAI
   is missing; it never passes silently. A PrintOps gate without PrintOps data is UNVERIFIED
   (shown, counted under STATUS, never PASS; it does not block on its own).
 
-WHY: wrong colour in a head, a used head that is empty (the U1's broken T2), missing
+WHY: wrong colour in a head, a used head that is empty (an empty U1 head), missing
   previews and halves that no longer fit were all caught by hand on recent jobs — after
   they would have cost hours of printing.
 

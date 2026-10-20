@@ -49,7 +49,7 @@ it. The file's header documents every key (values with ranges, methods, apply ta
 
 ## Requirement statuses and the policy
 
-For each usable head (the broken U1 T2 is listed as skipped) the engine takes the spool bound to
+For each usable head (a head marked `usable: false` in the fleet is listed as skipped) the engine takes the spool bound to
 it (`3d printops spool load`) and the nozzle on it (#166's nozzle installs when present, else
 `fleet/printers.yaml`) and gives every kind a status:
 
@@ -87,7 +87,7 @@ k1se: 2 FAIL, 3 WARN; ~130 min, ~55 g
   WARN       T1   temp_tower            new_material_type  no PLA recorded yet (жёлтый)
 ```
 
-On the U1 the broken head is listed as `skipped T2: head T2 does not work (…)`; a head without a
+A head marked unusable in the fleet is listed as `skipped T<n>: <reason from the fleet>`; a head without a
 bound spool shows `UNVERIFIED … no_spool`; a nozzle swap logged by maintenance shows
 `FAIL T3 pressure_advance invalidated #4 predates nozzle_swap on 2026-10-15: …`.
 
