@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import importlib
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from functools import cached_property
 from typing import Any, Protocol, runtime_checkable
 
@@ -72,7 +72,7 @@ _HASH_MULTIPLIERS = np.array(
 
 @dataclass(frozen=True)
 class MeshFixOptions:
-    """Knobs shared by every backend (passed to `mesh_repair.repair_mesh` as keyword arguments too).
+    """Knobs of the builtin backend (the external `mesh_repair` library runs with its own defaults).
 
     `max_hole_edges`: boundary loops longer than this are left open. `debris_max_faces` / `debris_max_volume_mm3`:
     a shell below both next to a bigger body is debris. `ring`: the most face rings the builtin backend cuts
@@ -773,7 +773,7 @@ class ExternalBackend:
                 degrades="`3d prep` falls back to the builtin repair backend",
                 command="prep",
             )
-        out_v, out_f, report = module.repair_mesh(vertices, faces, **asdict(options))
+        out_v, out_f, report = module.repair_mesh(vertices, faces)  # the library has its own knobs; the builtin options do not apply
         return (
             np.ascontiguousarray(out_v, dtype=np.float64),
             np.ascontiguousarray(out_f, dtype=np.int64),
