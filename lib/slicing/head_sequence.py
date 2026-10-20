@@ -30,6 +30,7 @@ from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
 
 from gcode_labels import LAYER_MARKERS, ObjectLabels, undecorated
+from slicing.mix_pattern import parse_row
 
 # Bambu emits T255 / T1000 as pseudo tool changes; real heads are below this.
 _MAX_HEAD_INDEX = 255
@@ -83,15 +84,16 @@ def read_recipes(zf: zipfile.ZipFile) -> tuple[dict[int, str], int]:
     """Virtual filament id -> manual pattern ('' = ratio/Local-Z row), and raft layer count.
 
     Virtual ids follow the physical filaments: id = n_physical + 1 + row index. A row's
-    pattern is its last comma field when all digits (one 1-based head per layer).
+    pattern is its last comma field when all digits; the tokens are decoded to one 1-based
+    head per layer (`1` = the row's component_a, `2` = component_b, `3`-`9` = that head —
+    slicing/mix_pattern.py), so a row `2,3,…,12` is the heads `23`.
     """
     cfg = json.loads(zf.read("Metadata/project_settings.config"))
     n_phys = len(cfg.get("filament_colour") or [])
     rows = [r for r in str(cfg.get("mixed_filament_definitions") or "").split(";") if r]
     patterns: dict[int, str] = {}
     for i, row in enumerate(rows):
-        last = row.split(",")[-1].strip()
-        patterns[n_phys + 1 + i] = last if last.isdigit() else ""
+        patterns[n_phys + 1 + i] = parse_row(row).slots
     raft = cfg.get("raft_layers", "0")
     if isinstance(raft, list):
         raft = raft[0] if raft else "0"

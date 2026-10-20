@@ -226,3 +226,29 @@ def test_mixed_parts_inherit_per_part(tmp_path: Path) -> None:
         zf.writestr("Metadata/model_settings.config", ms)
     with zipfile.ZipFile(proj) as zf:
         assert read_object_extruders(zf) == {"A": [2, 3], "B": [4], "C": [1]}
+
+
+A23_ROW = "2,3,1,1,50,0,g,w,m2,z0,xa0,xb0,d0,o0,u701,cm1,12"
+
+
+def test_pattern_tokens_one_and_two_are_the_rows_components(tmp_path: Path) -> None:
+    """Row a=2, b=3, tokens `12` print heads 2,3,2,3 — the pattern digits are not the heads."""
+    proj = project_3mf(tmp_path / "p.3mf", {"A": 5}, mixed=A23_ROW)
+    with zipfile.ZipFile(proj) as zf:
+        assert read_recipes(zf)[0] == {5: "23"}
+    good = gcode(tmp_path / "good.gcode", [{"A": 2 + i % 2} for i in range(6)])
+    assert check(str(proj), str(good)).failures == 0
+
+
+def test_pattern_tokens_read_as_heads_fail_teeth(tmp_path: Path) -> None:
+    """The old reading (digits = heads: 1,2) is what the printer does NOT do: it must FAIL."""
+    proj = project_3mf(tmp_path / "p.3mf", {"A": 5}, mixed=A23_ROW)
+    wrong = gcode(tmp_path / "wrong.gcode", [{"A": 1 + i % 2} for i in range(6)])
+    assert check(str(proj), str(wrong)).failures == 1
+
+
+def test_pattern_tokens_three_and_up_are_direct_heads() -> None:
+    from slicing.mix_pattern import decode_pattern
+
+    assert decode_pattern("431", 2, 3) == "432"
+    assert decode_pattern("1212", 1, 2) == "1212"
