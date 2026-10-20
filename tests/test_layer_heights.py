@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import random
 import zipfile
 from pathlib import Path
 
@@ -124,3 +125,49 @@ def test_write_profiles_3mf(tmp_path: Path) -> None:
     lh.write_profiles_3mf(bare, out, {1: [0, 0.1, 3, 0.1]})
     with zipfile.ZipFile(out) as z:
         assert z.namelist() == ["x.txt", lh.PROFILE_ENTRY]
+
+
+def _zone_excess(
+    prof: list[float], height: float, zones: list[tuple[float, float]], cap: float
+) -> float:
+    """Largest amount by which a non-first layer with its mid inside a zone exceeds cap (<= 0 when fine)."""
+    tops = lh.simulate_layers(prof, height)
+    th = lh.thicknesses(tops)
+    worst = -1.0
+    for z_lo, z_hi in zones:
+        for i in lh.layers_in_zone(tops, z_lo, z_hi):
+            if i > 0:
+                worst = max(worst, th[i] - cap)
+    return worst
+
+
+@pytest.mark.parametrize(
+    ("height", "zone", "base_h", "cap"),
+    [(20.0, (9.468, 16.375), 0.2, 0.16), (20.0, (6.919, 10.544), 0.32, 0.2)],
+)
+def test_cap_holds_at_zone_entry_for_regression_cases(
+    height: float, zone: tuple[float, float], base_h: float, cap: float
+) -> None:
+    prof = lh.cap_profile(height, [zone], cap=cap, base=[0, base_h, height, base_h])
+    assert _zone_excess(prof, height, [zone], cap) <= 1e-6
+    assert lh.check_profile(prof, height) is None
+    assert abs(lh.simulate_layers(prof, height)[-1] - height) <= 0.16
+
+
+def test_cap_holds_for_random_zones_and_caps() -> None:
+    rng = random.Random(116)
+    for _ in range(60):
+        height = rng.uniform(10.0, 18.0)
+        z_lo = rng.uniform(1.0, height - 6.0)
+        zone = (z_lo, z_lo + rng.uniform(1.0, 5.0))
+        cap = rng.choice([0.10, 0.12, 0.16, 0.2, 0.24, 0.3])
+        base_h = rng.choice([0.2, 0.32])
+        prof = lh.cap_profile(height, [zone], cap=cap, base=[0, base_h, height, base_h])
+        assert _zone_excess(prof, height, [zone], cap) <= 1e-6, (
+            height,
+            zone,
+            cap,
+            base_h,
+        )
+        assert lh.check_profile(prof, height) is None
+        assert abs(lh.simulate_layers(prof, height)[-1] - height) <= 0.16
