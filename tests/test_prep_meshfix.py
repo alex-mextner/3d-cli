@@ -10,7 +10,6 @@ import json
 import sys
 import types
 from collections.abc import Iterator
-from dataclasses import asdict
 
 import numpy as np
 import pytest
@@ -557,7 +556,7 @@ def test_external_unavailable_falls_back_to_builtin(
         repair(without_faces(cube(), [0]), backend="meshfix-lib")
 
 
-def test_external_backend_forwards_arrays_and_options_to_mesh_repair(
+def test_external_backend_forwards_the_arrays_and_no_builtin_options_to_mesh_repair(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     seen: dict[str, object] = {}
@@ -581,8 +580,7 @@ def test_external_backend_forwards_arrays_and_options_to_mesh_repair(
     assert ExternalBackend().available() is True
     r = repair(without_faces(cube(), [0]), options=opts)  # 'auto' picks it
     assert r.backend == "meshfix-lib"
-    assert seen["max_hole_edges"] == 50 and seen["ring"] == 3
-    assert {k: seen[k] for k in asdict(opts)} == asdict(opts)
+    assert "max_hole_edges" not in seen and "ring" not in seen  # the library's keyword set is its own
     assert seen["shapes"] == ((8, 3), (11, 3))
     assert r.mesh.vertices.dtype == np.float64 and r.mesh.faces.dtype == np.int64
     assert r.after.is_volume
