@@ -28,7 +28,8 @@ if TYPE_CHECKING:
     from slicing.mix_pattern import MixRules
     from slicing.mix_tester import LoadedSlot
 
-USAGE = """3d mix check FILE.3mf [--json]
+USAGE = """3d mix check FILE.3mf [--layer-cap MM] [--max-run-mm MM] [--json]
+3d mix profile FILE.3mf -o OUT.3mf [--layer-cap MM] [--min-layer MM] [--max-layer MM] [--json]
 3d mix gcode FILE.gcode [--project FILE.3mf] [--layer-cap MM] [--max-run-mm MM] [--json]
 3d mix pattern PATTERN [--layer MM | --heights MM,MM,...] [--layer-cap MM] [--max-run-mm MM] [--json]
 3d mix recipes --target HEX (--slots N=HEX,... | --printer NAME) [--count N] [--max-cycle N]
@@ -38,14 +39,27 @@ USAGE = """3d mix check FILE.3mf [--json]
                [--base-3mf FILE.3mf] [--printops-api URL] [--json]
   Colour mixing by layers (Snapmaker Orca mixed filaments, U1).
 
-  check FILE.3mf [--json]
-      Lint a project 3MF before slicing: every part whose filament is a mixed one (a manual
-      layer pattern or a Local-Z ratio row) must show its colour on walls. Per part, its
+  check FILE.3mf
+      Lint a project 3MF before slicing. Faces: every part whose filament is a mixed one (a
+      manual layer pattern or a Local-Z ratio row) must show its colour on walls. Per part, its
       faces in bed coordinates are summed by normal: top (within 30° of horizontal, looking
       up), side (within 30° of vertical), slope (the rest looking up). FAIL when the top area
       exceeds half the side area (a layer mix reads only on walls, a flat top shows one
       filament); WARN when the upward slopes exceed half the side area (terraces).
+      Layers: every mixed pattern passes the layer rules (see `pattern`), and the layers sliced
+      over each mixed part (the object's layer height profile, else layer_height) are at most
+      --layer-cap thick; an object profile Orca would drop (last z is not the object height) or
+      a prime tower over objects with different layer heights is a FAIL.
       Exit 1 on FAIL, 0 otherwise (WARN is printed), 2 when the file is not a project 3MF.
+
+  profile FILE.3mf -o OUT.3mf
+      Write OUT.3mf: the project with a variable layer height profile (Metadata/layer_heights_
+      profile.txt) that keeps the project's own layer height everywhere except over the mixed
+      parts, where layers are at most --layer-cap thick (the transition is smooth: neighbouring
+      layers differ by at most 20 %). Orca takes one profile per object and, with a prime tower,
+      needs the same on every object: with a tower and several objects make the parts one
+      multi-part object (error otherwise). Then re-checks OUT.3mf like `check`. The input is
+      never overwritten.
 
   gcode FILE.gcode
       Measure what a sliced G-code printed in every mixed object: the head of each layer and
@@ -94,6 +108,8 @@ USAGE = """3d mix check FILE.3mf [--json]
   --layer MM          layer height (default 0.12; a U1 system process: 0.08 0.12 0.16 0.2);
                       above --layer-cap no mix is possible (error), pure filaments still are
   --layer-cap MM      thickest layer allowed in a mixed region (default 0.12)
+  --min-layer MM      thinnest layer a profile may use (profile, default 0.08)
+  --max-layer MM      thickest layer a profile may use (profile, default 0.32)
   --max-run-mm MM     thickest band of one colour (default: --layer-cap = one layer). 0.24 lets a
                       majority colour double (GWG, KKW); a minor colour never may
   --height MM         swatch height (tester, default 6)
@@ -111,7 +127,9 @@ Examples:
   3d mix pattern GWG --max-run-mm 0.24
   3d mix pattern WGW --heights 0.12,0.08,0.12 --json
   3d mix check out/u1_tiles.3mf
-  3d mix check out/u1_tiles.3mf --json
+  3d mix check out/u1_tiles.3mf --layer-cap 0.16 --json
+  3d mix profile out/cat.3mf -o out/cat.capped.3mf
+  3d mix profile out/cat.3mf -o out/cat.capped.3mf --layer-cap 0.1 --min-layer 0.06
   3d mix recipes --target '#B5654F' --slots 1=#F6C700,3=#E8732A,4=#B0284F
   3d mix recipes --target '#B5654F' --printer u1 --max-cycle 4 --json
   3d mix tester --target '#B5654F' --printer u1 -o out/mix/terracotta
@@ -137,28 +155,23 @@ _FLAGS = {
 def _check(argv: list[str]) -> int:
     import json
 
+    from slicing import mix_project
     from slicing.mix_faces import FAIL, ProjectError, check, format_lines
 
-    as_json = "--json" in argv
-    pos = [a for a in argv if a != "--json"]
-    unknown = [a for a in pos if a.startswith("-")]
-    if unknown:
+    if not argv or argv[0].startswith("-"):
         raise UsageError(
-            f"unknown option {unknown[0]}",
-            command=_CMD,
-            remediation=["See `3d mix --help`."],
-        )
-    if len(pos) != 1:
-        raise UsageError(
-            f"check takes one project 3MF, got {len(pos)}",
+            "check takes the project 3MF first",
             command=_CMD,
             remediation=["3d mix check out/plate.3mf"],
         )
-    path = Path(pos[0])
+    path, rest = Path(argv[0]), argv[1:]
+    opts, as_json = _options(rest, {"--layer-cap", "--max-run-mm"})
+    rules = _rules(opts)
     if not path.is_file():
         raise InputNotFound(str(path), command=_CMD)
     try:
         report = check(str(path))
+        layers = mix_project.check(str(path), rules)
     except ProjectError as exc:
         raise UsageError(
             str(exc),
@@ -167,15 +180,103 @@ def _check(argv: list[str]) -> int:
                 "Pass the project .3mf saved by Snapmaker Orca / Orca (not an STL export)."
             ],
         ) from exc
+    failed = report.status == FAIL or layers.status == FAIL
+    status = FAIL if failed else report.status if report.parts else layers.status
     if as_json:
-        print(json.dumps(report.to_dict(), indent=2, ensure_ascii=False))
+        print(
+            json.dumps(
+                {
+                    **report.to_dict(),
+                    "status": status,
+                    "layers": layers.to_dict(),
+                },
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
     else:
-        print(f"mix check {path.name}: {report.status}")
-        for line in format_lines(report):
+        print(f"mix check {path.name}: {status}")
+        for line in format_lines(report) + mix_project.format_lines(layers):
             print(f"  {line}")
-    if report.status == FAIL:
+    if failed:
         raise GateFailure(
-            f"mix check: {report.failures} mixed part(s) with the visible face horizontal",
+            f"mix check: {report.failures} mixed part(s) with the visible face horizontal, "
+            f"{layers.failures} layer-rule finding(s)",
+            command=_CMD,
+            silent=True,
+        )
+    return 0
+
+
+def _profile(argv: list[str]) -> int:
+    from slicing import layer_heights, mix_project
+    from slicing.head_sequence import ProjectError
+
+    if not argv or argv[0].startswith("-"):
+        raise UsageError(
+            "profile takes the project 3MF first",
+            command=_CMD,
+            remediation=["3d mix profile out/plate.3mf -o out/plate.capped.3mf"],
+        )
+    src, rest = Path(argv[0]), argv[1:]
+    opts, as_json = _options(rest, {"-o", "--layer-cap", "--min-layer", "--max-layer"})
+    if "-o" not in opts:
+        raise UsageError("-o OUT.3mf is required (the input is never overwritten)", command=_CMD)
+    dst = Path(opts["-o"])
+    if dst.suffix.lower() != ".3mf":
+        raise UsageError(f"-o {dst}: the output must be a .3mf file", command=_CMD)
+    if not src.is_file():
+        raise InputNotFound(str(src), command=_CMD)
+    if dst.exists() and dst.samefile(src):
+        raise UsageError("-o must differ from the input: the input is never overwritten", command=_CMD)
+    rules = _rules(opts)
+    hmin = _number(opts, "--min-layer", layer_heights.HMIN_MM, 0.02, 0.4)
+    hmax = _number(opts, "--max-layer", layer_heights.HMAX_MM, 0.04, 0.8)
+    if not hmin <= rules.layer_cap_mm <= hmax:
+        raise UsageError(
+            f"--layer-cap {rules.layer_cap_mm:g} must lie between --min-layer {hmin:g} and --max-layer {hmax:g}",
+            command=_CMD,
+        )
+    try:
+        plans = mix_project.plan_profiles(
+            str(src), cap=rules.layer_cap_mm, hmin=hmin, hmax=hmax
+        )
+        layer_heights.write_profiles_3mf(
+            src, dst, {p.object_id: p.profile for p in plans}
+        )
+        after = mix_project.check(str(dst), rules)
+    except ProjectError as exc:
+        raise UsageError(str(exc), command=_CMD) from exc
+    objects = [
+        {
+            "object": p.object,
+            "object_id": p.object_id,
+            "height_mm": round(p.height, 3),
+            "mixed_zones_mm": [list(z) for z in p.zones],
+            "profile": p.profile,
+        }
+        for p in plans
+    ]
+    summary = {
+        "output": str(dst),
+        "layer_cap_mm": rules.layer_cap_mm,
+        "status": after.status,
+        "objects": objects,
+        "findings": [f.to_dict() for f in after.findings],
+    }
+    lines = [
+        f"mix profile: {src.name} -> {dst} (mixed layers capped at {rules.layer_cap_mm:g} mm)",
+        *(
+            f"  {p.object}: object {p.object_id}, {p.height:.1f} mm, mixed z "
+            + ", ".join(f"{lo:g}-{hi:g}" for lo, hi in p.zones)
+            for p in plans
+        ),
+        *(f"  {line}" for line in mix_project.format_lines(after)),
+    ]
+    _emit(summary, lines, as_json)
+    if after.status == "FAIL":
+        raise GateFailure(
+            f"mix profile: the written project still breaks the layer rules ({after.failures})",
             command=_CMD,
             silent=True,
         )
@@ -625,6 +726,8 @@ def run(argv: list[str]) -> int:
     sub, rest = argv[0], argv[1:]
     if sub == "check":
         return _check(rest)
+    if sub == "profile":
+        return _profile(rest)
     if sub == "gcode":
         return _gcode(rest)
     if sub == "pattern":
@@ -634,7 +737,7 @@ def run(argv: list[str]) -> int:
     if sub == "tester":
         return _tester(rest)
     raise InvalidArgument(
-        "subcommand", sub, ["check", "gcode", "pattern", "recipes", "tester"], command=_CMD
+        "subcommand", sub, ["check", "gcode", "pattern", "profile", "recipes", "tester"], command=_CMD
     )
 
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import zipfile
 from pathlib import Path
 
 from head_sequence_fixtures import gcode as head_gcode
@@ -166,3 +167,40 @@ def test_print_preflight_has_a_mix_layers_line(tmp_path: Path) -> None:
     assert checks["mix layers"]["status"] == "PASS", checks["mix layers"]
     assert bad.returncode == 1
     assert "mix layers" in bad.stdout and "layers 1-2" in bad.stdout
+
+
+def test_mix_check_and_profile_cap_the_layers_over_a_mixed_part(tmp_path: Path) -> None:
+    """A standing mixed tile at the process layer height 0.2 mm FAILs the layer cap; `mix profile`
+    writes a capped copy that passes and leaves the input alone."""
+    orca_project(
+        tmp_path / "thick.3mf", [tile("PTA", 5, standing=True)], settings={"layer_height": "0.2"}
+    )
+    before = (tmp_path / "thick.3mf").read_bytes()
+
+    bad = run_cli(tmp_path, "mix", "check", "thick.3mf")
+    made = run_cli(tmp_path, "mix", "profile", "thick.3mf", "-o", "capped.3mf")
+    good = run_cli(tmp_path, "mix", "check", "capped.3mf", "--json")
+
+    assert bad.returncode == 1, bad.stdout + bad.stderr
+    assert "FAIL layers PTA / PTA" in bad.stdout and "thicker than the 0.12 mm cap" in bad.stdout
+    assert made.returncode == 0, made.stdout + made.stderr
+    assert "mixed layers capped at 0.12 mm" in made.stdout
+    assert (tmp_path / "thick.3mf").read_bytes() == before
+    assert good.returncode == 0, good.stdout + good.stderr
+    layers = {f["scope"]: f for f in json.loads(good.stdout)["layers"]["findings"]}["layers"]
+    assert layers["status"] == "PASS" and "its layer height profile" in layers["detail"]
+    with zipfile.ZipFile(tmp_path / "capped.3mf") as zf:
+        assert zf.read("Metadata/layer_heights_profile.txt").decode().startswith("object_id=1000|")
+
+
+def test_mix_profile_refuses_what_orca_would_refuse_and_never_overwrites(tmp_path: Path) -> None:
+    orca_project(
+        tmp_path / "two.3mf",
+        [tile("PTA", 5, standing=True), tile("REF", 1, standing=True)],
+        settings={"enable_prime_tower": "1"},
+    )
+    two = run_cli(tmp_path, "mix", "profile", "two.3mf", "-o", "out.3mf")
+    same = run_cli(tmp_path, "mix", "profile", "two.3mf", "-o", "two.3mf")
+    assert two.returncode == 2 and "ONE multi-part object" in two.stderr
+    assert same.returncode == 2 and "never overwritten" in same.stderr
+    assert not (tmp_path / "out.3mf").exists()
