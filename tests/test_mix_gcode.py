@@ -172,7 +172,7 @@ def test_a_plain_colour_change_is_not_a_mix_without_a_project(tmp_path: Path) ->
         tmp_path / "p.gcode", [{"A": h} for h in [1] * 5 + [4] * 5], heights=[0.32] * 10
     )
     (r,) = check(str(g)).results
-    assert r.status == SKIP and "no alternation" in r.detail
+    assert r.status == SKIP and "solid colours" in r.detail
 
 
 def test_no_layer_z_is_a_skip_that_says_so(tmp_path: Path) -> None:
@@ -193,3 +193,43 @@ def test_preflight_shape(tmp_path: Path) -> None:
     assert preflight_check(str(good), str(broken))["status"] == SKIP
     with pytest.raises(ProjectError):
         check(str(good), str(broken))
+
+
+def test_stacked_solid_colour_bands_are_not_a_mix_without_a_project(tmp_path: Path) -> None:
+    """Four solid colours one above the other, 5 layers each at 0.2 mm: no alternation, nothing to FAIL."""
+    heads = [h for h in (1, 2, 3, 4) for _ in range(5)]
+    g = gcode(tmp_path / "bands.gcode", [{"A": h} for h in heads], heights=[0.2] * 20)
+    (r,) = check(str(g)).results
+    assert r.status == SKIP and "solid colours" in r.detail
+    assert preflight_check(str(g), None)["status"] == SKIP
+
+
+def test_a_solid_stretch_in_a_shared_head_between_two_mixed_regions_is_not_joined(tmp_path: Path) -> None:
+    """Object A = solid part in head 1 + mix 5 (heads 1/4). Two correct alternating regions with six solid
+    head-1 layers between them must not read as a six-layer run of head 1."""
+    proj = project_3mf(tmp_path / "p.3mf", {"A": [5, 1]})
+    zone = [[1, 4] if i % 2 == 0 else [1] for i in range(6)]
+    layers = [{"A": h} for h in (*zone, *([[1]] * 6), *zone)]
+    g = gcode(tmp_path / "p.gcode", layers, heights=[0.12] * len(layers))
+    (r,) = check(str(g), str(proj)).results
+    assert r.status == PASS, r.detail
+    assert "|" in r.sequence  # two segments, never one run across the solid block
+
+
+def test_a_by_object_print_restarts_z_without_crashing_or_inventing_thickness(tmp_path: Path) -> None:
+    """A sequential (by-object) G-code restarts Z for the second object: its layers are not measured."""
+    th = layer_thickness({0: 0.2, 1: 0.32, 2: 0.12, 3: 0.24})
+    assert {k: round(v, 3) for k, v in th.items()} == {0: 0.2, 1: 0.12, 3: 0.12}
+    proj = project_3mf(tmp_path / "p.3mf", {"A": 5, "B": 5})
+    lines = ["T1000"]
+    for z, a, b in [(0.12, 1, None), (0.24, 4, None), (0.36, 1, None), (0.12, None, 4), (0.24, None, 1), (0.36, None, 4)]:
+        lines += [";LAYER_CHANGE", f";Z:{z}"]
+        for name, head in (("A", a), ("B", b)):
+            if head is not None:
+                lines += [f"T{head - 1}", f"EXCLUDE_OBJECT_START NAME={name}_id_0_copy_0", "G1 X1 Y1 F3000",
+                          "G1 X10 Y10 E0.5", f"EXCLUDE_OBJECT_END NAME={name}_id_0_copy_0"]
+    g = tmp_path / "seq.gcode"
+    g.write_text("\n".join(lines) + "\n")
+    report = check(str(g), str(proj))
+    assert report.status in (PASS, SKIP)
+    assert preflight_check(str(g), str(proj))["status"] in (PASS, SKIP)

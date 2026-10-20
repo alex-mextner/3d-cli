@@ -161,12 +161,18 @@ def check(project_3mf: str, rules: MixRules = MixRules()) -> MixProjectReport:  
                 )
             )
             profile = None
-        tops = object_layers(height, profile, layer_h, first)
+        # an object's own layer_height / first layer override the project's (model_settings.config)
+        tops = object_layers(
+            height,
+            profile,
+            parts[0].layer_height or layer_h,
+            parts[0].first_layer or first,
+        )
         th = thicknesses(tops)
         source = (
             "its layer height profile"
             if profile is not None
-            else f"layer_height {layer_h:g} mm"
+            else f"layer_height {parts[0].layer_height or layer_h:g} mm"
         )
         for p in parts:
             idx = [i for i in layers_in_zone(tops, p.z_lo, p.z_hi) if i > 0]
@@ -308,7 +314,8 @@ def plan_profiles(
     out = []
     for oid, parts in by_object.items():
         height = parts[0].object_height
-        base = profiles.get(oid) or [0.0, layer_h, height, layer_h]
+        own_h = parts[0].layer_height or layer_h
+        base = profiles.get(oid) or [0.0, own_h, height, own_h]
         zones = sorted({(round(p.z_lo, 4), round(p.z_hi, 4)) for p in parts})
         out.append(
             ObjectPlan(

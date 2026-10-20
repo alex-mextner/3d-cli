@@ -254,3 +254,7 @@ def test_mix_profile_refuses_what_orca_would_refuse_and_never_overwrites(
     assert two.returncode == 2 and "ONE multi-part object" in two.stderr
     assert same.returncode == 2 and "never overwritten" in same.stderr
     assert not (tmp_path / "out.3mf").exists()
+    orca_project(tmp_path / "one.3mf", [tile("PTA", 5, standing=True)])
+    nodir = run_cli(tmp_path, "mix", "profile", "one.3mf", "-o", "missing/dir/out.3mf")
+    assert nodir.returncode == 2
+    assert "cannot write" in nodir.stderr and "Traceback" not in nodir.stderr
