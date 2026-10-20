@@ -26,6 +26,8 @@ viz = ["pyvista>=0.43"]
 web = ["fastapi>=0.110", "uvicorn>=0.27", "markdown>=3.5"]
 # Insert/socket section distances (`3d fit-check`).
 fit = ["shapely>=2.0"]
+# `3d prep`: proof-pack renders (pillow) and voxel -> mesh surfaces for the adaptation operators (scikit-image).
+prep = ["pillow>=10.0", "scikit-image>=0.22", "shapely>=2.0"]
 # Camera failure detection (`3d printer vision`): onnxruntime runs the downloaded detector on the CPU.
 vision = ["onnxruntime>=1.17", "opencv-python-headless>=4.8"]
 # Test gate (`dev run test`): pytest + mypy (+ web deps/httpx for the web TestClient), yamllint
