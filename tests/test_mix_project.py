@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from mix_fixtures import orca_project, tile
+from mix_fixtures import Obj, Part, box, orca_project, tile
 
 from slicing import layer_heights as lh
 from slicing.head_sequence import ProjectError
@@ -197,3 +197,35 @@ def test_plan_profiles_refuses_what_orca_cannot_slice(tmp_path: Path) -> None:
     none = orca_project(tmp_path / "none.3mf", [tile("REF", 1)])
     with pytest.raises(ProjectError, match="nothing to cap"):
         plan_profiles(str(none), cap=0.12, hmin=0.08, hmax=0.32)
+
+
+def test_an_objects_own_layer_height_overrides_the_projects(tmp_path: Path) -> None:
+    """Orca slices an object with a layer_height of its own at that height: 0.28 mm here, whatever the
+    project says (0.12 mm), and the other way round."""
+    thick = tile("PTA", 5, standing=True)
+    thick.settings = {"layer_height": "0.28"}
+    report = check(str(project(tmp_path, objects=[thick], settings={"layer_height": "0.12"})))
+    (layers,) = by_scope(report, "layers")
+    assert layers.status == FAIL and "0.280 mm" in layers.detail
+    thin = tile("PTA", 5, standing=True)
+    thin.settings = {"layer_height": "0.1"}
+    ok = check(str(project(tmp_path, "thin.3mf", objects=[thin], settings={"layer_height": "0.32"})))
+    assert [f.status for f in by_scope(ok, "layers")] == [PASS]
+
+
+def test_blockers_and_modifiers_do_not_make_the_object_taller(tmp_path: Path) -> None:
+    """The profile's last z must be the height of the MODEL parts: a tall support blocker or modifier
+    in the object does not count (Orca would drop a profile that ends at the wrong z)."""
+    obj = Obj(
+        "PTA",
+        [
+            Part("body", box(20, 3, 20), 5, offset=(0.0, 0.0, 10.0)),
+            Part("blocker", box(5, 5, 60), 1, offset=(0.0, 0.0, 30.0), subtype="support_blocker"),
+            Part("mod", box(5, 5, 50), 1, offset=(0.0, 0.0, 25.0), subtype="modifier_part"),
+        ],
+        extruder=5,
+    )
+    (plan,) = plan_profiles(str(project(tmp_path, objects=[obj])), cap=0.12, hmin=0.08, hmax=0.32)
+    assert plan.height == pytest.approx(20.0)
+    assert plan.profile[-2] == pytest.approx(20.0)
+    assert plan.zones == [(0.0, 20.0)]

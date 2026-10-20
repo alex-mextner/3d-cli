@@ -45,6 +45,7 @@ _UNITS = {
     "meter": 1000.0,
 }
 _MAX_DEPTH = 16
+_NOT_PRINTED = ("negative_part", "support_blocker", "support_enforcer")
 
 # row-major 3x4: r00 r01 r02 tx r10 r11 r12 ty r20 r21 r22 tz
 Matrix = tuple[float, ...]
@@ -70,6 +71,8 @@ class PartFaces:
     object_height: float = 0.0  # mm, of the whole object (all its parts)
     z_lo: float = 0.0  # mm above the object's lowest point
     z_hi: float = 0.0
+    layer_height: float = 0.0  # the object's own layer height override (0 = the project's)
+    first_layer: float = 0.0  # the object's own first layer override (0 = the project's)
 
     def to_dict(self) -> dict[str, builtins.object]:
         return {
@@ -138,6 +141,9 @@ class _ObjectSettings:
     name: str
     extruder: int
     parts: dict[str, tuple[str, int]]  # part id -> (name, extruder; 0 = the object's)
+    subtypes: dict[str, str] = field(default_factory=dict)  # part id -> Orca part subtype
+    layer_height: float = 0.0  # the object's own layer_height override; 0 = the project's
+    first_layer: float = 0.0  # the object's own initial_layer_print_height; 0 = the project's
 
 
 def _extruder(el: ET.Element) -> int:
@@ -146,8 +152,18 @@ def _extruder(el: ET.Element) -> int:
     return int(raw) if raw.strip().isdigit() else 0
 
 
+def _metadata_number(el: ET.Element, key: str) -> float:
+    e = el.find(f"metadata[@key='{key}']")
+    try:
+        v = float(e.get("value", "0")) if e is not None else 0.0
+    except ValueError:
+        return 0.0
+    return v if math.isfinite(v) and v > 0 else 0.0
+
+
 def read_settings(zf: zipfile.ZipFile) -> dict[str, _ObjectSettings]:
-    """model_settings.config: object id -> name, extruder and its parts' extruders."""
+    """model_settings.config: object id -> name, extruder, its parts' extruders and subtypes, and
+    the object's own layer height overrides."""
     root = ET.fromstring(zf.read("Metadata/model_settings.config"))
     out: dict[str, _ObjectSettings] = {}
     for obj in root.findall("object"):
@@ -158,13 +174,22 @@ def read_settings(zf: zipfile.ZipFile) -> dict[str, _ObjectSettings]:
             else f"object {obj.get('id')}"
         )
         parts: dict[str, tuple[str, int]] = {}
+        subtypes: dict[str, str] = {}
         for part in obj.findall("part"):
             pn = part.find("metadata[@key='name']")
             parts[part.get("id", "")] = (
                 pn.get("value", "") if pn is not None else "",
                 _extruder(part),
             )
-        out[obj.get("id", "")] = _ObjectSettings(name, _extruder(obj) or 1, parts)
+            subtypes[part.get("id", "")] = part.get("subtype", "normal_part")
+        out[obj.get("id", "")] = _ObjectSettings(
+            name,
+            _extruder(obj) or 1,
+            parts,
+            subtypes,
+            _metadata_number(obj, "layer_height"),
+            _metadata_number(obj, "initial_layer_print_height"),
+        )
     return out
 
 
@@ -362,9 +387,13 @@ def _parts(
         for vpart, vid, vm in volumes:
             pname, pex = st.parts.get(vid, ("", 0))
             ex = pex or st.extruder
+            subtype = st.subtypes.get(vid, "normal_part")
+            if subtype in _NOT_PRINTED:
+                continue  # negative parts and support blockers/enforcers add no material
             acc = _Areas()
             model.areas(vpart, vid, vm, acc)
-            if acc.triangles:
+            if acc.triangles and subtype == "normal_part":
+                # a modifier shapes settings inside the object, it does not make it taller
                 z_lo, z_hi = min(z_lo, acc.z_min), max(z_hi, acc.z_max)
             if ex not in recipes:
                 continue
@@ -381,6 +410,8 @@ def _parts(
                 acc.side,
                 acc.slope,
                 object_id=position,
+                layer_height=st.layer_height,
+                first_layer=st.first_layer,
             )
             pf.status, pf.detail = classify(acc.top, acc.side, acc.slope)
             mixed.append((pf, acc))

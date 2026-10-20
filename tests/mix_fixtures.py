@@ -136,6 +136,7 @@ class Part:
     extruder: int  # 0 = inherit the object's
     rot: Rot = IDENTITY
     offset: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    subtype: str = "normal_part"  # Orca part subtype: modifier_part, support_blocker, …
 
 
 @dataclass
@@ -186,7 +187,7 @@ def orca_project(
                 f'<component p:path="/{sub}" objectid="{pid}" transform="{transform(part.rot, part.offset)}"/>'
             )
             parts_xml.append(
-                f'<part id="{pid}" subtype="normal_part"><metadata key="name" value="{part.name}"/>'
+                f'<part id="{pid}" subtype="{part.subtype}"><metadata key="name" value="{part.name}"/>'
                 f'<metadata key="extruder" value="{part.extruder}"/></part>'
             )
             pid += 1

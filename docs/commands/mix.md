@@ -192,10 +192,14 @@ With `--project FILE.3mf` the mixed rows say which heads each object's mix uses,
 which colour is the additional one. The mix head of a layer is the head printed on it that the object's
 solid parts do not use, or the mix's own head when only shared heads printed; the check covers the layers
 from the first to the last one on which a mix-only head printed, so a mix part that shares a head with
-the solid colour of its object is never guessed at its edges (a missed edge layer, not a false FAIL). A
-mix whose every head is also a solid head is SKIP and says so, as is a Local-Z ratio row. Without a
-project only objects that print exactly one head per layer and alternate are measured — the stretch
-between the first and the last head change; a plain colour change is not a mix.
+the solid colour of its object is never guessed at its edges (a missed edge layer, not a false FAIL);
+a stretch of shared-head-only layers longer than the recipe itself prints in a shared head is solid colour
+between two mixed regions and ends the measured stretch. A mix whose every head is also a solid head is
+SKIP and says so, as is a Local-Z ratio row. Layers whose Z does not rise (a by-object print restarts Z for
+every object) or has no `;Z:` comment have no measurable thickness and are left out. Without a project only
+objects that print exactly one head per layer are measured, and only where they alternate: stretches of at
+least five consecutive runs of at most three layers each, minus the first and last run of the stretch.
+Solid colour bands, however many are stacked, are never measured.
 
 `3d print-preflight` runs the same check as its `mix layers` line (project 3MF: as for `head seq`).
 `--layer-cap`/`--max-run-mm` apply to `3d mix gcode`; the preflight line uses the defaults.

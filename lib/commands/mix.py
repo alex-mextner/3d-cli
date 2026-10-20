@@ -69,7 +69,7 @@ USAGE = """3d mix check FILE.3mf [--layer-cap MM] [--max-run-mm MM] [--json]
       or when a mixed layer is thicker than --layer-cap (the first layer is exempt; raft layers
       are skipped). --project FILE.3mf (the plate project the G-code was sliced from) says which
       heads each object's mix uses; without it only objects that print one head per layer and
-      alternate are measured (the stretch between the first and last head change). Also the
+      alternate are measured (stretches of short alternating runs). Also the
       `mix layers` line of `3d print-preflight`.
 
   pattern PATTERN
@@ -247,6 +247,14 @@ def _profile(argv: list[str]) -> int:
         after = mix_project.check(str(dst), rules)
     except ProjectError as exc:
         raise UsageError(str(exc), command=_CMD) from exc
+    except OSError as exc:
+        raise UsageError(
+            f"cannot write {dst}: {exc.strerror or exc}",
+            command=_CMD,
+            remediation=["Create the output directory first, or pick a writable -o path."],
+        ) from exc
+    except ValueError as exc:  # a mixed part Orca cannot cap (an empty z range, a cap below the thinnest layer)
+        raise UsageError(f"cannot cap the layers of {src.name}: {exc}", command=_CMD) from exc
     objects = [
         {
             "object": p.object,

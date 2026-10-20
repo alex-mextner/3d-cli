@@ -14,9 +14,9 @@ WHAT: for every object printed in a mixed filament, reads which head printed it 
   which a head used ONLY by the mix printed: a mix part that shares a head with the solid colour
   of its object cannot be told from it outside that window, so the edge layers go unchecked
   rather than guessed (a missed edge layer, never a false FAIL).
-  Without a project, only objects that print exactly one head per layer and alternate (a run
-  between two head changes) are measured: the runs inside the alternation, never the first or
-  last run (those may be solid colour).
+  Without a project, only objects that print exactly one head per layer are measured, and only
+  where they alternate: stretches of at least five consecutive runs of at most three layers each,
+  minus the first and last run of the stretch (solid colour regions are long runs, never measured).
 WHY: a recipe that passes the validator can still print wrong — the slicer indexes the pattern by
   layer number, the wrap-around of GWG is GWGGWG, a variable layer height thickens a stripe.
   Only the G-code says what was printed (2026-10-20, Chekhov on the U1: "the additional colour
@@ -105,11 +105,19 @@ class MixGcodeReport:
 
 
 def layer_thickness(layer_z: dict[int, float]) -> dict[int, float]:
-    """Layer index -> thickness: the Z step from the layer below (the first layer: its own Z)."""
+    """Layer index -> thickness: the Z step from the layer below (the first layer: its own Z).
+    A layer whose predecessor has no Z, or whose Z does not rise (a by-object print restarts Z for
+    every object), has no measurable thickness and is left out: it ends a stretch of layers."""
     out: dict[int, float] = {}
     for k in sorted(layer_z):
+        z = layer_z[k]
+        if k == 0:
+            if z > 0:
+                out[k] = z
+            continue
         below = layer_z.get(k - 1)
-        out[k] = layer_z[k] - (below if below is not None else 0.0)
+        if below is not None and z > below:
+            out[k] = z - below
     return out
 
 
@@ -270,11 +278,15 @@ def _without_project(
             )
             continue
         seq = {k: next(iter(layers[k])) for k in ks}
-        inner = _interior(seq)
+        inner = _alternating(seq)
         if inner is None:
             out.append(
                 MixLayers(
-                    name, 0, "", SKIP, "no alternation (one colour change at most)"
+                    name,
+                    0,
+                    "",
+                    SKIP,
+                    "no stretch of short alternating runs: solid colours, or pass the project 3MF",
                 )
             )
             continue
@@ -282,16 +294,41 @@ def _without_project(
     return out
 
 
-def _interior(seq: dict[int, int]) -> dict[int, int] | None:
-    """The layers between the first and the last head change — the alternating stretch. A solid
-    first/last colour is a run touching the edge of the object, so it is cut off; a stretch with
-    fewer than two changes is a colour change, not a mix."""
-    ks = sorted(seq)
-    changes = [k for a, k in zip(ks, ks[1:], strict=False) if seq[a] != seq[k]]
-    if len(changes) < 2:
-        return None
-    first, last = changes[0], changes[-1]
-    return {k: seq[k] for k in ks if first <= k < last}
+_MIX_RUN_LAYERS = 3  # a mix alternates in runs this short; a longer run is a solid colour region
+_MIN_ALTERNATING_RUNS = 5  # three interior runs after the edge runs are cut off
+
+
+def _alternating(seq: dict[int, int]) -> dict[int, int] | None:
+    """Without a project: the layers where the object plausibly prints a mix — stretches of at least
+    `_MIN_ALTERNATING_RUNS` consecutive runs of the same head, none longer than `_MIX_RUN_LAYERS`
+    layers, minus the first and last run of each stretch (they may be solid colour). Solid colour
+    bands stacked on one another (a run of 5 layers, then another colour) never qualify."""
+    runs: list[tuple[int, list[int]]] = []
+    for k in sorted(seq):
+        if runs and runs[-1][0] == seq[k] and runs[-1][1][-1] == k - 1:
+            runs[-1][1].append(k)
+        else:
+            runs.append((seq[k], [k]))
+    out: dict[int, int] = {}
+    stretch: list[tuple[int, list[int]]] = []
+
+    def flush() -> None:
+        if len(stretch) >= _MIN_ALTERNATING_RUNS:
+            for head, ks in stretch[1:-1]:
+                out.update(dict.fromkeys(ks, head))
+        stretch.clear()
+
+    for head, ks in runs:
+        short = len(ks) <= _MIX_RUN_LAYERS
+        contiguous = not stretch or stretch[-1][1][-1] == ks[0] - 1
+        if short and contiguous:
+            stretch.append((head, ks))
+            continue
+        flush()
+        if short:
+            stretch.append((head, ks))
+    flush()
+    return out or None
 
 
 def _with_project(
@@ -339,7 +376,9 @@ def _with_project(
                     )
                 )
                 continue
-            seq = _mix_heads(layers, ks, own, only)
+            seq = _mix_heads(
+                layers, ks, own, only, _shared_run(recipe, own & others)
+            )
             if not seq:
                 out.append(
                     MixLayers(
@@ -351,28 +390,58 @@ def _with_project(
     return out
 
 
+def _shared_run(recipe: str, shared: set[int]) -> int:
+    """The longest stretch of consecutive layers of the (repeating) recipe printed in a head that
+    the object's solid parts also use: so long a run of shared-head-only layers can still be the
+    mix; a longer one is solid colour between two mixed regions."""
+    flags = [int(d) in shared for d in recipe]
+    if all(flags):
+        return len(flags)
+    best = run = 0
+    for f in flags + flags:  # the cycle repeats
+        run = run + 1 if f else 0
+        best = max(best, run)
+    return min(best, len(flags))
+
+
 def _mix_heads(
-    layers: dict[int, set[int]], ks: list[int], own: set[int], only: set[int]
+    layers: dict[int, set[int]],
+    ks: list[int],
+    own: set[int],
+    only: set[int],
+    shared_run: int,
 ) -> dict[int, int]:
     """{layer: head the mix printed} from the first to the last layer a mix-only head appears on.
-    On a layer where only shared heads printed, the mix's own head among them. A layer where
-    the mix's head cannot be told (none of its heads, or two mix-only heads at once) is left
-    out: it ends a segment (see `_segments`)."""
+    On a layer where only shared heads printed, the mix's own head among them — unless more than
+    `shared_run` such layers follow one another: that is solid colour between two mixed regions,
+    and its layers are left out. A layer where the mix's head cannot be told (none of its heads,
+    or two mix-only heads at once) is left out too: it ends a segment (see `_segments`)."""
     hit = [k for k in ks if layers[k] & only]
     if not hit:
         return {}
     lo, hi = hit[0], hit[-1]
     seq: dict[int, int] = {}
+    pending: dict[int, int] = {}  # shared-head-only layers since the last mix-only layer
+
+    def settle() -> None:
+        if len(pending) <= shared_run:
+            seq.update(pending)
+        pending.clear()
+
     for k in ks:
         if not lo <= k <= hi:
             continue
         exclusive = layers[k] & only
+        mine = layers[k] & own
+        if not exclusive and len(mine) == 1:
+            if pending and k - 1 not in pending:
+                settle()
+            pending[k] = next(iter(mine))
+            continue
+        settle()
         if len(exclusive) == 1:
             seq[k] = next(iter(exclusive))
-            continue
-        mine = layers[k] & own
-        if len(mine) == 1 and not exclusive:
-            seq[k] = next(iter(mine))
+    settle()
     return seq
 
 
@@ -393,7 +462,7 @@ def preflight_check(
     """print-preflight entry: {status PASS/FAIL/SKIP, detail, lines}."""
     try:
         report = check(gcode, project_3mf, rules)
-    except ProjectError as exc:
+    except (ProjectError, ValueError) as exc:
         return {"status": SKIP, "detail": str(exc), "lines": []}
     measured = [r for r in report.results if r.status in (PASS, FAIL)]
     lines = [
