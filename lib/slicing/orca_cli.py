@@ -38,7 +38,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
-from errors import MissingDependency
+from errors import MissingDependency, ThreeDError
 from prep.contracts import Verdict
 from slicing import slice_warnings
 
@@ -794,7 +794,7 @@ def reference_project_settings(
     the flattened vendor presets go through `--load-settings` / `--load-filaments` and a probe model is
     exported as a project, whose settings are returned (quirk `inherits-one-level`).
 
-    Raises `MissingDependency` when a named preset is not in `presets`, `RuntimeError` when the CLI wrote
+    Raises `MissingDependency` when a named preset is not in `presets`, `ThreeDError` when the CLI wrote
     no project."""
     wanted = [
         ("machine", machine),
@@ -849,13 +849,22 @@ def reference_project_settings(
         out = tmp / "probe.3mf"
         if not out.exists():
             why = "timed out" if timed_out else f"exit {returncode}"
-            raise RuntimeError(
-                f"the Orca CLI wrote no reference project ({why}):\n{log[-2000:]}"
+            if "libOpenGL" in log or "libGLU" in log:
+                raise MissingDependency(
+                    "host OpenGL runtime libraries (libOpenGL.so.0, libGLU)",
+                    install="sudo apt-get install libopengl0 libglu1-mesa; on a box without sudo point ORCA at a wrapper that sets LD_LIBRARY_PATH (e.g. ORCA=~/.local/bin/snapmaker-orca)",
+                    degrades="headless slicing and project_settings generation",
+                    command="prep",
+                )
+            raise ThreeDError(
+                f"the Orca CLI wrote no reference project ({why})",
+                command="prep",
+                remediation=[log[-1500:].strip() or "no output"],
             )
         with zipfile.ZipFile(out) as z:
             cfg = json.loads(z.read("Metadata/project_settings.config"))
     if not isinstance(cfg, dict):
-        raise RuntimeError(
-            "the Orca CLI's project_settings.config is not a JSON object"
+        raise ThreeDError(
+            "the Orca CLI's project_settings.config is not a JSON object", command="prep"
         )
     return cfg
