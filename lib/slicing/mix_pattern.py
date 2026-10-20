@@ -115,7 +115,9 @@ class MixReport:
         }
 
 
-def _runs(colours: Sequence[str], thickness: Sequence[float], cyclic: bool) -> list[Run]:
+def _runs(
+    colours: Sequence[str], thickness: Sequence[float], cyclic: bool
+) -> list[Run]:
     runs: list[Run] = []
     for i, (c, t) in enumerate(zip(colours, thickness, strict=True)):
         if runs and runs[-1].colour == c:
@@ -126,7 +128,12 @@ def _runs(colours: Sequence[str], thickness: Sequence[float], cyclic: bool) -> l
     if cyclic and len(runs) > 1 and runs[0].colour == runs[-1].colour:
         head, tail = runs[0], runs[-1]
         runs = [
-            Run(tail.colour, tail.first, tail.layers + head.layers, tail.thickness_mm + head.thickness_mm),
+            Run(
+                tail.colour,
+                tail.first,
+                tail.layers + head.layers,
+                tail.thickness_mm + head.thickness_mm,
+            ),
             *runs[1:-1],
         ]
     return runs
@@ -228,11 +235,17 @@ def analyse(
     )
 
 
+def _span(first: int, last: int) -> str:
+    return f"layer {first}" if first == last else f"layers {first}-{last}"
+
+
 def _where(run: Run, n: int) -> str:
     last = run.first + run.layers - 1
     if last >= n:  # wrapped run of a cyclic pattern
-        return f"layers {run.first}-{n - 1} and 0-{last - n} across the repeat seam"
-    return f"layers {run.first}-{last}"
+        return (
+            f"{_span(run.first, n - 1)} and {_span(0, last - n)} across the repeat seam"
+        )
+    return _span(run.first, last)
 
 
 def analyse_pattern(
@@ -283,7 +296,9 @@ def parse_row(row: str) -> MixedRow:
     first two fields are not filament numbers."""
     fields = [f.strip() for f in row.split(",")]
     if len(fields) < 2 or not (fields[0].isdigit() and fields[1].isdigit()):
-        raise ValueError(f"mixed filament row {row!r} must start with two filament numbers")
+        raise ValueError(
+            f"mixed filament row {row!r} must start with two filament numbers"
+        )
     last = fields[-1]
     pattern = last if len(fields) > 2 and last.isdigit() and last.isascii() else ""
     return MixedRow(int(fields[0]), int(fields[1]), pattern)

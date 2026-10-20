@@ -13,7 +13,8 @@ from printops.color import hex_from_linear, linear_rgb, linear_to_lab, srgb_to_l
 from printops.mix_key import canonical
 from slicing.head_sequence import read_object_extruders, read_recipes
 from slicing.mix_faces import check
-from slicing.mix_model import Slot, mix, pick, rank
+from slicing.mix_model import MixModelError, Slot, mix, pattern, pick, rank
+from slicing.mix_pattern import MixRules, analyse_pattern
 from slicing.mix_tester import (
     LoadedSlot,
     MixTesterError,
@@ -65,12 +66,40 @@ def test_stripes_mix_in_linear_light() -> None:
     assert mix(["#000000", "#FFFFFF"], [2, 1]) == "#9C9C9C"
 
 
-def test_black_and_white_grey_ranks_a_short_two_filament_cycle_first() -> None:
-    """#808080 is 22 % white in linear light: of the cycles up to 3 layers the 2:1 one is
-    closest (the 1:1 cycle shows #BCBCBC, ΔE ~20); it is a short black/white cycle."""
-    best = rank("#808080", BW, max_cycle=3)[0]
+def test_black_and_white_grey_ranks_the_one_to_one_cycle_under_the_default_rules() -> None:
+    """#808080 is 22 % white in linear light, closest to the 2:1 cycle `141` — which repeats as
+    1411 41: black on two layers in a row, a double-thick band. The default rules reject it, so
+    the best that remains is the 1:1 cycle (#BCBCBC, ΔE ~20)."""
+    ranked = rank("#808080", BW, max_cycle=3)
+    assert ranked[0].pattern in ("14", "41") and ranked[0].weights == (1, 1)
+    assert "141" not in {c.pattern for c in ranked}
+    assert all(analyse_pattern(c.pattern, 0.12).ok for c in ranked)
+
+
+def test_a_majority_colour_may_double_when_the_run_limit_allows_it() -> None:
+    best = rank("#808080", BW, max_cycle=3, rules=MixRules(max_run_mm=0.24))[0]
     assert best.pattern == "141" and best.weights == (2, 1)
     assert best.delta_e < 10
+
+
+def test_no_ranked_mix_prints_a_colour_on_adjacent_layers_by_default() -> None:
+    slots = [Slot(s.slot, s.hex) for s in U1]
+    for c in rank("#B5654F", slots, max_cycle=6):
+        if c.cycle > 1:
+            assert not any(a == b for a, b in zip(c.pattern, c.pattern[-1:] + c.pattern[:-1], strict=True)), c.pattern
+
+
+def test_a_layer_above_the_mix_cap_is_an_error_not_a_silent_empty_list() -> None:
+    with pytest.raises(MixModelError, match="0.12 mm cap"):
+        rank("#808080", BW, max_cycle=3, layer_h=0.2)
+    assert sorted(c.pattern for c in rank("#808080", BW, max_cycle=1, layer_h=0.2)) == ["1", "4"]
+    assert rank("#808080", BW, max_cycle=3, layer_h=0.2, rules=MixRules(layer_cap_mm=0.2))
+
+
+def test_arrangement_avoids_equal_seam_neighbours_where_it_can() -> None:
+    assert pattern([1, 2, 3], [2, 1, 1]) == "1213"  # spread order would give 1231 -> 11 at the seam
+    assert pattern([4, 2], [2, 1]) == "424"  # a share above half: the GWG case stays, the rules reject it
+    assert pattern([1, 4], [1, 1]) == "14"
 
 
 def test_max_cycle_bounds_every_candidate_and_ranking_is_deterministic() -> None:
