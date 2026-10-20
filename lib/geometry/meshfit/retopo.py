@@ -53,10 +53,12 @@ def remesh(V: Array, F: IntArray, params: Mapping[str, Any]) -> Result:
             "mean_edge_after": meshmath.mean_edge_length(V2, F2),
         }
         return V2, F2, info, True
-    if engine == "pymeshlab":
-        V2, F2 = _pymeshlab_remesh(V, F, params, target)
+    if engine in ("pymeshlab", "botsch"):
+        V2, F2 = (_pymeshlab_remesh if engine == "pymeshlab" else _botsch_remesh)(
+            V, F, params, target
+        )
         info = {
-            "engine": "pymeshlab",
+            "engine": engine,
             "faces_before": len(F),
             "faces_after": len(F2),
             "mean_edge_before": before,
@@ -64,9 +66,34 @@ def remesh(V: Array, F: IntArray, params: Mapping[str, Any]) -> Result:
         }
         return V2, F2, info, False
     raise UsageError(
-        f"remesh: engine must be refine or pymeshlab, got {engine!r}",
+        f"remesh: engine must be refine, botsch or pymeshlab, got {engine!r}",
         command="mesh deform",
     )
+
+
+def _botsch_remesh(
+    V: Array, F: IntArray, params: Mapping[str, Any], target: float
+) -> tuple[Array, IntArray]:
+    """Botsch & Kobbelt isotropic remeshing (gpytoolbox, MIT): best triangle quality in the research benchmark."""
+    try:
+        import gpytoolbox
+    except ImportError as err:
+        raise MissingDependency(
+            "gpytoolbox",
+            install="pip install gpytoolbox   (MIT; pulls scikit-image and scs)",
+            degrades="remesh engine botsch (the built-in `refine` engine still works)",
+            command="mesh deform",
+        ) from err
+    V2, F2 = gpytoolbox.remesh_botsch(
+        V,
+        F.astype(np.int32),
+        i=int(params.get("iterations", 10)),
+        h=target,
+        project=True,
+        detect_feature_edges=bool(params.get("feature_deg")),
+        feature_dihedral_threshold=float(params.get("feature_deg", 45.0)),
+    )
+    return np.asarray(V2, dtype=np.float64), np.asarray(F2, dtype=np.int64)
 
 
 def _pymeshlab_remesh(
@@ -106,7 +133,9 @@ def _pymeshlab_remesh(
 
 
 def decimate(V: Array, F: IntArray, params: Mapping[str, Any]) -> Result:
-    engine = str(params.get("engine", "manifold3d"))
+    engine = str(
+        params.get("engine", "quadric" if "target_faces" in params else "manifold3d")
+    )
     if engine == "manifold3d":
         tol = float(params.get("tolerance", 0.01))
         try:

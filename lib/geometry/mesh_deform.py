@@ -22,6 +22,16 @@ import sys
 import time
 from typing import Any
 
+# Threaded BLAS changes the bits of large dense products (research note §5); pin it before numpy loads.
+# Sparse solves, stacked 3x3 SVDs and np.bincount reductions are single-thread deterministic anyway.
+for _var in (
+    "OPENBLAS_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "VECLIB_MAXIMUM_THREADS",
+    "BLIS_NUM_THREADS",
+):
+    os.environ[_var] = "1"
+
 _LIB = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _LIB not in sys.path:
     sys.path.insert(0, _LIB)
@@ -161,8 +171,9 @@ def _print_summary(
     )
     si = report.get("self_intersections")
     if si:
+        before, after = si["before"], si["after"]
         print(
-            f"  self-intersections: before {si['before'].get('count', si['before'].get('self_intersecting'))}, after {si['after'].get('count', si['after'].get('self_intersecting'))} ({si['after'].get('engine') or 'unavailable'})"
+            f"  self-intersections ({after['engine']}, {after['unit']}): before {before['count']}, after {after['count']}"
         )
     det = report["determinism"]
     if det["verified"]:
