@@ -1,4 +1,5 @@
 """Teeth tests for the layer-pattern rules (slicing.mix_pattern): every rule must be able to fail."""
+
 from __future__ import annotations
 
 import pytest
@@ -46,7 +47,9 @@ def test_gwg_passes_when_the_majority_base_may_double() -> None:
 
 def test_minor_on_adjacent_layers_always_fails() -> None:
     # W is the minor colour (1 of 4) and sits on two layers in a row — not relaxable by max_run_mm
-    report = analyse_pattern("WWGGG", 0.12, MixRules(max_run_mm=10.0))  # W = 2/5 minor, adjacent
+    report = analyse_pattern(
+        "WWGGG", 0.12, MixRules(max_run_mm=10.0)
+    )  # W = 2/5 minor, adjacent
     assert rules_of(report) == {MINOR_ADJACENT}
     assert report.minor == ("W",)
 
@@ -108,7 +111,12 @@ def test_rules_reject_nonsense() -> None:
 
 def test_row_decoding() -> None:
     row = parse_row("2,3,1,1,50,0,g,w,m2,z0,xa0,xb0,d0,o0,u701,cm1,12")
-    assert (row.component_a, row.component_b, row.pattern, row.slots) == (2, 3, "12", "23")
+    assert (row.component_a, row.component_b, row.pattern, row.slots) == (
+        2,
+        3,
+        "12",
+        "23",
+    )
     assert parse_row("1,4,1,0,25,0,g,w,m2,z0,xa0,xb0,d0,o0,u702,cm0").pattern == ""
     assert decode_pattern("4312", 2, 3) == "4323"
     with pytest.raises(ValueError):
