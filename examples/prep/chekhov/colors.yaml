@@ -1,0 +1,29 @@
+# Chekhov (DnHart13 cat phone stand) on a Snapmaker U1 loaded black / white / red / dark green.
+# Boxes are in the print frame (Z up, base on Z=0, XY-centred; the cat looks toward -Y, tail +Y),
+# measured on silhouettes of the final mesh (projects/chekhov/print/landmarks.py in garage-band).
+# Recipes: no filament on two adjacent layers; mixed layers <= 0.12 mm (3d-cli docs/workflows/prep.md).
+filaments:
+  - {slot: 1, key: K, name: Black,      hex: '#000000'}
+  - {slot: 2, key: W, name: White,      hex: '#ffffff'}
+  - {slot: 3, key: R, name: Red,        hex: '#c12e1f'}
+  - {slot: 4, key: G, name: Dark green, hex: '#1b5e20'}
+
+default: {key: K}              # coat, tail, outlines
+
+landmarks:
+  eye:            {box: [5, 14, -27, -15, 65, 76], mirror: x}
+  nose:           {box: [-5, 5, -28, -20, 56, 64.5]}
+  mouth_chin:     {box: [-10, 10, -28, -14, 49, 58]}
+  muzzle_cheek:   {box: [2, 18, -28, -14, 53, 67], mirror: x}
+  forehead_blaze: {box: [-4.5, 4.5, -27, -5, 72, 91]}
+  chest:          {box: [-19, 19, -33, -12, 30, 52]}
+  front_paw:      {box: [7, 23, -38, -23, 25, 41], mirror: x}
+
+regions:                       # priority = list order: the first matching region wins
+  - {name: eyes,     landmarks: [eye_L, eye_R], assign: {mix: WG}}   # grey-green iris, no yellow spool available
+  - {name: nose,     landmark: nose,            assign: {mix: WR}}   # pink
+  - {name: chin,     landmark: mouth_chin,      assign: {key: K}}
+  - {name: blaze,    landmark: forehead_blaze,  assign: {key: W}}
+  - {name: cheeks,   landmarks: [muzzle_cheek_L, muzzle_cheek_R], assign: {key: W}}
+  - {name: chest,    landmark: chest,           assign: {key: W}}
+  - {name: paws,     landmarks: [front_paw_L, front_paw_R], assign: {key: W}}

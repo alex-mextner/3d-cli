@@ -1,0 +1,380 @@
+{
+ "generated": "2026-10-20",
+ "notes": "All dimensions/weights read from GSMArena device pages on 2026-10-20 (apple.com/samsung.com/store.google.com/mi.com not opened). thick_mm is body thickness; camera bump adds extra and GSMArena does not state it, so camera_bump_mm is null. Where a page lists several variants (S24 167/168 g, Xiaomi 14/15 thickness, etc.) the largest value is used. Case allowances are defaults (+1.5mm/side typical silicone/TPU, +3mm/side rugged OtterBox/UAG class); no real measured case dimensions were looked up, so they are unverified assumptions. USB port position is general knowledge, not from the source page; Ultra models have S Pen beside the port.",
+ "cases": {
+  "none": {
+   "d_side_mm": 0,
+   "d_thick_mm": 0,
+   "d_height_mm": 0,
+   "note": "bare phone"
+  },
+  "typical": {
+   "d_side_mm": 1.5,
+   "d_thick_mm": 1.5,
+   "d_height_mm": 3.0,
+   "note": "thin silicone/TPU case (assumption, not measured)"
+  },
+  "bulky": {
+   "d_side_mm": 2.5,
+   "d_thick_mm": 3.0,
+   "d_height_mm": 5.0,
+   "note": "user-specified bulky silicone/rugged case: ~2-3 mm per side, ~3 mm thickness"
+  },
+  "rugged": {
+   "d_side_mm": 3.0,
+   "d_thick_mm": 4.0,
+   "d_height_mm": 6.0,
+   "note": "stress case, OtterBox/UAG class (assumption, not measured)"
+  }
+ },
+ "phones": [
+  {
+   "id": "iphone-15",
+   "name": "iPhone 15",
+   "height_mm": 147.6,
+   "width_mm": 71.6,
+   "thick_mm": 7.8,
+   "camera_bump_mm": null,
+   "mass_g": 171.0,
+   "usb_port": "bottom-centre USB-C",
+   "source": "https://www.gsmarena.com/apple_iphone_15-12559.php",
+   "source_note": "GSMArena device page (opened): dims '147.6 x 71.6 x 7.8 mm', weight '171 g'; heaviest/thickest listed variant used; no official-site cross-check"
+  },
+  {
+   "id": "iphone-15-plus",
+   "name": "iPhone 15 Plus",
+   "height_mm": 160.9,
+   "width_mm": 77.8,
+   "thick_mm": 7.8,
+   "camera_bump_mm": null,
+   "mass_g": 201.0,
+   "usb_port": "bottom-centre USB-C",
+   "source": "https://www.gsmarena.com/apple_iphone_15_plus-12558.php",
+   "source_note": "GSMArena device page (opened): dims '160.9 x 77.8 x 7.8 mm', weight '201 g'; heaviest/thickest listed variant used; no official-site cross-check"
+  },
+  {
+   "id": "iphone-15-pro",
+   "name": "iPhone 15 Pro",
+   "height_mm": 146.6,
+   "width_mm": 70.6,
+   "thick_mm": 8.3,
+   "camera_bump_mm": null,
+   "mass_g": 187.0,
+   "usb_port": "bottom-centre USB-C",
+   "source": "https://www.gsmarena.com/apple_iphone_15_pro-12557.php",
+   "source_note": "GSMArena device page (opened): dims '146.6 x 70.6 x 8.3 mm', weight '187 g'; heaviest/thickest listed variant used; no official-site cross-check"
+  },
+  {
+   "id": "iphone-15-pro-max",
+   "name": "iPhone 15 Pro Max",
+   "height_mm": 159.9,
+   "width_mm": 76.7,
+   "thick_mm": 8.3,
+   "camera_bump_mm": null,
+   "mass_g": 221.0,
+   "usb_port": "bottom-centre USB-C",
+   "source": "https://www.gsmarena.com/apple_iphone_15_pro_max-12548.php",
+   "source_note": "GSMArena device page (opened): dims '159.9 x 76.7 x 8.3 mm', weight '221 g'; heaviest/thickest listed variant used; no official-site cross-check"
+  },
+  {
+   "id": "iphone-16",
+   "name": "iPhone 16",
+   "height_mm": 147.6,
+   "width_mm": 71.6,
+   "thick_mm": 7.8,
+   "camera_bump_mm": null,
+   "mass_g": 170.0,
+   "usb_port": "bottom-centre USB-C",
+   "source": "https://www.gsmarena.com/apple_iphone_16-13317.php",
+   "source_note": "GSMArena device page (opened): dims '147.6 x 71.6 x 7.8 mm', weight '170 g'; heaviest/thickest listed variant used; no official-site cross-check"
+  },
+  {
+   "id": "iphone-16-plus",
+   "name": "iPhone 16 Plus",
+   "height_mm": 160.9,
+   "width_mm": 77.8,
+   "thick_mm": 7.8,
+   "camera_bump_mm": null,
+   "mass_g": 199.0,
+   "usb_port": "bottom-centre USB-C",
+   "source": "https://www.gsmarena.com/apple_iphone_16_plus-13316.php",
+   "source_note": "GSMArena device page (opened): dims '160.9 x 77.8 x 7.8 mm', weight '199 g'; heaviest/thickest listed variant used; no official-site cross-check"
+  },
+  {
+   "id": "iphone-16-pro",
+   "name": "iPhone 16 Pro",
+   "height_mm": 149.6,
+   "width_mm": 71.5,
+   "thick_mm": 8.3,
+   "camera_bump_mm": null,
+   "mass_g": 199.0,
+   "usb_port": "bottom-centre USB-C",
+   "source": "https://www.gsmarena.com/apple_iphone_16_pro-13315.php",
+   "source_note": "GSMArena device page (opened): dims '149.6 x 71.5 x 8.3 mm', weight '199 g'; heaviest/thickest listed variant used; no official-site cross-check"
+  },
+  {
+   "id": "iphone-16-pro-max",
+   "name": "iPhone 16 Pro Max",
+   "height_mm": 163.0,
+   "width_mm": 77.6,
+   "thick_mm": 8.3,
+   "camera_bump_mm": null,
+   "mass_g": 227.0,
+   "usb_port": "bottom-centre USB-C",
+   "source": "https://www.gsmarena.com/apple_iphone_16_pro_max-13123.php",
+   "source_note": "GSMArena device page (opened): dims '163 x 77.6 x 8.3 mm', weight '227 g'; heaviest/thickest listed variant used; no official-site cross-check"
+  },
+  {
+   "id": "iphone-17",
+   "name": "iPhone 17",
+   "height_mm": 149.6,
+   "width_mm": 71.5,
+   "thick_mm": 8.0,
+   "camera_bump_mm": null,
+   "mass_g": 177.0,
+   "usb_port": "bottom-centre USB-C",
+   "source": "https://www.gsmarena.com/apple_iphone_17-14050.php",
+   "source_note": "GSMArena device page (opened): dims '149.6 x 71.5 x 8 mm', weight '177 g'; heaviest/thickest listed variant used; no official-site cross-check"
+  },
+  {
+   "id": "iphone-17-pro",
+   "name": "iPhone 17 Pro",
+   "height_mm": 150.0,
+   "width_mm": 71.9,
+   "thick_mm": 8.8,
+   "camera_bump_mm": null,
+   "mass_g": 206.0,
+   "usb_port": "bottom-centre USB-C",
+   "source": "https://www.gsmarena.com/apple_iphone_17_pro-14049.php",
+   "source_note": "GSMArena device page (opened): dims '150 x 71.9 x 8.8 mm', weight '206 g'; heaviest/thickest listed variant used; no official-site cross-check"
+  },
+  {
+   "id": "iphone-17-pro-max",
+   "name": "iPhone 17 Pro Max",
+   "height_mm": 163.4,
+   "width_mm": 78.0,
+   "thick_mm": 8.8,
+   "camera_bump_mm": null,
+   "mass_g": 233.0,
+   "usb_port": "bottom-centre USB-C",
+   "source": "https://www.gsmarena.com/apple_iphone_17_pro_max-13964.php",
+   "source_note": "GSMArena device page (opened): dims '163.4 x 78 x 8.8 mm', weight '233 g'; heaviest/thickest listed variant used; no official-site cross-check"
+  },
+  {
+   "id": "iphone-air",
+   "name": "iPhone Air",
+   "height_mm": 156.2,
+   "width_mm": 74.7,
+   "thick_mm": 5.6,
+   "camera_bump_mm": null,
+   "mass_g": 165.0,
+   "usb_port": "bottom-centre USB-C",
+   "source": "https://www.gsmarena.com/apple_iphone_17_air-13502.php",
+   "source_note": "GSMArena device page (opened): dims '156.2 x 74.7 x 5.6 mm', weight '165 g'; heaviest/thickest listed variant used; no official-site cross-check"
+  },
+  {
+   "id": "galaxy-s24",
+   "name": "Samsung Galaxy S24",
+   "height_mm": 147.0,
+   "width_mm": 70.6,
+   "thick_mm": 7.6,
+   "camera_bump_mm": null,
+   "mass_g": 168.0,
+   "usb_port": "bottom-centre USB-C",
+   "source": "https://www.gsmarena.com/samsung_galaxy_s24-12773.php",
+   "source_note": "GSMArena device page (opened): dims '147 x 70.6 x 7.6 mm', weight '167 g or 168 g'; heaviest/thickest listed variant used; no official-site cross-check"
+  },
+  {
+   "id": "galaxy-s24-plus",
+   "name": "Samsung Galaxy S24+",
+   "height_mm": 158.5,
+   "width_mm": 75.9,
+   "thick_mm": 7.7,
+   "camera_bump_mm": null,
+   "mass_g": 197.0,
+   "usb_port": "bottom-centre USB-C",
+   "source": "https://www.gsmarena.com/samsung_galaxy_s24+-12772.php",
+   "source_note": "GSMArena device page (opened): dims '158.5 x 75.9 x 7.7 mm', weight '196 g or 197 g'; heaviest/thickest listed variant used; no official-site cross-check"
+  },
+  {
+   "id": "galaxy-s24-ultra",
+   "name": "Samsung Galaxy S24 Ultra",
+   "height_mm": 162.3,
+   "width_mm": 79.0,
+   "thick_mm": 8.6,
+   "camera_bump_mm": null,
+   "mass_g": 233.0,
+   "usb_port": "bottom USB-C (slightly right of centre, next to S Pen on Ultra)",
+   "source": "https://www.gsmarena.com/samsung_galaxy_s24_ultra-12771.php",
+   "source_note": "GSMArena device page (opened): dims '162.3 x 79 x 8.6 mm', weight '232 g or 233 g'; heaviest/thickest listed variant used; no official-site cross-check"
+  },
+  {
+   "id": "galaxy-s25",
+   "name": "Samsung Galaxy S25",
+   "height_mm": 146.9,
+   "width_mm": 70.5,
+   "thick_mm": 7.2,
+   "camera_bump_mm": null,
+   "mass_g": 162.0,
+   "usb_port": "bottom-centre USB-C",
+   "source": "https://www.gsmarena.com/samsung_galaxy_s25-13610.php",
+   "source_note": "GSMArena device page (opened): dims '146.9 x 70.5 x 7.2 mm', weight '162 g'; heaviest/thickest listed variant used; no official-site cross-check"
+  },
+  {
+   "id": "galaxy-s25-plus",
+   "name": "Samsung Galaxy S25+",
+   "height_mm": 158.4,
+   "width_mm": 75.8,
+   "thick_mm": 7.3,
+   "camera_bump_mm": null,
+   "mass_g": 190.0,
+   "usb_port": "bottom-centre USB-C",
+   "source": "https://www.gsmarena.com/samsung_galaxy_s25+-13609.php",
+   "source_note": "GSMArena device page (opened): dims '158.4 x 75.8 x 7.3 mm', weight '190 g'; heaviest/thickest listed variant used; no official-site cross-check"
+  },
+  {
+   "id": "galaxy-s25-ultra",
+   "name": "Samsung Galaxy S25 Ultra",
+   "height_mm": 162.8,
+   "width_mm": 77.6,
+   "thick_mm": 8.2,
+   "camera_bump_mm": null,
+   "mass_g": 218.0,
+   "usb_port": "bottom USB-C (S Pen slot beside it)",
+   "source": "https://www.gsmarena.com/samsung_galaxy_s25_ultra-13322.php",
+   "source_note": "GSMArena device page (opened): dims '162.8 x 77.6 x 8.2 mm', weight '218 g'; heaviest/thickest listed variant used; no official-site cross-check"
+  },
+  {
+   "id": "pixel-9",
+   "name": "Google Pixel 9",
+   "height_mm": 152.8,
+   "width_mm": 72.0,
+   "thick_mm": 8.5,
+   "camera_bump_mm": null,
+   "mass_g": 198.0,
+   "usb_port": "bottom-centre USB-C",
+   "source": "https://www.gsmarena.com/google_pixel_9-13219.php",
+   "source_note": "GSMArena device page (opened): dims '152.8 x 72 x 8.5 mm', weight '198 g'; heaviest/thickest listed variant used; no official-site cross-check"
+  },
+  {
+   "id": "pixel-9-pro",
+   "name": "Google Pixel 9 Pro",
+   "height_mm": 152.8,
+   "width_mm": 72.0,
+   "thick_mm": 8.5,
+   "camera_bump_mm": null,
+   "mass_g": 199.0,
+   "usb_port": "bottom-centre USB-C",
+   "source": "https://www.gsmarena.com/google_pixel_9_pro-13218.php",
+   "source_note": "GSMArena device page (opened): dims '152.8 x 72 x 8.5 mm', weight '199 g'; heaviest/thickest listed variant used; no official-site cross-check"
+  },
+  {
+   "id": "pixel-9-pro-xl",
+   "name": "Google Pixel 9 Pro XL",
+   "height_mm": 162.8,
+   "width_mm": 76.6,
+   "thick_mm": 8.5,
+   "camera_bump_mm": null,
+   "mass_g": 221.0,
+   "usb_port": "bottom-centre USB-C",
+   "source": "https://www.gsmarena.com/google_pixel_9_pro_xl-13217.php",
+   "source_note": "GSMArena device page (opened): dims '162.8 x 76.6 x 8.5 mm', weight '221 g'; heaviest/thickest listed variant used; no official-site cross-check"
+  },
+  {
+   "id": "pixel-10",
+   "name": "Google Pixel 10",
+   "height_mm": 152.8,
+   "width_mm": 72.0,
+   "thick_mm": 8.6,
+   "camera_bump_mm": null,
+   "mass_g": 204.0,
+   "usb_port": "bottom-centre USB-C",
+   "source": "https://www.gsmarena.com/google_pixel_10_5g-13979.php",
+   "source_note": "GSMArena device page (opened): dims '152.8 x 72 x 8.6 mm', weight '204 g'; heaviest/thickest listed variant used; no official-site cross-check"
+  },
+  {
+   "id": "pixel-10-pro",
+   "name": "Google Pixel 10 Pro",
+   "height_mm": 152.8,
+   "width_mm": 72.0,
+   "thick_mm": 8.5,
+   "camera_bump_mm": null,
+   "mass_g": 207.0,
+   "usb_port": "bottom-centre USB-C",
+   "source": "https://www.gsmarena.com/google_pixel_10_pro_5g-13987.php",
+   "source_note": "GSMArena device page (opened): dims '152.8 x 72 x 8.5 mm', weight '207 g'; heaviest/thickest listed variant used; no official-site cross-check"
+  },
+  {
+   "id": "pixel-10-pro-xl",
+   "name": "Google Pixel 10 Pro XL",
+   "height_mm": 162.8,
+   "width_mm": 76.6,
+   "thick_mm": 8.5,
+   "camera_bump_mm": null,
+   "mass_g": 232.0,
+   "usb_port": "bottom-centre USB-C",
+   "source": "https://www.gsmarena.com/google_pixel_10_pro_xl_5g-13988.php",
+   "source_note": "GSMArena device page (opened): dims '162.8 x 76.6 x 8.5 mm', weight '232 g'; heaviest/thickest listed variant used; no official-site cross-check"
+  },
+  {
+   "id": "xiaomi-14",
+   "name": "Xiaomi 14",
+   "height_mm": 152.8,
+   "width_mm": 71.5,
+   "thick_mm": 8.2,
+   "camera_bump_mm": null,
+   "mass_g": 193.0,
+   "usb_port": "bottom-centre USB-C",
+   "source": "https://www.gsmarena.com/xiaomi_14-12626.php",
+   "source_note": "GSMArena device page (opened): dims '152.8 x 71.5 x 8.2 mm or 8.3 mm', weight '188 g or 193 g'; heaviest/thickest listed variant used; no official-site cross-check"
+  },
+  {
+   "id": "xiaomi-15",
+   "name": "Xiaomi 15",
+   "height_mm": 152.3,
+   "width_mm": 71.2,
+   "thick_mm": 8.1,
+   "camera_bump_mm": null,
+   "mass_g": 192.0,
+   "usb_port": "bottom-centre USB-C",
+   "source": "https://www.gsmarena.com/xiaomi_15-13472.php",
+   "source_note": "GSMArena device page (opened): dims '152.3 x 71.2 x 8.1 / 8.4 / 8.5 mm', weight '189 / 191 / 192 g'; heaviest/thickest listed variant used; no official-site cross-check"
+  },
+  {
+   "id": "redmi-note-13-pro",
+   "name": "Redmi Note 13 Pro 5G",
+   "height_mm": 161.2,
+   "width_mm": 74.2,
+   "thick_mm": 8.0,
+   "camera_bump_mm": null,
+   "mass_g": 187.0,
+   "usb_port": "bottom-centre USB-C",
+   "source": "https://www.gsmarena.com/xiaomi_redmi_note_13_pro-12581.php",
+   "source_note": "GSMArena device page (opened): dims '161.2 x 74.2 x 8 mm', weight '187 g'; heaviest/thickest listed variant used; no official-site cross-check"
+  },
+  {
+   "id": "redmi-note-14-pro",
+   "name": "Redmi Note 14 Pro 5G",
+   "height_mm": 162.3,
+   "width_mm": 74.4,
+   "thick_mm": 8.4,
+   "camera_bump_mm": null,
+   "mass_g": 190.0,
+   "usb_port": "bottom-centre USB-C",
+   "source": "https://www.gsmarena.com/xiaomi_redmi_note_14_pro_5g_(global)-13613.php",
+   "source_note": "GSMArena device page (opened): dims '162.3 x 74.4 x 8.4 mm', weight '190 g'; heaviest/thickest listed variant used; no official-site cross-check"
+  }
+ ],
+ "non_goals": [
+  {
+   "id": "ipad-mini-7",
+   "name": "iPad mini (A17 Pro)",
+   "height_mm": 195.4,
+   "width_mm": 134.8,
+   "thick_mm": 6.3,
+   "mass_g": 297.0,
+   "source": "https://www.gsmarena.com/apple_ipad_mini_(2024)-13437.php",
+   "source_note": "GSMArena (opened); landscape dims 195.4x134.8 as listed; weight Wi-Fi/cellular max"
+  }
+ ]
+}
