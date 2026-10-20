@@ -133,15 +133,23 @@ def _measure(
     seq: dict[int, int],
     thick: dict[int, float],
     rules: MixRules,
+    reference: str = "",
 ) -> MixLayers:
-    """Apply the rules to {layer: mix head}, segment by segment (see `_segments`)."""
+    """Apply the rules to {layer: mix head}, segment by segment (see `_segments`). `reference`
+    is the recipe's cycle (one head digit per layer): it says which colour is the additional one."""
     graded: list[tuple[list[int], MixReport]] = []
     for layers in _segments(seq):
         # the bed layer is one fixed 0.2 mm layer: judged at the cap, never a violation
         heights = [
             min(thick[k], rules.layer_cap_mm) if k == 0 else thick[k] for k in layers
         ]
-        report = analyse([str(seq[k]) for k in layers], heights, rules, cyclic=False)
+        report = analyse(
+            [str(seq[k]) for k in layers],
+            heights,
+            rules,
+            cyclic=False,
+            reference=list(reference) or None,
+        )
         if report.mixed:
             graded.append((layers, report))
     measured = sum(len(ls) for ls, _ in graded)
@@ -157,9 +165,7 @@ def _measure(
     failed = [(ls, r) for ls, r in graded if not r.ok]
     first_layer = graded[0][0][0]
     if failed:
-        detail = "; ".join(
-            _describe(v, ls, rules) for ls, r in failed for v in r.violations
-        )
+        detail = _describe_all(failed, rules)
         return MixLayers(
             name,
             filament,
@@ -181,20 +187,33 @@ def _measure(
     )
 
 
-def _describe(v: Violation, layers: list[int], rules: MixRules) -> str:
-    """A violation indexes its segment; a user looks a layer number up in the G-code."""
-    first = layers[v.first]
-    if v.rule == LAYER_TOO_THICK:
-        return (
-            f"{v.layers} mixed layer(s) thicker than the {rules.layer_cap_mm:g} mm cap, "
-            f"first at layer {first} (thickest {v.thickness_mm:.3f} mm): stripes that thick read as bands"
+def _describe_all(failed: list[tuple[list[int], MixReport]], rules: MixRules) -> str:
+    """One sentence per rule and colour, however many layers repeat the fault. A violation
+    indexes its segment; a user looks a layer number up in the G-code."""
+    groups: dict[tuple[str, str], list[tuple[int, int, Violation]]] = {}
+    for layers, report in failed:
+        for v in report.violations:
+            last = layers[min(v.first + v.layers - 1, len(layers) - 1)]
+            key = (v.rule, "" if v.rule == LAYER_TOO_THICK else v.colour)
+            groups.setdefault(key, []).append((layers[v.first], last, v))
+    out = []
+    for (rule, colour), items in groups.items():
+        first, last, _ = items[0]
+        worst = max(v.thickness_mm for _, _, v in items)
+        if rule == LAYER_TOO_THICK:
+            n = sum(v.layers for _, _, v in items)
+            out.append(
+                f"{n} mixed layer(s) thicker than the {rules.layer_cap_mm:g} mm cap, first at "
+                f"layer {first} (thickest {worst:.3f} mm): stripes that thick read as bands"
+            )
+            continue
+        what = "minor colour" if rule == MINOR_ADJACENT else "colour"
+        times = "" if len(items) == 1 else f" {len(items)} times"
+        out.append(
+            f"{rule}: {what} on head {colour} printed on consecutive layers{times}, first on "
+            f"layers {first}-{last}, up to a {worst:.3f} mm band"
         )
-    last = layers[min(v.first + v.layers - 1, len(layers) - 1)]
-    what = "minor colour" if v.rule == MINOR_ADJACENT else "colour"
-    return (
-        f"{v.rule}: {what} on head {v.colour} printed on layers {first}-{last}, "
-        f"a {v.thickness_mm:.3f} mm band"
-    )
+    return "; ".join(out)
 
 
 def check(
@@ -328,7 +347,7 @@ def _with_project(
                     )
                 )
                 continue
-            out.append(_measure(key, e, recipe, seq, thick, rules))
+            out.append(_measure(key, e, recipe, seq, thick, rules, recipe))
     return out
 
 

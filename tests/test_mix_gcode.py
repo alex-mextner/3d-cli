@@ -13,6 +13,7 @@ from slicing.mix_pattern import MixRules
 
 # virtual filament 5 = pattern "14" (heads 1 and 4), as in head_sequence_fixtures
 THIN = [0.2] + [0.12] * 11
+ROW_141 = "1,4,1,1,50,0,g,w,m2,z0,xa0,xb0,d0,o0,u701,cm1,141"
 
 
 def heights_z(heights: list[float]) -> dict[int, float]:
@@ -60,11 +61,18 @@ def test_the_minor_colour_on_consecutive_layers_fails_and_names_the_layers(
 def test_a_doubled_majority_colour_fails_by_default_and_passes_when_allowed(
     tmp_path: Path,
 ) -> None:
-    proj = project_3mf(tmp_path / "p.3mf", {"A": 5})
-    heads = [1, 4, 1, 1, 4, 1, 1, 4, 1]  # head 1 (3 of 4) doubles: ...1 1...
+    """Recipe 141 (head 1 on two of three layers): printed as planned, head 1 doubles at the seam."""
+    proj = project_3mf(tmp_path / "p.3mf", {"A": 5}, mixed=ROW_141)
+    heads = [1, 4, 1, 1, 4, 1, 1, 4, 1]
     g = gcode(tmp_path / "p.gcode", [{"A": h} for h in heads], heights=[0.12] * 9)
     assert check(str(g), str(proj)).results[0].status == FAIL
     assert check(str(g), str(proj), MixRules(max_run_mm=0.24)).results[0].status == PASS
+    # ... but the same print of a 1:1 recipe is the additional colour doubled: never allowed
+    one_to_one = project_3mf(tmp_path / "q.3mf", {"A": 5})
+    assert (
+        check(str(g), str(one_to_one), MixRules(max_run_mm=0.24)).results[0].status
+        == FAIL
+    )
 
 
 def test_a_thick_mixed_layer_fails(tmp_path: Path) -> None:
