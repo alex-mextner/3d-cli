@@ -12,8 +12,8 @@ from slicing.head_sequence import ProjectError
 from slicing.mix_pattern import MixRules
 from slicing.mix_project import FAIL, PASS, SKIP, check, plan_profiles
 
-# object ids in the fixtures are 1000 + index; the standing tile is 20 mm tall
-PTA = 1000
+# the layer_heights_profile.txt key is the object's 1-based position; the standing tile is 20 mm tall
+PTA = 1
 GWG_ROWS = "1,4,1,1,50,0,g,w,m2,z0,xa0,xb0,d0,o0,u701,cm1,141"
 
 

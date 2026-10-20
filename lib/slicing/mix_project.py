@@ -125,7 +125,6 @@ def check(project_3mf: str, rules: MixRules = MixRules()) -> MixProjectReport:  
                 if PROFILE_ENTRY in names
                 else {}
             )
-            object_ids = _object_ids(zf)
     except (zipfile.BadZipFile, KeyError, ValueError, TypeError, OSError) as exc:
         raise ProjectError(
             f"{project_3mf}: not a readable Orca-family project 3MF: {exc}"
@@ -229,26 +228,16 @@ def check(project_3mf: str, rules: MixRules = MixRules()) -> MixProjectReport:  
                 )
             )
     report.findings.extend(layer_findings)
-    report.findings.extend(_plate(cfg, profiles, object_ids))
+    report.findings.extend(_plate(cfg, profiles, faces.objects))
     return report
 
 
-def _object_ids(zf: zipfile.ZipFile) -> list[int]:
-    from slicing.mix_faces import read_settings
-
-    return sorted(int(i) for i in read_settings(zf) if i.isdigit())
-
-
 def _plate(
-    cfg: dict[str, Any], profiles: dict[int, list[float]], object_ids: list[int]
+    cfg: dict[str, Any], profiles: dict[int, list[float]], objects: int
 ) -> list[Finding]:
-    if (
-        len(object_ids) < 2
-        or not profiles
-        or not _truthy(cfg.get("enable_prime_tower"))
-    ):
+    if objects < 2 or not profiles or not _truthy(cfg.get("enable_prime_tower")):
         return []
-    mine = {i: profiles.get(i) for i in object_ids}
+    mine = {i: profiles.get(i) for i in range(1, objects + 1)}
     first = next(iter(mine.values()))
     if all(p is not None and p == first for p in mine.values()):
         return []
@@ -257,7 +246,7 @@ def _plate(
             "plate",
             "plate",
             FAIL,
-            f"prime tower on with {len(object_ids)} objects whose layer heights differ "
+            f"prime tower on with {objects} objects whose layer heights differ "
             f"(profiles for objects {sorted(i for i, p in mine.items() if p is not None)}): "
             "Orca refuses to slice (the prime tower needs the same variable layer height on every object); "
             "make the mixed parts ONE multi-part object, or switch the prime tower off",
@@ -295,7 +284,6 @@ def plan_profiles(
                 if PROFILE_ENTRY in zf.namelist()
                 else {}
             )
-            object_ids = _object_ids(zf)
     except (zipfile.BadZipFile, KeyError, ValueError, TypeError, OSError) as exc:
         raise ProjectError(
             f"{project_3mf}: not a readable Orca-family project 3MF: {exc}"
@@ -308,9 +296,9 @@ def plan_profiles(
         raise ProjectError(
             f"{project_3mf}: raft_layers {raft}: the raft shifts the layer stack; switch the raft off"
         )
-    if len(object_ids) > 1 and _truthy(cfg.get("enable_prime_tower")):
+    if faces.objects > 1 and _truthy(cfg.get("enable_prime_tower")):
         raise ProjectError(
-            f"{project_3mf}: prime tower on with {len(object_ids)} objects: Orca needs the same variable "
+            f"{project_3mf}: prime tower on with {faces.objects} objects: Orca needs the same variable "
             "layer height on every object, so make the parts ONE multi-part object or switch the tower off"
         )
     layer_h = _number(cfg.get("layer_height"), 0.2)
