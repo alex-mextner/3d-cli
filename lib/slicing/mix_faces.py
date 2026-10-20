@@ -66,6 +66,10 @@ class PartFaces:
     slope: float = 0.0
     status: str = PASS
     detail: str = ""
+    object_id: int = 0  # the build item's object id (Metadata/layer_heights_profile.txt key)
+    object_height: float = 0.0  # mm, of the whole object (all its parts)
+    z_lo: float = 0.0  # mm above the object's lowest point
+    z_hi: float = 0.0
 
     def to_dict(self) -> dict[str, builtins.object]:
         return {
@@ -78,6 +82,8 @@ class PartFaces:
             "slope_mm2": round(self.slope, 1),
             "status": self.status,
             "detail": self.detail,
+            "z_lo_mm": round(self.z_lo, 3),
+            "z_hi_mm": round(self.z_hi, 3),
         }
 
 
@@ -192,6 +198,8 @@ class _Areas:
     side: float = 0.0
     slope: float = 0.0
     triangles: int = 0
+    z_min: float = math.inf  # bed coordinates, mm
+    z_max: float = -math.inf
 
 
 def _mesh_areas(mesh: ET.Element, m: Matrix, scale: float, acc: _Areas) -> None:
@@ -211,6 +219,8 @@ def _mesh_areas(mesh: ET.Element, m: Matrix, scale: float, acc: _Areas) -> None:
                 (m[8] * x + m[9] * y + m[10] * z + m[11]) * scale,
             )
         )
+        acc.z_min = min(acc.z_min, pts[-1][2])
+        acc.z_max = max(acc.z_max, pts[-1][2])
     for t in ts:
         try:
             idx = [int(t.get(k, "-1")) for k in ("v1", "v2", "v3")]
@@ -344,13 +354,19 @@ def _parts(
             if comps is not None and len(comps)
             else [(part, oid, m)]
         )
+        if not _has_mixed(st, recipes):
+            continue  # nothing to measure, and no mesh to read
+        mixed: list[tuple[PartFaces, _Areas]] = []
+        z_lo, z_hi = math.inf, -math.inf  # the whole object, mixed or not
         for vpart, vid, vm in volumes:
             pname, pex = st.parts.get(vid, ("", 0))
             ex = pex or st.extruder
-            if ex not in recipes:
-                continue
             acc = _Areas()
             model.areas(vpart, vid, vm, acc)
+            if acc.triangles:
+                z_lo, z_hi = min(z_lo, acc.z_min), max(z_hi, acc.z_max)
+            if ex not in recipes:
+                continue
             if acc.triangles == 0:
                 raise ProjectError(
                     f"{st.name}: part {pname or vid} in mixed filament {ex} has no triangles"
@@ -363,10 +379,22 @@ def _parts(
                 acc.top,
                 acc.side,
                 acc.slope,
+                object_id=int(oid) if oid.isdigit() else 0,
             )
             pf.status, pf.detail = classify(acc.top, acc.side, acc.slope)
+            mixed.append((pf, acc))
+        for pf, acc in mixed:
+            pf.object_height = z_hi - z_lo
+            pf.z_lo, pf.z_hi = acc.z_min - z_lo, acc.z_max - z_lo
             out.append(pf)
     return out
+
+
+def _has_mixed(st: _ObjectSettings, recipes: dict[int, str]) -> bool:
+    """Does any part of this object print in a mixed filament?"""
+    return st.extruder in recipes or any(
+        (pex or st.extruder) in recipes for _name, pex in st.parts.values()
+    )
 
 
 def format_lines(report: MixFaceReport) -> list[str]:

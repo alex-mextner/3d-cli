@@ -157,15 +157,24 @@ def _mesh_xml(oid: int, mesh: Mesh) -> str:
 
 
 def orca_project(
-    path: Path, objects: list[Obj], *, mixed: str = MIXED_ROWS, n_phys: int = 4
+    path: Path,
+    objects: list[Obj],
+    *,
+    mixed: str = MIXED_ROWS,
+    n_phys: int = 4,
+    settings: dict[str, object] | None = None,
+    files: dict[str, str] | None = None,
 ) -> Path:
-    cfg = {
+    """`settings` are merged into project_settings.config, `files` are extra zip entries."""
+    cfg: dict[str, object] = {
         "filament_colour": ["#000000", "#808080", "#E8732A", "#F6C700"][:n_phys]
         + ["#FFFFFF"] * (n_phys - 4),
         "mixed_filament_definitions": mixed,
         "raft_layers": "0",
+        "layer_height": "0.12",
+        **(settings or {}),
     }
-    resources, build, settings = [], [], []
+    resources, build, object_settings = [], [], []
     subs: dict[str, str] = {}
     pid = 1
     for i, obj in enumerate(objects):
@@ -194,7 +203,7 @@ def orca_project(
         extra = "".join(
             f'<metadata key="{k}" value="{v}"/>' for k, v in obj.settings.items()
         )
-        settings.append(
+        object_settings.append(
             f'<object id="{oid}"><metadata key="name" value="{obj.name}"/>'
             f'<metadata key="extruder" value="{obj.extruder}"/>{extra}{"".join(parts_xml)}</object>'
         )
@@ -209,8 +218,10 @@ def orca_project(
         zf.writestr("Metadata/project_settings.config", json.dumps(cfg))
         zf.writestr(
             "Metadata/model_settings.config",
-            f'<?xml version="1.0" encoding="UTF-8"?><config>{"".join(settings)}</config>',
+            f'<?xml version="1.0" encoding="UTF-8"?><config>{"".join(object_settings)}</config>',
         )
+        for name, text in (files or {}).items():
+            zf.writestr(name, text)
     return path
 
 
