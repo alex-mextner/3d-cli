@@ -61,7 +61,6 @@ class Pipeline:
         self.spec = spec
         self.V0, self.F0 = V.copy(), F.copy()
         self.V, self.F = V.copy(), F.copy()
-        self.lock = np.zeros(len(V), dtype=bool)
         self.records: list[dict[str, Any]] = []
         base = RegionContext(self.V, self.F, spec["regions"], spec["base_dir"])
         self.keepout_weight0 = self._keepout_weight(base)
