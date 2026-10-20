@@ -31,6 +31,7 @@ explain why the command exists, what its inputs mean, and how it fits into the l
 | `fit-niche` | [fit-niche.md](fit-niche.md) | Generate a parametric insert/plug that mates into a described cavity with FDM clearances. |
 | `import` | [import.md](import.md) | Generate OpenSCAD wrappers or conversion plans for imported model formats. |
 | `pack` | [pack.md](pack.md) | Plan deterministic print-bed layouts from explicit part footprints. |
+| `prep` | [prep.md](prep.md) | Model to print-ready plate with cached steps: repair, orientation, no-support adaptation, fit table, stability, colour regions, layers, Orca project, slice, G-code gates, proof pack. |
 | `props` | [props.md](props.md) | Snap-off support ribs for a part printed standing, with the height/base stability gate. |
 | `validate` | [validate.md](validate.md) | Fast OpenSCAD parse check without rendering. |
 | `params` | [params.md](params.md) | Extract Customizer-style parameters. |
@@ -111,6 +112,8 @@ Every gate from model to printer, in order: [Print pipeline](../workflows/print-
 | `bench` | [bench.md](bench.md) | Auto-scored generative-modeling benchmark: prompt → `.scad`, build-success gate, metric vector, `$/ok` + `--compare`. |
 | `auth` | [auth.md](auth.md) | Configure optional Hugging Face credentials for ZeroGPU and gated weights. |
 | `doctor` | [doctor.md](doctor.md) | Read-only dependency report with install commands. |
+| `heavy` | [heavy.md](heavy.md) | Run one command alone under the machine heavy lock with a memory cap (re-entrant, bounded wait). |
+| `remote` | [remote.md](remote.md) | Push files to an ssh heavy box, run under its heavy lock, pull results. |
 | `events` | [events.md](events.md) | Record and inspect append-only CLI/model workflow events. |
 | `ha` | [ha.md](ha.md) | Deploy `integrations/homeassistant/` to the live Home Assistant config (submodule + symlinks, check_config, reloads, rollback). |
 | `init` | [init.md](init.md) | Scaffold a `3d.yaml` project and agent-friendly project skeleton. |

@@ -100,5 +100,16 @@ a cache turns "a new script per question" into "re-run the changed step".
 
 ## After: `3d prep` on the same STL
 
-See `docs/workflows/prep.md` for the flow and the measured per-step table on the original
-`cat phone holder full.stl` (section "Measured on the Chekhov STL").
+Measured 2026-10-20 on the 16-core heavy box, original `cat phone holder full.stl`, cold cache
+(full table in [`docs/workflows/prep.md`](../workflows/prep.md#measured-on-the-chekhov-stl)):
+
+| Ledger phase (by hand) | Minutes | `3d prep` step | Seconds |
+|---|---:|---|---:|
+| 2 mesh diagnose + repair | 14.6 | diagnose + repair | 7.0 |
+| 4 cavity fill, overhang analysis, 45 degree adaptation | 28.5 | orient + adapt + overhang | 11.5 |
+| 3, 5, 7 phone fit, stability, simulation | ≈ 41 | fit + stability | 2.9 |
+| A-D colour, layer plan, 3MF, G-code verifier (test shapes only) | 43.8 | colors + layers + project + slice + gates | 42.5 |
+| 8, 10, 11 proof pack (+ 25.5 min nested-lock deadlock) | 16.6 | proof | 11.0 |
+| **whole flow, to a verified G-code** | **never finished (142 min)** | **`3d prep`** | **75** |
+
+Re-running the unchanged command takes 1 s; changing the colours re-runs from `colors` in 55 s.
