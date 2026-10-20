@@ -34,6 +34,9 @@ _GRID_MM = 0.05
 _COMPRESS_TOL = 0.002
 _ROUND_GUARD = 1e-4  # profile values are rounded to 4 decimals; keep that from nudging a zone value over cap
 _TAIL_MM = 3.0
+_CAP_TOL = 1e-6
+_CAP_ROUNDS = 7
+_RETRY_LOWER_MM = 0.002
 _LAST_Z_TOL = 1e-3
 # Orca samples the profile near a layer BOTTOM (print_z + hmin/2), so a layer pair steps by ~slope * the thicker
 # layer, not the mean; tightening the envelope keeps the step within slope * mean(h) plus compression slack
@@ -215,6 +218,44 @@ def cap_profile(
         if hi > lo:
             clipped.append((lo, hi))
 
+    for rnd in range(_CAP_ROUNDS):
+        # each retry widens the zone-entry margin and lowers zone values further, both geometrically
+        margin = _GRID_MM * 2**rnd
+        extra = _COMPRESS_TOL + _ROUND_GUARD + _RETRY_LOWER_MM * (2**rnd - 1)
+        flat = _build_flat(height, clipped, cap, base, hmin, hmax, slope, first, margin, extra)
+        if flat is not None:
+            return flat
+    raise ValueError(
+        f"cannot keep layers <= cap {cap} inside zones {clipped} with hmin {hmin}, slope {slope}"
+    )
+
+
+def _in_zones(zones: Sequence[tuple[float, float]], z: float, margin: float = 0.0) -> bool:
+    return any(lo - margin <= z <= hi + margin for lo, hi in zones)
+
+
+def _zone_violation(tops: Sequence[float], zones: Sequence[tuple[float, float]], cap: float) -> bool:
+    """True when a layer (other than the fixed first one) with its MID in a zone is thicker than cap."""
+    th = thicknesses(tops)
+    return any(
+        h > cap + _CAP_TOL and _in_zones(zones, t - 0.5 * h)
+        for t, h in list(zip(tops, th, strict=True))[1:]
+    )
+
+
+def _build_flat(
+    height: float,
+    zones: Sequence[tuple[float, float]],
+    cap: float,
+    base: Sequence[float] | None,
+    hmin: float,
+    hmax: float,
+    slope: float,
+    first: float,
+    margin: float,
+    extra: float,
+) -> list[float] | None:
+    """One build attempt; None when no tail-landing candidate keeps every zone layer <= cap."""
     n = int(height / _GRID_MM)
     zs = [i * _GRID_MM for i in range(n + 1)]
     if height - zs[-1] > 1e-9:
@@ -222,33 +263,17 @@ def cap_profile(
     else:
         zs[-1] = height
 
-    def in_zone(z: float) -> bool:
-        # one grid step of margin: a layer mid between a zone edge and its outer grid point stays capped
-        return any(lo - _GRID_MM <= z <= hi + _GRID_MM for lo, hi in clipped)
-
-    zone_flags = [in_zone(z) for z in zs]
+    zone_flags = [_in_zones(zones, z, margin) for z in zs]
     req = [hmax if base is None else min(max(_interp(base, z), hmin), hmax) for z in zs]
     req = [min(r, cap) if f else r for r, f in zip(req, zone_flags, strict=True)]
     env = [min(max(h, hmin), hmax) for h in _lipschitz(req, zs, slope * _ORCA_SAMPLE_MARGIN)]
-    # compression and 4-decimal rounding may only lower values inside zones
-    lowered = [
-        max(h - _COMPRESS_TOL - _ROUND_GUARD, hmin) if f else h
-        for h, f in zip(env, zone_flags, strict=True)
-    ]
+    lowered = [max(h - extra, hmin) if f else h for h, f in zip(env, zone_flags, strict=True)]
 
     best: tuple[float, list[float]] | None = None
     for step in range(26):
         sc = 1.0 - 0.01 * step
         tail = [
-            max(
-                h
-                * (
-                    1
-                    - (1 - sc)
-                    * min(max((z - (height - _TAIL_MM)) / _TAIL_MM, 0.0), 1.0)
-                ),
-                hmin,
-            )
+            max(h * (1 - (1 - sc) * min(max((z - (height - _TAIL_MM)) / _TAIL_MM, 0.0), 1.0)), hmin)
             if z > height - _TAIL_MM
             else h
             for z, h in zip(zs, lowered, strict=True)
@@ -258,11 +283,13 @@ def cap_profile(
         for z, h in zip(zz, hh, strict=True):
             flat += [round(z, 4), h]
         flat[-2] = round(height, 4)
-        err = abs(simulate_layers(flat, height, first, hmin)[-1] - height)
+        tops = simulate_layers(flat, height, first, hmin)
+        if _zone_violation(tops, zones, cap):
+            continue
+        err = abs(tops[-1] - height)
         if best is None or err < best[0] - 1e-9:
             best = (err, flat)
-    assert best is not None
-    return best[1]
+    return None if best is None else best[1]
 
 
 def write_profiles_3mf(
