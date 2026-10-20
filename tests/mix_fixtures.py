@@ -20,7 +20,7 @@ NS = (
 )
 # 4 physical filaments; virtual 5 = manual pattern "431"; virtual 6 = ratio (Local-Z) row.
 MIXED_ROWS = (
-    "4,1,1,1,50,0,g,w,m2,z0,xa0,xb0,d0,o0,u701,cm1,431;"
+    "1,4,1,1,50,0,g,w,m2,z0,xa0,xb0,d0,o0,u701,cm1,431;"
     "1,4,1,1,25,0,g,w,m2,z0,xa0,xb0,d0,o0,u702,cm0"
 )
 
