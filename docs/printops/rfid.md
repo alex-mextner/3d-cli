@@ -164,6 +164,8 @@ Moonraker‑интеграция Spoolman держит **один** активн
 
 ## 3. ESPHome‑станция
 
+> Конфиги ESPHome для станции (D32 и S3: `esphome/station.yaml`, `esphome/d32/*.yaml`) опубликованы в [alex-mextner/kettle-xiaomi](https://github.com/alex-mextner/kettle-xiaomi).
+
 ### 3.1 Операции
 | Код | Действие | Что отправляет |
 |---|---|---|
