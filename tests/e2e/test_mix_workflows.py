@@ -104,15 +104,18 @@ def test_mix_pattern_rejects_gwg_and_accepts_an_isolated_minor_layer(
 
 
 def test_mix_pattern_takes_variable_layer_heights(tmp_path: Path) -> None:
+    """A user checks a pattern that will print at variable layer heights: one 0.2 mm layer fails it."""
     ok = run_cli(tmp_path, "mix", "pattern", "WGWB", "--heights", "0.12,0.08,0.12,0.1")
     bad = run_cli(tmp_path, "mix", "pattern", "WGWB", "--heights", "0.12,0.08,0.2,0.1")
     wrong = run_cli(tmp_path, "mix", "pattern", "WG", "--heights", "0.12")
-    assert ok.returncode == 0, ok.stdout + ok.stderr
-    assert bad.returncode == 1 and "0.200 mm at layer 2" in bad.stdout
-    assert wrong.returncode == 2 and "lists 1 layers for a pattern of 2" in wrong.stderr
+    assert [ok.returncode, bad.returncode, wrong.returncode] == [0, 1, 2], ok.stdout + ok.stderr
+    assert "mix pattern WGWB: PASS" in ok.stdout
+    assert "0.200 mm at layer 2" in bad.stdout
+    assert "lists 1 layers for a pattern of 2" in wrong.stderr
 
 
 def test_mix_recipes_never_offer_a_pattern_the_rules_reject(tmp_path: Path) -> None:
+    """A user ranks black+white mixes for a grey: the double-black cycle 141 is not offered."""
     out = run_cli(
         tmp_path,
         "mix",
@@ -152,6 +155,7 @@ def _sliced(directory: Path, heads: list[int], heights: list[float]) -> Path:
 def test_mix_gcode_fails_consecutive_minor_layers_and_thick_layers_and_passes_the_good_print(
     tmp_path: Path,
 ) -> None:
+    """A user gates four sliced plates: good and variable-height pass; doubled-colour and thick-layer fail."""
     thin = [0.2] + [0.12] * 7
     _sliced(tmp_path / "good", [1, 4] * 4, thin)
     _sliced(tmp_path / "double", [1, 4, 4, 1, 4, 1, 4, 1], thin)
@@ -189,6 +193,7 @@ def test_mix_gcode_fails_consecutive_minor_layers_and_thick_layers_and_passes_th
 
 
 def test_print_preflight_has_a_mix_layers_line(tmp_path: Path) -> None:
+    """A user preflights two sliced plates: the mix layers line passes the good one and fails the doubled one."""
     thin = [0.2] + [0.12] * 7
     _sliced(tmp_path / "good", [1, 4] * 4, thin)
     _sliced(tmp_path / "double", [1, 4, 4, 1, 4, 1, 4, 1], thin)
