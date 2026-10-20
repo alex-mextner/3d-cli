@@ -243,6 +243,7 @@ def test_mix_check_and_profile_cap_the_layers_over_a_mixed_part(tmp_path: Path) 
 def test_mix_profile_refuses_what_orca_would_refuse_and_never_overwrites(
     tmp_path: Path,
 ) -> None:
+    """A user caps layers on a two-object plate with a prime tower, or onto the input file: both are refused."""
     orca_project(
         tmp_path / "two.3mf",
         [tile("PTA", 5, standing=True), tile("REF", 1, standing=True)],
