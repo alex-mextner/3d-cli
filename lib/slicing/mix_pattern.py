@@ -33,6 +33,7 @@ from dataclasses import dataclass, field
 LAYER_CAP_MM = 0.12
 # layer_heights_profile.txt rounds to 0.0001 mm and slicers write layer Z with 3 decimals
 TOLERANCE_MM = 5e-4
+_SHARE_EPS = 1e-9  # float noise must not make one half of a 1:1 mix the 'majority'
 
 LAYER_TOO_THICK = "layer-too-thick"
 MINOR_ADJACENT = "minor-adjacent"
@@ -154,12 +155,16 @@ def analyse(
     rules: MixRules = MixRules(),  # noqa: B008 — frozen dataclass, safe as a default
     *,
     cyclic: bool,
+    reference: Sequence[str] | None = None,
 ) -> MixReport:
     """Check a layer sequence (one colour symbol per layer, bottom to top) against `rules`.
 
     `thickness` is one layer height in mm for every layer, or one per layer. `cyclic=True` for a
     recipe pattern that repeats (the last layer is followed by the first); `False` for a measured
-    sequence of a real print.
+    sequence of a real print. A colour is MAJOR when it holds more than half of the layers of
+    `reference` (the recipe's cycle; default: the checked sequence itself, by thickness); every
+    other colour is minor. A measured print is judged by its recipe, not by the half-layer
+    that tips an odd-length run over 50 %.
     """
     if not colours:
         raise ValueError("an empty layer sequence")
@@ -169,12 +174,16 @@ def analyse(
     text = "".join(colours) if all(len(c) == 1 for c in colours) else ",".join(colours)
     if len(set(colours)) == 1:
         return MixReport(text, cyclic, False, max_layer_mm=max(layers))
-    total = sum(layers)
     share: dict[str, float] = {}
-    for c, t in zip(colours, layers, strict=True):
-        share[c] = share.get(c, 0.0) + t / total
-    major = {c for c, s in share.items() if s > 0.5}
-    minor = tuple(sorted(c for c in share if c not in major))
+    if reference is None:
+        total = sum(layers)
+        for c, t in zip(colours, layers, strict=True):
+            share[c] = share.get(c, 0.0) + t / total
+    else:  # the plan says who the additional colour is, not the layers that happened to print
+        for c in reference:
+            share[c] = share.get(c, 0.0) + 1 / len(reference)
+    major = {c for c, s in share.items() if s > 0.5 + _SHARE_EPS}
+    minor = tuple(sorted(c for c in set(colours) if c not in major))
     runs = _runs(colours, layers, cyclic)
     limit = rules.run_limit_mm
     violations: list[Violation] = []

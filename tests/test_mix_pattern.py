@@ -121,3 +121,27 @@ def test_row_decoding() -> None:
     assert decode_pattern("4312", 2, 3) == "4323"
     with pytest.raises(ValueError):
         parse_row("g,w,1,1")
+
+
+def test_the_recipe_decides_who_is_the_additional_colour_not_a_stray_layer() -> None:
+    # 1:1 recipe, odd number of printed layers: "WGWGW" has W on 3 of 5 layers; judged by itself W would be
+    # the majority and its doubling merely a thick band. Judged by its recipe both colours are minor.
+    printed = list("WGWWGW")
+    by_itself = analyse(printed, 0.12, MixRules(max_run_mm=0.24), cyclic=False)
+    assert (
+        by_itself.ok
+    )  # W holds 4 of 6 layers: a majority, the double W passes the relaxed limit
+    by_recipe = analyse(
+        printed, 0.12, MixRules(max_run_mm=0.24), cyclic=False, reference=list("WG")
+    )
+    assert {v.rule for v in by_recipe.violations} == {MINOR_ADJACENT}
+
+
+def test_equal_halves_are_never_a_majority_through_float_noise() -> None:
+    heights = [
+        0.1 + 1e-12 * i for i in range(8)
+    ]  # one colour sums a hair above the other
+    report = analyse(
+        list("GWGWGWGW"), heights, MixRules(layer_cap_mm=0.2), cyclic=False
+    )
+    assert set(report.minor) == {"G", "W"}
