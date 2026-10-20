@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     from slicing.mix_tester import LoadedSlot
 
 USAGE = """3d mix check FILE.3mf [--json]
+3d mix gcode FILE.gcode [--project FILE.3mf] [--layer-cap MM] [--max-run-mm MM] [--json]
 3d mix pattern PATTERN [--layer MM | --heights MM,MM,...] [--layer-cap MM] [--max-run-mm MM] [--json]
 3d mix recipes --target HEX (--slots N=HEX,... | --printer NAME) [--count N] [--max-cycle N]
                [--layer MM] [--layer-cap MM] [--max-run-mm MM] [--printops-api URL] [--json]
@@ -45,6 +46,17 @@ USAGE = """3d mix check FILE.3mf [--json]
       exceeds half the side area (a layer mix reads only on walls, a flat top shows one
       filament); WARN when the upward slopes exceed half the side area (terraces).
       Exit 1 on FAIL, 0 otherwise (WARN is printed), 2 when the file is not a project 3MF.
+
+  gcode FILE.gcode
+      Measure what a sliced G-code printed in every mixed object: the head of each layer and
+      the real layer Z (variable layer heights included), against the layer rules below. FAIL
+      (exit 1) when the additional colour is printed on consecutive layers (the layers, the
+      head and the band in mm are named), when a colour forms a band thicker than --max-run-mm,
+      or when a mixed layer is thicker than --layer-cap (the first layer is exempt; raft layers
+      are skipped). --project FILE.3mf (the plate project the G-code was sliced from) says which
+      heads each object's mix uses; without it only objects that print one head per layer and
+      alternate are measured (the stretch between the first and last head change). Also the
+      `mix layers` line of `3d print-preflight`.
 
   pattern PATTERN
       Check one repeating layer pattern (a character per layer: GWG, 431, WR) against the
@@ -92,6 +104,8 @@ USAGE = """3d mix check FILE.3mf [--json]
   --json              the same summary as JSON
 
 Examples:
+  3d mix gcode out/cat.gcode --project out/cat.3mf
+  3d mix gcode out/cat.gcode --project out/cat.3mf --max-run-mm 0.24 --json
   3d mix pattern GWG
   3d mix pattern GW --layer 0.12
   3d mix pattern GWG --max-run-mm 0.24
@@ -369,6 +383,52 @@ def _cand_line(n: int, c: dict[str, Any]) -> str:
     )
 
 
+def _gcode(argv: list[str]) -> int:
+    import json
+
+    from slicing.head_sequence import ProjectError
+    from slicing.mix_gcode import check, format_lines
+
+    if not argv or argv[0].startswith("-"):
+        raise UsageError(
+            "gcode takes the G-code file first",
+            command=_CMD,
+            remediation=["3d mix gcode out/plate.gcode --project out/plate.3mf"],
+        )
+    path, rest = Path(argv[0]), argv[1:]
+    opts, as_json = _options(rest, {"--project", "--layer-cap", "--max-run-mm"})
+    if not path.is_file():
+        raise InputNotFound(str(path), command=_CMD)
+    project = opts.get("--project")
+    if project is not None and not Path(project).is_file():
+        raise InputNotFound(project, command=_CMD)
+    rules = _rules(opts)
+    try:
+        report = check(str(path), project, rules)
+    except ProjectError as exc:
+        raise UsageError(
+            str(exc),
+            command=_CMD,
+            remediation=["Pass the plate project .3mf saved by Snapmaker Orca / Orca."],
+        ) from exc
+    if as_json:
+        print(json.dumps(report.to_dict(), indent=2, ensure_ascii=False))
+    else:
+        print(
+            f"mix gcode {path.name}: {report.status} (cap {rules.layer_cap_mm:g} mm, "
+            f"run limit {rules.run_limit_mm:g} mm)"
+        )
+        for line in format_lines(report) or ["no mixed object found"]:
+            print(f"  {line}")
+    if report.failures:
+        raise GateFailure(
+            f"mix gcode: {report.failures} mixed object(s) break the layer rules",
+            command=_CMD,
+            silent=True,
+        )
+    return 0
+
+
 def _pattern(argv: list[str]) -> int:
     import json
 
@@ -565,6 +625,8 @@ def run(argv: list[str]) -> int:
     sub, rest = argv[0], argv[1:]
     if sub == "check":
         return _check(rest)
+    if sub == "gcode":
+        return _gcode(rest)
     if sub == "pattern":
         return _pattern(rest)
     if sub == "recipes":
@@ -572,7 +634,7 @@ def run(argv: list[str]) -> int:
     if sub == "tester":
         return _tester(rest)
     raise InvalidArgument(
-        "subcommand", sub, ["check", "pattern", "recipes", "tester"], command=_CMD
+        "subcommand", sub, ["check", "gcode", "pattern", "recipes", "tester"], command=_CMD
     )
 
 

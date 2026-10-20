@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 from head_sequence_fixtures import gcode as head_gcode
+from head_sequence_fixtures import project_3mf
 from mix_fixtures import orca_project, tile
 
 from .workflow_helper import run_cli
@@ -117,3 +118,51 @@ def test_mix_recipes_never_offer_a_pattern_the_rules_reject(tmp_path: Path) -> N
     assert "141" not in patterns and "14" in patterns
     thick = run_cli(tmp_path, "mix", "recipes", "--target", "#808080", "--slots", "1=#000000,4=#FFFFFF", "--layer", "0.2")
     assert thick.returncode == 2 and "0.12 mm cap" in thick.stderr
+
+
+def _sliced(directory: Path, heads: list[int], heights: list[float]) -> Path:
+    """NAME.3mf (object A in mixed filament 5 = heads 1/4) next to a sliced NAME.gcode."""
+    directory.mkdir()
+    project_3mf(directory / "plate.3mf", {"A": 5})
+    return head_gcode(directory / "plate.gcode", [{"A": h} for h in heads], heights=heights)
+
+
+def test_mix_gcode_fails_consecutive_minor_layers_and_thick_layers_and_passes_the_good_print(
+    tmp_path: Path,
+) -> None:
+    thin = [0.2] + [0.12] * 7
+    _sliced(tmp_path / "good", [1, 4] * 4, thin)
+    _sliced(tmp_path / "double", [1, 4, 4, 1, 4, 1, 4, 1], thin)
+    _sliced(tmp_path / "thick", [1, 4] * 4, [0.2] + [0.32] * 7)
+    _sliced(tmp_path / "var", [1, 4] * 4, [0.2, 0.08, 0.1, 0.12, 0.08, 0.12, 0.1, 0.08])
+
+    def gate(name: str, *extra: str):
+        return run_cli(
+            tmp_path, "mix", "gcode", f"{name}/plate.gcode", "--project", f"{name}/plate.3mf", *extra
+        )
+
+    good, double, thick, var = gate("good"), gate("double"), gate("thick"), gate("var")
+    assert good.returncode == 0, good.stdout + good.stderr
+    assert "mix gcode plate.gcode: PASS" in good.stdout
+    assert double.returncode == 1 and "layers 1-2" in double.stdout and "0.240 mm band" in double.stdout
+    assert thick.returncode == 1 and "thicker than the 0.12 mm cap" in thick.stdout
+    # variable layer heights 0.08-0.12 mm: every stripe within the cap, measured from the real Z
+    assert var.returncode == 0, var.stdout + var.stderr
+    payload = json.loads(gate("var", "--json").stdout)
+    (row,) = payload["results"]
+    assert row["report"]["max_layer_mm"] <= 0.12 + 1e-6 and row["report"]["ok"] is True
+    assert json.loads(gate("double", "--json").stdout)["status"] == "FAIL"
+    # a configured cap that the print respects
+    assert gate("thick", "--layer-cap", "0.32").returncode == 0
+
+
+def test_print_preflight_has_a_mix_layers_line(tmp_path: Path) -> None:
+    thin = [0.2] + [0.12] * 7
+    _sliced(tmp_path / "good", [1, 4] * 4, thin)
+    _sliced(tmp_path / "double", [1, 4, 4, 1, 4, 1, 4, 1], thin)
+    good = run_cli(tmp_path, "print-preflight", "good/plate.gcode", "--json")
+    bad = run_cli(tmp_path, "print-preflight", "double/plate.gcode")
+    checks = {c["name"]: c for c in json.loads(good.stdout)["checks"]}
+    assert checks["mix layers"]["status"] == "PASS", checks["mix layers"]
+    assert bad.returncode == 1
+    assert "mix layers" in bad.stdout and "layers 1-2" in bad.stdout
