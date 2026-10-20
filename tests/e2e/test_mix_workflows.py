@@ -41,6 +41,7 @@ def test_mix_check_fails_a_flat_mixed_tile_and_passes_it_standing(
 
 
 def test_mix_check_rejects_a_file_that_is_not_a_project(tmp_path: Path) -> None:
+    """A user points `3d mix check` at an STL-like file instead of a saved project and gets a usage error."""
     (tmp_path / "part.3mf").write_bytes(b"solid not a zip")
     result = run_cli(tmp_path, "mix", "check", "part.3mf")
     assert result.returncode == 2

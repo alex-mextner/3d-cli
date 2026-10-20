@@ -30,6 +30,7 @@ def _base(path: Path) -> None:
 
 
 def test_recipes_text_and_json_name_the_same_candidates(tmp_path: Path) -> None:
+    """A user ranks mixes for a grey from three spools; the text table and --json list the same candidates."""
     args = ("mix", "recipes", "--target", "#808080", "--slots", SLOTS, "--count", "4")
     text = run_cli(tmp_path, *args)
     as_json = run_cli(tmp_path, *args, "--json")
@@ -44,6 +45,7 @@ def test_recipes_text_and_json_name_the_same_candidates(tmp_path: Path) -> None:
 def test_tester_writes_project_manifest_and_sheet_from_a_base_project(
     tmp_path: Path,
 ) -> None:
+    """A user turns a target colour into a tester plate: project, manifest and swatch sheet, then lints it."""
     _base(tmp_path / "base.3mf")
     args = (
         "mix", "tester", "--target", "#808080", "--slots", SLOTS,
@@ -82,6 +84,7 @@ def test_tester_writes_project_manifest_and_sheet_from_a_base_project(
 
 
 def test_tester_usage_errors_say_what_to_pass(tmp_path: Path) -> None:
+    """A user who forgets -o, passes both slot sources or a bad colour is told exactly what to pass."""
     no_out = run_cli(tmp_path, "mix", "tester", "--target", "#808080", "--slots", SLOTS)
     both = run_cli(
         tmp_path,
@@ -95,8 +98,7 @@ def test_tester_usage_errors_say_what_to_pass(tmp_path: Path) -> None:
         "u1",
     )
     bad = run_cli(tmp_path, "mix", "recipes", "--target", "#808080", "--slots", "1=red")
-    assert no_out.returncode == 2 and "-o OUT/NAME is required" in no_out.stderr
-    assert (
-        both.returncode == 2 and "exactly one of --slots and --printer" in both.stderr
-    )
-    assert bad.returncode == 2 and "is not N=#RRGGBB" in bad.stderr
+    assert [r.returncode for r in (no_out, both, bad)] == [2, 2, 2]
+    assert "-o OUT/NAME is required" in no_out.stderr
+    assert "exactly one of --slots and --printer" in both.stderr
+    assert "is not N=#RRGGBB" in bad.stderr
