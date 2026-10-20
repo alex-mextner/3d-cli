@@ -297,13 +297,23 @@ def main(argv: list[str]) -> None:
         die((__doc__ or "").strip().splitlines()[0] + "\n\n" + usage(), 2)
     inp = argv[1]
     defines: list[str] = []
+    repair = False
+    out_path: str | None = None
     i = 2
     while i < len(argv):
         if argv[i] == "-D" and i + 1 < len(argv):
             defines.append(argv[i + 1])
             i += 2
+        elif argv[i] == "--repair":
+            repair = True
+            i += 1
+        elif argv[i] in ("-o", "--output") and i + 1 < len(argv):
+            out_path = argv[i + 1]
+            i += 2
         else:
             die(f"unknown arg: {argv[i]}\n{usage()}", 2)
+    if out_path and not repair:
+        die("-o/--output only applies with --repair", 2)
 
     if not os.path.isfile(inp):
         die(f"no such file: {inp}", 2)
@@ -312,6 +322,8 @@ def main(argv: list[str]) -> None:
     try:
         import trimesh  # noqa: F401
     except ImportError:
+        if repair:
+            die("--repair needs trimesh (run it as `3d mesh ... --repair`, which resolves the dependencies)", 127)
         fallback_openscad(inp, defines)
         return  # unreachable (fallback exits)
 
@@ -329,14 +341,52 @@ def main(argv: list[str]) -> None:
     else:
         die(f"unsupported extension {ext} (want .scad/.stl/.3mf/.obj/.ply/.off)", 2)
 
+    if repair:
+        target = out_path or default_repair_path(inp)
+        if any(_same_file(target, source) for source in (inp, mesh_path)):
+            die(f"--repair would overwrite its input ({target}); pick another -o", 2)
+        mesh_path = repair_to_file(mesh_path, target)
+
     r = check_with_trimesh(mesh_path)
     report_and_exit(r)
 
 
+def _same_file(a: str, b: str) -> bool:
+    """The same path, or the same file reached through a symlink or hard link."""
+    if os.path.realpath(a) == os.path.realpath(b):
+        return True
+    return os.path.exists(a) and os.path.exists(b) and os.path.samefile(a, b)
+
+
+def default_repair_path(inp: str) -> str:
+    """<dir>/<stem>.fixed.<ext>: next to the input, never over it; anything but .stl / .obj becomes .stl."""
+    stem, ext = os.path.splitext(inp)
+    return f"{stem}.fixed{ext if ext.lower() in ('.stl', '.obj') else '.stl'}"
+
+
+def repair_to_file(mesh_path: str, out_path: str) -> str:
+    """Repair mesh_path with meshfix (lib/mesh_repair.py), write out_path, print the proof. Returns out_path."""
+    import mesh_repair
+    from errors import ThreeDError
+
+    try:
+        report = mesh_repair.repair_file(mesh_path, out_path)
+    except ThreeDError as exc:
+        print(exc.render(), file=sys.stderr)
+        sys.exit(exc.exit_code)
+    except Exception as exc:  # meshfix.MeshfixError, unreadable file
+        die(f"repair failed: {exc}", 2)
+    print(mesh_repair.format_report(report))
+    print(f"repaired mesh written to {out_path}")
+    print()
+    return out_path
+
+
 def usage() -> str:
     return (
-        "Usage: mesh_check.py PART.{stl,3mf,scad} [-D 'var=val' ...]\n"
+        "Usage: mesh_check.py PART.{stl,3mf,scad} [-D 'var=val' ...] [--repair [-o OUT]]\n"
         "  Via the CLI (resolves deps): 3d mesh PART.stl\n"
+        "  --repair: fix the mesh with meshfix first (writes PART.fixed.stl unless -o), then gate the result\n"
         "  Direct: uv run --with trimesh,manifold3d mesh_check.py PART.stl"
     )
 
