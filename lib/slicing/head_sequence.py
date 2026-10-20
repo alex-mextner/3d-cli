@@ -132,26 +132,57 @@ def read_object_extruders(zf: zipfile.ZipFile) -> dict[str, list[int]]:
     return objs
 
 
-def heads_by_layer(lines: Iterable[str]) -> dict[str, dict[int, set[int]]]:
-    """Object name -> layer index -> 1-based heads that extruded with XY motion on that layer."""
+@dataclass
+class GcodeScan:
+    """What a sliced G-code says per layer: the 1-based heads each object extruded with, and the
+    layer's Z (`;Z:` of Orca / PrusaSlicer, `; Z_HEIGHT:` of Bambu) where the slicer wrote it."""
+
+    heads: dict[str, dict[int, set[int]]]
+    layer_z: dict[int, float]
+
+
+def _layer_z(line: str) -> float | None:
+    if not line.startswith(";"):
+        return None
+    body = line[1:].lstrip()
+    for key in ("Z:", "Z_HEIGHT:"):
+        if body.startswith(key):
+            try:
+                return float(body[len(key) :].split()[0])
+            except (ValueError, IndexError):
+                return None
+    return None
+
+
+def scan_gcode(lines: Iterable[str]) -> GcodeScan:
+    """Object name -> layer index -> heads that extruded with XY motion on that layer, plus the
+    Z of every layer that announced one."""
     tool, layer = 1, -1  # single-head printers never emit T
     labels = ObjectLabels()
     seen: dict[str, dict[int, set[int]]] = collections.defaultdict(
         lambda: collections.defaultdict(set)
     )
+    layer_z: dict[int, float] = {}
     for raw in lines:
         line = raw.lstrip()
         if line.startswith(LAYER_MARKERS):
             layer += 1
         elif (m := _TOOL_RE.match(line)) and int(m.group(1)) < _MAX_HEAD_INDEX:
             tool = int(m.group(1)) + 1
+        elif (z := _layer_z(line)) is not None:
+            layer_z.setdefault(layer, z)
         elif labels.feed(line):
             continue
         elif labels.current and line.startswith("G1"):
             code = line.split(";", 1)[0]
             if _EXTRUDE_RE.search(code) and ("X" in code or "Y" in code):
                 seen[labels.current][layer].add(tool)
-    return seen
+    return GcodeScan(seen, layer_z)
+
+
+def heads_by_layer(lines: Iterable[str]) -> dict[str, dict[int, set[int]]]:
+    """Object name -> layer index -> 1-based heads that extruded with XY motion on that layer."""
+    return scan_gcode(lines).heads
 
 
 def _norm(s: str) -> str:
