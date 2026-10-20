@@ -13,9 +13,9 @@ from dataclasses import dataclass, field
 
 from cli.registry import Command
 from errors import GateFailure, InvalidArgument, UsageError
-from profiles import slicers, sync
+from profiles import doctor, slicers, sync
 
-USAGE = """3d profiles <status|diff|sync> [options]
+USAGE = """3d profiles <status|diff|sync|doctor> [options]
   Keep the user presets of OrcaSlicer, Snapmaker Orca and Bambu Studio in the repo as
   profiles/<slicer>/<kind>/<name>.json (+ .info) and sync them both ways. Three-way against the
   last sync: changed only in the slicer -> pull, only in the repo -> push, on both sides ->
@@ -24,6 +24,8 @@ USAGE = """3d profiles <status|diff|sync> [options]
 
 Subcommands:
   status [--slicer S] [--json]    what a sync would do, per preset (writes nothing)
+  doctor [--slicer S] [--json]    check presets: parents exist, layer-height limits, .info in sync;
+                                  one line per finding with its fix, exit 1 on any ERROR
   diff [NAME] [--slicer S]        unified diff repo -> slicer of presets that differ
   sync [--slicer S] [--pull | --push] [--dry-run] [--yes] [--force]
                                   apply pulls and pushes; conflicts are left as they are
@@ -39,7 +41,7 @@ Options:
 
 Before a push, the replaced slicer files are copied to ~/.cache/3d-cli/profiles-backup/<time>/.
 The last-sync snapshot is ~/.config/3d-cli/profiles-sync.json. Exit: 0 ok; 1 conflicts left,
-changes skipped, slicer running or another sync running; 2 bad arguments.
+changes skipped, slicer running or another sync running, doctor found an ERROR; 2 bad arguments.
 
 Examples:
   3d profiles status
@@ -52,6 +54,7 @@ Examples:
 SLICER_CHOICES = ("orca", "snapmaker-orca", "bambu", "all")
 SUBCOMMAND_FLAGS = {
     "status": ("--slicer", "--json"),
+    "doctor": ("--slicer", "--json"),
     "diff": ("--slicer",),
     "sync": ("--slicer", "--pull", "--push", "--dry-run", "--yes", "--force"),
 }
@@ -298,6 +301,40 @@ def _sync_locked(opts: Options) -> int:
     return 0
 
 
+def _run_doctor(opts: Options) -> int:
+    chosen = (
+        list(slicers.SLICERS.values())
+        if opts.slicer == "all"
+        else [slicers.SLICERS[opts.slicer]]
+    )
+    reports = {s.id: doctor.diagnose_slicer(s) for s in chosen}
+    errors = sum(r.errors for r in reports.values() if r is not None)
+    if opts.json:
+        print(
+            json.dumps(
+                {
+                    "ok": errors == 0,
+                    "slicers": {
+                        k: (r.to_dict() if r else None) for k, r in reports.items()
+                    },
+                },
+                indent=2,
+            )
+        )
+        return 1 if errors else 0
+    for slicer_id, report in reports.items():
+        if report is None:
+            print(
+                f"{slicer_id}: no presets in the repo or the slicer, nothing to check"
+            )
+            continue
+        for finding in report.findings:
+            print(finding.line())
+        if not report.findings:
+            print(f"{slicer_id}: ok ({', '.join(report.checked)})")
+    return 1 if errors else 0
+
+
 def run(argv: list[str]) -> int:
     if not argv:
         print(USAGE)
@@ -313,6 +350,8 @@ def run(argv: list[str]) -> int:
     opts = _parse(argv[1:], sub)
     if sub == "status":
         return _run_status(opts)
+    if sub == "doctor":
+        return _run_doctor(opts)
     if sub == "diff":
         return _run_diff(opts)
     return _run_sync(opts)
@@ -321,7 +360,7 @@ def run(argv: list[str]) -> int:
 COMMAND = Command(
     name="profiles",
     group="SLICING",
-    summary="keep slicer user presets (Orca, Snapmaker Orca, Bambu Studio) in the repo; status/diff/sync",
-    usage="profiles <status|diff|sync> [--slicer S] [--pull|--push] [--dry-run] [--yes]",
+    summary="keep slicer user presets (Orca, Snapmaker Orca, Bambu Studio) in the repo; status/diff/sync/doctor",
+    usage="profiles <status|diff|sync|doctor> [--slicer S] [--pull|--push] [--dry-run] [--yes] [--json]",
     run=run,
 )

@@ -13,6 +13,7 @@ Issue: [#180](https://github.com/alex-mextner/3d-cli/issues/180), PrintOps decis
 3d profiles status [--slicer S] [--json]
 3d profiles diff [NAME] [--slicer S]
 3d profiles sync [--slicer S] [--pull | --push] [--dry-run] [--yes] [--force]
+3d profiles doctor [--slicer S] [--json]
 ```
 
 - `status` — per preset, what a sync would do; ends with `clean` when both sides match. A
@@ -20,6 +21,16 @@ Issue: [#180](https://github.com/alex-mextner/3d-cli/issues/180), PrintOps decis
   it was named with `--slicer` or the repo holds presets for it. Writes nothing.
 - `diff [NAME]` — unified diff repo -> slicer of every preset that differs, or only of `NAME`
   (the file name without `.json`, or its `<kind>/<file>` path).
+- `doctor` — static checks of the user presets in the repo and in the slicer, one line per finding with
+  its fix; exit 1 on any ERROR (WARN does not fail). Catches what otherwise surfaces hours later at slice
+  time: an `inherits` parent that exists nowhere (`parent-missing`), a layer height outside the machine's
+  `min_layer_height`..`max_layer_height` (`layer-height-range`), an adaptive preset whose 0.08-0.32 band the
+  machine would clamp (`adaptive-clamped`, ERROR when the preset name declares the range), a U1 machine
+  preset without the nozzle/limit keys or with the wrong head count (`machine-keys`, `machine-band`), and
+  `.info` files that are missing, orphaned or out of step with their JSON (`info-*`). Vendor-system
+  checks need the slicer's `resources/profiles` (`ORCA_RES` overrides the location); without them one
+  `system-presets-missing` WARN says what was not verified. Never writes. See
+  [`3d prep`](prep.md) and the [U1 Orca CLI notes](../printers/u1-orca-cli.md).
 - `sync` — apply pulls and pushes. Without `--yes` it asks first on a terminal and refuses
   without one.
 - `--slicer S` — `orca`, `snapmaker-orca`, `bambu` or `all` (default). A slicer that has never
@@ -45,6 +56,8 @@ Examples:
 3d profiles sync --dry-run
 3d profiles sync --pull --yes
 3d profiles sync --slicer bambu --push --yes --force
+3d profiles doctor
+3d profiles doctor --slicer snapmaker-orca --json
 ```
 
 ## How the sync decides
