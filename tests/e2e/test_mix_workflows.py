@@ -78,3 +78,42 @@ def test_print_preflight_shows_the_mix_face_line_from_the_sibling_project(
     assert checks["mix face"]["status"] == "PASS", checks["mix face"]
     assert checks["head seq"]["status"] == "PASS", checks["head seq"]
     assert "SKIP  mix face    no project 3MF" in none.stdout
+
+
+def test_mix_pattern_rejects_gwg_and_accepts_an_isolated_minor_layer(tmp_path: Path) -> None:
+    """GWG repeats as GWGGWG — a double-thick G band; GW (and GWG once a base colour may double) pass."""
+    bad = run_cli(tmp_path, "mix", "pattern", "GWG")
+    good = run_cli(tmp_path, "mix", "pattern", "GW")
+    relaxed = run_cli(tmp_path, "mix", "pattern", "GWG", "--max-run-mm", "0.24")
+    thick = run_cli(tmp_path, "mix", "pattern", "GW", "--layer", "0.32")
+    as_json = run_cli(tmp_path, "mix", "pattern", "GWG", "--json")
+
+    assert bad.returncode == 1, bad.stdout + bad.stderr
+    assert "mix pattern GWG: FAIL" in bad.stdout
+    assert "run-too-thick: G forms a 0.240 mm band" in bad.stdout
+    assert good.returncode == 0 and "mix pattern GW: PASS" in good.stdout
+    assert relaxed.returncode == 0, relaxed.stdout + relaxed.stderr
+    assert thick.returncode == 1 and "layer-too-thick" in thick.stdout
+    payload = json.loads(as_json.stdout)
+    assert payload["ok"] is False
+    assert [v["rule"] for v in payload["violations"]] == ["run-too-thick"]
+
+
+def test_mix_pattern_takes_variable_layer_heights(tmp_path: Path) -> None:
+    ok = run_cli(tmp_path, "mix", "pattern", "WGWB", "--heights", "0.12,0.08,0.12,0.1")
+    bad = run_cli(tmp_path, "mix", "pattern", "WGWB", "--heights", "0.12,0.08,0.2,0.1")
+    wrong = run_cli(tmp_path, "mix", "pattern", "WG", "--heights", "0.12")
+    assert ok.returncode == 0, ok.stdout + ok.stderr
+    assert bad.returncode == 1 and "0.200 mm at layer 2" in bad.stdout
+    assert wrong.returncode == 2 and "lists 1 layers for a pattern of 2" in wrong.stderr
+
+
+def test_mix_recipes_never_offer_a_pattern_the_rules_reject(tmp_path: Path) -> None:
+    out = run_cli(
+        tmp_path, "mix", "recipes", "--target", "#808080", "--slots", "1=#000000,4=#FFFFFF", "--json"
+    )
+    assert out.returncode == 0, out.stderr
+    patterns = [c["pattern"] for c in json.loads(out.stdout)["candidates"]]
+    assert "141" not in patterns and "14" in patterns
+    thick = run_cli(tmp_path, "mix", "recipes", "--target", "#808080", "--slots", "1=#000000,4=#FFFFFF", "--layer", "0.2")
+    assert thick.returncode == 2 and "0.12 mm cap" in thick.stderr

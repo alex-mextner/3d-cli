@@ -25,14 +25,16 @@ from errors import GateFailure, InputNotFound, InvalidArgument, UsageError
 
 if TYPE_CHECKING:
     from slicing.mix_model import Candidate
+    from slicing.mix_pattern import MixRules
     from slicing.mix_tester import LoadedSlot
 
 USAGE = """3d mix check FILE.3mf [--json]
+3d mix pattern PATTERN [--layer MM | --heights MM,MM,...] [--layer-cap MM] [--max-run-mm MM] [--json]
 3d mix recipes --target HEX (--slots N=HEX,... | --printer NAME) [--count N] [--max-cycle N]
-               [--layer MM] [--printops-api URL] [--json]
+               [--layer MM] [--layer-cap MM] [--max-run-mm MM] [--printops-api URL] [--json]
 3d mix tester  --target HEX (--slots N=HEX,... | --printer NAME) -o OUT/NAME [--count N]
-               [--max-cycle N] [--layer MM] [--height MM] [--base-3mf FILE.3mf]
-               [--printops-api URL] [--json]
+               [--max-cycle N] [--layer MM] [--layer-cap MM] [--max-run-mm MM] [--height MM]
+               [--base-3mf FILE.3mf] [--printops-api URL] [--json]
   Colour mixing by layers (Snapmaker Orca mixed filaments, U1).
 
   check FILE.3mf [--json]
@@ -44,11 +46,25 @@ USAGE = """3d mix check FILE.3mf [--json]
       filament); WARN when the upward slopes exceed half the side area (terraces).
       Exit 1 on FAIL, 0 otherwise (WARN is printed), 2 when the file is not a project 3MF.
 
+  pattern PATTERN
+      Check one repeating layer pattern (a character per layer: GWG, 431, WR) against the
+      layer rules and print the verdict. Exit 1 when it breaks one. The rules (the same for
+      recipes, the tester and the G-code gate):
+        - the ADDITIONAL (minor) colour is one thin layer between the others: it is never on
+          two consecutive layers, the repeat seam included (WGGGW repeats as ...WW...);
+        - no colour forms a band thicker than --max-run-mm (default: one capped layer, so a
+          colour does not repeat on adjacent layers; GWG repeats as GWGGWG, a double G band);
+        - every layer is at most --layer-cap thick (default 0.12 mm).
+      --layer MM is the layer height (default: the cap); --heights lists one per pattern
+      character for a variable layer height.
+
   recipes
       Rank every layer pattern of the loaded filaments with a cycle of at most --max-cycle
-      layers: the wall colour is the mean of the layers in linear light, scored by CIEDE2000
-      to the target plus 0.2 × the stripe ΔE seen from 30 cm. Prints the best and its
-      variants (lighter, darker, warmer, greener, short), then the next best.
+      layers that passes the layer rules: the wall colour is the mean of the layers in linear
+      light, scored by CIEDE2000 to the target plus 0.2 × the stripe ΔE seen from 30 cm.
+      Patterns that break the rules are rejected, not ranked low (with the default limits only
+      1:1 pairs, 1:1:1 triples, 2:1:1 ... qualify; pure filaments always do). Prints the best
+      and its variants (lighter, darker, warmer, greener, short), then the next best.
 
   tester
       Write OUT/NAME.3mf (Snapmaker Orca project: one mixed filament per candidate, one
@@ -63,7 +79,11 @@ USAGE = """3d mix check FILE.3mf [--json]
                       Spoolman filament id; the filament ids give the manifest its mix keys)
   --count N           candidates to keep (default 6)
   --max-cycle N       longest layer cycle (default 3; SPEC 58: short cycles read best)
-  --layer MM          layer height (default 0.12; a U1 system process: 0.08 0.12 0.16 0.2)
+  --layer MM          layer height (default 0.12; a U1 system process: 0.08 0.12 0.16 0.2);
+                      above --layer-cap no mix is possible (error), pure filaments still are
+  --layer-cap MM      thickest layer allowed in a mixed region (default 0.12)
+  --max-run-mm MM     thickest band of one colour (default: --layer-cap = one layer). 0.24 lets a
+                      majority colour double (GWG, KKW); a minor colour never may
   --height MM         swatch height (tester, default 6)
   --base-3mf FILE     take the project settings from this Snapmaker Orca project instead of
                       exporting the U1 system presets with the installed Snapmaker Orca
@@ -72,6 +92,10 @@ USAGE = """3d mix check FILE.3mf [--json]
   --json              the same summary as JSON
 
 Examples:
+  3d mix pattern GWG
+  3d mix pattern GW --layer 0.12
+  3d mix pattern GWG --max-run-mm 0.24
+  3d mix pattern WGW --heights 0.12,0.08,0.12 --json
   3d mix check out/u1_tiles.3mf
   3d mix check out/u1_tiles.3mf --json
   3d mix recipes --target '#B5654F' --slots 1=#F6C700,3=#E8732A,4=#B0284F
@@ -87,6 +111,8 @@ _FLAGS = {
     "--count",
     "--max-cycle",
     "--layer",
+    "--layer-cap",
+    "--max-run-mm",
     "--height",
     "--base-3mf",
     "-o",
@@ -193,6 +219,22 @@ def _integer(opts: dict[str, str], flag: str, default: int, lo: int, hi: int) ->
     return int(raw)
 
 
+def _rules(opts: dict[str, str]) -> MixRules:
+    """The layer rules of --layer-cap / --max-run-mm (defaults: 0.12 mm, one capped layer)."""
+    from slicing.mix_pattern import LAYER_CAP_MM, MixRules
+
+    cap = _number(opts, "--layer-cap", LAYER_CAP_MM, 0.04, 0.4)
+    run = (
+        _number(opts, "--max-run-mm", 0.0, 0.0, 5.0) if "--max-run-mm" in opts else None
+    )
+    if run is not None and run < cap:
+        raise UsageError(
+            f"--max-run-mm {run:g} is below the layer cap {cap:g}: one layer is already {cap:g} mm thick",
+            command=_CMD,
+        )
+    return MixRules(cap, run)
+
+
 def _parse_slots(text: str) -> list[LoadedSlot]:
     from printops.color import parse_hex
     from slicing.mix_tester import LoadedSlot
@@ -272,6 +314,7 @@ class _Plan:
     layer: float
     count: int
     max_cycle: int
+    rules: MixRules
 
 
 def _plan(opts: dict[str, str], layer: float | None = None) -> _Plan:
@@ -295,16 +338,18 @@ def _plan(opts: dict[str, str], layer: float | None = None) -> _Plan:
         raise UsageError(f"layer {layer!r} must have at most 4 decimals", command=_CMD)
     count = _integer(opts, "--count", 6, 1, 20)
     max_cycle = _integer(opts, "--max-cycle", 3, 1, 12)
+    rules = _rules(opts)
     try:
         ranked = rank(
             target,
             [Slot(s.slot, s.hex, s.name) for s in slots],
             max_cycle=max_cycle,
             layer_h=layer,
+            rules=rules,
         )
     except MixModelError as e:
         raise UsageError(str(e), command=_CMD) from e
-    return _Plan(target, slots, ranked, layer, count, max_cycle)
+    return _Plan(target, slots, ranked, layer, count, max_cycle, rules)
 
 
 def _emit(summary: dict[str, Any], lines: list[str], as_json: bool) -> None:
@@ -324,6 +369,65 @@ def _cand_line(n: int, c: dict[str, Any]) -> str:
     )
 
 
+def _pattern(argv: list[str]) -> int:
+    import json
+
+    from slicing.mix_pattern import analyse_pattern
+
+    if not argv or argv[0].startswith("-"):
+        raise UsageError(
+            "pattern takes the layer pattern first",
+            command=_CMD,
+            remediation=["3d mix pattern GWG", "3d mix pattern 431 --layer 0.12"],
+        )
+    text, rest = argv[0], argv[1:]
+    opts, as_json = _options(
+        rest, {"--layer", "--heights", "--layer-cap", "--max-run-mm"}
+    )
+    rules = _rules(opts)
+    if "--heights" in opts and "--layer" in opts:
+        raise UsageError("pass --layer or --heights, not both", command=_CMD)
+    thickness: float | list[float]
+    if "--heights" in opts:
+        try:
+            thickness = [float(x) for x in opts["--heights"].split(",")]
+        except ValueError:
+            raise UsageError(
+                f"--heights {opts['--heights']!r} is not a comma list of numbers",
+                command=_CMD,
+            ) from None
+        if len(thickness) != len(text):
+            raise UsageError(
+                f"--heights lists {len(thickness)} layers for a pattern of {len(text)}",
+                command=_CMD,
+            )
+    else:
+        thickness = _number(opts, "--layer", rules.layer_cap_mm, 0.01, 1.0)
+    try:
+        report = analyse_pattern(text, thickness, rules)
+    except ValueError as e:
+        raise UsageError(str(e), command=_CMD) from e
+    if as_json:
+        print(json.dumps(report.to_dict(), indent=2, ensure_ascii=False))
+    else:
+        verdict = "PASS" if report.ok else "FAIL"
+        kind = "repeating" if report.mixed else "single colour (no mix)"
+        print(
+            f"mix pattern {text}: {verdict} ({kind}, cap {rules.layer_cap_mm:g} mm, run limit {rules.run_limit_mm:g} mm)"
+        )
+        if report.minor:
+            print(f"  minor colour(s): {', '.join(report.minor)}")
+        for v in report.violations:
+            print(f"  FAIL {v.rule}: {v.detail}")
+    if not report.ok:
+        raise GateFailure(
+            f"mix pattern {text}: {len(report.violations)} rule violation(s)",
+            command=_CMD,
+            silent=True,
+        )
+    return 0
+
+
 def _recipes(argv: list[str]) -> int:
     from slicing.mix_model import pick
 
@@ -334,12 +438,15 @@ def _recipes(argv: list[str]) -> int:
     summary = {
         "target": target,
         "layer_height": layer,
+        "layer_cap_mm": p.rules.layer_cap_mm,
+        "max_run_mm": p.rules.run_limit_mm,
         "max_cycle": max_cycle,
         "slots": [s.to_dict() for s in slots],
         "candidates": [{"number": i + 1, **c} for i, c in enumerate(chosen)],
     }
     lines = [
         f"mix recipes for {target} (layer {layer:g} mm, cycle ≤ {max_cycle}, "
+        f"no colour band over {p.rules.run_limit_mm:g} mm, "
         + ", ".join(f"T{s.slot} {s.hex}" for s in slots)
         + ")"
     ] + [_cand_line(i + 1, c) for i, c in enumerate(chosen)]
@@ -458,12 +565,14 @@ def run(argv: list[str]) -> int:
     sub, rest = argv[0], argv[1:]
     if sub == "check":
         return _check(rest)
+    if sub == "pattern":
+        return _pattern(rest)
     if sub == "recipes":
         return _recipes(rest)
     if sub == "tester":
         return _tester(rest)
     raise InvalidArgument(
-        "subcommand", sub, ["check", "recipes", "tester"], command=_CMD
+        "subcommand", sub, ["check", "pattern", "recipes", "tester"], command=_CMD
     )
 
 
