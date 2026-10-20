@@ -66,7 +66,7 @@ class PartFaces:
     slope: float = 0.0
     status: str = PASS
     detail: str = ""
-    object_id: int = 0  # the build item's object id (Metadata/layer_heights_profile.txt key)
+    object_id: int = 0  # 1-based position among the build items (the `object_id=` key of Metadata/layer_heights_profile.txt)
     object_height: float = 0.0  # mm, of the whole object (all its parts)
     z_lo: float = 0.0  # mm above the object's lowest point
     z_hi: float = 0.0
@@ -91,6 +91,7 @@ class PartFaces:
 class MixFaceReport:
     parts: list[PartFaces] = field(default_factory=list)
     mixed_rows: int = 0
+    objects: int = 0  # build items, mixed or not
 
     @property
     def status(self) -> str:
@@ -307,7 +308,7 @@ def check(project_3mf: str) -> MixFaceReport:
             if not recipes:
                 return report
             model = _Model(zf)
-            report.parts = _parts(model, settings, recipes)
+            report.parts, report.objects = _parts(model, settings, recipes)
     except (
         zipfile.BadZipFile,
         KeyError,
@@ -327,13 +328,13 @@ def check(project_3mf: str) -> MixFaceReport:
 
 def _parts(
     model: _Model, settings: dict[str, _ObjectSettings], recipes: dict[int, str]
-) -> list[PartFaces]:
+) -> tuple[list[PartFaces], int]:
     main = "3D/3dmodel.model"
     build = model.root(main).find(f"{{{_CORE}}}build")
     if build is None or not len(build):
         raise ProjectError("3D/3dmodel.model has no build items (no geometry to check)")
     out: list[PartFaces] = []
-    for item in build:
+    for position, item in enumerate(build, start=1):
         part = item.get(f"{{{_PROD}}}path") or main
         oid = item.get("objectid", "")
         obj = model.object(part, oid)
@@ -379,7 +380,7 @@ def _parts(
                 acc.top,
                 acc.side,
                 acc.slope,
-                object_id=int(oid) if oid.isdigit() else 0,
+                object_id=position,
             )
             pf.status, pf.detail = classify(acc.top, acc.side, acc.slope)
             mixed.append((pf, acc))
@@ -387,7 +388,7 @@ def _parts(
             pf.object_height = z_hi - z_lo
             pf.z_lo, pf.z_hi = acc.z_min - z_lo, acc.z_max - z_lo
             out.append(pf)
-    return out
+    return out, len(build)
 
 
 def _has_mixed(st: _ObjectSettings, recipes: dict[int, str]) -> bool:
