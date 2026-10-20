@@ -131,6 +131,39 @@ less out/proof-report.md            # verdict table, renders, overhang heat-map,
   3d prep "cat phone holder full.stl" --out ../out --spec chekhov/prep.yaml
 ```
 
+## Recipes
+
+Copy-paste commands, each run before it was written down. A recipe that needs a printer, a slicer
+or a service says so.
+
+### Colour mix (Snapmaker U1 Full Spectrum)
+
+A mixed filament prints one filament per layer and alternates them; the eye averages the stripes on
+walls. The additional colour must be one thin layer between the others — never on two layers in a
+row, and layers over a mixed part at most 0.12 mm ([layer rules](GLOSSARY.md#layer-rules-mix)).
+
+```bash
+# Is this layer pattern legal? GW passes; GWG repeats as GWGGWG, a double-thick G band
+3d mix pattern GW
+3d mix pattern GWG                      # exit 1: run-too-thick
+
+# Which mixes of the loaded spools come closest to a colour? (illegal patterns are rejected)
+3d mix recipes --target '#B5654F' --slots 1=#F6C700,3=#E8732A,4=#B0284F
+
+# A small standing-swatch plate to print first                                  # needs Snapmaker Orca
+3d mix tester --target '#B5654F' --slots 1=#F6C700,3=#E8732A,4=#B0284F -o out/mix/terracotta
+
+# Before slicing: mixed faces vertical, layers over mixed parts thin; cap them if not
+3d mix check out/cat.3mf
+3d mix profile out/cat.3mf -o out/cat.capped.3mf
+
+# After slicing out/cat.capped.3mf: what was really printed (heads per layer, real layer Z)
+3d mix gcode out/cat.capped.gcode --project out/cat.capped.3mf
+3d print-preflight out/cat.capped.gcode --source-3mf out/cat.capped.3mf --offline   # `mix face` + `mix layers` lines
+```
+
+Details: [docs/commands/mix.md](docs/commands/mix.md).
+
 ## Shell composition — pipes, redirects, and conditionals
 
 Every `3d` command is a plain Unix tool: it reads files, writes files, prints text to stdout,
