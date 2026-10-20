@@ -88,7 +88,7 @@ region handles so the silhouette matches reference masks — and prints the per-
 | `--collage FILE.png` | before / after / displacement heat-map in front, left and top views, drawn by the numpy rasteriser (needs Pillow). | `--collage fur.png` |
 | `--verify-determinism` | runs the spec twice and exits 1 unless both meshes are identical. | `--verify-determinism` |
 | `--seed N` | overrides the spec seed. | `--seed 7` |
-| `--no-self-intersections` | skips the self-intersection count (pymeshlab, else open3d, when installed; `null` otherwise). | `--no-self-intersections` |
+| `--no-self-intersections` | skips the self-intersection count (pymeshlab when it imports, else a built-in KD-tree edge/triangle test: ~3 s on 400k faces; counts transversal piercings, not coplanar overlaps). | `--no-self-intersections` |
 | `--json` | prints the whole report instead of the summary. | `--json` |
 
 Exit codes: `0` PASS, `1` gate FAIL (a keep-out zone moved, or two runs differ — nothing is written), `2` usage / input
@@ -138,8 +138,8 @@ zone unless the spec sets `keepout_tolerance_mm: <mm>`, which switches the gate 
 | `symmetrize` | mirror (average, or copy one side) | `axis` x\|y\|z, `at`, `mode` average\|mirror_positive\|mirror_negative |
 | `grab` (alias `move`) | move / rotate / scale handle regions; the surface follows | `handles: [{region, translate, rotate: {axis, deg}, scale, pivot}]`, `anchors`, `solver` none\|harmonic\|biharmonic\|arap (arap), `iterations` (10), `influence` (mm; solve only this patch), `handle_min` |
 | `fur` (alias `relief`) | seeded strand relief along the normal, outward only | `amplitude`, `amplitude_regions`, `flow`, `pitch`, `length`, `fine`, `warp`, `clumps`, `normal_smoothing`, `overhang_safe: {max_angle_deg}` |
-| `remesh` | `refine`: conforming midpoint splits to `target_edge` (vertex-preserving); `pymeshlab`: isotropic explicit remeshing | `engine`, `target_edge` (mm), `iterations` |
-| `decimate` | `manifold3d`: tolerance simplify; `quadric`: fast-simplification to a face count | `engine`, `tolerance`, `target_faces` |
+| `remesh` | `refine` (default): conforming midpoint splits to `target_edge`, vertex-preserving, no quality guarantee; `botsch`: isotropic remeshing via `gpytoolbox` (best triangle quality, moves vertices); `pymeshlab`: isotropic explicit remeshing (GPL, needs libGL) | `engine`, `target_edge` (mm), `iterations`, `feature_deg` |
+| `decimate` | `manifold3d` (default): tolerance simplify; `quadric` (default when `target_faces` is set): `fast-simplification` to a face count. Both leave sliver triangles: remesh before a further `grab`. | `engine`, `tolerance` (mm), `target_faces` |
 | `repair` | `builtin` (trimesh: merge, drop degenerate/duplicate faces, fix winding, fill holes) or `meshfix` (the `3d mesh --repair` adapter) | `engine` |
 | `fit_silhouette` | see below | `views`, `handles`, `iterations`, `step_mm`, `min_step_mm`, `min_gain`, `anchors`, `influence` |
 
@@ -195,11 +195,19 @@ volume, bbox, sha256), `watertight_before|after`, `volume_before_mm3|after`, per
 rounds), `keepout` (`locked_vertices`, `fade_vertices`, `max_displacement_mm`, `tolerance_mm`, `gate`),
 `self_intersections` (`before` / `after`), `determinism`, `timing_s`.
 
+## Optional dependencies
+
+Core needs only what `3d` already ships (numpy, scipy, trimesh, manifold3d, pyyaml). Optional, each with a structured
+error naming the install line when missing: `pillow` (reference masks, `--collage`), `gpytoolbox` (remesh `botsch`),
+`fast-simplification` (decimate `quadric`), `pymeshlab` (remesh `pymeshlab`, faster self-intersection count; GPL-3,
+needs libGL), `embreex` (~100x faster `gap` ray casts). Why these and not libigl / OpenVDB / bpy, with benchmarks:
+[research note](../research/mesh-fit-2026-10-20.md).
+
 ## Reproducibility, honestly
 
 Byte-identical output needs the same input, spec, seed **and** library versions. Inside one environment it holds for
 any thread count (SuperLU and the stacked 3x3 SVDs are single-thread deterministic; reductions use ordered
-`np.bincount`) — `tests/e2e/test_mesh_deform_workflows.py` runs `OMP_NUM_THREADS=1` against `8` and compares SHA-256.
+`np.bincount`; the tool pins threaded BLAS to one thread because the research found it changes the bits of large dense products) — `tests/e2e/test_mesh_deform_workflows.py` runs `OMP_NUM_THREADS=1` against `8` and compares SHA-256.
 Across machines, `gap` regions with the embree backend (float32) can differ from `rtree` (float64) in the last bits;
 pin `backend: rtree` when a hash must travel. `.obj`/`.ply` are written by trimesh and are not byte-guaranteed.
 The STL/3MF writers use a fixed header, fixed zip timestamps and float32 coordinates (the input is canonicalised to

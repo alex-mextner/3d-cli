@@ -54,7 +54,7 @@ Options:
   --collage FILE.png        before / after / displacement heat-map views (numpy rasteriser; needs Pillow)
   --verify-determinism      run the spec twice, fail (exit 1) unless both meshes are identical
   --seed N                  override the spec seed
-  --no-self-intersections   skip the self-intersection count (pymeshlab or open3d, when installed)
+  --no-self-intersections   skip the self-intersection count (pymeshlab, else a built-in KD-tree test)
   --json                    print the full report instead of the summary
 
 Spec (YAML/JSON): seed, regions, keepout, ops, [landmarks, keepout_tolerance_mm].
@@ -66,7 +66,7 @@ Spec (YAML/JSON): seed, regions, keepout, ops, [landmarks, keepout_tolerance_mm]
             The gate re-checks the OUTPUT against the INPUT: max displacement must be 0.0 mm, else exit 1.
   ops:      smooth | inflate | draw | pinch | crease | scale_local | symmetrize | grab (solver none|harmonic|
             biharmonic|arap, handles, anchors, influence) | fur (alias relief; overhang_safe) | remesh (engine
-            refine|pymeshlab) | decimate (engine manifold3d|quadric) | repair (engine builtin|meshfix) |
+            refine|botsch|pymeshlab) | decimate (engine manifold3d|quadric) | repair (engine builtin|meshfix) |
             fit_silhouette (views, handles)
 
 Exit: 0 PASS, 1 gate FAIL (keep-out moved / not reproducible), 2 usage or input error.

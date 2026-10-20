@@ -30,6 +30,7 @@ from errors import GateFailure, UsageError
 from . import brushes, deform, fit, relief, retopo
 from .meshio import describe, mesh_sha256
 from .regions import LOCK_WEIGHT, RegionContext
+from .selfint import count_self_intersections
 from .spec import TOPOLOGY_OPS
 
 Array = NDArray[np.float64]
@@ -259,40 +260,6 @@ def _surface_distance_of_missing(
         trimesh.Trimesh(V, F, process=False), missing
     )
     return float(dist.max())
-
-
-def count_self_intersections(V: Array, F: IntArray) -> dict[str, Any]:
-    """Self-intersecting face count (pymeshlab) or the open3d boolean; None when neither is installed."""
-    try:
-        import pymeshlab
-
-        ms = pymeshlab.MeshSet()
-        ms.add_mesh(pymeshlab.Mesh(vertex_matrix=V, face_matrix=F.astype(np.int32)))
-        ms.apply_filter("compute_selection_by_self_intersections_per_face")
-        return {
-            "engine": "pymeshlab",
-            "count": int(ms.current_mesh().selected_face_number()),
-        }
-    except ImportError:
-        pass
-    try:
-        import open3d as o3d
-
-        tm = o3d.geometry.TriangleMesh(
-            o3d.utility.Vector3dVector(V),
-            o3d.utility.Vector3iVector(F.astype(np.int32)),
-        )
-        return {
-            "engine": "open3d",
-            "count": None,
-            "self_intersecting": bool(tm.is_self_intersecting()),
-        }
-    except ImportError:
-        return {
-            "engine": None,
-            "count": None,
-            "note": "install pymeshlab or open3d to count self-intersections",
-        }
 
 
 def spec_sha256(spec: Mapping[str, Any]) -> str:
