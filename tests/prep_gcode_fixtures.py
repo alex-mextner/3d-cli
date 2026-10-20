@@ -93,3 +93,36 @@ def gcode_text(
 def write_gcode(path: Path, layers: Sequence[tuple[float, int]], **kw: object) -> Path:
     path.write_text(gcode_text(layers, **kw))  # type: ignore[arg-type]
     return path
+
+
+EYE_BBOX = (100.0, 130.0, 110.0, 140.0)  # x0, y0, x1, y1: the "eye" part, beside the body disc (x 115..155)
+
+
+def multipart_gcode(
+    layers: Sequence[tuple[float, Sequence[int]]],
+    *,
+    outside_bbox: dict[int, int] | None = None,
+) -> str:
+    """A tool-0 body disc on every layer plus a small box at `EYE_BBOX` printed by the tools listed per layer.
+
+    `layers` = (thickness mm, tools printing inside the eye bbox in that layer, in print order).
+    `outside_bbox` = {layer index: tool}: that tool also prints a line on the body (outside the bbox) in that layer.
+    """
+    x0, y0, x1, y1 = EYE_BBOX
+    lines = ["M83", "T0"]
+    z = 0.0
+    for k, (h, eye_tools) in enumerate(layers):
+        z += h
+        lines += [";LAYER_CHANGE", f";Z:{z:.3f}", f";HEIGHT:{h:.3f}", "T0", ";TYPE:Outer wall"]
+        lines += _extrude(_loop(CENTRE[0], CENTRE[1], 20.0))
+        if outside_bbox and k in outside_bbox:
+            lines += [f"T{outside_bbox[k]}", ";TYPE:Inner wall", *_extrude([(125.0, 135.0), (145.0, 135.0)])]
+        for t in eye_tools:
+            lines += [f"T{t}", ";TYPE:Internal solid infill"]
+            lines += _extrude([(x0 + 1, y0 + 1), (x1 - 1, y0 + 1), (x1 - 1, y1 - 1), (x0 + 1, y1 - 1)])
+    return "\n".join(lines) + "\n"
+
+
+def write_multipart(path: Path, layers: Sequence[tuple[float, Sequence[int]]], **kw: object) -> Path:
+    path.write_text(multipart_gcode(layers, **kw))  # type: ignore[arg-type]
+    return path

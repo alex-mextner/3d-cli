@@ -19,6 +19,9 @@ INVARIANTS:
     height), `;TYPE:<feature>`, `Tn` tool changes (tool numbers are 0-based G-code tools: slot n = `T(n-1)`),
     `G0/G1` moves with X/Y/E, relative (M83) or absolute (M82) extrusion. Extrusion before the first
     `;LAYER_CHANGE` (start G-code purge lines) is not part of any layer.
+  * Manifest `parts[]` (the project builder's real schema: name, assign{slot|mix}, tools, bbox, z_range) become
+    non-exclusive regions: parts overlap in Z, so a mix is judged only on its EXCLUSIVE tools (those no part
+    overlapping it in Z and XY also prints with) and only on extrusion inside the part's bbox; see `exclusive_tools`.
   * Regions are Z slabs (a layer belongs to a region when its mid-plane is inside [z_min, z_max]) in which the WHOLE
     layer is expected to print with the region's tools; prime tower, wipe tower, skirt, brim and `Custom` runs are
     ignored when attributing a layer to tools.
@@ -60,6 +63,9 @@ from prep.contracts import Verdict, worst
 NON_MODEL_KINDS = frozenset({"Prime tower", "Wipe tower", "Custom", "Skirt", "Brim"})
 WALL_KINDS = frozenset({"Outer wall", "Inner wall"})
 _EPS_MM = 1e-3
+_BBOX_MARGIN_MM = (
+    0.2  # extrusion centre lines sit inside the mesh bbox; absorb rounding
+)
 _MIN_LOOP_POINTS = 8  # a wall run with fewer points is a stub, not a loop
 _DEFAULT_LINE_MM = 0.45
 
@@ -372,13 +378,20 @@ class GateSpec:
 
 @dataclass(frozen=True)
 class Region:
-    """A Z slab with the tools it must print with. `tools` = only these tools; `mix` = the per-layer cycle."""
+    """A Z slab with the tools it must print with. `tools` = only these tools; `mix` = the per-layer cycle.
+
+    `exclusive=True` (manifest `regions`): the whole layer inside the slab belongs to this region.
+    `exclusive=False` (manifest `parts`): the part overlaps others in z, `bbox` = (x0, y0, x1, y1) mm in G-code
+    coordinates is where it sits, and only tools no overlapping part also uses can be attributed to it.
+    """
 
     name: str
     z_min: float
     z_max: float
     tools: tuple[int, ...] | None = None
     mix: tuple[int, ...] | None = None
+    bbox: tuple[float, float, float, float] | None = None
+    exclusive: bool = True
 
 
 @dataclass(frozen=True)
@@ -414,6 +427,9 @@ class GateExpectations:
         if not isinstance(data, dict):
             raise InvalidArgument("manifest", str(p), ["a JSON object"], command="prep")
         regions = tuple(_region(r, str(p)) for r in data.get("regions") or [])
+        if not regions:
+            parts = (_part_region(r, str(p)) for r in data.get("parts") or [])
+            regions = tuple(r for r in parts if r is not None)
         allowed: frozenset[int] | None = None
         if data.get("allowed_tools") is not None:
             allowed = frozenset(
@@ -475,6 +491,45 @@ def _region(raw: object, src: str) -> Region:
         z_max=float(raw["z_max"]),
         tools=pick("tools", "slots"),
         mix=pick("mix", "mix_slots"),
+    )
+
+
+def _part_region(raw: object, src: str) -> Region | None:
+    """One manifest `parts[]` entry -> Region, None when the part names no tool (nothing to judge)."""
+    if not isinstance(raw, dict):
+        raise InvalidArgument(
+            "manifest parts[]", repr(raw), ["object"], command="prep", extra=src
+        )
+    raw_assign = raw.get("assign")
+    assign: dict[str, Any] = raw_assign if isinstance(raw_assign, dict) else {}
+    mix: tuple[int, ...] | None = None
+    tools: tuple[int, ...] | None = None
+    if assign.get("mix") is not None:
+        mix = _tool_list(str(assign["mix"]), -1, "parts[].assign.mix", src)
+    elif assign.get("slot") is not None:
+        tools = (int(assign["slot"]) - 1,)
+    elif raw.get("tools") is not None:
+        tools = _tool_list(raw["tools"], 0, "parts[].tools", src)
+    if mix is None and tools is None:
+        return None
+    bbox_raw = raw.get("bbox")
+    zr = raw.get("z_range")
+    if zr is None and bbox_raw is not None:
+        zr = [bbox_raw[0][2], bbox_raw[1][2]]
+    if zr is None:
+        return None
+    bbox: tuple[float, float, float, float] | None = None
+    if bbox_raw is not None:
+        (ax, ay, _az), (bx, by, _bz) = bbox_raw
+        bbox = (float(ax), float(ay), float(bx), float(by))
+    return Region(
+        name=str(raw.get("name", "part")),
+        z_min=float(zr[0]),
+        z_max=float(zr[1]),
+        tools=tools,
+        mix=mix,
+        bbox=bbox,
+        exclusive=False,
     )
 
 
@@ -755,7 +810,118 @@ def _t(tools: Iterable[int]) -> str:
     return "[" + ", ".join(f"T{t}" for t in sorted(tools)) + "]"
 
 
-def _gate_region_tools(parsed: Parsed, exp: GateExpectations | None) -> Gate:
+@dataclass(frozen=True)
+class _Partial:
+    """Verdict inputs for one mix region that overlaps other parts (`Region.exclusive` False).
+
+    `skip` names why nothing can be judged; otherwise `adjacent` / `follow` list the defects of the region's
+    exclusive tools measured inside its bbox, one string per tool.
+    """
+
+    skip: str | None
+    adjacent: list[str]
+    follow: list[str]
+
+
+def _tools_of(reg: Region) -> set[int]:
+    return set(reg.mix or reg.tools or ())
+
+
+def exclusive_tools(reg: Region, exp: GateExpectations) -> frozenset[int]:
+    """Tools of `reg`'s mix that no other part overlapping it in z AND xy also prints with."""
+    mine = set(reg.mix or ())
+    for other in exp.regions:
+        if other is reg or not _tools_of(other):
+            continue
+        if not (reg.z_min < other.z_max and other.z_min < reg.z_max):
+            continue
+        if reg.bbox is not None and other.bbox is not None:
+            ax0, ay0, ax1, ay1 = reg.bbox
+            bx0, by0, bx1, by1 = other.bbox
+            if not (ax0 < bx1 and bx0 < ax1 and ay0 < by1 and by0 < ay1):
+                continue
+        mine -= _tools_of(other)
+    return frozenset(mine)
+
+
+def _tools_inside(
+    layer: Layer, bbox: tuple[float, float, float, float] | None, wanted: frozenset[int]
+) -> set[int]:
+    """Which of `wanted` extrude with a point inside `bbox` (+ margin) in this layer; the tower etc. never count."""
+    found: set[int] = set()
+    for r in layer.runs:
+        if r.tool not in wanted or r.tool in found or r.kind in NON_MODEL_KINDS:
+            continue
+        pts = r.pts[1:]
+        if bbox is not None:
+            x0, y0, x1, y1 = bbox
+            m = _BBOX_MARGIN_MM
+            pts = pts[
+                (pts[:, 0] >= x0 - m)
+                & (pts[:, 0] <= x1 + m)
+                & (pts[:, 1] >= y0 - m)
+                & (pts[:, 1] <= y1 + m)
+            ]
+        if len(pts):
+            found.add(r.tool)
+    return found
+
+
+def _partial_mix(parsed: Parsed, reg: Region, exp: GateExpectations) -> _Partial:
+    assert reg.mix
+    excl = exclusive_tools(reg, exp)
+    if not excl:
+        return _Partial(
+            f"every tool of mix {_t(reg.mix)} is also used by an overlapping part",
+            [],
+            [],
+        )
+    slab = [
+        (k, layer)
+        for k, layer in enumerate(parsed.layers)
+        if _in_slab(layer, reg.z_min, reg.z_max)
+    ]
+    if not slab:
+        return _Partial(f"no layers in z {reg.z_min:g}..{reg.z_max:g}", [], [])
+    present = {k: _tools_inside(layer, reg.bbox, excl) for k, layer in slab}
+    pat = reg.mix
+    adjacent: list[str] = []
+    follow: list[str] = []
+    ks = [k for k, _ in slab]
+    for tool in sorted(excl):
+        pairs = [k for k in ks if tool in present[k] and tool in present.get(k + 1, ())]
+        if pairs:
+            adjacent.append(
+                f"{reg.name}: T{tool} prints inside the part's bbox on {len(pairs)} adjacent layer pair(s) "
+                f"(first layers {pairs[0]}-{pairs[0] + 1}, z={parsed.layers[pairs[0]].z:g})"
+            )
+        missing = [
+            k for k in ks if pat[k % len(pat)] == tool and tool not in present[k]
+        ]
+        extra = [k for k in ks if pat[k % len(pat)] != tool and tool in present[k]]
+        if missing or extra:
+            follow.append(
+                f"{reg.name}: T{tool} does not follow mix {''.join(map(str, pat))} inside the bbox — "
+                f"absent on {len(missing)} layer(s) where the pattern wants it"
+                f"{' (first ' + str(missing[0]) + ')' if missing else ''}, present on {len(extra)} where it must not be"
+                f"{' (first ' + str(extra[0]) + ')' if extra else ''}"
+            )
+    return _Partial(None, adjacent, follow)
+
+
+def _partials(parsed: Parsed, exp: GateExpectations | None) -> dict[Region, _Partial]:
+    if exp is None:
+        return {}
+    return {
+        r: _partial_mix(parsed, r, exp)
+        for r in exp.regions
+        if r.mix and not r.exclusive
+    }
+
+
+def _gate_region_tools(
+    parsed: Parsed, exp: GateExpectations | None, partials: dict[Region, _Partial]
+) -> Gate:
     regs = [r for r in exp.regions if r.tools or r.mix] if exp else []
     if not regs:
         return Gate(
@@ -764,7 +930,21 @@ def _gate_region_tools(parsed: Parsed, exp: GateExpectations | None) -> Gate:
             "no manifest regions with tools or mix (GateExpectations.regions)",
         )
     bad: list[str] = []
+    skipped: list[str] = []
+    checked = 0
     for reg in regs:
+        if not reg.exclusive:
+            if not reg.mix:
+                skipped.append(f"{reg.name}: part overlaps other parts' tools")
+                continue
+            part = partials[reg]
+            if part.skip:
+                skipped.append(f"{reg.name}: {part.skip}")
+                continue
+            checked += 1
+            bad += part.follow
+            continue
+        checked += 1
         idx = [
             (k, layer)
             for k, layer in enumerate(parsed.layers)
@@ -784,12 +964,15 @@ def _gate_region_tools(parsed: Parsed, exp: GateExpectations | None) -> Gate:
                     f"{reg.name}: {len(off)} of {len(used)} layers print with tools outside {_t(reg.tools)} "
                     f"(first layer {off[0]}: {_t(parsed.layers[off[0]].model_tools)})"
                 )
+    note = f" (skipped: {'; '.join(skipped)})" if skipped else ""
+    if not checked and not bad:
+        return Gate("region-tools", "SKIP", "; ".join(skipped))
     return Gate(
         "region-tools",
         "FAIL" if bad else "PASS",
         "; ".join(bad)
         if bad
-        else f"{len(regs)} region(s) print with exactly the expected tools / mix cycle",
+        else f"{checked} region(s) print with exactly the expected tools / mix cycle{note}",
     )
 
 
@@ -843,7 +1026,10 @@ def _minor_adjacent(seq: list[str], heights: list[float], cap: float) -> int:
 
 
 def _gate_mix_minor(
-    parsed: Parsed, spec: GateSpec, exp: GateExpectations | None
+    parsed: Parsed,
+    spec: GateSpec,
+    exp: GateExpectations | None,
+    partials: dict[Region, _Partial],
 ) -> Gate:
     mixes = _mix_regions(exp)
     if not mixes:
@@ -853,8 +1039,17 @@ def _gate_mix_minor(
             "no mix region in the manifest (GateExpectations.regions[].mix)",
         )
     bad: list[str] = []
+    skipped: list[str] = []
     seen = 0
     for reg in mixes:
+        if not reg.exclusive:
+            part = partials[reg]
+            if part.skip:
+                skipped.append(f"{reg.name}: {part.skip}")
+                continue
+            seen += 1
+            bad += part.adjacent
+            continue
         layers = [
             layer
             for layer in parsed.layers
@@ -869,18 +1064,19 @@ def _gate_mix_minor(
             bad.append(
                 f"{reg.name}: {n} adjacent layer pair(s) print the same minor colour (sequence {','.join(seq[:12])}...)"
             )
-    if not seen:
+    note = f" (skipped: {'; '.join(skipped)})" if skipped else ""
+    if not seen and not bad:
         return Gate(
             "mix-minor-adjacent",
             "SKIP",
-            "no mix region has two printed layers to compare",
+            "; ".join(skipped) or "no mix region has two printed layers to compare",
         )
     return Gate(
         "mix-minor-adjacent",
         "FAIL" if bad else "PASS",
         "; ".join(bad)
         if bad
-        else f"{seen} mix region(s): the minor colour never prints on adjacent layers",
+        else f"{seen} mix region(s): the minor colour never prints on adjacent layers{note}",
     )
 
 
@@ -959,6 +1155,7 @@ def check_gcode(
     """Parse `path` and run every gate. See the module header for gate names and SKIP semantics."""
     parsed = parse(path)
     zone = spec.zone or (expectations.structural_zone if expectations else None)
+    partials = _partials(parsed, expectations)
     gates = [
         _gate_walls(parsed, spec, zone),
         _gate_infill(parsed, spec, zone),
@@ -966,8 +1163,8 @@ def check_gcode(
         _gate_layer_heights(parsed, spec),
         _gate_mix_layer_cap(parsed, spec, expectations),
         _gate_tools_allowed(parsed, spec, expectations),
-        _gate_region_tools(parsed, expectations),
-        _gate_mix_minor(parsed, spec, expectations),
+        _gate_region_tools(parsed, expectations, partials),
+        _gate_mix_minor(parsed, spec, expectations, partials),
         _gate_prime_tower(parsed, expectations),
         _gate_bed(parsed, spec),
     ]

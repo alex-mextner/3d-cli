@@ -472,3 +472,116 @@ def test_manifest_structural_zone_drives_walls_gate(tmp_path: Path) -> None:
     assert (
         gate(run(tmp_path, FLAT, GateSpec(), exp, loops=2), "walls").verdict == "FAIL"
     )
+
+
+# ---- overlapping parts (manifest `parts`): judged inside the part bbox, on the tools no other part shares
+
+from prep_gcode_fixtures import EYE_BBOX, write_multipart  # noqa: E402
+
+EYE = Region("eyes", 0.5, 2.0, mix=(1, 3), bbox=EYE_BBOX, exclusive=False)
+CHEEK = Region("cheeks", 0.0, 2.4, tools=(1,), bbox=(95.0, 125.0, 115.0, 145.0), exclusive=False)
+FAR_GREEN = Region("elsewhere", 0.0, 2.4, tools=(3,), bbox=(200.0, 200.0, 210.0, 210.0), exclusive=False)
+BASE = Region("base", 0.0, 2.4, tools=(0,), bbox=(110.0, 110.0, 160.0, 160.0), exclusive=False)
+PARTS = GateExpectations(regions=(EYE, CHEEK, FAR_GREEN, BASE))
+# layer k prints tool 1 (even) / tool 3 (odd) in the eye box; the overlapping cheek part adds tool 1 on odd layers
+GOOD_EYES = [(0.1, [1] if k % 2 == 0 else [3, 1]) for k in range(24)]
+
+
+def parts_report(tmp_path: Path, layers, exp: GateExpectations = PARTS, **kw):  # type: ignore[no-untyped-def]
+    return check_gcode(write_multipart(tmp_path / "mp.gcode", layers, **kw), GateSpec(), exp)
+
+
+def test_exclusive_tools_ignore_parts_that_do_not_overlap_and_drop_tools_of_overlapping_ones() -> None:
+    from prep.gcode_gates import exclusive_tools
+
+    assert exclusive_tools(EYE, PARTS) == frozenset({3})  # cheek shares tool 1; the far green part is elsewhere
+    overlapping_green = Region("g", 0.0, 2.4, tools=(3,), bbox=(105.0, 135.0, 120.0, 150.0), exclusive=False)
+    assert exclusive_tools(EYE, GateExpectations(regions=(EYE, overlapping_green))) == frozenset({1})
+    above = Region("g", 5.0, 6.0, tools=(3,), bbox=(105.0, 135.0, 120.0, 150.0), exclusive=False)
+    assert exclusive_tools(EYE, GateExpectations(regions=(EYE, above))) == frozenset({1, 3})
+
+
+def test_overlapping_parts_conforming_eye_passes_all_three_gates(tmp_path: Path) -> None:
+    rep = parts_report(tmp_path, GOOD_EYES)
+    for name in ("mix-layer-cap", "region-tools", "mix-minor-adjacent"):
+        assert gate(rep, name).verdict == "PASS", gate(rep, name).detail
+    assert "skipped" in gate(rep, "region-tools").detail  # pure overlapping parts are not judged, and say so
+
+
+def test_green_on_two_adjacent_layers_inside_the_bbox_fails(tmp_path: Path) -> None:
+    layers = list(GOOD_EYES)
+    layers[10] = (0.1, [3, 1])  # layer 10 is an even layer: pattern wants tool 1 only, and 3 is now on 9, 10, 11
+    rep = parts_report(tmp_path, layers)
+    adj = gate(rep, "mix-minor-adjacent")
+    assert adj.verdict == "FAIL" and "T3 prints inside the part's bbox on 2 adjacent layer pair(s)" in adj.detail
+    assert "first layers 9-10" in adj.detail
+    follow = gate(rep, "region-tools")
+    assert follow.verdict == "FAIL" and "present on 1 where it must not be (first 10)" in follow.detail
+
+
+def test_missing_green_on_a_pattern_layer_fails_region_tools_only(tmp_path: Path) -> None:
+    layers = list(GOOD_EYES)
+    layers[11] = (0.1, [1])  # odd layer without green: stripe lost
+    rep = parts_report(tmp_path, layers)
+    f = gate(rep, "region-tools")
+    assert f.verdict == "FAIL" and "absent on 1 layer(s) where the pattern wants it (first 11)" in f.detail
+    assert gate(rep, "mix-minor-adjacent").verdict == "PASS"
+
+
+def test_green_outside_the_bbox_does_not_count(tmp_path: Path) -> None:
+    # green printed on the body in an even layer, next to an odd layer's green inside the bbox
+    rep = parts_report(tmp_path, GOOD_EYES, outside_bbox={10: 3, 12: 3})
+    assert gate(rep, "mix-minor-adjacent").verdict == "PASS"
+    assert gate(rep, "region-tools").verdict == "PASS"
+
+
+def test_thick_layer_inside_the_eye_slab_fails_mix_layer_cap(tmp_path: Path) -> None:
+    layers = list(GOOD_EYES)
+    layers[8] = (0.2, layers[8][1])
+    cap = gate(parts_report(tmp_path, layers), "mix-layer-cap")
+    assert cap.verdict == "FAIL" and "eyes: 1 of" in cap.detail and "0.200" in cap.detail
+
+
+def test_mix_without_exclusive_tool_is_skip_naming_the_reason(tmp_path: Path) -> None:
+    both = Region("both", 0.0, 2.4, tools=(1, 3), bbox=(105.0, 135.0, 120.0, 150.0), exclusive=False)
+    rep = parts_report(tmp_path, GOOD_EYES, GateExpectations(regions=(EYE, both)))
+    for name in ("region-tools", "mix-minor-adjacent"):
+        g = gate(rep, name)
+        assert g.verdict == "SKIP" and "also used by an overlapping part" in g.detail
+
+
+def test_pure_overlapping_parts_alone_skip_region_tools(tmp_path: Path) -> None:
+    rep = parts_report(tmp_path, GOOD_EYES, GateExpectations(regions=(CHEEK, BASE)))
+    g = gate(rep, "region-tools")
+    assert g.verdict == "SKIP" and "part overlaps other parts' tools" in g.detail
+
+
+REAL_SHAPE_MANIFEST = {
+    "name": "cat",
+    "heads_slots": [1, 2, 3, 4],
+    "prime_tower": True,
+    "mix_rows": [],
+    "parts": [
+        {"name": "eyes", "assign": {"mix": "24", "mix_src": "24"}, "extruder": 5, "tools": [1, 3], "volume_mm3": 819.7,
+         "bbox": [[121.0, 112.383, 65.0], [149.0, 120.0, 76.0]], "z_range": [65.0, 76.0]},
+        {"name": "chin", "assign": {"slot": 1}, "extruder": 1, "tools": [0], "volume_mm3": 911.87,
+         "bbox": [[125.0, 111.086, 49.0], [145.0, 121.0, 58.0]], "z_range": [49.0, 58.0]},
+        {"name": "ghost", "extruder": 9, "bbox": [[0, 0, 0], [1, 1, 1]]},
+    ],
+}
+
+
+def test_from_manifest_reads_the_real_parts_schema(tmp_path: Path) -> None:
+    m = tmp_path / "cat.manifest.json"
+    m.write_text(json.dumps(REAL_SHAPE_MANIFEST))
+    e = GateExpectations.from_manifest(m)
+    assert e.allowed_tools == frozenset({0, 1, 2, 3}) and e.prime_tower is True
+    eyes, chin = e.regions  # the part that names no tool is dropped
+    assert (eyes.name, eyes.mix, eyes.tools, eyes.exclusive) == ("eyes", (1, 3), None, False)
+    assert (eyes.z_min, eyes.z_max, eyes.bbox) == (65.0, 76.0, (121.0, 112.383, 149.0, 120.0))
+    assert (chin.tools, chin.mix, chin.exclusive) == ((0,), None, False)
+    # `regions`, when present, wins over `parts` and stays exclusive
+    both = {**REAL_SHAPE_MANIFEST, "regions": [{"name": "r", "z_min": 0, "z_max": 1, "tools": [0]}]}
+    m.write_text(json.dumps(both))
+    (only,) = GateExpectations.from_manifest(m).regions
+    assert only.name == "r" and only.exclusive and only.bbox is None

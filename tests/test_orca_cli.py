@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from errors import MissingDependency
+from errors import MissingDependency, ThreeDError
 from prep.contracts import StepResult
 from slicing import orca_cli
 from slicing.orca_cli import (
@@ -592,7 +592,7 @@ def test_reference_settings_fails_loudly_when_the_cli_writes_nothing(
     tmp_path: Path, vendors: Path
 ) -> None:
     cli = OrcaCli(_exe(tmp_path / "x", "#!/bin/sh\necho oops\nexit 3\n"), "test")
-    with pytest.raises(RuntimeError, match="oops"):
+    with pytest.raises(ThreeDError) as exc:
         orca_cli.reference_project_settings(
             cli,
             SystemPresets(vendors),
@@ -603,6 +603,27 @@ def test_reference_settings_fails_loudly_when_the_cli_writes_nothing(
             bed_centre=(1.0, 1.0),
             heavy=False,
         )
+    assert "exit 3" in exc.value.message and "oops" in " ".join(exc.value.remediation)
+
+
+def test_a_missing_opengl_runtime_is_a_missing_dependency_with_the_wrapper_hint(
+    tmp_path: Path, vendors: Path
+) -> None:
+    """The Chekhov box's raw AppRun needs libOpenGL.so.0; the fix is a wrapper, not a retry."""
+    script = "#!/bin/sh\necho 'Error: missing host OpenGL runtime library libOpenGL.so.0.' >&2\nexit 1\n"
+    cli = OrcaCli(_exe(tmp_path / "x", script), "test")
+    with pytest.raises(MissingDependency) as exc:
+        orca_cli.reference_project_settings(
+            cli,
+            SystemPresets(vendors),
+            vendor="Snapmaker",
+            machine="Snapmaker U1",
+            process="0.20mm Standard",
+            filaments=["PLA"],
+            bed_centre=(1.0, 1.0),
+            heavy=False,
+        )
+    assert "OpenGL" in exc.value.message and "ORCA=" in " ".join(exc.value.remediation)
 
 
 # ------------------------------------------------------------------ quirk catalogue
