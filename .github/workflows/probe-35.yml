@@ -1,0 +1,36 @@
+name: probe-35
+on:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        with:
+          version: "latest"
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y openscad imagemagick xvfb shellcheck tesseract-ocr tesseract-ocr-rus mtools xz-utils
+      - name: Tool versions and bare render
+        continue-on-error: true
+        run: |
+          openscad --version; convert -version | head -1; which magick compare convert || true
+          echo 'cube(10);' > /tmp/cube.scad
+          echo "--- no display"; openscad --render -o /tmp/a.png /tmp/cube.scad; echo "rc=$?"; ls -la /tmp/a.png || true
+          echo "--- xvfb"; time xvfb-run -a openscad --render -o /tmp/b.png /tmp/cube.scad; echo "rc=$?"; ls -la /tmp/b.png || true
+      - name: Sync dependencies
+        run: uv sync --all-extras
+      - name: Bench test without display
+        continue-on-error: true
+        run: uv run pytest tests/test_ai_bench.py::test_run_suite_offline_completes_and_persists -x -vv -s -p no:cacheprovider --no-cov 2>&1 | tail -60
+      - name: Whole suite under xvfb, stop at first failure
+        continue-on-error: true
+        run: xvfb-run -a uv run pytest tests/ -x -q --timeout=60 -p no:cacheprovider --no-cov 2>&1 | tail -80
