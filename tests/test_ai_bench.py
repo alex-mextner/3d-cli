@@ -432,3 +432,31 @@ def test_gate0_png_render_runs_under_the_headless_display_prefix(
     built, png, _ = bench._gate0_render(scad, tmp_path, "/usr/bin/openscad")
     assert (built, png) == (False, None)
     assert seen[0][:3] == ["xvfb-run", "--auto-servernum", "/usr/bin/openscad"]
+
+
+def _process_is_alive(pid: int) -> bool:
+    """True while `pid` is a running process (a zombie awaiting its reaper is gone)."""
+    stat = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True)
+    state = stat.stdout.strip()
+    return bool(state) and not state.startswith("Z")
+
+
+def test_run_timeout_kills_the_whole_process_group(tmp_path: Path) -> None:
+    """xvfb-run is a wrapper whose children (Xvfb, openscad) outlive a plain kill of the
+    wrapper; a timed-out gate-0 render must not leave them running."""
+    import time
+
+    pidfile = tmp_path / "grandchild.pid"
+    code = (
+        "import subprocess, sys, time\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+        f"open({str(pidfile)!r}, 'w').write(str(child.pid))\n"
+        "time.sleep(60)\n"
+    )
+    result = bench._run([sys.executable, "-c", code], timeout=3.0)
+    assert result.rc == 124
+    grandchild = int(pidfile.read_text())
+    deadline = time.time() + 10
+    while _process_is_alive(grandchild) and time.time() < deadline:
+        time.sleep(0.1)
+    assert not _process_is_alive(grandchild)
