@@ -87,6 +87,12 @@ class FakeMoonraker:
         "stepper_y": {"position_max": 274.0},
     })                                            # Klipper configfile.settings
     history: list[dict[str, Any]] = field(default_factory=list)  # Moonraker job history, newest first
+    queue: dict[str, Any] = field(default_factory=lambda: {"queued_jobs": [], "queue_state": "ready"})  # job_queue/status
+    totals: dict[str, Any] = field(default_factory=lambda: {"job_totals": {
+        "total_jobs": 0, "total_time": 0.0, "total_print_time": 0.0, "total_filament_used": 0.0,
+        "longest_job": 0.0, "longest_print": 0.0}})  # history/totals
+    server_info: dict[str, Any] = field(default_factory=lambda: {
+        "klippy_connected": True, "klippy_state": "ready", "moonraker_version": "v0.9.3-fake"})  # /server/info
     camera: bytes | None = None                   # JPEG served at the U1 camera monitor.jpg path
     camera_hits: int = 0                          # each hit gets new bytes (a COM counter), like a live camera
     script_errors: dict[str, str] = field(default_factory=dict)  # G-code command -> Klipper error (HTTP 400)
@@ -156,6 +162,12 @@ class FakeMoonraker:
                     start, limit = int(q.get("start", ["0"])[0]), int(q.get("limit", ["50"])[0])
                     self._reply({"result": {"count": len(fake.history),
                                             "jobs": fake.history[start:start + limit]}})
+                elif u.path == "/server/job_queue/status":
+                    self._reply({"result": fake.queue})
+                elif u.path == "/server/history/totals":
+                    self._reply({"result": fake.totals})
+                elif u.path == "/server/info":
+                    self._reply({"result": fake.server_info})
                 elif u.path == "/server/files/list":
                     self._reply({"result": [{"path": n, "size": s, "modified": 1.0} for n, s in fake.files.items()]})
                 elif u.path.startswith("/server/files/gcodes/") and unquote(u.path[21:]) in fake.contents:
@@ -243,6 +255,7 @@ class FakeCreality:
     http_requests: list[Recorded] = field(default_factory=list)
     ws_received: list[str] = field(default_factory=list)
     stored_size_delta: int = 0
+    index_html: str = "<html><head><title>Creality K1 SE</title></head><body>web UI</body></html>"  # GET /
     start_reply: str = "ack"  # "ack": push the running state; "silent": say nothing; "close": hang up
     http_port: int = 0
     ws_port: int = 0
@@ -280,6 +293,14 @@ class FakeCreality:
 
             def do_GET(self) -> None:
                 fake.http_requests.append(Recorded("GET", self.path, {}))
+                if self.path == "/":
+                    data = fake.index_html.encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html")
+                    self.send_header("Content-Length", str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
+                    return
                 self._reply({"model": "K1 SE", "version": "1.0.0", "hostname": "K1SE-85B6"})
 
             def do_POST(self) -> None:
@@ -383,6 +404,69 @@ class FakeCreality:
     def _serve_conn(self, conn: socket.socket) -> None:
         with conn:
             self._ws_session(conn)
+
+
+HISTORY_JOBS: list[dict[str, Any]] = [  # Moonraker /server/history/list jobs, newest first
+    {"job_id": "2", "filename": "benchy.gcode", "status": "completed", "start_time": 1_700_000_000.0,
+     "print_duration": 8040.0, "filament_used": 12400.0},
+    {"job_id": "1", "filename": "cube.gcode", "status": "cancelled", "start_time": 1_699_900_000.0,
+     "print_duration": 610.0, "filament_used": 800.0},
+    {"job_id": "0", "filename": "old.gcode", "status": "completed", "start_time": 1_699_800_000.0,
+     "print_duration": 60.0, "filament_used": 100.0},
+]
+HISTORY_TOTALS: dict[str, Any] = {"job_totals": {
+    "total_jobs": 127, "total_time": 900000.0, "total_print_time": 770000.0, "total_filament_used": 412300.0}}
+JOB_QUEUE: dict[str, Any] = {"queue_state": "ready", "queued_jobs": [
+    {"filename": "next_part.gcode", "job_id": "A", "time_in_queue": 185.0}]}
+
+FLUIDD_HTML = "<!doctype html><html><head><title>Fluidd</title></head><body><div id=app></div></body></html>"
+MAINSAIL_HTML = "<!DOCTYPE html><html><head><title>Mainsail</title></head><body><div id=app></div></body></html>"
+
+
+@dataclass
+class FakeWebServer:
+    """A printer web UI (Fluidd, Mainsail, ...): GET / answers `html` with HTTP `status`."""
+
+    html: str = FLUIDD_HTML
+    status: int = 200
+    requests: list[str] = field(default_factory=list)
+    port: int = 0
+
+    def handler(self) -> type[BaseHTTPRequestHandler]:
+        fake = self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a: Any) -> None:
+                pass
+
+            def do_GET(self) -> None:
+                fake.requests.append(self.path)
+                data = fake.html.encode()
+                self.send_response(fake.status)
+                self.send_header("Content-Type", "text/html")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+        return H
+
+    @contextmanager
+    def serve(self) -> Iterator[FakeWebServer]:
+        srv = _Server(("127.0.0.1", 0), self.handler())
+        self.port = srv.server_address[1]
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            yield self
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+
+def free_port() -> int:
+    """A loopback port nothing listens on (connection refused), for the unreachable paths."""
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return int(s.getsockname()[1])
 
 
 def write_devices(config_home: Path, moon: FakeMoonraker | None = None, k1: FakeCreality | None = None) -> Path:
