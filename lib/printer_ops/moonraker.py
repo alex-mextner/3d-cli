@@ -8,6 +8,8 @@ https://github.com/alex-mextner/3d-cli/issues/92:
   upload  POST /server/files/upload   multipart root=gcodes, print=false, file
   start   POST /printer/print/start?filename=<name>
   cancel  POST /printer/print/cancel
+  queue   GET  /server/job_queue/status        (read-only: `3d printers show`)
+  history GET  /server/history/list?limit=N&order=desc, /server/history/totals   (read-only: same)
   gcode   POST /printer/gcode/script?script=<line>   (the bed-clear ack, printer_ops/bed.py; the
                head-filament write and pressure advance below)
 
@@ -48,9 +50,11 @@ from __future__ import annotations
 import hashlib
 import http.client
 import json
+import math
 import re
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 from urllib.parse import quote, urlsplit
 
 from printer_ops.base import (
@@ -64,9 +68,13 @@ from printer_ops.base import (
     Adapter,
     HeadFilament,
     HeadWrite,
+    HistoryTotals,
+    JobQueue,
+    JobRecord,
     PrinterCommError,
     PrinterRefused,
     PrinterStatus,
+    QueuedJob,
     RemoteFile,
     Slot,
     UploadResult,
@@ -84,6 +92,7 @@ _STATE = {
     "error": ERROR,
 }
 _HEATERS = ("extruder", "extruder1", "extruder2", "extruder3", "heater_bed")
+_T = TypeVar("_T")
 _QUERY = "webhooks&print_stats&virtual_sdcard&display_status&" + "&".join(_HEATERS) + "&print_task_config"
 
 
@@ -194,6 +203,57 @@ def parse_status(status: dict[str, Any]) -> PrinterStatus:
     )
 
 
+def _num(value: Any) -> float | None:
+    """A finite JSON number (not a bool, not NaN/Infinity) as float, else None."""
+    ok = isinstance(value, (int, float)) and not isinstance(value, bool)
+    return float(value) if ok and math.isfinite(value) else None
+
+
+def parse_queue(result: Any) -> JobQueue:
+    """Moonraker `/server/job_queue/status` result -> JobQueue."""
+    if not isinstance(result, dict) or not isinstance(result.get("queued_jobs"), list):
+        raise ValueError(f"job_queue/status: no 'queued_jobs' list in {str(result)[:120]!r}")
+    jobs = [
+        QueuedJob(str(j["filename"]), str(j["job_id"]) if j.get("job_id") is not None else None,
+                  _num(j.get("time_in_queue")))
+        for j in result["queued_jobs"]
+        if isinstance(j, dict) and j.get("filename")
+    ]
+    state = result.get("queue_state")
+    return JobQueue(str(state) if state is not None else None, jobs)
+
+
+def parse_history(result: Any) -> list[JobRecord]:
+    """Moonraker `/server/history/list` result -> JobRecords in the order the printer sent them."""
+    if not isinstance(result, dict) or not isinstance(result.get("jobs"), list):
+        raise ValueError(f"history/list: no 'jobs' list in {str(result)[:120]!r}")
+    return [
+        JobRecord(
+            filename=str(j.get("filename") or "?"),
+            status=str(j.get("status") or "?"),
+            start_time=_num(j.get("start_time")),
+            print_s=_num(j.get("print_duration")),
+            filament_mm=_num(j.get("filament_used")),
+            job_id=str(j["job_id"]) if j.get("job_id") is not None else None,
+        )
+        for j in result["jobs"]
+        if isinstance(j, dict)
+    ]
+
+
+def parse_totals(result: Any) -> HistoryTotals:
+    """Moonraker `/server/history/totals` result -> HistoryTotals."""
+    totals = result.get("job_totals") if isinstance(result, dict) else None
+    if not isinstance(totals, dict):
+        raise ValueError(f"history/totals: no 'job_totals' in {str(result)[:120]!r}")
+    jobs = _num(totals.get("total_jobs"))
+    return HistoryTotals(
+        jobs=int(jobs) if jobs is not None else None,
+        print_s=_num(totals.get("total_print_time")),
+        filament_mm=_num(totals.get("total_filament_used")),
+    )
+
+
 class MoonrakerAdapter(Adapter):
     kind = "moonraker"
     upload_while_busy = True  # other files may be stored while printing; never the active one
@@ -232,6 +292,21 @@ class MoonrakerAdapter(Adapter):
 
     def status(self) -> PrinterStatus:
         return parse_status(self.query(_QUERY))
+
+    def _parsed(self, path: str, parse: Callable[[Any], _T]) -> _T:
+        try:
+            return parse(self._get(path))
+        except ValueError as exc:
+            raise self._comm_error(f"GET {path}", exc) from exc
+
+    def queue(self) -> JobQueue:
+        return self._parsed("/server/job_queue/status", parse_queue)
+
+    def history(self, limit: int) -> list[JobRecord]:
+        return self._parsed(f"/server/history/list?limit={int(limit)}&order=desc", parse_history)
+
+    def history_totals(self) -> HistoryTotals:
+        return self._parsed("/server/history/totals", parse_totals)
 
     def axis_limits(self) -> tuple[Limits | None, str]:
         """Configured limits win; otherwise Klipper's own stepper_x/stepper_y position_min/max."""
@@ -406,4 +481,5 @@ class MoonrakerAdapter(Adapter):
         return float(got)
 
 
-__all__ = ["MoonrakerAdapter", "extruder_name", "filament_config_gcode", "parse_slots", "parse_status"]
+__all__ = ["MoonrakerAdapter", "extruder_name", "filament_config_gcode", "parse_history", "parse_queue",
+           "parse_slots", "parse_status", "parse_totals"]
