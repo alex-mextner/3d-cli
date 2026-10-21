@@ -26,7 +26,7 @@ jobs:
       - name: Install system deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y openscad imagemagick shellcheck tesseract-ocr tesseract-ocr-rus mtools xz-utils
+          sudo apt-get install -y openscad imagemagick xvfb shellcheck tesseract-ocr tesseract-ocr-rus mtools xz-utils
       - name: Sync dependencies
         run: uv sync --all-extras
       - name: Run ruff
@@ -40,6 +40,7 @@ jobs:
       - name: Run yamllint (Home Assistant integration)
         run: uv run yamllint --strict -c integrations/homeassistant/.yamllint integrations/homeassistant
       - name: Run pytest with coverage
-        run: uv run pytest tests/ integrations/homeassistant/tests/ --cov=lib --cov-fail-under=80 -q
+        # xvfb: OpenSCAD's PNG export needs a GL context, which a bare runner lacks.
+        run: xvfb-run -a uv run pytest tests/ integrations/homeassistant/tests/ --cov=lib --cov-fail-under=80 -q
       - name: Run mypy
         run: uv run mypy lib/ tests/
