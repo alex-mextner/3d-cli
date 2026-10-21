@@ -14,7 +14,7 @@ A printer screen (Snapmaker U1, any Klipper/Moonraker host, Creality K1 stock fi
 | `check` | PASS/FAIL per file. PASS = every size of the profile's `; thumbnails =` is present as a valid block in the first MiB (what Moonraker reads). No spec in the file: PASS when at least one thumbnail is present. Exit 1 on any FAIL. |
 | `add` | Insert the missing sizes. The file is rewritten atomically with its mode and mtime kept (a staleness check "G-code older than its project" must not be fooled). A file that already passes is left byte-identical. |
 | `--image PNG` | Use this picture (e.g. a plate render; transparent margins trimmed) instead of drawing one from the G-code. Needs Pillow. |
-| `--size WxH[/FMT]` | Sizes for a G-code without a `; thumbnails =` spec (repeatable). |
+| `--size WxH[/FMT]` | Sizes for a G-code without a `; thumbnails =` spec (repeatable). 1..4096 px per side, otherwise exit 2 (also applies to the profile's own spec). |
 | `--out FILE` | Write the result to `FILE`, leave the input untouched (one input only). |
 | `--preview PNG` | Also save the full-size G-code render. |
 | `--replace` | Redraw every size, dropping the thumbnail blocks already in the head (e.g. after a better `--image`). |
@@ -48,7 +48,7 @@ Adding thumbnails changes the file's SHA-256 but not its toolpath: a `NAME.slice
 
 ## The picture drawn from the G-code
 
-Without `--image`, every visible extrusion move (walls, surfaces, bridges, brim, support; not sparse/internal infill, prime tower, skirt or custom start G-code) is drawn in a true isometric view from the front right, z-buffered, in each tool's `filament_colour`, shaded from screen-space normals with darkened silhouette edges, on a transparent background — what the file actually prints, at about 10 s and 1.5 GB for a 115 MB U1 G-code.
+Without `--image`, every visible extrusion move (walls, surfaces, bridges, brim, support; not sparse/internal infill, prime tower, skirt or custom start G-code) is drawn in a true isometric view from the front right, z-buffered, in each tool's `filament_colour`, shaded from screen-space normals with darkened silhouette edges, on a transparent background — what the file actually prints, at about 10 s and 1.5 GB for a 115 MB U1 G-code. The picture is drawn at 2× the biggest thumbnail (supersampling) but at most 2048 px per side (about 4 Mpx, a bounded memory cost); a thumbnail above 1024 px is scaled up from that picture. Use `--image` for more detail.
 
 ## Printer preflights
 
