@@ -58,7 +58,11 @@ if TYPE_CHECKING:
 # Moonraker's metadata extractor reads the first and last MiB only (READ_SIZE in
 # moonraker/components/file_manager/metadata.py); a thumbnail further in is invisible.
 HEAD_BYTES = 1024 * 1024
-MAX_SIDE = 4096  # per-side bound for a requested thumbnail (a typo must not allocate gigabytes)
+MAX_SIDE = 4096  # per-side bound for a requested thumbnail size (rejects typos such as 99999x32)
+# The picture drawn from the toolpaths is at most this many pixels per side (about 4 Mpx; the render
+# keeps several float64 arrays per pixel, so 8192² would need gigabytes). Thumbnails up to 1024 px
+# are still drawn at 2x supersampling; a larger one is scaled up from this picture.
+RENDER_MAX_SIDE = 2048
 ROW = 78  # base64 characters per comment line, as Orca writes them (Thumbnails.hpp max_row_length)
 
 # block tag per format, as Orca's compress_thumbnail_* tag() and Moonraker's parser expect
@@ -557,6 +561,11 @@ def render_gcode(path: str, size: int = 600) -> Image:
 # ---------------------------------------------------------------- ensure
 
 
+def render_side(sizes: list[Thumb]) -> int:
+    """Side of the G-code render that feeds `sizes`: 2x the biggest one (supersampling), capped."""
+    return min(2 * max([max(t.width, t.height) for t in sizes] or [300]), RENDER_MAX_SIDE)
+
+
 def ensure(path: str, image: str | None = None, sizes: list[Thumb] | None = None, out: str | None = None,
            source: Callable[[str], Image] | None = None, replace: bool = False) -> ThumbCheck:
     """Add every missing required thumbnail (or `sizes`, when the G-code declares none).
@@ -579,8 +588,7 @@ def ensure(path: str, image: str | None = None, sizes: list[Thumb] | None = None
     bad = [t for t in todo if t.fmt not in WRITABLE]
     if bad:
         raise ThumbnailError(f"cannot write {', '.join(map(str, bad))}: supported formats are {', '.join(WRITABLE)}")
-    biggest = max(max(t.width, t.height) for t in todo)
-    pic = load_image(image) if image else (source or (lambda p: render_gcode(p, size=2 * biggest)))(path)
+    pic = load_image(image) if image else (source or (lambda p: render_gcode(p, size=render_side(todo))))(path)
     text = "".join(block(t, encode(fit(pic, t.width, t.height), t.fmt)) for t in todo)
     splice(path, text, out, expect=seen, replace=replace)
     after = check(out or path)
@@ -630,7 +638,7 @@ def main(argv: list[str] | None = None) -> int:
                 if a.preview:
                     def src(gp: str, keep: str = a.preview) -> Image:
                         want = check(gp).required or sizes
-                        pic = render_gcode(gp, size=2 * max([max(t.width, t.height) for t in want] or [300]))
+                        pic = render_gcode(gp, size=render_side(want))
                         with open(keep, "wb") as fh:
                             fh.write(encode_png(pic))
                         return pic

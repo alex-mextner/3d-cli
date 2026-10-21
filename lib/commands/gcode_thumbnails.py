@@ -31,7 +31,8 @@ USAGE = """3d gcode-thumbnails <check|add> <file.gcode>... [options]
                            already has them is left untouched.
     --image PNG            picture to use (e.g. a plate render) instead of drawing the
                            preview from the G-code's extrusion moves
-    --size WxH[/FMT]       sizes for a G-code without a `; thumbnails =` spec (repeatable)
+    --size WxH[/FMT]       sizes for a G-code without a `; thumbnails =` spec (repeatable);
+                           1..4096 px per side (the G-code render is capped at 2048 px)
     --out FILE             write the result there instead of in place (one input only)
     --preview PNG          also save the full-size G-code render
     --replace              redraw every size, dropping the thumbnails already there
