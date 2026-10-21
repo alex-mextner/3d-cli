@@ -5,9 +5,9 @@ from __future__ import annotations
 import pytest
 from printer_fakes import HISTORY_JOBS, HISTORY_TOTALS, FakeMoonraker
 
-from printer_ops.base import Adapter, PrinterCommError, UnsupportedOperation
+from printer_ops.base import Adapter, PrinterCommError, PrinterStatus, Slot, UnsupportedOperation
 from printer_ops.moonraker import MoonrakerAdapter, parse_history, parse_queue, parse_totals
-from printer_ops.render import status_lines
+from printer_ops.render import render_status, status_lines
 
 
 def test_parse_queue_history_and_totals_read_the_moonraker_payloads() -> None:
@@ -110,3 +110,58 @@ def test_numbers_that_are_not_finite_are_treated_as_unknown() -> None:
     assert (jobs[0].start_time, jobs[0].print_s, jobs[0].filament_mm) == (None, None, None)
     assert (totals.jobs, totals.print_s, totals.filament_mm) == (None, None, 5.0)
     assert queue.jobs[0].waiting_s is None
+
+
+def _main_render_status(name: str, adapter: Adapter, st: PrinterStatus) -> str:
+    """`3d printer status` text exactly as main printed it before the sanitizer."""
+
+    def temp(v: float | None) -> str:
+        return "-" if v is None else f"{v:.0f}" if float(v).is_integer() else f"{v:.1f}"
+
+    lines = [f"{name}  ({adapter.kind}  {adapter.host}:{adapter.port}{'  ' + st.model if st.model else ''})"]
+    lines.append(f"  state     {st.state}  [{st.raw_state}]")
+    if st.filename:
+        prog = f"  {st.progress * 100:.1f}%" if st.progress is not None else ""
+        lines.append(f"  file      {st.filename}{prog}")
+    if st.temps:
+        lines.append("  temps     " + "  ".join(f"{k} {temp(a)}/{temp(t)}" for k, (a, t) in st.temps.items()))
+    if st.slots:
+        heads = [f"{s.label} {s.color or '?'} {s.material or ''}".rstrip() if s.present else f"{s.label} empty"
+                 for s in st.slots]
+        lines.append("  heads     " + " | ".join(heads))
+    if st.message:
+        lines.append(f"  message   {st.message}")
+    return "\n".join(lines)
+
+
+def test_printer_status_text_is_byte_identical_to_main_for_normal_input() -> None:
+    adapter = MoonrakerAdapter("u1", "192.168.0.26", 7125)
+    for st in (
+        PrinterStatus("printing", "printing", "base_1-1a2b3c4d5e6f7a8b.gcode", 0.4213,
+                      {"extruder": (205.0, 210.0), "bed": (59.6, 60.0)},
+                      message="Filament runout on T2", model="Snapmaker U1",
+                      slots=[Slot(0, "T1", True, "#000000", "PLA"), Slot(1, "T2", False), Slot(2, "T3", True)]),
+        PrinterStatus("idle", "standby", None, None, {}),
+        PrinterStatus("error", "klippy:shutdown", None, None, {"nozzle": (None, None)}, message="Lost communication"),
+    ):
+        assert render_status("u1", adapter, st) == _main_render_status("u1", adapter, st)
+
+
+def test_printer_status_text_strips_escapes_from_what_the_printer_reports() -> None:
+    adapter = MoonrakerAdapter("u1", "127.0.0.1", 7125)
+    st = PrinterStatus("printing", "printing\x1b[2J", "a\x07" + "F" * 9000, 0.5, {}, message="m\x1b]0;x\x07",
+                       slots=[Slot(0, "T1", True, "\x1b[31m", "PLA\x9b")])
+    out = render_status("u1", adapter, st)
+
+    assert not any(c in out for c in ("\x1b", "\x07", "\x9b")) and max(map(len, out.splitlines())) <= 300
+
+
+def test_an_oversized_slot_list_from_the_printer_cannot_flood_the_heads_line() -> None:
+    from printer_ops.moonraker import parse_status
+
+    st = parse_status({"print_stats": {"state": "standby"}, "print_task_config": {"filament_exist": [False] * 10_000}})
+    out = render_status("u1", MoonrakerAdapter("u1", "127.0.0.1", 7125), st)
+    heads = next(ln for ln in out.splitlines() if ln.lstrip().startswith("heads"))
+
+    assert len(st.slots) == 10_000 and len(heads) <= 300
+    assert "T16 empty" in heads and "T17" not in heads and heads.endswith("+9984 more")

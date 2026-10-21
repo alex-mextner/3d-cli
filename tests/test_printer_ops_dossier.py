@@ -506,3 +506,54 @@ def test_a_broken_fleet_error_names_the_command_the_user_ran(tmp_path: Path, mon
     with pytest.raises(FleetError) as err:
         dossier.resolve("u1", reg)
     assert err.value.command == "printers"
+
+
+# ---- hostile printer-supplied strings -----------------------------------------------------
+
+LINE_CAP = 300  # no text line of the dossier may be longer, whatever the printer sends
+BAD = ("\x1b", "\x07", "\x9b", "\x9d", "\x00", "\r", "\u2028", "\u202e")
+
+
+def test_text_output_never_carries_terminal_escapes_or_unbounded_lines(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    evil = "\x1b[31mred\x1b]0;pwn\x07\x9b2J\u202e"
+    moon = FakeMoonraker(
+        history=[{"job_id": "1", "filename": "X" * 100_000 + evil, "status": "completed\x1b[2J",
+                  "start_time": 1_700_000_000.0, "print_duration": 60.0, "filament_used": 1000.0}],
+        totals=HISTORY_TOTALS,
+        queue={"queue_state": "ready" + evil, "queued_jobs": [{"filename": "Q" * 5000 + "\x1b[31m", "time_in_queue": 1.0},
+                                                             {"filename": "line1\nline2\rline3", "time_in_queue": 2.0}]},
+    )
+    moon.status["print_stats"].update(state="printing", filename="F" * 9000 + evil, message="boom\n" + evil * 200)
+    moon.status["print_task_config"]["filament_color_rgba"][0] = evil
+    moon.status["print_task_config"]["filament_type"][0] = "PLA" + evil * 50
+    web = FakeWebServer(html=f"<html><head><title>Fluidd {evil}{'T' * 5000}</title></head></html>")
+    with moon.serve(), web.serve():
+        reg = _registry(tmp_path, monkeypatch, u1_entry(moon))
+        _web(monkeypatch, web)
+        d = dossier.collect(reg.machine("u1"), live=True, secs=2.0)
+        text = dossier_render.render(dossier.resolve("u1", reg), [d])
+
+    assert d.history.status == dossier.OK and d.queue.status == dossier.OK and d.live.status == dossier.OK
+    assert not any(bad in text for bad in BAD)
+    assert max(map(len, text.splitlines())) <= LINE_CAP
+    assert "XXXX" in text and "QQQQ" in text and "\u2026" in text  # cut, not dropped
+    assert "line1?line2?line3" in text  # a newline inside a name cannot forge a line
+    assert "Fluidd" in text and "completed?[2J" in text
+
+
+def test_text_output_of_unreachable_reason_and_errors_is_sanitized() -> None:
+    evil = "\x1b[2J" + "E" * 5000
+    sec: dossier.Section[object] = dossier.Section(dossier.UNREACHABLE, None, evil)
+    line = dossier_render._unavailable(sec)
+
+    assert line is not None and "\x1b" not in line and len(line) <= LINE_CAP
+
+
+def test_normal_names_pass_through_the_sanitizer_unchanged() -> None:
+    from printer_ops.render import NAME_W, clean, strip_controls
+
+    for ok in ("base_1.gcode", "Snapmaker U1", "T1 #1B5E20 PLA", "детали v2.gcode", "a b  c", "x" * NAME_W):
+        assert clean(ok, NAME_W) == ok and strip_controls(ok) == ok
+    assert clean("x" * (NAME_W + 1), NAME_W) == "x" * (NAME_W - 1) + "\u2026"

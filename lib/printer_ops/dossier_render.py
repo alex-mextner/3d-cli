@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from printer_ops.dossier import OK, UNREACHABLE, History, MachineFacts, PrinterDossier, Resolved, Section
-from printer_ops.render import status_lines
+from printer_ops.render import NAME_W, TEXT_W, WORD_W, clean, status_lines, strip_controls
 
 if TYPE_CHECKING:
     from printer_ops.base import JobQueue
@@ -41,7 +41,7 @@ def _unavailable(sec: Section[Any]) -> str | None:
     """The one line of a section that has no data (None when it has)."""
     if sec.status == OK:
         return None
-    return f"  {'unreachable: ' if sec.status == UNREACHABLE else ''}{sec.note}"
+    return f"  {'unreachable: ' if sec.status == UNREACHABLE else ''}{clean(sec.note or '')}"
 
 
 def _spec(r: Resolved) -> list[str]:
@@ -122,10 +122,11 @@ def _web_ui(sec: Section[WebUiProbe], camera: str | None) -> list[str]:
     elif sec.value is not None and not sec.value.found:
         lines.append("  none answered")
     elif sec.value is not None:
-        width = max(len(w.url) for w in sec.value.found)
+        width = max(len(clean(w.url, TEXT_W)) for w in sec.value.found)
         for w in sec.value.found:
-            detail = ", ".join(x for x in (f"HTTP {w.http_status}", f'"{w.title}"' if w.title else None, w.note) if x)
-            lines.append(f"  {w.kind:<14}{w.url:<{width}}  ({detail})")
+            title = f'"{clean(w.title, 60)}"' if w.title else None
+            detail = ", ".join(x for x in (f"HTTP {w.http_status}", title, clean(w.note) if w.note else None) if x)
+            lines.append(f"  {clean(w.kind, 14):<14}{clean(w.url, TEXT_W):<{width}}  ({detail})")
     if camera:
         lines.append(f"  {'camera':<14}{camera}")
     return lines
@@ -136,10 +137,10 @@ def _queue(sec: Section[JobQueue]) -> list[str]:
     if off or sec.value is None:
         return ["Queue", off or ""]
     q = sec.value
-    lines = [f"Queue  ({len(q.jobs)} queued, state {q.state or '?'})"]
+    lines = [f"Queue  ({len(q.jobs)} queued, state {clean(q.state or '?', WORD_W)})"]
     if not q.jobs:
         lines.append("  empty")
-    lines += [f"  {i}. {j.filename}  (waiting {fmt_duration(j.waiting_s)})" for i, j in enumerate(q.jobs, 1)]
+    lines += [f"  {i}. {clean(j.filename, NAME_W)}  (waiting {fmt_duration(j.waiting_s)})" for i, j in enumerate(q.jobs, 1)]
     return lines
 
 
@@ -162,12 +163,14 @@ def _history(sec: Section[History]) -> list[str]:
                  f"{fmt_duration(t.print_s)} printing, {fmt_filament(t.filament_mm)} filament)")
     lines = [head]
     if h.totals_error:
-        lines.append(f"  totals unavailable: {h.totals_error}")
+        lines.append(f"  totals unavailable: {clean(h.totals_error)}")
     if h.jobs_error:
-        lines.append(f"  jobs unavailable: {h.jobs_error}")
-    name_w = max((len(j.filename) for j in h.jobs), default=0)
-    lines += [f"  {_local_time(j.start_time)}  {j.status:<12}  {j.filename:<{name_w}}  "
-              f"{fmt_duration(j.print_s):>8}  {fmt_filament(j.filament_mm):>8}" for j in h.jobs]
+        lines.append(f"  jobs unavailable: {clean(h.jobs_error)}")
+    names = [clean(j.filename, NAME_W) for j in h.jobs]
+    name_w = max(map(len, names), default=0)
+    lines += [f"  {_local_time(j.start_time)}  {clean(j.status, WORD_W):<12}  {name:<{name_w}}  "
+              f"{fmt_duration(j.print_s):>8}  {fmt_filament(j.filament_mm):>8}"
+              for j, name in zip(h.jobs, names, strict=True)]
     return lines
 
 
@@ -195,4 +198,4 @@ def render(r: Resolved, dossiers: list[PrinterDossier], fleet_error: str | None 
             out.append(f"  fleet registry unreadable: {fleet_error}")
     for d in dossiers:
         out += ["", *(["-" * 60] if len(dossiers) > 1 else []), *render_printer(d)]
-    return "\n".join(out)
+    return "\n".join(strip_controls(line) for line in out)  # net for owner-written strings (notes, reasons, paths)

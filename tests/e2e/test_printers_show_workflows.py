@@ -425,3 +425,25 @@ def test_show_help_prints_usage_and_contacts_nothing(tmp_path: Path) -> None:
 
     assert helped.returncode == 0 and "--no-live" in helped.stdout and "--history N" in helped.stdout
     assert moon.requests == []
+
+
+def test_a_hostile_printer_cannot_inject_terminal_escapes_or_flood_the_dossier(tmp_path: Path) -> None:
+    """A broken or hostile printer reports file names full of escape codes and 100 000 characters:
+    the text dossier shows them defanged and cut, and the terminal is never driven by the printer."""
+    evil = "\x1b[31mred\x1b]0;pwn\x07"
+    moon = FakeMoonraker(
+        history=[{"job_id": "1", "filename": "X" * 100_000 + evil, "status": "completed\x1b[2J",
+                  "start_time": 1_700_000_000.0, "print_duration": 60.0, "filament_used": 1000.0}],
+        totals=HISTORY_TOTALS,
+        queue={"queue_state": "ready", "queued_jobs": [{"filename": "Q" * 5000 + "\x1b[31m", "time_in_queue": 1.0}]},
+    )
+    with moon.serve():
+        fleet = write_fleet(tmp_path / "fleet.yaml", u1_entry(moon))
+        shown = _show(tmp_path, _env(tmp_path, fleet), "u1")
+        as_json = _show(tmp_path, _env(tmp_path, fleet), "u1", "--json")
+
+    assert shown.returncode == 0, shown.stderr
+    assert not any(c in shown.stdout for c in ("\x1b", "\x07", "\x9b"))
+    assert max(map(len, shown.stdout.splitlines())) <= 300
+    assert "completed?[2J" in shown.stdout and "XXXX" in shown.stdout
+    assert json.loads(as_json.stdout)["printers"][0]["history"]["jobs"][0]["filename"].endswith(evil)  # JSON is exact
