@@ -89,7 +89,11 @@ def psnr_images(path_a: str, path_b: str) -> dict[str, Any]:
         if is_temp:
             with contextlib.suppress(OSError):
                 os.remove(resized)
+    # IM6 prints `0` for identical images where IM7 prints `inf`; compare's exit status
+    # (0 identical, 1 different, 2 error) tells them apart.
     value = _parse_psnr(raw)
+    if proc.returncode == 0 and value == 0.0:
+        value = PSNR_CAP_DB
     return {"value": value, "sense": SENSE_HIGHER, "unit": "dB", "capped": value >= PSNR_CAP_DB}
 
 
@@ -130,7 +134,9 @@ def _resize_to_match(magick: str, ref: str, other: str) -> tuple[str, bool]:
     dims = subprocess.run([*ident, "-format", "%wx%h", ref], capture_output=True, text=True).stdout.strip()
     fd, out = tempfile.mkstemp(prefix="_psnr_resized_", suffix=".png")
     os.close(fd)
-    subprocess.run([magick, other, "-resize", f"{dims}!", out], capture_output=True, text=True)
+    # IM6 has no `magick` front end and `compare` cannot resize; its resizer is `convert`.
+    resize = ["convert"] if magick == "compare" else [magick]
+    subprocess.run([*resize, other, "-resize", f"{dims}!", out], capture_output=True, text=True)
     if os.path.isfile(out) and os.path.getsize(out) > 0:
         return out, True
     with contextlib.suppress(OSError):
