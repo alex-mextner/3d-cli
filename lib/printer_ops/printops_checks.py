@@ -5,9 +5,9 @@ WHAT: the G-code's per-tool facts (slicer footer + body temperatures) checked ag
   3d-api, the spool bound to each slot with its filament data, remaining-weight interval and
   drying state. One preflight line per check (per-tool breakdown under it):
     printer_profile_match  `; printer_model` is the target printer's model
-    nozzle_compat          `; nozzle_diameter` = the head's nozzle; abrasive filament (Spoolman
-                           `abrasive`, `; required_nozzle_HRC` > 0, CF/GF/... in the type) only
-                           on nozzle materials policy `abrasive_ok` lists
+    nozzle_compat          `; nozzle_diameter` = the head's nozzle; `; required_nozzle_HRC`
+                           <= its material's nominal hardness; abrasive filament (Spoolman
+                           `abrasive`, CF/GF/... markers) only on policy `abrasive_ok` materials
     filament_temp_range    `; nozzle_temperature[_initial_layer]`, the body's M104/M109 per tool
                            and the bed (plate-specific footer temps, M140/M190) inside the loaded
                            filament's nozzle/bed_temp_min..max
@@ -49,6 +49,15 @@ from typing import Any
 from printer_ops.preflight import FAIL, PASS, UNVERIFIED, WARN, Check
 
 RANK = {PASS: 0, UNVERIFIED: 1, WARN: 2, FAIL: 3}
+# Orca compatibility values, not a measurement of the installed nozzle. Ruby has no
+# documented value here and must remain unknown when a positive HRC minimum is required.
+# https://github.com/OrcaSlicer/OrcaSlicer/wiki/printer_basic_information_accessory
+NOZZLE_HARDNESS_HRC: dict[str, int] = {
+    "brass": 2,
+    "stainless": 20,
+    "hardened": 55,
+    "tungsten": 85,
+}
 _KEY_LINE = re.compile(r"^;\s*([A-Za-z_][A-Za-z0-9_ \[\]]*?)\s*=\s*(.*)$")
 _TOOL_LINE = re.compile(r"^T(\d+)\s*(?:;.*)?$")
 _TEMP_CMD = re.compile(r"^(M10[49]|M1[49]0)\b([^;]*)")
@@ -565,21 +574,26 @@ def check_printer_profile(c: _Ctx) -> list[Finding]:
 def _abrasive(
     c: _Ctx, t: int, spool: Mapping[str, Any] | None
 ) -> tuple[bool | None, str]:
-    """(abrasive?, why). None = cannot tell (no spool data and nothing in the G-code says so)."""
-    hrc = c.job.num("required_nozzle_HRC", t)
-    if hrc:
-        return True, f"G-code requires nozzle HRC {hrc:g}"
-    if spool is not None and isinstance(spool.get("abrasive"), bool):
-        return bool(spool["abrasive"]), "Spoolman filament " + (
-            "abrasive" if spool["abrasive"] else "not abrasive"
-        )
+    """(abrasive?, why). Invalid or absent evidence stays unknown unless a positive source wins."""
+    flag = (spool or {}).get("abrasive")
+    if flag is True:
+        return True, "Spoolman filament abrasive"
+    invalid: list[str] = []
     for src, value in (
         ("spool material", (spool or {}).get("material")),
         ("spool name", (spool or {}).get("name")),
         ("G-code type", c.job.text("filament_type", t)),
     ):
-        if c.policy.is_abrasive_material(value):
+        if value is not None and not isinstance(value, str):
+            invalid.append(f"invalid {src} (expected text or null, got {type(value).__name__})")
+        elif c.policy.is_abrasive_material(value):
             return True, f"{src} {value!r}"
+    if flag is not None and not isinstance(flag, bool):
+        invalid.append("invalid spool abrasive flag (expected boolean or null)")
+    if invalid:
+        return None, "; ".join(invalid)
+    if flag is False:
+        return False, "Spoolman filament not abrasive"
     if spool is not None:
         return (
             False,
@@ -618,8 +632,47 @@ def check_nozzle(c: _Ctx) -> list[Finding]:
                 )
             )
             continue
-        abrasive, why = _abrasive(c, t, spool)
         material = nozzle.get("material")
+        required_hrc = c.job.num("required_nozzle_HRC", t)
+        hardness_note = ""
+        if required_hrc is not None and required_hrc > 0:
+            hardness = (
+                NOZZLE_HARDNESS_HRC.get(material)
+                if isinstance(material, str)
+                else None
+            )
+            if hardness is None:
+                out.append(
+                    _f(
+                        name,
+                        "unknown",
+                        f"G-code requires nozzle HRC {required_hrc:g}, but installed "
+                        f"{material or 'unknown'} nozzle hardness is not known",
+                        t,
+                        slot,
+                        "hardness",
+                    )
+                )
+            elif required_hrc > hardness:
+                out.append(
+                    _f(
+                        name,
+                        "hard",
+                        f"G-code requires nozzle HRC {required_hrc:g}, installed "
+                        f"{material} nozzle has nominal HRC {hardness:g}",
+                        t,
+                        slot,
+                        "hardness",
+                    )
+                )
+                continue
+            else:
+                hardness_note = (
+                    f"; G-code requires nozzle HRC {required_hrc:g}, "
+                    f"installed nominal HRC {hardness:g}"
+                )
+        abrasive, why = _abrasive(c, t, spool)
+        why += hardness_note
         dia = f"{float(nozzle['diameter_mm']):g} mm"
         if abrasive is None:
             out.append(_f(name, "unknown", f"{dia} ok; {why}", t, slot, "abrasive"))

@@ -48,7 +48,7 @@ is FAIL under the policy level `block`, WARN under `warn`; `off` hides the check
 |---|---|---|---|
 | `printops` | — | — | where the state came from: live 3d-api, snapshot (WARN when older than `snapshot_max_age_h`), or fleet only (UNVERIFIED) |
 | `printer_profile_match` | block | `; printer_model` is not the target's model (a K1 SE G-code on the U1) | |
-| `nozzle_compat` | block | `; nozzle_diameter` ≠ the head's nozzle; abrasive filament (Spoolman `abrasive`, `; required_nozzle_HRC` > 0, or a CF/GF/GLOW/WOOD/METAL token in the material) on a nozzle outside `abrasive_ok` (hardened, ruby, tungsten) | |
+| `nozzle_compat` | block | `; nozzle_diameter` ≠ the head's nozzle; a positive `; required_nozzle_HRC` exceeds its material's nominal hardness; independently, abrasive filament (a true Spoolman `abrasive` flag or a CF/GF/GLOW/WOOD/METAL token in the material/name/type) on a nozzle outside policy `abrasive_ok` (default: hardened, ruby, tungsten) | |
 | `filament_temp_range` | block | `; nozzle_temperature`, `; nozzle_temperature_initial_layer` outside the filament's `nozzle_temp_min..max`; any body `M104/M109` for that tool above the max (standby temps below the min are fine); the plate's footer temps (`curr_bed_type` → `textured_plate_temp` …) or any `M140/M190` outside `bed_temp_min..max` | |
 | `loaded_filament_match` | block | the bound spool's `material` ≠ `; filament_type` (aliases: `gates.material_aliases`); colour ΔE2000 (spool `measured_hex`, else the filament colour, vs `; filament_colour`) above `fail_delta_e` | ΔE above `warn_delta_e`; vendor ≠ `; filament_vendor` (re-check flow/PA). Thresholds per project: `gates.colour.projects` (shell glob on the G-code path) |
 | `slot_binding_known` | warn | | no spool bound to a used slot: usage will not be booked; two spools bound to one slot |
@@ -57,6 +57,23 @@ is FAIL under the policy level `block`, WARN under `warn`; `off` hides the check
 | `maintenance_due` | block | the head is `usable: false` in the fleet; an open fault on it (from #166) | maintenance due (from #166) |
 | `enclosure_material` | warn | a `gates.enclosure_material` material (ABS, ASA, PC, PA…) on a printer with `enclosure: none` | the same on `enclosure: partial` |
 | `plate_material` | warn | `; curr_bed_type` is not among the printer's `plates`; a `gates.plate_material` pairing (PETG/TPU on smooth PEI, ABS/PC/PA on the Cool Plate) | |
+
+Nozzle hardness and filament abrasiveness are separate checks, applied only to tools used by
+the job. A positive `required_nozzle_HRC` is a minimum; `0` skips that numeric requirement.
+The [Orca compatibility values](https://github.com/OrcaSlicer/OrcaSlicer/wiki/printer_basic_information_accessory)
+are brass `2`, stainless `20`, hardened `55`, and tungsten `85`. They are nominal slicer
+conventions, not measurements of a particular nozzle. Thus a plain-PLA preset declaring
+HRC `3` passes this requirement on stainless, but HRC `21` does not. A positive requirement
+with unknown installed hardness, including ruby, is UNVERIFIED. Independently, a true
+abrasive flag or positive material/name/type marker still requires an allowed nozzle;
+a false spool flag cannot hide that evidence, and unknown hardness cannot hide a hard
+abrasive-policy failure. The [filament setting's documented minimum](https://github.com/OrcaSlicer/OrcaSlicer/wiki/material_basic_information#required-nozzle-hrc)
+is preserved rather than converted into an abrasive flag.
+
+Within the nozzle gate, a spool marker value other than text or null, or an `abrasive`
+flag other than boolean or null, leaves abrasiveness UNVERIFIED unless another valid
+positive flag or marker establishes it.
+Malformed metadata is not treated as verified nonabrasive filament.
 
 Lot changes and calibration values (`; pressure_advance`, `; filament_flow_ratio`) are the
 `calibration_current` gate of the calibration engine ([#167](https://github.com/alex-mextner/3d-cli/issues/167)).
