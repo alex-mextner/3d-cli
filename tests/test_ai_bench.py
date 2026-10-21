@@ -230,6 +230,27 @@ def test_aggregate_build_rate_none_when_nothing_attempted() -> None:
 
 
 # ── Whole-suite run + persistence + resilience ───────────────────────────────
+def _openscad_exports_png(workdir: Path) -> bool:
+    """True when OpenSCAD is usable AND can export a PNG here.
+
+    A bare CI runner has OpenSCAD but no X display, so PNG export needs the same xvfb
+    prefix gate 0 uses ("Can't create OpenGL OffscreenView" without it) while STL export
+    works; the probe must mirror gate 0 or it would skip exactly where gate 0 now passes.
+    """
+    import cli.env as cli_env
+
+    exe = bench._find_openscad()
+    if exe is None:
+        return False
+    workdir.mkdir(parents=True, exist_ok=True)
+    scad = workdir / "probe.scad"
+    scad.write_text("cube(1);\n", encoding="utf-8")
+    png = workdir / "probe.png"
+    cmd = [*cli_env.openscad_display_prefix(), exe, "--render", "-o", str(png), str(scad)]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    return proc.returncode == 0 and png.is_file()
+
+
 def test_run_suite_offline_completes_and_persists(tmp_path: Path) -> None:
     cases = load_cases()
     data_dir = tmp_path / "data"
@@ -243,6 +264,9 @@ def test_run_suite_offline_completes_and_persists(tmp_path: Path) -> None:
         assert by_id[fid].status is ProofStatus.FAILURE
     assert by_id["unsafe-include"].stop_reason == bench.STOP_UNSAFE
     assert by_id["budget-zero-calls"].stop_reason == bench.STOP_BUDGET
+    if bench._find_openscad() is not None and not _openscad_exports_png(tmp_path / "probe"):
+        # Everything that does not need a render was asserted above; the rest needs a PNG.
+        pytest.skip("OpenSCAD cannot export a PNG here (no display/GL); gate 0 fails by design")
     # Good cases: OK when this machine has OpenSCAD, DIAGNOSTIC when it doesn't.
     for gid in ("cube-basic", "l-bracket", "washer"):
         assert by_id[gid].status in (ProofStatus.OK, ProofStatus.DIAGNOSTIC)

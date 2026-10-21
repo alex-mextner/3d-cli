@@ -85,25 +85,16 @@ def psnr_images(path_a: str, path_b: str) -> dict[str, Any]:
         proc = subprocess.run([*cmp_cmd, "-metric", "PSNR", path_a, resized, "null:"],
                               capture_output=True, text=True)
         raw = (proc.stderr or proc.stdout).strip()
-        value = _parse_psnr(raw)
-        # ImageMagick 6 prints `0` (not `inf`) for IDENTICAL images, which a real 0 dB
-        # reading (all-black vs all-white) also prints. Count differing pixels to tell
-        # them apart; an identical pair is the capped PSNR, never 0 dB ("worst").
-        if value == 0.0 and _no_differing_pixels(cmp_cmd, path_a, resized):
-            value = PSNR_CAP_DB
     finally:
         if is_temp:
             with contextlib.suppress(OSError):
                 os.remove(resized)
+    # IM6 prints `0` for identical images where IM7 prints `inf`; compare's exit status
+    # (0 identical, 1 different, 2 error) tells them apart.
+    value = _parse_psnr(raw)
+    if proc.returncode == 0 and value == 0.0:
+        value = PSNR_CAP_DB
     return {"value": value, "sense": SENSE_HIGHER, "unit": "dB", "capped": value >= PSNR_CAP_DB}
-
-
-def _no_differing_pixels(cmp_cmd: list[str], path_a: str, path_b: str) -> bool:
-    """True when `compare -metric AE` counts zero differing pixels between the files."""
-    proc = subprocess.run([*cmp_cmd, "-metric", "AE", path_a, path_b, "null:"],
-                          capture_output=True, text=True)
-    tokens = (proc.stderr or proc.stdout).split()
-    return proc.returncode == 0 and bool(tokens) and tokens[0] == "0"
 
 
 def _parse_psnr(raw: str) -> float:
@@ -143,7 +134,9 @@ def _resize_to_match(magick: str, ref: str, other: str) -> tuple[str, bool]:
     dims = subprocess.run([*ident, "-format", "%wx%h", ref], capture_output=True, text=True).stdout.strip()
     fd, out = tempfile.mkstemp(prefix="_psnr_resized_", suffix=".png")
     os.close(fd)
-    subprocess.run([magick, other, "-resize", f"{dims}!", out], capture_output=True, text=True)
+    # IM6 has no `magick` front end and `compare` cannot resize; its resizer is `convert`.
+    resize = ["convert"] if magick == "compare" else [magick]
+    subprocess.run([*resize, other, "-resize", f"{dims}!", out], capture_output=True, text=True)
     if os.path.isfile(out) and os.path.getsize(out) > 0:
         return out, True
     with contextlib.suppress(OSError):

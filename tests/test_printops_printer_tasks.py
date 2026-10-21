@@ -857,27 +857,29 @@ def test_manual_task_lifecycle_dependencies_and_snoozes(
     with pytest.raises(pt.TaskError, match="already done"):
         pt.done(conn, x["id"], actor="me")
 
-    # A frozen clock (snooze takes `now=`): the snooze target must lie in the future of the
-    # clock the test runs on, not of the wall clock — a literal date silently expires.
-    clock = datetime.datetime(2026, 10, 19, tzinfo=datetime.timezone.utc)
+    # Relative to "now": a literal calendar date stops being "in the future" and breaks this test.
+    until_dt = (
+        datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=2)))
+        + datetime.timedelta(days=2)
+    ).replace(second=0, microsecond=0)
     sn = pt.snooze(
         conn,
         shaper["id"],
         actor="me",
-        until="2026-10-20T09:00+02:00",
+        until=until_dt.isoformat(timespec="minutes"),
         reason="after the house queue",
-        now=clock,
     )
-    assert (
-        sn["status"] == "snoozed" and sn["snoozed_until"] == "2026-10-20T07:00:00.000Z"
+    until_utc = until_dt.astimezone(datetime.timezone.utc)
+    assert sn["status"] == "snoozed" and sn["snoozed_until"] == until_utc.strftime(
+        "%Y-%m-%dT%H:%M:%S.000Z"
     )
     with pytest.raises(pt.TaskError, match="not in the future"):
-        pt.snooze(conn, shaper["id"], actor="me", until="2020-01-01", now=clock)
+        pt.snooze(conn, shaper["id"], actor="me", until="2020-01-01")
     rep = pt.sync(
         conn,
         src,
         "k1se",
-        now=datetime.datetime(2026, 10, 21, tzinfo=datetime.timezone.utc),
+        now=until_utc + datetime.timedelta(days=1),
     )
     assert (
         shaper["id"] in rep.updated and pt.get(conn, shaper["id"])["status"] == "open"
