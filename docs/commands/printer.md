@@ -4,7 +4,10 @@
 [`fleet/printers.yaml`](../../fleet/printers.yaml) and of `printer-devices.yaml`: it reads their
 state, stores G-code on them, starts an uploaded file after an explicit `--yes`, and cancels
 a job. `3d printers` (plural) is a different command: it lists printer **models** and their
-build volumes; `3d printer` is about the machines themselves.
+build volumes; `3d printer` is about the machines themselves. For everything about one machine on
+one screen — model spec, address and settings, the web UIs that answer (Fluidd/Mainsail/Moonraker),
+live status, job queue and job history — use [`3d printers show NAME`](printers.md#show-name)
+(`--json`, `--no-live`, `--history N`, `--secs S`).
 
 Epic: [#90](https://github.com/alex-mextner/3d-cli/issues/90).
 
@@ -77,6 +80,8 @@ Options:
 3d printer status u1
 3d printer status k1se --secs 5
 3d printer status u1 --json | jq '.slots[] | {label, color, material}'
+3d printers show u1                    # the full dossier: machine, web UIs, status, queue, history
+3d printers show k1se --history 10 --secs 3
 3d printer upload u1 out/part.gcode
 3d printer upload k1se "out/roof left.gcode" --as roof_left.gcode
 3d printer start u1 out/part.gcode --yes
