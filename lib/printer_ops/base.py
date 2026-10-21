@@ -223,6 +223,10 @@ class Adapter:
     def cancel(self) -> None:
         raise self._unsupported("cancel")
 
+    def pause(self) -> None:
+        """Request a native pause. The caller owns job binding and paused-state verification."""
+        raise self._unsupported("pause")
+
     def run_gcode(self, script: str, *, timeout: float = 120.0) -> None:
         """Run a G-code script (lines joined by newlines; the bed-clear acknowledgement in
         printer_ops/bed.py and the `3d calibrate photo` pose/light in topcam/photo.py). Returns

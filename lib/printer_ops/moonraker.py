@@ -406,6 +406,9 @@ class MoonrakerAdapter(Adapter):
     def cancel(self) -> None:
         self._post("/printer/print/cancel")
 
+    def pause(self) -> None:
+        self._post("/printer/print/pause")
+
     def run_gcode(self, script: str, *, timeout: float = 120.0) -> None:
         """Run G-code lines (newline-separated) through `/printer/gcode/script`. Moonraker
         answers when Klipper finished them (an `M400` at the end waits for the moves; a long

@@ -208,6 +208,9 @@ class FakeMoonraker:
                 elif u.path == "/printer/print/cancel":
                     fake.status["print_stats"].update(state="cancelled")
                     self._reply({"result": "ok"})
+                elif u.path == "/printer/print/pause":
+                    fake.status["print_stats"].update(state="paused")
+                    self._reply({"result": "ok"})
                 elif u.path == "/printer/gcode/script":
                     fake.scripts.append(rec.query["script"][0])
                     if fake.scripts[-1].strip().upper() == "G28" and fake.home_on_g28:
