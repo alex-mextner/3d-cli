@@ -85,12 +85,25 @@ def psnr_images(path_a: str, path_b: str) -> dict[str, Any]:
         proc = subprocess.run([*cmp_cmd, "-metric", "PSNR", path_a, resized, "null:"],
                               capture_output=True, text=True)
         raw = (proc.stderr or proc.stdout).strip()
+        value = _parse_psnr(raw)
+        # ImageMagick 6 prints `0` (not `inf`) for IDENTICAL images, which a real 0 dB
+        # reading (all-black vs all-white) also prints. Count differing pixels to tell
+        # them apart; an identical pair is the capped PSNR, never 0 dB ("worst").
+        if value == 0.0 and _no_differing_pixels(cmp_cmd, path_a, resized):
+            value = PSNR_CAP_DB
     finally:
         if is_temp:
             with contextlib.suppress(OSError):
                 os.remove(resized)
-    value = _parse_psnr(raw)
     return {"value": value, "sense": SENSE_HIGHER, "unit": "dB", "capped": value >= PSNR_CAP_DB}
+
+
+def _no_differing_pixels(cmp_cmd: list[str], path_a: str, path_b: str) -> bool:
+    """True when `compare -metric AE` counts zero differing pixels between the files."""
+    proc = subprocess.run([*cmp_cmd, "-metric", "AE", path_a, path_b, "null:"],
+                          capture_output=True, text=True)
+    tokens = (proc.stderr or proc.stdout).split()
+    return proc.returncode == 0 and bool(tokens) and tokens[0] == "0"
 
 
 def _parse_psnr(raw: str) -> float:

@@ -515,12 +515,29 @@ def _fail(case: BenchCase, stop: str, *, calls: int, wall: float,
     )
 
 
-def _gate0_render(scad_path: pathlib.Path, workdir: pathlib.Path,
-                  openscad: str) -> tuple[bool, pathlib.Path | None, str | None]:
-    """GATE 0: render the .scad to a PNG. Returns (build_success, png_path, error)."""
+def _gate0_render(
+    scad_path: pathlib.Path, workdir: pathlib.Path, openscad: str
+) -> tuple[bool, pathlib.Path | None, str | None]:
+    """GATE 0: render the .scad to a PNG. Returns (build_success, png_path, error).
+
+    PNG export needs an OpenGL context, so on a headless runner the call goes through
+    xvfb-run (cli.env.openscad_display_prefix) — without it OpenSCAD 2021.01 exits 1 with
+    "Can't create OpenGL OffscreenView" after a successful CGAL render.
+    """
+    from cli import env
+
     png = workdir / f"{scad_path.stem}.png"
-    proc = _run([openscad, "--render", "-o", str(png), str(scad_path)],
-                timeout=DEFAULT_RENDER_TIMEOUT)
+    proc = _run(
+        [
+            *env.openscad_display_prefix(),
+            openscad,
+            "--render",
+            "-o",
+            str(png),
+            str(scad_path),
+        ],
+        timeout=DEFAULT_RENDER_TIMEOUT,
+    )
     if proc.rc != 0 or not png.is_file():
         return False, None, (proc.err or proc.out).strip()[:200]
     return True, png, None

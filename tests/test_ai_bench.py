@@ -408,3 +408,27 @@ def test_cli_bench_compare_roundtrip(tmp_path: Path) -> None:
     proc = _run_cli(["bench", "--compare"], env)
     assert proc.returncode == 0
     assert "BENCH compare" in proc.stdout
+
+
+def test_gate0_png_render_runs_under_the_headless_display_prefix(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """OpenSCAD 2021.01 (the CI runner's apt build) cannot export a PNG without a display;
+    gate 0 must go through the xvfb prefix or every good case fails as a build failure."""
+    import cli.env as cli_env
+
+    monkeypatch.setattr(
+        cli_env, "openscad_display_prefix", lambda: ["xvfb-run", "--auto-servernum"]
+    )
+    seen: list[list[str]] = []
+
+    def fake_run(cmd: list[str], *, timeout: float) -> Any:
+        seen.append(cmd)
+        return bench._Proc(rc=1, out="", err="no png")
+
+    monkeypatch.setattr(bench, "_run", fake_run)
+    scad = tmp_path / "m.scad"
+    scad.write_text("cube(1);", encoding="utf-8")
+    built, png, _ = bench._gate0_render(scad, tmp_path, "/usr/bin/openscad")
+    assert (built, png) == (False, None)
+    assert seen[0][:3] == ["xvfb-run", "--auto-servernum", "/usr/bin/openscad"]

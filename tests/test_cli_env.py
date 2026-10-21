@@ -267,5 +267,33 @@ def test_find_slicer_bambu_fallback(monkeypatch: Any) -> None:
 
 def test_find_slicer_bundle_path(monkeypatch: Any) -> None:
     monkeypatch.setattr(shutil, "which", lambda x: None)
-    monkeypatch.setattr("os.access", lambda p, m: p == "/Applications/OrcaSlicer.app/Contents/MacOS/OrcaSlicer")
-    assert env.find_slicer() == ("orca", "/Applications/OrcaSlicer.app/Contents/MacOS/OrcaSlicer")
+    monkeypatch.setattr(
+        "os.access",
+        lambda p, m: p == "/Applications/OrcaSlicer.app/Contents/MacOS/OrcaSlicer",
+    )
+    assert env.find_slicer() == (
+        "orca",
+        "/Applications/OrcaSlicer.app/Contents/MacOS/OrcaSlicer",
+    )
+
+
+# --- openscad_display_prefix ---
+def test_openscad_display_prefix_empty_when_display_set(monkeypatch: Any) -> None:
+    monkeypatch.setenv("DISPLAY", ":0")
+    monkeypatch.setattr(shutil, "which", lambda x: "/usr/bin/xvfb-run")
+    assert env.openscad_display_prefix() == []
+
+
+def test_openscad_display_prefix_wraps_in_xvfb_when_headless(monkeypatch: Any) -> None:
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.setattr(
+        shutil, "which", lambda x: "/usr/bin/xvfb-run" if x == "xvfb-run" else None
+    )
+    prefix = env.openscad_display_prefix()
+    assert prefix[:2] == ["/usr/bin/xvfb-run", "--auto-servernum"]
+
+
+def test_openscad_display_prefix_empty_without_xvfb(monkeypatch: Any) -> None:
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.setattr(shutil, "which", lambda x: None)
+    assert env.openscad_display_prefix() == []

@@ -103,3 +103,40 @@ def test_parse_psnr_maps_inf_to_cap() -> None:
     assert pm._parse_psnr("inf") == pm.PSNR_CAP_DB
     assert pm._parse_psnr("0 (0)") == pytest.approx(0.0)
     assert math.isfinite(pm._parse_psnr("31.5 (0.9)"))
+
+
+def _fake_compare(
+    monkeypatch: pytest.MonkeyPatch, *, psnr: str, ae: str, ae_rc: int
+) -> None:
+    """Stub ImageMagick 6's `compare`: it prints PSNR `0` for identical AND for black-vs-white."""
+
+    class _Done:
+        def __init__(self, stderr: str, returncode: int) -> None:
+            self.stderr, self.stdout, self.returncode = stderr, "", returncode
+
+    def fake_run(cmd: list[str], **_: object) -> _Done:
+        metric = cmd[cmd.index("-metric") + 1]
+        return _Done(psnr, 0) if metric == "PSNR" else _Done(ae, ae_rc)
+
+    monkeypatch.setattr(pm, "_find_magick", lambda: "compare")
+    monkeypatch.setattr(
+        pm, "_resize_to_match", lambda magick, ref, other: (other, False)
+    )
+    monkeypatch.setattr(pm.subprocess, "run", fake_run)
+
+
+def test_psnr_images_im6_zero_for_identical_files_is_the_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _fake_compare(monkeypatch, psnr="0 (0)", ae="0", ae_rc=0)
+    result = pm.psnr_images("a.png", "a.png")
+    assert result["value"] == pm.PSNR_CAP_DB
+    assert result["capped"] is True
+
+
+def test_psnr_images_real_zero_db_stays_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    """All-black vs all-white is a genuine 0 dB: pixels differ, so it must NOT be capped."""
+    _fake_compare(monkeypatch, psnr="0 (0)", ae="256", ae_rc=1)
+    result = pm.psnr_images("black.png", "white.png")
+    assert result["value"] == pytest.approx(0.0)
+    assert result["capped"] is False

@@ -39,6 +39,7 @@ from typing import Any
 
 from axis import VIEW_DIRECTIONS, VIEW_NAMES
 from cli.resources import pool_size
+from cli.env import openscad_display_prefix
 
 # ---------------------------------------------------------------------------
 # named-view direction table.  Each value is the eye DIRECTION from the look-at
@@ -76,24 +77,9 @@ def find_openscad() -> str:
     )
 
 
-def _openscad_prefix() -> list[str]:
-    """Return a prefix like ['xvfb-run', ...] when running headless on Linux.
-
-    OpenSCAD still needs a display server even with --render on some builds.
-    When DISPLAY is absent and xvfb-run is available, prefix the command so
-    the render succeeds on CI runners.
-    """
-    if os.environ.get("DISPLAY"):
-        return []
-    xvfb = shutil.which("xvfb-run")
-    if xvfb:
-        return [xvfb, "--auto-servernum", "--server-args=-screen 0 1280x1024x24"]
-    return []
-
-
 def _run_openscad(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
     """Run openscad (possibly wrapped in xvfb-run) and return the result."""
-    full = [*_openscad_prefix(), *cmd]
+    full = [*openscad_display_prefix(), *cmd]
     return subprocess.run(full, **kwargs)  # type: ignore[arg-type]
 
 
@@ -296,7 +282,7 @@ def render_multi(args: argparse.Namespace) -> int:
 
     bbox = model_bbox(scad, defines, openscad) if render_flag else None
 
-    prefix = _openscad_prefix()
+    prefix = openscad_display_prefix()
     cmds: list[tuple[str, str, list[str]]] = []
     for view in MULTI_VIEWS:
         out = os.path.join(outdir, f"{base}_{view}.png")
