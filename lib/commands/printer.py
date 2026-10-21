@@ -51,6 +51,8 @@ USAGE = """3d printer [-n NAME] <subcommand> [args]
                                        (objects on the bed / plate missing FAIL) when the
                                        printer has watch.bed.enabled
   cancel NAME --yes                    cancel the running/paused job
+  guard NAME --job-id ID --yes         one-job automatic PAUSE on confirmed camera failure;
+                                       local evidence only (see `3d printer guard --help`)
   watch NAME...|--all [options]        live read-only subscription: anomaly events to
                                        stdout JSONL / --exec / --steer SESSION / subscribers
                                        (see `3d printer watch --help`)
@@ -79,7 +81,7 @@ Options:
   --secs S           Creality: seconds to listen on ws:9999 for pushed state (default 3)
   --as REMOTE        remote name stem (default: local name, spaces -> _); the stored name
                      always ends in -<sha256[:16]>.gcode; give start the same --as
-  --yes              required for start and cancel: you confirm the physical action
+  --yes              required for start, cancel and guard: you confirm the physical action
   --force            start even when preflight FAILs (the failing checks are printed)
   --source-3mf FILE  the project 3MF the G-code was sliced from: head-sequence check + halves-check
                      (without it the head-sequence check uses NAME.3mf next to the G-code)
@@ -110,6 +112,7 @@ Examples:
   3d printer subscribe --session 01a12cd6 --printer u1,k1se
   3d printer subscriptions
   3d printer agent list
+  3d printer guard u1 --job-id 00006D --yes
   3d printer todo list u1
   3d printer -n k1se issues add --title "X belt squeaks" --type inspect"""
 
@@ -469,6 +472,10 @@ def run(argv: list[str]) -> int:
         return watch(rest)
     if sub == "vision":
         return _cmd_vision(rest)
+    if sub == "guard":
+        from printer_ops.guard import run as guard
+
+        return guard(rest, vision_deps=VISION_DEPS)
     if sub == "bed":
         return _cmd_bed(rest)
     if sub in ("subscribe", "unsubscribe", "subscriptions"):
@@ -484,7 +491,7 @@ def run(argv: list[str]) -> int:
 
         return todo(rest, printer=name)
     raise UsageError(f"unknown subcommand '{sub}'", command="printer",
-                     remediation=["Use list, status, upload, start, cancel, watch, vision, bed, subscribe, unsubscribe, "
+                     remediation=["Use list, status, upload, start, cancel, watch, vision, guard, bed, subscribe, unsubscribe, "
                                   "subscriptions, agent or todo (issues) — see `3d printer --help`."])
 
 

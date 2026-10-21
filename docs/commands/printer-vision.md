@@ -58,6 +58,113 @@ Each event fires once per episode. Camera events (`vision_*`) carry the saved fr
 Nothing is sent to the printer except `camera.start_monitor`: vision never pauses or cancels.
 Decide on the event (`3d printer status`, Fluidd), then pause yourself.
 
+## One-job automatic pause
+
+`watch`, `vision` and alert delivery are observation paths. Receiving a critical alert does
+not prove a printer was paused. The separate `guard` command explicitly authorizes an
+automatic native PAUSE of one current Moonraker job:
+
+```bash
+3d printer guard u1 --job-id 00006D --yes
+3d printer guard u1 --job-id 00006D --dry-run --interval 10 --evidence ~/.cache/3d-cli/guard-check
+```
+
+Get the actual native job ID from Moonraker history immediately after the start is acknowledged.
+`--job-id` is required; a filename alone cannot distinguish repeated attempts of the same file.
+The printer is positional: use `printer guard NAME`, not the `-n/--name` selector reserved
+for `printer todo`/`issues`; the CLI rejects that selector with the positional spelling.
+The guard binds the latest `in_progress` history record's job ID, filename and start time to
+the printer's current `printing` state. It refuses read-only and non-Moonraker devices and
+disarms on a pause, completion, cancellation, another job, or a reset print duration. It never
+resumes or cancels and never changes firmware detection settings.
+
+The guard uses the configured camera, geometry and existing Obico/CLIP scorer and failure
+thresholds. The verifier must be enabled. Two consecutive **distinct, fresh frames** must
+reach the existing critical trend with verified failure regions. It checks frame acquisition
+time, source `Last-Modified` when supplied, JPEG content changes and brightness; old, repeated,
+dark, unverified or unreadable evidence cannot authorize a pause. Healthy frames decay old
+failure history. Scene findings and native NPU log entries alone do not trigger this guard.
+An undecodable frame, OpenCV processing error, or ONNX Runtime `Fail`, `RuntimeException`,
+`EngineError` or `EPFail` during scoring produces `blind` with `score_error` and clears the
+temporal evidence. Valid later frames can recover. Other exceptions, including programming
+errors and model/input-contract errors, propagate; identity, state-file and PAUSE failures
+are outside the scoring handler. A JPEG warning alone does not imply a decoding failure.
+The existing first-six-frame warmup and model limitations remain: this does not guarantee
+recognition of an intact displaced panel before it turns into visible spaghetti.
+Every blind outcome replaces the complete failure tracker, including its long-term baseline;
+repeated interrupted warmups cannot train away a later real failure.
+
+The current policy is version 1, with a 30-second maximum frame age and a 10-second default
+capture interval (`--interval` accepts 2..30 seconds). Shorter intervals change the elapsed
+time represented by the existing frame-count tracker. Keep 10 seconds for its tested cadence.
+Acquisition continuity has a separate limit: the greater of 30 seconds or the configured
+interval plus a 2-second scheduling margin. Thus `--interval 30` tolerates a small capture
+delay, while the default still discards temporal evidence after a gap over 30 seconds.
+This margin never increases the maximum age of an individual frame, including the final
+freshness check immediately before PAUSE.
+When polling outruns the camera, a fresh duplicate produces `waiting` with
+`camera_ready: false`. It adds no confirmation, does not reset a continuous trend, and does
+not advance the last distinct image's acquisition time. A stale, invalid or reordered frame,
+or a gap beyond that continuity limit, still produces `blind` and resets the full tracker.
+The guard remembers the last 64 unique JPEG hashes in insertion order. Repeated reads do
+not refresh their position, and elapsed time or blindness does not clear this bounded cache.
+Only 64 newer unique images can evict an old image; this is a recent replay check, not a
+history of every image in the job. Frozen or alternating cached images therefore cannot
+refresh the continuity bound, even without source timestamps. When supplied, `Last-Modified`
+must not move backward from the latest accepted distinct image's source timestamp; this
+high-water mark survives blindness and a duplicate's rewritten header cannot advance it.
+Equal source timestamps are allowed for distinct images because HTTP
+timestamps may have coarser resolution than the camera.
+`--evidence DIR` changes the saved-frame directory; the default is `~/.cache/3d-cli/guard`.
+`--dry-run` records `would_pause` and exits without a PAUSE, job or motion command, or an
+attempt claim. Camera keepalive (`camera.start_monitor`) still runs when configured.
+
+**Clock synchronization is a precondition.** The guard host, Moonraker history and camera
+server must use synchronized wall clocks. Acquisition time must not be in the host's future
+and must be at or after the native job start. When supplied, `Last-Modified` must also be at
+or after that start, no more than 30 seconds old, and no more than 5 seconds ahead of the host.
+The guard does not estimate offsets, change clocks or relax these checks. A `blind` reason
+identifies a future acquisition, future source timestamp, source age, or pre-job image;
+clock skew is a possible cause, not a proven diagnosis. Compare host/printer time and obtain
+a new frame before claiming readiness. If that cannot resolve the diagnostic within a
+30-second readiness check, treat the guard as unavailable and inspect the clock/camera
+instead of waiting indefinitely. For an active print, this requires operator attention;
+the guard does not pause from missing evidence.
+
+Decisions are printed as JSONL and saved atomically to
+`~/.local/state/3d-cli/guard/NAME.status.json` (XDG paths apply). `armed` means the scorer is
+loaded and the native job is bound (`camera_ready: false`). A fresh `observing` record with
+`camera_ready: true`, `frame_ts` and, when available, `frame_modified` establishes that a
+usable frame has passed through the policy.
+Check its `pid`, `ts`, `job_id`, `filename`, `action: pause`, `authorized: true`,
+`dry_run: false` and `policy_version: 1`. A dead process, stale status, `waiting` or `blind` record does
+not establish protection.
+
+Before PAUSE, the guard saves the raw evidence and an exclusive durable claim at
+`~/.local/state/3d-cli/guard/NAME-JOBID.json`, then re-reads the current native job and checks
+frame age again. If that final read has a communication error, or the same job's evidence
+expires before the request, it durably releases only its own definitely-unsent claim and
+returns to `blind` with all temporal evidence reset. New usable frames can recover. A changed
+job, manual pause or reset duration at that final read also releases the owned unsent claim,
+then disarms. This does not resume the printer or automatically rearm the guard. A claim
+replaced by another owner is preserved, and the guard disarms
+without sending a request. Filesystem failures propagate; they never report a successful
+release. It sends `/printer/print/pause` once and polls for the same job to report
+`paused`. An acknowledged request without that readback is `pause_unverified` (exit 1).
+A lost response or firmware refusal still gets readback and a terminal result. Once the
+PAUSE actuator has been entered, its claim is retained even if the request is refused.
+An uncertain request is never resent,
+including after a process restart. Inspect the claim and printer before taking any further
+action. The API does not provide an atomic conditional pause; the final identity read narrows
+the unavoidable read/write race.
+
+The guard has no notification dispatcher, subscriber, temporary agent or Telegram dependency.
+Run it as a finite per-job process and check its fresh status after attaching it to the
+acknowledged job. Any process restart must retain the exact job ID and persistent claim
+directory; it reloads the models and starts fresh evidence, including the six-frame warmup.
+It must never start or resume a print. A new job needs a new explicit invocation with its
+own native ID.
+
 Labels of the U1's own detector (unisrv `camera.detect_capture`), from Snapmaker u1-klipper
 `defect_detection.py` and the U1's `klippy.log`:
 
