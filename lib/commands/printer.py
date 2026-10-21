@@ -42,6 +42,8 @@ USAGE = """3d printer [-n NAME] <subcommand> [args]
   list [--json]                        every fleet + configured printer: owner, access,
                                        model, address, heads (unusable ones with reason)
   status NAME [--json] [--secs S]      state, job, progress, temperatures, loaded heads
+                                       (everything about one printer — web UIs, queue, job
+                                       history, settings: `3d printers show NAME`)
   upload NAME FILE.gcode [--as REMOTE] store the file on the printer; never starts a print
   start NAME FILE.gcode --yes [--as REMOTE] [--source-3mf X.3mf] [--bridge-max MM] [--force] [--secs S]
                                        start a file that was uploaded before; runs
@@ -157,29 +159,6 @@ def _adapter(name: str, opts: dict[str, str], *, write: bool = False) -> Adapter
     return adapter_by_name(name, secs=opts.get("--secs"))
 
 
-def _fmt_temp(v: float | None) -> str:
-    return "-" if v is None else f"{v:.0f}" if float(v).is_integer() else f"{v:.1f}"
-
-
-def _render_status(name: str, adapter: Adapter, st: PrinterStatus) -> str:
-    lines = [f"{name}  ({adapter.kind}  {adapter.host}:{adapter.port}{'  ' + st.model if st.model else ''})"]
-    lines.append(f"  state     {st.state}  [{st.raw_state}]")
-    if st.filename:
-        prog = f"  {st.progress * 100:.1f}%" if st.progress is not None else ""
-        lines.append(f"  file      {st.filename}{prog}")
-    if st.temps:
-        lines.append("  temps     " + "  ".join(f"{k} {_fmt_temp(a)}/{_fmt_temp(t)}" for k, (a, t) in st.temps.items()))
-    if st.slots:
-        heads = [
-            f"{s.label} {s.color or '?'} {s.material or ''}".rstrip() if s.present else f"{s.label} empty"
-            for s in st.slots
-        ]
-        lines.append("  heads     " + " | ".join(heads))
-    if st.message:
-        lines.append(f"  message   {st.message}")
-    return "\n".join(lines)
-
-
 def _list_row(name: str, printer: FleetPrinter | None, device: Device | None) -> dict[str, Any]:
     """One `printer list` entry: fleet facts (owner, topology) + the device that would be contacted."""
     from dataclasses import asdict
@@ -240,13 +219,15 @@ def _cmd_list(argv: list[str]) -> int:
 def _cmd_status(argv: list[str]) -> int:
     import json
 
+    from printer_ops.render import render_status
+
     (name,), opts = _parse(argv, {"--json", "--secs"}, 1, "status")
     adapter = _adapter(name, opts)
     st = adapter.status()
     if "--json" in opts:
         print(json.dumps({"printer": name, "adapter": adapter.kind, **st.to_json()}, indent=1, default=str))
     else:
-        print(_render_status(name, adapter, st))
+        print(render_status(name, adapter, st))
     return 0
 
 
@@ -335,6 +316,7 @@ def _cmd_start(argv: list[str]) -> int:
 def _start_snapshot(name: str, file: str, original: Path, local: Path, source: Path | None,
                     opts: dict[str, str]) -> int:
     from printer_ops.base import UNKNOWN, PrinterCommError, PrinterRefused, file_sha256, safe_remote_name
+    from printer_ops.render import render_status
     from printer_ops import bridge_max_for
     from printer_ops.preflight import FAIL, run_preflight
     from printer_ops.printops_checks import context_from_options
@@ -412,12 +394,13 @@ def _start_snapshot(name: str, file: str, original: Path, local: Path, source: P
             f"[{after.raw_state}]: outcome UNKNOWN",
             command="printer", remediation=dont_resend,
         )
-    print(_render_status(name, adapter, after))
+    print(render_status(name, adapter, after))
     return 0
 
 
 def _cmd_cancel(argv: list[str]) -> int:
     from printer_ops.base import ACTIVE_JOB_STATES, PrinterRefused
+    from printer_ops.render import render_status
 
     (name,), opts = _parse(argv, {"--yes", "--secs"}, 1, "cancel")
     if "--yes" not in opts:
@@ -429,7 +412,7 @@ def _cmd_cancel(argv: list[str]) -> int:
         raise PrinterRefused(f"{name} is {st.state} [{st.raw_state}]: no job to cancel", command="printer")
     adapter.cancel()
     print(f"cancel sent to {name} (job {st.filename or '?'})")
-    print(_render_status(name, adapter, adapter.status()))
+    print(render_status(name, adapter, adapter.status()))
     return 0
 
 

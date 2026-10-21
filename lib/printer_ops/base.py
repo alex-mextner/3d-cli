@@ -130,6 +130,44 @@ class HeadWrite:
     pressure_advance: float | None   # the extruder's K after the write (the firmware may reset it)
 
 
+@dataclass
+class QueuedJob:
+    """One job waiting in the printer's own job queue (not started yet)."""
+
+    filename: str
+    job_id: str | None = None
+    waiting_s: float | None = None   # seconds since it was queued
+
+
+@dataclass
+class JobQueue:
+    """The printer-side job queue: its state (ready/loading/starting/paused) and the waiting jobs."""
+
+    state: str | None
+    jobs: list[QueuedJob] = field(default_factory=list)
+
+
+@dataclass
+class JobRecord:
+    """One finished (or interrupted) job of the printer's job history, newest first."""
+
+    filename: str
+    status: str                      # the firmware's own word: completed, cancelled, error, ...
+    start_time: float | None = None  # unix seconds
+    print_s: float | None = None     # time spent printing
+    filament_mm: float | None = None
+    job_id: str | None = None
+
+
+@dataclass
+class HistoryTotals:
+    """Lifetime counters of the printer's job history."""
+
+    jobs: int | None = None
+    print_s: float | None = None
+    filament_mm: float | None = None
+
+
 class Adapter:
     """Interface every printer backend implements. Unimplemented ops raise UnsupportedOperation."""
 
@@ -156,6 +194,18 @@ class Adapter:
     def list_files(self, expect: tuple[str, int] | None = None) -> dict[str, RemoteFile]:
         """Remote G-code files by name. `expect=(name, size)` lets a slow lister stop early."""
         raise self._unsupported("list files")
+
+    def queue(self) -> JobQueue:
+        """The printer's own job queue. Read-only."""
+        raise self._unsupported("a job queue")
+
+    def history(self, limit: int) -> list[JobRecord]:
+        """The `limit` newest jobs of the printer's job history, newest first. Read-only."""
+        raise self._unsupported("job history")
+
+    def history_totals(self) -> HistoryTotals:
+        """Lifetime job count, print time and filament of the printer. Read-only."""
+        raise self._unsupported("job history")
 
     def upload(self, local: Path, remote_name: str) -> UploadResult:
         raise self._unsupported("upload")
@@ -248,7 +298,8 @@ def http_json(method: str, url: str, *, timeout: float = 10.0, body: bytes | Non
 
 
 def http_request(method: str, url: str, *, timeout: float = 10.0, body: bytes | None = None,
-                 headers: dict[str, str] | None = None) -> tuple[int, bytes]:
+                 headers: dict[str, str] | None = None, max_bytes: int | None = None) -> tuple[int, bytes]:
+    """One HTTP request -> (status, body); `max_bytes` caps how much of the body is read."""
     parts = urlsplit(url)
     conn = http.client.HTTPConnection(parts.hostname or "", parts.port or 80, timeout=timeout)
     try:
@@ -257,7 +308,7 @@ def http_request(method: str, url: str, *, timeout: float = 10.0, body: bytes | 
             path += "?" + parts.query
         conn.request(method, path, body=body, headers=headers or {})
         r = conn.getresponse()
-        return r.status, r.read()
+        return r.status, r.read(max_bytes)
     finally:
         conn.close()
 

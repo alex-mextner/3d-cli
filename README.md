@@ -471,7 +471,7 @@ per-OS install command (e.g. `brew install --cask orcaslicer`) — never broken.
 | `3d init [path]` | scaffold a `3d.yaml` project skeleton. |
 | `3d projects list\|add\|remove` | manage the project registry used by `3d web`. |
 | `3d materials list\|show` | inspect FDM material names and properties. |
-| `3d printers list\|show` | inspect printer names, bed volumes, and nozzle metadata. |
+| `3d printers list\|show` | inspect printer models (bed, nozzle, firmware); `show u1` is the one-screen dossier of a fleet printer: machine, web UIs, live status, job queue, job history. |
 | `3d metrics list\|show` | inspect persisted command metrics JSONL records. |
 | `3d doctor` | report present/missing deps + the exact install command per OS (read-only). |
 

@@ -71,8 +71,11 @@ Target package: `lib/geometry/`, with subpackages only when a real boundary appe
 - `lib/slicing/printing.py`
 - `lib/printer_ops/` — real-printer control behind `3d printer` / `3d print-preflight`:
   adapter contract + status model (`base.py`), stdlib WebSocket client (`ws.py`),
-  `moonraker.py` (Klipper/Moonraker, Snapmaker U1), `creality.py` (Creality K1 stock
-  firmware), `devices.py` (`printer-devices.yaml`), `preflight.py` (pre-print checks),
+  `moonraker.py` (Klipper/Moonraker, Snapmaker U1; also the read-only job queue and history),
+  `creality.py` (Creality K1 stock firmware), `devices.py` (`printer-devices.yaml`),
+  `dossier.py` / `dossier_render.py` / `webui.py` / `render.py` (`3d printers show NAME`: name
+  resolution, the concurrent read-only live reads, the web UI probe, the text; `render.py` is
+  the status text shared with `3d printer status`), `preflight.py` (pre-print checks),
   `move_bounds.py` (G-code moves and arc extremes vs axis travel / printable area),
   `watch.py` / `watch_run.py` / `watch_sinks.py` (`3d printer watch`: detectors, streams,
   the event Dispatcher and its staged sinks; agents first, `tg` only as the emergency
