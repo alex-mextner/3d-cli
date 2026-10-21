@@ -108,6 +108,7 @@ def test_history_flag_limits_the_jobs_listed(tmp_path: Path) -> None:
 
 
 def test_the_default_history_is_the_last_five_jobs(tmp_path: Path) -> None:
+    """The printer has run eight jobs; without --history the user sees the five most recent."""
     many = [
         {
             "job_id": str(i),
@@ -150,6 +151,7 @@ def test_a_model_name_shows_the_spec_and_every_machine_of_that_model(
 
 
 def test_json_is_one_machine_readable_dossier(tmp_path: Path) -> None:
+    """A script asks for `--json` and gets one object with the model, the machine, the web UIs, the live state, the queue and the history."""
     moon = FakeMoonraker(history=HISTORY_JOBS, totals=HISTORY_TOTALS, queue=JOB_QUEUE)
     fluidd = FakeWebServer()
     with moon.serve(), fluidd.serve():
@@ -201,6 +203,7 @@ def test_json_is_one_machine_readable_dossier(tmp_path: Path) -> None:
 
 
 def test_no_live_prints_static_facts_and_touches_no_network(tmp_path: Path) -> None:
+    """The user only wants the facts on file (no printer contact): `--no-live` prints them and nothing is sent to the printer or its web UIs."""
     moon = FakeMoonraker(history=HISTORY_JOBS, totals=HISTORY_TOTALS)
     fluidd = FakeWebServer()
     with moon.serve(), fluidd.serve():
@@ -266,6 +269,7 @@ def test_an_offline_fleet_printer_is_never_contacted(tmp_path: Path) -> None:
 def test_a_creality_stock_printer_has_no_queue_or_history_but_its_own_web_ui(
     tmp_path: Path,
 ) -> None:
+    """The K1 SE on stock firmware has no queue or history API: the dossier says so plainly, still shows its state and its built-in web page."""
     k1 = FakeCreality()
     with k1.serve():
         fleet = write_fleet(tmp_path / "fleet.yaml", k1_entry(k1))
@@ -299,6 +303,7 @@ def test_the_live_status_matches_what_printer_status_prints(tmp_path: Path) -> N
 
 
 def test_an_unknown_name_lists_models_and_fleet_printers(tmp_path: Path) -> None:
+    """The user mistypes the printer name and the error lists both the model names and the fleet printers to pick from."""
     moon = FakeMoonraker()
     with moon.serve():
         fleet = write_fleet(tmp_path / "fleet.yaml", u1_entry(moon))
@@ -311,6 +316,7 @@ def test_an_unknown_name_lists_models_and_fleet_printers(tmp_path: Path) -> None
 
 
 def test_bad_flag_values_are_structured_usage_errors(tmp_path: Path) -> None:
+    """The user passes nonsense (`--history many`, `--secs 0`, an unknown flag, no name) and gets a clear usage error, never a traceback."""
     fleet = write_fleet(tmp_path / "fleet.yaml")
     env = _env(tmp_path, fleet)
     bad = [
@@ -332,6 +338,7 @@ def test_bad_flag_values_are_structured_usage_errors(tmp_path: Path) -> None:
 def test_every_show_flag_is_documented_with_an_example_in_help_and_docs(
     tmp_path: Path,
 ) -> None:
+    """The user reads `3d printers --help` or the docs page and finds every `show` flag with a copy-pasteable example."""
     helped = run_cli(tmp_path, "printers", "--help")
     docs = (REPO_ROOT / "docs" / "commands" / "printers.md").read_text(encoding="utf-8")
     printer_docs = (REPO_ROOT / "docs" / "commands" / "printer.md").read_text(
@@ -353,6 +360,7 @@ def test_every_show_flag_is_documented_with_an_example_in_help_and_docs(
 def test_a_configured_camera_snapshot_url_is_listed_without_its_credentials(
     tmp_path: Path,
 ) -> None:
+    """The printer's camera URL carries a password and token in the settings file: the dossier shows the URL without them, in text and in JSON."""
     moon = FakeMoonraker()
     watch = (
         "  watch:\n    exec: \"curl -H 'Authorization: Bearer TOPSECRET' https://hooks.example/x\"\n"
@@ -373,6 +381,7 @@ def test_a_configured_camera_snapshot_url_is_listed_without_its_credentials(
 
 
 def test_a_bad_web_ports_override_is_a_structured_error_and_nothing_is_probed(tmp_path: Path) -> None:
+    """The user exports a wrong THREED_WEBUI_PORTS: the command refuses with a clear error before sending a single request."""
     moon = FakeMoonraker()
     with moon.serve():
         fleet = write_fleet(tmp_path / "fleet.yaml", u1_entry(moon))
@@ -383,6 +392,7 @@ def test_a_bad_web_ports_override_is_a_structured_error_and_nothing_is_probed(tm
 
 
 def test_a_malformed_camera_snapshot_setting_does_not_break_the_dossier(tmp_path: Path) -> None:
+    """A typo in the camera URL of the settings file must not hide the rest of the printer's facts."""
     moon = FakeMoonraker()
     watch = '  watch:\n    vision:\n      snapshot: "http://cam:80800/?token=SNAPTOKEN"\n'
     with moon.serve():
@@ -394,6 +404,7 @@ def test_a_malformed_camera_snapshot_setting_does_not_break_the_dossier(tmp_path
 
 
 def test_json_lists_the_web_ui_candidates_that_did_not_answer(tmp_path: Path) -> None:
+    """A script wants to know which web UI places were tried and did not answer: `--json` lists them next to the ones that did."""
     moon = FakeMoonraker()
     fluidd, gone = FakeWebServer(), free_port()
     with moon.serve(), fluidd.serve():
@@ -406,6 +417,7 @@ def test_json_lists_the_web_ui_candidates_that_did_not_answer(tmp_path: Path) ->
 
 
 def test_show_help_prints_usage_and_contacts_nothing(tmp_path: Path) -> None:
+    """The user asks `3d printers show u1 --help` and gets the usage text, not a printer dossier."""
     moon = FakeMoonraker()
     with moon.serve():
         fleet = write_fleet(tmp_path / "fleet.yaml", u1_entry(moon))
