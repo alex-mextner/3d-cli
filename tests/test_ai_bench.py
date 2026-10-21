@@ -233,9 +233,12 @@ def test_aggregate_build_rate_none_when_nothing_attempted() -> None:
 def _openscad_exports_png(workdir: Path) -> bool:
     """True when OpenSCAD is usable AND can export a PNG here.
 
-    A bare CI runner has OpenSCAD but no X display, so PNG export fails
-    ("Can't create OpenGL OffscreenView") while STL export works.
+    A bare CI runner has OpenSCAD but no X display, so PNG export needs the same xvfb
+    prefix gate 0 uses ("Can't create OpenGL OffscreenView" without it) while STL export
+    works; the probe must mirror gate 0 or it would skip exactly where gate 0 now passes.
     """
+    import cli.env as cli_env
+
     exe = bench._find_openscad()
     if exe is None:
         return False
@@ -243,7 +246,8 @@ def _openscad_exports_png(workdir: Path) -> bool:
     scad = workdir / "probe.scad"
     scad.write_text("cube(1);\n", encoding="utf-8")
     png = workdir / "probe.png"
-    proc = subprocess.run([exe, "--render", "-o", str(png), str(scad)], capture_output=True, text=True)
+    cmd = [*cli_env.openscad_display_prefix(), exe, "--render", "-o", str(png), str(scad)]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
     return proc.returncode == 0 and png.is_file()
 
 
@@ -428,3 +432,55 @@ def test_cli_bench_compare_roundtrip(tmp_path: Path) -> None:
     proc = _run_cli(["bench", "--compare"], env)
     assert proc.returncode == 0
     assert "BENCH compare" in proc.stdout
+
+
+def test_gate0_png_render_runs_under_the_headless_display_prefix(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """OpenSCAD 2021.01 (the CI runner's apt build) cannot export a PNG without a display;
+    gate 0 must go through the xvfb prefix or every good case fails as a build failure."""
+    import cli.env as cli_env
+
+    monkeypatch.setattr(
+        cli_env, "openscad_display_prefix", lambda: ["xvfb-run", "--auto-servernum"]
+    )
+    seen: list[list[str]] = []
+
+    def fake_run(cmd: list[str], *, timeout: float) -> Any:
+        seen.append(cmd)
+        return bench._Proc(rc=1, out="", err="no png")
+
+    monkeypatch.setattr(bench, "_run", fake_run)
+    scad = tmp_path / "m.scad"
+    scad.write_text("cube(1);", encoding="utf-8")
+    built, png, _ = bench._gate0_render(scad, tmp_path, "/usr/bin/openscad")
+    assert (built, png) == (False, None)
+    assert seen[0][:3] == ["xvfb-run", "--auto-servernum", "/usr/bin/openscad"]
+
+
+def _process_is_alive(pid: int) -> bool:
+    """True while `pid` is a running process (a zombie awaiting its reaper is gone)."""
+    stat = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True)
+    state = stat.stdout.strip()
+    return bool(state) and not state.startswith("Z")
+
+
+def test_run_timeout_kills_the_whole_process_group(tmp_path: Path) -> None:
+    """xvfb-run is a wrapper whose children (Xvfb, openscad) outlive a plain kill of the
+    wrapper; a timed-out gate-0 render must not leave them running."""
+    import time
+
+    pidfile = tmp_path / "grandchild.pid"
+    code = (
+        "import subprocess, sys, time\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+        f"open({str(pidfile)!r}, 'w').write(str(child.pid))\n"
+        "time.sleep(60)\n"
+    )
+    result = bench._run([sys.executable, "-c", code], timeout=3.0)
+    assert result.rc == 124
+    grandchild = int(pidfile.read_text())
+    deadline = time.time() + 10
+    while _process_is_alive(grandchild) and time.time() < deadline:
+        time.sleep(0.1)
+    assert not _process_is_alive(grandchild)
