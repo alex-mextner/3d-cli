@@ -77,6 +77,23 @@ def find_openscad() -> str | None:
     return None
 
 
+def openscad_display_prefix() -> list[str]:
+    """Command prefix that gives OpenSCAD an X display when the session has none.
+
+    PNG export (`openscad -o x.png`) opens an OpenGL offscreen view, which on OpenSCAD
+    2021.01 (Ubuntu's apt build, the CI runner) fails with "Can't create OpenGL
+    OffscreenView" and exit 1 when DISPLAY is unset. With xvfb-run available the prefix
+    is `['xvfb-run', ...]`; otherwise (a display exists, or no xvfb-run) it is empty and
+    OpenSCAD runs as-is.
+    """
+    if os.environ.get("DISPLAY"):
+        return []
+    xvfb = shutil.which("xvfb-run")
+    if xvfb:
+        return [xvfb, "--auto-servernum", "--server-args=-screen 0 1280x1024x24"]
+    return []
+
+
 def require_openscad(command: str | None = None) -> str:
     osc = find_openscad()
     if osc is None:

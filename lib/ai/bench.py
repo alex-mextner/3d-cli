@@ -38,8 +38,10 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import pathlib
 import re
+import signal
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -367,13 +369,22 @@ class _Proc:
 
 
 def _run(cmd: list[str], *, timeout: float, env: dict[str, str] | None = None) -> _Proc:
+    """Run `cmd`, capturing output. On timeout the whole process GROUP is killed: a wrapper
+    such as xvfb-run starts OpenSCAD and Xvfb as children, and killing only the wrapper
+    would leave both running."""
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env)
-    except subprocess.TimeoutExpired:
-        return _Proc(rc=124, out="", err=f"timed out after {timeout:g}s")
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True, env=env, start_new_session=True)
     except FileNotFoundError as exc:
         return _Proc(rc=127, out="", err=str(exc))
-    return _Proc(rc=p.returncode, out=p.stdout or "", err=p.stderr or "")
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        proc.communicate()
+        return _Proc(rc=124, out="", err=f"timed out after {timeout:g}s")
+    return _Proc(rc=proc.returncode, out=out or "", err=err or "")
 
 
 def _bin3d() -> pathlib.Path:
@@ -515,12 +526,29 @@ def _fail(case: BenchCase, stop: str, *, calls: int, wall: float,
     )
 
 
-def _gate0_render(scad_path: pathlib.Path, workdir: pathlib.Path,
-                  openscad: str) -> tuple[bool, pathlib.Path | None, str | None]:
-    """GATE 0: render the .scad to a PNG. Returns (build_success, png_path, error)."""
+def _gate0_render(
+    scad_path: pathlib.Path, workdir: pathlib.Path, openscad: str
+) -> tuple[bool, pathlib.Path | None, str | None]:
+    """GATE 0: render the .scad to a PNG. Returns (build_success, png_path, error).
+
+    PNG export needs an OpenGL context, so on a headless runner the call goes through
+    xvfb-run (cli.env.openscad_display_prefix) — without it OpenSCAD 2021.01 exits 1 with
+    "Can't create OpenGL OffscreenView" after a successful CGAL render.
+    """
+    from cli import env
+
     png = workdir / f"{scad_path.stem}.png"
-    proc = _run([openscad, "--render", "-o", str(png), str(scad_path)],
-                timeout=DEFAULT_RENDER_TIMEOUT)
+    proc = _run(
+        [
+            *env.openscad_display_prefix(),
+            openscad,
+            "--render",
+            "-o",
+            str(png),
+            str(scad_path),
+        ],
+        timeout=DEFAULT_RENDER_TIMEOUT,
+    )
     if proc.rc != 0 or not png.is_file():
         return False, None, (proc.err or proc.out).strip()[:200]
     return True, png, None
