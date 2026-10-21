@@ -20,8 +20,10 @@ SCHEMA (all keys required unless noted):
           purge_g_per_tool + max(margin_g, margin_pct % of the G-code grams)
   nozzle_compat: {abrasive_ok: [nozzle material], abrasive_markers: [TOKEN]}
           abrasive_ok ⊆ fleet NOZZLE_MATERIALS; a filament is abrasive when Spoolman says so
-          (filament extra `abrasive`), the G-code asks for a hardened nozzle
-          (`required_nozzle_HRC` > 0), or its material/type has a marker token (PLA-CF, PA12 GF)
+          (filament extra `abrasive`) or its material/name/type has a marker token (PLA-CF,
+          PA12 GF). A false flag cannot hide a positive marker. Independently, a positive
+          `required_nozzle_HRC` minimum is compared with the nozzle material's known nominal
+          hardness; a nonzero minimum alone does not classify a filament as abrasive.
   enclosure_material: {materials: [NAME]}   materials that want a closed printer (warping, fumes)
   plate_material: [{materials: [NAME], plates: [fleet PLATE_TYPES], why}]   bad pairings
 """
