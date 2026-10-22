@@ -542,44 +542,51 @@ def _fit(ctx: PlateContext, x0: float, y0: float) -> Objs:
     ), (_row_labels(ctx, "fits_labels", [_tenths(g) for g in FIT_GAPS], xs, y0),)
 
 
+def hinge_scad(hx: float, ay: float, g: float) -> str:
+    """OpenSCAD source of one print-in-place hinge: left end at x = hx, axis along X at y = ay,
+    radial gap g. Leaf A (outer knuckles + pin) in front, leaf B (middle knuckle) behind."""
+    r, rp, length, leaf, t = HINGE_R, HINGE_PIN_R, HINGE_L, HINGE_LEAF, HINGE_T
+    k1, k2 = hx + length / 3, hx + 2 * length / 3  # B's knuckle is the middle third
+
+    def knuckle(xa: float, xb: float) -> str:
+        return (
+            f"translate([{xa},{ay},{r}]) rotate([0,90,0]) cylinder(r={r},h={xb - xa},$fn=48);"
+            f"translate([{xa},{ay - r},0]) cube([{xb - xa},{2 * r},{r}]);"
+        )
+
+    hole = (
+        f"translate([{hx - 1},{ay},{r}]) rotate([0,90,0]) rotate([0,0,45]) "
+        f"{{ cylinder(r={rp + g},h={length + 2},$fn=48); cube([{rp + g},{rp + g},{length + 2}]); }}"
+    )  # teardrop: the roof point is up (+Z after the turn), no overhang flatter than 45°
+    part_a = (
+        f"union() {{ {knuckle(hx, k1 - g / 2)} {knuckle(k2 + g / 2, hx + length)}"
+        f" translate([{hx},{ay - leaf},0]) cube([{length},{leaf - r - g},{t}]);"
+        f" translate([{hx},{ay - r - g},0]) cube([{k1 - g / 2 - hx},{r + g},{t}]);"
+        f" translate([{k2 + g / 2},{ay - r - g},0]) cube([{hx + length - k2 - g / 2},{r + g},{t}]);"
+        f" translate([{hx},{ay},{r}]) rotate([0,90,0]) cylinder(r={rp},h={length},$fn=32); }}"
+    )
+    part_b = (
+        f"difference() {{ union() {{ {knuckle(k1 + g / 2, k2 - g / 2)}"
+        f" translate([{hx},{ay + r + g},0]) cube([{length},{leaf - r - g},{t}]);"
+        f" translate([{k1 + g / 2},{ay},0]) cube([{k2 - k1 - g},{r + g},{t}]); }} {hole} }}"
+    )
+    return part_a + "\n" + part_b
+
+
 def _hinges(x0: float, y0: float) -> Objs:
     objs = []
-    r, rp, length, leaf, t = HINGE_R, HINGE_PIN_R, HINGE_L, HINGE_LEAF, HINGE_T
+    length, leaf = HINGE_L, HINGE_LEAF
     for k, g in enumerate(HINGE_GAPS):
         hx = x0 + k * (length + 4.0)
         ay = y0 + LABEL_DY + leaf  # axis y
-        k1, k2 = hx + length / 3, hx + 2 * length / 3  # B's knuckle is the middle third
-
-        def knuckle(xa: float, xb: float, ay: float = ay) -> str:
-            return (
-                f"translate([{xa},{ay},{r}]) rotate([0,90,0]) cylinder(r={r},h={xb - xa},$fn=48);"
-                f"translate([{xa},{ay - r},0]) cube([{xb - xa},{2 * r},{r}]);"
-            )
-
-        hole = (
-            f"translate([{hx - 1},{ay},{r}]) rotate([0,90,0]) rotate([0,0,45]) "
-            f"{{ cylinder(r={rp + g},h={length + 2},$fn=48); cube([{rp + g},{rp + g},{length + 2}]); }}"
-        )  # teardrop: the roof point is up (+Z after the turn), no overhang flatter than 45°
-        part_a = (
-            f"union() {{ {knuckle(hx, k1 - g / 2)} {knuckle(k2 + g / 2, hx + length)}"
-            f" translate([{hx},{ay - leaf},0]) cube([{length},{leaf - r - g},{t}]);"
-            f" translate([{hx},{ay - r - g},0]) cube([{k1 - g / 2 - hx},{r + g},{t}]);"
-            f" translate([{k2 + g / 2},{ay - r - g},0]) cube([{hx + length - k2 - g / 2},{r + g},{t}]);"
-            f" translate([{hx},{ay},{r}]) rotate([0,90,0]) cylinder(r={rp},h={length},$fn=32); }}"
-        )
-        part_b = (
-            f"difference() {{ union() {{ {knuckle(k1 + g / 2, k2 - g / 2)}"
-            f" translate([{hx},{ay + r + g},0]) cube([{length},{leaf - r - g},{t}]);"
-            f" translate([{k1 + g / 2},{ay},0]) cube([{k2 - k1 - g},{r + g},{t}]); }} {hole} }}"
-        )
-        bbox = (hx, ay - leaf, 0.0, hx + length, ay + leaf, 2 * r)
+        bbox = (hx, ay - leaf, 0.0, hx + length, ay + leaf, 2 * HINGE_R)
         objs.append(
             PlateObject(
                 f"hinge_{round(g * 10):02d}",
                 "hinge",
-                stl=openscad_stl(part_a + "\n" + part_b),
+                stl=openscad_stl(hinge_scad(hx, ay, g)),
                 stl_bbox=bbox,
-                params={"gap_mm": g, "pin_d_mm": 2 * rp},
+                params={"gap_mm": g, "pin_d_mm": 2 * HINGE_PIN_R},
                 bed_label=(_tenths(g), hx + length / 2, y0),
                 read=f"Print-in-place hinge, gap {g:g} mm (label in tenths): fold it; the smallest gap that "
                 "turns freely after a firm first twist is the print-in-place clearance.",

@@ -13,7 +13,7 @@ Talks to 3d-api like [`3d printops`](printops.md) (`PRINTOPS_API`, `PRINTOPS_TOK
 3d calibrate show ID
 3d calibrate check FILE.gcode --printer P [--spools T1=ID,…] [--plate PLATE]
                    [--accept calibration:KIND[,…] --reason TEXT]
-3d calibrate gen pa|flow|combo|temp|shaper|plate1|dense --printer P -o OUT --filament-preset NAME
+3d calibrate gen pa|flow|combo|temp|shaper|plate1|dense|dense2 --printer P -o OUT --filament-preset NAME
                  [--machine-preset NAME] [--process-preset NAME] [--material PLA] [--color #RRGGBB]
                  [--nozzle-temp C] [--only T,…] [--skip T,…] [--pa-range LOW:HIGH] [--pa-step S]
   common (all but gen): [--json] [--api URL] [--token TOKEN]
@@ -218,6 +218,24 @@ and acceleration measures settings you do not print with). The G-code ends with
   and after each visit the engine re-sends the slicer's acceleration and fan and balances any
   extrusion a band changed. Labels are one-layer digits on the bed. The 22 mm bridge needs
   `print-preflight --bridge-max 25`. K1 SE, PLA: ~44 min + START_PRINT, ~13 g; OpenSCAD on PATH.
+- `dense2` — the second K1 SE bed (`lib/slicing/calibration_plates/dense2.py`): only what `dense`
+  left open, on a 7×7 grid of 30 mm cells, every sample facing the same way with a raised
+  seven-segment label (one size, 5 mm) at the front of its cell. Hole tiles side by side: plain
+  mesh (PL), polyholes (PH), arc fitting (AF), xy hole compensation +0.1 (HC); Orca's CLI has no
+  per-object settings for STLs, so PH and HC are drawn into the mesh and AF's visits come from a
+  second slice with `enable_arc_fitting` (swapped only where both slices enter and leave a visit
+  at the same place). Ovality targets Ø3/5/8/10 with X/Y edges, a 5 mm ruler and a Ø10 ring; pins
+  in holes 0.15/0.25/0.35 and, with a 0.4 mm first-layer chamfer, 0.10/0.15/0.20; elephant-foot
+  blocks without/with the chamfer; M3 2.7/3.0/3.6, M4 3.5/4.0/4.7; slots 2.05/2.15/2.25 and the
+  2 mm tab; hinges 0.25/0.35; thin walls 0.25/0.35/0.45 along Y and X; the 14 mm bridge and the
+  60° overhang on 8 mm bases; MVS strip 24–32 mm³/s; stringing pillars; a top tile; a temperature
+  mini-tower last and alone; corner fiducials (ring + rulers) and 20 mm one-layer patches on the
+  free cells. Brims: 3 mm on every object whose base side is under 10 mm or that is taller than
+  its base is wide (`Plate.brim`): hand-written for objects printed by layer (Orca's own brim
+  would go on every object), Orca's own in the sequential slice for the tower. MVS 20
+  and inner walls at 8000 come from the user presets (#266); the map's `slicer_overrides` lists
+  what the plate sets on top of them. The engine now picks a Z band by the layer's range (Orca's
+  `;Z:` is the layer's top), so a band's setting starts on the layer its step does (#301).
 - `shaper` — a text file of console commands for printers with an accelerometer (K1 SE: ADXL345):
   G28, nozzle and part fan off, `TEMPERATURE_WAIT SENSOR=extruder MAXIMUM=38` (a hot nozzle keeps
   the hotend fan on, and its vibration masks the resonance; the K1's G28 heats it to 140 °C),
@@ -227,6 +245,35 @@ and acceleration measures settings you do not print with). The G-code ends with
 `TUNING_TOWER` and `M221` are inert for the macro check (they never move the head). Orca's
 `calc_exclude_triangles` error is accepted in the sidecar only when the machine has no bed
 exclude area.
+
+### U1 plate 1: every test on a white underlay ([#320](https://github.com/alex-mextner/3d-cli/issues/320), [#322](https://github.com/alex-mextner/3d-cli/issues/322), [#308](https://github.com/alex-mextner/3d-cli/issues/308))
+
+The Snapmaker U1 plate is generated as a Snapmaker Orca project by
+`lib/slicing/calibration_plates/u1_underlay.py`. It is not a `gen` sub-plate: the K1 engine
+writes one object per STL, and the U1 needs each test as one object with white and black parts.
+
+```sh
+cd lib && uv run --project .. --with segno --with pillow \
+  python -m slicing.calibration_plates.u1_underlay -o ~/.cache/u1-calib/u1_plate1_underlay_bw.gcode [--date YYYY-MM-DD] [--preview-only]
+```
+
+- The underlay is 2 layers in white on T4 (G-code `T3`), with a 5 mm brim, part fan 0 and the bed
+  at 70 °C for the first layer. The tests are in black on T1 (`T0`) from layer 3. The G-code has
+  exactly one tool change, T4 → T1, above the underlay (#308), and no prime tower.
+- Each test is its own Orca object, so it has its own `EXCLUDE_OBJECT`. The test's white base
+  overlaps the underlay sheet by 0.05 mm so the perimeters fuse. Loose pieces (pins, the tab,
+  hinges, elephant-foot blocks) stand on white feet in cut-outs of the base.
+- Per-object parameters:
+  - ironing is an object setting;
+  - flow, ringing/VFA ACCEL and speed, retraction and temperature are G-code hooks on the black
+    visits; bands are chosen by the layer's mid height (#301);
+  - the temperature bands start above every other test;
+  - PA lines and the MVS strip are hand-written and run inside their own objects.
+- The map `NAME.json` lists each test's `read_by` (`camera_top` / `camera_side` / `manual`,
+  tg#22399), the hooks applied per object and layer, the per-layer tool and fan scan, and the
+  label (`C<date>P1` and its QR when `segno` is installed).
+- Before printing: `3d gcode-thumbnails add`, `3d slice-warnings record` with
+  `NAME.slice.log`, and `3d print-preflight --printer u1`.
 
 ## `photo` — the top-camera photo mode ([#342](https://github.com/alex-mextner/3d-cli/issues/342))
 

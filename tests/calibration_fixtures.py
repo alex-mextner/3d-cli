@@ -142,8 +142,9 @@ for s in (x for x in a if x.endswith(".stl")):
 L = ["; thumbnails = 16x16/PNG"]
 L += [f"EXCLUDE_OBJECT_DEFINE NAME={n}.stl_id_{i}_copy_0" for i, (n, *_r) in enumerate(objs)]
 L += ["START_PRINT EXTRUDER_TEMP=220 BED_TEMP=55", "G90", "M83", "G1 E-.8 F2400"]
-def layer(i, n, cx, cy, z):
-    return [f"EXCLUDE_OBJECT_START NAME={n}.stl_id_{i}_copy_0", f"G1 X{cx} Y{cy} F30000", f"G1 Z{z:.2f}",
+def layer(i, n, cx, cy, z):  # like Orca: z-hop, travel and lower inside the object's visit
+    return [f"EXCLUDE_OBJECT_START NAME={n}.stl_id_{i}_copy_0", f"G1 Z{z + 0.4:.2f} F30000",
+            f"G1 X{cx} Y{cy} F30000", f"G1 Z{z:.2f}",
             "G1 E.8 F2400", f"G1 X{cx + 1} Y{cy} E.05", "G1 E-.56 F2400", f"G1 X{cx} Y{cy} E-.24",
             f"EXCLUDE_OBJECT_END NAME={n}.stl_id_{i}_copy_0"]
 if seq:
