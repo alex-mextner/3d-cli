@@ -10,7 +10,8 @@ WHAT: the camera can tell whether the bed is clear (the parts were taken off) an
                   <state dir>/bed/<printer>.json, evidence frames in <cache dir>/vision/bed/;
   * `BedChild`    `3d printer watch` runs `bed_state.py monitor NAME` per printer with
                   `watch.bed.enabled: true` and turns its JSON lines into watch Events
-                  (bed_clear, bed_occupied, plate_present, plate_missing; all info);
+                  (bed_clear, bed_occupied, plate_present, plate_missing: info; bed_unknown,
+                  the camera cannot tell right after a job: warning, so it reaches a person);
   * the gate     preflight.check_bed, the `bed` line of `3d printer start` / `3d print-preflight --printer`:
                   FAIL on objects or a missing plate, PASS on a clear bed with the plate,
                   WARN when the camera cannot tell;
@@ -53,7 +54,7 @@ BED_TOOL = "bed_state.py"
 
 CLEAR, OCCUPIED, PRINTING, UNKNOWN = "clear", "occupied", "printing", "unknown"
 PRESENT, MISSING = "present", "missing"
-KINDS = ("bed_clear", "bed_occupied", "plate_present", "plate_missing")
+KINDS = ("bed_clear", "bed_occupied", "plate_present", "plate_missing", "bed_unknown")
 # Printer states in which the bed may be judged and acknowledged (base.py normalized states).
 QUIET_STATES = ("idle", "complete", "cancelled")
 
@@ -80,7 +81,7 @@ class BedConfig:
     interval_s: float = 1.0               # camera + state poll while the printer is quiet
     roi: tuple[tuple[float, float], ...] | None = None  # bed polygon (0..1) at the reference Z
     volume_height_mm: float = 80.0        # calibrated cameras: judge the bed up to this height
-    z_tol_mm: float = 0.5                 # a reference is used only within this Z distance
+    z_tol_mm: float = 0.5                 # no camera calibration (roi): a reference is used only within this Z distance
     stale_s: float = 120.0                # the gate re-checks when the last verdict is older
     clear_ack: AckConfig | None = None
 
@@ -204,11 +205,14 @@ def write_state(printer: str, data: dict[str, Any]) -> None:
 # ---- events ---------------------------------------------------------------------------------
 
 def transitions(prev_bed: str | None, prev_plate: str | None, bed: str, plate: str) -> list[str]:
-    """Event kinds for a new verdict. Unknown never fires and never forgets the last known
-    value; plate_present fires only after plate_missing (not after every job)."""
+    """Event kinds for a new verdict. Unknown never forgets the last known value and fires only
+    as bed_unknown on the first verdict after a job (the bed was "printing"): never silence
+    after a job. plate_present fires only after plate_missing (not after every job)."""
     kinds = []
     if bed in (CLEAR, OCCUPIED) and bed != prev_bed:
         kinds.append(f"bed_{bed}")
+    elif bed == UNKNOWN and prev_bed == PRINTING:
+        kinds.append("bed_unknown")
     if plate == MISSING and prev_plate != MISSING:
         kinds.append("plate_missing")
     elif plate == PRESENT and prev_plate == MISSING:
@@ -217,8 +221,9 @@ def transitions(prev_bed: str | None, prev_plate: str | None, bed: str, plate: s
 
 
 def event_from(printer: str, obj: dict[str, Any]) -> Event:
-    """A monitor JSON `event` object -> watch Event (unknown kinds are refused; always info)."""
-    from printer_ops.watch import INFO, Event
+    """A monitor JSON `event` object -> watch Event (unknown kinds are refused; bed_unknown is a
+    warning, the rest info)."""
+    from printer_ops.watch import INFO, WARNING, Event
 
     kind = str(obj.get("kind", ""))
     if kind not in KINDS:
@@ -226,7 +231,7 @@ def event_from(printer: str, obj: dict[str, Any]) -> Event:
     raw = obj.get("data")
     data: dict[str, Any] = dict(raw) if isinstance(raw, dict) else {}
     ts = obj.get("ts")
-    return Event(printer, kind, INFO, str(obj.get("text") or kind), data,
+    return Event(printer, kind, WARNING if kind == "bed_unknown" else INFO, str(obj.get("text") or kind), data,
                  key=str(obj.get("key") or f"{printer}:{kind}"),
                  ts=float(ts) if isinstance(ts, (int, float)) else time.time())
 

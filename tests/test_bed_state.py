@@ -3,8 +3,9 @@ references) and lib/printer_ops/bed.py (config, events, start gate, clear ack, w
 
 The frames in tests/data/bed are real camera frames scaled to 480 px: the Snapmaker U1 after a
 cancelled job on 2026-10-14 (parked at Z 200, green parts standing on the bed until 14:00:47,
-then taken off; 25 more minutes of the empty bed in drifting light) and the K1 SE empty bed in
-daylight and later in a dark room. Every printer here is a loopback fake or a stub.
+then taken off; 25 more minutes of the empty bed in drifting light), the U1's empty bed at Z 10
+after a G28 on 2026-10-17 (#402), and the K1 SE empty bed in daylight and later in a dark room.
+Every printer here is a loopback fake or a stub.
 """
 
 from __future__ import annotations
@@ -46,14 +47,28 @@ def device(name: str = "u1", *, watch: dict[str, Any] | None = None, trusted: tu
                   watch=watch or {}, access=access)
 
 
-def u1_ref(kind: str = "plate") -> B.Reference:
+def u1_ref(kind: str = "plate", z: float = 200.0) -> B.Reference:
     from vision_geometry import bundled_calibration
 
     img = frame("u1_z200_clear_ref.jpg")
     cam = bundled_calibration("Snapmaker U1")
-    vol, surf, _ = B.build_masks(device(), pbed.BedConfig(enabled=True), 200.0, img.shape[:2])
+    vol, surf, _ = B.build_masks(device(), pbed.BedConfig(enabled=True), z, img.shape[:2])
     assert cam is not None and vol.any()
-    return B.Reference(kind, 200.0, 0.0, "calibration", img, vol, surf, DATA / "u1_z200_clear_ref.jpg")
+    return B.Reference(kind, z, 0.0, "calibration", img, vol, surf, DATA / "u1_z200_clear_ref.jpg")
+
+
+def u1_z10_ref() -> B.Reference:
+    """The U1 bed at Z 10 after a G28, empty, 2026-10-17 14:13 (a `bed status` evidence frame:
+    its status text is burned in at the top left)."""
+    img = frame("u1_z10_clear_ref.jpg")
+    vol, surf, _ = B.build_masks(device(), pbed.BedConfig(enabled=True), 10.0, img.shape[:2])
+    return B.Reference("plate", 10.0, 0.0, "calibration", img, vol, surf, DATA / "u1_z10_clear_ref.jpg")
+
+
+def u1_match() -> B.ZMatch:
+    match = B.z_match(device(), pbed.BedConfig(enabled=True))
+    assert match.cam is not None
+    return match
 
 
 def k1_ref(kind: str = "plate", img: Any = None) -> B.Reference:
@@ -159,6 +174,59 @@ def test_no_reference_at_this_z_is_unknown_with_the_capture_command() -> None:
     assert "3d printer bed reference u1 --capture" in v.reason
 
 
+# ---- the U1 resting heights (#402): Z 200.3 after u1_night_v5, Z 275 after a home, Z 10 after G28 ----
+
+@pytest.mark.parametrize(("name", "bed"), [(n, "clear") for n in U1_CLEAR] + [(n, "occupied") for n in U1_OCCUPIED])
+def test_u1_park_at_z_200_3_is_judged_against_the_z_199_7_reference(name: str, bed: str) -> None:
+    """u1_night_v5 (2026-10-17) ended at toolhead Z 200.3 (PRINT_END G0 Z200 plus that job's mesh
+    and Z offset) and the reference was taken at Z 199.67: 0.63 mm, outside the old fixed 0.5 mm,
+    so the bed stayed `unknown` with no event. The calibration says the picture moved 0.7 px."""
+    match = u1_match()
+    assert match(199.67, 200.3) and not match(200.0, 205.0)
+    v = B.classify(frame(name), [u1_ref(z=199.67)], 200.3, "u1", match=match)
+    assert v.bed == bed, v.reason
+    assert 0.1 < v.metrics["bed_in_view"] < 0.2 and "low parts at the back may not show" in v.reason
+
+
+def test_a_roi_polygon_printer_keeps_the_millimetre_tolerance() -> None:
+    match = B.z_match(device("k1se", model=None), pbed.BedConfig(enabled=True, roi=K1_ROI))
+    assert match.cam is None and match(125.0, 125.4) and not match(125.0, 125.6)
+
+
+def test_u1_bed_at_z_275_is_out_of_the_camera_view_never_clear() -> None:
+    """After a home the U1 bed sits at Z 275 (the Z endstop): the camera sees none of it, so no
+    reference could tell a clear bed from a flat part; the verdict says so instead of asking for one."""
+    v = B.classify(frame("u1_z200_clear_1403.jpg"), [u1_ref(z=199.67), u1_z10_ref()], 275.0, "u1", match=u1_match())
+    assert (v.bed, v.plate) == ("unknown", "unknown")
+    assert "out of the camera's view at Z 275.0" in v.reason and "sees the bed again at Z 210" in v.reason
+    assert "--capture" not in v.reason and v.metrics["bed_in_view"] == 0.0
+
+
+def test_no_reference_is_captured_where_the_bed_is_out_of_view(xdg: Path) -> None:
+    from errors import UsageError
+
+    with pytest.raises(UsageError, match="out of the camera's view at Z 275.0"):
+        B.capture_reference(device(), pbed.BedConfig(enabled=True), plate=True,
+                            camera=FakeCamera("u1_z200_clear_ref.jpg"), printer_fn=lambda d: ("idle", 275.0))
+    assert B.list_references("u1") == []
+
+
+def test_u1_at_z_10_after_a_home_is_judged_against_the_z_10_reference() -> None:
+    from vision_geometry import prism_mask
+
+    ref, match = u1_z10_ref(), u1_match()
+    assert match.cam is not None and (match.in_view(10.0) or 0.0) > 0.9
+    dim = np.clip(ref.image.astype(np.float32) * 0.8 + 10, 0, 255).astype(np.uint8)  # other room light
+    assert B.classify(dim, [u1_ref(), ref], 10.0, "u1", match=match).bed == "clear"
+    part = ref.image.copy()  # a 20 x 20 x 15 mm part in the middle of the bed, placed by the calibration
+    box = [(125.0, 125.0), (145.0, 125.0), (145.0, 145.0), (125.0, 145.0)]
+    part[prism_mask(match.cam, 10.0, part.shape[:2], [box], 0.0, 15.0) > 0] = (40, 160, 40)
+    v = B.classify(part, [u1_ref(), ref], 10.0, "u1", match=match)
+    assert v.bed == "occupied", v.reason
+    # without a Z 10 reference: unknown with the capture command (the monitor warns, see below)
+    assert B.classify(dim, [u1_ref()], 10.0, "u1", match=match).reason.startswith("no empty-bed reference at Z 10.0")
+
+
 def test_a_bare_bed_reference_at_another_resolution_is_ignored() -> None:
     small = cv2.resize(frame("u1_z200_clear_ref.jpg"), (240, 135))
     m = np.ones(small.shape[:2], bool)
@@ -239,6 +307,9 @@ def test_monitor_does_not_judge_while_the_scene_keeps_moving() -> None:
     (("clear", "present"), ("unknown", "missing"), ["plate_missing"]),
     (("clear", "missing"), ("clear", "present"), ["plate_present"]),
     ((None, None), ("clear", "present"), ["bed_clear"]),
+    (("printing", None), ("unknown", "unknown"), ["bed_unknown"]),  # #402: never silence after a job
+    (("unknown", None), ("unknown", "unknown"), []),
+    (("unknown", None), ("clear", "present"), ["bed_clear"]),
 ])
 def test_transitions(prev: tuple[Any, Any], new: tuple[str, str], kinds: list[str]) -> None:
     assert pbed.transitions(*prev, *new) == kinds
@@ -248,6 +319,7 @@ def test_event_from_monitor_line() -> None:
     e = pbed.event_from("u1", {"kind": "bed_clear", "text": "clear", "ts": 5.0, "key": "u1:bed_clear:5",
                                 "data": {"frame": "/x.jpg"}})
     assert (e.kind, e.severity, e.key, e.ts, e.data["frame"]) == ("bed_clear", "info", "u1:bed_clear:5", 5.0, "/x.jpg")
+    assert pbed.event_from("u1", {"kind": "bed_unknown", "text": "cannot determine"}).severity == "warning"
     with pytest.raises(ValueError, match="unknown bed event kind"):
         pbed.event_from("u1", {"kind": "rm -rf"})
 
@@ -597,6 +669,37 @@ def test_monitor_restart_does_not_repeat_the_last_event(xdg: Path) -> None:
         assert [o["event"]["kind"] for o in out.objs if "event" in o] == expected
 
 
+def test_monitor_warns_once_when_the_bed_cannot_be_judged_after_a_job(xdg: Path) -> None:
+    """#402: after the job the U1 bed sits at Z 275, out of the camera's view: one bed_unknown
+    warning instead of silence; a restart does not repeat it; the bed back in view at the PRINT_END
+    park (Z 200.3, reference at Z 199.67) with nothing on it is bed_clear."""
+    dev = device(watch={"bed": {"enabled": True}})
+    cfg = pbed.BedConfig(enabled=True, interval_s=0.2)
+    cam = FakeCamera("u1_z200_clear_ref.jpg")
+    B.capture_reference(dev, cfg, plate=True, camera=cam, printer_fn=lambda d: ("idle", 199.67))
+    script = [("printing", 50.0)] * 2 + [("complete", 275.0)] * 15
+    polls = {"i": 0}
+
+    def printer_fn(d: Device) -> tuple[str, float | None]:
+        i = min(polls["i"], len(script) - 1)
+        polls["i"] += 1
+        return script[i]
+
+    out, clock = _Lines(), SimClock()
+    B.run_monitor(dev, cfg, duration=2 * 10.0 + 15 * 0.2 - 0.01, out=out, camera=cam, printer_fn=printer_fn,
+                  clock=clock, sleep=clock.sleep)
+    events = [o["event"] for o in out.objs if "event" in o]
+    assert [e["kind"] for e in events] == ["bed_unknown"]
+    assert events[0]["text"].startswith("u1: cannot determine the bed state after the job (camera, Z 275.0)")
+    assert "out of the camera's view" in events[0]["text"] and Path(events[0]["data"]["frame"]).is_file()
+    assert pbed.event_from("u1", events[0]).severity == "warning"
+    for z, expected in ((275.0, []), (200.3, ["bed_clear"])):
+        out = _Lines()
+        B.run_monitor(dev, cfg, duration=2.0, out=out, camera=cam, printer_fn=lambda d, z=z: ("idle", z),
+                      clock=clock, sleep=clock.sleep)
+        assert [o["event"]["kind"] for o in out.objs if "event" in o] == expected
+
+
 class FrozenCamera(FakeCamera):
     def grab(self) -> Any:
         """Byte-identical JPEGs every time, like a static or frozen snapshot."""
@@ -643,3 +746,22 @@ def test_bed_child_turns_lines_into_events_and_restarts() -> None:
     assert got and got[0].kind == "bed_clear" and got[0].printer == "u1"
     assert states and states[0] == ("u1", {"bed": "clear"})
     assert child.restarts >= 1
+
+
+def test_a_point_behind_the_camera_at_one_z_does_not_veto_the_view_shift(monkeypatch: pytest.MonkeyPatch) -> None:
+    """One sampled point that goes behind the camera between the two Zs counts as not seen; the
+    other points' small shift decides the match instead of an inf from the NaN difference."""
+    import numpy as np
+
+    class StubCam:
+        width, height = 100, 100
+
+        def project(self, pts: Any, z: float) -> Any:
+            px = np.array([[10.0, 10.0], [50.0, 50.0], [20.0, 20.0]]) + z * 0.1
+            if z > 5:
+                px[2] = np.nan  # behind the camera at the higher Z
+            return px
+
+    monkeypatch.setattr(B, "_bed_points", lambda cam, heights, n: np.zeros((3, 3)))
+    shift = B.view_shift_px.__wrapped__(StubCam(), 0.0, 10.0, 80.0)  # type: ignore[arg-type]
+    assert shift == pytest.approx(2**0.5 * B.PROC_W / 100)
