@@ -1,0 +1,49 @@
+{
+ "provenance": "Snapmaker U1 chamber camera (Moonraker /server/files/camera/monitor.jpg), 2026-10-22 20:25 local, job u1-two-panel-032-adhesion-retry (history 00006E) PAUSED at layer 17/53 by a user pause; the upper layers of the white honeycomb panel float above the rim that stayed on the plate. Printer label QR codes blacked out; downscaled 1920x1080 -> 960x540.",
+ "bed_z": 10.45,
+ "part_height": 5.32,
+ "objects": [
+  [
+   [
+    11.6,
+    37.2
+   ],
+   [
+    23.4,
+    30.4
+   ],
+   [
+    235.8,
+    30.4
+   ],
+   [
+    247.6,
+    37.2
+   ],
+   [
+    259.4,
+    57.7
+   ],
+   [
+    259.4,
+    234.8
+   ],
+   [
+    247.6,
+    241.6
+   ],
+   [
+    35.2,
+    241.6
+   ],
+   [
+    23.4,
+    234.8
+   ],
+   [
+    11.6,
+    214.3
+   ]
+  ]
+ ]
+}

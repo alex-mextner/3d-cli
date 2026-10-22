@@ -53,6 +53,8 @@ from printer_ops.vision import (  # noqa: E402
 if TYPE_CHECKING:
     import numpy as np
 
+    from vision_detach import DetachParams
+
 
 @dataclass(frozen=True)
 class ModelSpec:
@@ -311,12 +313,21 @@ class PrintGeometry:
     """Camera calibration + live print position -> the box ROI and the bed-change Findings.
     Static masks are cached per (file, 0.1 mm of Z); the toolhead box is per frame."""
 
-    def __init__(self, cam: Any, *, scene: bool = True, growth: bool = True) -> None:
+    def __init__(
+        self,
+        cam: Any,
+        *,
+        scene: bool = True,
+        growth: bool = True,
+        detach: DetachParams | None = None,
+    ) -> None:
+        from vision_detach import DetachWatch
         from vision_scene import GrowthWatch, SceneWatch
 
         self.cam = cam
         self.scene = SceneWatch() if scene else None
         self.growth = GrowthWatch() if growth else None
+        self.detach = None if detach is None else DetachWatch(detach)
         self.file: str | None = None
         self._key: tuple[Any, ...] | None = None
         self._masks: dict[str, np.ndarray] = {}
@@ -339,6 +350,11 @@ class PrintGeometry:
                 "roi": cv2.dilate(roi, np.ones((grow, grow), np.uint8)),
                 "silhouette": sil,
                 "area": vg.bed_mask(self.cam, z, shape) | sil,
+                # part-detached check (vision_detach.py): where the near walls should be, the
+                # whole part volume, and the plate with a margin for the sheet beyond the bed
+                "wall": vg.wall_mask(self.cam, z, shape, objs),
+                "body": vg.prism_mask(self.cam, z, shape, objs, 0.0, max(z, 0.5)),
+                "plate": vg.bed_mask(self.cam, z, shape, margin_mm=ROI_PAD_MM / 2),
                 # growth check: the newest band vs. solid part well below it and empty space
                 # above it; the one-band gaps keep calibration error (9-30 px) from mixing them
                 "band": vg.prism_mask(self.cam, z, shape, objs, z - BAND_MM, z),
@@ -366,7 +382,7 @@ class PrintGeometry:
 
     def reset_print(self) -> None:
         """A new print started (possibly the same file again): drop every bed-change reference."""
-        for w in (self.scene, self.growth):
+        for w in (self.scene, self.growth, self.detach):
             if w is not None:
                 w.reset()
 
@@ -387,6 +403,10 @@ class PrintGeometry:
         if self.scene is not None:
             findings += self.scene.update(
                 bgr, ctx.z, now, m["area"], m["silhouette"], m["head"] | m["band"]
+            )
+        if self.detach is not None:
+            findings += self.detach.update(
+                bgr, ctx.z, m["wall"], m["body"], m["plate"], m["head"]
             )
         if self.growth is not None:
             findings += self.growth.update(
@@ -479,19 +499,43 @@ def _device_camera(device: Any, args: argparse.Namespace) -> Any:
     )
 
 
+def detach_params(setting: Any) -> DetachParams | None:
+    """`watch.vision.detach`: true (defaults), false, or a mapping of DetachParams fields."""
+    from errors import UsageError
+    from vision_detach import DetachParams
+
+    if setting is False or setting is None:
+        return None
+    if setting is True:
+        return DetachParams()
+    try:
+        if not isinstance(setting, dict):
+            raise TypeError("expected true, false or a mapping")
+        return DetachParams(**setting)
+    except TypeError as exc:
+        raise UsageError(
+            f"watch.vision.detach must be true, false or a mapping of "
+            f"{', '.join(DetachParams.__dataclass_fields__)}: {exc}",
+            command="printer vision",
+        ) from exc
+
+
 def build_scorer(
     cfg: dict[str, Any],
     *,
     verify: bool = True,
     camera: Any = None,
     scene: bool = False,
+    detach: bool = True,
 ) -> FrameScorer:
     """The per-frame pipeline from a device's `watch: vision:` settings: `verify: false` turns
     stage 2 off, `ignore:` lists polygons (normalised [x, y] points) whose boxes are dropped,
     `geometry: false` ignores the camera calibration `camera` (vision_geometry.CameraModel).
     `scene: true` (or `scene=True`, the --scene flag) adds the bed-change detectors
     (foreign_object, part_moved, no_growth); off by default because on the U1 they still raise
-    ~139 and ~50 false findings per healthy printing day (docs/research/printer-vision-tuning.md)."""
+    ~139 and ~50 false findings per healthy printing day (docs/research/printer-vision-tuning.md).
+    The part-detached check (vision_detach.py) is on whenever the calibration is: `detach: false`
+    (or `detach=False`, --no-detach) turns it off, `detach: {gap_abs: 0.3, ...}` tunes it."""
     from errors import UsageError
 
     try:
@@ -521,7 +565,12 @@ def build_scorer(
         verifier = ClipVerifier(ensure_clip(), threads=_threads())
     bed_change = scene or bool(cfg.get("scene", False))
     geometry = (
-        PrintGeometry(camera, scene=bed_change, growth=bed_change)
+        PrintGeometry(
+            camera,
+            scene=bed_change,
+            growth=bed_change,
+            detach=detach_params(cfg.get("detach", True)) if detach else None,
+        )
         if camera is not None and cfg.get("geometry", True)
         else None
     )
@@ -563,6 +612,7 @@ def run_live(args: argparse.Namespace) -> int:
         verify=not args.no_verify,
         camera=cam,
         scene=args.scene,
+        detach=not args.no_detach,
     )
     context_tap = (
         ContextTap(device.host, device.port) if scorer.geometry else None
@@ -636,6 +686,12 @@ def run_live(args: argparse.Namespace) -> int:
                     ],
                     findings=[f.kind for f in score.findings],
                 )
+            detach = scorer.geometry.detach if scorer.geometry is not None else None
+            if detach is not None:
+                # one frame cannot satisfy the persistence rule, so --once reports the raw reading
+                gap = detach.last_gap
+                report["detach_gap"] = None if gap is None else round(gap, 3)
+                report["part_detached"] = gap is not None and gap >= detach.params.gap_abs
             report["trend"] = round(monitor.tracker.adjusted, 3)
             report["events"] = [e.to_json() for e in events]
             if frame is not None and args.save:
@@ -1098,7 +1154,7 @@ def run_eval(args: argparse.Namespace) -> int:
         ).get("vision")
         cfg = vision_cfg if isinstance(vision_cfg, dict) else {}
     scorer = build_scorer(
-        cfg, verify=not args.no_verify, camera=cam, scene=args.scene
+        cfg, verify=not args.no_verify, camera=cam, scene=args.scene, detach=not args.no_detach
     )
     replays = {str(p): load_replay(p) for p, _ in sources}
 
@@ -1145,6 +1201,7 @@ def main(argv: list[str]) -> int:
     live.add_argument("--no-verify", action="store_true")
     live.add_argument("--no-geometry", action="store_true")
     live.add_argument("--scene", action="store_true")
+    live.add_argument("--no-detach", action="store_true")
     live.add_argument("--evidence")
     live.add_argument("--dry-run", action="store_true")
     live.add_argument("--min-severity")
@@ -1158,6 +1215,7 @@ def main(argv: list[str]) -> int:
     ev.add_argument("--interval", type=float, default=10.0)
     ev.add_argument("--no-verify", action="store_true")
     ev.add_argument("--scene", action="store_true")
+    ev.add_argument("--no-detach", action="store_true")
     ev.add_argument("--printer")
     ev.add_argument("--json", action="store_true")
     rec = sub.add_parser("record")

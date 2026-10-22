@@ -228,6 +228,7 @@ Every current root Python module is listed here so future additions are intentio
 - `vision_detect.py` — pixel half of `3d printer vision`: Obico ONNX spaghetti scorer (weights downloaded at runtime, sha256-pinned), `FrameScorer` (ROI/ignore masks + stage-2 verifier), brightness check, live camera loop, `record` and `eval` on recorded footage; decision logic and camera/klippy.log access live in `printer_ops/vision.py`.
 - `vision_verify.py` — stage 2 of `3d printer vision`: zero-shot CLIP ViT-B/32 (ONNX, sha256-pinned) on crops of the detector's boxes → verified score q.
 - `calib_rectify.py` — calibration photo → rectified bed-mm image: ArUco fiducials (DICT_4X4_50), homography, external scale reference (`3d calibrate photo|rectify`, #342).
+- `vision_detach.py` — tier-a detached-part check for `3d printer vision` (`vision_part_detached`): bare build plate in the near wall band of a part's footprint prism, from the camera calibration; see `docs/research/printer-vision-detached-part.md`.
 - `vision_geometry.py` — printer camera model (pinhole/fisheye), bed/volume/silhouette masks at the current Z, calibration fit CLI; the U1 calibration ships in `lib/data/vision/`.
 - `vision_ghost.py` — 3D ghost of the rest of a print over a printer camera frame: collects a job's walls from one G-code pass, paints them through a `vision_geometry` camera into a sparse per-frame blend table (used by the U1 camera proxy).
 - `vision_scene.py` — opt-in bed-change detectors for `3d printer vision --scene` (foreign object, moved part, no growth).
