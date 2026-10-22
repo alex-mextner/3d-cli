@@ -2,11 +2,28 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
 from . import io
 from .segment import instances_to_labelmap
+
+
+def _remove_previous_masks(out_dir: Path) -> None:
+    """Delete only the mask files a previous run listed in its instances.json (never other files in masks/)."""
+    previous = out_dir / "instances.json"
+    if not previous.is_file():
+        return
+    try:
+        doc = json.loads(previous.read_text())
+        rels = [str(r["mask"]) for r in doc["instances"]]
+    except (OSError, ValueError, KeyError, TypeError):
+        return
+    for rel in rels:
+        target = (out_dir / rel).resolve()
+        if target.parent == (out_dir / "masks").resolve() and target.suffix == ".png":
+            target.unlink(missing_ok=True)
 
 
 def write_result(
@@ -18,10 +35,7 @@ def write_result(
     h, w = rgb.shape[:2]
     masks_dir = out_dir / "masks"
     masks_dir.mkdir(parents=True, exist_ok=True)
-    for stale in masks_dir.glob(
-        "*.png"
-    ):  # a re-run into the same DIR must not leave masks of a previous run
-        stale.unlink()
+    _remove_previous_masks(out_dir)
     insts = result["instances"]
     records = []
     for inst in insts:

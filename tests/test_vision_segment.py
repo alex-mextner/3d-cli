@@ -798,3 +798,62 @@ def test_min_area_zero_still_drops_empty_masks() -> None:
         max_area_frac=0.5,
     )
     assert len(seg.run(_rgb())["instances"]) == 1
+
+
+# --- review round 2 ------------------------------------------------------------------------------------------------
+
+
+def test_write_result_only_removes_masks_the_previous_run_listed(
+    tmp_path: Path,
+) -> None:
+    from threed_vision.outputs import write_result
+
+    base = {"method": "m", "device": "cpu", "timing_s": {"total": 0}, "vram_mb": 0}
+    (tmp_path / "masks").mkdir()
+    (tmp_path / "masks" / "reference.png").write_bytes(b"user file")
+    two = [_inst(1, _blob(10, 10, 20, 20)), _inst(2, _blob(60, 30, 15, 25))]
+    write_result(tmp_path, "p.jpg", _rgb(), {**base, "instances": two})
+    write_result(tmp_path, "p.jpg", _rgb(), {**base, "instances": two[:1]})
+    assert sorted(p.name for p in (tmp_path / "masks").iterdir()) == [
+        "001.png",
+        "reference.png",
+    ]
+
+
+def test_empty_amg_candidate_does_not_crash_background_rejection() -> None:
+    seg = FakeSegmenter(
+        [_blob(10, 10, 20, 20), np.zeros((H, W), bool)],
+        [],
+        device="cpu",
+        fill="none",
+        clip=FakeClip(),
+        max_area_frac=0.5,
+    )
+    assert len(seg.run(_rgb())["instances"]) == 1
+
+
+def test_explicit_cuda_without_a_cuda_ort_provider_is_missing_dependency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from threed_vision import device as dev
+
+    monkeypatch.setattr(dev, "free_vram_mb", lambda: 9000)
+    monkeypatch.setattr(clip, "setup_ort_cuda", lambda: False)
+    monkeypatch.setattr(clip, "ort_missing_cuda_libs", lambda: [])
+    with pytest.raises(MissingDependency, match="CUDAExecutionProvider"):
+        clip.ClipEncoder("cuda")._resolve()
+    enc = clip.ClipEncoder("auto")
+    enc._resolve()
+    assert enc.device == "cpu"
+
+
+def test_explicit_cuda_without_cuda_torch_is_missing_dependency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    torch = pytest.importorskip("torch")
+    from threed_vision import torchutil
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    with pytest.raises(MissingDependency, match="CUDA GPU"):
+        torchutil.require_cuda_if_requested("cuda")
+    torchutil.require_cuda_if_requested("cpu")

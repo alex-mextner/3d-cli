@@ -15,8 +15,8 @@ import numpy as np
 
 from . import models
 from .device import resolve_device
-from .errors import BadInput
-from .torchutil import free_cuda, is_oom, require_torch
+from .errors import BadInput, MissingDependency
+from .torchutil import free_cuda, is_oom, require_cuda_if_requested, require_torch
 
 DEFAULT_QUERIES = [
     "a hand tool",
@@ -108,13 +108,21 @@ class OwlDetector:
         )  # missing weights are reported before missing python packages
         require_torch()
         import torch
-        from transformers import Owlv2ForObjectDetection, Owlv2Processor
+
+        try:
+            from transformers import Owlv2ForObjectDetection, Owlv2Processor
+        except ImportError as exc:
+            raise MissingDependency(
+                "the `transformers` package is not installed (needed for OWLv2)",
+                "uv pip install -e 'packages/threed-vision[seg]'",
+            ) from exc
 
         self.device = (
             "cpu"
             if self._cpu_only
             else resolve_device(self.requested, self.vram_estimate_mb)
         )
+        require_cuda_if_requested(self.device if self.requested == "cuda" else "cpu")
         self._proc = Owlv2Processor.from_pretrained(str(path), local_files_only=True)
         dtype = torch.float16 if self.device == "cuda" else torch.float32
         model = Owlv2ForObjectDetection.from_pretrained(

@@ -30,7 +30,14 @@ from .clip import ClipEncoder, OrtEncoder, crop_masked
 from .detect import DEFAULT_QUERIES, OwlDetector
 from .device import resolve_device
 from .errors import BadInput
-from .torchutil import free_cuda, is_oom, peak_mb, require_torch, reset_peak
+from .torchutil import (
+    free_cuda,
+    is_oom,
+    peak_mb,
+    require_cuda_if_requested,
+    require_torch,
+    reset_peak,
+)
 
 _T = TypeVar("_T")
 Progress = Callable[[str, float], None]  # (stage, fraction 0..1)
@@ -345,6 +352,10 @@ class Segmenter:
             else resolve_device(self.requested, self.vram_estimate_mb)
         )
         if self.uses_sam:
+            require_torch()
+            require_cuda_if_requested(
+                self.device if self.requested == "cuda" else "cpu"
+            )
             self._load_sam()
         else:
             self._u2 = U2Net(self._engine_request())
@@ -452,15 +463,7 @@ class Segmenter:
             return self._run_u2net(rgb, tm, t_all, stage)
         h, w = rgb.shape[:2]
         pps, max_side = self._effective()
-        scale = 1.0
-        proc = rgb
-        if max_side and max(h, w) > max_side:
-            import cv2
-
-            scale = max_side / max(h, w)
-            proc = cv2.resize(
-                rgb, (round(w * scale), round(h * scale)), interpolation=cv2.INTER_AREA
-            )
+        proc, scale = self._downscale(rgb)
         ph, pw = proc.shape[:2]
 
         cands: list[Instance] = []
@@ -475,6 +478,9 @@ class Segmenter:
                 "points_per_side=0 (boxes only) needs fill='owlv2'",
                 "use --points-per-side N>0 or --fill owlv2",
             )
+        cands = [
+            c for c in cands if c["mask"].any()
+        ]  # an empty mask cannot be cropped for CLIP
         n_amg = len(cands)
 
         n_owl = 0

@@ -140,7 +140,9 @@ class OrtEncoder:
             so.graph_optimization_level = level
             try:
                 sess = ort.InferenceSession(str(path), so, providers=providers)
-            except Exception as exc:  # ORT raises a bare RuntimeError/Fail for unloadable graphs
+            except (
+                Exception
+            ) as exc:  # ORT raises a bare RuntimeError/Fail for unloadable graphs
                 last = exc
                 continue
             active = list(sess.get_providers())
@@ -158,11 +160,13 @@ class OrtEncoder:
     def _resolve(self) -> None:
         self.device = resolve_device(self.requested, self.vram_estimate_mb)
         if self.device == "cuda" and not setup_ort_cuda():
-            missing = ort_missing_cuda_libs()
-            if self.requested == "cuda" and missing:
+            if self.requested == "cuda":
+                missing = ort_missing_cuda_libs()
                 raise MissingDependency(
-                    f"onnxruntime CUDA provider unusable: missing {', '.join(missing)}",
-                    "install torch from the cu128 index (its nvidia-* wheels provide them); `3d doctor` shows the state",
+                    f"onnxruntime CUDA provider unusable: missing {', '.join(missing)}"
+                    if missing
+                    else "onnxruntime has no CUDAExecutionProvider (the CPU-only wheel is installed)",
+                    "install onnxruntime-gpu 1.23.x and torch from the cu128 index (its nvidia-* wheels provide the CUDA-12 libs); `3d doctor` shows the state",
                 )
             self.device = "cpu"
 

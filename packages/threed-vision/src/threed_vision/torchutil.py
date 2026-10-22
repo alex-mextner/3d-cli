@@ -19,6 +19,19 @@ def require_torch() -> None:
         ) from exc
 
 
+def require_cuda_if_requested(device: str) -> None:
+    """An explicit `cuda` request without a usable CUDA torch is a missing dependency (exit 127), not a traceback."""
+    if device != "cuda":
+        return
+    import torch
+
+    if not torch.cuda.is_available():
+        raise MissingDependency(
+            "device 'cuda' was requested but torch cannot see a CUDA GPU",
+            "use --device auto|cpu, or install the CUDA build of torch (cu128 index) and check `3d doctor`",
+        )
+
+
 def is_oom(exc: BaseException) -> bool:
     """True for a CUDA out-of-memory failure (torch.cuda.OutOfMemoryError or a RuntimeError saying so)."""
     return (
