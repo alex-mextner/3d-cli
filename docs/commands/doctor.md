@@ -23,6 +23,7 @@ Reports which dependencies are present or missing for the full `3d` pipeline, an
 - **Python mesh stack** — [`trimesh`](GLOSSARY.md#trimesh), [`manifold3d`](GLOSSARY.md#manifold3d), `numpy`, `scipy`, `rtree`, `pillow`, [`opencv`](GLOSSARY.md#opencv), `pyvista` (optional, for `collision --viz`)
 - **Web dashboard** — `fastapi`, `uvicorn`, `markdown`, `pyyaml` (optional tier)
 - **Slicer** — `OrcaSlicer` / `Bambu Studio` / `PrusaSlicer`
+- **Photo->3D vision stack** (optional, WARN not MISSING) — the `threed-vision` venv, `onnxruntime CUDA` (PASS only when `CUDAExecutionProvider` really loads; otherwise the row names the missing CUDA-12 `.so`, e.g. `libcudnn.so.9`, because onnxruntime silently falls back to CPU), and the vision models (`3d vision-models pull`; see [vision-models.md](vision-models.md))
 - **OpenSCAD libraries** — [`BOSL2`](GLOSSARY.md#bosl2), [`NopSCADlib`](GLOSSARY.md#nopscadlib) (auto-install on first run)
 
 ## Exit codes
