@@ -456,7 +456,7 @@ def annotate(jpeg: bytes, score: FrameScore) -> bytes:
 
 def _device_camera(device: Any, args: argparse.Namespace) -> Any:
     from errors import UsageError
-    from printer_ops.vision import U1_MONITOR, MoonrakerCamera
+    from printer_ops.camera import open_camera, require_camera
 
     if device.adapter != "moonraker":
         raise UsageError(
@@ -467,15 +467,9 @@ def _device_camera(device: Any, args: argparse.Namespace) -> Any:
                 "Moonraker entry (adapter: moonraker, port 7125), not creality-stock."
             ],
         )
-    cfg = (getattr(device, "watch", None) or {}).get("vision") or {}
-    cfg = cfg if isinstance(cfg, dict) else {}
-    snapshot = args.snapshot or str(cfg.get("snapshot") or U1_MONITOR)
-    keep = False if args.no_keepalive else cfg.get("keepalive")
-    return MoonrakerCamera(
-        device.host,
-        device.port,
-        snapshot=snapshot,
-        keepalive=None if keep is None else bool(keep),
+    spec = require_camera(device, "printer vision")  # watch.vision.camera / model default, never a guess
+    return open_camera(
+        device, spec, snapshot=args.snapshot, keepalive=False if args.no_keepalive else None
     )
 
 

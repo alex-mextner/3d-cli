@@ -39,8 +39,8 @@ from typing import Any, NamedTuple
 from urllib.parse import urlsplit
 
 from printer_ops.base import PAUSED, PRINTING, PrinterCommError
+from printer_ops.camera import MONITOR_PATH
 
-U1_MONITOR = "/server/files/camera/monitor.jpg"
 KEEPALIVE_S = (
     60.0  # camera.start_monitor renewal; the U1 monitor lapses after a few minutes
 )
@@ -146,14 +146,14 @@ def _http_date(value: str | None) -> float | None:
 
 
 class MoonrakerCamera:
-    """Snapshots from a Moonraker printer: the U1 monitor.jpg, or any snapshot URL/path."""
+    """Snapshots from a Moonraker printer: its camera monitor file, or any snapshot URL/path."""
 
     def __init__(
         self,
         host: str,
         port: int = 7125,
         *,
-        snapshot: str = U1_MONITOR,
+        snapshot: str,
         keepalive: bool | None = None,
         timeout: float = 10.0,
         retry_delay: float = 1.0,
@@ -165,9 +165,9 @@ class MoonrakerCamera:
             retry_delay,
         )
         self.url = snapshot if "://" in snapshot else f"http://{host}:{port}{snapshot}"
-        # Only the Snapmaker monitor file needs waking; a real streamer serves frames on its own.
+        # Only the Moonraker monitor file needs waking; a real streamer serves frames on its own.
         self.keepalive_enabled = (
-            snapshot == U1_MONITOR if keepalive is None else keepalive
+            snapshot == MONITOR_PATH if keepalive is None else keepalive
         )
         # A camera streamer (mjpg-streamer, ustreamer, go2rtc) sends whole in-memory frames, so
         # encoder padding is safe there; a file under Moonraker's /server/files/ (the U1
@@ -234,8 +234,14 @@ class MoonrakerCamera:
             command="printer vision",
             remediation=[
                 "Check that the printer is on and its camera is enabled.",
-                "A Snapmaker U1 writes the file only after camera.start_monitor "
-                "(sent automatically unless --no-keepalive).",
+                *(
+                    [
+                        "This camera writes the file only after camera.start_monitor "
+                        "(sent automatically unless --no-keepalive)."
+                    ]
+                    if self.keepalive_enabled
+                    else []
+                ),
             ],
         )
 

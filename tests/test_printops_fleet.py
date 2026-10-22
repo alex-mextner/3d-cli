@@ -266,5 +266,8 @@ def test_repo_fleet_watch_settings_reach_the_devices(monkeypatch: pytest.MonkeyP
     d = devices.load_devices()
     assert d["u1"].watch["tg_fallback"] is True and d["u1"].watch["bed"]["enabled"] is True
     assert d["k1se"].watch["tg_fallback"] is True
-    assert d["k1se"].watch["vision"] == {"snapshot": "http://192.168.0.27:8080/?action=snapshot"}
+    from printer_ops.camera import camera_spec
+
+    assert camera_spec(d["k1se"]).snapshot == "http://192.168.0.27:8080/?action=snapshot"
+    assert camera_spec(d["u1"]).kind == "moonraker-monitor"
     assert d["k1se"].watch["bed"]["roi"][0] == [0.31, 0.48]

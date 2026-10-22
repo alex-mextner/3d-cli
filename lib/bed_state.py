@@ -584,19 +584,15 @@ def read_printer(device: Device) -> tuple[str, float | None]:
 
 
 def camera_for(device: Device) -> Any:
-    """The same snapshot source as `3d printer vision` (watch.vision.snapshot, else the U1
-    monitor.jpg woken by camera.start_monitor)."""
+    """The same snapshot source as `3d printer vision` (printer_ops.camera: `watch.vision.camera`,
+    else the printer model's default camera); a printer without one is refused."""
     from errors import UsageError
-    from printer_ops.vision import U1_MONITOR, MoonrakerCamera
+    from printer_ops.camera import open_camera, require_camera
 
     if device.adapter != "moonraker":
         raise UsageError(f"{device.name}: no camera or Z access for adapter {device.adapter}", command="printer bed",
                          remediation=["The bed check needs a Moonraker printer (adapter: moonraker)."])
-    cfg = (device.watch or {}).get("vision") or {}
-    cfg = cfg if isinstance(cfg, dict) else {}
-    keep = cfg.get("keepalive")
-    return MoonrakerCamera(device.host, device.port, snapshot=str(cfg.get("snapshot") or U1_MONITOR),
-                           keepalive=keep if isinstance(keep, bool) else None)
+    return open_camera(device, require_camera(device, "printer bed"))
 
 
 def grab(camera: Any) -> bytes:

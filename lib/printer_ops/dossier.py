@@ -213,15 +213,19 @@ def _with_model(query: str, model_name: str | None, reg: Registry, machines: lis
 # ---- static facts --------------------------------------------------------------------------
 
 def camera_snapshot(machine: Machine) -> str | None:
-    """The configured camera snapshot URL (`watch.vision.snapshot`), credential-free; a bare
-    path is resolved against the printer's own address like `3d printer vision` does."""
+    """The camera snapshot URL (printer_ops.camera: `watch.vision.camera`, else the model's default),
+    credential-free; a bare path is resolved against the printer's own address like
+    `3d printer vision` does. None: no camera, or a broken setting (the static facts still print)."""
+    from printer_ops.camera import camera_spec
+
     device = machine.device
-    vision = device.watch.get("vision") if device else None
-    snap = vision.get("snapshot") if isinstance(vision, dict) else None
-    if not snap or device is None:
+    if device is None:
         return None
-    snap = str(snap)
-    return redact_url(snap if "://" in snap else f"http://{device.host}:{device.port}/{snap.lstrip('/')}")
+    try:
+        url = camera_spec(device).snapshot_url(device.host, device.port)
+    except InvalidArgument:
+        return None
+    return redact_url(url) if url else None
 
 
 def machine_facts(machine: Machine) -> MachineFacts:

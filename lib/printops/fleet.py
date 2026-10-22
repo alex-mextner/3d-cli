@@ -292,6 +292,11 @@ def _entry(name: str, spec: Any, path: Path, bad: list[str]) -> FleetPrinter | N
             for k in ("adapter", "host")
             if not spec.get(k)
         )
+    watch = spec.get("watch")
+    if isinstance(watch, dict) and watch.get("vision") is not None:
+        from printer_ops.camera import vision_problems
+
+        bad.extend(vision_problems(watch["vision"], "watch.vision"))
     heads = _heads(spec.get("heads"), bad)
     ams = _ams(spec["ams"], bad) if "ams" in spec else None
     enclosure = _choice(spec, "enclosure", ENCLOSURES, bad)

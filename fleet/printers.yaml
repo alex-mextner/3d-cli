@@ -50,6 +50,8 @@ u1:
   bridge_max_mm: 25
   watch:
     tg_fallback: true       # `3d printer watch`: tg only for warning+ events that no subscribed agent took
+    vision:                 # `3d printer vision u1`, `guard`, `bed`: where the frames come from
+      camera: {kind: moonraker-monitor}   # stock firmware has no stream: unisrv rewrites /server/files/camera/monitor.jpg while camera.start_monitor is renewed (keepalive, automatic)
     bed:                    # camera bed state (#303, `3d printer bed --help`): bed_clear/bed_occupied, start gate
       enabled: true         # ROI from the bundled camera calibration; references at the PRINT_END park (Z 200) and the post-G28 rest (Z 10); at Z >= ~215 the bed is out of the camera's view (#402)
       clear_ack:            # one motor sound after bed_clear; no beeper/M300 on the U1 (configfile, 2026-10-16)
@@ -108,7 +110,10 @@ k1se:
   watch:
     tg_fallback: true       # `3d printer watch`: tg only for warning+ events that no subscribed agent took
     vision:                 # `3d printer vision k1se`: Helper Script mjpg-streamer on the USB webcam
-      snapshot: "http://192.168.0.27:8080/?action=snapshot"
+      camera:
+        kind: mjpg-streamer
+        port: 8080          # snapshot http://HOST:8080/?action=snapshot
+        streams: ["http://192.168.0.27:8080/?action=stream", "http://192.168.0.27:4408/webcam/?action=stream"]   # go2rtc k1se_camera (second: Fluidd's nginx)
     bed:                    # camera bed state (#303); no camera calibration yet: ROI = the plate in the
       enabled: true         # webcam frame at the END_PRINT park (Z 125), checked on a live frame 2026-10-16
       roi: [[0.31, 0.48], [0.72, 0.27], [0.92, 0.55], [0.92, 0.97], [0.41, 0.97]]

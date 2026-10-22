@@ -22,6 +22,7 @@ import pytest
 from errors import ThreeDError
 from printer_ops import vision
 from printer_ops.base import PrinterCommError
+from printer_ops.camera import MONITOR_PATH
 from printer_ops.vision import (
     CRITICAL,
     EOI_TAIL_MAX,
@@ -188,7 +189,7 @@ def test_grab_retries_500_and_truncated_frames_then_returns_the_complete_one() -
     with FakeCam(
         replies=[(500, b"FileNotFoundError"), (200, JPEG[:40])]
     ).serve() as fake:
-        frame = MoonrakerCamera("127.0.0.1", fake.port, retry_delay=0).grab()
+        frame = MoonrakerCamera("127.0.0.1", fake.port, snapshot=MONITOR_PATH, retry_delay=0).grab()
     assert frame.jpeg == JPEG
     assert (
         frame.modified
@@ -199,7 +200,7 @@ def test_grab_retries_500_and_truncated_frames_then_returns_the_complete_one() -
 
 def test_grab_gives_up_with_a_structured_error() -> None:
     with FakeCam(replies=[(500, b"x")] * 3).serve() as fake:
-        cam = MoonrakerCamera("127.0.0.1", fake.port, retry_delay=0)
+        cam = MoonrakerCamera("127.0.0.1", fake.port, snapshot=MONITOR_PATH, retry_delay=0)
         with pytest.raises(PrinterCommError, match="after 3 tries: HTTP 500"):
             cam.grab()
 
@@ -226,7 +227,7 @@ def test_keepalive_sends_only_camera_start_monitor_and_at_most_once_a_minute(
     monkeypatch.setattr(
         ws.WebSocket, "connect", classmethod(lambda cls, *a, **k: _FakeWS())
     )
-    cam = MoonrakerCamera("192.0.2.1")
+    cam = MoonrakerCamera("192.0.2.1", snapshot=MONITOR_PATH)
     assert cam.keepalive(1000.0) is True
     assert cam.keepalive(1030.0) is False
     assert cam.keepalive(1061.0) is True

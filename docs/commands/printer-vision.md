@@ -16,14 +16,15 @@ from the device's `watch:` block in `printer-devices.yaml`).
 3d printer vision fetch-model
 ```
 
-- `NAME` — a Moonraker printer from `3d printer list` (the rooted K1 SE runs Moonraker
-  and its USB webcam is served by mjpg-streamer; `fleet/printers.yaml` sets its `watch.vision.snapshot`
-  to `http://192.168.0.27:8080/?action=snapshot`, a full URL fetched directly).
+- `NAME` — a Moonraker printer from `3d printer list` that has a camera. Where the frames come
+  from is the printer's `watch.vision.camera` ([Fleet registry](printer.md#cameras-watchvisioncamera):
+  the U1 is `moonraker-monitor`, the rooted K1 SE `mjpg-streamer` on `:8080`); a printer without
+  one is refused with `no camera`, never given another printer's camera path.
 - `--interval` — seconds between frames (default 10; the thresholds were tuned for 10 s).
 - `--once` — score the current frame, print one JSON verdict and exit; `--save` also writes the
   frame (with detection boxes when there are any).
-- `--snapshot` — camera URL or Moonraker path; default `/server/files/camera/monitor.jpg` (U1).
-- `--no-keepalive` — do not send `camera.start_monitor` (see U1 camera below).
+- `--snapshot` — camera URL or Moonraker path, overriding the printer's `watch.vision.camera`.
+- `--no-keepalive` — do not send `camera.start_monitor` (only `moonraker-monitor` cameras need it; see U1 camera below).
 - `--no-npu` — do not read the printer's own detector verdicts from klippy.log.
 - `--evidence` — where event frames are saved (default `~/.cache/3d-cli/vision/evidence/`).
 - `--no-verify` — skip stage 2 (the CLIP verifier); the trend then runs on the raw Obico score,
@@ -246,8 +247,8 @@ u1:
   watch:
     tg_fallback: true        # emergency only: the phone gets what no agent could take
     vision:
-      snapshot: /server/files/camera/monitor.jpg   # default for Moonraker printers
-      keepalive: true                              # default: on for the U1 monitor.jpg only
+      camera: {kind: moonraker-monitor}            # the U1; K1 SE: {kind: mjpg-streamer, port: 8080}; see printer.md "Cameras"
+      keepalive: true                              # default: on for kind moonraker-monitor only
       verify: true                                 # stage 2 (CLIP verifier); default on
       geometry: true                               # bed-volume mask from the camera calibration
       scene: false                                 # bed-change detectors; default off (noisy)

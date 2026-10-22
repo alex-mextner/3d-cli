@@ -225,6 +225,12 @@ def _parse(path: Path, data: Any) -> dict[str, Device]:
         if not isinstance(watch, dict):
             raise InvalidArgument(f"{name}.watch", str(watch), ["a mapping, e.g. {tg_fallback: true, min_severity: warning}"],
                                   command="printer", extra=f"Fix {path}.")
+        from printer_ops.camera import vision_problems
+
+        bad = vision_problems(watch.get("vision"), f"{name}.watch.vision")
+        if bad:
+            raise DeviceConfigError(f"{path}: {'; '.join(bad)}", command="printer",
+                                    remediation=["watch.vision.camera: see docs/commands/printer.md \"Fleet registry\""])
         access = spec.get("access", "full")
         if access not in ("full", "read-only"):
             raise InvalidArgument(f"{name}.access", str(access), ["full", "read-only"], command="printer",
