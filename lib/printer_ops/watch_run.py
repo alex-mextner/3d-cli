@@ -71,7 +71,8 @@ USAGE = """3d printer watch NAME... | --all [options]
   `snapshot` plus anything already wrong. Runs until stopped (or --duration).
   Printers with `watch.bed.enabled: true` also get the camera bed monitor (`3d printer bed
   --help`): bed_clear / bed_occupied / plate_present / plate_missing (info) once the parts are
-  taken off, put on, or the plate goes missing; nothing is grabbed while a job runs.
+  taken off, put on, or the plate goes missing, and bed_unknown (warning) when the camera cannot
+  tell right after a job; nothing is grabbed while a job runs.
 
 Sinks (several at once; per printer also from printer-devices.yaml `<name>.watch:`):
   stdout JSONL (default)  {"ts","printer","kind","severity","text","key","data"} per line
