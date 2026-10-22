@@ -50,8 +50,9 @@ a fresh mesh ([#330][330]):
    the whole bed) after the bed has reached print temperature and soaked for a few minutes, before
    the first extrusion. If the printer's start macro already probes, the engine relies on it
    only when a test proves that macro does it. Preflight fails on macros a printer does not
-   trust, so `BED_MESH_CALIBRATE` joins the K1 SE's `trusted_macros` in `fleet/printers.yaml`
-   (the U1 already lists it) in the same change ([#330][330]).
+   trust, so `BED_MESH_CALIBRATE` joins the K1 SE's `trusted_macros` (the U1 already lists it)
+   in `fleet/printers.yaml` and in any `printer-devices.yaml` override, which replaces the fleet
+   list ([#330][330]).
 2. **Fetch.** Right after probing, `3d-api` (or the CLI) reads
    `GET /printer/objects/query?bed_mesh` from Moonraker: `profile_name`, `mesh_min`, `mesh_max`,
    `probed_matrix`, `mesh_matrix`, `profiles`, plus `probe_count` and the probe offset from
@@ -362,8 +363,10 @@ dashboard and the phone-camera upload.
   evening, photo in the morning);
 - transitions are idempotent (a repeated button press does not apply twice) and out-of-order
   calls return 409 with the expected action;
-- a photo is bound by the QR on the plate's label (session, plate, generation revision); a photo of
-  an old or regenerated plate is refused;
+- a photo is bound by the QR on the plate's label (session, plate, generation revision); a photo
+  whose QR names an old or regenerated plate is refused. Without a readable QR the photo is
+  accepted only inside an explicit session context (CLI `--session`, a reply in the bot, the
+  card), and then the revision cannot be checked: the user confirms which plate it is;
 - `3d calibrate status --session ID` (or the card, or the bot) shows where it stopped; `abort`
   works from any step.
 
