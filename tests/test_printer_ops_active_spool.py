@@ -9,7 +9,7 @@ from collections.abc import Callable, Iterator
 import pytest
 from printer_fakes import FakeMoonraker, free_port
 
-from printer_ops.base import Adapter, PrinterCommError, UnsupportedOperation
+from printer_ops.base import Adapter, PrinterCommError, PrinterRefused, UnsupportedOperation
 from printer_ops.moonraker import MoonrakerAdapter
 
 STATUS = "/server/spoolman/status"
@@ -42,7 +42,7 @@ def test_set_active_spool_posts_the_id_as_json_and_reads_it_back(moon: FakeMoonr
     got = _adapter(moon).set_active_spool(2)
     assert (got.before, got.after) == (14, 2)
     assert moon.active_spool == 2
-    assert _paths(moon) == [("GET", STATUS), ("POST", SPOOL_ID), ("GET", SPOOL_ID)]
+    assert _paths(moon) == [("GET", STATUS), ("GET", "/printer/objects/query"), ("POST", SPOOL_ID), ("GET", SPOOL_ID)]
     assert json.loads(moon.writes()[0].fields["body"]) == {"spool_id": 2}
 
 
@@ -108,6 +108,23 @@ def test_an_unreadable_read_back_after_a_good_write_is_an_error(moon: FakeMoonra
     with pytest.raises(PrinterCommError, match="HTTP 500"):
         _adapter(moon).set_active_spool(2)
     assert moon.active_spool == 2  # the write happened; the caller is told it is unverified
+
+
+def test_the_write_is_refused_while_a_job_is_printing_but_not_while_paused(moon: FakeMoonraker) -> None:
+    moon.status["print_stats"]["state"] = "printing"
+    with pytest.raises(PrinterRefused, match="is printing"):
+        _adapter(moon).set_active_spool(2)
+    with pytest.raises(PrinterRefused, match="is printing"):
+        _adapter(moon).set_active_spool(None)
+    assert moon.writes() == [] and moon.active_spool == 14
+    moon.status["print_stats"]["state"] = "paused"  # a spool is swapped while paused
+    assert _adapter(moon).set_active_spool(2).after == 2
+
+
+def test_the_spool_that_is_already_active_is_not_written_again_even_while_printing(moon: FakeMoonraker) -> None:
+    moon.status["print_stats"]["state"] = "printing"
+    got = _adapter(moon).set_active_spool(14)
+    assert (got.before, got.after) == (14, 14) and moon.writes() == []
 
 
 def test_a_404_on_the_write_itself_is_a_comm_error_not_unsupported(moon: FakeMoonraker) -> None:

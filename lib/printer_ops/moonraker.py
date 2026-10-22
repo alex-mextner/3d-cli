@@ -50,7 +50,8 @@ ACTIVE SPOOL (`[spoolman]` in moonraker.conf, e.g. the rooted K1 SE): Moonraker 
   component means the printer has no `[spoolman]` (stock U1): UnsupportedOperation. The write
   does not need Spoolman (Moonraker keeps the id in its own database and queues usage per spool
   id, `pending_reports`, until the link is back), so it is made while `spoolman_connected` is
-  false too and the result says so.
+  false too and the result says so. Never while a job is PRINTING: the rest of the job would be
+  booked to the new spool (a paused job is allowed: that is when a spool is swapped).
 
 UPLOAD SAFETY: `print=false` is always sent and a response claiming print_started=true is
   reported loudly. A response timeout is not a failure by itself: Moonraker has been seen
@@ -630,6 +631,17 @@ class MoonrakerAdapter(Adapter):
 
     def set_active_spool(self, spool_id: int | None) -> ActiveSpoolWrite:
         before = self.active_spool()
+        if before.spool_id == spool_id:  # already what was asked: nothing to write, even mid-job
+            return ActiveSpoolWrite(before=before.spool_id, after=before.spool_id, connected=before.connected,
+                                    pending_reports=before.pending_reports)
+        state = (self.query("print_stats").get("print_stats") or {}).get("state")
+        if state == "printing":
+            raise PrinterRefused(
+                f"{self.name} is printing: changing the active spool now would book the rest of the job "
+                f"to {'no spool' if spool_id is None else f'spool #{spool_id}'}",
+                command="printer",
+                remediation=["Do it when the job is paused or finished: the spool binding is already saved."],
+            )
         path = "/server/spoolman/spool_id"
         try:
             self._spoolman("POST", path, {"spool_id": spool_id})

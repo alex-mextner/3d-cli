@@ -55,12 +55,16 @@ Actions:
       U1: colour, material, vendor; sub-type Basic) and read back; the U1 resets the head's
       pressure advance on that write, so the current PA calibration of this head + spool is put
       back (else the factory K stays, with a warning). Not while the printer prints; a head with
-      official RFID filament only with --force-official; --no-printer-write skips it. A failed
-      write keeps the binding, prints WARNING and opens a printer_write_failed anomaly — run the
-      same load again to retry
-  unload PRINTER/SLOT [--to LOCATION] [--gross G]
+      official RFID filament only with --force-official; --no-printer-write skips it. On a
+      single-head Moonraker printer with [spoolman] (the K1 SE) Moonraker's active spool is
+      set to this spool too (read back), so Moonraker books the printer's usage to it; a
+      multi-head printer (U1) is not touched, one active spool cannot follow tool changes. A
+      failed write keeps the binding, prints WARNING and opens a printer_write_failed anomaly —
+      run the same load again to retry
+  unload PRINTER/SLOT [--to LOCATION] [--gross G] [--no-printer-write]
       take the spool out of a slot (even an unusable head); --gross weighs it first (a failed
-      weighing leaves it loaded)
+      weighing leaves it loaded). Clears Moonraker's active spool when it is this spool;
+      --no-printer-write leaves the printer alone
   use ID GRAMS [--source S] [--confidence G] [--job JOB] [--note TEXT]
       book usage (Spoolman /use + ledger). Sources: gcode_estimate moonraker_live printer_reported
       voice manual purge (default manual); negative GRAMS gives grams back (correction)
@@ -77,7 +81,7 @@ Actions:
 Options:
   --json         print the API's JSON answer (scan / receive --from-photo: the proposal too)
   --yes          receive --from-photo: create without asking (after checking the proposal)
-  --no-printer-write  load: bind in Spoolman only, leave the printer head as it is
+  --no-printer-write  load/unload: change Spoolman only, leave the printer head and active spool as they are
   --force-official    load: also overwrite a head showing official Snapmaker RFID filament
   --api URL      3d-api base URL (default: $PRINTOPS_API, else ~/.config/3d-cli/printops.yaml)
   --token TOKEN  bearer token (default: $PRINTOPS_TOKEN, else the same file)
@@ -90,8 +94,11 @@ Examples:
   3d printops spool receive --from-photo ~/.cache/spool-labels/k1-black.jpg --name "чёрный (K1)" --location WH:default
   3d printops spool receive --from-photo label.jpg --net 750 --price 1299 --location WH:default --yes
   3d printops spool load 7 u1/T3
+  3d printops spool load 2 k1se/T1
+  3d printops spool load 7 u1/T3 --no-printer-write
   3d printops spool use 7 12.4 --source gcode_estimate --job u1-2026-10-14-01
   3d printops spool unload u1/T3 --to WH:default --gross 803
+  3d printops spool unload k1se/T1 --to WH:default --no-printer-write
   3d printops spool measure 7 803
   3d printops spool import-owned ~/xp/garage-band/projects/babushkin-dom/gen/plates.json --location WH:default
   3d printops spool import-owned ~/xp/garage-band/projects/babushkin-dom/gen/plates.json --location WH:default --apply"""
@@ -637,7 +644,7 @@ def _move(argv: list[str], sub: str) -> int:
     )
 
 
-LOAD_TIMEOUT_S = 60.0  # the answer waits for the printer head write (a few printer requests)
+LOAD_TIMEOUT_S = 120.0  # the answer waits for the printer writes (head, active spool: up to nine printer requests)
 
 
 def _load(argv: list[str], sub: str) -> int:
@@ -671,26 +678,54 @@ def fmt_printer_write(pw: dict[str, Any] | None) -> str:
     """The printer half of a load answer, one line."""
     if not pw:
         return ""
-    if pw["status"] == "written":
+    active = pw.get("active_spool")
+    active_written = active is not None and active["status"] == "written"
+    head_written = pw["status"] == "written"
+    text = ""
+    if head_written:
         after = pw.get("after") or {}
         pa = pw.get("pressure_advance") or {}
         k = pa.get("k")
         k_text = f"K={k:g}" if isinstance(k, (int, float)) else "K=?"
         why = f"calibration #{pa['calibration_id']}" if pa.get("action") == "restored" else "factory"
-        return (
+        text = (
             f"\n  printer head: {after.get('color')} {after.get('vendor')} {after.get('material')} "
             f"{after.get('sub_type')} (read back), pressure advance {k_text} ({why})"
         )
-    return f"\n  printer head: {pw['status']} — {pw.get('reason')}"
+    elif pw["status"] != "skipped" or not active_written:  # a K1 whose active spool was set has no head to report
+        text = f"\n  printer head: {pw['status']} — {pw.get('reason')}"
+    if active and (active["status"] != "skipped" or not head_written):
+        text += fmt_active_spool(active)
+    return text
 
 
-def printer_write_warnings(pw: dict[str, Any] | None) -> list[str]:
+def fmt_active_spool(active: dict[str, Any]) -> str:
+    """Moonraker's active spool after a load or unload, one line."""
+    if active["status"] != "written":
+        return f"\n  printer: Moonraker active spool {active['status']} — {active.get('reason')}"
+    if active["after"] is None:
+        return f"\n  printer: Moonraker active spool cleared (was #{active['before']}) (read back)"
+    return f"\n  printer: Moonraker active spool #{active['after']} (read back)"
+
+
+def printer_write_warnings(pw: dict[str, Any] | None, *, unloading: bool = False) -> list[str]:
     if not pw:
         return []
     out = [f"WARNING: {w}" for w in pw.get("warnings") or []]
     if pw["status"] == "failed":
         out.append(
             "WARNING: the spool is bound, but the printer head was NOT updated "
+            "(a printer_write_failed anomaly is open; run the same load again to retry)"
+        )
+    active = pw.get("active_spool")
+    if active and active["status"] == "failed" and unloading:
+        out.append(
+            f"WARNING: the spool is unloaded, but Moonraker's active spool may still be #{active['spool_id']} "
+            "and books the printer's usage to it: clear it in Fluidd (Spoolman dialog) or on the printer"
+        )
+    elif active and active["status"] == "failed":
+        out.append(
+            "WARNING: the spool is bound, but Moonraker's active spool was NOT set "
             "(a printer_write_failed anomaly is open; run the same load again to retry)"
         )
     return out
@@ -701,7 +736,7 @@ def _unload(argv: list[str], sub: str) -> int:
         argv,
         sub,
         values=COMMON_VALUES | {"--to", "--gross"},
-        flags=COMMON_FLAGS,
+        flags=COMMON_FLAGS | {"--no-printer-write"},
         n_pos=1,
     )
     printer, head = _slot(p.pos[0], sub)
@@ -711,14 +746,19 @@ def _unload(argv: list[str], sub: str) -> int:
     gross = _num(p, "--gross", sub)
     if gross is not None:
         body["gross_g"] = gross
-    return _post(
-        p,
-        sub,
-        client(p, sub),
-        f"/v1/printers/{printer}/slots/{head}/unload",
-        body,
-        "unloaded ",
-    )
+    if "--no-printer-write" in p.flags:
+        body["printer_write"] = False
+    api = client(p, sub)
+    api.timeout = max(api.timeout, LOAD_TIMEOUT_S)
+    with api_errors(sub):
+        res = api.post(f"/v1/printers/{printer}/slots/{head}/unload", body)
+    active = (res.get("printer_write") or {}).get("active_spool")
+    shown = fmt_active_spool(active) if active and active["status"] != "skipped" else ""
+    _out(p, res, "unloaded " + fmt_spool(res) + _drift(res) + shown)
+    if "--json" not in p.flags:
+        for line in printer_write_warnings(res.get("printer_write"), unloading=True):
+            print(line, file=sys.stderr)
+    return 0
 
 
 def _use(argv: list[str], sub: str) -> int:
