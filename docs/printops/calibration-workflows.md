@@ -336,8 +336,8 @@ parts print, or the residual stays over the threshold after two shim passes. A n
 The session lives in `3d-api`; the CLI, the bot and HA are equal views of it. Each shows the same
 step and the same expected action ("photo of plate 1 needed"). None of the three channels exists
 yet: the table is the planned interface of the tickets in its header. On `main` today
-`3d calibrate` has `plan`, `record`, `ls`, `show` and `check`, and `3d printer` has no `mesh` or
-`todo`.
+`3d calibrate` has `plan`, `record`, `ls`, `show`, `check`, `gen`, `photo` and `rectify`, and
+`3d printer` has `todo` but no `mesh`.
 
 | Step | CLI ([#278][278]) | Bot ([#279][279]) | HA card «Калибровка» ([#280][280], [#275][275]) |
 |---|---|---|---|
