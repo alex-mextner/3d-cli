@@ -543,6 +543,7 @@ def run_live(args: argparse.Namespace) -> int:
     from printer_ops.base import PrinterCommError
     from printer_ops.devices import get_device
     from printer_ops.vision import ContextTap, KlippyLogTap, VisionMonitor
+    from printer_ops.vision_status import VisionStatus
     from printer_ops.watch import severity_rank
     from printer_ops.watch_sinks import Dispatcher
 
@@ -567,6 +568,7 @@ def run_live(args: argparse.Namespace) -> int:
     monitor = VisionMonitor(
         device.name, scorer, annotate=annotate, evidence_dir=evidence
     )
+    status = None if args.once else VisionStatus(device.name)  # the file 3d-api serves to Home Assistant
     dispatcher = None
     if not args.once:
         dispatcher = Dispatcher.for_devices([device], dry_run=args.dry_run)
@@ -608,6 +610,15 @@ def run_live(args: argparse.Namespace) -> int:
                 events += monitor.npu(tap.poll(), time.time())
             except PrinterCommError as exc:
                 report["npu_error"] = str(exc)
+        if status is not None:
+            status.update(
+                state=report.get("state"),
+                filename=report.get("file"),
+                score=score,
+                events=events,
+                trend=monitor.tracker.adjusted,
+                camera_error=report.get("camera_error"),
+            )
         if args.once:
             if score is None and frame is not None:
                 score = scorer(
