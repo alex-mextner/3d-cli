@@ -39,6 +39,7 @@ def _model(tmp_path: Path) -> Path:
 def test_deform_writes_the_mesh_report_and_summary_with_the_keepout_gate(
     tmp_path: Path,
 ) -> None:
+    """A user deforms a model: it writes the mesh, report and summary with the keep-out gate passing."""
     model = _model(tmp_path)
     result = run_cli(
         tmp_path,
@@ -85,6 +86,7 @@ def test_deform_writes_the_mesh_report_and_summary_with_the_keepout_gate(
 def test_same_spec_gives_the_same_sha256_regardless_of_thread_count(
     tmp_path: Path,
 ) -> None:
+    """A user deforms with different thread counts and gets the same sha256."""
     model = _model(tmp_path)
     shas = []
     for threads in ("1", "8"):
@@ -110,6 +112,7 @@ def test_same_spec_gives_the_same_sha256_regardless_of_thread_count(
 
 
 def test_3mf_output_is_reproducible(tmp_path: Path) -> None:
+    """A user exports 3MF twice from one spec and gets byte-identical files."""
     model = _model(tmp_path)
     for name in ("a", "b"):
         assert (
@@ -131,6 +134,7 @@ def test_3mf_output_is_reproducible(tmp_path: Path) -> None:
 def test_a_vertex_moving_op_next_to_a_keepout_zone_fails_the_gate_and_writes_nothing(
     tmp_path: Path,
 ) -> None:
+    """A user's decimate op moves vertices near a keep-out zone: the gate fails and no file is written."""
     model = _model(tmp_path)
     (tmp_path / "bad.yaml").write_text(
         SPEC.replace("{op: remesh, target_edge: 1.0}", "{op: decimate, tolerance: 0.1}")
@@ -144,21 +148,22 @@ def test_a_vertex_moving_op_next_to_a_keepout_zone_fails_the_gate_and_writes_not
 
 
 def test_invalid_spec_and_missing_files_are_usage_errors(tmp_path: Path) -> None:
+    """A user mistypes a spec key or points at a missing file and gets a usage error naming it."""
     model = _model(tmp_path)
     (tmp_path / "typo.yaml").write_text("ops:\n  - {op: smooth, iteratoins: 3}\n")
     typo = run_cli(tmp_path, "mesh", "deform", str(model), "typo.yaml")
-    assert (
-        typo.returncode == 2
-        and "unknown keys" in typo.stderr
-        and "iteratoins" in typo.stderr
-    )
+    assert typo.returncode == 2
+    assert "unknown keys" in typo.stderr
+    assert "iteratoins" in typo.stderr
     missing = run_cli(
         tmp_path, "mesh", "deform", str(tmp_path / "nope.stl"), "spec.yaml"
     )
-    assert missing.returncode == 2 and "file not found" in missing.stderr
+    assert missing.returncode == 2
+    assert "file not found" in missing.stderr
 
 
 def test_help_documents_every_flag_and_the_docs_page_matches() -> None:
+    """A user reads the help text and the docs page: both document every flag and op."""
     from commands import mesh
 
     usage = mesh.DEFORM_USAGE
@@ -195,15 +200,15 @@ def test_help_documents_every_flag_and_the_docs_page_matches() -> None:
 
 
 def test_help_subcommand_prints_the_deform_usage(tmp_path: Path) -> None:
+    """A user runs `3d mesh deform --help` and sees the flags and keep-out gate."""
     result = run_cli(tmp_path, "mesh", "deform", "--help")
-    assert (
-        result.returncode == 0
-        and "--verify-determinism" in result.stdout
-        and "keep-out" in result.stdout
-    )
+    assert result.returncode == 0
+    assert "--verify-determinism" in result.stdout
+    assert "keep-out" in result.stdout
 
 
 def test_collage_and_fit_silhouette_workflow(tmp_path: Path) -> None:
+    """A user fits a mesh to a silhouette, writes a collage, and gets a usage error without a fit op."""
     pytest.importorskip("PIL")
     from PIL import Image
 
