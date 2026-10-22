@@ -71,6 +71,15 @@ def default_intrinsics(
     return np.array([[f, 0.0, w / 2.0], [0.0, f, h / 2.0], [0.0, 0.0, 1.0]])
 
 
+def _f_labels(f_px: float | None, f_ratio: float) -> tuple[str, str]:
+    """(f_source, quality flag) for how a manual-scale focal length was chosen."""
+    if f_px is not None:
+        return "given", "f_given"
+    if f_ratio != DEFAULT_F_RATIO:
+        return "given", "f_ratio_given"
+    return "default", "f_default_ratio"
+
+
 def _scale_result(
     length_px: float,
     length_mm: float,
@@ -90,11 +99,7 @@ def _scale_result(
     K = default_intrinsics(w, h, f_px, f_ratio)
     mm_per_px = length_mm / length_px
     flags = ["fronto_parallel_assumed", *quality]
-    flags.append(
-        "f_given"
-        if f_px is not None
-        else ("f_default_ratio" if f_ratio == DEFAULT_F_RATIO else "f_ratio_given")
-    )
+    flags.append(_f_labels(f_px, f_ratio)[1])
     if length_px < 0.02 * math.hypot(w, h):
         flags.append(
             "short_reference"
@@ -104,9 +109,7 @@ def _scale_result(
         "plane_depth_mm": float(K[0, 0]) * mm_per_px,
         "K": K,
         "f_px": float(K[0, 0]),
-        "f_source": "given"
-        if (f_px is not None or f_ratio != DEFAULT_F_RATIO)
-        else "default",
+        "f_source": _f_labels(f_px, f_ratio)[0],
         "source": source,
         "length_px": float(length_px),
         "image_size": [w, h],
@@ -238,9 +241,7 @@ def local_mm_per_px(H_px_to_grid_mm: Any, pt_px: Any) -> float:
     return float(math.sqrt(abs(np.linalg.det(J))))
 
 
-def scale_from_grid(
-    calibration: dict[str, Any], *, at_px: Any = None
-) -> dict[str, Any]:
+def _scale_from_grid(calibration: dict[str, Any], at_px: Any = None) -> dict[str, Any]:
     """Scale of the wall plane from a `detect_grid` result (also after a JSON round trip) or from an HSW
     `photo_calibration.json` (`focal_px`, `camera_R_object_to_cv`, `camera_t_object_to_cv_mm`, `image_size_px`).
 
@@ -300,6 +301,75 @@ def scale_from_grid(
         "at_px": pt,
         "image_size": [w, h],
         "quality": quality,
+    }
+
+
+def scale_from_grid(
+    calibration: dict[str, Any], *, at_px: Any = None, image_size: Any = None
+) -> dict[str, Any]:
+    """Scale of the wall plane from a `detect_grid` result (also after a JSON round trip) or from an HSW
+    `photo_calibration.json` (`focal_px`, `camera_R_object_to_cv`, `camera_t_object_to_cv_mm`, `image_size_px`).
+
+    `image_size` (w, h) of the photo the scale is wanted for: a calibration made on a photo of another size raises
+    `BadInput` (its homography is in that photo's pixels). Malformed calibrations raise `BadInput` too, never a bare
+    KeyError/ValueError. Everything else as `_scale_from_grid`."""
+    if not isinstance(calibration, dict):
+        raise BadInput("the calibration must be a JSON object")
+    if calibration.get("ok") is False:
+        raise BadInput(
+            f"the calibration is not usable (reason: {calibration.get('reason')})"
+        )
+    try:
+        res = _scale_from_grid(calibration, at_px)
+    except (KeyError, ValueError, TypeError, np.linalg.LinAlgError) as exc:
+        raise BadInput(f"malformed grid calibration: {exc!r}") from exc
+    if (
+        image_size is not None
+        and [int(v) for v in _size(image_size)] != res["image_size"]
+    ):
+        raise BadInput(
+            f"the calibration is for a {res['image_size'][0]}x{res['image_size'][1]} photo but the photo is "
+            f"{_size(image_size)[0]}x{_size(image_size)[1]}"
+        )
+    return res
+
+
+def scale_from_homography(
+    H_px_to_mm: Any,
+    *,
+    image_size: Any,
+    at_px: Any = None,
+    f_px: float | None = None,
+    f_ratio: float = DEFAULT_F_RATIO,
+) -> dict[str, Any]:
+    """Scale at a pixel of a photo whose pixel -> plane-mm homography is `H_px_to_mm` (e.g. a photo registered onto a
+    calibrated one: `H_other_px_to_mm @ H_a_to_b`). `at_px` defaults to the image centre. `plane_depth_mm = f * mm_per_px`
+    assumes the plane is fronto-parallel there. Raises `BadInput` when the pixel is not on the plane's finite side."""
+    w, h = _size(image_size)
+    K = default_intrinsics(w, h, f_px, f_ratio)
+    pt = np.asarray(at_px if at_px is not None else (w / 2.0, h / 2.0), float).reshape(
+        2
+    )
+    Hm = np.asarray(H_px_to_mm, float).reshape(3, 3)
+    mm_per_px = local_mm_per_px(Hm, pt)
+    if (
+        not (math.isfinite(mm_per_px) and mm_per_px > 0)
+        or float(Hm[2] @ [pt[0], pt[1], 1.0]) <= 0
+    ):
+        raise BadInput(
+            "that pixel is not on the finite side of the shared plane (above its horizon?)"
+        )
+    f_source, f_flag = _f_labels(f_px, f_ratio)
+    return {
+        "mm_per_px": mm_per_px,
+        "plane_depth_mm": float(K[0, 0]) * mm_per_px,
+        "K": K,
+        "f_px": float(K[0, 0]),
+        "f_source": f_source,
+        "source": "homography",
+        "at_px": pt,
+        "image_size": [w, h],
+        "quality": ["plane_of_overlap_only", "fronto_parallel_assumed", f_flag],
     }
 
 
@@ -771,6 +841,10 @@ def _fail(
         "grid_pitch_mm": list(pitch),
         "mm_per_px_centre": None,
         "plane_depth_mm": None,
+        "tilt_deg": None,
+        "roll_deg": None,
+        "coverage": None,
+        "f_rel_uncertainty": None,
         "roi_xywh": [0, 0, 0, 0],
         "timing_s": timing,
     }
@@ -798,6 +872,11 @@ def solve_grid_pose(
     pitch = (float(grid_pitch_mm[0]), float(grid_pitch_mm[1]))
     if not (pitch[0] > 0 and pitch[1] > 0):
         raise BadInput("grid_pitch_mm must be two positive numbers")
+    if abs(pitch[0] / pitch[1] - math.sqrt(3) / 2) > 0.02:
+        raise BadInput(
+            f"grid_pitch_mm {pitch[0]} x {pitch[1]} is not a regular honeycomb (column pitch / row pitch must be sqrt(3)/2 = 0.866)",
+            "the labelling relies on the 6-fold symmetry of a regular hexagonal lattice",
+        )
     pts = (
         np.asarray(points_px, float).reshape(-1, 2)
         if np.size(points_px)

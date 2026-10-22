@@ -12,10 +12,9 @@ import numpy as np
 from .. import io
 from ..calibrate import (
     DEFAULT_F_RATIO,
-    default_intrinsics,
     detect_grid,
-    local_mm_per_px,
     scale_from_grid,
+    scale_from_homography,
     scale_from_points,
     scale_from_reference,
 )
@@ -153,6 +152,8 @@ def _homography_scale(
         raise BadInput(
             "--homography-to needs exactly one of --other-mm-per-px X or --other-grid honeycomb"
         )
+    if args.other_mm_per_px is not None and not args.other_mm_per_px > 0:
+        raise BadInput("--other-mm-per-px must be positive")
     other = io.load_rgb(args.homography_to)
     reg = register(rgb, other)
     if not reg["ok"]:
@@ -161,7 +162,6 @@ def _homography_scale(
             "use two photos of the same scene with overlapping, textured content",
         )
     H = np.asarray(reg["H_a_to_b"])
-    at = np.asarray(args.at if args.at else (size[0] / 2.0, size[1] / 2.0), float)
     if args.other_grid:
         cal = detect_grid(other)
         if not cal["ok"]:
@@ -170,30 +170,14 @@ def _homography_scale(
             )
         H_px_to_mm = np.asarray(cal["homography_px_to_grid_mm"]) @ H
     else:
-        if not args.other_mm_per_px > 0:
-            raise BadInput("--other-mm-per-px must be positive")
         H_px_to_mm = np.diag([args.other_mm_per_px, args.other_mm_per_px, 1.0]) @ H
-    mm_per_px = local_mm_per_px(H_px_to_mm, at)
-    K = default_intrinsics(size[0], size[1], args.f_px, _ratio(args))
-    quality = [
-        "plane_of_overlap_only",
-        "fronto_parallel_depth_assumed",
-        "f_given" if args.f_px else "f_default_ratio",
-    ]
+    res = scale_from_homography(
+        H_px_to_mm, image_size=size, at_px=args.at, f_px=args.f_px, f_ratio=_ratio(args)
+    )
     if not reg["baseline_ok"]:
-        quality.append("same_viewpoint")
-    return {
-        "mm_per_px": mm_per_px,
-        "plane_depth_mm": float(K[0, 0]) * mm_per_px,
-        "K": K,
-        "f_px": float(K[0, 0]),
-        "f_source": "given" if args.f_px else "default",
-        "source": "homography",
-        "at_px": at,
-        "image_size": list(size),
-        "quality": quality,
-        "reg": _reg_summary(reg),
-    }
+        res["quality"].append("same_viewpoint")
+    res["reg"] = _reg_summary(reg)
+    return res
 
 
 def run(args: argparse.Namespace) -> int:
@@ -244,18 +228,7 @@ def run(args: argparse.Namespace) -> int:
                     f"no honeycomb grid found in {args.image}: {cal['reason']}",
                     "use --ref/--points, or photograph the panel with >= 12 full cells visible",
                 )
-        if not isinstance(cal, dict):
-            raise BadInput("the calibration JSON must be an object")
-        if cal.get("ok") is False:
-            raise BadInput(
-                f"the calibration is not usable (reason: {cal.get('reason')})"
-            )
-        cal_size = cal.get("image_size") or cal.get("image_size_px")
-        if cal_size is not None and [int(v) for v in cal_size] != list(size):
-            raise BadInput(
-                f"the calibration is for a {cal_size[0]}x{cal_size[1]} photo but {args.image} is {size[0]}x{size[1]}"
-            )
-        res = scale_from_grid(cal, at_px=args.at)
+        res = scale_from_grid(cal, at_px=args.at, image_size=size)
     else:
         res = _homography_scale(args, rgb, size)
     doc = io.to_jsonable(res)

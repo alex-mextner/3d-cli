@@ -34,7 +34,7 @@ Options:
   --json               print exactly one JSON object
 
 baseline_ok is false when the relative rotation is < 3 degrees AND the translation is < 5 % of the plane depth: B is then
-(nearly) the same viewpoint (measured on the carpet pair: 1853 matches, rotation 0.94 degrees) and adds no parallax.
+(nearly) the same viewpoint (measured on the carpet pair: 1853 matches, rotation ~0, a pure zoom) and adds no parallax.
 The homography is exact only for one plane; tall objects are approximate.
 
 Exit: 0 ok, 2 bad input, 3 photos could not be registered.

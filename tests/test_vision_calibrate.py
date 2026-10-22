@@ -11,6 +11,7 @@ import math
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -494,3 +495,42 @@ def test_periodic_texture_without_a_honeycomb_returns_quickly_with_a_small_budge
     elapsed = time.perf_counter() - t
     assert res["ok"] is False and res["reason"]
     assert elapsed < 6.0, elapsed  # budget + one detector pass of slack; the search never runs on for minutes
+
+
+def test_failed_result_has_every_documented_key_as_null() -> None:
+    cam = fx.camera(900.0, SIZE, 25.0, 12.0, 4.0, 900.0, CENTRE)
+    ok = C.detect_grid(fx.render(cam, SIZE))
+    fail = C.detect_grid(np.full((200, 200, 3), 128, np.uint8))
+    assert fail["ok"] is False
+    assert set(ok) - {"polarity", "sigma"} <= set(fail) | {"timing_s"}  # same key set, numbers null
+    for key in ("tilt_deg", "roll_deg", "coverage", "f_rel_uncertainty", "mm_per_px_centre"):
+        assert fail[key] is None
+
+
+def test_non_honeycomb_pitch_is_rejected() -> None:
+    with pytest.raises(BadInput):
+        C.solve_grid_pose(np.zeros((20, 2)), image_size=(100, 100), grid_pitch_mm=(20.0, 20.0))
+    assert C.solve_grid_pose(np.zeros((0, 2)), image_size=(100, 100), grid_pitch_mm=(10.0, 11.547))["reason"] == "too_few_cells"
+
+
+def test_scale_from_grid_rejects_other_sized_photos_and_malformed_files() -> None:
+    cam = fx.camera(900.0, SIZE, 25.0, 12.0, 4.0, 900.0, CENTRE)
+    cal = C.detect_grid(fx.render(cam, SIZE))
+    assert C.scale_from_grid(cal, image_size=SIZE)["source"] == "grid"
+    with pytest.raises(BadInput):
+        C.scale_from_grid(cal, image_size=(SIZE[0] // 2, SIZE[1]))
+    bad_inputs: list[Any] = [[], {"homography_grid_mm_to_px": [[1, 2]], "K": 3}, {"ok": False, "reason": "poor_fit"}]
+    for bad in bad_inputs:
+        with pytest.raises(BadInput):
+            C.scale_from_grid(bad)
+
+
+def test_scale_from_homography_labels_and_horizon() -> None:
+    H = np.diag([2.0, 2.0, 1.0])
+    res = C.scale_from_homography(H, image_size=(1000, 800), f_ratio=0.5)
+    assert res["mm_per_px"] == pytest.approx(2.0) and res["source"] == "homography"
+    assert res["f_source"] == "given" and "f_ratio_given" in res["quality"]
+    assert C.scale_from_homography(H, image_size=(1000, 800))["f_source"] == "default"
+    behind = np.array([[1.0, 0, 0], [0, 1.0, 0], [0, -0.01, 1.0]])  # w = 1 - 0.01 y: negative below y = 100
+    with pytest.raises(BadInput):
+        C.scale_from_homography(behind, image_size=(1000, 800), at_px=(500, 400))

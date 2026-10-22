@@ -33,8 +33,9 @@ photos not registrable.
 3d photo-scale tools.jpg --ref 82=239.4 --instances seg/instances.json --json
 3d photo-scale tools.jpg --points 120,340,980,360 --distance 300 --f-px 937.5
 3d photo-scale wall.jpg --grid honeycomb --json
-3d photo-scale wall.jpg --grid honeycomb --calibration ~/dev/garage-band/projects/HSW/refit/photo_calibration.json
+3d photo-scale wall.jpg --grid honeycomb --calibration refit/photo_calibration.json
 3d photo-scale a.jpg --homography-to b.jpg --other-grid honeycomb
+3d photo-scale a.jpg --homography-to b.jpg --other-mm-per-px 2.0 --at 600,450 --f-ratio 0.4
 ```
 
 ## Output
@@ -81,5 +82,5 @@ s = scale_from_grid(detect_grid(rgb), at_px=None)
 K = default_intrinsics(w, h, f_px=None, f_ratio=0.375)   # EXIF-less fallback K
 ```
 
-`scale_from_points` / `scale_from_reference` raise `BadInput` (exit 2 in the CLI) for a zero/negative length, a non-finite
+`scale_from_homography(H_px_to_mm, image_size=..., at_px=None, f_px=None, f_ratio=0.375)` is the fourth route (the registered-photo transfer: pass `H_other_px_to_mm @ H_a_to_b`); `scale_from_grid(cal, at_px=None, image_size=(w, h))` rejects a calibration made on a photo of another size. `scale_from_points` / `scale_from_reference` raise `BadInput` (exit 2 in the CLI) for a zero/negative length, a non-finite
 point, an empty mask or a mask whose shape differs from `image_size`.

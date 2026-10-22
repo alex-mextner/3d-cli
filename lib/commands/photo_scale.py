@@ -10,7 +10,7 @@ WHY: segmentation, closed-form profiles and silhouette fits all need mm/px; the 
 
 Examples:
   3d photo-scale tools.jpg --ref 82=239.4 --instances seg/instances.json --json
-  3d photo-scale tools.jpg --points 120,340,980,360 --distance 300 --f-px 937
+  3d photo-scale tools.jpg --points 120,340,980,360 --distance 300 --f-px 937.5
   3d photo-scale wall.jpg --grid honeycomb --json
 """
 
@@ -47,7 +47,7 @@ Exit: 0 ok, 2 bad input, 3 grid not found / photos not registrable.
 
 Examples:
   3d photo-scale tools.jpg --ref 82=239.4 --instances seg/instances.json --json
-  3d photo-scale tools.jpg --points 120,340,980,360 --distance 300 --f-px 937
+  3d photo-scale tools.jpg --points 120,340,980,360 --distance 300 --f-px 937.5
   3d photo-scale wall.jpg --grid honeycomb --json
   3d photo-scale a.jpg --homography-to b.jpg --other-grid honeycomb"""
 

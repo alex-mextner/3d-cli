@@ -7,7 +7,7 @@ photo B w.r.t. photo A for that plane: `X_B = R @ X_A + t_over_depth * d`, with 
 
 `baseline_ok` answers "does the second photo add parallax?". It is False when the relative rotation is below 3 degrees AND
 the translation is below 5 % of the plane depth: the second photo is then (almost) the same viewpoint (measured: carpet HEIC
-vs IMG_4934 -> 1853 matches, rotation 0.94 deg, translation 0), so nothing about the 3-D shape can be learnt from it. A pure
+vs IMG_4934 -> 1853 matches, rotation ~0 deg, translation 0), so nothing about the 3-D shape can be learnt from it. A pure
 camera rotation >= 3 degrees about its own centre still reports `baseline_ok=True`; use `translation_ratio` to tell it apart.
 """
 
@@ -136,7 +136,7 @@ def register(
     ratio: float = 0.75,
     ransac_px: float = 4.0,
 ) -> dict[str, Any]:
-    """Register photo A to photo B (RESULT 7.9).
+    """Register photo A to photo B.
 
     `masks_a` / `masks_b`: optional lists (or 3-D arrays) of bool HxW instance masks of A / B. `K_a` / `K_b`: 3x3
     intrinsics; default `default_intrinsics` (f = 0.375 * diagonal). Returns a dict:
