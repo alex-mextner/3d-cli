@@ -17,6 +17,8 @@ compatibility wrappers.
 - `lib/cli/env.py` owns tool discovery, install hints, and `OPENSCADPATH` export.
 - `lib/cli/pyrun.py` runs heavier bundled Python tools through the selected Python tier.
 - `lib/cli/paths.py` contains shared path helpers.
+- `lib/cli/heavy.py` is the machine-wide heavy lock (`flock` + `systemd-run` cap), re-entrant through `THREED_HEAVY_HELD` with a bounded wait; backs `3d heavy` and every heavy run inside `3d prep` / `slicing.orca_cli`.
+- `lib/cli/remote.py` builds the rsync/ssh argv and loads `~/.config/3d-cli/remote.yaml` for `3d remote`.
 - `lib/cli/resources.py` sizes every worker pool and caps native thread pools
   (`THREED_MAX_WORKERS`, default `min(6, cores / 2)`); the dispatcher applies it first.
 - `lib/errors.py` defines structured CLI errors and exit-code mapping.
@@ -69,6 +71,10 @@ Target package: `lib/geometry/`, with subpackages only when a real boundary appe
 ### Slicing / Print Workflow
 
 - `lib/slicing/printing.py`
+- `lib/slicing/orca_cli.py` — the one place for Snapmaker Orca / OrcaSlicer CLI knowledge: binary discovery, the slicing copy (no `<plate>` block), headless `slice_project` under the heavy lock, failure classification and the `KNOWN_QUIRKS` catalogue behind `docs/printers/u1-orca-cli.md` (#431).
+- `lib/prep/` — `3d prep` (#431): `pipeline.py` (ordered, cached steps; `cache.py`), `steps.py` (adapters), `cli.py` (flags + spec file), and one library per step: `meshfix.py` (diagnose/repair + backend interface for the public meshfix library), `orient.py`, `overhang.py`, `adapt.py` (cavity fill, 45 degree wedges), `voxel.py` (scan-converted occupancy), `fit.py` (item-table fit envelope), `stability.py`, `regions.py` (landmark boxes -> colour parts/mixes), `layers.py` (adaptive layer-height plan), `project3mf.py` (Orca project 3MF + manifest), `gcode_gates.py` / `gcode_view.py`, and the proof pack (`raster.py`, `panels.py`, `report.py`, `proof.py`). Results follow `contracts.StepResult`.
+- `prep_cli.py` — entry script `3d prep` runs through `cli.pyrun` with the prep dependencies (`uv sync --extra prep`).
+- `lib/profiles/doctor.py` — `3d profiles doctor`: static checks of user presets (parents, layer-height limits, `.info`).
 - `lib/printer_ops/` — real-printer control behind `3d printer` / `3d print-preflight`:
   adapter contract + status model (`base.py`), stdlib WebSocket client (`ws.py`),
   `moonraker.py` (Klipper/Moonraker, Snapmaker U1; also the read-only job queue and history),

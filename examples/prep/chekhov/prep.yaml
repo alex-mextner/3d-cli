@@ -1,0 +1,25 @@
+# 3d prep spec for the Chekhov cat phone stand (DnHart13 "lazy fat cat" phone holder) on a Snapmaker U1.
+#   3d prep "cat phone holder full.stl" --out out --spec examples/prep/chekhov/prep.yaml
+# Paths are relative to this file.
+printer: u1
+orient: auto
+angle: 45                 # no overhang steeper than 45 degrees from vertical
+pitch: 0.25               # one 0.25 mm voxel per layer unit
+adapt:
+  zones:                  # the face (above 50 mm) keeps its shape: 75 degrees, no pillars under nose/chin/paws
+    - {z_min: 50, z_max: 200, angle_deg: 75, columns: false}
+overhang:
+  bridge_max_mm: 20       # the chin and ears bridge up to ~20 mm without supports
+fit: phones.json          # 28 phones x 4 cases (none / typical / bulky / rugged)
+holder:                   # the stand's lean seat: back-bottom corner on the ledge, screen faces -Y
+  mode: lean
+  front_sign: -1
+  lean_range_deg: [8, 36]
+  seat_y0_mm: [-43, -42, -41, -40, -39]
+colors: colors.yaml
+process:
+  walls: 4
+  infill: 15
+  layer_min: 0.08
+  layer_max: 0.32
+  mix_cap: 0.12
