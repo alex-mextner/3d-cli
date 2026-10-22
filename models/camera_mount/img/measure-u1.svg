@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="480" viewBox="0 0 900 480" font-family="sans-serif" font-size="15">
+  <rect width="900" height="480" fill="#ffffff"/>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#d1495b"/>
+    </marker>
+  </defs>
+  <text x="20" y="28" font-size="18" font-weight="bold">Snapmaker U1 — вид сверху (крышка Top Cover снята)</text>
+  <rect x="60" y="60" width="440" height="380" rx="30" fill="#9aa5b1" stroke="#333"/>
+  <rect x="110" y="110" width="340" height="280" rx="24" fill="#ffffff" stroke="#333"/>
+  <text x="200" y="250" fill="#555">проём</text>
+  <text x="265" y="92">зад</text>
+  <text x="260" y="432">перед</text>
+  <!-- pads -->
+  <g fill="#333"><circle cx="85" cy="85" r="9"/><circle cx="475" cy="85" r="9"/><circle cx="85" cy="415" r="9"/><circle cx="475" cy="415" r="9"/></g>
+  <line x1="85" y1="85" x2="475" y2="415" stroke="#e8871e" stroke-width="10" opacity="0.6"/>
+  <line x1="85" y1="72" x2="475" y2="72" stroke="#d1495b" stroke-width="2" marker-start="url(#a)" marker-end="url(#a)"/>
+  <text x="120" y="50" fill="#d1495b" font-size="13">U1-1a: между центрами подушек, слева–справа</text>
+  <line x1="490" y1="85" x2="490" y2="415" stroke="#d1495b" stroke-width="2" marker-start="url(#a)" marker-end="url(#a)"/>
+  <text x="500" y="205" fill="#d1495b" font-size="13">U1-1b: спереди–сзади</text>
+  <!-- detail of a pad -->
+  <text x="560" y="90" font-size="16" font-weight="bold">Силиконовая подушка (4 шт.)</text>
+  <rect x="580" y="120" width="260" height="60" fill="#9aa5b1" stroke="#333"/>
+  <rect x="680" y="120" width="40" height="34" fill="#ffffff" stroke="#333"/>
+  <line x1="680" y1="112" x2="720" y2="112" stroke="#d1495b" stroke-width="2" marker-start="url(#a)" marker-end="url(#a)"/>
+  <text x="590" y="108" fill="#d1495b" font-size="13">U1-2: диаметр отверстия</text>
+  <line x1="730" y1="120" x2="730" y2="154" stroke="#d1495b" stroke-width="2" marker-start="url(#a)" marker-end="url(#a)"/>
+  <text x="740" y="142" fill="#d1495b" font-size="13">глубина</text>
+  <text x="560" y="230" fill="#d1495b">U1-3: что торчит над верхней плоскостью</text>
+  <text x="560" y="250" fill="#d1495b">по диагонали (оранжевая линия) и насколько</text>
+  <text x="560" y="270" fill="#d1495b">высоко (трубки, жгуты, датчики)? Мост проходит</text>
+  <text x="560" y="290" fill="#d1495b">низом трубы на 23 мм, ножками до 57 мм.</text>
+  <text x="560" y="340" fill="#d1495b">U1-4: стол в Z = max (270): от верхней</text>
+  <text x="560" y="360" fill="#d1495b">плоскости до поверхности стола, мм</text>
+  <text x="560" y="410" fill="#333">+ фото верха сверху целиком и одной</text>
+  <text x="560" y="430" fill="#333">подушки крупно с линейкой рядом</text>
+</svg>
