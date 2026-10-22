@@ -23,6 +23,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -90,15 +91,17 @@ def scad(
 
 def scene_facts() -> dict[str, float]:
     """lens height above the printer top and lens-to-bed distances, from the model's own echo."""
-    echo = Path("/tmp/camera_mount_facts.echo")
-    subprocess.run(
-        [OPENSCAD, "-o", str(echo), "-D", 'part="assembly"', str(SCAD)],
-        check=True,
-        capture_output=True,
-    )
+    with tempfile.TemporaryDirectory() as tmp:
+        echo = Path(tmp) / "facts.echo"
+        subprocess.run(
+            [OPENSCAD, "-o", str(echo), "-D", 'part="assembly"', str(SCAD)],
+            check=True,
+            capture_output=True,
+        )
+        echo_text = echo.read_text()
     m = re.search(
         r"lens above printer top = ([\d.]+) mm; lens to bed: K1 SE ([\d.]+) mm, U1 ([\d.]+) mm",
-        echo.read_text(),
+        echo_text,
     )
     if not m:
         raise RuntimeError("no lens echo in camera_mount.scad")
