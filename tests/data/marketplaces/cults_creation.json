@@ -1,0 +1,32 @@
+{
+ "_note": "Shape from Cults' published GraphQL examples (no API key available when recorded); values are illustrative.",
+ "data": {
+  "creation": {
+   "identifier": "spoon-drawer-pull",
+   "name": "Spoon drawer pull",
+   "url": "https://cults3d.com/en/3d-model/home/spoon-drawer-pull",
+   "likesCount": 7,
+   "downloadsCount": 30,
+   "illustrationImageUrl": "https://files.cults3d.com/spoon-drawer-pull.jpg",
+   "creator": {
+    "nick": "kitchenfab",
+    "shortUrl": "https://cults3d.com/:kitchenfab"
+   },
+   "license": {
+    "name": "CC BY"
+   },
+   "price": {
+    "cents": 0
+   },
+   "tags": [
+    "spoon",
+    "drawer"
+   ],
+   "blueprints": [
+    {
+     "fileUrl": "https://files.cults3d.com/uploaders/1/spoon-pull.stl?sig=x"
+    }
+   ]
+  }
+ }
+}

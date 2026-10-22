@@ -37,7 +37,7 @@ def _read_json(path: Path) -> dict[str, Any]:
         return {}
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
+    except ValueError:  # JSONDecodeError, or a file that is not UTF-8
         raise UsageError(
             f"auth file is not valid JSON: {path}",
             command="auth",
@@ -68,6 +68,16 @@ def load_hf_token() -> HFTokenInfo | None:
         return None
     username = hf.get("username")
     return HFTokenInfo(token=token, username=str(username) if username else None, source=str(auth_path()))
+
+
+def read_auth_section(name: str) -> dict[str, Any]:
+    """One provider's object from auth.json (e.g. "thingiverse"), {} when absent. Other
+    credential consumers (`3d models`) share this file and its 0600 handling."""
+    path = auth_path()
+    if path.is_file():
+        _ensure_private_auth_path(path)
+    section = _read_json(path).get(name)
+    return section if isinstance(section, dict) else {}
 
 
 def _ensure_private_auth_path(path: Path) -> None:

@@ -1,0 +1,29 @@
+{
+ "_note": "Shape from Cults' published GraphQL examples (no API key available when recorded); values are illustrative.",
+ "data": {
+  "creation": {
+   "identifier": "luxury-spoon-pull",
+   "name": "Luxury spoon pull",
+   "url": "https://cults3d.com/en/3d-model/home/luxury-spoon-pull",
+   "likesCount": 7,
+   "downloadsCount": 30,
+   "illustrationImageUrl": "https://files.cults3d.com/luxury-spoon-pull.jpg",
+   "creator": {
+    "nick": "paidmaker",
+    "shortUrl": "https://cults3d.com/:paidmaker"
+   },
+   "license": {
+    "name": "CC BY"
+   },
+   "price": {
+    "cents": 499
+   },
+   "tags": [],
+   "blueprints": [
+    {
+     "fileUrl": "https://files.cults3d.com/uploaders/2/lux.stl"
+    }
+   ]
+  }
+ }
+}

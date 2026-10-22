@@ -1,0 +1,53 @@
+{
+ "id": 1871683,
+ "title": "Modern Angular Front Mounted Drawer Pull or Handle",
+ "slug": "modern-angular-front-mounted-drawer-pull-or-handle",
+ "coverUrl": "https://makerworld.bblmw.com/makerworld/model/US786d813cecac38/design/2025-10-09_8f8fd8c96782e8.jpg",
+ "summary": "<p><span style=\"background-color: rgb(255,255,255); color: rgb(0,0,0)\">This simple handle or drawer pull is easy to install using pan head wood screws from the front, rather than the back. It comes with a drilling guide to make placement easier. The guide has a center cutout on the top for centering, and holes spaced every 5mm for predrilling pilot holes for the mounting screws. The handle hole sp",
+ "likeCount": 448,
+ "downloadCount": 1797,
+ "license": "Standard Digital File License",
+ "tags": [
+  "drawer",
+  "door",
+  "pull",
+  "handle",
+  "knob",
+  "kitchen",
+  "workshop",
+  "cabinet",
+  "chest",
+  "furniture",
+  "minimalist"
+ ],
+ "designCreator": {
+  "uid": 360858839,
+  "name": "zentenro",
+  "handle": "zentenro"
+ },
+ "paidSetting": {
+  "isPaid": false,
+  "crowdfunding": 0
+ },
+ "isPointRedeemable": false,
+ "isExclusive": false,
+ "defaultInstanceId": 2003447,
+ "designExtension": {
+  "model_files": [
+   {
+    "modelName": "Handler-120.stl",
+    "modelSize": 63484,
+    "modelUrl": "",
+    "modelType": "stl",
+    "thumbnailName": "Handler-120.jpeg"
+   },
+   {
+    "modelName": "Handler-DG.stl",
+    "modelSize": 4001084,
+    "modelUrl": "",
+    "modelType": "stl",
+    "thumbnailName": "Handler-DG.jpeg"
+   }
+  ]
+ }
+}
