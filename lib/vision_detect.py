@@ -476,7 +476,7 @@ def annotate(jpeg: bytes, score: FrameScore) -> bytes:
 
 def _device_camera(device: Any, args: argparse.Namespace) -> Any:
     from errors import UsageError
-    from printer_ops.vision import U1_MONITOR, MoonrakerCamera
+    from printer_ops.camera import open_camera, require_camera
 
     if device.adapter != "moonraker":
         raise UsageError(
@@ -487,15 +487,9 @@ def _device_camera(device: Any, args: argparse.Namespace) -> Any:
                 "Moonraker entry (adapter: moonraker, port 7125), not creality-stock."
             ],
         )
-    cfg = (getattr(device, "watch", None) or {}).get("vision") or {}
-    cfg = cfg if isinstance(cfg, dict) else {}
-    snapshot = args.snapshot or str(cfg.get("snapshot") or U1_MONITOR)
-    keep = False if args.no_keepalive else cfg.get("keepalive")
-    return MoonrakerCamera(
-        device.host,
-        device.port,
-        snapshot=snapshot,
-        keepalive=None if keep is None else bool(keep),
+    spec = require_camera(device, "printer vision")  # watch.vision.camera / model default, never a guess
+    return open_camera(
+        device, spec, snapshot=args.snapshot, keepalive=False if args.no_keepalive else None
     )
 
 
@@ -598,13 +592,17 @@ def run_live(args: argparse.Namespace) -> int:
     from printer_ops.base import PrinterCommError
     from printer_ops.devices import get_device
     from printer_ops.vision import ContextTap, KlippyLogTap, VisionMonitor
+    from printer_ops.vision_status import VisionStatus
     from printer_ops.watch import severity_rank
     from printer_ops.watch_sinks import Dispatcher
 
     device = get_device(args.printer)
     camera = _device_camera(device, args)
     adapter = make_adapter(device)
-    tap = None if args.no_npu else KlippyLogTap(device.host, device.port)
+    from printer_ops.vision_config import monitor_limits, npu_enabled
+
+    # the printer's own detector only where it has one (watch.vision.npu; default: a Snapmaker monitor camera)
+    tap = KlippyLogTap(device.host, device.port) if npu_enabled(device) and not args.no_npu else None
     cfg = (getattr(device, "watch", None) or {}).get("vision") or {}
     cam = _calibration(device, args)
     scorer = build_scorer(
@@ -621,8 +619,10 @@ def run_live(args: argparse.Namespace) -> int:
         Path(args.evidence) if args.evidence else cache_dir() / "vision" / "evidence"
     )
     monitor = VisionMonitor(
-        device.name, scorer, annotate=annotate, evidence_dir=evidence
+        device.name, scorer, annotate=annotate, evidence_dir=evidence,
+        limits=monitor_limits(cfg if isinstance(cfg, dict) else {}),
     )
+    status = None if args.once else VisionStatus(device.name)  # the file 3d-api serves to Home Assistant
     dispatcher = None
     if not args.once:
         dispatcher = Dispatcher.for_devices([device], dry_run=args.dry_run)
@@ -664,6 +664,15 @@ def run_live(args: argparse.Namespace) -> int:
                 events += monitor.npu(tap.poll(), time.time())
             except PrinterCommError as exc:
                 report["npu_error"] = str(exc)
+        if status is not None:
+            status.update(
+                state=report.get("state"),
+                filename=report.get("file"),
+                score=score,
+                events=events,
+                trend=monitor.tracker.adjusted,
+                camera_error=report.get("camera_error"),
+            )
         if args.once:
             if score is None and frame is not None:
                 score = scorer(

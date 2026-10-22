@@ -1,0 +1,5 @@
+# Camera of a printer MODEL, the default for a device that has no `watch.vision.camera` of its
+# own (lib/printer_ops/camera.py; the kinds are documented in docs/commands/printer.md "Fleet
+# registry"). Keyed like lib/data/printers.yaml; a model that is not listed has no default camera.
+Snapmaker U1:
+  kind: moonraker-monitor   # stock firmware: no stream, /server/files/camera/monitor.jpg + camera.start_monitor

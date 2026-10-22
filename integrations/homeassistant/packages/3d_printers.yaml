@@ -65,31 +65,9 @@ rest_command:
 # fetch is capped at 5 s: the alert waits for it. Unique names (the phone downloads on
 # delivery); the newest 30 per printer are kept. /media is the HA container's own disk.
 # Refreshed only by homeassistant.update_entity from the script (and once at HA start).
-command_line:
-  - sensor:
-      name: "Printer U1 Alert Snapshot"
-      unique_id: printer_u1_alert_snapshot
-      icon: mdi:camera
-      scan_interval: 315360000
-      command_timeout: 10
-      command: >-
-        d=/media/printer-alerts; f=u1-$(date +%Y%m%d-%H%M%S)-$$.jpg; mkdir -p "$d" &&
-        if curl -fsS --connect-timeout 2 --max-time 5 -o "$d/$f" 'http://u1-camera-proxy:8090/u1.jpg'
-        && [ "$(head -c 2 "$d/$f" | od -An -tx1 | tr -d ' \n')" = ffd8 ];
-        then echo "printer-alerts/$f"; else rm -f "$d/$f"; echo failed; fi;
-        ls -1t "$d"/u1-*.jpg 2>/dev/null | tail -n +31 | xargs -r rm -f
-  - sensor:
-      name: "Printer K1 SE Alert Snapshot"
-      unique_id: printer_k1_se_alert_snapshot
-      icon: mdi:camera
-      scan_interval: 315360000
-      command_timeout: 10
-      command: >-
-        d=/media/printer-alerts; f=k1_se-$(date +%Y%m%d-%H%M%S)-$$.jpg; mkdir -p "$d" &&
-        if curl -fsS --connect-timeout 2 --max-time 5 -o "$d/$f" 'http://go2rtc:1984/api/frame.jpeg?src=k1se_camera'
-        && [ "$(head -c 2 "$d/$f" | od -An -tx1 | tr -d ' \n')" = ffd8 ];
-        then echo "printer-alerts/$f"; else rm -f "$d/$f"; echo failed; fi;
-        ls -1t "$d"/k1_se-*.jpg 2>/dev/null | tail -n +31 | xargs -r rm -f
+#
+# The grabbers themselves (command_line sensors sensor.printer_<slug>_alert_snapshot, one per fleet printer
+# with a camera) are generated in packages/printer_vision.yaml (`3d ha vision`).
 
 script:
   printer_send_notification:
@@ -103,14 +81,14 @@ script:
         description: Notification body.
       printer:
         description: >
-          u1 or k1_se. A fresh frame from that printer's camera is attached to the phone
-          notification; without one the alert goes out as text.
+          The printer's HA slug (u1, k1_se, ...). A fresh frame from that printer's camera is
+          attached to the phone notification; a printer without a frame grabber gets text.
     sequence:
       - variables:
           started: "{{ now().timestamp() }}"
           grabber: >-
-            {{ 'sensor.printer_' ~ printer ~ '_alert_snapshot'
-               if printer | default('') in ['u1', 'k1_se'] else '' }}
+            {%- set g = 'sensor.printer_' ~ (printer | default('')) ~ '_alert_snapshot' -%}
+            {{ g if printer | default('') != '' and states[g] is not none else '' }}
           snapshot: ""
       - if: "{{ grabber != '' }}"
         then:

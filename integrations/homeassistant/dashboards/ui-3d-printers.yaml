@@ -78,12 +78,10 @@ views:
                   confirmation:
                     text: Emergency stop K1 SE?
 
-          # Rooted K1 SE: the USB webcam is served by mjpg-streamer (:8080, also :4408/webcam/),
-          # go2rtc stream k1se_camera. ha_creality_ws's own camera entity (Creality WebRTC :8000)
-          # no longer gets frames and is hidden in the entity registry. mjpg-streamer sends JPEG,
-          # which WebRTC/MSE reject ("codecs not matched"); MJPEG mode relays the frames over the
-          # HA websocket unchanged, so phones play it without an ffmpeg transcode on the Odroid.
-          # Controls sit top-right: the bottom edge is left to the picture.
+          # >>> 3d ha vision: dashboard:k1se (generated from fleet/printers.yaml; do not edit, run `3d ha vision --write`)
+          # K1 SE: go2rtc stream k1se_camera, served by the printer's own streamer. Its JPEG frames are
+          # rejected by WebRTC/MSE ("codecs not matched"); MJPEG mode relays them over the HA websocket
+          # unchanged, so phones play it without a transcode. Controls sit top-right.
           - type: custom:webrtc-camera
             title: K1 SE Camera
             server: http://go2rtc:1984/
@@ -99,6 +97,22 @@ views:
               video {aspect-ratio: 16/9; object-fit: contain; background: #111;}
               .controls {top: 32px; right: 8px; bottom: auto; left: auto; gap: 6px; padding: 2px 6px; border-radius: 8px; background: rgba(0,0,0,.45);}
               .space, .stream, .play {display: none !important;}
+          # No ghost overlay for K1 SE: no bundled camera calibration for Creality K1 SE (lib/data/vision, lib/vision_geometry.py).
+          - type: entities
+            title: K1 SE vision
+            show_header_toggle: false
+            entities:
+              - entity: binary_sensor.printer_k1_se_vision_alive
+                name: Vision running
+              - entity: sensor.printer_k1_se_vision_verdict
+                name: Verdict (q, else p)
+              - entity: sensor.printer_k1_se_vision_events
+                name: Events
+              - entity: binary_sensor.printer_k1_se_vision_printing
+                name: Printing
+              - entity: binary_sensor.printer_k1_se_vision_paused
+                name: Paused
+          # <<< 3d ha vision: dashboard:k1se
 
       - type: grid
         cards:
@@ -178,7 +192,8 @@ views:
                   confirmation:
                     text: Emergency stop U1?
 
-          # The proxy bakes the inspector status into the bottom band of every frame, so the
+          # >>> 3d ha vision: dashboard:u1 (generated from fleet/printers.yaml; do not edit, run `3d ha vision --write`)
+          # The camera proxy bakes the inspector status into the bottom band of every frame, so the
           # player controls move top-right; the stream is switched via the mode label (top-right).
           - type: custom:webrtc-camera
             title: U1 Camera
@@ -203,7 +218,6 @@ views:
               video {aspect-ratio: 16/9; object-fit: contain; background: #111;}
               .controls {top: 32px; right: 8px; bottom: auto; left: auto; gap: 6px; padding: 2px 6px; border-radius: 8px; background: rgba(0,0,0,.45);}
               .space, .stream {display: none !important;}
-
           # Semi-transparent 3D ghost of the layers still to print, baked into the stream by the proxy.
           - type: tile
             entity: input_boolean.u1_camera_ghost
@@ -211,6 +225,21 @@ views:
             icon: mdi:cube-outline
             tap_action:
               action: toggle
+          - type: entities
+            title: U1 vision
+            show_header_toggle: false
+            entities:
+              - entity: binary_sensor.printer_u1_vision_alive
+                name: Vision running
+              - entity: sensor.printer_u1_vision_verdict
+                name: Verdict (q, else p)
+              - entity: sensor.printer_u1_vision_events
+                name: Events
+              - entity: binary_sensor.printer_u1_vision_printing
+                name: Printing
+              - entity: binary_sensor.printer_u1_vision_paused
+                name: Paused
+          # <<< 3d ha vision: dashboard:u1
 
           - type: custom:u1-inspector-card
             title: Что делает U1

@@ -12,3 +12,5 @@ rules:
     allow-non-breakable-inline-mappings: true
   truthy:
     check-keys: false
+  # The `3d ha vision` region markers close a nested block (the next line is dedented).
+  comments-indentation: disable

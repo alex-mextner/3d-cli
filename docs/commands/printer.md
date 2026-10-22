@@ -225,6 +225,7 @@ Per printer:
 | `enclosure`, `chamber_heater` | `none`/`partial`/`full`; `true`/`false` |
 | `plates` | `smooth_pei`, `textured_pei`, `cool_plate`, `engineering_plate`, `high_temp_plate`, `epoxy`, `glass` |
 | `notes`, `sources` | free text; where the facts come from |
+| `watch` | `3d printer watch/vision/guard/bed` settings (keys: `printer_ops/watch_run.py`); `watch.vision.camera` is where the frames come from, see [Cameras](#cameras-watchvisioncamera) |
 | `photo` | top-camera photo settings for `3d calibrate photo`: camera, lock, frames, light G-code, pose, scale reference ([calibrate.md](calibrate.md#photo--the-top-camera-photo-mode-342)) |
 
 A key that is not known is left out (shown as `null`/`-`), never guessed.
@@ -240,6 +241,45 @@ $ 3d printer list
   xecut-a1      hackerspace  offline   Bambu Lab A1         - (never contacted)             T1
   xecut-cr200b  hackerspace  offline   Creality CR-200B Pro - (never contacted)             T1
 ```
+
+### Cameras (`watch.vision.camera`)
+
+`3d printer vision`, `guard`, the bed monitor (`3d printer bed`, `watch.bed`), the dossier and the
+Home Assistant generator (`3d ha vision`) all read the camera of a printer from ONE place,
+`printer_ops/camera.py`; nothing in them carries a printer's camera path. `3d lint --printops` and
+the loader check the block.
+
+```yaml
+k1se:
+  watch:
+    vision:
+      camera:
+        kind: mjpg-streamer      # moonraker-monitor | mjpg-streamer | snapshot-url | none
+        port: 8080               # mjpg-streamer: snapshot http://HOST:8080/?action=snapshot
+        streams: ["http://192.168.0.27:8080/?action=stream"]   # live URLs for go2rtc / Home Assistant
+```
+
+| `kind` | Keys | What it is |
+|---|---|---|
+| `moonraker-monitor` | `keepalive` | Snapmaker U1 stock firmware: no stream, Moonraker serves `/server/files/camera/monitor.jpg` only while `camera.start_monitor` is renewed (sent automatically, once a minute) |
+| `mjpg-streamer` | `url`, `port` (8080), `streams`, `keepalive` | the Creality Helper Script webcam (K1 SE); `url` replaces the derived snapshot URL, `streams` the derived `?action=stream` |
+| `snapshot-url` | `url` (required), `streams`, `keepalive` | any camera that answers a JPEG GET; `url` is absolute or a path on the printer's Moonraker |
+| `none` | - | the printer has no camera: `vision`, `guard` and `bed` say `no camera` (exit 2) |
+
+`watch.vision.snapshot: URL` stays as the shorthand for `camera: {kind: snapshot-url, url: URL}`
+(give one of the two); `watch.vision.keepalive: false` switches a keepalive off. A device that sets
+neither gets its MODEL's default from `lib/data/vision/cameras.yaml` (`Snapmaker U1` →
+`moonraker-monitor`), so a `printer-devices.yaml` override that drops the `watch:` block keeps its
+camera; any other printer has no camera until one is set. Offline printers (Bambu P1S, A1 mini, the
+hackspace machines) carry no `watch:` and are never contacted, so they have none by construction.
+Two more `watch.vision` settings are per printer too: `npu: true|false` (read the printer's own
+camera detector from klippy.log; default on only for a `moonraker-monitor` camera, so the K1 SE does
+not poll for verdicts it can never have) and `limits: {stale_s, dark_luma, npu_threshold,
+npu_quiet_s}` (the frozen/dark/NPU thresholds, measured on the U1, replaced per printer).
+The camera calibration that turns a frame into bed coordinates (`3d printer vision` ROI, the bed
+check, the ghost overlay) is separate: the bundled one of the model (`lib/data/vision/`), else
+`~/.config/3d-cli/vision/NAME-camera.yaml`; without it the bed check falls back to
+`watch.bed.roi` and vision to the unmasked frame.
 
 ## Configuring printers
 
@@ -479,7 +519,12 @@ until someone takes them off. The camera can see that, so nobody has to tell an 
   edge is in view (about 2 % of the frame), so the plate verdict rests on that strip and the
   reason says how much of the bed the camera sees; the U1's own `DETECT_BED_PLATE` still checks
   the plate at start. Below 2 % of the frame the surface counts as out of view (plate `unknown`,
-  the bed check WARNs).
+  the bed check WARNs). These pixel limits are the defaults tuned on the U1 and K1 SE frames;
+  `watch.bed.thresholds: {clear_max: 0.05, level: 30, ...}` overrides any of them for one printer
+  (`level`, `detrend_px`, `edge_px`, `clear_blob_px`, `clear_max`, `occupied_blob_px`,
+  `occupied_min`, `plate_missing_min`, `plate_tie`, `surface_min`, `change_min`, `settle_frames`,
+  `match_px`, `view_min`). The camera is the printer's `watch.vision.camera`; enabling the bed check
+  on a printer without one is refused when the config is read.
 - **Monitor.** `3d printer watch` runs `bed monitor NAME` as a child for every Moonraker printer
   with `watch.bed.enabled: true`. Nothing is grabbed while a job runs; otherwise one snapshot per
   `interval_s` (1 s), identical bytes skipped, one reduced decode + one masked difference per new

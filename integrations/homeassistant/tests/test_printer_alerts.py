@@ -19,6 +19,8 @@ import pytest
 import yaml
 
 PACKAGE = Path(__file__).resolve().parents[1] / "packages" / "3d_printers.yaml"
+# The frame grabbers are generated per fleet printer by `3d ha vision` (lib/ha_vision.py).
+GENERATED = Path(__file__).resolve().parents[1] / "packages" / "printer_vision.yaml"
 SCRIPT = "script.printer_send_notification"
 PRINTERS = {"u1", "k1_se"}
 
@@ -27,6 +29,13 @@ def _package() -> dict[str, Any]:
     data = yaml.safe_load(PACKAGE.read_text(encoding="utf-8"))
     assert isinstance(data, dict)
     return data
+
+
+class _Loader(yaml.SafeLoader):
+    """SafeLoader that reads HA's `!secret` tags as plain strings."""
+
+
+_Loader.add_multi_constructor("!", lambda loader, suffix, node: loader.construct_scalar(node))
 
 
 def _calls(steps: Any) -> Iterator[dict[str, Any]]:
@@ -46,7 +55,7 @@ def _grabbers() -> dict[str, str]:
     """unique_id -> shell command of each command_line frame grabber."""
     return {
         s["sensor"]["unique_id"]: s["sensor"]["command"]
-        for s in _package()["command_line"]
+        for s in yaml.load(GENERATED.read_text(encoding="utf-8"), Loader=_Loader)["command_line"]  # noqa: S506
         if s["sensor"]["unique_id"].endswith("_alert_snapshot")
     }
 
@@ -92,8 +101,9 @@ def test_offline_alert_maps_every_trigger_to_its_own_printer() -> None:
 def test_every_printer_has_a_grabber_the_script_finds() -> None:
     script = _package()["script"]["printer_send_notification"]
     grabber = script["sequence"][0]["variables"]["grabber"]
-    assert "'sensor.printer_' ~ printer ~ '_alert_snapshot'" in grabber
-    assert set(_grabbers()) == {f"printer_{p}_alert_snapshot" for p in PRINTERS}
+    assert "'sensor.printer_' ~ (printer | default('')) ~ '_alert_snapshot'" in grabber
+    # one grabber per fleet printer with a camera; the hand-written alerts only name printers that have one
+    assert {f"printer_{p}_alert_snapshot" for p in PRINTERS} <= set(_grabbers())
 
 
 def test_script_attaches_only_a_file_written_by_this_run() -> None:
