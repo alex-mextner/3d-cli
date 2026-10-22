@@ -31,7 +31,7 @@ from __future__ import annotations
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 LIB = Path(__file__).resolve().parent
 if str(LIB) not in sys.path:
@@ -91,6 +91,10 @@ class DetachWatch:
         footprint prisms bed..z; `bed`: the build plate area at this Z; `exclude`: toolhead
         volume (all full-res uint8). -> a Finding while the condition holds."""
         gap = self.last_gap = self.measure(bgr, z, wall, body, bed, exclude)
+        return self.judge(gap, z)
+
+    def judge(self, gap: float | None, z: float | None, *, low_confidence: bool = False) -> list[Finding]:
+        """The persistence rules on one measurement (`None` = abstained)."""
         if gap is None:
             self.streak = self.crit_streak = 0
             return []
@@ -105,7 +109,7 @@ class DetachWatch:
         self.crit_streak = self.crit_streak + 1 if rise >= prm.gap_crit else 0
         if self.streak < prm.persist:
             return []
-        level = CRITICAL if self.crit_streak >= prm.persist_crit else WARNING
+        level = CRITICAL if self.crit_streak >= prm.persist_crit and not low_confidence else WARNING
         why = (
             f"{smooth * 100:.0f}% of the part's volume shows bare build plate"
             if absolute
@@ -117,13 +121,15 @@ class DetachWatch:
                 "vision_part_detached",
                 level,
                 f"the printed part looks detached from the plate: {why} "
-                "(peeled/warped corner, lifted or knocked off?); look at the frame and pause "
-                "if it is real",
+                "(peeled/warped corner, lifted or knocked off?)"
+                + (" [uncalibrated check, low confidence]" if low_confidence else "")
+                + "; look at the frame and pause if it is real",
                 {
                     "gap": round(smooth, 3),
                     "baseline": round(self.base, 3),
                     "rise": round(rise, 3),
-                    "z": round(z, 2),
+                    **({"z": round(z, 2)} if z is not None else {}),
+                    **({"confidence": "low"} if low_confidence else {}),
                 },
             )
         ]
@@ -144,15 +150,8 @@ class DetachWatch:
         prm = self.params
         if z < prm.min_z:
             return None
-        h, w = bgr.shape[:2]
-        small = cv2.resize(
-            bgr, (WIDTH, round(h * WIDTH / w)), interpolation=cv2.INTER_AREA
-        )
-        lab = cv2.cvtColor(cv2.GaussianBlur(small, (5, 5), 0), cv2.COLOR_BGR2LAB)
-        light = lab[..., 0].astype(np.float32) * 100.0 / 255.0
-        ab = lab[..., 1:].astype(np.float32) - 128.0
-        chroma = np.hypot(ab[..., 0], ab[..., 1])
-        shape = small.shape[:2]
+        light, ab, chroma = _planes(bgr)
+        shape = light.shape
 
         def shrink(mask: np.ndarray) -> np.ndarray:
             return cv2.resize(mask, (shape[1], shape[0]), interpolation=cv2.INTER_NEAREST) > 0
@@ -169,12 +168,115 @@ class DetachWatch:
         ref = shrink(bed) & ~outer & free & (light >= MIN_LIGHT * 2)
         if ref.sum() < prm.min_ref_share * px:
             return None
-        plate = np.median(ab[ref], axis=0)
-        plate_c = float(np.hypot(*plate))
-        if plate_c < prm.min_chroma:
+        is_plate = _plate_map(light, ab, chroma, ref, prm)
+        if is_plate is None:
             return None
-        tol = max(prm.tol_floor, prm.tol_ratio * plate_c)
-        near = np.hypot(*(ab - plate).transpose(2, 0, 1)) <= tol
-        # same hue and a real share of the plate's saturation: grey shadow and white parts out
-        is_plate = near & (chroma >= 0.5 * plate_c) & (light >= MIN_LIGHT)
         return float(is_plate[inner].sum()) / float(inner.sum())
+
+
+def _planes(bgr: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """(lightness 0..100, (a, b) offsets from grey, chroma) at the working resolution."""
+    import cv2
+    import numpy as np
+
+    h, w = bgr.shape[:2]
+    small = cv2.resize(bgr, (WIDTH, round(h * WIDTH / w)), interpolation=cv2.INTER_AREA)
+    lab = cv2.cvtColor(cv2.GaussianBlur(small, (5, 5), 0), cv2.COLOR_BGR2LAB)
+    light = lab[..., 0].astype(np.float32) * 100.0 / 255.0
+    ab = lab[..., 1:].astype(np.float32) - 128.0
+    return light, ab, np.hypot(ab[..., 0], ab[..., 1])
+
+
+def _plate_map(
+    light: np.ndarray, ab: np.ndarray, chroma: np.ndarray, ref: np.ndarray, prm: DetachParams
+) -> np.ndarray | None:
+    """Pixels that have the plate's colour, the plate colour being the median over the `ref`
+    pixels; None when that plate is too grey to be told from the part."""
+    import numpy as np
+
+    plate = np.median(ab[ref], axis=0)
+    plate_c = float(np.hypot(*plate))
+    if plate_c < prm.min_chroma:
+        return None
+    tol = max(prm.tol_floor, prm.tol_ratio * plate_c)
+    near = np.hypot(*(ab - plate).transpose(2, 0, 1)) <= tol
+    # same hue and a real share of the plate's saturation: grey shadow and white parts out
+    return near & (chroma >= 0.5 * plate_c) & (light >= MIN_LIGHT)  # type: ignore[no-any-return]
+
+
+@dataclass
+class FixedBedDetach:
+    """UNCALIBRATED fallback of the same idea, for a printer whose camera and bed do not move
+    against each other (a gantry-moves-Z printer such as the Creality K1 SE: the plate sits at
+    the same pixels at every Z) and that has no camera calibration, so no footprint prism.
+
+    The footprint is LEARNT instead: a few frames `baseline_gap_s` apart at the start of the
+    print; what is not plate colour inside `roi` in ALL of them is the part (the moving
+    toolhead is not in all of them). From then on `gap` is the share of that baseline that
+    shows bare plate; a part that peeled, shifted or was knocked off leaves plate where it was.
+    Same persistence rules, always `low_confidence` (warning, never critical).
+
+    UNVALIDATED on a real failure: there is no K1 frame of a detached part, only synthetic
+    ones (tests/test_vision_detach.py). It is therefore opt-in (`watch.vision.fixed_bed`)."""
+
+    roi: list[tuple[float, float]]  # the plate in the picture, normalised 0..1
+    params: DetachParams = field(default_factory=DetachParams)
+    baseline_frames: int = 6
+    baseline_gap_s: float = 20.0
+    judge: DetachWatch = field(init=False)
+    part: Any = None  # bool array at the working resolution once the baseline is learnt
+    _seen: list[Any] = field(default_factory=list)
+    _last_t: float = float("-inf")
+    last_gap: float | None = None
+
+    def __post_init__(self) -> None:
+        self.judge = DetachWatch(self.params)
+
+    def reset(self) -> None:
+        self.judge.reset()
+        self.part = None
+        self._seen = []
+        self._last_t = float("-inf")
+        self.last_gap = None
+
+    def update(self, bgr: np.ndarray, now: float) -> list[Finding]:
+        import cv2
+        import numpy as np
+
+        prm = self.params
+        light, ab, chroma = _planes(bgr)
+        shape = light.shape
+        roi = np.zeros(shape, np.uint8)
+        pts = np.array([[x * shape[1], y * shape[0]] for x, y in self.roi], np.int32)
+        cv2.fillPoly(roi, [pts], 1)
+        inside = roi > 0
+        learning = self.part is None
+        if learning and now - self._last_t < self.baseline_gap_s:
+            return []
+        px = float(shape[0] * shape[1])
+        k = max(3, round(ERODE_PX_1920 * WIDTH / 1920)) | 1
+        ref = inside & (light >= MIN_LIGHT * 2)
+        if self.part is not None:
+            grown = cv2.dilate(self.part.astype(np.uint8), np.ones((3 * k, 3 * k), np.uint8)) > 0
+            ref = ref & ~grown
+        if ref.sum() < prm.min_ref_share * px:
+            return []
+        is_plate = _plate_map(light, ab, chroma, ref, prm)
+        if is_plate is None:
+            self.last_gap = None
+            return self.judge.judge(None, None, low_confidence=True)
+        if learning:
+            self._last_t = now
+            self._seen.append(inside & ~is_plate & (light >= MIN_LIGHT))
+            if len(self._seen) < self.baseline_frames:
+                return []
+            part = np.logical_and.reduce(self._seen)
+            part = cv2.erode(part.astype(np.uint8), np.ones((k, k), np.uint8)) > 0
+            self._seen = []
+            if part.sum() < prm.min_body_share * px:  # nothing printed yet: learn again later
+                return []
+            self.part = part
+            return []
+        gap = float(is_plate[self.part].sum()) / float(self.part.sum())
+        self.last_gap = gap
+        return self.judge.judge(gap, None, low_confidence=True)

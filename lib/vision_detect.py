@@ -245,7 +245,9 @@ class FrameScorer:
         ignore: list[list[tuple[float, float]]] | None = None,
         geometry: PrintGeometry | None = None,
         model: Any = None,
+        fixed_bed: Any = None,
     ) -> None:
+        self.fixed_bed = fixed_bed  # vision_detach.FixedBedDetach: uncalibrated part-detached check
         self.detector = detector
         self.verifier = verifier
         self.ignore = ignore or []
@@ -261,6 +263,8 @@ class FrameScorer:
             self.geometry.reset_print()
         if self.model is not None:
             self.model.reset_print()
+        if self.fixed_bed is not None:
+            self.fixed_bed.reset()
 
     def _allowed(self, b: Box) -> bool:
         cx, cy = (b.x1 + b.x2) / 2, (b.y1 + b.y2) / 2
@@ -280,6 +284,10 @@ class FrameScorer:
             else:
                 now = time.time() if self.now is None else self.now
                 self.roi, findings = self.geometry.update(bgr, self.context, now)
+        if self.fixed_bed is not None:
+            findings = findings + self.fixed_bed.update(
+                bgr, time.time() if self.now is None else self.now
+            )
         s = self.detector.score_bgr(bgr)
         kept = [b for b in s.boxes if self._allowed(b)]
         if self.model is not None:
@@ -545,6 +553,37 @@ def geometry_params(setting: Any) -> GeometryParams:
         ) from exc
 
 
+def fixed_bed_detach(setting: Any, bed_roi: Any) -> Any:
+    """`watch.vision.fixed_bed` (off unless set): the uncalibrated part-detached fallback for a
+    printer whose camera and bed do not move against each other. `true` or a mapping
+    {roi: [[x, y], ...], baseline_frames, baseline_gap_s}; the plate polygon (normalised) defaults to
+    the printer's `watch.bed.roi`."""
+    from errors import UsageError
+    from vision_detach import FixedBedDetach
+
+    if setting in (None, False):
+        return None
+    opts = {} if setting is True else setting
+    if not isinstance(opts, dict) or set(opts) - {"roi", "baseline_frames", "baseline_gap_s"}:
+        raise UsageError(
+            "watch.vision.fixed_bed must be true or a mapping of roi, baseline_frames, baseline_gap_s",
+            command="printer vision",
+        )
+    roi = opts.get("roi", bed_roi)
+    try:
+        poly = [(float(x), float(y)) for x, y in roi or []]
+    except (TypeError, ValueError) as exc:
+        raise UsageError(f"watch.vision.fixed_bed.roi must be [x, y] pairs (0..1): {exc}", command="printer vision") from exc
+    if len(poly) < 3 or not all(0.0 <= v <= 1.0 for pt in poly for v in pt):
+        raise UsageError(
+            "watch.vision.fixed_bed needs a plate polygon of >= 3 points in 0..1: set "
+            "fixed_bed.roi or the printer's watch.bed.roi",
+            command="printer vision",
+        )
+    extra = {k: opts[k] for k in ("baseline_frames", "baseline_gap_s") if k in opts}
+    return FixedBedDetach(poly, **extra)
+
+
 def build_scorer(
     cfg: dict[str, Any],
     *,
@@ -553,6 +592,7 @@ def build_scorer(
     scene: bool = False,
     detach: bool = True,
     model: bool | None = False,
+    bed_roi: Any = None,
 ) -> FrameScorer:
     """The per-frame pipeline from a device's `watch: vision:` settings: `verify: false` turns
     stage 2 off, `ignore:` lists polygons (normalised [x, y] points) whose boxes are dropped,
@@ -611,12 +651,19 @@ def build_scorer(
             command="printer vision",
             remediation=["Drop --scene, or see docs/research/printer-vision-geometry.md."],
         )
+    fixed_bed = (
+        fixed_bed_detach(cfg.get("fixed_bed"), bed_roi)
+        if geometry is None and detach
+        else None
+    )
     tier_b = None
     if model is not False:
         from vision_model import build_tier
 
         tier_b = build_tier(cfg.get("model"), flag=model)
-    return FrameScorer(ObicoScorer(ensure_model()), verifier, polys, geometry, tier_b)
+    return FrameScorer(
+        ObicoScorer(ensure_model()), verifier, polys, geometry, tier_b, fixed_bed
+    )
 
 
 def _calibration(device: Any, args: argparse.Namespace) -> Any:
@@ -653,6 +700,7 @@ def run_live(args: argparse.Namespace) -> int:
         scene=args.scene,
         detach=not args.no_detach,
         model=args.model,
+        bed_roi=((getattr(device, "watch", None) or {}).get("bed") or {}).get("roi"),
     )
     context_tap = (
         ContextTap(device.host, device.port) if scorer.geometry else None
@@ -738,6 +786,9 @@ def run_live(args: argparse.Namespace) -> int:
                     findings=[f.kind for f in score.findings],
                 )
             detach = scorer.geometry.detach if scorer.geometry is not None else None
+            if detach is None and scorer.fixed_bed is not None:
+                detach = scorer.fixed_bed.judge
+                detach.last_gap = scorer.fixed_bed.last_gap
             if detach is not None:
                 # one frame cannot satisfy the persistence rule, so --once reports the raw reading
                 gap = detach.last_gap
@@ -801,7 +852,8 @@ def run_guard(args: argparse.Namespace) -> int:
         raise UsageError("guard requires the CLIP verifier; watch.vision.verify is disabled", command="printer guard")
     camera_args = argparse.Namespace(snapshot=None, no_keepalive=False, no_geometry=False)
     camera = _device_camera(device, camera_args)
-    scorer = build_scorer(cfg, camera=_calibration(device, camera_args))
+    # guard pauses on confirmed spaghetti only: no detached-part check is built for it
+    scorer = build_scorer(cfg, camera=_calibration(device, camera_args), detach=False)
     if scorer.verifier is None:
         raise UsageError("guard requires a loaded CLIP verifier", command="printer guard")
     score_errors = _frame_score_errors()

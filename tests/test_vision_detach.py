@@ -193,3 +193,65 @@ def test_the_toolhead_and_roi_assumptions_are_per_printer_settings(scene: _Scene
     small = PrintGeometry(cam, params=GeometryParams(half_mm=10.0)).masks(ctx, shape)["head"]
     big = PrintGeometry(cam, params=GeometryParams(half_mm=60.0)).masks(ctx, shape)["head"]
     assert int((big > 0).sum()) > int((small > 0).sum()) > 0
+
+
+# ---- the uncalibrated fallback (FixedBedDetach), synthetic only ------------------------------
+
+PLATE = (40, 110, 190)  # BGR: an orange-ish PEI plate
+PART = (225, 225, 225)  # a white part
+ROI = [(0.05, 0.3), (0.95, 0.3), (0.95, 0.95), (0.05, 0.95)]
+
+
+def _bed(part_rows: tuple[int, int] = (200, 300), head: tuple[int, int] | None = None) -> np.ndarray:
+    img = np.full((360, 640, 3), PLATE, np.uint8)
+    img[part_rows[0] : part_rows[1], 200:420] = PART
+    if head is not None:  # the toolhead, a dark block that is never twice in the same place
+        img[120:260, head[0] : head[1]] = (50, 50, 50)
+    return img
+
+
+
+
+def _run_fixed(frames: list[np.ndarray], step: float = 20.0) -> list[list[tuple[str, str]]]:
+    from vision_detach import FixedBedDetach
+
+    watch = FixedBedDetach(ROI)
+    return [[(f.kind, f.severity) for f in watch.update(img, i * step)] for i, img in enumerate(frames)]
+
+
+def _learn_frames() -> list[np.ndarray]:
+    return [_bed(head=(40 + 90 * i, 120 + 90 * i)) for i in range(6)]  # the head walks across the bed
+
+
+def test_the_fixed_bed_fallback_learns_the_part_and_ignores_the_moving_head() -> None:
+    out = _run_fixed(_learn_frames() + [_bed(head=(500, 600))] * 20)
+    assert all(o == [] for o in out)
+
+
+def test_the_fixed_bed_fallback_flags_a_part_that_left_its_place_as_low_confidence() -> None:
+    lifted = _bed(part_rows=(150, 215))  # the part shifted up: most of its old place is plate
+    out = _run_fixed(_learn_frames() + [_bed()] * 5 + [lifted] * 25)
+    kinds = [o for o in out if o]
+    assert kinds, "a part that vanished from its place was not reported"
+    assert set(kinds[0]) == {("vision_part_detached", "warning")}
+    assert all(sev == "warning" for batch in kinds for _, sev in batch)  # never critical: low confidence
+
+
+def test_the_fixed_bed_fallback_abstains_on_a_grey_plate() -> None:
+    grey = np.full((360, 640, 3), 120, np.uint8)
+    grey[200:300, 200:420] = PART
+    assert _run_fixed([grey] * 40) == [[]] * 40
+
+
+def test_the_fixed_bed_setting_needs_a_plate_polygon_and_is_off_by_default() -> None:
+    from errors import UsageError
+    from vision_detect import fixed_bed_detach
+
+    assert fixed_bed_detach(None, ROI) is None and fixed_bed_detach(False, ROI) is None
+    assert fixed_bed_detach(True, [[0.1, 0.3], [0.9, 0.3], [0.9, 0.9]]) is not None  # the bed's roi
+    with pytest.raises(UsageError):
+        fixed_bed_detach(True, None)
+    with pytest.raises(UsageError):
+        fixed_bed_detach({"roi": [[2, 2], [3, 3], [4, 4]]}, None)
+    with pytest.raises(UsageError):
+        fixed_bed_detach({"nope": 1}, ROI)
