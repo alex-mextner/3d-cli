@@ -156,7 +156,17 @@ pauses with `3d printer pause` if that command exists and calls the user with `t
   every live subscriber of the printer and kills the tmux session; with no live subscriber it
   exits 1 and the agent stays.
 - `3d printer agent list [--json]` — each agent: tmux session, running, live omp pid, started,
-  last alert, last error, handoff asked. `3d printer agent stop PRINTER` kills it.
+  last alert, last error, handoff asked, the attach command. `3d printer agent stop PRINTER` kills it.
+- Isolation: the tmux server is `3d-printer-agent` only for the real user's default state dir
+  (`~/.local/state/3d-cli`, the passwd home — not `$HOME`). Any other state dir — a custom
+  `XDG_STATE_HOME`, a test's tmp `HOME` — gets its own server `3d-printer-agent-<hash of the
+  state dir>`, so its `3d-printer-agent-PRINTER` sessions never share the production agents'
+  server (`3d printer agent list` prints the attach command). Under pytest (`PYTEST_CURRENT_TEST`
+  set, or `HOME`/the state dir in a `pytest-of-*` tmp dir) the real tmux is refused outright and
+  the alert goes on to the fallback; a test that wants the spawn path sets
+  `THREED_TEST_REAL_PRINTER_AGENT=1` with fake `tmux`/`omp` on `PATH`, and even then the
+  production state dir (so the `3d-printer-agent` server) is refused
+  ([#399](https://github.com/alex-mextner/3d-cli/issues/399)).
 
 ```bash
 3d printer agent list

@@ -12,7 +12,7 @@ import pytest
 
 from printer_fakes import FakeMoonraker, u1_status
 
-from .workflow_helper import run_cli
+from .workflow_helper import agent_spawns, run_cli
 
 pytest.importorskip("numpy")
 pytest.importorskip("cv2")
@@ -145,3 +145,5 @@ def test_watch_runs_the_bed_monitor_and_emits_its_events(tmp_path: Path) -> None
     assert "bed monitor: u1" in watch.stderr
     hb = json.loads((tmp_path / "hb.json").read_text(encoding="utf-8"))
     assert hb["printers"]["u1"]["bed"]["bed"] == "clear"
+    # #399: this run once started a real omp agent as 3d-printer-agent-u1 on the production tmux server
+    assert agent_spawns(tmp_path) == [], watch.stderr[-2000:]

@@ -3,7 +3,7 @@
 WHAT: `PrinterAgentSink` (LAST_RESORT stage of the watch Dispatcher) gets the warning+ events
   that no live agent (a `--steer` target or a `3d printer subscribe` session) took. Per printer
   it keeps ONE interactive omp session running in tmux:
-      [systemd-run --user --scope] tmux -L 3d-printer-agent new-session -d -s 3d-printer-agent-NAME \
+      [systemd-run --user --scope] tmux -L SOCKET new-session -d -s 3d-printer-agent-NAME \
           -c <state>/printer-agents/NAME \
           -- omp --append-system-prompt <dir>/role.md "<first alert>" @<frame>...
   The first alert is its opening message; later alerts reach it through `tg-ctl omp-live send`
@@ -12,6 +12,10 @@ WHAT: `PrinterAgentSink` (LAST_RESORT stage of the watch Dispatcher) gets the wa
   live session subscribes to every kind of that printer at warning or lower: it is then asked to run
   `3d printer agent handoff NAME --summary ...`, which forwards the summary to the subscriber
   and kills the tmux session.
+  SOCKET is `3d-printer-agent` for the real user's default state dir; any other state dir (a
+  test HOME, a custom XDG_STATE_HOME) gets its own `3d-printer-agent-<hash>` server, and under
+  pytest the real tmux is refused outright (spawn_refusal), so a test never touches or shadows
+  the production agents (#399).
 
 WHY: no alert may go straight to the user (a false U1 "noodle" alarm did), and no target
   session is guessed: without an explicit live subscriber, a dedicated agent judges first.
@@ -31,6 +35,7 @@ INVARIANTS: stdlib only; never raises into the watch loop (the sink records and 
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shlex
@@ -59,8 +64,14 @@ from printer_ops.watch_sinks import LAST_RESORT, OmpLive, Runner, Sink
 
 SESSION_PREFIX = "3d-printer-agent-"
 # Own tmux server: the user's tmux sessions never share it (nor its cgroup), and a watcher
-# restart cannot take them down. Attach with `tmux -L 3d-printer-agent attach -t ...`.
+# restart cannot take them down. Its name comes from tmux_socket(): the production state dir
+# keeps this plain name, any other state dir (a test HOME) gets its own server.
 TMUX_SOCKET = "3d-printer-agent"
+# A test that really wants the tmux/omp spawn path (with fake binaries on PATH) sets this to 1;
+# anything else under pytest is refused: a test-started omp agent once ran ~21 h on the
+# production socket under the production session name (#399).
+ALLOW_UNDER_TEST_ENV = "THREED_TEST_REAL_PRINTER_AGENT"
+_REAL_RUN = subprocess.run  # captured at import, so a later monkeypatch of subprocess.run is not mistaken for a fake
 AGENT_MIN_SEVERITY = WARNING
 START_EVERY_S = 600.0
 READY_TIMEOUT_S = 90.0
@@ -85,6 +96,52 @@ def agent_dir(printer: str) -> Path:
 def session_name(printer: str) -> str:
     # tmux rewrites `.` and `:` in session names, so `-t =NAME` would never match them
     return SESSION_PREFIX + printer.replace(".", "_").replace(":", "_")
+
+
+def _default_agents_root() -> Path | None:
+    """`printer-agents` under the real user's default state dir (the passwd home, not $HOME)."""
+    try:
+        import pwd
+
+        home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+    except (ImportError, KeyError):  # no passwd entry for this uid (some containers): no default install
+        return None
+    return home / ".local" / "state" / "3d-cli" / "printer-agents"
+
+
+def tmux_socket() -> str:
+    """The agents' tmux server (`tmux -L NAME`). The real user's default state dir keeps the plain
+    TMUX_SOCKET; any other state dir (a test HOME, a custom XDG_STATE_HOME) gets a server named
+    after it, so its sessions never collide with the production agents' same-named ones."""
+    root = agents_root().resolve()
+    default = _default_agents_root()
+    if default is not None and root == default.resolve():
+        return TMUX_SOCKET
+    return f"{TMUX_SOCKET}-{hashlib.sha256(str(root).encode()).hexdigest()[:10]}"
+
+
+def _under_pytest() -> str | None:
+    """How this process shows it runs under pytest, or None."""
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return "PYTEST_CURRENT_TEST is set"
+    for what, path in (("HOME", Path.home()), ("the state dir", agents_root())):
+        if any(part.startswith("pytest-of-") for part in path.parts):
+            return f"{what} {path} is a pytest tmp dir"
+    return None
+
+
+def spawn_refusal() -> str | None:
+    """Why the real tmux (and so a real omp agent) must not run here: under pytest, unless the
+    test set ALLOW_UNDER_TEST_ENV=1 — and even then never on the production tmux server. None
+    outside tests."""
+    why = _under_pytest()
+    if why is None:
+        return None
+    if os.environ.get(ALLOW_UNDER_TEST_ENV) != "1":
+        return why
+    if tmux_socket() == TMUX_SOCKET:
+        return f"{ALLOW_UNDER_TEST_ENV}=1, but the state dir is the production one ({agents_root()})"
+    return None
 
 
 def find_tool(name: str) -> str | None:
@@ -127,7 +184,7 @@ It forwards your summary to that session and ends this temporary session.
 
 
 def attach_hint(printer: str) -> str:
-    return f"tmux -L {TMUX_SOCKET} attach -t {session_name(printer)}"
+    return f"tmux -L {tmux_socket()} attach -t {session_name(printer)}"
 
 
 def config_note(cwd: Path) -> str:
@@ -187,8 +244,16 @@ class PrinterAgents:
         self.waiting: list[_Pending] = []
         self.scope = scope   # start the tmux server in its own systemd scope, outside the watcher unit
 
+    def _refuse_under_test(self) -> None:
+        """Raise before any real tmux/omp/omp-live call under pytest: an injected runner is a fake,
+        the default one spawns real processes on the user's machine."""
+        if self.runner is _REAL_RUN and (why := spawn_refusal()):
+            raise RuntimeError(f"refusing to run the real tmux/omp for the temporary printer agent under a test ({why}); "
+                               f"fake the runner, or set {ALLOW_UNDER_TEST_ENV}=1 with fake tmux/omp on PATH")
+
     # ---- tmux -----------------------------------------------------------------------------
     def _tmux(self, *args: str, scoped: bool = False) -> subprocess.CompletedProcess[str]:
+        self._refuse_under_test()
         tmux = self.tmux_bin or find_tool("tmux")
         if not tmux:
             raise RuntimeError("tmux not found: the temporary printer agent runs in a tmux session")
@@ -196,7 +261,7 @@ class PrinterAgents:
         systemd_run = find_tool("systemd-run") if scoped and self.scope else None
         if systemd_run:  # else a first server would live in (and die with) the watcher unit's cgroup
             prefix = [systemd_run, "--user", "--scope", "--quiet", "--collect"]
-        return self.runner([*prefix, tmux, "-L", TMUX_SOCKET, *args], text=True, capture_output=True, timeout=20)
+        return self.runner([*prefix, tmux, "-L", tmux_socket(), *args], text=True, capture_output=True, timeout=20)
 
     def running(self, printer: str) -> bool:
         try:
@@ -283,7 +348,8 @@ class PrinterAgents:
         """Hand `events` to the printer's agent, starting it if needed. -> what happened.
         A live agent gets them now; a starting one is awaited on a background thread, which
         calls `on_unreached(events)` if it never shows up. Raises RuntimeError when no agent
-        can take them at all (restart limit, tmux/omp missing)."""
+        can take them at all (restart limit, tmux/omp missing, a test without fakes)."""
+        self._refuse_under_test()
         d = agent_dir(printer)
         d.mkdir(parents=True, exist_ok=True)
         with (d / "events.jsonl").open("a", encoding="utf-8") as fh:
@@ -413,7 +479,9 @@ USAGE = """3d printer agent list [--json]
   (`3d printer subscribe --help`) go to it. It runs in tmux session 3d-printer-agent-PRINTER on
   its own tmux server (watch it: `tmux -L 3d-printer-agent attach -t 3d-printer-agent-u1`),
   cwd ~/.local/state/3d-cli/printer-agents/
-  PRINTER/ (role.md, events.jsonl, pane.log), started on the first such alert with
+  PRINTER/ (role.md, events.jsonl, pane.log). A state dir other than the default one (a custom
+  XDG_STATE_HOME, a test HOME) gets its own server 3d-printer-agent-<hash>: `list` prints the
+  attach command. Started on the first such alert with
       tmux -L 3d-printer-agent new-session -d -s 3d-printer-agent-PRINTER -c DIR -- omp --append-system-prompt
           DIR/role.md "<alert>" @FRAME
   at most once per 10 min per printer; it decides itself whether to message the user (tg).
@@ -447,7 +515,7 @@ def cmd_list(argv: list[str]) -> int:
         h = agents.host(p, hosts) if hosts is not None else None
         rows.append({"printer": p, "session": session_name(p), "running": agents.running(p),
                      "live": None if hosts is None else h is not None, "pid": h.get("pid") if h else None,
-                     "dir": str(agent_dir(p)), "state": state.get(p, {})})
+                     "dir": str(agent_dir(p)), "attach": attach_hint(p), "state": state.get(p, {})})
     if opts.get("--json"):
         print(json.dumps(rows, ensure_ascii=False, indent=1))
         return 0
@@ -463,6 +531,7 @@ def cmd_list(argv: list[str]) -> int:
         if st.get("last_error"):
             print(f"  last error: {st.get('last_error_ts')} {st['last_error']}")
         print(f"  dir: {r['dir']}")
+        print(f"  attach: {r['attach']}")
     return 0
 
 
@@ -524,4 +593,5 @@ def run(argv: list[str]) -> int:
                      remediation=["Use list, stop or handoff — see `3d printer agent --help`."])
 
 
-__all__ = ["USAGE", "PrinterAgentSink", "PrinterAgents", "agent_alert", "agent_dir", "find_tool", "run", "session_name"]
+__all__ = ["ALLOW_UNDER_TEST_ENV", "USAGE", "PrinterAgentSink", "PrinterAgents", "agent_alert", "agent_dir", "find_tool",
+           "run", "session_name", "spawn_refusal", "tmux_socket"]
