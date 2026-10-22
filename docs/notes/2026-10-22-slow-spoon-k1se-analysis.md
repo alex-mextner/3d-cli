@@ -14,16 +14,18 @@ Fix tracking: #471 (`3d retarget`).
 | 0.8–30.2 | Main sits in `wait` for 29 min: the user's first sight of progress. |
 | 30.2 | User: "everything was already sliced, only the supports needed a tweak". Main relays; slice #1 (~21 min of compute) is cancelled unfinished. |
 | 30–34 | Sub reads the 3MF properly: its orientation (as authored) is 220.6 x 210.2 x 68.6 mm on a 220 mm bed; a minimal tilt (11°, 209 x 209 x 117 mm) fixes it. Slice #2 starts at 34.1. |
-| 34–74.5 | Slice #2 runs ~40 min (output files at 18:44 UTC): 1,465 layers over 117 mm, 62 MB G-code, support 854 m of extrusion vs 305 m of outer wall, est. print 8 h 8 min. |
+| 34–74.5 | Slice #2 is launched at 34.1; its output files land at 18:44 UTC (~40 min later). Re-measured afterwards (`result.json` `sliced_time`), Orca slices this spoon in **26 s**; most of the 40 min was the job waiting on the shared heavy-run `flock`, not slicing. The slice itself: 1,465 layers over 117 mm, 62 MB G-code, support 854 m of extrusion vs 305 m of outer wall, est. print 8 h 8 min. |
 
-Where the 74.5 min went: slicing ~61 min (**82 %**, one ~21-min run thrown away); re-derivation,
-tooling friction and Main's own work ~13.5 min (18 %).
+Where the 74.5 min went: waiting for slicing jobs ~61 min (**82 %**, one ~21-min run thrown away; the Orca
+compute itself is ~26 s, the rest was queueing on the shared heavy-run `flock`); re-derivation, tooling
+friction and Main's own work ~13.5 min (18 %).
 
 ## Causes, ranked
 
-1. **The slicer run dominated, and the first one was the wrong job.** 1,465 layers (≈0.08 mm, like the
-   U1 project's `layer_height`) of a 117 mm tall tilt, with supports as long as the part itself. Slow on a loaded box (load average 13–20, `nice -n 10`,
-   `CPUQuota`) `[INFERENCE]`. Nothing estimated cost before launching, nothing flagged "20 min, one part".
+1. **Waiting on slicing jobs dominated, and the first one was the wrong job.** 1,465 layers (≈0.08 mm, like the
+   U1 project's `layer_height`) of a 117 mm tall tilt, with supports as long as the part itself. The Orca run
+   itself measures 26 s (`result.json` `sliced_time`); the ~40 min was the job queued behind the shared
+   heavy-run `flock` on a loaded box (load average 13–20). Nothing flagged "one part, queued behind other jobs".
 2. **The premise "just retune supports" was half wrong and nobody could see it in < 1 s.** The U1 project
    places a 299 mm spoon diagonally on a 270 mm bed; on the 220 mm K1 SE it needs a small tilt. No command
    answers "does this 3MF fit bed B?" — `3d retarget` (added in #471) does in 0.5 s (`does not fit … 215.5 x 215.3 mm

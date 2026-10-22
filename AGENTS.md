@@ -193,7 +193,8 @@ walls and infill. Do not re-derive them from the STL. The fast path, in order:
 
 A single-part reprint on a known printer is a fast-path job: no multi-angle renders, no
 worktree-per-experiment, no per-task slicing script; the G-code gates are the verification.
-Slicing is slow when `layer_height` is 0.08 with tall tree supports: pass `--process` for a
+A 0.08 mm `layer_height` with tall tree supports makes a big G-code (1,465 layers, 62 MB; the Orca run
+itself is ~26 s, so a long wall time means the job sat behind the shared heavy-run lock): pass `--process` for a
 0.20 mm preset of the target printer unless the part needs finer layers. See
 `docs/notes/2026-10-22-slow-spoon-k1se-analysis.md`.
 
