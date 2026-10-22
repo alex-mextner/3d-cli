@@ -87,7 +87,8 @@ def safe_filename(filename: str) -> str:
     return "/".join(quote(p, safe="") for p in parts)
 
 
-def enrich(status: dict, index: GCodeIndex | None, *, stale=False, index_state="unavailable", now=None) -> dict:
+def enrich(status: dict, index: GCodeIndex | None, *, stale=False, index_state="unavailable", now=None,
+           printer_id="u1") -> dict:
     """Pure projection, also used to test pause/offline/completed/buffered states."""
     now = time.time() if now is None else now
     ps = status.get("print_stats") or {}
@@ -167,7 +168,7 @@ def enrich(status: dict, index: GCodeIndex | None, *, stale=False, index_state="
     if index and size not in (None, 0, index.size):
         warnings.append("Runtime file size differs from indexed file; cursor interpretation disabled")
     return {
-        "schema_version": 1, "printer_id": "u1", "observed_at": now, "stale": stale,
+        "schema_version": 1, "printer_id": printer_id, "observed_at": now, "stale": stale,
         "state": state, "state_label": STATES.get(state, "Недоступно"),
         "operation": {"label": label, "source": source, "estimated": estimate, "note": note},
         "layer": layer, "total_layers": total, "gcode_layer": cursor.layer if cursor else None,
@@ -188,7 +189,8 @@ class NoRedirect(HTTPRedirectHandler):
 
 
 class Inspector:
-    def __init__(self, printer_url: str, interval: float = 2.0, ghosts=None):
+    def __init__(self, printer_url: str, interval: float = 2.0, ghosts=None, printer_id: str = "u1"):
+        self.printer_id = printer_id
         origin = urlsplit(printer_url)
         if origin.scheme not in ("http", "https") or not origin.hostname or origin.username or origin.password:
             raise ValueError("Inspector requires a fixed HTTP(S) printer origin without credentials")
@@ -313,7 +315,7 @@ class Inspector:
     def snapshot(self):
         with self.lock:
             data = enrich(self.status, self.index, stale=time.time() - self.updated > 12,
-                          index_state=self.index_state, now=self.updated or time.time())
+                          index_state=self.index_state, now=self.updated or time.time(), printer_id=self.printer_id)
             data["age_seconds"] = round(time.time() - self.updated, 1) if self.updated else None
             data["index_error"] = self.index_error
             data["recent_events"] = copy.deepcopy(self.events[-8:])

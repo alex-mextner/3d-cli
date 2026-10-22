@@ -661,6 +661,11 @@ def bundled_calibration(model: str) -> CameraModel | None:
     return read_camera(_BUILTIN_DIR / name) if name else None
 
 
+def has_bundled_calibration(model: str) -> bool:
+    """Whether 3d-cli ships a camera calibration for this printer model (no file is read)."""
+    return _model_key(model) in _BUNDLED
+
+
 def read_camera(path: pathlib.Path) -> CameraModel:
     import yaml
 

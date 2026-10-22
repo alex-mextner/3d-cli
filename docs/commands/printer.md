@@ -515,7 +515,12 @@ until someone takes them off. The camera can see that, so nobody has to tell an 
   edge is in view (about 2 % of the frame), so the plate verdict rests on that strip and the
   reason says how much of the bed the camera sees; the U1's own `DETECT_BED_PLATE` still checks
   the plate at start. Below 2 % of the frame the surface counts as out of view (plate `unknown`,
-  the bed check WARNs).
+  the bed check WARNs). These pixel limits are the defaults tuned on the U1 and K1 SE frames;
+  `watch.bed.thresholds: {clear_max: 0.05, level: 30, ...}` overrides any of them for one printer
+  (`level`, `detrend_px`, `edge_px`, `clear_blob_px`, `clear_max`, `occupied_blob_px`,
+  `occupied_min`, `plate_missing_min`, `plate_tie`, `surface_min`, `change_min`, `settle_frames`,
+  `match_px`, `view_min`). The camera is the printer's `watch.vision.camera`; enabling the bed check
+  on a printer without one is refused when the config is read.
 - **Monitor.** `3d printer watch` runs `bed monitor NAME` as a child for every Moonraker printer
   with `watch.bed.enabled: true`. Nothing is grabbed while a job runs; otherwise one snapshot per
   `interval_s` (1 s), identical bytes skipped, one reduced decode + one masked difference per new

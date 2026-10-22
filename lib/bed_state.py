@@ -54,7 +54,7 @@ import sys
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -120,6 +120,11 @@ class Thresholds:
 
 
 TH = Thresholds()
+
+
+def thresholds_for(cfg: BedConfig) -> Thresholds:
+    """The thresholds of one printer: the tuned defaults with its `watch.bed.thresholds` applied."""
+    return replace(TH, **{k: type(getattr(TH, k))(v) for k, v in cfg.thresholds})
 
 
 # ---- pixels ---------------------------------------------------------------------------------
@@ -342,7 +347,7 @@ class ZMatch:
 
 
 def z_match(device: Device, cfg: BedConfig) -> ZMatch:
-    return ZMatch(cfg.z_tol_mm, camera_model(device, cfg), cfg.volume_height_mm)
+    return ZMatch(cfg.z_tol_mm, camera_model(device, cfg), cfg.volume_height_mm, thresholds_for(cfg).match_px)
 
 
 def out_of_view(match: ZMatch, z: float | None, th: Thresholds = TH) -> str | None:
@@ -710,12 +715,13 @@ def run_monitor(device: Device, cfg: BedConfig, **kw: Any) -> Monitor:
 
 def _run_monitor(device: Device, cfg: BedConfig, *, duration: float | None = None, out: Any = sys.stdout,
                 camera: Any = None, printer_fn: Callable[[Device], tuple[str, float | None]] = read_printer,
-                ack_fn: Callable[..., tuple[bool, str]] = clear_ack, th: Thresholds = TH,
+                ack_fn: Callable[..., tuple[bool, str]] = clear_ack, th: Thresholds | None = None,
                 clock: Callable[[], float] = time.time, sleep: Callable[[float], None] = time.sleep,
                 busy_interval: float = 10.0) -> Monitor:
     from printer_ops.base import PrinterCommError
 
     name = device.name
+    th = thresholds_for(cfg) if th is None else th
     camera = camera if camera is not None else camera_for(device)
     store = RefStore(name)
     prev = read_state(name) or {}
@@ -820,10 +826,11 @@ FROZEN_CHECK_S = 6.0  # one_shot waits this long for a new frame (the U1 rewrite
 
 def one_shot(device: Device, cfg: BedConfig, *, max_age: float | None, camera: Any = None,
              printer_fn: Callable[[Device], tuple[str, float | None]] = read_printer,
-             th: Thresholds = TH, now: float | None = None,
+             th: Thresholds | None = None, now: float | None = None,
              sleep: Callable[[float], None] = time.sleep) -> dict[str, Any]:
     """The bed now: the monitor's last verdict when it is fresher than `max_age` at this Z,
     else one fresh camera frame classified here (never written to the monitor's state)."""
+    th = thresholds_for(cfg) if th is None else th
     now = time.time() if now is None else now
     state, z = printer_fn(device)
     if state in ACTIVE:
@@ -888,12 +895,12 @@ def capture_reference(device: Device, cfg: BedConfig, *, plate: bool, camera: An
         jpeg = grab(camera if camera is not None else camera_for(device))
     assert z is not None
     match = z_match(device, cfg)
-    hidden = out_of_view(match, z)
+    hidden = out_of_view(match, z, thresholds_for(cfg))
     if hidden is not None:  # a reference there would read every low part as a clear bed
         raise UsageError(f"{device.name}: {hidden}; a reference there cannot show parts on the bed",
                          command="printer bed",
-                         remediation=["Capture with the bed where the camera sees it (the U1 rests at Z 200 after a "
-                                      "job and at Z 10 after a G28)."])
+                         remediation=["Capture with the bed at a Z where the camera sees it: the Z the printer rests at "
+                                      "after a job or a home (`3d printer bed reference NAME` lists the references)."])
     try:
         img = decode_small(jpeg)
     except ValueError as exc:
@@ -978,6 +985,11 @@ Config (fleet/printers.yaml or printer-devices.yaml, `<name>.watch.bed`):
                            camera calibration, else the whole frame
   interval_s, stale_s, volume_height_mm
   z_tol_mm                 reference Z tolerance for a watch.bed.roi (uncalibrated) camera
+  thresholds: {clear_max: 0.05, level: 30}   per-printer overrides of the tuned pixel thresholds
+                           (level, detrend_px, edge_px, clear_blob_px, clear_max, occupied_blob_px,
+                           occupied_min, plate_missing_min, plate_tie, surface_min, change_min,
+                           settle_frames, match_px, view_min)
+  The camera is the printer's watch.vision.camera (a printer without one cannot enable the bed check).
   clear_ack: {enabled: true, command: STEPPER_BUZZ STEPPER=stepper_z, debounce_minutes: 10,
               min_z_mm: 10}   one motor sound after bed_clear (the command must be in
                            trusted_macros; only while the printer is idle/complete/cancelled)
@@ -1025,6 +1037,8 @@ def main(argv: list[str]) -> int:
                          remediation=["See `3d printer bed --help`."])
     device = get_device(args.name)
     cfg = bed_config(device)
+    if args.sub in ("monitor", "status") or (args.sub == "reference" and args.capture and not args.from_file):
+        camera_for(device)  # a printer without a camera is refused here, before any printer request
     if args.sub == "monitor":
         run_monitor(device, cfg, duration=args.duration)
         return 0

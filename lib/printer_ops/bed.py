@@ -58,7 +58,11 @@ KINDS = ("bed_clear", "bed_occupied", "plate_present", "plate_missing", "bed_unk
 # Printer states in which the bed may be judged and acknowledged (base.py normalized states).
 QUIET_STATES = ("idle", "complete", "cancelled")
 
-BED_KEYS = ("enabled", "interval_s", "roi", "volume_height_mm", "z_tol_mm", "stale_s", "clear_ack")
+BED_KEYS = ("enabled", "interval_s", "roi", "volume_height_mm", "z_tol_mm", "stale_s", "clear_ack", "thresholds")
+# The per-printer overrides of bed_state.Thresholds (tuned on the U1 and K1 SE frames of tests/data/bed;
+# another camera may need other values): every field of that dataclass, a test keeps the two in step.
+THRESHOLD_KEYS = ("level", "detrend_px", "edge_px", "clear_blob_px", "clear_max", "occupied_blob_px", "occupied_min",
+                  "plate_missing_min", "plate_tie", "surface_min", "change_min", "settle_frames", "match_px", "view_min")
 ACK_KEYS = ("enabled", "command", "debounce_minutes", "min_z_mm")
 
 
@@ -84,6 +88,7 @@ class BedConfig:
     z_tol_mm: float = 0.5                 # no camera calibration (roi): a reference is used only within this Z distance
     stale_s: float = 120.0                # the gate re-checks when the last verdict is older
     clear_ack: AckConfig | None = None
+    thresholds: tuple[tuple[str, float], ...] = ()  # overrides of bed_state.Thresholds fields (THRESHOLD_KEYS)
 
 
 def _num(value: Any, what: str, minimum: float) -> float:
@@ -97,6 +102,15 @@ def _flag(value: Any, what: str) -> bool:
     if not isinstance(value, bool):
         raise InvalidArgument(what, str(value), ["true", "false"], command="printer")
     return value
+
+
+def _thresholds(value: Any, what: str) -> tuple[tuple[str, float], ...]:
+    if not isinstance(value, dict):
+        raise InvalidArgument(what, str(value), [f"a mapping of {', '.join(THRESHOLD_KEYS)} to numbers"], command="printer")
+    unknown = sorted(set(value) - set(THRESHOLD_KEYS))
+    if unknown:
+        raise InvalidArgument(what, ", ".join(unknown), THRESHOLD_KEYS, command="printer")
+    return tuple((k, _num(v, f"{what}.{k}", 0)) for k, v in value.items())
 
 
 def _roi(value: Any, what: str) -> tuple[tuple[float, float], ...]:
@@ -154,7 +168,7 @@ def bed_config(device: Device) -> BedConfig:
     unknown = sorted(set(raw) - set(BED_KEYS))
     if unknown:
         raise InvalidArgument(where, ", ".join(unknown), BED_KEYS, command="printer", extra=f"Fix {device.source}.")
-    return BedConfig(
+    cfg = BedConfig(
         enabled=_flag(raw.get("enabled", False), f"{where}.enabled"),
         interval_s=_num(raw.get("interval_s", 1.0), f"{where}.interval_s", 0.2),
         roi=_roi(raw["roi"], f"{where}.roi") if "roi" in raw else None,
@@ -162,7 +176,16 @@ def bed_config(device: Device) -> BedConfig:
         z_tol_mm=_num(raw.get("z_tol_mm", 0.5), f"{where}.z_tol_mm", 0),
         stale_s=_num(raw.get("stale_s", 120.0), f"{where}.stale_s", 1),
         clear_ack=_ack(raw["clear_ack"], device) if "clear_ack" in raw else None,
+        thresholds=_thresholds(raw["thresholds"], f"{where}.thresholds") if "thresholds" in raw else (),
     )
+    if cfg.enabled:
+        from printer_ops.camera import camera_spec
+
+        spec = camera_spec(device)
+        if not spec.present:  # the monitor would fail on its first frame: say so when the config is read
+            raise InvalidArgument(f"{where}.enabled", "true", ["a printer with a camera (watch.vision.camera)"],
+                                  command="printer", extra=f"{device.name} has no camera ({spec.source}); fix {device.source}.")
+    return cfg
 
 
 # ---- files ----------------------------------------------------------------------------------

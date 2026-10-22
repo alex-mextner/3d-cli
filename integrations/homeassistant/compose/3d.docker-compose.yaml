@@ -36,6 +36,7 @@ services:
     networks:
       - ha-net
 
+# >>> 3d ha vision: compose-proxies (generated from fleet/printers.yaml; do not edit, run `3d ha vision --write`)
   u1-camera-proxy:
     # Preserve callbacks to HA after HA leaves the bridge network.
     extra_hosts:
@@ -51,6 +52,9 @@ services:
       - U1_CAMERA_START_MONITOR=true
       - U1_CAMERA_START_MONITOR_URL=http://192.168.0.26:7125/server/mqtt/publish
       - U1_CAMERA_START_MONITOR_INTERVAL=240
+      - U1_CAMERA_NAME=u1
+      - U1_GHOST_MODEL=Snapmaker U1
+      - U1_PRINTER_URL=http://192.168.0.26:7125
     volumes:
       - /usr/share/fonts:/usr/share/fonts:ro
       - /home/ultra/homeassistant:/config:ro
@@ -59,3 +63,4 @@ services:
     restart: unless-stopped
     networks:
       - ha-net
+# <<< 3d ha vision: compose-proxies
