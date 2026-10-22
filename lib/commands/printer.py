@@ -59,7 +59,8 @@ USAGE = """3d printer [-n NAME] <subcommand> [args]
   vision NAME [options]                camera failure detection (spaghetti, detached part, stale/dark camera)
                                        into the same event sinks as watch; also
                                        `vision eval --pos P.. --neg N..`, `vision record NAME DIR [--timeout S]`,
-                                       `vision fetch-model` (see docs/commands/printer-vision.md)
+                                       `vision fetch-model [--tier a|b|all]`, `vision fit-head ..`
+                                       (see docs/commands/printer-vision.md)
   bed status|reference|monitor NAME    bed state from the camera: clear/occupied, build plate
                                        present/missing; `reference NAME --capture` takes the
                                        empty-bed reference (see `3d printer bed --help`)
@@ -427,7 +428,7 @@ VISION_DEPS = "numpy,opencv-python-headless,onnxruntime,pyyaml,scipy"
 def _cmd_vision(argv: list[str]) -> int:
     """`vision NAME ...` is shorthand for `vision run NAME ...`; eval/record/fetch-model pass
     through."""
-    if argv and argv[0] not in ("eval", "record", "fetch-model", "run", "-h", "--help"):
+    if argv and argv[0] not in ("eval", "record", "fetch-model", "fit-head", "run", "-h", "--help"):
         argv = ["run", *argv]
     from cli.pyrun import exec_tool
 
