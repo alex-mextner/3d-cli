@@ -1,0 +1,70 @@
+{
+ "total": 1019,
+ "hits": [
+  {
+   "id": 1871683,
+   "title": "Modern Angular Front Mounted Drawer Pull or Handle",
+   "slug": "modern-angular-front-mounted-drawer-pull-or-handle",
+   "cover": "https://makerworld.bblmw.com/makerworld/model/US786d813cecac38/design/2025-10-09_8f8fd8c96782e8.jpg",
+   "likeCount": 448,
+   "downloadCount": 1797,
+   "printCount": 1458,
+   "designCreator": {
+    "uid": 360858839,
+    "name": "zentenro",
+    "handle": "zentenro",
+    "avatar": "https://public-cdn.bblmw.com/avatar/360858839/2024-12-03_761d1df55c8aa.jpg"
+   },
+   "createTime": "2025-10-09T16:57:18Z",
+   "license": "Standard Digital File License",
+   "tags": [
+    "drawer",
+    "door",
+    "pull",
+    "handle",
+    "knob",
+    "kitchen",
+    "workshop",
+    "cabinet",
+    "chest",
+    "furniture",
+    "minimalist"
+   ],
+   "is_point_redeemable": false,
+   "isExclusive": false,
+   "status": 1
+  },
+  {
+   "id": 2549832,
+   "title": "Möbelgriff Schubladen- Schrankgriff 5 längen",
+   "slug": "furniture-handle-drawer-cabinet-handle-5-lengths",
+   "cover": "https://makerworld.bblmw.com/makerworld/model/US1d5b2262e01a7c/design/dd4bce9dfffa468f.jpg",
+   "likeCount": 134,
+   "downloadCount": 257,
+   "printCount": 227,
+   "designCreator": {
+    "uid": 201551340,
+    "name": "Domi.S",
+    "handle": "Domi.S",
+    "avatar": "https://public-cdn.bblmw.com/avatar/8b1bd160-9762-11ef-b726-0b7b14945c6d.jpg"
+   },
+   "createTime": "2026-03-20T15:39:08Z",
+   "license": "Standard Digital File License",
+   "tags": [
+    "schubladengriff",
+    "moebelgriff",
+    "griff",
+    "moebel",
+    "schubladen",
+    "BAMBULAB",
+    "drawer",
+    "drawer pull",
+    "tuergriff",
+    "universal"
+   ],
+   "is_point_redeemable": false,
+   "isExclusive": true,
+   "status": 1
+  }
+ ]
+}

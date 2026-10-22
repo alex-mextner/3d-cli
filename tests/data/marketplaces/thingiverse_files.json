@@ -1,0 +1,16 @@
+[
+ {
+  "id": 11,
+  "name": "spoon_pull.stl",
+  "size": 1234,
+  "direct_url": "https://cdn.thingiverse.com/assets/spoon_pull.stl",
+  "download_url": "https://api.thingiverse.com/files/11/download"
+ },
+ {
+  "id": 12,
+  "name": "spoon_pull_v2.stl",
+  "size": 99,
+  "direct_url": null,
+  "download_url": "https://api.thingiverse.com/files/12/download"
+ }
+]
