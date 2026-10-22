@@ -176,3 +176,20 @@ def test_the_print_geometry_runs_the_check_and_forgets_it_with_the_print(scene: 
     geo.reset_print()
     assert geo.detach.last_gap is None
     assert PrintGeometry(cam, scene=False, growth=False).detach is None
+
+
+def test_the_toolhead_and_roi_assumptions_are_per_printer_settings(scene: _Scene) -> None:
+    from errors import UsageError
+    from printer_ops.vision import PrintContext
+    from vision_detect import GeometryParams, PrintGeometry, geometry_params
+
+    assert geometry_params(None) == GeometryParams()
+    assert geometry_params({"half_mm": 20.0}).half_mm == 20.0
+    with pytest.raises(UsageError):
+        geometry_params({"half": 20.0})
+    cam = vg.bundled_calibration("Snapmaker U1")
+    ctx = PrintContext("part.gcode", 5.3, 120.0, 120.0, ((( 20.0, 20.0), (60.0, 20.0), (60.0, 60.0)),))
+    shape = scene.detached.shape[:2]
+    small = PrintGeometry(cam, params=GeometryParams(half_mm=10.0)).masks(ctx, shape)["head"]
+    big = PrintGeometry(cam, params=GeometryParams(half_mm=60.0)).masks(ctx, shape)["head"]
+    assert int((big > 0).sum()) > int((small > 0).sum()) > 0

@@ -296,17 +296,20 @@ class FrameScorer:
         return self.score_bgr(decode(jpeg))
 
 
-# The U1 toolhead seen from the chamber camera: a ~60 mm block around the nozzle reaching
-# ~100 mm up; the reported XY lags the frame by up to ~0.5 s of travel, hence the margin.
-HEAD_HALF_MM = 30.0
-HEAD_SKEW_MM = 40.0
-HEAD_UP_MM = 100.0
-ROI_PAD_MM = 15.0  # calibration error is up to ~30 px near the camera (9 px RMS)
-ROI_ABOVE_MM = 40.0  # spaghetti tangles around the nozzle, above the part top
-ROI_GROW_PX = 40  # at 1920 px: boxes just outside the projected volume still count
-BAND_MM = (
-    4.0  # the newest layers; excluded from the change detector, checked for growth
-)
+@dataclass(frozen=True)
+class GeometryParams:
+    """What the masks assume about the toolhead and the calibration, per printer
+    (`watch.vision.head`). Defaults are the U1 toolhead seen from its chamber camera: a ~60 mm
+    block around the nozzle reaching ~100 mm up; the reported XY lags the frame by up to ~0.5 s
+    of travel, hence the skew margin."""
+
+    half_mm: float = 30.0  # toolhead half width
+    skew_mm: float = 40.0  # status/frame skew margin
+    up_mm: float = 100.0  # toolhead height above the nozzle
+    pad_mm: float = 15.0  # calibration error is up to ~30 px near the camera (9 px RMS)
+    above_mm: float = 40.0  # spaghetti tangles around the nozzle, above the part top
+    grow_px: int = 40  # at 1920 px: boxes just outside the projected volume still count
+    band_mm: float = 4.0  # the newest layers; excluded from the change detector, checked for growth
 
 
 class PrintGeometry:
@@ -320,11 +323,13 @@ class PrintGeometry:
         scene: bool = True,
         growth: bool = True,
         detach: DetachParams | None = None,
+        params: GeometryParams | None = None,
     ) -> None:
         from vision_detach import DetachWatch
         from vision_scene import GrowthWatch, SceneWatch
 
         self.cam = cam
+        self.params = params or GeometryParams()
         self.scene = SceneWatch() if scene else None
         self.growth = GrowthWatch() if growth else None
         self.detach = None if detach is None else DetachWatch(detach)
@@ -337,13 +342,14 @@ class PrintGeometry:
         import numpy as np
         import vision_geometry as vg
 
+        g = self.params
         key = (ctx.filename, round(ctx.z, 1), shape, ctx.objects)
         if key != self._key:
             objs = [[(float(x), float(y)) for x, y in o] for o in ctx.objects]
             z = ctx.z
-            grow = max(1, round(ROI_GROW_PX * shape[1] / 1920))
+            grow = max(1, round(g.grow_px * shape[1] / 1920))
             roi = vg.volume_mask(
-                self.cam, z, shape, objs, pad_mm=ROI_PAD_MM, above_mm=ROI_ABOVE_MM
+                self.cam, z, shape, objs, pad_mm=g.pad_mm, above_mm=g.above_mm
             )
             sil = vg.silhouette_mask(self.cam, z, shape, objs, pad_mm=3)
             self._masks = {
@@ -354,29 +360,29 @@ class PrintGeometry:
                 # whole part volume, and the plate with a margin for the sheet beyond the bed
                 "wall": vg.wall_mask(self.cam, z, shape, objs),
                 "body": vg.prism_mask(self.cam, z, shape, objs, 0.0, max(z, 0.5)),
-                "plate": vg.bed_mask(self.cam, z, shape, margin_mm=ROI_PAD_MM / 2),
+                "plate": vg.bed_mask(self.cam, z, shape, margin_mm=g.pad_mm / 2),
                 # growth check: the newest band vs. solid part well below it and empty space
                 # above it; the one-band gaps keep calibration error (9-30 px) from mixing them
-                "band": vg.prism_mask(self.cam, z, shape, objs, z - BAND_MM, z),
+                "band": vg.prism_mask(self.cam, z, shape, objs, z - g.band_mm, z),
                 "below": vg.prism_mask(
-                    self.cam, z, shape, objs, z - 4 * BAND_MM, z - 2 * BAND_MM
+                    self.cam, z, shape, objs, z - 4 * g.band_mm, z - 2 * g.band_mm
                 ),
                 "above": vg.prism_mask(
-                    self.cam, z, shape, objs, z + BAND_MM, z + 3 * BAND_MM
+                    self.cam, z, shape, objs, z + g.band_mm, z + 3 * g.band_mm
                 ),
             }
             self._key = key
         head = [
             (
-                ctx.x + dx * (HEAD_HALF_MM + HEAD_SKEW_MM),
-                ctx.y + dy * (HEAD_HALF_MM + HEAD_SKEW_MM),
+                ctx.x + dx * (g.half_mm + g.skew_mm),
+                ctx.y + dy * (g.half_mm + g.skew_mm),
             )
             for dx, dy in ((-1, -1), (1, -1), (1, 1), (-1, 1))
         ]
         return {
             **self._masks,
             "head": vg.prism_mask(
-                self.cam, ctx.z, shape, [head], ctx.z - 2.0, ctx.z + HEAD_UP_MM
+                self.cam, ctx.z, shape, [head], ctx.z - 2.0, ctx.z + g.up_mm
             ),
         }
 
@@ -514,6 +520,24 @@ def detach_params(setting: Any) -> DetachParams | None:
         ) from exc
 
 
+def geometry_params(setting: Any) -> GeometryParams:
+    """`watch.vision.head`: absent (the U1 defaults) or a mapping of GeometryParams fields."""
+    from errors import UsageError
+
+    if setting is None:
+        return GeometryParams()
+    try:
+        if not isinstance(setting, dict):
+            raise TypeError("expected a mapping")
+        return GeometryParams(**setting)
+    except TypeError as exc:
+        raise UsageError(
+            f"watch.vision.head must be a mapping of "
+            f"{', '.join(GeometryParams.__dataclass_fields__)}: {exc}",
+            command="printer vision",
+        ) from exc
+
+
 def build_scorer(
     cfg: dict[str, Any],
     *,
@@ -564,6 +588,7 @@ def build_scorer(
             scene=bed_change,
             growth=bed_change,
             detach=detach_params(cfg.get("detach", True)) if detach else None,
+            params=geometry_params(cfg.get("head")),
         )
         if camera is not None and cfg.get("geometry", True)
         else None

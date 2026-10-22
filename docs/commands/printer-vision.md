@@ -279,6 +279,7 @@ u1:
       geometry: true                               # bed-volume mask from the camera calibration
       scene: false                                 # bed-change detectors; default off (noisy)
       ignore: [[[0.8, 0.0], [1.0, 0.0], [1.0, 0.3], [0.8, 0.3]]]  # polygons (0..1) to drop boxes in
+      head: {half_mm: 30, skew_mm: 40, up_mm: 100, pad_mm: 15, above_mm: 40, grow_px: 40, band_mm: 4}  # toolhead/ROI geometry (the U1 values; needs a calibration)
 ```
 
 ## Status for Home Assistant
