@@ -500,7 +500,7 @@ def _download(f: ModelFile, name: str, dest: Path, progress: Progress | None) ->
             with (
                 urllib.request.urlopen(req, timeout=60) as resp,
                 open(tmp, "wb") as out,
-            ):  # noqa: S310 - pinned https URLs
+            ):  # pinned https URLs
                 while chunk := resp.read(1 << 20):
                     out.write(chunk)
                     h.update(chunk)

@@ -21,7 +21,7 @@ from __future__ import annotations
 import hashlib
 import time
 from collections.abc import Callable, Sequence
-from typing import Any
+from typing import Any, TypeVar
 
 import numpy as np
 
@@ -32,6 +32,7 @@ from .device import resolve_device
 from .errors import BadInput
 from .torchutil import free_cuda, is_oom, peak_mb, require_torch, reset_peak
 
+_T = TypeVar("_T")
 Progress = Callable[[str, float], None]  # (stage, fraction 0..1)
 Instance = dict[str, Any]
 
@@ -108,10 +109,11 @@ def merge_instances(
     instances: Sequence[Instance], ids: Sequence[int]
 ) -> list[Instance]:
     """Union of the instances in `ids` replaces them as ONE instance carrying the smallest id (source 'merged')."""
-    if len(set(map(int, ids))) < 2:
+    wanted = set(map(int, ids))
+    if len(wanted) < 2:
         raise BadInput("merge needs at least two distinct instance ids")
     by_id = {int(i["id"]): i for i in instances}
-    unknown = sorted(set(map(int, ids)) - set(by_id))
+    unknown = sorted(wanted - set(by_id))
     if unknown:
         raise BadInput(
             f"no instance with id {unknown}", f"existing ids: {sorted(by_id)}"
@@ -131,7 +133,7 @@ def merge_instances(
     out: list[Instance] = []
     placed = False
     for inst in instances:
-        if int(inst["id"]) in set(map(int, ids)):
+        if int(inst["id"]) in wanted:
             if not placed:
                 out.append(merged)
                 placed = True
@@ -302,6 +304,9 @@ class Segmenter:
         self.owl_threshold = owl_threshold
         self.device = "cpu"
         self.loaded = False
+        self._cpu_only = (
+            False  # set only while one call is being redone on CPU after a GPU OOM
+        )
         self._owns_clip, self._owns_detector = clip is None, detector is None
         self._clip = clip
         self._detector = detector
@@ -334,11 +339,15 @@ class Segmenter:
     def load(self) -> None:
         if self.loaded:
             return
-        self.device = resolve_device(self.requested, self.vram_estimate_mb)
+        self.device = (
+            "cpu"
+            if self._cpu_only
+            else resolve_device(self.requested, self.vram_estimate_mb)
+        )
         if self.uses_sam:
             self._load_sam()
         else:
-            self._u2 = U2Net(self.device)
+            self._u2 = U2Net(self._engine_request())
             self._u2.load()
             self.device = self._u2.device
         self.loaded = True
@@ -364,7 +373,7 @@ class Segmenter:
                 device=self.device,
                 apply_postprocessing=False,
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             if self.device == "cuda" and is_oom(exc) and self.requested != "cuda":
                 free_cuda()
                 self.device = "cpu"
@@ -394,14 +403,18 @@ class Segmenter:
         self.loaded = False
         free_cuda()
 
+    def _engine_request(self) -> str:
+        """Device request for engines this Segmenter creates: the user's intent (so `auto` keeps its fallbacks), not the resolved device."""
+        return "cpu" if self._cpu_only else self.requested
+
     def _get_detector(self) -> OwlDetector:
         if self._detector is None:
-            self._detector = OwlDetector(self.device)
+            self._detector = OwlDetector(self._engine_request())
         return self._detector
 
     def _get_clip(self) -> ClipEncoder:
         if self._clip is None:
-            self._clip = ClipEncoder(self.device)
+            self._clip = ClipEncoder(self._engine_request())
         return self._clip
 
     # the main entry point
@@ -409,12 +422,16 @@ class Segmenter:
         _check_rgb(rgb)
         try:
             return self._run(rgb, progress)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             if not (self.device == "cuda" and is_oom(exc) and self.requested != "cuda"):
                 raise
             self.unload()
-            self.requested = "cpu"
-            return self._run(rgb, progress)
+            self._cpu_only = True
+            try:
+                return self._run(rgb, progress)
+            finally:
+                self._cpu_only = False
+                self.unload()  # the next call re-evaluates `auto` instead of staying on CPU
 
     def _run(self, rgb: np.ndarray, progress: Progress | None) -> dict[str, Any]:
         t_all = time.perf_counter()
@@ -496,7 +513,12 @@ class Segmenter:
         max_proc = self.max_area_frac * ph * pw
         for c, b in zip(cands, bg, strict=True):
             area = int(c["mask"].sum())
-            if (self.reject_bg and b >= 0.5) or area >= max_proc or area < min_proc:
+            if (
+                (self.reject_bg and b >= 0.5)
+                or area >= max_proc
+                or area == 0
+                or area < min_proc
+            ):
                 continue
             mask = c["mask"] if scale == 1.0 else _upscale(c["mask"], (h, w))
             instances.append(
@@ -614,7 +636,11 @@ class Segmenter:
                 )
                 mask = m[0] > 0
                 n = int(mask.sum())
-                if n < min_px or (mask & union).sum() / max(n, 1) > max_overlap:
+                if (
+                    n == 0
+                    or n < min_px
+                    or (mask & union).sum() / max(n, 1) > max_overlap
+                ):
                     continue
                 added.append({"mask": mask, "source": "owl", "stability": float(s[0])})
                 union |= mask
@@ -669,19 +695,25 @@ class Segmenter:
         """One SAM2 box-prompted instance per detector box (`{"xyxy", "score", "label"}`), source "owl".
 
         Each instance also carries the box's `label`, `score` and `box_xyxy`. A box whose prompt yields an empty mask
-        is skipped. The image is embedded once (the predictor caches it). Ids are 1..N in box order.
+        is skipped. The image is downscaled and embedded once. Ids are 1..N in box order.
         """
+        if not boxes:
+            return []
+        prompts = [
+            {"box": np.asarray(b["xyxy"], np.float32).reshape(1, 4)} for b in boxes
+        ]
+        found = self._with_oom_fallback(lambda: self._prompt_masks(rgb, prompts))
         out: list[Instance] = []
-        for b in boxes:
-            try:
-                out = self.add_by_box(rgb, out, b["xyxy"], source="owl")
-            except BadInput:
+        for b, hit in zip(boxes, found, strict=True):
+            if hit is None:
                 continue
-            out[-1].update(
+            inst = make_instance(hit[0], len(out) + 1, "owl", 0.0, hit[1])
+            inst.update(
                 label=b["label"],
                 score=float(b["score"]),
                 box_xyxy=[float(v) for v in b["xyxy"]],
             )
+            out.append(inst)
         return out
 
     def _add_prompt(
@@ -691,44 +723,71 @@ class Segmenter:
         source: str,
         **prompt: np.ndarray,
     ) -> list[Instance]:
-        import torch
-
-        _check_rgb(rgb)
-        if self.method == "u2net":
-            raise BadInput("click-to-add needs a SAM2 method (sam2 / sam2-dense)")
-        self.load()
-        h, w = rgb.shape[:2]
-        pps, max_side = self._effective()
-        del pps
-        scale, proc = 1.0, rgb
-        if max_side and max(h, w) > max_side:
-            import cv2
-
-            scale = max_side / max(h, w)
-            proc = cv2.resize(
-                rgb, (round(w * scale), round(h * scale)), interpolation=cv2.INTER_AREA
-            )
-        scaled = {
-            k: (v * scale if k in ("point_coords", "box") else v)
-            for k, v in prompt.items()
-        }
-        pred = self._predictor(proc)
-        with torch.inference_mode():
-            m, s, _ = pred.predict(
-                multimask_output="box" not in prompt
-                and len(prompt["point_labels"]) == 1,
-                **scaled,
-            )
-        best = int(np.argmax(s))
-        mask = m[best] > 0
-        if scale != 1.0:
-            mask = _upscale(mask, (h, w))
-        if int(mask.sum()) == 0:
+        (hit,) = self._with_oom_fallback(lambda: self._prompt_masks(rgb, [prompt]))
+        if hit is None:
             raise BadInput("the prompt produced an empty mask")
         return [
             *instances,
-            make_instance(mask, next_id(instances), source, 0.0, float(s[best])),
+            make_instance(hit[0], next_id(instances), source, 0.0, hit[1]),
         ]
+
+    def _with_oom_fallback(self, fn: Callable[[], _T]) -> _T:
+        """Run `fn`; on GPU out-of-memory with a non-explicit device, redo it on CPU for this call only."""
+        if self.method == "u2net":
+            raise BadInput("click-to-add needs a SAM2 method (sam2 / sam2-dense)")
+        try:
+            return fn()
+        except Exception as exc:
+            if not (self.device == "cuda" and is_oom(exc) and self.requested != "cuda"):
+                raise
+        self.unload()
+        self._cpu_only = True
+        try:
+            return fn()
+        finally:
+            self._cpu_only = False
+            self.unload()
+
+    def _downscale(self, rgb: np.ndarray) -> tuple[np.ndarray, float]:
+        """(image SAM2 sees, scale factor): the longest side is capped at the device's processing size."""
+        h, w = rgb.shape[:2]
+        _, max_side = self._effective()
+        if not (max_side and max(h, w) > max_side):
+            return rgb, 1.0
+        import cv2
+
+        scale = max_side / max(h, w)
+        proc = cv2.resize(
+            rgb, (round(w * scale), round(h * scale)), interpolation=cv2.INTER_AREA
+        )
+        return proc, scale
+
+    def _prompt_masks(
+        self, rgb: np.ndarray, prompts: Sequence[dict[str, np.ndarray]]
+    ) -> list[tuple[np.ndarray, float] | None]:
+        """SAM2 prompts (`box` (1,4) or `point_coords`+`point_labels`) -> (mask at input size, score) or None if empty."""
+        import torch
+
+        _check_rgb(rgb)
+        self.load()
+        h, w = rgb.shape[:2]
+        proc, scale = self._downscale(rgb)
+        pred = self._predictor(proc)
+        out: list[tuple[np.ndarray, float] | None] = []
+        for prompt in prompts:
+            scaled = {
+                k: (v * scale if k in ("point_coords", "box") else v)
+                for k, v in prompt.items()
+            }
+            single_point = "box" not in prompt and len(prompt["point_labels"]) == 1
+            with torch.inference_mode():
+                m, s, _ = pred.predict(multimask_output=single_point, **scaled)
+            best = int(np.argmax(s))
+            mask = m[best] > 0
+            if scale != 1.0:
+                mask = _upscale(mask, (h, w))
+            out.append((mask, float(s[best])) if mask.any() else None)
+        return out
 
     merge = staticmethod(merge_instances)
     delete = staticmethod(delete_instances)

@@ -15,6 +15,7 @@ Boxes for text queries in a photo (OWLv2-base-patch16-ensemble, fp16 on GPU / fp
 3d detect tools.jpg --queries "a hand tool,a box" --json
 3d detect tools.jpg --queries pliers --threshold 0.25 --nms 0.3 --json
 3d detect tools.jpg --queries "a tape roll" --max-area-frac 0.02 --device cpu
+3d detect tools.jpg --queries pliers --backend owlv2     # the only backend today
 3d detect tools.jpg --queries "a hand tool,pliers" --masks out/ --json     # boxes + a SAM2 mask per box
 ```
 
