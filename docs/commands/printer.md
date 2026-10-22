@@ -68,8 +68,10 @@ Options:
   `3d printer start u1 out/part.gcode --yes`
 - `--bridge-max MM` — preflight overhangs gate: longest bridge; overrides the printer's `bridge_max_mm`.
   `3d printer start u1 out/porch.gcode --yes --bridge-max 25`
-- `--force` — start even when preflight reports FAIL; the failing checks are printed as `FORCED`.
-  `3d printer start k1se out/roof.gcode --yes --force`
+- `--force` — ask to start despite preflight FAILs. It is **not an override by itself**: the start
+  needs the owner's one-time Telegram approval (see [Forcing a start](#forcing-a-start)); without it
+  the start is refused with exit 1. After an approved start the failing checks are printed as `FORCED`.
+  `RIG_HATCH_REQUEST_3D_PRINTER_START_FORCE="why this FAIL is acceptable" 3d printer start k1se out/roof.gcode --yes --force`
 - `--source-3mf FILE` — the project 3MF the G-code was sliced from; preflight then runs the
   head-sequence check on it and `3d halves-check` (without it, the head-sequence check uses
   `NAME.3mf` next to `NAME.gcode` when present).
@@ -89,7 +91,7 @@ Options:
 3d printer upload k1se "out/roof left.gcode" --as roof_left.gcode
 3d printer start u1 out/part.gcode --yes
 3d printer start u1 out/base.gcode --yes --source-3mf print/base.3mf
-3d printer start k1se out/roof.gcode --yes --force
+RIG_HATCH_REQUEST_3D_PRINTER_START_FORCE="roof overhang FAIL: stale map, issue #N" 3d printer start k1se out/roof.gcode --yes --force
 3d printer cancel k1se --yes
 3d printer watch u1 --duration 20
 3d printer watch u1 k1se --steer 01a12cd6
@@ -317,8 +319,9 @@ purge macro and lengths, travel clearance, start commands); see that page for th
 `trusted_macros` names the macros (vendor start/end, pause, toolchange `T0`…`Tn`, timelapse
 commands) whose bodies you know keep the head on the bed and leave the coordinate modes
 (G90/G91, G92, SET_GCODE_OFFSET) as they found them. The bounds check cannot see inside a
-macro, so any macro in the G-code that is not listed makes preflight FAIL and `start` needs
-`--force`. With `--printer A --axis-limits B` only A's list counts.
+macro, so any macro in the G-code that is not listed makes preflight FAIL and `start` is
+refused (add the macro to `trusted_macros`; a [forced start](#forcing-a-start) needs the owner's
+Telegram approval). With `--printer A --axis-limits B` only A's list counts.
 
 `bridge_max_mm` is the longest span this printer bridges cleanly (measure it with a bridge test
 print). The preflight overhangs gate counts uncarried runs up to it as bridges; `--bridge-max`
@@ -539,7 +542,7 @@ until someone takes them off. The camera can see that, so nobody has to tell an 
   The last verdict is in `~/.local/state/3d-cli/bed/NAME.json` and in the watch heartbeat.
 - **Start gate.** `3d printer start` and `3d print-preflight --printer` add a `bed` line: FAIL on
   objects or a missing plate, PASS on a clear bed with the plate, WARN when the camera cannot
-  tell (no reference at this Z, out of view, stale, plate out of view, camera down); `--force` overrides.
+  tell (no reference at this Z, out of view, stale, plate out of view, camera down); a [forced start](#forcing-a-start) overrides it.
 - **Clear acknowledgement** (`watch.bed.clear_ack`, off by default): after `bed_clear` the
   printer makes one motor sound so the person at it knows the camera saw the empty bed. Neither
   printer has a beeper, so the command is `STEPPER_BUZZ STEPPER=stepper_z` (Klipper: ±1 mm ×10,
@@ -584,7 +587,7 @@ A Home Assistant bed sensor is a follow-up: [#305](https://github.com/alex-mextn
    material gates of `3d print-preflight --printer NAME` (live 3d-api state from
    `$PRINTOPS_API` / `printops.yaml`, else fleet facts only), and on printers with
    `watch.bed.enabled` the camera [bed check](#bed-state) (objects on the bed or the plate
-   missing); a FAIL blocks the start unless `--force`.
+   missing); a FAIL blocks the start unless the owner approves a [forced start](#forcing-a-start).
 5. `upload` refuses while a Creality printer is busy (the firmware does not protect the
    running job), and on any printer refuses to overwrite the file being printed.
 6. `start` succeeds only when the printer acknowledges it: Moonraker's HTTP reply, or on
@@ -598,6 +601,32 @@ A Home Assistant bed sensor is a follow-up: [#305](https://github.com/alex-mextn
    `3d print-preflight X.gcode --printer a1mini` (state checks are left out) and
    `--axis-limits a1mini`. A `read-only` printer answers `status` but refuses `upload`, `start`
    and `cancel` before any request is sent.
+
+### Forcing a start
+
+A preflight FAIL is either a real defect (do not print) or a false positive of a gate (fix the gate
+and open an issue for it). `--force` therefore never starts such a print by itself; it only
+**asks**, and the owner answers on Telegram, through the shared hatch helper the agent-hooks and
+`gh ship --skip-ci` use (agent-tools `lib/agenttools_hatch_escalation`, hook id
+`3d-printer-start-force`, [`lib/printer_ops/force_hatch.py`](../../lib/printer_ops/force_hatch.py)):
+
+```bash
+RIG_HATCH_REQUEST_3D_PRINTER_START_FORCE="loaded_filament_match: slice has no colour, issue #N" \
+  3d printer start k1se out/part.gcode --yes --force
+```
+
+- The written justification (at least 8 characters, not a bare `1`) opens one Telegram prompt with
+  Approve / Deny: the card names the printer, the file, its SHA-256, the exact command and **every
+  failing check with its detail**. The command waits for the tap (no local timeout); an Approve
+  tapped after the process was interrupted is a grant that the same command, rerun with
+  `RIG_HATCH_REQUEST_3D_PRINTER_START_FORCE=approved:hgr-…`, redeems.
+- Approved: the start continues, prints `FORCED: starting despite preflight FAIL (...)`, and the
+  helper appends the use to `~/.config/agent-tools/overrides.log`.
+- Without `--force`, without the variable, denied, timed out, or without a trusted `tg-ctl` /
+  helper (`~/dev/agent-tools`, then `~/xp/agent-tools`, owned by you or root and not
+  group/world-writable): exit 1, nothing is sent to the printer.
+- Only the owner can approve. After every forced start, analyse the FAIL it overrode and fix the
+  root cause (the gate or the slice) — the next print of the same kind must not need a force.
 
 Exit codes: 0 done; 1 refused by a safety rule (incl. offline/read-only printer), preflight FAIL,
 or printer unreachable; 2 usage error, unknown printer, bad config or fleet file, or missing file.

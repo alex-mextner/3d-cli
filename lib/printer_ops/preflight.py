@@ -487,7 +487,7 @@ def _first(violations: Sequence[Violation], count: int, where: str = "outside") 
 
 
 def check_macros(rep: BoundsReport, trusted: frozenset[str]) -> list[Check]:
-    """Macros hide their moves. Untrusted ones FAIL (start needs --force); the printer's
+    """Macros hide their moves. Untrusted ones FAIL (start is refused); the printer's
     `trusted_macros` (PROFILE_FILES) names the ones known to stay on the bed."""
     if not rep.macros:
         return []
@@ -505,7 +505,7 @@ def check_macros(rep: BoundsReport, trusted: frozenset[str]) -> list[Check]:
                 FAIL,
                 f"moves inside these commands are not checked: {fmt(untrusted)}; "
                 "if they stay on the bed add them to trusted_macros for this printer in "
-                f"{PROFILE_FILES}, otherwise --force",
+                f"{PROFILE_FILES}",
             )
         ]
     return [

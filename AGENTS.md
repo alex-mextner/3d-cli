@@ -342,7 +342,8 @@ skills (`atomic-commits`, `ai-review-before-commit`, `pre-commit-gate`,
   `lib/printer_ops/` adapters (`moonraker`, `creality-stock`); `printers` (plural) stays the
   MODEL registry. Every hardware write is an explicit subcommand: `upload` never starts,
   `start`/`cancel` need `--yes`, `start` refuses busy printers and runs `print-preflight`
-  (FAIL blocks unless `--force`). Tests use the loopback fakes in `tests/printer_fakes.py`;
+  (a FAIL blocks; `--force` alone does not override it: a forced start needs the owner's one-time Telegram
+  hatch approval, `lib/printer_ops/force_hatch.py`; fix the cause of each FAIL instead). Tests use the loopback fakes in `tests/printer_fakes.py`;
   agents never point tests or ad-hoc runs at real printers. See `docs/commands/printer.md`.
 - `printers` (plural) is the model registry AND the fleet-wide actions, as self-registering subs in
   `lib/printers_cli/<sub>.py` (`SUB = Sub(...)`, found by `printers_cli.discover()`; adding one edits no

@@ -19,13 +19,14 @@ import pytest
 from errors import InputNotFound, InvalidArgument, ThreeDError, UsageError
 from printer_fakes import (
     FakeCreality,
+    FakeHatch,
     FakeMoonraker,
     k1_state,
     u1_status,
     write_devices,
 )
 from printer_ops import base as pbase
-from printer_ops import creality, devices, moonraker, move_bounds, preflight, ws
+from printer_ops import creality, devices, force_hatch, moonraker, move_bounds, preflight, ws
 from printer_ops.base import (
     PrinterCommError,
     PrinterRefused,
@@ -70,6 +71,14 @@ def k1(env: Path) -> Iterator[FakeCreality]:
     fake = FakeCreality()
     with fake.serve():
         yield fake
+
+
+@pytest.fixture()
+def hatch(monkeypatch: pytest.MonkeyPatch) -> FakeHatch:
+    """The owner's Telegram hatch for `printer start --force`; approves unless a test says otherwise."""
+    fake = FakeHatch()
+    monkeypatch.setattr(force_hatch, "load_hatch", lambda: fake)
+    return fake
 
 
 @pytest.fixture()
@@ -704,6 +713,7 @@ def test_cmd_start_refused_on_preflight_fail_and_forced(
     env: Path,
     tmp_path: Path,
     gates_ok: None,
+    hatch: FakeHatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     g = gcode(
@@ -719,12 +729,38 @@ def test_cmd_start_refused_on_preflight_fail_and_forced(
     assert moon.writes() == []
     assert "G-code #FF0000, loaded #1B5E20" in capsys.readouterr().out
 
+    assert hatch.requests == []  # a plain refusal asks nobody
+
     assert printer("start", "u1", str(g), "--yes", "--force") == 0
     out = capsys.readouterr().out
     assert "FORCED" in out and "slot T2" in out and "read-back sha256 matches" in out
+    assert "owner approved on Telegram (test double approved)" in out
     assert [(r.path, r.query) for r in moon.writes()] == [
         ("/printer/print/start", {"filename": [safe_remote_name(g)]})
     ]
+    (request,) = hatch.requests
+    assert request["hook"] == "3d-printer-start-force" and request["critical"] is True
+    assert request["context"]["printer"] == "u1" and request["context"]["file"] == str(g)
+    assert "- slot T2:" in request["context"]["failing_checks"]
+
+
+@pytest.mark.parametrize("verdict", ["deny", "not-requested"])
+def test_cmd_start_force_without_telegram_approval_never_starts(
+    moon: FakeMoonraker, env: Path, tmp_path: Path, gates_ok: None, hatch: FakeHatch, verdict: str
+) -> None:
+    """`--force` alone must not start a print that fails preflight: the owner's approval does."""
+    hatch.verdict = verdict
+    g = gcode(
+        tmp_path,
+        U1_GCODE.replace("#1B5E20;#FFFFFF\n; filament_type", "#FF0000;#FFFFFF\n; filament_type"),
+    )
+    moon.put(safe_remote_name(g), g.read_bytes())
+    write_devices(env, moon=moon)
+    with pytest.raises(PrinterRefused, match="--force does not override preflight FAIL by itself") as exc:
+        printer("start", "u1", str(g), "--yes", "--force")
+    assert "RIG_HATCH_REQUEST_3D_PRINTER_START_FORCE" in "\n".join(exc.value.remediation)
+    assert "- slot T2:" in "\n".join(exc.value.remediation)
+    assert moon.writes() == []
 
 
 def test_cmd_start_happy_path_k1(
@@ -1657,7 +1693,7 @@ def test_bridge_limit_comes_from_flag_then_device_then_default(env: Path, tmp_pa
 
 
 def test_cmd_start_refuses_an_untrusted_macro_without_force(
-    moon: FakeMoonraker, env: Path, tmp_path: Path, gates_ok: None
+    moon: FakeMoonraker, env: Path, tmp_path: Path, gates_ok: None, hatch: FakeHatch
 ) -> None:
     g = gcode(tmp_path, U1_GCODE.replace("G28\n", "G28\nWIPE_NOZZLE\n"))
     moon.put(safe_remote_name(g), g.read_bytes())

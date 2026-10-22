@@ -187,7 +187,7 @@ and acceleration measures settings you do not print with). The G-code ends with
   `filament_temp_range` FAILs when the tower's first (hottest) temperature, 230 °C for PLA or
   250 °C for PETG, is outside the loaded spool's `nozzle_temp_min/max`; the colder blocks are
   never flagged. The tower is meant to cross the window: read the other checks and start it
-  with `3d printer start … --force`.
+  with a [forced start](printer.md#forcing-a-start) (Telegram approval).
 - `plate1` — the filament plate of the calibration series (`lib/slicing/calibration_plate.py`,
   `lib/slicing/calibration_plates/filament.py`): PA lines, a max-volumetric-speed strip (label =
   mm³/s), flow tiles (15×15 mm, 5 solid layers), bridges 8/11/14 mm, overhangs 45–60°, a retraction

@@ -1,7 +1,7 @@
 # `3d print-preflight` — is this G-code ready for that printer?
 
 Read-only checks before a print starts. [`3d printer start`](printer.md) runs the same checks
-and refuses on FAIL unless `--force`. Issue: [#96](https://github.com/alex-mextner/3d-cli/issues/96).
+and refuses on FAIL unless the owner approves a [forced start](printer.md#forcing-a-start) on Telegram. Issue: [#96](https://github.com/alex-mextner/3d-cli/issues/96).
 Every G-code gate of the [print pipeline](../workflows/print-pipeline.md) runs; a gate whose
 input is missing is SKIP and its line says what to pass — it never passes silently.
 
@@ -51,7 +51,7 @@ is FAIL under the policy level `block`, WARN under `warn`; `off` hides the check
 | `printer_profile_match` | block | `; printer_model` is not the target's model (a K1 SE G-code on the U1) | |
 | `nozzle_compat` | block | `; nozzle_diameter` ≠ the head's nozzle; a positive `; required_nozzle_HRC` exceeds its material's nominal hardness; independently, abrasive filament (a true Spoolman `abrasive` flag or a CF/GF/GLOW/WOOD/METAL token in the material/name/type) on a nozzle outside policy `abrasive_ok` (default: hardened, ruby, tungsten) | |
 | `filament_temp_range` | block | `; nozzle_temperature`, `; nozzle_temperature_initial_layer` outside the filament's `nozzle_temp_min..max`; any body `M104/M109` for that tool above the max (standby temps below the min are fine); the plate's footer temps (`curr_bed_type` → `textured_plate_temp` …) or any `M140/M190` outside `bed_temp_min..max` | |
-| `loaded_filament_match` | block | the bound spool's `material` ≠ `; filament_type` (aliases: `gates.material_aliases`); colour ΔE2000 (spool `measured_hex`, else the filament colour, vs `; filament_colour`) above `fail_delta_e` | ΔE above `warn_delta_e`; vendor ≠ `; filament_vendor` (re-check flow/PA). Thresholds per project: `gates.colour.projects` (shell glob on the G-code path) |
+| `loaded_filament_match` | block | the bound spool's `material` ≠ `; filament_type` (aliases: `gates.material_aliases`); colour ΔE2000 (spool `measured_hex`, else the filament colour, vs `; filament_colour`) above `fail_delta_e` | ΔE above `warn_delta_e`; vendor ≠ `; filament_vendor` (re-check flow/PA). Thresholds per project: `gates.colour.projects` (shell glob on the G-code path). **UNVERIFIED, never FAIL/WARN, on colour** when the slice's recorded slicer warnings (`NAME.slice-warnings.json`, same SHA-256) contain Orca's `no filament colors found in projects`: the project declares no filament colour (an STL slice), so `; filament_colour` is the filament profile's default and says nothing about the spool; the material check still applies |
 | `slot_binding_known` | warn | | no spool bound to a used slot: usage will not be booked; two spools bound to one slot |
 | `filament_sufficient` | block | `; filament used [g]` + `purge_g_per_tool` + max(`margin_g`, `margin_pct`) above the high end of the remaining interval | need inside the interval: weigh the spool (`3d printops spool measure ID GROSS_G`) |
 | `drying_due` | warn | the spool is `wet` | `due`, or in an open drying session |
@@ -65,7 +65,7 @@ process values only when the presets are on this machine (Orca's system profiles
 `profiles/` and the slicers' user preset folders; `ORCA_PROFILES` / `ORCA_USER_PRESETS` point
 elsewhere); otherwise it says so under a PASS on the names. The filament preset joins when the
 spool binding names one ([#294](https://github.com/alex-mextner/3d-cli/issues/294)). To print a
-plate with other presets on purpose: `3d printer start … --force`, or `preset_match: warn` for
+plate with other presets on purpose: a [forced start](printer.md#forcing-a-start) (Telegram approval), or `preset_match: warn` for
 the printer under `gates.printers` in fleet/policy.yaml.
 
 Nozzle hardness and filament abrasiveness are separate checks, applied only to tools used by

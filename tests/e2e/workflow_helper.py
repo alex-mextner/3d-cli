@@ -83,6 +83,10 @@ def isolated_env(tmp_path: Path) -> dict[str, str]:
     env.update(
         {
             "HOME": str(home),
+            # The shared hatch helper (printer_ops/force_hatch.py) would otherwise talk to the owner's
+            # REAL tg-ctl (a Telegram prompt, a late-grant lookup): under this variable only a tg-ctl
+            # inside tmp_path may run.
+            "AGENTTOOLS_TEST_HERMETIC_HOME": str(home),
             "CUBE": str(CUBE),
             "PYTHON": sys.executable,
             "PYTHONWARNINGS": "error",
@@ -103,6 +107,7 @@ def isolated_env(tmp_path: Path) -> dict[str, str]:
     env.pop("HF_TOKEN", None)
     env.pop("OPENSCADPATH", None)
     env.pop("PRINTOPS_API", None)  # a host 3d-api config must not reach a test's CLI
+    env.pop("RIG_HATCH_REQUEST_3D_PRINTER_START_FORCE", None)  # an owner's hatch justification must not approve a test
     env.pop("PRINTOPS_TOKEN", None)
     # A git hook (the pre-commit gate) exports GIT_INDEX_FILE/GIT_DIR; left set, a test's
     # `git init/add/commit` in a temp repo would write into the host repo's index instead.
@@ -131,6 +136,42 @@ def run_cli(
         text=True,
         timeout=timeout,
     )
+
+
+HATCH_RUNNER = Path(__file__).with_name("hatch_runner.py")
+
+
+def run_cli_with_hatch(
+    tmp_path: Path,
+    *argv: str,
+    verdict: str = "approve",
+    env_extra: dict[str, str] | None = None,
+    timeout: int = 120,
+) -> subprocess.CompletedProcess[str]:
+    """run_cli, with the owner's Telegram hatch answered `verdict` ("approve" | "deny") by a test
+    double (tests/e2e/hatch_runner.py); the requests it received are in hatch_requests(tmp_path)."""
+    env = isolated_env(tmp_path)
+    env["THREED_TEST_HATCH_VERDICT"] = verdict
+    env["THREED_TEST_HATCH_LOG"] = str(tmp_path / "hatch-requests.jsonl")
+    if env_extra:
+        env.update(env_extra)
+        _agent_fakes_first(env, tmp_path)
+    return subprocess.run(
+        [sys.executable, str(HATCH_RUNNER), *argv],
+        cwd=str(tmp_path),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+
+
+def hatch_requests(tmp_path: Path) -> list[dict[str, object]]:
+    """Every hatch request the CLI runs of `tmp_path` made through run_cli_with_hatch, in order."""
+    log = tmp_path / "hatch-requests.jsonl"
+    if not log.is_file():
+        return []
+    return [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
 def run_shell(script: str, tmp_path: Path, *, timeout: int = 120) -> subprocess.CompletedProcess[str]:
