@@ -12,7 +12,11 @@ WHAT: the G-code's per-tool facts (slicer footer + body temperatures) checked ag
                            and the bed (plate-specific footer temps, M140/M190) inside the loaded
                            filament's nozzle/bed_temp_min..max
     loaded_filament_match  bound spool's material = `; filament_type` (FAIL), colour CIEDE2000
-                           vs `; filament_colour` (WARN/FAIL by project), vendor = `; filament_vendor` (WARN)
+                           vs `; filament_colour` (WARN/FAIL by project), vendor = `; filament_vendor` (WARN).
+                           A slice whose recorded slicer warnings say the project carries no
+                           filament colour ("no filament colors found in projects", sidecar
+                           `3d slice-warnings`) has only the profile's default colour in the footer:
+                           the colour is UNVERIFIED, never graded against the spool
     slot_binding_known     every used slot has a spool in the ledger (WARN: usage not booked)
     filament_sufficient    `; filament used [g]` + purge + margin vs the ledger interval: FAIL
                            above its high end, WARN "weigh" inside it
@@ -445,6 +449,7 @@ class _Ctx:
     origin: str
     slicer: Mapping[str, str] = field(default_factory=dict)  # fleet `slicer:` presets
     model: str = ""  # the fleet printer's model (resolves its vendor's Orca presets)
+    colourless: bool = False  # the slicer found no filament colour in the project (footer = profile default)
 
     @property
     def known(self) -> bool:
@@ -754,6 +759,27 @@ def check_temps(c: _Ctx) -> list[Finding]:
     return out
 
 
+_NO_FILAMENT_COLOURS = "no filament colors found in projects"
+
+
+def project_has_no_filament_colour(origin: Path, gcode: Path) -> bool:
+    """True when the slice's recorded slicer warnings (NAME.slice-warnings.json next to `origin`,
+    written by `3d slice-warnings record`) contain Orca's "no filament colors found in projects":
+    the project (an STL slice, a 3MF without per-filament colours) declares none, so the footer's
+    `; filament_colour` is the filament profile's default and says nothing about the spool to load.
+    A missing, unreadable or stale sidecar (another G-code's hash) proves nothing: False."""
+    from slicing import slice_warnings as sw
+
+    side = sw.sidecar_path(origin)
+    try:
+        data = sw.load(side)
+        if data.get("gcode_sha256") != sw.sha256_file(gcode):
+            return False
+    except (sw.SidecarError, OSError):
+        return False
+    return any(sw.normalise(w.message) == _NO_FILAMENT_COLOURS for w in sw.warnings_of(data))
+
+
 def check_loaded(c: _Ctx) -> list[Finding]:
     name = "loaded_filament_match"
     out: list[Finding] = []
@@ -787,7 +813,14 @@ def check_loaded(c: _Ctx) -> list[Finding]:
             )
         want_c = _hex(c.job.text("filament_colour", t))
         got_c = _hex(spool.get("measured_hex")) or _hex(spool.get("color_hex"))
-        if want_c and got_c:
+        if c.colourless:
+            if grade == "ok":
+                grade, kind = "unknown", "colour"
+            notes.append(
+                f"colour not checked: the project declares no filament colour (G-code {want_c or '?'} "
+                "is the slicer profile default)"
+            )
+        elif want_c and got_c:
             de = hex_delta_e(want_c, got_c)
             msg = f"ΔE {de:.1f} G-code {want_c} vs loaded {got_c}"
             if de > rule.fail_delta_e:
@@ -1303,6 +1336,7 @@ def run_checks(
         str((origin or gcode).resolve()),
         slicer=dict(fp.slicer),
         model=fp.model,
+        colourless=project_has_no_filament_colour(origin or gcode, gcode),
     )
     for name, fn in CHECKS.items():
         level = policy.level(name, fp.name)
