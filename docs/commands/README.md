@@ -70,6 +70,8 @@ For a practical figure-by-figure image backplate loop, see
 | `overlay` | [overlay.md](overlay.md) | Difference, ghost, and edge-overlay diagnostics. |
 | `match` | [match.md](match.md) | [Forced-monotonic](GLOSSARY.md#forced-monotonic-loop) param edit loop. |
 | `preprocess` | [preprocess.md](preprocess.md) | Reference subject mask and proportional depth preprocessing. |
+| `segment` | [segment.md](segment.md) | Multi-object photo segmentation (SAM2 + OWLv2 fill + CLIP background rejection) into per-instance masks (threed-vision). |
+| `detect` | [detect.md](detect.md) | Open-vocabulary object boxes for text queries (OWLv2, threed-vision). |
 
 ### Slicing
 
@@ -109,6 +111,7 @@ Every gate from model to printer, in order: [Print pipeline](../workflows/print-
 | `ai` | [ai.md](ai.md) | Build offline AI-assist prompt bundles without calling a backend. |
 | `bench` | [bench.md](bench.md) | Auto-scored generative-modeling benchmark: prompt → `.scad`, build-success gate, metric vector, `$/ok` + `--compare`. |
 | `auth` | [auth.md](auth.md) | Configure optional Hugging Face credentials for ZeroGPU and gated weights. |
+| `vision-models` | [vision-models.md](vision-models.md) | Vision model weights (SAM2.1-tiny, OWLv2, CLIP, DINOv2, u2net): `status`, explicit sha256-verified `pull` (imports local copies, never downloads implicitly). |
 | `doctor` | [doctor.md](doctor.md) | Read-only dependency report with install commands. |
 | `events` | [events.md](events.md) | Record and inspect append-only CLI/model workflow events. |
 | `ha` | [ha.md](ha.md) | Deploy `integrations/homeassistant/` to the live Home Assistant config (submodule + symlinks, check_config, reloads, rollback). |

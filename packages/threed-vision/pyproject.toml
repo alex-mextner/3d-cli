@@ -21,7 +21,7 @@ gpu = ["onnxruntime-gpu==1.23.2", "tokenizers>=0.15"]
 # SAM2.1 automatic masks + OWLv2 boxes + the torch soft-silhouette fitter.
 # torch/torchvision MUST be the cu128 wheels (download.pytorch.org/whl/cu128): their nvidia-*-cu12 libraries are what
 # onnxruntime-gpu 1.23.x loads; a cu130 torch leaves ORT on CPU.
-seg = ["torch>=2.8,<2.12", "torchvision>=0.23,<0.27", "sam2>=1.1", "transformers>=4.45", "rembg>=2.0.60"]
+seg = ["torch>=2.8,<2.12", "torchvision>=0.23,<0.27", "sam2>=1.1", "transformers>=4.45"]
 fit = ["torch>=2.8,<2.12", "cma>=3.3"]
 
 [build-system]

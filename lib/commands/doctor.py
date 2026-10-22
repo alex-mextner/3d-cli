@@ -25,10 +25,12 @@ line for each missing item instead.
 """
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
 import sys
+from typing import Any
 
 from cli.env import (
     PY_MESH_MODULES,
@@ -54,6 +56,8 @@ USAGE = """3d doctor
   Checks: openscad, imagemagick, ffmpeg, python3, uv/pip, the python mesh stack
   (trimesh, manifold3d, numpy, scipy, rtree, pillow, opencv), a slicer
   (OrcaSlicer / Bambu Studio / PrusaSlicer), and tesseract (optional: spool label photos).
+  Optional photo->3D vision stack: onnxruntime CUDA (names the missing CUDA-12 .so when the GPU
+  provider cannot load and onnxruntime falls back to CPU) and the vision models (`3d vision-models pull`).
 
 Examples:
   3d doctor
@@ -217,6 +221,32 @@ def run(argv: list[str]) -> int:  # noqa: C901
         warn("tesseract", f"absent — only label photos need it ({install_cmd('tesseract')})")
 
     print()
+    print(f"{b}Photo->3D vision stack (3d segment / detect / recognise — OPTIONAL){z}")
+    vinfo = _vision_stage_json("info", [])
+    if vinfo is None:
+        warn("vision python env", "absent — see packages/threed-vision/README.md (uv venv + uv pip install -e packages/threed-vision[gpu,seg,fit])")
+    else:
+        ort = vinfo.get("onnxruntime") or {}
+        if not ort.get("installed"):
+            warn("onnxruntime", "absent in the vision env — uv pip install 'packages/threed-vision[gpu]'")
+        elif ort.get("cuda_usable"):
+            passl("onnxruntime CUDA", f"onnxruntime {ort.get('version')}: CUDAExecutionProvider loads (GPU CLIP/DINO/u2net)")
+        else:
+            libs = ", ".join(ort.get("missing_cuda_libs") or []) or "CUDAExecutionProvider is not listed"
+            warn(
+                "onnxruntime CUDA",
+                f"onnxruntime {ort.get('version')} runs on CPU: cannot load {libs} "
+                "(onnxruntime-gpu 1.23.x needs the CUDA-12 libs shipped by the torch cu128 wheels; >=1.24 is a CUDA-13 build)",
+            )
+        vmodels = _vision_stage_json("vision-models", ["status", "--json"])
+        if vmodels is not None:
+            todo = [n for n, m in vmodels.get("models", {}).items() if not m.get("installed")]
+            if todo:
+                warn("vision models", f"missing: {', '.join(todo)} — run: 3d vision-models pull {' '.join(todo)}")
+            else:
+                passl("vision models", f"all {len(vmodels.get('models', {}))} present in {vmodels.get('models_dir')}")
+
+    print()
     print(f"{b}OpenSCAD libraries{z}")
     if os.path.isdir(os.path.join(repo_root(), "libs", "BOSL2")):
         passl("libs/BOSL2", os.path.join(repo_root(), "libs", "BOSL2"))
@@ -232,6 +262,25 @@ def run(argv: list[str]) -> int:  # noqa: C901
     )
     # informational: nonzero so scripts/CI can gate, but never crashes.
     return 1
+
+
+def _vision_stage_json(stage: str, args: list[str]) -> dict[str, Any] | None:
+    """Run one `threed_vision` stage in the vision venv and parse its single JSON object (None when unavailable)."""
+    from cli.vision_env import package_src, stage_argv
+    from errors import MissingDependency
+
+    try:
+        argv = stage_argv(stage, args, heavy=True)
+    except MissingDependency:
+        return None
+    env = dict(os.environ)
+    env["PYTHONPATH"] = package_src() + os.pathsep + env.get("PYTHONPATH", "")
+    try:
+        r = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=60)
+        data = json.loads(r.stdout)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
 
 
 COMMAND = Command(
