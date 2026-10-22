@@ -9,8 +9,10 @@
 #   title           human name
 #   scope           what a record is bound to: printer | head (implies printer) | nozzle (the
 #                   nozzle installed on the head) | plate (build plate of the printer) | filament
-#                   (Spoolman filament: vendor + material + product). A record matches a print
-#                   only when every scope dimension matches.
+#                   (Spoolman filament: vendor + material + product) | mix (a colour mix: layer
+#                   height + the filaments of its layer cycle or Local-Z shares, by Spoolman
+#                   filament id, lib/printops/mix_key.py; goes with printer only). A record
+#                   matches a print only when every scope dimension matches.
 #   lot_sensitive   true: a record for another lot of the same filament still applies, but the
 #                   requirement reports `new_lot` (policy decides warn/block/off)
 #   baseline        required: a scope without any record is missing (new material/vendor/…);
@@ -21,7 +23,8 @@
 #                   nozzle_swap | nozzle_diameter | extruder | ptfe | hotend | kinematics | belts |
 #                   plate | head_swap | move | repair
 #   methods         how a value is obtained (free names; `3d calibrate gen` implements some)
-#   values          what a result records: {name: {type number|string, min, max, unit, optional}}
+#   values          what a result records: {name: {type number|string|color, min, max, unit,
+#                   optional}}; color = "#RRGGBB" (stored upper-case)
 #   order           value names that must be non-decreasing (e.g. temp min ≤ best ≤ max)
 #   gcode           footer checks of the `calibration_current` gate: value name →
 #                   {key: G-code footer key, compare eq|le, tolerance, enabled_by: footer key that
@@ -209,3 +212,44 @@ kinds:
     estimate: {minutes: 10, grams: 0}
     sources:
       - https://www.klipper3d.org/Measuring_Resonances.html
+
+  # Colour (epic #410, plan §20.4, issue #412). Neither is a requirement before a print: the mix
+  # model (`3d mix`) and the mix check of print-preflight read these records directly
+  # (filament_color is `off` in fleet/policy.yaml; mix-scoped kinds never enter the per-head
+  # requirement lists).
+  filament_color:
+    title: Filament colour as printed
+    scope: [filament]
+    lot_sensitive: true
+    baseline: required
+    invalidated_by: []
+    methods: [mix_tester_photo, colorimeter, manual]  # mix_tester_photo: the pure reference swatch of `3d mix tester`
+    values:
+      hex: {type: color}                       # measured sRGB after white balance
+      spoolman_hex: {type: color, optional: true}  # the hex it corrects
+      delta_e: {type: number, min: 0, max: 100, optional: true}  # CIEDE2000 spoolman_hex → hex
+      lab_l: {type: number, min: 0, max: 100, optional: true}
+      lab_a: {type: number, min: -128, max: 128, optional: true}
+      lab_b: {type: number, min: -128, max: 128, optional: true}
+    apply: [journal]
+    estimate: {minutes: 15, grams: 1}
+    sources:
+      - "babushkin-dom docs/full-spectrum/README.md (Full Spectrum colour model, CIEDE2000)"
+      - https://hajim.rochester.edu/ece/sites/gsharma/ciede2000/
+
+  mix_color:
+    title: Colour mix as printed
+    scope: [printer, mix]
+    lot_sensitive: false
+    baseline: assumed
+    invalidated_by: []
+    methods: [mix_tester_photo, manual]
+    values:
+      hex: {type: color}                       # measured wall colour of the mix
+      predicted_hex: {type: color, optional: true}  # what the mix model predicted
+      delta_e_predicted: {type: number, min: 0, max: 100, optional: true}
+    apply: [journal]
+    estimate: {minutes: 15, grams: 1}
+    sources:
+      - "babushkin-dom SPEC.md item 58 (short layer patterns read best on walls)"
+      - https://hajim.rochester.edu/ece/sites/gsharma/ciede2000/

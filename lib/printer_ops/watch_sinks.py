@@ -327,8 +327,12 @@ class Dispatcher:
         from printer_ops.printer_agent import PrinterAgentSink
         from printer_ops.subscriptions import SubscriptionSink
 
-        self.add(printer, [*sinks_for(settings["sinks"], dry_run=dry_run), SubscriptionSink(dry_run=dry_run),
-                           PrinterAgentSink(dry_run=dry_run)], settings["min_severity"], settings["dedup_s"])
+        sinks = [*sinks_for(settings["sinks"], dry_run=dry_run), SubscriptionSink(dry_run=dry_run)]
+        # Managed subscribers may be intentionally read-only. Never replace a missing
+        # managed agent with a broader default agent when the operator disables fallback.
+        if settings.get("agent_fallback", True):
+            sinks.append(PrinterAgentSink(dry_run=dry_run))
+        self.add(printer, sinks, settings["min_severity"], settings["dedup_s"])
 
     @classmethod
     def for_devices(cls, devices: Iterable[Device], *, dry_run: bool = False,

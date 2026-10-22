@@ -7,13 +7,13 @@ Talks to 3d-api like [`3d printops`](printops.md) (`PRINTOPS_API`, `PRINTOPS_TOK
 ```
 3d calibrate plan --printer P [--head T] [--spool ID] [--plate PLATE] [--all]
 3d calibrate record KIND --printer P [--head T] [--spool ID | --filament ID] [--lot LOT] [--plate PLATE]
-                    --values NAME=V[,NAME=V…] [--method M] [--note TEXT] [--evidence URL[,URL…]]
-                    [--valid-until DATE]
-3d calibrate ls [--printer P] [--head T] [--kind KIND] [--status planned|recorded|abandoned] [--all] [--limit N]
+                    [--mix KEY] --values NAME=V[,NAME=V…] [--method M] [--note TEXT]
+                    [--evidence URL[,URL…]] [--valid-until DATE]
+3d calibrate ls [--printer P] [--head T] [--kind KIND] [--mix KEY] [--status planned|recorded|abandoned] [--all] [--limit N]
 3d calibrate show ID
 3d calibrate check FILE.gcode --printer P [--spools T1=ID,…] [--plate PLATE]
                    [--accept calibration:KIND[,…] --reason TEXT]
-3d calibrate gen pa|flow|combo|temp|shaper|plate1|dense --printer P -o OUT --filament-preset NAME
+3d calibrate gen pa|flow|combo|temp|shaper|plate1|dense|dense2 --printer P -o OUT --filament-preset NAME
                  [--machine-preset NAME] [--process-preset NAME] [--material PLA] [--color #RRGGBB]
                  [--nozzle-temp C] [--only T,…] [--skip T,…] [--pa-range LOW:HIGH] [--pa-step S]
   common (all but gen): [--json] [--api URL] [--token TOKEN]
@@ -42,10 +42,24 @@ other values than the recorded ones.
 | `head_offsets` (U1 only) | printer | — | assumed | head_swap, nozzle_swap, hotend, repair | — |
 | `rotation_distance` | head | — | assumed | extruder | — |
 | `belt_tension` | printer | — | assumed | belts, kinematics | — |
+| `filament_color` | filament | yes | required, policy `off` | — | — (read by the mix model, `3d mix`) |
+| `mix_color` | printer × mix | — | assumed | — | — (read by the mix check of a plate, #418) |
 
 *Baseline* `required`: a head without a record for the loaded filament needs one.
 *Baseline* `assumed`: no record means the factory state, which holds until maintenance invalidates
 it. The file's header documents every key (values with ranges, methods, apply targets, estimates).
+
+**Colour kinds** ([#412](https://github.com/alex-mextner/3d-cli/issues/412), plan §20.4) are never
+required before a print and never appear in `plan`: `filament_color` (the colour a filament really
+prints: the per-spool correction of the Spoolman hex) is `off` in `fleet/policy.yaml`, and the
+engine skips every `mix`-scoped kind. Their values have the type `color` (`#RRGGBB`, stored upper
+case). `mix_color` is keyed by `--mix`, the canonical key of a colour mix
+(`lib/printops/mix_key.py`): the layer height and the Spoolman filament ids of its layer cycle,
+reduced to the shortest repeating unit and rotated to the smallest id sequence compared as
+numbers (`h0.12:f3.f12.f7`; patterns `431` and `314` on the same filaments are one mix), or a
+Local-Z row's whole-percent shares by filament id (`h0.12:lz:f1=25,f4=75`). Any rotation is
+accepted and stored canonical; a newer record of the same printer and key supersedes the older,
+a record of another key never does.
 
 ## Requirement statuses and the policy
 
@@ -105,6 +119,9 @@ older one. Values are checked against the catalog (`flow_ratio=3` is refused: 0.
 3d calibrate record pressure_advance --printer u1 --head T3 --values pressure_advance=0.035 --method pa_pattern
 3d calibrate record input_shaper --printer k1se --values shaper_type_x=mzv,shaper_freq_x=54.2,shaper_type_y=ei,shaper_freq_y=41 --method k1_auto
 3d calibrate record temp_tower --filament 7 --lot B7 --values nozzle_temp_min=205,nozzle_temp_best=215,nozzle_temp_max=230
+3d calibrate record filament_color --spool 12 --values hex=#C8902A,spoolman_hex=#F6C700 --method mix_tester_photo
+3d calibrate record mix_color --printer u1 --mix h0.12:f3.f12.f7 --values hex=#B5654F,predicted_hex=#A86A55
+3d calibrate ls --kind mix_color --mix h0.12:f12.f7.f3
 ```
 
 Calibrations done before 3d-api knew of them (written to the offline settings-history buffer) are
@@ -201,6 +218,24 @@ and acceleration measures settings you do not print with). The G-code ends with
   and after each visit the engine re-sends the slicer's acceleration and fan and balances any
   extrusion a band changed. Labels are one-layer digits on the bed. The 22 mm bridge needs
   `print-preflight --bridge-max 25`. K1 SE, PLA: ~44 min + START_PRINT, ~13 g; OpenSCAD on PATH.
+- `dense2` — the second K1 SE bed (`lib/slicing/calibration_plates/dense2.py`): only what `dense`
+  left open, on a 7×7 grid of 30 mm cells, every sample facing the same way with a raised
+  seven-segment label (one size, 5 mm) at the front of its cell. Hole tiles side by side: plain
+  mesh (PL), polyholes (PH), arc fitting (AF), xy hole compensation +0.1 (HC); Orca's CLI has no
+  per-object settings for STLs, so PH and HC are drawn into the mesh and AF's visits come from a
+  second slice with `enable_arc_fitting` (swapped only where both slices enter and leave a visit
+  at the same place). Ovality targets Ø3/5/8/10 with X/Y edges, a 5 mm ruler and a Ø10 ring; pins
+  in holes 0.15/0.25/0.35 and, with a 0.4 mm first-layer chamfer, 0.10/0.15/0.20; elephant-foot
+  blocks without/with the chamfer; M3 2.7/3.0/3.6, M4 3.5/4.0/4.7; slots 2.05/2.15/2.25 and the
+  2 mm tab; hinges 0.25/0.35; thin walls 0.25/0.35/0.45 along Y and X; the 14 mm bridge and the
+  60° overhang on 8 mm bases; MVS strip 24–32 mm³/s; stringing pillars; a top tile; a temperature
+  mini-tower last and alone; corner fiducials (ring + rulers) and 20 mm one-layer patches on the
+  free cells. Brims: 3 mm on every object whose base side is under 10 mm or that is taller than
+  its base is wide (`Plate.brim`): hand-written for objects printed by layer (Orca's own brim
+  would go on every object), Orca's own in the sequential slice for the tower. MVS 20
+  and inner walls at 8000 come from the user presets (#266); the map's `slicer_overrides` lists
+  what the plate sets on top of them. The engine now picks a Z band by the layer's range (Orca's
+  `;Z:` is the layer's top), so a band's setting starts on the layer its step does (#301).
 - `shaper` — a text file of console commands for printers with an accelerometer (K1 SE: ADXL345):
   G28, nozzle and part fan off, `TEMPERATURE_WAIT SENSOR=extruder MAXIMUM=38` (a hot nozzle keeps
   the hotend fan on, and its vibration masks the resonance; the K1's G28 heats it to 140 °C),
@@ -210,6 +245,35 @@ and acceleration measures settings you do not print with). The G-code ends with
 `TUNING_TOWER` and `M221` are inert for the macro check (they never move the head). Orca's
 `calc_exclude_triangles` error is accepted in the sidecar only when the machine has no bed
 exclude area.
+
+### U1 plate 1: every test on a white underlay ([#320](https://github.com/alex-mextner/3d-cli/issues/320), [#322](https://github.com/alex-mextner/3d-cli/issues/322), [#308](https://github.com/alex-mextner/3d-cli/issues/308))
+
+The Snapmaker U1 plate is generated as a Snapmaker Orca project by
+`lib/slicing/calibration_plates/u1_underlay.py`. It is not a `gen` sub-plate: the K1 engine
+writes one object per STL, and the U1 needs each test as one object with white and black parts.
+
+```sh
+cd lib && uv run --project .. --with segno --with pillow \
+  python -m slicing.calibration_plates.u1_underlay -o ~/.cache/u1-calib/u1_plate1_underlay_bw.gcode [--date YYYY-MM-DD] [--preview-only]
+```
+
+- The underlay is 2 layers in white on T4 (G-code `T3`), with a 5 mm brim, part fan 0 and the bed
+  at 70 °C for the first layer. The tests are in black on T1 (`T0`) from layer 3. The G-code has
+  exactly one tool change, T4 → T1, above the underlay (#308), and no prime tower.
+- Each test is its own Orca object, so it has its own `EXCLUDE_OBJECT`. The test's white base
+  overlaps the underlay sheet by 0.05 mm so the perimeters fuse. Loose pieces (pins, the tab,
+  hinges, elephant-foot blocks) stand on white feet in cut-outs of the base.
+- Per-object parameters:
+  - ironing is an object setting;
+  - flow, ringing/VFA ACCEL and speed, retraction and temperature are G-code hooks on the black
+    visits; bands are chosen by the layer's mid height (#301);
+  - the temperature bands start above every other test;
+  - PA lines and the MVS strip are hand-written and run inside their own objects.
+- The map `NAME.json` lists each test's `read_by` (`camera_top` / `camera_side` / `manual`,
+  tg#22399), the hooks applied per object and layer, the per-layer tool and fan scan, and the
+  label (`C<date>P1` and its QR when `segno` is installed).
+- Before printing: `3d gcode-thumbnails add`, `3d slice-warnings record` with
+  `NAME.slice.log`, and `3d print-preflight --printer u1`.
 
 ## `photo` — the top-camera photo mode ([#342](https://github.com/alex-mextner/3d-cli/issues/342))
 

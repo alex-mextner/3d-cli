@@ -10,7 +10,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
 from ..calibration_plate import Plate, PlateContext
-from . import dense, filament
+from . import dense, dense2, filament
 
 
 @dataclass(frozen=True)
@@ -22,6 +22,7 @@ class PlateDef:
 PLATES: dict[str, PlateDef] = {
     filament.PLATE_ID: PlateDef(filament.build, filament.TESTS),
     dense.PLATE_ID: PlateDef(dense.build, dense.TESTS),
+    dense2.PLATE_ID: PlateDef(dense2.build, dense2.TESTS),
 }
 
 

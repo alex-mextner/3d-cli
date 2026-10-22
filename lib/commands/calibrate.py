@@ -28,20 +28,21 @@ if TYPE_CHECKING:  # registry contract: stdlib-only at import time
 
 USAGE = """3d calibrate plan --printer P [--head T] [--spool ID] [--plate PLATE] [--all]
 3d calibrate record KIND --printer P [--head T] [--spool ID | --filament ID] [--lot LOT] [--plate PLATE]
-                    --values NAME=V[,NAME=V…] [--method M] [--note TEXT] [--evidence URL[,URL…]]
-                    [--valid-until DATE]
-3d calibrate ls [--printer P] [--head T] [--kind KIND] [--status planned|recorded|abandoned] [--all] [--limit N]
+                    [--mix KEY] --values NAME=V[,NAME=V…] [--method M] [--note TEXT]
+                    [--evidence URL[,URL…]] [--valid-until DATE]
+3d calibrate ls [--printer P] [--head T] [--kind KIND] [--mix KEY] [--status planned|recorded|abandoned] [--all] [--limit N]
 3d calibrate show ID
 3d calibrate check FILE.gcode --printer P [--spools T1=ID,…] [--plate PLATE]
                    [--accept calibration:KIND[,…] --reason TEXT]
-3d calibrate gen pa|flow|combo|temp|shaper|plate1|dense --printer P -o OUT [--material PLA] [--color #RRGGBB]
+3d calibrate gen pa|flow|combo|temp|shaper|plate1|dense|dense2 --printer P -o OUT [--material PLA] [--color #RRGGBB]
                  [--nozzle-temp C] [--only T,…] [--skip T,…] [--pa-range LOW:HIGH] [--pa-step S]
                  [--machine-preset NAME] [--process-preset NAME] --filament-preset NAME
   common (all but gen): [--json] [--api URL] [--token TOKEN]
 
   Calibrations per printer head and filament (fleet/calibrations.yaml: flow_ratio, pressure_advance,
   temp_tower, max_volumetric_speed, retraction, input_shaper, z_offset, bed_mesh, head_offsets,
-  rotation_distance, belt_tension). 3d-api compares what is loaded on a head (the spool bound with
+  rotation_distance, belt_tension; colour: filament_color, mix_color — read by `3d mix`, never
+  required before a print). 3d-api compares what is loaded on a head (the spool bound with
   `3d printops spool load`) with the records: a new material type, vendor or filament blocks flow
   ratio and pressure advance, a new lot warns, a nozzle swap or maintenance makes old records stale
   (fleet/policy.yaml `calibrations:` sets block/warn/off per reason, kind and printer).
@@ -63,7 +64,10 @@ Subcommands:
           (printers with an accelerometer); plate1 = the filament plate: every test of a new spool on
           one bed, each object with its own setting (docs/printops/express-calibration.md); dense =
           plate1's tests without PA/flow plus ringing (ACCEL by Z), VFA (speed by Z), size/skew,
-          fits, hinges, screw holes, thin walls, first-layer patches (K1 SE bed); plates add a
+          fits, hinges, screw holes, thin walls, first-layer patches (K1 SE bed); dense2 = what
+          dense left open: hole variants (plain/polyhole/arc fitting/hole compensation), ovality,
+          new fit/screw/slot/hinge/thin-wall values, elephant foot, bridge and overhang with a 3 mm
+          brim, MVS 24–32, a 7x7 grid with fiducials (K1 SE bed); plates add a
           JSON map object → parameters, bbox, how to read it. The G-code gets thumbnails and a slice-warnings record,
           ready for `3d print-preflight` (temp: filament_temp_range FAILs when the tower's hottest
           block is above the spool's nozzle window; start it with --force). Local only; set SLICER=/path/to/orca.
@@ -75,6 +79,9 @@ Options:
   --filament ID      record for a Spoolman filament without a spool (e.g. a temperature tower)
   --lot LOT          lot number of the record (default: the spool's Spoolman lot_nr)
   --plate PLATE      build plate (z_offset, bed_mesh); default: the printer's only plate
+  --mix KEY          record/ls: the colour mix of a mix_color record — layer height and the Spoolman
+                     filament ids of its layer cycle (h0.12:f3.f12.f7; 431 and 314 are one mix) or
+                     its Local-Z shares (h0.12:lz:f1=25,f4=75)
   --values N=V,…     result values, e.g. pressure_advance=0.035 or flow_ratio=0.97
   --method M         how it was measured (the kind's methods; default manual)
   --evidence URLs    photo URLs / notes kept with the record
@@ -91,8 +98,8 @@ Options:
   --nozzle-temp C    gen: nozzle temperature instead of the preset's (not for temp: it prints its range)
   -o, --out FILE     gen: output .gcode (shaper: a .txt of console commands; plates also write OUT.json)
   --only T,…         gen plateN: print only these tests (plate1: pa, mvs, flow, bridge, overhang,
-                     retraction, temp; dense: see docs/commands/calibrate.md); plate1 packs again,
-                     dense keeps its fixed layout
+                     retraction, temp; dense, dense2: see docs/commands/calibrate.md); plate1
+                     packs again, dense and dense2 keep their fixed layout
   --skip T,…         gen plateN: print all tests but these
   --pa-range LOW:HIGH gen combo/plateN: PA line range (default by material: PLA 0:0.10, PETG 0:0.15)
   --pa-step S        gen combo/plateN: PA line step (default 0.01; a fine pass: --pa-range 0.03:0.05
@@ -112,6 +119,8 @@ Examples:
   3d calibrate record pressure_advance --printer u1 --head T3 --values pressure_advance=0.035 --method pa_pattern
   3d calibrate record flow_ratio --printer k1se --head T1 --values flow_ratio=0.97 --note "tiles 3/5"
   3d calibrate record temp_tower --filament 7 --values nozzle_temp_min=205,nozzle_temp_best=215,nozzle_temp_max=230
+  3d calibrate record filament_color --spool 12 --values hex=#C8902A,spoolman_hex=#F6C700 --method mix_tester_photo
+  3d calibrate record mix_color --printer u1 --mix h0.12:f3.f12.f7 --values hex=#B5654F,predicted_hex=#A86A55
   3d calibrate check plate.gcode --printer u1
   3d calibrate check plate.gcode --printer u1 --accept calibration:flow_ratio --reason "test cube, flow irrelevant"
   3d calibrate plan --printer u1 --json | jq '.items[] | {head, kind, status, level}'
@@ -121,7 +130,8 @@ Examples:
   3d calibrate gen temp --printer k1se --filament-preset 'Orange PLA @K1SE' -o k1se_temp_orange.gcode
   3d calibrate gen plate1 --printer k1se --filament-preset 'Orange PLA @K1SE' --skip pa,flow -o k1se_plate1_orange.gcode
   3d calibrate gen plate1 --printer k1se --filament-preset 'Orange PLA @K1SE' --only pa,flow --pa-range 0.03:0.05 --pa-step 0.0025 -o k1se_pa_fine.gcode
-  3d calibrate gen dense --printer k1se --filament-preset 'Orange PLA @K1SE' -o k1se_dense_orange.gcode"""
+  3d calibrate gen dense --printer k1se --filament-preset 'Orange PLA @K1SE' -o k1se_dense_orange.gcode
+  3d calibrate gen dense2 --printer k1se --filament-preset 'Orange PLA @K1SE' -o k1se_dense2_orange.gcode"""
 
 USAGE += (
     "\n\nTop-camera photo (#342):\n"
@@ -242,6 +252,7 @@ def _record(argv: list[str]) -> int:
             "--filament",
             "--lot",
             "--plate",
+            "--mix",
             "--values",
             "--method",
             "--note",
@@ -273,6 +284,7 @@ def _record(argv: list[str]) -> int:
         ("--head", "head"),
         ("--lot", "lot_nr"),
         ("--plate", "plate"),
+        ("--mix", "mix"),
         ("--method", "method"),
         ("--note", "note"),
         ("--valid-until", "valid_until"),
@@ -299,6 +311,7 @@ def _record_line(rec: dict[str, Any]) -> str:
     where = (
         "/".join(x for x in (rec.get("printer"), rec.get("head")) if x) or "any printer"
     )
+    where += f" mix {rec['mix']}" if rec.get("mix") else ""
     fil = rec.get("filament") or {}
     what = " ".join(
         str(x) for x in (fil.get("vendor"), fil.get("name") or fil.get("material")) if x
@@ -324,7 +337,7 @@ def _ls(argv: list[str]) -> int:
     p = parse(
         argv,
         "ls",
-        values={"--printer", "--head", "--kind", "--status", "--limit"} | COMMON_VALUES,
+        values={"--printer", "--head", "--kind", "--mix", "--status", "--limit"} | COMMON_VALUES,
         flags={"--all"} | COMMON_FLAGS,
         prefix=PREFIX,
     )
@@ -335,6 +348,7 @@ def _ls(argv: list[str]) -> int:
             printer=p.opts.get("--printer"),
             head=p.opts.get("--head"),
             kind=p.opts.get("--kind"),
+            mix=p.opts.get("--mix"),
             status=p.opts.get("--status"),
             current=None if "--all" in p.flags or "--status" in p.opts else "true",
             limit=limit,
@@ -453,9 +467,13 @@ def _float(raw: str, opt: str) -> float:
     try:
         value = float(raw)
     except ValueError as e:
-        raise UsageError(f"{opt} wants a number, got {raw!r}", command=f"{PREFIX} gen") from e
+        raise UsageError(
+            f"{opt} wants a number, got {raw!r}", command=f"{PREFIX} gen"
+        ) from e
     if value != value or value in (float("inf"), float("-inf")):
-        raise UsageError(f"{opt} wants a finite number, got {raw!r}", command=f"{PREFIX} gen")
+        raise UsageError(
+            f"{opt} wants a finite number, got {raw!r}", command=f"{PREFIX} gen"
+        )
     return value
 
 
@@ -490,7 +508,9 @@ def _preset_choice(opts: dict[str, str], entry: FleetPrinter) -> PresetChoice:
             f"no {', '.join(missing)} preset for {entry.name}: {NO_PRESETS_HINT}",
             command=f"{PREFIX} gen",
         )
-    return PresetChoice(names["machine"], names["process"], names["filament"], tuple(sources))
+    return PresetChoice(
+        names["machine"], names["process"], names["filament"], tuple(sources)
+    )
 
 
 def _ids(raw: str) -> frozenset[str]:

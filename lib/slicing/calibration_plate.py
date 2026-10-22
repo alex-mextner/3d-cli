@@ -12,9 +12,12 @@ OBJECT HOOKS (the per-object parameter contract): every value a test changes is 
   the object and undone when it leaves:
     before  once, before the object's first EXCLUDE_OBJECT_START
     enter   after every EXCLUDE_OBJECT_START (every layer in by-layer mode)
-    band    the Band whose [z0, z1) holds the current layer: its gcode after START and again when
-            a ;Z: marker inside the object moves into the next band; its transform rewrites the
-            object's own lines (between START and END only, never travels between objects)
+    band    the Band holding the current layer: its gcode after START and again when a ;Z: marker
+            inside the object moves into the next band; its transform rewrites the object's own
+            lines (between START and END only, never travels between objects). Orca's ;Z: is
+            the top of the layer that follows it, so a layer is the slab between the previous
+            marker and this one and belongs to the band holding its middle: the band's setting
+            switches on the very layer its geometry starts (#301)
     leave   before every EXCLUDE_OBJECT_END (restore: M221 S100, M220 S100, stock PA, ACCEL …)
     after   once, after the object's last EXCLUDE_OBJECT_END
   After an object that ran a band, the slicer's own acceleration, square corner velocity and fan
@@ -30,6 +33,15 @@ K1 GANTRY: sequential objects must stay under extruder_clearance_height_to_rod a
   that radius (Euclidean, bbox to bbox) away from every sequential object, so the head never
   reaches a finished object while it prints a tower; one-layer objects (patches, bed labels) lie
   below the nozzle tip. The splice lifts above everything before travelling to the first tower.
+BRIMS: Plate.brim > 0 gives every object that needs one (PlateObject.brim, else the rule in
+  brim_width: a base side under BRIM_BASE_MM or taller than its base is wide) a brim of that
+  width. Layer objects get a hand-written brim around each piece of their base, printed with the
+  other custom blocks: Orca's CLI has no per-object settings for STL inputs, so a brim on some
+  objects only must be our own. Sequential objects print last and alone, so their slice turns
+  on Orca's own brim (seq_brim) and it prints right before them, not cold at the start.
+ARC FITTING: a PlateObject with arc_fitting=True gets its every visit from a second layer slice
+  with enable_arc_fitting on (a G-code export option of the whole plate in Orca): swap_visits
+  checks each pair can stand in for the other (entry travel, Z, retraction, the lift after it).
 WHY: one 30–40 min plate replaces several separate calibration prints (express calibration of a
   new spool, docs/printops/express-calibration.md; issue #254 and its follow-up).
 """
@@ -76,6 +88,7 @@ from slicing.calibration_gen import (
 )
 
 Phase = Literal["layer", "sequential"]
+Rect = tuple[float, float, float, float]  # x0, y0, x1, y1 on the bed
 _NAME = re.compile(r"^[a-z][a-z0-9_]*$")
 _START = re.compile(r"^EXCLUDE_OBJECT_START NAME=([A-Za-z0-9_]+)\.stl\S*")
 _END = re.compile(r"^EXCLUDE_OBJECT_END NAME=([A-Za-z0-9_]+)\.stl\S*")
@@ -127,6 +140,9 @@ class PlateObject:
     bed_label: tuple[str, float, float] | None = (
         None  # text, centre x, bottom y: printed on the bed
     )
+    base: tuple[Rect, ...] = ()  # pieces of the bed footprint (default: base_rects())
+    brim: float | None = None  # brim width, mm; None: the plate's rule (brim_width)
+    arc_fitting: bool = False  # this object's G-code from a slice with arc fitting on
 
     def mesh(self) -> str:
         return self.stl or boxes_stl(list(self.boxes))
@@ -138,8 +154,17 @@ class PlateObject:
             return self.stl_bbox
         return _union(self.boxes)
 
-    def band_at(self, z: float) -> Band | None:
-        return next((b for b in self.bands if b.z0 <= z + 1e-6 < b.z1), None)
+    def base_rects(self) -> tuple[Rect, ...]:
+        """The footprint on the bed: `base`, else the boxes standing on it, else the bbox."""
+        if self.base:
+            return self.base
+        on_bed = tuple(box_rect(b) for b in self.boxes if b[2] <= 1e-6)
+        return on_bed or (box_rect(self.bbox()),)
+
+    def band_for(self, lo: float, hi: float) -> Band | None:
+        """The band holding the layer that spans [lo, hi] (its middle; #301)."""
+        mid = (lo + hi) / 2
+        return next((b for b in self.bands if b.z0 <= mid + 1e-6 < b.z1), None)
 
 
 @dataclass(frozen=True)
@@ -173,6 +198,7 @@ class Plate:
         str, ...
     ] = ()  # before END_PRINT: undo anything a hook may have left set
     notes: tuple[str, ...] = ()
+    brim: float = 0.0  # brim width for the objects that need one (brim_width); 0: none
 
 
 @dataclass(frozen=True)
@@ -270,6 +296,11 @@ def make_context(
         tests,
         pa,
     )
+
+
+def box_rect(b: Box) -> Rect:
+    """A box's outline on the bed."""
+    return b[0], b[1], b[3], b[4]
 
 
 def _union(boxes: tuple[Box, ...] | list[Box]) -> Box:
@@ -413,7 +444,8 @@ def apply_hooks(
     if missing:
         raise GenError(f"objects not found in the slice: {', '.join(missing)}")
     out: list[str] = []
-    z = 0.0
+    z = 0.0  # the current layer spans [z_lo, z]: Orca's ;Z: marks a layer's top
+    z_lo = 0.0
     cur: PlateObject | None = None
     band: Band | None = None
     banded = False  # a band ran during this visit of `cur`
@@ -423,10 +455,15 @@ def apply_hooks(
     for i, line in enumerate(lines):
         state.see(line)
         if m := _ZMARK.match(line):
-            z = float(m.group(1))
+            nz = float(m.group(1))
+            if nz < z - 1e-6:  # by-object printing: the next object's first layer
+                z_lo = 0.0
+            elif nz > z + 1e-6:
+                z_lo = z
+            z = nz
             out.append(line)
             if cur is not None:
-                nb = cur.band_at(z)
+                nb = cur.band_for(z_lo, z)
                 if nb is not band and nb is not None:
                     out += nb.gcode
                 band = nb
@@ -438,7 +475,7 @@ def apply_hooks(
                 out += cur.before
             out.append(line)
             out += cur.enter
-            band = cur.band_at(z)
+            band = cur.band_for(z_lo, z)
             banded = band is not None
             primed = False
             if band is not None:
@@ -640,6 +677,206 @@ def bed_labels(
     )
 
 
+# The default brim rule: a base side under this, or an object taller than its base is wide,
+# tips or peels off without one (the 60° overhang on a 4 mm base did on the first dense plate).
+BRIM_BASE_MM = 10.0
+BRIM_GAP = 0.15  # mm between the object and the brim's first line: fused, yet peels off
+BRIM_SPEED = 30.0  # mm/s, a first-layer speed
+
+
+def brim_width(o: PlateObject, auto: float) -> float:
+    """The object's own `brim`, else `auto` when its base needs one (BRIM_BASE_MM rule)."""
+    if o.brim is not None:
+        return o.brim
+    if auto <= 0:
+        return 0.0
+    side = min(min(r[2] - r[0], r[3] - r[1]) for r in o.base_rects())
+    return auto if side < BRIM_BASE_MM or o.bbox()[5] > side else 0.0
+
+
+def brim_rects(o: PlateObject, width: float, line_w: float) -> list[Rect]:
+    """The outer edge of the brim around each base piece (for layout checks and footprint)."""
+    n = max(1, round(width / line_w))
+    d = BRIM_GAP + n * line_w
+    return [(r[0] - d, r[1] - d, r[2] + d, r[3] + d) for r in o.base_rects()]
+
+
+def seq_brim(plate: Plate) -> dict[str, Any]:
+    """Orca brim settings for the sequential slice: the widest brim its objects need."""
+    width = max(
+        (brim_width(o, plate.brim) for o in plate.objects if o.phase == "sequential"),
+        default=0.0,
+    )
+    if width <= 0:
+        return {}
+    return {"brim_type": "outer_only", "brim_width": width, "brim_object_gap": BRIM_GAP}
+
+
+def brim_block(ctx: PlateContext, plate: Plate) -> CustomBlock | None:
+    """One hand-written first-layer block: per base piece of every layer object that needs a
+    brim, concentric rectangles one line apart, BRIM_GAP away from the piece, as one path.
+    Sequential objects print minutes later: their brim is Orca's own, in their slice
+    (seq_brim)."""
+    w = ctx.ex.line_w
+    body: list[str] = []
+    widths: dict[str, float] = {}
+    for o in plate.objects:
+        if o.phase != "layer":
+            continue
+        width = brim_width(o, plate.brim)
+        if width <= 0:
+            continue
+        widths[o.name] = width
+        n = max(1, round(width / w))
+        for x0, y0, x1, y1 in o.base_rects():
+            path: list[tuple[float, float]] = []
+            for k in range(n):
+                d = BRIM_GAP + w / 2 + k * w
+                left, front, right, back = x0 - d, y0 - d, x1 + d, y1 + d
+                path += [
+                    (left, front),
+                    (right, front),
+                    (right, back),
+                    (left, back),
+                    (left, front),
+                ]
+            body += _path_gcode(path, ctx.ex, [BRIM_SPEED] * (len(path) - 1))
+    if not body:
+        return None
+    return CustomBlock(
+        "brims",
+        "brim",
+        custom_lines(ctx, body, "brims"),
+        params={name: f"{v:g} mm" for name, v in widths.items()},
+        read=f"Brims (one layer, {BRIM_GAP:g} mm from the part) around the objects that need one: "
+        f"a base side under {BRIM_BASE_MM:g} mm or taller than the base is wide. Peel them off "
+        "before measuring.",
+    )
+
+
+_XYZ = re.compile(r"\b([XYZ])(-?[\d.]+)")
+
+
+def _visit_ends(lines: list[str]) -> tuple[bool, float | None, float]:
+    """(enters and leaves safely, the Z it prints at last, sum of retractions and E-only
+    moves) of one visit. Safely: its first XY move has no E word and runs at a Z set inside the
+    visit above the Z it ends at (Orca's z-hop, travel, lower), and its last E word is a
+    retraction (no primed nozzle for the lift and travel after it)."""
+    entry_z: float | None = None
+    entered: bool | None = None
+    z: float | None = None
+    last_e = 0.0
+    retract = 0.0
+    for line in lines:
+        if not line.startswith(("G0 ", "G1 ", "G2 ", "G3 ")):
+            continue
+        code = line.split(";", 1)[0]
+        words = dict(_XYZ.findall(code))
+        m = _EWORD.search(code)
+        e = float(m.group(1)) if m else 0.0
+        xy = "X" in words or "Y" in words
+        if "Z" in words:
+            z = float(words["Z"])
+        if entered is None and xy:
+            entered = m is None and z is not None
+            entry_z = z
+        if m:
+            last_e = e
+        if e < 0 or (m and not xy):
+            retract += e
+    lifted = (
+        bool(entered) and entry_z is not None and z is not None and entry_z > z + 1e-6
+    )
+    return lifted and last_e < 0, z, retract
+
+
+def _visits(lines: list[str], name: str) -> list[tuple[int, int]]:
+    out: list[tuple[int, int]] = []
+    start = None
+    for i, line in enumerate(lines):
+        if (m := _START.match(line)) and m.group(1) == name:
+            start = i
+        elif (m := _END.match(line)) and m.group(1) == name and start is not None:
+            out.append((start, i))
+            start = None
+    return out
+
+
+def _states_at(lines: list[str], idxs: set[int]) -> dict[int, list[str]]:
+    """The slicer's acceleration/fan state (as _SlicerState.resend()) before each line in idxs."""
+    state = _SlicerState()
+    out: dict[int, list[str]] = {}
+    for i, line in enumerate(lines):
+        if i in idxs:
+            out[i] = state.resend()
+        state.see(line)
+    return out
+
+
+def _lifted_after(lines: list[str], i: int, z: float) -> bool:
+    """The first move after line i lifts above z (Orca's z-hop before the travel to the next
+    object or the layer change), or nothing moves any more."""
+    for line in lines[i + 1 :]:
+        if line.startswith(("G0 ", "G1 ", "G2 ", "G3 ")):
+            words = dict(_XYZ.findall(line.split(";", 1)[0]))
+            if not words:
+                continue  # a feedrate or E-only line
+            return "Z" in words and float(words["Z"]) > z + 1e-6 and _e(line) <= 0
+    return True
+
+
+def swap_visits(base: str, alt: str, names: set[str]) -> str:
+    """Every START…END visit of `names` in `base` replaced by the same visit of `alt`, a slice
+    of the same plate with one G-code export option changed (arc fitting). Arc fitting moves
+    seams and reorders paths, so a visit may start and end elsewhere in XY. That is safe only
+    when both visits enter lifted (Orca's z-hop, a travel without extrusion, then down) and end
+    retracted, end at the same Z, retract the same in total (to the slicer's 5-digit E
+    rounding), and `base` lifts again before its next move: so the process needs a retract lift
+    (z-hop). Anything else is an error, never a silent mix. The swapped visit starts with the
+    acceleration/fan state its own slice assumed and ends by restoring `base`'s."""
+    base_lines, alt_lines = base.split("\n"), alt.split("\n")
+    pairs: list[
+        tuple[int, int, int, int]
+    ] = []  # base start, base end, alt start, alt end
+    for name in sorted(names):
+        base_visits, alt_visits = _visits(base_lines, name), _visits(alt_lines, name)
+        if len(base_visits) != len(alt_visits) or not base_visits:
+            raise GenError(
+                f"{name}: {len(base_visits)} visits in the slice, {len(alt_visits)} with arc fitting"
+            )
+        for (b_start, b_end), (a_start, a_end) in zip(
+            base_visits, alt_visits, strict=True
+        ):
+            b_safe, b_z, b_ret = _visit_ends(base_lines[b_start : b_end + 1])
+            a_safe, a_z, a_ret = _visit_ends(alt_lines[a_start : a_end + 1])
+            where = f"{name}: arc-fitted visit at line {a_start + 1}, plain one at line {b_start + 1}"
+            if not (b_safe and a_safe and _lifted_after(base_lines, b_end, b_z or 0.0)):
+                raise GenError(
+                    f"{where}: a visit must start with a z-hop and a travel without extrusion, "
+                    "end retracted and be followed by a z-hop; arc fitting needs a retract lift "
+                    "in the process preset"
+                )
+            if b_z is None or a_z is None or abs(b_z - a_z) > 1e-3:
+                raise GenError(f"{where}: they end at Z {b_z} and {a_z}")
+            if abs(b_ret - a_ret) > 1e-3:
+                raise GenError(
+                    f"{where}: they retract {b_ret:.5f} and {a_ret:.5f} mm in total"
+                )
+            pairs.append((b_start, b_end, a_start, a_end))
+    base_state = _states_at(base_lines, {b_end for _, b_end, _, _ in pairs})
+    alt_state = _states_at(alt_lines, {a_start + 1 for _, _, a_start, _ in pairs})
+    for b_start, b_end, a_start, a_end in sorted(pairs, reverse=True):
+        visit = alt_lines[a_start : a_end + 1]
+        base_lines[b_start : b_end + 1] = [
+            visit[0],
+            *alt_state[a_start + 1],
+            *visit[1:-1],
+            *base_state[b_end],
+            visit[-1],
+        ]
+    return "\n".join(base_lines)
+
+
 # One-layer objects (first-layer patches, bed labels) lie below the nozzle tip: the head passes
 # over them while it prints a tower.
 LOW_OBJECT_H = 0.6
@@ -665,7 +902,7 @@ def _check_clearance(
     if not seq:
         return
     for name, bb in layer:
-        if bb[5] <= LOW_OBJECT_H:
+        if bb[5] <= LOW_OBJECT_H + 1e-6:  # 0.2 + 0.4 sums to 0.6000000000000001
             continue
         if bb[5] > rod:
             raise GenError(
@@ -686,12 +923,17 @@ def build_plate(ctx: PlateContext, plate: Plate, slicer: str, out: Path) -> Gene
             f"{out}: the plate's map is NAME.json next to the G-code; name the G-code .gcode"
         )
     labels = bed_labels(ctx, plate.objects)
+    brims = brim_block(ctx, plate)
     # Bed labels first, blocks taller than the first layer (the MVS strip) last: hand-written
     # travels run at first-layer height + lift and must never cross a finished taller block
     # (Orca's own early travels do not know the strip: #397).
     flat: list[CustomBlock] = []
     tall: list[CustomBlock] = []
-    for c in (*((labels,) if labels is not None else ()), *plate.custom):
+    for c in (
+        *((labels,) if labels is not None else ()),
+        *plate.custom,
+        *((brims,) if brims is not None else ()),
+    ):
         (flat if c.bbox()[5] <= ctx.ex.layer_h + 1e-6 else tall).append(c)
     plate = replace(plate, custom=(*flat, *tall))
     names = [o.name for o in plate.objects] + [c.name for c in plate.custom]
@@ -723,6 +965,18 @@ def build_plate(ctx: PlateContext, plate: Plate, slicer: str, out: Path) -> Gene
         {**base_fil, **plate.layer_filament},
     )
     require_relative_e(a_text, ctx.p)
+    arcs = {o.name for o in layer if o.arc_fitting}
+    if arcs:
+        arc_text, _ = slice_models(
+            slicer,
+            ctx.idx,
+            ctx.p,
+            ctx.material,
+            {f"{o.name}.stl": o.mesh() for o in layer},
+            {**plate.layer_process, "enable_arc_fitting": 1},
+            {**base_fil, **plate.layer_filament},
+        )
+        a_text = swap_visits(a_text, arc_text, arcs)
     b_text: str | None = None
     b_log = ""
     if seq:
@@ -732,7 +986,7 @@ def build_plate(ctx: PlateContext, plate: Plate, slicer: str, out: Path) -> Gene
             ctx.p,
             ctx.material,
             {f"{o.name}.stl": o.mesh() for o in seq},
-            {**plate.seq_process, "print_sequence": "by object"},
+            {**plate.seq_process, **seq_brim(plate), "print_sequence": "by object"},
             {**base_fil, **plate.seq_filament},
         )
         require_relative_e(b_text, ctx.p)
@@ -815,6 +1069,8 @@ def write_map(
                 for b in o.bands
             ],
             "items": items(o.items),
+            "brim_mm": brim_width(o, plate.brim),
+            "arc_fitting": o.arc_fitting,
             "read": o.read,
             "record": o.record,
         }
@@ -835,6 +1091,11 @@ def write_map(
             "filament": ctx.p.filament[ctx.material],
             "chosen_by": dict(ctx.p.chosen_by),
         },
+        # the plate's own settings over the presets (layer phase); hand-written blocks ignore them
+        "slicer_overrides": {
+            "process": dict(plate.layer_process),
+            "filament": dict(plate.layer_filament),
+        },
         "color": ctx.color,
         "nozzle_temp": ctx.base_temp,
         "estimate_min": round(estimate / 60, 1),
@@ -842,6 +1103,7 @@ def write_map(
         + ["layer: " + o.name for o in plate.objects if o.phase == "layer"]
         + ["sequential: " + n for n in seq_order],
         "objects": objects,
+        "notes": list(plate.notes),
         "generated_by": f"3d calibrate gen {plate.plate_id}",
     }
     path = gcode.with_suffix(".json")

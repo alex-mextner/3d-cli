@@ -58,7 +58,7 @@ UNIT_NAME = "3d-printer-watch@.service"
 # printer-devices.yaml `<name>.watch:` keys and their CLI flags.
 # `vision` belongs to `3d printer vision` (issue #150), which shares the same sinks; watch ignores it.
 # `bed` starts the bed monitor child (printer_ops/bed.py, issue #303).
-WATCH_KEYS = ("tg_fallback", "steer", "exec", "stdout", "min_severity", "stall_minutes", "heat_timeout_minutes",
+WATCH_KEYS = ("agent_fallback", "tg_fallback", "steer", "exec", "stdout", "min_severity", "stall_minutes", "heat_timeout_minutes",
               "milestones", "dedup_minutes", "vision", "bed")
 
 USAGE = """3d printer watch NAME... | --all [options]
@@ -229,6 +229,7 @@ def settings_for(device: Device, opts: dict[str, Any]) -> dict[str, Any]:
     }
     return {
         "sinks": sinks,
+        "agent_fallback": _bool(cfg.get("agent_fallback", True), f"{where}.agent_fallback"),
         "min_severity": _severity(cfg.get("min_severity", INFO), f"{where}.min_severity / --min-severity"),
         "limits": WatchLimits(
             stall_s=_number(cfg.get("stall_minutes", 15), "--stall-min", minimum=1) * 60,

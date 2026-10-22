@@ -114,6 +114,23 @@ Generate a full set of views for a catalog or documentation page.
 This produces `bracket_front.png`, `bracket_back.png`, `bracket_left.png`, `bracket_right.png`, `bracket_top.png`, `bracket_iso.png`
 concurrently — one command, six angles.
 
+### 6. Imported STL → print-ready in minutes
+
+A purchased cat-phone-stand STL has debris shells, a hollow open bottom and 45°+ overhangs. One command
+repairs it, checks that 28 phones sit in it and that it stands, colours regions from landmark boxes,
+slices it for a Snapmaker U1 and writes a proof pack. Every step is cached: re-run it after a colour change
+and only colours → slice → gates run. See [`docs/workflows/prep.md`](docs/workflows/prep.md) for the flow and the
+measured times.
+
+```bash
+3d prep "cat phone holder full.stl" --out out --spec examples/prep/chekhov/prep.yaml
+less out/proof-report.md            # verdict table, renders, overhang heat-map, fit matrix, G-code views
+3d prep status out
+# on the 16-core box instead of this machine:
+3d remote run --project cat --push "cat phone holder full.stl" --push examples/prep/chekhov --pull -- \
+  3d prep "cat phone holder full.stl" --out ../out --spec chekhov/prep.yaml
+```
+
 ## Shell composition — pipes, redirects, and conditionals
 
 Every `3d` command is a plain Unix tool: it reads files, writes files, prints text to stdout,
@@ -262,7 +279,7 @@ when one is missing; `brew`/`apt`/`winget`):
 hand. Only the heavyweight ones worth knowing about:
 
 - **core (auto):** the mesh stack [`trimesh`](GLOSSARY.md#trimesh) + [`manifold3d`](GLOSSARY.md#manifold3d) (watertight / manifold / volume) and `pyyaml` (the `3d.yaml` project model).
-- **optional extras:** `opencv` + `pillow` (`preprocess`), `pyvista` (`collision --viz`), `fastapi`/`uvicorn` (`web`). The full pinned set lives in `pyproject.toml` (`preprocess`/`viz`/`web`/`dev` extras) + `uv.lock`.
+- **optional extras:** `opencv` + `pillow` (`preprocess`), `pillow` + `scikit-image` (`prep`), `pyvista` (`collision --viz`), `fastapi`/`uvicorn` (`web`). The full pinned set lives in `pyproject.toml` (`preprocess`/`viz`/`web`/`dev` extras) + `uv.lock`.
 
 A missing optional dependency degrades only the command that needs it — never the whole CLI.
 `3d doctor` prints PASS/MISSING per item with the exact per-OS install line for anything absent.
@@ -328,6 +345,7 @@ assembly mode (the assembly must honour `-D cut=true` and colour each part outsi
 | `3d params <file.scad> [--json]` | Extract Customizer-style parameters. |
 | `3d om <file.scad> <selector>` | Query `.scad` object-model annotations as JSON. |
 | `3d usdz <file.scad\|file.stl>` | Export a colored USDZ for Apple AR Quick Look. |
+| `3d prep <model.stl\|.3mf> [--spec prep.yaml]` | Model → repaired, adapted (no supports), fit/stability-checked, colour-assigned, sliced and G-code-gated plate + proof pack, with a per-step cache ([docs](docs/commands/prep.md)). |
 
 ```bash
 3d export examples/cube.scad -o cube.stl          # PASS, exit 0
@@ -474,6 +492,8 @@ per-OS install command (e.g. `brew install --cask orcaslicer`) — never broken.
 | `3d printers list\|show` | inspect printer models (bed, nozzle, firmware); `show u1` is the one-screen dossier of a fleet printer: machine, web UIs, live status, job queue, job history. |
 | `3d metrics list\|show` | inspect persisted command metrics JSONL records. |
 | `3d doctor` | report present/missing deps + the exact install command per OS (read-only). |
+| `3d heavy -- CMD` | run one command alone under the machine heavy lock + memory cap; re-entrant, bounded wait ([docs](docs/commands/heavy.md)). |
+| `3d remote run --push F --pull -- CMD` | push files to an ssh heavy box, run under its `heavy`, pull results ([docs](docs/commands/remote.md)). |
 
 ```bash
 3d init my-bracket --no-input
