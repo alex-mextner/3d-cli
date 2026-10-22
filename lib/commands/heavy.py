@@ -48,7 +48,7 @@ class _Opts:
 
 
 def _int(flag: str, raw: str) -> int:
-    if not raw.lstrip("-").isdigit():
+    if not raw.isdigit():
         raise InvalidArgument(flag, raw, ["an integer"], command="heavy")
     return int(raw)
 

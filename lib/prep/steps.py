@@ -258,7 +258,7 @@ def _fit_loads(pipe: Pipeline) -> list[Any]:
         )
         normal = (
             0.0,
-            -sign * math.cos(phi) * -1.0 if False else sign * -math.cos(phi),
+            -sign * math.cos(phi),
             math.sin(phi),
         )
         loads.append(

@@ -73,7 +73,7 @@ def run(argv: list[str]) -> int:
     lock = "--no-lock" not in argv
     args = [a for a in argv if a != "--no-lock"]
     cmd = tool_argv(DEPS, "prep_cli.py", args)
-    if not lock or args[0] in ("steps", "status"):
+    if not lock or (args and args[0] in ("steps", "status")):
         import subprocess
 
         return subprocess.run(cmd, check=False).returncode  # noqa: S603 — argv from cli.pyrun

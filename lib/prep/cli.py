@@ -170,7 +170,7 @@ def make_config(ns: argparse.Namespace) -> PrepConfig:
         infill_pct=int(pick(ns.infill, process.get("infill"), 15)),
         hmin=float(pick(ns.layer_min, process.get("layer_min"), 0.08)),
         hmax=float(pick(ns.layer_max, process.get("layer_max"), 0.32)),
-        mix_cap=float(process.get("mix_cap", 0.12)),
+        mix_cap=float(pick(None, process.get("mix_cap"), 0.12)),
         brim_mm=float(pick(ns.brim, process.get("brim"), 0.0)),
         gate=dict(spec.get("gcode") or {}),
         only=_csv(ns.only),

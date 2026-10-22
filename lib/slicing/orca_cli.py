@@ -24,6 +24,7 @@ PAST BUGS: see KNOWN_QUIRKS (each entry names its evidence).
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -554,7 +555,8 @@ def _run(
     try:
         out, _ = proc.communicate(timeout=timeout_s if python_deadline else None)
     except subprocess.TimeoutExpired:
-        os.killpg(proc.pid, signal.SIGKILL)
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(proc.pid, signal.SIGKILL)
         out, _ = proc.communicate()
         return EXIT_TIMEOUT, out or "", True
     return proc.returncode, out or "", False

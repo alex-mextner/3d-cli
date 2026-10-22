@@ -78,8 +78,7 @@ class StepCache:
     ) -> None:
         self.dir.mkdir(parents=True, exist_ok=True)
         rel = [
-            str(a.relative_to(self.workdir)) if a.is_absolute() else str(a)
-            for a in artifacts
+            str(a.resolve().relative_to(self.workdir.resolve())) for a in artifacts
         ]
         record = {
             "key": key,
