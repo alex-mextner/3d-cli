@@ -43,6 +43,26 @@ directly, bypassing 3d-api's token scopes. This is deliberate (plan §5.1, D4): 
 `[spoolman]` on the U1 and the Spoolman web UI need direct LAN access. 3d-api treats
 Spoolman as the source of truth and reconciles against it rather than assuming exclusivity.
 
+### Fluidd and Spoolman's origin check
+
+Fluidd talks to Spoolman from the **browser** (its Spoolman dialog and spool selector call
+`http://192.168.0.39:7912/api/v1/...`), and Spoolman 0.26+ rejects requests from an Origin it
+does not know. Without an entry Fluidd shows "Spoolman is blocking Fluidd's browser origin".
+Compose therefore sets Spoolman's `SPOOLMAN_CORS_ORIGIN` (a comma-separated list of full
+origins, scheme included, no path; `*` disables the check) from the deploy variable
+`PRINTOPS_SPOOLMAN_CORS_ORIGIN`:
+
+| Default origin | Fluidd it admits |
+|---|---|
+| `http://192.168.0.27:4408` | K1 SE (`docs/printers/k1se-root-upgrade.md`) |
+| `http://192.168.0.26` | U1 (served on port 80) |
+| `http://192.168.0.39:8123` | the U1's Fluidd opened through Home Assistant's printer ingress (`docs/printops/plan.md` §3); the page then lives on HA's origin |
+
+A new Fluidd/Mainsail address (another printer, a tailnet name) goes into the default in
+`compose.yaml`, then `3d printops deploy`. The variable, when set in the environment of
+`docker compose` on the Odroid, replaces the whole default list, so repeat the origins you still
+need. Moonraker (`[spoolman]`) and 3d-api send no Origin header and are not affected.
+
 ## Volumes (on the WD HDD)
 
 `/home/ultra` on the Odroid is a bind mount of `/mnt/wd500/odroid-rt/ultra` (the WD 500 GB HDD,

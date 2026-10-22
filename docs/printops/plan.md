@@ -162,7 +162,7 @@
 ### 5.1 Хранилища
 - **Spoolman** (docker на Odroid, в LAN, без внешнего доступа) — источник правды для vendor, filament и spool (identity, `remaining`, `lot_nr`, `price`, `location`-строка).
 - **PrintOps DB** (SQLite WAL на HDD Odroid, владелец — `3d-api`). Ссылается на `spoolman_spool_id` и `spoolman_filament_id`. Все изменения идут через события (append-only `events`) и проекции.
-- **Правило одного писателя:** в Spoolman пишет только `3d-api`, кроме Moonraker `[spoolman]` на U1, если его включат (D4). Тогда `3d-api` по заданиям U1 не делает `/use`, а только сверяет.
+- **Правило одного писателя:** в Spoolman пишет только `3d-api`, кроме Moonraker `[spoolman]` на принтерах, где он включён: K1 SE (после root 2026-10-15, `docs/printers/k1se-root-upgrade.md`) и U1, если его включат (D4). Тогда `3d-api` по заданиям такого принтера не делает `/use`, а только сверяет; `spool load` лишь ставит active spool Moonraker (одноголовые принтеры, §9.6 в `oss.md`).
 - **Альтернатива (D2):** своё хранилище с экспортом и импортом в формате Spoolman. Плюс — одна БД и транзакции. Минус — теряем Fluidd, SpoolLink, Disane87-HA и Bambu-мосты.
 
 ### 5.2 Сущности (PrintOps)

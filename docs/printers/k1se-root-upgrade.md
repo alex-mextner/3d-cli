@@ -395,6 +395,16 @@ Creality `web-server` and has no `/webcam/`. Change it to
 `http://192.168.0.27:4408/webcam/?action=stream`. To match `u1_camera`, an H.264 variant is
 `ffmpeg:http://192.168.0.27:8080/?action=stream#video=h264`.
 
+**Spoolman.** `moonraker.conf` carries `[spoolman] server: http://192.168.0.39:7912 sync_rate: 5`
+(Odroid). Moonraker keeps ONE active spool (`GET /server/spoolman/status` →
+`{spoolman_connected, pending_reports, spool_id}`) and books the printer's usage to it itself
+every 5 s, queueing reports in `pending_reports` (per spool id) while Spoolman is down. So Moonraker is this
+printer's usage writer and PrintOps never books its jobs (`docs/printops/oss.md` §9.6).
+`3d printops spool load ID k1se/T1` sets the active spool to the loaded one
+(`POST /server/spoolman/spool_id`, read back); `unload` clears it. Fluidd's own spool selector
+needs Spoolman to admit its origin `http://192.168.0.27:4408` (`SPOOLMAN_CORS_ORIGIN`,
+`services/3d-api/README.md`).
+
 **Watcher.** `systemctl --user stop 3d-printer-watch@k1se` before root/install (reboots page
 otherwise). After the yaml switch: `systemctl --user restart 3d-printer-watch@k1se`. The unit
 runs `3d printer watch k1se $WATCH_ARGS` and picks up the new adapter from the yaml.
