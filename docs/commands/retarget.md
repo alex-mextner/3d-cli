@@ -29,7 +29,8 @@ When a ready project exists: **patch it (`3d retarget`), do not re-slice from th
 | `--preset NAME` | — | Named setting set, repeatable. `easy-release-supports`: same-material supports that peel off — `enable_support=1`, `support_top_z_distance=0.2`, `support_bottom_z_distance=0.2`, `support_interface_top_layers=2`, `support_interface_bottom_layers=0`, `support_interface_spacing=0.5`, `support_interface_pattern=rectilinear`. |
 | `--set KEY=VALUE` | — | Override one project setting, repeatable, applied after presets. An unknown KEY is an error with close matches (the slicer would silently ignore it). A list key takes the value in every slot; use JSON for explicit lists: `--set 'nozzle_temperature=["215"]'`. |
 | `--preset-dir DIR` | — | Extra preset directory (repeatable) holding `machine/ process/ filament/ *.json`, searched before everything else. |
-| `--gcode PATH` | — | Also slice the result to `PATH` with the installed slicer (`3d slice`, embedded settings), then run `3d gcode-bounds` on it. |
+| `--gcode PATH` | — | Also slice the result to `PATH` with the installed Orca-family slicer (placed objects as an STL + the retargeted settings as presets; see below), then run `3d gcode-bounds` on it. |
+| `--bounds-printer NAME` | — | Fleet printer for that `gcode-bounds` run (axis limits, trusted macros), e.g. `k1se`. |
 | `--dry-run` | off | Do everything but write the `.3mf`; same report and exit code. |
 | `-v, --verbose` | off | List every changed key instead of the first few per group. |
 
@@ -38,7 +39,7 @@ When a ready project exists: **patch it (`3d retarget`), do not re-slice from th
 3d retarget spoon.3mf --to k1se --keep 1 --preset easy-release-supports --set support_interface_spacing=0.4
 3d retarget part.3mf --to "Creality K1 SE 0.4 nozzle" --process "0.20mm Standard @Creality K1 SE" --filament "Orange PLA @K1SE"
 3d retarget part.3mf --to k1se --margin 8 --preset-dir ./my-presets
-3d retarget part.3mf --to k1se --keep 1 --gcode part.gcode
+3d retarget part.3mf --to k1se --keep 1 --gcode part.gcode --bounds-printer k1se
 3d retarget big.3mf --to k1se --dry-run          # exit 1 and the footprint-vs-bed numbers if it cannot fit
 ```
 
@@ -83,15 +84,17 @@ The report lists the presets used (with where they were found), each object kept
 (rotation, move, footprint vs bed), every changed key grouped by origin (`machine`, `filament`,
 `process`, `collapse`, `preset NAME`, `--set`) as `key: old -> new`, notes, and the elapsed time.
 
-**`--gcode` and the Snapmaker Orca CLI.** `--gcode` runs [`3d slice`](slice.md), i.e. whatever
-Orca-family CLI is installed. The Snapmaker Orca AppImage CLI (`01.10.01.50` on this workstation)
-cannot slice a *project* 3MF: it loads it, prints the object bounding box, and exits 127 after ~2 s —
-measured on the retargeted spoon and on the untouched U1 source alike
-([`slice-check`](slice-check.md#slicer-quirks-verified-on-macos-2026-06) documents the same crash).
-`3d retarget` still writes and validates the `.3mf` and then reports the failed slice; open it in the
-slicer GUI, or slice with upstream OrcaSlicer. Orca itself confirmed the placement: its log reports
-`object bbox min {1.45209, 3.14636, 0} - max {218.548, 216.854, 68.6144}` for the spoon retargeted
-with `--margin 1`, the same box `retarget` computed.
+**`--gcode`.** The Snapmaker Orca CLI (`01.10.01.50` here) exits 127 on a *project* 3MF — the untouched
+U1 source and the retargeted file alike ([`slice-check`](slice-check.md#slicer-quirks-verified-on-macos-2026-06)
+documents it) — but slices an STL given `--load-settings` / `--load-filaments`. So `--gcode` exports the
+placed printing volumes as a binary STL in bed coordinates, splits the retargeted `project_settings.config`
+into machine / process / filament presets (process and filament name the machine as their only compatible
+printer), runs `<slicer> --datadir <tmp> --load-settings machine;process --load-filaments filament --arrange 0
+--orient 0 --slice 0` (`APPIMAGE_EXTRACT_AND_RUN=1`, `QT_QPA_PLATFORM=offscreen`) and then
+[`3d gcode-bounds`](gcode-bounds.md) on the result; `--bounds-printer k1se` gives that run the printer's
+axis limits and trusted macros (`START_PRINT`/`END_PRINT` are macros: without it that check says FAIL).
+Variable layer-height profiles, per-object settings and modifiers are not carried into this slice: it
+uses the project-level settings only. The `.3mf` is written and validated either way.
 
 Only `normal_part` volumes count toward the footprint and height; modifiers, negative parts and
 support blockers do not.

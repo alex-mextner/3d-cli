@@ -137,14 +137,27 @@ def test_bad_inputs_exit_2_with_a_remedy(tmp_path: Path) -> None:
 
 
 def _fake_slicer(tmp_path: Path, gcode_x: int) -> Path:
-    """An Orca-CLI stand-in: `-g` (the PrusaSlicer probe `3d slice` tries first for an unknown
-    slicer) fails; `--slice 0 --outputdir DIR in.3mf` writes a one-move G-code at X=`gcode_x`."""
-    script = tmp_path / "fake-slicer.sh"
+    """An Orca-CLI stand-in. It insists on the recipe the real Snapmaker CLI needs: an `.stl`
+    (never a project 3MF), `--load-settings machine;process` and `--load-filaments` files that
+    are valid JSON naming the machine, and `--arrange 0 --orient 0`. It writes a one-move G-code
+    at X=`gcode_x` into `--outputdir`."""
+    script = tmp_path / "fake-slicer.py"
     script.write_text(
-        "#!/bin/sh\n"
-        'for a in "$@"; do [ "$a" = "-g" ] && exit 1; done\n'
-        'while [ $# -gt 0 ]; do [ "$1" = "--outputdir" ] && out="$2"; shift; done\n'
-        f"printf '; printable_area = 0x0,220x0,220x220,0x220\\n;LAYER_CHANGE\\nG1 X{gcode_x} Y100 Z0.2 F3000\\nG1 X{gcode_x} Y120 E1\\n' > \"$out/plate_1.gcode\"\n",
+        "#!/usr/bin/env python3\n"
+        "import json, struct, sys\n"
+        "a = sys.argv[1:]\n"
+        "get = lambda k: a[a.index(k) + 1]\n"
+        "src = a[-1]\n"
+        "assert src.endswith('.stl'), 'project 3mf given: ' + src\n"
+        "data = open(src, 'rb').read()\n"
+        "n = struct.unpack('<I', data[80:84])[0]\n"
+        "assert n > 0 and len(data) == 84 + 50 * n, 'bad binary stl'\n"
+        "machine, process = get('--load-settings').split(';')\n"
+        "m, p, f = json.load(open(machine)), json.load(open(process)), json.load(open(get('--load-filaments')))\n"
+        "assert p['compatible_printers'] == [m['name']] == f['compatible_printers']\n"
+        "assert m['printable_area'] == ['0x0', '220x0', '220x220', '0x220'] and p['layer_height']\n"
+        "assert get('--arrange') == '0' and get('--orient') == '0'\n"
+        f"open(get('--outputdir') + '/plate_1.gcode', 'w').write('; printable_area = 0x0,220x0,220x220,0x220\\n;LAYER_CHANGE\\nG1 X{gcode_x} Y100 Z0.2 F3000\\nG1 X{gcode_x} Y120 E1\\n')\n",
         encoding="utf-8",
     )
     script.chmod(0o755)
@@ -161,7 +174,7 @@ def test_gcode_flag_slices_the_result_and_bounds_checks_it(tmp_path: Path) -> No
     )
     assert res.returncode == 0, res.stdout + res.stderr
     assert (tmp_path / "k1.gcode").is_file()
-    assert "sliced OK" in res.stdout
+    assert "sliced OK" in res.stdout and "print area" in res.stdout
 
 
 def test_gcode_flag_fails_when_the_sliced_gcode_leaves_the_bed(tmp_path: Path) -> None:
@@ -173,3 +186,15 @@ def test_gcode_flag_fails_when_the_sliced_gcode_leaves_the_bed(tmp_path: Path) -
         env_extra={**_env(tmp_path), "SLICER": str(slicer)},
     )
     assert res.returncode == 1, res.stdout + res.stderr
+
+
+def test_gcode_flag_reports_a_slicer_that_refuses(tmp_path: Path) -> None:
+    src, presets = _setup(tmp_path)
+    slicer = tmp_path / "refuse.sh"
+    slicer.write_text("#!/bin/sh\necho 'run found error, return -17' >&2\nexit 239\n", encoding="utf-8")
+    slicer.chmod(0o755)
+    res = run_cli(
+        tmp_path, "retarget", str(src), "--to", "testk1", "--preset-dir", str(presets), "--keep", "1",
+        "--gcode", str(tmp_path / "k1.gcode"), env_extra={**_env(tmp_path), "SLICER": str(slicer)},
+    )
+    assert res.returncode == 1 and "slicing failed (exit 239" in res.stderr and "return -17" in res.stderr

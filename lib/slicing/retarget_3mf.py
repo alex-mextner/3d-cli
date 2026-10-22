@@ -20,6 +20,7 @@ Examples:
   parts, report = retarget(src, machine=PresetSource(name, flat_settings), keep="1", margin=5.0)
   write_package(dst, parts)
 """
+
 from __future__ import annotations
 
 import difflib
@@ -28,6 +29,7 @@ import io
 import json
 import math
 import re
+import struct
 import zipfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -49,7 +51,13 @@ LAYER_PROFILE = "Metadata/layer_heights_profile.txt"
 _NS_CORE = "http://schemas.microsoft.com/3dmanufacturing/core/2015/02"
 _NS_PROD = "http://schemas.microsoft.com/3dmanufacturing/production/2015/06"
 _TAG_VERTEX = f"{{{_NS_CORE}}}vertex"
+_TAG_TRIANGLE = f"{{{_NS_CORE}}}triangle"
 _TAG_OBJECT = f"{{{_NS_CORE}}}object"
+_PRESET_IDENTITY_KEYS = ("name", "from", "version", "print_compatible_printers")
+_HOST_REACHING_KEYS: dict[str, Any] = {
+    "post_process": [],
+    "output_filename_format": "{input_filename_base}.gcode",
+}
 
 # G-code templates belong to the printer: a macro the target does not define aborts the print.
 GCODE_KEYS = frozenset(
@@ -67,9 +75,13 @@ GCODE_KEYS = frozenset(
     }
 )
 # Project-only per-extruder lists (newer multi-nozzle builds) that no system preset spells out.
-_EXTRA_PER_EXTRUDER = frozenset({"extruder_type", "printer_extruder_id", "extruder_variant_list"})
+_EXTRA_PER_EXTRUDER = frozenset(
+    {"extruder_type", "printer_extruder_id", "extruder_variant_list"}
+)
 # Lists whose length is a point count / free-form, never "one entry per extruder".
-_POINT_LIST_KEYS = frozenset({"printable_area", "bed_exclude_area", "head_wrap_detect_zone"})
+_POINT_LIST_KEYS = frozenset(
+    {"printable_area", "bed_exclude_area", "head_wrap_detect_zone"}
+)
 # Machine lists whose length is a mode count (machine_max_*: normal/silent) or a size list
 # (thumbnails), never the extruder count, even when the two numbers coincide.
 _FIXED_LENGTH_PREFIXES = ("machine_max_", "machine_min_", "thumbnails")
@@ -86,12 +98,18 @@ _REQUIRED_KEYS = (
     "machine_end_gcode",
     "layer_height",
 )
-_PREVIEW_PREFIXES = "plate_|top_|pick_"  # plate_ also covers plate_no_light_N and plate_N_small
+_PREVIEW_PREFIXES = (
+    "plate_|top_|pick_"  # plate_ also covers plate_no_light_N and plate_N_small
+)
 _PREVIEW_PART = re.compile(rf"^Metadata/(?:{_PREVIEW_PREFIXES})[^/]*\.(?:png|json)$")
-_PREVIEW_REL = re.compile(rf'[ \t]*<Relationship\b[^>]*Target="/?Metadata/(?:{_PREVIEW_PREFIXES})[^"]*"[^>]*/>[ \t]*\r?\n?')
+_PREVIEW_REL = re.compile(
+    rf'[ \t]*<Relationship\b[^>]*Target="/?Metadata/(?:{_PREVIEW_PREFIXES})[^"]*"[^>]*/>[ \t]*\r?\n?'
+)
 # A sliced project carries the source printer's G-code: it must not travel to the target.
 _STALE_GCODE = re.compile(r"^Metadata/plate_\d+\.gcode(?:\.md5)?$")
-_GCODE_REL = re.compile(r'[ \t]*<Relationship\b[^>]*Target="/?Metadata/plate_\d+\.gcode[^"]*"[^>]*/>[ \t]*\r?\n?')
+_GCODE_REL = re.compile(
+    r'[ \t]*<Relationship\b[^>]*Target="/?Metadata/plate_\d+\.gcode[^"]*"[^>]*/>[ \t]*\r?\n?'
+)
 _PAINT_ATTR = re.compile(r'\s(?:paint_color|mmu_segmentation)="[^"]*"')
 _TOL = 1e-6
 # Orca's flush-volume tables for exactly one filament (matrix 1x1; vector = purge into/from the tower).
@@ -154,7 +172,9 @@ class Report:
     bed: Bed = field(default_factory=lambda: Bed(0.0, 0.0, 0.0, 0.0))
     margin: float = 0.0
     footprint: tuple[float, float] = (0.0, 0.0)
-    placement: Placement = field(default_factory=lambda: Placement(0.0, (0.0, 0.0), 0.0, 0.0, (0.0, 0.0)))
+    placement: Placement = field(
+        default_factory=lambda: Placement(0.0, (0.0, 0.0), 0.0, 0.0, (0.0, 0.0))
+    )
     zmax: float = 0.0
     changes: list[Change] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
@@ -178,7 +198,9 @@ def read_package(path: Path) -> dict[str, bytes]:
         with zipfile.ZipFile(path) as zf:
             parts = {i.filename: zf.read(i) for i in zf.infolist() if not i.is_dir()}
     except zipfile.BadZipFile as exc:
-        raise InvalidArgument("input", str(path), ["a .3mf (zip) project file"], command="retarget") from exc
+        raise InvalidArgument(
+            "input", str(path), ["a .3mf (zip) project file"], command="retarget"
+        ) from exc
     if SETTINGS not in parts or MAIN_MODEL not in parts or MODEL_SETTINGS not in parts:
         raise InvalidArgument(
             "input",
@@ -218,7 +240,9 @@ def _dump_settings(settings: Mapping[str, Any]) -> bytes:
 
 
 # --------------------------------------------------------------------------- transforms
-Matrix = tuple[float, ...]  # 3MF layout: m00 m01 m02 m10 m11 m12 m20 m21 m22 tx ty tz (row vectors)
+Matrix = tuple[
+    float, ...
+]  # 3MF layout: m00 m01 m02 m10 m11 m12 m20 m21 m22 tx ty tz (row vectors)
 _IDENTITY: Matrix = (1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0)
 
 
@@ -243,11 +267,15 @@ def _compose(first: Matrix, then: Matrix) -> Matrix:
         for r in range(3)
         for c in range(3)
     ]
-    trans = [sum(a[9 + k] * b[3 * k + c] for k in range(3)) + b[9 + c] for c in range(3)]
+    trans = [
+        sum(a[9 + k] * b[3 * k + c] for k in range(3)) + b[9 + c] for c in range(3)
+    ]
     return (*rot, *trans)
 
 
-def _rotation_about_z(angle_deg: float, pivot: tuple[float, float], dx: float, dy: float) -> Matrix:
+def _rotation_about_z(
+    angle_deg: float, pivot: tuple[float, float], dx: float, dy: float
+) -> Matrix:
     """World transform: rotate CCW by `angle_deg` about `pivot` (XY), then translate (dx, dy)."""
     c, s = math.cos(math.radians(angle_deg)), math.sin(math.radians(angle_deg))
     px, py = pivot
@@ -267,7 +295,9 @@ def _apply(m: Matrix, x: float, y: float, z: float) -> tuple[float, float, float
 
 # --------------------------------------------------------------------------- model parsing
 _ITEM_RE = re.compile(r"[ \t]*<item\b[^>]*/>[ \t]*\r?\n?")
-_OBJECT_RE = re.compile(r"[ \t]*<object id=\"(\d+)\"[^>]*>.*?</object>[ \t]*\r?\n?", re.DOTALL)
+_OBJECT_RE = re.compile(
+    r"[ \t]*<object id=\"(\d+)\"[^>]*>.*?</object>[ \t]*\r?\n?", re.DOTALL
+)
 
 
 def _build_items(main_model: str) -> list[_Item]:
@@ -277,12 +307,24 @@ def _build_items(main_model: str) -> list[_Item]:
         tag = m.group(0)
         oid = re.search(r'objectid="(\d+)"', tag)
         if oid is None:
-            raise InvalidArgument("3MF build item", tag.strip(), ["an <item objectid=...>"], command="retarget")
+            raise InvalidArgument(
+                "3MF build item",
+                tag.strip(),
+                ["an <item objectid=...>"],
+                command="retarget",
+            )
         transform = re.search(r'transform="([^"]*)"', tag)
         object_id = int(oid.group(1))
         instance = seen.get(object_id, 0)
         seen[object_id] = instance + 1
-        items.append(_Item(n, object_id, instance, _parse_matrix(transform.group(1) if transform else None)))
+        items.append(
+            _Item(
+                n,
+                object_id,
+                instance,
+                _parse_matrix(transform.group(1) if transform else None),
+            )
+        )
     return items
 
 
@@ -323,7 +365,13 @@ def _mesh_vertices(xml: bytes, object_id: int) -> list[tuple[float, float, float
     verts: list[tuple[float, float, float]] = []
     for _event, elem in ET.iterparse(io.BytesIO(xml), events=("end",)):
         if elem.tag == _TAG_VERTEX:
-            verts.append((float(elem.attrib["x"]), float(elem.attrib["y"]), float(elem.attrib["z"])))
+            verts.append(
+                (
+                    float(elem.attrib["x"]),
+                    float(elem.attrib["y"]),
+                    float(elem.attrib["z"]),
+                )
+            )
         elif elem.tag == _TAG_OBJECT:
             if int(elem.attrib["id"]) == object_id:
                 return verts
@@ -340,7 +388,10 @@ class _Footprint:
 
 
 def _footprint(
-    parts: Mapping[str, bytes], main_model: str, items: Sequence[_Item], skip: frozenset[int] = frozenset()
+    parts: Mapping[str, bytes],
+    main_model: str,
+    items: Sequence[_Item],
+    skip: frozenset[int] = frozenset(),
 ) -> _Footprint:
     """XY convex hull and Z range of the given build items in world space; mesh objects in
     `skip` (modifiers, negative parts, support blockers) do not count."""
@@ -354,10 +405,15 @@ def _footprint(
                 continue
             key = (leaf.path, leaf.object_id)
             if key not in cache:
-                source = parts.get(leaf.path) if leaf.path else main_model.encode("utf-8")
+                source = (
+                    parts.get(leaf.path) if leaf.path else main_model.encode("utf-8")
+                )
                 if source is None:
                     raise InvalidArgument(
-                        "3MF", str(leaf.path), ["a sub-model part present in the archive"], command="retarget"
+                        "3MF",
+                        str(leaf.path),
+                        ["a sub-model part present in the archive"],
+                        command="retarget",
                     )
                 cache[key] = _mesh_vertices(source, leaf.object_id)
                 if not cache[key]:
@@ -373,7 +429,12 @@ def _footprint(
                 xy.append((x, y))
                 zmin, zmax = min(zmin, z), max(zmax, z)
     if not xy:
-        raise InvalidArgument("--keep", str([i.index for i in items]), ["objects that contain a mesh"], command="retarget")
+        raise InvalidArgument(
+            "--keep",
+            str([i.index for i in items]),
+            ["objects that contain a mesh"],
+            command="retarget",
+        )
     return _Footprint(convex_hull(xy), zmin, zmax)
 
 
@@ -389,14 +450,19 @@ def _non_printing_volumes(model_settings: str) -> frozenset[int]:
 
 def _object_names(model_settings: str) -> dict[int, str]:
     names: dict[int, str] = {}
-    for m in re.finditer(r'<object id="(\d+)">\s*<metadata key="name" value="([^"]*)"', model_settings):
+    for m in re.finditer(
+        r'<object id="(\d+)">\s*<metadata key="name" value="([^"]*)"', model_settings
+    ):
         names[int(m.group(1))] = m.group(2)
     return names
 
 
 def _object_extruders(model_settings: str) -> dict[int, int]:
     out: dict[int, int] = {}
-    for m in re.finditer(r'<object id="(\d+)">\s*(?:<metadata key="name"[^>]*/>\s*)?<metadata key="extruder" value="(\d+)"', model_settings):
+    for m in re.finditer(
+        r'<object id="(\d+)">\s*(?:<metadata key="name"[^>]*/>\s*)?<metadata key="extruder" value="(\d+)"',
+        model_settings,
+    ):
         out[int(m.group(1))] = int(m.group(2))
     return out
 
@@ -416,7 +482,9 @@ def bed_from_settings(settings: Mapping[str, Any]) -> Bed:
         raise InvalidArgument(
             "printable_area",
             json.dumps(raw),
-            ["four corners of an axis-aligned rectangle, e.g. [\"0x0\",\"220x0\",\"220x220\",\"0x220\"]"],
+            [
+                'four corners of an axis-aligned rectangle, e.g. ["0x0","220x0","220x220","0x220"]'
+            ],
             command="retarget",
             extra="Round / polygonal beds are not supported by the Z-rotation fit.",
         )
@@ -431,9 +499,16 @@ def coerce_override(existing: Any, raw: str) -> Any:
         try:
             value = json.loads(raw)
         except ValueError as exc:
-            raise InvalidArgument("--set value", raw, ["a JSON list of strings, e.g. [\"0.2\"]"], command="retarget") from exc
+            raise InvalidArgument(
+                "--set value",
+                raw,
+                ['a JSON list of strings, e.g. ["0.2"]'],
+                command="retarget",
+            ) from exc
         if not isinstance(value, list):
-            raise InvalidArgument("--set value", raw, ["a JSON list of strings"], command="retarget")
+            raise InvalidArgument(
+                "--set value", raw, ["a JSON list of strings"], command="retarget"
+            )
         return [str(v) for v in value]
     if isinstance(existing, list):
         return [raw] * len(existing)
@@ -443,7 +518,12 @@ def coerce_override(existing: Any, raw: str) -> Any:
 def parse_assignment(text: str) -> tuple[str, str]:
     key, sep, value = text.partition("=")
     if not sep or not key.strip():
-        raise InvalidArgument("--set", text, ["KEY=VALUE, e.g. support_top_z_distance=0.2"], command="retarget")
+        raise InvalidArgument(
+            "--set",
+            text,
+            ["KEY=VALUE, e.g. support_top_z_distance=0.2"],
+            command="retarget",
+        )
     return key.strip(), value
 
 
@@ -472,7 +552,10 @@ def _rewrite_settings(
     nozzles = machine.settings.get("nozzle_diameter")
     if not isinstance(nozzles, list) or not nozzles:
         raise InvalidArgument(
-            "machine preset", machine.name, ["a machine preset with nozzle_diameter"], command="retarget"
+            "machine preset",
+            machine.name,
+            ["a machine preset with nozzle_diameter"],
+            command="retarget",
         )
     new_ext = len(nozzles)
     if old_fil > new_ext and new_ext > 1:
@@ -501,12 +584,23 @@ def _rewrite_settings(
                 cleared.append(key)
             continue
         value = src[key]
-        per_extruder = key not in _POINT_LIST_KEYS and not key.startswith(_FIXED_LENGTH_PREFIXES)
-        if isinstance(value, list) and per_extruder and old_ext != new_ext and len(value) == old_ext:
+        per_extruder = key not in _POINT_LIST_KEYS and not key.startswith(
+            _FIXED_LENGTH_PREFIXES
+        )
+        if (
+            isinstance(value, list)
+            and per_extruder
+            and old_ext != new_ext
+            and len(value) == old_ext
+        ):
             if new_ext == 1:  # the kept object's extruder, as for its filament below
                 put(key, [value[min(keep_slot, old_ext) - 1]], "collapse")
             else:
-                put(key, value[:new_ext] if new_ext < old_ext else value[:1] * new_ext, "collapse")
+                put(
+                    key,
+                    value[:new_ext] if new_ext < old_ext else value[:1] * new_ext,
+                    "collapse",
+                )
 
     if cleared:
         report.notes.append(
@@ -522,7 +616,12 @@ def _rewrite_settings(
             if key not in src:
                 continue
             # One filament preset serves every filament slot of a multi-extruder target.
-            wide = kind == "filament" and new_fil > 1 and isinstance(value, list) and len(value) == 1
+            wide = (
+                kind == "filament"
+                and new_fil > 1
+                and isinstance(value, list)
+                and len(value) == 1
+            )
             put(key, value * new_fil if wide else value, kind)
     if filament is not None:
         put("filament_settings_id", [filament.name] * new_fil, "filament")
@@ -534,15 +633,27 @@ def _rewrite_settings(
     if new_fil == 1:
         for key in scopes["filament"]:
             value = new.get(key)
-            if key not in new or origin.get(key) == "filament" or not isinstance(value, list) or len(value) <= 1:
+            if (
+                key not in new
+                or origin.get(key) == "filament"
+                or not isinstance(value, list)
+                or len(value) <= 1
+            ):
                 continue
             idx = keep_slot - 1 if len(value) == old_fil and old_fil > 1 else 0
             put(key, [value[min(idx, len(value) - 1)]], "collapse")
     if collapse_filaments:
         for key, value in list(new.items()):
-            if key.endswith(_SLOT_KEY_SUFFIX) and isinstance(value, str) and value.isdigit() and int(value) > 1:
+            if (
+                key.endswith(_SLOT_KEY_SUFFIX)
+                and isinstance(value, str)
+                and value.isdigit()
+                and int(value) > 1
+            ):
                 put(key, "1", "collapse")
-        if "filament_map" in new:  # filament -> extruder assignment: the one filament on extruder 1
+        if (
+            "filament_map" in new
+        ):  # filament -> extruder assignment: the one filament on extruder 1
             put("filament_map", ["1"], "collapse")
         put("flush_volumes_matrix", list(_SINGLE_FILAMENT_FLUSH_MATRIX), "collapse")
         put("flush_volumes_vector", list(_SINGLE_FILAMENT_FLUSH_VECTOR), "collapse")
@@ -567,14 +678,20 @@ def _rewrite_settings(
 
     for key in _REQUIRED_KEYS:
         if key not in new:
-            raise InvalidArgument("project settings", key, [f"a project with {key}"], command="retarget")
+            raise InvalidArgument(
+                "project settings", key, [f"a project with {key}"], command="retarget"
+            )
 
-    report.changes = [Change(k, src.get(k), v, origin[k]) for k, v in new.items() if src.get(k) != v]
+    report.changes = [
+        Change(k, src.get(k), v, origin[k]) for k, v in new.items() if src.get(k) != v
+    ]
     return new
 
 
 # --------------------------------------------------------------------------- package rewrite
-def _drop_dead_parts(parts: dict[str, bytes], main_model: str, kept_objects: set[int]) -> str:
+def _drop_dead_parts(
+    parts: dict[str, bytes], main_model: str, kept_objects: set[int]
+) -> str:
     """Remove the objects/items that are not kept from the main model; delete the sub-model
     parts nothing references any more; return the new main model text."""
     leaves = _leaves(main_model)
@@ -583,9 +700,14 @@ def _drop_dead_parts(parts: dict[str, bytes], main_model: str, kept_objects: set
     }
     # Meshes stored in the main model itself (no sub-model part) belong to their wrapper object.
     kept_objects = kept_objects | {
-        leaf.object_id for oid in kept_objects for leaf in leaves.get(oid, []) if leaf.path is None
+        leaf.object_id
+        for oid in kept_objects
+        for leaf in leaves.get(oid, [])
+        if leaf.path is None
     }
-    dead_paths = {leaf.path for ls in leaves.values() for leaf in ls if leaf.path} - live_paths
+    dead_paths = {
+        leaf.path for ls in leaves.values() for leaf in ls if leaf.path
+    } - live_paths
 
     def keep_object(m: re.Match[str]) -> str:
         return m.group(0) if int(m.group(1)) in kept_objects else ""
@@ -595,16 +717,21 @@ def _drop_dead_parts(parts: dict[str, bytes], main_model: str, kept_objects: set
         parts.pop(path, None)
     rels = parts.get(MODEL_RELS)
     if rels is not None:
+
         def keep_rel(m: re.Match[str]) -> str:
             target = re.search(r'Target="/?([^"]*)"', m.group(0))
             return "" if target and target.group(1) in dead_paths else m.group(0)
 
-        parts[MODEL_RELS] = re.sub(r"[ \t]*<Relationship\b[^>]*/>[ \t]*\r?\n?", keep_rel, rels.decode("utf-8")).encode("utf-8")
+        parts[MODEL_RELS] = re.sub(
+            r"[ \t]*<Relationship\b[^>]*/>[ \t]*\r?\n?", keep_rel, rels.decode("utf-8")
+        ).encode("utf-8")
     return text
 
 
 _PLATE_RE = re.compile(r"[ \t]*<plate>.*?</plate>[ \t]*\r?\n?", re.DOTALL)
-_INSTANCE_RE = re.compile(r"[ \t]*<model_instance>.*?</model_instance>[ \t]*\r?\n?", re.DOTALL)
+_INSTANCE_RE = re.compile(
+    r"[ \t]*<model_instance>.*?</model_instance>[ \t]*\r?\n?", re.DOTALL
+)
 
 
 def _keep_one_plate(text: str, instance_map: Mapping[tuple[int, int], int]) -> str:
@@ -651,10 +778,16 @@ def _filter_model_settings(
     `instance_map` maps `(object id, old instance id)` of each kept build item to its new
     instance id: dropping a sibling instance shifts the ones after it down.
     """
+
     def keep_object(m: re.Match[str]) -> str:
         return m.group(0) if int(m.group(1)) in kept_objects else ""
 
-    text = re.sub(r"[ \t]*<object id=\"(\d+)\">.*?</object>[ \t]*\r?\n?", keep_object, text, flags=re.DOTALL)
+    text = re.sub(
+        r"[ \t]*<object id=\"(\d+)\">.*?</object>[ \t]*\r?\n?",
+        keep_object,
+        text,
+        flags=re.DOTALL,
+    )
 
     def keep_instance(m: re.Match[str]) -> str:
         block = m.group(0)
@@ -665,7 +798,9 @@ def _filter_model_settings(
         new_id = instance_map.get((int(oid.group(1)), int(iid.group(1))))
         if new_id is None:
             return ""
-        return re.sub(r'(key="instance_id" value=")\d+(")', rf"\g<1>{new_id}\g<2>", block)
+        return re.sub(
+            r'(key="instance_id" value=")\d+(")', rf"\g<1>{new_id}\g<2>", block
+        )
 
     text = _INSTANCE_RE.sub(keep_instance, text)
 
@@ -689,14 +824,20 @@ def _filter_model_settings(
     )
     if one_extruder:
         text = re.sub(r'(<metadata key="extruder" value=")\d+(")', r"\g<1>1\g<2>", text)
-        text = re.sub(r'(<metadata key="filament_maps" value=")[^"]*(")', r"\g<1>1\g<2>", text)
+        text = re.sub(
+            r'(<metadata key="filament_maps" value=")[^"]*(")', r"\g<1>1\g<2>", text
+        )
     return text
 
 
-def _filter_layer_profile(text: str, order: Sequence[int], kept_objects: set[int]) -> tuple[str, list[str]]:
+def _filter_layer_profile(
+    text: str, order: Sequence[int], kept_objects: set[int]
+) -> tuple[str, list[str]]:
     """Orca keys this file by the 1-based position of the object in the model: keep the lines of
     kept objects and renumber them to their new position."""
-    new_pos = {oid: i for i, oid in enumerate([o for o in order if o in kept_objects], start=1)}
+    new_pos = {
+        oid: i for i, oid in enumerate([o for o in order if o in kept_objects], start=1)
+    }
     owner_of = dict(enumerate(order, start=1))
     kept_lines: list[str] = []
     notes: list[str] = []
@@ -720,7 +861,9 @@ def _filter_layer_profile(text: str, order: Sequence[int], kept_objects: set[int
 def _set_item_transforms(
     main_model: str, kept: Sequence[_Item], placement: Placement
 ) -> str:
-    world = _rotation_about_z(placement.angle_deg, placement.pivot, placement.dx, placement.dy)
+    world = _rotation_about_z(
+        placement.angle_deg, placement.pivot, placement.dx, placement.dy
+    )
     new_by_index = {item.index: _compose(item.transform, world) for item in kept}
     kept_idx = set(new_by_index)
     counter = 0
@@ -733,7 +876,9 @@ def _set_item_transforms(
         tag = m.group(0)
         formatted = _format_matrix(new_by_index[counter])
         if 'transform="' in tag:
-            return re.sub(r'transform="[^"]*"', f'transform="{formatted}"', tag, count=1)
+            return re.sub(
+                r'transform="[^"]*"', f'transform="{formatted}"', tag, count=1
+            )
         return tag.replace("<item", f'<item transform="{formatted}"', 1)
 
     return _ITEM_RE.sub(sub, main_model)
@@ -747,7 +892,10 @@ def parse_keep(spec: str, count: int) -> list[int]:
         picked = []
     if not picked or picked[0] < 1 or picked[-1] > count:
         raise InvalidArgument(
-            "--keep", spec, [f"comma-separated numbers within 1..{count}"], command="retarget",
+            "--keep",
+            spec,
+            [f"comma-separated numbers within 1..{count}"],
+            command="retarget",
             extra=f"The project has {count} build object(s), numbered 1..{count} in the order listed.",
         )
     return picked
@@ -772,11 +920,19 @@ def retarget(
     model_settings = parts[MODEL_SETTINGS].decode("utf-8")
     items = _build_items(main_model)
     if not items:
-        raise InvalidArgument("input", str(src), ["a project with at least one build object"], command="retarget")
+        raise InvalidArgument(
+            "input",
+            str(src),
+            ["a project with at least one build object"],
+            command="retarget",
+        )
 
     names = _object_names(model_settings)
     report = Report(source=src.name, target=machine.name, margin=margin)
-    report.objects = [f"{it.index}: {names.get(it.object_id, '?')} (object {it.object_id})" for it in items]
+    report.objects = [
+        f"{it.index}: {names.get(it.object_id, '?')} (object {it.object_id})"
+        for it in items
+    ]
 
     wanted = parse_keep(keep, len(items)) if keep else [it.index for it in items]
     kept = [items[i - 1] for i in wanted]
@@ -831,10 +987,14 @@ def retarget(
             f"too tall for {machine.name}: part is {span:.1f} mm high, "
             f"printable_height is {height:g} mm",
             command="retarget",
-            remediation=["Keep fewer objects (--keep) or pick a printer with more Z travel."],
+            remediation=[
+                "Keep fewer objects (--keep) or pick a printer with more Z travel."
+            ],
         )
     if abs(foot.zmin) > 0.05:
-        report.notes.append(f"lowest point is z={foot.zmin:.3f} mm, not on the bed; left as in the source")
+        report.notes.append(
+            f"lowest point is z={foot.zmin:.3f} mm, not on the bed; left as in the source"
+        )
 
     placement = fit_to_bed(foot.hull, bed, margin)
     if placement is None:
@@ -852,7 +1012,9 @@ def retarget(
             f"(bed {bed.width:g} x {bed.depth:g} mm minus {margin:g} mm margin each side); {hint}",
             command="retarget",
             remediation=[
-                "Keep fewer objects: --keep N (objects: " + "; ".join(report.objects) + ")",
+                "Keep fewer objects: --keep N (objects: "
+                + "; ".join(report.objects)
+                + ")",
                 "Re-orient (tilt) or split the part in the slicer; Z rotation alone cannot make it fit.",
             ],
         )
@@ -860,18 +1022,24 @@ def retarget(
     report.footprint = placement.size
 
     kept_objects = {it.object_id for it in kept}
-    order = list(dict.fromkeys(it.object_id for it in items))  # the slicer's object numbering
+    order = list(
+        dict.fromkeys(it.object_id for it in items)
+    )  # the slicer's object numbering
     out = dict(parts)
     new_main = _set_item_transforms(main_model, kept, placement)
     out[MAIN_MODEL] = _drop_dead_parts(out, new_main, kept_objects).encode("utf-8")
 
     one_extruder = len(new_settings.get("filament_settings_id", [])) == 1
-    new_ms = _filter_model_settings(model_settings, kept_objects, instance_map, one_extruder=one_extruder)
+    new_ms = _filter_model_settings(
+        model_settings, kept_objects, instance_map, one_extruder=one_extruder
+    )
     out[MODEL_SETTINGS] = new_ms.encode("utf-8")
     out[SETTINGS] = _dump_settings(new_settings)
 
     if LAYER_PROFILE in out:
-        profile, notes = _filter_layer_profile(out[LAYER_PROFILE].decode("utf-8"), order, kept_objects)
+        profile, notes = _filter_layer_profile(
+            out[LAYER_PROFILE].decode("utf-8"), order, kept_objects
+        )
         report.notes.extend(notes)
         if profile:
             out[LAYER_PROFILE] = profile.encode("utf-8")
@@ -882,15 +1050,21 @@ def retarget(
         del out[name]
     if stale:
         _drop_preview_rels(out)
-        report.notes.append(f"dropped {len(stale)} stale preview file(s); the slicer redraws them on open")
+        report.notes.append(
+            f"dropped {len(stale)} stale preview file(s); the slicer redraws them on open"
+        )
     old_gcode = [name for name in out if _STALE_GCODE.match(name)]
     for name in old_gcode:
         del out[name]
     if old_gcode:
         for rels_name in (ROOT_RELS, "Metadata/_rels/model_settings.config.rels"):
             if rels_name in out:
-                out[rels_name] = _GCODE_REL.sub("", out[rels_name].decode("utf-8")).encode("utf-8")
-        report.notes.append(f"dropped {len(old_gcode)} G-code part(s) sliced for the source printer; re-slice for the target")
+                out[rels_name] = _GCODE_REL.sub(
+                    "", out[rels_name].decode("utf-8")
+                ).encode("utf-8")
+        report.notes.append(
+            f"dropped {len(old_gcode)} G-code part(s) sliced for the source printer; re-slice for the target"
+        )
 
     if one_extruder:
         stripped = 0
@@ -901,7 +1075,9 @@ def retarget(
                 out[name] = new_text.encode("utf-8")
                 stripped += n
         if stripped:
-            report.notes.append(f"removed {stripped} per-triangle colour paint marks (single filament target)")
+            report.notes.append(
+                f"removed {stripped} per-triangle colour paint marks (single filament target)"
+            )
     return out, report
 
 
@@ -912,7 +1088,9 @@ def _drop_preview_rels(parts: dict[str, bytes]) -> None:
 
 
 # --------------------------------------------------------------------------- validation
-def validate_parts(parts: Mapping[str, bytes], *, bed: Bed, margin: float, nozzles: int) -> list[str]:
+def validate_parts(
+    parts: Mapping[str, bytes], *, bed: Bed, margin: float, nozzles: int
+) -> list[str]:
     """Independent re-check of a retargeted package; an empty list means it is sound."""
     problems: list[str] = []
     for name, data in parts.items():
@@ -927,7 +1105,9 @@ def validate_parts(parts: Mapping[str, bytes], *, bed: Bed, margin: float, nozzl
         settings = json.loads(parts[SETTINGS].decode("utf-8"))
     except (KeyError, ValueError) as exc:
         return [*problems, f"{SETTINGS}: not valid JSON ({exc})"]
-    problems.extend(f"{SETTINGS}: missing key {k}" for k in _REQUIRED_KEYS if k not in settings)
+    problems.extend(
+        f"{SETTINGS}: missing key {k}" for k in _REQUIRED_KEYS if k not in settings
+    )
     if problems:
         return problems
 
@@ -937,13 +1117,19 @@ def validate_parts(parts: Mapping[str, bytes], *, bed: Bed, margin: float, nozzl
     except InvalidArgument as exc:
         problems.append(str(exc))
     if len(settings.get("nozzle_diameter", [])) != nozzles:
-        problems.append(f"nozzle_diameter has {len(settings.get('nozzle_diameter', []))} entries, expected {nozzles}")
+        problems.append(
+            f"nozzle_diameter has {len(settings.get('nozzle_diameter', []))} entries, expected {nozzles}"
+        )
     if nozzles == 1:
         if len(settings.get("filament_settings_id", [])) != 1:
-            problems.append("more than one filament remains for a single-extruder target")
+            problems.append(
+                "more than one filament remains for a single-extruder target"
+            )
         ms = parts[MODEL_SETTINGS].decode("utf-8")
         if any(int(v) > 1 for v in re.findall(r'key="extruder" value="(\d+)"', ms)):
-            problems.append(f"{MODEL_SETTINGS}: an object/part is still assigned to extruder > 1")
+            problems.append(
+                f"{MODEL_SETTINGS}: an object/part is still assigned to extruder > 1"
+            )
 
     try:
         main = parts[MAIN_MODEL].decode("utf-8")
@@ -955,7 +1141,9 @@ def validate_parts(parts: Mapping[str, bytes], *, bed: Bed, margin: float, nozzl
         return [*problems, f"{MAIN_MODEL}: no build items"]
     for item in items:
         if not leaves.get(item.object_id):
-            problems.append(f"build item {item.index} references object {item.object_id} that has no mesh")
+            problems.append(
+                f"build item {item.index} references object {item.object_id} that has no mesh"
+            )
         problems.extend(
             f"object {item.object_id}: part {leaf.path} is missing from the archive"
             for leaf in leaves.get(item.object_id, [])
@@ -965,7 +1153,12 @@ def validate_parts(parts: Mapping[str, bytes], *, bed: Bed, margin: float, nozzl
         return problems
 
     try:
-        foot = _footprint(parts, main, items, _non_printing_volumes(parts[MODEL_SETTINGS].decode("utf-8")))
+        foot = _footprint(
+            parts,
+            main,
+            items,
+            _non_printing_volumes(parts[MODEL_SETTINGS].decode("utf-8")),
+        )
     except (ET.ParseError, InvalidArgument) as exc:
         return [f"a mesh part cannot be read: {exc}"]
     min_x, min_y, max_x, max_y = bounds(foot.hull)
@@ -978,5 +1171,128 @@ def validate_parts(parts: Mapping[str, bytes], *, bed: Bed, margin: float, nozzl
         )
     height = float(str(settings["printable_height"]))
     if foot.zmax > height + _TOL:
-        problems.append(f"part top z={foot.zmax:.2f} exceeds printable_height {height:g}")
+        problems.append(
+            f"part top z={foot.zmax:.2f} exceeds printable_height {height:g}"
+        )
     return problems
+
+
+# --------------------------------------------------------------------------- slicing inputs
+def _read_mesh(
+    source: bytes, object_id: int
+) -> tuple[list[tuple[float, float, float]], list[tuple[int, int, int]]]:
+    """Vertices and triangles of one `<object>`, streamed: elements are cleared as they close, so
+    a large model file is never held as a tree, and parsing stops once the object ends."""
+    verts: list[tuple[float, float, float]] = []
+    faces: list[tuple[int, int, int]] = []
+    inside = False
+    for event, elem in ET.iterparse(io.BytesIO(source), events=("start", "end")):
+        if elem.tag == _TAG_OBJECT:
+            if event == "start":
+                inside = int(elem.attrib["id"]) == object_id
+            else:
+                if inside:
+                    break
+                elem.clear()
+        elif event == "end":
+            if inside and elem.tag == _TAG_VERTEX:
+                verts.append(
+                    (
+                        float(elem.attrib["x"]),
+                        float(elem.attrib["y"]),
+                        float(elem.attrib["z"]),
+                    )
+                )
+            elif inside and elem.tag == _TAG_TRIANGLE:
+                faces.append(
+                    (
+                        int(elem.attrib["v1"]),
+                        int(elem.attrib["v2"]),
+                        int(elem.attrib["v3"]),
+                    )
+                )
+            if not inside or elem.tag in (_TAG_VERTEX, _TAG_TRIANGLE):
+                elem.clear()
+    return verts, faces
+
+
+def export_stl(parts: Mapping[str, bytes]) -> bytes:
+    """Binary STL of every printing volume of the package's build items, in world (bed)
+    coordinates. The Snapmaker Orca CLI crashes on project 3MFs but slices an STL with
+    `--load-settings`, so `3d retarget --gcode` slices this plus the retargeted settings."""
+    main = parts[MAIN_MODEL].decode("utf-8")
+    skip = _non_printing_volumes(parts[MODEL_SETTINGS].decode("utf-8"))
+    leaves = _leaves(main)
+    meshes: dict[
+        tuple[str, int],
+        tuple[list[tuple[float, float, float]], list[tuple[int, int, int]]],
+    ] = {}
+    packer = struct.Struct("<12fH")
+    body = bytearray()
+    count = 0
+    for item in _build_items(main):
+        for leaf in leaves.get(item.object_id, []):
+            if leaf.object_id in skip:
+                continue
+            key = (leaf.path, leaf.object_id)
+            if key not in meshes:
+                meshes[key] = _read_mesh(
+                    parts[leaf.path] if leaf.path else parts[MAIN_MODEL], leaf.object_id
+                )
+            local, faces = meshes[key]
+            world = _compose(leaf.transform, item.transform)
+            verts = [_apply(world, x, y, z) for x, y, z in local]
+            for a, b, c in faces:
+                body += packer.pack(0, 0, 0, *verts[a], *verts[b], *verts[c], 0)
+                count += 1
+    return b"retarget".ljust(80, b"\0") + struct.pack("<I", count) + body
+
+
+def split_project_settings(
+    settings: Mapping[str, Any], machine_name: str
+) -> dict[str, dict[str, Any]]:
+    """The retargeted `project_settings.config` as three preset files for `--load-settings` /
+    `--load-filaments`: machine keys, filament keys, everything else = process. Process and
+    filament presets name the machine as their only compatible printer (the CLI matches it
+    against the machine preset's own name)."""
+    process_name = settings.get("print_settings_id")
+    filament_names = settings.get("filament_settings_id")
+    if not process_name or not filament_names:
+        raise GateFailure(
+            "the project settings have no print_settings_id / filament_settings_id",
+            command="retarget",
+            remediation=[
+                "re-save the project from the slicer so it carries its preset names"
+            ],
+        )
+    scopes = setting_scopes()
+    ident = {"from": "system", "instantiation": "true"}
+    out: dict[str, dict[str, Any]] = {"machine": {}, "process": {}, "filament": {}}
+    for key, value in settings.items():
+        if key in _PRESET_IDENTITY_KEYS:
+            continue
+        if key in scopes["machine"]:
+            out["machine"][key] = value
+        elif key in scopes["filament"]:
+            out["filament"][key] = value
+        else:
+            out["process"][key] = value
+    # A third-party project must not make the slicer run a host command (`post_process`) or write
+    # outside the work dir (`output_filename_format`) just because `--gcode` loads its settings.
+    out["process"].update(_HOST_REACHING_KEYS)
+    out["machine"].update(ident, type="machine", name=machine_name)
+    out["process"].update(
+        ident,
+        type="process",
+        name=str(process_name),
+        compatible_printers=[machine_name],
+        compatible_printers_condition="",
+    )
+    out["filament"].update(
+        ident,
+        type="filament",
+        name=str(filament_names[0]),
+        compatible_printers=[machine_name],
+        compatible_printers_condition="",
+    )
+    return out
