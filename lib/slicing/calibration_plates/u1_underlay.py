@@ -57,6 +57,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
 
+from cli.resources import max_workers
 from slicing.calibration_gen import Box, GenError, prism_stl
 from slicing.calibration_plates.dense import (
     motion,
@@ -1893,7 +1894,7 @@ def render_meshes(tests: list[Test], label: Test, underlay: Rect) -> list[Mesh]:
         obj, name, ex, src, scad = job
         return _mesh(obj, name, ex, openscad_stl(src) if scad else src)
 
-    with ThreadPoolExecutor(max_workers=6) as pool:
+    with ThreadPoolExecutor(max_workers=min(6, max_workers())) as pool:
         return list(pool.map(one, jobs))
 
 
@@ -2424,13 +2425,13 @@ def apply_hooks(
                     elif e > 0 and not xy and open_r:
                         line = s[: em.start()] + f" E{e - open_r:.5f}" + s[em.end() :]
                         open_r = 0.0
-        elif pending and s.startswith("G1"):
-            em = re.search(r" E(\d*\.?\d+)", s)
-            if em and not re.search(r" [XY]-?[\d.]", s):
+        if pending and line.lstrip().startswith("G1"):
+            em = re.search(r" E(\d*\.?\d+)", line)
+            if em and not re.search(r" [XY]-?[\d.]", line):
                 line = (
-                    s[: em.start()]
+                    line[: em.start()]
                     + f" E{float(em.group(1)) - pending:.5f}"
-                    + s[em.end() :]
+                    + line[em.end() :]
                 )
                 pending = 0.0
         out.append(line)

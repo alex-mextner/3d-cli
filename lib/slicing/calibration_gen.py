@@ -1143,6 +1143,8 @@ def digit_boxes(
             )
             ox += s + gap
             continue
+        if ch not in _DIGITS:
+            raise GenError(f"label character {ch!r} has no seven-segment glyph")
         for seg in _DIGITS[ch]:
             (ax, ay), (bx, by) = _SEG[seg]
             xa, xb = sorted((ox + ax * w, ox + bx * w))
