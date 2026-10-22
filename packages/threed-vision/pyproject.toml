@@ -23,6 +23,8 @@ gpu = ["onnxruntime-gpu==1.23.2", "tokenizers>=0.15"]
 # onnxruntime-gpu 1.23.x loads; a cu130 torch leaves ORT on CPU.
 seg = ["torch>=2.8,<2.12", "torchvision>=0.23,<0.27", "sam2>=1.1", "transformers>=4.45"]
 fit = ["torch>=2.8,<2.12", "cma>=3.3"]
+# Mesh loading for `3d bank thumbs` (bank thumbnails are rendered from STL/OBJ/PLY/GLB/3MF meshes).
+bank = ["trimesh>=4.0"]
 
 [build-system]
 requires = ["hatchling"]

@@ -72,6 +72,8 @@ For a practical figure-by-figure image backplate loop, see
 | `preprocess` | [preprocess.md](preprocess.md) | Reference subject mask and proportional depth preprocessing. |
 | `segment` | [segment.md](segment.md) | Multi-object photo segmentation (SAM2 + OWLv2 fill + CLIP background rejection) into per-instance masks (threed-vision). |
 | `detect` | [detect.md](detect.md) | Open-vocabulary object boxes for text queries (OWLv2, threed-vision). |
+| `recognise` | [recognise.md](recognise.md) | Class proposals for segmented instances: CLIP text prompts (class-mean calibrated) plus bank retrieval inside the proposed classes (threed-vision). |
+| `bank` | [bank.md](bank.md) | Reference bank for image retrieval: lie-flat thumbnails from meshes (textured), CLIP/DINOv2 embedding index, nearest-entry query (threed-vision). |
 
 ### Slicing
 
