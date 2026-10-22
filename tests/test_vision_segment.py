@@ -690,3 +690,34 @@ def test_detect_without_masks_never_loads_the_segmenter(
         detect_cmd.run(parser.parse_args([str(photo), "--queries", "x", "--json"])) == 0
     )
     assert "masks" not in json.loads(capsys.readouterr().out)
+
+
+# --- ClipEncoder.load: missing model is reported before a missing package -------------------------------------------
+
+
+def test_clip_load_reports_the_missing_model_even_without_tokenizers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("THREED_VISION_MODELS_DIR", str(tmp_path))
+    monkeypatch.setitem(
+        sys.modules, "tokenizers", None
+    )  # `import tokenizers` -> ImportError
+    monkeypatch.setattr(clip.ClipEncoder, "_resolve", lambda self: None)
+    with pytest.raises(MissingDependency) as exc:
+        clip.ClipEncoder("cpu").load()
+    assert "3d vision-models pull clip-b32" in exc.value.render()
+
+
+def test_clip_load_without_tokenizers_is_a_missing_dependency_not_a_crash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setitem(sys.modules, "tokenizers", None)
+    monkeypatch.setattr(clip.ClipEncoder, "_resolve", lambda self: None)
+    monkeypatch.setattr(clip.ClipEncoder, "_session", lambda self, rel: object())
+    monkeypatch.setattr(
+        clip.models, "model_path", lambda name, rel=None: tmp_path / "t.json"
+    )
+    enc = clip.ClipEncoder("cpu")
+    with pytest.raises(MissingDependency, match="tokenizers"):
+        enc.load()
+    assert not enc.loaded and enc._sessions == {}

@@ -187,15 +187,20 @@ class ClipEncoder(OrtEncoder):
     vram_estimate_mb = 500
 
     def _build(self) -> None:
-        from tokenizers import Tokenizer
-
-        self._sessions = {
+        sessions = {
             "v": self._session("clipb32_vision.onnx"),
             "t": self._session("clip_text.onnx"),
         }
-        self._tok = Tokenizer.from_file(
-            str(models.model_path(self.model_name, "clip_tokenizer.json"))
-        )
+        tok_path = models.model_path(self.model_name, "clip_tokenizer.json")
+        try:
+            from tokenizers import Tokenizer
+        except ImportError as exc:
+            raise MissingDependency(
+                "tokenizers is not installed (needed for the CLIP text tower)",
+                "uv pip install 'packages/threed-vision[gpu]'",
+            ) from exc
+        self._sessions = sessions
+        self._tok = Tokenizer.from_file(str(tok_path))
 
     def images(self, crops: list[np.ndarray], batch_size: int = 32) -> np.ndarray:
         self.load()
