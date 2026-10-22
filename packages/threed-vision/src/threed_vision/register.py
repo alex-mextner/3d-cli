@@ -265,6 +265,7 @@ def register(
 
     warped: list[Array] = []
     rep: list[dict[str, Any]] = []
+    mb_boxes = [_bbox(b) for b in mb]
     t0 = time.perf_counter()
     for i, m in enumerate(ma):
         w = (
@@ -284,7 +285,7 @@ def register(
             "unstable": None,
         }
         if mb:
-            ious = [float((w & b).sum() / max(int((w | b).sum()), 1)) for b in mb]
+            ious = _ious(w, _bbox(w), mb, mb_boxes)
             j = int(np.argmax(ious))
             entry.update(
                 best_b_index=j, iou=ious[j], unstable=bool(ious[j] < flag_below)
@@ -316,6 +317,42 @@ def register(
         "image_size_b": [wb, hb],
         "timing_s": timing,
     }
+
+
+def _bbox(mask: Array) -> tuple[int, int, int, int, int]:
+    """(y0, y1, x0, x1, area) of a mask; an empty mask has area 0."""
+    ys, xs = np.nonzero(mask)
+    if xs.size == 0:
+        return 0, 0, 0, 0, 0
+    return (
+        int(ys.min()),
+        int(ys.max()) + 1,
+        int(xs.min()),
+        int(xs.max()) + 1,
+        int(xs.size),
+    )
+
+
+def _ious(
+    w: Array,
+    wbox: tuple[int, int, int, int, int],
+    masks: list[Array],
+    boxes: list[tuple[int, int, int, int, int]],
+) -> list[float]:
+    """IoU of `w` with every mask, intersecting only inside the bounding-box overlap (no full-frame work per pair)."""
+    out: list[float] = []
+    for b, bb in zip(masks, boxes, strict=True):
+        y0, y1, x0, x1 = (
+            max(wbox[0], bb[0]),
+            min(wbox[1], bb[1]),
+            max(wbox[2], bb[2]),
+            min(wbox[3], bb[3]),
+        )
+        inter = (
+            int((w[y0:y1, x0:x1] & b[y0:y1, x0:x1]).sum()) if y1 > y0 and x1 > x0 else 0
+        )
+        out.append(inter / max(wbox[4] + bb[4] - inter, 1))
+    return out
 
 
 def _inside_fraction(mask: Array, H: Array, size_b: tuple[int, int]) -> float:

@@ -174,3 +174,19 @@ def test_real_carpet_pair_is_the_same_viewpoint() -> None:
     # pair differs by a pure zoom about the principal point, i.e. no rotation at all
     assert res["rel_rot_deg"] < 0.5
     assert res["baseline_ok"] is False
+
+
+def test_bbox_cropped_ious_equal_the_full_frame_definition() -> None:
+    rng = np.random.default_rng(4)
+    masks = []
+    for _ in range(30):
+        m = np.zeros((300, 400), bool)
+        y, x = int(rng.integers(0, 250)), int(rng.integers(0, 350))
+        m[y : y + int(rng.integers(5, 60)), x : x + int(rng.integers(5, 60))] = True
+        masks.append(m)
+    boxes = [G._bbox(m) for m in masks]
+    for w in masks[:5]:
+        got = G._ious(w, G._bbox(w), masks, boxes)
+        want = [float((w & b).sum() / max(int((w | b).sum()), 1)) for b in masks]
+        assert got == pytest.approx(want)
+    assert G._bbox(np.zeros((4, 4), bool))[4] == 0

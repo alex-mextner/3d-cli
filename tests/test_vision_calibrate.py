@@ -424,3 +424,31 @@ def test_homography_helpers() -> None:
     assert C.local_mm_per_px(persp, (500.0, 0.0)) == pytest.approx(
         math.sqrt(1 / 1.5**3), rel=1e-6
     )  # Jacobian det = 1/w^3 (d(x/w)/dx = 1/w^2, d(y/w)/dy = 1/w), w = 1.5
+
+
+def test_invalid_known_focal_is_bad_input_not_a_crash() -> None:
+    cam = fx.camera(900.0, SIZE, 25.0, 12.0, 4.0, 900.0, CENTRE)
+    img = fx.render(cam, SIZE)
+    for bad in (0.0, -5.0, float("nan")):
+        with pytest.raises(BadInput):
+            C.detect_grid(img, f_px=bad)
+    with pytest.raises(BadInput):
+        C.detect_grid(img, f_ratio=0.0)
+
+
+def test_returned_tilt_matches_the_returned_pose_after_the_focal_fallback() -> None:
+    pts, size = _recorded()
+    res = C.solve_grid_pose(
+        pts[(pts[:, 0] > 450) & (pts[:, 1] < 520)], image_size=size
+    )  # small footprint -> prior f
+    assert res["ok"] and res["f_source"] == "default"
+    assert res["tilt_deg"] == pytest.approx(
+        math.degrees(math.acos(-np.asarray(res["R"])[2, 2]))
+    )
+
+
+def test_user_supplied_f_ratio_is_labelled_given() -> None:
+    given = C.scale_from_points(
+        (0, 0), (500, 0), 100.0, image_size=(1000, 800), f_ratio=0.5
+    )
+    assert given["f_source"] == "given" and "f_ratio_given" in given["quality"]

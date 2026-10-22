@@ -244,6 +244,17 @@ def run(args: argparse.Namespace) -> int:
                     f"no honeycomb grid found in {args.image}: {cal['reason']}",
                     "use --ref/--points, or photograph the panel with >= 12 full cells visible",
                 )
+        if not isinstance(cal, dict):
+            raise BadInput("the calibration JSON must be an object")
+        if cal.get("ok") is False:
+            raise BadInput(
+                f"the calibration is not usable (reason: {cal.get('reason')})"
+            )
+        cal_size = cal.get("image_size") or cal.get("image_size_px")
+        if cal_size is not None and [int(v) for v in cal_size] != list(size):
+            raise BadInput(
+                f"the calibration is for a {cal_size[0]}x{cal_size[1]} photo but {args.image} is {size[0]}x{size[1]}"
+            )
         res = scale_from_grid(cal, at_px=args.at)
     else:
         res = _homography_scale(args, rgb, size)
