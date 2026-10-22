@@ -44,6 +44,8 @@ def stage_argv(stage: str, args: list[str], *, heavy: bool) -> list[str]:
         "the threed-vision python environment",
         install=(
             f"uv venv {os.path.dirname(os.path.dirname(venv_py))} --python 3.12 && "
+            f"uv pip install --python {venv_py} torch==2.11.0 torchvision==0.26.0 --index-url https://download.pytorch.org/whl/cu128"
+            f" --extra-index-url https://pypi.org/simple --index-strategy unsafe-best-match && "
             f"uv pip install --python {venv_py} -e '{os.path.join(repo_root(), 'packages', 'threed-vision')}[gpu,seg,fit]'"
             "  (or set THREED_VISION_PYTHON to a python that has the package's deps)"
         ),
