@@ -25,6 +25,7 @@ input is missing is SKIP and its line says what to pass — it never passes sile
 | `overhangs` | always (SKIP for a G-code without extrusion or in vase mode) | An object prints more than 100 mm² on nothing: per layer, extrusion that the layer below does not carry under the 45° rule and that no bridge reaches. The bridge limit is `--bridge-max`, else the printer's `bridge_max_mm` in `printer-devices.yaml` (`--printer` / `--axis-limits NAME`), else 15 mm; the line names the source. Small ceilings, grass tips and edge step-outs are WARN, listed per object with z and position; a map PNG is written. See [`3d gcode-overhangs`](gcode-overhangs.md). |
 | `slicer warn` | always | `NAME.slice-warnings.json` is missing, was recorded for another G-code (SHA-256 differs: re-sliced or edited), or holds a slicer warning/error without a reason. PASS lists every accepted warning with its reason. See [`3d slice-warnings`](slice-warnings.md). |
 | `head seq` | the project 3MF: `--source-3mf`, else `NAME.3mf` next to `NAME.gcode` (SKIP without one, or when no object can print on the wrong head: no mixed filaments and every object single-head) | An object prints some layer on a head its filaments do not call for, or is missing from the G-code ([#103](https://github.com/alex-mextner/3d-cli/issues/103); the [`slice-check`](slice-check.md) `head-sequence` check). |
+| `mix face` | the same project 3MF as `head seq` (SKIP without one, or when no part prints in a mixed filament) | A part in a mixed filament (manual layer pattern or Local-Z row) shows its colour on a horizontal face: its faces looking up within 30° of horizontal outweigh half its walls (faces within 30° of vertical). A layer mix reads only on walls; a flat top shows one filament. Mostly sloped upward faces (terraces) are WARN. Per part with top/wall areas: [`3d mix check`](mix.md) ([#411](https://github.com/alex-mextner/3d-cli/issues/411)). |
 | `visible` | `--visible` (SKIP without: the visible side is a design input) | [`3d visible-faces --gcode`](visible-faces.md) finds support or sagging islands on a declared visible side. |
 | `halves` | `--source-3mf` | `3d halves-check FILE.3mf` failed or could not run. |
 
@@ -118,6 +119,7 @@ PREFLIGHT print/k1se/k1_base_4_v3.gcode
                    map: ~/.cache/3d-cli/overhangs/k1_base_4_v3-583b75803925.png
   FAIL  slicer warn no k1_base_4_v3.slice-warnings.json: the slicer's warnings for this G-code were never recorded (3d slice-warnings record k1_base_4_v3.gcode --log SLICER.log [--result result.json])
   SKIP  head seq    nothing to sequence: no mixed filaments and every object on one head (1 object(s), k1_base_4_v3.3mf next to the G-code)
+  SKIP  mix face    no part prints in a mixed filament (0 mixed row(s)) (k1_base_4_v3.3mf next to the G-code)
   SKIP  visible     no --visible spec: the visible side is a design input (e.g. --visible 'WALL*:y<104.8')
 STATUS: FAIL
 ```
