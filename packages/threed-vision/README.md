@@ -39,6 +39,7 @@ uv pip install --python ~/.cache/3d-cli/vision/venv/bin/python -e 'packages/thre
 | `fit_silhouette` | `fit_object` (soft-silhouette fit, GPU->CPU) and `fit_cma` (CMA-ES second attempt) |
 | `fit` | `fit_auto`: closed form first, soft refine only if needed, CMA only for low confidence |
 | `view_check` | `check(fit, views)`: IoU of the fit in extra views, `needs_views`, single-photo sanity mode |
+| `appearance` | `sample_part_colours`: per-part (handle/shaft/head) robust Lab colours from photo + mask (numpy + OpenCV) |
 | `mesh_export` | `emit_mesh(fit, 'glb'\|'stl'\|'obj'\|'scad')`: watertight mesh in mm |
 | `register` | SIFT + RANSAC homography, relative pose, mask warp |
 

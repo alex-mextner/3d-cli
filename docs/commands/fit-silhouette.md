@@ -145,6 +145,35 @@ Everything returned is plain dicts/lists/floats (`json.dumps(fit)` works, no NaN
 `known_depth=None`, `planar=False`, `fixed_dims=None`, `heldout_views=None`, `iou_accept=0.9`, `min_iou=0.8`, `max_tries=3`, `device="auto"`,
 `seed=0`, `cma=True`. Models are not involved: nothing is downloaded.
 
+## Part colours from the photo (`appearance.sample_part_colours`)
+
+Library API only (numpy + OpenCV, no models, deterministic); there is no `3d` command for it. Use it next to a fit so the proxy model is
+painted like the real tool.
+
+```python
+from threed_vision.appearance import sample_part_colours
+
+out = sample_part_colours(rgb_uint8_HxWx3, mask_bool_HxW,        # the same full-resolution photo + mask the fit used
+                          fit=fit,                                # optional: only refines role_guess from the template
+                          n_parts=None,                           # None = cut at width-profile discontinuities (max 4); 1..4 forces it
+                          max_colours=4)                          # palette size
+# {"parts": [{"t0": 0.0, "t1": 0.34, "colour_srgb": [201, 31, 29], "hex": "#c91f1d", "lab": [..], "area_frac": 0.31,
+#             "n_pixels": 4210, "role_guess": "handle"},
+#            {"t0": 0.34, "t1": 1.0, "colour_srgb": [127, 127, 129], "hex": "#7f7f81", ..., "role_guess": "shaft"}],
+#  "palette": [{"colour_srgb": .., "hex": .., "lab": .., "area_frac": ..}], "axis_deg": -83.2}
+```
+
+`t` runs along the object's length from the wider end (`0` = "handle first", same orientation as `fit_profile`); for a fitted object it
+maps to `x = (t − ½)·L_mm` in the object frame **only up to the end flip** (the fit's X axis may point the other way: compare
+`axis_deg` with the projection of `fit["pose"]["axis"]`). Parts are cut where the closed-form width profile jumps by ≥ 20 % of the maximum
+width, at least ~8 % of the length apart; a tool with a uniform width and only a colour change is one part (force `n_parts`). Per part the colour
+is the densest CIE-Lab cluster (8-unit bins, median) of the **eroded** mask interior with highlights (very light, nearly colourless
+pixels) removed, so the blended mask boundary and glare do not tint it; a part too thin to have an interior uses its own pixels. Palette
+colours within dE 12 are merged. Same input ⇒ same output (no random init). `role_guess` (`handle` → `shaft` → `head`, `body`, `jaw`) is
+a heuristic from order and the template, not recognition. The colour is what the camera saw (lighting and white balance included).
+Raises `BadInput` (non-RGB image, mask/image shape mismatch, empty or < 8-pixel mask, `n_parts` outside 1..4, `max_colours` < 1); a part
+with no usable pixel returns `colour_srgb`/`hex`/`lab` = `None`; no value is ever NaN.
+
 ## Limits (measured)
 
 * Single-view fits reproduce the photo; thickness/roll are priors (unseen-view IoU of single-view fits was 0.03–0.5 in the spike).
