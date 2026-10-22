@@ -87,6 +87,128 @@ The worst healthy frame is the dark tip of a tree support in `quant_1`. The U1's
 flagged the same episode earlier (13:46). The 04:38 episode has no frames (no timelapse was
 recording); `klippy.log` shows NPU scores 0.84–0.89 from 04:33 and a pause with code 2.
 
+## Three tiers (2026-10-22)
+
+The U1 printed a large white honeycomb panel that peeled off the plate and no detector noticed.
+Vision is therefore split in three tiers, each independent of the others:
+
+| tier | what | cost | where |
+|---|---|---|---|
+| (a) cheap checks | stale/dark camera, Obico boxes + CLIP crop verifier, bed-change and detached-part geometry | CPU, every frame (10 s) | `vision_detect.py`, `vision_scene.py`, `vision_detach.py` |
+| (b) mid-tier model | a whole-frame image model, zero-shot prompts or a fitted head | GPU if free (6 ms) else CPU (160 ms), every 30 s | `vision_model.py` |
+| (c) LLM check | the temporary printer agent looks at the frame an event carries and decides | minutes, tokens | `printer_ops/printer_agent.py`, `subscriptions.py` |
+
+Tier (b) did **not exist** before: stage 1 is Obico's YOLOv2 on 416 px crops of nothing but
+spaghetti texture, stage 2 is CLIP ViT-B/32 on the crops of those boxes (both CPU onnxruntime,
+`CPUExecutionProvider` hard-coded, ~0.14 s per frame, no GPU path), neither ever looks at the
+whole frame, and the only class either covers is spaghetti: nothing for a detached part, an empty
+plate, residue or a displaced part. `vision_model.py` adds the whole-frame model; it only ever
+adds `Finding`s (warning, never an automatic pause) next to tier (a).
+
+### Tier (b): candidates, measured (2026-10-22, RTX 4060 8 GB, desktop holding ~3.5 GB)
+
+Every candidate was embedded once on the GPU (fp16, whole frame squashed to 224 px) over the same
+11,381 frames and scored with the same prompt sets (`PROMPTS` in `vision_model.py`, not tuned on
+any split) with `tools/vision_model_bench.py`. Frames: the public collection of
+[printer-vision-tuning.md](printer-vision-tuning.md) (6,387 images; `test` split = 360
+spaghetti, 982 healthy, 162 `detached` and 147 `warping`), 4,952 healthy U1 frames (six
+timelapses and the speckled-wall recordings), 15 idle U1 frames, the 6 clean U1 spaghetti frames of
+2026-10-14, the U1 panel frame and the K1 frame. AUROC; "TPR@1%" = recall at the threshold that
+passes 1 % of the healthy frames of that task.
+
+| candidate (licence, params) | spaghetti, public test AUROC / TPR@1% | clean U1 spaghetti (6) at the U1-healthy p99.9 threshold | empty plate (idle+K1 vs printing) | `detached` emptydeck | warping | any-failure head, leave-one-source-out | GPU b=1 ms / VRAM |
+|---|---|---|---|---|---|---|---|
+| CLIP ViT-B/32 (MIT, 151 M) | 0.843 / 0.29 | 1/6 | 0.91 | 0.50 | 0.62 | 0.725 | 5.4 / 589 MiB |
+| **CLIP ViT-B/16 (MIT, 150 M)** | **0.888 / 0.53** | **5/6** | 0.98 | 0.45 | 0.52 | 0.797 | 3.7 / 693 MiB |
+| LAION CLIP ViT-B/32 (MIT, 151 M) | 0.797 / 0.20 | 2/6 | 0.87 | 0.50 | 0.14 | 0.800 | 3.5 / 418 MiB |
+| SigLIP base-224 (Apache-2.0, 203 M) | 0.868 / 0.53 | 0/6 | 0.99 | 0.53 | 0.80 | 0.843 | 4.2 / 933 MiB |
+| SigLIP2 base-224 (Apache-2.0, 375 M) | 0.837 / 0.46 | 0/6 | 0.95 | 0.53 | 0.87 | 0.844 | 4.7 / 1137 MiB |
+| DINOv2-small (Apache-2.0, 22 M), embedding + logistic head only | no zero-shot | | | head CV 0.68 | | 0.809 | 4.8 / 273 MiB |
+
+Not evaluated, with the reason: YOLO11/Ultralytics (AGPL) and PrintGuard (GPL-2.0) stay out of the
+shipped path; MobileCLIP (Apple's `apple-amlr` licence) is not permissive; OWLv2 (Apache-2.0, 155 M,
+960 px) and RT-DETR/D-FINE would need box labels, of which we have 226 images (all spaghetti).
+SigLIP/SigLIP2 score best on warping and on the fitted heads, but score the real U1 spaghetti
+frames below their own healthy p99.9 (0/6), so they are not the shipped default; they remain
+candidates for the fitted-head path once more labelled frames exist.
+
+**Chosen: CLIP ViT-B/16.** Best spaghetti AUROC and the only candidate that sees the real U1
+failure, MIT like the CLIP B/32 of the verifier (same preprocessing and prompt machinery), 150 M
+parameters (86 M in the vision tower), 173 MB as an fp16 ONNX export
+([Xenova/clip-vit-base-patch16](https://huggingface.co/Xenova/clip-vit-base-patch16) at revision
+`342fdf2f67aded64d138ff074745fb4a5d2bba5f`, base model
+[openai/clip-vit-base-patch16](https://huggingface.co/openai/clip-vit-base-patch16) at
+`57c216476eefef5ab752ec549e440a49ae4ae5f3`, sha256 `3e261924…`). The ONNX export matches torch
+(cosine ≥ 0.9999 on 128 frames); the int8 export does not (cosine 0.79) and is not used.
+
+### Tier (b): what it does and does not do
+
+Shipped thresholds are the ones measured on the ONNX path (fp16, CUDA) over the same frames:
+
+| spaghetti score ≥ | public tune recall / healthy FP | public test recall / healthy FP | U1 healthy FP | clean U1 spaghetti |
+|---:|---|---|---|---|
+| 0.3 | 0.675 / 6.7 % | 0.617 / 2.5 % | 25 / 4952 | 6/6 |
+| 0.4 | 0.612 / 4.5 % | 0.536 / 1.1 % | 3 / 4952 | 5/6 |
+| **0.5** (default) | 0.556 / 3.1 % | 0.467 / 0.7 % | 0 / 4952 | 5/6 |
+| 0.7 | 0.430 / 1.6 % | 0.306 / 0.3 % | 0 / 4952 | 4/6 |
+
+- **It is a second opinion, not a replacement.** On the public test split tier (a) (verified score
+  q ≥ 0.38) finds 303 of 360 spaghetti images with 0 false positives; tier (b) alone finds 168
+  with 7 false positives. Of the 57 images tier (a) misses, tier (b) at 0.5 finds 12
+  (union 315/360, still 7 false positives per 982 healthy single frames).
+- **Cadence and debounce make it quiet.** One run every 30 s, and a Finding only after 3 runs in
+  a row at or above the threshold (clears after 2 below). Replayed over 19.7 h of healthy U1
+  footage (the speckled walls, 2.4 h at 10 s; the plain walls, 17.3 h) it raised 0 Findings
+  (highest run score 0.34), also at threshold 0.4. The 6-frame real spaghetti clip is too sparse
+  (20–107 s apart) for three consecutive runs at the default; with `confirm: 2` and threshold 0.4
+  it raises one Finding at its last frame. Real spaghetti persists for minutes, so 90 s of
+  confirmation is the price of silence.
+- **No skill on a detached part.** Zero-shot `part_detached` has AUROC 0.45 on the
+  bed-camera `detached` frames, 0.38 on the 8 U1 panel frames and 0.52 on warping: the whole frame
+  of a panel lifting at one corner looks like the healthy print to a 224 px embedding. Even a head
+  fitted on those bed-camera frames (sequence-grouped cross-validation AUROC 0.72) transfers to the
+  U1 panel frames with AUROC 0.90 for CLIP B/16 but only 0.50–0.65 for the other candidates, on n = 8 frames from one
+  event, of which 7 carry drawn detection boxes: that is not evidence. **The U1 panel case is
+  tier (a)'s geometry detector's job (`vision_detach.py`); tier (b) ships with `part_detached` OFF**
+  and a way to turn it on once there are labelled frames (below).
+- **No skill on an empty plate either.** The score separates 15 near-identical idle frames
+  (AUROC 0.98) but gives 0.32 and 0.27 on the two real U1 shutdown frames and 0.48 on the K1 frame
+  (threshold 0.8 passes 0.55 % of healthy U1 frames and only 10 of 16 idle ones). `empty_bed` is
+  OFF by default; the bed check of `3d printer bed` (tier (a)) is the empty-plate detector.
+- The two U1 frames of the panel incident: `u1_monitor.jpg` scores spaghetti 0.01, part_detached
+  0.27, empty_bed 0.52 and `u1-spag.jpg` (panel lifted, strings hanging) spaghetti 0.22: tier (b)
+  would **not** have caught the panel, and says so.
+
+### Tier (b): device and cost (measured through `vision_model.ModelScorer`, 150 frames)
+
+| device | median per frame (resize + inference) | p95 | VRAM | notes |
+|---|---|---|---|---|
+| CPU (6 threads, load average 6–12 from other agents) | 164 ms | 177 ms | 0 | 0.45 s to load |
+| RTX 4060 (onnxruntime-gpu 1.31 CUDA provider, cuDNN 9, fp16 export) | 6.1 ms | 9.6 ms | +379 MiB peak | arena capped at 3 GiB; 0.34 s to load |
+
+The two paths agree to |Δp| ≤ 0.008 per class on the 150 frames. Embedding all 11,381 frames of
+the data set took 52.5 s on the GPU (4.6 ms per frame). After `close()` the session's arena is
+returned; the CUDA context (about 100–300 MiB) stays until the process exits. Device choice:
+`auto` uses CUDA only if onnxruntime has the CUDA provider **and** `nvidia-smi` reports ≥ 2 GiB
+free (the desktop shares the card); `THREED_VISION_DEVICE=cpu|cuda|auto` or `watch.vision.model.device`
+override; `cuda` without the provider is a structured error, never a silent CPU run. The CPU build
+of onnxruntime is what `uv sync --extra vision` installs; for the GPU path
+`uv pip install onnxruntime-gpu nvidia-cudnn-cu13 nvidia-cublas nvidia-cuda-runtime nvidia-curand
+nvidia-cufft` (onnxruntime-gpu replaces the CPU package; match the CUDA major version of the
+wheel).
+
+### Tier (b): labelled frames and the fitted head
+
+`3d printer vision fit-head --class part_detached --pos DIR.. --neg DIR..` embeds the frames once,
+fits a ridge-logistic head on the unit-length embeddings (numpy, seconds), reports block
+cross-validation AUROC and the recall at the out-of-fold `--fpr` threshold, and writes
+`~/.cache/3d-cli/vision/models/tier-b-head.json`. The head replaces the zero-shot probability of
+its class and its threshold turns the class on. Frames come from `3d printer vision record NAME DIR`
+(U1, K1 or any Moonraker camera) sorted into folders by the user. The honest state today: ONE
+event with two raw frames of the lifted panel (`u1_monitor.jpg`, `u1-spag.jpg`) cannot validate a
+detachment head; the data set needs more such frames per printer, and the head must be judged on
+held-out prints, not on the frames it was fitted on.
+
 ## Not done (follow-ups)
 
 - Layer shift / detachment by comparing the part silhouette with the G-code footprint

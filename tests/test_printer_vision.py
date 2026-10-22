@@ -584,6 +584,12 @@ def test_evaluate_scores_a_directory_in_order(tmp_path: Path) -> None:
         (["run", "u1"], ["run", "u1"]),
         (["eval", "--pos", "a"], ["eval", "--pos", "a"]),
         (["fetch-model"], ["fetch-model"]),
+        (["fetch-model", "--tier", "b"], ["fetch-model", "--tier", "b"]),
+        (
+            ["fit-head", "--class", "part_detached", "--pos", "a", "--neg", "b"],
+            ["fit-head", "--class", "part_detached", "--pos", "a", "--neg", "b"],
+        ),
+        (["u1", "--once", "--model"], ["run", "u1", "--once", "--model"]),
         (["record", "u1", "/tmp/rec"], ["record", "u1", "/tmp/rec"]),
     ],
 )

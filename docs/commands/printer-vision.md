@@ -9,11 +9,14 @@ from the device's `watch:` block in `printer-devices.yaml`).
 ```text
 3d printer vision NAME [--interval S] [--once] [--save OUT.jpg] [--dry-run] [--min-severity LEVEL]
                        [--snapshot URL|PATH] [--no-keepalive] [--no-npu] [--evidence DIR] [--verbose]
-                       [--no-verify] [--no-geometry] [--scene]
+                       [--no-verify] [--no-geometry] [--scene] [--model | --no-model]
 3d printer vision eval --pos PATH... --neg PATH... [--every N] [--warmup N] [--interval S]
                        [--lead-in N] [--printer NAME] [--no-verify] [--scene] [--json]
+                       [--model [--model-class CLASS]]
 3d printer vision record NAME DIR [--interval S] [--max N] [--snapshot URL|PATH] [--no-keepalive]
-3d printer vision fetch-model
+3d printer vision fetch-model [--tier a|b|all]
+3d printer vision fit-head --class CLASS --pos PATH... --neg PATH... [--every N] [--l2 X]
+                       [--fpr R] [--folds N] [--out FILE] [--json]
 ```
 
 - `NAME` — a Moonraker printer from `3d printer list` (the rooted K1 SE runs Moonraker
@@ -33,13 +36,30 @@ from the device's `watch:` block in `printer-devices.yaml`).
   `vision_no_growth`). Off by default: they are still noisy (see
   [printer-vision-tuning.md](../research/printer-vision-tuning.md)). Same as `scene: true` in the
   device's `watch: vision:` block. Needs the camera calibration (a usage error without it).
+- `--model` / `--no-model` — tier (b), the whole-frame vision model (see "Three tiers" below):
+  `--model` forces it on (downloads the 173 MB weights on first use, structured error when it
+  cannot), `--no-model` turns it off; without either the device's `watch.vision.model.enabled`
+  decides, and when that is unset it is on exactly when the weights are already cached
+  (`fetch-model` caches them; a live loop never starts a download by itself). `guard` never uses it.
 - `eval` — replay footage: each `--pos`/`--neg` path is a directory of frames, one image, or a
   video (a U1 timelapse `.mp4`); each path counts as one print. Prints per-frame
   precision/recall/false-positive rate at several score thresholds, and whether the live
   tracker would have raised an alert on each sequence.
 - `record` — while the printer prints, save every frame with the print context (Z, objects)
   into `DIR` (`meta.jsonl`), for `eval --printer NAME` later.
-- `fetch-model` — download the detector and verifier weights now (otherwise the first run does it).
+  `eval --model` also scores every frame with tier (b) (no cadence, no debounce) and prints, for
+  `--model-class` (default `spaghetti`; `part_detached`, `empty_bed`) taking the `--pos` frames as
+  that class, precision/recall/FPR at thresholds 0.1..0.9, the mean score of every class per
+  side, the worst negatives and the seconds per frame, for the device it ran on.
+- `fetch-model` — download the weights now (otherwise the first run does it): `--tier a` the
+  Obico detector and the CLIP verifier, `--tier b` the tier (b) model, `all` (default) both.
+  Idempotent: a cached file that passes its sha256 is not fetched again.
+- `fit-head` — fit tier (b)'s logistic head for one class on labelled frames you provide
+  (`--pos` shows the condition, `--neg` must not raise it; directories, images or videos),
+  report block cross-validation and write `~/.cache/3d-cli/vision/models/tier-b-head.json`
+  (other classes already in the file are kept). `--fpr` (default 0.005) sets the threshold at
+  that quantile of the out-of-fold negatives; `--l2` the ridge strength; `--every N` keeps one
+  frame in N. Frames come from `vision record`, sorted into folders by you.
 
 ## What it detects
 
@@ -47,6 +67,8 @@ from the device's `watch:` block in `printer-devices.yaml`).
 |---|---|---|
 | `vision_spaghetti` | warning, then critical | the trend of the verified score q crosses the alert / the escalated threshold while printing |
 | `vision_spaghetti_vetoed` | info | the raw detector's trend would warn, but the verifier confirms less than 0.3 of it (texture, not filament) |
+| `vision_model_spaghetti` | warning | tier (b): the whole-frame model scores loose filament >= 0.5 on 3 model runs (30 s apart) in a row; a second opinion next to `vision_spaghetti`, never a pause |
+| `vision_model_part_detached`, `vision_model_empty_bed` | warning | tier (b), **off by default** (no skill zero-shot): only with a fitted head (`fit-head`) or a `threshold` in `watch.vision.model`; `vision_model_empty_bed` is only judged once the print is at least `min_z` (10 mm) high |
 | `vision_foreign_object`, `vision_part_moved` | warning | only with `--scene`: something new on the bed outside the parts / a part's silhouette changed |
 | `vision_no_growth` | info | only with `--scene`: the newest layers of a part look empty (under- or no extrusion) |
 | `printer_noodle_verdict` | warning | the U1's own NPU detector logs a defect label (table below) at or above 0.83 (once per episode, 5 min quiet ends it) |
@@ -206,9 +228,39 @@ Labels of the U1's own detector (unisrv `camera.detect_capture`), from Snapmaker
    printing and logs each verdict to klippy.log; vision tails that log over HTTP Range requests.
    Moonraker does not expose the detector itself (`camera.detect_capture` → -32601).
 
+## Three tiers
+
+1. **(a) cheap checks, every frame.** The pipeline above: stale/dark camera, Obico boxes + CLIP
+   crop verifier, bed-change geometry.
+2. **(b) a mid-size model on the whole frame, every 30 s** (`lib/vision_model.py`). OpenAI CLIP
+   ViT-B/16 (MIT; fp16 ONNX, 173 MB, sha256-pinned, revision `342fdf2f67aded64d138ff074745fb4a5d2bba5f`
+   of Xenova/clip-vit-base-patch16) embeds the frame squashed to 224 px and scores it against
+   prompt sets (spaghetti, part detached, empty plate, healthy), or against a head you fitted with
+   `fit-head`. It adds `vision_model_*` Findings next to tier (a), as warnings only. Device: the
+   GPU when onnxruntime has the CUDA provider and >= 2 GiB of VRAM are free (6 ms per frame,
+   +379 MiB), else the CPU (160 ms); `THREED_VISION_DEVICE=cpu|cuda|auto` or
+   `watch.vision.model.device` override, and `cuda` without the provider is an error, not a silent
+   CPU run. Only `spaghetti` is on by default: zero-shot has no skill on a lifted/detached part or
+   an empty plate (numbers: [printer-vision.md](../research/printer-vision.md)), so those two
+   classes need a fitted head or an explicit threshold.
+3. **(c) the LLM look.** A Finding or event wakes the subscribed agent session or the temporary
+   printer agent, which receives the frame and judges it (`3d printer subscribe`, `agent`).
+
+GPU onnxruntime is optional and not a project dependency: `uv pip install onnxruntime-gpu
+nvidia-cudnn-cu13 nvidia-cublas nvidia-cuda-runtime nvidia-curand nvidia-cufft` replaces the CPU
+package in the environment that runs `3d printer vision` (use the CUDA-12 wheels with an
+onnxruntime-gpu built for CUDA 12). Without it everything runs on the CPU.
+
 ## Model and licence
 
-The weights are **not** part of 3d-cli (MIT). On first use they are downloaded from
+Tier (b)'s weights are downloaded the same way (`fetch-model --tier b`) from
+`https://huggingface.co/Xenova/clip-vit-base-patch16` (revision above; OpenAI CLIP ViT-B/16, MIT,
+ONNX export by Xenova/transformers.js), checked against sha256
+`3e261924f7d66d04f10bb131f7f212162d9ee82199544771aa2dd318bb7e2b7b`, and cached in the same
+directory. The prompt embeddings (`lib/data/vision/model_prompts.json`) are small text and ship
+with 3d-cli.
+
+The tier (a) weights are **not** part of 3d-cli (MIT). On first use they are downloaded from
 `https://www.obico.io/static_pub/ml-models/model-weights-5a6b1be1fa.onnx` (202 MB) into
 `~/.cache/3d-cli/vision/models/` and checked against sha256
 `0a6ebd8e30dbf6a450c50f9c0a5406f04ba7eb1c99fd5996e888c78bb383b9aa`. They come from
@@ -252,7 +304,20 @@ u1:
       geometry: true                               # bed-volume mask from the camera calibration
       scene: false                                 # bed-change detectors; default off (noisy)
       ignore: [[[0.8, 0.0], [1.0, 0.0], [1.0, 0.3], [0.8, 0.3]]]  # polygons (0..1) to drop boxes in
+      model:                       # tier (b); every key optional, a bare true/false works too
+        enabled: true              # default: on when the weights are cached; false = off
+        device: auto               # auto (CUDA if >= 2 GiB free) | cpu | cuda; THREED_VISION_DEVICE wins
+        every_s: 30                # seconds between model runs (not per frame)
+        threshold: {spaghetti: 0.5}  # per class, or one number for all; empty_bed/part_detached need one (or a head)
+        confirm: 3                 # runs in a row at/above the threshold before the Finding
+        clear: 2                   # runs below it before the Finding clears
+        min_z: 10                  # mm; empty_bed is judged only once the print is this high (default 10)
+        crop: [0.0, 0.3, 1.0, 1.0] # normalised x1,y1,x2,y2 of the bed area; default the whole frame
+        head: ~/.cache/3d-cli/vision/models/tier-b-head.json   # default; from `fit-head`
 ```
+
+The block is per device, so every Moonraker printer in the fleet (U1, K1 SE, others) gets its own
+camera `snapshot`, thresholds and `crop`; nothing in tier (b) is U1-specific.
 
 ## Examples
 
@@ -260,4 +325,9 @@ u1:
 3d printer vision u1 --once --save /tmp/u1.jpg   # one verdict + the frame
 3d printer vision u1 --dry-run --verbose        # run the loop, print what would be sent
 3d printer vision eval --pos ~/footage/spaghetti --neg ~/footage/healthy/*.mp4
+3d printer vision eval --pos ~/footage/spaghetti --neg ~/footage/healthy/*.mp4 --model   # + tier (b)
+3d printer vision fetch-model --tier b           # cache the tier (b) weights (idempotent)
+3d printer vision k1se --once --model            # force tier (b) on for one verdict
+THREED_VISION_DEVICE=cpu 3d printer vision u1    # keep the GPU free for something else
+3d printer vision fit-head --class part_detached --pos ~/vision/detached/* --neg ~/vision/ok/*
 ```

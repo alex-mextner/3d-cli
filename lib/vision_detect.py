@@ -242,11 +242,13 @@ class FrameScorer:
         verifier: Any = None,
         ignore: list[list[tuple[float, float]]] | None = None,
         geometry: PrintGeometry | None = None,
+        model: Any = None,
     ) -> None:
         self.detector = detector
         self.verifier = verifier
         self.ignore = ignore or []
         self.geometry = geometry
+        self.model = model  # vision_model.ModelTier (tier b): extra Findings, never p/q
         self.context: PrintContext | None = None
         self.now: float | None = None  # frame time for replays; None = wall clock
         self.roi: np.ndarray | None = None
@@ -255,6 +257,8 @@ class FrameScorer:
         """A new print: forget the bed-change references (no-op without geometry)."""
         if self.geometry is not None:
             self.geometry.reset_print()
+        if self.model is not None:
+            self.model.reset_print()
 
     def _allowed(self, b: Box) -> bool:
         cx, cy = (b.x1 + b.x2) / 2, (b.y1 + b.y2) / 2
@@ -276,6 +280,9 @@ class FrameScorer:
                 self.roi, findings = self.geometry.update(bgr, self.context, now)
         s = self.detector.score_bgr(bgr)
         kept = [b for b in s.boxes if self._allowed(b)]
+        if self.model is not None:
+            now = time.time() if self.now is None else self.now
+            findings = findings + self.model.update(bgr, self.context, now)
         s = FrameScore(
             p=float(sum(b.conf for b in kept)),
             boxes=kept,
@@ -485,13 +492,17 @@ def build_scorer(
     verify: bool = True,
     camera: Any = None,
     scene: bool = False,
+    model: bool | None = False,
 ) -> FrameScorer:
     """The per-frame pipeline from a device's `watch: vision:` settings: `verify: false` turns
     stage 2 off, `ignore:` lists polygons (normalised [x, y] points) whose boxes are dropped,
     `geometry: false` ignores the camera calibration `camera` (vision_geometry.CameraModel).
     `scene: true` (or `scene=True`, the --scene flag) adds the bed-change detectors
     (foreign_object, part_moved, no_growth); off by default because on the U1 they still raise
-    ~139 and ~50 false findings per healthy printing day (docs/research/printer-vision-tuning.md)."""
+    ~139 and ~50 false findings per healthy printing day (docs/research/printer-vision-tuning.md).
+    `model`: tier (b), the whole-frame vision model (vision_model.py), driven by
+    `watch.vision.model` — False (default) = not built, True = build it (downloads the weights if
+    needed), None = build it only when its weights are already cached."""
     from errors import UsageError
 
     try:
@@ -532,7 +543,12 @@ def build_scorer(
             command="printer vision",
             remediation=["Drop --scene, or see docs/research/printer-vision-geometry.md."],
         )
-    return FrameScorer(ObicoScorer(ensure_model()), verifier, polys, geometry)
+    tier_b = None
+    if model is not False:
+        from vision_model import build_tier
+
+        tier_b = build_tier(cfg.get("model"), flag=model)
+    return FrameScorer(ObicoScorer(ensure_model()), verifier, polys, geometry, tier_b)
 
 
 def _calibration(device: Any, args: argparse.Namespace) -> Any:
@@ -563,6 +579,7 @@ def run_live(args: argparse.Namespace) -> int:
         verify=not args.no_verify,
         camera=cam,
         scene=args.scene,
+        model=args.model,
     )
     context_tap = (
         ContextTap(device.host, device.port) if scorer.geometry else None
@@ -636,6 +653,8 @@ def run_live(args: argparse.Namespace) -> int:
                     ],
                     findings=[f.kind for f in score.findings],
                 )
+            if scorer.model is not None and scorer.model.last_scores:
+                report["model"] = scorer.model.report()
             report["trend"] = round(monitor.tracker.adjusted, 3)
             report["events"] = [e.to_json() for e in events]
             if frame is not None and args.save:
@@ -1120,11 +1139,22 @@ def run_eval(args: argparse.Namespace) -> int:
     m = metrics(results, interval_s=args.interval * args.every)
     n = m["frames"]["pos"] + m["frames"]["neg"]
     m["seconds_per_frame"] = round((time.time() - t0) / max(1, n), 3)
+    if args.model:
+        import vision_model
+
+        m["model"] = vision_model.eval_sources(
+            sources,
+            vision_model.parse_config(cfg.get("model"), flag=True),
+            every=args.every,
+            cls=args.model_class,
+        )
     if args.json:
         print(json.dumps(m, indent=2))
     else:
         _print_metrics(m)
         print(f"speed: {m['seconds_per_frame']} s/frame")
+        if args.model:
+            vision_model.print_eval(m["model"])
     return 0
 
 
@@ -1145,6 +1175,13 @@ def main(argv: list[str]) -> int:
     live.add_argument("--no-verify", action="store_true")
     live.add_argument("--no-geometry", action="store_true")
     live.add_argument("--scene", action="store_true")
+    live.add_argument(
+        "--model",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="tier (b) whole-frame vision model: --model forces it on (downloads the weights), "
+        "--no-model off; default follows watch.vision.model.enabled, else on when cached",
+    )
     live.add_argument("--evidence")
     live.add_argument("--dry-run", action="store_true")
     live.add_argument("--min-severity")
@@ -1158,6 +1195,8 @@ def main(argv: list[str]) -> int:
     ev.add_argument("--interval", type=float, default=10.0)
     ev.add_argument("--no-verify", action="store_true")
     ev.add_argument("--scene", action="store_true")
+    ev.add_argument("--model", action="store_true", help="also score every frame with tier (b)")
+    ev.add_argument("--model-class", default="spaghetti", help="tier (b) class the --pos frames show")
     ev.add_argument("--printer")
     ev.add_argument("--json", action="store_true")
     rec = sub.add_parser("record")
@@ -1167,16 +1206,29 @@ def main(argv: list[str]) -> int:
     rec.add_argument("--max", type=int)
     rec.add_argument("--snapshot")
     rec.add_argument("--no-keepalive", action="store_true")
-    sub.add_parser("fetch-model")
+    fm = sub.add_parser("fetch-model")
+    fm.add_argument("--tier", choices=("a", "b", "all"), default="all")
+    from vision_fit import add_fit_arguments
+
+    add_fit_arguments(sub.add_parser("fit-head", help="fit the tier (b) logistic head on labelled frames"))
     args = ap.parse_args(argv)
     if args.cmd == "guard":
         return run_guard(args)
     if args.cmd == "fetch-model":
-        from vision_verify import ensure_clip
+        if args.tier in ("a", "all"):
+            from vision_verify import ensure_clip
 
-        print(ensure_model())
-        print(ensure_clip())
+            print(ensure_model())
+            print(ensure_clip())
+        if args.tier in ("b", "all"):
+            import vision_model
+
+            print(vision_model.fetch())
         return 0
+    if args.cmd == "fit-head":
+        from vision_fit import run_fit
+
+        return run_fit(args)
     if args.cmd == "eval":
         return run_eval(args)
     if args.cmd == "record":
