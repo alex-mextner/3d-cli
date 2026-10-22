@@ -89,7 +89,11 @@ def _scale_result(
     K = default_intrinsics(w, h, f_px, f_ratio)
     mm_per_px = length_mm / length_px
     flags = ["fronto_parallel_assumed", *quality]
-    flags.append("f_given" if f_px is not None else "f_default_ratio")
+    flags.append(
+        "f_given"
+        if f_px is not None
+        else ("f_default_ratio" if f_ratio == DEFAULT_F_RATIO else "f_ratio_given")
+    )
     if length_px < 0.02 * math.hypot(w, h):
         flags.append(
             "short_reference"
@@ -99,7 +103,9 @@ def _scale_result(
         "plane_depth_mm": float(K[0, 0]) * mm_per_px,
         "K": K,
         "f_px": float(K[0, 0]),
-        "f_source": "given" if f_px is not None else "default",
+        "f_source": "given"
+        if (f_px is not None or f_ratio != DEFAULT_F_RATIO)
+        else "default",
         "source": source,
         "length_px": float(length_px),
         "image_size": [w, h],
@@ -352,12 +358,14 @@ def find_cell_centres(
     base = 3.0
     shrink = max(1.0, sigma / base) if sigma > 4.0 else 1.0
     s = sigma / shrink
+    sx = sy = shrink
     if shrink > 1.0:
-        g = cv2.resize(
-            g,
-            (max(8, round(W0 / shrink)), max(8, round(H0 / shrink))),
-            interpolation=cv2.INTER_AREA,
-        )
+        ws, hs = max(8, round(W0 / shrink)), max(8, round(H0 / shrink))
+        g = cv2.resize(g, (ws, hs), interpolation=cv2.INTER_AREA)
+        sx, sy = (
+            W0 / ws,
+            H0 / hs,
+        )  # the real per-axis ratios (rounding makes them differ from `shrink`)
     band = cv2.GaussianBlur(g, (0, 0), s) - cv2.GaussianBlur(g, (0, 0), 1.6 * s)
     S = -band if polarity == "dark" else band
     r = max(2, int(round(2.0 * s)))
@@ -399,8 +407,8 @@ def find_cell_centres(
             ),
             0,
         )
-        px = (xs + ox + 0.5) * shrink - 0.5
-        py = (ys + oy + 0.5) * shrink - 0.5
+        px = (xs + ox + 0.5) * sx - 0.5
+        py = (ys + oy + 0.5) * sy - 0.5
         out_pts = np.column_stack([px, py])
         out_v = v
     return {
@@ -819,6 +827,10 @@ def solve_grid_pose(
     known_f = (
         f_px if f_px is not None else (f_ratio * diag if f_ratio is not None else None)
     )
+    if known_f is not None and not (math.isfinite(known_f) and known_f > 0):
+        raise BadInput(
+            f"focal length must be a positive number of pixels, got {known_f!r}"
+        )
     quality: list[str] = []
     P = seed_pts[idx]
     X = _lattice_mm(ij, pitch)
@@ -835,7 +847,6 @@ def solve_grid_pose(
     # final inlier set: every centre that lands on a lattice node of the refined model, grown outwards from the seed
     # patch so scattered non-lattice extrema elsewhere in the photo can never be adopted; two re-fit rounds
     nodes = {lab[int(k)] for k in idx}
-    P, X = pts[idx], _lattice_mm(np.array(sorted(nodes), float), pitch)
     fit_f = f_source == "estimated"
     f_rel2 = f_rel
     for _round in range(2):
@@ -862,7 +873,6 @@ def solve_grid_pose(
     timing["pose_s"] = time.perf_counter() - t0
     if t[2] <= 0:
         return _fail("implausible_pose", len(pts), (w, h), pitch, timing)
-    tilt = math.degrees(math.acos(float(np.clip(-R[2, 2], -1.0, 1.0))))
     footprint = float(np.hypot(*np.ptp(P, axis=0))) / diag
     f_unc = float("nan")
     if f_source == "estimated":
@@ -880,6 +890,9 @@ def solve_grid_pose(
         else:
             quality.append("f_estimated" if f_unc <= 0.05 else "f_weak")
     K = np.array([[f, 0, cx], [0, f, cy], [0, 0, 1.0]])
+    tilt = math.degrees(
+        math.acos(float(np.clip(-R[2, 2], -1.0, 1.0)))
+    )  # of the pose actually returned
 
     # fix the grid-frame labelling: the lattice has 6-fold symmetry, so pick the 60-degree rotation whose +y is most upright
     k_best = min(range(6), key=lambda k: abs(_roll_deg(R @ _rot_z(-60.0 * k))))
@@ -1045,6 +1058,8 @@ def detect_grid(
     # honeycomb (wall junctions plus shaded hole centres) form a complete triangular lattice at 1/sqrt(3) of the cell
     # pitch that fits just as well but has the wrong scale, so bright is only a fallback for printed light cells.
     for pol in ("dark", "bright"):
+        if pol == "bright" and best is not None and best["ok"]:
+            break  # never let a bright result displace a dark one (wrong-scale junction lattice)
         for sigma in sigmas:
             res = attempt(sigma, pol)
             if best is None or (res["ok"], res["n_inliers"]) > (
