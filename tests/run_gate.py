@@ -215,7 +215,8 @@ def main(argv: list[str]) -> int:
 
     print("=== ruff ===", flush=True)
     rc_ruff = subprocess.run(
-        [sys.executable, "-m", "ruff", "check", os.path.join(root, "lib"), os.path.join(root, "tests")],
+        [sys.executable, "-m", "ruff", "check", os.path.join(root, "lib"), os.path.join(root, "tests"),
+         os.path.join(root, "packages", "threed-vision", "src")],
         cwd=root, env=env,
     ).returncode
 
@@ -250,6 +251,7 @@ def main(argv: list[str]) -> int:
         os.path.join(root, "bin", "3d"),
         os.path.join(root, "lib"),
         os.path.join(root, "tests"),
+        os.path.join(root, "packages", "threed-vision", "src", "threed_vision"),
     ]
     rc_mypy = subprocess.run(
         [sys.executable, "-m", "mypy", "--config-file", os.path.join(root, "mypy.ini"), *targets],
