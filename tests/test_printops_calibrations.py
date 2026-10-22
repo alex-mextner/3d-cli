@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from fleet_fixtures import REPO_FLEET
+from fleet_fixtures import write_fleet_with_synthetic_broken_t2
 from printops_fakes import FakeSpoolman
 
 from printops import calibrations as cal
@@ -29,9 +29,9 @@ REPO = Path(__file__).resolve().parents[1]
 
 
 @pytest.fixture
-def repo_files(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The committed fleet, policy and catalog — the tests also keep them valid."""
-    monkeypatch.setenv("THREED_FLEET", str(REPO_FLEET))
+def repo_files(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The committed fleet (T2 synthetically broken), policy and catalog."""
+    monkeypatch.setenv("THREED_FLEET", str(write_fleet_with_synthetic_broken_t2(tmp_path / "fleet" / "printers.yaml")))
     monkeypatch.delenv("PRINTOPS_POLICY", raising=False)
     monkeypatch.delenv("PRINTOPS_CALIBRATIONS", raising=False)
 

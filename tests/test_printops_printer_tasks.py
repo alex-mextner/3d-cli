@@ -12,7 +12,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from fleet_fixtures import REPO_FLEET
+from fleet_fixtures import write_fleet_with_synthetic_broken_t2
 from printops_fakes import FakeSpoolman
 
 from printops import calibrations as cal
@@ -191,7 +191,7 @@ U1 = [
 def env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     rules = tmp_path / "maintenance-rules.yaml"
     rules.write_text(RULES, encoding="utf-8")
-    monkeypatch.setenv("THREED_FLEET", str(REPO_FLEET))
+    monkeypatch.setenv("THREED_FLEET", str(write_fleet_with_synthetic_broken_t2(tmp_path / "fleet" / "printers.yaml")))
     monkeypatch.setenv("THREED_MAINTENANCE_RULES", str(rules))
     monkeypatch.delenv("PRINTOPS_POLICY", raising=False)
     monkeypatch.delenv("PRINTOPS_CALIBRATIONS", raising=False)

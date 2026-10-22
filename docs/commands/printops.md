@@ -307,6 +307,8 @@ u1  Snapmaker U1  [full]  printing 16% u1_walls_main_v3-de0f43df5562b59c.gcode  
   T4     printer: PLA #FFFFFF Snapmaker  |  spool 5 Elegoo PLA White PLA #F4F4F4 610 g
 ```
 
+A head the fleet marks `usable: false` is annotated `T<n> (unusable: <reason>)` and refuses spool loads.
+
 ### `anomalies`
 
 Each reconcile pass (after every poll, and right after `slot.loaded` / `slot.unloaded` /

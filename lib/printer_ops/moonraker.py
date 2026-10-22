@@ -17,7 +17,7 @@ SNAPMAKER U1: Klipper object `print_task_config` carries what each of the 4 head
   the same fields Snapmaker Orca's "Sync filament" reads (SSWCP.cpp:1658-1767):
   filament_exist, filament_color_rgba ("RRGGBBAA"), filament_type, filament_vendor,
   filament_sub_type. Index i is G-code tool Ti and the printer's head label T(i+1). A head
-  with filament_exist=false (an unloaded head) is reported as an empty slot. Non-U1 Klipper
+  with filament_exist=false is reported as an empty slot. Non-U1 Klipper
   printers simply lack the object and get no slots.
 
 HEAD FILAMENT WRITE (U1, issue #400): `set_head_filament` sends ONE line
@@ -45,6 +45,7 @@ UPLOAD SAFETY: `print=false` is always sent and a response claiming print_starte
   to time out after the whole file arrived (issue #68), so the file list is re-read and a
   matching size counts as verified; otherwise the outcome is UNKNOWN and never retried.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -93,7 +94,11 @@ _STATE = {
 }
 _HEATERS = ("extruder", "extruder1", "extruder2", "extruder3", "heater_bed")
 _T = TypeVar("_T")
-_QUERY = "webhooks&print_stats&virtual_sdcard&display_status&" + "&".join(_HEATERS) + "&print_task_config"
+_QUERY = (
+    "webhooks&print_stats&virtual_sdcard&display_status&"
+    + "&".join(_HEATERS)
+    + "&print_task_config"
+)
 
 
 def _rgba_to_hex(value: Any) -> str | None:
@@ -114,15 +119,17 @@ def parse_slots(cfg: dict[str, Any]) -> list[Slot]:
         return []
     slots = []
     for i, present in enumerate(exists):
-        slots.append(Slot(
-            index=i,
-            label=f"T{i + 1}",
-            present=bool(present),
-            color=_rgba_to_hex(_at(cfg.get("filament_color_rgba"), i)),
-            material=_at(cfg.get("filament_type"), i),
-            vendor=_at(cfg.get("filament_vendor"), i),
-            sub_type=_at(cfg.get("filament_sub_type"), i),
-        ))
+        slots.append(
+            Slot(
+                index=i,
+                label=f"T{i + 1}",
+                present=bool(present),
+                color=_rgba_to_hex(_at(cfg.get("filament_color_rgba"), i)),
+                material=_at(cfg.get("filament_type"), i),
+                vendor=_at(cfg.get("filament_vendor"), i),
+                sub_type=_at(cfg.get("filament_sub_type"), i),
+            )
+        )
     return slots
 
 
@@ -138,20 +145,30 @@ def extruder_name(index: int) -> str:
     return "extruder" if index == 0 else f"extruder{index}"
 
 
-def filament_config_gcode(index: int, filament: HeadFilament, *, force_official: bool = False) -> str:
+def filament_config_gcode(
+    index: int, filament: HeadFilament, *, force_official: bool = False
+) -> str:
     """The one `SET_PRINT_FILAMENT_CONFIG` line for head `index`. ValueError when a value cannot
     travel in a Klipper argument (nothing is sent then)."""
     color = filament.color.strip().lstrip("#").upper()
     if not _HEX6.fullmatch(color):
         raise ValueError(f"colour must be #RRGGBB, got {filament.color!r}")
-    texts = {"vendor": filament.vendor, "material": filament.material, "sub-type": filament.sub_type}
+    texts = {
+        "vendor": filament.vendor,
+        "material": filament.material,
+        "sub-type": filament.sub_type,
+    }
     for what, value in texts.items():
         if not value.strip():
             raise ValueError(f"{what} is empty")
         if len(value) > MAX_TEXT:
-            raise ValueError(f"{what} is longer than {MAX_TEXT} characters: {value[:MAX_TEXT]!r}…")
+            raise ValueError(
+                f"{what} is longer than {MAX_TEXT} characters: {value[:MAX_TEXT]!r}…"
+            )
         if _UNSAFE.search(value):
-            raise ValueError(f"{what} {value!r} holds a character Klipper G-code cannot carry (quote # ; * or a control character)")
+            raise ValueError(
+                f"{what} {value!r} holds a character Klipper G-code cannot carry (quote # ; * or a control character)"
+            )
     line = (
         f'SET_PRINT_FILAMENT_CONFIG CONFIG_EXTRUDER={index} VENDOR="{filament.vendor}" '
         f'FILAMENT_TYPE="{filament.material}" FILAMENT_SUBTYPE="{filament.sub_type}" '
@@ -167,7 +184,9 @@ def _differs(after: Slot, want: HeadFilament) -> list[str]:
         ("vendor", after.vendor, want.vendor),
         ("sub-type", after.sub_type, want.sub_type),
     )
-    return [f"{what} {got!r} (sent {sent!r})" for what, got, sent in pairs if got != sent]
+    return [
+        f"{what} {got!r} (sent {sent!r})" for what, got, sent in pairs if got != sent
+    ]
 
 
 def parse_status(status: dict[str, Any]) -> PrinterStatus:
@@ -190,7 +209,10 @@ def parse_status(status: dict[str, Any]) -> PrinterStatus:
     for h in _HEATERS:
         obj = status.get(h)
         if isinstance(obj, dict) and obj:
-            temps["bed" if h == "heater_bed" else h] = (obj.get("temperature"), obj.get("target"))
+            temps["bed" if h == "heater_bed" else h] = (
+                obj.get("temperature"),
+                obj.get("target"),
+            )
     return PrinterStatus(
         state=state,
         raw_state=raw_state,
@@ -212,10 +234,15 @@ def _num(value: Any) -> float | None:
 def parse_queue(result: Any) -> JobQueue:
     """Moonraker `/server/job_queue/status` result -> JobQueue."""
     if not isinstance(result, dict) or not isinstance(result.get("queued_jobs"), list):
-        raise ValueError(f"job_queue/status: no 'queued_jobs' list in {str(result)[:120]!r}")
+        raise ValueError(
+            f"job_queue/status: no 'queued_jobs' list in {str(result)[:120]!r}"
+        )
     jobs = [
-        QueuedJob(str(j["filename"]), str(j["job_id"]) if j.get("job_id") is not None else None,
-                  _num(j.get("time_in_queue")))
+        QueuedJob(
+            str(j["filename"]),
+            str(j["job_id"]) if j.get("job_id") is not None else None,
+            _num(j.get("time_in_queue")),
+        )
         for j in result["queued_jobs"]
         if isinstance(j, dict) and j.get("filename")
     ]
@@ -256,10 +283,19 @@ def parse_totals(result: Any) -> HistoryTotals:
 
 class MoonrakerAdapter(Adapter):
     kind = "moonraker"
-    upload_while_busy = True  # other files may be stored while printing; never the active one
+    upload_while_busy = (
+        True  # other files may be stored while printing; never the active one
+    )
 
-    def __init__(self, name: str, host: str, port: int = 7125, *, timeout: float = 10.0,
-                 upload_timeout: float = 600.0) -> None:
+    def __init__(
+        self,
+        name: str,
+        host: str,
+        port: int = 7125,
+        *,
+        timeout: float = 10.0,
+        upload_timeout: float = 600.0,
+    ) -> None:
         super().__init__(name, host, port)
         self.timeout = timeout
         self.upload_timeout = upload_timeout
@@ -287,7 +323,9 @@ class MoonrakerAdapter(Adapter):
         result = self._get("/printer/objects/query?" + objects)
         status = result.get("status") if isinstance(result, dict) else None
         if not isinstance(status, dict):
-            raise self._comm_error("objects/query", f"no 'status' in reply: {str(result)[:200]}")
+            raise self._comm_error(
+                "objects/query", f"no 'status' in reply: {str(result)[:200]}"
+            )
         return status
 
     def status(self) -> PrinterStatus:
@@ -303,7 +341,9 @@ class MoonrakerAdapter(Adapter):
         return self._parsed("/server/job_queue/status", parse_queue)
 
     def history(self, limit: int) -> list[JobRecord]:
-        return self._parsed(f"/server/history/list?limit={int(limit)}&order=desc", parse_history)
+        return self._parsed(
+            f"/server/history/list?limit={int(limit)}&order=desc", parse_history
+        )
 
     def history_totals(self) -> HistoryTotals:
         return self._parsed("/server/history/totals", parse_totals)
@@ -319,13 +359,17 @@ class MoonrakerAdapter(Adapter):
         try:
             settings = result["status"]["configfile"]["settings"]
             sx, sy = settings["stepper_x"], settings["stepper_y"]
-            lim = ((float(sx.get("position_min", 0.0)), float(sx["position_max"])),
-                   (float(sy.get("position_min", 0.0)), float(sy["position_max"])))
+            lim = (
+                (float(sx.get("position_min", 0.0)), float(sx["position_max"])),
+                (float(sy.get("position_min", 0.0)), float(sy["position_max"])),
+            )
         except (KeyError, TypeError, ValueError, AttributeError):
             return None, "Klipper config has no stepper_x/stepper_y position_max"
         return lim, "Klipper stepper_x/stepper_y"
 
-    def list_files(self, expect: tuple[str, int] | None = None) -> dict[str, RemoteFile]:
+    def list_files(
+        self, expect: tuple[str, int] | None = None
+    ) -> dict[str, RemoteFile]:
         result = self._get("/server/files/list?root=gcodes")
         files: dict[str, RemoteFile] = {}
         for e in result if isinstance(result, list) else []:
@@ -338,8 +382,13 @@ class MoonrakerAdapter(Adapter):
         size = local.stat().st_size
         url = self.base + "/server/files/upload"
         try:
-            status, data = http_upload(url, local, remote_name, {"root": "gcodes", "print": "false"},
-                                       timeout=self.upload_timeout)
+            status, data = http_upload(
+                url,
+                local,
+                remote_name,
+                {"root": "gcodes", "print": "false"},
+                timeout=self.upload_timeout,
+            )
         except TimeoutError as exc:
             return self._reconcile_after_timeout(remote_name, size, exc)
         except OSError as exc:
@@ -356,27 +405,41 @@ class MoonrakerAdapter(Adapter):
                 f"{self.name}: Moonraker reports the upload STARTED or QUEUED a print although "
                 "print=false was sent",
                 command="printer",
-                remediation=[f"Check the printer now: 3d printer status {self.name}",
-                             f"Cancel if unintended: 3d printer cancel {self.name} --yes"],
+                remediation=[
+                    f"Check the printer now: 3d printer status {self.name}",
+                    f"Cancel if unintended: 3d printer cancel {self.name} --yes",
+                ],
             )
         remote = self.list_files().get(remote_name)
         if remote is None:
-            raise self._comm_error("upload", f"{remote_name} missing from the file list after upload")
+            raise self._comm_error(
+                "upload", f"{remote_name} missing from the file list after upload"
+            )
         if remote.size != size:
-            raise self._comm_error("upload", f"size mismatch: local {size} B, printer {remote.size} B")
+            raise self._comm_error(
+                "upload", f"size mismatch: local {size} B, printer {remote.size} B"
+            )
         return UploadResult(remote_name, size, verified=True)
 
-    def _reconcile_after_timeout(self, remote_name: str, size: int, exc: BaseException) -> UploadResult:
+    def _reconcile_after_timeout(
+        self, remote_name: str, size: int, exc: BaseException
+    ) -> UploadResult:
         remote = self.list_files().get(remote_name)
         if remote is not None and remote.size == size:
-            return UploadResult(remote_name, size, verified=True,
-                                note="upload response timed out; size verified from the printer's file list")
+            return UploadResult(
+                remote_name,
+                size,
+                verified=True,
+                note="upload response timed out; size verified from the printer's file list",
+            )
         raise PrinterCommError(
             f"{self.name}: upload of {remote_name} timed out and the printer does not list it with "
             f"the expected size ({size} B; listed: {remote.size if remote else 'absent'}) — outcome UNKNOWN",
             command="printer",
-            remediation=[f"Re-read before retrying: 3d printer status {self.name}",
-                         "Retry the upload only after confirming the file is absent or incomplete."],
+            remediation=[
+                f"Re-read before retrying: 3d printer status {self.name}",
+                "Retry the upload only after confirming the file is absent or incomplete.",
+            ],
         ) from exc
 
     def remote_sha256(self, remote_name: str) -> str | None:
@@ -385,7 +448,9 @@ class MoonrakerAdapter(Adapter):
         url = self.base + "/server/files/gcodes/" + quote(remote_name, safe="/")
         parts = urlsplit(url)
         h = hashlib.sha256()
-        conn = http.client.HTTPConnection(parts.hostname or "", parts.port or 80, timeout=self.upload_timeout)
+        conn = http.client.HTTPConnection(
+            parts.hostname or "", parts.port or 80, timeout=self.upload_timeout
+        )
         try:
             conn.request("GET", parts.path)
             r = conn.getresponse()
@@ -393,7 +458,10 @@ class MoonrakerAdapter(Adapter):
                 raise self._comm_error(f"read back {remote_name}", f"HTTP {r.status}")
             for chunk in iter(lambda: r.read(1 << 20), b""):
                 h.update(chunk)
-        except (OSError, http.client.HTTPException) as exc:  # IncompleteRead is not an OSError
+        except (
+            OSError,
+            http.client.HTTPException,
+        ) as exc:  # IncompleteRead is not an OSError
             raise self._comm_error(f"read back {remote_name}", exc) from exc
         finally:
             conn.close()
@@ -424,21 +492,28 @@ class MoonrakerAdapter(Adapter):
         ext = extruder_name(index)
         raw = self.query(f"webhooks&print_stats&print_task_config&{ext}")
         if not raw.get("print_task_config"):
-            raise self._unsupported("writing a head's filament (no print_task_config: not a Snapmaker U1)")
+            raise self._unsupported(
+                "writing a head's filament (no print_task_config: not a Snapmaker U1)"
+            )
         st = parse_status(raw)
         slot = next((s for s in st.slots if s.index == index), None)
         if slot is None:
-            raise PrinterRefused(f"{self.name}: print_task_config has no head {index} ({len(st.slots)} heads)",
-                                 command="printer")
+            raise PrinterRefused(
+                f"{self.name}: print_task_config has no head {index} ({len(st.slots)} heads)",
+                command="printer",
+            )
         pa = (raw.get(ext) or {}).get("pressure_advance")
         return st, slot, float(pa) if isinstance(pa, (int, float)) else None
 
-    def set_head_filament(self, index: int, filament: HeadFilament, *,
-                          force_official: bool = False) -> HeadWrite:
+    def set_head_filament(
+        self, index: int, filament: HeadFilament, *, force_official: bool = False
+    ) -> HeadWrite:
         try:
             line = filament_config_gcode(index, filament, force_official=force_official)
         except ValueError as exc:
-            raise PrinterRefused(f"{self.name} head T{index + 1}: {exc}", command="printer") from exc
+            raise PrinterRefused(
+                f"{self.name} head T{index + 1}: {exc}", command="printer"
+            ) from exc
         st, before, _ = self._head_state(index)
         cfg = st.raw["print_task_config"]
         if st.state in (PRINTING, PAUSED, UNKNOWN):
@@ -446,7 +521,9 @@ class MoonrakerAdapter(Adapter):
                 f"{self.name} is {st.raw_state}: writing a head's filament resets its pressure advance "
                 "(FLOW_RESET_K), never done during a job",
                 command="printer",
-                remediation=["Load again when the printer is idle: the spool binding is already saved."],
+                remediation=[
+                    "Load again when the printer is idle: the spool binding is already saved."
+                ],
             )
         if _at(cfg.get("filament_official"), index) and not force_official:
             raise PrinterRefused(
@@ -460,15 +537,24 @@ class MoonrakerAdapter(Adapter):
         wrong = _differs(after, filament)
         if wrong:
             raise PrinterCommError(
-                f"{self.name} head T{index + 1} after SET_PRINT_FILAMENT_CONFIG shows " + "; ".join(wrong),
+                f"{self.name} head T{index + 1} after SET_PRINT_FILAMENT_CONFIG shows "
+                + "; ".join(wrong),
                 command="printer",
-                remediation=[f"Check the head on the printer screen: 3d printer status {self.name}"],
+                remediation=[
+                    f"Check the head on the printer screen: 3d printer status {self.name}"
+                ],
             )
-        return HeadWrite(index=index, extruder=extruder_name(index), before=before, after=after,
-                         pressure_advance=pa)
+        return HeadWrite(
+            index=index,
+            extruder=extruder_name(index),
+            before=before,
+            after=after,
+            pressure_advance=pa,
+        )
 
-    def set_pressure_advance(self, index: int, advance: float, *,
-                             smooth_time: float | None = None) -> float:
+    def set_pressure_advance(
+        self, index: int, advance: float, *, smooth_time: float | None = None
+    ) -> float:
         ext = extruder_name(index)
         line = f"SET_PRESSURE_ADVANCE EXTRUDER={ext} ADVANCE={advance:.6g}"
         if smooth_time is not None:
@@ -479,10 +565,20 @@ class MoonrakerAdapter(Adapter):
             raise PrinterCommError(
                 f"{self.name} {ext} after SET_PRESSURE_ADVANCE shows pressure_advance {got!r}, sent {advance:.6g}",
                 command="printer",
-                remediation=[f"Set it by hand: SET_PRESSURE_ADVANCE EXTRUDER={ext} ADVANCE={advance:.6g}"],
+                remediation=[
+                    f"Set it by hand: SET_PRESSURE_ADVANCE EXTRUDER={ext} ADVANCE={advance:.6g}"
+                ],
             )
         return float(got)
 
 
-__all__ = ["MoonrakerAdapter", "extruder_name", "filament_config_gcode", "parse_history", "parse_queue",
-           "parse_slots", "parse_status", "parse_totals"]
+__all__ = [
+    "MoonrakerAdapter",
+    "extruder_name",
+    "filament_config_gcode",
+    "parse_history",
+    "parse_queue",
+    "parse_slots",
+    "parse_status",
+    "parse_totals",
+]

@@ -32,7 +32,7 @@ WHAT (issue https://github.com/alex-mextner/3d-cli/issues/96), one PASS/WARN/FAI
   is missing; it never passes silently. A PrintOps gate without PrintOps data is UNVERIFIED
   (shown, counted under STATUS, never PASS; it does not block on its own).
 
-WHY: wrong colour in a head, a used head that is empty (an empty U1 head), missing
+WHY: wrong colour in a head, a used head that is empty, missing
   previews and halves that no longer fit were all caught by hand on recent jobs — after
   they would have cost hours of printing.
 
@@ -298,7 +298,9 @@ def _tail(text: str) -> str:
     return (text.strip().splitlines() or ["no output"])[-1]
 
 
-def check_overhangs(gcode: Path, bridge_max: float | None = None, bridge_source: str = "default") -> Check:
+def check_overhangs(
+    gcode: Path, bridge_max: float | None = None, bridge_source: str = "default"
+) -> Check:
     """`3d gcode-overhangs`: no object prints more than the limit on nothing (FAIL); small
     ceilings and edge step-outs are WARN, listed per object. `bridge_source` says where
     `bridge_max` came from (--bridge-max, the printer's bridge_max_mm, default)."""
@@ -311,7 +313,8 @@ def check_overhangs(gcode: Path, bridge_max: float | None = None, bridge_source:
             tool_argv(
                 "numpy,scipy",
                 "gcode_overhangs.py",
-                [str(gcode), "--json"] + ([] if bridge_max is None else ["--bridge-max", f"{bridge_max:g}"]),
+                [str(gcode), "--json"]
+                + ([] if bridge_max is None else ["--bridge-max", f"{bridge_max:g}"]),
             ),
             capture_output=True,
             text=True,
@@ -330,7 +333,9 @@ def check_overhangs(gcode: Path, bridge_max: float | None = None, bridge_source:
             f"gcode-overhangs could not run (exit {r.returncode}): {_tail(r.stderr)}",
         )
     detail = f"{payload.get('detail', '')} (bridge limit from {bridge_source})"
-    return Check("overhangs", str(payload.get("status", FAIL)), detail, format_lines(payload))
+    return Check(
+        "overhangs", str(payload.get("status", FAIL)), detail, format_lines(payload)
+    )
 
 
 def check_slice_warnings(origin: Path, gcode: Path) -> Check:
@@ -487,7 +492,8 @@ def check_macros(rep: BoundsReport, trusted: frozenset[str]) -> list[Check]:
         Check(
             "macros",
             PASS,
-            f"all in the printer's trusted_macros ({PROFILE_FILES}): " + fmt(sorted(rep.macros)),
+            f"all in the printer's trusted_macros ({PROFILE_FILES}): "
+            + fmt(sorted(rep.macros)),
         )
     ]
 
@@ -610,7 +616,11 @@ def check_bed_verdict(v: dict[str, Any]) -> Check:
     """`bed_state.py status --json` (issue #303) -> the `bed` line."""
     bed, plate = v.get("bed", "unknown"), v.get("plate", "unknown")
     age = v.get("age_s")
-    when = f"{v.get('source', '?')}, {age:.0f} s ago" if isinstance(age, (int, float)) else str(v.get("source", "?"))
+    when = (
+        f"{v.get('source', '?')}, {age:.0f} s ago"
+        if isinstance(age, (int, float))
+        else str(v.get("source", "?"))
+    )
     frame = [f"frame: {v['frame']}"] if v.get("frame") else []
     why = str(v.get("reason") or "")
     if plate == "missing":
@@ -624,8 +634,12 @@ def check_bed_verdict(v: dict[str, Any]) -> Check:
     return Check("bed", WARN, f"bed state {bed} ({when}): {why}", frame)
 
 
-def check_bed(device: Device, *, runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
-              timeout: float = 90.0) -> Check:
+def check_bed(
+    device: Device,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+    timeout: float = 90.0,
+) -> Check:
     """The camera `bed` line (printer_ops/bed.py): SKIP when the printer's bed monitor is off,
     else the watcher's verdict when fresher than `stale_s` at the same Z, else a fresh one-shot
     camera check (`bed_state.py status`). A check that cannot run is a WARN, never a crash."""
@@ -633,11 +647,19 @@ def check_bed(device: Device, *, runner: Callable[..., subprocess.CompletedProce
 
     cfg = bed_config(device)
     if not cfg.enabled:
-        return Check("bed", SKIP, f"bed camera check off for {device.name} (watch.bed.enabled in {device.source})")
+        return Check(
+            "bed",
+            SKIP,
+            f"bed camera check off for {device.name} (watch.bed.enabled in {device.source})",
+        )
     try:
         from cli.pyrun import tool_argv
 
-        argv = tool_argv(BED_DEPS, BED_TOOL, ["status", device.name, "--json", "--max-age", f"{cfg.stale_s:g}"])
+        argv = tool_argv(
+            BED_DEPS,
+            BED_TOOL,
+            ["status", device.name, "--json", "--max-age", f"{cfg.stale_s:g}"],
+        )
         r = runner(argv, capture_output=True, text=True, timeout=timeout)
     except Exception as exc:  # no runtime / timeout
         return Check("bed", WARN, f"bed check could not run: {exc}")
@@ -645,11 +667,12 @@ def check_bed(device: Device, *, runner: Callable[..., subprocess.CompletedProce
         verdict = json.loads(r.stdout)
     except ValueError:
         tail = (r.stderr or r.stdout or "").strip().splitlines()[-1:] or ["no output"]
-        return Check("bed", WARN, f"bed check failed (exit {r.returncode}): {tail[0][:300]}")
+        return Check(
+            "bed", WARN, f"bed check failed (exit {r.returncode}): {tail[0][:300]}"
+        )
     if not isinstance(verdict, dict):
         return Check("bed", WARN, f"bed check returned {str(verdict)[:200]}")
     return check_bed_verdict(verdict)
-
 
 
 def run_preflight(
