@@ -178,6 +178,25 @@ full suite on a Runpod pod instead (`runpod-run --cpu cpu3c-8 --apt openscad,ima
 uv run pytest tests -q`, skill `runpod-offload`). A slow tool is a bug: profile it
 (`py-spy record`, cProfile) and fix the algorithm before adding hardware.
 
+## A ready project 3MF exists: patch it, do not re-slice
+
+When the task is "print / reprint X on printer B" and a slicer project `.3mf` of X already
+exists (made for printer A), that file IS the source of truth for orientation, supports,
+walls and infill. Do not re-derive them from the STL. The fast path, in order:
+
+1. `3d retarget X.3mf --to B --keep N [--process PRESET] [--preset easy-release-supports] [--set K=V] --dry-run` —
+   one second, no slicer. It prints the footprint vs the bed and exits 1 if the part cannot fit
+   at any Z rotation (then, and only then, change the orientation: the minimum tilt, not a new
+   search from scratch).
+2. Same command without `--dry-run` (+ `--gcode OUT` to slice it), then the usual G-code gates
+   (`3d print-preflight`).
+
+A single-part reprint on a known printer is a fast-path job: no multi-angle renders, no
+worktree-per-experiment, no per-task slicing script; the G-code gates are the verification.
+Slicing is slow when `layer_height` is 0.08 with tall tree supports: pass `--process` for a
+0.20 mm preset of the target printer unless the part needs finer layers. See
+`docs/notes/2026-10-22-slow-spoon-k1se-analysis.md`.
+
 ## User proof/reporting requirements
 
 The project owner wants progress reports in Telegram for this workstream. When reporting
@@ -354,6 +373,8 @@ skills (`atomic-commits`, `ai-review-before-commit`, `pre-commit-gate`,
   guards). All of it is fleet-driven: nothing is keyed on a printer name (`tests/test_printer_fw_parity.py`
   scans for it), and tests use loopback fakes and an injected ssh runner, never a real device. See
   `docs/commands/printers.md`, `printers-fw.md`, `docs/printers/firmware-profiles.md`.
+- `retarget` moves a slicer project `.3mf` to another printer in seconds (target preset, one extruder, kept
+  objects, fit to the bed, `--set`/`--preset`); `slicing/{retarget_3mf,orca_presets,bed_fit}.py`, `docs/commands/retarget.md`.
 - `print-preflight` runs EVERY G-code gate (bounds, overhangs, slicer warnings, head
   sequence, mix face, mix layers, thumbnails, visible faces); a new G-code gate is added to
   `printer_ops/preflight.run_preflight`, never left as a separate step, and a gate without
