@@ -16,6 +16,8 @@ compatibility wrappers.
 - `lib/cli/registry.py` discovers `lib/commands/*.py` modules and reads each `COMMAND`.
 - `lib/cli/env.py` owns tool discovery, install hints, and `OPENSCADPATH` export.
 - `lib/cli/pyrun.py` runs heavier bundled Python tools through the selected Python tier.
+- `lib/cli/vision_env.py` launches `packages/threed-vision` stages (`python -m threed_vision <stage>`) from the thin
+  `3d detect|segment|recognise|...` commands; the algorithms live in the package, not in `lib/`.
 - `lib/cli/paths.py` contains shared path helpers.
 - `lib/cli/resources.py` sizes every worker pool and caps native thread pools
   (`THREED_MAX_WORKERS`, default `min(6, cores / 2)`); the dispatcher applies it first.
