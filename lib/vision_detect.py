@@ -410,13 +410,17 @@ def _inside(x: float, y: float, poly: list[tuple[float, float]]) -> bool:
     return hit
 
 
+class FrameDecodeError(ValueError):
+    """A framed camera image cannot be decoded; it is not usable failure evidence."""
+
+
 def decode(jpeg: bytes) -> np.ndarray:
     import cv2
     import numpy as np
 
     img = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR)
     if img is None:
-        raise ValueError("not a decodable image")
+        raise FrameDecodeError("not a decodable image")
     return img
 
 
@@ -661,6 +665,76 @@ def run_live(args: argparse.Namespace) -> int:
                 flush=True,
             )
         time.sleep(max(0.5, args.interval - (time.time() - t0)))
+
+
+def _frame_score_errors() -> tuple[type[Exception], ...]:
+    """Native pixel/runtime failures only; programming and model-contract errors propagate."""
+    import cv2
+    from onnxruntime.capi.onnxruntime_pybind11_state import EPFail, EngineError, Fail, RuntimeException
+
+    return (FrameDecodeError, cv2.error, Fail, RuntimeException, EngineError, EPFail)
+
+
+def run_guard(args: argparse.Namespace) -> int:
+    """The explicit one-job writer. It has no Dispatcher, subscriber, agent or message sink."""
+    from cli.paths import cache_dir, state_dir
+    from errors import UsageError
+    from printer_ops import make_adapter
+    from printer_ops.base import PrinterCommError
+    from printer_ops.guard import PauseGuard, _write_result, guard_device, validate_args
+    from printer_ops.vision import ContextTap
+
+    validate_args(args)
+    device = guard_device(args.printer)
+    cfg = (getattr(device, "watch", None) or {}).get("vision") or {}
+    cfg = cfg if isinstance(cfg, dict) else {}
+    if cfg.get("verify", True) is not True:
+        raise UsageError("guard requires the CLIP verifier; watch.vision.verify is disabled", command="printer guard")
+    camera_args = argparse.Namespace(snapshot=None, no_keepalive=False, no_geometry=False)
+    camera = _device_camera(device, camera_args)
+    scorer = build_scorer(cfg, camera=_calibration(device, camera_args))
+    if scorer.verifier is None:
+        raise UsageError("guard requires a loaded CLIP verifier", command="printer guard")
+    score_errors = _frame_score_errors()
+    context = ContextTap(device.host, device.port) if scorer.geometry else None
+    root = state_dir() / "guard"
+    guard = PauseGuard.arm(make_adapter(device), args.job_id, state_dir=root,
+                           evidence_dir=Path(args.evidence).expanduser() if args.evidence else cache_dir() / "guard",
+                           clock=time.time, sleep=time.sleep, dry_run=args.dry_run, interval=args.interval)
+    root.mkdir(parents=True, exist_ok=True)
+
+    def report(value: dict[str, Any]) -> None:
+        _write_result(root / f"{device.name}.status.json", value)
+        print(json.dumps(value, ensure_ascii=False, allow_nan=False), flush=True)
+
+    report(guard._report("armed"))
+    while True:
+        started = time.time()
+        frame, score, error, score_error = None, None, None, None
+        try:
+            camera.keepalive(started)
+            frame = camera.grab()
+            if context is not None:
+                scorer.context = context.poll()
+                if scorer.context.filename != guard.job.filename:
+                    raise PrinterCommError("camera context belongs to another file", command="printer guard")
+        except PrinterCommError as exc:
+            error = str(exc)
+        else:
+            # Only scoring is recoverable here. Identity, state writes and PAUSE stay outside.
+            try:
+                score = scorer(frame.jpeg)
+            except score_errors as exc:
+                score_error = f"{type(exc).__name__}: {exc}"[:2000]
+        result = guard.observe(frame, score)
+        if error:
+            result["camera_error"] = error
+        if score_error:
+            result["score_error"] = score_error
+        report(result)
+        if result["terminal"]:
+            return 1 if result["outcome"] == "pause_unverified" else 0
+        time.sleep(max(0.5, args.interval - (time.time() - started)))
 
 
 def run_record(args: argparse.Namespace) -> int:
@@ -1055,8 +1129,11 @@ def run_eval(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str]) -> int:
+    from printer_ops.guard import add_arguments
+
     ap = argparse.ArgumentParser(prog="3d printer vision")
     sub = ap.add_subparsers(dest="cmd", required=True)
+    add_arguments(sub.add_parser("guard", help="explicit one-job automatic PAUSE; local evidence only"))
     live = sub.add_parser("run")
     live.add_argument("printer")
     live.add_argument("--interval", type=float, default=10.0)
@@ -1092,6 +1169,8 @@ def main(argv: list[str]) -> int:
     rec.add_argument("--no-keepalive", action="store_true")
     sub.add_parser("fetch-model")
     args = ap.parse_args(argv)
+    if args.cmd == "guard":
+        return run_guard(args)
     if args.cmd == "fetch-model":
         from vision_verify import ensure_clip
 

@@ -61,8 +61,12 @@ USAGE = """3d print-preflight FILE.gcode [--printer NAME] [--axis-limits X0:X1,Y
   fleet/policy.yaml `gates:`.
   printops               where the PrintOps state came from (3d-api, snapshot + age, fleet only)
   printer_profile_match  `; printer_model` is the target printer's model
-  nozzle_compat          `; nozzle_diameter` = the installed nozzle; abrasive filament only on
-                         hardened/ruby/tungsten nozzles
+  nozzle_compat          `; nozzle_diameter` = the installed nozzle; positive required_nozzle_HRC
+                         <= its material's nominal hardness (unknown -> UNVERIFIED).
+                         Independently, abrasive flags/markers require a policy abrasive_ok
+                         nozzle; a false spool flag cannot hide a positive marker.
+                         Malformed marker data -> UNVERIFIED unless valid positive evidence
+                         establishes abrasiveness.
   filament_temp_range    nozzle/bed temperatures (footer + M104/M109/M140/M190) inside the
                          loaded filament's nozzle_temp_min..max / bed_temp_min..max
   loaded_filament_match  the slot's spool: material = `; filament_type` (FAIL), colour ΔE2000

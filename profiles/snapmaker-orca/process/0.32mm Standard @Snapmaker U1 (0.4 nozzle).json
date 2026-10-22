@@ -28,5 +28,6 @@
     ],
     "version": "2.3.3.3",
     "wall_generator": "arachne",
-    "wall_sequence": "inner-outer-inner wall"
+    "wall_sequence": "inner-outer-inner wall",
+    "reduce_infill_retraction": "0"
 }

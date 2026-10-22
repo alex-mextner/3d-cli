@@ -14,6 +14,7 @@ from typing import Any
 
 import pytest
 import yaml
+from e2e.workflow_helper import run_cli
 from printops_fakes import FakeSpoolman
 
 from errors import UsageError
@@ -446,6 +447,336 @@ def test_target_printer_is_inferred_from_the_gcode_model(tmp_path: Path) -> None
         result.printer == "u1"
         and "the G-code's printer_model 'Snapmaker U1'" in result.checks[0].detail
     )
+
+
+# -- numeric hardness and independent abrasiveness ------------------------------------------
+def _nozzle_hrc_case(
+    tmp_path: Path,
+    *,
+    required_hrc: str,
+    nozzle_material: object,
+    loaded: dict[str, Any] | None,
+    gcode_type: str = "PLA",
+) -> preflight.Check:
+    """Exercise the public gate with only T4 used; other tools' HRC must be ignored."""
+    st = state(t3=loaded)
+    head = next(h for h in st["heads"] if h["label"] == "T4")
+    head["nozzle"]["material"] = nozzle_material
+    path = gcode(
+        tmp_path,
+        used_g=(0.0, 0.0, 0.0, 20.0),
+        types=f"PLA;PLA;PLA;{gcode_type}",
+        hrc=f"86,86,86,{required_hrc}",
+        body="T3\nM104 S215 T3\nG1 X1 E1\n",
+    )
+    return run(path, st)["nozzle_compat"]
+
+
+@pytest.mark.parametrize(
+    ("nozzle_material", "required_hrc", "expected"),
+    [
+        ("stainless", "3", "PASS"),
+        ("stainless", "20", "PASS"),
+        ("stainless", "21", "FAIL"),
+        ("stainless", "40", "FAIL"),
+        ("brass", "2", "PASS"),
+        ("brass", "3", "FAIL"),
+        ("hardened", "55", "PASS"),
+        ("hardened", "56", "FAIL"),
+        ("tungsten", "85", "PASS"),
+        ("tungsten", "86", "FAIL"),
+    ],
+)
+def test_nozzle_hrc_compares_requirement_with_installed_hardness(
+    tmp_path: Path, nozzle_material: str, required_hrc: str, expected: str
+) -> None:
+    # Ordinary Generic PLA declares HRC 3; a nonzero minimum is not an abrasive flag.
+    check = _nozzle_hrc_case(
+        tmp_path,
+        required_hrc=required_hrc,
+        nozzle_material=nozzle_material,
+        loaded=spool(4, color="FFFFFF", abrasive=False),
+    )
+    assert check.status == expected, check
+    assert f"HRC {required_hrc}" in check.detail + "\n".join(check.lines)
+
+
+@pytest.mark.parametrize("nozzle_material", [None, "ruby"])
+def test_nozzle_hrc_unknown_installed_hardness_is_unverified(
+    tmp_path: Path, nozzle_material: str | None
+) -> None:
+    check = _nozzle_hrc_case(
+        tmp_path,
+        required_hrc="3",
+        nozzle_material=nozzle_material,
+        loaded=spool(4, color="FFFFFF", abrasive=False),
+    )
+    assert check.status == "UNVERIFIED", check
+    assert "hardness" in check.detail + "\n".join(check.lines)
+
+
+@pytest.mark.parametrize("malformed_material", [["stainless"], {"kind": "stainless"}])
+@pytest.mark.parametrize("abrasive", [False, True])
+def test_nozzle_hrc_malformed_offline_material_does_not_crash(
+    tmp_path: Path, malformed_material: object, abrasive: bool
+) -> None:
+    check = _nozzle_hrc_case(
+        tmp_path,
+        required_hrc="3",
+        nozzle_material=malformed_material,
+        loaded=spool(4, color="FFFFFF", abrasive=abrasive),
+    )
+    assert check.status == ("FAIL" if abrasive else "UNVERIFIED"), check
+    evidence = check.detail + "\n".join(check.lines)
+    assert "hardness is not known" in evidence
+    if abrasive:
+        assert "abrasive filament" in evidence
+
+
+@pytest.mark.parametrize("required_hrc", ["0", "3"])
+@pytest.mark.parametrize("abrasive_source", ["flag", "marker"])
+def test_nozzle_unknown_hardness_does_not_hide_abrasive_policy_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    required_hrc: str,
+    abrasive_source: str,
+) -> None:
+    data = yaml.safe_load(REPO_POLICY.read_text(encoding="utf-8"))
+    data["gates"]["nozzle_compat"]["abrasive_ok"] = ["hardened", "tungsten"]
+    path = tmp_path / "policy.yaml"
+    path.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+    monkeypatch.setenv("PRINTOPS_POLICY", str(path))
+    loaded = spool(4, color="FFFFFF", abrasive=abrasive_source == "flag")
+    if abrasive_source == "marker":
+        loaded["material"] = "PLA-CF"
+    check = _nozzle_hrc_case(
+        tmp_path,
+        required_hrc=required_hrc,
+        nozzle_material="ruby",
+        loaded=loaded,
+    )
+    assert check.status == "FAIL", check
+    evidence = check.detail + "\n".join(check.lines)
+    assert "abrasive filament" in evidence
+    if required_hrc != "0":
+        assert "hardness is not known" in evidence
+
+
+@pytest.mark.parametrize("required_hrc", ["0", "3", "20"])
+def test_nozzle_explicit_abrasive_spool_still_fails_on_stainless(
+    tmp_path: Path, required_hrc: str
+) -> None:
+    check = _nozzle_hrc_case(
+        tmp_path,
+        required_hrc=required_hrc,
+        nozzle_material="stainless",
+        loaded=spool(4, color="FFFFFF", abrasive=True),
+    )
+    assert check.status == "FAIL", check
+    assert "abrasive" in check.detail + "\n".join(check.lines)
+
+
+@pytest.mark.parametrize("marker_source", ["spool_material", "spool_name", "gcode_type"])
+@pytest.mark.parametrize("required_hrc", ["0", "3"])
+def test_nozzle_abrasive_marker_is_not_hidden_by_false_spool_flag(
+    tmp_path: Path, marker_source: str, required_hrc: str
+) -> None:
+    loaded = spool(4, color="FFFFFF", abrasive=False)
+    gcode_type = "PLA"
+    if marker_source == "spool_material":
+        loaded["material"] = "PLA-CF"
+    elif marker_source == "spool_name":
+        loaded["name"] = "PLA-GF test"
+    else:
+        gcode_type = "PLA-CF"
+    check = _nozzle_hrc_case(
+        tmp_path,
+        required_hrc=required_hrc,
+        nozzle_material="stainless",
+        loaded=loaded,
+        gcode_type=gcode_type,
+    )
+    assert check.status == "FAIL", check
+    assert "abrasive" in check.detail + "\n".join(check.lines)
+
+
+def test_nozzle_low_hrc_does_not_prove_an_unknown_spool_is_nonabrasive(
+    tmp_path: Path,
+) -> None:
+    check = _nozzle_hrc_case(
+        tmp_path, required_hrc="3", nozzle_material="stainless", loaded=None
+    )
+    assert check.status == "UNVERIFIED", check
+    assert "no spool data" in check.detail + "\n".join(check.lines)
+
+
+@pytest.mark.parametrize(
+    ("required_hrc", "abrasive", "expected"),
+    [("3", False, "PASS"), ("21", False, "FAIL"), ("3", True, "FAIL")],
+)
+def test_cli_nozzle_compat_compares_hrc_and_keeps_abrasive_policy(
+    tmp_path: Path, _env: Path, required_hrc: str, abrasive: bool, expected: str
+) -> None:
+    """The normal offline CLI reports the same nozzle verdict as the gate engine."""
+    st = state(t3=spool(4, color="FFFFFF", abrasive=abrasive))
+    head = next(h for h in st["heads"] if h["label"] == "T4")
+    head["nozzle"]["material"] = "stainless"
+    snapshot = tmp_path / "snapshot.json"
+    gates.write_snapshot(
+        snapshot,
+        {
+            "version": 1,
+            "taken_at": gates.drying.format_ts(datetime.datetime.now(UTC)),
+            "printers": {"u1": st},
+        },
+    )
+    plate = gcode(
+        tmp_path,
+        used_g=(0.0, 0.0, 0.0, 20.0),
+        hrc=f"86,86,86,{required_hrc}",
+        body="T3\nM104 S215 T3\nG1 X1 E1\n",
+    )
+    result = run_cli(
+        tmp_path,
+        "print-preflight",
+        str(plate),
+        "--offline",
+        "--printops-snapshot",
+        str(snapshot),
+        "--json",
+        env_extra={"THREED_FLEET": str(_env), "PRINTOPS_API": "http://127.0.0.1:9"},
+    )
+    assert result.returncode in (0, 1), (result.stdout, result.stderr)
+    checks = {check["name"]: check for check in json.loads(result.stdout)["checks"]}
+    # This minimal gate fixture lacks thumbnails; its unrelated overall FAIL is expected.
+    assert checks["printops"]["status"] == "PASS", checks["printops"]
+    assert checks["nozzle_compat"]["status"] == expected, checks["nozzle_compat"]
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("name", 123),
+        ("name", ["PLA"]),
+        ("name", {"text": "PLA"}),
+        ("name", False),
+        ("name", []),
+        ("name", 0),
+        ("abrasive", "false"),
+        ("abrasive", 0),
+        ("material", 123),
+        ("material", ["PLA-CF"]),
+    ],
+)
+def test_nozzle_malformed_marker_data_is_unverified(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, field: str, value: object
+) -> None:
+    if field == "material":
+        # These cases isolate the nozzle gate from other consumers of material text.
+        override(tmp_path, monkeypatch, loaded_filament_match="off",
+                 enclosure_material="off", plate_material="off")
+    loaded = spool(4, color="FFFFFF", abrasive=False)
+    loaded[field] = value
+    check = _nozzle_hrc_case(
+        tmp_path, required_hrc="3", nozzle_material="stainless", loaded=loaded
+    )
+    assert check.status == "UNVERIFIED", check
+    assert f"invalid spool {field}" in check.detail + "\n".join(check.lines)
+
+
+@pytest.mark.parametrize(
+    "positive_source", ["flag", "material", "name", "gcode_type", "name_after_malformed_material"]
+)
+def test_nozzle_positive_evidence_outranks_malformed_marker_data(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, positive_source: str
+) -> None:
+    loaded = spool(4, color="FFFFFF", abrasive=False)
+    loaded["name"] = 123
+    gcode_type = "PLA"
+    if positive_source == "flag":
+        loaded["abrasive"] = True
+    elif positive_source == "material":
+        loaded["material"] = "PLA-CF"
+    elif positive_source == "name":
+        loaded["name"] = "PLA-GF test"
+        loaded["abrasive"] = "false"
+    elif positive_source == "name_after_malformed_material":
+        loaded["material"] = 123
+        loaded["name"] = "PLA-CF"
+        override(tmp_path, monkeypatch, loaded_filament_match="off",
+                 enclosure_material="off", plate_material="off")
+    else:
+        gcode_type = "PLA-CF"
+    check = _nozzle_hrc_case(
+        tmp_path,
+        required_hrc="3",
+        nozzle_material="stainless",
+        loaded=loaded,
+        gcode_type=gcode_type,
+    )
+    assert check.status == "FAIL", check
+    assert "abrasive filament" in check.detail + "\n".join(check.lines)
+    if positive_source == "name_after_malformed_material":
+        assert "spool name 'PLA-CF'" in check.detail + "\n".join(check.lines)
+
+
+@pytest.mark.parametrize(
+    ("updates", "gcode_type", "expected", "evidence"),
+    [
+        ({"name": 123}, "PLA", "UNVERIFIED", "invalid spool name"),
+        ({"name": ["PLA"]}, "PLA", "UNVERIFIED", "invalid spool name"),
+        ({"name": 0}, "PLA", "UNVERIFIED", "invalid spool name"),
+        ({"name": 123}, "PLA-CF", "FAIL", "G-code type"),
+        ({"name": 123, "abrasive": True}, "PLA", "FAIL", "Spoolman filament abrasive"),
+    ],
+)
+def test_cli_nozzle_malformed_marker_snapshot_keeps_structured_verdict(
+    tmp_path: Path,
+    _env: Path,
+    updates: dict[str, Any],
+    gcode_type: str,
+    expected: str,
+    evidence: str,
+) -> None:
+    """Inspect an offline snapshot with malformed metadata without losing positive evidence."""
+    loaded = spool(4, color="FFFFFF", abrasive=False)
+    loaded.update(updates)
+    st = state(t3=loaded)
+    head = next(h for h in st["heads"] if h["label"] == "T4")
+    head["nozzle"]["material"] = "stainless"
+    snapshot = tmp_path / "snapshot.json"
+    gates.write_snapshot(
+        snapshot,
+        {
+            "version": 1,
+            "taken_at": gates.drying.format_ts(datetime.datetime.now(UTC)),
+            "printers": {"u1": st},
+        },
+    )
+    plate = gcode(
+        tmp_path,
+        used_g=(0.0, 0.0, 0.0, 20.0),
+        types=f"PLA;PLA;PLA;{gcode_type}",
+        hrc="86,86,86,3",
+        body="T3\nM104 S215 T3\nG1 X1 E1\n",
+    )
+    result = run_cli(
+        tmp_path,
+        "print-preflight",
+        str(plate),
+        "--offline",
+        "--printops-snapshot",
+        str(snapshot),
+        "--json",
+        env_extra={"THREED_FLEET": str(_env), "PRINTOPS_API": "http://127.0.0.1:9"},
+    )
+    assert result.returncode in (0, 1), (result.stdout, result.stderr)
+    assert "Traceback" not in result.stderr
+    checks = {check["name"]: check for check in json.loads(result.stdout)["checks"]}
+    assert checks["printops"]["status"] == "PASS", checks["printops"]
+    check = checks["nozzle_compat"]
+    assert check["status"] == expected, check
+    assert evidence in check["detail"] + "\n".join(check["lines"])
 
 
 # -- one G-code per FAIL condition ----------------------------------------------------------
