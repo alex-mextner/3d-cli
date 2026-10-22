@@ -188,3 +188,9 @@ def test_full_main_runs_the_whole_tests_dir_and_the_ha_integration_tests(
     pytest_cmd = next(cmd for cmd in calls if cmd[1:3] == ["-m", "pytest"])
     assert pytest_cmd[3:] == [os.path.join(str(repo), "tests"),
                               os.path.join(str(repo), "integrations", "homeassistant", "tests"), "-k", "registry"]
+
+
+def test_module_name_maps_threed_vision_package_files() -> None:
+    assert run_gate.module_name("packages/threed-vision/src/threed_vision/io.py") == "threed_vision.io"
+    assert run_gate.module_name("packages/threed-vision/src/threed_vision/commands/__init__.py") == "threed_vision.commands"
+    assert run_gate.module_name("packages/threed-vision/pyproject.toml") is None

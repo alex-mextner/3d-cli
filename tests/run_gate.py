@@ -98,8 +98,8 @@ def changed_files(root: str) -> list[str]:
 
 
 def module_name(rel: str) -> str | None:
-    """Dotted name a lib/ or tests/ Python file is imported under (lib/ and tests/ are on sys.path)."""
-    for prefix in ("lib/", "tests/"):
+    """Dotted name a lib/, tests/ or packages/threed-vision/src Python file is imported under (all three are on sys.path)."""
+    for prefix in ("lib/", "tests/", "packages/threed-vision/src/"):
         if rel.startswith(prefix) and rel.endswith(".py"):
             parts = rel[len(prefix):-len(".py")].split("/")
             if parts[-1] == "__init__":
@@ -215,7 +215,8 @@ def main(argv: list[str]) -> int:
 
     print("=== ruff ===", flush=True)
     rc_ruff = subprocess.run(
-        [sys.executable, "-m", "ruff", "check", os.path.join(root, "lib"), os.path.join(root, "tests")],
+        [sys.executable, "-m", "ruff", "check", os.path.join(root, "lib"), os.path.join(root, "tests"),
+         os.path.join(root, "packages", "threed-vision", "src")],
         cwd=root, env=env,
     ).returncode
 
@@ -250,6 +251,7 @@ def main(argv: list[str]) -> int:
         os.path.join(root, "bin", "3d"),
         os.path.join(root, "lib"),
         os.path.join(root, "tests"),
+        os.path.join(root, "packages", "threed-vision", "src", "threed_vision"),
     ]
     rc_mypy = subprocess.run(
         [sys.executable, "-m", "mypy", "--config-file", os.path.join(root, "mypy.ini"), *targets],
