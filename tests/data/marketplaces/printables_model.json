@@ -1,0 +1,46 @@
+{
+ "data": {
+  "print": {
+   "id": "311253",
+   "name": "Spoon Drawer Pull",
+   "slug": "spoon-drawer-pull",
+   "likesCount": 58,
+   "downloadCount": 180,
+   "premium": false,
+   "price": null,
+   "user": {
+    "handle": "cluckOmatic",
+    "publicUsername": "cluckOmatic"
+   },
+   "license": {
+    "name": "Creative Commons — Public Domain",
+    "abbreviation": "CC0"
+   },
+   "image": {
+    "filePath": "media/prints/311253/images/2702515_a40d887e-2302-4ad2-8601-dd7b6f1f4387/handle-v1.png"
+   },
+   "summary": "Spoon Drawer Pull for contest",
+   "tags": [
+    {
+     "name": "pull"
+    },
+    {
+     "name": "spoon"
+    },
+    {
+     "name": "drawer"
+    }
+   ],
+   "stls": [
+    {
+     "id": "1395244",
+     "name": "spoon_handle.stl",
+     "fileSize": 3306984
+    }
+   ],
+   "gcodes": [],
+   "slas": [],
+   "otherFiles": []
+  }
+ }
+}

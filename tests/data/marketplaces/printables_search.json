@@ -1,0 +1,68 @@
+{
+ "data": {
+  "result": {
+   "items": [
+    {
+     "id": "311253",
+     "name": "Spoon Drawer Pull",
+     "slug": "spoon-drawer-pull",
+     "likesCount": 58,
+     "downloadCount": 180,
+     "premium": false,
+     "price": null,
+     "user": {
+      "handle": "cluckOmatic",
+      "publicUsername": "cluckOmatic"
+     },
+     "license": {
+      "name": "Creative Commons — Public Domain",
+      "abbreviation": "CC0"
+     },
+     "image": {
+      "filePath": "media/prints/311253/images/2702515_a40d887e-2302-4ad2-8601-dd7b6f1f4387/handle-v1.png"
+     }
+    },
+    {
+     "id": "408003",
+     "name": "Robust Spool Storage Drawer Full",
+     "slug": "robust-spool-storage-drawer-full",
+     "likesCount": 4,
+     "downloadCount": 33,
+     "premium": false,
+     "price": null,
+     "user": {
+      "handle": "KrazeeKamikazee",
+      "publicUsername": "KrazeeKamikazee"
+     },
+     "license": {
+      "name": "Creative Commons — Attribution  — Noncommercial",
+      "abbreviation": "CC-BY-NC"
+     },
+     "image": {
+      "filePath": "media/prints/408003/images/3392138_c1212285-f3b6-41ab-86cb-5d365b1ad6c6/tempimageejey1y.gif"
+     }
+    },
+    {
+     "id": "1412367",
+     "name": "Filament Spool Drawers - pull pivot variant",
+     "slug": "filament-spool-drawers-pull-pivot-variant",
+     "likesCount": 5,
+     "downloadCount": 22,
+     "premium": false,
+     "price": null,
+     "user": {
+      "handle": "PixelShark_2601023",
+      "publicUsername": "Pixel Shark"
+     },
+     "license": {
+      "name": "Creative Commons — Attribution  — Noncommercial",
+      "abbreviation": "CC-BY-NC"
+     },
+     "image": {
+      "filePath": "media/prints/8c3fc3f9-7af8-4223-8224-6d90e82d59dc/images/10657472_b8c66a05-f78a-46a4-9251-dec69d538914_14d6d5e7-124a-4256-b902-49d6e800dc23/spoolpull_2025-sep-12_09-15-47am-000_customizedview29756041632_png_alpha.png"
+     }
+    }
+   ]
+  }
+ }
+}

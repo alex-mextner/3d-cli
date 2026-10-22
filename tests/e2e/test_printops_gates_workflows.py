@@ -27,6 +27,7 @@ PRINTOPS_GATES = (
     "maintenance_due",
     "enclosure_material",
     "plate_material",
+    "preset_match",
 )
 FLEET = """\
 u1:
@@ -313,3 +314,47 @@ def test_offline_preflight_with_an_explicit_api_is_a_usage_error(
     assert both.stdout == ""
     assert env_only.returncode in (0, 1), env_only.stderr
     assert "no PrintOps snapshot" in env_only.stdout
+
+
+def test_preflight_catches_a_plate_sliced_with_stock_presets(tmp_path: Path) -> None:
+    """The user slices a K1 SE plate with Orca's stock presets instead of the ones the printer
+    prints with (#293): `3d print-preflight --offline` names the presets and FAILs; the same
+    plate sliced with the fleet entry's user presets passes preset_match."""
+    fleet = tmp_path / "k1.yaml"
+    fleet.write_text(
+        "k1se:\n  model: Creality K1 SE\n  owner: own\n  access: offline\n"
+        "  heads: [{label: T1, index: 0, usable: true}]\n"
+        "  slicer: {machine: K1 SE - Copy, process: Std 8900}\n",
+        encoding="utf-8",
+    )
+    user = tmp_path / "user" / "process"
+    user.mkdir(parents=True)
+    (user / "Std 8900.json").write_text(json.dumps({"name": "Std 8900", "default_acceleration": "8900"}))
+    env = {"THREED_FLEET": str(fleet), "ORCA_USER_PRESETS": str(tmp_path / "user"),
+           "PRINTOPS_SNAPSHOT": str(tmp_path / "none.json")}
+
+    def plate(name: str, machine: str, process: str, accel: str) -> Path:
+        path = tmp_path / name
+        path.write_text(
+            "M140 S60\nM104 S215\nG1 X10 Y10 E1\n"
+            "; printer_model = Creality K1 SE\n"
+            f"; printer_settings_id = {machine}\n; print_settings_id = {process}\n"
+            f"; default_acceleration = {accel}\n; filament_type = PLA\n; nozzle_diameter = 0.4\n",
+            encoding="utf-8",
+        )
+        return path
+
+    stock = plate("stock.gcode", "Creality K1 SE 0.4 nozzle", "0.20mm Standard @Creality K1 SE", "12000")
+    mine = plate("mine.gcode", "K1 SE - Copy", "Std 8900", "8900")
+    bad = run_cli(tmp_path, "print-preflight", str(stock), "--printer", "k1se", "--offline", "--json",
+                  env_extra=env)
+    good = run_cli(tmp_path, "print-preflight", str(mine), "--printer", "k1se", "--offline", "--json",
+                   env_extra=env)
+
+    assert bad.returncode == 1, bad.stderr
+    got = _checks(bad.stdout)["preset_match"]
+    assert got["status"] == "FAIL"
+    assert got["detail"] == (
+        "sliced with machine preset 'Creality K1 SE 0.4 nozzle', the printer prints with 'K1 SE - Copy' (+1 more)"
+    ), got
+    assert _checks(good.stdout)["preset_match"]["status"] == "PASS", good.stdout
