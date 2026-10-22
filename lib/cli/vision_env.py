@@ -34,12 +34,20 @@ def stage_argv(stage: str, args: list[str], *, heavy: bool) -> list[str]:
     explicit = os.environ.get("THREED_VISION_PYTHON")
     venv_py = vision_venv_python()
     if explicit:
-        return [explicit, "-m", "threed_vision", stage, *args]
+        resolved = shutil.which(explicit)
+        if resolved is None:
+            raise MissingDependency(
+                f"an executable python at THREED_VISION_PYTHON ({explicit})",
+                install="point THREED_VISION_PYTHON at a python that has the package's deps, or unset it",
+                degrades=f"`3d {stage}`",
+                command=stage,
+            )
+        return [resolved, "-m", "threed_vision", stage, *args]
     if os.access(venv_py, os.X_OK):
         return [venv_py, "-m", "threed_vision", stage, *args]
     if not heavy and not os.environ.get("PY3D_NO_UV") and shutil.which("uv"):
         flags = [f for dep in LIGHT_DEPS for f in ("--with", dep)]
-        return ["uv", "run", *flags, "python", "-m", "threed_vision", stage, *args]
+        return ["uv", "run", "--no-project", *flags, "python", "-m", "threed_vision", stage, *args]
     raise MissingDependency(
         "the threed-vision python environment",
         install=(
@@ -59,4 +67,11 @@ def run_stage(stage: str, args: list[str], *, heavy: bool = False) -> int:
     argv = stage_argv(stage, args, heavy=heavy)
     env = dict(os.environ)
     env["PYTHONPATH"] = package_src() + os.pathsep + env.get("PYTHONPATH", "")
-    return subprocess.run(argv, env=env).returncode
+    try:
+        return subprocess.run(argv, env=env).returncode
+    except FileNotFoundError as exc:  # interpreter/uv vanished between resolution and exec
+        raise MissingDependency(
+            f"the launcher {argv[0]}",
+            install="recreate the vision venv (see packages/threed-vision/README.md) or reinstall uv",
+            degrades=f"`3d {stage}`", command=stage,
+        ) from exc

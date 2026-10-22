@@ -9,7 +9,7 @@ from typing import Any
 
 import numpy as np
 
-from .errors import BadInput
+from .errors import BadInput, MissingDependency
 
 
 def load_rgb(path: str | Path, max_side: int | None = None) -> np.ndarray:
@@ -20,19 +20,23 @@ def load_rgb(path: str | Path, max_side: int | None = None) -> np.ndarray:
     if not p.is_file():
         raise BadInput(f"image not found: {p}")
     if p.suffix.lower() in (".heic", ".heif"):
-        import pillow_heif
-
+        try:
+            import pillow_heif
+        except ImportError as exc:
+            raise MissingDependency("pillow-heif is required to decode HEIC photos", "uv pip install pillow-heif") from exc
         pillow_heif.register_heif_opener()
     try:
         with Image.open(p) as im:
             rgb = np.array(ImageOps.exif_transpose(im).convert("RGB"))
-    except OSError as exc:
+    except (OSError, Image.DecompressionBombError) as exc:
         raise BadInput(f"cannot decode image {p}: {exc}") from exc
     if max_side and max(rgb.shape[:2]) > max_side:
         import cv2
 
         s = max_side / max(rgb.shape[:2])
-        rgb = cv2.resize(rgb, None, fx=s, fy=s, interpolation=cv2.INTER_AREA)
+        rgb = cv2.resize(
+            rgb, (max(1, round(rgb.shape[1] * s)), max(1, round(rgb.shape[0] * s))), interpolation=cv2.INTER_AREA
+        )
     return rgb
 
 
@@ -111,11 +115,15 @@ def mask_iou(a: np.ndarray, b: np.ndarray) -> float:
     return float((a & b).sum() / max(int((a | b).sum()), 1))
 
 
-def masks_to_labelmap(masks: list[np.ndarray], min_area: int = 150, max_frac: float = 0.25) -> np.ndarray:
-    """bool HxW masks -> uint16 label map (1..N); larger masks are painted first so small ones stay on top."""
-    if not masks:
-        return np.zeros((0, 0), np.uint16)
-    h, w = masks[0].shape
+def masks_to_labelmap(
+    masks: list[np.ndarray], min_area: int = 150, max_frac: float = 0.25, shape: tuple[int, int] | None = None
+) -> np.ndarray:
+    """bool HxW masks -> uint16 label map (1..N); larger masks are painted first so small ones stay on top.
+
+    `shape` (H, W) is required when `masks` may be empty so the result still has the image size."""
+    if not masks and shape is None:
+        raise BadInput("masks_to_labelmap needs shape=(H, W) when there are no masks")
+    h, w = shape if shape is not None else masks[0].shape
     keep = sorted((m for m in masks if min_area <= m.sum() <= max_frac * h * w), key=lambda m: -int(m.sum()))
     lab = np.zeros((h, w), np.uint16)
     for i, m in enumerate(keep, 1):

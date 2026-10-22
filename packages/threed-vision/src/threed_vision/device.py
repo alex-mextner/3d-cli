@@ -9,19 +9,29 @@ import site
 import subprocess
 from typing import Any
 
+from .errors import BadInput
+
 Device = str  # "cuda" | "cpu"
 
 
 def free_vram_mb() -> int | None:
-    """Free VRAM of GPU 0 in MiB, or None when there is no usable CUDA device."""
+    """Free VRAM of GPU 0 in MiB, or None when there is no usable CUDA device.
+
+    When torch is importable its answer is authoritative (a CPU-only torch, an exclusive-process GPU held elsewhere
+    or broken nvidia libs mean "no usable device" for the torch stages: None). nvidia-smi is only consulted when
+    torch is not installed at all (ORT-only environments).
+    """
     try:
         import torch
-
-        if torch.cuda.is_available():
-            return int(torch.cuda.mem_get_info()[0] // (1 << 20))
-        return None
     except ImportError:
         pass
+    except OSError:  # torch present but its CUDA libs fail to load
+        return None
+    else:
+        try:
+            return int(torch.cuda.mem_get_info()[0] // (1 << 20)) if torch.cuda.is_available() else None
+        except RuntimeError:
+            return None
     try:
         out = subprocess.run(
             ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
@@ -34,11 +44,13 @@ def free_vram_mb() -> int | None:
 
 def resolve_device(preference: str = "auto", need_vram_mb: int = 0) -> Device:
     """'auto' -> cuda when a GPU has `need_vram_mb` free, else cpu. 'cuda' is strict (caller handles absence)."""
+    if preference not in ("auto", "cuda", "cpu"):
+        raise BadInput(f"unknown device {preference!r}", "use auto, cuda or cpu")
     if preference == "cpu":
         return "cpu"
-    free = free_vram_mb()
     if preference == "cuda":
         return "cuda"
+    free = free_vram_mb()
     return "cuda" if free is not None and free >= need_vram_mb else "cpu"
 
 
@@ -63,6 +75,17 @@ def _loadable(lib: str) -> bool:
     return True
 
 
+def _extend_library_path() -> None:
+    """Prepend the venv's nvidia-*/lib dirs to LD_LIBRARY_PATH once (idempotent; never leaves an empty entry,
+    which the loader treats as the current directory). Only child processes see it: glibc reads the variable at
+    process start, so this process relies on `ort.preload_dlls` / already-loaded libs (torch loads its own)."""
+    wanted = [d for sp in site.getsitepackages() for d in sorted(glob.glob(os.path.join(sp, "nvidia", "*", "lib")))]
+    current = [p for p in os.environ.get("LD_LIBRARY_PATH", "").split(":") if p]
+    merged = [*(d for d in wanted if d not in current), *current]
+    if merged:
+        os.environ["LD_LIBRARY_PATH"] = ":".join(merged)
+
+
 def setup_ort_cuda() -> bool:
     """Make onnxruntime-gpu (CUDA-12 build) find cuDNN/cuBLAS from the venv's nvidia-* wheels (torch cu128 ships them).
 
@@ -72,10 +95,7 @@ def setup_ort_cuda() -> bool:
         import onnxruntime as ort
     except ImportError:
         return False
-    for sp in site.getsitepackages():
-        libs = sorted(glob.glob(os.path.join(sp, "nvidia", "*", "lib")))
-        if libs:
-            os.environ["LD_LIBRARY_PATH"] = ":".join([*libs, os.environ.get("LD_LIBRARY_PATH", "")])
+    _extend_library_path()
     if hasattr(ort, "preload_dlls"):
         with contextlib.suppress(Exception):  # best-effort; the loadability probe below is authoritative
             ort.preload_dlls(cuda=True, cudnn=True, directory=None)

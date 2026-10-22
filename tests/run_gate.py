@@ -98,8 +98,8 @@ def changed_files(root: str) -> list[str]:
 
 
 def module_name(rel: str) -> str | None:
-    """Dotted name a lib/ or tests/ Python file is imported under (lib/ and tests/ are on sys.path)."""
-    for prefix in ("lib/", "tests/"):
+    """Dotted name a lib/, tests/ or packages/threed-vision/src Python file is imported under (all three are on sys.path)."""
+    for prefix in ("lib/", "tests/", "packages/threed-vision/src/"):
         if rel.startswith(prefix) and rel.endswith(".py"):
             parts = rel[len(prefix):-len(".py")].split("/")
             if parts[-1] == "__init__":

@@ -10,7 +10,6 @@ from pathlib import Path
 import pytest
 
 np = pytest.importorskip("numpy")
-pytest.importorskip("PIL")
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "packages" / "threed-vision" / "src"
@@ -41,6 +40,7 @@ def test_mask_helpers_roundtrip() -> None:
 
 
 def test_load_rgb_missing_is_bad_input(tmp_path: Path) -> None:
+    pytest.importorskip("PIL")
     with pytest.raises(errors.BadInput):
         io.load_rgb(tmp_path / "nope.png")
 
@@ -59,8 +59,8 @@ def test_module_entrypoint_runs_info() -> None:
 def test_stage_argv_prefers_explicit_python(monkeypatch: pytest.MonkeyPatch) -> None:
     from cli import vision_env
 
-    monkeypatch.setenv("THREED_VISION_PYTHON", "/opt/vpy")
-    assert vision_env.stage_argv("info", ["--json"], heavy=True) == ["/opt/vpy", "-m", "threed_vision", "info", "--json"]
+    monkeypatch.setenv("THREED_VISION_PYTHON", sys.executable)
+    assert vision_env.stage_argv("info", ["--json"], heavy=True) == [sys.executable, "-m", "threed_vision", "info", "--json"]
 
 
 def test_heavy_stage_without_venv_raises_with_install_hint(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -72,3 +72,52 @@ def test_heavy_stage_without_venv_raises_with_install_hint(monkeypatch: pytest.M
     with pytest.raises(MissingDependency) as exc:
         vision_env.stage_argv("segment", [], heavy=True)
     assert "uv venv" in exc.value.install
+
+
+def test_unknown_device_preference_is_rejected() -> None:
+    from threed_vision import device
+
+    with pytest.raises(errors.BadInput):
+        device.resolve_device("gpu")
+    assert device.resolve_device("cpu") == "cpu"
+
+
+def test_library_path_extension_is_idempotent_and_never_empty(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    import site
+
+    from threed_vision import device
+
+    lib = tmp_path / "nvidia" / "cublas" / "lib"
+    lib.mkdir(parents=True)
+    monkeypatch.setattr(site, "getsitepackages", lambda: [str(tmp_path)])
+    monkeypatch.setenv("LD_LIBRARY_PATH", f":{lib}")  # leading empty entry + a duplicate of what we add
+    device._extend_library_path()
+    device._extend_library_path()
+    parts = os.environ["LD_LIBRARY_PATH"].split(":")
+    assert parts == [str(lib)]
+
+
+def test_free_vram_is_none_when_torch_cannot_reach_cuda(monkeypatch: pytest.MonkeyPatch) -> None:
+    import types
+
+    from threed_vision import device
+
+    fake = types.SimpleNamespace(cuda=types.SimpleNamespace(is_available=lambda: False))
+    monkeypatch.setitem(sys.modules, "torch", fake)
+    assert device.free_vram_mb() is None
+    assert device.resolve_device("auto", 100) == "cpu"
+
+
+def test_empty_labelmap_needs_shape_and_keeps_it() -> None:
+    with pytest.raises(errors.BadInput):
+        io.masks_to_labelmap([])
+    assert io.masks_to_labelmap([], shape=(4, 6)).shape == (4, 6)
+
+
+def test_missing_explicit_python_is_structured(monkeypatch: pytest.MonkeyPatch) -> None:
+    from cli import vision_env
+    from errors import MissingDependency
+
+    monkeypatch.setenv("THREED_VISION_PYTHON", "/nonexistent/python3.99")
+    with pytest.raises(MissingDependency):
+        vision_env.stage_argv("info", [], heavy=False)
