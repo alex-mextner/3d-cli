@@ -149,6 +149,8 @@ calibrations:
     # Slicer presets carry vendor defaults for these; measure them, but do not stop a print.
     max_volumetric_speed: warn
     retraction: warn
+    # A measured colour corrects the mix model (plan §20.4, #412); a print never needs one.
+    filament_color: off
   printers:
     # D7: other people's printers are never contacted and not ours to calibrate.
     p1s: off

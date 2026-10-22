@@ -70,12 +70,13 @@ def list_records(
     head: str | None = None,
     kind: str | None = None,
     status: str | None = None,
+    mix: str | None = None,
     current: bool = False,
     limit: Annotated[int, Query(ge=1, le=1000)] = 100,
 ) -> Any:
     return _call(lambda: {"calibrations": [
         c.to_dict() for c in cal.list_calibrations(conn, printer=printer, head=head, kind=kind,
-                                                   status=status, current=current, limit=limit)
+                                                   status=status, mix=mix, current=current, limit=limit)
     ]})
 
 

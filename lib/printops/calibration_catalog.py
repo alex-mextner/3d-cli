@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,9 +20,11 @@ from typing import Any
 
 import yaml
 
+from printops.color import parse_hex
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
-DIMENSIONS = ("printer", "head", "nozzle", "plate", "filament")
+DIMENSIONS = ("printer", "head", "nozzle", "plate", "filament", "mix")
 BASELINES = ("required", "assumed")
 TRIGGERS = (
     "nozzle_swap",
@@ -36,7 +39,7 @@ TRIGGERS = (
     "move",
     "repair",
 )
-VALUE_TYPES = ("number", "string")
+VALUE_TYPES = ("number", "string", "color")  # color: "#RRGGBB" (printops.color.parse_hex)
 COMPARES = ("eq", "le")
 APPLY_SCHEMES = ("orca", "klipper", "journal")
 
@@ -116,6 +119,11 @@ class Kind:
     def printer_scoped(self) -> bool:
         return bool({"printer", "head", "nozzle", "plate"} & set(self.scope))
 
+    @property
+    def mix_scoped(self) -> bool:
+        """Per colour mix (printops.mix_key): looked up by its key, not in the per-head lists."""
+        return "mix" in self.scope
+
     def applies_to(self, model: str) -> bool:
         return self.models is None or model in self.models
 
@@ -134,6 +142,13 @@ class Kind:
             if v is None:
                 if not spec.optional:
                     raise CatalogError(f"{self.id}: value {name} is required")
+                continue
+            if spec.type == "color":
+                # typed measurements: exactly six digits (parse_hex also takes device forms —
+                # RGBA, Creality's pad digit — that would store a typo as another colour)
+                if not (isinstance(v, str) and re.fullmatch(r"#?[0-9A-Fa-f]{6}", v.strip())):
+                    raise CatalogError(f"{self.id}: {name} must be a colour #RRGGBB, got {v!r}")
+                out[name] = parse_hex(v)
                 continue
             if spec.type == "string":
                 if not isinstance(v, str) or not v.strip():
@@ -222,6 +237,11 @@ def _kind(name: str, body: Any) -> Kind:
         raise CatalogError(f"{where}.scope: nozzle needs head (a nozzle sits on a head)")
     if "head" in scope and "printer" in scope:
         raise CatalogError(f"{where}.scope: head already implies printer; list only head")
+    if "mix" in scope and set(scope) != {"printer", "mix"}:
+        raise CatalogError(
+            f"{where}.scope: mix goes with printer only (a mix names its filaments itself; "
+            "it prints the same on any head)"
+        )
     if not isinstance(body["lot_sensitive"], bool):
         raise CatalogError(f"{where}.lot_sensitive must be true or false")
     if body["lot_sensitive"] and "filament" not in scope:
