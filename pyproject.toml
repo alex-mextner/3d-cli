@@ -13,6 +13,7 @@ dependencies = [
     "numpy>=1.24",
     "scipy>=1.10",
     "rtree>=1.0",
+    "pillow>=10.1",  # `3d dimension` renders + labels the dimensioned views (scalable built-in font)
     "pyyaml>=6.0",   # 3d.yaml project model + materials/printers registries (§2a/§5)
 ]
 
