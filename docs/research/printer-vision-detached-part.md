@@ -106,12 +106,15 @@ Config: `watch.vision.detach: false | {gap_abs, gap_rise, gap_crit, persist, ...
 
 `SceneWatch` (lib/vision_scene.py, only with `--scene`) compared the frame with the median of frames 3-12 min
 old, so a part that lifts a little every few minutes was never different from its reference. It now also keeps a
-**slow reference** (15-60 min old, up to 2.5 mm lower bed travel, at most 16 frames in the median): the same
+**slow reference** (15-60 min old, at most 0.8 mm of bed travel since then — the same tolerance as the fast one — and at most 16 frames in the median): the same
 Lab-difference test, a larger minimum area (0.6 % of the frame) and 6 checks in a row, reported as
 `vision_part_moved` with `data.reference: "slow"`. Test: a synthetic part that creeps one pixel row every 5 min is
 invisible to the 3-12 min reference over 90 min and found by the slow one only after 15 min
 ([tests/test_vision_scene.py](../../tests/test_vision_scene.py)). Limit: the reference must be at the same Z within
-2.5 mm, so on a fast-growing print (> ~3 mm per 15 min) there is no slow reference and the check stays silent;
+0.8 mm, so on a print that grows faster than ~0.8 mm per 15 min there is no slow reference and the check stays
+silent (replayed on the 870-frame / 145 min healthy `u1rec_walls` recording: the slow tier produced 0 findings
+because it never had a reference there, the unchanged fast tier 37 episodes — the known `--scene` noise; with a
+reference window of up to 2.5 mm the slow tier fired on 575 frames, so that was rejected);
 the detached-part check above has no such limit (it compares against the plate in the same frame).
 
 ## `vision record` returned nothing (root cause)
