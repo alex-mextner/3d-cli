@@ -32,8 +32,14 @@ uv pip install --python ~/.cache/3d-cli/vision/venv/bin/python -e 'packages/thre
 | `recognise` | CLIP text prompts (class-mean calibrated) + bank retrieval |
 | `bank` | thumbnails/silhouettes from meshes, embedding index, query |
 | `fit_profile` | closed-form oriented rect + width profile (numpy, ms) |
-| `fit_silhouette` | soft-rasteriser template fit (torch) + CMA-ES fallback |
-| `view_check` | held-out-view IoU confidence |
+| `loft` | the lathe / flat / box loft template (numpy) and the `fit` dict schema shared by everything below |
+| `render` | independent hard cv2 rasteriser (`hard_mask`, `view_iou`), `mesh_from_fit`, `overlay` |
+| `fit_init` | closed-form 3-D start + ranked pose candidates (numpy) |
+| `soft_raster` | differentiable convex-hull-union soft rasteriser + Adam `LoftFit` (torch, imported lazily) |
+| `fit_silhouette` | `fit_object` (soft-silhouette fit, GPU->CPU) and `fit_cma` (CMA-ES second attempt) |
+| `fit` | `fit_auto`: closed form first, soft refine only if needed, CMA only for low confidence |
+| `view_check` | `check(fit, views)`: IoU of the fit in extra views, `needs_views`, single-photo sanity mode |
+| `mesh_export` | `emit_mesh(fit, 'glb'\|'stl'\|'obj'\|'scad')`: watertight mesh in mm |
 | `register` | SIFT + RANSAC homography, relative pose, mask warp |
 
 Adding a stage command: one module `commands/<name>.py` (`NAME`, `SUMMARY`, `add_arguments`, `run`) plus a
