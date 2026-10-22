@@ -56,9 +56,9 @@ USAGE = """3d printer [-n NAME] <subcommand> [args]
   watch NAME...|--all [options]        live read-only subscription: anomaly events to
                                        stdout JSONL / --exec / --steer SESSION / subscribers
                                        (see `3d printer watch --help`)
-  vision NAME [options]                camera failure detection (spaghetti, stale/dark camera)
+  vision NAME [options]                camera failure detection (spaghetti, detached part, stale/dark camera)
                                        into the same event sinks as watch; also
-                                       `vision eval --pos P.. --neg N..`, `vision record NAME DIR`,
+                                       `vision eval --pos P.. --neg N..`, `vision record NAME DIR [--timeout S]`,
                                        `vision fetch-model` (see docs/commands/printer-vision.md)
   bed status|reference|monitor NAME    bed state from the camera: clear/occupied, build plate
                                        present/missing; `reference NAME --capture` takes the

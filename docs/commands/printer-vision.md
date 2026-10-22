@@ -9,10 +9,10 @@ from the device's `watch:` block in `printer-devices.yaml`).
 ```text
 3d printer vision NAME [--interval S] [--once] [--save OUT.jpg] [--dry-run] [--min-severity LEVEL]
                        [--snapshot URL|PATH] [--no-keepalive] [--no-npu] [--evidence DIR] [--verbose]
-                       [--no-verify] [--no-geometry] [--scene]
+                       [--no-verify] [--no-geometry] [--scene] [--no-detach]
 3d printer vision eval --pos PATH... --neg PATH... [--every N] [--warmup N] [--interval S]
-                       [--lead-in N] [--printer NAME] [--no-verify] [--scene] [--json]
-3d printer vision record NAME DIR [--interval S] [--max N] [--snapshot URL|PATH] [--no-keepalive]
+                       [--lead-in N] [--printer NAME] [--no-verify] [--scene] [--no-detach] [--json]
+3d printer vision record NAME DIR [--interval S] [--max N] [--timeout S] [--snapshot URL|PATH] [--no-keepalive]
 3d printer vision fetch-model
 ```
 
@@ -28,7 +28,10 @@ from the device's `watch:` block in `printer-devices.yaml`).
 - `--evidence` — where event frames are saved (default `~/.cache/3d-cli/vision/evidence/`).
 - `--no-verify` — skip stage 2 (the CLIP verifier); the trend then runs on the raw Obico score,
   which on the U1 fires on speckled walls. For debugging only.
-- `--no-geometry` — ignore the camera calibration (no bed-volume mask, no bed-change detectors).
+- `--no-geometry` — ignore the camera calibration (no bed-volume mask, no bed-change or part-detached detectors).
+- `--no-detach` — skip the part-detached check (`vision_part_detached`, below); same as `detach: false` in the
+  device's `watch: vision:` block, which can also hold a mapping that tunes it. With `--once` the report adds
+  `detach_gap` (0..1, null = the check abstained) and `part_detached` (gap at or above the absolute threshold).
 - `--scene` — also run the bed-change detectors (`vision_foreign_object`, `vision_part_moved`,
   `vision_no_growth`). Off by default: they are still noisy (see
   [printer-vision-tuning.md](../research/printer-vision-tuning.md)). Same as `scene: true` in the
@@ -37,8 +40,10 @@ from the device's `watch:` block in `printer-devices.yaml`).
   video (a U1 timelapse `.mp4`); each path counts as one print. Prints per-frame
   precision/recall/false-positive rate at several score thresholds, and whether the live
   tracker would have raised an alert on each sequence.
-- `record` — while the printer prints, save every frame with the print context (Z, objects)
-  into `DIR` (`meta.jsonl`), for `eval --printer NAME` later.
+- `record` — while the printer prints or is paused, save every frame with the print context (state, Z,
+  objects) into `DIR` (`meta.jsonl`), for `eval --printer NAME` later. In any other state it saves nothing
+  and says so on stderr; `--timeout S` makes it exit 1 when no frame was saved within S seconds (without it
+  it waits for a print), `--max N` stops after N frames.
 - `fetch-model` — download the detector and verifier weights now (otherwise the first run does it).
 
 ## What it detects
@@ -47,6 +52,7 @@ from the device's `watch:` block in `printer-devices.yaml`).
 |---|---|---|
 | `vision_spaghetti` | warning, then critical | the trend of the verified score q crosses the alert / the escalated threshold while printing |
 | `vision_spaghetti_vetoed` | info | the raw detector's trend would warn, but the verifier confirms less than 0.3 of it (texture, not filament) |
+| `vision_part_detached` | warning, then critical | the printed part looks lifted/peeled off the plate: bare build plate shows where the near wall of the part should be (details below); on by default with the camera calibration; never pauses |
 | `vision_foreign_object`, `vision_part_moved` | warning | only with `--scene`: something new on the bed outside the parts / a part's silhouette changed |
 | `vision_no_growth` | info | only with `--scene`: the newest layers of a part look empty (under- or no extrusion) |
 | `printer_noodle_verdict` | warning | the U1's own NPU detector logs a defect label (table below) at or above 0.83 (once per episode, 5 min quiet ends it) |
@@ -57,6 +63,24 @@ Each event fires once per episode. Camera events (`vision_*`) carry the saved fr
 `data.frame` (with boxes); `printer_noodle_verdict` comes from the log and has no frame.
 Nothing is sent to the printer except `camera.start_monitor`: vision never pauses or cancels.
 Decide on the event (`3d printer status`, Fluidd), then pause yourself.
+
+### The part-detached check (`vision_part_detached`)
+
+Tier (a): OpenCV only, one frame, no history. The calibration projects each part footprint's prism
+(bed to the current layer) into the picture; its near side wall is the band between the base edge on the plate
+and the newest layer. The plate colour is learnt from the bed pixels outside the part in the same frame, and
+`gap` is the share of the eroded wall band with that colour. Warning: `gap ≥ 0.25`, or `gap` ≥ 0.12 above the
+lowest gap of this print, for 3 frames in a row; critical: the rise stays ≥ 0.25 for 12 frames. It abstains
+(no event) on a grey plate (chroma < 25), without enough visible plate, below 1.5 mm, or without footprints.
+Never pauses: [`printer guard`](#one-job-automatic-pause) acts on confirmed spaghetti only. The U1 incident it
+was written for, the numbers on the real frame (gap 0.52), its limits and its unmeasured false-positive rate:
+[printer-vision-detached-part.md](../research/printer-vision-detached-part.md). Tuning:
+
+```yaml
+watch:
+  vision:
+    detach: {gap_abs: 0.25, gap_rise: 0.12, gap_crit: 0.25, persist: 3, persist_crit: 12}  # or false
+```
 
 ## One-job automatic pause
 

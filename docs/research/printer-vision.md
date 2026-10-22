@@ -89,6 +89,7 @@ recording); `klippy.log` shows NPU scores 0.84–0.89 from 04:33 and a pause wit
 
 ## Not done (follow-ups)
 
-- Layer shift / detachment by comparing the part silhouette with the G-code footprint
-  (needs a bed↔image homography for the fixed camera).
+- Layer shift by comparing the part silhouette with the G-code footprint. Detachment from the plate is
+  covered since 2026-10-22 by `vision_part_detached`; the incident that motivated it is written up in
+  [printer-vision-detached-part.md](printer-vision-detached-part.md).
 - Masks for the purge bin and prime tower.

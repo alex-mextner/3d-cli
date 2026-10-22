@@ -22,7 +22,7 @@ Epic: [#90](https://github.com/alex-mextner/3d-cli/issues/90).
 3d printer guard NAME --job-id ID --yes [--interval S] [--evidence DIR]
 3d printer guard NAME --job-id ID --dry-run
 3d printer watch NAME... | --all [--steer SESSION] [--exec CMD] [--min-severity LEVEL] ...
-3d printer vision NAME [--interval S] [--once] [--dry-run] [--scene] ...  |  vision eval ...  |  vision record NAME DIR  |  vision fetch-model
+3d printer vision NAME [--interval S] [--once] [--dry-run] [--scene] [--no-detach] ...  |  vision eval ...  |  vision record NAME DIR [--timeout S]  |  vision fetch-model
 3d printer bed status NAME [--json] [--max-age S]  |  bed reference NAME [--capture [--no-plate]]  |  bed monitor NAME
 3d printer subscribe --session ID [--printer P,P] [--kinds K,K] [--min-severity LEVEL] ...
 3d printer unsubscribe --session ID | --id SUBID | --all

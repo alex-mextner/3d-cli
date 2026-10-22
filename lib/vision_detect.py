@@ -794,12 +794,15 @@ def run_guard(args: argparse.Namespace) -> int:
 
 
 def run_record(args: argparse.Namespace) -> int:
-    """`vision record NAME DIR`: while the printer prints, save every frame plus where the print
-    is (gcode Z, toolhead XY, object footprints) to DIR/meta.jsonl. Read-only, like the live
-    loop. The folder is a test set for `vision eval`, which replays it with the calibrated
-    detectors. Stops after --max frames (default: never)."""
+    """`vision record NAME DIR`: while a print is running OR paused (a paused printer is where a
+    failure is still on the bed), save every frame plus where the print is (gcode Z, toolhead
+    XY, object footprints, printer state) to DIR/meta.jsonl. Read-only, like the live loop. The
+    folder is a test set for `vision eval`, which replays it with the calibrated detectors.
+    Stops after --max frames (default: never) or, with --timeout S, gives up (exit 1) when no
+    frame was saved within S seconds, so a script never waits forever on an idle printer."""
+    from errors import GateFailure
     from printer_ops import make_adapter
-    from printer_ops.base import PRINTING, PrinterCommError
+    from printer_ops.base import PAUSED, PRINTING, PrinterCommError
     from printer_ops.devices import get_device
     from printer_ops.vision import ContextTap
 
@@ -809,13 +812,16 @@ def run_record(args: argparse.Namespace) -> int:
     context_tap = ContextTap(device.host, device.port)
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    n, objects = 0, None
+    n, objects, last_state = 0, None, None
+    started = time.time()
     with (out / "meta.jsonl").open("a") as meta:
         while args.max is None or n < args.max:
             t0 = time.time()
+            state, active = None, False
             try:
-                printing = adapter.status().state == PRINTING
-                if printing:
+                state = adapter.status().state
+                active = state in (PRINTING, PAUSED)
+                if active:
                     camera.keepalive(t0)
                     frame = camera.grab()
                     ctx = context_tap.poll()
@@ -823,8 +829,15 @@ def run_record(args: argparse.Namespace) -> int:
                 print(
                     json.dumps({"t": round(t0, 1), "error": str(exc)}), file=sys.stderr
                 )
-                printing = False
-            if printing:
+                active = False
+            if state != last_state:  # say why nothing is saved (an idle printer was silent)
+                last_state = state
+                print(
+                    json.dumps({"t": round(t0, 1), "state": state, "recording": active}),
+                    file=sys.stderr,
+                    flush=True,
+                )
+            if active:
                 # milliseconds: two frames inside one second must not overwrite each other
                 stamp = time.strftime("%Y%m%dT%H%M%S", time.gmtime(frame.ts))
                 name = f"{stamp}.{int(frame.ts * 1000) % 1000:03d}Z.jpg"
@@ -833,6 +846,7 @@ def run_record(args: argparse.Namespace) -> int:
                     "frame": name,
                     "t": round(frame.ts, 2),
                     "file": ctx.filename,
+                    "state": state,
                     "z": ctx.z,
                     "x": round(ctx.x, 2),
                     "y": round(ctx.y, 2),
@@ -842,6 +856,16 @@ def run_record(args: argparse.Namespace) -> int:
                 meta.write(json.dumps(row) + "\n")
                 meta.flush()
                 n += 1
+            elif args.timeout is not None and n == 0 and time.time() - started >= args.timeout:
+                raise GateFailure(
+                    f"{device.name}: no frame saved in {args.timeout:g} s "
+                    f"(printer state: {state or 'unreachable'})",
+                    command="printer vision record",
+                    remediation=[
+                        "record saves frames only while the printer is printing or paused; "
+                        "start or resume a print, or drop --timeout to wait for one."
+                    ],
+                )
             time.sleep(max(0.5, args.interval - (time.time() - t0)))
     return 0
 
@@ -1223,6 +1247,7 @@ def main(argv: list[str]) -> int:
     rec.add_argument("out")
     rec.add_argument("--interval", type=float, default=10.0)
     rec.add_argument("--max", type=int)
+    rec.add_argument("--timeout", type=float)
     rec.add_argument("--snapshot")
     rec.add_argument("--no-keepalive", action="store_true")
     sub.add_parser("fetch-model")
