@@ -167,8 +167,13 @@ class OwlDetector:
         nms: float = 0.5,
         max_area_frac: float = 0.05,
     ) -> dict[str, Any]:
-        if rgb.ndim != 3 or rgb.shape[2] != 3:
-            raise BadInput(f"detect expects an HxWx3 RGB array, got shape {rgb.shape}")
+        if (
+            not isinstance(rgb, np.ndarray)
+            or rgb.ndim != 3
+            or rgb.shape[2] != 3
+            or rgb.dtype != np.uint8
+        ):
+            raise BadInput("detect expects an HxWx3 uint8 RGB array")
         qs = list(queries) if queries else list(DEFAULT_QUERIES)
         t0 = time.perf_counter()
         self.load()

@@ -147,6 +147,11 @@ class OrtEncoder:
                 continue
             active = list(sess.get_providers())
             if want_cuda and (not active or active[0] != "CUDAExecutionProvider"):
+                if self.requested == "cuda":
+                    raise MissingDependency(
+                        f"onnxruntime dropped the CUDA provider for {path.name} (active: {active})",
+                        "check `3d doctor` (onnxruntime-gpu 1.23.x + the CUDA-12 libs from the torch cu128 wheels)",
+                    )
                 self.device = (
                     "cpu"  # the CUDA provider was dropped silently: report the truth
                 )

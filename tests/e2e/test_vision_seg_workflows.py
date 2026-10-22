@@ -35,6 +35,7 @@ def _photo(tmp_path: Path) -> Path:
 
 
 def test_segment_help_documents_every_flag_and_artefact(tmp_path: Path) -> None:
+    """A user runs `3d segment --help` before a first photo and finds every flag and every artefact the command writes."""
     result = run_cli(tmp_path, "segment", "--help")
     assert result.returncode == 0
     for word in (
@@ -59,6 +60,7 @@ def test_segment_help_documents_every_flag_and_artefact(tmp_path: Path) -> None:
 
 
 def test_detect_and_models_help(tmp_path: Path) -> None:
+    """A user reads `3d detect --help` and `3d vision-models --help` to learn the flags, the subcommands and the model names to pull."""
     detect = run_cli(tmp_path, "detect", "--help")
     assert detect.returncode == 0
     for word in (
@@ -87,7 +89,10 @@ def test_detect_and_models_help(tmp_path: Path) -> None:
 def test_models_status_json_lists_every_model_as_missing_in_an_empty_cache(
     tmp_path: Path,
 ) -> None:
-    result = run_cli(tmp_path, "vision-models", "status", "--json", env_extra=_env(tmp_path))
+    """A fresh machine runs `3d vision-models status --json` and sees every model missing with the exact pull command to run."""
+    result = run_cli(
+        tmp_path, "vision-models", "status", "--json", env_extra=_env(tmp_path)
+    )
     assert result.returncode == 0, result.stderr
     doc = json.loads(result.stdout)
     assert doc["models_dir"] == str(tmp_path / "models")
@@ -99,13 +104,18 @@ def test_models_status_json_lists_every_model_as_missing_in_an_empty_cache(
         "u2net",
     }
     assert all(not m["installed"] for m in doc["models"].values())
-    assert doc["models"]["sam2-tiny"]["pull"].startswith("3d vision-models pull sam2-tiny")
+    assert doc["models"]["sam2-tiny"]["pull"].startswith(
+        "3d vision-models pull sam2-tiny"
+    )
     human = run_cli(tmp_path, "vision-models", "status", env_extra=_env(tmp_path))
     assert "MISSING" in human.stdout and "3d vision-models pull" in human.stdout
 
 
 def test_models_pull_unknown_name_is_bad_input(tmp_path: Path) -> None:
-    result = run_cli(tmp_path, "vision-models", "pull", "nope", env_extra=_env(tmp_path))
+    """A user mistypes a model name in `3d vision-models pull` and gets a clear message listing the valid names."""
+    result = run_cli(
+        tmp_path, "vision-models", "pull", "nope", env_extra=_env(tmp_path)
+    )
     assert result.returncode == 2
     assert (
         "unknown vision model 'nope'" in result.stderr and "sam2-tiny" in result.stderr
@@ -142,6 +152,7 @@ def test_models_pull_unknown_name_is_bad_input(tmp_path: Path) -> None:
 def test_missing_model_exits_127_naming_the_pull_command(
     tmp_path: Path, argv: list[str], model: str
 ) -> None:
+    """A user runs `3d segment` or `3d detect` before pulling weights and is told the exact `3d vision-models pull <name>` to run, with no traceback and no output files."""
     img = _photo(tmp_path)
     args = [a.format(img=img, out=tmp_path / "out") for a in argv]
     result = run_cli(tmp_path, *args, env_extra=_env(tmp_path))
@@ -152,6 +163,7 @@ def test_missing_model_exits_127_naming_the_pull_command(
 
 
 def test_bad_inputs_are_exit_2(tmp_path: Path) -> None:
+    """A user passes a missing photo or empty queries and gets a specific bad-input message."""
     missing = run_cli(
         tmp_path,
         "segment",
@@ -160,7 +172,8 @@ def test_bad_inputs_are_exit_2(tmp_path: Path) -> None:
         str(tmp_path / "o"),
         env_extra=_env(tmp_path),
     )
-    assert missing.returncode == 2 and "image not found" in missing.stderr
+    assert missing.returncode == 2
+    assert "image not found" in missing.stderr
     empty_q = run_cli(
         tmp_path,
         "detect",
@@ -169,4 +182,5 @@ def test_bad_inputs_are_exit_2(tmp_path: Path) -> None:
         " , ",
         env_extra=_env(tmp_path),
     )
-    assert empty_q.returncode == 2 and "--queries is empty" in empty_q.stderr
+    assert empty_q.returncode == 2
+    assert "--queries is empty" in empty_q.stderr

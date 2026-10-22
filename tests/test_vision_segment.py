@@ -569,6 +569,9 @@ def test_auto_device_needs_enough_free_vram(
     monkeypatch.setattr(dev, "free_vram_mb", lambda: free_mb)
     seg = Segmenter(device=requested)
     monkeypatch.setattr(seg, "_load_sam", lambda: None)
+    monkeypatch.setattr(segment.models, "model_path", lambda name, rel=None: Path(name))
+    monkeypatch.setattr(segment, "require_torch", lambda: None)
+    monkeypatch.setattr(segment, "require_cuda_if_requested", lambda device: None)
     seg.load()
     assert seg.device == expected and Segmenter.vram_estimate_mb == 2000
 
@@ -857,3 +860,36 @@ def test_explicit_cuda_without_cuda_torch_is_missing_dependency(
     with pytest.raises(MissingDependency, match="CUDA GPU"):
         torchutil.require_cuda_if_requested("cuda")
     torchutil.require_cuda_if_requested("cpu")
+
+
+def test_segmenter_load_names_the_missing_model_before_the_missing_torch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("THREED_VISION_MODELS_DIR", str(tmp_path))
+    monkeypatch.setitem(sys.modules, "torch", None)  # `import torch` -> ImportError
+    with pytest.raises(MissingDependency) as exc:
+        Segmenter(device="cpu").load()
+    assert "3d vision-models pull sam2-tiny" in exc.value.render()
+
+
+def test_fill_stage_lets_large_owl_boxes_through_when_max_area_frac_is_raised() -> None:
+    seen: list[float] = []
+
+    class RecordingDetector(FakeDetector):
+        def detect(
+            self, rgb: Any, queries: Any, threshold: float = 0.15, **kw: Any
+        ) -> Any:
+            seen.append(kw["max_area_frac"])
+            return super().detect(rgb, queries, threshold, **kw)
+
+    for frac in (0.2, 0.03):
+        FakeSegmenter(
+            [],
+            [],
+            device="cuda",
+            fill="owlv2",
+            reject_bg=False,
+            detector=RecordingDetector([]),
+            max_area_frac=frac,
+        ).run(_rgb())
+    assert seen == [0.2, segment.OWL_MIN_AREA_FRAC]

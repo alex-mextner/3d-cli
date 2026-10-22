@@ -50,6 +50,7 @@ FILLS = ("owlv2", "none")
 CPU_POINTS_PER_SIDE = 0
 CPU_AMG_ONLY_POINTS_PER_SIDE = 16  # CPU with fill="none" has nothing but the grid: 16x16 (measured 36 s, 29 instances)
 CPU_MAX_SIDE = 1024
+OWL_MIN_AREA_FRAC = 0.05  # OWLv2 boxes up to this image fraction always reach the fill stage; a larger --max-area-frac widens it
 
 BG_PROMPTS = [
     "a photo of a carpet",
@@ -352,6 +353,9 @@ class Segmenter:
             else resolve_device(self.requested, self.vram_estimate_mb)
         )
         if self.uses_sam:
+            models.model_path(
+                "sam2-tiny"
+            )  # missing weights are reported before missing python packages
             require_torch()
             require_cuda_if_requested(
                 self.device if self.requested == "cuda" else "cpu"
@@ -488,9 +492,12 @@ class Segmenter:
             stage("detect", 0.0)
             t0 = time.perf_counter()
             det = self._get_detector()
-            boxes = det.detect(proc, self.queries, threshold=self.owl_threshold)[
-                "boxes"
-            ]
+            boxes = det.detect(
+                proc,
+                self.queries,
+                threshold=self.owl_threshold,
+                max_area_frac=max(self.max_area_frac, OWL_MIN_AREA_FRAC),
+            )["boxes"]
             tm["detect"] = time.perf_counter() - t0
             stage("detect", 1.0)
             stage("fill", 0.0)
