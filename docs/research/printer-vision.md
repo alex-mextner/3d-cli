@@ -186,6 +186,12 @@ Shipped thresholds are the ones measured on the ONNX path (fp16, CUDA) over the 
 | CPU (6 threads, load average 6–12 from other agents) | 164 ms | 177 ms | 0 | 0.45 s to load |
 | RTX 4060 (onnxruntime-gpu 1.31 CUDA provider, cuDNN 9, fp16 export) | 6.1 ms | 9.6 ms | +379 MiB peak | arena capped at 3 GiB; 0.34 s to load |
 
+For comparison, tier (a) on this machine today (onnxruntime session, 2 threads, random 416 px / 224 px
+input): Obico YOLOv2 124 ms on the CPU, 6.6 ms on the CUDA provider (+674 MiB); CLIP B/32 verifier
+crop 55 ms on the CPU, 2.1 ms on CUDA (+280 MiB). `ObicoScorer` and `ClipVerifier` hard-code
+`CPUExecutionProvider`, so tier (a) has no GPU path today; the numbers say one would be cheap, but
+it is not wired (the tier (a) cost is 0.14 s per 10 s frame on the CPU, ~1.4 % of a core).
+
 The two paths agree to |Δp| ≤ 0.008 per class on the 150 frames. Embedding all 11,381 frames of
 the data set took 52.5 s on the GPU (4.6 ms per frame). After `close()` the session's arena is
 returned; the CUDA context (about 100–300 MiB) stays until the process exits. Device choice:
