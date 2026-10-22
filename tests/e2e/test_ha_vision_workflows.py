@@ -31,6 +31,7 @@ def scratch_checkout(tmp_path: Path) -> Path:
 
 
 def test_the_committed_files_are_current_and_the_plan_names_every_printer() -> None:
+    """The owner runs `3d ha vision` on the committed repo: every fleet printer is planned (camera printers get their files, offline ones are named as having none) and the generated files are current."""
     import subprocess
     import sys
 
@@ -64,6 +65,7 @@ def test_the_committed_files_are_current_and_the_plan_names_every_printer() -> N
 
 
 def test_a_hand_edit_is_reported_and_write_restores_it(tmp_path: Path) -> None:
+    """Someone edits a generated Home Assistant package by hand: `3d ha vision` reports it out of date (exit 1) and `--write` restores the generated text."""
     root = scratch_checkout(tmp_path)
     package = (
         root / "integrations" / "homeassistant" / "packages" / "printer_vision.yaml"
@@ -81,11 +83,8 @@ def test_a_hand_edit_is_reported_and_write_restores_it(tmp_path: Path) -> None:
     )
     again = run_cli(tmp_path, "ha", "vision", "--fleet", FLEET, "--root", str(root))
 
-    assert (
-        stale.returncode == 1
-        and "out of date: integrations/homeassistant/packages/printer_vision.yaml"
-        in stale.stdout
-    )
+    assert stale.returncode == 1
+    assert "out of date: integrations/homeassistant/packages/printer_vision.yaml" in stale.stdout
     assert "run `3d ha vision --write`" in stale.stdout
     assert (
         fixed.returncode == 0
@@ -97,6 +96,7 @@ def test_a_hand_edit_is_reported_and_write_restores_it(tmp_path: Path) -> None:
 
 
 def test_a_missing_entity_makes_the_command_fail_naming_it(tmp_path: Path) -> None:
+    """A dashboard entity or a manifest entry is lost: the check names exactly what is missing and exits 1; `--write` regenerates a card."""
     root = scratch_checkout(tmp_path)
     dash = (
         root / "integrations" / "homeassistant" / "dashboards" / "ui-3d-printers.yaml"
@@ -123,32 +123,24 @@ def test_a_missing_entity_makes_the_command_fail_naming_it(tmp_path: Path) -> No
         encoding="utf-8",
     )
     gap = run_cli(tmp_path, "ha", "vision", "--fleet", FLEET, "--root", str(root))
-    assert (
-        gap.returncode == 1
-        and "missing: packages/printer_vision.yaml is not a `files` entry" in gap.stdout
-    )
+    assert gap.returncode == 1
+    assert "missing: packages/printer_vision.yaml is not a `files` entry" in gap.stdout
 
 
 def test_usage_errors_are_structured(tmp_path: Path) -> None:
+    """Wrong `3d ha vision` usage (unknown flag, no fleet, flag without a value) gives a structured usage error, never a traceback; `--help` documents the surface."""
     unknown = run_cli(tmp_path, "ha", "vision", "--bogus")
     no_fleet = run_cli(tmp_path, "ha", "vision")
     no_value = run_cli(tmp_path, "ha", "vision", "--root")
     help_ = run_cli(tmp_path, "ha", "vision", "--help")
 
-    assert (
-        unknown.returncode == 2
-        and "unknown option '--bogus'" in unknown.stderr
-        and "Traceback" not in unknown.stderr
-    )
-    assert (
-        no_fleet.returncode == 2
-        and "no fleet registry to generate from" in no_fleet.stderr
-    )
-    assert no_value.returncode == 2 and "--root needs a value" in no_value.stderr
-    assert (
-        help_.returncode == 0
-        and "vision [--write] [--root DIR] [--fleet FILE]" in help_.stdout
-    )
+    assert unknown.returncode == 2
+    assert "unknown option '--bogus'" in unknown.stderr
+    assert "no fleet registry to generate from" in no_fleet.stderr
+    assert "--root needs a value" in no_value.stderr
+    assert "vision [--write] [--root DIR] [--fleet FILE]" in help_.stdout
+    assert no_fleet.returncode == no_value.returncode == 2
+    assert help_.returncode == 0
 
 
 @pytest.mark.parametrize(
@@ -158,6 +150,7 @@ def test_usage_errors_are_structured(tmp_path: Path) -> None:
 def test_a_printer_without_a_camera_is_told_so_by_vision_and_bed(
     tmp_path: Path, subcommand: tuple[str, ...]
 ) -> None:
+    """A printer with no camera configured is told so by `printer vision` and `printer bed` instead of guessing a U1 path."""
     pytest.importorskip("numpy")
     pytest.importorskip("cv2")
     config = tmp_path / "xdg-config" / "3d-cli"

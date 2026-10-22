@@ -29,6 +29,7 @@ def _setup(tmp_path: Path) -> dict[str, str]:
 
 
 def test_doctor_fails_on_a_dry_run_service_and_prints_the_fix(tmp_path: Path) -> None:
+    """The owner runs `3d printer vision doctor` while the vision service runs with --dry-run: it exits 1, names the unit and prints the commands that fix it and prove delivery."""
     extra = {**_setup(tmp_path), "DOCTOR_FLAGS": "--dry-run --verbose"}
     r = run_cli(tmp_path, "printer", "vision", "doctor", env_extra=extra)
     assert r.returncode == 1, r.stdout + r.stderr
@@ -37,6 +38,7 @@ def test_doctor_fails_on_a_dry_run_service_and_prints_the_fix(tmp_path: Path) ->
 
 
 def test_doctor_passes_when_the_services_deliver(tmp_path: Path) -> None:
+    """The same check on a deployment that delivers (no --dry-run) passes and lists the running units."""
     extra = {**_setup(tmp_path), "DOCTOR_FLAGS": "--verbose"}
     r = run_cli(tmp_path, "printer", "vision", "doctor", env_extra=extra)
     assert r.returncode == 0, r.stdout + r.stderr
@@ -44,7 +46,9 @@ def test_doctor_passes_when_the_services_deliver(tmp_path: Path) -> None:
 
 
 def test_doctor_help_and_unknown_printer(tmp_path: Path) -> None:
+    """`doctor --help` explains the check; an unknown printer name is a usage error that names it."""
     extra = _setup(tmp_path)
     assert "--dry-run" in run_cli(tmp_path, "printer", "vision", "doctor", "--help", env_extra=extra).stdout
     r = run_cli(tmp_path, "printer", "vision", "doctor", "nope", env_extra=extra)
-    assert r.returncode == 2 and "nope" in r.stderr
+    assert r.returncode == 2
+    assert "nope" in r.stderr
