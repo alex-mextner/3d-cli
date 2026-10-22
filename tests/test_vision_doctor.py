@@ -14,6 +14,7 @@ sys.path.insert(0, str(ROOT / "lib"))
 sys.path.insert(0, str(ROOT / "packages" / "threed-vision" / "src"))
 
 doctor = importlib.import_module("commands.doctor")
+stage_json = importlib.import_module("cli.vision_env").stage_json
 
 
 def _run(
@@ -21,9 +22,7 @@ def _run(
     capsys: pytest.CaptureFixture[str],
     payloads: dict[str, Any],
 ) -> str:
-    monkeypatch.setattr(
-        doctor, "_vision_stage_json", lambda stage, args: payloads.get(stage)
-    )
+    monkeypatch.setattr(doctor, "stage_json", lambda stage, args: payloads.get(stage))
     doctor.run([])
     return capsys.readouterr().out
 
@@ -74,7 +73,10 @@ def test_doctor_passes_when_cuda_provider_loads_and_models_are_present(
         capsys,
         {
             "info": info,
-            "vision-models": {"models_dir": "/m", "models": {"u2net": {"installed": True}}},
+            "vision-models": {
+                "models_dir": "/m",
+                "models": {"u2net": {"installed": True}},
+            },
         },
     )
     assert any("PASS" in ln and "onnxruntime CUDA" in ln for ln in out.splitlines())
@@ -94,4 +96,12 @@ def test_vision_stage_json_is_none_without_an_interpreter(
 ) -> None:
     monkeypatch.delenv("THREED_VISION_PYTHON", raising=False)
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
-    assert doctor._vision_stage_json("info", []) is None
+    assert stage_json("info", []) is None
+
+
+def test_vision_stage_json_parses_one_json_object(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("THREED_VISION_PYTHON", sys.executable)
+    info = stage_json("info", [])
+    assert info is not None and "onnxruntime" in info

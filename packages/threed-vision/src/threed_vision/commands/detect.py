@@ -94,7 +94,7 @@ def _write_masks(
     """SAM2 box prompts for the detected boxes -> `segment`-compatible output directory; returns a small summary."""
     from ..segment import Segmenter
     from ..torchutil import peak_mb, reset_peak
-    from .segment import write_result
+    from ..outputs import write_result
 
     seg = Segmenter(method="sam2", fill="none", reject_bg=False, device=args.device)
     reset_peak()

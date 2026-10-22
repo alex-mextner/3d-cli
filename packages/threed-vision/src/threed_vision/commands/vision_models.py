@@ -1,4 +1,4 @@
-"""`models status|pull`: the registry of weights the vision stages need (offline-first, explicit fetch)."""
+"""`vision-models status|pull`: the registry of weights the vision stages need (offline-first, explicit fetch)."""
 
 from __future__ import annotations
 

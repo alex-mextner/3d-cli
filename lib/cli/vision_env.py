@@ -10,9 +10,11 @@ Heavy stages (torch / onnxruntime / sam2) never fall back to ad-hoc uv: they nee
 """
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
+from typing import Any
 
 from cli.env import repo_root
 from errors import MissingDependency
@@ -54,9 +56,24 @@ def stage_argv(stage: str, args: list[str], *, heavy: bool) -> list[str]:
     )
 
 
+def _stage_env() -> dict[str, str]:
+    env = dict(os.environ)
+    env["PYTHONPATH"] = package_src() + os.pathsep + env.get("PYTHONPATH", "")
+    return env
+
+
 def run_stage(stage: str, args: list[str], *, heavy: bool = False) -> int:
     """Run `python -m threed_vision <stage> ...` with PYTHONPATH pointing at the package; returns its exit code."""
     argv = stage_argv(stage, args, heavy=heavy)
-    env = dict(os.environ)
-    env["PYTHONPATH"] = package_src() + os.pathsep + env.get("PYTHONPATH", "")
-    return subprocess.run(argv, env=env).returncode
+    return subprocess.run(argv, env=_stage_env()).returncode
+
+
+def stage_json(stage: str, args: list[str], *, timeout: float = 60) -> dict[str, Any] | None:
+    """Run a heavy-tier stage that prints one JSON object and parse it; None when the venv, the stage or the JSON is unavailable."""
+    try:
+        argv = stage_argv(stage, args, heavy=True)
+        r = subprocess.run(argv, env=_stage_env(), capture_output=True, text=True, timeout=timeout)
+        data = json.loads(r.stdout)
+    except (MissingDependency, OSError, subprocess.SubprocessError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None

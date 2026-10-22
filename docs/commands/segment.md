@@ -31,6 +31,8 @@ find one to four blobs on this kind of photo; SAM2 automatic masks alone miss th
 3d segment one-tool.jpg -o seg/ --method u2net           # one tool on a plain background
 3d segment tools.heic -o seg/ --device cpu --max-side 1024
 3d segment tools.jpg -o seg/ --queries "a hand tool,a box" --points-per-side 24
+3d segment tools.jpg -o seg/ --min-area 400 --max-area-frac 0.05    # drop specks, allow larger objects
+3d segment tools.jpg -o seg/ --reject-bg --device cuda              # explicit GPU: errors instead of falling back
 ```
 
 | flag | meaning |

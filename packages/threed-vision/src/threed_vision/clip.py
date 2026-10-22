@@ -14,7 +14,13 @@ from typing import Any
 import numpy as np
 
 from . import models
-from .device import Device, ort_missing_cuda_libs, resolve_device, setup_ort_cuda
+from .device import (
+    Device,
+    ort_missing_cuda_libs,
+    ort_providers,
+    resolve_device,
+    setup_ort_cuda,
+)
 from .errors import MissingDependency
 
 CLIP_MEAN = np.array([0.48145466, 0.4578275, 0.40821073], np.float32)
@@ -123,11 +129,7 @@ class OrtEncoder:
         )  # a missing model is reported before a missing package
         ort = self._ort()
         want_cuda = self.device == "cuda"
-        providers = (
-            ["CUDAExecutionProvider", "CPUExecutionProvider"]
-            if want_cuda
-            else ["CPUExecutionProvider"]
-        )
+        providers = ort_providers(self.device)
         last: Exception | None = None
         for level in (
             ort.GraphOptimizationLevel.ORT_ENABLE_ALL,
@@ -138,7 +140,7 @@ class OrtEncoder:
             so.graph_optimization_level = level
             try:
                 sess = ort.InferenceSession(str(path), so, providers=providers)
-            except Exception as exc:  # noqa: BLE001 - ORT raises a bare RuntimeError/Fail for unloadable graphs
+            except Exception as exc:  # ORT raises a bare RuntimeError/Fail for unloadable graphs
                 last = exc
                 continue
             active = list(sess.get_providers())

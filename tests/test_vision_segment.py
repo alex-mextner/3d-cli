@@ -257,7 +257,7 @@ class FakeSegmenter(Segmenter):
         self.seen_shapes: list[tuple[int, ...]] = []
 
     def load(self) -> None:
-        self.device = "cpu" if self.requested == "cpu" else "cuda"
+        self.device = "cpu" if self.requested == "cpu" or self._cpu_only else "cuda"
         self.loaded = True
 
     def _amg(self, rgb: Any, pps: int) -> list[dict[str, Any]]:
@@ -500,7 +500,7 @@ def test_importing_segment_does_not_import_heavy_dependencies() -> None:
 
 
 def test_write_result_artefacts_match_the_documented_schema(tmp_path: Path) -> None:
-    from threed_vision.commands import segment as seg_cmd
+    from threed_vision.outputs import write_result
 
     rgb = _rgb()
     insts = [
@@ -514,7 +514,7 @@ def test_write_result_artefacts_match_the_documented_schema(tmp_path: Path) -> N
         "timing_s": {"amg": 1.0, "total": 1.5},
         "vram_mb": 0,
     }
-    doc = seg_cmd.write_result(tmp_path, "photo.jpg", rgb, result)
+    doc = write_result(tmp_path, "photo.jpg", rgb, result)
     on_disk = json.loads((tmp_path / "instances.json").read_text())
     assert on_disk == json.loads(json.dumps(doc))
     assert on_disk["image"] == {"path": "photo.jpg", "w": W, "h": H}
@@ -577,24 +577,20 @@ def test_auto_device_needs_enough_free_vram(
 
 
 class BoxPromptSegmenter(Segmenter):
-    """Replaces only the SAM2 predictor call: the mask is the prompt box itself; zero-area boxes yield an empty mask."""
+    """Replaces only the SAM2 predictor: the mask is the prompt box itself; zero-area boxes yield no mask."""
 
     def load(self) -> None:
         self.device = "cpu"
         self.loaded = True
 
-    def _add_prompt(
-        self, rgb: Any, instances: Any, source: str, **prompt: Any
-    ) -> list[dict[str, Any]]:
-        x0, y0, x1, y1 = (int(v) for v in prompt["box"][0])
-        mask = np.zeros(rgb.shape[:2], bool)
-        mask[y0:y1, x0:x1] = True
-        if not mask.any():
-            raise BadInput("the prompt produced an empty mask")
-        return [
-            *instances,
-            segment.make_instance(mask, segment.next_id(instances), source, 0.0, 0.9),
-        ]
+    def _prompt_masks(self, rgb: Any, prompts: Any) -> list[tuple[Any, float] | None]:
+        out: list[tuple[Any, float] | None] = []
+        for p in prompts:
+            x0, y0, x1, y1 = (int(v) for v in p["box"][0])
+            mask = np.zeros(rgb.shape[:2], bool)
+            mask[y0:y1, x0:x1] = True
+            out.append((mask, 0.9) if mask.any() else None)
+        return out
 
 
 def test_masks_for_boxes_labels_each_instance_and_skips_empty_prompts() -> None:
@@ -721,3 +717,84 @@ def test_clip_load_without_tokenizers_is_a_missing_dependency_not_a_crash(
     with pytest.raises(MissingDependency, match="tokenizers"):
         enc.load()
     assert not enc.loaded and enc._sessions == {}
+
+
+# --- device handling: engines get the user's request, OOM fallback is per call ---------------------------------------
+
+
+def test_owned_engines_receive_the_request_not_the_resolved_device() -> None:
+    seg = Segmenter(device="auto")
+    seg.device = "cuda"  # what load() resolved
+    assert seg._get_clip().requested == "auto"
+    assert seg._get_detector().requested == "auto"
+    explicit = Segmenter(device="cuda")
+    assert explicit._get_clip().requested == "cuda"
+
+
+def test_oom_fallback_is_local_to_one_run_and_keeps_the_request() -> None:
+    seg = FakeSegmenter(
+        [_blob(10, 10, 20, 20)], [], device="auto", fill="none", reject_bg=False
+    )
+    seg.oom_once = True  # type: ignore[attr-defined]
+    res = seg.run(_rgb())
+    assert res["device"] == "cpu" and seg.requested == "auto"
+    assert not seg._cpu_only and not seg.loaded  # the next run re-evaluates auto
+    assert seg.run(_rgb())["device"] == "cuda"
+
+
+class OomOncePromptSegmenter(BoxPromptSegmenter):
+    def __init__(self, **kw: Any) -> None:
+        super().__init__(**kw)
+        self.devices: list[str] = []
+
+    def load(self) -> None:
+        self.device = "cpu" if self._cpu_only else "cuda"
+        self.loaded = True
+
+    def _prompt_masks(self, rgb: Any, prompts: Any) -> Any:
+        self.load()
+        self.devices.append(self.device)
+        if self.device == "cuda":
+            raise RuntimeError("CUDA out of memory. Tried to allocate 20.00 MiB")
+        return super()._prompt_masks(rgb, prompts)
+
+
+def test_box_prompts_fall_back_to_cpu_on_oom_for_auto_only() -> None:
+    boxes = [{"xyxy": [10, 10, 30, 30], "score": 0.7, "label": "pliers"}]
+    seg = OomOncePromptSegmenter(device="auto")
+    seg.load()
+    out = seg.masks_for_boxes(_rgb(), boxes)
+    assert len(out) == 1 and seg.devices == ["cuda", "cpu"] and seg.requested == "auto"
+    strict = OomOncePromptSegmenter(device="cuda")
+    strict.load()
+    with pytest.raises(RuntimeError, match="out of memory"):
+        strict.masks_for_boxes(_rgb(), boxes)
+
+
+def test_masks_for_boxes_rejects_u2net_instead_of_returning_nothing() -> None:
+    boxes = [{"xyxy": [10, 10, 30, 30], "score": 0.7, "label": "x"}]
+    with pytest.raises(BadInput, match="SAM2"):
+        Segmenter(method="u2net", device="cpu").masks_for_boxes(_rgb(), boxes)
+
+
+def test_write_result_clears_masks_of_a_previous_run(tmp_path: Path) -> None:
+    from threed_vision.outputs import write_result
+
+    base = {"method": "m", "device": "cpu", "timing_s": {"total": 0}, "vram_mb": 0}
+    two = [_inst(1, _blob(10, 10, 20, 20)), _inst(2, _blob(60, 30, 15, 25))]
+    write_result(tmp_path, "p.jpg", _rgb(), {**base, "instances": two})
+    write_result(tmp_path, "p.jpg", _rgb(), {**base, "instances": two[:1]})
+    assert sorted(p.name for p in (tmp_path / "masks").iterdir()) == ["001.png"]
+
+
+def test_min_area_zero_still_drops_empty_masks() -> None:
+    seg = FakeSegmenter(
+        [_blob(10, 10, 20, 20), np.zeros((H, W), bool)],
+        [],
+        device="cpu",
+        fill="none",
+        reject_bg=False,
+        min_area=0,
+        max_area_frac=0.5,
+    )
+    assert len(seg.run(_rgb())["instances"]) == 1

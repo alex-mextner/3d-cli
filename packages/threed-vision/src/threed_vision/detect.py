@@ -94,18 +94,27 @@ class OwlDetector:
         self.requested = device
         self.device = "cpu"
         self.loaded = False
+        self._cpu_only = (
+            False  # set only while one call is being redone on CPU after a GPU OOM
+        )
         self._model: Any = None
         self._proc: Any = None
 
     def load(self) -> None:
         if self.loaded:
             return
-        path = models.model_path("owlv2-base")  # missing weights are reported before missing python packages
+        path = models.model_path(
+            "owlv2-base"
+        )  # missing weights are reported before missing python packages
         require_torch()
         import torch
         from transformers import Owlv2ForObjectDetection, Owlv2Processor
 
-        self.device = resolve_device(self.requested, self.vram_estimate_mb)
+        self.device = (
+            "cpu"
+            if self._cpu_only
+            else resolve_device(self.requested, self.vram_estimate_mb)
+        )
         self._proc = Owlv2Processor.from_pretrained(str(path), local_files_only=True)
         dtype = torch.float16 if self.device == "cuda" else torch.float32
         model = Owlv2ForObjectDetection.from_pretrained(
@@ -113,7 +122,7 @@ class OwlDetector:
         ).eval()
         try:
             self._model = model.to(self.device)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             if not (self.device == "cuda" and is_oom(exc) and self.requested != "cuda"):
                 raise
             del model
@@ -157,13 +166,17 @@ class OwlDetector:
         self.load()
         try:
             out = self._forward(rgb, qs)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             if not (self.device == "cuda" and is_oom(exc) and self.requested != "cuda"):
                 raise
             self.unload()
-            self.requested = "cpu"
-            self.load()
-            out = self._forward(rgb, qs)
+            self._cpu_only = True
+            try:
+                self.load()
+                out = self._forward(rgb, qs)
+            finally:
+                self._cpu_only = False
+                self.unload()  # the next call re-evaluates `auto` instead of staying on CPU
         import torch
 
         h, w = rgb.shape[:2]

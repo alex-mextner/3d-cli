@@ -6,9 +6,10 @@ Skipped when any of them is absent (CI has none); run them with the vision venv:
 
 from __future__ import annotations
 
+import os
 import sys
-from typing import Any
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -26,8 +27,12 @@ from threed_vision import clip, device, io, models  # noqa: E402
 from threed_vision.detect import OwlDetector  # noqa: E402
 from threed_vision.segment import Segmenter, segment_single_object  # noqa: E402
 
+# private photo, never vendored: point THREED_VISION_TEST_PHOTO at it (tests skip when it is absent)
 CARPET = Path(
-    "/home/ultra/dev/garage-band/projects/HSW/docs/photos/tools-on-carpet-2026-10-21.heic"
+    os.environ.get(
+        "THREED_VISION_TEST_PHOTO",
+        "/home/ultra/dev/garage-band/projects/HSW/docs/photos/tools-on-carpet-2026-10-21.heic",
+    )
 )
 GPU = torch.cuda.is_available()
 
