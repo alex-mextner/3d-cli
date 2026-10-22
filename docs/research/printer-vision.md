@@ -125,6 +125,12 @@ passes 1 % of the healthy frames of that task.
 | SigLIP2 base-224 (Apache-2.0, 375 M) | 0.837 / 0.46 | 0/6 | 0.95 | 0.53 | 0.87 | 0.844 | 4.7 / 1137 MiB |
 | DINOv2-small (Apache-2.0, 22 M), embedding + logistic head only | no zero-shot | | | head CV 0.68 | | 0.809 | 4.8 / 273 MiB |
 
+Hugging Face revisions evaluated (first 10 hex of the commit): openai/clip-vit-base-patch32
+`3d74acf9a2`, openai/clip-vit-base-patch16 `57c216476e`, laion/CLIP-ViT-B-32-laion2B-s34B-b79K
+`1a25a44671`, google/siglip-base-patch16-224 `7fd15f0689`, google/siglip2-base-patch16-224 `75de2d55ec`,
+facebook/dinov2-small `ed25f3a31f`. Licences are the ones the model cards state (MIT for the CLIP
+family, Apache-2.0 for SigLIP/DINOv2).
+
 Not evaluated, with the reason: YOLO11/Ultralytics (AGPL) and PrintGuard (GPL-2.0) stay out of the
 shipped path; MobileCLIP (Apple's `apple-amlr` licence) is not permissive; OWLv2 (Apache-2.0, 155 M,
 960 px) and RT-DETR/D-FINE would need box labels, of which we have 226 images (all spaghetti).
