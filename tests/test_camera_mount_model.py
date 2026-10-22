@@ -19,8 +19,23 @@ trimesh = pytest.importorskip("trimesh")
 MODEL = Path(__file__).resolve().parents[1] / "models" / "camera_mount"
 SCAD = MODEL / "camera_mount.scad"
 PARTS = [
-    "hub", "beam_a", "beam_b", "foot", "shoe_k1", "shoe_u1", "post", "arm", "cam_plate",
-    "wedge", "hanger", "pin_long", "pin_short", "pi_tray", "cable_clip", "led_ring", "dowel",
+    "hub",
+    "beam_a",
+    "beam_b",
+    "foot",
+    "shoe_k1",
+    "shoe_u1",
+    "post",
+    "arm",
+    "cam_plate",
+    "wedge",
+    "hanger",
+    "pin_long",
+    "pin_short",
+    "pi_tray",
+    "cable_clip",
+    "led_ring",
+    "dowel",
 ]
 PLATES = ["plate_hub", "plate_beam", "plate_small", "plate_extras", "plate_led"]
 # assembly-frame pairs that fits.yaml (`3d fit-check --spec`) reads
@@ -54,6 +69,13 @@ def test_part_exports_to_one_closed_body_on_the_k1se_bed(
     part: str, tmp_path: Path
 ) -> None:
     mesh = trimesh.load(_export(part, tmp_path / f"{part}.stl"))
+    # OpenSCAD 2021 (CI) prints ASCII STL with ~6 significant digits, so a part rotated by
+    # cam_yaw = -45 degrees can carry sub-micron sliver triangles whose corners straddle a
+    # rounding boundary on one CPU's libm and not another's; weld at 1 um and drop the
+    # zero-area faces before asking whether the body is closed.
+    mesh.merge_vertices(digits_vertex=3)
+    mesh.update_faces(mesh.nondegenerate_faces())
+    mesh.remove_unreferenced_vertices()
     assert mesh.is_watertight
     assert len(mesh.split(only_watertight=False)) == 1
     lo, hi = mesh.bounds
