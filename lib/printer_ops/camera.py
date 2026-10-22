@@ -254,5 +254,11 @@ def open_camera(
         device.host,
         device.port,
         snapshot=url,
-        keepalive=spec.keepalive if keepalive is None else keepalive,
+        # a --snapshot override is a different file: the configured camera's keepalive (the
+        # Snapmaker monitor wake-up) applies only when that file is the monitor itself
+        keepalive=(
+            spec.keepalive if snapshot is None else snapshot == MONITOR_PATH
+        )
+        if keepalive is None
+        else keepalive,
     )

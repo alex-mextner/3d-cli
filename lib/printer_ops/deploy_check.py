@@ -45,7 +45,9 @@ class UnitVerdict:
 
     @property
     def ok(self) -> bool:
-        return not (self.running and self.dry_run)
+        """False for a delivering-nothing unit AND for one we could not inspect: a check that
+        cannot see must not pass (no user D-Bus over ssh/cron looks like a healthy host)."""
+        return self.state != "unknown" and not (self.running and self.dry_run)
 
 
 @dataclass
@@ -157,9 +159,13 @@ def render(verdicts: list[PrinterVerdict]) -> str:
             continue
         for u in v.units:
             mark = "FAIL" if not u.ok else ("ok  " if u.running else "idle")
-            extra = f" runs with --dry-run (in {u.source}): events are printed, never delivered" if not u.ok else ""
+            extra = ""
+            if u.state == "unknown":
+                extra = " cannot be inspected (no `systemctl --user` here): run this on the host of the services"
+            elif not u.ok:
+                extra = f" runs with --dry-run (in {u.source}): events are printed, never delivered"
             lines.append(f"{mark} {u.unit}: {u.state}{extra}{' — ' + u.note if u.note else ''}")
-            if not u.ok:
+            if not u.ok and u.state != "unknown":
                 lines += [f"       $ {c}" for c in fix_commands(v.printer, u)]
         lines += [f"warn {w}" for w in v.warnings]
     return "\n".join(lines)
@@ -210,7 +216,7 @@ def run(argv: list[str], show: Show = systemctl_show) -> int:
     bad = [(v, u) for v in verdicts for u in v.failures]
     if bad:
         raise GateFailure(
-            f"{len(bad)} service(s) run with --dry-run on a printer with a camera: "
+            f"{len(bad)} service(s) run with --dry-run or could not be inspected on a printer with a camera: "
             + ", ".join(u.unit for _, u in bad),
             command="printer vision doctor", silent=True)
     return 0

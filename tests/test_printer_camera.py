@@ -259,3 +259,18 @@ def test_bed_state_uses_the_same_camera_and_refuses_a_printer_without_one() -> N
     )
     with pytest.raises(UsageError, match="no camera"):
         bed_state.camera_for(device({}, model="Creality K1 SE"))
+
+
+def test_a_snapshot_override_takes_the_keepalive_of_the_file_it_names() -> None:
+    """`--snapshot` swaps the file: the configured camera's keepalive (the Snapmaker monitor
+    wake-up) must follow the URL, not stay with the printer (reviewer finding, PR #482)."""
+    u1 = device({"vision": {"camera": {"kind": camera.MONITOR}}}, model=None)
+    spec = camera.camera_spec(u1)
+    assert spec.keepalive is True
+    assert camera.open_camera(u1, spec).keepalive_enabled is True
+    assert camera.open_camera(u1, spec, snapshot="http://cam/x.jpg").keepalive_enabled is False
+    k1 = device({"vision": {"camera": {"kind": camera.MJPG}}})
+    other = camera.camera_spec(k1)
+    assert camera.open_camera(k1, other).keepalive_enabled is False
+    assert camera.open_camera(k1, other, snapshot=camera.MONITOR_PATH).keepalive_enabled is True
+    assert camera.open_camera(k1, other, snapshot="/x.jpg", keepalive=True).keepalive_enabled is True

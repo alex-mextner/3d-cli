@@ -67,9 +67,12 @@ def test_a_printer_without_a_camera_is_not_checked() -> None:
     assert v.units == [] and not v.failures
 
 
-def test_without_systemctl_the_answer_is_unknown_not_ok() -> None:
+def test_without_systemctl_the_answer_is_unknown_and_fails() -> None:
+    """No user D-Bus over ssh/cron must not look like a healthy host (reviewer finding, PR #482)."""
     unit = dc.check_unit("3d-printer-vision@u1.service", lambda _u: "")
     assert unit.state == "unknown" and not unit.running
+    assert not unit.ok
+    assert "cannot be inspected" in dc.render([dc.check_printer("u1", True, lambda _u: "")])
 
 
 @pytest.fixture()

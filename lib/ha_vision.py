@@ -241,7 +241,7 @@ def _vision_rest(p: VisionPrinter, s: Settings) -> str:
         unique_id: printer_{slug}_vision_verdict
         icon: mdi:eye-check-outline
         state_class: measurement
-        value_template: "{{{{ value_json.q if value_json.q is not none else value_json.p }}}}"
+        value_template: "{{% set v = value_json.q if value_json.q is not none else value_json.p %}}{{{{ 'unknown' if v is none else v }}}}"
         json_attributes: [state, file, p, q, trend, luma, findings, frames, age_s, camera_error]
       - name: "Printer {t} Vision Events"
         unique_id: printer_{slug}_vision_events
@@ -535,8 +535,14 @@ def find_region(text: str, region: str) -> tuple[int, int] | None:
     """(start, end) character offsets of the region INCLUDING both marker lines, or None."""
     begin, end = markers(region)
     i = text.find(begin)
-    j = text.find(end)
-    if i == -1 or j == -1 or j < i:
+    if i == -1:
+        return None
+    # The end marker of `dashboard:k1` is a prefix of the one of `dashboard:k1se`: look only after
+    # the begin marker and accept the match only at the end of its line.
+    j = text.find(end, i)
+    while j != -1 and text[j + len(end) : j + len(end) + 1] not in ("", "\n", "\r"):
+        j = text.find(end, j + 1)
+    if j == -1:
         return None
     return i, j + len(end)
 

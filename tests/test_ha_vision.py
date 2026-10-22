@@ -528,3 +528,32 @@ def test_a_broken_generate_block_is_refused(tmp_path: Path, block: str) -> None:
 
     with pytest.raises(Exception, match="generate"):
         ha_vision.load_settings(root)
+
+
+def test_a_region_whose_name_is_a_prefix_of_another_is_found_and_replaced_alone() -> None:
+    """`dashboard:k1`'s end marker is a prefix of `dashboard:k1se`'s: the longer region comes
+    first in the file and must neither hide nor swallow the shorter one."""
+    where = Path("dash.yaml")
+    b1, e1 = ha_vision.markers("dashboard:k1")
+    b2, e2 = ha_vision.markers("dashboard:k1se")
+    text = f"head\n{b2}\nk1se body\n{e2}\nmid\n{b1}\nold k1\n{e1}\ntail\n"
+    found = ha_vision.find_region(text, "dashboard:k1")
+    assert found is not None
+    assert text[found[0] : found[1]].endswith(e1)
+    out = ha_vision.replace_region(text, "dashboard:k1", "new k1", where)
+    assert "new k1" in out and "old k1" not in out
+    assert "k1se body" in out and out.count(e2) == 1
+
+
+def test_the_verdict_sensor_is_unknown_not_the_string_none_while_no_frame_is_scored(
+    repo_fleet: Any,
+) -> None:
+    """The vision loop writes p = q = null while paused or on a camera error; a numeric
+    `state_class: measurement` sensor must then be `unknown`, not the string "None"."""
+    package = (
+        Path(__file__).resolve().parents[1]
+        / "integrations/homeassistant/packages/printer_vision.yaml"
+    ).read_text(encoding="utf-8")
+    templates = [ln for ln in package.splitlines() if "value_json.q" in ln]
+    assert templates
+    assert all("'unknown' if v is none else v" in ln for ln in templates)

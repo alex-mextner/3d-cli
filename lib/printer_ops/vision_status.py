@@ -16,6 +16,7 @@ INVARIANTS: stdlib only; writes are atomic (temp file + rename) so a reader neve
 from __future__ import annotations
 
 import json
+import math
 import os
 import sys
 import time
@@ -120,8 +121,4 @@ def _num(value: Any) -> float | None:
     """A finite number rounded for the file, else None (JSON has no NaN)."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    return (
-        round(float(value), 4)
-        if value == value and abs(value) != float("inf")
-        else None
-    )
+    return round(float(value), 4) if math.isfinite(value) else None
