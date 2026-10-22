@@ -315,3 +315,11 @@ def test_the_guard_reads_its_camera_from_the_device_not_from_a_u1_default(
         devices["k1se"], argparse.Namespace(snapshot=None, no_keepalive=False)
     )
     assert cam.url == spec.snapshot and not cam.keepalive_enabled
+
+
+def test_the_live_loop_takes_the_npu_tap_and_the_limits_from_the_printer() -> None:
+    import inspect
+
+    source = inspect.getsource(vision_detect.run_live)
+
+    assert "npu_enabled(device)" in source and "monitor_limits(cfg" in source

@@ -550,7 +550,10 @@ def run_live(args: argparse.Namespace) -> int:
     device = get_device(args.printer)
     camera = _device_camera(device, args)
     adapter = make_adapter(device)
-    tap = None if args.no_npu else KlippyLogTap(device.host, device.port)
+    from printer_ops.vision_config import monitor_limits, npu_enabled
+
+    # the printer's own detector only where it has one (watch.vision.npu; default: a Snapmaker monitor camera)
+    tap = KlippyLogTap(device.host, device.port) if npu_enabled(device) and not args.no_npu else None
     cfg = (getattr(device, "watch", None) or {}).get("vision") or {}
     cam = _calibration(device, args)
     scorer = build_scorer(
@@ -566,7 +569,8 @@ def run_live(args: argparse.Namespace) -> int:
         Path(args.evidence) if args.evidence else cache_dir() / "vision" / "evidence"
     )
     monitor = VisionMonitor(
-        device.name, scorer, annotate=annotate, evidence_dir=evidence
+        device.name, scorer, annotate=annotate, evidence_dir=evidence,
+        limits=monitor_limits(cfg if isinstance(cfg, dict) else {}),
     )
     status = None if args.once else VisionStatus(device.name)  # the file 3d-api serves to Home Assistant
     dispatcher = None

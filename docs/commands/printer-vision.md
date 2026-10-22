@@ -25,7 +25,7 @@ from the device's `watch:` block in `printer-devices.yaml`).
   frame (with detection boxes when there are any).
 - `--snapshot` — camera URL or Moonraker path, overriding the printer's `watch.vision.camera`.
 - `--no-keepalive` — do not send `camera.start_monitor` (only `moonraker-monitor` cameras need it; see U1 camera below).
-- `--no-npu` — do not read the printer's own detector verdicts from klippy.log.
+- `--no-npu` — do not read the printer's own detector verdicts from klippy.log (read only where the printer has one: `watch.vision.npu`, default on for a `moonraker-monitor` camera).
 - `--evidence` — where event frames are saved (default `~/.cache/3d-cli/vision/evidence/`).
 - `--no-verify` — skip stage 2 (the CLIP verifier); the trend then runs on the raw Obico score,
   which on the U1 fires on speckled walls. For debugging only.
@@ -249,6 +249,8 @@ u1:
     vision:
       camera: {kind: moonraker-monitor}            # the U1; K1 SE: {kind: mjpg-streamer, port: 8080}; see printer.md "Cameras"
       keepalive: true                              # default: on for kind moonraker-monitor only
+      npu: true                                    # read the printer's own detector; default: on for moonraker-monitor only
+      limits: {stale_s: 120, dark_luma: 20, npu_threshold: 0.83, npu_quiet_s: 300}   # defaults measured on the U1
       verify: true                                 # stage 2 (CLIP verifier); default on
       geometry: true                               # bed-volume mask from the camera calibration
       scene: false                                 # bed-change detectors; default off (noisy)

@@ -157,6 +157,9 @@ def vision_problems(vision: Any, where: str = "watch.vision") -> list[str]:
         bad.append(f"{where}.snapshot: must be a non-empty URL or path")
     if "keepalive" in vision and not isinstance(vision["keepalive"], bool):
         bad.append(f"{where}.keepalive: true or false")
+    from printer_ops.vision_config import limits_problems
+
+    bad.extend(limits_problems(vision, where))
     return bad
 
 

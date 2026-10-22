@@ -272,6 +272,10 @@ neither gets its MODEL's default from `lib/data/vision/cameras.yaml` (`Snapmaker
 `moonraker-monitor`), so a `printer-devices.yaml` override that drops the `watch:` block keeps its
 camera; any other printer has no camera until one is set. Offline printers (Bambu P1S, A1 mini, the
 hackspace machines) carry no `watch:` and are never contacted, so they have none by construction.
+Two more `watch.vision` settings are per printer too: `npu: true|false` (read the printer's own
+camera detector from klippy.log; default on only for a `moonraker-monitor` camera, so the K1 SE does
+not poll for verdicts it can never have) and `limits: {stale_s, dark_luma, npu_threshold,
+npu_quiet_s}` (the frozen/dark/NPU thresholds, measured on the U1, replaced per printer).
 The camera calibration that turns a frame into bed coordinates (`3d printer vision` ROI, the bed
 check, the ghost overlay) is separate: the bundled one of the model (`lib/data/vision/`), else
 `~/.config/3d-cli/vision/NAME-camera.yaml`; without it the bed check falls back to
