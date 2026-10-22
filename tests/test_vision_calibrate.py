@@ -452,3 +452,45 @@ def test_user_supplied_f_ratio_is_labelled_given() -> None:
         (0, 0), (500, 0), 100.0, image_size=(1000, 800), f_ratio=0.5
     )
     assert given["f_source"] == "given" and "f_ratio_given" in given["quality"]
+
+
+def _jittered_dot_texture(size: tuple[int, int], pitch: float = 11.0, seed: int = 2) -> np.ndarray:
+    """A woven-mesh stand-in: regular dot rows with jitter and every other row shifted. Quasi-periodic, never a honeycomb."""
+    import cv2
+
+    w, h = size
+    rng = np.random.default_rng(seed)
+    img = np.full((h, w), 190, np.uint8)
+    for r, y in enumerate(np.arange(8, h - 8, pitch * 0.9)):
+        for x in np.arange(8 + (r % 2) * pitch * 0.5, w - 8, pitch):
+            jx, jy = rng.normal(0, 0.18 * pitch, 2)
+            cv2.circle(img, (int(x + jx), int(y + jy)), 3, 60, -1)
+    return np.repeat(img[:, :, None], 3, axis=2)
+
+
+def test_time_budget_zero_ends_a_real_panel_search_with_reason_time_budget() -> None:
+    pts, size = _recorded()
+    res = C.solve_grid_pose(pts, image_size=size, deadline=0.0)  # a deadline in the past
+    assert res["ok"] is False and res["reason"] == "time_budget"
+    cam = fx.camera(900.0, SIZE, 25.0, 12.0, 4.0, 900.0, CENTRE)
+    out = C.detect_grid(fx.render(cam, SIZE), time_budget_s=0.0)
+    assert out["ok"] is False and out["reason"] == "time_budget" and out["quality"] == ["time_budget"]
+    assert out["n_cells"] > 0  # partial diagnostics survive
+    json.dumps(io.to_jsonable(out), allow_nan=False)
+
+
+def test_a_lattice_found_before_the_budget_is_still_returned() -> None:
+    cam = fx.camera(900.0, SIZE, 25.0, 12.0, 4.0, 900.0, CENTRE)
+    res = C.detect_grid(fx.render(cam, SIZE), time_budget_s=30.0)
+    assert res["ok"] and res["reason"] is None
+
+
+def test_periodic_texture_without_a_honeycomb_returns_quickly_with_a_small_budget() -> None:
+    import time
+
+    img = _jittered_dot_texture((2000, 1500))
+    t = time.perf_counter()
+    res = C.detect_grid(img, time_budget_s=1.5)
+    elapsed = time.perf_counter() - t
+    assert res["ok"] is False and res["reason"]
+    assert elapsed < 6.0, elapsed  # budget + one detector pass of slack; the search never runs on for minutes

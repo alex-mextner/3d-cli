@@ -60,6 +60,13 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         help="known focal length / image diagonal (e.g. 0.375)",
     )
     parser.add_argument(
+        "--time-budget",
+        type=float,
+        default=8.0,
+        metavar="SECONDS",
+        help="wall-clock budget; a photo without a grid fails with reason time_budget instead of searching on (default 8)",
+    )
+    parser.add_argument(
         "--json",
         action="store_true",
         help="print exactly one JSON object (the calibration) to stdout",
@@ -89,7 +96,11 @@ def _overlay(rgb: np.ndarray, res: dict[str, Any]) -> np.ndarray:
 def run(args: argparse.Namespace) -> int:
     rgb = io.load_rgb(args.image)
     res = detect_grid(
-        rgb, grid_pitch_mm=args.grid_pitch, f_px=args.f_px, f_ratio=args.f_ratio
+        rgb,
+        grid_pitch_mm=args.grid_pitch,
+        f_px=args.f_px,
+        f_ratio=args.f_ratio,
+        time_budget_s=args.time_budget,
     )
     doc = io.to_jsonable(
         {

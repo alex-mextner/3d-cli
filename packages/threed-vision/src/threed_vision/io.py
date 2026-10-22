@@ -106,6 +106,18 @@ def mask_polygon(mask: np.ndarray, epsilon_px: float = 1.5) -> list[list[float]]
     return [[float(x), float(y)] for x, y in c.reshape(-1, 2)]
 
 
+def to_gray(rgb: np.ndarray, dtype: type = np.uint8) -> np.ndarray:
+    """HxW or HxWx3 (RGB) image -> HxW grey array of `dtype` (uint8 for SIFT, float32 for band-pass filters)."""
+    import cv2
+
+    a = np.asarray(rgb)
+    if a.ndim == 3:
+        a = cv2.cvtColor(a[:, :, :3].astype(np.uint8), cv2.COLOR_RGB2GRAY)
+    elif a.ndim != 2:
+        raise BadInput("image must be HxW or HxWx3")
+    return a.astype(dtype)
+
+
 def mask_iou(a: np.ndarray, b: np.ndarray) -> float:
     a, b = np.asarray(a, bool), np.asarray(b, bool)
     return float((a & b).sum() / max(int((a | b).sum()), 1))

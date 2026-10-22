@@ -21,22 +21,12 @@ import numpy as np
 
 from .calibrate import default_intrinsics
 from .errors import BadInput
+from .io import to_gray
 
 Array = np.ndarray
 MIN_INLIERS = 15
 BASELINE_MIN_ROT_DEG = 3.0
 BASELINE_MIN_TRANSLATION_RATIO = 0.05
-
-
-def _gray(rgb: Array) -> Array:
-    import cv2
-
-    a = np.asarray(rgb)
-    if a.ndim == 3:
-        return cv2.cvtColor(a[:, :, :3].astype(np.uint8), cv2.COLOR_RGB2GRAY)
-    if a.ndim == 2:
-        return a.astype(np.uint8)
-    raise BadInput("image must be HxW or HxWx3")
 
 
 def _rot_angle_deg(R: Array) -> float:
@@ -161,7 +151,7 @@ def register(
     import cv2
 
     t_all = time.perf_counter()
-    ga, gb = _gray(a_rgb), _gray(b_rgb)
+    ga, gb = to_gray(a_rgb), to_gray(b_rgb)
     (ha, wa), (hb, wb) = ga.shape, gb.shape
     if min(ha, wa, hb, wb) < 16:
         raise BadInput("images are too small to register")
