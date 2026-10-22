@@ -209,6 +209,60 @@ event with two raw frames of the lifted panel (`u1_monitor.jpg`, `u1-spag.jpg`) 
 detachment head; the data set needs more such frames per printer, and the head must be judged on
 held-out prints, not on the frames it was fitted on.
 
+## Labelled frames, server training and publishing (`tools/vision_train`)
+
+Fine-tuning does not run on the workstation. `tools/vision_train/` (dev tools, outside `lib/`, not
+part of the `3d` runtime) builds the labelled set, trains on the user's own GPU server and
+publishes; large files never enter git.
+
+| step | command | what it does |
+|---|---|---|
+| build | `dataset.py build OUT [--third-party]` | own frames from `sources.json` (provenance, labels, splits, per-source crop) → sanitised JPEGs named by sha256, `labels.jsonl`, `sanitation.json`; `--third-party` adds the public collection for server training only |
+| check / review | `dataset.py check OUT`, `dataset.py sheets OUT` | repeats every sanitation check on the published part; contact sheets for the human review |
+| look at the server | `remote.py preflight` | read-only `nvidia-smi`, `free -m`, `df -h`, `uptime`, python/uv/docker/rsync presence; starts nothing, writes nothing |
+| train | `remote.py plan RUN --dataset OUT` then `remote.py run RUN --dataset OUT --yes [--mode finetune] [--max-hours H] -- TRAIN_ARGS` | rsync `lib/`, `tools/`, the data to `~/3d-cli-train/RUN/`, one ssh session under `timeout --kill-after`, a trap that kills the children, then pulls only small artifacts (`--max-size=20m`, no `*.pt`/`*.onnx`/`*.safetensors`), also after a failed run |
+| artifacts | `remote.py pull RUN [--weights]`, `remote.py clean RUN --yes [--all]` | weights come to `~/.cache/3d-cli/train/runs/RUN/` only with `--weights`; `clean` frees the venv and copies but keeps `out/` (the server-side copy) unless `--all` |
+| publish | `publish.py whoami`, `publish.py dataset OUT [--publish]`, `publish.py model RUN_DIR --dataset-revision SHA [--weights FILE] [--publish]` | dry run by default; reads every uploaded file back at the commit and compares sha256 |
+
+Host and paths: `THREED_TRAIN_HOST` (default `65.21.40.51`), `THREED_TRAIN_USER`,
+`THREED_TRAIN_DIR` (default `~/3d-cli-train`); user, key and port come from `~/.ssh/config`. No
+secret is sent to the server: the Hugging Face token stays on the workstation and weights are pushed
+from there after `pull --weights`. `train.py` modes: `head` (embeds every frame once with the base CLIP
+B/16, fits one logistic head per class on the train split, reports on the test split next to the
+zero-shot prompts, refits on everything), `finetune` (unfreezes the last N vision blocks, classifier
+initialised from the prompts so training starts at the zero-shot answer, `--export-onnx` writes a tower
+the runtime loads), `eval`. Its metrics are `vision_detect._table` and `vision_fit.auroc`, the same
+code `3d printer vision eval --model` runs (imported, not copied), per provenance (own vs third-party).
+
+**What is in the set today (2026-10-22, `DATASET_SHA256` 306bd93d…).** 436 published own frames
+(Snapmaker U1 and one K1 frame): 421 healthy (358 train / 63 test, six prints), 7 spaghetti, 7
+empty bed, 1 `part_detached`; plus 36 own frames kept private (the face/person detector fired, almost
+certainly false hits on printer parts, but a refusal is a refusal), of which one is the second
+frame of the panel event. Each published frame was cropped to the bed area, re-encoded (no EXIF/ICC),
+checked for QR codes (none found inside the crop; the chamber back wall with its stickers is outside
+it) and for faces/people on the published bytes; all 15 contact sheets were looked at by hand and show
+only the inside of the printers. Third-party frames (the public collection, licences differ) are
+never published. Honest size: 2 frames of one panel event cannot train or validate a detachment
+detector, so `finetune` on this set is not warranted; the pipeline exists to be re-run when more
+frames are recorded (`vision record`) and labelled.
+
+Local smoke runs (RTX 4060, the desktop holding ~3.7 GB, `--smoke`: 28 frames): `head` 8.8 s on the
+GPU and the same AUROCs on the CPU path; `finetune --batch 8` 3 steps in 6.0 s with a peak of +1.23 GiB
+VRAM (cap 3 GiB); the exported ONNX tower (345 MB, fp32) loads in `vision_model.ModelScorer`. These
+check the pipeline, not a result.
+
+**Where the artifacts live.** (1) Public Hugging Face repos, linked both ways with the GitHub repo:
+dataset `alex-mextner/3d-cli-print-failure-frames` (CC-BY-4.0, own frames only) and model
+`alex-mextner/3d-cli-print-failure-tier-b` (MIT, the base licence), every card naming the 3d-cli commit,
+the base model revision and the dataset revision. (2) The server copy under `~/3d-cli-train/RUN/out/`.
+(3) Git holds only small text: this documentation, `sources.json`, the cards' generator, metrics.
+The PrintOps backup (`lib/printops/backup.py`) snapshots the Odroid's SQLite databases from inside
+a container and cannot take workstation-side model files; it was not changed. When a head is first
+published its Hugging Face revision and sha256 must be pinned in `lib/vision_model.py` (like
+`TIER_B`); nothing is trained yet, so there is no pin. **Publishing is paused:** the Hugging Face
+token on this workstation belongs to the account `Alex-Ultra` (write scope present), not to
+`alex-mextner`, so `publish.py dataset` was only dry-run (440 files, 28.4 MB, sanitation clean).
+
 ## Not done (follow-ups)
 
 - Layer shift / detachment by comparing the part silhouette with the G-code footprint
