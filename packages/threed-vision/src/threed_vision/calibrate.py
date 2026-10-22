@@ -30,6 +30,7 @@ from typing import Any
 import numpy as np
 
 from .errors import BadInput
+from .io import to_gray
 
 DEFAULT_GRID_PITCH_MM: tuple[float, float] = (20.4382, 23.6)
 DEFAULT_F_RATIO = (
@@ -305,17 +306,6 @@ def scale_from_grid(
 # --------------------------------------------------------------------------------------------------------------------
 # (a)+(b) cell-centre detection
 # --------------------------------------------------------------------------------------------------------------------
-def _gray(rgb: Array) -> Array:
-    import cv2
-
-    a = np.asarray(rgb)
-    if a.ndim == 3:
-        a = cv2.cvtColor(a[:, :, :3].astype(np.uint8), cv2.COLOR_RGB2GRAY)
-    elif a.ndim != 2:
-        raise BadInput("image must be HxW or HxWx3")
-    return a.astype(np.float32)
-
-
 def _periodic_filter(pts: Array, strength: Array) -> tuple[Array, Array]:
     """Keep only points that sit in a regular hexagonal neighbourhood (6 near-equal nearest-neighbour distances) at the
     dominant spacing: this is the 'high-frequency periodic texture' ROI in point form."""
@@ -353,7 +343,7 @@ def find_cell_centres(
     if polarity not in ("dark", "bright"):
         raise BadInput("polarity must be 'dark' or 'bright'")
     t0 = time.perf_counter()
-    g = _gray(rgb)
+    g = to_gray(rgb, np.float32)
     H0, W0 = g.shape
     base = 3.0
     shrink = max(1.0, sigma / base) if sigma > 4.0 else 1.0
@@ -514,6 +504,10 @@ def _assign(
     return {k: key for key, k in best.items()}, res
 
 
+class _BudgetExceeded(Exception):
+    """The wall-clock budget ran out before any lattice hypothesis was found (internal)."""
+
+
 def _grow(
     points: Array,
     p0: int,
@@ -521,6 +515,7 @@ def _grow(
     v: Array,
     pitch: tuple[float, float],
     spacing: float,
+    deadline: float | None = None,
 ) -> tuple[Array, dict[int, tuple[int, int]], Array] | None:
     """Seeded region growing: affine patch around point `p0` with neighbour vectors u (-> axial i) and v (-> axial j),
     then iterate homography fit + bounded extrapolation until the labelling is stable."""
@@ -534,6 +529,8 @@ def _grow(
     lab = {int(k): (int(ij[k, 0]), int(ij[k, 1])) for k in sel}
     H: Array | None = None
     for _ in range(40):
+        if deadline is not None and time.perf_counter() >= deadline:
+            return None
         if len(lab) < 4:
             return None
         ks = np.array(sorted(lab))
@@ -556,6 +553,7 @@ def _assign_lattice(
     pitch: tuple[float, float],
     seed: int = 0,
     max_seeds: int = 40,
+    deadline: float | None = None,
 ) -> tuple[dict[int, tuple[int, int]], Array] | None:
     """Find the dominant hexagonal lattice in `points`; returns {point index: axial (i, j)} (orientation-labelled so the
     wall frame is right-handed in the photo; the roll is fixed later) and the homography fitted to it."""
@@ -573,6 +571,10 @@ def _assign_lattice(
     seeds = list(rng.permutation(pool)[:max_seeds])
     best: tuple[int, float, Array, dict[int, tuple[int, int]]] | None = None
     for p0 in seeds:
+        if deadline is not None and time.perf_counter() >= deadline:
+            if best is None:
+                raise _BudgetExceeded
+            break
         vec = points[nn[p0, 1:]] - points[p0]
         if len(vec) < 3:
             continue
@@ -588,7 +590,7 @@ def _assign_lattice(
         if cand.size == 0:
             continue
         v = vec[int(cand[np.argmin(np.abs(cosang[cand] - 0.5))])]
-        grown = _grow(points, int(p0), u, v, pitch, spacing)
+        grown = _grow(points, int(p0), u, v, pitch, spacing, deadline)
         if grown is None:
             continue
         H, lab, res = grown
@@ -598,6 +600,8 @@ def _assign_lattice(
             best = (score[0], score[1], H, lab)
         if good >= 0.7 * n and good >= STRONG_INLIERS:
             break
+    if best is None and deadline is not None and time.perf_counter() >= deadline:
+        raise _BudgetExceeded
     if best is None or best[0] < MIN_INLIERS:
         return None
     return best[3], best[2]
@@ -780,6 +784,7 @@ def solve_grid_pose(
     f_px: float | None = None,
     f_ratio: float | None = None,
     seed: int = 0,
+    deadline: float | None = None,
 ) -> dict[str, Any]:
     """Cell centres (Nx2 px, any outliers allowed) -> lattice labelling + camera pose. Never raises on 'no grid': returns
     `ok=False` with a `reason` ("too_few_cells", "no_lattice", "degenerate_lattice", "implausible_pose").
@@ -812,7 +817,11 @@ def solve_grid_pose(
             len(seed_pts), MAX_SEED_POINTS, replace=False
         )
         seed_pts = seed_pts[np.sort(keep)]
-    got = _assign_lattice(seed_pts, pitch, seed=seed)
+    try:
+        got = _assign_lattice(seed_pts, pitch, seed=seed, deadline=deadline)
+    except _BudgetExceeded:
+        timing["lattice_s"] = time.perf_counter() - t0
+        return _fail("time_budget", len(pts), (w, h), pitch, timing)
     timing["lattice_s"] = time.perf_counter() - t0
     if got is None:
         return _fail("no_lattice", len(pts), (w, h), pitch, timing)
@@ -1022,6 +1031,7 @@ def detect_grid(
     f_px: float | None = None,
     f_ratio: float | None = None,
     sigmas: tuple[float, ...] = _SIGMAS,
+    time_budget_s: float = 8.0,
 ) -> dict[str, Any]:
     """Honeycomb grid camera calibration from one photo of the wall panel. See the module docstring for the frame.
 
@@ -1031,7 +1041,12 @@ def detect_grid(
     `[col, row]` labels), `f_source` ("estimated" | "given" | "default"), `quality` (flag list), `image_size`,
     `grid_pitch_mm`, `mm_per_px_centre`, `plane_depth_mm`, `tilt_deg`, `roll_deg`, `roi_xywh`, `polarity`, `sigma`,
     `timing_s`. Never raises on 'no grid' and never returns NaN: `ok=False` + `reason`, numeric fields None.
-    `sigmas` are the blob scales tried in order (cell pitch in px / 5); the first strong lattice wins."""
+    `sigmas` are the blob scales tried in order (cell pitch in px / 5); the first strong lattice wins.
+
+    `time_budget_s` (default 8) is a wall-clock budget enforced between blob scales and inside the lattice-growth loops, so
+    a photo without a grid (carpet, mesh, grille: quasi-periodic texture) returns in seconds, not minutes: `ok=False`,
+    `reason="time_budget"` and `quality=["time_budget"]` when the budget ran out before any lattice was found; the best
+    partial diagnostics (`n_cells`, `timing_s`) stay in the result. A lattice found before the budget is still returned."""
     t0 = time.perf_counter()
     g = np.asarray(rgb)
     if g.ndim not in (2, 3) or g.size == 0:
@@ -1039,9 +1054,11 @@ def detect_grid(
     h, w = g.shape[:2]
     best: dict[str, Any] | None = None
     t_detect = 0.0
+    expired = False
+    deadline = t0 + float(time_budget_s)
 
     def attempt(sigma: float, pol: str) -> dict[str, Any]:
-        nonlocal t_detect
+        nonlocal t_detect, expired
         cc = find_cell_centres(g, sigma=sigma, polarity=pol)
         t_detect += cc["timing_s"]
         res = solve_grid_pose(
@@ -1050,7 +1067,9 @@ def detect_grid(
             grid_pitch_mm=grid_pitch_mm,
             f_px=f_px,
             f_ratio=f_ratio,
+            deadline=deadline,
         )
+        expired = expired or res["reason"] == "time_budget"
         res["polarity"], res["sigma"] = pol, float(sigma)
         return res
 
@@ -1061,6 +1080,9 @@ def detect_grid(
         if pol == "bright" and best is not None and best["ok"]:
             break  # never let a bright result displace a dark one (wrong-scale junction lattice)
         for sigma in sigmas:
+            if time.perf_counter() >= deadline and best is not None:
+                expired = True
+                break
             res = attempt(sigma, pol)
             if best is None or (res["ok"], res["n_inliers"]) > (
                 best["ok"],
@@ -1073,7 +1095,7 @@ def detect_grid(
             continue
         break
     assert best is not None
-    if best["ok"]:
+    if best["ok"] and time.perf_counter() < deadline:
         # the lattice now tells the true cell size: re-detect at the matching blob scale (row pitch in px / 4.8) when the
         # scale that found it was off by more than 20 %, which sharpens the centres of large cells
         spacing_px = grid_pitch_mm[1] / best["mm_per_px_centre"]
@@ -1082,6 +1104,8 @@ def detect_grid(
             again = attempt(tuned, best["polarity"])
             if again["ok"] and again["n_inliers"] >= 0.8 * best["n_inliers"]:
                 best = again
+    if not best["ok"] and expired:
+        best = {**best, "reason": "time_budget", "quality": ["time_budget"]}
     best["timing_s"] = {
         **best["timing_s"],
         "detect_s": t_detect,

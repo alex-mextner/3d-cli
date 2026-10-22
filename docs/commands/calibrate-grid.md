@@ -10,7 +10,7 @@ The algorithm lives in `packages/threed-vision` (`threed_vision.calibrate`); the
 ## Usage
 
 ```bash
-3d calibrate-grid <image> [-o DIR] [--grid-pitch COLxROW] [--f-px N | --f-ratio R] [--json]
+3d calibrate-grid <image> [-o DIR] [--grid-pitch COLxROW] [--f-px N | --f-ratio R] [--time-budget S] [--json]
 ```
 
 | Option | Default | What |
@@ -19,6 +19,7 @@ The algorithm lives in `packages/threed-vision` (`threed_vision.calibrate`); the
 | `--grid-pitch COLxROW` | `20.4382x23.6` | Column x row pitch in mm (the HSW panel) |
 | `--f-px N` | estimate | Known focal length in px (EXIF / earlier calibration): only R and t are solved |
 | `--f-ratio R` | estimate | Known focal length / image diagonal (the HSW phone is 0.375) |
+| `--time-budget S` | `8` | Wall-clock budget: the lattice search stops at the deadline, so a photo without a grid ends with `reason: time_budget` instead of searching on |
 | `--json` | off | Print exactly one JSON object (the calibration) |
 
 Exit codes: `0` grid found, `2` bad input (missing/undecodable image), `3` no grid found / poor fit (with `--json` the
@@ -64,7 +65,7 @@ Camera: `X_cam = R @ X_grid + t_mm` (OpenCV camera, x right, y down, z forward),
 
 | Key | Meaning |
 |---|---|
-| `ok`, `reason` | `reason` is `null` when ok; otherwise `too_few_cells`, `no_lattice`, `degenerate_lattice`, `poor_fit`, `sparse_lattice`, `cells_too_small`, `vertex_lattice`, `implausible_pose` (all numeric fields are then `null`) |
+| `ok`, `reason` | `reason` is `null` when ok; otherwise `too_few_cells`, `no_lattice`, `degenerate_lattice`, `poor_fit`, `sparse_lattice`, `cells_too_small`, `vertex_lattice`, `implausible_pose`, `time_budget` (all numeric fields are then `null`) |
 | `K`, `f_px`, `f_source` | intrinsics; `f_source` = `given` / `estimated` / `default` |
 | `R`, `t_mm` | grid frame -> camera |
 | `homography_grid_mm_to_px`, `homography_px_to_grid_mm` | 3x3, row-major |
@@ -95,7 +96,7 @@ from threed_vision import io
 from threed_vision.calibrate import detect_grid, px_to_grid_mm, grid_mm_to_px, local_mm_per_px
 
 rgb = io.load_rgb("IMG_4937.jpeg")                    # upright RGB uint8 (EXIF/HEIC handled)
-cal = detect_grid(rgb)                                 # f estimated; detect_grid(rgb, f_px=720.8) when EXIF/calibration known
+cal = detect_grid(rgb, time_budget_s=8.0)                                 # f estimated; detect_grid(rgb, f_px=720.8) when EXIF/calibration known
 if not cal["ok"]:
     ...                                                # cal["reason"]; never raises on "no grid", never NaN
 H_px_to_mm = cal["homography_px_to_grid_mm"]           # 3x3 -> hsw-editor Calibration.homography
@@ -118,7 +119,7 @@ is a recorded example.
 | plane tilt | 9.4 degrees | 8.7 degrees |
 
 Projecting the same lattice cells with both cameras (nearest-cell labelling: my cell -> reference object plane -> nearest
-reference lattice node): median 0.09 px, max 0.32 px. Run time 0.3 s on the full photo.
+reference lattice node): median 0.09 px, max 0.32 px. Run time 0.1-0.3 s on the full photo. Photos without a grid (measured after the budget change): the carpet HEIC (2000x1500, carpet texture) returns `ok: false, sparse_lattice` in 1.9 s, IMG_4934 in 1.0 s; the search is capped at `time_budget_s` (default 8 s; `reason: time_budget`).
 
 Other photos: IMG_4935 (room, no panel) -> `ok: false` (`poor_fit`); IMG_4936 (the panel sticks into the top-right
 corner, ~70 cells over 150 x 150 px) -> `ok: true`, median 0.34 px, f falls back to the default (footprint too small).

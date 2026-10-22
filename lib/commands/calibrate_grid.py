@@ -27,6 +27,7 @@ Options:
   --grid-pitch CxR     column x row pitch in mm (default 20.4382x23.6)
   --f-px N             known focal length in px: only R and t are solved (EXIF / earlier calibration)
   --f-ratio R          known focal length / image diagonal (the HSW phone is 0.375)
+  --time-budget S      wall-clock budget in seconds (default 8): a photo without a grid ends with reason time_budget
   --json               print exactly one JSON object: ok, K, f_px, R, t_mm, homography_grid_mm_to_px,
                        homography_px_to_grid_mm (photo px -> wall mm), reproj_median_px, reproj_p95_px,
                        n_cells, n_inliers, inlier_cells_px, inlier_cells, f_source, quality, ...

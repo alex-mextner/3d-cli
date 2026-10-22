@@ -201,6 +201,29 @@ def test_photo_scale_transfers_the_scale_of_another_photo_through_the_homography
     assert neither.returncode == 2 and "--other-mm-per-px" in neither.stderr
 
 
+def test_photo_scale_other_grid_transfers_the_wall_scale_to_a_photo_of_the_same_plane(tmp_path: Path) -> None:
+    """A is a close-up of the wall (no panel visible), B shows the honeycomb: B's grid gives the plane, the register
+    homography carries it to A. B is A seen through a known homography, so the scale at A's centre is checkable."""
+    wall = tmp_path / "wall.png"
+    fx.write_wall_photo(str(wall))
+    bgr = cv2.imread(str(wall))
+    assert bgr is not None
+    b = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+    zoom = np.array([[1.4, 0, -240.0], [0, 1.4, -180.0], [0, 0, 1.0]])  # A = B zoomed 1.4x about the middle
+    a = cv2.warpPerspective(b, zoom, (1200, 900), flags=cv2.INTER_CUBIC)
+    fx.write_png(str(tmp_path / "a.png"), a)
+    direct = _json(tmp_path, str(wall), "--grid", "honeycomb", "--at", "600,450")
+    doc = _json(tmp_path, str(tmp_path / "a.png"), "--homography-to", str(wall), "--other-grid", "honeycomb")
+    assert doc["source"] == "homography" and doc["reg"]["inliers"] > 20
+    # A's centre pixel (600,450) shows B's pixel zoom^-1 (600,450)+...: 1.4x magnification -> 1/1.4 of B's mm/px there
+    assert doc["mm_per_px"] == pytest.approx(direct["mm_per_px"] / 1.4, rel=0.08)
+    blank = tmp_path / "blank.png"
+    fx.write_png(str(blank), fx.textured((1200, 900)))
+    nogrid = run_cli(tmp_path, "photo-scale", str(tmp_path / "a.png"), "--homography-to", str(blank), "--other-grid",
+                     "honeycomb", env_extra=LIGHT_ENV)
+    assert nogrid.returncode == 3
+
+
 def test_photo_scale_argument_errors(tmp_path: Path) -> None:
     photo = tmp_path / "p.png"
     fx.write_png(str(photo), fx.textured((200, 100)))
