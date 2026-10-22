@@ -15,6 +15,7 @@ from the device's `watch:` block in `printer-devices.yaml`).
                        [--model [--model-class CLASS]]
 3d printer vision record NAME DIR [--interval S] [--max N] [--timeout S] [--snapshot URL|PATH] [--no-keepalive]
 3d printer vision fetch-model [--tier a|b|all]
+3d printer vision doctor [NAME...] [--json]
 3d printer vision fit-head --class CLASS --pos PATH... --neg PATH... [--every N] [--l2 X]
                        [--fpr R] [--folds N] [--out FILE] [--json]
 ```
@@ -36,8 +37,8 @@ from the device's `watch:` block in `printer-devices.yaml`).
 - `--no-detach` — skip the part-detached check (`vision_part_detached`, below); same as `detach: false` in the
   device's `watch: vision:` block, which can also hold a mapping that tunes it. With `--once` the report adds
   `detach_gap` (0..1, null = the check abstained) and `part_detached` (gap at or above the absolute threshold).
-- `--scene` — also run the bed-change detectors (`vision_foreign_object`, `vision_part_moved`,
-  `vision_no_growth`). Off by default: they are still noisy (see
+- `--scene` — also run the bed-change detectors (`vision_foreign_object`, `vision_part_moved` — against a
+  3-12 min reference and, for slow drift, a 15-60 min one — and `vision_no_growth`). Off by default: they are still noisy (see
   [printer-vision-tuning.md](../research/printer-vision-tuning.md)). Same as `scene: true` in the
   device's `watch: vision:` block. Needs the camera calibration (a usage error without it).
 - `--model` / `--no-model` — tier (b), the whole-frame vision model (see "Three tiers" below):
@@ -60,6 +61,10 @@ from the device's `watch:` block in `printer-devices.yaml`).
 - `fetch-model` — download the weights now (otherwise the first run does it): `--tier a` the
   Obico detector and the CLIP verifier, `--tier b` the tier (b) model, `all` (default) both.
   Idempotent: a cached file that passes its sha256 is not fetched again.
+- `doctor` — read-only deployment check: for every printer with a camera (or the given NAMEs) it asks
+  `systemctl --user show` about `3d-printer-vision@NAME` and `3d-printer-watch@NAME` and **exits 1 when a running
+  service carries `--dry-run`** (events are printed, never delivered), with the commands to fix it. See
+  "Deploying the services".
 - `fit-head` — fit tier (b)'s logistic head for one class on labelled frames you provide
   (`--pos` shows the condition, `--neg` must not raise it; directories, images or videos),
   report block cross-validation and write `~/.cache/3d-cli/vision/models/tier-b-head.json`
@@ -104,6 +109,23 @@ watch:
   vision:
     detach: {gap_abs: 0.25, gap_rise: 0.12, gap_crit: 0.25, persist: 3, persist_crit: 12}  # or false
 ```
+
+**Without a calibration** (the K1 SE and any printer without `lib/data/vision/<model>-camera.yaml`) there is no
+footprint prism, so the check above is off. A lower-confidence **fallback** exists for printers whose camera and
+bed do not move against each other (gantry-moves-Z, e.g. the K1 SE webcam): `fixed_bed` learns the footprint
+instead. In the first minutes of the print it takes 6 frames 20 s apart and keeps what is not plate colour inside the
+plate polygon in *all* of them (the moving toolhead is not), then reports `vision_part_detached` when that learnt
+footprint turns into bare plate. It is **opt-in, warning only (never critical), flagged `confidence: low` in the
+event, and unvalidated on a real failure** (only synthetic frames: no K1 frame of a detached part exists).
+
+```yaml
+watch:
+  vision:
+    fixed_bed: true                      # polygon = watch.bed.roi; or {roi: [[x, y], ...], baseline_frames: 6, baseline_gap_s: 20}
+```
+
+It cannot work on a printer whose bed moves against the camera (U1-style bed-moves-Z without a calibration: the
+learnt footprint slides in the picture with every layer) and it abstains on a grey plate.
 
 ## One-job automatic pause
 
@@ -346,6 +368,36 @@ u1:
 
 The block is per device, so every Moonraker printer in the fleet (U1, K1 SE, others) gets its own
 camera `snapshot`, thresholds and `crop`; nothing in tier (b) is U1-specific.
+
+## Deploying the services
+
+`vision` and `watch` print what they would send when started with `--dry-run`; a service started that way
+looks alive (a JSON verdict line every 10 s) while no event ever reaches the agent, `tg` or a subscriber. On
+2026-10-22 a U1 print peeled off the plate for hours under exactly that deployment. The check:
+
+```bash
+3d printer vision doctor            # exit 1 + FAIL lines + the fix when a running unit has --dry-run
+3d printer vision doctor u1 --json  # machine-readable
+```
+
+The change it asks for (once the events are trusted), per printer with a camera:
+
+```bash
+systemctl --user edit --full 3d-printer-vision@u1.service   # delete `--dry-run` from ExecStart
+systemctl --user edit --full 3d-printer-watch@u1.service    # same, or the WATCH_ARGS of its EnvironmentFile
+systemctl --user daemon-reload
+systemctl --user restart 3d-printer-vision@u1.service 3d-printer-watch@u1.service
+3d printer vision doctor            # must exit 0
+3d printer subscriptions test u1 --kind vision_part_detached --send --text 'u1: delivery check'
+```
+
+What a delivered event looks like: `subscriptions test --send` exits 0 only when a live subscriber took the
+`[TEST]` event; a real alert additionally appends a line to
+`~/.local/state/3d-cli/printer-agents/u1/events.jsonl` and starts/feeds the temporary agent session
+`3d-printer-agent-u1` (`tmux ls`); in the journal the sink lines have **no** `dry-run` prefix (held ones read
+`dry-run temporary u1 agent (...)` / `dry-run subscribers ...`). Follow with
+`journalctl --user -fu '3d-printer-vision@*' -u '3d-printer-watch@*'`. `doctor` never starts, stops or edits
+a unit; it needs systemd (`unknown` without it, never a pass) and only sees user services.
 
 ## Status for Home Assistant
 

@@ -93,12 +93,26 @@ Config: `watch.vision.detach: false | {gap_abs, gap_rise, gap_crit, persist, ...
 - Detects a lift of at least ~½ of the printed height plus the 25 px erosion (about 3-4 mm at Z 5 from the
   U1 camera); a 1-2 mm corner curl is invisible to a camera at this angle. Walls facing away from the
   camera are not judged.
-- Needs the calibration (a K1 SE webcam has none yet: the check is off there) and the footprints
-  (`exclude_object` in the G-code). A plate colour close to the filament colour is treated as plate
+- Needs the calibration and the footprints (`exclude_object` in the G-code). Without a calibration (K1 SE) only
+  the opt-in `fixed_bed` fallback exists (learnt footprint, warning only, synthetic tests only); on a bed-moves-Z
+  printer without a calibration nothing honest is possible, because the footprint moves in the picture with every
+  layer and cannot be learnt from a frame. A plate colour close to the filament colour is treated as plate
   (orange on a gold plate): the part looks "detached" from the start and only the relative rule helps.
 - While PAUSED the vision loop fetches no frames and the reported Z includes the pause lift, so the live check
   runs only while printing; `vision --once` on a paused printer reads a lifted Z (tests use bed Z 10.45 and
   part height 5.32 explicitly).
+
+## Slow drift: the second reference of `part_moved`
+
+`SceneWatch` (lib/vision_scene.py, only with `--scene`) compared the frame with the median of frames 3-12 min
+old, so a part that lifts a little every few minutes was never different from its reference. It now also keeps a
+**slow reference** (15-60 min old, up to 2.5 mm lower bed travel, at most 16 frames in the median): the same
+Lab-difference test, a larger minimum area (0.6 % of the frame) and 6 checks in a row, reported as
+`vision_part_moved` with `data.reference: "slow"`. Test: a synthetic part that creeps one pixel row every 5 min is
+invisible to the 3-12 min reference over 90 min and found by the slow one only after 15 min
+([tests/test_vision_scene.py](../../tests/test_vision_scene.py)). Limit: the reference must be at the same Z within
+2.5 mm, so on a fast-growing print (> ~3 mm per 15 min) there is no slow reference and the check stays silent;
+the detached-part check above has no such limit (it compares against the plate in the same frame).
 
 ## `vision record` returned nothing (root cause)
 
@@ -113,5 +127,5 @@ in S seconds ([tests/test_vision_record.py](../../tests/test_vision_record.py), 
 
 - When the part detached (no frames), and who sent the pause.
 - The false-positive rate of the new check on healthy gold-plate prints, and its recall below ~3 mm of lift.
-- K1 SE: no calibration, so no geometry-based detection; `~/.cache/3d-fixes/k1_now.jpg` is a truncated
+- K1 SE: no calibration, so only the unvalidated `fixed_bed` fallback; `~/.cache/3d-fixes/k1_now.jpg` is a truncated
   JPEG (no EOI; OpenCV decodes it with a warning, the image reader tool rejects it).
