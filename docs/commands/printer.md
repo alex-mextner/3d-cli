@@ -556,3 +556,7 @@ A Home Assistant bed sensor is a follow-up: [#305](https://github.com/alex-mextn
 
 Exit codes: 0 done; 1 refused by a safety rule (incl. offline/read-only printer), preflight FAIL,
 or printer unreachable; 2 usage error, unknown printer, bad config or fleet file, or missing file.
+
+### Managed agent receivers
+
+`watch.agent_fallback: false` disables automatic temporary-agent creation when a registered subscriber is unavailable; registered subscribers and stdout remain active. The default is true for backwards compatibility. Combine with `watch.tg_fallback: false` when raw external messaging is not authorized. Only actual booleans are accepted. A missing subscriber is still a delivery failure, not success.
