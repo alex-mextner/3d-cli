@@ -75,7 +75,7 @@ bad-device:
 
 
 def u1_entry(moon: FakeMoonraker, access: str = "full", heads: int = 4) -> str:
-    """The real U1 shape (4 heads, T2 broken) pointing at a FakeMoonraker."""
+    """The real U1 shape (4 heads, T2 synthetically broken) pointing at a FakeMoonraker."""
     rows = [
         f"    - {{label: T{i + 1}, index: {i}, extruder: extruder{i or ''}, "
         f"nozzle: {{diameter_mm: 0.4, material: stainless, type: std}}"
@@ -124,6 +124,27 @@ def write_fleet(path: Path, *entries: str) -> Path:
 
 
 REPO_POLICY = REPO_FLEET.with_name("policy.yaml")
+
+SYNTHETIC_BROKEN_HEAD_REASON = "synthetic fixture fault: head T2 does not work (queue.json)"
+
+
+def write_fleet_with_synthetic_broken_t2(path: Path) -> Path:
+    """The committed fleet with the U1's T2 flipped to `usable: false` — a SYNTHETIC fault.
+
+    The real T2 works (owner, 2026-10-20), but the unusable-head paths (fault seeding, repair
+    tasks, calibration skips, `printer list` UNUSABLE) still need coverage on the real fleet shape.
+    The policy file is copied next to it so sibling lookups keep working."""
+    text = REPO_FLEET.read_text(encoding="utf-8")
+    needle = "{label: T2, index: 1, extruder: extruder1, nozzle: {diameter_mm: 0.4, material: stainless, type: std}, usable: true}"
+    assert needle in text, "fleet/printers.yaml U1 T2 line changed; update the fixture"
+    text = text.replace(
+        needle,
+        needle.replace("usable: true", f'usable: false, reason: "{SYNTHETIC_BROKEN_HEAD_REASON}"'),
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    path.with_name("policy.yaml").write_text(REPO_POLICY.read_text(encoding="utf-8"), encoding="utf-8")
+    return path
 
 
 def write_policy_for_fleet(path: Path, fleet: Path) -> Path:
