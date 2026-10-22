@@ -19,6 +19,11 @@ score/
 !docs/img/*.png
 !docs/img/*.svg
 !tests/data/spool_labels/*.png
+# committed model artifacts: guide renders and printable STLs (models/<name>/build.py rebuilds them)
+!models/*/img/*.png
+!models/*/stl/*.stl
+!models/*/stl/*/*.stl
+!models/*/viewer/*.3mf
 
 # local tooling state
 .serena/

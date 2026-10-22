@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="360" viewBox="0 0 900 360" font-family="sans-serif" font-size="15">
+  <rect width="900" height="360" fill="#ffffff"/>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#d1495b"/>
+    </marker>
+  </defs>
+  <text x="20" y="28" font-size="18" font-weight="bold">C920 на штативном винте — вид сбоку (как на столе)</text>
+  <!-- clip base on a table -->
+  <rect x="120" y="260" width="200" height="14" fill="#555"/>
+  <circle cx="200" cy="280" r="6" fill="#d1495b"/>
+  <text x="120" y="305" font-size="13">гнездо 1/4" снизу клипсы</text>
+  <!-- body -->
+  <rect x="150" y="160" width="90" height="70" rx="30" fill="#222"/>
+  <rect x="236" y="185" width="10" height="20" fill="#aaa"/>
+  <text x="252" y="182" font-size="13">объектив (перед)</text>
+  <line x1="200" y1="252" x2="200" y2="195" stroke="#999" stroke-dasharray="4 3"/>
+  <line x1="200" y1="140" x2="246" y2="140" stroke="#d1495b" stroke-width="2" marker-start="url(#a)" marker-end="url(#a)"/>
+  <text x="120" y="130" fill="#d1495b">C-1: по горизонтали: ось винта 1/4" → передняя плоскость объектива, мм</text>
+  <line x1="350" y1="195" x2="350" y2="274" stroke="#d1495b" stroke-width="2" marker-start="url(#a)" marker-end="url(#a)"/>
+  <text x="360" y="230" fill="#d1495b">C-2: от низа клипсы до оси объектива, мм</text>
+  <text x="360" y="250" fill="#555" font-size="13">(по спецификации ≈ 29: высота с клипсой 43.3, корпус 29)</text>
+  <text x="20" y="340" fill="#333">В держателе камера повёрнута на 90°: клипса прижата к вертикальной лапке, объектив смотрит вниз.</text>
+</svg>
