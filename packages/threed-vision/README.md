@@ -16,7 +16,7 @@ Run any stage: `python -m threed_vision <stage> --help` (or `3d <stage>`). Exit 
 
 Install (venv outside the repo): `uv venv ~/.cache/3d-cli/vision/venv --python 3.12 &&
 uv pip install --python ~/.cache/3d-cli/vision/venv/bin/python -e 'packages/threed-vision[gpu,seg,fit]'`
-(torch must come from the cu128 index on this driver stack; `onnxruntime-gpu` stays on 1.23.x).
+(torch/torchvision MUST come from the cu128 index: `uv pip install torch==2.11.0 torchvision==0.26.0 --index-url https://download.pytorch.org/whl/cu128 --extra-index-url https://pypi.org/simple --index-strategy unsafe-best-match`; a default/cu130 torch leaves `onnxruntime-gpu` (pinned 1.23.x, CUDA 12) on CPU. `3d doctor`/`python -m threed_vision info` name the missing `.so`).
 
 ## Module map
 

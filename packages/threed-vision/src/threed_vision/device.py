@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import contextlib
+import ctypes
 import glob
 import os
 import site
@@ -41,10 +42,31 @@ def resolve_device(preference: str = "auto", need_vram_mb: int = 0) -> Device:
     return "cuda" if free is not None and free >= need_vram_mb else "cpu"
 
 
-def setup_ort_cuda() -> bool:
-    """Make onnxruntime-gpu (CUDA-12 build) find cuDNN/cuBLAS from the venv's nvidia-* wheels (torch ships them).
+# Shared libraries the CUDA-12 build of onnxruntime-gpu (1.23.x) dlopen()s for its CUDA provider.
+ORT_CUDA12_LIBS = ("libcudart.so.12", "libcublas.so.12", "libcublasLt.so.12", "libcufft.so.11", "libcudnn.so.9")
 
-    Returns True when the CUDA execution provider is usable. Idempotent.
+
+def ort_missing_cuda_libs() -> list[str]:
+    """Names of the CUDA-12 runtime libraries onnxruntime-gpu needs that cannot be loaded (empty = usable).
+
+    `ort.get_available_providers()` lists CUDAExecutionProvider even when these are missing, and the session
+    then silently falls back to CPU, so a loadability probe is the only honest check.
+    """
+    return [lib for lib in ORT_CUDA12_LIBS if not _loadable(lib)]
+
+
+def _loadable(lib: str) -> bool:
+    try:
+        ctypes.CDLL(lib)
+    except OSError:
+        return False
+    return True
+
+
+def setup_ort_cuda() -> bool:
+    """Make onnxruntime-gpu (CUDA-12 build) find cuDNN/cuBLAS from the venv's nvidia-* wheels (torch cu128 ships them).
+
+    Returns True only when the CUDA provider is listed AND its CUDA-12 libraries load. Idempotent.
     """
     try:
         import onnxruntime as ort
@@ -55,9 +77,9 @@ def setup_ort_cuda() -> bool:
         if libs:
             os.environ["LD_LIBRARY_PATH"] = ":".join([*libs, os.environ.get("LD_LIBRARY_PATH", "")])
     if hasattr(ort, "preload_dlls"):
-        with contextlib.suppress(Exception):  # best-effort; the provider probe below is authoritative
+        with contextlib.suppress(Exception):  # best-effort; the loadability probe below is authoritative
             ort.preload_dlls(cuda=True, cudnn=True, directory=None)
-    return "CUDAExecutionProvider" in ort.get_available_providers()
+    return "CUDAExecutionProvider" in ort.get_available_providers() and not ort_missing_cuda_libs()
 
 
 def ort_providers(device: Device) -> list[str]:
@@ -71,4 +93,10 @@ def ort_diagnose() -> dict[str, Any]:
     except ImportError:
         return {"installed": False}
     usable = setup_ort_cuda()
-    return {"installed": True, "version": ort.__version__, "providers": ort.get_available_providers(), "cuda_usable": usable}
+    return {
+        "installed": True,
+        "version": ort.__version__,
+        "providers": ort.get_available_providers(),
+        "cuda_usable": usable,
+        "missing_cuda_libs": [] if usable else ort_missing_cuda_libs(),
+    }

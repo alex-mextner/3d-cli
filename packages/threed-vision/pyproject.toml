@@ -19,8 +19,10 @@ onnx = ["onnxruntime>=1.17", "tokenizers>=0.15"]
 # CUDA-12 driver stack (libcublasLt.so.13 missing) -- keep the 1.23 CUDA-12 line pinned.
 gpu = ["onnxruntime-gpu==1.23.2", "tokenizers>=0.15"]
 # SAM2.1 automatic masks + OWLv2 boxes + the torch soft-silhouette fitter.
-seg = ["torch>=2.4", "torchvision>=0.19", "sam2>=1.1", "transformers>=4.45", "rembg>=2.0.60"]
-fit = ["torch>=2.4", "cma>=3.3"]
+# torch/torchvision MUST be the cu128 wheels (download.pytorch.org/whl/cu128): their nvidia-*-cu12 libraries are what
+# onnxruntime-gpu 1.23.x loads; a cu130 torch leaves ORT on CPU.
+seg = ["torch>=2.8,<2.12", "torchvision>=0.23,<0.27", "sam2>=1.1", "transformers>=4.45", "rembg>=2.0.60"]
+fit = ["torch>=2.8,<2.12", "cma>=3.3"]
 
 [build-system]
 requires = ["hatchling"]
