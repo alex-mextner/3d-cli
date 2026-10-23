@@ -1,0 +1,368 @@
+# Snapmaker U1: stock firmware <-> paxx12 "Extended Firmware" (community build on the stock image).
+#
+# Read by lib/printer_fw/profiles.py (schema: docs/printers/firmware-profiles.md). DATA only: the
+# engine never names this printer. Every vendor fact cites a source URL; what no source states is
+# marked [INFERENCE]. Runbook this profile encodes line by line:
+# https://github.com/alex-mextner/3d-cli/blob/main/docs/printers/u1-paxx12-upgrade.md
+id: snapmaker-u1
+vendor: Snapmaker
+family: U1
+models:
+  - contains: "snapmaker u1"
+sources:
+  - https://github.com/paxx12-snapmaker-u1/SnapmakerU1-Extended-Firmware
+  - https://github.com/paxx12-snapmaker-u1/SnapmakerU1-Extended-Firmware/blob/main/docs/install.md
+  - https://github.com/paxx12-snapmaker-u1/SnapmakerU1-Extended-Firmware/blob/main/docs/firmware_config.md
+  - https://github.com/paxx12-snapmaker-u1/SnapmakerU1-Extended-Firmware/blob/main/docs/ssh_access.md
+  - https://wiki.snapmaker.com/en/snapmaker_u1/firmware_update_procedure
+  - https://github.com/alex-mextner/3d-cli/blob/main/docs/printers/u1-paxx12-upgrade.md
+capabilities:
+  klipper_possible: true
+  notes: >-
+    The U1 runs Klipper + Moonraker on stock firmware already (Moonraker answers on :7125 with no
+    login). The paxx12 Extended Firmware keeps that and adds SSH, a firmware-config web page,
+    native camera streaming, SpoolLink and more. Source:
+    https://github.com/paxx12-snapmaker-u1/SnapmakerU1-Extended-Firmware/blob/main/README.md
+services:
+  moonraker: 7125
+  web: 80
+adapter_services:
+  moonraker: moonraker
+ssh:
+  user: root
+  credentials: >-
+    paxx12 ssh_access.md documents root/snapmaker and lava/snapmaker once SSH is switched on in
+    firmware-config; change the password and use your key (3d uses ssh BatchMode: key or agent
+    only, it stores and sends no password). Stock firmware has Settings > Maintenance > Root Access
+    (same document).
+  connect_timeout_s: 30
+# Idle only when Moonraker reports a known idle state; printing, paused and unreadable all count as busy
+# (the install reboots the printer and flashes the toolhead MCUs).
+idle_probe:
+  kind: http_get
+  id: u1-print-state
+  title: Moonraker print_stats.state is an idle state
+  service: moonraker
+  path: "/printer/objects/query?print_stats"
+  json_path: result.status.print_stats.state
+  regex: '^(standby|complete|cancelled|error)$'
+
+# Probes used by more than one state/step; `{ref: NAME}` expands to the entry before validation.
+probes:
+  moonraker-up:
+    kind: http_get
+    title: Moonraker answers /machine/system_info
+    service: moonraker
+    path: /machine/system_info
+  firmware-config-answers:
+    kind: http_get
+    title: firmware-config /api/status lists System Information
+    service: web
+    path: /firmware-config/api/status
+    json_path: version.title
+    equals: System Information
+  # The same document as above, negated: a stock web server that answers 200 for any path (a UI
+  # fallback page) must still read as "no firmware-config", so a body that is not that JSON is absent.
+  firmware-config-absent:
+    kind: http_get
+    title: firmware-config does not answer
+    service: web
+    path: /firmware-config/api/status
+    json_path: version.title
+    equals: System Information
+    negate: true
+    absent_ok: true
+
+backups:
+  - id: system-info
+    description: Firmware/product info (versions, serial) to compare against after the install.
+    via: http_get
+    service: moonraker
+    path: /machine/system_info
+  - id: server-config
+    description: Moonraker's parsed configuration (auth, trusted_clients, components).
+    via: http_get
+    service: moonraker
+    path: /server/config
+  - id: printer-cfg
+    description: printer.cfg with the SAVE_CONFIG bed-mesh block (config root).
+    via: http_get
+    service: moonraker
+    path: /server/files/config/printer.cfg
+  - id: xyz-offset-calibration
+    description: Head XY offsets (xyz_offset_calibration.cfg), the calibration that must survive.
+    via: http_get
+    service: moonraker
+    path: /server/files/config/xyz_offset_calibration.cfg
+  - id: moonraker-conf
+    description: moonraker.conf (trusted_clients, webcam and component settings).
+    via: http_get
+    service: moonraker
+    path: /server/files/config/moonraker.conf
+    optional: true
+  - id: fluidd-cfg
+    description: fluidd.cfg included by printer.cfg.
+    via: http_get
+    service: moonraker
+    path: /server/files/config/fluidd.cfg
+    optional: true
+  - id: bed-mesh-default
+    description: Stock bed-mesh JSON.
+    via: http_get
+    service: moonraker
+    path: /server/files/config/snapmaker/bed_mesh_default.json
+    optional: true
+  - id: input-shaper
+    description: Input shaper calibration JSON.
+    via: http_get
+    service: moonraker
+    path: /server/files/config/snapmaker/input_shaper.json
+    optional: true
+  - id: defect-detection
+    description: AI defect-detection settings JSON.
+    via: http_get
+    service: moonraker
+    path: /server/files/config/snapmaker/defect_detection.json
+    optional: true
+  - id: filament-parameters
+    description: Filament settings JSON.
+    via: http_get
+    service: moonraker
+    path: /server/files/config/snapmaker/filament_parameters.json
+    optional: true
+  - id: database-list
+    description: Moonraker database namespaces (webcams, fluidd, moonraker, gcode_metadata).
+    via: http_get
+    service: moonraker
+    path: /server/database/list
+    optional: true
+  - id: history
+    description: Print history (Moonraker keeps it in a DB file that no GET returns whole).
+    via: http_get
+    service: moonraker
+    path: "/server/history/list?limit=1000&order=asc"
+    optional: true
+  - id: full-config-tree
+    description: The whole config root, logs and DB namespaces (not reachable with one GET).
+    via: manual
+    instruction: >-
+      Run scripts/u1-moonraker-backup.sh (GET-only, safe while printing; add --logs --camera when idle) and keep
+      the printed directory; see docs/printers/u1-paxx12-upgrade.md section 4.
+
+states:
+  - id: stock
+    title: Snapmaker stock firmware (Klipper + Moonraker, no firmware-config page)
+    detection:
+      all:
+        - {ref: moonraker-up}
+        - {ref: firmware-config-absent}
+    notes: >-
+      An extended build with Advanced Mode OFF also hides /firmware-config (paxx12 firmware_config.md:
+      the page exists only with Advanced Mode on), so it looks stock to read-only probes.
+      [INFERENCE: no other read-only signal is documented].
+    sources:
+      - https://github.com/paxx12-snapmaker-u1/SnapmakerU1-Extended-Firmware/blob/main/docs/firmware_config.md
+  - id: extended
+    title: paxx12 Extended Firmware with Advanced Mode on (firmware-config answers)
+    detection:
+      all:
+        - {ref: firmware-config-answers}
+        - {ref: moonraker-up}
+    notes: >-
+      /api/status shape (version.title, items[].label/value) read from firmware-config.py handle_status
+      in the paxx12 repository.
+    sources:
+      - https://github.com/paxx12-snapmaker-u1/SnapmakerU1-Extended-Firmware/blob/main/overlays/firmware-extended/02-firmware-config/root/usr/local/bin/firmware-config.py
+
+guards:
+  - id: never-flash-while-printing
+    kind: require_idle
+    reason: >-
+      Do not start while the U1 prints: the install reboots the printer and flashes the toolhead MCUs.
+    sources:
+      - https://github.com/alex-mextner/3d-cli/blob/main/docs/printers/u1-paxx12-upgrade.md
+  - id: keep-force-logins-off
+    kind: invariant_probe
+    reason: >-
+      firmware-config "Require Login (Fluidd only)" writes force_logins: true, which overrides
+      trusted_clients; the 3d moonraker adapter, the HA moonraker integration, u1_print_inspector and the camera
+      proxy all call Moonraker without a key, so it must stay off (paxx12 issue 660: it also breaks OpenRFID's webhook).
+    probe:
+      - {kind: http_get, id: moonraker-config-readable, title: Moonraker answers /server/config, service: moonraker, path: /server/config}
+      - {kind: http_get, id: force-logins-off, title: Moonraker authorization.force_logins is not true, service: moonraker, path: /server/config, json_path: result.config.authorization.force_logins, regex: '(?i)^true$', negate: true, absent_ok: true}
+    sources:
+      - https://github.com/alex-mextner/3d-cli/blob/main/docs/printers/u1-paxx12-upgrade.md
+      - https://github.com/paxx12-snapmaker-u1/SnapmakerU1-Extended-Firmware/issues/660
+  - id: no-require-login
+    kind: forbidden_option
+    options: [enable-require-login, require-login]
+    reason: >-
+      Turning on firmware-config "Require Login" sets force_logins: true and breaks every key-less Moonraker consumer
+      (3d moonraker adapter, HA integration, camera proxy). Keep it off; the adapter has no API-key support.
+    sources:
+      - https://github.com/alex-mextner/3d-cli/blob/main/docs/printers/u1-paxx12-upgrade.md
+  - id: no-touchscreen-factory-reset
+    kind: forbidden_option
+    options: [touchscreen-factory-reset, factory-reset]
+    applies_when: {from: [extended]}
+    reason: >-
+      Never use the touchscreen "factory reset" while the extended firmware is installed (paxx12 issue 778: splash-screen hang);
+      use the recovery files (extended-recover.txt / full-recover.txt) or the firmware-config recovery actions instead.
+    sources:
+      - https://github.com/paxx12-snapmaker-u1/SnapmakerU1-Extended-Firmware/issues/778
+      - https://github.com/alex-mextner/3d-cli/blob/main/docs/printers/u1-paxx12-upgrade.md
+
+transitions:
+  - id: install-extended
+    from: stock
+    to: extended
+    title: Install the paxx12 Extended Firmware from a USB stick
+    sources:
+      - https://github.com/paxx12-snapmaker-u1/SnapmakerU1-Extended-Firmware/blob/main/docs/install.md
+      - https://github.com/paxx12-snapmaker-u1/SnapmakerU1-Extended-Firmware/releases/tag/v1.6.0-paxx12-22
+    steps:
+      - id: local-update-extended-firmware
+        title: Install the extended .bin through the touchscreen Local Update, then turn Advanced Mode on
+        kind: manual
+        automatable: false
+        risk: high
+        backup: [system-info, printer-cfg, xyz-offset-calibration]
+        instruction: |
+          Stable release v1.6.0-paxx12-22 (built on Snapmaker stock 1.6.0), file
+          U1_extended_1.6.0-paxx12-22_upgrade.bin, 247180032 bytes,
+          SHA-256 eea907c22847b6f165640f0ae5e835ca42181f7a39b722ff062fd138d47a689c
+          (GitHub release asset digest; check it with sha256sum on the USB stick).
+          1. Copy the .bin to the ROOT of a FAT32 USB stick (exFAT/NTFS fail). Put the matching stock
+             .bin for rollback on the same stick.
+          2. Plug the stick into the printer. Touchscreen: Settings > About > Firmware Version >
+             Local Update, pick the .bin, confirm. The printer flashes, updates the MCUs and reboots
+             (possibly more than once). DO NOT power it off.
+          3. After boot Settings > About shows an extended build. If Wi-Fi did not come back, enter it again.
+          4. Settings > Maintenance > Advanced Mode -> on, then restart the printer. Without it
+             /firmware-config/ does not open (and this step cannot be verified).
+          5. Open /firmware-config/ and LEAVE "Require Login" off.
+        verify:
+          wait_s: 1800
+          interval_s: 15
+          probes:
+            - {ref: firmware-config-answers}
+            - {ref: moonraker-up}
+        rollback:
+          to: stock
+          instruction: >-
+            firmware-config > Troubleshooting > Recover to Backup Firmware (A/B slots; the other slot should still
+            hold stock [INFERENCE: what the button restores was not checked]), or Local Update with the stock
+            .bin from the same USB stick; calibrations live in printer_data/config and should survive,
+            restore from the backup if they do not.
+        sources:
+          - https://github.com/paxx12-snapmaker-u1/SnapmakerU1-Extended-Firmware/blob/main/docs/install.md
+          - https://github.com/alex-mextner/3d-cli/blob/main/docs/printers/u1-paxx12-upgrade.md
+  - id: revert-to-stock
+    from: extended
+    to: stock
+    title: Boot the other firmware slot (the previous stock firmware)
+    sources:
+      - https://github.com/paxx12-snapmaker-u1/SnapmakerU1-Extended-Firmware/blob/main/overlays/firmware-extended/02-firmware-config/root/usr/local/share/firmware-config/functions/20_actions_troubleshooting.yaml
+    steps:
+      - id: switch-to-backup-firmware
+        title: firmware-config action switch-to-backup-firmware (boots the other A/B slot, reboots)
+        kind: http_post
+        automatable: true
+        risk: high
+        backup: [system-info, printer-cfg, xyz-offset-calibration]
+        post:
+          service: web
+          path: /firmware-config/api/action/switch-to-backup-firmware
+          expect_status: 200
+          success_regex: SUCCESS
+        verify:
+          wait_s: 900
+          interval_s: 10
+          down_probes:
+            - {ref: moonraker-up}
+          probes:
+            - {ref: moonraker-up}
+            - {ref: firmware-config-absent}
+        rollback:
+          to: extended
+          instruction: >-
+            Run the same action again (it toggles the slot), or Local Update with the extended .bin from USB.
+            The backup slot holds the previous firmware only right after an install
+            [INFERENCE]; if it holds something else, install the stock .bin from
+            https://wiki.snapmaker.com/en/snapmaker_u1/firmware/release_notes with Local Update (same steps as the install).
+        sources:
+          - https://github.com/paxx12-snapmaker-u1/SnapmakerU1-Extended-Firmware/blob/main/overlays/firmware-extended/02-firmware-config/root/usr/local/share/firmware-config/functions/20_actions_troubleshooting.yaml
+          - https://github.com/paxx12-snapmaker-u1/SnapmakerU1-Extended-Firmware/blob/main/docs/install.md
+  - id: maintain-extended
+    from: extended
+    to: extended
+    title: Maintenance of an installed extended firmware (select with --also)
+    sources:
+      - https://github.com/paxx12-snapmaker-u1/SnapmakerU1-Extended-Firmware/blob/main/docs/firmware_config.md
+    steps: []
+    optional_steps:
+      - id: upgrade-extended-firmware
+        title: Upload an extended/stock .bin through firmware-config (Firmware Upgrade > Upload File)
+        kind: http_upload
+        automatable: true
+        risk: high
+        backup: [system-info, printer-cfg, xyz-offset-calibration]
+        upload:
+          service: web
+          path: /firmware-config/api/upgrade/upload
+          field: file
+          accept_suffix: .bin
+          min_bytes: 52428800
+          known_sha256:
+            - eea907c22847b6f165640f0ae5e835ca42181f7a39b722ff062fd138d47a689c
+          expect_status: 200
+          success_regex: SUCCESS
+        timeout_s: 1800
+        verify:
+          wait_s: 1800
+          interval_s: 15
+          down_probes:
+            - {ref: moonraker-up}
+          probes:
+            - {ref: firmware-config-answers}
+            - {ref: moonraker-up}
+        rollback:
+          to: extended
+          instruction: >-
+            firmware-config > Troubleshooting > Switch to Backup Firmware (or `fw apply NAME --to stock`), or
+            Local Update from a USB stick with the previous .bin.
+        notes: >-
+          Endpoint, multipart part name `file`, the 50 MB minimum size and the success text come from
+          firmware-config.py / 30_upgrade.yaml of the paxx12 repository (tag v1.6.0-paxx12-22). The firmware
+          rejects a file smaller than 50 MB; the system reboots by itself after a successful upgrade.
+        sources:
+          - https://github.com/paxx12-snapmaker-u1/SnapmakerU1-Extended-Firmware/blob/main/overlays/firmware-extended/02-firmware-config/root/usr/local/share/firmware-config/functions/30_upgrade.yaml
+          - https://github.com/paxx12-snapmaker-u1/SnapmakerU1-Extended-Firmware/blob/main/docs/firmware_config.md
+      - id: reset-extended-to-defaults
+        title: firmware-config action reset-extended-to-defaults (clears extended settings, reboots)
+        kind: http_post
+        automatable: true
+        risk: medium
+        backup: [system-info, printer-cfg, xyz-offset-calibration]
+        post:
+          service: web
+          path: /firmware-config/api/action/reset-extended-to-defaults
+          expect_status: 200
+          success_regex: SUCCESS
+        verify:
+          wait_s: 900
+          interval_s: 10
+          down_probes:
+            - {ref: moonraker-up}
+          probes:
+            - {ref: moonraker-up}
+        rollback:
+          instruction: >-
+            The extended settings (camera, SpoolLink, auth ...) are cleared; re-enter them in firmware-config. Printer
+            calibrations are not extended settings [INFERENCE]: compare with the backup. Advanced Mode may need to be
+            switched on again on the touchscreen.
+        notes: >-
+          install.md: "Klipper failed to start (Extended only): Firmware Config > Recovery > Reset Extended to Defaults".
+        sources:
+          - https://github.com/paxx12-snapmaker-u1/SnapmakerU1-Extended-Firmware/blob/main/docs/install.md
+          - https://github.com/paxx12-snapmaker-u1/SnapmakerU1-Extended-Firmware/blob/main/overlays/firmware-extended/02-firmware-config/root/usr/local/share/firmware-config/functions/20_actions_troubleshooting.yaml
