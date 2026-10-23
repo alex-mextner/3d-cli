@@ -36,9 +36,18 @@ ha_repo:
   go2rtc_api: http://127.0.0.1:1984
   go2rtc_stream: u1_camera
 
+# Read by `3d ha vision` (lib/ha_vision.py), which generates packages/printer_vision.yaml and the marked
+# regions of go2rtc.yaml, the compose file and the dashboard from fleet/printers.yaml.
+generate:
+  printops_api: http://192.168.0.39:8765   # 3d-api as seen from HA (packages/printops_tasks.yaml)
+  proxy_port_base: 8090                    # first camera proxy; the next one gets +1, in fleet order
+  scan_interval_s: 30                      # HA polls GET /v1/printers/NAME/vision this often
+  alive_max_age_s: 120                     # an older status = the vision loop is not running
+
 files:
   - {src: packages/3d_printers.yaml, dest: packages/3d_printers.yaml, mode: symlink}
   - {src: packages/u1_print_inspector.yaml, dest: packages/u1_print_inspector.yaml, mode: symlink}
+  - {src: packages/printer_vision.yaml, dest: packages/printer_vision.yaml, mode: symlink}
   - {src: packages/printops_tasks.yaml, dest: packages/printops_tasks.yaml, mode: symlink}
   - {src: dashboards/ui-3d-printers.yaml, dest: ui-3d-printers.yaml, mode: symlink}
   - {src: scripts/u1_mjpeg_proxy.py, dest: scripts/u1_mjpeg_proxy.py, mode: symlink, services: [u1-camera-proxy]}

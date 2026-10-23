@@ -9,37 +9,68 @@ from the device's `watch:` block in `printer-devices.yaml`).
 ```text
 3d printer vision NAME [--interval S] [--once] [--save OUT.jpg] [--dry-run] [--min-severity LEVEL]
                        [--snapshot URL|PATH] [--no-keepalive] [--no-npu] [--evidence DIR] [--verbose]
-                       [--no-verify] [--no-geometry] [--scene]
+                       [--no-verify] [--no-geometry] [--scene] [--no-detach] [--model | --no-model]
 3d printer vision eval --pos PATH... --neg PATH... [--every N] [--warmup N] [--interval S]
-                       [--lead-in N] [--printer NAME] [--no-verify] [--scene] [--json]
-3d printer vision record NAME DIR [--interval S] [--max N] [--snapshot URL|PATH] [--no-keepalive]
-3d printer vision fetch-model
+                       [--lead-in N] [--printer NAME] [--no-verify] [--scene] [--no-detach] [--json]
+                       [--model [--model-class CLASS]]
+3d printer vision record NAME DIR [--interval S] [--max N] [--timeout S] [--snapshot URL|PATH] [--no-keepalive]
+3d printer vision fetch-model [--tier a|b|all]
+3d printer vision doctor [NAME...] [--json]
+3d printer vision fit-head --class CLASS --pos PATH... --neg PATH... [--every N] [--l2 X]
+                       [--fpr R] [--folds N] [--out FILE] [--json]
 ```
 
-- `NAME` — a Moonraker printer from `3d printer list` (the rooted K1 SE runs Moonraker
-  and its USB webcam is served by mjpg-streamer; `fleet/printers.yaml` sets its `watch.vision.snapshot`
-  to `http://192.168.0.27:8080/?action=snapshot`, a full URL fetched directly).
+- `NAME` — a Moonraker printer from `3d printer list` that has a camera. Where the frames come
+  from is the printer's `watch.vision.camera` ([Fleet registry](printer.md#cameras-watchvisioncamera):
+  the U1 is `moonraker-monitor`, the rooted K1 SE `mjpg-streamer` on `:8080`); a printer without
+  one is refused with `no camera`, never given another printer's camera path.
 - `--interval` — seconds between frames (default 10; the thresholds were tuned for 10 s).
 - `--once` — score the current frame, print one JSON verdict and exit; `--save` also writes the
   frame (with detection boxes when there are any).
-- `--snapshot` — camera URL or Moonraker path; default `/server/files/camera/monitor.jpg` (U1).
-- `--no-keepalive` — do not send `camera.start_monitor` (see U1 camera below).
-- `--no-npu` — do not read the printer's own detector verdicts from klippy.log.
+- `--snapshot` — camera URL or Moonraker path, overriding the printer's `watch.vision.camera`.
+- `--no-keepalive` — do not send `camera.start_monitor` (only `moonraker-monitor` cameras need it; see U1 camera below).
+- `--no-npu` — do not read the printer's own detector verdicts from klippy.log (read only where the printer has one: `watch.vision.npu`, default on for a `moonraker-monitor` camera).
 - `--evidence` — where event frames are saved (default `~/.cache/3d-cli/vision/evidence/`).
 - `--no-verify` — skip stage 2 (the CLIP verifier); the trend then runs on the raw Obico score,
   which on the U1 fires on speckled walls. For debugging only.
-- `--no-geometry` — ignore the camera calibration (no bed-volume mask, no bed-change detectors).
-- `--scene` — also run the bed-change detectors (`vision_foreign_object`, `vision_part_moved`,
-  `vision_no_growth`). Off by default: they are still noisy (see
+- `--no-geometry` — ignore the camera calibration (no bed-volume mask, no bed-change or part-detached detectors).
+- `--no-detach` — skip the part-detached check (`vision_part_detached`, below); same as `detach: false` in the
+  device's `watch: vision:` block, which can also hold a mapping that tunes it. With `--once` the report adds
+  `detach_gap` (0..1, null = the check abstained) and `part_detached` (gap at or above the absolute threshold).
+- `--scene` — also run the bed-change detectors (`vision_foreign_object`, `vision_part_moved` — against a
+  3-12 min reference and, for slow drift, a 15-60 min one — and `vision_no_growth`). Off by default: they are still noisy (see
   [printer-vision-tuning.md](../research/printer-vision-tuning.md)). Same as `scene: true` in the
   device's `watch: vision:` block. Needs the camera calibration (a usage error without it).
+- `--model` / `--no-model` — tier (b), the whole-frame vision model (see "Three tiers" below):
+  `--model` forces it on (downloads the 173 MB weights on first use, structured error when it
+  cannot), `--no-model` turns it off; without either the device's `watch.vision.model.enabled`
+  decides, and when that is unset it is on exactly when the weights are already cached
+  (`fetch-model` caches them; a live loop never starts a download by itself). `guard` never uses it.
 - `eval` — replay footage: each `--pos`/`--neg` path is a directory of frames, one image, or a
   video (a U1 timelapse `.mp4`); each path counts as one print. Prints per-frame
   precision/recall/false-positive rate at several score thresholds, and whether the live
   tracker would have raised an alert on each sequence.
-- `record` — while the printer prints, save every frame with the print context (Z, objects)
-  into `DIR` (`meta.jsonl`), for `eval --printer NAME` later.
-- `fetch-model` — download the detector and verifier weights now (otherwise the first run does it).
+  `eval --model` also scores every frame with tier (b) (no cadence, no debounce) and prints, for
+  `--model-class` (default `spaghetti`; `part_detached`, `empty_bed`) taking the `--pos` frames as
+  that class, precision/recall/FPR at thresholds 0.1..0.9, the mean score of every class per
+  side, the worst negatives and the seconds per frame, for the device it ran on.
+- `record` — while the printer prints or is paused, save every frame with the print context (state, Z,
+  objects) into `DIR` (`meta.jsonl`), for `eval --printer NAME` later. In any other state it saves nothing
+  and says so on stderr; `--timeout S` makes it exit 1 when no frame was saved within S seconds (without it
+  it waits for a print), `--max N` stops after N frames.
+- `fetch-model` — download the weights now (otherwise the first run does it): `--tier a` the
+  Obico detector and the CLIP verifier, `--tier b` the tier (b) model, `all` (default) both.
+  Idempotent: a cached file that passes its sha256 is not fetched again.
+- `doctor` — read-only deployment check: for every printer with a camera (or the given NAMEs) it asks
+  `systemctl --user show` about `3d-printer-vision@NAME` and `3d-printer-watch@NAME` and **exits 1 when a running
+  service carries `--dry-run`** (events are printed, never delivered), with the commands to fix it. See
+  "Deploying the services".
+- `fit-head` — fit tier (b)'s logistic head for one class on labelled frames you provide
+  (`--pos` shows the condition, `--neg` must not raise it; directories, images or videos),
+  report block cross-validation and write `~/.cache/3d-cli/vision/models/tier-b-head.json`
+  (other classes already in the file are kept). `--fpr` (default 0.005) sets the threshold at
+  that quantile of the out-of-fold negatives; `--l2` the ridge strength; `--every N` keeps one
+  frame in N. Frames come from `vision record`, sorted into folders by you.
 
 ## What it detects
 
@@ -47,6 +78,9 @@ from the device's `watch:` block in `printer-devices.yaml`).
 |---|---|---|
 | `vision_spaghetti` | warning, then critical | the trend of the verified score q crosses the alert / the escalated threshold while printing |
 | `vision_spaghetti_vetoed` | info | the raw detector's trend would warn, but the verifier confirms less than 0.3 of it (texture, not filament) |
+| `vision_part_detached` | warning, then critical | the printed part looks lifted/peeled off the plate: bare build plate shows where the near wall of the part should be (details below); on by default with the camera calibration; never pauses |
+| `vision_model_spaghetti` | warning | tier (b): the whole-frame model scores loose filament >= 0.5 on 3 model runs (30 s apart) in a row; a second opinion next to `vision_spaghetti`, never a pause |
+| `vision_model_part_detached`, `vision_model_empty_bed` | warning | tier (b), **off by default** (no skill zero-shot): only with a fitted head (`fit-head`) or a `threshold` in `watch.vision.model`; `vision_model_empty_bed` is only judged once the print is at least `min_z` (10 mm) high |
 | `vision_foreign_object`, `vision_part_moved` | warning | only with `--scene`: something new on the bed outside the parts / a part's silhouette changed |
 | `vision_no_growth` | info | only with `--scene`: the newest layers of a part look empty (under- or no extrusion) |
 | `printer_noodle_verdict` | warning | the U1's own NPU detector logs a defect label (table below) at or above 0.83 (once per episode, 5 min quiet ends it) |
@@ -57,6 +91,41 @@ Each event fires once per episode. Camera events (`vision_*`) carry the saved fr
 `data.frame` (with boxes); `printer_noodle_verdict` comes from the log and has no frame.
 Nothing is sent to the printer except `camera.start_monitor`: vision never pauses or cancels.
 Decide on the event (`3d printer status`, Fluidd), then pause yourself.
+
+### The part-detached check (`vision_part_detached`)
+
+Tier (a): OpenCV only, one frame, no history. The calibration projects each part footprint's prism
+(bed to the current layer) into the picture; its near side wall is the band between the base edge on the plate
+and the newest layer. The plate colour is learnt from the bed pixels outside the part in the same frame, and
+`gap` is the share of the eroded wall band with that colour. Warning: `gap ≥ 0.25`, or `gap` ≥ 0.12 above the
+lowest gap of this print, for 3 frames in a row; critical: the rise stays ≥ 0.25 for 12 frames. It abstains
+(no event) on a grey plate (chroma < 25), without enough visible plate, below 1.5 mm, or without footprints.
+Never pauses: [`printer guard`](#one-job-automatic-pause) acts on confirmed spaghetti only. The U1 incident it
+was written for, the numbers on the real frame (gap 0.52), its limits and its unmeasured false-positive rate:
+[printer-vision-detached-part.md](../research/printer-vision-detached-part.md). Tuning:
+
+```yaml
+watch:
+  vision:
+    detach: {gap_abs: 0.25, gap_rise: 0.12, gap_crit: 0.25, persist: 3, persist_crit: 12}  # or false
+```
+
+**Without a calibration** (the K1 SE and any printer without `lib/data/vision/<model>-camera.yaml`) there is no
+footprint prism, so the check above is off. A lower-confidence **fallback** exists for printers whose camera and
+bed do not move against each other (gantry-moves-Z, e.g. the K1 SE webcam): `fixed_bed` learns the footprint
+instead. In the first minutes of the print it takes 6 frames 20 s apart and keeps what is not plate colour inside the
+plate polygon in *all* of them (the moving toolhead is not), then reports `vision_part_detached` when that learnt
+footprint turns into bare plate. It is **opt-in, warning only (never critical), flagged `confidence: low` in the
+event, and unvalidated on a real failure** (only synthetic frames: no K1 frame of a detached part exists).
+
+```yaml
+watch:
+  vision:
+    fixed_bed: true                      # polygon = watch.bed.roi; or {roi: [[x, y], ...], baseline_frames: 6, baseline_gap_s: 20}
+```
+
+It cannot work on a printer whose bed moves against the camera (U1-style bed-moves-Z without a calibration: the
+learnt footprint slides in the picture with every layer) and it abstains on a grey plate.
 
 ## One-job automatic pause
 
@@ -206,9 +275,39 @@ Labels of the U1's own detector (unisrv `camera.detect_capture`), from Snapmaker
    printing and logs each verdict to klippy.log; vision tails that log over HTTP Range requests.
    Moonraker does not expose the detector itself (`camera.detect_capture` → -32601).
 
+## Three tiers
+
+1. **(a) cheap checks, every frame.** The pipeline above: stale/dark camera, Obico boxes + CLIP
+   crop verifier, bed-change geometry.
+2. **(b) a mid-size model on the whole frame, every 30 s** (`lib/vision_model.py`). OpenAI CLIP
+   ViT-B/16 (MIT; fp16 ONNX, 173 MB, sha256-pinned, revision `342fdf2f67aded64d138ff074745fb4a5d2bba5f`
+   of Xenova/clip-vit-base-patch16) embeds the frame squashed to 224 px and scores it against
+   prompt sets (spaghetti, part detached, empty plate, healthy), or against a head you fitted with
+   `fit-head`. It adds `vision_model_*` Findings next to tier (a), as warnings only. Device: the
+   GPU when onnxruntime has the CUDA provider and >= 2 GiB of VRAM are free (6 ms per frame,
+   +379 MiB), else the CPU (160 ms); `THREED_VISION_DEVICE=cpu|cuda|auto` or
+   `watch.vision.model.device` override, and `cuda` without the provider is an error, not a silent
+   CPU run. Only `spaghetti` is on by default: zero-shot has no skill on a lifted/detached part or
+   an empty plate (numbers: [printer-vision.md](../research/printer-vision.md)), so those two
+   classes need a fitted head or an explicit threshold.
+3. **(c) the LLM look.** A Finding or event wakes the subscribed agent session or the temporary
+   printer agent, which receives the frame and judges it (`3d printer subscribe`, `agent`).
+
+GPU onnxruntime is optional and not a project dependency: `uv pip install onnxruntime-gpu
+nvidia-cudnn-cu13 nvidia-cublas nvidia-cuda-runtime nvidia-curand nvidia-cufft` replaces the CPU
+package in the environment that runs `3d printer vision` (use the CUDA-12 wheels with an
+onnxruntime-gpu built for CUDA 12). Without it everything runs on the CPU.
+
 ## Model and licence
 
-The weights are **not** part of 3d-cli (MIT). On first use they are downloaded from
+Tier (b)'s weights are downloaded the same way (`fetch-model --tier b`) from
+`https://huggingface.co/Xenova/clip-vit-base-patch16` (revision above; OpenAI CLIP ViT-B/16, MIT,
+ONNX export by Xenova/transformers.js), checked against sha256
+`3e261924f7d66d04f10bb131f7f212162d9ee82199544771aa2dd318bb7e2b7b`, and cached in the same
+directory. The prompt embeddings (`lib/data/vision/model_prompts.json`) are small text and ship
+with 3d-cli.
+
+The tier (a) weights are **not** part of 3d-cli (MIT). On first use they are downloaded from
 `https://www.obico.io/static_pub/ml-models/model-weights-5a6b1be1fa.onnx` (202 MB) into
 `~/.cache/3d-cli/vision/models/` and checked against sha256
 `0a6ebd8e30dbf6a450c50f9c0a5406f04ba7eb1c99fd5996e888c78bb383b9aa`. They come from
@@ -246,13 +345,79 @@ u1:
   watch:
     tg_fallback: true        # emergency only: the phone gets what no agent could take
     vision:
-      snapshot: /server/files/camera/monitor.jpg   # default for Moonraker printers
-      keepalive: true                              # default: on for the U1 monitor.jpg only
+      camera: {kind: moonraker-monitor}            # the U1; K1 SE: {kind: mjpg-streamer, port: 8080}; see printer.md "Cameras"
+      keepalive: true                              # default: on for kind moonraker-monitor only
+      npu: true                                    # read the printer's own detector; default: on for moonraker-monitor only
+      limits: {stale_s: 120, dark_luma: 20, npu_threshold: 0.83, npu_quiet_s: 300}   # defaults measured on the U1
       verify: true                                 # stage 2 (CLIP verifier); default on
       geometry: true                               # bed-volume mask from the camera calibration
       scene: false                                 # bed-change detectors; default off (noisy)
       ignore: [[[0.8, 0.0], [1.0, 0.0], [1.0, 0.3], [0.8, 0.3]]]  # polygons (0..1) to drop boxes in
+      head: {half_mm: 30, skew_mm: 40, up_mm: 100, pad_mm: 15, above_mm: 40, grow_px: 40, band_mm: 4}  # toolhead/ROI geometry (the U1 values; needs a calibration)
+      model:                       # tier (b); every key optional, a bare true/false works too
+        enabled: true              # default: on when the weights are cached; false = off
+        device: auto               # auto (CUDA if >= 2 GiB free) | cpu | cuda; THREED_VISION_DEVICE wins
+        every_s: 30                # seconds between model runs (not per frame)
+        threshold: {spaghetti: 0.5}  # per class, or one number for all; empty_bed/part_detached need one (or a head)
+        confirm: 3                 # runs in a row at/above the threshold before the Finding
+        clear: 2                   # runs below it before the Finding clears
+        min_z: 10                  # mm; empty_bed is judged only once the print is this high (default 10)
+        crop: [0.0, 0.3, 1.0, 1.0] # normalised x1,y1,x2,y2 of the bed area; default the whole frame
+        head: ~/.cache/3d-cli/vision/models/tier-b-head.json   # default; from `fit-head`
 ```
+
+The block is per device, so every Moonraker printer in the fleet (U1, K1 SE, others) gets its own
+camera `snapshot`, thresholds and `crop`; nothing in tier (b) is U1-specific.
+
+## Deploying the services
+
+`vision` and `watch` print what they would send when started with `--dry-run`; a service started that way
+looks alive (a JSON verdict line every 10 s) while no event ever reaches the agent, `tg` or a subscriber. On
+2026-10-22 a U1 print peeled off the plate for hours under exactly that deployment. The check:
+
+```bash
+3d printer vision doctor            # exit 1 + FAIL lines + the fix when a running unit has --dry-run
+3d printer vision doctor u1 --json  # machine-readable
+```
+
+The change it asks for (once the events are trusted), per printer with a camera:
+
+```bash
+systemctl --user edit --full 3d-printer-vision@u1.service   # delete `--dry-run` from ExecStart
+systemctl --user edit --full 3d-printer-watch@u1.service    # same, or the WATCH_ARGS of its EnvironmentFile
+systemctl --user daemon-reload
+systemctl --user restart 3d-printer-vision@u1.service 3d-printer-watch@u1.service
+3d printer vision doctor            # must exit 0
+3d printer subscriptions test u1 --kind vision_part_detached --send --text 'u1: delivery check'
+```
+
+What a delivered event looks like: `subscriptions test --send` exits 0 only when a live subscriber took the
+`[TEST]` event; a real alert additionally appends a line to
+`~/.local/state/3d-cli/printer-agents/u1/events.jsonl` and starts/feeds the temporary agent session
+`3d-printer-agent-u1` (`tmux ls`); in the journal the sink lines have **no** `dry-run` prefix (held ones read
+`dry-run temporary u1 agent (...)` / `dry-run subscribers ...`). Follow with
+`journalctl --user -fu '3d-printer-vision@*' -u '3d-printer-watch@*'`. `doctor` never starts, stops or edits
+a unit; it needs systemd (`unknown` without it, never a pass) and only sees user services.
+
+## Status for Home Assistant
+
+The live loop (not `--once`) keeps `~/.local/state/3d-cli/vision/NAME.json` current every cycle:
+the printer state, the last frame's `p`, `q`, trend, luma and findings, frames scored, event
+counts by kind, the last event and the camera error. 3d-api serves it as
+`GET /v1/printers/NAME/vision` (scope `read`, plus `age_s`; 404 for an unknown printer or one whose
+loop never ran), and the HA package generated by [`3d ha vision`](ha.md#camera-vision-for-every-fleet-printer-3d-ha-vision)
+turns that into sensors for every fleet printer with a camera. The API reads the file from its own
+state dir, so the vision loop and the API must share it (same user and host, or a mounted dir)
+[deployment not verified]. A failed write only logs; it never stops the loop.
+
+## Fleet parity
+
+Nothing in `vision`, `guard`, `bed`, the dossier or the HA generator names a printer: the camera
+comes from the printer's `watch.vision.camera` (else its model's default), the bed ROI from
+`watch.bed.roi` or the model's calibration, thresholds from the device's `watch:` block.
+`tests/test_fleet_vision_parity.py` iterates the fleet and fails on a U1 literal in these generic
+modules (its allowlist names the few U1-specific ones) and on a camera printer without its
+generated Home Assistant artifacts.
 
 ## Examples
 
@@ -260,4 +425,9 @@ u1:
 3d printer vision u1 --once --save /tmp/u1.jpg   # one verdict + the frame
 3d printer vision u1 --dry-run --verbose        # run the loop, print what would be sent
 3d printer vision eval --pos ~/footage/spaghetti --neg ~/footage/healthy/*.mp4
+3d printer vision eval --pos ~/footage/spaghetti --neg ~/footage/healthy/*.mp4 --model   # + tier (b)
+3d printer vision fetch-model --tier b           # cache the tier (b) weights (idempotent)
+3d printer vision k1se --once --model            # force tier (b) on for one verdict
+THREED_VISION_DEVICE=cpu 3d printer vision u1    # keep the GPU free for something else
+3d printer vision fit-head --class part_detached --pos ~/vision/detached/* --neg ~/vision/ok/*
 ```

@@ -1,0 +1,25 @@
+{
+  "_comment": "Provenance of every frame the tier (b) training set can contain. `own` frames come from the owner's printers (Snapmaker U1, Creality K1 SE): they may be published after sanitation (CC-BY-4.0). `third_party` frames come from the public collection documented in docs/research/printer-vision-tuning.md (licences differ, most are local-eval-only): they are used for training/evaluation on the server and are NEVER published. Paths are local to the workstation that ran the capture; `keep` is the normalised x1,y1,x2,y2 crop of the published pixels (everything outside it, e.g. the back wall of the chamber with its QR stickers, never leaves the machine).",
+  "own": [
+    {"id": "u1-timelapse-a", "glob": "~/.cache/3d-cli/vision/data/frames/quant/*.jpg", "label": "healthy", "printer": "snapmaker-u1", "group": "u1-print-a", "split": "train", "every": 12, "keep": [0, 0.3, 1, 1]},
+    {"id": "u1-timelapse-b", "glob": "~/.cache/3d-cli/vision/data/frames/obj/*.jpg", "label": "healthy", "printer": "snapmaker-u1", "group": "u1-print-b", "split": "train", "every": 6, "keep": [0, 0.3, 1, 1]},
+    {"id": "u1-timelapse-c", "glob": "~/.cache/3d-cli/vision/data/frames/shelf/*.jpg", "label": "healthy", "printer": "snapmaker-u1", "group": "u1-print-c", "split": "train", "every": 12, "keep": [0, 0.3, 1, 1]},
+    {"id": "u1-timelapse-d", "glob": "~/.cache/3d-cli/vision/data/frames/Fast_Funnel_small/*.jpg", "label": "healthy", "printer": "snapmaker-u1", "group": "u1-print-d", "split": "test", "every": 6, "keep": [0, 0.3, 1, 1]},
+    {"id": "u1-timelapse-e", "glob": "~/.cache/3d-cli/vision/data/frames/Ja-back__2_/*.jpg", "label": "healthy", "printer": "snapmaker-u1", "group": "u1-print-e", "split": "test", "every": 6, "keep": [0, 0.3, 1, 1]},
+    {"id": "u1-live-walls", "glob": "~/.cache/3d-cli/vision/data/u1rec_walls/*.jpg", "label": "healthy", "printer": "snapmaker-u1", "group": "u1-print-f", "split": "train", "every": 12, "keep": [0, 0.3, 1, 1]},
+    {"id": "u1-idle-bed", "glob": "~/.cache/3d-cli/vision/data/eval/neg_live_idle/*.jpg", "label": "empty_bed", "printer": "snapmaker-u1", "group": "u1-idle", "split": "train", "every": 3, "keep": [0, 0.3, 1, 1]},
+    {"id": "u1-spaghetti-1", "glob": "~/.cache/3d-cli/vision/data/eval/pos_spaghetti/*.jpg", "label": "spaghetti", "printer": "snapmaker-u1", "group": "u1-fail-a", "split": "test", "every": 1, "keep": [0, 0.3, 1, 1]},
+    {"id": "u1-panel-detached", "glob": "~/.cache/3d-fixes/u1_monitor.jpg", "label": "part_detached", "printer": "snapmaker-u1", "group": "u1-fail-b", "split": "test", "every": 1, "keep": [0, 0.3, 1, 1]},
+    {"id": "u1-panel-spaghetti", "glob": "~/.cache/3d-cli/vision/now/u1-spag.jpg", "label": "part_detached", "printer": "snapmaker-u1", "group": "u1-fail-b", "split": "test", "every": 1, "keep": [0, 0.3, 1, 1]},
+    {"id": "u1-shutdown-bed", "glob": "~/.cache/3d-cli/vision/now/u1-shutdown*.jpg", "label": "empty_bed", "printer": "snapmaker-u1", "group": "u1-idle", "split": "test", "every": 1, "keep": [0, 0.3, 1, 1]},
+    {"id": "u1-healthy-print", "glob": "~/.cache/3d-cli/vision/now/u1.jpg", "label": "healthy", "printer": "snapmaker-u1", "group": "u1-print-g", "split": "test", "every": 1, "keep": [0, 0.3, 1, 1]},
+    {"id": "k1-empty-bed", "glob": "~/.cache/3d-fixes/k1_now.jpg", "label": "empty_bed", "printer": "creality-k1se", "group": "k1-idle", "split": "test", "every": 1, "keep": [0, 0.25, 0.85, 1]},
+    {"id": "k1-spaghetti", "glob": "~/.cache/3d-cli/vision/now/k1se-cam.jpg", "label": "spaghetti", "printer": "creality-k1se", "group": "k1-fail-a", "split": "test", "every": 1, "keep": [0, 0.25, 0.85, 1]}
+  ],
+  "third_party": {
+    "manifest": "~/.cache/3d-cli/vision/datasets/manifest.jsonl",
+    "root": "~/.cache/3d-cli/vision/datasets",
+    "labels": {"spaghetti": "spaghetti", "detached": "part_detached", "healthy": "healthy"},
+    "max_per_label_and_source": 250
+  }
+}

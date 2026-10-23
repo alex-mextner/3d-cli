@@ -42,6 +42,7 @@ from printer_ops.vision import INFO, WARNING, Finding  # noqa: E402
 if TYPE_CHECKING:
     import numpy as np
 
+MAX_REF_FRAMES = 16  # frames in one reference median
 WIDTH = 320  # working resolution: enough for a screwdriver on the bed, cheap to median
 
 
@@ -66,11 +67,14 @@ def _median(stack: list[np.ndarray]) -> np.ndarray:
 
     import numpy as np
 
+    frames = np.stack(stack)
+    if not np.isnan(frames).any():
+        return np.median(frames, axis=0)  # several times faster than nanmedian
     with warnings.catch_warnings():
         warnings.simplefilter(
             "ignore", RuntimeWarning
         )  # all-NaN pixels (head) stay NaN
-        return np.nanmedian(np.stack(stack), axis=0)
+        return np.nanmedian(frames, axis=0)
 
 
 @dataclass(frozen=True)
@@ -85,6 +89,16 @@ class SceneParams:
     min_area: float = 0.004  # share of the working image (~230 px at 320x180)
     persist: int = 3
     part_share: float = 0.5  # region inside the expected silhouette -> part moved
+    # Slow tier: a part that lifts or creeps a pixel row every few minutes never differs from a
+    # frame 3-12 min ago by `diff`, and a change older than the window is the new normal. The slow
+    # reference is 15-60 min old and may sit up to `slow_max_dz` mm (the same 0.8 as the fast one) lower (the bed drops a sliver
+    # per layer; the top band is excluded), so it keeps remembering the part as it WAS.
+    slow_min_age_s: float = 900.0
+    slow_max_age_s: float = 3600.0
+    slow_max_dz: float = 0.8
+    slow_min_frames: int = 8
+    slow_min_area: float = 0.006
+    slow_persist: int = 6
 
 
 @dataclass
@@ -98,15 +112,23 @@ class _Sample:
 class SceneWatch:
     params: SceneParams = field(default_factory=SceneParams)
     recent: deque[_Sample] = field(default_factory=lambda: deque(maxlen=3))
-    history: deque[_Sample] = field(default_factory=lambda: deque(maxlen=16))
+    history: deque[_Sample] = field(default_factory=lambda: deque(maxlen=64))
     streak: int = 0
     last_regions: list[tuple[int, int, int, int]] = field(default_factory=list)
+    slow_streak: int = 0
+    slow_regions: list[tuple[int, int, int, int]] = field(default_factory=list)
+    # tier -> (the samples the reference was built from, their median): the reference only
+    # changes when a sample enters or leaves its window, not on every frame
+    _refs: dict[str, tuple[tuple[int, ...], Any]] = field(default_factory=dict)
 
     def reset(self) -> None:
         self.recent.clear()
         self.history.clear()
         self.streak = 0
         self.last_regions = []
+        self.slow_streak = 0
+        self.slow_regions = []
+        self._refs = {}
 
     def update(
         self,
@@ -130,32 +152,90 @@ class SceneWatch:
         self.recent.append(sample)
         if not self.history or now - self.history[-1].t >= prm.ref_every_s:
             self.history.append(sample)
-        ref_frames = [
-            s.lab
-            for s in self.history
-            if prm.ref_min_age_s <= now - s.t <= prm.ref_max_age_s
-            and abs(s.z - z) <= prm.max_dz
-        ]
-        if len(self.recent) < prm.cur_len or len(ref_frames) < prm.ref_min_frames:
-            self.streak = 0
+        if len(self.recent) < prm.cur_len:
+            self.streak = self.slow_streak = 0
             return []
         cur = _median([s.lab for s in self.recent])
-        ref = _median(ref_frames)
+        sil = shrink_mask(silhouette, hw)
+        area_hw = shrink_mask(area, hw)
+        findings: list[Finding] = []
+        fast = self._tier(
+            "fast", cur, now, z, area_hw, sil, hw,
+            prm.ref_min_age_s, prm.ref_max_age_s, prm.max_dz, prm.ref_min_frames,
+            prm.min_area, prm.persist,
+        )
+        slow = self._tier(
+            "slow", cur, now, z, area_hw, sil, hw,
+            prm.slow_min_age_s, prm.slow_max_age_s, prm.slow_max_dz, prm.slow_min_frames,
+            prm.slow_min_area, prm.slow_persist,
+        )
+        findings = fast + slow
+        return _strongest_per_kind(findings)
+
+    def _tier(
+        self,
+        name: str,
+        cur: np.ndarray,
+        now: float,
+        z: float,
+        area: np.ndarray,
+        sil: np.ndarray,
+        hw: tuple[int, ...],
+        min_age: float,
+        max_age: float,
+        max_dz: float,
+        min_frames: int,
+        min_area: float,
+        persist: int,
+    ) -> list[Finding]:
+        """One reference window: regions that differ from the median of the samples aged
+        `min_age..max_age` s and within `max_dz` mm of now, kept for `persist` checks in a row."""
+        import numpy as np
+
+        prm = self.params
+        slow = name == "slow"
+        ref_samples = [
+            s
+            for s in self.history
+            if min_age <= now - s.t <= max_age and abs(s.z - z) <= max_dz
+        ]
+
+        def clear() -> list[Finding]:
+            if slow:
+                self.slow_streak, self.slow_regions = 0, []
+            else:
+                self.streak, self.last_regions = 0, []
+            return []
+
+        if len(ref_samples) < min_frames:
+            return clear()
+        if len(ref_samples) > MAX_REF_FRAMES:  # an even subset gives the same median, cheaper
+            step = -(-len(ref_samples) // MAX_REF_FRAMES)
+            ref_samples = ref_samples[::step]
+        key = tuple(id(s) for s in ref_samples)
+        cached = self._refs.get(name)
+        if cached is None or cached[0] != key:
+            cached = (key, _median([s.lab for s in ref_samples]))
+            self._refs[name] = cached
+        ref = cached[1]
         dist = np.sqrt(np.nansum((cur - ref) ** 2, axis=2))
         valid = ~(np.isnan(cur).any(axis=2) | np.isnan(ref).any(axis=2))
-        where = shrink_mask(area, hw) & valid
+        where = area & valid
         changed = (dist > prm.diff) & where
-        regions = _regions(changed, prm.min_area * hw[0] * hw[1])
+        regions = _regions(changed, min_area * hw[0] * hw[1])
         if not regions:
-            self.streak, self.last_regions = 0, []
-            return []
+            return clear()
         boxes = [r[0] for r in regions]
-        same = any(_iou(a, b) > 0.3 for a in boxes for b in self.last_regions)
-        self.streak = self.streak + 1 if same or not self.last_regions else 1
-        self.last_regions = boxes
-        if self.streak < prm.persist:
+        last = self.slow_regions if slow else self.last_regions
+        streak = self.slow_streak if slow else self.streak
+        same = any(_iou(a, b) > 0.3 for a in boxes for b in last)
+        streak = streak + 1 if same or not last else 1
+        if slow:
+            self.slow_streak, self.slow_regions = streak, boxes
+        else:
+            self.streak, self.last_regions = streak, boxes
+        if streak < persist:
             return []
-        sil = shrink_mask(silhouette, hw)
         findings = []
         for (x, y, w, h), comp in regions:
             inside = float((comp & sil).sum()) / max(1, int(comp.sum()))
@@ -166,8 +246,9 @@ class SceneWatch:
                 else "vision_foreign_object"
             )
             what = (
-                "the printed part looks different from a few minutes ago (detached, "
-                "knocked over or shifted?)"
+                "the printed part looks different from "
+                + ("an hour ago, a slow drift or lift (detached, curling or creeping?)"
+                   if slow else "a few minutes ago (detached, knocked over or shifted?)")
                 if kind == "vision_part_moved"
                 else "something new on the bed outside the part (tool, debris, a fallen blob?)"
             )
@@ -185,6 +266,7 @@ class SceneWatch:
                         ],
                         "bed_share": round(share, 4),
                         "inside_part": round(inside, 3),
+                        "reference": name,
                     },
                 )
             )

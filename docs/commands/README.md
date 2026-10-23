@@ -121,7 +121,7 @@ Every gate from model to printer, in order: [Print pipeline](../workflows/print-
 | `heavy` | [heavy.md](heavy.md) | Run one command alone under the machine heavy lock with a memory cap (re-entrant, bounded wait). |
 | `remote` | [remote.md](remote.md) | Push files to an ssh heavy box, run under its heavy lock, pull results. |
 | `events` | [events.md](events.md) | Record and inspect append-only CLI/model workflow events. |
-| `ha` | [ha.md](ha.md) | Deploy `integrations/homeassistant/` to the live Home Assistant config (submodule + symlinks, check_config, reloads, rollback). |
+| `ha` | [ha.md](ha.md) | Deploy `integrations/homeassistant/` to the live Home Assistant config (submodule + symlinks, check_config, reloads, rollback); `ha vision` generates the per-printer camera-vision files from the fleet. |
 | `init` | [init.md](init.md) | Scaffold a `3d.yaml` project and agent-friendly project skeleton. |
 | `projects` | [projects.md](projects.md) | Register/list/remove project directories used by `3d web`. |
 | `workspaces` | [workspaces.md](workspaces.md) | Create/list/read web dashboard workspace metadata. |

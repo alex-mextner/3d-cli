@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Expose the Snapmaker U1 monitor JPEG as an MJPEG stream for go2rtc."""
+"""Expose a printer camera (the Snapmaker U1 monitor JPEG by default) as an MJPEG stream for go2rtc.
+
+`3d ha vision` (lib/ha_vision.py) writes one compose service per printer that needs this proxy,
+with these environment variables: U1_CAMERA_URL (the snapshot), U1_CAMERA_NAME (default u1: the
+stream is /NAME.jpg and /NAME.mjpeg), U1_PRINTER_URL (the Moonraker origin), U1_GHOST_MODEL (the
+printer model whose bundled camera calibration the ghost uses). The U1_ prefix is historical."""
 
 from __future__ import annotations
 
@@ -24,7 +29,8 @@ SOURCE_URL = os.environ.get(
 PORT = int(os.environ.get("U1_CAMERA_PORT", "8090"))
 FPS = max(0.2, float(os.environ.get("U1_CAMERA_FPS", "1.0")))
 TIMEOUT = float(os.environ.get("U1_CAMERA_TIMEOUT", "5"))
-BOUNDARY = "u1camera"
+NAME = os.environ.get("U1_CAMERA_NAME", "u1")
+BOUNDARY = f"{NAME}camera"
 START_MONITOR = os.environ.get("U1_CAMERA_START_MONITOR", "true").lower() in {
     "1",
     "true",
@@ -57,7 +63,7 @@ START_MONITOR_DOMAINS = [
 _source = urllib.parse.urlsplit(SOURCE_URL)
 ghosts = GhostRenderer()
 inspector = Inspector(os.environ.get("U1_PRINTER_URL", f"{_source.scheme}://{_source.netloc}"),
-                      ghosts=ghosts)
+                      ghosts=ghosts, printer_id=NAME)
 
 
 class FrameCache:
@@ -221,7 +227,7 @@ keepalive = CameraMonitorKeepalive()
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "U1MJPEG/1.0"
+    server_version = "PrinterMJPEG/1.0"
 
     def do_POST(self) -> None:  # noqa: N802
         """`POST /ghost {"enabled": bool}`: HA's input_boolean.u1_camera_ghost switches the ghost."""
@@ -263,9 +269,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/health":
             self._health()
-        elif parsed.path == "/u1.jpg":
+        elif parsed.path == f"/{NAME}.jpg":
             self._snapshot()
-        elif parsed.path == "/u1.mjpeg":
+        elif parsed.path == f"/{NAME}.mjpeg":
             self._mjpeg()
         else:
             self.send_error(HTTPStatus.NOT_FOUND, "not found")
@@ -351,7 +357,7 @@ def main() -> None:
     keepalive.start()
     cache.start()
     server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
-    print(f"Serving U1 MJPEG proxy on :{PORT}, source={SOURCE_URL}", flush=True)
+    print(f"Serving {NAME} MJPEG proxy on :{PORT}, source={SOURCE_URL}", flush=True)
     server.serve_forever()
 
 

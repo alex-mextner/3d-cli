@@ -220,6 +220,12 @@ Open faults, due maintenance rules (`maintenance_due`) and the calibration requi
 materialised as tasks on every tasks request and every 15 minutes in the background (events
 `printer_task.opened|updated|closed`). Details: docs/commands/printer.md#to-do-list-3d-printer-todo.
 
+## API (camera vision status)
+
+| Route | Scope | Result |
+|---|---|---|
+| `GET /v1/printers/{name}/vision` | read | the status file of `3d printer vision NAME` (`printer_ops/vision_status.py`: state, p, q, trend, findings, frames, events by kind, last event, camera_error) plus `age_s`; 404 unknown printer or the loop never ran. Read from the API's own state dir. Home Assistant sensors: `3d ha vision`. |
+
 ## API (camera nodes, #341)
 
 | Endpoint | Scope | |

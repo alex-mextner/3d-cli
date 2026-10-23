@@ -222,6 +222,7 @@ Every current root Python module is listed here so future additions are intentio
 - `gcode_thumbnails.py` — printer-screen thumbnail blocks in G-code: stdlib-only check against the profile's `thumbnails` spec, Orca-format block writer, z-buffered toolpath preview render (numpy); backs `3d gcode-thumbnails`.
 - `frame_check.py` — render framing checks.
 - `ha_deploy.py` — `3d ha deploy`: manifest/snippet/compose/vendor checks for `integrations/homeassistant/`, plan from a host probe, backup → submodule checkout → symlinks/copies → check_config → reloads → service recreate → post-checks with rollback, HA-repo deploy PR.
+- `ha_vision.py` — `3d ha vision`: generates the Home Assistant side of camera vision (vision sensors, alert frame grabber, go2rtc stream, camera proxy service, dashboard camera cards, ghost switch) for every fleet printer with a camera, from `fleet/printers.yaml`; checks the committed files for drift and missing entities.
 - `ha_deploy_probe.py` — stdlib-only, read-only probe that `3d ha deploy` runs with the HA host's `python3` over ssh (git/submodule state, dest hashes, compose hashes and mounts, vendor versions, HA API/dashboard/go2rtc signals).
 - `hardware.py` — local machine and toolchain capability reporting.
 - `hf_auth.py` — optional Hugging Face token loading, validation, and secure storage.
@@ -239,7 +240,10 @@ Every current root Python module is listed here so future additions are intentio
 - `halves_check.py` — paired-halves gate: loads pairs marked in 3MF object metadata (or STL pairs), maps both halves into the assembly frame, rasterises their cut faces and compares outline, dowel holes, size and islands; backs `3d halves-check`.
 - `vision_detect.py` — pixel half of `3d printer vision`: Obico ONNX spaghetti scorer (weights downloaded at runtime, sha256-pinned), `FrameScorer` (ROI/ignore masks + stage-2 verifier), brightness check, live camera loop, `record` and `eval` on recorded footage; decision logic and camera/klippy.log access live in `printer_ops/vision.py`.
 - `vision_verify.py` — stage 2 of `3d printer vision`: zero-shot CLIP ViT-B/32 (ONNX, sha256-pinned) on crops of the detector's boxes → verified score q.
+- `vision_model.py` — tier (b) of `3d printer vision`: CLIP ViT-B/16 (fp16 ONNX, sha256-pinned) on the whole frame every `every_s` seconds, zero-shot prompts or a fitted head → debounced `vision_model_*` Findings; device auto-detect (CUDA provider + ≥ 2 GiB free VRAM, else CPU), `THREED_VISION_DEVICE` override.
+- `vision_fit.py` — `3d printer vision fit-head`: numpy ridge-logistic head for tier (b) on user-labelled frames, block cross-validation, `tier-b-head.json`.
 - `calib_rectify.py` — calibration photo → rectified bed-mm image: ArUco fiducials (DICT_4X4_50), homography, external scale reference (`3d calibrate photo|rectify`, #342).
+- `vision_detach.py` — tier-a detached-part check for `3d printer vision` (`vision_part_detached`): bare build plate in the near wall band of a part's footprint prism, from the camera calibration; see `docs/research/printer-vision-detached-part.md`.
 - `vision_geometry.py` — printer camera model (pinhole/fisheye), bed/volume/silhouette masks at the current Z, calibration fit CLI; the U1 calibration ships in `lib/data/vision/`.
 - `vision_ghost.py` — 3D ghost of the rest of a print over a printer camera frame: collects a job's walls from one G-code pass, paints them through a `vision_geometry` camera into a sparse per-frame blend table (used by the U1 camera proxy).
 - `vision_scene.py` — opt-in bed-change detectors for `3d printer vision --scene` (foreign object, moved part, no growth).

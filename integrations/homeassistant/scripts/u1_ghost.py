@@ -23,7 +23,9 @@ import time
 from typing import Any
 
 LIB = Path(__file__).resolve().parents[3] / "lib"
-CAMERA_MODEL = "Snapmaker U1"
+# The printer model whose bundled calibration (3d-cli lib/data/vision) the ghost is projected through;
+# `3d ha vision` sets it per printer in the compose service, the default is the U1.
+CAMERA_MODEL = os.environ.get("U1_GHOST_MODEL", "Snapmaker U1")
 MAX_LAG_MM = 1.0
 
 
@@ -158,7 +160,7 @@ class GhostRenderer:
             if self._camera is None:
                 self._camera = geometry.bundled_calibration(CAMERA_MODEL)
             if self._camera is None:
-                raise LookupError("no bundled U1 camera calibration")
+                raise LookupError(f"no bundled camera calibration for {CAMERA_MODEL}")
             ghost = vision_ghost.render(shell, self._camera, key[1], key[2])
         except Exception as exc:  # noqa: BLE001 - never break the camera stream
             error = f"{type(exc).__name__}: ghost render failed: {str(exc)[:160]}"

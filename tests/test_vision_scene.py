@@ -13,7 +13,7 @@ pytest.importorskip("cv2")
 import numpy as np  # noqa: E402
 
 from printer_ops.vision import INFO, WARNING  # noqa: E402
-from vision_scene import GrowthWatch, SceneWatch  # noqa: E402
+from vision_scene import GrowthWatch, SceneParams, SceneWatch  # noqa: E402
 
 H, W = 360, 640
 
@@ -122,3 +122,38 @@ def test_findings_are_warnings_for_the_bed_and_info_for_growth() -> None:
     found = [sw.update(tool, 10.0, 610 + i * 10, AREA, SIL) for i in range(4)][-1]
     assert [f.severity for f in found] == [WARNING]
     assert 0 < found[0].data["bed_share"] < 0.2
+
+
+def _creeping_part(minutes: float) -> np.ndarray:
+    """The part lifted one pixel row every 5 minutes (a corner curling off the plate)."""
+    img = np.full((H, W, 3), 60, np.uint8)
+    top = 200 - int(minutes / 5)
+    img[top:300, 250:400] = (40, 160, 40)
+    return img
+
+
+def _creep(params: SceneParams) -> list[tuple[float, list[str]]]:
+    area = np.zeros((H, W), np.uint8)
+    area[120:, :] = 255
+    sil = np.zeros((H, W), np.uint8)
+    sil[140:320, 240:410] = 255
+    watch = SceneWatch(params)
+    out = []
+    for i in range(0, 91):  # 90 minutes, one frame a minute
+        t = i * 60.0
+        found = watch.update(_creeping_part(t / 60), 10.0, t, area, sil)
+        out.append((t, [f.kind for f in found]))
+    return out
+
+
+def test_a_slow_lift_that_never_changes_within_12_minutes_is_still_reported() -> None:
+    out = _creep(SceneParams())
+    hits = [t for t, kinds in out if "vision_part_moved" in kinds]
+    assert hits, "a part that crept 18 rows in 90 min was never reported"
+    assert hits[0] >= 15 * 60  # only the slow reference (15-60 min old) can see it
+
+
+def test_without_the_slow_reference_the_same_creep_is_invisible() -> None:
+    # Regression for the 2026-10-22 U1 case: the 3-12 min reference absorbs a gradual lift.
+    blind = SceneParams(slow_min_frames=10_000)
+    assert all(kinds == [] for _, kinds in _creep(blind))

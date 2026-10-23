@@ -53,6 +53,8 @@ from printer_ops.vision import (  # noqa: E402
 if TYPE_CHECKING:
     import numpy as np
 
+    from vision_detach import DetachParams
+
 
 @dataclass(frozen=True)
 class ModelSpec:
@@ -242,11 +244,15 @@ class FrameScorer:
         verifier: Any = None,
         ignore: list[list[tuple[float, float]]] | None = None,
         geometry: PrintGeometry | None = None,
+        model: Any = None,
+        fixed_bed: Any = None,
     ) -> None:
+        self.fixed_bed = fixed_bed  # vision_detach.FixedBedDetach: uncalibrated part-detached check
         self.detector = detector
         self.verifier = verifier
         self.ignore = ignore or []
         self.geometry = geometry
+        self.model = model  # vision_model.ModelTier (tier b): extra Findings, never p/q
         self.context: PrintContext | None = None
         self.now: float | None = None  # frame time for replays; None = wall clock
         self.roi: np.ndarray | None = None
@@ -255,6 +261,10 @@ class FrameScorer:
         """A new print: forget the bed-change references (no-op without geometry)."""
         if self.geometry is not None:
             self.geometry.reset_print()
+        if self.model is not None:
+            self.model.reset_print()
+        if self.fixed_bed is not None:
+            self.fixed_bed.reset()
 
     def _allowed(self, b: Box) -> bool:
         cx, cy = (b.x1 + b.x2) / 2, (b.y1 + b.y2) / 2
@@ -274,8 +284,15 @@ class FrameScorer:
             else:
                 now = time.time() if self.now is None else self.now
                 self.roi, findings = self.geometry.update(bgr, self.context, now)
+        if self.fixed_bed is not None:
+            findings = findings + self.fixed_bed.update(
+                bgr, time.time() if self.now is None else self.now
+            )
         s = self.detector.score_bgr(bgr)
         kept = [b for b in s.boxes if self._allowed(b)]
+        if self.model is not None:
+            now = time.time() if self.now is None else self.now
+            findings = findings + self.model.update(bgr, self.context, now)
         s = FrameScore(
             p=float(sum(b.conf for b in kept)),
             boxes=kept,
@@ -294,29 +311,43 @@ class FrameScorer:
         return self.score_bgr(decode(jpeg))
 
 
-# The U1 toolhead seen from the chamber camera: a ~60 mm block around the nozzle reaching
-# ~100 mm up; the reported XY lags the frame by up to ~0.5 s of travel, hence the margin.
-HEAD_HALF_MM = 30.0
-HEAD_SKEW_MM = 40.0
-HEAD_UP_MM = 100.0
-ROI_PAD_MM = 15.0  # calibration error is up to ~30 px near the camera (9 px RMS)
-ROI_ABOVE_MM = 40.0  # spaghetti tangles around the nozzle, above the part top
-ROI_GROW_PX = 40  # at 1920 px: boxes just outside the projected volume still count
-BAND_MM = (
-    4.0  # the newest layers; excluded from the change detector, checked for growth
-)
+@dataclass(frozen=True)
+class GeometryParams:
+    """What the masks assume about the toolhead and the calibration, per printer
+    (`watch.vision.head`). Defaults are the U1 toolhead seen from its chamber camera: a ~60 mm
+    block around the nozzle reaching ~100 mm up; the reported XY lags the frame by up to ~0.5 s
+    of travel, hence the skew margin."""
+
+    half_mm: float = 30.0  # toolhead half width
+    skew_mm: float = 40.0  # status/frame skew margin
+    up_mm: float = 100.0  # toolhead height above the nozzle
+    pad_mm: float = 15.0  # calibration error is up to ~30 px near the camera (9 px RMS)
+    above_mm: float = 40.0  # spaghetti tangles around the nozzle, above the part top
+    grow_px: int = 40  # at 1920 px: boxes just outside the projected volume still count
+    band_mm: float = 4.0  # the newest layers; excluded from the change detector, checked for growth
 
 
 class PrintGeometry:
     """Camera calibration + live print position -> the box ROI and the bed-change Findings.
     Static masks are cached per (file, 0.1 mm of Z); the toolhead box is per frame."""
 
-    def __init__(self, cam: Any, *, scene: bool = True, growth: bool = True) -> None:
+    def __init__(
+        self,
+        cam: Any,
+        *,
+        scene: bool = True,
+        growth: bool = True,
+        detach: DetachParams | None = None,
+        params: GeometryParams | None = None,
+    ) -> None:
+        from vision_detach import DetachWatch
         from vision_scene import GrowthWatch, SceneWatch
 
         self.cam = cam
+        self.params = params or GeometryParams()
         self.scene = SceneWatch() if scene else None
         self.growth = GrowthWatch() if growth else None
+        self.detach = None if detach is None else DetachWatch(detach)
         self.file: str | None = None
         self._key: tuple[Any, ...] | None = None
         self._masks: dict[str, np.ndarray] = {}
@@ -326,47 +357,53 @@ class PrintGeometry:
         import numpy as np
         import vision_geometry as vg
 
+        g = self.params
         key = (ctx.filename, round(ctx.z, 1), shape, ctx.objects)
         if key != self._key:
             objs = [[(float(x), float(y)) for x, y in o] for o in ctx.objects]
             z = ctx.z
-            grow = max(1, round(ROI_GROW_PX * shape[1] / 1920))
+            grow = max(1, round(g.grow_px * shape[1] / 1920))
             roi = vg.volume_mask(
-                self.cam, z, shape, objs, pad_mm=ROI_PAD_MM, above_mm=ROI_ABOVE_MM
+                self.cam, z, shape, objs, pad_mm=g.pad_mm, above_mm=g.above_mm
             )
             sil = vg.silhouette_mask(self.cam, z, shape, objs, pad_mm=3)
             self._masks = {
                 "roi": cv2.dilate(roi, np.ones((grow, grow), np.uint8)),
                 "silhouette": sil,
                 "area": vg.bed_mask(self.cam, z, shape) | sil,
+                # part-detached check (vision_detach.py): where the near walls should be, the
+                # whole part volume, and the plate with a margin for the sheet beyond the bed
+                "wall": vg.wall_mask(self.cam, z, shape, objs),
+                "body": vg.prism_mask(self.cam, z, shape, objs, 0.0, max(z, 0.5)),
+                "plate": vg.bed_mask(self.cam, z, shape, margin_mm=g.pad_mm / 2),
                 # growth check: the newest band vs. solid part well below it and empty space
                 # above it; the one-band gaps keep calibration error (9-30 px) from mixing them
-                "band": vg.prism_mask(self.cam, z, shape, objs, z - BAND_MM, z),
+                "band": vg.prism_mask(self.cam, z, shape, objs, z - g.band_mm, z),
                 "below": vg.prism_mask(
-                    self.cam, z, shape, objs, z - 4 * BAND_MM, z - 2 * BAND_MM
+                    self.cam, z, shape, objs, z - 4 * g.band_mm, z - 2 * g.band_mm
                 ),
                 "above": vg.prism_mask(
-                    self.cam, z, shape, objs, z + BAND_MM, z + 3 * BAND_MM
+                    self.cam, z, shape, objs, z + g.band_mm, z + 3 * g.band_mm
                 ),
             }
             self._key = key
         head = [
             (
-                ctx.x + dx * (HEAD_HALF_MM + HEAD_SKEW_MM),
-                ctx.y + dy * (HEAD_HALF_MM + HEAD_SKEW_MM),
+                ctx.x + dx * (g.half_mm + g.skew_mm),
+                ctx.y + dy * (g.half_mm + g.skew_mm),
             )
             for dx, dy in ((-1, -1), (1, -1), (1, 1), (-1, 1))
         ]
         return {
             **self._masks,
             "head": vg.prism_mask(
-                self.cam, ctx.z, shape, [head], ctx.z - 2.0, ctx.z + HEAD_UP_MM
+                self.cam, ctx.z, shape, [head], ctx.z - 2.0, ctx.z + g.up_mm
             ),
         }
 
     def reset_print(self) -> None:
         """A new print started (possibly the same file again): drop every bed-change reference."""
-        for w in (self.scene, self.growth):
+        for w in (self.scene, self.growth, self.detach):
             if w is not None:
                 w.reset()
 
@@ -387,6 +424,10 @@ class PrintGeometry:
         if self.scene is not None:
             findings += self.scene.update(
                 bgr, ctx.z, now, m["area"], m["silhouette"], m["head"] | m["band"]
+            )
+        if self.detach is not None:
+            findings += self.detach.update(
+                bgr, ctx.z, m["wall"], m["body"], m["plate"], m["head"]
             )
         if self.growth is not None:
             findings += self.growth.update(
@@ -456,7 +497,7 @@ def annotate(jpeg: bytes, score: FrameScore) -> bytes:
 
 def _device_camera(device: Any, args: argparse.Namespace) -> Any:
     from errors import UsageError
-    from printer_ops.vision import U1_MONITOR, MoonrakerCamera
+    from printer_ops.camera import open_camera, require_camera
 
     if device.adapter != "moonraker":
         raise UsageError(
@@ -467,16 +508,80 @@ def _device_camera(device: Any, args: argparse.Namespace) -> Any:
                 "Moonraker entry (adapter: moonraker, port 7125), not creality-stock."
             ],
         )
-    cfg = (getattr(device, "watch", None) or {}).get("vision") or {}
-    cfg = cfg if isinstance(cfg, dict) else {}
-    snapshot = args.snapshot or str(cfg.get("snapshot") or U1_MONITOR)
-    keep = False if args.no_keepalive else cfg.get("keepalive")
-    return MoonrakerCamera(
-        device.host,
-        device.port,
-        snapshot=snapshot,
-        keepalive=None if keep is None else bool(keep),
+    spec = require_camera(device, "printer vision")  # watch.vision.camera / model default, never a guess
+    return open_camera(
+        device, spec, snapshot=args.snapshot, keepalive=False if args.no_keepalive else None
     )
+
+
+def detach_params(setting: Any) -> DetachParams | None:
+    """`watch.vision.detach`: true (defaults), false, or a mapping of DetachParams fields."""
+    from errors import UsageError
+    from vision_detach import DetachParams
+
+    if setting is False or setting is None:
+        return None
+    if setting is True:
+        return DetachParams()
+    try:
+        if not isinstance(setting, dict):
+            raise TypeError("expected true, false or a mapping")
+        return DetachParams(**setting)
+    except TypeError as exc:
+        raise UsageError(
+            f"watch.vision.detach must be true, false or a mapping of "
+            f"{', '.join(DetachParams.__dataclass_fields__)}: {exc}",
+            command="printer vision",
+        ) from exc
+
+
+def geometry_params(setting: Any) -> GeometryParams:
+    """`watch.vision.head`: absent (the U1 defaults) or a mapping of GeometryParams fields."""
+    from errors import UsageError
+
+    if setting is None:
+        return GeometryParams()
+    try:
+        if not isinstance(setting, dict):
+            raise TypeError("expected a mapping")
+        return GeometryParams(**setting)
+    except TypeError as exc:
+        raise UsageError(
+            f"watch.vision.head must be a mapping of "
+            f"{', '.join(GeometryParams.__dataclass_fields__)}: {exc}",
+            command="printer vision",
+        ) from exc
+
+
+def fixed_bed_detach(setting: Any, bed_roi: Any) -> Any:
+    """`watch.vision.fixed_bed` (off unless set): the uncalibrated part-detached fallback for a
+    printer whose camera and bed do not move against each other. `true` or a mapping
+    {roi: [[x, y], ...], baseline_frames, baseline_gap_s}; the plate polygon (normalised) defaults to
+    the printer's `watch.bed.roi`."""
+    from errors import UsageError
+    from vision_detach import FixedBedDetach
+
+    if setting in (None, False):
+        return None
+    opts = {} if setting is True else setting
+    if not isinstance(opts, dict) or set(opts) - {"roi", "baseline_frames", "baseline_gap_s"}:
+        raise UsageError(
+            "watch.vision.fixed_bed must be true or a mapping of roi, baseline_frames, baseline_gap_s",
+            command="printer vision",
+        )
+    roi = opts.get("roi", bed_roi)
+    try:
+        poly = [(float(x), float(y)) for x, y in roi or []]
+    except (TypeError, ValueError) as exc:
+        raise UsageError(f"watch.vision.fixed_bed.roi must be [x, y] pairs (0..1): {exc}", command="printer vision") from exc
+    if len(poly) < 3 or not all(0.0 <= v <= 1.0 for pt in poly for v in pt):
+        raise UsageError(
+            "watch.vision.fixed_bed needs a plate polygon of >= 3 points in 0..1: set "
+            "fixed_bed.roi or the printer's watch.bed.roi",
+            command="printer vision",
+        )
+    extra = {k: opts[k] for k in ("baseline_frames", "baseline_gap_s") if k in opts}
+    return FixedBedDetach(poly, **extra)
 
 
 def build_scorer(
@@ -485,13 +590,21 @@ def build_scorer(
     verify: bool = True,
     camera: Any = None,
     scene: bool = False,
+    detach: bool = True,
+    model: bool | None = False,
+    bed_roi: Any = None,
 ) -> FrameScorer:
     """The per-frame pipeline from a device's `watch: vision:` settings: `verify: false` turns
     stage 2 off, `ignore:` lists polygons (normalised [x, y] points) whose boxes are dropped,
     `geometry: false` ignores the camera calibration `camera` (vision_geometry.CameraModel).
     `scene: true` (or `scene=True`, the --scene flag) adds the bed-change detectors
     (foreign_object, part_moved, no_growth); off by default because on the U1 they still raise
-    ~139 and ~50 false findings per healthy printing day (docs/research/printer-vision-tuning.md)."""
+    ~139 and ~50 false findings per healthy printing day (docs/research/printer-vision-tuning.md).
+    The part-detached check (vision_detach.py) is on whenever the calibration is: `detach: false`
+    (or `detach=False`, --no-detach) turns it off, `detach: {gap_abs: 0.3, ...}` tunes it.
+    `model`: tier (b), the whole-frame vision model (vision_model.py), driven by
+    `watch.vision.model` — False (default) = not built, True = build it (downloads the weights if
+    needed), None = build it only when its weights are already cached."""
     from errors import UsageError
 
     try:
@@ -521,7 +634,13 @@ def build_scorer(
         verifier = ClipVerifier(ensure_clip(), threads=_threads())
     bed_change = scene or bool(cfg.get("scene", False))
     geometry = (
-        PrintGeometry(camera, scene=bed_change, growth=bed_change)
+        PrintGeometry(
+            camera,
+            scene=bed_change,
+            growth=bed_change,
+            detach=detach_params(cfg.get("detach", True)) if detach else None,
+            params=geometry_params(cfg.get("head")),
+        )
         if camera is not None and cfg.get("geometry", True)
         else None
     )
@@ -532,7 +651,19 @@ def build_scorer(
             command="printer vision",
             remediation=["Drop --scene, or see docs/research/printer-vision-geometry.md."],
         )
-    return FrameScorer(ObicoScorer(ensure_model()), verifier, polys, geometry)
+    fixed_bed = (
+        fixed_bed_detach(cfg.get("fixed_bed"), bed_roi)
+        if geometry is None and detach
+        else None
+    )
+    tier_b = None
+    if model is not False:
+        from vision_model import build_tier
+
+        tier_b = build_tier(cfg.get("model"), flag=model)
+    return FrameScorer(
+        ObicoScorer(ensure_model()), verifier, polys, geometry, tier_b, fixed_bed
+    )
 
 
 def _calibration(device: Any, args: argparse.Namespace) -> Any:
@@ -549,13 +680,17 @@ def run_live(args: argparse.Namespace) -> int:
     from printer_ops.base import PrinterCommError
     from printer_ops.devices import get_device
     from printer_ops.vision import ContextTap, KlippyLogTap, VisionMonitor
+    from printer_ops.vision_status import VisionStatus
     from printer_ops.watch import severity_rank
     from printer_ops.watch_sinks import Dispatcher
 
     device = get_device(args.printer)
     camera = _device_camera(device, args)
     adapter = make_adapter(device)
-    tap = None if args.no_npu else KlippyLogTap(device.host, device.port)
+    from printer_ops.vision_config import monitor_limits, npu_enabled
+
+    # the printer's own detector only where it has one (watch.vision.npu; default: a Snapmaker monitor camera)
+    tap = KlippyLogTap(device.host, device.port) if npu_enabled(device) and not args.no_npu else None
     cfg = (getattr(device, "watch", None) or {}).get("vision") or {}
     cam = _calibration(device, args)
     scorer = build_scorer(
@@ -563,6 +698,9 @@ def run_live(args: argparse.Namespace) -> int:
         verify=not args.no_verify,
         camera=cam,
         scene=args.scene,
+        detach=not args.no_detach,
+        model=args.model,
+        bed_roi=((getattr(device, "watch", None) or {}).get("bed") or {}).get("roi"),
     )
     context_tap = (
         ContextTap(device.host, device.port) if scorer.geometry else None
@@ -571,8 +709,10 @@ def run_live(args: argparse.Namespace) -> int:
         Path(args.evidence) if args.evidence else cache_dir() / "vision" / "evidence"
     )
     monitor = VisionMonitor(
-        device.name, scorer, annotate=annotate, evidence_dir=evidence
+        device.name, scorer, annotate=annotate, evidence_dir=evidence,
+        limits=monitor_limits(cfg if isinstance(cfg, dict) else {}),
     )
+    status = None if args.once else VisionStatus(device.name)  # the file 3d-api serves to Home Assistant
     dispatcher = None
     if not args.once:
         dispatcher = Dispatcher.for_devices([device], dry_run=args.dry_run)
@@ -614,6 +754,15 @@ def run_live(args: argparse.Namespace) -> int:
                 events += monitor.npu(tap.poll(), time.time())
             except PrinterCommError as exc:
                 report["npu_error"] = str(exc)
+        if status is not None:
+            status.update(
+                state=report.get("state"),
+                filename=report.get("file"),
+                score=score,
+                events=events,
+                trend=monitor.tracker.adjusted,
+                camera_error=report.get("camera_error"),
+            )
         if args.once:
             if score is None and frame is not None:
                 score = scorer(
@@ -636,6 +785,17 @@ def run_live(args: argparse.Namespace) -> int:
                     ],
                     findings=[f.kind for f in score.findings],
                 )
+            detach = scorer.geometry.detach if scorer.geometry is not None else None
+            if detach is None and scorer.fixed_bed is not None:
+                detach = scorer.fixed_bed.judge
+                detach.last_gap = scorer.fixed_bed.last_gap
+            if detach is not None:
+                # one frame cannot satisfy the persistence rule, so --once reports the raw reading
+                gap = detach.last_gap
+                report["detach_gap"] = None if gap is None else round(gap, 3)
+                report["part_detached"] = gap is not None and gap >= detach.params.gap_abs
+            if scorer.model is not None and scorer.model.last_scores:
+                report["model"] = scorer.model.report()
             report["trend"] = round(monitor.tracker.adjusted, 3)
             report["events"] = [e.to_json() for e in events]
             if frame is not None and args.save:
@@ -692,7 +852,8 @@ def run_guard(args: argparse.Namespace) -> int:
         raise UsageError("guard requires the CLIP verifier; watch.vision.verify is disabled", command="printer guard")
     camera_args = argparse.Namespace(snapshot=None, no_keepalive=False, no_geometry=False)
     camera = _device_camera(device, camera_args)
-    scorer = build_scorer(cfg, camera=_calibration(device, camera_args))
+    # guard pauses on confirmed spaghetti only: no detached-part check is built for it
+    scorer = build_scorer(cfg, camera=_calibration(device, camera_args), detach=False)
     if scorer.verifier is None:
         raise UsageError("guard requires a loaded CLIP verifier", command="printer guard")
     score_errors = _frame_score_errors()
@@ -738,12 +899,15 @@ def run_guard(args: argparse.Namespace) -> int:
 
 
 def run_record(args: argparse.Namespace) -> int:
-    """`vision record NAME DIR`: while the printer prints, save every frame plus where the print
-    is (gcode Z, toolhead XY, object footprints) to DIR/meta.jsonl. Read-only, like the live
-    loop. The folder is a test set for `vision eval`, which replays it with the calibrated
-    detectors. Stops after --max frames (default: never)."""
+    """`vision record NAME DIR`: while a print is running OR paused (a paused printer is where a
+    failure is still on the bed), save every frame plus where the print is (gcode Z, toolhead
+    XY, object footprints, printer state) to DIR/meta.jsonl. Read-only, like the live loop. The
+    folder is a test set for `vision eval`, which replays it with the calibrated detectors.
+    Stops after --max frames (default: never) or, with --timeout S, gives up (exit 1) when no
+    frame was saved within S seconds, so a script never waits forever on an idle printer."""
+    from errors import GateFailure
     from printer_ops import make_adapter
-    from printer_ops.base import PRINTING, PrinterCommError
+    from printer_ops.base import PAUSED, PRINTING, PrinterCommError
     from printer_ops.devices import get_device
     from printer_ops.vision import ContextTap
 
@@ -753,13 +917,16 @@ def run_record(args: argparse.Namespace) -> int:
     context_tap = ContextTap(device.host, device.port)
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    n, objects = 0, None
+    n, objects, last_state = 0, None, None
+    started = time.time()
     with (out / "meta.jsonl").open("a") as meta:
         while args.max is None or n < args.max:
             t0 = time.time()
+            state, active = None, False
             try:
-                printing = adapter.status().state == PRINTING
-                if printing:
+                state = adapter.status().state
+                active = state in (PRINTING, PAUSED)
+                if active:
                     camera.keepalive(t0)
                     frame = camera.grab()
                     ctx = context_tap.poll()
@@ -767,8 +934,15 @@ def run_record(args: argparse.Namespace) -> int:
                 print(
                     json.dumps({"t": round(t0, 1), "error": str(exc)}), file=sys.stderr
                 )
-                printing = False
-            if printing:
+                active = False
+            if state != last_state:  # say why nothing is saved (an idle printer was silent)
+                last_state = state
+                print(
+                    json.dumps({"t": round(t0, 1), "state": state, "recording": active}),
+                    file=sys.stderr,
+                    flush=True,
+                )
+            if active:
                 # milliseconds: two frames inside one second must not overwrite each other
                 stamp = time.strftime("%Y%m%dT%H%M%S", time.gmtime(frame.ts))
                 name = f"{stamp}.{int(frame.ts * 1000) % 1000:03d}Z.jpg"
@@ -777,6 +951,7 @@ def run_record(args: argparse.Namespace) -> int:
                     "frame": name,
                     "t": round(frame.ts, 2),
                     "file": ctx.filename,
+                    "state": state,
                     "z": ctx.z,
                     "x": round(ctx.x, 2),
                     "y": round(ctx.y, 2),
@@ -786,6 +961,16 @@ def run_record(args: argparse.Namespace) -> int:
                 meta.write(json.dumps(row) + "\n")
                 meta.flush()
                 n += 1
+            elif args.timeout is not None and n == 0 and time.time() - started >= args.timeout:
+                raise GateFailure(
+                    f"{device.name}: no frame saved in {args.timeout:g} s "
+                    f"(printer state: {state or 'unreachable'})",
+                    command="printer vision record",
+                    remediation=[
+                        "record saves frames only while the printer is printing or paused; "
+                        "start or resume a print, or drop --timeout to wait for one."
+                    ],
+                )
             time.sleep(max(0.5, args.interval - (time.time() - t0)))
     return 0
 
@@ -1098,7 +1283,7 @@ def run_eval(args: argparse.Namespace) -> int:
         ).get("vision")
         cfg = vision_cfg if isinstance(vision_cfg, dict) else {}
     scorer = build_scorer(
-        cfg, verify=not args.no_verify, camera=cam, scene=args.scene
+        cfg, verify=not args.no_verify, camera=cam, scene=args.scene, detach=not args.no_detach
     )
     replays = {str(p): load_replay(p) for p, _ in sources}
 
@@ -1120,11 +1305,22 @@ def run_eval(args: argparse.Namespace) -> int:
     m = metrics(results, interval_s=args.interval * args.every)
     n = m["frames"]["pos"] + m["frames"]["neg"]
     m["seconds_per_frame"] = round((time.time() - t0) / max(1, n), 3)
+    if args.model:
+        import vision_model
+
+        m["model"] = vision_model.eval_sources(
+            sources,
+            vision_model.parse_config(cfg.get("model"), flag=True),
+            every=args.every,
+            cls=args.model_class,
+        )
     if args.json:
         print(json.dumps(m, indent=2))
     else:
         _print_metrics(m)
         print(f"speed: {m['seconds_per_frame']} s/frame")
+        if args.model:
+            vision_model.print_eval(m["model"])
     return 0
 
 
@@ -1145,6 +1341,14 @@ def main(argv: list[str]) -> int:
     live.add_argument("--no-verify", action="store_true")
     live.add_argument("--no-geometry", action="store_true")
     live.add_argument("--scene", action="store_true")
+    live.add_argument("--no-detach", action="store_true")
+    live.add_argument(
+        "--model",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="tier (b) whole-frame vision model: --model forces it on (downloads the weights), "
+        "--no-model off; default follows watch.vision.model.enabled, else on when cached",
+    )
     live.add_argument("--evidence")
     live.add_argument("--dry-run", action="store_true")
     live.add_argument("--min-severity")
@@ -1158,6 +1362,9 @@ def main(argv: list[str]) -> int:
     ev.add_argument("--interval", type=float, default=10.0)
     ev.add_argument("--no-verify", action="store_true")
     ev.add_argument("--scene", action="store_true")
+    ev.add_argument("--no-detach", action="store_true")
+    ev.add_argument("--model", action="store_true", help="also score every frame with tier (b)")
+    ev.add_argument("--model-class", default="spaghetti", help="tier (b) class the --pos frames show")
     ev.add_argument("--printer")
     ev.add_argument("--json", action="store_true")
     rec = sub.add_parser("record")
@@ -1165,18 +1372,32 @@ def main(argv: list[str]) -> int:
     rec.add_argument("out")
     rec.add_argument("--interval", type=float, default=10.0)
     rec.add_argument("--max", type=int)
+    rec.add_argument("--timeout", type=float)
     rec.add_argument("--snapshot")
     rec.add_argument("--no-keepalive", action="store_true")
-    sub.add_parser("fetch-model")
+    fm = sub.add_parser("fetch-model")
+    fm.add_argument("--tier", choices=("a", "b", "all"), default="all")
+    from vision_fit import add_fit_arguments
+
+    add_fit_arguments(sub.add_parser("fit-head", help="fit the tier (b) logistic head on labelled frames"))
     args = ap.parse_args(argv)
     if args.cmd == "guard":
         return run_guard(args)
     if args.cmd == "fetch-model":
-        from vision_verify import ensure_clip
+        if args.tier in ("a", "all"):
+            from vision_verify import ensure_clip
 
-        print(ensure_model())
-        print(ensure_clip())
+            print(ensure_model())
+            print(ensure_clip())
+        if args.tier in ("b", "all"):
+            import vision_model
+
+            print(vision_model.fetch())
         return 0
+    if args.cmd == "fit-head":
+        from vision_fit import run_fit
+
+        return run_fit(args)
     if args.cmd == "eval":
         return run_eval(args)
     if args.cmd == "record":

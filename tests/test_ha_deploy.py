@@ -65,11 +65,24 @@ def test_real_packages_only_need_reloads() -> None:
     assert restart == []
     assert reloads == {
         "automation.reload",
-        "command_line.reload",
         "rest.reload",
         "rest_command.reload",
         "script.reload",
         "template.reload",
+    }
+
+
+def test_the_generated_vision_package_only_needs_reloads() -> None:
+    reloads, restart = package_reloads(
+        (REAL / "packages/printer_vision.yaml").read_text(encoding="utf-8")
+    )
+    assert restart == []
+    assert reloads == {
+        "automation.reload",
+        "command_line.reload",
+        "input_boolean.reload",
+        "rest.reload",
+        "rest_command.reload",
     }
 
 
@@ -86,7 +99,10 @@ def test_help_and_docs_list_the_same_flags() -> None:
 
     doc = (REPO_ROOT / "docs/commands/ha.md").read_text(encoding="utf-8")
     flags = set(re.findall(r"--[a-z][a-z-]+", USAGE))
-    assert flags == {"--dry-run", "--host", "--ref", "--ha-dir", "--source"}
+    assert flags == {
+        "--dry-run", "--host", "--ref", "--ha-dir", "--source",  # deploy
+        "--write", "--root", "--fleet",  # vision
+    }
     assert flags <= set(re.findall(r"--[a-z][a-z-]+", doc))
 
 

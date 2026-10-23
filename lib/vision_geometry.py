@@ -574,6 +574,35 @@ def top_band_mask(
     return _paint(cam, shape, polys)
 
 
+def wall_mask(
+    cam: CameraModel,
+    z: float,
+    shape: tuple[int, ...],
+    objects: list[Polygon],
+    heights: list[float] | None = None,
+    grow_px: int = 3,
+) -> np.ndarray:
+    """The side walls the camera should see: for each object the prism faces from the bed to
+    min(z, height) minus its top face (grown by `grow_px`). From a low camera that is the band
+    between the base edge and the top edge on the near side; where a part sits on the plate it
+    is part, where the part lifted off it is bare plate."""
+    import numpy as np
+    from scipy.ndimage import binary_dilation
+
+    out = np.zeros(tuple(int(v) for v in shape[:2]), dtype=bool)
+    for poly, top in zip(objects, _heights(objects, heights), strict=True):
+        hi = min(z, top)
+        if hi <= 0:
+            continue
+        faces = _prism_faces(cam, z, _pad(poly, 0), 0.0, hi)
+        sides = _paint(cam, shape, [faces[0], *faces[2:]]) > 0
+        top_face = _paint(cam, shape, [faces[1]]) > 0
+        if grow_px > 0:
+            top_face = binary_dilation(top_face, iterations=grow_px)
+        out |= sides & ~top_face
+    return out.astype(np.uint8) * 255
+
+
 def prism_mask(
     cam: CameraModel,
     z: float,
@@ -659,6 +688,11 @@ def bundled_calibration(model: str) -> CameraModel | None:
     """The calibration shipped for a printer model (e.g. 'Snapmaker U1'), or None."""
     name = _BUNDLED.get(_model_key(model))
     return read_camera(_BUILTIN_DIR / name) if name else None
+
+
+def has_bundled_calibration(model: str) -> bool:
+    """Whether 3d-cli ships a camera calibration for this printer model (no file is read)."""
+    return _model_key(model) in _BUNDLED
 
 
 def read_camera(path: pathlib.Path) -> CameraModel:
