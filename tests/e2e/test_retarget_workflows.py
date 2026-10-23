@@ -198,3 +198,28 @@ def test_gcode_flag_reports_a_slicer_that_refuses(tmp_path: Path) -> None:
         "--gcode", str(tmp_path / "k1.gcode"), env_extra={**_env(tmp_path), "SLICER": str(slicer)},
     )
     assert res.returncode == 1 and "slicing failed (exit 239" in res.stderr and "return -17" in res.stderr
+
+
+def test_gcode_flag_records_the_slicer_warnings_sidecar(tmp_path: Path) -> None:
+    src, presets = _setup(tmp_path)
+    slicer = _fake_slicer(tmp_path, gcode_x=100)
+    gcode = tmp_path / "k1.gcode"
+    res = run_cli(
+        tmp_path, "retarget", str(src), "--to", "testk1", "--preset-dir", str(presets), "--keep", "1",
+        "-o", str(tmp_path / "k1.3mf"), "--gcode", str(gcode),
+        env_extra={**_env(tmp_path), "SLICER": str(slicer)},
+    )
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert (tmp_path / "k1.slice-warnings.json").is_file() and "slicer warnings:" in res.stdout
+
+
+def test_gcode_path_may_not_overwrite_either_project(tmp_path: Path) -> None:
+    src, presets = _setup(tmp_path)
+    before = src.read_bytes()
+    out = tmp_path / "k1.3mf"
+    base = ["retarget", str(src), "--to", "testk1", "--preset-dir", str(presets), "--keep", "1", "-o", str(out)]
+    env = _env(tmp_path)
+    onto_source = run_cli(tmp_path, *base, "--gcode", str(src), env_extra=env)
+    onto_output = run_cli(tmp_path, *base, "--gcode", str(out), env_extra=env)
+    assert onto_source.returncode == 2 and onto_output.returncode == 2
+    assert src.read_bytes() == before and not out.exists()

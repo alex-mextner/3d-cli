@@ -642,7 +642,7 @@ def _rewrite_settings(
                 continue
             idx = keep_slot - 1 if len(value) == old_fil and old_fil > 1 else 0
             put(key, [value[min(idx, len(value) - 1)]], "collapse")
-    if collapse_filaments:
+    if new_fil == 1:  # one extruder: whatever extruder a slot key or the filament map names is extruder 1
         for key, value in list(new.items()):
             if (
                 key.endswith(_SLOT_KEY_SUFFIX)
@@ -652,9 +652,10 @@ def _rewrite_settings(
             ):
                 put(key, "1", "collapse")
         if (
-            "filament_map" in new
+            "filament_map" in new and new["filament_map"] != ["1"]
         ):  # filament -> extruder assignment: the one filament on extruder 1
             put("filament_map", ["1"], "collapse")
+    if collapse_filaments:
         put("flush_volumes_matrix", list(_SINGLE_FILAMENT_FLUSH_MATRIX), "collapse")
         put("flush_volumes_vector", list(_SINGLE_FILAMENT_FLUSH_VECTOR), "collapse")
         if new.get("enable_prime_tower") != "0":

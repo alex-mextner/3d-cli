@@ -203,6 +203,16 @@ def run(argv: list[str]) -> int:
             command="retarget",
             extra="The source project is never overwritten; pick another output name.",
         )
+    if opts.gcode and not opts.dry_run:
+        for protected in (src, out):
+            if Path(opts.gcode).resolve() == protected.resolve():
+                raise InvalidArgument(
+                    "--gcode",
+                    opts.gcode,
+                    ["a path different from the input and the output project"],
+                    command="retarget",
+                    extra="The G-code would overwrite a project file; pick another name.",
+                )
     for pname in opts.setting_sets:
         if pname not in rt.PRESETS:
             raise InvalidArgument(
@@ -295,13 +305,17 @@ def _write_validated(
     return problems
 
 
+# `find_slicer` kinds that take the Orca CLI flags used below ("custom" is an explicit $SLICER).
+_ORCA_FAMILY = frozenset({"orca", "bambu", "custom"})
+
+
 def _find_orca_cli() -> str:
     """The Orca-family slicer binary. `find_slicer` knows OrcaSlicer/Bambu/Prusa names, not the
     Snapmaker Orca launcher, so that one is looked up here."""
     from cli.env import find_slicer
 
     found = find_slicer()
-    if found is not None:
+    if found is not None and found[0] in _ORCA_FAMILY:
         return found[1]
     snapmaker = shutil.which("snapmaker-orca") or shutil.which("snapmaker_orca")
     if snapmaker:
@@ -324,6 +338,7 @@ def _slice_and_check(
     retargeted project settings go in as machine / process / filament presets.
     """
     from commands import gcode_bounds
+    from commands.slice import _record_warnings
     from slicing import retarget_3mf as rt
 
     binary = _find_orca_cli()
@@ -359,6 +374,7 @@ def _slice_and_check(
                 remediation=[tail or "no slicer output"],
             )
         shutil.move(produced[0], gcode)
+        _record_warnings(str(gcode), proc.stdout + proc.stderr, str(work))
     print(f"sliced OK -> {gcode} ({gcode.stat().st_size} bytes)")
     return gcode_bounds.run(
         [str(gcode), *(["--printer", bounds_printer] if bounds_printer else [])]

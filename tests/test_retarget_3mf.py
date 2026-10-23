@@ -689,6 +689,13 @@ def test_project_only_per_extruder_and_per_filament_lists_collapse_too(
     ]  # was ["2", "2"]: the one filament sits on extruder 1
 
 
+def test_a_one_filament_project_still_moves_its_filament_to_extruder_1(
+    tmp_path: Path, env: Path
+) -> None:
+    parts, _ = build(tmp_path, env, TWO, filaments=1, keep="1")
+    assert settings_of(parts)["filament_map"] == ["1"]  # was ["2"]: extruder 2 does not exist on the target
+
+
 def test_a_malformed_bed_is_an_argument_error_not_a_crash() -> None:
     for bad in (
         ["220", "220x0", "220x220", "0x220"],
