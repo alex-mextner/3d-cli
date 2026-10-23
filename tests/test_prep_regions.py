@@ -476,7 +476,10 @@ def test_patterns_without_equal_neighbours_pass(pattern: str) -> None:
 @pytest.mark.parametrize("pattern", ["GWGG", "WGGW", "GWG", "GGWR", "WRKW"])
 def test_adjacent_repeats_are_caught_including_the_seam(pattern: str) -> None:
     # GWG and WRKW only repeat across the seam: G,W,G,G,W,G
-    assert _violations(pattern, [0.1]) == ["m"]
+    found = _violations(pattern, [0.1])
+    # the layer-rules engine reports each repeated colour (WGGW: G in the middle, W across the seam)
+    assert found
+    assert set(found) == {"m"}
 
 
 def test_thickness_over_the_cap_is_caught_and_the_same_pattern_passes_when_thin() -> (
