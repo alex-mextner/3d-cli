@@ -1,0 +1,141 @@
+# Bambu Lab P1P / P1S / A1 / A1 mini: what is really possible on closed firmware.
+#
+# Klipper is NOT possible: the firmware is Bambu's closed one and no source below replaces it with
+# Klipper. What the vendor documents is LAN Only mode, Developer mode (third-party software without
+# the Authorization Control System) and firmware downgrades through Bambu Handy. All of it is done
+# on the printer screen or in the app, so every step here is MANUAL and verified by asking the user;
+# no state of this profile can be detected read-only (LAN/Developer mode need the access code and an
+# MQTT login), so `fw plan --from STATE` is the usual way in.
+id: bambu-lab-p1-a1
+vendor: Bambu Lab
+family: P1 and A1 series (P1P, P1S, A1, A1 mini)
+models:
+  - regex: '^bambu\s*lab\s+(p1p|p1s|a1|a1\s*mini)$'
+sources:
+  - https://wiki.bambulab.com/en/knowledge-sharing/enable-lan-mode
+  - https://wiki.bambulab.com/en/knowledge-sharing/enable-developer-mode
+  - https://wiki.bambulab.com/en/software/third-party-integration
+  - https://blog.bambulab.com/firmware-update-introducing-new-authorization-control-system-2/
+  - https://wiki.bambulab.com/en/knowledge-sharing/firmware-downgrade
+  - https://help.simplyprint.io/en/article/bambu-lab-security-firmware-authorization-control-system-update-will-i-still-be-able-to-use-simplyprint-y2uoor/
+capabilities:
+  klipper_possible: false
+  notes: >-
+    Klipper cannot be installed on Bambu P1/A1 printers: they run Bambu's closed firmware and none of the sources of this profile
+    describes a Klipper port. What is possible: LAN Only mode (printer works on the local network without the cloud), Developer mode
+    (opens the MQTT channel, live stream and FTP so third-party software works without Bambu's authorization checks; only together with LAN
+    Only mode, never with the cloud) and installing an older firmware through Bambu Handy. The Authorization Control System arrived in
+    firmware 01.08.02.00 for P1 and 01.05.00.00 for A1 (SimplyPrint helpdesk; the Bambu wiki gives no version numbers for P/A series).
+
+backups:
+  - id: lan-access-code
+    description: The printer's LAN Access Code (shown on its screen in LAN Only mode) and its Bambu Studio printer settings; there is no read-only export.
+    via: manual
+    instruction: >-
+      Write down the Access Code from the printer screen (Settings > WLAN > Lan Only Mode on P series; Setting > LAN Only Mode on A series)
+      and export your Bambu Studio printer/filament profiles. Nothing here can be read from the printer without that code.
+
+states:
+  - id: stock
+    title: Stock firmware, cloud mode (Bambu Handy / Bambu Studio cloud)
+    notes: Not machine-detectable; the starting point of the transitions below.
+  - id: lan-mode
+    title: LAN Only mode on (local network, access code, no cloud)
+    notes: >-
+      Not machine-detectable without the access code. Cloud-only features stop: no remote print start from outside the LAN, no Bambu Handy,
+      no print history (Bambu wiki enable-lan-mode).
+    sources:
+      - https://wiki.bambulab.com/en/knowledge-sharing/enable-lan-mode
+  - id: developer-mode
+    title: LAN Only mode + Developer mode (third-party software works without authorization)
+    notes: Not machine-detectable. Developer mode only works under LAN Only mode (Bambu wiki third-party-integration).
+    sources:
+      - https://wiki.bambulab.com/en/knowledge-sharing/enable-developer-mode
+      - https://wiki.bambulab.com/en/software/third-party-integration
+  - id: pre-authorization-firmware
+    title: Older firmware without the Authorization Control System (downgraded)
+    notes: >-
+      Reached by installing an older version through Bambu Handy. A downgrade path exists for P1/A1 (SimplyPrint: "Firmware downgrades are
+      possible"); models shipped later with authorization on day 1 have none, which is why Developer mode is the durable route.
+    sources:
+      - https://wiki.bambulab.com/en/knowledge-sharing/firmware-downgrade
+
+transitions:
+  - id: enable-lan-mode
+    from: stock
+    to: lan-mode
+    title: Turn LAN Only mode on at the printer
+    sources:
+      - https://wiki.bambulab.com/en/knowledge-sharing/enable-lan-mode
+    steps:
+      - id: enable-lan-only-mode
+        title: Enable LAN Only mode on the printer screen and note the Access Code
+        kind: manual
+        automatable: false
+        risk: low
+        instruction: |
+          P1P / P1S: Settings > WLAN > Lan Only Mode (initially OFF) > turn on, confirm "Yes". It shows ON when it worked; note the Access Code.
+          A1 / A1 mini: Settings (page 3) > LAN Only Mode > turn on; the button turns green. On A1 the code is shown only after LAN Only mode is on
+          (all zeros: toggle the mode off and on, SimplyPrint helpdesk).
+          Then bind the printer in Bambu Studio: Device page > the printer with the lock icon > enter the Access Code.
+          Cloud-only features stop working (remote start from outside the LAN, Bambu Handy, print history).
+        verify:
+          - {kind: confirm, id: lan-only-on, title: the printer shows LAN Only mode ON, prompt: "Does the printer screen show LAN Only mode ON?"}
+        sources:
+          - https://wiki.bambulab.com/en/knowledge-sharing/enable-lan-mode
+  - id: enable-developer-mode
+    from: lan-mode
+    to: developer-mode
+    title: Turn Developer mode on (needs LAN Only mode)
+    sources:
+      - https://wiki.bambulab.com/en/knowledge-sharing/enable-developer-mode
+      - https://wiki.bambulab.com/en/software/third-party-integration
+    steps:
+      - id: enable-developer-mode-on-screen
+        title: Enable Developer mode on the printer screen (opens MQTT, live stream and FTP)
+        kind: manual
+        automatable: false
+        risk: medium
+        instruction: |
+          P1P / P1S: after Lan Only mode is ON, scroll down in the WLAN settings, select Developer Mode, read the Important Notice carefully, scroll to
+          the end and click Enable; it shows ON.
+          A1 / A1 mini: Setting > Developer Mode, tick "I confirm reading and understanding the Important Notice above", select Enable; the button turns green.
+          This opens the MQTT channel, the live stream and FTP: you take over responsibility for the printer's network security. The printer cannot
+          connect to Bambu Cloud while Developer mode is on. Third-party software (the access code is the credential) then works without Bambu Connect.
+        verify:
+          - {kind: confirm, id: developer-mode-on, title: the printer shows Developer mode enabled, prompt: "Does the printer screen show Developer Mode ON (green)?"}
+        rollback:
+          to: lan-mode
+          instruction: >-
+            Switch Developer mode off in the same menu [INFERENCE: the wiki documents only enabling it]; LAN Only mode stays on. Review who can
+            reach the printer's MQTT/FTP ports on your network.
+        sources:
+          - https://wiki.bambulab.com/en/knowledge-sharing/enable-developer-mode
+  - id: downgrade-firmware
+    from: stock
+    to: pre-authorization-firmware
+    title: Install an older firmware through Bambu Handy
+    sources:
+      - https://wiki.bambulab.com/en/knowledge-sharing/firmware-downgrade
+    steps:
+      - id: downgrade-through-bambu-handy
+        title: Bambu Handy > Settings > Device > Firmware Version > "I want to update to a historical version"
+        kind: manual
+        automatable: false
+        risk: medium
+        instruction: |
+          Use the latest Bambu Handy (official Software Download page or your app store). Tap Settings (top right), Device (bottom), the menu icon,
+          Settings, "Firmware Version", scroll slightly and tap "I want to update to a historical version", pick the version you need (the one the
+          technical team recommends or the previous one) and tap Update. The printer restarts by itself; run a calibration afterwards.
+          The same firmware that predates the Authorization Control System lets third-party software work without Developer mode; newer firmware
+          needs Studio/Handy updated together with it (Bambu blog).
+        verify:
+          - {kind: confirm, id: old-firmware-running, title: the printer runs the older firmware, prompt: "Does the printer's Firmware Version page show the older version you chose?"}
+        rollback:
+          to: stock
+          instruction: >-
+            Install the current firmware again from the same Firmware Version page in Bambu Handy [INFERENCE: the wiki shows the downgrade only];
+            then run a calibration.
+        sources:
+          - https://wiki.bambulab.com/en/knowledge-sharing/firmware-downgrade
+          - https://blog.bambulab.com/firmware-update-introducing-new-authorization-control-system-2/

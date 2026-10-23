@@ -347,8 +347,12 @@ skills (`atomic-commits`, `ai-review-before-commit`, `pre-commit-gate`,
 - `printers` (plural) is the model registry AND the fleet-wide actions, as self-registering subs in
   `lib/printers_cli/<sub>.py` (`SUB = Sub(...)`, found by `printers_cli.discover()`; adding one edits no
   shared file): `spools|load|unload|swap|filament` (the filament in the printers, thin over printops and the
-  adapters, `--dry-run`/`--json`). All of it is fleet-driven: nothing is keyed on a printer name, and tests use
-  loopback fakes, never a real device. See `docs/commands/printers.md`.
+  adapters, `--dry-run`/`--json`) and `fw` (`lib/printer_fw/` + vendor profiles as YAML data in
+  `lib/data/firmware/`: `status|plan|backup|apply`, `apply` is a dry run by default and with `--yes` needs a
+  fresh backup, the typed printer name and an idle printer; the runbooks' pitfalls are machine-checked
+  guards). All of it is fleet-driven: nothing is keyed on a printer name (`tests/test_printer_fw_parity.py`
+  scans for it), and tests use loopback fakes and an injected ssh runner, never a real device. See
+  `docs/commands/printers.md`, `printers-fw.md`, `docs/printers/firmware-profiles.md`.
 - `print-preflight` runs EVERY G-code gate (bounds, overhangs, slicer warnings, head
   sequence, mix face, mix layers, thumbnails, visible faces); a new G-code gate is added to
   `printer_ops/preflight.run_preflight`, never left as a separate step, and a gate without
