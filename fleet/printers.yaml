@@ -44,7 +44,17 @@ u1:
     MOVE_TO_XY_IDLE_POSITION_EXTRUDER, SM_PRINT_AUTO_FEED, SM_PRINT_CHECK_SWITCH_EXTRUDER,
     SM_PRINT_EXTRUDER_PREHEAT, SM_PRINT_FLOW_CALIBRATE, SM_PRINT_PREEXTRUDE_FILAMENT,
     SET_PURIFIER_MODE, TIMELAPSE_START, TIMELAPSE_STOP, TIMELAPSE_TAKE_FRAME, WAIT_CHAMBER_TEMP,
-    T0, T1, T2, T3]
+    T0, T1, T2, T3,
+    # Pause for a manual step (nuts into a print cavity, filament change). Only M600 is trusted, not
+    # bare PAUSE (no plate emits it; review brainstorm 2026-10-23: keep the trust as narrow as the
+    # evidence). M600 is the printer's own one-line alias `[gcode_macro M600] gcode: PAUSE` (fluidd.cfg:63); PAUSE -> INNER_PAUSE
+    # (fluidd.cfg:325) = SAVE_GCODE_STATE, retract, Z+5, head to the filament-discard spot
+    # (X ~93..228, Y 300.5, behind the plate, inside axis_limits y 0..335), nozzles 40 C, bed kept,
+    # idle timeout off; RESUME -> INNER_RESUME (fluidd.cfg:421) reheats, purges 20 mm at the discard
+    # spot and RESTORE_GCODE_STATE (G90/G91, offsets, E mode, position). Bodies read from the
+    # printer's config 2026-10-22 (Snapmaker/u1-klipper pause_resume.py); this printer completed
+    # three M600 nut-pause prints (Moonraker history 000045, 000050, 000051, 2026-10-04..10).
+    M600]
   # longest clean bridge for the print-preflight overhangs gate (default 15):
   # tester u1_bridge_span A, 17,2/20,5 мм
   bridge_max_mm: 25
