@@ -56,6 +56,9 @@ FILLS = ("owlv2", "none")
 QUALITIES = ("fast", "accurate")
 # "fast" processes the full-resolution photo on CPU too (SAM2 resizes its input to 1024 x 1024 whatever the photo size, so
 # downscaling saves nothing; it only costs mask detail: 41 % -> 89 % parity with the GPU masks, docs/commands/segment.md).
+BG_REJECT_THRESHOLD = (
+    0.5  # summed background probability (CLIP) from which a mask is dropped
+)
 DEFAULT_GRID_GATE = 0.1  # OWLv2 objectness a grid point's patch neighbourhood needs before the point is decoded (quality="fast")
 # CPU default (measurements in docs/commands/segment.md): no AMG grid, OWLv2 boxes -> SAM2 box prompts, all on a copy of the
 # image whose longest side is CPU_MAX_SIDE. points_per_side=0 means "no AMG".
@@ -210,8 +213,8 @@ def _fraction_covered(union: np.ndarray, box: Sequence[float]) -> float:
 def load_prompts(spec: str) -> list[str]:
     """CLIP prompts from a comma list ("a carpet,a floor") or a text file (one prompt per line, `#` comments, blank lines skipped).
 
-    A value that is not an existing file but looks like a path (a separator or a `.txt` / `.md` suffix) is an error, not a prompt:
-    a mistyped file name must not become the only background prompt.
+    A value that is not an existing file but looks like a path (a `.txt` / `.md` / `.lst` suffix, or a separator without any space
+    or comma) is an error, not a prompt: a mistyped file name must not become the only background prompt.
     """
     path = Path(spec)
     try:
@@ -227,7 +230,9 @@ def load_prompts(spec: str) -> list[str]:
                 "a UTF-8 text file, one prompt per line",
             ) from exc
         parts = [ln.split("#", 1)[0] for ln in lines]
-    elif "/" in spec or path.suffix.lower() in (".txt", ".md", ".lst"):
+    elif path.suffix.lower() in (".txt", ".md", ".lst") or (
+        "/" in spec and " " not in spec and "," not in spec
+    ):
         raise BadInput(
             f"prompt file {spec!r} does not exist",
             "a comma list of prompts, or the path of an existing file",
@@ -418,6 +423,8 @@ class Segmenter:
         self.fg_prompts = (
             list(fg_prompts) if fg_prompts is not None else list(FG_PROMPTS)
         )
+        self.owl_tiles = owl_tiles
+        self.grid_gate = DEFAULT_GRID_GATE if grid_gate is None else grid_gate
         _validate(
             points_per_side=points_per_side,
             points_per_batch=points_per_batch,
@@ -426,15 +433,13 @@ class Segmenter:
             max_area_frac=max_area_frac,
             owl_threshold=owl_threshold,
             owl_tiles=owl_tiles,
-            grid_gate=DEFAULT_GRID_GATE if grid_gate is None else grid_gate,
+            grid_gate=self.grid_gate,
             fill=fill,
             method=method,
             reject_bg=reject_bg,
             bg_prompts=self.bg_prompts,
             fg_prompts=self.fg_prompts,
         )
-        self.owl_tiles = owl_tiles
-        self.grid_gate = grid_gate
         self.requested = device
         self.points_per_side, self.points_per_batch, self.max_side = (
             points_per_side,
@@ -446,9 +451,8 @@ class Segmenter:
         self.owl_threshold = owl_threshold
         self.device = "cpu"
         self.loaded = False
-        self._cpu_only = (
-            False  # set only while one call is being redone on CPU after a GPU OOM
-        )
+        # set only while one call is being redone on CPU after a GPU OOM
+        self._cpu_only = False
         self._owns_clip, self._owns_detector = clip is None, detector is None
         self._clip = clip
         self._detector = detector
@@ -456,9 +460,8 @@ class Segmenter:
         self._u2: U2Net | None = None
         self._pred: Any = None
         self._pred_key: str | None = None
-        self._bg_text: np.ndarray | None = (
-            None  # CLIP text embeddings of bg_prompts + fg_prompts
-        )
+        # CLIP text embeddings of bg_prompts + fg_prompts
+        self._bg_text: np.ndarray | None = None
 
     # lifecycle
     @property
@@ -467,7 +470,8 @@ class Segmenter:
 
     @property
     def effective_quality(self) -> str:
-        """The quality this run uses: the requested one, else "accurate" on cuda and "fast" on cpu (the stock generator
+        """The quality this run uses (meaningful once `load()` resolved the device): the requested one, else "accurate" on
+        cuda and "fast" on cpu (the stock generator
         takes 85-92 s on CPU, the boxes-only legacy path reproduces 41 % of the GPU masks: docs/commands/segment.md)."""
         return self.quality or ("fast" if self.device == "cpu" else "accurate")
 
@@ -625,14 +629,13 @@ class Segmenter:
         cands: list[Instance] = []
         boxes: list[dict[str, Any]] = []
         gate = (
-            (DEFAULT_GRID_GATE if self.grid_gate is None else self.grid_gate)
+            self.grid_gate
             if self.effective_quality == "fast" and self.fill == "owlv2" and pps > 0
             else 0.0
         )
         objectness: np.ndarray | None = None
-        if (
-            gate > 0
-        ):  # OWLv2 first: its objectness map decides which grid points are worth decoding
+        # OWLv2 first: its objectness map decides which grid points are worth decoding
+        if gate > 0:
             stage("detect", 0.0)
             t0 = time.perf_counter()
             boxes, objectness = self._detect(proc)
@@ -688,7 +691,7 @@ class Segmenter:
         for c, b in zip(cands, bg, strict=True):
             area = int(c["mask"].sum())
             if (
-                (self.reject_bg and b >= 0.5)
+                (self.reject_bg and b >= BG_REJECT_THRESHOLD)
                 or area >= max_proc
                 or area == 0
                 or area < min_proc
@@ -709,7 +712,9 @@ class Segmenter:
             "vram_mb": peak_mb(self.device),
             "n_amg": n_amg,
             "n_owl_added": n_owl,
-            "n_bg_rejected": int((bg >= 0.5).sum()) if self.reject_bg else 0,
+            "n_bg_rejected": int((bg >= BG_REJECT_THRESHOLD).sum())
+            if self.reject_bg
+            else 0,
             "quality": self.effective_quality,
             "points_per_side": pps,
             "process_scale": round(scale, 4),
@@ -768,9 +773,8 @@ class Segmenter:
         if objectness is not None and gate > 0:
             pts = gate_points(pts, objectness, hw, gate)
         res = grid_masks(self._predictor(rgb), hw, pts)
-        if (
-            self.device == "cuda"
-        ):  # hand the decoder's cached blocks back before CLIP / ONNX allocate theirs
+        # hand the decoder's cached blocks back before CLIP / ONNX allocate theirs
+        if self.device == "cuda":
             import torch
 
             torch.cuda.empty_cache()

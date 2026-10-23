@@ -162,10 +162,12 @@ class OrtEncoder:
                 )
             self.providers = active
             return sess
-        cannot_load = (
-            CudaSessionFailed if want_cuda and last is not None else MissingDependency
-        )
-        raise cannot_load(
+        if want_cuda:
+            raise CudaSessionFailed(
+                f"cannot create a CUDA session for {path.name}: {last}",
+                "the GPU is probably full: free VRAM, or run with --device cpu (--device auto retries on CPU by itself)",
+            ) from last
+        raise MissingDependency(
             f"cannot load {path.name} with onnxruntime: {last}",
             f"3d vision-models pull {self.model_name}",
         ) from last

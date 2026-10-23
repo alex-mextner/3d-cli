@@ -24,10 +24,8 @@ BOX_NMS_THRESH = 0.6
 MIN_REGION_AREA = 100  # holes / islands smaller than this (px at the processed resolution) are cleaned like SAM's AMG does
 POINT_BATCH = 64  # decoder batch: 64 points x 3 masks x 256 x 256 logits = 50 MB
 UPSAMPLE_BATCH = 16  # masks upsampled to photo size per step (16 x 3 MP floats = 200 MB of GPU memory)
-BOX_CORNER_LABELS = (
-    2,
-    3,
-)  # SAM2 prompt labels of a box's top-left and bottom-right corner
+# SAM2 prompt labels of a box's top-left and bottom-right corner
+BOX_CORNER_LABELS = (2, 3)
 
 
 _HALF: weakref.WeakKeyDictionary[Any, Any] = weakref.WeakKeyDictionary()
