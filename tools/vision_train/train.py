@@ -1,8 +1,8 @@
 """train.py — fit, evaluate and fine-tune tier (b) on the labelled frame set (dataset.py output).
 
-Runs on the training server (tools/vision_train/remote.py copies lib/ + this directory + the data
-there and runs it under a hard timeout); the same file works on any CUDA box and, slowly, on a
-CPU. The workstation only ever runs it as a tiny smoke test (`--smoke`: 48 frames, a few steps,
+Runs on the owner's laptop (`remote.py run --entry train.py`: it copies lib/ + this directory + the
+data there and runs it under the load/VRAM guard); the same file works on any CUDA box and, slowly,
+on a CPU. experiment.py is the held-out comparison; this is the single-split tool. The workstation only ever runs it as a tiny smoke test (`--smoke`: 48 frames, a few steps,
 <= 3 GB of VRAM). Needs the packages of requirements.txt (torch, transformers, numpy, opencv).
 
     train.py head      DATASET OUT   embed every frame once, fit one logistic head per class on the

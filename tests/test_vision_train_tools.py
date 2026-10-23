@@ -206,7 +206,11 @@ def test_clean_frees_everything_but_out_unless_all_and_never_touches_other_dirs(
     )  # out/ stays
     assert "$HOME/work-3d-cli-vision/r1" in out
     assert remote.main(["clean", "r1", "--all"]) == 0 and ran == []
-    assert "rm -rf -- $HOME/work-3d-cli-vision/r1" in capsys.readouterr().out
+    printed = capsys.readouterr().out
+    assert "rm -rf -- $HOME/work-3d-cli-vision/r1" in printed
+    assert (
+        "rmdir $HOME/work-3d-cli-vision" in printed
+    )  # the base dir goes too, but only when empty
     assert remote.main(["clean", "r1", "--all", "--yes"]) == 0 and len(ran) == 1
 
 
@@ -844,3 +848,135 @@ def test_train_tables_are_the_eval_model_tables() -> None:
     assert "spaghetti/third_party" not in train.class_tables(
         np.zeros((10, 4)), rows, scores
     )
+
+
+# ---- experiment.py: held-out folds and metrics ----------------------------------------------------------
+
+
+def _rows(spec: list[tuple[str, str, str, int]]) -> list[dict[str, Any]]:
+    """(group, source, label, count) -> rows; the domain follows the source name."""
+    out = []
+    for group, source, label, n in spec:
+        domain = "own" if source.startswith("u1") else "third_party"
+        out += [
+            {
+                "id": f"{group}-{label}-{i}",
+                "group": group,
+                "source": source,
+                "label": label,
+                "domain": domain,
+            }
+            for i in range(n)
+        ]
+    return out
+
+
+def test_folds_keep_every_group_whole_and_spread_each_label_over_the_folds() -> None:
+    experiment = _load("experiment")
+    spec = [(f"vid{i}", "emptydeck", "part_detached", 5) for i in range(10)]
+    spec += [(f"vid{i}", "emptydeck", "healthy", 4) for i in range(10)]
+    spec += [(f"src{i}", f"src{i}", "spaghetti", 30) for i in range(5)] + [
+        (f"print{i}", "u1-timelapse", "healthy", 40) for i in range(8)
+    ]
+    rows = _rows(spec)
+    folds = experiment.make_folds(rows, 5)
+    assert folds == experiment.make_folds(rows, 5)  # deterministic
+    seen: dict[str, set[int]] = {}
+    for r, f in zip(rows, folds, strict=True):
+        seen.setdefault(r["group"], set()).add(f)
+    assert all(len(v) == 1 for v in seen.values())  # a group is never in two folds
+    for label in ("part_detached", "spaghetti", "healthy"):
+        in_fold = {f for r, f in zip(rows, folds, strict=True) if r["label"] == label}
+        assert in_fold == set(range(5)), (
+            label
+        )  # every fold holds out some of every class here
+
+
+def test_matched_negatives_remove_the_source_shortcut() -> None:
+    """Positives come from one source, most negatives from others. A scorer that only recognises
+    the source wins pooled (AUROC 1.0) and is at chance against the same source's own healthy frames."""
+    np = _np()
+    experiment = _load("experiment")
+    rows = _rows(
+        [
+            ("a", "emptydeck", "part_detached", 20),
+            ("a", "emptydeck", "healthy", 20),
+            ("b", "other", "healthy", 200),
+        ]
+    )
+    folds = [0] * len(rows)
+    rng = np.random.RandomState(0)
+    score = np.array(
+        [0.9 if r["source"] == "emptydeck" else 0.1 for r in rows]
+    ) + rng.uniform(-0.05, 0.05, len(rows))
+    pooled = experiment.class_metrics(
+        score, rows, folds, "part_detached", "third_party", boot=0
+    )
+    matched = experiment.class_metrics(
+        score, rows, folds, "part_detached", "matched", boot=0
+    )
+    assert pooled["auroc"] > 0.95 and pooled["n_neg"] == 220
+    assert matched["n_neg"] == 20 and 0.3 < matched["auroc"] < 0.7  # chance
+    assert (
+        experiment.class_metrics(score, rows, folds, "spaghetti", "all", boot=0) is None
+    )  # no positives
+
+
+def test_a_nan_score_means_no_score_and_is_left_out_of_the_metrics() -> None:
+    np = _np()
+    experiment = _load("experiment")
+    rows = _rows([("a", "s1", "spaghetti", 10), ("b", "s1", "healthy", 10)])
+    folds = [0] * 10 + [1] * 10
+    score = np.array([0.9] * 10 + [0.1] * 10)
+    score[:5] = np.nan
+    m = experiment.class_metrics(score, rows, folds, "spaghetti", "all", boot=0)
+    assert m["n_pos"] == 5 and m["n_neg"] == 10 and m["auroc"] == 1.0
+    assert m["groups_pos"] == 1 and m["groups_neg"] == 1
+
+
+def test_group_bootstrap_interval_is_wide_when_the_positives_are_one_group() -> None:
+    np = _np()
+    experiment = _load("experiment")
+    rows = _rows(
+        [(f"v{i}", "s", "spaghetti", 6) for i in range(6)]
+        + [(f"h{i}", "s", "healthy", 6) for i in range(6)]
+    )
+    folds = [i % 3 for i in range(len(rows))]
+    rng = np.random.RandomState(1)
+    score = np.array(
+        [1.0 if r["label"] == "spaghetti" else 0.0 for r in rows]
+    ) + rng.uniform(-0.6, 0.6, len(rows))
+    m = experiment.class_metrics(score, rows, folds, "spaghetti", "all", boot=100)
+    lo, hi = m["auroc_ci95_group_bootstrap"]
+    assert (
+        lo <= m["auroc"] <= hi
+        and hi - lo > 0.01
+        and m["groups_pos"] == 6
+        and len(m["auroc_per_fold"]) == 3
+    )
+
+
+def test_leave_setup_out_merges_videos_with_similar_frames_into_one_group() -> None:
+    np = _np()
+    experiment = _load("experiment")
+    rows = _rows([(f"emptydeck:vid{i}", "emptydeck", "healthy", 3) for i in range(6)])
+    for r in rows:
+        r["group"] = r["id"].split("-")[0]
+    emb = np.zeros((len(rows), 4), np.float32)
+    for i, r in enumerate(rows):
+        setup = int(r["group"][-1]) % 2  # videos 0,2,4 look alike, 1,3,5 look alike
+        emb[i] = np.eye(4)[setup] + 0.01 * np.eye(4)[2 + (i % 2)]
+    experiment.regroup_by_setup(rows, emb, 2)
+    groups = {r["group"] for r in rows}
+    assert groups == {"emptydeck-setup0", "emptydeck-setup1"}
+    by_video: dict[str, set[str]] = {}
+    for r in rows:
+        by_video.setdefault(r["id"].split("-")[0], set()).add(r["group"])
+    assert all(len(v) == 1 for v in by_video.values())
+    assert (
+        len({next(iter(by_video[f"emptydeck:vid{i}"])) for i in (0, 2, 4)}) == 1
+    )  # alike videos share a setup
+    own = _rows([("u1-print", "u1-timelapse", "healthy", 2)])
+    before = [dict(r) for r in own]
+    experiment.regroup_by_setup(own, np.zeros((2, 4), np.float32), 2)
+    assert own == before  # only emptydeck frames are regrouped

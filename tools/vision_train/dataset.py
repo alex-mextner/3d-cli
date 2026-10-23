@@ -7,9 +7,9 @@ Dev tool, not part of the `3d` runtime. Needs numpy + opencv-python-headless:
     dataset.py build OUT [--third-party] [--sources sources.json]
         own frames (sources.json "own") -> OUT/own/frames/<id>.jpg, sanitised; with --third-party
         also the public collection (sources.json "third_party") -> OUT/third_party/frames/ for
-        server-side training and evaluation ONLY (never published: licences differ)
+        training and evaluation on the laptop ONLY (never published: licences differ)
         -> OUT/labels.jsonl, OUT/sanitation.json (what was removed), OUT/DATASET_SHA256 (the
-        published rows) and OUT/TRAINING_SHA256 (every row the server trains on); a frame the
+        published rows) and OUT/TRAINING_SHA256 (every row the laptop trains on); a frame the
         face/person detector refuses is kept only as OUT/private/frames (provenance own_private)
     dataset.py check OUT        re-run every sanitation check on the published part of OUT
     dataset.py sheets OUT       contact sheets of the published frames, for the human review
@@ -272,7 +272,7 @@ def build(out: Path, sources: dict[str, Any], third_party: bool) -> None:
 
     digest = fingerprint([r for r in rows if r["provenance"] == "own"])  # what gets published
     (out / "DATASET_SHA256").write_text(digest + "\n")
-    (out / "TRAINING_SHA256").write_text(fingerprint(rows) + "\n")  # everything the server trains on
+    (out / "TRAINING_SHA256").write_text(fingerprint(rows) + "\n")  # everything the laptop trains on
     report["frames"] = {
         "own": sum(r["provenance"] == "own" for r in rows),
         "own_private": sum(r["provenance"] == "own_private" for r in rows),

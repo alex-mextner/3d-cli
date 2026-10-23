@@ -14,8 +14,9 @@ block cross-validation (contiguous time blocks, so neighbouring frames never sit
 sets the Finding threshold at the `--fpr` quantile of the OUT-OF-FOLD negatives, and writes
 models/tier-b-head.json (other classes already in the file are kept). The head replaces the
 zero-shot probability of its class; `vision eval --model` then reports it on any folder.
-The heavy fine-tune of the backbone itself lives in tools/vision_train (runs on the training
-server); this CLI is the minutes-on-a-laptop path.
+The held-out experiments (zero-shot vs head vs partial fine-tune) live in tools/vision_train and run
+on the owner's laptop over ssh; this CLI is the seconds-on-any-machine path. Measured on held-out
+data a head helps spaghetti little and `part_detached` not enough to alert (docs/research/printer-vision.md).
 """
 
 from __future__ import annotations

@@ -187,7 +187,9 @@ def clean_command(run: str, *, everything: bool) -> list[str]:
     d = run_dir(run)
     d_sh = d.replace("~", "$HOME", 1) if d.startswith("~") else shlex.quote(d)
     if everything:
-        return ssh_cmd(f"bash -c {shlex.quote(f'rm -rf -- {d_sh}')}")
+        base = base_dir().replace("~", "$HOME", 1)
+        script = f"rm -rf -- {d_sh}; rmdir {base} 2>/dev/null || true"  # rmdir only removes an EMPTY base dir
+        return ssh_cmd(f"bash -c {shlex.quote(script)}")
     keep = "uv uvcache python .venv hf tmp lib tools data run.pid"
     return ssh_cmd(
         f"bash -c {shlex.quote(f'test -d {d_sh} && cd {d_sh} && rm -rf -- {keep}')}"

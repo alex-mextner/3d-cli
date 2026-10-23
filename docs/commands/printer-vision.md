@@ -71,6 +71,17 @@ from the device's `watch:` block in `printer-devices.yaml`).
   (other classes already in the file are kept). `--fpr` (default 0.005) sets the threshold at
   that quantile of the out-of-fold negatives; `--l2` the ridge strength; `--every N` keeps one
   frame in N. Frames come from `vision record`, sorted into folders by you.
+  What a head can and cannot do (held-out numbers, 2026-10-23, [printer-vision.md](../research/printer-vision.md)):
+  for `part_detached` a head fitted on public bed-camera videos reaches only AUROC 0.60 against the
+  healthy frames of the same videos (0.45 zero-shot), 1 % recall at 1 % false positives, and it scored
+  the original U1 panel frame in the 1st percentile of healthy frames: do not enable that class from a
+  head fitted on third-party frames; fit it on frames recorded from your own camera and check it with
+  held-out prints first. For spaghetti the zero-shot prompts and tier (a) are better than a frozen-feature head.
+- Training and evaluation beyond `fit-head` (partial fine-tune, held-out experiments) run through the
+  dev tools in `tools/vision_train/`, on the owner's laptop over ssh (`THREED_TRAIN_HOST`, default
+  `home`; 6 GiB GPU, job capped at 4.5 GiB VRAM, 6 threads, `nice -n 10`, stopped when the load average
+  passes 12), never on the workstation, Runpod, or `65.21.40.51` (no GPU: it only keeps a second copy of
+  weights). They are not part of the `3d` runtime and need no flag here.
 
 ## What it detects
 

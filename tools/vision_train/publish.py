@@ -13,7 +13,7 @@ compares sha256 (and size) with the local bytes, and prints the repo URL and the
 TOKEN: HF_TOKEN from the environment, else the single variable HF_API_KEY of the env file
 THREED_ENV_FILE (default /home/ultra/xp/.env); no other line of that file is read. The token is
 passed to huggingface_hub only; it is never printed, logged, written to a card or sent to the
-training server (weights are pulled to this machine with `remote.py pull --weights` and pushed
+training machine (weights are pulled to this machine with `remote.py pull --weights` and pushed
 from here).
 
 Proposed repos (the account must be the one that owns the GitHub repo):

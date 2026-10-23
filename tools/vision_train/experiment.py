@@ -17,6 +17,8 @@ PER CLASS (spaghetti, part_detached, empty_bed), positives = frames of that clas
 interval over groups, recall at 1 % and 5 % false-positive rate (the threshold is taken from the
 held-out negatives themselves: an oracle that flatters every method equally), the per-fold AUROCs,
 and `vision_detect._table` precision/recall at fixed thresholds. Also VRAM peak and wall time.
+Subset `matched` keeps only the healthy frames of the sources that have positives of the class
+(same cameras/videos): pooled negatives let a model win by recognising the source, not the condition.
 A class with only a handful of groups (part_detached: ONE own event) yields numbers that are not
 evidence; they are printed with their group counts so that nobody reads them as such.
 
@@ -91,6 +93,32 @@ def load_images(rows: list[dict[str, Any]], threads: int) -> tuple[Any, Any]:
     return np.stack([a for a, _ in out]), np.stack([b for _, b in out])
 
 
+def regroup_by_setup(rows: list[dict[str, Any]], emb: Any, k: int) -> None:
+    """Leave-SETUP-out: the emptydeck videos come from a few printers/cameras, so a video-level
+    split still lets a head learn "this printer's bed". Cluster the videos by the mean embedding of
+    their frames (k-means, fixed seed) and make each cluster one group."""
+    import numpy as np
+
+    videos = sorted({r["group"] for r in rows if r["source"] == "emptydeck"})
+    if len(videos) < k:
+        return
+    mean = np.stack([emb[[i for i, r in enumerate(rows) if r["group"] == v]].mean(0) for v in videos])
+    mean /= np.linalg.norm(mean, axis=1, keepdims=True)
+    rng = np.random.RandomState(0)
+    centre = mean[rng.choice(len(videos), k, replace=False)]
+    for _ in range(50):
+        assign = np.argmax(mean @ centre.T, axis=1)
+        new = np.stack([mean[assign == c].mean(0) if (assign == c).any() else centre[c] for c in range(k)])
+        new /= np.linalg.norm(new, axis=1, keepdims=True)
+        if np.allclose(new, centre):
+            break
+        centre = new
+    of = dict(zip(videos, assign.tolist(), strict=True))
+    for r in rows:
+        if r["source"] == "emptydeck":
+            r["group"] = f"emptydeck-setup{of[r['group']]}"
+
+
 def make_folds(rows: list[dict[str, Any]], k: int) -> list[int]:
     """fold index per row: whole groups, dealt so that each label's groups spread over the folds."""
     groups: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
@@ -143,10 +171,15 @@ def class_metrics(
     import vision_model as vm
     from vision_detect import _table
 
+    # "matched": third-party frames only, and the healthy ones only from the SOURCES that have
+    # positives of this class (same cameras, same videos). Pooled negatives from other sources let a model win by
+    # recognising the source, not the condition (emptydeck bed-camera views vs everything else).
+    pos_sources = {r["source"] for r in rows if r["label"] == cls and r["domain"] == "third_party"}
     idx = [
         i
         for i, r in enumerate(rows)
-        if (domain == "all" or r["domain"] == domain)
+        if (domain == "all" or r["domain"] == ("third_party" if domain == "matched" else domain))
+        and (domain != "matched" or r["source"] in pos_sources)
         and r["label"] in (cls, "healthy")
         and not np.isnan(scores[i])
     ]
@@ -205,7 +238,7 @@ def all_metrics(
     out: dict[str, Any] = {}
     for method, per_class in method_scores.items():
         for cls, scores in per_class.items():
-            for domain in ("own", "third_party", "all"):
+            for domain in ("own", "third_party", "matched", "all"):
                 m = class_metrics(scores, rows, folds, cls, domain)
                 if m is not None:
                     out[f"{method}/{cls}/{domain}"] = m
@@ -430,6 +463,9 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--batch", type=int, default=16)
     ap.add_argument("--lr", type=float, default=1e-5)
     ap.add_argument("--l2", type=float, default=1.0)
+    ap.add_argument("--seed", type=int, default=0, help="offset of the fine-tune seeds (seed = fold + offset)")
+    ap.add_argument("--setup-clusters", type=int, default=0, help="cluster the emptydeck videos into K printer setups and hold setups out")
+    ap.add_argument("--tag", default="", help="write into OUT/<tag>/ (several runs per pull)")
     ap.add_argument("--methods", default="zeroshot,head,finetune")
     ap.add_argument(
         "--tier-a", type=Path, help="JSON {frame id: tier (a) verified score q}"
@@ -464,6 +500,12 @@ def main(argv: list[str]) -> int:
     t0 = time.time()
     imgs224, imgs_big = load_images(rows, threads)
     timings = {"load_images_s": round(time.time() - t0, 1)}
+    vis = Vision(device, torch.float16 if device == "cuda" else torch.float32)
+    t0 = time.time()
+    emb = frozen_embeddings(vis, imgs224)
+    timings["embed_s"] = round(time.time() - t0, 1)
+    if args.setup_clusters:
+        regroup_by_setup(rows, emb, args.setup_clusters)
     folds = make_folds(rows, 2 if args.smoke else args.folds)
     k = max(folds) + 1
     labels = np.array([r["label"] for r in rows])
@@ -477,13 +519,9 @@ def main(argv: list[str]) -> int:
         },
         "folds": k,
         "fold_sizes": [int(sum(f == i for f in folds)) for i in range(k)],
+        "setup_clusters": args.setup_clusters,
     }
     print(json.dumps(summary), flush=True)
-
-    vis = Vision(device, torch.float16 if device == "cuda" else torch.float32)
-    t0 = time.time()
-    emb = frozen_embeddings(vis, imgs224)
-    timings["embed_s"] = round(time.time() - t0, 1)
     scores: dict[str, dict[str, Any]] = {}
     if "zeroshot" in methods:
         table = vm.PromptTable.load()
@@ -532,7 +570,7 @@ def main(argv: list[str]) -> int:
                 flush=True,
             )
             tf = time.time()
-            probs = finetune_fold(vis_ft, imgs224, imgs_big, rows, tr, te, args, seed=f)
+            probs = finetune_fold(vis_ft, imgs224, imgs_big, rows, tr, te, args, seed=f + args.seed)
             for j, c in enumerate(CLASSES, start=1):
                 ft_scores[c][te] = probs[:, j]
             print(f"  fold {f + 1} took {time.time() - tf:.0f} s", flush=True)
@@ -547,6 +585,8 @@ def main(argv: list[str]) -> int:
         )
     # NaN = the fold had too few training positives: no score, excluded from that method's metrics
     metrics = all_metrics(scores, rows, folds)
+    if args.tag:
+        args.out = args.out / args.tag
     args.out.mkdir(parents=True, exist_ok=True)
     result = {
         "dataset": str(args.dataset.name),
