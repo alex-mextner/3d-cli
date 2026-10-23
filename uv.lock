@@ -10,13 +10,7 @@ resolution-markers = [
 
 [[package]]
 name = "3d-cli"
-<<<<<<< HEAD
-version = "0.58.0"
-||||||| parent of 2acd532c (docs(printers): lib-map, command index, README and AGENTS for printers spools/doctor/fw; release 0.56.0)
-version = "0.55.0"
-=======
-version = "0.56.0"
->>>>>>> 2acd532c (docs(printers): lib-map, command index, README and AGENTS for printers spools/doctor/fw; release 0.56.0)
+version = "0.59.0"
 source = { virtual = "." }
 dependencies = [
     { name = "manifold3d" },
