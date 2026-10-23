@@ -16,7 +16,7 @@ def _remove_previous_masks(out_dir: Path) -> None:
     if not previous.is_file():
         return
     try:
-        doc = json.loads(previous.read_text())
+        doc = json.loads(previous.read_text(encoding="utf-8"))
         rels = [str(r["mask"]) for r in doc["instances"]]
     except (OSError, ValueError, KeyError, TypeError):
         return

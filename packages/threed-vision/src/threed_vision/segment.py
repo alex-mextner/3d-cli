@@ -440,13 +440,14 @@ class Segmenter:
         except Exception as exc:
             if not (self.device == "cuda" and is_oom(exc) and self.requested != "cuda"):
                 raise
-            self.unload()
-            self._cpu_only = True
-            try:
-                return self._run(rgb, progress)
-            finally:
-                self._cpu_only = False
-                self.unload()  # the next call re-evaluates `auto` instead of staying on CPU
+        # the retry runs outside the `except` block: the failed attempt's traceback must not keep GPU tensors alive
+        self.unload()
+        self._cpu_only = True
+        try:
+            return self._run(rgb, progress)
+        finally:
+            self._cpu_only = False
+            self.unload()  # the next call re-evaluates `auto` instead of staying on CPU
 
     def _run(self, rgb: np.ndarray, progress: Progress | None) -> dict[str, Any]:
         t_all = time.perf_counter()

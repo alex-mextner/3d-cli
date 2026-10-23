@@ -182,6 +182,8 @@ class OwlDetector:
         except Exception as exc:
             if not (self.device == "cuda" and is_oom(exc) and self.requested != "cuda"):
                 raise
+            out = None  # retry below, outside the `except` block, so the traceback does not pin GPU tensors
+        if out is None:
             self.unload()
             self._cpu_only = True
             try:
