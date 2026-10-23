@@ -91,6 +91,11 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         help="hard override: (full) thickness",
     )
     parser.add_argument(
+        "--no-refine",
+        action="store_true",
+        help="closed-form fit only: no soft-silhouette refiner, no CMA-ES (no torch needed)",
+    )
+    parser.add_argument(
         "--no-cma", action="store_true", help="never run the CMA-ES second attempt"
     )
     parser.add_argument(
@@ -146,7 +151,7 @@ def run(args: argparse.Namespace) -> int:
         max_tries=args.max_tries,
         device=args.device,
         seed=args.seed,
-        cma=not args.no_cma,
+        cma=not args.no_cma, refine=not args.no_refine,
     )
     for entry, spec in zip(fit["views"], args.view, strict=True):
         entry["mask"] = spec.rpartition(":")[0]

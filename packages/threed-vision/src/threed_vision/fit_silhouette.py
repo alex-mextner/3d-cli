@@ -264,7 +264,7 @@ def refine_candidates(
     """Soft-silhouette refinement of the best ranked candidates (see `ranked_candidates`); falls back GPU -> CPU for device='auto'."""
     fixed = fixed or {}
     if max_tries < 1:
-        raise BadInput(f"max_tries must be >= 1, got {max_tries}", remediation="use fit_auto(iou_accept=0) / --iou-accept 0 for closed form only")
+        raise BadInput(f"max_tries must be >= 1, got {max_tries}", remediation="use fit_auto(refine=False) / --no-refine for the closed-form fit only")
     dev = resolve_torch_device(device)
     fallback = None
     kw = {

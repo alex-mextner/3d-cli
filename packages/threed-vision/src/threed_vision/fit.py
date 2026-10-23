@@ -18,7 +18,7 @@ from typing import Any
 
 import numpy as np
 
-from .fit_init import FLAG_BELOW_IOU, ranked_candidates
+from .fit_init import ranked_candidates
 from .errors import BadInput, MissingDependency
 from .fit_silhouette import assemble, cma_refine, prepare_inputs, refine_candidates
 
@@ -41,13 +41,10 @@ def _skipped(method: str, exc: MissingDependency) -> dict[str, Any]:
     return {"method": method, "skipped": exc.render(), "train_min_iou": None, "train_mean_iou": None, "heldout_iou": None, "time_s": 0.0}
 
 
-def _score(fit: dict[str, Any]) -> tuple[float, float]:
-    """Selection key: held-out IoU first when the fit has one, then mean training IoU."""
-    held = fit["confidence"]["heldout_iou"]
-    return (
-        held if held is not None else 0.0,
-        float(np.mean([v["iou"] for v in fit["views"]])),
-    )
+def _score(fit: dict[str, Any], min_iou: float) -> tuple[bool, float]:
+    """Selection key: a fit whose TRAINING IoU clears `min_iou` first, then the mean TRAINING IoU. The held-out view never selects
+    (it only reports): choosing the attempt by it would make `confidence.heldout_iou` a best-of-N number, not an independent one."""
+    return (fit["confidence"]["train_min_iou"] >= min_iou, float(np.mean([v["iou"] for v in fit["views"]])))
 
 
 def fit_auto(
@@ -65,14 +62,15 @@ def fit_auto(
     device: str = "auto",
     seed: int = 0,
     cma: bool = True,
+    refine: bool = True,
 ) -> dict[str, Any]:
     """Fit a lathe / flat loft / box to calibrated silhouettes (views = [{"mask","K","R","t"}], world -> camera, mm).
 
     template None picks by closed-form kind (or 'lathe' | 'flat' | 'box'). A single view needs `known_depth` (mm along camera z);
     `planar=True` = top-down object on a plane parallel to the image. `fixed_dims` {length_mm, max_width_mm, thickness_mm} are HARD
     user overrides (exact in the result). `heldout_views` are scored, never fitted: they make `confidence.heldout_iou`.
-    `iou_accept` is the per-view hard-raster IoU at which the closed-form model is returned without any optimiser (a held-out view below 0.75 always triggers the refiner);
-    `min_iou` is the `confidence.status == 'low'` threshold. Raises BadInput / MissingDependency (refinement needs torch).
+    `iou_accept` is the per-view hard-raster IoU at which the closed-form model is returned without any optimiser (a closed form that is already `low` - train IoU under `min_iou` or a held-out view under 0.75 - always triggers the refiner; the attempt is then chosen by training IoU, the held-out IoU is only reported);
+    `min_iou` is the `confidence.status == 'low'` threshold. `refine=False` returns the closed-form fit whatever its confidence (no torch, no CMA). Raises BadInput / MissingDependency (refinement needs torch).
     """
     t_all = time.perf_counter()
     vs, hv, fixed = prepare_inputs(views, heldout_views, fixed_dims)
@@ -104,9 +102,9 @@ def fit_auto(
     )
     attempts = [_summary(best)]
     t_refine = t_cma = 0.0
-    held = best["confidence"]["heldout_iou"]
-    # a held-out view the closed form fails to predict (flat/box fits that reproduce their training views) also earns a refinement
-    if best["confidence"]["train_min_iou"] < iou_accept or (held is not None and held < FLAG_BELOW_IOU):
+    # refine when the closed form is not accepted, or is already `low`: a train IoU under `min_iou` (a stricter --min-confidence than
+    # --iou-accept) or a held-out view under 0.75 (flat/box fits reproduce their training views and miss the unseen one)
+    if refine and (best["confidence"]["train_min_iou"] < iou_accept or best["confidence"]["status"] == "low"):
         try:
             soft = refine_candidates(
                 vs, cands, info, K=K, device=device, planar=planar, fixed=fixed, min_iou=min_iou, max_tries=max_tries, seed=seed, heldout_views=hv
@@ -119,7 +117,7 @@ def fit_auto(
         if soft is not None:
             t_refine = soft["timing_s"]["refine"]
             attempts.append(_summary(soft))
-            if _score(soft) >= _score(best):
+            if _score(soft, min_iou) >= _score(best, min_iou):
                 best = soft
         if cma and best["confidence"]["status"] == "low":
             try:
@@ -129,7 +127,7 @@ def fit_auto(
             else:
                 t_cma = second["timing_s"]["refine"]
                 attempts.append(_summary(second))
-                if _score(second) > _score(best):
+                if _score(second, min_iou) > _score(best, min_iou):
                     best = second
     best["timing_s"] = {
         **info["timing_s"],

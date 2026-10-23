@@ -28,11 +28,12 @@ at `+z = plane depth`). `K` is in the pixels of the full-resolution mask.
 | `--planar` | off | the object lies on a plane parallel to the image (top-down photo): in-plane rotation + shift only |
 | `--known-depth MM` | none | camera z-depth of the object; **required for one view** (it defines the size), e.g. from `calibrate.scale_from_reference(...)["plane_depth_mm"]` |
 | `--fixed-length-mm` `--fixed-width-mm` `--fixed-thickness-mm` | none | user overrides = **hard constraints**, exact in the result (not penalties) |
-| `--iou-accept` | `0.9` | per-view hard-raster IoU at which the closed-form model is returned with no optimiser (`0` = closed form only; a held-out view below 0.75 still triggers the refiner) |
+| `--iou-accept` | `0.9` | per-view hard-raster IoU at which the closed-form model is returned with no optimiser (the refiner also runs when the closed form is already `low`: a train IoU under `--min-confidence` or a held-out view under 0.75) |
 | `--min-confidence` | `0.8` | train IoU below this → `status: low`, exit 3 (`min_iou` in Python) |
 | `--max-tries` | `3` | soft-fit restarts from the next-best pose candidate |
 | `--stations` | `8` | profile stations (`K` in Python; `fit-profile` calls the same number `--k`) |
 | `--device auto\|cuda\|cpu` | `auto` | refiner device: GPU when torch sees one with ≥ 700 MB free, otherwise (or if the GPU run fails) CPU; `cuda` is strict |
+| `--no-refine` | off | closed-form fit only whatever its confidence: no refiner, no CMA-ES, no torch needed |
 | `--no-cma` | off | never run the CMA-ES second attempt |
 | `--seed` | `0` | seed of every random path (CMA-ES, torch) |
 | `--emit glb\|stl\|obj\|scad` | none | also write `model.<ext>` (needs `-o`) |
@@ -109,7 +110,7 @@ rasteriser (not the soft one that was optimised). `heldout_iou` = the minimum ov
    projected rings, scored with a half-plane signed distance (one matmul): the boundary sits exactly at p = 0.5, the smoothness penalty uses a
    *detached* scale, softplus is inverted stably, a NaN/inf loss restores the last finite parameters.
 3. **`cma`**: CMA-ES on the hard rasteriser (CPU, no torch, ≈ 3 s) — only when the result is still `low`; it is better than Adam on flat/boxy
-   shapes and worse on lathe-like ones, so the better of the two attempts wins (held-out IoU when there is one, else mean training IoU).
+   shapes and worse on lathe-like ones, so the better of the attempts wins, chosen by training IoU (a fit that clears `--min-confidence` first). The held-out view only reports: it never selects an attempt, so `heldout_iou` is not a best-of-N number (it can still make a closed form `low` and so trigger the refiner).
 
 Same inputs + same `--seed` ⇒ the same result on CPU (tested, bitwise). On CUDA repeated runs were bitwise identical in 3 runs on an RTX 4060 and are asserted equal to 1e-4; PyTorch does not promise bitwise determinism across devices/versions.
 
@@ -143,7 +144,7 @@ overlays = render_overlays(fit, [other_view])        # RGB review images (mask g
 
 Everything returned is plain dicts/lists/floats (`json.dumps(fit)` works, no NaN); `fit_auto` keyword arguments: `template=None`, `K=8`,
 `known_depth=None`, `planar=False`, `fixed_dims=None`, `heldout_views=None`, `iou_accept=0.9`, `min_iou=0.8`, `max_tries=3`, `device="auto"`,
-`seed=0`, `cma=True`. Models are not involved: nothing is downloaded.
+`seed=0`, `cma=True`, `refine=True` (`False` = closed form only). Models are not involved: nothing is downloaded.
 
 ## Part colours from the photo (`appearance.sample_part_colours`)
 
@@ -209,7 +210,7 @@ pliers 46, multimeter 20, tape measure 8, power supply 24, snips 80, drills 76/5
 | 3-view soft fit, first attempt, synthetic | CPU | 16 | 1.35 | 4.49 | 4.49 |
 | 3-view soft fit, up to 3 tries, synthetic | GPU | 16 | 1.38 | 3.51 | 3.51 |
 | 3-view soft fit, up to 3 tries, synthetic | CPU | 16 | 1.55 | 13.44† | 13.44† |
-| 3-view closed form only (`iou_accept=0`), synthetic | CPU | 16 | 0.21 | 0.29 | 0.29 |
+| 3-view closed form only (`refine=False`), synthetic | CPU | 16 | 0.21 | 0.29 | 0.29 |
 
 \* there is only one real view per carpet object, so views 2 and 3 are rendered from the single-view fit (±50°): the timing is representative
 (same mask sizes, same optimiser), the IoU is not evidence of 3-D recovery. † one pose (flat pliers, 3 retries) measured while the load average

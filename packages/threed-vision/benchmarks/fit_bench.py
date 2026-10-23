@@ -195,7 +195,7 @@ def synthetic_rows(device: str, poses: int) -> list[dict[str, Any]]:
                 heldout_views=sc["heldout"],
             )
             cf = fit_auto(
-                sc["views"], template=tmpl, iou_accept=0.0, heldout_views=sc["heldout"]
+                sc["views"], template=tmpl, refine=False, heldout_views=sc["heldout"]
             )
             row = {
                 "shape": name,
@@ -309,7 +309,7 @@ def main() -> int:
             [r["threeview_3try_s"] for r in synth],
         ),
         row_stats(
-            "synthetic 3-view closed form (fit_auto, iou_accept=0)",
+            "synthetic 3-view closed form (fit_auto, refine=False)",
             [r["closed_form_3view_s"] for r in synth],
         ),
     ]

@@ -16,7 +16,7 @@ Options:
   --planar --known-depth MM        top-down object on a plane parallel to the image / depth for a single view
   --fixed-length-mm / --fixed-width-mm / --fixed-thickness-mm   hard overrides (exact in the result)
   --heldout MASK:CAM.json          scored, never fitted -> confidence.heldout_iou
-  --iou-accept 0.9  --min-confidence 0.8  --max-tries 3  --stations 8  --seed 0  --no-cma
+  --iou-accept 0.9  --min-confidence 0.8  --max-tries 3  --stations 8  --seed 0  --no-refine  --no-cma
   --device auto|cuda|cpu           refiner device (auto = GPU with CPU fallback)
   --emit glb|stl|obj|scad  --mesh-frame object|world
 Exit: 0 ok / single_view, 3 low confidence, 2 bad input, 127 missing torch/cma/trimesh.

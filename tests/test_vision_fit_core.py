@@ -214,7 +214,7 @@ def test_template_override_wins_over_kind() -> None:
         known_depth=sc["depth"],
         planar=True,
         template="flat",
-        iou_accept=0.0,
+        refine=False,
     )
     assert fit["template"] == {
         "name": "flat",
@@ -247,7 +247,7 @@ def test_fixed_dims_are_exact_hard_constraints_in_closed_form() -> None:
         known_depth=sc["depth"],
         planar=True,
         fixed_dims=fixed,
-        iou_accept=0.0,
+        refine=False,
     )
     for k, v in fixed.items():
         assert fit["dims_mm"][k] == pytest.approx(v, rel=1e-12)
@@ -265,7 +265,7 @@ def test_fixed_dims_are_exact_hard_constraints_in_closed_form() -> None:
         known_depth=sc["depth"],
         planar=True,
         fixed_dims={"length_mm": 100.0},
-        iou_accept=0.0,
+        refine=False,
     )
     assert partial["dims_mm"]["length_mm"] == pytest.approx(100.0, rel=1e-12)
     assert partial["dims_mm"]["max_width_mm"] != pytest.approx(
@@ -280,7 +280,7 @@ def test_huge_fixed_width_stays_finite() -> None:
         known_depth=sc["depth"],
         planar=True,
         fixed_dims={"max_width_mm": 1e9},
-        iou_accept=0.0,
+        refine=False,
     )
     assert fit["dims_mm"]["max_width_mm"] == pytest.approx(1e9)
     assert 0.0 <= fit["confidence"]["train_min_iou"] <= 1.0
@@ -303,7 +303,7 @@ def test_closed_form_fit_is_deterministic() -> None:
 def test_multi_view_closed_form_locates_the_object() -> None:
     sc = S.scene("screwdriver", 0)
     fit = fit_auto(
-        sc["views"], iou_accept=0.0, template="lathe"
+        sc["views"], refine=False, template="lathe"
     )  # three calibrated views, no known_depth needed
     assert fit["method"] == "closed_form" and fit["confidence"]["n_views"] == 3
     assert np.linalg.norm(np.array(fit["pose"]["t_mm"]) - sc["t"]) < 40.0
@@ -394,7 +394,7 @@ def test_view_check_sanity_flags_an_absurd_fit() -> None:
         known_depth=sc["depth"],
         planar=True,
         template="flat",
-        iou_accept=0.0,
+        refine=False,
     )
     fit["params"]["aspect"] = 0.004  # a 0.1 mm sheet for a flat-template tool
     res = view_check.check(fit, [])
@@ -494,7 +494,7 @@ def test_recorded_screwdriver_is_not_fitted_with_a_sheared_diagonal_axis() -> No
     full = np.zeros((1500, 2000), bool)
     full[518 : 518 + crop.shape[0], 848 : 848 + crop.shape[1]] = crop
     K = np.array([[937.5, 0, 1000.0], [0, 937.5, 750.0], [0, 0, 1.0]])
-    fit = fit_auto([{"mask": full, "K": K, "R": np.eye(3), "t": np.zeros(3)}], known_depth=1184.0, planar=True, iou_accept=0.0)
+    fit = fit_auto([{"mask": full, "K": K, "R": np.eye(3), "t": np.zeros(3)}], known_depth=1184.0, planar=True, refine=False)
     assert fit["dims_mm"]["length_mm"] == pytest.approx(255.3, rel=0.06)
     assert abs(fit["pose"]["axis"][1]) > 0.99  # upright in the image
     assert max(abs(c) for c in fit["params"]["c_mm"]) < 0.1 * fit["dims_mm"]["length_mm"]
@@ -632,3 +632,53 @@ def test_view_check_rejects_unusable_ring() -> None:
         fit["template"]["ring"] = bad
         with pytest.raises(BadInput, match="ring"):
             view_check.check(fit, [])
+
+
+def test_crop_keeps_a_thin_shaft_that_point_sampling_would_lose() -> None:
+    """warpAffine point-samples (it ignores INTER_AREA): a 5 px shaft at 8 source px per crop pixel used to break up."""
+    from threed_vision.fit_init import crop_view
+
+    mask = np.zeros((1536, 1152), bool)
+    mask[600:1000, 570:575] = True  # 400 x 5 px shaft
+    cv = crop_view(mask, S.KF, np.eye(3), np.zeros(3), 64)
+    assert cv["mask"].sum() == pytest.approx(mask.sum() * cv["scale"] ** 2, rel=0.05)  # area is conserved
+    col = cv["mask"].max(axis=1)
+    assert (col > 0.1).sum() >= 0.7 * cv["mask"].shape[0] * 0.8  # the shaft is a continuous line, not dashes
+
+
+def test_strict_min_confidence_triggers_the_refiner_and_heldout_does_not_select(monkeypatch: pytest.MonkeyPatch) -> None:
+    from threed_vision import fit as fit_mod
+    from threed_vision.errors import MissingDependency
+
+    calls: list[str] = []
+
+    def fake_refine(*a: object, **k: object) -> dict:
+        calls.append("soft")
+        raise MissingDependency("torch")
+
+    monkeypatch.setattr(fit_mod, "refine_candidates", fake_refine)
+    sc = S.topdown_scene("box_elongated", 30)
+    # closed form IoU ~0.96 >= iou_accept 0.9, but below the stricter min_iou 0.99 -> low -> the refiner must be tried
+    fit = fit_auto(sc["views"], known_depth=sc["depth"], planar=True, min_iou=0.99)
+    assert calls == ["soft"] and fit["confidence"]["status"] == "low" and fit["attempts"][1]["method"] == "soft"
+    # selection is by TRAINING IoU only: a better-trained fit with a bad held-out view still wins over a worse-trained one with a good one
+    ok_train = {"confidence": {"train_min_iou": 0.85, "heldout_iou": 0.80, "status": "ok"}, "views": [{"iou": 0.9}]}
+    bad_heldout = {"confidence": {"train_min_iou": 0.97, "heldout_iou": 0.74, "status": "low"}, "views": [{"iou": 0.97}]}
+    assert fit_mod._score(bad_heldout, 0.8) > fit_mod._score(ok_train, 0.8)
+
+
+def test_crop_position_matches_its_intrinsics() -> None:
+    """The downscaled crop must put an off-centre bar where K2 says it is (a half-pixel shift is ~4 source px at 8:1)."""
+    from threed_vision.fit_init import crop_view
+
+    mask = np.zeros((1536, 1152), bool)
+    mask[500:900, 700:740] = True  # off-centre bar, 40 px wide
+    for S_ in (64, 96):
+        cv = crop_view(mask, S.KF, np.eye(3), np.zeros(3), S_)
+        ys, xs = np.nonzero(cv["mask"] > 0.01)
+        w = cv["mask"][ys, xs]
+        cx = float((xs * w).sum() / w.sum())
+        cy = float((ys * w).sum() / w.sum())
+        # true centroid in the canvas index convention (idx - x0) * s
+        tx, ty = (719.5 - cv["x0"]) * cv["scale"], (699.5 - cv["y0"]) * cv["scale"]
+        assert abs(cx - tx) < 0.2 and abs(cy - ty) < 0.2

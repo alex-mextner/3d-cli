@@ -124,8 +124,23 @@ def crop_view(mask: np.ndarray, K: np.ndarray, R: np.ndarray, t: np.ndarray, S: 
     half = max(xs.max() - xs.min(), ys.max() - ys.min()) / 2 * (1 + margin) + 2
     x0, y0 = cx - half, cy - half
     s = S / (2 * half)
-    A = np.array([[s, 0, -x0 * s], [0, s, -y0 * s]], np.float32)
-    m = cv2.warpAffine(mask.astype(np.float32), A, (S, S), flags=cv2.INTER_AREA)
+    # warpAffine ignores INTER_AREA (it point-samples bilinearly): a 5 px shaft would break up at 8 source px per crop pixel. Shrink the
+    # bbox with a true area average first, then place it on the S x S canvas with a near-unit affine.
+    bx, by = int(xs.min()), int(ys.min())
+    sub = mask[by : int(ys.max()) + 1, bx : int(xs.max()) + 1].astype(np.float32)
+    bw, bh = sub.shape[1], sub.shape[0]
+    if s < 1.0:
+        # whole-pixel output sizes would inflate a thin part (5 px * 0.157 = 0.8 px -> 1 px): zero-pad the bbox so w2 / wp == s
+        w2, h2 = max(1, math.ceil(bw * s)), max(1, math.ceil(bh * s))
+        wp, hp = max(bw, round(w2 / s)), max(bh, round(h2 / s))
+        sub = np.pad(sub, ((0, hp - bh), (0, wp - bw)))
+        sub = np.asarray(cv2.resize(sub, (w2, h2), interpolation=cv2.INTER_AREA), np.float32)
+        sx, sy = w2 / wp, h2 / hp
+    else:
+        sx = sy = 1.0
+    # cv2.resize puts small pixel j at source index (j + 0.5)/sx - 0.5 (+ bx); canvas index convention is (idx - x0) * s, as for K2
+    A = np.array([[s / sx, 0, (0.5 / sx - 0.5 + bx - x0) * s], [0, s / sy, (0.5 / sy - 0.5 + by - y0) * s]], np.float32)
+    m = cv2.warpAffine(sub, A, (S, S), flags=cv2.INTER_LINEAR)
     K2 = np.array(K, np.float64).copy()
     K2[0, 0] *= s
     K2[1, 1] *= s

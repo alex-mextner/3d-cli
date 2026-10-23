@@ -234,7 +234,7 @@ def test_fixed_dims_are_exact_after_optimisation(
         sc["views"],
         "flat",
         known_depth=sc["depth"],
-        planar=sc is not None,
+        planar=True,
         fixed_dims=fixed,
         device="cpu",
         max_tries=1,

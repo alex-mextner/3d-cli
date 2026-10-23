@@ -298,7 +298,7 @@ def test_commands_have_help_and_are_listed(tmp_path: Path) -> None:
 def test_fit_silhouette_heldout_template_and_every_mesh_format(tmp_path: Path) -> None:
     """--heldout makes heldout_iou, --template overrides the kind, --emit writes every format, --mesh-frame world bakes the pose in."""
     sc = write_scene(tmp_path)
-    base = ["fit-silhouette", "--view", "mask.png:cam.json", "--planar", "--known-depth", str(sc["depth"]), "--iou-accept", "0"]
+    base = ["fit-silhouette", "--view", "mask.png:cam.json", "--planar", "--known-depth", str(sc["depth"]), "--no-refine"]
     r = cli(tmp_path, *base, "--heldout", "mask.png:cam.json", "--template", "flat", "--emit", "obj", "--mesh-frame", "world", "-o", "out", "--json")
     assert r.returncode == 0, r.stdout + r.stderr
     fit = json.loads(r.stdout)
@@ -323,12 +323,15 @@ def test_fit_profile_options_reach_the_algorithm(tmp_path: Path) -> None:
 def test_fit_silhouette_stations_seed_and_search_flags_are_wired(tmp_path: Path) -> None:
     sc = write_scene(tmp_path)
     r = cli(
-        tmp_path, "fit-silhouette", "--view", "mask.png:cam.json", "--planar", "--known-depth", str(sc["depth"]), "--iou-accept", "0",
+        tmp_path, "fit-silhouette", "--view", "mask.png:cam.json", "--planar", "--known-depth", str(sc["depth"]), "--no-refine",
         "--stations", "6", "--seed", "5", "--max-tries", "1", "--no-cma", "--device", "cpu", "--json",
     )
     assert r.returncode == 0, r.stdout + r.stderr
     fit = json.loads(r.stdout)
     assert len(fit["params"]["w_mm"]) == 6 and fit["template"]["stations"] == 6
+    # strict --device cuda with the closed form not accepted: the refiner is required; without torch/GPU that is a structured 127
     r = cli(tmp_path, "fit-silhouette", "--view", "mask.png:cam.json", "--planar", "--known-depth", str(sc["depth"]), "--device", "cuda", "--iou-accept", "1.01")
-    assert r.returncode in (2, 3, 127, 0)  # strict cuda without torch/GPU: structured error or a fit, never a traceback
     assert "Traceback" not in r.stderr
+    assert r.returncode in (0, 3, 127), r.stderr  # refiner required: it runs (0/3) or the strict cuda request fails structurally (127)
+    if r.returncode == 127:
+        assert "torch" in r.stderr or "CUDA" in r.stderr
