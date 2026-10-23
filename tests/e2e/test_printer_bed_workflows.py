@@ -12,7 +12,7 @@ import pytest
 
 from printer_fakes import FakeMoonraker, u1_status
 
-from .workflow_helper import agent_spawns, run_cli
+from .workflow_helper import agent_spawns, run_cli, run_cli_with_hatch
 
 pytest.importorskip("numpy")
 pytest.importorskip("cv2")
@@ -78,7 +78,7 @@ def test_reference_then_status_sees_parts_and_the_cleared_bed(tmp_path: Path) ->
 
 
 def test_start_is_refused_while_parts_are_on_the_bed(tmp_path: Path) -> None:
-    """The user starts a print with the last job's parts still on the bed: start refuses; --force overrides."""
+    """The user starts a print with the last job's parts still on the bed: start refuses; --force overrides only with the owner's Telegram approval."""
     moon = u1_after_job()
     (tmp_path / "part.gcode").write_text(GCODE, encoding="utf-8")
     with moon.serve():
@@ -88,7 +88,7 @@ def test_start_is_refused_while_parts_are_on_the_bed(tmp_path: Path) -> None:
         moon.camera = jpeg("u1_occupied_1351.jpg")
         refused = run_cli(tmp_path, "printer", "start", "u1", "part.gcode", "--yes")
         writes_refused = [r.path for r in moon.writes()]
-        forced = run_cli(tmp_path, "printer", "start", "u1", "part.gcode", "--yes", "--force")
+        forced = run_cli_with_hatch(tmp_path, "printer", "start", "u1", "part.gcode", "--yes", "--force")
 
     assert refused.returncode == 1
     assert "FAIL  bed" in refused.stdout and "objects on the bed" in refused.stdout

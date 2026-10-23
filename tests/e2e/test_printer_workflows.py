@@ -5,7 +5,7 @@ from pathlib import Path
 
 from printer_fakes import FakeCreality, FakeMoonraker, k1_state, u1_status, write_devices
 
-from .workflow_helper import run_cli
+from .workflow_helper import hatch_requests, run_cli, run_cli_with_hatch
 
 U1_GCODE = """G28
 T0
@@ -49,7 +49,7 @@ def test_printer_upload_stores_without_starting_then_start_needs_yes(tmp_path: P
         up = run_cli(tmp_path, "printer", "upload", "u1", "part.gcode")
         no_yes = run_cli(tmp_path, "printer", "start", "u1", "part.gcode")
         writes_before_start = [r.path for r in moon.writes()]
-        started = run_cli(tmp_path, "printer", "start", "u1", "part.gcode", "--yes", "--force")
+        started = run_cli_with_hatch(tmp_path, "printer", "start", "u1", "part.gcode", "--yes", "--force")
 
     assert up.returncode == 0, up.stderr
     assert "NOT started" in up.stdout and "3d printer start u1 part.gcode --yes" in up.stdout
@@ -60,6 +60,68 @@ def test_printer_upload_stores_without_starting_then_start_needs_yes(tmp_path: P
     assert "read-back sha256 matches" in started.stdout
     assert "start acknowledged by u1: part-" in started.stdout
     assert [r.path for r in moon.writes()] == ["/server/files/upload", "/printer/print/start"]
+
+
+def test_printer_force_alone_never_starts_a_print_that_fails_preflight(tmp_path: Path) -> None:
+    """`--force` is a request, not an override: with no Telegram approval (no hatch justification,
+    the real helper inside the test sandbox) a preflight FAIL still refuses and nothing is started."""
+    moon = FakeMoonraker()
+    (tmp_path / "part.gcode").write_text(U1_GCODE, encoding="utf-8")
+    with moon.serve():
+        write_devices(tmp_path / "xdg-config", moon=moon)
+        assert run_cli(tmp_path, "printer", "upload", "u1", "part.gcode").returncode == 0
+        plain = run_cli(tmp_path, "printer", "start", "u1", "part.gcode", "--yes")
+        forced = run_cli(tmp_path, "printer", "start", "u1", "part.gcode", "--yes", "--force")
+        justified = run_cli(
+            tmp_path, "printer", "start", "u1", "part.gcode", "--yes", "--force",
+            env_extra={"RIG_HATCH_REQUEST_3D_PRINTER_START_FORCE": "the FAIL is a false positive of the gate"},
+        )
+
+    assert plain.returncode == 1 and "preflight FAIL; start refused" in plain.stderr
+    for refused in (forced, justified):
+        assert refused.returncode == 1, refused.stdout + refused.stderr
+        assert "--force does not override preflight FAIL by itself" in refused.stderr
+        assert "FORCED" not in refused.stdout
+    assert "no approval requested" in forced.stderr or "hatch helper is unavailable" in forced.stderr
+    assert "RIG_HATCH_REQUEST_3D_PRINTER_START_FORCE" in forced.stderr
+    assert "/printer/print/start" not in [r.path for r in moon.writes()]
+
+
+def test_printer_force_denied_on_telegram_starts_nothing(tmp_path: Path) -> None:
+    """The user passes --force and the owner taps Deny on Telegram: the print is not started."""
+    moon = FakeMoonraker()
+    (tmp_path / "part.gcode").write_text(U1_GCODE, encoding="utf-8")
+    with moon.serve():
+        write_devices(tmp_path / "xdg-config", moon=moon)
+        assert run_cli(tmp_path, "printer", "upload", "u1", "part.gcode").returncode == 0
+        denied = run_cli_with_hatch(
+            tmp_path, "printer", "start", "u1", "part.gcode", "--yes", "--force", verdict="deny"
+        )
+
+    assert denied.returncode == 1, denied.stdout + denied.stderr
+    assert "test double denied" in denied.stderr and "FORCED" not in denied.stdout
+    assert "/printer/print/start" not in [r.path for r in moon.writes()]
+    assert len(hatch_requests(tmp_path)) == 1
+
+
+def test_printer_force_approved_request_lists_the_failing_checks(tmp_path: Path) -> None:
+    """The owner sees WHAT is being forced: the printer, the file, the command and every FAIL line."""
+    moon = FakeMoonraker()
+    (tmp_path / "part.gcode").write_text(U1_GCODE, encoding="utf-8")
+    with moon.serve():
+        write_devices(tmp_path / "xdg-config", moon=moon)
+        assert run_cli(tmp_path, "printer", "upload", "u1", "part.gcode").returncode == 0
+        started = run_cli_with_hatch(tmp_path, "printer", "start", "u1", "part.gcode", "--yes", "--force")
+
+    assert started.returncode == 0, started.stdout + started.stderr
+    assert "owner approved on Telegram" in started.stdout
+    (request,) = hatch_requests(tmp_path)
+    context = request["context"]
+    assert isinstance(context, dict)
+    assert request["hook"] == "3d-printer-start-force" and request["critical"] is True
+    assert context["printer"] == "u1" and context["file"].endswith("part.gcode")
+    assert "- slicer warn:" in context["failing_checks"] and "- thumbnails:" in context["failing_checks"]
+    assert request["command"] == f"3d printer start u1 {context['file']} --yes --force"
 
 
 def test_printer_start_refuses_a_same_size_stale_file_on_the_printer(tmp_path: Path) -> None:

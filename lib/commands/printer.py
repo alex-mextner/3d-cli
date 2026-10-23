@@ -13,7 +13,8 @@ SAFETY (enforced here, before any write):
   - upload only stores the file; it never starts a print;
   - start and cancel need --yes; start refuses a printing/paused/busy/unreadable printer,
     re-reads state immediately before the write, and runs `3d print-preflight` plus the camera
-    `bed` check (printer_ops/bed.py; FAIL blocks unless --force);
+    `bed` check (printer_ops/bed.py; a FAIL blocks; --force needs the owner's Telegram hatch
+    approval, printer_ops/force_hatch.py);
   - a failed/timed-out start is reported as UNKNOWN and never resent automatically.
 
 INVARIANTS: stdlib-only at import time (registry contract); printer_ops is imported lazily.
@@ -84,7 +85,10 @@ Options:
   --as REMOTE        remote name stem (default: local name, spaces -> _); the stored name
                      always ends in -<sha256[:16]>.gcode; give start the same --as
   --yes              required for start, cancel and guard: you confirm the physical action
-  --force            start even when preflight FAILs (the failing checks are printed)
+  --force            ask to start despite preflight FAILs. NOT an override by itself: it needs the owner's
+                     one-time Telegram approval (RIG_HATCH_REQUEST_3D_PRINTER_START_FORCE="<why>" sends
+                     the request with the failing checks; without approval the start is refused).
+                     Fix the cause of every FAIL instead — each forced case gets analysed
   --source-3mf FILE  the project 3MF the G-code was sliced from: head-sequence check + halves-check
                      (without it the head-sequence check uses NAME.3mf next to the G-code)
   --bridge-max MM    preflight overhangs gate: longest bridge; overrides the printer's
@@ -106,7 +110,8 @@ Examples:
   3d printer upload k1se "out/roof left.gcode" --as roof_left.gcode
   3d printer start u1 out/part.gcode --yes
   3d printer start u1 out/base.gcode --yes --source-3mf print/base.3mf
-  3d printer start k1se out/roof.gcode --yes --force
+  RIG_HATCH_REQUEST_3D_PRINTER_START_FORCE="roof overhang FAIL is a stale map, issue #N" \\
+    3d printer start k1se out/roof.gcode --yes --force   # waits for the owner's Telegram tap
   3d printer cancel k1se --yes
   3d printer watch u1 k1se --steer 01a12cd6
   3d printer vision u1 --once --save /tmp/u1.jpg
@@ -371,9 +376,15 @@ def _start_snapshot(name: str, file: str, original: Path, local: Path, source: P
     if report.overall == FAIL:
         if "--force" not in opts:
             raise PrinterRefused("preflight FAIL; start refused", command="printer",
-                                 remediation=["Fix the FAIL lines above, or pass --force to start anyway."])
+                                 remediation=["Fix the cause of each FAIL line above (a gate's false positive is a bug: "
+                                              "file an issue and fix it).",
+                                              "Forcing needs a one-time Telegram approval, not a flag: see --force in "
+                                              "`3d printer --help`."])
+        from printer_ops.force_hatch import require_force_approval
+
         forced = ", ".join(c.name for c in report.checks if c.status == FAIL)
-        print(f"FORCED: starting despite preflight FAIL ({forced})")
+        approval = require_force_approval(printer=name, file=str(original), sha256=local_hash, checks=report.checks)
+        print(f"FORCED: starting despite preflight FAIL ({forced}); owner approved on Telegram ({approval})")
 
     _refuse_if_busy(name, adapter.status(), "state changed during preflight")
     dont_resend = [f"Do NOT resend blindly. Check: 3d printer status {name}"]

@@ -70,7 +70,7 @@ Subcommands:
           brim, MVS 24–32, a 7x7 grid with fiducials (K1 SE bed); plates add a
           JSON map object → parameters, bbox, how to read it. The G-code gets thumbnails and a slice-warnings record,
           ready for `3d print-preflight` (temp: filament_temp_range FAILs when the tower's hottest
-          block is above the spool's nozzle window; start it with --force). Local only; set SLICER=/path/to/orca.
+          block is above the spool's nozzle window; start needs a Telegram-approved --force). Local only; set SLICER=/path/to/orca.
 
 Options:
   --printer P        fleet printer name (fleet/printers.yaml), e.g. u1, k1se

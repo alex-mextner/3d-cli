@@ -949,6 +949,54 @@ def test_soft_findings_warn(tmp_path: Path) -> None:
     )
 
 
+def _record_no_colour_warning(path: Path, *, sha: str | None = None) -> None:
+    from slicing import slice_warnings as sw
+
+    side = sw.sidecar_path(path)
+    side.write_text(
+        json.dumps(
+            {
+                "schema": 1,
+                "gcode": path.name,
+                "gcode_sha256": sha or sw.sha256_file(path),
+                "warnings": [
+                    {
+                        "id": sw.warning_id("warning", "no filament colors found in projects"),
+                        "level": "warning",
+                        "message": "no filament colors found in projects",
+                        "sources": ["log"],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_profile_default_colour_of_a_colourless_project_is_unverified_not_fail(tmp_path: Path) -> None:
+    """An STL slice carries no filament colour: the footer's #F2754E is the profile default, so a
+    black spool must not FAIL on dE (garage-band spoon, dE 56.6)."""
+    path = gcode(tmp_path, colours="#F2754E;#808080;#1B5E20;#FFFFFF")
+    st = good_state()
+    assert run(path, st)["loaded_filament_match"].status == "FAIL"
+    _record_no_colour_warning(path)
+    check = run(path, st)["loaded_filament_match"]
+    assert check.status == "UNVERIFIED"
+    assert "declares no filament colour" in check.detail and "F2754E" in check.detail
+
+
+def test_colourless_project_still_fails_on_material_mismatch(tmp_path: Path) -> None:
+    path = gcode(tmp_path, types="PETG;PLA;PLA;PLA", colours="#F2754E;#808080;#1B5E20;#FFFFFF")
+    _record_no_colour_warning(path)
+    assert run(path, good_state())["loaded_filament_match"].status == "FAIL"
+
+
+def test_stale_no_colour_sidecar_does_not_waive_the_colour_check(tmp_path: Path) -> None:
+    path = gcode(tmp_path, colours="#F2754E;#808080;#1B5E20;#FFFFFF")
+    _record_no_colour_warning(path, sha="0" * 64)
+    assert run(path, good_state())["loaded_filament_match"].status == "FAIL"
+
+
 def test_project_colour_rule_is_stricter(tmp_path: Path) -> None:
     proj = tmp_path / "babushkin-dom" / "print"
     proj.mkdir(parents=True)

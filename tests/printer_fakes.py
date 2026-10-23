@@ -666,3 +666,29 @@ class FakeMoonrakerWS:
     def _serve_conn(self, conn: socket.socket) -> None:
         with conn:
             self._session(conn)
+
+
+@dataclass
+class FakeHatchVerdict:
+    approved: bool
+    should_stop: bool
+    reason: str
+
+
+@dataclass
+class FakeHatch:
+    """The owner's Telegram hatch (printer_ops/force_hatch.py) answered by a test double.
+    verdict: "approve" | "deny" | "not-requested" (the env justification was not set)."""
+
+    verdict: str = "approve"
+    requests: list[dict[str, Any]] = field(default_factory=list)
+
+    def request_hatch_approval(
+        self, hook_id: str, context: dict[str, object], *, cwd: str, command: str, critical: bool
+    ) -> FakeHatchVerdict:
+        self.requests.append({"hook": hook_id, "context": context, "cwd": cwd, "command": command, "critical": critical})
+        if self.verdict == "approve":
+            return FakeHatchVerdict(True, True, "test double approved")
+        if self.verdict == "deny":
+            return FakeHatchVerdict(False, True, "test double denied")
+        return FakeHatchVerdict(False, False, "RIG_HATCH_REQUEST_3D_PRINTER_START_FORCE is not set")

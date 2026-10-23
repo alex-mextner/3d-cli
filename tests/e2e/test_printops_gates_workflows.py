@@ -14,7 +14,7 @@ from printops_fixtures import LiveApi
 from printops.client import ApiClient
 from printops.spoolman import encode_extra, ensure_extra_fields
 
-from .workflow_helper import run_cli
+from .workflow_helper import run_cli, run_cli_with_hatch
 
 PRINTOPS_GATES = (
     "printer_profile_match",
@@ -259,7 +259,7 @@ def test_printer_start_refuses_a_plate_sliced_for_another_printer(
             tmp_path, "printer", "start", "u1", wrong.name, "--yes", env_extra=env
         )
         sent_after_refusal = [r.path for r in moon.writes()]
-        started = run_cli(
+        started = run_cli_with_hatch(
             tmp_path,
             "printer",
             "start",

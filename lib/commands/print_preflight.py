@@ -70,7 +70,9 @@ USAGE = """3d print-preflight FILE.gcode [--printer NAME] [--axis-limits X0:X1,Y
   filament_temp_range    nozzle/bed temperatures (footer + M104/M109/M140/M190) inside the
                          loaded filament's nozzle_temp_min..max / bed_temp_min..max
   loaded_filament_match  the slot's spool: material = `; filament_type` (FAIL), colour ΔE2000
-                         vs `; filament_colour` (WARN/FAIL, thresholds per project), vendor (WARN)
+                         vs `; filament_colour` (WARN/FAIL, thresholds per project), vendor (WARN);
+                         colour is UNVERIFIED when the slice recorded "no filament colors found in
+                         projects" (an STL slice: the footer colour is the profile default)
   slot_binding_known     every used slot has a spool in the ledger (WARN: usage not booked)
   filament_sufficient    `; filament used [g]` + purge + margin vs the spool's remaining
                          interval: FAIL above it, WARN "weigh" inside it

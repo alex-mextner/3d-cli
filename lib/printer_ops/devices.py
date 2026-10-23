@@ -18,7 +18,7 @@ ENTRY:
   real X/Y travel used by `3d print-preflight` (Moonraker printers report it themselves).
   Optional `trusted_macros: [PAUSE, START_PRINT]` names macros (commands whose bodies the
   bounds check cannot see) known to keep the head on the bed; any other macro in a G-code
-  FAILs print-preflight, so `3d printer start` needs --force for it.
+  FAILs print-preflight, so `3d printer start` is refused for it (list it here).
   Optional `watch: {steer: <omp session>, tg_fallback: true, exec: CMD, min_severity: warning, ...}`
   configures `3d printer watch` for this printer (keys: printer_ops/watch_run.py WATCH_KEYS).
   Optional `resume:` holds the printer-specific values of `3d gcode-resume` (ResumeProfile:

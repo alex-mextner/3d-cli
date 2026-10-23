@@ -4,7 +4,7 @@ A part goes from model to printer through three groups of gates. Each gate is a 
 command that exits 1 on FAIL, so a shell script or an agent stops at the first broken one.
 The G-code gates are not optional: [`3d print-preflight`](../commands/print-preflight.md) runs
 all of them, and [`3d printer start`](../commands/printer.md) runs `print-preflight` and refuses
-on FAIL unless `--force`.
+on FAIL unless the owner approves a [forced start](../commands/printer.md#forcing-a-start) on Telegram.
 
 ```
 model gates ──> slice ──> G-code gates ──> print-preflight ──> printer start

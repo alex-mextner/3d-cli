@@ -1265,7 +1265,7 @@ def gen_temp(
             "nozzle_temp_best=BEST,nozzle_temp_max=MAX --method temp_tower",
             f"print-preflight's filament_temp_range FAILs when {steps[0]} °C (the first block) is outside "
             "the spool's nozzle_temp_min/max; the tower crosses the window on purpose: check the rest and "
-            "start with --force.",
+            "start with a forced start (--force needs the owner's Telegram approval, see `3d printer --help`).",
         ],
     )
 
