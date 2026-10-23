@@ -4,7 +4,8 @@ WHAT: `parse_hex` accepts what printers and Spoolman report ("#1A2B3C", "1a2b3c"
   "000000FF", Creality's padded "#0ffa800"); `srgb_to_lab`; `delta_e2000` (Sharma, Wu, Dalal 2005,
   "The CIEDE2000 Color-Difference Formula: Implementation Notes, Supplementary Test Data, and
   Mathematical Observations", Color Res. Appl. 30(1) — tests check all 34 pairs of its table);
-  `hex_delta_e` for two hex colours.
+  `hex_delta_e` for two hex colours; `linear_rgb` / `hex_from_linear` / `linear_to_lab` for
+  colours averaged in linear light (the layer-mix model, lib/slicing/mix_model.py).
 
 WHY: a printer reports the colour of what is loaded only approximately (U1 touchscreen presets,
   slicer sync), so "same colour" is a perceptual distance under a threshold, not string equality
@@ -52,17 +53,38 @@ def _f(t: float) -> float:
     return t ** (1 / 3) if t > (6 / 29) ** 3 else t / (3 * (6 / 29) ** 2) + 4 / 29
 
 
-def srgb_to_lab(hex_color: str) -> tuple[float, float, float]:
-    """ "#RRGGBB" -> CIELAB (L*, a*, b*) under D65."""
+def linear_rgb(hex_color: str) -> tuple[float, float, float]:
+    """ "#RRGGBB" -> linear-light RGB in 0..1 (IEC 61966-2-1 decoding)."""
     h = parse_hex(hex_color)
     if h is None:
         raise ValueError(f"not a colour: {hex_color!r}")
     r, g, b = (_linear(int(h[i : i + 2], 16) / 255.0) for i in (1, 3, 5))
+    return r, g, b
+
+
+def _encode(c: float) -> float:
+    c = min(1.0, max(0.0, c))
+    return 12.92 * c if c <= 0.0031308 else 1.055 * c ** (1 / 2.4) - 0.055
+
+
+def hex_from_linear(rgb: tuple[float, float, float]) -> str:
+    """Linear-light RGB (clipped to 0..1) -> "#RRGGBB"."""
+    return "#" + "".join(f"{round(_encode(c) * 255):02X}" for c in rgb)
+
+
+def linear_to_lab(rgb: tuple[float, float, float]) -> tuple[float, float, float]:
+    """Linear-light sRGB -> CIELAB (L*, a*, b*) under D65 (mixes average in linear light)."""
+    r, g, b = rgb
     x = (0.4124564 * r + 0.3575761 * g + 0.1804375 * b) * 100
     y = (0.2126729 * r + 0.7151522 * g + 0.0721750 * b) * 100
     z = (0.0193339 * r + 0.1191920 * g + 0.9503041 * b) * 100
     fx, fy, fz = _f(x / _D65[0]), _f(y / _D65[1]), _f(z / _D65[2])
     return 116 * fy - 16, 500 * (fx - fy), 200 * (fy - fz)
+
+
+def srgb_to_lab(hex_color: str) -> tuple[float, float, float]:
+    """ "#RRGGBB" -> CIELAB (L*, a*, b*) under D65."""
+    return linear_to_lab(linear_rgb(hex_color))
 
 
 def delta_e2000(

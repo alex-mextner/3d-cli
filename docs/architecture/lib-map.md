@@ -56,6 +56,7 @@ rendering, slicing support, and verification:
 - `lib/geometry/mesh_metrics.py`
 - `halves_check.py`
 - `mesh_check.py`
+- `mesh_repair.py`
 - `niche_fit.py`
 - `orca_project_3mf.py`
 - `packing.py`
@@ -93,6 +94,8 @@ Target package: `lib/geometry/`, with subpackages only when a real boundary appe
   alerts no live subscriber took, and its handoff).
 - `lib/slicing/head_sequence.py` — per-object, per-layer toolhead check of sliced G-code against the project 3MF's mixed-filament patterns (`slice-check --check head-sequence`; `preflight_check()` is the `head seq` gate of `print-preflight`, #103).
 - `lib/slicing/mix_faces.py` — every part printed in a mixed filament (pattern or Local-Z row) of an Orca-family project 3MF shows its colour on walls: face areas by normal in bed coordinates, FAIL when the top outweighs half the walls (`3d mix check`; `preflight_check()` is the `mix face` gate of `print-preflight`, #411).
+- `lib/slicing/mix_model.py` — the layer-mix recipe model (#116): wall colour as the linear-light mean of the layers, CIEDE2000 to a target, stripe visibility at 30 cm / 1 m, ranking and variant picks (`3d mix recipes|tester`).
+- `lib/slicing/mix_tester.py` — the U1 mix tester plate (#413): standing numbered swatches per candidate and per pure spool, a Snapmaker Orca project (settings from a probe export of the U1 system presets or a base 3MF), the `printops.mix_tester/1` manifest and the swatch-sheet PNG (`3d mix tester`).
 - `lib/slicing/slice_warnings.py` — the slicer's warnings for one G-code (Orca-family CLI log, result.json, slice_info of a sliced 3MF) in `NAME.slice-warnings.json` with the G-code's SHA-256 and a reason per accepted warning; backs `3d slice-warnings` and the `slicer warn` gate of `print-preflight`.
 - `lib/printops/` — PrintOps (epic #154) behind `3d printops` and the 3d-api service
   (`services/3d-api/`): `db.py` (SQLite + `migrations/NNNN_<slice>.sql`), `events.py`
@@ -109,7 +112,7 @@ Target package: `lib/geometry/`, with subpackages only when a real boundary appe
   and puts back the current pressure-advance calibration the firmware's K reset drops.
   Slot reconciliation (#161): `slots.py` (read-only per-adapter slot readers: U1
   `print_task_config` + `filament_detect`, K1 SE ws runout switch), `color.py` (hex → CIELAB,
-  CIEDE2000), `reconcile.py` (Spoolman `printops_slot` bindings vs live slots, plus failed head
+  linear-light RGB, CIEDE2000; also the preflight colour gate), `reconcile.py` (Spoolman `printops_slot` bindings vs live slots, plus failed head
   writes from the event log → `anomaly` rows + `slot.mismatch` / `anomaly.*` events), `api/routes_reconcile.py` (`/v1/printers`,
   `/v1/anomalies`, background poller via router lifespan).
   Incidents (#165): `incidents.py` (structured incidents, lifecycle, rates per kg / print-hour),
@@ -233,6 +236,7 @@ Every current root Python module is listed here so future additions are intentio
 - `mask_geometry.py` — lightweight mask coverage, bounding-box, and centroid metadata.
 - `materials.py` — compatibility wrapper re-exporting `registries.materials`.
 - `mesh_check.py` — mesh verification implementation.
+- `mesh_repair.py` — thin adapter over the public `meshfix` library (https://github.com/alex-mextner/meshfix): `repair_mesh` / `repair_file` and the stable report keys; clones and builds the pinned tag once when it is not installed; backs `3d mesh --repair` (#432).
 - `halves_check.py` — paired-halves gate: loads pairs marked in 3MF object metadata (or STL pairs), maps both halves into the assembly frame, rasterises their cut faces and compares outline, dowel holes, size and islands; backs `3d halves-check`.
 - `vision_detect.py` — pixel half of `3d printer vision`: Obico ONNX spaghetti scorer (weights downloaded at runtime, sha256-pinned), `FrameScorer` (ROI/ignore masks + stage-2 verifier), brightness check, live camera loop, `record` and `eval` on recorded footage; decision logic and camera/klippy.log access live in `printer_ops/vision.py`.
 - `vision_verify.py` — stage 2 of `3d printer vision`: zero-shot CLIP ViT-B/32 (ONNX, sha256-pinned) on crops of the detector's boxes → verified score q.
