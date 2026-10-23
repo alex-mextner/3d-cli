@@ -41,6 +41,7 @@ if TYPE_CHECKING:
     from printer_ops.devices import Device
     from printer_ops.webui import WebUiProbe
     from printer_doctor.targets import Target
+    from printer_ops.subscriptions import DeliveryState, Health, OmpLive, Registry
     from printops.client import ApiClient
 
 MAX_BODY = 4 * 1024 * 1024
@@ -166,6 +167,16 @@ class Fetched:
 
 
 @dataclass
+class SubscriptionSources:
+    """Where the alert-subscription data comes from; None fields are the real registry file, delivery
+    state file and `tg-ctl omp-live` (tests inject temp files and a fake runner)."""
+
+    registry: Registry | None = None
+    state: DeliveryState | None = None
+    live: OmpLive | None = None
+
+
+@dataclass
 class Services:
     """Every seam a test may replace; None = the real implementation."""
 
@@ -181,6 +192,7 @@ class Services:
     timeout: float = 8.0  # per request
     listen_s: float | None = None  # Creality ws listen window (--secs)
     poll_s: float = 45.0  # how long a restart fix waits for Klipper to come back
+    subscriptions: SubscriptionSources = field(default_factory=SubscriptionSources)
     down: DownTracker = field(
         default_factory=DownTracker
     )  # shared by every Context of the run
@@ -215,6 +227,7 @@ class Context:
         self._api: tuple[ApiClient | None] | None = None
         self._api_cache: dict[str, JsonValue | CannotSee] = {}
         self._webui: WebUiProbe | None = None
+        self._sub_health: list[Health] | None = None
 
     # ---- identity -------------------------------------------------------------------------
     @property
@@ -501,6 +514,32 @@ class Context:
                 self._webui = probe(device)
         return self._webui
 
+    def subscription_registry(self) -> Registry:
+        from printer_ops.subscriptions import Registry
+
+        return self.services.subscriptions.registry or Registry()
+
+    def subscription_health(self, *, fresh: bool = False) -> list[Health]:
+        """Every alert subscription judged now (session liveness from `tg-ctl omp-live`, delivery
+        state from the state file); cached until `invalidate()` (`fresh` re-reads: a fix must act on
+        what is true now, not on what the check saw). An unreadable registry is an error."""
+        if fresh:
+            self._sub_health = None
+        if self._sub_health is None:
+            from errors import ThreeDError
+            from printer_ops.subscriptions import DeliveryState, OmpLive, read_health
+
+            src = self.services.subscriptions
+            try:
+                self._sub_health = read_health(
+                    registry=self.subscription_registry(),
+                    state=src.state or DeliveryState(),
+                    live=src.live or OmpLive(),
+                )
+            except ThreeDError as exc:
+                raise CannotSee(clean(exc.message), "error") from exc
+        return self._sub_health
+
     def systemctl_show(self, unit: str) -> str:
         if self.services.systemctl_show is not None:
             return self.services.systemctl_show(unit)
@@ -540,6 +579,7 @@ class Context:
         self._api_cache.clear()
         self._status = None
         self._webui = None
+        self._sub_health = None
         device = self.target.device
         if device is not None:
             self.services.down.forget(device.host.lower(), device.port)
@@ -552,6 +592,7 @@ __all__ = [
     "HttpFn",
     "HttpReply",
     "Services",
+    "SubscriptionSources",
     "as_list",
     "as_obj",
     "default_http",

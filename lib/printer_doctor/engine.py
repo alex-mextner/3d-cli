@@ -151,17 +151,24 @@ def _apply(check: Check, fix: Fix, ctx: Context, record: ResultRecord) -> None:
     )
     ctx.invalidate()
     after = evaluate(check, ctx)
-    report.verified = after.status == "pass"
-    if not report.verified:
-        report.error = f"not fixed after apply: {after.summary}"
-        after = _unconfirmed(check, record.result, after)
+    if fix.goal is not None and after.status in ("pass", "fail"):
+        report.verified = fix.goal(
+            after
+        )  # the fix's own promise, e.g. "the stale entries are gone"
+        if not report.verified:
+            report.error = f"not fixed after apply: {after.summary}"
+    else:
+        report.verified = after.status == "pass"
+        if not report.verified:
+            report.error = f"not fixed after apply: {after.summary}"
+            after = _unconfirmed(check, record.result, after)
     record.result = after
 
 
 def _refusal(fix: Fix, ctx: Context, options: Options) -> str | None:
     """Why `fix` must not be applied now, before the fix function runs; None = go ahead."""
     access = ctx.target.access
-    if access != "full":
+    if fix.touches_printer and access != "full":
         return (
             f"refused: access {access} (3d only writes to printers with access: full)"
         )

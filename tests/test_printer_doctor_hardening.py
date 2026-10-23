@@ -48,6 +48,7 @@ from printer_doctor_fakes import (
     ev,
     printer_view,
     rig,
+    subscription_sources,
     target,
 )
 from printer_fakes import FakeMoonraker, free_port
@@ -691,7 +692,7 @@ def test_a_dead_printer_costs_one_timeout_not_one_per_path_or_per_check() -> Non
     clock = ManualClock()
     svc = Services(clock=clock, sleep=clock.sleep, http=hole.http, adapter=hole.adapter, journal=lambda e, a: "buffered",
                    webui=lambda d: (_ for _ in ()).throw(AssertionError("the web UI probe must not run against a dead host")),
-                   systemctl_show=lambda u: "", api=lambda: None, timeout=8.0)  # fmt: skip
+                   systemctl_show=lambda u: "", api=lambda: None, timeout=8.0, subscriptions=subscription_sources())  # fmt: skip
     ctx = Context(target(watch=watch), svc)
     report = run_printer(ctx, discover_checks(), Options())
     by = {rec.result.check: rec.result for rec in report.records}

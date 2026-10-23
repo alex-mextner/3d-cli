@@ -126,16 +126,20 @@ def _fix_lines(printer: str, rec: ResultRecord) -> list[str]:
     if fix is None:
         return []
     lines = [f"        fix [{fix.risk}]: {clean(fix.description)}"]
-    if fix.applied and fix.verified:
+    if fix.applied and fix.verified and not rec.result.finding:
         return [
             *lines,
             f"        -> fixed, verified by re-running the check (journal: {fix.journal})",
         ]
-    if fix.applied:
+    if fix.applied and fix.verified:
+        lines.append(
+            f"        -> applied and verified, but the finding remains (journal: {fix.journal})"
+        )
+    elif fix.applied:
         lines.append(f"        -> applied but {fix.error} (journal: {fix.journal})")
     elif fix.error:
         lines.append(f"        -> {fix.error}")
-    if fix.risk == "manual-only" or fix.error:
+    if fix.risk == "manual-only" or fix.error or (fix.applied and rec.result.finding):
         lines += [_step_line(clean(step)) for step in fix.manual_steps]
     elif fix.risk == "safe":
         lines.append("        -> run with --fix to apply it")

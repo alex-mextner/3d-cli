@@ -12,6 +12,7 @@ from errors import GateFailure, InvalidArgument, UsageError
 from fleet_fixtures import u1_entry, write_fleet
 from printer_doctor.context import Services
 from printer_doctor.registry import discover_checks
+from printer_doctor_fakes import subscription_sources
 from printer_fakes import FakeMoonraker
 from printers_cli import dispatch, resolve
 from printers_cli.doctor import USAGE, run
@@ -41,6 +42,7 @@ def services() -> Services:
         systemctl_show=lambda unit: "",
         timeout=3.0,
         poll_s=3.0,
+        subscriptions=subscription_sources(),
     )
 
 
@@ -124,7 +126,7 @@ def test_all_includes_the_offline_printers_and_never_contacts_them(
             "--all",
             "--json",
             "--skip",
-            "watch-units-dry-run,camera-snapshot,camera-config",
+            "watch-units-dry-run,camera-snapshot,camera-config,alert-subscribers",
         ],
         services(),
     ) in (0,)

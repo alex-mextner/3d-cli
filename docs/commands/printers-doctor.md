@@ -82,6 +82,12 @@ steps or in the journal becomes the fix's `error` text; it never aborts the run 
 restart that was already sent. A second `--fix` run is a no-op: the check passes, so nothing is applied
 or journalled again.
 
+A fix may declare its own goal when "the check passes again" is not what it can achieve (`alert-subscribers`:
+pruning dead subscriptions cannot create a live one): `verified` then means the goal was met, the result stays a
+finding, and the report says **applied and verified, but the finding remains**; `summary.fixed` counts it and
+`summary.remaining` still counts the finding. A fix that changes only local state (a registry file), not the
+machine, is not subject to the `access: full` rule.
+
 Manual steps: a line starting with `$` is a real shell command (copy-paste it), a line starting with
 `-` is prose. The line `re-run: 3d printers doctor PRINTER --check ID` is printed once per unfixed finding.
 
@@ -167,6 +173,13 @@ means the check talks to the printer; an `access: offline` printer is never cont
 ### `watch-units-dry-run` — the vision/watch user services deliver
 - **Applies to** printers with a camera; needs `systemctl --user` on this host (without it: **skip**, never a pass). Severity **error**. Reuses `printer_ops/deploy_check.py` (`check_printer`, `fix_commands`; the logic of `3d printer vision doctor`): `3d-printer-vision@NAME` or `3d-printer-watch@NAME` running with `--dry-run` (on `ExecStart` or in the `WATCH_ARGS` of its EnvironmentFile) is an **error**; no running vision service is a **warn**.
 - **Evidence** `units: [{unit, state, dry_run, source}]`, `warnings`. **Fix** manual-only: the commands of `deploy_check.fix_commands` (edit the unit, `daemon-reload`, restart, delivery test).
+
+### `alert-subscribers` — a live omp session receives the printer's alerts
+Issue [#526](https://github.com/alex-mextner/3d-cli/issues/526). A watcher (`3d printer watch`, `3d printer vision`) delivers a printer's events to the omp sessions subscribed with `3d printer subscribe`; a session that is not live counts as unsubscribed, so its events fall through to the temporary printer agent or nowhere. On 2026-10-23 three subscriptions of a session that had been dead for five days held 89, 41 and 36 failed deliveries while `3d printer subscriptions` listed only live entries.
+- **Applies to** printers with a watcher: a camera (a vision unit; the model default counts) or `watch:` settings (a watch unit). Offline printers and printers with neither are skipped with that reason. Severity **error**. It reads the subscription registry, the delivery state and `tg-ctl omp-live status`, not the printer.
+- **Finding** no subscription that covers the printer (`--printer` list or every printer), at `min_severity` warning or lower, belongs to a live session (the liveness logic of `3d printer subscriptions`). Entries above warning level do not count. With no covering entry at all it fails without asking `tg-ctl`. When `tg-ctl` cannot tell who is live and no entry is known live, the check **skips** (it cannot see) instead of guessing.
+- **Evidence** `entries` (every covering entry: `id`, `session`, `printers`, `min_severity`, `live`, `stale`, `prunable`, `stale_reasons`, `consecutive_failed`, `failed`, `delivered`, `last_success`, `last_error`, `last_error_ts`), `prunable` (ids), `stale_after_failures` (5).
+- **Fix** **safe**, touches no printer (so it also runs for a `read-only` printer): removes the covering entries whose session is **not live now** and whose last 5 deliveries in a row failed: the code path of `3d printer unsubscribe --id`, with liveness re-read right before, so an entry of a live session is never removed and a session that is only away (few failures: `omp -r` keeps the session id) stays. Journalled like every fix. Idempotent: with nothing to prune it is `refused: nothing to prune …`. **Verified** means the stale entries are gone; the finding **remains** ("no subscription covers this printer" / "no live subscriber") until a live session subscribes, and the report says "applied and verified, but the finding remains" (exit code 1). Subscribing is manual-only: the steps print `omp-steer list` and `3d printer subscribe --session SESSION_ID --printer NAME`.
 
 ### `device-override-stale` — an override does not silently replace the fleet entry
 - **Applies to** a printer that has both a fleet entry and an effective device from another file (`Device.source` differs from the fleet file). Severity **warn**. Reads config only.

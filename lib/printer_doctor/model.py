@@ -128,12 +128,19 @@ class Fix:
     risk `safe`        --fix applies it (idempotent, never mid-print, verified by the check).
     risk `needs-yes`   --fix applies it only with --yes too (it restarts something).
     risk `manual-only` never executed; `manual_steps` are printed (and put in the JSON).
-    `manual_steps` exists for every risk: it is what to do by hand when the fix is refused."""
+    `manual_steps` exists for every risk: it is what to do by hand when the fix is refused.
+    `touches_printer` False: the fix changes only local state (a registry file), never the machine,
+    so the `access: full` rule of the engine does not apply to it.
+    `goal` decides `verified` from the verifying re-run when "the check passes again" is not what the
+    fix can achieve (pruning dead subscriptions cannot create a live subscriber): it receives the
+    result of the re-run and says whether the fix did what it promised."""
 
     risk: Risk
     description: str
     manual_steps: FixSteps
     apply: FixApply | None = None
+    touches_printer: bool = True
+    goal: Callable[[CheckResult], bool] | None = None
 
     def __post_init__(self) -> None:
         if self.risk not in RISKS:

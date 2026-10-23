@@ -83,9 +83,29 @@ printer agent gets its alerts), the last delivery (time, printer, kinds, count) 
 error. `--json` prints the same data as an array. The delivery state lives in
 `~/.local/state/3d-cli/printer-subscriptions.json`, not in the registry.
 
+**Stale entries** ([#526](https://github.com/alex-mextner/3d-cli/issues/526)). An entry whose session is not
+live, or whose last 5 deliveries in a row failed (the state keeps `consecutive_failed`, reset by the first
+success; state written before that counter existed falls back to the lifetime `failed` total when its last
+event was a failure), is flagged:
+
+```
+s1a2b3c4d5e  session 3b1c4d2e — printers u1; kinds all; min warning
+  live: NO — no live omp session matches '3b1c4d2e' (counts as unsubscribed: the printer agent gets its alerts)
+  last delivery: 2026-10-17T09:00:00+02:00 u1 vision_spaghetti (12 delivered)
+  last error: 2026-10-23T10:00:00+02:00 no live omp session matches '3b1c4d2e'
+  STALE: session is not live and 89 deliveries failed in a row — 89 failed in total, last success 2026-10-17T09:00:00+02:00; remove it: 3d printer unsubscribe --id s1a2b3c4d5e
+```
+
+A printer with a watcher (a camera, or `watch:` settings) and **no live subscriber at warning level** also gets a
+`warning:` line naming the command to subscribe a session; the exit code stays 0. With `--json` the warnings go
+to stderr and every entry gains `stale`, `stale_reasons`, `consecutive_failed` and `last_success` (the existing keys
+and the top-level array are unchanged). `3d printers doctor PRINTER --check alert-subscribers` fails on the same
+condition and `--fix` prunes the dead entries ([printers-doctor.md](printers-doctor.md)).
+
 ```bash
 3d printer subscriptions
 3d printer subscriptions --json | jq '.[] | {id, live: .live.live, last: .state.last_ts}'
+3d printer subscriptions --json | jq '.[] | select(.stale) | {id, session, consecutive_failed, last_success}'
 ```
 
 `subscriptions test PRINTER` sends one synthetic `[TEST]` event through the subscriptions. By

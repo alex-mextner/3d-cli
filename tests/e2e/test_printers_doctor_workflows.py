@@ -15,7 +15,7 @@ from printer_fakes import FakeMoonraker, free_port
 
 from .workflow_helper import isolated_env, run_cli
 
-SKIP_HOST_DEPENDENT = "watch-units-dry-run,camera-snapshot,camera-config"  # systemd / cameras of the host running the test
+SKIP_HOST_DEPENDENT = "watch-units-dry-run,camera-snapshot,camera-config,alert-subscribers"  # systemd / cameras of the host running the test
 
 
 class Lab:
@@ -263,3 +263,124 @@ def test_a_read_only_printer_is_diagnosed_but_never_restarted(tmp_path: Path) ->
     )
     assert fix["manual_steps"] and u1.writes() == []
     assert lab.journal("u1") == []
+
+
+def _tg_ctl(tmp_path: Path, sessions: list[dict[str, Any]]) -> dict[str, str]:
+    """A fake `tg-ctl` first on PATH that lists `sessions` as the live omp sessions."""
+    import os
+    import sys
+
+    bindir = tmp_path / "fakebin"
+    bindir.mkdir(exist_ok=True)
+    script = bindir / "tg-ctl"
+    script.write_text(
+        f"#!{sys.executable}\nimport json, sys\n"
+        "if sys.argv[1:3] == ['omp-live', 'status']:\n"
+        f"    print({json.dumps(sessions)!r})\n"
+        "else:\n    print('{\"ok\":true}')\n",
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    return {"PATH": f"{bindir}:{os.environ['PATH']}"}
+
+
+def test_alert_subscribers_prunes_dead_subscriptions_then_passes_once_a_live_session_subscribes(
+    tmp_path: Path,
+) -> None:
+    """Three subscriptions of a session that died days ago swallow every U1 alert. `3d printers doctor u1 --check
+    alert-subscribers` fails (exit 1) and names each dead entry; `--fix` removes the dead entries (journalled), says the
+    finding remains and prints the subscribe command; a rerun is a no-op; after a live session subscribes the check passes."""
+    u1, k1, api = lab_servers()
+    live = {
+        "pid": 433553,
+        "sessionId": "01a12cd6-7b39-7356",
+        "cwd": "/tmp",
+        "title": "main",
+    }
+    with u1.serve(), k1.serve(), api.serve():
+        lab = Lab(tmp_path, u1, k1, api)
+        lab.env.update(_tg_ctl(tmp_path, [live]))
+        ids = []
+        for session in ("dead0001", "dead0002"):
+            made = run_cli(
+                tmp_path,
+                "printer",
+                "subscribe",
+                "--session",
+                session,
+                "--printer",
+                "u1",
+                "--json",
+                env_extra=lab.env,
+            )
+            assert made.returncode == 0, made.stderr
+            ids.append(json.loads(made.stdout)["id"])
+        state = (
+            Path(isolated_env(tmp_path)["XDG_STATE_HOME"])
+            / "3d-cli"
+            / "printer-subscriptions.json"
+        )
+        state.parent.mkdir(parents=True, exist_ok=True)
+        state.write_text(json.dumps({"subscriptions": {
+            ids[0]: {"failed": 89, "consecutive_failed": 89, "last_error": "no live omp session matches 'dead0001'"},
+            ids[1]: {"failed": 41, "consecutive_failed": 41, "last_error": "no live omp session matches 'dead0002'"},
+        }, "agents": {}}))  # fmt: skip
+
+        read_only = lab.doctor("u1", "--check", "alert-subscribers", "--json")
+        fixed = lab.doctor("u1", "--check", "alert-subscribers", "--fix", "--json")
+        again = lab.doctor("u1", "--check", "alert-subscribers", "--fix", "--json")
+        subscribed = run_cli(
+            tmp_path,
+            "printer",
+            "subscribe",
+            "--session",
+            "01a12cd6",
+            "--printer",
+            "u1",
+            env_extra=lab.env,
+        )
+        healthy = lab.doctor("u1", "--check", "alert-subscribers", "--json")
+
+    assert read_only.returncode == 1, read_only.stderr
+    first = results(json.loads(read_only.stdout), "u1")["alert-subscribers"]
+    assert first["status"] == "fail" and first["severity"] == "error"
+    assert sorted(first["evidence"]["prunable"]) == sorted(ids)
+    assert {row["consecutive_failed"] for row in first["evidence"]["entries"]} == {
+        89,
+        41,
+    }
+    assert first["fix"]["risk"] == "safe" and first["fix"]["applied"] is False
+
+    assert fixed.returncode == 1  # the finding remains: nobody is subscribed
+    fix = results(json.loads(fixed.stdout), "u1")["alert-subscribers"]
+    assert (
+        fix["fix"]["applied"] is True
+        and fix["fix"]["verified"] is True
+        and fix["fix"]["journal"] == "imported"
+    )
+    assert fix["status"] == "fail" and "no subscription covers" in fix["summary"]
+    assert (
+        "then: 3d printer subscribe --session SESSION_ID --printer u1"
+        in fix["fix"]["manual_steps"]
+    )
+    (line,) = lab.journal("u1")
+    assert (line["kind"], line["key"], line["new"]) == (
+        "doctor_fix",
+        "alert-subscribers",
+        [],
+    )
+    assert len(line["old"]) == 2
+
+    noop = results(json.loads(again.stdout), "u1")["alert-subscribers"]["fix"]
+    assert noop["applied"] is False and noop["error"].startswith(
+        "refused: nothing to prune"
+    )
+    assert len(lab.journal("u1")) == 1
+
+    assert subscribed.returncode == 0, subscribed.stderr
+    assert healthy.returncode == 0, healthy.stdout
+    assert (
+        results(json.loads(healthy.stdout), "u1")["alert-subscribers"]["status"]
+        == "pass"
+    )
+    assert u1.writes() == [] and k1.writes() == []  # the printers were never written to

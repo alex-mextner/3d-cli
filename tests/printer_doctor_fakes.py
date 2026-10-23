@@ -9,6 +9,8 @@ Nothing contacts a real printer, Spoolman or 3d-api.
 from __future__ import annotations
 
 import json
+import subprocess
+import tempfile
 import threading
 import time
 from collections.abc import Callable, Iterator, Mapping
@@ -19,11 +21,13 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
-from printer_doctor.context import Context, Services
+from printer_doctor.context import Context, Services, SubscriptionSources
 from printer_doctor.model import CheckResult
 from printer_doctor.targets import Target
 from printer_ops.devices import Device
 from printops.client import ApiClient, Response
+from printer_ops.subscriptions import DeliveryState, Registry
+from printer_ops.watch_sinks import OmpLive
 from printops.fleet import FleetPrinter, Head
 
 FLEET_FILE = Path("fleet-under-test.yaml")
@@ -33,6 +37,51 @@ JPEG = b"\xff\xd8\xff\xe0" + b"\x00" * 64 + b"\xff\xd9"
 def ev(result: CheckResult) -> dict[str, Any]:
     """A result's evidence for assertions (JSON-shaped, so indexing it is untyped on purpose)."""
     return dict(result.evidence)
+
+
+class FakeTgCtl:
+    """`tg-ctl omp-live status --json` stand-in: `hosts` are the live omp sessions; every call is
+    recorded so a test can prove a read-only run never sent anything to a session. `missing` makes the
+    binary absent (tg-ctl not installed)."""
+
+    def __init__(
+        self, hosts: list[dict[str, Any]] | None = None, *, missing: bool = False
+    ) -> None:
+        self.hosts = list(hosts or [])
+        self.missing = missing
+        self.calls: list[list[str]] = []
+
+    def __call__(self, cmd: list[str], **kw: Any) -> subprocess.CompletedProcess[str]:
+        self.calls.append(cmd)
+        if self.missing:
+            raise FileNotFoundError(cmd[0])
+        out = (
+            json.dumps(self.hosts)
+            if cmd[:3] == ["tg-ctl", "omp-live", "status"]
+            else '{"ok":true}'
+        )
+        return subprocess.CompletedProcess(cmd, 0, out, "")
+
+    def sends(self) -> list[list[str]]:
+        return [c for c in self.calls if c[:3] == ["tg-ctl", "omp-live", "send"]]
+
+
+_SCRATCH = tempfile.mkdtemp(
+    prefix="doctor-subscriptions-"
+)  # a registry that never exists: no subscribers
+
+
+def subscription_sources(
+    base: Path | None = None, tg: FakeTgCtl | None = None
+) -> SubscriptionSources:
+    """Alert-subscription files under `base` (default: an empty scratch dir) and a fake tg-ctl;
+    never the real registry, state file or omp sessions."""
+    base = base or Path(_SCRATCH)
+    return SubscriptionSources(
+        Registry(base / "subscriptions.yaml"),
+        DeliveryState(base / "printer-subscriptions.json"),
+        OmpLive(runner=tg or FakeTgCtl()),
+    )
 
 
 class ManualClock:
@@ -160,6 +209,7 @@ def rig(
         entries.append(entry)
         return journal_outcome
 
+    services.setdefault("subscriptions", subscription_sources())
     svc = Services(
         clock=time.time if real_clock else clock,
         sleep=clock.sleep,

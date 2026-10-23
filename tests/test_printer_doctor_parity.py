@@ -21,7 +21,12 @@ from printer_doctor.context import Context, Services
 from printer_doctor.engine import NEVER_CONTACTED, Options, run_printer
 from printer_doctor.registry import discover_checks
 from printer_doctor.targets import Target
-from printer_doctor_fakes import FakeApi, ManualClock, printer_view
+from printer_doctor_fakes import (
+    FakeApi,
+    ManualClock,
+    printer_view,
+    subscription_sources,
+)
 from printer_fakes import FakeCreality, FakeMoonraker
 from printer_ops.devices import Device, fleet_devices
 from printer_ops.webui import WebUiProbe
@@ -146,7 +151,7 @@ def test_every_fleet_printer_runs_through_every_check_without_crashing(
     services = Services(
         clock=clock, sleep=clock.sleep, api=lambda: api.client(), journal=lambda e, a: "buffered",
         systemctl_show=lambda unit: "", webui=lambda d: WebUiProbe(), wake_camera=lambda d, s: None,
-        timeout=3.0, listen_s=0.3,
+        timeout=3.0, listen_s=0.3, subscriptions=subscription_sources(),
     )  # fmt: skip
     checks = discover_checks()
     if not printer.contactable:
