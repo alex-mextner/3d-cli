@@ -17,14 +17,15 @@ Epic: [#90](https://github.com/alex-mextner/3d-cli/issues/90).
 3d printer list [--json]
 3d printer status NAME [--json] [--secs S]
 3d printer upload NAME FILE.gcode [--as REMOTE]
-3d printer start NAME FILE.gcode --yes [--as REMOTE] [--source-3mf X.3mf] [--bridge-max MM] [--force] [--secs S]
+3d printer start NAME FILE.gcode --yes [--as REMOTE] [--source-3mf X.3mf] [--bridge-max MM] [--force] [--secs S] [--no-bed-move]
 3d printer cancel NAME --yes
 3d printer guard NAME --job-id ID --yes [--interval S] [--evidence DIR]
 3d printer guard NAME --job-id ID --dry-run
 3d printer watch NAME... | --all [--steer SESSION] [--exec CMD] [--min-severity LEVEL] ...
 3d printer vision NAME [--interval S] [--once] [--dry-run] [--scene] [--no-detach] ...  |  vision eval ...  |  vision record NAME DIR [--timeout S]  |  vision fetch-model
-3d printer bed status NAME [--json] [--max-age S]  |  bed reference NAME [--capture [--no-plate]]  |  bed monitor NAME
+3d printer bed status NAME [--json] [--max-age S] [--best-view | --no-move] [--part-height MM]  |  bed reference NAME [--capture [--no-plate]]  |  bed monitor NAME
 3d printer subscribe --session ID [--printer P,P] [--kinds K,K] [--min-severity LEVEL] ...
+3d printer subscribe --session ID --printer P --once --on bed-free
 3d printer unsubscribe --session ID | --id SUBID | --all
 3d printer subscriptions [list | test PRINTER] [--json]
 3d printer agent list [--json] | stop PRINTER | handoff PRINTER --summary TEXT
@@ -530,6 +531,53 @@ until someone takes them off. The camera can see that, so nobody has to tell an 
   confirmed within S seconds at the same Z, else one fresh frame is judged (it waits up to 6 s
   for the camera to deliver a new frame; without one the camera may be frozen, so a clear-looking
   frame reads `unknown`, while parts or a missing plate on it still count).
+- **Auto view** (`watch.bed.auto_view`: off unless the printer's entry sets it; `fleet/printers.yaml` sets it for the U1). At its
+  Z 200 rest the U1 camera sees 15 % of the plate, and a window light there once read as «15.7 % of
+  the view differs: occupied» and a print was started with `--force`. So when the share of the plate
+  in the frame at the current Z is under `auto_view_min` (0.85), the printer is idle / complete /
+  cancelled with Z homed, and an empty-bed reference stands at a better Z, `bed status` (and the
+  `bed` preflight line, `printer start`) moves the **bed in Z only** to that Z, waits for the camera,
+  judges a fresh frame there and puts the bed back, so the printer is left as found. The Z is picked
+  by `lib/bed_view.py`: candidates are the Zs of the references plus a 5 mm grid; one qualifies with
+  ≥ 85 % of the plate in the frame, a reference standing for it, inside the clearance floor and the
+  axis ceiling; views within 10 points of the best are equal and the **nearest to the current Z**
+  wins (least motion, the bed stays as far from the nozzles as it can). On the U1 references at Z
+  70 / 150 / 175 / 199.7 give **Z 70** (89 % of the plate in view). If no Z qualifies the verdict
+  stays the old one, with the reason (`no Z shows that much`, `no empty-bed reference stands there:
+  … bed reference NAME --capture`, …): the camera never invents a view, and `unknown` is never
+  read as clear. `--best-view` moves even when `auto_view` is off, `--no-move` (`--no-bed-move` on
+  `print-preflight` / `printer start`) never moves, `--part-height MM` declares the tallest thing that
+  may stand on the bed for one call. The verdict (and `--json`) carries `view`: `action` (`moved` /
+  `not moved` / `none`), `moved_from`, `z_used`, `restored`, `pick`, and the reason names the Z
+  judged at; the preflight line reads «judged at Z 70.0 after moving the bed from Z 200.0 and back».
+  What it **never** does:
+  - move while the printer is `printing`, `paused` or `busy`: nothing is sent and the camera is not
+    asked; the verdict is `printing` («printing: bed not moved, view not judged», WARN in the
+    preflight, never clear). Every send, the restore included, re-reads the printer first and
+    refuses unless it reads idle / complete / cancelled with Klipper ready and Z homed, so a print
+    that starts during the check gets no move;
+  - move X or Y, home, or run a macro: the whole write is `G90`, `G1 Z<z> F600`, `M400` (G1 in
+    gcode coordinates, so the Z offset of the last job is kept and the bed returns to exactly where
+    it was). An unhomed printer is «cannot move: not homed» with the old verdict: no printer
+    profile marks `G28 Z` safe with parts on the bed, so it is not offered;
+  - raise the bed into a part. The bed goes toward the nozzles, so the floor is the tallest thing
+    that may stand on it + 15 mm (never below Z 10): `--part-height`, `watch.bed.auto_view_part_mm`,
+    else the last job's `object_height` from Moonraker's file metadata. Unknown height: no move
+    («the height of what may stand on the bed is unknown»). The ceiling is `resume.z_max_mm` - 5.
+    After a tall job the floor can exclude every good Z: then take the part off and run
+    `bed status NAME --best-view --part-height 0`;
+  - leave the bed away on failure: the restore is in a `finally` (exceptions, Ctrl-C, SIGTERM); a
+    marker `~/.local/state/3d-cli/bed/NAME.view.json` records the displaced Z until it is back, and
+    the next check puts the bed back first. A restore that fails is reported (`restored: false`,
+    preflight WARN), never swallowed. One view check per printer at a time (flock).
+  The `3d printer watch` monitor never moves the bed, and judges nothing (no verdict, no event, no
+  ack) while a check has the bed away from where it was found. Config: `watch.bed.auto_view: true|false`,
+  `auto_view_min`, `auto_view_part_mm` (see below).
+- **Bed free, once.** `3d printer subscribe --session ID --printer u1 --once --on bed-free`: when
+  the running job ends (a `3d printer watch` sees printing/paused → idle / complete / cancelled) the
+  watcher waits 20 s for the end macro, runs the auto-view bed check, sends **one** `bed_free`
+  event with the verdict and the evidence frame to that omp session and removes the subscription.
+  See [printer-subscribe.md](printer-subscribe.md#one-shot-bed-free).
 - **How.** Frames are decoded at 480 px; the current one is mapped onto the reference colours by
   a robust gain/offset fit (auto-exposure, room light) and a median detrend removes smooth light
   gradients; a changed region of ≥ 200 px (or ≥ 8 % of the bed view) is `occupied`, under 100 px
@@ -560,6 +608,8 @@ until someone takes them off. The camera can see that, so nobody has to tell an 
 - **Start gate.** `3d printer start` and `3d print-preflight --printer` add a `bed` line: FAIL on
   objects or a missing plate, PASS on a clear bed with the plate, WARN when the camera cannot
   tell (no reference at this Z, out of view, stale, plate out of view, camera down); a [forced start](#forcing-a-start) overrides it.
+  On an idle printer with `watch.bed.auto_view` the line is judged at the best Z (the bed moved in Z
+  only, and back; `--no-bed-move` judges at the current Z), see *Auto view* above.
 - **Clear acknowledgement** (`watch.bed.clear_ack`, off by default): after `bed_clear` the
   printer makes one motor sound so the person at it knows the camera saw the empty bed. Neither
   printer has a beeper, so the command is `STEPPER_BUZZ STEPPER=stepper_z` (Klipper: ±1 mm ×10,
@@ -575,6 +625,9 @@ u1:
     bed:
       enabled: true
       clear_ack: {enabled: true, command: STEPPER_BUZZ STEPPER=stepper_z, debounce_minutes: 10, min_z_mm: 10}
+      auto_view: true           # move the bed in Z to where the camera sees the whole plate (fleet U1: true; default false)
+      auto_view_min: 0.85       # share of the plate in the frame below which it is moved
+      auto_view_part_mm: 60     # optional: the tallest thing that may stand on the bed (else the last job's object_height)
 k1se:
   watch:
     bed:

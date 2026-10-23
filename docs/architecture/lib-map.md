@@ -265,6 +265,7 @@ Every current root Python module is listed here so future additions are intentio
 - `vision_ghost.py` — 3D ghost of the rest of a print over a printer camera frame: collects a job's walls from one G-code pass, paints them through a `vision_geometry` camera into a sparse per-frame blend table (used by the U1 camera proxy).
 - `vision_scene.py` — opt-in bed-change detectors for `3d printer vision --scene` (foreign object, moved part, no growth).
 - `bed_state.py` — pixel half of the printer bed state (#303): empty-bed references per Z, robust photometric difference in the bed ROI, clear/occupied + plate classifier, change-gated monitor loop (`3d printer bed`, the `3d printer watch` child); config, events, start gate and clear ack live in `printer_ops/bed.py`.
+- `bed_view.py` — the auto view of the printer bed (#303 follow-up): pure picker of the best inspection Z (share of the plate in the camera frame, reference at that Z, clearance floor, axis ceiling), the guarded Z-only move + judge + restore flow `bed_state.py status` runs (`watch.bed.auto_view`). Stdlib only; the pixels stay in `bed_state.py`.
 - `lib/geometry/mesh_metrics.py` — pinned-convention 3D shape metrics (Chamfer, F-score@tau, Hausdorff, normal consistency, volumetric IoU) between two meshes; backs `3d metrics geometry`.
 - `perceptual_metrics.py` — perceptual/semantic image metrics (PSNR, LPIPS, CLIP-sim) with explicit senses and graceful degradation; backs `3d metrics perceptual`.
 - `metrics.py` — compatibility wrapper re-exporting `registries.metrics`.

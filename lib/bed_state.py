@@ -40,7 +40,8 @@ OUTPUT (monitor): one JSON object per stdout line — `{"event": {...}}` on a tr
   after each verdict; logs on stderr. Evidence frames (ROI outlined, changed pixels red) go to
   ~/.cache/3d-cli/vision/bed/.
 
-READ-ONLY except `watch.bed.clear_ack` (printer_ops/bed.py WRITES).
+READ-ONLY except `watch.bed.clear_ack` (printer_ops/bed.py WRITES) and the auto view of `status`
+(lib/bed_view.py: a Z-only move of the bed to where the camera sees the whole plate, and back).
 """
 
 from __future__ import annotations
@@ -63,6 +64,7 @@ if str(LIB) not in sys.path:
     sys.path.insert(0, str(LIB))
 
 from printer_ops.bed import (  # noqa: E402
+    AUTO_VIEW_SETTLE_S,
     CLEAR,
     MISSING,
     OCCUPIED,
@@ -80,6 +82,8 @@ from printer_ops.bed import (  # noqa: E402
     transitions,
     write_state,
 )
+
+from bed_view import view_in_progress  # noqa: E402
 
 if TYPE_CHECKING:
     import numpy as np
@@ -751,6 +755,11 @@ def _run_monitor(device: Device, cfg: BedConfig, *, duration: float | None = Non
                 last_jpeg, last_img = b"", None
                 sleep(busy_interval)
                 continue
+            if view_in_progress(name, t0):  # an auto view check is moving the bed: its frames are not the bed's state
+                mon.reset()
+                last_jpeg, last_img = b"", None
+                sleep(max(cfg.interval_s, 1.0))
+                continue
             jpeg = grab(camera)
             last_err = ""
         except PrinterCommError as exc:
@@ -835,7 +844,8 @@ def one_shot(device: Device, cfg: BedConfig, *, max_age: float | None, camera: A
     state, z = printer_fn(device)
     if state in ACTIVE:
         return {"printer": device.name, "bed": PRINTING, "plate": UNKNOWN, "z": z, "source": "printer",
-                "age_s": 0.0, "reason": f"printer is {state}: the bed belongs to the job", "frame": None}
+                "age_s": 0.0, "frame": None,
+                "reason": f"{state}: bed not moved, view not judged (the camera is not asked): the bed belongs to the job"}
     last = read_state(device.name)
     match = z_match(device, cfg)
     if (max_age is not None and last and isinstance(last.get("checked"), (int, float))
@@ -866,6 +876,38 @@ def one_shot(device: Device, cfg: BedConfig, *, max_age: float | None, camera: A
     frame = save_evidence(device.name, jpeg, v, f"status-{v.bed}", now)
     return {"printer": device.name, "bed": v.bed, "plate": v.plate, "z": z, "source": "camera now", "age_s": 0.0,
             "reason": v.reason, "metrics": {k: round(x, 4) for k, x in v.metrics.items()}, "frame": frame}
+
+
+def status_view(device: Device, cfg: BedConfig, *, mode: str = "auto", max_age: float | None = None,
+                part_height: float | None = None, adapter: Any = None, camera: Any = None,
+                th: Thresholds | None = None, now: float | None = None,
+                sleep: Callable[[float], None] = time.sleep, settle_s: float | None = None) -> dict[str, Any]:
+    """`one_shot`, preceded by the auto view (lib/bed_view.py): when the camera sees less of the plate at
+    the current Z than `watch.bed.auto_view_min` and the printer is idle, the bed is moved in Z to the best
+    inspection Z, a fresh frame is judged there and the bed is put back. `mode`: auto (watch.bed.auto_view
+    decides) | force (--best-view) | never (--no-move). The verdict gains `view` (what was done and why)."""
+    import bed_view
+    from printer_ops import make_adapter
+
+    adapter = adapter if adapter is not None else make_adapter(device, timeout=10.0)
+    camera = camera if camera is not None else camera_for(device)
+    match = z_match(device, cfg)
+    refs = RefStore(device.name).load()
+
+    def printer_fn(_: Device) -> tuple[str, float | None]:
+        m = bed_view.read_motion(adapter)
+        return m.state, m.z
+
+    def judge(age: float | None) -> dict[str, Any]:
+        return one_shot(device, cfg, max_age=age, camera=camera, printer_fn=printer_fn, th=th, now=now, sleep=sleep)
+
+    def view(z: float) -> float | None:
+        return 1.0 if match.cam is None else match.in_view(z)  # a roi polygon is in the frame by definition
+
+    return bed_view.auto_view(device, cfg, mode=mode, adapter=adapter, judge=judge, view=view,
+                              ref_zs=[r.z for r in refs if r.z is not None], stands=match, max_age=max_age,
+                              part_height_mm=part_height, sleep=sleep,
+                              settle_s=AUTO_VIEW_SETTLE_S if settle_s is None else settle_s)
 
 
 def capture_reference(device: Device, cfg: BedConfig, *, plate: bool, camera: Any = None,
@@ -953,7 +995,7 @@ def list_references(printer: str) -> list[dict[str, Any]]:
 
 # ---- CLI ------------------------------------------------------------------------------------
 
-USAGE = """3d printer bed status NAME [--json] [--max-age S]
+USAGE = """3d printer bed status NAME [--json] [--max-age S] [--best-view | --no-move] [--part-height MM]
 3d printer bed reference NAME [--capture [--no-plate] [--from FRAME.jpg --z Z]] [--json]
 3d printer bed monitor NAME [--duration S]
   Bed state from the printer's camera (issue #303): is the bed clear, is the build plate on.
@@ -993,10 +1035,35 @@ Config (fleet/printers.yaml or printer-devices.yaml, `<name>.watch.bed`):
   clear_ack: {enabled: true, command: STEPPER_BUZZ STEPPER=stepper_z, debounce_minutes: 10,
               min_z_mm: 10}   one motor sound after bed_clear (the command must be in
                            trusted_macros; only while the printer is idle/complete/cancelled)
+  auto_view: true|false    move the bed in Z to where the camera sees the whole plate (see "Auto
+                           view"); off unless set (fleet/printers.yaml: true for the U1)
+  auto_view_min: 0.85      share of the plate that must be in the frame; below it the bed is moved
+  auto_view_part_mm: 60    declared height of the tallest thing that may stand on the bed (mm)
+
+Auto view (status; also the `bed` line of `3d print-preflight --printer` and `3d printer start`):
+  The U1 rests at Z 200 after a job, where its camera sees ~15 % of the plate: window light there
+  read as "occupied". When the share of the plate in the frame at the current Z is under
+  auto_view_min, the printer is idle/complete/cancelled, Z is homed and an empty-bed reference
+  stands at a better Z, `status` moves the bed in Z ONLY (G90, G1 Z F600, M400: no X/Y, no home,
+  no macro) to the nearest Z that shows >= auto_view_min (views within 10 points of the best are
+  equal), waits for the camera, judges a fresh frame there and puts the bed back in a `finally`
+  (a marker file undoes an interrupted check at the next one). The verdict names the Z used and
+  what was done in `view`. NEVER moved: while printing/paused/busy (the verdict says "bed not
+  moved, view not judged" and is never clear), not homed ("cannot move: not homed": the check
+  never homes), a read-only printer, or when the height of what may stand on the bed is unknown:
+  the floor is that height + 15 mm (--part-height / auto_view_part_mm, else the last job's
+  object_height from Moonraker's file metadata) and never below Z 10; the ceiling is
+  resume.z_max_mm - 5. Without a Z that qualifies the old verdict stands, with the reason.
+  --best-view   move even when watch.bed.auto_view is off
+  --no-move     never move (the camera judges at the current Z)
+  --part-height MM   the tallest thing that may stand on the bed, for this call
+  The `3d printer watch` monitor never moves the bed and judges nothing while a check has it away.
 
 Examples:
   3d printer bed reference u1 --capture
   3d printer bed status u1
+  3d printer bed status u1 --no-move
+  3d printer bed status u1 --best-view --part-height 0   # the plate is empty: look at the whole of it
   3d printer bed status k1se --json | jq .bed"""
 
 
@@ -1016,6 +1083,9 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--duration", type=float)
     ap.add_argument("--from", dest="from_file")
     ap.add_argument("--z", type=float)
+    ap.add_argument("--best-view", action="store_true")
+    ap.add_argument("--no-move", action="store_true")
+    ap.add_argument("--part-height", type=float)
     ap.add_argument("-h", "--help", action="store_true")
     args, rest = ap.parse_known_args(argv)
     if args.help:
@@ -1026,7 +1096,7 @@ def main(argv: list[str]) -> int:
 
         raise UsageError(f"unknown arguments for `printer bed {args.sub}`: {' '.join(rest)}", command="printer bed",
                          remediation=["See `3d printer bed --help`."])
-    allowed = {"status": {"json", "max_age"}, "monitor": {"duration"},
+    allowed = {"status": {"json", "max_age", "best_view", "no_move", "part_height"}, "monitor": {"duration"},
                "reference": {"json", "capture"} | ({"no_plate", "from_file", "z"} if args.capture else set())}[args.sub]
     stray = [f"--{k.replace('_', '-')}" if k != "from_file" else "--from" for k, v in vars(args).items()
              if k not in {"sub", "name", "help"} | allowed and v is not None and v is not False]
@@ -1035,6 +1105,16 @@ def main(argv: list[str]) -> int:
 
         raise UsageError(f"`printer bed {args.sub}` does not take {', '.join(stray)}", command="printer bed",
                          remediation=["See `3d printer bed --help`."])
+    if args.best_view and args.no_move:
+        from errors import UsageError
+
+        raise UsageError("--best-view and --no-move contradict each other", command="printer bed",
+                         remediation=["Pass one: --best-view moves the bed to the best inspection Z, --no-move never."])
+    if args.part_height is not None and not (math.isfinite(args.part_height) and args.part_height >= 0):
+        from errors import InvalidArgument
+
+        raise InvalidArgument("--part-height", str(args.part_height), ["a height in mm, 0 or more"],
+                              command="printer bed")
     device = get_device(args.name)
     cfg = bed_config(device)
     if args.sub in ("monitor", "status") or (args.sub == "reference" and args.capture and not args.from_file):
@@ -1069,7 +1149,8 @@ def main(argv: list[str]) -> int:
                 stamp = time.strftime("%Y-%m-%d %H:%M", time.localtime(float(r.get("ts", 0))))
                 print(f"{r['kind']:<8} Z {float(r['z']):6.1f}  {stamp}  {r['path']}  ROI: {r.get('roi_source')}")
         return 0
-    v = one_shot(device, cfg, max_age=args.max_age)
+    v = status_view(device, cfg, mode="never" if args.no_move else "force" if args.best_view else "auto",
+                    max_age=args.max_age, part_height=args.part_height)
     if args.json:
         print(json.dumps(v, indent=1, default=str))
     else:

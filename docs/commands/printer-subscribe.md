@@ -25,6 +25,7 @@ and messages the user only when it is
 
 ```
 3d printer subscribe --session ID [--printer P,P] [--kinds K,K] [--min-severity LEVEL] [--note TEXT] [--json]
+3d printer subscribe --session ID --printer P --once --on bed-free [--note TEXT] [--json]
 3d printer unsubscribe --session ID | --id SUBID | --all
 3d printer subscriptions [list] [--json]
 3d printer subscriptions test PRINTER [--kind KIND] [--severity LEVEL] [--text TEXT] [--frame PATH] [--send]
@@ -69,6 +70,40 @@ id is a hash of the three) and prints it. The output also shows whether the sess
 
 A live session subscribed to **every kind** of a printer (no `--kinds`, `--min-severity`
 `warning` or `info`) takes over from that printer's temporary agent: `subscribe` (and the next delivery) asks the agent to hand over.
+
+## One-shot bed-free
+
+`3d printer subscribe --session ID --printer u1 --once --on bed-free` asks for **one** answer: how the
+bed looks once the job that is running now is over. It is a trigger in the same registry, not an event
+filter (`--on` needs `--once`, exactly one printer with `watch.bed.enabled`, no `--kinds`;
+`--min-severity` is ignored), and it never matches an ordinary alert or takes over from the temporary
+printer agent.
+
+- **When.** A running `3d printer watch` (or anything on `Dispatcher.for_devices`) sees the printer's
+  `state` event go from `printing`/`paused` to `idle`, `complete` or `cancelled` (a pause, an error or a
+  start is not a free bed). It waits 20 s (`END_PRINT` / `CANCEL_PRINT` may still be parking the bed) and
+  runs `3d printer bed status NAME --json` off the dispatcher thread: with `watch.bed.auto_view` (the
+  U1) the bed is moved in Z only to where the camera sees the whole plate, a fresh frame is judged, and
+  the bed is put back ([Bed state](printer.md#bed-state)). Nothing is moved while a job is running.
+- **What the session gets.** ONE `bed_free` event (`[3d printer bed-free -> subscriber ID]`): the verdict
+  (`bed clear|occupied|unknown|printing`, plate), the Z it was judged at and whether the bed was moved and
+  restored, the reason, and the evidence frame path (`data.frame`), with the instruction to open the
+  frame and tell the user via `tg` (≤ 5 lines). Severity info only for a clear bed with the plate and a
+  restored Z, warning otherwise; an unknown verdict is delivered as unknown, never as clear. A check
+  that cannot run is still answered once (`bed unknown`, with why).
+- **Then** the subscription is removed (once). A session that is not live keeps it armed (it counts as
+  unsubscribed like any other and shows as dead in `subscriptions`). Two watchers fire it once (a claim
+  in the delivery state).
+- **Listed** by `3d printer subscriptions` as `once, when the printer is free: bed-free`
+  (`on`/`once` in `--json`); `unsubscribe --id` removes it.
+- **Not** fired for a printer that is idle already when you subscribe, when no watcher runs at the job's
+  end, or when `watch.min_severity` filters out the info `state` event of the job end.
+- `watch --dry-run` runs no check and removes nothing.
+
+```bash
+3d printer subscribe --session 01a12cd6 --printer u1 --once --on bed-free
+3d printer subscriptions
+```
 
 ## unsubscribe
 
@@ -115,6 +150,7 @@ and the top-level array are unchanged). `3d printers doctor PRINTER --check aler
 condition and `--fix` prunes the dead entries ([printers-doctor.md](printers-doctor.md)).
 
 ```bash
+3d printer subscribe --session 01a12cd6 --printer u1 --once --on bed-free
 3d printer subscriptions
 3d printer subscriptions --json | jq '.[] | {id, live: .live.live, last: .state.last_ts}'
 3d printer subscriptions --json | jq '.[] | select(.stale) | {id, session, consecutive_failed, last_success}'
@@ -312,7 +348,8 @@ good registry).
 
 - `~/.config/3d-cli/subscriptions.yaml` (honours `XDG_CONFIG_HOME`, which the watch unit
   pins): `prune_after_days: 3` and `subscriptions: [{id, session, printers, kinds, min_severity,
-  note, created}]`. Every change is a locked (`subscriptions.yaml.lock`) read-modify-write with
+  note, created}]` (a bed-free entry adds `on: bed-free`, `once: true`; write the key quoted, a bare
+  `on:` is a boolean to YAML 1.1 — the reader accepts both). Every change is a locked (`subscriptions.yaml.lock`) read-modify-write with
   an atomic rename that keeps `prune_after_days`.
 - `~/.local/state/3d-cli/printer-subscriptions.json`: the last delivery, last error and
   `dead_since` per subscription; per printer agent: start, `start_failures`, last alert,

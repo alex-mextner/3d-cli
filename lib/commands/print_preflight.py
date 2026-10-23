@@ -28,14 +28,18 @@ from errors import GateFailure, InputNotFound, UsageError
 
 USAGE = """3d print-preflight FILE.gcode [--printer NAME] [--axis-limits X0:X1,Y0:Y1|NAME] [--source-3mf FILE.3mf]
                    [--visible [OBJ:]SPEC]... [--bridge-max MM] [--printops-api URL] [--offline]
-                   [--printops-snapshot FILE] [--json] [--secs S]
+                   [--printops-snapshot FILE] [--json] [--secs S] [--no-bed-move]
   Read-only checks before a print. `3d printer start` runs the same checks and refuses on FAIL.
   Every G-code gate runs; one whose input is missing is SKIP and says what to pass.
 
   thumbnails   preview images required by the G-code's `; thumbnails =` spec are present
   printer      (--printer) the printer is not printing / paused / busy / unreadable
   bed          (--printer with watch.bed.enabled) the camera sees the bed clear and the build
-               plate on: objects or no plate FAIL, cannot tell WARN (`3d printer bed --help`)
+               plate on: objects or no plate FAIL, cannot tell WARN (`3d printer bed --help`). On
+               a printer with watch.bed.auto_view (the U1: its camera sees 15 % of the plate at
+               the Z 200 rest) an idle printer's bed is moved in Z only to where the whole plate
+               is in view, judged there and put back; the line names the Z used. Never while
+               printing/paused, never homing; --no-bed-move judges at the current Z
   slot Tn      (--printer, per-head printers such as the Snapmaker U1) each head the G-code
                uses is loaded, and its colour and material equal `; filament_colour` /
                `; filament_type` for that tool
@@ -98,6 +102,7 @@ Options:
                           used) and the PrintOps state comes from the snapshot file; not with --printops-api
   --printops-snapshot F   snapshot for --offline (default: $PRINTOPS_SNAPSHOT, else
                           ~/.cache/3d-cli/printops-snapshot.json; `3d printops gates snapshot`)
+  --no-bed-move           the bed line judges at the current Z: the printer's bed is not moved
   --json                  JSON report on stdout
   --secs S                Creality: seconds to listen for pushed state (default 3)
 
@@ -142,7 +147,7 @@ def run(argv: list[str]) -> int:
                 opts[a] = argv[i + 1]
             i += 2
             continue
-        if a in ("--json", "--offline"):
+        if a in ("--json", "--offline", "--no-bed-move"):
             opts[a] = "1"
         elif a.startswith("--"):
             raise UsageError(f"unknown option {a}", command="print-preflight",
@@ -198,7 +203,7 @@ def run(argv: list[str]) -> int:
     if "--printer" in opts and device is not None:
         from printer_ops.preflight import check_bed
 
-        bed = check_bed(device)
+        bed = check_bed(device, move="--no-bed-move" not in opts)
     bridge, bridge_source = bridge_max_for(opts.get("--bridge-max"), device, command="print-preflight")
     report = run_preflight(gcode, status=status, source_3mf=source, axis_limits=limits, limits_source=limits_source,
                            trusted_macros=trusted, visible=visible, bridge_max=bridge, bridge_source=bridge_source,
