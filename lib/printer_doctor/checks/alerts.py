@@ -39,7 +39,8 @@ from printer_doctor.model import (
 )
 
 
-def _applies(ctx: Context) -> str | None:
+def watched_printer(ctx: Context) -> str | None:
+    """`applies` of the alert checks: the printer has a watcher whose alerts need a receiver."""
     from printer_ops.subscriptions import has_watcher
 
     device = ctx.target.device
@@ -136,7 +137,7 @@ CHECKS = (
         severity="error",
         applies_to="printers with a watcher (a camera, or `watch:` settings); reads the subscription registry and tg-ctl, not the printer",
         contacts_printer=False,
-        applies=_applies,
+        applies=watched_printer,
         run=_run,
         fix=Fix(
             "safe",

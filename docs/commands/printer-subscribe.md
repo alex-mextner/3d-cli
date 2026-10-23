@@ -177,7 +177,17 @@ pauses with `3d printer pause` if that command exists and calls the user with `t
   every live subscriber of the printer and kills the tmux session; with no live subscriber it
   exits 1 and the agent stays.
 - `3d printer agent list [--json]` — each agent: tmux session, running, live omp pid, started,
-  last alert, last error, handoff asked, the attach command. `3d printer agent stop PRINTER` kills it.
+  last alert, last error (with `N in a row` when several failed in a row), handoff asked, the attach
+  command. `3d printer agent stop PRINTER` kills it.
+- **A watcher running with `--dry-run` delivers nothing to the agent** ([#526](https://github.com/alex-mextner/3d-cli/issues/526)).
+  Its agent sink prints `[3d printer alert -> temporary NAME agent]` to the watcher's journal, starts no
+  agent, writes no `events.jsonl` / `pane.log` and reports the alert as reached, which also holds the tg
+  fallback back (2026-10-22: a PAUSED alert went nowhere this way). The agent state now records it
+  (`dry_run_ts`, `dry_run_events`; cleared by the next real delivery) and `agent list` prints a `DRY-RUN:`
+  line. Fix the unit (`3d printer vision doctor`, `3d printers doctor NAME --check watch-units-dry-run`).
+  `3d printers doctor NAME --check alert-fallback-agent` fails when no live subscriber exists and the
+  agent cannot be relied on (tmux/omp missing, repeated start errors, its last alert older than the
+  watcher's newest warning+ alert).
 - Isolation: the tmux server is `3d-printer-agent` only for the real user's default state dir
   (`~/.local/state/3d-cli`, the passwd home — not `$HOME`). Any other state dir — a custom
   `XDG_STATE_HOME`, a test's tmp `HOME` — gets its own server `3d-printer-agent-<hash of the

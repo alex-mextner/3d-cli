@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
-from printer_doctor.context import Context, Services, SubscriptionSources
+from printer_doctor.context import AgentSources, Context, Services, SubscriptionSources
 from printer_doctor.model import CheckResult
 from printer_doctor.targets import Target
 from printer_ops.devices import Device
@@ -81,6 +81,42 @@ def subscription_sources(
         Registry(base / "subscriptions.yaml"),
         DeliveryState(base / "printer-subscriptions.json"),
         OmpLive(runner=tg or FakeTgCtl()),
+    )
+
+
+class FakeTmux:
+    """`tmux -L SOCKET ...` stand-in for the temporary printer agent: `sessions` are the running tmux
+    sessions; every call is recorded so a test can prove the doctor only asked `has-session`."""
+
+    def __init__(self, sessions: set[str] | None = None) -> None:
+        self.sessions = set(sessions or ())
+        self.calls: list[list[str]] = []
+
+    def __call__(self, cmd: list[str], **kw: Any) -> subprocess.CompletedProcess[str]:
+        self.calls.append(cmd)
+        if "has-session" in cmd:
+            name = cmd[cmd.index("-t") + 1].lstrip("=")
+            return subprocess.CompletedProcess(
+                cmd, 0 if name in self.sessions else 1, "", ""
+            )
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+
+TOOLS = {"tmux": "/usr/bin/tmux", "omp": "/usr/bin/omp"}
+
+
+def agent_sources(
+    base: Path | None = None,
+    tmux: FakeTmux | None = None,
+    tools: dict[str, str | None] | None = None,
+) -> AgentSources:
+    """Agent state under `base` (default: the empty scratch dir), a fake tmux and fake tool paths."""
+    base = base or Path(_SCRATCH)
+    return AgentSources(
+        state_dir=base,
+        state=DeliveryState(base / "printer-subscriptions.json"),
+        tools=TOOLS if tools is None else tools,
+        runner=tmux or FakeTmux(),
     )
 
 
@@ -210,6 +246,7 @@ def rig(
         return journal_outcome
 
     services.setdefault("subscriptions", subscription_sources())
+    services.setdefault("agents", agent_sources())
     svc = Services(
         clock=time.time if real_clock else clock,
         sleep=clock.sleep,

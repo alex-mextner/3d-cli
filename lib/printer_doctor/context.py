@@ -24,10 +24,12 @@ from __future__ import annotations
 import errno
 import http.client
 import json
+import subprocess
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
@@ -41,7 +43,9 @@ if TYPE_CHECKING:
     from printer_ops.devices import Device
     from printer_ops.webui import WebUiProbe
     from printer_doctor.targets import Target
+    from printer_ops.printer_agent import PrinterAgents
     from printer_ops.subscriptions import DeliveryState, Health, OmpLive, Registry
+    from printer_ops.watch_sinks import Runner
     from printops.client import ApiClient
 
 MAX_BODY = 4 * 1024 * 1024
@@ -177,6 +181,18 @@ class SubscriptionSources:
 
 
 @dataclass
+class AgentSources:
+    """Where the temporary-printer-agent data comes from; None fields are the real thing (the user's
+    state dir, `tmux` / `omp` found on PATH, the real runner). Tests inject a temp state dir, fake tool
+    paths (`tools`: name -> path, None = not installed) and a fake tmux runner."""
+
+    state_dir: Path | None = None
+    state: DeliveryState | None = None
+    tools: Mapping[str, str | None] | None = None
+    runner: Runner | None = None
+
+
+@dataclass
 class Services:
     """Every seam a test may replace; None = the real implementation."""
 
@@ -193,6 +209,7 @@ class Services:
     listen_s: float | None = None  # Creality ws listen window (--secs)
     poll_s: float = 45.0  # how long a restart fix waits for Klipper to come back
     subscriptions: SubscriptionSources = field(default_factory=SubscriptionSources)
+    agents: AgentSources = field(default_factory=AgentSources)
     down: DownTracker = field(
         default_factory=DownTracker
     )  # shared by every Context of the run
@@ -540,6 +557,36 @@ class Context:
                 raise CannotSee(clean(exc.message), "error") from exc
         return self._sub_health
 
+    def state_dir(self) -> Path:
+        """The directory the watchers and agents keep their state in (`<state>/watch`, `<state>/vision`,
+        `<state>/printer-agents`)."""
+        if self.services.agents.state_dir is not None:
+            return self.services.agents.state_dir
+        from cli.paths import state_dir
+
+        return state_dir()
+
+    def tool(self, name: str) -> str | None:
+        """Where `name` (tmux, omp) is installed, the way the watcher finds it (PATH, then the usual dirs)."""
+        tools = self.services.agents.tools
+        if tools is not None:
+            return tools.get(name)
+        from printer_ops.printer_agent import find_tool
+
+        return find_tool(name)
+
+    def printer_agents(self) -> PrinterAgents:
+        from printer_ops.printer_agent import PrinterAgents
+        from printer_ops.subscriptions import DeliveryState
+
+        src = self.services.agents
+        return PrinterAgents(
+            runner=src.runner or subprocess.run,
+            state=src.state or DeliveryState(),
+            tmux=self.tool("tmux"),
+            omp=self.tool("omp"),
+        )
+
     def systemctl_show(self, unit: str) -> str:
         if self.services.systemctl_show is not None:
             return self.services.systemctl_show(unit)
@@ -591,6 +638,7 @@ __all__ = [
     "Fetched",
     "HttpFn",
     "HttpReply",
+    "AgentSources",
     "Services",
     "SubscriptionSources",
     "as_list",

@@ -24,6 +24,7 @@ from printer_doctor.targets import Target
 from printer_doctor_fakes import (
     FakeApi,
     ManualClock,
+    agent_sources,
     printer_view,
     subscription_sources,
 )
@@ -151,7 +152,7 @@ def test_every_fleet_printer_runs_through_every_check_without_crashing(
     services = Services(
         clock=clock, sleep=clock.sleep, api=lambda: api.client(), journal=lambda e, a: "buffered",
         systemctl_show=lambda unit: "", webui=lambda d: WebUiProbe(), wake_camera=lambda d, s: None,
-        timeout=3.0, listen_s=0.3, subscriptions=subscription_sources(),
+        timeout=3.0, listen_s=0.3, subscriptions=subscription_sources(), agents=agent_sources(),
     )  # fmt: skip
     checks = discover_checks()
     if not printer.contactable:

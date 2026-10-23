@@ -15,7 +15,7 @@ from printer_fakes import FakeMoonraker, free_port
 
 from .workflow_helper import isolated_env, run_cli
 
-SKIP_HOST_DEPENDENT = "watch-units-dry-run,camera-snapshot,camera-config,alert-subscribers"  # systemd / cameras of the host running the test
+SKIP_HOST_DEPENDENT = "watch-units-dry-run,camera-snapshot,camera-config,alert-subscribers,alert-fallback-agent"  # systemd / cameras of the host running the test
 
 
 class Lab:
@@ -384,3 +384,82 @@ def test_alert_subscribers_prunes_dead_subscriptions_then_passes_once_a_live_ses
         == "pass"
     )
     assert u1.writes() == [] and k1.writes() == []  # the printers were never written to
+
+
+def _fake_agent_tools(tmp_path: Path) -> dict[str, str]:
+    """Fake `tmux` and `omp` first on PATH (the check only looks that they are installed)."""
+    import sys
+
+    bindir = tmp_path / "fakebin"
+    bindir.mkdir(exist_ok=True)
+    for tool in ("tmux", "omp"):
+        script = bindir / tool
+        script.write_text(
+            f"#!{sys.executable}\nimport sys\nsys.exit(1)\n", encoding="utf-8"
+        )
+        script.chmod(0o755)
+    return {}
+
+
+def test_alert_fallback_agent_names_a_dry_run_watcher_as_the_reason_alerts_went_nowhere(
+    tmp_path: Path,
+) -> None:
+    """The U1's watcher unit ran with `--dry-run` and its PAUSED alert never reached the temporary agent: with no live subscriber
+    `3d printers doctor u1 --check alert-fallback-agent` fails (exit 1), says the dry-run watcher swallowed alerts after the
+    agent's last real one, and prints the tmux and unit commands; once a live session subscribes the check passes."""
+    u1, k1, api = lab_servers()
+    live = {
+        "pid": 433553,
+        "sessionId": "01a12cd6-7b39-7356",
+        "cwd": "/tmp",
+        "title": "main",
+    }
+    with u1.serve(), k1.serve(), api.serve():
+        lab = Lab(tmp_path, u1, k1, api)
+        lab.env.update(_tg_ctl(tmp_path, [live]))
+        _fake_agent_tools(tmp_path)
+        lab.env["PATH"] = f"{tmp_path / 'fakebin'}:{lab.env['PATH']}"
+        state_home = Path(isolated_env(tmp_path)["XDG_STATE_HOME"]) / "3d-cli"
+        (state_home / "vision").mkdir(parents=True, exist_ok=True)
+        (state_home / "printer-subscriptions.json").write_text(json.dumps({"subscriptions": {}, "agents": {"u1": {
+            "last_ts": "2026-10-21T16:08:00+00:00", "last_kinds": ["printer_paused"], "stopped": "2026-10-21T17:00:00+00:00",
+            "dry_run_ts": "2026-10-22T20:22:59+00:00", "dry_run_events": 2}}}))  # fmt: skip
+        (state_home / "vision" / "u1.json").write_text(json.dumps({"schema": 1, "printer": "u1", "ts": 1,
+            "last_event": {"kind": "printer_paused", "severity": "warning", "ts": 1_792_700_579.0}}))  # fmt: skip
+
+        broken = lab.doctor("u1", "--check", "alert-fallback-agent", "--json")
+        text = lab.doctor("u1", "--check", "alert-fallback-agent")
+        run_cli(
+            tmp_path,
+            "printer",
+            "subscribe",
+            "--session",
+            "01a12cd6",
+            "--printer",
+            "u1",
+            env_extra=lab.env,
+        )
+        healthy = lab.doctor("u1", "--check", "alert-fallback-agent", "--json")
+
+    assert broken.returncode == 1, broken.stderr
+    res = results(json.loads(broken.stdout), "u1")["alert-fallback-agent"]
+    assert (
+        res["status"] == "fail"
+        and res["severity"] == "error"
+        and res["fix"]["risk"] == "manual-only"
+    )
+    assert "--dry-run swallowed 2 alert(s)" in res["summary"]
+    assert (
+        res["evidence"]["agent"]["dry_run_events"] == 2
+        and res["evidence"]["watcher_newest_alert"]["kind"] == "printer_paused"
+    )
+    assert res["fix"]["applied"] is False
+    assert "$ 3d printer vision doctor u1" in res["fix"]["manual_steps"]
+    assert (
+        "        $ systemctl --user cat 3d-printer-watch@u1.service 3d-printer-vision@u1.service"
+        in text.stdout
+    )
+    assert healthy.returncode == 0, healthy.stdout
+    ok = results(json.loads(healthy.stdout), "u1")["alert-fallback-agent"]
+    assert ok["status"] == "pass" and "not needed" in ok["summary"]
+    assert u1.writes() == [] and k1.writes() == []
