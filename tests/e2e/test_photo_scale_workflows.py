@@ -225,6 +225,7 @@ def test_photo_scale_other_grid_transfers_the_wall_scale_to_a_photo_of_the_same_
 
 
 def test_photo_scale_argument_errors(tmp_path: Path) -> None:
+    """Forgetting --distance or the source flag is reported by name, and --help / bare invocation print the usage."""
     photo = tmp_path / "p.png"
     fx.write_png(str(photo), fx.textured((200, 100)))
     no_distance = run_cli(
@@ -240,5 +241,9 @@ def test_photo_scale_argument_errors(tmp_path: Path) -> None:
         run_cli(tmp_path, "photo-scale", str(photo), env_extra=LIGHT_ENV).returncode
         == 2
     )  # a source is required
-    assert run_cli(tmp_path, "photo-scale", "--help").returncode == 0
-    assert run_cli(tmp_path, "photo-scale").returncode == 1
+    help_run = run_cli(tmp_path, "photo-scale", "--help")
+    assert help_run.returncode == 0
+    assert "3d photo-scale" in help_run.stdout
+    bare = run_cli(tmp_path, "photo-scale")
+    assert bare.returncode == 1
+    assert "--points" in bare.stdout

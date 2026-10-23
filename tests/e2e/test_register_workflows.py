@@ -33,6 +33,7 @@ def _write_instances(folder: Path, masks: list[np.ndarray]) -> Path:
 
 
 def test_register_json_for_a_pair_with_a_real_baseline(tmp_path: Path) -> None:
+    """Two photos taken from different positions: the JSON carries the homography and a usable relative pose."""
     a, b, H_true, R_true = fx.view_pair()
     fx.write_png(str(tmp_path / "a.png"), a)
     fx.write_png(str(tmp_path / "b.png"), b)
@@ -153,6 +154,7 @@ def test_register_warps_masks_and_scores_repeatability(tmp_path: Path) -> None:
 
 
 def test_register_failure_modes(tmp_path: Path) -> None:
+    """Featureless photos cannot be registered (exit 3 with the reason), a missing file is a plain input error (exit 2)."""
     blank = np.full((300, 400, 3), 128, np.uint8)
     fx.write_png(str(tmp_path / "blank.png"), blank)
     unreg = run_cli(
@@ -171,5 +173,10 @@ def test_register_failure_modes(tmp_path: Path) -> None:
         env_extra=LIGHT_ENV,
     )
     assert missing.returncode == 2 and "image not found" in missing.stderr
-    assert run_cli(tmp_path, "register", "--help").returncode == 0
-    assert run_cli(tmp_path, "register").returncode == 1
+    help_run = run_cli(tmp_path, "register", "--help")
+    assert help_run.returncode == 0
+    assert "baseline_ok" in help_run.stdout
+    bare = run_cli(tmp_path, "register")
+    assert bare.returncode == 1
+    assert "3d register" in bare.stdout
+    assert "too_few_features" in unreg.stderr

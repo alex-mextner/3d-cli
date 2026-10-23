@@ -52,6 +52,7 @@ def test_calibrate_grid_json_recovers_the_camera_of_a_synthetic_wall_photo(
 def test_calibrate_grid_writes_calibration_and_overlay_artifacts(
     tmp_path: Path,
 ) -> None:
+    """A user calibrates with a known focal length and keeps calibration.json plus an overlay image to check by eye."""
     photo = tmp_path / "wall.png"
     fx.write_wall_photo(str(photo))
     out = tmp_path / "calib"
@@ -75,6 +76,7 @@ def test_calibrate_grid_writes_calibration_and_overlay_artifacts(
 def test_calibrate_grid_without_a_grid_exits_3_and_still_prints_json(
     tmp_path: Path,
 ) -> None:
+    """A photo of a blank wall: the script still gets the failure reason as JSON, and the exit code says low confidence."""
     blank = tmp_path / "blank.png"
     fx.write_png(str(blank), np.full((300, 400, 3), 200, np.uint8))
     r = run_cli(tmp_path, "calibrate-grid", str(blank), "--json", env_extra=LIGHT_ENV)
@@ -87,6 +89,7 @@ def test_calibrate_grid_without_a_grid_exits_3_and_still_prints_json(
 
 
 def test_calibrate_grid_bad_input_exits_2(tmp_path: Path) -> None:
+    """A typo in the path, conflicting focal flags and bare invocations all fail with a readable message."""
     r = run_cli(
         tmp_path, "calibrate-grid", str(tmp_path / "missing.jpg"), env_extra=LIGHT_ENV
     )
