@@ -117,19 +117,18 @@ def stderr_is_journal(environ: dict[str, str] | None = None, fd: int = 2) -> boo
 HELD_WARNING_EVERY_S = 3600.0   # a refused service restarts every 15-30 s: tell the user once an hour
 
 
-def notify_held_service(printer: str, *, runner: Runner = subprocess.run, now: float | None = None) -> bool:
+def notify_held_service(printer: str, *, runner: Runner | None = None, now: float | None = None) -> bool:
     """Tell the user (`tg`, at most once per HELD_WARNING_EVERY_S, shared by every restart) that a service
     for `printer` refused to start with --dry-run, so its alerts are NOT being delivered. Best effort:
     the refusal itself never depends on it. -> whether a message was sent."""
-    if runner is subprocess.run and os.environ.get("PYTEST_CURRENT_TEST"):
-        return False   # a test must never message the user
+    run = runner or run_real_tg   # under pytest the default raises: a test must never message the user
     from printer_ops.subscriptions import DeliveryState
 
     try:
         stamp = time.time() if now is None else now
         if not DeliveryState().claim_warning("held-service", stamp, HELD_WARNING_EVERY_S):
             return False
-        r = runner([find_tool("tg") or "tg", "--tag", "problem",
+        r = run([find_tool("tg") or "tg", "--tag", "problem",
                     f"[{printer}] a printer watcher service refused to start: it was started with --dry-run, which "
                     "prints alerts instead of delivering them. Printer alerts are NOT being delivered. Remove "
                     "--dry-run from the unit (ExecStart or WATCH_ARGS), daemon-reload and restart it. This message "
@@ -143,7 +142,7 @@ def notify_held_service(printer: str, *, runner: Runner = subprocess.run, now: f
     return r.returncode == 0
 
 
-def refuse_dry_run_service(printer: str = "?", *, runner: Runner = subprocess.run) -> None:
+def refuse_dry_run_service(printer: str = "?", *, runner: Runner | None = None) -> None:
     """`--dry-run` in a service silently holds every alert (the 2026-10-22 U1 incident): refuse, and tell
     the user (hourly) that the service is not delivering."""
     if stderr_is_journal():
