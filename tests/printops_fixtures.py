@@ -32,6 +32,9 @@ from printops.client import ApiClient, ApiError, Response
 from printops.db import migrate, open_db
 from printops.settings import Settings
 
+# the suite-wide autouse guard against real tg/omp/tmux (tests/fake_tool_bins.py) rides along
+pytest_plugins = ["fake_tool_bins"]
+
 
 class TestClientTransport:
     """printops.client.Transport over a starlette TestClient (no sockets). Streams must be
