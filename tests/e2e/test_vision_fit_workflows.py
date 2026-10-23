@@ -58,6 +58,7 @@ def test_fit_profile_json_goes_through_a_shell_redirect(tmp_path: Path) -> None:
 
 
 def test_fit_profile_json_schema_and_instance_reference(tmp_path: Path) -> None:
+    """A user measures instance 20 of a `3d segment` result by reference (`instances.json#20`) and reads kind, length and IoU from the JSON."""
     (tmp_path / "masks").mkdir()
     save_png(tmp_path / "masks" / "020.png", S.recorded_mask("multimeter"))
     (tmp_path / "instances.json").write_text(
@@ -80,15 +81,19 @@ def test_fit_profile_json_schema_and_instance_reference(tmp_path: Path) -> None:
         "time_ms",
     } <= set(out)
     human = cli(tmp_path, "fit-profile", "masks/020.png", "--mm-per-px", "1.263")
-    assert human.returncode == 0 and "kind=box" in human.stdout
+    assert human.returncode == 0
+    assert "kind=box" in human.stdout
 
 
 def test_fit_profile_bad_input_exits_2(tmp_path: Path) -> None:
+    """A user feeds an empty mask and a missing file to fit-profile and gets a plain message with exit 2, not a traceback."""
     save_png(tmp_path / "empty.png", np.zeros((40, 40), bool))
     r = cli(tmp_path, "fit-profile", "empty.png", "--mm-per-px", "1")
-    assert r.returncode == 2 and "foreground" in r.stderr
+    assert r.returncode == 2
+    assert "foreground" in r.stderr
     r = cli(tmp_path, "fit-profile", "nope.png", "--mm-per-px", "1")
-    assert r.returncode == 2 and "not found" in r.stderr
+    assert r.returncode == 2
+    assert "not found" in r.stderr
 
 
 def test_fit_silhouette_photo_to_mesh_story(tmp_path: Path) -> None:
@@ -133,6 +138,7 @@ def test_fit_silhouette_photo_to_mesh_story(tmp_path: Path) -> None:
 
 
 def test_fit_silhouette_user_overrides_win_exactly(tmp_path: Path) -> None:
+    """A user types the real length, width and thickness of the tool: the fit reports exactly those numbers."""
     sc = write_scene(tmp_path)
     r = cli(
         tmp_path,
@@ -162,6 +168,7 @@ def test_fit_silhouette_user_overrides_win_exactly(tmp_path: Path) -> None:
 def test_fit_silhouette_low_confidence_exits_3_but_still_writes_the_fit(
     tmp_path: Path,
 ) -> None:
+    """A script demands 0.9999 confidence: the fit is still written and printed, the exit code 3 tells the script it is not trustworthy."""
     sc = write_scene(tmp_path, "pliers_flat")
     r = cli(
         tmp_path,
@@ -185,9 +192,11 @@ def test_fit_silhouette_low_confidence_exits_3_but_still_writes_the_fit(
 
 
 def test_fit_silhouette_input_errors(tmp_path: Path) -> None:
+    """A user forgets the depth, the output dir, the camera file or gives a broken camera: each is a clear exit-2 message naming the fix."""
     write_scene(tmp_path)
     r = cli(tmp_path, "fit-silhouette", "--view", "mask.png:cam.json", "--json")
-    assert r.returncode == 2 and "known_depth" in r.stderr
+    assert r.returncode == 2
+    assert "known_depth" in r.stderr
     r = cli(
         tmp_path,
         "fit-silhouette",
@@ -198,9 +207,11 @@ def test_fit_silhouette_input_errors(tmp_path: Path) -> None:
         "--emit",
         "stl",
     )
-    assert r.returncode == 2 and "-o" in r.stderr
+    assert r.returncode == 2
+    assert "-o" in r.stderr
     r = cli(tmp_path, "fit-silhouette", "--view", "mask.png", "--known-depth", "650")
-    assert r.returncode == 2 and "MASK:CAM.json" in r.stderr
+    assert r.returncode == 2
+    assert "MASK:CAM.json" in r.stderr
     (tmp_path / "badcam.json").write_text(
         json.dumps({"K": S.KF.tolist()}), encoding="utf-8"
     )
@@ -212,7 +223,8 @@ def test_fit_silhouette_input_errors(tmp_path: Path) -> None:
         "--known-depth",
         "650",
     )
-    assert r.returncode == 2 and "pose" in r.stderr
+    assert r.returncode == 2
+    assert "pose" in r.stderr
 
 
 def test_view_check_single_photo_then_extra_views(tmp_path: Path) -> None:
@@ -274,21 +286,27 @@ def test_view_check_single_photo_then_extra_views(tmp_path: Path) -> None:
     )
     assert res["needs_views"] and (tmp_path / "check.png").stat().st_size > 100
     strict = cli(tmp_path, "view-check", "out/fit.json", "--view", "mask.png:cam.json", "--flag-below", "0.9999")
-    assert strict.returncode == 3 and "FLAG" in strict.stdout  # even the fitted photo is below a perfect-IoU bar
+    assert strict.returncode == 3
+    assert "FLAG" in strict.stdout  # even the fitted photo is below a perfect-IoU bar
 
 
 def test_view_check_errors(tmp_path: Path) -> None:
+    """A user points view-check at a missing file and at a JSON that is not a fit: exit 2 with a message."""
     r = cli(tmp_path, "view-check", "missing.json")
-    assert r.returncode == 2 and "not found" in r.stderr
+    assert r.returncode == 2
+    assert "not found" in r.stderr
     (tmp_path / "junk.json").write_text("{}", encoding="utf-8")
     r = cli(tmp_path, "view-check", "junk.json")
-    assert r.returncode == 2 and "not a threed_vision fit" in r.stderr
+    assert r.returncode == 2
+    assert "not a threed_vision fit" in r.stderr
 
 
 def test_commands_have_help_and_are_listed(tmp_path: Path) -> None:
+    """A user discovers the three commands through `3d <cmd> --help` and `3d help`."""
     for name in ("fit-profile", "fit-silhouette", "view-check"):
         r = cli(tmp_path, name, "--help")
-        assert r.returncode == 0 and f"3d {name}" in r.stdout
+        assert r.returncode == 0
+        assert f"3d {name}" in r.stdout
     listing = cli(tmp_path, "help")
     assert all(
         n in listing.stdout for n in ("fit-profile", "fit-silhouette", "view-check")
@@ -313,6 +331,7 @@ def test_fit_silhouette_heldout_template_and_every_mesh_format(tmp_path: Path) -
 
 
 def test_fit_profile_options_reach_the_algorithm(tmp_path: Path) -> None:
+    """A user asks fit-profile for 5 stations on 40 bins along a forced axis and gets exactly that."""
     save_png(tmp_path / "m.png", S.recorded_mask("multimeter"))
     r = cli(tmp_path, "fit-profile", "m.png", "--mm-per-px", "1", "--k", "5", "--nbins", "40", "--axis-deg", "0", "--json")
     assert r.returncode == 0, r.stdout + r.stderr
@@ -321,6 +340,7 @@ def test_fit_profile_options_reach_the_algorithm(tmp_path: Path) -> None:
 
 
 def test_fit_silhouette_stations_seed_and_search_flags_are_wired(tmp_path: Path) -> None:
+    """A user picks 6 stations, a seed and a closed-form-only run, and tries a strict GPU request without torch: a fit or a structured error, never a traceback."""
     sc = write_scene(tmp_path)
     r = cli(
         tmp_path, "fit-silhouette", "--view", "mask.png:cam.json", "--planar", "--known-depth", str(sc["depth"]), "--no-refine",
