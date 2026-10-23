@@ -28,6 +28,7 @@ Epic: [#90](https://github.com/alex-mextner/3d-cli/issues/90).
 3d printer unsubscribe --session ID | --id SUBID | --all
 3d printer subscriptions [list | test PRINTER] [--json]
 3d printer agent list [--json] | stop PRINTER | handoff PRINTER --summary TEXT
+3d printer doctor [NAME ...|--all] [--fix] [--yes] [--json]
 3d printer todo list [PRINTER] [--all] [--json] | add PRINTER --title TEXT [options] | done ID [--note TEXT]
 3d printer todo dismiss ID --reason TEXT | snooze ID [--until DATE] [--reason TEXT] | reopen ID
 3d printer todo import [FILE...] [--dry-run] [--json]
@@ -47,6 +48,7 @@ Epic: [#90](https://github.com/alex-mextner/3d-cli/issues/90).
 | `bed status` / `reference` / `monitor` | Is the bed clear, is the build plate on — from the camera against an empty-bed reference; also the `bed` start gate and the `bed_clear` event — see [Bed state](#bed-state). |
 | `subscribe` / `unsubscribe` / `subscriptions` | Route printer alerts to an AI agent first: it looks at the frame and tells the user only if the failure is real — see [printer-subscribe.md](printer-subscribe.md). |
 | `agent list` / `stop` / `handoff` | The temporary per-printer omp agent (tmux) that gets the warning+ alerts no live subscriber took — see [printer-subscribe.md#the-temporary-printer-agent](printer-subscribe.md#the-temporary-printer-agent). |
+| `doctor [NAME\|--all]` | Diagnose the printer's setup (Klippy, Moonraker, Spoolman link and CORS, active spool, camera, watch services, ...) and with `--fix` repair what is safe — the same command as `3d printers doctor`, see [printers-doctor.md](printers-doctor.md). |
 | `todo …` (alias `issues`) | The to-do list of each printer: needed calibrations, due maintenance, repairs of open faults, manual tasks — see [To-do list](#to-do-list-3d-printer-todo). A printer's problems are tasks of this list, not GitHub tickets. |
 
 Options:
