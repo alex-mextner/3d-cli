@@ -1,5 +1,5 @@
-# Training-server environment for tools/vision_train/train.py (remote.py builds a venv from this
-# file under the run directory; nothing here is a dependency of 3d-cli itself).
+# Environment of tools/vision_train/experiment.py and train.py on the training machine (hostrun.py builds
+# a venv from this file under the run directory; nothing here is a dependency of 3d-cli itself).
 torch>=2.4
 transformers>=4.56
 numpy>=1.26

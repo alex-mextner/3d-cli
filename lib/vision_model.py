@@ -21,7 +21,8 @@ public test split (tier (a)'s q is more precise; tier (b) adds a second opinion 
 the 57 test spaghetti frames tier (a) misses). Zero-shot is NOT reliable for an empty build plate
 (it fires on 15 near-identical idle frames, not on the two real shutdown/K1 empties) and has no
 skill on "part detached" (AUROC 0.45-0.51): those two classes stay off until a head fitted on
-labelled frames (`fit-head`, or the server fine-tune in tools/vision_train) provides them.
+labelled frames of the same camera (`fit-head`) provides them; on held-out data neither a head nor a
+partial fine-tune was good enough yet (docs/research/printer-vision.md, 2026-10-23).
 
 The weights are NOT in the repo: `ensure_model(TIER_B)` downloads the Xenova ONNX export into
 ~/.cache/3d-cli/vision/models/ (sha256-pinned, atomic, idempotent). torch/transformers are never

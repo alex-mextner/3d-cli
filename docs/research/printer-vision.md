@@ -221,59 +221,159 @@ event with two raw frames of the lifted panel (`u1_monitor.jpg`, `u1-spag.jpg`) 
 detachment head; the data set needs more such frames per printer, and the head must be judged on
 held-out prints, not on the frames it was fitted on.
 
-## Labelled frames, server training and publishing (`tools/vision_train`)
+## Labelled frames, laptop experiments and publishing (`tools/vision_train`)
 
-Fine-tuning does not run on the workstation. `tools/vision_train/` (dev tools, outside `lib/`, not
-part of the `3d` runtime) builds the labelled set, trains on the user's own GPU server and
-publishes; large files never enter git.
+Training and evaluation do not run on the workstation, and not on Runpod. `tools/vision_train/` (dev
+tools, outside `lib/`, not part of the `3d` runtime) builds the labelled set, runs the experiments on
+the owner's laptop (`ssh home`, tailscale; RTX 3060 Laptop, **6 GiB VRAM**, 16 cores, ~40 GB free RAM)
+and publishes; large files never enter git. The server `65.21.40.51` has no GPU: it is only the
+second copy of weights (`remote.py mirror`, rsync, nothing runs there).
 
 | step | command | what it does |
 |---|---|---|
-| build | `dataset.py build OUT [--third-party]` | own frames from `sources.json` (provenance, labels, splits, per-source crop) → sanitised JPEGs named by sha256, `labels.jsonl`, `sanitation.json`; `--third-party` adds the public collection for server training only |
+| build | `dataset.py build OUT [--third-party]` | own frames from `sources.json` (provenance, labels, groups, per-source crop; `publish: false` sources stay private) → sanitised JPEGs named by sha256, `labels.jsonl`, `sanitation.json`; `--third-party` adds the public collection for training/evaluation only |
+| tier (a) column | `tier_a_scores.py DATASET [--cuda]` | the shipped tier (a) verified score q for every frame, for the comparison |
 | check / review | `dataset.py check OUT`, `dataset.py sheets OUT` | repeats every sanitation check on the published part; contact sheets for the human review |
-| look at the server | `remote.py preflight` | read-only `nvidia-smi`, `free -m`, `df -h`, `uptime`, python/uv/docker/rsync presence; starts nothing, writes nothing |
-| train | `remote.py plan RUN --dataset OUT` then `remote.py run RUN --dataset OUT --yes [--mode finetune] [--max-hours H] -- TRAIN_ARGS` | rsync `lib/`, `tools/`, the data to `~/3d-cli-train/RUN/`, one ssh session under `timeout --kill-after`, a trap that kills the children, then pulls only small artifacts (`--max-size=20m`, no `*.pt`/`*.onnx`/`*.safetensors`), also after a failed run |
-| artifacts | `remote.py pull RUN [--weights]`, `remote.py clean RUN --yes [--all]` | weights come to `~/.cache/3d-cli/train/runs/RUN/` only with `--weights`; `clean` frees the venv and copies but keeps `out/` (the server-side copy) unless `--all` |
+| look at the laptop | `remote.py preflight` | read-only: `nvidia-smi` incl. free VRAM, `free -m`, `df -h`, load, python/uv/docker/rsync, leftovers; starts nothing, writes nothing |
+| run | `remote.py plan RUN --dataset OUT` then `remote.py run RUN --dataset OUT --yes [--entry experiment.py] [--max-hours H] -- ARGS` | rsync `lib/`, `tools/`, the data to `~/work-3d-cli-vision/RUN/`, one ssh session: uv + Python + venv **inside that directory** (no sudo, nothing in `~/.local`), then the job under the guard; pulls only small artifacts (`--max-size=20m`, no `*.pt`/`*.onnx`/`*.safetensors`/`*.npy`), also after a failed run |
+| finish | `remote.py pull RUN [--weights]`, `remote.py clean RUN --yes --all`, `remote.py verify-idle` | `clean` frees the directory (without `--all` it keeps `out/`); `verify-idle` fails while any process of ours still mentions the work directory |
+| report | `report.py RUN_DIR --dataset OUT` | tables of every run, fine-tune seed spread, source-matched metrics, per-frame scores of the own detached-part event |
 | publish | `publish.py whoami`, `publish.py dataset OUT [--publish]`, `publish.py model RUN_DIR --dataset-revision SHA [--weights FILE] [--publish]` | dry run by default; reads every uploaded file back at the commit and compares sha256 |
 
-Host and paths: `THREED_TRAIN_HOST` (default `65.21.40.51`), `THREED_TRAIN_USER`,
-`THREED_TRAIN_DIR` (default `~/3d-cli-train`); user, key and port come from `~/.ssh/config`. No
-secret is sent to the server: the Hugging Face token stays on the workstation and weights are pushed
-from there after `pull --weights`. `train.py` modes: `head` (embeds every frame once with the base CLIP
-B/16, fits one logistic head per class on the train split, reports on the test split next to the
-zero-shot prompts, refits on everything), `finetune` (unfreezes the last N vision blocks, classifier
-initialised from the prompts so training starts at the zero-shot answer, `--export-onnx` writes a tower
-the runtime loads), `eval`. Its metrics are `vision_detect._table` and `vision_fit.auroc`, the same
-code `3d printer vision eval --model` runs (imported, not copied), per provenance (own vs third-party).
+**The laptop is the user's machine, so the job is polite** (`hostrun.py`, which runs there, stdlib
+only): it refuses to start above a load average of 8 or when the GPU has less than the cap free; the job
+runs at `nice -n 10` with at most 6 CPU threads and at most **4.5 GiB of the 6 GiB** of VRAM (handed to the
+job as `THREED_VRAM_CAP_MIB`; torch's allocator is limited to the cap minus 700 MiB for the CUDA
+context, and a watchdog reads the job's real VRAM from `nvidia-smi` every 2 s); it kills the whole
+process group when the load average goes above 12, when less than 300 MiB of the card is left (the user
+started something), at the hard `--max-hours`, and when ssh drops; pid file, `out/GUARD.json` with the
+peaks. Host `THREED_TRAIN_HOST` (default `home`; user/key/port from `~/.ssh/config`), directory
+`THREED_TRAIN_DIR` (default `~/work-3d-cli-vision`), second-copy host `THREED_WEIGHTS_HOST` (default
+`65.21.40.51`). No secret is sent: the Hugging Face token stays on the workstation and weights are
+pulled here and published from here. `train.py` (modes `head`, `finetune`, `eval`) is the older single-split
+tool; `experiment.py` is what produced the numbers below.
 
-**What is in the set today (2026-10-22, `DATASET_SHA256` 306bd93d…).** 436 published own frames
-(Snapmaker U1 and one K1 frame): 421 healthy (358 train / 63 test, six prints), 7 spaghetti, 7
-empty bed, 1 `part_detached`; plus 36 own frames kept private (the face/person detector fired, almost
-certainly false hits on printer parts, but a refusal is a refusal), of which one is the second
-frame of the panel event. Each published frame was cropped to the bed area, re-encoded (no EXIF/ICC),
-checked for QR codes (none found inside the crop; the chamber back wall with its stickers is outside
-it) and for faces/people on the published bytes; all 15 contact sheets were looked at by hand and show
-only the inside of the printers. Third-party frames (the public collection, licences differ) are
-never published. Honest size: 2 frames of one panel event cannot train or validate a detachment
-detector, so `finetune` on this set is not warranted; the pipeline exists to be re-run when more
-frames are recorded (`vision record`) and labelled.
+### Experiment 2026-10-23: does anything beat zero-shot / tier (a) on held-out data?
 
-Local smoke runs (RTX 4060, the desktop holding ~3.7 GB, `--smoke`: 28 frames): `head` 8.8 s on the
-GPU and the same AUROCs on the CPU path; `finetune --batch 8` 3 steps in 6.0 s with a peak of +1.23 GiB
-VRAM (cap 3 GiB); the exported ONNX tower (345 MB, fp32) loads in `vision_model.ModelScorer`. These
-check the pipeline, not a result.
+`experiment.py` compares, on the same frames: the shipped **zero-shot** prompts of CLIP B/16; a **head**
+(logistic regression on the frozen B/16 embedding, what `vision fit-head` fits); a **partial fine-tune**
+(last 2 or 4 vision blocks + projection + a 4-way classifier initialised from the prompts, fp16 autocast,
+batch 16, AdamW, 4 epochs with class-balanced sampling and crop/brightness augmentation); and, for
+spaghetti, **tier (a)'s q** from the shipped pipeline (Obico + CLIP B/32 verifier). **Held out by
+group**: every frame has a group (one print/event; third-party: the whole source, or one video for
+emptydeck), groups are dealt over 5 folds stratified by class, a group is never in two folds, so every
+frame is scored by a model that never saw its print; the held-out scores are pooled. Frames
+(`dataset-v3`): 3,565, of which 479 own (436 published + 43 private, from 6 U1 prints, the U1 idle bed,
+2 spaghetti events, 1 detached-part event, 2 K1 frames) and 3,086 third-party (public collection,
+capped at 250 per label and source, 15 sources; never published): 2,483 healthy (49 groups), 903
+spaghetti (11 groups), 171 `part_detached` (31 groups: 30 emptydeck videos + the one U1 event), 8
+`empty_bed` (2 groups). The 95 % intervals are a bootstrap over groups; TPR@1 %FPR uses the held-out
+negatives themselves as the threshold (an oracle that flatters every method equally).
+
+**Spaghetti** (all frames: 903 positive / 2,483 healthy, 11 groups; ± = spread over fine-tune seeds):
+
+| method | AUROC (95 % CI) | TPR@1 %FPR | TPR@5 %FPR | source-matched AUROC / TPR@1 % (896 / 910, third-party) |
+|---|---|---:|---:|---|
+| zero-shot prompts (shipped tier (b)) | 0.911 (0.87–0.97) | 0.548 | 0.715 | 0.883 / 0.423 |
+| **tier (a) q (shipped)** | 0.923 (0.88–0.98) | **0.826** | **0.858** | 0.923 / 0.787 |
+| head on frozen B/16 | 0.871 (0.79–0.97) | 0.504 | 0.654 | 0.871 / 0.518 |
+| fine-tune, 2 blocks, lr 1e-5, 3 seeds | 0.929 / 0.951 / 0.934 | 0.648 / 0.710 / 0.718 | 0.759 / 0.841 / 0.831 | 0.925–0.943 / 0.569–0.708 |
+| fine-tune, 4 blocks, lr 2e-5, 1 seed | 0.939 (0.89–0.99) | 0.800 | 0.857 | 0.942 / 0.796 |
+
+On the 7 own spaghetti frames (2 events) every method is at 0.86–1.00 AUROC: far too few to rank them.
+
+Precision / recall at fixed score thresholds (spaghetti, all frames; the scores are not calibrated alike,
+so the same threshold is not the same operating point; tier (a) is q, the others are probabilities):
+
+| method | score >= 0.3 | >= 0.5 | >= 0.8 |
+|---|---|---|---|
+| zero-shot prompts | 0.85 / 0.71 | 0.93 / 0.59 | 0.98 / 0.37 |
+| tier (a) q | 0.99 / 0.77 | 1.00 / 0.72 | 1.00 / 0.65 |
+| head on frozen B/16 | 0.67 / 0.75 | 0.88 / 0.61 | 1.00 / 0.37 |
+| fine-tune, 2 blocks (seed 0) | 0.88 / 0.74 | 0.92 / 0.71 | 0.96 / 0.65 |
+| fine-tune, 4 blocks (seed 0) | 0.98 / 0.79 | 0.99 / 0.77 | 0.99 / 0.72 |
+
+For `part_detached` the same table on the 9 own event frames gives recall 0 at 0.5 for every method and,
+at 0.3, precision 0.33 / recall 0.22 for the head (the fine-tune: nothing flagged). The pooled third-party
+numbers (head 0.32 / 0.93 at 0.5, fine-tune 0.52 / 0.64) are the shortcut-inflated ones described below.
+
+**Part detached** (the class the U1 panel failure needs):
+
+| method | pooled: 30 held-out videos, 162 / 2,028 | **source-matched**: emptydeck detached vs emptydeck healthy, 162 / 230 | + leave-printer-setup-out (4 clusters) | **U1 panel event**, 9 frames vs 455 own healthy: AUROC / TPR@1 % |
+|---|---|---|---|---|
+| zero-shot | 0.491 / 0.000 | 0.452 / 0.025 | same | 0.181 / 0.000 |
+| head | 0.944 / 0.210 | 0.600 / 0.012 | 0.561 / 0.012 | 0.825 / 0.333 |
+| fine-tune, 2 blocks (3 seeds) | 0.956–0.964 / 0.210–0.296 | 0.666–0.722 / 0.025–0.080 | 0.646 / 0.062 | 0.372–0.484 / 0.000 |
+| fine-tune, 4 blocks | 0.964 / 0.272 | 0.726 / 0.093 | n/a | 0.509 / 0.000 |
+
+**Reading, honestly.**
+
+1. **Spaghetti: the partial fine-tune is a real gain over zero-shot and ties tier (a), but it does not
+   beat tier (a).** On held-out sources the fine-tune raises AUROC by 0.02–0.04 and recall at 1 %FPR
+   from 0.55 to 0.65–0.80, with the seed spread listed; the 4-block run reaches tier (a)'s 0.80 at 1 %FPR
+   (0.826 vs 0.800, one seed). Tier (a) stays the better detector at low false-positive rates, and the
+   confidence intervals of the AUROCs overlap. The two are complementary: taking either at 0.5 %FPR each
+   gives 0.81–0.82 recall at 1.0 % union FPR for the 2-block fine-tune (tier (a) alone: 0.826 at 1 %FPR,
+   no gain) and 0.865 for the 4-block run (+3.9 points, one seed, not established).
+2. **Part detached: nothing is usable.** The pooled 0.94–0.96 AUROC is a **shortcut**: positives come
+   from one source (emptydeck bed cameras), most negatives from others, so a model scores "looks like
+   emptydeck". Against the healthy frames of the same videos the head falls to 0.60 and the fine-tune to
+   0.67–0.73 (0.56 / 0.65 when whole printer setups are held out), with 1–9 % recall at 1 %FPR. Zero-shot is
+   at chance (0.45). So the frozen-feature head and the partial fine-tune learn something real about
+   detachment (above 0.5, above zero-shot) but nowhere near an alarm.
+3. **The original incident frame is not found.** On the 9 frames of the U1 event the head ranks 8
+   above the 70th percentile of own healthy frames (4 above the 99th), but `u1_monitor.jpg`, the clean
+   frame that started this work, scores 0.01, the **1st percentile**, below almost every healthy frame; the
+   frames it does flag are the annotated evidence frames and the later frame with strings hanging (the
+   spaghetti stage). The fine-tune does not transfer at all (0.37–0.51). Those 9 frames are ONE event
+   from one camera: any score on them is not evidence in either direction.
+4. **Empty bed: 8 frames from 2 groups** (the U1 idle bed and one K1 frame): a held-out score is not
+   evidence; the head could be scored on only one frame. Nothing was concluded.
+5. **Tier (a)'s `vision_part_detached` (geometry) remains the only detector aimed at the U1 panel
+   failure**; a fitted tier (b) head is not a substitute until a few dozen real detachment events exist
+   per printer (`vision record`, label, re-run `experiment.py`).
+
+**Cost on the laptop** (guard readings, `out/GUARD.json`): the whole experiment (frame loading, frozen
+embeddings, head, 5 fine-tune folds) takes **394 s wall** (the 4-block run 424 s; the fine-tune alone 315 s,
+63 s per fold), at most **1.6 GiB of VRAM** for the 2-block fine-tune and **2.0 GiB** for 4 blocks
+(torch allocator peak 1.0 GiB allocated / 1.4 GiB reserved; the cap was 4.5 GiB), peak load average 2.2
+(the user's own load), 6 threads at nice 10; uv + Python + torch + transformers installed inside the run
+directory (sync, install and pull together under two minutes); nothing was left behind (`clean --all`, `verify-idle`, GPU back to
+26 MiB). The guard never fired. Reproduce:
+
+```bash
+D=~/.cache/3d-cli/train/dataset-v3
+python tools/vision_train/dataset.py build $D --third-party        # needs the local public collection
+python tools/vision_train/tier_a_scores.py $D --cuda               # tier (a) column
+python tools/vision_train/remote.py preflight
+python tools/vision_train/remote.py run exp1 --dataset $D --max-hours 1 --yes -- --tier-a data/tier_a.json
+python tools/vision_train/remote.py clean exp1 --all --yes && python tools/vision_train/remote.py verify-idle
+python tools/vision_train/report.py ~/.cache/3d-cli/train/runs/exp1 --dataset $D
+```
+
+**What is in the published set today (2026-10-22, `DATASET_SHA256` 306bd93d…).** 436 published own
+frames (Snapmaker U1 and one K1 frame): 421 healthy (six prints), 7 spaghetti, 7 empty bed, 1
+`part_detached`; plus 43 own frames kept private (36 where the face/person detector fired, almost
+certainly false hits on printer parts, but a refusal is a refusal; 7 event frames with detection boxes
+drawn on them). Each published frame was cropped to the bed area, re-encoded (no EXIF/ICC), checked for
+QR codes (none inside the crop; the chamber back wall with its stickers is outside it) and for
+faces/people on the published bytes; all 15 contact sheets were looked at by hand and show only the
+inside of the printers. Third-party frames (the public collection, licences differ) are never published.
 
 **Where the artifacts live.** (1) Public Hugging Face repos, linked both ways with the GitHub repo:
-dataset `alex-mextner/3d-cli-print-failure-frames` (CC-BY-4.0, own frames only) and model
-`alex-mextner/3d-cli-print-failure-tier-b` (MIT, the base licence), every card naming the 3d-cli commit,
-the base model revision and the dataset revision. (2) The server copy under `~/3d-cli-train/RUN/out/`.
-(3) Git holds only small text: this documentation, `sources.json`, the cards' generator, metrics.
-The PrintOps backup (`lib/printops/backup.py`) snapshots the Odroid's SQLite databases from inside
-a container and cannot take workstation-side model files; it was not changed. When a head is first
-published its Hugging Face revision and sha256 must be pinned in `lib/vision_model.py` (like
-`TIER_B`); nothing is trained yet, so there is no pin. **Publishing is paused:** the Hugging Face
-token on this workstation belongs to the account `Alex-Ultra` (write scope present), not to
-`alex-mextner`, so `publish.py dataset` was only dry-run (440 files, 28.4 MB, sanitation clean).
+the dataset is published (2026-10-23): [Alex-Ultra/3d-cli-print-failure-frames](https://huggingface.co/datasets/Alex-Ultra/3d-cli-print-failure-frames)
+at revision `3ac6790305246b7282ccd10a0f6a69f1761cdbcd` (CC-BY-4.0, own frames only: 440 files, 28.4 MB,
+`DATASET_SHA256` 306bd93d…, built at 3d-cli commit `a06ced75`; every uploaded file was read back at that
+revision and its sha256 compared). The model repo `Alex-Ultra/3d-cli-print-failure-tier-b` (MIT, the base
+licence) is NOT created: no trained weights are worth keeping (see below). The cards name the 3d-cli
+commit, the base model revision and the dataset revision. (2) `65.21.40.51:~/3d-cli-weights/RUN/` via
+`remote.py mirror` (weights only; it has no GPU). (3) Git holds only small text. The PrintOps backup
+(`lib/printops/backup.py`) snapshots the Odroid's SQLite databases from inside a container and cannot
+take workstation-side model files; it was not changed. No weights came out of the experiment worth
+keeping (nothing beat tier (a), the detachment head is not usable), so **nothing was published and no
+revision is pinned in `lib/vision_model.py`**. The repos live on the account that owns the Hugging Face
+token available here (`Alex-Ultra`, write scope present); the account name is not important, the repo
+cards link to github.com/alex-mextner/3d-cli and the commit.
 
 ## Not done (follow-ups)
 
