@@ -731,7 +731,9 @@ def test_exported_stl_is_the_placed_part_in_bed_coordinates(
     stl = rt.export_stl(parts)
     n = struct.unpack("<I", stl[80:84])[0]
     assert n == 12 and len(stl) == 84 + 50 * 12  # a box = 12 triangles
-    xs, ys, zs = [], [], []
+    xs: list[float] = []
+    ys: list[float] = []
+    zs: list[float] = []
     for i in range(n):
         v = struct.unpack("<12fH", stl[84 + 50 * i : 134 + 50 * i])
         xs += v[3:12:3]

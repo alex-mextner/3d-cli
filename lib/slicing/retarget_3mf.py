@@ -1224,7 +1224,7 @@ def export_stl(parts: Mapping[str, bytes]) -> bytes:
     skip = _non_printing_volumes(parts[MODEL_SETTINGS].decode("utf-8"))
     leaves = _leaves(main)
     meshes: dict[
-        tuple[str, int],
+        tuple[str | None, int],
         tuple[list[tuple[float, float, float]], list[tuple[int, int, int]]],
     ] = {}
     packer = struct.Struct("<12fH")
