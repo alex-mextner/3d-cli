@@ -71,6 +71,12 @@ A **hand-made bank** (real photos) is a `bank.json` whose entries have `id`, `th
 `mm_per_px`); `bank thumbs bank.json -o DIR` copies the images next to a normalised `bank.json` (entries are assumed textured).
 Photos should show the object lying flat, longest axis vertical, on a plain background; a `sil` mask lets the index crop tightly.
 
+**Known limits of retrieval.** Query crops are rotated so the object's longest axis is vertical, but thumbnails are embedded as rendered: image retrieval
+assumes the default `--view longest-axis` (or upright photos). `--view top` / `--view iso` thumbnails are for inspection and the UI, not for matching. Meshes are
+measured along their own principal axes when that gives a smaller bounding box, so `extents_mm` are L x W x T even for a part modelled diagonally.
+`--metric all` / `clip+dino+sil` ranks an entry that has no silhouette on its appearance scores alone (the shape term is left out, not counted as 0).
+`categories.json` keys are mesh file stems.
+
 ### `index`
 
 Embeds each thumbnail as a tightly cropped object on the neutral CLIP background (CLIP and DINOv2-small, both L2-normalised) and stores

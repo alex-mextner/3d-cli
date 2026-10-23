@@ -1236,3 +1236,85 @@ def test_hand_made_bank_and_index_documents_with_wrong_types_are_bad_input(
         (d / "index.json").write_text(json.dumps(bad), encoding="utf-8")
         with pytest.raises(BadInput, match="cannot load a bank index"):
             bank.load_index(d)
+
+
+@needs_trimesh
+def test_a_tool_modelled_diagonally_still_lies_flat_with_its_true_extents() -> None:
+    mesh = trimesh.creation.box(extents=(200.0, 24.0, 24.0))
+    mesh.apply_transform(
+        trimesh.transformations.rotation_matrix(np.radians(45), [0, 0, 1])
+    )  # lying at 45 deg on the bed
+    r = bank.render_mesh(mesh, "longest-axis", px=192)
+    assert r.extents_mm == pytest.approx([200.0, 24.0, 24.0], abs=0.2)
+    ys, xs = np.nonzero(r.silhouette)
+    assert np.ptp(ys) > 5 * np.ptp(xs), "the long axis ends up vertical"
+    assert r.mm_per_px == pytest.approx(200.0 / (192 * 0.9), rel=0.02)
+    axis_aligned = bank.render_mesh(
+        trimesh.creation.box(extents=(200.0, 24.0, 24.0)), "longest-axis", px=192
+    )
+    assert np.ptp(np.nonzero(axis_aligned.silhouette)[0]) > 5 * np.ptp(
+        np.nonzero(axis_aligned.silhouette)[1]
+    )
+
+
+def test_descriptor_fits_a_body_with_a_longer_cross_extent() -> None:
+    """A heavy 120x60 body with a thin 260 px lead sticking out sideways: the lead is longer than the body's principal axis."""
+    mask = np.zeros((300, 400), bool)
+    mask[100:160, 20:140] = True
+    mask[128:132, 100:360] = True
+    d = bank.silhouette_descriptor(mask)
+    xs = np.nonzero(d.any(axis=0))[0]
+    ys = np.nonzero(d.any(axis=1))[0]
+    assert max(np.ptp(xs), np.ptp(ys)) + 1 >= bank.SIL_SIZE * 0.9 - 2
+    assert (
+        xs.min() >= 1
+        and xs.max() <= bank.SIL_SIZE - 2
+        and ys.min() >= 1
+        and ys.max() <= bank.SIL_SIZE - 2
+    )
+
+
+@needs_trimesh
+def test_categories_map_names_the_file_stem_before_the_generated_id(
+    tmp_path: Path,
+) -> None:
+    src = tmp_path / "meshes"
+    (src / "a").mkdir(parents=True)
+    (src / "b").mkdir()
+    for rel in ("a/thing.stl", "b/thing.stl", "thing_2.stl"):
+        trimesh.creation.box(extents=(100, 30, 10)).export(src / rel)
+    (src / "categories.json").write_text(json.dumps({"thing_2": "X"}), encoding="utf-8")
+    entries = json.loads(
+        bank.build_thumbnails(src, tmp_path / "bank", px=64).read_text(encoding="utf-8")
+    )["entries"]
+    labelled = [e["category"] for e in entries]
+    assert labelled.count("X") == 1, (
+        "only the file called thing_2.stl gets the category"
+    )
+
+
+def test_index_arrays_of_the_wrong_shape_are_bad_input(tmp_path: Path) -> None:
+    d = tmp_path / "idx"
+    d.mkdir()
+    meta = {"version": bank.BANK_VERSION, "sil_size": bank.SIL_SIZE, "build_id": "x"}
+    (d / "index.json").write_text(
+        json.dumps({"meta": meta, "entries": [{"id": "a"}]}), encoding="utf-8"
+    )
+    good = {
+        "clip": np.zeros((1, 2), np.float32),
+        "dino": np.zeros((1, 2), np.float32),
+        "build_id": np.array("x"),
+    }
+    for sil in (np.zeros((1, 3), np.uint8), np.zeros(5, np.uint8)):
+        np.savez(d / "index.npz", sil=sil, **good)
+        with pytest.raises(BadInput, match="inconsistent"):
+            bank.load_index(d)
+    np.savez(
+        d / "index.npz",
+        sil=np.zeros((1, 1152), np.uint8),
+        clip=np.float32(1.0),
+        dino=good["dino"],
+        build_id=good["build_id"],
+    )
+    with pytest.raises(BadInput, match="inconsistent"):
+        bank.load_index(d)

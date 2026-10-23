@@ -170,6 +170,18 @@ def _face_colors(mesh: Any) -> tuple[np.ndarray, bool]:
     return np.tile(np.array(BASE_RGB, np.uint8), (n, 1)), False
 
 
+def _principal_frame(verts: np.ndarray) -> np.ndarray:
+    """3x3 rotation whose rows are the axes to measure the mesh along: the file's own X/Y/Z for an axis-aligned model, else its
+    principal axes, whichever frame has the smaller bounding box (so extents_mm are the object's L x W x T, not a diagonal's)."""
+    centred = verts - verts.mean(axis=0)
+    _, _, vt = np.linalg.svd(centred, full_matrices=False)
+    if np.linalg.det(vt) < 0:
+        vt[2] = -vt[2]
+    aligned = np.prod(np.ptp(verts, axis=0))
+    rotated = np.prod(np.ptp(centred @ vt.T, axis=0))
+    return vt if rotated < 0.98 * aligned else np.eye(3)
+
+
 def render_mesh(
     mesh: Any, view: str = "longest-axis", px: int = 192, unit_scale: float = 1.0
 ) -> Rendered:
@@ -185,10 +197,14 @@ def render_mesh(
     faces = np.asarray(mesh.faces, np.int64)
     if len(faces) == 0:
         raise BadInput("mesh has no faces")
-    extents = np.asarray(mesh.extents, np.float64)
-    centre = np.asarray(mesh.bounds, np.float64).mean(0)
-    m = view_matrix(extents, view)
-    p = (verts - centre) @ m.T
+    frame = _principal_frame(
+        verts
+    )  # the object's own axes: a tool modelled diagonally on the bed still lies flat
+    local = verts @ frame.T
+    extents = np.ptp(local, axis=0)
+    centre = (local.min(axis=0) + local.max(axis=0)) / 2
+    m = view_matrix(extents, view) @ frame
+    p = (verts - centre @ frame) @ m.T
     uv_min, uv_max = p[:, :2].min(0), p[:, :2].max(0)
     span = float(max((uv_max - uv_min).max(), 1e-9))
     scale = px * 0.9 / span
@@ -277,7 +293,7 @@ def build_thumbnails(
 
     Per entry: `{"id","name","category","thumb","sil","extents_mm","mm_per_px","textured"}` (paths relative to bank.json); the
     document carries `"textured"` (every entry has colour) and a `"warning"` when some entry fell back to shaded grey.
-    `categories` is an optional JSON `{name_or_id: category}` (default: `categories.json` next to the meshes, else name rules).
+    `categories` is an optional JSON `{mesh file stem: category}` (default: `categories.json` next to the meshes, else name rules).
     """
     import cv2
 
@@ -311,9 +327,7 @@ def build_thumbnails(
             {
                 "id": ident,
                 "name": path.stem,
-                "category": cmap.get(ident)
-                or cmap.get(path.stem)
-                or category_from_name(path.stem),
+                "category": cmap.get(path.stem) or category_from_name(path.stem),
                 "thumb": thumb,
                 "sil": sil,
                 "extents_mm": rendered.extents_mm,
@@ -370,7 +384,7 @@ def _copy_into(src_base: Path, dst_base: Path, rel: str, what: str) -> None:
 def _rebase_bank(bank_json: Path, out: Path) -> Path:
     """Copy a hand-made bank (real photo thumbnails + optional silhouettes) next to a normalised bank.json."""
     doc = read_bank(bank_json)
-    base = bank_json.parent if bank_json.is_file() else bank_json
+    base = bank_json.parent
     entries = []
     for e in doc["entries"]:
         for key in ("thumb", "sil"):
@@ -462,7 +476,7 @@ def silhouette_descriptor(mask: np.ndarray, size: int = SIL_SIZE) -> np.ndarray:
     _, vecs = np.linalg.eigh(np.cov((pts - centre).T))
     major, minor = vecs[:, 1], vecs[:, 0]
     along, across = (pts - centre) @ major, (pts - centre) @ minor
-    length = max(float(np.ptp(along)), 1.0)
+    length = max(float(np.ptp(along)), float(np.ptp(across)), 1.0)
     # pivot = middle of the object's extent (not its centre of mass), so a lopsided tool (heavy handle, light blade) is not clipped
     pivot = (
         centre
@@ -770,10 +784,18 @@ def load_index(index_dir: str | Path) -> BankIndex:
             rebuild,
         )
     n = len(entries)
-    if clip_e.shape[0] != n or dino_e.shape[0] != n or sil_bits.shape[0] != n:
+    bits = SIL_SIZE * SIL_SIZE
+    if (
+        clip_e.ndim != 2
+        or dino_e.ndim != 2
+        or sil_bits.ndim != 2
+        or clip_e.shape[0] != n
+        or dino_e.shape[0] != n
+        or sil_bits.shape != (n, -(-bits // 8))
+    ):
         raise BadInput(f"index in {d} is inconsistent (entries vs embeddings)", rebuild)
     sil = (
-        np.unpackbits(sil_bits, axis=1)[:, : SIL_SIZE * SIL_SIZE]
+        np.unpackbits(sil_bits, axis=1)[:, :bits]
         .reshape(n, SIL_SIZE, SIL_SIZE)
         .astype(bool)
     )

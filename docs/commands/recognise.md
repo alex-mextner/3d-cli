@@ -130,8 +130,8 @@ to their class); `drill bit case` / `bit set` / `hex key set` count as equivalen
 | DINOv2 -> untextured bank | 0.36 | 0.48 | 0.52 | 0.21 / 0.39 / 0.39 |
 | CLIP image -> untextured bank | 0.18 | 0.30 | 0.39 | 0.21 / 0.30 / 0.48 |
 | silhouette -> untextured bank | 0.18 | 0.42 | 0.61 | 0.24 / 0.45 / 0.58 |
-| (spike protocol) DINOv2, raw crop vs raw thumbnail | 0.24 | 0.42 | 0.42 | 0.21 / 0.39 / 0.39 |
-| (spike protocol) CLIP, raw crop vs raw thumbnail | 0.27 | 0.30 | 0.48 | 0.21 / 0.30 / 0.48 |
+| (spike protocol) DINOv2, raw crop vs raw thumbnail | 0.21 | 0.42 | 0.42 | 0.21 / 0.39 / 0.39 |
+| (spike protocol) CLIP, raw crop vs raw thumbnail | 0.27 | 0.36 | 0.48 | 0.21 / 0.30 / 0.48 |
 
 Deviations from the spike, and why:
 
@@ -143,7 +143,7 @@ Deviations from the spike, and why:
   and both 180-degree orientations are tried. The two `(spike protocol)` rows re-run the spike's way (unrotated crop against the raw 192 px thumbnail) in
   the same run and land within one crop of the spike's numbers.
 - **CLIP image retrieval is not better: top-1 0.18 (spike 0.21), top-3 0.30 (0.30), top-5 0.39 (0.48).** Alignment and tight cropping did not help CLIP
-  on grey renders (the spike-protocol rerun gives top-1 0.27); with 33 crops these differences are a few crops and I did not investigate them.
+  on grey renders (the spike-protocol rerun gives top-1 0.27, top-3 0.36); with 33 crops these differences are a few crops and I did not investigate them.
 - **Silhouette: top-1 0.18 vs 0.24, top-3 0.42 vs 0.45, top-5 0.61 vs 0.58** (two, one and one crops of 33): the descriptor is now warped from the mask,
   centred on the middle of the object's extent, instead of scattering its pixels. Differences are not investigated further.
 - The grey bank stays a coin flip whatever the metric: the spike counted only ~12 of its label classes in the 34-tool bank and the thumbnails carry
