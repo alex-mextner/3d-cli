@@ -1,4 +1,4 @@
-# `3d printers` — the printer registry, one printer's dossier, its filament and its firmware
+# `3d printers` — the printer registry, one printer's dossier, its filament, its health and its firmware
 
 `list` shows the printer MODELS the tool knows (bed/nozzle/firmware used by `3d.yaml`, slicing and
 project checks). `show <name>` is the one-screen dossier of a printer: its model spec, the machine
@@ -10,6 +10,7 @@ The other subcommands act on the machines of the fleet registry and are self-reg
 `fleet/printers.yaml` + `printer-devices.yaml`, nothing is keyed on a printer name:
 
 - `spools`, `load`, `unload`, `swap`, `filament` — the filament in the printers (below).
+- `doctor` — diagnose a printer's setup and fix what is safe to fix: [printers-doctor.md](printers-doctor.md).
 - `fw` — firmware / root / Klipper-unlock plans per vendor profile: [printers-fw.md](printers-fw.md),
   profile schema in [../printers/firmware-profiles.md](../printers/firmware-profiles.md).
 
@@ -23,6 +24,7 @@ The other subcommands act on the machines of the fleet registry and are self-reg
 3d printers unload PRINTER[/HEAD] [--to LOC] [--gross G] [--dry-run] [--json]
 3d printers swap SPOOL PRINTER[/HEAD] --to LOC [--dry-run] [--json]
 3d printers filament show|set ...
+3d printers doctor [PRINTER ...|--all] [--fix] [--yes] [--json]
 3d printers fw status|plan|backup|apply|profiles ...
 ```
 
@@ -33,6 +35,7 @@ The other subcommands act on the machines of the fleet registry and are self-reg
 | `spools` (alias `slots`) | What is loaded where: spool, remaining interval, active-spool agreement. |
 | `load` / `unload` / `swap` | Put a spool into a printer slot, take it out, or exchange it (`--dry-run` everywhere). |
 | `filament show` / `filament set` | What each head shows it holds; write one head's filament directly. |
+| `doctor` | Diagnose (and with `--fix` repair) a printer's setup. |
 | `fw` (alias `firmware`) | Firmware / root / Klipper unlock: status, plan, backup, apply. |
 
 ```bash

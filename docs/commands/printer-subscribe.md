@@ -95,9 +95,29 @@ with the failure counters of the delivery chain per printer (below). `--json` pr
 data as an array (`dead_for_s` per entry). The delivery state lives in
 `~/.local/state/3d-cli/printer-subscriptions.json`, not in the registry.
 
+**Stale entries** ([#526](https://github.com/alex-mextner/3d-cli/issues/526)). An entry whose session is not
+live, or whose last 5 deliveries in a row failed (the state keeps `consecutive_failed`, reset by the first
+success; state written before that counter existed falls back to the lifetime `failed` total when its last
+event was a failure), is flagged:
+
+```
+s1a2b3c4d5e  session 3b1c4d2e — printers u1; kinds all; min warning
+  live: NO — no live omp session matches '3b1c4d2e' (counts as unsubscribed: the printer agent gets its alerts)
+  last delivery: 2026-10-17T09:00:00+02:00 u1 vision_spaghetti (12 delivered)
+  last error: 2026-10-23T10:00:00+02:00 no live omp session matches '3b1c4d2e'
+  STALE: session is not live and 89 deliveries failed in a row — 89 failed in total, last success 2026-10-17T09:00:00+02:00; remove it: 3d printer unsubscribe --id s1a2b3c4d5e
+```
+
+A printer with a watcher (a camera, or `watch:` settings) and **no live subscriber at warning level** also gets a
+`warning:` line naming the command to subscribe a session; the exit code stays 0. With `--json` the warnings go
+to stderr and every entry gains `stale`, `stale_reasons`, `consecutive_failed` and `last_success` (the existing keys
+and the top-level array are unchanged). `3d printers doctor PRINTER --check alert-subscribers` fails on the same
+condition and `--fix` prunes the dead entries ([printers-doctor.md](printers-doctor.md)).
+
 ```bash
 3d printer subscriptions
 3d printer subscriptions --json | jq '.[] | {id, live: .live.live, last: .state.last_ts}'
+3d printer subscriptions --json | jq '.[] | select(.stale) | {id, session, consecutive_failed, last_success}'
 ```
 
 `subscriptions test PRINTER` sends one synthetic `[TEST]` event through the subscriptions. By
@@ -183,7 +203,17 @@ pauses with `3d printer pause` if that command exists and calls the user with `t
   every live subscriber of the printer and kills the tmux session; with no live subscriber it
   exits 1 and the agent stays.
 - `3d printer agent list [--json]` — each agent: tmux session, running, live omp pid, started,
-  last alert, last error, handoff asked, the attach command. `3d printer agent stop PRINTER` kills it.
+  last alert, last error (with `N in a row` when several failed in a row), handoff asked, the attach
+  command. `3d printer agent stop PRINTER` kills it.
+- **A `--dry-run` run delivers nothing to the agent** ([#526](https://github.com/alex-mextner/3d-cli/issues/526)).
+  A watcher service refuses `--dry-run` (see "A service never holds alerts" below); a manual run still prints
+  `[3d printer alert -> temporary NAME agent]`, starts no agent and writes no `events.jsonl` / `pane.log`. The
+  agent state records it (`dry_run_ts`, `dry_run_events`; cleared by the next real delivery) and
+  `agent list` prints a `DRY-RUN:` line, so an old unit that still runs with the flag is found. Fix the unit
+  (`3d printer vision doctor`, `3d printers doctor NAME --check watch-units-dry-run`).
+  `3d printers doctor NAME --check alert-fallback-agent` fails when no live subscriber exists and the
+  agent cannot be relied on (tmux/omp missing, repeated start errors, its last alert older than the
+  watcher's newest warning+ alert).
 - Isolation: the tmux server is `3d-printer-agent` only for the real user's default state dir
   (`~/.local/state/3d-cli`, the passwd home — not `$HOME`). Any other state dir — a custom
   `XDG_STATE_HOME`, a test's tmp `HOME` — gets its own server `3d-printer-agent-<hash of the

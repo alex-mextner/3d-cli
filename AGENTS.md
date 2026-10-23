@@ -178,6 +178,26 @@ full suite on a Runpod pod instead (`runpod-run --cpu cpu3c-8 --apt openscad,ima
 uv run pytest tests -q`, skill `runpod-offload`). A slow tool is a bug: profile it
 (`py-spy record`, cProfile) and fix the algorithm before adding hardware.
 
+## A ready project 3MF exists: patch it, do not re-slice
+
+When the task is "print / reprint X on printer B" and a slicer project `.3mf` of X already
+exists (made for printer A), that file IS the source of truth for orientation, supports,
+walls and infill. Do not re-derive them from the STL. The fast path, in order:
+
+1. `3d retarget X.3mf --to B --keep N [--process PRESET] [--preset easy-release-supports] [--set K=V] --dry-run` —
+   one second, no slicer. It prints the footprint vs the bed and exits 1 if the part cannot fit
+   at any Z rotation (then, and only then, change the orientation: the minimum tilt, not a new
+   search from scratch).
+2. Same command without `--dry-run` (+ `--gcode OUT` to slice it), then the usual G-code gates
+   (`3d print-preflight`).
+
+A single-part reprint on a known printer is a fast-path job: no multi-angle renders, no
+worktree-per-experiment, no per-task slicing script; the G-code gates are the verification.
+A 0.08 mm `layer_height` with tall tree supports makes a big G-code (1,465 layers, 62 MB; the Orca run
+itself is ~26 s, so a long wall time means the job sat behind the shared heavy-run lock): pass `--process` for a
+0.20 mm preset of the target printer unless the part needs finer layers. See
+`docs/notes/2026-10-22-slow-spoon-k1se-analysis.md`.
+
 ## User proof/reporting requirements
 
 The project owner wants progress reports in Telegram for this workstream. When reporting
@@ -348,12 +368,18 @@ skills (`atomic-commits`, `ai-review-before-commit`, `pre-commit-gate`,
 - `printers` (plural) is the model registry AND the fleet-wide actions, as self-registering subs in
   `lib/printers_cli/<sub>.py` (`SUB = Sub(...)`, found by `printers_cli.discover()`; adding one edits no
   shared file): `spools|load|unload|swap|filament` (the filament in the printers, thin over printops and the
-  adapters, `--dry-run`/`--json`) and `fw` (`lib/printer_fw/` + vendor profiles as YAML data in
-  `lib/data/firmware/`: `status|plan|backup|apply`, `apply` is a dry run by default and with `--yes` needs a
-  fresh backup, the typed printer name and an idle printer; the runbooks' pitfalls are machine-checked
-  guards). All of it is fleet-driven: nothing is keyed on a printer name (`tests/test_printer_fw_parity.py`
-  scans for it), and tests use loopback fakes and an injected ssh runner, never a real device. See
-  `docs/commands/printers.md`, `printers-fw.md`, `docs/printers/firmware-profiles.md`.
+  adapters, `--dry-run`/`--json`), `doctor` (`lib/printer_doctor/`: a registry of drop-in checks in
+  `checks/*.py`, each with a severity, evidence and an optional fix of risk class safe / needs-yes /
+  manual-only; `--fix` applies only safe fixes, `--yes` the needs-yes ones, every applied fix is verified by
+  re-running its check and journalled; a new check is one module) and `fw` (`lib/printer_fw/` + vendor
+  profiles as YAML data in `lib/data/firmware/`: `status|plan|backup|apply`, `apply` is a dry run by default
+  and with `--yes` needs a fresh backup, the typed printer name and an idle printer; the runbooks' pitfalls
+  are machine-checked guards). All of it is fleet-driven: nothing is keyed on a printer name
+  (`tests/test_printer_doctor_parity.py`, `tests/test_printer_fw_parity.py` scan for it), and tests use
+  loopback fakes and an injected ssh runner, never a real device. See `docs/commands/printers.md`,
+  `printers-doctor.md`, `printers-fw.md`, `docs/printers/firmware-profiles.md`.
+- `retarget` moves a slicer project `.3mf` to another printer in seconds (target preset, one extruder, kept
+  objects, fit to the bed, `--set`/`--preset`); `slicing/{retarget_3mf,orca_presets,bed_fit}.py`, `docs/commands/retarget.md`.
 - `print-preflight` runs EVERY G-code gate (bounds, overhangs, slicer warnings, head
   sequence, mix face, mix layers, thumbnails, visible faces); a new G-code gate is added to
   `printer_ops/preflight.run_preflight`, never left as a separate step, and a gate without
