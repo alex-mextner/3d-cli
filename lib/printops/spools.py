@@ -20,9 +20,10 @@ INVARIANTS:
     is the one non-atomic window; the event log then simply lacks the change.)
   - Events: spool.received, spool.moved, slot.loaded, slot.unloaded (subject `slot:<p>/<head>`,
     payload printer/head/spool_id), spool.used (ledger), spool.measured, spool.empty; after a
-    load, slot.printer_written / slot.printer_write_failed (printops.head_sync, #400).
-  - `load` writes the printer head only AFTER the binding is committed: the printer write is slow
-    and may fail, and neither may hold the DB write lock or undo the ledger.
+    load or unload, slot.printer_written / slot.printer_write_failed (printops.head_sync, #400).
+  - `load` writes the printer head (and Moonraker's active spool) only AFTER the binding is
+    committed: the printer write is slow and may fail, and neither may hold the DB write lock or
+    undo the ledger. `unload` clears Moonraker's active spool the same way.
 """
 
 from __future__ import annotations
@@ -681,7 +682,8 @@ def load(
 ) -> dict[str, Any]:
     """Bind a spool to a printer slot (`printops_slot` + location `slot:<p>/<head>`), then — after
     the binding is committed, unless `printer_write` is False — make the printer's head show it
-    (printops.head_sync; `force_official` lets it overwrite an official RFID head). The answer's
+    (printops.head_sync; `force_official` lets it overwrite an official RFID head) and, on a
+    single-head Moonraker printer with `[spoolman]`, Moonraker's active spool. The answer's
     `printer_write` says what happened on the printer; its failure never undoes the binding."""
     slot = check_slot(printer, head)
     loc = _slot_location(ctx, slot)
@@ -763,8 +765,11 @@ def unload(
     to: str | None = None,
     gross_g: float | None = None,
     spool_id: int | None = None,
+    printer_write: bool = True,
 ) -> dict[str, Any]:
-    """Take the spool out of a slot (to `to`, else nowhere); optionally weigh it first.
+    """Take the spool out of a slot (to `to`, else nowhere); optionally weigh it first. Unless
+    `printer_write` is False, Moonraker's active spool is cleared afterwards when it is the
+    unloaded spool (printops.head_sync.release_active_spool; the answer's `printer_write`).
 
     With `gross_g` the weighing is committed BEFORE the unload (its own transaction): a
     weighing that fails (no tare, Spoolman down) leaves the slot as it was, and an unload that
@@ -811,6 +816,11 @@ def unload(
     out = view(ctx.conn, placed[-1])
     if gross_g is not None:
         out["drift_g"] = drift
+    out["printer_write"] = (
+        head_sync.release_active_spool(ctx, slot, [int(sp["id"]) for sp in placed])
+        if printer_write
+        else head_sync.Outcome(head_sync.SKIPPED, "printer write turned off for this unload")
+    ).to_dict()
     return out
 
 

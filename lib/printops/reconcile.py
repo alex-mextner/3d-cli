@@ -21,12 +21,15 @@ KINDS (evidence in anomaly.evidence):
     location_conflict  the spool's Spoolman location is set and is not this slot ("slot:u1/T3"),
                        i.e. the spool is in two places at once
   write — from the event log (printops.head_sync, #400):
-    printer_write_failed  the latest head write of a slot (`slot.printer_written` /
-                       `slot.printer_write_failed`) failed for the spool still bound there. Clears
-                       on a later successful write, when the binding changes, or — for a failed
-                       filament write — when a live reading shows the head holding the spool's
-                       material and colour (set on the touchscreen). A failed pressure-advance
-                       restore clears only by writing again (re-run `spool load`) or by unbinding.
+    printer_write_failed  the latest write of a slot (`slot.printer_written` /
+                       `slot.printer_write_failed`) failed for the spool still bound there. The
+                       head's filament and Moonraker's active spool are separate writes, each judged
+                       by its own latest event. Clears on a later successful write of the same kind,
+                       when the binding changes, or — for a failed filament write — when a live
+                       reading shows the head holding the spool's material and colour (set on the
+                       touchscreen). A failed pressure-advance restore, or a failed Moonraker
+                       active-spool write (stage `active_spool`), clears only by writing again
+                       (re-run `spool load`) or by unbinding.
   slot.mismatch is emitted with every newly opened live kind and multiple_spools.
 
 LIFECYCLE: one open/ack anomaly per dedupe_key (kind + subject + the evidence that identifies
@@ -52,6 +55,7 @@ from printops import events as ev
 from printops.color import hex_delta_e, parse_hex
 from printops.db import open_db, transaction, utc_now
 from printops.fleet import Fleet, FleetPrinter
+from printops.head_sync import ACTIVE_STAGE
 from printops.slots import LiveSlot, Reading
 from printops.spoolman import Spoolman, decode_extra
 
@@ -178,24 +182,37 @@ class WriteFailure:
     slot: str  # "u1/T3"
     spool_id: int
     error: str
-    stage: str  # "filament" (head not written) | "pressure_advance" (written, K not restored)
+    # "filament" (head not written) | "pressure_advance" (written, K not restored) |
+    # "active_spool" (Moonraker's active spool not set)
+    stage: str
     at: str
     event_id: int
 
 
+def active_key(slot: str) -> str:
+    """The `write_failures` key of Moonraker's active-spool write of `slot` ("u1/T3" is the head's)."""
+    return f"{slot}#{ACTIVE_STAGE}"
+
+
 def write_failures(conn: sqlite3.Connection) -> dict[str, WriteFailure]:
-    """Slot → its latest head write, for the slots whose latest write failed."""
+    """Slot → its latest failed head write, and `active_key(slot)` → its latest failed Moonraker
+    active-spool write (events with `write` = "active_spool"). The two writes are independent and
+    each is judged by its OWN latest event, so a good write of one never hides the other's failure."""
+    # SQLite `IS` is a null-safe `=`: events without a `write` key (head writes) form the NULL group
     rows = conn.execute(
-        "SELECT e.* FROM events e JOIN (SELECT subject, MAX(id) AS id FROM events"
-        " WHERE kind IN (?, ?) GROUP BY subject) last ON e.id = last.id WHERE e.kind = ?",
+        "SELECT e.* FROM events e JOIN (SELECT subject, MAX(id) AS id,"
+        " json_extract(payload, '$.write') IS 'active_spool' AS active"
+        " FROM events WHERE kind IN (?, ?) GROUP BY subject, active) last ON e.id = last.id"
+        " WHERE e.kind = ? ORDER BY e.id",
         (*WRITE_EVENTS, WRITE_EVENTS[1]),
     )
-    out = {}
-    for r in rows:
-        p = json.loads(r["payload"])
-        slot = str(r["subject"]).removeprefix("slot:")
-        out[slot] = WriteFailure(slot, int(p.get("spool_id") or 0), str(p.get("error") or ""),
-                                 str(p.get("stage") or "filament"), str(r["at"]), int(r["id"]))
+    out: dict[str, WriteFailure] = {}
+    for row in rows:
+        p = json.loads(row["payload"])
+        slot = str(row["subject"]).removeprefix("slot:")
+        stage = str(p.get("stage") or "filament")
+        out[active_key(slot) if stage == ACTIVE_STAGE else slot] = WriteFailure(
+            slot, int(p.get("spool_id") or 0), str(p.get("error") or ""), stage, str(row["at"]), int(row["id"]))
     return out
 
 
@@ -290,17 +307,19 @@ def compare_printer(
     live_ok = reading is not None and reading.ok
     live_by_head = {s.head: s for s in reading.slots} if reading is not None and live_ok else {}
     for b in mine:
-        f = (failures or {}).get(b.slot)
-        if f is None or f.spool_id != b.spool_id:
-            continue
-        if f.stage == "filament" and _head_matches(live_by_head.get(b.head), b, max_delta_e):
-            continue
-        add(
-            "printer_write_failed",
-            f"slot:{b.slot}",
-            {"spool": b.to_dict(), "error": f.error, "stage": f.stage, "at": f.at, "event_id": f.event_id},
-            b.spool_id,
-        )
+        for key in (b.slot, active_key(b.slot)):  # the head's write, then Moonraker's active spool
+            f = (failures or {}).get(key)
+            if f is None or f.spool_id != b.spool_id:
+                continue
+            if f.stage == "filament" and _head_matches(live_by_head.get(b.head), b, max_delta_e):
+                continue
+            add(
+                "printer_write_failed",
+                f"slot:{b.slot}",
+                {"spool": b.to_dict(), "error": f.error, "stage": f.stage, "at": f.at, "event_id": f.event_id},
+                b.spool_id,
+                *((f.stage,) if f.stage == ACTIVE_STAGE else ()),  # a head failure keeps its old identity
+            )
 
     if reading is None or not reading.ok:
         return out

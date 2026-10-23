@@ -12,8 +12,10 @@
   POST /v1/printers/{p}/slots/{s}/load    {spool_id, replace_to?, printer_write? (default true),
                                            force_official?}               write  s = head label (T3) or ams-id/n;
                                            answer + printer_write {status written|skipped|failed, reason,
-                                           wanted, before, after, pressure_advance, warnings} (#400)
-  POST /v1/printers/{p}/slots/{s}/unload  {to?, gross_g?, spool_id?}      write
+                                           wanted, before, after, pressure_advance, warnings,
+                                           active_spool {status, reason, spool_id, before, after}} (#400)
+  POST /v1/printers/{p}/slots/{s}/unload  {to?, gross_g?, spool_id?, printer_write? (default true)}  write
+                                           answer + printer_write.active_spool (cleared when it was the unloaded spool)
   GET  /v1/tares?vendor=                                                   read   the tare DB
   POST /v1/tares                       {vendor, tare_g, source, spool_kind?, net_g?, sigma_g?, note?}  write
   GET  /v1/spools/{id}/tare                                                read   the tare chain for a spool
@@ -255,6 +257,7 @@ def unload(
             to=_str(b, "to"),
             gross_g=_num(b, "gross_g"),
             spool_id=sid,
+            printer_write=_flag(b, "printer_write", default=True),
         )
 
     return _call(go)

@@ -109,7 +109,9 @@ Target package: `lib/geometry/`, with subpackages only when a real boundary appe
   items); `datalint.py` runs every `lint_<slice>.py` data rule (`lint_spools.py`) for
   `GET /v1/lint` / `3d lint --printops`. `head_sync.py` (#400): after `load`, writes the
   printer head to show the spool (`Adapter.set_head_filament`, U1 `SET_PRINT_FILAMENT_CONFIG`)
-  and puts back the current pressure-advance calibration the firmware's K reset drops.
+  and puts back the current pressure-advance calibration the firmware's K reset drops; on a
+  single-head Moonraker printer with `[spoolman]` (K1 SE) it also sets Moonraker's active spool
+  (`Adapter.set_active_spool`) and `unload` clears it (`release_active_spool`).
   Slot reconciliation (#161): `slots.py` (read-only per-adapter slot readers: U1
   `print_task_config` + `filament_detect`, K1 SE ws runout switch), `color.py` (hex → CIELAB,
   linear-light RGB, CIEDE2000; also the preflight colour gate), `reconcile.py` (Spoolman `printops_slot` bindings vs live slots, plus failed head

@@ -12,6 +12,8 @@ https://github.com/alex-mextner/3d-cli/issues/92:
   history GET  /server/history/list?limit=N&order=desc, /server/history/totals   (read-only: same)
   gcode   POST /printer/gcode/script?script=<line>   (the bed-clear ack, printer_ops/bed.py; the
                head-filament write and pressure advance below)
+  spool   GET  /server/spoolman/status          {spoolman_connected, pending_reports, spool_id}
+          GET/POST /server/spoolman/spool_id    {"spool_id": N|null}   (active spool, see below)
 
 SNAPMAKER U1: Klipper object `print_task_config` carries what each of the 4 heads holds —
   the same fields Snapmaker Orca's "Sync filament" reads (SSWCP.cpp:1658-1767):
@@ -40,6 +42,17 @@ HEAD FILAMENT WRITE (U1, issue #400): `set_head_filament` sends ONE line
   - never while printing or paused, nor when Klipper is not ready: FLOW_RESET_K would change
     K mid-print.
 
+ACTIVE SPOOL (`[spoolman]` in moonraker.conf, e.g. the rooted K1 SE): Moonraker keeps ONE active
+  Spoolman spool and books the filament the printer extrudes to it itself (`PUT /spool/<id>/use`
+  every sync_rate seconds; while Spoolman is down the reports queue in `pending_reports`).
+  `active_spool` reads it, `set_active_spool` writes it through Moonraker's own endpoint and reads
+  it back, so what gets booked follows the spool `spool load` put on the printer. A 404 on the
+  component means the printer has no `[spoolman]` (stock U1): UnsupportedOperation. The write
+  does not need Spoolman (Moonraker keeps the id in its own database and queues usage per spool
+  id, `pending_reports`, until the link is back), so it is made while `spoolman_connected` is
+  false too and the result says so. Never while a job is PRINTING: the rest of the job would be
+  booked to the new spool (a paused job is allowed: that is when a spool is swapped).
+
 UPLOAD SAFETY: `print=false` is always sent and a response claiming print_started=true is
   reported loudly. A response timeout is not a failure by itself: Moonraker has been seen
   to time out after the whole file arrived (issue #68), so the file list is re-read and a
@@ -66,6 +79,8 @@ from printer_ops.base import (
     PAUSED,
     PRINTING,
     UNKNOWN,
+    ActiveSpool,
+    ActiveSpoolWrite,
     Adapter,
     HeadFilament,
     HeadWrite,
@@ -80,6 +95,7 @@ from printer_ops.base import (
     Slot,
     UploadResult,
     http_json,
+    http_request,
     http_upload,
 )
 from printer_ops.move_bounds import Limits
@@ -570,6 +586,83 @@ class MoonrakerAdapter(Adapter):
                 ],
             )
         return float(got)
+
+    def _spoolman(self, method: str, path: str, body: dict[str, Any] | None = None, *,
+                  probe: bool = False) -> Any:
+        """One call of Moonraker's `[spoolman]` component -> its `result`. With `probe` a 404 means
+        the component is not loaded (no `[spoolman]` section): UnsupportedOperation; the calls
+        after a successful probe treat it as an error."""
+        payload = None if body is None else json.dumps(body).encode()
+        headers = None if body is None else {"Content-Type": "application/json"}
+        try:
+            status, raw = http_request(method, self.base + path, timeout=self.timeout, body=payload,
+                                       headers=headers)
+        except (OSError, http.client.HTTPException) as exc:
+            raise self._comm_error(f"{method} {path}", exc) from exc
+        if probe and status == 404:
+            raise self._unsupported("an active spool (Moonraker has no [spoolman] section in moonraker.conf)")
+        if status >= 400:
+            raise self._comm_error(f"{method} {path}", f"HTTP {status}: {raw[:300]!r}")
+        try:
+            reply = json.loads(raw or b"null")
+        except ValueError as exc:
+            raise self._comm_error(f"{method} {path}", f"non-JSON reply {raw[:200]!r}") from exc
+        return reply.get("result", reply) if isinstance(reply, dict) else reply
+
+    def _spoolman_object(self, path: str, *, probe: bool = False) -> dict[str, Any]:
+        result = self._spoolman("GET", path, probe=probe)
+        if not isinstance(result, dict):
+            raise self._comm_error(f"GET {path}", f"no result object in reply: {str(result)[:200]}")
+        return result
+
+    def _spool_id(self, result: dict[str, Any], path: str) -> int | None:
+        value = result.get("spool_id")
+        if value is None or (isinstance(value, int) and not isinstance(value, bool)):
+            return value
+        raise self._comm_error(f"GET {path}", f"spool_id {value!r} is neither an integer nor null")
+
+    def active_spool(self) -> ActiveSpool:
+        path = "/server/spoolman/status"
+        result = self._spoolman_object(path, probe=True)
+        pending = result.get("pending_reports")  # one entry per spool with usage waiting
+        return ActiveSpool(connected=result.get("spoolman_connected") is True,
+                           spool_id=self._spool_id(result, path),
+                           pending_reports=len(pending) if isinstance(pending, list) else None)
+
+    def set_active_spool(self, spool_id: int | None) -> ActiveSpoolWrite:
+        before = self.active_spool()
+        if before.spool_id == spool_id:  # already what was asked: nothing to write, even mid-job
+            return ActiveSpoolWrite(before=before.spool_id, after=before.spool_id, connected=before.connected,
+                                    pending_reports=before.pending_reports)
+        state = (self.query("print_stats").get("print_stats") or {}).get("state")
+        if state == "printing":
+            raise PrinterRefused(
+                f"{self.name} is printing: changing the active spool now would book the rest of the job "
+                f"to {'no spool' if spool_id is None else f'spool #{spool_id}'}",
+                command="printer",
+                remediation=["Do it when the job is paused or finished: the spool binding is already saved."],
+            )
+        path = "/server/spoolman/spool_id"
+        try:
+            self._spoolman("POST", path, {"spool_id": spool_id})
+        except PrinterCommError:
+            # Moonraker applies the id before it answers, so a lost answer (timeout, dropped
+            # connection) can hide a write that landed: the read-back decides, as for an upload (#68).
+            try:
+                landed = self._spool_id(self._spoolman_object(path), path) == spool_id
+            except PrinterCommError:
+                landed = False
+            if not landed:
+                raise
+        after = self._spool_id(self._spoolman_object(path), path)
+        if after != spool_id:
+            raise PrinterCommError(
+                f"{self.name}: after setting the active spool to {spool_id!r} Moonraker reports {after!r}",
+                command="printer",
+                remediation=[f"Check the printer's Spoolman state: 3d printer status {self.name}"],
+            )
+        return ActiveSpoolWrite(before=before.spool_id, after=after, connected=before.connected,
+                                pending_reports=before.pending_reports)
 
 
 __all__ = [
