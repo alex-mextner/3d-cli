@@ -213,7 +213,7 @@ def register(
         gb.shape,
     )
     H, inl = cv2.findHomography(
-        pa, pb, cv2.RANSAC, ransac_px / min(fa, fb), maxIters=5000, confidence=0.999
+        pa, pb, cv2.RANSAC, ransac_px / fb, maxIters=5000, confidence=0.999
     )
     if H is None or inl is None or not np.isfinite(H).all():
         return _empty("no_homography", (wa, ha), (wb, hb), timing, matches=len(good))

@@ -1187,7 +1187,7 @@ def detect_grid(
             again = attempt(tuned, best["polarity"])
             if again["ok"] and again["n_inliers"] >= 0.8 * best["n_inliers"]:
                 best = again
-    if not best["ok"] and expired:
+    if not best["ok"] and expired and best["reason"] in ("no_lattice", "time_budget"):
         best = {**best, "reason": "time_budget", "quality": ["time_budget"]}
     best["timing_s"] = {
         **best["timing_s"],
