@@ -40,7 +40,7 @@ optimisation, and the fp32 tower runs at ~4 ms per crop).
 - **`pull` is idempotent:** verified files are skipped (`present`).
 - **`pull` imports before downloading:** if a registered file (matching size AND sha256) already exists in a legacy location it is hard-linked
   (copied when the filesystem differs) instead of downloaded: `~/.cache/3d-cli/vision/models/research/`, `~/.cache/hsw-editor/spikes/vision/weights/`,
-  `~/.cache/hsw-editor/u2net/`, the `~/.cache/hsw-editor/hf` OWLv2 snapshot, plus any directory in `$THREED_VISION_IMPORT_DIRS` (os.pathsep separated).
+  `~/.cache/hsw-editor/u2net/`, the `~/.cache/hsw-editor/hf` OWLv2 snapshot; when `$THREED_VISION_IMPORT_DIRS` is set (os.pathsep separated, empty = none) it REPLACES that built-in list.
 - **`pull` is atomic:** downloads go to `<file>.part<pid>`, size and sha256 are checked, then `os.replace`. A failed or mismatching download leaves nothing behind.
   A file lock serialises concurrent pulls.
 - **Verification is cached:** the first lookup hashes the file; the result is stored in `<cache>/.verified.json` keyed by size + mtime, so later `model_path()` calls are a `stat()`.
