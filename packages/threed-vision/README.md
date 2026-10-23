@@ -15,7 +15,7 @@ Run any stage: `python -m threed_vision <stage> --help` (or `3d <stage>`). Exit 
 2 bad input, 3 low confidence, 127 missing dependency/model. `--json` prints exactly one JSON object to stdout.
 
 Install (venv outside the repo): `uv venv ~/.cache/3d-cli/vision/venv --python 3.12 &&
-uv pip install --python ~/.cache/3d-cli/vision/venv/bin/python -e 'packages/threed-vision[gpu,seg,fit]'`
+uv pip install --python ~/.cache/3d-cli/vision/venv/bin/python -e 'packages/threed-vision[gpu,seg,fit,bank]'`
 (torch/torchvision MUST come from the cu128 index: `uv pip install torch==2.11.0 torchvision==0.26.0 --index-url https://download.pytorch.org/whl/cu128 --extra-index-url https://pypi.org/simple --index-strategy unsafe-best-match`; a default/cu130 torch leaves `onnxruntime-gpu` (pinned 1.23.x, CUDA 12) on CPU. `3d doctor`/`python -m threed_vision info` name the missing `.so`).
 
 ## Module map
@@ -32,8 +32,15 @@ uv pip install --python ~/.cache/3d-cli/vision/venv/bin/python -e 'packages/thre
 | `recognise` | CLIP text prompts (class-mean calibrated) + bank retrieval |
 | `bank` | thumbnails/silhouettes from meshes, embedding index, query |
 | `fit_profile` | closed-form oriented rect + width profile (numpy, ms) |
-| `fit_silhouette` | soft-rasteriser template fit (torch) + CMA-ES fallback |
-| `view_check` | held-out-view IoU confidence |
+| `loft` | the lathe / flat / box loft template (numpy) and the `fit` dict schema shared by everything below |
+| `render` | independent hard cv2 rasteriser (`hard_mask`, `view_iou`), `mesh_from_fit`, `overlay` |
+| `fit_init` | closed-form 3-D start + ranked pose candidates (numpy) |
+| `soft_raster` | differentiable convex-hull-union soft rasteriser + Adam `LoftFit` (torch, imported lazily) |
+| `fit_silhouette` | `fit_object` (soft-silhouette fit, GPU->CPU) and `fit_cma` (CMA-ES second attempt) |
+| `fit` | `fit_auto`: closed form first, soft refine only if needed, CMA only for low confidence |
+| `view_check` | `check(fit, views)`: IoU of the fit in extra views, `needs_views`, single-photo sanity mode |
+| `appearance` | `sample_part_colours`: per-part (handle/shaft/head) robust Lab colours from photo + mask (numpy + OpenCV) |
+| `mesh_export` | `emit_mesh(fit, 'glb'\|'stl'\|'obj'\|'scad')`: watertight mesh in mm |
 | `register` | SIFT + RANSAC homography, relative pose, mask warp |
 
 Adding a stage command: one module `commands/<name>.py` (`NAME`, `SUMMARY`, `add_arguments`, `run`) plus a
@@ -68,3 +75,27 @@ seg.unload(); owl.unload(); clip.unload()                              # really 
 Errors are `threed_vision.errors.VisionError` subclasses with `exit_code`: `BadInput` (2), `LowConfidence` (3), `MissingDependency` (127: package,
 GPU runtime or model missing; `.render()` includes the fix such as `3d vision-models pull sam2-tiny`). GPU out-of-memory on `device="auto"` falls back
 to CPU transparently (`res["device"]` says what ran); an explicit `device="cuda"` raises instead. See `docs/commands/segment.md` for measurements.
+
+### Recognition and bank retrieval (`recognise`, `bank`)
+
+Text proposes the class, retrieval re-ranks inside it, the user confirms. Image retrieval needs a **textured** bank (colour meshes or real photos; grey renders
+retrieve badly, see `docs/commands/bank.md`); with a grey bank `metric="auto"` falls back to the silhouette descriptor.
+
+```python
+from threed_vision import bank
+from threed_vision.clip import ClipEncoder, DinoEncoder
+from threed_vision.recognise import Recogniser, load_categories
+
+bank.build_thumbnails("tools/", "bank/", view="longest-axis", px=192)        # -> bank/bank.json (+ NAME.png, NAME_sil.png); needs the `bank` extra (trimesh)
+idx_dir = bank.build_index("bank/bank.json", "bank/", clip=clip, dino=DinoEncoder("auto"))   # -> bank/ with index.npz + index.json (needs clip-b32, dinov2-s)
+index = bank.load_index(idx_dir)                                               # numpy + json only: no network, no models
+hits = bank.query(index, rgb, topk=5, mask=res["instances"][0]["mask"], clip=clip)   # [{"bank_id","name","category","score","metric","extents_mm","thumb"}] best first
+
+rec = Recogniser("auto", clip=clip, dino=DinoEncoder("auto"))                  # shares the resident encoders; Recogniser() makes and frees its own
+cats = load_categories("tool-classes.json")                                    # None = 22 workshop tools; "a,b,c"; or a file of strings / {"id","prompts"} objects
+out = rec.classify(rgb, res["instances"], cats, calibrate=True, topk=5, bank=index)
+# [{"id", "text_topk": [{"label","score","raw"}], "bank_topk": [{"bank_id","score","metric",...}], "bank_restricted_to": [...], "calibrated": True}, ...]
+```
+
+`calibrate=True` subtracts the per-class mean over the instances (needs >= 8; or pass `prior=`). `bank_topk` only contains entries of the best `rerank_classes`
+(default 3) text classes and `text_topk` never depends on the bank. See `docs/commands/recognise.md` and `docs/commands/bank.md`.

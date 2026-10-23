@@ -65,6 +65,9 @@ For a practical figure-by-figure image backplate loop, see
 |---|---|---|
 | `compare` | [compare.md](compare.md) | Segmented model/reference comparison with [IoU](GLOSSARY.md#iou), [SSIM](GLOSSARY.md#ssim)/DSSIM, and artifacts. |
 | `fit-camera` | [fit-camera.md](fit-camera.md) | Fit a camera pose to a reference by [silhouette](GLOSSARY.md#silhouette) IoU. |
+| `fit-profile` | [fit-profile.md](fit-profile.md) | Closed-form length/width profile + shape kind of a mask (numpy, ~1 ms), no optimiser. |
+| `fit-silhouette` | [fit-silhouette.md](fit-silhouette.md) | Fit lathe/flat-loft/box params + pose to calibrated mask views (closed form first, soft-silhouette/CMA-ES only if needed); `fit.json` + mesh. |
+| `view-check` | [view-check.md](view-check.md) | Render a fit into extra views with the independent rasteriser, flag IoU below 0.75, suggest missing views; single-photo sanity mode. |
 | `proxy-align` | [proxy-align.md](proxy-align.md) | Align generated proxy meshes to CAD meshes for spatial camera priors. |
 | `silhouette` | [silhouette.md](silhouette.md) | Camera-locked render to binary silhouette mask. |
 | `score` | [score.md](score.md) | Silhouette [AE](GLOSSARY.md#ae) + IoU, printed as `KEY=VALUE` lines. |
@@ -76,6 +79,8 @@ For a practical figure-by-figure image backplate loop, see
 | `register` | [register.md](register.md) | SIFT + RANSAC registration of two photos: relative pose, `baseline_ok`, mask warp A->B, repeatability IoU. |
 | `segment` | [segment.md](segment.md) | Multi-object photo segmentation (SAM2 + OWLv2 fill + CLIP background rejection) into per-instance masks (threed-vision). |
 | `detect` | [detect.md](detect.md) | Open-vocabulary object boxes for text queries (OWLv2, threed-vision). |
+| `recognise` | [recognise.md](recognise.md) | Class proposals for segmented instances: CLIP text prompts (class-mean calibrated) plus bank retrieval inside the proposed classes (threed-vision). |
+| `bank` | [bank.md](bank.md) | Reference bank for image retrieval: lie-flat thumbnails from meshes (textured), CLIP/DINOv2 embedding index, nearest-entry query (threed-vision). |
 
 ### Slicing
 

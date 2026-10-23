@@ -1,0 +1,82 @@
+{
+ "description": "Hand labels of 33 crops of tools-on-carpet-2026-10-21.heic (2000x1500) from the vision spike (RESULT.md section 3). A crop is identified by bbox_xywh + area_px of the spike's mask; `3d segment` reproduces these masks (all 33 match at bbox IoU >= 0.98 with area within 1 %), instance ids are NOT stable between runs.",
+ "image": {
+  "name": "tools-on-carpet-2026-10-21.heic",
+  "w": 2000,
+  "h": 1500
+ },
+ "match": {
+  "bbox_iou_min": 0.8,
+  "area_ratio": [
+   0.8,
+   1.25
+  ]
+ },
+ "equivalent": {
+  "drill bit case": [
+   "drill bit case",
+   "bit set"
+  ],
+  "bit set": [
+   "bit set",
+   "drill bit case",
+   "hex key set"
+  ],
+  "hex key set": [
+   "hex key set",
+   "bit set"
+  ]
+ },
+ "spike_reference": {
+  "clip_text_raw_top1": 0.42,
+  "clip_text_raw_top3": 0.79,
+  "clip_text_raw_top5": 0.88,
+  "clip_text_calibrated_top1": 0.61,
+  "clip_text_calibrated_top3": 0.79,
+  "clip_text_calibrated_top5": 0.82,
+  "dino_bank_top1": 0.21,
+  "dino_bank_top3": 0.39,
+  "dino_bank_top5": 0.39,
+  "clip_bank_top1": 0.21,
+  "clip_bank_top3": 0.3,
+  "clip_bank_top5": 0.48,
+  "silhouette_bank_top1": 0.24,
+  "silhouette_bank_top3": 0.45,
+  "silhouette_bank_top5": 0.58
+ },
+ "labels": [
+  {"label": "cordless drill", "bbox_xywh": [479, 112, 103, 80], "area_px": 2969},
+  {"label": "box", "bbox_xywh": [666, 61, 78, 110], "area_px": 7238},
+  {"label": "box", "bbox_xywh": [984, 87, 60, 106], "area_px": 5469},
+  {"label": "multimeter", "bbox_xywh": [436, 280, 110, 67], "area_px": 6700},
+  {"label": "caliper", "bbox_xywh": [597, 289, 65, 189], "area_px": 4197},
+  {"label": "box", "bbox_xywh": [704, 268, 140, 156], "area_px": 15649},
+  {"label": "tape measure", "bbox_xywh": [527, 349, 80, 85], "area_px": 5273},
+  {"label": "drill bit case", "bbox_xywh": [870, 321, 131, 125], "area_px": 10501},
+  {"label": "cordless drill", "bbox_xywh": [1068, 305, 109, 73], "area_px": 5863},
+  {"label": "cordless drill", "bbox_xywh": [1088, 398, 99, 109], "area_px": 5493},
+  {"label": "wire stripper", "bbox_xywh": [588, 580, 89, 188], "area_px": 8634},
+  {"label": "wire stripper", "bbox_xywh": [669, 570, 88, 185], "area_px": 7314},
+  {"label": "screwdriver", "bbox_xywh": [827, 582, 38, 191], "area_px": 3623},
+  {"label": "screwdriver", "bbox_xywh": [848, 518, 32, 203], "area_px": 3789},
+  {"label": "bit set", "bbox_xywh": [983, 562, 56, 131], "area_px": 6675},
+  {"label": "bit set", "bbox_xywh": [988, 535, 116, 162], "area_px": 9827},
+  {"label": "bit set", "bbox_xywh": [1042, 537, 62, 160], "area_px": 9167},
+  {"label": "bit set", "bbox_xywh": [1111, 567, 102, 129], "area_px": 11287},
+  {"label": "hex key set", "bbox_xywh": [1231, 579, 95, 129], "area_px": 10248},
+  {"label": "pliers", "bbox_xywh": [1423, 573, 89, 90], "area_px": 4526},
+  {"label": "pliers", "bbox_xywh": [1541, 595, 59, 180], "area_px": 4190},
+  {"label": "pliers", "bbox_xywh": [1425, 611, 97, 103], "area_px": 3034},
+  {"label": "box", "bbox_xywh": [1797, 628, 203, 233], "area_px": 25989},
+  {"label": "power supply", "bbox_xywh": [221, 858, 242, 118], "area_px": 22467},
+  {"label": "hammer", "bbox_xywh": [867, 847, 53, 265], "area_px": 7357},
+  {"label": "roll of tape", "bbox_xywh": [1369, 799, 64, 99], "area_px": 5618},
+  {"label": "roll of tape", "bbox_xywh": [1427, 805, 53, 88], "area_px": 3925},
+  {"label": "roll of tape", "bbox_xywh": [1465, 802, 64, 88], "area_px": 4363},
+  {"label": "roll of tape", "bbox_xywh": [1480, 815, 92, 76], "area_px": 3204},
+  {"label": "roll of tape", "bbox_xywh": [1559, 817, 110, 88], "area_px": 6105},
+  {"label": "roll of tape", "bbox_xywh": [1618, 815, 72, 98], "area_px": 4040},
+  {"label": "roll of tape", "bbox_xywh": [1656, 784, 67, 65], "area_px": 3186},
+  {"label": "tin snips", "bbox_xywh": [776, 931, 58, 200], "area_px": 4852}
+ ]
+}

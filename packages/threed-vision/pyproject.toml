@@ -22,7 +22,11 @@ gpu = ["onnxruntime-gpu==1.23.2", "tokenizers>=0.15"]
 # torch/torchvision MUST be the cu128 wheels (download.pytorch.org/whl/cu128): their nvidia-*-cu12 libraries are what
 # onnxruntime-gpu 1.23.x loads; a cu130 torch leaves ORT on CPU.
 seg = ["torch>=2.8,<2.12", "torchvision>=0.23,<0.27", "sam2>=1.1", "transformers>=4.45"]
-fit = ["torch>=2.8,<2.12", "cma>=3.3"]
+# `fit`: torch (soft-silhouette refiner), cma (CMA-ES second attempt), trimesh (glb/stl/obj export). The closed-form fit, view-check and the
+# scad export need only the core deps.
+fit = ["torch>=2.8,<2.12", "cma>=3.3", "trimesh>=4.0"]
+# Mesh loading for `3d bank thumbs` (bank thumbnails are rendered from STL/OBJ/PLY/GLB/3MF meshes); also covered by `fit`.
+bank = ["trimesh>=4.0"]
 
 [build-system]
 requires = ["hatchling"]
