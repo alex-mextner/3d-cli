@@ -54,6 +54,10 @@ from printer_ops.watch_sinks import Admission, Dispatcher, OmpLive, Runner, Sink
 REGISTRY_NAME = "subscriptions.yaml"
 STATE_NAME = "printer-subscriptions.json"
 DEFAULT_PRUNE_DAYS = 3.0   # a session dead for longer is removed from the registry (0 = never)
+# Failed deliveries in a row after which an entry is flagged stale (`3d printer subscriptions`,
+# doctor check `alert-subscribers`): the delivery state counts one per failed delivery attempt
+# and resets on the first success, so a session that was only briefly away never reaches it.
+STALE_AFTER_FAILURES = 5
 FRAME_KEYS = ("frame", "frames", "crop", "evidence")
 _NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
 
@@ -357,9 +361,10 @@ class DeliveryState:
             if ok:
                 row.update(last_ts=iso(now), last_printer=events[0].printer if events else None,
                            last_kinds=sorted({e.kind for e in events}), last_target=detail,
-                           delivered=int(row.get("delivered", 0)) + len(events))
+                           delivered=int(row.get("delivered", 0)) + len(events), consecutive_failed=0)
             else:
-                row.update(last_error=detail, last_error_ts=iso(now), failed=int(row.get("failed", 0)) + len(events))
+                row.update(last_error=detail, last_error_ts=iso(now), failed=int(row.get("failed", 0)) + len(events),
+                           consecutive_failed=consecutive_failures(row) + 1)
 
         self.update(change)
 
@@ -525,6 +530,124 @@ def counter_lines(counters: dict[str, Any], *, printers: tuple[str, ...] = ()) -
         if shown:
             out.append(f"{printer}: {', '.join(shown)}")
     return out
+
+
+# ---- health of the entries --------------------------------------------------------------------
+
+def _ts(value: Any) -> float | None:
+    try:
+        return datetime.datetime.fromisoformat(str(value)).timestamp()
+    except ValueError:
+        return None
+
+
+def consecutive_failures(row: dict[str, Any]) -> int:
+    """Failed deliveries since the last success. State written before the counter existed has only
+    the lifetime `failed` total: when its last event was a failure (no success, or an error newer
+    than the last success) that total is the best (upper) bound."""
+    n = row.get("consecutive_failed")
+    if isinstance(n, int) and not isinstance(n, bool):
+        return max(n, 0)
+    failed = row.get("failed")
+    if not isinstance(failed, int) or isinstance(failed, bool) or failed <= 0:
+        return 0
+    last_ok, last_bad = _ts(row.get("last_ts")), _ts(row.get("last_error_ts"))
+    if last_bad is None or (last_ok is not None and last_ok >= last_bad):
+        return 0
+    return failed
+
+
+@dataclass(frozen=True)
+class Health:
+    """One subscription, judged: is its session alive and are its deliveries getting through?
+
+    `stale`    the session is not live (`live` False) or its last STALE_AFTER_FAILURES+ deliveries
+               failed: alerts to it are going nowhere.
+    `prunable` stale for both reasons at once (not live now AND repeated failures): the entry of a
+               session that is gone. A dead session with few failures may come back (`omp -r` keeps
+               the session id), a failing but live one is working again: neither is pruned."""
+
+    sub: Subscription
+    live: bool | None              # None = cannot tell (tg-ctl missing/broken)
+    live_detail: str
+    consecutive_failed: int
+    failed: int
+    delivered: int
+    last_success: str | None
+    last_error: str | None
+    last_error_ts: str | None
+
+    @property
+    def failing(self) -> bool:
+        return self.consecutive_failed >= STALE_AFTER_FAILURES
+
+    @property
+    def stale(self) -> bool:
+        return self.live is False or self.failing
+
+    @property
+    def prunable(self) -> bool:
+        return self.live is False and self.failing
+
+    @property
+    def reasons(self) -> list[str]:
+        out = []
+        if self.live is False:
+            out.append("session is not live")
+        if self.failing:
+            out.append(f"{self.consecutive_failed} deliveries failed in a row")
+        return out
+
+    def takes_alerts_for(self, printer: str) -> bool:
+        """A live subscriber that takes every kind of `printer` at warning level (the level the watchers alert at):
+        one that filters by kind leaves the other kinds to the temporary agent, so it does not count."""
+        return self.live is True and self.sub.takes_over(printer)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"id": self.sub.id, "session": self.sub.session, "printers": list(self.sub.printers),
+                "min_severity": self.sub.min_severity, "live": self.live, "stale": self.stale,
+                "prunable": self.prunable, "stale_reasons": self.reasons,
+                "consecutive_failed": self.consecutive_failed, "failed": self.failed, "delivered": self.delivered,
+                "last_success": self.last_success, "last_error": self.last_error, "last_error_ts": self.last_error_ts}
+
+
+def healths(subs: list[Subscription], live: dict[str, dict[str, Any]], state: dict[str, Any]) -> list[Health]:
+    """`liveness()` + the delivery state, per entry."""
+    out = []
+    for s in subs:
+        found = state.get(s.id)
+        row: dict[str, Any] = found if isinstance(found, dict) else {}
+        info = live.get(s.id, {"live": None, "detail": "unknown"})
+        out.append(Health(s, info["live"], str(info.get("detail") or ""), consecutive_failures(row),
+                          int(row.get("failed") or 0), int(row.get("delivered") or 0),
+                          row.get("last_ts") or None, row.get("last_error") or None, row.get("last_error_ts") or None))
+    return out
+
+
+def unwatched(printers: list[str], health: list[Health]) -> list[str]:
+    """The printers of `printers` with no live subscriber at warning level (their warning+ alerts go to
+    the temporary agent, or nowhere). Only meaningful when liveness is known for at least one entry."""
+    return [p for p in printers if not any(h.takes_alerts_for(p) for h in health)]
+
+
+def has_watcher(device: Any) -> bool:
+    """The printer has a watcher to subscribe to: a camera (vision unit) or `watch:` settings (watch unit)."""
+    from errors import ThreeDError
+    from printer_ops.camera import camera_spec
+
+    if getattr(device, "watch", None):
+        return True
+    try:
+        return camera_spec(device).present
+    except ThreeDError:
+        return False
+
+
+def read_health(*, registry: Registry | None = None, state: DeliveryState | None = None,
+                live: OmpLive | None = None) -> list[Health]:
+    """Every entry of the registry judged now (tg-ctl is asked once)."""
+    subs = (registry or Registry()).load()
+    return healths(subs, liveness(subs, live or OmpLive()), (state or DeliveryState()).read()["subscriptions"])
 
 
 # ---- messages -------------------------------------------------------------------------------
@@ -810,6 +933,13 @@ subscriptions: each entry, whether its session is live now (tg-ctl omp-live stat
   `prune_after_days` (top-level key of subscriptions.yaml, default 3, 0 = never) with a log
   line; the last removals and the failure counters of the delivery chain per printer
   (subscriber_dead, agent_start_failed, fallback_tg_sent, ...) are listed at the end.
+  An entry is flagged STALE when its session is not live or its last 5 deliveries in a row failed
+  (with the failed count, the last success and the `unsubscribe --id` to remove it). A printer
+  with a watcher (a camera or `watch:` settings) and no live subscriber at warning level gets a
+  `warning:` line (stderr with --json); the exit code stays 0. --json adds `stale`,
+  `stale_reasons`, `consecutive_failed` and `last_success` to every entry.
+  `3d printers doctor PRINTER --check alert-subscribers` fails on the same condition and can
+  prune the dead entries.
   test PRINTER   send one synthetic [TEST] event through the subscriptions: prints who gets
                  what (dry run); --send really delivers it to the live subscribers (never to
                  the temporary agent or tg); --kind (default vision_spaghetti), --severity
@@ -973,6 +1103,27 @@ def cmd_unsubscribe(argv: list[str]) -> int:
     return 0
 
 
+def _unwatched_printers(health: list[Health]) -> list[str]:
+    """Printers with a watcher (camera or `watch:` settings) and no live subscriber at warning level.
+    Empty when liveness is unknown (tg-ctl missing: nothing can be said) or the devices cannot be read."""
+    from printer_ops.devices import load_devices
+
+    if health and all(h.live is None for h in health):
+        return []
+    try:
+        devices = load_devices()
+    except ThreeDError as exc:
+        _log(f"cannot read the printer devices to look for unwatched printers: {exc.message}")
+        return []
+    return unwatched([n for n, d in sorted(devices.items()) if d.access != "offline" and has_watcher(d)], health)
+
+
+def _stale_text(h: Health) -> str:
+    last = h.last_success or "never"
+    return (f"STALE: {' and '.join(h.reasons)} — {h.failed} failed in total, last success {last}"
+            f"; remove it: 3d printer unsubscribe --id {h.sub.id}")
+
+
 def cmd_list(argv: list[str]) -> int:
     _, opts = parse(argv, {"--json"}, "subscriptions")
     reg = Registry()
@@ -981,14 +1132,24 @@ def cmd_list(argv: list[str]) -> int:
     full = DeliveryState().read()
     state = full["subscriptions"]
     now = time.time()
+    health = healths(subs, live, state)
+    by_id = {h.sub.id: h for h in health}
+    missing = _unwatched_printers(health)
+    warnings = [f"warning: {p} has a watcher but no live subscriber at warning level: its alerts go to the temporary "
+                f"printer agent or nowhere. Subscribe a live session: 3d printer subscribe --session ID --printer {p}"
+                for p in missing]
     if opts.get("--json"):
         print(json.dumps([{**s.to_dict(), "live": live[s.id], "state": state.get(s.id, {}),
-                           "dead_for_s": dead_age_s(state.get(s.id), now)} for s in subs],
+                           "dead_for_s": dead_age_s(state.get(s.id), now),
+                           "stale": by_id[s.id].stale, "stale_reasons": by_id[s.id].reasons,
+                           "consecutive_failed": by_id[s.id].consecutive_failed,
+                           "last_success": by_id[s.id].last_success} for s in subs],
                          ensure_ascii=False, indent=1))
+        for w in warnings:  # stdout stays the array consumers already parse
+            print(w, file=sys.stderr)
         return 0
     if not subs:
         print(f"no subscriptions (registry: {reg.path})\nAdd one: 3d printer subscribe --session ID --printer NAME")
-        return 0
     for s in subs:
         st = state.get(s.id, {})
         print(f"{s.id}  {s.target} — {s.filters()}")
@@ -1002,13 +1163,18 @@ def cmd_list(argv: list[str]) -> int:
             days = reg.prune_after_days()
             print(f"  STALE: dead since {st.get('dead_since')} ({age / 3600:.1f} h); "
                   + (f"removed automatically after {days:g} d" if days > 0 else "automatic removal is off"))
+        elif by_id[s.id].stale:  # dead sessions are described above; this is a live one that keeps failing
+            print(f"  {_stale_text(by_id[s.id])}")
         if s.note:
             print(f"  note: {s.note}")
-    print(f"registry: {reg.path}")
+    if subs:
+        print(f"registry: {reg.path}")
     for p in full["pruned"][-5:]:
         print(f"pruned {p.get('pruned')}: {p.get('id')} (session {p.get('session')}, dead since {p.get('dead_since')})")
     for line in counter_lines(full["counters"]):
         print(f"delivery failures {line}")
+    for w in warnings:
+        print(w)
     return 0
 
 
@@ -1066,7 +1232,8 @@ def run(sub: str, argv: list[str]) -> int:
     return cmd_list(argv[1:] if argv and argv[0] == "list" else argv)
 
 
-__all__ = ["CHAIN_COUNTERS", "DEFAULT_PRUNE_DAYS", "USAGE", "DeliveryState", "Registry", "RegistryError",
-           "SubscriptionSink", "Subscription", "agent_message", "alert_text", "atomic_write", "counter_lines",
-           "dead_age_s", "flock", "fresh_frame_hint", "frames_of", "has_vision", "iso", "liveness", "make", "names",
-           "ordered", "parse", "run", "sub_id"]
+__all__ = ["CHAIN_COUNTERS", "DEFAULT_PRUNE_DAYS", "STALE_AFTER_FAILURES", "USAGE", "DeliveryState", "Health",
+           "Registry", "RegistryError", "SubscriptionSink", "Subscription", "agent_message", "alert_text", "atomic_write",
+           "consecutive_failures", "counter_lines", "dead_age_s", "flock", "fresh_frame_hint", "frames_of", "has_vision",
+           "has_watcher", "healths", "iso", "liveness", "make", "names", "ordered", "parse", "read_health", "run", "sub_id",
+           "unwatched"]
