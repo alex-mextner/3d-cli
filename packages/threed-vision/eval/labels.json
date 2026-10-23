@@ -78,5 +78,12 @@
   {"label": "roll of tape", "bbox_xywh": [1618, 815, 72, 98], "area_px": 4040},
   {"label": "roll of tape", "bbox_xywh": [1656, 784, 67, 65], "area_px": 3186},
   {"label": "tin snips", "bbox_xywh": [776, 931, 58, 200], "area_px": 4852}
- ]
+ ],
+  "extra_labels": {
+    "description": "Two objects annotated by eye on the photo, independent of any mask (3d-cli #479): the blue 12-inch adjustable wrench and the hammer with its head (head + handle, one object). The default pipeline returns neither as one instance. `segment_recall.py` scores them separately.",
+    "labels": [
+      {"label": "adjustable wrench", "bbox_xywh": [900, 853, 70, 288]},
+      {"label": "hammer (head + handle)", "bbox_xywh": [833, 830, 100, 282]}
+    ]
+  }
 }

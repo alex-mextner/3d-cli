@@ -97,9 +97,12 @@ def _write_masks(
     from ..outputs import write_result
 
     seg = Segmenter(method="sam2", fill="none", reject_bg=False, device=args.device)
-    reset_peak()
     t0 = time.perf_counter()
     try:
+        # no box, no SAM2: an empty result must not need the weights (they may not be pulled) nor a CUDA context
+        if det_res["boxes"]:
+            seg.load()
+            reset_peak(seg.device)
         instances = seg.masks_for_boxes(rgb, det_res["boxes"])
         elapsed = round(time.perf_counter() - t0, 2)
         doc = write_result(
@@ -111,7 +114,7 @@ def _write_masks(
                 "method": "owlv2+sam2-box",
                 "device": seg.device,
                 "timing_s": {"masks": elapsed, "total": elapsed},
-                "vram_mb": peak_mb(),
+                "vram_mb": peak_mb(seg.device),
             },
         )
     finally:

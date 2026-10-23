@@ -9,24 +9,38 @@ find one to four blobs on this kind of photo; SAM2 automatic masks alone miss th
 
 ## Pipeline
 
-1. **amg** — SAM2.1-tiny automatic mask generator (`points_per_side` grid, `points_per_batch` 32, pred-IoU >= 0.8, stability >= 0.9, box NMS 0.6).
-2. **detect** — OWLv2 open-vocabulary boxes for `--queries`.
-3. **fill** — SAM2 *box prompts* for every OWLv2 box that is less than 60 % covered by existing masks and whose new mask overlaps existing ones by < 30 %.
-4. **bg_reject** — CLIP ViT-B/32 zero-shot: masks whose crop is more "carpet / parquet / cabinet / shadow / foot / bin / cable" than "tool / box / tape ..." are dropped (`bg_prob >= 0.5`).
+1. **amg** — SAM2.1-tiny grid of point prompts (`points_per_side` per side, pred-IoU >= 0.8, stability >= 0.9, box NMS 0.6). Two implementations, `--quality`:
+   * `accurate`: the stock `SAM2AutomaticMaskGenerator`: every candidate mask (3 per grid point) is upsampled to the photo and scored there.
+   * `fast`: the same prompts, but the pred-IoU / stability / NMS filters run on the decoder's own 256x256 logits, the decoder runs in fp16 on CUDA, and only the
+     surviving masks are upsampled to the photo (`threed_vision.sam_grid`). With `--grid-gate` (default 0.1) OWLv2 runs *first* and only the grid points next to
+     a patch with OWLv2 objectness >= the gate are decoded: the bare carpet is never prompted (and so produces no carpet patches).
+2. **detect** — OWLv2 open-vocabulary boxes for `--queries` (`--owl-tiles N` adds N x N overlapping tiles; measured below: it does not help).
+3. **fill** — SAM2 *box prompts* for every OWLv2 box that is less than 60 % covered by existing masks and whose new mask overlaps existing ones by < 30 % (`fast`: one batched decoder pass).
+4. **bg_reject** — CLIP ViT-B/32 zero-shot: masks whose crop is more like a background prompt (`--bg-prompts`, default "carpet / parquet / cabinet / shadow / foot / bin / cable") than like a foreground prompt (`--fg-prompts`, default "tool / box / tape ...") are dropped (`bg_prob >= 0.5`).
 5. an area filter always applies: `--min-area` (150 px) .. `--max-area-frac` (0.03 of the image).
+
+`--quality` defaults per device: **`accurate` on cuda** (the pre-existing default, unchanged) and **`fast` on cpu** (the stock generator needs 85-92 s there, and the
+boxes-only legacy path reproduced 41 % of the GPU masks). `fast` also processes the full-resolution photo on CPU: SAM2 resizes whatever it gets to 1024x1024 anyway, so
+the former 1024 px downscale saved nothing and cost mask detail.
 
 `--method u2net` is the single-object fast path (u2net matte, largest component; 0.05 s GPU / 0.5 s CPU).
 
 ## Usage
 
 ```
-3d segment <image> -o DIR [--method sam2|sam2-dense|u2net] [--fill owlv2|none] [--queries "a,b,c"]
-           [--reject-bg|--no-reject-bg] [--points-per-side N] [--max-side PX] [--min-area PX]
-           [--max-area-frac F] [--device auto|cuda|cpu] [--json]
+3d segment <image> -o DIR [--method sam2|sam2-dense|u2net] [--quality fast|accurate] [--fill owlv2|none] [--queries "a,b,c"]
+           [--reject-bg|--no-reject-bg] [--bg-prompts "a,b"|FILE] [--fg-prompts "a,b"|FILE] [--points-per-side N]
+           [--grid-gate F] [--owl-tiles N] [--max-side PX] [--min-area PX] [--max-area-frac F]
+           [--device auto|cuda|cpu] [--json]
 ```
 
 ```bash
-3d segment tools.jpg -o seg/ --json                      # default pipeline
+3d segment tools.jpg -o seg/ --json                      # default pipeline (accurate on cuda, fast on cpu)
+3d segment tools.jpg -o seg/ --quality fast              # ~1.9 s warm on the RTX 4060 instead of ~6 s, same photo
+3d segment tools.jpg -o seg/ --quality fast --grid-gate 0   # decode every grid point (no OWLv2-gated prompts)
+3d segment bench.jpg -o seg/ --bg-prompts "a photo of a steel workbench,a photo of a pegboard" --fg-prompts "a photo of a hand tool"
+3d segment bench.jpg -o seg/ --bg-prompts bg.txt          # one prompt per line, # comments
+3d segment tools.jpg -o seg/ --owl-tiles 2               # OWLv2 on 2x2 tiles too (measured: more fragments, no gain)
 3d segment tools.jpg -o seg/ --fill none --no-reject-bg  # AMG only
 3d segment one-tool.jpg -o seg/ --method u2net           # one tool on a plain background
 3d segment tools.heic -o seg/ --device cpu --max-side 1024
@@ -38,15 +52,23 @@ find one to four blobs on this kind of photo; SAM2 automatic masks alone miss th
 | flag | meaning |
 |---|---|
 | `-o, --out DIR` | output directory (required) |
-| `--method` | `sam2` AMG grid (default), `sam2-dense` 64x64 grid with batch 16, `u2net` one salient object |
+| `--method` | `sam2` grid (default), `sam2-dense` 64x64 grid (runs its grid on CPU too), `u2net` one salient object |
+| `--quality` | `fast` or `accurate`; default `accurate` on cuda, `fast` on cpu (see Pipeline). Ignored by `u2net` |
+| `--grid-gate F` | `fast` only: decode only grid points near a patch whose OWLv2 objectness is >= F (0 = every point; default 0.1; needs `--fill owlv2`) |
+| `--owl-tiles N` | also run OWLv2 on an N x N grid of 25 %-overlapping tiles (1..4, default 1); boxes cut by a tile edge are dropped |
+| `--bg-prompts`, `--fg-prompts` | CLIP prompts, a comma list or a file (one per line, `#` comments); replace the defaults. Both lists must be non-empty while background rejection is on |
 | `--fill` | `owlv2` (default) add SAM2 masks for OWLv2 boxes the AMG missed; `none` |
 | `--queries` | OWLv2 text queries, comma separated (default: hand tool, power tool, box, tube of glue, tape roll, pliers, screwdriver) |
 | `--reject-bg` / `--no-reject-bg` | CLIP background rejection (default on) |
-| `--points-per-side N` | AMG grid per side. Default 32 on GPU; on CPU `0` (no grid, OWLv2 boxes only) or 16 with `--fill none` |
-| `--max-side PX` | downscale the longest side before SAM2 (`0` = never). Default: none on GPU, 1024 on CPU. Masks are always returned at the input resolution |
+| `--points-per-side N` | grid per side, `0` (OWLv2 boxes only, needs `--fill owlv2`) or 1..128. Default 32 (64 for `sam2-dense`); `--quality accurate` on CPU: `0`, or 16 with `--fill none` |
+| `--max-side PX` | downscale the longest side before SAM2 (`0` = never, else 64..8192). Default: none, except 1024 for `--quality accurate` on CPU. Masks are always returned at the input resolution |
 | `--min-area`, `--max-area-frac` | area filter (150 px, 0.03) |
 | `--device` | `auto` picks cuda only when >= 2000 MB VRAM is free (the card is shared), else cpu; GPU out-of-memory falls back to CPU; explicit `cuda` never falls back |
 | `--json` | print exactly one JSON object (the `instances.json` content) |
+
+Option values are validated before any model loads: an out-of-range `--max-side` / `--points-per-side` / `--owl-tiles` / `--grid-gate`, empty prompt lists, `--points-per-side 0 --fill none` exit 2 with the value named.
+A `--device cpu` run never initialises CUDA (no `torch.cuda` call reaches a driver; `tests/test_vision_segment.py::test_cpu_runs_never_touch_cuda`); `auto` still falls back to CPU when
+the GPU runs out of memory, including when onnxruntime's CUDA provider cannot initialise for CLIP.
 
 Exit codes: 0 ok, 2 bad input, 127 a model or package is missing (the message names `3d vision-models pull <name>`; models are never downloaded implicitly).
 
@@ -66,29 +88,57 @@ Exit codes: 0 ok, 2 bad input, 127 a model or package is missing (the message na
 `stability` is SAM2's stability score for `amg` and the SAM2 predicted IoU for prompted masks. `timing_s.load` appears only when the
 models were loaded during that call. `vram_mb` is the torch peak allocation (ONNX CLIP adds ~0.5 GB outside torch's counter).
 
-## Measured (carpet photo 2000x1500, RTX 4060 8 GB shared, load average 5-10)
+## Measured (carpet photo 2000x1500, RTX 4060 8 GB shared, load average 4-7)
 
-| run | time | instances | notes |
+Scored by `packages/threed-vision/eval/segment_recall.py` (committed): `warm` = median of 3 further `run()` calls, `cold` = the first `run()` of a fresh `Segmenter` (models built inside it),
+**recall 33** = share of the 33 hand labels of `eval/labels.json` matched at bbox IoU >= 0.5, **parity** = share of the 98 masks of the `accurate` GPU run reproduced at mask IoU >= 0.7.
+The labels were made on the `accurate` GPU output, so that row is 100 % by construction and every other row can only lose: read recall as "how close to the accurate result", not as ground truth.
+
+```
+python packages/threed-vision/eval/segment_recall.py tools.heic --device cuda --warm 3 --masks-dir m/ --overlay-dir ov/ \
+    --variant accurate='{"quality":"accurate"}' --variant fast='{"quality":"fast"}'
+python packages/threed-vision/eval/segment_recall.py tools.heic --device cpu --reference m/accurate.npz --variant cpu='{}'
+```
+
+| run | cold | warm | instances | recall 33 | parity | notes |
+|---|---|---|---|---|---|---|
+| GPU `--quality accurate` (the GPU default) | 11.5 s | 5.7 s | 98 | 100 % | 100 % | amg 4.2, detect 0.2, fill 0.8, bg_reject 1.1 |
+| **GPU `--quality fast`** | 2.2-7.6 s | **1.8 s** | 91 | 91 % (30/33) | 89 % | amg ~0.6, detect 0.2, fill 0.3, bg_reject 0.8; torch peak ~1.7 GB |
+| CPU, previous default (boxes only on a 1024 px copy; now `--quality accurate` on CPU) | 11.5 s | 9.0 s | 65 | 39 % | 41 % | |
+| **CPU default (`fast`, full resolution)** | 49.9 s | **38.7 s** | 93 | 91 % | **89 %** | 4 OMP threads, load ~6 |
+
+Variants scored by the same script (GPU; `wrench / hammer` = the two by-eye labels found as one instance; full tables in the notes):
+
+| variant | warm | recall 33 | wrench / hammer | parity |
+|---|---|---|---|---|
+| accurate (GPU default) | 5.7 s | 100 % | no / no | 100 % |
+| fast (default, gate 0.1) | 1.8 s | 91 % | no / no | 89 % |
+| fast, `--grid-gate 0` | 2.7 s | 91 % | no / no | 91 % |
+| fast, `--grid-gate 0.3` | 1.1 s | 52 % | no / yes | 61 % |
+| fast, `--owl-tiles 2` / `3` | 2.3 / 2.5 s | 88 % | yes / no | 80 / 83 % |
+| accurate, `--owl-tiles 2` | 6.4 s | 94 % | yes / no | 91 % |
+| fast, extra OWLv2 queries (wrench, hammer, spanner, tweezers, hex key) | 1.8 s | 91 % | no / no | 89 % |
+
+The three labels `fast` misses (two `pliers`, one `roll of tape`) are objects it returns whole where the label marks a part. `fast` finds neither the blue adjustable wrench nor the
+hammer head (proof image `docs/img/segment-hammer-wrench.jpg`: photo / accurate overlay / fast overlay; `--owl-tiles 2` finds the wrench but fragments other objects). A `--device cpu` run
+needs ~8 s more on a cold process (imports). On a saturated machine (load 23) expect 2-3x the CPU times.
+
+What was tried, the profile, the variant tables (grid size, gate, tiles, queries, `--max-side`), the CPU parity table, the second-background prompt runs and the 2026-10-22 measurements are in
+[docs/notes/segment-fast-measurements-2026-10-23.md](../notes/segment-fast-measurements-2026-10-23.md).
+
+Second background, measured with `--quality fast` (candidates CLIP rejected, `n_bg_rejected`; `--bg-prompts "a photo of a wall,a photo of a honeycomb pegboard,a photo of a floor,a photo of a rug,a photo of a shadow"`):
+
+| photo | default prompts | custom prompts | `--no-reject-bg` |
 |---|---|---|---|
-| GPU default, cold (loads SAM2, OWLv2, CLIP) | 13.8-15.4 s | 98 (65 amg + 33 owl) | torch peak 1935 MB |
-| GPU default, warm (models resident) | 6.8-7.0 s | 98 | amg 4.07, detect 0.18, fill 0.77-0.80, bg_reject 1.07-1.19; torch peak 2255 MB |
-| **CPU default**, cold | 23.8 s | 65 (all `owl`) | load 0.8, detect 9.0, fill 8.1 (includes the SAM2 image embedding), bg_reject 3.8 |
-| **CPU default**, warm | 15.8 s | 65 | detect 5.6, fill 7.4, bg_reject 2.1 |
-| `bin/3d segment` end to end, GPU (cold process, load average ~8, 3.9 GB held by other processes) | 27.8 s wall (`timing_s.total` 19.4) | 98 | nvidia-smi peak +2.5 GB for the whole process (torch CUDA context + ONNX CLIP) |
-| `bin/3d segment --device cpu` end to end, **load average 23** | 70 s wall (`timing_s.total` 64.7: detect 17.5, fill 34.2, bg_reject 7.3) | 65 | the same CPU run is 2-3x slower on a saturated machine |
-| CPU `--fill none` (16x16 AMG on a 1024 px copy) | 36.1 s | 29 | AMG 30.1 s: not worth it |
-| CPU 32x32 AMG at full resolution (spike) | 85-92 s | 87 | unacceptable, never the default |
-| `--method u2net` | 0.046 s GPU / 0.50 s CPU (warm) | 1 | one salient object only |
+| IMG_4934 (1536x1152, another carpet photo; the ticket's "wall photo" is IMG_4937) | 18 rejected, 85 instances | 9 rejected, 95 instances | 0, 101 |
+| IMG_4937 (the honeycomb wall, almost empty) | 14 rejected, 33 instances | 14 rejected, 33 instances | 0, 46 |
 
-Why the CPU default skips the AMG grid: the grid costs ~0.12 s per prompt point on CPU, OWLv2 (fixed 960 px input, ~6 s) plus one SAM2 box
-prompt per box (~0.06 s each when batched through one image embedding) is cheaper and finds the tools the grid is sampling for.
-Quality (IoU >= 0.7 match against the GPU masks): the CPU default reproduces 41 % of the 98 GPU masks and 62 % of its own masks have a GPU
-counterpart; it has fewer carpet patches but merges neighbouring tape rolls / hammer+wrench and drops the multimeter. Use a GPU for
-production quality; the CPU path is the "no GPU, still usable" fallback.
+**Choosing background prompts for another surface:** list what the surface and its shadows look like as `--bg-prompts` ("a photo of a steel workbench", "a photo of a pegboard"), keep `--fg-prompts`
+about tools, run once with `--no-reject-bg` and once with your prompts and compare `n_bg_rejected` in `instances.json` and the overlays. CLIP scores a *crop* of each mask (`keep_bg=True`: the whole bounding box),
+so a large irregular patch whose box contains neighbouring tools scores low (the 51 000 px carpet patch has `bg_prob` 0.09) and survives the 0.5 threshold.
 
-Known residual errors (GPU default overlay): 3-4 carpet / floor patches survive background rejection, the hammer head is split from its
-handle, small pliers merge, some thin tools (tweezers, hex keys, the blue wrench) are missed. The UI is expected to fix those with
-click-to-add (`Segmenter.add_by_point` / `add_by_box`), merge and delete.
+Known residual errors (GPU `accurate` overlay): 3-4 carpet / floor patches survive background rejection (fewer with `fast`), the hammer head is split from its handle, small pliers merge, the adjustable
+wrench and some thin tools (tweezers, hex keys) are missed. The UI is expected to fix those with click-to-add (`Segmenter.add_by_point` / `add_by_box`), merge and delete.
 
 ## Python API (what a service calls)
 
@@ -96,10 +146,12 @@ click-to-add (`Segmenter.add_by_point` / `add_by_box`), merge and delete.
 from threed_vision import io
 from threed_vision.segment import Segmenter
 
-seg = Segmenter(device="auto")            # method="sam2", fill="owlv2", reject_bg=True; auto = cuda with >= 2000 MB free, else cpu
+seg = Segmenter(device="auto")            # method="sam2", fill="owlv2", reject_bg=True, quality=None (accurate on cuda, fast on cpu); auto = cuda with >= 2000 MB free, else cpu
+# Segmenter(quality="fast", bg_prompts=[...], fg_prompts=[...], owl_tiles=2, grid_gate=0.1) - every keyword is validated in the constructor (BadInput, exit 2 on the CLI)
 seg.load()                                # optional: weights stay resident until seg.unload()
 rgb = io.load_rgb("tools.heic")           # uint8 HxWx3, EXIF-upright
-res = seg.run(rgb, progress=lambda stage, frac: print(stage, frac))   # stages: load, amg, detect, fill, bg_reject
+res = seg.run(rgb, progress=lambda stage, frac: print(stage, frac))   # stages: load, amg, detect, fill, bg_reject (detect runs before amg when the fast gate is on)
+# res also carries "quality", "n_amg", "n_owl_added", "n_bg_rejected", "points_per_side", "process_scale", "timing_s", "vram_mb"
 for inst in res["instances"]:             # id, source, bbox_xywh, area_px, bg_prob, stability, mask (np.bool_ HxW)
     ...
 insts = seg.add_by_point(rgb, res["instances"], [[640, 410]])          # click-to-add (new list; new one is last, id = max+1)

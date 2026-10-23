@@ -59,6 +59,42 @@ def boxes_from_square(cxcywh_norm: np.ndarray, h: int, w: int) -> np.ndarray:
     return xyxy
 
 
+def tile_windows(
+    h: int, w: int, n: int, overlap: float
+) -> list[tuple[int, int, int, int]]:
+    """Pass windows (x0, y0, x1, y1): the whole image first, then (for n > 1) an n x n grid whose neighbours overlap by `overlap`."""
+    wins = [(0, 0, w, h)]
+    if n <= 1:
+        return wins
+    tw, th = w / (n - (n - 1) * overlap), h / (n - (n - 1) * overlap)
+    for j in range(n):
+        for i in range(n):
+            x0, y0 = round(i * tw * (1 - overlap)), round(j * th * (1 - overlap))
+            wins.append((x0, y0, min(w, round(x0 + tw)), min(h, round(y0 + th))))
+    return wins
+
+
+def cut_by_inner_edge(
+    xyxy: np.ndarray,
+    win: tuple[int, int, int, int],
+    hw: tuple[int, int],
+    tol: float = 3.0,
+) -> np.ndarray:
+    """Bool per box: it touches a side of the tile window that is not also a side of the image (the object continues beyond it)."""
+    x0, y0, x1, y1 = win
+    h, w = hw
+    cut = np.zeros(len(xyxy), bool)
+    if x0 > 0:
+        cut |= xyxy[:, 0] < x0 + tol
+    if y0 > 0:
+        cut |= xyxy[:, 1] < y0 + tol
+    if x1 < w:
+        cut |= xyxy[:, 2] > x1 - tol
+    if y1 < h:
+        cut |= xyxy[:, 3] > y1 - tol
+    return cut
+
+
 def select_boxes(
     xyxy: np.ndarray,
     scores: np.ndarray,
@@ -159,6 +195,65 @@ class OwlDetector:
         with torch.inference_mode():
             return self._model(**inp)
 
+    def _boxes(
+        self,
+        rgb: np.ndarray,
+        qs: list[str],
+        threshold: float,
+        tiles: int,
+        overlap: float,
+    ) -> tuple[np.ndarray, np.ndarray, list[str], np.ndarray]:
+        """Candidate boxes (xyxy px of `rgb`, scores, labels) and the whole-image objectness map.
+
+        The boxes come from the whole image plus, for `tiles` > 1, a tiles x tiles grid. OWLv2 sees a 960 px square whatever
+        the input size, so a tile of a 2000 px photo is magnified ~2x: thin or small tools that fall under the detector's
+        patch size in the full pass get boxes from the tile pass.
+        """
+        import torch
+
+        h, w = rgb.shape[:2]
+        boxes_all: list[np.ndarray] = []
+        scores_all: list[np.ndarray] = []
+        labels_all: list[str] = []
+        objectness = np.zeros((1, 1), np.float32)
+        for k, (x0, y0, x1, y1) in enumerate(tile_windows(h, w, tiles, overlap)):
+            out = self._forward(rgb[y0:y1, x0:x1], qs)
+            if k == 0:  # the first window is the whole image
+                side = int(round(out.objectness_logits.shape[-1] ** 0.5))
+                objectness = (
+                    torch.sigmoid(out.objectness_logits[0].float())
+                    .reshape(side, side)
+                    .cpu()
+                    .numpy()
+                )
+            logits = out.logits[0].float()  # (patches, n_queries)
+            sc, lab_idx = torch.sigmoid(logits).max(dim=-1)
+            keep = (sc >= threshold).nonzero().flatten()
+            if not len(keep):
+                continue
+            norm = out.pred_boxes[0].float()[keep].cpu().numpy()
+            xyxy = boxes_from_square(norm, y1 - y0, x1 - x0) + np.array(
+                [x0, y0, x0, y0], np.float32
+            )
+            sc_np = sc[keep].cpu().numpy()
+            labs = [qs[int(i)] for i in lab_idx[keep].cpu().numpy()]
+            if k > 0:
+                # a tile: a box cut by a tile edge is a fragment, the whole-image pass has the whole object
+                ok = ~cut_by_inner_edge(xyxy, (x0, y0, x1, y1), (h, w))
+                xyxy, sc_np = xyxy[ok], sc_np[ok]
+                labs = [lb for lb, keep_it in zip(labs, ok, strict=True) if keep_it]
+            boxes_all.append(xyxy)
+            scores_all.append(sc_np)
+            labels_all += labs
+        if not boxes_all:
+            return np.zeros((0, 4), np.float32), np.zeros(0, np.float32), [], objectness
+        return (
+            np.concatenate(boxes_all),
+            np.concatenate(scores_all),
+            labels_all,
+            objectness,
+        )
+
     def detect(
         self,
         rgb: np.ndarray,
@@ -166,7 +261,12 @@ class OwlDetector:
         threshold: float = 0.15,
         nms: float = 0.5,
         max_area_frac: float = 0.05,
+        tiles: int = 1,
+        tile_overlap: float = 0.25,
+        with_objectness: bool = False,
     ) -> dict[str, Any]:
+        """Boxes for `queries`; `with_objectness` adds OWLv2's class-agnostic objectness map ((g, g) float32 in 0..1 over the image
+        padded to a square: row / column i covers [i, i+1) * max(H, W) / g px) under `"objectness"`."""
         if (
             not isinstance(rgb, np.ndarray)
             or rgb.ndim != 3
@@ -174,41 +274,41 @@ class OwlDetector:
             or rgb.dtype != np.uint8
         ):
             raise BadInput("detect expects an HxWx3 uint8 RGB array")
+        if not (1 <= tiles <= 4) or not (0.0 <= tile_overlap < 0.5):
+            raise BadInput(
+                f"tiles={tiles} / tile_overlap={tile_overlap} out of range",
+                "tiles 1..4 (1 = whole image only), tile_overlap in [0, 0.5)",
+            )
         qs = list(queries) if queries else list(DEFAULT_QUERIES)
         t0 = time.perf_counter()
         self.load()
+        found: tuple[np.ndarray, np.ndarray, list[str], np.ndarray] | None
         try:
-            out = self._forward(rgb, qs)
+            found = self._boxes(rgb, qs, threshold, tiles, tile_overlap)
         except Exception as exc:
             if not (self.device == "cuda" and is_oom(exc) and self.requested != "cuda"):
                 raise
-            out = None  # retry below, outside the `except` block, so the traceback does not pin GPU tensors
-        if out is None:
+            found = None  # retry below, outside the `except` block, so the traceback does not pin GPU tensors
+        if found is None:
             self.unload()
             self._cpu_only = True
             try:
                 self.load()
-                out = self._forward(rgb, qs)
+                found = self._boxes(rgb, qs, threshold, tiles, tile_overlap)
             finally:
                 self._cpu_only = False
                 self.unload()  # the next call re-evaluates `auto` instead of staying on CPU
-        import torch
-
+        xyxy, scores, labels, objectness = found
         h, w = rgb.shape[:2]
-        logits = out.logits[0].float()  # (patches, n_queries)
-        scores_all, lab_idx = torch.sigmoid(logits).max(dim=-1)
-        keep = (scores_all >= threshold).nonzero().flatten()
-        boxes = out.pred_boxes[0].float()[keep].cpu().numpy()
-        scores = scores_all[keep].cpu().numpy()
-        labels = [qs[int(i)] for i in lab_idx[keep].cpu().numpy()]
-        xyxy = (
-            boxes_from_square(boxes, h, w)
-            if len(boxes)
-            else np.zeros((0, 4), np.float32)
-        )
         res = (
             select_boxes(xyxy, scores, labels, h, w, nms, max_area_frac)
-            if len(boxes)
+            if len(xyxy)
             else []
         )
-        return {"boxes": res, "timing_s": round(time.perf_counter() - t0, 3)}
+        doc: dict[str, Any] = {
+            "boxes": res,
+            "timing_s": round(time.perf_counter() - t0, 3),
+        }
+        if with_objectness:
+            doc["objectness"] = objectness
+        return doc

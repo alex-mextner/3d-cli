@@ -210,11 +210,13 @@ class FakeDetector:
     ) -> dict[str, Any]:
         self.calls += 1
         self.shapes.append(rgb.shape)
+        self.kwargs = kw
         return {
             "boxes": [
                 {"xyxy": b, "score": 0.5, "label": "a hand tool"} for b in self.boxes
             ],
             "timing_s": 0.0,
+            "objectness": np.full((4, 4), 0.9, np.float32),
         }
 
     def unload(self) -> None:
@@ -252,6 +254,9 @@ class FakeSegmenter(Segmenter):
     """Segmenter whose SAM2 stages are canned; everything else (orchestration, filters, ids, scaling) is real."""
 
     def __init__(self, amg: list[Any], fill_masks: list[Any], **kw: Any) -> None:
+        kw.setdefault(
+            "quality", "accurate"
+        )  # the stock generator path is the one `_amg` / `_fill` below replace
         super().__init__(**kw)
         self._amg_masks, self._fill_masks, self.amg_calls = amg, fill_masks, 0
         self.seen_shapes: list[tuple[int, ...]] = []
@@ -691,6 +696,42 @@ def test_detect_without_masks_never_loads_the_segmenter(
     assert "masks" not in json.loads(capsys.readouterr().out)
 
 
+def test_detect_masks_with_no_box_needs_no_sam2_weights(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import argparse
+    from PIL import Image
+
+    from threed_vision.commands import detect as detect_cmd
+
+    class StubOwl:
+        device = "cpu"
+
+        def __init__(self, device: str) -> None:
+            pass
+
+        def detect(self, rgb: Any, queries: Any, **kw: Any) -> dict[str, Any]:
+            return {"boxes": [], "timing_s": 0.0}
+
+        def unload(self) -> None:
+            pass
+
+    class NoWeights(Segmenter):
+        def load(self) -> None:
+            raise AssertionError("an empty detection must not load SAM2")
+
+    monkeypatch.setattr(detect_cmd, "OwlDetector", StubOwl)
+    monkeypatch.setattr(segment, "Segmenter", NoWeights)
+    photo = tmp_path / "p.png"
+    Image.fromarray(_rgb()).save(photo)
+    parser = argparse.ArgumentParser()
+    detect_cmd.add_arguments(parser)
+    out_dir = tmp_path / "out"
+    args = parser.parse_args([str(photo), "--queries", "x", "--masks", str(out_dir)])
+    assert detect_cmd.run(args) == 0
+    assert json.loads((out_dir / "instances.json").read_text())["instances"] == []
+
+
 # --- ClipEncoder.load: missing model is reported before a missing package -------------------------------------------
 
 
@@ -893,3 +934,394 @@ def test_fill_stage_lets_large_owl_boxes_through_when_max_area_frac_is_raised() 
             max_area_frac=frac,
         ).run(_rgb())
     assert seen == [0.2, segment.OWL_MIN_AREA_FRAC]
+
+
+# --- prompts, option validation, CUDA-free CPU runs, fast quality (#479 #480 #508 #478) ---------------------------
+
+
+class PromptClip(FakeClip):
+    """Text embeddings follow the prompt's brightness word: "dark" prompts look like dark crops, "bright" ones like bright crops."""
+
+    def texts(self, prompts: list[str]) -> Any:
+        return np.array(
+            [[0.0, 1.0] if "dark" in p else [1.0, 0.0] for p in prompts], np.float32
+        )
+
+
+def _prompt_run(**kw: Any) -> list[tuple[int, int]]:
+    bright, dark = _blob(10, 10, 20, 20), _blob(155, 10, 20, 20)  # bright / dark crops
+    seg = FakeSegmenter(
+        [bright, dark],
+        [],
+        device="cpu",
+        fill="none",
+        detector=FakeDetector([]),
+        clip=PromptClip(),
+        max_area_frac=0.5,
+        **kw,
+    )
+    return [tuple(i["bbox_xywh"][:2]) for i in seg.run(_rgb())["instances"]]
+
+
+def test_bg_and_fg_prompts_change_which_masks_clip_rejects() -> None:
+    # defaults ("carpet / floor ..." are background): FakeClip's texts() is not used here, PromptClip maps by the word "dark"
+    dark_is_bg = _prompt_run(bg_prompts=["a dark carpet"], fg_prompts=["a bright tool"])
+    bright_is_bg = _prompt_run(bg_prompts=["a bright wall"], fg_prompts=["a dark tool"])
+    assert dark_is_bg == [(10, 10)]  # the dark patch is rejected
+    assert bright_is_bg == [(155, 10)]  # swapping the prompts swaps the survivor
+
+
+def test_default_prompts_are_the_documented_lists_and_are_copied() -> None:
+    seg = Segmenter(device="cpu")
+    assert seg.bg_prompts == segment.BG_PROMPTS and seg.fg_prompts == segment.FG_PROMPTS
+    seg.bg_prompts.append("x")
+    assert "x" not in segment.BG_PROMPTS
+
+
+def test_prompts_without_a_bg_or_fg_entry_are_bad_input_unless_rejection_is_off() -> (
+    None
+):
+    with pytest.raises(BadInput, match="at least one bg prompt and one fg prompt"):
+        Segmenter(device="cpu", bg_prompts=[])
+    with pytest.raises(BadInput):
+        Segmenter(device="cpu", fg_prompts=[])
+    Segmenter(device="cpu", bg_prompts=[], reject_bg=False)
+
+
+def test_load_prompts_reads_a_comma_list_or_a_file(tmp_path: Path) -> None:
+    assert segment.load_prompts("a wooden table, a shadow ,") == [
+        "a wooden table",
+        "a shadow",
+    ]
+    f = tmp_path / "bg.txt"
+    f.write_text("# bench\na steel bench\n\na cable  # trailing\n", encoding="utf-8")
+    assert segment.load_prompts(str(f)) == ["a steel bench", "a cable"]
+    with pytest.raises(BadInput):
+        segment.load_prompts(" , ")
+
+
+def test_a_mistyped_prompt_file_is_an_error_not_a_prompt(tmp_path: Path) -> None:
+    for typo in ("bg-prompts.txt", str(tmp_path / "nope" / "bg"), "prompts.md"):
+        with pytest.raises(BadInput, match="does not exist"):
+            segment.load_prompts(typo)
+    bad = tmp_path / "latin1.txt"
+    bad.write_bytes("caf\xe9\n".encode("latin-1"))
+    with pytest.raises(BadInput, match="cannot read prompt file"):
+        segment.load_prompts(str(bad))
+
+
+@pytest.mark.parametrize(
+    "kw",
+    [
+        {"max_side": -5},
+        {"max_side": 10},
+        {"max_side": 100000},
+        {"points_per_side": -1},
+        {"points_per_side": 500},
+        {"points_per_batch": 0},
+        {"min_area": -1},
+        {"max_area_frac": 0.0},
+        {"max_area_frac": 1.5},
+        {"owl_threshold": 2.0},
+        {"owl_tiles": 0},
+        {"owl_tiles": 9},
+        {"grid_gate": -0.1},
+        {"points_per_side": 0, "fill": "none"},
+        {"quality": "turbo"},
+    ],
+)
+def test_invalid_options_are_bad_input_at_construction(kw: dict[str, Any]) -> None:
+    with pytest.raises(BadInput):
+        Segmenter(device="cpu", **kw)
+
+
+def test_valid_edge_options_are_accepted() -> None:
+    Segmenter(
+        device="cpu", max_side=0, points_per_side=0
+    )  # boxes only, never downscale
+    Segmenter(
+        device="cpu", points_per_side=128, max_side=64, owl_tiles=4, grid_gate=1.0
+    )
+
+
+def test_cpu_sam2_dense_runs_its_64_grid_instead_of_silently_running_none() -> None:
+    seg = FakeSegmenter(
+        [_blob(10, 10, 20, 20)],
+        [],
+        device="cpu",
+        method="sam2-dense",
+        fill="none",
+        reject_bg=False,
+        max_area_frac=0.5,
+    )
+    seg.run(_rgb())
+    assert seg.pps == 64 and seg.amg_calls == 1
+
+
+class _NoCuda:
+    """A `torch.cuda` stand-in: anything that would initialise or query a CUDA context raises."""
+
+    @staticmethod
+    def is_initialized() -> bool:
+        return False  # asking is allowed: it never creates a context
+
+    def __getattr__(self, name: str) -> Any:
+        raise AssertionError(f"torch.cuda.{name} touched on a --device cpu run")
+
+
+def test_cpu_runs_never_touch_cuda(monkeypatch: pytest.MonkeyPatch) -> None:
+    import types
+
+    from threed_vision import torchutil
+
+    fake = types.ModuleType("torch")
+    fake.cuda = _NoCuda()  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "torch", fake)
+    seg = FakeSegmenter(
+        [_blob(10, 10, 20, 20)],
+        [_blob(90, 10, 20, 20)],
+        device="cpu",
+        detector=FakeDetector([[88, 8, 112, 32]]),
+        clip=FakeClip(),
+        max_area_frac=0.5,
+        min_area=50,
+    )
+    res = seg.run(_rgb())
+    seg.unload()  # free_cuda() on the way out
+    assert res["device"] == "cpu" and res["vram_mb"] == 0
+    torchutil.reset_peak("cpu")
+    assert torchutil.peak_mb("cpu") == 0 and torchutil.cuda_allocated_mb() == 0
+    torchutil.free_cuda()
+
+
+def test_fast_quality_with_a_gate_runs_owl_before_the_grid_and_hands_it_the_objectness() -> (
+    None
+):
+    order: list[str] = []
+    seen: dict[str, Any] = {}
+
+    class GateDetector(FakeDetector):
+        def detect(
+            self, rgb: Any, queries: Any, threshold: float = 0.15, **kw: Any
+        ) -> dict[str, Any]:
+            order.append("detect")
+            return super().detect(rgb, queries, threshold, **kw)
+
+    class FastFake(FakeSegmenter):
+        def _grid(
+            self, rgb: Any, pps: int, objectness: Any, gate: float
+        ) -> list[dict[str, Any]]:
+            order.append("grid")
+            seen.update(pps=pps, gate=gate, shape=objectness.shape)
+            return [{"mask": _blob(10, 10, 20, 20), "source": "amg", "stability": 0.9}]
+
+    seg = FastFake(
+        [],
+        [],
+        device="cuda",
+        quality="fast",
+        grid_gate=0.1,
+        detector=GateDetector([[0, 0, 9, 9]]),
+        reject_bg=False,
+        max_area_frac=0.5,
+        min_area=50,
+    )
+    res = seg.run(_rgb())
+    assert order == ["detect", "grid"] and seen == {
+        "pps": 32,
+        "gate": 0.1,
+        "shape": (4, 4),
+    }
+    assert [i["source"] for i in res["instances"]] == ["amg"]
+    assert list(res["timing_s"])[:3] == ["load", "detect", "amg"]
+
+
+def test_gate_points_keep_only_points_near_an_object_patch() -> None:
+    from threed_vision import sam_grid
+
+    obj = np.zeros((10, 10), np.float32)
+    obj[2, 3] = (
+        0.9  # one hot patch: x in [3,4)/10 * 100 px, y in [2,3)/10 * 100 px (square 100 x 100 image)
+    )
+    pts = np.array([[35.0, 25.0], [45.0, 35.0], [95.0, 95.0], [5.0, 5.0]], np.float32)
+    kept = sam_grid.gate_points(pts, obj, (100, 100), 0.5)
+    # the hot patch and its 3x3 neighbourhood (patches x 2..4, y 1..3) pass; the far points do not
+    assert kept.tolist() == [[35.0, 25.0], [45.0, 35.0]]
+    assert sam_grid.gate_points(pts, obj, (100, 100), 0.0).shape == (4, 2)
+
+
+def test_gate_points_use_the_padded_square_frame_of_a_wide_image() -> None:
+    from threed_vision import sam_grid
+
+    obj = np.zeros((10, 10), np.float32)
+    obj[0, 9] = 1.0  # top-right patch of the padded square (side = max(H, W) = 200)
+    pts = np.array([[195.0, 5.0], [195.0, 90.0]], np.float32)  # 200 x 100 image
+    kept = sam_grid.gate_points(pts, obj, (100, 200), 0.5)
+    assert kept.tolist() == [[195.0, 5.0]]
+
+
+def test_clean_mask_fills_small_holes_and_drops_small_islands_but_keeps_the_frame_edge() -> (
+    None
+):
+    from threed_vision import sam_grid
+
+    m = np.zeros((80, 80), bool)
+    m[10:60, 10:60] = True
+    m[30:34, 30:34] = False  # a 16 px hole
+    m[70:73, 70:73] = True  # a 9 px island
+    out = sam_grid.clean_mask(m, min_area=20)
+    assert out[30:34, 30:34].all() and not out[70:73, 70:73].any()
+    assert out[10:60, 10:60].all() and int(out.sum()) == 50 * 50
+    notch = np.zeros((40, 40), bool)
+    notch[0:30, 0:30] = True
+    notch[0:3, 10:13] = (
+        False  # 9 px of background open to the frame edge: the outside, not a hole
+    )
+    assert (sam_grid.clean_mask(notch, min_area=20) == notch).all()
+    assert not sam_grid.clean_mask(np.zeros((9, 9), bool)).any()
+    # every island small: the largest survives (SAM's remove_small_regions), as a mask is never emptied by cleaning
+    small = np.zeros((40, 40), bool)
+    small[5:12, 5:12] = True  # 49 px
+    small[30:33, 30:33] = True  # 9 px
+    kept = sam_grid.clean_mask(small, min_area=100)
+    assert kept[5:12, 5:12].all() and not kept[30:33, 30:33].any()
+
+
+def test_mask_bbox_matches_nonzero_bbox_and_handles_empty() -> None:
+    rng = np.random.default_rng(3)
+    for _ in range(20):
+        m = rng.random((40, 60)) > 0.97
+        ys, xs = np.nonzero(m)
+        want = (
+            [0, 0, 0, 0]
+            if xs.size == 0
+            else [
+                int(xs.min()),
+                int(ys.min()),
+                int(xs.max() - xs.min() + 1),
+                int(ys.max() - ys.min() + 1),
+            ]
+        )
+        assert io.mask_bbox_xywh(m) == want
+    assert io.mask_bbox_xywh(np.zeros((5, 5), bool)) == [0, 0, 0, 0]
+
+
+def test_tile_windows_cover_the_image_and_cut_boxes_are_flagged() -> None:
+    wins = detect.tile_windows(100, 200, 2, 0.25)
+    assert (
+        wins[0] == (0, 0, 200, 100) and len(wins) == 5
+    )  # the whole image + 2 x 2 tiles
+    cover = np.zeros((100, 200), bool)
+    for x0, y0, x1, y1 in wins[1:]:
+        assert 0 <= x0 < x1 <= 200 and 0 <= y0 < y1 <= 100
+        cover[y0:y1, x0:x1] = True
+    assert cover.all()
+    assert detect.tile_windows(100, 200, 1, 0.25) == [(0, 0, 200, 100)]
+    win = wins[1]  # top-left tile
+    boxes = np.array(
+        [[10, 10, 40, 40], [10, 10, win[2] - 1, 40], [10, 10, 40, win[3] - 1]],
+        np.float32,
+    )
+    cut = detect.cut_by_inner_edge(boxes, win, (100, 200))
+    assert cut.tolist() == [False, True, True]
+    # a tile edge that IS the image edge never cuts
+    assert not detect.cut_by_inner_edge(
+        np.array([[0, 0, 30, 30]], np.float32), win, (100, 200)
+    ).any()
+
+
+def test_detect_rejects_bad_tiles() -> None:
+    det = detect.OwlDetector("cpu")
+    with pytest.raises(BadInput):
+        det.detect(np.zeros((8, 8, 3), np.uint8), tiles=0)
+    with pytest.raises(BadInput):
+        det.detect(np.zeros((8, 8, 3), np.uint8), tiles=2, tile_overlap=0.9)
+
+
+def test_owl_tiles_option_reaches_the_detector() -> None:
+    det = FakeDetector([])
+    seg = FakeSegmenter(
+        [_blob(10, 10, 20, 20)],
+        [],
+        device="cpu",
+        owl_tiles=3,
+        detector=det,
+        reject_bg=False,
+        max_area_frac=0.5,
+        min_area=50,
+    )
+    seg.run(_rgb())
+    assert det.kwargs["tiles"] == 3 and det.kwargs["with_objectness"] is True
+
+
+def test_cpu_default_is_the_fast_grid_on_the_full_resolution_photo() -> None:
+    seen: dict[str, Any] = {}
+
+    class CpuFast(FakeSegmenter):
+        def _grid(
+            self, rgb: Any, pps: int, objectness: Any, gate: float
+        ) -> list[dict[str, Any]]:
+            seen.update(shape=rgb.shape, pps=pps, gate=gate)
+            return [{"mask": _blob(10, 10, 20, 20), "source": "amg", "stability": 0.9}]
+
+    seg = CpuFast(
+        [],
+        [],
+        device="cpu",
+        quality=None,
+        detector=FakeDetector([]),
+        reject_bg=False,
+        max_area_frac=0.5,
+        min_area=50,
+    )
+    assert seg.effective_quality == "fast"
+    res = seg.run(_rgb())
+    assert seen == {"shape": (H, W, 3), "pps": 32, "gate": segment.DEFAULT_GRID_GATE}
+    assert res["process_scale"] == 1.0 and res["points_per_side"] == 32
+
+
+def test_quality_defaults_to_accurate_on_gpu_and_fast_on_cpu_and_is_overridable() -> (
+    None
+):
+    gpu, cpu = Segmenter(device="cuda"), Segmenter(device="cpu")
+    gpu.device, cpu.device = "cuda", "cpu"
+    assert gpu.effective_quality == "accurate" and cpu.effective_quality == "fast"
+    assert Segmenter(device="cpu", quality="accurate").effective_quality == "accurate"
+    forced = Segmenter(device="cuda", quality="fast")
+    forced.device = "cuda"
+    assert forced.effective_quality == "fast"
+
+
+class CudaThenCpuEncoder(clip.OrtEncoder):
+    """An onnxruntime encoder whose CUDA session fails once; records the device of every build attempt."""
+
+    model_name = "clip-b32"
+
+    def __init__(self, device: str, error: Exception) -> None:
+        super().__init__(device)
+        self.error = error
+        self.built_on: list[str] = []
+
+    def _resolve(self) -> None:
+        self.device = "cuda"
+
+    def _build(self) -> None:
+        self.built_on.append(self.device)
+        if self.device == "cuda":
+            raise self.error
+
+
+def test_auto_retries_on_cpu_when_the_cuda_session_cannot_initialise_but_not_for_other_errors() -> (
+    None
+):
+    enc = CudaThenCpuEncoder("auto", clip.CudaSessionFailed("cuBLAS failed"))
+    enc.load()
+    assert enc.built_on == ["cuda", "cpu"] and enc.device == "cpu" and enc.loaded
+    other = CudaThenCpuEncoder("auto", MissingDependency("tokenizers is missing"))
+    with pytest.raises(MissingDependency, match="tokenizers"):
+        other.load()
+    assert other.built_on == ["cuda"]  # a missing package is not retried on CPU
+    explicit = CudaThenCpuEncoder("cuda", clip.CudaSessionFailed("cuBLAS failed"))
+    with pytest.raises(clip.CudaSessionFailed):
+        explicit.load()
+    assert explicit.built_on == ["cuda"]  # an explicit cuda request reports it

@@ -113,10 +113,13 @@ def ort_diagnose() -> dict[str, Any]:
     except ImportError:
         return {"installed": False}
     usable = setup_ort_cuda()
+    providers = ort.get_available_providers()
     return {
         "installed": True,
         "version": ort.__version__,
-        "providers": ort.get_available_providers(),
+        "providers": providers,
+        # the CPU-only `onnxruntime` wheel lists no CUDAExecutionProvider at all: no CUDA lib is "missing", the wrong wheel is installed
+        "cpu_only_wheel": "CUDAExecutionProvider" not in providers,
         "cuda_usable": usable,
         "missing_cuda_libs": [] if usable else ort_missing_cuda_libs(),
     }

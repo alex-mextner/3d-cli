@@ -72,10 +72,10 @@ def crop_masked(
     """Padded bbox crop of `mask`; outside the (slightly dilated) mask the crop is painted `bg` unless `keep_bg`."""
     import cv2
 
-    ys, xs = np.nonzero(mask)
+    ys, xs = np.flatnonzero(mask.any(axis=1)), np.flatnonzero(mask.any(axis=0))
     if xs.size == 0:
         raise ValueError("empty mask")
-    x0, x1, y0, y1 = int(xs.min()), int(xs.max()) + 1, int(ys.min()), int(ys.max()) + 1
+    x0, x1, y0, y1 = int(xs[0]), int(xs[-1]) + 1, int(ys[0]), int(ys[-1]) + 1
     p = int(pad * max(x1 - x0, y1 - y0)) + 2
     x0, y0, x1, y1 = (
         max(0, x0 - p),
@@ -97,6 +97,11 @@ def _l2(e: np.ndarray) -> np.ndarray:
     return np.asarray(
         e / np.maximum(np.linalg.norm(e, axis=-1, keepdims=True), 1e-12), np.float32
     )
+
+
+class CudaSessionFailed(MissingDependency):
+    """onnxruntime could not build a session with the CUDA provider (cuBLAS / arena allocation on a card that filled up
+    after the free-VRAM check). `auto` retries on CPU; an explicit `cuda` reports it."""
 
 
 class OrtEncoder:
@@ -157,6 +162,11 @@ class OrtEncoder:
                 )
             self.providers = active
             return sess
+        if want_cuda:
+            raise CudaSessionFailed(
+                f"cannot create a CUDA session for {path.name}: {last}",
+                "the GPU is probably full: free VRAM, or run with --device cpu (--device auto retries on CPU by itself)",
+            ) from last
         raise MissingDependency(
             f"cannot load {path.name} with onnxruntime: {last}",
             f"3d vision-models pull {self.model_name}",
@@ -182,7 +192,15 @@ class OrtEncoder:
         if self.loaded:
             return
         self._resolve()
-        self._build()
+        try:
+            self._build()
+        except CudaSessionFailed:
+            if self.requested == "cuda":
+                raise
+            # `auto` means "the GPU if it works": the CPU session is the documented fallback for a CUDA provider that
+            # cannot initialise on a shared card that filled up after the free-VRAM check
+            self.device = "cpu"
+            self._build()
         self.loaded = True
 
     def unload(self) -> None:

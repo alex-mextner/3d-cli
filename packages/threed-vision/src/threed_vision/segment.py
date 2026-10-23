@@ -1,19 +1,24 @@
-"""Multi-object segmentation: SAM2.1-tiny automatic masks + OWLv2 box fill + CLIP background rejection.
+"""Multi-object segmentation: SAM2.1-tiny grid masks + OWLv2 box fill + CLIP background rejection.
 
-Pipeline (spike `pipeline_seg.py`, measured 10.6 s / 98 masks on the carpet photo, GPU):
-  amg        SAM2.1-tiny automatic mask generator (points_per_side x points_per_side grid, points_per_batch 32)
-  detect     OWLv2 open-vocabulary boxes (`queries`)
-  fill       SAM2 box prompts for boxes that are < 60 % explained by the AMG masks (new mask overlap < 30 %)
-  bg_reject  CLIP zero-shot "background vs object" prompts drop carpet / floor / cabinet patches
-Methods: "sam2" (grid 32 on GPU), "sam2-dense" (grid 64, batch 16), "u2net" (single salient object, ~0.06 s GPU).
+Pipeline (docs/commands/segment.md has the measurements):
+  amg        SAM2.1-tiny point-prompt grid (points_per_side x points_per_side, pred-IoU > 0.8, stability >= 0.9, box NMS 0.6):
+             quality="accurate": the stock SAM2AutomaticMaskGenerator (every candidate mask scored at photo resolution);
+             quality="fast": the same prompts filtered on the decoder's 256x256 logits with an fp16 decoder, only where OWLv2
+             objectness says there is an object (`sam_grid`)
+  detect     OWLv2 open-vocabulary boxes (`queries`; `owl_tiles` adds N x N overlapping tiles)
+  fill       SAM2 box prompts for boxes that are < 60 % explained by the grid masks (new mask overlap < 30 %)
+  bg_reject  CLIP zero-shot "background vs object" prompts (`bg_prompts` / `fg_prompts`) drop carpet / floor / cabinet patches
+Methods: "sam2" (grid 32), "sam2-dense" (grid 64), "u2net" (single salient object, ~0.06 s GPU).
 `fill` is "owlv2" or "none"; `reject_bg` toggles the CLIP filter (the area filter always applies).
+`quality=None` means "accurate" on cuda (the long-standing default) and "fast" on cpu.
 
-On CPU the full-resolution 32x32 AMG takes ~90 s (measured). The CPU default therefore skips the grid (points_per_side
-0): OWLv2 boxes become SAM2 box prompts on a copy of the image whose longest side is CPU_MAX_SIDE (see `CPU_*` below);
-masks are always returned at the input resolution. `points_per_side=N` on CPU still runs an N x N AMG.
+On CPU the stock 32x32 generator at full resolution takes ~90 s (measured), so the CPU default is quality="fast" on the full-resolution
+photo (SAM2 resizes its input to 1024 x 1024 itself; a downscaled copy only costs mask detail). quality="accurate" on CPU keeps the
+legacy path: points_per_side 0, OWLv2 boxes become SAM2 box prompts on a copy of the image whose longest side is CPU_MAX_SIDE.
+Masks are always returned at the input resolution. An explicit `points_per_side=N` runs an N x N grid on CPU too.
 
 Model-backed stages are classes (`load()` / `unload()` / `loaded` / `device` / `vram_estimate_mb`); a ClipEncoder /
-OwlDetector injected into the constructor is shared and is NOT unloaded by `Segmenter.unload()`.
+OwlDetector injected into the constructor is shared and is NOT unloaded by `Segmenter.unload()`. A cpu run never initialises CUDA.
 """
 
 from __future__ import annotations
@@ -21,6 +26,7 @@ from __future__ import annotations
 import hashlib
 import time
 from collections.abc import Callable, Sequence
+from pathlib import Path
 from typing import Any, TypeVar
 
 import numpy as np
@@ -45,6 +51,15 @@ Instance = dict[str, Any]
 
 METHODS = ("sam2", "sam2-dense", "u2net")
 FILLS = ("owlv2", "none")
+# "accurate": the stock SAM2 automatic mask generator (every candidate mask scored at photo resolution);
+# "fast": the same grid prompts filtered on the decoder's 256x256 logits + batched box prompts (`sam_grid`).
+QUALITIES = ("fast", "accurate")
+# "fast" processes the full-resolution photo on CPU too (SAM2 resizes its input to 1024 x 1024 whatever the photo size, so
+# downscaling saves nothing; it only costs mask detail: 41 % -> 89 % parity with the GPU masks, docs/commands/segment.md).
+BG_REJECT_THRESHOLD = (
+    0.5  # summed background probability (CLIP) from which a mask is dropped
+)
+DEFAULT_GRID_GATE = 0.1  # OWLv2 objectness a grid point's patch neighbourhood needs before the point is decoded (quality="fast")
 # CPU default (measurements in docs/commands/segment.md): no AMG grid, OWLv2 boxes -> SAM2 box prompts, all on a copy of the
 # image whose longest side is CPU_MAX_SIDE. points_per_side=0 means "no AMG".
 CPU_POINTS_PER_SIDE = 0
@@ -52,6 +67,7 @@ CPU_AMG_ONLY_POINTS_PER_SIDE = 16  # CPU with fill="none" has nothing but the gr
 CPU_MAX_SIDE = 1024
 OWL_MIN_AREA_FRAC = 0.05  # OWLv2 boxes up to this image fraction always reach the fill stage; a larger --max-area-frac widens it
 
+# Background / foreground CLIP prompts tuned to the carpet photo; `Segmenter(bg_prompts=..., fg_prompts=...)` replaces them.
 BG_PROMPTS = [
     "a photo of a carpet",
     "a photo of a wooden parquet floor",
@@ -194,6 +210,96 @@ def _fraction_covered(union: np.ndarray, box: Sequence[float]) -> float:
     return float(reg.mean()) if reg.size else 1.0
 
 
+def load_prompts(spec: str) -> list[str]:
+    """CLIP prompts from a comma list ("a carpet,a floor") or a text file (one prompt per line, `#` comments, blank lines skipped).
+
+    A value that is not an existing file but looks like a path (a `.txt` / `.md` / `.lst` suffix, or a separator without any space
+    or comma) is an error, not a prompt: a mistyped file name must not become the only background prompt.
+    """
+    path = Path(spec)
+    try:
+        is_file = path.is_file()
+    except OSError:
+        is_file = False
+    if is_file:
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeDecodeError) as exc:
+            raise BadInput(
+                f"cannot read prompt file {spec!r}: {exc}",
+                "a UTF-8 text file, one prompt per line",
+            ) from exc
+        parts = [ln.split("#", 1)[0] for ln in lines]
+    elif path.suffix.lower() in (".txt", ".md", ".lst") or (
+        "/" in spec and " " not in spec and "," not in spec
+    ):
+        raise BadInput(
+            f"prompt file {spec!r} does not exist",
+            "a comma list of prompts, or the path of an existing file",
+        )
+    else:
+        parts = spec.split(",")
+    prompts = [p.strip() for p in parts if p.strip()]
+    if not prompts:
+        raise BadInput(
+            f"no prompts in {spec!r}", "a comma list or a file with one prompt per line"
+        )
+    return prompts
+
+
+def _validate(
+    *,
+    points_per_side: int | None,
+    points_per_batch: int,
+    max_side: int | None,
+    min_area: int,
+    max_area_frac: float,
+    owl_threshold: float,
+    owl_tiles: int,
+    grid_gate: float,
+    fill: str,
+    method: str,
+    reject_bg: bool,
+    bg_prompts: Sequence[str],
+    fg_prompts: Sequence[str],
+) -> None:
+    """Reject option values that would crash deep inside torch or silently produce nothing (exit code 2 on the CLI)."""
+    if points_per_side is not None and not 0 <= points_per_side <= 128:
+        raise BadInput(
+            f"points_per_side={points_per_side} out of range",
+            "0 (OWLv2 boxes only, needs --fill owlv2) or 1..128",
+        )
+    if points_per_side == 0 and fill != "owlv2" and method != "u2net":
+        raise BadInput(
+            "points_per_side=0 (boxes only) needs fill='owlv2'",
+            "use --points-per-side N>0 or --fill owlv2",
+        )
+    if points_per_batch < 1:
+        raise BadInput(f"points_per_batch={points_per_batch} must be >= 1")
+    if max_side is not None and not (max_side == 0 or 64 <= max_side <= 8192):
+        raise BadInput(
+            f"max_side={max_side} out of range", "0 (never downscale) or 64..8192 px"
+        )
+    if min_area < 0:
+        raise BadInput(f"min_area={min_area} must be >= 0")
+    if not 0.0 < max_area_frac <= 1.0:
+        raise BadInput(f"max_area_frac={max_area_frac} out of range", "(0, 1]")
+    if not 0.0 <= owl_threshold <= 1.0:
+        raise BadInput(f"owl_threshold={owl_threshold} out of range", "[0, 1]")
+    if not 1 <= owl_tiles <= 4:
+        raise BadInput(
+            f"owl_tiles={owl_tiles} out of range",
+            "1 (whole image) .. 4 (4x4 grid + whole image)",
+        )
+    if not 0.0 <= grid_gate <= 1.0:
+        raise BadInput(f"grid_gate={grid_gate} out of range", "[0, 1] (0 = no gating)")
+    if reject_bg and (not bg_prompts or not fg_prompts):
+        raise BadInput(
+            "background rejection needs at least one bg prompt and one fg prompt",
+            "pass both --bg-prompts and --fg-prompts, or --no-reject-bg",
+        )
+
+
 # --- u2net single-object matte -------------------------------------------------------------------------------------
 
 
@@ -280,6 +386,7 @@ class Segmenter:
     def __init__(
         self,
         method: str = "sam2",
+        quality: str | None = None,
         fill: str = "owlv2",
         reject_bg: bool = True,
         device: str = "auto",
@@ -290,6 +397,10 @@ class Segmenter:
         max_area_frac: float = 0.03,
         queries: Sequence[str] | None = None,
         owl_threshold: float = 0.15,
+        owl_tiles: int = 1,
+        grid_gate: float | None = None,
+        bg_prompts: Sequence[str] | None = None,
+        fg_prompts: Sequence[str] | None = None,
         clip: ClipEncoder | None = None,
         detector: OwlDetector | None = None,
     ) -> None:
@@ -300,7 +411,35 @@ class Segmenter:
             )
         if fill not in FILLS:
             raise BadInput(f"unknown fill '{fill}'", f"one of: {', '.join(FILLS)}")
+        if quality is not None and quality not in QUALITIES:
+            raise BadInput(
+                f"unknown quality '{quality}'", f"one of: {', '.join(QUALITIES)}"
+            )
         self.method, self.fill, self.reject_bg = method, fill, reject_bg
+        self.quality = quality
+        self.bg_prompts = (
+            list(bg_prompts) if bg_prompts is not None else list(BG_PROMPTS)
+        )
+        self.fg_prompts = (
+            list(fg_prompts) if fg_prompts is not None else list(FG_PROMPTS)
+        )
+        self.owl_tiles = owl_tiles
+        self.grid_gate = DEFAULT_GRID_GATE if grid_gate is None else grid_gate
+        _validate(
+            points_per_side=points_per_side,
+            points_per_batch=points_per_batch,
+            max_side=max_side,
+            min_area=min_area,
+            max_area_frac=max_area_frac,
+            owl_threshold=owl_threshold,
+            owl_tiles=owl_tiles,
+            grid_gate=self.grid_gate,
+            fill=fill,
+            method=method,
+            reject_bg=reject_bg,
+            bg_prompts=self.bg_prompts,
+            fg_prompts=self.fg_prompts,
+        )
         self.requested = device
         self.points_per_side, self.points_per_batch, self.max_side = (
             points_per_side,
@@ -312,9 +451,8 @@ class Segmenter:
         self.owl_threshold = owl_threshold
         self.device = "cpu"
         self.loaded = False
-        self._cpu_only = (
-            False  # set only while one call is being redone on CPU after a GPU OOM
-        )
+        # set only while one call is being redone on CPU after a GPU OOM
+        self._cpu_only = False
         self._owns_clip, self._owns_detector = clip is None, detector is None
         self._clip = clip
         self._detector = detector
@@ -322,12 +460,20 @@ class Segmenter:
         self._u2: U2Net | None = None
         self._pred: Any = None
         self._pred_key: str | None = None
+        # CLIP text embeddings of bg_prompts + fg_prompts
         self._bg_text: np.ndarray | None = None
 
     # lifecycle
     @property
     def uses_sam(self) -> bool:
         return self.method != "u2net"
+
+    @property
+    def effective_quality(self) -> str:
+        """The quality this run uses (meaningful once `load()` resolved the device): the requested one, else "accurate" on
+        cuda and "fast" on cpu (the stock generator
+        takes 85-92 s on CPU, the boxes-only legacy path reproduces 41 % of the GPU masks: docs/commands/segment.md)."""
+        return self.quality or ("fast" if self.device == "cpu" else "accurate")
 
     def _effective(self) -> tuple[int, int | None]:
         """(points_per_side, processing max_side) for the resolved device; points_per_side 0 = no AMG (OWLv2 boxes only)."""
@@ -337,12 +483,19 @@ class Segmenter:
                 pps = 64 if self.method == "sam2-dense" else 32
             return pps, side
         if pps is None:
-            pps = (
-                CPU_POINTS_PER_SIDE
-                if self.fill == "owlv2"
-                else CPU_AMG_ONLY_POINTS_PER_SIDE
-            )
-        return pps, CPU_MAX_SIDE if side is None else (side or None)
+            if self.method == "sam2-dense":
+                pps = 64  # the dense method IS its grid: it runs it on CPU too (slow; docs/commands/segment.md)
+            elif self.effective_quality == "fast":
+                pps = 32
+            else:
+                pps = (
+                    CPU_POINTS_PER_SIDE
+                    if self.fill == "owlv2"
+                    else CPU_AMG_ONLY_POINTS_PER_SIDE
+                )
+        if side is None and self.effective_quality != "fast":
+            side = CPU_MAX_SIDE
+        return pps, side or None
 
     def load(self) -> None:
         if self.loaded:
@@ -352,6 +505,7 @@ class Segmenter:
             if self._cpu_only
             else resolve_device(self.requested, self.vram_estimate_mb)
         )
+        reset_peak(self.device)
         if self.uses_sam:
             models.model_path(
                 "sam2-tiny"
@@ -457,8 +611,9 @@ class Segmenter:
             if progress:
                 progress(name, frac)
 
-        reset_peak()
-        if not self.loaded:
+        if self.loaded:
+            reset_peak(self.device)
+        else:  # load() resets the peak counter once it knows the device, before the weights are built
             stage("load", 0.0)
             t0 = time.perf_counter()
             self.load()
@@ -472,17 +627,30 @@ class Segmenter:
         ph, pw = proc.shape[:2]
 
         cands: list[Instance] = []
+        boxes: list[dict[str, Any]] = []
+        gate = (
+            self.grid_gate
+            if self.effective_quality == "fast" and self.fill == "owlv2" and pps > 0
+            else 0.0
+        )
+        objectness: np.ndarray | None = None
+        # OWLv2 first: its objectness map decides which grid points are worth decoding
+        if gate > 0:
+            stage("detect", 0.0)
+            t0 = time.perf_counter()
+            boxes, objectness = self._detect(proc)
+            tm["detect"] = time.perf_counter() - t0
+            stage("detect", 1.0)
         if pps > 0:
             stage("amg", 0.0)
             t0 = time.perf_counter()
-            cands = self._amg(proc, pps)
+            cands = (
+                self._grid(proc, pps, objectness, gate)
+                if self.effective_quality == "fast"
+                else self._amg(proc, pps)
+            )
             tm["amg"] = time.perf_counter() - t0
             stage("amg", 1.0)
-        elif self.fill != "owlv2":
-            raise BadInput(
-                "points_per_side=0 (boxes only) needs fill='owlv2'",
-                "use --points-per-side N>0 or --fill owlv2",
-            )
         cands = [
             c for c in cands if c["mask"].any()
         ]  # an empty mask cannot be cropped for CLIP
@@ -490,17 +658,12 @@ class Segmenter:
 
         n_owl = 0
         if self.fill == "owlv2":
-            stage("detect", 0.0)
-            t0 = time.perf_counter()
-            det = self._get_detector()
-            boxes = det.detect(
-                proc,
-                self.queries,
-                threshold=self.owl_threshold,
-                max_area_frac=max(self.max_area_frac, OWL_MIN_AREA_FRAC),
-            )["boxes"]
-            tm["detect"] = time.perf_counter() - t0
-            stage("detect", 1.0)
+            if objectness is None:
+                stage("detect", 0.0)
+                t0 = time.perf_counter()
+                boxes, _ = self._detect(proc)
+                tm["detect"] = time.perf_counter() - t0
+                stage("detect", 1.0)
             stage("fill", 0.0)
             t0 = time.perf_counter()
             added = self._fill(
@@ -528,7 +691,7 @@ class Segmenter:
         for c, b in zip(cands, bg, strict=True):
             area = int(c["mask"].sum())
             if (
-                (self.reject_bg and b >= 0.5)
+                (self.reject_bg and b >= BG_REJECT_THRESHOLD)
                 or area >= max_proc
                 or area == 0
                 or area < min_proc
@@ -546,9 +709,13 @@ class Segmenter:
             "method": self.method + ("+owlv2" if self.fill == "owlv2" else ""),
             "device": self.device,
             "timing_s": {k: round(v, 3) for k, v in tm.items()},
-            "vram_mb": peak_mb(),
+            "vram_mb": peak_mb(self.device),
             "n_amg": n_amg,
             "n_owl_added": n_owl,
+            "n_bg_rejected": int((bg >= BG_REJECT_THRESHOLD).sum())
+            if self.reject_bg
+            else 0,
+            "quality": self.effective_quality,
             "points_per_side": pps,
             "process_scale": round(scale, 4),
         }
@@ -575,10 +742,47 @@ class Segmenter:
             "method": "u2net",
             "device": self.device,
             "timing_s": {k: round(v, 3) for k, v in tm.items()},
-            "vram_mb": peak_mb(),
+            "vram_mb": peak_mb(self.device),
         }
 
     # SAM2 stages
+    def _detect(self, proc: np.ndarray) -> tuple[list[dict[str, Any]], np.ndarray]:
+        """OWLv2 boxes (+ the whole-image objectness map) of the image SAM2 sees."""
+        res = self._get_detector().detect(
+            proc,
+            self.queries,
+            threshold=self.owl_threshold,
+            max_area_frac=max(self.max_area_frac, OWL_MIN_AREA_FRAC),
+            tiles=self.owl_tiles,
+            with_objectness=True,
+        )
+        return res["boxes"], res["objectness"]
+
+    def _grid(
+        self,
+        rgb: np.ndarray,
+        pps: int,
+        objectness: np.ndarray | None,
+        gate: float,
+    ) -> list[Instance]:
+        """quality="fast": SAM2 point prompts on a `pps`^2 grid (only where OWLv2 objectness >= `gate`, when given), see `sam_grid`."""
+        from .sam_grid import gate_points, grid_masks, grid_points
+
+        hw = rgb.shape[:2]
+        pts = grid_points(hw, pps)
+        if objectness is not None and gate > 0:
+            pts = gate_points(pts, objectness, hw, gate)
+        res = grid_masks(self._predictor(rgb), hw, pts)
+        # hand the decoder's cached blocks back before CLIP / ONNX allocate theirs
+        if self.device == "cuda":
+            import torch
+
+            torch.cuda.empty_cache()
+        return [
+            {"mask": r["mask"], "source": "amg", "stability": r["stability"]}
+            for r in res
+        ]
+
     def _amg(self, rgb: np.ndarray, pps: int) -> list[Instance]:
         import torch
         from sam2.automatic_mask_generator import SAM2AutomaticMaskGenerator
@@ -641,6 +845,8 @@ class Segmenter:
         if not boxes:
             return added
         pred = self._predictor(rgb)
+        if self.effective_quality == "fast":
+            return self._fill_batched(pred, rgb, union, boxes, min_px, max_overlap)
         with torch.inference_mode():
             for b in boxes:
                 if _fraction_covered(union, b) > 0.6:
@@ -660,14 +866,39 @@ class Segmenter:
                 union |= mask
         return added
 
+    def _fill_batched(
+        self,
+        pred: Any,
+        rgb: np.ndarray,
+        union: np.ndarray,
+        boxes: list[list[float]],
+        min_px: float,
+        max_overlap: float,
+    ) -> list[Instance]:
+        """`_fill` for quality="fast": one batched decoder pass over the boxes the grid masks leave uncovered."""
+        from .sam_grid import box_masks
+
+        todo = [b for b in boxes if _fraction_covered(union, b) <= 0.6]
+        added: list[Instance] = []
+        decoded = box_masks(pred, rgb.shape[:2], np.asarray(todo, np.float32))
+        for box, (mask, score) in zip(todo, decoded, strict=True):
+            if _fraction_covered(union, box) > 0.6:
+                continue  # explained by a mask this very pass added (the stock `_fill` re-checks after every addition)
+            n = int(mask.sum())
+            if n == 0 or n < min_px or (mask & union).sum() / max(n, 1) > max_overlap:
+                continue
+            added.append({"mask": mask, "source": "owl", "stability": score})
+            union |= mask
+        return added
+
     # CLIP background rejection
     def _reject(self, rgb: np.ndarray, masks: list[np.ndarray]) -> np.ndarray:
         clip = self._get_clip()
         crops = [crop_masked(rgb, m, keep_bg=True)[0] for m in masks]
         img = clip.images(crops)
         if self._bg_text is None:
-            self._bg_text = clip.texts(BG_PROMPTS + FG_PROMPTS)
-        return bg_probability(img, self._bg_text, len(BG_PROMPTS))
+            self._bg_text = clip.texts(self.bg_prompts + self.fg_prompts)
+        return bg_probability(img, self._bg_text, len(self.bg_prompts))
 
     # UI helpers: click-to-add
     def add_by_point(
