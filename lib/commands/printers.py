@@ -1,4 +1,4 @@
-"""3d printers — inspect the printer registry and see everything about one printer.
+"""3d printers — the printer registry, one printer's dossier and its filament.
 
 WHAT: `list` shows every known printer MODEL with its build volume; `show NAME` is the
   one-screen dossier of a printer: model spec (build volume, nozzle, firmware, default
@@ -19,6 +19,12 @@ Examples:
   3d printers show u1                       # dossier of the fleet printer `u1`: spec + machine + live
   3d printers show u1 --no-live --json      # static facts only, machine-readable, no network
   3d printers show k1se --history 10 --secs 3
+  3d printers spools                        # which spool is in which printer, active-spool agreement
+  3d printers swap 9 u1/T2 --to WH:default  # exchange a slot's spool
+
+Self-registering subs (lib/printers_cli/<sub>.py, found by `printers_cli.discover()`; no edit here
+  to add one): `spools`/`load`/`unload`/`swap`/`filament` (the filament in the printers).
+  `list` and `show` stay in this module.
 
 ROADMAP §2a: "Materials & printers — shared, cross-cutting vocabularies.
   Single canonical registries materials.yaml + printers.yaml (built-in defaults +
@@ -151,13 +157,27 @@ def _print_show(argv: list[str]) -> int:
     return 0
 
 
+def _usage() -> str:
+    """USAGE plus one line per self-registering sub (`printers_cli/<sub>.py`)."""
+    from printers_cli import discover
+
+    subs = discover()
+    if not subs:
+        return USAGE
+    width = max(len(s.name) for s in subs.values())
+    lines = [f"  {s.name:<{width}}  {s.summary}" + (f"  (alias: {', '.join(s.aliases)})" if s.aliases else "")
+             for s in subs.values()]
+    return (USAGE.rstrip("\n") + "\n\nMore subcommands (`3d printers <sub> --help` for each):\n"
+            + "\n".join(lines) + "\n")
+
+
 def run(argv: list[str]) -> int:
     if not argv:
-        print(USAGE)
+        print(_usage())
         return 1
     sub = argv[0]
     if sub in ("-h", "--help", "help"):
-        print(USAGE)
+        print(_usage())
         return 0
 
     if sub == "list":
@@ -168,17 +188,21 @@ def run(argv: list[str]) -> int:
             return 0
         return _print_show(argv[1:])
 
-    raise UsageError(
-        f"unknown subcommand '{sub}'",
-        command="printers",
-        remediation=["Use `list` or `show <name>` — see `3d printers --help`."],
-    )
+    from printers_cli import discover, dispatch, resolve
+
+    if resolve(sub) is None:
+        raise UsageError(
+            f"unknown subcommand '{sub}'",
+            command="printers",
+            remediation=[f"Use list, show or one of {', '.join(discover())} — see `3d printers --help`."],
+        )
+    return dispatch(argv)
 
 
 COMMAND = Command(
     name="printers",
     group="LIBRARIES",
-    summary="printer registry + one-screen printer dossier: list / show <name>",
+    summary="printer registry + dossier + fleet actions: list / show / spools / load / filament",
     usage=USAGE,
     run=run,
 )
