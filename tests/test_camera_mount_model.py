@@ -69,18 +69,27 @@ def test_part_exports_to_one_closed_body_on_the_k1se_bed(
     part: str, tmp_path: Path
 ) -> None:
     mesh = trimesh.load(_export(part, tmp_path / f"{part}.stl"))
-    # OpenSCAD 2021 (CI) prints ASCII STL with ~6 significant digits, so a part rotated by
-    # cam_yaw = -45 degrees can carry sub-micron sliver triangles whose corners straddle a
-    # rounding boundary on one CPU's libm and not another's; weld at 1 um and drop the
-    # zero-area faces before asking whether the body is closed.
-    mesh.merge_vertices(digits_vertex=3)
-    mesh.update_faces(mesh.nondegenerate_faces())
-    mesh.remove_unreferenced_vertices()
     assert mesh.is_watertight
     assert len(mesh.split(only_watertight=False)) == 1
     lo, hi = mesh.bounds
     assert lo[2] == pytest.approx(0.0, abs=1e-3), "part must sit on the bed"
     assert max(hi[0] - lo[0], hi[1] - lo[1]) <= K1SE_BED_MM - 10
+
+
+# OpenSCAD 2021 (the CGAL build CI installs) tessellates a CSG result differently from one run
+# to the next. A model with near-coplanar sliver facets therefore exports a closed body on some
+# runs and a non-manifold one on others: the cam_plate, whose cradle was built from cubes
+# rotated one by one to cam_yaw = -45, failed about 4 runs in 10 on the same machine. One
+# export per CI run cannot pin that; eight let a model that bad through about 1 time in 60.
+CAM_PLATE_EXPORT_RUNS = 8
+
+
+@needs_openscad
+@pytest.mark.parametrize("run", range(CAM_PLATE_EXPORT_RUNS))
+def test_cam_plate_is_one_closed_body_on_every_export(run: int, tmp_path: Path) -> None:
+    mesh = trimesh.load(_export("cam_plate", tmp_path / f"cam_plate_{run}.stl"))
+    assert mesh.is_watertight
+    assert len(mesh.split(only_watertight=False)) == 1
 
 
 @needs_openscad

@@ -350,37 +350,44 @@ module arm() {
 // three tilt-screw heads (countersunk seats underneath); the tab below carries a cradle the
 // C920 clip foot slides down into: two rails with lips over the foot's side edges and two
 // 45-degree stops at the bottom (no bridge across the slot in either print or use).
+//
+// The plate is built in the tab's own frame (+x along the tab), so every rail, lip, slot and
+// tab face is axis-aligned and the faces that must be coplanar lie on one plane; the finished
+// solid is rotated by cam_yaw once. Rotating each cube on its own rounded every vertex
+// separately, and at the 45-degree yaw that left near-coplanar sliver facets between the
+// parts: OpenSCAD 2021 (CI's CGAL build) exported a non-manifold body on about 4 runs in 10.
+// The pad, the tilt holes and the axis mark are counter-rotated by -cam_yaw so that final
+// rotation puts them where the hub frame wants them.
 module cam_plate() {
     slot_x = cam_axis_off;   // the foot's back face lies on the tab face here
-    difference() {
+    rotate(cam_yaw) difference() {
         union() {
             hull() {
-                translate([0, 0, -plate_t]) cylinder(r = pad_r, h = plate_t);
-                rotate(cam_yaw) translate([slot_x - clip_t - fit - lip, -tab_w / 2, -plate_t]) cube([clip_t + fit + lip + tab_t + 11, tab_w, plate_t]);
+                // the pad keeps its facets where they sit in the hub frame
+                rotate(-cam_yaw) translate([0, 0, -plate_t]) cylinder(r = pad_r, h = plate_t);
+                translate([slot_x - clip_t - fit - lip, -tab_w / 2, -plate_t]) cube([clip_t + fit + lip + tab_t + 11, tab_w, plate_t]);
             }
-            rotate(cam_yaw) {
-                translate([slot_x, -tab_w / 2, -plate_t - tab_len + eps]) cube([tab_t, tab_w, tab_len]);
-                for (s = [-1, 1]) {
-                    // rail + lip, along the whole tab
-                    translate([slot_x - clip_t - fit - lip / 2, s * (tab_w / 2 - rail / 2 - 0.5), -plate_t - tab_len / 2 + eps])
-                        cube([clip_t + fit + lip + eps, rail + 1, tab_len], center = true);
-                    translate([slot_x - clip_t - fit - lip, s > 0 ? clip_w / 2 + fit - lip : -tab_w / 2, -plate_t - tab_len + eps])
-                        cube([lip, tab_w / 2 - clip_w / 2 - fit + lip, tab_len]);
-                    // bottom stop: a 45-degree ledge from each rail
-                    translate([slot_x - clip_t - fit, s * (clip_w / 2 + fit), -plate_t - tab_len]) rotate([90, 0, 0])
-                        linear_extrude(4, center = true) polygon([[0, 0], [clip_t + fit + eps, 0], [clip_t + fit + eps, clip_t + fit + 1], [0, 1]]);
-                }
+            translate([slot_x, -tab_w / 2, -plate_t - tab_len + eps]) cube([tab_t, tab_w, tab_len]);
+            for (s = [-1, 1]) {
+                // rail + lip, along the whole tab
+                translate([slot_x - clip_t - fit - lip / 2, s * (tab_w / 2 - rail / 2 - 0.5), -plate_t - tab_len / 2 + eps])
+                    cube([clip_t + fit + lip + eps, rail + 1, tab_len], center = true);
+                translate([slot_x - clip_t - fit - lip, s > 0 ? clip_w / 2 + fit - lip : -tab_w / 2, -plate_t - tab_len + eps])
+                    cube([lip, tab_w / 2 - clip_w / 2 - fit + lip, tab_len]);
+                // bottom stop: a 45-degree ledge from each rail
+                translate([slot_x - clip_t - fit, s * (clip_w / 2 + fit), -plate_t - tab_len]) rotate([90, 0, 0])
+                    linear_extrude(4, center = true) polygon([[0, 0], [clip_t + fit + eps, 0], [clip_t + fit + eps, clip_t + fit + 1], [0, 1]]);
             }
             // gusset between tab and plate
-            rotate(cam_yaw) translate([slot_x + tab_t - eps, 0, -plate_t]) rotate([90, 0, 0])
+            translate([slot_x + tab_t - eps, 0, -plate_t]) rotate([90, 0, 0])
                 linear_extrude(4, center = true) polygon([[0, 0], [10, 0], [0, -14]]);
         }
         // the slot itself: the clip foot slides down between the rails, under the lips
-        rotate(cam_yaw) translate([slot_x - clip_t - fit, -clip_w / 2 - fit, -plate_t - tab_len + 4])
+        translate([slot_x - clip_t - fit, -clip_w / 2 - fit, -plate_t - tab_len + 4])
             cube([clip_t + fit + eps, clip_w + 2 * fit, tab_len]);
-        for (a = tilt_ang) rotate(a) translate([tilt_r, 0, -plate_t]) hanger_hole(plate_t);
+        for (a = tilt_ang) rotate(a - cam_yaw) translate([tilt_r, 0, -plate_t]) hanger_hole(plate_t);
         // axis mark on the plate: line it up with the arm mark
-        translate([0, 0, -0.6]) cylinder(d = 3, h = 1, $fn = 16);
+        rotate(-cam_yaw) translate([0, 0, -0.6]) cylinder(d = 3, h = 1, $fn = 16);
     }
 }
 
