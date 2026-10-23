@@ -344,6 +344,19 @@ skills (`atomic-commits`, `ai-review-before-commit`, `pre-commit-gate`,
   `start`/`cancel` need `--yes`, `start` refuses busy printers and runs `print-preflight`
   (FAIL blocks unless `--force`). Tests use the loopback fakes in `tests/printer_fakes.py`;
   agents never point tests or ad-hoc runs at real printers. See `docs/commands/printer.md`.
+- `printers` (plural) is the model registry AND the fleet-wide actions, as self-registering subs in
+  `lib/printers_cli/<sub>.py` (`SUB = Sub(...)`, found by `printers_cli.discover()`; adding one edits no
+  shared file): `spools|load|unload|swap|filament` (the filament in the printers, thin over printops and the
+  adapters, `--dry-run`/`--json`), `doctor` (`lib/printer_doctor/`: a registry of drop-in checks in
+  `checks/*.py`, each with a severity, evidence and an optional fix of risk class safe / needs-yes /
+  manual-only; `--fix` applies only safe fixes, `--yes` the needs-yes ones, every applied fix is verified by
+  re-running its check and journalled; a new check is one module) and `fw` (`lib/printer_fw/` + vendor
+  profiles as YAML data in `lib/data/firmware/`: `status|plan|backup|apply`, `apply` is a dry run by default
+  and with `--yes` needs a fresh backup, the typed printer name and an idle printer; the runbooks' pitfalls
+  are machine-checked guards). All of it is fleet-driven: nothing is keyed on a printer name
+  (`tests/test_printer_doctor_parity.py`, `tests/test_printer_fw_parity.py` scan for it), and tests use
+  loopback fakes and an injected ssh runner, never a real device. See `docs/commands/printers.md`,
+  `printers-doctor.md`, `printers-fw.md`, `docs/printers/firmware-profiles.md`.
 - `print-preflight` runs EVERY G-code gate (bounds, overhangs, slicer warnings, head
   sequence, mix face, mix layers, thumbnails, visible faces); a new G-code gate is added to
   `printer_ops/preflight.run_preflight`, never left as a separate step, and a gate without
