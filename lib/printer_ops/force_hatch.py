@@ -45,6 +45,7 @@ _MODULE = "agenttools_hatch_escalation"
 # agent-tools checkouts searched, relative to the real home; the first one that has the helper wins.
 _CHECKOUTS = (Path("dev") / "agent-tools", Path("xp") / "agent-tools")
 _DETAIL_CHARS = 240
+_CARD_VALUE_CHARS = 1000  # the shared hatch helper cuts each context value at this length
 
 
 class _Verdict(Protocol):
@@ -109,15 +110,21 @@ def load_hatch() -> _HatchLib:
     raise HatchUnavailable("; ".join(problems))
 
 
-def failing_summary(checks: Sequence[Check]) -> str:
-    """One `- name: detail` line per FAIL (details capped), the text the owner reads on Telegram."""
+def failing_summary(checks: Sequence[Check], budget: int | None = None) -> str:
+    """One `- name: detail` line per FAIL (details capped), the text the owner reads on Telegram.
+
+    `budget` bounds the whole text: the card helper truncates a context value past `_CARD_VALUE_CHARS`,
+    which would silently drop the last FAILs, so the details shrink to fit and every name stays."""
+    failed = [c for c in checks if c.status == FAIL]
+    cap = _DETAIL_CHARS
+    if budget is not None and failed:
+        overhead = sum(len(c.name) + 5 for c in failed)
+        cap = max(20, min(_DETAIL_CHARS, (budget - overhead) // len(failed)))
     lines = []
-    for c in checks:
-        if c.status != FAIL:
-            continue
+    for c in failed:
         detail = " ".join(c.detail.split())
-        if len(detail) > _DETAIL_CHARS:
-            detail = detail[: _DETAIL_CHARS - 1] + "…"
+        if len(detail) > cap:
+            detail = detail[: cap - 1] + "…"
         lines.append(f"- {c.name}: {detail}")
     return "\n".join(lines)
 
@@ -160,7 +167,7 @@ def require_force_approval(
         "printer": printer,
         "file": file,
         "sha256": sha256,
-        "failing_checks": failing,
+        "failing_checks": failing_summary(checks, _CARD_VALUE_CHARS - 50),
     }
     verdict = hatch.request_hatch_approval(
         HOOK_ID, context, cwd=os.getcwd(), command=command, critical=True

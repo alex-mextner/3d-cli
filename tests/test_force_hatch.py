@@ -42,6 +42,13 @@ def test_failing_summary_lists_only_fails_one_line_each() -> None:
     assert len(long) < 300 and long.endswith("…")
 
 
+def test_failing_summary_budget_keeps_every_fail_name() -> None:
+    many = [Check(f"gate{i}", FAIL, "d" * 240) for i in range(5)] + [Check("bed", FAIL, "objects on bed")]
+    text = force_hatch.failing_summary(many, budget=950)
+    assert len(text) <= 950
+    assert all(f"- gate{i}:" in text for i in range(5)) and "- bed: objects on bed" in text
+
+
 def test_hook_id_and_env_var_follow_the_hatch_convention() -> None:
     assert force_hatch.HOOK_ID == "3d-printer-start-force"
     assert (
