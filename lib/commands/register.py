@@ -33,8 +33,9 @@ Options:
   -o, --out DIR        write DIR/registration.json and DIR/warped/NNN.png (A masks in B)
   --json               print exactly one JSON object
 
-baseline_ok is false when the relative rotation is < 3 degrees AND the translation is < 5 % of the plane depth: B is then
-(nearly) the same viewpoint (measured on the carpet pair: 1853 matches, rotation ~0, a pure zoom) and adds no parallax.
+baseline_ok is false when the relative rotation is < 3 degrees AND the translation PERPENDICULAR to the plane normal
+(lateral_translation_ratio) is < 5 % of the plane depth: B is then (nearly) the same viewpoint - or a zoom/dolly along the
+optical axis (flag zoom_or_dolly) - and adds no parallax (measured on the carpet pair: 1853 matches, rotation ~0, a pure zoom).
 The homography is exact only for one plane; tall objects are approximate.
 
 Exit: 0 ok, 2 bad input, 3 photos could not be registered.

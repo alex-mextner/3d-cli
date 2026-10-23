@@ -52,6 +52,9 @@ photos not registrable.
 
 ## Assumptions (also in `quality`)
 
+- `--homography-to ... --other-grid`: **only `mm_per_px` is perspective-correct** (it comes from the composed homography at `--at`); `plane_depth_mm` there is still `f * mm_per_px`, i.e. assumes the plane is fronto-parallel at that pixel.
+- `--grid --calibration FILE` uses the calibration's own focal length (`--f-px/--f-ratio` only feed the detector when no `--calibration` is given). The HSW `photo_calibration.json` route reports `f_source: "given"`.
+
 - **Fronto-parallel** (`--ref`, `--points`, `--homography-to`): the measured segment / plane is parallel to the image plane.
   A segment foreshortened by a tilt of *a* degrees is under-measured by `1 - cos a`: 3.4 % at 15 degrees, 13 % at 30 degrees.
   Flag `fronto_parallel_assumed`.

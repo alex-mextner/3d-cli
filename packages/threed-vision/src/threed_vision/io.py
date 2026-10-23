@@ -66,8 +66,11 @@ def load_mask(path: str | Path) -> np.ndarray:
     p = Path(path)
     if not p.is_file():
         raise BadInput(f"mask not found: {p}")
-    with Image.open(p) as im:
-        return np.array(im.convert("L")) > 0
+    try:
+        with Image.open(p) as im:
+            return np.array(im.convert("L")) > 0
+    except OSError as exc:  # truncated / not an image (PIL's UnidentifiedImageError is an OSError)
+        raise BadInput(f"cannot decode mask {p}: {exc}") from exc
 
 
 def to_jsonable(obj: Any) -> Any:

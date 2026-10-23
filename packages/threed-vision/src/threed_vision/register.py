@@ -6,9 +6,10 @@ photo B w.r.t. photo A for that plane: `X_B = R @ X_A + t_over_depth * d`, with 
 (unknown without a scale: pass `plane_depth_mm` to get `t_mm`).
 
 `baseline_ok` answers "does the second photo add parallax?". It is False when the relative rotation is below 3 degrees AND
-the translation is below 5 % of the plane depth: the second photo is then (almost) the same viewpoint (measured: carpet HEIC
+the translation perpendicular to the plane normal (`lateral_translation_ratio`) is below 5 % of the plane depth: the second
+photo is then (almost) the same viewpoint, or a zoom/dolly along the optical axis (measured: carpet HEIC
 vs IMG_4934 -> 1853 matches, rotation ~0 deg, translation 0), so nothing about the 3-D shape can be learnt from it. A pure
-camera rotation >= 3 degrees about its own centre still reports `baseline_ok=True`; use `translation_ratio` to tell it apart.
+camera rotation >= 3 degrees about its own centre still reports `baseline_ok=True`; use `lateral_translation_ratio` to tell it apart.
 """
 
 from __future__ import annotations

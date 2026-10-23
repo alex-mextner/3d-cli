@@ -404,7 +404,7 @@ def test_scale_from_grid_matches_the_homography_and_accepts_the_hsw_json_schema(
     from_hsw = C.scale_from_grid(hsw, at_px=from_result["at_px"])
     assert (
         from_hsw["mm_per_px"] == pytest.approx(truth, rel=1e-9)
-        and from_hsw["f_source"] == "calibration"
+        and from_hsw["f_source"] == "given"
     )
     with pytest.raises(BadInput):
         C.scale_from_grid({"nonsense": 1})

@@ -272,7 +272,7 @@ def _scale_from_grid(calibration: dict[str, Any], at_px: Any = None) -> dict[str
         R = np.asarray(c["camera_R_object_to_cv"], float).reshape(3, 3)
         t = np.asarray(c["camera_t_object_to_cv_mm"], float).reshape(3)
         Hm = K @ np.column_stack([R[:, 0], R[:, 1], t])
-        f_source = "calibration"
+        f_source = "given"  # the HSW calibration JSON carries a user-supplied focal length
         cells = np.zeros((0, 2))
     else:
         raise BadInput(
@@ -873,7 +873,7 @@ def solve_grid_pose(
     pitch = (float(grid_pitch_mm[0]), float(grid_pitch_mm[1]))
     if not (pitch[0] > 0 and pitch[1] > 0):
         raise BadInput("grid_pitch_mm must be two positive numbers")
-    if abs(pitch[0] / pitch[1] - math.sqrt(3) / 2) > 0.02:
+    if abs(pitch[0] / pitch[1] - math.sqrt(3) / 2) > 1e-3:
         raise BadInput(
             f"grid_pitch_mm {pitch[0]} x {pitch[1]} is not a regular honeycomb (column pitch / row pitch must be sqrt(3)/2 = 0.866)",
             "the labelling relies on the 6-fold symmetry of a regular hexagonal lattice",
