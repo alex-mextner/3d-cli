@@ -44,7 +44,7 @@ explain why the command exists, what its inputs mean, and how it fits into the l
 | Command | Doc | Role |
 |---|---|---|
 | `check` | [check.md](check.md) | Master acceptance gate; runs all applicable gates by default. |
-| `mesh` | [mesh.md](mesh.md) | Watertight/manifold/self-intersection/volume checks. |
+| `mesh` | [mesh.md](mesh.md) | Watertight/manifold/self-intersection/volume checks; `mesh deform` / `mesh fit-silhouette`: deterministic spec-driven sculpting (regions, keep-out zones, ARAP grab, fur relief, remesh) with no GUI. |
 | `halves-check` | [halves-check.md](halves-check.md) | Paired halves of a split part: cut faces, dowel holes, size and islands match in the assembly frame. |
 | `fit-check` | [fit-check.md](fit-check.md) | Already-printed insert vs its socket: locked printed size, no overlap, gap per side all the way up. |
 | `printability` | [printability.md](printability.md) | FDM wall, min-feature, overhang, and orientation checks. |

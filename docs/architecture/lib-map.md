@@ -54,6 +54,7 @@ rendering, slicing support, and verification:
 - `export_formats.py`
 - `import_formats.py`
 - `lib/geometry/mesh_metrics.py`
+- `lib/geometry/mesh_deform.py` — `3d mesh deform` / `fit-silhouette` tool script; the engine lives in `lib/geometry/meshfit/` (regions, brushes, ARAP/biharmonic `deform`, `relief` fur, `retopo`, `fit`, numpy `raster`, `engine` with the keep-out gate).
 - `halves_check.py`
 - `mesh_check.py`
 - `mesh_repair.py`

@@ -11,6 +11,14 @@ Modern print format that natively carries color, materials, and metadata (prefer
 ### AE
 Absolute Error; ImageMagick metric counting mismatched pixels (normalized = count/area). 0 = perfect match. https://imagemagick.org/script/compare.php
 
+### ARAP
+<a id="arap"></a>
+As-Rigid-As-Possible deformation: move handle vertices and let the rest follow while every small neighbourhood stays as close to a rigid motion as it can (alternating a per-vertex best-rotation fit and a sparse linear solve). Used by `3d mesh deform` `grab`. https://igl.ethz.ch/projects/ARAP/
+
+### Biharmonic deformation
+<a id="biharmonic-deformation"></a>
+Handle-based deformation that minimises the thin-plate (Laplacian-of-Laplacian) energy: a smooth, C1 pull with no bulge, linear in the handle motion. `3d mesh deform` uses it for `grab` (`solver: biharmonic`), as the ARAP starting point and in `fit_silhouette`.
+
 ### B-rep
 Boundary Representation; solid modeled by its bounding faces/edges/vertices (OCCT/CadQuery/build123d), as opposed to CSG. https://en.wikipedia.org/wiki/Boundary_representation
 
@@ -128,10 +136,13 @@ https://en.wikipedia.org/wiki/Jaccard_index
 <a id="jq"></a>
 Command-line JSON processor; the inspiration for `3d om` (pipeable filters over the object model). https://jqlang.github.io/jq/
 
+### Keep-out zone
+<a id="keep-out-zone"></a>
+A region of the mesh (eyes, cable notch, phone-contact corridor) that a `3d mesh deform` spec marks as protected: every op's displacement there is multiplied by `1 - weight`, fully-inside vertices stay bit-identical, and the final gate compares the output to the input (max displacement must be 0.0 mm).
+
 ### Layer rules (mix)
 <a id="layer-rules-mix"></a>
 What a legal Full Spectrum layer sequence is: the *minor* (additional) colour is one thin layer between the others, never on two consecutive layers (a repeating pattern wraps: `GWG` repeats as `GWGGWG`, a double-thick G band); no colour band thicker than the run limit (default one layer); every layer of a mixed region at most the *layer cap* (0.12 mm; the first layer is exempt). One validator, `lib/slicing/mix_pattern.py`, behind `3d mix pattern|recipes|tester|check|gcode`. Pattern tokens: `1` = the row's component_a, `2` = component_b, `3`-`9` = that filament.
-
 ### LPIPS
 <a id="lpips"></a>
 Learned Perceptual Image Patch Similarity; perceptual image distance (Zhang et al. 2018). https://arxiv.org/abs/1801.03924
