@@ -80,6 +80,7 @@ class Fake:
         send_ok: bool = True,
         agent_comes_up: bool = True,
         tmux_ok: bool = True,
+        receipt: bool = True,
     ) -> None:
         self.calls: list[list[str]] = []
         self.raw: list[list[str]] = []
@@ -88,20 +89,37 @@ class Fake:
         self.send_ok = send_ok
         self.agent_comes_up = agent_comes_up
         self.tmux_ok = tmux_ok
+        self.receipt = receipt  # False: exit 0 and ok:true, but no `accepted` receipt (a half answer)
 
     def __call__(self, cmd: list[str], **kw: Any) -> subprocess.CompletedProcess[str]:
         self.raw.append(cmd)
-        if "tmux" in cmd:  # record tmux calls without the systemd-run scope and the own socket
-            cmd = cmd[cmd.index("tmux"):]
+        if (
+            "tmux" in cmd
+        ):  # record tmux calls without the systemd-run scope and the own socket
+            cmd = cmd[cmd.index("tmux") :]
             # a tmp state dir never shares the production agents' tmux server (#399)
-            assert cmd[1] == "-L" and cmd[2] == printer_agent.tmux_socket() != printer_agent.TMUX_SOCKET
+            assert (
+                cmd[1] == "-L"
+                and cmd[2] == printer_agent.tmux_socket() != printer_agent.TMUX_SOCKET
+            )
             cmd = [cmd[0], *cmd[3:]]
         self.calls.append(cmd)
         out, code = '{"ok":true}', 0
         if cmd[:3] == ["tg-ctl", "omp-live", "status"]:
             out = json.dumps(self.hosts)
-        elif cmd[:3] == ["tg-ctl", "omp-live", "send"] and not self.send_ok:
-            out, code = '{"ok":false,"error":"gone"}', 1
+        elif cmd[:3] == ["tg-ctl", "omp-live", "send"]:
+            if not self.send_ok:
+                out, code = '{"ok":false,"error":"gone"}', 1
+            elif self.receipt:
+                out = json.dumps(
+                    {
+                        "ok": True,
+                        "accepted": True,
+                        "status": "accepted",
+                        "requestId": cmd[cmd.index("--request-id") + 1],
+                        "sessionId": cmd[cmd.index("--session") + 1],
+                    }
+                )
         elif cmd[0] == "tmux":
             out, code = self._tmux(cmd[1:])
         return subprocess.CompletedProcess(cmd, code, out, "")
@@ -276,8 +294,10 @@ def test_update_matches_by_identity_and_refuses_an_id_collision(xdg: Path) -> No
     whose hash collides with an unrelated one is refused instead of overwriting it."""
     reg = Registry()
     reg.path.parent.mkdir(parents=True)
-    reg.path.write_text("subscriptions: [{id: sold01, session: 01a12cd6, printers: [u1]},"
-                        " {id: sclash, session: other}]")
+    reg.path.write_text(
+        "subscriptions: [{id: sold01, session: 01a12cd6, printers: [u1]},"
+        " {id: sclash, session: other}]"
+    )
     again, new = reg.put(make(session="01a12cd6", printers=["u1"], note="n"))
     assert (again.id, new) == ("sold01", False) and len(reg.load()) == 2
     with pytest.raises(RegistryError, match="collides"):
@@ -526,7 +546,10 @@ def test_dry_run_prints_and_sends_nothing(
     assert SubscriptionSink(runner=run, dry_run=True).deliver([e]) == [e]
     assert run.sends() == []
     err = capsys.readouterr().err
-    assert f"dry-run {s.id} -> session 01a12cd6 (pid 433553)" in err and "frames: /f.jpg" in err
+    assert (
+        f"dry-run {s.id} -> session 01a12cd6 (pid 433553)" in err
+        and "frames: /f.jpg" in err
+    )
     assert not DeliveryState().path.exists()
 
 
@@ -595,7 +618,7 @@ def test_info_events_and_events_a_subscriber_took_never_reach_the_agent(
     assert run.news() == [] and tg.got == [] and len(run.sends()) == 1
     Registry().remove(lambda s: True)
     d.process([noodle(sev=INFO, kind="vision_spaghetti_vetoed")])
-    assert run.news() == [] and tg.got == []   # info is no emergency: never to the phone
+    assert run.news() == [] and tg.got == []  # info is no emergency: never to the phone
 
 
 def test_agent_that_never_comes_up_is_killed_and_tg_gets_the_alert(xdg: Path) -> None:
@@ -608,13 +631,18 @@ def test_agent_that_never_comes_up_is_killed_and_tg_gets_the_alert(xdg: Path) ->
     assert "did not come up within 10 s" in DeliveryState().agent("u1")["last_error"]
 
 
-def test_agent_start_is_limited_per_printer_and_shared_by_processes(xdg: Path) -> None:
+def test_agent_start_is_limited_per_printer_and_shared_by_processes(
+    xdg: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        printer_agent, "START_RETRY_DELAYS_S", ()
+    )  # one failure per delivery
     run = Fake(tmux_ok=False)
     clock = [1000.0]
     a = agents(run, clock)
     with pytest.raises(RuntimeError, match="tmux new-session failed"):
         a.deliver("u1", [noodle()])
-    clock[0] = 1300.0
+    clock[0] = 1010.0  # inside the 30 s backoff window of the failed start
     with pytest.raises(RuntimeError, match="restart limit"):
         agents(run, clock).deliver(
             "u1", [noodle()]
@@ -623,7 +651,7 @@ def test_agent_start_is_limited_per_printer_and_shared_by_processes(xdg: Path) -
     assert "starting the k1se agent" in agents(run, clock).deliver(
         "k1se", [noodle(printer="k1se")]
     )
-    clock[0] = 1601.0
+    clock[0] = 1031.0  # backoff over: the failed start is retried (not 10 min later)
     assert "starting the u1 agent" in agents(run, clock).deliver("u1", [noodle()])
 
 
@@ -679,7 +707,9 @@ def test_full_subscriber_triggers_handoff_once(xdg: Path) -> None:
         "Session 01a12cd6-7b39 (pid 433553" in ask[-1]
         and "3d printer agent handoff u1 --summary" in ask[-1]
     )
-    assert DeliveryState().agent("u1")["handoff_asked"] == [f"{agent_host['sessionId']}->01a12cd6-7b39"]
+    assert DeliveryState().agent("u1")["handoff_asked"] == [
+        f"{agent_host['sessionId']}->01a12cd6-7b39"
+    ]
 
 
 @pytest.mark.parametrize(
@@ -751,8 +781,8 @@ def test_tg_fallback_gets_only_what_no_agent_took_marked_as_such(xdg: Path) -> N
     Registry().remove(lambda s: True)
     d.process([noodle("/z")])
     (call,) = tg.calls
-    assert call[0] == "tg" and call[1].startswith(
-        "[агент недоступен] printer [WARNING]"
+    assert call[:3] == ["tg", "--tag", "problem"] and call[-1].startswith(
+        "u1: possible spaghetti"
     )
 
 
@@ -777,7 +807,10 @@ def test_watch_tg_fallback_setting_and_deprecated_aliases(
         opts = watch_run.parse_args(["u1", *argv])[1]
         return bool(watch_run.settings_for(dev, opts)["sinks"]["tg_fallback"])
 
-    assert fallback({}) is False and fallback({"tg_fallback": True}) is True
+    assert (
+        fallback({}) is True and fallback({"tg_fallback": True}) is True
+    )  # on unless switched off
+    assert fallback({"tg_fallback": False}) is False
     with pytest.raises(InvalidArgument):
         fallback({"tg_fallback": "yes"})
     assert (
@@ -787,7 +820,9 @@ def test_watch_tg_fallback_setting_and_deprecated_aliases(
     )
     for flag in ("--tg", "--tg-always"):
         assert fallback({}, (flag,)) is True
-        assert watch_run.parse_args(["u1", flag])[1]["tokens"] == ["--tg"]  # kept by --install-service
+        assert watch_run.parse_args(["u1", flag])[1]["tokens"] == [
+            "--tg"
+        ]  # kept by --install-service
     assert "deprecated" in capsys.readouterr().err
 
 
@@ -862,7 +897,9 @@ if sys.argv[1:3] == ["omp-live", "status"]:
     print(json.dumps(hosts))
 else:
     open({str(sent)!r}, "a").write(json.dumps(sys.argv[1:]) + "\\n")
-    print('{{"ok":true}}')
+    a = sys.argv
+    print(json.dumps({{"ok": True, "accepted": True, "status": "accepted",
+                      "requestId": a[a.index("--request-id") + 1], "sessionId": a[a.index("--session") + 1]}}))
 """)
     script.chmod(0o755)
     monkeypatch.setenv("PATH", f"{bindir}:{os.environ['PATH']}")
@@ -1095,12 +1132,16 @@ def test_concurrent_watcher_start_awaits_instead_of_falling_back(xdg: Path) -> N
     slot just claimed (tmux not up yet) and waits for that agent instead of paging the user."""
     run = Fake(agent_comes_up=False)
     clock = [1000.0]
-    DeliveryState().claim_start("u1", 999.0, 600.0)   # process A claimed it a second ago
+    DeliveryState().claim_start("u1", 999.0, 600.0)  # process A claimed it a second ago
     a = agents(run, clock)
 
-    def a_comes_up(_: float) -> None:   # meanwhile A's tmux session appears and its omp registers
+    def a_comes_up(
+        _: float,
+    ) -> None:  # meanwhile A's tmux session appears and its omp registers
         run.tmux[session_name("u1")] = str(agent_dir("u1"))
-        run.hosts.append({"pid": 4242, "sessionId": "agent-u1", "cwd": str(agent_dir("u1"))})
+        run.hosts.append(
+            {"pid": 4242, "sessionId": "agent-u1", "cwd": str(agent_dir("u1"))}
+        )
 
     a.sleep = a_comes_up
     fell: list[list[Event]] = []
@@ -1109,13 +1150,19 @@ def test_concurrent_watcher_start_awaits_instead_of_falling_back(xdg: Path) -> N
     assert fell == [] and [c[3] for c in run.sends()] == ["4242"]
 
 
-def test_transient_omp_live_failure_is_retried_while_the_agent_starts(xdg: Path) -> None:
+def test_transient_omp_live_failure_is_retried_while_the_agent_starts(
+    xdg: Path,
+) -> None:
     run = Fake()
     real = run.__call__
     fails = [2]
 
     def flaky(cmd: list[str], **kw: Any) -> subprocess.CompletedProcess[str]:
-        if cmd[:3] == ["tg-ctl", "omp-live", "status"] and session_name("u1") in run.tmux and fails[0]:
+        if (
+            cmd[:3] == ["tg-ctl", "omp-live", "status"]
+            and session_name("u1") in run.tmux
+            and fails[0]
+        ):
             fails[0] -= 1
             return subprocess.CompletedProcess(cmd, 1, "", "bridge restarting")
         return real(cmd, **kw)
@@ -1142,7 +1189,9 @@ def test_sink_close_drains_pending_agent_starts(xdg: Path) -> None:
 
 def test_role_points_at_a_project_local_printer_config(xdg: Path) -> None:
     run = Fake()
-    (xdg / "printer-devices.yaml").write_text("u1: {adapter: moonraker, host: 10.0.0.9}\n")
+    (xdg / "printer-devices.yaml").write_text(
+        "u1: {adapter: moonraker, host: 10.0.0.9}\n"
+    )
     agents(run).start("u1", [noodle()])
     role = (agent_dir("u1") / "role.md").read_text()
     assert f"cd {xdg} && 3d printer" in role
@@ -1155,7 +1204,9 @@ def test_a_new_subscriber_asks_again_after_a_failed_handoff(xdg: Path) -> None:
     d.mkdir(parents=True)
     run.hosts.append({"pid": 777, "sessionId": "agent-u1", "cwd": str(d)})
     assert a.request_handoff("u1", MAIN) and not a.request_handoff("u1", MAIN)
-    assert a.request_handoff("u1", OTHER)   # MAIN went away before the handoff: OTHER is asked
+    assert a.request_handoff(
+        "u1", OTHER
+    )  # MAIN went away before the handoff: OTHER is asked
 
 
 def test_stop_frees_the_restart_slot_but_a_failed_start_keeps_it(xdg: Path) -> None:
@@ -1165,15 +1216,15 @@ def test_stop_frees_the_restart_slot_but_a_failed_start_keeps_it(xdg: Path) -> N
     a.deliver("u1", [noodle()])
     a.join(10)
     assert a.stop("u1")
-    clock[0] = 1100.0   # < 10 min later, e.g. the subscriber it handed over to died
+    clock[0] = 1100.0  # < 10 min later, e.g. the subscriber it handed over to died
     assert "starting the u1 agent" in a.deliver("u1", [noodle()])
     a.join(10)
     run.agent_comes_up = False
     a.stop("u1")
     fell: list[list[Event]] = []
     a.deliver("u1", [noodle()], fell.append)
-    a.join(10)                    # did not come up: stopped, slot kept
-    clock[0] += 100
+    a.join(10)  # did not come up: stopped, slot kept (30 s backoff)
+    clock[0] += 5  # the window runs from the failed start's claim, not from the failure
     with pytest.raises(RuntimeError, match="restart limit"):
         a.deliver("u1", [noodle()])
     assert len(fell) == 1
@@ -1190,11 +1241,15 @@ def test_rate_limited_steer_still_counts_as_taken() -> None:
 
 
 def test_info_only_batches_get_no_triage_steps() -> None:
-    text = agent_message([noodle(sev=INFO, kind="milestone")], [make(session="x", min_severity=INFO)])
+    text = agent_message(
+        [noodle(sev=INFO, kind="milestone")], [make(session="x", min_severity=INFO)]
+    )
     assert "Info only" in text and "What to do" not in text and "tg --photo" not in text
 
 
-def test_requests_ids_are_unique_within_one_millisecond(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_requests_ids_are_unique_within_one_millisecond(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     run = Fake()
     monkeypatch.setattr("time.time", lambda: 1000.0)
     live = OmpLive(runner=run)
@@ -1204,15 +1259,28 @@ def test_requests_ids_are_unique_within_one_millisecond(monkeypatch: pytest.Monk
     assert len(set(rids)) == 2
 
 
-def test_cli_subscribe_stores_the_full_session_id(tgctl: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    assert subscriptions.run("subscribe", ["--session", "01a12cd6", "--printer", "u1"]) == 0
+def test_cli_subscribe_stores_the_full_session_id(
+    tgctl: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert (
+        subscriptions.run("subscribe", ["--session", "01a12cd6", "--printer", "u1"])
+        == 0
+    )
     assert [s.session for s in Registry().load()] == ["01a12cd6-7b39"]
-    assert subscriptions.run("subscribe", ["--session", "01a12cd6-7b39", "--printer", "u1"]) == 0
+    assert (
+        subscriptions.run(
+            "subscribe", ["--session", "01a12cd6-7b39", "--printer", "u1"]
+        )
+        == 0
+    )
     assert len(Registry().load()) == 1 and "\nupdated " in capsys.readouterr().out
 
 
-def test_agent_handoff_without_omp_live_keeps_the_agent(cli_agents: Fake, capsys: pytest.CaptureFixture[str],
-                                                         monkeypatch: pytest.MonkeyPatch) -> None:
+def test_agent_handoff_without_omp_live_keeps_the_agent(
+    cli_agents: Fake,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     def down(self: object) -> list[dict[str, Any]]:
         raise RuntimeError("tg-ctl not found: cannot reach omp sessions")
 
@@ -1244,37 +1312,48 @@ def test_handoff_asks_each_subscriber_once(xdg: Path) -> None:
     assert len([c for c in run.sends() if c[3] == "777"]) == 2
 
 
-def test_shutdown_hands_still_pending_alerts_to_the_fallback_within_the_budget(xdg: Path) -> None:
+def test_shutdown_hands_still_pending_alerts_to_the_fallback_within_the_budget(
+    xdg: Path,
+) -> None:
     run = Fake(agent_comes_up=False)
     gate = threading.Event()
 
     def hold(_: float) -> None:
         gate.wait(5)
 
-    a = PrinterAgents(runner=run, tmux="tmux", omp="omp", sleep=hold, ready_timeout_s=3600)
+    a = PrinterAgents(
+        runner=run, tmux="tmux", omp="omp", sleep=hold, ready_timeout_s=3600
+    )
     fell: list[list[Event]] = []
     a.deliver("u1", [noodle()], fell.append)
     a.join(0.2)
     assert [[e.kind for e in b] for b in fell] == [["vision_spaghetti"]]
-    run.hosts.append({"pid": 5, "sessionId": "late", "cwd": str(agent_dir("u1"))})  # comes up late:
+    run.hosts.append(
+        {"pid": 5, "sessionId": "late", "cwd": str(agent_dir("u1"))}
+    )  # comes up late:
     gate.set()
     a.join(10)
-    assert len(fell) == 1 and run.sends() == []   # settled once: no second delivery
+    assert len(fell) == 1 and run.sends() == []  # settled once: no second delivery
 
 
 def test_dotted_printer_names_get_a_tmux_safe_session() -> None:
     assert session_name("k1.se") == "3d-printer-agent-k1_se"
 
 
-def test_the_real_tmux_is_refused_under_pytest(xdg: Path, monkeypatch: pytest.MonkeyPatch,
-                                               capsys: pytest.CaptureFixture[str]) -> None:
+def test_the_real_tmux_is_refused_under_pytest(
+    xdg: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
     """#399: a watch run under pytest started a real omp agent. With the default (real) runner,
     the agent refuses before any process is spawned, and the sink reports the alert unreached."""
+
     def no_process(*a: Any, **kw: Any) -> None:
         raise AssertionError(f"a real process was spawned: {a}")
 
     monkeypatch.setattr(subprocess, "Popen", no_process)
-    with pytest.raises(RuntimeError, match="refusing to run the real tmux/omp .*PYTEST_CURRENT_TEST is set"):
+    with pytest.raises(
+        RuntimeError,
+        match="refusing to run the real tmux/omp .*PYTEST_CURRENT_TEST is set",
+    ):
         PrinterAgents().deliver("u1", [noodle()])
     with pytest.raises(RuntimeError, match="refusing"):
         PrinterAgents().stop("u1")
@@ -1285,37 +1364,60 @@ def test_the_real_tmux_is_refused_under_pytest(xdg: Path, monkeypatch: pytest.Mo
     assert not agent_dir("u1").exists()
 
 
-def test_spawn_refusal_sees_pytest_env_and_tmp_dirs_unless_overridden(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_spawn_refusal_sees_pytest_env_and_tmp_dirs_unless_overridden(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     import pwd
 
     assert "PYTEST_CURRENT_TEST" in (printer_agent.spawn_refusal() or "")
     monkeypatch.delenv("PYTEST_CURRENT_TEST")
     monkeypatch.setenv("HOME", "/tmp/pytest-of-ultra/pytest-7/test_x0/home")
     monkeypatch.setenv("XDG_STATE_HOME", "/srv/state")
-    assert printer_agent.spawn_refusal() == "HOME /tmp/pytest-of-ultra/pytest-7/test_x0/home is a pytest tmp dir"
+    assert (
+        printer_agent.spawn_refusal()
+        == "HOME /tmp/pytest-of-ultra/pytest-7/test_x0/home is a pytest tmp dir"
+    )
     monkeypatch.setenv("HOME", "/home/someone")
     monkeypatch.setenv("XDG_STATE_HOME", "/tmp/pytest-of-ultra/pytest-7/test_x0/state")
     assert "the state dir" in (printer_agent.spawn_refusal() or "")
     monkeypatch.setenv(printer_agent.ALLOW_UNDER_TEST_ENV, "1")
     assert printer_agent.spawn_refusal() is None
-    monkeypatch.setenv("PYTEST_CURRENT_TEST", "t")   # even with the override: never the production server
-    monkeypatch.setenv("XDG_STATE_HOME", str(Path(pwd.getpwuid(os.getuid()).pw_dir) / ".local" / "state"))
-    assert "the state dir is the production one" in (printer_agent.spawn_refusal() or "")
+    monkeypatch.setenv(
+        "PYTEST_CURRENT_TEST", "t"
+    )  # even with the override: never the production server
+    monkeypatch.setenv(
+        "XDG_STATE_HOME",
+        str(Path(pwd.getpwuid(os.getuid()).pw_dir) / ".local" / "state"),
+    )
+    assert "the state dir is the production one" in (
+        printer_agent.spawn_refusal() or ""
+    )
     monkeypatch.delenv("PYTEST_CURRENT_TEST")
     monkeypatch.delenv(printer_agent.ALLOW_UNDER_TEST_ENV)
     monkeypatch.setenv("XDG_STATE_HOME", "/srv/state")
-    assert printer_agent.spawn_refusal() is None   # production: no pytest marker at all
+    assert printer_agent.spawn_refusal() is None  # production: no pytest marker at all
 
 
-def test_tmux_socket_is_namespaced_by_the_state_dir(xdg: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_tmux_socket_is_namespaced_by_the_state_dir(
+    xdg: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Only the real user's default state dir uses the production server name; any other state
     dir gets its own server, stable for that dir, so same-named sessions never collide."""
     import pwd
 
     tmp_socket = printer_agent.tmux_socket()
-    assert tmp_socket.startswith("3d-printer-agent-") and tmp_socket == printer_agent.tmux_socket()
-    assert printer_agent.attach_hint("u1") == f"tmux -L {tmp_socket} attach -t 3d-printer-agent-u1"
+    assert (
+        tmp_socket.startswith("3d-printer-agent-")
+        and tmp_socket == printer_agent.tmux_socket()
+    )
+    assert (
+        printer_agent.attach_hint("u1")
+        == f"tmux -L {tmp_socket} attach -t 3d-printer-agent-u1"
+    )
     monkeypatch.setenv("XDG_STATE_HOME", str(xdg / "other"))
     assert printer_agent.tmux_socket() not in (tmp_socket, printer_agent.TMUX_SOCKET)
-    monkeypatch.setenv("XDG_STATE_HOME", str(Path(pwd.getpwuid(os.getuid()).pw_dir) / ".local" / "state"))
+    monkeypatch.setenv(
+        "XDG_STATE_HOME",
+        str(Path(pwd.getpwuid(os.getuid()).pw_dir) / ".local" / "state"),
+    )
     assert printer_agent.tmux_socket() == printer_agent.TMUX_SOCKET

@@ -411,17 +411,29 @@ Sinks — several at once:
 - [The temporary printer agent](printer-subscribe.md#the-temporary-printer-agent) — no flag:
   warning+ events that no live agent (`--steer`, a subscriber) took go to a per-printer omp
   agent in tmux, which judges them and decides itself whether to tell the user.
-- tg — **emergency only**, yaml `watch.tg_fallback: true` (no CLI flag): one message per batch
-  through the `tg` CLI, marked «агент недоступен», carrying only the warning+ events no agent
-  could take (the printer agent did not start). The watcher never messages the user otherwise.
+- tg — **emergency**, on unless yaml `watch.tg_fallback: false` (no CLI flag): ONE short message
+  per incident through the `tg` CLI (≤ 5 lines: `printer: <worst event>`, `+N related: kinds`, the
+  pause outcome; the frame as `--photo`), carrying only the warning+ events nobody could judge — no
+  live subscriber, and the printer agent did not start (3 tries) or was not up within
+  `watch.agent_ack_seconds` (default 90) even after one silent restart. This is the only case
+  where the watcher messages the user itself ([When nobody can
+  judge](printer-subscribe.md#when-nobody-can-judge)). After a message, further alerts of the
+  same or lower severity within `watch.message_cooldown_minutes` (default 10) are folded into one
+  `+N more: kinds` line sent when it ends; a higher severity passes once.
   The old `--tg` / `--tg-always` flags and `tg:` key are read as `tg_fallback: true` with a
   deprecation warning.
+- pause — before that message, a high-confidence critical finding pauses the print itself when
+  `watch.pause_without_agent` is `critical-only` (default for own, `access: full` printers with a
+  camera): [Pause without an agent](printer-vision.md#pause-without-an-agent). The stream itself
+  stays read-only; the pause goes through the adapter, once per job, never resume or cancel.
 - `--dry-run` — exec/steer/subscriptions/agent/tg print what they would send to stderr instead.
+  Refused in a service (stderr is the journal): a service never holds alerts.
 
 Delivery rules: events below `--min-severity` (default `info`) are dropped; the same event
 key within `--dedup-min` (default 10) is dropped; events arriving within 2 s go out as one
-tg/steer message, most severe first; tg and steer send at most 6 messages per 10 minutes —
-critical events always go through, and the next message says how many were held back.
+tg/steer message, most severe first; steer sends at most 6 messages per 10 minutes (critical
+events always go through, and the next message says how many were held back); tg sends one
+message per incident and a cooldown per printer (above).
 
 Other options: `--all`, `--stall-min N` (15), `--heat-timeout-min N` (10), `--milestones 50,90`,
 `--heartbeat FILE`, `--duration S` (stop after S seconds).
@@ -434,7 +446,10 @@ u1:
   host: 192.168.0.26
   watch:
     steer: 01a12cd6          # or a list; also `exec: CMD` / a list
-    tg_fallback: true        # emergency: phone gets only what NO agent could take
+    tg_fallback: true        # emergency (the default; false = nobody is told when no agent can judge)
+    agent_ack_seconds: 90    # the temporary agent must show up in omp-live within this (one silent restart), else tg (+ pause)
+    message_cooldown_minutes: 10   # per printer: same-or-lower severity alerts after a tg message are folded into one line
+    pause_without_agent: critical-only   # or off; default critical-only for own/full/camera printers
     min_severity: info
     stall_minutes: 20
     heat_timeout_minutes: 10
@@ -633,4 +648,4 @@ or printer unreachable; 2 usage error, unknown printer, bad config or fleet file
 
 ### Managed agent receivers
 
-`watch.agent_fallback: false` disables automatic temporary-agent creation when a registered subscriber is unavailable; registered subscribers and stdout remain active. The default is true for backwards compatibility. Combine with `watch.tg_fallback: false` when raw external messaging is not authorized. Only actual booleans are accepted. A missing subscriber is still a delivery failure, not success.
+`watch.agent_fallback: false` disables automatic temporary-agent creation when a registered subscriber is unavailable; registered subscribers and stdout remain active. The default is true for backwards compatibility. Combine with `watch.tg_fallback: false` when raw external messaging is not authorized (the default `tg_fallback: true` otherwise messages the user when no subscriber is live). Only actual booleans are accepted. A missing subscriber is still a delivery failure, not success.

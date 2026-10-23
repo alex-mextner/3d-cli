@@ -30,7 +30,8 @@ import contextlib
 import fcntl
 import json
 import math
-from collections.abc import Iterable
+import os
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -122,13 +123,41 @@ def buffer_files() -> tuple[Path, list[Path]]:
     return d, _files(d)
 
 
+def append(printer: str, record: Mapping[str, Any]) -> Path:
+    """Append one record as a line to `<buffer_dir>/<printer>.jsonl`: flock, one O_APPEND write,
+    fsync (module doc, FORMAT). Raises HistoryBufferError for a name that is not a file name."""
+    if not printer or "/" in printer or printer.startswith("."):
+        raise HistoryBufferError(f"printer {printer!r} is not a fleet printer name")
+    d = buffer_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    path = d / f"{printer}.jsonl"
+    line = (
+        json.dumps(dict(record), ensure_ascii=False, separators=(", ", ": ")) + "\n"
+    ).encode("utf-8")
+    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            view = memoryview(line)
+            while view:  # a short write must not leave a torn line behind silently
+                view = view[os.write(fd, view) :]
+            os.fsync(fd)
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+    return path
+
+
 def _no_constant(name: str) -> Any:
     raise ValueError(f"{name} is not a JSON number")
 
 
 def _int64(text: str) -> int:
     value = int(text)
-    if not -(2**63) <= value < 2**63:  # SQLite INTEGER; a float() of it could overflow too
+    if (
+        not -(2**63) <= value < 2**63
+    ):  # SQLite INTEGER; a float() of it could overflow too
         raise ValueError(f"{text[:20]}… is out of the integer range")
     return value
 
@@ -150,8 +179,12 @@ def parse_lines(raw_lines: Iterable[str]) -> list[Line]:
         if not text:
             continue
         try:
-            data = json.loads(text, parse_constant=_no_constant, parse_float=_finite, parse_int=_int64)
-        except ValueError as e:  # JSONDecodeError, or NaN/Infinity/1e999/huge ints (unstorable)
+            data = json.loads(
+                text, parse_constant=_no_constant, parse_float=_finite, parse_int=_int64
+            )
+        except (
+            ValueError
+        ) as e:  # JSONDecodeError, or NaN/Infinity/1e999/huge ints (unstorable)
             if not isinstance(e, json.JSONDecodeError):
                 raise HistoryBufferError(str(e), line=n) from e
             raise HistoryBufferError(

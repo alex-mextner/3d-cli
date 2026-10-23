@@ -12,8 +12,11 @@ WHAT: one thread per printer keeps a websocket open and feeds its detector (watc
   A stream with no data for `silence_s` is treated as dead (Moonraker pushes proc stats every
   second, the K1 heartbeats), then reconnects with exponential backoff (2 s .. 60 s).
 
-READ-ONLY: the only frames ever sent are the JSON-RPC queries above and the K1 heartbeat
-  reply — never a G-code, start, pause or cancel.
+READ-ONLY: the only frames ever sent on the stream are the JSON-RPC queries above and the K1
+  heartbeat reply — never a G-code, start, pause or cancel. The single, opt-out exception is
+  outside the stream: for a printer with `watch.pause_without_agent` (default on for own
+  printers with access full and a camera) a high-confidence critical finding that NO agent could
+  judge pauses the print through the adapter (auto_pause.py), once per job, never resume/cancel.
 
 HEARTBEAT: a JSON file (default ~/.local/state/3d-cli/watch/<names>.json) rewritten every
   `heartbeat_s` with per-printer connection/state/last-message age and per-sink counters,
@@ -58,8 +61,12 @@ UNIT_NAME = "3d-printer-watch@.service"
 # printer-devices.yaml `<name>.watch:` keys and their CLI flags.
 # `vision` belongs to `3d printer vision` (issue #150), which shares the same sinks; watch ignores it.
 # `bed` starts the bed monitor child (printer_ops/bed.py, issue #303).
-WATCH_KEYS = ("agent_fallback", "tg_fallback", "steer", "exec", "stdout", "min_severity", "stall_minutes", "heat_timeout_minutes",
-              "milestones", "dedup_minutes", "vision", "bed")
+WATCH_KEYS = ("agent_fallback", "agent_ack_seconds", "tg_fallback", "message_cooldown_minutes", "pause_without_agent",
+              "steer", "exec", "stdout", "min_severity", "stall_minutes", "heat_timeout_minutes", "milestones",
+              "dedup_minutes", "vision", "bed")
+DEFAULT_AGENT_ACK_S = 90.0
+DEFAULT_MESSAGE_COOLDOWN_MIN = 10.0
+MAINTAIN_EVERY_S = 300.0   # how often the watcher prunes dead subscriptions (Dispatcher.maintain)
 
 USAGE = """3d printer watch NAME... | --all [options]
   Subscribe to the printers' live state (read-only) and report anomalies as events:
@@ -86,9 +93,20 @@ Sinks (several at once; per printer also from printer-devices.yaml `<name>.watch
                           (no flag; see `3d printer subscribe --help`)
   printer agent           warning+ events no live agent took go to a temporary omp agent
                           for that printer (`3d printer agent --help`); no flag
-  tg (emergency)          yaml `watch.tg_fallback: true` only: warning+ events NO agent could take
-                          (the printer agent did not start) go to the phone, marked
-                          «агент недоступен». The watcher never messages the user otherwise.
+  tg (emergency)          warning+ events NO agent could take (no live subscriber, and the printer
+                          agent did not start or did not come up within `watch.agent_ack_seconds`,
+                          default 90, after one silent restart of the agent) go to the phone as ONE
+                          short message per incident (<= 5 lines: headline, `+N related: kinds`, the
+                          pause outcome) with the frame: the only case where the watcher messages the
+                          user itself. Same-or-lower severity alerts within
+                          `watch.message_cooldown_minutes` (default 10) are folded into one `+N more:
+                          kinds` line when it ends; a higher severity goes through once. On by default;
+                          yaml `watch.tg_fallback: false` turns it off (then nobody is told).
+  pause (emergency)       before that message, a high-confidence critical finding (verified
+                          vision_spaghetti, vision_part_detached; docs/commands/printer-vision.md
+                          #pause-without-an-agent) pauses the print if `watch.pause_without_agent`
+                          is `critical-only` (the default for own, access: full printers with a
+                          camera; `off` disables it). Never resumes or cancels.
 
 Options:
   --all                    every printer in printer-devices.yaml
@@ -99,12 +117,13 @@ Options:
   --dedup-min N            drop a repeated event key within N minutes (default 10)
   --heartbeat FILE         heartbeat JSON (default ~/.local/state/3d-cli/watch/<names>.json)
   --duration S             stop after S seconds (demo / smoke test)
-  --dry-run                steer/exec/subscribers/agent/tg print what they would send (stderr)
+  --dry-run                steer/exec/subscribers/agent/tg print what they would send (stderr);
+                           refused in a service (stderr is the journal): a service never holds alerts
   --install-service        write the user systemd unit for each NAME (other flags go to
                            ~/.config/3d-cli/watch/NAME.env) and print the enable command
 
-Delivery: events arriving within 2 s are batched into one message; steer and tg send at
-most 6 messages per 10 min (critical events always go through). Severity:
+Delivery: events arriving within 2 s are batched into one message; steer sends at most 6
+messages per 10 min (critical events always go through), tg at most one per incident. Severity:
 critical = needs a decision now (error, exception, homing lost, filament runout while
 printing, Klipper shutdown); warning = paused/cancelled/bed off/temperature/stall;
 info = started/resumed/complete/snapshot/milestones.
@@ -113,7 +132,8 @@ Config (printer-devices.yaml):
   u1:
     adapter: moonraker
     host: 192.168.0.26
-    watch: {steer: 01a12cd6, tg_fallback: true, min_severity: info, stall_minutes: 20}
+    watch: {steer: 01a12cd6, min_severity: info, stall_minutes: 20}   # tg_fallback is on unless false
+    # also: agent_ack_seconds: 90, message_cooldown_minutes: 10, pause_without_agent: critical-only | off
 
 Examples:
   3d printer watch u1 --duration 20
@@ -223,13 +243,29 @@ def settings_for(device: Device, opts: dict[str, Any]) -> dict[str, Any]:
     sinks: dict[str, Any] = {
         "exec": [*_strs(cfg.get("exec"), f"{where}.exec"), *opts.get("--exec", [])],
         "steer": [*_strs(cfg.get("steer"), f"{where}.steer"), *opts.get("--steer", [])],
-        "tg_fallback": _bool(cfg.get("tg_fallback", False), f"{where}.tg_fallback")
+        # On unless explicitly false: a printer without the key (a user override replaces the whole
+        # fleet entry, `watch:` included) once left the user uninformed when no agent could start.
+        "tg_fallback": _bool(cfg.get("tg_fallback", legacy_tg is not False), f"{where}.tg_fallback")
         or legacy_tg not in (None, False) or bool(opts.get("--tg")),
         "stdout": bool(cfg.get("stdout", True)) and not opts.get("--no-stdout"),
     }
+    from printer_ops.auto_pause import resolve_policy
+
+    pause_policy = resolve_policy(device, cfg.get("pause_without_agent"))
+    if pause_policy != "off" and not sinks["tg_fallback"]:
+        if cfg.get("pause_without_agent") is not None:
+            raise InvalidArgument(f"{where}.pause_without_agent", str(cfg["pause_without_agent"]),
+                                  ["off", f"or tg_fallback: true ({device.name}: a pause nobody is told about)"],
+                                  command="printer", extra=f"Fix {device.source}.")
+        pause_policy = "off"   # the default never pauses silently
     return {
         "sinks": sinks,
+        "pause_policy": pause_policy,
+        "agent_ack_s": _number(cfg.get("agent_ack_seconds", DEFAULT_AGENT_ACK_S), f"{where}.agent_ack_seconds",
+                               minimum=5.0),
         "agent_fallback": _bool(cfg.get("agent_fallback", True), f"{where}.agent_fallback"),
+        "message_cooldown_s": _number(cfg.get("message_cooldown_minutes", DEFAULT_MESSAGE_COOLDOWN_MIN),
+                                      f"{where}.message_cooldown_minutes") * 60,
         "min_severity": _severity(cfg.get("min_severity", INFO), f"{where}.min_severity / --min-severity"),
         "limits": WatchLimits(
             stall_s=_number(cfg.get("stall_minutes", 15), "--stall-min", minimum=1) * 60,
@@ -654,6 +690,8 @@ def run(argv: list[str]) -> int:
         dispatcher.add_settings(d.name, settings[d.name], dry_run=bool(opts.get("--dry-run")))
     heartbeat = Heartbeat(Path(opts["--heartbeat"]) if "--heartbeat" in opts else default_heartbeat(names))
     stop = threading.Event()
+    dispatcher.maintain()   # prune subscriptions dead for too long before the first alert
+    next_maintain = time.monotonic() + MAINTAIN_EVERY_S
 
     def _term(*_: Any) -> None:
         stop.set()
@@ -675,6 +713,9 @@ def run(argv: list[str]) -> int:
                 break
             stop.wait(min(15.0, left) if left is not None else 15.0)
             heartbeat.write(dispatcher.stats(), dispatcher.last_event)
+            if time.monotonic() >= next_maintain:
+                next_maintain = time.monotonic() + MAINTAIN_EVERY_S
+                dispatcher.maintain()
     except KeyboardInterrupt:
         pass
     finally:
