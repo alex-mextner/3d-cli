@@ -25,6 +25,10 @@ model gates ──> slice ──> G-code gates ──> print-preflight ──> p
 [`3d slice`](../commands/slice.md) or the slicer CLI; [`3d slice-check PLATE.3mf`](../commands/slice-check.md)
 checks that the project opens and slices headless.
 
+A ready project 3MF made for another printer is not re-sliced from the mesh: retarget it first
+(`3d retarget PROJECT.3mf --to PRINTER --keep N`, [`docs/commands/retarget.md`](../commands/retarget.md)) —
+it keeps the orientation, supports and tuned settings and fails loudly when the part cannot fit.
+
 Every slice records the slicer's own warnings next to the G-code, bound to its SHA-256:
 `3d slice` does it itself; a project script that runs the slicer CLI keeps its stdout+stderr,
 `result.json` and (with `--export-3mf`) the sliced 3MF, and after the last edit of the G-code
