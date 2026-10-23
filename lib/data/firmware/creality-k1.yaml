@@ -1,0 +1,468 @@
+# Creality K1 family (K1, K1 SE, K1C, K1 Max): stock -> official root access -> Creality Helper
+# Script -> Moonraker + Fluidd (Klipper-ready, 3d `moonraker` adapter).
+#
+# DATA only (schema: docs/printers/firmware-profiles.md); every vendor fact cites a source, what no
+# source states is marked [INFERENCE]. Runbook encoded line by line:
+# https://github.com/alex-mextner/3d-cli/blob/main/docs/printers/k1se-root-upgrade.md
+id: creality-k1
+vendor: Creality
+family: K1 series (K1, K1 SE, K1C, K1 Max)
+models:
+  - regex: '^creality\s+k1(\s?(se|c|max))?$'
+sources:
+  - https://guilouz.github.io/Creality-Helper-Script-Wiki/
+  - https://guilouz.github.io/Creality-Helper-Script-Wiki/firmwares/install-and-update-rooted-firmware-k1/
+  - https://guilouz.github.io/Creality-Helper-Script-Wiki/helper-script/helper-script-installation/
+  - https://github.com/Guilouz/Creality-Helper-Script
+  - https://github.com/CrealityOfficial/K1_Series_Klipper
+  - https://github.com/alex-mextner/3d-cli/blob/main/docs/printers/k1se-root-upgrade.md
+capabilities:
+  klipper_possible: true
+  notes: >-
+    The stock K1 firmware runs Klipper but ships no Moonraker (the stock web UI on :80 and the ws :9999 API are Creality's
+    own `web-server`). Creality's official root access plus Guilouz's Creality Helper Script install Moonraker + Fluidd
+    and keep the stock stack, so `3d printer` can use the moonraker adapter. The Helper Script supports K1-series
+    firmware 1.3.3.5 and later; some 2025 K1C units ship without the root menu item (stop there, do not try exploits).
+services:
+  web: 80
+  fluidd: 4408
+  moonraker: 7125
+  camera: 8080
+adapter_services:
+  creality-stock: web
+  moonraker: moonraker
+ssh:
+  user: root
+  credentials: >-
+    Creality documents root / creality_2023 once root is enabled on the screen (public: anyone on the LAN can use it).
+    Install your public key and run `passwd` on first login; 3d uses ssh BatchMode (key or agent only) and stores no
+    password. Dropbear needs ~28 s to send its banner, hence the long connect timeout.
+  connect_timeout_s: 90
+idle_probe:
+  kind: http_get
+  id: k1-print-state
+  title: Moonraker print_stats.state is an idle state
+  service: moonraker
+  path: "/printer/objects/query?print_stats"
+  json_path: result.status.print_stats.state
+  regex: '^(standby|complete|cancelled|error)$'
+
+backups:
+  - id: info-json
+    description: Stock GET /info (model, hostname) taken before root.
+    via: http_get
+    service: web
+    path: /info
+  - id: fluidd-release-info
+    description: Fluidd release_info.json of the Creality preinstall (absent after root).
+    via: http_get
+    service: fluidd
+    path: /release_info.json
+    optional: true
+  - id: printer-cfg
+    description: printer.cfg; its #*# SAVE_CONFIG block holds bed mesh, input shaper and PID values.
+    via: ssh_file
+    path: /usr/data/printer_data/config/printer.cfg
+    expect_regex: '(?m)^#\*# \['
+    states: [rooted, helper-installed, klipper-ready]
+  - id: config-tree
+    description: printer_data/config (macros, printer parameters, sensorless, factory config) as a tarball.
+    via: ssh_tar
+    base: /usr/data
+    paths: [printer_data/config]
+    expect_tar_members:
+      - printer_data/config/printer.cfg
+      - printer_data/config/gcode_macro.cfg
+    states: [rooted, helper-installed, klipper-ready]
+  - id: userdata-tree
+    description: creality/userdata (screen settings and the screen's Z-offset, stored outside printer.cfg [INFERENCE]).
+    via: ssh_tar
+    base: /usr/data
+    paths: [creality/userdata]
+    optional: true
+    states: [rooted, helper-installed, klipper-ready]
+  - id: ws-baseline
+    description: The printer's own view of its tuning (ws :9999 ReqPrinterPara) and its G-code file list, stock firmware only.
+    via: manual
+    instruction: >-
+      Run the read-only baseline of docs/printers/k1se-root-upgrade.md section 3.1 (GET /info plus a ws `get ReqPrinterPara`
+      and `reqGcodeFile`); there is no HTTP API for printer.cfg on stock firmware.
+
+states:
+  - id: stock
+    title: Creality stock firmware (web-server on :80 and ws :9999; no Moonraker, no key-authenticated ssh)
+    detection:
+      all:
+        - {kind: http_get, id: stock-info, title: stock web server answers GET /info, service: web, path: /info}
+    notes: "Baseline: the stock stack keeps answering in every later state."
+  - id: rooted
+    title: Root enabled on the screen and key-based ssh works
+    detection:
+      all:
+        - {kind: tcp_banner, id: ssh-banner, title: dropbear sends an SSH banner, service: ssh, regex: '^SSH-2\.0-', timeout: 45}
+        - {kind: ssh_command, id: ssh-key-auth, title: key-based ssh login works, command: test -d /usr/data}
+    notes: >-
+      Before root `:22` accepts TCP but sends no SSH banner (runbook, [INFERENCE: sshd not running]); the banner takes ~28 s
+      even after root. Banner without a working key is reported as a partial detection: install your key first.
+    sources:
+      - https://guilouz.github.io/Creality-Helper-Script-Wiki/firmwares/install-and-update-rooted-firmware-k1/
+  - id: helper-installed
+    title: Creality Helper Script present in /usr/data/helper-script
+    requires: [rooted]
+    detection:
+      all:
+        - {kind: ssh_file_exists, id: helper-script, title: /usr/data/helper-script/helper.sh exists, path: /usr/data/helper-script/helper.sh}
+    sources:
+      - https://guilouz.github.io/Creality-Helper-Script-Wiki/helper-script/helper-script-installation/
+  - id: klipper-ready
+    title: Moonraker answers with Klipper ready (Helper Script Moonraker + nginx)
+    detection:
+      all:
+        - {kind: http_get, id: moonraker-ready, title: Moonraker reports klippy_state ready, service: moonraker, path: /server/info, json_path: result.klippy_state, equals: ready}
+    sources:
+      - https://github.com/alex-mextner/3d-cli/blob/main/docs/printers/k1se-root-upgrade.md
+
+guards:
+  - id: never-flash-while-printing
+    kind: require_idle
+    reason: >-
+      Do not start while the K1 prints (runbook): rooting, the Helper Script installs and the reboots they need interrupt a job.
+    sources:
+      - https://github.com/alex-mextner/3d-cli/blob/main/docs/printers/k1se-root-upgrade.md
+  - id: keep-creality-web-server-up
+    kind: invariant_probe
+    reason: >-
+      The 3d creality-stock adapter, HA ha_creality_ws and Creality Print uploads use the stock `web-server` (:80 and ws :9999);
+      nothing may stop it. After every step the stock GET /info must still answer.
+    probe:
+      kind: http_get
+      id: stock-web-server
+      title: stock web server still answers GET /info
+      service: web
+      path: /info
+    sources:
+      - https://github.com/alex-mextner/3d-cli/blob/main/docs/printers/k1se-root-upgrade.md
+  - id: no-remove-creality-web-interface
+    kind: forbidden_option
+    options: [remove-creality-web-interface, customize-remove-creality-web-interface]
+    reason: >-
+      Do NOT use Helper Script Customize > "Remove Creality Web Interface": it renames /usr/bin/web-server and /usr/bin/Monitor to
+      *.disabled, kills them and puts Fluidd on :80. :80 and :9999 are both served by that web-server, so removing it breaks the 3d
+      creality-stock adapter, HA ha_creality_ws and Creality Print uploads.
+    sources:
+      - https://github.com/alex-mextner/3d-cli/blob/main/docs/printers/k1se-root-upgrade.md
+      - https://guilouz.github.io/Creality-Helper-Script-Wiki/helper-script/remove-and-restore-creality-web-interface/
+  - id: no-guppy-screen
+    kind: forbidden_option
+    options: [install-guppy-screen, guppy-screen, customize-guppy-screen]
+    reason: >-
+      Do not install Guppy Screen: it stops the same stock stack (web-server) that the creality-stock adapter and ws :9999 depend on.
+    sources:
+      - https://github.com/alex-mextner/3d-cli/blob/main/docs/printers/k1se-root-upgrade.md
+      - https://guilouz.github.io/Creality-Helper-Script-Wiki/helper-script/guppy-screen/
+  - id: fluidd-needs-world-readable
+    kind: step_requires_command
+    step: install-fluidd
+    pattern: 'chmod -R a\+rX /usr/data/fluidd'
+    reason: >-
+      The Fluidd v1.37.6 zip unpacks as 0600/0700 and nginx (user www-data) answers 403 until `chmod -R a+rX /usr/data/fluidd` is run.
+    sources:
+      - https://github.com/alex-mextner/3d-cli/blob/main/docs/printers/k1se-root-upgrade.md
+  - id: narrow-trusted-clients-after-moonraker
+    kind: step_requires_step
+    step: install-moonraker-nginx
+    requires_step: narrow-trusted-clients
+    reason: >-
+      The Helper Script's Moonraker trusts 192.168.0.0/16 and listens on 0.0.0.0:7125, so the whole LAN would control the printer (G-code,
+      reboot) without an API key; narrow trusted_clients to the hosts that need control and turn off use_xheaders right after the install.
+    sources:
+      - https://github.com/alex-mextner/3d-cli/blob/main/docs/printers/k1se-root-upgrade.md
+  - id: no-ssl-verify-off
+    kind: forbidden_command_pattern
+    pattern: 'sslVerify\s+false'
+    reason: >-
+      Never `git config --global http.sslVerify false` on the printer (the wiki suggests it on an SSL error): the script runs as root and its
+      Moonraker step git-pulls again, so anyone on the path could swap the code. Check `date` first; if TLS still fails use the offline archive.
+    sources:
+      - https://github.com/alex-mextner/3d-cli/blob/main/docs/printers/k1se-root-upgrade.md
+      - https://guilouz.github.io/Creality-Helper-Script-Wiki/helper-script/helper-script-installation/
+
+transitions:
+  - id: enable-root
+    from: stock
+    to: rooted
+    title: Enable root on the screen and install your ssh key
+    sources:
+      - https://guilouz.github.io/Creality-Helper-Script-Wiki/firmwares/install-and-update-rooted-firmware-k1/
+      - https://github.com/alex-mextner/3d-cli/blob/main/docs/printers/k1se-root-upgrade.md
+    steps:
+      - id: enable-root-on-screen
+        title: Settings > Root account information (official Creality root access)
+        kind: manual
+        automatable: false
+        risk: medium
+        instruction: |
+          Firmware must be 1.3.3.5 or later (Settings > About); the Helper Script supports nothing older.
+          1. The printer must be idle. Touchscreen: Settings (gear) > Root account information.
+          2. Read the disclaimer, tick the agreement box, WAIT 30 s until OK becomes active, press OK.
+          3. The next dialog says root is enabled and shows login root / creality_2023. Press OK. If it shows a different password, use that one.
+          Root has to be enabled again after a full factory reset. If this menu item is missing (some 2025 K1C units), STOP:
+          do not try community exploits.
+        verify:
+          wait_s: 120
+          interval_s: 10
+          probes:
+            - {kind: tcp_banner, id: ssh-banner, title: dropbear sends an SSH banner, service: ssh, regex: '^SSH-2\.0-', timeout: 45}
+        rollback:
+          to: stock
+          instruction: >-
+            A full factory reset disables root again (the wiki: root access must be re-enabled after a reset); Creality does not cover
+            problems caused by root use [INFERENCE: exact wording on the screen].
+        sources:
+          - https://guilouz.github.io/Creality-Helper-Script-Wiki/firmwares/install-and-update-rooted-firmware-k1/
+      - id: install-ssh-key
+        title: Log in once with the documented root password, harden root and install your public key
+        kind: manual
+        automatable: false
+        risk: low
+        instruction: |
+          creality_2023 is public: right after the first login (ssh -o ConnectTimeout=90 root@HOST; dropbear needs ~28 s for its banner):
+            passwd                                   # then store the new password in your password manager
+            mkdir -p /root/.ssh && cat >> /root/.ssh/authorized_keys     # paste your PUBLIC key, Ctrl-D
+          If ssh fails with `no matching host key type`, add -o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedAlgorithms=+ssh-rsa [INFERENCE: old dropbear].
+          3d only ever logs in with a key (ssh BatchMode), so this step is what lets `fw backup` and `fw apply` use ssh at all.
+        verify:
+          - {kind: ssh_command, id: ssh-key-auth, title: key-based ssh login works, command: test -d /usr/data}
+        sources:
+          - https://github.com/alex-mextner/3d-cli/blob/main/docs/printers/k1se-root-upgrade.md
+  - id: install-helper-script
+    from: rooted
+    to: helper-installed
+    title: Get the Creality Helper Script into /usr/data/helper-script
+    sources:
+      - https://guilouz.github.io/Creality-Helper-Script-Wiki/helper-script/helper-script-installation/
+      - https://github.com/alex-mextner/3d-cli/blob/main/docs/printers/k1se-root-upgrade.md
+    steps:
+      - id: fetch-helper-script
+        title: git clone (fresh) or update in place (the factory image may already contain an old copy)
+        kind: ssh_script
+        automatable: true
+        risk: medium
+        backup: [printer-cfg, config-tree]
+        command: |
+          set -e
+          ping -c1 github.com >/dev/null && date
+          if [ -d /usr/data/helper-script/.git ]; then
+            cd /usr/data/helper-script && git fetch origin main && git reset --hard origin/main && git clean -fdx
+          else
+            git clone --depth 1 https://github.com/Guilouz/Creality-Helper-Script.git /usr/data/helper-script
+          fi
+        verify:
+          - {kind: ssh_file_exists, id: helper-script, title: /usr/data/helper-script/helper.sh exists, path: /usr/data/helper-script/helper.sh}
+        rollback:
+          instruction: >-
+            rm -rf /usr/data/helper-script removes the script (it is only the installer; components it already installed have their
+            own Remove menus). Runbook pins commit b46787a (2025-05-21, last upstream push when written); this step follows origin/main.
+        notes: >-
+          The path /usr/data/helper-script is hard-coded in the script. Directory exists on our factory image: update in place, never
+          clone over it or untar on top of it. The wiki's `git config --global http.sslVerify false` is refused by a guard.
+        sources:
+          - https://guilouz.github.io/Creality-Helper-Script-Wiki/helper-script/helper-script-installation/
+          - https://github.com/alex-mextner/3d-cli/blob/main/docs/printers/k1se-root-upgrade.md
+  - id: install-moonraker
+    from: helper-installed
+    to: klipper-ready
+    title: Helper Script Moonraker + nginx + Fluidd, then lock Moonraker down
+    sources:
+      - https://github.com/alex-mextner/3d-cli/blob/main/docs/printers/k1se-root-upgrade.md
+      - https://guilouz.github.io/Creality-Helper-Script-Wiki/helper-script/moonraker-k1/
+    steps:
+      - id: remove-preinstalled-moonraker-fluidd
+        title: Remove a preinstalled (broken) Creality Moonraker/Fluidd so the install menu accepts a fresh install
+        kind: ssh_script
+        automatable: true
+        risk: medium
+        backup: [printer-cfg, config-tree]
+        skip_if:
+          - {kind: ssh_file_exists, id: no-preinstalled-moonraker, title: no /usr/data/moonraker to remove, path: /usr/data/moonraker, negate: true}
+        command: |
+          set -e
+          cat > /usr/data/k1drive.sh <<'DRIVER'
+          #!/bin/sh
+          set -e
+          HELPER_SCRIPT_FOLDER=/usr/data/helper-script
+          for s in "$HELPER_SCRIPT_FOLDER"/scripts/*.sh "$HELPER_SCRIPT_FOLDER"/scripts/menu/*.sh "$HELPER_SCRIPT_FOLDER"/scripts/menu/K1/*.sh; do . "$s"; done
+          set_paths; set_permissions; model=K1
+          for f in "$@"; do echo "=== $f"; "$f"; done
+          DRIVER
+          chmod +x /usr/data/k1drive.sh
+          printf 'y\ny\n' | /usr/data/k1drive.sh remove_fluidd remove_moonraker_nginx
+        verify:
+          - {kind: ssh_file_exists, id: moonraker-removed, title: /usr/data/moonraker is gone, path: /usr/data/moonraker, negate: true}
+          - {kind: ssh_file_exists, id: fluidd-removed, title: /usr/data/fluidd is gone, path: /usr/data/fluidd, negate: true}
+        rollback:
+          instruction: >-
+            The next step installs both again; the Helper Script Remove menu is the per-component undo. Leave Entware in place.
+            [INFERENCE: removal deletes /usr/data/moonraker and /usr/data/fluidd; if the verification fails, look at the directories by hand].
+        notes: >-
+          Runbook 4.2 step 5/6: the factory image contained an old Helper install (Moonraker down, `moonraker.conf` missing). The install menu
+          refuses "already installed" components, so remove Fluidd and Moonraker+Nginx first; the wiki says the same. The driver file
+          sources the same scripts helper.sh sources and calls the menu functions directly (the menus read their answers from stdin).
+          A factory reset first is NOT done: it wipes calibration, Wi-Fi and root.
+        sources:
+          - https://github.com/alex-mextner/3d-cli/blob/main/docs/printers/k1se-root-upgrade.md
+      - id: install-moonraker-nginx
+        title: Install Moonraker and Nginx (Install menu 1)
+        kind: ssh_script
+        automatable: true
+        risk: medium
+        backup: [printer-cfg, config-tree]
+        timeout_s: 900
+        command: |
+          set -e
+          cat > /usr/data/k1drive.sh <<'DRIVER'
+          #!/bin/sh
+          set -e
+          HELPER_SCRIPT_FOLDER=/usr/data/helper-script
+          for s in "$HELPER_SCRIPT_FOLDER"/scripts/*.sh "$HELPER_SCRIPT_FOLDER"/scripts/menu/*.sh "$HELPER_SCRIPT_FOLDER"/scripts/menu/K1/*.sh; do . "$s"; done
+          set_paths; set_permissions; model=K1
+          for f in "$@"; do echo "=== $f"; "$f"; done
+          DRIVER
+          chmod +x /usr/data/k1drive.sh
+          /usr/data/k1drive.sh install_moonraker_nginx
+        verify:
+          wait_s: 180
+          interval_s: 10
+          probes:
+            - {kind: http_get, id: moonraker-up, title: Moonraker answers /server/info, service: moonraker, path: /server/info}
+        rollback:
+          instruction: >-
+            Helper Script Remove menu > Moonraker and Nginx restores its changes; nothing here edits Creality's web-server.
+        notes: >-
+          Extracts the bundled tarballs, then `git pull`s Moonraker (the printer needs internet). Moonraker on :7125, nginx :4408 (Fluidd) / :4409
+          (Mainsail), host-control shims (sudo, systemctl, supervisorctl). Its trusted_clients include 192.168.0.0/16: the guard
+          narrow-trusted-clients-after-moonraker forces the lock-down step into the same plan.
+        sources:
+          - https://github.com/alex-mextner/3d-cli/blob/main/docs/printers/k1se-root-upgrade.md
+          - https://guilouz.github.io/Creality-Helper-Script-Wiki/helper-script/moonraker-k1/
+      - id: install-fluidd
+        title: Install Fluidd (port 4408) and make it world-readable
+        kind: ssh_script
+        automatable: true
+        risk: medium
+        backup: [printer-cfg, config-tree]
+        timeout_s: 900
+        command: |
+          set -e
+          cat > /usr/data/k1drive.sh <<'DRIVER'
+          #!/bin/sh
+          set -e
+          HELPER_SCRIPT_FOLDER=/usr/data/helper-script
+          for s in "$HELPER_SCRIPT_FOLDER"/scripts/*.sh "$HELPER_SCRIPT_FOLDER"/scripts/menu/*.sh "$HELPER_SCRIPT_FOLDER"/scripts/menu/K1/*.sh; do . "$s"; done
+          set_paths; set_permissions; model=K1
+          for f in "$@"; do echo "=== $f"; "$f"; done
+          DRIVER
+          chmod +x /usr/data/k1drive.sh
+          /usr/data/k1drive.sh install_fluidd
+          chmod -R a+rX /usr/data/fluidd
+          /etc/init.d/S50nginx restart
+        verify:
+          wait_s: 60
+          interval_s: 5
+          probes:
+            - {kind: http_get, id: fluidd-up, title: Fluidd answers on its port (no 403), service: fluidd, path: /}
+        rollback:
+          instruction: Helper Script Remove menu > Fluidd.
+        notes: >-
+          The v1.37.6 zip unpacks as 0600/0700 and nginx (www-data) answers 403 until chmod -R a+rX; the guard fluidd-needs-world-readable
+          checks this command. Needs GitHub; offline copy: scp -O the zip, unzip into /usr/data/fluidd, chmod, restart S50nginx (runbook 4.2 table).
+        sources:
+          - https://github.com/alex-mextner/3d-cli/blob/main/docs/printers/k1se-root-upgrade.md
+      - id: narrow-trusted-clients
+        title: Narrow Moonraker trusted_clients (and nginx) to the hosts that need control
+        kind: manual
+        automatable: false
+        risk: medium
+        instruction: |
+          In /usr/data/printer_data/config/moonraker.conf replace the whole trusted_clients list with the hosts that need control, one full
+          address per line, and turn off proxy headers:
+            [server]
+            use_xheaders: False
+
+            [authorization]
+            trusted_clients:
+                127.0.0.1
+                <your PC address>
+                <your Home Assistant address>
+          then /etc/init.d/S56moonraker_service restart. nginx (/usr/data/nginx/nginx/nginx.conf, Fluidd :4408 and Mainsail :4409) proxies from
+          127.0.0.1, which stays trusted, so add `allow <host>;` lines and `deny all;` at the top of both server blocks and run
+          /etc/init.d/S50nginx restart. Check from another LAN device that :4408/:4409 answer 403 and from your PC that Fluidd still loads.
+          Residual exposure, accepted: mjpg-streamer on :8080 has no authentication (view only).
+        verify:
+          - {kind: http_get, id: no-cidr-trusted, title: "trusted_clients holds single hosts, no CIDR range", service: moonraker, path: /server/config, json_path: result.config.authorization.trusted_clients, regex: '/\d', negate: true}
+          - {kind: http_get, id: no-xheaders, title: use_xheaders is off, service: moonraker, path: /server/config, json_path: result.config.server.use_xheaders, regex: '(?i)^false$'}
+        rollback:
+          instruction: Restore printer_data/config/moonraker.conf from the backup (config-tree) and restart S56moonraker_service.
+        notes: >-
+          The /server/config answer shape (result.config.<section>.<option>) is Moonraker's documented API, but whether it returns these
+          options as strings or lists is [INFERENCE]; the probes match on their text.
+        sources:
+          - https://github.com/alex-mextner/3d-cli/blob/main/docs/printers/k1se-root-upgrade.md
+    optional_steps:
+      - id: install-gcode-shell-command
+        title: Install Klipper Gcode Shell Command (lets a macro restart the camera)
+        kind: manual
+        automatable: false
+        risk: low
+        instruction: >-
+          Helper Script Install menu (5) > Klipper Gcode Shell Command, or on the printer
+          `/usr/data/k1drive.sh install_gcode_shell_command` after the k1drive.sh driver of the runbook (4.2 step 6) exists.
+        verify:
+          - {kind: confirm, id: gcode-shell-installed, title: the Helper Script reports Klipper Gcode Shell Command installed, prompt: "Does the Helper Script (Information menu) show Klipper Gcode Shell Command as installed?"}
+        sources:
+          - https://github.com/alex-mextner/3d-cli/blob/main/docs/printers/k1se-root-upgrade.md
+      - id: install-save-zoffset-macros
+        title: Install Save Z-Offset Macros (offsets persist across reboots)
+        kind: ssh_script
+        automatable: true
+        risk: low
+        backup: [printer-cfg, config-tree]
+        command: |
+          set -e
+          cat > /usr/data/k1drive.sh <<'DRIVER'
+          #!/bin/sh
+          set -e
+          HELPER_SCRIPT_FOLDER=/usr/data/helper-script
+          for s in "$HELPER_SCRIPT_FOLDER"/scripts/*.sh "$HELPER_SCRIPT_FOLDER"/scripts/menu/*.sh "$HELPER_SCRIPT_FOLDER"/scripts/menu/K1/*.sh; do . "$s"; done
+          set_paths; set_permissions; model=K1
+          for f in "$@"; do echo "=== $f"; "$f"; done
+          DRIVER
+          chmod +x /usr/data/k1drive.sh
+          /usr/data/k1drive.sh install_save_zoffset_macros
+        verify:
+          - {kind: ssh_command, id: zoffset-include, title: printer.cfg includes the save-zoffset config, command: grep -q save-zoffset.cfg /usr/data/printer_data/config/printer.cfg}
+        rollback:
+          instruction: Restore printer.cfg from the backup (printer-cfg) or use the Helper Script Remove menu.
+        notes: >-
+          Runbook: adds `[include Helper-Script/save-zoffset.cfg]` and renames SET_GCODE_OFFSET to _SET_GCODE_OFFSET (installed 2026-10-15).
+          That the include lives in printer.cfg is [INFERENCE] for the verification probe.
+        sources:
+          - https://github.com/alex-mextner/3d-cli/blob/main/docs/printers/k1se-root-upgrade.md
+      - id: install-usb-camera
+        title: USB camera (mjpg-streamer) from checksummed .ipk files
+        kind: manual
+        automatable: false
+        risk: medium
+        instruction: >-
+          Follow docs/printers/k1se-root-upgrade.md section 4.3 exactly: as of 2026-10-15 the Helper Script's `opkg install mjpg-streamer` fails
+          (`Unknown package`) because the packages left the mipselsf-k3.4 index, so push the HTTPS-fetched, checksummed .ipk files (dependencies
+          libiconv-full, libjpeg-turbo, libv4l included), verify them with sha256sum -c, install them by explicit file name, then check
+          `v4l2-ctl --list-devices` for the right /dev/videoN and register the stream in moonraker.conf. The service hard-codes /dev/video4,
+          1280x720, 15 fps, :8080.
+        verify:
+          - {kind: http_get, id: camera-snapshot, title: mjpg-streamer answers a snapshot, service: camera, path: "/?action=snapshot"}
+        rollback:
+          instruction: /etc/init.d/S50usb_camera stop (also killall cam_app cx_ai_middleware, harmless without a Creality camera), or lower resolution/fps.
+        sources:
+          - https://github.com/alex-mextner/3d-cli/blob/main/docs/printers/k1se-root-upgrade.md
+          - https://guilouz.github.io/Creality-Helper-Script-Wiki/helper-script/usb-camera-support/

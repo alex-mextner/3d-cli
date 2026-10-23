@@ -1,0 +1,127 @@
+# Bambu Lab X1 / X1 Carbon / X1E: LAN + Developer mode (as P1/A1) and the X1Plus overlay firmware.
+#
+# Klipper is NOT possible on stock Bambu firmware. X1Plus is an overlay on Bambu's firmware (custom
+# UI, SSH, console, statistics ...), not Klipper. Everything is manual here and verified by asking
+# the user; X1Plus is a pointer to its own wiki, because no precise command line is verifiable from
+# the sources and none is invented.
+id: bambu-lab-x1
+vendor: Bambu Lab
+family: X1 series (X1, X1 Carbon, X1E)
+models:
+  - regex: '^bambu\s*lab\s+x1(c|e|\s*carbon)?$'
+sources:
+  - https://wiki.bambulab.com/en/knowledge-sharing/enable-lan-mode
+  - https://wiki.bambulab.com/en/knowledge-sharing/enable-developer-mode
+  - https://wiki.bambulab.com/en/software/third-party-integration
+  - https://blog.bambulab.com/firmware-update-introducing-new-authorization-control-system-2/
+  - https://github.com/X1Plus/X1Plus
+  - https://github.com/X1Plus/X1Plus/wiki
+capabilities:
+  klipper_possible: false
+  notes: >-
+    Klipper cannot be installed on Bambu X1 printers on stock firmware. Possible: LAN Only mode, Developer mode (third-party software without
+    authorization; the Authorization Control System arrived with X1 firmware 01.08.03.00) and the community X1Plus firmware, an overlay on Bambu's
+    firmware (https://github.com/X1Plus/X1Plus README: "custom firmware for Bambu Lab X1 and X1 Carbon"), which is not Klipper either.
+
+backups:
+  - id: lan-access-code
+    description: The printer's LAN Access Code (shown on its screen in LAN Only mode) and Bambu Studio printer settings; no read-only export exists.
+    via: manual
+    instruction: >-
+      Write down the Access Code (Settings > LAN Only on the printer screen) and export your Bambu Studio printer/filament profiles.
+
+states:
+  - id: stock
+    title: Stock firmware, cloud mode
+    notes: Not machine-detectable; the starting point of the transitions below.
+  - id: lan-mode
+    title: LAN Only mode on (local network, access code, no cloud)
+    notes: >-
+      Not machine-detectable. No remote print start from outside the LAN, no Bambu Handy, no print history; on X1 series starting a print from Bambu
+      Studio in LAN mode needs a micro SD card inserted (Bambu wiki enable-lan-mode).
+    sources:
+      - https://wiki.bambulab.com/en/knowledge-sharing/enable-lan-mode
+  - id: developer-mode
+    title: LAN Only mode + Developer mode
+    notes: Not machine-detectable. Developer mode only works under LAN Only mode.
+    sources:
+      - https://wiki.bambulab.com/en/knowledge-sharing/enable-developer-mode
+  - id: x1plus
+    title: X1Plus custom firmware installed
+    notes: Not machine-detectable here.
+    sources:
+      - https://github.com/X1Plus/X1Plus/wiki
+
+transitions:
+  - id: enable-lan-mode
+    from: stock
+    to: lan-mode
+    title: Turn LAN Only mode on at the printer
+    sources:
+      - https://wiki.bambulab.com/en/knowledge-sharing/enable-lan-mode
+    steps:
+      - id: enable-lan-only-mode
+        title: Enable LAN Only mode on the printer screen and note the Access Code
+        kind: manual
+        automatable: false
+        risk: low
+        instruction: |
+          Printer screen: Settings > LAN Only, turn LAN Only mode on (choose whether to enable LAN mode liveview), note the Access Code.
+          Bind the printer in Bambu Studio: Device page > the printer with the lock icon > enter the Access Code.
+          X series: starting a print from Bambu Studio in LAN mode needs a micro SD card in the slot right of the touch screen.
+        verify:
+          - {kind: confirm, id: lan-only-on, title: the printer shows LAN Only mode on, prompt: "Does the printer screen show LAN Only mode ON?"}
+        sources:
+          - https://wiki.bambulab.com/en/knowledge-sharing/enable-lan-mode
+  - id: enable-developer-mode
+    from: lan-mode
+    to: developer-mode
+    title: Turn Developer mode on (needs LAN Only mode)
+    sources:
+      - https://wiki.bambulab.com/en/knowledge-sharing/enable-developer-mode
+    steps:
+      - id: enable-developer-mode-on-screen
+        title: Enable Developer mode on the printer screen (opens MQTT, live stream and FTP)
+        kind: manual
+        automatable: false
+        risk: medium
+        instruction: |
+          After LAN Only mode is on: Settings > LAN Only > "Developer Mode", read the Important Notice and Risk warning, tick "I confirm reading and
+          understanding the Important Notice above", select "Enable Developer Mode"; the button turns green.
+          This opens the MQTT channel, live stream and FTP: you take over responsibility for the printer's network security; no Bambu Cloud.
+        verify:
+          - {kind: confirm, id: developer-mode-on, title: the printer shows Developer mode enabled, prompt: "Does the printer screen show Developer Mode enabled (green)?"}
+        rollback:
+          to: lan-mode
+          instruction: >-
+            Switch Developer mode off in the same menu [INFERENCE: the wiki documents only enabling it]; LAN Only mode stays on.
+        sources:
+          - https://wiki.bambulab.com/en/knowledge-sharing/enable-developer-mode
+  - id: install-x1plus
+    from: stock
+    to: x1plus
+    title: Install the X1Plus overlay firmware (follow its wiki)
+    sources:
+      - https://github.com/X1Plus/X1Plus
+      - https://github.com/X1Plus/X1Plus/wiki
+    steps:
+      - id: install-x1plus-from-its-wiki
+        title: Install X1Plus with its own installer (X1 / X1 Carbon only)
+        kind: manual
+        automatable: false
+        risk: high
+        instruction: |
+          Follow https://github.com/X1Plus/X1Plus/wiki ("tells you everything you need to know about installing and using X1Plus"). From the project's
+          README: X1Plus is an overlay on Bambu's firmware; the host-side installer checks that the printer runs a SUPPORTED base firmware version,
+          logs in over MQTT, FTP and SSH, copies an .x1p image to the SD card and finishes the install from the printer's own menu.
+          Never remove the SD card from a live X1Plus system. No command line is given here on purpose: use the project's installer and wiki.
+        verify:
+          - {kind: confirm, id: x1plus-running, title: the printer boots into X1Plus, prompt: "Does the printer boot into X1Plus (its own boot/home screen)?"}
+        rollback:
+          to: stock
+          instruction: >-
+            Follow the X1Plus wiki's instructions for returning to the stock firmware (https://github.com/X1Plus/X1Plus/wiki); no procedure was
+            verified for this profile [INFERENCE: one exists].
+        sources:
+          - https://github.com/X1Plus/X1Plus
+          - https://github.com/X1Plus/X1Plus/wiki
