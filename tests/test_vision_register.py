@@ -190,3 +190,21 @@ def test_bbox_cropped_ious_equal_the_full_frame_definition() -> None:
         want = [float((w & b).sum() / max(int((w | b).sum()), 1)) for b in masks]
         assert got == pytest.approx(want)
     assert G._bbox(np.zeros((4, 4), bool))[4] == 0
+
+
+def test_same_size_zoom_is_not_mistaken_for_a_baseline() -> None:
+    """Both photos 800x600 (a phone's 1x/2x lens): K_a == K_b, a pure zoom decomposes as t || normal, no parallax."""
+    a = fx.textured()
+    s = 1.6
+    zoom = np.array([[s, 0, 400.0 - s * 400.0], [0, s, 300.0 - s * 300.0], [0, 0, 1.0]])
+    b = cv2.warpPerspective(a, zoom, (800, 600), flags=cv2.INTER_CUBIC)
+    res = G.register(a, b)
+    assert res["ok"] and res["rel_rot_deg"] < 3.0
+    assert res["baseline_ok"] is False and "same_viewpoint" in res["quality"]
+    assert res["lateral_translation_ratio"] < 0.05
+
+
+def test_lateral_translation_still_counts_as_a_baseline() -> None:
+    a, b, _, _ = fx.view_pair(yaw_deg=0.5, pitch_deg=0.0, t=(0.25, 0.0, 0.0))
+    res = G.register(a, b)
+    assert res["ok"] and res["baseline_ok"] is True and res["lateral_translation_ratio"] > 0.1

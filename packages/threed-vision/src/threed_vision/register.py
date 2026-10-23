@@ -52,6 +52,7 @@ def _empty(
         "rel_rot_deg": None,
         "t_over_depth": None,
         "translation_ratio": None,
+        "lateral_translation_ratio": None,
         "t_mm": None,
         "plane_normal": None,
         "n_solutions": 0,
@@ -177,6 +178,12 @@ def register(
             else g
         ), s
 
+    def _unshrink(pts: Array, small: tuple[int, ...], full: tuple[int, ...]) -> Array:
+        sx, sy = small[1] / full[1], small[0] / full[0]
+        return np.column_stack(
+            [(pts[:, 0] + 0.5) / sx - 0.5, (pts[:, 1] + 0.5) / sy - 0.5]
+        ).astype(np.float32)
+
     t0 = time.perf_counter()
     sa, fa = shrink(ga)
     sb, fb = shrink(gb)
@@ -193,10 +200,17 @@ def register(
     timing["match_s"] = time.perf_counter() - t0
     if len(good) < MIN_INLIERS:
         return _empty("too_few_matches", (wa, ha), (wb, hb), timing, matches=len(good))
-    pa = (
-        np.array([kpa[m.queryIdx].pt for m in good], dtype=np.float32) / fa
-    )  # full-resolution pixels
-    pb = np.array([kpb[m.trainIdx].pt for m in good], dtype=np.float32) / fb
+    # SIFT works on the shrunk copies: map back with the REAL per-axis ratio and the pixel-centre convention
+    pa = _unshrink(
+        np.array([kpa[m.queryIdx].pt for m in good], dtype=np.float32),
+        sa.shape,
+        ga.shape,
+    )
+    pb = _unshrink(
+        np.array([kpb[m.trainIdx].pt for m in good], dtype=np.float32),
+        sb.shape,
+        gb.shape,
+    )
     H, inl = cv2.findHomography(
         pa, pb, cv2.RANSAC, ransac_px / min(fa, fb), maxIters=5000, confidence=0.999
     )
@@ -238,15 +252,20 @@ def register(
             R
         )  # OpenCV leaves R slightly non-orthonormal for near-degenerate homographies
         R = U @ Vt
-        if (
-            float(np.linalg.norm(normal)) < 0.5
-        ):  # pure rotation/zoom: the plane is not recoverable
-            normal = None
-            quality.append("no_decomposable_translation")
     rot = _rot_angle_deg(R)
     ratio_t = float(np.linalg.norm(t_over_d))
+    # A zoom (or a dolly along the optical axis) looks like t || plane normal: it adds no parallax for the plane, so the
+    # translation that counts is the part perpendicular to the normal.
+    lateral = ratio_t
+    if normal is not None:
+        lateral = float(np.linalg.norm(t_over_d - float(t_over_d @ normal) * normal))
+        if (
+            ratio_t >= BASELINE_MIN_TRANSLATION_RATIO
+            and lateral < BASELINE_MIN_TRANSLATION_RATIO
+        ):
+            quality.append("zoom_or_dolly")
     baseline_ok = bool(
-        rot >= BASELINE_MIN_ROT_DEG or ratio_t >= BASELINE_MIN_TRANSLATION_RATIO
+        rot >= BASELINE_MIN_ROT_DEG or lateral >= BASELINE_MIN_TRANSLATION_RATIO
     )
     if not baseline_ok:
         quality.append("same_viewpoint")
@@ -294,6 +313,7 @@ def register(
         "rel_rot_deg": rot,
         "t_over_depth": t_over_d,
         "translation_ratio": ratio_t,
+        "lateral_translation_ratio": lateral,
         "t_mm": None if plane_depth_mm is None else t_over_d * float(plane_depth_mm),
         "plane_normal": normal,
         "n_solutions": n_sol,

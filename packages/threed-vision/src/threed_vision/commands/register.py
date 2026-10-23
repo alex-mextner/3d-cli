@@ -73,10 +73,10 @@ def _document(res: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
 def run(args: argparse.Namespace) -> int:
     a, b = io.load_rgb(args.a), io.load_rgb(args.b)
     K_a = (
-        default_intrinsics(a.shape[1], a.shape[0], args.f_px_a) if args.f_px_a else None
+        default_intrinsics(a.shape[1], a.shape[0], args.f_px_a) if args.f_px_a is not None else None
     )
     K_b = (
-        default_intrinsics(b.shape[1], b.shape[0], args.f_px_b) if args.f_px_b else None
+        default_intrinsics(b.shape[1], b.shape[0], args.f_px_b) if args.f_px_b is not None else None
     )
     masks_a = load_masks(args.mask_a) if args.mask_a else None
     masks_b = load_masks(args.mask_b) if args.mask_b else None

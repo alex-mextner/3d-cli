@@ -42,7 +42,7 @@ Exit codes: `0` registered (also when `baseline_ok` is false), `2` bad input, `3
 | `rel_R`, `rel_rot_deg` | rotation of B w.r.t. A (orthonormalised) and its angle |
 | `t_over_depth`, `translation_ratio`, `t_mm` | translation in units of the plane distance from A (`t_mm` with `--plane-depth-mm`) and its norm |
 | `plane_normal`, `n_solutions` | the chosen of OpenCV's decompositions (most matches in front of both cameras) |
-| `baseline_ok` | **false** when rotation < 3 degrees AND translation < 5 % of the plane depth: B adds no parallax |
+| `baseline_ok` | **false** when rotation < 3 degrees AND the translation *perpendicular to the plane normal* (`lateral_translation_ratio`) < 5 % of the plane depth: B adds no parallax. A zoom or a dolly along the optical axis (`t` parallel to the normal, flag `zoom_or_dolly`) therefore does not count, also when both photos have the same size |
 | `quality` | `same_viewpoint`, `few_inliers`, `no_decomposable_translation` |
 | `repeatability` | per A mask: `iou` (null without `--mask-b`), `best_b_index`, `unstable`, `area_a_px`, `warped_area_px`, `inside_b_frac` |
 

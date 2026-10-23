@@ -352,10 +352,11 @@ def scale_from_homography(
     )
     Hm = np.asarray(H_px_to_mm, float).reshape(3, 3)
     mm_per_px = local_mm_per_px(Hm, pt)
-    if (
-        not (math.isfinite(mm_per_px) and mm_per_px > 0)
-        or float(Hm[2] @ [pt[0], pt[1], 1.0]) <= 0
-    ):
+    # the sign of w = h3 . (x, y, 1) is arbitrary (a homography is defined up to scale), so compare with the image
+    # centre, which is taken to be on the finite side of the plane
+    w_here = float(Hm[2] @ [pt[0], pt[1], 1.0])
+    w_centre = float(Hm[2] @ [w / 2.0, h / 2.0, 1.0])
+    if not (math.isfinite(mm_per_px) and mm_per_px > 0) or w_here * w_centre <= 0:
         raise BadInput(
             "that pixel is not on the finite side of the shared plane (above its horizon?)"
         )
@@ -1131,6 +1132,9 @@ def detect_grid(
     if g.ndim not in (2, 3) or g.size == 0:
         raise BadInput("rgb must be a non-empty HxWx3 (or HxW) image")
     h, w = g.shape[:2]
+    for name, val in (("f_px", f_px), ("f_ratio", f_ratio)):
+        if val is not None and not (math.isfinite(val) and val > 0):
+            raise BadInput(f"{name} must be a positive number, got {val!r}")
     best: dict[str, Any] | None = None
     t_detect = 0.0
     expired = False

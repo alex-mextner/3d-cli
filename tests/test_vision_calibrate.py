@@ -531,6 +531,11 @@ def test_scale_from_homography_labels_and_horizon() -> None:
     assert res["mm_per_px"] == pytest.approx(2.0) and res["source"] == "homography"
     assert res["f_source"] == "given" and "f_ratio_given" in res["quality"]
     assert C.scale_from_homography(H, image_size=(1000, 800))["f_source"] == "default"
-    behind = np.array([[1.0, 0, 0], [0, 1.0, 0], [0, -0.01, 1.0]])  # w = 1 - 0.01 y: negative below y = 100
+    behind = np.array([[1.0, 0, 0], [0, 1.0, 0], [0, -0.01, 1.0]])  # w = 1 - 0.01 y: negative below y = 100, the image centre (y=400) is behind
     with pytest.raises(BadInput):
-        C.scale_from_homography(behind, image_size=(1000, 800), at_px=(500, 400))
+        C.scale_from_homography(behind, image_size=(1000, 800), at_px=(500, 50))
+
+
+def test_bad_focal_is_bad_input_even_without_a_grid() -> None:
+    with pytest.raises(BadInput):
+        C.detect_grid(np.full((100, 100, 3), 128, np.uint8), f_px=-5.0)
