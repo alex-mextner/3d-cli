@@ -400,8 +400,8 @@ def _check_entry(path: Path, e: dict[str, Any]) -> None:
     for key in ("id", "thumb", "sil", "name", "category"):
         if key in e and e[key] is not None and not isinstance(e[key], str):
             raise BadInput(f"{who}: '{key}' must be a string")
-    if "thumb" not in e:
-        raise BadInput(f"{who} has no 'thumb'")
+    if not isinstance(e.get("thumb"), str) or not e["thumb"]:
+        raise BadInput(f"{who} needs a 'thumb' file name")
     ext = e.get("extents_mm")
     if ext is not None and not (
         isinstance(ext, list)

@@ -1135,6 +1135,7 @@ def test_empty_mask_corrupt_index_and_sil_free_all_metric(
     ("patch", "needle"),
     [
         ({"thumb": 5}, "'thumb' must be a string"),
+        ({"thumb": None}, "needs a 'thumb' file name"),
         ({"extents_mm": "250x40"}, "'extents_mm' must be a list of 3 numbers"),
         ({"extents_mm": [1, 2]}, "'extents_mm' must be a list of 3 numbers"),
         ({"extents_mm": [1, "a", 3]}, "'extents_mm' must be a list of 3 numbers"),
