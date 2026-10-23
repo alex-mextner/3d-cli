@@ -130,6 +130,25 @@ class HeadWrite:
     pressure_advance: float | None   # the extruder's K after the write (the firmware may reset it)
 
 
+@dataclass(frozen=True)
+class ActiveSpool:
+    """Moonraker's `[spoolman]` state: the ONE spool it books extruded filament to."""
+
+    connected: bool                  # Moonraker reaches its Spoolman (`spoolman_connected`)
+    spool_id: int | None             # the active Spoolman spool; None = none selected
+    pending_reports: int | None      # spools with usage queued while Spoolman was unreachable
+
+
+@dataclass(frozen=True)
+class ActiveSpoolWrite:
+    """Outcome of `Adapter.set_active_spool`; `after` is read back from the printer."""
+
+    before: int | None
+    after: int | None
+    connected: bool                  # Moonraker's Spoolman link when the write was made (read just before it)
+    pending_reports: int | None      # spools whose usage waits for Spoolman (see ActiveSpool)
+
+
 @dataclass
 class QueuedJob:
     """One job waiting in the printer's own job queue (not started yet)."""
@@ -243,6 +262,16 @@ class Adapter:
                              smooth_time: float | None = None) -> float:
         """Set head `index`'s pressure advance; returns the K read back from the printer."""
         raise self._unsupported("setting pressure advance")
+
+    def active_spool(self) -> ActiveSpool:
+        """Moonraker's active spool and its Spoolman link. UnsupportedOperation when the printer
+        has no `[spoolman]` (or the adapter has no such concept). Read-only."""
+        raise self._unsupported("an active spool (no Moonraker [spoolman])")
+
+    def set_active_spool(self, spool_id: int | None) -> ActiveSpoolWrite:
+        """Make `spool_id` (None = clear) the spool the printer's own usage reporting books to,
+        verified by reading it back."""
+        raise self._unsupported("setting an active spool (no Moonraker [spoolman])")
 
     def _unsupported(self, op: str) -> UnsupportedOperation:
         return UnsupportedOperation(

@@ -326,7 +326,7 @@ Each reconcile pass (after every poll, and right after `slot.loaded` / `slot.unl
 | `unusable_head` | a spool bound to a head the fleet marks `usable: false` |
 | `unknown_slot` | `printops_slot` names a printer or head not in the fleet |
 | `location_conflict` | the spool's Spoolman location is set and is not `slot:<printer>/<head>` |
-| `printer_write_failed` | the latest head write of `spool load` (event `slot.printer_write_failed`) failed for the spool still bound there. Clears after a successful write (run the load again), when the binding changes, or — for a failed filament write — when the printer shows the spool's material and colour (set on the touchscreen) |
+| `printer_write_failed` | the latest head write of `spool load` (event `slot.printer_write_failed`) failed for the spool still bound there. Clears after a successful write (run the load again), when the binding changes, or — for a failed filament write — when the printer shows the spool's material and colour (set on the touchscreen). Stage `active_spool` = Moonraker's active spool could not be set (K1 SE: usage would be booked to the old spool); it is its own write, tracked apart from the head's (both can be open at once), and a successful head write does not clear it |
 
 A new anomaly emits `anomaly.opened` (and `slot.mismatch` for the slot kinds); one that is no
 longer seen is resolved by `reconcile` (`anomaly.resolved`). Printer-side kinds stay open while

@@ -99,6 +99,23 @@ def u1_entry(moon: FakeMoonraker, access: str = "full", heads: int = 4) -> str:
     )
 
 
+def k1se_moonraker_entry(moon: FakeMoonraker) -> str:
+    """The rooted K1 SE (one head, Moonraker, no print_task_config) pointing at a FakeMoonraker."""
+    return "\n".join(
+        [
+            "k1se:",
+            "  model: Creality K1 SE",
+            "  owner: own",
+            "  access: full",
+            "  adapter: moonraker",
+            "  host: 127.0.0.1",
+            f"  port: {moon.port}",
+            "  heads: [{label: T1, index: 0, extruder: extruder, nozzle: {diameter_mm: 0.4, material: hardened}}]",
+            "",
+        ]
+    )
+
+
 def k1_entry(k1: FakeCreality) -> str:
     return "\n".join(
         [

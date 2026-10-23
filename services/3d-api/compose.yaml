@@ -20,6 +20,15 @@ services:
       PUID: "1000"                           # = ultra; Spoolman's entrypoint drops root to this uid
       PGID: "1000"
       SPOOLMAN_DIR_DATA: /home/app/.local/share/spoolman
+      # Spoolman >= 0.26 rejects browser requests whose Origin it does not know. Fluidd calls
+      # Spoolman FROM THE BROWSER (its Spoolman dialog + spool selector, GET /api/v1/info), so each
+      # Fluidd/Mainsail origin must be listed here, else Fluidd shows "Spoolman is blocking
+      # Fluidd's browser origin". Comma-separated FULL origins (scheme required, no path); `*`
+      # turns the check off. Moonraker and 3d-api send no Origin header and are unaffected.
+      # Default = the fleet's Fluidd origins: K1 SE (:4408, docs/printers/k1se-root-upgrade.md),
+      # U1 (port 80, docs/commands/printer-vision.md) and Home Assistant (its printer ingress serves
+      # the U1's Fluidd under HA's origin, docs/printops/plan.md). Add Mainsail/tailnet names here.
+      SPOOLMAN_CORS_ORIGIN: ${PRINTOPS_SPOOLMAN_CORS_ORIGIN:-http://192.168.0.27:4408,http://192.168.0.26,http://192.168.0.39:8123}
     volumes:
       - ${PRINTOPS_DATA_DIR:-/home/ultra/printops/data}/spoolman:/home/app/.local/share/spoolman
     ports:

@@ -58,7 +58,7 @@ No tare → `measure` refuses (409) and says why; pass `--tare G` (recorded for 
 3d printops spool scan IMG|TXT [IMG|TXT …] [--location LOC]
 3d printops spool move ID LOCATION
 3d printops spool load ID PRINTER/SLOT [--replace-to LOCATION] [--no-printer-write] [--force-official]
-3d printops spool unload PRINTER/SLOT [--to LOCATION] [--gross G]
+3d printops spool unload PRINTER/SLOT [--to LOCATION] [--gross G] [--no-printer-write]
 3d printops spool use ID GRAMS [--source S] [--confidence G] [--job JOB] [--note TEXT]
 3d printops spool measure ID GROSS_G [--tare G [--tare-source TEXT]] [--scale-sigma G] [--note TEXT]
 3d printops spool empty ID [--note TEXT]
@@ -118,7 +118,8 @@ Every action takes `--json` (the API answer), `--api URL`, `--token TOKEN`.
   Klipper restarts (the firmware then re-applies its own stored K); a G-code with
   `enable_pressure_advance = 1` sets its own K anyway.
 
-  Not written: AMS slots, offline printers, printers without per-head filament (K1 SE). Refused,
+  Not written: AMS slots, offline printers, printers without per-head filament (K1 SE; its
+  active spool is set instead, below). Refused,
   with a WARNING: a printer that is printing or paused (the K reset would hit the job), a head
   holding official Snapmaker RFID filament (only with `--force-official`), a vendor/material with
   `# ; * "` `'` (Klipper cannot carry them), a filament without colour or material in Spoolman.
@@ -131,7 +132,45 @@ Every action takes `--json` (the API answer), `--api URL`, `--token TOKEN`.
     printer head: #4FE44D Elegoo PLA+ Basic (read back), pressure advance K=0.02 (factory)
   WARNING: u1/T3 keeps the firmware's factory pressure advance K=0.02 (no current calibration for spool #7: pressure advance is new_material_type: no PLA+ recorded yet (Elegoo RAPID PLA+ Green lot L2409))
   ```
-- `--no-printer-write` — bind in Spoolman only; the head stays as it is.
+
+  **Moonraker's active spool is set too** on a printer whose Moonraker has `[spoolman]` (the
+  rooted K1 SE, `docs/printers/k1se-root-upgrade.md`). Moonraker keeps ONE active Spoolman spool
+  (Fluidd's spool selector, `GET/POST /server/spoolman/spool_id`) and books the printer's
+  extruded filament to it itself, so without this a freshly loaded black spool would be printed
+  on the spool that was selected before. After the binding is saved 3d-api posts the loaded spool
+  id to Moonraker's own endpoint and reads it back; `unload` posts `null`, but only when the
+  active spool is the unloaded one. `3d printops spool load 2 k1se/T1`
+
+  ```
+  loaded #2    Elegoo PLA+ Black #000000  in k1se/T1  1000 ± 20 g (980–1020)
+    printer: Moonraker active spool #2 (read back)
+  ```
+
+  Only **single-head** printers (a one-head fleet entry): Moonraker has one active spool and no
+  notion of which head extrudes, so on a multi-head printer (U1) any value would be booked to
+  the wrong spool as soon as the tool changes. That is skipped without contacting the printer
+  and the answer says why. Also skipped: a printer without `[spoolman]` (Moonraker answers 404),
+  AMS slots, offline printers. The active spool does not wait for the head write (a K1 has none)
+  and a failed head write does not stop it; `printer_write_failed` tracks the two writes
+  separately, so a good one never hides the other's failure.
+  A Moonraker whose own Spoolman link is down (`spoolman_connected: false`) still takes the
+  change (it keeps the id in its database and queues usage per spool until the link is back):
+  the load succeeds with a WARNING saying so. Refused with a WARNING: a printer that is printing
+  (the rest of the job would be booked to the new spool; a paused job is fine, that is when a
+  spool is swapped; the spool that is already active is left alone), an HTTP error from Moonraker
+  and a read-back that differs (a refusal while printing is a failure like any other: the
+  anomaly stays until the load is repeated or the spool leaves the slot). Failure handling is
+  the head write's: the binding stays, a `printer_write_failed` anomaly with stage `active_spool` opens, the exit
+  code is 0, and the same `load` again retries. A failed clear on `unload` has no binding to
+  hang an anomaly on: it prints a WARNING (clear the spool in Fluidd) and the answer's
+  `printer_write.active_spool.status` is `failed`; no event is written. `spool move`,
+  `spool empty` and a `load` that takes a spool out of another slot do not touch the old
+  printer's active spool: `unload` it first.
+
+  Who books usage: Moonraker does, from its `[spoolman]` section; PrintOps never books those
+  jobs (`docs/printops/oss.md` section 9.6). `spool use` stays the manual correction.
+- `--no-printer-write` — change Spoolman only; the head and Moonraker's active spool stay as
+  they are (`unload` takes it too).
   `3d printops spool load 7 u1/T3 --no-printer-write`
 - `--force-official` — also overwrite a head that shows official Snapmaker RFID filament.
   `3d printops spool load 7 u1/T1 --force-official`
@@ -139,6 +178,8 @@ Every action takes `--json` (the API answer), `--api URL`, `--token TOKEN`.
   for `load` (`u1/t3` = `u1/T3`, `ams1/02` = `ams1/2`), and a head marked unusable can still be
   emptied. `--gross G` weighs it first: a weighing that fails leaves it loaded; an unload that
   fails after a good weighing leaves it weighed and loaded (run `unload` again).
+  Moonraker's active spool is cleared when it is the unloaded one (see `load`);
+  `--no-printer-write` skips that. `3d printops spool unload k1se/T1 --to WH:A/S1 --no-printer-write`
   `3d printops spool unload u1/T3 --to WH:A/S1 --gross 974`
 - `use` — book usage: Spoolman `/use` + a ledger row, atomically (a Spoolman error books
   nothing). `3d printops spool use 7 12.4 --source gcode_estimate --job u1-2026-10-14-01`
@@ -225,8 +266,8 @@ label.jpg  (OCR, turned 0°, score 87.8)
 | POST | `/v1/spools/{id}/use` | write | `{grams, source, confidence_g?, job_id?, note?}` |
 | POST | `/v1/spools/{id}/measure` | write | `{gross_g, tare_g?, tare_source?, scale_sigma_g?, note?}` |
 | POST | `/v1/spools/{id}/empty` | write | `{note?}` |
-| POST | `/v1/printers/{p}/slots/{s}/load` | write | `{spool_id, replace_to?, printer_write? (true), force_official? (false)}` (`s` = `T3` or `ams1/2`); the answer adds `printer_write {status: written\|skipped\|failed, reason, wanted, before, after, pressure_advance {action: restored\|factory\|restore_failed, k, calibration_id}, warnings}` |
-| POST | `/v1/printers/{p}/slots/{s}/unload` | write | `{to?, gross_g?, spool_id?}` |
+| POST | `/v1/printers/{p}/slots/{s}/load` | write | `{spool_id, replace_to?, printer_write? (true), force_official? (false)}` (`s` = `T3` or `ams1/2`); the answer adds `printer_write {status: written\|skipped\|failed, reason, wanted, before, after, pressure_advance {action: restored\|factory\|restore_failed, k, calibration_id}, warnings, active_spool {status: written\|skipped\|failed, reason, spool_id, before, after}}`; `status`/`reason`/`wanted`/`before`/`after` describe the head write, `active_spool` Moonraker's active spool (null: not attempted; `after` is what was read back, null = cleared) |
+| POST | `/v1/printers/{p}/slots/{s}/unload` | write | `{to?, gross_g?, spool_id?, printer_write? (true)}`; the answer adds `printer_write.active_spool` (same shape; `written` with `after: null` = cleared) |
 | GET / POST | `/v1/tares` | read / write | `vendor` / `{vendor, tare_g, source, spool_kind?, net_g?, sigma_g?, note?}` |
 | GET | `/v1/lint` | read | `weigh_days` — the data rules below |
 
@@ -238,8 +279,10 @@ Events: `spool.received`, `spool.moved`, `slot.loaded` / `slot.unloaded` (subjec
 `slot:u1/T3`, payload `printer`, `head`, `spool_id`), `spool.used`, `spool.measured` (gross,
 tare and its source, net, ±, previous interval), `spool.empty`, and after a load
 `slot.printer_written` (payload `printer`, `head`, `spool_id`, `wanted`, `after`,
-`pressure_advance`) or `slot.printer_write_failed` (`wanted`, `error`, `stage` = `filament` |
-`pressure_advance`).
+`pressure_advance`; an active-spool write carries `write: "active_spool"` and `active_spool {status,
+reason, spool_id, before, after}` instead) or `slot.printer_write_failed` (`wanted`, `error`, `stage` = `filament` |
+`pressure_advance` | `active_spool`). An active-spool event carries `write: "active_spool"`; an
+`unload` emits none, its answer says what happened.
 
 Python API for other slices: `printops.ledger.book(conn, spoolman, spool_id, grams, source,
 confidence_g, job_id=None, note=None, *, actor)`, `ledger.remaining(conn, spoolman, spool_id)

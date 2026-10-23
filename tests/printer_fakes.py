@@ -97,6 +97,16 @@ class FakeMoonraker:
     camera_hits: int = 0                          # each hit gets new bytes (a COM counter), like a live camera
     script_errors: dict[str, str] = field(default_factory=dict)  # G-code command -> Klipper error (HTTP 400)
     ignored_commands: set[str] = field(default_factory=set)      # acknowledged but without effect
+    spoolman: bool = False                        # `[spoolman]` in moonraker.conf (False: its endpoints 404)
+    spoolman_connected: bool = True               # Moonraker reaches its Spoolman
+    spoolman_pending: list[dict[str, Any]] = field(default_factory=list)  # queued usage reports
+    active_spool: Any = None                      # Moonraker's active spool id (`/server/spoolman/spool_id`)
+    spoolman_ignores_set: bool = False            # POST spool_id answers 200 but changes nothing
+    spoolman_error: int = 0                       # every spoolman endpoint answers this HTTP status
+    spoolman_set_error: int = 0                   # only POST spool_id answers this HTTP status
+    spoolman_set_error_after_apply: bool = False  # ... but only after it applied the id (a lost answer)
+    spoolman_read_error: int = 0                  # only GET spool_id (the read-back) answers this HTTP status
+    spoolman_raw: bytes | None = None             # ... or this raw (non-JSON) body with 200
     port: int = 0
 
     def writes(self) -> list[Recorded]:
@@ -150,6 +160,19 @@ class FakeMoonraker:
                 self.end_headers()
                 self.wfile.write(data)
 
+            def _spoolman_fault(self) -> bool:
+                """Answer a spoolman endpoint with the configured fault; True when one was sent."""
+                if fake.spoolman_error:
+                    self._reply({"error": {"code": fake.spoolman_error}}, fake.spoolman_error)
+                elif fake.spoolman_raw is not None:
+                    self.send_response(200)
+                    self.send_header("Content-Length", str(len(fake.spoolman_raw)))
+                    self.end_headers()
+                    self.wfile.write(fake.spoolman_raw)
+                else:
+                    return False
+                return True
+
             def do_GET(self) -> None:
                 u = urlsplit(self.path)
                 fake.requests.append(Recorded("GET", u.path, parse_qs(u.query)))
@@ -168,6 +191,17 @@ class FakeMoonraker:
                     self._reply({"result": fake.totals})
                 elif u.path == "/server/info":
                     self._reply({"result": fake.server_info})
+                elif u.path in ("/server/spoolman/status", "/server/spoolman/spool_id") and fake.spoolman:
+                    if self._spoolman_fault():
+                        return
+                    if u.path.endswith("/spool_id") and fake.spoolman_read_error:
+                        self._reply({"error": {"code": fake.spoolman_read_error}}, fake.spoolman_read_error)
+                        return
+                    result: dict[str, Any] = {"spool_id": fake.active_spool}
+                    if u.path.endswith("/status"):
+                        result |= {"spoolman_connected": fake.spoolman_connected,
+                                   "pending_reports": fake.spoolman_pending}
+                    self._reply({"result": result})
                 elif u.path == "/server/files/list":
                     self._reply({"result": [{"path": n, "size": s, "modified": 1.0} for n, s in fake.files.items()]})
                 elif u.path.startswith("/server/files/gcodes/") and unquote(u.path[21:]) in fake.contents:
@@ -202,6 +236,18 @@ class FakeMoonraker:
                     self._reply(fake.upload_reply or {"result": {
                         "item": {"path": filename, "root": "gcodes"},
                         "print_started": False, "print_queued": False, "action": "create_file"}}, 201)
+                elif u.path == "/server/spoolman/spool_id" and fake.spoolman:
+                    rec.fields = {"body": body}
+                    if self._spoolman_fault():
+                        return
+                    if fake.spoolman_set_error and fake.spoolman_set_error_after_apply:
+                        fake.active_spool = json.loads(body)["spool_id"]
+                    if fake.spoolman_set_error:
+                        self._reply({"error": {"code": fake.spoolman_set_error}}, fake.spoolman_set_error)
+                        return
+                    if not fake.spoolman_ignores_set:
+                        fake.active_spool = json.loads(body)["spool_id"]
+                    self._reply({"result": {"spool_id": fake.active_spool}})
                 elif u.path == "/printer/print/start":
                     fake.status["print_stats"].update(state="printing", filename=rec.query["filename"][0])
                     self._reply({"result": "ok"})

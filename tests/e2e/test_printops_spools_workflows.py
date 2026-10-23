@@ -8,7 +8,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from fleet_fixtures import REPO_FLEET, u1_entry, write_fleet, write_policy_for_fleet
+from fleet_fixtures import REPO_FLEET, k1se_moonraker_entry, u1_entry, write_fleet, write_policy_for_fleet
 from printer_fakes import FACTORY_K, FakeMoonraker
 from printops_fixtures import LiveApi
 
@@ -195,6 +195,41 @@ def test_load_shows_the_spool_on_the_u1_head_and_no_printer_write_leaves_it(
     assert quiet.returncode == 0 and "in u1/T4" in quiet.stdout, quiet.stderr
     assert "printer head: skipped" in quiet.stdout and "WARNING" not in quiet.stderr
     assert len(moon.scripts) == 1 and moon.scripts[0].startswith("SET_PRINT_FILAMENT_CONFIG CONFIG_EXTRUDER=2 ")
+
+
+def test_load_and_unload_move_the_k1_se_moonraker_active_spool(
+    tmp_path: Path, shop: LiveApi, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The owner puts the black spool on the rooted K1 SE while Fluidd still has the white #14
+    selected: `spool load` says Moonraker's active spool is now the black one (read back), so the
+    printer stops booking to white. `unload --no-printer-write` leaves it, a plain `unload` clears it."""
+    moon = FakeMoonraker(spoolman=True, active_spool=14)
+    moon.status.pop("print_task_config")  # the K1 has no per-head filament
+    with moon.serve():
+        fleet = write_fleet(tmp_path / "fleet-k1.yaml", k1se_moonraker_entry(moon))
+        monkeypatch.setenv("THREED_FLEET", str(fleet))
+        monkeypatch.setenv("PRINTOPS_POLICY", str(write_policy_for_fleet(tmp_path / "policy-k1.yaml", fleet)))
+        got = _cli(tmp_path, shop, "printops", "spool", "receive", "--vendor", "Elegoo", "--material", "PLA+",
+                   "--name", "RAPID PLA+ Black", "--color", "#000000", "--net", "1000", "--location",
+                   "WH:default", "--json")
+        assert got.returncode == 0, got.stderr
+        sid = str(json.loads(got.stdout)["id"])
+        loaded = _cli(tmp_path, shop, "printops", "spool", "load", sid, "k1se/T1")
+        after_load = moon.active_spool
+        kept = _cli(tmp_path, shop, "printops", "spool", "unload", "k1se/T1", "--no-printer-write")
+        after_kept = moon.active_spool
+        reloaded = _cli(tmp_path, shop, "printops", "spool", "load", sid, "k1se/T1")
+        cleared = _cli(tmp_path, shop, "printops", "spool", "unload", "k1se/T1")
+
+    assert loaded.returncode == 0, loaded.stderr
+    assert f"printer: Moonraker active spool #{sid} (read back)" in loaded.stdout
+    assert "printer head" not in loaded.stdout and "WARNING" not in loaded.stderr
+    assert after_load == int(sid) and moon.scripts == []
+    assert kept.returncode == 0 and "Moonraker" not in kept.stdout and after_kept == int(sid), kept.stderr
+    assert reloaded.returncode == 0, reloaded.stderr
+    assert cleared.returncode == 0, cleared.stderr
+    assert f"printer: Moonraker active spool cleared (was #{sid}) (read back)" in cleared.stdout
+    assert moon.active_spool is None
 
 
 def test_a_fault_opened_from_the_cli_stops_loads_into_that_head_until_closed(
