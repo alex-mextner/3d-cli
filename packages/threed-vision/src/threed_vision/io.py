@@ -66,8 +66,11 @@ def load_mask(path: str | Path) -> np.ndarray:
     p = Path(path)
     if not p.is_file():
         raise BadInput(f"mask not found: {p}")
-    with Image.open(p) as im:
-        return np.array(im.convert("L")) > 0
+    try:
+        with Image.open(p) as im:
+            return np.array(im.convert("L")) > 0
+    except OSError as exc:  # truncated / not an image (PIL's UnidentifiedImageError is an OSError)
+        raise BadInput(f"cannot decode mask {p}: {exc}") from exc
 
 
 def to_jsonable(obj: Any) -> Any:
@@ -108,6 +111,18 @@ def mask_polygon(mask: np.ndarray, epsilon_px: float = 1.5) -> list[list[float]]
         return []
     c = cv2.approxPolyDP(max(cs, key=cv2.contourArea), epsilon_px, True)
     return [[float(x), float(y)] for x, y in c.reshape(-1, 2)]
+
+
+def to_gray(rgb: np.ndarray, dtype: type = np.uint8) -> np.ndarray:
+    """HxW or HxWx3 (RGB) image -> HxW grey array of `dtype` (uint8 for SIFT, float32 for band-pass filters)."""
+    import cv2
+
+    a = np.asarray(rgb)
+    if a.ndim == 3:
+        a = cv2.cvtColor(a[:, :, :3].astype(np.uint8), cv2.COLOR_RGB2GRAY)
+    elif a.ndim != 2:
+        raise BadInput("image must be HxW or HxWx3")
+    return a.astype(dtype)
 
 
 def mask_iou(a: np.ndarray, b: np.ndarray) -> float:
