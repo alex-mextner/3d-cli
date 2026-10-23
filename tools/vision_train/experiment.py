@@ -612,7 +612,7 @@ def main(argv: list[str]) -> int:
                 "ids": [r["id"] for r in rows],
                 "folds": folds,
                 "scores": {
-                    m: {c: [round(float(v), 5) for v in s] for c, s in per.items()}
+                    m: {c: [None if v != v else round(float(v), 5) for v in s] for c, s in per.items()}
                     for m, per in scores.items()
                 },
             }

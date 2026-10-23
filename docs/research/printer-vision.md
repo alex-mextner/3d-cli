@@ -282,6 +282,21 @@ negatives themselves as the threshold (an oracle that flatters every method equa
 
 On the 7 own spaghetti frames (2 events) every method is at 0.86–1.00 AUROC: far too few to rank them.
 
+Precision / recall at fixed score thresholds (spaghetti, all frames; the scores are not calibrated alike,
+so the same threshold is not the same operating point; tier (a) is q, the others are probabilities):
+
+| method | score >= 0.3 | >= 0.5 | >= 0.8 |
+|---|---|---|---|
+| zero-shot prompts | 0.85 / 0.71 | 0.93 / 0.59 | 0.98 / 0.37 |
+| tier (a) q | 0.99 / 0.77 | 1.00 / 0.72 | 1.00 / 0.65 |
+| head on frozen B/16 | 0.67 / 0.75 | 0.88 / 0.61 | 1.00 / 0.37 |
+| fine-tune, 2 blocks (seed 0) | 0.88 / 0.74 | 0.92 / 0.71 | 0.96 / 0.65 |
+| fine-tune, 4 blocks (seed 0) | 0.98 / 0.79 | 0.99 / 0.77 | 0.99 / 0.72 |
+
+For `part_detached` the same table on the 9 own event frames gives recall 0 at 0.5 for every method and,
+at 0.3, precision 0.33 / recall 0.22 for the head (the fine-tune: nothing flagged). The pooled third-party
+numbers (head 0.32 / 0.93 at 0.5, fine-tune 0.52 / 0.64) are the shortcut-inflated ones described below.
+
 **Part detached** (the class the U1 panel failure needs):
 
 | method | pooled: 30 held-out videos, 162 / 2,028 | **source-matched**: emptydeck detached vs emptydeck healthy, 162 / 230 | + leave-printer-setup-out (4 clusters) | **U1 panel event**, 9 frames vs 455 own healthy: AUROC / TPR@1 % |
