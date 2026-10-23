@@ -229,7 +229,8 @@ nobody is told about is refused). `watch.agent_fallback: false` only removes the
 
 **A service never holds alerts.** `--dry-run` makes every sink print instead of send. It is
 refused when stderr is the journal (`3d printer watch|vision --dry-run` in a systemd unit exits 2
-with the fix) — the 2026-10-22 PAUSED alert was swallowed by a unit that ran `watch --dry-run`
+with the fix, and the unit's restarts send you one `tg` warning an hour: "alerts are NOT being
+delivered") — the 2026-10-22 PAUSED alert was swallowed by a unit that ran `watch --dry-run`
 ("delivery held") and every log line looked alive. In a terminal `--dry-run` still works.
 
 ## Delivery order

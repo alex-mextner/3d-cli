@@ -432,8 +432,10 @@ camera `snapshot`, thresholds and `crop`; nothing in tier (b) is U1-specific.
 looks alive (a JSON verdict line every 10 s) while no event ever reaches the agent, `tg` or a subscriber. On
 2026-10-22 a U1 print peeled off the plate for hours under exactly that deployment. Since
 [#529](https://github.com/alex-mextner/3d-cli/issues/529) both commands **refuse to start with `--dry-run`
-when stderr is the journal** (exit 2, with the fix), so a unit that still carries it fails loudly instead of
-holding alerts. The doctor check, for units that are not restarted yet:
+when stderr is the journal** (exit 2, with the fix, plus one `tg` warning an hour while the unit keeps
+restarting), so a unit that still carries it fails loudly instead of holding alerts. The repo's own template
+(`3d printer watch --install-service`) never had it and rejects it; the vision unit has no installer
+([#531](https://github.com/alex-mextner/3d-cli/issues/531)): the 2026-10-22 units were hand-written. The doctor check, for units that are not restarted yet:
 
 ```bash
 3d printer vision doctor            # exit 1 + FAIL lines + the fix when a running unit has --dry-run

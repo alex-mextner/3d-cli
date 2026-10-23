@@ -25,7 +25,9 @@ no tmux session, no `pane.log`) and returns the events as *reached*, so the FALL
 and stayed silent. The unit was a dry-run unit: `~/.config/systemd/user/3d-printer-watch@.service` ran
 `3d printer watch %i --dry-run` and was described "live monitoring, delivery held" (started 2026-10-22
 11:14:07; the u1 drop-in `live-observer.conf` that removed `--dry-run` is from 2026-10-23 02:01). The
-vision unit carried the same flag. So the chain worked exactly as a held unit should — and nothing in it said
+vision unit carried the same flag. The repo did not put it there: `watch --install-service` writes a template
+without `--dry-run` and rejects the flag, and there is no vision installer
+([#531](https://github.com/alex-mextner/3d-cli/issues/531)); both units were hand-written. So the chain worked exactly as a held unit should — and nothing in it said
 the delivery was held.
 
 Contributing links, each of which would have swallowed the alert on its own:

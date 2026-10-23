@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
@@ -620,6 +621,46 @@ def test_dry_run_is_refused_when_stderr_is_the_journal(
     Dispatcher().add_settings(
         "u1", settings, dry_run=True
     )  # a terminal dry run is fine
+
+
+def test_a_refused_dry_run_service_tells_the_user_once_an_hour(
+    xdg: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The unit restarts every 15-30 s: the refusal is in the journal every time, the phone hears
+    about it once an hour, and a dead tg never turns the refusal into something else."""
+    monkeypatch.setattr(watch_sinks, "stderr_is_journal", lambda *a, **k: True)
+    tg = Tg()
+    with pytest.raises(UsageError):
+        refuse_dry_run_service("u1", runner=tg)
+    (call,) = tg.calls
+    assert call[0].endswith("tg") and call[1:3] == ["--tag", "problem"]
+    assert "[u1]" in call[-1]
+    assert "--dry-run" in call[-1] and "NOT being delivered" in call[-1]
+    for _ in range(3):  # the restarts of the next hour
+        with pytest.raises(UsageError):
+            refuse_dry_run_service("u1", runner=tg)
+    assert len(tg.calls) == 1
+    assert (
+        watch_sinks.notify_held_service("u1", runner=tg, now=time.time() + 3601) is True
+    )
+    assert len(tg.calls) == 2
+    broken = Tg(fail=9)
+    assert (
+        watch_sinks.notify_held_service("u1", runner=broken, now=time.time() + 9000)
+        is False
+    )
+    with pytest.raises(UsageError):
+        refuse_dry_run_service("u1", runner=Tg(fail=9))
+
+
+def test_a_test_never_messages_the_user_about_a_held_service(
+    xdg: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def boom(*a: Any, **k: Any) -> None:
+        raise AssertionError("tg must not run from a test")
+
+    monkeypatch.setattr(subprocess, "run", boom)
+    assert watch_sinks.notify_held_service("u1") is False
 
 
 # ---- the automatic pause is the LAST step -----------------------------------------------------

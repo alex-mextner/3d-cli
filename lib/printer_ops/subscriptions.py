@@ -390,6 +390,18 @@ class DeliveryState:
 
         self.update(change)
 
+    def claim_warning(self, key: str, now: float, every_s: float) -> bool:
+        """True (and the slot is taken) when no warning `key` was sent in the last `every_s` seconds."""
+        def change(data: dict[str, Any]) -> bool:
+            warned = data.setdefault("warnings", {})
+            last = warned.get(key)
+            if isinstance(last, (int, float)) and 0 <= now - last < every_s:
+                return False
+            warned[key] = now
+            return True
+
+        return bool(self.update(change))
+
     def bump(self, printer: str, name: str, n: int = 1) -> None:
         """Count `n` more failures of the chain of `printer` (names: CHAIN_COUNTERS)."""
         def change(data: dict[str, Any]) -> None:

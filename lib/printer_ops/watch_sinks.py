@@ -112,11 +112,42 @@ def stderr_is_journal(environ: dict[str, str] | None = None, fd: int = 2) -> boo
     return (st.st_dev, st.st_ino) == (int(dev), int(ino))
 
 
-def refuse_dry_run_service() -> None:
-    """`--dry-run` in a service silently holds every alert (the 2026-10-22 U1 incident): refuse."""
+HELD_WARNING_EVERY_S = 3600.0   # a refused service restarts every 15-30 s: tell the user once an hour
+
+
+def notify_held_service(printer: str, *, runner: Runner = subprocess.run, now: float | None = None) -> bool:
+    """Tell the user (`tg`, at most once per HELD_WARNING_EVERY_S, shared by every restart) that a service
+    for `printer` refused to start with --dry-run, so its alerts are NOT being delivered. Best effort:
+    the refusal itself never depends on it. -> whether a message was sent."""
+    if runner is subprocess.run and os.environ.get("PYTEST_CURRENT_TEST"):
+        return False   # a test must never message the user
+    from printer_ops.subscriptions import DeliveryState
+
+    try:
+        stamp = time.time() if now is None else now
+        if not DeliveryState().claim_warning("held-service", stamp, HELD_WARNING_EVERY_S):
+            return False
+        r = runner([find_tool("tg") or "tg", "--tag", "problem",
+                    f"[{printer}] a printer watcher service refused to start: it was started with --dry-run, which "
+                    "prints alerts instead of delivering them. Printer alerts are NOT being delivered. Remove "
+                    "--dry-run from the unit (ExecStart or WATCH_ARGS), daemon-reload and restart it. This message "
+                    "repeats hourly while the unit keeps restarting."],
+                   text=True, capture_output=True, timeout=60)
+    except Exception as exc:  # best effort: the refusal below is the guarantee
+        _log(f"cannot warn the user about the held service: {exc.__class__.__name__}: {exc}")
+        return False
+    if r.returncode != 0:
+        _log(f"tg refused the held-service warning: exit {r.returncode}")
+    return r.returncode == 0
+
+
+def refuse_dry_run_service(printer: str = "?", *, runner: Runner = subprocess.run) -> None:
+    """`--dry-run` in a service silently holds every alert (the 2026-10-22 U1 incident): refuse, and tell
+    the user (hourly) that the service is not delivering."""
     if stderr_is_journal():
         from errors import UsageError
 
+        notify_held_service(printer, runner=runner)
         raise UsageError(
             "`--dry-run` makes every alert print instead of being delivered, and this process is a service "
             "(its stderr is the journal): nothing would ever reach anyone", command="printer",
@@ -520,7 +551,7 @@ class Dispatcher:
         from printer_ops.subscriptions import DeliveryState, SubscriptionSink
 
         if dry_run:
-            refuse_dry_run_service()
+            refuse_dry_run_service(printer)
         state = DeliveryState()
         sinks = [*sinks_for(settings["sinks"], dry_run=dry_run), SubscriptionSink(dry_run=dry_run, state=state)]
         # Managed subscribers may be intentionally read-only. Never replace a missing
@@ -681,5 +712,5 @@ class Dispatcher:
 
 
 __all__ = ["FALLBACK", "FIRST", "LAST_RESORT", "Dispatcher", "DryRunSink", "ExecSink", "Ledger", "OmpLive", "Pauser", "Sink",
-           "SteerSink", "StdoutSink", "TgSink", "batch_text", "find_tool", "refuse_dry_run_service", "sinks_for",
-           "stderr_is_journal", "tg_frames"]
+           "SteerSink", "StdoutSink", "TgSink", "batch_text", "find_tool", "notify_held_service",
+           "refuse_dry_run_service", "sinks_for", "stderr_is_journal", "tg_frames"]
