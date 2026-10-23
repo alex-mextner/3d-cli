@@ -71,6 +71,9 @@ For a practical figure-by-figure image backplate loop, see
 | `overlay` | [overlay.md](overlay.md) | Difference, ghost, and edge-overlay diagnostics. |
 | `match` | [match.md](match.md) | [Forced-monotonic](GLOSSARY.md#forced-monotonic-loop) param edit loop. |
 | `preprocess` | [preprocess.md](preprocess.md) | Reference subject mask and proportional depth preprocessing. |
+| `calibrate-grid` | [calibrate-grid.md](calibrate-grid.md) | Honeycomb wall photo -> focal length, camera pose and photo-px -> wall-mm homography (numpy + OpenCV, no model). |
+| `photo-scale` | [photo-scale.md](photo-scale.md) | mm per pixel + plane depth + K from a reference object, two points, the honeycomb grid or another photo. |
+| `register` | [register.md](register.md) | SIFT + RANSAC registration of two photos: relative pose, `baseline_ok`, mask warp A->B, repeatability IoU. |
 
 ### Slicing
 

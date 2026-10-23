@@ -54,7 +54,8 @@ Issue: [#156](https://github.com/alex-mextner/3d-cli/issues/156).
 (`dev run test`), and `yamllint` checks the whole directory (`.yamllint`).
 
 On the Odroid the compose overlay `/home/ultra/odroid-overlay/compose.odroid.yaml` mounts its
-own copy of `go2rtc.yaml` (different Tailscale WebRTC candidate), so a change to
+own copy of `go2rtc.yaml` (same WebRTC candidates: the Odroid LAN IP and its tailnet name
+`odroidn2.tailbfe8ea.ts.net`, which go2rtc hands to the client as-is), so a change to
 `go2rtc/go2rtc.yaml` does not reach the running go2rtc there; `3d ha deploy` prints a warning
 when a changed file is not mounted by the service it lists.
 

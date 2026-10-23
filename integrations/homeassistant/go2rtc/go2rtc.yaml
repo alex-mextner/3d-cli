@@ -8,7 +8,7 @@ webrtc:
   listen: :8555
   candidates:
     - 192.168.0.39:8555
-    - 100.74.26.95:8555
+    - odroidn2.tailbfe8ea.ts.net:8555
 
 # >>> 3d ha vision: go2rtc-streams (generated from fleet/printers.yaml; do not edit, run `3d ha vision --write`)
 streams:
