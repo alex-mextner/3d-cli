@@ -71,6 +71,10 @@ USAGE = """3d printer [-n NAME] <subcommand> [args]
                                        `subscriptions [list|test]` (see `3d printer subscribe --help`)
   agent list|stop|handoff              the temporary per-printer omp agent that gets the alerts
                                        no live subscriber took (see `3d printer agent --help`)
+  doctor [NAME|--all] [--fix] [--yes] [--json]
+                                       diagnose (and with --fix repair) the printer's setup: Klippy,
+                                       Moonraker, Spoolman link/CORS, active spool, camera, watch
+                                       services (same as `3d printers doctor`; see `3d printers doctor --help`)
   todo list|add|done|dismiss|snooze|reopen|import   (alias: issues)
                                        the printer's to-do list: needed calibrations, due
                                        maintenance, repairs, manual tasks (3d-api; offline a
@@ -120,6 +124,8 @@ Examples:
   3d printer subscriptions
   3d printer agent list
   3d printer guard u1 --job-id 00006D --yes
+  3d printer doctor --all
+  3d printer doctor k1se --fix
   3d printer todo list u1
   3d printer -n k1se issues add --title "X belt squeaks" --type inspect"""
 
@@ -503,13 +509,17 @@ def run(argv: list[str]) -> int:
         from printer_ops.printer_agent import run as agent
 
         return agent(rest)
+    if sub == "doctor":
+        from printers_cli import dispatch
+
+        return dispatch(["doctor", *rest])
     if sub in ("todo", "issues"):
         from printops.todo_cli import run as todo
 
         return todo(rest, printer=name)
     raise UsageError(f"unknown subcommand '{sub}'", command="printer",
                      remediation=["Use list, status, upload, start, cancel, watch, vision, guard, bed, subscribe, unsubscribe, "
-                                  "subscriptions, agent or todo (issues) — see `3d printer --help`."])
+                                  "subscriptions, agent, doctor or todo (issues) — see `3d printer --help`."])
 
 
 def _printer_name(argv: list[str]) -> tuple[str | None, list[str]]:

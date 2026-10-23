@@ -38,6 +38,16 @@ LIMITS: one start per printer per START_EVERY_S (shared by all watcher processes
   the events go back to the Dispatcher's FALLBACK sinks (the emergency tg) through
   `Sink.on_unreached`. A synchronous start that fails is retried in place (START_RETRY_DELAYS_S).
 
+STATE (`DeliveryState.agents[PRINTER]`): started / stopped, last_ts + last_kinds (the last alert an agent
+  took), last_error + last_error_ts + consecutive_errors (failed starts / deliveries since the last
+  success), start_claimed (restart limit), and `dry_run_ts` + `dry_run_events` (alerts a `--dry-run`
+  watcher "delivered" to this agent without sending anything; cleared by the next real delivery).
+  A watcher that runs with `--dry-run` used to leave NO trace here: its journal said
+  `[3d printer alert -> temporary u1 agent]` while no agent started, nothing was written to
+  events.jsonl and the tg fallback was held back, because the sink reports a dry-run alert as reached
+  (2026-10-22: the PAUSED alert of 20:22:59 went nowhere). `3d printer agent list` and
+  `3d printers doctor --check alert-fallback-agent` now say so. Refs #526.
+
 INVARIANTS: stdlib only; never raises into the watch loop (the sink records and logs); this
   module itself never talks to a printer.
 """
@@ -353,6 +363,36 @@ class PrinterAgents:
         self.state.update(change)
         _log(f"{printer}: ALERT NOT DELIVERED TO AN AGENT ({counter}): {why}")
 
+    def record_error(self, printer: str, why: str) -> None:
+        """A failed start / delivery: the last error and how many failed in a row (reset by the next
+        alert an agent took), so `agent list` and the doctor can tell one hiccup from a dead fallback."""
+        now = iso(self.clock())
+
+        def change(data: dict[str, Any]) -> None:
+            row = data["agents"].setdefault(printer, {})
+            n = row.get("consecutive_errors")
+            row.update(last_error=why, last_error_ts=now,
+                       consecutive_errors=(n if isinstance(n, int) and not isinstance(n, bool) else 0) + 1)
+
+        self.state.update(change)
+
+    def record_success(self, printer: str, events: list[Event]) -> None:
+        """The agent took `events`: remember it, and clear the error streak and any dry-run marker."""
+        self.state.set_agent(printer, last_ts=iso(self.clock()), last_kinds=sorted({e.kind for e in events}),
+                             consecutive_errors=0, dry_run_ts=None, dry_run_events=None)
+
+    def record_dry_run(self, printer: str, events: list[Event]) -> None:
+        """A `--dry-run` watcher pretended to deliver `events`: nothing was sent and no agent was
+        started, so say so where `agent list` and the doctor look."""
+        now = iso(self.clock())
+
+        def change(data: dict[str, Any]) -> None:
+            row = data["agents"].setdefault(printer, {})
+            n = row.get("dry_run_events")
+            row.update(dry_run_ts=now, dry_run_events=(n if isinstance(n, int) and not isinstance(n, bool) else 0) + len(events))
+
+        self.state.update(change)
+
     # ---- lifecycle ------------------------------------------------------------------------
     def start(self, printer: str, events: list[Event]) -> None:
         omp = self.omp_bin or find_tool("omp")
@@ -450,7 +490,7 @@ class PrinterAgents:
             except Exception as exc:  # never raised: the events go to the fallback instead
                 _log(f"{printer}: {exc}")
                 self._start_failed(printer, str(exc), "agent_not_acked")
-                self.state.set_agent(printer, last_error=str(exc), last_error_ts=iso(self.clock()))
+                self.record_error(printer, str(exc))
                 w.give_up()
             w.settle()
 
@@ -512,24 +552,25 @@ class PrinterAgentSink(Sink):
             by_printer.setdefault(e.printer, []).append(e)
         reached: list[Event] = []
         for printer, evs in by_printer.items():
-            if self.dry_run:
-                _log(f"dry-run temporary {printer} agent ({session_name(printer)}):\n{agent_alert(evs, printer)}")
-                reached += evs
-                continue
             if self.agents is None:
                 self.agents = PrinterAgents()
             agents = self.agents
+            if self.dry_run:
+                _log(f"dry-run temporary {printer} agent ({session_name(printer)}):\n{agent_alert(evs, printer)}")
+                agents.record_dry_run(printer, evs)  # the only persisted trace: nothing else happens
+                reached += evs
+                continue
             try:
                 what = agents.deliver(printer, evs, self.on_unreached)
             except Exception as exc:  # never into the watch loop: the tg fallback gets them
                 self.stats.last_error = f"{printer}: {exc}"
                 _log(f"{printer}: {exc}")
-                agents.state.set_agent(printer, last_error=str(exc), last_error_ts=iso(agents.clock()))
+                agents.record_error(printer, str(exc))
                 if not isinstance(exc, AgentUnavailable):   # those were counted where they happened
                     agents.state.bump(printer, "agent_start_failed")
                 continue
             _log(f"{printer}: {what}")
-            agents.state.set_agent(printer, last_ts=iso(agents.clock()), last_kinds=sorted({e.kind for e in evs}))
+            agents.record_success(printer, evs)
             reached += evs
         return reached
 
@@ -562,7 +603,9 @@ USAGE = """3d printer agent list [--json]
 
   list      running agents: tmux session, live omp pid, started, last alert/error, handoff, and the
             failure counters of the whole delivery chain per printer (agent_start_failed,
-            agent_not_acked, agent_restart_limit, subscriber_dead, fallback_tg_sent, ...)
+            agent_not_acked, agent_restart_limit, subscriber_dead, fallback_tg_sent, ...);
+            a DRY-RUN line when a `--dry-run` run swallowed alerts instead of delivering them
+            (`3d printers doctor PRINTER --check alert-fallback-agent` explains whether the fallback works)
   stop      kill the printer's agent session
   handoff   (run by the agent) forward --summary to every live session subscribed to every
             kind of the printer (warning+), then stop the agent; exit 1 (agent kept) when no subscriber is live
@@ -606,7 +649,13 @@ def cmd_list(argv: list[str]) -> int:
         print(f"  started {st.get('started') or '-'}; last alert {st.get('last_ts') or '-'} "
               f"{','.join(st.get('last_kinds') or [])}; handoff asked {st.get('handoff_asked_ts') or '-'}")
         if st.get("last_error"):
-            print(f"  last error: {st.get('last_error_ts')} {st['last_error']}")
+            streak = st.get("consecutive_errors")
+            print(f"  last error: {st.get('last_error_ts')} {st['last_error']}"
+                  + (f" ({streak} in a row)" if isinstance(streak, int) and streak > 1 else ""))
+        if st.get("dry_run_ts"):
+            print(f"  DRY-RUN: {st.get('dry_run_events', '?')} alert(s) were swallowed by a `--dry-run` watcher, the last at "
+                  f"{st['dry_run_ts']}: it prints them and starts no agent. Fix the unit: "
+                  f"3d printers doctor {r['printer']} --check watch-units-dry-run")
         print(f"  dir: {r['dir']}")
         print(f"  attach: {r['attach']}")
     return 0
