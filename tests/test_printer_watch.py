@@ -777,6 +777,10 @@ class FakeRun:
     def __call__(self, cmd: list[str], **kw: Any) -> subprocess.CompletedProcess[str]:
         self.calls.append((cmd, kw))
         code, out = self.replies.get(" ".join(cmd[:3]), (0, '{"ok":true}'))
+        if " ".join(cmd[:3]) == "tg-ctl omp-live send" and (code, out) == (0, '{"ok":true}'):
+            out = json.dumps({"ok": True, "accepted": True, "status": "accepted",
+                              "requestId": cmd[cmd.index("--request-id") + 1],
+                              "sessionId": cmd[cmd.index("--session") + 1]})   # the host's receipt
         return subprocess.CompletedProcess(cmd, code, out, "")
 
 
@@ -815,7 +819,7 @@ def test_steer_reports_bridge_failure() -> None:
 def test_tg_and_exec_sinks() -> None:
     run = FakeRun()
     TgSink(runner=run).deliver([ev(key="k")])
-    assert run.calls[0][0][0] == "tg" and "u1: state warning" in run.calls[0][0][1]
+    assert run.calls[0][0][:3] == ["tg", "--tag", "problem"] and "u1: state warning" in run.calls[0][0][-1]
     run = FakeRun()
     ExecSink("cat > /dev/null", runner=run).deliver([ev(key="k"), ev(key="j")])
     assert len(run.calls) == 2

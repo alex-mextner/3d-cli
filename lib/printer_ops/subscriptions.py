@@ -1,4 +1,4 @@
-"""subscriptions.py — `3d printer subscribe`: printer alerts go to an AI agent, never straight to the user.
+"""subscriptions.py — `3d printer subscribe`: printer alerts go to an AI agent first, to the user only when nobody can judge.
 
 WHAT: the registry of omp sessions explicitly subscribed to printer alerts, and the
   `SubscriptionSink` every watcher (`3d printer watch`, `3d printer vision` — anything built on
@@ -6,12 +6,17 @@ WHAT: the registry of omp sessions explicitly subscribed to printer alerts, and 
   need no watcher flags. A matching event goes into the subscribed LIVE omp session (the
   `tg-ctl omp-live` bridge of the steer sink) with every frame path and the instruction to look
   at the frame, judge, and tell the user only when the failure is real. A session that is not
-  live counts as unsubscribed: its events fall through to the temporary printer agent
-  (printer_agent.py), which hands over to a subscriber as soon as one covers the printer.
+  live counts as unsubscribed: it is never sent to (liveness is asked afresh on every delivery
+  and a send counts only with the host's `accepted` receipt) and its events fall through to the
+  temporary printer agent (printer_agent.py), which hands over to a subscriber as soon as one
+  covers the printer. A session dead for more than `prune_after_days` (registry key, default 3)
+  is removed from the registry with a log line; every skipped/failed delivery is counted
+  (DeliveryState `counters`) and shown by `3d printer subscriptions` / `3d printer agent list`.
 
 WHY: a U1 "noodle" alert (raw p 0.832) on a healthy print went straight to the user's phone.
   Camera and firmware detectors are noisy; something that can open the frame must judge first
-  (issues #150, #145). No guessing of the target session: subscriptions are explicit.
+  (issues #150, #145). No guessing of the target session: subscriptions are explicit. Dead
+  subscribers once swallowed alerts for days with nothing but a log line (2026-10-17..22).
 
 FILES: registry `<config>/subscriptions.yaml` (XDG_CONFIG_HOME honoured; the watch unit pins
   it), edited only under an flock and replaced atomically; delivery state (per subscription:
@@ -48,6 +53,7 @@ from printer_ops.watch_sinks import Dispatcher, OmpLive, Runner, Sink
 
 REGISTRY_NAME = "subscriptions.yaml"
 STATE_NAME = "printer-subscriptions.json"
+DEFAULT_PRUNE_DAYS = 3.0   # a session dead for longer is removed from the registry (0 = never)
 FRAME_KEYS = ("frame", "frames", "crop", "evidence")
 _NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
 
@@ -226,6 +232,9 @@ class Registry:
             return []
         if not isinstance(data, dict) or not isinstance(data.get("subscriptions", []), list):
             raise self._error("top level must be `subscriptions: [ ... ]`")
+        days = data.get("prune_after_days")
+        if days is not None and (isinstance(days, bool) or not isinstance(days, (int, float)) or days < 0):
+            raise self._error("prune_after_days must be a number of days >= 0 (0 = never prune)")
         out: list[Subscription] = []
         for i, raw in enumerate(data.get("subscriptions") or []):
             where = f"subscriptions[{i}]."
@@ -244,10 +253,28 @@ class Registry:
             raise self._error(f"duplicate id(s) {', '.join(dup)}")
         return out
 
+    def _settings(self) -> dict[str, Any]:
+        """The registry's top-level keys other than `subscriptions` (`prune_after_days`); {} when unreadable."""
+        import yaml
+
+        try:
+            data = yaml.safe_load(self.path.read_text(encoding="utf-8"))
+        except (OSError, yaml.YAMLError):
+            return {}
+        return {k: v for k, v in data.items() if k != "subscriptions"} if isinstance(data, dict) else {}
+
+    def prune_after_days(self) -> float:
+        """Days a dead session may stay registered; a bad value (load() reports it) means the default."""
+        days = self._settings().get("prune_after_days", DEFAULT_PRUNE_DAYS)
+        if isinstance(days, bool) or not isinstance(days, (int, float)) or days < 0:
+            return DEFAULT_PRUNE_DAYS
+        return float(days)
+
     def save(self, subs: list[Subscription]) -> None:
         import yaml
 
-        body = yaml.safe_dump({"subscriptions": [s.to_dict() for s in subs]}, sort_keys=False, allow_unicode=True)
+        body = yaml.safe_dump({**self._settings(), "subscriptions": [s.to_dict() for s in subs]},
+                              sort_keys=False, allow_unicode=True)
         atomic_write(self.path, self.HEADER + body)
 
     def update(self, change: Callable[[list[Subscription]], list[Subscription]]) -> list[Subscription]:
@@ -290,7 +317,9 @@ class Registry:
 
 class DeliveryState:
     """Shared by every watcher process (flock + atomic replace); failures are logged, never raised.
-    `subscriptions`: id -> last delivery / error; `agents`: printer -> temporary agent state."""
+    `subscriptions`: id -> last delivery / error / `dead_since`; `agents`: printer -> temporary agent
+    state; `counters`: printer -> failures of the delivery chain (CHAIN_COUNTERS); `pruned`: the
+    registry entries removed for being dead too long (newest last)."""
 
     def __init__(self, path: Path | None = None) -> None:
         self.path = path or state_path()
@@ -302,9 +331,11 @@ class DeliveryState:
             data = {}
         if not isinstance(data, dict):
             data = {}
-        for key in ("subscriptions", "agents"):
+        for key in ("subscriptions", "agents", "counters"):
             if not isinstance(data.get(key), dict):
                 data[key] = {}
+        if not isinstance(data.get("pruned"), list):
+            data["pruned"] = []
         return data
 
     def update(self, change: Callable[[dict[str, Any]], Any]) -> Any:
@@ -330,6 +361,43 @@ class DeliveryState:
 
         self.update(change)
 
+    def mark_dead(self, sid: str, now: float) -> None:
+        """The subscription's session is not live: remember since when (the first time only)."""
+        def change(data: dict[str, Any]) -> None:
+            row = data["subscriptions"].setdefault(sid, {})
+            if not isinstance(row.get("dead_since_ts"), (int, float)):
+                row.update(dead_since_ts=now, dead_since=iso(now))
+
+        self.update(change)
+
+    def mark_live(self, sid: str) -> None:
+        """The session answers again (`omp -r` keeps the session id): it is no longer dead."""
+        row = self.read()["subscriptions"].get(sid)
+        if not isinstance(row, dict) or "dead_since_ts" not in row:
+            return
+
+        def change(data: dict[str, Any]) -> None:
+            data["subscriptions"].get(sid, {}).pop("dead_since_ts", None)
+            data["subscriptions"].get(sid, {}).pop("dead_since", None)
+
+        self.update(change)
+
+    def record_pruned(self, sub: Subscription, dead_since: Any, now: float) -> None:
+        def change(data: dict[str, Any]) -> None:
+            data["subscriptions"].pop(sub.id, None)
+            data["pruned"] = [*data["pruned"], {"id": sub.id, "session": sub.session, "printers": list(sub.printers),
+                                                "dead_since": dead_since, "pruned": iso(now)}][-PRUNED_KEPT:]
+
+        self.update(change)
+
+    def bump(self, printer: str, name: str, n: int = 1) -> None:
+        """Count `n` more failures of the chain of `printer` (names: CHAIN_COUNTERS)."""
+        def change(data: dict[str, Any]) -> None:
+            row = data["counters"].setdefault(printer, {})
+            row[name] = int(row.get(name, 0)) + n
+
+        self.update(change)
+
     def agent(self, printer: str) -> dict[str, Any]:
         row = self.read()["agents"].get(printer)
         return row if isinstance(row, dict) else {}
@@ -351,6 +419,44 @@ class DeliveryState:
             return True
 
         return bool(self.update(change))
+
+
+PRUNED_KEPT = 20
+# Failures of the delivery chain, counted per printer in DeliveryState.counters and listed by
+# `3d printer subscriptions` and `3d printer agent list`. Name -> what it counts.
+CHAIN_COUNTERS = {
+    "subscriber_dead": "events skipped because the subscribed session is not live",
+    "subscriber_send_failed": "sends to a live session that failed or were not acknowledged",
+    "subscriber_unreachable": "deliveries where tg-ctl omp-live could not tell who is live",
+    "agent_start_failed": "temporary agent starts that failed (tmux/omp missing, tmux error)",
+    "agent_not_acked": "temporary agents that did not come up (omp-live) within the acknowledgement window",
+    "agent_restart_limit": "alerts refused a new agent start (restarted too recently)",
+    "fallback_tg_sent": "alerts sent straight to the user because nobody could judge them",
+    "fallback_tg_failed": "emergency tg messages that failed (nobody was told)",
+    "auto_pause_paused": "prints paused by the watcher itself",
+    "auto_pause_pause_unverified": "pause requests the printer acknowledged but did not show as paused",
+    "auto_pause_failed": "automatic pauses that failed",
+    "auto_pause_skipped": "automatic pauses not done (not printing, once per job, ...)",
+}
+
+
+def dead_age_s(row: Any, now: float) -> float | None:
+    """Seconds since the subscription's session was first seen dead (None = alive or never seen dead)."""
+    since = row.get("dead_since_ts") if isinstance(row, dict) else None
+    return max(0.0, now - since) if isinstance(since, (int, float)) and not isinstance(since, bool) else None
+
+
+def counter_lines(counters: dict[str, Any], *, printers: tuple[str, ...] = ()) -> list[str]:
+    """`u1: subscriber_dead 3, agent_start_failed 1` per printer that has any counter."""
+    out = []
+    for printer in sorted(counters):
+        row = counters[printer]
+        if printers and printer not in printers or not isinstance(row, dict):
+            continue
+        shown = [f"{k} {v}" for k, v in sorted(row.items()) if isinstance(v, int) and v]
+        if shown:
+            out.append(f"{printer}: {', '.join(shown)}")
+    return out
 
 
 # ---- messages -------------------------------------------------------------------------------
@@ -472,11 +578,66 @@ class SubscriptionSink(Sink):
                 _log(f"{exc.message} — keeping the previous {len(self._subs)} subscription(s)")
         return self._subs
 
-    def _fail(self, s: Subscription, events: list[Event], why: str, now: float) -> None:
+    def _fail(self, s: Subscription, events: list[Event], why: str, now: float, counter: str) -> None:
+        """A failed delivery to `s`: logged, counted per printer and recorded; `events` fall through."""
         self.stats.last_error = f"{s.id}: {why}"
         _log(f"{s.id} ({s.target}): {why}")
         if not self.dry_run:
             self.state.record(s.id, events, now, ok=False, detail=why)
+            for printer in sorted({e.printer for e in events}):
+                self.state.bump(printer, counter, sum(e.printer == printer for e in events))
+
+    def _dead(self, s: Subscription, events: list[Event], why: str, now: float) -> None:
+        """`s`'s session is not live: nothing is sent, the events fall straight through to the agent."""
+        self._fail(s, events, why, now, "subscriber_dead")
+        if not self.dry_run:
+            self.state.mark_dead(s.id, now)
+
+    def _prune(self, now: float) -> None:
+        """Remove the entries whose session has been dead for more than the registry's `prune_after_days`."""
+        days = self.registry.prune_after_days()
+        if days <= 0 or self.dry_run:
+            return
+        rows = self.state.read()["subscriptions"]
+        ages = {s.id: age for s in self.entries() if (age := dead_age_s(rows.get(s.id), now)) is not None}
+        doomed = {sid: age for sid, age in ages.items() if age > days * 86400}
+        if not doomed:
+            return
+        try:
+            gone = self.registry.remove(lambda s: s.id in doomed)
+        except ThreeDError as exc:
+            _log(f"cannot prune dead subscriptions: {exc.message}")
+            return
+        for s in gone:
+            _log(f"pruned {s.id} ({s.target}; {s.filters()}): its session has been dead for "
+                 f"{doomed[s.id] / 86400:.1f} d (limit {days:g} d, registry key prune_after_days)")
+            self.state.record_pruned(s, rows.get(s.id, {}).get("dead_since"), now)
+
+    def maintain(self) -> None:
+        """Refresh which entries are dead (even when no alert came for days) and prune the long dead."""
+        subs = self.entries()
+        if not subs or self.dry_run:
+            return
+        now = self.clock()
+        try:
+            hosts = self.live.sessions()
+        except Exception as exc:  # cannot tell who is live: nothing is marked
+            _log(f"cannot check the subscribed sessions: {exc}")
+            return
+        for s in subs:
+            if self._is_live(s, hosts):
+                self.state.mark_live(s.id)
+            else:
+                self.state.mark_dead(s.id, now)
+        self._prune(now)
+
+    @staticmethod
+    def _is_live(s: Subscription, hosts: list[dict[str, Any]]) -> bool:
+        try:
+            OmpLive.resolve(s.session, hosts, titles=False)
+        except RuntimeError:
+            return False
+        return True
 
     def deliver(self, events: list[Event], suppressed: int = 0) -> list[Event]:
         matched = [(s, [e for e in events if s.matches(e)]) for s in self.entries()]
@@ -485,18 +646,20 @@ class SubscriptionSink(Sink):
             return []
         now = self.clock()
         try:
-            hosts = self.live.sessions()
-        except Exception as exc:  # tg-ctl missing/broken: every session entry is unreachable
+            hosts = self.live.sessions()   # asked afresh for EVERY delivery: never a cached "live"
+        except Exception as exc:  # tg-ctl missing/broken: nobody can tell who is live, nothing is sent
             for s, evs in matched:
-                self._fail(s, evs, str(exc), now)
+                self._fail(s, evs, str(exc), now, "subscriber_unreachable")
             return []
         groups: dict[str, tuple[dict[str, Any], list[Subscription], list[Event]]] = {}
         for s, evs in matched:
             try:
                 host = OmpLive.resolve(s.session, hosts, titles=False)[0]
             except RuntimeError as exc:
-                self._fail(s, evs, str(exc), now)
+                self._dead(s, evs, str(exc), now)
                 continue
+            if not self.dry_run:
+                self.state.mark_live(s.id)
             _, subs, got = groups.setdefault(str(host.get("sessionId")), (host, [], []))
             subs.append(s)
             got += [e for e in evs if all(e is not g for g in got)]
@@ -509,15 +672,16 @@ class SubscriptionSink(Sink):
                 continue
             try:
                 self.live.send(host, agent_message(evs, subs))
-            except Exception as exc:
+            except Exception as exc:  # also "accepted but never acknowledged": that is NOT delivered
                 for s in subs:
-                    self._fail(s, [e for e in evs if s.matches(e)], str(exc), now)
+                    self._fail(s, [e for e in evs if s.matches(e)], str(exc), now, "subscriber_send_failed")
                 continue
             for s in subs:
                 self.state.record(s.id, [e for e in evs if s.matches(e)], now, ok=True,
                                   detail=f"session {host.get('sessionId')} pid {host.get('pid')}")
             reached += evs
             self._handoffs(subs, {e.printer for e in evs}, host, hosts)
+        self._prune(now)
         return [e for e in events if any(e is r for r in reached)]
 
     def _handoffs(self, subs: list[Subscription], printers: set[str], host: dict[str, Any],
@@ -540,14 +704,18 @@ USAGE = """3d printer subscribe --session ID [--printer P,P] [--kinds K,K] [--mi
 3d printer subscriptions [list] [--json]
 3d printer subscriptions test PRINTER [--kind KIND] [--severity LEVEL] [--text TEXT] [--frame PATH] [--send]
 
-  Printer alerts go to an AI agent, never straight to the user. Every `3d printer watch` and
-  `3d printer vision` delivers matching events to the subscribed omp session (tg-ctl omp-live,
-  like --steer) with every frame path and the instruction to open the frame, judge, and tell
-  the user via `tg` only if the failure is real. Liveness is checked on every delivery: a
-  session that is not live counts as unsubscribed, and warning+ events no live subscriber took
-  go to the printer's temporary omp agent (`3d printer agent --help`), which hands over to a
-  session that subscribes to all kinds of that printer. No watcher restart needed: the
-  registry is re-read when it changes.
+  Printer alerts go to an AI agent first. Every `3d printer watch` and `3d printer vision`
+  delivers matching events to the subscribed omp session (tg-ctl omp-live, like --steer) with
+  every frame path and the instruction to open the frame, judge, and tell the user via `tg`
+  only if the failure is real. Liveness is asked afresh before EVERY delivery and a send counts
+  only with the session's acceptance receipt: a session that is not live is never sent to and
+  counts as unsubscribed, and warning+ events no live subscriber took go to the printer's
+  temporary omp agent (`3d printer agent --help`), which hands over to a session that
+  subscribes to all kinds of that printer. Only when nobody can judge — no live subscriber and
+  the agent cannot start or does not come up within 90 s — the watcher itself sends the alert
+  to the user via `tg` with the frame (and, for a few high-confidence critical findings, pauses
+  the print first: docs/commands/printer-vision.md#pause-without-an-agent). No watcher restart
+  needed: the registry is re-read when it changes.
 
 subscribe (same session + printers + kinds again = update that entry; prints it):
   --session ID          omp sessionId or its prefix (survives `omp -r`), or a pid
@@ -565,6 +733,10 @@ unsubscribe: --session ID (every entry of that session), --id SUBID, or --all.
 
 subscriptions: each entry, whether its session is live now (tg-ctl omp-live status --json),
   and its last delivery / last error (state: ~/.local/state/3d-cli/printer-subscriptions.json).
+  A dead session shows since when it is dead and is removed from the registry after
+  `prune_after_days` (top-level key of subscriptions.yaml, default 3, 0 = never) with a log
+  line; the last removals and the failure counters of the delivery chain per printer
+  (subscriber_dead, agent_start_failed, fallback_tg_sent, ...) are listed at the end.
   test PRINTER   send one synthetic [TEST] event through the subscriptions: prints who gets
                  what (dry run); --send really delivers it to the live subscribers (never to
                  the temporary agent or tg); --kind (default vision_spaghetti), --severity
@@ -733,9 +905,12 @@ def cmd_list(argv: list[str]) -> int:
     reg = Registry()
     subs = reg.load()
     live = liveness(subs, OmpLive())
-    state = DeliveryState().read()["subscriptions"]
+    full = DeliveryState().read()
+    state = full["subscriptions"]
+    now = time.time()
     if opts.get("--json"):
-        print(json.dumps([{**s.to_dict(), "live": live[s.id], "state": state.get(s.id, {})} for s in subs],
+        print(json.dumps([{**s.to_dict(), "live": live[s.id], "state": state.get(s.id, {}),
+                           "dead_for_s": dead_age_s(state.get(s.id), now)} for s in subs],
                          ensure_ascii=False, indent=1))
         return 0
     if not subs:
@@ -750,9 +925,17 @@ def cmd_list(argv: list[str]) -> int:
         print(f"  last delivery: {last}")
         if st.get("last_error"):
             print(f"  last error: {st.get('last_error_ts')} {st['last_error']}")
+        if (age := dead_age_s(st, now)) is not None:
+            days = reg.prune_after_days()
+            print(f"  STALE: dead since {st.get('dead_since')} ({age / 3600:.1f} h); "
+                  + (f"removed automatically after {days:g} d" if days > 0 else "automatic removal is off"))
         if s.note:
             print(f"  note: {s.note}")
     print(f"registry: {reg.path}")
+    for p in full["pruned"][-5:]:
+        print(f"pruned {p.get('pruned')}: {p.get('id')} (session {p.get('session')}, dead since {p.get('dead_since')})")
+    for line in counter_lines(full["counters"]):
+        print(f"delivery failures {line}")
     return 0
 
 
@@ -810,6 +993,7 @@ def run(sub: str, argv: list[str]) -> int:
     return cmd_list(argv[1:] if argv and argv[0] == "list" else argv)
 
 
-__all__ = ["USAGE", "DeliveryState", "Registry", "RegistryError", "SubscriptionSink", "Subscription", "agent_message",
-           "alert_text", "atomic_write", "flock", "fresh_frame_hint", "frames_of", "has_vision", "iso", "liveness",
-           "make", "names", "ordered", "parse", "run", "sub_id"]
+__all__ = ["CHAIN_COUNTERS", "DEFAULT_PRUNE_DAYS", "USAGE", "DeliveryState", "Registry", "RegistryError",
+           "SubscriptionSink", "Subscription", "agent_message", "alert_text", "atomic_write", "counter_lines",
+           "dead_age_s", "flock", "fresh_frame_hint", "frames_of", "has_vision", "iso", "liveness", "make", "names",
+           "ordered", "parse", "run", "sub_id"]

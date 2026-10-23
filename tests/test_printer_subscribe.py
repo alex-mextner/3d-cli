@@ -80,6 +80,7 @@ class Fake:
         send_ok: bool = True,
         agent_comes_up: bool = True,
         tmux_ok: bool = True,
+        receipt: bool = True,
     ) -> None:
         self.calls: list[list[str]] = []
         self.raw: list[list[str]] = []
@@ -88,6 +89,7 @@ class Fake:
         self.send_ok = send_ok
         self.agent_comes_up = agent_comes_up
         self.tmux_ok = tmux_ok
+        self.receipt = receipt  # False: exit 0 and ok:true, but no `accepted` receipt (a half answer)
 
     def __call__(self, cmd: list[str], **kw: Any) -> subprocess.CompletedProcess[str]:
         self.raw.append(cmd)
@@ -100,8 +102,19 @@ class Fake:
         out, code = '{"ok":true}', 0
         if cmd[:3] == ["tg-ctl", "omp-live", "status"]:
             out = json.dumps(self.hosts)
-        elif cmd[:3] == ["tg-ctl", "omp-live", "send"] and not self.send_ok:
-            out, code = '{"ok":false,"error":"gone"}', 1
+        elif cmd[:3] == ["tg-ctl", "omp-live", "send"]:
+            if not self.send_ok:
+                out, code = '{"ok":false,"error":"gone"}', 1
+            elif self.receipt:
+                out = json.dumps(
+                    {
+                        "ok": True,
+                        "accepted": True,
+                        "status": "accepted",
+                        "requestId": cmd[cmd.index("--request-id") + 1],
+                        "sessionId": cmd[cmd.index("--session") + 1],
+                    }
+                )
         elif cmd[0] == "tmux":
             out, code = self._tmux(cmd[1:])
         return subprocess.CompletedProcess(cmd, code, out, "")
@@ -614,7 +627,7 @@ def test_agent_start_is_limited_per_printer_and_shared_by_processes(xdg: Path) -
     a = agents(run, clock)
     with pytest.raises(RuntimeError, match="tmux new-session failed"):
         a.deliver("u1", [noodle()])
-    clock[0] = 1300.0
+    clock[0] = 1010.0  # inside the 30 s backoff window of the failed start
     with pytest.raises(RuntimeError, match="restart limit"):
         agents(run, clock).deliver(
             "u1", [noodle()]
@@ -623,7 +636,7 @@ def test_agent_start_is_limited_per_printer_and_shared_by_processes(xdg: Path) -
     assert "starting the k1se agent" in agents(run, clock).deliver(
         "k1se", [noodle(printer="k1se")]
     )
-    clock[0] = 1601.0
+    clock[0] = 1031.0  # backoff over: the failed start is retried (not 10 min later)
     assert "starting the u1 agent" in agents(run, clock).deliver("u1", [noodle()])
 
 
@@ -751,7 +764,7 @@ def test_tg_fallback_gets_only_what_no_agent_took_marked_as_such(xdg: Path) -> N
     Registry().remove(lambda s: True)
     d.process([noodle("/z")])
     (call,) = tg.calls
-    assert call[0] == "tg" and call[1].startswith(
+    assert call[:3] == ["tg", "--tag", "problem"] and call[-1].startswith(
         "[агент недоступен] printer [WARNING]"
     )
 
@@ -777,7 +790,8 @@ def test_watch_tg_fallback_setting_and_deprecated_aliases(
         opts = watch_run.parse_args(["u1", *argv])[1]
         return bool(watch_run.settings_for(dev, opts)["sinks"]["tg_fallback"])
 
-    assert fallback({}) is False and fallback({"tg_fallback": True}) is True
+    assert fallback({}) is True and fallback({"tg_fallback": True}) is True   # on unless switched off
+    assert fallback({"tg_fallback": False}) is False
     with pytest.raises(InvalidArgument):
         fallback({"tg_fallback": "yes"})
     assert (
@@ -862,7 +876,9 @@ if sys.argv[1:3] == ["omp-live", "status"]:
     print(json.dumps(hosts))
 else:
     open({str(sent)!r}, "a").write(json.dumps(sys.argv[1:]) + "\\n")
-    print('{{"ok":true}}')
+    a = sys.argv
+    print(json.dumps({{"ok": True, "accepted": True, "status": "accepted",
+                      "requestId": a[a.index("--request-id") + 1], "sessionId": a[a.index("--session") + 1]}}))
 """)
     script.chmod(0o755)
     monkeypatch.setenv("PATH", f"{bindir}:{os.environ['PATH']}")
@@ -1172,8 +1188,8 @@ def test_stop_frees_the_restart_slot_but_a_failed_start_keeps_it(xdg: Path) -> N
     a.stop("u1")
     fell: list[list[Event]] = []
     a.deliver("u1", [noodle()], fell.append)
-    a.join(10)                    # did not come up: stopped, slot kept
-    clock[0] += 100
+    a.join(10)                    # did not come up: stopped, slot kept (30 s backoff)
+    clock[0] += 5   # the window runs from the failed start's claim, not from the failure
     with pytest.raises(RuntimeError, match="restart limit"):
         a.deliver("u1", [noodle()])
     assert len(fell) == 1

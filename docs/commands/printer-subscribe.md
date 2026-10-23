@@ -1,18 +1,24 @@
-# `3d printer subscribe` — printer alerts go to an AI agent, never straight to the user
+# `3d printer subscribe` — printer alerts go to an AI agent first, to the user only when nobody can judge
 
 Camera and firmware detectors are noisy: a U1 "noodle" alert (raw p 0.832) on a healthy print
 went straight to the user's phone. Now every `3d printer watch` and `3d printer vision` delivers
 events to an AI agent first. The agent opens the frame, decides whether the failure is real,
 and messages the user only when it is
 ([#150](https://github.com/alex-mextner/3d-cli/issues/150),
-[#145](https://github.com/alex-mextner/3d-cli/issues/145)):
+[#145](https://github.com/alex-mextner/3d-cli/issues/145)). The chain must work by itself — on
+2026-10-22 a PAUSED U1 reached nobody
+([#529](https://github.com/alex-mextner/3d-cli/issues/529),
+[research note](../research/printer-alert-delivery-2026-10-22.md)):
 
-1. a live omp session that **explicitly** subscribed with `3d printer subscribe` (no session is
-   ever guessed);
+1. a **verified-live** omp session that **explicitly** subscribed with `3d printer subscribe`
+   (no session is ever guessed; liveness is asked afresh before every delivery and a send
+   counts only with the session's `accepted` receipt — a dead session is never sent to);
 2. otherwise, for warning+ events, the printer's
    [temporary agent](#the-temporary-printer-agent) — an omp session in tmux started for it;
-3. only when no agent could take the event at all, the phone — and only if the printer's
-   `watch.tg_fallback: true` is set.
+3. only when **nobody can judge** — no live subscriber, and the agent cannot start or is not up
+   within 90 s — the watcher tells the user itself through `tg`, with the frame
+   ([When nobody can judge](#when-nobody-can-judge)); `watch.tg_fallback` is on unless set to
+   `false`. This is the only case where a printer alert goes straight to the user.
 
 ## Usage
 
@@ -37,8 +43,8 @@ id is a hash of the three) and prints it. The output also shows whether the sess
 
 - `--session ID` — the omp sessionId or its prefix (it survives `omp -r`; the pid does not),
   or a pid. Resolved on each delivery against `tg-ctl omp-live status --json`, exactly like
-  `3d printer watch --steer`, but never by title. A session that is not live counts as
-  unsubscribed.
+  `3d printer watch --steer`, but never by title. A session that is not live is never sent to
+  and counts as unsubscribed.
   `omp-steer list` shows the sessions.
   `3d printer subscribe --session 01a12cd6 --printer u1,k1se`
 - `--printer P,P` — only these printers (must be in `printer-devices.yaml`; repeatable;
@@ -80,7 +86,12 @@ the command says so and exits 0.
 For each entry, `subscriptions` lists its target and filters. It also shows whether the
 session is live now (`tg-ctl omp-live status --json`; a dead session says why and that the
 printer agent gets its alerts), the last delivery (time, printer, kinds, count) and the last
-error. `--json` prints the same data as an array. The delivery state lives in
+error. A session that is gone is marked `STALE: dead since …` and is **removed from the registry
+after `prune_after_days`** (default 3; a top-level key of `subscriptions.yaml`, `0` = never) with
+a log line (`subscriptions: pruned s1a2b3c4d5e …`) and a `pruned` record shown at the end of the
+listing; a session that comes back (`omp -r` keeps the id) is no longer dead. The listing ends
+with the failure counters of the delivery chain per printer (below). `--json` prints the same
+data as an array (`dead_for_s` per entry). The delivery state lives in
 `~/.local/state/3d-cli/printer-subscriptions.json`, not in the registry.
 
 ```bash
@@ -146,11 +157,18 @@ It never pauses, cancels or sends G-code without the user's ok — except policy
 material loaded, a wrong or dangerous temperature, CF filament on a brass nozzle): then it
 pauses with `3d printer pause` if that command exists and calls the user with `tg call me --say`.
 
-- At most one start per printer per 10 minutes, shared by every watcher process (a deliberate
-  `agent stop` or a handoff frees the slot).
+- At most one start per printer per 10 minutes after a good start (a crash-loop guard), shared by
+  every watcher process (a deliberate `agent stop` or a handoff frees the slot). A start that
+  **failed** (tmux/omp missing, tmux error, not up in time) is retried sooner with backoff: 30 s,
+  60 s, 120 s, ... capped at 10 min, and logged loudly (`ALERT NOT DELIVERED TO AN AGENT`).
 - The watcher waits for a starting agent on a background thread (one printer's slow start never
-  delays another printer's alert). If the agent does not show up in `omp-live` within 90 s, its
-  tmux session is killed and the events go on to the tg fallback.
+  delays another printer's alert). The agent's acknowledgement is that it shows up in
+  `omp-live` in its own directory within 90 s (`watch.agent_ack_seconds`); otherwise its tmux
+  session is killed and the events go on to [the tg fallback](#when-nobody-can-judge).
+- The tmux server is started through `systemd-run --user --scope`: tmux 3.6 puts only the pane
+  process (omp) in its own scope, the **server** stays in the cgroup of the watcher's unit and
+  takes omp with it when the unit stops or restarts
+  ([proof](../research/printer-alert-delivery-2026-10-22.md#the-spawn-survives-the-unit)).
 - Handover: when a live session subscribes to every kind of the printer at warning or lower
   (so it gets everything the agent would), the agent is asked
   (once) to run `3d printer agent handoff PRINTER --summary '...'`. That forwards the summary to
@@ -176,20 +194,62 @@ pauses with `3d printer pause` if that command exists and calls the user with `t
 3d printer agent handoff u1 --summary 'two noodle alerts, both false (purge line); user not told'
 ```
 
+## When nobody can judge
+
+No live subscriber took a warning+ event and the temporary agent could not (the start failed, it
+did not show up in `omp-live` within the acknowledgement window, or it was restarted less than
+10 minutes ago). Then the watcher does not drop it and does not log it away:
+
+1. **Pause** — for the few high-confidence critical findings of a printer with
+   `watch.pause_without_agent: critical-only` (the default for own, `access: full` printers with
+   a camera), the watcher first pauses the print itself, once per job, and never resumes or
+   cancels: [Pause without an agent](printer-vision.md#pause-without-an-agent).
+2. **Tell the user** — one `tg --tag problem [--photo FRAME]... "<text>"`: the alert, why no
+   agent took it, the frame (up to 3 that exist on disk) and, when it paused, what it did and how
+   to resume. A refused tag or photo is retried as plain text: the words always go out. Critical
+   events are never rate-limited; others at most 6 per 10 minutes (`sinks.tg.suppressed`).
+   `tg` is found in `PATH`, then `~/.local/bin` (a unit's `PATH` is minimal).
+3. **Count it** — every link of the chain that fails bumps a per-printer counter in
+   `printer-subscriptions.json`, shown by `3d printer agent list` and `3d printer subscriptions`
+   (`delivery failures u1: agent_start_failed 1, subscriber_dead 3`):
+
+| counter | counts |
+| --- | --- |
+| `subscriber_dead` | events skipped because the subscribed session is not live |
+| `subscriber_send_failed` | sends to a live session that failed or were not acknowledged |
+| `subscriber_unreachable` | deliveries where `tg-ctl omp-live` could not tell who is live |
+| `agent_start_failed` | agent starts that failed (tmux/omp missing, tmux error) |
+| `agent_not_acked` | agents that did not come up within the acknowledgement window |
+| `agent_restart_limit` | alerts refused a new agent start (restarted too recently) |
+| `fallback_tg_sent` / `fallback_tg_failed` | emergency tg messages sent / that failed (nobody told) |
+| `auto_pause_paused`, `_pause_unverified`, `_failed`, `_skipped` | outcomes of the automatic pause |
+
+`watch.tg_fallback: false` removes the guarantee (and the automatic pause with it: a pause
+nobody is told about is refused). `watch.agent_fallback: false` only removes the temporary agent.
+
+**A service never holds alerts.** `--dry-run` makes every sink print instead of send. It is
+refused when stderr is the journal (`3d printer watch|vision --dry-run` in a systemd unit exits 2
+with the fix) — the 2026-10-22 PAUSED alert was swallowed by a unit that ran `watch --dry-run`
+("delivery held") and every log line looked alive. In a terminal `--dry-run` still works.
+
 ## Delivery order
 
 1. The watcher's per-printer filters run first: `--min-severity` and the dedup window.
 2. FIRST stage: stdout, `--exec`, `--steer` targets and the session subscriptions. One
-   `tg-ctl omp-live status` call per batch resolves every session. A dead, ambiguous or
-   unreachable session is recorded in the state file and logged to stderr; it never stops the
-   watcher. `--steer all` with no session up does not count as a delivery.
+   `tg-ctl omp-live status` call per batch, **never cached**, resolves every session (it drops a
+   registry entry whose pid is gone, probes each socket within 10 s). A dead, ambiguous or
+   unreachable session is never sent to: it is recorded in the state file, counted, marked dead
+   since when and logged to stderr, and its events fall through to the next stage at once; it
+   never stops the watcher. A send counts only with the host's `accepted` receipt for that
+   request id and session (no receipt, or no answer within 30 s = failed). `--steer all` with no
+   session up does not count as a delivery.
 3. LAST_RESORT stage: the temporary printer agent, for warning+ events no agent took.
-4. FALLBACK stage: `tg`, only with `watch.tg_fallback: true` in `printer-devices.yaml`, only
-   for the warning+ events no agent took (info events never page the user), marked
-   «агент недоступен». There is no bypass for critical events. The removed `--tg` /
+4. FALLBACK stage: [pause, then `tg`](#when-nobody-can-judge) — on unless
+   `watch.tg_fallback: false` in `printer-devices.yaml`, only for the warning+ events no agent
+   took (info events never page the user), marked «агент недоступен». The removed `--tg` /
    `--tg-always` flags and the yaml key `tg:` are still read, as `tg_fallback: true` with a
-   deprecation warning, so units installed before keep running. The heartbeat counts the events tg left to an agent in
-   `sinks.tg.left_to_agent`.
+   deprecation warning, so units installed before keep running (a legacy `tg: false` stays off).
+   The heartbeat counts the events tg left to an agent in `sinks.tg.left_to_agent`.
 
 The session subscriptions are not rate-limited; the watcher's dedup window still applies. A
 broken `subscriptions.yaml` is reported (the CLI exits 2; a watcher logs it and keeps the last
@@ -198,10 +258,12 @@ good registry).
 ## Files
 
 - `~/.config/3d-cli/subscriptions.yaml` (honours `XDG_CONFIG_HOME`, which the watch unit
-  pins): `subscriptions: [{id, session, printers, kinds, min_severity, note, created}]`. Every
-  change is a locked (`subscriptions.yaml.lock`) read-modify-write with an atomic rename.
-- `~/.local/state/3d-cli/printer-subscriptions.json`: the last delivery and last error per
-  subscription; per printer agent: start, last alert, handoff, errors.
+  pins): `prune_after_days: 3` and `subscriptions: [{id, session, printers, kinds, min_severity,
+  note, created}]`. Every change is a locked (`subscriptions.yaml.lock`) read-modify-write with
+  an atomic rename that keeps `prune_after_days`.
+- `~/.local/state/3d-cli/printer-subscriptions.json`: the last delivery, last error and
+  `dead_since` per subscription; per printer agent: start, `start_failures`, last alert,
+  handoff, errors; `counters` per printer; `pruned` (the last removed entries).
 - `~/.local/state/3d-cli/printer-agents/PRINTER/`: `role.md`, `events.jsonl` (every event routed
   to the agent), `pane.log` (the tmux pane).
 

@@ -3,8 +3,11 @@
 WHAT: `Sink` implementations and the `Dispatcher` that feeds them from one queue:
   stdout  one JSON object per event per line (always unthrottled);
   exec    `sh -c CMD` per event, event JSON on stdin, PRINTER_EVENT_* in the environment;
-  tg      EMERGENCY only (`watch.tg_fallback: true`): one phone message per batch through the
-          `tg` CLI, marked «агент недоступен», for events no agent could take;
+  tg      EMERGENCY (on unless `watch.tg_fallback: false`): one phone message per batch through
+          the `tg` CLI, with the frame, marked «агент недоступен», for events no agent could take
+          — the only case where a printer alert goes straight to the user. A printer with a pause
+          policy (auto_pause.py) is paused first for a high-confidence critical finding and the
+          message says so;
   steer   one message per batch into a live omp session through `tg-ctl omp-live send` —
           the same bridge `omp-steer` and mem-sentinel use: a busy session gets it as a
           steer, an idle one as an aside that starts a turn.
@@ -17,10 +20,20 @@ WHAT: `Sink` implementations and the `Dispatcher` that feeds them from one queue
   the chatty sinks (tg, steer); critical events are never rate-limited.
 
 AGENT FIRST: camera/detector alerts are often false (a U1 "noodle" at p 0.83 on a healthy
-  print reached the user), so the watchers never message the user themselves: an agent
-  decides. Sinks run in stages: FIRST (stdout, exec, steer, session subscriptions), then
-  LAST_RESORT (the temporary printer agent: only events no agent took), then FALLBACK (tg):
-  only events no agent took at all — the agent could not be started.
+  print reached the user), so the watchers message the user themselves only when nobody can
+  judge: an agent decides. Sinks run in stages: FIRST (stdout, exec, steer, session
+  subscriptions), then LAST_RESORT (the temporary printer agent: only events no agent took),
+  then FALLBACK (tg, optional pause): only events no agent took at all — no live subscriber and
+  the agent could not be started, or did not acknowledge in time.
+
+DELIVERY IS ACKNOWLEDGED: `OmpLive.send` counts a message as delivered only with the live host's
+  `accepted` receipt for that request id and session, and `OmpLive.sessions()` is asked afresh
+  before every delivery (`tg-ctl omp-live status` drops a registry entry whose pid is gone and
+  probes each socket), so a dead session is never sent to and its events fall straight through.
+
+A SERVICE NEVER HOLDS ALERTS: `--dry-run` makes every sink print instead of send. When stderr is
+  the journal (a systemd service) it is refused (`refuse_dry_run_service`): the PAUSED alert of the
+  U1 on 2026-10-22 was swallowed by a unit that ran `watch --dry-run`, and nothing said so.
 
 STEER TARGET: a pid, a sessionId (or its prefix), or a substring of the session title, resolved
   on EVERY delivery against `tg-ctl omp-live status --json` — the pid changes when a session
@@ -35,6 +48,7 @@ from __future__ import annotations
 import json
 import os
 import queue
+import shutil
 import subprocess
 import sys
 import threading
@@ -43,11 +57,13 @@ import uuid
 from collections import deque
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Protocol
 
 from printer_ops.watch import CRITICAL, INFO, WARNING, Event, severity_rank
 
 if TYPE_CHECKING:
+    from printer_ops.auto_pause import PauseResult
     from printer_ops.devices import Device
 
 Runner = Callable[..., "subprocess.CompletedProcess[str]"]
@@ -64,6 +80,61 @@ def run_real_tg(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
         raise RuntimeError("refusing to run the real tg from a test: inject runner=")
     return subprocess.run(*args, **kwargs)
 
+
+_TOOL_DIRS = ("~/.local/bin", "/home/linuxbrew/.linuxbrew/bin", "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin")
+
+
+def find_tool(name: str) -> str | None:
+    """PATH first, then the usual install dirs (a systemd user unit has a minimal PATH)."""
+    found = shutil.which(name)
+    if found:
+        return found
+    for d in _TOOL_DIRS:
+        p = Path(d).expanduser() / name
+        if p.is_file() and os.access(p, os.X_OK):
+            return str(p)
+    return None
+
+
+def stderr_is_journal(environ: dict[str, str] | None = None, fd: int = 2) -> bool:
+    """True when this process's stderr is a systemd journal stream, i.e. it runs as a service.
+    systemd documents the check: `JOURNAL_STREAM=<dev>:<inode>` must match fstat of the descriptor.
+    The bare variable is not enough: a terminal started by systemd (GNOME runs apps as units)
+    passes it on to every child."""
+    env = os.environ if environ is None else environ
+    dev, _, ino = env.get("JOURNAL_STREAM", "").partition(":")
+    if not (dev.isdigit() and ino.isdigit()):
+        return False
+    try:
+        st = os.fstat(fd)
+    except OSError:
+        return False
+    return (st.st_dev, st.st_ino) == (int(dev), int(ino))
+
+
+def refuse_dry_run_service() -> None:
+    """`--dry-run` in a service silently holds every alert (the 2026-10-22 U1 incident): refuse."""
+    if stderr_is_journal():
+        from errors import UsageError
+
+        raise UsageError(
+            "`--dry-run` makes every alert print instead of being delivered, and this process is a service "
+            "(its stderr is the journal): nothing would ever reach anyone", command="printer",
+            remediation=["Remove --dry-run from the unit's ExecStart / WATCH_ARGS, then:",
+                         "  systemctl --user daemon-reload && systemctl --user restart <the unit>",
+                         "Dry runs belong in a terminal: `3d printer watch NAME --dry-run --duration 30`."])
+
+
+class Ledger(Protocol):
+    """Where the chain counts its failures (subscriptions.DeliveryState)."""
+
+    def bump(self, printer: str, name: str, n: int = 1) -> None: ...
+
+
+class Pauser(Protocol):
+    """auto_pause.AutoPauser: pauses the print for a qualifying critical event, once per job."""
+
+    def pause(self, events: list[Event]) -> PauseResult | None: ...
 
 @dataclass
 class SinkStats:
@@ -97,6 +168,9 @@ class Sink:
 
     def close(self, timeout: float) -> None:
         """Finish background work at shutdown (the printer agent's pending readiness checks)."""
+
+    def maintain(self) -> None:
+        """Periodic housekeeping (`Dispatcher.maintain`): the subscription sink prunes dead entries."""
 
     def deliver(self, events: list[Event], suppressed: int = 0) -> list[Event] | None:
         """Send one batch. `suppressed` = events held back by this sink's rate limit since
@@ -152,9 +226,28 @@ def batch_text(events: list[Event], *, suppressed: int = 0, prefix: str = "") ->
     return "\n".join(lines)
 
 
+MAX_TG_FRAMES = 3
+
+
+def tg_frames(events: list[Event]) -> list[str]:
+    """The camera frames of `events` that exist on disk (most severe event first), at most MAX_TG_FRAMES."""
+    from printer_ops.subscriptions import frames_of, ordered
+
+    out: list[str] = []
+    for e in ordered(events):
+        for f in frames_of(e):
+            if f not in out and Path(f).is_file():
+                out.append(f)
+    return out[:MAX_TG_FRAMES]
+
+
 class TgSink(Sink):
-    """The user's phone, as the emergency fallback: it only gets events that no agent took
-    (the printer agent could not start), marked as such."""
+    """The user's phone, as the emergency fallback: it only gets events that no agent took (no
+    live subscriber and the printer agent could not start or did not answer in time), marked as
+    such, with the camera frame. A printer with a pause policy is paused FIRST for a qualifying
+    critical finding (`attach(printer, pauser=...)`) and the message says what happened and how
+    to resume. A refused `--tag`/`--photo` falls back to the plain text: the words always go out.
+    The route is shared by every printer of the process, so printer-specific parts are attached."""
 
     name = "tg"
     rate = (6, 600.0)
@@ -164,31 +257,100 @@ class TgSink(Sink):
         super().__init__()
         self.runner = runner
         self.binary = binary
+        self.ledger: Ledger | None = None
+        self.pausers: dict[str, Pauser] = {}
+        self.whys: dict[str, Callable[[], str]] = {}
+        self.on_pause: Callable[[PauseResult], None] | None = None
+
+    def attach(self, printer: str, *, pauser: Pauser | None = None, why: Callable[[], str] | None = None) -> None:
+        if pauser is not None:
+            self.pausers[printer] = pauser
+        if why is not None:
+            self.whys[printer] = why
+
+    def _count(self, printer: str, name: str) -> None:
+        if self.ledger is not None:
+            self.ledger.bump(printer, name)
+
+    def _paused(self, events: list[Event]) -> list[str]:
+        """Pause where the printer's policy asks for it; -> the message lines about it."""
+        lines: list[str] = []
+        for printer in dict.fromkeys(e.printer for e in events):
+            pauser = self.pausers.get(printer)
+            if pauser is None:
+                continue
+            try:
+                result = pauser.pause([e for e in events if e.printer == printer])
+            except Exception as exc:  # the words must still reach the user
+                _log(f"{printer}: automatic pause crashed: {exc.__class__.__name__}: {exc}")
+                self._count(printer, "auto_pause_failed")
+                lines.append(f"{printer}: the automatic pause crashed ({exc.__class__.__name__}: {exc}); "
+                             "the print was NOT paused by the watcher: check it now.")
+                continue
+            if result is None:
+                continue
+            self._count(printer, f"auto_pause_{result.outcome}")
+            _log(f"{printer}: automatic pause {result.outcome}: {result.detail}")
+            if self.on_pause is not None:
+                self.on_pause(result)
+            lines.append(result.message())
+        return lines
+
+    def _text(self, events: list[Event], suppressed: int, extra: list[str]) -> str:
+        lines = [batch_text(events, suppressed=suppressed, prefix="[агент недоступен] printer ")]
+        for printer in dict.fromkeys(e.printer for e in events):
+            why = self.whys.get(printer)
+            lines.append(f"{printer}: no live subscriber took this alert and "
+                         f"{why() if why is not None else 'the temporary agent could not take it'}.")
+        return "\n".join([*lines, *extra])
 
     def deliver(self, events: list[Event], suppressed: int = 0) -> None:
-        text = batch_text(events, suppressed=suppressed, prefix="[агент недоступен] printer ")
-        r = self.runner([self.binary, text], text=True, capture_output=True, timeout=60)
+        extra = self._paused(events)
+        text = self._text(events, suppressed, extra)
+        frames = tg_frames(events)
+        rich = [self.binary, "--tag", "problem", *[x for f in frames for x in ("--photo", f)], text]
+        r = self.runner(rich, text=True, capture_output=True, timeout=60)
         if r.returncode != 0:
-            raise RuntimeError(f"tg exit {r.returncode}: {(r.stderr or r.stdout or '').strip()[:300]}")
+            first = f"tg exit {r.returncode}: {(r.stderr or r.stdout or '').strip()[:300]}"
+            r = self.runner([self.binary, text], text=True, capture_output=True, timeout=60)
+            if r.returncode != 0:
+                for printer in dict.fromkeys(e.printer for e in events):
+                    self._count(printer, "fallback_tg_failed")
+                raise RuntimeError(f"{first}; plain retry: tg exit {r.returncode}: "
+                                   f"{(r.stderr or r.stdout or '').strip()[:300]}")
+            _log(f"tg refused the tagged/photo message ({first}); sent the text alone")
+        for printer in dict.fromkeys(e.printer for e in events):
+            self._count(printer, "fallback_tg_sent")
 
 
 class OmpLive:
     """The `tg-ctl omp-live` bridge into live omp sessions (status + send), shared by the
     steer and subscription sinks."""
 
+    STATUS_TIMEOUT_S = 10.0   # `status` probes every socket itself: more than this means a stuck bridge
+    SEND_TIMEOUT_S = 30.0
+
     def __init__(self, *, runner: Runner = subprocess.run, tgctl: str = "tg-ctl") -> None:
         self.runner = runner
         self.tgctl = tgctl
 
     def sessions(self) -> list[dict[str, Any]]:
+        """The live omp sessions NOW (never cached): `omp-live status` drops a registry entry whose
+        pid is gone and probes each live socket, within STATUS_TIMEOUT_S."""
         try:
-            r = self.runner([self.tgctl, "omp-live", "status", "--json"], text=True, capture_output=True, timeout=20)
+            r = self.runner([self.tgctl, "omp-live", "status", "--json"], text=True, capture_output=True,
+                            timeout=self.STATUS_TIMEOUT_S)
         except FileNotFoundError as exc:
             raise RuntimeError(f"{self.tgctl} not found: cannot reach omp sessions") from exc
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(f"tg-ctl omp-live status did not answer within {self.STATUS_TIMEOUT_S:g} s") from exc
         if r.returncode != 0:
             raise RuntimeError(f"tg-ctl omp-live status exit {r.returncode}: {(r.stderr or '').strip()[:200]}")
-        hosts = json.loads(r.stdout or "[]")
-        return hosts if isinstance(hosts, list) else []
+        try:
+            hosts = json.loads(r.stdout or "[]")
+        except ValueError as exc:
+            raise RuntimeError(f"tg-ctl omp-live status printed no JSON: {(r.stdout or '').strip()[:120]!r}") from exc
+        return [h for h in hosts if isinstance(h, dict)] if isinstance(hosts, list) else []
 
     @staticmethod
     def resolve(target: str, hosts: list[dict[str, Any]], *, titles: bool = True) -> list[dict[str, Any]]:
@@ -216,13 +378,35 @@ class OmpLive:
         raise RuntimeError(f"no live omp session matches {t!r} (see: omp-steer list)")
 
     def send(self, host: dict[str, Any], text: str) -> None:
+        """Deliver `text` and require the host's receipt: `ok` + `accepted` for THIS request id and
+        session. An exit 0 without it (an old bridge, a half answer) counts as NOT delivered."""
         rid = f"3d-printer-watch-{int(time.time() * 1000)}-{host.get('pid')}-{uuid.uuid4().hex[:8]}"
-        r = self.runner([self.tgctl, "omp-live", "send", str(host.get("pid")), "--request-id", rid,
-                         "--session", str(host.get("sessionId")), text],
-                        text=True, capture_output=True, timeout=30)
+        sid = str(host.get("sessionId"))
+        try:
+            r = self.runner([self.tgctl, "omp-live", "send", str(host.get("pid")), "--request-id", rid,
+                             "--session", sid, text],
+                            text=True, capture_output=True, timeout=self.SEND_TIMEOUT_S)
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(f"omp-live send to {host.get('pid')}: no acknowledgement within "
+                               f"{self.SEND_TIMEOUT_S:g} s") from exc
         out = (r.stdout or "").strip()
         if r.returncode != 0 or '"ok":false' in out.replace(" ", ""):
             raise RuntimeError(f"omp-live send to {host.get('pid')} failed: {(out or r.stderr or '').strip()[:300]}")
+        if not self._acknowledged(out, rid, sid):
+            raise RuntimeError(f"omp-live send to {host.get('pid')} was not acknowledged (no `accepted` receipt for "
+                               f"request {rid}): {out[:200] or '(empty answer)'}")
+
+    @staticmethod
+    def _acknowledged(out: str, rid: str, sid: str) -> bool:
+        for line in reversed(out.splitlines()):
+            try:
+                reply = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(reply, dict):
+                return (reply.get("ok") is True and reply.get("accepted") is True
+                        and reply.get("requestId") == rid and str(reply.get("sessionId")) == sid)
+        return False
 
 
 class SteerSink(Sink):
@@ -332,15 +516,30 @@ class Dispatcher:
         """Route one printer by its validated `watch_run.settings_for` result, plus the
         `3d printer subscribe` registry (every printer, so watch and vision reach subscribers
         without flags; the registry is re-read when it changes)."""
-        from printer_ops.printer_agent import PrinterAgentSink
-        from printer_ops.subscriptions import SubscriptionSink
+        from printer_ops.printer_agent import PrinterAgents, PrinterAgentSink, record_event, unavailable_reason
+        from printer_ops.subscriptions import DeliveryState, SubscriptionSink
 
-        sinks = [*sinks_for(settings["sinks"], dry_run=dry_run), SubscriptionSink(dry_run=dry_run)]
+        if dry_run:
+            refuse_dry_run_service()
+        state = DeliveryState()
+        sinks = [*sinks_for(settings["sinks"], dry_run=dry_run), SubscriptionSink(dry_run=dry_run, state=state)]
         # Managed subscribers may be intentionally read-only. Never replace a missing
         # managed agent with a broader default agent when the operator disables fallback.
         if settings.get("agent_fallback", True):
-            sinks.append(PrinterAgentSink(dry_run=dry_run))
+            agents = PrinterAgents(state=state, ready_timeout_s=settings.get("agent_ack_s", 90.0))
+            sinks.append(PrinterAgentSink(agents=agents, dry_run=dry_run))
         self.add(printer, sinks, settings["min_severity"], settings["dedup_s"])
+        route = self.routes.get("tg")
+        if route is not None and isinstance(route.sink, TgSink) and printer in route.printers:
+            tg = route.sink
+            tg.ledger = state
+            tg.on_pause = lambda result: record_event(result.to_event())
+            pauser = None
+            if settings.get("pause_policy", "off") != "off":
+                from printer_ops.auto_pause import AutoPauser
+
+                pauser = AutoPauser(printer)
+            tg.attach(printer, pauser=pauser, why=lambda: unavailable_reason(printer, state))
 
     @classmethod
     def for_devices(cls, devices: Iterable[Device], *, dry_run: bool = False,
@@ -353,6 +552,19 @@ class Dispatcher:
         for dev in devices:
             d.add_settings(dev.name, settings_for(dev, opts or {}), dry_run=dry_run)
         return d
+
+    def maintain(self) -> None:
+        """Housekeeping of the sinks that have some (the subscription registry prunes dead entries);
+        called at start and every few minutes by the watcher. Never raises."""
+        for route in list(self.routes.values()):
+            self._maintain_one(route.sink)
+
+    @staticmethod
+    def _maintain_one(sink: Sink) -> None:
+        try:
+            sink.maintain()
+        except Exception as exc:  # a sink must never stop the watcher
+            _log(f"sink {sink.ident} maintenance failed: {exc.__class__.__name__}: {exc}")
 
     # ---- synchronous core ---------------------------------------------------------------
     def accept(self, e: Event, now: float) -> bool:
@@ -468,5 +680,6 @@ class Dispatcher:
         return {ident: {"printers": sorted(r.printers), **r.sink.stats.__dict__} for ident, r in self.routes.items()}
 
 
-__all__ = ["FALLBACK", "FIRST", "LAST_RESORT", "Dispatcher", "DryRunSink", "ExecSink", "OmpLive", "Sink", "SteerSink", "StdoutSink", "TgSink",
-           "batch_text", "sinks_for"]
+__all__ = ["FALLBACK", "FIRST", "LAST_RESORT", "Dispatcher", "DryRunSink", "ExecSink", "Ledger", "OmpLive", "Pauser", "Sink",
+           "SteerSink", "StdoutSink", "TgSink", "batch_text", "find_tool", "refuse_dry_run_service", "sinks_for",
+           "stderr_is_journal", "tg_frames"]

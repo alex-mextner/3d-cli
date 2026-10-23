@@ -31,7 +31,9 @@ def _fake_tgctl(tmp_path: Path) -> tuple[dict[str, str], Path]:
         f"    print({json.dumps(SESSIONS)!r})\n"
         "else:\n"
         f"    open({str(sent)!r}, 'a').write(json.dumps(sys.argv[1:]) + '\\n')\n"
-        "    print('{\"ok\":true}')\n",
+        "    a = sys.argv\n"
+        "    print(json.dumps({'ok': True, 'accepted': True, 'status': 'accepted', "
+        "'requestId': a[a.index('--request-id') + 1], 'sessionId': a[a.index('--session') + 1]}))\n",
         encoding="utf-8",
     )
     script.chmod(0o755)
@@ -108,7 +110,7 @@ def test_subscribe_help_and_usage_errors_are_explicit(tmp_path: Path) -> None:
     spawn = run_cli(tmp_path, "printer", "subscribe", "--session", "x", "--spawn")
 
     assert "3d printer subscribe --session 01a12cd6 --printer u1" in helped.stdout
-    assert "watch.tg_fallback: true" in watch_help.stdout and "--tg" not in watch_help.stdout
+    assert "watch.tg_fallback: false" in watch_help.stdout and "--tg" not in watch_help.stdout
     assert "tmux -L 3d-printer-agent attach -t 3d-printer-agent-u1" in agent_help.stdout
     assert agents.returncode == 0 and agents.stdout.strip() == "no temporary printer agents"
     assert spawn.returncode == 2 and "unknown option --spawn" in spawn.stderr
