@@ -64,7 +64,7 @@ CLEAN_PLACEMENT = 300.0  # a score above this means a label collision remains
 GRID_CELL = 4
 # A custom/span arrow is drawn only where it keeps >= 90% of its true length.
 MIN_TRUE_LENGTH_RATIO = 0.9
-SPAN_MIN_GAIN = 1.03  # show the longest span when it beats the longest bbox side by 3%
+SPAN_MIN_GAIN = 1.03  # show the part's longest span when its oriented box beats the axis-aligned one by 3%
 BODY_COLOR = (0.46, 0.62, 0.84)
 AMBIENT, DIFFUSE = 0.34, 0.66
 FONT_CANDIDATES = (
@@ -218,6 +218,7 @@ class Panel:
         )
         self.mask: np.ndarray | None = None
         self.cover: np.ndarray | None = None
+        self.cells: np.ndarray | None = None
         # Boxes nothing may cover: placed labels plus the reserved panel title / bed caption.
         self.labels: list[tuple[float, float, float, float]] = []
         # Arrow and extension segments already drawn, so a later label avoids striking them out.
@@ -280,33 +281,26 @@ class Panel:
         full = np.zeros((canvas.height, canvas.width), dtype=bool)
         full[y0:y1, x0:x1] = np.asarray(alpha) > 40
         self.mask = full
-        # The sidecar stores the silhouette on a GRID_CELL grid (any covered pixel marks the
-        # cell), so placement scores against that same conservative footprint.
+        # The sidecar stores the silhouette as GRID_CELL cells counted from the panel origin (any
+        # covered pixel marks the cell); placement scores against that same conservative footprint.
+        sub = full[y0:y1, x0:x1]
         cell = GRID_CELL
-        padded = np.zeros(
-            (-(-full.shape[0] // cell) * cell, -(-full.shape[1] // cell) * cell),
-            dtype=bool,
+        cell_rows, cell_cols = -(-sub.shape[0] // cell), -(-sub.shape[1] // cell)
+        padded = np.zeros((cell_rows * cell, cell_cols * cell), dtype=bool)
+        padded[: sub.shape[0], : sub.shape[1]] = sub
+        self.cells = np.asarray(
+            padded.reshape(cell_rows, cell, cell_cols, cell).any(axis=(1, 3))
         )
-        padded[: full.shape[0], : full.shape[1]] = full
-        blocks = padded.reshape(
-            padded.shape[0] // cell, cell, padded.shape[1] // cell, cell
-        ).any(axis=(1, 3))
-        self.cover = np.kron(blocks, np.ones((cell, cell), dtype=bool))[
-            : full.shape[0], : full.shape[1]
+        cover = np.zeros_like(full)
+        cover[y0:y1, x0:x1] = np.kron(self.cells, np.ones((cell, cell), dtype=bool))[
+            : sub.shape[0], : sub.shape[1]
         ]
+        self.cover = cover
 
     def silhouette_grid(self) -> dict[str, Any]:
-        assert self.mask is not None
-        x0, y0, x1, y1 = self.rect
-        sub = self.mask[y0:y1, x0:x1]
-        rows = []
-        for gy in range(0, sub.shape[0], GRID_CELL):
-            row = "".join(
-                "#" if sub[gy : gy + GRID_CELL, gx : gx + GRID_CELL].any() else "."
-                for gx in range(0, sub.shape[1], GRID_CELL)
-            )
-            rows.append(row)
-        return {"x0": x0, "y0": y0, "cell": GRID_CELL, "rows": rows}
+        assert self.cells is not None
+        rows = ["".join("#" if on else "." for on in row) for row in self.cells]
+        return {"x0": self.rect[0], "y0": self.rect[1], "cell": GRID_CELL, "rows": rows}
 
 
 def _text_bbox(font: Any, text: str) -> tuple[float, float, float, float]:
@@ -335,7 +329,28 @@ def _score_box(panel: Panel, box: tuple[float, float, float, float]) -> float:
     score += 1000.0 * sum(
         1 for other in panel.labels if rects_overlap(list(box), list(other))
     )
+    # Nor may a label sit on an arrow or extension line already drawn.
+    if any(_segment_hits_box(start, end, box) for start, end in panel.segments):
+        score += 1000.0
     return score
+
+
+def _segment_hits_box(
+    start: np.ndarray, end: np.ndarray, box: tuple[float, float, float, float]
+) -> bool:
+    """Exact segment/rectangle intersection (Liang-Barsky), however long the segment."""
+    lo, hi = 0.0, 1.0
+    delta = end - start
+    for axis, (low, high) in enumerate(((box[0], box[2]), (box[1], box[3]))):
+        if delta[axis] == 0.0:
+            if not low <= start[axis] <= high:
+                return False
+            continue
+        t0, t1 = (low - start[axis]) / delta[axis], (high - start[axis]) / delta[axis]
+        lo, hi = max(lo, min(t0, t1)), min(hi, max(t0, t1))
+        if lo > hi:
+            return False
+    return True
 
 
 def _line_silhouette(panel: Panel, a: np.ndarray, b: np.ndarray) -> float:
@@ -568,6 +583,12 @@ def longest_span(mesh: Any) -> tuple[np.ndarray, np.ndarray]:
     return best
 
 
+def is_slanted(mesh: Any) -> bool:
+    """Is the part's oriented bounding box longer than the longest side of its axis-aligned one (by SPAN_MIN_GAIN)?"""
+    oriented = float(np.max(mesh.bounding_box_oriented.primitive.extents))
+    return oriented > SPAN_MIN_GAIN * float(np.max(mesh.extents))
+
+
 def _draw_bed(
     draw: ImageDraw.ImageDraw,
     panel: Panel,
@@ -650,10 +671,10 @@ def render(
         (cname, np.array(c1), np.array(c2))
         for cname, c1, c2 in (parse_dim(d) for d in (dims or []))
     ]
-    span_a, span_b = longest_span(mesh)
-    if float(np.linalg.norm(span_b - span_a)) > SPAN_MIN_GAIN * float(max(ext)):
-        # a slanted part: its real length is not a bbox side
-        custom.insert(0, ("span", span_a, span_b))
+    # A slanted part's own length (its oriented box) beats the longest side of the axis-aligned box;
+    # an axis-aligned block, strap or wedge has no such length, so it gets no space-diagonal "span".
+    if is_slanted(mesh):
+        custom.insert(0, ("span", *longest_span(mesh)))
     sidecar: dict[str, Any] = {
         "part": title,
         "source": os.path.abspath(model),
@@ -740,7 +761,13 @@ def render(
     return sidecar
 
 
-def _arg_type(parser: Any, to_value: Any) -> Any:
+def _checked_dim_spec(raw: str) -> str:
+    """Validate a --dim spec but keep the raw string: `render` parses it again."""
+    parse_dim(raw)
+    return raw
+
+
+def _arg_type(to_value: Any) -> Any:
     """argparse `type=` that turns a ValueError from dimension_args into a usage error."""
 
     def convert(raw: str) -> Any:
@@ -761,13 +788,11 @@ def main(argv: list[str] | None = None) -> int:
         "--dim",
         action="append",
         default=[],
-        type=_arg_type(ap, lambda r: (parse_dim(r), r)[1]),
+        type=_arg_type(_checked_dim_spec),
     )
-    ap.add_argument("--bed", type=_arg_type(ap, parse_bed))
-    ap.add_argument("--width", type=_arg_type(ap, parse_width), default=REFERENCE_WIDTH)
-    ap.add_argument(
-        "--label-px", type=_arg_type(ap, lambda r: positive(r, "--label-px"))
-    )
+    ap.add_argument("--bed", type=_arg_type(parse_bed))
+    ap.add_argument("--width", type=_arg_type(parse_width), default=REFERENCE_WIDTH)
+    ap.add_argument("--label-px", type=_arg_type(lambda r: positive(r, "--label-px")))
     args = ap.parse_args(argv)
     try:
         sidecar = render(

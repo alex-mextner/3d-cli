@@ -9,7 +9,9 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import shutil
 import subprocess
+import sys
 from typing import Any
 
 import pytest
@@ -49,6 +51,12 @@ def _sidecar(image: str) -> dict[str, Any]:
     with open(sidecar_path(image), encoding="utf-8") as handle:
         data: dict[str, Any] = json.load(handle)
     return data
+
+
+def _move(dim: dict[str, Any], box: list[float]) -> None:
+    """Put a label (box and its text) somewhere else."""
+    dim["box"] = box
+    dim["text_box"] = [box[0] + 3, box[1] + 3, box[2] - 3, box[3] - 3]
 
 
 def _write_sidecar(image: str, data: dict[str, Any]) -> None:
@@ -125,14 +133,14 @@ def test_overlapping_labels_fail(copy: str) -> None:
     second = next(
         d for d in data["dimensions"] if d["view"] == first["view"] and d is not first
     )
-    second["box"] = list(first["box"])
+    _move(second, list(first["box"]))
     _write_sidecar(copy, data)
     assert any(o.rule == "overlaps-label" for o in check_image(copy))
 
 
 def test_label_outside_the_image_fails(copy: str) -> None:
     data = _sidecar(copy)
-    data["dimensions"][0]["box"] = [-30.0, 5.0, 100.0, 30.0]
+    _move(data["dimensions"][0], [-30.0, 5.0, 100.0, 30.0])
     _write_sidecar(copy, data)
     assert any(o.rule == "outside-image" for o in check_image(copy))
 
@@ -145,7 +153,7 @@ def test_label_sitting_on_the_part_fails(copy: str) -> None:
     gy = next(y for y, row in enumerate(grid["rows"]) if row.count("#") > 12)
     gx = grid["rows"][gy].index("#")
     x, y = grid["x0"] + gx * cell, grid["y0"] + gy * cell
-    dim["box"] = [x, y, x + 40, y + 12]
+    _move(dim, [x, y, x + 40, y + 12])
     _write_sidecar(copy, data)
     assert any(o.rule == "covers-geometry" for o in check_image(copy))
 
@@ -153,12 +161,9 @@ def test_label_sitting_on_the_part_fails(copy: str) -> None:
 def test_label_leaving_its_panel_fails(copy: str) -> None:
     data = _sidecar(copy)
     dim = next(d for d in data["dimensions"] if d["view"] == "top")
-    dim["box"] = [
-        630.0,
-        100.0,
-        700.0,
-        125.0,
-    ]  # inside the image, across into the front panel
+    _move(
+        dim, [630.0, 100.0, 700.0, 125.0]
+    )  # inside the image, across into the front panel
     _write_sidecar(copy, data)
     assert any(o.rule == "outside-panel" for o in check_image(copy))
 
@@ -382,8 +387,6 @@ def test_check_rejects_render_flags_and_render_rejects_json(
 
 
 def test_scad_input_renders_through_openscad(tmp_path: pathlib.Path) -> None:
-    import shutil
-
     if shutil.which("openscad") is None:
         pytest.skip("openscad not installed")
     scad = tmp_path / "block.scad"
@@ -429,3 +432,170 @@ def test_span_dimension_appears_for_a_slanted_part_and_foreshortened_extras_are_
     assert all(
         d["view"] != "top" for d in data["dimensions"] if d["label"] == "tilted edge"
     )
+
+
+def test_axis_aligned_block_gets_no_span(part: str, tmp_path: pathlib.Path) -> None:
+    data = render(part, str(tmp_path / "block.png"))
+    assert not [d for d in data["dimensions"] if d["label"] == "span"]
+
+
+@pytest.mark.parametrize("shape", ["strap-100", "strap-150", "pyramid"])
+def test_axis_aligned_part_gets_no_span(tmp_path: pathlib.Path, shape: str) -> None:
+    meshes = {
+        "strap-100": lambda: trimesh.creation.box(extents=(100, 25, 5)),
+        "strap-150": lambda: trimesh.creation.box(extents=(150, 40, 3)),
+        "pyramid": lambda: trimesh.Trimesh(
+            vertices=[[0, 0, 0], [100, 0, 0], [100, 100, 0], [0, 100, 0], [50, 50, 20]],
+            faces=[[0, 2, 1], [0, 3, 2], [0, 1, 4], [1, 2, 4], [2, 3, 4], [3, 0, 4]],
+        ),
+    }
+    mesh = meshes[shape]()
+    mesh.apply_translation(-mesh.bounds[0])
+    src = tmp_path / "part.stl"
+    mesh.export(src)
+    data = render(str(src), str(tmp_path / "part.png"))
+    assert not [d for d in data["dimensions"] if d["label"] == "span"]
+
+
+def test_direct_renderer_reports_a_bad_value_as_a_usage_error(
+    part: str, tmp_path: pathlib.Path
+) -> None:
+    from dimension_render import main
+
+    with pytest.raises(SystemExit) as raised:
+        main([part, "-o", str(tmp_path / "x.png"), "--width", "100"])
+    assert raised.value.code == 2
+
+
+@pytest.mark.parametrize(
+    "rotation",
+    [
+        pytest.param(("z", 0.785), id="rod-at-45-degrees-on-the-bed"),
+        pytest.param(("y", 0.6), id="rod-tilted-out-of-the-bed-plane"),
+    ],
+)
+def test_thin_rod_gets_a_span_however_it_is_oriented(
+    tmp_path: pathlib.Path, rotation: tuple[str, float]
+) -> None:
+    axis, angle = rotation
+    rod = trimesh.creation.box(extents=(150, 6, 6))
+    rod.apply_transform(
+        trimesh.transformations.rotation_matrix(
+            angle, {"y": [0, 1, 0], "z": [0, 0, 1]}[axis]
+        )
+    )
+    rod.apply_translation(-rod.bounds[0])
+    src = tmp_path / "rod.stl"
+    rod.export(src)
+    data = render(str(src), str(tmp_path / "rod.png"))
+    assert any(d["label"] == "span" for d in data["dimensions"])
+
+
+def test_segment_avoidance_catches_a_long_line_through_a_short_label() -> None:
+    from dimension_render import _segment_hits_box
+
+    import numpy as np
+
+    box = (500.0, 400.0, 530.0, 412.0)  # 12 px tall, the line is 1000 px long
+    assert _segment_hits_box(np.array([517.0, 0.0]), np.array([517.0, 1000.0]), box)
+    assert not _segment_hits_box(np.array([540.0, 0.0]), np.array([540.0, 1000.0]), box)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda d: d["dimensions"][0].__setitem__("text_box", [float("nan"), 1, 5, 9]),
+        lambda d: d["dimensions"][0].__setitem__("font_px", float("inf")),
+        lambda d: d["dimensions"][0].__setitem__("text_box", [0, 0, 20, 20]),
+        lambda d: d["views"]["top"]["silhouette_grid"].__setitem__("rows", [5]),
+        lambda d: d["views"]["top"]["silhouette_grid"].__setitem__("rows", None),
+        lambda d: d["views"]["top"]["silhouette_grid"].__setitem__(
+            "cell", float("inf")
+        ),
+        lambda d: d["views"]["top"]["silhouette_grid"].__setitem__("cell", 0),
+        lambda d: d["views"]["top"]["silhouette_grid"].__setitem__("cell", -4),
+        lambda d: d["views"]["top"]["silhouette_grid"].__setitem__("rows", ["##", "#"]),
+        lambda d: d["views"]["top"]["silhouette_grid"].__setitem__("rows", ["#x"]),
+        lambda d: d["views"]["top"]["silhouette_grid"].__setitem__("rows", []),
+        lambda d: d["views"]["top"]["silhouette_grid"].__setitem__("rows", ["."]),
+        lambda d: d["views"]["top"]["silhouette_grid"].__setitem__("x0", 3),
+    ],
+)
+def test_non_finite_or_inconsistent_sidecar_values_are_bad_sidecar(
+    copy: str, mutate: Any
+) -> None:
+    data = _sidecar(copy)
+    mutate(data)
+    with open(sidecar_path(copy), "w", encoding="utf-8") as handle:
+        json.dump(data, handle)  # allow_nan default: writes NaN/Infinity tokens
+    assert [o.rule for o in check_image(copy)] == ["bad-sidecar"]
+
+
+def test_odd_widths_keep_the_placement_grid_aligned_with_the_check(
+    part: str, tmp_path: pathlib.Path
+) -> None:
+    out = str(tmp_path / "odd.png")
+    render(part, out, width=1282)
+    assert check_image(out) == []
+
+
+def test_width_is_bounded(part: str) -> None:
+    for width in ("128000", "100"):
+        with pytest.raises(InvalidArgument):
+            dimension_run([part, "-o", "x.png", "--width", width])
+
+
+def _three_d(*args: str) -> subprocess.CompletedProcess[str]:
+    env = {**os.environ, "PY3D_NO_UV": "1"}
+    return subprocess.run(
+        [str(REPO / "bin" / "3d"), *args], capture_output=True, text=True, env=env
+    )
+
+
+def test_render_through_bin_3d_with_the_alias_and_awkward_values(
+    part: str, tmp_path: pathlib.Path
+) -> None:
+    out = tmp_path / "e2e.png"
+    done = _three_d(
+        "dims",
+        part,
+        "-o",
+        str(out),
+        "--bed",
+        "220x220",
+        "--name",
+        "-v2 plate",
+        "--dim",
+        "left:-30,0,0:30,0,0",
+    )
+    assert done.returncode == 0, done.stderr
+    assert out.is_file() and pathlib.Path(sidecar_path(str(out))).is_file()
+    assert _sidecar(str(out))["part"] == "-v2 plate"
+    checked = _three_d("dimension", "--check", str(out))
+    assert checked.returncode == 0, checked.stdout
+
+
+def test_missing_openscad_exits_127_through_bin_3d(tmp_path: pathlib.Path) -> None:
+    scad = tmp_path / "block.scad"
+    scad.write_text("cube(10);\n")
+    env = {
+        **os.environ,
+        "PY3D_NO_UV": "1",
+        "PATH": f"{pathlib.Path(sys.executable).parent}:/usr/bin:/bin",
+    }
+    if shutil.which("openscad", path=env["PATH"]) is not None:
+        pytest.skip("openscad lives on the test PATH")
+    done = subprocess.run(
+        [
+            str(REPO / "bin" / "3d"),
+            "dimension",
+            str(scad),
+            "-o",
+            str(tmp_path / "x.png"),
+        ],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert done.returncode == 127, done.stderr
+    assert "openscad is not installed" in done.stderr

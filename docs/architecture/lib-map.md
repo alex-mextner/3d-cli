@@ -39,6 +39,9 @@ rendering, slicing support, and verification:
 - `arrange_pack.py`
 - `collision_check.py`
 - `collision_viz.py`
+- `dimension_args.py`
+- `dimension_check.py`
+- `dimension_render.py`
 - `fit_camera.py`
 - `fit_camera_math.py`
 - `fit_check.py`
@@ -250,6 +253,9 @@ Every current root Python module is listed here so future additions are intentio
 - `projects_registry.py` — compatibility wrapper re-exporting `registries.projects`.
 - `reporting.py` — deterministic gate and metric artifact report composition.
 - `workspaces.py` — web dashboard workspace metadata registry.
+- `dimension_args.py` — the stdlib-only option grammar of `3d dimension` (`--bed`, `--dim`, `--width`), shared by the command and the renderer.
+- `dimension_check.py` — the legibility gate of dimensioned renders (`3d dimension --check`): sidecar + pixel checks of every label.
+- `dimension_render.py` — shaded top/front/side/iso renders with mm dimension arrows and the `.dims.json` sidecar (`3d dimension`).
 - `refmatch.py` — image/reference matching helpers.
 - `render.py` — OpenSCAD render and section implementation.
 - `spatial_fit_metrics.py` — contour-first camera-fit diagnostics and warning metrics.

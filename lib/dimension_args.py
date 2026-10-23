@@ -13,6 +13,7 @@ import math
 
 Point = tuple[float, float, float]
 MIN_WIDTH_PX = 640
+MAX_WIDTH_PX = 8192  # a typo like 128000 would allocate a ~20 GB canvas
 
 
 def finite(raw: str, what: str) -> float:
@@ -63,6 +64,8 @@ def parse_dim(spec: str) -> tuple[str, Point, Point]:
 
 
 def parse_width(raw: str) -> int:
-    if not raw.isdigit() or int(raw) < MIN_WIDTH_PX:
-        raise ValueError(f"--width {raw!r}: expected an integer >= {MIN_WIDTH_PX}")
+    if not raw.isdigit() or not MIN_WIDTH_PX <= int(raw) <= MAX_WIDTH_PX:
+        raise ValueError(
+            f"--width {raw!r}: expected an integer {MIN_WIDTH_PX}..{MAX_WIDTH_PX}"
+        )
     return int(raw)

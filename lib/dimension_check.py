@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import sys
@@ -137,23 +138,54 @@ class _Label:
         return f"{self.label} [{self.view}]"
 
 
+def _number(raw: Any, what: str) -> float:
+    """A finite float: JSON allows NaN/Infinity, a sidecar must not carry them."""
+    value = float(raw)
+    if not math.isfinite(value):
+        raise ValueError(f"{what} is not finite")
+    return value
+
+
 def _rect(raw: Any, what: str) -> list[float]:
-    rect = [float(v) for v in raw]
+    rect = [_number(v, what) for v in raw]
     if len(rect) != 4:
         raise ValueError(f"{what} needs 4 numbers, got {len(rect)}")
     return rect
 
 
+def _grid(raw: Any) -> dict[str, Any]:
+    """A validated silhouette grid: positive finite cell, int origin, equal-length rows of '#'/'.'."""
+    rows = raw["rows"]
+    if not isinstance(rows, list) or not all(isinstance(r, str) for r in rows):
+        raise ValueError("silhouette_grid rows must be a list of strings")
+    if any(len(r) != len(rows[0]) or set(r) - {"#", "."} for r in rows):
+        raise ValueError(
+            "silhouette_grid rows must be equal-length strings of '#' and '.'"
+        )
+    cell = int(_number(raw["cell"], "silhouette_grid cell"))
+    if cell < 1:
+        raise ValueError("silhouette_grid cell must be at least 1")
+    return {
+        "cell": cell,
+        "x0": int(_number(raw["x0"], "silhouette_grid x0")),
+        "y0": int(_number(raw["y0"], "silhouette_grid y0")),
+        "rows": rows,
+    }
+
+
 def _parse_label(raw: Any) -> _Label:
-    return _Label(
+    label = _Label(
         label=str(raw["label"]),
         view=str(raw["view"]),
-        font_px=float(raw["font_px"]),
+        font_px=_number(raw["font_px"], "font_px"),
         box=_rect(raw["box"], "box"),
         text_box=_rect(raw["text_box"], "text_box"),
-        value=float(raw["value_mm"]),
+        value=_number(raw["value_mm"], "value_mm"),
         text=str(raw["text"]),
     )
+    if not _inside(label.text_box, label.box):
+        raise ValueError(f"{label.name}: text_box is not inside box")
+    return label
 
 
 def _check_pixels(
@@ -215,6 +247,17 @@ def _shows_value(text: str, value: float) -> bool:
     )
 
 
+def _grid_matches_rect(grid: dict[str, Any], rect: list[float], view: str) -> None:
+    """A silhouette grid must start at its view's origin and span the whole panel, else it hides collisions."""
+    cell = grid["cell"]
+    want_rows = math.ceil((rect[3] - rect[1]) / cell)
+    want_cols = math.ceil((rect[2] - rect[0]) / cell)
+    if (grid["x0"], grid["y0"]) != (int(rect[0]), int(rect[1])):
+        raise ValueError(f"view {view}: silhouette_grid origin is not the view origin")
+    if len(grid["rows"]) != want_rows or any(len(r) != want_cols for r in grid["rows"]):
+        raise ValueError(f"view {view}: silhouette_grid does not cover the view")
+
+
 def _load_sidecar(
     side: str,
 ) -> tuple[list[_Label], dict[str, dict[str, Any]], str, tuple[int, int]]:
@@ -224,13 +267,12 @@ def _load_sidecar(
     labels = [_parse_label(raw) for raw in data["dimensions"]]
     views: dict[str, dict[str, Any]] = {}
     for view, entry in data["views"].items():
-        views[str(view)] = {
-            "rect": _rect(entry["rect"], f"view {view} rect"),
-            "grid": entry.get("silhouette_grid"),
-        }
-        grid = views[str(view)]["grid"]
+        raw_grid = entry.get("silhouette_grid")
+        rect = _rect(entry["rect"], f"view {view} rect")
+        grid = None if raw_grid is None else _grid(raw_grid)
         if grid is not None:
-            int(grid["cell"]), int(grid["x0"]), int(grid["y0"]), list(grid["rows"])
+            _grid_matches_rect(grid, rect, str(view))
+        views[str(view)] = {"rect": rect, "grid": grid}
     image = data["image"]
     return (
         labels,

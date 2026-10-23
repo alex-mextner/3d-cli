@@ -24,16 +24,30 @@ Example (the spoon150 print pose on a 220 x 220 bed):
 | Item | When |
 |---|---|
 | `X`, `Y`, `Z` — overall bounding box | every view where the edge is visible (top: X, Y; front: X, Z; side: Y, Z; iso: all three) |
-| `span` — the longest distance between two points of the part | when it exceeds the longest bounding-box side by 3% (a part lying slanted on the bed: 150.2 mm for spoon150 vs 117.9 mm of bbox) |
+| `span` — the longest distance between two points of the part | when the part's oriented bounding box is more than 3% longer than the axis-aligned one (a part lying slanted or tilted: 150.2 mm for spoon150 vs 117.9 mm of bbox) |
 | `--dim "name:x,y,z:x,y,z"` — any feature, points in model mm | views where the arrow keeps >= 90% of its true length (an arrow shown foreshortened would lie about the value) |
 | `--bed WxD` — dashed bed outline + `bed W x D mm` in the top view | model coordinates are bed coordinates, as in a print-pose STL; `PART OUTSIDE BED` in red when it sticks out |
 | part name + overall size | header |
 
+Render options besides `--bed` and `--dim`:
+
+| Option | Meaning | Example |
+|---|---|---|
+| `-o`, `--out OUT.png` | output image (required); the sidecar is `OUT.png.dims.json` | `3d dimension part.stl -o previews/part_dims.png` |
+| `--name TEXT` | part name in the header (default: the file name) | `--name "spoon150 K1 SE"` |
+| `--width PX` | image width, 640..8192 (default 1280; the legibility rules scale with it) | `--width 1920` |
+| `--label-px PX` | label font size at 1280 px width (default 20; below 14 `--check` fails) | `--label-px 24` |
+
+`--dim` points are model-space mm and may be negative (`--dim "width:-30,0,0:30,0,0"`).
+`span` is shown only when the part's oriented bounding box is more than 3% longer than its
+axis-aligned one, so an axis-aligned block, strap or pyramid gets no space-diagonal "length".
+
 A `.scad` input is exported through `openscad` first. Each label is placed at the first
 offset/side/position that clears the part's silhouette, the other labels and the panel edge;
 an extra dimension (`--dim`, `span`) with no clean spot in a view is left out of that view
-instead of covering geometry. Arrows and extension lines never cross a label already placed, and the
-bed caption is reserved so no label can cover it.
+instead of covering geometry. Arrows and extension lines avoid labels already placed where a clean
+spot exists (a `bbox` dimension with none is still drawn), and the bed caption is reserved so no
+label can cover it.
 
 ## Sidecar `OUT.png.dims.json`
 

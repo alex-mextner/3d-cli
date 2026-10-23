@@ -36,12 +36,12 @@ Render options:
                        "boss length:60,40,0:60,65,0" (repeatable). Shown only in views where
                        the arrow keeps >= 90% of its true length.
   --name TEXT          part name in the header (default: the file name)
-  --width PX           image width (default 1280, the width the legibility rules are set at)
+  --width PX           image width 640..8192 (default 1280, the width the legibility rules are set at)
   --label-px PX        label font size at 1280 px width (default 20; below 14 the check fails)
 
 Automatic dimensions: overall X / Y / Z of the bounding box in every view where the edge is
-visible, and "span" (the longest distance between two points) when it exceeds the longest
-bounding-box side by 3% — a part lying slanted on the bed.
+visible, and "span" (the longest distance between two points) when the part's oriented box is more
+than 3% longer than its axis-aligned one — a part lying slanted or tilted.
 
 Check (--check IMAGE): needs IMAGE.dims.json beside it and verifies
   - the sidecar belongs to this exact image (sha256, size) and lists >= 3 dimensions;
@@ -126,7 +126,9 @@ def run(argv: list[str]) -> int:
         elif arg in RENDER_FLAGS:
             value = _value(argv, i, arg)
             _validate(arg, value)
-            render_flags += [arg, value]
+            render_flags.append(
+                f"{arg}={value}"
+            )  # `=` form: a value may start with '-'
             i += 2
         elif arg.startswith("-"):
             raise UsageError(
@@ -172,7 +174,9 @@ def run(argv: list[str]) -> int:
     if not os.path.isfile(model):
         raise InputNotFound(model, command="dimension")
     os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
-    return exec_tool(DEPS, "dimension_render.py", [model, "-o", out, *render_flags])
+    return exec_tool(
+        DEPS, "dimension_render.py", [model, f"--out={out}", *render_flags]
+    )
 
 
 COMMAND = Command(
