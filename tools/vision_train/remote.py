@@ -52,6 +52,16 @@ SSH_OPTS = [
     "ServerAliveCountMax=4",
 ]
 HEAVY = ("*.pt", "*.onnx", "*.safetensors", "*.npy")
+# Processes of ours are those whose working directory is inside the base dir: the job is started with
+# `cd RUN_DIR && exec ... .venv/bin/python tools/...`, so no argv mentions the directory (pgrep -f cannot
+# see it) but every process, workers included, inherits the cwd.
+LEFTOVERS = (
+    'for d in /proc/[0-9]*; do [ -O "$d" ] || continue; c=$(readlink "$d/cwd" 2>/dev/null) || continue; '
+    'case "$c" in "$HOME"/work-3d-cli-vision|"$HOME"/work-3d-cli-vision/*) '
+    'echo "${d#/proc/} $(tr "\\0" " " < "$d/cmdline" 2>/dev/null | cut -c1-100)"; f=1;; esac; done; [ "${f:-}" = 1 ]'
+)
+
+
 # what the laptop is allowed to be asked for (see the module docstring); hostrun.py enforces it
 LIMITS = {"threads": 6, "vram_cap_mib": 4608, "max_load": 12.0, "start_load": 8.0}
 PREFLIGHT = """\
@@ -63,8 +73,8 @@ echo "== disk"; df -h "$HOME"
 echo "== tools"; for t in python3 uv docker rsync curl timeout nice pgrep; do command -v "$t" || echo "$t: missing"; done
 python3 --version 2>&1
 echo "== top cpu"; ps -eo pid,pcpu,pmem,etime,comm --sort=-pcpu | head -6
-echo "== our leftovers"; pgrep -u "$USER" -f '[w]ork-3d-cli-vision' || echo "none"
-"""
+echo "== our leftovers"; {LEFTOVERS} || echo "none"
+""".replace("{LEFTOVERS}", LEFTOVERS)
 
 
 def host() -> str:
@@ -197,12 +207,11 @@ def clean_command(run: str, *, everything: bool) -> list[str]:
 
 
 def verify_idle_command() -> list[str]:
-    """Fails (exit 1) when any process of ours still mentions the work dir. The `[w]` keeps pgrep from
-    matching its own command line."""
+    """Fails (exit 1) when any process of ours still works in the base dir (see LEFTOVERS)."""
     return ssh_cmd(
         "bash -c "
         + shlex.quote(
-            "if pgrep -u \"$USER\" -fa '[w]ork-3d-cli-vision'; then echo 'STILL RUNNING' >&2; exit 1; else echo 'idle: nothing of ours is running'; fi"
+            f"if {LEFTOVERS}; then echo 'STILL RUNNING' >&2; exit 1; else echo 'idle: nothing of ours is running'; fi"
         )
     )
 
@@ -215,11 +224,13 @@ def mirror_commands(run: str) -> list[list[str]]:
         rsync_cmd(
             f"{out}/",
             f"{weights_host()}:{dest}/",
+            "--include=*/",
             "--include=*.pt",
             "--include=*.onnx",
             "--include=*.safetensors",
             "--include=*.json",
             "--exclude=*",
+            "--prune-empty-dirs",
         ),
     ]
 

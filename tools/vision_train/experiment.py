@@ -527,10 +527,13 @@ def main(argv: list[str]) -> int:
         table = vm.PromptTable.load()
         probs = [table.probs(e) for e in emb]
         scores["zeroshot"] = {c: np.array([p[c] for p in probs]) for c in CLASSES}
-    if "tier_a" in methods or args.tier_a:
+    if "tier_a" in methods and not args.tier_a:
+        raise SystemExit("--methods tier_a needs --tier-a FILE.json ({id: q}, tier_a_scores.py)")
+    if args.tier_a:
         q = json.loads(args.tier_a.read_text())
+        # a frame tier (a) never scored is NaN (excluded), not a confident 0.0
         scores["tier_a"] = {
-            "spaghetti": np.array([float(q.get(r["id"], 0.0)) for r in rows])
+            "spaghetti": np.array([float(q[r["id"]]) if r["id"] in q else np.nan for r in rows])
         }
     if "head" in methods:
         t0 = time.time()
@@ -555,10 +558,12 @@ def main(argv: list[str]) -> int:
         scores["head"] = head_scores
         timings["head_s"] = round(time.time() - t0, 1)
     ft_vram: dict[str, float] = {}
+    embed_vram = vram_report()
     if "finetune" in methods:
         del vis  # the fine-tune starts from the exact fp32 weights, not the fp16 copy
         if device == "cuda":
             torch.cuda.empty_cache()
+            torch.cuda.reset_peak_memory_stats()  # peak_through_finetune is the fine-tune phase alone
         vis_ft = Vision(device, torch.float32)
         t0 = time.time()
         ft_scores = {c: np.zeros(len(rows)) for c in CLASSES}
@@ -577,12 +582,12 @@ def main(argv: list[str]) -> int:
         scores["finetune"] = ft_scores
         timings["finetune_s"] = round(time.time() - t0, 1)
         ft_vram = vram_report()
-    vram = vram_report()
-    if device == "cuda":
-        reserved = vram["reserved_peak_mib"] + CONTEXT_MIB
-        assert reserved <= cap_mib + 1, (
-            f"VRAM peak {reserved} MiB (reserved + context) above the cap {cap_mib} MiB"
-        )
+    vram = {k_: max(embed_vram.get(k_, 0.0), ft_vram.get(k_, 0.0)) for k_ in (embed_vram or ft_vram)}
+    over_cap = (
+        f"VRAM peak {vram['reserved_peak_mib'] + CONTEXT_MIB} MiB (reserved + context) above the cap {cap_mib} MiB"
+        if device == "cuda" and vram["reserved_peak_mib"] + CONTEXT_MIB > cap_mib + 1
+        else None
+    )
     # NaN = the fold had too few training positives: no score, excluded from that method's metrics
     metrics = all_metrics(scores, rows, folds)
     if args.tag:
@@ -602,6 +607,7 @@ def main(argv: list[str]) -> int:
             "context_allowance": CONTEXT_MIB,
             "peak_all_phases": vram,
             "peak_through_finetune": ft_vram,
+            "over_cap": over_cap,
         },
         "metrics": metrics,
     }
@@ -620,6 +626,8 @@ def main(argv: list[str]) -> int:
         + "\n"
     )
     print_table(metrics)
+    if over_cap:  # after the scores are on disk: a breach is reported, not a reason to lose the run
+        raise SystemExit(over_cap)
     return 0
 
 

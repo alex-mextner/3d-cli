@@ -165,8 +165,15 @@ def kill_group(pgid: int, sig: int) -> None:
         os.killpg(pgid, sig)
 
 
-def _pump(proc: subprocess.Popen[str], log: Any) -> None:
-    """Copy CMD's output to our stdout (the ssh session) and to out/run.log."""
+def say(text: str, *, err: bool = False) -> None:
+    """A diagnostic line that can never raise: after an ssh drop stdout/stderr are broken pipes."""
+    with contextlib.suppress(OSError, ValueError):
+        print(text, file=sys.stderr if err else sys.stdout, flush=True)
+
+
+def _pump(proc: subprocess.Popen[str], log: Any, stop: dict[str, str | None]) -> None:
+    """Copy CMD's output to our stdout (the ssh session) and to out/run.log. A broken pipe means the ssh
+    session is gone (sshd sends no SIGHUP without a pty): that is a stop reason, the guard kills CMD."""
     assert proc.stdout is not None
     for line in proc.stdout:
         log.write(line)
@@ -175,7 +182,7 @@ def _pump(proc: subprocess.Popen[str], log: Any) -> None:
             sys.stdout.write(line)
             sys.stdout.flush()
         except OSError:
-            pass  # ssh dropped: the signal handler stops CMD; the log keeps the rest
+            stop["reason"] = stop["reason"] or "ssh_dropped"  # the log keeps the rest
 
 
 def _child_env(args: argparse.Namespace) -> dict[str, str]:
@@ -209,7 +216,7 @@ def run_guarded(cmd: list[str], args: argparse.Namespace) -> int:
         (out / "GUARD.json").write_text(
             json.dumps({"outcome": "refused", "reason": refusal}) + "\n"
         )
-        print(f"hostrun: refusing to start: {refusal}", file=sys.stderr, flush=True)
+        say(f"hostrun: refusing to start: {refusal}", err=True)
         return 5
     t0 = time.time()
     log = (out / "run.log").open("a")
@@ -222,10 +229,10 @@ def run_guarded(cmd: list[str], args: argparse.Namespace) -> int:
         stderr=subprocess.STDOUT,
         text=True,
     )
-    pump = threading.Thread(target=_pump, args=(proc, log), daemon=True)
+    stop: dict[str, str | None] = {"reason": None}
+    pump = threading.Thread(target=_pump, args=(proc, log, stop), daemon=True)
     pump.start()
     pidfile.write_text(f"{os.getpid()}\n{proc.pid}\n")
-    stop: dict[str, str | None] = {"reason": None}
 
     def on_signal(signum: int, _frame: Any) -> None:
         stop["reason"] = f"signal_{signal.Signals(signum).name}"
@@ -250,10 +257,9 @@ def run_guarded(cmd: list[str], args: argparse.Namespace) -> int:
                 max_s=args.max_hours * 3600.0,
             )
             if outcome:
-                print(
+                say(
                     f"hostrun: stopping CMD: {outcome} (load {load:.1f}, VRAM of CMD {ours_mib} MiB)",
-                    file=sys.stderr,
-                    flush=True,
+                    err=True,
                 )
                 kill_group(proc.pid, signal.SIGTERM)
                 try:
@@ -280,7 +286,7 @@ def run_guarded(cmd: list[str], args: argparse.Namespace) -> int:
         "threads": args.threads,
     }
     (out / "GUARD.json").write_text(json.dumps(result, indent=2) + "\n")
-    print("hostrun: " + json.dumps(result), flush=True)
+    say("hostrun: " + json.dumps(result))
     if outcome == "timeout":
         return 4
     if outcome:

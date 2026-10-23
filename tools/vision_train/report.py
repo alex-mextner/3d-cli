@@ -119,6 +119,8 @@ def matched_tables(root: Path, dataset: Path) -> list[str]:
 def event_frames(root: Path, dataset: Path) -> list[str]:
     import numpy as np
 
+    if not (root / "oof_scores.json").is_file():
+        return []  # only tagged runs: their tables are printed by matched_tables
     oof = json.loads((root / "oof_scores.json").read_text())
     rows = {}
     for line in (dataset / "labels.jsonl").read_text().splitlines():

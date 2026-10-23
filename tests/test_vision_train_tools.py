@@ -219,7 +219,7 @@ def test_verify_idle_looks_for_our_work_dir_without_matching_itself(
 ) -> None:
     remote = _load("remote")
     cmd = shlex.split(remote.verify_idle_command()[-1])[-1]  # the script bash receives
-    assert "pgrep -u \"$USER\" -fa '[w]ork-3d-cli-vision'" in cmd and "exit 1" in cmd
+    assert "/proc/[0-9]*" in cmd and "readlink" in cmd and "exit 1" in cmd
     ran: list[Any] = []
 
     def fake_ssh(c: list[str], check: bool = False) -> Any:
@@ -244,6 +244,8 @@ def test_mirror_sends_only_weights_and_json_to_the_second_copy_host_and_runs_not
         and "--exclude=*" in sync
         and "65.21.40.51:~/3d-cli-weights/r1/" in sync
     )
+    # tagged runs write out/<tag>/...: the filter must descend into sub-directories (reviewer, PR #510)
+    assert sync.index("--include=*/") < sync.index("--exclude=*") and "--prune-empty-dirs" in sync
     assert (
         remote.main(["mirror", "r1"]) == 0 and "mkdir -p" in capsys.readouterr().out
     )  # dry run prints
@@ -980,3 +982,66 @@ def test_leave_setup_out_merges_videos_with_similar_frames_into_one_group() -> N
     before = [dict(r) for r in own]
     experiment.regroup_by_setup(own, np.zeros((2, 4), np.float32), 2)
     assert own == before  # only emptydeck frames are regrouped
+
+
+# ---- review findings of PR #510 ---------------------------------------------------------------------------
+
+
+def test_verify_idle_sees_a_real_process_that_only_has_the_work_dir_as_its_cwd(
+    tmp_path: Path,
+) -> None:
+    """The job is `cd RUN && exec ... .venv/bin/python tools/x.py`: no argv mentions the work dir, so
+    pgrep -f could not see it. The check looks at the cwd of every process of ours (reviewer finding)."""
+    import subprocess
+
+    remote = _load("remote")
+    script = shlex.split(remote.verify_idle_command()[-1])[-1]
+    home = tmp_path / "home"
+    run = home / "work-3d-cli-vision" / "r1"
+    run.mkdir(parents=True)
+    env = {**os.environ, "HOME": str(home)}
+
+    def check() -> Any:
+        return subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True, cwd=tmp_path)
+
+    idle = check()
+    assert idle.returncode == 0 and "idle" in idle.stdout
+    sleeper = subprocess.Popen(["sleep", "30"], cwd=run, env=env)  # relative-path job: argv has no work dir
+    try:
+        busy = check()
+        assert busy.returncode == 1 and "STILL RUNNING" in busy.stderr
+        assert str(sleeper.pid) in busy.stdout
+    finally:
+        sleeper.terminate()
+        sleeper.wait()
+    assert check().returncode == 0
+
+
+def test_a_dropped_ssh_session_stops_the_job_and_still_writes_the_guard_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """sshd sends no SIGHUP without a pty: a broken stdout pipe is the only sign. It must stop CMD,
+    and the diagnostics printed to the dead pipe must not raise before GUARD.json is written."""
+    hostrun = _load("hostrun")
+
+    class Dead:
+        def write(self, _s: str) -> int:
+            raise BrokenPipeError
+
+        def flush(self) -> None:
+            raise BrokenPipeError
+
+    monkeypatch.setattr(hostrun.sys, "stdout", Dead())
+    monkeypatch.setattr(hostrun.sys, "stderr", Dead())
+    started = time.time()
+    code = "import time\nprint('hello', flush=True)\ntime.sleep(60)"
+    rc, result = _run_guard(hostrun, tmp_path, monkeypatch, code, max_hours=1.0)
+    assert result["outcome"] == "ssh_dropped" and rc == 3
+    assert time.time() - started < 20
+    assert not (tmp_path / "run.pid").exists()
+    assert "hello" in (tmp_path / "out" / "run.log").read_text()  # the log keeps what the pipe lost
+
+
+def test_report_tolerates_a_run_dir_that_only_has_tagged_runs(tmp_path: Path) -> None:
+    report = _load("report")
+    assert report.event_frames(tmp_path, tmp_path) == []
