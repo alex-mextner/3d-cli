@@ -229,7 +229,10 @@ def build(out: Path, sources: dict[str, Any], third_party: bool) -> None:
             stat["refused_person_or_face"] += refused
             stat["frames_with_qr_masked"] += bool(rep["qr_masked"])
             digest = hashlib.sha256(data).hexdigest()
-            folder, provenance = ("private", "own_private") if refused else ("own", "own")
+            # `publish: false` sources (frames with drawn detection boxes, evidence of other events)
+            # are training/evaluation data only, like a refused frame
+            private = refused or src.get("publish", True) is False
+            folder, provenance = ("private", "own_private") if private else ("own", "own")
             dest = out / folder / "frames" / f"{digest[:16]}.jpg"
             dest.parent.mkdir(parents=True, exist_ok=True)
             if dest.exists():
@@ -253,7 +256,7 @@ def build(out: Path, sources: dict[str, Any], third_party: bool) -> None:
                     "qr_masked": rep["qr_masked"],
                 }
             )
-            stat["kept_private" if refused else "published"] += 1
+            stat["kept_private" if private else "published"] += 1
         report["own"][src["id"]] = stat
         print(f"own {src['id']}: {stat}", flush=True)
     if third_party:
@@ -281,6 +284,16 @@ def build(out: Path, sources: dict[str, Any], third_party: bool) -> None:
         json.dumps(report, indent=2, sort_keys=True) + "\n"
     )
     print(f"built {out}: {report['frames']}  dataset sha256 {digest[:16]}")
+
+
+_SEQUENCE = re.compile(r"^(?P<seq>.+)_t\d+\.jpg$")
+
+
+def _group(m: dict[str, Any]) -> str:
+    """The unit a held-out split must keep together: one video/sequence where the source names it
+    (emptydeck: `<video>_t<seconds>.jpg`), else the whole source (stricter than per print)."""
+    hit = _SEQUENCE.match(Path(m["path"]).name) if m["source"] == "emptydeck" else None
+    return f"{m['source']}:{hit.group('seq')}" if hit else str(m["source"])
 
 
 def _build_third_party(
@@ -322,7 +335,8 @@ def _build_third_party(
                 "file": f"third_party/frames/{digest[:16]}.jpg",
                 "label": label,
                 "split": m["split"],
-                "group": f"{m['source']}",
+                "group": _group(m),
+                "orig": m["path"],
                 "printer": "other",
                 "provenance": "third_party",
                 "source": m["source"],
