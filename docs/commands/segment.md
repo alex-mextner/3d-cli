@@ -107,6 +107,18 @@ python packages/threed-vision/eval/segment_recall.py tools.heic --device cpu --r
 | CPU, previous default (boxes only on a 1024 px copy; now `--quality accurate` on CPU) | 11.5 s | 9.0 s | 65 | 39 % | 41 % | |
 | **CPU default (`fast`, full resolution)** | 49.9 s | **38.7 s** | 93 | 91 % | **89 %** | 4 OMP threads, load ~6 |
 
+Variants scored by the same script (GPU; `wrench / hammer` = the two by-eye labels found as one instance; full tables in the notes):
+
+| variant | warm | recall 33 | wrench / hammer | parity |
+|---|---|---|---|---|
+| accurate (GPU default) | 5.7 s | 100 % | no / no | 100 % |
+| fast (default, gate 0.1) | 1.8 s | 91 % | no / no | 89 % |
+| fast, `--grid-gate 0` | 2.7 s | 91 % | no / no | 91 % |
+| fast, `--grid-gate 0.3` | 1.1 s | 52 % | no / yes | 61 % |
+| fast, `--owl-tiles 2` / `3` | 2.3 / 2.5 s | 88 % | yes / no | 80 / 83 % |
+| accurate, `--owl-tiles 2` | 6.4 s | 94 % | yes / no | 91 % |
+| fast, extra OWLv2 queries (wrench, hammer, spanner, tweezers, hex key) | 1.8 s | 91 % | no / no | 89 % |
+
 The three labels `fast` misses (two `pliers`, one `roll of tape`) are objects it returns whole where the label marks a part. `fast` finds neither the blue adjustable wrench nor the
 hammer head (proof image `docs/img/segment-hammer-wrench.jpg`: photo / accurate overlay / fast overlay; `--owl-tiles 2` finds the wrench but fragments other objects). A `--device cpu` run
 needs ~8 s more on a cold process (imports). On a saturated machine (load 23) expect 2-3x the CPU times.
