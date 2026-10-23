@@ -21,14 +21,17 @@ from __future__ import annotations
 from cli.pyrun import exec_tool
 from cli.registry import Command
 
-USAGE = """3d mesh <file.stl|.3mf|.scad> [-D k=v ...]
+USAGE = """3d mesh <file.stl|.3mf|.scad> [-D k=v ...] [--repair [-o OUT]]
   Report watertight / manifold / self-intersection / volume.
+  --repair  fix the mesh first with meshfix (holes, flipped faces, duplicate vertices/faces, non-manifold
+            edges, T-junctions, islands), write <file>.fixed.stl (or -o OUT), then gate the repaired mesh.
   Engine tiers: trimesh+open3d (full) -> trimesh+manifold3d -> openscad warning grep.
   Exit 0 = PASS, 1 = FAIL (geometric defect), 2 = load/usage error.
 
 Example:
   3d mesh part.stl
-  3d mesh model.scad -D 'width=80'"""
+  3d mesh model.scad -D 'width=80'
+  3d mesh purchased.stl --repair -o purchased.fixed.stl"""
 
 
 def run(argv: list[str]) -> int:

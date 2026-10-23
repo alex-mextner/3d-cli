@@ -35,7 +35,10 @@ CUBE_VOLUME = 1000.0  # 10 mm cube
 
 
 @pytest.fixture(autouse=True)
-def _restore_registry() -> Iterator[None]:
+def _restore_registry(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    # The real meshfix library (lib/mesh_repair.py) wins `auto` wherever it is buildable; these tests pin the
+    # builtin/fake backends, so hide it unless a test installs its own stand-in module.
+    monkeypatch.setitem(sys.modules, "mesh_repair", None)
     saved = backends()
     yield
     for b in backends():
@@ -580,7 +583,9 @@ def test_external_backend_forwards_the_arrays_and_no_builtin_options_to_mesh_rep
     assert ExternalBackend().available() is True
     r = repair(without_faces(cube(), [0]), options=opts)  # 'auto' picks it
     assert r.backend == "meshfix-lib"
-    assert "max_hole_edges" not in seen and "ring" not in seen  # the library's keyword set is its own
+    assert (
+        "max_hole_edges" not in seen and "ring" not in seen
+    )  # the library's keyword set is its own
     assert seen["shapes"] == ((8, 3), (11, 3))
     assert r.mesh.vertices.dtype == np.float64 and r.mesh.faces.dtype == np.int64
     assert r.after.is_volume
