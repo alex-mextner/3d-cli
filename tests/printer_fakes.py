@@ -107,6 +107,14 @@ class FakeMoonraker:
     spoolman_set_error_after_apply: bool = False  # ... but only after it applied the id (a lost answer)
     spoolman_read_error: int = 0                  # only GET spool_id (the read-back) answers this HTTP status
     spoolman_raw: bytes | None = None             # ... or this raw (non-JSON) body with 200
+    components: list[str] | None = None           # `components` of /server/info (None: the key is absent)
+    failed_components: list[str] = field(default_factory=list)  # /server/info failed_components (when set)
+    server_warnings: list[str] = field(default_factory=list)    # /server/info warnings (when set)
+    config: dict[str, Any] | None = None          # /server/config result.config (None: the endpoint 404s)
+    system_info: dict[str, Any] | None = None     # /machine/system_info result.system_info (None: 404)
+    disk_usage: dict[str, int] | None = None      # /server/files/directory disk_usage (None: not reported)
+    date_offset_s: float = 0.0                    # the HTTP Date header runs this many seconds ahead
+    restart_recovers: bool = True                 # firmware_restart / restart bring klippy_state back to ready
     port: int = 0
 
     def writes(self) -> list[Recorded]:
@@ -152,6 +160,9 @@ class FakeMoonraker:
             def log_message(self, *a: Any) -> None:
                 pass
 
+            def date_time_string(self, timestamp: float | None = None) -> str:
+                return super().date_time_string((timestamp or time.time()) + fake.date_offset_s)
+
             def _reply(self, obj: Any, code: int = 200) -> None:
                 data = json.dumps(obj).encode()
                 self.send_response(code)
@@ -190,7 +201,25 @@ class FakeMoonraker:
                 elif u.path == "/server/history/totals":
                     self._reply({"result": fake.totals})
                 elif u.path == "/server/info":
-                    self._reply({"result": fake.server_info})
+                    info = dict(fake.server_info)
+                    if fake.components is not None:
+                        info["components"] = fake.components
+                    if fake.failed_components:
+                        info["failed_components"] = fake.failed_components
+                    if fake.server_warnings:
+                        info["warnings"] = fake.server_warnings
+                    self._reply({"result": info})
+                elif u.path == "/printer/info" and fake.server_info.get("klippy_state") is not None:
+                    state = fake.server_info["klippy_state"]
+                    self._reply({"result": {"state": state, "state_message": f"Klipper is {state}",
+                                            "hostname": "fake"}})
+                elif u.path == "/server/config" and fake.config is not None:
+                    self._reply({"result": {"config": fake.config, "orig": {}, "files": []}})
+                elif u.path == "/machine/system_info" and fake.system_info is not None:
+                    self._reply({"result": {"system_info": fake.system_info}})
+                elif (u.path == "/server/files/directory" and parse_qs(u.query).get("path") == ["gcodes"]
+                      and fake.disk_usage is not None):
+                    self._reply({"result": {"dirs": [], "files": [], "disk_usage": fake.disk_usage}})
                 elif u.path in ("/server/spoolman/status", "/server/spoolman/spool_id") and fake.spoolman:
                     if self._spoolman_fault():
                         return
@@ -248,6 +277,11 @@ class FakeMoonraker:
                     if not fake.spoolman_ignores_set:
                         fake.active_spool = json.loads(body)["spool_id"]
                     self._reply({"result": {"spool_id": fake.active_spool}})
+                elif u.path in ("/printer/firmware_restart", "/printer/restart"):
+                    if fake.restart_recovers:
+                        fake.server_info.update(klippy_state="ready", klippy_connected=True)
+                        fake.status.setdefault("webhooks", {}).update(state="ready")
+                    self._reply({"result": "ok"})
                 elif u.path == "/printer/print/start":
                     fake.status["print_stats"].update(state="printing", filename=rec.query["filename"][0])
                     self._reply({"result": "ok"})
