@@ -361,15 +361,19 @@ faces/people on the published bytes; all 15 contact sheets were looked at by han
 inside of the printers. Third-party frames (the public collection, licences differ) are never published.
 
 **Where the artifacts live.** (1) Public Hugging Face repos, linked both ways with the GitHub repo:
-dataset `alex-mextner/3d-cli-print-failure-frames` (CC-BY-4.0, own frames only) and model
-`alex-mextner/3d-cli-print-failure-tier-b` (MIT, the base licence), every card naming the 3d-cli commit,
-the base model revision and the dataset revision. (2) `65.21.40.51:~/3d-cli-weights/RUN/` via
+the dataset is published (2026-10-23): [Alex-Ultra/3d-cli-print-failure-frames](https://huggingface.co/datasets/Alex-Ultra/3d-cli-print-failure-frames)
+at revision `3ac6790305246b7282ccd10a0f6a69f1761cdbcd` (CC-BY-4.0, own frames only: 440 files, 28.4 MB,
+`DATASET_SHA256` 306bd93d…, built at 3d-cli commit `a06ced75`; every uploaded file was read back at that
+revision and its sha256 compared). The model repo `Alex-Ultra/3d-cli-print-failure-tier-b` (MIT, the base
+licence) is NOT created: no trained weights are worth keeping (see below). The cards name the 3d-cli
+commit, the base model revision and the dataset revision. (2) `65.21.40.51:~/3d-cli-weights/RUN/` via
 `remote.py mirror` (weights only; it has no GPU). (3) Git holds only small text. The PrintOps backup
 (`lib/printops/backup.py`) snapshots the Odroid's SQLite databases from inside a container and cannot
 take workstation-side model files; it was not changed. No weights came out of the experiment worth
 keeping (nothing beat tier (a), the detachment head is not usable), so **nothing was published and no
-revision is pinned in `lib/vision_model.py`**. Publishing is also paused on the account: the Hugging
-Face token on this workstation belongs to `Alex-Ultra` (write scope present), not `alex-mextner`.
+revision is pinned in `lib/vision_model.py`**. The repos live on the account that owns the Hugging Face
+token available here (`Alex-Ultra`, write scope present); the account name is not important, the repo
+cards link to github.com/alex-mextner/3d-cli and the commit.
 
 ## Not done (follow-ups)
 

@@ -17,8 +17,8 @@ training machine (weights are pulled to this machine with `remote.py pull --weig
 from here).
 
 Proposed repos (the account must be the one that owns the GitHub repo):
-    dataset  alex-mextner/3d-cli-print-failure-frames     (CC-BY-4.0; own frames only)
-    model    alex-mextner/3d-cli-print-failure-tier-b     (MIT: CLIP ViT-B/16 base licence)
+    dataset  Alex-Ultra/3d-cli-print-failure-frames       (CC-BY-4.0; own frames only; published)
+    model    Alex-Ultra/3d-cli-print-failure-tier-b       (MIT: CLIP ViT-B/16 base licence; not published)
 Cards link both ways with github.com/alex-mextner/3d-cli and pin the code commit.
 """
 
@@ -37,8 +37,8 @@ from typing import Any
 
 HERE = Path(__file__).resolve().parent
 GITHUB = "https://github.com/alex-mextner/3d-cli"
-DATASET_REPO = "alex-mextner/3d-cli-print-failure-frames"
-MODEL_REPO = "alex-mextner/3d-cli-print-failure-tier-b"
+DATASET_REPO = "Alex-Ultra/3d-cli-print-failure-frames"
+MODEL_REPO = "Alex-Ultra/3d-cli-print-failure-tier-b"
 ENV_FILE = Path(os.environ.get("THREED_ENV_FILE", "/home/ultra/xp/.env"))
 TOKEN_VAR = "HF_API_KEY"
 

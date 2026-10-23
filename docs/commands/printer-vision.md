@@ -60,7 +60,10 @@ from the device's `watch:` block in `printer-devices.yaml`).
   it waits for a print), `--max N` stops after N frames.
 - `fetch-model` — download the weights now (otherwise the first run does it): `--tier a` the
   Obico detector and the CLIP verifier, `--tier b` the tier (b) model, `all` (default) both.
-  Idempotent: a cached file that passes its sha256 is not fetched again.
+  Idempotent: a cached file that passes its sha256 is not fetched again. The labelled frames the tier (b)
+  experiments use are public: [Alex-Ultra/3d-cli-print-failure-frames](https://huggingface.co/datasets/Alex-Ultra/3d-cli-print-failure-frames)
+  (CC-BY-4.0, revision `3ac6790305246b7282ccd10a0f6a69f1761cdbcd`; provenance and sanitation in
+  [printer-vision.md](../research/printer-vision.md)).
 - `doctor` — read-only deployment check: for every printer with a camera (or the given NAMEs) it asks
   `systemctl --user show` about `3d-printer-vision@NAME` and `3d-printer-watch@NAME` and **exits 1 when a running
   service carries `--dry-run`** (events are printed, never delivered), with the commands to fix it. See
