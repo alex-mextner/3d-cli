@@ -57,6 +57,14 @@ def _log(msg: str) -> None:
     print(f"watch: {msg}", file=sys.stderr, flush=True)
 
 
+def run_real_tg(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+    """The default runner of TgSink, the user's phone: subprocess.run, except under pytest, where a
+    sink built without an injected runner would message the real user (2026-10-23: every test run sent a fake CRITICAL alert)."""
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        raise RuntimeError("refusing to run the real tg from a test: inject runner=")
+    return subprocess.run(*args, **kwargs)
+
+
 @dataclass
 class SinkStats:
     delivered: int = 0
@@ -152,7 +160,7 @@ class TgSink(Sink):
     rate = (6, 600.0)
     stage = FALLBACK
 
-    def __init__(self, *, runner: Runner = subprocess.run, binary: str = "tg") -> None:
+    def __init__(self, *, runner: Runner = run_real_tg, binary: str = "tg") -> None:
         super().__init__()
         self.runner = runner
         self.binary = binary
