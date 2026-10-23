@@ -377,7 +377,7 @@ def _rebase_bank(bank_json: Path, out: Path) -> Path:
             if e.get(key):
                 _copy_into(base, out, e[key], f"{bank_json}: entry '{e['id']}' {key}")
         entries.append(dict(e))
-    return _write_bank(out, entries, doc.get("view", "supplied"), int(doc.get("px", 0)))
+    return _write_bank(out, entries, doc["view"], doc["px"])
 
 
 def _check_entry(path: Path, e: dict[str, Any]) -> None:
@@ -432,6 +432,14 @@ def read_bank(bank_json: str | Path) -> dict[str, Any]:
         if e.get("category") is None:
             e["category"] = category_from_name(str(e["name"]))
         e.setdefault("textured", True)
+    if (
+        not isinstance(doc.get("view", "supplied"), str)
+        or isinstance(doc.get("px", 0), bool)
+        or not isinstance(doc.get("px", 0), int)
+    ):
+        raise BadInput(f"{path}: 'view' must be a string and 'px' an integer")
+    doc.setdefault("view", "supplied")
+    doc.setdefault("px", 0)
     return dict(doc)
 
 
@@ -453,26 +461,30 @@ def silhouette_descriptor(mask: np.ndarray, size: int = SIL_SIZE) -> np.ndarray:
     centre = pts.mean(axis=0)
     _, vecs = np.linalg.eigh(np.cov((pts - centre).T))
     major, minor = vecs[:, 1], vecs[:, 0]
-    length = max(float(np.ptp((pts - centre) @ major)), 1.0)
-    # maps a pixel of the crop to the descriptor frame: x' = minor . (p - centre), y' = major . (p - centre), scaled to fit
-    a = np.stack([minor, major]) * (size * 0.9 / length)
-    offset = size / 2 - a @ centre
+    along, across = (pts - centre) @ major, (pts - centre) @ minor
+    length = max(float(np.ptp(along)), 1.0)
+    # pivot = middle of the object's extent (not its centre of mass), so a lopsided tool (heavy handle, light blade) is not clipped
+    pivot = (
+        centre
+        + major * (along.min() + along.max()) / 2
+        + minor * (across.min() + across.max()) / 2
+    )
+    scale = size * 0.9 / length
+    # maps a pixel of the crop to the descriptor frame: x' = minor . (p - pivot), y' = major . (p - pivot), scaled to fit
+    a = np.stack([minor, major]) * scale
+    offset = size / 2 - a @ pivot
     crop: np.ndarray = (
         mask[y0 : int(ys.max()) + 1, x0 : int(xs.max()) + 1].astype(np.uint8)
     ) * 255
-    if (
-        size * 0.9 / length < 0.5
-    ):  # area-average first: a plain warp would alias thin parts away
+    if scale < 0.5:
+        # area-average first: a plain warp would alias thin parts away
         h, w = crop.shape
-        pre = size * 0.9 / length * 2.0
-        nw, nh = (
-            max(1, round(w * pre)),
-            max(1, round(h * pre)),
-        )  # a hair-thin object must keep at least one row / column
+        pre = scale * 2.0
+        # a hair-thin object must keep at least one row / column
+        nw, nh = max(1, round(w * pre)), max(1, round(h * pre))
         crop = cv2.resize(crop, (nw, nh), interpolation=cv2.INTER_AREA)
-        a = (
-            a * np.array([w / nw, h / nh])[None, :]
-        )  # the resized crop has other pixel units
+        # the resized crop has other pixel units
+        a = a * np.array([w / nw, h / nh])[None, :]
     out = cv2.warpAffine(
         crop, np.hstack([a, offset[:, None]]), (size, size), flags=cv2.INTER_LINEAR
     )
@@ -552,8 +564,9 @@ def _thumb_object(
     """A bank thumbnail as the same kind of input as a query crop: object tightly cropped on the neutral CLIP background."""
     if sil is None or not (sil > 0).any():
         return thumb_rgb
+    # pad=0.0 like `align_object`: query crops and thumbnails must show the object at the same scale
     return crop_masked(
-        thumb_rgb, check_mask(sil > 0, thumb_rgb.shape, f"{what} silhouette")
+        thumb_rgb, check_mask(sil > 0, thumb_rgb.shape, f"{what} silhouette"), pad=0.0
     )[0]
 
 
@@ -727,6 +740,12 @@ def load_index(index_dir: str | Path) -> BankIndex:
             )
         entries = doc["entries"]
         meta = doc["meta"]
+        if (
+            not isinstance(meta, dict)
+            or not isinstance(entries, list)
+            or not all(isinstance(e, dict) for e in entries)
+        ):
+            raise TypeError("meta must be an object and entries a list of objects")
     except (
         OSError,
         ValueError,

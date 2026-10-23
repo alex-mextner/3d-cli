@@ -27,7 +27,7 @@ nothing of the proposed classes returns an empty `bank_topk` instead of a guess.
 ```
 3d recognise <image> --instances DIR/instances.json [--categories FILE|a,b,c] [--bank INDEX_DIR] [--topk 5] [--bank-topk N]
              [--rerank-classes 3] [--metric auto|clip|dino|sil|clip+dino|all] [--calibrate|--no-calibrate]
-             [--pool-size 60] [--pool-min-area-frac 0.00083] [--ids 3,7] [--device auto|cuda|cpu] [--json]
+             [--pool-size 60] [--pool-min-area-frac 0.000833] [--ids 3,7] [--device auto|cuda|cpu] [--json]
 ```
 
 ```bash
@@ -127,9 +127,9 @@ to their class); `drill bit case` / `bit set` / `hex key set` count as equivalen
 |---|---|---|---|---|
 | CLIP text, raw prompts | 0.45 | 0.79 | 0.91 | 0.42 / 0.79 / 0.88 |
 | CLIP text, **class-mean calibrated** | **0.64** | 0.82 | 0.82 | 0.61 / 0.79 / 0.82 |
-| DINOv2 -> untextured bank | 0.36 | 0.42 | 0.45 | 0.21 / 0.39 / 0.39 |
-| CLIP image -> untextured bank | 0.27 | 0.36 | 0.48 | 0.21 / 0.30 / 0.48 |
-| silhouette -> untextured bank | 0.24 | 0.42 | 0.58 | 0.24 / 0.45 / 0.58 |
+| DINOv2 -> untextured bank | 0.36 | 0.48 | 0.52 | 0.21 / 0.39 / 0.39 |
+| CLIP image -> untextured bank | 0.18 | 0.30 | 0.39 | 0.21 / 0.30 / 0.48 |
+| silhouette -> untextured bank | 0.18 | 0.42 | 0.61 | 0.24 / 0.45 / 0.58 |
 | (spike protocol) DINOv2, raw crop vs raw thumbnail | 0.24 | 0.42 | 0.42 | 0.21 / 0.39 / 0.39 |
 | (spike protocol) CLIP, raw crop vs raw thumbnail | 0.27 | 0.30 | 0.48 | 0.21 / 0.30 / 0.48 |
 
@@ -138,12 +138,14 @@ Deviations from the spike, and why:
 - **Text rows differ from the spike by one crop of 33** in four cells (raw top-1 0.45 vs 0.42 and top-5 0.91 vs 0.88, calibrated top-1 0.64 vs 0.61 and top-3 0.82 vs 0.79), all in our favour. The calibration pool is the same
   protocol (60 largest instances above 2500 px) but not the same masks: of the spike's 60 pool masks `3d segment` reproduces 44 with identical
   bbox and area; the other 16 differ by under 1 % area (GPU non-determinism), which moves a few similarities.
-- **DINOv2 retrieval is better than the spike (top-1 0.36 vs 0.21)** because the library aligns the object before embedding: the masked crop is
-  rotated so its longest axis is vertical like the lie-flat thumbnails, thumbnails are cropped to the object, and both 180-degree orientations
-  are tried. The two `(spike protocol)` rows re-run the spike's way (unrotated crop against the raw 192 px thumbnail) in the same run and land
-  within one crop of the spike's numbers. CLIP gains less (top-1 0.27 either way, top-3 0.36 vs 0.30).
-- **Silhouette top-3 0.42 vs 0.45** (one crop of 33): the descriptor is now warped from the mask instead of scattering its pixels; the one-crop
-  difference was not investigated further.
+- **DINOv2 retrieval is better than the spike (top-1 0.36 vs 0.21, top-3 0.48 vs 0.39)** because the library aligns the object before embedding: the masked
+  crop is rotated so its longest axis is vertical like the lie-flat thumbnails, thumbnails are cropped to the object at the same scale as the query crop,
+  and both 180-degree orientations are tried. The two `(spike protocol)` rows re-run the spike's way (unrotated crop against the raw 192 px thumbnail) in
+  the same run and land within one crop of the spike's numbers.
+- **CLIP image retrieval is not better: top-1 0.18 (spike 0.21), top-3 0.30 (0.30), top-5 0.39 (0.48).** Alignment and tight cropping did not help CLIP
+  on grey renders (the spike-protocol rerun gives top-1 0.27); with 33 crops these differences are a few crops and I did not investigate them.
+- **Silhouette: top-1 0.18 vs 0.24, top-3 0.42 vs 0.45, top-5 0.61 vs 0.58** (two, one and one crops of 33): the descriptor is now warped from the mask,
+  centred on the middle of the object's extent, instead of scattering its pixels. Differences are not investigated further.
 - The grey bank stays a coin flip whatever the metric: the spike counted only ~12 of its label classes in the 34-tool bank and the thumbnails carry
   no appearance. **None of these rows says anything about a textured bank**; no textured tool library exists yet ([#485](https://github.com/alex-mextner/3d-cli/issues/485)).
 

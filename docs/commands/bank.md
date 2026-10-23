@@ -124,7 +124,7 @@ hits = bank.query(idx_dir, crop_rgb, topk=5, metric="clip", categories=["screwdr
 ## Measured
 
 The 34 untextured STL tools of the spike (`refit/tools`) and the 33 labelled crops of the carpet photo: accuracy table in
-[recognise.md](recognise.md#measured) (grey bank, top-1 0.24-0.36, top-3 0.36-0.42 for the three metrics). Through `bin/3d`: `bank thumbs` renders the 34
+[recognise.md](recognise.md#measured) (grey bank, top-1 0.18-0.36, top-3 0.30-0.48 for the three metrics). Through `bin/3d`: `bank thumbs` renders the 34
 STLs in 1.6 s wall (192 px, CPU), `bank index` embeds them in 3.2 s (4.4 s wall incl. start-up, RTX 4060), `index.npz` is 214 KB, `bank query` takes
 40-70 ms with the silhouette metric. Retrieval accuracy for a **textured** bank is not measured yet: no textured tool library exists (tracked in
 [#485](https://github.com/alex-mextner/3d-cli/issues/485)), so the numbers are the grey-bank worst case, not what a textured bank will give.

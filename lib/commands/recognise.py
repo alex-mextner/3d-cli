@@ -34,7 +34,7 @@ Options:
   --calibrate | --no-calibrate   subtract the per-class mean similarity over the photo's larger instances (default on; needs >= 8;
                             --calibrate-prior is an alias)
   --pool-size N             calibrate over the N largest instances (default 60, the measured protocol; 0 = all instances)
-  --pool-min-area-frac F    ... that cover at least this image fraction (default 0.00083 = 2500 px of 2000x1500)
+  --pool-min-area-frac F    ... that cover at least this image fraction (default 0.000833 = 2500 px of 2000x1500)
   --ids 3,7                 report only these instance ids (calibration still uses all)
   --device auto|cuda|cpu
   --json                    print exactly one JSON object

@@ -1168,3 +1168,71 @@ def test_hand_made_bank_json_with_wrong_field_types_is_bad_input(
     }
     (tmp_path / "bank.json").write_text(json.dumps(good), encoding="utf-8")
     assert bank.read_bank(tmp_path)["entries"][0]["textured"] is False
+
+
+def test_lopsided_masks_are_not_clipped_by_the_descriptor_frame() -> None:
+    """A heavy handle + thin blade: its centre of mass is far from the middle of its extent, yet both ends must stay in frame."""
+    mask = np.zeros((400, 200), bool)
+    mask[10:70, 70:130] = True  # fat head 60 px wide
+    mask[70:390, 95:105] = (
+        True  # 320 px long thin shaft: the centre of mass sits near the head
+    )
+    d = bank.silhouette_descriptor(mask)
+    ys = np.nonzero(d.any(axis=1))[0]
+    assert ys.min() >= 1 and ys.max() <= bank.SIL_SIZE - 2, (
+        "no row of the object touches or leaves the frame"
+    )
+    assert abs((ys.min() + ys.max()) / 2 - bank.SIL_SIZE / 2) < 3, (
+        "the object is centred by its extent"
+    )
+    assert np.ptp(ys) + 1 == pytest.approx(bank.SIL_SIZE * 0.9, abs=2)
+
+
+def test_thumbnail_and_query_crops_show_the_object_at_the_same_scale() -> None:
+    thumb = np.full((192, 192, 3), bank.BG_RGB, np.uint8)
+    thumb[20:172, 70:120] = (200, 30, 30)
+    sil = np.zeros((192, 192), np.uint8)
+    sil[20:172, 70:120] = 255
+    from_thumb = bank._thumb_object(thumb, sil, "t")
+    photo = np.full((500, 400, 3), 128, np.uint8)
+    photo[100:400, 150:250] = (200, 30, 30)
+    mask = np.zeros((500, 400), bool)
+    mask[100:400, 150:250] = True
+    from_query = bank.object_views(photo, mask)[0]
+    assert from_thumb.shape[0] / from_thumb.shape[1] == pytest.approx(
+        from_query.shape[0] / from_query.shape[1], rel=0.1
+    )
+    assert abs(from_thumb.shape[0] - 152) <= 6, (
+        "tight crop: no 12 % margin around the thumbnail object"
+    )
+
+
+def test_hand_made_bank_and_index_documents_with_wrong_types_are_bad_input(
+    tmp_path: Path,
+) -> None:
+    entry = {"id": "a", "thumb": "a.png"}
+    for extra in ({"px": None}, {"px": "192px"}, {"view": 3}):
+        (tmp_path / "bank.json").write_text(
+            json.dumps({"entries": [entry], **extra}), encoding="utf-8"
+        )
+        with pytest.raises(
+            BadInput, match="'view' must be a string and 'px' an integer"
+        ):
+            bank.read_bank(tmp_path / "bank.json")
+    d = tmp_path / "idx"
+    d.mkdir()
+    np.savez(
+        d / "index.npz",
+        clip=np.zeros((1, 2), np.float32),
+        dino=np.zeros((1, 2), np.float32),
+        sil=np.zeros((1, 1), np.uint8),
+        build_id=np.array("x"),
+    )
+    bad_docs: list[dict[str, Any]] = [
+        {"meta": [], "entries": [{}]},
+        {"meta": {}, "entries": [1]},
+    ]
+    for bad in bad_docs:
+        (d / "index.json").write_text(json.dumps(bad), encoding="utf-8")
+        with pytest.raises(BadInput, match="cannot load a bank index"):
+            bank.load_index(d)

@@ -232,7 +232,9 @@ def bank_rows(
     spike = spike_protocol_bank(
         rgb, [inst["mask"] for _, inst, _ in matched], index, clip, dino
     )
-    predictions.update({name: ranked[:5] for name, ranked in spike.items()})
+    predictions.update(
+        {name: [r[:5] for r in ranked] for name, ranked in spike.items()}
+    )
     return predictions
 
 

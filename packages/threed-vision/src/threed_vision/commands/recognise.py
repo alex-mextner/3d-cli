@@ -77,7 +77,7 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         "--pool-min-area-frac",
         type=float,
         default=CALIBRATION_MIN_AREA_FRAC,
-        help="calibration pool instances must cover at least this image fraction (default 0.00083 = 2500 px of 2000x1500)",
+        help="calibration pool instances must cover at least this image fraction (default 0.000833 = 2500 px of 2000x1500)",
     )
     parser.add_argument(
         "--ids",

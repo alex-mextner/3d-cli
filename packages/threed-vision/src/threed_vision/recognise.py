@@ -47,7 +47,7 @@ MIN_CALIBRATION_CROPS = 8
 # Calibration pool (the spike's protocol, 60 largest crops above 2500 px of a 2000x1500 photo): the class means are taken over the
 # larger objects only, since small fragments distort them. 2500 / (2000 * 1500) of the image area.
 CALIBRATION_POOL = 60
-CALIBRATION_MIN_AREA_FRAC = 0.00083
+CALIBRATION_MIN_AREA_FRAC = 2500 / (2000 * 1500)
 # Keys under which a JSON object may carry the category list (e.g. an index document that also holds its tool classes).
 WRAPPER_KEYS = ("categories", "toolClasses")
 
