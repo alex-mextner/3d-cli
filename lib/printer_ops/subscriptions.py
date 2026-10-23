@@ -364,7 +364,11 @@ class DeliveryState:
         self.update(change)
 
     def mark_dead(self, sid: str, now: float) -> None:
-        """The subscription's session is not live: remember since when (the first time only)."""
+        """The subscription's session is not live: remember since when (the first time only; an entry
+        already marked costs no state rewrite)."""
+        if "dead_since_ts" in self.read()["subscriptions"].get(sid, {}):
+            return
+
         def change(data: dict[str, Any]) -> None:
             row = data["subscriptions"].setdefault(sid, {})
             if not isinstance(row.get("dead_since_ts"), (int, float)):

@@ -338,7 +338,7 @@ class PrinterAgents:
         guard), a growing backoff after failed ones so a fixed tmux/omp is retried soon."""
         failures = self.state.agent(printer).get("start_failures")
         if isinstance(failures, int) and not isinstance(failures, bool) and failures > 0:
-            return min(BACKOFF_BASE_S * 2 ** (failures - 1), self.start_every_s)
+            return min(BACKOFF_BASE_S * 2 ** min(failures - 1, 16), self.start_every_s)   # capped exponent: a corrupt count stays cheap
         return self.start_every_s
 
     def _start_failed(self, printer: str, why: str, counter: str) -> None:
