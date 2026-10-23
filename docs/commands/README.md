@@ -65,6 +65,9 @@ For a practical figure-by-figure image backplate loop, see
 |---|---|---|
 | `compare` | [compare.md](compare.md) | Segmented model/reference comparison with [IoU](GLOSSARY.md#iou), [SSIM](GLOSSARY.md#ssim)/DSSIM, and artifacts. |
 | `fit-camera` | [fit-camera.md](fit-camera.md) | Fit a camera pose to a reference by [silhouette](GLOSSARY.md#silhouette) IoU. |
+| `fit-profile` | [fit-profile.md](fit-profile.md) | Closed-form length/width profile + shape kind of a mask (numpy, ~1 ms), no optimiser. |
+| `fit-silhouette` | [fit-silhouette.md](fit-silhouette.md) | Fit lathe/flat-loft/box params + pose to calibrated mask views (closed form first, soft-silhouette/CMA-ES only if needed); `fit.json` + mesh. |
+| `view-check` | [view-check.md](view-check.md) | Render a fit into extra views with the independent rasteriser, flag IoU below 0.75, suggest missing views; single-photo sanity mode. |
 | `proxy-align` | [proxy-align.md](proxy-align.md) | Align generated proxy meshes to CAD meshes for spatial camera priors. |
 | `silhouette` | [silhouette.md](silhouette.md) | Camera-locked render to binary silhouette mask. |
 | `score` | [score.md](score.md) | Silhouette [AE](GLOSSARY.md#ae) + IoU, printed as `KEY=VALUE` lines. |
