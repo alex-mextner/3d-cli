@@ -27,6 +27,7 @@ def _settings(path: Path) -> dict[str, Any]:
 
 
 def test_help_and_no_args_print_usage(tmp_path: Path) -> None:
+    """A user asks `3d retarget --help` and sees every flag; a bare `3d retarget` prints usage and fails."""
     helped = run_cli(tmp_path, "retarget", "--help")
     assert helped.returncode == 0
     for flag in ("--to", "--keep", "--margin", "--process", "--filament", "--preset", "--set", "--preset-dir", "--gcode", "--dry-run"):
@@ -35,6 +36,7 @@ def test_help_and_no_args_print_usage(tmp_path: Path) -> None:
 
 
 def test_one_object_is_retargeted_validated_and_reported(tmp_path: Path) -> None:
+    """A user runs `3d retarget` for this case: one object is retargeted validated and reported."""
     src, presets = _setup(tmp_path)
     before = src.read_bytes()
     out = tmp_path / "out" / "spoon.k1.3mf"
@@ -59,6 +61,7 @@ def test_one_object_is_retargeted_validated_and_reported(tmp_path: Path) -> None
 
 
 def test_default_output_sits_next_to_the_input(tmp_path: Path) -> None:
+    """A user runs `3d retarget` for this case: default output sits next to the input."""
     src, presets = _setup(tmp_path)
     res = run_cli(tmp_path, "retarget", str(src), "--to", "testk1", "--preset-dir", str(presets), "--keep", "2", env_extra=_env(tmp_path))
     assert res.returncode == 0, res.stderr
@@ -66,6 +69,7 @@ def test_default_output_sits_next_to_the_input(tmp_path: Path) -> None:
 
 
 def test_part_that_cannot_fit_exits_1_with_the_numbers_and_writes_nothing(tmp_path: Path) -> None:
+    """A user runs `3d retarget` for this case: part that cannot fit exits 1 with the numbers and writes nothing."""
     src, presets = _setup(tmp_path, [Box("slab", (260, 250, 10))])
     out = tmp_path / "slab.k1.3mf"
     res = run_cli(tmp_path, "retarget", str(src), "--to", "testk1", "--preset-dir", str(presets), "-o", str(out), env_extra=_env(tmp_path))
@@ -75,10 +79,12 @@ def test_part_that_cannot_fit_exits_1_with_the_numbers_and_writes_nothing(tmp_pa
     assert not out.exists()
     # A smaller margin cannot rescue a 260 mm part on a 220 mm bed.
     again = run_cli(tmp_path, "retarget", str(src), "--to", "testk1", "--preset-dir", str(presets), "--margin", "0", "--dry-run", env_extra=_env(tmp_path))
-    assert again.returncode == 1 and "even with no margin" in again.stderr
+    assert again.returncode == 1
+    assert "even with no margin" in again.stderr
 
 
 def test_ambiguous_printer_name_lists_the_others_it_could_have_meant(tmp_path: Path) -> None:
+    """A user runs `3d retarget` for this case: ambiguous printer name lists the others it could have meant."""
     src, presets = _setup(tmp_path)
     res = run_cli(tmp_path, "retarget", str(src), "--to", "test", "--preset-dir", str(presets), "--keep", "1", "--dry-run", env_extra=_env(tmp_path))
     assert res.returncode == 0, res.stderr
@@ -87,6 +93,7 @@ def test_ambiguous_printer_name_lists_the_others_it_could_have_meant(tmp_path: P
 
 
 def test_a_failed_run_keeps_a_file_that_was_already_at_the_output_path(tmp_path: Path) -> None:
+    """A user runs `3d retarget` for this case: a failed run keeps a file that was already at the output path."""
     src, presets = _setup(tmp_path, [Box("slab", (260, 250, 10))])
     out = tmp_path / "keep-me.3mf"
     out.write_bytes(b"an earlier good retarget")
@@ -97,43 +104,56 @@ def test_a_failed_run_keeps_a_file_that_was_already_at_the_output_path(tmp_path:
 
 
 def test_output_may_not_overwrite_the_source_project(tmp_path: Path) -> None:
+    """A user runs `3d retarget` for this case: output may not overwrite the source project."""
     src, presets = _setup(tmp_path)
     before = src.read_bytes()
     res = run_cli(tmp_path, "retarget", str(src), "--to", "testk1", "--preset-dir", str(presets), "-o", str(src), env_extra=_env(tmp_path))
-    assert res.returncode == 2 and "never overwritten" in res.stderr
+    assert res.returncode == 2
+    assert "never overwritten" in res.stderr
     assert src.read_bytes() == before
 
 
 def test_keeping_objects_from_two_plates_exits_2_before_any_fit(tmp_path: Path) -> None:
+    """A user runs `3d retarget` for this case: keeping objects from two plates exits 2 before any fit."""
     src = make_project(tmp_path / "plates.3mf", [Box("a", (40, 40, 10)), Box("b", (50, 30, 10))], plates=((1,), (2,)))
     presets = write_presets(tmp_path / "presets")
     res = run_cli(tmp_path, "retarget", str(src), "--to", "testk1", "--preset-dir", str(presets), env_extra=_env(tmp_path))
-    assert res.returncode == 2 and "one plate" in res.stderr
+    assert res.returncode == 2
+    assert "one plate" in res.stderr
 
 
 def test_dry_run_reports_but_writes_nothing(tmp_path: Path) -> None:
+    """A user runs `3d retarget` for this case: dry run reports but writes nothing."""
     src, presets = _setup(tmp_path)
     res = run_cli(tmp_path, "retarget", str(src), "--to", "testk1", "--preset-dir", str(presets), "--keep", "1", "--dry-run", env_extra=_env(tmp_path))
-    assert res.returncode == 0 and "dry run, nothing written" in res.stdout
+    assert res.returncode == 0
+    assert "dry run, nothing written" in res.stdout
     assert not list(tmp_path.glob("*.testk1.3mf"))
 
 
 def test_bad_inputs_exit_2_with_a_remedy(tmp_path: Path) -> None:
+    """A user runs `3d retarget` for this case: bad inputs exit 2 with a remedy."""
     src, presets = _setup(tmp_path)
     base = ["retarget", str(src), "--preset-dir", str(presets)]
     env = _env(tmp_path)
     unknown_printer = run_cli(tmp_path, *base, "--to", "no-such-printer", env_extra=env)
-    assert unknown_printer.returncode == 2 and "no-such-printer" in unknown_printer.stderr and "Test K1 0.4 nozzle" in unknown_printer.stderr
+    assert unknown_printer.returncode == 2
+    assert "no-such-printer" in unknown_printer.stderr and "Test K1 0.4 nozzle" in unknown_printer.stderr
     bad_key = run_cli(tmp_path, *base, "--to", "testk1", "--set", "support_top_z_distanc=1", env_extra=env)
-    assert bad_key.returncode == 2 and "support_top_z_distance" in bad_key.stderr
+    assert bad_key.returncode == 2
+    assert "support_top_z_distance" in bad_key.stderr
     bad_keep = run_cli(tmp_path, *base, "--to", "testk1", "--keep", "9", env_extra=env)
-    assert bad_keep.returncode == 2 and "1..2" in bad_keep.stderr
+    assert bad_keep.returncode == 2
+    assert "1..2" in bad_keep.stderr
     bad_preset = run_cli(tmp_path, *base, "--to", "testk1", "--preset", "nope", env_extra=env)
-    assert bad_preset.returncode == 2 and "easy-release-supports" in bad_preset.stderr
+    assert bad_preset.returncode == 2
+    assert "easy-release-supports" in bad_preset.stderr
     no_target = run_cli(tmp_path, "retarget", str(src), env_extra=env)
-    assert no_target.returncode == 2 and "--to" in no_target.stderr
+    assert no_target.returncode == 2
+    assert "--to" in no_target.stderr
     missing = run_cli(tmp_path, "retarget", str(tmp_path / "gone.3mf"), "--to", "testk1", "--preset-dir", str(presets), env_extra=env)
-    assert missing.returncode == 2 and "gone.3mf" in missing.stderr
+    assert missing.returncode == 2
+    assert "gone.3mf" in missing.stderr
 
 
 def _fake_slicer(tmp_path: Path, gcode_x: int) -> Path:
@@ -165,6 +185,7 @@ def _fake_slicer(tmp_path: Path, gcode_x: int) -> Path:
 
 
 def test_gcode_flag_slices_the_result_and_bounds_checks_it(tmp_path: Path) -> None:
+    """A user runs `3d retarget` for this case: gcode flag slices the result and bounds checks it."""
     src, presets = _setup(tmp_path)
     slicer = _fake_slicer(tmp_path, gcode_x=100)
     res = run_cli(
@@ -178,6 +199,7 @@ def test_gcode_flag_slices_the_result_and_bounds_checks_it(tmp_path: Path) -> No
 
 
 def test_gcode_flag_fails_when_the_sliced_gcode_leaves_the_bed(tmp_path: Path) -> None:
+    """A user runs `3d retarget` for this case: gcode flag fails when the sliced gcode leaves the bed."""
     src, presets = _setup(tmp_path)
     slicer = _fake_slicer(tmp_path, gcode_x=400)  # 400 mm: far outside the 220 mm bed
     res = run_cli(
@@ -186,9 +208,11 @@ def test_gcode_flag_fails_when_the_sliced_gcode_leaves_the_bed(tmp_path: Path) -
         env_extra={**_env(tmp_path), "SLICER": str(slicer)},
     )
     assert res.returncode == 1, res.stdout + res.stderr
+    assert "print area" in res.stdout
 
 
 def test_gcode_flag_reports_a_slicer_that_refuses(tmp_path: Path) -> None:
+    """A user runs `3d retarget` for this case: gcode flag reports a slicer that refuses."""
     src, presets = _setup(tmp_path)
     slicer = tmp_path / "refuse.sh"
     slicer.write_text("#!/bin/sh\necho 'run found error, return -17' >&2\nexit 239\n", encoding="utf-8")
@@ -197,10 +221,12 @@ def test_gcode_flag_reports_a_slicer_that_refuses(tmp_path: Path) -> None:
         tmp_path, "retarget", str(src), "--to", "testk1", "--preset-dir", str(presets), "--keep", "1",
         "--gcode", str(tmp_path / "k1.gcode"), env_extra={**_env(tmp_path), "SLICER": str(slicer)},
     )
-    assert res.returncode == 1 and "slicing failed (exit 239" in res.stderr and "return -17" in res.stderr
+    assert res.returncode == 1
+    assert "slicing failed (exit 239" in res.stderr and "return -17" in res.stderr
 
 
 def test_gcode_flag_records_the_slicer_warnings_sidecar(tmp_path: Path) -> None:
+    """A user slices with --gcode and gets the slicer-warnings sidecar print-preflight needs."""
     src, presets = _setup(tmp_path)
     slicer = _fake_slicer(tmp_path, gcode_x=100)
     gcode = tmp_path / "k1.gcode"
@@ -214,6 +240,7 @@ def test_gcode_flag_records_the_slicer_warnings_sidecar(tmp_path: Path) -> None:
 
 
 def test_gcode_path_may_not_overwrite_either_project(tmp_path: Path) -> None:
+    """A user mistypes --gcode as the source or the output project; both are refused and nothing is overwritten."""
     src, presets = _setup(tmp_path)
     before = src.read_bytes()
     out = tmp_path / "k1.3mf"
@@ -221,5 +248,6 @@ def test_gcode_path_may_not_overwrite_either_project(tmp_path: Path) -> None:
     env = _env(tmp_path)
     onto_source = run_cli(tmp_path, *base, "--gcode", str(src), env_extra=env)
     onto_output = run_cli(tmp_path, *base, "--gcode", str(out), env_extra=env)
-    assert onto_source.returncode == 2 and onto_output.returncode == 2
+    assert onto_source.returncode == 2
+    assert onto_output.returncode == 2
     assert src.read_bytes() == before and not out.exists()
