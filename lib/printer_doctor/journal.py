@@ -8,7 +8,8 @@ WHY: a restart or a re-pointed active spool changes what a printer does; the jou
   "who changed it, when, from what to what" like every other setting change (plan §7.4).
 INVARIANTS: stdlib only. Never raises: a journal that cannot be written or imported must not
   undo or fail the fix, so the outcome is a string for the report: `imported` (buffered and
-  imported), `buffered` (written locally; 3d-api not configured / unreachable / refused the line),
+  imported), `buffered` (written locally; 3d-api not configured / unreachable / answered garbage /
+  refused the line),
   or `failed: <why>` (not even the local append worked). The line is validated with the same
   parser the importer uses before it is written, so a line the import would refuse is never kept.
 """
@@ -17,6 +18,7 @@ from __future__ import annotations
 
 import datetime
 import fcntl
+import http.client
 import json
 import os
 import uuid
@@ -109,8 +111,8 @@ def record(
             "/v1/settings/import",
             {"file": str(path), "lines": [text], "spools": {}, "methods": {}},
         )
-    except (ApiError, OSError):
-        return "buffered"
+    except (ApiError, OSError, ValueError, http.client.HTTPException):
+        return "buffered"  # unreachable, refused, or an answer that is not JSON: the line is safe locally
     counts = report.get("counts") if isinstance(report, dict) else None
     if isinstance(counts, dict) and not counts.get("refused"):
         return "imported"

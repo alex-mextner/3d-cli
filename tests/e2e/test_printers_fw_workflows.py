@@ -11,6 +11,7 @@ import os
 import stat
 import subprocess
 import sys
+import time
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -44,6 +45,25 @@ sys.exit(1)
 PRINTER_CFG = "[printer]\n#*# [bed_mesh default]\n#*# points = 1\n"
 FW_PATH = "/firmware-config/api/status"
 POST_PATH = "/firmware-config/api/action/switch-to-backup-firmware"
+UPLOAD_PATH = "/firmware-config/api/upgrade/upload"
+
+
+def b64(text: str | bytes) -> str:
+    return base64.b64encode(text if isinstance(text, bytes) else text.encode()).decode()
+
+
+def lan_config(hardened: bool) -> dict[str, Any]:
+    trusted = (
+        ["127.0.0.1", "192.168.0.38"] if hardened else ["127.0.0.1", "192.168.0.0/16"]
+    )
+    return {
+        "result": {
+            "config": {
+                "authorization": {"trusted_clients": trusted},
+                "server": {"use_xheaders": not hardened},
+            }
+        }
+    }
 
 
 @dataclass
@@ -54,6 +74,7 @@ class World:
     k1: FakeCreality = field(default_factory=FakeCreality)
     extra_env: dict[str, str] = field(default_factory=dict)
     web_is_adapter: bool = False
+    down: dict[str, int] = field(default_factory=lambda: {"n": 0})
 
     @property
     def dest(self) -> Path:
@@ -61,6 +82,8 @@ class World:
 
     def fleet(self) -> Path:
         path = self.tmp_path / "fleet.yaml"
+        if path.exists():
+            return path
         path.write_text(
             f"""\
 alpha:
@@ -123,9 +146,16 @@ delta:
 
     # -- the U1 world -----------------------------------------------------------------------------
 
+    def _system_info(self) -> tuple[int, dict[str, Any] | str]:
+        """Moonraker's answer; a rebooting printer answers 503 once (the probe sees it go down)."""
+        if self.down["n"] > 0:
+            self.down["n"] -= 1
+            return 503, ""
+        return 200, {"result": {"system_info": {}}}
+
     def u1(self, *, extended: bool, printing: bool = False) -> None:
         m = self.moon
-        m.set("GET /machine/system_info", body={"result": {"system_info": {}}})
+        m.set("GET /machine/system_info", body=self._system_info)
         m.set("GET /", body="<html>ui</html>")
         m.set(
             "GET /server/config",
@@ -150,18 +180,28 @@ delta:
 
             def reboot() -> tuple[int, str]:
                 m.routes.pop(f"GET {FW_PATH}", None)
+                self.down["n"] = 1
                 return (
                     200,
                     "=== switch-to-backup-firmware ===\nSUCCESS: Completed successfully\n",
                 )
 
+            def upgrade() -> tuple[int, str]:
+                self.down["n"] = 1
+                return (
+                    200,
+                    "=== Upgrade Started ===\nSUCCESS: Completed successfully.\n",
+                )
+
             m.set(f"POST {POST_PATH}", body=reboot)
+            m.set(f"POST {UPLOAD_PATH}", body=upgrade)
 
     # -- the K1 world: fake ssh + banner -------------------------------------------------------------
 
-    def k1_rooted(self) -> Path:
+    def k1_rooted(self, *, lan: str | None = None) -> Path:
+        """A rooted K1 behind the fake ssh. `lan` adds a running Moonraker: "open" (trusts the
+        whole LAN) or "locked" (narrowed, nginx denies others)."""
         m = self.moon
-        m.set("GET /server/info", body={"result": {"klippy_state": "startup"}})
         self.web_is_adapter = True
         bindir = self.tmp_path / "fakebin"
         bindir.mkdir(exist_ok=True)
@@ -177,23 +217,12 @@ delta:
         rules: list[dict[str, Any]] = [
             {"needle": "test -d /usr/data", "rc": 0},
             {
-                "needle": "test -e /usr/data/helper-script/helper.sh",
-                "needs": ["cloned"],
-                "rc": 0,
-            },
-            {"needle": "test -e /usr/data/helper-script/helper.sh", "rc": 1},
-            {
-                "needle": "git clone --depth 1",
-                "sets": ["cloned"],
-                "out_b64": base64.b64encode(b"cloned\n").decode(),
-            },
-            {
                 "needle": "cat /usr/data/printer_data/config/printer.cfg",
-                "out_b64": base64.b64encode(PRINTER_CFG.encode()).decode(),
+                "out_b64": b64(PRINTER_CFG),
             },
             {
                 "needle": "tar czf - -C /usr/data printer_data/config",
-                "out_b64": base64.b64encode(tree).decode(),
+                "out_b64": b64(tree),
             },
             {
                 "needle": "tar czf - -C /usr/data creality/userdata",
@@ -201,6 +230,38 @@ delta:
                 "err": "tar: creality/userdata: No such file or directory",
             },
         ]
+        if lan is None:
+            rules += [
+                {
+                    "needle": "test -e /usr/data/helper-script/helper.sh",
+                    "needs": ["cloned"],
+                    "rc": 0,
+                },
+                {"needle": "test -e /usr/data/helper-script/helper.sh", "rc": 1},
+                {"needle": "grep -q '^b46787a'", "needs": ["cloned"], "rc": 0},
+                {"needle": "grep -q '^b46787a'", "rc": 1},
+                {
+                    "needle": 'git clone "$URL"',
+                    "sets": ["cloned"],
+                    "out_b64": b64("cloned\n"),
+                },
+            ]
+        else:
+            m.set("GET /server/info", body={"result": {"klippy_state": "ready"}})
+            m.set("GET /server/config", body=lan_config(lan == "locked"))
+            rules += [
+                {"needle": "test -e /usr/data/helper-script/helper.sh", "rc": 0},
+                {
+                    "needle": "stat -c %a /usr/data/fluidd/index.html",
+                    "out_b64": b64("755\n"),
+                },
+                {
+                    "needle": "grep -c 'deny all'",
+                    "rc": 0 if lan == "locked" else 1,
+                    "out_b64": b64("2\n" if lan == "locked" else "0\n"),
+                },
+            ]
+            m.set("GET /", body="<html>fluidd</html>")
         rules_file = self.tmp_path / "ssh-rules.json"
         rules_file.write_text(json.dumps(rules), encoding="utf-8")
         log = self.tmp_path / "ssh.log"
@@ -216,11 +277,9 @@ delta:
 
     def ssh_commands(self) -> list[str]:
         log = self.tmp_path / "ssh.log"
-        return (
-            [json.loads(line)["command"] for line in log.read_text().splitlines()]
-            if log.exists()
-            else []
-        )
+        if not log.exists():
+            return []
+        return [json.loads(line)["command"] for line in log.read_text().splitlines()]
 
 
 @pytest.fixture
@@ -242,6 +301,8 @@ def doc(result: subprocess.CompletedProcess[str]) -> Any:
 
 
 def test_profiles_lists_vendors_models_states_and_sources(world: World) -> None:
+    """The user lists the firmware profiles and sees each vendor family, whether Klipper is possible, its
+    state transitions and the source URLs, as text and as JSON."""
     out = world.fw("profiles")
     assert out.returncode == 0, out.stderr
     for fragment in (
@@ -267,6 +328,8 @@ def test_profiles_lists_vendors_models_states_and_sources(world: World) -> None:
 def test_status_detects_stock_and_extended_with_read_only_requests(
     world: World,
 ) -> None:
+    """The user asks which firmware a Snapmaker is running: stock, then after the extended build is on, the
+    tool says so and shows the probe evidence, having sent nothing but GET requests."""
     world.u1(extended=False)
     stock = doc(world.fw("status", "alpha", "--json"))["printers"][0]
     assert (stock["profile"], stock["state"]) == ("snapmaker-u1", "stock")
@@ -275,42 +338,47 @@ def test_status_detects_stock_and_extended_with_read_only_requests(
     assert ext["state"] == "extended" and ext["detection"]["matched"] == ["extended"]
     assert world.moon.mutations() == []
     text = world.fw("status", "alpha", "--verbose").stdout
-    assert (
-        "alpha (Snapmaker U1, access full): profile snapmaker-u1" in text
-        and "state: extended" in text
-        and "firmware-config" in text
-    )
+    assert "alpha (Snapmaker U1, access full): profile snapmaker-u1" in text
+    assert "state: extended" in text and "firmware-config" in text
 
 
 def test_status_all_no_live_resolves_profiles_without_any_request(world: World) -> None:
+    """The user lists every fleet printer's profile offline: each printer gets a profile or the explicit
+    no-profile message, and no printer is contacted."""
     out = doc(world.fw("status", "--all", "--no-live", "--json"))["printers"]
     by = {e["printer"]: e for e in out}
+    assert by["alpha"]["profile"] == "snapmaker-u1"
     assert (
-        by["alpha"]["profile"] == "snapmaker-u1"
-        and by["kappa"]["profile"] == "creality-k1"
+        by["kappa"]["profile"] == "creality-k1"
         and by["gamma"]["profile"] == "bambu-lab-p1-a1"
     )
-    assert (
-        by["delta"]["profile"] is None
-        and by["delta"]["note"] == "no firmware profile for model Creality CR-200B Pro"
-    )
+    assert by["delta"]["profile"] is None
+    assert by["delta"]["note"] == "no firmware profile for model Creality CR-200B Pro"
     assert world.moon.requests == [] and world.k1.http_requests == []
 
 
 def test_status_of_an_offline_printer_never_contacts_it_and_a_missing_name_is_usage(
     world: World,
 ) -> None:
+    """The user checks a neighbour's offline printer (never contacted, the tool says so), forgets the printer
+    name (usage error) and mistypes it (error listing the valid names)."""
     out = world.fw("status", "gamma")
-    assert out.returncode == 0 and "never contacted" in out.stdout
+    assert "never contacted" in out.stdout
+    assert out.returncode == 0 and world.moon.requests == []
     bad = world.fw("status")
-    assert bad.returncode == 2 and "needs a PRINTER or --all" in bad.stderr
-    assert world.fw("status", "nobody").returncode == 2
+    assert "needs a PRINTER or --all" in bad.stderr
+    assert bad.returncode == 2
+    unknown = world.fw("status", "nobody")
+    assert "alpha" in unknown.stderr and "kappa" in unknown.stderr
+    assert unknown.returncode == 2
 
 
 # ---- plan --------------------------------------------------------------------------------------------------
 
 
 def test_plan_prints_the_runbook_steps_and_never_executes(world: World) -> None:
+    """The user plans the move from stock to the extended firmware: the steps, risks, backups and rollback are
+    printed from the runbook and nothing is sent to the printer."""
     world.u1(extended=False)
     out = world.fw("plan", "alpha", "--to", "extended")
     assert out.returncode == 0, out.stderr
@@ -325,35 +393,38 @@ def test_plan_prints_the_runbook_steps_and_never_executes(world: World) -> None:
         assert fragment in out.stdout
     assert world.moon.mutations() == []
     as_json = doc(world.fw("plan", "alpha", "--to", "extended", "--json"))
-    assert (
-        as_json["steps"][0]["kind"] == "manual"
-        and as_json["violations"] == []
-        and as_json["detected"]["state"] == "stock"
-    )
+    assert as_json["steps"][0]["kind"] == "manual" and as_json["violations"] == []
+    assert as_json["detected"]["state"] == "stock"
 
 
 def test_plan_for_an_offline_printer_needs_from_and_contacts_nothing(
     world: World,
 ) -> None:
+    """The user plans Developer mode for a neighbour's offline Bambu: the tool refuses to detect it, but with an
+    assumed starting state it prints the manual steps and contacts nothing."""
     refused = world.fw("plan", "gamma", "--to", "developer-mode")
-    assert refused.returncode == 2 and "offline fleet printer" in refused.stderr
+    assert "offline fleet printer" in refused.stderr
+    assert refused.returncode == 2
     out = world.fw("plan", "gamma", "--from", "stock", "--to", "developer-mode")
     assert (
-        out.returncode == 0
-        and "enable-lan-only-mode" in out.stdout
+        "enable-lan-only-mode" in out.stdout
         and "enable-developer-mode-on-screen" in out.stdout
     )
-    assert world.moon.requests == []
+    assert out.returncode == 0 and world.moon.requests == []
 
 
 def test_plan_exit_codes_unknown_state_unreachable_forbidden_and_klipper_on_bambu(
     world: World,
 ) -> None:
+    """The user makes the planning mistakes: an unknown target state, an unreachable one, a forbidden option
+    quoting its reason, Klipper on a Bambu (honestly refused) and a missing --to."""
     world.u1(extended=False)
     unknown = world.fw("plan", "alpha", "--to", "warp-drive")
-    assert unknown.returncode == 2 and "accepted:" in unknown.stderr
+    assert "accepted:" in unknown.stderr
+    assert unknown.returncode == 2
     unreachable = world.fw("plan", "gamma", "--from", "developer-mode", "--to", "stock")
-    assert unreachable.returncode == 1 and "no path from" in unreachable.stderr
+    assert "no path from" in unreachable.stderr
+    assert unreachable.returncode == 1
     forbidden = world.fw(
         "plan",
         "alpha",
@@ -365,17 +436,21 @@ def test_plan_exit_codes_unknown_state_unreachable_forbidden_and_klipper_on_bamb
         "enable-require-login",
     )
     assert (
-        forbidden.returncode == 1
-        and "REFUSED: guard no-require-login" in forbidden.stdout
+        "REFUSED: guard no-require-login" in forbidden.stdout
         and "force_logins" in forbidden.stdout
     )
+    assert forbidden.returncode == 1
     klipper = world.fw("plan", "gamma", "--from", "stock", "--to", "klipper-ready")
-    assert klipper.returncode == 2 and "Klipper cannot be installed" in klipper.stderr
+    assert "Klipper cannot be installed" in klipper.stderr
+    assert klipper.returncode == 2
     no_to = world.fw("plan", "alpha")
-    assert no_to.returncode == 2 and "needs --to STATE" in no_to.stderr
+    assert "needs --to STATE" in no_to.stderr
+    assert no_to.returncode == 2
 
 
 def test_plan_also_adds_an_optional_step_in_order(world: World) -> None:
+    """The user adds two optional firmware-config actions to the plan and gets them in that order, the first one
+    as an upload to the documented endpoint."""
     world.u1(extended=True)
     out = doc(
         world.fw(
@@ -394,98 +469,97 @@ def test_plan_also_adds_an_optional_step_in_order(world: World) -> None:
         "upgrade-extended-firmware",
         "reset-extended-to-defaults",
     ]
-    assert out["steps"][0]["upload"]["path"] == "/firmware-config/api/upgrade/upload"
+    assert out["steps"][0]["upload"]["path"] == UPLOAD_PATH
 
 
 # ---- backup ------------------------------------------------------------------------------------------------
 
 
 def test_backup_writes_a_manifest_and_files_read_only(world: World) -> None:
+    """The user backs up a Snapmaker before the firmware change: the config files and a manifest with hashes land
+    in a timestamped directory and the printer only received GET requests."""
     world.u1(extended=True)
     out = world.fw("backup", "alpha", "--dest", str(world.dest), "--json")
     assert out.returncode == 0, out.stderr
     manifest = doc(out)
-    assert (
-        manifest["printer"] == "alpha"
-        and manifest["profile"] == "snapmaker-u1"
-        and manifest["state"] == "extended"
-        and manifest["ok"] is True
+    assert (manifest["printer"], manifest["profile"], manifest["state"]) == (
+        "alpha",
+        "snapmaker-u1",
+        "extended",
     )
+    assert manifest["ok"] is True
     saved = Path(manifest["directory"])
-    assert (
-        json.loads((saved / "manifest.json").read_text())["items"]
-        and (saved / "SHA256SUMS").is_file()
-    )
+    assert json.loads((saved / "manifest.json").read_text())["items"]
+    assert (saved / "SHA256SUMS").is_file()
     by_id = {i["id"]: i for i in manifest["items"]}
-    assert (
-        by_id["printer-cfg"]["status"] == "ok"
-        and (saved / by_id["printer-cfg"]["file"]).read_text() == "cfg-content"
-    )
+    assert by_id["printer-cfg"]["status"] == "ok"
+    assert (saved / by_id["printer-cfg"]["file"]).read_text() == "cfg-content"
     assert by_id["full-config-tree"]["status"] == "manual"
     assert world.moon.mutations() == []
     text = world.fw("backup", "alpha", "--dest", str(world.dest))
-    assert text.returncode == 0 and "ok       printer-cfg" in text.stdout
+    assert "ok       printer-cfg" in text.stdout
+    assert text.returncode == 0
 
 
 def test_backup_exits_1_when_a_required_item_cannot_be_read(world: World) -> None:
+    """The printer refuses to serve printer.cfg: the backup is reported incomplete, so a later apply cannot use it."""
     world.u1(extended=True)
     world.moon.routes.pop("GET /server/files/config/printer.cfg")
     out = world.fw("backup", "alpha", "--dest", str(world.dest))
-    assert (
-        out.returncode == 1
-        and "BACKUP INCOMPLETE" in out.stdout
-        and "failed   printer-cfg" in out.stdout
-    )
+    assert "BACKUP INCOMPLETE" in out.stdout and "failed   printer-cfg" in out.stdout
+    assert out.returncode == 1
 
 
 def test_backup_of_an_offline_printer_is_refused(world: World) -> None:
+    """The user asks to back up a neighbour's offline printer: the tool refuses instead of contacting it."""
     out = world.fw("backup", "gamma", "--dest", str(world.dest))
-    assert out.returncode == 1 and "offline fleet printer" in out.stderr
+    assert "offline fleet printer" in out.stderr and "never contacted" in out.stderr
+    assert out.returncode == 1
+    assert not world.dest.exists()
 
 
 # ---- apply ---------------------------------------------------------------------------------------------------
 
 
 def test_apply_is_a_dry_run_by_default_and_posts_nothing(world: World) -> None:
+    """The user runs apply without --yes: it prints what would be POSTed and which gate (the backup) is still
+    open, and nothing is sent."""
     world.u1(extended=True)
     out = world.fw("apply", "alpha", "--to", "stock")
     assert out.returncode == 0, out.stderr
-    assert (
-        "DRY RUN (nothing is changed; add --yes to apply)" in out.stdout
-        and f"POST web:{POST_PATH}" in out.stdout
-    )
-    assert (
-        "gate backup: MISSING" in out.stdout
-        and "gate idle: OK" in out.stdout
-        and "dry run: nothing was changed (not ready" in out.stdout
-    )
+    assert "DRY RUN (nothing is changed; add --yes to apply)" in out.stdout
+    assert f"POST web:{POST_PATH}" in out.stdout
+    assert "gate backup: MISSING" in out.stdout and "gate idle: OK" in out.stdout
+    assert "dry run: nothing was changed (not ready" in out.stdout
     assert world.moon.mutations() == []
 
 
 def test_apply_yes_story_confirm_backup_idle_then_the_documented_post(
     world: World,
 ) -> None:
+    """The user reverts the Snapmaker to stock: no typed name, wrong name, no backup and a printing printer are
+    each refused; once backed up, idle and confirmed, exactly the documented POST is sent and the reboot is seen."""
     world.u1(extended=True)
     base = ["apply", "alpha", "--to", "stock", "--yes", "--backup-dir", str(world.dest)]
 
     no_name = world.fw(*base)
-    assert no_name.returncode == 2 and "--confirm alpha" in no_name.stderr
+    assert "--confirm alpha" in no_name.stderr
+    assert no_name.returncode == 2
     wrong = world.fw(*base, "--confirm", "k1")
-    assert wrong.returncode == 2 and "not the printer's name" in wrong.stderr
+    assert "not the printer's name" in wrong.stderr
+    assert wrong.returncode == 2
 
     no_backup = world.fw(*base, "--confirm", "alpha")
-    assert no_backup.returncode == 1 and "REFUSED: no fresh backup" in no_backup.stdout
+    assert "REFUSED: no fresh backup" in no_backup.stdout
+    assert no_backup.returncode == 1
     assert world.moon.mutations() == []
 
     assert world.fw("backup", "alpha", "--dest", str(world.dest)).returncode == 0
 
     world.u1(extended=True, printing=True)
     busy = world.fw(*base, "--confirm", "alpha")
-    assert (
-        busy.returncode == 1
-        and "is not idle" in busy.stdout
-        and "toolhead MCUs" in busy.stdout
-    )
+    assert "is not idle" in busy.stdout and "toolhead MCUs" in busy.stdout
+    assert busy.returncode == 1
     assert world.moon.mutations() == []
 
     world.u1(extended=True)
@@ -499,6 +573,8 @@ def test_apply_yes_story_confirm_backup_idle_then_the_documented_post(
 
 
 def test_apply_json_is_a_machine_readable_event_list(world: World) -> None:
+    """A script runs apply with --json and parses one document: the result, the states before and after and the
+    ordered event list from the start to the done event."""
     world.u1(extended=True)
     assert world.fw("backup", "alpha", "--dest", str(world.dest)).returncode == 0
     out = world.fw(
@@ -515,72 +591,90 @@ def test_apply_json_is_a_machine_readable_event_list(world: World) -> None:
     )
     assert out.returncode == 0, out.stderr
     result = doc(out)
-    assert (
-        result["result"],
-        result["exit_code"],
-        result["printer"],
-        result["from"],
-        result["final_state"],
-    ) == ("applied", 0, "alpha", "extended", "stock")
+    assert (result["result"], result["exit_code"], result["printer"]) == (
+        "applied",
+        0,
+        "alpha",
+    )
+    assert (result["from"], result["final_state"]) == ("extended", "stock")
     kinds = [e["kind"] for e in result["events"]]
     assert kinds[0] == "start" and "gate" in kinds and kinds[-1] == "done"
+
+
+def test_apply_json_errors_are_json_too(world: World) -> None:
+    """With --json even a usage error (a missing --to, an unknown printer) is one JSON document with the exit code."""
+    missing = world.fw("apply", "alpha", "--json")
+    assert (
+        doc(missing)["result"] == "error"
+        and "needs --to STATE" in doc(missing)["error"]
+    )
+    assert missing.returncode == 2
+    unknown = world.fw("apply", "nobody", "--to", "stock", "--json")
+    assert doc(unknown)["exit_code"] == 2 and "nobody" in doc(unknown)["error"]
+    assert unknown.returncode == 2
 
 
 def test_apply_refuses_offline_printers_unreachable_targets_and_forbidden_options(
     world: World,
 ) -> None:
+    """The user tries to change an offline printer, an impossible target and a forbidden option: each is refused
+    before anything is sent to a printer."""
     world.u1(extended=True)
     offline = world.fw(
         "apply", "gamma", "--to", "developer-mode", "--yes", "--confirm", "gamma"
     )
-    assert offline.returncode == 1 and "offline fleet printer" in offline.stdout
+    assert "offline fleet printer" in offline.stdout
+    assert offline.returncode == 1
     assert world.fw("backup", "alpha", "--dest", str(world.dest)).returncode == 0
     base = ["--yes", "--confirm", "alpha", "--backup-dir", str(world.dest)]
     forbidden = world.fw(
         "apply", "alpha", "--to", "extended", "--also", "factory-reset", *base
     )
-    assert (
-        forbidden.returncode == 1
-        and "guard no-touchscreen-factory-reset" in forbidden.stdout
-    )
+    assert "guard no-touchscreen-factory-reset" in forbidden.stdout
+    assert forbidden.returncode == 1
     unreachable = world.fw("apply", "alpha", "--to", "ghost-state", *base)
+    assert "accepted:" in unreachable.stderr
     assert unreachable.returncode == 2
     assert world.moon.mutations() == []
 
 
-def test_apply_stops_when_the_backup_is_older_than_the_allowed_age(
+def test_apply_refuses_a_stale_backup_and_accepts_it_with_a_longer_age_limit(
     world: World,
 ) -> None:
+    """The user's last backup is 30 hours old: apply refuses it under the 24 h default and accepts it once
+    --backup-max-age allows two days; bad ages are usage errors."""
     world.u1(extended=True)
-    assert world.fw("backup", "alpha", "--dest", str(world.dest)).returncode == 0
-    for flag in ("0s", "nonsense", "-1h"):
-        assert (
-            world.fw(
-                "apply", "alpha", "--to", "stock", "--backup-max-age", flag
-            ).returncode
-            == 2
-        )
-    ok = world.fw(
-        "apply",
-        "alpha",
-        "--to",
-        "stock",
-        "--backup-dir",
-        str(world.dest),
-        "--backup-max-age",
-        "90m",
+    made = doc(world.fw("backup", "alpha", "--dest", str(world.dest), "--json"))
+    manifest_path = Path(made["directory"]) / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["created_epoch"] = time.time() - 30 * 3600
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    base = ["apply", "alpha", "--to", "stock", "--backup-dir", str(world.dest)]
+
+    stale = world.fw(*base, "--yes", "--confirm", "alpha")
+    assert (
+        "REFUSED: no fresh backup" in stale.stdout
+        and "h old; the limit is 24 h" in stale.stdout
     )
-    assert ok.returncode == 0 and "gate backup: OK" in ok.stdout
+    assert stale.returncode == 1
+    assert world.moon.mutations() == []
+
+    for bad in ("0s", "nonsense"):
+        refused = world.fw(*base, "--backup-max-age", bad)
+        assert "--backup-max-age" in refused.stderr
+        assert refused.returncode == 2
+
+    ok = world.fw(*base, "--backup-max-age", "48h")
+    assert "gate backup: OK" in ok.stdout
+    assert ok.returncode == 0
 
 
 def test_apply_upload_step_needs_its_file_and_sends_it(
     world: World, tmp_path: Path
 ) -> None:
+    """The user upgrades the extended firmware through firmware-config: without --file the tool says what to pass;
+    with the image it uploads it, warns that its hash is not in the profile and sees the printer reboot."""
     world.u1(extended=True)
-    world.moon.set(
-        "POST /firmware-config/api/upgrade/upload",
-        body="=== Upgrade Started ===\nSUCCESS: Completed successfully.\n",
-    )
     assert world.fw("backup", "alpha", "--dest", str(world.dest)).returncode == 0
     base = [
         "apply",
@@ -596,19 +690,18 @@ def test_apply_upload_step_needs_its_file_and_sends_it(
         str(world.dest),
     ]
     missing = world.fw(*base)
-    assert (
-        missing.returncode == 2
-        and "--file upgrade-extended-firmware=PATH" in missing.stderr
-    )
+    assert "--file upgrade-extended-firmware=PATH" in missing.stderr
+    assert missing.returncode == 2
     image = tmp_path / "update.bin"
     image.write_bytes(b"\0" * (50 * 1024 * 1024))
     sent = world.fw(*base, "--file", str(image))
     assert sent.returncode == 0, sent.stdout + sent.stderr
     assert any(
-        p == "/firmware-config/api/upgrade/upload" and n > 50 * 1024 * 1024
-        for _, p, n in world.moon.mutations()
+        p == UPLOAD_PATH and n > 50 * 1024 * 1024 for _, p, n in world.moon.mutations()
     )
-    assert "NOT in the profile's known list" in sent.stdout
+    assert (
+        "NOT in the profile's known list" in sent.stdout and "verified:" in sent.stdout
+    )
 
 
 # ---- K1: ssh through the real runner and a fake ssh binary ---------------------------------------------------
@@ -617,29 +710,33 @@ def test_apply_upload_step_needs_its_file_and_sends_it(
 def test_k1_status_backup_and_dry_run_use_only_read_only_ssh_commands(
     world: World,
 ) -> None:
+    """The user inspects a rooted Creality K1: status, backup and a dry run over ssh run only read commands, and
+    the dry run prints the pinned Helper Script checkout it would run."""
     world.k1_rooted()
     status = doc(world.fw("status", "kappa", "--json"))["printers"][0]
     assert (status["profile"], status["state"]) == ("creality-k1", "rooted")
     backup = world.fw("backup", "kappa", "--dest", str(world.dest), "--json")
     assert backup.returncode == 0, backup.stderr
     items = {i["id"]: i["status"] for i in doc(backup)["items"]}
+    assert items["printer-cfg"] == items["config-tree"] == "ok"
     assert (
-        items["printer-cfg"] == items["config-tree"] == "ok"
-        and items["userdata-tree"] == "missing"
+        items["userdata-tree"] == "missing"
+        and items["fluidd-release-info"] == "missing"
     )
     dry = world.fw(
         "apply", "kappa", "--to", "helper-installed", "--backup-dir", str(world.dest)
     )
     assert dry.returncode == 0, dry.stdout + dry.stderr
     assert (
-        "git clone --depth 1 https://github.com/Guilouz/Creality-Helper-Script.git"
-        in dry.stdout
+        "git checkout -f --detach b46787a" in dry.stdout
         and "gate backup: OK" in dry.stdout
     )
     assert not any("git clone" in c for c in world.ssh_commands())
 
 
-def test_k1_apply_yes_runs_the_runbook_script_over_ssh(world: World) -> None:
+def test_k1_apply_yes_runs_the_pinned_runbook_script_over_ssh(world: World) -> None:
+    """The user installs the Helper Script on a rooted K1: the one documented ssh script runs, pinned to the
+    runbook's commit and asserting the remote, and the tool verifies the checkout."""
     world.k1_rooted()
     assert world.fw("backup", "kappa", "--dest", str(world.dest)).returncode == 0
     out = world.fw(
@@ -656,16 +753,19 @@ def test_k1_apply_yes_runs_the_runbook_script_over_ssh(world: World) -> None:
     assert out.returncode == 0, out.stdout + out.stderr
     assert "done: kappa is now in state helper-installed" in out.stdout
     clones = [c for c in world.ssh_commands() if "git clone" in c]
-    assert (
-        len(clones) == 1
-        and clones[0].startswith("set -e\nping -c1 github.com")
-        and "git fetch origin main" in clones[0]
+    assert len(clones) == 1
+    script = clones[0]
+    assert script.startswith(
+        "set -e\nURL=https://github.com/Guilouz/Creality-Helper-Script.git\nping -c1 github.com"
     )
+    assert "git checkout -f --detach b46787a" in script and "origin/main" not in script
 
 
 def test_k1_forbidden_helper_script_action_is_refused_before_any_ssh_write(
     world: World,
 ) -> None:
+    """The user passes the Helper Script's Remove Creality Web Interface action: the tool refuses with the
+    runbook's reason before anything is written over ssh."""
     world.k1_rooted()
     assert world.fw("backup", "kappa", "--dest", str(world.dest)).returncode == 0
     out = world.fw(
@@ -682,34 +782,108 @@ def test_k1_forbidden_helper_script_action_is_refused_before_any_ssh_write(
         str(world.dest),
     )
     assert (
-        out.returncode == 1
-        and "Remove Creality Web Interface" in out.stdout
+        "Remove Creality Web Interface" in out.stdout
         and "creality-stock adapter" in out.stdout
     )
+    assert out.returncode == 1
     assert not any("git clone" in c or "k1drive" in c for c in world.ssh_commands())
 
 
+def test_k1_with_moonraker_open_to_the_lan_is_not_klipper_ready_and_apply_stops_at_the_lockdown(
+    world: World,
+) -> None:
+    """The install got Moonraker running but it still trusts the whole LAN: status says moonraker-installed, and a
+    re-run of the same apply stops at the manual lock-down step instead of reporting nothing to do."""
+    world.k1_rooted(lan="open")
+    status = doc(world.fw("status", "kappa", "--json"))["printers"][0]
+    assert status["state"] == "moonraker-installed"
+    assert world.fw("backup", "kappa", "--dest", str(world.dest)).returncode == 0
+    out = world.fw(
+        "apply",
+        "kappa",
+        "--to",
+        "klipper-ready",
+        "--yes",
+        "--confirm",
+        "kappa",
+        "--backup-dir",
+        str(world.dest),
+    )
+    assert "narrow-trusted-clients" in out.stdout and "deny all;" in out.stdout
+    assert "NEXT: do the step, then re-run the same command" in out.stdout
+    assert out.returncode == 1
+
+
+def test_k1_locked_down_is_klipper_ready_and_apply_has_nothing_to_do(
+    world: World,
+) -> None:
+    """With trusted_clients narrowed and nginx denying other hosts the K1 reads as klipper-ready and apply says so."""
+    world.k1_rooted(lan="locked")
+    status = doc(world.fw("status", "kappa", "--json"))["printers"][0]
+    assert status["state"] == "klipper-ready"
+    assert world.fw("backup", "kappa", "--dest", str(world.dest)).returncode == 0
+    out = world.fw(
+        "apply",
+        "kappa",
+        "--to",
+        "klipper-ready",
+        "--yes",
+        "--confirm",
+        "kappa",
+        "--backup-dir",
+        str(world.dest),
+    )
+    assert "already in state klipper-ready: nothing to do" in out.stdout
+    assert out.returncode == 0
+
+
+def test_no_ssh_refuses_a_plan_that_needs_ssh_and_never_runs_it(world: World) -> None:
+    """The user passes --no-ssh to a plan with an ssh step: the dry run says it is not ready, --yes refuses it
+    with a clear message and no ssh command is ever run."""
+    world.k1_rooted()
+    dry = world.fw("apply", "kappa", "--to", "helper-installed", "--no-ssh")
+    assert "not ready" in dry.stdout and "drop --no-ssh" in dry.stdout
+    assert dry.returncode == 0
+    refused = world.fw(
+        "apply",
+        "kappa",
+        "--to",
+        "helper-installed",
+        "--no-ssh",
+        "--yes",
+        "--confirm",
+        "kappa",
+        "--backup-dir",
+        str(world.dest),
+    )
+    assert (
+        "--no-ssh forbids the ssh steps of this plan: fetch-helper-script"
+        in refused.stdout
+    )
+    assert refused.returncode == 1
+    assert world.ssh_commands() == []
+
+
 def test_a_missing_ssh_binary_is_exit_127(world: World, tmp_path: Path) -> None:
+    """On a machine without ssh the tool says what to install and exits 127 instead of a traceback."""
     empty = tmp_path / "empty-path"
     empty.mkdir()
     world.extra_env["PATH"] = str(empty)
     out = world.fw("status", "kappa")
-    assert (
-        out.returncode == 127
-        and "ssh not found" in out.stderr
-        and "openssh-client" in out.stderr
-    )
+    assert "ssh not found" in out.stderr and "openssh-client" in out.stderr
+    assert "Traceback" not in out.stderr
+    assert out.returncode == 127
 
 
 # ---- help / docs -----------------------------------------------------------------------------------------------
 
 
 def test_help_and_alias_and_unknown_subcommand(world: World) -> None:
+    """The user asks for help, uses the `firmware` alias and mistypes the subcommand: usage is printed, the alias
+    works, `3d printers --help` lists fw and the typo lists the accepted subcommands."""
     helped = world.fw("--help")
-    assert (
-        helped.returncode == 0
-        and "3d printers fw <status|plan|backup|apply|profiles>" in helped.stdout
-    )
+    assert "3d printers fw <status|plan|backup|apply|profiles>" in helped.stdout
+    assert helped.returncode == 0
     assert world.fw("apply", "--help").returncode == 0
     alias = run_cli(
         world.tmp_path,
@@ -719,14 +893,17 @@ def test_help_and_alias_and_unknown_subcommand(world: World) -> None:
         "--json",
         env_extra=world.env(),
     )
-    assert alias.returncode == 0 and doc(alias)["profiles"]
+    assert doc(alias)["profiles"]
+    assert alias.returncode == 0
     listing = run_cli(world.tmp_path, "printers", "--help")
     assert "fw" in listing.stdout
     bad = world.fw("explode")
-    assert bad.returncode == 2 and "accepted:" in bad.stderr
+    assert "accepted:" in bad.stderr
+    assert bad.returncode == 2
 
 
 def test_every_flag_has_an_example_in_the_help_and_in_the_docs(world: World) -> None:
+    """The user reads `3d printers fw --help` or the docs page and finds every flag with a copy-pasteable example."""
     usage = world.fw("--help").stdout
     docs = (REPO_ROOT / "docs" / "commands" / "printers-fw.md").read_text(
         encoding="utf-8"

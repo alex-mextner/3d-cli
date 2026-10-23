@@ -23,6 +23,8 @@ WHY: the usage ledger, the planner and the print gates trust these records; a dr
 
 from __future__ import annotations
 
+import json
+import shlex
 from collections.abc import Mapping
 
 from printer_doctor.context import Context, as_list, as_obj
@@ -33,6 +35,7 @@ from printer_doctor.model import (
     Fix,
     FixChange,
     FixRefused,
+    command,
     JsonValue,
     Verdict,
 )
@@ -73,9 +76,14 @@ def _active_applies(ctx: Context) -> str | None:
     reason = single_head_reason(ctx.name, len(fleet.heads))
     if reason:
         return reason
+    reason = (
+        ctx.api_configured()
+    )  # cheap, no request: before anything contacts the printer
+    if reason:
+        return reason
     if "spoolman" not in ctx.components():
         return "no [spoolman] component in this Moonraker: it has no active spool"
-    return ctx.api_configured()
+    return None
 
 
 def _read_active(ctx: Context) -> tuple[int | None, bool, int | None]:
@@ -127,7 +135,15 @@ def _active_apply(ctx: Context, result: CheckResult) -> FixChange:
         raise FixRefused(
             f"PrintOps binds {len(ids)} spools to the head: resolve that first (3d printops slots {ctx.name})"
         )
-    job = ctx.job_state()
+    try:
+        job = ctx.job_state()
+    except (
+        CannotSee
+    ) as exc:  # fail closed: an unreadable print state may be a running print
+        raise FixRefused(
+            f"cannot tell whether a job is running ({exc.reason}): the active spool is not "
+            "changed unless the printer is known to be idle"
+        ) from exc
     if job in ("printing", "paused"):
         raise FixRefused(f"a job is {job}: the active spool is not changed mid-print")
     write = ctx.adapter().set_active_spool(ids[0] if ids else None)
@@ -141,12 +157,15 @@ def _active_apply(ctx: Context, result: CheckResult) -> FixChange:
 def _active_steps(ctx: Context, result: CheckResult) -> list[str]:
     bound = result.evidence.get("bound_spool_ids")
     ids = bound if isinstance(bound, list) else []
-    value = str(ids[0]) if len(ids) == 1 else "null"
+    body = shlex.quote(json.dumps({"spool_id": ids[0] if len(ids) == 1 else None}))
+    url = shlex.quote(f"{ctx.base_url}/server/spoolman/spool_id")
+    name = shlex.quote(ctx.name)
     return [
-        "When the printer is idle: curl -X POST -H 'Content-Type: application/json' "
-        f"-d '{{\"spool_id\": {value}}}' {ctx.base_url}/server/spoolman/spool_id",
-        f"Or reload the spool through PrintOps (it sets the active spool): `3d printops slots {ctx.name}`, then `3d printops spool load ID {ctx.name}/SLOT`.",
-        f"Or use the web UI's Spoolman panel to select the spool. Check: `3d printers doctor {ctx.name} --check active-spool-binding`.",
+        "When the printer is idle:",
+        command(f"curl -X POST -H 'Content-Type: application/json' -d {body} {url}"),
+        "Or reload the spool through PrintOps (it sets the active spool): see the slots first, then load:",
+        command(f"3d printops slots {name}"),
+        "Or use the web UI's Spoolman panel to select the spool.",
     ]
 
 
@@ -216,10 +235,13 @@ def _slots(ctx: Context) -> Verdict:
 
 
 def _slots_steps(ctx: Context, result: CheckResult) -> list[str]:
+    name = shlex.quote(ctx.name)
     return [
-        f"See both sides: `3d printops slots {ctx.name}` and `3d printops anomalies --printer {ctx.name}`.",
+        "See both sides:",
+        command(f"3d printops slots {name}"),
+        command(f"3d printops anomalies --printer {name}"),
         "Empty or unknown slot with a bound spool: load the spool into the printer's head, or "
-        "unload it in PrintOps (`3d printops spool unload " + ctx.name + "/SLOT`).",
+        f"unload it in PrintOps (`3d printops spool unload {name}/SLOT`).",
         "An anomaly that is intended (a different spool on purpose): `3d printops anomalies ack ID --note TEXT`.",
     ]
 
@@ -276,12 +298,14 @@ def _faults(ctx: Context) -> Verdict:
 
 
 def _faults_steps(ctx: Context, result: CheckResult) -> list[str]:
+    name = shlex.quote(ctx.name)
     return [
         "Fault on a head the fleet calls usable: either repair it and close the fault "
         "(`3d printops maint fault close ID --root-cause TEXT`), or mark the head `usable: false` "
         f"with a `reason:` under {ctx.name}.heads in fleet/printers.yaml.",
-        f"Head unusable in the fleet without a fault: `3d printops maint sync-fleet` seeds the fault from "
-        f"fleet/printers.yaml, or open one by hand: `3d printops maint fault open {ctx.name}/HEAD --symptom TEXT`.",
+        "Head unusable in the fleet without a fault: seed the fault from fleet/printers.yaml:",
+        command("3d printops maint sync-fleet"),
+        f"or open one by hand: `3d printops maint fault open {name}/HEAD --symptom TEXT`.",
         "Or, when the head works again, set `usable: true` in fleet/printers.yaml.",
     ]
 

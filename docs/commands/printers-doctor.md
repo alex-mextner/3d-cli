@@ -19,6 +19,22 @@ full. Every check is driven by the fleet registry (`fleet/printers.yaml` +
 **Default is read-only.** A plain run sends GET requests only (the tests prove it with request logs).
 `--fix` repairs, under the fix's risk class (below), and verifies every repair by re-running its check.
 
+**Only `access: full` printers are ever written to.** A `safe` or `needs-yes` fix on a `read-only` printer
+is refused (`refused: access read-only`, nothing sent; the manual steps are still printed); `manual-only`
+fixes never run at all. Offline printers are never contacted.
+
+**A dead printer costs one timeout.** The first transport failure of a host (a timeout, no route, an
+unresolvable name) is remembered for the whole run: every later request to that host fails at once with
+the first error, so a powered-off printer does not cost one timeout per check (a refused or reset
+connection only marks that host:port, so a camera on another port is still asked). A dead 3d-api is
+remembered the same way, across all printers. Printers are diagnosed concurrently (at most
+`THREED_MAX_WORKERS` / `cli.resources.max_workers()` at a time) and reported in the order given.
+
+**Untrusted text.** Whatever a printer or its config supplies (component names, messages, the
+`[spoolman] server` URL) is shown with control characters escaped, a URL's credentials and secret query
+values are redacted in every output, and every value interpolated into a printed command is
+shell-quoted. HTTP(S) URLs are fetched with their own scheme (`https` verifies the certificate).
+
 ## Arguments and flags
 
 | Flag | Meaning | Example |
@@ -52,14 +68,22 @@ missing, a feature the printer does not have). A `skip` is never a pass.
 | Risk | `--fix` | `--fix --yes` | Rule |
 |---|---|---|---|
 | `safe` | applied | applied | idempotent, never mid-print, verified by the check, journalled |
-| `needs-yes` | listed, **not** applied | applied | restarts something; refused while a job is printing or paused |
+| `needs-yes` | listed, **not** applied | applied | restarts something; refused while a job is printing or paused (an unreadable print state counts as printing, except for `klippy-state`, where Klipper itself is down) |
 | `manual-only` | never | never | the exact steps are printed (and are in the JSON); 3d never executes them |
 
 Each applied fix reports one of: **fixed** (the check passes again, `verified: true`), **not fixed after
-apply** (`applied: true, verified: false`: the check still fails; the fix is journalled anyway because
-it ran), **refused** (a safety rule stopped it before anything was sent, e.g. the printer is printing),
-**not applied** (a `needs-yes` fix without `--yes`) or **failed** (the apply itself raised). A second
-`--fix` run is a no-op: the check passes, so nothing is applied or journalled again.
+apply** (`applied: true, verified: false`: the check still fails, or its verifying run could only skip
+or error; the fix is journalled anyway because it ran, and the result stays a finding at the check's
+severity, so the exit code is 1), **refused** (a safety rule stopped it before anything was sent: the
+printer is printing, its print state is unreadable, `access` is not `full`), **not applied** (a
+`needs-yes` fix without `--yes`) or **failed** (the apply itself failed: no journal line, nothing
+happened; an HTTP answer >= 400 to a restart is this). An unexpected exception in a fix, in its manual
+steps or in the journal becomes the fix's `error` text; it never aborts the run or hides the report of a
+restart that was already sent. A second `--fix` run is a no-op: the check passes, so nothing is applied
+or journalled again.
+
+Manual steps: a line starting with `$` is a real shell command (copy-paste it), a line starting with
+`-` is prose. The line `re-run: 3d printers doctor PRINTER --check ID` is printed once per unfixed finding.
 
 ### Journal
 
@@ -70,7 +94,7 @@ Every **applied** fix writes a `printops.settings_change/1` record (kind `doctor
 configured (`PRINTOPS_API` / `PRINTOPS_TOKEN` / `~/.config/3d-cli/printops.yaml`) and reachable, imported
 through `POST /v1/settings/import` (the route behind `3d settings import`; idempotent by uid). The fix
 report's `journal` says what happened: `imported`, `buffered` (written locally; 3d-api not configured,
-unreachable, or it refused the line: `3d settings import` replays the buffer later) or `failed: …` (not
+unreachable, answered something that is not JSON, or it refused the line: `3d settings import` replays the buffer later) or `failed: …` (not
 even the local append worked). A journal problem never undoes or fails the fix.
 
 ## Checks
@@ -88,7 +112,7 @@ means the check talks to the printer; an `access: offline` printer is never cont
 ### `klippy-state` — Klipper is ready
 - **Applies to** Moonraker-family printers (`creality-stock`: skip, not applicable). Severity **error** unless `ready`.
 - **Evidence** `klippy_state`, `klippy_connected`, `state_message` (from `/printer/info`).
-- **Fix** **needs-yes**: `shutdown` → `POST /printer/firmware_restart`; `error` / `disconnected` → `POST /printer/restart` (the Klipper host service). Refused when `print_stats.state` is `printing` or `paused`, and for `startup` (still booting). Verified by `/server/info` reporting `ready` within a bounded poll (45 s, 1 s steps).
+- **Fix** **needs-yes**: `shutdown` → `POST /printer/firmware_restart`; `error` → `POST /printer/restart` (both are Klippy requests relayed over its socket); `disconnected` → `POST /machine/services/restart` with `{"service": "klipper"}` (with Klippy disconnected there is nothing to relay to, so the host service is restarted; needs a Moonraker with a service provider and `klipper` in `allowed_services`, [docs](https://moonraker.readthedocs.io/en/latest/external_api/machine/); without one the answer is HTTP 4xx and the fix is `failed`). An HTTP status >= 400 is a failed fix before anything is polled or journalled. Refused when `print_stats.state` is `printing` or `paused`, and for `startup` (still booting); a print state that cannot be read counts as "Klipper is not answering" here (its job was halted). Verified by `/server/info` reporting `ready` within a bounded poll (45 s, 1 s steps).
 
 ### `moonraker-components` — no failed components, no config warnings
 - **Applies to** Moonraker. Severity **warn**.
@@ -104,11 +128,11 @@ means the check talks to the printer; an `access: offline` printer is never cont
 
 ### `spoolman-link` — Moonraker is connected to Spoolman
 - **Applies to** Moonraker whose `/server/info` lists the `spoolman` component (a printer without `[spoolman]` answers 404 on `/server/spoolman/*`: skip with that reason). Severity **error** when not connected, **warn** when usage reports are queued.
-- **Evidence** `spoolman_connected`, `pending_reports` (count), `pending_spool_ids`, `spool_id`, `spoolman_server` (from `config.spoolman.server`).
-- **Fix** manual-only: `curl SPOOLMAN/api/v1/health`, start Spoolman, fix `[spoolman] server:`, restart Moonraker.
+- **Evidence** `spoolman_connected`, `pending_reports` (count), `pending_spool_ids`, `spool_id`, `spoolman_server` (from `config.spoolman.server`, sanitised: see `spoolman-cors`; null when unusable).
+- **Fix** manual-only: `curl SPOOLMAN/api/v1/health` (only when the URL is known), start Spoolman, fix `[spoolman] server:`, restart Moonraker.
 
 ### `spoolman-cors` — Spoolman admits the web UI's browser origin
-- **Applies to** Moonraker with a `[spoolman] server:` and a Fluidd/Mainsail web UI (the origins come from `printer_ops.webui.probe`, reduced to `scheme://host:port`). Severity **error**; skip when no UI answered.
+- **Applies to** Moonraker with a `[spoolman] server:` and a Fluidd/Mainsail web UI (the origins come from `printer_ops.webui.probe`, reduced to the `scheme://host[:port]` a browser sends: a default port, `:80` for http and `:443` for https, is dropped because CORSMiddleware compares the string exactly). Severity **error**; skip when no UI answered. The Spoolman URL is printer-supplied config and is fetched from this host, so it is rebuilt first: only `http`/`https` with a host, credentials dropped, no query, fragment, params or unusual path characters; anything else is ignored with a skip reason (never fetched, never printed in a command).
 - **How** `GET <spoolman>/api/v1/info` with `Origin: <origin>`; Spoolman (FastAPI CORSMiddleware) answers `Access-Control-Allow-Origin` only for an allowed origin (or `*`); no header means the browser blocks Fluidd's Spoolman panel.
 - **Evidence** `spoolman_url`, `origins: [{origin, status, access_control_allow_origin, admitted}]`, `missing`.
 - **Fix** manual-only: set `PRINTOPS_SPOOLMAN_CORS_ORIGIN` (comma-separated full origins) for the `spoolman` service of `services/3d-api/compose.yaml` (it feeds `SPOOLMAN_CORS_ORIGIN`; `services/3d-api/README.md`), then `docker compose up -d --force-recreate spoolman`.
@@ -137,7 +161,7 @@ means the check talks to the printer; an `access: offline` printer is never cont
 
 ### `camera-snapshot` — the snapshot URL answers a JPEG
 - **Applies to** printers with a camera. Severity **error**. `GET` the resolved snapshot URL (`CameraSpec.snapshot_url`): HTTP 200 and the first bytes `FF D8`, within the request timeout. A camera that needs Moonraker's `camera.start_monitor` keepalive is woken once with the same call the vision service uses and asked again (up to 3 times); a camera without keepalive is asked once.
-- **Evidence** `url` (credentials redacted), `kind`, `http_status`, `bytes`, `content_type`, `woken_with_keepalive`.
+- **Evidence** `url` (credentials and secret query values redacted), `kind`, `http_status`, `bytes`, `content_type`, `woken_with_keepalive` (true only when the wake-up call succeeded), `keepalive_error` (why it failed). A camera that gave no HTTP answer at all is not woken: a wake-up cannot fix a dead host.
 - **Fix** manual-only: what to restart (the streamer / the camera service) and which URL.
 
 ### `watch-units-dry-run` — the vision/watch user services deliver
@@ -149,9 +173,9 @@ means the check talks to the printer; an `access: offline` printer is never cont
 - **Evidence** `fleet` and `effective` (`adapter`, `host`, `port`, `source`), `winner: "override"`. The override replaces the whole device part of the fleet entry (`printer_ops/devices.py`), so a fleet fix is invisible while it exists.
 - **Fix** manual-only: delete the override entry, or move its values into the fleet entry.
 
-### `print-stuck` — no job paused for hours
-- **Applies to** Moonraker. Severity **warn**. `print_stats.state == paused` for longer than **2 h** (`PAUSED_WARN_S`). Klipper stamps no pause time, so the length is `total_duration − print_duration` (time since the job started minus time extruding; it includes the first minutes of heating, so it can only be a little high). "Printing with no progress" is not cheaply observable and is not checked.
-- **Evidence** `state`, `filename`, `total_duration_s`, `print_duration_s`, `paused_for_s`, `threshold_s`. **Fix** manual-only: resume or cancel.
+### `print-stuck` — a paused job that has spent hours not extruding
+- **Applies to** Moonraker. Severity **warn**. The job is `paused` now and `total_duration − print_duration` of `print_stats` exceeds **2 h** (`PAUSED_WARN_S`). Klipper stamps no pause time, so this figure is **cumulative**: all time without extrusion since the job started (every pause that was already resumed, plus the heating before the first extrusion), not the length of the current pause. A job with several long colour-change pauses can therefore warn right after a short new pause; the summary says "in total". "Printing with no progress" is not cheaply observable and is not checked.
+- **Evidence** `state`, `filename`, `total_duration_s`, `print_duration_s`, `not_extruding_s`, `threshold_s`. **Fix** manual-only: resume or cancel.
 
 ### `time-sync` — the printer's clock agrees with this host
 - **Applies to** every contactable printer whose HTTP replies carry a `Date` header (Moonraker's do; else skip). `|skew| > 120 s` **warn**, `> 1 h` **error** (the header has 1 s resolution).
@@ -240,7 +264,7 @@ documented here.
 
 ## Not verified on real hardware
 
-The restart fix (`POST /printer/firmware_restart`, `/printer/restart`), the active-spool write and the
+The restart fix (`POST /printer/firmware_restart`, `/printer/restart`, `/machine/services/restart`), the active-spool write and the
 camera keepalive were exercised against fakes that implement the documented Moonraker behaviour, not
 against a physical printer. The Moonraker endpoints used (`/server/info`, `/server/config`,
 `/server/spoolman/status`, `/server/files/directory`, `/printer/objects/query`) are documented at

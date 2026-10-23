@@ -281,3 +281,127 @@ def test_an_unreadable_manifest_is_ignored(tmp_path: Path) -> None:
     bad.mkdir()
     (bad / MANIFEST).write_text("{not json")
     assert list_manifests(tmp_path, "alpha") == []
+
+
+# ---- optional items, content checks, concurrency ------------------------------------------------
+
+
+def test_an_optional_http_item_whose_port_refuses_is_skipped_not_failed(
+    tmp_path: Path,
+) -> None:
+    """Nothing listens on the Fluidd port: the optional release_info item is skipped and the backup stays usable."""
+    http = FakeHttp()
+    http.set(
+        "GET", 80, "/info", 200, {"model": "K1 SE"}
+    )  # no route at all on 4408: refused
+    tgt = target("alpha", "Creality K1 SE", adapter="creality-stock", port=80)
+    be, *_ = make_backends(k1_runner(), http)
+    m = take_backup(
+        K1,
+        ep_of(K1, tgt),
+        be,
+        printer="alpha",
+        model=tgt.model,
+        state="rooted",
+        dest_root=tmp_path,
+        now=NOW,
+    )
+    item = next(i for i in m.items if i.id == "fluidd-release-info")
+    assert item.status == "skipped" and item.detail == "optional: connection refused"
+    assert m.ok
+    found, why = gate(tmp_path, now=NOW + HOUR, required={"printer-cfg", "config-tree"})
+    assert found is not None and why == ""
+
+
+def test_a_required_http_item_whose_port_refuses_still_fails_the_backup(
+    tmp_path: Path,
+) -> None:
+    tgt = target("beta", "Snapmaker U1")
+    be, *_ = make_backends(http=FakeHttp())  # Moonraker unreachable
+    m = take_backup(
+        U1,
+        ep_of(U1, tgt),
+        be,
+        printer="beta",
+        model=tgt.model,
+        state="stock",
+        dest_root=tmp_path,
+        now=NOW,
+    )
+    failed = {i.id: i.detail for i in m.items if i.status == "failed"}
+    assert failed["system-info"] == "connection refused" and not m.ok
+
+
+def test_an_optional_item_with_another_http_error_is_a_failure(tmp_path: Path) -> None:
+    http = k1_http()
+    http.set("GET", 4408, "/release_info.json", 502, "")
+    m = k1_backup_with(tmp_path, http)
+    item = next(i for i in m.items if i.id == "fluidd-release-info")
+    assert item.status == "failed" and item.detail == "HTTP 502" and not m.ok
+
+
+def k1_backup_with(tmp_path: Path, http: FakeHttp) -> Manifest:
+    tgt = target("alpha", "Creality K1 SE", adapter="creality-stock", port=80)
+    be, *_ = make_backends(k1_runner(), http)
+    return take_backup(
+        K1,
+        ep_of(K1, tgt),
+        be,
+        printer="alpha",
+        model=tgt.model,
+        state="rooted",
+        dest_root=tmp_path,
+        now=NOW,
+    )
+
+
+def test_expect_regex_is_enforced_for_http_items_too(tmp_path: Path) -> None:
+    from dataclasses import replace
+
+    from printer_fw.backup import _fetch_http
+
+    item = next(b for b in U1.backups if b.id == "printer-cfg")
+    strict = replace(item, expect_regex=r"(?m)^#\*# \[")
+    http = FakeHttp()
+    http.set("GET", 7125, "/server/files/config/printer.cfg", 200, "[printer]\n")
+    tgt = target("beta", "Snapmaker U1")
+    be, *_ = make_backends(http=http)
+    res, data = _fetch_http(strict, ep_of(U1, tgt), be)
+    assert res.status == "failed" and "does not match" in res.detail and data == b""
+    http.set("GET", 7125, "/server/files/config/printer.cfg", 200, PRINTER_CFG)
+    assert _fetch_http(strict, ep_of(U1, tgt), be)[0].status == "ok"
+
+
+def test_two_backups_in_the_same_second_never_collide_even_when_the_name_is_taken(
+    tmp_path: Path,
+) -> None:
+    first = k1_backup(tmp_path)
+    (
+        first.directory.parent / f"{first.directory.name}-2"
+    ).mkdir()  # a stray directory took the next name
+    second = k1_backup(tmp_path)
+    third = k1_backup(tmp_path)
+    names = {first.directory.name, second.directory.name, third.directory.name}
+    assert (
+        len(names) == 3
+        and second.directory.name.endswith("-3")
+        and third.directory.name.endswith("-4")
+    )
+
+
+def test_backup_files_are_created_exclusively_and_privately(tmp_path: Path) -> None:
+    from printer_fw.backup import _write_private
+
+    target_file = tmp_path / "x"
+    _write_private(target_file, b"secret")
+    assert (
+        stat.S_IMODE(target_file.stat().st_mode) == 0o600
+        and target_file.read_bytes() == b"secret"
+    )
+    with pytest.raises(FileExistsError):
+        _write_private(target_file, b"again")
+    link = tmp_path / "link"
+    link.symlink_to(tmp_path / "elsewhere")
+    with pytest.raises(FileExistsError):
+        _write_private(link, b"x")  # a planted symlink is never followed
+    assert not (tmp_path / "elsewhere").exists()

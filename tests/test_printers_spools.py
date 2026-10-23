@@ -515,3 +515,50 @@ def test_every_sub_prints_help(capsys: Any) -> None:
     for run in (spools_cmd, run_load, run_unload, run_swap, filament):
         assert run(["--help"]) == 0
         assert "Examples:" in _out(capsys)
+
+
+def test_spools_still_reports_when_spoolman_is_down(po: ApiClient, monkeypatch: pytest.MonkeyPatch, capsys: Any) -> None:
+    from printops.client import ApiError
+
+    real = ApiClient.get
+
+    def get(self: ApiClient, path: str, **params: Any) -> Any:
+        if path == "/v1/spools":
+            raise ApiError("HTTP 502: spoolman unreachable", status=502)
+        return real(self, path, **params)
+
+    monkeypatch.setattr(ApiClient, "get", get)
+    assert spools_cmd(["k1se", "--json"]) == 0
+    got = _json(capsys)
+    assert got["spools_error"] and got["printers"][0]["name"] == "k1se"
+
+
+def test_filament_set_rejects_text_that_cannot_travel_in_a_gcode_argument(po: ApiClient, u1: FakeMoonraker) -> None:
+    for bad in ("PETG;M112", "PETG\nFIRMWARE_RESTART", 'a"b', "x" * 40):
+        with pytest.raises(InvalidArgument):
+            filament(["set", "u1/T3", "--color", "#C62828", "--material", bad])
+    assert u1.writes() == []
+
+
+def test_filament_dry_run_predicts_the_official_rfid_refusal(po: ApiClient, u1: FakeMoonraker, capsys: Any) -> None:
+    u1.status["print_task_config"]["filament_official"][2] = True
+    with pytest.raises(GateFailure):
+        filament(["set", "u1/T3", "--color", "#C62828", "--material", "PETG", "--dry-run"])
+    assert "official RFID" in _out(capsys)
+    assert filament(["set", "u1/T3", "--color", "#C62828", "--material", "PETG", "--dry-run", "--force-official"]) == 0
+    assert u1.writes() == []
+
+
+def test_swap_into_an_occupied_ams_slot_passes_replace_to(po: ApiClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An AMS slot is not in the toolhead view: occupants must come from the loaded spools' slot."""
+    from printers_cli import load as load_mod
+
+    seen: list[list[str]] = []
+    def fake_run(argv: list[str]) -> int:
+        seen.append(argv)
+        return 0
+
+    monkeypatch.setattr("printops.cli.spool.run", fake_run)
+    monkeypatch.setattr(load_mod, "_occupants", lambda api, target: [{"id": 5, "name": "old"}])
+    assert run_swap(["9", "u1/T1", "--to", "WH:default"]) == 0
+    assert seen[0][:3] == ["load", "9", "u1/T1"] and "--replace-to" in seen[0]

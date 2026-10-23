@@ -20,7 +20,7 @@ The real lists this was written against (read-only GETs, 2026-10-23): a Snapmake
   172.18.0.0/16, 10.0.0.0/8, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.0.0.0/8, FE80::/10,
   ::1/128 (flagged: 10.0.0.0/8, 172.16.0.0/12, 192.0.0.0/8); a rooted K1 SE trusts 10.0.0.0/8,
   127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16, FE80::/10, ::1/128 (flagged:
-  10.0.0.0/8, 172.16.0.0/12). Pinned in tests/test_printer_doctor_checks_config.py.
+  10.0.0.0/8, 172.16.0.0/12). Pinned in tests/test_printer_doctor_checks_moonraker.py.
 """
 
 from __future__ import annotations

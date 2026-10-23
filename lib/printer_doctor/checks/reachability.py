@@ -13,10 +13,19 @@ header has 1 s resolution and the request takes milliseconds, so 120 s is far ab
 from __future__ import annotations
 
 import email.utils
+import shlex
 from datetime import datetime, timezone
 
 from printer_doctor.context import Context
-from printer_doctor.model import CannotSee, Check, Fix, JsonValue, Verdict
+from printer_doctor.model import (
+    CannotSee,
+    Check,
+    CheckResult,
+    Fix,
+    JsonValue,
+    Verdict,
+    command,
+)
 
 WARN_SKEW_S = 120.0
 ERROR_SKEW_S = 3600.0
@@ -41,10 +50,11 @@ def _reachable(ctx: Context) -> Verdict:
     )
 
 
-def _reachable_steps(ctx: Context, _result: object) -> list[str]:
+def _reachable_steps(ctx: Context, _result: CheckResult) -> list[str]:
     d = ctx.device
     return [
-        f"Power: is the printer on and on the network? `ping {d.host}`",
+        "Power: is the printer on and on the network?",
+        command(f"ping -c 3 {shlex.quote(d.host)}"),
         f"Address: host and port of {d.name} come from {d.source} "
         f"(`3d printer list` shows the effective entry): {d.adapter} at {d.host}:{d.port}.",
         "Services: on a Moonraker printer check that Moonraker runs (its web UI shows "
@@ -88,13 +98,13 @@ def _time_sync(ctx: Context) -> Verdict:
     return Verdict.ok(f"clock within {abs(skew):.0f} s of this host", **evidence)
 
 
-def _time_steps(ctx: Context, result: object) -> list[str]:
+def _time_steps(ctx: Context, result: CheckResult) -> list[str]:
     return [
-        "Check this host first: `timedatectl status` (System clock synchronized: yes).",
+        "Check this host first (System clock synchronized: yes):",
+        command("timedatectl status"),
         "Then the printer's time source: enable NTP in its system settings (Moonraker: Machine "
         "tab; stock firmware: the touchscreen's time/zone settings), or set the clock by hand.",
         "A Linux-based printer: `date` over ssh, `ntpd`/`chronyd`/`systemd-timesyncd` status.",
-        "Re-run `3d printers doctor " + ctx.name + " --check time-sync` to confirm.",
     ]
 
 

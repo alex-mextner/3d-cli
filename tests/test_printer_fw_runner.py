@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 from errors import MissingDependency
-from printer_fw.runner import NO_SSH_RC, TIMEOUT_RC, CommandResult, SshRunner
+from printer_fw.runner import SSH_ERROR_RC, TIMEOUT_RC, CommandResult, SshRunner
 
 FAKE = """#!{python}
 import json, os, sys, time
@@ -119,7 +119,7 @@ def test_a_binary_that_cannot_start_is_reported_as_an_ssh_failure(
     exe.chmod(0o755)
     monkeypatch.setenv("PATH", str(tmp_path))
     res = SshRunner().run("h", "root", ["true"], timeout=5)
-    assert res.rc == NO_SSH_RC
+    assert res.rc == SSH_ERROR_RC
 
 
 def test_check_available_passes_when_ssh_exists(fake_ssh: Path) -> None:

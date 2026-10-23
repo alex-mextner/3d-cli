@@ -18,22 +18,21 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from errors import InvalidArgument, ThreeDError, UsageError
 
-from printers_cli._common import PrinterRef, require_printer
+from printers_cli._common import PrinterRef, parallel_map, require_printer
 
 if TYPE_CHECKING:
     from printer_ops.base import ActiveSpool
 
-AGREES, MISMATCH, NOT_APPLICABLE, UNREACHABLE, SKIPPED = (
-    "agrees",
-    "mismatch",
-    "not-applicable",
-    "unreachable",
-    "skipped",
-)
+ActiveStatus = Literal["agrees", "mismatch", "not-applicable", "unreachable", "skipped"]
+AGREES: ActiveStatus = "agrees"
+MISMATCH: ActiveStatus = "mismatch"
+NOT_APPLICABLE: ActiveStatus = "not-applicable"
+UNREACHABLE: ActiveStatus = "unreachable"
+SKIPPED: ActiveStatus = "skipped"
 
 
 @dataclass(frozen=True)
@@ -61,42 +60,32 @@ def valid_slots(ref: PrinterRef) -> list[str]:
     return out
 
 
-def resolve_slot(arg: str, command: str) -> SlotTarget:
+def resolve_slot(arg: str, command: str, refs: dict[str, PrinterRef] | None = None) -> SlotTarget:
     """`PRINTER` or `PRINTER/HEAD` (`u1/T3`, `p1s/ams1/2`) -> SlotTarget. A bare printer name
     works only when the fleet entry has exactly one slot; the head is matched case-insensitively
     and written the way the fleet spells it."""
     name, _, rest = arg.removeprefix("slot:").partition("/")
-    ref = require_printer(name, command)
+    ref = require_printer(name, command, refs)
     slots = valid_slots(ref)
     cmd = f"printers {command}"
     if rest:
-        match = next((s for s in slots if s.casefold() == rest.casefold()), None)
-        if match is None:
-            if (
-                not slots
-            ):  # no fleet entry to check against: the 3d-api validates the slot
+        label = next((s for s in slots if s.casefold() == rest.casefold()), None)
+        if label is None:
+            # no fleet entry to check against: the 3d-api validates the slot
+            if not slots:
                 return SlotTarget(ref.name, rest, None, ref)
-            raise InvalidArgument(
-                "slot",
-                rest,
-                slots,
-                command=cmd,
-                extra=f"{ref.name} declares these slots in fleet/printers.yaml.",
-            )
+            raise InvalidArgument("slot", rest, slots, command=cmd,
+                                  extra=f"{ref.name} declares these slots in fleet/printers.yaml.")
     elif len(slots) == 1:
-        match = slots[0]
+        label = slots[0]
     else:
         raise UsageError(
             f"{ref.name} has {len(slots)} slots; say which: {ref.name}/<slot>",
             command=cmd,
-            remediation=[
-                f"slots of {ref.name}: {', '.join(slots) or '(none declared)'}"
-            ],
+            remediation=[f"slots of {ref.name}: {', '.join(slots) or '(none declared)'}"],
         )
-    head = next(
-        (h for h in (ref.fleet.heads if ref.fleet else ()) if h.label == match), None
-    )
-    return SlotTarget(ref.name, match, head.index if head is not None else None, ref)
+    head = next((h for h in (ref.fleet.heads if ref.fleet else ()) if h.label == label), None)
+    return SlotTarget(ref.name, label, head.index if head is not None else None, ref)
 
 
 # ---- the report --------------------------------------------------------------------------------
@@ -104,7 +93,7 @@ def resolve_slot(arg: str, command: str) -> SlotTarget:
 
 @dataclass
 class ActiveSpoolReport:
-    status: str  # agrees | mismatch | not-applicable | unreachable | skipped
+    status: ActiveStatus
     note: str
     spool_id: int | None = None  # Moonraker's active spool
     bound_spool_id: int | None = (
@@ -136,8 +125,8 @@ def read_active_spool(ref: PrinterRef, secs: float) -> ActiveSpool:
     """Moonraker's `[spoolman]` state of the printer behind `ref` (the live read, GET only)."""
     from printer_ops import make_adapter
 
-    if ref.device is None:
-        raise ValueError(f"{ref.name} has no device to read")  # callers check `contactable` first
+    if ref.device is None:  # callers check `contactable` first
+        raise ThreeDError(f"{ref.name} has no device to read", command="printers spools")
     return make_adapter(ref.device, timeout=secs).active_spool()
 
 
@@ -174,7 +163,8 @@ def active_report(
 
         status = NOT_APPLICABLE if isinstance(e, UnsupportedOperation) else UNREACHABLE
         return ActiveSpoolReport(status, e.message, bound_spool_id=bound_id)
-    def seen(status: str, note: str) -> ActiveSpoolReport:
+
+    def seen(status: ActiveStatus, note: str) -> ActiveSpoolReport:
         return ActiveSpoolReport(status, note, got.spool_id, bound_id, got.connected, got.pending_reports)
 
     if bound is None:
@@ -187,6 +177,12 @@ def active_report(
     return seen(MISMATCH, f"Moonraker has {theirs} but PrintOps bound {mine}: usage is booked to the wrong spool")
 
 
+def _enrich(spool: dict[str, Any], loaded: dict[int, dict[str, Any]]) -> dict[str, Any]:
+    """A slot's bound spool (3d-api printer view) plus the remaining interval and vendor of its loaded-spool view."""
+    extra = loaded.get(spool["spool_id"], {})
+    return {**spool, **{k: extra[k] for k in ("remaining_text", "vendor") if k in extra}}
+
+
 def build_report(
     printer_views: list[dict[str, Any]],
     loaded: list[dict[str, Any]],
@@ -196,28 +192,23 @@ def build_report(
     read: ActiveReader,
     spools_error: str | None = None,
 ) -> Report:
-    """Merge the 3d-api printer views with the loaded-spool views and the live active spools."""
+    """Merge the 3d-api printer views with the loaded-spool views and the live active spools (the
+    printers are asked concurrently: one dead host must not queue the others behind its timeout)."""
     by_id = {int(sp["id"]): sp for sp in loaded}
+    merged = [
+        {**view, "slots": [
+            {**s, "spools": None if s.get("spools") is None else [_enrich(sp, by_id) for sp in s["spools"]]}
+            for s in view["slots"]
+        ]}
+        for view in printer_views
+    ]
+    actives = parallel_map(lambda v: active_report(v, refs.get(v["name"]), live=live, read=read), merged)
     report = Report(spools_error=spools_error)
-    for view in printer_views:
-        slots = []
-        for s in view["slots"]:
-            bound = None
-            if s.get("spools") is not None:
-                bound = [
-                    {**sp, **{k: by_id[sp["spool_id"]][k] for k in ("remaining_text", "vendor")
-                              if sp["spool_id"] in by_id and k in by_id[sp["spool_id"]]}}
-                    for sp in s["spools"]
-                ]
-            slots.append({**s, "spools": bound})
+    for view, active in zip(merged, actives, strict=True):
         entry = {k: view[k] for k in ("name", "model", "access", "adapter")}
         entry["state"] = _state(view.get("live"))
-        entry["slots"] = slots
-        entry["active_spool"] = asdict(
-            active_report(
-                {**view, "slots": slots}, refs.get(view["name"]), live=live, read=read
-            )
-        )
+        entry["slots"] = view["slots"]
+        entry["active_spool"] = asdict(active)
         report.printers.append(entry)
     return report
 
@@ -235,11 +226,12 @@ def _state(live: dict[str, Any] | None) -> str:
 def _live_slot(p: dict[str, Any] | None) -> str:
     if p is None:
         return "?"
-    if p["present"] is False:
+    present = p.get("present")
+    if present is False:
         return "empty"
     parts = [x for x in (p.get("material"), p.get("color"), p.get("vendor")) if x]
     if not parts:
-        return "loaded (type unknown)" if p["present"] else "presence unknown"
+        return "loaded (type unknown)" if present else "presence unknown"
     return " ".join(parts)
 
 
@@ -250,15 +242,10 @@ def _bound(spools: list[dict[str, Any]] | None) -> str:
         return "no spool"
     out = []
     for sp in spools:
-        color = f" {sp['colors'][0]}" if sp.get("colors") else ""
-        left = sp.get("remaining_text") or (
-            f"{sp['remaining_g']:.0f} g" if sp.get("remaining_g") is not None else ""
-        )
-        out.append(
-            f"#{sp['spool_id']} {sp['name']} {sp.get('material') or ''}{color}  {left}".replace(
-                "  ", " "
-            ).strip()
-        )
+        left = sp.get("remaining_text") or (f"{sp['remaining_g']:.0f} g" if sp.get("remaining_g") is not None else "")
+        color = sp["colors"][0] if sp.get("colors") else ""
+        parts = (f"#{sp['spool_id']}", sp["name"], sp.get("material") or "", color, left)
+        out.append(" ".join(x for x in parts if x))
     return "; ".join(out)
 
 

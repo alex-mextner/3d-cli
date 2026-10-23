@@ -11,8 +11,10 @@ after the fixes: GateFailure silent, the report is already printed) / 2 (usage).
 
 from __future__ import annotations
 
+import dataclasses
 import datetime
 import math
+from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING
 
 from errors import GateFailure, InvalidArgument, UsageError
@@ -40,8 +42,9 @@ Arguments:
   --all              every printer of the registry                  3d printers doctor --all
 
 Options:
-  --fix              apply the `safe` fixes (idempotent, never mid-print), verify each by re-running
-                     its check, journal it (settings-change buffer; 3d-api when reachable);
+  --fix              apply the `safe` fixes (idempotent, never mid-print, only on access: full printers),
+                     verify each by re-running its check, journal it (settings-change buffer; 3d-api
+                     when reachable);
                      `needs-yes` fixes are listed, not run; `manual-only` ones only print their steps
                                                                      3d printers doctor k1se --fix
   --yes              with --fix: also apply `needs-yes` fixes (restarts Klipper / the firmware;
@@ -129,6 +132,7 @@ def run(argv: list[str], services: ServicesType | None = None) -> int:
     if wants_help(argv):
         print(USAGE)
         return 0
+    from cli.resources import pool_size
     from printer_doctor import render
     from printer_doctor.context import Context, Services
     from printer_doctor.engine import Options, run_printer, summarize
@@ -174,7 +178,9 @@ def run(argv: list[str], services: ServicesType | None = None) -> int:
                 ["a positive number of seconds, e.g. 3"],
                 command=CMD_NAME,
             )
-        svc.listen_s = secs
+        svc = dataclasses.replace(
+            svc, listen_s=secs
+        )  # the caller's Services stays untouched
     options = Options(
         fix="--fix" in p.flags,
         yes="--yes" in p.flags,
@@ -183,7 +189,14 @@ def run(argv: list[str], services: ServicesType | None = None) -> int:
     )
     targets = load_targets()
     names = _names(p.pos, "--all" in p.flags, sorted(targets))
-    reports = [run_printer(Context(targets[n], svc), checks, options) for n in names]
+    # Printers are independent: diagnose them concurrently (bounded as AGENTS.md asks), in the
+    # order they were named, so one slow or dead printer does not hold up the rest.
+    with ThreadPoolExecutor(max_workers=pool_size(len(names))) as pool:
+        reports = list(
+            pool.map(
+                lambda n: run_printer(Context(targets[n], svc), checks, options), names
+            )
+        )
     summary = summarize(reports, fail_on)
     now = datetime.datetime.fromtimestamp(svc.clock(), datetime.timezone.utc)
     if as_json:

@@ -11,20 +11,28 @@ INVARIANTS: stdlib at import time; anything heavier is imported inside the metho
   re-reads). POSTs are never cached and are logged in `requests` like every other call, so a test
   can prove that a read-only run sent none. Transport failures become `CannotSee`: the check
   reports skip/error with the reason, never a pass.
+  A dead host costs ONE timeout per run: the first transport failure is remembered in
+  `Services.down` (shared by every Context of the run, thread-safe) and every later request to
+  that host fails at once with the first error. A timeout / no route marks the whole host (any
+  port: a powered-off printer), a refusal or reset only host:port (Moonraker down, camera up).
+  `fresh=True` reads and `invalidate()` bypass and clear the mark: a restart fix must be able to
+  watch the printer come back. 3d-api is tracked the same way (`Services.down.api`).
 """
 
 from __future__ import annotations
 
+import errno
 import http.client
 import json
+import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
 from printer_doctor.journal import JournalEntry
-from printer_doctor.model import CannotSee, JsonValue
+from printer_doctor.model import CannotSee, JsonValue, clean
 
 if TYPE_CHECKING:
     from printer_ops.base import Adapter, PrinterStatus
@@ -52,6 +60,22 @@ class HttpReply:
 HttpFn = Callable[[str, str, Mapping[str, str] | None, bytes | None, float], HttpReply]
 
 
+def endpoint(url: str) -> tuple[str, str, int]:
+    """(scheme, host, port) of an http(s) URL; OSError for anything a request cannot be sent to."""
+    try:
+        parts = urlsplit(url)
+        scheme, host, port = parts.scheme, parts.hostname, parts.port
+    except ValueError as exc:
+        raise OSError(f"invalid URL: {exc}") from exc
+    if scheme not in ("http", "https"):
+        raise OSError(
+            f"unsupported URL scheme {scheme!r} (only http and https are contacted)"
+        )
+    if not host:
+        raise OSError("URL has no host")
+    return scheme, host.lower(), port or (443 if scheme == "https" else 80)
+
+
 def default_http(
     method: str,
     url: str,
@@ -59,12 +83,20 @@ def default_http(
     body: bytes | None,
     timeout: float,
 ) -> HttpReply:
-    """One stdlib HTTP request; keeps the response headers (Date, Access-Control-*) that
-    `printer_ops.base.http_request` drops. OSError for every transport failure."""
+    """One stdlib HTTP(S) request; keeps the response headers (Date, Access-Control-*) that
+    `printer_ops.base.http_request` drops. The URL scheme is honoured (https: default port 443,
+    certificate verified); OSError for every transport failure and for any other scheme."""
+    scheme, host, port = endpoint(url)
     parts = urlsplit(url)
-    conn = http.client.HTTPConnection(
-        parts.hostname or "", parts.port or 80, timeout=timeout
-    )
+    conn: http.client.HTTPConnection
+    if scheme == "https":
+        import ssl
+
+        conn = http.client.HTTPSConnection(
+            host, port, timeout=timeout, context=ssl.create_default_context()
+        )
+    else:
+        conn = http.client.HTTPConnection(host, port, timeout=timeout)
     try:
         path = (parts.path or "/") + (f"?{parts.query}" if parts.query else "")
         conn.request(method, path, body=body, headers=dict(headers or {}))
@@ -78,6 +110,52 @@ def default_http(
         raise OSError(f"{type(exc).__name__}: {exc}") from exc
     finally:
         conn.close()
+
+
+_HOST_LEVEL_ERRNOS = frozenset(
+    {errno.EHOSTUNREACH, errno.ENETUNREACH, errno.EHOSTDOWN, errno.ENETDOWN}
+)
+
+
+def _host_level(exc: OSError) -> bool:
+    """A failure that says the HOST is gone (timeout, no route, name does not resolve), not just
+    one port (refused / reset: something else on that host may still answer)."""
+    import socket
+
+    return (
+        isinstance(exc, (TimeoutError, socket.gaierror))
+        or exc.errno in _HOST_LEVEL_ERRNOS
+    )
+
+
+class DownTracker:
+    """Hosts (and 3d-api) that already failed during this run; shared by every Context."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._hosts: dict[str, str] = {}
+        self._endpoints: dict[tuple[str, int], str] = {}
+        self.api: str | None = None
+
+    def mark(self, host: str, port: int, exc: OSError) -> None:
+        with self._lock:
+            if _host_level(exc):
+                self._hosts.setdefault(host, str(exc))
+            else:
+                self._endpoints.setdefault((host, port), str(exc))
+
+    def reason(self, host: str, port: int) -> str | None:
+        with self._lock:
+            return self._hosts.get(host) or self._endpoints.get((host, port))
+
+    def forget(self, host: str, port: int) -> None:
+        with self._lock:
+            self._hosts.pop(host, None)
+            self._endpoints.pop((host, port), None)
+
+    def mark_api(self, reason: str) -> None:
+        with self._lock:
+            self.api = self.api or reason
 
 
 @dataclass(frozen=True)
@@ -103,6 +181,9 @@ class Services:
     timeout: float = 8.0  # per request
     listen_s: float | None = None  # Creality ws listen window (--secs)
     poll_s: float = 45.0  # how long a restart fix waits for Klipper to come back
+    down: DownTracker = field(
+        default_factory=DownTracker
+    )  # shared by every Context of the run
 
 
 def as_obj(value: JsonValue, what: str) -> Mapping[str, JsonValue]:
@@ -175,20 +256,38 @@ class Context:
         url: str,
         headers: Mapping[str, str] | None = None,
         body: bytes | None = None,
+        *,
+        fresh: bool = False,
     ) -> Fetched:
+        """One request. Without `fresh`, a host that already failed raises its first error at once
+        (and nothing is sent or logged); a success clears the mark."""
+        _, host, port = endpoint(url)
+        down = self.services.down
+        if not fresh and (cached := down.reason(host, port)) is not None:
+            raise OSError(cached)
         self.requests.append((method, url))
         fn = self.services.http or default_http
-        reply = fn(method, url, headers, body, self.services.timeout)
+        try:
+            reply = fn(method, url, headers, body, self.services.timeout)
+        except OSError as exc:
+            down.mark(host, port, exc)
+            raise
+        down.forget(host, port)
         return Fetched(url, reply, self.now())
 
     def external(
         self, method: str, url: str, headers: Mapping[str, str] | None = None
     ) -> Fetched:
-        """A request to some other host (Spoolman, a camera streamer); not cached."""
+        """A request to some other host (Spoolman, a camera streamer); not cached. Errors name the
+        URL with credentials and secret query values redacted."""
+        from printer_ops.webui import redact_url
+
         try:
             return self._send(method, url, headers)
         except OSError as exc:
-            raise CannotSee(f"{url} unreachable from this host: {exc}") from exc
+            raise CannotSee(
+                f"{redact_url(url)} unreachable from this host: {clean(str(exc))}"
+            ) from exc
 
     def get(self, path: str, *, fresh: bool = False) -> Fetched:
         """GET `path` on the printer's Moonraker origin, cached (failures too) unless `fresh`."""
@@ -199,20 +298,27 @@ class Context:
                 raise hit
             return hit
         try:
-            got: Fetched | CannotSee = self._send("GET", url)
+            got: Fetched | CannotSee = self._send("GET", url, fresh=fresh)
         except OSError as exc:
-            got = CannotSee(f"printer unreachable: {exc} (see check `reachable`)")
+            got = CannotSee(
+                f"printer unreachable: {clean(str(exc))} (see check `reachable`)"
+            )
         self._http_cache[path] = got
         if isinstance(got, CannotSee):
             raise got
         return got
 
-    def post(self, path: str) -> Fetched:
-        """POST (empty body) to the printer; only fixes call this. Never cached."""
+    def post(
+        self, path: str, payload: Mapping[str, JsonValue] | None = None
+    ) -> Fetched:
+        """POST to the printer (JSON body when `payload`); only fixes call this. Never cached and
+        never short-circuited by the down mark: the answer to a write must come from the printer."""
+        headers = {"Content-Type": "application/json"} if payload is not None else None
+        data = json.dumps(payload).encode() if payload is not None else b""
         try:
-            return self._send("POST", self.base_url + path, body=b"")
+            return self._send("POST", self.base_url + path, headers, data, fresh=True)
         except OSError as exc:
-            raise CannotSee(f"POST {path} failed: {exc}", "error") from exc
+            raise CannotSee(f"POST {path} failed: {clean(str(exc))}", "error") from exc
 
     def result(self, path: str, *, fresh: bool = False) -> JsonValue:
         """The `result` of a Moonraker JSON answer. 404 -> skip (not served), 401/403 -> skip
@@ -260,17 +366,23 @@ class Context:
         section = self.config().get(name)
         return section if isinstance(section, Mapping) else None
 
-    def job_state(self) -> str | None:
-        """print_stats.state read fresh; None when Klipper cannot answer (it is down, so no job
-        runs: a shutdown halts the print)."""
-        try:
-            body = self.result("/printer/objects/query?print_stats", fresh=True)
-        except CannotSee:
-            return None
+    def job_state(self) -> str:
+        """print_stats.state, read fresh. CannotSee when it cannot be read (timeout, 5xx, 401,
+        missing): callers that must never act mid-print treat that as "busy"."""
+        body = self.result("/printer/objects/query?print_stats", fresh=True)
         status = body.get("status") if isinstance(body, Mapping) else None
         stats = status.get("print_stats") if isinstance(status, Mapping) else None
         state = stats.get("state") if isinstance(stats, Mapping) else None
-        return state if isinstance(state, str) else None
+        if not isinstance(state, str):
+            raise CannotSee("print_stats.state is missing from objects/query", "error")
+        return state
+
+    def device_down(self) -> str | None:
+        """Why the printer's host is already known to be unreachable this run, else None."""
+        device = self.target.device
+        if device is None:
+            return None
+        return self.services.down.reason(device.host.lower(), device.port)
 
     # ---- adapter ----------------------------------------------------------------------------
     def adapter(self) -> Adapter:
@@ -292,10 +404,21 @@ class Context:
         if self._status is None:
             from errors import ThreeDError
 
-            try:
-                self._status = self.adapter().status()
-            except ThreeDError as exc:
-                self._status = CannotSee(exc.message, "error")
+            device = self.device
+            cached = self.device_down()
+            if cached is not None:
+                self._status = CannotSee(
+                    f"printer unreachable: {clean(cached)}", "error"
+                )
+            else:
+                try:
+                    self._status = self.adapter().status()
+                    self.services.down.forget(device.host.lower(), device.port)
+                except ThreeDError as exc:
+                    cause = exc.__cause__
+                    if isinstance(cause, OSError):
+                        self.services.down.mark(device.host.lower(), device.port, cause)
+                    self._status = CannotSee(clean(exc.message), "error")
         if isinstance(self._status, CannotSee):
             raise self._status
         return self._status
@@ -334,8 +457,12 @@ class Context:
             from printops.client import ApiError
 
             try:
+                if self.services.down.api is not None:
+                    raise CannotSee(f"3d-api unreachable: {self.services.down.api}")
                 self._api_cache[key] = self.api().get(path, **params)
             except ApiError as exc:
+                if exc.status == 0:
+                    self.services.down.mark_api(exc.message)
                 self._api_cache[key] = self._api_failure(path, exc.status, exc.message)
             except CannotSee as exc:
                 self._api_cache[key] = exc
@@ -346,6 +473,7 @@ class Context:
 
     @staticmethod
     def _api_failure(path: str, status: int, message: str) -> CannotSee:
+        message = clean(message)
         if status == 0:
             return CannotSee(f"3d-api unreachable: {message}")
         if status in (401, 403):
@@ -360,6 +488,11 @@ class Context:
     def webui(self) -> WebUiProbe:
         if self._webui is None:
             device = self.device
+            cached = self.device_down()
+            if cached is not None:
+                raise CannotSee(
+                    f"printer unreachable: {clean(cached)} (see check `reachable`)"
+                )
             if self.services.webui is not None:
                 self._webui = self.services.webui(device)
             else:
@@ -384,16 +517,22 @@ class Context:
         open_camera(self.device, spec).keepalive()
 
     def journal(self, entry: JournalEntry) -> str:
-        """Record an applied fix; the outcome word (journal.record). Never raises."""
+        """Record an applied fix; the outcome word (journal.record). Never raises: whatever goes
+        wrong becomes `failed: ...` (the fix already happened and must still be reported)."""
         try:
-            api = self.api()
-        except CannotSee:
-            api = None
-        if self.services.journal is not None:
-            return self.services.journal(entry, api)
-        from printer_doctor.journal import record
+            try:
+                api = None if self.services.down.api is not None else self.api()
+            except (
+                Exception
+            ):  # not configured, or a config that cannot be read: buffer only
+                api = None
+            if self.services.journal is not None:
+                return self.services.journal(entry, api)
+            from printer_doctor.journal import record
 
-        return record(entry, api)
+            return record(entry, api)
+        except Exception as exc:
+            return clean(f"failed: {type(exc).__name__}: {exc}")
 
     def invalidate(self) -> None:
         """Forget every cached read (after a fix, so the verifying re-run sees the new state)."""
@@ -401,10 +540,14 @@ class Context:
         self._api_cache.clear()
         self._status = None
         self._webui = None
+        device = self.target.device
+        if device is not None:
+            self.services.down.forget(device.host.lower(), device.port)
 
 
 __all__ = [
     "Context",
+    "DownTracker",
     "Fetched",
     "HttpFn",
     "HttpReply",
@@ -412,4 +555,5 @@ __all__ = [
     "as_list",
     "as_obj",
     "default_http",
+    "endpoint",
 ]

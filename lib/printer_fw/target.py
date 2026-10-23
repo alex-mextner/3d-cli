@@ -20,7 +20,7 @@ INVARIANTS: an offline fleet printer has no address and is never contacted (`con
 from __future__ import annotations
 
 import os
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -85,7 +85,12 @@ def parse_port_overrides(text: str) -> dict[str, int]:
     out: dict[str, int] = {}
     for part in filter(None, (p.strip() for p in text.split(","))):
         name, _, port = part.partition("=")
-        if not name or not port.isdigit() or not 0 < int(port) < 65536:
+        # isascii first: str.isdigit() is true for "²" and int() then raises.
+        if (
+            not name
+            or not (port.isascii() and port.isdigit())
+            or not 0 < int(port) < 65536
+        ):
             raise InvalidArgument(
                 ENV_PORTS,
                 text,
@@ -94,6 +99,24 @@ def parse_port_overrides(text: str) -> dict[str, int]:
             )
         out[name] = int(port)
     return out
+
+
+def validate_port_overrides(
+    profiles: Iterable[Profile], environ: Mapping[str, str] | None = None
+) -> None:
+    """The override env var is shared by every printer, so a name must be a service of SOME
+    profile; a typo (`ssh2=22`) would otherwise be silently ignored."""
+    env = os.environ if environ is None else environ
+    known = {name for p in profiles for name in p.services}
+    for name in parse_port_overrides(env.get(ENV_PORTS, "")):
+        if name not in known:
+            raise InvalidArgument(
+                ENV_PORTS,
+                env.get(ENV_PORTS, ""),
+                sorted(known),
+                command="printers fw",
+                extra=f"{name!r} is not a service of any firmware profile.",
+            )
 
 
 def service_ports(

@@ -35,7 +35,7 @@ from dataclasses import dataclass
 
 from printer_fw.plan import Plan
 from printer_fw.probes import Backends, Endpoint, ProbeResult, evaluate_group
-from printer_fw.profiles import RUNTIME_GUARD_KINDS, Guard, Profile, Step
+from printer_fw.profiles import Guard, Profile, Step
 
 
 @dataclass(frozen=True)
@@ -80,6 +80,8 @@ def plan_violations(profile: Profile, plan: Plan) -> list[Violation]:
     out: list[Violation] = []
     ids = set(plan.step_ids())
     commands = {p.step.id: p.step.command for p in plan.steps}
+    # A manual step "runs" what its instruction tells the user to run.
+    texts = {p.step.id: p.step.command or p.step.instruction for p in plan.steps}
     for g in profile.guards:
         if not _applies(g, plan.from_state, plan.to_state):
             continue
@@ -95,7 +97,7 @@ def plan_violations(profile: Profile, plan: Plan) -> list[Violation]:
                 if cmd and rx.search(cmd)
             ]
         elif g.kind == "step_requires_command" and g.step in ids:
-            cmd = commands.get(g.step, "")
+            cmd = texts.get(g.step, "")
             if not re.search(g.pattern, cmd):
                 out.append(Violation(g, f"step {g.step} must run /{g.pattern}/"))
         elif (
@@ -110,25 +112,14 @@ def plan_violations(profile: Profile, plan: Plan) -> list[Violation]:
 
 
 def runtime_guards(profile: Profile, step: Step) -> list[Guard]:
-    """The run-time guards that apply before `step`: `scope: always` ones matching the step's
-    risk, plus the ones the step lists in its preconditions."""
-    out: list[Guard] = []
-    for g in profile.guards:
-        if g.kind not in RUNTIME_GUARD_KINDS:
-            continue
-        if g.id in step.guard_refs or (
-            g.scope == "always"
-            and (g.kind == "invariant_probe" or step.risk in g.risks)
-        ):
-            out.append(g)
-    return out
-
-
-def idle_guard(profile: Profile, step: Step) -> Guard | None:
-    """The `require_idle` guard in force for `step` (its reason/sources go into the refusal)."""
-    return next(
-        (g for g in runtime_guards(profile, step) if g.kind == "require_idle"), None
-    )
+    """The invariant guards in force for `step`: `scope: always` ones, plus the ones the step
+    lists in its preconditions. (`require_idle` is checked before EVERY step by the engine.)"""
+    return [
+        g
+        for g in profile.guards
+        if g.kind == "invariant_probe"
+        and (g.id in step.guard_refs or g.scope == "always")
+    ]
 
 
 def any_idle_guard(profile: Profile) -> Guard | None:

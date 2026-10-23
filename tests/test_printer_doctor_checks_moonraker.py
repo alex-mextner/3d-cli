@@ -4,6 +4,7 @@ disk-space, time-sync, print-stuck, webui-presence. Each has a failing and a pas
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import pytest
@@ -84,7 +85,7 @@ def test_reachable_fails_with_error_severity_and_manual_steps_when_nothing_answe
     assert (
         rec.fix is not None
         and not rec.fix.applied
-        and any("ping 127.0.0.1" in s for s in rec.fix.manual_steps)
+        and any("ping -c 3 127.0.0.1" in s for s in rec.fix.manual_steps)
     )
 
 
@@ -146,16 +147,72 @@ def test_klippy_fix_without_yes_sends_nothing_and_with_yes_restarts_the_firmware
     assert r.journal[0].before == "shutdown" and r.journal[0].after == "ready"
 
 
-@pytest.mark.parametrize("state", ["error", "disconnected"])
-def test_klippy_error_and_disconnected_restart_the_klipper_host_not_the_firmware(
-    state: str,
-) -> None:
-    moon = FakeMoonraker(server_info={"klippy_connected": False, "klippy_state": state})
+def test_klippy_error_restarts_klipper_through_the_klippy_relay() -> None:
+    moon = FakeMoonraker(
+        server_info={"klippy_connected": True, "klippy_state": "error"}
+    )
     with moon.serve():
         res, _ = check("klippy-state", moon.port, Options(fix=True, yes=True))
     assert res.status == "pass" and [w.path for w in moon.writes()] == [
         "/printer/restart"
     ]
+
+
+def test_klippy_disconnected_restarts_the_klipper_service_not_the_klippy_relay() -> (
+    None
+):
+    """With Klippy disconnected `/printer/restart` cannot work (nothing to relay to): the fix
+    restarts the host service through the machine endpoint, with the documented JSON body."""
+    moon = FakeMoonraker(
+        server_info={"klippy_connected": False, "klippy_state": "disconnected"},
+        services={"klipper": True},
+    )
+    with moon.serve():
+        res, r = check("klippy-state", moon.port, Options(fix=True, yes=True))
+    assert res.status == "pass"
+    (write,) = moon.writes()
+    assert write.path == "/machine/services/restart" and json.loads(
+        write.fields["body"]
+    ) == {"service": "klipper"}
+    assert (r.journal[0].before, r.journal[0].after) == ("disconnected", "ready")
+
+
+def test_klippy_disconnected_without_a_service_provider_fails_without_journal_or_polling() -> (
+    None
+):
+    """The restart POST is answered 400 (a Moonraker with provider `none`): that is `failed`, not
+    `applied` — no journal line for a restart that never happened, and no 45 s wait."""
+    moon = FakeMoonraker(
+        server_info={"klippy_connected": False, "klippy_state": "disconnected"}
+    )
+    with moon.serve():
+        r = rig(target(port=moon.port))
+        start = r.clock.now
+        rec = run_printer(
+            r.ctx, [CHECKS["klippy-state"]], Options(fix=True, yes=True)
+        ).records[0]
+    assert rec.fix is not None and not rec.fix.applied and rec.fix.verified is None
+    assert rec.fix.error and rec.fix.error.startswith(
+        "failed: POST /machine/services/restart: HTTP 400"
+    )
+    assert r.journal == [] and r.clock.now == start and len(moon.writes()) == 1
+    assert rec.result.status == "fail"
+
+
+@pytest.mark.parametrize("code", [401, 500, 503])
+def test_a_restart_endpoint_error_is_a_failed_fix_not_an_applied_one(code: int) -> None:
+    moon = FakeMoonraker(
+        server_info={"klippy_connected": True, "klippy_state": "shutdown"},
+        restart_error=code,
+    )
+    with moon.serve():
+        r = rig(target(port=moon.port))
+        start = r.clock.now
+        rec = run_printer(
+            r.ctx, [CHECKS["klippy-state"]], Options(fix=True, yes=True)
+        ).records[0]
+    assert rec.fix is not None and rec.fix.error and f"HTTP {code}" in rec.fix.error
+    assert not rec.fix.applied and r.journal == [] and r.clock.now == start
 
 
 @pytest.mark.parametrize("job", ["printing", "paused"])

@@ -36,6 +36,24 @@ RISKS: tuple[Risk, ...] = ("safe", "needs-yes", "manual-only")
 RANK: dict[str, int] = {s: i for i, s in enumerate(SEVERITIES)}
 
 
+def clean(text: str) -> str:
+    """`text` with control characters (terminal escape sequences, CR, NUL) shown escaped instead of
+    interpreted: summaries and steps carry strings a printer chose (component names, messages)."""
+    return "".join(c if c.isprintable() else repr(c)[1:-1] for c in text)
+
+
+COMMAND_PREFIX = "$ "
+
+
+def command(text: str) -> str:
+    """A manual step that is a real shell command (rendered with `$`); other steps are prose."""
+    return COMMAND_PREFIX + text
+
+
+def is_command(step: str) -> bool:
+    return step.startswith(COMMAND_PREFIX)
+
+
 class CannotSee(Exception):
     """The check could not look (endpoint unreachable, tool missing, not configured).
 

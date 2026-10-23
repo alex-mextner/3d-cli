@@ -28,6 +28,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
 import re
 import tarfile
 import time
@@ -118,6 +119,18 @@ def _fetch_http(
     url = ep.url(item.service, item.path)
     try:
         status, body = be.http("GET", url, timeout=item.timeout_s)
+    except ConnectionRefusedError:
+        if item.optional:  # nothing listens there (e.g. a web UI that is not installed)
+            return ItemResult(
+                item.id,
+                item.via,
+                "skipped",
+                url,
+                detail="optional: connection refused",
+            ), b""
+        return ItemResult(
+            item.id, item.via, "failed", url, detail="connection refused"
+        ), b""
     except (OSError, ValueError) as exc:
         return ItemResult(item.id, item.via, "failed", url, detail=str(exc)), b""
     if status == 404 and item.optional:
@@ -127,6 +140,16 @@ def _fetch_http(
     if status != 200:
         return ItemResult(
             item.id, item.via, "failed", url, detail=f"HTTP {status}"
+        ), b""
+    if item.expect_regex and not re.search(
+        item.expect_regex, body.decode("utf-8", "replace")
+    ):
+        return ItemResult(
+            item.id,
+            item.via,
+            "failed",
+            url,
+            detail=f"content does not match /{item.expect_regex}/",
         ), b""
     return ItemResult(item.id, item.via, "ok", url), body
 
@@ -219,9 +242,10 @@ def _fetch_tar(
 
 
 def _write_private(path: Path, data: bytes) -> None:
-    with path.open("xb") as fh:
+    """Create `path` (never overwrite, never follow a planted symlink) readable by the owner only."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "wb") as fh:
         fh.write(data)
-    path.chmod(0o600)
 
 
 def take_backup(
@@ -242,10 +266,15 @@ def take_backup(
     base = f"{_SAFE.sub('_', printer)}-{profile.id}-{moment.strftime('%Y%m%dT%H%M%SZ')}"
     directory = dest_root / base
     n = 1
-    while directory.exists():
-        n += 1
-        directory = dest_root / f"{base}-{n}"
-    directory.mkdir(mode=0o700)
+    while True:
+        try:
+            directory.mkdir(mode=0o700)
+            break
+        except (
+            FileExistsError
+        ):  # another backup of this second: take the next free name
+            n += 1
+            directory = dest_root / f"{base}-{n}"
     manifest = Manifest(
         printer, profile.id, model, state, moment.isoformat(), stamp_epoch, directory
     )

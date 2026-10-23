@@ -47,6 +47,32 @@ idle_probe:
   json_path: result.status.print_stats.state
   regex: '^(standby|complete|cancelled|error)$'
 
+# Probes used by more than one state/step; `{ref: NAME}` expands to the entry before validation.
+probes:
+  moonraker-up:
+    kind: http_get
+    title: Moonraker answers /machine/system_info
+    service: moonraker
+    path: /machine/system_info
+  firmware-config-answers:
+    kind: http_get
+    title: firmware-config /api/status lists System Information
+    service: web
+    path: /firmware-config/api/status
+    json_path: version.title
+    equals: System Information
+  # The same document as above, negated: a stock web server that answers 200 for any path (a UI
+  # fallback page) must still read as "no firmware-config", so a body that is not that JSON is absent.
+  firmware-config-absent:
+    kind: http_get
+    title: firmware-config does not answer
+    service: web
+    path: /firmware-config/api/status
+    json_path: version.title
+    equals: System Information
+    negate: true
+    absent_ok: true
+
 backups:
   - id: system-info
     description: Firmware/product info (versions, serial) to compare against after the install.
@@ -128,8 +154,8 @@ states:
     title: Snapmaker stock firmware (Klipper + Moonraker, no firmware-config page)
     detection:
       all:
-        - {kind: http_get, id: moonraker-system-info, title: Moonraker answers /machine/system_info, service: moonraker, path: /machine/system_info}
-        - {kind: http_get, id: no-firmware-config, title: firmware-config page does not answer, service: web, path: /firmware-config/api/status, negate: true}
+        - {ref: moonraker-up}
+        - {ref: firmware-config-absent}
     notes: >-
       An extended build with Advanced Mode OFF also hides /firmware-config (paxx12 firmware_config.md:
       the page exists only with Advanced Mode on), so it looks stock to read-only probes.
@@ -140,8 +166,8 @@ states:
     title: paxx12 Extended Firmware with Advanced Mode on (firmware-config answers)
     detection:
       all:
-        - {kind: http_get, id: firmware-config-status, title: firmware-config /api/status lists System Information, service: web, path: /firmware-config/api/status, json_path: version.title, equals: System Information}
-        - {kind: http_get, id: moonraker-system-info, title: Moonraker answers /machine/system_info, service: moonraker, path: /machine/system_info}
+        - {ref: firmware-config-answers}
+        - {ref: moonraker-up}
     notes: >-
       /api/status shape (version.title, items[].label/value) read from firmware-config.py handle_status
       in the paxx12 repository.
@@ -163,7 +189,7 @@ guards:
       proxy all call Moonraker without a key, so it must stay off (paxx12 issue 660: it also breaks OpenRFID's webhook).
     probe:
       - {kind: http_get, id: moonraker-config-readable, title: Moonraker answers /server/config, service: moonraker, path: /server/config}
-      - {kind: http_get, id: force-logins-off, title: Moonraker authorization.force_logins is not true, service: moonraker, path: /server/config, json_path: result.config.authorization.force_logins, regex: '(?i)^true$', negate: true}
+      - {kind: http_get, id: force-logins-off, title: Moonraker authorization.force_logins is not true, service: moonraker, path: /server/config, json_path: result.config.authorization.force_logins, regex: '(?i)^true$', negate: true, absent_ok: true}
     sources:
       - https://github.com/alex-mextner/3d-cli/blob/main/docs/printers/u1-paxx12-upgrade.md
       - https://github.com/paxx12-snapmaker-u1/SnapmakerU1-Extended-Firmware/issues/660
@@ -219,8 +245,8 @@ transitions:
           wait_s: 1800
           interval_s: 15
           probes:
-            - {kind: http_get, id: firmware-config-status, title: firmware-config /api/status lists System Information, service: web, path: /firmware-config/api/status, json_path: version.title, equals: System Information}
-            - {kind: http_get, id: moonraker-up, title: Moonraker answers again, service: moonraker, path: /machine/system_info}
+            - {ref: firmware-config-answers}
+            - {ref: moonraker-up}
         rollback:
           to: stock
           instruction: >-
@@ -252,9 +278,11 @@ transitions:
         verify:
           wait_s: 900
           interval_s: 10
+          down_probes:
+            - {ref: moonraker-up}
           probes:
-            - {kind: http_get, id: moonraker-up, title: Moonraker answers again after the reboot, service: moonraker, path: /machine/system_info}
-            - {kind: http_get, id: no-firmware-config, title: firmware-config page does not answer, service: web, path: /firmware-config/api/status, negate: true}
+            - {ref: moonraker-up}
+            - {ref: firmware-config-absent}
         rollback:
           to: extended
           instruction: >-
@@ -293,9 +321,11 @@ transitions:
         verify:
           wait_s: 1800
           interval_s: 15
+          down_probes:
+            - {ref: moonraker-up}
           probes:
-            - {kind: http_get, id: firmware-config-status, title: firmware-config answers again, service: web, path: /firmware-config/api/status, json_path: version.title, equals: System Information}
-            - {kind: http_get, id: moonraker-up, title: Moonraker answers again, service: moonraker, path: /machine/system_info}
+            - {ref: firmware-config-answers}
+            - {ref: moonraker-up}
         rollback:
           to: extended
           instruction: >-
@@ -322,8 +352,10 @@ transitions:
         verify:
           wait_s: 900
           interval_s: 10
+          down_probes:
+            - {ref: moonraker-up}
           probes:
-            - {kind: http_get, id: moonraker-up, title: Moonraker answers again after the reboot, service: moonraker, path: /machine/system_info}
+            - {ref: moonraker-up}
         rollback:
           instruction: >-
             The extended settings (camera, SpoolLink, auth ...) are cleared; re-enter them in firmware-config. Printer

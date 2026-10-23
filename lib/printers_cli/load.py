@@ -7,9 +7,11 @@ WHAT: the fleet-addressed front of `3d printops spool load|unload` (same 3d-api 
   storage location and the new one takes its place, in ONE 3d-api transaction).
 WHY: swapping a spool was `unload` + `load --replace-to` by hand, and nothing said beforehand that
   the head was marked unusable or still held another spool.
-INVARIANTS: no logic is copied from printops — a real run calls `printops.cli.spool._load/_unload`
-  with the reshaped argv; `--dry-run` only reads (GET /v1/printers/P, /v1/spools/ID,
-  /v1/printers/P/faults) and its refusals mirror the 3d-api rules named in `printops.spools.load`.
+INVARIANTS: no logic is copied from printops — a real run calls the public
+  `printops.cli.spool.run(["load"|"unload", ...])` with the reshaped argv; `--dry-run` only reads
+  (GET /v1/printers/P, /v1/spools?loaded=true, /v1/spools/ID, /v1/printers/P/faults) and its
+  refusals mirror the 3d-api rules named in `printops.spools.load`. Occupants come from the loaded
+  spools' `slot`, so toolheads and AMS slots are seen alike.
 """
 
 from __future__ import annotations
@@ -106,108 +108,138 @@ def _spool_id(raw: str, command: str) -> int:
     return int(text)
 
 
-def _slot_view(api: ApiClient, target: SlotTarget) -> dict[str, Any]:
-    printer = api.get(f"/v1/printers/{quote(target.printer, safe='')}")
-    for s in printer["slots"]:
-        if s["slot"].casefold() == target.key.casefold():
-            return {"printer": printer, "slot": s}
-    return {"printer": printer, "slot": None}
+def _printer_path(name: str, suffix: str = "") -> str:
+    return f"/v1/printers/{quote(name, safe='')}{suffix}"
 
 
-def _plan(
+def _occupants(api: ApiClient, target: SlotTarget) -> list[dict[str, Any]]:
+    """The spools bound to `target` (toolhead or AMS slot), from the loaded spools' `slot`."""
+    key = target.key.casefold()
+    return [
+        s
+        for s in api.get("/v1/spools", loaded="true")["spools"]
+        if str(s.get("slot") or "").casefold() == key
+    ]
+
+
+def _head_view(
+    api: ApiClient, target: SlotTarget
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """The printer's 3d-api view and the view of `target` in it (None for an AMS slot: only toolheads are there)."""
+    printer = api.get(_printer_path(target.printer))
+    slot = next(
+        (s for s in printer["slots"] if s["slot"].casefold() == target.key.casefold()),
+        None,
+    )
+    return printer, slot
+
+
+def _describe(spool: dict[str, Any]) -> str:
+    return f"#{spool['id']} {spool.get('name') or ''}".strip()
+
+
+def _writes_printer(p: Parsed) -> bool:
+    return "--no-printer-write" not in p.flags
+
+
+def _plan_load(
     api: ApiClient,
     target: SlotTarget,
     action: str,
-    spool_id: int | None,
+    spool_id: int,
     p: Parsed,
     replace_to: str | None,
 ) -> dict[str, Any]:
-    """What `action` would do to `target`, from GETs only: the facts and the rules that would refuse."""
-    view = _slot_view(api, target)
-    slot, printer = view["slot"], view["printer"]
-    occupants: list[dict[str, Any]] = (
-        [] if slot is None else list(slot.get("spools") or [])
-    )
+    """What `load`/`swap` would do: facts and the 3d-api rules that would refuse it, from GETs only."""
+    printer, slot = _head_view(api, target)
+    occupants = _occupants(api, target)
+    others = [o for o in occupants if o["id"] != spool_id]
+    spool = api.get(f"/v1/spools/{spool_id}")
     refusals: list[str] = []
     notes: list[str] = []
-    spool: dict[str, Any] | None = None
-    if (
-        slot is None
-    ):  # an AMS slot is not a head view of /v1/printers: the 3d-api checks it itself
-        notes.append(
-            f"{target.key} is not a toolhead of the 3d-api's fleet view: its rules are checked by the real call"
+    if spool.get("archived"):
+        refusals.append(f"spool #{spool_id} is archived")
+    if slot is not None and not slot["usable"]:
+        refusals.append(f"{target.key} is marked unusable: {slot.get('reason')}")
+    if target.head_index is not None:
+        faults = api.get(_printer_path(target.printer, "/faults"))["faults"]
+        mine = [
+            f
+            for f in faults
+            if f.get("head") == target.slot and f.get("status", "open") == "open"
+        ]
+        if mine:
+            shown = "; ".join(f"#{f['id']} {f['symptom']}" for f in mine[:3])
+            refusals.append(f"{target.key} has {len(mine)} open fault(s): {shown}")
+    if others and not replace_to:
+        refusals.append(
+            f"{target.key} already holds {', '.join(_describe(o) for o in others)}: "
+            "pass --replace-to LOCATION (or use `swap --to`)"
         )
-    if spool_id is not None:
-        spool = api.get(f"/v1/spools/{spool_id}")
-        if spool.get("archived"):
-            refusals.append(f"spool #{spool_id} is archived")
-    others = [o for o in occupants if o["spool_id"] != spool_id]
-    if action in ("load", "swap"):
-        if slot is not None and not slot["usable"]:
-            refusals.append(f"{target.key} is marked unusable: {slot.get('reason')}")
-        if slot is not None and target.head_index is not None:
-            faults = api.get(f"/v1/printers/{quote(target.printer, safe='')}/faults")[
-                "faults"
-            ]
-            mine = [f for f in faults if f.get("head") == target.slot]
-            if mine:
-                shown = "; ".join(f"#{f['id']} {f['symptom']}" for f in mine[:3])
-                refusals.append(f"{target.key} has {len(mine)} open fault(s): {shown}")
-        if others and not replace_to:
-            who = ", ".join(f"#{o['spool_id']} {o['name']}" for o in others)
-            refusals.append(
-                f"{target.key} already holds {who}: pass --replace-to LOCATION (or use `swap --to`)"
-            )
-        if (
-            spool_id is not None
-            and any(o["spool_id"] == spool_id for o in occupants)
-            and not others
-        ):
-            notes.append(
-                f"spool #{spool_id} is already bound to {target.key}: the load only re-writes the printer head"
-            )
-    elif not occupants and slot is not None:
-        refusals.append(f"{target.key} holds no spool")
-    steps: list[str] = []
-    if action == "unload":
-        steps += [
-            f"unload spool #{o['spool_id']} {o['name']} from {target.key}"
-            + (f" to {p.opts['--to']}" if "--to" in p.opts else "")
-            for o in occupants
-        ]
-        if "--gross" in p.opts:
-            steps.insert(0, f"weigh it first: gross {p.opts['--gross']} g")
-    else:
-        steps += [
-            f"move spool #{o['spool_id']} {o['name']} out of {target.key} to {replace_to}"
-            for o in others
-            if replace_to
-        ]
-        steps.append(f"bind spool #{spool_id} to {target.key}")
-    writes_printer = "--no-printer-write" not in p.flags
-    adapter, n_slots = printer.get("adapter"), len(printer["slots"])
-    if writes_printer and adapter == "moonraker":
-        if action != "unload" and target.head_index is not None:
+    if not others and any(o["id"] == spool_id for o in occupants):
+        notes.append(
+            f"spool #{spool_id} is already bound to {target.key}: the load only re-writes the printer head"
+        )
+    steps = [
+        f"move spool {_describe(o)} out of {target.key} to {replace_to}"
+        for o in others
+        if replace_to
+    ]
+    steps.append(f"bind spool #{spool_id} to {target.key}")
+    if _writes_printer(p) and printer.get("adapter") == "moonraker":
+        if target.head_index is not None:
             steps.append(
                 f"write the printer head {target.slot} to show the spool (when the firmware supports it; "
                 "refused while the printer prints)"
             )
-        if n_slots == 1:
-            steps.append(
-                "set Moonraker's active spool"
-                + (" (cleared when it was this spool)" if action == "unload" else "")
-            )
-    return {
-        "dry_run": True,
-        "action": action,
-        "slot": target.key,
-        "spool": None
+        if len(printer["slots"]) == 1:
+            steps.append("set Moonraker's active spool")
+    return _plan_body(action, target, printer, spool, occupants, steps, notes, refusals)
+
+
+def _plan_unload(api: ApiClient, target: SlotTarget, p: Parsed) -> dict[str, Any]:
+    """What `unload` would do, from GETs only."""
+    printer, _ = _head_view(api, target)
+    occupants = _occupants(api, target)
+    refusals = [] if occupants else [f"{target.key} holds no spool"]
+    where = f" to {p.opts['--to']}" if "--to" in p.opts else ""
+    steps = [f"unload spool {_describe(o)} from {target.key}{where}" for o in occupants]
+    if "--gross" in p.opts and occupants:
+        steps.insert(0, f"weigh it first: gross {p.opts['--gross']} g")
+    if (
+        _writes_printer(p)
+        and printer.get("adapter") == "moonraker"
+        and len(printer["slots"]) == 1
+        and occupants
+    ):
+        steps.append("clear Moonraker's active spool when it is this spool")
+    return _plan_body("unload", target, printer, None, occupants, steps, [], refusals)
+
+
+def _plan_body(
+    action: str,
+    target: SlotTarget,
+    printer: dict[str, Any],
+    spool: dict[str, Any] | None,
+    occupants: list[dict[str, Any]],
+    steps: list[str],
+    notes: list[str],
+    refusals: list[str],
+) -> dict[str, Any]:
+    shown = (
+        None
         if spool is None
         else {
             k: spool.get(k)
             for k in ("id", "vendor", "material", "name", "color_hex", "remaining_text")
-        },
-        "occupants": occupants,
+        }
+    )
+    return {
+        "dry_run": True,
+        "action": action,
+        "slot": target.key,
+        "spool": shown,
+        "occupants": [{"spool_id": o["id"], "name": o.get("name")} for o in occupants],
         "steps": steps,
         "notes": notes,
         "refusals": refusals,
@@ -232,32 +264,32 @@ def _print_plan(plan: dict[str, Any], as_json: bool) -> None:
         print("  no refusing rule found")
 
 
-def _dry_run(
-    api: ApiClient,
-    target: SlotTarget,
-    action: str,
-    spool_id: int | None,
-    p: Parsed,
-    replace_to: str | None,
-) -> int:
-    with api_errors(f"{action} --dry-run"):
-        plan = _plan(api, target, action, spool_id, p, replace_to)
+def _finish_dry_run(plan: dict[str, Any], target: SlotTarget, p: Parsed) -> int:
     _print_plan(plan, "--json" in p.flags)
     if plan["refusals"]:
         raise GateFailure(
-            f"{action} {target.key} would be refused: {plan['refusals'][0]}",
-            command=f"printers {action}",
+            f"{plan['action']} {target.key} would be refused: {plan['refusals'][0]}",
+            command=f"printers {plan['action']}",
             silent=True,
         )
     return 0
 
 
-def _forward_flags(p: Parsed, flags: tuple[str, ...]) -> list[str]:
-    out = [f for f in flags if f in p.flags]
-    for opt in ("--api", "--token"):
+def _delegate(
+    verb: str,
+    positional: list[str],
+    p: Parsed,
+    flags: tuple[str, ...],
+    values: tuple[str, ...],
+) -> int:
+    """Run `3d printops spool VERB` with the options this sub parsed (the printops code is the one real writer)."""
+    from printops.cli.spool import run as spool
+
+    rest = [f for f in flags if f in p.flags]
+    for opt in ("--api", "--token", *values):
         if opt in p.opts:
-            out += [opt, p.opts[opt]]
-    return out
+            rest += [opt, p.opts[opt]]
+    return spool([verb, *positional, *rest])
 
 
 def run_load(argv: list[str]) -> int:
@@ -273,15 +305,24 @@ def run_load(argv: list[str]) -> int:
     )
     spool_id = _spool_id(p.pos[0], "load")
     target = resolve_slot(p.pos[1], "load")
-    api = client(p, "load")
     if "--dry-run" in p.flags:
-        return _dry_run(api, target, "load", spool_id, p, p.opts.get("--replace-to"))
-    from printops.cli.spool import run as spool
-
-    rest = _forward_flags(p, ("--json", "--no-printer-write", "--force-official"))
-    if "--replace-to" in p.opts:
-        rest += ["--replace-to", p.opts["--replace-to"]]
-    return spool(["load", str(spool_id), target.key, *rest])
+        with api_errors("load --dry-run"):
+            plan = _plan_load(
+                client(p, "load"),
+                target,
+                "load",
+                spool_id,
+                p,
+                p.opts.get("--replace-to"),
+            )
+        return _finish_dry_run(plan, target, p)
+    return _delegate(
+        "load",
+        [str(spool_id), target.key],
+        p,
+        ("--json", "--no-printer-write", "--force-official"),
+        ("--replace-to",),
+    )
 
 
 def run_unload(argv: list[str]) -> int:
@@ -296,16 +337,13 @@ def run_unload(argv: list[str]) -> int:
         n_pos=1,
     )
     target = resolve_slot(p.pos[0], "unload")
-    api = client(p, "unload")
     if "--dry-run" in p.flags:
-        return _dry_run(api, target, "unload", None, p, None)
-    from printops.cli.spool import run as spool
-
-    rest = _forward_flags(p, ("--json", "--no-printer-write"))
-    for opt in ("--to", "--gross"):
-        if opt in p.opts:
-            rest += [opt, p.opts[opt]]
-    return spool(["unload", target.key, *rest])
+        with api_errors("unload --dry-run"):
+            plan = _plan_unload(client(p, "unload"), target, p)
+        return _finish_dry_run(plan, target, p)
+    return _delegate(
+        "unload", [target.key], p, ("--json", "--no-printer-write"), ("--to", "--gross")
+    )
 
 
 def run_swap(argv: list[str]) -> int:
@@ -332,25 +370,19 @@ def run_swap(argv: list[str]) -> int:
     target = resolve_slot(p.pos[1], "swap")
     api = client(p, "swap")
     if "--dry-run" in p.flags:
-        return _dry_run(api, target, "swap", spool_id, p, p.opts["--to"])
+        with api_errors("swap --dry-run"):
+            plan = _plan_load(api, target, "swap", spool_id, p, p.opts["--to"])
+        return _finish_dry_run(plan, target, p)
     with api_errors("swap"):
-        occupied = bool(
-            [
-                o
-                for o in (_slot_view(api, target)["slot"] or {}).get("spools") or []
-                if o["spool_id"] != spool_id
-            ]
-        )
-    if not occupied and "--json" not in p.flags:
+        empty = not [o for o in _occupants(api, target) if o["id"] != spool_id]
+    if empty and "--json" not in p.flags:
         print(
             f"note: {target.key} holds no other spool: this is a plain load", flush=True
         )
-    from printops.cli.spool import run as spool
-
-    rest = _forward_flags(p, ("--json", "--no-printer-write", "--force-official"))
-    if occupied:
-        rest += ["--replace-to", p.opts["--to"]]
-    return spool(["load", str(spool_id), target.key, *rest])
+    # --replace-to is harmless on an empty slot (the 3d-api only reads it when there is an occupant)
+    p.opts["--replace-to"] = p.opts["--to"]
+    return _delegate("load", [str(spool_id), target.key], p, ("--json", "--no-printer-write", "--force-official"),
+                     ("--replace-to",))
 
 
 SUBS = (

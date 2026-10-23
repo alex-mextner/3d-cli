@@ -65,7 +65,6 @@ READ_ONLY_COMMANDS: Final = frozenset(
     {
         "cat",
         "test",
-        "[",
         "ls",
         "grep",
         "head",
@@ -77,7 +76,7 @@ READ_ONLY_COMMANDS: Final = frozenset(
         "true",
     }
 )
-_UNSAFE_SHELL = re.compile(r"[>;&`|]|\$\(|<\(|\b(?:rm|mv|dd|reboot|poweroff|tee)\b")
+_PROBE_CHAR = re.compile(r"[A-Za-z0-9 _./:=@%+,'\"^-]")
 _ID = re.compile(r"[a-z0-9][a-z0-9._-]*")
 _SERVICE = re.compile(r"[a-z][a-z0-9_]*")
 DEFAULT_SSH_SERVICE: Final = "ssh"
@@ -121,6 +120,9 @@ class Probe:
     id: str
     title: str
     negate: bool = False
+    # For a negated probe: a body that lacks `json_path` (or is not JSON) means the thing is
+    # ABSENT. Without it such an answer is "could not read" and the probe fails closed.
+    absent_ok: bool = False
     service: str = ""
     path: str = ""
     expect_status: tuple[int, ...] = (200,)
@@ -128,13 +130,8 @@ class Probe:
     equals: str | None = None
     regex: str | None = None
     command: str = ""
-    value: str = ""
     prompt: str = ""
     timeout: float = 5.0
-
-    @property
-    def uses_ssh(self) -> bool:
-        return self.kind in SSH_PROBE_KINDS
 
 
 @dataclass(frozen=True)
@@ -182,6 +179,11 @@ class Verify:
     probes: tuple[Probe, ...]
     wait_s: float = 0.0  # poll up to this long (reboots take minutes)
     interval_s: float = 5.0
+    # Evidence the action really started: these must STOP holding (the printer went down to
+    # reboot) within `down_wait_s` before `probes` are polled. Without it a verification that
+    # already holds before the action would pass instantly.
+    down_probes: tuple[Probe, ...] = ()
+    down_wait_s: float = 300.0
 
 
 @dataclass(frozen=True)
@@ -257,10 +259,8 @@ class Guard:
     pattern: str = ""
     requires_step: str = ""
     probes: tuple[Probe, ...] = ()
-    risks: tuple[str, ...] = ("medium", "high")
-    scope: str = (
-        "always"  # always | referenced (only where a step lists it in preconditions)
-    )
+    # always | referenced (only where a step lists it in preconditions)
+    scope: str = "always"
 
 
 @dataclass(frozen=True)
@@ -473,6 +473,7 @@ _PROBE_KEYS = (
     "id",
     "title",
     "negate",
+    "absent_ok",
     "service",
     "path",
     "expect_status",
@@ -480,25 +481,33 @@ _PROBE_KEYS = (
     "equals",
     "regex",
     "command",
-    "value",
     "prompt",
     "timeout",
 )
 
 
 def read_only_command(command: str) -> str | None:
-    """Why `command` is not a read-only probe command, or None when it is."""
-    words = command.split()
-    if not words:
+    """Why `command` is not a read-only probe command, or None when it is.
+
+    A probe command goes to `sh -s`, so ANY character that chains, redirects, substitutes or
+    quotes in a surprising way is refused: only letters, digits, spaces and `_ . / : = @ % + , ' " ^ -`
+    are allowed (newline included in the refusal: it would start a second command), and the first
+    word must be an allow-listed reading command."""
+    if not command.strip():
         return "is empty"
-    if words[0] not in READ_ONLY_COMMANDS:
+    odd = next((c for c in command if not _PROBE_CHAR.fullmatch(c)), None)
+    if odd is not None:
+        shown = "a newline" if odd in "\n\r" else repr(odd)
         return (
-            f"starts with {words[0]!r}; a probe may only start with one of: "
+            f"contains {shown}, which a read-only probe may not use "
+            "(no chaining, redirects, pipes, substitution or multi-line commands)"
+        )
+    word = command.split()[0]
+    if word not in READ_ONLY_COMMANDS:
+        return (
+            f"starts with {word!r}; a probe may only start with one of: "
             + ", ".join(sorted(READ_ONLY_COMMANDS))
         )
-    bad = _UNSAFE_SHELL.search(command)
-    if bad:
-        return f"contains {bad.group(0)!r}: a probe must not redirect, chain, pipe, substitute or modify"
     return None
 
 
@@ -523,11 +532,11 @@ def _probe(
         return None
     if not kind:
         return None
-    probe_id = str(data.get("id") or default_id)
-    title = str(data.get("title") or probe_id)
-    service = str(data.get("service") or "")
-    path = str(data.get("path") or "")
-    command = str(data.get("command") or "")
+    probe_id = _str(data, "id", where, bad, required=False) or default_id
+    title = _str(data, "title", where, bad, required=False) or probe_id
+    service = _str(data, "service", where, bad, required=False)
+    path = _str(data, "path", where, bad, required=False)
+    command = _str(data, "command", where, bad, required=False)
     regex = data.get("regex")
     if regex is not None and not isinstance(regex, str):
         bad.add(f"{where}.regex", "must be a string")
@@ -568,10 +577,11 @@ def _probe(
         id=probe_id,
         title=title,
         negate=_bool(data, "negate", where, bad, default=False),
+        absent_ok=_bool(data, "absent_ok", where, bad, default=False),
         service=service,
         path=path,
         expect_status=_statuses(data, where, bad),
-        json_path=str(data.get("json_path") or ""),
+        json_path=_str(data, "json_path", where, bad, required=False),
         equals=None
         if equals is None
         else str(equals).lower()
@@ -579,8 +589,7 @@ def _probe(
         else str(equals),
         regex=regex,
         command=command,
-        value=str(data.get("value") or ""),
-        prompt=str(data.get("prompt") or ""),
+        prompt=_str(data, "prompt", where, bad, required=False),
         timeout=_number(data, "timeout", where, bad, 5.0),
     )
 
@@ -643,11 +652,26 @@ def _verify(
     ssh: bool,
     step_id: str,
 ) -> Verify:
-    wait, interval = 0.0, 5.0
+    wait, interval, down_wait = 0.0, 5.0, 300.0
+    down: tuple[Probe, ...] = ()
     if isinstance(raw, dict):
-        _unknown(raw, ("probes", "wait_s", "interval_s"), where, bad)
+        _unknown(
+            raw,
+            ("probes", "wait_s", "interval_s", "down_probes", "down_wait_s"),
+            where,
+            bad,
+        )
         wait = _number(raw, "wait_s", where, bad, 0.0)
         interval = max(0.01, _number(raw, "interval_s", where, bad, 5.0))
+        down_wait = _number(raw, "down_wait_s", where, bad, 300.0)
+        down = _probes(
+            raw.get("down_probes"),
+            f"{where}.down_probes",
+            bad,
+            services,
+            ssh,
+            f"{step_id}.down",
+        )
         probes = _probes(
             raw.get("probes"),
             f"{where}.probes",
@@ -660,7 +684,7 @@ def _verify(
         probes = _probes(raw, where, bad, services, ssh, f"{step_id}.verify")
     if not probes:
         bad.add(where, "is required: every step needs at least one verification probe")
-    return Verify(probes, wait, interval)
+    return Verify(probes, wait, interval, down, down_wait)
 
 
 def _upload(
@@ -789,8 +813,8 @@ def _step(
             f"must be one of {', '.join(RISKS)}, got {data.get('risk')!r}",
         )
     automatable = _bool(data, "automatable", where, bad, default=False)
-    command = str(data.get("command") or "")
-    instruction = str(data.get("instruction") or "")
+    command = _str(data, "command", where, bad, required=False)
+    instruction = _str(data, "instruction", where, bad, required=False)
     if kind == "manual":
         if automatable:
             bad.add(f"{where}.automatable", "a manual step cannot be automatable")
@@ -805,6 +829,14 @@ def _step(
         bad.add(
             f"{where}.command",
             "ssh_command is one line; use ssh_script for a multi-line script",
+        )
+    if (
+        kind in ("ssh_script", "ssh_command", "http_upload", "http_post")
+        and not automatable
+    ):
+        bad.add(
+            f"{where}.automatable",
+            f"a {kind} step must be automatable: a step 3d cannot run is a `manual` step",
         )
     upload = (
         _upload(data.get("upload"), f"{where}.upload", bad, services)
@@ -879,7 +911,7 @@ def _step(
         post=post,
         rollback=rollback,
         sources=_urls(data, "sources", where, bad, required=False),
-        notes=str(data.get("notes") or ""),
+        notes=_str(data, "notes", where, bad, required=False),
         timeout_s=_number(data, "timeout_s", where, bad, 300.0),
     )
 
@@ -919,8 +951,8 @@ def _backup(
         bad.add(
             f"{where}.via", f"unknown via {via!r}; accepted: {', '.join(BACKUP_VIA)}"
         )
-    service = str(data.get("service") or "")
-    path = str(data.get("path") or "")
+    service = _str(data, "service", where, bad, required=False)
+    path = _str(data, "path", where, bad, required=False)
     paths = _strings(data, "paths", where, bad)
     if via == "http_get":
         if service not in services:
@@ -979,7 +1011,6 @@ def _guard(
             "pattern",
             "requires_step",
             "probe",
-            "risks",
             "scope",
         ),
         where,
@@ -1037,12 +1068,6 @@ def _guard(
         bad.add(where, "step_requires_step needs `step` and `requires_step`")
     if kind == "invariant_probe" and not probes:
         bad.add(f"{where}.probe", "is required for invariant_probe")
-    risks = _strings(data, "risks", where, bad) or ("medium", "high")
-    for r in risks:
-        if r not in RISKS:
-            bad.add(
-                f"{where}.risks", f"unknown risk {r!r}; accepted: {', '.join(RISKS)}"
-            )
     scope = str(data.get("scope") or "always")
     if scope not in ("always", "referenced"):
         bad.add(f"{where}.scope", "must be always or referenced")
@@ -1058,7 +1083,6 @@ def _guard(
         pattern=pattern,
         requires_step=requires_step,
         probes=probes,
-        risks=risks,
         scope=scope,
     )
 
@@ -1099,10 +1123,75 @@ def parse_profile(data: object, where: str) -> Profile:
     return profile
 
 
+_SNIPPET = re.compile(r"\{\{snippet\.([A-Za-z0-9_-]+)\}\}")
+
+
+def _expand_library(
+    top: dict[str, object], where: str, bad: _Problems
+) -> dict[str, object]:
+    """Resolve the profile's reuse mechanisms BEFORE validation, so everything downstream sees plain
+    data: `probes: {name: {...}}` + `{ref: name, <overrides>}` anywhere a probe is expected, and
+    `snippets: {name: "text"}` + `{{snippet.name}}` inside any string (a shared script header)."""
+    library: dict[str, dict[str, object]] = {}
+    snippets: dict[str, str] = {}
+    if top.get("probes") is not None:
+        raw = _mapping(top["probes"], f"{where}.probes", bad) or {}
+        for name, spec in raw.items():
+            body = _mapping(spec, f"{where}.probes.{name}", bad)
+            if body is not None:
+                library[name] = body
+    if top.get("snippets") is not None:
+        raw = _mapping(top["snippets"], f"{where}.snippets", bad) or {}
+        for name, text in raw.items():
+            if isinstance(text, str) and text.strip():
+                snippets[name] = text.rstrip("\n")
+            else:
+                bad.add(f"{where}.snippets.{name}", "must be a non-empty string")
+
+    def sub(match: re.Match[str], path: str) -> str:
+        name = match.group(1)
+        if name not in snippets:
+            bad.add(
+                path,
+                f"unknown snippet {name!r}; defined: {', '.join(sorted(snippets)) or 'none'}",
+            )
+            return match.group(0)
+        return snippets[name]
+
+    def walk(node: object, path: str) -> object:
+        if isinstance(node, dict):
+            if "ref" in node:
+                name = node["ref"]
+                base = library.get(name) if isinstance(name, str) else None
+                if base is None:
+                    bad.add(
+                        path,
+                        f"unknown probe ref {name!r}; library: {', '.join(sorted(library)) or 'none'}",
+                    )
+                    return node
+                over = {
+                    k: walk(v, f"{path}.{k}") for k, v in node.items() if k != "ref"
+                }
+                return {"id": name, **base, **over}
+            return {k: walk(v, f"{path}.{k}") for k, v in node.items()}
+        if isinstance(node, list):
+            return [walk(v, f"{path}[{i}]") for i, v in enumerate(node)]
+        if isinstance(node, str) and "{{snippet." in node:
+            return _SNIPPET.sub(lambda m: sub(m, path), node)
+        return node
+
+    return {
+        k: walk(v, f"{where}.{k}")
+        for k, v in top.items()
+        if k not in ("probes", "snippets")
+    }
+
+
 def _parse(data: object, where: str, bad: _Problems) -> Profile | None:
     top = _mapping(data, where, bad)
     if top is None:
         return None
+    top = _expand_library(top, where, bad)
     _unknown(top, _TOP_KEYS, where, bad)
     profile_id = _str(top, "id", where, bad)
     if profile_id and not _ID.fullmatch(profile_id):

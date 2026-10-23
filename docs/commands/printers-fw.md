@@ -15,7 +15,7 @@ possible**) get the documented LAN Only / Developer mode / downgrade paths as ma
 
 ```
 3d printers fw status [PRINTER|--all] [--json] [--no-live] [--no-ssh] [--verbose]
-3d printers fw plan PRINTER --to STATE [--from STATE] [--also STEP_ID ...] [--json]
+3d printers fw plan PRINTER --to STATE [--from STATE] [--also STEP_ID ...] [--no-ssh] [--json]
 3d printers fw backup PRINTER [--dest DIR] [--no-ssh] [--json]
 3d printers fw apply PRINTER --to STATE [--yes] [--confirm NAME] [--backup-dir DIR] [--backup-max-age AGE]
                      [--also STEP_ID ...] [--file [STEP_ID=]PATH ...] [--no-ssh] [--json]
@@ -50,6 +50,7 @@ target. **It never executes anything**; with `--from` it does not even contact t
 | `--to STATE` | target state (`3d printers fw profiles` lists them) | `3d printers fw plan myprinter --to extended` |
 | `--from STATE` | assume this state instead of detecting; the only way to plan for an offline printer | `3d printers fw plan myprinter --from stock --to developer-mode` |
 | `--also ID` | add an optional step of a transition on the path (repeatable); a guard-forbidden id is refused with its reason | `3d printers fw plan myprinter --to klipper-ready --also install-gcode-shell-command` |
+| `--no-ssh` | skip ssh probes while detecting the state | `3d printers fw plan myprinter --to extended --no-ssh` |
 | `--json` | machine-readable (`steps[]`, `violations[]`, `detected`) | `3d printers fw plan myprinter --to extended --json` |
 
 Exit codes: 0 plan printed (an empty plan = already there); 1 the target is unreachable from the state or a
@@ -60,13 +61,14 @@ guard refuses an `--also`; 2 unknown state / bad flag / offline printer without 
 Read-only pull of the profile's backup items that apply in the printer's state into
 `DIR/<printer>-<profile>-<UTC>/` (directory 0700, files 0600): the files, a `SHA256SUMS` and a
 `manifest.json` — profile id, printer name, model, state, creation time and per item the source, file, size,
-SHA-256 and status (`ok`, `failed`, `missing` for an absent optional item, `manual`, `skipped`). Exit 1 when an item
+SHA-256 and status (`ok`, `failed`, `missing` for an absent optional item (HTTP 404 / no such file), `skipped` for an item that
+does not apply in the printer's state or an optional HTTP item whose port refuses the connection, `manual`). Exit 1 when an item
 failed: `apply` will not accept that backup.
 
 | Flag | Meaning | Example |
 |---|---|---|
 | `--dest DIR` | where to write (default `~/.local/share/3d-cli/firmware-backups`) | `3d printers fw backup myprinter --dest ~/fw-backups` |
-| `--no-ssh` | take only the HTTP items | `3d printers fw backup myprinter --no-ssh` |
+| `--no-ssh` | take only the HTTP items (ssh items then fail the backup: it would not be accepted) | `3d printers fw backup myprinter --no-ssh` |
 | `--json` | the manifest as JSON | `3d printers fw backup myprinter --json` |
 
 ## `apply`
@@ -86,11 +88,16 @@ The gates, all machine-enforced (each has a failing and a passing test):
 | guards | a profile guard violation (forbidden `--also`, missing hardening step, forbidden command) quotes its reason and source | 1 |
 | backup | a FRESH backup of this printer: manifest younger than 24 h (`--backup-max-age`), no failed item, files intact, holding the first step's backup ids | 1 |
 | idle | adapter status, else the profile's idle probe; printing / paused / busy / unreadable is refused | 1 |
-| per step | before: idle again, backup ids present, `skip_if`, preconditions, invariants; after: the verification probe (polled for reboots) and the invariants — a failure STOPS, prints the step's rollback | 1 |
+| per step | before: idle again, backup ids present, `skip_if`, preconditions, invariants; after: the verification probe (polled for reboots; a reboot step must first be SEEN going down, see `down_probes`) and the invariants — a failure STOPS, prints the step's rollback. A connection dropped during an upload/POST counts only for a step that expects the reboot | 1 |
 
 Manual steps: interactive runs wait for Enter and re-check the probe; scripts stop at the first pending manual
 step with `NEXT: do the step, then re-run the same command` (exit 1). The state is re-detected on every run and a
 step whose verification already holds is skipped, so `apply` is resumable.
+
+Resuming never skips a security step: a profile makes the hardening part of the target state's DETECTION (the K1's
+`klipper-ready` needs Moonraker locked down: `trusted_clients` narrowed, proxy headers off, nginx denying other
+hosts), so a K1 whose Moonraker came up but still trusts the whole LAN reads as `moonraker-installed` and a re-run
+of the same command stops at the lock-down step instead of reporting "nothing to do".
 
 | Flag | Meaning | Example |
 |---|---|---|
@@ -101,8 +108,8 @@ step whose verification already holds is skipped, so `apply` is resumable.
 | `--backup-max-age AGE` | newest allowed backup age: `24h` (default), `90m`, `2d`; a bare number is hours | `3d printers fw apply myprinter --to klipper-ready --backup-max-age 6h` |
 | `--also ID` | optional step (repeatable) | `3d printers fw apply myprinter --to klipper-ready --also install-usb-camera` |
 | `--file [ID=]PATH` | the firmware file an upload step sends; a bare `PATH` when the plan has one upload step | `3d printers fw apply myprinter --to extended --file ~/fw/update.bin` |
-| `--no-ssh` | do not use ssh probes (steps that need ssh fail their verification) | `3d printers fw apply myprinter --to extended --no-ssh` |
-| `--json` | machine-readable event list (`events[]` with `kind`, `message` and data) | `3d printers fw apply myprinter --to extended --json` |
+| `--no-ssh` | never use ssh: ssh probes are skipped, and a plan containing an `ssh_script` / `ssh_command` step is "not ready" in the dry run and REFUSED (exit 1, before anything runs) with `--yes` | `3d printers fw apply myprinter --to extended --no-ssh` |
+| `--json` | machine-readable event list (`events[]` with `kind`, `message` and data); every error is one `{"result": "error", "exit_code": N, "error": "...", "events": [...]}` document, exit code kept | `3d printers fw apply myprinter --to extended --json` |
 
 An upload file is checked before anything runs (suffix, minimum size, SHA-256 printed and compared with the
 profile's known list; an unknown hash is a warning that tells you to compare it with the release notes).
@@ -127,7 +134,8 @@ ssh runs through a command runner (`ssh -o BatchMode=yes`: key or agent only). 3
 a profile's `ssh.credentials` only documents the vendor default (for example the public root password a vendor
 shows on the screen) so you can log in once by hand, install your key and change it. Connect once by hand so the
 printer's host key is in `known_hosts`. `THREED_FW_SERVICE_PORTS=name=PORT[,name=PORT]` redirects a profile's
-named services (for a port-forward).
+named services (for a port-forward); a name that is a service of no profile, or a port that is not 1-65535, is a
+usage error.
 
 ## Safety notes
 

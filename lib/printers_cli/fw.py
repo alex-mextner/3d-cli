@@ -23,7 +23,6 @@ INVARIANTS: thin: argv parsing, rendering, exit codes (0 ok / dry run, 1 refused
 
 from __future__ import annotations
 
-import json
 import re
 import sys
 from collections.abc import Mapping
@@ -33,12 +32,13 @@ from typing import TYPE_CHECKING
 from errors import GateFailure, InvalidArgument, ThreeDError, UsageError
 from printers_cli import Sub
 
+from printers_cli._common import emit_json, parse, wants_help
+
 if TYPE_CHECKING:
     from printer_fw.engine import Context, EventLog
     from printer_fw.probes import Backends
     from printer_fw.profiles import Profile
     from printer_fw.target import Target
-from printers_cli._common import emit_json, parse, wants_help
 
 USAGE = """3d printers fw <status|plan|backup|apply|profiles> ...   (alias: 3d printers firmware ...)
   Firmware / root / Klipper-unlock tool, driven by vendor profiles (lib/data/firmware/*.yaml)
@@ -52,13 +52,14 @@ USAGE = """3d printers fw <status|plan|backup|apply|profiles> ...   (alias: 3d p
         --no-ssh      skip ssh/banner probes (they can take ~30 s on slow SSH servers):
                       3d printers fw status myprinter --no-ssh
         --verbose     show every probe and its evidence:  3d printers fw status myprinter --verbose
-  plan PRINTER --to STATE [--from STATE] [--also STEP_ID ...] [--json]
+  plan PRINTER --to STATE [--from STATE] [--also STEP_ID ...] [--no-ssh] [--json]
       print the ordered plan (steps, preconditions, backups, risks, rollback, sources). NEVER executes.
         --to STATE    target state (see `fw profiles`):  3d printers fw plan myprinter --to extended
         --from STATE  assume this state instead of detecting (the only way to plan for an offline
                       printer; contacts nothing):  3d printers fw plan myprinter --from stock --to developer-mode
         --also ID     add an optional step of a transition on the path (repeatable):
                       3d printers fw plan myprinter --to klipper-ready --also install-gcode-shell-command
+        --no-ssh      skip ssh probes while detecting:  3d printers fw plan myprinter --to extended --no-ssh
         --json        machine-readable:  3d printers fw plan myprinter --to extended --json
   backup PRINTER [--dest DIR] [--no-ssh] [--json]
       read-only pull of the files the runbook lists into DIR/<printer>-<profile>-<UTC>/ with a
@@ -73,6 +74,7 @@ USAGE = """3d printers fw <status|plan|backup|apply|profiles> ...   (alias: 3d p
       `automatable` execute (HTTP upload of the firmware file you supply, documented ssh scripts);
       manual steps are printed, then verified by their probe (interactive: after Enter; otherwise
       the run stops with `NEXT: do the step, then re-run the same command` and resumes on re-run).
+      A step that reboots the printer is only verified after the printer was SEEN going down.
       REFUSES (exit 1) without a fresh backup, while the printer prints/pauses/is busy/unreadable,
       for an offline fleet printer, for an unreachable target or a guard violation; a wrong or
       missing --confirm is exit 2.
@@ -86,8 +88,10 @@ USAGE = """3d printers fw <status|plan|backup|apply|profiles> ...   (alias: 3d p
                       3d printers fw apply myprinter --to klipper-ready --also install-usb-camera
         --file [ID=]PATH   the firmware file an upload step sends (bare PATH when the plan has one
                       upload step):  3d printers fw apply myprinter --to extended --file ~/fw/update.bin
-        --no-ssh      do not use ssh probes (steps that need ssh will fail verification)
-        --json        machine-readable event list:  3d printers fw apply myprinter --to extended --json
+        --no-ssh      never use ssh: probes that need it are skipped and a plan with an ssh step is
+                      refused (dry run: "not ready"):  3d printers fw apply myprinter --to extended --no-ssh
+        --json        machine-readable event list, errors included as {"result": "error", ...}:
+                      3d printers fw apply myprinter --to extended --json
   profiles [--json]
       list the vendor profiles: vendor, models matched, states, transitions, sources.
         --json        machine-readable:  3d printers fw profiles --json
@@ -95,11 +99,13 @@ USAGE = """3d printers fw <status|plan|backup|apply|profiles> ...   (alias: 3d p
   Exit codes: 0 ok / dry run / nothing to do; 1 refused for safety, verification failed or a manual
   step is pending; 2 usage / invalid argument; 127 ssh binary missing.
   ssh uses key authentication only (BatchMode); 3d stores no passwords. Ports of the profile's
-  services can be redirected with THREED_FW_SERVICE_PORTS=name=PORT[,name=PORT] (port-forwards).
+  services can be redirected with THREED_FW_SERVICE_PORTS=name=PORT[,name=PORT] (port-forwards;
+  a name that is no service of any profile is refused).
 """
 
 _AGE = re.compile(r"(\d+(?:\.\d+)?)([smhd]?)")
 _UNITS = {"s": 1.0, "m": 60.0, "h": 3600.0, "d": 86400.0, "": 3600.0}
+_STEP_ID = re.compile(r"[a-z0-9][a-z0-9._-]*")  # same shape as profiles._ID
 
 
 def _age_seconds(text: str) -> float:
@@ -174,7 +180,12 @@ def _profile_for(target: Target, profiles: Mapping[str, Profile]) -> Profile:
 def _status(argv: list[str]) -> int:
     from printer_fw import engine, render
     from printer_fw.profiles import load_profiles, match_profile
-    from printer_fw.target import all_targets, endpoint, resolve_target
+    from printer_fw.target import (
+        all_targets,
+        endpoint,
+        resolve_target,
+        validate_port_overrides,
+    )
 
     p = parse(
         argv,
@@ -190,9 +201,13 @@ def _status(argv: list[str]) -> int:
         raise UsageError(
             "`fw status` needs a PRINTER or --all",
             command="printers fw status",
-            remediation=["3d printers fw status myprinter", "3d printers fw status --all"],
+            remediation=[
+                "3d printers fw status myprinter",
+                "3d printers fw status --all",
+            ],
         )
     profiles = load_profiles()
+    validate_port_overrides(profiles.values())
     targets = (
         all_targets() if "--all" in p.flags else [resolve_target(p.pos[0], "fw status")]
     )
@@ -219,14 +234,16 @@ def _status(argv: list[str]) -> int:
 
 
 def _context(
-    printer: str, command: str, use_ssh: bool, interactive: bool, log: EventLog
+    printer: str, command: str, *, use_ssh: bool, interactive: bool, log: EventLog
 ) -> Context:
     from printer_fw.engine import Context
     from printer_fw.profiles import load_profiles
-    from printer_fw.target import endpoint, resolve_target
+    from printer_fw.target import endpoint, resolve_target, validate_port_overrides
 
+    profiles = load_profiles()
+    validate_port_overrides(profiles.values())
     target = resolve_target(printer, command)
-    profile = _profile_for(target, load_profiles())
+    profile = _profile_for(target, profiles)
     ask = input if interactive else None
     return Context(
         profile,
@@ -256,7 +273,13 @@ def _plan(argv: list[str]) -> int:
             command="printers fw plan",
             remediation=["3d printers fw plan myprinter --to extended"],
         )
-    ctx = _context(p.pos[0], "fw plan", "--no-ssh" not in p.flags, False, EventLog())
+    ctx = _context(
+        p.pos[0],
+        "fw plan",
+        use_ssh="--no-ssh" not in p.flags,
+        interactive=False,
+        log=EventLog(),
+    )
     report = plan_for(ctx, p.opts["--to"], tuple(also), p.opts.get("--from"))
     if "--json" in p.flags:
         out = render.plan_json(report.plan)
@@ -286,7 +309,13 @@ def _backup(argv: list[str]) -> int:
     p = parse(
         argv, "fw backup", values={"--dest"}, flags={"--json", "--no-ssh"}, n_pos=1
     )
-    ctx = _context(p.pos[0], "fw backup", "--no-ssh" not in p.flags, False, EventLog())
+    ctx = _context(
+        p.pos[0],
+        "fw backup",
+        use_ssh="--no-ssh" not in p.flags,
+        interactive=False,
+        log=EventLog(),
+    )
     dest = (
         Path(p.opts["--dest"]).expanduser()
         if "--dest" in p.opts
@@ -305,7 +334,30 @@ def _backup(argv: list[str]) -> int:
 
 
 def _apply(argv: list[str]) -> int:
-    from printer_fw.engine import ApplyOptions, EventLog, run_apply
+    from printer_fw.engine import EventLog
+
+    json_mode = "--json" in argv
+    log = EventLog(None if json_mode else print)
+    try:
+        return _apply_run(argv, json_mode, log)
+    except ThreeDError as exc:
+        if not json_mode:
+            raise
+        # --json promises one JSON document on stdout for EVERY outcome, errors included.
+        emit_json(
+            {
+                "result": "error",
+                "exit_code": exc.exit_code,
+                "error": exc.message,
+                "events": [e.to_json() for e in log.events],
+            }
+        )
+        return exc.exit_code
+
+
+def _apply_run(argv: list[str], json_mode: bool, log: EventLog) -> int:
+    from printer_fw.backup import DEFAULT_MAX_AGE_S
+    from printer_fw.engine import ApplyOptions, run_apply
 
     also, argv = _take_multi(argv, "--also")
     file_args, argv = _take_multi(argv, "--file")
@@ -322,18 +374,22 @@ def _apply(argv: list[str]) -> int:
             command="printers fw apply",
             remediation=["3d printers fw apply myprinter --to extended   (dry run)"],
         )
-    json_mode = "--json" in p.flags
     files: dict[str, Path] = {}
     default_file: Path | None = None
     for raw in file_args:
         step, sep, path = raw.partition("=")
-        if sep and re.fullmatch(r"[a-z0-9][a-z0-9._-]*", step):
+        if sep and _STEP_ID.fullmatch(step):
             files[step] = Path(path).expanduser()
         else:
             default_file = Path(raw).expanduser()
     interactive = _interactive(json_mode)
-    log = EventLog(None if json_mode else print)
-    ctx = _context(p.pos[0], "fw apply", "--no-ssh" not in p.flags, interactive, log)
+    ctx = _context(
+        p.pos[0],
+        "fw apply",
+        use_ssh="--no-ssh" not in p.flags,
+        interactive=interactive,
+        log=log,
+    )
     opts = ApplyOptions(
         to=p.opts["--to"],
         yes="--yes" in p.flags,
@@ -343,29 +399,12 @@ def _apply(argv: list[str]) -> int:
         else _default_backup_dir(),
         max_age_s=_age_seconds(p.opts["--backup-max-age"])
         if "--backup-max-age" in p.opts
-        else 24 * 3600.0,
+        else DEFAULT_MAX_AGE_S,
         also=tuple(also),
         files=files,
         default_file=default_file,
     )
-    try:
-        result = run_apply(ctx, opts)
-    except ThreeDError as exc:
-        if not json_mode:
-            raise
-        print(
-            json.dumps(
-                {
-                    "result": "error",
-                    "exit_code": exc.exit_code,
-                    "error": exc.message,
-                    "events": [e.to_json() for e in log.events],
-                },
-                indent=2,
-                ensure_ascii=False,
-            )
-        )
-        return exc.exit_code
+    result = run_apply(ctx, opts)
     if json_mode:
         emit_json(
             {"printer": ctx.target.name, "profile": ctx.profile.id, **result.to_json()}

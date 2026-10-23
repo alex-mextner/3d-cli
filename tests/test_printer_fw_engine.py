@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -17,7 +18,7 @@ from printer_fw.engine import (
     run_apply,
 )
 from printer_fw.plan import Unreachable
-from printer_fw.profiles import Profile, load_profiles, parse_profile
+from printer_fw.profiles import Profile, Step, load_profiles, parse_profile
 from printer_fw.runner import CommandResult
 from printer_fw_fakes import (
     FakeHttp,
@@ -146,6 +147,10 @@ def demo_profile() -> Profile:
                     "verify": {
                         "wait_s": 5,
                         "interval_s": 1,
+                        "down_wait_s": 5,
+                        "down_probes": [
+                            {"kind": "http_get", "service": "web", "path": "/final"}
+                        ],
                         "probes": [
                             {"kind": "http_get", "service": "web", "path": "/final"}
                         ],
@@ -167,6 +172,8 @@ class World:
     def __init__(self, tmp_path: Path, state: str = "custom") -> None:
         self.tmp_path = tmp_path
         self.http, self.runner, self.upload = FakeHttp(), FakeRunner(), FakeUpload()
+        self.down = 0
+        self.upload.effect = self.reboot  # an uploaded firmware reboots the printer
         self.http.set("GET", 80, "/", 200, "root")
         self.http.set("GET", 80, "/state", 200, {"state": "standby"})
         self.http.set("GET", 80, "/cfg", 200, "config-data")
@@ -179,13 +186,23 @@ class World:
         )
         self.at(state)
 
+    def _final(self) -> tuple[int, str]:
+        """The `/final` evidence: refuses the connection while the printer 'reboots'."""
+        if self.down > 0:
+            self.down -= 1
+            raise ConnectionRefusedError("rebooting")
+        return 200, ""
+
+    def reboot(self) -> None:
+        self.down = 2
+
     def at(self, state: str) -> World:
         for path in ("/one", "/custom", "/final"):
             self.http.routes.pop(("GET", 80, path), None)
         if state in ("custom", "final"):
             self.http.set("GET", 80, "/custom", 200, "")
         if state == "final":
-            self.http.set("GET", 80, "/final", 200, "")
+            self.http.routes[("GET", 80, "/final")] = self._final
         return self
 
     def be(self, **kw: Any):  # noqa: ANN202
@@ -626,16 +643,86 @@ def test_a_connection_dropped_by_the_rebooting_printer_is_left_to_the_verificati
     fw = tmp_path / "update.bin"
     fw.write_bytes(b"firmware-bytes")
     w.upload.raises = ConnectionResetError("reset by peer")
-    assert (
-        run(
-            w,
-            to="final",
+    r = run(
+        w, to="final", also=("send-file",), default_file=fw, yes=True, confirm="demo"
+    )
+    assert (r.exit_code, r.result) == (0, "applied")
+    text = messages(r)
+    assert "connection dropped during upload" in text and "reset by peer" in text
+
+
+def test_a_reboot_step_whose_printer_never_goes_down_fails_its_verification(
+    tmp_path: Path,
+) -> None:
+    """The verification already holds before the upload: without seeing the printer go down it proves nothing."""
+    w = World(tmp_path, "final")
+    w.backup(state="final")
+    w.upload.effect = None  # the upload did nothing: no reboot
+    fw = tmp_path / "update.bin"
+    fw.write_bytes(b"firmware-bytes")
+    r = run(
+        w, to="final", also=("send-file",), default_file=fw, yes=True, confirm="demo"
+    )
+    assert (r.exit_code, r.result) == (1, "failed")
+    text = messages(r)
+    assert "the printer never went down within 5s" in text
+    assert "ROLLBACK: flash the old file" in text
+
+
+def test_an_upload_refused_before_any_byte_is_a_failure_even_when_a_reboot_is_expected(
+    tmp_path: Path,
+) -> None:
+    w = World(tmp_path, "final")
+    w.backup(state="final")
+    w.upload.raises = ConnectionRefusedError("no route")
+    fw = tmp_path / "update.bin"
+    fw.write_bytes(b"firmware-bytes")
+    r = run(
+        w, to="final", also=("send-file",), default_file=fw, yes=True, confirm="demo"
+    )
+    assert (r.exit_code, r.result) == (1, "failed")
+    assert "upload to http://10.0.0.5:80/up failed: no route" in messages(r)
+
+
+def test_a_dropped_connection_is_a_failure_when_the_step_does_not_expect_a_reboot(
+    tmp_path: Path,
+) -> None:
+    w = World(tmp_path, "final")
+    w.backup(state="final")
+    w.upload.raises = ConnectionResetError("reset by peer")
+    fw = tmp_path / "update.bin"
+    fw.write_bytes(b"firmware-bytes")
+    quiet = without_down_probes(DEMO, "send-file")
+    r = run_apply(
+        context(quiet, target("demo", "Test Model"), w.be()),
+        opts(
+            w.tmp_path,
+            "final",
             also=("send-file",),
             default_file=fw,
             yes=True,
             confirm="demo",
-        ).exit_code
-        == 0
+        ),
+    )
+    assert (r.exit_code, r.result) == (1, "failed")
+    assert "upload to http://10.0.0.5:80/up failed: reset by peer" in messages(r)
+
+
+def without_down_probes(profile: Profile, step_id: str) -> Profile:
+    def patch(steps: tuple[Step, ...]) -> tuple[Step, ...]:
+        return tuple(
+            replace(s, verify=replace(s.verify, down_probes=()))
+            if s.id == step_id
+            else s
+            for s in steps
+        )
+
+    return replace(
+        profile,
+        transitions=tuple(
+            replace(t, steps=patch(t.steps), optional_steps=patch(t.optional_steps))
+            for t in profile.transitions
+        ),
     )
 
 
@@ -717,11 +804,19 @@ def k1_world(
                 None,
             ),
         )
+        runner.rules.insert(
+            0,
+            (
+                "grep -q '^b46787a' /usr/data/helper-script/.git/HEAD",
+                CommandResult(0),
+                None,
+            ),
+        )
         if drop_web_after_clone:
             http.drop(80)  # the stock web-server died
             http.set("GET", 4408, "/", 200, "")
 
-    runner.on("git clone --depth 1", rc=0, out="cloned\n", effect=cloned)
+    runner.on('git clone "$URL"', rc=0, out="cloned\n", effect=cloned)
     tgt = target("alpha", "Creality K1 SE", adapter="creality-stock", port=80)
     k1 = PROFILES["creality-k1"]
     be, *_ = make_backends(runner, http)
@@ -745,17 +840,15 @@ def test_k1_runs_the_runbook_script_verbatim(tmp_path: Path) -> None:
     r = run_apply(ctx, opts(tmp_path, "helper-installed", yes=True, confirm="alpha"))
     assert (r.exit_code, r.result) == (0, "applied")
     assert runner.mutating() == [step[1].command]
-    assert (
-        "git clone --depth 1 https://github.com/Guilouz/Creality-Helper-Script.git /usr/data/helper-script"
-        in step[1].command
-    )
+    assert 'git clone "$URL" /usr/data/helper-script' in step[1].command
+    assert "git checkout -f --detach b46787a" in step[1].command
     assert http.mutations() == []
 
 
 def test_k1_dry_run_shows_the_script_and_changes_nothing(tmp_path: Path) -> None:
     http, runner, ctx = k1_world(tmp_path)
     r = run_apply(ctx, opts(tmp_path, "helper-installed"))
-    assert r.result == "dry-run" and "git clone --depth 1" in messages(r)
+    assert r.result == "dry-run" and "git checkout -f --detach b46787a" in messages(r)
     assert runner.mutating() == [] and http.mutations() == []
 
 
@@ -787,9 +880,9 @@ def test_k1_stops_when_a_step_takes_down_the_stock_web_server(tmp_path: Path) ->
     http, runner, ctx = k1_world(tmp_path, drop_web_after_clone=True)
     r = run_apply(ctx, opts(tmp_path, "helper-installed", yes=True, confirm="alpha"))
     assert (r.exit_code, r.result) == (1, "failed")
-    assert "guard keep-creality-web-server-up" in messages(
-        r
-    ) and "after step fetch-helper-script" in messages(r)
+    text = messages(r)
+    assert "guard keep-creality-web-server-up" in text
+    assert "after step fetch-helper-script" in text
 
 
 def test_k1_apply_waits_for_a_working_key_before_anything_else(tmp_path: Path) -> None:
@@ -823,9 +916,17 @@ def test_k1_apply_waits_for_a_working_key_before_anything_else(tmp_path: Path) -
     assert runner.mutating() == []
 
 
-def u1_world(tmp_path: Path) -> tuple[FakeHttp, Context]:
+def u1_world(tmp_path: Path, *, reboots: bool = True) -> tuple[FakeHttp, Context]:
     http = FakeHttp()
-    http.set("GET", 7125, "/machine/system_info", 200, {"result": {}})
+    down = {"n": 0}
+
+    def system_info() -> tuple[int, dict[str, Any]]:
+        if down["n"] > 0:
+            down["n"] -= 1
+            raise ConnectionRefusedError("rebooting")
+        return 200, {"result": {}}
+
+    http.routes[("GET", 7125, "/machine/system_info")] = system_info
     http.set(
         "GET",
         7125,
@@ -846,6 +947,8 @@ def u1_world(tmp_path: Path) -> tuple[FakeHttp, Context]:
     def reboot() -> tuple[int, str]:
         http.routes.pop(("GET", 80, "/firmware-config/api/status"), None)
         http.set("GET", 80, "/", 200, "stock ui")
+        if reboots:
+            down["n"] = 2  # Moonraker refuses connections while the printer reboots
         return (
             200,
             "=== switch-to-backup-firmware ===\nSUCCESS: Completed successfully\n",
@@ -944,3 +1047,222 @@ def test_without_an_idle_probe_an_unreadable_printer_is_busy(
     tgt = target("demo", "Bambu Lab P1S")
     v = adapter_idle(tgt, p, ep_of(p, tgt), make_backends()[0])
     assert v.idle is False and "no idle probe" in v.detail
+
+
+# ---- review follow-ups: ssh gate, single question, resume, reboot ---------------------------------
+
+
+def test_no_ssh_blocks_every_ssh_step_in_a_dry_run_and_with_yes(tmp_path: Path) -> None:
+    w = World(tmp_path)
+    w.backup()
+    tgt = target("demo", "Test Model")
+    dry = run_apply(context(DEMO, tgt, w.be(use_ssh=False)), opts(tmp_path))
+    assert dry.result == "dry-run"
+    ready = next(e for e in dry.events if e.kind == "dry-run")
+    assert (
+        ready.data["ready"] is False
+        and "drop --no-ssh: steps run-script need ssh" in ready.message
+    )
+    refused = run_apply(
+        context(DEMO, tgt, w.be(use_ssh=False)),
+        opts(tmp_path, yes=True, confirm="demo"),
+    )
+    assert (refused.exit_code, refused.result) == (1, "refused")
+    assert "--no-ssh forbids the ssh steps of this plan: run-script" in messages(
+        refused
+    )
+    assert w.runner.calls == []
+
+
+def test_the_ssh_gate_does_not_touch_plans_without_ssh_steps(tmp_path: Path) -> None:
+    w = World(tmp_path, "stock")
+    w.backup(state="stock")
+    r = run_apply(
+        context(DEMO, target("demo", "Test Model"), w.be(use_ssh=False)),
+        opts(tmp_path, "custom"),
+    )
+    ready = next(e for e in r.events if e.kind == "dry-run")
+    assert ready.data["ready"] is True
+
+
+def test_a_manual_step_with_a_confirm_probe_asks_the_user_once(tmp_path: Path) -> None:
+    data = minimal_profile_data()
+    data["transitions"][0]["steps"][0]["verify"] = [
+        {"kind": "confirm", "prompt": "Is it on?"}
+    ]
+    profile = parse_profile(data, "d.yaml")
+    http = FakeHttp()
+    http.set("GET", 80, "/", 200, "")
+    questions: list[str] = []
+
+    def confirm(question: str) -> bool:
+        questions.append(question)
+        http.set("GET", 80, "/custom", 200, "")
+        return True
+
+    be, *_ = make_backends(http=http, confirm=confirm)
+    tgt = target("demo", "Test Model")
+    take_backup(
+        profile,
+        ep_of(profile, tgt),
+        be,
+        printer="demo",
+        model=tgt.model,
+        state="stock",
+        dest_root=tmp_path,
+        now=NOW,
+    )
+    r = run_apply(
+        context(
+            profile,
+            tgt,
+            be,
+            ask=lambda q: "demo" if q.startswith("Type the printer name") else "",
+        ),
+        opts(tmp_path, "custom", yes=True),
+    )
+    assert (r.exit_code, r.result) == (0, "applied")
+    assert questions == ["Is it on?"]
+
+
+def test_a_stopped_run_still_reports_the_state_it_started_from(tmp_path: Path) -> None:
+    w = World(tmp_path)
+    refused = run(w, yes=True, confirm="demo")  # no backup
+    assert (refused.result, refused.from_state, refused.final_state) == (
+        "refused",
+        "custom",
+        None,
+    )
+    assert refused.to_json()["from"] == "custom"
+
+
+# ---- K1: an interrupted install can never be resumed past the hardening ------------------------
+
+
+def k1_lan_world(
+    tmp_path: Path, *, hardened: bool, nginx_denies: bool = True
+) -> tuple[FakeHttp, FakeRunner, Context]:
+    """A K1 whose Moonraker is up and Klipper ready; `hardened` decides if its LAN access is narrowed."""
+    http, runner = k1_http(), k1_runner()
+    http.routes[("BANNER", 22, "")] = (200, "SSH-2.0-dropbear_2020.81")
+    http.set("GET", 4408, "/", 200, "<html/>")
+    http.set("GET", 7125, "/server/info", 200, {"result": {"klippy_state": "ready"}})
+    http.set("GET", 7125, "/server/config", 200, lan_config(hardened))
+    runner.on("test -d /usr/data", rc=0)
+    runner.on("test -e /usr/data/helper-script/helper.sh", rc=0)
+    runner.on("stat -c %a /usr/data/fluidd/index.html", rc=0, out="755\n")
+    runner.on(
+        "grep -c 'deny all'",
+        rc=0 if nginx_denies else 1,
+        out="2\n" if nginx_denies else "0\n",
+    )
+    tgt = target("alpha", "Creality K1 SE", adapter="creality-stock", port=80)
+    k1 = PROFILES["creality-k1"]
+    be, *_ = make_backends(runner, http)
+    take_backup(
+        k1,
+        ep_of(k1, tgt),
+        be,
+        printer="alpha",
+        model=tgt.model,
+        state="moonraker-installed",
+        dest_root=tmp_path,
+        now=NOW,
+    )
+    return http, runner, context(k1, tgt, be)
+
+
+def lan_config(hardened: bool) -> dict[str, Any]:
+    trusted = (
+        ["127.0.0.1", "192.168.0.38"] if hardened else ["127.0.0.1", "192.168.0.0/16"]
+    )
+    return {
+        "result": {
+            "config": {
+                "authorization": {"trusted_clients": trusted},
+                "server": {"use_xheaders": not hardened},
+            }
+        }
+    }
+
+
+def test_resuming_after_moonraker_came_up_still_demands_the_lockdown(
+    tmp_path: Path,
+) -> None:
+    """Moonraker answers 'ready' but trusts the whole LAN: apply is NOT a noop, it stops at the hardening."""
+    http, runner, ctx = k1_lan_world(tmp_path, hardened=False)
+    dry = run_apply(ctx, opts(tmp_path, "klipper-ready"))
+    assert (dry.result, dry.from_state) == ("dry-run", "moonraker-installed")
+    assert "narrow-trusted-clients" in messages(dry)
+
+    r = run_apply(ctx, opts(tmp_path, "klipper-ready", yes=True, confirm="alpha"))
+    assert (r.exit_code, r.result, r.from_state) == (
+        1,
+        "pending-manual",
+        "moonraker-installed",
+    )
+    text = messages(r)
+    assert "skipped: already satisfied" in text  # Fluidd is up and world-readable
+    assert (
+        "deny all;" in text
+        and "NEXT: do the step, then re-run the same command" in text
+    )
+    assert runner.mutating() == [] and http.mutations() == []
+
+
+def test_a_locked_down_k1_is_klipper_ready_and_apply_is_a_noop(tmp_path: Path) -> None:
+    _, runner, ctx = k1_lan_world(tmp_path, hardened=True)
+    r = run_apply(ctx, opts(tmp_path, "klipper-ready", yes=True, confirm="alpha"))
+    assert (r.exit_code, r.result, r.from_state) == (0, "noop", "klipper-ready")
+    assert runner.mutating() == []
+
+
+def test_narrowing_moonraker_without_denying_nginx_is_still_not_done(
+    tmp_path: Path,
+) -> None:
+    """trusted_clients is narrow but nginx still proxies for the whole LAN: the step is not verified."""
+    _, _, ctx = k1_lan_world(tmp_path, hardened=True, nginx_denies=False)
+    r = run_apply(ctx, opts(tmp_path, "klipper-ready", yes=True, confirm="alpha"))
+    assert (r.exit_code, r.result, r.from_state) == (
+        1,
+        "pending-manual",
+        "moonraker-installed",
+    )
+    assert "nginx.conf" in messages(r)
+
+
+def test_the_lockdown_is_verified_once_the_user_did_it(tmp_path: Path) -> None:
+    http, runner, ctx = k1_lan_world(tmp_path, hardened=False)
+
+    def done(question: str) -> str:
+        if question.startswith("Type the printer name"):
+            return "alpha"
+        http.set(
+            "GET", 7125, "/server/config", 200, lan_config(True)
+        )  # the user edited moonraker.conf
+        return ""
+
+    interactive = replace(ctx, ask=done)
+    r = run_apply(interactive, opts(tmp_path, "klipper-ready", yes=True))
+    assert (r.exit_code, r.result, r.final_state) == (0, "applied", "klipper-ready")
+    assert "verified: Moonraker reports its trusted_clients" in messages(r)
+
+
+# ---- reboot steps are verified against a real reboot -------------------------------------------
+
+
+def test_u1_revert_that_never_reboots_is_not_reported_as_done(tmp_path: Path) -> None:
+    http, ctx = u1_world(tmp_path, reboots=False)
+    http.routes[("GET", 7125, "/machine/system_info")] = (200, {"result": {}})
+    r = run_apply(ctx, opts(tmp_path, "stock", yes=True, confirm="alpha"))
+    assert (r.exit_code, r.result) == (1, "failed")
+    assert "the printer never went down within 300s" in messages(r)
+    assert "ROLLBACK:" in messages(r)
+
+
+def test_a_reboot_step_passes_once_the_printer_went_down_and_came_back(
+    tmp_path: Path,
+) -> None:
+    _, ctx = u1_world(tmp_path, reboots=True)
+    r = run_apply(ctx, opts(tmp_path, "stock", yes=True, confirm="alpha"))
+    assert (r.exit_code, r.result, r.final_state) == (0, "applied", "stock")

@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Protocol
 
 from printer_fw.profiles import Probe, SshSettings
-from printer_fw.runner import NO_SSH_RC, TIMEOUT_RC, CommandRunner
+from printer_fw.runner import SSH_ERROR_RC, TIMEOUT_RC, CommandRunner
 
 OK, FAIL, ERROR, SKIPPED = "ok", "fail", "error", "skipped"
 MAX_BODY = 256 * 1024
@@ -187,14 +187,24 @@ def _http(probe: Probe, ep: Endpoint, be: Backends) -> tuple[str, str]:
         )
     if not probe.json_path and probe.regex is None:
         return OK, f"{url}: HTTP {status}"
+    if len(body) >= MAX_BODY:
+        return (
+            ERROR,
+            f"{url}: answer longer than {MAX_BODY} bytes, cannot be read whole",
+        )
+    # A body that does not hold the value we look for is ABSENT evidence for a plain probe, but
+    # for a negated one it must not read as "the bad thing is absent": that would pass a hardening
+    # check against an answer of a shape nobody expected. `absent_ok` opts in for the options that
+    # are legitimately missing when unset (e.g. an auth switch left at its default).
+    unreadable = FAIL if not probe.negate or probe.absent_ok else ERROR
     if probe.json_path:
         try:
             doc = json.loads(body)
         except ValueError:
-            return FAIL, f"{url}: HTTP {status} but the body is not JSON"
+            return unreadable, f"{url}: HTTP {status} but the body is not JSON"
         found, value = _lookup(doc, probe.json_path)
         if not found:
-            return FAIL, f"{url}: no {probe.json_path} in the answer"
+            return unreadable, f"{url}: no {probe.json_path} in the answer"
         text = _as_text(value)
         if probe.equals is not None and text != probe.equals:
             return (
@@ -207,9 +217,8 @@ def _http(probe: Probe, ep: Endpoint, be: Backends) -> tuple[str, str]:
                 f"{url}: {probe.json_path} is {text!r}, expected /{probe.regex}/",
             )
         return OK, f"{url}: {probe.json_path} = {text[:80]!r}"
-    assert probe.regex is not None
     text = body.decode("utf-8", "replace")
-    if re.search(probe.regex, text):
+    if probe.regex is not None and re.search(probe.regex, text):
         return OK, f"{url}: body matches /{probe.regex}/"
     return FAIL, f"{url}: body does not match /{probe.regex}/"
 
@@ -260,7 +269,7 @@ def _ssh(probe: Probe, ep: Endpoint, be: Backends, script: str) -> tuple[str, st
         timeout=max(probe.timeout, ep.ssh.connect_timeout_s),
         port=ep.ssh_port,
     )
-    if result.rc in (NO_SSH_RC, TIMEOUT_RC):
+    if result.rc in (SSH_ERROR_RC, TIMEOUT_RC):
         why = result.err.strip().splitlines()[-1] if result.err.strip() else "no answer"
         return ERROR, f"ssh {ep.ssh.user}@{ep.host}: {why}", ""
     return (
@@ -351,4 +360,25 @@ def poll(
         ok, results = evaluate_group(probes, "all", ep, be)
         if ok or be.monotonic() >= deadline:
             return ok, results
+        be.sleep(min(interval_s, max(0.0, deadline - be.monotonic())))
+
+
+def wait_down(
+    probes: Sequence[Probe],
+    ep: Endpoint,
+    be: Backends,
+    *,
+    wait_s: float,
+    interval_s: float,
+) -> tuple[bool, list[ProbeResult]]:
+    """Poll until `probes` STOP holding (the printer went down to reboot) or `wait_s` elapsed;
+    True means the drop was seen. A verification that already holds before an action started says
+    nothing about the action, so a reboot step must first see its printer disappear."""
+    deadline = be.monotonic() + wait_s
+    while True:
+        up, results = evaluate_group(probes, "all", ep, be)
+        if not up:
+            return True, results
+        if be.monotonic() >= deadline:
+            return False, results
         be.sleep(min(interval_s, max(0.0, deadline - be.monotonic())))

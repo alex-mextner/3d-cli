@@ -10,10 +10,20 @@ CHECK `watch-units-dry-run` REUSES `printer_ops.deploy_check` (`check_printer`, 
 
 from __future__ import annotations
 
+import shlex
+from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
 from printer_doctor.context import Context
-from printer_doctor.model import CannotSee, Check, CheckResult, Fix, JsonValue, Verdict
+from printer_doctor.model import (
+    CannotSee,
+    Check,
+    CheckResult,
+    Fix,
+    JsonValue,
+    Verdict,
+    command,
+)
 
 if TYPE_CHECKING:
     from printer_ops.deploy_check import PrinterVerdict
@@ -35,7 +45,7 @@ def _applies(ctx: Context) -> str | None:
 def _units(ctx: Context) -> PrinterVerdict:
     from printer_ops.deploy_check import check_printer
 
-    return check_printer(ctx.name, True, ctx.systemctl_show)
+    return check_printer(ctx.name, has_camera=True, show=ctx.systemctl_show)
 
 
 def _run(ctx: Context) -> Verdict:
@@ -66,17 +76,31 @@ def _run(ctx: Context) -> Verdict:
 
 
 def _steps(ctx: Context, result: CheckResult) -> list[str]:
-    from printer_ops.deploy_check import fix_commands
+    """The fix commands for the units the run itself found failing (rebuilt from its evidence, so
+    systemd is asked once, not again for the steps)."""
+    from printer_ops.deploy_check import UnitVerdict, fix_commands
 
-    verdict = _units(ctx)
     steps: list[str] = []
-    for unit in verdict.units:
+    units = result.evidence.get("units")
+    for row in units if isinstance(units, list) else []:
+        if not isinstance(row, Mapping):
+            continue
+        unit = UnitVerdict(
+            str(row.get("unit")),
+            str(row.get("state")),
+            row.get("dry_run") is True,
+            str(row.get("source") or ""),
+        )
         if not unit.ok and unit.state != "unknown":
-            steps += fix_commands(ctx.name, unit)
+            steps += [
+                command(c) if c.split(None, 1)[0] in ("systemctl", "3d") else c
+                for c in fix_commands(ctx.name, unit)
+            ]
     if not steps:
+        name = shlex.quote(ctx.name)
         steps = [
-            f"systemctl --user enable --now 3d-printer-vision@{ctx.name}.service",
-            f"systemctl --user enable --now 3d-printer-watch@{ctx.name}.service",
+            command(f"systemctl --user enable --now 3d-printer-vision@{name}.service"),
+            command(f"systemctl --user enable --now 3d-printer-watch@{name}.service"),
         ]
     return steps
 

@@ -87,6 +87,9 @@ def results(doc: dict[str, Any], printer: str) -> dict[str, dict[str, Any]]:
 def test_read_only_diagnosis_of_the_whole_fleet_reports_findings_and_writes_nothing(
     tmp_path: Path,
 ) -> None:
+    """The owner runs `3d printers doctor --all --json` on the fleet: Klipper on one printer sits in `shutdown`, another's Moonraker
+    books filament to the wrong spool, two printers are offline. The report names each finding, never contacts the offline ones,
+    exits 1 because findings remain, and nothing is written to a printer or to 3d-api."""
     u1, k1, api = lab_servers()
     with u1.serve(), k1.serve(), api.serve():
         lab = Lab(tmp_path, u1, k1, api)
@@ -127,6 +130,8 @@ def test_read_only_diagnosis_of_the_whole_fleet_reports_findings_and_writes_noth
 def test_fix_applies_the_safe_fix_only_then_yes_adds_the_restart_and_a_rerun_is_a_noop(
     tmp_path: Path,
 ) -> None:
+    """The owner repairs with `--fix`: the safe active-spool fix is applied, verified and journalled (offline buffer + 3d-api import)
+    while the Klipper restart waits for `--yes`; `--fix --yes` then restarts it, the exit code turns 0 and a third run does nothing."""
     u1, k1, api = lab_servers()
     with u1.serve(), k1.serve(), api.serve():
         lab = Lab(tmp_path, u1, k1, api)
@@ -176,6 +181,7 @@ def test_fix_applies_the_safe_fix_only_then_yes_adds_the_restart_and_a_rerun_is_
 
 
 def test_a_busy_printer_refuses_the_restart_and_nothing_is_sent(tmp_path: Path) -> None:
+    """The owner runs `--fix --yes` while the printer is printing: the restart is refused with the reason and nothing reaches the printer."""
     u1, k1, api = lab_servers()
     u1.status["print_stats"].update(state="printing")
     with u1.serve(), k1.serve(), api.serve():
@@ -193,6 +199,8 @@ def test_a_busy_printer_refuses_the_restart_and_nothing_is_sent(tmp_path: Path) 
 
 
 def test_text_report_and_the_printer_alias_and_usage_errors(tmp_path: Path) -> None:
+    """The owner reads the text report through the `3d printer doctor` alias, then makes the usual mistakes: no printer named and an
+    unknown printer are usage errors (exit 2) that list the valid names; `--help` documents `--list-checks`."""
     u1, k1, api = lab_servers()
     with u1.serve(), k1.serve(), api.serve():
         lab = Lab(tmp_path, u1, k1, api)
@@ -224,6 +232,7 @@ def test_text_report_and_the_printer_alias_and_usage_errors(tmp_path: Path) -> N
 
 
 def test_list_checks_works_without_any_fleet(tmp_path: Path) -> None:
+    """On a machine with no fleet file `3d printers doctor --list-checks --json` still lists every check, sorted by id."""
     run = run_cli(
         tmp_path,
         "printers",
@@ -235,3 +244,22 @@ def test_list_checks_works_without_any_fleet(tmp_path: Path) -> None:
     assert run.returncode == 0, run.stderr
     ids = [c["id"] for c in json.loads(run.stdout)["checks"]]
     assert "klippy-state" in ids and "spoolman-cors" in ids and ids == sorted(ids)
+
+
+def test_a_read_only_printer_is_diagnosed_but_never_restarted(tmp_path: Path) -> None:
+    """A printer registered `access: read-only` sits in Klipper `shutdown`. `--fix --yes` reports the finding and the manual
+    steps, refuses the restart because 3d only writes to access: full printers, sends nothing and exits 1."""
+    u1, k1, api = lab_servers()
+    with u1.serve(), k1.serve(), api.serve():
+        lab = Lab(tmp_path, u1, k1, api)
+        lab.env["THREED_FLEET"] = str(
+            write_fleet(tmp_path / "ro-fleet.yaml", u1_entry(u1, access="read-only"))
+        )
+        run = lab.doctor("u1", "--check", "klippy-state", "--fix", "--yes", "--json")
+    assert run.returncode == 1, run.stderr
+    fix = results(json.loads(run.stdout), "u1")["klippy-state"]["fix"]
+    assert fix["applied"] is False and fix["error"].startswith(
+        "refused: access read-only"
+    )
+    assert fix["manual_steps"] and u1.writes() == []
+    assert lab.journal("u1") == []

@@ -33,7 +33,7 @@ from typing import Protocol
 from errors import MissingDependency
 
 TIMEOUT_RC = 124  # the `timeout(1)` convention: the command did not finish in time
-NO_SSH_RC = 255  # ssh's own "could not connect / authenticate" status
+SSH_ERROR_RC = 255  # ssh's own "could not connect / authenticate" status (a remote command may also exit 255)
 
 
 @dataclass(frozen=True)
@@ -141,5 +141,5 @@ class SshRunner:
                 TIMEOUT_RC, exc.stdout or b"", (exc.stderr or b"") + b"ssh timed out"
             )
         except OSError as exc:
-            return CommandResult(NO_SSH_RC, b"", str(exc).encode())
+            return CommandResult(SSH_ERROR_RC, b"", str(exc).encode())
         return CommandResult(done.returncode, done.stdout, done.stderr)

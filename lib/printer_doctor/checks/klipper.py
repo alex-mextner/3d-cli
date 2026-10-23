@@ -1,19 +1,29 @@
 """klipper.py — Moonraker-family health: Klipper state, Moonraker components, stuck jobs, disk.
 
 CHECKS
-  klippy-state          `/server/info` klippy_state must be `ready`. Fix (needs-yes): restart the
-                        firmware (`shutdown`) or the Klipper host service (`error`/`disconnected`)
-                        through Moonraker, refused while a job is printing or paused, verified by
-                        Klipper reporting `ready` within a bounded poll. `startup` is refused:
-                        Klipper is still booting, a restart would only restart that.
+  klippy-state          `/server/info` klippy_state must be `ready`. Fix (needs-yes), through
+                        Moonraker: `shutdown` -> `POST /printer/firmware_restart`, `error` ->
+                        `POST /printer/restart` (both are Klippy requests relayed over its socket),
+                        `disconnected` -> `POST /machine/services/restart {"service": "klipper"}`
+                        (Klippy is not connected, so only the host service can be restarted; needs
+                        a Moonraker with a service provider and `klipper` in allowed_services,
+                        https://moonraker.readthedocs.io/en/latest/external_api/machine/). An HTTP
+                        answer >= 400 is a failed fix (nothing journalled: nothing happened).
+                        Refused while a job is printing or paused; a print state that cannot be
+                        read counts as "Klipper is not answering" here (its job was halted).
+                        Verified by Klipper reporting `ready` within a bounded poll. `startup` is
+                        refused: Klipper is still booting, a restart would only restart that.
   moonraker-components  `failed_components` / `warnings` of `/server/info` (a component that did
                         not load: spoolman, update_manager, ...). Manual.
-  print-stuck           a job in `paused` for longer than PAUSED_WARN_S (default 2 h). Klipper
-                        stamps no pause time, so the pause length is approximated as
-                        `total_duration - print_duration` of print_stats (time since the job
-                        started minus time spent extruding): it includes heating/prep (minutes),
-                        which only makes the number slightly high, never hides a long pause.
-                        "printing with no progress" is not cheaply observable and is not checked.
+  print-stuck           a job that is `paused` NOW and has spent more than PAUSED_WARN_S (2 h) not
+                        extruding. Klipper stamps no pause time, so the figure is
+                        `total_duration - print_duration` of print_stats: CUMULATIVE time without
+                        extrusion since the job started (every pause that was resumed, plus the
+                        heating before the first extrusion), not the length of the current pause.
+                        A job with several long colour-change pauses can therefore warn right after
+                        a short new pause; the evidence says which number it is
+                        (`not_extruding_s`). "printing with no progress" is not cheaply observable
+                        and is not checked.
   disk-space            free space of the `gcodes` root from `/server/files/directory`.
                         warn below 5 % or 200 MB free, error below 1 % or 50 MB (decimal MB).
 WHY: a printer in `shutdown` accepts nothing until restarted; a failed component silently
@@ -23,7 +33,10 @@ WHY: a printer in `shutdown` accepts nothing until restarted; a failed component
 
 from __future__ import annotations
 
+import json
+import shlex
 from collections.abc import Mapping
+from typing import NamedTuple
 
 from printer_doctor.checks._common import human_bytes, str_list
 from printer_doctor.context import Context
@@ -36,15 +49,23 @@ from printer_doctor.model import (
     FixRefused,
     JsonValue,
     Verdict,
+    command,
 )
 
 PAUSED_WARN_S = 2 * 3600.0
 DISK_WARN_PCT, DISK_WARN_BYTES = 5.0, 200_000_000
 DISK_ERROR_PCT, DISK_ERROR_BYTES = 1.0, 50_000_000
+
+
+class Restart(NamedTuple):
+    path: str
+    payload: Mapping[str, JsonValue] | None = None
+
+
 RESTART_FOR = {
-    "shutdown": "/printer/firmware_restart",
-    "error": "/printer/restart",
-    "disconnected": "/printer/restart",
+    "shutdown": Restart("/printer/firmware_restart"),
+    "error": Restart("/printer/restart"),
+    "disconnected": Restart("/machine/services/restart", {"service": "klipper"}),
 }
 
 
@@ -57,10 +78,6 @@ def _num(value: JsonValue) -> float | None:
 
 
 # ---- klippy-state ---------------------------------------------------------------------------
-
-
-def _klippy_applies(ctx: Context) -> str | None:
-    return ctx.moonraker_only()
 
 
 def _klippy_state(ctx: Context) -> Verdict:
@@ -103,31 +120,46 @@ def _restart(ctx: Context, result: CheckResult) -> FixChange:
         raise FixRefused(
             "Klipper is still starting up: wait for it, a restart would only restart the boot"
         )
-    path = RESTART_FOR.get(before)
-    if path is None:
+    restart = RESTART_FOR.get(before)
+    if restart is None:
         raise FixRefused(f"no restart is known for klippy_state {before!r}")
-    job = ctx.job_state()
+    try:
+        job = ctx.job_state()
+    except CannotSee:
+        job = None  # Klipper is down, so its job was halted: nothing to protect
     if job in ("printing", "paused"):
-        raise FixRefused(f"a job is {job}: restarting Klipper would kill it")
-    ctx.post(path)
-    return FixChange(before, _wait_ready(ctx), f"POST {path}")
+        raise FixRefused(f"a job is {job}: restarting Klipper would end it")
+    got = ctx.post(restart.path, restart.payload)
+    if got.reply.status >= 400:
+        detail = got.reply.body[:160].decode("utf-8", "replace")
+        raise CannotSee(
+            f"POST {restart.path}: HTTP {got.reply.status} {detail}", "error"
+        )
+    return FixChange(before, _wait_ready(ctx), f"POST {restart.path}")
 
 
 def _klippy_steps(ctx: Context, result: CheckResult) -> list[str]:
-    state = result.evidence.get("klippy_state")
+    state = str(result.evidence.get("klippy_state"))
     message = result.evidence.get("state_message")
-    path = RESTART_FOR.get(str(state), "/printer/restart")
-    verb = "FIRMWARE_RESTART" if path.endswith("firmware_restart") else "RESTART"
-    steps = [
+    restart = RESTART_FOR.get(state, RESTART_FOR["error"])
+    url = shlex.quote(f"{ctx.base_url}{restart.path}")
+    curl = f"curl -X POST {url}"
+    if restart.payload is not None:
+        body = shlex.quote(json.dumps(restart.payload))
+        curl = f"curl -X POST -H 'Content-Type: application/json' -d {body} {url}"
+    verb = (
+        "FIRMWARE_RESTART" if restart.path.endswith("firmware_restart") else "RESTART"
+    )
+    return [
         f"Read why: Klipper says {message!r}"
         if message
         else "Read why: the web UI shows Klipper's message.",
-        f"In the web UI press {verb} (not while a job runs), or: curl -X POST {ctx.base_url}{path}",
+        f"When no job runs, press {verb} in the web UI (for `disconnected`: Machine tab -> klipper -> restart), or:",
+        command(curl),
         "If it comes back as `error`, the printer.cfg is wrong: fix the config named in the message, then RESTART.",
-        "If it stays `disconnected`, the Klipper service is not running: restart it from the web UI "
-        "(Machine tab -> klipper) or on the printer: `systemctl restart klipper`.",
+        "A Moonraker without a service provider cannot restart `klipper` itself: restart the service on the printer "
+        "(e.g. `systemctl restart klipper`, or the firmware's own init script).",
     ]
-    return steps
 
 
 # ---- moonraker-components -------------------------------------------------------------------
@@ -191,16 +223,22 @@ def _stuck(ctx: Context) -> Verdict:
         return Verdict.ok(f"job state {state!r}, nothing paused", **evidence)
     if total is None or extruding is None:
         raise CannotSee(
-            "paused, but print_stats carries no durations to measure the pause", "error"
+            "paused, but print_stats carries no durations to measure the time without extrusion",
+            "error",
         )
-    paused = max(0.0, total - extruding)
-    evidence["paused_for_s"] = round(paused)
-    if paused > PAUSED_WARN_S:
+    idle = max(
+        0.0, total - extruding
+    )  # cumulative: every pause so far + the heating before it
+    evidence["not_extruding_s"] = round(idle)
+    if idle > PAUSED_WARN_S:
         return Verdict.fail(
-            f"job paused for about {paused / 3600:.1f} h", "warn", **evidence
+            f"job is paused and has spent about {idle / 3600:.1f} h not extruding in total "
+            "(all pauses and heating so far, not only this pause)",
+            "warn",
+            **evidence,
         )
     return Verdict.ok(
-        f"job paused for about {paused / 60:.0f} min (limit {PAUSED_WARN_S / 3600:.0f} h)",
+        f"job is paused, {idle / 60:.0f} min without extrusion in total (limit {PAUSED_WARN_S / 3600:.0f} h)",
         **evidence,
     )
 
@@ -208,9 +246,11 @@ def _stuck(ctx: Context) -> Verdict:
 def _stuck_steps(ctx: Context, result: CheckResult) -> list[str]:
     return [
         "Look at the printer: a paused job with a cooled nozzle and bed usually needs the cause "
-        "fixed (filament runout, a jam) and RESUME, or CANCEL.",
-        f"Resume or cancel from the web UI, or `3d printer cancel {ctx.name}` (3d refuses "
-        "to touch a printer with access read-only).",
+        "fixed (filament runout, a jam) and RESUME, or CANCEL. The figure is cumulative: if the "
+        "pauses so far were intended (colour changes), this one may be fine.",
+        "Resume or cancel from the web UI, or:",
+        command(f"3d printer cancel {shlex.quote(ctx.name)}"),
+        "(3d refuses to touch a printer with access read-only.)",
         "A paused job holds the plate: nothing else can print on this printer until it is resumed or cancelled.",
     ]
 
@@ -247,12 +287,9 @@ def _disk(ctx: Context) -> Verdict:
 
 def _disk_steps(ctx: Context, result: CheckResult) -> list[str]:
     return [
-        "Delete old G-code: web UI (Fluidd/Mainsail) G-code files list -> select -> delete, "
-        "or `curl -X DELETE " + ctx.base_url + "/server/files/gcodes/<file>.gcode`.",
+        "Delete old G-code: web UI (Fluidd/Mainsail) G-code files list -> select -> delete "
+        "(API: DELETE /server/files/gcodes/FILE).",
         "Timelapse videos and `.thumbs` also live in the same partition on most firmwares; clear those too.",
-        "Check the number again: `3d printers doctor "
-        + ctx.name
-        + " --check disk-space`.",
     ]
 
 
@@ -262,7 +299,7 @@ CHECKS = (
         title="Klipper is ready (not shutdown / error / disconnected)",
         severity="error",
         applies_to="Moonraker-family printers",
-        applies=_klippy_applies,
+        applies=lambda ctx: ctx.moonraker_only(),
         run=_klippy_state,
         fix=Fix(
             "needs-yes",
@@ -286,7 +323,7 @@ CHECKS = (
     ),
     Check(
         id="print-stuck",
-        title="no job paused for longer than 2 h",
+        title="no paused job that has spent over 2 h not extruding in total",
         severity="warn",
         applies_to="Moonraker-family printers",
         applies=lambda ctx: ctx.moonraker_only(),

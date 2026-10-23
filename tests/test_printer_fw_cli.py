@@ -187,3 +187,51 @@ def test_profiles_command_prints_text_and_json(
     )
     assert fw_cli.run(["profiles", "--json"]) == 0
     assert '"klipper_possible": false' in capsys.readouterr().out
+
+
+def test_apply_json_reports_every_error_as_one_json_document(
+    fleet: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An unknown printer, a bad age and a profile-less model all come out as JSON with --json, exit code kept."""
+    import json
+
+    cases = [
+        (["apply", "nobody", "--to", "x", "--json"], 2, "nobody"),
+        (
+            ["apply", "bambu", "--to", "stock", "--backup-max-age", "soon", "--json"],
+            2,
+            "--backup-max-age",
+        ),
+        (["apply", "bambu", "--json"], 2, "needs --to STATE"),
+    ]
+    for argv, code, fragment in cases:
+        assert fw_cli.run(argv) == code
+        doc = json.loads(capsys.readouterr().out)
+        assert doc["result"] == "error" and doc["exit_code"] == code
+        assert fragment in doc["error"] and doc["events"] == []
+
+
+def test_a_mistyped_service_in_the_port_override_is_refused(
+    fleet: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("THREED_FW_SERVICE_PORTS", "ssh2=22")
+    with pytest.raises(InvalidArgument) as err:
+        fw_cli.run(["status", "bambu", "--no-live"])
+    assert (
+        err.value.exit_code == 2
+        and "'ssh2' is not a service of any firmware profile"
+        in err.value.remediation[0]
+    )
+    monkeypatch.setenv("THREED_FW_SERVICE_PORTS", "web=8080,ssh=2222,moonraker=7125")
+    assert fw_cli.run(["status", "bambu", "--no-live"]) == 0
+
+
+def test_non_ascii_digits_in_a_port_override_are_an_invalid_argument_not_a_crash() -> (
+    None
+):
+    from printer_fw.target import parse_port_overrides
+
+    for bad in ("web=²", "web=٣٣", "web=0", "web=70000", "=80", "web", "web=8o"):
+        with pytest.raises(InvalidArgument):
+            parse_port_overrides(bad)
+    assert parse_port_overrides("web=80, ssh=22,") == {"web": 80, "ssh": 22}

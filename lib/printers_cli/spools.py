@@ -8,9 +8,11 @@ The logic is `printers_cli/_spool_view.py`.
 
 from __future__ import annotations
 
+from typing import Any
 from urllib.parse import quote
 
 from errors import GateFailure
+from printops.client import ApiError
 
 from printers_cli import Sub
 from printers_cli._common import (
@@ -19,6 +21,7 @@ from printers_cli._common import (
     emit_json,
     known_printers,
     parse,
+    parse_secs,
     require_printer,
     wants_help,
 )
@@ -54,65 +57,33 @@ Examples:
   3d printers spools --no-live --json | jq '.printers[].slots[] | select(.spools == [])'
   3d printers spools --json | jq '.printers[] | select(.active_spool.status == "mismatch") | .name'"""
 
-DEFAULT_SECS = 10.0
-
-
-def _seconds(raw: str | None) -> float:
-    from errors import InvalidArgument
-
-    if raw is None:
-        return DEFAULT_SECS
-    try:
-        value = float(raw)
-    except ValueError:
-        value = 0.0
-    if not 0 < value < float("inf"):
-        raise InvalidArgument(
-            "--secs",
-            raw,
-            ["a number of seconds > 0, e.g. 3"],
-            command="printers spools",
-        )
-    return value
-
-
 def run(argv: list[str]) -> int:
     if wants_help(argv):
         print(USAGE)
         return 0
-    p = parse(
-        argv,
-        "spools",
-        values={"--api", "--token", "--secs"},
-        flags={"--json", "--no-live", "--strict"},
-        n_pos=(0, 64),
-    )
-    secs = _seconds(p.opts.get("--secs"))
-    names = [require_printer(n, "spools").name for n in p.pos]
+    p = parse(argv, "spools", values={"--api", "--token", "--secs"}, flags={"--json", "--no-live", "--strict"},
+              n_pos=(0, 64))
+    secs = parse_secs(p.opts.get("--secs"), "spools")
+    refs = known_printers()
+    names = [require_printer(n, "spools", refs).name for n in p.pos]
     api = client(p, "spools")
     with api_errors("spools"):
         if names:
             views = [api.get(f"/v1/printers/{quote(n, safe='')}") for n in names]
         else:
             views = api.get("/v1/printers")["printers"]
+    spools_error = next((v["spools_error"] for v in views if v.get("spools_error")), None)
+    loaded: list[dict[str, Any]] = []
+    try:
         loaded = api.get("/v1/spools", loaded="true")["spools"]
-    report = build_report(
-        views,
-        loaded,
-        known_printers(),
-        live="--no-live" not in p.flags,
-        read=lambda ref: read_active_spool(ref, secs),
-        spools_error=next(
-            (v["spools_error"] for v in views if v.get("spools_error")), None
-        ),
-    )
+    except ApiError as e:  # Spoolman down: the slots and live readings still make a useful report
+        spools_error = spools_error or e.message
+    report = build_report(views, loaded, refs, live="--no-live" not in p.flags,
+                          read=lambda ref: read_active_spool(ref, secs), spools_error=spools_error)
     _print(report, "--json" in p.flags)
     if "--strict" in p.flags and report.mismatches:
-        raise GateFailure(
-            f"Moonraker's active spool disagrees with the bound spool on: {', '.join(report.mismatches)}",
-            command="printers spools",
-            silent=True,
-        )
+        raise GateFailure(f"Moonraker's active spool disagrees with the bound spool on: {', '.join(report.mismatches)}",
+                          command="printers spools", silent=True)
     return 0
 
 

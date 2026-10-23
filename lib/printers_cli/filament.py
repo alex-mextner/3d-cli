@@ -26,6 +26,7 @@ from printers_cli._common import (
     emit_json,
     known_printers,
     parse,
+    parse_secs,
     require_printer,
     wants_help,
 )
@@ -64,8 +65,9 @@ Examples:
   3d printers filament set u1/T1 --color '#FFFFFF' --material PLA --force-official"""
 
 _HEX = re.compile(r"#?[0-9A-Fa-f]{6}")
-DEFAULT_SECS = 10.0
 SET_CMD = "printers filament set"
+CREALITY_LISTEN_S = 3.0  # the push window of creality-stock; --secs is a per-read timeout, not a reason to idle 10 s
+_TEXT = re.compile(r"[A-Za-z0-9+._ -]{1,32}")  # what travels into a firmware G-code argument
 
 
 def _slot_json(s: Slot) -> dict[str, Any]:
@@ -80,23 +82,6 @@ def _slot_json(s: Slot) -> dict[str, Any]:
     }
 
 
-def _seconds(raw: str | None, sub: str) -> float:
-    if raw is None:
-        return DEFAULT_SECS
-    try:
-        value = float(raw)
-    except ValueError:
-        value = 0.0
-    if not 0 < value < float("inf"):
-        raise InvalidArgument(
-            "--secs",
-            raw,
-            ["a number of seconds > 0, e.g. 3"],
-            command=f"printers filament {sub}",
-        )
-    return value
-
-
 def _adapter(ref: PrinterRef, secs: float) -> Adapter:
     from printer_ops import make_adapter
 
@@ -105,12 +90,12 @@ def _adapter(ref: PrinterRef, secs: float) -> Adapter:
             f"{ref.name} is never contacted (access {ref.access})",
             command="printers filament",
         )
-    return make_adapter(ref.device, timeout=secs, listen_s=secs)
+    return make_adapter(ref.device, timeout=secs, listen_s=min(secs, CREALITY_LISTEN_S))
 
 
 def _show(argv: list[str]) -> int:
     p = parse(argv, "filament show", values={"--secs"}, flags={"--json"}, n_pos=(0, 64))
-    secs = _seconds(p.opts.get("--secs"), "show")
+    secs = parse_secs(p.opts.get("--secs"), "filament show")
     refs = known_printers()
     chosen = (
         [require_printer(n, "filament show") for n in p.pos]
@@ -158,7 +143,7 @@ def _show(argv: list[str]) -> int:
                 )
                 or "type unknown"
             )
-            print(f"  {s['label']:<4} {what if s['present'] else 'empty'}")
+            print(f"  {s['label']:<4} {what if s['present'] is not False else 'empty'}")
     return 0
 
 
@@ -192,7 +177,10 @@ def _set(argv: list[str]) -> int:
         raise InvalidArgument(
             "--color", p.opts["--color"], ["#RRGGBB, e.g. '#C62828'"], command=cmd
         )
-    secs = _seconds(p.opts.get("--secs"), "set")
+    secs = parse_secs(p.opts.get("--secs"), "filament set")
+    for opt in ("--material", "--vendor", "--sub-type"):
+        if opt in p.opts and not _TEXT.fullmatch(p.opts[opt]):
+            raise InvalidArgument(opt, p.opts[opt], ["1-32 of letters, digits, space and + . _ -"], command=cmd)
     target = resolve_slot(p.pos[0], "filament set")
     if target.head_index is None:
         raise UsageError(
@@ -260,6 +248,9 @@ def _dry_run(
         )
     if before is None:
         refusals.append(f"{ref.name} reports no head with index {index}")
+    official = (st.raw.get("print_task_config") or {}).get("filament_official")
+    if (not force and isinstance(official, list) and index < len(official) and official[index] is True):
+        refusals.append(f"{ref.name} head index {index} holds official RFID filament: pass --force-official to overwrite it")
     plan = {
         "dry_run": True,
         "printer": ref.name,
@@ -284,9 +275,6 @@ def _dry_run(
         print(f"  after:  {plan['after']}")
         for r in refusals:
             print(f"  WOULD BE REFUSED: {r}")
-        print(
-            "  an official-RFID head is refused by the printer write unless --force-official"
-        )
     if refusals:
         raise GateFailure(
             f"filament set on {ref.name} would be refused: {refusals[0]}",

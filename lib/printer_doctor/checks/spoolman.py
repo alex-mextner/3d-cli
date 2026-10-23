@@ -14,6 +14,10 @@ CHECKS
                  must be answered with `Access-Control-Allow-Origin` = that origin (or `*`);
                  Spoolman (FastAPI CORSMiddleware) sends none for an origin it does not allow, and
                  the browser then shows "Spoolman is blocking Fluidd's browser origin".
+TRUST: the Spoolman URL is printer-supplied config. It is fetched from THIS host and pasted into
+  printed commands, so it is rebuilt by `_common.safe_http_url` (http/https with a host; credentials
+  dropped; query, fragment and odd paths refused) and a URL that fails that is ignored with a
+  skip reason. Every interpolated value of a printed command goes through `shlex.quote`.
 SOURCE of the fix: services/3d-api/compose.yaml sets Spoolman's `SPOOLMAN_CORS_ORIGIN` from
   `${PRINTOPS_SPOOLMAN_CORS_ORIGIN:-<default origins>}`; services/3d-api/README.md explains it
   (comma-separated full origins, scheme included, no path; `*` disables the check).
@@ -21,11 +25,20 @@ SOURCE of the fix: services/3d-api/compose.yaml sets Spoolman's `SPOOLMAN_CORS_O
 
 from __future__ import annotations
 
+import shlex
 from collections.abc import Mapping
 
-from printer_doctor.checks._common import UI_KINDS, origin_of
+from printer_doctor.checks._common import UI_KINDS, origin_of, safe_http_url
 from printer_doctor.context import Context
-from printer_doctor.model import CannotSee, Check, CheckResult, Fix, JsonValue, Verdict
+from printer_doctor.model import (
+    CannotSee,
+    Check,
+    CheckResult,
+    Fix,
+    JsonValue,
+    Verdict,
+    command,
+)
 
 # ---- spoolman-link --------------------------------------------------------------------------
 
@@ -40,13 +53,14 @@ def _has_spoolman(ctx: Context) -> str | None:
 
 
 def _spoolman_server(ctx: Context) -> str | None:
-    """`config.spoolman.server` of the printer, None when unreadable."""
+    """`config.spoolman.server` of the printer as a safe http(s) URL (see module doc), None when
+    unreadable, absent or not acceptable."""
     try:
         section = ctx.config_section("spoolman")
     except CannotSee:
         return None
     server = section.get("server") if section is not None else None
-    return server if isinstance(server, str) and server.strip() else None
+    return safe_http_url(server) if isinstance(server, str) else None
 
 
 def _link(ctx: Context) -> Verdict:
@@ -84,9 +98,18 @@ def _link(ctx: Context) -> Verdict:
 
 def _link_steps(ctx: Context, result: CheckResult) -> list[str]:
     server = result.evidence.get("spoolman_server")
-    where = str(server) if server else "the `[spoolman] server:` of moonraker.conf"
+    if isinstance(server, str) and server:
+        probe = [
+            "From this host Spoolman must answer:",
+            command(f"curl -fsS {shlex.quote(server + '/api/v1/health')}"),
+        ]
+    else:
+        probe = [
+            "Moonraker's `[spoolman] server:` is not readable or not a plain http(s) URL: read it in "
+            "moonraker.conf (web UI 'Configuration'), then check that address answers /api/v1/health."
+        ]
     return [
-        f"From this host: `curl -fsS {where.rstrip('/')}/api/v1/health` (Spoolman must answer).",
+        *probe,
         "If it does not: start Spoolman (its container/service) and check the address and port in "
         "`[spoolman] server:` of moonraker.conf (web UI 'Configuration').",
         "Moonraker reconnects by itself (sync_rate seconds); queued usage reports are sent then. If "
@@ -102,7 +125,7 @@ def _cors_applies(ctx: Context) -> str | None:
     if reason:
         return reason
     if _spoolman_server(ctx) is None:
-        return "moonraker.conf [spoolman] has no server: URL to test"
+        return "moonraker.conf [spoolman] has no server: that is a plain http(s) URL with a host, no query"
     return None
 
 
@@ -158,19 +181,26 @@ def _cors(ctx: Context) -> Verdict:
 
 def _cors_steps(ctx: Context, result: CheckResult) -> list[str]:
     missing = result.evidence.get("missing")
-    names = ",".join(str(m) for m in missing) if isinstance(missing, list) else ""
-    return [
+    origins = [str(m) for m in missing] if isinstance(missing, list) else []
+    names = ",".join(origins)
+    steps = [
         "On the host that runs the PrintOps stack (compose file services/3d-api/compose.yaml, "
         "service `spoolman`), set PRINTOPS_SPOOLMAN_CORS_ORIGIN to a comma-separated list of "
-        f"full origins (scheme included, no path) that includes: {names}",
-        "  e.g. in the stack's .env: PRINTOPS_SPOOLMAN_CORS_ORIGIN=<existing origins>,"
-        + names,
-        "Recreate the container so it reads the variable: `docker compose up -d --force-recreate spoolman` "
-        "(in the directory of that compose file).",
+        f"full origins (scheme included, no path; a default port is left out, as a browser sends it) that includes: {names}",
+        f"e.g. in the stack's .env: PRINTOPS_SPOOLMAN_CORS_ORIGIN=<existing origins>,{names}",
+        "Recreate the container so it reads the variable (in the directory of that compose file):",
+        command("docker compose up -d --force-recreate spoolman"),
         "Explanation and defaults: services/3d-api/README.md (`SPOOLMAN_CORS_ORIGIN`).",
-        f"Verify: `curl -si -H 'Origin: {names.split(',')[0] if names else '<origin>'}' "
-        f"{result.evidence.get('spoolman_url')}` must show an Access-Control-Allow-Origin header.",
     ]
+    url = result.evidence.get("spoolman_url")
+    if origins and isinstance(url, str):
+        steps += [
+            "Verify: the answer must carry an Access-Control-Allow-Origin header:",
+            command(
+                f"curl -si -H {shlex.quote('Origin: ' + origins[0])} {shlex.quote(url)}"
+            ),
+        ]
+    return steps
 
 
 CHECKS = (

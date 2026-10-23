@@ -38,6 +38,7 @@ def probe(
     regex: str | None = None,
     command: str = "",
     negate: bool = False,
+    absent_ok: bool = False,
     expect_status: tuple[int, ...] = (200,),
     prompt: str = "",
 ) -> Probe:
@@ -46,6 +47,7 @@ def probe(
         id="p",
         title="p",
         negate=negate,
+        absent_ok=absent_ok,
         service=service,
         path=path,
         expect_status=expect_status,
@@ -366,7 +368,20 @@ def test_u1_stock_vs_extended_vs_unreachable() -> None:
     )
 
 
-def k1_world(*, banner: bool = False, moonraker: bool = False) -> FakeHttp:
+def k1_config(trusted: list[str], *, xheaders: bool) -> dict[str, Any]:
+    return {
+        "result": {
+            "config": {
+                "authorization": {"trusted_clients": trusted},
+                "server": {"use_xheaders": xheaders},
+            }
+        }
+    }
+
+
+def k1_world(
+    *, banner: bool = False, moonraker: bool = False, hardened: bool = False
+) -> FakeHttp:
     http = FakeHttp()
     http.set("GET", WEB, "/info", 200, {"model": "K1 SE"})
     http.set("GET", 4408, "/", 200, "<html/>")
@@ -378,10 +393,35 @@ def k1_world(*, banner: bool = False, moonraker: bool = False) -> FakeHttp:
         http.set(
             "GET", MOON, "/server/info", 200, {"result": {"klippy_state": "ready"}}
         )
+        trusted = (
+            ["127.0.0.1", "192.168.0.38"]
+            if hardened
+            else ["127.0.0.1", "192.168.0.0/16"]
+        )
+        http.set(
+            "GET",
+            MOON,
+            "/server/config",
+            200,
+            k1_config(trusted, xheaders=not hardened),
+        )
     return http
 
 
-def test_k1_walks_stock_rooted_helper_klipper() -> None:
+def helper_runner(*, nginx_denies: bool = True) -> FakeRunner:
+    runner = (
+        FakeRunner()
+        .on("test -d /usr/data", rc=0)
+        .on("test -e /usr/data/helper-script/helper.sh", rc=0)
+    )
+    if nginx_denies:
+        runner.on("grep -c 'deny all'", rc=0, out="2\n")
+    else:
+        runner.on("grep -c 'deny all'", rc=1, out="0\n")
+    return runner
+
+
+def test_k1_walks_stock_rooted_helper_moonraker_klipper() -> None:
     stock, r = detect_k1(k1_world())
     assert stock.state == "stock"
     assert r.calls == []  # no ssh banner -> the ssh states are not even probed
@@ -390,21 +430,63 @@ def test_k1_walks_stock_rooted_helper_klipper() -> None:
     rooted, _ = detect_k1(k1_world(banner=True), rooted_runner)
     assert rooted.state == "rooted" and rooted.matched == ("stock", "rooted")
 
-    helper_runner = (
-        FakeRunner()
-        .on("test -d /usr/data", rc=0)
-        .on("test -e /usr/data/helper-script/helper.sh", rc=0)
-    )
-    helper, _ = detect_k1(k1_world(banner=True), helper_runner)
+    helper, _ = detect_k1(k1_world(banner=True), helper_runner())
     assert helper.state == "helper-installed"
 
-    ready, _ = detect_k1(k1_world(banner=True, moonraker=True), helper_runner)
+    open_lan, _ = detect_k1(
+        k1_world(banner=True, moonraker=True, hardened=False), helper_runner()
+    )
+    assert open_lan.state == "moonraker-installed"
+
+    ready, _ = detect_k1(
+        k1_world(banner=True, moonraker=True, hardened=True), helper_runner()
+    )
     assert ready.state == "klipper-ready" and ready.matched == (
         "stock",
         "rooted",
         "helper-installed",
+        "moonraker-installed",
         "klipper-ready",
     )
+
+
+def test_a_moonraker_open_to_the_lan_is_never_klipper_ready() -> None:
+    """Each piece of the lock-down evidence is needed for klipper-ready."""
+    ok = k1_world(banner=True, moonraker=True, hardened=True)
+    assert detect_k1(ok, helper_runner())[0].state == "klipper-ready"
+    cidr = k1_world(banner=True, moonraker=True, hardened=True)
+    cidr.set(
+        "GET",
+        MOON,
+        "/server/config",
+        200,
+        k1_config(["127.0.0.1", "192.168.0.0/16"], xheaders=False),
+    )
+    assert detect_k1(cidr, helper_runner())[0].state == "moonraker-installed"
+    xheaders = k1_world(banner=True, moonraker=True, hardened=True)
+    xheaders.set(
+        "GET", MOON, "/server/config", 200, k1_config(["127.0.0.1"], xheaders=True)
+    )
+    assert detect_k1(xheaders, helper_runner())[0].state == "moonraker-installed"
+    no_nginx = k1_world(banner=True, moonraker=True, hardened=True)
+    assert (
+        detect_k1(no_nginx, helper_runner(nginx_denies=False))[0].state
+        == "moonraker-installed"
+    )
+    no_ssh, _ = detect_k1(ok, helper_runner(), use_ssh=False)
+    # No ssh: root and the nginx evidence cannot be proven, so the lock-down cannot be either.
+    assert no_ssh.state == "moonraker-installed" and no_ssh.partial
+
+
+def test_a_lockdown_that_cannot_be_read_fails_closed() -> None:
+    """Moonraker answers /server/info but /server/config has another shape: the printer is not klipper-ready."""
+    world = k1_world(banner=True, moonraker=True, hardened=True)
+    world.set("GET", MOON, "/server/config", 200, {"result": {"unexpected": True}})
+    assert detect_k1(world, helper_runner())[0].state == "moonraker-installed"
+    world.set("GET", MOON, "/server/config", 200, "<html>proxy error page</html>")
+    assert detect_k1(world, helper_runner())[0].state == "moonraker-installed"
+    world.set("GET", MOON, "/server/config", 502, "")
+    assert detect_k1(world, helper_runner())[0].state == "moonraker-installed"
 
 
 def test_a_banner_without_a_working_key_is_a_partial_detection_not_rooted() -> None:
@@ -435,9 +517,100 @@ def test_detection_json_carries_every_probe_outcome() -> None:
     assert evidence["stock"]["probes"][0]["outcome"] == "ok"
 
 
+def neg_probe(path: str, *, absent_ok: bool = False) -> Probe:
+    """`a.b` must not match /bad/; a body without it is 'absent' only with absent_ok."""
+    return probe(
+        "http_get",
+        service="web",
+        path=path,
+        json_path="a.b",
+        regex="bad",
+        negate=True,
+        absent_ok=absent_ok,
+    )
+
+
 @pytest.mark.parametrize("profile", list(PROFILES.values()), ids=lambda p: p.id)
 def test_every_profile_detects_only_with_known_services(profile: Profile) -> None:
     services = set(profile.services)
     for s in profile.states:
         for p in s.detection.probes if s.detection else ():
             assert not p.service or p.service in services
+
+
+# ---- negated probes fail closed ----------------------------------------------------------------
+
+
+def test_a_negated_probe_over_an_unreadable_answer_is_unknown_not_absent() -> None:
+    http = FakeHttp()
+    http.set("GET", WEB, "/json", 200, {"other": 1})
+    http.set("GET", WEB, "/html", 200, "<html>spa fallback</html>")
+    http.set("GET", WEB, "/big", 200, b"x" * (256 * 1024))
+    for path in ("/json", "/html"):
+        out, detail = run_probe(neg_probe(path), http)
+        assert out == ERROR, (path, detail)
+    out, detail = run_probe(neg_probe("/big"), http)
+    assert out == ERROR and "cannot be read whole" in detail
+
+
+def test_absent_ok_marks_options_that_are_legitimately_missing_when_unset() -> None:
+    http = FakeHttp()
+    http.set("GET", WEB, "/json", 200, {"other": 1})
+    http.set("GET", WEB, "/html", 200, "<html>spa fallback</html>")
+    assert run_probe(neg_probe("/json", absent_ok=True), http)[0] == OK
+    assert run_probe(neg_probe("/html", absent_ok=True), http)[0] == OK
+    # absent_ok does not hide a value that IS there.
+    http.set("GET", WEB, "/there", 200, {"a": {"b": "bad"}})
+    assert run_probe(neg_probe("/there", absent_ok=True), http)[0] == FAIL
+
+
+def test_a_negated_probe_still_reads_an_answered_no_as_absent() -> None:
+    """A refused connection or a status other than the expected one is a definite 'not there'."""
+    http = FakeHttp()
+    http.set("GET", WEB, "/", 200, "")
+    neg = probe("http_get", service="web", path="/missing", negate=True)
+    assert run_probe(neg, http)[0] == OK  # 404
+    assert run_probe(neg, FakeHttp())[0] == OK  # connection refused
+    http.set("GET", WEB, "/gone", 502, "")
+    assert (
+        run_probe(probe("http_get", service="web", path="/gone", negate=True), http)[0]
+        == OK
+    )
+
+
+def test_a_stock_web_server_that_answers_every_path_with_a_page_still_reads_as_stock() -> (
+    None
+):
+    """U1 stock firmware could serve its UI for unknown paths: that must not hide `stock`."""
+    world = u1_world()
+    world.set(
+        "GET",
+        WEB,
+        "/firmware-config/api/status",
+        200,
+        "<!doctype html><title>Fluidd</title>",
+    )
+    det, _ = detect("snapmaker-u1", world, model="Snapmaker U1")
+    assert det.state == "stock"
+
+
+def test_wait_down_sees_a_printer_go_away_and_gives_up_when_it_never_does() -> None:
+    from printer_fw.probes import wait_down
+
+    http = FakeHttp()
+    be, *_ = make_backends(http=http)
+    p = probe("http_get", service="web", path="/up")
+    http.set("GET", WEB, "/up", 200, "")
+    went, results = wait_down([p], EP, be, wait_s=10, interval_s=2)
+    assert went is False and results[0].holds
+    calls = {"n": 0}
+
+    def flaky() -> tuple[int, str]:
+        calls["n"] += 1
+        if calls["n"] >= 3:
+            raise ConnectionRefusedError("rebooting")
+        return 200, ""
+
+    http.routes[("GET", WEB, "/up")] = flaky
+    went, results = wait_down([p], EP, be, wait_s=60, interval_s=2)
+    assert went is True and calls["n"] == 3 and results[0].outcome == FAIL

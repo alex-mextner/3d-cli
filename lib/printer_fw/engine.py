@@ -49,12 +49,14 @@ from printer_fw.backup import (
 from printer_fw.detect import Detection, detect_state
 from printer_fw.plan import Plan, PlannedStep, build_plan
 from printer_fw.probes import (
+    FAIL,
     Backends,
     Endpoint,
     ProbeResult,
     evaluate,
     evaluate_group,
     poll,
+    wait_down,
 )
 from printer_fw.profiles import Profile, Step
 from printer_fw.target import Target
@@ -410,19 +412,27 @@ def _refuse(log: EventLog, message: str, *remediation: str, **data: object) -> _
     return _Stop(1, "refused")
 
 
-def run_apply(ctx: Context, opts: ApplyOptions) -> ApplyResult:
-    log = ctx.log
+@dataclass
+class _Run:
+    """What a run learned on the way, kept even when it stops early (reported as `from`)."""
+
     state_before: str | None = None
     final: str | None = None
+
+
+def run_apply(ctx: Context, opts: ApplyOptions) -> ApplyResult:
+    run = _Run()
     try:
-        state_before, final, result = _apply(ctx, opts)
+        result = _apply(ctx, opts, run)
         code = 0
     except _Stop as stop:
         code, result = stop.code, stop.result
-    return ApplyResult(code, result, state_before, opts.to, final, tuple(log.events))
+    return ApplyResult(
+        code, result, run.state_before, opts.to, run.final, tuple(ctx.log.events)
+    )
 
 
-def _apply(ctx: Context, opts: ApplyOptions) -> tuple[str | None, str | None, str]:
+def _apply(ctx: Context, opts: ApplyOptions, run: _Run) -> str:
     profile, target, log = ctx.profile, ctx.target, ctx.log
     mode = "APPLY" if opts.yes else "DRY RUN (nothing is changed; add --yes to apply)"
     log.emit("start", f"fw apply {target.name} --to {opts.to} [{profile.id}]: {mode}")
@@ -468,6 +478,7 @@ def _apply(ctx: Context, opts: ApplyOptions) -> tuple[str | None, str | None, st
             "Run `3d printers fw status NAME` for the probe evidence.",
         )
     state = detection.state
+    run.state_before = state
     bad = guards.forbidden_options(profile, opts.also, state, opts.to)
     if bad:
         for v in bad:
@@ -476,7 +487,8 @@ def _apply(ctx: Context, opts: ApplyOptions) -> tuple[str | None, str | None, st
     plan = build_plan(profile, state, opts.to, opts.also)
     if plan.empty:
         log.emit("noop", f"{target.name} is already in state {opts.to}: nothing to do")
-        return state, state, "noop"
+        run.final = state
+        return "noop"
     violations = guards.plan_violations(profile, plan)
     if violations:
         for v in violations:
@@ -528,18 +540,27 @@ def _apply(ctx: Context, opts: ApplyOptions) -> tuple[str | None, str | None, st
         gate="idle",
         ok=idle.idle,
     )
+    ssh_blocked = (
+        [s.step.id for s in plan.steps if s.step.kind in ("ssh_script", "ssh_command")]
+        if not ctx.be.use_ssh
+        else []
+    )
     missing_files = [
         s.step.id
         for s in plan.steps
         if s.step.kind == "http_upload" and s.step.id not in files
     ]
     if not opts.yes:
-        ready = manifest is not None and idle.idle and not missing_files
+        ready = (
+            manifest is not None and idle.idle and not missing_files and not ssh_blocked
+        )
         hints: list[str] = []
         if manifest is None or not idle.idle:
             hints.append("fix the gates above")
         if missing_files:
             hints.append("pass --file for " + ", ".join(missing_files))
+        if ssh_blocked:
+            hints.append("drop --no-ssh: steps " + ", ".join(ssh_blocked) + " need ssh")
         log.emit(
             "dry-run",
             "dry run: nothing was changed"
@@ -550,7 +571,13 @@ def _apply(ctx: Context, opts: ApplyOptions) -> tuple[str | None, str | None, st
             ),
             ready=ready,
         )
-        return state, None, "dry-run"
+        return "dry-run"
+    if ssh_blocked:
+        raise _refuse(
+            log,
+            f"--no-ssh forbids the ssh steps of this plan: {', '.join(ssh_blocked)}",
+            "Run the same command without --no-ssh (key authentication only; see `3d printers fw --help`).",
+        )
     if manifest is None:
         raise _refuse(
             log,
@@ -572,6 +599,7 @@ def _apply(ctx: Context, opts: ApplyOptions) -> tuple[str | None, str | None, st
     for i, ps in enumerate(plan.steps, 1):
         _run_step(ctx, plan, ps, i, files, manifest)
     final_det = detect_state(profile, ctx.ep, ctx.be)
+    run.final = final_det.state
     target_state = profile.state(opts.to)
     if (
         target_state is not None
@@ -592,39 +620,68 @@ def _apply(ctx: Context, opts: ApplyOptions) -> tuple[str | None, str | None, st
     log.emit(
         "done", f"done: {target.name} is now in state {opts.to}", state=final_det.state
     )
-    return state, final_det.state, "applied"
+    return "applied"
 
 
-def _stop_failed(ctx: Context, step: Step, why: str) -> _Stop:
-    ctx.log.emit("failed", f"STOPPED at step {step.id}: {why}", step=step.id)
+def _emit_rollback(ctx: Context, step: Step) -> None:
     if step.rollback is not None:
         ctx.log.emit(
             "rollback", "  ROLLBACK: " + step.rollback.instruction.strip(), step=step.id
         )
+
+
+def _stop_failed(ctx: Context, step: Step, why: str) -> _Stop:
+    ctx.log.emit("failed", f"STOPPED at step {step.id}: {why}", step=step.id)
+    _emit_rollback(ctx, step)
     return _Stop(1, "failed")
 
 
-def _invariants(ctx: Context, step: Step, when: str) -> None:
+def _enforce_invariants(ctx: Context, step: Step, when: str) -> None:
     for g, res in guards.check_invariants(ctx.profile, step, ctx.ep, ctx.be):
         v = guards.Violation(g, f"{when} step {step.id}: {render.clean(res.detail)}")
         ctx.log.emit("guard", "STOPPED: " + v.render(), guard=g.id)
-        if step.rollback is not None:
-            ctx.log.emit(
-                "rollback",
-                "  ROLLBACK: " + step.rollback.instruction.strip(),
-                step=step.id,
-            )
+        _emit_rollback(ctx, step)
         raise _Stop(1, "failed")
 
 
-def _verify(ctx: Context, step: Step) -> tuple[bool, list[ProbeResult]]:
-    return poll(
-        step.verify.probes,
-        ctx.ep,
-        ctx.be,
-        wait_s=step.verify.wait_s,
-        interval_s=step.verify.interval_s,
+# What a rebooting printer does to a connection that was open while it went down.
+DROPPED = (ConnectionResetError, BrokenPipeError, ConnectionAbortedError, TimeoutError)
+
+
+def _connection_dropped(ctx: Context, step: Step, what: str, exc: OSError) -> None:
+    """A dropped connection is only believable when the step expects the printer to reboot (it has
+    `down_probes`); then the verification decides. Anywhere else it is a failed step."""
+    if not step.verify.down_probes:
+        raise _stop_failed(ctx, step, f"{what} failed: {exc}") from exc
+    ctx.log.emit(
+        "upload",
+        f"  connection dropped during {what} ({exc}); the printer is expected to reboot, verifying",
+        step=step.id,
     )
+
+
+def _verify(ctx: Context, step: Step) -> tuple[bool, list[ProbeResult]]:
+    v = step.verify
+    if v.down_probes:
+        # The printer must first be SEEN going down: a verification that already holds before
+        # the action says nothing about the action.
+        went_down, down_results = wait_down(
+            v.down_probes,
+            ctx.ep,
+            ctx.be,
+            wait_s=v.down_wait_s,
+            interval_s=min(v.interval_s, 2.0),
+        )
+        if not went_down:
+            seen = down_results[-1]
+            ghost = ProbeResult(
+                seen.probe,
+                FAIL,
+                f"the printer never went down within {v.down_wait_s:g}s (still: {seen.detail}): "
+                "the action did not take effect, or the reboot was too short to see",
+            )
+            return False, [ghost]
+    return poll(v.probes, ctx.ep, ctx.be, wait_s=v.wait_s, interval_s=v.interval_s)
 
 
 def _run_step(
@@ -671,31 +728,29 @@ def _run_step(
     if step.kind == "manual":
         _manual(ctx, step)
     else:
-        _invariants(ctx, step, "before")
-        if not step.automatable:
-            raise _stop_failed(
-                ctx,
-                step,
-                "the step is not automatable and not manual: refusing to run it",
-            )
+        _enforce_invariants(ctx, step, "before")
         _execute(ctx, step, files.get(step.id))
-    ok, results = _verify(ctx, step)
-    if not ok:
-        raise _stop_failed(ctx, step, "verification failed: " + _probe_summary(results))
-    log.emit(
-        "verify",
-        f"  verified: {'; '.join(p.title for p in step.verify.probes)}",
-        step=step.id,
-    )
-    _invariants(ctx, step, "after")
+        ok, results = _verify(ctx, step)
+        if not ok:
+            raise _stop_failed(
+                ctx, step, "verification failed: " + _probe_summary(results)
+            )
+        log.emit(
+            "verify",
+            f"  verified: {'; '.join(p.title for p in step.verify.probes)}",
+            step=step.id,
+        )
+    _enforce_invariants(ctx, step, "after")
 
 
 def _manual(ctx: Context, step: Step) -> None:
+    """Returns only once the step's verification holds (already, or after the user did it);
+    otherwise raises the pending-manual stop. The verification runs once per answer: a `confirm`
+    probe must not ask the user the same question twice."""
     log = ctx.log
     # A `confirm` probe asks the human; asking before showing the instruction would be absurd.
     observable = all(p.kind != "confirm" for p in step.verify.probes)
-    ok = observable and evaluate_group(step.verify.probes, "all", ctx.ep, ctx.be)[0]
-    if ok:
+    if observable and evaluate_group(step.verify.probes, "all", ctx.ep, ctx.be)[0]:
         log.emit("skip", "  already done: its verification probe holds", step=step.id)
         return
     log.lines(["  do by hand:", *render.indent(step.instruction)])
@@ -718,6 +773,11 @@ def _manual(ctx: Context, step: Step) -> None:
             raise _Stop(1, "pending-manual")
         ok, results = _verify(ctx, step)
         if ok:
+            log.emit(
+                "verify",
+                f"  verified: {'; '.join(p.title for p in step.verify.probes)}",
+                step=step.id,
+            )
             return
         log.emit(
             "verify", "  not verified yet: " + _probe_summary(results), step=step.id
@@ -727,6 +787,10 @@ def _manual(ctx: Context, step: Step) -> None:
 def _execute(ctx: Context, step: Step, file: Path | None) -> None:
     ep, be, log = ctx.ep, ctx.be, ctx.log
     if step.kind in ("ssh_script", "ssh_command"):
+        if not be.use_ssh:
+            raise _stop_failed(
+                ctx, step, "ssh is disabled (--no-ssh): refusing to run it"
+            )
         assert ep.ssh is not None
         res = be.runner.run(
             ep.host, ep.ssh.user, step.command, timeout=step.timeout_s, port=ep.ssh_port
@@ -741,6 +805,9 @@ def _execute(ctx: Context, step: Step, file: Path | None) -> None:
         url = ep.url(step.post.service, step.post.path)
         try:
             status, body = be.http("POST", url, timeout=step.timeout_s, body=b"")
+        except DROPPED as exc:
+            _connection_dropped(ctx, step, f"POST {url}", exc)
+            return
         except OSError as exc:
             raise _stop_failed(ctx, step, f"POST {url}: {exc}") from exc
         _check_http(
@@ -758,15 +825,11 @@ def _execute(ctx: Context, step: Step, file: Path | None) -> None:
         log.emit("upload", f"  uploading {file.name} to {url}", step=step.id)
         try:
             status, body = be.upload(url, file, file.name, {}, timeout=step.timeout_s)
-        except OSError as exc:
-            # The printer reboots into the new firmware and may drop the connection after it took
-            # the whole file: the verification probe, not this socket, decides.
-            log.emit(
-                "upload",
-                f"  connection ended during/after the upload ({exc}); verifying",
-                step=step.id,
-            )
+        except DROPPED as exc:
+            _connection_dropped(ctx, step, f"upload to {url}", exc)
             return
+        except OSError as exc:
+            raise _stop_failed(ctx, step, f"upload to {url} failed: {exc}") from exc
         _check_http(
             ctx,
             step,

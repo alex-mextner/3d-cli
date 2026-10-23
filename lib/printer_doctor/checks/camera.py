@@ -15,7 +15,7 @@ WHY: `3d printer vision`/`watch`/`bed` and the Home Assistant stream all read th
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 from printer_doctor.context import Context
 from printer_doctor.model import CannotSee, Check, CheckResult, Fix, JsonValue, Verdict
@@ -60,9 +60,12 @@ def _config(ctx: Context) -> Verdict:
     )
     if problems:
         return Verdict.fail("; ".join(problems), "error", problems=problems)
+    from printer_ops.webui import redact_url
+
     spec = _spec(ctx)
+    url = redact_url(spec.snapshot_url(device.host, device.port) or "")
     return Verdict.ok(
-        f"camera kind {spec.kind}, snapshot {spec.snapshot_url(device.host, device.port)}",
+        f"camera kind {spec.kind}, snapshot {url}",
         kind=spec.kind,
         source=spec.source,
         keepalive=spec.keepalive,
@@ -87,13 +90,27 @@ def _snapshot_applies(ctx: Context) -> str | None:
     return None if spec.present else f"no camera configured ({spec.source})"
 
 
-def _grab(ctx: Context, url: str) -> tuple[int | None, bytes, str | None, str | None]:
-    """(status, body, content-type, transport error)."""
+class Grab(NamedTuple):
+    status: int | None  # None: no HTTP answer at all
+    body: bytes
+    content_type: str | None
+    error: (
+        str | None
+    )  # the transport error when status is None (credentials already redacted)
+
+    @property
+    def is_jpeg(self) -> bool:
+        return self.status == 200 and self.body.startswith(JPEG_MAGIC)
+
+
+def _grab(ctx: Context, url: str) -> Grab:
     try:
         got = ctx.external("GET", url)
     except CannotSee as exc:
-        return None, b"", None, exc.reason
-    return got.reply.status, got.reply.body, got.reply.headers.get("content-type"), None
+        return Grab(None, b"", None, exc.reason)
+    return Grab(
+        got.reply.status, got.reply.body, got.reply.headers.get("content-type"), None
+    )
 
 
 def _snapshot(ctx: Context) -> Verdict:
@@ -103,38 +120,46 @@ def _snapshot(ctx: Context) -> Verdict:
     device = ctx.device
     spec = _spec(ctx)
     url = spec.snapshot_url(device.host, device.port)
-    assert url is not None
-    status, body, ctype, error = _grab(ctx, url)
-    woke = False
+    if url is None:
+        raise CannotSee(f"camera kind {spec.kind} has no snapshot URL", "error")
+    grab = _grab(ctx, url)
+    woke, attempted, keepalive_error = False, False, None
     for _ in range(WAKE_TRIES if spec.keepalive else 0):
-        if status == 200 and body.startswith(JPEG_MAGIC):
+        # A camera that sleeps still answers HTTP (503/404); no answer at all means the host or
+        # port is down, which a wake-up cannot fix and would only wait on again.
+        if grab.is_jpeg or grab.status is None:
             break
-        if not woke:
+        if not attempted:
+            attempted = True
             try:
                 ctx.wake_camera(spec)
+                woke = True
             except (ThreeDError, OSError) as exc:
-                error = f"keepalive failed: {exc}"
-            woke = True
+                keepalive_error = redact_url(str(getattr(exc, "message", None) or exc))
         ctx.sleep(1.0)
-        status, body, ctype, error = _grab(ctx, url)
+        grab = _grab(ctx, url)
     evidence: dict[str, JsonValue] = {
         "url": redact_url(url),
         "kind": spec.kind,
-        "http_status": status,
-        "bytes": len(body),
-        "content_type": ctype,
+        "http_status": grab.status,
+        "bytes": len(grab.body),
+        "content_type": grab.content_type,
         "woken_with_keepalive": woke,
+        "keepalive_error": keepalive_error,
     }
-    if status == 200 and body.startswith(JPEG_MAGIC):
-        return Verdict.ok(f"snapshot is a JPEG ({len(body)} bytes)", **evidence)
-    if status is None:
+    if grab.is_jpeg:
+        return Verdict.ok(f"snapshot is a JPEG ({len(grab.body)} bytes)", **evidence)
+    note = f" (keepalive failed: {keepalive_error})" if keepalive_error else ""
+    if grab.status is None:
         return Verdict.fail(
-            f"snapshot URL does not answer: {error}", "error", **evidence
+            f"snapshot URL does not answer: {grab.error}", "error", **evidence
         )
-    if status != 200:
-        return Verdict.fail(f"snapshot URL answers HTTP {status}", "error", **evidence)
+    if grab.status != 200:
+        return Verdict.fail(
+            f"snapshot URL answers HTTP {grab.status}{note}", "error", **evidence
+        )
     return Verdict.fail(
-        f"snapshot answers 200 but is not a JPEG (starts {body[:4].hex() or 'empty'})",
+        f"snapshot answers 200 but is not a JPEG (starts {grab.body[:4].hex() or 'empty'}){note}",
         "error",
         **evidence,
     )
@@ -143,7 +168,9 @@ def _snapshot(ctx: Context) -> Verdict:
 def _snapshot_steps(ctx: Context, result: CheckResult) -> list[str]:
     url = result.evidence.get("url")
     kind = result.evidence.get("kind")
-    steps = [f"Open {url} in a browser: it must show one still frame."]
+    steps = [
+        f"Open {url} in a browser: it must show one still frame (credentials are left out of this report)."
+    ]
     if kind == "mjpg-streamer":
         steps.append(
             "The streamer is not running: restart it on the printer (Creality Helper Script: "
@@ -160,7 +187,6 @@ def _snapshot_steps(ctx: Context, result: CheckResult) -> list[str]:
             + str(ctx.device.source)
             + "."
         )
-    steps.append(f"Then `3d printers doctor {ctx.name} --check camera-snapshot`.")
     return steps
 
 

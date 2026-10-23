@@ -572,7 +572,8 @@ def test_watch_units_fail_for_dry_run_with_the_fix_commands_and_never_execute_th
     ) and "3d-printer-vision@p1.service" in rec.result.summary
     assert rec.fix is not None and not rec.fix.applied
     assert (
-        "systemctl --user restart 3d-printer-vision@p1.service" in rec.fix.manual_steps
+        "$ systemctl --user restart 3d-printer-vision@p1.service"
+        in rec.fix.manual_steps
     )
 
 

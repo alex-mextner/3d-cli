@@ -58,6 +58,7 @@ def test_the_shortest_path_is_the_chain_of_transitions() -> None:
         "enable-root",
         "install-helper-script",
         "install-moonraker",
+        "finish-moonraker",
     ]
     assert plan.step_ids() == [
         "enable-root-on-screen",
@@ -88,6 +89,7 @@ def test_an_unreachable_target_is_a_refusal_listing_what_is_reachable() -> None:
     assert reachable_states(K1, "stock") == [
         "rooted",
         "helper-installed",
+        "moonraker-installed",
         "klipper-ready",
     ]
     assert reachable_states(K1, "klipper-ready") == []
@@ -273,13 +275,13 @@ def test_fluidd_install_must_fix_permissions_at_load_and_at_plan_time() -> None:
     for t in data["transitions"]:
         for s in t["steps"]:
             if s["id"] == "install-fluidd":
-                s["command"] = s["command"].replace(
+                s["instruction"] = s["instruction"].replace(
                     "chmod -R a+rX /usr/data/fluidd", "true"
                 )
     with pytest.raises(ProfileError, match="does not match /chmod -R a"):
         parse_profile(data, "k1.yaml")
     broken = with_step(
-        K1, "install-fluidd", command="set -e\n/usr/data/k1drive.sh install_fluidd\n"
+        K1, "install-fluidd", instruction="Run /usr/data/k1drive.sh install_fluidd\n"
     )
     plan = build_plan(broken, "helper-installed", "klipper-ready")
     assert [v.guard.id for v in guards.plan_violations(broken, plan)] == [
@@ -388,14 +390,10 @@ def test_an_invariant_that_cannot_be_read_counts_as_violated() -> None:
     ]
 
 
-def test_require_idle_applies_to_risky_steps_only() -> None:
-    risky = K1.step("fetch-helper-script")
-    low = K1.step("install-ssh-key")
-    assert risky is not None and low is not None
-    assert guards.idle_guard(K1, risky[1]) is not None
-    assert guards.idle_guard(K1, low[1]) is None
+def test_require_idle_is_checked_before_every_step_and_quotes_its_reason() -> None:
     guard = guards.any_idle_guard(K1)
     assert guard is not None and "Do not start while the K1 prints" in guard.reason
+    assert guards.any_idle_guard(PROFILES["bambu-lab-p1-a1"]) is None
 
 
 def test_violation_json_quotes_reason_and_sources() -> None:

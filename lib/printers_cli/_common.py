@@ -8,10 +8,10 @@ UsageError, exit 2) with `3d printers` as the command prefix in messages.
 from __future__ import annotations
 
 import json
-from collections.abc import Set
+from collections.abc import Callable, Sequence, Set
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from errors import InvalidArgument, UsageError
 from printops.cli._common import Parsed, api_errors as _api_errors
@@ -23,12 +23,17 @@ if TYPE_CHECKING:
     from printops.client import ApiClient
     from printops.fleet import FleetPrinter
 
+_T = TypeVar("_T")
+_R = TypeVar("_R")
+
 __all__ = [
     "Parsed",
     "api_errors",
     "client",
     "PrinterRef",
     "emit_json",
+    "parallel_map",
+    "parse_secs",
     "known_printers",
     "parse",
     "require_printer",
@@ -59,6 +64,35 @@ def api_errors(sub: str) -> AbstractContextManager[None]:
 
 def wants_help(argv: list[str]) -> bool:
     return any(a in ("-h", "--help") for a in argv)
+
+
+DEFAULT_SECS = 10.0
+
+
+def parse_secs(raw: str | None, command: str) -> float:
+    """`--secs S`: seconds to wait per printer read (default 10); NaN, inf, zero and text are InvalidArgument."""
+    if raw is None:
+        return DEFAULT_SECS
+    try:
+        value = float(raw)
+    except ValueError:
+        value = 0.0
+    if not 0 < value < float("inf"):  # false for nan too
+        raise InvalidArgument("--secs", raw, ["a number of seconds > 0, e.g. 3"], command=f"printers {command}")
+    return value
+
+
+def parallel_map(fn: Callable[[_T], _R], items: Sequence[_T]) -> list[_R]:
+    """`fn` over `items` on at most `cli.resources.max_workers()` threads, results in item order. Independent
+    printer reads that each may wait out a timeout must not queue behind one dead host."""
+    if len(items) < 2:
+        return [fn(i) for i in items]
+    from concurrent.futures import ThreadPoolExecutor
+
+    from cli.resources import max_workers
+
+    with ThreadPoolExecutor(max_workers=min(len(items), max_workers())) as pool:
+        return list(pool.map(fn, items))
 
 
 def emit_json(data: Any) -> None:
@@ -100,9 +134,10 @@ def known_printers() -> dict[str, PrinterRef]:
     }
 
 
-def require_printer(name: str, command: str) -> PrinterRef:
-    """The registry entry for `name`; an unknown name is an InvalidArgument listing the valid ones."""
-    refs = known_printers()
+def require_printer(name: str, command: str, refs: dict[str, PrinterRef] | None = None) -> PrinterRef:
+    """The registry entry for `name`; an unknown name is an InvalidArgument listing the valid ones.
+    Pass `refs` (from `known_printers()`) to look several names up without re-reading the registry."""
+    refs = known_printers() if refs is None else refs
     if name in refs:
         return refs[name]
     folded = [n for n in refs if n.casefold() == name.casefold()]

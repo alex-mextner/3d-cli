@@ -60,7 +60,7 @@ fakes). The `ssh` service defaults to 22 when the profile has an `ssh:` block.
 ### Probes (read-only)
 
 Used in `detection`, `preconditions`, `skip_if`, `verify`, `idle_probe` and invariant guards. Every
-probe may set `id`, `title`, `negate` (flip ok/fail) and `timeout` (seconds).
+probe may set `id`, `title`, `negate` (flip ok/fail), `absent_ok` and `timeout` (seconds).
 
 | kind | fields | holds when |
 |---|---|---|
@@ -68,14 +68,36 @@ probe may set `id`, `title`, `negate` (flip ok/fail) and `timeout` (seconds).
 | `adapter_kind` | `equals` | the registry's adapter name equals it (static, no contact) |
 | `tcp_open` | `service` | a TCP connection opens |
 | `tcp_banner` | `service`, `regex`, `timeout` | the service sends a banner matching `regex` (an sshd announcing itself) |
-| `ssh_command` | `command`, optional `regex` | the remote command exits 0 (and stdout matches). The command must start with `cat test [ ls grep head stat uname readlink wc df true` and contain no `> ; & \| backtick $(` — validated at load, so a probe cannot change a printer |
+| `ssh_command` | `command`, optional `regex` | the remote command exits 0 (and stdout matches). Validated at load so a probe cannot change a printer: the first word must be one of `cat test ls grep head stat uname readlink wc df true` and every character must be a letter, digit, space or one of `_ . / : = @ % + , ' " ^ -` — no newline, `$`, `;`, `&`, `\|`, `<`, `>`, backtick, backslash or braces |
 | `ssh_file_exists` | `path` | `test -e PATH` succeeds |
 | `confirm` | `prompt` | the user answers yes (interactive only; never usable for detection) |
 
-A probe has three outcomes besides negation: `ok`, `fail` (definitely not there — a refused connection
-is a fail) and `error` (could not tell: timeout, ssh auth failure; `skipped` for `--no-ssh` and
-non-interactive `confirm`). `negate` flips ok/fail and leaves error/skipped alone, so a rebooting printer
-is never read as "firmware not present".
+A probe has a tri-state outcome: `ok`, `fail` (definitely not there — a refused connection, or an HTTP status other
+than the expected one, is a fail) and `error` (could not tell: timeout, ssh auth failure, an answer longer than
+256 KiB; `skipped` for `--no-ssh` and non-interactive `confirm`). `negate` flips ok/fail and leaves error/skipped
+alone, so a rebooting printer is never read as "firmware not present". A **negated** `http_get` with a `json_path`
+also fails closed on an answer that is not JSON or lacks the path (`error`, not "absent"), so a hardening check
+cannot pass vacuously against a page of an unexpected shape; add `absent_ok: true` for an option that is
+legitimately missing when it is unset (for example an auth switch left at its default) or to read a stock
+server's UI fallback page as "that API is not here". Pair a negated probe with a positive "readable" probe first
+(an `all` group stops at the first probe that does not hold).
+
+### Reuse: probe library and snippets
+
+```yaml
+probes:                         # named probes, used as {ref: NAME} anywhere a probe is expected
+  moonraker-up: {kind: http_get, service: moonraker, path: /server/info, title: Moonraker answers}
+snippets:                       # named text, used as {{snippet.NAME}} inside any string (a shared script header)
+  k1drive: |
+    cat > /usr/data/k1drive.sh <<'DRIVER'
+    ...
+states:
+  - id: up
+    detection: {all: [{ref: moonraker-up}, {ref: moonraker-up, negate: true, id: not-up}]}   # fields override
+```
+
+Both expand BEFORE validation, so a `ref`/snippet problem is reported like any other (`unknown probe ref 'x'`);
+a ref keeps the library name as its probe `id` unless it sets one.
 
 ### States
 
@@ -103,7 +125,7 @@ and is planned with `--from STATE`.
 transitions:
   - id: install-moonraker
     from: helper-installed
-    to: klipper-ready
+    to: moonraker-installed
     title: ...
     sources: [...]
     steps: [...]               # required, in order
@@ -128,7 +150,7 @@ firmware upgrade); an `--also` step is valid only when its transition lies on th
   instruction: |               # manual: what the user does
   upload: {service, path, field: file, accept_suffix, min_bytes, known_sha256: [...], expect_status, success_regex}
   post: {service, path, expect_status, success_regex}
-  verify: [probe, ...]         # or {wait_s: 900, interval_s: 10, probes: [...]}  REQUIRED for every step
+  verify: [probe, ...]         # or {wait_s: 900, interval_s: 10, down_probes: [...], down_wait_s: 300, probes: [...]}  REQUIRED
   rollback: {instruction: "...", to: stock}
   sources: [...]
   notes: ...
@@ -137,11 +159,22 @@ firmware upgrade); an `--also` step is valid only when its transition lies on th
 
 Rules enforced at load: `automatable: true` is only valid where the runbook gives a precise command or
 endpoint **and** a `verify` probe exists (3d never runs a step it cannot check); a manual step cannot be
-automatable; a step may only require `backup:` ids that 3d can take itself (not `manual` items);
-`upload.field` must be `file` (the part name the shared uploader sends). `verify.wait_s` polls for
-the minutes a reboot takes. A manual step is checked by its `verify` probe: already holding means "done
-earlier" and the step is skipped; otherwise the instruction is shown and (interactive) the tool waits for
-Enter and re-checks, or (non-interactive) the run stops with `NEXT: do the step, then re-run the same command`.
+automatable and every non-manual step MUST be automatable (a step 3d cannot run is a `manual` step); a step
+may only require `backup:` ids that 3d can take itself (not `manual` items); `upload.field` must be `file`
+(the part name the shared uploader sends). **Only automate what the runbook documents completely**: a menu
+function that reads answers from stdin is automatable only when the runbook gives those answers (the K1
+Remove menus: `printf 'y\ny\n'`); the Install menus are manual steps whose instruction carries the commands.
+
+`verify.wait_s` polls for the minutes a reboot takes. A step that reboots the printer lists `down_probes`
+(with `down_wait_s`): those must first STOP holding — the printer is seen going down — before `probes` are polled,
+because a verification that already holds before the action says nothing about it. A dropped connection during an
+upload or POST is believed only for such a step (then the verification decides); anywhere else it is a failed
+step, and a refused connection (nothing was sent) always is.
+
+A manual step is checked by its `verify` probe: already holding means "done earlier" and the step is skipped;
+otherwise the instruction is shown and (interactive) the tool waits for Enter and re-checks — once per answer, so a
+`confirm` probe asks its question once — or (non-interactive) the run stops with
+`NEXT: do the step, then re-run the same command`.
 
 ### Backups
 
@@ -153,7 +186,7 @@ backups:
     service: moonraker  path: /server/files/config/printer.cfg    # http_get
     path: /usr/data/printer_data/config/printer.cfg               # ssh_file (cat)
     base: /usr/data  paths: [printer_data/config]                 # ssh_tar (tar czf -, archive verified)
-    optional: true               # an absent item (404 / no such file) is recorded `missing`, not a failure
+    optional: true               # absent = `missing` (404 / no such file) or `skipped` (connection refused); never a failure
     states: [rooted]             # taken only in these states (ssh items need root)
     expect_regex: '(?m)^#\*# \['  # the content must match (a SAVE_CONFIG block must exist)
     expect_tar_members: [printer_data/config/printer.cfg]
@@ -176,18 +209,21 @@ guard, and the refusal quotes `reason` and the source URLs.
 |---|---|---|
 | `forbidden_option` | `options: [ids]` | `--also ID` is refused (exit 1) and a plan that contains a step with that id is refused |
 | `forbidden_command_pattern` | `pattern` (regex) | no command of the plan may match |
-| `step_requires_command` | `step`, `pattern` | the step's command must contain the pattern — checked at profile load and on every plan |
+| `step_requires_command` | `step`, `pattern` | the step's command (a manual step: its instruction) must contain the pattern — checked at profile load and on every plan |
 | `step_requires_step` | `step`, `requires_step` | a plan containing `step` must contain `requires_step` |
-| `require_idle` | `risks` (default medium, high) | the printer must be idle before such a step; its reason is quoted in the refusal |
-| `invariant_probe` | `probe` (one or a list; all must hold) | before and after every step; an unreadable invariant counts as violated |
+| `require_idle` | — | the printer must be idle before every step; the guard's reason is quoted in the refusal |
+| `invariant_probe` | `probe` (one probe or a list; all must hold) | before and after every step; an unreadable invariant counts as violated |
 
-`scope: referenced` limits a run-time guard to steps that list `{guard: ID}` in `preconditions`.
+`scope: referenced` limits an invariant to steps that list `{guard: ID}` in `preconditions`.
 
 ### The idle check
 
-`apply` refuses while the printer is printing, paused, busy or unreadable. It asks the registry
-adapter's status (`moonraker` / `creality-stock`); if that cannot be read, the profile's `idle_probe`
-decides, and it holds only for a *readable, idle* printer. No adapter and no `idle_probe` = busy.
+`apply` refuses while the printer is printing, paused, busy or unreadable — at the start AND before every
+step (a step runs minutes after the first check). It asks the registry adapter's status (`moonraker` /
+`creality-stock`); if that cannot be read, the profile's `idle_probe` decides, and it holds only for a
+*readable, idle* printer (an HTTP error, a body of another shape or an unreachable printer all count as busy).
+No adapter and no `idle_probe` = busy. A `require_idle` guard supplies the `reason` and sources quoted in
+the refusal.
 
 ### SSH and secrets
 
@@ -213,8 +249,9 @@ host-key policy is ssh's own: connect once by hand so the key is in `known_hosts
 
 ## The shipped profiles
 
-Generated from the files; the YAML is the source of truth. "Detected by" lists the probes (`not` =
-negated). Every URL below is cited by the profile.
+Maintained by hand from the YAML (the YAML is the source of truth); `tests/test_printer_fw_docs.py` fails when a
+profile, state, transition, step, guard or source URL of a shipped file is missing from this page. "Detected by"
+lists the probes (`not` = negated). Every URL below is cited by the profile.
 
 ### `bambu-lab-p1-a1` — Bambu Lab P1 and A1 series (P1P, P1S, A1, A1 mini)
 
@@ -269,13 +306,15 @@ Sources: <https://wiki.bambulab.com/en/knowledge-sharing/enable-lan-mode>; <http
 | `stock` | all of: stock web server answers GET /info | Creality stock firmware (web-server on :80 and ws :9999; no Moonraker, no key-authenticated ssh) |
 | `rooted` | all of: dropbear sends an SSH banner; key-based ssh login works | Root enabled on the screen and key-based ssh works |
 | `helper-installed` | all of: /usr/data/helper-script/helper.sh exists (probed only after rooted) | Creality Helper Script present in /usr/data/helper-script |
-| `klipper-ready` | all of: Moonraker reports klippy_state ready | Moonraker answers with Klipper ready (Helper Script Moonraker + nginx) |
+| `moonraker-installed` | all of: Moonraker answers /server/info | Moonraker answers, but its LAN access is NOT narrowed yet (open to the whole LAN) |
+| `klipper-ready` | all of: Moonraker reports klippy_state ready; Moonraker reports its trusted_clients; not trusted_clients lists single hosts, no CIDR range; use_xheaders is off; nginx.conf denies other hosts (`deny all`) (probed only after moonraker-installed) | Moonraker reports Klipper ready AND is locked down (trusted_clients narrowed, xheaders off, nginx denies other hosts) |
 
 | Transition | Steps (kind, risk) | Sources |
 |---|---|---|
 | `stock` → `rooted` (enable-root) | `enable-root-on-screen` (manual, medium)<br>`install-ssh-key` (manual, low) | <https://guilouz.github.io/Creality-Helper-Script-Wiki/firmwares/install-and-update-rooted-firmware-k1/><br><https://github.com/alex-mextner/3d-cli/blob/main/docs/printers/k1se-root-upgrade.md> |
 | `rooted` → `helper-installed` (install-helper-script) | `fetch-helper-script` (ssh_script, automatable, medium) | <https://guilouz.github.io/Creality-Helper-Script-Wiki/helper-script/helper-script-installation/><br><https://github.com/alex-mextner/3d-cli/blob/main/docs/printers/k1se-root-upgrade.md> |
-| `helper-installed` → `klipper-ready` (install-moonraker) | `remove-preinstalled-moonraker-fluidd` (ssh_script, automatable, medium)<br>`install-moonraker-nginx` (ssh_script, automatable, medium)<br>`install-fluidd` (ssh_script, automatable, medium)<br>`narrow-trusted-clients` (manual, medium)<br>`install-gcode-shell-command` (manual, low) *optional, `--also`*<br>`install-save-zoffset-macros` (ssh_script, automatable, low) *optional, `--also`*<br>`install-usb-camera` (manual, medium) *optional, `--also`* | <https://github.com/alex-mextner/3d-cli/blob/main/docs/printers/k1se-root-upgrade.md><br><https://guilouz.github.io/Creality-Helper-Script-Wiki/helper-script/moonraker-k1/> |
+| `helper-installed` → `moonraker-installed` (install-moonraker) | `remove-preinstalled-moonraker-fluidd` (ssh_script, automatable, medium)<br>`install-moonraker-nginx` (manual, medium) | <https://github.com/alex-mextner/3d-cli/blob/main/docs/printers/k1se-root-upgrade.md><br><https://guilouz.github.io/Creality-Helper-Script-Wiki/helper-script/moonraker-k1/> |
+| `moonraker-installed` → `klipper-ready` (finish-moonraker) | `install-fluidd` (manual, medium)<br>`narrow-trusted-clients` (manual, medium)<br>`install-gcode-shell-command` (manual, low) *optional, `--also`*<br>`install-save-zoffset-macros` (manual, low) *optional, `--also`*<br>`install-usb-camera` (manual, medium) *optional, `--also`* | <https://github.com/alex-mextner/3d-cli/blob/main/docs/printers/k1se-root-upgrade.md> |
 
 | Guard | Kind | Why (quoted in the refusal) | Sources |
 |---|---|---|---|
@@ -297,7 +336,7 @@ Sources: <https://guilouz.github.io/Creality-Helper-Script-Wiki/>; <https://guil
 
 | State | Detected by | Meaning |
 |---|---|---|
-| `stock` | all of: Moonraker answers /machine/system_info; not firmware-config page does not answer | Snapmaker stock firmware (Klipper + Moonraker, no firmware-config page) |
+| `stock` | all of: Moonraker answers /machine/system_info; not firmware-config does not answer | Snapmaker stock firmware (Klipper + Moonraker, no firmware-config page) |
 | `extended` | all of: firmware-config /api/status lists System Information; Moonraker answers /machine/system_info | paxx12 Extended Firmware with Advanced Mode on (firmware-config answers) |
 
 | Transition | Steps (kind, risk) | Sources |
@@ -323,9 +362,14 @@ Sources: <https://github.com/paxx12-snapmaker-u1/SnapmakerU1-Extended-Firmware>;
   real printer can disagree; each assumption that no source states is marked `[INFERENCE]` in the profile.
 - Snapmaker U1: the firmware-config API (`/firmware-config/api/status`, `.../upgrade/upload`,
   `.../action/<id>`) is read from the paxx12 source tree (tag `v1.6.0-paxx12-22`), not exercised. An extended
-  build with Advanced Mode off looks like stock to read-only probes.
-- Creality K1: a banner-only dropbear needs ~28 s; `fw status --no-ssh` skips those probes. The Helper Script menu
-  functions the install steps call (`install_moonraker_nginx`, `install_fluidd`, ...) are the ones the runbook used on
-  2026-10-15; the verification of `install-save-zoffset-macros` assumes the include lands in `printer.cfg`.
+  build with Advanced Mode off looks like stock to read-only probes. The reboot steps rely on Moonraker being
+  seen unreachable for at least one probe (poll every 2 s); a reboot shorter than that reads as "the printer never
+  went down" and fails closed with the rollback printed.
+- Creality K1: a banner-only dropbear needs ~28 s; `fw status --no-ssh` skips those probes. The Helper Script is
+  pinned to the runbook's commit `b46787a` (that it is reachable from `origin/main` is an `[INFERENCE]`; the step
+  fails loudly if it is not). Only the Remove menus are automated (the runbook gives their stdin answers); the Install
+  menus are manual because no source documents their prompts. `klipper-ready` needs an ssh read of `nginx.conf`
+  (`deny all` present; that both server blocks have it is not proven), so a locked-down K1 read with `--no-ssh` shows as
+  `moonraker-installed`. The verification of `install-save-zoffset-macros` assumes the include lands in `printer.cfg`.
 - Bambu: no state is detectable without the access code; every step is manual and confirmed by you. Klipper is
   not possible on these printers.

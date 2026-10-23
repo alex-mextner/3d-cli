@@ -115,6 +115,9 @@ class FakeMoonraker:
     disk_usage: dict[str, int] | None = None      # /server/files/directory disk_usage (None: not reported)
     date_offset_s: float = 0.0                    # the HTTP Date header runs this many seconds ahead
     restart_recovers: bool = True                 # firmware_restart / restart bring klippy_state back to ready
+    restart_error: int = 0                        # the restart endpoints answer this HTTP status and do nothing
+    query_error: int = 0                          # /printer/objects/query answers this HTTP status
+    services: dict[str, bool] | None = None       # allowed systemd services (name -> restartable); None: no provider
     port: int = 0
 
     def writes(self) -> list[Recorded]:
@@ -190,6 +193,10 @@ class FakeMoonraker:
                 if u.path == "/printer/objects/query" and "configfile" in parse_qs(u.query, keep_blank_values=True):
                     self._reply({"result": {"eventtime": 1.0, "status": {"configfile": {"settings": fake.settings}}}})
                 elif u.path == "/printer/objects/query":
+                    if fake.query_error or fake.server_info.get("klippy_state") == "disconnected":
+                        code = fake.query_error or 503  # Moonraker has no Klippy to ask
+                        self._reply({"error": {"code": code, "message": "Klippy Disconnected"}}, code)
+                        return
                     self._reply({"result": {"eventtime": 1.0, "status": fake.status}})
                 elif u.path == "/server/history/list":
                     q = parse_qs(u.query)
@@ -278,7 +285,23 @@ class FakeMoonraker:
                         fake.active_spool = json.loads(body)["spool_id"]
                     self._reply({"result": {"spool_id": fake.active_spool}})
                 elif u.path in ("/printer/firmware_restart", "/printer/restart"):
+                    # Klippy requests: relayed over the Klippy socket, impossible while it is disconnected
+                    if fake.restart_error or fake.server_info.get("klippy_state") == "disconnected":
+                        code = fake.restart_error or 503
+                        self._reply({"error": {"code": code, "message": "Klippy Disconnected"}}, code)
+                        return
                     if fake.restart_recovers:
+                        fake.server_info.update(klippy_state="ready", klippy_connected=True)
+                        fake.status.setdefault("webhooks", {}).update(state="ready")
+                    self._reply({"result": "ok"})
+                elif u.path == "/machine/services/restart":
+                    rec.fields = {"body": body}
+                    service = (json.loads(body) if body else {}).get("service") or rec.query.get("service", [""])[0]
+                    if fake.restart_error or fake.services is None or not fake.services.get(service):
+                        code = fake.restart_error or 400
+                        self._reply({"error": {"code": code, "message": f"Service {service} not available"}}, code)
+                        return
+                    if service == "klipper" and fake.restart_recovers:
                         fake.server_info.update(klippy_state="ready", klippy_connected=True)
                         fake.status.setdefault("webhooks", {}).update(state="ready")
                     self._reply({"result": "ok"})

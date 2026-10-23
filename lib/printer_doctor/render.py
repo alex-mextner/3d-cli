@@ -16,6 +16,7 @@ JSON SCHEMA `printers.doctor/1` (docs/commands/printers-doctor.md):
 from __future__ import annotations
 
 import datetime
+import shlex
 from collections.abc import Sequence
 
 from printer_doctor.engine import Summary
@@ -25,6 +26,8 @@ from printer_doctor.model import (
     JsonValue,
     PrinterReport,
     ResultRecord,
+    clean,
+    is_command,
 )
 
 SCHEMA = "printers.doctor/1"
@@ -113,27 +116,33 @@ def checks_text(checks: Sequence[Check]) -> str:
     return "\n".join(lines)
 
 
-def _fix_lines(rec: ResultRecord) -> list[str]:
+def _step_line(step: str) -> str:
+    """`$ cmd` for a real shell command, `- text` for prose (model.command marks commands)."""
+    return f"        {step}" if is_command(step) else f"        - {step}"
+
+
+def _fix_lines(printer: str, rec: ResultRecord) -> list[str]:
     fix = rec.fix
     if fix is None:
         return []
-    lines = [f"        fix [{fix.risk}]: {fix.description}"]
+    lines = [f"        fix [{fix.risk}]: {clean(fix.description)}"]
     if fix.applied and fix.verified:
-        lines.append(
-            f"        -> fixed, verified by re-running the check (journal: {fix.journal})"
-        )
-        return lines
+        return [
+            *lines,
+            f"        -> fixed, verified by re-running the check (journal: {fix.journal})",
+        ]
     if fix.applied:
         lines.append(f"        -> applied but {fix.error} (journal: {fix.journal})")
     elif fix.error:
         lines.append(f"        -> {fix.error}")
     if fix.risk == "manual-only" or fix.error:
-        lines += [f"        $ {step}" for step in fix.manual_steps]
+        lines += [_step_line(clean(step)) for step in fix.manual_steps]
     elif fix.risk == "safe":
         lines.append("        -> run with --fix to apply it")
     else:
         lines.append("        -> run with --fix --yes to apply it")
-    return lines
+    rerun = f"3d printers doctor {shlex.quote(printer)} --check {rec.result.check}"
+    return [*lines, f"        re-run: {rerun}"]
 
 
 def to_text(reports: Sequence[PrinterReport], summary: Summary) -> str:
@@ -144,8 +153,10 @@ def to_text(reports: Sequence[PrinterReport], summary: Summary) -> str:
         for rec in rep.records:
             r = rec.result
             tag = f" [{r.severity}]" if r.status in ("fail", "error") else ""
-            out.append(f"  {_MARK[r.status]} {r.check:<{width}}{tag}  {r.summary}")
-            out.extend(_fix_lines(rec))
+            out.append(
+                f"  {_MARK[r.status]} {r.check:<{width}}{tag}  {clean(r.summary)}"
+            )
+            out.extend(_fix_lines(rep.name, rec))
         out.append("")
     out.append(
         f"{summary.passed} pass, {summary.failed} fail, {summary.skipped} skip, "

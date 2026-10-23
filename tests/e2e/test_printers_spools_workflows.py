@@ -95,6 +95,7 @@ def _receive(tmp_path: Path, live: LiveApi, name: str, color: str) -> int:
 def test_user_loads_swaps_and_unloads_a_spool_and_sees_the_active_spool_agree(
     tmp_path: Path, live: LiveApi, k1: FakeMoonraker
 ) -> None:
+    """The owner loads a spool into the K1, swaps it for another, sees Moonraker's active spool drift when Fluidd picks a different one, and unloads."""
     r = run_cli(
         tmp_path,
         "printops",
@@ -142,6 +143,7 @@ def test_user_loads_swaps_and_unloads_a_spool_and_sees_the_active_spool_agree(
 def test_dry_run_load_into_a_broken_head_is_refused_and_writes_nothing(
     tmp_path: Path, live: LiveApi, u1: FakeMoonraker
 ) -> None:
+    """The owner asks a dry run whether a spool may go into a head marked broken: the answer is no, and nothing is written."""
     r = run_cli(
         tmp_path,
         "printops",
@@ -169,6 +171,7 @@ def test_dry_run_load_into_a_broken_head_is_refused_and_writes_nothing(
 def test_filament_set_writes_the_u1_head_and_show_reads_it(
     tmp_path: Path, live: LiveApi, u1: FakeMoonraker
 ) -> None:
+    """The owner sets one U1 head's filament by hand and reads it back with `filament show`."""
     code, out, err = _cli(
         tmp_path,
         live,
@@ -193,6 +196,7 @@ def test_filament_set_writes_the_u1_head_and_show_reads_it(
 def test_help_and_usage_errors_exit_as_documented(
     tmp_path: Path, live: LiveApi
 ) -> None:
+    """The owner reads each sub's help and gets exit 2 with a reason for a bad invocation."""
     for sub in ("spools", "load", "unload", "swap", "filament"):
         code, out, err = _cli(tmp_path, live, sub, "--help")
         assert code == 0 and "Examples:" in out, sub
