@@ -229,3 +229,19 @@ def test_blockers_and_modifiers_do_not_make_the_object_taller(tmp_path: Path) ->
     assert plan.height == pytest.approx(20.0)
     assert plan.profile[-2] == pytest.approx(20.0)
     assert plan.zones == [(0.0, 20.0)]
+
+
+@pytest.mark.parametrize("layer_height", ["0", "-0.2", "1e-9", "nan"])
+def test_a_layer_height_below_the_physical_minimum_is_a_refusal_not_a_hang(
+    tmp_path: Path, layer_height: str
+) -> None:
+    """A corrupt or hostile project with layer_height 0 / negative / vanishing would make the layer
+    simulation append layers for ever; it must stop with a ProjectError."""
+    with pytest.raises(ProjectError, match="not simulable"):
+        check(str(project(tmp_path, settings={"layer_height": layer_height})))
+
+
+def test_a_profile_height_below_the_physical_minimum_is_a_dropped_profile() -> None:
+    assert lh.check_profile([0.0, 1e-9, 20.0, 1e-9], 20.0) == "layer heights must be at least 0.01 mm"
+    with pytest.raises(ValueError, match="below the 0.01 mm minimum"):
+        lh.simulate_layers([0.0, 1e-9, 20.0, 1e-9], 20.0)

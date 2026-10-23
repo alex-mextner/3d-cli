@@ -41,6 +41,12 @@ _LAST_Z_TOL = 1e-3
 # Orca samples the profile near a layer BOTTOM (print_z + hmin/2), so a layer pair steps by ~slope * the thicker
 # layer, not the mean; tightening the envelope keeps the step within slope * mean(h) plus compression slack
 _ORCA_SAMPLE_MARGIN = 0.8
+MIN_LAYER_MM = 0.01  # no real process prints thinner; a smaller (or non-finite) value would make the simulation crawl or never end
+
+
+def _require_layer(value: float, what: str) -> None:
+    if not value >= MIN_LAYER_MM:  # also rejects NaN
+        raise ValueError(f"{what} {value!r} mm is below the {MIN_LAYER_MM:g} mm minimum")
 
 
 def simulate_layers(
@@ -49,7 +55,12 @@ def simulate_layers(
     first: float = FIRST_LAYER_MM,
     hmin: float = HMIN_MM,
 ) -> list[float]:
-    """Layer TOP z values Orca cuts for a flat profile [z0,h0,z1,h1,...] (port of generate_object_layers)."""
+    """Layer TOP z values Orca cuts for a flat profile [z0,h0,z1,h1,...] (port of generate_object_layers).
+
+    Raises ValueError when `first` or a profile height is below MIN_LAYER_MM or not a number."""
+    _require_layer(first, "first layer")
+    for h in profile[1::2]:
+        _require_layer(h, "profile layer height")
     zs = list(profile[0::2])
     hs = list(profile[1::2])
     tops = [first]
@@ -78,7 +89,11 @@ def simulate_layers(
 def uniform_layers(
     height: float, layer_h: float, first: float = FIRST_LAYER_MM
 ) -> list[float]:
-    """Layer tops without a profile; the last top may land within half a layer of `height`."""
+    """Layer tops without a profile; the last top may land within half a layer of `height`.
+
+    Raises ValueError when `layer_h` or `first` is below MIN_LAYER_MM or not a number."""
+    _require_layer(layer_h, "layer height")
+    _require_layer(first, "first layer")
     tops = [first]
     while tops[-1] + 0.5 * layer_h < height:
         tops.append(tops[-1] + layer_h)
@@ -138,8 +153,8 @@ def check_profile(profile: Sequence[float], height: float) -> str | None:
     hs = profile[1::2]
     if any(b <= a for a, b in zip(zs, zs[1:], strict=False)):
         return "z values must be strictly increasing"
-    if any(h <= 0 for h in hs):
-        return "layer heights must be > 0"
+    if any(not h >= MIN_LAYER_MM for h in hs):
+        return f"layer heights must be at least {MIN_LAYER_MM:g} mm"
     if abs(zs[-1] - height) > _LAST_Z_TOL:
         return f"last z {zs[-1]:.4f} differs from object height {height:.4f} by more than {_LAST_Z_TOL}"
     return None

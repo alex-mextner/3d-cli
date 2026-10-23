@@ -236,6 +236,13 @@ def test_pattern_tokens_one_and_two_are_the_rows_components(tmp_path: Path) -> N
     proj = project_3mf(tmp_path / "p.3mf", {"A": 5}, mixed=A23_ROW)
     with zipfile.ZipFile(proj) as zf:
         assert read_recipes(zf)[0] == {5: "23"}
+
+
+def test_a_row_without_filament_numbers_is_a_ratio_row_not_a_crash(tmp_path: Path) -> None:
+    """A blank or garbled row carries no pattern; read_recipes must keep tolerating it."""
+    proj = project_3mf(tmp_path / "p.3mf", {"A": 5}, mixed="x,y;" + A23_ROW)
+    with zipfile.ZipFile(proj) as zf:
+        assert read_recipes(zf)[0] == {5: "", 6: "23"}
     good = gcode(tmp_path / "good.gcode", [{"A": 2 + i % 2} for i in range(6)])
     assert check(str(proj), str(good)).failures == 0
 

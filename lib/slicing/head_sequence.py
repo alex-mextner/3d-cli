@@ -80,6 +80,14 @@ class HeadSequenceReport:
         }
 
 
+def _row_pattern(row: str) -> str:
+    """The decoded pattern of one mixed-filament row; a row without filament numbers carries none, like a ratio row."""
+    try:
+        return parse_row(row).slots
+    except ValueError:
+        return ""
+
+
 def read_recipes(zf: zipfile.ZipFile) -> tuple[dict[int, str], int]:
     """Virtual filament id -> manual pattern ('' = ratio/Local-Z row), and raft layer count.
 
@@ -93,7 +101,7 @@ def read_recipes(zf: zipfile.ZipFile) -> tuple[dict[int, str], int]:
     rows = [r for r in str(cfg.get("mixed_filament_definitions") or "").split(";") if r]
     patterns: dict[int, str] = {}
     for i, row in enumerate(rows):
-        patterns[n_phys + 1 + i] = parse_row(row).slots
+        patterns[n_phys + 1 + i] = _row_pattern(row)
     raft = cfg.get("raft_layers", "0")
     if isinstance(raft, list):
         raft = raft[0] if raft else "0"

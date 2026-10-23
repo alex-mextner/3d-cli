@@ -103,10 +103,14 @@ def _truthy(value: Any) -> bool:
 def object_layers(
     height: float, profile: list[float] | None, layer_height: float, first: float
 ) -> list[float]:
-    """Layer tops Orca slices an object of `height` mm into."""
-    if profile is not None:
-        return simulate_layers(profile, height, first)
-    return uniform_layers(height, layer_height, first)
+    """Layer tops Orca slices an object of `height` mm into. Raises ProjectError for a layer height or
+    first layer below the physical minimum (a hostile or corrupt project), instead of simulating forever."""
+    try:
+        if profile is not None:
+            return simulate_layers(profile, height, first)
+        return uniform_layers(height, layer_height, first)
+    except ValueError as exc:
+        raise ProjectError(f"layer stack not simulable: {exc}") from exc
 
 
 def check(project_3mf: str, rules: MixRules = MixRules()) -> MixProjectReport:  # noqa: B008
