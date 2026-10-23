@@ -255,14 +255,20 @@ def _contact(slot: SlotRef) -> tuple[Fleet, Device] | str:
     return fleet, device
 
 
-def _single_head_only(slot: SlotRef, n_heads: int) -> str | None:
-    """Why Moonraker's one active spool cannot stand for `slot`, None when it can."""
+def single_head_reason(printer: str, n_heads: int) -> str | None:
+    """Why Moonraker's one active spool cannot stand for a head of `printer`, None when it can
+    (also what `3d printers spools` and the doctor use to decide where the check applies)."""
     if n_heads == 1:
         return None
     return (
-        f"{slot.printer} has {n_heads} heads and Moonraker keeps ONE active spool for all of them: "
+        f"{printer} has {n_heads} heads and Moonraker keeps ONE active spool for all of them: "
         "it cannot follow tool changes, so none is set"
     )
+
+
+def _single_head_only(slot: SlotRef, n_heads: int) -> str | None:
+    """Why Moonraker's one active spool cannot stand for `slot`, None when it can."""
+    return single_head_reason(slot.printer, n_heads)
 
 
 def sync_head(
