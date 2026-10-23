@@ -31,6 +31,7 @@ def test_to_jsonable_handles_numpy_and_nonfinite() -> None:
 
 
 def test_mask_helpers_roundtrip() -> None:
+    pytest.importorskip("cv2")  # mask_polygon needs OpenCV; the gate env of the fast hook has none
     m = np.zeros((20, 30), bool)
     m[5:10, 8:20] = True
     assert io.mask_bbox_xywh(m) == [8, 5, 12, 5]

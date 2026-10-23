@@ -230,6 +230,12 @@ def run(argv: list[str]) -> int:  # noqa: C901
             warn("onnxruntime", "absent in the vision env — uv pip install 'packages/threed-vision[gpu]'")
         elif ort.get("cuda_usable"):
             passl("onnxruntime CUDA", f"onnxruntime {ort.get('version')}: CUDAExecutionProvider loads (GPU CLIP/DINO/u2net)")
+        elif ort.get("cpu_only_wheel"):
+            warn(
+                "onnxruntime CUDA",
+                f"onnxruntime {ort.get('version')} is the CPU-only wheel (no CUDAExecutionProvider): "
+                "uv pip uninstall onnxruntime && uv pip install 'onnxruntime-gpu==1.23.2'",
+            )
         else:
             libs = ", ".join(ort.get("missing_cuda_libs") or []) or "CUDAExecutionProvider is not listed"
             warn(

@@ -55,6 +55,10 @@ def test_segment_help_documents_every_flag_and_artefact(tmp_path: Path) -> None:
         "--max-area-frac",
         "--device",
         "--json",
+        "--quality",
+        "--owl-tiles",
+        "--bg-prompts",
+        "--fg-prompts",
     ):
         assert word in result.stdout
 
@@ -184,3 +188,61 @@ def test_bad_inputs_are_exit_2(tmp_path: Path) -> None:
     )
     assert empty_q.returncode == 2
     assert "--queries is empty" in empty_q.stderr
+
+
+@pytest.mark.parametrize(
+    ("extra", "message"),
+    [
+        (["--max-side", "-5"], "max_side=-5"),
+        (["--max-side", "10"], "max_side=10"),
+        (["--points-per-side", "999"], "points_per_side=999"),
+        (["--points-per-side", "0", "--fill", "none"], "boxes only"),
+        (["--owl-tiles", "9"], "owl_tiles=9"),
+        (["--min-area", "-1"], "min_area=-1"),
+        (["--bg-prompts", " , "], "no prompts"),
+        (["--fg-prompts", ","], "no prompts"),
+    ],
+)
+def test_invalid_segment_options_exit_2_before_any_model_is_touched(
+    tmp_path: Path, extra: list[str], message: str
+) -> None:
+    """A user passes a nonsensical option and gets exit 2 with the offending value named, not a torch traceback or a missing-model error."""
+    result = run_cli(
+        tmp_path,
+        "segment",
+        str(_photo(tmp_path)),
+        "-o",
+        str(tmp_path / "o"),
+        *extra,
+        env_extra=_env(tmp_path),
+    )
+    assert result.returncode == 2, result.stderr
+    assert message in result.stderr
+    assert (
+        "Traceback" not in result.stderr and "vision-models pull" not in result.stderr
+    )
+
+
+def test_valid_prompt_flags_reach_the_model_stage(tmp_path: Path) -> None:
+    """A user gives custom background prompts (a comma list and a file) and the run proceeds to loading models (exit 127 on an empty cache)."""
+    prompts = tmp_path / "bg.txt"
+    prompts.write_text("# bench\na steel bench\na pegboard\n", encoding="utf-8")
+    for bg in ("a wooden table,a shadow", str(prompts)):
+        result = run_cli(
+            tmp_path,
+            "segment",
+            str(_photo(tmp_path)),
+            "-o",
+            str(tmp_path / "o"),
+            "--bg-prompts",
+            bg,
+            "--fg-prompts",
+            "a hand tool",
+            "--quality",
+            "fast",
+            "--device",
+            "cpu",
+            env_extra=_env(tmp_path),
+        )
+        assert result.returncode == 127, result.stderr
+        assert "3d vision-models pull sam2-tiny" in result.stderr

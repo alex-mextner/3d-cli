@@ -57,6 +57,25 @@ def test_doctor_names_the_missing_cuda_library_when_ort_falls_back_to_cpu(
     assert "3d vision-models pull sam2-tiny" in out
 
 
+def test_doctor_names_the_gpu_wheel_when_only_cpu_onnxruntime_is_installed(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    info = {
+        "onnxruntime": {
+            "installed": True,
+            "version": "1.23.2",
+            "providers": ["CPUExecutionProvider"],
+            "cpu_only_wheel": True,
+            "cuda_usable": False,
+            "missing_cuda_libs": [],
+        }
+    }
+    out = _run(monkeypatch, capsys, {"info": info})
+    line = next(ln for ln in out.splitlines() if "onnxruntime CUDA" in ln)
+    assert "WARN" in line and "CPU-only wheel" in line and "onnxruntime-gpu==1.23.2" in line
+    assert "cudnn" not in line.lower()
+
+
 def test_doctor_passes_when_cuda_provider_loads_and_models_are_present(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

@@ -40,30 +40,37 @@ def is_oom(exc: BaseException) -> bool:
 
 
 def free_cuda() -> None:
-    """Drop Python references first (caller), then return cached blocks to the driver."""
+    """Drop Python references first (caller), then return cached blocks to the driver.
+
+    Only when this process already initialised CUDA: a CPU-only run (`--device cpu`, the GPU is busy or absent) must never
+    be the one that creates a CUDA context, so there is nothing to free and nothing is touched.
+    """
     gc.collect()
     try:
         import torch
     except ImportError:
         return
-    if torch.cuda.is_available():
+    if torch.cuda.is_initialized():
         torch.cuda.empty_cache()
 
 
 def cuda_allocated_mb() -> int:
-    """torch.cuda.memory_allocated of the current device in MiB (0 without CUDA)."""
+    """torch.cuda.memory_allocated of the current device in MiB (0 when CUDA was never initialised)."""
     try:
         import torch
     except ImportError:
         return 0
     return (
         int(torch.cuda.memory_allocated() // (1 << 20))
-        if torch.cuda.is_available()
+        if torch.cuda.is_initialized()
         else 0
     )
 
 
-def reset_peak() -> None:
+def reset_peak(device: str) -> None:
+    """Reset torch's peak-allocation counter; a no-op unless `device` is "cuda"."""
+    if device != "cuda":
+        return
     try:
         import torch
     except ImportError:
@@ -72,7 +79,10 @@ def reset_peak() -> None:
         torch.cuda.reset_peak_memory_stats()
 
 
-def peak_mb() -> int:
+def peak_mb(device: str) -> int:
+    """Peak torch CUDA allocation in MiB since `reset_peak`; 0 unless `device` is "cuda"."""
+    if device != "cuda":
+        return 0
     try:
         import torch
     except ImportError:

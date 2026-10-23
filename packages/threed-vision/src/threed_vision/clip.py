@@ -72,10 +72,10 @@ def crop_masked(
     """Padded bbox crop of `mask`; outside the (slightly dilated) mask the crop is painted `bg` unless `keep_bg`."""
     import cv2
 
-    ys, xs = np.nonzero(mask)
+    ys, xs = np.flatnonzero(mask.any(axis=1)), np.flatnonzero(mask.any(axis=0))
     if xs.size == 0:
         raise ValueError("empty mask")
-    x0, x1, y0, y1 = int(xs.min()), int(xs.max()) + 1, int(ys.min()), int(ys.max()) + 1
+    x0, x1, y0, y1 = int(xs[0]), int(xs[-1]) + 1, int(ys[0]), int(ys[-1]) + 1
     p = int(pad * max(x1 - x0, y1 - y0)) + 2
     x0, y0, x1, y1 = (
         max(0, x0 - p),
@@ -182,7 +182,16 @@ class OrtEncoder:
         if self.loaded:
             return
         self._resolve()
-        self._build()
+        try:
+            self._build()
+        except MissingDependency:
+            if self.device != "cuda" or self.requested == "cuda":
+                raise
+            # `auto` means "the GPU if it works": the CUDA provider can fail to initialise on a shared card that filled up
+            # after the free-VRAM check (cuBLAS / arena allocation); the CPU session is the documented fallback.
+            self._sessions.clear()
+            self.device = "cpu"
+            self._build()
         self.loaded = True
 
     def unload(self) -> None:

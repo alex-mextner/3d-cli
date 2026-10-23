@@ -10,7 +10,7 @@ from pathlib import Path
 from .. import io
 from ..errors import BadInput
 from ..outputs import write_result
-from ..segment import FILLS, METHODS, Segmenter
+from ..segment import FILLS, METHODS, QUALITIES, Segmenter, load_prompts
 
 NAME = "segment"
 SUMMARY = "segment a photo into object instances (SAM2 + OWLv2 fill + CLIP background rejection); writes instances.json, labels.png, masks/, overlay.jpg"
@@ -31,6 +31,13 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         help="sam2 (grid AMG), sam2-dense (64x64 grid) or u2net (one salient object)",
     )
     parser.add_argument(
+        "--quality",
+        choices=QUALITIES,
+        default=None,
+        help="fast: grid masks filtered on SAM2's 256x256 logits (fp16 on GPU), only where OWLv2 sees objects, + batched box prompts; "
+        "accurate: the stock SAM2 automatic mask generator (default: accurate on cuda, fast on cpu)",
+    )
+    parser.add_argument(
         "--fill",
         choices=FILLS,
         default="owlv2",
@@ -42,6 +49,29 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         help='OWLv2 queries, comma separated (default "a hand tool,a power tool,a box,...")',
     )
     parser.add_argument(
+        "--owl-tiles",
+        type=int,
+        default=1,
+        help="also run OWLv2 on an N x N grid of overlapping tiles (1 = whole image only, max 4; finds small / thin tools)",
+    )
+    parser.add_argument(
+        "--grid-gate",
+        type=float,
+        default=None,
+        help="--quality fast: decode only grid points near a patch with OWLv2 objectness >= F (0 = every point, default 0.1)",
+    )
+    parser.add_argument(
+        "--bg-prompts",
+        default=None,
+        help="CLIP background prompts: comma list or a file, one per line (default: carpet / parquet / cabinet / shadow / foot / bin / cable); "
+        "e.g. --bg-prompts 'a photo of a wooden table,a photo of a shadow'",
+    )
+    parser.add_argument(
+        "--fg-prompts",
+        default=None,
+        help="CLIP object prompts: comma list or a file, one per line (default: hand tool / power tool / box / screwdriver / pliers / ...)",
+    )
+    parser.add_argument(
         "--reject-bg",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -51,13 +81,13 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         "--points-per-side",
         type=int,
         default=None,
-        help="AMG prompt grid per side (default 32 on GPU; on CPU 0 = OWLv2 boxes only, or 16 with --fill none)",
+        help="prompt grid per side (default 32; --quality accurate on CPU: 0 = OWLv2 boxes only, or 16 with --fill none)",
     )
     parser.add_argument(
         "--max-side",
         type=int,
         default=None,
-        help="downscale the longest image side before SAM2 (0 = never; default none on GPU, 1024 on CPU)",
+        help="downscale the longest image side before SAM2 (0 = never; default none, except 1024 for --quality accurate on CPU)",
     )
     parser.add_argument(
         "--min-area",
@@ -95,6 +125,7 @@ def run(args: argparse.Namespace) -> int:
         raise BadInput("--queries is empty")
     seg = Segmenter(
         method=args.method,
+        quality=args.quality,
         fill=args.fill,
         reject_bg=args.reject_bg,
         device=args.device,
@@ -103,6 +134,10 @@ def run(args: argparse.Namespace) -> int:
         min_area=args.min_area,
         max_area_frac=args.max_area_frac,
         queries=queries,
+        owl_tiles=args.owl_tiles,
+        grid_gate=args.grid_gate,
+        bg_prompts=load_prompts(args.bg_prompts) if args.bg_prompts else None,
+        fg_prompts=load_prompts(args.fg_prompts) if args.fg_prompts else None,
     )
 
     def progress(stage: str, frac: float) -> None:

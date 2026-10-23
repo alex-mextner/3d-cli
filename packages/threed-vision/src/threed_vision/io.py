@@ -96,10 +96,11 @@ def write_json(path: str | Path, obj: Any) -> None:
 
 
 def mask_bbox_xywh(mask: np.ndarray) -> list[int]:
-    ys, xs = np.nonzero(mask)
-    if xs.size == 0:
+    rows = np.flatnonzero(mask.any(axis=1))  # row / column projections: far cheaper than np.nonzero on a photo-sized mask
+    if rows.size == 0:
         return [0, 0, 0, 0]
-    return [int(xs.min()), int(ys.min()), int(xs.max() - xs.min() + 1), int(ys.max() - ys.min() + 1)]
+    cols = np.flatnonzero(mask.any(axis=0))
+    return [int(cols[0]), int(rows[0]), int(cols[-1] - cols[0] + 1), int(rows[-1] - rows[0] + 1)]
 
 
 def mask_polygon(mask: np.ndarray, epsilon_px: float = 1.5) -> list[list[float]]:
