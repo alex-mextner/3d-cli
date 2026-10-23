@@ -114,6 +114,13 @@ needs ~8 s more on a cold process (imports). On a saturated machine (load 23) ex
 What was tried, the profile, the variant tables (grid size, gate, tiles, queries, `--max-side`), the CPU parity table, the second-background prompt runs and the 2026-10-22 measurements are in
 [docs/notes/segment-fast-measurements-2026-10-23.md](../notes/segment-fast-measurements-2026-10-23.md).
 
+Second background, measured with `--quality fast` (candidates CLIP rejected, `n_bg_rejected`; `--bg-prompts "a photo of a wall,a photo of a honeycomb pegboard,a photo of a floor,a photo of a rug,a photo of a shadow"`):
+
+| photo | default prompts | custom prompts | `--no-reject-bg` |
+|---|---|---|---|
+| IMG_4934 (1536x1152, another carpet photo; the ticket's "wall photo" is IMG_4937) | 18 rejected, 85 instances | 9 rejected, 95 instances | 0, 101 |
+| IMG_4937 (the honeycomb wall, almost empty) | 14 rejected, 33 instances | 14 rejected, 33 instances | 0, 46 |
+
 **Choosing background prompts for another surface:** list what the surface and its shadows look like as `--bg-prompts` ("a photo of a steel workbench", "a photo of a pegboard"), keep `--fg-prompts`
 about tools, run once with `--no-reject-bg` and once with your prompts and compare `n_bg_rejected` in `instances.json` and the overlays. CLIP scores a *crop* of each mask (`keep_bg=True`: the whole bounding box),
 so a large irregular patch whose box contains neighbouring tools scores low (the 51 000 px carpet patch has `bg_prob` 0.09) and survives the 0.5 threshold.
