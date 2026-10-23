@@ -136,8 +136,12 @@ def run(args: argparse.Namespace) -> int:
         queries=queries,
         owl_tiles=args.owl_tiles,
         grid_gate=args.grid_gate,
-        bg_prompts=load_prompts(args.bg_prompts) if args.bg_prompts else None,
-        fg_prompts=load_prompts(args.fg_prompts) if args.fg_prompts else None,
+        bg_prompts=load_prompts(args.bg_prompts)
+        if args.bg_prompts is not None
+        else None,
+        fg_prompts=load_prompts(args.fg_prompts)
+        if args.fg_prompts is not None
+        else None,
     )
 
     def progress(stage: str, frac: float) -> None:

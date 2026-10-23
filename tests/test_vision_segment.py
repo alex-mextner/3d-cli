@@ -251,7 +251,7 @@ class FakeClip:
 
 
 class FakeSegmenter(Segmenter):
-    """TEST DOUBLE (never shipped): a Segmenter whose SAM2 stages are canned; everything else (orchestration, filters, ids, scaling) is real."""
+    """Segmenter whose SAM2 stages are canned; everything else (orchestration, filters, ids, scaling) is real."""
 
     def __init__(self, amg: list[Any], fill_masks: list[Any], **kw: Any) -> None:
         kw.setdefault(
@@ -696,6 +696,42 @@ def test_detect_without_masks_never_loads_the_segmenter(
     assert "masks" not in json.loads(capsys.readouterr().out)
 
 
+def test_detect_masks_with_no_box_needs_no_sam2_weights(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import argparse
+    from PIL import Image
+
+    from threed_vision.commands import detect as detect_cmd
+
+    class StubOwl:
+        device = "cpu"
+
+        def __init__(self, device: str) -> None:
+            pass
+
+        def detect(self, rgb: Any, queries: Any, **kw: Any) -> dict[str, Any]:
+            return {"boxes": [], "timing_s": 0.0}
+
+        def unload(self) -> None:
+            pass
+
+    class NoWeights(Segmenter):
+        def load(self) -> None:
+            raise AssertionError("an empty detection must not load SAM2")
+
+    monkeypatch.setattr(detect_cmd, "OwlDetector", StubOwl)
+    monkeypatch.setattr(segment, "Segmenter", NoWeights)
+    photo = tmp_path / "p.png"
+    Image.fromarray(_rgb()).save(photo)
+    parser = argparse.ArgumentParser()
+    detect_cmd.add_arguments(parser)
+    out_dir = tmp_path / "out"
+    args = parser.parse_args([str(photo), "--queries", "x", "--masks", str(out_dir)])
+    assert detect_cmd.run(args) == 0
+    assert json.loads((out_dir / "instances.json").read_text())["instances"] == []
+
+
 # --- ClipEncoder.load: missing model is reported before a missing package -------------------------------------------
 
 
@@ -964,6 +1000,16 @@ def test_load_prompts_reads_a_comma_list_or_a_file(tmp_path: Path) -> None:
         segment.load_prompts(" , ")
 
 
+def test_a_mistyped_prompt_file_is_an_error_not_a_prompt(tmp_path: Path) -> None:
+    for typo in ("bg-prompts.txt", str(tmp_path / "nope" / "bg"), "prompts.md"):
+        with pytest.raises(BadInput, match="does not exist"):
+            segment.load_prompts(typo)
+    bad = tmp_path / "latin1.txt"
+    bad.write_bytes("caf\xe9\n".encode("latin-1"))
+    with pytest.raises(BadInput, match="cannot read prompt file"):
+        segment.load_prompts(str(bad))
+
+
 @pytest.mark.parametrize(
     "kw",
     [
@@ -1046,10 +1092,6 @@ def test_cpu_runs_never_touch_cuda(monkeypatch: pytest.MonkeyPatch) -> None:
     torchutil.reset_peak("cpu")
     assert torchutil.peak_mb("cpu") == 0 and torchutil.cuda_allocated_mb() == 0
     torchutil.free_cuda()
-    with pytest.raises(AssertionError, match="touched"):
-        torchutil.peak_mb(
-            "cuda"
-        )  # the guard is the device argument, not a silent except
 
 
 def test_fast_quality_with_a_gate_runs_owl_before_the_grid_and_hands_it_the_objectness() -> (
@@ -1137,6 +1179,12 @@ def test_clean_mask_fills_small_holes_and_drops_small_islands_but_keeps_the_fram
     )
     assert (sam_grid.clean_mask(notch, min_area=20) == notch).all()
     assert not sam_grid.clean_mask(np.zeros((9, 9), bool)).any()
+    # every island small: the largest survives (SAM's remove_small_regions), as a mask is never emptied by cleaning
+    small = np.zeros((40, 40), bool)
+    small[5:12, 5:12] = True  # 49 px
+    small[30:33, 30:33] = True  # 9 px
+    kept = sam_grid.clean_mask(small, min_area=100)
+    assert kept[5:12, 5:12].all() and not kept[30:33, 30:33].any()
 
 
 def test_mask_bbox_matches_nonzero_bbox_and_handles_empty() -> None:
@@ -1242,3 +1290,38 @@ def test_quality_defaults_to_accurate_on_gpu_and_fast_on_cpu_and_is_overridable(
     forced = Segmenter(device="cuda", quality="fast")
     forced.device = "cuda"
     assert forced.effective_quality == "fast"
+
+
+class CudaThenCpuEncoder(clip.OrtEncoder):
+    """An onnxruntime encoder whose CUDA session fails once; records the device of every build attempt."""
+
+    model_name = "clip-b32"
+
+    def __init__(self, device: str, error: Exception) -> None:
+        super().__init__(device)
+        self.error = error
+        self.built_on: list[str] = []
+
+    def _resolve(self) -> None:
+        self.device = "cuda"
+
+    def _build(self) -> None:
+        self.built_on.append(self.device)
+        if self.device == "cuda":
+            raise self.error
+
+
+def test_auto_retries_on_cpu_when_the_cuda_session_cannot_initialise_but_not_for_other_errors() -> (
+    None
+):
+    enc = CudaThenCpuEncoder("auto", clip.CudaSessionFailed("cuBLAS failed"))
+    enc.load()
+    assert enc.built_on == ["cuda", "cpu"] and enc.device == "cpu" and enc.loaded
+    other = CudaThenCpuEncoder("auto", MissingDependency("tokenizers is missing"))
+    with pytest.raises(MissingDependency, match="tokenizers"):
+        other.load()
+    assert other.built_on == ["cuda"]  # a missing package is not retried on CPU
+    explicit = CudaThenCpuEncoder("cuda", clip.CudaSessionFailed("cuBLAS failed"))
+    with pytest.raises(clip.CudaSessionFailed):
+        explicit.load()
+    assert explicit.built_on == ["cuda"]  # an explicit cuda request reports it

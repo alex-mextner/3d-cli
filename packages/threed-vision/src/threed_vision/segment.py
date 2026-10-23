@@ -55,7 +55,7 @@ FILLS = ("owlv2", "none")
 # "fast": the same grid prompts filtered on the decoder's 256x256 logits + batched box prompts (`sam_grid`).
 QUALITIES = ("fast", "accurate")
 # "fast" processes the full-resolution photo on CPU too (SAM2 resizes its input to 1024 x 1024 whatever the photo size, so
-# downscaling saves nothing; it only costs mask detail: 41 % -> 84 % parity with the GPU masks, docs/commands/segment.md).
+# downscaling saves nothing; it only costs mask detail: 41 % -> 89 % parity with the GPU masks, docs/commands/segment.md).
 DEFAULT_GRID_GATE = 0.1  # OWLv2 objectness a grid point's patch neighbourhood needs before the point is decoded (quality="fast")
 # CPU default (measurements in docs/commands/segment.md): no AMG grid, OWLv2 boxes -> SAM2 box prompts, all on a copy of the
 # image whose longest side is CPU_MAX_SIDE. points_per_side=0 means "no AMG".
@@ -208,17 +208,32 @@ def _fraction_covered(union: np.ndarray, box: Sequence[float]) -> float:
 
 
 def load_prompts(spec: str) -> list[str]:
-    """CLIP prompts from a comma list ("a carpet,a floor") or a text file (one prompt per line, `#` comments, blank lines skipped)."""
+    """CLIP prompts from a comma list ("a carpet,a floor") or a text file (one prompt per line, `#` comments, blank lines skipped).
+
+    A value that is not an existing file but looks like a path (a separator or a `.txt` / `.md` suffix) is an error, not a prompt:
+    a mistyped file name must not become the only background prompt.
+    """
     path = Path(spec)
     try:
         is_file = path.is_file()
     except OSError:
         is_file = False
-    parts = (
-        [ln.split("#", 1)[0] for ln in path.read_text(encoding="utf-8").splitlines()]
-        if is_file
-        else spec.split(",")
-    )
+    if is_file:
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeDecodeError) as exc:
+            raise BadInput(
+                f"cannot read prompt file {spec!r}: {exc}",
+                "a UTF-8 text file, one prompt per line",
+            ) from exc
+        parts = [ln.split("#", 1)[0] for ln in lines]
+    elif "/" in spec or path.suffix.lower() in (".txt", ".md", ".lst"):
+        raise BadInput(
+            f"prompt file {spec!r} does not exist",
+            "a comma list of prompts, or the path of an existing file",
+        )
+    else:
+        parts = spec.split(",")
     prompts = [p.strip() for p in parts if p.strip()]
     if not prompts:
         raise BadInput(
@@ -453,7 +468,7 @@ class Segmenter:
     @property
     def effective_quality(self) -> str:
         """The quality this run uses: the requested one, else "accurate" on cuda and "fast" on cpu (the stock generator
-        takes 85-92 s on CPU, the boxes-only legacy path reproduces 38 % of the GPU masks: docs/commands/segment.md)."""
+        takes 85-92 s on CPU, the boxes-only legacy path reproduces 41 % of the GPU masks: docs/commands/segment.md)."""
         return self.quality or ("fast" if self.device == "cpu" else "accurate")
 
     def _effective(self) -> tuple[int, int | None]:
@@ -861,7 +876,10 @@ class Segmenter:
 
         todo = [b for b in boxes if _fraction_covered(union, b) <= 0.6]
         added: list[Instance] = []
-        for mask, score in box_masks(pred, rgb.shape[:2], np.asarray(todo, np.float32)):
+        decoded = box_masks(pred, rgb.shape[:2], np.asarray(todo, np.float32))
+        for box, (mask, score) in zip(todo, decoded, strict=True):
+            if _fraction_covered(union, box) > 0.6:
+                continue  # explained by a mask this very pass added (the stock `_fill` re-checks after every addition)
             n = int(mask.sum())
             if n == 0 or n < min_px or (mask & union).sum() / max(n, 1) > max_overlap:
                 continue

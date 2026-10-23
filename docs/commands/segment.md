@@ -20,7 +20,7 @@ find one to four blobs on this kind of photo; SAM2 automatic masks alone miss th
 5. an area filter always applies: `--min-area` (150 px) .. `--max-area-frac` (0.03 of the image).
 
 `--quality` defaults per device: **`accurate` on cuda** (the pre-existing default, unchanged) and **`fast` on cpu** (the stock generator needs 85-92 s there, and the
-boxes-only legacy path reproduced 38 % of the GPU masks). `fast` also processes the full-resolution photo on CPU: SAM2 resizes whatever it gets to 1024x1024 anyway, so
+boxes-only legacy path reproduced 41 % of the GPU masks). `fast` also processes the full-resolution photo on CPU: SAM2 resizes whatever it gets to 1024x1024 anyway, so
 the former 1024 px downscale saved nothing and cost mask detail.
 
 `--method u2net` is the single-object fast path (u2net matte, largest component; 0.05 s GPU / 0.5 s CPU).
@@ -105,15 +105,16 @@ python packages/threed-vision/eval/segment_recall.py tools.heic --device cpu --r
 
 | run | cold | warm | instances | recall 33 | wrench / hammer | parity vs accurate GPU | notes |
 |---|---|---|---|---|---|---|---|
-| GPU `--quality accurate` (the previous default, unchanged) | 11.8 s | 5.8 s | 98 | 100 % | no / no | 100 % | amg 4.2, detect 0.2, fill 0.8, bg_reject 1.1; torch peak 2245 MB |
-| **GPU `--quality fast`** | 2.8 s | **1.7 s** | 91 | 91 % (30/33) | no / no | 84 % | amg ~0.6, detect 0.2, fill 0.3, bg_reject 0.8; torch peak ~1.7 GB |
-| GPU accurate `--max-side 1024` | 5.6 s | 4.5 s | 91 | 82 % | - | 67 % | the stock generator is not resolution-bound: little gain, much loss |
-| GPU fast `--method sam2-dense` (64x64 grid, gated) | 4.8 s | 3.8 s | 118 | 88 % | - | - | more parts, not better |
-| CPU, previous default (boxes only on a 1024 px copy) | 11.3 s | 10.6 s | 65 | 39 % | no / yes | **38 %** | detect 4.9, fill 4.7, bg_reject 3.0 |
-| **CPU default now = `--quality fast`, full resolution** | 46.3 s | **41.1 s** | 93 | 91 % | no / no | **84 %** | detect 4.2, amg 27 (grid prompts), fill 5.4, bg_reject 2.5; 4 OMP threads, load ~7 |
+| GPU `--quality accurate` (the previous default, unchanged) | 11.5 s | 5.7 s | 98 | 100 % | no / no | 100 % | amg 4.2, detect 0.2, fill 0.8, bg_reject 1.1; torch peak 2245 MB |
+| **GPU `--quality fast`** | 2.2-7.6 s | **1.8 s** | 91 | 91 % (30/33) | no / no | 89 % | amg ~0.6, detect 0.2, fill 0.3, bg_reject 0.8; torch peak ~1.7 GB |
+| GPU accurate `--max-side 1024` | 5.7 s | 4.4 s | 91 | 82 % | no / no | 71 % | the stock generator is not resolution-bound: little gain, much loss |
+| GPU fast `--method sam2-dense` (64x64 grid, gated) | 4.6 s | 3.6 s | 118 | 88 % | no / no | 87 % | more parts, not better |
+| CPU, previous default (boxes only on a 1024 px copy) | 11.5 s | 9.0 s | 65 | 39 % | no / yes | **41 %** | detect 4.9, fill 4.7, bg_reject 3.0 |
+| **CPU default now = `--quality fast`, full resolution** | 49.9 s | **38.7 s** | 93 | 91 % | no / no | **89 %** | detect 4.2, amg 27, fill 5.4, bg_reject 2.5; 4 OMP threads, load ~6 |
 
-Cold = the first call of a fresh `Segmenter` in a warm process (weights in the page cache; building SAM2 / OWLv2 / CLIP is inside it). A cold *process* (`bin/3d segment`, imports + torch CUDA context) adds
-~8 s on top of the earlier measurement below. `warm` varies by about +-0.3 s between runs with the machine's load (the same `fast` configuration measured 1.6-1.9 s in four runs).
+Cold = the first call of a fresh `Segmenter` in a process whose weights are in the page cache (building SAM2 / OWLv2 / CLIP is inside it; the GPU `fast` cold time was 2.2, 2.8, 3.0 and 7.6 s in
+four runs, the `accurate` one 11.5-11.8 s). A cold *process* (`bin/3d segment`: imports + torch CUDA context) adds ~8 s on top (earlier measurement below). `warm` varies by about +-0.3 s with the
+machine's load (the same `fast` configuration measured 1.6-1.9 s in five runs).
 
 The three labels `fast` misses (two `pliers`, one `roll of tape`) are not missing objects. The labels were taken from the accurate masks, where the pliers are split into handles and tips and a tape
 roll into rings; `fast` returns the whole pliers / the whole roll as one mask (overlays of both runs viewed side by side), so the bbox IoU with the label part drops below 0.5. Of the 98 accurate masks,
@@ -121,7 +122,7 @@ roll into rings; `fast` returns the whole pliers / the whole roll as one mask (o
 
 **wrench / hammer** (`labels.json` `extra_labels`, boxes drawn by eye, independent of any mask): the blue 12-inch adjustable wrench and the hammer with its head, each as ONE instance (bbox IoU >= 0.5).
 Proof image `docs/img/segment-hammer-wrench.jpg` (photo / accurate overlay / fast overlay): **neither run segments the wrench at all and both return only the hammer's wooden handle** (the head is a
-separate dark object nobody prompts). Variants that fix part of it are in the next table.
+separate dark object nobody prompts). Variants that fix part of it are in the next table. The CPU boxes-only legacy path happens to return the hammer whole.
 
 ### Where the 7 s went, and what did not help
 
@@ -129,47 +130,48 @@ cProfile of a warm AMG-only run (`--max-side 1024 --fill none`, 85 masks): of 4.
 scores it there), 0.5 s is mask bounding boxes (`np.nonzero` on photo-sized masks) and the SAM2 decoder itself is 0.14 s. Everything in `fast` follows from that: filter the candidates on the decoder's 256x256
 logits (the logits the full-size masks are upsampled from), upsample only the survivors, bounding boxes from row / column projections (`np.nonzero` on 3 MP masks cost 0.65 s per photo in `crop_masked` alone), a
 resident fp16 copy of the decoder (agreement with fp32: mask IoU 0.9988, predicted IoU differs by 5e-4; 1024 prompts in 1.6 s vs 2.8 s fp32 and 2.5 s with `torch.autocast`, which re-casts the weights per
-call), and OWLv2 objectness gating. Measured on the same photo: stock generator 5.8-6.5 s warm; filters at 256x256 with the fp32 decoder: `amg` stage 3.1 s; with the fp16 decoder `amg` 1.7 s (2.6-3.5 s
+call), and OWLv2 objectness gating. Measured on the same photo: stock generator 5.7-6.5 s warm; filters at 256x256 with the fp32 decoder: `amg` stage 3.1 s; with the fp16 decoder `amg` 1.7 s (2.6-3.5 s
 warm total); gating at 0.1: **1.6-1.9 s warm total**.
 
-Same run (load ~7), GPU, `--quality fast` unless noted:
+GPU, `--quality fast` unless noted (one session, load ~4-6; parity = share of the 98 accurate masks reproduced at mask IoU 0.7):
 
 | variant | warm | recall 33 | wrench / hammer | parity | verdict |
 |---|---|---|---|---|---|
-| gate 0.1, 32x32 (default) | 1.9 s | 91 % | no / no | 84 % | kept |
-| gate 0.05 | 2.1 s | 91 % | - | 85 % | same masks, slower |
-| no gate (`--grid-gate 0`) | 2.6 s | 91 % | - | 86 % | the gate costs nothing measurable and saves 0.7 s |
-| `--owl-tiles 2` | 2.2-2.4 s | 88 % (29/33) | **yes** / no | 73 % | finds the wrench (one mask) and the two small spanners, fragments other objects: opt-in |
-| `--owl-tiles 3` | 2.4-2.6 s | 88 % | **yes** / no | 76 % | same |
-| accurate + `--owl-tiles 2` | 6.5 s | 94 % | **yes** / no | 91 % | same wrench gain on the stock generator |
-| extra queries (adjustable wrench, hammer, spanner, tweezers, hex key) | 1.9 s | 91 % | no / no | 84 % | OWLv2 does not box them better than the default queries |
-
-Other fast settings measured in a quieter run (load ~5): gate 0.15 1.65 s / 85 % / parity 80 %, gate 0.3 1.25 s / 52 % / 54 % (drops thin tools); grid 24x24 1.6 s / 79 % / 68 %, 16x16 1.35 s / 58 % / 58 %
-(the thin tools need the 32 grid), 40x40 2.3 s / 76 % / 73 % (more fragments); `--max-side 1024` 1.2 s / 79 % / 57 % (never worth it).
+| gate 0.1, 32x32 (default) | 1.8 s | 91 % | no / no | 89 % | kept |
+| gate 0.05 | 2.1 s | 91 % | no / no | 91 % | same masks, slower |
+| no gate (`--grid-gate 0`) | 2.7 s | 91 % | no / no | 91 % | the gate costs 2 points of parity and saves 1 s |
+| gate 0.15 | 1.55 s | 85 % | no / no | 83 % | drops thin tools |
+| gate 0.3 | 1.1 s | 52 % | no / **yes** | 61 % | the sparse grid leaves the hammer to OWLv2's box, which returns it whole; 40 % of the other labels are lost |
+| grid 24x24 / 16x16 / 40x40 | 1.35 / 1.3 / 2.2 s | 79 / 58 / 76 % | no / no, no / **yes**, no / no | 73 / 65 / 80 % | the thin tools need the 32 grid; 40 fragments |
+| `--max-side 1024` | 1.15 s | 79 % | no / no | 62 % | never worth it |
+| `--owl-tiles 2` | 2.3 s | 88 % (29/33) | **yes** / no | 80 % | finds the wrench (one mask) and the two small spanners, fragments other objects: opt-in |
+| `--owl-tiles 3` | 2.5 s | 88 % | **yes** / no | 83 % | same |
+| accurate + `--owl-tiles 2` | 6.4 s | 94 % | **yes** / no | 91 % | same wrench gain on the stock generator |
+| extra queries (adjustable wrench, hammer, spanner, tweezers, hex key) | 1.8 s | 91 % | no / no | 89 % | OWLv2 does not box them better than the default queries |
 
 **#479 result.** The recall gain the ticket asks for (>= 10 points over the baseline) cannot be measured here: the 33 labels come from the baseline's own masks, so the baseline scores 100 % and every variant
-can only lose. Tiled OWLv2 does what it was meant for on the two by-eye labels (the wrench becomes one instance, +1 of 2), costs 3-12 points on the mask-derived labels because it fragments objects, and
-leaves the hammer split (the dark head is never prompted; OWLv2's "a hammer" box is rejected by the fill stage because its mask overlaps the handle mask by more than 30 %). Tiling is therefore opt-in
-(`--owl-tiles`), not a default; merging boxes into parent masks (the ticket's third idea) was not tried.
+can only lose (follow-up: #544). Tiled OWLv2 does what it was meant for on the by-eye labels (the wrench becomes one instance, +1 of 2), costs 3-12 points on the mask-derived labels because it fragments
+objects, and leaves the hammer split (the dark head is never prompted; OWLv2's "a hammer" box is rejected by the fill stage because its mask overlaps the handle mask by more than 30 %). Tiling is
+therefore opt-in (`--owl-tiles`), not a default; merging boxes into parent masks (the ticket's third idea) was not tried.
 
 MobileSAM was not tried: it is not installed in the vision venv and nothing may be downloaded at request time (the spike measured it at 9-10 s for the 32x32 grid, slower than SAM2-tiny).
 `torch.compile` / TensorRT for the decoder were not tried (the decoder is now ~25 % of the run).
 
 ### CPU parity (#478)
 
-| CPU variant (4 OMP threads, load ~7) | warm | recall 33 | parity vs GPU accurate |
+| CPU variant (4 OMP threads, load ~6) | warm | recall 33 | parity vs GPU accurate (IoU 0.7) |
 |---|---|---|---|
-| boxes only on a 1024 px copy, the previous default | 10.6-12.9 s | 39 % | 38 % |
-| fast, 16x16 gated, 1024 px copy | 20.2 s | 52 % | 41 % |
-| fast, 24x24 gated, 1024 px copy | 27.2 s | 64 % | 48 % |
-| fast 16x16 + `--owl-tiles 2`, 1024 px | 35.4 s | 58 % | 37 % |
-| fast 24x24 gated, full resolution | 28.3 s | 79 % | 68 % |
-| **fast 32x32 gated, full resolution (the CPU default)** | **39.3-41.1 s** | 91 % | **84 %** |
-| fast 32x32 gate 0.05, full resolution | 57.3 s | 91 % | 85 % |
+| boxes only on a 1024 px copy, the previous default | 9.0 s | 39 % | 41 % |
+| fast, 16x16 gated, 1024 px copy | 18.2 s | 52 % | 47 % |
+| fast, 24x24 gated, 1024 px copy | 24.2 s | 64 % | 51 % |
+| fast 16x16 + `--owl-tiles 2`, 1024 px copy | 34.7 s | 58 % | 44 % |
+| fast 24x24 gated, full resolution | 27.2 s | 79 % | 73 % |
+| **fast 32x32 gated, full resolution (the CPU default)** | **38.7 s** | 91 % | **89 %** |
 
-The target of #478 (>= 65 % at IoU 0.7 in <= 60 s warm at load < 8; the ticket text also says 70 %) is met: **84 % in 41 s**. It comes from dropping the 1024 px copy, not from tiling: SAM2 resizes any photo to
-1024x1024 itself, so downscaling only costs mask detail (even the GPU loses 33 points of parity with it), and the 256x256 filtering makes the full-resolution grid affordable where the stock generator needed
-85-92 s. Tiled OWLv2 was measured and rejected (rows above). The GPU default is unchanged (`accurate`: 100 % of its own masks). On a saturated machine (load 23) expect 2-3x the CPU times.
+The target of #478 (>= 65 % at IoU 0.7 in <= 60 s warm at load < 8; the ticket text also says 70 %) is met: **89 % in 39 s**. It comes from dropping the 1024 px copy, not from tiling: SAM2 resizes any photo to
+1024x1024 itself, so downscaling only costs mask detail (even the GPU loses 18-27 points of parity with it), and the 256x256 filtering makes the full-resolution grid affordable where the stock generator needed
+85-92 s. Tiled OWLv2 was measured and rejected (rows above). The GPU default is unchanged (`accurate`: 100 % of its own masks). Gate 0.05 at full resolution took 57 s in an earlier run. On a saturated machine
+(load 23) expect 2-3x the CPU times. Further CPU speed-ups are #545.
 
 ### Second background and background prompts (#480)
 

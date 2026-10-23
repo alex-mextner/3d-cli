@@ -93,13 +93,16 @@ def _write_masks(
 ) -> dict[str, Any]:
     """SAM2 box prompts for the detected boxes -> `segment`-compatible output directory; returns a small summary."""
     from ..segment import Segmenter
-    from ..torchutil import peak_mb
+    from ..torchutil import peak_mb, reset_peak
     from ..outputs import write_result
 
     seg = Segmenter(method="sam2", fill="none", reject_bg=False, device=args.device)
     t0 = time.perf_counter()
     try:
-        seg.load()  # resets the CUDA peak counter (when the resolved device is cuda) before the weights are built
+        # no box, no SAM2: an empty result must not need the weights (they may not be pulled) nor a CUDA context
+        if det_res["boxes"]:
+            seg.load()
+            reset_peak(seg.device)
         instances = seg.masks_for_boxes(rgb, det_res["boxes"])
         elapsed = round(time.perf_counter() - t0, 2)
         doc = write_result(

@@ -203,10 +203,11 @@ class OwlDetector:
         tiles: int,
         overlap: float,
     ) -> tuple[np.ndarray, np.ndarray, list[str], np.ndarray]:
-        """Candidate boxes (xyxy px of `rgb`, scores, labels, whole-image objectness map) from the whole image plus, for `tiles` > 1, a tiles x tiles grid.
+        """Candidate boxes (xyxy px of `rgb`, scores, labels) and the whole-image objectness map.
 
-        OWLv2 sees a 960 px square whatever the input size, so a tile of a 2000 px photo is magnified ~2x: thin or small
-        tools that fall under the detector's patch size in the full pass get boxes from the tile pass.
+        The boxes come from the whole image plus, for `tiles` > 1, a tiles x tiles grid. OWLv2 sees a 960 px square whatever
+        the input size, so a tile of a 2000 px photo is magnified ~2x: thin or small tools that fall under the detector's
+        patch size in the full pass get boxes from the tile pass.
         """
         import torch
 
@@ -214,10 +215,10 @@ class OwlDetector:
         boxes_all: list[np.ndarray] = []
         scores_all: list[np.ndarray] = []
         labels_all: list[str] = []
-        objectness: np.ndarray | None = None
-        for x0, y0, x1, y1 in tile_windows(h, w, tiles, overlap):
+        objectness = np.zeros((1, 1), np.float32)
+        for k, (x0, y0, x1, y1) in enumerate(tile_windows(h, w, tiles, overlap)):
             out = self._forward(rgb[y0:y1, x0:x1], qs)
-            if objectness is None:  # the first window is the whole image
+            if k == 0:  # the first window is the whole image
                 side = int(round(out.objectness_logits.shape[-1] ** 0.5))
                 objectness = (
                     torch.sigmoid(out.objectness_logits[0].float())
@@ -236,16 +237,14 @@ class OwlDetector:
             )
             sc_np = sc[keep].cpu().numpy()
             labs = [qs[int(i)] for i in lab_idx[keep].cpu().numpy()]
-            if (
-                (x1 - x0, y1 - y0) != (w, h)
-            ):  # a tile: a box cut by a tile edge is a fragment, the full pass has the whole
+            if k > 0:
+                # a tile: a box cut by a tile edge is a fragment, the whole-image pass has the whole object
                 ok = ~cut_by_inner_edge(xyxy, (x0, y0, x1, y1), (h, w))
                 xyxy, sc_np = xyxy[ok], sc_np[ok]
-                labs = [lb for lb, k in zip(labs, ok, strict=True) if k]
+                labs = [lb for lb, keep_it in zip(labs, ok, strict=True) if keep_it]
             boxes_all.append(xyxy)
             scores_all.append(sc_np)
             labels_all += labs
-        assert objectness is not None
         if not boxes_all:
             return np.zeros((0, 4), np.float32), np.zeros(0, np.float32), [], objectness
         return (

@@ -16,13 +16,14 @@
   median of `--warm` further runs (`timing_s.total`, stage breakdown of the last one). A variant is a JSON dict of `Segmenter`
   keyword arguments; the device comes from `--device`.
 
-Heavy: run it under `flock /tmp/hsw-heavy.lock systemd-run --user --scope -q -p MemoryMax=6G -p MemorySwapMax=0 nice -n 19 ...`.
+Heavy: run it under `flock /tmp/3d-cli-heavy.lock systemd-run --user --scope -q -p MemoryMax=6G -p MemorySwapMax=0 nice -n 19 ...`.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import re
 import statistics
 import sys
 from pathlib import Path
@@ -34,7 +35,6 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "src"))
 
 from threed_vision import io  # noqa: E402
-from threed_vision.errors import BadInput  # noqa: E402
 from threed_vision.segment import Segmenter  # noqa: E402
 
 
@@ -46,29 +46,40 @@ def bbox_iou(a: list[int], b: list[int]) -> float:
     return inter / max(a[2] * a[3] + b[2] * b[3] - inter, 1)
 
 
+def found(
+    label: dict[str, Any], instances: list[dict[str, Any]], iou_min: float
+) -> bool:
+    """True when some instance's bbox reaches `iou_min` IoU with the label's bbox."""
+    return any(
+        bbox_iou(label["bbox_xywh"], i["bbox_xywh"]) >= iou_min for i in instances
+    )
+
+
 def label_recall(
     labels: list[dict[str, Any]], instances: list[dict[str, Any]], iou_min: float
 ) -> tuple[float, list[dict[str, Any]]]:
     """(recall, missed labels): a label is found when some instance's bbox reaches `iou_min` IoU with it."""
-    missed = [
-        lab
-        for lab in labels
-        if max(
-            (bbox_iou(lab["bbox_xywh"], i["bbox_xywh"]) for i in instances), default=0.0
-        )
-        < iou_min
-    ]
+    missed = [lab for lab in labels if not found(lab, instances, iou_min)]
     return (len(labels) - len(missed)) / max(len(labels), 1), missed
 
 
+def boxes_intersect(a: list[int], b: list[int]) -> bool:
+    return not (
+        a[0] + a[2] <= b[0]
+        or b[0] + b[2] <= a[0]
+        or a[1] + a[3] <= b[1]
+        or b[1] + b[3] <= a[1]
+    )
+
+
 def parity(ref: list[np.ndarray], masks: list[np.ndarray], iou_min: float) -> float:
-    """Fraction of `ref` masks with a mask in `masks` at IoU >= `iou_min`."""
+    """Fraction of `ref` masks with a mask in `masks` at mask IoU >= `iou_min` (bounding boxes only reject disjoint pairs)."""
     boxes = [io.mask_bbox_xywh(m) for m in masks]
     hit = 0
     for r in ref:
         rb = io.mask_bbox_xywh(r)
         if any(
-            bbox_iou(rb, b) >= iou_min and io.mask_iou(r, m) >= iou_min
+            boxes_intersect(rb, b) and io.mask_iou(r, m) >= iou_min
             for b, m in zip(boxes, masks, strict=True)
         ):
             hit += 1
@@ -123,7 +134,7 @@ def table(rows: list[dict[str, Any]]) -> str:
         par = "-" if r.get("parity") is None else f"{r['parity'] * 100:.0f} %"
         lines.append(
             f"| {r['variant']} | {r['device']} | {r['cold_s']} | {r['warm_s']} | {r['instances']} | "
-            f"{r['recall'] * 100:.0f} % ({round(r['recall'] * r['n_labels'])}/{r['n_labels']}) | "
+            f"{r['recall'] * 100:.0f} % ({r['n_found']}/{r['n_labels']}) | "
             f"{' / '.join('yes' if ok else 'no' for ok in r['extra'].values()) or '-'} | {par} | "
             f"{', '.join(m['label'] for m in r['missed']) or '-'} |"
         )
@@ -172,10 +183,14 @@ def main(argv: list[str] | None = None) -> int:
     variants: list[tuple[str, dict[str, Any]]] = []
     for spec in args.variant or ["default={}"]:
         name, _, raw = spec.partition("=")
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", name):
+            ap.error(
+                f"--variant {spec!r}: the name must be a plain file name (letters, digits, . _ -)"
+            )
         try:
             variants.append((name, json.loads(raw or "{}")))
         except ValueError as exc:
-            raise BadInput(f"--variant {spec!r}: {exc}") from exc
+            ap.error(f"--variant {spec!r}: {exc}")
     label_doc = json.loads(Path(args.labels).read_text(encoding="utf-8"))
     labels = label_doc["labels"]
     extra = label_doc.get("extra_labels", {}).get("labels", [])
@@ -188,12 +203,9 @@ def main(argv: list[str] | None = None) -> int:
         insts = last["instances"]
         row["recall"], row["missed"] = label_recall(labels, insts, args.iou)
         row["n_labels"] = len(labels)
-        row[
-            "extra"
-        ] = {  # objects annotated by eye (wrench, hammer): found as ONE instance at bbox IoU >= --iou?
-            lab["label"]: label_recall([lab], insts, args.iou)[0] == 1.0
-            for lab in extra
-        }
+        # objects annotated by eye (wrench, hammer): found as ONE instance at bbox IoU >= --iou?
+        row["extra"] = {lab["label"]: found(lab, insts, args.iou) for lab in extra}
+        row["n_found"] = row["n_labels"] - len(row["missed"])
         masks = [i["mask"] for i in insts]
         row["parity"] = parity(ref, masks, args.parity_iou) if ref is not None else None
         if args.masks_dir:

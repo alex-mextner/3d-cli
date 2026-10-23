@@ -25,7 +25,7 @@ Options:
   -o, --out DIR            output directory (required)
   --method sam2|sam2-dense|u2net   sam2 = AMG grid (default), sam2-dense = 64x64 grid, u2net = one salient object
   --quality fast|accurate  fast = SAM2 grid filtered on the decoder's 256x256 logits, fp16, prompted only where OWLv2 sees objects
-                           (~1.7 s warm on an RTX 4060, ~41 s on CPU); accurate = the stock SAM2 generator (~5.8 s warm on GPU)
+                           (~1.8 s warm on an RTX 4060, ~39 s on CPU); accurate = the stock SAM2 generator (~5.7 s warm on GPU)
                            default: accurate on cuda, fast on cpu
   --fill owlv2|none        OWLv2 boxes + SAM2 box prompts fill what the AMG missed (default owlv2)
   --queries "a,b,c"        OWLv2 queries (default: hand tool, power tool, box, tube of glue, tape roll, pliers, screwdriver)
@@ -48,8 +48,10 @@ Examples:
   3d segment tools.jpg -o seg/ --quality accurate             # the stock generator (the GPU default)
   3d segment tools.jpg -o seg/ --fill none --no-reject-bg
   3d segment one-tool.jpg -o seg/ --method u2net
-  3d segment tools.heic -o seg/ --device cpu                 # fast, full resolution: ~41 s warm, 84 % of the GPU masks at IoU 0.7
+  3d segment tools.heic -o seg/ --device cpu                 # fast, full resolution: ~39 s warm, 89 % of the GPU masks at IoU 0.7
   3d segment tools.jpg -o seg/ --quality fast --owl-tiles 2   # also tiles OWLv2 (finds the adjustable wrench)
+  3d segment tools.jpg -o seg/ --quality fast --grid-gate 0   # decode every grid point, not only those near OWLv2 objects
+  3d segment bench.jpg -o seg/ --bg-prompts bg.txt --fg-prompts fg.txt   # prompt files, one per line, # comments
   3d segment bench.jpg -o seg/ --bg-prompts "a photo of a steel workbench,a photo of a pegboard" --fg-prompts "a photo of a hand tool"
   3d segment tools.jpg -o seg/ --queries "a hand tool,a box" --points-per-side 24
   3d segment tools.jpg -o seg/ --min-area 400 --max-area-frac 0.05   # drop specks, allow larger objects

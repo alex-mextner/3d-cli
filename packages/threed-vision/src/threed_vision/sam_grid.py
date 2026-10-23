@@ -23,6 +23,11 @@ STABILITY_OFFSET = 1.0
 BOX_NMS_THRESH = 0.6
 MIN_REGION_AREA = 100  # holes / islands smaller than this (px at the processed resolution) are cleaned like SAM's AMG does
 POINT_BATCH = 64  # decoder batch: 64 points x 3 masks x 256 x 256 logits = 50 MB
+UPSAMPLE_BATCH = 16  # masks upsampled to photo size per step (16 x 3 MP floats = 200 MB of GPU memory)
+BOX_CORNER_LABELS = (
+    2,
+    3,
+)  # SAM2 prompt labels of a box's top-left and bottom-right corner
 
 
 _HALF: weakref.WeakKeyDictionary[Any, Any] = weakref.WeakKeyDictionary()
@@ -88,7 +93,10 @@ def grid_points(hw: tuple[int, int], points_per_side: int) -> np.ndarray:
 
 
 def gate_points(
-    points_px: np.ndarray, objectness: np.ndarray, hw: tuple[int, int], min_objectness: float
+    points_px: np.ndarray,
+    objectness: np.ndarray,
+    hw: tuple[int, int],
+    min_objectness: float,
 ) -> np.ndarray:
     """Keep the grid points that fall on (or next to) a patch whose OWLv2 objectness is at least `min_objectness`.
 
@@ -114,8 +122,9 @@ def grid_masks(
 ) -> list[dict[str, Any]]:
     """Automatic masks from one point prompt per row of `points_px` (x, y pixels): `[{"mask" bool HxW, "stability" float}]`.
 
-    Same thresholds as the stock generator (predicted IoU > 0.8, stability >= 0.9, box NMS 0.6); candidates without a
-    non-degenerate box at 256x256 resolution are dropped. Results are ordered by predicted IoU, best first.
+    Same thresholds as the stock generator (predicted IoU > 0.8, stability >= 0.9, box NMS 0.6); candidates that are empty at
+    256x256 resolution are dropped. Results are ordered by predicted IoU, best first. Written against sam2 1.1.0: the
+    `SAM2ImagePredictor` internals (`_features`, `_transforms`, `model.sam_*`) are the ones its own `_predict` uses.
     """
     import torch
     from sam2.utils.amg import batched_mask_to_box, calculate_stability_score
@@ -146,8 +155,10 @@ def grid_masks(
             low, iou, stab = low[keep], iou[keep], stab[keep]
             if not len(low):
                 continue
-            boxes = batched_mask_to_box(low > 0)
-            keep = (boxes[:, 2] > boxes[:, 0]) & (boxes[:, 3] > boxes[:, 1])
+            masks = low > 0
+            boxes = batched_mask_to_box(masks)
+            # a one-column mask has a zero-extent box at 256x256 (~8 px on the photo): keep it, drop only empty ones
+            keep = masks.flatten(1).any(dim=1)
             logit_parts.append(low[keep].half())
             iou_parts.append(iou[keep])
             stab_parts.append(stab[keep])
@@ -160,7 +171,7 @@ def grid_masks(
         order = nms(boxes.float(), iou, BOX_NMS_THRESH)
         logits, stab = logits[order], stab[order]
         out: list[dict[str, Any]] = []
-        for sl in _chunks(len(logits), 16):
+        for sl in _chunks(len(logits), UPSAMPLE_BATCH):
             masks = _upsample(logits[sl], (h, w)).cpu().numpy()
             out += [
                 {"mask": clean_mask(m), "stability": float(s)}
@@ -170,7 +181,10 @@ def grid_masks(
 
 
 def box_masks(
-    pred: Any, hw: tuple[int, int], boxes_xyxy: np.ndarray, chunk: int = 16
+    pred: Any,
+    hw: tuple[int, int],
+    boxes_xyxy: np.ndarray,
+    chunk: int = UPSAMPLE_BATCH,
 ) -> list[tuple[np.ndarray, float]]:
     """One SAM2 mask per box prompt, batched on the decoder: `[(bool HxW, predicted IoU)]` in box order (single-mask output)."""
     import torch
@@ -184,11 +198,10 @@ def box_masks(
             normalize=True,
             orig_hw=hw,
         )
-        labels = torch.tensor([[2, 3]], dtype=torch.int, device=b.device)
+        labels = torch.tensor([BOX_CORNER_LABELS], dtype=torch.int, device=b.device)
         for sl in _chunks(len(b), chunk):
-            corners = b[
-                sl
-            ]  # (B, 2, 2): a box prompt is its two corners, labels 2 and 3
+            # (B, 2, 2): a box prompt is its two corners
+            corners = b[sl]
             low, iou = _decode(pred, corners, labels.repeat(len(corners), 1), False)
             masks = _upsample(low[:, 0], hw).cpu().numpy()
             out += [
@@ -198,7 +211,10 @@ def box_masks(
 
 
 def clean_mask(mask: np.ndarray, min_area: int = MIN_REGION_AREA) -> np.ndarray:
-    """Fill holes and drop islands smaller than `min_area` px (SAM's `min_mask_region_area`), working on the mask's bbox only."""
+    """Fill holes and drop islands smaller than `min_area` px (SAM's `min_mask_region_area`), working on the mask's bbox only.
+
+    Like SAM's `remove_small_regions`, a mask whose every island is small keeps its largest one instead of vanishing.
+    """
     import cv2
 
     rows, cols = np.flatnonzero(mask.any(axis=1)), np.flatnonzero(mask.any(axis=0))
@@ -206,20 +222,22 @@ def clean_mask(mask: np.ndarray, min_area: int = MIN_REGION_AREA) -> np.ndarray:
         return mask
     y0, y1, x0, x1 = rows[0], rows[-1] + 1, cols[0], cols[-1] + 1
     sub = np.pad(mask[y0:y1, x0:x1], 1).astype(np.uint8)
-    for fg in (
-        0,
-        1,
-    ):  # 0: fill small holes (components of the background), 1: drop small islands
-        _, lab, stats, _ = cv2.connectedComponentsWithStats(
-            (sub == fg).astype(np.uint8), connectivity=8
-        )
-        small = np.flatnonzero(stats[1:, cv2.CC_STAT_AREA] < min_area) + 1
-        if fg == 0:
-            small = small[
-                small != lab[0, 0]
-            ]  # the padded frame's background is the outside, never a hole
-        if len(small):
-            sub[np.isin(lab, small)] = 1 - fg
+    # fill small holes: components of the background, except the one around the frame (the outside of the mask)
+    _, lab, stats, _ = cv2.connectedComponentsWithStats(
+        (sub == 0).astype(np.uint8), connectivity=8
+    )
+    holes = np.flatnonzero(stats[1:, cv2.CC_STAT_AREA] < min_area) + 1
+    holes = holes[holes != lab[0, 0]]
+    if len(holes):
+        sub[np.isin(lab, holes)] = 1
+    # drop small islands, keeping the largest component when all of them are small
+    _, lab, stats, _ = cv2.connectedComponentsWithStats(sub, connectivity=8)
+    areas = stats[1:, cv2.CC_STAT_AREA]
+    small = np.flatnonzero(areas < min_area) + 1
+    if len(small) == len(areas):
+        small = small[small != int(np.argmax(areas)) + 1]
+    if len(small):
+        sub[np.isin(lab, small)] = 0
     out = np.zeros_like(mask)
     out[y0:y1, x0:x1] = sub[1:-1, 1:-1] > 0
     return out

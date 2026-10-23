@@ -59,6 +59,7 @@ def test_segment_help_documents_every_flag_and_artefact(tmp_path: Path) -> None:
         "--owl-tiles",
         "--bg-prompts",
         "--fg-prompts",
+        "--grid-gate",
     ):
         assert word in result.stdout
 
@@ -201,6 +202,8 @@ def test_bad_inputs_are_exit_2(tmp_path: Path) -> None:
         (["--min-area", "-1"], "min_area=-1"),
         (["--bg-prompts", " , "], "no prompts"),
         (["--fg-prompts", ","], "no prompts"),
+        (["--bg-prompts", ""], "no prompts"),
+        (["--bg-prompts", "typo-prompts.txt"], "does not exist"),
     ],
 )
 def test_invalid_segment_options_exit_2_before_any_model_is_touched(

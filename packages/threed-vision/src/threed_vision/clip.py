@@ -99,6 +99,11 @@ def _l2(e: np.ndarray) -> np.ndarray:
     )
 
 
+class CudaSessionFailed(MissingDependency):
+    """onnxruntime could not build a session with the CUDA provider (cuBLAS / arena allocation on a card that filled up
+    after the free-VRAM check). `auto` retries on CPU; an explicit `cuda` reports it."""
+
+
 class OrtEncoder:
     """Shared onnxruntime session management: device request -> real providers, optimisation fallback, unload."""
 
@@ -157,7 +162,10 @@ class OrtEncoder:
                 )
             self.providers = active
             return sess
-        raise MissingDependency(
+        cannot_load = (
+            CudaSessionFailed if want_cuda and last is not None else MissingDependency
+        )
+        raise cannot_load(
             f"cannot load {path.name} with onnxruntime: {last}",
             f"3d vision-models pull {self.model_name}",
         ) from last
@@ -184,12 +192,11 @@ class OrtEncoder:
         self._resolve()
         try:
             self._build()
-        except MissingDependency:
-            if self.device != "cuda" or self.requested == "cuda":
+        except CudaSessionFailed:
+            if self.requested == "cuda":
                 raise
-            # `auto` means "the GPU if it works": the CUDA provider can fail to initialise on a shared card that filled up
-            # after the free-VRAM check (cuBLAS / arena allocation); the CPU session is the documented fallback.
-            self._sessions.clear()
+            # `auto` means "the GPU if it works": the CPU session is the documented fallback for a CUDA provider that
+            # cannot initialise on a shared card that filled up after the free-VRAM check
             self.device = "cpu"
             self._build()
         self.loaded = True
