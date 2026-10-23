@@ -261,6 +261,49 @@ Labels of the U1's own detector (unisrv `camera.detect_capture`), from Snapmaker
 | `extrusion_line` | in the clean-bed answer: a purge/extrusion line; the firmware ignores it | no |
 | anything else | a label a later firmware may add | yes (better a question than a miss) |
 
+## Pause without an agent
+
+Alert delivery (`printer watch`, `printer vision`) tries live subscribed sessions, then the
+temporary agent. When both failed, or the agent did not acknowledge within its window (default
+90 s), the watcher itself pauses the print for a small set of findings and tells you over `tg`.
+It only calls the adapter's native pause, never cancel, resume, G-code or start.
+
+It fires only for one of these events (a single table, `QUALIFYING` in
+`lib/printer_ops/auto_pause.py`), at most 10 minutes old:
+
+| event | needs |
+|---|---|
+| `vision_spaghetti` | severity critical; the CLIP verifier ran (`q` is a number) and `q >= 0.3 * p`; at least one box verified >= 0.5 (the evidence bar of `printer guard`) |
+| `vision_part_detached` | severity critical and not `confidence: low` |
+
+Warnings, infos and every other kind (`printer_noodle_verdict`, camera, state, exception,
+filament events) never pause. At the moment of the pause the watcher re-reads the printer: it
+must be `printing`, the newest history record must be the `in_progress` job of the current file,
+and the alert must not predate that job's start; otherwise it does nothing and says why.
+
+Once per job: an exclusive claim `~/.local/state/3d-cli/guard/NAME-JOBID.json` (XDG paths apply)
+is created before the request. It is the same file `printer guard` uses, so whichever of the two
+tried first wins and the other skips; the claim stays whatever the outcome and nothing is retried.
+The result is `paused`, `pause_unverified` (accepted, but not `paused` after 8 s) or `failed`
+(both critical), and one `print.pause` line goes to the settings journal.
+
+Policy, per printer: `watch.pause_without_agent: critical-only|off` in `printer-devices.yaml`.
+Unset means `critical-only` only for a printer that is in the fleet registry with
+`owner: own` and `access: full`, uses the `moonraker` adapter, and has a camera; everything else
+is `off`. An explicit `critical-only` for another owner's printer, a read-only/offline one or a
+non-Moonraker adapter is refused at startup (exit 2): the watcher never pauses somebody else's
+printer. Set `off` to turn it off.
+
+The `tg` message says what was seen, whether the print was paused (or why not) and how to resume:
+press Resume on the printer's touchscreen or in Fluidd/Mainsail (`http://HOST` of the
+printer), or Cancel there. The watcher never resumes or cancels by itself.
+
+The pause is the step before the emergency `tg` message, so it needs `watch.tg_fallback` (on by
+default): with `tg_fallback: false` the default policy is `off` and an explicit `critical-only` is
+refused (a pause nobody is told about). The acknowledgement window is `watch.agent_ack_seconds`
+(default 90). Every outcome is counted (`auto_pause_*` in `3d printer agent list`) and recorded as
+an `auto_pause` event in `printer-agents/NAME/events.jsonl` and the journal.
+
 ## How it decides
 
 1. **Frame.** The U1 has no video stream on stock firmware; `unisrv` rewrites
@@ -387,7 +430,10 @@ camera `snapshot`, thresholds and `crop`; nothing in tier (b) is U1-specific.
 
 `vision` and `watch` print what they would send when started with `--dry-run`; a service started that way
 looks alive (a JSON verdict line every 10 s) while no event ever reaches the agent, `tg` or a subscriber. On
-2026-10-22 a U1 print peeled off the plate for hours under exactly that deployment. The check:
+2026-10-22 a U1 print peeled off the plate for hours under exactly that deployment. Since
+[#529](https://github.com/alex-mextner/3d-cli/issues/529) both commands **refuse to start with `--dry-run`
+when stderr is the journal** (exit 2, with the fix), so a unit that still carries it fails loudly instead of
+holding alerts. The doctor check, for units that are not restarted yet:
 
 ```bash
 3d printer vision doctor            # exit 1 + FAIL lines + the fix when a running unit has --dry-run
@@ -408,8 +454,10 @@ systemctl --user restart 3d-printer-vision@u1.service 3d-printer-watch@u1.servic
 What a delivered event looks like: `subscriptions test --send` exits 0 only when a live subscriber took the
 `[TEST]` event; a real alert additionally appends a line to
 `~/.local/state/3d-cli/printer-agents/u1/events.jsonl` and starts/feeds the temporary agent session
-`3d-printer-agent-u1` (`tmux ls`); in the journal the sink lines have **no** `dry-run` prefix (held ones read
-`dry-run temporary u1 agent (...)` / `dry-run subscribers ...`). Follow with
+`3d-printer-agent-u1` (`tmux -L 3d-printer-agent ls`); in the journal the sink lines have **no** `dry-run` prefix
+(held ones read `dry-run temporary u1 agent (...)` / `dry-run subscribers ...`). When no agent can take an alert the
+journal says `ALERT NOT DELIVERED TO AN AGENT (<counter>)` and the user gets the `tg` message
+([delivery](printer-subscribe.md#when-nobody-can-judge)). Follow with
 `journalctl --user -fu '3d-printer-vision@*' -u '3d-printer-watch@*'`. `doctor` never starts, stops or edits
 a unit; it needs systemd (`unknown` without it, never a pass) and only sees user services.
 

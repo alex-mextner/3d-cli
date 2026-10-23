@@ -92,9 +92,11 @@ Target package: `lib/geometry/`, with subpackages only when a real boundary appe
   `move_bounds.py` (G-code moves and arc extremes vs axis travel / printable area),
   `force_hatch.py` (the owner's Telegram hatch approval that `3d printer start --force` needs),
   `watch.py` / `watch_run.py` / `watch_sinks.py` (`3d printer watch`: detectors, streams,
-  the event Dispatcher and its staged sinks; agents first, `tg` only as the emergency
-  `watch.tg_fallback`), `subscriptions.py` (`3d printer subscribe`: the agent-subscription
-  registry `subscriptions.yaml` and the `SubscriptionSink` every watcher adds), and
+  the event Dispatcher and its staged sinks; agents first, `tg` (with the frame, after the optional
+  automatic pause) only when nobody can judge: `watch.tg_fallback`, on by default), `subscriptions.py` (`3d printer subscribe`: the agent-subscription
+  registry `subscriptions.yaml` and the `SubscriptionSink` every watcher adds),
+  `auto_pause.py` (`watch.pause_without_agent`: the watcher's own claimed, once-per-job native
+  pause for critical verified findings when no agent took the alert; shares `guard.py`'s claim), and
   `printer_agent.py` (`3d printer agent`: the temporary per-printer omp agent in tmux for
   alerts no live subscriber took, and its handoff).
 - `lib/printers_cli/` — the self-registering `3d printers <sub>` subs (`Sub` + `discover()`, like `printops/cli/`; one module per sub, `list`/`show` stay in `commands/printers.py`): `spools.py` (what is loaded where + Moonraker active-spool agreement, logic in `_spool_view.py`, which also holds the `PRINTER[/HEAD]` slot addressing), `load.py` (`load`/`unload`/`swap`, thin over `printops.cli.spool` with `--dry-run`), `filament.py` (`filament show|set` over `Adapter.set_head_filament`), `fw.py` (thin Sub over the package below), `_common.py` (parser, 3d-api client, fleet printer names).
