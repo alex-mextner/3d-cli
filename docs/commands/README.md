@@ -74,6 +74,8 @@ For a practical figure-by-figure image backplate loop, see
 | `calibrate-grid` | [calibrate-grid.md](calibrate-grid.md) | Honeycomb wall photo -> focal length, camera pose and photo-px -> wall-mm homography (numpy + OpenCV, no model). |
 | `photo-scale` | [photo-scale.md](photo-scale.md) | mm per pixel + plane depth + K from a reference object, two points, the honeycomb grid or another photo. |
 | `register` | [register.md](register.md) | SIFT + RANSAC registration of two photos: relative pose, `baseline_ok`, mask warp A->B, repeatability IoU. |
+| `segment` | [segment.md](segment.md) | Multi-object photo segmentation (SAM2 + OWLv2 fill + CLIP background rejection) into per-instance masks (threed-vision). |
+| `detect` | [detect.md](detect.md) | Open-vocabulary object boxes for text queries (OWLv2, threed-vision). |
 
 ### Slicing
 
@@ -114,6 +116,7 @@ Every gate from model to printer, in order: [Print pipeline](../workflows/print-
 | `ai` | [ai.md](ai.md) | Build offline AI-assist prompt bundles without calling a backend. |
 | `bench` | [bench.md](bench.md) | Auto-scored generative-modeling benchmark: prompt → `.scad`, build-success gate, metric vector, `$/ok` + `--compare`. |
 | `auth` | [auth.md](auth.md) | Configure optional Hugging Face credentials for ZeroGPU and gated weights. |
+| `vision-models` | [vision-models.md](vision-models.md) | Vision model weights (SAM2.1-tiny, OWLv2, CLIP, DINOv2, u2net): `status`, explicit sha256-verified `pull` (imports local copies, never downloads implicitly). |
 | `doctor` | [doctor.md](doctor.md) | Read-only dependency report with install commands. |
 | `heavy` | [heavy.md](heavy.md) | Run one command alone under the machine heavy lock with a memory cap (re-entrant, bounded wait). |
 | `remote` | [remote.md](remote.md) | Push files to an ssh heavy box, run under its heavy lock, pull results. |
