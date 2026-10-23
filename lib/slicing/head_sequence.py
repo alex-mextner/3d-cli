@@ -30,6 +30,7 @@ from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
 
 from gcode_labels import LAYER_MARKERS, ObjectLabels, undecorated
+from slicing.mix_pattern import parse_row
 
 # Bambu emits T255 / T1000 as pseudo tool changes; real heads are below this.
 _MAX_HEAD_INDEX = 255
@@ -79,19 +80,28 @@ class HeadSequenceReport:
         }
 
 
+def _row_pattern(row: str) -> str:
+    """The decoded pattern of one mixed-filament row; a row without filament numbers carries none, like a ratio row."""
+    try:
+        return parse_row(row).slots
+    except ValueError:
+        return ""
+
+
 def read_recipes(zf: zipfile.ZipFile) -> tuple[dict[int, str], int]:
     """Virtual filament id -> manual pattern ('' = ratio/Local-Z row), and raft layer count.
 
     Virtual ids follow the physical filaments: id = n_physical + 1 + row index. A row's
-    pattern is its last comma field when all digits (one 1-based head per layer).
+    pattern is its last comma field when all digits; the tokens are decoded to one 1-based
+    head per layer (`1` = the row's component_a, `2` = component_b, `3`-`9` = that head —
+    slicing/mix_pattern.py), so a row `2,3,…,12` is the heads `23`.
     """
     cfg = json.loads(zf.read("Metadata/project_settings.config"))
     n_phys = len(cfg.get("filament_colour") or [])
     rows = [r for r in str(cfg.get("mixed_filament_definitions") or "").split(";") if r]
     patterns: dict[int, str] = {}
     for i, row in enumerate(rows):
-        last = row.split(",")[-1].strip()
-        patterns[n_phys + 1 + i] = last if last.isdigit() else ""
+        patterns[n_phys + 1 + i] = _row_pattern(row)
     raft = cfg.get("raft_layers", "0")
     if isinstance(raft, list):
         raft = raft[0] if raft else "0"
@@ -130,26 +140,57 @@ def read_object_extruders(zf: zipfile.ZipFile) -> dict[str, list[int]]:
     return objs
 
 
-def heads_by_layer(lines: Iterable[str]) -> dict[str, dict[int, set[int]]]:
-    """Object name -> layer index -> 1-based heads that extruded with XY motion on that layer."""
+@dataclass
+class GcodeScan:
+    """What a sliced G-code says per layer: the 1-based heads each object extruded with, and the
+    layer's Z (`;Z:` of Orca / PrusaSlicer, `; Z_HEIGHT:` of Bambu) where the slicer wrote it."""
+
+    heads: dict[str, dict[int, set[int]]]
+    layer_z: dict[int, float]
+
+
+def _layer_z(line: str) -> float | None:
+    if not line.startswith(";"):
+        return None
+    body = line[1:].lstrip()
+    for key in ("Z:", "Z_HEIGHT:"):
+        if body.startswith(key):
+            try:
+                return float(body[len(key) :].split()[0])
+            except (ValueError, IndexError):
+                return None
+    return None
+
+
+def scan_gcode(lines: Iterable[str]) -> GcodeScan:
+    """Object name -> layer index -> heads that extruded with XY motion on that layer, plus the
+    Z of every layer that announced one."""
     tool, layer = 1, -1  # single-head printers never emit T
     labels = ObjectLabels()
     seen: dict[str, dict[int, set[int]]] = collections.defaultdict(
         lambda: collections.defaultdict(set)
     )
+    layer_z: dict[int, float] = {}
     for raw in lines:
         line = raw.lstrip()
         if line.startswith(LAYER_MARKERS):
             layer += 1
         elif (m := _TOOL_RE.match(line)) and int(m.group(1)) < _MAX_HEAD_INDEX:
             tool = int(m.group(1)) + 1
+        elif (z := _layer_z(line)) is not None:
+            layer_z.setdefault(layer, z)
         elif labels.feed(line):
             continue
         elif labels.current and line.startswith("G1"):
             code = line.split(";", 1)[0]
             if _EXTRUDE_RE.search(code) and ("X" in code or "Y" in code):
                 seen[labels.current][layer].add(tool)
-    return seen
+    return GcodeScan(seen, layer_z)
+
+
+def heads_by_layer(lines: Iterable[str]) -> dict[str, dict[int, set[int]]]:
+    """Object name -> layer index -> 1-based heads that extruded with XY motion on that layer."""
+    return scan_gcode(lines).heads
 
 
 def _norm(s: str) -> str:

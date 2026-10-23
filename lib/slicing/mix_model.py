@@ -5,14 +5,23 @@ WHAT: the recipe model of Full Spectrum / Snapmaker Orca mixed filaments (issue 
   - mix(): fine stripes of opaque filament mix in the eye as the area-weighted mean in LINEAR
     light; compared with the target in CIELAB with CIEDE2000 (printops.color);
   - pattern(): the weights spread over the cycle as evenly as possible (Snapmaker Orca's
-    build_weighted_gradient_sequence), one slot digit per layer;
+    build_weighted_gradient_sequence), one slot digit per layer, or the arrangement with fewer
+    equal neighbours across the repeat seam when the spread order has avoidable ones;
   - stripe_delta_e(): how visible the stripes are — the wall profile (one filament per layer,
     repeating) blurred by the eye's line spread (Gaussian, σ = 1 arcmin at the viewing distance)
     in linear light; the worst ΔE of the blurred profile against its mean (< 2 invisible, > 5 seen);
-  - rank(): every integer weight vector over the slots with cycle length ≤ max_cycle and gcd 1,
-    scored ΔE + 0.2 × stripe ΔE at 30 cm (a visibly striped wall is worse than a slightly off hue);
+  - rank(): every integer weight vector over the slots with cycle length ≤ max_cycle and gcd 1
+    whose pattern passes the layer rules of slicing/mix_pattern.py (the additional colour is one
+    thin layer, never on adjacent layers; no colour band thicker than the run limit; layers no
+    thicker than the cap), scored ΔE + 0.2 × stripe ΔE at 30 cm (a visibly striped wall is worse
+    than a slightly off hue);
     pick(): the best plus variants around it (lighter, darker, warmer, greener, pure, short), then
     the next best, up to `count`.
+RULES: a mix whose pattern breaks the layer rules is REJECTED, not ranked low: 2026-10-20 the
+  eye recipe GWG repeated as GWGGWG and printed a double-thick G band ("the additional colour
+  must never print several layers in a row as thick stripes"). With the default rules only
+  patterns where no colour touches itself qualify (1:1 pairs, triples, 2:1:1 …); pure filaments
+  always qualify. `rules=MixRules(max_run_mm=0.24)` lets a majority colour double.
 WHY: Snapmaker Orca's own preview predicts mixes with a pigment model that is off by ΔE 14–21 for
   opaque PLA stripes; SPEC 58 (babushkin-dom): short even cycles (1–3 layers) read best, longer
   ones band even when their mean is closer. On 2026-10-17 a mix chosen without a printed test came
@@ -35,6 +44,7 @@ from printops.color import (
     linear_to_lab,
     parse_hex,
 )
+from slicing.mix_pattern import TOLERANCE_MM, MixRules, analyse_pattern
 
 Lab = tuple[float, float, float]
 RGB = tuple[float, float, float]
@@ -142,8 +152,39 @@ def dispersed_sequence(ids: Sequence[int], weights: Sequence[int]) -> list[int]:
     return seq
 
 
+def _equal_neighbours(seq: Sequence[int]) -> int:
+    """Pairs of equal layers next to each other in the repeating cycle (the seam included)."""
+    return (
+        sum(seq[i] == seq[i - 1] for i in range(len(seq))) if len(set(seq)) > 1 else 0
+    )
+
+
+def _spread_out(ids: Sequence[int], weights: Sequence[int]) -> list[int]:
+    """Most frequent colour first on every other position, the rest in the gaps: no two equal
+    neighbours whenever the largest share is at most half of the cycle."""
+    pairs = sorted(
+        ((i, w) for i, w in zip(ids, weights, strict=True) if w > 0),
+        key=lambda p: -p[1],
+    )
+    flat = [i for i, w in pairs for _ in range(w)]
+    out = [0] * len(flat)
+    out[0::2] = flat[: (len(flat) + 1) // 2]
+    out[1::2] = flat[(len(flat) + 1) // 2 :]
+    return out
+
+
+def arrange(ids: Sequence[int], weights: Sequence[int]) -> list[int]:
+    """One cycle of layers for these weights: the evenly spread order of Snapmaker Orca, unless
+    it leaves equal layers next to each other across the repeat seam that another order avoids
+    (`A B C A` repeats as `…A A…`; `A B A C` does not). Where a share above half makes equal
+    neighbours unavoidable (`GWG` repeats as `GWGGWG`) the spread order stays."""
+    spread = dispersed_sequence(ids, weights)
+    alt = _spread_out(ids, weights)
+    return alt if _equal_neighbours(alt) < _equal_neighbours(spread) else spread
+
+
 def pattern(slots: Sequence[int], weights: Sequence[int]) -> str:
-    return "".join(str(s) for s in dispersed_sequence(slots, weights))
+    return "".join(str(s) for s in arrange(slots, weights))
 
 
 @lru_cache(maxsize=256)
@@ -217,9 +258,15 @@ def _weight_vectors(n_slots: int, max_cycle: int) -> list[tuple[int, ...]]:
 
 
 def rank(
-    target: str, slots: Sequence[Slot], *, max_cycle: int = 3, layer_h: float = 0.12
+    target: str,
+    slots: Sequence[Slot],
+    *,
+    max_cycle: int = 3,
+    layer_h: float = 0.12,
+    rules: MixRules = MixRules(),  # noqa: B008 — frozen dataclass, safe as a default
 ) -> list[Candidate]:
-    """Every candidate, best score first (stripes scored only near the best ΔE)."""
+    """Every candidate whose pattern passes `rules` at `layer_h`, best score first (stripes
+    scored only near the best ΔE). Pure filaments (one-layer cycles) always qualify."""
     if not slots:
         raise MixModelError("no slots: pass the loaded filaments")
     if len({s.slot for s in slots}) != len(slots) or any(
@@ -230,6 +277,12 @@ def rank(
         )
     if not 1 <= max_cycle <= 24:
         raise MixModelError(f"max cycle {max_cycle} must be 1..24 layers")
+    if max_cycle > 1 and layer_h > rules.layer_cap_mm + TOLERANCE_MM:
+        raise MixModelError(
+            f"layer {layer_h:g} mm is thicker than the {rules.layer_cap_mm:g} mm cap for mixed "
+            "layers: stripes that thick read as bands. Use a thinner layer, raise --layer-cap, "
+            "or --max-cycle 1 for pure filaments only"
+        )
     tl = linear_to_lab(linear_rgb(_hex(target)))
     hexes = [_hex(s.hex) for s in slots]
     linears = [linear_rgb(h) for h in hexes]
@@ -237,12 +290,13 @@ def rank(
     by_slot = dict(zip(ids, hexes, strict=True))
     cands = []
     for w in _weight_vectors(len(slots), max_cycle):
+        pat = pattern(ids, w)
+        if not analyse_pattern(pat, layer_h, rules).ok:
+            continue
         lin = mix_linear(linears, w)
         lab = linear_to_lab(lin)
         cands.append(
-            Candidate(
-                w, ids, pattern(ids, w), hex_from_linear(lin), lab, delta_e2000(lab, tl)
-            )
+            Candidate(w, ids, pat, hex_from_linear(lin), lab, delta_e2000(lab, tl))
         )
     floor = min(c.delta_e for c in cands)
     # stripes cost ~ms each: score only the closest few near the best ΔE

@@ -44,7 +44,9 @@ layer. A planned head missing from a layer is not a FAIL (the 3MF carries no per
 a shorter part's head legitimately disappears); an unplanned head on a layer is.
 A physical filament prints on its own head; a mixed filament (`mixed_filament_definitions`,
 virtual id = physical count + 1 + row) with a manual pattern (`…,cm1,14`) prints one pattern
-digit per layer, at any starting phase. Raft layers (`raft_layers`) are skipped. Ratio rows
+token per layer, at any starting phase; the tokens are decoded as Orca reads them (`1` = the row's
+component_a, `2` = component_b, `3`-`9` = that head), so a row `2,3,…,cm1,12` expects heads 2,3,2,3.
+Raft layers (`raft_layers`) are skipped. Ratio rows
 (`…,cm0`, Local-Z) have no per-layer pattern: such objects are reported `local-z`, not checked.
 Heads are read from `T<n>` (`T255`/`T1000` Bambu pseudo-changes ignored), objects from
 `EXCLUDE_OBJECT_START NAME=` or Bambu Studio's `; start printing object` / `M624` blocks, layers

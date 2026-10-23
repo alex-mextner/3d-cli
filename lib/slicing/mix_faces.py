@@ -45,6 +45,7 @@ _UNITS = {
     "meter": 1000.0,
 }
 _MAX_DEPTH = 16
+_NOT_PRINTED = ("negative_part", "support_blocker", "support_enforcer")
 
 # row-major 3x4: r00 r01 r02 tx r10 r11 r12 ty r20 r21 r22 tz
 Matrix = tuple[float, ...]
@@ -66,6 +67,12 @@ class PartFaces:
     slope: float = 0.0
     status: str = PASS
     detail: str = ""
+    object_id: int = 0  # 1-based position among the build items (the `object_id=` key of Metadata/layer_heights_profile.txt)
+    object_height: float = 0.0  # mm, of the whole object (all its parts)
+    z_lo: float = 0.0  # mm above the object's lowest point
+    z_hi: float = 0.0
+    layer_height: float = 0.0  # the object's own layer height override (0 = the project's)
+    first_layer: float = 0.0  # the object's own first layer override (0 = the project's)
 
     def to_dict(self) -> dict[str, builtins.object]:
         return {
@@ -78,6 +85,8 @@ class PartFaces:
             "slope_mm2": round(self.slope, 1),
             "status": self.status,
             "detail": self.detail,
+            "z_lo_mm": round(self.z_lo, 3),
+            "z_hi_mm": round(self.z_hi, 3),
         }
 
 
@@ -85,6 +94,7 @@ class PartFaces:
 class MixFaceReport:
     parts: list[PartFaces] = field(default_factory=list)
     mixed_rows: int = 0
+    objects: int = 0  # build items, mixed or not
 
     @property
     def status(self) -> str:
@@ -131,6 +141,9 @@ class _ObjectSettings:
     name: str
     extruder: int
     parts: dict[str, tuple[str, int]]  # part id -> (name, extruder; 0 = the object's)
+    subtypes: dict[str, str] = field(default_factory=dict)  # part id -> Orca part subtype
+    layer_height: float = 0.0  # the object's own layer_height override; 0 = the project's
+    first_layer: float = 0.0  # the object's own initial_layer_print_height; 0 = the project's
 
 
 def _extruder(el: ET.Element) -> int:
@@ -139,8 +152,18 @@ def _extruder(el: ET.Element) -> int:
     return int(raw) if raw.strip().isdigit() else 0
 
 
+def _metadata_number(el: ET.Element, key: str) -> float:
+    e = el.find(f"metadata[@key='{key}']")
+    try:
+        v = float(e.get("value", "0")) if e is not None else 0.0
+    except ValueError:
+        return 0.0
+    return v if math.isfinite(v) and v > 0 else 0.0
+
+
 def read_settings(zf: zipfile.ZipFile) -> dict[str, _ObjectSettings]:
-    """model_settings.config: object id -> name, extruder and its parts' extruders."""
+    """model_settings.config: object id -> name, extruder, its parts' extruders and subtypes, and
+    the object's own layer height overrides."""
     root = ET.fromstring(zf.read("Metadata/model_settings.config"))
     out: dict[str, _ObjectSettings] = {}
     for obj in root.findall("object"):
@@ -151,13 +174,22 @@ def read_settings(zf: zipfile.ZipFile) -> dict[str, _ObjectSettings]:
             else f"object {obj.get('id')}"
         )
         parts: dict[str, tuple[str, int]] = {}
+        subtypes: dict[str, str] = {}
         for part in obj.findall("part"):
             pn = part.find("metadata[@key='name']")
             parts[part.get("id", "")] = (
                 pn.get("value", "") if pn is not None else "",
                 _extruder(part),
             )
-        out[obj.get("id", "")] = _ObjectSettings(name, _extruder(obj) or 1, parts)
+            subtypes[part.get("id", "")] = part.get("subtype", "normal_part")
+        out[obj.get("id", "")] = _ObjectSettings(
+            name,
+            _extruder(obj) or 1,
+            parts,
+            subtypes,
+            _metadata_number(obj, "layer_height"),
+            _metadata_number(obj, "initial_layer_print_height"),
+        )
     return out
 
 
@@ -192,6 +224,8 @@ class _Areas:
     side: float = 0.0
     slope: float = 0.0
     triangles: int = 0
+    z_min: float = math.inf  # bed coordinates, mm
+    z_max: float = -math.inf
 
 
 def _mesh_areas(mesh: ET.Element, m: Matrix, scale: float, acc: _Areas) -> None:
@@ -211,6 +245,8 @@ def _mesh_areas(mesh: ET.Element, m: Matrix, scale: float, acc: _Areas) -> None:
                 (m[8] * x + m[9] * y + m[10] * z + m[11]) * scale,
             )
         )
+        acc.z_min = min(acc.z_min, pts[-1][2])
+        acc.z_max = max(acc.z_max, pts[-1][2])
     for t in ts:
         try:
             idx = [int(t.get(k, "-1")) for k in ("v1", "v2", "v3")]
@@ -297,7 +333,7 @@ def check(project_3mf: str) -> MixFaceReport:
             if not recipes:
                 return report
             model = _Model(zf)
-            report.parts = _parts(model, settings, recipes)
+            report.parts, report.objects = _parts(model, settings, recipes)
     except (
         zipfile.BadZipFile,
         KeyError,
@@ -317,13 +353,13 @@ def check(project_3mf: str) -> MixFaceReport:
 
 def _parts(
     model: _Model, settings: dict[str, _ObjectSettings], recipes: dict[int, str]
-) -> list[PartFaces]:
+) -> tuple[list[PartFaces], int]:
     main = "3D/3dmodel.model"
     build = model.root(main).find(f"{{{_CORE}}}build")
     if build is None or not len(build):
         raise ProjectError("3D/3dmodel.model has no build items (no geometry to check)")
     out: list[PartFaces] = []
-    for item in build:
+    for position, item in enumerate(build, start=1):
         part = item.get(f"{{{_PROD}}}path") or main
         oid = item.get("objectid", "")
         obj = model.object(part, oid)
@@ -344,13 +380,23 @@ def _parts(
             if comps is not None and len(comps)
             else [(part, oid, m)]
         )
+        if not _has_mixed(st, recipes):
+            continue  # nothing to measure, and no mesh to read
+        mixed: list[tuple[PartFaces, _Areas]] = []
+        z_lo, z_hi = math.inf, -math.inf  # the whole object, mixed or not
         for vpart, vid, vm in volumes:
             pname, pex = st.parts.get(vid, ("", 0))
             ex = pex or st.extruder
-            if ex not in recipes:
-                continue
+            subtype = st.subtypes.get(vid, "normal_part")
+            if subtype in _NOT_PRINTED:
+                continue  # negative parts and support blockers/enforcers add no material
             acc = _Areas()
             model.areas(vpart, vid, vm, acc)
+            if acc.triangles and subtype == "normal_part":
+                # a modifier shapes settings inside the object, it does not make it taller
+                z_lo, z_hi = min(z_lo, acc.z_min), max(z_hi, acc.z_max)
+            if ex not in recipes:
+                continue
             if acc.triangles == 0:
                 raise ProjectError(
                     f"{st.name}: part {pname or vid} in mixed filament {ex} has no triangles"
@@ -363,10 +409,24 @@ def _parts(
                 acc.top,
                 acc.side,
                 acc.slope,
+                object_id=position,
+                layer_height=st.layer_height,
+                first_layer=st.first_layer,
             )
             pf.status, pf.detail = classify(acc.top, acc.side, acc.slope)
+            mixed.append((pf, acc))
+        for pf, acc in mixed:
+            pf.object_height = z_hi - z_lo
+            pf.z_lo, pf.z_hi = acc.z_min - z_lo, acc.z_max - z_lo
             out.append(pf)
-    return out
+    return out, len(build)
+
+
+def _has_mixed(st: _ObjectSettings, recipes: dict[int, str]) -> bool:
+    """Does any part of this object print in a mixed filament?"""
+    return st.extruder in recipes or any(
+        (pex or st.extruder) in recipes for _name, pex in st.parts.values()
+    )
 
 
 def format_lines(report: MixFaceReport) -> list[str]:

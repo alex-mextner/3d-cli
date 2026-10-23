@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import zipfile
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 # 4 physical filaments; virtual 5 = manual pattern "14"; virtual 6 = ratio (Local-Z) row.
@@ -38,19 +39,34 @@ def project_3mf(path: Path, objects: dict[str, int | list[int]], *, raft_layers:
     return path
 
 
-def gcode(path: Path, layers: list[dict[str, int]], *, extra: str = "") -> Path:
-    """layers[i] = {object name: 1-based head that object prints on layer i}."""
+def gcode(
+    path: Path,
+    layers: Sequence[Mapping[str, int | list[int]]],
+    *,
+    extra: str = "",
+    heights: list[float] | None = None,
+) -> Path:
+    """layers[i] = {object name: 1-based head that object prints on layer i} (or a list of heads
+    printed one after the other). `heights` = the thickness of every layer: each layer then
+    announces its Z (`;Z:`) as Orca does, the first layer's Z being its own thickness."""
     out = ["; synthetic", "T1000", "G1 X0 Y0 E1 ; purge outside any object"]
-    for layer in layers:
+    z = 0.0
+    for i, layer in enumerate(layers):
         out.append(";LAYER_CHANGE")
-        for name, head in layer.items():
-            out.append(f"T{head - 1}")
-            out.append(f"EXCLUDE_OBJECT_START NAME={name}_id_0_copy_0")
-            out.append("G1 X1 Y1 F3000")
-            if extra:
-                out.append(extra)
-            out.append("G1 X10 Y10 E0.5")
-            out.append("G1 E-0.8 ; retract")
-            out.append(f"EXCLUDE_OBJECT_END NAME={name}_id_0_copy_0")
+        if heights is not None:
+            z += heights[i]
+            out.append(f";Z:{z:.4g}")
+            out.append(f";HEIGHT:{heights[i]:.4g}")
+        for name, head_or_heads in layer.items():
+            heads = [head_or_heads] if isinstance(head_or_heads, int) else head_or_heads
+            for head in heads:
+                out.append(f"T{head - 1}")
+                out.append(f"EXCLUDE_OBJECT_START NAME={name}_id_0_copy_0")
+                out.append("G1 X1 Y1 F3000")
+                if extra:
+                    out.append(extra)
+                out.append("G1 X10 Y10 E0.5")
+                out.append("G1 E-0.8 ; retract")
+                out.append(f"EXCLUDE_OBJECT_END NAME={name}_id_0_copy_0")
     path.write_text("\n".join(o for o in out if o) + "\n")
     return path
