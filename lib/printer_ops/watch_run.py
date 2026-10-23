@@ -61,9 +61,11 @@ UNIT_NAME = "3d-printer-watch@.service"
 # printer-devices.yaml `<name>.watch:` keys and their CLI flags.
 # `vision` belongs to `3d printer vision` (issue #150), which shares the same sinks; watch ignores it.
 # `bed` starts the bed monitor child (printer_ops/bed.py, issue #303).
-WATCH_KEYS = ("agent_fallback", "agent_ack_seconds", "tg_fallback", "pause_without_agent", "steer", "exec", "stdout",
-              "min_severity", "stall_minutes", "heat_timeout_minutes", "milestones", "dedup_minutes", "vision", "bed")
+WATCH_KEYS = ("agent_fallback", "agent_ack_seconds", "tg_fallback", "message_cooldown_minutes", "pause_without_agent",
+              "steer", "exec", "stdout", "min_severity", "stall_minutes", "heat_timeout_minutes", "milestones",
+              "dedup_minutes", "vision", "bed")
 DEFAULT_AGENT_ACK_S = 90.0
+DEFAULT_MESSAGE_COOLDOWN_MIN = 10.0
 MAINTAIN_EVERY_S = 300.0   # how often the watcher prunes dead subscriptions (Dispatcher.maintain)
 
 USAGE = """3d printer watch NAME... | --all [options]
@@ -93,8 +95,12 @@ Sinks (several at once; per printer also from printer-devices.yaml `<name>.watch
                           for that printer (`3d printer agent --help`); no flag
   tg (emergency)          warning+ events NO agent could take (no live subscriber, and the printer
                           agent did not start or did not come up within `watch.agent_ack_seconds`,
-                          default 90) go to the phone with the frame, marked «агент недоступен»:
-                          the only case where the watcher messages the user itself. On by default;
+                          default 90, after one silent restart of the agent) go to the phone as ONE
+                          short message per incident (<= 5 lines: headline, `+N related: kinds`, the
+                          pause outcome) with the frame: the only case where the watcher messages the
+                          user itself. Same-or-lower severity alerts within
+                          `watch.message_cooldown_minutes` (default 10) are folded into one `+N more:
+                          kinds` line when it ends; a higher severity goes through once. On by default;
                           yaml `watch.tg_fallback: false` turns it off (then nobody is told).
   pause (emergency)       before that message, a high-confidence critical finding (verified
                           vision_spaghetti, vision_part_detached; docs/commands/printer-vision.md
@@ -116,8 +122,8 @@ Options:
   --install-service        write the user systemd unit for each NAME (other flags go to
                            ~/.config/3d-cli/watch/NAME.env) and print the enable command
 
-Delivery: events arriving within 2 s are batched into one message; steer and tg send at
-most 6 messages per 10 min (critical events always go through). Severity:
+Delivery: events arriving within 2 s are batched into one message; steer sends at most 6
+messages per 10 min (critical events always go through), tg at most one per incident. Severity:
 critical = needs a decision now (error, exception, homing lost, filament runout while
 printing, Klipper shutdown); warning = paused/cancelled/bed off/temperature/stall;
 info = started/resumed/complete/snapshot/milestones.
@@ -127,7 +133,7 @@ Config (printer-devices.yaml):
     adapter: moonraker
     host: 192.168.0.26
     watch: {steer: 01a12cd6, min_severity: info, stall_minutes: 20}   # tg_fallback is on unless false
-    # also: agent_ack_seconds: 90, pause_without_agent: critical-only | off
+    # also: agent_ack_seconds: 90, message_cooldown_minutes: 10, pause_without_agent: critical-only | off
 
 Examples:
   3d printer watch u1 --duration 20
@@ -258,6 +264,8 @@ def settings_for(device: Device, opts: dict[str, Any]) -> dict[str, Any]:
         "agent_ack_s": _number(cfg.get("agent_ack_seconds", DEFAULT_AGENT_ACK_S), f"{where}.agent_ack_seconds",
                                minimum=5.0),
         "agent_fallback": _bool(cfg.get("agent_fallback", True), f"{where}.agent_fallback"),
+        "message_cooldown_s": _number(cfg.get("message_cooldown_minutes", DEFAULT_MESSAGE_COOLDOWN_MIN),
+                                      f"{where}.message_cooldown_minutes") * 60,
         "min_severity": _severity(cfg.get("min_severity", INFO), f"{where}.min_severity / --min-severity"),
         "limits": WatchLimits(
             stall_s=_number(cfg.get("stall_minutes", 15), "--stall-min", minimum=1) * 60,

@@ -78,9 +78,9 @@ open({rec!r} + "/tg-calls.jsonl", "a").write(json.dumps(sys.argv[1:]) + "\\n")
 """
 
 DRIVER = """
-import os, sys
+import os, subprocess, sys
 sys.path.insert(0, {lib!r})
-from printer_ops.printer_agent import PrinterAgents, PrinterAgentSink, tmux_socket, unavailable_reason
+from printer_ops.printer_agent import PrinterAgents, PrinterAgentSink, tmux_socket
 from printer_ops.subscriptions import DeliveryState, SubscriptionSink
 from printer_ops.watch import Event
 from printer_ops.watch_sinks import Dispatcher, TgSink
@@ -88,9 +88,9 @@ from printer_ops.watch_sinks import Dispatcher, TgSink
 open({rec!r} + "/socket", "w").write(tmux_socket())
 state = DeliveryState()
 agents = PrinterAgents(state=state, ready_timeout_s=30)
-tg = TgSink(binary={tg!r})
+tg = TgSink(binary={tg!r}, runner=subprocess.run)   # the rig's fake `tg` binary: really spawned
 tg.ledger = state
-tg.attach("u1", why=lambda: unavailable_reason("u1", state))
+tg.attach("u1")
 d = Dispatcher(dedup_s=0)
 d.add("u1", [SubscriptionSink(state=state), PrinterAgentSink(agents=agents), tg])
 event = Event("u1", "vision_spaghetti", "warning", "u1: possible spaghetti on camera (smoke)",
@@ -281,11 +281,8 @@ def test_when_no_agent_can_start_the_alert_reaches_the_user_through_tg_with_the_
     )
     (call,) = rig.tg_calls()
     assert call[:2] == ["--tag", "problem"] and call[2:4] == ["--photo", str(rig.frame)]
-    assert call[-1].startswith(
-        "[агент недоступен] printer [WARNING] u1: possible spaghetti on camera (smoke)"
-    )
-    assert "omp not found" in call[-1]
+    assert call[-1] == "u1: possible spaghetti on camera (smoke)"   # one short line, nothing about the agent
     state = json.loads(
         (rig.tmp / "state" / "3d-cli" / "printer-subscriptions.json").read_text()
     )
-    assert state["counters"]["u1"] == {"agent_start_failed": 1, "fallback_tg_sent": 1}
+    assert state["counters"]["u1"] == {"agent_start_failed": 3, "fallback_tg_sent": 1}

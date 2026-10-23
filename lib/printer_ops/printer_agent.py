@@ -19,7 +19,7 @@ WHAT: `PrinterAgentSink` (LAST_RESORT stage of the watch Dispatcher) gets the wa
 
 WHY: a false U1 "noodle" alarm once went straight to the user, and no target session is
   guessed: without an explicit live subscriber, a dedicated agent judges first. Only when this
-  agent cannot take the alert (start failed, not up within the acknowledgement window, restarted
+  agent cannot take the alert (start failed 3 times, not up after one silent restart, restarted
   too recently) the Dispatcher's FALLBACK sink tells the user itself (`tg`, optional pause).
 
 FILES (<state>/printer-agents/NAME/): role.md (the standing instructions), events.jsonl (every
@@ -33,15 +33,16 @@ LIMITS: one start per printer per START_EVERY_S (shared by all watcher processes
   Waiting for a starting agent to show up in omp-live (READY_TIMEOUT_S, the acknowledgement
   window; `watch.agent_ack_seconds`) happens on a per-printer thread,
   never on the dispatcher thread: a slow U1 agent must not delay a K1 alert. If it does not
-  show up, the tmux session is killed and the events go back to the Dispatcher's FALLBACK
-  sinks (the emergency tg) through `Sink.on_unreached`.
+  show up, the tmux session is killed and a NEW agent is started silently once (the user is
+  told nothing about an agent that is merely restarting); only when that one is not up either do
+  the events go back to the Dispatcher's FALLBACK sinks (the emergency tg) through
+  `Sink.on_unreached`. A synchronous start that fails is retried in place (START_RETRY_DELAYS_S).
 
 INVARIANTS: stdlib only; never raises into the watch loop (the sink records and logs); this
   module itself never talks to a printer.
 """
 from __future__ import annotations
 
-import datetime
 import hashlib
 import json
 import os
@@ -83,6 +84,7 @@ AGENT_MIN_SEVERITY = WARNING
 START_EVERY_S = 600.0
 BACKOFF_BASE_S = 30.0   # first retry window after a failed start: 30 s, 60 s, 120 s, ... up to START_EVERY_S
 READY_TIMEOUT_S = 90.0
+START_RETRY_DELAYS_S = (2.0, 5.0)   # a failed synchronous start is retried twice before the alert is handed on
 _PASS_ENV = ("PATH", "HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME")
 
 
@@ -161,9 +163,11 @@ For every alert message you get (the first one is below, later ones arrive while
    No frame or too old: {fresh}.
 2. Decide: REAL print failure (spaghetti/noodle, detached or knocked-over part, blob on the
    nozzle, layer shift, printing in air, filament runout, heater fault) or FALSE ALARM?
-3. Real: tell the user via `tg` — one short Russian message with the frame:
-   `tg --photo FRAME "{printer}: <что видно>, <что советуешь>"`. False alarm: do not message
-   the user; one line for yourself is enough.
+3. Real: tell the user via `tg` — one short Russian message (at most 5 lines) with the frame:
+   `tg --photo FRAME "{printer}: <что видно>, <что советуешь>"`. Send AT MOST ONE tg message
+   per incident: alerts of the same or lower severity within 10 minutes of your message get no
+   new message (note them for yourself); only an escalation or a material change gets one short
+   follow-up. False alarm: do not message the user; one line for yourself is enough.
 4. Never pause, cancel, or send G-code or any command to the printer without the user's
    explicit ok. ONE exception (policy D5), for serious faults: the wrong material loaded, a
    wrong or dangerous temperature, carbon-fibre (CF) filament on a brass nozzle. Then pause the
@@ -217,21 +221,6 @@ def record_event(e: Event) -> None:
             fh.write(line + "\n")
     except OSError as exc:
         _log(f"{e.printer}: cannot append to events.jsonl: {exc}")
-
-
-def unavailable_reason(printer: str, state: DeliveryState, *, now: float | None = None, fresh_s: float = 900.0) -> str:
-    """The clause of the emergency message saying why the agent could not take the alert: its last
-    error when that is recent, else a generic one (an old error is not the reason for this alert)."""
-    row = state.agent(printer)
-    err, ts = row.get("last_error"), row.get("last_error_ts")
-    if err and isinstance(ts, str):
-        try:
-            age = (time.time() if now is None else now) - datetime.datetime.fromisoformat(ts).timestamp()
-        except ValueError:
-            age = fresh_s + 1
-        if age <= fresh_s:
-            return f"the temporary agent could not take it ({str(err)[:200]})"
-    return "the temporary agent could not take it"
 
 
 class _Pending:
@@ -426,11 +415,15 @@ class PrinterAgents:
             self.state.bump(printer, "agent_restart_limit")
             raise AgentUnavailable(f"temporary {printer} agent was started less than {window / 60:g} min ago "
                                    "and is not running (restart limit)", "agent_restart_limit")
-        try:
-            self.start(printer, events)
-        except Exception as exc:
-            self._start_failed(printer, str(exc), "agent_start_failed")
-            raise AgentUnavailable(str(exc), "agent_start_failed") from exc
+        for attempt in range(len(START_RETRY_DELAYS_S) + 1):   # silent: the user hears nothing unless all fail
+            try:
+                self.start(printer, events)
+                break
+            except Exception as exc:
+                self._start_failed(printer, str(exc), "agent_start_failed")
+                if attempt == len(START_RETRY_DELAYS_S):
+                    raise AgentUnavailable(str(exc), "agent_start_failed") from exc
+                self.sleep(START_RETRY_DELAYS_S[attempt])
         self._await(printer, events, on_unreached, send=False)
         return f"starting the {printer} agent ({attach_hint(printer)})"
 
@@ -440,8 +433,17 @@ class PrinterAgents:
 
         def wait() -> None:
             try:
-                h = self._wait_ready(printer)
-                if send and w.settle():
+                restarted = False
+                try:
+                    h = self._wait_ready(printer)
+                except Exception as first:   # not up: one silent restart before anyone is told
+                    _log(f"{printer}: {first}; starting a new agent silently")
+                    self._start_failed(printer, str(first), "agent_not_acked")
+                    self.stop(printer, release=False)   # the half-started session, if it is still there
+                    self.start(printer, events)
+                    restarted = True   # the new agent got the events as its opening prompt
+                    h = self._wait_ready(printer)
+                if send and not restarted and w.settle():
                     self.live.send(h, agent_alert(events, printer))
                 self.state.set_agent(printer, start_failures=0)
                 _log(f"{printer}: the agent is up (pid {h.get('pid')})")
@@ -551,8 +553,10 @@ USAGE = """3d printer agent list [--json]
   30 s, 60 s, ... capped at 10 min); it decides itself whether to message the user (tg). The start
   is acknowledged when the agent shows up in `tg-ctl omp-live` within 90 s (`watch.agent_ack_seconds`).
   When the agent cannot start or does not come up, nobody is left to judge the alert: the
-  watcher sends it to the user itself via `tg` with the frame (`watch.tg_fallback`, default on), and
-  for a few high-confidence critical findings pauses the print first (`3d printer vision --help`).
+  watcher sends one short message to the user itself via `tg` with the frame (`watch.tg_fallback`,
+  default on; at most one per incident, `watch.message_cooldown_minutes`), and for a few high-confidence
+  critical findings pauses the print first (`3d printer vision --help`). A start that fails, or an agent
+  that is not up within the window, is retried silently first: the user hears nothing about a restart.
   When a live session subscribes to every kind of the printer (at warning or lower), the
   agent is asked to hand over and runs `handoff`.
 
@@ -667,4 +671,4 @@ def run(argv: list[str]) -> int:
 
 
 __all__ = ["ALLOW_UNDER_TEST_ENV", "USAGE", "AgentUnavailable", "PrinterAgentSink", "PrinterAgents", "agent_alert",
-           "agent_dir", "record_event", "run", "session_name", "spawn_refusal", "tmux_socket", "unavailable_reason"]
+           "agent_dir", "record_event", "run", "session_name", "spawn_refusal", "tmux_socket"]

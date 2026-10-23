@@ -49,7 +49,7 @@ from typing import Any
 
 from errors import InvalidArgument, ThreeDError, UsageError
 from printer_ops.watch import SEVERITIES, WARNING, Event, severity_rank
-from printer_ops.watch_sinks import Dispatcher, OmpLive, Runner, Sink
+from printer_ops.watch_sinks import Admission, Dispatcher, OmpLive, Runner, Sink
 
 REGISTRY_NAME = "subscriptions.yaml"
 STATE_NAME = "printer-subscriptions.json"
@@ -319,7 +319,9 @@ class DeliveryState:
     """Shared by every watcher process (flock + atomic replace); failures are logged, never raised.
     `subscriptions`: id -> last delivery / error / `dead_since`; `agents`: printer -> temporary agent
     state; `counters`: printer -> failures of the delivery chain (CHAIN_COUNTERS); `pruned`: the
-    registry entries removed for being dead too long (newest last)."""
+    registry entries removed for being dead too long (newest last); `limiter`: printer -> the outgoing
+    message limiter (`last_sent`, `max_severity` sent in this incident, `folded` count + `kinds` waiting
+    for the cooldown to end)."""
 
     def __init__(self, path: Path | None = None) -> None:
         self.path = path or state_path()
@@ -331,7 +333,7 @@ class DeliveryState:
             data = {}
         if not isinstance(data, dict):
             data = {}
-        for key in ("subscriptions", "agents", "counters"):
+        for key in ("subscriptions", "agents", "counters", "limiter"):
             if not isinstance(data.get(key), dict):
                 data[key] = {}
         if not isinstance(data.get("pruned"), list):
@@ -410,6 +412,55 @@ class DeliveryState:
 
         self.update(change)
 
+    def admit(self, printer: str, severity: int, kinds: list[str], now: float, cooldown_s: float) -> Admission:
+        """May `printer` send a message about `kinds` (one per event, worst severity rank `severity`)?
+        The first message of an incident (nothing sent for `cooldown_s`) goes out, carrying the `+N more` of
+        alerts folded before; so does a severity above everything sent in this incident (once, and it
+        restarts the cooldown); anything else is only counted, to be flushed when the cooldown ends."""
+        def change(data: dict[str, Any]) -> Admission:
+            row = data["limiter"].setdefault(printer, {})
+            before = json.loads(json.dumps(row))
+            last, top = row.get("last_sent"), row.get("max_severity")
+            cooling = isinstance(last, (int, float)) and 0 <= now - last < cooldown_s
+            if cooling and isinstance(top, int) and severity <= top:
+                row["folded"] = int(row.get("folded", 0)) + len(kinds)
+                row["kinds"] = list(dict.fromkeys([*row.get("kinds", []), *kinds]))
+                return Admission(False, before=before)
+            if cooling and isinstance(top, int):   # an escalation: the folded alerts wait for the cooldown's end
+                row.update(last_sent=now, max_severity=severity)
+                return Admission(True, before=before)
+            more, more_kinds = int(row.get("folded", 0)), tuple(row.get("kinds", []))
+            row.update(last_sent=now, max_severity=severity, folded=0, kinds=[])
+            return Admission(True, more, more_kinds, before)
+
+        got = self.update(change)
+        return got if isinstance(got, Admission) else Admission(True)   # unwritable state: never mute the user
+
+    def flush_folded(self, printer: str, now: float, cooldown_s: float) -> Admission:
+        """The alerts folded for `printer`, once its cooldown has ended (`send` False: nothing to say yet).
+        `last_sent` stays: the cooldown is over, so the next alert starts a fresh incident."""
+        def change(data: dict[str, Any]) -> Admission:
+            row = data["limiter"].get(printer)
+            if not isinstance(row, dict) or not int(row.get("folded", 0)):
+                return Admission(False)
+            last = row.get("last_sent")
+            if isinstance(last, (int, float)) and 0 <= now - last < cooldown_s:
+                return Admission(False)
+            before = json.loads(json.dumps(row))
+            more, kinds = int(row["folded"]), tuple(row.get("kinds", []))
+            row.update(folded=0, kinds=[])
+            return Admission(True, more, kinds, before)
+
+        got = self.update(change)
+        return got if isinstance(got, Admission) else Admission(False)
+
+    def restore_limiter(self, printer: str, before: dict[str, Any]) -> None:
+        """A send that failed hands its limiter slot back (the user was not told)."""
+        def change(data: dict[str, Any]) -> None:
+            data["limiter"][printer] = before
+
+        self.update(change)
+
     def agent(self, printer: str) -> dict[str, Any]:
         row = self.read()["agents"].get(printer)
         return row if isinstance(row, dict) else {}
@@ -445,6 +496,7 @@ CHAIN_COUNTERS = {
     "agent_restart_limit": "alerts refused a new agent start (restarted too recently)",
     "fallback_tg_sent": "alerts sent straight to the user because nobody could judge them",
     "fallback_tg_failed": "emergency tg messages that failed (nobody was told)",
+    "fallback_tg_folded": "alerts held by the per-printer message cooldown (sent as one `+N more` line)",
     "auto_pause_paused": "prints paused by the watcher itself",
     "auto_pause_pause_unverified": "pause requests the printer acknowledged but did not show as paused",
     "auto_pause_failed": "automatic pauses that failed",
@@ -533,8 +585,10 @@ def alert_text(events: list[Event], header: str, footer: list[str]) -> str:
         "2. Judge whether this is a REAL print failure (spaghetti/noodle, detached or knocked-over part, "
         "blob on the nozzle, layer shift, printing in air) or a false alarm (normal print, reflections, "
         "lighting, purge line, supports, empty bed).",
-        "3. Real: tell the user via `tg` — a short Russian message with the frame: "
-        "`tg --photo FRAME \"<printer>: <что видно>, <что советуешь>\"`. False alarm: do not message the user.",
+        "3. Real: tell the user via `tg` — ONE short Russian message per incident (at most 5 lines) with the "
+        "frame: `tg --photo FRAME \"<printer>: <что видно>, <что советуешь>\"`. Same-or-lower severity alerts "
+        "within 10 minutes of your message get no new message (note them for yourself); only an escalation or a "
+        "material change gets one short follow-up. False alarm: do not message the user.",
         "4. Never pause, cancel or send G-code without the user's explicit ok.",
         *footer,
     ]
@@ -723,11 +777,14 @@ USAGE = """3d printer subscribe --session ID [--printer P,P] [--kinds K,K] [--mi
   only with the session's acceptance receipt: a session that is not live is never sent to and
   counts as unsubscribed, and warning+ events no live subscriber took go to the printer's
   temporary omp agent (`3d printer agent --help`), which hands over to a session that
-  subscribes to all kinds of that printer. Only when nobody can judge — no live subscriber and
-  the agent cannot start or does not come up within 90 s — the watcher itself sends the alert
-  to the user via `tg` with the frame (and, for a few high-confidence critical findings, pauses
-  the print first: docs/commands/printer-vision.md#pause-without-an-agent). No watcher restart
-  needed: the registry is re-read when it changes.
+  subscribes to all kinds of that printer; an agent that fails to start is restarted silently
+  (3 tries, then once more after the window), never announced to you. Only when nobody can
+  judge — no live subscriber and every agent try failed — the watcher itself sends ONE short
+  message per incident (<= 5 lines) to the user via `tg` with the frame (and, for a few
+  high-confidence critical findings, pauses the print first: docs/commands/printer-vision.md
+  #pause-without-an-agent); `watch.message_cooldown_minutes` (default 10) folds later alerts of the
+  same or lower severity into one `+N more` line. No watcher restart needed: the registry is
+  re-read when it changes.
 
 subscribe (same session + printers + kinds again = update that entry; prints it):
   --session ID          omp sessionId or its prefix (survives `omp -r`), or a pid

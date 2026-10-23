@@ -93,7 +93,7 @@ Target package: `lib/geometry/`, with subpackages only when a real boundary appe
   `force_hatch.py` (the owner's Telegram hatch approval that `3d printer start --force` needs),
   `watch.py` / `watch_run.py` / `watch_sinks.py` (`3d printer watch`: detectors, streams,
   the event Dispatcher and its staged sinks; agents first, `tg` (with the frame, after the optional
-  automatic pause) only when nobody can judge: `watch.tg_fallback`, on by default), `subscriptions.py` (`3d printer subscribe`: the agent-subscription
+  automatic pause) only when nobody can judge, as one short message per incident under a per-printer cooldown: `watch.tg_fallback`, on by default), `subscriptions.py` (`3d printer subscribe`: the agent-subscription
   registry `subscriptions.yaml` and the `SubscriptionSink` every watcher adds),
   `auto_pause.py` (`watch.pause_without_agent`: the watcher's own claimed, once-per-job native
   pause for critical verified findings when no agent took the alert; shares `guard.py`'s claim), and

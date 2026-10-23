@@ -96,7 +96,8 @@ class Chain:
         self.state = DeliveryState()
         self.agents = agents(run, clock)
         self.agents.state = self.state
-        self.tg_sink = TgSink(runner=self.tg)
+        self.now = [1000.0]  # the outgoing limiter's clock
+        self.tg_sink = TgSink(runner=self.tg, clock=lambda: self.now[0])
         self.tg_sink.ledger = self.state
         self.d = Dispatcher(dedup_s=0)
         self.d.add(
@@ -107,13 +108,7 @@ class Chain:
                 self.tg_sink,
             ],
         )
-        self.tg_sink.attach(
-            "u1",
-            pauser=pauser,
-            why=lambda: printer_agent.unavailable_reason(
-                "u1", self.state, now=self.agents.clock()
-            ),
-        )
+        self.tg_sink.attach("u1", pauser=pauser)
 
     def process(self, *events: Event) -> list[Event]:
         got = self.d.process(list(events))
@@ -241,13 +236,13 @@ def test_a_broken_bridge_sends_nothing_counts_it_and_the_user_is_told(
         "bridge down" in DeliveryState().read()["subscriptions"][sub.id]["last_error"]
     )
     (call,) = c.tg.calls
-    assert "bridge down" in call[-1]
+    assert call[-1].startswith("u1: possible spaghetti") and "агент" not in call[-1]
 
 
 # ---- agent cannot start / does not answer -> tg ----------------------------------------------
 
 
-def test_a_failed_spawn_goes_to_the_user_through_tg_with_the_frame_and_is_counted(
+def test_a_failed_spawn_is_retried_silently_then_one_short_tg_message_with_the_frame(
     xdg: Path,
 ) -> None:
     subscribe("deadbeef")
@@ -257,33 +252,32 @@ def test_a_failed_spawn_goes_to_the_user_through_tg_with_the_frame_and_is_counte
     (call,) = c.tg.calls
     assert call[:3] == ["tg", "--tag", "problem"] and call[3:5] == ["--photo", frame]
     text = call[-1]
-    assert text.startswith(
-        "[агент недоступен] printer [CRITICAL] u1: possible spaghetti"
-    )
+    assert text == "u1: possible spaghetti on camera (score 0.83)"
     assert (
-        "no live subscriber took this alert" in text
-        and "tmux new-session failed" in text
+        "недоступен" not in text
+        and "temporary agent" not in text
+        and "tmux" not in text
     )
     assert c.counters() == {
         "subscriber_dead": 1,
-        "agent_start_failed": 1,
+        "agent_start_failed": 3,
         "fallback_tg_sent": 1,
     }
-    assert DeliveryState().agent("u1")["start_failures"] == 1
+    assert DeliveryState().agent("u1")["start_failures"] == 3
 
 
-def test_an_agent_that_never_comes_up_hands_the_alert_to_tg(xdg: Path) -> None:
+def test_an_agent_that_never_comes_up_even_after_a_silent_restart_hands_the_alert_to_tg(
+    xdg: Path,
+) -> None:
     frame = frame_file(xdg)
     run = Fake(agent_comes_up=False)
     c = Chain(run)
     c.process(noodle(frame))
-    (call,) = c.tg.calls  # after the acknowledgement window, from the agent's thread
-    assert (
-        call[-1].startswith("[агент недоступен] printer [WARNING]")
-        and "--photo" in call
-    )
+    (call,) = c.tg.calls  # after two acknowledgement windows, from the agent's thread
+    assert call[-1].startswith("u1: possible spaghetti") and "--photo" in call
+    assert len(run.news()) == 2  # the first start and the one silent restart
     assert session_name("u1") not in run.tmux  # the half-started session was stopped
-    assert c.counters() == {"agent_not_acked": 1, "fallback_tg_sent": 1}
+    assert c.counters() == {"agent_not_acked": 2, "fallback_tg_sent": 1}
 
 
 def test_tg_text_survives_a_refused_photo_or_tag(xdg: Path) -> None:
@@ -293,7 +287,9 @@ def test_tg_text_survives_a_refused_photo_or_tag(xdg: Path) -> None:
     assert (
         len(tg.calls) == 2 and "--photo" in tg.calls[0] and "--photo" not in tg.calls[1]
     )
-    assert tg.calls[1][0] == "tg" and tg.calls[1][1].startswith("[агент недоступен]")
+    assert tg.calls[1][0] == "tg" and tg.calls[1][1].startswith(
+        "u1: possible spaghetti"
+    )
 
 
 def test_a_dead_tg_is_counted_and_raised_never_swallowed(xdg: Path) -> None:
@@ -325,8 +321,11 @@ def test_tg_sends_at_most_three_frames_that_exist(xdg: Path) -> None:
 
 
 def test_failed_starts_back_off_30_60_120_up_to_the_ten_minute_cap_and_a_good_start_resets(
-    xdg: Path,
+    xdg: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(
+        printer_agent, "START_RETRY_DELAYS_S", ()
+    )  # one failure per delivery
     run = Fake(tmux_ok=False)
     clock = [1000.0]
     a = agents(run, clock)
@@ -719,8 +718,8 @@ def test_the_pause_only_happens_after_every_channel_failed_and_before_the_tg_mes
     assert order == ["pause", "tg"] and pauser.calls == 1
     text = c.tg.calls[0][-1]
     assert (
-        "PAUSED the print" in text
-        and "To resume:" in text
+        "PAUSED the print (a.gcode)" in text
+        and "Resume:" in text
         and "http://192.168.0.26" in text
     )
     assert c.counters()["auto_pause_paused"] == 1
@@ -736,7 +735,7 @@ def test_a_crashing_pauser_never_stops_the_words_from_reaching_the_user(
     c = Chain(Fake(tmux_ok=False), pauser=Boom())
     c.process(noodle(sev=CRITICAL))
     (call,) = c.tg.calls
-    assert "the automatic pause crashed" in call[-1] and "NOT paused" in call[-1]
+    assert "automatic pause crashed" in call[-1] and "NOT paused" in call[-1]
     assert (
         c.counters()["auto_pause_failed"] == 1 and c.counters()["fallback_tg_sent"] == 1
     )
@@ -752,7 +751,7 @@ def test_no_pause_for_a_batch_without_a_qualifying_event_but_the_message_still_g
     c = Chain(Fake(tmux_ok=False), pauser=Quiet())
     c.process(noodle(sev=WARNING))
     (call,) = c.tg.calls
-    assert "PAUSED" not in call[-1] and "[агент недоступен]" in call[-1]
+    assert "PAUSED" not in call[-1] and call[-1].startswith("u1: possible spaghetti")
 
 
 def test_the_dispatcher_records_the_pause_as_an_event_and_wires_the_policy(
@@ -763,6 +762,7 @@ def test_the_dispatcher_records_the_pause_as_an_event_and_wires_the_policy(
         "min_severity": "info",
         "dedup_s": 0.0,
         "agent_ack_s": 33.0,
+        "message_cooldown_s": 120.0,
     }
     on, off = Dispatcher(), Dispatcher()
     on.add_settings("u1", {**base, "pause_policy": "critical-only"})
@@ -773,7 +773,11 @@ def test_the_dispatcher_records_the_pause_as_an_event_and_wires_the_policy(
         isinstance(tg_on.pausers.get("u1"), auto_pause.AutoPauser)
         and "u1" not in tg_off.pausers
     )
-    assert tg_on.ledger is not None and tg_on.on_pause is not None
+    assert (
+        tg_on.ledger is not None
+        and tg_on.on_pause is not None
+        and tg_on.cooldowns == {"u1": 120.0}
+    )
     agent = on.routes["printer-agent"].sink
     assert (
         isinstance(agent, PrinterAgentSink)
@@ -850,20 +854,311 @@ def test_settings_refuse_a_pause_nobody_would_be_told_about(
         )
 
 
-def test_unavailable_reason_names_only_a_recent_error(xdg: Path) -> None:
-    state = DeliveryState()
-    assert (
-        printer_agent.unavailable_reason("u1", state)
-        == "the temporary agent could not take it"
-    )
-    state.set_agent(
-        "u1", last_error="omp not found", last_error_ts=subscriptions.iso(1000.0)
-    )
-    assert "omp not found" in printer_agent.unavailable_reason("u1", state, now=1100.0)
-    assert "omp not found" not in printer_agent.unavailable_reason(
-        "u1", state, now=1000.0 + 901
-    )
-
-
 def test_the_tg_route_is_the_only_fallback_stage_sink() -> None:
-    assert TgSink().stage == FALLBACK and TgSink().agent is False
+    assert TgSink(runner=Tg()).stage == FALLBACK and TgSink(runner=Tg()).agent is False
+
+
+# ---- silent restart: the user hears nothing about an agent that is merely restarting ------------
+
+
+class FlakyTmux(Fake):
+    """`fail` new-session calls fail; then `dead` starts succeed without an omp ever showing up."""
+
+    def __init__(self, fail: int = 0, dead: int = 0) -> None:
+        super().__init__()
+        self.fail, self.dead, self.started = fail, dead, 0
+
+    def _tmux(self, args: list[str]) -> tuple[str, int]:
+        if args[0] == "new-session":
+            self.started += 1
+            if self.started <= self.fail:
+                return "boom", 1
+            self.agent_comes_up = self.started > self.fail + self.dead
+        return super()._tmux(args)
+
+
+def test_a_start_that_fails_twice_then_works_runs_one_agent_and_never_messages_the_user(
+    xdg: Path,
+) -> None:
+    c = Chain(FlakyTmux(fail=2))
+    assert c.process(noodle(sev=CRITICAL)) != []  # the agent took it
+    assert c.tg.calls == []
+    assert list(c.run.tmux) == [session_name("u1")] and len(c.run.news()) == 3
+    assert c.counters() == {"agent_start_failed": 2}
+    assert (
+        DeliveryState().agent("u1")["start_failures"] == 0
+    )  # the good start reset the backoff
+
+
+def test_the_retries_wait_two_then_five_seconds_through_the_injected_sleep(
+    xdg: Path,
+) -> None:
+    slept: list[float] = []
+    a = agents(FlakyTmux(fail=2))
+    a.sleep = slept.append
+    a.deliver("u1", [noodle()])
+    a.join(10)
+    assert slept[:2] == [2.0, 5.0]
+
+
+def test_three_failed_starts_send_exactly_one_short_tg_line(xdg: Path) -> None:
+    c = Chain(FlakyTmux(fail=3))
+    c.process(noodle(sev=CRITICAL))
+    (call,) = c.tg.calls
+    assert call[-1] == "u1: possible spaghetti on camera (score 0.83)"
+    assert (
+        c.counters()["agent_start_failed"] == 3
+        and c.counters()["fallback_tg_sent"] == 1
+    )
+
+
+def test_an_agent_not_up_in_the_window_is_restarted_silently_and_nobody_is_told(
+    xdg: Path,
+) -> None:
+    c = Chain(FlakyTmux(dead=1))
+    assert c.process(noodle(sev=CRITICAL)) != []
+    assert c.tg.calls == []
+    assert len(c.run.news()) == 2 and list(c.run.tmux) == [session_name("u1")]
+    assert (
+        c.run.sends() == []
+    )  # the new agent got the alert as its opening prompt, once
+    assert c.counters() == {"agent_not_acked": 1}
+    assert DeliveryState().agent("u1")["start_failures"] == 0
+
+
+# ---- one short message per incident ------------------------------------------------------------
+
+
+def incident(frame: str | None = None) -> list[Event]:
+    """The three events of the 2026-10-22 U1 incident, as one Dispatcher batch."""
+    data: dict[str, Any] = {"frame": frame} if frame else {}
+    return [
+        Event(
+            "u1",
+            "exception",
+            CRITICAL,
+            "u1: printer error 2 (detected noodle) (layer 41, 63%)",
+            data,
+            key="e",
+        ),
+        Event(
+            "u1",
+            "gcode_error",
+            CRITICAL,
+            "u1: G-code error: !! MCU 'mcu' shutdown: Timer too close\n"
+            + "mcu dump " * 300,
+            {"line": "!! raw dump"},
+            key="g",
+        ),
+        Event(
+            "u1",
+            "state",
+            WARNING,
+            "u1: printing -> paused (layer 41, 63%)",
+            {"to": "paused"},
+            key="s",
+        ),
+    ]
+
+
+def test_the_three_events_of_one_incident_become_one_short_message(xdg: Path) -> None:
+    order: list[str] = []
+    frame = frame_file(xdg)
+    c = Chain(Fake(tmux_ok=False), tg=OrderedTg(order), pauser=Pauser(order))
+    c.process(*incident(frame))
+    (call,) = c.tg.calls
+    assert call[1:5] == ["--tag", "problem", "--photo", frame]
+    lines = call[-1].splitlines()
+    assert 1 < len(lines) <= 5 and len(set(lines)) == len(lines)
+    assert lines[0] == "u1: printer error 2 (detected noodle) (layer 41, 63%)"
+    assert lines[1] == "+2 related: gcode_error, state"
+    assert (
+        lines[2].startswith("Watcher PAUSED the print (a.gcode).")
+        and "http://192.168.0.26" in lines[2]
+    )
+    assert (
+        "mcu dump" not in call[-1]
+        and "!!" not in call[-1]
+        and "paused (layer" not in call[-1]
+    )
+
+
+def test_a_failed_pause_is_one_line_and_the_headline_is_cut_to_the_first_200_chars(
+    xdg: Path,
+) -> None:
+    long_first = Event(
+        "u1", "exception", CRITICAL, "u1: " + "x" * 400 + "\nsecond line", {}, key="l"
+    )
+    c = Chain(Fake(tmux_ok=False), pauser=Pauser([], outcome="failed"))
+    c.process(long_first)
+    lines = c.tg.calls[0][-1].splitlines()
+    assert len(lines) == 2 and len(lines[0]) == 200 and lines[0].endswith("…")
+    assert lines[1] == "Watcher could NOT pause the print — check the printer."
+
+
+# ---- outgoing limiter ---------------------------------------------------------------------------
+
+KINDS = ("vision_spaghetti", "gcode_error", "heater_drift")
+
+
+def ev(kind: str, sev: str = WARNING, i: int = 0) -> Event:
+    return Event("u1", kind, sev, f"u1: {kind} #{i}", {}, key=f"{kind}:{i}")
+
+
+class Limited:
+    """A TgSink with its limiter state, a fake clock and a recording `tg`."""
+
+    def __init__(self, tg: Tg | None = None, cooldown_s: float = 600.0) -> None:
+        self.now = [1000.0]
+        self.tg = tg or Tg()
+        self.state = DeliveryState()
+        self.sink = TgSink(runner=self.tg, clock=lambda: self.now[0])
+        self.sink.ledger = self.state
+        self.sink.attach("u1", cooldown_s=cooldown_s)
+
+    def texts(self) -> list[str]:
+        return [call[-1] for call in self.tg.calls]
+
+
+def test_ten_mixed_events_over_a_minute_are_one_message_then_one_summary_after_the_cooldown(
+    xdg: Path,
+) -> None:
+    lim = Limited()
+    for i in range(10):
+        lim.now[0] = 1000.0 + 6 * i
+        lim.sink.deliver([ev(KINDS[i % 3], i=i)])
+    assert lim.texts() == ["u1: vision_spaghetti #0"]
+    assert lim.state.read()["counters"]["u1"]["fallback_tg_folded"] == 9
+    lim.now[0] = 1000.0 + 599
+    lim.sink.maintain()
+    assert len(lim.tg.calls) == 1  # the cooldown is not over
+    lim.now[0] = 1000.0 + 601
+    lim.sink.maintain()
+    assert lim.texts()[1:] == [
+        "u1: +9 more: gcode_error, heater_drift, vision_spaghetti"
+    ]
+    lim.sink.maintain()
+    lim.now[0] += 3600
+    lim.sink.maintain()
+    assert len(lim.tg.calls) == 2  # said once, never again
+
+
+def test_an_escalation_passes_once_and_the_rest_waits_for_the_summary(
+    xdg: Path,
+) -> None:
+    lim = Limited()
+    lim.sink.deliver([ev("vision_spaghetti")])
+    for i in range(1, 6):
+        lim.now[0] += 5
+        lim.sink.deliver([ev("gcode_error", i=i)])
+    assert len(lim.tg.calls) == 1
+    lim.now[0] += 5
+    lim.sink.deliver([ev("exception", CRITICAL)])
+    assert len(lim.tg.calls) == 2 and lim.texts()[1] == "u1: exception #0"
+    for i in range(
+        3
+    ):  # critical again: same severity as the last message now, so folded
+        lim.now[0] += 5
+        lim.sink.deliver([ev("exception", CRITICAL, i=i + 1)])
+    assert len(lim.tg.calls) == 2
+    lim.now[0] += 601
+    lim.sink.maintain()
+    assert lim.texts()[2:] == ["u1: +8 more: gcode_error, exception"]
+
+
+def test_the_next_message_after_the_cooldown_carries_the_folded_line_and_starts_a_fresh_incident(
+    xdg: Path,
+) -> None:
+    lim = Limited()
+    lim.sink.deliver([ev("vision_spaghetti")])
+    lim.now[0] += 60
+    lim.sink.deliver([ev("gcode_error", i=1)])
+    lim.sink.deliver([ev("heater_drift", i=2)])
+    lim.now[0] += 700  # a second incident, no maintain() ran in between
+    lim.sink.deliver([ev("vision_spaghetti", i=3)])
+    assert lim.texts()[1:] == [
+        "u1: vision_spaghetti #3\n+2 more: gcode_error, heater_drift"
+    ]
+    lim.sink.maintain()
+    assert len(lim.tg.calls) == 2
+    lim.now[0] += 30  # and its own cooldown is running
+    lim.sink.deliver([ev("vision_spaghetti", i=4)])
+    assert len(lim.tg.calls) == 2
+
+
+def test_after_a_flushed_summary_the_next_alert_is_a_fresh_message_immediately(
+    xdg: Path,
+) -> None:
+    lim = Limited()
+    lim.sink.deliver([ev("vision_spaghetti")])
+    lim.now[0] += 10
+    lim.sink.deliver([ev("gcode_error", i=1)])
+    lim.now[0] += 700
+    lim.sink.maintain()
+    lim.sink.deliver([ev("vision_spaghetti", i=2)])
+    assert lim.texts() == [
+        "u1: vision_spaghetti #0",
+        "u1: +1 more: gcode_error",
+        "u1: vision_spaghetti #2",
+    ]
+
+
+def test_the_limiter_is_shared_between_watcher_processes(xdg: Path) -> None:
+    watch, vision = (
+        Limited(),
+        Limited(),
+    )  # two processes: own sinks and clocks, one state file
+    watch.sink.deliver([ev("vision_spaghetti")])
+    vision.now[0] += 20
+    vision.sink.deliver([ev("vision_spaghetti", i=1)])
+    assert len(watch.tg.calls) == 1 and vision.tg.calls == []
+
+
+def test_a_failed_send_hands_its_slot_back(xdg: Path) -> None:
+    lim = Limited(Tg(fail=2))  # the tagged call and the plain retry both fail
+    with pytest.raises(RuntimeError, match="plain retry"):
+        lim.sink.deliver([ev("vision_spaghetti")])
+    lim.now[0] += 5
+    lim.sink.deliver([ev("vision_spaghetti", i=1)])
+    assert lim.texts()[-1] == "u1: vision_spaghetti #1" and len(lim.tg.calls) == 3
+
+
+def test_the_pause_is_never_limited_only_the_message_is(xdg: Path) -> None:
+    order: list[str] = []
+    pauser = Pauser(order)
+    c = Chain(Fake(tmux_ok=False), pauser=pauser)
+    c.process(noodle(sev=CRITICAL))
+    c.now[0] += 30
+    c.process(
+        noodle(frame_file(xdg), sev=CRITICAL)
+    )  # same severity inside the cooldown
+    assert pauser.calls == 2 and len(c.tg.calls) == 1
+    assert (
+        c.counters()["auto_pause_paused"] == 2
+        and c.counters()["fallback_tg_folded"] == 1
+    )
+
+
+def test_the_cooldown_setting_is_validated_and_defaults_to_ten_minutes(
+    tmp_path: Path,
+) -> None:
+    from printer_ops import devices
+
+    def cooldown(watch: dict[str, Any]) -> float:
+        dev = devices.Device("u1", "moonraker", "h", 7125, None, tmp_path, watch=watch)
+        return float(watch_run.settings_for(dev, {})["message_cooldown_s"])
+
+    assert cooldown({}) == 600.0 and cooldown({"message_cooldown_minutes": 3}) == 180.0
+    with pytest.raises(Exception, match="message_cooldown_minutes"):
+        cooldown({"message_cooldown_minutes": -1})
+
+
+def test_the_agents_role_and_the_subscriber_footer_ask_for_one_message_per_incident(
+    xdg: Path,
+) -> None:
+    role = printer_agent.ROLE.format(printer="u1", events="e", fresh="f")
+    assert (
+        "AT MOST ONE tg message" in role and "10 minutes" in role and "5 lines" in role
+    )
+    text = subscriptions.alert_text([noodle()], "[x]", [])
+    assert "ONE short Russian message per incident" in text and "10 minutes" in text

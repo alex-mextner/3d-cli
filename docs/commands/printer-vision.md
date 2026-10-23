@@ -294,9 +294,13 @@ is `off`. An explicit `critical-only` for another owner's printer, a read-only/o
 non-Moonraker adapter is refused at startup (exit 2): the watcher never pauses somebody else's
 printer. Set `off` to turn it off.
 
-The `tg` message says what was seen, whether the print was paused (or why not) and how to resume:
-press Resume on the printer's touchscreen or in Fluidd/Mainsail (`http://HOST` of the
-printer), or Cancel there. The watcher never resumes or cancels by itself.
+The `tg` message is one short message per incident (≤ 5 lines): the worst event as the headline,
+at most one `+N related: kind, kind` line, and one line about the pause — what job was paused and
+how to resume (Resume on the printer's touchscreen or in Fluidd/Mainsail, `http://HOST` of the
+printer), or `Watcher could NOT pause the print — check the printer.` The watcher never resumes
+or cancels by itself. The pause itself is never limited; only the messages are
+(`watch.message_cooldown_minutes`, default 10: later alerts of the same or lower severity fold
+into one `+N more` line).
 
 The pause is the step before the emergency `tg` message, so it needs `watch.tg_fallback` (on by
 default): with `tg_fallback: false` the default policy is `off` and an explicit `critical-only` is

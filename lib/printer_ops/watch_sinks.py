@@ -3,11 +3,13 @@
 WHAT: `Sink` implementations and the `Dispatcher` that feeds them from one queue:
   stdout  one JSON object per event per line (always unthrottled);
   exec    `sh -c CMD` per event, event JSON on stdin, PRINTER_EVENT_* in the environment;
-  tg      EMERGENCY (on unless `watch.tg_fallback: false`): one phone message per batch through
-          the `tg` CLI, with the frame, marked «агент недоступен», for events no agent could take
-          — the only case where a printer alert goes straight to the user. A printer with a pause
-          policy (auto_pause.py) is paused first for a high-confidence critical finding and the
-          message says so;
+  tg      EMERGENCY (on unless `watch.tg_fallback: false`): ONE short message per incident (at most
+          5 lines: headline, `+N related: kinds`, the pause outcome) through the `tg` CLI, with the
+          frame, for events no agent could take — the only case where a printer alert goes straight
+          to the user. A printer with a pause policy (auto_pause.py) is paused first for a
+          high-confidence critical finding and the message says so. A per-printer cooldown
+          (`watch.message_cooldown_minutes`, default 10) folds further alerts of the same or lower
+          severity into one `+N more: kinds` line sent when it ends; the pause is never limited;
   steer   one message per batch into a live omp session through `tg-ctl omp-live send` —
           the same bridge `omp-steer` and mem-sentinel use: a busy session gets it as a
           steer, an idle one as an aside that starts a turn.
@@ -17,7 +19,7 @@ WHAT: `Sink` implementations and the `Dispatcher` that feeds them from one queue
   The Dispatcher drops events below the printer's min severity, drops a repeated dedup key
   inside the dedup window, coalesces what arrives within `coalesce_s` into one batch (a noodle
   pause is exception + state + gcode lines at once: one message, not four) and rate-limits
-  the chatty sinks (tg, steer); critical events are never rate-limited.
+  the steer sink (critical events are never rate-limited); tg has its own cooldown limiter.
 
 AGENT FIRST: camera/detector alerts are often false (a U1 "noodle" at p 0.83 on a healthy
   print reached the user), so the watchers message the user themselves only when nobody can
@@ -156,16 +158,35 @@ def refuse_dry_run_service(printer: str = "?", *, runner: Runner = subprocess.ru
                          "Dry runs belong in a terminal: `3d printer watch NAME --dry-run --duration 30`."])
 
 
+@dataclass(frozen=True)
+class Admission:
+    """The outgoing limiter's verdict for one message of `printer`. `more`/`more_kinds` = alerts folded
+    earlier that this message carries as its `+N more` line; `before` restores the state when the send
+    fails (a failed send must not use up the cooldown)."""
+
+    send: bool
+    more: int = 0
+    more_kinds: tuple[str, ...] = ()
+    before: dict[str, Any] = field(default_factory=dict)
+
+
 class Ledger(Protocol):
-    """Where the chain counts its failures (subscriptions.DeliveryState)."""
+    """Where the chain counts its failures and keeps the outgoing limiter (subscriptions.DeliveryState)."""
 
     def bump(self, printer: str, name: str, n: int = 1) -> None: ...
+
+    def admit(self, printer: str, severity: int, kinds: list[str], now: float, cooldown_s: float) -> Admission: ...
+
+    def flush_folded(self, printer: str, now: float, cooldown_s: float) -> Admission: ...
+
+    def restore_limiter(self, printer: str, before: dict[str, Any]) -> None: ...
 
 
 class Pauser(Protocol):
     """auto_pause.AutoPauser: pauses the print for a qualifying critical event, once per job."""
 
     def pause(self, events: list[Event]) -> PauseResult | None: ...
+
 
 @dataclass
 class SinkStats:
@@ -272,40 +293,80 @@ def tg_frames(events: list[Event]) -> list[str]:
     return out[:MAX_TG_FRAMES]
 
 
+MAX_HEADLINE = 200
+DEFAULT_COOLDOWN_S = 600.0   # `watch.message_cooldown_minutes`
+
+
+def _first_line(text: str, limit: int = MAX_HEADLINE) -> str:
+    line = (text.strip().splitlines() or [""])[0].strip()
+    return line if len(line) <= limit else line[:limit - 1] + "…"
+
+
+def short_text(printer: str, events: list[Event], pause_lines: list[str], more: Admission | None = None) -> str:
+    """The whole phone message of one incident, at most 5 lines: `printer: <worst event, first line>`,
+    `+N related: kind, kind` (the other events of the batch: kinds only), the pause outcome, and the
+    `+N more` line of alerts folded by an earlier cooldown. Raw G-code dumps and event data never go in."""
+    ranked = sorted(events, key=lambda e: -severity_rank(e.severity))
+    head = _first_line(ranked[0].text)   # watch.py texts already start with `printer: `
+    lines = [head if head.startswith(f"{printer}:") else f"{printer}: {head}"]
+    others = ranked[1:]
+    if others:
+        lines.append(f"+{len(others)} related: {', '.join(dict.fromkeys(e.kind for e in others))}")
+    lines += pause_lines[:2]
+    if more is not None and more.more:
+        lines.append(f"+{more.more} more: {', '.join(more.more_kinds)}")
+    return "\n".join(lines)
+
+
+def pause_lines(result: PauseResult) -> list[str]:
+    """What the user needs to know about the automatic pause, in one line (nothing for a skipped one)."""
+    if result.outcome == "paused":
+        where = f" {result.webui}" if result.webui else ""
+        return [f"Watcher PAUSED the print ({result.filename or 'current job'}). Resume: printer screen "
+                f"or Fluidd/Mainsail{where}; it never resumes or cancels itself."]
+    if result.outcome in ("failed", "pause_unverified"):
+        return ["Watcher could NOT pause the print — check the printer."]
+    return []
+
+
 class TgSink(Sink):
     """The user's phone, as the emergency fallback: it only gets events that no agent took (no
-    live subscriber and the printer agent could not start or did not answer in time), marked as
-    such, with the camera frame. A printer with a pause policy is paused FIRST for a qualifying
-    critical finding (`attach(printer, pauser=...)`) and the message says what happened and how
-    to resume. A refused `--tag`/`--photo` falls back to the plain text: the words always go out.
-    The route is shared by every printer of the process, so printer-specific parts are attached."""
+    live subscriber and the printer agent could not start or did not answer in time), with the
+    camera frame, as ONE short message per incident (`short_text`). A printer with a pause policy is
+    paused FIRST for a qualifying critical finding (`attach(printer, pauser=...)`) and the message says
+    what happened and how to resume; the pause is never limited, only messages are: the per-printer
+    cooldown (DeliveryState.admit, shared by every watcher process) folds further alerts of the same or
+    lower severity into one `+N more` line sent when it ends (`maintain`) or with the next message, and
+    lets a higher severity through once. A refused `--tag`/`--photo` falls back to the plain text: the
+    words always go out. The route is shared by every printer of the process, so printer-specific
+    parts are attached."""
 
     name = "tg"
-    rate = (6, 600.0)
     stage = FALLBACK
 
-    def __init__(self, *, runner: Runner = run_real_tg, binary: str = "tg") -> None:
+    def __init__(self, *, runner: Runner = run_real_tg, binary: str = "tg",
+                 clock: Callable[[], float] = time.time) -> None:
         super().__init__()
         self.runner = runner
         self.binary = binary
+        self.clock = clock
         self.ledger: Ledger | None = None
         self.pausers: dict[str, Pauser] = {}
-        self.whys: dict[str, Callable[[], str]] = {}
+        self.cooldowns: dict[str, float] = {}
         self.on_pause: Callable[[PauseResult], None] | None = None
 
-    def attach(self, printer: str, *, pauser: Pauser | None = None, why: Callable[[], str] | None = None) -> None:
+    def attach(self, printer: str, *, pauser: Pauser | None = None, cooldown_s: float = DEFAULT_COOLDOWN_S) -> None:
         if pauser is not None:
             self.pausers[printer] = pauser
-        if why is not None:
-            self.whys[printer] = why
+        self.cooldowns[printer] = cooldown_s
 
-    def _count(self, printer: str, name: str) -> None:
+    def _count(self, printer: str, name: str, n: int = 1) -> None:
         if self.ledger is not None:
-            self.ledger.bump(printer, name)
+            self.ledger.bump(printer, name, n)
 
-    def _paused(self, events: list[Event]) -> list[str]:
-        """Pause where the printer's policy asks for it; -> the message lines about it."""
-        lines: list[str] = []
+    def _paused(self, events: list[Event]) -> dict[str, list[str]]:
+        """Pause where the printer's policy asks for it; -> printer -> the message lines about it."""
+        out: dict[str, list[str]] = {}
         for printer in dict.fromkeys(e.printer for e in events):
             pauser = self.pausers.get(printer)
             if pauser is None:
@@ -315,8 +376,7 @@ class TgSink(Sink):
             except Exception as exc:  # the words must still reach the user
                 _log(f"{printer}: automatic pause crashed: {exc.__class__.__name__}: {exc}")
                 self._count(printer, "auto_pause_failed")
-                lines.append(f"{printer}: the automatic pause crashed ({exc.__class__.__name__}: {exc}); "
-                             "the print was NOT paused by the watcher: check it now.")
+                out[printer] = ["The automatic pause crashed: the print was NOT paused — check the printer."]
                 continue
             if result is None:
                 continue
@@ -324,34 +384,61 @@ class TgSink(Sink):
             _log(f"{printer}: automatic pause {result.outcome}: {result.detail}")
             if self.on_pause is not None:
                 self.on_pause(result)
-            lines.append(result.message())
-        return lines
+            out[printer] = pause_lines(result)
+        return out
 
-    def _text(self, events: list[Event], suppressed: int, extra: list[str]) -> str:
-        lines = [batch_text(events, suppressed=suppressed, prefix="[агент недоступен] printer ")]
-        for printer in dict.fromkeys(e.printer for e in events):
-            why = self.whys.get(printer)
-            lines.append(f"{printer}: no live subscriber took this alert and "
-                         f"{why() if why is not None else 'the temporary agent could not take it'}.")
-        return "\n".join([*lines, *extra])
-
-    def deliver(self, events: list[Event], suppressed: int = 0) -> None:
-        extra = self._paused(events)
-        text = self._text(events, suppressed, extra)
-        frames = tg_frames(events)
+    def _send(self, printer: str, text: str, frames: list[str]) -> None:
         rich = [self.binary, "--tag", "problem", *[x for f in frames for x in ("--photo", f)], text]
         r = self.runner(rich, text=True, capture_output=True, timeout=60)
         if r.returncode != 0:
             first = f"tg exit {r.returncode}: {(r.stderr or r.stdout or '').strip()[:300]}"
             r = self.runner([self.binary, text], text=True, capture_output=True, timeout=60)
             if r.returncode != 0:
-                for printer in dict.fromkeys(e.printer for e in events):
-                    self._count(printer, "fallback_tg_failed")
+                self._count(printer, "fallback_tg_failed")
                 raise RuntimeError(f"{first}; plain retry: tg exit {r.returncode}: "
                                    f"{(r.stderr or r.stdout or '').strip()[:300]}")
             _log(f"tg refused the tagged/photo message ({first}); sent the text alone")
+        self._count(printer, "fallback_tg_sent")
+
+    def deliver(self, events: list[Event], suppressed: int = 0) -> None:
+        paused = self._paused(events)   # before any limiting: the safety step is never held back
+        now = self.clock()
+        errors: list[Exception] = []
         for printer in dict.fromkeys(e.printer for e in events):
-            self._count(printer, "fallback_tg_sent")
+            mine = [e for e in events if e.printer == printer]
+            cooldown = self.cooldowns.get(printer, DEFAULT_COOLDOWN_S)
+            adm = Admission(True)
+            if self.ledger is not None:
+                adm = self.ledger.admit(printer, max(severity_rank(e.severity) for e in mine),
+                                        [e.kind for e in mine], now, cooldown)
+            if not adm.send:
+                self._count(printer, "fallback_tg_folded", len(mine))
+                _log(f"{printer}: tg message folded by the {cooldown / 60:g} min cooldown "
+                     f"({', '.join(dict.fromkeys(e.kind for e in mine))})")
+                continue
+            try:
+                self._send(printer, short_text(printer, mine, paused.get(printer, []), adm), tg_frames(mine))
+            except Exception as exc:  # the other printers of the batch still get theirs
+                if self.ledger is not None:
+                    self.ledger.restore_limiter(printer, adm.before)
+                errors.append(exc)
+        if errors:
+            raise errors[0]
+
+    def maintain(self) -> None:
+        """Send the `+N more: kinds` line of every printer whose cooldown has ended."""
+        if self.ledger is None:
+            return
+        now = self.clock()
+        for printer, cooldown in list(self.cooldowns.items()):
+            adm = self.ledger.flush_folded(printer, now, cooldown)
+            if not adm.send:
+                continue
+            try:
+                self._send(printer, f"{printer}: +{adm.more} more: {', '.join(adm.more_kinds)}", [])
+            except Exception as exc:
+                self.ledger.restore_limiter(printer, adm.before)
+                _log(f"{printer}: the folded-alerts summary was not sent: {exc}")
 
 
 class OmpLive:
@@ -547,7 +634,7 @@ class Dispatcher:
         """Route one printer by its validated `watch_run.settings_for` result, plus the
         `3d printer subscribe` registry (every printer, so watch and vision reach subscribers
         without flags; the registry is re-read when it changes)."""
-        from printer_ops.printer_agent import PrinterAgents, PrinterAgentSink, record_event, unavailable_reason
+        from printer_ops.printer_agent import PrinterAgents, PrinterAgentSink, record_event
         from printer_ops.subscriptions import DeliveryState, SubscriptionSink
 
         if dry_run:
@@ -570,7 +657,7 @@ class Dispatcher:
                 from printer_ops.auto_pause import AutoPauser
 
                 pauser = AutoPauser(printer)
-            tg.attach(printer, pauser=pauser, why=lambda: unavailable_reason(printer, state))
+            tg.attach(printer, pauser=pauser, cooldown_s=settings.get("message_cooldown_s", DEFAULT_COOLDOWN_S))
 
     @classmethod
     def for_devices(cls, devices: Iterable[Device], *, dry_run: bool = False,
@@ -711,6 +798,7 @@ class Dispatcher:
         return {ident: {"printers": sorted(r.printers), **r.sink.stats.__dict__} for ident, r in self.routes.items()}
 
 
-__all__ = ["FALLBACK", "FIRST", "LAST_RESORT", "Dispatcher", "DryRunSink", "ExecSink", "Ledger", "OmpLive", "Pauser", "Sink",
-           "SteerSink", "StdoutSink", "TgSink", "batch_text", "find_tool", "notify_held_service",
-           "refuse_dry_run_service", "sinks_for", "stderr_is_journal", "tg_frames"]
+__all__ = ["DEFAULT_COOLDOWN_S", "FALLBACK", "FIRST", "LAST_RESORT", "Admission", "Dispatcher", "DryRunSink", "ExecSink",
+           "Ledger", "OmpLive", "Pauser", "Sink", "SteerSink", "StdoutSink", "TgSink", "batch_text", "find_tool",
+           "notify_held_service", "pause_lines", "refuse_dry_run_service", "short_text", "sinks_for",
+           "stderr_is_journal", "tg_frames"]

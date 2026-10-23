@@ -15,8 +15,9 @@ and messages the user only when it is
    counts only with the session's `accepted` receipt — a dead session is never sent to);
 2. otherwise, for warning+ events, the printer's
    [temporary agent](#the-temporary-printer-agent) — an omp session in tmux started for it;
-3. only when **nobody can judge** — no live subscriber, and the agent cannot start or is not up
-   within 90 s — the watcher tells the user itself through `tg`, with the frame
+3. only when **nobody can judge** — no live subscriber, and the agent cannot start (3 tries) or is
+   not up within 90 s even after one silent restart — the watcher tells the user itself through
+   `tg`: one short message per incident, with the frame
    ([When nobody can judge](#when-nobody-can-judge)); `watch.tg_fallback` is on unless set to
    `false`. This is the only case where a printer alert goes straight to the user.
 
@@ -152,7 +153,10 @@ It stays running on its own tmux server, in its own systemd scope when `systemd-
 watcher restart does not kill it and your own tmux sessions are untouched
 (`tmux -L 3d-printer-agent attach -t 3d-printer-agent-u1` to watch it); later alerts reach
 it through `tg-ctl omp-live send` (it is found by its cwd). Its `role.md` tells it to open the
-frames, check `3d printer status`, and message the user via `tg` only when the failure is real.
+frames, check `3d printer status`, and message the user via `tg` only when the failure is real:
+at most ONE short message (≤ 5 lines) per incident — same-or-lower severity alerts within 10
+minutes of its message get no new message, only an escalation or a material change gets one
+short follow-up. The footer of the alert a subscribed session receives says the same.
 It never pauses, cancels or sends G-code without the user's ok — except policy D5 (wrong
 material loaded, a wrong or dangerous temperature, CF filament on a brass nozzle): then it
 pauses with `3d printer pause` if that command exists and calls the user with `tg call me --say`.
@@ -161,10 +165,14 @@ pauses with `3d printer pause` if that command exists and calls the user with `t
   every watcher process (a deliberate `agent stop` or a handoff frees the slot). A start that
   **failed** (tmux/omp missing, tmux error, not up in time) is retried sooner with backoff: 30 s,
   60 s, 120 s, ... capped at 10 min, and logged loudly (`ALERT NOT DELIVERED TO AN AGENT`).
+- **Restarts are silent.** A start that fails is retried in place up to 3 times (2 s, then 5 s
+  apart); every failure is logged loudly and counted, none of them messages you. An agent that is
+  not up within the window is killed and started **once more**, silently, before anything is
+  handed to the fallback. Only when every try failed does the alert go on to
+  [the tg fallback](#when-nobody-can-judge), as one short line that says nothing about the agent.
 - The watcher waits for a starting agent on a background thread (one printer's slow start never
   delays another printer's alert). The agent's acknowledgement is that it shows up in
-  `omp-live` in its own directory within 90 s (`watch.agent_ack_seconds`); otherwise its tmux
-  session is killed and the events go on to [the tg fallback](#when-nobody-can-judge).
+  `omp-live` in its own directory within 90 s (`watch.agent_ack_seconds`).
 - The tmux server is started through `systemd-run --user --scope`: tmux 3.6 puts only the pane
   process (omp) in its own scope, the **server** stays in the cgroup of the watcher's unit and
   takes omp with it when the unit stops or restarts
@@ -196,19 +204,32 @@ pauses with `3d printer pause` if that command exists and calls the user with `t
 
 ## When nobody can judge
 
-No live subscriber took a warning+ event and the temporary agent could not (the start failed, it
-did not show up in `omp-live` within the acknowledgement window, or it was restarted less than
-10 minutes ago). Then the watcher does not drop it and does not log it away:
+No live subscriber took a warning+ event and the temporary agent could not (every start try
+failed, it did not show up in `omp-live` within the acknowledgement window even after a silent
+restart, or it was restarted less than 10 minutes ago). Then the watcher does not drop it and
+does not log it away:
 
 1. **Pause** — for the few high-confidence critical findings of a printer with
    `watch.pause_without_agent: critical-only` (the default for own, `access: full` printers with
    a camera), the watcher first pauses the print itself, once per job, and never resumes or
-   cancels: [Pause without an agent](printer-vision.md#pause-without-an-agent).
-2. **Tell the user** — one `tg --tag problem [--photo FRAME]... "<text>"`: the alert, why no
-   agent took it, the frame (up to 3 that exist on disk) and, when it paused, what it did and how
-   to resume. A refused tag or photo is retried as plain text: the words always go out. Critical
-   events are never rate-limited; others at most 6 per 10 minutes (`sinks.tg.suppressed`).
-   `tg` is found in `PATH`, then `~/.local/bin` (a unit's `PATH` is minimal).
+   cancels: [Pause without an agent](printer-vision.md#pause-without-an-agent). The pause is
+   never limited by the message cooldown below.
+2. **Tell the user** — ONE short `tg --tag problem [--photo FRAME]... "<text>"` per incident,
+   at most 5 lines: `<printer>: <the most severe event, first line, ≤ 200 chars>`, then at most
+   one `+N related: kind, kind` line for the other events of the batch (kinds only, deduped), then
+   one line about the pause (`Watcher PAUSED the print (FILE). Resume: printer screen or
+   Fluidd/Mainsail http://HOST` / `Watcher could NOT pause the print — check the printer.`). The
+   exception, the G-code error and the PAUSED state of one incident arrive in one batch and make
+   one message. The text never says why no agent took it and carries no raw G-code or data. A
+   refused tag or photo is retried as plain text: the words always go out. `tg` is found in
+   `PATH`, then `~/.local/bin` (a unit's `PATH` is minimal).
+   **Cooldown:** after a message, further alerts of the same or lower severity for that printer
+   (default 10 minutes, `watch.message_cooldown_minutes`) are only counted
+   (`fallback_tg_folded`) and sent as ONE `+N more: kind, kind` line when the cooldown ends (by
+   the watcher's 5-minute maintenance, or with the next message if one comes first). A higher
+   severity than anything already sent in the incident passes once. The state is shared by every
+   watcher process (`limiter` in `printer-subscriptions.json`), so `watch` and `vision` together
+   keep to one message.
 3. **Count it** — every link of the chain that fails bumps a per-printer counter in
    `printer-subscriptions.json`, shown by `3d printer agent list` and `3d printer subscriptions`
    (`delivery failures u1: agent_start_failed 1, subscriber_dead 3`):
@@ -218,10 +239,11 @@ did not show up in `omp-live` within the acknowledgement window, or it was resta
 | `subscriber_dead` | events skipped because the subscribed session is not live |
 | `subscriber_send_failed` | sends to a live session that failed or were not acknowledged |
 | `subscriber_unreachable` | deliveries where `tg-ctl omp-live` could not tell who is live |
-| `agent_start_failed` | agent starts that failed (tmux/omp missing, tmux error) |
-| `agent_not_acked` | agents that did not come up within the acknowledgement window |
+| `agent_start_failed` | agent starts that failed (tmux/omp missing, tmux error); each of the 3 tries counts |
+| `agent_not_acked` | agents that did not come up within the acknowledgement window (each silent restart counts) |
 | `agent_restart_limit` | alerts refused a new agent start (restarted too recently) |
 | `fallback_tg_sent` / `fallback_tg_failed` | emergency tg messages sent / that failed (nobody told) |
+| `fallback_tg_folded` | alerts held by the message cooldown (sent as one `+N more` line) |
 | `auto_pause_paused`, `_pause_unverified`, `_failed`, `_skipped` | outcomes of the automatic pause |
 
 `watch.tg_fallback: false` removes the guarantee (and the automatic pause with it: a pause
@@ -247,7 +269,7 @@ delivered") — the 2026-10-22 PAUSED alert was swallowed by a unit that ran `wa
 3. LAST_RESORT stage: the temporary printer agent, for warning+ events no agent took.
 4. FALLBACK stage: [pause, then `tg`](#when-nobody-can-judge) — on unless
    `watch.tg_fallback: false` in `printer-devices.yaml`, only for the warning+ events no agent
-   took (info events never page the user), marked «агент недоступен». The removed `--tg` /
+   took (info events never page the user), as one short message per incident. The removed `--tg` /
    `--tg-always` flags and the yaml key `tg:` are still read, as `tg_fallback: true` with a
    deprecation warning, so units installed before keep running (a legacy `tg: false` stays off).
    The heartbeat counts the events tg left to an agent in `sinks.tg.left_to_agent`.

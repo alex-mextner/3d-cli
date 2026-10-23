@@ -82,3 +82,5 @@ tested with a fake adapter only; `printer guard`'s identical claim/pause path wa
 `omp-live` `accepted` receipt of the live HSW observer session; that the units no longer carry `--dry-run`
 (u1 watch and vision: removed by the 2026-10-23 drop-ins; the base unit files still say `--dry-run`, and with
 this change a service that still did would refuse to start instead of holding alerts).
+
+**Quiet by construction (2026-10-23, tg#24124/#24125):** an agent that fails to start is restarted silently (3 tries 2 s/5 s apart, then one more start if it is not up in the window) and only a total failure sends one short `tg` line; every fallback message is one ≤ 5-line message per incident, and a per-printer cooldown (`watch.message_cooldown_minutes`, default 10, state shared by watch and vision) folds the rest into one `+N more` line — the automatic pause is never limited.
