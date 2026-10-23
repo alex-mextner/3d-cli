@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 np = pytest.importorskip("numpy")
+pytest.importorskip("cv2")  # the launched stage imports OpenCV
 PIL_Image = pytest.importorskip("PIL.Image")
 
 from .workflow_helper import run_cli  # noqa: E402

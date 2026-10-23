@@ -144,8 +144,12 @@ def load_categories(spec: str | Path | None) -> list[Category]:
     one of `WRAPPER_KEYS` / one label per line, optional `label: synonym, synonym`); otherwise a comma list "a,b,c"."""
     if spec is None or str(spec).strip() == "":
         return parse_categories(None)
-    path = Path(spec)
-    if not path.is_file():
+    try:
+        path = Path(spec)
+        is_file = path.is_file()
+    except OSError:  # a long comma list is not a valid file name
+        is_file = False
+    if not is_file:
         items = [c.strip() for c in str(spec).split(",") if c.strip()]
         if not items:
             raise BadInput("--categories is empty")

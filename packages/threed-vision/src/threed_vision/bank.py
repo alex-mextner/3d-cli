@@ -284,8 +284,8 @@ def build_thumbnails(
     src_p, out = Path(src), Path(out_dir)
     if view not in VIEWS:
         raise BadInput(f"unknown view '{view}'", f"one of: {', '.join(VIEWS)}")
-    out.mkdir(parents=True, exist_ok=True)
     if src_p.is_file() and src_p.suffix == ".json":
+        out.mkdir(parents=True, exist_ok=True)
         return _rebase_bank(src_p, out)
     if not src_p.is_dir():
         raise BadInput(
@@ -297,6 +297,7 @@ def build_thumbnails(
     )
     if not meshes:
         raise BadInput(f"no meshes ({', '.join(MESH_SUFFIXES)}) under {src_p}")
+    out.mkdir(parents=True, exist_ok=True)
     cmap = _read_categories_map(src_p, categories)
     taken: set[str] = set()
     entries: list[dict[str, Any]] = []
@@ -426,8 +427,10 @@ def read_bank(bank_json: str | Path) -> dict[str, Any]:
         raise BadInput(f"{path}: every entry needs a unique 'id'")
     for e in entries:
         _check_entry(path, e)
-        e.setdefault("name", e["id"])
-        e.setdefault("category", category_from_name(str(e["name"])))
+        if e.get("name") is None:
+            e["name"] = e["id"]
+        if e.get("category") is None:
+            e["category"] = category_from_name(str(e["name"]))
         e.setdefault("textured", True)
     return dict(doc)
 
