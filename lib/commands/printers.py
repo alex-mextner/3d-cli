@@ -1,4 +1,4 @@
-"""3d printers — inspect the printer registry and see everything about one printer.
+"""3d printers — the printer registry, one printer's dossier, its filament, its health, its firmware.
 
 WHAT: `list` shows every known printer MODEL with its build volume; `show NAME` is the
   one-screen dossier of a printer: model spec (build volume, nozzle, firmware, default
@@ -19,6 +19,15 @@ Examples:
   3d printers show u1                       # dossier of the fleet printer `u1`: spec + machine + live
   3d printers show u1 --no-live --json      # static facts only, machine-readable, no network
   3d printers show k1se --history 10 --secs 3
+  3d printers spools                        # which spool is in which printer, active-spool agreement
+  3d printers swap 9 u1/T2 --to WH:default  # exchange a slot's spool
+  3d printers doctor --all                  # diagnose every fleet printer (read-only)
+  3d printers fw plan u1 --to extended      # what a firmware change would do (never executes)
+
+Self-registering subs (lib/printers_cli/<sub>.py, found by `printers_cli.discover()`; no edit here
+  to add one): `spools`/`load`/`unload`/`swap`/`filament` (the filament in the printers), `doctor`
+  (diagnose + fix a printer's setup), `fw` (firmware / root / Klipper-unlock per vendor profile).
+  `list` and `show` stay in this module.
 
 ROADMAP §2a: "Materials & printers — shared, cross-cutting vocabularies.
   Single canonical registries materials.yaml + printers.yaml (built-in defaults +
