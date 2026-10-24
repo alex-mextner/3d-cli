@@ -115,5 +115,10 @@ def check_remix(spec: PublishSpec, lookup: LicenseLookup) -> RemixCheck | None:
                 f"the source is GNU LGPL: publish under LGPL or GPL, not {out.label}"
             )
     return RemixCheck(
-        spec.remix_of, tuple(evidence), tuple(dict.fromkeys(known)), spec.permission_ref, waived, tuple(problems)
+        spec.remix_of,
+        tuple(evidence),
+        tuple(dict.fromkeys(known)),
+        spec.permission_ref,
+        waived,
+        tuple(problems),
     )

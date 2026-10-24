@@ -30,7 +30,9 @@ explain why the command exists, what its inputs mean, and how it fits into the l
 | `export` | [export.md](export.md) | Format-aware [STL](GLOSSARY.md#stl)/[3MF](GLOSSARY.md#3mf)/USDZ export, format planning, and [manifold](GLOSSARY.md#manifold) validation when the mesh stack is available. |
 | `generate` | [generate.md](generate.md) | Text description + named dimensions -> verified parametric `.scad` via an AI backend (generate/validate/render/check/fix loop). |
 | `fit-niche` | [fit-niche.md](fit-niche.md) | Generate a parametric insert/plug that mates into a described cavity with FDM clearances. |
-| `library` | [library.md](library.md) | Local model-library database (searches, sources, designs, makes, photos, publications): `path`, `migrate`, `status`, `export`, offline. |
+| `library` | [library.md](library.md) | Local model-library database (searches, sources, designs, makes, photos, publications): `path`, `migrate`, `status`, `export`, offline; read-only `makes`, `publications`, `relations`, `graph DESIGN` (source <- remix <- make). |
+| `make` | [make.md](make.md) | Record the prints (makes) of a design in the library: `add`, `status` (queued -> printing -> done/failed), `list`; local database only. |
+| `photo` | [photo.md](photo.md) | Photos of makes and designs: `add`, `capture` (the table photo with the printer's bed lifted by the guarded Z move, dry run unless `--yes`, bed restored), `renders`, `list`. |
 | `import` | [import.md](import.md) | Generate OpenSCAD wrappers or conversion plans for imported model formats. |
 | `pack` | [pack.md](pack.md) | Plan deterministic print-bed layouts from explicit part footprints. |
 | `prep` | [prep.md](prep.md) | Model to print-ready plate with cached steps: repair, orientation, no-support adaptation, fit table, stability, colour regions, layers, Orca project, slice, G-code gates, proof pack. |
@@ -114,7 +116,7 @@ Every gate from model to printer, in order: [Print pipeline](../workflows/print-
 | Command | Doc | Role |
 |---|---|---|
 | `libs` | [libs.md](libs.md) | OpenSCAD library path/list info; install is automatic on first run. |
-| `models` | [models.md](models.md) | Search Printables, MakerWorld, Thingiverse and Cults3D; show a model; download a free model's files with a `model.json` (author, license, source). Paid models are never downloaded. `publish` puts your own project (3mf + scad + stl + CAD files) on MakerWorld/Printables/Thingiverse: dry run by default, refuses a remix of a no-derivatives licence without permission. |
+| `models` | [models.md](models.md) | Search Printables, MakerWorld, Thingiverse and Cults3D; show a model; download a free model's files with a `model.json` (author, license, source). Paid models are never downloaded. `publish` puts your own project (3mf + scad + stl + CAD files + renders + photos) on MakerWorld/Printables/Thingiverse/Cults, or a remix / a make post of a downloaded model: dry run by default, refuses a remix of a no-derivatives licence without permission and any vitamin/reference/stand_in part in the file set; `--yes` records publications and relations in the library. `offer` proposes the publication after a print or a modify step. |
 | `openscad` | [openscad.md](openscad.md) | Install OpenSCAD libraries (WriteText, BOSL2, …) into OpenSCAD's user library folder for plain `openscad`. |
 | `printers` | [printers.md](printers.md) | Printer registry and fleet actions: `list`/`show` (model spec + one-screen dossier), `spools`/`load`/`unload`/`swap`/`filament` (the filament in the printers, `--dry-run`), `doctor` ([printers-doctor.md](printers-doctor.md): diagnose and fix a printer's setup), `fw` ([printers-fw.md](printers-fw.md): firmware / root / Klipper-unlock plans per vendor profile). |
 | `procurement` | [procurement.md](procurement.md) | Build deterministic purchase plans from local BOM and inventory files. |

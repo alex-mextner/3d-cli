@@ -221,3 +221,109 @@ def publish_browser(
         f"the {plan.platform} draft is filled in browser session {session} (screenshot: {out or 'taken'}). "
         "Review it and press Publish yourself.",
     )
+
+
+CULTS = "cults"
+CULTS_CATEGORIES = "query Categories { categories { id name(locale: EN) } }"
+CULTS_LICENSES = "query Licenses { licenses { code name } }"
+CULTS_CREATE = (
+    "mutation Create($name: String!, $description: String!, $categoryId: ID!, $licenseCode: String!, "
+    "$tagNames: [String!], $fileUrls: [String!], $imageUrls: [String!]) { createCreation(name: $name, "
+    "description: $description, categoryId: $categoryId, licenseCode: $licenseCode, tagNames: $tagNames, "
+    "fileUrls: $fileUrls, imageUrls: $imageUrls, locale: EN, downloadPrice: 0, currency: EUR, "
+    "madeWithAi: false) { creation { id url(locale: EN) } errors } }"
+)
+
+
+def _cults_call(
+    query: str, variables: dict[str, Any], auth: dict[str, str], api: str
+) -> dict[str, Any]:
+    return transport.graphql(
+        CULTS,
+        api,
+        query,
+        variables,
+        headers=auth,
+        auth_hint="Cults rejected the username/API key: `3d models auth set cults`.",
+    )
+
+
+def publish_cults(
+    plan: PlatformPlan,
+    license_id: str,
+    *,
+    credentials: tuple[str, str],
+    api: str | None = None,
+) -> str:
+    """Create the Cults3D creation from the plan: resolve the category and licence ids with two read-only
+    queries, then `createCreation` with the hosted file/image URLs. Returns the creation URL.
+
+    The shapes follow the community-documented API (github.com/CheekyCodexConjurer/cults3d-api-docs) and are
+    NOT verified against a real account (#565); the loopback test uses fixtures of those shapes."""
+    import base64
+
+    from marketplaces import cults
+    from publishing.licenses import parse_license
+
+    username, key = credentials
+    basic = base64.b64encode(f"{username}:{key}".encode()).decode("ascii")
+    auth = {"Authorization": f"Basic {basic}"}
+    url = api or cults.api_url()
+    fields = plan.fields
+    cats = _cults_call(CULTS_CATEGORIES, {}, auth, url).get("categories") or []
+    wanted = str(fields["category"]).strip().casefold()
+    category = next(
+        (c for c in cats if str(c.get("name", "")).strip().casefold() == wanted), None
+    )
+    if category is None:
+        names = ", ".join(sorted(str(c.get("name")) for c in cats)[:20])
+        raise MarketplaceError(
+            CULTS,
+            "parse",
+            f"Cults has no category named {fields['category']!r}",
+            remediation=[
+                f"Set `category` in publish.yaml to one of: {names or '(the query returned none)'}"
+            ],
+        )
+    lics = _cults_call(CULTS_LICENSES, {}, auth, url).get("licenses") or []
+    licence = next(
+        (
+            lic
+            for lic in lics
+            if (parsed := parse_license(str(lic.get("name", "")))) is not None
+            and parsed.id == license_id
+        ),
+        None,
+    )
+    if licence is None:
+        offered = ", ".join(str(lic.get("name")) for lic in lics)
+        raise MarketplaceError(
+            CULTS,
+            "parse",
+            f"Cults does not offer a licence matching {fields['license']!r}",
+            remediation=[
+                f"Pick a publish.yaml `license` Cults offers: {offered or '(the query returned none)'}"
+            ],
+        )
+    variables = {
+        "name": fields["name"],
+        "description": fields["description"],
+        "categoryId": category["id"],
+        "licenseCode": licence["code"],
+        "tagNames": list(fields["tags"]),
+        "fileUrls": list(fields["file_urls"]),
+        "imageUrls": list(fields["image_urls"]),
+    }
+    made = _cults_call(CULTS_CREATE, variables, auth, url).get("createCreation") or {}
+    errors = made.get("errors")
+    creation = made.get("creation") or {}
+    if errors or not creation:
+        raise MarketplaceError(
+            CULTS,
+            "http",
+            f"Cults refused the creation: {errors or 'no creation returned'}",
+        )
+    return (
+        as_str(creation.get("url"))
+        or f"{cults.WEB_URL} (creation {creation.get('id')})"
+    )

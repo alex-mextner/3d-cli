@@ -35,6 +35,16 @@ imports - `library.db.insert_row(conn, table, values, source_key=K)` returns the
 `lib/library/actions.py` fixes eight functions - `search, rank, download, open_slicer, launch_agent, queue,
 photo, publish` - returning `{schema: "3d.action/1", action, ok, data, errors[], warnings[]}`. They never
 print, prompt or exit. The TUI (S7) binds keys to `ACTIONS[name]` and the CLI exposes the same functions as
-flags with `--json`. `queue` and `photo` (register an existing file) are implemented; the other actions raise
-`NotImplementedByDesign(owner_issue)` until their slice lands (`OWNERS` maps action -> issue). `invoke(name,
+flags with `--json`. `queue`, `photo` (register a file, or `capture=True`: the table photo with the printer's bed lifted, restored
+afterwards; dry run by default) and `publish` (plan by default, `dry_run=False` records the rows) are implemented
+(slice #579); the other actions raise `NotImplementedByDesign(owner_issue)` until their slice lands (`OWNERS` maps
+action -> issue, `None` = implemented).
+
+## Writers of makes, photos, publications and relations (#579)
+
+`library/records.py` is the one place that writes them; `3d make`, `3d photo` and `3d models publish --yes` call
+it. Relations: `make --make_of--> design` (every make), `design --derived_from--> model_source` (a make printed from
+a download), `design --remix_of--> model_source` (a published remix). `publication.platform` is the platform name,
+or `<platform>:make` for a make post; a publication goes `planned` -> `draft|published|failed` and is never deleted.
+Read them with `3d library makes|publications|relations list` and `3d library graph DESIGN`. `invoke(name,
 **kwargs)` is the never-raising edge for UIs.

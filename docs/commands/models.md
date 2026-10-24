@@ -5,8 +5,9 @@ Finds ready-made models on the four big marketplaces — [Printables](https://ww
 [Cults3D](https://cults3d.com) — and downloads a free model's files together with a
 `model.json` that records where they came from, who made them and under which license.
 Paid models are listed with their price but never downloaded. `3d models publish` goes the
-other way: it puts one of your own model projects on MakerWorld, Printables and Thingiverse,
-after the checks that must pass first (see [Publishing](#publishing-a-model-project)).
+other way: it puts one of your own model projects (or a remix of a downloaded one, or a make of somebody's
+model) on MakerWorld, Printables, Thingiverse and Cults3D, after the checks that must pass first (see
+[Publishing](#publishing-a-model-project)); `3d models offer` proposes that after a print or a modify step.
 
 ## Usage
 
@@ -14,7 +15,8 @@ after the checks that must pass first (see [Publishing](#publishing-a-model-proj
 3d models search QUERY [--site S[,S...]] [--limit N] [--json]
 3d models show URL [--json]
 3d models download URL [--dir D] [--json]
-3d models publish PROJECT_DIR --platform makerworld|printables|thingiverse|all [--dry-run | --yes] [--json]
+3d models publish PROJECT_DIR --platform makerworld|printables|thingiverse|cults|all [--kind auto|original|remix|make] [--of SRC] [--make ID] [--dry-run | --yes] [--json]
+3d models offer [PROJECT_DIR] [--trigger print|modify] [--publish auto|ask|off] [--yes] [--json]
 3d models auth status [--json]
 3d models auth set SITE
 3d models auth delete SITE
@@ -48,9 +50,21 @@ Options:
   (default: all four).
 - `--limit N` — results per site, 1..100 (default 10).
 - `--dir D` — download directory (new or empty).
-- `--platform P` — `publish` target: `makerworld`, `printables`, `thingiverse` or `all` (required).
+- `--platform P` — `publish` target: `makerworld`, `printables`, `thingiverse`, `cults`, a comma-separated list, or
+  `all` (the first three, plus `cults` when `publish.yaml` has `hosted:` URLs) (required).
 - `--dry-run` — `publish`: print the plan, send nothing. This is the default.
-- `--yes` — `publish`: really send. Contradicts `--dry-run`.
+- `--yes` — `publish`: really send. Contradicts `--dry-run`. `offer`: the confirmation.
+- `--kind K` — `publish`: `auto` (default), `original`, `remix`, `make`. Example: `--kind remix --of ./downloaded-model`.
+- `--of SRC` — `publish`: the source model (URL, `model.json`, or a directory holding one).
+- `--make ID` — `publish`/`offer`: the make (full uid or unique prefix) whose photos are used. Example: `--make 0199a1c2-7d3e`.
+- `--design NAME` — `publish`/`offer`: the library design (default: `name:` of `3d.yaml`, else the directory name).
+- `--note TEXT` — `publish --kind make`: the text of the make post. Example: `--note "printed in PLA, no supports"`.
+- `--db PATH` — `publish`/`offer`: the library database (default: `3d library path`). Example: `--db /tmp/library.db`.
+- `--allow-nonprintable P[,P]` / `--reason TEXT` — `publish`: publish vitamin/reference/stand_in parts on purpose
+  (logged). Example: `--allow-nonprintable probe_pcb --reason "assembly kit"`.
+- `--drop-nonprintable` — `publish`: leave non-printable parts' files out, with a warning.
+- `--trigger T` — `offer`: `print` (default) or `modify`. `--publish M` — `offer`: `auto`, `ask`, `off`.
+  `--printer P` — `offer`: find the make of that printer in the library.
 - `--json` — machine-readable output: `search` prints
   `{"query", "results": {site: [model...]}, "errors": [{"site", "kind", "message", "remediation"}]}`
   where `kind` is `auth`, `blocked`, `paid`, `not-found`, `http`, `network`, `parse` or
@@ -65,6 +79,7 @@ Exit codes (identical with and without `--json`):
 | 0 | done; for `search`, at least one site answered |
 | 1 | a site failed (Cloudflare block, not found, network, HTTP, parse), the model is paid, or every searched site failed for different reasons |
 | 2 | bad usage (unknown flag/site, foreign URL, `--dir` is a file or non-empty), or credentials missing/refused — also when every searched site lacks credentials; for `publish`: a defective `publish.yaml` or a refusal (see below) |
+| 1 (publish) | a part of `3d.yaml` that is `vitamin`/`reference`/`stand_in` has a file in the publish set, or a platform did not go through |
 | 127 | no Chrome-TLS tool for MakerWorld (see below) |
 
 `search` exits non-zero only when no site answered; its JSON still lists every site's error.
@@ -85,6 +100,12 @@ Accepted URLs: `https://www.printables.com/model/<id>-<slug>`,
 3d models download https://www.printables.com/model/311253-spoon-drawer-pull --dir parts/pull --json
 3d models publish projects/wall-plugs --platform all --dry-run
 3d models publish projects/wall-plugs --platform thingiverse --yes
+3d models publish projects/mole --platform all --kind remix --of ./printables-311253-spoon-pull --dry-run --json
+3d models publish projects/mole --platform printables --kind make --make 0199a1c2-7d3e-7000-8000-000000000001 --of https://www.printables.com/model/311253-spoon-drawer-pull --dry-run
+3d models publish projects/mole --platform all --drop-nonprintable --dry-run
+3d models publish projects/mole --platform all --allow-nonprintable probe_pcb --reason "assembly kit" --dry-run
+3d models offer projects/mole --trigger print --json
+3d models offer --printer k1se --publish off
 3d models auth set thingiverse
 3d models auth status
 ```
@@ -170,6 +191,7 @@ permission when given), and a Thingiverse source is also linked as `ancestors`.
 | Thingiverse | the official REST API: `POST /things`, `POST /files/0/uploadFile` per file and image, `POST /files/0/FinalizeFiles`, `POST /things/{id}/publish` | creates the thing, uploads, finalizes and publishes; a failure after the draft exists leaves it unpublished and names it |
 | MakerWorld | no public upload API; the website driven with `agent-browser` in its own headed session `3d-publish-makerworld` | opens the site, uploads the files, fills title, description, tags, licence and category, takes a screenshot and **stops before the final Publish button** |
 | Printables | no public upload API (its GraphQL is internal); `agent-browser` in session `3d-publish-printables` | the same, plus the summary |
+| Cults3D | GraphQL API `createCreation`, HTTP Basic (nick + API key); files and images pulled from your `hosted:` URLs | creates a free creation, see [Cults3D](#cults3d) |
 
 Thingiverse's token goes in the `Authorization: Bearer` header only. For the two browser sites
 the login is passed with `keychain fill` from `3d-cli/<site>-user` and `3d-cli/<site>-password`
@@ -204,6 +226,111 @@ and store the `access_token` with `3d models auth set thingiverse-upload`
 (environment `THINGIVERSE_UPLOAD_TOKEN`, keychain item `3d-cli/thingiverse-upload-token`, or
 `auth.json` `thingiverse-upload.token`). With `--yes` it is resolved before any platform starts,
 so a missing token leaves nothing half-published.
+
+### Cults3D
+
+`--platform cults` (and `all` when `publish.yaml` has a `hosted:` map) uses Cults' GraphQL API with the nick and
+API key of `3d models auth set cults`. **Cults pulls files and images from public https URLs; the API takes no
+upload**, so every file and image of the plan needs an entry in `hosted:` (file name → URL) — a missing one is
+a `REFUSED` problem, as are a missing `category` (its English name) and more than 10 files or images (bundle the
+CAD files in a zip). `--yes` sends three requests: `categories` (to find the category id), `licenses` (the
+licence whose name parses to the project's licence), then `createCreation(... downloadPrice: 0 ...)` — a free
+creation. The API shapes follow the community-documented API; they are **unverified against a real account**
+(#565) and the tests use fixtures of those shapes (`tests/data/publish/`), not recordings.
+
+```yaml
+hosted:
+  wall_plug.3mf: https://files.example.com/wall_plug.3mf
+  wall_plug.scad: https://files.example.com/wall_plug.scad
+  iso.png: https://files.example.com/iso.png
+```
+
+### Remix and make posts (`--kind`, `--of`)
+
+`--kind` is `auto` (default: a remix when `--of` or `remix_of` says so, else an original), `original`, `remix` or
+`make`. `--of SRC` names the source: a model URL, a `model.json` written by `3d models download`, or the
+directory holding one. The source's licence is read where it was recorded (the `model.json`, else the library's
+`model_source` row, else the marketplace), and the #564 remix rules above apply unchanged: ND / NC-ND /
+all-rights-reserved / unknown is refused without `permission_ref`; NC, SA and GPL conditions are inherited.
+
+`--kind make --make ID --of SRC` posts a **make** — "I printed this" with the photos of make `ID` — to the model
+page of the source (or of the design's own recorded publications): `--platform all` means the platforms that
+have such a page. The remix rules do not apply (printing a model is what every licence allows); what is required
+is a model page and at least one photo of the make (`render` photos do not count). The steps are the same
+agent-browser route as a listing (open the page, press the site's make button, attach the photos, fill the
+note, screenshot) and **stop before the final Post button**. Their labels (`Add make`, `Share your print`,
+`I Made One`, `Add a make`) are unverified against the live pages. `--note TEXT` is the post text; printer and
+filament come from the make.
+
+### Photos and renders in the listing
+
+The photos of the library join the listing's images, so a listing carries CAD files, **renders** (`previews/`,
+registered as `photo(kind=render)`) and **photos** (`table`/`bed`, with the bed height they were taken at):
+those of the design and of all its makes for a listing, those of the make for a make post. A photo whose file is
+gone is a warning, not an error. The dry run lists them (`photos from the library`; `photos` in `--json`). Take
+them with [`3d photo`](photo.md).
+
+### Non-printable parts never go out as printable models
+
+Roles live in the project's `3d.yaml` (`parts.<name>.role`: `printed` (default), `vitamin`, `reference`,
+`stand_in`; a `vitamin`/`reference` carries `reference_source: {url, license}`; see
+[`parts.md`](../contracts/parts.md)). A file of the publish set (root and `print/`) belongs to a part when its
+stem is the part's name or the stem of its `file:`.
+
+- A file of a non-printable part in the set **refuses the publication with exit 1** (`GateFailure`; the plan is
+  printed first, `--yes` does not lift it).
+- `--drop-nonprintable` leaves those files out and lists each as a warning.
+- `--allow-nonprintable PART[,PART] --reason TEXT` publishes them on purpose; without `--reason` it is refused
+  (exit 2). The override is listed in the plan and written as a `library.publish.override` event (part, role,
+  reason) in the library.
+- Every part with a `reference_source` is **credited** in the description (`Reference models used (not part of
+  the printable files): - probe_pcb: URL (licence)`), and its licence is judged like `remix_of`: an ND reference
+  is refused without `permission_ref`, NC/SA/GPL conditions must be carried by the published `license`.
+
+### What `--yes` records in the library
+
+`--yes` writes to the local library (`--db PATH`, default `3d library path`): a `publication` row per platform
+(`planned` before the attempt, then `draft` — a browser draft awaiting your click —, `published` or `failed`; a
+make post is recorded as `<platform>:make`), the `remix_of` relation design → source (the source becomes a
+`model_source` row when new), `make_of` make → design, and the project's renders as `photo(kind=render)`.
+Nothing is deleted: a rerun adds rows. A dry run never creates or writes the library. Read it back with
+`3d library publications|relations list`, `3d library graph DESIGN`.
+
+### `3d models offer` — the publish offer after a print or a modify step
+
+```bash
+3d models offer [PROJECT_DIR] [--trigger print|modify] [--publish auto|ask|off] [--platform P] [--make ID | --design NAME | --printer P] [--yes] [--json]
+```
+
+Prepares the dry-run plan for the design — an original or remix listing with CAD files, renders and photos on all
+platforms, plus a make post when the print was of somebody else's model — states the licence, and asks. Nothing is
+ever published without a confirmation:
+
+| `--publish` | Terminal | Not a terminal / `--json` |
+|---|---|---|
+| `ask` (default) | prints the summary, asks `Publish to all platforms with CAD files, renders and photos? [Y/n]` — the default is yes only for an open licence with no refusal | prints the plan and the exact `3d models publish … --yes` commands; publishes nothing |
+| `auto` | publishes only together with `--yes` | `--yes` publishes; without it `status: needs_confirmation` |
+| `off` | nothing at all: no output, the library is not even opened, exit 0 | the same (`{"status": "off"}` with `--json`) |
+
+`--publish` defaults to `$THREED_PUBLISH_OFFER`, then `offer` in `<config dir>/publish.json` (`{"offer": "off"}`),
+then `ask`. `--yes` with `ask` publishes (it is the confirmation). The final click of the MakerWorld/Printables
+drafts stays yours as always; a refused plan (licence, missing 3mf/scad, non-printable part) exits 2/1 and sends
+nothing.
+
+**Licence default (stated in the offer, `defaults_used` in `--json`).** A design whose `publish.yaml` lacks
+`license` — or has no `publish.yaml`; `title`/`description` are then assumed from the design name — is offered under
+**CC BY** (open, available on every platform). A remix inherits what its source requires: share-alike → CC BY-SA,
+non-commercial → CC BY-NC, both → CC BY-NC-SA, GPL/LGPL → the same. No category is ever assumed: Thingiverse
+(and Cults) keep refusing until `category` is set. Which listing is offered: `trigger=modify` → a remix when the
+design has a source, else an original; `trigger=print` → the original/remix listing unless the design is only
+*derived from* a source (a plain print of a download), plus a make post when a model page is known.
+
+**Hooks.** `3d printer subscribe --once --on bed-free` appends the offer to the message its agent receives when the
+library knows a `printing`/`done` make on that printer and the mode is not `off`: the agent runs
+`3d models offer --make ID --trigger print --json`, shows the user the plan and asks. `3d mesh deform` /
+`fit-silhouette` call the offer when their output lands in a project: on a terminal the prompt of
+`--trigger modify`, otherwise one hint line on stderr; silent when `off`. The exit code of the mesh step is never
+changed.
 
 ## How each site is reached
 

@@ -19,3 +19,11 @@
 
 Wiring at each print boundary (`arrange`, `prep`, `export`, `printer start/upload`, publish) and of the palette
 into render/dimension/usdz/3mf export is done per slice; see the follow-ups in the S0 pull request.
+
+## Publish (S8, #579)
+
+`3d models publish` reads roles from the project's `3d.yaml` (`parts.<name>.role`, `reference_source`) through
+`part_from_dict`; a file of the publish set that belongs to a non-printable part raises `NonPrintableParts` (exit 1)
+via `assert_printable`, unless `--drop-nonprintable` or `--allow-nonprintable PART --reason TEXT` (logged as a
+`library.publish.override` event). Reference sources are credited in the description and their licences are checked
+like `remix_of`. See [`docs/commands/models.md`](../commands/models.md#non-printable-parts-never-go-out-as-printable-models).
