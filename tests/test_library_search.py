@@ -309,22 +309,38 @@ def test_search_kind_is_validated() -> None:
 
 
 # -- Thingiverse follow-ups persist across processes -------------------------------------------------------
-def test_thingiverse_follow_ups_are_cached_in_the_library_between_runs(server: BulkServer, dbpath: str) -> None:
+def test_thingiverse_follow_ups_are_cached_in_the_library_between_runs(
+    server: BulkServer, dbpath: str
+) -> None:
     first = _run("case", dbpath, sites=("thingiverse",), limit=20)
     assert server.calls["thingiverse:detail"] == server.calls["thingiverse:files"] == 20
     thingiverse.clear_cache()  # a new process remembers nothing in memory
     again = _run("case", dbpath, sites=("thingiverse",), limit=20)
-    assert server.calls["thingiverse:detail"] == server.calls["thingiverse:files"] == 20  # no new follow-up request
-    assert again["results"] == first["results"] | {"thingiverse": again["results"]["thingiverse"]}
-    assert all(r["analytics"]["files_known"] and r["license"] for r in again["results"]["thingiverse"])
-    assert [f["name"] for f in again["results"]["thingiverse"][1]["files"]] == ["base_2.stl", "top_2.stl",
-                                                                                 "assembled_2.3mf"]
+    assert (
+        server.calls["thingiverse:detail"] == server.calls["thingiverse:files"] == 20
+    )  # no new follow-up request
+    assert again["results"] == first["results"] | {
+        "thingiverse": again["results"]["thingiverse"]
+    }
+    assert all(
+        r["analytics"]["files_known"] and r["license"]
+        for r in again["results"]["thingiverse"]
+    )
+    assert [f["name"] for f in again["results"]["thingiverse"][1]["files"]] == [
+        "base_2.stl",
+        "top_2.stl",
+        "assembled_2.3mf",
+    ]
     thingiverse.clear_cache()
-    _run("case", None, sites=("thingiverse",), limit=20)  # --no-save: the stored answers are not used
+    _run(
+        "case", None, sites=("thingiverse",), limit=20
+    )  # --no-save: the stored answers are not used
     assert server.calls["thingiverse:detail"] == 40
 
 
-def test_a_stored_follow_up_answer_expires(server: BulkServer, dbpath: str, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_stored_follow_up_answer_expires(
+    server: BulkServer, dbpath: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     _run("case", dbpath, sites=("thingiverse",), limit=5)
     thingiverse.clear_cache()
     monkeypatch.setattr(search, "DETAIL_MAX_AGE_S", -1.0)
@@ -332,7 +348,9 @@ def test_a_stored_follow_up_answer_expires(server: BulkServer, dbpath: str, monk
     assert server.calls["thingiverse:detail"] == 10
 
 
-def test_the_detail_store_reads_garbage_and_a_dead_database_as_a_miss(tmp_path: Path) -> None:
+def test_the_detail_store_reads_garbage_and_a_dead_database_as_a_miss(
+    tmp_path: Path,
+) -> None:
     store = search.LibraryDetailStore(str(tmp_path / "blocker" / "library.db"))
     (tmp_path / "blocker").write_text("a file", encoding="utf-8")
     assert store.get("thingiverse:1") is None
@@ -341,7 +359,9 @@ def test_the_detail_store_reads_garbage_and_a_dead_database_as_a_miss(tmp_path: 
     ok = search.LibraryDetailStore(str(tmp_path / "library.db"))
     ok.put("thingiverse:9", {"thing": "not an object"})
     assert ok.get("thingiverse:9") == {"thing": "not an object"}
-    assert thingiverse._stored(ok, "9") is None  # a malformed entry is ignored, not trusted
+    assert (
+        thingiverse._stored(ok, "9") is None
+    )  # a malformed entry is ignored, not trusted
     ok.close()
 
 
@@ -759,7 +779,9 @@ def test_migration_0010_adds_the_search_core_columns(dbpath: str) -> None:
             "created_at"
         }
         status = librarydb.status(conn, dbpath)
-        assert status["migrations"] == [1, 10] and status["migrations_pending"] == []
+        assert (
+            status["migrations"] == [1, 10, 30] and status["migrations_pending"] == []
+        )
         with pytest.raises(Exception, match="CHECK"):
             conn.execute(
                 "INSERT INTO model_source (uid, site, model_id, url, files, role, created_at) "

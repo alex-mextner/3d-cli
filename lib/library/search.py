@@ -44,7 +44,9 @@ SCHEMA = "3d.models.search/2"
 DEEP_MAX_BYTES = 25 * 1024 * 1024
 DEEP_BUDGET_S = 90.0
 DEEP_WORKERS = 4
-DETAIL_MAX_AGE_S = 6 * 3600.0  # how long a stored Thingiverse follow-up answer is trusted
+DETAIL_MAX_AGE_S = (
+    6 * 3600.0
+)  # how long a stored Thingiverse follow-up answer is trusted
 VITAMIN_DEEP_TOP = (
     10  # `--for-vitamin` measures this many candidates per site unless told otherwise
 )
@@ -217,11 +219,18 @@ class LibraryDetailStore:
         if conn is None:
             return None
         try:
-            row = conn.execute("SELECT analytics, created_at FROM analytics_cache WHERE key = ?", (key,)).fetchone()
+            row = conn.execute(
+                "SELECT analytics, created_at FROM analytics_cache WHERE key = ?",
+                (key,),
+            ).fetchone()
             if row is None:
                 return None
-            stored = datetime.datetime.fromisoformat(row["created_at"].replace("Z", "+00:00"))
-            if (datetime.datetime.now(datetime.timezone.utc) - stored).total_seconds() > self._max_age_s:
+            stored = datetime.datetime.fromisoformat(
+                row["created_at"].replace("Z", "+00:00")
+            )
+            if (
+                datetime.datetime.now(datetime.timezone.utc) - stored
+            ).total_seconds() > self._max_age_s:
                 return None
             value = json.loads(row["analytics"])
         except (sqlite3.Error, ValueError):
@@ -248,13 +257,17 @@ def _skipped(reason: str) -> dict[str, Any]:
     return {"status": "skipped", "reason": reason}
 
 
-def _fetch(model: Model, name: str, deadline: Deadline, tmp: Path, n: int) -> tuple[Path | None, dict[str, Any]]:
+def _fetch(
+    model: Model, name: str, deadline: Deadline, tmp: Path, n: int
+) -> tuple[Path | None, dict[str, Any]]:
     """Download ONE listed mesh into `tmp`: `(path, {})` on success, `(None, doc)` with the deep entry to report
     otherwise. A transport failure is a `status: error` entry, never raised: one unreachable file must not cost
     the rest of the batch."""
     client = catalog.CLIENTS[model.site]
     if client.file_link is None:
-        return None, _skipped(f"{model.site} serves its files only inside a login-gated archive")
+        return None, _skipped(
+            f"{model.site} serves its files only inside a login-gated archive"
+        )
     if deadline.expired():
         return None, _skipped("deep time budget spent")
     file = next(f for f in model.files if f.name == name)
@@ -286,7 +299,9 @@ def deep_measure(
         if model.paid:
             out[key] = _skipped("paid listing")
             continue
-        pick = analytics.pick_mesh(((f.name, f.size) for f in model.files), max_bytes=max_bytes)
+        pick = analytics.pick_mesh(
+            ((f.name, f.size) for f in model.files), max_bytes=max_bytes
+        )
         if pick is None:
             out[key] = _skipped("no mesh file of known size within the cap")
             continue
@@ -301,11 +316,20 @@ def deep_measure(
     deadline = Deadline(budget_s)
     with tempfile.TemporaryDirectory(prefix="3d-deep-") as tmp_name:
         tmp = Path(tmp_name)
-        with ThreadPoolExecutor(max_workers=min(DEEP_WORKERS, pool_size(len(todo)))) as pool:
-            fetched = list(pool.map(lambda it: _fetch(it[1][0], it[1][1], deadline, tmp, it[0]), enumerate(todo)))
+        with ThreadPoolExecutor(
+            max_workers=min(DEEP_WORKERS, pool_size(len(todo)))
+        ) as pool:
+            fetched = list(
+                pool.map(
+                    lambda it: _fetch(it[1][0], it[1][1], deadline, tmp, it[0]),
+                    enumerate(todo),
+                )
+            )
         paths = [path for path, _ in fetched if path is not None]
         measured = analytics.measure_meshes(paths)
-        for (model, name, size, cache_key), (path, failure) in zip(todo, fetched, strict=True):
+        for (model, name, size, cache_key), (path, failure) in zip(
+            todo, fetched, strict=True
+        ):
             key = (model.site, model.id)
             if path is None:
                 out[key] = failure
@@ -410,7 +434,9 @@ def run_search(query: str, options: SearchOptions | None = None) -> SearchRun:
         }
         if opts.save and conn is not None:
             _persist(conn, doc, opts)
-        return SearchRun(doc, {r.site: r.error for r in site_results if r.error is not None})
+        return SearchRun(
+            doc, {r.site: r.error for r in site_results if r.error is not None}
+        )
     finally:
         if store is not None:
             store.close()
@@ -566,7 +592,7 @@ def session_doc(conn: sqlite3.Connection, ref: str) -> dict[str, Any]:
     session = _resolve_session(conn, ref)
     meta = json.loads(session["meta"])
     rows = conn.execute(
-        "SELECT site, record FROM search_result WHERE session_id = ? ORDER BY id",
+        "SELECT site, record, verdict, score, rationale FROM search_result WHERE session_id = ? ORDER BY id",
         (session["id"],),
     ).fetchall()
     sites = list(meta.get("sites", []))
@@ -574,13 +600,22 @@ def session_doc(conn: sqlite3.Connection, ref: str) -> dict[str, Any]:
         s: [] for s in sites if s not in _failed(meta)
     }
     for row in rows:
-        results.setdefault(row["site"], []).append(json.loads(row["record"]))
+        record = json.loads(row["record"])
+        if (
+            row["verdict"] is not None
+        ):  # a ranked result carries its verdict; an unranked one is unchanged
+            record["verdict"], record["score"], record["rationale"] = (
+                row["verdict"],
+                row["score"],
+                row["rationale"],
+            )
+        results.setdefault(row["site"], []).append(record)
     parent = None
     if session["parent_id"] is not None:
         parent = conn.execute(
             "SELECT uid FROM search_session WHERE id = ?", (session["parent_id"],)
         ).fetchone()["uid"]
-    return {
+    doc: dict[str, Any] = {
         "schema": SCHEMA,
         "query": session["query"],
         "effective_query": meta.get("effective_query", session["query"]),
@@ -598,6 +633,19 @@ def session_doc(conn: sqlite3.Connection, ref: str) -> dict[str, Any]:
         "kind": session["kind"],
         "parent": parent,
     }
+    from library import (
+        rankstore,
+    )  # what `--rank` kept: absent keys for a search that was never ranked
+
+    planned = rankstore.list_plan_queries(conn, int(session["id"]))
+    questions = rankstore.list_questions(conn, int(session["id"]))
+    if planned:
+        doc["queries"] = [
+            {k: v for k, v in p.items() if k != "row_id"} for p in planned
+        ]
+    if questions:
+        doc["questions"] = questions
+    return doc
 
 
 def _failed(meta: dict[str, Any]) -> set[str]:

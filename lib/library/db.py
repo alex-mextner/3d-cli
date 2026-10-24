@@ -87,6 +87,40 @@ TABLES: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "photo": (("make_id", "design_id", "path", "kind", "z_mm", "taken_at"), ()),
     "publication": (("design_id", "platform", "url", "state"), ()),
     "relation": (("from_kind", "from_id", "to_kind", "to_id", "rel"), ()),
+    "search_plan_query": (
+        (
+            "session_id",
+            "seq",
+            "query",
+            "kind",
+            "rationale",
+            "status",
+            "skip_reason",
+            "run_session_id",
+        ),
+        (),
+    ),
+    "search_question": (
+        ("session_id", "key", "type", "prompt", "choices"),
+        ("choices",),
+    ),
+    "llm_call": (
+        (
+            "session_id",
+            "role",
+            "model",
+            "status",
+            "items",
+            "elapsed_s",
+            "input_tokens",
+            "output_tokens",
+            "cache_read_tokens",
+            "cache_write_tokens",
+            "cost_usd",
+            "detail",
+        ),
+        (),
+    ),
 }
 
 
