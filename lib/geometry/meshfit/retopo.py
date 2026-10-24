@@ -32,27 +32,84 @@ IntArray = NDArray[np.int64]
 Result = tuple[Array, IntArray, dict[str, Any], bool]
 
 
-def remesh(V: Array, F: IntArray, params: Mapping[str, Any]) -> Result:
+def refine(
+    V: Array,
+    F: IntArray,
+    params: Mapping[str, Any],
+    zone: NDArray[np.bool_] | None = None,
+) -> tuple[Array, IntArray, dict[str, Any], IntArray]:
+    """remesh engine `refine`: conforming midpoint splits, optionally only around the vertices of `zone`.
+
+    `target_edge` splits edges longer than 4/3 of it (the mean edge ends near the target); `max_edge`
+    splits every edge longer than exactly that and fails when `max_rounds` is not enough to get there.
+    Returns (V, F, info, parent) with parent = the input face every output face was cut from."""
+    has_target, has_max = "target_edge" in params, "max_edge" in params
+    if has_target == has_max:
+        raise UsageError(
+            "remesh refine: give exactly one of target_edge (mean edge, mm) or max_edge (longest edge, mm)",
+            command="mesh deform",
+        )
+    value = float(params["max_edge" if has_max else "target_edge"])
+    if value <= 0:
+        raise UsageError(
+            f"remesh refine: {'max_edge' if has_max else 'target_edge'} (mm) must be a positive number",
+            command="mesh deform",
+        )
+    limit = value if has_max else value * 4.0 / 3.0
+    before = meshmath.mean_edge_length(V, F)
+    V2, F2, rounds, parent, zone2 = meshmath.refine_edges(
+        V, F, limit, int(params.get("max_rounds", 10)), zone
+    )
+    tri = V2[F2]
+    longest = np.linalg.norm(tri[:, [1, 2, 0]] - tri, axis=2).max(axis=1)
+    tested = np.ones(len(F2), dtype=bool) if zone2 is None else zone2[F2].any(axis=1)
+    longest_tested = float(longest[tested].max()) if tested.any() else 0.0
+    if has_max and longest_tested > limit:
+        raise UsageError(
+            f"remesh refine: {rounds} round(s) left an edge of {longest_tested:.4f} mm above max_edge {limit} mm",
+            command="mesh deform",
+            remediation=["Raise max_rounds on the op (default 10)."],
+        )
+    info: dict[str, Any] = {
+        "engine": "refine",
+        "rounds": rounds,
+        "faces_before": len(F),
+        "faces_after": len(F2),
+        "mean_edge_before": before,
+        "mean_edge_after": meshmath.mean_edge_length(V2, F2),
+        "edge_limit_mm": limit,
+        "longest_edge_in_zone_mm": round(longest_tested, 6),
+    }
+    if zone is not None:
+        info["zone_vertices"] = int(np.asarray(zone).sum())
+        info["zone_faces_after"] = int(tested.sum())
+    return V2, F2, info, parent
+
+
+def remesh(
+    V: Array,
+    F: IntArray,
+    params: Mapping[str, Any],
+    zone: NDArray[np.bool_] | None = None,
+) -> Result:
     engine = str(params.get("engine", "refine"))
+    if engine == "refine":
+        V2, F2, info, _ = refine(V, F, params, zone)
+        return V2, F2, info, True
+    if zone is not None:
+        raise UsageError(
+            f"remesh: a region is only honoured by engine refine, not {engine!r}",
+            command="mesh deform",
+            remediation=[
+                "Use engine refine, or drop `region` to remesh the whole mesh."
+            ],
+        )
     target = float(params["target_edge"]) if "target_edge" in params else None
     if target is None or target <= 0:
         raise UsageError(
             "remesh: target_edge (mm) must be a positive number", command="mesh deform"
         )
     before = meshmath.mean_edge_length(V, F)
-    if engine == "refine":
-        V2, F2, rounds = meshmath.refine_long_edges(
-            V, F, target * 4.0 / 3.0, int(params.get("max_rounds", 10))
-        )
-        info = {
-            "engine": "refine",
-            "rounds": rounds,
-            "faces_before": len(F),
-            "faces_after": len(F2),
-            "mean_edge_before": before,
-            "mean_edge_after": meshmath.mean_edge_length(V2, F2),
-        }
-        return V2, F2, info, True
     if engine in ("pymeshlab", "botsch"):
         V2, F2 = (_pymeshlab_remesh if engine == "pymeshlab" else _botsch_remesh)(
             V, F, params, target

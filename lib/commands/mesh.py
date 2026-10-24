@@ -54,6 +54,10 @@ Options:
   --collage FILE.png        before / after / displacement heat-map views (numpy rasteriser; needs Pillow)
   --verify-determinism      run the spec twice, fail (exit 1) unless both meshes are identical
   --seed N                  override the spec seed
+  --labels FILE.npz         per-face labels (array `face_label`, plus any other array with one row per face) to carry
+                            to the result; faces split by a remesh refine op give their row to every child (refused
+                            next to decimate / repair / botsch / pymeshlab, which have no input-to-output face map)
+  --out-labels FILE.npz     where to write them (default <out>.labels.npz); needs --labels
   --no-self-intersections   skip the self-intersection count (pymeshlab, else a built-in KD-tree test)
   --json                    print the full report instead of the summary
 
@@ -64,9 +68,9 @@ Spec (YAML/JSON): seed, regions, keepout, ops, [landmarks, keepout_tolerance_mm]
   landmarks: {file: landmarks.json, prefix: lm_}   every landmark box becomes the region <prefix><name>
   keepout:  regions whose vertices never move (weight 1 = bit-identical; the falloff band fades to 0).
             The gate re-checks the OUTPUT against the INPUT: max displacement must be 0.0 mm, else exit 1.
-  ops:      smooth | inflate | draw | pinch | crease | scale_local | symmetrize | grab (solver none|harmonic|
+  ops:      smooth | inflate | draw | displace (direction, amount) | pinch | crease | scale_local | symmetrize | grab (solver none|harmonic|
             biharmonic|arap, handles, anchors, influence) | fur (alias relief; overhang_safe) | remesh (engine
-            refine|botsch|pymeshlab) | decimate (engine manifold3d|quadric) | repair (engine builtin|meshfix) |
+            refine|botsch|pymeshlab; refine takes target_edge or max_edge and honours `region`) | decimate (engine manifold3d|quadric) | repair (engine builtin|meshfix) |
             fit_silhouette (views, handles)
 
 Exit: 0 PASS, 1 gate FAIL (keep-out moved / not reproducible), 2 usage or input error.
@@ -74,6 +78,7 @@ Exit: 0 PASS, 1 gate FAIL (keep-out moved / not reproducible), 2 usage or input 
 Example:
   3d mesh deform part.stl spec.yaml -o part_fit.stl --collage part_fit.png --verify-determinism
   3d mesh deform part.stl spec.yaml --report fit.json --json
+  3d mesh deform part.stl spec.yaml --labels part.labels.npz --out-labels part_fit.labels.npz
   3d mesh fit-silhouette part.stl fit.yaml -o part_fit.stl"""
 
 DEFORM_SUBCOMMANDS = ("deform", "fit-silhouette")

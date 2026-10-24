@@ -135,27 +135,63 @@ def refine_long_edges(
     Original vertices keep their index and coordinates; new vertices are appended in a fixed order.
     Returns (V, F, rounds). Midpoint splitting never opens the mesh, so watertight stays watertight.
     """
+    V2, F2, rounds, _, _ = refine_edges(V, F, max_edge, max_rounds)
+    return V2, F2, rounds
+
+
+def refine_edges(
+    V: Array,
+    F: IntArray,
+    max_edge: float,
+    max_rounds: int = 10,
+    zone: NDArray[np.bool_] | None = None,
+) -> tuple[Array, IntArray, int, IntArray, NDArray[np.bool_] | None]:
+    """`refine_long_edges` with an optional vertex `zone` and the parent of every output face.
+
+    With a zone only faces that have a vertex in it are tested; an edge that one of them splits is split
+    in every face that shares it (a neighbour outside the zone is split too, so the mesh stays closed),
+    and the new midpoint belongs to the zone when either end does. Without a zone every long edge splits.
+    Returns (V, F, rounds, parent, zone): parent[i] is the index into the INPUT faces of the face output
+    face i was cut from (the identity for faces never split); zone is the zone extended to the new vertices
+    (None without one).
+    """
     rounds = 0
+    parent = np.arange(len(F), dtype=np.int64)
+    zone_now = None if zone is None else np.asarray(zone, dtype=bool).copy()
     for _ in range(max_rounds):
         n = len(V)
         e = np.stack([F[:, [0, 1]], F[:, [1, 2]], F[:, [2, 0]]], axis=1)  # (m, 3, 2)
         length = np.linalg.norm(V[e[..., 0]] - V[e[..., 1]], axis=2)
         split = length > max_edge
+        if zone_now is not None:
+            split &= zone_now[F].any(axis=1)[:, None]
         if not split.any():
             break
         lo, hi = np.minimum(e[..., 0], e[..., 1]), np.maximum(e[..., 0], e[..., 1])
         key = lo * n + hi
         ukeys = np.unique(key[split])
+        split = np.isin(
+            key, ukeys
+        )  # every face edge that is split, also those of faces outside the zone
         mid_index = n + np.searchsorted(ukeys, key)  # only read where split is True
         mid = V[ukeys // n] * 0.5 + V[ukeys % n] * 0.5
         Vn = np.concatenate([V, mid])
+        if zone_now is not None:
+            zone_now = np.concatenate(
+                [zone_now, zone_now[ukeys // n] | zone_now[ukeys % n]]
+            )
         count = split.sum(axis=1)
-        parts = [F[count == 0]]
-        parts += _split_faces(Vn, F, mid_index, split, count)
+        keep = count == 0
+        parts = [F[keep]]
+        sources = [np.nonzero(keep)[0]]
+        for faces, rows in _split_faces(Vn, F, mid_index, split, count):
+            parts.append(faces)
+            sources.append(rows)
         F = np.concatenate(parts)
+        parent = parent[np.concatenate(sources)]
         V = Vn
         rounds += 1
-    return V, F, rounds
+    return V, F, rounds, parent, zone_now
 
 
 def _split_faces(
@@ -164,13 +200,14 @@ def _split_faces(
     mid_index: IntArray,
     split: NDArray[np.bool_],
     count: IntArray,
-) -> list[IntArray]:
-    out: list[IntArray] = []
+) -> list[tuple[IntArray, IntArray]]:
+    """-> [(new faces, row of F each came from)] for the 1-, 2- and 3-edge patterns, in a fixed order."""
+    out: list[tuple[IntArray, IntArray]] = []
     idx1 = np.nonzero(count == 1)[0]
     if len(idx1):
         s = np.argmax(split[idx1], axis=1)
         a, b, c, m = _roll(F, idx1, s, mid_index, 0)
-        out += [np.stack([a, m, c], 1), np.stack([m, b, c], 1)]
+        out += [(np.stack([a, m, c], 1), idx1), (np.stack([m, b, c], 1), idx1)]
     idx2 = np.nonzero(count == 2)[0]
     if len(idx2):
         u = np.argmin(split[idx2], axis=1)  # the unsplit edge goes last
@@ -187,16 +224,16 @@ def _split_faces(
         t_b = np.where(
             first[:, None], np.stack([a, m1, c], 1), np.stack([m0, m1, c], 1)
         )
-        out += [np.stack([m0, b, m1], 1), t_a, t_b]
+        out += [(np.stack([m0, b, m1], 1), idx2), (t_a, idx2), (t_b, idx2)]
     idx3 = np.nonzero(count == 3)[0]
     if len(idx3):
         a, b, c = F[idx3, 0], F[idx3, 1], F[idx3, 2]
         m0, m1, m2 = mid_index[idx3, 0], mid_index[idx3, 1], mid_index[idx3, 2]
         out += [
-            np.stack([a, m0, m2], 1),
-            np.stack([m0, b, m1], 1),
-            np.stack([m2, m1, c], 1),
-            np.stack([m0, m1, m2], 1),
+            (np.stack([a, m0, m2], 1), idx3),
+            (np.stack([m0, b, m1], 1), idx3),
+            (np.stack([m2, m1, c], 1), idx3),
+            (np.stack([m0, m1, m2], 1), idx3),
         ]
     return out
 
