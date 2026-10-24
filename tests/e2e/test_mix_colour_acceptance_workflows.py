@@ -31,6 +31,7 @@ def test_a_high_contrast_12_layer_cycle_with_lower_de_ranks_below_the_short_cycl
 
 
 def test_json_equals_the_text_table_for_every_candidate(tmp_path: Path) -> None:
+    """A user ranks 20 recipes once as a text table and once as JSON; both list the same rows."""
     text = run_cli(tmp_path, *ARGS)
     as_json = run_cli(tmp_path, *ARGS, "--json")
     assert text.returncode == 0 and as_json.returncode == 0
