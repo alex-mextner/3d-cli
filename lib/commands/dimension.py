@@ -22,8 +22,8 @@ from cli.pyrun import exec_tool
 from cli.registry import Command
 from errors import InputNotFound, InvalidArgument, UsageError
 
-USAGE = """3d dimension MODEL.(stl|3mf|obj|scad) -o OUT.png [--bed WxD] [--dim NAME:x,y,z:x,y,z]... [--part SEL=NAME[:ROLE]]... [-D NAME=VALUE]... [options]
-3d dimension --check IMAGE.png [--json]
+USAGE = """3d dimension MODEL.(stl|3mf|obj|scad) -o OUT.png [--bed WxD] [--dim NAME:x,y,z:x,y,z]... [--part SEL=NAME[:ROLE]]... [-D NAME=VALUE]... [--up Z|Y|X] [--overall auto|always|never] [--dims-from SPEC] [options]
+3d dimension --check IMAGE.png [--json] [--require-dims]
   Render the part from top / front / side / iso with dimension arrows and values in mm, or
   verify that such a render is legible. The render also writes OUT.png.dims.json (every
   dimension: label, value, view, text box in px; per-view panel and silhouette; image sha256).
@@ -55,7 +55,37 @@ Automatic dimensions: overall X / Y / Z of the bounding box in every view where 
 visible, and "span" (the longest distance between two points) when the part's oriented box is more
 than 3% longer than its axis-aligned one — a part lying slanted or tilted.
 
+Views and dimensions:
+  --up Z|Y|X           the model's vertical axis (default Z). A model drawn Y-up gets a TRUE top view
+                       (labels keep the model's own X/Y/Z letters); not with --bed.
+                       Example: 3d dimension mole.3mf --up Y -o mole.png
+  --overall auto|always|never
+                       overall X/Y/Z of the whole model. auto (default) draws them, except on an
+                       exploded assembly or a plate of parts that do not touch: there they are noise
+                       and every separate part gets its own footprint dims instead. never draws none.
+                       always on such a layout is refused (exit 2).
+                       Example: 3d dimension plate.3mf --overall never -o plate.png
+  --dims-from SPEC     a JSON/YAML list of {name, from: [x,y,z], to: [x,y,z]} measurements that MUST be
+                       drawn: the render fails (exit 2) naming any that fits no view, and the sidecar
+                       records them for `--check --require-dims`. The mating gap between two parts is
+                       declared {name, kind: gap, parts: [A, B], from, to}.
+                       Example: 3d dimension box.stl --dims-from dims.yaml -o box.png
+
+Occlusion: a --dim / --dims-from measurement is drawn in a view only if both endpoints are visible there
+(a ray toward the eye meets no surface more than 0.5 mm away); otherwise it is listed under `hidden_in_view`
+in the sidecar. One hidden in every view fails a --dims-from render. An explicit arrow is anchored on the part
+(drawn dashed where it runs over it); name it after the object it measures.
+
+No dimension across separate parts: on an exploded assembly or a plate (parts that do not touch) a
+--dim / --dims-from measurement whose two endpoints are on DIFFERENT parts (within 0.5 mm of a part's
+bounding box) is refused with exit 2, naming both parts, because the number would only measure the gap
+between them. Keep both endpoints on ONE part, or declare a `kind: gap` between two named parts. The
+automatic span of a slanted part is never drawn across separated parts either, and --check fails an
+image whose sidecar holds such a dimension (rule spans-separated-parts).
+
 Check (--check IMAGE): needs IMAGE.dims.json beside it and verifies
+  --require-dims       also FAIL when a measurement declared with --dims-from is missing from the
+                       image (or the image declares none). Example: 3d dimension --check box.png --require-dims
   - the sidecar belongs to this exact image (sha256, size) and lists >= 3 dimensions;
   - font >= 14 px at 1280 px width and the drawn text really is that tall;
   - every label box inside the image and its view panel, none overlapping another label,
@@ -69,7 +99,7 @@ Examples:
   3d dimension box.3mf -o box.png --part "lid=top cover"
   3d dimension --check ~/.cache/3d-cli/spoon_dims.png"""
 
-DEPS = "trimesh,numpy,pillow,scipy"
+DEPS = "trimesh,numpy,pillow,scipy,pyyaml"
 
 
 RENDER_FLAGS = (
@@ -80,6 +110,9 @@ RENDER_FLAGS = (
     "--label-px",
     "--part",
     "--define",
+    "--up",
+    "--overall",
+    "--dims-from",
 )
 FLAG_ALIASES = {"-D": "--define"}
 
@@ -111,6 +144,12 @@ def _validate(flag: str, value: str) -> None:
             "a positive finite number",
         ),
         "--define": (dimension_args.parse_define, "NAME=VALUE, e.g. standin=true"),
+        "--up": (dimension_args.parse_up, "Z, Y or X"),
+        "--overall": (dimension_args.parse_overall, "auto, always or never"),
+        "--dims-from": (
+            dimension_args.parse_dims_file,
+            "a JSON/YAML file listing {name, from, to} measurements",
+        ),
         "--part": (
             dimension_args.parse_part,
             "SELECTOR=NAME[:ROLE], e.g. '#2a62c9=PCB:stand_in'",
@@ -138,6 +177,7 @@ def run(argv: list[str]) -> int:
     check: str | None = None
     out: str | None = None
     as_json = False
+    require_dims = False
     render_flags: list[str] = []
     i = 0
     while i < len(argv):
@@ -150,6 +190,9 @@ def run(argv: list[str]) -> int:
             i += 2
         elif arg == "--json":
             as_json = True
+            i += 1
+        elif arg == "--require-dims":
+            require_dims = True
             i += 1
         elif (
             arg.startswith("-D") and len(arg) > 2
@@ -182,7 +225,7 @@ def run(argv: list[str]) -> int:
     if check is not None:
         if model or out or render_flags:
             raise UsageError(
-                "--check takes only IMAGE (and --json)",
+                "--check takes only IMAGE (and --json, --require-dims)",
                 command="dimension",
                 remediation=["Render and check in two commands."],
             )
@@ -191,7 +234,17 @@ def run(argv: list[str]) -> int:
         return exec_tool(
             "numpy,pillow",
             "dimension_check.py",
-            [check, *(["--json"] if as_json else [])],
+            [
+                check,
+                *(["--json"] if as_json else []),
+                *(["--require-dims"] if require_dims else []),
+            ],
+        )
+    if require_dims:
+        raise UsageError(
+            "--require-dims belongs to --check",
+            command="dimension",
+            remediation=["3d dimension --check IMAGE.png --require-dims"],
         )
     if as_json:
         raise UsageError(

@@ -41,7 +41,11 @@ from dimension_args import (
     parse_bed,
     parse_define,
     parse_dim,
+    parse_dims_file,
+    parse_dims_gaps,
+    parse_overall,
     parse_part,
+    parse_up,
     parse_width,
     positive,
 )
@@ -53,6 +57,16 @@ from dimension_check import (
 )
 from dimension_legend import draw_legend, layout_legend
 from dimension_model import RenderError, load_raw
+from dimension_options import (
+    PERM,
+    SpanError,
+    classify_dimension,
+    letters,
+    part_bounds,
+    reorient,
+    separated_groups,
+    visible_from,
+)
 from dimension_parts import Model, build_model
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
 
@@ -72,6 +86,7 @@ HEADER_PX = 64
 PANEL_MARGIN_X = 118
 PANEL_MARGIN_TOP = 52
 PANEL_MARGIN_BOTTOM = 84
+ON_PART_OFFSETS = (200, 250, 310, 380)
 OFFSETS = (26, 42, 58, 76, 96, 118, 140, 166)
 CLEAN_PLACEMENT = 300.0  # a score above this means a label collision remains
 GRID_CELL = 4
@@ -405,10 +420,14 @@ def place_dimension(
         0.5
     ]
     beside = abs(normal[0]) * half_w + abs(normal[1]) * half_h + 6
-    # A custom/span arrow must not cut across the part; a bbox edge sits on the silhouette
-    # anyway, so only its offset line is judged.
-    line_weight = 300.0 if kind == "bbox" else 3000.0
-    for base_off in OFFSETS:
+    # The auto span of a slanted part must not cut across it; a bbox edge sits on the silhouette anyway,
+    # so only its offset line is judged. An explicit measurement (--dim / --dims-from, `custom` or `gap`)
+    # is anchored ON the part (a feature seen on the surface or on a cut face), so its arrow may run over
+    # the part: only its label must find clean paper, and the arrow is drawn dashed where it crosses.
+    on_part = kind in ("custom", "gap") and name != "span"
+    line_weight = 300.0 if kind == "bbox" else (0.0 if on_part else 3000.0)
+    # An arrow over the part may need to leave it entirely to give its label clean paper.
+    for base_off in OFFSETS + (ON_PART_OFFSETS if on_part else ()):
         off = base_off * panel.ui
         for sign in (sign0, -sign0):
             a2, b2 = a + normal * sign * off, b + normal * sign * off
@@ -467,11 +486,16 @@ def place_dimension(
             fill=color,
             width=1,
         )
-    draw.line(
-        [tuple(a2 + along * arrow_px), tuple(b2 - along * arrow_px)],
-        fill=color,
-        width=2,
-    )
+    inside = on_part and _line_silhouette(panel, a2, b2) > 0.3
+    start, end = a2 + along * arrow_px, b2 - along * arrow_px
+    if inside:  # dashed: the arrow runs over the part, it measures a feature on / in it
+        run = float(np.linalg.norm(end - start))
+        for k in np.arange(0.0, run, 12.0):
+            seg_a = start + along * k
+            seg_b = start + along * min(k + 7.0, run)
+            draw.line([tuple(seg_a), tuple(seg_b)], fill=color, width=2)
+    else:
+        draw.line([tuple(start), tuple(end)], fill=color, width=2)
     _arrowhead(draw, a2, -along, color, arrow_px)
     _arrowhead(draw, b2, along, color, arrow_px)
     draw.rectangle(box, fill=(255, 255, 255), outline=color, width=1)
@@ -603,6 +627,19 @@ def _draw_bed(
     }
 
 
+def _span_fields(
+    item: Placed, info: dict[str, dict[str, object]], separated: bool
+) -> dict[str, object]:
+    """The sidecar fields `--check` uses to refuse a dimension across separate parts."""
+    if item.kind == "bbox":
+        return {
+            "spans_separated": separated
+        }  # an overall size of a layout whose parts are apart
+    if item.kind == "part":
+        return {"spans_separated": False}
+    return info.get(item.label, {"spans_separated": False})
+
+
 def render(
     model_path: str,
     out: str,
@@ -614,11 +651,20 @@ def render(
     label_px: float | None = None,
     defines: list[str] | None = None,
     parts: list[str] | None = None,
+    up: str = "Z",
+    overall: str = "auto",
+    required: list[str] | None = None,
+    gaps: dict[str, tuple[str, str]] | None = None,
 ) -> dict[str, Any]:
     """Render `model` to `out` (+ sidecar); returns the sidecar dict."""
     title = name or os.path.splitext(os.path.basename(model_path))[0]
-    model = build_model(load_raw(model_path, defines), title, parts or [])
+    if up != "Z" and bed is not None:
+        raise RenderError(
+            "3d dimension: --bed is in bed coordinates (Z up); drop --up or --bed"
+        )
+    model = reorient(build_model(load_raw(model_path, defines), title, parts or []), up)
     mesh = model.mesh
+    axis_letters = letters(up)
     scale = width / REFERENCE_WIDTH
     px_font = (label_px if label_px is not None else 20.0) * scale
     panel_w, panel_h = width // 2, int(round(560 * scale))
@@ -631,28 +677,58 @@ def render(
     font = _font(px_font)
     head_font, view_font = _font(26 * scale, bold=True), _font(18 * scale, bold=True)
     ext = mesh.extents
+    by_letter = {letter: float(ext[i]) for i, letter in enumerate(axis_letters)}
+    groups = separated_groups(model)
+    if overall == "always" and groups:
+        raise RenderError(
+            f"3d dimension: --overall always would draw one size across {len(groups)} separate parts "
+            "of an exploded / multi-part layout (a number that measures the gaps between them); "
+            "use --overall auto for each part's own size"
+        )
+    draw_overall = overall == "always" or (overall == "auto" and not groups)
+    per_part_dims = overall == "auto" and bool(groups)
     draw.text((16, 10 * scale), title, font=head_font, fill=(20, 20, 20))
-    draw.text(
-        (16, 40 * scale),
-        f"overall X {ext[0]:.1f} x Y {ext[1]:.1f} x Z {ext[2]:.1f} mm",
-        font=size_font,
-        fill=(60, 60, 60),
+    overall_text = (
+        f"overall X {by_letter['X']:.1f} x Y {by_letter['Y']:.1f} x Z {by_letter['Z']:.1f} mm"
+        if draw_overall or not groups
+        else f"{len(groups)} separate parts: sizes per part"
     )
+    draw.text((16, 40 * scale), overall_text, font=size_font, fill=(60, 60, 60))
     custom = [
-        (cname, np.array(c1), np.array(c2))
+        (cname, np.array(c1)[list(PERM[up])], np.array(c2)[list(PERM[up])])
         for cname, c1, c2 in (parse_dim(d) for d in (dims or []))
     ]
     # A slanted part's own length (its oriented box) beats the longest side of the axis-aligned box;
     # an axis-aligned block, strap or pyramid has no such length, so it gets no space-diagonal "span".
-    if is_slanted(mesh):
+    # Never across separated parts: the farthest pair of an exploded layout is a gap, not a length.
+    if not groups and is_slanted(mesh):
         custom.insert(0, ("span", *longest_span(mesh)))
+    bounds = part_bounds(model)
+    gap_parts = gaps or {}
+    dim_info: dict[str, dict[str, object]] = {}
+    for cname, c1, c2 in custom:
+        if cname == "span":
+            dim_info[cname] = {"parts": [], "spans_separated": False}
+            continue
+        try:
+            dim_info[cname] = classify_dimension(
+                model, bounds, cname, c1, c2, gap_parts.get(cname), bool(groups)
+            )
+        except SpanError as exc:
+            raise RenderError(f"3d dimension: {exc}") from exc
     sidecar: dict[str, Any] = {
         "part": title,
         "source": os.path.abspath(model_path),
-        "bbox_mm": [float(v) for v in ext],
+        "bbox_mm": [float(ext[axis_letters.index(c)]) for c in "XYZ"],
+        "up": up,
+        "overall": "drawn"
+        if draw_overall
+        else ("per-part" if per_part_dims else "none"),
         "views": {},
     }
     placed: list[Placed] = []
+    all_tris = np.asarray(mesh.triangles, dtype=float)
+    hidden: dict[str, list[str]] = {}
     for index, view in enumerate(VIEWS):
         col, row = index % 2, index // 2
         rect = (
@@ -683,24 +759,53 @@ def render(
         panel.labels.append(title_box)
         if bed is not None and view == "top":
             sidecar["bed"] = _draw_bed(draw, panel, bed, view_font)
-        for axis, p, q in bbox_edges(np.asarray(mesh.bounds), panel):
-            letter = "XYZ"[axis]
-            item = place_dimension(
-                draw,
-                panel,
-                p,
-                q,
-                letter,
-                float(ext[axis]),
-                "bbox",
-                AXIS_COLORS[letter],
-                font,
-                px_font,
-                (AXIS_SIDE[axis][0], -AXIS_SIDE[axis][1]),
-            )
-            if item:
-                placed.append(item)
+        if draw_overall:
+            for axis, p, q in bbox_edges(np.asarray(mesh.bounds), panel):
+                letter = axis_letters[axis]
+                item = place_dimension(
+                    draw,
+                    panel,
+                    p,
+                    q,
+                    letter,
+                    float(ext[axis]),
+                    "bbox",
+                    AXIS_COLORS[letter],
+                    font,
+                    px_font,
+                    (AXIS_SIDE[axis][0], -AXIS_SIDE[axis][1]),
+                )
+                if item:
+                    placed.append(item)
+        elif per_part_dims:
+            for group in groups:
+                span = group.bounds[1] - group.bounds[0]
+                for axis, p, q in bbox_edges(group.bounds, panel):
+                    letter = axis_letters[axis]
+                    item = place_dimension(
+                        draw,
+                        panel,
+                        p,
+                        q,
+                        f"{letter} {group.name[:16]}",
+                        float(span[axis]),
+                        "part",
+                        AXIS_COLORS[letter],
+                        font,
+                        px_font,
+                        (AXIS_SIDE[axis][0], -AXIS_SIDE[axis][1]),
+                    )
+                    if item:
+                        placed.append(item)
         for cname, c1, c2 in custom:
+            # Only geometry the eye sees can be measured in this view: an endpoint behind a surface
+            # (a PCB inside its case) would leave the arrow floating in the air next to the part.
+            if cname != "span" and not (
+                visible_from(all_tris, c1, panel.cam)
+                and visible_from(all_tris, c2, panel.cam)
+            ):
+                hidden.setdefault(cname, []).append(view)
+                continue
             item = place_dimension(
                 draw,
                 panel,
@@ -708,7 +813,7 @@ def render(
                 c2,
                 cname,
                 float(np.linalg.norm(c2 - c1)),
-                "custom",
+                "gap" if cname in gap_parts else "custom",
                 CUSTOM_COLOR,
                 font,
                 px_font,
@@ -719,6 +824,24 @@ def render(
             "rect": list(rect),
             "silhouette_grid": panel.silhouette_grid(),
         }
+    required_names = [parse_dim(d)[0] for d in (required or [])]
+    drawn_names = {p.label for p in placed}
+    missing = [n for n in required_names if n not in drawn_names]
+    if missing:
+        inside = [n for n in missing if len(hidden.get(n, [])) == len(VIEWS)]
+        why = (
+            f"; {', '.join(inside)} lies inside the model, hidden in every view "
+            "(measure it in a section, or choose endpoints on visible surfaces)"
+            if inside
+            else ""
+        )
+        raise RenderError(
+            f"3d dimension: --dims-from: not drawn in any view: {', '.join(missing)} "
+            f"(an arrow is shown only where it keeps >= 90% of its true length, finds a clean spot "
+            f"and both endpoints are visible){why}"
+        )
+    if required_names:
+        sidecar["required_dims"] = required_names
     legend = (
         draw_legend(canvas, legend_rows, header + 2 * panel_h, size_font, scale)
         if legend_rows
@@ -731,7 +854,11 @@ def render(
         "height": height,
         "sha256": sha256_file(out),
     }
-    sidecar["dimensions"] = [p.as_dict() for p in placed]
+    sidecar["separated_parts"] = bool(groups)
+    sidecar["hidden_in_view"] = hidden
+    sidecar["dimensions"] = [
+        {**p.as_dict(), **_span_fields(p, dim_info, bool(groups))} for p in placed
+    ]
     sidecar["parts"] = [p.as_dict() for p in model.parts]
     if legend is not None:
         sidecar["legend"] = legend
@@ -744,6 +871,12 @@ def render(
 def _checked_dim_spec(raw: str) -> str:
     """Validate a --dim spec but keep the raw string: `render` parses it again."""
     parse_dim(raw)
+    return raw
+
+
+def _checked_dims_file(raw: str) -> str:
+    """Validate a --dims-from file but keep its path: `main` reads the dims and the gaps from it."""
+    parse_dims_file(raw)
     return raw
 
 
@@ -785,13 +918,22 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--part", action="append", default=[], type=_arg_type(_checked_part_spec)
     )
+    ap.add_argument("--up", type=_arg_type(parse_up), default="Z")
+    ap.add_argument("--overall", type=_arg_type(parse_overall), default="auto")
+    ap.add_argument("--dims-from", type=_arg_type(_checked_dims_file), default=None)
     args = ap.parse_args(argv)
+    required = parse_dims_file(args.dims_from) if args.dims_from else []
+    gaps = parse_dims_gaps(args.dims_from) if args.dims_from else {}
     try:
         sidecar = render(
             args.model,
             args.out,
             name=args.name,
-            dims=args.dim,
+            dims=[*args.dim, *required],
+            up=args.up,
+            overall=args.overall,
+            required=required,
+            gaps=gaps,
             bed=args.bed,
             width=args.width,
             label_px=args.label_px,

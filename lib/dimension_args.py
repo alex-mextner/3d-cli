@@ -9,6 +9,7 @@ Each parser raises ValueError with a message naming what was expected.
 
 from __future__ import annotations
 
+import json
 import math
 import re
 from typing import NamedTuple
@@ -124,3 +125,127 @@ def parse_part(spec: str) -> PartSpec:
     if new_name is None and not role:
         raise ValueError(f"--part {spec!r}: give a NAME, a :ROLE or both")
     return PartSpec(selector, new_name, role or None)
+
+
+UP_AXES = ("Z", "Y", "X")
+OVERALL_MODES = ("auto", "always", "never")
+
+
+def parse_up(raw: str) -> str:
+    """`Z`, `Y` or `X` (any case): the model's vertical axis."""
+    value = raw.strip().upper()
+    if value not in UP_AXES:
+        raise ValueError(f"--up {raw!r}: expected one of {', '.join(UP_AXES)}")
+    return value
+
+
+def parse_overall(raw: str) -> str:
+    value = raw.strip().lower()
+    if value not in OVERALL_MODES:
+        raise ValueError(
+            f"--overall {raw!r}: expected one of {', '.join(OVERALL_MODES)}"
+        )
+    return value
+
+
+def _point_text(raw: object, where: str) -> str:
+    if not isinstance(raw, (list, tuple)) or len(raw) != 3:
+        raise ValueError(f"{where}: a point is three numbers [x, y, z]")
+    return ",".join(str(finite(str(v), where)) for v in raw)
+
+
+def _load_dims_data(path: str) -> list[object]:
+    """The raw list of a `--dims-from` file (JSON, or YAML when pyyaml is there)."""
+    try:
+        with open(path, encoding="utf-8") as handle:
+            text = handle.read()
+    except OSError as exc:
+        raise ValueError(f"--dims-from {path!r}: cannot read it: {exc}") from exc
+    try:
+        data = json.loads(text)
+    except ValueError:
+        try:
+            import yaml
+
+            data = yaml.safe_load(text)
+        except Exception as exc:  # noqa: BLE001 - yaml raises its own error family or is missing
+            raise ValueError(
+                f"--dims-from {path!r}: not valid JSON or YAML: {exc}"
+            ) from exc
+    if isinstance(data, dict):
+        data = data.get("dims")
+    if not isinstance(data, list) or not data:
+        raise ValueError(
+            f"--dims-from {path!r}: expected a non-empty list of measurements"
+        )
+    return data
+
+
+def parse_dims_file(path: str) -> list[str]:
+    """Read a `--dims-from` spec (JSON, or YAML when pyyaml is there) as `--dim` strings.
+
+    Shape: a list, or {"dims": [...]}, of {"name": ..., "from": [x,y,z], "to": [x,y,z]} and, for the
+    mating gap between two parts, {"name": ..., "kind": "gap", "parts": [A, B], "from": ..., "to": ...}.
+    Names must be unique (the check matches the image's labels by name).
+    """
+    data = _load_dims_data(path)
+    out: list[str] = []
+    for name, p1, p2, _gap in _dims_entries(data, path):
+        out.append(f"{name}:{p1}:{p2}")
+    return out
+
+
+def parse_dims_gaps(path: str) -> dict[str, tuple[str, str]]:
+    """The `kind: gap` entries of a `--dims-from` spec: measurement name -> its two named parts."""
+    return {
+        name: gap
+        for name, _p1, _p2, gap in _dims_entries(_load_dims_data(path), path)
+        if gap is not None
+    }
+
+
+def _dims_entries(
+    data: list[object], path: str
+) -> list[tuple[str, str, str, tuple[str, str] | None]]:
+    """Validated (name, from-text, to-text, gap parts or None) of every entry.
+
+    `kind` is `dim` (default: both ends on ONE part) or `gap` (the declared mating gap between two
+    NAMED parts: `parts: [A, B]`). Anything else is refused.
+    """
+    out: list[tuple[str, str, str, tuple[str, str] | None]] = []
+    seen: set[str] = set()
+    for i, item in enumerate(data):
+        where = f"--dims-from {path!r} entry {i + 1}"
+        if not isinstance(item, dict) or not isinstance(item.get("name"), str):
+            raise ValueError(f"{where}: needs a string `name`, `from` and `to`")
+        name = item["name"].strip()
+        if not name or ":" in name or name in seen:
+            raise ValueError(
+                f"{where}: name {name!r} is empty, contains ':' or repeats"
+            )
+        seen.add(name)
+        kind = str(item.get("kind", "dim")).strip().lower()
+        gap: tuple[str, str] | None = None
+        if kind == "gap":
+            named = item.get("parts")
+            if (
+                not isinstance(named, (list, tuple))
+                or len(named) != 2
+                or not all(isinstance(n, str) and n.strip() for n in named)
+                or named[0].strip() == named[1].strip()
+            ):
+                raise ValueError(
+                    f"{where}: a `kind: gap` needs `parts: [A, B]`, two different part names"
+                )
+            gap = (named[0].strip(), named[1].strip())
+        elif kind != "dim":
+            raise ValueError(f"{where}: kind {kind!r} is not `dim` or `gap`")
+        out.append(
+            (
+                name,
+                _point_text(item.get("from"), where),
+                _point_text(item.get("to"), where),
+                gap,
+            )
+        )
+    return out

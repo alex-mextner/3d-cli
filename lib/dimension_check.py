@@ -353,6 +353,7 @@ def check_image(
     *,
     min_font_px: float = MIN_FONT_PX,
     min_dimensions: int = MIN_DIMENSIONS,
+    require_dims: bool = False,
 ) -> list[Offender]:
     """Return every legibility offender of `image` (empty list = legible)."""
     side = sidecar or sidecar_path(image)
@@ -411,7 +412,81 @@ def check_image(
         for second in labels[i + 1 :]
         if rects_overlap(first.box, second.box)
     )
+    offenders.extend(_spanning_separated(side))
+    if require_dims:
+        offenders.extend(_missing_required(side, labels))
     return offenders
+
+
+def _spanning_separated(side: str) -> list[Offender]:
+    """Offenders for every dimension that measures across separate parts of an exploded / multi-part layout.
+
+    `3d dimension` refuses to draw one and records `spans_separated` on each dimension; a sidecar that
+    says so (a render by an old tool cannot, a hand-edited one is out of luck) fails the gate. The one
+    allowed form is a mating gap declared `kind: gap` between two named parts.
+    """
+    try:
+        with open(side, encoding="utf-8") as handle:
+            raw = json.load(handle)["dimensions"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return []
+    seen: set[str] = set()
+    out: list[Offender] = []
+    for entry in raw:
+        if not isinstance(entry, dict) or entry.get("spans_separated") is not True:
+            continue
+        if entry.get("kind") == "gap":
+            continue
+        label = str(entry.get("label"))
+        if label in seen:
+            continue
+        seen.add(label)
+        parts = entry.get("parts")
+        named = (
+            f" ({' / '.join(map(str, parts))})"
+            if isinstance(parts, list) and parts
+            else ""
+        )
+        out.append(
+            Offender(
+                label,
+                "spans-separated-parts",
+                f"measures across separate parts of an exploded / multi-part layout{named}; "
+                "keep it on one part or declare a `kind: gap` between two named parts",
+            )
+        )
+    return out
+
+
+def _missing_required(side: str, labels: list[_Label]) -> list[Offender]:
+    """Offenders for every measurement declared with `--dims-from` that is not drawn in the image.
+
+    A sidecar without a `required_dims` list was not rendered with `--dims-from`: asking for the
+    requirement then is itself the failure (nothing was declared, so nothing can be vouched for).
+    """
+    try:
+        with open(side, encoding="utf-8") as handle:
+            required = json.load(handle).get("required_dims")
+    except (OSError, ValueError, AttributeError):
+        required = None
+    if not isinstance(required, list) or not all(isinstance(n, str) for n in required):
+        return [
+            Offender(
+                "(image)",
+                "no-required-dims",
+                "the sidecar declares no required measurements — render with `--dims-from SPEC`",
+            )
+        ]
+    drawn = {label.label for label in labels}
+    return [
+        Offender(
+            name,
+            "missing-required-dim",
+            "declared with --dims-from but not drawn in any view",
+        )
+        for name in required
+        if name not in drawn
+    ]
 
 
 def format_report(image: str, offenders: list[Offender]) -> str:
@@ -427,8 +502,9 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="dimension_check.py")
     ap.add_argument("image")
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--require-dims", action="store_true")
     args = ap.parse_args(argv)
-    offenders = check_image(args.image)
+    offenders = check_image(args.image, require_dims=args.require_dims)
     if args.json:
         print(
             json.dumps(
