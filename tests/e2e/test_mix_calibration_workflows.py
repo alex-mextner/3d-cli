@@ -183,6 +183,6 @@ def test_print_preflight_help_documents_mix_calibration(tmp_path: Path) -> None:
     out = run_cli(tmp_path, "print-preflight", "--help").stdout
     assert (
         "mix_calibration" in out
-        and "--accept mix_calibration" in out
+        and "--accept preset_match|mix_calibration" in out
         and "--reason TEXT" in out
     )
