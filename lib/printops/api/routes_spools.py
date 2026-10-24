@@ -6,6 +6,7 @@
   GET  /v1/spools/{id}?ledger=N                                            read   spool + ledger + tare
   GET  /v1/spools/{id}/ledger                                              read   all ledger rows
   POST /v1/spools/{id}/move            {location}                         write
+  POST /v1/spools/{id}/slicer-preset   {preset (null clears; blank refused), scope? spool|filament}  write  #294
   POST /v1/spools/{id}/use             {grams, source, confidence_g?, job_id?, note?}  write  Spoolman /use + ledger
   POST /v1/spools/{id}/measure         {gross_g, tare_g?, tare_source?, scale_sigma_g?, note?}  write  /measure + anchor
   POST /v1/spools/{id}/empty           {note?}                            write  anchor 0, archive
@@ -173,6 +174,18 @@ def move(conn: Db, sm: Sm, who: Writer, spool_id: int, body: JsonBody) -> Any:
         if not loc:
             raise spools.SpoolError(422, "location is required")
         return spools.move(_ctx(conn, sm, who), spool_id, loc)
+
+    return _call(go)
+
+
+@router.post("/v1/spools/{spool_id}/slicer-preset", response_model=None)
+def slicer_preset(conn: Db, sm: Sm, who: Writer, spool_id: int, body: JsonBody) -> Any:
+    def go() -> Any:
+        if "preset" not in body:
+            raise spools.SpoolError(422, 'preset is required ("" or null clears it)')
+        return spools.set_slicer_preset(
+            _ctx(conn, sm, who), spool_id, _str(body, "preset"), scope=_str(body, "scope") or "spool"
+        )
 
     return _call(go)
 

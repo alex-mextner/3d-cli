@@ -48,6 +48,10 @@ Actions:
       `receive` command per spool, and a table of the batch. Writes nothing.
   move ID LOCATION
       store or move a spool (a loaded spool is unloaded on the way)
+  preset ID (NAME | --clear) [--filament]
+      the slicer filament preset (user preset name) the spool prints with, kept in a Spoolman
+      extra field; `3d calibrate gen --printer P` uses it as the default --filament-preset.
+      --filament stores it on the spool's Spoolman filament (every spool of it) instead
   load ID PRINTER/SLOT [--replace-to LOCATION] [--no-printer-write] [--force-official]
       bind a spool to a printer head (u1/T3) or AMS slot (p1s/ams1/2); refuses heads the
       fleet marks unusable or with an open fault, and occupied slots (unless --replace-to says
@@ -644,6 +648,20 @@ def _move(argv: list[str], sub: str) -> int:
     )
 
 
+def _preset(argv: list[str], sub: str) -> int:
+    p = parse(argv, sub, values=COMMON_VALUES, flags=COMMON_FLAGS | {"--clear", "--filament"}, n_pos=(1, 2))
+    clear, has_name = "--clear" in p.flags, len(p.pos) == 2
+    if clear and has_name:
+        raise UsageError(f"`{sub}` takes a preset NAME or --clear, not both", command=f"printops {sub}")
+    if not clear and not has_name:
+        raise UsageError(f"`{sub}` wants ID NAME, or ID --clear", command=f"printops {sub}")
+    body = {"preset": None if clear else p.pos[1], "scope": "filament" if "--filament" in p.flags else "spool"}
+    with api_errors(sub):
+        res = client(p, sub).post(f"/v1/spools/{_id(p.pos[0], sub)}/slicer-preset", body)
+    _out(p, res, f"spool {res['id']} slicer filament preset: {res.get('slicer_filament_preset') or '(none)'}")
+    return 0
+
+
 LOAD_TIMEOUT_S = 120.0  # the answer waits for the printer writes (head, active spool: up to nine printer requests)
 
 
@@ -858,6 +876,7 @@ ACTIONS = {
     "receive": _receive,
     "scan": _scan,
     "move": _move,
+    "preset": _preset,
     "load": _load,
     "unload": _unload,
     "use": _use,
@@ -868,7 +887,7 @@ ACTIONS = {
 
 SUB = Sub(
     name="spool",
-    summary="spool lifecycle: receive/scan/ls/show/move/load/unload/use/measure/empty/import-owned",
+    summary="spool lifecycle: receive/scan/ls/show/move/preset/load/unload/use/measure/empty/import-owned",
     usage=USAGE,
     run=run,
 )

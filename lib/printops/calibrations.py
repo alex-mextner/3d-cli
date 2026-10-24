@@ -379,21 +379,60 @@ class Bound:
     note: str | None = None
 
 
-def bound_filament(sm: Spoolman | None, printer: str, head: Head) -> Bound:
-    if sm is None:
-        return Bound(None, "Spoolman is not configured: the loaded spool is unknown")
+def _bound_spool(sm: Spoolman, printer: str, head: Head) -> JSON:
+    """The one spool bound to `printer`'s `head`; a CalibrationError says why there is none."""
     from printops.spools import SlotRef, SpoolError, spool_in_slot
 
     try:
         found = spool_in_slot(sm, SlotRef(printer, head.label))
     except SpoolError as e:
-        return Bound(None, f"Spoolman unreachable: {e.message}")
+        raise CalibrationError(502, f"Spoolman unreachable: {e.message}") from e
     if not found:
-        return Bound(None, f"no spool bound to {printer}/{head.label} (`3d printops spool load`)")
+        raise CalibrationError(404, f"no spool bound to {printer}/{head.label} (`3d printops spool load`)")
     if len(found) > 1:
         ids = ", ".join(f"#{s['id']}" for s in found)
-        return Bound(None, f"{len(found)} spools bound to {printer}/{head.label} ({ids}): fix the binding")
-    return Bound(Filament.from_spool(found[0]))
+        raise CalibrationError(409, f"{len(found)} spools bound to {printer}/{head.label} ({ids}): fix the binding")
+    return found[0]
+
+
+def bound_filament(sm: Spoolman | None, printer: str, head: Head) -> Bound:
+    if sm is None:
+        return Bound(None, "Spoolman is not configured: the loaded spool is unknown")
+    try:
+        return Bound(Filament.from_spool(_bound_spool(sm, printer, head)))
+    except CalibrationError as e:
+        return Bound(None, e.message)
+
+
+def slicer_preset(ctx: Ctx, printer: str, *, head: str | None = None, spool_id: int | None = None) -> dict[str, Any]:
+    """The slicer filament preset of the spool bound to `printer`'s head, or of spool `spool_id`
+    (the spool's own extra field, else its filament's; #294). `preset` is None when the spool
+    carries none, `scope` says where it was found ("spool" | "filament"), `bound` whether the spool
+    came from the head's binding; a head with no (or several) bound spools is an error, never a guess."""
+    from printops.spools import slicer_preset_of
+
+    p = fleet_printer(ctx.fleet, printer)
+    if ctx.spoolman is None:
+        raise CalibrationError(503, "Spoolman is not configured (set SPOOLMAN_URL)")
+    h: Head | None = fleet_head(p, head) if head is not None else None
+    if spool_id is not None:
+        spool = _spool(ctx.spoolman, spool_id)
+    else:
+        if h is None and len(p.heads) != 1:
+            raise CalibrationError(
+                422, f"{p.name} has {len(p.heads)} heads ({', '.join(x.label for x in p.heads)}): pass head or spool"
+            )
+        h = h or p.heads[0]
+        spool = _bound_spool(ctx.spoolman, p.name, h)
+    named = slicer_preset_of(spool)
+    return {
+        "printer": p.name,
+        "head": h.label if h else None,
+        "spool_id": spool["id"],
+        "preset": named[0] if named else None,
+        "scope": named[1] if named else None,
+        "bound": spool_id is None,
+    }
 
 
 # -- runs and results -------------------------------------------------------------------------

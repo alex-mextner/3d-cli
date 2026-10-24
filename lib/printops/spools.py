@@ -19,7 +19,7 @@ INVARIANTS:
     a Spoolman failure rolls the DB rows and events back. (A DB failure after Spoolman accepted
     is the one non-atomic window; the event log then simply lacks the change.)
   - Events: spool.received, spool.moved, slot.loaded, slot.unloaded (subject `slot:<p>/<head>`,
-    payload printer/head/spool_id), spool.used (ledger), spool.measured, spool.empty; after a
+    payload printer/head/spool_id), spool.used (ledger), spool.measured, spool.empty, spool.preset_set; after a
     load or unload, slot.printer_written / slot.printer_write_failed (printops.head_sync, #400).
   - `load` writes the printer head (and Moonraker's active spool) only AFTER the binding is
     committed: the printer write is slow and may fail, and neither may hold the DB write lock or
@@ -29,6 +29,7 @@ INVARIANTS:
 from __future__ import annotations
 
 import math
+import re
 import sqlite3
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
@@ -115,6 +116,11 @@ def slot_of(spool: Mapping[str, Any]) -> str:
     return str(extra_value(spool, "printops_slot") or "")
 
 
+# The Spoolman extra field (on the spool and on its filament) naming the slicer filament preset.
+PRESET_FIELD = "slicer_filament_preset"
+_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+
+
 def get_spool(sm: Spoolman, spool_id: int) -> JSON:
     try:
         return sm.get("spool", spool_id)
@@ -142,6 +148,7 @@ def view(conn: sqlite3.Connection, spool: Mapping[str, Any]) -> dict[str, Any]:
         conn, int(spool["id"]), fallback_g=_num(spool.get("remaining_weight"))
     )
     tare = tares.resolve(conn, spool)
+    named = slicer_preset_of(spool)
     return {
         "id": spool["id"],
         "vendor": vendor,
@@ -156,6 +163,7 @@ def view(conn: sqlite3.Connection, spool: Mapping[str, Any]) -> dict[str, Any]:
         "price": spool.get("price"),
         "opened_at": extra_value(spool, "opened_at"),
         "external_key": extra_value(spool, "external_key"),
+        "slicer_filament_preset": named[0] if named else None,
         "archived": bool(spool.get("archived")),
         "initial_weight_g": spool.get("initial_weight"),
         "spoolman_remaining_g": spool.get("remaining_weight"),
@@ -165,6 +173,16 @@ def view(conn: sqlite3.Connection, spool: Mapping[str, Any]) -> dict[str, Any]:
         "tare_problem": tare.reason or None,
         "comment": spool.get("comment"),
     }
+
+
+def slicer_preset_of(spool: Mapping[str, Any]) -> tuple[str, str] | None:
+    """(preset, "spool" | "filament"): the spool's own slicer filament preset, else its filament's
+    (#294); None when neither names one."""
+    for where, item in (("spool", spool), ("filament", spool.get("filament") or {})):
+        v = extra_value(item, PRESET_FIELD)
+        if isinstance(v, str) and v.strip():
+            return v.strip(), where
+    return None
 
 
 def _num(v: Any) -> float | None:
@@ -604,6 +622,32 @@ def move(ctx: Ctx, spool_id: int, location: str) -> dict[str, Any]:
             ctx.actor,
         )
         sp = _place(ctx, spool_id, loc, {"printops_slot": ""} if was else {})
+    return view(ctx.conn, sp)
+
+
+def set_slicer_preset(ctx: Ctx, spool_id: int, preset: str | None, *, scope: str = "spool") -> dict[str, Any]:
+    """Record the slicer filament preset `preset` (None clears it) on the spool, or on its Spoolman
+    filament (`scope="filament"`: every spool of it) — `3d calibrate gen` reads it (#294). A blank
+    name is refused: clearing is `None`, never an empty string typed by accident."""
+    if scope not in ("spool", "filament"):
+        raise SpoolError(422, f"scope must be spool or filament, got {scope!r}")
+    name = None if preset is None else preset.strip()
+    if name == "" or (name is not None and _CONTROL.search(name)):
+        raise SpoolError(422, "a preset name must be non-blank and free of control characters (null clears it)")
+    value = encode_extra(name or "")
+    with db.transaction(ctx.conn):
+        sp = _live_spool(ctx, spool_id)
+        ev.emit(ctx.conn, "spool.preset_set", f"spool:{spool_id}", {"preset": name, "scope": scope}, ctx.actor)
+        try:
+            if scope == "spool":
+                sp = ctx.spoolman.update("spool", spool_id, {"extra": {PRESET_FIELD: value}})
+            else:
+                fid = (sp.get("filament") or {}).get("id")
+                if fid is None:
+                    raise SpoolError(502, f"spool #{spool_id} has no filament in Spoolman")
+                sp = {**sp, "filament": ctx.spoolman.update("filament", int(fid), {"extra": {PRESET_FIELD: value}})}
+        except SpoolmanError as e:
+            raise SpoolError(502, e.message) from e
     return view(ctx.conn, sp)
 
 

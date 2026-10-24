@@ -193,6 +193,10 @@ EXTRA_FIELDS: tuple[ExtraField, ...] = (
     # #160: key of the source record a spool was imported from ("babushkin-dom:owned:белый"),
     # so re-running an import changes nothing.
     ExtraField("spool", "external_key", "PrintOps import key", "text"),
+    # #294: the slicer filament preset (user preset name) this spool / filament prints with;
+    # `3d calibrate gen` takes it as the default --filament-preset. The spool's wins.
+    ExtraField("spool", "slicer_filament_preset", "Slicer filament preset", "text"),  # spools.PRESET_FIELD
+    ExtraField("filament", "slicer_filament_preset", "Slicer filament preset", "text"),
 )
 
 # PrintOps fields sort after any fields the user added by hand in the Spoolman UI.
