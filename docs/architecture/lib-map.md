@@ -53,6 +53,8 @@ rendering, slicing support, and verification:
 - `gcode_resume.py`
 - `gcode_labels.py`
 - `gcode_overhangs.py`
+- `gcode_mix_gate.py`
+- `gcode_scan.py`
 - `gcode_thumbnails.py`
 - `export_formats.py`
 - `import_formats.py`
@@ -236,6 +238,8 @@ Every current root Python module is listed here so future additions are intentio
 - `gcode_resume.py` — resume a stopped multi-head Orca print above a layer (layer walk, machine state at a byte, resume header from the device's `resume:` profile, per-head retraction tracking, `--no-tower` off-bed purges); stdlib-only; backs `3d gcode-resume`. Its per-line parser (`advance`) and the streamed `state_at` (machine state at a printer's byte cursor or a layer) also give PrintOps incidents their G-code context.
 - `gcode_labels.py` — the slicer's own labels in a G-code: object labels in both dialects (Klipper `EXCLUDE_OBJECT_*`, Bambu Studio `; start printing object` / `M624`…`M625` blocks named by their `; printing object` comment, `M486`, PrusaSlicer comments), layer-change markers, feature tags and line widths; stdlib-only; the one parser behind head-sequence, overhangs, visible-faces and the print-area plate section.
 - `gcode_overhangs.py` — extrusion printed on nothing per object and layer of a sliced G-code (numpy/scipy raster of each layer's carrier, sparse reach/bridge/step-out tests on the pixels that stick out, layers split over forked workers); backs `3d gcode-overhangs` and the `overhangs` gate of `print-preflight`.
+- `gcode_scan.py` — one streaming pass over a sliced G-code, layer by layer: per-layer Z / height / extrusion runs (type, tool, XY) handed to consumers, plus M600 pauses, tool changes, grams per tool and feature type and footer settings; the whole file is never held; numpy only.
+- `gcode_mix_gate.py` — the multi-colour gates of `3d gcode-mix-gate`: colour volumes attributed from the part STLs (pure / mixed per layer on the layer's own outer-wall evidence / accent / thin), pause, heads and prime tower, pocket void, layer heights, footer settings, and the `--mix-teeth` / `--cavity-teeth` controls that must FAIL (a gate that cannot fail is vacuous); numpy/scipy/trimesh.
 - `gcode_thumbnails.py` — printer-screen thumbnail blocks in G-code: stdlib-only check against the profile's `thumbnails` spec, Orca-format block writer, z-buffered toolpath preview render (numpy); backs `3d gcode-thumbnails`.
 - `frame_check.py` — render framing checks.
 - `ha_deploy.py` — `3d ha deploy`: manifest/snippet/compose/vendor checks for `integrations/homeassistant/`, plan from a host probe, backup → submodule checkout → symlinks/copies → check_config → reloads → service recreate → post-checks with rollback, HA-repo deploy PR.
