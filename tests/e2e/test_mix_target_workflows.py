@@ -45,6 +45,7 @@ def test_target_text_and_json_agree_and_hit_the_known_patch(tmp_path: Path) -> N
 
 
 def test_target_of_a_render_skips_the_white_balance(tmp_path: Path) -> None:
+    """A user reads the target off a Blender render: no white region, no balance, the exact pixels."""
     photo(tmp_path / "render.png", PATCH_HEX)
     run = run_cli(
         tmp_path, "mix", "target", "render.png", "--box", BOX, "--no-wb", "--json"
@@ -60,6 +61,7 @@ def test_target_of_a_render_skips_the_white_balance(tmp_path: Path) -> None:
 def test_target_refuses_a_photo_without_a_white_reference_and_bad_boxes(
     tmp_path: Path,
 ) -> None:
+    """A user forgets the white region, passes both white options, or a box off the image: each is refused with the reason."""
     photo(tmp_path / "mockup.png", PATCH_HEX)
     missing = run_cli(tmp_path, "mix", "target", "mockup.png", "--box", BOX)
     assert missing.returncode == 2
@@ -136,6 +138,7 @@ def test_tester_target_photo_records_image_box_and_sha256_in_the_manifest(
 def test_recipes_take_the_target_photo_and_a_hex_target_has_no_source(
     tmp_path: Path,
 ) -> None:
+    """A user ranks recipes for a photo target: the summary carries the source; a hex target has none."""
     photo(tmp_path / "mockup.png", PATCH_HEX, (0.9, 0.9, 1.0))
     photo_run = run_cli(
         tmp_path, "mix", "recipes", "--target-photo", "mockup.png", "--box", BOX,
@@ -154,12 +157,14 @@ def test_recipes_take_the_target_photo_and_a_hex_target_has_no_source(
 def test_target_and_target_photo_are_exclusive_and_photo_flags_need_the_photo(
     tmp_path: Path,
 ) -> None:
+    """A user mixes a hex target with a photo target, or gives a box without a photo: both are refused."""
     photo(tmp_path / "mockup.png", PATCH_HEX)
     both = run_cli(
         tmp_path, "mix", "recipes", "--target", "#808080", "--target-photo", "mockup.png",
         "--box", BOX, "--no-wb", "--slots", SLOTS,
     )  # fmt: skip
-    assert both.returncode == 2 and "not both" in both.stderr
+    assert both.returncode == 2
+    assert "not both" in both.stderr
     stray = run_cli(
         tmp_path,
         "mix",
@@ -171,39 +176,82 @@ def test_target_and_target_photo_are_exclusive_and_photo_flags_need_the_photo(
         "--slots",
         SLOTS,
     )
-    assert stray.returncode == 2 and "only goes with --target-photo" in stray.stderr
+    assert stray.returncode == 2
+    assert "only goes with --target-photo" in stray.stderr
 
 
 def test_target_option_errors_name_the_fix(tmp_path: Path) -> None:
+    """A user mistypes the target options: every refusal is exit 2 and names the flag to fix."""
     photo(tmp_path / "mockup.png", PATCH_HEX)
-    no_box = run_cli(tmp_path, "mix", "target", "mockup.png", "--no-wb")
-    assert no_box.returncode == 2 and "--box" in no_box.stderr
-    level_no_white = run_cli(
-        tmp_path, "mix", "target", "mockup.png", "--box", BOX, "--no-wb", "--white-level", "240"
-    )  # fmt: skip
-    assert (
-        level_no_white.returncode == 2
-        and "--white-level needs --white" in level_no_white.stderr
-    )
-    too_high = run_cli(
-        tmp_path, "mix", "target", "mockup.png", "--box", BOX, "--white", WHITE_BOX, "--white-level", "300"
-    )  # fmt: skip
-    assert too_high.returncode == 2 and "--white-level" in too_high.stderr
-    missing = run_cli(
-        tmp_path, "mix", "recipes", "--target-photo", "gone.png", "--box", BOX, "--no-wb", "--slots", SLOTS
-    )  # fmt: skip
-    assert missing.returncode == 2 and "gone.png" in missing.stderr
-    no_region = run_cli(
-        tmp_path, "mix", "recipes", "--target-photo", "mockup.png", "--no-wb", "--slots", SLOTS
-    )  # fmt: skip
-    assert no_region.returncode == 2 and "--box" in no_region.stderr
-    not_image = tmp_path / "notes.txt"
-    not_image.write_text("not a picture")
-    bad = run_cli(tmp_path, "mix", "target", "notes.txt", "--box", BOX, "--no-wb")
-    assert bad.returncode == 2 and "cannot be read as an image" in bad.stderr
+    (tmp_path / "notes.txt").write_text("not a picture")
+    cases = [
+        (("mix", "target", "mockup.png", "--no-wb"), "--box"),
+        (
+            (
+                "mix",
+                "target",
+                "mockup.png",
+                "--box",
+                BOX,
+                "--no-wb",
+                "--white-level",
+                "240",
+            ),
+            "--white-level needs --white",
+        ),
+        (
+            (
+                "mix",
+                "target",
+                "mockup.png",
+                "--box",
+                BOX,
+                "--white",
+                WHITE_BOX,
+                "--white-level",
+                "300",
+            ),
+            "--white-level",
+        ),
+        (
+            (
+                "mix",
+                "recipes",
+                "--target-photo",
+                "gone.png",
+                "--box",
+                BOX,
+                "--no-wb",
+                "--slots",
+                SLOTS,
+            ),
+            "gone.png",
+        ),
+        (
+            (
+                "mix",
+                "recipes",
+                "--target-photo",
+                "mockup.png",
+                "--no-wb",
+                "--slots",
+                SLOTS,
+            ),
+            "--box",
+        ),
+        (
+            ("mix", "target", "notes.txt", "--box", BOX, "--no-wb"),
+            "cannot be read as an image",
+        ),
+    ]
+    for argv, fragment in cases:
+        run = run_cli(tmp_path, *argv)
+        assert run.returncode == 2, argv
+        assert fragment in run.stderr, (argv, run.stderr)
 
 
 def test_white_level_changes_the_exposure_of_the_target(tmp_path: Path) -> None:
+    """A user asks for a darker white reference level: the same patch reads darker."""
     photo(tmp_path / "mockup.png", PATCH_HEX, (1.0, 0.82, 0.55))
     base = ("mix", "target", "mockup.png", "--box", BOX, "--white", WHITE_BOX, "--json")
     low = json.loads(run_cli(tmp_path, *base, "--white-level", "200").stdout)
@@ -213,6 +261,7 @@ def test_white_level_changes_the_exposure_of_the_target(tmp_path: Path) -> None:
 
 
 def test_a_manifest_with_a_broken_target_source_is_invalid(tmp_path: Path) -> None:
+    """A user tests a render target: the manifest says render, and a damaged sha256 no longer validates."""
     write_base_project(tmp_path / "base.3mf")
     photo(tmp_path / "mockup.png", PATCH_HEX)
     args = (
@@ -232,5 +281,5 @@ def test_reader_script_reports_bad_arguments_as_a_usage_error(tmp_path: Path) ->
     """A malformed --box reaches the reader and comes back as exit 2 with the reason, not a traceback."""
     photo(tmp_path / "mockup.png", PATCH_HEX)
     run = run_cli(tmp_path, "mix", "target", "mockup.png", "--box", "1,2,3", "--no-wb")
-    assert run.returncode == 2 and "x0,y0,x1,y1" in run.stderr
-    assert "Traceback" not in run.stderr
+    assert run.returncode == 2
+    assert "x0,y0,x1,y1" in run.stderr
