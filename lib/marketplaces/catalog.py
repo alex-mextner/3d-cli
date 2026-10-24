@@ -10,30 +10,47 @@ import json
 import os
 import shutil
 import tempfile
+import time
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
 
 from cli.resources import pool_size
 from errors import ThreeDError, UsageError
 from marketplaces import cults, makerworld, printables, thingiverse, transport
-from marketplaces.base import SITES, DownloadLinks, MarketplaceError, Model, safe_name
+from marketplaces.base import SITES, DownloadLinks, MarketplaceError, Model, ModelFile, safe_name
+
+
+FileLink = Callable[[Model, ModelFile], tuple[str, dict[str, str]]]
 
 
 @dataclass(frozen=True)
 class Client:
+    """One site. `enrich` (optional) completes search hits with per-hit follow-up requests
+    (Thingiverse licenses and file lists); `file_link` resolves ONE file's download URL and
+    headers (absent when the site only serves a login-gated archive, MakerWorld)."""
+
     site: str
     match: Callable[[str], str | None]
     search: Callable[[str, int], list[Model]]
     show: Callable[[str], Model]
     download_links: Callable[[Model], DownloadLinks]
+    file_link: FileLink | None = None
+    enrich: Callable[[list[Model]], list[Model]] | None = None
 
 
 CLIENTS: dict[str, Client] = {
-    module.SITE: Client(module.SITE, module.match, module.search, module.show, module.download_links)
-    for module in (printables, makerworld, thingiverse, cults)
+    printables.SITE: Client(printables.SITE, printables.match, printables.search, printables.show,
+                            printables.download_links, file_link=printables.download_link),
+    makerworld.SITE: Client(makerworld.SITE, makerworld.match, makerworld.search, makerworld.show,
+                            makerworld.download_links),
+    thingiverse.SITE: Client(thingiverse.SITE, thingiverse.match, thingiverse.search, thingiverse.show,
+                             thingiverse.download_links, file_link=thingiverse.download_link,
+                             enrich=thingiverse.enrich),
+    cults.SITE: Client(cults.SITE, cults.match, cults.search, cults.show, cults.download_links,
+                       file_link=cults.download_link),
 }
 assert tuple(CLIENTS) == SITES, "SITES and CLIENTS must list the same sites in the same order"
 
@@ -50,6 +67,8 @@ class SiteResult:
     site: str
     models: tuple[Model, ...] = ()
     error: ThreeDError | None = None
+    elapsed_s: float = 0.0
+    warnings: tuple[str, ...] = ()
 
 
 def error_json(site: str, exc: ThreeDError) -> dict[str, Any]:
@@ -59,15 +78,29 @@ def error_json(site: str, exc: ThreeDError) -> dict[str, Any]:
     return {"site": site, "kind": kind, "message": exc.message, "remediation": list(exc.remediation)}
 
 
-def search(query: str, sites: Sequence[str], limit: int) -> list[SiteResult]:
+def search(query: str, sites: Sequence[str], limit: int, *, details: bool = True) -> list[SiteResult]:
+    """Search every site in parallel. `details=False` skips the per-hit follow-up requests of
+    sites that need them (Thingiverse: one request per page, but no license or file list)."""
     def one(site: str) -> SiteResult:
+        client = CLIENTS[site]
+        started = time.monotonic()
         try:
-            return SiteResult(site, tuple(CLIENTS[site].search(query, limit)))
+            models = client.search(query, limit)
+            warnings: list[str] = []
+            if details and client.enrich is not None:
+                models = client.enrich(models)
+                missing = sum(1 for m in models if not m.files_known)
+                if missing:
+                    warnings.append(f"{missing} of {len(models)} hits have no file list or license "
+                                    "(request budget spent or the site refused the follow-up call)")
+            return SiteResult(site, tuple(models), elapsed_s=time.monotonic() - started,
+                              warnings=tuple(warnings))
         except ThreeDError as exc:
-            return SiteResult(site, error=exc)
+            return SiteResult(site, error=exc, elapsed_s=time.monotonic() - started)
         except Exception as exc:  # noqa: BLE001 — a parser bug on one site must not hide the others
             return SiteResult(site, error=MarketplaceError(
-                site, "parse", f"unexpected answer ({type(exc).__name__}: {exc})"))
+                site, "parse", f"unexpected answer ({type(exc).__name__}: {exc})"),
+                elapsed_s=time.monotonic() - started)
 
     with ThreadPoolExecutor(max_workers=pool_size(len(sites))) as pool:
         return list(pool.map(one, sites))
@@ -134,8 +167,34 @@ def _publish(src: Path, dst: Path) -> None:
         raise
 
 
-def download(url: str, dest: Path | None) -> tuple[Model, Path, list[dict[str, Any]]]:
-    """Fetch every file of the model at `url` into `dest` and write `dest/model.json`.
+@dataclass(frozen=True)
+class WrittenFile:
+    """One file a download wrote: its (unique, sanitised) name in the target directory."""
+
+    name: str
+    size: int
+    sha256: str
+    kind: str = ""
+
+    def to_json(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def _select_files(model: Model, select: Sequence[str]) -> Model:
+    """`model` restricted to the files named in `select` (exact names, case-sensitive)."""
+    wanted = list(dict.fromkeys(select))
+    names = {f.name for f in model.files}
+    unknown = [n for n in wanted if n not in names]
+    if unknown:
+        raise UsageError(f"{model.site} #{model.id} has no file named {', '.join(map(repr, unknown))}",
+                         command="models", remediation=["Available: " + ", ".join(sorted(names))])
+    return replace(model, files=tuple(f for f in model.files if f.name in wanted))
+
+
+def download(url: str, dest: Path | None, *, select: Sequence[str] | None = None
+             ) -> tuple[Model, Path, list[WrittenFile]]:
+    """Fetch every file of the model at `url` (or only the `select`ed names) into `dest` and
+    write `dest/model.json`.
     Paid models are refused before any file request. The directory itself is never replaced
     (an existing empty one keeps its mode, owner and ACLs): files are staged in a hidden
     `.part-*` directory inside it and moved in only once all of them and model.json are
@@ -149,6 +208,11 @@ def download(url: str, dest: Path | None) -> tuple[Model, Path, list[dict[str, A
                                f"'{model.title}' is a paid model ({model.price or 'paid'}); "
                                "3d models only downloads free files",
                                remediation=[f"Buy it on the site and download it there: {model.url}"])
+    if select:
+        if client.file_link is None:
+            raise UsageError(f"{model.site} serves every file in one archive; --file cannot pick members",
+                             command="models", remediation=["Download without --file."])
+        model = _select_files(model, select)
     target = dest or default_dir(model)
     _check_target(target)
     links = client.download_links(model)
@@ -170,13 +234,12 @@ def download(url: str, dest: Path | None) -> tuple[Model, Path, list[dict[str, A
                          command="models", remediation=["Pass a --dir inside a writable directory."]) from exc
     published: list[Path] = []
     try:
-        written: list[dict[str, Any]] = []
+        written: list[WrittenFile] = []
         used: set[str] = {"model.json"}
         for file, link, headers in links:
             name = _unique(safe_name(file.name or Path(link.split("?", 1)[0]).name), used)
             size = transport.download(model.site, link, staging / name, headers=headers)
-            written.append({"name": name, "size": size, "sha256": _sha256(staging / name),
-                            "kind": file.kind})
+            written.append(WrittenFile(name, size, _sha256(staging / name), file.kind))
         meta = {
             "source": {"site": model.site, "id": model.id, "url": model.url},
             "title": model.title,
@@ -186,11 +249,11 @@ def download(url: str, dest: Path | None) -> tuple[Model, Path, list[dict[str, A
             "tags": list(model.tags),
             "summary": model.summary,
             "downloaded_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
-            "files": written,
+            "files": [w.to_json() for w in written],
         }
         (staging / "model.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False) + "\n",
                                             encoding="utf-8")
-        for name in [w["name"] for w in written] + ["model.json"]:
+        for name in [w.name for w in written] + ["model.json"]:
             try:
                 _publish(staging / name, target / name)
             except OSError as exc:  # something appeared in the target meanwhile: never overwrite

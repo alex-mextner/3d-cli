@@ -45,9 +45,7 @@ def test_actions_module_imports_without_heavy_deps_or_library_db() -> None:
 
 
 @pytest.mark.parametrize("name,owner,kwargs", [
-    ("search", 576, {"query": "case"}),
     ("rank", 577, {"session": "x"}),
-    ("download", 576, {"url": "https://x"}),
     ("open_slicer", 578, {"path": "a.3mf"}),
     ("launch_agent", 578, {"prompt": "hi"}),
     ("photo", 579, {"capture": True}),

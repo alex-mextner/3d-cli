@@ -280,6 +280,8 @@ Every current root Python module is listed here so future additions are intentio
 - `mask_geometry.py` — lightweight mask coverage, bounding-box, and centroid metadata.
 - `materials.py` — compatibility wrapper re-exporting `registries.materials`.
 - `mesh_check.py` — mesh verification implementation.
+- `mesh_facts.py` — tool behind `library.analytics.measure_meshes`: measures mesh files with trimesh (bbox, volume, manifold, bodies) and prints one JSON object; run through `cli.pyrun` because the `3d` dispatcher has no trimesh (`3d models search --deep`, `3d models analyze`, #576).
+- `image_thumbs.py` — tool behind `library.images.render_images`: encodes result pictures as kitty/iterm2/sixel thumbnails with Pillow and prints one JSON object; run through `cli.pyrun` when the dispatcher's Python has no Pillow (`3d models search --images`, #576).
 - `mesh_repair.py` — thin adapter over the public `meshfix` library (https://github.com/alex-mextner/meshfix): `repair_mesh` / `repair_file` and the stable report keys; clones and builds the pinned tag once when it is not installed; backs `3d mesh --repair` (#432).
 - `halves_check.py` — paired-halves gate: loads pairs marked in 3MF object metadata (or STL pairs), maps both halves into the assembly frame, rasterises their cut faces and compares outline, dowel holes, size and islands; backs `3d halves-check`.
 - `vision_detect.py` — pixel half of `3d printer vision`: Obico ONNX spaghetti scorer (weights downloaded at runtime, sha256-pinned), `FrameScorer` (ROI/ignore masks + stage-2 verifier), brightness check, live camera loop, `record` and `eval` on recorded footage; decision logic and camera/klippy.log access live in `printer_ops/vision.py`.
