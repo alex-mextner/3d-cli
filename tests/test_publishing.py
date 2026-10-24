@@ -433,6 +433,12 @@ def test_dry_run_text_lists_files_fields_steps_and_the_refusal(tmp_path: Path) -
     assert "original.scad" not in text and "gcode" not in text
 
 
+def test_dry_run_text_prints_a_thingiverse_remix_link(tmp_path: Path) -> None:
+    remix = YAML + "remix_of: https://www.thingiverse.com/thing:4000001\nremix_license: CC BY\n"
+    text = plan.render_text(evaluate(make_project(tmp_path, remix), "thingiverse"), dry_run=True)
+    assert "is_remix: True" in text and "ancestors: 4000001" in text
+
+
 def test_dry_run_text_of_a_clean_project_says_ok(tmp_path: Path) -> None:
     text = plan.render_text(evaluate(make_project(tmp_path)), dry_run=True)
     assert (
