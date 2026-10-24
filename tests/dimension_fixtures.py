@@ -8,6 +8,10 @@ writes boxes with `o`/`usemtl` and an MTL. Boxes are 10 mm cubes at x = 0, 20, 4
 
 from __future__ import annotations
 
+import functools
+import shutil
+import subprocess
+import tempfile
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -176,3 +180,33 @@ def write_obj(path: Path, boxes: list[Box], *, with_mtl: bool = True) -> Path:
 
 
 THREE_BOXES = [Box("lid", 0, RED), Box("base", 20, GREEN), Box("clip", 40, BLUE)]
+
+
+@functools.cache
+def openscad_exports_3mf_color() -> bool:
+    """True when the installed openscad writes `color()` into its 3MF export.
+
+    OpenSCAD 2021.01 (Ubuntu 24.04's package, so CI) writes a 3MF with one material and drops every
+    `color()`; the snapshot builds that keep colours are what `3d dimension` needs for a .scad input.
+    """
+    exe = shutil.which("openscad")
+    if exe is None:
+        return False
+    with tempfile.TemporaryDirectory() as tmp:
+        src, out = Path(tmp, "probe.scad"), Path(tmp, "probe.3mf")
+        src.write_text(
+            'color("red") cube(1);\ncolor("blue") translate([2, 0, 0]) cube(1);\n'
+        )
+        done = subprocess.run(
+            [exe, "-o", str(out), str(src)], capture_output=True, check=False
+        )
+        if done.returncode != 0 or not out.exists():
+            return False
+        with zipfile.ZipFile(out) as zf:
+            model = next(n for n in zf.namelist() if n.endswith(".model"))
+            return zf.read(model).count(b"<base ") > 1
+
+
+SCAD_COLOR_REASON = (
+    "openscad does not export color() to 3MF (needs a 2023+ snapshot, CI has 2021.01)"
+)

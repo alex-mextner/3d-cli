@@ -22,6 +22,8 @@ from dimension_fixtures import (
     GREEN,
     RED,
     THREE_BOXES,
+    openscad_exports_3mf_color,
+    SCAD_COLOR_REASON,
     Box,
     write_3mf,
     write_3mf_per_triangle,
@@ -407,7 +409,7 @@ def test_many_parts_wrap_the_legend_and_the_gate_still_passes(
     assert check_image(out) == []
 
 
-@pytest.mark.skipif(shutil.which("openscad") is None, reason="openscad not installed")
+@pytest.mark.skipif(not openscad_exports_3mf_color(), reason=SCAD_COLOR_REASON)
 def test_scad_color_calls_become_coloured_parts(tmp_path: pathlib.Path) -> None:
     scad = tmp_path / "asm.scad"
     scad.write_text(
