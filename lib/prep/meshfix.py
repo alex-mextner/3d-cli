@@ -760,7 +760,14 @@ class ExternalBackend:
         return module if callable(getattr(module, "repair_mesh", None)) else None
 
     def available(self) -> bool:
-        return self._load() is not None
+        # `auto` must not pick the adapter just because it imports: it clones and builds on first use, so it only
+        # counts when meshfix can run now (installed, or a cached build exists). An adapter without `available()`
+        # (a stand-in module) is taken at its word.
+        module = self._load()
+        if module is None:
+            return False
+        ready = getattr(module, "available", None)
+        return bool(ready()) if callable(ready) else True
 
     def repair(
         self, vertices: Array, faces: IntArray, options: MeshFixOptions
@@ -773,7 +780,9 @@ class ExternalBackend:
                 degrades="`3d prep` falls back to the builtin repair backend",
                 command="prep",
             )
-        out_v, out_f, report = module.repair_mesh(vertices, faces)  # the library has its own knobs; the builtin options do not apply
+        out_v, out_f, report = module.repair_mesh(
+            vertices, faces
+        )  # the library has its own knobs; the builtin options do not apply
         return (
             np.ascontiguousarray(out_v, dtype=np.float64),
             np.ascontiguousarray(out_f, dtype=np.int64),
