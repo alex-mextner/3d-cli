@@ -88,7 +88,12 @@ def run(argv: list[str]) -> int:
         return 0
     if argv[0] == "status":
         current = heavy.holder()
-        print(f"held by pid {current.pid}: {current.command}" if current else "free")
+        if current:
+            print(f"held by pid {current.pid}: {current.command}")
+        elif heavy.lock_free():
+            print("free")
+        else:  # lslocks missing or it could not name the holder: the lock itself is still busy
+            print("held (holder unknown; `lslocks` names it)")
         return 0
     if argv[0] == "prefix":
         o, _ = _parse(argv[1:])

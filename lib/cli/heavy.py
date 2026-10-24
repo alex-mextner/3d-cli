@@ -11,7 +11,8 @@ WHY: the lock was typed by hand in every script (AGENTS.md "Machine resources").
   holder instead of hanging for ever.
 INVARIANTS: stdlib only. The lock file is the same `/tmp/3d-cli-heavy.lock` the AGENTS.md one-liner
   uses, so hand-typed wrappers and `3d heavy` exclude each other. Without systemd (macOS, containers)
-  the cap is skipped and only the lock + nice apply; without `flock(1)` Python's fcntl takes the lock.
+  the cap is skipped and only the lock + nice apply; without `flock(1)` Python's fcntl takes the lock
+  (`run_heavy` directly, `heavy_prefix` by re-entering `3d heavy`).
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ import fcntl
 import os
 import shutil
 import subprocess
+import sys
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -36,6 +38,7 @@ DEFAULT_CPU_QUOTA = "600%"
 DEFAULT_NICE = 10
 DEFAULT_WAIT_S = 1800
 EXIT_BUSY = 75  # flock -E: the bounded wait ran out (EX_TEMPFAIL, same code as the remote `heavy`)
+_THREED = Path(__file__).resolve().parents[2] / "bin" / "3d"
 
 
 class HeavyBusy(ThreeDError):
@@ -69,25 +72,9 @@ def _scope_works() -> bool:
     return probe.returncode == 0
 
 
-def heavy_prefix(
-    *,
-    memory_max: str = DEFAULT_MEMORY_MAX,
-    cpu_quota: str = DEFAULT_CPU_QUOTA,
-    nice: int = DEFAULT_NICE,
-    wait_s: int = DEFAULT_WAIT_S,
-    lock: str = LOCK_PATH,
-    env: Mapping[str, str] | None = None,
-) -> list[str]:
-    """argv prefix for a heavy command; `[]` when the caller is already inside the lock.
-
-    The command that follows runs with THREED_HEAVY_HELD=1 so anything it starts that asks for a
-    prefix gets `[]` back. The wait is bounded by `wait_s` (`flock -w`).
-    """
-    if held(env):
-        return []
+def _capped(*, memory_max: str, cpu_quota: str, nice: int) -> list[str]:
+    """The part of the prefix after the lock: systemd cap when available, nice, and the held marker."""
     argv: list[str] = []
-    if shutil.which("flock"):
-        argv += ["flock", "-w", str(wait_s), "-E", str(EXIT_BUSY), lock]
     if _scope_works():
         argv += [
             "systemd-run",
@@ -101,8 +88,53 @@ def heavy_prefix(
             "-p",
             f"CPUQuota={cpu_quota}",
         ]
-    argv += ["nice", "-n", str(nice), "env", f"{ENV_HELD}=1"]
-    return argv
+    return [*argv, "nice", "-n", str(nice), "env", f"{ENV_HELD}=1"]
+
+
+def heavy_prefix(
+    *,
+    memory_max: str = DEFAULT_MEMORY_MAX,
+    cpu_quota: str = DEFAULT_CPU_QUOTA,
+    nice: int = DEFAULT_NICE,
+    wait_s: int = DEFAULT_WAIT_S,
+    lock: str = LOCK_PATH,
+    env: Mapping[str, str] | None = None,
+) -> list[str]:
+    """argv prefix for a heavy command; `[]` when the caller is already inside the lock.
+
+    The command that follows runs with THREED_HEAVY_HELD=1 so anything it starts that asks for a
+    prefix gets `[]` back. The wait is bounded by `wait_s` (`flock -w`). Without `flock(1)` a prefix
+    cannot take the lock itself, so it re-enters `3d heavy` (which holds it through fcntl): the marker
+    is never set by a prefix that did not lock.
+    """
+    if held(env):
+        return []
+    if shutil.which("flock"):
+        return [
+            "flock",
+            "-w",
+            str(wait_s),
+            "-E",
+            str(EXIT_BUSY),
+            lock,
+            *_capped(memory_max=memory_max, cpu_quota=cpu_quota, nice=nice),
+        ]
+    return [
+        "env",
+        f"{LOCK_ENV}={lock}",
+        sys.executable,
+        str(_THREED),
+        "heavy",
+        "--wait",
+        str(wait_s),
+        "--mem",
+        memory_max,
+        "--cpu",
+        cpu_quota,
+        "--nice",
+        str(nice),
+        "--",
+    ]
 
 
 def _acquire(lock: str, wait_s: float) -> int:
@@ -148,6 +180,20 @@ def holder(lock: str = LOCK_PATH) -> Holder | None:
     return None
 
 
+def lock_free(lock: str = LOCK_PATH) -> bool:
+    """True when nobody holds the lock; needs no `lslocks` (a non-blocking fcntl probe, released at once)."""
+    if not Path(lock).exists():
+        return True
+    fd = os.open(lock, os.O_RDONLY)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return False
+    finally:
+        os.close(fd)
+    return True
+
+
 def run_heavy(
     argv: Sequence[str],
     *,
@@ -163,13 +209,15 @@ def run_heavy(
     base = dict(os.environ if env is None else env)
     if held(base):
         return subprocess.run(list(argv), cwd=cwd, env=base, check=False).returncode  # noqa: S603
-    prefix = heavy_prefix(
-        memory_max=memory_max, cpu_quota=cpu_quota, nice=nice, wait_s=wait_s, lock=lock, env=base
-    )
-    if prefix[:1] == ["flock"]:
+    if shutil.which("flock"):
+        prefix = heavy_prefix(
+            memory_max=memory_max, cpu_quota=cpu_quota, nice=nice, wait_s=wait_s, lock=lock, env=base
+        )
         return subprocess.run([*prefix, *argv], cwd=cwd, env=base, check=False).returncode  # noqa: S603
-    fd = _acquire(lock, wait_s)  # no flock(1): hold the lock from this process
+    # no flock(1): hold the lock from this process (`heavy_prefix` re-enters here for shell callers)
+    fd = _acquire(lock, wait_s)
     try:
-        return subprocess.run([*prefix, *argv], cwd=cwd, env=base, check=False).returncode  # noqa: S603
+        capped = _capped(memory_max=memory_max, cpu_quota=cpu_quota, nice=nice)
+        return subprocess.run([*capped, *argv], cwd=cwd, env=base, check=False).returncode  # noqa: S603
     finally:
         os.close(fd)
