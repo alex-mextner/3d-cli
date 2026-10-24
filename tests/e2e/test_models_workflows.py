@@ -374,8 +374,7 @@ def test_bad_invocations_are_structured(tmp_path: Path) -> None:
     assert "an integer 1..100" in limit.stderr
     bare = run_cli(tmp_path, "models")
     assert bare.returncode == 1
-    assert bare.stdout.startswith("3d models <search|searches|rerank|followups|browse|act|show|download|analyze|publish|auth>"
-    )
+    assert bare.stdout.startswith("3d models <search|searches|rerank|followups|browse|act|show|download|analyze|publish|offer|auth>")
 
 
 def test_auth_status_names_sources_but_never_values(tmp_path: Path) -> None:
@@ -418,6 +417,8 @@ def test_help_and_docs_list_the_same_flags_and_examples(tmp_path: Path) -> None:
         "--limit",
         "--dir",
         "--json", "--platform", "--dry-run", "--yes",
+        "--kind", "--of", "--design", "--make", "--note", "--printer", "--publish", "--reason", "--trigger",
+        "--allow-nonprintable", "--drop-nonprintable",
         "--images",
         "--columns",
         "--deep",

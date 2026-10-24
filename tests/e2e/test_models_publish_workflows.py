@@ -140,9 +140,18 @@ def test_a_remix_of_a_no_derivatives_licence_is_refused_until_permission_is_give
         "lifted by permission_ref" in allowed.stdout and "=> allowed" in allowed.stdout
     )
     as_json = run_cli(
-        tmp_path, "models", "publish", str(project), "--platform", "thingiverse", "--json", env_extra=BLANK
+        tmp_path,
+        "models",
+        "publish",
+        str(project),
+        "--platform",
+        "thingiverse",
+        "--json",
+        env_extra=BLANK,
     )
-    description = json.loads(as_json.stdout)["platforms"]["thingiverse"]["fields"]["description"]
+    description = json.loads(as_json.stdout)["platforms"]["thingiverse"]["fields"][
+        "description"
+    ]
     assert description.endswith(
         "Remix of https://example.invalid/en/models/2592818 (published with the original author's "
         "permission: mail from the author, 2026-11-01)"
@@ -219,18 +228,18 @@ def test_bad_invocations_are_structured_errors(tmp_path: Path) -> None:
     project = make_project(tmp_path)
     missing = run_cli(tmp_path, "models", "publish", str(project), env_extra=BLANK)
     assert missing.returncode == 2
-    assert "accepted: makerworld, printables, thingiverse, all" in missing.stderr
+    assert "accepted: makerworld, printables, thingiverse, cults, all" in missing.stderr
     wrong = run_cli(
         tmp_path,
         "models",
         "publish",
         str(project),
         "--platform",
-        "cults",
+        "etsy",
         env_extra=BLANK,
     )
     assert wrong.returncode == 2
-    assert "accepted: makerworld, printables, thingiverse, all" in wrong.stderr
+    assert "accepted: makerworld, printables, thingiverse, cults, all" in wrong.stderr
     both = run_cli(
         tmp_path,
         "models",

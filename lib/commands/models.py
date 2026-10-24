@@ -1,6 +1,6 @@
 """3d models — search, inspect and download models on 3D-model marketplaces.
 
-ACCESSED VIA: `3d models search|searches|show|download|analyze|publish|auth`. Thin CLI over lib/marketplaces/ (one
+ACCESSED VIA: `3d models search|searches|show|download|analyze|publish|offer|auth`. Thin CLI over lib/marketplaces/ (one
 client per site: Printables, MakerWorld, Thingiverse, Cults3D), lib/library/ (search core, file analytics,
 persistence in the library DB) and lib/publishing/ (the publish plan and its refusal rules). Everything heavy
 is imported inside each subcommand so `3d help` loads only the stdlib-only `marketplaces.base`.
@@ -14,18 +14,15 @@ import sys
 from collections.abc import Collection
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from cli.registry import Command
 from errors import InputNotFound, InvalidArgument, ThreeDError, UsageError
 from marketplaces.base import SITES, MarketplaceError, Model
 
-if TYPE_CHECKING:
-    from publishing.plan import PlatformPlan
-
 DEFAULT_LIMIT = 10
 
-USAGE = """3d models <search|searches|rerank|followups|browse|act|show|download|analyze|publish|auth> [options]
+USAGE = """3d models <search|searches|rerank|followups|browse|act|show|download|analyze|publish|offer|auth> [options]
   Find and fetch 3D models on Printables, MakerWorld, Thingiverse and Cults3D, and publish your own.
 
 Subcommands:
@@ -78,12 +75,21 @@ Subcommands:
   analyze FILE... [--json] [--no-save]
                         deterministic analytics of local files: mesh bounding box, volume,
                         watertight/manifold, triangles, bodies, print footprint; archive members
-  publish PROJECT_DIR --platform P [--dry-run | --yes] [--json]
+  publish PROJECT_DIR --platform P [--kind K] [--of SRC] [--dry-run | --yes] [--json]
                         publish a model project (publish.yaml + 3mf + scad source + stl + any
-                        f3d/step/blend) to makerworld, printables, thingiverse or all. Dry run
-                        by default: prints the exact file set, fields and steps per platform
-                        and exits 2 when a rule refuses it (no 3mf or scad, a remix of a model
-                        whose licence forbids derivatives without permission_ref); --yes sends
+                        f3d/step/blend, plus the renders and photos of the library) to makerworld,
+                        printables, thingiverse, cults or all. Dry run by default: prints the exact
+                        file set, fields and steps per platform and exits 2 when a rule refuses it (no
+                        3mf or scad, a remix of a model whose licence forbids derivatives without
+                        permission_ref); exits 1 when a part of 3d.yaml is vitamin/reference/stand_in
+                        and its file is in the set; --yes sends and records publication/relation rows
+                        in the library. --kind remix --of SRC publishes a remix of SRC (a URL or a
+                        model.json); --kind make --make ID --of SRC posts a make with its photos
+  offer [PROJECT_DIR] [--trigger print|modify] [--publish auto|ask|off] [--yes] [--json]
+                        after a print or a modify step: prepare the publication plan (all platforms,
+                        CAD files, renders, photos; licence CC BY unless the source needs more) and ask
+                        [Y/n] on a terminal, or print the plan / `--json` for an agent. Never publishes
+                        without an interactive yes or --yes; --publish off is silent
   auth status [--json]  which sources hold each site's credentials (names only, never values)
   auth set SITE         store SITE's token/key in the OS keychain (keychain-cli); the value
                         is read from a hidden prompt, or from stdin one line per field
@@ -123,7 +129,19 @@ Options:
   --idempotency-key K   a retried search with the same K and query returns the first saved session
                         Example: 3d models search "cable clip" --idempotency-key run-42
   --dir D               download directory
-  --platform P          publish target: makerworld, printables, thingiverse, all (required)
+  --platform P          publish target: makerworld, printables, thingiverse, cults, all (required;
+                        all = the first three, plus cults when publish.yaml has `hosted:` URLs)
+  --kind K              publish: auto (default: remix when --of or remix_of is set), original, remix, make
+  --of SRC              publish: the source model: URL or model.json (a remix of it, or the page of a make)
+  --make ID             publish/offer: the make (full uid or unique prefix) whose photos are used
+  --design NAME         publish/offer: the library design (default: 3d.yaml name, else the directory name)
+  --note TEXT           publish --kind make: the text of the make post
+  --allow-nonprintable P[,P]  publish: publish these vitamin/reference/stand_in parts on purpose
+                        (needs --reason TEXT; logged as a library event)
+  --drop-nonprintable   publish: leave the files of non-printable parts out, with a warning
+  --trigger T           offer: print (a print finished) or modify (a model was modified)
+  --publish M           offer: auto (publishes only with --yes), ask (default), off (silent)
+  --printer P           offer: find the make of that printer in the library
   --dry-run             publish: print the plan, send nothing (the default)
   --yes                 publish: really send (Thingiverse API; MakerWorld/Printables draft in
                         agent-browser, the final Publish click stays yours)
@@ -223,7 +241,8 @@ AXE_CURL_IMPERSONATE_DIR / THREED_CURL_IMPERSONATE) or the curl_cffi Python pack
 Exit codes (the same with --json):
   0    done; for search, at least one site answered; for act, a dry run or every action succeeded
   1    a site failed (blocked, not found, network), a paid model, or every searched
-       site failed for different reasons
+       site failed for different reasons; publish: a vitamin/reference/stand_in part in
+       the publish set, or a platform that did not go through
   2    bad usage, a non-empty --dir, or missing/refused credentials (also when every
        searched site lacks credentials)
   127  no Chrome-TLS tool for MakerWorld; `--llm require` without omp; no `textual` for the
@@ -249,6 +268,12 @@ Examples:
   3d models download https://www.printables.com/model/311253-spoon-drawer-pull --dir parts/pull --json
   3d models publish projects/wall-plugs --platform all --dry-run
   3d models publish projects/wall-plugs --platform thingiverse --yes
+  3d models publish projects/mole --platform all --kind remix --of ./printables-311253-spoon-pull --dry-run --json
+  3d models publish projects/mole --platform printables --kind make --make 0199a1c2-7d3e-7000-8000-000000000001 --of https://www.printables.com/model/311253-spoon-drawer-pull --dry-run
+  3d models publish projects/mole --platform all --drop-nonprintable --dry-run
+  3d models publish projects/mole --platform all --allow-nonprintable probe_pcb --reason "assembly kit" --dry-run
+  3d models offer projects/mole --trigger print --json
+  3d models offer --printer k1se --publish off
   3d models analyze parts/pull/spoon_handle.stl --json
   3d models auth set thingiverse
   3d models auth status"""
@@ -982,58 +1007,15 @@ def _auth(argv: list[str]) -> int:
 
 
 def _publish(argv: list[str]) -> int:
-    from marketplaces import credentials
-    from publishing import plan, remix
+    from publishing import cli
 
-    p = _parse(argv, value_flags={"--platform"}, bool_flags={"--dry-run", "--yes", "--json"})
-    opts = p.opts
-    project = Path(_one_positional(p.positional, "PROJECT_DIR")).expanduser()
-    if "--platform" not in opts:
-        raise InvalidArgument("--platform", "(missing)", [*plan.PLATFORMS, "all"], command="models")
-    if "--yes" in opts and "--dry-run" in opts:
-        raise UsageError("--yes and --dry-run contradict each other", command="models",
-                         remediation=["Drop --dry-run to publish, or drop --yes to see the plan."])
-    if not project.is_dir():
-        raise InputNotFound(str(project), command="models")
-    dry_run = "--yes" not in opts
-    ev = plan.evaluate(project, plan.platform_list(opts["--platform"]), remix.marketplace_license)
-    if "--json" in opts:
-        print(json.dumps(plan.to_json(ev, dry_run=dry_run), indent=2, ensure_ascii=False))
-    else:
-        print(plan.render_text(ev, dry_run=dry_run))
-    problems = ev.all_problems()
-    if problems:
-        raise UsageError(f"publish refused: {len(problems)} problem(s); nothing was sent", command="models",
-                         remediation=["The REFUSED list above has each problem and its fix."])
-    if dry_run:
-        return 0
-    # Credentials first, so a missing token cannot leave one platform published and the rest not.
-    token = credentials.thingiverse_upload_token() if any(p.platform == "thingiverse" for p in ev.plans) else ""
-    results = [_publish_one(item, token, to_stderr="--json" in opts) for item in ev.plans]
-    return 0 if all(results) else 1
+    return cli.publish(argv, _parse)
 
 
-def _publish_one(item: PlatformPlan, token: str, *, to_stderr: bool = False) -> bool:
-    """Publish one platform's plan; True when it went through, False after printing why not.
+def _offer(argv: list[str]) -> int:
+    from publishing import cli
 
-    With `--json` stdout holds only the plan document, so progress lines go to stderr.
-    """
-    from publishing import execute
-
-    out = sys.stderr if to_stderr else sys.stdout
-    try:
-        if item.platform == "thingiverse":
-            print(f"thingiverse: published {execute.publish_thingiverse(item, token=token)}", file=out)
-            return True
-        outcome = execute.publish_browser(item)
-        print(f"{item.platform}: {outcome.message}", file=out)
-        return outcome.ok
-    except ThreeDError as exc:
-        print(exc.render(), file=sys.stderr)
-        return False
-    except OSError as exc:  # lock file, temp dir, unreadable upload: say so instead of a traceback
-        print(f"{item.platform}: publish failed: {exc}", file=sys.stderr)
-        return False
+    return cli.offer(argv, _parse)
 
 
 def _rank_flags() -> dict[str, Any]:
@@ -1175,6 +1157,7 @@ SUBCOMMANDS = {
     "download": _download,
     "analyze": _analyze,
     "publish": _publish,
+    "offer": _offer,
     "auth": _auth,
 }
 
@@ -1200,7 +1183,7 @@ def run(argv: list[str]) -> int:
 COMMAND = Command(
     name="models",
     group="LIBRARIES",
-    summary="search/show/download models on Printables, MakerWorld, Thingiverse, Cults3D; publish a project",
+    summary="search/show/download models on Printables, MakerWorld, Thingiverse, Cults3D; publish/offer a project",
     usage=USAGE,
     run=run,
 )

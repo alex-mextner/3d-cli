@@ -12,8 +12,9 @@ with a machine-readable error `code`, so a key press never crashes the UI.
 
 OWNERSHIP: slice S0 (#571) fixed the signatures and the result shape; each other slice implemented its actions
 (`OWNERS`). An action whose slice has not landed raises `NotImplementedByDesign(owner_issue)`: a typed seam for
-that slice, not a fake feature. The model browser (S7, #578) implements `open_slicer`, `launch_agent`,
-`open_browser` and `preview`; the programs they start come from `library/launch.py`.
+that slice, not a fake feature. The table-photo / publish slice (S8, #579) implements `photo` (register a file,
+or capture the table photo with a lifted bed) and `publish`; the model browser (S7, #578) implements
+`open_slicer`, `launch_agent`, `open_browser` and `preview`; the programs they start come from `library/launch.py`.
 
 IMPORT RULE: stdlib-only at module top (checked by tests/test_imports.py); the library DB is imported lazily
 inside the actions that need it.
@@ -700,16 +701,53 @@ def photo(
     z_mm: float | None = None,
     capture: bool = False,
     db_path: str | None = None,
+    source_key: str | None = None,
+    printer: str | None = None,
+    lift: str | float = "auto",
+    camera: str | None = None,
+    part_height_mm: float | None = None,
+    out: str | None = None,
+    dry_run: bool = True,
 ) -> ActionResult:
-    """Attach a photo of a make/design (`kind` in PHOTO_KINDS): register `path`, or `capture` one.
+    """Attach a photo of a make/design (`kind` in PHOTO_KINDS): register the file at `path`, or `capture` one.
 
-    Registering an existing file is implemented here; `capture=True` (top camera, bed lift to `z_mm`) belongs
-    to the make/photo slice. `data`: `{photo: uid, path, kind}`.
+    Registering (`path` + exactly one of `make`/`design`) is immediate; `source_key` makes it idempotent.
+    `capture=True` takes the table photo of a MAKE: the printer's bed is lifted to `lift` (`"auto"` or a toolhead
+    Z in mm) by the guarded Z move of `bed_view`, a fresh camera frame is saved to `out`, the bed is put back
+    (also on error) and the file is registered with its `z_mm`. `dry_run` (default) only reads the printer and
+    reports the lift it would make. A busy printer, an unknown height of the parts on the bed or a lift outside
+    the allowed Z range raise `GateFailure` (nothing moves). `data`: `{photo: uid|None, path, kind, z_mm}`; for a
+    capture also `{make, plan, moved, restored, restore_error, fresh, dry_run}`.
     """
     if kind not in PHOTO_KINDS:
         raise InvalidArgument("kind", kind, list(PHOTO_KINDS), command="library")
-    if capture or path is None:
-        raise NotImplementedByDesign("photo", 579, "photo capture with bed lift")
+    if capture:
+        if make is None or design is not None or path is not None:
+            raise InvalidArgument(
+                "capture",
+                "make/design/path",
+                [
+                    "--make ID only: a capture belongs to a make and takes its file from the camera"
+                ],
+                command="photo",
+            )
+        from library import capture as capturing
+
+        return capturing.capture(
+            make=make,
+            kind=kind,
+            printer=printer,
+            lift=lift,
+            camera=camera,
+            part_height_mm=part_height_mm,
+            out=out,
+            dry_run=dry_run,
+            db_path=db_path,
+        )
+    if path is None:
+        raise InvalidArgument(
+            "path", "(missing)", ["a photo file, or capture=True"], command="library"
+        )
     if (make is None) == (design is None):
         raise InvalidArgument(
             "make/design",
@@ -720,40 +758,35 @@ def photo(
     from pathlib import Path
 
     from library import db as librarydb
+    from library import records
 
     resolved = Path(path).resolve()
     if not resolved.is_file():
         raise InvalidArgument("path", path, ["an existing file"], command="library")
     conn = librarydb.open_library(db_path)
     try:
-        column, table, uid = (
-            ("make_id", "make", make) if make else ("design_id", "design", design)
-        )
-        row = conn.execute(f"SELECT id FROM {table} WHERE uid = ?", (uid,)).fetchone()
-        if row is None:
-            return error_result(
-                "photo",
-                [
-                    issue(
-                        "not_found",
-                        f"{table} {uid!r} does not exist",
-                        ["Use the uid printed by `queue`."],
-                    )
-                ],
+        try:
+            row, created = records.add_photo(
+                conn,
+                path,
+                make=make,
+                design=design,
+                kind=kind,
+                z_mm=z_mm,
+                source_key=source_key,
             )
-        ins = librarydb.insert_row(
-            conn,
+        except records.RecordNotFound as exc:
+            return error_result(
+                "photo", [issue("not_found", exc.message, exc.remediation)]
+            )
+        return ok_result(
             "photo",
             {
-                column: int(row["id"]),
+                "photo": str(row["uid"]),
                 "path": str(resolved),
                 "kind": kind,
-                "z_mm": z_mm,
-                "taken_at": librarydb.db.utc_now(),
+                "created": created,
             },
-        )
-        return ok_result(
-            "photo", {"photo": ins.uid, "path": str(resolved), "kind": kind}
         )
     finally:
         conn.close()
@@ -764,15 +797,105 @@ def publish(
     *,
     platforms: Sequence[str] = (),
     dry_run: bool = True,
+    kind: str = "auto",
+    of: str | None = None,
+    make: str | None = None,
+    allow_nonprintable: Sequence[str] = (),
+    reason: str = "",
+    drop_nonprintable: bool = False,
     db_path: str | None = None,
 ) -> ActionResult:
-    """Publish a design to `platforms`; `dry_run` (default) plans only. Records `publication` rows.
+    """Publish a design to `platforms` (default: all); `dry_run` (default) plans only and writes nothing.
 
-    `data`: `{design: uid, publications: [{platform, state, url}]}`.
+    The design's `project_dir` (set by `3d make add --project-dir` / `queue`) is the project that is published;
+    `kind`: auto | original | remix | make (`of` = the source model, `make` = the make whose photos go).
+    Publishing (`dry_run=False`) records `publication` rows (planned -> draft|published|failed), the `remix_of`
+    relation and the render photos. A refused plan (licence, missing 3mf/scad, a non-printable part in the
+    publish set) is an `ok: false` result carrying the whole plan; nothing is sent.
+    `data`: `{design: uid, kind, dry_run, publications: [{platform, state, url}], plan: {3d.publish/1}}`.
     """
-    raise NotImplementedByDesign(
-        "publish", 579, "publishing (lands #564 models publish)"
+    from pathlib import Path
+
+    from library import db as librarydb
+    from library import records
+    from publishing import flow, plan
+
+    conn = librarydb.open_library(db_path)
+    try:
+        row = records.resolve(conn, "design", design, command="publish")
+    finally:
+        conn.close()
+    if not row["project_dir"]:
+        return error_result(
+            "publish",
+            [
+                issue(
+                    "no_project",
+                    f"design {row['name']!r} has no project directory to publish",
+                    ["Record it: `3d make add --design NAME --project-dir DIR`."],
+                )
+            ],
+        )
+    prep = flow.prepare(
+        Path(str(row["project_dir"])),
+        platform=",".join(platforms) or "all",
+        kind=kind,
+        of=of,
+        design=str(row["name"]),
+        make=make,
+        db_path=db_path,
+        allow=tuple(allow_nonprintable),
+        reason=reason,
+        drop=drop_nonprintable,
     )
+    doc = plan.to_json(prep.ev, dry_run=dry_run)
+    data: dict[str, Any] = {
+        "design": str(row["uid"]),
+        "kind": prep.kind,
+        "dry_run": dry_run,
+        "publications": [],
+        "plan": doc,
+    }
+    if prep.ev.gate is not None or prep.ev.all_problems():
+        refusals = [prep.ev.gate.message] if prep.ev.gate is not None else []
+        refusals += list(prep.ev.all_problems())
+        return error_result(
+            "publish",
+            [
+                issue("refused", r, ["Fix it, then run the plan again."])
+                for r in refusals
+            ],
+            data,
+        )
+    if dry_run:
+        data["publications"] = [
+            {"platform": p.platform, "state": "planned", "url": None}
+            for p in prep.ev.plans
+        ]
+        return ok_result(
+            "publish",
+            data,
+            [issue("dry_run", "nothing was sent", ["Pass dry_run=False to publish."])],
+        )
+    outcomes = flow.send(prep)
+    data["publications"] = [
+        {"platform": o.platform, "state": o.state, "url": o.url} for o in outcomes
+    ]
+    failed = [o for o in outcomes if not o.ok]
+    if failed:
+        return error_result(
+            "publish",
+            [
+                issue(
+                    "publish_failed",
+                    f"{o.platform}: {o.message}",
+                    ["See the message; the row stays `failed`."],
+                )
+                for o in failed
+            ],
+            data,
+        )
+    return ok_result("publish", data)
 
 
 def _get_or_create_design(conn: Any, name: str) -> tuple[int, str]:
@@ -814,8 +937,8 @@ OWNERS: dict[str, int | None] = {
     "open_slicer": 578,
     "launch_agent": 578,
     "queue": None,
-    "photo": 579,
-    "publish": 579,
+    "photo": None,
+    "publish": None,
     "open_browser": 578,
     "preview": 578,
 }

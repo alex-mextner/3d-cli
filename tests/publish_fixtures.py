@@ -1,6 +1,7 @@
 """Fixtures for the `3d models publish` tests: a throwaway project directory laid out like a
 garage-band project, and a loopback Thingiverse that records the create / upload / finalize /
 publish calls. No test touches a real site."""
+
 from __future__ import annotations
 
 import json
@@ -80,6 +81,73 @@ class FakeThingiverse:
 
         self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+
+    def close(self) -> None:
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+
+DATA = Path(__file__).resolve().parent / "data" / "publish"
+CULTS_USER, CULTS_KEY = "tester", "cults-test-key"
+HOSTED = """\
+hosted:
+  wall_plug.3mf: https://files.example.com/wall_plug.3mf
+  wall_plug.scad: https://files.example.com/wall_plug.scad
+  wall_plug.stl: https://files.example.com/wall_plug.stl
+  iso.png: https://files.example.com/iso.png
+"""
+
+
+def three_d_yaml(project: Path, parts: str) -> None:
+    """`parts` is the YAML body under `parts:` (the roles of the project's parts)."""
+    (project / "3d.yaml").write_text(
+        "name: wall-plug\nparts:\n" + parts, encoding="utf-8"
+    )
+
+
+class FakeCults:
+    """A loopback Cults3D GraphQL endpoint answering with the fixtures of tests/data/publish/ (responses
+    shaped after the community-documented API, github.com/CheekyCodexConjurer/cults3d-api-docs — NOT recorded
+    from a real account). Every request is kept in `calls` as (authorization header, query, variables)."""
+
+    def __init__(self, *, create: str = "cults_create") -> None:
+        self.calls: list[tuple[str, str, dict[str, object]]] = []
+        fake = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args: object) -> None:
+                return
+
+            def do_POST(self) -> None:  # noqa: N802 — http.server API
+                body = json.loads(
+                    self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                    or b"{}"
+                )
+                query = str(body.get("query") or "")
+                fake.calls.append(
+                    (
+                        self.headers.get("Authorization", ""),
+                        query,
+                        body.get("variables") or {},
+                    )
+                )
+                name = (
+                    "cults_categories"
+                    if "categories" in query
+                    else "cults_licenses"
+                    if "licenses" in query
+                    else create
+                )
+                data = (DATA / f"{name}.json").read_bytes()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}/graphql"
         threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
 
     def close(self) -> None:
