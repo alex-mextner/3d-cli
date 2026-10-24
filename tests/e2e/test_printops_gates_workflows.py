@@ -418,7 +418,7 @@ def test_preflight_catches_a_plate_sliced_with_stock_presets(tmp_path: Path) -> 
     )
     for argv, message in (
         (["--accept", "preset_match"], "--accept needs --reason"),
-        (["--accept", "plate_material", "--reason", "x"], "accepted: preset_match"),
+        (["--accept", "plate_material", "--reason", "x"], "accepted: mix_calibration, preset_match"),
         (["--accept", "", "--reason", "x"], "--accept needs a check name"),
         (["--reason", "x"], "--reason belongs to --accept"),
     ):

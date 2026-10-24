@@ -435,7 +435,11 @@ def check_mix_layers(gcode: Path, project: Path | None, project_source: str) -> 
 
     result = preflight_check(str(gcode), str(project) if project else None)
     lines = result.get("lines")
-    where = project_source if project is not None else "no project 3MF: alternating objects only"
+    where = (
+        project_source
+        if project is not None
+        else "no project 3MF: alternating objects only"
+    )
     return Check(
         "mix layers",
         str(result.get("status", FAIL)),
@@ -652,7 +656,9 @@ def check_bed_verdict(v: dict[str, Any]) -> Check:
     frame = [f"frame: {v['frame']}"] if v.get("frame") else []
     why = str(v.get("reason") or "")
     if view.get("action") == "moved" and not view.get("restored"):
-        frame.append(f"BED NOT PUT BACK to Z {view.get('moved_from')}: {view.get('restore_error')}")
+        frame.append(
+            f"BED NOT PUT BACK to Z {view.get('moved_from')}: {view.get('restore_error')}"
+        )
         if plate != "missing" and bed != "occupied":
             return Check("bed", WARN, f"bed state {bed} ({when}): {why}", frame)
     if plate == "missing":
@@ -678,7 +684,12 @@ def check_bed(
     camera check (`bed_state.py status`). With `watch.bed.auto_view` and an idle printer that check
     moves the bed in Z to where the camera sees the whole plate and back (`move=False`: --no-move).
     A check that cannot run is a WARN, never a crash."""
-    from printer_ops.bed import STATUS_MOVE_TIMEOUT_S, STATUS_TIMEOUT_S, bed_config, status_argv
+    from printer_ops.bed import (
+        STATUS_MOVE_TIMEOUT_S,
+        STATUS_TIMEOUT_S,
+        bed_config,
+        status_argv,
+    )
 
     cfg = bed_config(device)
     if not cfg.enabled:
@@ -687,10 +698,14 @@ def check_bed(
             SKIP,
             f"bed camera check off for {device.name} (watch.bed.enabled in {device.source})",
         )
-    if timeout is None:  # a move is two Z moves, a settle wait and a frame wait; never kill it half-way
+    if (
+        timeout is None
+    ):  # a move is two Z moves, a settle wait and a frame wait; never kill it half-way
         timeout = STATUS_MOVE_TIMEOUT_S if move and cfg.auto_view else STATUS_TIMEOUT_S
     try:
-        argv = status_argv(device.name, max_age=cfg.stale_s, move="auto" if move else "never")
+        argv = status_argv(
+            device.name, max_age=cfg.stale_s, move="auto" if move else "never"
+        )
         r = runner(argv, capture_output=True, text=True, timeout=timeout)
     except Exception as exc:  # no runtime / timeout
         return Check("bed", WARN, f"bed check could not run: {exc}")
@@ -749,5 +764,7 @@ def run_preflight(
     if printops is not None:
         from printer_ops.printops_checks import run_checks
 
-        report.checks.extend(run_checks(gcode, printops, origin=origin or gcode).checks)
+        report.checks.extend(
+            run_checks(gcode, printops, origin=origin or gcode, project=project).checks
+        )
     return report

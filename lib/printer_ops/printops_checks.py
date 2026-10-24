@@ -34,6 +34,11 @@ WHAT: the G-code's per-tool facts (slicer footer + body temperatures) checked ag
                            names a filament preset (#294), `; filament_settings_id` equals it and
                            `; filament_flow_ratio` / `; pressure_advance` / `; enable_pressure_advance`
                            equal its resolved values (#506)
+    mix_calibration        every mixed filament the project 3MF's plate prints has a current
+                           `mix_color` record for this printer (printer_ops/mix_calibration.py,
+                           #418): never measured / stale / expired → WARN naming
+                           `3d mix tester`; measured ΔE to the part's model colour above the
+                           policy limit → hard (`--accept mix_calibration` logs the acceptance in 3d-api)
   calibration_current (#167) is added when the calibration engine lands.
 
 LEVELS: PASS / WARN / FAIL / UNVERIFIED. A check whose input is missing (no 3d-api, no spool
@@ -319,11 +324,12 @@ class PrintopsContext:
     state: Mapping[str, Any] | None = None
     accept: frozenset[str] = frozenset()  # checks whose FAIL is accepted (ACCEPTABLE); needs `reason`
     reason: str = ""
+    client: Any = None  # an ApiClient for record lookups (tests, in-process 3d-api); else built from `api`
 
 
 # Checks `--accept NAME --reason TEXT` may downgrade from FAIL to WARN: a mismatch the user knowingly
 # prints (other presets on purpose, #506). The reason is printed under the WARN.
-ACCEPTABLE = frozenset({"preset_match"})
+ACCEPTABLE = frozenset({"preset_match", "mix_calibration"})
 
 
 def context_from_options(
@@ -477,6 +483,10 @@ class _Ctx:
     slicer: Mapping[str, str] = field(default_factory=dict)  # fleet `slicer:` presets
     model: str = ""  # the fleet printer's model (resolves its vendor's Orca presets)
     colourless: bool = False  # the slicer found no filament colour in the project (footer = profile default)
+    project: Path | None = None  # the plate's project 3MF (which mixes it prints), when there is one
+    client: Any = None  # printops.client.ApiClient for lookups the state does not carry (mix records)
+    accept: frozenset[str] = frozenset()  # checks whose hard findings the owner accepted (--accept)
+    reason: str = ""  # the written reason of --accept
 
     @property
     def known(self) -> bool:
@@ -1375,6 +1385,23 @@ def _printer_process_findings(c: _Ctx) -> list[Finding]:
     return out
 
 
+def check_mix_calibration(c: _Ctx) -> list[Finding]:
+    """Issue #418: every mix the plate prints has a current `mix_color` record (see mix_calibration.py)."""
+    from printer_ops.mix_calibration import check_mix_calibration as check
+
+    return check(c)
+
+
+def _client(ctx: PrintopsContext) -> Any:
+    """The 3d-api client the mix lookup uses: the one given, else one for --printops-api/$PRINTOPS_API
+    (never in --offline mode, which contacts nothing)."""
+    from printops.client import ApiClient
+
+    if ctx.client is not None or ctx.offline or not ctx.api:
+        return ctx.client
+    return ApiClient(ctx.api, ctx.token)
+
+
 CHECKS = {
     "printer_profile_match": check_printer_profile,
     "nozzle_compat": check_nozzle,
@@ -1387,6 +1414,7 @@ CHECKS = {
     "enclosure_material": check_enclosure,
     "plate_material": check_plate,
     "preset_match": check_preset_match,
+    "mix_calibration": check_mix_calibration,
 }
 
 
@@ -1424,6 +1452,7 @@ def run_checks(
     ctx: PrintopsContext,
     *,
     origin: Path | None = None,
+    project: Path | None = None,
     now: datetime.datetime | None = None,
 ) -> Result:
     """Every PrintOps gate for `gcode`. `origin` is the real location of a snapshot copy (the
@@ -1464,6 +1493,10 @@ def run_checks(
         slicer=dict(fp.slicer),
         model=fp.model,
         colourless=project_has_no_filament_colour(origin or gcode, gcode),
+        project=project,
+        client=_client(ctx),
+        accept=ctx.accept,
+        reason=ctx.reason,
     )
     for name, fn in CHECKS.items():
         level = policy.level(name, fp.name)
@@ -1485,6 +1518,8 @@ def run_checks(
             )
             for f in raw
         ]
+        if not findings:  # nothing to judge (e.g. mix_calibration on a plate without mixes)
+            continue
         result.findings.extend(findings)
         result.checks.append(_summarise(name, findings))
     return result

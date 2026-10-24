@@ -1580,7 +1580,7 @@ def test_preset_match_accept_needs_a_reason_and_only_names_preset_match() -> Non
     )
     with pytest.raises(UsageError, match="--accept needs --reason"):
         ctx(accept="preset_match")
-    with pytest.raises(UsageError, match="accepted: preset_match"):
+    with pytest.raises(UsageError, match="accepted: mix_calibration, preset_match"):
         ctx(accept="plate_material", reason="why")
     with pytest.raises(UsageError, match="--reason belongs to --accept"):
         ctx(reason="why")
