@@ -56,7 +56,10 @@ always recomputed** from the per-dimension scores; a model's own "mean" field is
 | `--stability-n N` | Stability samples per judge (default: `5`; `0` disables the flag). |
 | `--feature-context T` | Caller-supplied salient-feature taxonomy (kept out of core). |
 | `--config PATH` | Backend JSON config (default: `~/.config/3d-cli/ai.json`). |
-| `--json` | Emit the full `VisualScore` as JSON (per-dim, per-judge stability, notes). |
+| `--json` | Emit the full `VisualScore` as JSON (per-dim, per-judge stability, notes) plus `all_runs`, `rationale` and `gate`. |
+| `--rubric FILE.json` | Your own rubric instead of the four built-in dimensions: a JSON list of `{"key", "anchor_0", "anchor_2", "anchor_4", "label"?}`, e.g. one dimension per marking region. `3d judge crop_render.png crop_ref.png --rubric nostril.json` |
+| `--min-dim X` | Gate: exit 1 unless **every** dimension's mean over all reads (the canonical read and every stability sample) is ≥ `X`, e.g. `3d judge crop_render.png crop_ref.png --rubric nostril.json --min-dim 3 --stability-n 2`. A blind verdict passes nothing. |
+| `--max-mean X` | Gate: exit 1 unless the mean over all reads is ≤ `X` — a negative control: `3d judge front.png back.png --max-mean 2` (two different views must score low). |
 
 ## Result labels
 
@@ -86,6 +89,23 @@ When `LABEL=blind`, the numeric fields are masked (`MEAN=NA`, `DIM.*=NA`) so a c
 keying on `MEAN` alone cannot read a text-only verdict as a real visual score. The raw
 per-judge numbers remain available in `--json`, guarded by the `blind` flags.
 `CROSS_JUDGE_SPREAD` is `NA` for a single judge.
+
+## Gates and controls
+
+`--min-dim` and `--max-mean` turn the score into a PASS/FAIL (exit `0` / `1`, `GATE=PASS|FAIL` in the
+output, `gate` in `--json`). They gate on `RUNS_DIM.*` / `RUNS_MEAN`, the means over **every** read of every
+sighted judge (the canonical read plus the `--stability-n` samples): `DIM.*` and `MEAN` are the canonical
+reads only, and one VLM read of one dimension moves by a point between calls. `RUNS` is the number of reads.
+If the reply has a `rationale` string (ask for one in `--feature-context`) it is printed as `RATIONALE=`.
+
+A rubric is only worth gating on when it passes its own controls: the reference against itself must score 4
+everywhere, and two different views must score low.
+
+```bash
+3d judge ref.png ref.png --rubric nostril.json --min-dim 4     # control: the reference against itself must score 4
+3d judge front.png back.png --max-mean 2                       # control: two different views must score low
+3d judge crop_render.png crop_ref.png --rubric nostril.json --min-dim 3 --stability-n 2   # a feature passes at >= 3
+```
 
 ## Examples
 
