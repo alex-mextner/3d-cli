@@ -134,6 +134,10 @@ gates:
       why: "the Cool Plate is for low bed temperatures (PLA/TPU); high-temperature materials do not stick (https://wiki.bambulab.com/en/general/filament-guide-material-table)"
 
 calibrations:
+  # Layers of the calibration plates' shared underlay (#320): a multi-head printer prints 1 or 2 solid
+  # layers in its own contrasting filament; a single-head printer always prints exactly 1. Outside 1-2
+  # fails `3d lint`.
+  underlay_layers: 1
   # How strictly a missing or stale calibration is enforced (schema: lib/printops/calibration_policy.py;
   # catalog of kinds: fleet/calibrations.yaml). block = print-preflight FAIL (bypass:
   # `--accept calibration:<kind> --reason …`, logged), warn = WARN, off = not reported.

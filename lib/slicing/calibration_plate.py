@@ -86,6 +86,7 @@ from slicing.calibration_gen import (
     PresetChoice,
     chosen_presets,
 )
+from slicing.calibration_underlay import SHEET_NAME, Underlay, shift_z
 
 Phase = Literal["layer", "sequential"]
 Rect = tuple[float, float, float, float]  # x0, y0, x1, y1 on the bed
@@ -143,6 +144,12 @@ class PlateObject:
     base: tuple[Rect, ...] = ()  # pieces of the bed footprint (default: base_rects())
     brim: float | None = None  # brim width, mm; None: the plate's rule (brim_width)
     arc_fitting: bool = False  # this object's G-code from a slice with arc fitting on
+    # The test's place on the underlay (calibration_underlay): `on` stands on it, `cutout` on the
+    # bare bed in a hole of it, `off` lies outside it (keeps the brim rule), `sheet` is the
+    # underlay itself. `test` is the plate's test id; `movable`: has a part that moves or comes loose.
+    underlay: Literal["on", "cutout", "off", "sheet"] = "on"
+    test: str = ""
+    movable: bool = False
 
     def mesh(self) -> str:
         return self.stl or boxes_stl(list(self.boxes))
@@ -202,6 +209,18 @@ class Plate:
 
 
 @dataclass(frozen=True)
+class UnderlayHeads:
+    """The two heads of a multi-head plate: the underlay's and the tests'. `label` is the fleet's
+    head label (T4), `tool` the G-code tool command (T3); `delta_e` the contrast between them."""
+
+    underlay_label: str
+    underlay_tool: str
+    tests_label: str
+    tests_tool: str
+    delta_e: float
+
+
+@dataclass(frozen=True)
 class PlateContext:
     """What a plate declaration needs to know about the printer and the filament."""
 
@@ -218,6 +237,12 @@ class PlateContext:
     pa: tuple[float, ...] = (
         COMBO_PA_VALUES  # PA line values (material default or --pa-range)
     )
+    # Layers of the shared underlay (calibration_underlay): the plate stands on it by default; None
+    # (--no-underlay) prints on the bare bed with the brim rule.
+    underlay_layers: int | None = 1
+    # Multi-head printer (#320): (underlay head, tests' head) as head labels and G-code tools, e.g.
+    # (Head("T4", "T3"), Head("T1", "T0")); None: one head, no tool change.
+    heads: UnderlayHeads | None = None
 
     def wants(self, test: str) -> bool:
         return self.tests is None or test in self.tests
@@ -271,6 +296,8 @@ def make_context(
     tests: frozenset[str] | None = None,
     pa: tuple[float, ...] = COMBO_PA_VALUES,
     presets: PresetChoice | None = None,
+    underlay_layers: int | None = 1,
+    heads: UnderlayHeads | None = None,
 ) -> PlateContext:
     p, idx = chosen_presets(model, slicer, material, presets)
     if material not in p.filament:
@@ -295,6 +322,8 @@ def make_context(
         first_layer_extrusion(proc, fil, mach),
         tests,
         pa,
+        underlay_layers,
+        heads,
     )
 
 
@@ -423,7 +452,10 @@ def _e(line: str) -> float:
 
 
 def apply_hooks(
-    text: str, objects: tuple[PlateObject, ...], retract_f: float = 2400.0
+    text: str,
+    objects: tuple[PlateObject, ...],
+    retract_f: float = 2400.0,
+    floor: float = 0.0,
 ) -> str:
     """Insert every object's before/enter/band/leave/after G-code and run band transforms on its
     own lines (see the module docstring). Extrusion stays balanced across object boundaries:
@@ -457,7 +489,7 @@ def apply_hooks(
         if m := _ZMARK.match(line):
             nz = float(m.group(1))
             if nz < z - 1e-6:  # by-object printing: the next object's first layer
-                z_lo = 0.0
+                z_lo = floor  # a lifted object's first layer spans [floor, floor + h]
             elif nz > z + 1e-6:
                 z_lo = z
             z = nz
@@ -593,17 +625,176 @@ def _first_xy(lines: list[str]) -> tuple[float, float]:
     raise GenError("sequential slice has no XY move")
 
 
+def _after_layers(body: list[str], z: float) -> int:
+    """Index in `body` where the layers up to height `z` are done: the first layer change above it
+    (the end of the body when there is none)."""
+    for i, ln in enumerate(body):
+        if (m := _ZMARK.match(ln)) and float(m.group(1)) > z + 1e-6:
+            return i - 1 if i and body[i - 1].startswith(";LAYER_CHANGE") else i
+    return len(body)
+
+
+def _close_visits(body: list[str], cut: int) -> list[str]:
+    """`body` with no visit left open across a layer change up to `cut` (the layer change above the
+    underlay). Orca closes the last visit of a layer after the next layer's header: the header
+    (`;LAYER_CHANGE` … `G92 E0`), then that visit's retraction and wipe, then its
+    EXCLUDE_OBJECT_END. The retraction and wipe move before the header, so every visit of the
+    underlay's layers ends inside its own layer: the objects can be reordered, and a head change or
+    a hand-written block can start at a layer change without cutting a visit in two (the
+    retraction would run on the new head)."""
+    out = list(body)
+    for h in reversed(
+        [i for i in range(min(cut + 1, len(out))) if out[i].startswith(";LAYER_CHANGE")]
+    ):
+        last = next(
+            (
+                "start" if _START.match(out[i]) else "end"
+                for i in range(h - 1, -1, -1)
+                if _START.match(out[i]) or _END.match(out[i])
+            ),
+            "end",
+        )
+        if last != "start":
+            continue
+        he = h + 1
+        while he < len(out) and (
+            out[he].startswith(";") or out[he].strip() in ("", "G92 E0")
+        ):
+            he += 1
+        e = next((i for i in range(he, len(out)) if _END.match(out[i])), None)
+        if e is not None:
+            moved = out[he : e + 1]
+            del out[he : e + 1]
+            out[h:h] = moved
+    return out
+
+
+def _reorder_visits(body: list[str], cut: int, rank: Callable[[str], int]) -> list[str]:
+    """`body` with the visits of every layer in `body[:cut]` stably sorted by `rank(name)`. Orca
+    orders the objects of a layer by its own rules, so the underlay would not come first. A layer
+    is left alone unless its visits are back to back and each one enters with a z-hop and ends
+    retracted (the same condition swap_visits needs for a visit to stand anywhere)."""
+    marks = [i for i in range(cut) if body[i].startswith(";LAYER_CHANGE")] + [cut]
+    out = list(body)
+    for a, b in zip(marks, marks[1:], strict=False):
+        spans: list[tuple[int, int, str]] = []
+        start: tuple[int, str] | None = None
+        for i in range(a, b):
+            if m := _START.match(body[i]):
+                start = (i, m.group(1))
+            elif _END.match(body[i]) and start is not None:
+                spans.append((start[0], i, start[1]))
+                start = None
+        if len(spans) < 2 or any(
+            spans[k][1] + 1 != spans[k + 1][0] for k in range(len(spans) - 1)
+        ):
+            continue
+        blocks = [(name, body[s0 : e0 + 1]) for s0, e0, name in spans]
+        if not all(_visit_ends(blk)[0] for _, blk in blocks):
+            continue
+        ordered = sorted(blocks, key=lambda nb: rank(nb[0]))
+        if [n for n, _ in ordered] == [n for n, _ in blocks]:
+            continue
+        # a visit may rely on the acceleration and fan its predecessor set (Orca writes them only
+        # on change), and every predecessor changed: each visit gets the state it had before it
+        before = _states_at(body, {s0 for s0, _, _ in spans})
+        entry = {name: before[s0] for s0, _, name in spans}
+        moved = [ln for name, blk in ordered for ln in (*entry[name], *blk)]
+        out[spans[0][0] : spans[-1][1] + 1] = moved
+    return out
+
+
+def first_object(text: str) -> str | None:
+    """The first object the G-code prints."""
+    for ln in text.split("\n"):
+        if m := _START.match(ln):
+            return m.group(1)
+    return None
+
+
+def _tool_select(ctx: PlateContext, tool: str) -> list[str]:
+    """Select a head and bring its nozzle to the plate's temperature (the slice is single-filament:
+    its start G-code heats only the head it knows)."""
+    return [tool, f"M109 S{ctx.base_temp}"]
+
+
+def _assign_heads(
+    ctx: PlateContext, body: list[str], cut: int, bare: frozenset[str]
+) -> tuple[list[str], int, bool]:
+    """`body[:cut]` (the underlay's layers) with the heads selected: the underlay's head for the
+    sheet and the tests' feet, the tests' head for the objects that stand on the bare bed (`bare`:
+    their first layers are the test); then the tests' head from `cut` on. Returns the new body, the
+    index where the layers above the underlay (and the hand-written blocks) start, and whether the
+    head changed at that index (the last visit ran on the underlay's head)."""
+    heads = ctx.heads
+    assert heads is not None
+    out: list[str] = []
+    current: str | None = None
+    for ln in body[:cut]:
+        if m := _START.match(ln):
+            want = heads.tests_tool if m.group(1) in bare else heads.underlay_tool
+            if want != current:
+                out += _tool_select(ctx, want)
+                current = want
+        out.append(ln)
+    switched = current != heads.tests_tool
+    if switched:
+        out += _tool_select(ctx, heads.tests_tool)
+    return [*out, *body[cut:]], len(out), switched
+
+
 def splice(
-    ctx: PlateContext, a_text: str, b_text: str | None, custom: tuple[CustomBlock, ...]
+    ctx: PlateContext,
+    a_text: str,
+    b_text: str | None,
+    custom: tuple[CustomBlock, ...],
+    underlay_h: float = 0.0,
+    bare: frozenset[str] = frozenset(),
+    seq_lift: float | None = None,
 ) -> str:
+    """START_PRINT → [the underlay's layers] → hand-written blocks → layer objects → lift →
+    sequential objects. With an underlay (`underlay_h` > 0) the blocks follow the layers up to
+    the underlay's top (they print on it) and the sequential slice is lifted by `seq_lift` (default
+    the underlay's height; 0 when its objects stand outside it). On a multi-head printer the heads
+    are selected per object (`bare`: the objects of the bare bed print with the tests' head)."""
     head, body_a, tail = _split(a_text)
     head = _strip_thumbnails(head)
     custom_g = [ln for block in custom for ln in block.lines]
+    if underlay_h > 0:
+        cut = _after_layers(body_a, underlay_h)
+        body_a = _close_visits(body_a, cut)
+        cut = _after_layers(body_a, underlay_h)
+        end_state = (
+            _SlicerState()
+        )  # what the slicer believes is set after the underlay's layers
+        for ln in body_a[:cut]:
+            end_state.see(ln)
+        body_a = _reorder_visits(
+            body_a,
+            cut,
+            lambda n: 0 if n == SHEET_NAME else 2 if n in bare and ctx.heads else 1,
+        )
+        owed = _retract_owed(body_a[:cut])
+        changed = False
+        if ctx.heads is not None:
+            body_a, cut, changed = _assign_heads(ctx, body_a, cut, bare)
+        # The blocks assume a primed nozzle: de-retract what the slicer left retracted, retract it
+        # again after (the next visit de-retracts as it always does), and put fan and limits back.
+        # After a head change the new head has its own prime and nothing is owed on it.
+        owed = 0.0 if changed else owed
+        prime = [f"G1 E{owed:.5f} F{ctx.ex.retract_f:.0f}"] if owed > 1e-6 else []
+        unprime = [f"G1 E-{owed:.5f} F{ctx.ex.retract_f:.0f}"] if owed > 1e-6 else []
+        after = [*prime, *custom_g, *unprime, *end_state.resend()]
+        body_a = body_a[:cut] + after + body_a[cut:]
+        custom_g = []
     parts = head[:-1]
     start = head[-1]
     body_b: list[str] = []
     if b_text is not None:
         head_b, body_b, _ = _split(b_text)
+        lift_b = underlay_h if seq_lift is None else seq_lift
+        if lift_b > 0:  # sliced alone on the bed, printed on the finished underlay
+            body_b = shift_z(body_b, lift_b)
         defines = [ln for ln in head_b if ln.startswith("EXCLUDE_OBJECT_DEFINE")]
         last_def = max(
             (i for i, ln in enumerate(parts) if ln.startswith("EXCLUDE_OBJECT_DEFINE")),
@@ -626,15 +817,10 @@ def splice(
     return "\n".join(ln for ln in lines if not ln.startswith("M73 "))
 
 
-def restore_prime(text: str, retract_f: float) -> str:
-    """The layer phase ends retracted (its last retraction, as rewritten by any band), and the
-    sequential slice starts as if primed: its first de-retraction only undoes its own first
-    retraction. Add the layer phase's leftover right after that first de-retraction, at the
-    nozzle on the tower's first layer (no ooze in the air during the lift)."""
-    lines = text.split("\n")
-    mark = lines.index(SPLICE_MARK)
+def _retract_owed(lines: list[str]) -> float:
+    """How much the slicer left retracted: the E-only moves after its last extruding move."""
     owed = 0.0
-    for line in reversed(lines[:mark]):
+    for line in reversed(lines):
         if not line.startswith("G1 "):
             continue
         code = line.split(";", 1)[0]
@@ -645,6 +831,17 @@ def restore_prime(text: str, retract_f: float) -> str:
         if e > 0 and re.search(r" [XY]-?[\d.]", code):
             break  # the last extruding move: everything after it is the leftover retraction
         owed -= e
+    return owed
+
+
+def restore_prime(text: str, retract_f: float) -> str:
+    """The layer phase ends retracted (its last retraction, as rewritten by any band), and the
+    sequential slice starts as if primed: its first de-retraction only undoes its own first
+    retraction. Add the layer phase's leftover right after that first de-retraction, at the
+    nozzle on the tower's first layer (no ooze in the air during the lift)."""
+    lines = text.split("\n")
+    mark = lines.index(SPLICE_MARK)
+    owed = _retract_owed(lines[:mark])
     if owed <= 1e-6:
         return text
     for i in range(mark + 1, len(lines)):
@@ -889,11 +1086,25 @@ def _gap(a: Box, b: Box) -> float:
     return math.hypot(dx, dy)
 
 
+def _lifted(b: Box, dz: float) -> Box:
+    """A bbox standing dz higher."""
+    return (b[0], b[1], b[2] + dz, b[3], b[4], b[5] + dz)
+
+
 def _check_clearance(
-    layer: list[tuple[str, Box]], seq: list[tuple[str, Box]], rod: float, radius: float
+    layer: list[tuple[str, Box]],
+    seq: list[tuple[str, Box]],
+    rod: float,
+    radius: float,
+    underlay_h: float = 0.0,
+    bare: frozenset[str] = frozenset(),
 ) -> None:
     """K1 gantry rules (module docstring): towers under the rod; every layer object that is
-    not one layer thin under the rod and `radius` away from every tower."""
+    not one layer thin under the rod and `radius` away from every tower. Heights are above the
+    bed: the underlay's height (`underlay_h`) is part of every one of them, and a layer thin
+    object is one layer thin above the underlay; the objects named in `bare` stand on the bare bed
+    (cut-outs), so for them it is one layer thin above the bed."""
+    low = LOW_OBJECT_H + underlay_h
     for name, bb in seq:
         if bb[5] > rod:
             raise GenError(
@@ -902,7 +1113,9 @@ def _check_clearance(
     if not seq:
         return
     for name, bb in layer:
-        if bb[5] <= LOW_OBJECT_H + 1e-6:  # 0.2 + 0.4 sums to 0.6000000000000001
+        if (
+            bb[5] <= (LOW_OBJECT_H if name in bare else low) + 1e-6
+        ):  # 0.2 + 0.4 sums to 0.6000000000000001
             continue
         if bb[5] > rod:
             raise GenError(
@@ -923,18 +1136,24 @@ def build_plate(ctx: PlateContext, plate: Plate, slicer: str, out: Path) -> Gene
             f"{out}: the plate's map is NAME.json next to the G-code; name the G-code .gcode"
         )
     labels = bed_labels(ctx, plate.objects)
+    custom = (*((labels,) if labels is not None else ()), *plate.custom)
+    ul: Underlay | None = None
+    if ctx.underlay_layers is not None:
+        from slicing.calibration_plate_underlay import apply_underlay
+
+        plate, ul = apply_underlay(
+            ctx, replace(plate, custom=custom), ctx.underlay_layers
+        )
+        custom = plate.custom
+    uh = ul.height if ul is not None else 0.0
     brims = brim_block(ctx, plate)
     # Bed labels first, blocks taller than the first layer (the MVS strip) last: hand-written
     # travels run at first-layer height + lift and must never cross a finished taller block
     # (Orca's own early travels do not know the strip: #397).
     flat: list[CustomBlock] = []
     tall: list[CustomBlock] = []
-    for c in (
-        *((labels,) if labels is not None else ()),
-        *plate.custom,
-        *((brims,) if brims is not None else ()),
-    ):
-        (flat if c.bbox()[5] <= ctx.ex.layer_h + 1e-6 else tall).append(c)
+    for c in (*custom, *((brims,) if brims is not None else ())):
+        (flat if c.bbox()[5] <= ctx.ex.layer_h + uh + 1e-6 else tall).append(c)
     plate = replace(plate, custom=(*flat, *tall))
     names = [o.name for o in plate.objects] + [c.name for c in plate.custom]
     bad = [n for n in names if not _NAME.match(n)]
@@ -944,6 +1163,20 @@ def build_plate(ctx: PlateContext, plate: Plate, slicer: str, out: Path) -> Gene
         )
     layer = tuple(o for o in plate.objects if o.phase == "layer")
     seq = tuple(o for o in plate.objects if o.phase == "sequential")
+    bare = frozenset(
+        o.name for o in layer if o.underlay in ("cutout", "off") and uh > 0
+    )
+    on_seq = [o for o in seq if o.underlay == "on"]
+    if uh > 0 and on_seq and len(on_seq) != len(seq):
+        raise GenError(
+            "sequential objects are sliced together: they all stand on the underlay or all outside it"
+        )
+    if (
+        ctx.heads is not None
+    ):  # the sheet and the objects with a foot first, the bare-bed ones after
+        layer = tuple(
+            sorted(layer, key=lambda o: (o.name in bare, o.underlay != "sheet"))
+        )
     if not layer:
         raise GenError(
             f"plate {plate.plate_id}: needs at least one layer object (it frames the print)"
@@ -951,8 +1184,13 @@ def build_plate(ctx: PlateContext, plate: Plate, slicer: str, out: Path) -> Gene
     _check_clearance(
         [(o.name, o.bbox()) for o in layer]
         + [(c.name, c.bbox()) for c in plate.custom],
-        [(o.name, o.bbox()) for o in seq],
+        [
+            (o.name, _lifted(o.bbox(), uh) if o.underlay == "on" else o.bbox())
+            for o in seq
+        ],
         *ctx.clearance(),
+        uh,
+        bare,
     )
     base_fil = _filament_overrides(ctx.color, ctx.temp)
     a_text, a_log = slice_models(
@@ -990,8 +1228,9 @@ def build_plate(ctx: PlateContext, plate: Plate, slicer: str, out: Path) -> Gene
             {**base_fil, **plate.seq_filament},
         )
         require_relative_e(b_text, ctx.p)
-    text = splice(ctx, a_text, b_text, plate.custom)
-    text = apply_hooks(text, plate.objects, ctx.ex.retract_f)
+    text = splice(ctx, a_text, b_text, plate.custom, uh, bare, uh if on_seq else 0.0)
+    first_name = first_object(text)
+    text = apply_hooks(text, plate.objects, ctx.ex.retract_f, uh)
     if seq:
         text = restore_prime(text, ctx.ex.retract_f)
     text = insert_before_end(text, list(plate.restore))
@@ -1002,7 +1241,7 @@ def build_plate(ctx: PlateContext, plate: Plate, slicer: str, out: Path) -> Gene
         + (_seconds(b_text) if b_text else 0)
         + sum(custom_seconds(c.lines) for c in plate.custom)
     )
-    sidecar = write_map(ctx, plate, out, estimate, _sequence(text, seq))
+    sidecar = write_map(ctx, plate, out, estimate, _sequence(text, seq), ul, first_name)
     minutes = estimate / 60
     return Generated(
         plate.plate_id,
@@ -1035,7 +1274,13 @@ def _box(b: Box) -> list[float]:
 
 
 def write_map(
-    ctx: PlateContext, plate: Plate, gcode: Path, estimate: float, seq_order: list[str]
+    ctx: PlateContext,
+    plate: Plate,
+    gcode: Path,
+    estimate: float,
+    seq_order: list[str],
+    ul: Underlay | None = None,
+    first_name: str | None = None,
 ) -> Path:
     def items(its: tuple[Item, ...]) -> list[dict[str, Any]]:
         return [
@@ -1070,6 +1315,7 @@ def write_map(
             ],
             "items": items(o.items),
             "brim_mm": brim_width(o, plate.brim),
+            "underlay": o.underlay,
             "arc_fitting": o.arc_fitting,
             "read": o.read,
             "record": o.record,
@@ -1077,7 +1323,7 @@ def write_map(
         for o in plate.objects
     ]
     data = {
-        "schema": 1,
+        "schema": "calib-plate/1",
         "plate": plate.plate_id,
         "title": plate.title,
         "gcode": gcode.name,
@@ -1099,9 +1345,35 @@ def write_map(
         "color": ctx.color,
         "nozzle_temp": ctx.base_temp,
         "estimate_min": round(estimate / 60, 1),
-        "print_order": ["custom: " + c.name for c in plate.custom]
-        + ["layer: " + o.name for o in plate.objects if o.phase == "layer"]
-        + ["sequential: " + n for n in seq_order],
+        "print_order": [
+            *(["layer: " + SHEET_NAME] if ul is not None else []),
+            *("custom: " + c.name for c in plate.custom),
+            *(
+                "layer: " + o.name
+                for o in plate.objects
+                if o.phase == "layer" and o.underlay != "sheet"
+            ),
+            *("sequential: " + n for n in seq_order),
+        ],
+        "underlay": (
+            {
+                **ul.manifest(
+                    head=ctx.heads.underlay_label if ctx.heads else "T1",
+                    light="contrast" if ctx.heads else "raking",
+                    tool_note=(
+                        f"multi-head: the underlay is {ctx.heads.underlay_label} and the tests "
+                        f"{ctx.heads.tests_label} (ΔE {ctx.heads.delta_e:.0f}), so the camera reads "
+                        "dark on light; the tests' head is selected after the underlay's layers"
+                        if ctx.heads
+                        else "single head: the underlay and the tests are one filament, no tool change; "
+                        "photograph under raking light so the bare underlay shows its ridges and gaps"
+                    ),
+                ),
+                "first_object": first_name,
+            }
+            if ul is not None
+            else None
+        ),
         "objects": objects,
         "notes": list(plate.notes),
         "generated_by": f"3d calibrate gen {plate.plate_id}",

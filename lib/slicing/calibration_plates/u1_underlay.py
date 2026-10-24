@@ -1,8 +1,9 @@
 """calibration_plates/u1_underlay.py — Snapmaker U1 plate 1: every test in black on one white underlay.
 
 WHAT: one Snapmaker Orca project for the U1 (4 heads, 270 mm bed) and its G-code:
-    underlay  2 solid layers in white (head T4) under the whole test area, one sheet with a
-              5 mm brim; part fan 0 and bed 70 °C on its layers (#320). The underlay between
+    underlay  1–2 solid layers (`calibrations.underlay_layers`, default 1) in a filament that
+              contrasts with the tests' (head T4 white by default, chosen by the contrast check of
+              #263, `--underlay-tool`), no brim; part fan 0 and bed 70 °C on its layers (#320). The underlay between
               the tests is the first-layer map (no separate first-layer patches, tg#22369)
     label     front strip on the underlay (#322): session code in groups, date DD.MM.YYYY and
               printer, one line per head (T1 black #2, T4 white #1, brand/type), the process;
@@ -66,16 +67,25 @@ from slicing.calibration_plates.dense import (
     tubes_stl,
     velocity_line,
 )
+from slicing.calibration_underlay import (
+    MIN_CONTRAST_DE,
+    pick_underlay_tool,
+    rect_difference,
+    underlay_height,
+    validate_layers,
+)
 
 PLATE_ID = "u1_underlay"
 BED = 270.0
 EDGE = 5.0  # usable bed: BED minus this on every side
 FIRST_H, LAYER_H = 0.25, 0.2  # the U1 0.20 mm process (initial_layer_print_height 0.25)
-UNDERLAY_LAYERS = 2
+UNDERLAY_LAYERS = 1  # `calibrations.underlay_layers`, set by configure()
 U = (
     FIRST_H + (UNDERLAY_LAYERS - 1) * LAYER_H
 )  # underlay top: every black test starts here
-UNDERLAY_BRIM = 5.0
+UNDERLAY_BRIM = (
+    0.0  # none: the underlay holds the tests (#320); only a bare-bed plate has brims
+)
 AREA = (12.0, 12.0, 258.0, 258.0)  # tests are packed inside this
 PACK_GAP = 1.0  # bare underlay between neighbouring tests (tg#22397: minimal)
 SEAM = (
@@ -172,14 +182,20 @@ PROFILES = os.environ.get("ORCA_RES") or os.path.expanduser(
 MACHINE = "Snapmaker U1 (0.4 nozzle)"
 PROCESS = "0.20mm Standard @Snapmaker U1 (0.4 nozzle)"
 FILAMENT = "Snapmaker PLA SnapSpeed @U1"  # what the U1 reports loaded on T1, T3 and T4
-BLACK, WHITE = 1, 4  # 1-based extruders = head labels T1/T4 (G-code T0/T3)
+BLACK, WHITE = (
+    1,
+    4,
+)  # 1-based extruders = head labels: BLACK (T1) the tests, WHITE the underlay (T4)
 SLOT_COLOURS = ["#000000", "#FFFFFF", "#2D9E59", "#FFFFFF"]  # live print_task_config
+HEAD_SPOOLS = {
+    1: 2,
+    4: 1,
+}  # Spoolman spool ids the label names (heads not listed: none)
 # User 2026-10-16: bed 70 °C for the first layer, fan off on the underlay; vendor values else.
 # Toolchange ooze: babushkin-dom docs/u1_toolchange_ooze.md (parked head at −40, 15 s preheat).
 PROCESS_OVERRIDES: dict[str, Any] = {
     "enable_prime_tower": "0",
-    "brim_type": "outer_only",
-    "brim_width": f"{UNDERLAY_BRIM:g}",
+    "brim_type": "no_brim",
     "enable_support": "0",
     "top_shell_layers": "3",
     "bottom_shell_layers": "2",
@@ -193,6 +209,24 @@ FILAMENT_OVERRIDES = {
     "textured_plate_temp_initial_layer": "70",
     "hot_plate_temp_initial_layer": "70",
 }
+
+
+def configure(layers: int, tool: int) -> None:
+    """The underlay's layer count (`calibrations.underlay_layers`) and head (1-based extruder:
+    T4 = 4) for this run. U, TAB, the fan setting and WHITE are module state read at call time
+    by everything that builds the plate, so they are rebound here, once, before build_tests()."""
+    global UNDERLAY_LAYERS, U, TAB, WHITE
+    UNDERLAY_LAYERS = validate_layers(layers)
+    U = underlay_height(FIRST_H, LAYER_H, UNDERLAY_LAYERS)
+    TAB = (TAB[0], TAB[1], U + 7 * LAYER_H)
+    if tool not in (1, 2, 3, 4) or tool == BLACK:
+        raise GenError(
+            f"the underlay head must be one of T2, T3, T4 (T1 prints the tests), got T{tool}"
+        )
+    WHITE = tool
+    FILAMENT_OVERRIDES["close_fan_the_first_x_layers"] = str(UNDERLAY_LAYERS)
+
+
 IRONING = {"ironing_type": "top"}  # object setting of the ironed flow halves
 
 Rect = tuple[float, float, float, float]
@@ -1748,6 +1782,20 @@ def _flow_grid(rects: dict[str, Rect], x0: float, y0: float) -> None:
         rects[f"flow_{p}_i"] = (x + FLOW_HALF, y, x + 2 * FLOW_HALF, y + FLOW_D)
 
 
+COLOUR_NAMES = {"#000000": "чёрный", "#FFFFFF": "белый"}
+
+
+def head_line(tool: int) -> str:
+    """One label line for a head: `T4  белый  #1  Snapmaker PLA SnapSpeed`."""
+    colour = SLOT_COLOURS[tool - 1].upper()
+    spool = HEAD_SPOOLS.get(tool)
+    return (
+        f"T{tool}  {COLOUR_NAMES.get(colour, colour)}"
+        + (f"  #{spool}" if spool else "")
+        + "  Snapmaker PLA SnapSpeed"
+    )
+
+
 def build_tests(token: str, date: str) -> tuple[list[Test], dict[str, Any]]:
     rects, underlay = pack()
     tests = [
@@ -1790,8 +1838,8 @@ def build_tests(token: str, date: str) -> tuple[list[Test], dict[str, Any]]:
         token,
         date,
         (
-            "T1  чёрный  #2  Snapmaker PLA SnapSpeed",
-            "T4  белый  #1  Snapmaker PLA SnapSpeed",
+            head_line(BLACK),
+            head_line(WHITE),
         ),
         "процесс: 0.20mm Standard @U1",
     )
@@ -2006,8 +2054,8 @@ def preview_png(
     yy += 8
     for line in (
         "Caption colour: yellow = top camera, blue = side camera, red = by hand.",
-        "Grey: bed + 5 mm brim. White: T4 underlay, 2 layers (fan 0, bed 70 °C).",
-        "Black: T1 tests from layer 3 (one tool change T4→T1).",
+        f"Grey: bed. Underlay: T{WHITE}, {UNDERLAY_LAYERS} layer(s), no brim (fan 0, bed 70 °C).",
+        f"Black: T1 tests from layer {UNDERLAY_LAYERS + 1} (one tool change T{WHITE}→T1).",
         "Darkest bars: hand-written lines (PA inside the frame, MVS).",
         "Flow block: left half plain, right half ironed; walls between = thin walls.",
         "Bare underlay between tests = first-layer map (no patches).",
@@ -2719,6 +2767,44 @@ def scan(text_: str) -> dict[str, Any]:
 # ---- main ------------------------------------------------------------------------------------------
 
 
+_TOOL = re.compile(r"^T?([1-4])$", re.IGNORECASE)
+_HEX = re.compile(r"^#[0-9A-Fa-f]{6}$")
+
+
+def policy_layers() -> int:
+    """`calibrations.underlay_layers` of fleet/policy.yaml (1 when the file does not set it)."""
+    from printops import policy
+
+    try:
+        return policy.section("calibrations").underlay_layers
+    except policy.PolicyError as e:
+        raise GenError(f"fleet/policy.yaml: {e}") from e
+
+
+def setup_underlay(
+    layers: int | None, tool_arg: str | None, colours_arg: str | None
+) -> float:
+    """Layers, head and contrast of this run: `--underlay-layers` else the policy's, the head with
+    the most contrast against the tests' T1 (light under dark, #263) else `--underlay-tool` — both
+    through the same contrast check. Returns the ΔE of the pair."""
+    if colours_arg:
+        cols = [c.strip() for c in colours_arg.split(",")]
+        if len(cols) != 4 or not all(_HEX.match(c) for c in cols):
+            raise GenError("--slot-colours wants four #RRGGBB values, T1 to T4")
+        SLOT_COLOURS[:] = [c.upper() for c in cols]
+    override = None
+    if tool_arg is not None:
+        m = _TOOL.match(tool_arg.strip())
+        if m is None:
+            raise GenError(f"--underlay-tool wants T2, T3 or T4, got {tool_arg!r}")
+        override = f"T{m.group(1)}"
+    tool, delta_e = pick_underlay_tool(
+        {f"T{i}": c for i, c in enumerate(SLOT_COLOURS, start=1)}, f"T{BLACK}", override
+    )
+    configure(layers if layers is not None else policy_layers(), int(tool[1:]))
+    return delta_e
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="u1_underlay", description=__doc__.split("\n")[0])
     ap.add_argument(
@@ -2729,7 +2815,29 @@ def main(argv: list[str] | None = None) -> int:
     )
     ap.add_argument("--date", default=_dt.date.today().isoformat(), help="YYYY-MM-DD")
     ap.add_argument("--preview-only", action="store_true")
+    ap.add_argument(
+        "--underlay-layers",
+        type=int,
+        default=None,
+        help="1 or 2 layers (default: calibrations.underlay_layers of fleet/policy.yaml)",
+    )
+    ap.add_argument(
+        "--underlay-tool",
+        default=None,
+        help="head of the underlay, T2-T4 (default: the head that contrasts most with the tests' T1; "
+        f"the contrast check refuses a pair under ΔE {MIN_CONTRAST_DE:g})",
+    )
+    ap.add_argument(
+        "--slot-colours",
+        default=None,
+        help="#RRGGBB,#RRGGBB,#RRGGBB,#RRGGBB: what is loaded on T1..T4 (default: the live print_task_config)",
+    )
     a = ap.parse_args(argv)
+    try:
+        contrast_de = setup_underlay(a.underlay_layers, a.underlay_tool, a.slot_colours)
+    except GenError as e:
+        print(f"u1_underlay: {e}", file=sys.stderr)
+        return 2
     out = Path(a.out).expanduser()
     out.parent.mkdir(parents=True, exist_ok=True)
     token = f"C{a.date.replace('-', '')}P1"
@@ -2737,6 +2845,7 @@ def main(argv: list[str] | None = None) -> int:
     label: Test = extra["label_test"]
     ul: Rect = extra["underlay"]
     meshes = render_meshes(tests, label, ul)
+    bare = rect_difference(ul, [t.rect for t in tests] + [label.rect])
     usable = (BED - 2 * EDGE) ** 2
     ux = (ul[2] - ul[0]) * (ul[3] - ul[1])
     used = sum((t.rect[2] - t.rect[0]) * (t.rect[3] - t.rect[1]) for t in tests) + (
@@ -2810,25 +2919,43 @@ def main(argv: list[str] | None = None) -> int:
             "object_settings": {t.name: t.settings for t in tests if t.settings},
         },
         "heads": {
-            "T1": {"gcode_tool": "T0", "spool": 2, "colour": "black", "role": "tests"},
-            "T4": {
-                "gcode_tool": "T3",
-                "spool": 1,
-                "colour": "white",
+            "T1": {
+                "gcode_tool": "T0",
+                "spool": HEAD_SPOOLS.get(BLACK),
+                "colour": SLOT_COLOURS[BLACK - 1],
+                "role": "tests",
+            },
+            f"T{WHITE}": {
+                "gcode_tool": f"T{WHITE - 1}",
+                "spool": HEAD_SPOOLS.get(WHITE),
+                "colour": SLOT_COLOURS[WHITE - 1],
                 "role": "underlay",
             },
         },
         "underlay": {
             "layers": UNDERLAY_LAYERS,
             "top_mm": round(U, 3),
+            "first_layer_mm": FIRST_H,
             "bbox": r3(ul),
             "brim_mm": UNDERLAY_BRIM,
-            "head": "T4",
+            "brim": "none: the underlay holds the tests",
+            "head": f"T{WHITE}",
+            "contrast_delta_e": round(contrast_de, 1),
+            "contrast_min_delta_e": MIN_CONTRAST_DE,
             "bed_first_layer_c": 70,
             "part_fan": 0,
             "seam_overlap_mm": SEAM,
+            "bare": [r3(r) for r in bare],
             "first_layer_map": "the bare underlay between the tests (no first-layer patches)",
             "cutouts": [t.name for t in tests if t.underlay == "cutout"],
+            "read": {
+                "first_layer_map": "the bare underlay (`bare` rectangles) is the first-layer map: vision scores "
+                "its line coverage, gaps and ridges per cell",
+                "uniformity": "the spread of the map over the plate is the bed-flatness and z-offset hint",
+                "light": "contrast",
+                "note": f"multi-head: the underlay is T{WHITE}, a filament that contrasts with the tests' T1 "
+                f"(ΔE {contrast_de:.0f}), so the camera reads dark on light whatever the bed colour",
+            },
         },
         "label": extra["label"],
         "fill": fill,

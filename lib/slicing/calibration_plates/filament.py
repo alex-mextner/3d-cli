@@ -55,6 +55,8 @@ from slicing.calibration_plate import (
     label_width,
     scale_retractions,
 )
+from slicing.calibration_plate_underlay import declare
+from slicing.calibration_underlay import UnderlayDecl
 
 PLATE_ID = "plate1"
 TITLE = "plate 1: filament"
@@ -66,6 +68,17 @@ TESTS = {
     "overhang": "overhangs",
     "retraction": "retraction tower",
     "temp": "temperature tower",
+}
+# Where each test stands on the shared underlay (#320): every one is `on` — plate 1 has no
+# print-in-place part, no loose part and no through hole to measure with a pin.
+UNDERLAY = {
+    "pa": UnderlayDecl("on", "one-layer PA lines print on the underlay; their width is read from above"),
+    "mvs": UnderlayDecl("on", "the 0.3 mm strip prints on the underlay; its under-extrusion step is read from above"),
+    "flow": UnderlayDecl("on", "solid tiles are read by their top skin; the foot under each is the underlay"),
+    "bridge": UnderlayDecl("on", "pillars on a foot; the span bridges over the sheet, which tips no pillar"),
+    "overhang": UnderlayDecl("on", "the wedge's small base is what tipped: the foot fixes it without a brim"),
+    "retraction": UnderlayDecl("on", "the tower stands on a foot; strings between its posts are read from the side"),
+    "temp": UnderlayDecl("on", "the sequential tower is lifted onto the finished sheet, which has no hole under it"),
 }
 
 MARGIN = 6.0  # from the bed edge
@@ -626,7 +639,7 @@ def build(ctx: PlateContext) -> Plate:
     custom: list[CustomBlock] = []
     for s, x, y in pack(sections, ctx.p.bed, ctx.clearance()[1], PLATE_ID):
         objs, blocks = s.build(x, y)
-        objects += objs
+        objects += declare(objs, s.test, UNDERLAY)
         custom += blocks
     return Plate(
         PLATE_ID,

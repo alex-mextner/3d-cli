@@ -30,8 +30,12 @@ def orca(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
     return str(script)
 
 
-def _ctx(orca: str) -> cp.PlateContext:
-    return cp.make_context("Creality K1 SE", orca, "PLA", "#E8732A", None, presets=STOCK)
+def _ctx(orca: str, underlay_layers: int | None = None) -> cp.PlateContext:
+    """A K1 SE plate context on the bare bed (`--no-underlay`): the engine's own tests predate the
+    underlay (#320); tests/test_calibration_plate_underlay.py covers the default."""
+    return cp.make_context(
+        "Creality K1 SE", orca, "PLA", "#E8732A", None, presets=STOCK, underlay_layers=underlay_layers
+    )
 
 
 def _object_lines(text: str, name: str) -> list[list[str]]:
