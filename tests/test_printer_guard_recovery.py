@@ -501,3 +501,59 @@ def test_duplicate_source_timestamp_cannot_poison_next_distinct_image(tmp_path: 
     result = guard.observe(Frame(clock.now, b'genuine-after-rewritten-duplicate', source), score())
     assert result['outcome'] == 'paused' and printer.pauses == 1
     assert guard.latest_source_modified == source
+
+
+def test_moonraker_half_read_reply_is_a_comm_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    import http.client
+
+    from printer_ops import moonraker
+    from printer_ops.moonraker import MoonrakerAdapter
+
+    def half_read(*_a: Any, **_k: Any) -> Any:
+        raise http.client.IncompleteRead(b"{")
+
+    monkeypatch.setattr(moonraker, "http_json", half_read)
+    adapter = MoonrakerAdapter("u1", "127.0.0.1", 1)
+    with pytest.raises(PrinterCommError):
+        adapter.pause()
+    with pytest.raises(PrinterCommError):
+        adapter.status()
+
+
+def test_readback_failure_does_not_hide_the_actuator_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    guard, printer, clock = arm(tmp_path)
+    n = until_candidate(guard, clock)
+    calls = {"n": 0}
+    original_status = printer.status
+
+    def refuse() -> None:
+        printer.pauses += 1
+        raise PrinterRefused("firmware rejected pause", command="printer guard")
+
+    def status() -> Any:
+        if printer.pauses:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise PrinterCommError("readback timed out", command="printer guard")
+        return original_status()
+
+    monkeypatch.setattr(printer, "pause", refuse)
+    monkeypatch.setattr(printer, "status", status)
+    result = tick(guard, clock, n + 1)
+    assert result["outcome"] == "pause_unverified"
+    assert "rejected pause" in result["error"]
+    assert "readback timed out" in result["readback_error"]
+
+
+def test_guard_honours_configured_dark_luma(tmp_path: Path) -> None:
+    from dataclasses import replace
+
+    from printer_ops.vision import MonitorLimits
+
+    printer, clock = ScriptedPrinter(), Clock()
+    guard = policy.PauseGuard.arm(printer, JOB, state_dir=tmp_path / "state", evidence_dir=tmp_path / "e",
+                                  clock=clock, sleep=clock.sleep, limits=replace(MonitorLimits(), dark_luma=8.0))
+    result = tick(guard, clock, 1, score(luma=15.0))
+    assert result["outcome"] == "observing"

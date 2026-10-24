@@ -81,7 +81,8 @@ def _sync_directory(path: Path) -> None:
 class PauseGuard:
     def __init__(self, adapter: Adapter, job: BoundJob, *, state_dir: Path, evidence_dir: Path,
                  clock: Callable[[], float], sleep: Callable[[float], None], dry_run: bool,
-                 interval: float = 10.0) -> None:
+                 interval: float = 10.0, limits: MonitorLimits | None = None) -> None:
+        self.limits = limits or MonitorLimits()
         self.adapter, self.job = adapter, job
         self.clock, self.sleep, self.dry_run = clock, sleep, dry_run
         self.evidence_dir = evidence_dir
@@ -100,7 +101,8 @@ class PauseGuard:
     @classmethod
     def arm(cls, adapter: Adapter, job_id: str, *, state_dir: Path, evidence_dir: Path,
             clock: Callable[[], float] = time.time, sleep: Callable[[float], None] = time.sleep,
-            dry_run: bool = False, interval: float = 10.0) -> PauseGuard:
+            dry_run: bool = False, interval: float = 10.0,
+            limits: MonitorLimits | None = None) -> PauseGuard:
         if not _NAME.fullmatch(job_id) or not _NAME.fullmatch(adapter.name):
             raise UsageError("printer and --job-id need safe nonempty identifiers", command="printer guard")
         status, record = _snapshot(adapter)
@@ -109,7 +111,7 @@ class PauseGuard:
             raise PrinterRefused(f"{adapter.name}: --job-id {job_id} is not the current printing job",
                                  command="printer guard")
         guard = cls(adapter, BoundJob(job_id, record.filename, record.start_time), state_dir=state_dir,
-                    evidence_dir=evidence_dir, clock=clock, sleep=sleep, dry_run=dry_run, interval=interval)
+                    evidence_dir=evidence_dir, clock=clock, sleep=sleep, dry_run=dry_run, interval=interval, limits=limits)
         if guard.attempt_path.exists():
             raise PrinterRefused(f"{adapter.name} job {job_id}: pause already attempted; inspect {guard.attempt_path}",
                                  command="printer guard")
@@ -207,7 +209,7 @@ class PauseGuard:
             return self._blind(reason)
         valid = (score.q is not None and math.isfinite(score.q) and math.isfinite(score.p)
                  and math.isfinite(score.luma) and 0 <= score.q <= score.p
-                 and score.luma >= MonitorLimits().dark_luma)
+                 and score.luma >= self.limits.dark_luma)
         if not valid:
             return self._blind("no usable verified score")
         digest = hashlib.sha256(frame.jpeg).hexdigest()
@@ -271,7 +273,7 @@ class PauseGuard:
                 return self._report("disarmed", terminal=True, reason="pause claim ownership changed; no PAUSE sent")
             if reason := self._freshness_error(frame):
                 return self._release_unsent_claim(claim, f"pre-pause frame rejected: {reason}")
-            acknowledged, error = False, None
+            acknowledged, error, readback_error = False, None, None
             try:
                 self.adapter.pause()
                 acknowledged = True
@@ -284,12 +286,13 @@ class PauseGuard:
                 try:
                     paused = self._current(allow_paused=True).state == PAUSED
                 except (PrinterRefused, PrinterCommError) as exc:
-                    error = str(exc)
+                    readback_error = str(exc)
                 if paused or self.clock() >= deadline:
                     break
                 self.sleep(0.5)
             result = self._report("paused" if paused else "pause_unverified", terminal=True,
-                                  pause_acknowledged=acknowledged, error=error, **data)
+                                  pause_acknowledged=acknowledged, error=error,
+                                  readback_error=readback_error, **data)
             if self._owns_claim(claim):
                 _write_result(self.attempt_path, result)
             else:
