@@ -57,6 +57,9 @@ Options:
   --gcode PATH          also slice the result to PATH with the installed Orca-family slicer (the placed objects as an STL
                         + the retargeted settings as presets), then run `3d gcode-bounds` on it
   --bounds-printer NAME fleet printer for that gcode-bounds run (axis limits, trusted macros), e.g. k1se
+  --include-non-printable  keep objects tagged as vitamins / reference models / stand-ins (`3d:role`, see
+                        `3d assembly position`); without it a project that keeps one is refused. Logged.
+                        Example: 3d retarget fit-test.3mf --to k1se --include-non-printable
   --dry-run             do everything but write the .3mf (and skip --gcode); print the same report
   -v, --verbose         list every changed key, not just the first few per group
   -h, --help            this help
@@ -89,6 +92,7 @@ class _Options:
     gcode: str = ""
     bounds_printer: str = ""
     dry_run: bool = False
+    include_non_printable: bool = False
     verbose: bool = False
 
 
@@ -138,7 +142,9 @@ def _parse(argv: list[str]) -> _Options:
             else:
                 getattr(opts, _REPEATED[arg]).append(value)
             continue
-        if arg == "--dry-run":
+        if arg == "--include-non-printable":
+            opts.include_non_printable = True
+        elif arg == "--dry-run":
             opts.dry_run = True
         elif arg in ("-v", "--verbose"):
             opts.verbose = True
@@ -249,6 +255,7 @@ def run(argv: list[str]) -> int:
         margin=opts.margin,
         setting_sets=opts.setting_sets,
         overrides=overrides,
+        include_non_printable=opts.include_non_printable,
     )
     nozzles = len(machine.settings["nozzle_diameter"])
     if opts.dry_run:

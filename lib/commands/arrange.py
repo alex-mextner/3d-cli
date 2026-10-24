@@ -57,6 +57,12 @@ Options:
   -o, --out PREFIX      output path/prefix. single: <PREFIX>.3mf; per-plate:
                         <PREFIX>_plate1.3mf, _plate2.3mf, ... (default: <first-input>_arranged)
   --json                emit a machine-readable JSON plan + verification instead of a table
+  --include-non-printable
+                        place vitamins / reference models / stand-ins (3MF objects tagged `3d:role`, see
+                        `3d assembly position`) too. Without it they are left off every plate and named.
+                        Example: 3d arrange assembly.3mf --include-non-printable --reason "fit test"
+  --reason TEXT         why the override (logged with it).
+                        Example: 3d arrange assembly.3mf --include-non-printable --reason "fit test"
 
 Exit 1 if a single part is larger than the usable plate (named, with its size).
 
@@ -111,6 +117,8 @@ def run(argv: list[str]) -> int:
     min_volume = 1.0  # mm^3 floor for a split body (mirrors arrange_pack._DEFAULT_MIN_VOLUME)
     out = ""
     emit_json = False
+    include_np = False
+    reason = ""
     single = True  # default: one multi-plate project file
 
     i = 0
@@ -151,6 +159,14 @@ def run(argv: list[str]) -> int:
         elif a == "--json":
             emit_json = True
             i += 1
+        elif a == "--include-non-printable":
+            include_np = True
+            i += 1
+        elif a == "--reason":
+            if i + 1 >= n:
+                raise UsageError("option --reason needs a value", command="arrange")
+            reason = argv[i + 1]
+            i += 2
         elif a.startswith("-"):
             raise UsageError(
                 f"unknown option '{a}'",
@@ -200,6 +216,10 @@ def run(argv: list[str]) -> int:
         tool_args += ["-o", out]
     if emit_json:
         tool_args.append("--json")
+    if include_np:
+        tool_args.append("--include-non-printable")
+    if reason:
+        tool_args += ["--reason", reason]
     tool_args.append("--single" if single else "--per-plate")
 
     # trimesh's 3MF export needs networkx + lxml; rtree speeds the connected-body split.

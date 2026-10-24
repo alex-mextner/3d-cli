@@ -57,6 +57,8 @@ never silently truncated. Pass `--min-volume 0` to keep everything.
 | `--margin MM` | `8` | Keep-out margin from each bed edge (usable area = `bed - 2*margin`) |
 | `--min-volume MM3` | `1` | Drop (and **log**) split connected bodies below this volume as degenerate slivers; bodies with `<4` faces or a zero-thickness bounding box are always dropped regardless. `0` disables the volume floor. |
 | `-o, --out PREFIX` | `<first-input>_arranged` | Output path/prefix. single: `<PREFIX>.3mf`; per-plate: `<PREFIX>_plate1.3mf`, `_plate2.3mf`, ... |
+| `--include-non-printable` | off | Place vitamins / reference models / stand-ins too (3MF objects tagged `3d:role` / `3d:printable`, written by [`3d assembly position`](assembly.md)). Without it they are left off every plate and named (`NOT placed (non-printable part, role tag)`), and the tags of the printed objects survive into the output project. Example: `3d arrange assembly.3mf --include-non-printable --reason "fit test"`. |
+| `--reason TEXT` | — | Why the override; logged with it. Example: `3d arrange assembly.3mf --include-non-printable --reason "fit test"`. |
 | `--json` | off | Emit a machine-readable plan + verification instead of a table |
 
 ## Examples
@@ -66,6 +68,7 @@ never silently truncated. Pass `--min-volume 0` to keep everything.
 3d arrange assembly.3mf --per-plate -o out/tray
 3d arrange assembly.3mf --bed 270 --gap 6 --margin 8 -o sign.3mf
 3d arrange a.stl b.stl c.stl --bed 220
+3d arrange assembly.3mf --include-non-printable --reason "fit test"
 3d arrange assembly.3mf --json | jq '.plates | length'
 ```
 
