@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -548,3 +549,287 @@ def test_gen_plate1_with_only_skip_and_a_fine_pa_range(tmp_path: Path) -> None:
                       str(tmp_path / "plate.json"), env_extra=env)
     assert as_json.returncode != 0 and ".gcode" in as_json.stderr
     assert not (tmp_path / "plate.json").exists()
+
+
+def test_gen_plate_stands_on_the_shared_underlay_unless_told_not_to(
+    tmp_path: Path,
+) -> None:
+    """The user generates plate 1 through bin/3d: the underlay is the first thing in the G-code and the map
+    `calib-plate/1` carries its block; `--no-underlay` prints on the bare bed; a four-head printer prints
+    the underlay in the contrasting head (or `--underlay-tool`, contrast-checked) and changes to the tests' head;
+    a single test has no underlay."""
+    profiles, orca = write_plate_orca(tmp_path)
+    k1 = tmp_path / "fleet.yaml"
+    k1.write_text(
+        K1_FLEET + "u1:\n  model: Creality K1 SE\n  owner: own\n  access: offline\n"
+        "  heads: [{label: T1, index: 0}, {label: T2, index: 1}, {label: T3, index: 2}, {label: T4, index: 3}]\n",
+        encoding="utf-8",
+    )
+    env = {
+        "THREED_FLEET": str(k1),
+        "ORCA_PROFILES": str(profiles),
+        "ORCA_USER_PRESETS": str(tmp_path / "user"),
+        "SLICER": str(orca),
+    }
+    presets = [
+        "--machine-preset",
+        "Creality K1 SE 0.4 nozzle",
+        "--process-preset",
+        "0.20mm Standard @Creality K1 SE",
+        "--filament-preset",
+        "Creality Generic PLA @K1-all",
+    ]
+
+    out = tmp_path / "plate.gcode"
+    made = run_cli(
+        tmp_path,
+        "calibrate",
+        "gen",
+        "plate1",
+        "--printer",
+        "k1",
+        *presets,
+        "--only",
+        "flow,bridge",
+        "-o",
+        str(out),
+        env_extra=env,
+    )
+    assert made.returncode == 0, made.stderr
+    starts = [
+        ln
+        for ln in out.read_text().splitlines()
+        if ln.startswith("EXCLUDE_OBJECT_START")
+    ]
+    assert starts[0].startswith("EXCLUDE_OBJECT_START NAME=underlay.stl")
+    data = json.loads(out.with_suffix(".json").read_text())
+    assert data["schema"] == "calib-plate/1"
+    assert (
+        data["underlay"]["layers"] == 1
+        and data["underlay"]["pieces"] == 1
+        and data["underlay"]["head"] == "T1"
+    )
+    assert data["print_order"][0] == "layer: underlay"
+
+    bare = tmp_path / "bare.gcode"
+    made = run_cli(
+        tmp_path,
+        "calibrate",
+        "gen",
+        "plate1",
+        "--printer",
+        "k1",
+        *presets,
+        "--only",
+        "flow,bridge",
+        "--no-underlay",
+        "-o",
+        str(bare),
+        env_extra=env,
+    )
+    assert made.returncode == 0, made.stderr
+    assert "NAME=underlay" not in bare.read_text()
+    assert json.loads(bare.with_suffix(".json").read_text())["underlay"] is None
+
+    u1 = tmp_path / "u1.gcode"
+    colours = "T1=#000000,T2=#FFFFFF,T3=#2D9E59,T4=#FFFFFF"
+    made = run_cli(
+        tmp_path,
+        "calibrate",
+        "gen",
+        "plate1",
+        "--printer",
+        "u1",
+        *presets,
+        "--only",
+        "flow,bridge",
+        "--head-colours",
+        colours,
+        "-o",
+        str(u1),
+        env_extra=env,
+    )
+    assert made.returncode == 0, made.stderr
+    changes = [
+        ln for ln in u1.read_text().splitlines() if ln in ("T0", "T1", "T2", "T3")
+    ]
+    assert changes == ["T3", "T0"]  # T4 (the later white head) under the tests in T1
+    block = json.loads(u1.with_suffix(".json").read_text())["underlay"]
+    assert (
+        block["head"] == "T4"
+        and block["read"]["light"] == "contrast"
+        and block["layers"] == 1
+    )
+
+    forced = tmp_path / "u1_t2.gcode"
+    made = run_cli(
+        tmp_path,
+        "calibrate",
+        "gen",
+        "plate1",
+        "--printer",
+        "u1",
+        *presets,
+        "--only",
+        "flow,bridge",
+        "--head-colours",
+        colours,
+        "--underlay-tool",
+        "T2",
+        "-o",
+        str(forced),
+        env_extra=env,
+    )
+    assert made.returncode == 0, made.stderr
+    assert [
+        ln for ln in forced.read_text().splitlines() if ln in ("T0", "T1", "T2", "T3")
+    ] == ["T1", "T0"]
+
+    low = run_cli(
+        tmp_path,
+        "calibrate",
+        "gen",
+        "plate1",
+        "--printer",
+        "u1",
+        *presets,
+        "--head-colours",
+        "T1=#000000,T3=#0A0A0A",
+        "--underlay-tool",
+        "T3",
+        "-o",
+        str(tmp_path / "low.gcode"),
+        env_extra=env,
+    )
+    assert low.returncode == 2 and "contrast too low" in low.stderr
+    nocolour = run_cli(
+        tmp_path,
+        "calibrate",
+        "gen",
+        "plate1",
+        "--printer",
+        "u1",
+        *presets,
+        "-o",
+        str(tmp_path / "nc.gcode"),
+        env_extra=env,
+    )
+    assert nocolour.returncode == 2 and "colour" in nocolour.stderr
+    assert (
+        not (tmp_path / "low.gcode").exists() and not (tmp_path / "nc.gcode").exists()
+    )
+    one_head = run_cli(
+        tmp_path,
+        "calibrate",
+        "gen",
+        "plate1",
+        "--printer",
+        "k1",
+        *presets,
+        "--underlay-tool",
+        "T2",
+        "-o",
+        str(tmp_path / "oh.gcode"),
+        env_extra=env,
+    )
+    assert one_head.returncode == 2 and "one head" in one_head.stderr
+
+    single = run_cli(
+        tmp_path,
+        "calibrate",
+        "gen",
+        "temp",
+        "--printer",
+        "k1",
+        *presets,
+        "--no-underlay",
+        "-o",
+        str(tmp_path / "t.gcode"),
+        env_extra=env,
+    )
+    assert single.returncode == 2 and "single test" in single.stderr
+
+
+def test_underlay_map_reads_the_bare_underlay_of_a_plate_photo(tmp_path: Path) -> None:
+    """The user photographs a printed plate, rectifies it and asks for the first-layer map: the bare
+    underlay of the manifest is cut into cells, a gappy cell is reported where it is, a plate
+    printed without an underlay has nothing to read."""
+    import numpy as np
+    from PIL import Image
+
+    px = np.full((400, 400), 200, dtype=np.uint8)
+    px[78:118, 162:202:2] = (
+        30  # a gappy cell: x 40.6-50.6, y 70.6-80.6 (rows count from the top)
+    )
+    photo = tmp_path / "rectified.png"
+    Image.fromarray(px).save(photo)
+    rect = tmp_path / "rect.json"
+    rect.write_text(
+        json.dumps(
+            {"rectified": str(photo), "area_mm": [0, 0, 100, 100], "px_per_mm": 4}
+        )
+    )
+    plate = tmp_path / "plate.json"
+    plate.write_text(
+        json.dumps(
+            {
+                "schema": "calib-plate/1",
+                "underlay": {"bare": [[0, 0, 100, 100]], "read": {"light": "contrast"}},
+            }
+        )
+    )
+
+    made = run_cli(
+        tmp_path,
+        "calibrate",
+        "underlay-map",
+        str(plate),
+        "--rectify",
+        str(rect),
+        "--json",
+    )
+    assert made.returncode == 0, made.stderr
+    data = json.loads(made.stdout)
+    assert data["schema"] == "calib-underlay-map/1" and data["cells_read"] == 81
+    z = [h for h in data["hints"] if h["kind"] == "z_offset"]
+    assert [h["bbox_mm"] for h in z] == [[40.6, 70.6, 50.6, 80.6]]
+    text = run_cli(
+        tmp_path, "calibrate", "underlay-map", str(plate), "--rectify", str(rect)
+    )
+    assert text.returncode == 0 and "underlay map: proposed, 81/81 cells" in text.stdout
+    assert "hint z_offset" in text.stdout
+
+    bare = tmp_path / "bare.json"
+    bare.write_text(json.dumps({"schema": "calib-plate/1", "underlay": None}))
+    refused = run_cli(
+        tmp_path, "calibrate", "underlay-map", str(bare), "--rectify", str(rect)
+    )
+    assert refused.returncode == 2 and "no `underlay` block" in refused.stderr
+    no_rect = run_cli(tmp_path, "calibrate", "underlay-map", str(plate))
+    assert no_rect.returncode == 2 and "--rectify" in no_rect.stderr
+
+
+def test_gen_on_the_u1_is_its_underlay_plate_and_refuses_what_it_cannot_make(tmp_path: Path) -> None:
+    """`gen` on the four-head U1 goes to the U1 plate generator (underlay in the contrasting head,
+    one change to T1); the K1-only kinds, --no-underlay, test selection, a colour list that does
+    not name every head and a contrast the check refuses are all errors before any slicing."""
+    profiles, orca = write_plate_orca(tmp_path)
+    env = {"THREED_FLEET": str(REPO_FLEET), "SLICER": str(orca), "ORCA_PROFILES": str(profiles)}
+    out = tmp_path / "u1.gcode"
+
+    def gen(*args: str) -> subprocess.CompletedProcess[str]:
+        return run_cli(tmp_path, "calibrate", "gen", *args, "--printer", "u1", "-o", str(out), env_extra=env)
+
+    single = gen("pa")
+    assert single.returncode == 2 and "plate1 only" in single.stderr
+    dense = gen("dense")
+    assert dense.returncode == 2 and "plate1 only" in dense.stderr
+    bare = gen("plate1", "--no-underlay")
+    assert bare.returncode == 2 and "the underlay plate" in bare.stderr
+    only = gen("plate1", "--only", "flow")
+    assert only.returncode == 2 and "own tests and presets" in only.stderr
+    partial = gen("plate1", "--head-colours", "T1=#000000,T4=#FFFFFF")
+    assert partial.returncode == 2 and "every head" in partial.stderr and "missing T2, T3" in partial.stderr
+    low = gen("plate1", "--head-colours", "T1=#000000,T2=#FFFFFF,T3=#0A0A0A,T4=#FFFFFF", "--underlay-tool", "T3")
+    assert low.returncode == 2 and "contrast too low" in low.stderr
+    assert not out.exists()

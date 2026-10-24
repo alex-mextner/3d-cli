@@ -53,6 +53,7 @@ from slicing.calibration_plate import (
     brim_rects,
     brim_width,
 )
+from slicing.calibration_plate_underlay import declare
 from slicing.calibration_plates import filament
 from slicing.calibration_plates.dense import (
     HINGE_L,
@@ -62,13 +63,14 @@ from slicing.calibration_plates.dense import (
     hinge_scad,
     openscad_stl,
 )
+from slicing.calibration_underlay import UnderlayDecl
 
 PLATE_ID = "dense2"
-TITLE = "dense plate 2: holes, fits, elephant foot, brims"
+TITLE = "dense plate 2: holes, fits, elephant foot, bridge and overhang bases"
 TESTS = {
     "fiducials": "corner fiducials: one-layer patch, 5 mm rulers, Ø10 ring",
     "mvs": "max volumetric speed strip 24–32 mm³/s",
-    "brim": "14 mm bridge and 60° overhang on 8 mm bases with a 3 mm brim",
+    "brim": "14 mm bridge and 60° overhang on 8 mm bases (a 3 mm brim only with --no-underlay) and the 2.0 mm tab",
     "hole_quality": "holes: plain / polyholes / arc fitting / xy hole compensation",
     "ovality": "hole ovality Ø3/5/8/10 with X/Y edges, ruler and ring",
     "fit": "pins in holes 0.15/0.25/0.35 and chamfered 0.10/0.15/0.20",
@@ -79,8 +81,67 @@ TESTS = {
     "thin_wall": "thin walls 0.25/0.35/0.45 along Y and X",
     "stringing": "stringing pillars at the preset retraction",
     "top_surface": "top surface tile",
-    "first_layer": "one-layer 20 mm patches on the free cells",
+    "first_layer": "one-layer 20 mm patches on the free cells (--no-underlay only: the bare underlay is the map)",
     "temp": "temperature mini-tower (sequential, last)",
+}
+# Where each test stands on the shared underlay (#320): `on` = on the sheet (a foot under its base),
+# `cutout` = on the bare bed in a hole of the sheet (print-in-place or loose parts, elephant-foot
+# blocks, through holes measured with a pin).
+UNDERLAY = {
+    "fiducials": UnderlayDecl(
+        "on",
+        "rulers, ring and dot are raised 0.4 mm marks: they stand on the sheet, no tile",
+    ),
+    "mvs": UnderlayDecl(
+        "on", "the strip prints on the underlay; its step is read from above"
+    ),
+    "brim": UnderlayDecl(
+        "on",
+        "pillars and the wedge's base stand on a foot instead of a brim; the tab is a loose part (cutout)",
+    ),
+    "hole_quality": UnderlayDecl(
+        "cutout",
+        "through holes are measured with pins and drill shanks: a foot would close them",
+    ),
+    "ovality": UnderlayDecl(
+        "cutout",
+        "through holes are measured in X and Y with a pin or the caliper's inside jaws",
+    ),
+    "fit": UnderlayDecl(
+        "cutout",
+        "pins are printed in place in their holes and must come out",
+        movable=True,
+    ),
+    "elephant_foot": UnderlayDecl(
+        "cutout",
+        "the block's first layers ARE the test: it must start on the bed, not on a sheet",
+    ),
+    "screw": UnderlayDecl("cutout", "screw holes are through holes tried with a screw"),
+    "slots": UnderlayDecl(
+        "cutout", "slots take the loose 2.0 mm tab and are read by sliding it in"
+    ),
+    "hinge": UnderlayDecl(
+        "cutout",
+        "print-in-place hinges must turn: the sheet would weld them",
+        movable=True,
+    ),
+    "thin_wall": UnderlayDecl(
+        "on",
+        "walls stand on a foot instead of a 0.6 mm tile; a lost wall is read from above",
+    ),
+    "stringing": UnderlayDecl(
+        "on",
+        "pillars stand on a foot instead of a tile; strings are read from the side",
+    ),
+    "top_surface": UnderlayDecl(
+        "on", "the tile's top skin is read; its foot is part of the sheet"
+    ),
+    "first_layer": UnderlayDecl(
+        "on", "replaced by the underlay: its bare cells are the first-layer map"
+    ),
+    "temp": UnderlayDecl(
+        "on", "the sequential mini-tower is lifted onto the finished sheet"
+    ),
 }
 BED = (220.0, 220.0)
 EDGE = 5.0  # the usable bed: BED minus this on every side (footprint share)
@@ -302,16 +363,22 @@ def _tile_obj(
     items: tuple[Item, ...] = (),
     record: str = "",
     arc_fitting: bool = False,
+    bare: bool = False,
 ) -> PlateObject:
     """A tile of height h with `cuts` removed, `scad_extra` added (reaching up to `top`) and
-    raised labels at its front (text, x in the tile)."""
+    raised labels at its front (text, x in the tile). `bare`: no tile (it was only a base the
+    underlay now replaces): the extras and labels stand on the bed (h = 0) within the tile's
+    footprint."""
     lbl: list[Box] = []
     for text, x in labels:
         lbl += label_boxes(text, t[0] + x, _label_y(t), h)
-    src = (
-        f"union() {{ difference() {{ translate([{t[0]},{t[1]},0]) cube([{t[2] - t[0]},{t[3] - t[1]},{h}]);"
-        f" {cuts} }} {scad_extra} {scad_cubes(lbl)} }}"
-    )
+    if bare:
+        src = f"union() {{ {scad_extra} {scad_cubes(lbl)} }}"
+    else:
+        src = (
+            f"union() {{ difference() {{ translate([{t[0]},{t[1]},0]) cube([{t[2] - t[0]},{t[3] - t[1]},{h}]);"
+            f" {cuts} }} {scad_extra} {scad_cubes(lbl)} }}"
+        )
     return PlateObject(
         name,
         kind,
@@ -336,7 +403,15 @@ def _front_labels(
         name,
         "label",
         tuple(boxes),
-        # every stroke is its own tiny base: the default rule would ring each one with a brim
+        # every stroke is its own tiny base: one foot under the whole row of labels instead
+        base=(
+            (
+                min(b[0] for b in boxes),
+                min(b[1] for b in boxes),
+                max(b[3] for b in boxes),
+                max(b[4] for b in boxes),
+            ),
+        ),
         brim=0.0,
         params={"texts": " ".join(text for text, _ in labels)},
         read=read,
@@ -348,12 +423,14 @@ def _cell_params(spot: str) -> dict[str, float | str]:
     return {"cell": f"{s.col},{s.row}" + (f"+{s.span - 1}" if s.span > 1 else "")}
 
 
-def _fiducial(spot: str) -> Objs:
+def _fiducial(spot: str, underlay: bool = False) -> Objs:
+    """A corner fiducial. On the underlay the marks stand on the sheet directly (z = 0: lifted
+    with the object); on the bare bed they stand on a one-layer patch."""
     col, row, _ = CELLS[spot]
     t = spot_cell(spot)
     k = spot.rsplit("_", 1)[1]
     left, front = col == 0, row == 0
-    z = PATCH_H
+    z = 0.0 if underlay else PATCH_H
     cx, cy = (t[0] + t[2]) / 2, (t[1] + t[3]) / 2
     inset = 0.6
     s = LBL[3]
@@ -376,8 +453,11 @@ def _fiducial(spot: str) -> Objs:
         t[3] - LBL_Y - (LBL[1] + s) if front else _label_y(t)
     )  # away from the edge ruler
     marks += label_boxes(k, cx, ly, z)
+    patch = (
+        "" if underlay else f"translate([{t[0]},{t[1]},0]) cube([{TILE},{TILE},{z}]);"
+    )
     src = (
-        f"union() {{ translate([{t[0]},{t[1]},0]) cube([{TILE},{TILE},{z}]); {scad_cubes(marks)} "
+        f"union() {{ {patch} {scad_cubes(marks)} "
         f"{scad_ring(cx, cy, z, *RING)} translate([{cx},{cy},{z}]) cylinder(d=2,h={EMBOSS},$fn=32); }}"
     )
     return (
@@ -401,8 +481,13 @@ def _fiducial(spot: str) -> Objs:
                     {"outer_d_mm": RING[0]},
                 ),
             ),
-            read=f"Corner fiducial {k} (1 front-left, 2 front-right, 3 back-left, 4 back-right): a one-layer "
-            f"patch (judge the first layer here like on the patches), a Ø{RING[0]:g} ring with a centre dot "
+            read=f"Corner fiducial {k} (1 front-left, 2 front-right, 3 back-left, 4 back-right): "
+            + (
+                ""
+                if underlay
+                else "a one-layer patch (judge the first layer here like on the patches), "
+            )
+            + f"a Ø{RING[0]:g} ring with a centre dot "
             f"(photo registration: the four dots are the plate's reference frame) and {RULER_STEP:g} mm rulers "
             "along both bed edges (long ticks every 10 mm) for the photo scale in X and Y.",
         ),
@@ -455,7 +540,7 @@ def _mvs(ctx: PlateContext) -> Objs:
     ), blocks
 
 
-def _brim_bridge(t: Cell) -> Objs:
+def _brim_bridge(t: Cell, underlay: bool = False) -> Objs:
     p, h = BRIDGE_PILLAR, BRIDGE_PILLAR_H
     x, y = t[0] + 4.0, t[1] + 12.0
     w = 2 * p + BRIDGE
@@ -484,14 +569,17 @@ def _brim_bridge(t: Cell) -> Objs:
                     {"bridge_mm": BRIDGE},
                 ),
             ),
-            read=f"{BRIDGE:g} mm bridge again, now on {p:g} mm pillars with a {BRIM:g} mm brim (the first plate's 4x6 mm "
-            "pillar leaned in under the bridge's pull). Both pillars should stand vertical after peeling the brim; "
+            read=f"{BRIDGE:g} mm bridge again, now on {p:g} mm pillars "
+            + ("standing on the underlay" if underlay else f"with a {BRIM:g} mm brim")
+            + " (the first plate's 4x6 mm pillar leaned in under the bridge's pull). Both pillars should "
+            f"stand vertical{'' if underlay else ' after peeling the brim'}; "
             "the bridge's underside should show straight, tight lines.",
         ),
         PlateObject(
             "insert_tab",
             "fit",
             (tab,),
+            movable=True,
             params={**_cell_params("brim_bridge"), "thickness_mm": iz},
             read=f"The {iz:g} mm tab for the slots (printed flat, its thickness is a Z size): measure it, then "
             "push it into the slots.",
@@ -505,7 +593,7 @@ def _brim_bridge(t: Cell) -> Objs:
     ), ()
 
 
-def _brim_overhang(t: Cell) -> Objs:
+def _brim_overhang(t: Cell, underlay: bool = False) -> Objs:
     x, y = t[0] + 4.5, t[1] + 12.0
     b, h = OVERHANG_BASE, OVERHANG_H
     reach = h * math.tan(math.radians(OVERHANG))
@@ -524,8 +612,9 @@ def _brim_overhang(t: Cell) -> Objs:
                 "base_mm": f"{b:g}x{b:g}",
             },
             items=(Item(str(OVERHANG), bbox, {"overhang_deg": OVERHANG}),),
-            read=f"{OVERHANG}° overhang again (right face, from vertical), on a {b:g}x{b:g} mm base with a {BRIM:g} mm brim: "
-            "the first plate's one on a 4 mm base came off the bed. It should stay put; the face itself was fine.",
+            read=f"{OVERHANG}° overhang again (right face, from vertical), on a {b:g}x{b:g} mm base "
+            + ("on the underlay" if underlay else f"with a {BRIM:g} mm brim")
+            + ": the first plate's one on a 4 mm base came off the bed. It should stay put; the face itself was fine.",
         ),
         _front_labels(
             "overhang_labels",
@@ -884,7 +973,10 @@ def _hinges(t: Cell) -> Objs:
     return tuple(objs), ()
 
 
-def _thin(spot: str, along: str) -> Objs:
+def _thin(spot: str, along: str, underlay: bool = False) -> Objs:
+    base_h = (
+        0.0 if underlay else BASE_H
+    )  # the 0.6 mm tile is replaced by the underlay's foot
     t = spot_cell(spot)
     walls: list[Box] = []
     for x, w in zip(XS3, THIN, strict=True):
@@ -897,7 +989,7 @@ def _thin(spot: str, along: str) -> Objs:
                     0.0,
                     cx + w / 2,
                     t[1] + 9.0 + THIN_LEN_Y,
-                    BASE_H + THIN_H,
+                    base_h + THIN_H,
                 )
             )
         else:
@@ -909,7 +1001,7 @@ def _thin(spot: str, along: str) -> Objs:
                     0.0,
                     cx + THIN_LEN_X / 2,
                     cy + w / 2,
-                    BASE_H + THIN_H,
+                    base_h + THIN_H,
                 )
             )
     labels = [(_hundredths(w), x) for x, w in zip(XS3, THIN, strict=True)]
@@ -918,28 +1010,31 @@ def _thin(spot: str, along: str) -> Objs:
             spot,
             "thin_wall",
             t,
-            BASE_H,
+            base_h,
             scad_cubes(walls),
             "",
             labels,
-            top=BASE_H + THIN_H,
+            top=base_h + THIN_H,
+            bare=underlay,
             params={
                 **_cell_params(spot),
                 "walls_mm": ",".join(f"{w:g}" for w in THIN),
                 "along": along,
             },
             items=tuple(
-                Item(text, (b[0], b[1], BASE_H, b[3], b[4], b[5]), {"wall_mm": w})
+                Item(text, (b[0], b[1], base_h, b[3], b[4], b[5]), {"wall_mm": w})
                 for (text, _), w, b in zip(labels, THIN, walls, strict=True)
             ),
-            read=f"Thin walls along {along} on a {BASE_H:g} mm tile, label = thickness in hundredths of a mm. A missing "
+            read=f"Thin walls along {along} on "
+            + ("the underlay" if underlay else f"a {BASE_H:g} mm tile")
+            + ", label = thickness in hundredths of a mm. A missing "
             "wall = the slicer dropped it; measure the ones that printed (the first plate printed 0.3 along Y "
             "but lost it along X).",
         ),
     ), ()
 
 
-def _stringing(ctx: PlateContext, t: Cell) -> Objs:
+def _stringing(ctx: PlateContext, t: Cell, underlay: bool = False) -> Objs:
     cy = t[1] + 18.0
     pillars = " ".join(
         f"translate([{t[0] + x},{cy},0]) cylinder(d={STRING_D},h={STRING_H},$fn=48);"
@@ -951,11 +1046,12 @@ def _stringing(ctx: PlateContext, t: Cell) -> Objs:
             "stringing",
             "retraction",
             t,
-            BASE_H,
+            0.0 if underlay else BASE_H,
             pillars,
             "",
             [(text, TILE / 2)],
             top=STRING_H,
+            bare=underlay,
             params={
                 **_cell_params("stringing"),
                 "retraction_mm": ctx.retract,
@@ -1062,13 +1158,19 @@ def build(ctx: PlateContext) -> Plate:
             f"{PLATE_ID}: --only/--skip must keep a test besides temp (the plate is sliced by layer "
             "around them); the temperature tower alone is `gen temp`"
         )
+    ul = ctx.underlay_layers is not None
+    if ul and not any(ctx.wants(t) for t in TESTS if t not in ("temp", "first_layer")):
+        raise GenError(
+            f"{PLATE_ID}: with the underlay the first layer is read from its bare cells, there are no "
+            "patches; keep another test too, or use --no-underlay for the patches"
+        )
     makers: dict[str, Callable[[str], Objs]] = {
-        "fiducials": _fiducial,
+        "fiducials": lambda s: _fiducial(s, ul),
         "mvs": lambda _s: _mvs(ctx),
         "brim": lambda s: (
-            _brim_bridge(spot_cell(s))
+            _brim_bridge(spot_cell(s), ul)
             if s == "brim_bridge"
-            else _brim_overhang(spot_cell(s))
+            else _brim_overhang(spot_cell(s), ul)
         ),
         "hole_quality": lambda s: _hole_quality(s, s.rsplit("_", 1)[1].upper()),
         "ovality": _ovality,
@@ -1083,8 +1185,8 @@ def build(ctx: PlateContext) -> Plate:
         ),
         "slots": lambda s: _slots(spot_cell(s)),
         "hinge": lambda s: _hinges(spot_cell(s)),
-        "thin_wall": lambda s: _thin(s, "Y" if s == "thin_y" else "X"),
-        "stringing": lambda s: _stringing(ctx, spot_cell(s)),
+        "thin_wall": lambda s: _thin(s, "Y" if s == "thin_y" else "X", ul),
+        "stringing": lambda s: _stringing(ctx, spot_cell(s), ul),
         "top_surface": lambda s: _top(spot_cell(s)),
         "temp": lambda s: _temp(ctx, spot_cell(s)),
     }
@@ -1094,13 +1196,14 @@ def build(ctx: PlateContext) -> Plate:
         if not ctx.wants(test):
             continue
         if test == "first_layer":
-            for col, row in patch_cells():
-                objs, _ = _patch(col, row)
-                objects += objs
+            if not ul:  # the underlay's bare cells are the first-layer map
+                for col, row in patch_cells():
+                    objs, _ = _patch(col, row)
+                    objects += declare(objs, test, UNDERLAY)
             continue
         for spot in SPOTS[test]:
             objs, blocks = makers[test](spot)
-            objects += objs
+            objects += declare(objs, test, UNDERLAY)
             custom += blocks
     plate = Plate(
         PLATE_ID,
@@ -1113,7 +1216,7 @@ def build(ctx: PlateContext) -> Plate:
             "layer_height": filament.SEQ_LAYER_H,
         },
         seq_filament={"slow_down_layer_time": SEQ_MIN_LAYER_S},
-        brim=BRIM,
+        brim=0.0 if ul else BRIM,
     )
     line_w = ctx.ex.line_w
     _check_layout(plate, line_w)
@@ -1123,7 +1226,7 @@ def build(ctx: PlateContext) -> Plate:
         notes=(
             "Tests: " + ", ".join(t for t in TESTS if ctx.wants(t)) + ".",
             f"Footprint: {area / 100:.0f} cm² = {bed_share * 100:.0f} % of the bed, {usable_share * 100:.0f} % of "
-            f"the usable {BED[0] - 2 * EDGE:g}x{BED[1] - 2 * EDGE:g} mm (base outlines, brims, hand-written strip).",
+            f"the usable {BED[0] - 2 * EDGE:g}x{BED[1] - 2 * EDGE:g} mm (base outlines, brims with --no-underlay, hand-written strip).",
             "Grid: 7x7 cells of 30 mm, column 0 at the left, row 0 at the front; each sample's label sits at the "
             "front of its cell. Units: gaps, walls, chamfers and slot clearances in hundredths of a mm; screw "
             "holes in tenths; other diameters, the bridge and the tab in mm; the overhang in degrees.",
