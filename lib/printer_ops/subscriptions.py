@@ -444,8 +444,10 @@ class DeliveryState:
 
         self.update(change)
 
-    def claim_warning(self, key: str, now: float, every_s: float) -> bool:
-        """True (and the slot is taken) when no warning `key` was sent in the last `every_s` seconds."""
+    def claim_warning(self, key: str, now: float, every_s: float, *, fail_open: bool = False) -> bool:
+        """True (and the slot is taken) when no warning `key` was sent in the last `every_s` seconds;
+        `release_warning` gives the slot back. An unusable state file (`update` returns None) refuses the claim,
+        unless `fail_open`: a warning that must not be lost is then sent every time."""
         def change(data: dict[str, Any]) -> bool:
             warned = data.setdefault("warnings", {})
             last = warned.get(key)
@@ -454,7 +456,17 @@ class DeliveryState:
             warned[key] = now
             return True
 
-        return bool(self.update(change))
+        claimed = self.update(change)
+        if claimed is None and fail_open:  # the state file is unusable: say it rather than stay silent
+            return True
+        return bool(claimed)
+
+    def release_warning(self, key: str) -> None:
+        """Give back a slot taken by `claim_warning(key)`: the warning could not be sent, so the next try is not held off."""
+        def change(data: dict[str, Any]) -> None:
+            data.setdefault("warnings", {}).pop(key, None)
+
+        self.update(change)
 
     def bump(self, printer: str, name: str, n: int = 1) -> None:
         """Count `n` more failures of the chain of `printer` (names: CHAIN_COUNTERS)."""

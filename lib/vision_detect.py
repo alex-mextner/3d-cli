@@ -716,6 +716,7 @@ def run_live(args: argparse.Namespace) -> int:
     dispatcher = None
     if not args.once:
         dispatcher = Dispatcher.for_devices([device], dry_run=args.dry_run)
+        dispatcher.start_startup_test([device.name], "vision")
         if args.min_severity:
             severity_rank(args.min_severity)
             dispatcher.min_severity[device.name] = args.min_severity

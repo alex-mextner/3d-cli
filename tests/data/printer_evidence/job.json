@@ -1,0 +1,15 @@
+{
+  "job": {
+    "job_id": "000070",
+    "user": "_TRUSTED_USER_",
+    "filename": "chekhov_phone_stand-final4-48b4bf31-48b4bf311a62a332.gcode",
+    "status": "cancelled",
+    "start_time": 1792776299.0115554,
+    "end_time": 1792838110.524488,
+    "print_duration": 32258.154309715,
+    "total_duration": 61811.40797301501,
+    "filament_used": 48224.19130014186,
+    "auxiliary_data": [],
+    "exists": true
+  }
+}

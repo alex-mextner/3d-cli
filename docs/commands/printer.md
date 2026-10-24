@@ -19,6 +19,7 @@ Epic: [#90](https://github.com/alex-mextner/3d-cli/issues/90).
 3d printer upload NAME FILE.gcode [--as REMOTE]
 3d printer start NAME FILE.gcode --yes [--as REMOTE] [--source-3mf X.3mf] [--bridge-max MM] [--force] [--secs S] [--no-bed-move]
 3d printer cancel NAME --yes
+3d printer evidence NAME [--job ID | --last] [--out DIR] [--gcode FILE.gcode] [--note TEXT] [--klippy-log FILE] [--job-file FILE]
 3d printer guard NAME --job-id ID --yes [--interval S] [--evidence DIR]
 3d printer guard NAME --job-id ID --dry-run
 3d printer watch NAME... | --all [--steer SESSION] [--exec CMD] [--min-severity LEVEL] ...
@@ -43,6 +44,7 @@ Epic: [#90](https://github.com/alex-mextner/3d-cli/issues/90).
 | `upload NAME FILE` | Store the file on the printer and verify its size there. Never starts a print. |
 | `start NAME FILE --yes` | Start a file that was uploaded before. Runs [`3d print-preflight`](print-preflight.md) first. |
 | `cancel NAME --yes` | Cancel the running or paused job. |
+| `evidence NAME --out DIR` | After EVERY print (done, cancelled, failed): save the Moonraker history job and the klippy.log lines around its pauses and errors as `DIR/<date>-<outcome>.md` + `.json`, with the layer of each stop when `--gcode` is given; GET only. See [printer-evidence.md](printer-evidence.md). |
 | `guard NAME --job-id ID --yes` | Authorize one automatic native PAUSE of this exact live Moonraker job on confirmed camera failure; [policy and readiness](printer-vision.md#one-job-automatic-pause). |
 | `watch NAME...` | Stay subscribed (read-only) and report anomalies as events — see [Watching printers](#watching-printers). |
 | `vision NAME` | Watch the camera for failed prints (spaghetti, stale/dark camera, the U1's own NPU verdicts) — see [Camera failure detection](#camera-failure-detection). |
@@ -425,6 +427,16 @@ Sinks — several at once:
   `+N more: kinds` line sent when it ends; a higher severity passes once.
   The old `--tg` / `--tg-always` flags and `tg:` key are read as `tg_fallback: true` with a
   deprecation warning.
+  At start the watcher (and `3d printer vision`) sends ONE `[TEST]` message through the same `tg`
+  command line an alert uses and asserts tg's exit code, on its own thread (a hung tg never delays the
+  watching) and at most once an hour per service across restarts (a service restarting in a loop must
+  not spam; `watch` and `vision` each prove their own tg): a tg that refuses every message is otherwise silent
+  until the first real alert fails (Chekhov 2026-10-23: `tg --tag answer` without `--reply-to`, the
+  error buried in a log, a paused print waited 6 h). A refusal is an `ERROR: the Telegram test message
+  FAILED` line on stderr (the journal of the service) and, for `watch`, `failed` / `last_error` of the `tg`
+  sink in the heartbeat file (`vision` has no heartbeat: the log line is its only surface); the watcher
+  keeps running, its other sinks may still reach someone, and the next start tries again at once. A state
+  directory the service cannot write only turns the once-an-hour throttle off. Not sent with `--dry-run`.
 - pause — before that message, a high-confidence critical finding pauses the print itself when
   `watch.pause_without_agent` is `critical-only` (default for own, `access: full` printers with a
   camera): [Pause without an agent](printer-vision.md#pause-without-an-agent). The stream itself

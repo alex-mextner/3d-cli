@@ -102,6 +102,10 @@ Sinks (several at once; per printer also from printer-devices.yaml `<name>.watch
                           `watch.message_cooldown_minutes` (default 10) are folded into one `+N more:
                           kinds` line when it ends; a higher severity goes through once. On by default;
                           yaml `watch.tg_fallback: false` turns it off (then nobody is told).
+                          At start the watcher sends ONE `[TEST]` message through the same `tg` command
+                          line (at most once an hour across restarts) and asserts tg's exit code: a tg
+                          that refuses is an `ERROR` line in the log and `failed` / `last_error` of the
+                          `tg` sink in the heartbeat file; the watcher keeps running. Not in --dry-run.
   pause (emergency)       before that message, a high-confidence critical finding (verified
                           vision_spaghetti, vision_part_detached; docs/commands/printer-vision.md
                           #pause-without-an-agent) pauses the print if `watch.pause_without_agent`
@@ -691,6 +695,7 @@ def run(argv: list[str]) -> int:
     heartbeat = Heartbeat(Path(opts["--heartbeat"]) if "--heartbeat" in opts else default_heartbeat(names))
     stop = threading.Event()
     dispatcher.maintain()   # prune subscriptions dead for too long before the first alert
+    dispatcher.start_startup_test(names, "watch")   # a tg that refuses every message must be known now, not at the first alert
     next_maintain = time.monotonic() + MAINTAIN_EVERY_S
 
     def _term(*_: Any) -> None:

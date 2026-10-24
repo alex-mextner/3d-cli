@@ -1,0 +1,121 @@
+01:50:07.371:===== Config file =====
+[virtual_sdcard]
+path = /home/lava/printer_data/gcodes
+on_error_gcode = CANCEL_PRINT
+
+[pause_resume]
+03:03:45.058:Stats 235337.4: gcodein=0  mcu: mcu_awake=0.010 mcu_task_avg=0.000009 mcu_task_stddev=0.000004 err_len=1 err_dest=0 e
+03:03:45.129:Pausing toolhead to calculate extruder phase offset
+03:03:47.058:Stats 235339.4: gcodein=0  mcu: mcu_awake=0.011 mcu_task_avg=0.000009 mcu_task_stddev=0.000004 err_len=1 err_dest=0 e
+03:03:48.059:Heater extruder1 approaching new target of 215.000
+03:03:49.059:Stats 235341.4: gcodein=0  mcu: mcu_awake=0.011 mcu_task_avg=0.000009 mcu_task_stddev=0.000004 err_len=1 err_dest=0 e
+03:03:51.067:Stats 235343.4: gcodein=0  mcu: mcu_awake=0.010 mcu_task_avg=0.000009 mcu_task_stddev=0.000004 err_len=1 err_dest=0 e
+03:03:53.067:Stats 235345.4: gcodein=0  mcu: mcu_awake=0.010 mcu_task_avg=0.000009 mcu_task_stddev=0.000004 err_len=1 err_dest=0 e
+03:03:55.069:Stats 235347.4: gcodein=0  mcu: mcu_awake=0.010 mcu_task_avg=0.000009 mcu_task_stddev=0.000004 err_len=1 err_dest=0 e
+03:03:55.728:[ExtruderSwitchRecorder] Data atomically written to: /home/lava/printer_data/config/persistent/extruder_switch_recorder.json
+03:03:57.069:Stats 235349.4: gcodein=0  mcu: mcu_awake=0.010 mcu_task_avg=0.000009 mcu_task_stddev=0.000004 err_len=1 err_dest=0 e
+03:03:57.069:Heater extruder1 within range of 215.000
+03:03:59.070:Stats 235351.4: gcodein=0  mcu: mcu_awake=0.010 mcu_task_avg=0.000009 mcu_task_stddev=0.000004 err_len=1 err_dest=0 e
+03:05:10.603:park extruder3 !!!
+03:05:11.219:Stats 235423.6: gcodein=0  mcu: mcu_awake=0.015 mcu_task_avg=0.000010 mcu_task_stddev=0.000004 err_len=1 err_dest=0 e
+03:05:12.300:pick extruder1 !!!
+03:05:13.220:Stats 235425.6: gcodein=0  mcu: mcu_awake=0.015 mcu_task_avg=0.000010 mcu_task_stddev=0.000004 err_len=1 err_dest=0 e
+03:05:14.796:After picking the extruder, checking retry attempt 0, retry_extruder_id: None
+03:05:15.223:Stats 235427.6: gcodein=0  mcu: mcu_awake=0.015 mcu_task_avg=0.000010 mcu_task_stddev=0.000004 err_len=1 err_dest=0 e
+03:05:15.301:After picking the extruder, checking retry attempt 1, retry_extruder_id: None
+03:05:15.805:After picking the extruder, checking retry attempt 2, retry_extruder_id: None
+03:05:16.310:After picking the extruder, checking retry attempt 3, retry_extruder_id: None
+03:05:16.815:After picking the extruder, checking retry attempt 4, retry_extruder_id: None
+03:05:17.224:Stats 235429.6: gcodein=0  mcu: mcu_awake=0.010 mcu_task_avg=0.000009 mcu_task_stddev=0.000004 err_len=1 err_dest=0 e
+03:05:17.319:After picking the extruder, checking retry attempt 5, retry_extruder_id: None
+03:05:17.823:After picking the extruder, checking retry attempt 6, retry_extruder_id: None
+03:05:18.328:After picking the extruder, checking retry attempt 7, retry_extruder_id: None
+03:05:18.833:After picking the extruder, checking retry attempt 8, retry_extruder_id: None
+03:05:19.225:Stats 235431.6: gcodein=0  mcu: mcu_awake=0.010 mcu_task_avg=0.000009 mcu_task_stddev=0.000004 err_len=1 err_dest=0 e
+03:05:19.339:Extruder extruder1 pickup failed, detected that extruder1 is detached. err-sta: ['1-(FFF)']
+03:05:19.340:exit_print: lines=2464445, current_line_gcode=M400, file_position=64070964
+03:05:19.341:Pausing...
+03:05:19.386:Raising exception: id:523 index:1 code:46 oneshot:0 level:2 is_persistent:0, message: Extruder extruder1 pickup failed, detected that extruder1 is detached. err-sta: ['1-(FFF)']
+03:05:19.794:M107: Unsupported fan ID: 3
+03:05:19.795:idle_timeout: Timeout set to 9999999999.00 s
+03:05:19.796:mcu: stepper_x:7007 stepper_y:17761 stepper_z:80395
+stepper: stepper_x:344.300000 stepper_y:-155.700000 stepper_z:67.274167
+kinematic: X:94.300000 Y:250.000000 Z:67.274167
+toolhead: X:94.300000 Y:250.000000 Z:67.274483 E:214993.297580
+gcode: X:94.300000 Y:250.000000 Z:67.221444 E:214993.297580
+gcode base: X:-0.034067 Y:0.058320 Z:-0.158500 E:215002.441370
+gcode homing: X:-0.034067 Y:0.058320 Z:-0.158500
+03:05:19.799:Success: Set action code IDLE
+03:05:19.800:Exiting SD card print, lines=2464445, current_line_gcode=M400, file_position=64070964
+03:05:19.800:file: /home/lava/printer_data/gcodes/chekhov_phone_stand-final4-48b4bf31-48b4bf311a62a332.gcode
+03:05:49.242:Stats 235461.6: gcodein=0  mcu: mcu_awake=0.008 mcu_task_avg=0.000008 mcu_task_stddev=0.000003 err_len=1 err_dest=0 e
+03:05:55.729:[ExtruderSwitchRecorder] Data atomically written to: /home/lava/printer_data/config/persistent/extruder_switch_recorder.json
+03:06:19.260:Stats 235491.6: gcodein=0  mcu: mcu_awake=0.008 mcu_task_avg=0.000008 mcu_task_stddev=0.000004 err_len=1 err_dest=0 e
+03:06:49.281:Stats 235521.6: gcodein=0  mcu: mcu_awake=0.008 mcu_task_avg=0.000008 mcu_task_stddev=0.000003 err_len=1 err_dest=0 e
+09:29:04.866:After picking the extruder, checking retry attempt 6, retry_extruder_id: None
+09:29:05.373:After picking the extruder, checking retry attempt 7, retry_extruder_id: None
+09:29:05.877:After picking the extruder, checking retry attempt 8, retry_extruder_id: None
+09:29:06.383:extruder1 pickup failed
+09:29:06.384:Raising exception: id:523 index:1 code:23 oneshot:0 level:2 is_persistent:0, message: extruder1 pickup failed
+09:29:31.326:stepper_x has been manually enabled
+09:29:32.782:Run Current: 0.65A Hold Current: 0.65A
+09:29:33.037:Run Current: 0.65A Hold Current: 0.65A
+09:29:33.266:Stats 258485.6: gcodein=0  mcu: mcu_awake=0.008 mcu_task_avg=0.000008 mcu_task_stddev=0.000003 err_len=1 err_dest=0 e
+09:29:43.549:trigger_mcu_pos: {'stepper_y': 92034, 'stepper_x': -66242}
+09:29:51.553:trigger_mcu_pos: {'stepper_x': -95937, 'stepper_y': 59139}
+09:29:52.371:probe_start_x: 5.49688, probe_start_y: 4.90469
+09:29:52.372:use_origin: True, f_cal: True, origin: [12.875, 0.625]
+09:29:55.975:[ExtruderSwitchRecorder] Data atomically written to: /home/lava/printer_data/config/persistent/extruder_switch_recorder.json
+09:29:56.944:5.49688, 4.90469, 5.60000, 4.80000, [[-3136.0, -3136.0], [3456.0, 3456.0]], 12.87500, 0.62500, 13, 1
+
+09:29:57.223:Run Current: 1.20A Hold Current: 1.20A
+09:29:57.480:Run Current: 1.20A Hold Current: 1.20A
+09:29:57.481:extruder3 -> extruder1
+09:29:57.482:pick extruder1 !!!
+09:30:00.512:Activating extruder extruder1
+09:30:00.513:active new eddy current probe: inductance_coil extruder1
+09:30:00.514:exception cleared: id:523 index:1 code:46
+09:30:00.515:exception cleared: id:523 index:1 code:23
+09:30:03.285:Stats 258515.6: gcodein=0  mcu: mcu_awake=0.009 mcu_task_avg=0.000009 mcu_task_stddev=0.000004 err_len=1 err_dest=0 e
+09:30:05.081:[pause_resume] request resume
+09:30:05.082:Resuming...
+09:30:05.104:[print_task_config] INNER_CHECK_AND_RELOAD_FILAMENT_INFO extruder_index: 3
+09:30:05.105:Success: Set action code PRINT_RESUMING
+09:30:05.128:stepper_x has been manually enabled
+09:30:06.581:Run Current: 0.65A Hold Current: 0.65A
+09:30:06.836:Run Current: 0.65A Hold Current: 0.65A
+09:31:12.323:Heater extruder2 within range of 175.000
+09:31:18.328:Heater extruder3 within range of 175.000
+09:31:32.161:Success: Set action code IDLE
+09:31:32.164:Starting SD card print, file: /home/lava/printer_data/gcodes/chekhov_phone_stand-final4-48b4bf31-48b4bf311a62a332.gcode, position 64070964
+09:31:32.164:[print_task_config] set reprint info
+09:31:32.166:Success: Changed main state to PRINTING
+09:31:32.171:Force record power loss print file env
+09:31:32.336:Stats 258604.7: gcodein=0  mcu: mcu_awake=0.008 mcu_task_avg=0.000008 mcu_task_stddev=0.000003 err_len=1 err_dest=0 e
+09:31:34.337:Stats 258606.7: gcodein=0  mcu: mcu_awake=0.011 mcu_task_avg=0.000008 mcu_task_stddev=0.000005 err_len=1 err_dest=0 e
+09:31:34.404:extruder3 -> extruder1
+09:31:34.405:park extruder3 !!!
+09:31:35.890:pick extruder1 !!!
+09:31:36.338:Stats 258608.7: gcodein=0  mcu: mcu_awake=0.011 mcu_task_avg=0.000008 mcu_task_stddev=0.000005 err_len=1 err_dest=0 e
+09:31:38.340:Stats 258610.7: gcodein=0  mcu: mcu_awake=0.012 mcu_task_avg=0.000009 mcu_task_stddev=0.000004 err_len=1 err_dest=0 e
+09:31:38.380:Activating extruder extruder1
+09:31:38.381:active new eddy current probe: inductance_coil extruder1
+09:31:40.339:Stats 258612.7: gcodein=0  mcu: mcu_awake=0.012 mcu_task_avg=0.000009 mcu_task_stddev=0.000004 err_len=1 err_dest=0 e
+09:31:42.341:Stats 258614.7: gcodein=0  mcu: mcu_awake=0.012 mcu_task_avg=0.000009 mcu_task_stddev=0.000004 err_len=1 err_dest=0 e
+09:31:44.342:Stats 258616.7: gcodein=0  mcu: mcu_awake=0.011 mcu_task_avg=0.000009 mcu_task_stddev=0.000004 err_len=1 err_dest=0 e
+09:31:46.342:Stats 258618.7: gcodein=0  mcu: mcu_awake=0.011 mcu_task_avg=0.000009 mcu_task_stddev=0.000004 err_len=1 err_dest=0 e
+09:31:47.482:[pause_resume] request pause
+09:31:47.927:Pausing...
+09:31:48.028:Exiting SD card print, lines=2464505, current_line_gcode=G1  X20.500   E0.7560 F5325, file_position=64072162
+09:31:48.028:file: /home/lava/printer_data/gcodes/chekhov_phone_stand-final4-48b4bf31-48b4bf311a62a332.gcode
+10:34:18.630:Stats 262371.0: gcodein=0  mcu: mcu_awake=0.008 mcu_task_avg=0.000008 mcu_task_stddev=0.000004 err_len=1 err_dest=0 e
+10:34:48.647:Stats 262401.0: gcodein=0  mcu: mcu_awake=0.008 mcu_task_avg=0.000008 mcu_task_stddev=0.000004 err_len=1 err_dest=0 e
+10:35:10.400:[pause_resume] request cancel
+10:35:10.426:[print_task_config] reset print info
+10:35:10.667:Stats 262423.0: gcodein=0  mcu: mcu_awake=0.008 mcu_task_avg=0.000008 mcu_task_stddev=0.000004 err_len=1 err_dest=0 e
+10:35:11.180:rm power_loss info success
+10:35:11.183:Success: Exited to idle state
+10:35:12.667:Stats 262425.0: gcodein=0  mcu: mcu_awake=0.008 mcu_task_avg=0.000008 mcu_task_stddev=0.000004 err_len=1 err_dest=0 e
+10:41:10.894:Stats 262783.2: gcodein=0  mcu: mcu_awake=0.007 mcu_task_avg=0.000008 mcu_task_stddev=0.000002 err_len=1 err_dest=0 e
+10:41:12.894:Stats 262785.2: gcodein=0  mcu: mcu_awake=0.007 mcu_task_avg=0.000008 mcu_task_stddev=0.000002 err_len=1 err_dest=0 e
+10:41:14.896:Stats 262787.2: gcodein=0  mcu: mcu_awake=0.007 mcu_task_avg=0.000008 mcu_task_stddev=0.000002 err_len=1 err_dest=0 e
