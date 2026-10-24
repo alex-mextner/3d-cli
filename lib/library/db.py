@@ -36,7 +36,7 @@ ACTOR = "cli:library"
 
 # table -> (insertable columns, JSON columns). `id`, `uid`, `created_at` are generated.
 TABLES: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
-    "search_session": (("query", "parent_id", "kind"), ()),
+    "search_session": (("query", "parent_id", "kind", "meta"), ("meta",)),
     "search_result": (
         (
             "session_id",
@@ -50,12 +50,25 @@ TABLES: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
             "rationale",
             "analytics",
             "image_url",
+            "record",
         ),
-        ("analytics",),
+        ("analytics", "record"),
     ),
     "model_source": (
-        ("site", "model_id", "url", "license", "author", "dir", "files", "sha256"),
-        ("files",),
+        (
+            "site",
+            "model_id",
+            "url",
+            "license",
+            "author",
+            "dir",
+            "files",
+            "sha256",
+            "role",
+            "vitamin_kind",
+            "analytics",
+        ),
+        ("files", "analytics"),
     ),
     "design": (("name", "project_dir"), ()),
     "make": (

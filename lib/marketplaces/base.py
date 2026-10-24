@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
+import time
+from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, field
-from typing import Any
+from typing import Any, Protocol
 
 from errors import ThreeDError
 
@@ -42,10 +43,20 @@ class Model:
     tags: tuple[str, ...] = ()
     image: str = ""
     files: tuple[ModelFile, ...] = field(default_factory=tuple)
+    # Search-core additions (#576). `images` lists every picture URL the site gave, cover first;
+    # `files_known` is True only when the site's answer carried a file list (an empty list then
+    # means "no files", not "not fetched yet"), so a consumer can tell cad=false from cad=unknown.
+    date: str = ""
+    images: tuple[str, ...] = ()
+    makes: int | None = None
+    views: int | None = None
+    category: str = ""
+    files_known: bool = False
 
     def to_json(self) -> dict[str, Any]:
         data = asdict(self)
         data["tags"] = list(self.tags)
+        data["images"] = list(self.images)
         return data
 
 
@@ -71,8 +82,12 @@ class MarketplaceError(ThreeDError):
         super().__init__(f"{site}: {message}", command="models", remediation=remediation)
         self.site = site
         self.kind = kind
-        self.reason = message
         self.exit_code = 2 if kind == "auth" else 1
+
+    @property
+    def reason(self) -> str:
+        """The message without the `site: ` prefix (derived, so it cannot drift from `message`)."""
+        return self.message.removeprefix(f"{self.site}: ")
 
     def to_json(self) -> dict[str, Any]:
         return {"site": self.site, "kind": self.kind, "message": self.reason,
@@ -146,3 +161,52 @@ def child(parent: dict[str, Any], key: str) -> dict[str, Any]:
 
 def str_list(value: object) -> tuple[str, ...]:
     return tuple(v.strip() for v in value if isinstance(v, str)) if isinstance(value, list) else ()
+
+
+def collect_pages(fetch: Callable[[int, int], list[Model]], limit: int, page_size: int) -> list[Model]:
+    """Up to `limit` models from an offset-paged search: `fetch(offset, size)` is called once per
+    page of at most `page_size` until `limit` is reached or the site answers a short or empty
+    page. Repeats across pages (a site re-ranking between requests) are dropped."""
+    models: list[Model] = []
+    seen: set[str] = set()
+    offset = 0
+    for _ in range(-(-limit // page_size) + 1):
+        want = min(page_size, limit - len(models))
+        if want <= 0:
+            break
+        page = fetch(offset, want)
+        for model in page:
+            if model.id not in seen:
+                seen.add(model.id)
+                models.append(model)
+        offset += len(page)
+        if len(page) < want:
+            break
+    return models[:limit]
+
+
+def unique_urls(*urls: str) -> tuple[str, ...]:
+    """The non-empty `urls` in order without repeats."""
+    return tuple(dict.fromkeys(u for u in urls if u))
+
+
+class Deadline:
+    """A wall-clock budget for a batch of follow-up requests: work started after it has run out
+    is skipped, so a slow site delays a search by at most the budget plus requests in flight."""
+
+    def __init__(self, seconds: float) -> None:
+        self._end = time.monotonic() + seconds
+
+    def expired(self) -> bool:
+        return time.monotonic() >= self._end
+
+
+class DetailStore(Protocol):
+    """Persistent home of per-hit follow-up answers (Thingiverse licence + file list), so a repeat CLI search,
+    a separate process with no memory of the last one, does not spend the site's request allowance again.
+    Implementations must be thread-safe and best effort: `get` returns None and `put` does nothing when the
+    storage is unavailable."""
+
+    def get(self, key: str) -> dict[str, Any] | None: ...
+
+    def put(self, key: str, value: dict[str, Any]) -> None: ...

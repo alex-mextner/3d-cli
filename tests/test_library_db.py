@@ -26,7 +26,8 @@ def test_fresh_path_opens_and_migrates_idempotently(tmp_path: Path) -> None:
     path = tmp_path / "a" / "b" / "library.db"
     c1 = librarydb.open_library(path)
     applied = sorted(pdb.applied_versions(c1))
-    assert applied == [1] and path.is_file()
+    shipped = sorted(m.version for m in pdb.discover_migrations(librarydb.MIGRATIONS_DIR))
+    assert applied == shipped and shipped[0] == 1 and path.is_file()
     assert pdb.migrate(c1, librarydb.MIGRATIONS_DIR) == []  # second run: no-op
     c1.close()
     c2 = librarydb.open_library(path)  # reopening is a no-op too
@@ -41,7 +42,7 @@ def test_pragmas_foreign_keys_and_wal(conn: sqlite3.Connection) -> None:
 
 def test_migration_numbering_is_separate_from_printops() -> None:
     mine = {m.version for m in pdb.discover_migrations(librarydb.MIGRATIONS_DIR)}
-    assert mine == {1}
+    assert 1 in mine  # the library's own numbering starts at 0001, whatever later slices add
     assert librarydb.MIGRATIONS_DIR != pdb.MIGRATIONS_DIR
 
 

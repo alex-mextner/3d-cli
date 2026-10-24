@@ -523,7 +523,7 @@ def test_download_writes_files_and_model_json(monkeypatch: pytest.MonkeyPatch, t
     assert (target / "spoon_handle.stl").read_bytes() == FILES["spoon_handle.stl"]
     assert meta["source"] == {"site": "printables", "id": "311253", "url": SPOON_URL}
     assert meta["author"]["name"] == "cluckOmatic" and meta["license"] == "CC0"
-    assert files[0]["name"] == "spoon_handle.stl" and len(files[0]["sha256"]) == 64
+    assert files[0].name == "spoon_handle.stl" and len(files[0].sha256) == 64
     assert model.title == "Spoon Drawer Pull"
 
 

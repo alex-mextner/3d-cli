@@ -87,18 +87,28 @@ def test_search_where_every_site_fails_exits_with_the_shared_code(tmp_path: Path
     """Thingiverse and Cults both lack credentials: no site answered and every failure is
     an auth error, so the search exits 2; mixing in a site with a different failure
     (MakerWorld's Chrome-TLS curl cannot be started -> network) collapses to exit 1. Both
-    still list every error in the JSON."""
+    still list every error in the JSON; a THREED_CURL_IMPERSONATE that names no executable is a
+    usage error (exit 2) rather than a silent fallback (#504)."""
+    broken = tmp_path / "curl-broken"
+    broken.write_text("#!/bin/sh\nexit 7\n", encoding="utf-8")
+    broken.chmod(0o755)
     with MarketplaceServer() as server:
         auth = run_cli(tmp_path, "models", "search", "spoon", "--site", "thingiverse,cults", "--json",
                        env_extra=_env(server, tmp_path))
         mixed = run_cli(tmp_path, "models", "search", "spoon", "--site", "thingiverse,makerworld",
                         "--json", env_extra={**_env(server, tmp_path),
-                                             "THREED_CURL_IMPERSONATE": str(tmp_path / "missing")})
+                                             "THREED_CURL_IMPERSONATE": str(broken)})
+        unset = run_cli(tmp_path, "models", "search", "spoon", "--site", "makerworld", "--json",
+                        env_extra={**_env(server, tmp_path),
+                                   "THREED_CURL_IMPERSONATE": str(tmp_path / "missing")})
     assert auth.returncode == 2, auth.stderr
     assert [e["kind"] for e in json.loads(auth.stdout)["errors"]] == ["auth", "auth"]
     assert mixed.returncode == 1, mixed.stderr
     kinds = {e["site"]: e["kind"] for e in json.loads(mixed.stdout)["errors"]}
     assert kinds == {"thingiverse": "auth", "makerworld": "network"}
+    assert unset.returncode == 2, unset.stderr
+    [error] = json.loads(unset.stdout)["errors"]
+    assert "THREED_CURL_IMPERSONATE is not an executable file" in error["message"]
 
 
 def test_download_never_writes_into_a_non_empty_dir(tmp_path: Path) -> None:
@@ -209,7 +219,7 @@ def test_bad_invocations_are_structured(tmp_path: Path) -> None:
     assert "an integer 1..100" in limit.stderr
     bare = run_cli(tmp_path, "models")
     assert bare.returncode == 1
-    assert bare.stdout.startswith("3d models <search|show|download|auth>")
+    assert bare.stdout.startswith("3d models <search|searches|show|download|analyze|auth>")
 
 
 def test_auth_status_names_sources_but_never_values(tmp_path: Path) -> None:
@@ -240,7 +250,9 @@ def test_help_and_docs_list_the_same_flags_and_examples(tmp_path: Path) -> None:
     assert result.returncode == 0
     doc = (REPO_ROOT / "docs" / "commands" / "models.md").read_text(encoding="utf-8")
     flags = set(re.findall(r"--[a-z][a-z-]+", result.stdout))
-    assert flags == {"--site", "--limit", "--dir", "--json"}
+    assert flags == {"--site", "--limit", "--dir", "--json", "--images", "--columns", "--deep", "--deep-max-mb",
+                     "--deep-top", "--cad", "--for-vitamin", "--no-details", "--no-save", "--db",
+                     "--idempotency-key", "--file", "--role", "--vitamin"}
     for flag in flags:
         assert f"`{flag}" in doc, f"{flag} undocumented in docs/commands/models.md"
     examples = re.findall(r"^  (3d models .+)$", result.stdout, re.M)

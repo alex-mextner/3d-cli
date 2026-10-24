@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from errors import UsageError
 from marketplaces.base import MarketplaceError, as_str, dict_list, require_dict
 
 USER_AGENT = "3d-cli (+https://github.com/alex-mextner/3d-cli)"
@@ -190,7 +191,14 @@ def curl_impersonate_binary() -> str | None:
     then axe's pinned build in $AXE_CURL_IMPERSONATE_DIR, then any curl_chromeNNN on PATH."""
     explicit = os.environ.get("THREED_CURL_IMPERSONATE", "").strip()
     if explicit:
-        return explicit
+        path = Path(explicit).expanduser()
+        if not (path.is_file() and os.access(path, os.X_OK)):
+            raise UsageError(
+                f"THREED_CURL_IMPERSONATE is not an executable file: {explicit}",
+                command="models",
+                remediation=["Point THREED_CURL_IMPERSONATE at a curl-impersonate wrapper "
+                             "(curl_chrome146), or unset it to search PATH and AXE_CURL_IMPERSONATE_DIR."])
+        return str(path)
     axe_dir = os.environ.get("AXE_CURL_IMPERSONATE_DIR", "").strip()
     if axe_dir:
         for name in CURL_IMPERSONATE_NAMES:
@@ -205,10 +213,12 @@ def curl_impersonate_binary() -> str | None:
 
 
 def fetch_impersonated(site: str, url: str, *, headers: Mapping[str, str] | None = None) -> Response:
-    """GET `url` with a Chrome TLS fingerprint: through a curl-impersonate binary when one is
+    """GET `url` (http/https only) with a Chrome TLS fingerprint: through a curl-impersonate binary when one is
     found, else through impersonate_fetch.py (curl_cffi) run by cli.pyrun. Both write the
     body to a file and print "<status> <final url>"; request headers (which may carry a
     token) go through a file in a private 0700 temp dir, never through argv."""
+    if _split(site, url).scheme not in ("http", "https"):
+        raise MarketplaceError(site, "parse", f"refusing a non-HTTP URL from the site: {url[:120]}")
     merged = {"Accept": "application/json", **(headers or {})}
     # With a token aboard, a redirect is not followed at all (it surfaces as a 3xx error):
     # unlike the urllib lane we cannot pin headers to the first host inside curl.
