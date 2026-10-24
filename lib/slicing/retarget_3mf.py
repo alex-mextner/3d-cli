@@ -902,6 +902,21 @@ def parse_keep(spec: str, count: int) -> list[int]:
     return picked
 
 
+def _guard_kept(model_settings: str, kept: Sequence[_Item], include_non_printable: bool) -> None:
+    """Print boundary: refuse kept objects whose `3d:role` tag says they are not printable."""
+    from parts import assert_printable, part_from_metadata
+    from parts_3mf import tags_in
+
+    tagged = {t.object_id: t for t in tags_in(model_settings)}
+    names = _object_names(model_settings)
+    found = []
+    for it in kept:
+        tag = tagged.get(it.object_id)
+        if tag is not None:
+            found.append(part_from_metadata(names.get(it.object_id, tag.name), tag.metadata))
+    assert_printable(found, include_non_printable=include_non_printable, command="retarget")
+
+
 def retarget(
     src: Path,
     *,
@@ -912,9 +927,11 @@ def retarget(
     margin: float = 5.0,
     setting_sets: Sequence[str] = (),
     overrides: Sequence[tuple[str, str]] = (),
+    include_non_printable: bool = False,
 ) -> tuple[dict[str, bytes], Report]:
     """Build the retargeted parts for `src`; `keep` is a `--keep` spec ("1,3", empty = all).
-    Raises GateFailure when the footprint cannot fit."""
+    Raises GateFailure when the footprint cannot fit, and `NonPrintableParts` when a kept object is tagged
+    non-printable (vitamin / reference / stand-in, lib/parts.py) and `include_non_printable` is not set."""
     parts = read_package(src)
     settings = _load_settings(parts)
     main_model = parts[MAIN_MODEL].decode("utf-8")
@@ -938,6 +955,7 @@ def retarget(
     wanted = parse_keep(keep, len(items)) if keep else [it.index for it in items]
     kept = [items[i - 1] for i in wanted]
     report.kept = [it.index for it in kept]
+    _guard_kept(model_settings, kept, include_non_printable)
     instance_map: dict[tuple[int, int], int] = {}
     per_object: dict[int, int] = {}
     for it in kept:  # `kept` is in build order, as is the slicer's instance numbering

@@ -32,9 +32,12 @@ USAGE = """3d fit-check --insert A.stl[,B.stl] --socket S1.stl[,S2.stl] --gap MM
             insert the clearance stays at --gap +- --gap-tol
     depth   reported; FAIL below --min-depth
     open    the insert can go in: moved out along its insertion direction (--open
-            above, default; below) it meets no socket material — a roof over the
-            socket or a shoulder over a wider foot (undercut) FAILs; --open none for an
-            insert captured between parts
+            above, default; below; or ANY declared axis: +X -X +Y -Y or a vector) it
+            meets no socket material — a roof over the socket or a shoulder over a wider
+            foot (undercut) FAILs; --open none for an insert captured between parts.
+            The whole check runs in the declared frame (`z` of the report is the
+            coordinate along the axis) and the blocking location is given back in the
+            assembly frame
   No socket around the insert = FAIL. Comma-join, repeat or glob the parts of one side.
 
 Options:
@@ -57,8 +60,9 @@ Options:
   --gap-tol MM          clearance tolerance (default 0.03; with --fit the tolerance of the fit type)
   --step MM             slice step up the socket (default 0.25)
   --min-depth MM        FAIL when the socket is shallower (default: not checked)
-  --open DIR            insertion direction the socket must be open to: above
-                        (default), below, or none (captured insert, not checked)
+  --open DIR            direction the socket must be open to: above (default, +Z), below (-Z), none
+                        (captured insert, not checked), a signed axis +X -X +Y -Y, or a vector x,y,z
+                        in the assembly frame (a horizontal drawer: --open +Y)
   --spec FILE           YAML/JSON with many fits (see docs/commands/fit-check.md);
                         paths relative to the spec file
   --json                JSON report on stdout instead of the text lines
@@ -71,6 +75,8 @@ Examples:
   3d fit-check --insert plug.stl --socket plate.stl --gap 0.2 --gap-tol 0.05 --size-tol 0.05 --step 0.1 --min-depth 3.5
   3d fit-check --insert magnet.stl --socket 'HALF_*.stl' --gap 0.1 --open none
   3d fit-check --insert foot.stl --socket base.stl --gap 0.2 --open below
+  3d fit-check --insert drawer.stl --socket body.stl --gap 0.25 --open +Y
+  3d fit-check --insert slider.stl --socket rail.stl --gap 0.2 --open 1,1,0
   3d fit-check --insert plug.stl --socket plate.stl --fit sliding --shape round --printer k1se --material PETG
   3d fit-check --insert lid.stl --socket box.stl --fit snap --gap-tol 0.05
   3d fit-check --spec fits.yaml

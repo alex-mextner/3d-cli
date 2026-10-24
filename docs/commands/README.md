@@ -30,6 +30,7 @@ explain why the command exists, what its inputs mean, and how it fits into the l
 | `export` | [export.md](export.md) | Format-aware [STL](GLOSSARY.md#stl)/[3MF](GLOSSARY.md#3mf)/USDZ export, format planning, and [manifold](GLOSSARY.md#manifold) validation when the mesh stack is available. |
 | `generate` | [generate.md](generate.md) | Text description + named dimensions -> verified parametric `.scad` via an AI backend (generate/validate/render/check/fix loop). |
 | `fit-niche` | [fit-niche.md](fit-niche.md) | Generate a parametric insert/plug that mates into a described cavity with FDM clearances. |
+| `assembly` | [assembly.md](assembly.md) | Whole-assembly checks over declared mates: blocking intersections, per-mate fit clearance, insertion/removal sweeps on any axis, assembly order, finger/tool ergonomics, explode, BOM, 3MF positioning (`check`, `sweep`, `order`, `ergonomics`, `explode`, `bom`, `position`, `show`). |
 | `fits` | [fits.md](fits.md) | Fit tolerances per fit type (snap/sliding/tight/press/glue) corrected for printer x material: `list`, `show`, `resolve` (with provenance), `apply` (snippet / correct declared clearances), `corrections`. |
 | `library` | [library.md](library.md) | Local model-library database (searches, sources, designs, makes, photos, publications): `path`, `migrate`, `status`, `export`, offline. |
 | `import` | [import.md](import.md) | Generate OpenSCAD wrappers or conversion plans for imported model formats. |
