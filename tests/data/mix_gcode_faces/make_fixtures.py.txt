@@ -1,0 +1,32 @@
+"""Regenerates flat/standing .3mf + .gcode of this directory (real U1 slices, Snapmaker Orca).
+Run from the repo root: SNAPMAKER_ORCA=<extracted AppRun> .venv/bin/python tests/data/mix_gcode_faces/make_fixtures.py OUTDIR
+then copy OUTDIR/<name>/plate.3mf and plate_1.gcode here as <name>.3mf / <name>.gcode."""
+"""Generate the real U1 fixtures of tests/data/mix_gcode_faces: a 12x12x2.4 mm tile in mix 431, flat and standing,
+sliced by the installed Snapmaker Orca with the U1 system presets."""
+import subprocess
+import sys
+from pathlib import Path
+sys.path[:0] = ["lib", "tests"]
+from slicing import mix_tester as mt
+from mix_fixtures import Obj, Part, box, orca_project
+
+out = Path(sys.argv[1]); out.mkdir(parents=True, exist_ok=True)
+slicer = mt.find_slicer()
+cfg = mt.probe_settings(slicer, 0.12, 4)
+slots = [mt.LoadedSlot(1, "#8B2635", "Bordeaux", filament_id=3), mt.LoadedSlot(2, "#808080", "Grey", filament_id=5),
+         mt.LoadedSlot(3, "#E8732A", "Orange", filament_id=12), mt.LoadedSlot(4, "#F6C700", "Snapdragon", filament_id=7)]
+cfg_over = mt.project_settings(cfg, slots, [mt.mixed_row(0, "431")], [(129.0, 129.0, 142.0, 143.0)])
+cfg_over["raft_layers"] = "0"
+def tile(name, standing):
+    mesh = box(12, 2.4, 12) if standing else box(12, 12, 2.4)
+    return Obj(name, [Part(name, mesh, 5)], extruder=5, pos=(135.0, 135.0, 0.0))
+for name, standing in (("flat", False), ("standing", True)):
+    d = out / name; d.mkdir(exist_ok=True)
+    files = {
+        "[Content_Types].xml": '<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/><Default Extension="config" ContentType="text/xml"/></Types>',
+        "_rels/.rels": '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Target="/3D/3dmodel.model" Id="rel-1" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/></Relationships>',
+        "3D/_rels/3dmodel.model.rels": '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Target="/3D/Objects/object_1.model" Id="rel-1" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/></Relationships>',
+    }
+    proj = orca_project(d / "plate.3mf", [tile("PTA", standing)], settings=cfg_over, n_phys=len(cfg["filament_colour"]), files=files)
+    r = subprocess.run([slicer, "--datadir", str(d / "dd"), "--slice", "0", "--outputdir", str(d), str(proj)], capture_output=True, text=True, timeout=900)
+    print(name, r.returncode, (r.stdout + r.stderr)[-600:])

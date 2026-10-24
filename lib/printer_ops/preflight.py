@@ -23,7 +23,8 @@ WHAT (issue https://github.com/alex-mextner/3d-cli/issues/96), one PASS/WARN/FAI
   - head seq     every object prints each layer on its recipe's heads (slicing/head_sequence.py,
                  issue #103) — needs the project 3MF: --source-3mf or NAME.3mf next to the G-code;
   - mix face     every part in a mixed filament shows its colour on walls: FAIL when its top
-                 outweighs half its walls (slicing/mix_faces.py, issue #411; same project 3MF);
+                 outweighs half its walls (slicing/mix_faces.py, issue #411; same project 3MF; without one
+                 the G-code alone, objects printed by several heads: WARN, slicing/mix_gcode_faces.py, #419);
   - mix layers   the layer rules on what was printed: the additional colour never on consecutive
                  layers, no colour band or mixed layer thicker than 0.12 mm, measured on the
                  real per-layer heads and Z (slicing/mix_gcode.py, issue #116; with the project
@@ -408,13 +409,21 @@ def check_head_sequence(
     )
 
 
-def check_mix_faces(project: Path | None, project_source: str) -> Check:
-    """Issue #411: a part in a mixed filament shows its colour on walls, not on a flat top."""
+def check_mix_faces(project: Path | None, project_source: str, gcode: Path) -> Check:
+    """Issues #411 / #419: a part in a mixed filament shows its colour on walls, not on a flat top.
+    By the project 3MF when there is one (exact: it knows which parts are mixed, FAIL); else by the
+    G-code alone (objects printed on more than one head; WARN, a multi-colour part matches too)."""
     if project is None:
+        from slicing.mix_gcode_faces import preflight_check as gcode_check
+
+        got = gcode_check(str(gcode))
+        lines = got.get("lines")
         return Check(
             "mix face",
-            SKIP,
-            "no project 3MF: pass --source-3mf FILE.3mf or keep NAME.3mf next to NAME.gcode",
+            str(got.get("status", FAIL)),
+            f"{got.get('detail')} (G-code only: no project 3MF; --source-3mf FILE.3mf or NAME.3mf next to "
+            "NAME.gcode judges by the project)",
+            [str(x) for x in lines] if isinstance(lines, list) else [],
         )
     from slicing.mix_faces import preflight_check
 
@@ -435,7 +444,11 @@ def check_mix_layers(gcode: Path, project: Path | None, project_source: str) -> 
 
     result = preflight_check(str(gcode), str(project) if project else None)
     lines = result.get("lines")
-    where = project_source if project is not None else "no project 3MF: alternating objects only"
+    where = (
+        project_source
+        if project is not None
+        else "no project 3MF: alternating objects only"
+    )
     return Check(
         "mix layers",
         str(result.get("status", FAIL)),
@@ -652,7 +665,9 @@ def check_bed_verdict(v: dict[str, Any]) -> Check:
     frame = [f"frame: {v['frame']}"] if v.get("frame") else []
     why = str(v.get("reason") or "")
     if view.get("action") == "moved" and not view.get("restored"):
-        frame.append(f"BED NOT PUT BACK to Z {view.get('moved_from')}: {view.get('restore_error')}")
+        frame.append(
+            f"BED NOT PUT BACK to Z {view.get('moved_from')}: {view.get('restore_error')}"
+        )
         if plate != "missing" and bed != "occupied":
             return Check("bed", WARN, f"bed state {bed} ({when}): {why}", frame)
     if plate == "missing":
@@ -678,7 +693,12 @@ def check_bed(
     camera check (`bed_state.py status`). With `watch.bed.auto_view` and an idle printer that check
     moves the bed in Z to where the camera sees the whole plate and back (`move=False`: --no-move).
     A check that cannot run is a WARN, never a crash."""
-    from printer_ops.bed import STATUS_MOVE_TIMEOUT_S, STATUS_TIMEOUT_S, bed_config, status_argv
+    from printer_ops.bed import (
+        STATUS_MOVE_TIMEOUT_S,
+        STATUS_TIMEOUT_S,
+        bed_config,
+        status_argv,
+    )
 
     cfg = bed_config(device)
     if not cfg.enabled:
@@ -687,10 +707,14 @@ def check_bed(
             SKIP,
             f"bed camera check off for {device.name} (watch.bed.enabled in {device.source})",
         )
-    if timeout is None:  # a move is two Z moves, a settle wait and a frame wait; never kill it half-way
+    if (
+        timeout is None
+    ):  # a move is two Z moves, a settle wait and a frame wait; never kill it half-way
         timeout = STATUS_MOVE_TIMEOUT_S if move and cfg.auto_view else STATUS_TIMEOUT_S
     try:
-        argv = status_argv(device.name, max_age=cfg.stale_s, move="auto" if move else "never")
+        argv = status_argv(
+            device.name, max_age=cfg.stale_s, move="auto" if move else "never"
+        )
         r = runner(argv, capture_output=True, text=True, timeout=timeout)
     except Exception as exc:  # no runtime / timeout
         return Check("bed", WARN, f"bed check could not run: {exc}")
@@ -741,7 +765,7 @@ def run_preflight(
     report.checks.append(check_slice_warnings(origin or gcode, gcode))
     project, project_source = find_project_3mf(origin or gcode, source_3mf)
     report.checks.append(check_head_sequence(gcode, project, project_source))
-    report.checks.append(check_mix_faces(project, project_source))
+    report.checks.append(check_mix_faces(project, project_source, gcode))
     report.checks.append(check_mix_layers(gcode, project, project_source))
     report.checks.append(check_visible(gcode, visible))
     if source_3mf is not None:
