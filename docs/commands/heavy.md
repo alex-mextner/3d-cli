@@ -24,8 +24,11 @@ waited for its own parent until the 1500 s command timeout.
   `3d heavy status` shows the holder.
 - `--mem` (default 6G), `--cpu` (default 600%) and `--nice` (default 10) size the cap. Without systemd
   (macOS, containers) only the lock and `nice` apply.
-- `status` prints `held by pid N: COMMAND` or `free` (needs `lslocks`).
-- `prefix` prints the argv prefix for a shell script: `$(3d heavy prefix) python3 job.py`.
+- `status` prints `held by pid N: COMMAND`, `held (holder unknown; ...)` or `free`. Naming the holder needs
+  `lslocks`; held-or-free does not (a non-blocking lock probe), so a missing `lslocks` never reads as `free`.
+- `prefix` prints the argv prefix for a shell script: `$(3d heavy prefix) python3 job.py`. Without `flock(1)`
+  (macOS) the prefix re-enters `3d heavy`, which takes the lock through Python's fcntl; a prefix never sets
+  `THREED_HEAVY_HELD=1` unless the lock is really held.
 - `THREED_HEAVY_LOCK=/path` moves the lock file (tests, other boxes).
 
 Exit code: the wrapped command's own, 75 when the wait ran out, 2 for bad arguments.
