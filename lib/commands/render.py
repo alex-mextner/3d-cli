@@ -4,14 +4,16 @@ Modes (mutually exclusive): single view (default), --multi, --section. The heavy
 work (bbox-exact cameras, async multi, STL-cut section) lives in lib/render.py and runs
 through pyrun; this module only parses args and picks the per-mode dep set.
 """
+
 from __future__ import annotations
 
 import os
 
+import dimension_args
 from cli.env import require_openscad
 from cli.pyrun import run_tool
 from cli.registry import Command
-from errors import InputNotFound, UsageError
+from errors import InputNotFound, InvalidArgument, UsageError
 
 USAGE = """3d render <file.scad> [mode + options]
   Render a model to PNG. Default: single view, ISO angle, camera locked from the
@@ -53,6 +55,9 @@ Single-view options:
                         Example: 3d render bracket.scad --view left --render
 
 Section options:
+  Engineering-drawing convention: the CUT FACES are violet with 45-degree hatch lines, every
+  uncut surface keeps the colour of its PART, a legend names the parts and the cut face; colours
+  come from .scad color(), 3MF and OBJ+MTL files, see `3d dimension --help`.
   --plane YZ|XZ|XY     cut plane orientation. The plane passes through the model's
                         centroid by default. Use this to show the internal layout
                         on a specific face.
@@ -62,14 +67,15 @@ Section options:
                         negative normal direction; 'pos' keeps the positive side.
                         Default: neg
                         Example: 3d render bracket.scad --section --keep pos
-  --color              colored per-part assembly section mode. Use this when the
-                        .scad uses -D cut=true and each part is wrapped in a color()
-                        so the cut face shows the part color.
+  --at MM              position of the cut plane along its axis, in mm (a model coordinate).
+                        Default: the middle of the model.
+                        Example: 3d render bracket.scad --section --plane XZ --at 12.5
+  --part SEL=NAME[:ROLE]  name a part and/or set its role (SEL is a part name or a colour,
+                        e.g. '#2a62c9'; ROLE printed|vitamin|reference|stand_in; a stand_in is
+                        drawn muted). Repeatable.
+                        Example: 3d render assembly.scad --section --part '#2a62c9=PCB:stand_in'
+  --color              accepted for old scripts; a section is always per-part coloured.
                         Example: 3d render assembly.scad --section --color --plane YZ
-  --module 'name();'   module to cut, only needed when the generic STL-cut fallback
-                        is used instead of the assembly mode. Use this when the section
-                        is not a top-level difference().
-                        Example: 3d render bracket.scad --section --module 'cutaway();'
 
 Common:
   -o, --out PATH       output PNG path. Default: <file>.png
@@ -89,6 +95,23 @@ Examples:
   3d render assembly.scad --section --color --plane YZ -o sec.png"""
 
 
+SECTION_DEPS = "trimesh,numpy,pillow,scipy,manifold3d"
+
+
+def _validate_part(spec: str) -> None:
+    """Reject a malformed --part here, with the shared grammar, as a structured error."""
+    try:
+        dimension_args.parse_part(spec)
+    except ValueError as exc:
+        raise InvalidArgument(
+            "--part",
+            spec,
+            ["SELECTOR=NAME[:ROLE], e.g. '#2a62c9=PCB:stand_in'"],
+            command="render",
+            extra=str(exc),
+        ) from exc
+
+
 def run(argv: list[str]) -> int:
     if not argv:
         print(USAGE)
@@ -96,13 +119,15 @@ def run(argv: list[str]) -> int:
     if argv[0] in ("-h", "--help"):
         print(USAGE)
         return 0
-    require_openscad("render")
-
     inp = argv[0]
     rest = argv[1:]
 
     mode = "single"
     args: list[str] = []  # pass-through to render.py
+    section: list[
+        str
+    ] = []  # section-only flags, already in section_render.py's own spelling
+    defines: list[str] = []
     out = ""
     size = ""
     multi_outdir = ""
@@ -122,12 +147,32 @@ def run(argv: list[str]) -> int:
         elif a == "--section":
             mode = "section"
             i += 1
-        elif a in ("--view", "--cam", "--colorscheme", "--plane", "--keep", "--module"):
+        elif a in ("--view", "--cam", "--colorscheme"):
             if i + 1 >= n:
                 raise UsageError(f"option {a} needs a value", command="render")
             args += [a, rest[i + 1]]
             i += 2
-        elif a in ("--ortho", "--color", "--render"):
+        elif a in ("--plane", "--keep", "--at", "--part"):
+            if i + 1 >= n:
+                raise UsageError(f"option {a} needs a value", command="render")
+            if a == "--part":
+                _validate_part(rest[i + 1])
+            section.append(f"{a}={rest[i + 1]}")  # `=` form: a value may start with '-'
+            i += 2
+        elif a == "--module":
+            raise UsageError(
+                "option --module was removed: a section now cuts the model mesh itself",
+                command="render",
+                remediation=[
+                    "Drop --module; use --part and --at to choose what to show."
+                ],
+            )
+        elif a == "--color":
+            section.append(
+                a
+            )  # accepted for old scripts; a section is always per-part coloured
+            i += 1
+        elif a in ("--ortho", "--render"):
             args.append(a)
             i += 1
         elif a in ("-o", "--out"):
@@ -143,18 +188,30 @@ def run(argv: list[str]) -> int:
         elif a == "-D":
             if i + 1 >= n:
                 raise UsageError("option -D needs a value", command="render")
-            args += ["-D", rest[i + 1]]
+            defines.append(rest[i + 1])
             i += 2
         else:
             print(USAGE)
             raise UsageError(f"unknown option '{a}'", command="render")
 
+    if section and mode != "section":
+        raise UsageError(
+            f"{section[0].split('=')[0]} belongs to --section",
+            command="render",
+            remediation=["3d render model.scad --section --plane XZ -o sec.png"],
+        )
     if not os.path.isfile(inp):
         raise InputNotFound(inp, command="render")
+    # openscad renders single/multi views and exports a .scad for the section; a section of a
+    # mesh file (STL/3MF/OBJ) needs no openscad at all.
+    if mode != "section" or inp.lower().endswith(".scad"):
+        require_openscad("render")
+    for define in defines:
+        args += ["-D", define]
 
     # Per-mode python deps (see lib/render.py): single/multi need NO deps (mesh stack is
     # a pure enhancement, render.py degrades to --autocenter --viewall offline); the
-    # generic section genuinely needs trimesh to read the STL bbox for the cut.
+    # section (lib/section_render.py) cuts the mesh itself.
     if mode == "single":
         if out:
             args += ["-o", out]
@@ -168,12 +225,15 @@ def run(argv: list[str]) -> int:
         if size:
             args += ["--size", size]
         return run_tool("", "render.py", [*tool_args, *args])
-    # section
-    if out:
-        args += ["-o", out]
+    target = out or os.path.splitext(inp)[0] + ".png"
+    section_args = [inp, f"--out={target}", *(f"--define={d}" for d in defines)]
     if size:
-        args += ["--size", size]
-    return run_tool("trimesh,numpy", "render.py", ["section", inp, *args])
+        section_args.append(f"--size={size}")
+    return run_tool(
+        SECTION_DEPS,
+        "section_render.py",
+        [*section_args, *(s for s in section if s != "--color")],
+    )
 
 
 COMMAND = Command(

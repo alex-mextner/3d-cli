@@ -7,9 +7,7 @@ Owns everything the `render` command surface needs:
   - a single CGAL render (--render) with a locked 6-param VECTOR camera;
   - --multi: render all standard angles concurrently (asyncio.gather, bounded by a
     semaphore of cli.resources.max_workers(): <= 6, THREED_MAX_WORKERS overrides);
-  - --section: a TRUE cross-section that cuts ARBITRARY geometry (export STL once, then
-    difference(import, halfspace) with color OUTSIDE the cut so the cut face takes the
-    part colour), plus the richer per-part `-D cut=true` assembly colour mode.
+  - --section is NOT here: see section_render.py (mesh-level cut, violet hatched cut faces).
 
 Camera model: OpenSCAD has no bbox CLI flag, so a named view is realised as a viewing
 DIRECTION (unit-ish vector) + `--autocenter --viewall`, which makes OpenSCAD compute the
@@ -22,15 +20,15 @@ working with NO python mesh deps (the whole repo's degrade-gracefully ethos) whi
 Run via the CLI (resolves deps + openscad): `3d render ... `. Direct:
   python3 render.py single  model.scad -o out.png --view left
   python3 render.py multi   model.scad outdir/ [--render]
-  python3 render.py section model.scad -o sec.png --plane YZ [--color]
+  (cross-sections live in section_render.py: `3d section` / `3d render --section`)
 """
+
 from __future__ import annotations
 
 import argparse
 import asyncio
 import math
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -217,22 +215,33 @@ def render_single(args: argparse.Namespace) -> int:
         bbox = model_bbox(scad, defines, openscad)
         bbox_cam = view_camera(view, bbox)
         if bbox_cam is not None:
-            cam = bbox_cam              # exact bbox-fit camera
+            cam = bbox_cam  # exact bbox-fit camera
             use_viewall = False
         else:
-            cam = _dir_orbit_cam(_VIEW_DIRS[view])  # orbit ray; --viewall fits the frame
+            cam = _dir_orbit_cam(
+                _VIEW_DIRS[view]
+            )  # orbit ray; --viewall fits the frame
             use_viewall = True
 
     cmd = _base_render_cmd(
-        openscad, scad, out, cam=cam, size=size, ortho=args.ortho,
-        scheme=args.colorscheme, defines=defines, render=True,
+        openscad,
+        scad,
+        out,
+        cam=cam,
+        size=size,
+        ortho=args.ortho,
+        scheme=args.colorscheme,
+        defines=defines,
+        render=True,
         use_viewall_fallback=False,
     )
     if use_viewall:
         idx = cmd.index("-o")
         cmd[idx:idx] = ["--autocenter", "--viewall"]
-    print(f"render: {scad} -> {out}  view={args.view or ('cam' if args.cam else 'iso')}"
-          f"  {'ortho' if args.ortho else 'persp'}  size={size}")
+    print(
+        f"render: {scad} -> {out}  view={args.view or ('cam' if args.cam else 'iso')}"
+        f"  {'ortho' if args.ortho else 'persp'}  size={size}"
+    )
     proc = _run_openscad(cmd, capture_output=True, text=True)
     if proc.stdout:
         sys.stderr.write(proc.stdout)
@@ -256,10 +265,16 @@ async def _render_one_async(
             *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
         )
         _, err = await proc.communicate()
-        return label, proc.returncode or 0, (err.decode(errors="replace") if err else "")
+        return (
+            label,
+            proc.returncode or 0,
+            (err.decode(errors="replace") if err else ""),
+        )
 
 
-async def _render_multi_async(cmds: list[tuple[str, str, list[str]]]) -> list[tuple[str, int, str]]:
+async def _render_multi_async(
+    cmds: list[tuple[str, str, list[str]]],
+) -> list[tuple[str, int, str]]:
     """cmds = [(label, out, argv), ...]; run with a bounded semaphore."""
     limit = pool_size(len(cmds))
     sem = asyncio.Semaphore(limit)
@@ -291,8 +306,15 @@ def render_multi(args: argparse.Namespace) -> int:
         if use_viewall:
             cam = _dir_orbit_cam(_VIEW_DIRS[view])
         cmd = _base_render_cmd(
-            openscad, scad, out, cam=cam, size=size, ortho=False,
-            scheme="Tomorrow Night", defines=defines, render=render_flag,
+            openscad,
+            scad,
+            out,
+            cam=cam,
+            size=size,
+            ortho=False,
+            scheme="Tomorrow Night",
+            defines=defines,
+            render=render_flag,
             use_viewall_fallback=False,
         )
         if use_viewall:
@@ -300,8 +322,10 @@ def render_multi(args: argparse.Namespace) -> int:
             cmd[idx:idx] = ["--autocenter", "--viewall"]
         cmds.append((view, out, [*prefix, *cmd]))
 
-    print(f"multi: {scad} -> {outdir}  ({'render' if render_flag else 'preview'}, "
-          f"{'bbox cameras' if bbox else 'viewall fit'}, async)")
+    print(
+        f"multi: {scad} -> {outdir}  ({'render' if render_flag else 'preview'}, "
+        f"{'bbox cameras' if bbox else 'viewall fit'}, async)"
+    )
     results = asyncio.run(_render_multi_async(cmds))
     rc = 0
     by_label = {lbl: (code, err) for (lbl, code, err) in results}
@@ -316,238 +340,6 @@ def render_multi(args: argparse.Namespace) -> int:
     if rc == 0:
         print(f"multi: wrote {len(cmds)} views to {outdir}")
     return rc
-
-
-# ===========================================================================
-# section
-# ===========================================================================
-# camera direction per plane for the cut view (eye on the REMOVED side, angled for depth).
-_SECTION_DIR: dict[str, tuple[float, float, float]] = {
-    "YZ": (1.0, 0.35, 0.5),   # cut at X=cx, look from +X
-    "XZ": (0.35, 1.0, 0.5),   # cut at Y=cy
-    "XY": (0.5, 0.35, 1.0),   # cut at Z=cz
-}
-
-
-def _has_cut_contract(scad_path: str) -> bool:
-    """True if the .scad declares a TOP-LEVEL `cut` parameter (the colour-assembly
-    cut-contract: the file branches on `cut` and colours parts outside their difference).
-    A plain part with no such parameter can't honour -D cut=true, so --color must instead
-    use the generic STL-import cut (which also colours the cut face).
-
-    Only a brace-depth-0 assignment counts: a `cut = ...` inside a module/block is a local,
-    not the overridable top-level parameter, so it must NOT be mistaken for the contract."""
-    try:
-        with open(scad_path) as fh:
-            lines = fh.readlines()
-    except OSError:
-        return False
-    depth = 0
-    for line in lines:
-        # strip line comments so `// cut = ...` and trailing comments don't fool the scan
-        code = line.split("//", 1)[0]
-        if depth == 0 and re.match(r"\s*cut\s*=", code):
-            return True
-        depth += code.count("{") - code.count("}")
-        if depth < 0:
-            depth = 0
-    return False
-
-
-def _section_cam(
-    plane: str, keep: str, bbox: tuple[tuple[float, float, float], float] | None
-) -> str | None:
-    if bbox is None:
-        return None
-    (cx, cy, cz), diag = bbox
-    d = _SECTION_DIR[plane]
-    sign = -1.0 if keep == "pos" else 1.0   # eye sits on the removed side
-    dist = 2.4 * max(diag, 1.0)
-    n = math.sqrt(d[0] ** 2 + d[1] ** 2 + d[2] ** 2)
-    ex = cx + sign * d[0] / n * dist
-    ey = cy + sign * d[1] / n * dist
-    ez = cz + sign * d[2] / n * dist
-    return f"{ex:.4f},{ey:.4f},{ez:.4f},{cx:.4f},{cy:.4f},{cz:.4f}"
-
-
-def _halfspace_cube(
-    plane: str, keep: str, centroid: tuple[float, float, float], diag: float
-) -> str:
-    """An OpenSCAD cube() expression that, subtracted, removes one half across `plane` at
-    the centroid. Sized to the model diagonal so it always fully covers the part."""
-    cx, cy, cz = centroid
-    big = max(diag * 3.0, 50.0)
-    # cube spans [coord, coord+big] on the cut axis when removing the +side (keep=neg),
-    # or [coord-big, coord] when removing the -side (keep=pos).
-    def span(c: float, cut_axis: bool) -> tuple[float, float]:
-        if not cut_axis:
-            return (c - big, big * 2.0)  # (translate, size) fully covering
-        if keep == "pos":
-            return (c - big, big)        # remove the negative half
-        return (c, big)                  # remove the positive half (keep neg)
-    if plane == "YZ":
-        tx, sx = span(cx, True)
-        ty, sy = span(cy, False)
-        tz, sz = span(cz, False)
-    elif plane == "XZ":
-        tx, sx = span(cx, False)
-        ty, sy = span(cy, True)
-        tz, sz = span(cz, False)
-    else:  # XY
-        tx, sx = span(cx, False)
-        ty, sy = span(cy, False)
-        tz, sz = span(cz, True)
-    return f"translate([{tx:.3f},{ty:.3f},{tz:.3f}]) cube([{sx:.3f},{sy:.3f},{sz:.3f}]);"
-
-
-def render_section(args: argparse.Namespace) -> int:
-    openscad = find_openscad()
-    scad = args.file
-    if not os.path.isfile(scad):
-        print(f"section: file not found: {scad}", file=sys.stderr)
-        return 2
-    if not args.out:
-        print("section: -o out.png is required", file=sys.stderr)
-        return 2
-    plane = args.plane
-    keep = args.keep
-    if plane not in ("YZ", "XZ", "XY"):
-        print(f"section: unknown plane '{plane}' (use YZ|XZ|XY)", file=sys.stderr)
-        return 2
-    if keep not in ("neg", "pos"):
-        print(f"section: unknown keep '{keep}' (use neg|pos)", file=sys.stderr)
-        return 2
-    os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
-    defines: list[str] = args.define or []
-    size = args.size.replace("x", ",")
-
-    # ---- COLOUR assembly mode: ONLY valid when the assembly implements the cut-contract
-    # (a top-level `cut` parameter it honours, colouring each part OUTSIDE its difference).
-    # If the model has no such contract (e.g. a plain part like cube.scad), `-D cut=true`
-    # would be ignored and we'd render the UNCUT solid — so fall through to the generic
-    # STL-import cut, which also colours the cut face. Never silently render an uncut solid.
-    if args.color and _has_cut_contract(scad):
-        bbox = model_bbox(scad, defines, openscad)
-        cam = _section_cam(plane, keep, bbox)
-        use_viewall = cam is None
-        if use_viewall:
-            # No bbox: orbit along the plane's view direction (on the removed side, so
-            # plane+keep still pick the correct side/axis) and let --viewall fit.
-            sd = _SECTION_DIR[plane]
-            sgn = -1.0 if keep == "pos" else 1.0
-            cam = f"{sgn*sd[0]:.4f},{sgn*sd[1]:.4f},{sgn*sd[2]:.4f},0,0,0"
-        extra = list(defines) + [
-            "cut=true",
-            f'section_plane="{plane}"',
-            f'section_keep="{keep}"',
-        ]
-        cmd = _base_render_cmd(
-            openscad, scad, args.out, cam=cam, size=size, ortho=False,
-            scheme="Tomorrow Night", defines=extra, render=True,
-            use_viewall_fallback=False,
-        )
-        if use_viewall:
-            idx = cmd.index("-o")
-            cmd[idx:idx] = ["--autocenter", "--viewall"]
-        print(f"section: COLOUR assembly  plane={plane} keep={keep}")
-        proc = _run_openscad(cmd, capture_output=True, text=True)
-        if proc.stderr:
-            sys.stderr.write(proc.stderr)
-        if not os.path.isfile(args.out):
-            print("section: no output produced", file=sys.stderr)
-            return 1
-        nbytes = os.path.getsize(args.out)
-        print(f"section: wrote {args.out} ({nbytes} bytes)")
-        if nbytes < 15000:
-            print("  WARNING: tiny PNG — frame may be empty (check the assembly cut contract).")
-        return 0
-
-    # ---- GENERIC cut: works on ANY geometry (no cut-contract needed). Export the model
-    # to STL once, then difference(import(stl), halfspace) with the colour OUTSIDE the
-    # difference so the cut face takes the part colour. 6-param vector camera + --render.
-    bbox = model_bbox(scad, defines, openscad)
-    tmpdir = tempfile.mkdtemp(prefix="3d_section_")
-    try:
-        if bbox is not None:
-            (cx, cy, cz), diag = bbox
-            stl = os.path.join(tmpdir, "model.stl")
-            ecmd = [openscad, "--export-format", "binstl"]
-            for dv in defines:
-                ecmd += ["-D", dv]
-            ecmd += ["-o", stl, scad]
-            _run_openscad(ecmd, capture_output=True, text=True, timeout=300, check=False)
-            if not os.path.isfile(stl) or os.path.getsize(stl) < 100:
-                print("section: STL export failed — cannot cut", file=sys.stderr)
-                return 1
-            halfspace = _halfspace_cube(plane, keep, (cx, cy, cz), diag)
-            sec_scad = os.path.join(tmpdir, "section.scad")
-            with open(sec_scad, "w") as fh:
-                fh.write(
-                    "// AUTO-GENERATED cross-section (3d render --section)\n"
-                    f'color([0.82,0.66,0.46]) difference() {{\n'
-                    f'  import("{stl}");\n'
-                    f"  {halfspace}\n"
-                    "}\n"
-                )
-            cam_sec: str | None = _section_cam(plane, keep, bbox)  # bbox not None here
-            cmd = _base_render_cmd(
-                openscad, sec_scad, args.out, cam=cam_sec, size=size, ortho=False,
-                scheme="Tomorrow Night", defines=[], render=True,
-                use_viewall_fallback=False,
-            )
-        else:
-            # No mesh stack: fall back to a per-module cut in a temp file next to INPUT so
-            # use<> resolves. Requires --module (cannot import an unknown top-level call).
-            if not args.module:
-                print(
-                    "section: no python mesh stack -> need --module 'name();' to cut "
-                    "(or install trimesh for the generic STL-import cut).",
-                    file=sys.stderr,
-                )
-                return 2
-            input_dir = os.path.dirname(os.path.abspath(scad))
-            input_base = os.path.basename(scad)
-            cut_map = {
-                ("YZ", "neg"): ("translate([0,-300,-300]) cube([600,600,600]);", "240,70,120"),
-                ("YZ", "pos"): ("translate([-600,-300,-300]) cube([600,600,600]);", "-240,70,120"),
-                ("XZ", "neg"): ("translate([-300,0,-300]) cube([600,600,600]);", "70,240,120"),
-                ("XZ", "pos"): ("translate([-300,-600,-300]) cube([600,600,600]);", "70,-240,120"),
-                ("XY", "neg"): ("translate([-300,-300,0]) cube([600,600,600]);", "120,70,260"),
-                ("XY", "pos"): ("translate([-300,-300,-600]) cube([600,600,600]);", "120,70,-260"),
-            }
-            cut_expr, eye = cut_map[(plane, keep)]
-            sec_scad = os.path.join(input_dir, f".section_tmp_{os.getpid()}.scad")
-            with open(sec_scad, "w") as fh:
-                fh.write(
-                    "// AUTO-GENERATED cross-section (3d render --section) — safe to delete\n"
-                    f"use <{input_base}>\n"
-                    f"color([0.82,0.66,0.46]) difference() {{\n  {args.module}\n  {cut_expr}\n}}\n"
-                )
-            cmd = _base_render_cmd(
-                openscad, sec_scad, args.out, cam=f"{eye},0,0,0", size=size, ortho=False,
-                scheme="Tomorrow Night", defines=defines, render=True,
-                use_viewall_fallback=False,
-            )
-            idx = cmd.index("-o")
-            cmd[idx:idx] = ["--autocenter", "--viewall"]
-
-        print(f"section: {scad} plane={plane} keep={keep} -> {args.out}")
-        proc = _run_openscad(cmd, capture_output=True, text=True)
-        if proc.stderr:
-            sys.stderr.write(proc.stderr)
-        if not os.path.isfile(args.out):
-            print("section: no output produced", file=sys.stderr)
-            return 1
-        print(f"section: wrote {args.out} ({os.path.getsize(args.out)} bytes)")
-        return 0
-    finally:
-        # clean any temp section file written next to INPUT
-        leftover = os.path.join(
-            os.path.dirname(os.path.abspath(scad)), f".section_tmp_{os.getpid()}.scad"
-        )
-        if os.path.isfile(leftover):
-            os.remove(leftover)
-        shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 # ===========================================================================
@@ -575,17 +367,6 @@ def build_parser() -> argparse.ArgumentParser:
     m.add_argument("--size", default="800x600")
     m.add_argument("-D", "--define", action="append", default=[])
     m.set_defaults(func=render_multi)
-
-    c = sub.add_parser("section", help="true cross-section (generic or coloured assembly)")
-    c.add_argument("file")
-    c.add_argument("-o", "--out", default=None)
-    c.add_argument("--plane", default="YZ", choices=["YZ", "XZ", "XY"])
-    c.add_argument("--keep", default="neg", choices=["neg", "pos"])
-    c.add_argument("--color", action="store_true", help="coloured per-part assembly mode")
-    c.add_argument("--module", default=None, help="module call to cut (no-mesh fallback)")
-    c.add_argument("--size", default="1200x900")
-    c.add_argument("-D", "--define", action="append", default=[])
-    c.set_defaults(func=render_section)
     return p
 
 

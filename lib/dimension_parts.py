@@ -102,6 +102,9 @@ class Model:
     parts: list[PartInfo]
     colors: np.ndarray  # (P, 3) displayed colours, 0..1
     warnings: list[str]
+    # (F,) the closed solid a face belongs to: one per object of a multi-object file, one for a
+    # file without object structure (parts of one OpenSCAD union abut: only the whole is closed).
+    face_solid: np.ndarray
 
 
 @dataclass
@@ -365,13 +368,17 @@ def _pick(color: str, taken: list[tuple[str, bool]], muted: bool) -> str:
 
 
 def _resolve_colours(
-    cands: list[_Cand], names: list[str], roles: list[str]
+    cands: list[_Cand],
+    names: list[str],
+    roles: list[str],
+    reserved: Sequence[str],
 ) -> list[tuple[str, str | None, str, bool]]:
     """(displayed colour, authored colour, source, muted) per candidate."""
     n = len(cands)
-    if (
-        n == 1 and roles[0] != "stand_in"
-    ):  # a lone stand-in still goes through the muting rules below
+    # A lone part keeps its authored colour (or the classic blue); a lone stand-in, or any part with
+    # reserved colours to avoid, goes through the rules below.
+    lone = n == 1 and roles[0] != "stand_in" and not reserved
+    if lone:
         authored = cands[0].color
         return [
             (
@@ -390,7 +397,7 @@ def _resolve_colours(
     order = sorted(range(n), key=lambda i: names[i])
     shown: dict[int, str] = {}
     source: dict[int, str] = {}
-    taken: list[tuple[str, bool]] = []
+    taken: list[tuple[str, bool]] = [(c, False) for c in reserved]
     for i in order:  # pass 1: authored colours claim their place, first (by name) wins
         authored = cands[i].color
         if (
@@ -412,15 +419,24 @@ def _resolve_colours(
     ]
 
 
-def build_model(raw: RawModel, title: str, specs: Sequence[str] = ()) -> Model:
-    """Parts, roles and colours of `raw`, and the mesh to paint."""
+def build_model(
+    raw: RawModel,
+    title: str,
+    specs: Sequence[str] = (),
+    reserved: Sequence[str] = (),
+) -> Model:
+    """Parts, roles and colours of `raw`, and the mesh to paint.
+
+    `reserved` colours (e.g. a section's cut-face violet) belong to something else in the picture:
+    no part is given a colour close to one.
+    """
     import trimesh
 
     cands = _split_uncoloured(raw, _candidates(raw, title))
     forced = _apply_specs(cands, specs)
     names = _unique([c.name for c in cands])
     roles = [_role_of(c, forced.get(i)) for i, c in enumerate(cands)]
-    resolved = _resolve_colours(cands, names, roles)
+    resolved = _resolve_colours(cands, names, roles, reserved)
     parts = [
         PartInfo(name, role, shown, authored, how, muted, len(c.faces))
         for name, role, c, (shown, authored, how, muted) in zip(
@@ -429,12 +445,17 @@ def build_model(raw: RawModel, title: str, specs: Sequence[str] = ()) -> Model:
     ]
     face_part = np.zeros(len(raw.faces), dtype=np.int64)
     cullable = np.zeros(len(raw.faces), dtype=bool)
+    face_solid = np.zeros(len(raw.faces), dtype=np.int64)
+    solids: dict[str, int] = {}
     for i, cand in enumerate(cands):
         face_part[cand.faces] = i
         piece = trimesh.Trimesh(
             vertices=raw.vertices, faces=raw.faces[cand.faces], process=True
         )
         cullable[cand.faces] = bool(piece.is_watertight)
+        face_solid[cand.faces] = solids.setdefault(cand.object_id, len(solids))
     mesh = trimesh.Trimesh(vertices=raw.vertices, faces=raw.faces, process=False)
     colors = np.array([from_hex(p.color) for p in parts])
-    return Model(mesh, face_part, cullable, parts, colors, list(raw.warnings))
+    return Model(
+        mesh, face_part, cullable, parts, colors, list(raw.warnings), face_solid
+    )
