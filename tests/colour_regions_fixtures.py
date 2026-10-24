@@ -69,3 +69,26 @@ def sphere_labels(m: trimesh.Trimesh, gap: float = 3.0) -> tuple[NDArray[np.int1
     fl[z > gap] = 0
     fl[z < -gap] = 1
     return fl, ["top", "bottom", "belt"]
+
+
+def write_project(
+    stem: Path, ball: trimesh.Trimesh, work: Path, shift: list[float], top_assign: dict[str, Any], bottom_assign: dict[str, Any]
+) -> Path:
+    """A built project as `verify --parts` reads it: STEM.manifest.json + STEM.parts/N_part.stl in the project frame
+    (`shift`): a default part under everything (1), the `top` patch (2) and the `bottom` patch (3) of a `build` over it."""
+    from colour_regions.surface import load_mesh
+
+    pdir = Path(str(stem) + ".parts")
+    pdir.mkdir(parents=True)
+    meshes = (ball, load_mesh(work / "patches" / "top.ply"), load_mesh(work / "patches" / "bottom.ply"))
+    for k, mesh in enumerate(meshes, start=1):
+        moved = mesh.copy()
+        moved.apply_translation(shift)
+        moved.export(str(pdir / f"{k}_part.stl"))
+    man = {
+        "shift": shift,
+        "filaments": [{"slot": 1, "key": "K"}, {"slot": 2, "key": "W"}, {"slot": 3, "key": "R"}],
+        "parts": [{"assign": {"slot": 1}}, {"assign": top_assign}, {"assign": bottom_assign}],
+    }
+    Path(str(stem) + ".manifest.json").write_text(json.dumps(man), encoding="utf-8")
+    return stem

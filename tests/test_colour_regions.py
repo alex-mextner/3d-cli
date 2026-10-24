@@ -22,6 +22,7 @@ from colour_regions_fixtures import (
     save_mesh,
     sphere,
     sphere_labels,
+    write_project,
     write_rules,
 )
 
@@ -544,17 +545,23 @@ def test_verify_work_reports_unknown_groups_and_a_mismatched_mesh(tmp_path: Path
 
 
 # ------------------------------------------------------------------------------------------ review regressions
-def test_a_boxed_split_keeps_the_outside_faces_and_the_surface_intact() -> None:
-    """Splitting only inside a box leaves every outside triangle exactly as it was and does not change the surface."""
+def test_refine_is_conforming_keeps_the_surface_and_the_original_vertices() -> None:
+    """A boxed refinement splits the neighbours' shared edges too (the mesh stays closed), keeps the original vertices
+    where they were, preserves the area and leaves no face with its centroid in the box over the edge limit."""
     skin = fine_box(side=12.0, edge=3.0)
     box = (-30.0, 30.0, -30.0, 30.0, 5.0, 30.0)  # the top face only
-    split = transfer_mod.split_faces(skin, 1.0, box)
-    outside = np.asarray(skin.triangles_center)[:, 2] <= 5.0
-    assert len(split.faces) > len(skin.faces) and split.area == pytest.approx(skin.area)
-    assert split.faces.max() < len(split.vertices)
-    kept = np.asarray(split.triangles)[: int(outside.sum())]
-    assert np.allclose(kept, np.asarray(skin.triangles)[outside])  # outside faces first, geometry untouched
-    assert np.abs(np.asarray(split.vertices)).max() <= 6.0 + 1e-6  # nothing points at a stray vertex
+    fine, parent = transfer_mod.refine(skin, 1.0, box)
+    assert len(fine.faces) > len(skin.faces) and fine.area == pytest.approx(skin.area)
+    assert fine.is_watertight and np.array_equal(np.asarray(fine.vertices)[: len(skin.vertices)], np.asarray(skin.vertices))
+    assert len(parent) == len(fine.faces) and parent.max() < len(skin.faces)
+    tri = np.asarray(fine.triangles)
+    edges = np.linalg.norm(tri[:, [1, 2, 0]] - tri, axis=2).max(axis=1)
+    in_box = transfer_mod.in_box(np.asarray(fine.triangles_center), box)
+    assert (edges[in_box] <= 1.0 + 1e-9).all() and in_box.any()
+    # every child lies in the plane or the triangle of its parent: its centroid is on the parent's plane
+    pn = np.asarray(skin.face_normals)[parent]
+    po = np.asarray(skin.triangles)[parent][:, 0]
+    assert np.abs(np.einsum("ij,ij->i", np.asarray(fine.triangles_center) - po, pn)).max() < 1e-9
 
 
 def test_snap_keeps_a_fixed_label_and_does_not_ring_it_with_default_colour() -> None:
@@ -688,3 +695,186 @@ def test_a_group_of_only_tiny_pieces_is_skipped_with_a_warning_not_an_abort(tmp_
     res = build_mod.build(tmp_path / "b.ply", [build_mod.Track("t", str(tmp_path / "l.npz"))], rules, tmp_path / "w", verbose=False)
     assert [r["name"] for r in res.regions] == ["bottom"] and (tmp_path / "w" / "regions.json").is_file()
     assert "every piece is under" in capsys.readouterr().err
+
+
+# ------------------------------------------------------------------------------------------ legacy parity regressions
+def _giant_box_with_parts() -> tuple[trimesh.Trimesh, trimesh.Trimesh]:
+    """A 20 mm box of 12 giant triangles and the same box cut into 1.9 mm triangles (a different triangulation)."""
+    skin = trimesh.creation.box((20, 20, 20))
+    v, f = trimesh.remesh.subdivide_to_size(np.asarray(skin.vertices), np.asarray(skin.faces), 1.9)
+    return skin, trimesh.Trimesh(v, f, process=False)
+
+
+def test_classify_judges_only_the_listed_parts_by_surface_and_keeps_the_parents_decision_for_the_rest() -> None:
+    """With --surface-parts white the `other` part is decided by the parent's centroid (no giant face qualifies), the
+    white part by distance to its surface; with the default every part is judged by surface."""
+    skin, fine = _giant_box_with_parts()
+    c = np.asarray(fine.triangles_center)
+    other = _half_mesh(fine, (c[:, 2] > 9.9) & (c[:, 0] > 3.1))  # on the top face
+    white = _half_mesh(fine, (c[:, 2] < -9.9) & (c[:, 0] > 3.1))  # on the bottom face
+    parts = [("other", other), ("white", white)]
+    box = (-30.0, 30.0, -30.0, 30.0, -30.0, 30.0)
+    only_white = transfer_mod.classify_by_parts(skin, parts, 0.06, split_edge=1.2, split_box=box, surface_parts=["white"])
+    everything = transfer_mod.classify_by_parts(skin, parts, 0.06, split_edge=1.2, split_box=box)
+
+    def count(r: transfer_mod.Classified, name: str) -> int:
+        return int((r.face_label == r.names.index(name)).sum())
+
+    plain = transfer_mod.classify_by_parts(skin, parts, 0.06)  # no split: the parents' centroid decision
+    _, parent = transfer_mod.refine(skin, 1.2, box)
+    inherited = int((plain.face_label[parent] == plain.names.index("other")).sum())
+    assert count(only_white, "other") == inherited  # `other` keeps exactly what its parents' centroids said
+    fc = np.asarray(everything.mesh.triangles_center)
+    on_strip = (everything.face_label == everything.names.index("other"))
+    assert count(everything, "other") < inherited  # judged by surface, the parents' wedges off the strip are gone
+    assert (fc[on_strip][:, 0] > 1.0).all() and (fc[on_strip][:, 2] > 9.9).all()
+    assert count(only_white, "white") > 0 and count(everything, "white") == count(only_white, "white")
+    with pytest.raises(InvalidArgument) as exc:
+        transfer_mod.classify_by_parts(skin, parts, 0.06, split_edge=1.2, surface_parts=["whit"])
+    assert "white" in exc.value.accepted
+
+
+def test_a_surface_judged_part_replaces_the_parents_centroid_decision_in_the_box() -> None:
+    """A refined face the parent's centroid called white but that lies off the white surface is NOT white inside the box
+    (the legacy wedge fix), and stays white outside it."""
+    skin, fine = _giant_box_with_parts()
+    c = np.asarray(fine.triangles_center)
+    # the white part covers the centroid of one giant top triangle only partly: it is the x > 3.1 strip of the top face
+    white = _half_mesh(fine, (c[:, 2] > 9.9) & (c[:, 0] > 3.1))
+    inside = transfer_mod.classify_by_parts(skin, [("white", white)], 0.06, split_edge=1.2, split_box=(-30, 30, -30, 30, -30, 30))
+    fc = np.asarray(inside.mesh.triangles_center)
+    wrong = (inside.face_label == 0) & (fc[:, 0] < 1.0)  # white faces far from the strip (the strip's triangles reach 1.9 mm past x = 3.1)
+    assert not wrong.any()  # surface test: only the strip
+
+
+def test_transfer_class_matches_by_centroid_by_default_and_by_surface_on_request() -> None:
+    """A 40 x 10 plate of two giant triangles (white below the diagonal, black above): a target face on the white triangle
+    but nearer the black triangle's centroid is black by centroid and white by surface."""
+    src = trimesh.Trimesh(
+        np.array([[0, 0, 0], [40, 0, 0], [40, 10, 0], [0, 10, 0]], float), np.array([[0, 1, 2], [0, 2, 3]]), process=False
+    )  # triangle 0 (white): below the diagonal y = x / 4; triangle 1 (black): above it
+    names, fl = ["white", "black"], np.array([0, 1])
+    tgt = trimesh.Trimesh(
+        np.array([[14.0, 2.0, 0.0], [14.4, 2.0, 0.0], [14.0, 2.4, 0.0], [35.0, 1.0, 0.0], [35.4, 1.0, 0.0], [35.0, 1.4, 0.0]]),
+        np.array([[0, 1, 2], [3, 4, 5]]),
+        process=False,
+    )
+    new = Surf(tgt)
+    common: dict[str, Any] = {"positive": ["white"], "exclude": [], "max_dist": 50.0, "island_mm2": 0.0001, "fill_boxes": []}
+    by_centroid, _ = transfer_mod.transfer_class(new, src, fl, names, match="centroid", **common)
+    by_surface, _ = transfer_mod.transfer_class(new, src, fl, names, match="surface", **common)
+    cen = np.asarray(new.c)
+    assert (cen[:, 1] < cen[:, 0] / 4).all()  # both targets lie on the white triangle
+    assert (by_surface == 0).all()
+    c_white, c_black = np.asarray(src.triangles_center)
+    nearest_black = np.linalg.norm(cen - c_black, axis=1) < np.linalg.norm(cen - c_white, axis=1)
+    assert nearest_black.tolist() == [True, False]
+    assert ((by_centroid == -1) == nearest_black).all()
+    with pytest.raises(InvalidArgument):
+        transfer_mod.transfer_class(new, src, fl, names, match="nearest", **common)
+
+
+def test_the_refined_skin_is_stored_in_double_precision(tmp_path: Path) -> None:
+    """A float32 PLY moves the centroids a refined skin was classified with: ties between two source faces would flip."""
+    m = trimesh.Trimesh(np.array([[0, 0, 0], [1.0000001234567, 0, 0], [0, 1.0000007654321, 0.3333333333]]), np.array([[0, 1, 2]]), process=False)
+    transfer_mod.write_ply_f64(m, tmp_path / "m.ply")
+    back = load_mesh(tmp_path / "m.ply", process=False)
+    assert np.array_equal(np.asarray(back.vertices), np.asarray(m.vertices)) and back.faces.tolist() == [[0, 1, 2]]
+    m.export(str(tmp_path / "f32.ply"))
+    assert not np.array_equal(np.asarray(load_mesh(tmp_path / "f32.ply", process=False).vertices), np.asarray(m.vertices))  # the control
+
+
+def test_full_reach_stops_a_cell_at_the_far_wall_of_a_thin_plate(tmp_path: Path) -> None:
+    """A 5 mm plate coloured 3 mm deep from the top: the legacy grid cannot see the bottom wall 5 mm away and the cell
+    runs past the mid-plane; with full reach it stops there."""
+    from colour_regions.volume import shell_volume
+
+    plate = trimesh.creation.box((40, 40, 5))
+    plate.apply_translation([0, 0, 2.5])
+    s = Surf(plate)
+    top = np.asarray(plate.triangles_center)[:, 2] > 4.9
+    zmin = {}
+    for reach in (False, True):
+        cell = shell_volume(s, top, 3.0, 0.25, tmp_path / f"cell_{reach}.ply", full_reach=reach)
+        zmin[reach] = float(cell.bounds[0][2])
+    assert zmin[False] < 2.3  # the legacy cell crosses the mid-plane at z = 2.5
+    assert zmin[True] > 2.3
+
+
+def test_verify_parts_gate_reads_the_built_projects_parts_and_fails_when_they_are_swapped(tmp_path: Path) -> None:
+    """Gate 2 from a project's manifest + parts: a default part under everything, the two colour parts over it, in the
+    project's frame (shift). Swapping the colour parts' assigns FAILs."""
+    m, work, _ = _build_sphere(tmp_path)
+    group, names, assign = build_mod.load_groups(work)
+    s = Surf(m)
+    shift = [5.0, -3.0, 2.0]
+    th = verify_mod.Thresholds()
+    good = write_project(tmp_path / "good", m, work, shift, {"slot": 2}, {"mix": "23"})  # top = W (slot 2), bottom = WR (mix "23")
+    swapped = write_project(tmp_path / "swapped", m, work, shift, {"mix": "23"}, {"slot": 2})
+    ok = verify_mod.gate_parts(s, group, assign, names, good, th, "K", n=1500)
+    bad = verify_mod.gate_parts(s, group, assign, names, swapped, th, "K", n=1500)
+    assert ok["pass"] and ok["agree"] >= 0.97 and ok["agree_permuted"] < 0.6 * 0.97 and ok["source"] == "parts"
+    assert not bad["pass"] and bad["agree"] < 0.6
+    with pytest.raises(UsageError, match="default-key"):
+        verify_mod.gate_parts(s, group, assign, names, good, th, "X", n=1500)
+
+
+def test_a_later_part_keeps_its_claim_when_an_earlier_surface_judged_part_loses_the_face() -> None:
+    """[white, pink] with only white judged by surface: a refined face the parent's centroid gave to BOTH, but that is off
+    the white surface, falls back to pink instead of the default colour."""
+    skin, fine = _giant_box_with_parts()
+    c = np.asarray(fine.triangles_center)
+    strip = (c[:, 2] > 9.9) & (c[:, 0] > 3.1)
+    skin_c = np.asarray(skin.triangles_center)
+    top_giants = np.nonzero(skin_c[:, 2] > 9.9)[0]
+    # both parts claim the top giant triangles by centroid: a tiny face at each centroid (white's 0.05 mm above the skin)
+    n = len(top_giants)
+
+    def micro(offset: float) -> trimesh.Trimesh:
+        p = skin_c[top_giants] + [0, 0, offset]
+        return trimesh.Trimesh(np.vstack([p, p + [0.01, 0, 0], p + [0, 0.01, 0]]), np.array([[i, i + n, i + 2 * n] for i in range(n)]), process=False)
+
+    white = trimesh.util.concatenate([_half_mesh(fine, strip), micro(0.05)])
+    pink = micro(0.0)
+    box = (-30.0, 30.0, -30.0, 30.0, -30.0, 30.0)
+    res = transfer_mod.classify_by_parts(skin, [("white", white), ("pink", pink)], 0.06, split_edge=1.2, split_box=box, surface_parts=["white"])
+    fc = np.asarray(res.mesh.triangles_center)
+    far_from_micro = np.min([np.linalg.norm(fc - g, axis=1) for g in skin_c[top_giants]], axis=0) > 0.5
+    off_strip = (fc[:, 2] > 9.9) & (fc[:, 0] < 1.0) & far_from_micro
+    assert off_strip.any() and (res.face_label[off_strip] == res.names.index("pink")).all()
+    with pytest.raises(UsageError, match="needs --split-edge"):
+        transfer_mod.classify_by_parts(skin, [("white", white)], 0.06, surface_parts=["white"])
+    with pytest.raises(InvalidArgument):
+        transfer_mod.classify_by_parts(skin, [("white", white)], 0.06, surface_parts=["whit"])
+
+
+def test_the_default_cell_sees_a_giant_neighbour_whose_centroid_is_far(tmp_path: Path) -> None:
+    """The top face of a 60 mm box coloured 3 mm deep: the side faces are giant triangles whose centroids lie 20 mm below
+    the grid, but their triangles run along it, so a point 0.4 mm from the side wall is the wall's, not the cell's."""
+    from colour_regions.volume import shell_volume
+
+    box = trimesh.creation.box((60, 60, 60))
+    s = Surf(box)
+    top = np.asarray(box.triangles_center)[:, 2] > 29.0
+    cell = shell_volume(s, top, 3.0, 0.3, tmp_path / "top.ply")
+    inside_wall = np.array([[29.6, 0.0, 28.5]])  # 1.5 mm under the top face, 0.4 mm from the x = 30 wall
+    well_inside = np.array([[0.0, 0.0, 28.5]])
+    assert bool(cell.contains(well_inside)[0]) and not bool(cell.contains(inside_wall)[0])
+
+
+def test_gate_parts_takes_slot_assigns_and_ignores_stray_files_and_reports_bad_manifests(tmp_path: Path) -> None:
+    """A `{"slot": N}` group assign, a `.DS_Store` in the parts directory and a manifest without `parts` are handled."""
+    m, work, _ = _build_sphere(tmp_path)
+    group, names, assign = build_mod.load_groups(work)
+    s = Surf(m)
+    th = verify_mod.Thresholds()
+    stem = write_project(tmp_path / "p", m, work, [1.0, 2.0, 3.0], {"slot": 2}, {"mix": "23"})
+    (Path(str(stem) + ".parts") / ".DS_Store").write_text("x")
+    slot_assign = [{"slot": 2} if a == {"key": "W"} else a for a in assign]
+    ok = verify_mod.gate_parts(s, group, slot_assign, names, stem, th, "K", n=1500)
+    assert ok["pass"] and set(ok["per_group"]) == {"<none>", "top", "bottom"}
+    with pytest.raises(UsageError, match="not a filament key"):
+        verify_mod.gate_parts(s, group, [{"key": "X"}, assign[1]], names, stem, th, "K", n=1500)
+    Path(str(stem) + ".manifest.json").write_text(json.dumps({"shift": [0, 0, 0]}), encoding="utf-8")
+    with pytest.raises(UsageError, match="not a project manifest"):
+        verify_mod.gate_parts(s, group, assign, names, stem, th, "K", n=1500)

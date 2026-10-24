@@ -44,6 +44,9 @@ from colour_regions.surface import Array, Mask, Surf, load_mesh, sample_surface,
 from errors import InvalidArgument, UsageError
 
 DEFAULT_PART_TOL_MM = 0.06
+#: part faces within this distance (mm) of the split box take part in the surface test
+SURFACE_MARGIN_MM = 3.0
+MATCH_MODES = ("centroid", "surface")
 
 
 # ---------------------------------------------------------------------------------------------- classify
@@ -85,17 +88,73 @@ def in_box(points: Array, box: Box) -> Mask:
     return np.asarray(np.all((points > lo) & (points < hi), axis=1))
 
 
-def split_faces(m: trimesh.Trimesh, max_edge: float, box: Box | None) -> trimesh.Trimesh:
-    """Faces with an edge over `max_edge` mm (inside `box` when given) split exactly: the surface does not change,
-    only its triangulation. The split faces replace their parents at the end of the face list; they live on their own
-    vertices (appended after the originals), since the subdivision numbers the vertices it keeps by itself."""
-    f = np.asarray(m.faces)
-    sel = np.ones(len(f), bool) if box is None else in_box(np.asarray(m.triangles_center), box)
-    if not sel.any():
-        return m
-    v2, f2 = trimesh.remesh.subdivide_to_size(np.asarray(m.vertices), f[sel], max_edge)
-    nv = len(m.vertices)
-    return trimesh.Trimesh(np.vstack([m.vertices, v2]), np.vstack([f[~sel], f2 + nv]), process=False)
+def refine(
+    m: trimesh.Trimesh, max_edge: float, box: Box | None, max_iter: int = 16
+) -> tuple[trimesh.Trimesh, NDArray[np.int64]]:
+    """Conforming midpoint split: every face whose centroid lies in `box` (anywhere when None) and has an edge longer
+    than `max_edge` is split on those edges, repeatedly, until none is left; a face outside the box whose edge is split by
+    its neighbour is split too, so the mesh stays closed (its children are tested again). The surface does not change,
+    only its triangulation; the original vertices keep their indices. -> (refined mesh, parent face of every new face)."""
+    v = np.asarray(m.vertices, float).copy()
+    f = np.asarray(m.faces, np.int64).copy()
+    lo_b, hi_b = (np.full(3, -np.inf), np.full(3, np.inf)) if box is None else (np.array(box[0::2]), np.array(box[1::2]))
+    parent = np.arange(len(f))
+    for it in range(max_iter + 1):
+        tri = v[f]
+        edge_len = np.linalg.norm(tri[:, [1, 2, 0]] - tri, axis=2)  # edge i: f[i] -> f[i+1]
+        c = tri.mean(1)
+        zone = ((c > lo_b) & (c < hi_b)).all(1)
+        long_ = (edge_len > max_edge) & zone[:, None]
+        if not long_.any():
+            break
+        if it == max_iter:
+            raise UsageError(
+                f"splitting to {max_edge} mm did not converge in {max_iter} rounds",
+                command=CMD,
+                remediation=["Raise --split-edge or narrow --split-box."],
+            )
+        nv = len(v)
+        a, b = f, f[:, [1, 2, 0]]
+        key = np.minimum(a, b) * nv + np.maximum(a, b)
+        split_keys = np.unique(key[long_])
+        mark = np.isin(key, split_keys)  # every face edge that is split (also those of neighbours outside the box)
+        mid = (nv + np.searchsorted(split_keys, key)).astype(np.int64)  # valid where mark
+        ma, mb = split_keys // nv, split_keys % nv
+        v = np.vstack([v, 0.5 * (v[ma] + v[mb])])
+        n = mark.sum(1)
+        keep = n == 0
+        out_f, out_p = [f[keep]], [parent[keep]]
+        idx = np.nonzero(n == 1)[0]  # 1 split edge: rotate so it is edge 0
+        if len(idx):
+            e = np.argmax(mark[idx], axis=1)
+            v0, v1, v2 = f[idx, e], f[idx, (e + 1) % 3], f[idx, (e + 2) % 3]
+            mm = mid[idx, e]
+            out_f.append(np.concatenate([np.stack([v0, mm, v2], 1), np.stack([mm, v1, v2], 1)]))
+            out_p.append(np.tile(parent[idx], 2))
+        idx = np.nonzero(n == 2)[0]  # 2 split edges: the unsplit edge becomes edge 2 (v2 -> v0)
+        if len(idx):
+            u = np.argmin(mark[idx], axis=1)
+            v0, v1, v2 = f[idx, (u + 1) % 3], f[idx, (u + 2) % 3], f[idx, u]
+            m01, m12 = mid[idx, (u + 1) % 3], mid[idx, (u + 2) % 3]
+            first = np.linalg.norm(v[v0] - v[m12], axis=1) <= np.linalg.norm(v[m01] - v[v2], axis=1)
+            ta = np.stack([m01, v1, m12], 1)
+            tb = np.where(first[:, None], np.stack([v0, m01, m12], 1), np.stack([v0, m01, v2], 1))
+            tc = np.where(first[:, None], np.stack([v0, m12, v2], 1), np.stack([m01, m12, v2], 1))
+            out_f.append(np.concatenate([ta, tb, tc]))
+            out_p.append(np.tile(parent[idx], 3))
+        idx = np.nonzero(n == 3)[0]
+        if len(idx):
+            v0, v1, v2 = f[idx, 0], f[idx, 1], f[idx, 2]
+            m01, m12, m20 = mid[idx, 0], mid[idx, 1], mid[idx, 2]
+            out_f.append(
+                np.concatenate(
+                    [np.stack([v0, m01, m20], 1), np.stack([m01, v1, m12], 1), np.stack([m20, m12, v2], 1), np.stack([m01, m12, m20], 1)]
+                )
+            )
+            out_p.append(np.tile(parent[idx], 4))
+        f = np.concatenate([x for x in out_f if len(x)])
+        parent = np.concatenate([x for x in out_p if len(x)])
+    return trimesh.Trimesh(v, f, process=False), parent
 
 
 def parse_fill_box(raw: str) -> tuple[Box, float]:
@@ -118,27 +177,24 @@ class Classified:
     n_split: int  # faces added by splitting
 
 
-def _surface_hits(
-    parts: Sequence[tuple[str, trimesh.Trimesh]], name: str, shift: Array, box: Box, centres: Array, tol: float
-) -> Mask:
-    """Skin points `centres` that lie within `tol` of the SURFACE (not the face centroids) of the parts called `name`,
-    judged on area-proportional samples of the part faces near `box` at a pitch of 0.8 tol."""
-    lo, hi = np.array(box[0::2]) - 3.0, np.array(box[1::2]) + 3.0
-    pts: list[Array] = []
+def _surface_distance(
+    parts: Sequence[tuple[str, trimesh.Trimesh]], name: str, shift: Array, box: Box, points: Array
+) -> Array:
+    """Exact distance from `points` to the SURFACE of the parts called `name` (their faces within SURFACE_MARGIN_MM of
+    `box` are used; inf when there are none)."""
+    lo, hi = np.array(box[0::2]) - SURFACE_MARGIN_MM, np.array(box[1::2]) + SURFACE_MARGIN_MM
+    pieces: list[trimesh.Trimesh] = []
     for n, m in parts:
         if n != name:
             continue
         c = np.asarray(m.triangles_center) - shift
         near = np.nonzero(np.all((c > lo) & (c < hi), axis=1))[0]
-        if len(near) == 0:
-            continue
-        sub = trimesh.Trimesh(np.asarray(m.vertices) - shift, np.asarray(m.faces)[near], process=False)
-        p, _ = sample_surface(sub, 0.8 * tol)
-        pts.append(p)
-    if not pts:
-        return np.zeros(len(centres), bool)
-    d, _ = cKDTree(np.vstack(pts)).query(centres, workers=-1)
-    return np.asarray(d <= tol)
+        if len(near):
+            pieces.append(trimesh.Trimesh(np.asarray(m.vertices) - shift, np.asarray(m.faces)[near], process=False))
+    if not pieces:
+        return np.full(len(points), np.inf)
+    _, dist, _ = trimesh.proximity.closest_point(trimesh.util.concatenate(pieces), points)
+    return np.asarray(dist)
 
 
 def classify_by_parts(
@@ -148,37 +204,71 @@ def classify_by_parts(
     shift: tuple[float, float, float] = (0.0, 0.0, 0.0),
     split_edge: float | None = None,
     split_box: Box | None = None,
+    surface_parts: Sequence[str] | None = None,
 ) -> Classified:
     """A skin face takes the name of the FIRST part (list order) one of whose face centroids lies within `tol` of the
-    face centroid; -1 when no part does. Part meshes are in another frame by `shift` (subtracted). Inside `split_box`
-    (the whole skin when only `split_edge` is given) skin faces longer than `split_edge` are split first and judged by
-    their distance to the part SURFACE instead of the part face centroids, so a giant face the part was cut out of
-    cannot be mislabelled by where its centroid happens to be."""
+    face centroid; -1 when no part does. Part meshes are in another frame by `shift` (subtracted).
+    With `split_edge` the skin is refined first (`refine`, inside `split_box`, the whole skin when None): every new face
+    inherits the label of the face it comes from, and inside the box the faces are re-judged for the parts in
+    `surface_parts` (default: all): a face is of such a part when its centroid lies within `tol` of the part SURFACE
+    (and no earlier listed part claimed it), whatever its parent's centroid said. That is what a giant face a finely
+    cut part was cut out of needs; the other parts keep the parent's decision."""
     names: list[str] = []
     for n, _ in parts:
         if n not in names:
             names.append(n)
-    n_split = 0
-    if split_edge:
-        n_before = len(skin.faces)
-        skin = split_faces(skin, split_edge, split_box)
-        n_split = len(skin.faces) - n_before
-    c = np.asarray(skin.triangles_center)
+    judged = set(names if surface_parts is None else surface_parts)
+    unknown = sorted(judged - set(names))
+    if unknown:
+        raise InvalidArgument("--surface-parts", ",".join(unknown), names, command=CMD)
+    if surface_parts is not None and not split_edge:
+        raise UsageError("--surface-parts needs --split-edge", command=CMD, remediation=["Add e.g. --split-edge 0.5."])
     off = np.asarray(shift)
-    exact_box: Box | None = None
-    if split_edge:
-        lo, hi = c.min(axis=0) - 1.0, c.max(axis=0) + 1.0
-        exact_box = split_box or (float(lo[0]), float(hi[0]), float(lo[1]), float(hi[1]), float(lo[2]), float(hi[2]))
-    lab = np.full(len(c), -1, np.int16)
-    inside = in_box(c, exact_box) if exact_box is not None else np.zeros(len(c), bool)
+    c0 = np.asarray(skin.triangles_center)
+    near0: dict[str, Array] = {}  # per part: which original faces have a part face centroid within `tol`
     for name in names:
-        pts = [np.asarray(m.triangles_center) - off for n, m in parts if n == name]
-        d, _ = cKDTree(np.vstack(pts)).query(c, workers=-1)
-        hit = d <= tol
-        if exact_box is not None and inside.any():
-            hit[inside] = _surface_hits(parts, name, off, exact_box, c[inside], tol)
-        lab[hit & (lab < 0)] = names.index(name)  # an earlier part wins
-    return Classified(lab, names, skin, n_split)
+        pts = np.vstack([np.asarray(m.triangles_center) - off for n, m in parts if n == name])
+        near0[name] = np.asarray(cKDTree(pts).query(c0, workers=-1)[0] <= tol)
+    if not split_edge:
+        lab0 = np.full(len(c0), -1, np.int16)
+        for k, name in enumerate(names):
+            lab0[near0[name] & (lab0 < 0)] = k  # an earlier part wins
+        return Classified(lab0, names, skin, 0)
+    fine, parent = refine(skin, split_edge, split_box)
+    c = np.asarray(fine.triangles_center)
+    if split_box is not None:
+        box: Box = split_box
+    else:
+        lo, hi = c.min(axis=0) - 1.0, c.max(axis=0) + 1.0
+        box = (float(lo[0]), float(hi[0]), float(lo[1]), float(hi[1]), float(lo[2]), float(hi[2]))
+    inside = in_box(c, box)
+    zi = np.nonzero(inside)[0]
+    lab = np.full(len(c), -1, np.int16)
+    for k, name in enumerate(names):
+        claim = near0[name][parent]  # the parent's centroid decision
+        if name in judged and len(zi):
+            claim[zi] = _surface_distance(parts, name, off, box, c[zi]) <= tol  # replaced by the surface test in the box
+        lab[claim & (lab < 0)] = k  # an earlier part wins
+    return Classified(lab, names, fine, len(fine.faces) - len(skin.faces))
+
+
+def write_ply_f64(m: trimesh.Trimesh, path: Path) -> None:
+    """Binary PLY with double-precision vertices (trimesh's own writer stores float32): a refined skin that is read back
+    for a nearest-face transfer must keep the centroids it was classified with, or faces equidistant from two source
+    faces fall on the other side of the tie."""
+    v = np.ascontiguousarray(np.asarray(m.vertices, "<f8"))
+    f = np.asarray(m.faces, "<i4")
+    header = (
+        "ply\nformat binary_little_endian 1.0\n"
+        f"element vertex {len(v)}\nproperty double x\nproperty double y\nproperty double z\n"
+        f"element face {len(f)}\nproperty list uchar int vertex_indices\nend_header\n"
+    )
+    faces = np.zeros(len(f), dtype=[("n", "u1"), ("i", "<i4", (3,))])
+    faces["n"], faces["i"] = 3, f
+    with open(path, "wb") as fh:
+        fh.write(header.encode("ascii"))
+        fh.write(v.tobytes())
+        fh.write(faces.tobytes())
 
 
 def classify_file(
@@ -190,20 +280,21 @@ def classify_file(
     shift: tuple[float, float, float],
     split_edge: float | None,
     split_box: Box | None,
+    surface_parts: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     """`classify`: write the label file of `skin_path` by its parts; returns the report."""
-    skin = load_mesh(skin_path, process=False)
+    skin = load_mesh(skin_path)  # vertices merged: the refinement needs the neighbours to share vertices
     loaded: list[tuple[str, trimesh.Trimesh]] = []
     for name, p in parts:
         if not p.is_file():
             raise UsageError(f"part mesh not found: {p}", command=CMD)
         loaded.append((name, load_mesh(p, process=False)))
-    res = classify_by_parts(skin, loaded, tol, shift, split_edge, split_box)
+    res = classify_by_parts(skin, loaded, tol, shift, split_edge, split_box, surface_parts)
     out_p = Path(out)
     mesh_rel: str | None = None
     if split_edge:  # the split reorders the faces: the labels belong to the written mesh, even when nothing was long enough
         mesh_rel = out_p.with_suffix(".mesh.ply").name
-        res.mesh.export(str(out_p.parent / mesh_rel))
+        write_ply_f64(res.mesh, out_p.parent / mesh_rel)
     write_labels(out_p, res.face_label, res.names, digest=mesh_digest(res.mesh.triangles), mesh=mesh_rel)
     counts = {n: int((res.face_label == i).sum()) for i, n in enumerate(res.names)}
     return {
@@ -293,9 +384,13 @@ def transfer_class(
     max_dist: float,
     island_mm2: float,
     fill_boxes: Sequence[tuple[Box, float]],
+    match: str = "centroid",
     spacing: float = TRANSFER_SPACING_MM,
 ) -> tuple[NDArray[np.int16], dict[str, Any]]:
-    """One class of the source mesh onto the faces of `new` -> (labels: 0 = positive, -1 = other; report)."""
+    """One class of the source mesh onto the faces of `new` -> (labels: 0 = positive, -1 = other; report).
+    `match`: `centroid` = the nearest source face by centroid (the default), `surface` = the nearest source surface point."""
+    if match not in MATCH_MODES:
+        raise InvalidArgument("--match", match, list(MATCH_MODES), command=CMD)
     pos_ids = _ids(names, positive, "--positive")
     exc_ids = _ids(names, exclude, "--exclude")
     usable = ~np.isin(source_labels, exc_ids)
@@ -303,9 +398,13 @@ def transfer_class(
         raise UsageError("every source face is excluded", command=CMD, remediation=["Check --exclude."])
     sub = submesh(source, np.nonzero(usable)[0])
     is_pos_face = np.isin(source_labels[usable], pos_ids)
-    pts, fid = sample_surface(sub, spacing)
-    d, j = cKDTree(pts).query(new.c, workers=-1)
-    appr_pos = is_pos_face[fid[j]]
+    if match == "centroid":  # the nearest approved FACE (by centroid), what the approved build's borders were made of
+        d, j = cKDTree(np.asarray(sub.triangles_center)).query(new.c, workers=-1)
+        appr_pos = is_pos_face[j]
+    else:  # the nearest approved SURFACE point: independent of how the approved faces are sized
+        pts, fid = sample_surface(sub, spacing)
+        d, j = cKDTree(pts).query(new.c, workers=-1)
+        appr_pos = is_pos_face[fid[j]]
     lab = np.where(appr_pos, 0, -1).astype(np.int16)
     beyond = d > max_dist
     lab[beyond] = -1
@@ -324,6 +423,7 @@ def transfer_class(
         "dist_p95": round(float(np.percentile(d, 95)), 3),
         "dist_max": round(float(d.max()), 3),
         "beyond_max_dist": int(beyond.sum()),
+        "match": match,
         "filled_islands": filled,
     }
     return lab, report
@@ -340,6 +440,7 @@ def transfer_class_file(
     max_dist: float,
     island_mm2: float,
     fill_boxes: Sequence[tuple[Box, float]],
+    match: str = "centroid",
 ) -> dict[str, Any]:
     """`transfer-class`: write the one-label file of the positive class on the faces of `mesh_path`."""
     src = load_source(source_spec)
@@ -361,6 +462,7 @@ def transfer_class_file(
         max_dist=max_dist,
         island_mm2=island_mm2,
         fill_boxes=fill_boxes,
+        match=match,
     )
     write_labels(out, lab, [as_name], digest=mesh_digest(new.mesh.triangles))
     return report

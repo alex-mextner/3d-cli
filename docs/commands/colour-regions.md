@@ -101,6 +101,13 @@ A coloured label on a body that is not the main surface (a cavity, an inserted p
   of that region by their distance to the part SURFACE (parts sampled every 0.8 `--tol`), so a part cut out of a giant
   face cannot mislabel the whole face by where its centroid is; the split mesh is written as `OUT.mesh.ply` and named
   by the label file's `mesh` key.
+- Parity with the proven Chekhov scripts (issue #619): the defaults reproduce their outputs bit for bit on the real final
+  build (patch PLYs byte-identical, labels and white faces identical, gate numbers equal). `classify` refines conforming
+  (`--split-edge`) and re-judges only `--surface-parts` by exact distance to the part surface inside the box, the other
+  parts keep the parent face's centroid decision; `transfer-class --match centroid` (default) takes the nearest source
+  FACE by centroid, `--match surface` the nearest source surface point; `build --full-reach` lets a thin body coloured
+  from both sides see its far wall (the default keeps the legacy grid); `verify --parts STEM` judges gate 2 on the
+  built project's parts (`STEM.manifest.json` + `STEM.parts/`), as the old verifier did, instead of the patches.
 - `transfer` — every label of `LABELS@LABEL_MESH` onto the faces of MESH (labels beyond `--tol`: -1).
 - `transfer-class` — ONE approved class onto a newer mesh: faces nearest to an approved face of the `--positive`
   names get the label `--as NAME` (id 0), the rest -1. `--exclude` names are classes of unknown colour and never a
@@ -135,6 +142,7 @@ Exit codes: 0 ok; 1 a `verify` gate FAILed or a colour cell is not a closed volu
 | `--transfer-tol F` | build | `--transfer-tol 0.3` |
 | `--tol MM` | shell-volume, transfer, snap, classify | `--tol 0.25` (classify: part distance, `--tol 0.06`) |
 | `--force` | build | `--force` |
+| `--full-reach` | build, shell-volume | `--full-reach` |
 | `--labels LABELS` | shell-volume, transfer, snap | `--labels sculpt.npz` |
 | `--select REGEX` | shell-volume | `--select 'pad_.*' --select nose_leather` |
 | `--depth MM`, `--pitch MM` | shell-volume | `--depth 1.6 --pitch 0.08` |
@@ -142,14 +150,18 @@ Exit codes: 0 ok; 1 a `verify` gate FAILed or a colour cell is not a closed volu
 | `--part NAME=MESH` | classify | `--part pink=pink_part.stl --part white=white_a.stl` |
 | `--shift X,Y,Z` | classify | `--shift 10,20,0` |
 | `--split-edge MM`, `--split-box BOX` | classify | `--split-edge 2 --split-box -50,50,-20,20,0,40` |
+| `--surface-parts N,N` | classify | `--surface-parts white` |
 | `--source LABELS@MESH` | transfer-class | `--source approved.npz@approved.mesh.ply` |
 | `--positive NAMES`, `--exclude NAMES`, `--as NAME` | transfer-class | `--positive white --exclude pink --as white_approved` |
 | `--max-dist MM` | transfer-class | `--max-dist 6` |
+| `--match centroid\|surface` | transfer-class | `--match surface` |
 | `--fill-box BOX:AREA` | transfer-class | `--fill-box 10,30,-20,0,0,15:15` |
 | `--band MM`, `--scale MM`, `--min-crease DEG` | snap | `--band 2.5 --scale 0.9 --min-crease 15` |
 | `--fixed REGEX` | snap | `--fixed 'pad_.*'` |
 | `--work DIR`, `--regions FILE` | verify | `--work work --regions work/regions.json` |
 | `--skip-volumes` | verify | `--skip-volumes` |
+| `--parts STEM`, `--default-key K` | verify | `--parts work/project --default-key K` |
+| `--max-nz F` | verify --parts | `--max-nz 0.97` (above 1 keeps every face) |
 | `--samples N` | verify | `--samples 5000` |
 | `--waive G,G`, `--approved-groups G,G` | verify | `--waive iris,goatee --approved-groups white` |
 | `--json` | all | `--json` prints the result as JSON instead of the text report |
@@ -176,6 +188,11 @@ Examples:
 3d colour-regions verify cat.stl --work work --regions work/regions.json --dihedral 30 --crease 30 --min-share 0.5 --min-group 0.35 --shift-mm 1.5 --agree 0.97
 3d colour-regions verify cat.stl --work work --skip-volumes
 3d colour-regions verify cat.stl --work work --samples 5000
+3d colour-regions verify cat.stl --work work --parts work/project --default-key K --max-nz 0.97
+3d colour-regions classify approved_skin.stl --part white=white.stl --out approved.npz --split-edge 0.5 --split-box=-34,34,-62,-26.5,3,46 --surface-parts white
+3d colour-regions transfer-class new.stl --source approved.npz@approved.mesh.ply --positive white --as white_approved --out white.npz --match surface
+3d colour-regions build cat.stl --track sculpt=sculpt.npz --rules rules.json --out work --full-reach
+3d colour-regions shell-volume plate.stl --labels top.npz --select top --depth 3 --pitch 0.25 --out top.ply --full-reach
 3d colour-regions verify cat.stl --work work --shift-margin 0.1 --chance-margin 0.3
 3d colour-regions build cat.stl --track sculpt=sculpt.npz --rules rules.json --out work --json --memory-max 10G --no-lock
 ```

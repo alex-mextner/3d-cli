@@ -23,6 +23,7 @@ PAST BUGS: marching cubes leaves zero-area slivers (dropped, holes filled); an S
 
 from __future__ import annotations
 
+import math
 import sys
 from pathlib import Path
 from typing import Any
@@ -41,6 +42,9 @@ LEVEL = 1.2347e-4
 DECIMATE_ABOVE = 150_000
 DECIMATE_TO = 120_000
 MAX_VOXELS = 140e6
+#: the voxel grid extends `depth` + this past the selected faces; faces within CANDIDATE_MARGIN_MM of the grid compete
+GRID_MARGIN_MM = 1.5
+CANDIDATE_MARGIN_MM = 3.0
 #: connected pieces of a selection under this area (mm2) are too small to cut and are skipped
 MIN_CELL_AREA_MM2 = 0.3
 
@@ -76,15 +80,27 @@ def _decimate(verts: Array, faces: Array, target: int) -> tuple[Array, Array]:
     return o.vertex_matrix(), o.face_matrix()
 
 
-def _cell(s: Surf, sel: Mask, depth: float, pitch: float, smooth_vox: float = 0.8) -> trimesh.Trimesh:
+def _cell(s: Surf, sel: Mask, depth: float, pitch: float, full_reach: bool, smooth_vox: float = 0.8) -> trimesh.Trimesh:
     """The colour cell of one connected piece of faces `sel`."""
     from skimage.measure import marching_cubes
 
     fi = np.nonzero(sel & s.outer)[0]
     v = s.mesh.vertices[s.mesh.faces[fi]].reshape(-1, 3)
-    lo, hi = v.min(0) - (2 * depth + 1.5), v.max(0) + (2 * depth + 1.5)  # a competitor up to `depth` past a cell point counts
-    tri_lo, tri_hi = s.tri_bounds  # a competing face counts when its triangle reaches the grid, not only its centroid
-    near = np.nonzero(s.outer & ~sel & np.all((tri_hi > lo - 3) & (tri_lo < hi + 3), axis=1))[0]
+    # The grid reaches `depth + GRID_MARGIN_MM` past the selected faces and the competing faces are the ones whose
+    # centroid lies within CANDIDATE_MARGIN_MM of it: the set (and, as the samples are drawn per set, the very samples)
+    # the Chekhov colour build was proven with. Faces whose TRIANGLE reaches into the grid although their centroid does
+    # not (giant faces) are sampled as a second set, empty on a finely meshed skin. A competitor up to `depth` past a
+    # cell point counts as well (a thin plate coloured from both sides: the far wall is `2 * depth` away), which the
+    # legacy grid cannot see; with `full_reach` the grid grows by whole voxels (the lattice, hence every old distance
+    # value, stays where it was) and the faces reaching into the growth join the second set.
+    base_lo, base_hi = v.min(0) - (depth + GRID_MARGIN_MM), v.max(0) + (depth + GRID_MARGIN_MM)
+    grow = math.ceil(depth / pitch) * pitch if full_reach else 0.0
+    lo, hi = base_lo - grow, base_hi + grow
+    others = s.outer & ~sel
+    base = others & np.all((s.c > base_lo - CANDIDATE_MARGIN_MM) & (s.c < base_hi + CANDIDATE_MARGIN_MM), axis=1)
+    tri_lo, tri_hi = s.tri_bounds
+    reach = others & ~base & np.all((tri_hi > lo - CANDIDATE_MARGIN_MM) & (tri_lo < hi + CANDIDATE_MARGIN_MM), axis=1)
+    near, extra = np.nonzero(base)[0], np.nonzero(reach)[0]
     shape = np.ceil((hi - lo) / pitch).astype(int) + 1
     if shape.prod() > MAX_VOXELS:
         raise UsageError(
@@ -93,7 +109,8 @@ def _cell(s: Surf, sel: Mask, depth: float, pitch: float, smooth_vox: float = 0.
             remediation=["Raise the pitch (pitch_mm / --pitch) or split the selection into smaller pieces."],
         )
     p_sel = _samples(s, fi, 0.7 * pitch, 1)
-    p_oth = _samples(s, near, 0.7 * pitch, 2) if len(near) else np.empty((0, 3))
+    samples = [_samples(s, ids, 0.7 * pitch, seed) for ids, seed in ((near, 2), (extra, 3)) if len(ids)]
+    p_oth = np.vstack(samples) if samples else np.empty((0, 3))
 
     def occupancy(pts: Array) -> Mask:
         occ = np.zeros(shape, bool)
@@ -202,10 +219,16 @@ def closed_file(m: trimesh.Trimesh, out: Path) -> trimesh.Trimesh:
 
 
 def shell_volume(
-    s: Surf, sel: Mask, depth: float, pitch: float, out: str | Path, min_area_mm2: float = MIN_CELL_AREA_MM2
+    s: Surf,
+    sel: Mask,
+    depth: float,
+    pitch: float,
+    out: str | Path,
+    min_area_mm2: float = MIN_CELL_AREA_MM2,
+    full_reach: bool = False,
 ) -> trimesh.Trimesh:
     """One colour cell per connected piece of `sel` (outer body only, pieces under `min_area_mm2` skipped),
-    concatenated into the PLY `out`; returns the mesh read back from it."""
+    concatenated into the PLY `out`; returns the mesh read back from it. `full_reach`: see `_cell`."""
     out_path = Path(out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     n, lab = s.components(sel & s.outer)
@@ -214,7 +237,7 @@ def shell_volume(
         comp = lab == i
         if s.area[comp].sum() < min_area_mm2:
             continue
-        parts.append(_cell(s, comp, depth, pitch))
+        parts.append(_cell(s, comp, depth, pitch, full_reach))
     if not parts:
         raise UsageError(
             f"no faces selected for {out_path}",
