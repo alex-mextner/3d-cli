@@ -23,6 +23,7 @@ from errors import InvalidArgument
 from prep import frame
 from prep.contracts import Assign, Part, Verdict, worst
 from prep.pipeline import (
+    DEFAULT_PROCESS_PRESET,
     PRINTER_BED_MM,
     StepOutput,
     default_filaments,
@@ -312,6 +313,12 @@ def _layers(pipe: Pipeline) -> StepOutput:
     from prep import layers, regions
 
     cfg = pipe.cfg
+    if cfg.flat_profile:
+        return StepOutput(
+            {},
+            "SKIP",
+            f"{cfg.printer}: one filament at the process preset's fixed layer height, no adaptive plan",
+        )
     parts = _parts(pipe)
     zr = layers.mix_zranges_from(parts) if parts else ()
     plan = layers.plan_layers(
@@ -356,11 +363,95 @@ def _parts(pipe: Pipeline) -> list[Part]:
     return load_parts(pipe.mesh_path("parts"))
 
 
-def _project(pipe: Pipeline) -> StepOutput:
-    from prep import regions
-    from prep.project3mf import ProcessOverrides, ProjectSpec, build_project
+def _process_overrides(pipe: Pipeline, first_height: float) -> Any:
+    """The process settings `3d prep` owns (walls, infill, layer height) plus `--set`, as `ProcessOverrides`."""
+    from prep.project3mf import ProcessOverrides
 
     cfg = pipe.cfg
+    return ProcessOverrides(
+        wall_loops=cfg.walls,
+        sparse_infill_density=f"{cfg.infill_pct}%",
+        layer_height=0.2,
+        initial_layer_print_height=first_height,
+        adaptive_layer_height=False,
+        extra=dict(cfg.set_process),
+    )
+
+
+def _project_flat(pipe: Pipeline) -> StepOutput:
+    """Single-extruder printers: the placed STL and three flat preset files instead of a 3MF project."""
+    import numpy as np
+
+    from prep import flat_profiles
+
+    cfg = pipe.cfg
+    flags: dict[str, Any] = dict(_process_overrides(pipe, 0.2).to_config())
+    flags.pop("enable_support", None)  # `--supports` decides, in build_profiles
+    for key in ("layer_height", "initial_layer_print_height"):
+        flags.pop(key, None)  # the process preset's own layer height stands (`--set layer_height=` overrides)
+    if cfg.brim_mm:
+        flags.update({"brim_type": "outer_only", "brim_width": f"{cfg.brim_mm:g}"})
+    else:
+        flags["brim_type"] = "no_brim"
+    overlay = flat_profiles.load_overlay(cfg.overlay) if cfg.overlay else None
+    overlay = (overlay or flat_profiles.Overlay()).merged({}, cfg.set_filament)
+    # `--set` outranks the overlay file, which outranks the flags above; to_config() carried the extras, so drop
+    # them from the flags and hand them over as the top layer
+    for key in cfg.set_process:
+        flags.pop(key, None)
+    overlay = overlay.merged(cfg.set_process, {})
+    profiles = flat_profiles.build_profiles(
+        cfg.printer,
+        process_preset=cfg.process_name,
+        filament_preset=cfg.filament_preset,
+        process_flags=flags,
+        supports=cfg.supports,
+        overlay=overlay,
+    )
+    bed = PRINTER_BED_MM[cfg.printer]
+    mesh = pipe.final_mesh().copy()
+    lo, hi = mesh.bounds
+    mesh.apply_translation(
+        np.array([bed[0] / 2 - (lo[0] + hi[0]) / 2, bed[1] / 2 - (lo[1] + hi[1]) / 2, -lo[2]])
+    )
+    lo, hi = mesh.bounds
+    if lo[0] < 1 or lo[1] < 1 or hi[0] > bed[0] - 1 or hi[1] > bed[1] - 1 or hi[2] > bed[2]:
+        raise InvalidArgument(
+            "model size",
+            f"{(hi - lo).round(1).tolist()} mm",
+            [f"inside the {bed[0]:g} x {bed[1]:g} x {bed[2]:g} mm bed of the {cfg.printer}"],
+            command="prep",
+        )
+    stl = pipe.work / f"{cfg.name}.print.stl"
+    mesh.export(stl)
+    paths = profiles.write(pipe.work / f"{cfg.name}.profiles")
+    limits = flat_profiles.speed_limits(profiles.process)
+    data = {
+        "printer": cfg.printer,
+        "stl": stl.name,
+        "profiles": {k: str(v.relative_to(pipe.work)) for k, v in paths.items()},
+        "preset_names": profiles.names,
+        "renamed": profiles.renamed,
+        "supports": cfg.supports,
+        "layer_height": float(profiles.process.get("layer_height", 0.2)),
+        "speed_limits": limits,
+        "requested_settings": profiles.requested,
+        "bbox": [lo.round(3).tolist(), hi.round(3).tolist()],
+    }
+    summary = (
+        f"{profiles.names['machine']} / {profiles.names['process']} / {profiles.names['filament']}; "
+        f"supports {cfg.supports}; model {(hi - lo).round(1).tolist()} mm on the {bed[0]:g} bed"
+    )
+    return StepOutput(data, "PASS", summary, [stl, *paths.values()])
+
+
+def _project(pipe: Pipeline) -> StepOutput:
+    from prep import regions
+    from prep.project3mf import ProjectSpec, build_project
+
+    cfg = pipe.cfg
+    if cfg.flat_profile:
+        return _project_flat(pipe)
     parts = _parts(pipe)
     filaments = (
         list(regions.load_colour_spec(cfg.colors, mix_cap=cfg.mix_cap).filaments)
@@ -370,18 +461,12 @@ def _project(pipe: Pipeline) -> StepOutput:
     if not parts:
         parts = [Part("model", pipe.final_mesh(), Assign(slot=1))]
     plan = saved_layer_plan(pipe)
-    overrides = ProcessOverrides(
-        wall_loops=cfg.walls,
-        sparse_infill_density=f"{cfg.infill_pct}%",
-        layer_height=0.2,
-        initial_layer_print_height=plan.first_height if plan else 0.2,
-        adaptive_layer_height=False,
-    )
+    overrides = _process_overrides(pipe, plan.first_height if plan else 0.2)
     spec = ProjectSpec(
         name=cfg.name,
         parts=parts,
         filaments=filaments,
-        process_preset=cfg.process_preset,
+        process_preset=cfg.process_name or DEFAULT_PROCESS_PRESET,
         printer=cfg.printer,
         filament_preset=cfg.filament_preset,
         overrides=overrides,
@@ -407,8 +492,19 @@ def _slice(pipe: Pipeline) -> StepOutput:
     cfg = pipe.cfg
     if not cfg.slice:
         return StepOutput({}, "SKIP", "slicing disabled (--no-slice)")
-    project = pipe.work / f"{cfg.name}.3mf"
-    outcome = orca_cli.slice_project(project, pipe.work / "slice", heavy=True)
+    if cfg.flat_profile:
+        files = pipe.record_data("project")
+        outcome = orca_cli.slice_stl_with_profiles(
+            pipe.work / files["stl"],
+            pipe.work / "slice",
+            machine=pipe.work / files["profiles"]["machine"],
+            process=pipe.work / files["profiles"]["process"],
+            filament=pipe.work / files["profiles"]["filament"],
+            heavy=True,
+        )
+    else:
+        project = pipe.work / f"{cfg.name}.3mf"
+        outcome = orca_cli.slice_project(project, pipe.work / "slice", heavy=True)
     data = result_dict(outcome)
     artifacts: list[Path] = []
     if outcome.gcode is not None:
@@ -440,15 +536,26 @@ def _gates(pipe: Pipeline) -> StepOutput:
         return StepOutput(
             {}, "SKIP", "no G-code (slice step did not produce one): gates not run"
         )
-    spec = gcode_gates.GateSpec(
-        walls=cfg.walls,
-        infill=cfg.infill_pct / 100.0,
-        hmin=cfg.hmin,
-        hmax=cfg.hmax,
-        mix_cap=cfg.mix_cap,
-        bed_mm=PRINTER_BED_MM[cfg.printer],
-        **cfg.gate,
-    )
+    fields: dict[str, Any] = {
+        "walls": cfg.walls,
+        "infill": cfg.infill_pct / 100.0,
+        "hmin": cfg.hmin,
+        "hmax": cfg.hmax,
+        "mix_cap": cfg.mix_cap,
+        "bed_mm": PRINTER_BED_MM[cfg.printer],
+        "supports": cfg.supports == "auto",
+    }
+    if cfg.flat_profile:
+        # fixed layer height: every layer sits at the preset's value, which is also the "rare" thin layer
+        height = float(pipe.record_data("project").get("layer_height", 0.2))
+        fields.update(
+            hmin=height,
+            hmax=height,
+            rare_fraction=1.0,
+            speed_limits=pipe.record_data("project").get("speed_limits"),
+            expect_settings=pipe.record_data("project").get("requested_settings"),
+        )
+    spec = gcode_gates.GateSpec(**{**fields, **cfg.gate})
     manifest = pipe.work / f"{cfg.name}.manifest.json"
     expectations = (
         gcode_gates.GateExpectations.from_manifest(manifest)
