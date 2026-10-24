@@ -277,6 +277,59 @@ def test_unreadable_preset_json(tree: Path, res: Path) -> None:
     assert report.exit_code == 1
 
 
+def test_unreadable_info_is_a_finding_and_the_rest_is_still_checked(
+    tree: Path, res: Path
+) -> None:
+    (tree / "process/My PLA.info").write_bytes(b"base_id = \xff\xfe\n")
+    put(tree / "process/A.json", {"name": "A", "inherits": "B"})
+    put(tree / "process/B.json", {"name": "B", "inherits": "A"})
+    report = run_doctor(tree, res)
+    [f] = [f for f in report.findings if f.code == "preset-unreadable"]
+    assert "My PLA.info" in f.where and f.severity == "ERROR"
+    assert "inherits-cycle" in codes(report)  # diagnosis went on to the other presets
+    # the file exists: "create it" would clobber it
+    assert not [f for f in report.findings if f.code == "info-missing" and "My PLA" in f.where]
+
+
+def test_a_corrupt_vendor_parent_is_not_reported_as_an_inherits_loop(
+    tree: Path, res: Path
+) -> None:
+    (res / f"Snapmaker/process/{SYS_PROCESS}.json").write_text("{truncated")
+    report = run_doctor(tree, res)
+    [f] = [f for f in report.findings if f.where.endswith("My PLA.json")]
+    assert f.code == "parent-unreadable" and f.severity == "ERROR"
+    assert SYS_PROCESS in f.message and "loop" not in f.message
+
+
+def test_a_vendor_file_that_is_not_an_object_does_not_abort_the_run(
+    tree: Path, res: Path
+) -> None:
+    (res / f"Snapmaker/process/{SYS_PROCESS}.json").write_text("[1, 2]")
+    assert "parent-unreadable" in codes(run_doctor(tree, res))
+
+
+def test_a_vendor_machine_with_a_missing_parent_does_not_abort_the_run(
+    tree: Path, res: Path
+) -> None:
+    put(
+        res / "Snapmaker/machine/Orphan M.json",
+        {"name": "Orphan M", "inherits": "ghost"},
+    )
+    put(
+        tree / "process/My PLA.json",
+        {
+            "name": "My PLA",
+            "inherits": SYS_PROCESS,
+            "layer_height": "0.2",
+            "compatible_printers": ["Orphan M", U1],
+        },
+    )
+    report = run_doctor(tree, res)  # must not raise
+    assert not any(f.code == "layer-height-range" for f in report.findings)
+    [f] = [f for f in report.findings if f.code == "machine-unverifiable"]
+    assert f.severity == "WARN" and "Orphan M" in f.message and "ghost" in f.message
+
+
 def test_u1_machine_preset_with_the_wrong_nozzle_for_its_name(
     tree: Path, res: Path
 ) -> None:

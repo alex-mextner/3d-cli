@@ -5,11 +5,15 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import signal
 import stat
 import subprocess
 import sys
+import time
 import zipfile
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -97,8 +101,28 @@ def test_slicing_copy_set_cfg_needs_a_project_settings_member(tmp_path: Path) ->
     src = tmp_path / "bare.3mf"
     with zipfile.ZipFile(src, "w") as z:
         z.writestr("3D/3dmodel.model", "<model/>")
-    with pytest.raises(MissingDependency):
+    with pytest.raises(ThreeDError):
         slicing_copy(src, tmp_path / "o.3mf", set_cfg={"a": "1"})
+
+
+def test_slicing_copy_onto_its_own_source_keeps_the_project(tmp_path: Path) -> None:
+    src = make_project(tmp_path / "p.3mf")
+    slicing_copy(src, src, set_cfg={"layer_height": "0.3"})
+    members = read_members(src)
+    assert (
+        json.loads(members["Metadata/project_settings.config"])["layer_height"] == "0.3"
+    )
+    assert "Metadata/plate_1.json" not in members
+
+
+def test_slicing_copy_with_a_bad_input_leaves_no_output(tmp_path: Path) -> None:
+    src = tmp_path / "bare.3mf"
+    with zipfile.ZipFile(src, "w") as z:
+        z.writestr("3D/3dmodel.model", "<model/>")
+    dst = tmp_path / "o.3mf"
+    with pytest.raises(ThreeDError):
+        slicing_copy(src, dst, set_cfg={"a": "1"})
+    assert not dst.exists()
 
 
 def test_slicing_copy_handles_several_plates(tmp_path: Path) -> None:
@@ -268,7 +292,11 @@ if mode == "exit139":
 if mode == "exclude":
     print("[2026-10-20 17:22:34.1] [0x1] [error]   calc_exclude_triangles:Unable to create exclude triangles", file=sys.stderr)
     sys.exit(2)
-if mode == "sleep":
+if mode in ("sleep", "ignoreterm"):
+    if mode == "ignoreterm":
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    if os.environ.get("FAKE_PIDFILE"):
+        open(os.environ["FAKE_PIDFILE"], "w").write(str(os.getpid()))
     time.sleep(30)
 if mode == "rc101":
     json.dump({{"return_code": -101, "error_string": "arrange failed", "sliced_plates": []}}, open(os.path.join(out, "result.json"), "w"))
@@ -345,6 +373,27 @@ def test_slice_project_passes_the_headless_flags_and_slices_the_plate_free_copy(
     )  # inside the lock heavy_prefix() adds nothing: never a nested flock
 
 
+def test_reslicing_a_previous_sliced_3mf_in_the_same_workdir_is_refused_and_keeps_it(
+    tmp_path: Path, fake: OrcaCli
+) -> None:
+    work = tmp_path / "work"
+    work.mkdir()
+    prev = make_project(work / "sliced.3mf")
+    with pytest.raises(ThreeDError):
+        slice_project(prev, work, orca=fake)
+    assert prev.exists()
+
+
+def test_slice_project_uses_gnu_timeout_in_the_group_it_kills(
+    tmp_path: Path, fake: OrcaCli
+) -> None:
+    out = run(tmp_path, fake)
+    gnu = orca_cli._gnu_timeout()
+    if not gnu:
+        pytest.skip("GNU timeout not installed")
+    assert out.command[out.command.index(gnu) + 1] == "--foreground"
+
+
 def test_stale_outputs_of_an_earlier_run_do_not_count(
     tmp_path: Path, fake: OrcaCli, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -380,10 +429,10 @@ def test_slice_project_times_out_with_gnu_timeout(
     tmp_path: Path, fake: OrcaCli, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("FAKE_MODE", "sleep")
-    started = __import__("time").monotonic()
+    started = time.monotonic()
     out = run(tmp_path, fake, timeout_s=1)
     assert out.failure is not None and out.failure.kind == "timeout"
-    assert __import__("time").monotonic() - started < 20
+    assert time.monotonic() - started < 20
 
 
 def test_slice_project_times_out_without_gnu_timeout(
@@ -394,6 +443,97 @@ def test_slice_project_times_out_without_gnu_timeout(
     out = run(tmp_path, fake, timeout_s=1)
     assert out.failure is not None and out.failure.kind == "timeout"
     assert out.command[0] == str(fake.path)
+
+
+def test_slice_project_gnu_timeout_kills_a_child_that_ignores_sigterm(
+    tmp_path: Path, fake: OrcaCli, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if not shutil.which("timeout"):
+        pytest.skip("GNU timeout not installed")
+    monkeypatch.setenv("FAKE_MODE", "ignoreterm")
+    monkeypatch.setattr(orca_cli, "TIMEOUT_GRACE_S", 1)
+    started = time.monotonic()
+    out = run(tmp_path, fake, timeout_s=1)
+    assert out.failure is not None and out.failure.kind == "timeout"
+    assert time.monotonic() - started < 20
+
+
+def test_a_slicer_left_behind_by_a_wrapper_script_is_killed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A wrapper that does not `exec` the slicer exits first; the slicer must not outlive the call."""
+    monkeypatch.setenv("THREED_HEAVY_HELD", "1")
+    monkeypatch.setenv("FAKE_MODE", "sleep")
+    pidfile = tmp_path / "pid"
+    monkeypatch.setenv("FAKE_PIDFILE", str(pidfile))
+    real = _exe(tmp_path / "real-orca", FAKE)
+    wrapper = _exe(
+        tmp_path / "wrapper",
+        f'#!/bin/sh\n"{real}" "$@" &\nwhile [ ! -s "{pidfile}" ]; do sleep 0.1; done\nexit 3\n',
+    )
+    run(tmp_path, OrcaCli(wrapper, "test"), timeout_s=60)
+    assert _wait_gone(int(pidfile.read_text()))
+
+
+def _gone(pid: int) -> bool:
+    try:
+        state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+    except (FileNotFoundError, ProcessLookupError):
+        return True
+    return state == "Z"  # a zombie only waits for its reaper
+
+
+def _wait_gone(pid: int) -> bool:
+    for _ in range(100):
+        if _gone(pid):
+            return True
+        time.sleep(0.05)
+    return False
+
+
+@pytest.mark.parametrize("behind_flock", [False, True])
+def test_an_interrupted_slice_kills_the_whole_process_group(
+    tmp_path: Path,
+    fake: OrcaCli,
+    monkeypatch: pytest.MonkeyPatch,
+    behind_flock: bool,
+) -> None:
+    if behind_flock:
+        flock = shutil.which("flock")
+        if not flock:
+            pytest.skip("flock not installed")
+        # as under the heavy lock: flock is no session leader, so GNU timeout moves to a group of its own
+        monkeypatch.setattr(
+            "cli.heavy.heavy_prefix", lambda: [flock, str(tmp_path / "lock")]
+        )
+        monkeypatch.delenv("THREED_HEAVY_HELD")
+    monkeypatch.setenv("FAKE_MODE", "sleep")
+    pidfile = tmp_path / "pid"
+    monkeypatch.setenv("FAKE_PIDFILE", str(pidfile))
+
+    real_wait = subprocess.Popen.wait
+    interrupted: list[bool] = []
+
+    def interrupt(self: subprocess.Popen[Any], timeout: float | None = None) -> int:
+        argv = [str(a) for a in self.args] if isinstance(self.args, list) else []
+        if interrupted or str(fake.path) not in argv:  # not the slicer, or the cleanup's wait
+            return real_wait(self, timeout)
+        for _ in range(100):
+            if pidfile.exists() and pidfile.read_text():
+                break
+            time.sleep(0.05)
+        interrupted.append(True)
+        raise KeyboardInterrupt
+
+    with monkeypatch.context() as m:
+        m.setattr(subprocess.Popen, "wait", interrupt)
+        with pytest.raises(KeyboardInterrupt):
+            run(tmp_path, fake, timeout_s=60)
+    assert pidfile.exists(), "the fake slicer never started"
+    pid = int(pidfile.read_text())
+    if not _wait_gone(pid):
+        os.kill(pid, signal.SIGKILL)
+        pytest.fail("the slicer outlived the interrupted slice_project call")
 
 
 def test_slice_project_without_a_cli_names_the_install_path(
@@ -567,6 +707,46 @@ def test_reference_settings_hands_the_cli_flattened_presets(
         argv[argv.index("--load-filaments") + 1].count(";") == 1
     )  # two filament files
     assert argv[argv.index("--debug") + 1] == "1"
+
+
+def test_reference_settings_keeps_presets_that_differ_after_the_last_dot(
+    tmp_path: Path, vendors: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("THREED_HEAVY_HELD", "1")
+    for nozzle in ("0.4", "0.6"):
+        write_json(
+            vendors / f"Snapmaker/filament/PLA @U1 ({nozzle} nozzle).json",
+            {"name": f"PLA @U1 ({nozzle} nozzle)", "filament_type": ["PLA"]},
+        )
+    cli = OrcaCli(_exe(tmp_path / "ref-orca", REF_FAKE), "test")
+    cfg = orca_cli.reference_project_settings(
+        cli,
+        SystemPresets(vendors),
+        vendor="Snapmaker",
+        machine="Snapmaker U1",
+        process="0.20mm Standard",
+        filaments=["PLA @U1 (0.4 nozzle)", "PLA @U1 (0.6 nozzle)"],
+        bed_centre=(135.0, 135.0),
+    )
+    assert "PLA @U1 (0.4 nozzle)" in cfg and "PLA @U1 (0.6 nozzle)" in cfg
+
+
+def test_reference_settings_names_a_corrupt_vendor_preset(
+    tmp_path: Path, vendors: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("THREED_HEAVY_HELD", "1")
+    (vendors / "Snapmaker/process/fdm_u1.json").write_text("{truncated")
+    cli = OrcaCli(_exe(tmp_path / "ref-orca", REF_FAKE), "test")
+    with pytest.raises(orca_cli.PresetFileError, match="fdm_u1.json"):
+        orca_cli.reference_project_settings(
+            cli,
+            SystemPresets(vendors),
+            vendor="Snapmaker",
+            machine="Snapmaker U1",
+            process="0.20mm Standard",
+            filaments=["PLA"],
+            bed_centre=(135.0, 135.0),
+        )
 
 
 def test_reference_settings_names_the_missing_preset(
