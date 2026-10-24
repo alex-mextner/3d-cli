@@ -181,3 +181,129 @@ def test_the_api_serves_the_status_with_its_age_and_404s_unknown_or_never_run(
     assert 29.0 <= body["age_s"] <= 40.0
     assert unknown.status_code == 404 and "unknown printer" in unknown.json()["detail"]
     assert anonymous.status_code == 401
+
+
+LIVENESS_KEYS = (
+    "last_poll_ok",
+    "unreachable_since",
+    "reachable",
+    "last_frame_ts",
+    "supervising",
+    "job",
+    "interval_s",
+)
+
+
+def test_the_liveness_keys_are_written_with_what_the_cycle_passes(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "vision" / "k1se.json"
+    status = VisionStatus("k1se", path, started=50.0)
+
+    doc = status.update(
+        state="printing",
+        filename="a.gcode",
+        score=score(),
+        events=[],
+        trend=0.1,
+        camera_error=None,
+        now=200.0,
+        last_poll_ok=199.9,
+        unreachable_since=None,
+        reachable=True,
+        last_frame_ts=199.5,
+        supervising=True,
+        job={"file": "a.gcode", "started": 120.0},
+        interval_s=10.0,
+    )
+
+    assert (doc["last_poll_ok"], doc["unreachable_since"], doc["reachable"]) == (
+        199.9,
+        None,
+        True,
+    )
+    assert (doc["last_frame_ts"], doc["supervising"], doc["interval_s"]) == (
+        199.5,
+        True,
+        10.0,
+    )
+    assert (
+        doc["job"] == {"file": "a.gcode", "started": 120.0}
+        and doc["schema"] == SCHEMA == 1
+    )
+    assert read_status("k1se", path) == doc
+
+
+def test_an_unreachable_printer_still_gets_a_complete_document(tmp_path: Path) -> None:
+    status = VisionStatus("k1se", tmp_path / "k1se.json", started=50.0)
+
+    doc = status.update(
+        state=None,
+        filename=None,
+        score=None,
+        events=[],
+        trend=0.0,
+        camera_error=None,
+        now=300.0,
+        last_poll_ok=250.0,
+        unreachable_since=260.0,
+        reachable=False,
+        last_frame_ts=249.0,
+        supervising=False,
+        job=None,
+        interval_s=10.0,
+    )
+
+    assert (doc["reachable"], doc["unreachable_since"], doc["last_poll_ok"]) == (
+        False,
+        260.0,
+        250.0,
+    )
+    assert (doc["supervising"], doc["job"], doc["state"]) == (False, None, None)
+    assert (
+        doc["ts"] == 300.0
+    )  # written this cycle: the file's age says the loop is alive
+
+
+def test_old_style_calls_get_neutral_liveness_defaults_and_bad_numbers_never_reach_the_json(
+    tmp_path: Path,
+) -> None:
+    status = VisionStatus("k1se", tmp_path / "k1se.json")
+
+    plain = status.update(
+        state="printing",
+        filename="f",
+        score=score(),
+        events=[],
+        trend=0.0,
+        camera_error=None,
+        now=1.0,
+    )
+    assert all(key in plain for key in LIVENESS_KEYS)
+    assert (
+        plain["last_poll_ok"],
+        plain["last_frame_ts"],
+        plain["job"],
+        plain["supervising"],
+    ) == (None, None, None, False)
+
+    odd = status.update(
+        state="printing",
+        filename="f",
+        score=None,
+        events=[],
+        trend=0.0,
+        camera_error=None,
+        now=2.0,
+        last_poll_ok=float("nan"),
+        last_frame_ts=float("inf"),
+        job={"file": "f", "started": float("nan")},
+        interval_s=float("nan"),
+    )
+    assert (odd["last_poll_ok"], odd["last_frame_ts"], odd["interval_s"]) == (
+        None,
+        None,
+        None,
+    )
+    assert odd["job"] == {"file": "f", "started": None}
+    json.loads((tmp_path / "k1se.json").read_text(encoding="utf-8"))  # strict JSON

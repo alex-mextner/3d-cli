@@ -86,6 +86,14 @@ def _isolate_git_repo_env(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(name, raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _isolate_state_home(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory) -> None:
+    """`3d printer watch` and the doctor read and WRITE `~/.local/state/3d-cli/` (heartbeats, the delivery ledger,
+    the `NAME.intentional-off` marker that the first answer of a printer clears). On 2026-10-24 a stream test that
+    connected to a fake named like a real printer deleted the owner's real marker. Every test gets its own empty
+    state home; a test that wants a specific one still sets XDG_STATE_HOME itself (the later setenv wins)."""
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path_factory.mktemp("xdg-state")))
+
 
 @pytest.hookimpl(optionalhook=True)
 def pytest_xdist_auto_num_workers() -> int:

@@ -65,8 +65,21 @@ class VisionStatus:
         trend: float | None,
         camera_error: str | None,
         now: float | None = None,
+        last_poll_ok: float | None = None,
+        unreachable_since: float | None = None,
+        reachable: bool = True,
+        last_frame_ts: float | None = None,
+        supervising: bool = False,
+        job: dict[str, Any] | None = None,
+        interval_s: float | None = None,
     ) -> dict[str, Any]:
-        """Record one cycle and write the file; `score` is the frame's FrameScore (None: no frame)."""
+        """Record one cycle and write the file; `score` is the frame's FrameScore (None: no frame).
+
+        The liveness keys (`3d printer supervise status` / doctor read them): `last_poll_ok` (epoch of the
+        last answered status poll), `unreachable_since` (epoch of the first unanswered poll of the current
+        outage, None while it answers), `reachable`, `last_frame_ts` (epoch of the last grabbed camera
+        frame), `supervising` (printing and the camera loop is fetching frames), `job` (`{"file", "started"}`
+        while a job prints or is paused, else None) and `interval_s` (the loop's poll interval)."""
         now = time.time() if now is None else now
         if score is not None:
             self.frames += 1
@@ -101,6 +114,15 @@ class VisionStatus:
             },
             "last_event": self.last_event,
             "camera_error": camera_error,
+            "last_poll_ok": _epoch(last_poll_ok),
+            "unreachable_since": _epoch(unreachable_since),
+            "reachable": bool(reachable),
+            "last_frame_ts": _epoch(last_frame_ts),
+            "supervising": bool(supervising),
+            "job": None
+            if job is None
+            else {"file": job.get("file"), "started": _epoch(job.get("started"))},
+            "interval_s": _num(interval_s),
         }
         self._write(doc)
         return doc
@@ -122,3 +144,10 @@ def _num(value: Any) -> float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
     return round(float(value), 4) if math.isfinite(value) else None
+
+
+def _epoch(value: Any) -> float | None:
+    """A finite epoch in seconds (milliseconds kept), else None."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return round(float(value), 3) if math.isfinite(value) else None

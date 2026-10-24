@@ -22,6 +22,7 @@ import pytest
 from errors import InvalidArgument, UsageError
 from printer_fakes import FakeCreality, FakeMoonrakerWS, k1_state, u1_ws_status, write_devices
 from printer_ops import devices, watch_run
+from printer_ops.base import IDLE, PRINTING
 from printer_ops.watch import (
     CRITICAL,
     INFO,
@@ -53,12 +54,19 @@ def started(state: str = "printing", **over: Any) -> tuple[MoonrakerDetector, li
     return d, d.on_status(u1_ws_status(state, **over), 1000.0)
 
 
+@pytest.fixture(autouse=True)
+def _own_state_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A stream clears the printer's intentional-off marker at its first answer: never the owner's real one."""
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state-home"))
+
+
 # ---- Moonraker detector -----------------------------------------------------------------------
 
-def test_snapshot_of_a_healthy_print_is_one_info_event() -> None:
+def test_snapshot_of_a_healthy_print_is_followed_by_one_adopted_print_started() -> None:
     _, ev = started()
-    assert kinds(ev) == [("snapshot", INFO)]
+    assert kinds(ev) == [("snapshot", INFO), ("print_started", INFO)]
     assert "printing" in ev[0].text and "layer 828/1193" in ev[0].text
+    assert ev[1].data["adopted"] is True and ev[1].data["job_started"] is None
 
 
 def test_noodle_pause_reports_exception_code_2_and_the_pause_with_its_reason() -> None:
@@ -378,7 +386,7 @@ def test_connection_events() -> None:
 
 def test_first_connect_after_unreachable_start_is_not_called_reconnected() -> None:
     d = MoonrakerDetector("u1")
-    assert "cannot connect" in d.on_connection(False, "refused", 1000.0)[0].text
+    assert "waiting for the printer: refused" in d.on_connection(False, "refused", 1000.0)[0].text
     assert "connected (was unreachable at start)" in d.on_connection(True, "", 1010.0)[0].text
 
 
@@ -401,6 +409,119 @@ def test_subscription_covers_sensors_heaters_and_skips_macros() -> None:
     assert not any(k.startswith("gcode_macro") for k in sub)
 
 
+# ---- print_started: every start route is one state edge (#641) ---------------------------------
+
+def test_print_started_on_the_idle_to_printing_edge_with_the_file_known_at_once() -> None:
+    """Touchscreen, Fluidd/Mainsail, a macro: the detector only sees standby -> printing."""
+    d, _ = started("standby")
+    ev = d.on_status({"print_stats": {"state": "printing"}}, 1100.0)
+    assert kinds(ev) == [("print_started", INFO)]
+    e = ev[0]
+    assert e.text.startswith("u1: started printing")
+    assert e.data["from"] == IDLE and e.data["to"] == PRINTING
+    assert e.data["job_started"] == 1100.0 and e.data["adopted"] is False
+    assert e.data["file"] == "part-0123456789abcdef.gcode"
+    assert d.job_info() == {"file": "part-0123456789abcdef.gcode", "started": 1100.0, "adopted": False}
+
+
+@pytest.mark.parametrize("end", ["complete", "cancelled", "error"])
+def test_reprint_of_the_same_file_is_a_new_job_with_its_own_key(end: str) -> None:
+    d, _ = started("standby")
+    first = d.on_status({"print_stats": {"state": "printing"}}, 1100.0)
+    d.on_status({"print_stats": {"state": end}}, 1200.0)
+    second = d.on_status({"print_stats": {"state": "printing"}}, 1300.0)
+    assert kinds(first) == kinds(second) == [("print_started", INFO)]
+    assert first[0].data["file"] == second[0].data["file"] == "part-0123456789abcdef.gcode"
+    assert (first[0].data["job_started"], second[0].data["job_started"]) == (1100.0, 1300.0)
+    assert first[0].key != second[0].key and "part-0123456789abcdef.gcode" in second[0].key and "1300" in second[0].key
+    assert d.job_info() == {"file": "part-0123456789abcdef.gcode", "started": 1300.0, "adopted": False}
+
+
+def test_resume_after_a_pause_is_not_a_print_start() -> None:
+    d, _ = started()
+    d.on_status({"print_stats": {"state": "paused"}}, 1010.0)
+    ev = d.on_status({"print_stats": {"state": "printing"}}, 1020.0)
+    assert kinds(ev) == [("state", INFO)] and ev[0].text.startswith("u1: resumed")
+
+
+def test_print_started_is_emitted_once_when_the_file_name_arrives_a_push_later() -> None:
+    """Orca / Creality Print upload: print_stats.filename is still empty on the push that says printing."""
+    d = MoonrakerDetector("u1")
+    d.on_status(u1_ws_status("standby", print_stats={"filename": ""}), 1000.0)
+    ev = d.on_status({"print_stats": {"state": "printing"}}, 1100.0)
+    assert kinds(ev) == [("print_started", INFO)] and ev[0].data["file"] is None
+    assert d.job_info() == {"file": None, "started": 1100.0, "adopted": False}
+    assert d.on_status({"print_stats": {"filename": "orca-upload.gcode"}}, 1101.0) == []   # no second event
+    assert d.on_status({"virtual_sdcard": {"progress": 0.01, "file_position": 10}}, 1102.0) == []
+    assert d.job_info() == {"file": "orca-upload.gcode", "started": 1100.0, "adopted": False}
+
+
+def test_adopted_print_started_for_a_job_already_running_keeps_the_start_phase_rules() -> None:
+    """The watcher starts mid-job: one `print_started` (adopted), `_job_started` stays None, and the
+    start-phase hold still applies to a job at <= 1 % progress (K1 START_PRINT zeroing the bed)."""
+    d = MoonrakerDetector("u1", WatchLimits(confirm_s=10, start_confirm_s=90))
+    ev = d.on_status(u1_ws_status("printing", virtual_sdcard={"progress": 0.005, "file_position": 5}), 1000.0)
+    assert kinds(ev) == [("snapshot", INFO), ("print_started", INFO)]
+    started_ev = ev[1]
+    assert started_ev.data["adopted"] is True and started_ev.data["job_started"] is None
+    assert started_ev.text.startswith("u1: printing (adopted: the watcher was not running at its start)")
+    assert d._job_started is None
+    assert d.job_info() == {"file": "part-0123456789abcdef.gcode", "started": None, "adopted": True}
+    assert d.on_status({"heater_bed": {"target": 0.0}}, 1010.0) == []
+    assert d.tick(1030.0) == []                                  # still inside the 90 s start hold
+    assert kinds(d.tick(1101.0)) == [("bed_off", WARNING)]
+
+
+def test_adopted_job_that_ends_and_restarts_is_announced_as_a_real_start() -> None:
+    d, _ = started()
+    d.on_status({"print_stats": {"state": "complete"}}, 1100.0)
+    ev = d.on_status({"print_stats": {"state": "printing"}}, 1200.0)
+    assert ev[0].data["adopted"] is False and ev[0].data["job_started"] == 1200.0
+    assert d._job_started == 1200.0
+
+
+def test_no_job_means_no_job_in_the_heartbeat_info() -> None:
+    d, _ = started("standby")
+    assert d.job_info() is None
+    d.on_status({"print_stats": {"state": "printing"}}, 1100.0)
+    d.on_status({"print_stats": {"state": "complete"}}, 1200.0)
+    assert d.job_info() is None
+
+
+def test_creality_print_started_from_the_touchscreen_push_sequence() -> None:
+    """K1 stock: idle, a busy push (deviceState 1, state still 0), then state 1 with the file."""
+    d = CrealityDetector("k1se")
+    assert kinds(d.on_push(k1_state(0, 0), 1000.0)) == [("snapshot", INFO)]
+    assert d.on_push({"deviceState": 1}, 1010.0) == []             # busy: neither start nor alarm
+    ev = d.on_push({"state": 1, "printFileName": "/usr/data/printer_data/gcodes/k1_ovl1_v4.gcode",
+                    "printProgress": 0}, 1020.0)
+    assert kinds(ev) == [("print_started", INFO)] and ev[0].text.startswith("k1se: started printing")
+    assert ev[0].data["file"] == "k1_ovl1_v4.gcode" and ev[0].data["job_started"] == 1020.0
+    assert ev[0].data["adopted"] is False
+    assert d.on_push({"printProgress": 1, "layer": 1}, 1030.0) == []
+    assert d.job_info() == {"file": "k1_ovl1_v4.gcode", "started": 1020.0, "adopted": False}
+
+
+def test_creality_reprint_and_late_file_name() -> None:
+    d = CrealityDetector("k1se")
+    d.on_push(k1_state(2, 0, "part.gcode"), 1000.0)               # the last print is COMPLETE
+    ev = d.on_push({"state": 1, "deviceState": 1, "printFileName": "", "printProgress": 0}, 1100.0)
+    assert kinds(ev) == [("print_started", INFO)] and ev[0].data["file"] is None
+    assert d.on_push({"printFileName": "/usr/data/printer_data/gcodes/part.gcode"}, 1101.0) == []
+    assert d.job_info() == {"file": "part.gcode", "started": 1100.0, "adopted": False}
+    d.on_push({"state": 2, "deviceState": 0}, 1200.0)
+    again = d.on_push({"state": 1, "deviceState": 1, "printProgress": 0}, 1300.0)   # same file, second print
+    assert kinds(again) == [("print_started", INFO)] and again[0].data["file"] == "part.gcode"
+    assert again[0].key != ev[0].key
+
+
+def test_creality_adopted_print_started_at_watcher_start() -> None:
+    d = CrealityDetector("k1se")
+    ev = d.on_push(k1(), 1000.0)
+    assert kinds(ev) == [("snapshot", INFO), ("print_started", INFO)]
+    assert ev[1].data["adopted"] is True and d._job_started is None
+
+
 # ---- Creality detector -------------------------------------------------------------------------
 
 def k1(**over: Any) -> dict[str, Any]:
@@ -413,7 +534,7 @@ def k1(**over: Any) -> dict[str, Any]:
 
 def test_k1_pause_error_and_homing() -> None:
     d = CrealityDetector("k1se")
-    assert kinds(d.on_push(k1(), 1000.0)) == [("snapshot", INFO)]
+    assert kinds(d.on_push(k1(), 1000.0)) == [("snapshot", INFO), ("print_started", INFO)]
     ev = d.on_push({"state": 5, "deviceState": 0}, 1010.0)
     assert kinds(ev) == [("state", WARNING)] and "layer 40/120" in ev[0].text
     assert d.on_push({"autohome": "X:0 Y:0 Z:0"}, 1020.0) == []
@@ -515,7 +636,7 @@ def test_paused_at_end_progress_end_macro_is_silent() -> None:
 
 def test_watch_started_during_the_end_macro_reports_no_anomaly() -> None:
     _, ev = started(virtual_sdcard={"progress": 1.0}, toolhead={"homed_axes": ""}, heater_bed={"target": 0.0})
-    assert kinds(ev) == [("snapshot", INFO)]
+    assert kinds(ev) == [("snapshot", INFO), ("print_started", INFO)]
 
 
 def test_homing_lost_re_homed_within_the_hold_is_dropped() -> None:
@@ -536,7 +657,7 @@ def test_held_bed_off_dropped_when_a_full_status_reset_loses_the_heater() -> Non
 
 def test_homing_lost_found_at_watch_start_while_printing_is_held() -> None:
     d, ev = started(toolhead={"homed_axes": ""})  # e.g. a start macro re-homing
-    assert kinds(ev) == [("snapshot", INFO)]
+    assert kinds(ev) == [("snapshot", INFO), ("print_started", INFO)]
     d.on_status({"toolhead": {"homed_axes": "xyz"}}, 1005.0)
     assert d.tick(1030.0) == []
 
@@ -937,37 +1058,16 @@ def test_help() -> None:
     assert watch_run.run(["--help"]) == 0
 
 
-def test_install_service_writes_unit_and_env(env: Path, monkeypatch: pytest.MonkeyPatch,
-                                             capsys: pytest.CaptureFixture[str]) -> None:
-    p = env / "3d-cli" / "printer-devices.yaml"
-    p.parent.mkdir(parents=True)
-    p.write_text("u1: {adapter: moonraker, host: h}\nk1se: {adapter: creality-stock, host: h}\n")
-    monkeypatch.setattr(watch_run.shutil, "which", lambda name: "/opt/bin/3d" if name == "3d" else None)
-    assert watch_run.run(["u1", "k1se", "--install-service", "--steer", "01a12cd6"]) == 0
-    unit = (env / "systemd" / "user" / "3d-printer-watch@.service").read_text()
-    assert "ExecStart=/opt/bin/3d printer watch %i $WATCH_ARGS" in unit and "Restart=always" in unit
-    assert f"EnvironmentFile=-{env / '3d-cli' / 'watch'}/%i.env" in unit
-    assert f"Environment=XDG_CONFIG_HOME={env}" in unit
-    assert (env / "3d-cli" / "watch" / "u1.env").read_text().splitlines()[-1] == "WATCH_ARGS=--steer 01a12cd6"
-    assert (env / "3d-cli" / "watch" / "k1se.env").is_file()
-    assert "systemctl --user enable --now 3d-printer-watch@u1" in capsys.readouterr().out
-
-
-def test_install_service_refuses_args_with_spaces(env: Path) -> None:
+@pytest.mark.parametrize("extra", [[], ["--steer", "01a12cd6"], ["--dry-run"]])
+def test_install_service_is_gone_and_points_at_supervise_install(env: Path, extra: list[str]) -> None:
+    """One writer of the units only (#639): `3d printer supervise install`. The old `--install-service` wrote the
+    same `3d-printer-watch@.service` with a different definition and would undo the shipped one."""
     p = env / "3d-cli" / "printer-devices.yaml"
     p.parent.mkdir(parents=True)
     p.write_text("u1: {adapter: moonraker, host: h}\n")
-    with pytest.raises(InvalidArgument):
-        watch_run.run(["u1", "--install-service", "--exec", "logger -t x"])
-
-
-@pytest.mark.parametrize("flag", [["--duration", "60"], ["--dry-run"], ["--heartbeat", "x.json"]])
-def test_install_service_refuses_one_shot_flags(env: Path, flag: list[str]) -> None:
-    p = env / "3d-cli" / "printer-devices.yaml"
-    p.parent.mkdir(parents=True)
-    p.write_text("u1: {adapter: moonraker, host: h}\n")
-    with pytest.raises(UsageError):
-        watch_run.run(["u1", "--install-service", *flag])
+    with pytest.raises(UsageError, match="--install-service. is gone") as exc:
+        watch_run.run(["u1", "--install-service", *extra])
+    assert any("3d printer supervise install" in r for r in exc.value.remediation)
     assert not (env / "systemd").exists()
 
 
@@ -1008,7 +1108,8 @@ def test_moonraker_stream_end_to_end_is_read_only(fake_ws: FakeMoonrakerWS, tmp_
     _wait_for(lambda: any(e.kind == "bed_off" for e in got))
     stop.set()
     st.join(5)
-    assert [e.kind for e in got] == ["snapshot", "exception", "state", "gcode_error", "homing_lost", "bed_off"]
+    assert [e.kind for e in got] == ["snapshot", "print_started", "exception", "state", "gcode_error", "homing_lost",
+                                     "bed_off"]
     assert fake_ws.methods == ["server.info", "printer.objects.list", "printer.objects.subscribe",
                                "server.files.metadata"]
     assert "filament_motion_sensor e0_filament" in fake_ws.subscribed[0]
@@ -1076,7 +1177,7 @@ def test_moonraker_stream_reads_body_bounds_once_per_file(tmp_path: Path) -> Non
     mr = st.mr  # type: ignore[attr-defined]
     assert mr.frame.progress > 0.999                              # body progress, not 94.6 %
     assert mr._held == {}                                         # END_PRINT bed-off dropped
-    assert [e.kind for e in got] == ["snapshot"]
+    assert [e.kind for e in got] == ["snapshot", "print_started"]
 
 
 def test_metadata_reply_for_a_job_that_ended_meanwhile_is_discarded(tmp_path: Path) -> None:
@@ -1105,7 +1206,7 @@ def test_moonraker_stream_survives_a_hung_metadata_endpoint(tmp_path: Path, monk
         got = _run_stream(fake, tmp_path, lambda: False)  # runs ~5 s (the _wait_for timeout)
     kinds_seen = [e.kind for e in got]
     assert "connection" not in kinds_seen                         # no reconnect for optional data
-    assert kinds_seen == ["snapshot", "state"]
+    assert kinds_seen == ["snapshot", "print_started", "state"]
     assert fake.methods.count("server.files.metadata") == 1       # retried no sooner than in 60 s
     assert fake.methods.count("server.info") == 1
 
@@ -1125,7 +1226,7 @@ def test_stream_reports_unreachable_printer(tmp_path: Path) -> None:
     _wait_for(lambda: bool(got))
     stop.set()
     st.join(5)
-    assert got[0].kind == "connection" and "cannot connect" in got[0].text
+    assert got[0].kind == "connection" and got[0].severity == INFO and "waiting for the printer" in got[0].text
 
 
 def test_creality_stream_answers_heartbeat_only(tmp_path: Path) -> None:

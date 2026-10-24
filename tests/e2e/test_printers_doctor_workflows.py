@@ -15,7 +15,7 @@ from printer_fakes import FakeMoonraker, free_port
 
 from .workflow_helper import isolated_env, run_cli
 
-SKIP_HOST_DEPENDENT = "watch-units-dry-run,camera-snapshot,camera-config,alert-subscribers,alert-fallback-agent"  # systemd / cameras of the host running the test
+SKIP_HOST_DEPENDENT = "watch-units-dry-run,camera-snapshot,camera-config,alert-subscribers,alert-fallback-agent,printer-supervision"  # systemd / cameras of the host running the test
 
 
 class Lab:

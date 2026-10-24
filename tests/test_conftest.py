@@ -113,3 +113,13 @@ def test_tmp_path_is_created_under_the_session_temproot(tmp_path: Path, request:
         pytest.skip("an explicit --basetemp overrides the temproot")
     temproot = Path(os.environ["PYTEST_DEBUG_TEMPROOT"]).resolve()
     assert temproot in tmp_path.resolve().parents
+
+
+def test_every_test_gets_its_own_state_home_never_the_owners() -> None:
+    """2026-10-24: a watcher stream test deleted the owner's real `k1se.intentional-off`: the state dir of every
+    test is a fresh temp dir, not ~/.local/state."""
+    from cli.paths import state_dir
+
+    home_state = Path.home() / ".local" / "state"
+    assert state_dir().parent != home_state and home_state not in state_dir().parents
+    assert list(state_dir().parent.iterdir()) == []

@@ -7,9 +7,12 @@ from __future__ import annotations
 
 import json
 import os
-import socket
 import sys
+from collections.abc import Iterator
 from pathlib import Path
+
+import pytest
+from printer_fakes import FakeMoonrakerWS, u1_ws_status
 
 from .workflow_helper import agent_fakebin, agent_spawns, run_cli
 
@@ -117,39 +120,38 @@ def test_subscribe_help_and_usage_errors_are_explicit(tmp_path: Path) -> None:
     assert agent_help.stdout.count("3d-printer-agent-<hash>") == 1   # the socket isolation is documented
 
 
-def _unreachable_u1(tmp_path: Path) -> None:
-    """u1 on a closed local port: the watch's first reading is a `cannot connect` WARNING, which no
-    subscriber takes, so it goes to the temporary printer agent."""
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        port = s.getsockname()[1]
-    d = tmp_path / "xdg-config" / "3d-cli"
-    d.mkdir(parents=True, exist_ok=True)
-    (d / "printer-devices.yaml").write_text(f"u1:\n  adapter: moonraker\n  host: 127.0.0.1\n  port: {port}\n",
-                                            encoding="utf-8")
+@pytest.fixture()
+def paused_u1(tmp_path: Path) -> Iterator[None]:
+    """u1 = a loopback Moonraker whose job is paused: the watch's first reading is an `is PAUSED` WARNING,
+    which no subscriber takes, so it goes to the temporary printer agent. (An unreachable printer is no
+    warning any more: a switched-off printer is normal, #640.)"""
+    with FakeMoonrakerWS(status=u1_ws_status("paused")).serve() as fake:
+        d = tmp_path / "xdg-config" / "3d-cli"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "printer-devices.yaml").write_text(
+            f"u1:\n  adapter: moonraker\n  host: 127.0.0.1\n  port: {fake.port}\n", encoding="utf-8")
+        yield
 
 
-def test_watch_under_pytest_never_starts_a_real_printer_agent(tmp_path: Path) -> None:
+def test_watch_under_pytest_never_starts_a_real_printer_agent(tmp_path: Path, paused_u1: None) -> None:
     """#399: `3d printer watch` in a test started a real omp agent as 3d-printer-agent-u1 on the
     production tmux server. Now the agent refuses under pytest: no tmux/omp/systemd-run runs (the
     recording fakes first on PATH see nothing) and the refusal is logged; the watch carries on."""
-    _unreachable_u1(tmp_path)
     watch = run_cli(tmp_path, "printer", "watch", "u1", "--duration", "4", "--heartbeat", str(tmp_path / "hb.json"))
 
     assert watch.returncode == 0, watch.stderr[-2000:]
     events = [json.loads(x) for x in watch.stdout.splitlines() if x.strip().startswith("{")]
-    assert any(e["kind"] == "connection" and e["severity"] == "warning" for e in events), watch.stdout
+    assert any(e["kind"] == "state" and e["severity"] == "warning" for e in events), watch.stdout
     assert "printer-agent: u1: refusing to run the real tmux/omp for the temporary printer agent under a test" \
         in watch.stderr, watch.stderr[-2000:]
     assert agent_spawns(tmp_path) == []
     assert not (tmp_path / "xdg-state" / "3d-cli" / "printer-agents" / "u1").exists()
 
 
-def test_the_test_override_runs_the_agent_on_its_own_tmux_server(tmp_path: Path) -> None:
+def test_the_test_override_runs_the_agent_on_its_own_tmux_server(tmp_path: Path, paused_u1: None) -> None:
     """With THREED_TEST_REAL_PRINTER_AGENT=1 the spawn path runs — against the fake tmux/omp — and
     every tmux call goes to a server named after the tmp state dir, under the tmp TMUX_TMPDIR,
     never `-L 3d-printer-agent`. The fake tg-ctl reports the agent up once tmux created it."""
-    _unreachable_u1(tmp_path)
     agent_cwd = tmp_path / "xdg-state" / "3d-cli" / "printer-agents" / "u1"
     bindir = tmp_path / "tgbin"
     bindir.mkdir()
