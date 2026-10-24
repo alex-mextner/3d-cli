@@ -12,6 +12,9 @@ WHAT: streams a sliced G-code once (gcode_scan.py) and decides, from the extrusi
     "solid" layer, and a solid layer must match the pattern with zero tolerance. A layer with less evidence (the iris
     top and the lid rim: a 2 mm sliver whose every point is within the margin of another colour) is re-read at the
     small margin and may be off in <= 5 % of the layers; with < 1.0 mm even there it is reported, not judged.
+  - STRIPE CONTRAST: each mixed region's layer colours at the real layer heights, eye-blurred (stripe_contrast.py), worst
+    CIEDE2000 vs the period mean at the viewing distance: > max_stripe_de FAIL, > warn_stripe_de WARN. A pattern
+    with no equal neighbours and thin layers (GKGKWK) can still print as bold bands.
   - PAUSE: with a `pause` in the config exactly one M600, in the layer whose top Z is `pause.print_z`, before that
     layer extruded anything, the previous layer's top Z matching; without it no M600 at all.
   - TOOLS: the heads that used filament (the footer's `filament used [g]`) are exactly the configured heads, a prime
@@ -48,6 +51,8 @@ import numpy.typing as npt
 
 from errors import InputNotFound, InvalidArgument, ThreeDError, UsageError
 from gcode_scan import Layer, Scan, scan_gcode
+from printops.color import hex_from_linear, linear_rgb, parse_hex
+from stripe_contrast import layer_stripe_de
 
 CMD = "gcode-mix-gate"
 
@@ -64,6 +69,9 @@ MIN_EVIDENCE_MM = 1.0
 MAX_STRIPE_MM = (
     0.10  # one layer of a mixed region; 1 µm tolerance (G-code prints 0.100003)
 )
+MAX_STRIPE_DE = 3.0  # worst stripe dE00 of a mixed region at the viewing distance: above = FAIL
+WARN_STRIPE_DE = 2.0  # ... above = WARN
+VIEW_CM = 30.0  # viewing distance of the stripe check
 DEFAULT_MARGIN_MM = 0.9
 DEFAULT_BED_TOL_MM = 0.45
 SOLID_FRACTION_OFF = 0.05  # fringe layers allowed off the pattern of a thick volume
@@ -83,7 +91,7 @@ CAVITY_TEETH_FRACTION = 0.7  # outline moved by 0.7 x its X extent lands over so
 @dataclass(frozen=True)
 class Row:
     name: str
-    status: str  # PASS | FAIL | SKIP
+    status: str  # PASS | FAIL | WARN | SKIP
     detail: str
     key: str = ""  # stable id the teeth look rows up by (the display name may be reworded)
 
@@ -101,6 +109,9 @@ class Report:
 
     def skip(self, name: str, detail: str) -> None:
         self.rows.append(Row(name, "SKIP", detail))
+
+    def warn(self, name: str, detail: str, key: str = "") -> None:
+        self.rows.append(Row(name, "WARN", detail, key))
 
     @property
     def ok(self) -> bool:
@@ -140,6 +151,7 @@ class MixConfig:
     shift: tuple[float, float, float]
     settings: Mapping[str, str]
     parts_dir: str | None
+    colours: tuple[str, ...] = ()  # `#RRGGBB` per slot; empty = the G-code's `filament_colour`
 
     def referenced_tools(self) -> set[int]:
         tools: set[int] = set()
@@ -261,6 +273,17 @@ def parse_config(
     settings = data.get("expect_settings", {})
     if not isinstance(settings, dict):
         raise _bad("expect_settings", settings, ["{'wall_loops': '4', ...}"])
+    colours_raw = data.get("filament_colours")
+    if colours_raw is not None:
+        try:
+            if not isinstance(colours_raw, list) or not colours_raw:
+                raise ValueError
+            if any(parse_hex(c) is None for c in colours_raw):
+                raise ValueError
+        except ValueError as exc:
+            raise _bad(
+                "filament_colours", colours_raw, ["a list of '#RRGGBB', one per slot"]
+            ) from exc
     return MixConfig(
         parts=tuple(parts),
         default_tool=None if d_slot is None else d_slot - 1,
@@ -270,6 +293,7 @@ def parse_config(
         shift=(float(shift[0]), float(shift[1]), float(shift[2])),
         settings={str(k): str(v) for k, v in settings.items()},
         parts_dir=parts_dir,
+        colours=tuple(parse_hex(c) or "" for c in colours_raw or ()),
     )
 
 
@@ -474,6 +498,9 @@ class Limits:
     margin: float = DEFAULT_MARGIN_MM
     min_evidence_mm: float = MIN_EVIDENCE_MM
     max_stripe_mm: float = MAX_STRIPE_MM
+    max_stripe_de: float = MAX_STRIPE_DE
+    warn_stripe_de: float = WARN_STRIPE_DE
+    view_cm: float = VIEW_CM
 
 
 def _pattern_tool(exp: Sequence[int], layer: int, shift: int = 0) -> int:
@@ -503,6 +530,83 @@ def _stripe_height(
             run_h = max(run_h, cur_h)
         prev = (t, k)
     return run_h
+
+
+def _tool_colours(cfg: MixConfig, scan: Scan) -> list[str]:
+    """`#RRGGBB` per tool: the config's `filament_colours`, else the G-code's `filament_colour` (`;`-separated)."""
+    if cfg.colours:
+        return list(cfg.colours)
+    raw = scan.header.get("filament_colour", "")
+    # an unreadable entry keeps its slot (as "") so that the later colours do not shift to the wrong tool
+    return [parse_hex(v) or "" for v in raw.split(";")] if raw else []
+
+
+def _layer_colour(tools: set[int], colours: Sequence[str], default: int) -> str | None:
+    """Colour of a layer of a mix: the tools printing it (the default tool only when nothing else does), averaged in
+    linear light; None when a tool has no colour."""
+    use = (tools - {default}) or tools
+    if not use or any(t >= len(colours) or t < 0 or not colours[t] for t in use):
+        return None
+    lin = [linear_rgb(colours[t]) for t in sorted(use)]
+    r, g, b = (sum(v[i] for v in lin) / len(lin) for i in range(3))
+    return hex_from_linear((r, g, b))
+
+
+def _stripe_contrast_row(
+    report: Report,
+    part: Part,
+    layers: Mapping[int, set[int]],
+    scan: Scan,
+    colours: Sequence[str],
+    default: int,
+    limits: Limits,
+) -> None:
+    """Perceptual banding of a mixed region: the worst blurred-stripe dE00 over its runs of consecutive layers."""
+    name = f"colour volume {part.name}: stripe contrast dE00 <= {limits.max_stripe_de:g} at {limits.view_cm:g} cm"
+    if not colours:
+        report.skip(name, "no filament colours: add `filament_colours` to the config or `filament_colour` to the G-code")
+        return
+    runs: list[list[int]] = []
+    layer_colours: dict[int, str] = {}
+    for k in sorted(layers):
+        c = _layer_colour(layers[k], colours, default)
+        if c is None or not scan.layer_h[k]:
+            report.skip(name, f"layer {k} prints a tool without a filament colour ({len(colours)} colours known) or has no height")
+            return
+        layer_colours[k] = c
+        if runs and runs[-1][-1] == k - 1:
+            runs[-1].append(k)
+        else:
+            runs.append([k])
+    de: dict[int, float] = {}
+    for run in runs:
+        got = layer_stripe_de(
+            [layer_colours[k] for k in run],
+            [float(scan.layer_h[k] or 0.0) for k in run],
+            period_layers=max(2, len(part.mix)),
+            view_mm=limits.view_cm * 10.0,
+        )
+        de.update({k: d for k, d in zip(run, got, strict=True) if d is not None})
+    if not de:
+        report.skip(name, f"{len(layers)} layers, none with a full blur window (a region of consecutive layers taller than the period + blur is needed)")
+        return
+    worst_k = max(de, key=lambda k: de[k])
+    worst = de[worst_k]
+    fail = sorted(k for k, d in de.items() if d > limits.max_stripe_de)
+    warn = sorted(k for k, d in de.items() if limits.warn_stripe_de < d <= limits.max_stripe_de)
+    period = len(part.mix) * float(np.median([scan.layer_h[k] or 0.0 for k in layers]))
+    detail = (
+        f"worst {worst:.1f} at layer {worst_k} (z {float(scan.layer_z[worst_k] or 0.0):.2f}); {len(fail)} layers above "
+        f"{limits.max_stripe_de:g}, {len(warn)} above {limits.warn_stripe_de:g}; {len(de)} of {len(layers)} layers measured; "
+        f"pattern period {period:.2f} mm; vertical wall (a shallow surface widens the bands in plan: not modelled)"
+    )
+    key = f"stripe_de:{part.name}"
+    if fail:
+        report.add(name, False, detail + f"; first layers over the limit {fail[:6]}", key)
+    elif warn:
+        report.warn(name, detail, key)
+    else:
+        report.add(name, True, detail, key)
 
 
 def evaluate_regions(
@@ -541,6 +645,7 @@ def evaluate_regions(
         for pi, ts in o.inside.items():
             inside[pi][k] = ts
     dflt = -1 if cfg.default_tool is None else cfg.default_tool
+    tool_colours = _tool_colours(cfg, scan)
 
     seen: list[dict[int, set[int]]] = []
     low_margin: list[bool] = []  # read at the small margin (hairs, fringe), not the real thin-volume branch
@@ -618,6 +723,7 @@ def evaluate_regions(
             or not ts <= {_pattern_tool(exp, k, pattern_shift), dflt}
         ]
         ks = sorted(layers)
+        _stripe_contrast_row(report, part, layers, scan, tool_colours, dflt, limits)
         if part.accent is not None:
             _dither_rows(report, part, layers, ks, exp, zs, hs)
             continue
@@ -1248,12 +1354,17 @@ _VALUE_OPTS = (
     "--bed-tol",
     "--min-evidence",
     "--max-stripe",
+    "--max-stripe-de",
+    "--warn-stripe-de",
+    "--view-cm",
     "--teeth-volume",
 )
 _FLAGS = ("--mix-teeth", "--cavity-teeth", "--json")
 
 
-def _number(opts: dict[str, list[str]], flag: str, default: float) -> float:
+def _number(
+    opts: dict[str, list[str]], flag: str, default: float, unit: str = "mm"
+) -> float:
     if flag not in opts:
         return default
     try:
@@ -1262,7 +1373,7 @@ def _number(opts: dict[str, list[str]], flag: str, default: float) -> float:
         value = -1.0
     if not (math.isfinite(value) and value > 0):
         raise InvalidArgument(
-            flag, opts[flag][-1], ["a positive number of mm"], command=CMD
+            flag, opts[flag][-1], [f"a positive number of {unit}"], command=CMD
         )
     return value
 
@@ -1326,6 +1437,17 @@ def _run(argv: list[str]) -> int:
                 ["MIN:MAX in mm, e.g. 0.08:0.32"],
                 command=CMD,
             )
+    max_de = _number(opts, "--max-stripe-de", MAX_STRIPE_DE, "dE00")
+    warn_de = _number(
+        opts, "--warn-stripe-de", min(WARN_STRIPE_DE, max_de), "dE00"
+    )
+    if warn_de > max_de:
+        raise InvalidArgument(
+            "--warn-stripe-de",
+            opts["--warn-stripe-de"][-1],
+            [f"a number <= --max-stripe-de ({max_de:g})"],
+            command=CMD,
+        )
     cfg = load_config(Path(opts["--config"][-1]), default_slot=slot)
     options = GateOptions(
         parts_dir=Path(opts["--parts"][-1]) if "--parts" in opts else None,
@@ -1336,6 +1458,9 @@ def _run(argv: list[str]) -> int:
             margin=_number(opts, "--margin", DEFAULT_MARGIN_MM),
             min_evidence_mm=_number(opts, "--min-evidence", MIN_EVIDENCE_MM),
             max_stripe_mm=_number(opts, "--max-stripe", MAX_STRIPE_MM),
+            max_stripe_de=max_de,
+            warn_stripe_de=warn_de,
+            view_cm=_number(opts, "--view-cm", VIEW_CM, "cm"),
         ),
         bed_tol=_number(opts, "--bed-tol", DEFAULT_BED_TOL_MM),
         mix_teeth="--mix-teeth" in opts,

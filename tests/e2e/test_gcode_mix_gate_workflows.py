@@ -21,7 +21,7 @@ def test_gate_a_sliced_two_colour_plate_before_it_goes_to_the_printer(
 ) -> None:
     """A user sliced a plate whose right box alternates two filaments per layer. Before upload they gate
     the G-code against the part STLs and the config, see every volume pass, and keep the JSON report."""
-    plate, cfg, parts = _project(tmp_path, stripe_gcode())
+    plate, cfg, parts = _project(tmp_path, stripe_gcode(colours="#1B5E20;#080A0D;#E72F1D"))
 
     done = run_cli(
         tmp_path,
@@ -34,6 +34,7 @@ def test_gate_a_sliced_two_colour_plate_before_it_goes_to_the_printer(
     )
     assert done.returncode == 0, done.stderr
     assert "PASS  colour volume stripe: mix AB follows the pattern" in done.stdout
+    assert "PASS  colour volume stripe: stripe contrast dE00 <= 3 at 30 cm" in done.stdout
     assert "PASS  colour volume base: pure slot 3 (T2)" in done.stdout
     assert done.stdout.rstrip().splitlines()[-1] == "OVERALL PASS (not verified, no input: cavity)"
 

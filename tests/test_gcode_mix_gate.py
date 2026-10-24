@@ -485,3 +485,93 @@ def test_pause_before_the_first_layer_is_not_attributed_to_layer_zero(tmp_path: 
     g = tmp_path / "early.gcode"
     g.write_text("M600\n" + stripe_gcode(), encoding="ascii")
     assert scan_gcode(g).pauses[0].layer == -1
+
+
+# ---------------------------------------------------------------- perceptual stripe contrast
+
+G_K_R_W = ["#1B5E20", "#080A0D", "#E72F1D", "#FFFFFF"]  # slots 1..4: green, black, red, white
+
+
+def _stripe_de(
+    tmp_path: Path,
+    stls: Path,
+    pattern: str,
+    options: mg.GateOptions | None = None,
+    **gcode: Any,
+) -> mg.Row:
+    cfg: dict[str, Any] = {
+        "parts": [
+            {"name": "base", "assign": {"slot": 3}},
+            {"name": "stripe", "assign": {"mix": pattern, "mix_src": pattern}},
+        ],
+        "heads_slots": [1, 2, 3, 4],
+        "filament_colours": G_K_R_W,
+    }
+    cfg.update(gcode.pop("cfg", {}))
+    res = _gate(tmp_path, stls, stripe_gcode(pattern=pattern, **gcode), options, **cfg)
+    return _row(res, "colour volume stripe: stripe contrast")
+
+
+def _worst_de(row: mg.Row) -> float:
+    return float(row.detail.split("worst ")[1].split(" at")[0])
+
+
+def test_gkgkwk_fails_the_stripe_contrast_gate_although_no_layer_repeats(tmp_path: Path, stls: Path) -> None:
+    """The Chekhov iris: green/black/green/black/white/black passes the pattern and thickness gates, banding is the failure."""
+    row = _stripe_de(tmp_path, stls, "121242")
+    assert row.status == "FAIL", row.detail
+    assert _worst_de(row) > 20
+
+
+def test_gw_passes_the_stripe_contrast_gate(tmp_path: Path, stls: Path) -> None:
+    row = _stripe_de(tmp_path, stls, "14")
+    assert row.status == "PASS", row.detail
+    assert _worst_de(row) < 1
+
+
+def test_between_the_two_limits_is_a_warning_that_does_not_fail_the_gate(tmp_path: Path, stls: Path) -> None:
+    opt = mg.GateOptions(parts_dir=stls, limits=mg.Limits(max_stripe_de=100.0, warn_stripe_de=1.0))
+    row = _stripe_de(tmp_path, stls, "124", opt)
+    assert row.status == "WARN" and row.ok
+
+
+def test_max_stripe_de_option_moves_the_verdict(tmp_path: Path, stls: Path) -> None:
+    opt = mg.GateOptions(parts_dir=stls, limits=mg.Limits(max_stripe_de=40.0, warn_stripe_de=30.0))
+    assert _stripe_de(tmp_path, stls, "121242", opt).status == "PASS"
+
+
+def test_far_viewing_distance_hides_the_bands(tmp_path: Path, stls: Path) -> None:
+    opt = mg.GateOptions(parts_dir=stls, limits=mg.Limits(view_cm=100.0))
+    assert _stripe_de(tmp_path, stls, "121242", opt).status == "PASS"
+
+
+def test_colours_come_from_the_gcode_footer_when_the_config_has_none(tmp_path: Path, stls: Path) -> None:
+    row = _stripe_de(tmp_path, stls, "121242", colours=";".join(G_K_R_W), cfg={"filament_colours": None})
+    assert row.status == "FAIL"
+
+
+def test_without_any_filament_colour_the_stripe_check_is_a_named_skip(tmp_path: Path, stls: Path) -> None:
+    row = _stripe_de(tmp_path, stls, "121242", cfg={"filament_colours": None})
+    assert row.status == "SKIP" and "filament colour" in row.detail
+
+
+def test_a_tool_without_a_colour_is_a_skip_not_a_pass(tmp_path: Path, stls: Path) -> None:
+    row = _stripe_de(tmp_path, stls, "121242", cfg={"filament_colours": G_K_R_W[:3]})
+    assert row.status == "SKIP"
+
+
+def test_bad_filament_colours_are_a_structured_error() -> None:
+    with pytest.raises(InvalidArgument):
+        mg.parse_config({"filament_colours": ["green"]})
+
+
+def test_warn_limit_above_the_fail_limit_is_refused(capsys: pytest.CaptureFixture[str]) -> None:
+    assert mg.main(["x.gcode", "--config", "x.json", "--max-stripe-de", "3", "--warn-stripe-de", "5"]) == 2
+    assert "--warn-stripe-de" in capsys.readouterr().err
+
+
+def test_an_unreadable_gcode_colour_keeps_its_slot_so_later_tools_do_not_shift(tmp_path: Path, stls: Path) -> None:
+    """`#1B5E20;bogus;#E72F1D;#FFFFFF`: T1 has no colour, T3 stays white. The pattern uses T1, so the check is a SKIP,
+    not a verdict computed on the wrong colours."""
+    row = _stripe_de(tmp_path, stls, "121242", colours="#1B5E20;bogus;#E72F1D;#FFFFFF", cfg={"filament_colours": None})
+    assert row.status == "SKIP"
