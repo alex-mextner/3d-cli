@@ -12,6 +12,7 @@ INVARIANTS: a model with a single part has no legend (height 0); parts are liste
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any, NamedTuple
 
 from dimension_model import from_hex
@@ -33,13 +34,20 @@ class LegendEntry(NamedTuple):
     text: str
     color: str | None  # swatch colour; None draws no swatch (the "+N more" line)
     width: float  # px, swatch + text
+    hatched: bool = False  # diagonal hatch over the swatch (a cut face)
 
 
 def legend_text(part: PartInfo) -> str:
-    """A part's legend entry: its name, plus its role when it is not a printed part."""
-    if part.role == "printed":
-        return part.name
-    return f"{part.name} ({part.role.replace('_', '-')})"
+    """A part's legend entry: its name, plus its role when it is not a printed part.
+
+    A part drawn in a palette colour although its file gave another is marked, so a name like
+    "#1A1A1A" never sits beside a swatch of a different colour unexplained.
+    """
+    if part.role != "printed":
+        return f"{part.name} ({part.role.replace('_', '-')})"
+    if part.authored and part.color != part.authored:
+        return f"{part.name} (recoloured)"
+    return part.name
 
 
 def _text_width(font: Any, text: str) -> float:
@@ -48,29 +56,40 @@ def _text_width(font: Any, text: str) -> float:
 
 
 def layout_legend(
-    model: Model, font: Any, width: int, scale: float
+    model: Model,
+    font: Any,
+    width: int,
+    scale: float,
+    extra: Sequence[tuple[str, str, bool]] = (),
 ) -> tuple[list[list[LegendEntry]], int]:
-    """Legend rows and the strip height in px; no rows (height 0) for a single part."""
-    if len(model.parts) < 2:
+    """Legend rows and the strip height in px; none (height 0) for a single part with no `extra`.
+
+    `extra` entries (text, colour, hatched) follow the parts, e.g. a section's "cut face".
+    """
+    if len(model.parts) + len(extra) < 2:
         return [], 0
     pad, swatch = PAD_PX * scale, SWATCH_PX * scale
     text_gap, gap = TEXT_GAP_PX * scale, GAP_PX * scale
     ordered = sorted(model.parts, key=lambda p: p.name)
-    wanted: list[tuple[str, str | None]] = [
-        (legend_text(p), p.color) for p in ordered[:MAX_LEGEND_PARTS]
+    wanted: list[tuple[str, str | None, bool]] = [
+        (legend_text(p), p.color, False) for p in ordered[:MAX_LEGEND_PARTS]
     ]
     if len(ordered) > MAX_LEGEND_PARTS:
         wanted.append(
-            (f"+{len(ordered) - MAX_LEGEND_PARTS} more (see the sidecar)", None)
+            (f"+{len(ordered) - MAX_LEGEND_PARTS} more (see the sidecar)", None, False)
         )
+    wanted += [(text, color, hatched) for text, color, hatched in extra]
     room = width - 2 * pad - swatch - text_gap
     rows: list[list[LegendEntry]] = [[]]
     x = pad
-    for text, color in wanted:
+    for text, color, hatched in wanted:
         while len(text) > 1 and _text_width(font, text) > room:
             text = text[:-2] + "…"
         entry = LegendEntry(
-            text, color, (swatch + text_gap if color else 0.0) + _text_width(font, text)
+            text,
+            color,
+            (swatch + text_gap if color else 0.0) + _text_width(font, text),
+            hatched,
         )
         if rows[-1] and x + entry.width > width - pad:
             rows.append([])
@@ -103,6 +122,14 @@ def draw_legend(
                 draw.rectangle(
                     [x, sy, x + swatch, sy + swatch], fill=rgb, outline=OUTLINE_COLOR
                 )
+                if entry.hatched:  # the engineering-drawing mark of a cut face
+                    ink = tuple(round(c * 0.55) for c in rgb)
+                    for k in range(1, 4):
+                        d = swatch * k / 4
+                        draw.line(
+                            [(x + d, sy + swatch), (x + swatch, sy + d)], fill=ink
+                        )
+                        draw.line([(x, sy + swatch - d), (x + d, sy)], fill=ink)
                 text_x = x + swatch + text_gap
             left = font.getbbox(entry.text)[0]
             draw.text(

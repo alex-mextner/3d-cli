@@ -16,7 +16,7 @@ The unified render command. It produces camera-locked PNGs from an `.scad` file 
 |---|---|
 | *(default)* | Single view render |
 | `--multi [OUTDIR]` | front / back / left / right / top / iso into `OUTDIR` (default `previews/`), async |
-| `--section` | True cross-section (generic [STL](GLOSSARY.md#stl)-cut, or `--color` assembly mode) |
+| `--section` | Engineering cross-section: violet hatched cut faces, per-part colours, legend |
 
 ### Single-view options
 
@@ -29,12 +29,15 @@ The unified render command. It produces camera-locked PNGs from an `.scad` file 
 
 ### Section options
 
+Engineering-drawing convention: **cut faces violet with 45-degree hatch**, uncut surfaces in their per-part colours, a legend (see [`section.md`](section.md)).
+
 | Option | Default | What |
 |---|---|---|
 | `--plane YZ\|XZ\|XY` | `YZ` | Cut plane |
+| `--at MM` | middle of the model | Plane position along its axis (model mm) |
 | `--keep neg\|pos` | `neg` | Which half to keep |
-| `--color` | off | Coloured per-part **assembly** mode (assembly must honour `-D cut=true`) |
-| `--module 'name();'` | — | Module to cut (fallback when no mesh stack) |
+| `--part SEL=NAME[:ROLE]` | — | Name a part / set its role (`stand_in` is drawn muted); repeatable |
+| `--color` | — | Accepted for old scripts; a section is always per-part coloured |
 
 ### Common
 
@@ -50,9 +53,9 @@ The unified render command. It produces camera-locked PNGs from an `.scad` file 
 3d render model.scad --view 3-4 --ortho
 3d render model.scad --multi previews/ --render
 3d render model.scad --section --plane YZ -o sec.png
-3d render assembly.scad --section --color --plane YZ -o sec.png
+3d render assembly.scad --section --plane XZ --at 12.5 --keep pos --part "#2a62c9=PCB:stand_in" -o sec.png
 ```
 
 ## Implementation notes
 
-The heavy work (bbox-exact cameras, async multi, STL-cut section) lives in `lib/render.py` and runs through `pyrun`. Single and multi need **no Python mesh deps** — they degrade to `--autocenter --viewall` if the mesh stack is absent. The generic section genuinely needs [`trimesh`](GLOSSARY.md#trimesh) to read the STL bounding box for the cut.
+The heavy work (bbox-exact cameras, async multi) lives in `lib/render.py` and runs through `pyrun`. Single and multi need **no Python mesh deps** — they degrade to `--autocenter --viewall` if the mesh stack is absent. `--section` runs `lib/section_render.py`, which cuts the model mesh itself (trimesh + manifold3d + Pillow); see [`section.md`](section.md).
