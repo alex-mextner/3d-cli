@@ -88,7 +88,7 @@ fit_types:
       the glue line thin. Pair with a dowel/pin (paired-halves rule) for alignment.
 
 # Alternative spellings. `extra_mm` is added to the base clearance and shows up in the provenance, so a
-# legacy label stays a pure function of this file (clean cutover of niche_fit.FIT_CLEARANCES).
+# legacy label stays a pure function of this file (the fit-niche `snug/normal/loose` presets live only here).
 aliases:
   free_running: {fit_type: sliding}
   tight_running: {fit_type: tight}

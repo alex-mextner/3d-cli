@@ -24,6 +24,13 @@
 #                             in-plane strength by this for a worst-case across-layer estimate.
 #                             Approximate typical values (printed-part literature): PLA ~0.45,
 #                             PETG ~0.7, ABS ~0.6, ASA ~0.6, TPU ~0.8. Brand/temp dependent.
+#   shrink_xy_pct  %        — OPTIONAL linear XY shrink of the printed part (consumed by `3d fits resolve`
+#                             as slicer shrinkage compensation: scale the model by 100/(100-pct)).
+#                             Typical values from https://printfarmcalc.com/reference/shrinkage/ (2026-10):
+#                             PLA 0.3, PETG 0.4, TPU 0.6, ASA 0.7, ABS 0.8; brand/colour/temperature dependent.
+#   shrink_z_pct   %        — OPTIONAL linear Z shrink. No source records a per-material Z figure, so none is
+#                             shipped: `3d fits resolve` says "no Z compensation recorded" until you add one.
+#                             A missing field is "not recorded" (provenance entry), never a silent zero.
 
 PLA:
   density: 1.24
@@ -34,6 +41,7 @@ PLA:
   color: "#1f9c4b"
   finish: matte
   layer_adhesion: 0.45
+  shrink_xy_pct: 0.3
 
 PETG:
   density: 1.27
@@ -44,6 +52,7 @@ PETG:
   color: "#2b7fb8"
   finish: gloss
   layer_adhesion: 0.7
+  shrink_xy_pct: 0.4
 
 ABS:
   density: 1.04
@@ -54,6 +63,7 @@ ABS:
   color: "#3a3a3a"
   finish: matte
   layer_adhesion: 0.6
+  shrink_xy_pct: 0.8
 
 ASA:
   density: 1.07
@@ -64,6 +74,7 @@ ASA:
   color: "#d9d2c5"
   finish: matte
   layer_adhesion: 0.6
+  shrink_xy_pct: 0.7
 
 TPU:
   density: 1.21
@@ -74,3 +85,4 @@ TPU:
   color: "#222222"
   finish: matte
   layer_adhesion: 0.8
+  shrink_xy_pct: 0.6
