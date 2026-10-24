@@ -31,6 +31,7 @@ When a ready project exists: **patch it (`3d retarget`), do not re-slice from th
 | `--preset-dir DIR` | — | Extra preset directory (repeatable) holding `machine/ process/ filament/ *.json`, searched before everything else. |
 | `--gcode PATH` | — | Also slice the result to `PATH` with the installed Orca-family slicer (placed objects as an STL + the retargeted settings as presets; see below), then run `3d gcode-bounds` on it. |
 | `--bounds-printer NAME` | — | Fleet printer for that `gcode-bounds` run (axis limits, trusted macros), e.g. `k1se`. |
+| `--include-non-printable` | off | Keep objects tagged as vitamins / reference models / stand-ins (`3d:role`, written by [`3d assembly position`](assembly.md)); without it a project that keeps one is refused (`NonPrintableParts`, exit 1). The override is logged. Example: `3d retarget fit-test.3mf --to k1se --include-non-printable`. |
 | `--dry-run` | off | Do everything but write the `.3mf`; same report and exit code. |
 | `-v, --verbose` | off | List every changed key instead of the first few per group. |
 

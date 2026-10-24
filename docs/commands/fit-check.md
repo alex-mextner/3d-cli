@@ -16,6 +16,8 @@ Parts of one assembly are often printed days apart, on different printers, while
 3d fit-check --insert plug.stl --socket plate.stl --gap 0.2 --gap-tol 0.05 --size-tol 0.05 --step 0.1 --min-depth 3.5
 3d fit-check --insert magnet.stl --socket 'HALF_*.stl' --gap 0.1 --open none
 3d fit-check --insert foot.stl --socket base.stl --gap 0.2 --open below
+3d fit-check --insert drawer.stl --socket body.stl --gap 0.25 --open +Y
+3d fit-check --insert slider.stl --socket rail.stl --gap 0.2 --open 1,1,0
 3d fit-check --insert plug.stl --socket plate.stl --fit sliding --shape round --printer k1se --material PETG
 3d fit-check --insert lid.stl --socket box.stl --fit snap --gap-tol 0.05
 3d fit-check --spec fits.yaml
@@ -55,9 +57,9 @@ The layers start 0.05 mm above the insert's bottom and go up every `--step` mm t
 - `--gap-tol MM` — clearance tolerance, e.g. `--gap-tol 0.05` (default 0.03; with `--fit` the tolerance of the fit type, e.g. ±0.10 for `sliding`)
 - `--step MM` — layer step up the socket, e.g. `--step 0.1` (default 0.25)
 - `--min-depth MM` — FAIL when the socket is shallower, e.g. `--min-depth 3.5` (default: not checked)
-- `--open DIR` — the direction the socket must be open to: `above` (default), `below`, or `none` for a captured insert (a magnet closed in by a mating half), e.g. `--open none`
+- `--open DIR` — the direction the socket must be open to: `above` (default, +Z), `below` (−Z), `none` for a captured insert (a magnet closed in by a mating half), or a declared extraction axis in the assembly frame: `+X`, `−X`, `+Y`, `−Y` or a vector `x,y,z` (a horizontal drawer: `--open +Y`; an oblique slider: `--open 1,1,0`). With an axis the whole check (layers, clearance, socket depth, the open path) runs in that frame: both solids are turned in memory so the axis becomes +Z, `z` in `layers` and in the messages is the coordinate along the axis, and the blocking location is reported back in the assembly frame (`open_blocked_at`). The same pair rotated onto X, Y or Z gives the same verdicts. A zero, non-finite or malformed vector exits 2 before any mesh is read. The meshes are never modified; `open_frame` in the JSON records the evaluated axis and rotation. e.g. `--open none`, `--open +Y`
 - `--spec FILE` — many fits from a YAML/JSON file, e.g. `--spec fits.yaml`; takes no pair flags
-- `--json` — JSON report on stdout: `status` and `fits[]` with `insert`, `socket`, `insert_files`, `socket_files`, `status`, `insert_size_mm`, `printed_size_mm`, `any_turn`, `size_tol_mm`, `gap_set_mm`, `gap_tol_mm`, `fit` (null without `--fit`; else `fit_type`, `shape`, `printer`, `material`, `clearance_mm`, `tol_mm`, `fallback`, `correction_status`, `gap_from`, `gap_tol_from`), `step_mm`, `min_depth_mm`, `open`, `open_blocked_mm3` (socket volume in the insert's way out; null when open or not checked), `gap_mm` (min), `gap_max_mm`, `socket_depth_mm`, `overlap_z_mm`, `overlap_volume_mm3` (insert ∩ socket solids), `layers` (`z`, `gap` per socket layer) and `errors`
+- `--json` — JSON report on stdout: `status` and `fits[]` with `insert`, `socket`, `insert_files`, `socket_files`, `status`, `insert_size_mm`, `printed_size_mm`, `any_turn`, `size_tol_mm`, `gap_set_mm`, `gap_tol_mm`, `fit` (null without `--fit`; else `fit_type`, `shape`, `printer`, `material`, `clearance_mm`, `tol_mm`, `fallback`, `correction_status`, `gap_from`, `gap_tol_from`), `step_mm`, `min_depth_mm`, `open`, `open_frame` (null, or `axis`, `direction`, `rotation` of a declared-axis check), `open_blocked_mm3` (socket volume in the insert's way out; null when open or not checked), `open_blocked_at` (x, y, z of that material in the assembly frame for a declared axis), `gap_mm` (min), `gap_max_mm`, `socket_depth_mm`, `overlap_z_mm`, `overlap_volume_mm3` (insert ∩ socket solids), `layers` (`z`, `gap` per socket layer) and `errors`
 
 ## Fits spec
 

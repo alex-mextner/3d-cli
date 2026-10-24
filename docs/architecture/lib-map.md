@@ -54,6 +54,7 @@ rendering, slicing support, and verification:
 - `fit_camera.py`
 - `fit_camera_math.py`
 - `fit_check.py`
+- `assembly_cli.py`
 - `fits.py`
 - `fits_apply.py`
 - `fits_registry.py`
@@ -234,6 +235,7 @@ use a compatibility import.
 - `lib/data/materials.yaml`
 - `lib/data/printers.yaml`
 - `lib/data/fits.yaml` — the shared fit/tolerance table, read by `lib/fits.py` ([contract](../contracts/fits.md)).
+- `lib/assembly/` — the assembly toolkit behind `3d assembly` (`spec` YAML schema `3d.assembly/1`, `scene`, `overlap`, `check`, `sweep`, `ergonomics`, `forces`, `viz`, `position`, `threemf`, `report`, `vec`); see [docs/commands/assembly.md](../commands/assembly.md).
 - `lib/fits_sources/` — where the correction rows of `fits.resolve` come from, one drop-in module per source (`manual.py`: `3d fits corrections`; the calibration source of S2 is one more module); backs `3d fits`, `3d fit-check --fit`, `3d fit-niche --fit` ([contract](../contracts/fits.md)).
 - `lib/library/` — the local model-library database (`db.py`, own `migrations/`) and the action contract (`actions.py`); backs `3d library` ([contract](../contracts/library-db.md)).
 
@@ -261,6 +263,8 @@ Every current root Python module is listed here so future additions are intentio
 - `fit_camera_math.py` — import-light camera pose and proof-status math helpers.
 - `fit_check.py` — already-printed insert vs its socket: printed-size lock, per-layer clearance (manifold3d slices, shapely distances) and the open path along the insertion direction; backs `3d fit-check`.
 - `fits.py` — the one fit/tolerance table (`data/fits.yaml`, schema `3d.fits/1`): fit types, aliases, printer x material x nozzle x layer corrections, `resolve()` with provenance and `fit_clearance` calibration readings.
+- `assembly_cli.py` — the worker behind `3d assembly` (argument parsing, report assembly; geometry in `lib/assembly/`).
+- `parts_3mf.py` — reads the `3d:role` / `3d:printable` tags of a project 3MF and guards print boundaries (`arrange`, `retarget`, `prep`) with `lib/parts.py`.
 - `fits_apply.py` — pure text operations of `3d fits apply`: the OpenSCAD snippet of a resolved clearance and the idempotent rewrite of `// @fit`-marked declared clearances.
 - `fits_registry.py` — bridge from a free-text printer/material name (fleet key, model, `Elegoo Rapid PLA+`) to the registries `fits.resolve` cites in its provenance.
 - `gcode_resume.py` — resume a stopped multi-head Orca print above a layer (layer walk, machine state at a byte, resume header from the device's `resume:` profile, per-head retraction tracking, `--no-tower` off-bed purges); stdlib-only; backs `3d gcode-resume`. Its per-line parser (`advance`) and the streamed `state_at` (machine state at a printer's byte cursor or a layer) also give PrintOps incidents their G-code context.
