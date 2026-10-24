@@ -25,7 +25,9 @@ smaller than the cavity so it actually fits after FDM print tolerances:
 - **height (Z)** is a full seat: no Z clearance by default, so the insert bottoms out on
   the cavity floor.
 
-`--fit` presets map to sensible defaults for a 0.4 mm nozzle:
+`--fit` presets map to sensible defaults for a 0.4 mm nozzle. They are aliases of the shared fit table
+(`lib/data/fits.yaml`, [contract](../contracts/fits.md)): `snug` = `tight`, `normal` = `sliding`, `loose` =
+`sliding` + 0.15 mm:
 
 | Fit | Clearance (mm) | Feel |
 |---|---|---|

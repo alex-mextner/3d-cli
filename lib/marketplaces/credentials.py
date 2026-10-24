@@ -47,6 +47,11 @@ class Field:
 FIELDS: dict[str, tuple[Field, ...]] = {
     "thingiverse": (Field("thingiverse", "token", "THINGIVERSE_TOKEN", "3d-cli/thingiverse-token",
                           "Thingiverse App Token"),),
+    # Writing to Thingiverse needs the user's OAuth access token (authorize + code exchange,
+    # see docs/commands/models.md), not the read-only App Token above. Used by `models publish`.
+    "thingiverse-upload": (Field("thingiverse-upload", "token", "THINGIVERSE_UPLOAD_TOKEN",
+                                 "3d-cli/thingiverse-upload-token",
+                                 "Thingiverse OAuth access token (write scope)"),),
     "cults": (Field("cults", "username", "CULTS_USERNAME", "3d-cli/cults3d-user", "Cults3D username"),
               Field("cults", "api_key", "CULTS_API_KEY", "3d-cli/cults3d-key", "Cults3D API key")),
     "makerworld": (Field("makerworld", "token", "MAKERWORLD_TOKEN", "3d-cli/makerworld-token",
@@ -225,6 +230,23 @@ def thingiverse_token() -> str:
             "thingiverse", "auth", "the Thingiverse API needs an App Token (none configured)",
             remediation=[f"Create a free app at {THINGIVERSE_APPS_URL} and copy its App Token.",
                          _where("thingiverse")],
+        )
+    return token
+
+
+def thingiverse_upload_token() -> str:
+    token = _value(FIELDS["thingiverse-upload"][0])
+    if not token:
+        raise MarketplaceError(
+            "thingiverse", "auth", "publishing to Thingiverse needs an OAuth access token with write "
+            "scope (none configured)",
+            remediation=[
+                f"Create an app at {THINGIVERSE_APPS_URL}, open "
+                "https://www.thingiverse.com/login/oauth/authorize?client_id=<id>&redirect_uri=urn:ietf:wg:oauth:2.0:oob"
+                "&response_type=code, then POST client_id, client_secret and the code to "
+                "https://www.thingiverse.com/login/oauth/access_token and keep the access_token.",
+                _where("thingiverse-upload"),
+            ],
         )
     return token
 
