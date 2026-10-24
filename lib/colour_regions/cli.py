@@ -94,6 +94,7 @@ def _p_build() -> _Parser:
     p.add_argument("--island-mm2", type=_pos_float)
     p.add_argument("--transfer-tol", type=_pos_float)
     p.add_argument("--force", action="store_true")
+    p.add_argument("--full-reach", action="store_true")
     p.add_argument("--json", action="store_true")
     p.add_argument("--quiet", action="store_true")
     return p
@@ -109,6 +110,7 @@ def _p_shell_volume() -> _Parser:
     p.add_argument("--out", required=True)
     p.add_argument("--min-area", type=_pos_float, default=DEFAULT_MIN_CELL_AREA_MM2)
     p.add_argument("--tol", type=_pos_float, default=DEFAULT_TRANSFER_TOL_MM)
+    p.add_argument("--full-reach", action="store_true")
     p.add_argument("--json", action="store_true")
     return p
 
@@ -122,6 +124,7 @@ def _p_classify() -> _Parser:
     p.add_argument("--tol", type=_pos_float, default=transfer_mod.DEFAULT_PART_TOL_MM)
     p.add_argument("--split-edge", type=_pos_float)
     p.add_argument("--split-box")
+    p.add_argument("--surface-parts", default="")
     p.add_argument("--json", action="store_true")
     return p
 
@@ -147,6 +150,7 @@ def _p_transfer_class() -> _Parser:
     p.add_argument("--max-dist", type=_pos_float, default=DEFAULT_MAX_DIST_MM)
     p.add_argument("--island-mm2", type=_pos_float, default=DEFAULT_ISLAND_FILL_MM2)
     p.add_argument("--fill-box", action="append", default=[])
+    p.add_argument("--match", choices=transfer_mod.MATCH_MODES, default="centroid")
     p.add_argument("--json", action="store_true")
     return p
 
@@ -171,6 +175,9 @@ def _p_verify() -> _Parser:
     p.add_argument("mesh")
     p.add_argument("--work", required=True)
     p.add_argument("--regions")
+    p.add_argument("--parts")
+    p.add_argument("--default-key", default="K")
+    p.add_argument("--max-nz", type=_pos_float, default=d.max_nz)
     p.add_argument("--skip-volumes", action="store_true")
     p.add_argument("--waive", default="")
     p.add_argument("--approved-groups", default="")
@@ -208,7 +215,7 @@ def cmd_build(ns: argparse.Namespace) -> int:
     if ns.transfer_tol is not None:
         rules = dataclasses.replace(rules, transfer_tol_mm=ns.transfer_tol)
     tracks = [build_mod.parse_track(t) for t in ns.track]
-    res = build_mod.build(ns.mesh, tracks, rules, ns.out, force=ns.force, verbose=not (ns.quiet or ns.json))
+    res = build_mod.build(ns.mesh, tracks, rules, ns.out, force=ns.force, verbose=not (ns.quiet or ns.json), full_reach=ns.full_reach)
     if ns.json:
         _emit({"out": str(Path(ns.out).resolve()), "regions": res.regions, "groups": res.groups, "labels": res.labels, "stats": res.stats})
     else:
@@ -225,7 +232,7 @@ def cmd_shell_volume(ns: argparse.Namespace) -> int:
     if not ids:
         raise InvalidArgument("--select", " ".join(ns.select), names, command=CMD)
     sel = np.isin(lab, ids) & s.outer
-    cells = shell_volume(s, sel, ns.depth, ns.pitch, ns.out, min_area_mm2=ns.min_area)
+    cells = shell_volume(s, sel, ns.depth, ns.pitch, ns.out, min_area_mm2=ns.min_area, full_reach=ns.full_reach)
     info = {
         "out": str(Path(ns.out).resolve()),
         "labels": [names[i] for i in ids],
@@ -253,6 +260,7 @@ def cmd_classify(ns: argparse.Namespace) -> int:
         shift=transfer_mod.parse_vec3(ns.shift, "--shift"),
         split_edge=ns.split_edge,
         split_box=transfer_mod.parse_box(ns.split_box, "--split-box") if ns.split_box else None,
+        surface_parts=_names(ns.surface_parts) or None,
     )
     if ns.json:
         _emit(report)
@@ -284,6 +292,7 @@ def cmd_transfer_class(ns: argparse.Namespace) -> int:
         max_dist=ns.max_dist,
         island_mm2=ns.island_mm2,
         fill_boxes=boxes,
+        match=ns.match,
     )
     if ns.json:
         _emit(report)
@@ -313,6 +322,10 @@ def cmd_snap(ns: argparse.Namespace) -> int:
 
 def cmd_verify(ns: argparse.Namespace) -> int:
     _need_file(ns.mesh)
+    if ns.parts and ns.skip_volumes:
+        raise UsageError("--parts and --skip-volumes contradict each other", command=CMD)
+    if ns.parts and ns.regions:
+        raise UsageError("--parts and --regions both name the volumes gate 2 reads", command=CMD, remediation=["Pass one of them."])
     th = dataclasses.replace(
         verify_mod.Thresholds(),
         dihedral=ns.dihedral,
@@ -323,11 +336,13 @@ def cmd_verify(ns: argparse.Namespace) -> int:
         shift_margin=ns.shift_margin,
         chance_margin=ns.chance_margin,
         agree=ns.agree,
+        max_nz=ns.max_nz,
     )
-    group, names, _ = build_mod.load_groups(ns.work)
+    group, names, group_assign = build_mod.load_groups(ns.work)
     regions = None if ns.skip_volumes else (ns.regions or str(Path(ns.work) / "regions.json"))
     result, lines = verify_mod.verify_work(
-        ns.mesh, group, names, th=th, waive=set(_names(ns.waive)), approved=set(_names(ns.approved_groups)), regions=regions, samples=ns.samples
+        ns.mesh, group, names, th=th, waive=set(_names(ns.waive)), approved=set(_names(ns.approved_groups)), regions=regions, samples=ns.samples,
+        parts=None if ns.skip_volumes else ns.parts, group_assign=group_assign, default_key=ns.default_key,
     )
     if ns.report:
         Path(ns.report).write_text(json.dumps(result, indent=1, default=float), encoding="utf-8")

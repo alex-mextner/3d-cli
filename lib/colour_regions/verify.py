@@ -24,6 +24,7 @@ ASSUMPTIONS: the mesh is the one the labels were transferred to (`labels_final.n
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -56,6 +57,7 @@ class Thresholds:
     shift_margin: float = 0.06
     shift_mm: float = 1.5
     agree: float = 0.97
+    max_nz: float = 0.97  # gate 2 against project parts skips faces with |normal z| >= this (print frame, Z up); above 1 keeps all
 
 
 def edge_strength(s: Surf, th: Thresholds) -> Mask:
@@ -299,6 +301,129 @@ def gate_volumes(
     }
 
 
+def _filament_slots(man: dict[str, Any], where: str) -> dict[str, int]:
+    try:
+        return {str(f["key"]): int(f["slot"]) for f in man["filaments"] if f.get("key")}
+    except (KeyError, TypeError, ValueError) as exc:
+        raise UsageError(f"{where}: no `filaments` with key and slot", command=CMD) from exc
+
+
+def gate_parts(
+    s: Surf,
+    group: Array,
+    group_assign: list[dict[str, Any]],
+    names: list[str],
+    stem: str | Path,
+    th: Thresholds,
+    default_key: str,
+    n: int = DEFAULT_SAMPLES,
+    seed: int = 1,
+) -> dict[str, Any]:
+    """Gate 2 against the colour PARTS of a built project (`STEM.manifest.json` + `STEM.parts/N_*.stl`, as written by
+    `3d prep` / the project 3MF builder): the part holding the point `SAMPLE_DEPTH_MM` under the skin has the filament
+    assign the face's group asks for (`default_key` = the filament of the default colour). Same sampling and teeth as
+    `gate_volumes`; the parts, not the patches, are what the slicer prints, so this also catches a project that was
+    built from stale or edited volumes."""
+    stem = Path(stem)
+    man_path = Path(str(stem) + ".manifest.json")
+    parts_dir = Path(str(stem) + ".parts")
+    if not man_path.is_file() or not parts_dir.is_dir():
+        raise UsageError(
+            f"{man_path} or {parts_dir} not found",
+            command=CMD,
+            remediation=["--parts STEM needs STEM.manifest.json and the directory STEM.parts/ of the built project."],
+        )
+    try:
+        man = json.loads(man_path.read_text(encoding="utf-8"))
+        shift = np.array(man["shift"], float)
+        manifest_parts = list(man["parts"])
+        assigns = [json.dumps({k: v for k, v in p["assign"].items() if k in ("slot", "mix")}, sort_keys=True) for p in manifest_parts]
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError, AttributeError) as exc:
+        raise UsageError(
+            f"{man_path}: not a project manifest ({type(exc).__name__}: {exc})",
+            command=CMD,
+            remediation=["Expected `shift`, `filaments` [{key, slot}] and `parts` [{assign}] as the project builder writes them."],
+        ) from exc
+    fil = _filament_slots(man, str(man_path))
+    if default_key not in fil:
+        raise UsageError(f"--default-key {default_key!r} is not a filament key of the project", command=CMD,
+                         remediation=[f"The project's keys: {', '.join(sorted(fil))}"])
+
+    def resolve(a: dict[str, Any]) -> str:
+        if "slot" in a:
+            return json.dumps({"slot": a["slot"]})
+        if "key" in a:
+            if a["key"] not in fil:
+                raise UsageError(
+                    f"group assign key {a['key']!r} is not a filament key of the project",
+                    command=CMD,
+                    remediation=[f"The project's keys: {', '.join(sorted(fil))}"],
+                )
+            return json.dumps({"slot": fil[a["key"]]})
+        return json.dumps({"mix": "".join(str(fil.get(ch, ch)) for ch in a["mix"])})
+
+    numbered = [f for f in parts_dir.iterdir() if f.is_file() and re.match(r"\d+_", f.name)]  # N_name.stl: N = manifest part N
+    files = sorted(numbered, key=lambda f: int(f.name.split("_")[0]))
+    if len(files) != len(manifest_parts):
+        raise UsageError(
+            f"{len(files)} numbered part files in {parts_dir} but {len(manifest_parts)} manifest parts",
+            command=CMD,
+            remediation=["Part files are named N_name.stl, N = 1.. in manifest order."],
+        )
+    meshes = [load_mesh(f, process=False) for f in files]
+    default = json.dumps({"slot": fil[default_key]})
+    exp_of_group = [resolve(a) for a in group_assign]
+    a_, b_ = group[s.fa[:, 0]], group[s.fa[:, 1]]
+    border = np.zeros(s.nf, bool)
+    bm = a_ != b_
+    border[s.fa[bm, 0]] = border[s.fa[bm, 1]] = True
+    d = s.dist_to_faces(border & s.outer, limit=BORDER_CLEARANCE_MM)
+    cand = np.nonzero(s.outer & ~np.isfinite(d) & (np.abs(s.n[:, 2]) < th.max_nz))[0]
+    colored, plain = cand[group[cand] >= 0], cand[group[cand] < 0]
+    if len(colored) == 0 or len(plain) == 0:
+        raise UsageError("gate 2 needs coloured and default faces away from every border", command=CMD)
+    rng = np.random.default_rng(seed)
+    pick = np.r_[
+        rng.choice(colored, min(len(colored), n // 2), replace=False),
+        rng.choice(plain, min(len(plain), n // 2), replace=False),
+    ]
+    q = s.c[pick] - SAMPLE_DEPTH_MM * s.n[pick] + shift
+    got = np.full(len(pick), "none", dtype=object)
+    for i, m in enumerate(meshes):
+        lo, hi = m.bounds
+        box = np.all((q > lo - 0.1) & (q < hi + 0.1), axis=1)
+        if box.any():
+            inside = np.zeros(len(pick), bool)
+            inside[box] = m.contains(q[box])
+            got[inside] = assigns[i]
+    exp = np.array([exp_of_group[g] if g >= 0 else default for g in group[pick]], dtype=object)
+    agree = float((got == exp).mean())
+    # teeth: every face is expected in the NEXT assign that differs from its own (cyclic over the groups plus the default)
+    pool = [default, *exp_of_group]
+
+    def other(g: int) -> str:
+        own = exp_of_group[g] if g >= 0 else default
+        i = pool.index(own)
+        nxt = [c for c in pool[i + 1 :] + pool[:i] if c != own]
+        return nxt[0] if nxt else own
+
+    exp_perm = np.array([other(int(g)) for g in group[pick]], dtype=object)
+    agree_perm = float((got == exp_perm).mean())
+    per: dict[str, dict[str, float]] = {}
+    for g in range(-1, len(exp_of_group)):
+        mk = group[pick] == g
+        if mk.any():
+            per["<none>" if g < 0 else names[g]] = {"n": int(mk.sum()), "agree": round(float((got[mk] == exp[mk]).mean()), 3)}
+    return {
+        "agree": agree,
+        "agree_permuted": agree_perm,
+        "n": int(len(pick)),
+        "per_group": per,
+        "pass": bool(agree >= th.agree and agree_perm < 0.6 * th.agree),
+        "source": "parts",
+    }
+
+
 def format_edges(r: dict[str, Any], th: Thresholds, waive: set[str]) -> list[str]:
     """Human report of gate 1."""
     lines = [
@@ -356,6 +481,9 @@ def verify_work(
     approved: set[str],
     regions: str | Path | None,
     samples: int = DEFAULT_SAMPLES,
+    parts: str | Path | None = None,
+    group_assign: list[dict[str, Any]] | None = None,
+    default_key: str = "K",
 ) -> tuple[dict[str, Any], list[str]]:
     """Run gate 1 and (with `regions`) gate 2 -> (result dict with `pass`, report lines)."""
     s = Surf(mesh)
@@ -382,7 +510,12 @@ def verify_work(
     lines = format_edges(r1, th, waive)
     result: dict[str, Any] = {"edges": r1}
     ok = bool(r1["pass"])
-    if regions is not None:
+    if parts is not None:
+        r2 = gate_parts(s, group, group_assign or [], names, parts, th, default_key, n=samples)
+        result["volumes"] = r2
+        lines.append(format_volumes(r2, th))
+        ok = ok and bool(r2["pass"])
+    elif regions is not None:
         r2 = gate_volumes(s, group, names, load_regions(regions), th, n=samples)
         result["volumes"] = r2
         lines.append(format_volumes(r2, th))
