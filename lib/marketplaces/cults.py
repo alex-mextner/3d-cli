@@ -24,8 +24,10 @@ from marketplaces.base import (
     as_int,
     as_str,
     child,
+    collect_pages,
     dict_list,
     str_list,
+    unique_urls,
 )
 
 SITE = "cults"
@@ -33,13 +35,14 @@ API_URL = "https://cults3d.com/graphql"
 WEB_URL = "https://cults3d.com"
 _URL_RE = re.compile(r"^https?://(?:www\.)?cults3d\.com/(?:[a-z]{2}/)?3d-model/[^/]+/([^/?#]+)", re.I)
 
-_FIELDS = ("identifier name(locale: EN) url(locale: EN) likesCount downloadsCount "
-           "illustrationImageUrl creator { nick shortUrl } license { name(locale: EN) } "
-           "price(currency: EUR) { cents }")
-SEARCH_QUERY = ("query Search($query: String!, $limit: Int) { result: creationsSearchBatch("
-                f"query: $query, limit: $limit) {{ total results {{ {_FIELDS} }} }} }}")
-MODEL_QUERY = (f"query Creation($slug: String!) {{ creation(slug: $slug) {{ {_FIELDS} "
-               "tags(locale: EN) blueprints { fileUrl } } }")
+PAGE_SIZE = 50  # creationsSearchBatch answers up to 100 per call
+_FIELDS = ("identifier name(locale: EN) url(locale: EN) likesCount downloadsCount viewsCount "
+           "publishedAt illustrationImageUrl illustrations { imageUrl } category { name } "
+           "creator { nick shortUrl } license { name(locale: EN) } price(currency: EUR) { cents } "
+           "description(locale: EN) tags(locale: EN) blueprints { fileName fileUrl }")
+SEARCH_QUERY = ("query Search($query: String!, $limit: Int, $offset: Int) { result: creationsSearchBatch("
+                f"query: $query, limit: $limit, offset: $offset) {{ total results {{ {_FIELDS} }} }} }}")
+MODEL_QUERY = f"query Creation($slug: String!) {{ creation(slug: $slug) {{ {_FIELDS} }} }}"
 
 
 def api_url() -> str:
@@ -60,13 +63,28 @@ def _graphql(query: str, variables: dict[str, Any]) -> dict[str, Any]:
                                         f"{credentials.CULTS_KEYS_URL}."))
 
 
-def _model(item: dict[str, Any], *, files: tuple[ModelFile, ...] = ()) -> Model:
+def _files(item: dict[str, Any]) -> tuple[ModelFile, ...]:
+    """One file per blueprint. A blueprint's `fileName` is listed even when its `fileUrl` is
+    null (paid creations, or any answer that does not hand out the link); the file name falls
+    back to the URL's last segment only for answers that carry no fileName."""
+    files = []
+    for i, blueprint in enumerate(dict_list(item.get("blueprints")), start=1):
+        url = as_str(blueprint.get("fileUrl"))
+        name = as_str(blueprint.get("fileName")) or os.path.basename(
+            urllib.parse.unquote(url.split("?", 1)[0])) or f"file-{i}"
+        files.append(ModelFile(name=name, ref=url, kind="blueprint"))
+    return tuple(files)
+
+
+def _model(item: dict[str, Any]) -> Model:
     creator = child(item, "creator")
     lic = child(item, "license")
     # Free only when Cults says 0 cents; a missing or unreadable price counts as paid, so a
     # schema change can never turn a priced creation into a "free" download.
     cents = as_int(child(item, "price").get("cents"))
     price = "free" if cents == 0 else (f"{cents / 100:.2f} EUR" if cents else "price unknown")
+    cover = as_str(item.get("illustrationImageUrl"))
+    illustrations = tuple(as_str(i.get("imageUrl")) for i in dict_list(item.get("illustrations")))
     return Model(
         site=SITE,
         id=as_str(item.get("identifier")),
@@ -79,9 +97,15 @@ def _model(item: dict[str, Any], *, files: tuple[ModelFile, ...] = ()) -> Model:
         license=as_str(lic.get("name")),
         price=price,
         paid=cents != 0,
+        summary=" ".join(as_str(item.get("description")).split())[:500],
         tags=str_list(item.get("tags")),
-        image=as_str(item.get("illustrationImageUrl")),
-        files=files,
+        image=cover,
+        files=_files(item),
+        date=as_str(item.get("publishedAt")),
+        images=unique_urls(cover, *illustrations),
+        views=as_int(item.get("viewsCount")),
+        category=as_str(child(item, "category").get("name")),
+        files_known=isinstance(item.get("blueprints"), list),
     )
 
 
@@ -94,21 +118,25 @@ def parse_model(data: dict[str, Any]) -> Model:
     item = data.get("creation")
     if not isinstance(item, dict):
         raise MarketplaceError(SITE, "not-found", "creation not found")
-    files = tuple(
-        ModelFile(name=os.path.basename(urllib.parse.unquote(as_str(b.get("fileUrl")).split("?", 1)[0]))
-                  or f"file-{i}",
-                  ref=as_str(b.get("fileUrl")), kind="blueprint")
-        for i, b in enumerate(dict_list(item.get("blueprints")), start=1)
-    )
-    return _model(item, files=files)
+    return _model(item)
 
 
 def search(query: str, limit: int) -> list[Model]:
-    return parse_search(_graphql(SEARCH_QUERY, {"query": query, "limit": limit}))[:limit]
+    def page(offset: int, size: int) -> list[Model]:
+        return parse_search(_graphql(SEARCH_QUERY, {"query": query, "limit": size, "offset": offset}))
+
+    return collect_pages(page, limit, PAGE_SIZE)
 
 
 def show(ref: str) -> Model:
     return parse_model(_graphql(MODEL_QUERY, {"slug": ref}))
+
+
+def download_link(model: Model, file: ModelFile) -> tuple[str, dict[str, str]]:
+    """The file's URL from the listing, which Cults only fills in for downloadable files."""
+    if not file.ref:
+        raise MarketplaceError(SITE, "http", f"no file URL for {file.name} of {model.url}")
+    return file.ref, {}
 
 
 def download_links(model: Model) -> DownloadLinks:

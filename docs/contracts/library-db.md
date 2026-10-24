@@ -35,6 +35,31 @@ imports - `library.db.insert_row(conn, table, values, source_key=K)` returns the
 `lib/library/actions.py` fixes eight functions - `search, rank, download, open_slicer, launch_agent, queue,
 photo, publish` - returning `{schema: "3d.action/1", action, ok, data, errors[], warnings[]}`. They never
 print, prompt or exit. The TUI (S7) binds keys to `ACTIONS[name]` and the CLI exposes the same functions as
-flags with `--json`. `queue` and `photo` (register an existing file) are implemented; the other actions raise
-`NotImplementedByDesign(owner_issue)` until their slice lands (`OWNERS` maps action -> issue). `invoke(name,
+flags with `--json`. `queue`, `photo` (register an existing file), `search` and `download` (S5, #576) are
+implemented; the other actions raise `NotImplementedByDesign(owner_issue)` until their slice lands (`OWNERS` maps
+action -> issue). `search` takes `deep` and `idempotency_key` besides the contract arguments and returns a flat
+`results[]` (site, model_id, url, title, rank, image_url, license, paid, cad, size_mm, reference_suitable) plus the
+session uid; a site that failed is a `site_failed` warning and only "no site answered" is `ok: false`. `download`
+takes `role` / `vitamin_kind` / `deep` and records the `model_source`.
+
+## Migration 0010 - search core (S5, #576)
+
+`lib/library/migrations/0010_search_core.sql` (numbered apart from 0001 so slices that add tables later do not
+clash) adds:
+
+- `search_session.meta` - JSON object: `schema`, `effective_query`, `limit`, `sites`, `deep`, `vitamin`,
+  `elapsed_s`, `timings`, `errors`, `warnings` of the run;
+- `search_result.record` - JSON object: the full result card of `3d models search --json` (so `3d models searches
+  show ID --json` round-trips what the search printed); `analytics` holds its deterministic facts;
+- `model_source.role` - `printed | vitamin | reference | stand_in` or NULL (the user did not say), the part role of
+  `docs/contracts/parts.md`; `model_source.vitamin_kind` - `pcb | connector | screw | wire`;
+  `model_source.analytics` - JSON object with the file facts and mesh measurements of the downloaded files;
+- `analytics_cache(key PRIMARY KEY, sha256, analytics, created_at)` - deep mesh measurements keyed by
+  `file:<site>:<model id>:<name>:<size>` (a marketplace file, so a repeat `--deep` search needs no download) and by
+  `sha:<sha256>` (content, so a local file or a re-uploaded copy is not measured twice). Not exported; a cache.
+
+Idempotency keys: a session's `source_key` is `search:<sha256(idempotency_key, query)>` when the caller gives
+`idempotency_key` (none = a fresh session per search); a result's is `<session uid>:<site>:<model id>`; a
+`model_source`'s is `source:<site>:<model id>` (a repeat download updates that row). `3d library status` lists
+the applied migrations `[1, 10]`. `invoke(name,
 **kwargs)` is the never-raising edge for UIs.

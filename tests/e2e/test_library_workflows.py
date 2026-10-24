@@ -15,7 +15,7 @@ def test_library_status_works_offline_on_a_fresh_machine(tmp_path: Path) -> None
     assert result.returncode == 0, result.stderr
     doc = json.loads(result.stdout)
     assert doc["schema"] == "3d.library/1" and doc["path"] == str(db)
-    assert doc["migrations"] == [1] and doc["migrations_pending"] == []
+    assert doc["migrations"] == [1, 10] and doc["migrations_pending"] == []
     assert doc["counts"]["search_result"] == 0 and db.is_file()
 
 
@@ -28,8 +28,8 @@ def test_library_migrate_twice_and_export(tmp_path: Path) -> None:
     exported = run_cli(tmp_path, "library", "export", "--db", db)
 
     assert first.returncode == second.returncode == exported.returncode == 0
-    assert "migrations: [1]" in first.stdout
-    assert json.loads(second.stdout)["migrations"] == [1]
+    assert "migrations: [1, 10]" in first.stdout
+    assert json.loads(second.stdout)["migrations"] == [1, 10]
     tables = json.loads(exported.stdout)["tables"]
     assert set(tables) >= {"search_session", "search_result", "model_source", "design", "make", "photo",
                            "publication", "relation"}
