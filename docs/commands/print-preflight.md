@@ -10,7 +10,7 @@ input is missing is SKIP and its line says what to pass — it never passes sile
 ```
 3d print-preflight FILE.gcode [--printer NAME] [--axis-limits X0:X1,Y0:Y1|NAME] [--source-3mf FILE.3mf]
                    [--visible [OBJ:]SPEC]... [--bridge-max MM] [--printops-api URL] [--offline]
-                   [--printops-snapshot FILE] [--accept preset_match --reason TEXT] [--json] [--secs S] [--no-bed-move]
+                   [--printops-snapshot FILE] [--accept preset_match|mix_calibration --reason TEXT] [--json] [--secs S] [--no-bed-move]
 ```
 
 | Check | When | FAIL means |
@@ -59,14 +59,39 @@ is FAIL under the policy level `block`, WARN under `warn`; `off` hides the check
 | `enclosure_material` | warn | a `gates.enclosure_material` material (ABS, ASA, PC, PA…) on a printer with `enclosure: none` | the same on `enclosure: partial` |
 | `plate_material` | warn | `; curr_bed_type` is not among the printer's `plates`; a `gates.plate_material` pairing (PETG/TPU on smooth PEI, ABS/PC/PA on the Cool Plate) | |
 | `preset_match` | block | `; printer_settings_id` / `; print_settings_id` are not the fleet entry's `slicer: {machine, process}` presets (a plate sliced with Orca's stock presets, [#293](https://github.com/alex-mextner/3d-cli/issues/293)); `; default_acceleration` / `; outer_wall_acceleration` differ from the resolved process preset (an unsaved edit in the slicer); with a spool bound to a used tool that names a filament preset: `; filament_settings_id` is not that preset, or `; filament_flow_ratio` / `; pressure_advance` / `; enable_pressure_advance` differ from its resolved values ([#506](https://github.com/alex-mextner/3d-cli/issues/506)) | |
+| `mix_calibration` | warn | a measured `mix_color` of a mix is more than `gates.mix_color.max_delta_e` (ΔE2000) from the part's model colour | the mix was never measured on this printer, its record is expired, or a filament was re-measured after it |
 
 `preset_match` is UNVERIFIED when the fleet entry has no `slicer:` presets. It compares the
 process values only when the presets are on this machine (Orca's system profiles, the repo's
 `profiles/` and the slicers' user preset folders; `ORCA_PROFILES` / `ORCA_USER_PRESETS` point
 elsewhere); otherwise it says so under a PASS on the names. The filament preset joins when the
-spool bound to a used tool names one (the `slicer_filament_preset` extra field, set with `3d printops spool preset`, [#294](https://github.com/alex-mextner/3d-cli/issues/294)); a calibration print (`3d calibrate gen`) is compared by the filament preset's name only, because it varies flow and pressure advance on purpose. `; print_settings_id` is compared by name with the fleet process preset. The spool's preset names its printer's profile (`Orange PLA @K1SE`): moving the spool to another printer means setting its preset again (`3d printops spool preset`) or accepting the mismatch. A mismatch is a FAIL that `--accept preset_match --reason TEXT` turns into a WARN carrying the reason (`--accept` takes no other check; `--reason` is required with it). To print a
+spool bound to a used tool names one (the `slicer_filament_preset` extra field, set with `3d printops spool preset`, [#294](https://github.com/alex-mextner/3d-cli/issues/294)); a calibration print (`3d calibrate gen`) is compared by the filament preset's name only, because it varies flow and pressure advance on purpose. `; print_settings_id` is compared by name with the fleet process preset. The spool's preset names its printer's profile (`Orange PLA @K1SE`): moving the spool to another printer means setting its preset again (`3d printops spool preset`) or accepting the mismatch. A mismatch is a FAIL that `--accept preset_match --reason TEXT` turns into a WARN carrying the reason (`--accept` takes only `preset_match` and `mix_calibration`; `--reason` is required with it). To print a
 plate with other presets on purpose: a [forced start](printer.md#forcing-a-start) (Telegram approval), or `preset_match: warn` for
 the printer under `gates.printers` in fleet/policy.yaml.
+
+`mix_calibration` ([#418](https://github.com/alex-mextner/3d-cli/issues/418), plan §20.7) looks at every
+mixed filament (manual layer pattern or Local-Z row) that a part of the plate prints, in the same project
+3MF as `head seq` (`--source-3mf`, else `NAME.3mf` next to the G-code). There is no line without a project or
+when no part prints in a mixed filament. For each mix it takes the heads of the pattern → the spools bound to
+them (3d-api state) → their Spoolman filament ids → the mix key (plan §20.4, `printops.mix_key`)
+(`h0.12:f3.f7.f12`, rotation- and slot-independent) and asks 3d-api (`POST /v1/calibrations/mix-check`) for the
+current `mix_color` record of that printer and key. A record is current when it is not superseded, not past
+`valid_until`, and not older than a `filament_color` record of one of its filaments — unless both records carry
+the same `params.readout_sha256` (one readout wrote them together).
+
+```
+  WARN  mix_calibration  mix 431 (T4 Snapdragon, T3 Orange, T1 Bordeaux) never measured: 3d mix tester --target '#B5654F' --printer u1
+  PASS  mix_calibration  mix 431 (T4 Snapdragon, T3 Orange, T1 Bordeaux) #7 measured #B7664F on 2026-10-22: ΔE 0.9 from the part's colour #B5654F (plate)
+```
+
+Never measured, stale or expired is always WARN and names `3d mix tester --target … --printer NAME` (the target
+is the part's model colour when the project carries one, else `#RRGGBB`). When the project gives the part a
+model colour (3MF core `basematerials`/`colorgroup` on the object), the measured colour is compared with it: ΔE2000
+above `gates.mix_color.max_delta_e` (default 6) is the hard finding (WARN under the default level `warn`, FAIL
+under `block`). To print such a plate anyway: `--accept mix_calibration --reason TEXT` turns the FAIL into a WARN and
+logs a `calibration.accepted` event (mix key, record, ΔE text, reason, G-code SHA-256; needs a write token).
+Without a bound spool or Spoolman filament id for a head, or without 3d-api (`--offline` has no records), the line is
+UNVERIFIED and says what is missing.
 
 Nozzle hardness and filament abrasiveness are separate checks, applied only to tools used by
 the job. A positive `required_nozzle_HRC` is a minimum; `0` skips that numeric requirement.
@@ -111,7 +136,7 @@ Options:
 - `--secs S` — Creality: seconds to listen for pushed state: `3d print-preflight out/roof.gcode --printer k1se --secs 5`
 - `--printops-api URL` — 3d-api for the PrintOps gates (default `$PRINTOPS_API`, else `printops.yaml`): `3d print-preflight out/part.gcode --printer u1 --printops-api http://192.168.0.39:8765`
 - `--offline` — no network: no printer contact, PrintOps state from the snapshot (the slicer hook mode); together with `--printops-api` it is a usage error: `3d print-preflight out/part.gcode --offline`
-- `--accept preset_match --reason TEXT` — print with other presets on purpose: the `preset_match` FAIL becomes a WARN that lists the reason. No other check can be accepted; `--reason` is required: `3d print-preflight out/plate.gcode --printer k1se --accept preset_match --reason 'comparing stock flow on purpose'`.
+- `--accept preset_match --reason TEXT` — print with other presets on purpose: the `preset_match` FAIL becomes a WARN that lists the reason. `--accept mix_calibration` does the same for a measured mix far from the part's colour and logs it in 3d-api. No other check can be accepted; `--reason` is required: `3d print-preflight out/plate.gcode --printer k1se --accept preset_match --reason 'comparing stock flow on purpose'`.
 - `--printops-snapshot FILE` — the snapshot for `--offline`: `3d print-preflight out/part.gcode --offline --printops-snapshot ~/snap.json`
 
 Exit: 0 PASS or WARN (UNVERIFIED lines included), 1 FAIL, 2 usage error or missing file.

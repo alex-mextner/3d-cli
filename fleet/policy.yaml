@@ -83,6 +83,7 @@ gates:
     enclosure_material: warn       # ABS/ASA/PC/PA on an open printer
     plate_material: warn           # the G-code's plate is not on hand, or a bad material/plate pair
     preset_match: block            # not the printer's `slicer:` machine/process preset (#293)
+    mix_calibration: warn          # a plate's mix has no current mix_color record / is stale; measured ΔE above `mix_color` (#418)
   # Per-printer overrides, e.g. `k1se: {drying_due: off}`.
   printers: {}
   # Spoolman `material` spellings → G-code `filament_type` (Orca's names).
@@ -100,6 +101,12 @@ gates:
         warn_delta_e: 6
         fail_delta_e: 15
         why: "facade palette: mixes are tuned to ΔE 4-9 between neighbouring colours (print/QUEUE.md)"
+  # A measured mix (`mix_color` record, #412) against the model colour the project gives the part:
+  # CIEDE2000 above this is a hard finding of mix_calibration (FAIL under `block`). The epic's own
+  # acceptance is a corrected recipe within ΔE 3 of the measured swatch; 6 is where neighbouring
+  # facade colours stop being told apart (see colour.projects above).
+  mix_color:
+    max_delta_e: 6
   filament_sufficient:
     # Start-macro purge outside the G-code's counted extrusion (U1 SM_PRINT_PREEXTRUDE_FILAMENT
     # 30 mm ≈ 0.1 g; K1 START_PRINT line ≈ 0.5 g) rounded up; Orca's per-filament `filament used [g]`

@@ -28,7 +28,7 @@ from errors import GateFailure, InputNotFound, UsageError
 
 USAGE = """3d print-preflight FILE.gcode [--printer NAME] [--axis-limits X0:X1,Y0:Y1|NAME] [--source-3mf FILE.3mf]
                    [--visible [OBJ:]SPEC]... [--bridge-max MM] [--printops-api URL] [--offline]
-                   [--printops-snapshot FILE] [--accept preset_match --reason TEXT] [--json] [--secs S]
+                   [--printops-snapshot FILE] [--accept preset_match|mix_calibration --reason TEXT] [--json] [--secs S]
                    [--no-bed-move]
   Read-only checks before a print. `3d printer start` runs the same checks and refuses on FAIL.
   Every G-code gate runs; one whose input is missing is SKIP and says what to pass.
@@ -90,6 +90,12 @@ USAGE = """3d print-preflight FILE.gcode [--printer NAME] [--axis-limits X0:X1,Y
                          with the bound spool's `slicer_filament_preset`: `; filament_settings_id`,
                          `; filament_flow_ratio`, `; pressure_advance`, `; enable_pressure_advance`
                          = that filament preset (#506). Override: --accept preset_match --reason
+  mix_calibration        every mixed filament the project 3MF's plate prints (needs --source-3mf or
+                         NAME.3mf next to the G-code; no line without one or without mixes) has a
+                         current `mix_color` record for the printer in 3d-api (#418): never
+                         measured, stale (a filament was re-measured later) or expired -> WARN naming
+                         `3d mix tester --target '#RRGGBB' --printer NAME`; measured ΔE to the part's
+                         model colour above gates `mix_color.max_delta_e` -> hard (WARN, FAIL under `block`)
 
 Options:
   --printer NAME          a printer from printer-devices.yaml (see `3d printer list`); its state
@@ -106,8 +112,10 @@ Options:
                           used) and the PrintOps state comes from the snapshot file; not with --printops-api
   --printops-snapshot F   snapshot for --offline (default: $PRINTOPS_SNAPSHOT, else
                           ~/.cache/3d-cli/printops-snapshot.json; `3d printops gates snapshot`)
-  --accept preset_match   turn the preset_match FAIL into a WARN that carries --reason (printing with
-                          other presets on purpose); only preset_match; needs --reason TEXT
+  --accept CHECK          turn the FAIL of preset_match (printing with other presets on purpose) or of
+                          mix_calibration (a measured mix too far from the part's colour; the
+                          acceptance is also logged in 3d-api, needs a write token) into a WARN that
+                          carries --reason; only those two; needs --reason TEXT
   --reason TEXT           why the accepted mismatch is printed
   --no-bed-move           the bed line judges at the current Z: the printer's bed is not moved
   --json                  JSON report on stdout

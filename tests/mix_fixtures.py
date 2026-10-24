@@ -232,3 +232,25 @@ def tile(
     """A 20×20×3 mm tile lying flat, or the same tile standing (20 wide, 3 deep, 20 tall)."""
     mesh = box(20, 3, 20) if standing else box(20, 20, 3)
     return Obj(name, [Part(name, mesh, extruder)], extruder=extruder, rot=rot)
+
+
+def with_model_colour(path: Path, colour: str) -> Path:
+    """Give the project's first object (id 1000) a 3MF basematerials display colour `#RRGGBB`,
+    as a CAD export would carry it."""
+    with zipfile.ZipFile(path) as zf:
+        entries = {n: zf.read(n) for n in zf.namelist()}
+    main = entries["3D/3dmodel.model"].decode()
+    main = main.replace(
+        "<resources>",
+        f'<resources><basematerials id="9"><base name="part" displaycolor="{colour}FF"/></basematerials>',
+        1,
+    ).replace(
+        '<object id="1000" type="model">',
+        '<object id="1000" pid="9" pindex="0" type="model">',
+        1,
+    )
+    entries["3D/3dmodel.model"] = main.encode()
+    with zipfile.ZipFile(path, "w") as zf:
+        for name, data in entries.items():
+            zf.writestr(name, data)
+    return path
