@@ -283,6 +283,7 @@ FILAMENT_KINDS = [
     "temp_tower",
     "max_volumetric_speed",
     "retraction",
+    "fit_clearance",
 ]
 
 
@@ -484,14 +485,14 @@ def test_one_calibration_task_per_head_lists_its_kinds_and_closes_when_every_one
     assert flow["spool_id"] == sid and flow["reason"].startswith("new material type: ")
     label = "Creality Hyper PLA lot A1"
     assert (
-        flow["spool"] == label and t["title"] == f"Calibrate 5 kinds on T1 for {label}"
+        flow["spool"] == label and t["title"] == f"Calibrate 6 kinds on T1 for {label}"
     )
     assert t["why"] == (
-        "Flow ratio, Pressure advance (K), Temperature tower, Max volumetric speed, Retraction"
-        f" — {flow['reason']}"
-    )  # one reason, five kinds: said once
+        "Flow ratio, Pressure advance (K), Temperature tower, Max volumetric speed, Retraction, "
+        f"Fit clearance (quick coupon) — {flow['reason']}"
+    )  # one reason, six kinds: said once
     assert t["spool_id"] == sid and t["spools"] == [{"name": label, "spool_id": sid}]
-    assert t["duration_min"] == 30 + 15 + 45 + 20 + 20 and t["blocks"] == "none"
+    assert t["duration_min"] == 30 + 15 + 45 + 20 + 20 + 10 and t["blocks"] == "none"
     assert t["done_hint"] == (
         f"3d calibrate record <kind> --printer k1se --head T1 --spool {sid} "
         f"(<kind>: {' | '.join(FILAMENT_KINDS)})"
@@ -503,9 +504,9 @@ def test_one_calibration_task_per_head_lists_its_kinds_and_closes_when_every_one
     assert rep.updated == [t["id"]] and rep.closed == []
     less = pt.get(conn, t["id"])
     assert less["calibration_kinds"] == FILAMENT_KINDS[1:]
-    assert less["title"] == f"Calibrate 4 kinds on T1 for {label}"
+    assert less["title"] == f"Calibrate 5 kinds on T1 for {label}"
 
-    ids = [record(ctx, kind, sid) for kind in FILAMENT_KINDS[1:-1]]
+    ids = [record(ctx, kind, sid) for kind in [*FILAMENT_KINDS[1:-2], FILAMENT_KINDS[-1]]]
     pt.sync(conn, src, "k1se")
     one = pt.get(conn, t["id"])
     assert one["title"] == f"Calibrate Retraction on T1 for {label}"
@@ -539,6 +540,7 @@ def test_one_calibration_task_per_head_lists_its_kinds_and_closes_when_every_one
         "flow_ratio",
         "pressure_advance",
         "max_volumetric_speed",
+        "fit_clearance",
     ]  # the nozzle-scoped kinds; the closed task is history, never reopened
     assert pt.get(conn, t["id"])["status"] == "done"
 
@@ -590,6 +592,7 @@ def test_a_persons_dismissal_sticks_for_the_keys_it_covered_and_a_new_nozzle_reo
         "flow_ratio",
         "pressure_advance",
         "max_volumetric_speed",
+        "fit_clearance",
     ]  # new nozzle keys; temp tower and retraction keep the dismissal
 
 
@@ -634,7 +637,7 @@ def test_a_spool_back_whose_kinds_were_dismissed_dismisses_the_other_spools_task
     b = spool(ctx.spoolman, "Matte PLA", slot="k1se/T1")
     pt.sync(conn, src, "k1se")
     [hb] = calib_open(conn, "k1se")
-    assert hb["spool_id"] == b and len(hb["requirements"]) == 5
+    assert hb["spool_id"] == b and len(hb["requirements"]) == 6
     load(b, "")
     load(a, "k1se/T1")
     rep = pt.sync(conn, src, "k1se")
@@ -776,6 +779,7 @@ def test_the_per_kind_tasks_of_the_first_derivation_are_superseded_by_the_heads_
         "pressure_advance",
         "temp_tower",
         "max_volumetric_speed",
+        "fit_clearance",
     ]  # flow is recorded, retraction a person dismissed
     flow = pt.get(conn, legacy["flow_ratio"]["id"])
     assert (flow["status"], flow["calibration_id"]) == ("done", rec)

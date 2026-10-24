@@ -253,3 +253,23 @@ kinds:
     sources:
       - "babushkin-dom SPEC.md item 58 (short layer patterns read best on walls)"
       - https://hajim.rochester.edu/ece/sites/gsharma/ciede2000/
+
+  # Fit tolerances (epic #570, S2 #573). One record per head x nozzle x filament holds the readings of the
+  # quick coupon (`3d calibrate fit`): `readings` is a JSON list of {fit_type, shape, gap_mm, result free|press|
+  # fused} (lib/fits.py validate_fit_clearance), read by lib/fits_sources/calibration.py into the correction
+  # rows `3d fits resolve` applies. Advice, never a gate: fleet/policy.yaml makes it `warn`.
+  fit_clearance:
+    title: Fit clearance (quick coupon)
+    scope: [head, nozzle, filament]
+    lot_sensitive: false
+    baseline: required
+    invalidated_by: [nozzle_swap, nozzle_diameter, hotend]
+    methods: [fit_coupon, caliper, manual]  # fit_coupon: `3d calibrate fit gen`; caliper: `--measured`
+    values:
+      readings: {type: string}               # JSON list of fit_clearance readings
+      coupon: {type: string, optional: true}  # which coupon/ladder set was printed
+    apply: [journal]
+    estimate: {minutes: 10, grams: 6}
+    sources:
+      - "docs/contracts/fits.md (fit_clearance record, S0 #571)"
+      - "docs/commands/calibrate.md (calibrate fit)"

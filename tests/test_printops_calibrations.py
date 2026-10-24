@@ -88,7 +88,7 @@ def test_committed_catalog_and_policy_are_valid(repo_files: None) -> None:
     catalog = load_catalog()
     assert {"flow_ratio", "pressure_advance", "temp_tower", "max_volumetric_speed", "retraction",
             "input_shaper", "z_offset", "bed_mesh", "head_offsets", "rotation_distance",
-            "belt_tension", "filament_color", "mix_color"} == set(catalog.kinds)
+            "belt_tension", "filament_color", "mix_color", "fit_clearance"} == set(catalog.kinds)
     assert policy.check() == []
     p = policy.section("calibrations")
     assert p.kind_names() <= set(catalog.kinds)
@@ -396,6 +396,11 @@ def test_gate_compares_footer_values_with_the_records(ctx: cal.Ctx) -> None:
     record(ctx, "retraction", {"retraction_length": 0.8}, printer="u1", head="T1")
     record(ctx, "temp_tower", {"nozzle_temp_min": 200, "nozzle_temp_best": 215, "nozzle_temp_max": 230},
            printer="u1", head="T1", method="temp_tower")
+    # the fit coupon (#573) is advice: without it the gate says WARN (policy `fit_clearance: warn`), never FAIL
+    advice = cal.check_gcode(ctx, "u1", footer(), [0])
+    assert (advice.overall, by_kind(advice)["fit_clearance"].level) == ("WARN", "WARN")
+    record(ctx, "fit_clearance", {"readings": '[{"fit_type":"sliding","shape":"round","gap_mm":0.2,"result":"free"}]'},
+           printer="u1", head="T1", method="fit_coupon")
 
     ok = cal.check_gcode(ctx, "u1", footer(), [0])
     assert ok.overall == "PASS", [r.detail for r in ok.items if r.level != "PASS"]

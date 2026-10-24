@@ -24,8 +24,20 @@ clearance; the old `snug|normal|loose` are the `aliases:` block (`snug` = `tight
 
 Calibration record kind `fit_clearance` = `{fit_type, shape, gap_mm, result: free|press|fused}`;
 `fits.validate_fit_clearance` checks one, `fits.corrections_from_fit_clearance` turns a coupon's readings into
-`source: calibration` rows (smallest `free` gap minus the table clearance) that `resolve(extra_corrections=...)`
-applies. The coupon and the recording command are S2.
+`source: calibration` rows that `resolve(extra_corrections=...)` applies: a clearance fit (`snap`, `sliding`, `tight`)
+takes the smallest `free` gap, a `press` fit the largest gap that still read `press`, minus the table's signed target
+(clearance - interference). A press reading is SIGNED: the gap of an undersized hole is negative (`-interference`, down
+to -1 mm); every other fit type is never below 0. `glue` is validated but not converted.
+
+## The fit coupon (S2 #573)
+
+`3d calibrate fit plan|gen|quick|read|record|check` (`docs/commands/calibrate.md`, `lib/calibrate_fit*.py`,
+`lib/fit_coupon*.py`) prints six 7-step ladders around the table values, reads the user's result (`--result step=N`,
+one word per step, or caliper numbers `--measured`) and stores ONE `fit_clearance` calibration record per head x
+nozzle x filament (`fleet/calibrations.yaml`; value `readings` = the JSON list of the readings above) in 3d-api, or in
+the offline settings-history buffer (`printops.settings_change/1` line, replayed by `3d settings import`). A newer
+record supersedes the older one, so `record` carries over the ladders it does not re-read. The reader never stores a
+readout without a usable step (all fused: exit 1, widen the range with `--gap-offset`).
 
 ## Provenance (S1 #572)
 
@@ -50,12 +62,14 @@ A source is one module `lib/fits_sources/<name>.py` defining
 SOURCE = Source("calibration", "coupon rows of 3d calibrate fit", load)   # load(query: Query) -> list[Correction]
 ```
 
-`discover()` imports every non-underscore module there, so **slice S2 (#573) adds `calibration.py` and edits no
-shared file**: `load` turns the stored `fit_clearance` records into rows with `fits.corrections_from_fit_clearance`
-(`source="calibration"`, `measured_at`, the record id in `note`), reading the existing calibration store (3d-api
-with the offline JSONL buffer). A calibration row outranks a manual row of the same specificity and shows as
+`discover()` imports every non-underscore module there, so slice S2 (#573) added `calibration.py` and edited no
+shared file: `load` turns the stored `fit_clearance` records into rows with `fits.corrections_from_fit_clearance`
+(`source="calibration"`, `measured_at` = the record's `recorded_at`, `calibration record #12` or
+`buffer:<uid prefix>` in `note`), reading the existing calibration store (3d-api with the offline JSONL buffer). A
+calibration row outranks a manual row of the same specificity and shows as
 `status: calibrated`. A source that cannot read its store raises a `ThreeDError`; it never returns a silently partial
-list. `manual.py` is the built-in source: `<config dir>/fits-corrections.yaml` (`$THREED_FITS_CORRECTIONS`), managed by
+list (an UNREACHABLE 3d-api falls back to the buffer with a stderr note; `THREED_FIT_CALIBRATION_API=off` disables every
+3d-api call, the test suite sets it). `manual.py` is the built-in source: `<config dir>/fits-corrections.yaml` (`$THREED_FITS_CORRECTIONS`), managed by
 `3d fits corrections add|remove|list`, one row per scope, atomic locked writes.
 
 ## Declared clearances: the `@fit` marker

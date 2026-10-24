@@ -2,8 +2,8 @@
 
 WHAT: `fits.resolve` is pure: it applies the table's rows plus the extra rows it is handed. This package is the
 one place that hands it the rest: the manual rows a user keeps with `3d fits corrections add`
-(`manual.py`) and any other source that drops a module here, e.g. the calibration rows `3d calibrate fit apply`
-writes (slice S2 #573).
+(`manual.py`) and any other source that drops a module here, e.g. the calibration rows of `3d calibrate fit record`
+(`calibration.py`, slice S2 #573).
 
 CONTRACT (the hook for S2): a module `lib/fits_sources/<name>.py` defines `SOURCE = Source(name, summary,
 load)`. `load(query)` returns `fits.Correction` rows with `source` set to their real origin (`calibration` for a
