@@ -77,6 +77,22 @@ class Material:
     color: str              # default display hex, e.g. "#1f9c4b"
     finish: str             # matte | gloss | metal
     layer_adhesion: float   # cross-layer anisotropy factor in (0, 1]
+    shrink_xy_pct: float | None = None  # linear XY shrink, % of the printed size; None = not recorded
+    shrink_z_pct: float | None = None   # linear Z shrink, %; None = not recorded (no Z compensation)
+
+
+def _optional_percent(name: str, field: str, value: Any) -> float | None:
+    """An optional shrink percentage: absent/None = not recorded, otherwise a number in [0, 20)."""
+    if value is None:
+        return None
+    number = _coerce_float(name, field, value)
+    if not 0 <= number < 20:
+        raise MaterialError(
+            f"material {name!r}: `{field}` must be a percentage in [0, 20), got {value!r}",
+            command="materials",
+            remediation=[f"Set `{field}:` to the linear shrink in percent (PLA ~0.3), or remove it."],
+        )
+    return number
 
 
 def _require_yaml() -> Any:
@@ -174,6 +190,8 @@ def _build_material(name: str, spec: dict[str, Any]) -> Material:
         color=str(spec["color"]),
         finish=finish,
         layer_adhesion=_coerce_float(name, "layer_adhesion", spec["layer_adhesion"]),
+        shrink_xy_pct=_optional_percent(name, "shrink_xy_pct", spec.get("shrink_xy_pct")),
+        shrink_z_pct=_optional_percent(name, "shrink_z_pct", spec.get("shrink_z_pct")),
     )
 
 

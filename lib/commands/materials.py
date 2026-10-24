@@ -82,6 +82,10 @@ def _show(name: str) -> int:
         ("finish", m.finish),
         ("layer_adhesion", f"{m.layer_adhesion:g}  (cross-layer strength factor, 1.0 = isotropic)"),
     ]
+    if m.shrink_xy_pct is not None:
+        rows.append(("shrink_xy", f"{m.shrink_xy_pct:g} %  (linear, fit table: slicer shrinkage compensation)"))
+    if m.shrink_z_pct is not None:
+        rows.append(("shrink_z", f"{m.shrink_z_pct:g} %  (linear Z)"))
     label_w = max(len(k) for k, _ in rows)
     print(m.name)
     for key, val in rows:
