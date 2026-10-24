@@ -38,10 +38,17 @@ Options:
   --force-fallback     skip model tiers, use OpenCV/numpy floor only
   --sam2-checkpoint P   enable SAM2 mask tier (path to a .pt checkpoint)
   --depth-model ID      HF model id (default: depth-anything/Depth-Anything-V2-Small-hf)
+  --backdrop            studio render / product shot on a smooth neutral backdrop: the mask is everything that
+                        is not the backdrop (keeps black, white and pink parts that grabCut drops; a floor
+                        shadow stays backdrop). Tier "backdrop"; skips SAM2/rembg/grabCut
+  --backdrop-saturation S   --backdrop: highest HSV saturation of a backdrop pixel (default 0.14)
+  --backdrop-value LO,HI    --backdrop: HSV value range of a backdrop pixel (default 0.38,0.80)
 
 Example:
   3d preprocess ref.jpg -o work/
-  3d preprocess ref.jpg --force-fallback"""
+  3d preprocess ref.jpg --force-fallback
+  3d preprocess studio_render.png --backdrop -o work/
+  3d preprocess studio_render.png --backdrop --backdrop-saturation 0.2 --backdrop-value 0.3,0.9"""
 
 
 def run(argv: list[str]) -> int:
@@ -72,7 +79,10 @@ def run(argv: list[str]) -> int:
             args.append(a)
             i += 1
 
-    return exec_tool("opencv-python-headless,numpy,pillow", "preprocess_reference.py", args)
+    deps = "opencv-python-headless,numpy,pillow"
+    if "--backdrop" in argv:
+        deps += ",scipy"  # the backdrop mask uses scipy.ndimage
+    return exec_tool(deps, "preprocess_reference.py", args)
 
 
 COMMAND = Command(

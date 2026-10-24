@@ -186,6 +186,7 @@ boundaries are ready.
 These modules support reference preprocessing, image comparison, scoring, and match-loop
 orchestration:
 
+- `backdrop_mask.py`
 - `debug_overlay.py`
 - `match_loop.py`
 - `mask_geometry.py`
@@ -293,6 +294,7 @@ Every current root Python module is listed here so future additions are intentio
 - `dimension_args.py` — the stdlib-only option grammar of `3d dimension` (`--bed`, `--dim`, `--width`), shared by the command and the renderer.
 - `dimension_check.py` — the legibility gate of dimensioned renders (`3d dimension --check`): sidecar + pixel checks of every label.
 - `dimension_render.py` — shaded top/front/side/iso renders with mm dimension arrows and the `.dims.json` sidecar (`3d dimension`).
+- `backdrop_mask.py` — subject mask of a studio render: everything that is not the smooth neutral backdrop connected to the frame border (`3d preprocess --backdrop`; numpy + scipy).
 - `refmatch.py` — image/reference matching helpers.
 - `ref_measure.py` — `3d measure-ref`: the same feature shape (an eye opening with iris / pupil, a nostril ...) measured on a reference image and on a render (corner line, aspect, tilt, extents, lid cover), delta gate.
 - `render.py` — OpenSCAD render and section implementation.
