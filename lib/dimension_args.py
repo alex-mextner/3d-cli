@@ -9,6 +9,7 @@ Each parser raises ValueError with a message naming what was expected.
 
 from __future__ import annotations
 
+import json
 import math
 import re
 from typing import NamedTuple
@@ -124,3 +125,76 @@ def parse_part(spec: str) -> PartSpec:
     if new_name is None and not role:
         raise ValueError(f"--part {spec!r}: give a NAME, a :ROLE or both")
     return PartSpec(selector, new_name, role or None)
+
+
+UP_AXES = ("Z", "Y", "X")
+OVERALL_MODES = ("auto", "always", "never")
+
+
+def parse_up(raw: str) -> str:
+    """`Z`, `Y` or `X` (any case): the model's vertical axis."""
+    value = raw.strip().upper()
+    if value not in UP_AXES:
+        raise ValueError(f"--up {raw!r}: expected one of {', '.join(UP_AXES)}")
+    return value
+
+
+def parse_overall(raw: str) -> str:
+    value = raw.strip().lower()
+    if value not in OVERALL_MODES:
+        raise ValueError(
+            f"--overall {raw!r}: expected one of {', '.join(OVERALL_MODES)}"
+        )
+    return value
+
+
+def _point_text(raw: object, where: str) -> str:
+    if not isinstance(raw, (list, tuple)) or len(raw) != 3:
+        raise ValueError(f"{where}: a point is three numbers [x, y, z]")
+    return ",".join(str(finite(str(v), where)) for v in raw)
+
+
+def parse_dims_file(path: str) -> list[str]:
+    """Read a `--dims-from` spec (JSON, or YAML when pyyaml is there) as `--dim` strings.
+
+    Shape: a list, or {"dims": [...]}, of {"name": ..., "from": [x,y,z], "to": [x,y,z]}.
+    Names must be unique (the check matches the image's labels by name).
+    """
+    try:
+        with open(path, encoding="utf-8") as handle:
+            text = handle.read()
+    except OSError as exc:
+        raise ValueError(f"--dims-from {path!r}: cannot read it: {exc}") from exc
+    try:
+        data = json.loads(text)
+    except ValueError:
+        try:
+            import yaml
+
+            data = yaml.safe_load(text)
+        except Exception as exc:  # noqa: BLE001 - yaml raises its own error family or is missing
+            raise ValueError(
+                f"--dims-from {path!r}: not valid JSON or YAML: {exc}"
+            ) from exc
+    if isinstance(data, dict):
+        data = data.get("dims")
+    if not isinstance(data, list) or not data:
+        raise ValueError(
+            f"--dims-from {path!r}: expected a non-empty list of measurements"
+        )
+    out: list[str] = []
+    seen: set[str] = set()
+    for i, item in enumerate(data):
+        where = f"--dims-from {path!r} entry {i + 1}"
+        if not isinstance(item, dict) or not isinstance(item.get("name"), str):
+            raise ValueError(f"{where}: needs a string `name`, `from` and `to`")
+        name = item["name"].strip()
+        if not name or ":" in name or name in seen:
+            raise ValueError(
+                f"{where}: name {name!r} is empty, contains ':' or repeats"
+            )
+        seen.add(name)
+        out.append(
+            f"{name}:{_point_text(item.get('from'), where)}:{_point_text(item.get('to'), where)}"
+        )
+    return out

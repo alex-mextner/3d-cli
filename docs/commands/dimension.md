@@ -8,8 +8,8 @@ labels can be read. Issue: [#477](https://github.com/alex-mextner/3d-cli/issues/
 ## Usage
 
 ```
-3d dimension MODEL.(stl|3mf|obj|scad) -o OUT.png [--bed WxD] [--dim NAME:x,y,z:x,y,z]... [--part SEL=NAME[:ROLE]]... [-D NAME=VALUE]... [options]
-3d dimension --check IMAGE.png [--json]
+3d dimension MODEL.(stl|3mf|obj|scad) -o OUT.png [--bed WxD] [--dim NAME:x,y,z:x,y,z]... [--part SEL=NAME[:ROLE]]... [-D NAME=VALUE]... [--up Z|Y|X] [--overall auto|always|never] [--dims-from SPEC] [options]
+3d dimension --check IMAGE.png [--json] [--require-dims]
 ```
 
 Example (the spoon150 print pose on a 220 x 220 bed):
@@ -39,6 +39,9 @@ Render options besides `--bed` and `--dim`:
 | `--label-px PX` | label font size at 1280 px width (default 20; below 14 `--check` fails) | `--label-px 24` |
 | `-D NAME=VALUE` | override an OpenSCAD variable of a `.scad` input (repeatable; any other input is a usage error) | `-D standin=true` |
 | `--part SEL=NAME[:ROLE]` | rename a part and/or set its role (`printed`, `vitamin`, `reference`, `stand_in`); SEL is a part name or a `#RRGGBB` colour (repeatable) | `--part "#2a62c9=PCB:stand_in"` |
+| `--up Z\|Y\|X` | the model's vertical axis (default `Z`). A Y-up model gets a TRUE top view; labels keep the model's own X/Y/Z letters; not with `--bed` ([#595](https://github.com/alex-mextner/3d-cli/issues/595)) | `--up Y` |
+| `--overall auto\|always\|never` | overall X/Y/Z of the whole model. `auto` (default) draws them, except on an exploded assembly or a plate whose parts do not touch: there each separate part gets its own footprint dims (`X left 10.0 mm`) and the header says `N separate parts` ([#596](https://github.com/alex-mextner/3d-cli/issues/596)) | `--overall always` |
+| `--dims-from SPEC` | JSON/YAML list (or `{dims: [...]}`) of `{name, from: [x,y,z], to: [x,y,z]}` measurements that MUST be drawn: the render exits 2 naming any that fits no view, and the sidecar records them as `required_dims` ([#594](https://github.com/alex-mextner/3d-cli/issues/594)) | `--dims-from dims.yaml` |
 
 `--dim` points are model-space mm and may be negative (`--dim "width:-30,0,0:30,0,0"`).
 `span` is shown only when the part's oriented bounding box is more than 3% longer than its
@@ -85,6 +88,8 @@ A single-part model keeps one colour and gets no legend. Rename a part, or give 
 legend marks it `(stand-in)`, so a bought or imaginary part cannot be mistaken for a printed one;
 `vitamin` / `reference` keep their colour and are marked in the legend.
 
+Parts of a file that carry a role tag (`3d:role=stand_in|vitamin|reference`) are always included in the render, muted; for a `.scad` the model's own defines decide what exists (`-D standin=true`).
+
 Example (the soil-sensor mole: shells, nose/paws, eyes, and the purchased probe as stand-ins):
 
 ```
@@ -112,6 +117,8 @@ single part) and `warnings` (e.g. an OBJ whose MTL is missing). `--check` ignore
 labels only.
 
 ## `--check` — the legibility gate
+
+`--check IMAGE --require-dims` additionally FAILS (`missing-required-dim`) when a measurement declared with `--dims-from` is not in the image, or (`no-required-dims`) when the image declares none. Without the flag nothing changes.
 
 Reads the sidecar beside the image AND measures the pixels. Exit 0 = legible, 1 = offenders
 listed (`--json` for machine output), 2 = usage error.
