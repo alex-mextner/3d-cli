@@ -22,8 +22,13 @@ this module only parses argv and prints — all merge/validation/error logic liv
 """
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from cli.registry import Command
 from errors import UsageError
+
+if TYPE_CHECKING:
+    from materials import Material
 
 USAGE = """3d materials <subcommand>
   Why: every part picks a material BY NAME (in 3d.yaml). This command shows what those names
@@ -68,6 +73,10 @@ def _list() -> int:
     return 0
 
 
+def _default_tag(m: Material, field: str) -> str:
+    return "  [generic default, not on the card]" if field in m.defaulted else ""
+
+
 def _show(name: str) -> int:
     from materials import get_material  # lazy: pulls the loader (and yaml) only when used
 
@@ -81,6 +90,9 @@ def _show(name: str) -> int:
         ("color", m.color),
         ("finish", m.finish),
         ("layer_adhesion", f"{m.layer_adhesion:g}  (cross-layer strength factor, 1.0 = isotropic)"),
+        ("poisson", f"{m.poisson:g}  (in-plane){_default_tag(m, 'poisson')}"),
+        ("z_modulus_factor", f"{m.z_modulus_factor:g}  (E across layers / E in-plane){_default_tag(m, 'z_modulus_factor')}"),
+        ("strain_limit", f"{m.strain_limit_pct:g} %  (permissible single-assembly strain, in-plane){_default_tag(m, 'strain_limit_pct')}"),
     ]
     label_w = max(len(k) for k, _ in rows)
     print(m.name)

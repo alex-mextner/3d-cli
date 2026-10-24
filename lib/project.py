@@ -260,7 +260,9 @@ def _build_section(name: str, spec: Any, *, command: str | None) -> ProjectSecti
 def _build_load(name: str, spec: Any, *, command: str | None) -> ProjectLoad:
     data = _mapping(spec, f"loads.{name}", command=command)
     anchor = data.get("anchor")
-    if not isinstance(anchor, str) or not anchor:
+    if anchor is None and (data.get("kind") == "gravity" or data.get("plane") is not None):
+        anchor = ""  # gravity acts on the whole model; a `plane:` load names its face by coordinate, not by anchor
+    elif not isinstance(anchor, str) or not anchor:
         raise ProjectError(
             f"loads.{name} is missing `anchor:`",
             command=command,
