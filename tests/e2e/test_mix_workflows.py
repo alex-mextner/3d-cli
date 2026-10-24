@@ -79,7 +79,7 @@ def test_print_preflight_shows_the_mix_face_line_from_the_sibling_project(
     checks = {c["name"]: c for c in json.loads(ok.stdout)["checks"]}
     assert checks["mix face"]["status"] == "PASS", checks["mix face"]
     assert checks["head seq"]["status"] == "PASS", checks["head seq"]
-    assert "SKIP  mix face    no project 3MF" in none.stdout
+    assert "mix face" in none.stdout and "(G-code only: no project 3MF;" in none.stdout
 
 
 def test_mix_pattern_rejects_gwg_and_accepts_an_isolated_minor_layer(
@@ -258,3 +258,24 @@ def test_mix_profile_refuses_what_orca_would_refuse_and_never_overwrites(
     nodir = run_cli(tmp_path, "mix", "profile", "one.3mf", "-o", "missing/dir/out.3mf")
     assert nodir.returncode == 2
     assert "cannot write" in nodir.stderr and "Traceback" not in nodir.stderr
+
+
+def test_preflight_judges_mix_face_from_the_gcode_alone_without_a_project(
+    tmp_path: Path,
+) -> None:
+    """Real U1 slices of a mix tile (no NAME.3mf next to them): flat WARNs, standing PASSes, and the
+    line says it used the G-code; with the project next to it the 3MF is used instead (#419)."""
+    data = Path(__file__).resolve().parents[1] / "data" / "mix_gcode_faces"
+    for name in ("flat", "standing"):
+        (tmp_path / f"{name}.gcode").write_bytes((data / f"{name}.gcode").read_bytes())
+    flat = run_cli(tmp_path, "print-preflight", "flat.gcode", "--json")
+    standing = run_cli(tmp_path, "print-preflight", "standing.gcode", "--json")
+    flat_line = {c["name"]: c for c in json.loads(flat.stdout)["checks"]}["mix face"]
+    ok_line = {c["name"]: c for c in json.loads(standing.stdout)["checks"]}["mix face"]
+    assert flat_line["status"] == "WARN" and "G-code only: no project 3MF" in flat_line["detail"]
+    assert any("PTA: heads T1, T3, T4" in x for x in flat_line["lines"])
+    assert ok_line["status"] == "PASS" and "G-code only" in ok_line["detail"]
+    (tmp_path / "flat.3mf").write_bytes((data / "flat.3mf").read_bytes())
+    with_project = run_cli(tmp_path, "print-preflight", "flat.gcode", "--json")
+    line = {c["name"]: c for c in json.loads(with_project.stdout)["checks"]}["mix face"]
+    assert line["status"] == "FAIL" and "flat.3mf next to the G-code" in line["detail"]
