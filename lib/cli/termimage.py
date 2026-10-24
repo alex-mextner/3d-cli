@@ -17,6 +17,10 @@ DETECTION (`detect`): `THREED_IMAGE_PROTOCOL` (kitty|iterm2|sixel|none) wins; el
 not inside tmux/screen (they swallow graphics escapes unless passthrough is configured — ask for it with an explicit
 protocol); then env hints (KITTY_WINDOW_ID, TERM, TERM_PROGRAM, LC_TERMINAL).
 
+  - blocks — NOT a graphics protocol: the picture as half-block cells (`▀`, 24-bit foreground = upper pixel,
+    background = lower pixel). `preview_protocol()` picks it for a colour terminal without kitty/iterm2/sixel, so
+    the model browser always has a picture on a TTY; it needs Pillow and returns None without it.
+
 IMPORT RULE: stdlib-only at module top; Pillow is imported inside the functions that need it.
 """
 
@@ -29,6 +33,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 PROTOCOLS = ("kitty", "iterm2", "sixel")
+BLOCKS = "blocks"  # the fallback for a colour terminal without a graphics protocol: half-block cells, never forced by --images
 _PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 _SIXEL_TERMS = ("foot", "foot-extra", "mlterm", "contour", "yaft", "yaft-256color")
 _KITTY_CHUNK = 4096
@@ -58,6 +63,23 @@ def detect(env: Mapping[str, str] | None = None, *, is_tty: bool = True) -> str 
     if "sixel" in term or term in _SIXEL_TERMS:
         return "sixel"
     return None
+
+
+def preview_protocol(
+    env: Mapping[str, str] | None = None, *, is_tty: bool = True
+) -> str | None:
+    """`detect()`, else `blocks` on a colour terminal, else None. No TTY (a pipe, a file, CI) is None unless a protocol is
+    forced with `THREED_IMAGE_PROTOCOL`;
+    `THREED_IMAGE_PROTOCOL=none` is None too; `NO_COLOR` or `TERM=dumb` rules the block fallback out."""
+    e = os.environ if env is None else env
+    if e.get("THREED_IMAGE_PROTOCOL", "").strip().lower() == "none":
+        return None
+    found = detect(e, is_tty=is_tty)  # an explicit THREED_IMAGE_PROTOCOL wins even without a TTY, as for --images
+    if found:
+        return found
+    if not is_tty or e.get("NO_COLOR") or e.get("TERM", "") in ("", "dumb"):
+        return None
+    return BLOCKS
 
 
 def _pillow() -> Any:
@@ -180,6 +202,36 @@ def encode_sixel(data: bytes, cols: int) -> str | None:
         return None
 
 
+def encode_blocks(data: bytes, cols: int, *, max_rows: int = 20) -> str | None:
+    """The picture as lines of half-block cells, `cols` cells wide and at most `max_rows` text rows tall (two
+    pixel rows per text row), each line ending in a colour reset; None without Pillow or for an unreadable image."""
+    image_mod = _pillow()
+    if image_mod is None:
+        return None
+    try:
+        with image_mod.open(io.BytesIO(data)) as img:
+            img.load()
+            img = img.convert("RGB")
+            width = max(1, cols)
+            height = max(2, round(img.height * width / img.width))
+            if height > max_rows * 2:
+                height = max_rows * 2
+                width = max(1, round(img.width * height / img.height))
+            img = img.resize((width, height + height % 2))
+            px = img.load()
+            lines = []
+            for y in range(0, img.height, 2):
+                cells = []
+                for x in range(img.width):
+                    r1, g1, b1 = px[x, y]
+                    r2, g2, b2 = px[x, y + 1]
+                    cells.append(f"\x1b[38;2;{r1};{g1};{b1}m\x1b[48;2;{r2};{g2};{b2}m▀")
+                lines.append("".join(cells) + "\x1b[0m")
+            return "\n".join(lines) + "\n"
+    except Exception:  # noqa: BLE001 — see _png_bytes
+        return None
+
+
 def encode(data: bytes, protocol: str, *, cols: int = 20) -> str | None:
     """The escape sequence drawing `data` with `protocol`, or None when it cannot be done here (no Pillow for
     a non-PNG kitty image or a sixel, an iTerm2 image too big to send as is, an unreadable image, an unknown
@@ -193,4 +245,6 @@ def encode(data: bytes, protocol: str, *, cols: int = 20) -> str | None:
         return encode_iterm2(shrunk, cols) if shrunk else None
     if protocol == "sixel":
         return encode_sixel(data, cols)
+    if protocol == BLOCKS:
+        return encode_blocks(data, cols)
     return None
