@@ -21,18 +21,20 @@ from cli.registry import Command
 
 DEPS = "numpy,scipy,trimesh,manifold3d,rtree,shapely,pyyaml,pillow,scikit-image"
 
-USAGE = """3d prep MODEL.stl|.3mf [--out DIR] [--printer u1] [--colors colors.yaml] [--fit items.json] [options]
+USAGE = """3d prep MODEL.stl|.3mf [--out DIR] [--printer u1|k1se] [--colors colors.yaml] [--fit items.json] [options]
 3d prep steps                       list the steps and what each needs
 3d prep status OUT_DIR              step table of the last run in OUT_DIR
   Runs, with a per-step cache in OUT_DIR (default ./MODEL-prep):
     diagnose repair orient adapt overhang fit stability colors layers project slice gates proof
-  Outputs in OUT_DIR: NAME.print.stl, NAME.3mf, NAME.gcode, proof-report.md + proof/, prep.json.
+  Outputs in OUT_DIR: NAME.print.stl, NAME.3mf (u1) or NAME.profiles/ (k1se), NAME.gcode, proof-report.md + proof/,
+  prep.json.
   Exit 1 when any step FAILs; PASS/WARN/SKIP exit 0. Runs under the heavy lock (3d heavy) unless --no-lock.
 
 Options:
   --spec FILE.yaml        settings file (printer, orient, angle, pitch, adapt, fit, holder, loads, stability,
-                          colors, process{preset,filament_preset,walls,infill,layer_min,layer_max,brim,mix_cap}, gcode)
-  --printer u1            target printer (default u1)
+                          colors, process{preset,filament_preset,walls,infill,layer_min,layer_max,brim,mix_cap,
+                          supports,set,fset,overlay}, gcode)
+  --printer u1            target printer: u1 (4-head, 3MF project) or k1se (one head, STL + flat Orca presets; default u1)
   --orient auto|keep      auto = rotate to the best candidate when it clearly cuts overhang (default), keep = never
   --angle 45              overhang limit, degrees from vertical (default 45)
   --pitch 0.25            voxel size / layer unit in mm for overhang + adaptation (default 0.25)
@@ -40,9 +42,20 @@ Options:
   --no-adapt              report overhangs but do not change the model
   --fit items.json        items the object must hold (phones.json schema: cases + items); HolderSpec in --spec holder:
   --colors colors.yaml    filaments + landmark boxes + regions -> filament or mix per colour part
-  --process NAME          Orca process preset (default "0.20mm Standard @Snapmaker U1 (0.4 nozzle)")
-  --filament NAME         Orca filament preset for every slot (default: the printer's generic PLA)
+  --process NAME          Orca process preset (u1: "0.20mm Standard @Snapmaker U1 (0.4 nozzle)"; k1se: the fleet
+                          "0.20mm Standard @Creality K1 SE - accel 8900")
+  --filament NAME         Orca filament preset for every slot (default: the printer's generic PLA); k1se also
+                          has "Elegoo RAPID PLA+ @K1-all" (235/60 C, flow 0.98, max volumetric 30 mm3/s)
   --walls 4 --infill 15   wall loops and sparse infill percent
+  --supports none|auto    k1se: auto = easy tear-off supports under overhangs over 45 deg, build plate only
+                          (default none; u1 only accepts none)
+  --set KEY=VALUE         process setting over the preset, repeatable (e.g. --set outer_wall_speed=250); k1se: the
+                          `overrides` gate FAILs a key the slicer did not take (a typo is ignored silently)
+  --fset KEY=VALUE        k1se: filament setting over the preset, repeatable (--fset pressure_advance=0.04)
+  --max-volumetric N      k1se: the filament's max volumetric speed in mm3/s (= --fset filament_max_volumetric_speed=N)
+  --overlay FILE.json     k1se: {"process": {...}, "filament": {...}, "machine": {...}} settings over the preset;
+                          --set/--fset win over the file. Accelerations, jerk or a machine section rename the presets
+                          to "... - prep overrides" (the G-code then no longer claims the fleet preset)
   --layer-min 0.08 --layer-max 0.32   adaptive layer-height band in mm
   --brim MM               brim width (default 0)
   --only a,b              run just these steps (and what they need); --skip a,b leaves steps out
@@ -57,6 +70,8 @@ Examples:
   3d prep cat.stl --out out --colors colors.yaml                    # re-run: unchanged steps are cache hits
   3d prep cat.stl --out out --orient keep --angle 50 --no-adapt     # report only
   3d prep cat.stl --out out --only repair,orient,overhang --no-slice
+  3d prep part.stl --out out --printer k1se --orient keep --no-adapt --filament "Elegoo RAPID PLA+ @K1-all" --walls 3 --set outer_wall_speed=250 --max-volumetric 30   # real feedrates in the gates
+  3d prep part.stl --out out --printer k1se --overlay speeds.json --supports auto            # speeds/accel from a file
   3d prep cat.stl --out out --from colors                           # redo colours, layers, 3MF, slice, gates
   3d prep cat.stl --out out --no-slice --json | jq '.steps[] | {name, verdict, seconds}'
   3d prep status out

@@ -15,13 +15,13 @@ G-code verifier 14x), and a nested lock hung one run for 25 minutes.
 ## Usage
 
 ```
-3d prep MODEL.stl|.3mf [--out DIR] [--printer u1] [--colors colors.yaml] [--fit items.json] [options]
+3d prep MODEL.stl|.3mf [--out DIR] [--printer u1|k1se] [--colors colors.yaml] [--fit items.json] [options]
 3d prep steps
 3d prep status OUT_DIR
 ```
 
 Outputs in `OUT_DIR` (default `./MODEL-prep`): `NAME.print.stl` (the adapted mesh), `NAME.3mf` (project)
-+ `NAME.manifest.json`, `NAME.gcode`, `proof-report.md` + `proof/*.png`, `prep.json` (every step result,
++ `NAME.manifest.json` (u1) or `NAME.profiles/{machine,process,filament}.json` (k1se), `NAME.gcode`, `proof-report.md` + `proof/*.png`, `prep.json` (every step result,
 verdict and timing), `steps/*.json` (the cache), `meshes/*.npz` (intermediate meshes).
 
 Exit codes: 0 when no step FAILs (PASS/WARN/SKIP); 1 when any step FAILs; 2 bad arguments; 127 missing tool.
@@ -39,9 +39,9 @@ Exit codes: 0 when no step FAILs (PASS/WARN/SKIP); 1 when any step FAILs; 2 bad 
 | `stability` | `prep.stability` | mass, centre of mass, support polygon, tip angle, tap/pull with the items from `fit` as loads | static tipping; tap/pull below safety factor 1 is a WARN unless `stability: {sf_fail: 1.0}` |
 | `colors` | `prep.regions` | landmark boxes/volumes to disjoint colour parts, filament or layer mix per part, mix rules | a rule violation or an unknown filament |
 | `layers` | `prep.layers` | adaptive layer heights, 0.08 only on the steepest surfaces, mix zones capped | mix cap broken |
-| `project` | `prep.project3mf` | one multi-part object 3MF with per-part extruders, mixed rows, layer profile, prime tower | missing Orca resources: SKIP with the install hint |
+| `project` | `prep.project3mf` | one multi-part object 3MF with per-part extruders, mixed rows, layer profile, prime tower. `--printer k1se`: `prep.flat_profiles` instead: the STL placed on the bed and three flat Orca presets with the overrides applied | missing Orca resources: SKIP with the install hint; a part that does not fit the bed |
 | `slice` | `slicing.orca_cli` | headless slice under the heavy lock, every quirk handled ([U1 Orca CLI](../printers/u1-orca-cli.md)) | crash, segfault, no G-code |
-| `gates` | `prep.gcode_gates` | walls, infill, supports, layer heights, mix-layer cap, tool/head sequence per region, prime tower, bed bounds | any gate FAIL; a gate without input is SKIP naming it |
+| `gates` | `prep.gcode_gates` | walls, infill, supports, layer heights, mix-layer cap, tool/head sequence per region, prime tower, bed bounds, feedrates (real `F` per feature) | any gate FAIL; a gate without input is SKIP naming it |
 | `proof` | `prep.proof` | views, before/after, overhang heat-map, section, fit matrix + pose, stability plan, regions, layers, G-code renders, one markdown report | never FAILs by itself |
 
 A FAIL in `repair` or `adapt` stops the flow (later steps would run on a broken mesh); every other FAIL is
@@ -63,7 +63,8 @@ everything; `--only a,b` runs just those steps and what they need; `--skip a,b` 
   stability loads), `stability` (analysis options), `colors`, `process: {preset, filament_preset, walls,
   infill, layer_min, layer_max, brim, mix_cap}`, `gcode` (gate thresholds). Relative paths resolve against the
   spec file. A flag always wins over the spec. See `examples/prep/chekhov/prep.yaml`.
-- `--printer u1` — target printer; `u1` today (its 270 mm bed and 4 heads are built in).
+- `--printer u1|k1se` — target printer. `u1`: 270 mm bed, 4 heads, a 3MF project. `k1se`: Creality K1 SE, 220 x 220 x 250
+  bed, one head; see [K1 SE](#k1-se).
 - `--orient auto|keep` — `auto` (default) rotates only when a candidate clearly cuts the overhang area;
   `keep` never rotates. Landmark boxes in a colour spec follow the final orientation.
 - `--angle 45` — overhang limit in degrees from vertical.
@@ -75,8 +76,19 @@ everything; `--only a,b` runs just those steps and what they need; `--skip a,b` 
 - `--fit items.json` — items the object must hold, e.g. [`examples/prep/chekhov/phones.json`](../../examples/prep/chekhov/phones.json).
 - `--colors colors.yaml` — filaments, landmark boxes and regions; see
   [`examples/prep/chekhov/colors.yaml`](../../examples/prep/chekhov/colors.yaml).
-- `--process NAME` / `--filament NAME` — Orca process and filament presets.
+- `--process NAME` / `--filament NAME` — Orca process and filament presets (k1se defaults: the fleet process
+  `0.20mm Standard @Creality K1 SE - accel 8900` and `Creality Generic PLA @K1-all`; `Elegoo RAPID PLA+ @K1-all`
+  is in the repo `profiles/`).
 - `--walls 4 --infill 15` — wall loops and sparse infill percent.
+- `--supports none|auto` — k1se: `auto` adds easy tear-off supports (overhangs over 45 degrees, build plate only,
+  0.3 mm air gap, two wide-spaced interface layers). Default `none`; the u1 flow only takes `none` (it adapts the
+  model to need none).
+- `--set KEY=VALUE` — a process setting over the preset, repeatable: `--set outer_wall_speed=250`. On k1se the
+  `overrides` gate FAILs a key the slicer did not take (a misspelt key is ignored silently by the slicer).
+- `--fset KEY=VALUE` — k1se: a filament setting over the preset, repeatable: `--fset pressure_advance=0.04`.
+- `--max-volumetric N` — k1se: the filament's maximum volumetric speed in mm3/s.
+- `--overlay FILE.json` — k1se: `{"process": {...}, "filament": {...}, "machine": {...}}` over the preset.
+  `--set`/`--fset` win over the file.
 - `--layer-min 0.08 --layer-max 0.32` — adaptive layer band in mm.
 - `--brim MM` — brim width.
 - `--only a,b`, `--skip a,b`, `--from STEP`, `--force` — cache and step selection.
@@ -93,11 +105,50 @@ Examples:
 3d prep cat.stl --out out --colors colors.yaml                    # re-run: unchanged steps are cache hits
 3d prep cat.stl --out out --orient keep --angle 50 --no-adapt     # report only
 3d prep cat.stl --out out --only repair,orient,overhang --no-slice
+3d prep part.stl --out out --printer k1se --orient keep --no-adapt --filament "Elegoo RAPID PLA+ @K1-all" --walls 3 --set outer_wall_speed=250 --max-volumetric 30   # real feedrates in the gates
+3d prep part.stl --out out --printer k1se --overlay speeds.json --supports auto            # speeds/accel from a file
 3d prep cat.stl --out out --from colors                           # redo colours, layers, 3MF, slice, gates
 3d prep cat.stl --out out --no-slice --json | jq '.steps[] | {name, verdict, seconds}'
 3d prep status out
 3d remote run --push cat.stl --pull -- 3d prep cat.stl --out ../out   # on the heavy box
 ```
+
+## K1 SE
+
+`--printer k1se` slices one part for the Creality K1 SE (one head, no colours: `--colors` is an error, `layers`
+is SKIP, the process preset's fixed layer height stands). There is no 3MF project: `project` writes the model
+placed at the bed centre (`NAME.print.stl`) and three flat presets in `NAME.profiles/` — the fleet machine
+`Creality K1 SE 0.4 nozzle - Copy`, the fleet process and the filament, each with its `inherits` chain folded in —
+and `slice` runs `snapmaker-orca --load-settings MACHINE;PROCESS --load-filaments FILAMENT` on them
+(`--arrange 0 --orient 0`: the pose is what you gave). The recipe is the verified one of the garage-band
+soil-sensor-case `verify/slice_k1se.py`.
+
+Settings apply in this order, later wins: the preset, the flags `3d prep` owns (`--walls`, `--infill`, `--brim`,
+`--supports`), the `--overlay` file, `--set`/`--fset`/`--max-volumetric`. Per-feature speeds, accelerations and the
+volumetric cap are plain settings of the process/filament/machine presets:
+
+```json
+{
+  "process": {"outer_wall_speed": 250, "inner_wall_speed": 500, "sparse_infill_speed": 550, "travel_speed": 600,
+              "inner_wall_acceleration": 12000},
+  "filament": {"filament_max_volumetric_speed": 30},
+  "machine": {"machine_max_acceleration_extruding": 12000}
+}
+```
+
+A number is stored in the shape of the preset's own value (a list stays a list; a scalar is repeated for every entry).
+The fleet preset names stay on the G-code (`print-preflight` `preset_match` passes) unless an acceleration/jerk key
+or a `machine` section is overridden; then the presets are named `... - prep overrides`, because the G-code no
+longer matches the fleet preset.
+
+The `gates` step reads the real feedrate of every move from the G-code (`F` words, feature from `;TYPE:` /
+`; FEATURE:`), not from the slicer's config comments. The `feedrates` gate reports the fastest speed per feature
+and the travel speed in mm/s; a feature faster than the process asked for FAILs, one running below 90 % of its
+limit is listed (the volumetric limit caps fast lines: 30 mm3/s through a 0.2 x 0.45 mm line is at most 333 mm/s, so
+a requested 550 mm/s infill runs slower). The `overrides` gate then checks that the G-code's own config block echoes
+every setting you asked for and the three preset names: a misspelt `--set` key, which the slicer ignores
+silently, FAILs there (`--no-slice` skips this check, it needs the G-code). The step summary adds the slicer's print time, filament grams and the XY extent
+of the extrusion; the bed-bounds gate checks it against 220 x 220 x 250.
 
 ## Library interface of the steps
 
