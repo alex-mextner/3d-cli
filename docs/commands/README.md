@@ -73,6 +73,7 @@ For a practical figure-by-figure image backplate loop, see
 | `silhouette` | [silhouette.md](silhouette.md) | Camera-locked render to binary silhouette mask. |
 | `score` | [score.md](score.md) | Silhouette [AE](GLOSSARY.md#ae) + IoU, printed as `KEY=VALUE` lines. |
 | `overlay` | [overlay.md](overlay.md) | Difference, ghost, and edge-overlay diagnostics. |
+| `measure-ref` | [measure-ref.md](measure-ref.md) | Measure feature shapes (tilt, aspect, iris, lid cover) on a reference and a render, print the delta, gate it. |
 | `match` | [match.md](match.md) | [Forced-monotonic](GLOSSARY.md#forced-monotonic-loop) param edit loop. |
 | `preprocess` | [preprocess.md](preprocess.md) | Reference subject mask and proportional depth preprocessing. |
 | `calibrate-grid` | [calibrate-grid.md](calibrate-grid.md) | Honeycomb wall photo -> focal length, camera pose and photo-px -> wall-mm homography (numpy + OpenCV, no model). |
