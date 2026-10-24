@@ -50,7 +50,9 @@ from slicing.calibration_plate import (
     label_lines,
     label_width,
 )
+from slicing.calibration_plate_underlay import declare
 from slicing.calibration_plates import filament
+from slicing.calibration_underlay import UnderlayDecl
 
 PLATE_ID = "dense"
 TITLE = "dense plate: filament + mechanics"
@@ -69,8 +71,28 @@ TESTS = {
     "screw": "M3/M4 holes, slots for a 2 mm insert",
     "holes": "small holes Ø1–4",
     "thin_wall": "thin walls 0.3–1.0 mm",
-    "first_layer": "first-layer patches",
+    "first_layer": "first-layer patches (--no-underlay only: the bare underlay is the map)",
     "top_surface": "top surface patch",
+}
+# Where each test stands on the shared underlay (#320): `on` = on the sheet (a foot under its base),
+# `cutout` = on the bare bed in a hole of the sheet (print-in-place or loose parts, through holes).
+UNDERLAY = {
+    "mvs": UnderlayDecl("on", "the strip prints on the underlay; its step is read from above"),
+    "bridge": UnderlayDecl("on", "pillars on a foot, the span bridges over the sheet"),
+    "long_bridge": UnderlayDecl("on", "pillars on a foot, the span bridges over the sheet"),
+    "overhang": UnderlayDecl("on", "the small base of the wedge gets a foot instead of a brim"),
+    "retraction": UnderlayDecl("on", "the tower stands on a foot; strings are read from the side"),
+    "temp": UnderlayDecl("on", "the sequential tower is lifted onto the finished sheet"),
+    "ringing": UnderlayDecl("on", "the tube's thin walls stand on a foot; ripples are read on its faces"),
+    "vfa": UnderlayDecl("on", "the round tube stands on a foot; the bands are read on its wall"),
+    "dimension": UnderlayDecl("on", "the frame's outer edges are measured; its foot is part of the sheet"),
+    "fit": UnderlayDecl("cutout", "pins are printed in place in their holes and must come out: the sheet would weld them", movable=True),
+    "hinge": UnderlayDecl("cutout", "print-in-place hinges must turn: the sheet would weld the knuckles", movable=True),
+    "screw": UnderlayDecl("cutout", "M3/M4 holes are through holes tried with a screw, the insert is a loose part", movable=True),
+    "holes": UnderlayDecl("cutout", "through holes are measured with pins and drill shanks: a foot would close them"),
+    "thin_wall": UnderlayDecl("on", "walls 0.3-1.0 mm stand on a foot; a lost wall is read from above"),
+    "first_layer": UnderlayDecl("on", "replaced by the underlay: its bare cells are the first-layer map"),
+    "top_surface": UnderlayDecl("on", "the tile's top skin is read; its foot is part of the sheet"),
 }
 BED = (220.0, 220.0)
 LABEL_DY = filament.LABEL_DY  # a row's bed labels sit this far in front of its objects
@@ -745,9 +767,17 @@ def build(ctx: PlateContext) -> Plate:
             ("thin_wall", lambda x, y: _thin_walls(x, y, False)),
             ("thin_wall_x", lambda x, y: _thin_walls(x, y, True)),
         ],
-        "first_layer": [(p, partial(_patch, p)) for p in PATCHES],
+        # the underlay's bare cells are the first-layer map: no patches on an underlay plate
+        "first_layer": [] if ctx.underlay_layers is not None else [(p, partial(_patch, p)) for p in PATCHES],
         "top_surface": [("top_1", lambda x, y: _top("top_1", x, y))],
     }
+    if ctx.underlay_layers is not None and not any(
+        ctx.wants(t) for t in TESTS if t != "first_layer"
+    ):
+        raise GenError(
+            f"{PLATE_ID}: with the underlay the first layer is read from its bare cells, there are no "
+            "patches; keep another test too, or use --no-underlay for the patches"
+        )
     objects: list[PlateObject] = []
     custom: list[CustomBlock] = []
     for test in TESTS:
@@ -755,7 +785,7 @@ def build(ctx: PlateContext) -> Plate:
             continue
         for spot, make in makers[test]:
             objs, blocks = make(*AT[spot])
-            objects += objs
+            objects += declare(objs, test, UNDERLAY)
             custom += blocks
     _check_layout(objects)
     return Plate(
