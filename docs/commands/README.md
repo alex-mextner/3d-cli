@@ -115,6 +115,7 @@ Every gate from model to printer, in order: [Print pipeline](../workflows/print-
 |---|---|---|
 | `libs` | [libs.md](libs.md) | OpenSCAD library path/list info; install is automatic on first run. |
 | `models` | [models.md](models.md) | Search Printables, MakerWorld, Thingiverse and Cults3D; show a model; download a free model's files with a `model.json` (author, license, source). Paid models are never downloaded. |
+| `models browse` | [tui.md](tui.md) | The interactive model browser (Textual, extra `tui`): streamed results with live verdicts, `p b d s a f r / ? q`, resume from the library DB, numbered-prompt fallback; every key has a `3d models act` flag twin (agent workflow: `docs/agents/search-workflow.md`). |
 | `openscad` | [openscad.md](openscad.md) | Install OpenSCAD libraries (WriteText, BOSL2, …) into OpenSCAD's user library folder for plain `openscad`. |
 | `printers` | [printers.md](printers.md) | Printer registry and fleet actions: `list`/`show` (model spec + one-screen dossier), `spools`/`load`/`unload`/`swap`/`filament` (the filament in the printers, `--dry-run`), `doctor` ([printers-doctor.md](printers-doctor.md): diagnose and fix a printer's setup), `fw` ([printers-fw.md](printers-fw.md): firmware / root / Klipper-unlock plans per vendor profile). |
 | `procurement` | [procurement.md](procurement.md) | Build deterministic purchase plans from local BOM and inventory files. |

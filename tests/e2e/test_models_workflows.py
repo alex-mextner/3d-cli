@@ -375,7 +375,7 @@ def test_bad_invocations_are_structured(tmp_path: Path) -> None:
     bare = run_cli(tmp_path, "models")
     assert bare.returncode == 1
     assert bare.stdout.startswith(
-        "3d models <search|searches|rerank|followups|show|download|analyze|auth>"
+        "3d models <search|searches|rerank|followups|browse|act|show|download|analyze|auth>"
     )
 
 
@@ -451,6 +451,23 @@ def test_help_and_docs_list_the_same_flags_and_examples(tmp_path: Path) -> None:
         "--ndjson",
         "--background",
         "--wait",
+        "--tui",
+        "--plain",
+        "--select",
+        "--select-site",
+        "--select-verdict",
+        "--do",
+        "--action",
+        "--yes",
+        "--slicer",
+        "--browser",
+        "--agent",
+        "--agent-mode",
+        "--prompt",
+        "--agent-cwd",
+        "--refine",
+        "--filter",
+        "--session",
     }
     for flag in flags:
         assert f"`{flag}" in doc, f"{flag} undocumented in docs/commands/models.md"

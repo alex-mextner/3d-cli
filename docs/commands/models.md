@@ -14,11 +14,18 @@ Paid models are listed with their price but never downloaded.
                        [--rank[=MODEL]] [--classifier M] [--planner M] [--rewrite sonnet|MODEL|off]
                        [--max-queries N] [--max-calls N] [--token-budget N] [--llm-timeout S] [--batch-size N]
                        [--answer KEY=VALUE]... [--no-llm] [--llm auto|require] [--ndjson] [--background|--wait]
+                       [--tui [--plain]]
 3d models searches list [--limit N] [--json]
 3d models searches show ID [--json] [--images[=PROTO]] [--columns C[,C...]]
 3d models rerank ID [--classifier M] [--planner M] [--rewrite sonnet|MODEL|off] [--answer KEY=VALUE]...
                     [--follow N]... [--refresh] [--llm auto|require] [--ndjson|--json] [--db PATH]
 3d models followups ID [--json] [--answer KEY=VALUE]... [--follow N]...
+3d models browse [SEARCH_ID] [--plain] [--dir D] [--slicer S] [--browser CMD] [--agent B] [--agent-mode M]
+                 [--prompt TEXT] [--agent-cwd D] [--images[=PROTO]] [--no-llm] [--db PATH]
+3d models act [SEARCH_ID] [--select N,N-M,SITE:ID|all] [--select-site S[,S]] [--select-verdict V[,V]]
+              [--do list|preview|open|download|slicer|agent|queue] [--yes] [--dir D] [--slicer S] [--browser CMD]
+              [--agent B] [--agent-mode M] [--prompt TEXT] [--agent-cwd D] [--answer KEY=VALUE]... [--follow N]...
+              [--refine QUERY] [--filter TEXT] [--images[=PROTO]] [--json|--ndjson] [--db PATH]
 3d models show URL [--json]
 3d models download URL [--dir D] [--file NAME]... [--role ROLE [--vitamin KIND]] [--deep] [--json]
 3d models analyze FILE... [--json] [--no-save]
@@ -36,6 +43,8 @@ Paid models are listed with their price but never downloaded.
   design and know. Every search is saved in the library DB (`3d library`) unless `--no-save`.
 - `searches list|show` read saved searches back (ID: the running number, the full uid or `latest`).
   `searches show ID --json` is the same document the search printed, so an agent can re-read it later.
+- `browse` (also `search QUERY --tui`) is the interactive browser and `act` is its non-interactive twin: see
+  "Browser and `act`" below and `docs/commands/tui.md`.
 - `show` prints one model's metadata, CAD yes/no and file list.
 - `download` saves every file of a free model (or only the `--file` names) plus `model.json` into `--dir`,
   default `./<site>-<id>-<title>/`, and records a `model_source` row (URL, licence, author, files with sha256,
@@ -114,6 +123,42 @@ Options:
   Example: `3d models download URL --role reference --vitamin pcb`
 - `--vitamin KIND` — with `--role vitamin|reference`: `pcb`, `connector`, `screw` or `wire`.
   Example: `3d models download URL --role vitamin --vitamin screw`
+- `--tui` — with `search`: open the interactive browser instead of printing the list; it ranks like `--rank`
+  unless `--no-llm`. Needs a terminal on stdin and stdout and the `tui` extra (`uv sync --extra tui`); on a pipe, or
+  with `THREED_NO_TUI=1`, the search prints exactly what it prints without `--tui`.
+  Example: `3d models search "cable clip" --tui`
+- `--plain` — the numbered prompt (commands typed on stdin) instead of the full-screen browser; what `browse`
+  falls back to without a terminal. Example: `3d models browse latest --plain`
+- `--select SEL` — rows `act` works on: ranking numbers (`1,3`), ranges (`2-5`), `SITE:ID` keys or `all`.
+  Example: `3d models act latest --select 1,3,5-7 --do preview`
+- `--select-site S[,S]` — only rows from these sites. Example: `3d models act latest --select-site printables --do list`
+- `--select-verdict V[,V]` — only rows with these verdicts (`fits`, `maybe`, `no`, `unjudged`); several selectors
+  must all match. Example: `3d models act latest --select-verdict fits --do list`
+- `--do ACTION` (alias `--action`) — what `act` does with the rows: `list` (default), `preview`, `open` (alias
+  `browser`), `download`, `slicer`, `agent`, `queue`. Example: `3d models act latest --select 1 --do download`
+- `--yes` — really run `open`, `download`, `slicer`, `agent` and `queue`; without it `act` prints the plan and starts
+  nothing. Example: `3d models act latest --select 1 --do slicer --yes`
+- `--slicer S` — the slicer `s` / `slicer` opens: a kind (`orca`, `snapmaker-orca`, `creality-print`,
+  `bambu-studio`) or a command with `{paths}` (default: `$THREED_SLICER`, `browser.json`, the first installed).
+  Example: `3d models act latest --select 1 --do slicer --slicer snapmaker-orca`
+- `--browser CMD` — the command that opens a page, `{url}` where the URL goes (default: `$THREED_BROWSER`,
+  `browser.json`, `$BROWSER`, `xdg-open` / `open`).
+  Example: `3d models act latest --select 1 --do open --browser "firefox {url}"`
+- `--agent B` — the agent backend: `omp` (default), `claude`, `codex`, `opencode`.
+  Example: `3d models act latest --select 1 --do agent --agent claude`
+- `--agent-mode M` — `attach` (this terminal; the browser's default), `tmux` (a detached tmux session),
+  `detached` (no terminal, log in the brief dir) or `auto` (attach on a terminal, else tmux, else detached; the
+  default of `act`). Example: `3d models act latest --select 1 --do agent --agent-mode tmux --yes`
+- `--prompt TEXT` — the task the agent is seeded with (default: judge the picks against the query).
+  Example: `3d models act latest --select 1,2 --do agent --prompt "compare the two cases"`
+- `--agent-cwd D` — directory the agent starts in (default: the folder the downloads share, else the current one).
+  Example: `3d models act latest --select 1 --do agent --agent-cwd ~/projects/probe`
+- `--refine QUERY` — search again as a child of this search and merge the hits (the `r` key).
+  Example: `3d models act latest --refine "probe holder" --do list`
+- `--filter TEXT` — keep rows whose title, site, verdict, licence, tags or rationale contain TEXT (the `/` key).
+  Example: `3d models act latest --filter case --do list`
+- `--session ID` — the saved search to work on; the same as the positional `SEARCH_ID` (`latest` is the newest
+  search tree). Example: `3d models act --session latest --do list`
 - `--json` — machine-readable output (schemas below). On failure `show`/`download` print nothing on stdout
   and the structured error goes to stderr, exactly as without `--json`.
   Example: `3d models search "cable clip" --json`
@@ -125,7 +170,7 @@ Exit codes (identical with and without `--json`):
 | 0 | done; for `search`, at least one site answered |
 | 1 | a site failed (Cloudflare block, not found, network, HTTP, parse), the model is paid, or every searched site failed for different reasons |
 | 2 | bad usage (unknown flag/site, foreign URL, `--dir` is a file or non-empty), or credentials missing/refused — also when every searched site lacks credentials |
-| 127 | no Chrome-TLS tool for MakerWorld (see below) |
+| 127 | no Chrome-TLS tool for MakerWorld (see below); `textual` missing for the browser (`uv sync --extra tui`); no slicer, browser opener or agent program for `act` |
 
 `search` exits non-zero only when no site answered; its JSON still lists every site's error.
 
@@ -323,6 +368,52 @@ Flags (each also in `3d models --help`):
 Exit codes are those of `search` (0 when any site answered); `--llm require` without omp is 127, bad `--answer`
 values or flag combinations are 2. A model failure never changes the exit code.
 
+## Browser and `act`
+
+`3d models browse [SEARCH_ID]` and `3d models search QUERY --tui` open the interactive browser
+(`docs/commands/tui.md`): the S6 ranking events stream into a list (results first, verdicts as the model answers),
+arrows move, `space` selects, and `p b d s a f r / ? q` preview, open in the browser, download, open in the slicer,
+launch an agent, show follow-ups and questions, refine, filter, help, quit. `browse` resumes any saved search tree
+from the library DB (`latest` = the newest root). Without a terminal (stdout or stdin not a TTY, or
+`THREED_NO_TUI=1`) `browse` is a numbered prompt; with a terminal but without the `tui` extra it exits 127 with the
+install line, and `search --tui` on a pipe is just the normal search.
+
+`3d models act [SEARCH_ID] --select ... --do ...` is the twin of every key, for agents and scripts. It reads the saved
+search, runs the same `library.actions` functions the key runs (`preview`, `open_browser`, `download`,
+`open_slicer`, `launch_agent`, `queue`) and prints ONE `3d.models.act/1` document:
+
+```json
+{"schema": "3d.models.act/1", "action": "download", "ok": true, "dry_run": false, "exit_code": 0,
+ "search": "<root uid>", "query": "case",
+ "selected": [{"n": 1, "key": "printables:7", "site": "printables", "id": "7", "title": "...", "url": "..."}],
+ "results": [{"schema": "3d.action/1", "action": "download", "ok": true, "data": {"dir": "...", "files": []},
+              "errors": [], "warnings": []}],
+ "plan": [], "cli": "3d models act <uid> --do download --yes --select printables:7"}
+```
+
+`--do list` prints the numbered rows instead (`results[]`: `n, key, site, id, title, url, verdict, score, rationale,
+size_mm, cad, license, price, found_by, downloaded`) with the planner's `questions[]`, `followups[]` and `queries[]`;
+the `n` of a row is its position in the final ranking (fits, maybe, unjudged, no), the same number the browser shows.
+`--answer KEY=VALUE`, `--follow N` and `--refine QUERY` run the ranking pipeline first (`--ndjson` streams its
+`3d.models.rank/1` events before the final document), so one command can answer a question and act on the
+re-ranked rows. Anything that starts something is a dry run until `--yes`: the document then has `dry_run: true`,
+`results: []` and a `plan`. A model that was downloaded earlier (the library DB knows its folder) is reused, never
+fetched twice; `slicer` and `queue` download first when needed, `agent` seeds the brief with the downloaded paths and
+`model.json` provenance when they exist. Exit codes: 0 done (or a dry run), 1 an action failed (its `3d.action/1`
+result holds the error), 2 bad usage (`--select 99`, nothing selected, unknown `--do`), 127 a program is missing
+(slicer, browser opener, agent, or `textual`). The agent workflow is in `docs/agents/search-workflow.md`.
+
+Configuration (`~/.config/3d-cli/browser.json`, or the file named by `$THREED_BROWSER_CONFIG`):
+
+```json
+{"slicer": "snapmaker-orca", "browser": "firefox {url}",
+ "agent": {"backend": "omp", "command": ["omp", "@{brief}", "{prompt}"], "prompt": "Read {brief} ..."},
+ "download_dir": "~/models"}
+```
+
+No path is hard-coded: the slicer is `--slicer`, `$THREED_SLICER`, the file, then the first of OrcaSlicer, Snapmaker
+Orca, Creality Print, Bambu Studio found on `PATH` or in the usual app locations.
+
 ## Library DB
 
 `search` writes one `search_session` (query, kind, `meta`: sites, limit, timings, errors, warnings) and one
@@ -353,6 +444,10 @@ rebases and keeps both sets of lines. `SUBCOMMANDS` ends up with `publish` next 
 3d models search "cable clip" --images=kitty --limit 5
 3d models searches list
 3d models searches show latest --json
+3d models search "soil moisture sensor probe case" --tui
+3d models browse latest
+3d models act latest --do list --json
+3d models act latest --select-verdict fits --do download --dir parts --yes
 3d models show https://www.printables.com/model/311253-spoon-drawer-pull
 3d models show https://makerworld.com/en/models/1871683 --json
 3d models download https://www.printables.com/model/311253-spoon-drawer-pull
