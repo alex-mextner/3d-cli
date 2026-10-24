@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 
 DEFAULT_LIMIT = 10
 
-USAGE = """3d models <search|searches|rerank|followups|show|download|analyze|publish|auth> [options]
+USAGE = """3d models <search|searches|rerank|followups|browse|act|show|download|analyze|publish|auth> [options]
   Find and fetch 3D models on Printables, MakerWorld, Thingiverse and Cults3D, and publish your own.
 
 Subcommands:
@@ -33,6 +33,7 @@ Subcommands:
                [--deep] [--cad] [--for-vitamin KIND] [--no-details] [--no-save]
                [--rank[=MODEL]] [--classifier M] [--planner M] [--rewrite sonnet|MODEL|off]
                [--answer KEY=VALUE]... [--no-llm] [--llm auto|require] [--ndjson] [--background]
+               [--tui [--plain]]
                         search each site (default: all four, up to N results each, 1..100) and
                         list title, author, likes, downloads, licence, price, CAD yes/no, size,
                         file summary, description and URL; a site that fails is reported with
@@ -53,6 +54,20 @@ Subcommands:
   followups ID [--json] [--answer KEY=VALUE]... [--follow N]...
                         the follow-up queries and clarifying questions the planner saved for a search;
                         with --answer / --follow it works like `rerank`
+  browse [SEARCH_ID] [--plain] [--dir D] [--slicer S] [--browser CMD] [--agent B] [--agent-mode M]
+         [--prompt TEXT] [--agent-cwd D] [--images[=PROTO]] [--no-llm] [--db PATH]
+                        the interactive browser (also `search QUERY --tui`): results stream in, verdicts
+                        update live; arrows move, space selects, p preview, b browser, d download, s slicer,
+                        a agent, f follow-ups and questions, r refine, / filter, ? help, q quit. Resumes a
+                        saved search (default `latest`). Needs a terminal and the `tui` extra; without a
+                        terminal (or THREED_NO_TUI=1) it is a numbered prompt (docs/commands/tui.md)
+  act [SEARCH_ID] [--select N,N-M,SITE:ID|all] [--select-site S[,S]] [--select-verdict V[,V]]
+      [--do list|preview|open|download|slicer|agent|queue] [--yes] [--dir D] [--slicer S] [--browser CMD]
+      [--agent B] [--agent-mode M] [--prompt TEXT] [--agent-cwd D] [--answer KEY=VALUE]... [--follow N]...
+      [--refine QUERY] [--filter TEXT] [--images[=PROTO]] [--json|--ndjson] [--db PATH]
+                        the non-interactive twin of every browser key on a saved search; numbers are the
+                        ranking positions `--do list` prints. Anything that starts something is a dry run
+                        until --yes. Prints one `3d.models.act/1` document holding the `3d.action/1` results
   show URL [--json]     one model's metadata and file list
   download URL [--dir D] [--file NAME]... [--role ROLE [--vitamin KIND]] [--deep] [--json]
                         save every file of a free model (or only the --file names) plus model.json
@@ -156,6 +171,38 @@ Options:
                         Example: 3d models search "cable clip" --rank --background
   --wait                judge before returning (the default; accepted for scripts)
                         Example: 3d models search "cable clip" --rank --wait
+  --tui                 open the interactive browser instead of printing the list (needs a terminal; piped
+                        output is unchanged). Example: 3d models search "cable clip" --tui
+  --plain               the numbered prompt instead of the full-screen browser
+                        Example: 3d models browse latest --plain
+  --select SEL          rows to act on: ranking numbers, ranges, SITE:ID keys or all
+                        Example: 3d models act latest --select 1,3,5-7 --do preview
+  --select-site S[,S]   rows from these sites. Example: 3d models act latest --select-site printables --do list
+  --select-verdict V[,V]
+                        rows with this verdict (fits, maybe, no, unjudged)
+                        Example: 3d models act latest --select-verdict fits --do list
+  --do ACTION           what to do with the rows (alias --action): list, preview, open (alias browser),
+                        download, slicer, agent, queue. Example: 3d models act latest --select 1 --do download
+  --yes                 really run download / slicer / agent / open / queue (the default is a dry run)
+                        Example: 3d models act latest --select 1 --do slicer --yes
+  --slicer S            slicer kind (orca, snapmaker-orca, creality-print, bambu-studio) or a command with {paths}
+                        Example: 3d models act latest --select 1 --do slicer --slicer snapmaker-orca
+  --browser CMD         command that opens a page, `{url}` marks where the URL goes
+                        Example: 3d models act latest --select 1 --do open --browser "firefox {url}"
+  --agent B             agent backend: omp (default), claude, codex, opencode
+                        Example: 3d models act latest --select 1 --do agent --agent claude
+  --agent-mode M        auto, attach (this terminal), tmux (detached session) or detached
+                        Example: 3d models act latest --select 1 --do agent --agent-mode tmux --yes
+  --prompt TEXT         the task the agent is seeded with (default: judge the picks against the query)
+                        Example: 3d models act latest --select 1,2 --do agent --prompt "compare the two cases"
+  --agent-cwd D         directory the agent starts in (default: where the downloads are)
+                        Example: 3d models act latest --select 1 --do agent --agent-cwd ~/projects/probe
+  --refine QUERY        search again as a child of this search and merge the hits
+                        Example: 3d models act latest --refine "probe holder" --do list
+  --filter TEXT         keep rows whose title, site, verdict, licence or tags contain TEXT
+                        Example: 3d models act latest --filter case --do list
+  --session ID          the saved search (same as the positional SEARCH_ID)
+                        Example: 3d models act --session latest --do list
   --json                machine-readable output (search: schema `3d.models.search/2`; with ranking
                         `3d.models.rank-result/1`)
                         Example: 3d models search "cable clip" --json
@@ -174,12 +221,13 @@ MakerWorld needs a Chrome TLS fingerprint: curl_chrome146 on PATH (or
 AXE_CURL_IMPERSONATE_DIR / THREED_CURL_IMPERSONATE) or the curl_cffi Python package.
 
 Exit codes (the same with --json):
-  0    done; for search, at least one site answered
+  0    done; for search, at least one site answered; for act, a dry run or every action succeeded
   1    a site failed (blocked, not found, network), a paid model, or every searched
        site failed for different reasons
   2    bad usage, a non-empty --dir, or missing/refused credentials (also when every
        searched site lacks credentials)
-  127  no Chrome-TLS tool for MakerWorld; `--llm require` without omp
+  127  no Chrome-TLS tool for MakerWorld; `--llm require` without omp; no `textual` for the
+       browser (install the `tui` extra); no slicer / browser opener / agent program for act
 
 Examples:
   3d models search "spoon drawer pull"
@@ -191,6 +239,10 @@ Examples:
   3d models rerank latest --answer need_cad=yes --follow 1
   3d models followups latest --json
   3d models searches show latest --json
+  3d models search "soil moisture sensor probe case" --tui
+  3d models browse latest
+  3d models act latest --do list --json
+  3d models act latest --select-verdict fits --do download --dir parts --yes
   3d models show https://www.printables.com/model/311253-spoon-drawer-pull
   3d models show https://makerworld.com/en/models/1871683 --json
   3d models download https://www.printables.com/model/311253-spoon-drawer-pull
@@ -398,7 +450,7 @@ def _exit_for(failures: dict[str, ThreeDError], answered: int) -> int:
 
 
 def _search(argv: list[str]) -> int:
-    from library import rankcli
+    from library import browsecli, rankcli
     from library import search as searchcore
     from library import textview
 
@@ -414,6 +466,7 @@ def _search(argv: list[str]) -> int:
             "--db",
             "--idempotency-key",
             *rankcli.VALUE_FLAGS,
+            *browsecli.UI_VALUE_FLAGS,
         },
         bool_flags={
             "--json",
@@ -421,6 +474,8 @@ def _search(argv: list[str]) -> int:
             "--cad",
             "--no-details",
             "--no-save",
+            "--tui",
+            "--plain",
             *rankcli.BOOL_FLAGS,
         },
         repeat_flags=rankcli.REPEAT_FLAGS,
@@ -445,6 +500,15 @@ def _search(argv: list[str]) -> int:
         idempotency_key=p.opts.get("--idempotency-key"),
         db_path=p.opts.get("--db"),
     )
+    if "--tui" in p.opts and browsecli.interactive():
+        import dataclasses
+
+        ui_rank = rankcli.rank_options(p.opts, p.multi, rerank=True)  # the browser ranks unless --no-llm
+        assert ui_rank is not None
+        limit = rankcli.default_limit(p.opts, ui_rank)
+        if limit is not None:
+            options = dataclasses.replace(options, limit=limit)
+        return browsecli.search_tui(query, options, ui_rank, p.opts)
     rank = rankcli.rank_options(p.opts, p.multi)
     if rank is not None:
         return _search_ranked(p, query, options, rank, columns)
@@ -1075,11 +1139,38 @@ def _followups(argv: list[str]) -> int:
     return 0
 
 
+def _browser_flags() -> dict[str, Any]:
+    from library import browsecli, rankcli
+
+    return {
+        "value_flags": {*rankcli.VALUE_FLAGS, *browsecli.VALUE_FLAGS},
+        "bool_flags": {*rankcli.BOOL_FLAGS, *browsecli.BOOL_FLAGS},
+        "repeat_flags": rankcli.REPEAT_FLAGS,
+        "optional_flags": {"--images"},
+    }
+
+
+def _browse(argv: list[str]) -> int:
+    from library import browsecli
+
+    p = _parse(argv, **_browser_flags())
+    return browsecli.browse(p.positional, p.opts, p.multi)
+
+
+def _act(argv: list[str]) -> int:
+    from library import browsecli
+
+    p = _parse(argv, **_browser_flags())
+    return browsecli.act(p.positional, p.opts, p.multi)
+
+
 SUBCOMMANDS = {
     "search": _search,
     "searches": _searches,
     "rerank": _rerank,
     "followups": _followups,
+    "browse": _browse,
+    "act": _act,
     "show": _show,
     "download": _download,
     "analyze": _analyze,
