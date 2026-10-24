@@ -65,6 +65,7 @@ Run this script inside an env that has the heavy deps. Python 3.12 is recommende
   #    subject. For per-feature sub-masks -- e.g. a locomotive's funnel/boiler/cab --
   #    prompt with points instead.)
 """
+
 from __future__ import annotations
 
 import argparse
@@ -75,6 +76,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
+from errors import ThreeDError, UsageError
 from mask_geometry import mask_metadata
 
 # OpenCV is the guaranteed floor. If even this is missing we cannot run at all.
@@ -127,7 +129,9 @@ def mask_rembg(rgb: np.ndarray) -> np.ndarray | None:
 # --------------------------------------------------------------------------- #
 #  MASK -- tier 2: SAM 2 (documented best path)
 # --------------------------------------------------------------------------- #
-def mask_sam2(rgb: np.ndarray, checkpoint: str | None, config: str | None) -> np.ndarray | None:
+def mask_sam2(
+    rgb: np.ndarray, checkpoint: str | None, config: str | None
+) -> np.ndarray | None:
     """SAM 2 box-prompted mask. Needs an installed sam2 + checkpoint path."""
     if not checkpoint:
         return None
@@ -136,7 +140,9 @@ def mask_sam2(rgb: np.ndarray, checkpoint: str | None, config: str | None) -> np
         from sam2.build_sam import build_sam2
         from sam2.sam2_image_predictor import SAM2ImagePredictor
     except Exception:
-        sys.stderr.write("[mask] SAM2 requested but sam2/torch not importable; degrading.\n")
+        sys.stderr.write(
+            "[mask] SAM2 requested but sam2/torch not importable; degrading.\n"
+        )
         return None
     try:
         cfg = config or "configs/sam2.1/sam2.1_hiera_s.yaml"
@@ -158,7 +164,9 @@ def mask_sam2(rgb: np.ndarray, checkpoint: str | None, config: str | None) -> np
 # --------------------------------------------------------------------------- #
 #  MASK -- tier 3: OpenCV grabCut (guaranteed fallback)
 # --------------------------------------------------------------------------- #
-def _grabcut_attempt(bgr: np.ndarray, rect: tuple[int, int, int, int], iters: int) -> np.ndarray:
+def _grabcut_attempt(
+    bgr: np.ndarray, rect: tuple[int, int, int, int], iters: int
+) -> np.ndarray:
     """Single GrabCut attempt with a specific rect. Returns 0/255 mask."""
     h, w = bgr.shape[:2]
     gc = np.zeros((h, w), np.uint8)
@@ -218,14 +226,14 @@ def mask_grabcut(rgb: np.ndarray, iters: int = 6) -> np.ndarray:
     # Asymmetric: buildings typically have sky above and ground below, so top/bottom get
     # more inset than sides to give GrabCut better background anchors.
     configs = [
-        (0.02, 0.04),   # original tight config — works when subject is small-ish
-        (0.06, 0.12),   # medium inset — better for full-frame facades
-        (0.12, 0.18),   # generous inset — for very full-frame subjects
+        (0.02, 0.04),  # original tight config — works when subject is small-ish
+        (0.06, 0.12),  # medium inset — better for full-frame facades
+        (0.12, 0.18),  # generous inset — for very full-frame subjects
     ]
 
     best_mask: np.ndarray | None = None
     best_score = -1.0
-    for (xf, yf) in configs:
+    for xf, yf in configs:
         mx, my = max(1, int(xf * w)), max(1, int(yf * h))
         rect = (mx, my, w - 2 * mx, h - 2 * my)
         try:
@@ -264,7 +272,9 @@ def depth_depthanything(rgb: np.ndarray, model_id: str) -> np.ndarray | None:
         depth = np.asarray(out["depth"], dtype=np.float32)
         return depth  # raw relative depth; normalized within-subject by the caller
     except Exception as exc:
-        sys.stderr.write(f"[depth] Depth-Anything available but failed ({exc}); degrading.\n")
+        sys.stderr.write(
+            f"[depth] Depth-Anything available but failed ({exc}); degrading.\n"
+        )
         return None
 
 
@@ -335,21 +345,37 @@ def run(args: argparse.Namespace) -> int:
     # ----- MASK ------------------------------------------------------------- #
     mask = None
     mask_tier = "grabcut(cv2-fallback)"
-    if not args.force_fallback:
+    if not args.force_fallback and not args.backdrop:
         if args.sam2_checkpoint:
             t = time.time()
             mask = mask_sam2(rgb, args.sam2_checkpoint, args.sam2_config)
             if mask is not None:
-                mask_tier = f"sam2 ({time.time()-t:.1f}s)"
+                mask_tier = f"sam2 ({time.time() - t:.1f}s)"
         if mask is None and not args.no_rembg:
             t = time.time()
             mask = mask_rembg(rgb)
             if mask is not None:
-                mask_tier = f"rembg ({time.time()-t:.1f}s)"
+                mask_tier = f"rembg ({time.time() - t:.1f}s)"
+    if mask is None and args.backdrop:
+        from backdrop_mask import backdrop_mask
+
+        t = time.time()
+        lo, _, hi = args.backdrop_value.partition(",")
+        try:
+            value_range = (float(lo), float(hi))
+        except ValueError:
+            raise UsageError(
+                f"--backdrop-value must be LO,HI numbers in 0..1, got {args.backdrop_value!r}",
+                command="preprocess",
+            ) from None
+        mask = backdrop_mask(
+            rgb, max_saturation=args.backdrop_saturation, value_range=value_range
+        )
+        mask_tier = f"backdrop ({time.time() - t:.1f}s)"
     if mask is None:
         t = time.time()
         mask = mask_grabcut(rgb)
-        mask_tier = f"grabcut(cv2-fallback) ({time.time()-t:.1f}s)"
+        mask_tier = f"grabcut(cv2-fallback) ({time.time() - t:.1f}s)"
     save_gray(mask, mask_path)
     meta = mask_metadata(mask)
     print(
@@ -365,7 +391,7 @@ def run(args: argparse.Namespace) -> int:
         t = time.time()
         raw = depth_depthanything(rgb, args.depth_model)
         if raw is not None:
-            depth_tier = f"depth-anything-v2 ({time.time()-t:.1f}s)"
+            depth_tier = f"depth-anything-v2 ({time.time() - t:.1f}s)"
             # Normalize WITHIN the subject (background extremes don't squash subject
             # contrast), then mask so background is black -- keeps depth and mask
             # spatially consistent with the silhouette.
@@ -380,7 +406,7 @@ def run(args: argparse.Namespace) -> int:
     if depth is None:
         t = time.time()
         depth = depth_pseudo(rgb, mask)
-        depth_tier = f"pseudo(gradient-fallback) ({time.time()-t:.1f}s)"
+        depth_tier = f"pseudo(gradient-fallback) ({time.time() - t:.1f}s)"
     save_gray(depth, depth_path)
     print(f"[depth] tier={depth_tier}  -> {depth_path}")
 
@@ -399,22 +425,59 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=__doc__,
     )
     p.add_argument("image", help="path to the reference photo of the subject to mask")
-    p.add_argument("--out-dir", default=str(default_out),
-                   help="output directory (default: this script's dir)")
+    p.add_argument(
+        "--out-dir",
+        default=str(default_out),
+        help="output directory (default: this script's dir)",
+    )
     p.add_argument("--mask-name", default="mask.png")
     p.add_argument("--depth-name", default="depth.png")
-    p.add_argument("--depth-model", default="depth-anything/Depth-Anything-V2-Small-hf",
-                   help="HF model id for the depth-estimation pipeline")
-    p.add_argument("--sam2-checkpoint", default=None,
-                   help="path to a SAM 2 .pt checkpoint to enable the SAM2 mask tier")
-    p.add_argument("--sam2-config", default=None,
-                   help="SAM 2 config (e.g. configs/sam2.1/sam2.1_hiera_s.yaml)")
-    p.add_argument("--no-rembg", action="store_true",
-                   help="skip the rembg tier even if installed")
-    p.add_argument("--force-fallback", action="store_true",
-                   help="force the OpenCV/numpy floor (skip all model tiers)")
+    p.add_argument(
+        "--depth-model",
+        default="depth-anything/Depth-Anything-V2-Small-hf",
+        help="HF model id for the depth-estimation pipeline",
+    )
+    p.add_argument(
+        "--sam2-checkpoint",
+        default=None,
+        help="path to a SAM 2 .pt checkpoint to enable the SAM2 mask tier",
+    )
+    p.add_argument(
+        "--sam2-config",
+        default=None,
+        help="SAM 2 config (e.g. configs/sam2.1/sam2.1_hiera_s.yaml)",
+    )
+    p.add_argument(
+        "--no-rembg", action="store_true", help="skip the rembg tier even if installed"
+    )
+    p.add_argument(
+        "--force-fallback",
+        action="store_true",
+        help="force the OpenCV/numpy floor (skip all model tiers)",
+    )
+    p.add_argument(
+        "--backdrop",
+        action="store_true",
+        help="studio render / product shot on a smooth neutral backdrop: subject = everything that is not "
+        "the backdrop (keeps black, white and pink parts that grabCut drops; a floor shadow stays backdrop)",
+    )
+    p.add_argument(
+        "--backdrop-saturation",
+        type=float,
+        default=0.14,
+        help="--backdrop: highest HSV saturation of a backdrop pixel (default 0.14)",
+    )
+    p.add_argument(
+        "--backdrop-value",
+        default="0.38,0.80",
+        help="--backdrop: LO,HI range of the HSV value of a backdrop pixel (default 0.38,0.80)",
+    )
     return p
 
 
 if __name__ == "__main__":
-    sys.exit(run(build_parser().parse_args()))
+    try:
+        sys.exit(run(build_parser().parse_args()))
+    except ThreeDError as err:
+        print(err.render(), file=sys.stderr)
+        sys.exit(err.exit_code)

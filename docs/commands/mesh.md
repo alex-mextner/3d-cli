@@ -88,6 +88,8 @@ region handles so the silhouette matches reference masks — and prints the per-
 | `--collage FILE.png` | before / after / displacement heat-map in front, left and top views, drawn by the numpy rasteriser (needs Pillow). | `--collage fur.png` |
 | `--verify-determinism` | runs the spec twice and exits 1 unless both meshes are identical. | `--verify-determinism` |
 | `--seed N` | overrides the spec seed. | `--seed 7` |
+| `--labels FILE.npz` | per-face labels (an array `face_label`, one int per face of the mesh as loaded) to carry to the result: faces split by a `remesh` `refine` op give their label to every child. Refused up front when the spec has a `decimate`, `repair` or non-`refine` `remesh` op (no input-to-output face map). Any other array with one row per face (a face group, a patch id) is carried the same way; the rest (e.g. `names`) is copied unchanged. | `--labels cat.labels.npz` |
+| `--out-labels FILE.npz` | where to write the carried labels (default `<out>.labels.npz`); needs `--labels`. | `--out-labels cat_fur.labels.npz` |
 | `--no-self-intersections` | skips the self-intersection count (pymeshlab when it imports, else a built-in KD-tree edge/triangle test: ~3 s on 400k faces; counts transversal piercings, not coplanar overlaps). | `--no-self-intersections` |
 | `--json` | prints the whole report instead of the summary. | `--json` |
 
@@ -132,13 +134,14 @@ zone unless the spec sets `keepout_tolerance_mm: <mm>`, which switches the gate 
 | `smooth` | Taubin (non-shrinking) or Laplacian smoothing of the region | `iterations` (10), `lambda` (0.5), `method` taubin\|laplacian |
 | `inflate` | move along the smoothed vertex normal | `amount` (mm, signed), `normal_smoothing` (2) |
 | `draw` | move along the region's average normal (one direction) | `amount`, `normal_smoothing` |
+| `displace` | move along a fixed direction, whatever the local normal does (fill a socket forward, shave a ridge back) | `direction: [x,y,z]`, `amount` (mm, signed) |
 | `pinch` | pull toward a point or line, in the tangent plane | `strength` (0.5), `toward: {point}\|{line: [a, b]}`, `keep_normal` |
 | `crease` | pinch + a groove | `strength`, `depth` (mm), `sharpness` (2), `toward` |
 | `scale_local` | scale about a pivot, weighted by the region | `factor` (scalar or `[x,y,z]`), `pivot` |
 | `symmetrize` | mirror (average, or copy one side) | `axis` x\|y\|z, `at`, `mode` average\|mirror_positive\|mirror_negative |
 | `grab` (alias `move`) | move / rotate / scale handle regions; the surface follows | `handles: [{region, translate, rotate: {axis, deg}, scale, pivot}]`, `anchors`, `solver` none\|harmonic\|biharmonic\|arap (arap), `iterations` (10), `influence` (mm; solve only this patch), `handle_min` |
 | `fur` (alias `relief`) | seeded strand relief along the normal, outward only | `amplitude`, `amplitude_regions`, `flow`, `pitch`, `length`, `fine`, `warp`, `clumps`, `normal_smoothing`, `overhang_safe: {max_angle_deg}` |
-| `remesh` | `refine` (default): conforming midpoint splits to `target_edge`, vertex-preserving, no quality guarantee; `botsch`: isotropic remeshing via `gpytoolbox` (best triangle quality, moves vertices); `pymeshlab`: isotropic explicit remeshing (GPL, needs libGL) | `engine`, `target_edge` (mm), `iterations`, `feature_deg` |
+| `remesh` | `refine` (default): conforming midpoint splits to `target_edge` (mean edge) or `max_edge` (longest edge: fails when `max_rounds` is not enough), vertex-preserving, no quality guarantee; with a `region` only faces touching it are split (a neighbour sharing a split edge is split too, so the mesh stays closed) and the report gives the longest edge left in the zone; `botsch`: isotropic remeshing via `gpytoolbox` (best triangle quality, moves vertices); `pymeshlab`: isotropic explicit remeshing (GPL, needs libGL) | `engine`, `target_edge` (mm) or `max_edge` (mm, refine), `max_rounds` (10, refine), `iterations`, `feature_deg` |
 | `decimate` | `manifold3d` (default): tolerance simplify; `quadric` (default when `target_faces` is set): `fast-simplification` to a face count. Both leave sliver triangles: remesh before a further `grab`. | `engine`, `tolerance` (mm), `target_faces` |
 | `repair` | `builtin` (trimesh: merge, drop degenerate/duplicate faces, fix winding, fill holes) or `meshfix` (the `3d mesh --repair` adapter) | `engine` |
 | `fit_silhouette` | see below | `views`, `handles`, `iterations`, `step_mm`, `min_step_mm`, `min_gain`, `anchors`, `influence` |

@@ -76,6 +76,18 @@ def draw(ctx: RegionContext, params: Mapping[str, Any], w: Array) -> Array:
     return ctx.V + (_num(params, "amount", 0.0) * w)[:, None] * direction
 
 
+def displace(ctx: RegionContext, params: Mapping[str, Any], w: Array) -> Array:
+    """V += amount * w * unit(direction): a push along a fixed axis, whatever the local normal does."""
+    direction = np.asarray(params.get("direction", ()), dtype=np.float64)
+    norm = float(np.linalg.norm(direction)) if direction.shape == (3,) else 0.0
+    if norm <= 1e-12:
+        raise UsageError(
+            "displace: direction must be a non-zero [x, y, z] vector",
+            command="mesh deform",
+        )
+    return ctx.V + (_num(params, "amount", 0.0) * w)[:, None] * (direction / norm)
+
+
 def _pull(ctx: RegionContext, params: Mapping[str, Any], w: Array) -> Array:
     """Unit-strength pull vector toward the pinch target, with the normal component removed."""
     V = ctx.V

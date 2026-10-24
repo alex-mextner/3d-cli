@@ -42,6 +42,7 @@ BRUSHES: dict[str, BrushFn] = {
     "smooth": brushes.smooth,
     "inflate": brushes.inflate,
     "draw": brushes.draw,
+    "displace": brushes.displace,
     "pinch": brushes.pinch,
     "crease": brushes.crease,
     "scale_local": brushes.scale_local,
@@ -57,10 +58,18 @@ TOPOLOGY: dict[str, Callable[[Array, IntArray, Mapping[str, Any]], retopo.Result
 class Pipeline:
     """Mutable run state: current mesh, persistent keep-out lock, baseline for the final gate."""
 
-    def __init__(self, V: Array, F: IntArray, spec: Mapping[str, Any]) -> None:
+    def __init__(
+        self,
+        V: Array,
+        F: IntArray,
+        spec: Mapping[str, Any],
+        carry_faces: bool = False,
+    ) -> None:
         self.spec = spec
+        self.carry_faces = carry_faces
         self.V0, self.F0 = V.copy(), F.copy()
         self.V, self.F = V.copy(), F.copy()
+        self.face_parent: IntArray | None = np.arange(len(F), dtype=np.int64)
         self.records: list[dict[str, Any]] = []
         base = RegionContext(self.V, self.F, spec["regions"], spec["base_dir"])
         self.keepout_weight0 = self._keepout_weight(base)
@@ -168,7 +177,33 @@ class Pipeline:
 
     def _apply_topology(self, name: str, op: Mapping[str, Any]) -> dict[str, Any]:
         tolerance = float(self.spec["keepout_tolerance_mm"])
-        V2, F2, info, preserves = TOPOLOGY[name](self.V, self.F, op)
+        refining = name == "remesh" and str(op.get("engine", "refine")) == "refine"
+        if self.carry_faces and not refining:
+            raise UsageError(
+                f"{name} (engine {op.get('engine', 'default')}) cannot carry per-face labels: it does not map output faces to input faces",
+                command="mesh deform",
+                remediation=[
+                    "Use remesh engine `refine` (children inherit the parent face), or run without --labels."
+                ],
+            )
+        zone = None
+        if op.get("region") is not None:
+            if not refining:
+                raise UsageError(
+                    f"{name}: `region` is only honoured by remesh engine refine",
+                    command="mesh deform",
+                    remediation=["Drop `region` to run the op on the whole mesh."],
+                )
+            ctx = RegionContext(
+                self.V, self.F, self.spec["regions"], self.spec["base_dir"]
+            )
+            zone = ctx.weight(op.get("region")) > 0.0
+        parent = None
+        if refining:
+            V2, F2, info, parent = retopo.refine(self.V, self.F, op, zone)
+            preserves = True
+        else:
+            V2, F2, info, preserves = TOPOLOGY[name](self.V, self.F, op)
         if not preserves and len(self.baseline_locked) and tolerance <= 0.0:
             raise GateFailure(
                 f"{name} (engine {info.get('engine')}) moves vertices, so the keep-out zone cannot stay bit-identical",
@@ -186,6 +221,11 @@ class Pipeline:
         else:
             self.lock = _locate_rows(V2, self.baseline_locked)
         self.V, self.F = V2, F2
+        self.face_parent = (
+            None
+            if parent is None or self.face_parent is None
+            else self.face_parent[parent]
+        )
         return {"vertices_before": n_before, "vertices_after": int(len(V2)), **info}
 
     def keepout_gate(self) -> dict[str, Any]:
@@ -272,8 +312,26 @@ def run_spec(
     V: Array, F: IntArray, spec: Mapping[str, Any], *, self_intersections: bool = True
 ) -> tuple[Array, IntArray, dict[str, Any]]:
     """Apply `spec` to (V, F). Returns the new mesh and the report; report["status"] is PASS or FAIL."""
+    V2, F2, report, _ = run_spec_with_parents(
+        V, F, spec, self_intersections=self_intersections
+    )
+    return V2, F2, report
+
+
+def run_spec_with_parents(
+    V: Array,
+    F: IntArray,
+    spec: Mapping[str, Any],
+    *,
+    self_intersections: bool = True,
+    carry_faces: bool = False,
+) -> tuple[Array, IntArray, dict[str, Any], IntArray | None]:
+    """`run_spec` plus, for every output face, the index of the input face it was cut from.
+
+    Per-face data (labels) follows the faces through vertex ops and remesh engine `refine`; any other
+    topology op has no such mapping. With `carry_faces` such an op is refused up front."""
     started = time.perf_counter()
-    pipe = Pipeline(V, F, spec)
+    pipe = Pipeline(V, F, spec, carry_faces=carry_faces)
     for index, op in enumerate(spec["ops"]):
         pipe.apply(index, op)
     gate = pipe.keepout_gate()
@@ -299,4 +357,5 @@ def run_spec(
             "after": count_self_intersections(pipe.V, pipe.F),
         }
     report["timing_s"] = round(time.perf_counter() - started, 4)
-    return pipe.V, pipe.F, report
+    # None after a topology op that does not map output faces to input faces (carry_faces refuses those)
+    return pipe.V, pipe.F, report, pipe.face_parent

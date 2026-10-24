@@ -36,7 +36,9 @@ _LIB = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _LIB not in sys.path:
     sys.path.insert(0, _LIB)
 
-from errors import GateFailure, ThreeDError, UsageError  # noqa: E402  (lib/ must be on sys.path first)
+import numpy as np  # noqa: E402
+from errors import GateFailure, InputNotFound, ThreeDError, UsageError  # noqa: E402  (lib/ must be on sys.path first)
+from numpy.typing import NDArray  # noqa: E402
 
 PROG = "3d mesh"
 
@@ -49,10 +51,54 @@ def _parser(sub: str) -> argparse.ArgumentParser:
     p.add_argument("--report")
     p.add_argument("--collage")
     p.add_argument("--seed", type=int)
+    p.add_argument("--labels")
+    p.add_argument("--out-labels")
     p.add_argument("--verify-determinism", action="store_true")
     p.add_argument("--no-self-intersections", action="store_true")
     p.add_argument("--json", action="store_true")
     return p
+
+
+def _load_labels(path: str, n_faces: int) -> dict[str, NDArray[Any]]:
+    """Every array of an .npz; `face_label` is required and has one entry per face of the mesh as loaded.
+    Any other array with `n_faces` rows (a face group, a patch id) is per-face data too and is carried alike."""
+    if not os.path.isfile(path):
+        raise InputNotFound(path, command="mesh")
+    with np.load(path, allow_pickle=False) as data:
+        arrays = {k: np.asarray(data[k]) for k in data.files}
+    if "face_label" not in arrays:
+        raise UsageError(
+            f"{path}: no `face_label` array (found: {', '.join(arrays) or 'none'})",
+            command="mesh",
+            remediation=[
+                "Save labels as np.savez(path, face_label=<one int per face>, ...)."
+            ],
+        )
+    count = len(arrays["face_label"]) if arrays["face_label"].ndim else 0
+    if count != n_faces:
+        raise UsageError(
+            f"{path}: {count} face labels but the mesh has {n_faces} faces after loading (vertices are welded, degenerate and duplicate faces dropped)",
+            command="mesh",
+            remediation=[
+                "Label the mesh as `3d mesh deform` loads it: same file, same face order."
+            ],
+        )
+    return arrays
+
+
+def _save_labels(
+    path: str,
+    arrays: dict[str, NDArray[Any]],
+    n_faces: int,
+    parents: NDArray[np.int64],
+) -> str:
+    """Write the arrays for the output faces: per-face arrays (`n_faces` rows) are indexed by each face's parent, the rest copied."""
+    out: dict[str, Any] = {
+        k: v[parents] if v.ndim and len(v) == n_faces else v for k, v in arrays.items()
+    }
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    np.savez_compressed(path, **out)
+    return path
 
 
 def run_deform(argv: list[str], sub: str = "deform") -> int:
@@ -79,13 +125,35 @@ def run_deform(argv: list[str], sub: str = "deform") -> int:
             ],
         )
     out = args.out or os.path.splitext(args.mesh)[0] + ".deformed.stl"
+    if args.out_labels and not args.labels:
+        raise UsageError(
+            "--out-labels needs --labels",
+            command="mesh",
+            remediation=[
+                f"{PROG} {sub} part.stl spec.yaml --labels part.labels.npz --out-labels out.labels.npz"
+            ],
+        )
 
     loaded = time.perf_counter()
     V, F = meshio.load_mesh(args.mesh)
     load_s = time.perf_counter() - loaded
-    V1, F1, report = engine.run_spec(
-        V, F, spec, self_intersections=not args.no_self_intersections
+    face_data = _load_labels(args.labels, len(F)) if args.labels else None
+    V1, F1, report, parents = engine.run_spec_with_parents(
+        V,
+        F,
+        spec,
+        self_intersections=not args.no_self_intersections,
+        carry_faces=face_data is not None,
     )
+    if face_data is not None:
+        report["labels"] = {
+            "input": args.labels,
+            "faces_in": int(len(F)),
+            "classes": int(len(np.unique(face_data["face_label"]))),
+            "per_face_arrays": sorted(
+                k for k, v in face_data.items() if v.ndim and len(v) == len(F)
+            ),
+        }
     report["timing_s"] = {"load": round(load_s, 4), "run": report["timing_s"]}
     report["input"]["path"] = args.mesh
     report["input"]["sha256"] = meshio.file_sha256(args.mesh)
@@ -109,6 +177,13 @@ def run_deform(argv: list[str], sub: str = "deform") -> int:
     if report["status"] == "PASS":
         report["output"]["path"] = out
         report["output"]["sha256"] = meshio.save_mesh(out, V1, F1)
+        if face_data is not None:
+            assert parents is not None
+            labels_out = args.out_labels or os.path.splitext(out)[0] + ".labels.npz"
+            report["labels"]["output"] = _save_labels(
+                labels_out, face_data, len(F), parents
+            )
+            report["labels"]["faces_out"] = int(len(parents))
         if args.collage:
             from geometry.meshfit import collage
 
@@ -182,6 +257,11 @@ def _print_summary(
         )
     if "sha256" in outp:
         print(f"  sha256 {outp['sha256']}")
+    lab = report.get("labels")
+    if lab and "output" in lab:
+        print(
+            f"  labels: {lab['faces_in']} -> {lab['faces_out']} faces ({lab['classes']} classes) {lab['output']}"
+        )
     print(f"  report {report_path}")
     print(f">>> DEFORM: {report['status']}")
 

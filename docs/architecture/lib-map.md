@@ -186,12 +186,14 @@ boundaries are ready.
 These modules support reference preprocessing, image comparison, scoring, and match-loop
 orchestration:
 
+- `backdrop_mask.py`
 - `debug_overlay.py`
 - `match_loop.py`
 - `mask_geometry.py`
 - `preprocess_reference.py`
 - `proxy_align.py`
 - `refmatch.py`
+- `ref_measure.py`
 - `perceptual_metrics.py`
 - `spatial_fit_metrics.py`
 - `lib/cli/imaging.py`
@@ -292,7 +294,9 @@ Every current root Python module is listed here so future additions are intentio
 - `dimension_args.py` — the stdlib-only option grammar of `3d dimension` (`--bed`, `--dim`, `--width`), shared by the command and the renderer.
 - `dimension_check.py` — the legibility gate of dimensioned renders (`3d dimension --check`): sidecar + pixel checks of every label.
 - `dimension_render.py` — shaded top/front/side/iso renders with mm dimension arrows and the `.dims.json` sidecar (`3d dimension`).
+- `backdrop_mask.py` — subject mask of a studio render: everything that is not the smooth neutral backdrop connected to the frame border (`3d preprocess --backdrop`; numpy + scipy).
 - `refmatch.py` — image/reference matching helpers.
+- `ref_measure.py` — `3d measure-ref`: the same feature shape (an eye opening with iris / pupil, a nostril ...) measured on a reference image and on a render (corner line, aspect, tilt, extents, lid cover), delta gate.
 - `render.py` — OpenSCAD render and section implementation.
 - `spatial_fit_metrics.py` — contour-first camera-fit diagnostics and warning metrics.
 - `standing_props.py` — snap-off props for a part printed standing (the `3d props` backend): per-station back profile from manifold3d slices, sloped ribs with a straight inner edge behind the hindmost back point, tabs, foot strip, keep-out of the part dilated by the gap, height/base stability ratio; reads STL/3MF (core + production components, Orca part extruders) and writes a 3MF with the props as an extra part of the object.

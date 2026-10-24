@@ -31,6 +31,7 @@ OP_KEYS: dict[str, set[str]] = {
     "smooth": {"iterations", "lambda", "method"},
     "inflate": {"amount", "normal_smoothing"},
     "draw": {"amount", "normal_smoothing"},
+    "displace": {"amount", "direction"},
     "pinch": {"strength", "toward", "keep_normal", "normal_smoothing"},
     "crease": {
         "strength",
@@ -60,6 +61,7 @@ OP_KEYS: dict[str, set[str]] = {
     "remesh": {
         "engine",
         "target_edge",
+        "max_edge",
         "max_rounds",
         "iterations",
         "feature_deg",
@@ -274,6 +276,21 @@ def _validate_op(index: int, op: Any, known: set[str]) -> dict[str, Any]:
             regions_mod.validate_ref(h["region"], known, f"{where}.handles")
         for ref in op.get("anchors", []) or []:
             regions_mod.validate_ref(ref, known, f"{where}.anchors")
+    if name == "displace":
+        direction = op.get("direction")
+        if not (
+            isinstance(direction, list)
+            and len(direction) == 3
+            and all(isinstance(c, (int, float)) for c in direction)
+            and any(direction)
+        ):
+            raise _fail(
+                where, "displace needs direction: [x, y, z] (non-zero), amount: mm"
+            )
+        if not isinstance(op.get("amount"), (int, float)) or isinstance(
+            op.get("amount"), bool
+        ):
+            raise _fail(where, "displace needs amount: mm (a number)")
     if name == "fur":
         for item in op.get("amplitude_regions", []) or []:
             regions_mod.validate_ref(
