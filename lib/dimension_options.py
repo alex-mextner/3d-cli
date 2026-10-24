@@ -24,6 +24,9 @@ TOUCH_TOLERANCE = (
     0.01  # share of the model's diagonal: boxes this close count as touching
 )
 MAX_GROUPS = 8
+PART_TOLERANCE_MM = (
+    0.5  # an endpoint within this of a part's bounding box is on that part
+)
 
 
 def letters(up: str) -> tuple[str, str, str]:
@@ -52,7 +55,7 @@ class Group:
     bounds: np.ndarray  # (2, 3)
 
 
-def _part_bounds(model: Model) -> list[np.ndarray]:
+def part_bounds(model: Model) -> list[np.ndarray]:
     tris = np.asarray(model.mesh.triangles, dtype=float)
     out = []
     for i in range(len(model.parts)):
@@ -63,7 +66,7 @@ def _part_bounds(model: Model) -> list[np.ndarray]:
 
 def separated_groups(model: Model) -> list[Group]:
     """Groups of touching parts; more than one group means exploded / spread out on a plate."""
-    boxes = _part_bounds(model)
+    boxes = part_bounds(model)
     n = len(boxes)
     if n < 2:
         return []
@@ -95,3 +98,78 @@ def separated_groups(model: Model) -> list[Group]:
         groups.append(Group(model.parts[biggest].name, np.array([lo, hi])))
     groups.sort(key=lambda g: (g.name, tuple(g.bounds[0])))
     return groups
+
+
+def parts_at(bounds: list[np.ndarray], point: np.ndarray) -> set[int]:
+    """Indices of the parts whose bounding box (grown by PART_TOLERANCE_MM) holds `point`."""
+    return {
+        i
+        for i, box in enumerate(bounds)
+        if np.all(point >= box[0] - PART_TOLERANCE_MM)
+        and np.all(point <= box[1] + PART_TOLERANCE_MM)
+    }
+
+
+def _names(model: Model, indices: set[int]) -> str:
+    return " / ".join(sorted(model.parts[i].name for i in indices))
+
+
+class SpanError(ValueError):
+    """A dimension that would run between separate parts; the message names both and the allowed forms."""
+
+
+def classify_dimension(
+    model: Model,
+    bounds: list[np.ndarray],
+    name: str,
+    p1: np.ndarray,
+    p2: np.ndarray,
+    gap: tuple[str, str] | None,
+    separated: bool,
+) -> dict[str, object]:
+    """Check an explicit dimension against the part layout; returns its sidecar fields.
+
+    In a separated layout (an exploded assembly, a plate of parts that do not touch) both endpoints must
+    sit on ONE part; a measurement between two parts is allowed only when declared `kind: gap` between
+    the two NAMED parts, with one endpoint on each. Raises SpanError otherwise.
+    """
+    end1, end2 = parts_at(bounds, p1), parts_at(bounds, p2)
+    if gap is not None:
+        by_name = {p.name: i for i, p in enumerate(model.parts)}
+        missing = [n for n in gap if n not in by_name]
+        if missing:
+            raise SpanError(
+                f"gap dimension {name!r}: no part named {', '.join(map(repr, missing))}; "
+                f"the model has: {', '.join(sorted(by_name))}"
+            )
+        a, b = by_name[gap[0]], by_name[gap[1]]
+        if not ((a in end1 and b in end2) or (b in end1 and a in end2)):
+            raise SpanError(
+                f"gap dimension {name!r} must run from part {gap[0]!r} to part {gap[1]!r} "
+                f"(within {PART_TOLERANCE_MM} mm of their bounding boxes), but its ends are on "
+                f"{_names(model, end1) or 'no part'} and {_names(model, end2) or 'no part'}"
+            )
+        return {"parts": list(gap), "spans_separated": True}
+    if not separated:
+        return {
+            "parts": sorted(model.parts[i].name for i in end1 & end2),
+            "spans_separated": False,
+        }
+    for label, end in (("first", end1), ("second", end2)):
+        if not end:
+            raise SpanError(
+                f"dimension {name!r}: its {label} endpoint is on no part "
+                f"(more than {PART_TOLERANCE_MM} mm from every part's bounding box)"
+            )
+    common = end1 & end2
+    if not common:
+        raise SpanError(
+            f"dimension {name!r} runs from {_names(model, end1)} to {_names(model, end2)}: separate parts "
+            "of an exploded / multi-part layout, so the number would measure the gap between them. "
+            "Keep both endpoints on ONE part, or declare the mating gap in --dims-from as "
+            f'`kind: gap` with `parts: ["{_names(model, end1)}", "{_names(model, end2)}"]`'
+        )
+    return {
+        "parts": sorted(model.parts[i].name for i in common),
+        "spans_separated": False,
+    }

@@ -40,7 +40,7 @@ Render options besides `--bed` and `--dim`:
 | `-D NAME=VALUE` | override an OpenSCAD variable of a `.scad` input (repeatable; any other input is a usage error) | `-D standin=true` |
 | `--part SEL=NAME[:ROLE]` | rename a part and/or set its role (`printed`, `vitamin`, `reference`, `stand_in`); SEL is a part name or a `#RRGGBB` colour (repeatable) | `--part "#2a62c9=PCB:stand_in"` |
 | `--up Z\|Y\|X` | the model's vertical axis (default `Z`). A Y-up model gets a TRUE top view; labels keep the model's own X/Y/Z letters; not with `--bed` ([#595](https://github.com/alex-mextner/3d-cli/issues/595)) | `--up Y` |
-| `--overall auto\|always\|never` | overall X/Y/Z of the whole model. `auto` (default) draws them, except on an exploded assembly or a plate whose parts do not touch: there each separate part gets its own footprint dims (`X left 10.0 mm`) and the header says `N separate parts` ([#596](https://github.com/alex-mextner/3d-cli/issues/596)) | `--overall always` |
+| `--overall auto\|always\|never` | overall X/Y/Z of the whole model. `auto` (default) draws them, except on an exploded assembly or a plate whose parts do not touch: there each separate part gets its own footprint dims (`X left 10.0 mm`) and the header says `N separate parts`. `always` on such a layout is refused (exit 2) ([#596](https://github.com/alex-mextner/3d-cli/issues/596)) | `--overall never` |
 | `--dims-from SPEC` | JSON/YAML list (or `{dims: [...]}`) of `{name, from: [x,y,z], to: [x,y,z]}` measurements that MUST be drawn: the render exits 2 naming any that fits no view, and the sidecar records them as `required_dims` ([#594](https://github.com/alex-mextner/3d-cli/issues/594)) | `--dims-from dims.yaml` |
 
 `--dim` points are model-space mm and may be negative (`--dim "width:-30,0,0:30,0,0"`).
@@ -103,6 +103,21 @@ Example (the soil-sensor mole: shells, nose/paws, eyes, and the purchased probe 
 Dimension arrows and labels keep their own colours and white label boxes, so they stay legible on any part
 colour; the legibility gate below is unchanged.
 
+## No dimension across separate parts
+
+On an **exploded assembly or a plate** (the parts do not touch: a `separated_parts` layout, recorded in the sidecar) a measurement between two parts only measures the gap between them, so it is made impossible:
+
+| What | Result |
+|---|---|
+| automatic overall X/Y/Z | not drawn; each separate part gets its own footprint dims (`--overall auto`); `--overall always` is refused (exit 2) |
+| automatic `span` of a slanted part | not drawn across separated parts |
+| `--dim` / `--dims-from` with both endpoints on ONE part | drawn |
+| `--dim` / `--dims-from` with endpoints on DIFFERENT parts (each endpoint is on the parts whose bounding box, grown by 0.5 mm, holds it) | refused, exit 2, naming both parts and the allowed form |
+| an endpoint on no part | refused, exit 2 |
+| `{name, kind: gap, parts: [A, B], from, to}` in `--dims-from`, one endpoint on each named part | drawn as the declared mating gap (`kind: gap` in the sidecar) |
+
+`--check` fails an image whose `.dims.json` holds a dimension with `spans_separated: true` that is not a `kind: gap` (rule `spans-separated-parts`), so an image from a tool that did not enforce this cannot pass as legible when its sidecar says so. Touching parts (an assembled model) are not restricted.
+
 ## Sidecar `OUT.png.dims.json`
 
 `image` (path, width, height, sha256), `part`, `bbox_mm`, optional `bed`, `views`
@@ -113,7 +128,7 @@ per drawn label with `label`, `value_mm`, `view`, `kind` (`bbox` / `custom`), `t
 Since [#580](https://github.com/alex-mextner/3d-cli/issues/580) it also carries `parts` (per part:
 `name`, `role`, `printable`, displayed `color`, the `authored_color` of the file, `color_source`
 `authored` / `palette` / `default`, `muted`, `faces`), `legend` (`box` of the strip, `rows`; absent for a
-single part) and `warnings` (e.g. an OBJ whose MTL is missing). `--check` ignores these: it judges the
+single part) and `warnings` (e.g. an OBJ whose MTL is missing); each dimension also carries `spans_separated` (and `parts`), and the sidecar `separated_parts`. `--check` ignores these: it judges the
 labels only.
 
 ## `--check` — the legibility gate

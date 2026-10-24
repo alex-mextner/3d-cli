@@ -4,15 +4,21 @@ from __future__ import annotations
 
 import json
 import pathlib
+import shutil
 from typing import Any
 
 import pytest
-from dimension_fixtures import GREEN, RED, Box, write_3mf
+from dimension_fixtures import BLUE, GREEN, RED, Box, write_3mf
 
 pytest.importorskip("PIL")
 trimesh = pytest.importorskip("trimesh")
 
-from dimension_args import parse_dims_file, parse_overall, parse_up  # noqa: E402
+from dimension_args import (  # noqa: E402
+    parse_dims_file,
+    parse_dims_gaps,
+    parse_overall,
+    parse_up,
+)
 from dimension_check import check_image, sidecar_path  # noqa: E402
 from dimension_model import RenderError  # noqa: E402
 from dimension_render import render  # noqa: E402
@@ -118,17 +124,21 @@ def test_touching_parts_keep_the_overall_dims(tmp_path: pathlib.Path) -> None:
     assert next(d for d in data["dimensions"] if d["label"] == "X")["value_mm"] == 20.0
 
 
-def test_overall_always_and_never_override_the_detection(
+def test_overall_never_draws_none_and_always_is_refused_across_separate_parts(
     tmp_path: pathlib.Path,
 ) -> None:
     model = write_3mf(
         tmp_path / "plate.3mf", [Box("left", 0, RED), Box("right", 60, GREEN)]
     )
-    always = render(str(model), str(tmp_path / "a.png"), overall="always")
-    assert always["overall"] == "drawn" and always["bbox_mm"][0] == 70.0
-    assert {"X", "Y", "Z"} <= _labels(always)
+    with pytest.raises(RenderError, match="separate parts"):
+        render(str(model), str(tmp_path / "a.png"), overall="always")
     never = render(str(model), str(tmp_path / "n.png"), overall="never")
     assert never["overall"] == "none" and not _labels(never)
+    touching = write_3mf(
+        tmp_path / "pair.3mf", [Box("left", 0, RED), Box("right", 10, GREEN)]
+    )
+    always = render(str(touching), str(tmp_path / "t.png"), overall="always")
+    assert always["overall"] == "drawn" and always["bbox_mm"][0] == 20.0
 
 
 def _spec(
@@ -227,3 +237,212 @@ def test_require_dims_fails_when_a_declared_measurement_is_missing_or_none_was_d
     pathlib.Path(side).write_text(json.dumps(data), encoding="utf-8")
     offenders = check_image(declared, require_dims=True)
     assert [(o.label, o.rule) for o in offenders] == [("ghost", "missing-required-dim")]
+
+
+# --- no dimension across separate parts (#602) -------------------------------------------------
+
+
+@pytest.fixture
+def plate(tmp_path: pathlib.Path) -> str:
+    """Two 10 mm cubes 50 mm apart: `left` at x 0..10, `right` at x 60..70."""
+    return str(
+        write_3mf(
+            tmp_path / "plate.3mf", [Box("left", 0, RED), Box("right", 60, GREEN)]
+        )
+    )
+
+
+def test_a_dim_between_separate_parts_is_rejected_naming_both_and_the_allowed_form(
+    plate: str, tmp_path: pathlib.Path
+) -> None:
+    with pytest.raises(RenderError) as excinfo:
+        render(plate, str(tmp_path / "x.png"), dims=["across:5,5,5:65,5,5"])
+    message = str(excinfo.value)
+    assert "left" in message and "right" in message and "kind: gap" in message
+    assert excinfo.value.exit_code == 2
+
+
+def test_a_dim_inside_one_part_is_drawn_on_a_separated_layout(
+    plate: str, tmp_path: pathlib.Path
+) -> None:
+    out = str(tmp_path / "ok.png")
+    data = render(plate, out, dims=["edge:0,5,5:10,5,5"])
+    item = next(d for d in data["dimensions"] if d["label"] == "edge")
+    assert item["value_mm"] == 10.0 and item["spans_separated"] is False
+    assert item["parts"] == ["left"] and data["separated_parts"] is True
+    assert check_image(out) == []
+
+
+def test_an_endpoint_on_no_part_is_rejected(plate: str, tmp_path: pathlib.Path) -> None:
+    with pytest.raises(RenderError, match="no part"):
+        render(plate, str(tmp_path / "x.png"), dims=["air:5,5,5:30,5,5"])
+
+
+def test_the_tolerance_is_half_a_millimetre(plate: str, tmp_path: pathlib.Path) -> None:
+    render(
+        plate, str(tmp_path / "in.png"), dims=["near:0,5,5:10.4,5,5"]
+    )  # 0.4 mm past the face
+    with pytest.raises(RenderError, match="no part"):
+        render(plate, str(tmp_path / "out.png"), dims=["far:0,5,5:10.6,5,5"])
+
+
+def _gap_spec(tmp_path: pathlib.Path, parts: list[str]) -> list[str]:
+    path = tmp_path / "gap.json"
+    path.write_text(
+        json.dumps(
+            [
+                {
+                    "name": "mate",
+                    "kind": "gap",
+                    "parts": parts,
+                    "from": [10, 5, 5],
+                    "to": [60, 5, 5],
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return [str(path)]
+
+
+def test_a_declared_gap_between_two_named_parts_is_allowed_and_marked(
+    plate: str, tmp_path: pathlib.Path
+) -> None:
+    (path,) = _gap_spec(tmp_path, ["left", "right"])
+    out = str(tmp_path / "gap.png")
+    data = render(
+        plate,
+        out,
+        dims=parse_dims_file(path),
+        required=parse_dims_file(path),
+        gaps=parse_dims_gaps(path),
+    )
+    item = next(d for d in data["dimensions"] if d["label"] == "mate")
+    assert item["kind"] == "gap" and item["parts"] == ["left", "right"]
+    assert item["value_mm"] == 50.0
+    assert check_image(out, require_dims=True) == []  # a declared gap passes the gate
+
+
+def test_a_gap_between_the_wrong_or_unknown_parts_is_rejected(
+    plate: str, tmp_path: pathlib.Path
+) -> None:
+    for parts, text in (
+        (["left", "nope"], "no part named"),
+        (["left", "left2"], "no part named"),
+    ):
+        (path,) = _gap_spec(tmp_path, parts)
+        with pytest.raises(RenderError, match=text):
+            render(
+                plate,
+                str(tmp_path / "x.png"),
+                dims=parse_dims_file(path),
+                gaps=parse_dims_gaps(path),
+            )
+    swapped = write_3mf(
+        tmp_path / "three.3mf",
+        [Box("left", 0, RED), Box("right", 60, GREEN), Box("far", 120, BLUE)],
+    )
+    (path,) = _gap_spec(
+        tmp_path, ["left", "far"]
+    )  # the points sit on left and right, not far
+    with pytest.raises(RenderError, match="must run from part 'left' to part 'far'"):
+        render(
+            str(swapped),
+            str(tmp_path / "y.png"),
+            dims=parse_dims_file(path),
+            gaps=parse_dims_gaps(path),
+        )
+
+
+def test_touching_parts_are_not_a_separated_layout(tmp_path: pathlib.Path) -> None:
+    pair = write_3mf(
+        tmp_path / "pair.3mf", [Box("left", 0, RED), Box("right", 10, GREEN)]
+    )
+    data = render(str(pair), str(tmp_path / "p.png"), dims=["across:5,5,5:15,5,5"])
+    assert (
+        data["separated_parts"] is False
+    )  # nothing to refuse: the parts are assembled
+
+
+def test_the_gate_fails_an_image_whose_sidecar_has_a_dimension_across_separate_parts(
+    plate: str, tmp_path: pathlib.Path
+) -> None:
+    out = str(tmp_path / "ok.png")
+    render(plate, out, dims=["edge:0,5,5:10,5,5"])
+    assert check_image(out) == []
+    side = pathlib.Path(sidecar_path(out))
+    data = json.loads(side.read_text(encoding="utf-8"))
+    data["dimensions"][0]["spans_separated"] = True
+    data["dimensions"][0]["parts"] = ["left", "right"]
+    side.write_text(json.dumps(data), encoding="utf-8")
+    offenders = check_image(out)
+    assert [o.rule for o in offenders] == ["spans-separated-parts"]
+    assert "left / right" in offenders[0].detail
+    # the same dimension declared as a gap is the allowed form
+    data["dimensions"][0]["kind"] = "gap"
+    side.write_text(json.dumps(data), encoding="utf-8")
+    assert check_image(out) == []
+
+
+def test_an_overall_dimension_in_a_separated_sidecar_fails_the_gate(
+    tmp_path: pathlib.Path,
+) -> None:
+    box = tmp_path / "box.stl"
+    trimesh.creation.box(extents=(30, 20, 10)).export(box)
+    out = str(tmp_path / "b.png")
+    render(str(box), out)
+    side = pathlib.Path(sidecar_path(out))
+    data = json.loads(side.read_text(encoding="utf-8"))
+    for item in data["dimensions"]:
+        if item["kind"] == "bbox":
+            item["spans_separated"] = (
+                True  # what an overall dim of an exploded layout would say
+            )
+    side.write_text(json.dumps(data), encoding="utf-8")
+    rules = {o.rule for o in check_image(out)}
+    assert rules == {"spans-separated-parts"}
+
+
+def test_dims_file_gap_grammar(tmp_path: pathlib.Path) -> None:
+    for entry in (
+        {"name": "g", "kind": "gap", "from": [0, 0, 0], "to": [1, 1, 1]},
+        {
+            "name": "g",
+            "kind": "gap",
+            "parts": ["a"],
+            "from": [0, 0, 0],
+            "to": [1, 1, 1],
+        },
+        {
+            "name": "g",
+            "kind": "gap",
+            "parts": ["a", "a"],
+            "from": [0, 0, 0],
+            "to": [1, 1, 1],
+        },
+        {"name": "g", "kind": "wide", "from": [0, 0, 0], "to": [1, 1, 1]},
+    ):
+        path = tmp_path / "bad.json"
+        path.write_text(json.dumps([entry]), encoding="utf-8")
+        with pytest.raises(ValueError, match="--dims-from"):
+            parse_dims_file(str(path))
+
+
+@pytest.mark.skipif(shutil.which("openscad") is None, reason="openscad not installed")
+def test_an_exploded_scad_assembly_has_no_dimension_across_its_halves(
+    tmp_path: pathlib.Path,
+) -> None:
+    scad = tmp_path / "exploded.scad"
+    scad.write_text(
+        'color("red") cube(10);\ncolor("#2222CC") translate([0, 40, 0]) cube(10);\n'
+    )
+    out = str(tmp_path / "e.png")
+    data = render(str(scad), out)
+    assert data["separated_parts"] is True and data["overall"] == "per-part"
+    assert not [
+        d for d in data["dimensions"] if d["kind"] == "bbox" or d["spans_separated"]
+    ]
+    assert all(
+        d["value_mm"] == 10.0 for d in data["dimensions"]
+    )  # none is the 50 mm overall Y
+    assert check_image(out) == []

@@ -25,7 +25,17 @@ def test_plate_render_has_per_part_dims_and_declared_measurements_gate(
     )
     spec = tmp_path / "dims.json"
     spec.write_text(
-        json.dumps([{"name": "gap", "from": [10, 5, 5], "to": [60, 5, 5]}]),
+        json.dumps(
+            [
+                {
+                    "name": "gap",
+                    "kind": "gap",
+                    "parts": ["left", "right"],
+                    "from": [10, 5, 5],
+                    "to": [60, 5, 5],
+                }
+            ]
+        ),
         encoding="utf-8",
     )
     out = tmp_path / "plate.png"
@@ -112,3 +122,48 @@ def test_require_dims_is_only_for_check(tmp_path: Path) -> None:
         "--require-dims",
     )
     assert done.returncode == 2 and "belongs to --check" in done.stderr
+
+
+def test_a_dim_across_separate_parts_exits_2_naming_both_and_a_declared_gap_passes(
+    tmp_path: Path,
+) -> None:
+    model = write_3mf(
+        tmp_path / "plate.3mf", [Box("left", 0, RED), Box("right", 60, GREEN)]
+    )
+    refused = run_cli(
+        tmp_path, "dimension", str(model), "-o", str(tmp_path / "x.png"),
+        "--dim", "across:5,5,5:65,5,5",
+    )  # fmt: skip
+    assert refused.returncode == 2 and "Traceback" not in refused.stderr
+    assert (
+        "left" in refused.stderr
+        and "right" in refused.stderr
+        and "kind: gap" in refused.stderr
+    )
+    assert not (tmp_path / "x.png").exists()
+    within = tmp_path / "ok.png"
+    ok = run_cli(
+        tmp_path,
+        "dimension",
+        str(model),
+        "-o",
+        str(within),
+        "--dim",
+        "edge:0,5,5:10,5,5",
+    )
+    assert ok.returncode == 0, ok.stderr
+    assert run_cli(tmp_path, "dimension", "--check", str(within)).returncode == 0
+
+
+def test_check_fails_a_sidecar_that_spans_separate_parts(tmp_path: Path) -> None:
+    model = write_3mf(
+        tmp_path / "plate.3mf", [Box("left", 0, RED), Box("right", 60, GREEN)]
+    )
+    out = tmp_path / "p.png"
+    assert run_cli(tmp_path, "dimension", str(model), "-o", str(out)).returncode == 0
+    side = Path(f"{out}.dims.json")
+    data = json.loads(side.read_text(encoding="utf-8"))
+    data["dimensions"][0]["spans_separated"] = True
+    side.write_text(json.dumps(data), encoding="utf-8")
+    failed = run_cli(tmp_path, "dimension", "--check", str(out))
+    assert failed.returncode == 1 and "spans-separated-parts" in failed.stdout

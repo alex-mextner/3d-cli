@@ -63,11 +63,20 @@ Views and dimensions:
                        overall X/Y/Z of the whole model. auto (default) draws them, except on an
                        exploded assembly or a plate of parts that do not touch: there they are noise
                        and every separate part gets its own footprint dims instead. never draws none.
-                       Example: 3d dimension plate.3mf --overall always -o plate.png
+                       always on such a layout is refused (exit 2).
+                       Example: 3d dimension plate.3mf --overall never -o plate.png
   --dims-from SPEC     a JSON/YAML list of {name, from: [x,y,z], to: [x,y,z]} measurements that MUST be
                        drawn: the render fails (exit 2) naming any that fits no view, and the sidecar
-                       records them for `--check --require-dims`.
+                       records them for `--check --require-dims`. The mating gap between two parts is
+                       declared {name, kind: gap, parts: [A, B], from, to}.
                        Example: 3d dimension box.stl --dims-from dims.yaml -o box.png
+
+No dimension across separate parts: on an exploded assembly or a plate (parts that do not touch) a
+--dim / --dims-from measurement whose two endpoints are on DIFFERENT parts (within 0.5 mm of a part's
+bounding box) is refused with exit 2, naming both parts, because the number would only measure the gap
+between them. Keep both endpoints on ONE part, or declare a `kind: gap` between two named parts. The
+automatic span of a slanted part is never drawn across separated parts either, and --check fails an
+image whose sidecar holds such a dimension (rule spans-separated-parts).
 
 Check (--check IMAGE): needs IMAGE.dims.json beside it and verifies
   --require-dims       also FAIL when a measurement declared with --dims-from is missing from the
