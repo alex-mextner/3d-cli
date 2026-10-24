@@ -59,9 +59,10 @@ def stripe_gcode(
     used: str = "1.0, 1.0, 1.0",
     tower: bool = True,
     pattern: str = STRIPE_MIX,
+    colours: str | None = None,
 ) -> str:
     """`shift` rotates the printed pattern; `wrong_tool[k]` prints layer k's stripe with that tool;
-    `short_wall[k]` = length (mm) of the stripe's outer wall in layer k (default 17)."""
+    `colours` = the footer's `; filament_colour = #..;#..` line; `short_wall[k]` = length (mm) of the stripe's outer wall in layer k (default 17)."""
     exp = [int(c) - 1 for c in pattern]
     out = ["G90\nM83\n"]
     for k in range(LAYERS):
@@ -82,6 +83,8 @@ def stripe_gcode(
         if tower:
             out.append(";TYPE:Prime tower\nT0\nG1 X100 Y100\nG1 X110 Y100 E1\n")
     out.append(FOOTER.format(used=used))
+    if colours:
+        out.append(f"; filament_colour = {colours}\n")
     return "".join(out)
 
 

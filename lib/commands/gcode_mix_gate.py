@@ -29,6 +29,10 @@ USAGE = """3d gcode-mix-gate FILE.gcode --config GATES.json [--parts DIR] [optio
                   layers; thin volume = read from the extrusion inside it. A thick mixed volume is judged per
                   layer on its OWN outer wall (>= 1.0 mm unambiguous = "solid", zero tolerance; fringe layers
                   re-read at a small margin, <= 5 % off), plus no tool stripe thicker than one layer <= 0.10 mm
+  stripe contrast a mixed region's visible banding: its layers' colours at the REAL heights, blurred as the eye
+                  sees them (1 arcmin at --view-cm), worst CIEDE2000 vs their mean; > --max-stripe-de FAIL,
+                  > --warn-stripe-de WARN (GKGKWK 22.9, GKW 2.6, GW 0.2 at 0.08 mm). Vertical wall: a shallow
+                  surface shows its bands wider than modelled. Colours: `filament_colours` or the G-code's
   pause           `pause` in the config: exactly one M600, in the layer with that top Z, before it extrudes;
                   without `pause` no M600 at all
   tools           heads used (footer `filament used [g]`) == `heads_slots`; prime tower printed iff expected
@@ -46,6 +50,7 @@ Config (JSON; slots are 1-based, slot n = tool T(n-1); the manifest of a build s
              {"name": "base", "assign": {"slot": 2}},
              {"name": "hair", "assign": {"mix": "11211", "accent": 2}}],
    "default_slot": 2, "heads_slots": [1, 2, 3, 4], "prime_tower": true,
+   "filament_colours": ["#1B5E20", "#080A0D", "#E72F1D", "#FFFFFF"],
    "pause": {"print_z": 37.2392, "last_layer_before": {"top": 36.9994}},
    "shift": [135.0, 134.5, 0.0], "expect_settings": {"wall_loops": "4"}, "parts_dir": "work/parts"}
   `stl` is optional: without it the files of --parts DIR, sorted by name, are the parts in config order.
@@ -63,6 +68,9 @@ Options:
   --bed-tol MM           largest distance of an outer-wall point to its part surface (default 0.45)
   --min-evidence MM      own outer wall a layer needs to be judged strictly (default 1.0)
   --max-stripe MM        thickest single-tool stripe of a mix (default 0.10)
+  --max-stripe-de DE     worst stripe contrast (dE00) of a mixed region before FAIL (default 3)
+  --warn-stripe-de DE    ... before WARN (default 2, at most --max-stripe-de)
+  --view-cm CM           viewing distance of the stripe contrast (default 30)
   --mix-teeth            run the colour-volume controls
   --teeth-volume NAME    restrict --mix-teeth to this volume (repeatable)
   --cavity-teeth         run the cavity / pause controls (needs --cavity)
