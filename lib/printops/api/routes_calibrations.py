@@ -2,6 +2,9 @@
 
   GET  /v1/calibrations?printer=&head=&kind=&status=&current=&limit=     read   records, newest first
   GET  /v1/calibrations/required?printer=&head=|slot=&spool=&plate=&all=  read   what the head(s) need
+  GET  /v1/calibrations/slicer-preset?printer=&head=&spool=               read   {printer, head, spool_id, preset|null,
+                                                                          scope spool|filament|null, bound}: the slicer
+                                                                          filament preset of the spool on the head (#294)
   POST /v1/calibrations/check   {printer, footer, used_tools, spools?, accept?, reason?, plate?,
                                  gcode_sha?, file?}                       read (+write with accept)
   POST /v1/calibrations/runs    {kind, method, printer?, head?, spool_id?|filament_id?, lot_nr?,
@@ -98,6 +101,14 @@ def required(
     ctx = _ctx(request, conn, who)
     return _call(lambda: cal.requirements(ctx, printer, head=head or slot, spool_id=spool,
                                           plate=plate).to_dict(all_items=all))
+
+
+@router.get("/v1/calibrations/slicer-preset", response_model=None)
+def slicer_preset(
+    request: Request, conn: Db, who: Reader, printer: str, head: str | None = None, spool: int | None = None
+) -> Any:
+    ctx = _ctx(request, conn, who)
+    return _call(lambda: cal.slicer_preset(ctx, printer, head=head, spool_id=spool))
 
 
 def _footer(body: dict[str, Any]) -> dict[str, str]:

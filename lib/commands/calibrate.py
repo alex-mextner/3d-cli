@@ -23,6 +23,7 @@ from errors import GateFailure, InputNotFound, UsageError
 from topcam import photo_cli
 
 if TYPE_CHECKING:  # registry contract: stdlib-only at import time
+    from printops.cli._common import Parsed
     from printops.fleet import FleetPrinter
     from slicing.calibration_gen import PresetChoice
 
@@ -36,8 +37,9 @@ USAGE = """3d calibrate plan --printer P [--head T] [--spool ID] [--plate PLATE]
                    [--accept calibration:KIND[,…] --reason TEXT]
 3d calibrate gen pa|flow|combo|temp|shaper|plate1|dense|dense2 --printer P -o OUT [--material PLA] [--color #RRGGBB]
                  [--nozzle-temp C] [--only T,…] [--skip T,…] [--pa-range LOW:HIGH] [--pa-step S]
-                 [--machine-preset NAME] [--process-preset NAME] --filament-preset NAME
-  common (all but gen): [--json] [--api URL] [--token TOKEN]
+                 [--machine-preset NAME] [--process-preset NAME] [--filament-preset NAME]
+                 [--head T] [--spool ID] [--api URL] [--token TOKEN]
+  common (all but gen, which takes --api/--token only for its default filament preset): [--json] [--api URL] [--token TOKEN]
 
   Calibrations per printer head and filament (fleet/calibrations.yaml: flow_ratio, pressure_advance,
   temp_tower, max_volumetric_speed, retraction, input_shaper, z_offset, bed_mesh, head_offsets,
@@ -70,12 +72,12 @@ Subcommands:
           brim, MVS 24–32, a 7x7 grid with fiducials (K1 SE bed); plates add a
           JSON map object → parameters, bbox, how to read it. The G-code gets thumbnails and a slice-warnings record,
           ready for `3d print-preflight` (temp: filament_temp_range FAILs when the tower's hottest
-          block is above the spool's nozzle window; start needs a Telegram-approved --force). Local only; set SLICER=/path/to/orca.
+          block is above the spool's nozzle window; start needs a Telegram-approved --force). Local (3d-api only for the default --filament-preset); set SLICER=/path/to/orca.
 
 Options:
   --printer P        fleet printer name (fleet/printers.yaml), e.g. u1, k1se
   --head T           head label T1..Tn (plan: default every usable head)
-  --spool ID         Spoolman spool to plan/record for instead of the one bound to the head
+  --spool ID         Spoolman spool to plan/record/gen for instead of the one bound to the head
   --filament ID      record for a Spoolman filament without a spool (e.g. a temperature tower)
   --lot LOT          lot number of the record (default: the spool's Spoolman lot_nr)
   --plate PLATE      build plate (z_offset, bed_mesh); default: the printer's only plate
@@ -105,7 +107,10 @@ Options:
   --pa-step S        gen combo/plateN: PA line step (default 0.01; a fine pass: --pa-range 0.03:0.05
                      --pa-step 0.0025, labels like 42.5 = 0.0425)
   --filament-preset N gen (not shaper): the spool's slicer preset (user preset from the repo's
-                     profiles/ or Orca's user folder, e.g. 'Orange PLA @K1SE'); required
+                     profiles/ or Orca's user folder, e.g. 'Orange PLA @K1SE'). Default with 3d-api
+                     configured: the `slicer_filament_preset` of the spool bound to --printer
+                     [--head T] (or of --spool ID), set with `3d printops spool preset`; no binding or
+                     no preset there, or 3d-api down → error. Without 3d-api the flag is required
   --machine-preset N gen: machine preset (default: fleet `slicer.machine` of the printer)
   --process-preset N gen: process preset (default: fleet `slicer.process`). No preset → error,
                      never Orca's stock presets; the G-code ends with `; 3d calibrate presets: …`
@@ -487,21 +492,72 @@ def _pa_range(raw: str) -> tuple[float, float]:
     return _float(lo, "--pa-range"), _float(hi, "--pa-range")
 
 
-def _preset_choice(opts: dict[str, str], entry: FleetPrinter) -> PresetChoice:
+def _spool_preset(p: Parsed, entry: FleetPrinter) -> tuple[str, str] | None:
+    """(preset, source) from the spool bound to the head via 3d-api; None when 3d-api is not
+    configured (the flag stays required). A bound spool without a preset, no binding, or an
+    unreachable 3d-api refuse: the stock preset is never the fallback (#294)."""
+    from printops.client import ApiClient, ApiConfigError, ApiError, load_config
+
+    try:
+        url, token = load_config(api=p.opts.get("--api"), token=p.opts.get("--token"))
+    except ApiConfigError as e:  # a broken printops.yaml is an error, not "not configured"
+        raise UsageError(str(e), command=f"{PREFIX} gen") from e
+    if not url:  # 3d-api not configured: the flag stays required
+        return None
+    head, spool_opt = p.opts.get("--head"), p.opts.get("--spool")
+    where = f"{entry.name}/{head}" if head else entry.name
+    try:
+        data = ApiClient(url, token).get(
+            "/v1/calibrations/slicer-preset",
+            printer=entry.name,
+            head=head,
+            spool=_int(spool_opt, "--spool", "gen") if spool_opt else None,
+        )
+    except ApiError as e:
+        fix = {
+            0: "3d-api is unreachable (check PRINTOPS_API and that it runs)",
+            401: "set PRINTOPS_TOKEN (or `token:` in ~/.config/3d-cli/printops.yaml)",
+            403: "the token lacks the `read` scope",
+        }.get(e.status, "fix the binding (`3d printops slots`)")
+        raise UsageError(
+            f"no filament preset for {where}: 3d-api: {e.message}",
+            command=f"{PREFIX} gen",
+            remediation=[f"Pass --filament-preset NAME, or {fix}."],
+        ) from e
+    bound_note = f"bound to {where}" if data["bound"] else ""
+    if not data.get("preset"):
+        raise UsageError(
+            f"spool #{data['spool_id']} carries no slicer filament preset" + (f" ({bound_note})" if bound_note else ""),
+            command=f"{PREFIX} gen",
+            remediation=[
+                f"3d printops spool preset {data['spool_id']} 'PRESET NAME'  (then re-run), "
+                "or pass --filament-preset NAME."
+            ],
+        )
+    source = f"3d-api spool #{data['spool_id']} slicer_filament_preset on {data['scope']}"
+    return str(data["preset"]), source + (f", {bound_note}" if bound_note else "")
+
+
+def _preset_choice(p: Parsed, entry: FleetPrinter) -> PresetChoice:
     """--machine/--process/--filament-preset, else the fleet entry's `slicer:` presets; the
-    filament preset has no fleet default (it belongs to the spool). Missing → usage error."""
+    filament preset defaults to the spool bound to the head (3d-api), never to a stock preset.
+    Missing → usage error."""
     from slicing.calibration_gen import NO_PRESETS_HINT, PresetChoice
 
     names: dict[str, str] = {}
     sources: list[tuple[str, str]] = []
     for kind in ("machine", "process", "filament"):
         flag = f"--{kind}-preset"
-        if flag in opts:
-            names[kind] = opts[flag]
+        if flag in p.opts:
+            names[kind] = p.opts[flag]
             sources.append((kind, flag))
         elif kind in entry.slicer:
             names[kind] = entry.slicer[kind]
             sources.append((kind, f"fleet {entry.name}.slicer"))
+        elif kind == "filament" and "machine" in names and "process" in names and (found := _spool_preset(p, entry)):
+            # asked last: a missing machine/process preset is reported before 3d-api is bothered
+            names[kind], source = found
+            sources.append((kind, source))
     missing = [k for k in ("machine", "process", "filament") if k not in names]
     if missing:
         raise UsageError(
@@ -537,7 +593,10 @@ def _gen(argv: list[str]) -> int:
             "--machine-preset",
             "--process-preset",
             "--filament-preset",
-        },
+            "--head",
+            "--spool",
+        }
+        | COMMON_VALUES,
         n_pos=1,
         prefix=PREFIX,
     )
@@ -602,7 +661,7 @@ def _gen(argv: list[str]) -> int:
             pa_step=_float(p.opts["--pa-step"], "--pa-step")
             if "--pa-step" in p.opts
             else None,
-            presets=None if kind == "shaper" else _preset_choice(p.opts, entry),
+            presets=None if kind == "shaper" else _preset_choice(p, entry),
         )
     except GenError as e:
         raise UsageError(str(e), command=f"{PREFIX} gen") from e

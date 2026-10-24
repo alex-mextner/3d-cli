@@ -13,10 +13,11 @@ Talks to 3d-api like [`3d printops`](printops.md) (`PRINTOPS_API`, `PRINTOPS_TOK
 3d calibrate show ID
 3d calibrate check FILE.gcode --printer P [--spools T1=ID,…] [--plate PLATE]
                    [--accept calibration:KIND[,…] --reason TEXT]
-3d calibrate gen pa|flow|combo|temp|shaper|plate1|dense|dense2 --printer P -o OUT --filament-preset NAME
-                 [--machine-preset NAME] [--process-preset NAME] [--material PLA] [--color #RRGGBB]
+3d calibrate gen pa|flow|combo|temp|shaper|plate1|dense|dense2 --printer P -o OUT [--material PLA] [--color #RRGGBB]
                  [--nozzle-temp C] [--only T,…] [--skip T,…] [--pa-range LOW:HIGH] [--pa-step S]
-  common (all but gen): [--json] [--api URL] [--token TOKEN]
+                 [--machine-preset NAME] [--process-preset NAME] [--filament-preset NAME]
+                 [--head T] [--spool ID] [--api URL] [--token TOKEN]
+  common (all but gen, which takes --api/--token only for its default filament preset): [--json] [--api URL] [--token TOKEN]
 ```
 
 ## Why
@@ -152,10 +153,18 @@ the PrintOps checks of [#164](https://github.com/alex-mextner/3d-cli/issues/164)
 
 ## `gen` — calibration prints ([#168](https://github.com/alex-mextner/3d-cli/issues/168))
 
-Local, no API. Slices with the Orca CLI (`SLICER=/path/to/orca` to force one) with the presets the
+Slices with the Orca CLI (`SLICER=/path/to/orca` to force one) with the presets the
 printer and the spool really print with ([#293](https://github.com/alex-mextner/3d-cli/issues/293)):
 `--machine-preset`/`--process-preset` (default: the printer's `slicer: {machine, process}` in
-`fleet/printers.yaml`) and `--filament-preset` (the spool's preset; required). User presets are
+`fleet/printers.yaml`) and `--filament-preset` (the spool's preset). Without the flag and with 3d-api configured
+([#294](https://github.com/alex-mextner/3d-cli/issues/294)) the preset is the `slicer_filament_preset`
+of the spool bound to `--printer P` (`--head T` on a multi-head printer; `--spool ID` takes that
+spool instead of the binding), read through 3d-api: the spool's own Spoolman extra field, else its
+filament's; set it with `3d printops spool preset ID NAME [--filament]`. A head with no (or several)
+bound spools, a spool without a preset, or 3d-api unreachable is an error with the fix — never the
+stock preset; without 3d-api configured `--filament-preset` stays required. The G-code stamp and
+`NAME.json` record where the name came from (`3d-api spool #12
+slicer_filament_preset on filament, bound to k1/T1`, or `--filament-preset`). User presets are
 found in the repo's `profiles/snapmaker-orca/` (D10), then Orca's user folder, and inherit from the
 system presets of the printer model (`slicing/calibration_gen.py` `PRESETS`; today the Creality
 K1 SE). No preset → an error, never Orca's stock presets (a calibration sliced with stock flow, PA
