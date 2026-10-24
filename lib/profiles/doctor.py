@@ -2,7 +2,7 @@
 
 WHAT: `diagnose()` reads user presets (`{machine,process,filament}/*.json` + `.info`) and reports, per
   finding, a severity, a code, what is wrong and the exact fix:
-    parent-missing / parent-elsewhere / inherits-cycle   `inherits` must name an existing preset (user
+    parent-missing / parent-elsewhere / inherits-cycle / parent-unreadable   `inherits` must name an existing preset (user
         preset of the same kind in the checked trees, else a vendor system preset);
     layer-height-range   effective layer_height inside the machine's min..max_layer_height (Orca refuses a
         slice otherwise), and min <= max wherever both are given;
@@ -122,11 +122,14 @@ class Tree:
                     tree.unreadable.append((path, str(exc)))
                     continue
                 info_path = path.with_suffix(".info")
-                info = (
-                    preset_fmt.parse_info(info_path.read_text(encoding="utf-8"))
-                    if info_path.is_file()
-                    else None
-                )
+                info = None
+                if info_path.is_file():
+                    try:
+                        info = preset_fmt.parse_info(
+                            info_path.read_text(encoding="utf-8")
+                        )
+                    except (OSError, ValueError) as exc:  # UnicodeDecodeError is one
+                        tree.unreadable.append((info_path, str(exc)))
                 tree.presets[kind][path.stem] = Preset(
                     kind, path.stem, path, data, info
                 )
@@ -169,8 +172,8 @@ class _Context:
     ) -> tuple[dict[str, Any], str | None, str | None, str | None]:
         """(merged settings, error code, missing/cyclic name, nearest system ancestor's setting_id).
 
-        Error code is None, 'parent-missing', 'parent-unverifiable' (system parent, no vendor presets) or
-        'inherits-cycle'; the settings then hold what could be merged."""
+        Error code is None, 'parent-missing', 'parent-unverifiable' (system parent, no vendor presets),
+        'parent-unreadable' (a vendor file in the chain is not a JSON object) or 'inherits-cycle'; the settings then hold what could be merged."""
         chain: list[dict[str, Any]] = []
         seen: set[str] = {preset.name}
         cur_tree, cur = tree, preset
@@ -194,6 +197,13 @@ class _Context:
                 return _merge(chain), "parent-missing", str(exc.args[0]), None
             except ValueError:
                 return _merge(chain), "inherits-cycle", parent, None
+            except orca_cli.PresetFileError as exc:
+                return (
+                    _merge(chain),
+                    "parent-unreadable",
+                    f"{exc.path.name}: {exc.why}",
+                    None,
+                )
             flat = self.system.flat(kind, parent)
             setting_id = next(
                 (str(d["setting_id"]) for _, d in sys_chain if d.get("setting_id")),
@@ -254,7 +264,11 @@ def diagnose(
                     "preset-unreadable",
                     f"{tree.label} {path.parent.name}/{path.name}",
                     f"not a readable preset: {why}",
-                    "fix the JSON, or delete the file; the slicer writes one JSON object per preset",
+                    (
+                        "fix the file (UTF-8 `key = value` lines), or delete it"
+                        if path.suffix == ".info"
+                        else "fix the JSON, or delete the file; the slicer writes one JSON object per preset"
+                    ),
                 )
             )
         for info in tree.orphan_infos:
@@ -289,6 +303,16 @@ def _check_preset(
                 f'inherits "{missing}", which exists neither as a {preset.kind} user preset nor as a vendor preset',
                 f'restore the preset "{missing}" (copy it into this folder) or set "inherits" in '
                 f"{preset.path.name} to an existing {preset.kind} preset",
+            )
+        )
+    elif err == "parent-unreadable":
+        out.append(
+            Finding(
+                "ERROR",
+                "parent-unreadable",
+                where,
+                f"a vendor preset it inherits from is not readable ({missing})",
+                "reinstall the slicer, or restore that vendor preset file",
             )
         )
     elif err == "inherits-cycle":
@@ -328,6 +352,8 @@ def _check_info(
     out = report.findings
     info_name = preset.path.with_suffix(".info").name
     if preset.info is None:
+        if preset.path.with_suffix(".info") in {p for p, _ in tree.unreadable}:
+            return  # already reported as unreadable; "create it" would overwrite the file
         out.append(
             Finding(
                 "WARN",
@@ -377,7 +403,7 @@ def _check_info(
 
 
 def _machine_candidates(
-    ctx: _Context, tree: Tree, flat: dict[str, Any]
+    report: Report, where: str, ctx: _Context, tree: Tree, flat: dict[str, Any]
 ) -> list[tuple[str, dict[str, Any]]]:
     names = flat.get("compatible_printers")
     out: list[tuple[str, dict[str, Any]]] = []
@@ -388,7 +414,20 @@ def _machine_candidates(
         elif (
             ctx.system is not None and ctx.system.path("machine", str(name)) is not None
         ):
-            eff = ctx.system.flat("machine", str(name))
+            try:
+                eff = ctx.system.flat("machine", str(name))
+            except (KeyError, ValueError, orca_cli.PresetFileError) as exc:
+                # a broken vendor machine cannot be a candidate; never abort the whole run, never pass silently
+                report.findings.append(
+                    Finding(
+                        "WARN",
+                        "machine-unverifiable",
+                        where,
+                        f'compatible printer "{name}" cannot be resolved from the vendor presets ({exc}): its limits were not checked',
+                        "reinstall the slicer, or drop that name from compatible_printers",
+                    )
+                )
+                continue
         else:
             continue
         out.append((str(name), eff))
@@ -440,7 +479,7 @@ def _check_process(
                 f"set layer_height <= {min(own_max):g} (or raise max_layer_height) in {preset.path.name}",
             )
         )
-    machines = _machine_candidates(ctx, tree, flat)
+    machines = _machine_candidates(report, where, ctx, tree, flat)
     if not machines and flat.get("compatible_printers"):
         return
     named = _ADAPTIVE_NAME.search(preset.name)
