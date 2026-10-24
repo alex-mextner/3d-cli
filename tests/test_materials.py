@@ -221,3 +221,46 @@ def test_command_unknown_subcommand_raises():
     from commands import materials as cmd
     with pytest.raises(UsageError):
         cmd.run(["frobnicate"])
+
+
+# ---- structural fields (3d strength) -----------------------------------------
+
+def test_builtin_cards_carry_the_structural_fields(tmp_path):
+    mats = materials.load_materials(start=tmp_path)
+    for m in mats.values():
+        assert m.defaulted == ()
+        assert 0.0 < m.poisson < 0.5
+        assert 0.0 < m.z_modulus_factor <= 1.0
+        assert m.strain_limit_pct > 0.0
+    # published FDM snap-fit strain limits (FabFlow strain-life, 10 cycles, in-plane)
+    assert mats["PLA"].strain_limit_pct == pytest.approx(2.0)
+    assert mats["PETG"].strain_limit_pct == pytest.approx(4.5)
+    assert mats["PETG"].layer_adhesion > mats["PLA"].layer_adhesion  # ROADMAP s6: PLA ~0.45, PETG ~0.7
+
+
+def test_user_material_without_structural_fields_gets_listed_defaults(tmp_path, monkeypatch):
+    cfg = tmp_path / "xdg"
+    (cfg / "3d-cli").mkdir(parents=True)
+    (cfg / "3d-cli" / "materials.yaml").write_text(
+        "NYLON:\n  density: 1.14\n  e_modulus_mpa: 1800\n  tensile_mpa: 60\n"
+        "  yield_mpa: 50\n  max_temp_c: 120\n  color: \"#cccccc\"\n  finish: matte\n"
+        "  layer_adhesion: 0.65\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(cfg))
+    nylon = materials.get_material("NYLON", start=tmp_path)
+    assert set(nylon.defaulted) == {"poisson", "z_modulus_factor", "strain_limit_pct"}
+    assert nylon.strain_limit_pct == pytest.approx(100 * 50 / 1800)  # yield strain
+
+
+@pytest.mark.parametrize(
+    "bad",
+    ["poisson: 0.6", "poisson: 0", "z_modulus_factor: 1.5", "strain_limit_pct: -1", "layer_adhesion: 0", "layer_adhesion: 1.2"],
+)
+def test_user_structural_values_out_of_range_raise(tmp_path, monkeypatch, bad):
+    cfg = tmp_path / "xdg"
+    (cfg / "3d-cli").mkdir(parents=True)
+    (cfg / "3d-cli" / "materials.yaml").write_text(f"PLA:\n  {bad}\n", encoding="utf-8")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(cfg))
+    with pytest.raises(materials.MaterialError):
+        materials.load_materials(start=tmp_path)

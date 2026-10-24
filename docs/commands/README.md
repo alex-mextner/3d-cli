@@ -58,7 +58,7 @@ explain why the command exists, what its inputs mean, and how it fits into the l
 | `kinematics` | [kinematics.md](kinematics.md) | Validate project joint specs and emit deterministic JSON. |
 | `lint` | [lint.md](lint.md) | Advisory repository and OpenSCAD model lint rules. |
 | `report` | [report.md](report.md) | Compose existing gate and metric artifacts into deterministic summaries. |
-| `strength` | [strength.md](strength.md) | Validate structural load cases and emit deterministic dry-run reports. |
+| `strength` | [strength.md](strength.md) | Structural check of the assembled model: closed-form screens, linear FEA with contact, FDM anisotropy, snap-hook strain. |
 | `acceptance` | [check.md](check.md) | Alias declared by `check`. |
 
 ### Reference-Match Pipeline

@@ -52,6 +52,14 @@ _REQUIRED_FIELDS = (
     "layer_adhesion",
 )
 
+# Optional mechanical fields `3d strength` reads (structural solver). A user/project material that
+# omits them falls back to these generic FDM values, and `Material.defaulted` records which
+# ones, so a report can list them as assumptions instead of silently inventing a datasheet.
+_OPTIONAL_DEFAULTS: dict[str, float] = {
+    "poisson": 0.35,           # in-plane Poisson ratio
+    "z_modulus_factor": 0.85,  # E across layers / E in-plane
+}
+
 
 class MaterialError(ThreeDError):
     """A materials.yaml layer is malformed, or a defined material is incomplete/invalid. Exit 2."""
@@ -66,7 +74,11 @@ class Material:
     `layer_adhesion` is the FDM cross-layer anisotropy factor in (0, 1]: the fraction of the
     in-plane strength retained ACROSS layer lines (the weak Z direction). 1.0 = isotropic;
     PLA ~0.45, PETG ~0.7 (approximate, brand/temperature dependent). `3d strength` multiplies an
-    in-plane strength by this for a worst-case across-layer estimate."""
+    in-plane strength by this for the across-layer allowable.
+
+    The optional structural fields (`poisson`, `z_modulus_factor`, `strain_limit_pct`) feed the
+    transversely isotropic stiffness and the snap-fit strain check; `defaulted` lists the ones the
+    card did not set."""
 
     name: str
     density: float          # g/cm^3
@@ -79,6 +91,10 @@ class Material:
     layer_adhesion: float   # cross-layer anisotropy factor in (0, 1]
     shrink_xy_pct: float | None = None  # linear XY shrink, % of the printed size; None = not recorded
     shrink_z_pct: float | None = None   # linear Z shrink, %; None = not recorded (no Z compensation)
+    poisson: float = 0.35           # in-plane Poisson ratio
+    z_modulus_factor: float = 0.85  # E across the layers / E in-plane, in (0, 1]
+    strain_limit_pct: float = 0.0   # permissible single-assembly strain, in-plane, percent (0 = yield strain)
+    defaulted: tuple[str, ...] = ()  # optional fields that came from generic defaults, not a card
 
 
 def _optional_percent(name: str, field: str, value: Any) -> float | None:
@@ -180,16 +196,60 @@ def _build_material(name: str, spec: dict[str, Any]) -> Material:
             command="materials",
             remediation=[f"Set `finish:` to one of {', '.join(FINISHES)} for {name}."],
         )
+    yield_mpa = _coerce_float(name, "yield_mpa", spec["yield_mpa"])
+    e_modulus_mpa = _coerce_float(name, "e_modulus_mpa", spec["e_modulus_mpa"])
+    layer_adhesion = _coerce_float(name, "layer_adhesion", spec["layer_adhesion"])
+    if not 0.0 < layer_adhesion <= 1.0:
+        raise MaterialError(
+            f"material {name!r}: `layer_adhesion` must be in (0, 1], got {layer_adhesion:g}",
+            command="materials",
+            remediation=[f"Set `layer_adhesion:` between 0 (exclusive) and 1 for {name}."],
+        )
+    optional: dict[str, float] = {}
+    defaulted: list[str] = []
+    for field_name, fallback in _OPTIONAL_DEFAULTS.items():
+        if spec.get(field_name) is None:
+            optional[field_name] = fallback
+            defaulted.append(field_name)
+        else:
+            optional[field_name] = _coerce_float(name, field_name, spec[field_name])
+    if not 0.0 < optional["poisson"] < 0.5:
+        raise MaterialError(
+            f"material {name!r}: `poisson` must be in (0, 0.5), got {optional['poisson']:g}",
+            command="materials",
+            remediation=[f"Set `poisson:` between 0 and 0.5 (exclusive) for {name}."],
+        )
+    if not 0.0 < optional["z_modulus_factor"] <= 1.0:
+        raise MaterialError(
+            f"material {name!r}: `z_modulus_factor` must be in (0, 1], got {optional['z_modulus_factor']:g}",
+            command="materials",
+            remediation=[f"Set `z_modulus_factor:` between 0 (exclusive) and 1 for {name}."],
+        )
+    if spec.get("strain_limit_pct") is None:
+        strain_limit_pct = 100.0 * yield_mpa / e_modulus_mpa
+        defaulted.append("strain_limit_pct")
+    else:
+        strain_limit_pct = _coerce_float(name, "strain_limit_pct", spec["strain_limit_pct"])
+        if strain_limit_pct <= 0.0:
+            raise MaterialError(
+                f"material {name!r}: `strain_limit_pct` must be positive, got {strain_limit_pct:g}",
+                command="materials",
+                remediation=[f"Set a positive `strain_limit_pct:` (percent) for {name}."],
+            )
     return Material(
         name=name,
         density=_coerce_float(name, "density", spec["density"]),
-        e_modulus_mpa=_coerce_float(name, "e_modulus_mpa", spec["e_modulus_mpa"]),
+        e_modulus_mpa=e_modulus_mpa,
         tensile_mpa=_coerce_float(name, "tensile_mpa", spec["tensile_mpa"]),
-        yield_mpa=_coerce_float(name, "yield_mpa", spec["yield_mpa"]),
+        yield_mpa=yield_mpa,
         max_temp_c=_coerce_float(name, "max_temp_c", spec["max_temp_c"]),
         color=str(spec["color"]),
         finish=finish,
-        layer_adhesion=_coerce_float(name, "layer_adhesion", spec["layer_adhesion"]),
+        layer_adhesion=layer_adhesion,
+        poisson=optional["poisson"],
+        z_modulus_factor=optional["z_modulus_factor"],
+        strain_limit_pct=strain_limit_pct,
+        defaulted=tuple(defaulted),
         shrink_xy_pct=_optional_percent(name, "shrink_xy_pct", spec.get("shrink_xy_pct")),
         shrink_z_pct=_optional_percent(name, "shrink_z_pct", spec.get("shrink_z_pct")),
     )
