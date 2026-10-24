@@ -30,6 +30,7 @@ explain why the command exists, what its inputs mean, and how it fits into the l
 | `export` | [export.md](export.md) | Format-aware [STL](GLOSSARY.md#stl)/[3MF](GLOSSARY.md#3mf)/USDZ export, format planning, and [manifold](GLOSSARY.md#manifold) validation when the mesh stack is available. |
 | `generate` | [generate.md](generate.md) | Text description + named dimensions -> verified parametric `.scad` via an AI backend (generate/validate/render/check/fix loop). |
 | `fit-niche` | [fit-niche.md](fit-niche.md) | Generate a parametric insert/plug that mates into a described cavity with FDM clearances. |
+| `library` | [library.md](library.md) | Local model-library database (searches, sources, designs, makes, photos, publications): `path`, `migrate`, `status`, `export`, offline. |
 | `import` | [import.md](import.md) | Generate OpenSCAD wrappers or conversion plans for imported model formats. |
 | `pack` | [pack.md](pack.md) | Plan deterministic print-bed layouts from explicit part footprints. |
 | `prep` | [prep.md](prep.md) | Model to print-ready plate with cached steps: repair, orientation, no-support adaptation, fit table, stability, colour regions, layers, Orca project, slice, G-code gates, proof pack. |
