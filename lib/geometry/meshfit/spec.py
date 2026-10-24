@@ -287,6 +287,10 @@ def _validate_op(index: int, op: Any, known: set[str]) -> dict[str, Any]:
             raise _fail(
                 where, "displace needs direction: [x, y, z] (non-zero), amount: mm"
             )
+        if not isinstance(op.get("amount"), (int, float)) or isinstance(
+            op.get("amount"), bool
+        ):
+            raise _fail(where, "displace needs amount: mm (a number)")
     if name == "fur":
         for item in op.get("amplitude_regions", []) or []:
             regions_mod.validate_ref(

@@ -61,7 +61,7 @@ Examples:
   3d judge render.png photo.jpg --feature-context "columns; pediment; dome"
   3d judge crop_render.png crop_ref.png --rubric nostril.json --min-dim 3 --stability-n 2
   3d judge ref.png ref.png --rubric nostril.json --min-dim 4     # control: the reference against itself must score 4
-  3d judge front.png back.png --max-mean 2                       # control: two different views must score low" """
+  3d judge front.png back.png --max-mean 2                       # control: two different views must score low"""
 
 
 def _print_usage() -> None:

@@ -93,11 +93,11 @@ def _save_labels(
     parents: NDArray[np.int64],
 ) -> str:
     """Write the arrays for the output faces: per-face arrays (`n_faces` rows) are indexed by each face's parent, the rest copied."""
-    out = {
+    out: dict[str, Any] = {
         k: v[parents] if v.ndim and len(v) == n_faces else v for k, v in arrays.items()
     }
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-    np.savez_compressed(path, allow_pickle=False, **out)
+    np.savez_compressed(path, **out)
     return path
 
 

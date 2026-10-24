@@ -22,13 +22,6 @@ ops:
 """
 
 
-def _areas(V: np.ndarray, F: np.ndarray) -> np.ndarray:
-    t = V[F]
-    return np.asarray(
-        0.5 * np.linalg.norm(np.cross(t[:, 1] - t[:, 0], t[:, 2] - t[:, 0]), axis=1)
-    )
-
-
 def _setup(tmp_path: Path) -> tuple[Path, np.ndarray]:
     V, F = cube_sphere(16, 20.0)
     model = tmp_path / "ball.stl"

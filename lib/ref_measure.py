@@ -432,7 +432,6 @@ class FeatureResult:
     failures: list[str]
     hulls: dict[str, NDArray[np.float64]]
     corners: dict[str, tuple[Point, Point]]
-    boxes: dict[str, tuple[int, int, int, int]]
 
 
 def parse_tolerance(raw: Any, where: str) -> dict[str, tuple[str, float | None]]:
@@ -482,7 +481,7 @@ def load_spec(path: str) -> dict[str, Any]:
 
 
 def _compare(
-    name: str, ref: float, cand: float, tol: tuple[str, float | None] | None
+    ref: float, cand: float, tol: tuple[str, float | None] | None
 ) -> dict[str, Any]:
     delta = cand - ref
     pct = 100.0 * delta / abs(ref) if abs(ref) > 1e-9 else None
@@ -544,8 +543,6 @@ def measure_feature(
     metrics: dict[str, dict[str, float]] = {}
     hulls: dict[str, NDArray[np.float64]] = {}
     corners: dict[str, tuple[Point, Point]] = {}
-    boxes: dict[str, tuple[int, int, int, int]] = {}
-    part_shapes: dict[str, dict[str, Shape]] = {"reference": {}, "render": {}}
     absent: list[str] = []
     for side in ("reference", "render"):
         image = images[side]
@@ -584,7 +581,6 @@ def measure_feature(
                 continue
             x0, x1, y0, y1 = _extents(psh, f"{where} part {part!r} {side}")
             m[f"{part}_W"], m[f"{part}_H"] = x1 - x0, y1 - y0
-            part_shapes[side][part] = psh
             m[f"{part}__cy"] = (y0 + y1) / 2
         if (
             "iris" in parts_spec
@@ -602,18 +598,13 @@ def measure_feature(
         metrics[side] = m
         hulls[side] = hull
         corners[side] = cn
-        boxes[side] = (
-            _box(boxes_raw[side], f"{where}: box", image.size)
-            if boxes_raw[side] is not None
-            else (0, 0, *image.size)
-        )
     failures = list(absent)
     rows: dict[str, dict[str, Any]] = {}
     if "render" in metrics:
         for key, ref_value in metrics["reference"].items():
             if key not in metrics["render"]:
                 continue
-            rows[key] = _compare(key, ref_value, metrics["render"][key], tol.get(key))
+            rows[key] = _compare(ref_value, metrics["render"][key], tol.get(key))
             if rows[key]["status"] == "FAIL":
                 r = rows[key]
                 failures.append(
@@ -630,7 +621,7 @@ def measure_feature(
                 "status": "FAIL" if key in tol and tol[key][0] != "off" else "INFO",
             }
     return FeatureResult(
-        name, rows, "FAIL" if failures else "PASS", failures, hulls, corners, boxes
+        name, rows, "FAIL" if failures else "PASS", failures, hulls, corners
     )
 
 
