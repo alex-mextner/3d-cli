@@ -33,8 +33,14 @@ MAX_ROUNDS = 5000
 
 
 def fur(
-    ctx: RegionContext, params: Mapping[str, Any], w: Array, seed: int
+    ctx: RegionContext,
+    params: Mapping[str, Any],
+    w: Array,
+    seed: int,
+    scale: Array | None = None,
 ) -> tuple[Array, dict[str, Any]]:
+    """Fur displacement. `scale` (per vertex, e.g. the keep-out fade) multiplies the relief BEFORE the overhang limiter,
+    so the limit holds for the displacement that is actually applied."""
     seed = int(params.get("seed", seed))
     flow = np.asarray(params.get("flow", [0.0, 0.0, 1.0]), dtype=np.float64)
     amplitude = float(params.get("amplitude", 0.35))
@@ -77,6 +83,8 @@ def fur(
             )
             d = d * (1.0 - cw) + c * float(clump.get("amplitude", amplitude)) * cw
         disp[active] = np.maximum(d, 0.0) * w[active]
+    if scale is not None:
+        disp *= scale
     details: dict[str, Any] = {
         "seed": seed,
         "amplitude_mm": amplitude,
