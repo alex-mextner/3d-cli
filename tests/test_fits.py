@@ -168,6 +168,11 @@ def test_fit_clearance_record_validation() -> None:
                 {**ok, "fit_type": "snug"}, {**ok, "extra": 1}):
         with pytest.raises(FitTableError):
             fits.validate_fit_clearance(bad)
+    # only a press reading may be negative: an undersized hole is -interference
+    press = {"fit_type": "press", "shape": "round", "gap_mm": -0.075, "result": "press"}
+    assert fits.validate_fit_clearance(press) == press
+    with pytest.raises(FitTableError):
+        fits.validate_fit_clearance({**press, "gap_mm": -1.5})
 
 
 def test_non_finite_numbers_are_refused_in_records_and_tables() -> None:
@@ -212,12 +217,15 @@ def test_coupon_readings_become_calibration_rows_that_resolve_applies() -> None:
     ]
     rows = fits.corrections_from_fit_clearance(
         records, printer="k1se", material="PLA", nozzle_mm=0.4, measured_at="2026-10-24T10:00:00.000Z")
-    assert [(r.fit_type, r.shape, r.delta_mm, r.source) for r in rows] == [("sliding", "planar", 0.05, "calibration")]
+    assert [(r.fit_type, r.shape, r.delta_mm, r.source) for r in rows] == [
+        ("press", "pin", 0.1, "calibration"),
+        ("sliding", "planar", 0.05, "calibration"),
+    ]
     res = fits.resolve("sliding", "planar", "k1se", "PLA", 0.4, extra_corrections=rows)
     assert res.clearance_mm == 0.25 and res.fallback is False
     # another shape of the same printer is untouched
     assert fits.resolve("sliding", "round", "k1se", "PLA", 0.4, extra_corrections=rows).clearance_mm == 0.2
-    assert fits.median_delta(rows) == 0.05 and fits.median_delta([]) is None
+    assert fits.median_delta(rows) == 0.075 and fits.median_delta([]) is None  # median of the press +0.1 and sliding +0.05
 
 
 # --------------------------------------------------------------------------- S1: provenance of the registries and rows

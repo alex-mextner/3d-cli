@@ -82,6 +82,9 @@ def _fake_tool_bins(
     monkeypatch.setenv(
         "PATH", f"{_fake_bin_dir / 'bin'}{os.pathsep}{os.environ.get('PATH', '')}"
     )
+    # `3d fits` correction sources read fit_clearance records from 3d-api: never through the owner's
+    # ~/.config/3d-cli/printops.yaml (a test that wants an API sets this to "on" itself)
+    monkeypatch.setenv("THREED_FIT_CALIBRATION_API", "off")
     for modname in _TOOL_DIR_MODULES:
         try:
             module = importlib.import_module(modname)

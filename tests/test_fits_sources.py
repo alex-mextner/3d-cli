@@ -138,13 +138,14 @@ def test_discover_lists_the_manual_source_and_the_contract_is_one_module_one_sou
     assert all(isinstance(s, fits_sources.Source) for s in found.values())
 
 
-def test_a_calibration_module_dropped_into_the_package_feeds_resolve(
+def test_a_module_dropped_into_the_package_feeds_resolve(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """what slice S2 does: add lib/fits_sources/calibration.py defining SOURCE; nothing else is edited"""
+    """the S2 hook: a module lib/fits_sources/<name>.py defining SOURCE feeds `resolve`; nothing else is edited
+    (a third source `lab` here: `calibration` is the real 3d calibrate fit source now)"""
     drop = tmp_path / "dropins"
     drop.mkdir()
-    (drop / "calibration.py").write_text(
+    (drop / "lab.py").write_text(
         textwrap.dedent(
             """
             from fits import Correction
@@ -157,15 +158,15 @@ def test_a_calibration_module_dropped_into_the_package_feeds_resolve(
                                    measured_at="2026-10-24T11:00:00Z", note="smallest free gap 0.32 mm")]
 
 
-            SOURCE = Source("calibration", "coupon rows", load)
+            SOURCE = Source("lab", "coupon rows", load)
             """
         ),
         encoding="utf-8",
     )
     monkeypatch.setattr(fits_sources, "__path__", [*fits_sources.__path__, str(drop)])
-    monkeypatch.delitem(sys.modules, "fits_sources.calibration", raising=False)
+    monkeypatch.delitem(sys.modules, "fits_sources.lab", raising=False)
 
-    assert set(fits_sources.discover()) == {"calibration", "manual"}
+    assert set(fits_sources.discover()) == {"calibration", "lab", "manual"}
     manual.add(
         row(0.30, material="PLA", fit_type="sliding", shape="round")
     )  # a manual row of the same scope
@@ -179,7 +180,7 @@ def test_a_calibration_module_dropped_into_the_package_feeds_resolve(
         p["source"] for p in res.provenance if p["kind"] == "correction_superseded"
     ] == ["manual"]
     assert fits_sources.collect(Query())[0].source == "calibration"
-    monkeypatch.delitem(sys.modules, "fits_sources.calibration", raising=False)
+    monkeypatch.delitem(sys.modules, "fits_sources.lab", raising=False)
 
 
 def test_a_source_that_cannot_read_its_store_fails_loudly(

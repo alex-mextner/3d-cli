@@ -141,7 +141,8 @@ any other registered source such as `calibration` ([hook](../contracts/fits.md#c
 `*` means any printer/material; `--fit` takes a canonical type (rows match canonical names, not aliases). One row
 per scope (printer, material, nozzle, layer, shape, fit type): the same scope replaces the old row. Without
 `--yes` it is a dry run showing the clearance before -> after for the fit types it covers. Calibration rows are
-not written here: `3d calibrate fit apply` writes them (`source: calibration`).
+not written here: `3d calibrate fit record --yes` stores them (`source: calibration`, `status: calibrated`; list
+them with `corrections list --origin calibration`).
 
 ```bash
 3d fits corrections add --printer k1se --material PETG --nozzle 0.4 --delta 0.05          # dry run
@@ -181,5 +182,7 @@ broken corrections file (the accepted values are listed in the message); `127` a
 
 - `3d fit-check --fit snap|sliding|tight|glue ...` and `fit:` in a `--spec` file ([fit-check](fit-check.md)).
 - `3d fit-niche --fit TYPE --printer P --material M` ([fit-niche](fit-niche.md)).
-- `3d calibrate fit` (slice S2, [#573](https://github.com/alex-mextner/3d-cli/issues/573)) writes calibration rows
-  through the correction-source hook.
+- `3d calibrate fit` (slice S2, [#573](https://github.com/alex-mextner/3d-cli/issues/573)) stores the coupon
+  readings as calibration records; `lib/fits_sources/calibration.py` turns them into calibration rows, so every
+  command above shows `calibrated` with the date and the record id after a coupon was read
+  ([calibrate](calibrate.md#fit--quick-fit-calibration-573)).
