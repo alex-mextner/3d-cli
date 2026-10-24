@@ -250,3 +250,71 @@ def test_pick_host_rules_and_default_project() -> None:
         remote.default_project(Path("/tmp/chekhov"), date(2026, 10, 20))
         == "chekhov-2026-10-20"
     )
+
+
+def test_host_without_a_heavy_key_gets_the_box_wrapper_and_null_opts_out(
+    tmp_path: Path,
+) -> None:
+    cfg = tmp_path / "remote.yaml"
+    cfg.write_text(
+        "hosts:\n  bare:\n    ssh: me@bare.example\n  plain:\n    ssh: me@plain.example\n    heavy: null\n"
+    )
+    hosts, _ = remote.load_hosts(cfg)
+    assert (
+        hosts["bare"].heavy == "projects/bin/heavy"
+    )  # no lock-less run on the shared box by omission
+    assert hosts["plain"].heavy is None
+
+
+def test_sources_and_dest_are_operands_not_rsync_options(
+    tmp_path: Path, fakebin: Path
+) -> None:
+    _, calls = _run(
+        tmp_path, fakebin, ["run", "--project", "p", "--push", "-n.stl", "--", "true"]
+    )
+    argv = calls[0]
+    assert (
+        argv[argv.index("-n.stl") - 1] == "--"
+    )  # a file named -n.stl is not --dry-run
+    _, calls = _run(tmp_path, fakebin, ["pull", "--project", "p", "--to", "-x"])
+    assert calls[0][-3:] == ["--", "ultra@box.example:projects/p/out/", "-x/"]
+
+
+@pytest.mark.parametrize(
+    "project", ["../../.ssh", "a b", "a;b", "$(id)", "-x", "a/b", "..", "a'b"]
+)
+def test_project_names_are_single_safe_path_components(
+    tmp_path: Path, fakebin: Path, project: str
+) -> None:
+    for args in (
+        ["push", "--project", project, "x"],
+        ["run", "--project", project, "--", "true"],
+        ["pull", "--project", project],
+        ["status", "--project", project],
+    ):
+        out, calls = _run(tmp_path, fakebin, args)
+        assert out.returncode == 2 and calls == [], (args, out.stderr)
+
+
+@pytest.mark.parametrize("sub", ["..", "../x", "a/../b", "a b", "$(id)"])
+def test_pull_subdir_cannot_leave_the_project(
+    tmp_path: Path, fakebin: Path, sub: str
+) -> None:
+    for args in (
+        ["pull", "--project", "p", "--sub", sub],
+        ["run", "--project", "p", "--pull", sub, "--", "true"],
+    ):
+        out, calls = _run(tmp_path, fakebin, args)
+        assert out.returncode == 2, (args, out.stderr)
+        assert all(
+            c[0] != "rsync" for c in calls
+        )  # nothing is fetched from outside the project
+
+
+def test_default_project_is_made_safe_for_remote_paths() -> None:
+    day = date(2026, 10, 20)
+    assert remote.default_project(Path("/tmp/my models"), day) == "my-models-2026-10-20"
+    assert remote.default_project(Path("/tmp/a;$(x)'b"), day) == "a-x-b-2026-10-20"
+    assert remote.default_project(Path("/tmp/-x"), day) == "x-2026-10-20"
+    assert remote.default_project(Path("/"), day) == "job-2026-10-20"
+    assert remote.default_project(Path("/tmp/модель"), day) == "модель-2026-10-20"
