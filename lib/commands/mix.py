@@ -40,6 +40,8 @@ USAGE = """3d mix check FILE.3mf [--layer-cap MM] [--max-run-mm MM] [--json]
                [--base-3mf FILE.3mf] [--printops-api URL] [--json]
   TARGET: --target HEX | --target-photo IMAGE --box x0,y0,x1,y1 (--white x0,y0,x1,y1 | --no-wb)
           [--white-level N]
+3d mix readout PHOTO --manifest NAME.mix.json -o OUT/NAME [--white card|N] [--white-level N]
+               [--no-qr-check] [--json]
   Colour mixing by layers (Snapmaker Orca mixed filaments, U1).
 
   check FILE.3mf
@@ -110,7 +112,20 @@ USAGE = """3d mix check FILE.3mf [--layer-cap MM] [--max-run-mm MM] [--json]
       standing 20 mm swatch per candidate and per loaded spool, a number in front of each in
       the darkest spool), OUT/NAME.mix.json (manifest, schema printops.mix_tester/1) and
       OUT/NAME.png (target next to each prediction). Slice it in Snapmaker Orca and run
-      `3d print-preflight` as usual.
+      `3d print-preflight` as usual. OUT/NAME.card.png is the white card to print at 100 %: the
+      printed swatches lie on it, face up, for the photo of `readout`.
+
+  readout PHOTO
+      Measure the printed tester from one photo of its card (NAME.card.png on paper, the swatches
+      laid in their numbered frames, face up). A top-camera frame (`3d camera still`) and a phone
+      photo go the same way: the four corner fiducials rectify the photo to millimetres (3 of 4
+      are enough), the QR must name this manifest (another tester's card is refused), the white
+      balance is fitted on the blank paper regions (--white card) or on a pure reference swatch
+      (--white N: its colour is the spool's), and each swatch is the median in CIELAB of its patch
+      (the face without its border; the number lies outside the face). Prints, per swatch, the
+      measured hex, ΔE2000 to the prediction and to the target; writes OUT/NAME.readout.json
+      (`mix-readout/1`), OUT/NAME.readout.png (annotated) and OUT/NAME.rectified.png.
+      Exit 1: the photo cannot be read (reasons say what to reshoot); 2: bad arguments or manifest.
 
   --target HEX        the colour to match (#RRGGBB)
   --target-photo IMAGE  take the target from a region of this image instead of --target
@@ -119,6 +134,10 @@ USAGE = """3d mix check FILE.3mf [--layer-cap MM] [--max-run-mm MM] [--json]
   --white x0,y0,x1,y1 a region of white on the same photo (trim, paper): the white balance
   --no-wb             the image is a render, not a photo: no colour cast, skip the balance
   --white-level N     the 8-bit value the white region is mapped to (default 235)
+  --manifest FILE     the tester manifest NAME.mix.json the photo belongs to (readout)
+  --white card|N      readout white balance: the card's blank paper (default) or the number N of a
+                      pure reference swatch (a white spool): --white 9
+  --no-qr-check       readout: read the card without confirming its QR names the manifest
   --slots N=HEX,...   the loaded filaments by U1 head number (1-9), e.g. 1=#000000,4=#FFFFFF
   --printer NAME      read the loaded spools of NAME from 3d-api instead (colour, spool and
                       Spoolman filament id; the filament ids give the manifest its mix keys)
@@ -154,12 +173,14 @@ Examples:
   3d mix tester --target '#B5654F' --printer u1 -o out/mix/terracotta
   3d mix target mockup.jpg --box 410,220,470,300 --white 20,30,80,90
   3d mix target render.png --box 100,100,160,160 --no-wb --json
+  3d mix readout phone.jpg --manifest out/mix/wall.mix.json -o out/mix/wall-readout
+  3d mix readout frame.png --manifest out/mix/wall.mix.json -o out/mix/wall-readout --white 9 --json
   3d mix tester --target-photo mockup.jpg --box 410,220,470,300 --white 20,30,80,90 --printer u1 -o out/mix/wall
   3d mix tester --target '#808080' --slots 1=#000000,4=#FFFFFF --base-3mf print/u1.3mf -o out/grey"""
 
 _CMD = "mix"
 # flags without a value (--json is handled on its own)
-_SWITCHES = {"--no-wb"}
+_SWITCHES = {"--no-wb", "--no-qr-check"}  # readout alone takes --no-qr-check
 _FLAGS = {
     "--target",
     "--target-photo",
@@ -177,7 +198,8 @@ _FLAGS = {
     "--base-3mf",
     "-o",
     "--printops-api",
-} | _SWITCHES
+    "--no-wb",
+}
 
 
 def _check(argv: list[str]) -> int:
@@ -473,13 +495,38 @@ class _Plan:
     target_source: dict[str, Any] | None = None
 
 
-def _photo_reading(opts: dict[str, str], image: Path) -> dict[str, Any]:
-    """The `mix-target/1` record of the region of `image` per --box / --white / --no-wb /
-    --white-level. numpy and Pillow are needed, so the reading runs through cli.pyrun."""
+def _run_reader(
+    deps: str, script: str, args: list[str], what: str
+) -> tuple[int, dict[str, Any]]:
+    """Run a lib/ reader script through cli.pyrun: (exit code, its JSON record). A reader that
+    printed no JSON is a failure (exit 2: its arguments were refused; else it crashed)."""
     import json
     import subprocess
 
     from cli.pyrun import tool_argv
+
+    proc = subprocess.run(  # noqa: S603 — argv from cli.pyrun
+        tool_argv(deps, script, args), capture_output=True, text=True, check=False
+    )
+    try:
+        record = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        record = None
+    if not isinstance(record, dict):
+        if proc.returncode == 2:
+            raise UsageError(
+                proc.stderr.strip() or f"{what}: the options are invalid", command=_CMD
+            )
+        raise GateFailure(
+            f"{what} failed: {proc.stderr.strip() or 'the reader printed no result'}",
+            command=_CMD,
+        )
+    return proc.returncode, record
+
+
+def _photo_reading(opts: dict[str, str], image: Path) -> dict[str, Any]:
+    """The `mix-target/1` record of the region of `image` per --box / --white / --no-wb /
+    --white-level. numpy and Pillow are needed, so the reading runs through cli.pyrun."""
     from slicing.mix_target import DEFAULT_WHITE_LEVEL
 
     if "--box" not in opts:
@@ -508,24 +555,8 @@ def _photo_reading(opts: dict[str, str], image: Path) -> dict[str, Any]:
     if "--white" in opts:
         args.append(f"--white={opts['--white']}")
     args += ["--", str(image)]
-    proc = subprocess.run(  # noqa: S603 — argv from cli.pyrun
-        tool_argv("numpy,pillow", "mix_target_cli.py", args),
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    try:
-        record = json.loads(proc.stdout)
-    except json.JSONDecodeError:
-        record = None
-    if not isinstance(record, dict) and proc.returncode == 2:
-        raise UsageError(proc.stderr.strip() or "the target options are invalid", command=_CMD)
-    if not isinstance(record, dict):
-        raise GateFailure(
-            f"reading {image} failed: {proc.stderr.strip() or 'the reader printed no result'}",
-            command=_CMD,
-        )
-    if proc.returncode != 0:
+    code, record = _run_reader("numpy,pillow", "mix_target_cli.py", args, f"reading {image}")
+    if code != 0:
         raise UsageError(
             str(record.get("error", "the target region cannot be read")), command=_CMD
         )
@@ -723,6 +754,118 @@ def _pattern(argv: list[str]) -> int:
     return 0
 
 
+def _readout(argv: list[str]) -> int:
+    import json
+
+    from slicing.mix_target import DEFAULT_WHITE_LEVEL
+    from slicing.mix_tester import validate_manifest
+
+    if not argv or argv[0].startswith("-"):
+        raise UsageError(
+            "readout takes the photo first",
+            command=_CMD,
+            remediation=[
+                "3d mix readout phone.jpg --manifest out/wall.mix.json -o out/wall-readout"
+            ],
+        )
+    photo = Path(argv[0])
+    opts, as_json = _options(
+        argv[1:], {"--manifest", "-o", "--white", "--white-level", "--no-qr-check"}
+    )
+    for flag, what in (
+        ("--manifest", "the tester manifest NAME.mix.json"),
+        ("-o", "OUT/NAME"),
+    ):
+        if flag not in opts:
+            raise UsageError(f"readout needs {flag} {what}", command=_CMD)
+    if Path(opts["-o"]).suffix.lower() in (".json", ".png"):
+        raise UsageError(
+            f"-o {opts['-o']}: give the path without an extension (NAME.readout.json, NAME.readout.png and NAME.rectified.png are written)",
+            command=_CMD,
+        )
+    white = opts.get("--white", "card")
+    if white != "card" and not white.isdecimal():
+        raise UsageError(
+            f"--white {white!r}: card, or the number of a pure reference swatch",
+            command=_CMD,
+        )
+    if white != "card" and "--white-level" in opts:
+        raise UsageError("--white-level goes with --white card", command=_CMD)
+    level = _integer(opts, "--white-level", DEFAULT_WHITE_LEVEL, 1, 255)
+    mpath = Path(opts["--manifest"])
+    if not mpath.is_file():
+        raise InputNotFound(str(mpath), command=_CMD)
+    if not photo.is_file():
+        raise InputNotFound(str(photo), command=_CMD)
+    try:
+        manifest = json.loads(mpath.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        raise UsageError(f"{mpath} is not JSON: {e}", command=_CMD) from e
+    problems = validate_manifest(manifest)
+    if problems:
+        raise UsageError(
+            f"{mpath} is not a valid tester manifest: {'; '.join(problems)}",
+            command=_CMD,
+        )
+    if "readout" not in manifest:
+        raise UsageError(
+            f"{mpath} has no readout card layout (a tester written before #416)",
+            command=_CMD,
+            remediation=[
+                "Write the tester again with `3d mix tester`: it now also writes NAME.card.png."
+            ],
+        )
+    args = [
+        f"--manifest={mpath}",
+        f"--out={opts['-o']}",
+        f"--white={white}",
+        f"--white-level={level}",
+    ]
+    if "--no-qr-check" in opts:
+        args.append("--no-qr-check")
+    args += ["--", str(photo)]
+    code, record = _run_reader(
+        "numpy,pillow,opencv-python-headless", "mix_readout_cli.py", args, f"reading {photo}"
+    )
+    if code == 2:
+        raise UsageError(str(record.get("error", "bad readout arguments")), command=_CMD)
+    if code != 0:
+        raise GateFailure(
+            f"{photo}: {record.get('error', 'the photo cannot be read as this tester card')}",
+            command=_CMD,
+            remediation=["Fix what the message says and shoot the card again."],
+        )
+    fid, qr, wb = record["fiducials"], record["qr"], record["white"]
+    if wb["mode"] == "card":
+        wb_line = f"card paper ({wb['model']} over {len(wb['regions'])} regions) mapped to {wb['level']}"
+    else:
+        wb_line = f"reference swatch {wb['number']} mapped to its spool colour {wb['maps_to']}"
+    lines = [
+        f"mix readout {record['manifest']['file']} (manifest {record['manifest']['id']}): "
+        f"{record['summary']['swatches']} swatches from {Path(record['photo']['file']).name}",
+        f"  fiducials {fid['found']}/{fid['of']} (rms {fid['rms_mm']:.2f} mm, {fid['photo_px_per_mm']:.1f} px/mm in the photo), QR {qr['status']}",
+        f"  white balance: {wb_line}",
+        f"  {'n':>2}  {'swatch':<10} {'predicted':<9}  {'measured':<9}  ΔE pred  ΔE target",
+    ]
+    for r in record["swatches"]:
+        name = r["pattern"] or f"T{r['slot']} pure"
+        lines.append(
+            f"  {r['number']:>2}  {name:<10} {r['predicted_hex']:<9}  {r['measured_hex']:<9}  "
+            f"{r['delta_e_predicted']:>7.2f}  {r['delta_e_target']:>9.2f}"
+        )
+    best = record["summary"].get("closest_to_target")
+    if best:
+        lines.append(
+            f"  closest to the target {record['manifest']['target']}: {best['number']} ({best['pattern']}) "
+            f"{best['measured_hex']}, ΔE {best['delta_e_target']:.2f}"
+        )
+    lines += [f"  warning: {w}" for w in record["warnings"]]
+    out_dir = Path(opts["-o"]).parent
+    lines += [f"  {k}: {out_dir / v}" for k, v in record["files"].items()]
+    _emit(record, lines, as_json)
+    return 0
+
+
 def _target_cmd(argv: list[str]) -> int:
     if not argv or argv[0].startswith("-"):
         raise UsageError(
@@ -911,8 +1054,10 @@ def run(argv: list[str]) -> int:
         return _recipes(rest)
     if sub == "tester":
         return _tester(rest)
+    if sub == "readout":
+        return _readout(rest)
     raise InvalidArgument(
-        "subcommand", sub, ["check", "gcode", "pattern", "profile", "recipes", "target", "tester"], command=_CMD
+        "subcommand", sub, ["check", "gcode", "pattern", "profile", "readout", "recipes", "target", "tester"], command=_CMD
     )
 
 

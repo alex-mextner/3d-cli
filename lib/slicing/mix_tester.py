@@ -1,7 +1,7 @@
 """mix_tester.py — a small numbered plate of colour-mix swatches for one target colour (U1).
 
 WHAT: `build()` takes the ranked mix candidates (slicing.mix_model) for one target and the loaded
-  filaments, and writes three files next to each other:
+  filaments, and writes four files next to each other:
   - NAME.3mf — a Snapmaker Orca project: the loaded spools as the physical filaments, one
     `mixed_filament_definitions` row per candidate (a manual layer pattern), one standing swatch
     per candidate on its virtual filament and one per pure loaded spool on its physical slot
@@ -12,6 +12,9 @@ WHAT: `build()` takes the ranked mix candidates (slicing.mix_model) for one targ
     colour calibration kinds (`mix_color` mix key, `filament_color` filament id) when the
     Spoolman filament ids are known;
   - NAME.png — the swatch sheet: per number, the target next to the predicted colour.
+  - NAME.card.png — the white card to print at 100 % and lay the printed swatches on, face up, for
+    the readout photo (#416): fiducials, a QR naming the manifest (`id`), white paper regions and a
+    numbered frame per swatch; its layout is the manifest's `readout` (slicing/mix_card.py).
   Project settings come from the installed Snapmaker Orca's U1 system presets (the CLI exports a
   probe project, so every key is as the slicer writes it) or from a given project 3MF.
 WHY: epic #410 / issue #413: a mix chosen from predictions alone came out ΔE 16.6 from the
@@ -41,6 +44,7 @@ from pathlib import Path
 from typing import Any
 
 from printops.color import parse_hex, srgb_to_lab
+from slicing import mix_card
 from slicing.mix_model import Candidate
 from slicing.mix_target import validate_source
 
@@ -751,6 +755,10 @@ def build(
     for ref in sorted(slots, key=lambda r: r.slot):
         swatches.append(Swatch(len(swatches) + 1, ref.slot, ref.hex, slot=ref))
     layout(swatches)
+    try:
+        mix_card.layout(len(swatches), height, "0" * 12)  # before any file is written
+    except mix_card.MixCardError as e:
+        raise MixTesterError(str(e)) from e
     label = darkest(slots)
     objs = _objects(swatches, height, label.slot)
     rows = [mixed_row(i, c.pattern) for i, c in enumerate(mixes)]
@@ -760,6 +768,7 @@ def build(
         "3mf": out.with_name(out.name + ".3mf"),
         "manifest": out.with_name(out.name + ".mix.json"),
         "png": out.with_name(out.name + ".png"),
+        "card": out.with_name(out.name + ".card.png"),
     }
     write_3mf(paths["3mf"], objs, cfg, app, f"mix tester {target_hex}")
     paths["png"].write_bytes(sheet_png(target_hex, swatches))
@@ -812,6 +821,9 @@ def build(
                     },
                 }
             )
+    manifest["id"] = mix_card.manifest_id(manifest)
+    manifest["readout"] = mix_card.layout(len(swatches), height, manifest["id"])
+    paths["card"].write_bytes(mix_card.render(manifest["readout"]))
     paths["manifest"].write_text(
         json.dumps(manifest, indent=2, ensure_ascii=False) + "\n"
     )
@@ -860,4 +872,10 @@ def validate_manifest(m: Any) -> list[str]:
                 and b[1] < b[3]
             ):
                 errs.append(f"swatch {e.get('number')}: {k} must be [x0, y0, x1, y1]")
+    if "readout" in m:
+        mid = m.get("id")
+        if not isinstance(mid, str) or mid != mix_card.manifest_id(m):
+            errs.append("id is not the id of this manifest's content")
+        else:
+            errs.extend(mix_card.validate_readout(m["readout"], len(entries), mid))
     return errs
