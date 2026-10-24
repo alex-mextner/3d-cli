@@ -28,7 +28,8 @@ from errors import GateFailure, InputNotFound, UsageError
 
 USAGE = """3d print-preflight FILE.gcode [--printer NAME] [--axis-limits X0:X1,Y0:Y1|NAME] [--source-3mf FILE.3mf]
                    [--visible [OBJ:]SPEC]... [--bridge-max MM] [--printops-api URL] [--offline]
-                   [--printops-snapshot FILE] [--json] [--secs S] [--no-bed-move]
+                   [--printops-snapshot FILE] [--accept preset_match --reason TEXT] [--json] [--secs S]
+                   [--no-bed-move]
   Read-only checks before a print. `3d printer start` runs the same checks and refuses on FAIL.
   Every G-code gate runs; one whose input is missing is SKIP and says what to pass.
 
@@ -85,7 +86,10 @@ USAGE = """3d print-preflight FILE.gcode [--printer NAME] [--axis-limits X0:X1,Y
   enclosure_material     ABS/ASA/PC/PA... on an open printer (WARN)
   plate_material         `; curr_bed_type` is a plate on hand; no bad material/plate pair (WARN)
   preset_match           `; printer_settings_id`/`; print_settings_id` = the fleet `slicer:` presets;
-                         default/outer wall acceleration = the resolved process preset (#293)
+                         default/outer wall acceleration = the resolved process preset (#293);
+                         with the bound spool's `slicer_filament_preset`: `; filament_settings_id`,
+                         `; filament_flow_ratio`, `; pressure_advance`, `; enable_pressure_advance`
+                         = that filament preset (#506). Override: --accept preset_match --reason
 
 Options:
   --printer NAME          a printer from printer-devices.yaml (see `3d printer list`); its state
@@ -102,6 +106,9 @@ Options:
                           used) and the PrintOps state comes from the snapshot file; not with --printops-api
   --printops-snapshot F   snapshot for --offline (default: $PRINTOPS_SNAPSHOT, else
                           ~/.cache/3d-cli/printops-snapshot.json; `3d printops gates snapshot`)
+  --accept preset_match   turn the preset_match FAIL into a WARN that carries --reason (printing with
+                          other presets on purpose); only preset_match; needs --reason TEXT
+  --reason TEXT           why the accepted mismatch is printed
   --no-bed-move           the bed line judges at the current Z: the printer's bed is not moved
   --json                  JSON report on stdout
   --secs S                Creality: seconds to listen for pushed state (default 3)
@@ -118,7 +125,8 @@ Examples:
   3d print-preflight out/walls.gcode --visible 'WALL*:y<104.8'
   3d print-preflight out/part.gcode --printer u1 --json | jq '.checks[] | select(.status=="FAIL")'
   3d print-preflight out/part.gcode --printer u1 --printops-api http://192.168.0.39:8765
-  3d print-preflight out/part.gcode --offline     # slicer hook: PrintOps snapshot, no network"""
+  3d print-preflight out/part.gcode --offline     # slicer hook: PrintOps snapshot, no network
+  3d print-preflight out/plate.gcode --printer k1se --accept preset_match --reason 'stock flow on purpose'"""
 
 
 def run(argv: list[str]) -> int:
@@ -138,7 +146,7 @@ def run(argv: list[str]) -> int:
     while i < len(argv):
         a = argv[i]
         if a in ("--printer", "--source-3mf", "--secs", "--axis-limits", "--visible", "--bridge-max",
-                 "--printops-api", "--printops-snapshot"):
+                 "--printops-api", "--printops-snapshot", "--accept", "--reason"):
             if i + 1 >= len(argv):
                 raise UsageError(f"{a} needs a value", command="print-preflight")
             if a == "--visible":
@@ -182,7 +190,8 @@ def run(argv: list[str]) -> int:
         profile = None
     printops = context_from_options(printer, opts.get("--axis-limits"), api=opts.get("--printops-api"),
                                     offline=offline, snapshot=opts.get("--printops-snapshot"),
-                                    command="print-preflight")
+                                    command="print-preflight", accept=opts.get("--accept"),
+                                    reason=opts.get("--reason"))
 
     status = None
     device = profile or (None if "--printer" in opts else device_for(opts.get("--axis-limits")))

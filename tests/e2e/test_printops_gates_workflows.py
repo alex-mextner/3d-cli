@@ -329,9 +329,14 @@ def test_preflight_catches_a_plate_sliced_with_stock_presets(tmp_path: Path) -> 
     )
     user = tmp_path / "user" / "process"
     user.mkdir(parents=True)
-    (user / "Std 8900.json").write_text(json.dumps({"name": "Std 8900", "default_acceleration": "8900"}))
-    env = {"THREED_FLEET": str(fleet), "ORCA_USER_PRESETS": str(tmp_path / "user"),
-           "PRINTOPS_SNAPSHOT": str(tmp_path / "none.json")}
+    (user / "Std 8900.json").write_text(
+        json.dumps({"name": "Std 8900", "default_acceleration": "8900"})
+    )
+    env = {
+        "THREED_FLEET": str(fleet),
+        "ORCA_USER_PRESETS": str(tmp_path / "user"),
+        "PRINTOPS_SNAPSHOT": str(tmp_path / "none.json"),
+    }
 
     def plate(name: str, machine: str, process: str, accel: str) -> Path:
         path = tmp_path / name
@@ -344,12 +349,33 @@ def test_preflight_catches_a_plate_sliced_with_stock_presets(tmp_path: Path) -> 
         )
         return path
 
-    stock = plate("stock.gcode", "Creality K1 SE 0.4 nozzle", "0.20mm Standard @Creality K1 SE", "12000")
+    stock = plate(
+        "stock.gcode",
+        "Creality K1 SE 0.4 nozzle",
+        "0.20mm Standard @Creality K1 SE",
+        "12000",
+    )
     mine = plate("mine.gcode", "K1 SE - Copy", "Std 8900", "8900")
-    bad = run_cli(tmp_path, "print-preflight", str(stock), "--printer", "k1se", "--offline", "--json",
-                  env_extra=env)
-    good = run_cli(tmp_path, "print-preflight", str(mine), "--printer", "k1se", "--offline", "--json",
-                   env_extra=env)
+    bad = run_cli(
+        tmp_path,
+        "print-preflight",
+        str(stock),
+        "--printer",
+        "k1se",
+        "--offline",
+        "--json",
+        env_extra=env,
+    )
+    good = run_cli(
+        tmp_path,
+        "print-preflight",
+        str(mine),
+        "--printer",
+        "k1se",
+        "--offline",
+        "--json",
+        env_extra=env,
+    )
 
     assert bad.returncode == 1, bad.stderr
     got = _checks(bad.stdout)["preset_match"]
@@ -358,3 +384,55 @@ def test_preflight_catches_a_plate_sliced_with_stock_presets(tmp_path: Path) -> 
         "sliced with machine preset 'Creality K1 SE 0.4 nozzle', the printer prints with 'K1 SE - Copy' (+1 more)"
     ), got
     assert _checks(good.stdout)["preset_match"]["status"] == "PASS", good.stdout
+
+    # printing the stock-preset plate on purpose: --accept preset_match --reason turns the FAIL into a WARN
+    # that carries the reason, and the run exits 0
+    accepted = run_cli(
+        tmp_path,
+        "print-preflight",
+        str(stock),
+        "--printer",
+        "k1se",
+        "--offline",
+        "--json",
+        "--accept",
+        "preset_match",
+        "--reason",
+        "comparing stock flow on purpose",
+        env_extra=env,
+    )
+    # the run still exits 1 for the plate's missing thumbnails / slice-warnings record: preset_match is not why
+    assert accepted.returncode == 1, accepted.stderr
+    failed = {
+        c["name"]
+        for c in json.loads(accepted.stdout)["checks"]
+        if c["status"] == "FAIL"
+    }
+    assert "preset_match" not in failed and failed
+    note = _checks(accepted.stdout)["preset_match"]
+    assert note["status"] == "WARN"
+    lines = json.loads(accepted.stdout)["checks"]
+    text = "\n".join(next(c["lines"] for c in lines if c["name"] == "preset_match"))
+    assert (
+        "accepted with --accept preset_match: comparing stock flow on purpose" in text
+    )
+    for argv, message in (
+        (["--accept", "preset_match"], "--accept needs --reason"),
+        (["--accept", "plate_material", "--reason", "x"], "accepted: preset_match"),
+        (["--accept", "", "--reason", "x"], "--accept needs a check name"),
+        (["--reason", "x"], "--reason belongs to --accept"),
+    ):
+        refused = run_cli(
+            tmp_path,
+            "print-preflight",
+            str(stock),
+            "--printer",
+            "k1se",
+            "--offline",
+            *argv,
+            env_extra=env,
+        )
+        assert refused.returncode == 2 and message in refused.stderr, (
+            argv,
+            refused.stderr,
+        )

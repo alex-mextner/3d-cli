@@ -135,6 +135,7 @@ def _spool(conn: sqlite3.Connection, sp: Mapping[str, Any]) -> dict[str, Any]:
         "color_hex": v["color_hex"],
         "lot_nr": v["lot_nr"],
         "filament_id": v["filament_id"],
+        "slicer_filament_preset": v["slicer_filament_preset"],
         "remaining": v["remaining"],
         "spoolman_remaining_g": v["spoolman_remaining_g"],
         "conflict": [],

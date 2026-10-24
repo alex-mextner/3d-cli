@@ -30,8 +30,10 @@ WHAT: the G-code's per-tool facts (slicer footer + body temperatures) checked ag
                            Orca's stock presets prints settings nobody calibrated), and the
                            footer's default/outer wall acceleration equal the resolved process
                            preset when the presets are on this machine (Orca and user preset
-                           folders, slicing.calibration_gen); the filament preset joins when the
-                           spool binding names one (#294)
+                           folders, slicing.calibration_gen); when the spool bound to a used tool
+                           names a filament preset (#294), `; filament_settings_id` equals it and
+                           `; filament_flow_ratio` / `; pressure_advance` / `; enable_pressure_advance`
+                           equal its resolved values (#506)
   calibration_current (#167) is added when the calibration engine lands.
 
 LEVELS: PASS / WARN / FAIL / UNVERIFIED. A check whose input is missing (no 3d-api, no spool
@@ -315,6 +317,13 @@ class PrintopsContext:
     offline: bool = False
     snapshot: Path | None = None
     state: Mapping[str, Any] | None = None
+    accept: frozenset[str] = frozenset()  # checks whose FAIL is accepted (ACCEPTABLE); needs `reason`
+    reason: str = ""
+
+
+# Checks `--accept NAME --reason TEXT` may downgrade from FAIL to WARN: a mismatch the user knowingly
+# prints (other presets on purpose, #506). The reason is printed under the WARN.
+ACCEPTABLE = frozenset({"preset_match"})
 
 
 def context_from_options(
@@ -325,6 +334,8 @@ def context_from_options(
     offline: bool,
     snapshot: str | None,
     command: str,
+    accept: str | None = None,
+    reason: str | None = None,
 ) -> PrintopsContext:
     """The context of a CLI run: --printer (else --axis-limits NAME; a numeric X0:X1,Y0:Y1 spec
     names no printer), --printops-api else $PRINTOPS_API / printops.yaml, --offline + snapshot."""
@@ -341,7 +352,23 @@ def context_from_options(
     except ApiConfigError as e:
         raise UsageError(str(e), command=command) from e
     named = printer or (axis_limits if axis_limits and ":" not in axis_limits else None)
+    accepted = frozenset(x.strip() for x in (accept or "").split(",") if x.strip())
+    if accepted - ACCEPTABLE:
+        raise UsageError(
+            f"--accept names {', '.join(sorted(accepted - ACCEPTABLE))}; accepted: {', '.join(sorted(ACCEPTABLE))}",
+            command=command,
+        )
+    if accept is not None and not accepted:
+        raise UsageError("--accept needs a check name", command=command)
+    if accepted and not (reason or "").strip():
+        raise UsageError(
+            "--accept needs --reason TEXT: why this mismatch is printed on purpose", command=command
+        )
+    if reason is not None and not accepted:
+        raise UsageError("--reason belongs to --accept CHECK", command=command)
     return PrintopsContext(
+        accept=accepted,
+        reason=(reason or "").strip(),
         printer=named,
         api=None if offline else (api or env_api),
         token=env_token,
@@ -1128,6 +1155,14 @@ def check_plate(c: _Ctx) -> list[Finding]:
 # preset's value unless it was edited in the slicer without saving (the G-code then prints
 # settings the preset — and every calibration made with it — does not have).
 PRESET_VALUES = ("default_acceleration", "outer_wall_acceleration")
+# Filament values the footer must carry from the spool binding's filament preset (#506): flow and
+# pressure advance edited in the slicer and not saved, or taken from another spool's preset, print
+# differently from the profile every calibration of this spool was made with.
+FILAMENT_PRESET_VALUES = (
+    "filament_flow_ratio",
+    "pressure_advance",
+    "enable_pressure_advance",
+)
 # `3d calibrate gen` (slicing.calibration_gen.presets_stamp) marks its G-code with this line: a
 # calibration print sets its own accelerations on purpose, so only the preset names are compared.
 CALIBRATION_STAMP = "; 3d calibrate presets: "
@@ -1135,6 +1170,13 @@ CALIBRATION_STAMP = "; 3d calibrate presets: "
 
 def _process_preset(model: str, name: str) -> tuple[dict[str, Any] | None, str]:
     """The resolved process preset `name` (system + user presets), or None and why not."""
+    return _resolved_preset(model, "process", name)
+
+
+def _resolved_preset(
+    model: str, kind: str, name: str
+) -> tuple[dict[str, Any] | None, str]:
+    """The resolved `kind` (process | filament) preset `name`, or None and why not."""
     from cli.env import find_slicer
     from errors import ThreeDError
     from slicing.calibration_gen import (
@@ -1147,11 +1189,14 @@ def _process_preset(model: str, name: str) -> tuple[dict[str, Any] | None, str]:
 
     slicer = find_slicer()
     try:
-        vendor = presets_for(model).vendor
+        try:
+            vendor = presets_for(model).vendor
+        except GenError:  # no calibration presets for this model: user presets only
+            vendor = ""
         index = ProfileIndex(
             profile_roots(slicer[1] if slicer else None), user_preset_roots()
         )
-        return index.flat(vendor, "process", name), ""
+        return index.flat(vendor, kind, name), ""
     except (
         GenError,
         ThreeDError,
@@ -1170,6 +1215,88 @@ def _preset_num(preset: dict[str, Any], key: str) -> float | None:
 
 
 def check_preset_match(c: _Ctx) -> list[Finding]:
+    # The spool's filament preset needs no fleet `slicer:` mapping: its names are in the binding.
+    return _printer_process_findings(c) + _filament_findings(c)
+
+
+def _filament_findings(c: _Ctx) -> list[Finding]:
+    """The G-code's filament_settings_id and flow / pressure advance against the filament preset
+    the spool bound to each used tool names (`slicer_filament_preset`, #294). A spool without one
+    is not compared (nothing says what it prints with)."""
+    name = "preset_match"
+    out: list[Finding] = []
+    for t, slot, entry, _head in c.tools():
+        spool = (entry or {}).get("spool") or {}
+        want = spool.get("slicer_filament_preset")
+        if not (isinstance(want, str) and want):
+            continue
+        got = c.job.text("filament_settings_id", t)
+        if not got:
+            out.append(
+                _f(name, "unknown", "the G-code has no `; filament_settings_id`", t, slot)
+            )
+            continue
+        if got != want:
+            out.append(
+                _f(
+                    name,
+                    "hard",
+                    f"sliced with filament preset {got!r}, the spool on {slot} prints with {want!r}",
+                    t,
+                    slot,
+                    "filament_settings_id",
+                )
+            )
+            continue
+        out.append(_f(name, "ok", f"filament preset {got!r}", t, slot))
+        if c.job.calibration_print:
+            out.append(
+                _f(
+                    name,
+                    "ok",
+                    "calibration print: it varies flow and pressure advance, values not compared",
+                    t,
+                    slot,
+                )
+            )
+            continue
+        preset, why = _resolved_preset(c.model, "filament", want)
+        if preset is None:
+            out.append(_f(name, "ok", f"filament values not compared: {why}", t, slot))
+            continue
+        for key in FILAMENT_PRESET_VALUES:
+            want_n = _preset_num(preset, key)
+            if want_n is None:
+                continue
+            got_v = c.job.num(key, tool=t)
+            if got_v is None:
+                out.append(
+                    _f(
+                        name,
+                        "unknown",
+                        f"the G-code has no `; {key}` (preset {want_n:g})",
+                        t,
+                        slot,
+                    )
+                )
+            elif math.isclose(got_v, want_n, rel_tol=1e-6, abs_tol=1e-9):
+                out.append(_f(name, "ok", f"{key} {got_v:g} = preset", t, slot))
+            else:
+                out.append(
+                    _f(
+                        name,
+                        "hard",
+                        f"{key} {got_v:g}, the filament preset {want!r} has {want_n:g} "
+                        "(edited in the slicer and not saved?)",
+                        t,
+                        slot,
+                        key,
+                    )
+                )
+    return out
+
+
+def _printer_process_findings(c: _Ctx) -> list[Finding]:
     name = "preset_match"
     if not c.slicer:
         return [
@@ -1342,6 +1469,10 @@ def run_checks(
         level = policy.level(name, fp.name)
         if level == "off":
             continue
+        raw = fn(c)
+        if name in ctx.accept and any(f.grade == "hard" for f in raw):
+            level = "warn"
+            raw = [*raw, _f(name, "ok", f"accepted with --accept {name}: {ctx.reason}")]
         findings = [
             Finding(
                 f.check,
@@ -1352,7 +1483,7 @@ def run_checks(
                 f.kind,
                 _status(f.grade, level),
             )
-            for f in fn(c)
+            for f in raw
         ]
         result.findings.extend(findings)
         result.checks.append(_summarise(name, findings))
