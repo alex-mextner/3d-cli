@@ -10,7 +10,7 @@ from commands import fit_niche as cmd
 from errors import InvalidArgument, UsageError
 from niche_fit import (
     DEFAULT_CLEARANCE,
-    FIT_CLEARANCES,
+    FIT_LABELS,
     emit_scad,
     make_spec,
     resolve_clearance,
@@ -20,7 +20,9 @@ from niche_fit import (
 
 # --------------------------------------------------------------------------- clearance
 def test_fit_presets_map_to_documented_clearances() -> None:
-    assert FIT_CLEARANCES == {"snug": 0.10, "normal": 0.20, "loose": 0.35}
+    assert {label: resolve_clearance(label, None)[0] for label in FIT_LABELS} == {
+        "snug": 0.10, "normal": 0.20, "loose": 0.35,
+    }
     assert DEFAULT_CLEARANCE == 0.20
 
 

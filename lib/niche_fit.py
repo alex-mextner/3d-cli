@@ -28,17 +28,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+import fits
 from errors import InvalidArgument, UsageError
 
 # ---------------------------------------------------------------------------
-# Fit presets. `--clearance` overrides any of these. Values are millimetres of
-# gap PER MATING FACE (rect) / RADIAL (round) and reflect typical 0.4mm-nozzle
-# FDM tolerances: snug needs sanding/press, normal slides by hand, loose is a
-# drop-in with visible play.
+# Fit presets. `--clearance` overrides any of these. The numbers live in the shared fit
+# table (`lib/data/fits.yaml`, `lib/fits.py`): snug = tight, normal = sliding, loose =
+# sliding + 0.15 mm. Millimetres of gap PER MATING FACE (rect) / RADIAL (round).
 # ---------------------------------------------------------------------------
-FIT_CLEARANCES: dict[str, float] = {"snug": 0.10, "normal": 0.20, "loose": 0.35}
+FIT_LABELS = ("snug", "normal", "loose")  # the --fit enum of `3d fit-niche`; aliases in fits.yaml
 DEFAULT_FIT = "normal"
-DEFAULT_CLEARANCE = FIT_CLEARANCES[DEFAULT_FIT]
+DEFAULT_CLEARANCE = fits.resolve(DEFAULT_FIT, "planar").clearance_mm
 
 SHAPES = ("rect", "round")
 
@@ -128,9 +128,9 @@ def resolve_clearance(fit: str | None, override: float | None) -> tuple[float, s
     was also named. With no override the fit preset supplies the value. A named `--fit` is
     validated against the closed enum whether or not a clearance override is also given.
     """
-    if fit is not None and fit not in FIT_CLEARANCES:
+    if fit is not None and fit not in FIT_LABELS:
         raise InvalidArgument(
-            "--fit", fit, list(FIT_CLEARANCES),
+            "--fit", fit, list(FIT_LABELS),
             command="fit-niche",
             extra="Or pass an explicit --clearance MM.",
         )
@@ -143,7 +143,7 @@ def resolve_clearance(fit: str | None, override: float | None) -> tuple[float, s
             )
         return override, (fit or "custom")
     label = fit or DEFAULT_FIT
-    return FIT_CLEARANCES[label], label
+    return fits.resolve(label, "planar").clearance_mm, label
 
 
 def _require_positive(name: str, value: float) -> None:
