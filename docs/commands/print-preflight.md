@@ -10,7 +10,7 @@ input is missing is SKIP and its line says what to pass — it never passes sile
 ```
 3d print-preflight FILE.gcode [--printer NAME] [--axis-limits X0:X1,Y0:Y1|NAME] [--source-3mf FILE.3mf]
                    [--visible [OBJ:]SPEC]... [--bridge-max MM] [--printops-api URL] [--offline]
-                   [--printops-snapshot FILE] [--json] [--secs S] [--no-bed-move]
+                   [--printops-snapshot FILE] [--accept preset_match --reason TEXT] [--json] [--secs S] [--no-bed-move]
 ```
 
 | Check | When | FAIL means |
@@ -58,13 +58,13 @@ is FAIL under the policy level `block`, WARN under `warn`; `off` hides the check
 | `maintenance_due` | block | the head is `usable: false` in the fleet; an open fault on it (from #166) | maintenance due (from #166) |
 | `enclosure_material` | warn | a `gates.enclosure_material` material (ABS, ASA, PC, PA…) on a printer with `enclosure: none` | the same on `enclosure: partial` |
 | `plate_material` | warn | `; curr_bed_type` is not among the printer's `plates`; a `gates.plate_material` pairing (PETG/TPU on smooth PEI, ABS/PC/PA on the Cool Plate) | |
-| `preset_match` | block | `; printer_settings_id` / `; print_settings_id` are not the fleet entry's `slicer: {machine, process}` presets (a plate sliced with Orca's stock presets, [#293](https://github.com/alex-mextner/3d-cli/issues/293)); `; default_acceleration` / `; outer_wall_acceleration` differ from the resolved process preset (an unsaved edit in the slicer) | |
+| `preset_match` | block | `; printer_settings_id` / `; print_settings_id` are not the fleet entry's `slicer: {machine, process}` presets (a plate sliced with Orca's stock presets, [#293](https://github.com/alex-mextner/3d-cli/issues/293)); `; default_acceleration` / `; outer_wall_acceleration` differ from the resolved process preset (an unsaved edit in the slicer); with a spool bound to a used tool that names a filament preset: `; filament_settings_id` is not that preset, or `; filament_flow_ratio` / `; pressure_advance` / `; enable_pressure_advance` differ from its resolved values ([#506](https://github.com/alex-mextner/3d-cli/issues/506)) | |
 
 `preset_match` is UNVERIFIED when the fleet entry has no `slicer:` presets. It compares the
 process values only when the presets are on this machine (Orca's system profiles, the repo's
 `profiles/` and the slicers' user preset folders; `ORCA_PROFILES` / `ORCA_USER_PRESETS` point
 elsewhere); otherwise it says so under a PASS on the names. The filament preset joins when the
-spool binding names one ([#294](https://github.com/alex-mextner/3d-cli/issues/294)). To print a
+spool bound to a used tool names one (the `slicer_filament_preset` extra field, set with `3d printops spool preset`, [#294](https://github.com/alex-mextner/3d-cli/issues/294)); a calibration print (`3d calibrate gen`) is compared by the filament preset's name only, because it varies flow and pressure advance on purpose. `; print_settings_id` is compared by name with the fleet process preset. The spool's preset names its printer's profile (`Orange PLA @K1SE`): moving the spool to another printer means setting its preset again (`3d printops spool preset`) or accepting the mismatch. A mismatch is a FAIL that `--accept preset_match --reason TEXT` turns into a WARN carrying the reason (`--accept` takes no other check; `--reason` is required with it). To print a
 plate with other presets on purpose: a [forced start](printer.md#forcing-a-start) (Telegram approval), or `preset_match: warn` for
 the printer under `gates.printers` in fleet/policy.yaml.
 
@@ -111,6 +111,7 @@ Options:
 - `--secs S` — Creality: seconds to listen for pushed state: `3d print-preflight out/roof.gcode --printer k1se --secs 5`
 - `--printops-api URL` — 3d-api for the PrintOps gates (default `$PRINTOPS_API`, else `printops.yaml`): `3d print-preflight out/part.gcode --printer u1 --printops-api http://192.168.0.39:8765`
 - `--offline` — no network: no printer contact, PrintOps state from the snapshot (the slicer hook mode); together with `--printops-api` it is a usage error: `3d print-preflight out/part.gcode --offline`
+- `--accept preset_match --reason TEXT` — print with other presets on purpose: the `preset_match` FAIL becomes a WARN that lists the reason. No other check can be accepted; `--reason` is required: `3d print-preflight out/plate.gcode --printer k1se --accept preset_match --reason 'comparing stock flow on purpose'`.
 - `--printops-snapshot FILE` — the snapshot for `--offline`: `3d print-preflight out/part.gcode --offline --printops-snapshot ~/snap.json`
 
 Exit: 0 PASS or WARN (UNVERIFIED lines included), 1 FAIL, 2 usage error or missing file.

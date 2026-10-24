@@ -562,7 +562,9 @@ def test_nozzle_explicit_abrasive_spool_still_fails_on_stainless(
     assert "abrasive" in check.detail + "\n".join(check.lines)
 
 
-@pytest.mark.parametrize("marker_source", ["spool_material", "spool_name", "gcode_type"])
+@pytest.mark.parametrize(
+    "marker_source", ["spool_material", "spool_name", "gcode_type"]
+)
 @pytest.mark.parametrize("required_hrc", ["0", "3"])
 def test_nozzle_abrasive_marker_is_not_hidden_by_false_spool_flag(
     tmp_path: Path, marker_source: str, required_hrc: str
@@ -659,8 +661,13 @@ def test_nozzle_malformed_marker_data_is_unverified(
 ) -> None:
     if field == "material":
         # These cases isolate the nozzle gate from other consumers of material text.
-        override(tmp_path, monkeypatch, loaded_filament_match="off",
-                 enclosure_material="off", plate_material="off")
+        override(
+            tmp_path,
+            monkeypatch,
+            loaded_filament_match="off",
+            enclosure_material="off",
+            plate_material="off",
+        )
     loaded = spool(4, color="FFFFFF", abrasive=False)
     loaded[field] = value
     check = _nozzle_hrc_case(
@@ -671,7 +678,8 @@ def test_nozzle_malformed_marker_data_is_unverified(
 
 
 @pytest.mark.parametrize(
-    "positive_source", ["flag", "material", "name", "gcode_type", "name_after_malformed_material"]
+    "positive_source",
+    ["flag", "material", "name", "gcode_type", "name_after_malformed_material"],
 )
 def test_nozzle_positive_evidence_outranks_malformed_marker_data(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, positive_source: str
@@ -689,8 +697,13 @@ def test_nozzle_positive_evidence_outranks_malformed_marker_data(
     elif positive_source == "name_after_malformed_material":
         loaded["material"] = 123
         loaded["name"] = "PLA-CF"
-        override(tmp_path, monkeypatch, loaded_filament_match="off",
-                 enclosure_material="off", plate_material="off")
+        override(
+            tmp_path,
+            monkeypatch,
+            loaded_filament_match="off",
+            enclosure_material="off",
+            plate_material="off",
+        )
     else:
         gcode_type = "PLA-CF"
     check = _nozzle_hrc_case(
@@ -961,7 +974,9 @@ def _record_no_colour_warning(path: Path, *, sha: str | None = None) -> None:
                 "gcode_sha256": sha or sw.sha256_file(path),
                 "warnings": [
                     {
-                        "id": sw.warning_id("warning", "no filament colors found in projects"),
+                        "id": sw.warning_id(
+                            "warning", "no filament colors found in projects"
+                        ),
                         "level": "warning",
                         "message": "no filament colors found in projects",
                         "sources": ["log"],
@@ -973,7 +988,9 @@ def _record_no_colour_warning(path: Path, *, sha: str | None = None) -> None:
     )
 
 
-def test_profile_default_colour_of_a_colourless_project_is_unverified_not_fail(tmp_path: Path) -> None:
+def test_profile_default_colour_of_a_colourless_project_is_unverified_not_fail(
+    tmp_path: Path,
+) -> None:
     """An STL slice carries no filament colour: the footer's #F2754E is the profile default, so a
     black spool must not FAIL on dE (garage-band spoon, dE 56.6)."""
     path = gcode(tmp_path, colours="#F2754E;#808080;#1B5E20;#FFFFFF")
@@ -986,12 +1003,16 @@ def test_profile_default_colour_of_a_colourless_project_is_unverified_not_fail(t
 
 
 def test_colourless_project_still_fails_on_material_mismatch(tmp_path: Path) -> None:
-    path = gcode(tmp_path, types="PETG;PLA;PLA;PLA", colours="#F2754E;#808080;#1B5E20;#FFFFFF")
+    path = gcode(
+        tmp_path, types="PETG;PLA;PLA;PLA", colours="#F2754E;#808080;#1B5E20;#FFFFFF"
+    )
     _record_no_colour_warning(path)
     assert run(path, good_state())["loaded_filament_match"].status == "FAIL"
 
 
-def test_stale_no_colour_sidecar_does_not_waive_the_colour_check(tmp_path: Path) -> None:
+def test_stale_no_colour_sidecar_does_not_waive_the_colour_check(
+    tmp_path: Path,
+) -> None:
     path = gcode(tmp_path, colours="#F2754E;#808080;#1B5E20;#FFFFFF")
     _record_no_colour_warning(path, sha="0" * 64)
     assert run(path, good_state())["loaded_filament_match"].status == "FAIL"
@@ -1165,6 +1186,17 @@ def test_api_state_reports_bound_spools_with_ledger_and_drying(
     assert (
         sp["drying"]["state"] in ("ok", "fresh") and sp["drying"]["class"] == "low"
     )  # loading sets opened_at
+    assert (
+        sp["slicer_filament_preset"] is None
+    )  # #506: the binding's filament preset reaches preset_match
+    api_client.post(
+        f"/v1/spools/{sid}/slicer-preset",
+        {"preset": "Orange PLA @K1SE", "scope": "filament"},
+    )
+    named = {
+        t["slot"]: t for t in api_client.get("/v1/gates/state", printer="u1")["tools"]
+    }["T3"]["spool"]
+    assert named["slicer_filament_preset"] == "Orange PLA @K1SE"
 
     snap = api_client.get("/v1/gates/snapshot")
     assert (
@@ -1214,7 +1246,9 @@ k1bare:
 """
 
 
-def _k1_presets(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, accel: str = "8900") -> None:
+def _k1_presets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, accel: str = "8900"
+) -> None:
     """The fleet above, Orca's K1 SE system process preset and the user preset inheriting it."""
     fleet = tmp_path / "k1.yaml"
     fleet.write_text(K1_FLEET, encoding="utf-8")
@@ -1222,14 +1256,24 @@ def _k1_presets(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, accel: str = "8
     system = tmp_path / "profiles" / "Creality" / "process"
     system.mkdir(parents=True)
     (system / "0.20mm Standard @Creality K1 SE.json").write_text(
-        json.dumps({"name": "0.20mm Standard @Creality K1 SE", "default_acceleration": "12000",
-                    "outer_wall_acceleration": "5000"})
+        json.dumps(
+            {
+                "name": "0.20mm Standard @Creality K1 SE",
+                "default_acceleration": "12000",
+                "outer_wall_acceleration": "5000",
+            }
+        )
     )
     user = tmp_path / "user" / "process"
     user.mkdir(parents=True)
     (user / "Std 8900.json").write_text(
-        json.dumps({"name": "Std 8900", "inherits": "0.20mm Standard @Creality K1 SE",
-                    "default_acceleration": accel})
+        json.dumps(
+            {
+                "name": "Std 8900",
+                "inherits": "0.20mm Standard @Creality K1 SE",
+                "default_acceleration": accel,
+            }
+        )
     )
     monkeypatch.setenv("ORCA_PROFILES", str(tmp_path / "profiles"))
     monkeypatch.setenv("ORCA_USER_PRESETS", str(tmp_path / "user"))
@@ -1257,8 +1301,11 @@ def _k1_gcode(
         used_g=(20.0,),
         hrc="0",
         body=body,
-        extra={"printer_settings_id": machine, "print_settings_id": process,
-               **{k: v for k, v in values.items() if v is not None}},
+        extra={
+            "printer_settings_id": machine,
+            "print_settings_id": process,
+            **{k: v for k, v in values.items() if v is not None},
+        },
     )
 
 
@@ -1277,22 +1324,36 @@ def test_preset_match_passes_on_the_fleet_presets_with_their_values(
     assert any("outer_wall_acceleration 5000 = preset" in ln for ln in check.lines)
 
 
-def test_preset_match_fails_on_stock_presets(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_preset_match_fails_on_stock_presets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The #293 bug: a calibration plate sliced with Orca's stock presets, not the user's."""
     _k1_presets(tmp_path, monkeypatch)
     check = _preset(
-        _k1_gcode(tmp_path, "Creality K1 SE 0.4 nozzle", "0.20mm Standard @Creality K1 SE", accel="12000")
+        _k1_gcode(
+            tmp_path,
+            "Creality K1 SE 0.4 nozzle",
+            "0.20mm Standard @Creality K1 SE",
+            accel="12000",
+        )
     )
     assert check.status == "FAIL"
-    assert "sliced with machine preset 'Creality K1 SE 0.4 nozzle'" in "\n".join(check.lines)
+    assert "sliced with machine preset 'Creality K1 SE 0.4 nozzle'" in "\n".join(
+        check.lines
+    )
     assert any("the printer prints with 'Std 8900'" in ln for ln in check.lines)
 
 
-def test_preset_match_fails_on_an_unsaved_preset_edit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_preset_match_fails_on_an_unsaved_preset_edit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     _k1_presets(tmp_path, monkeypatch)
     check = _preset(_k1_gcode(tmp_path, "K1 SE - Copy", "Std 8900", accel="10000"))
     assert check.status == "FAIL"
-    assert "default_acceleration 10000, the process preset 'Std 8900' has 8900" in check.detail
+    assert (
+        "default_acceleration 10000, the process preset 'Std 8900' has 8900"
+        in check.detail
+    )
 
 
 def test_preset_match_unresolvable_preset_keeps_the_name_check(
@@ -1309,9 +1370,14 @@ def test_preset_match_without_fleet_presets_is_unverified_and_policy_can_warn(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _k1_presets(tmp_path, monkeypatch)
-    path = _k1_gcode(tmp_path, "Creality K1 SE 0.4 nozzle", "0.20mm Standard @Creality K1 SE")
+    path = _k1_gcode(
+        tmp_path, "Creality K1 SE 0.4 nozzle", "0.20mm Standard @Creality K1 SE"
+    )
     check = _preset(path, "k1bare")
-    assert check.status == "UNVERIFIED" and "no `slicer: {machine, process}` for k1bare" in check.detail
+    assert (
+        check.status == "UNVERIFIED"
+        and "no `slicer: {machine, process}` for k1bare" in check.detail
+    )
     override(tmp_path, monkeypatch, preset_match="warn")
     assert _preset(path).status == "WARN"
 
@@ -1322,23 +1388,275 @@ def test_preset_match_names_only_on_a_calibration_print(
     """`3d calibrate gen pa` sets every acceleration to 500 on purpose and stamps the G-code."""
     _k1_presets(tmp_path, monkeypatch)
     stamp = "; 3d calibrate presets: machine=K1 SE - Copy (fleet k1se.slicer); process=Std 8900 (fleet k1se.slicer)\n"
-    check = _preset(_k1_gcode(tmp_path, "K1 SE - Copy", "Std 8900", accel="500", body=stamp + "G1 X1 E1\n"))
+    check = _preset(
+        _k1_gcode(
+            tmp_path, "K1 SE - Copy", "Std 8900", accel="500", body=stamp + "G1 X1 E1\n"
+        )
+    )
     assert check.status == "PASS", check.detail
     assert any("calibration print" in ln for ln in check.lines)
 
 
-def test_preset_match_missing_inputs_are_unverified(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_preset_match_missing_inputs_are_unverified(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     _k1_presets(tmp_path, monkeypatch)
-    no_accel = _preset(_k1_gcode(tmp_path, "K1 SE - Copy", "Std 8900", accel=None, name="a.gcode"))
+    no_accel = _preset(
+        _k1_gcode(tmp_path, "K1 SE - Copy", "Std 8900", accel=None, name="a.gcode")
+    )
     assert no_accel.status == "UNVERIFIED"
     assert "the G-code has no `; default_acceleration` (preset 8900)" in no_accel.detail
-    no_ids = _preset(gcode(tmp_path, "b.gcode", model="Creality K1 SE", extra={"printer_settings_id": ""}))
+    no_ids = _preset(
+        gcode(
+            tmp_path,
+            "b.gcode",
+            model="Creality K1 SE",
+            extra={"printer_settings_id": ""},
+        )
+    )
     assert no_ids.status == "UNVERIFIED"
     assert "no `; printer_settings_id`" in "\n".join([no_ids.detail, *no_ids.lines])
     fleet = tmp_path / "k1.yaml"
     fleet.write_text(
-        K1_FLEET.replace("slicer: {machine: K1 SE - Copy, process: Std 8900}", "slicer: {machine: K1 SE - Copy}"),
+        K1_FLEET.replace(
+            "slicer: {machine: K1 SE - Copy, process: Std 8900}",
+            "slicer: {machine: K1 SE - Copy}",
+        ),
         encoding="utf-8",
     )
     half = _preset(_k1_gcode(tmp_path, "K1 SE - Copy", "Std 8900", name="c.gcode"))
-    assert half.status == "UNVERIFIED" and "fleet `slicer:` has no process preset" in half.detail
+    assert (
+        half.status == "UNVERIFIED"
+        and "fleet `slicer:` has no process preset" in half.detail
+    )
+
+
+# -- preset_match: the spool binding's filament preset (#506) ----------------------------------
+FILAMENT_PRESET = "Orange PLA @K1SE"
+FILAMENT_FOOTER = {
+    "filament_settings_id": FILAMENT_PRESET,
+    "filament_flow_ratio": "0.931",
+    "pressure_advance": "0.045",
+    "enable_pressure_advance": "1",
+}
+
+
+def _filament_preset(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """The K1 fleet and presets of `_k1_presets`, a user filament preset, and a state whose tool 0
+    spool names it."""
+    _k1_presets(tmp_path, monkeypatch)
+    user = tmp_path / "user" / "filament"
+    user.mkdir(parents=True)
+    (user / f"{FILAMENT_PRESET}.json").write_text(
+        json.dumps(
+            {
+                "name": FILAMENT_PRESET,
+                "filament_flow_ratio": ["0.931"],
+                "pressure_advance": ["0.045"],
+                "enable_pressure_advance": ["1"],
+            }
+        )
+    )
+    return state("k1se", t0={**spool(1), "slicer_filament_preset": FILAMENT_PRESET})
+
+
+def _filament_check(
+    tmp_path: Path,
+    st: dict[str, Any],
+    footer: dict[str, str],
+    *,
+    body: str = "M104 S215\nG1 X1 E1\n",
+    ctx: PrintopsContext | None = None,
+) -> preflight.Check:
+    path = gcode(
+        tmp_path,
+        model="Creality K1 SE",
+        types="PLA",
+        colours="#000000",
+        vendors="Elegoo",
+        used_g=(20.0,),
+        hrc="0",
+        body=body,
+        extra={
+            "printer_settings_id": "K1 SE - Copy",
+            "print_settings_id": "Std 8900",
+            "default_acceleration": "8900",
+            "outer_wall_acceleration": "5000",
+            **footer,
+        },
+    )
+    context = ctx or PrintopsContext(printer="k1se", state=st)
+    return {c.name: c for c in run_checks(path, context, now=NOW).checks}[
+        "preset_match"
+    ]
+
+
+def test_preset_match_passes_on_the_spools_filament_preset_values(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    st = _filament_preset(tmp_path, monkeypatch)
+    check = _filament_check(tmp_path, st, FILAMENT_FOOTER)
+    assert check.status == "PASS", check.detail
+    for want in (
+        "filament_flow_ratio 0.931 = preset",
+        "pressure_advance 0.045 = preset",
+        "enable_pressure_advance 1 = preset",
+        f"filament preset {FILAMENT_PRESET!r}",
+    ):
+        assert any(want in ln for ln in check.lines), (want, check.lines)
+
+
+@pytest.mark.parametrize(
+    ("footer", "message"),
+    [
+        (
+            {"filament_flow_ratio": "0.98"},
+            "filament_flow_ratio 0.98, the filament preset 'Orange PLA @K1SE' has 0.931",
+        ),
+        (
+            {"pressure_advance": "0"},
+            "pressure_advance 0, the filament preset 'Orange PLA @K1SE' has 0.045",
+        ),
+        (
+            {"enable_pressure_advance": "0"},
+            "enable_pressure_advance 0, the filament preset 'Orange PLA @K1SE' has 1",
+        ),
+        (
+            {"filament_settings_id": "Creality Generic PLA @K1-all"},
+            "sliced with filament preset 'Creality Generic PLA @K1-all', the spool on T1 prints with 'Orange PLA @K1SE'",
+        ),
+    ],
+)
+def test_preset_match_fails_when_the_filament_differs_from_the_spools_preset(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    footer: dict[str, str],
+    message: str,
+) -> None:
+    st = _filament_preset(tmp_path, monkeypatch)
+    check = _filament_check(tmp_path, st, {**FILAMENT_FOOTER, **footer})
+    assert check.status == "FAIL"
+    assert message in "\n".join([check.detail, *check.lines])
+
+
+def test_preset_match_filament_mismatch_can_be_accepted_with_a_reason(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    st = _filament_preset(tmp_path, monkeypatch)
+    footer = {**FILAMENT_FOOTER, "filament_flow_ratio": "0.98"}
+    ctx = PrintopsContext(
+        printer="k1se",
+        state=st,
+        accept=frozenset({"preset_match"}),
+        reason="trying a wetter flow",
+    )
+    check = _filament_check(tmp_path, st, footer, ctx=ctx)
+    assert check.status == "WARN"
+    assert any(
+        "accepted with --accept preset_match: trying a wetter flow" in ln
+        for ln in check.lines
+    )
+    assert any("filament_flow_ratio 0.98" in ln for ln in check.lines)
+
+
+def test_preset_match_accept_needs_a_reason_and_only_names_preset_match() -> None:
+    from errors import UsageError
+
+    from printer_ops.printops_checks import context_from_options
+
+    def ctx(**kw: str | None) -> PrintopsContext:
+        return context_from_options(
+            "k1se",
+            None,
+            api=None,
+            offline=True,
+            snapshot=None,
+            command="print-preflight",
+            **kw,
+        )
+
+    assert ctx(accept="preset_match", reason="why").accept == frozenset(
+        {"preset_match"}
+    )
+    with pytest.raises(UsageError, match="--accept needs --reason"):
+        ctx(accept="preset_match")
+    with pytest.raises(UsageError, match="accepted: preset_match"):
+        ctx(accept="plate_material", reason="why")
+    with pytest.raises(UsageError, match="--reason belongs to --accept"):
+        ctx(reason="why")
+
+
+def test_preset_match_filament_calibration_print_compares_the_name_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    st = _filament_preset(tmp_path, monkeypatch)
+    stamp = "; 3d calibrate presets: machine=K1 SE - Copy (fleet k1se.slicer); process=Std 8900 (fleet k1se.slicer)\n"
+    pa_sweep = {
+        **FILAMENT_FOOTER,
+        "pressure_advance": "0.02",
+        "filament_flow_ratio": "0.9",
+    }
+    check = _filament_check(tmp_path, st, pa_sweep, body=stamp + "G1 X1 E1\n")
+    assert check.status == "PASS", check.detail
+    other = _filament_check(
+        tmp_path,
+        st,
+        {**pa_sweep, "filament_settings_id": "Other"},
+        body=stamp + "G1 X1 E1\n",
+    )
+    assert other.status == "FAIL"
+
+
+def test_preset_match_filament_without_a_named_preset_or_footer_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    st = _filament_preset(tmp_path, monkeypatch)
+    bare = state("k1se", t0=spool(1))  # the spool names no preset: nothing to compare
+    assert (
+        _filament_check(
+            tmp_path, bare, {**FILAMENT_FOOTER, "pressure_advance": "0.5"}
+        ).status
+        == "PASS"
+    )
+    no_id = _filament_check(
+        tmp_path,
+        st,
+        {k: v for k, v in FILAMENT_FOOTER.items() if k != "filament_settings_id"},
+    )
+    assert (
+        no_id.status == "UNVERIFIED" and "no `; filament_settings_id`" in no_id.detail
+    )
+
+
+def test_preset_match_filament_is_compared_on_a_printer_without_fleet_presets_or_calibration_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The u1 fleet entry has no `slicer:` mapping and no calibration presets for its model: the
+    spool's filament preset (a self-contained user preset) is still compared."""
+    user = tmp_path / "user" / "filament"
+    user.mkdir(parents=True)
+    (user / f"{FILAMENT_PRESET}.json").write_text(
+        json.dumps({"name": FILAMENT_PRESET, "filament_flow_ratio": ["0.931"]})
+    )
+    monkeypatch.setenv("ORCA_USER_PRESETS", str(user.parent))
+    monkeypatch.setenv("ORCA_PROFILES", str(tmp_path / "profiles"))
+    monkeypatch.setattr("cli.env.find_slicer", lambda: None)
+    st = state("u1", t0={**spool(1), "slicer_filament_preset": FILAMENT_PRESET})
+
+    def run_u1(flow: str, preset: str = FILAMENT_PRESET) -> preflight.Check:
+        path = gcode(
+            tmp_path,
+            used_g=(20.0, 0.0, 0.0, 0.0),
+            body="T0\nM104 S215 T0\nG1 X1 E1\n",
+            extra={"filament_settings_id": preset, "filament_flow_ratio": flow},
+        )
+        return run(path, st)["preset_match"]
+
+    ok = run_u1("0.931")
+    assert any("filament_flow_ratio 0.931 = preset" in ln for ln in ok.lines)
+    bad = run_u1("0.98")
+    assert bad.status == "FAIL" and "filament_flow_ratio 0.98" in "\n".join(bad.lines)
+    wrong = run_u1("0.931", preset="Creality Generic PLA @K1-all")
+    assert wrong.status == "FAIL" and "the spool on T1 prints with" in "\n".join(
+        wrong.lines
+    )
