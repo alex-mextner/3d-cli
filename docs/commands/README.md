@@ -93,6 +93,7 @@ Every gate from model to printer, in order: [Print pipeline](../workflows/print-
 | `gcode-thumbnails` | [gcode-thumbnails.md](gcode-thumbnails.md) | Check/add the printer-screen preview thumbnails a G-code carries (Orca CLI writes none). |
 | `print` | [print.md](print.md) | Validate print fields and emit deterministic dry-run job plans. |
 | `gcode-bounds` | [gcode-bounds.md](gcode-bounds.md) | Check every G-code move (arc bulges too) against axis travel and the printable area; offline. |
+| `gcode-mix-gate` | [gcode-mix-gate.md](gcode-mix-gate.md) | Gate a multi-colour G-code on what was printed: mix pattern per layer on own outer-wall evidence, pause, heads, cavity; `--mix-teeth` self-tests; offline. |
 | `gcode-resume` | [gcode-resume.md](gcode-resume.md) | Resume a stopped multi-head print above the last intact layer (no Z homing); offline. |
 | `gcode-overhangs` | [gcode-overhangs.md](gcode-overhangs.md) | Find extrusion printed on nothing, per object and layer (the slicer is silent with supports off); offline. |
 | `mix` | [mix.md](mix.md) | Colour mixing by layers (Snapmaker Orca mixed filaments): `recipes` ranks layer patterns for a target colour (patterns that put the additional colour on adjacent layers are rejected), `pattern` checks one pattern against the layer rules, `tester` writes a numbered U1 swatch plate with manifest and sheet, `check` lints a project (mixed parts show their colour on walls, layers over them are thin), `profile` caps the layer height over mixed parts, `gcode` measures the printed layers. |
