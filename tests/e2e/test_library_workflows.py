@@ -20,6 +20,7 @@ def test_library_status_works_offline_on_a_fresh_machine(tmp_path: Path) -> None
 
 
 def test_library_migrate_twice_and_export(tmp_path: Path) -> None:
+    """A user bootstraps the library, re-runs the bootstrap safely, then exports every table for a backup."""
     db = str(tmp_path / "library.db")
 
     first = run_cli(tmp_path, "library", "migrate", "--db", db)
@@ -35,6 +36,7 @@ def test_library_migrate_twice_and_export(tmp_path: Path) -> None:
 
 
 def test_library_path_uses_the_environment_and_never_creates_the_file(tmp_path: Path) -> None:
+    """An agent points the library at its own file through the environment and only asks where it is."""
     db = tmp_path / "elsewhere" / "library.db"
 
     result = run_cli(tmp_path, "library", "path", "--json", env_extra={"THREED_LIBRARY_DB": str(db)})
@@ -44,11 +46,15 @@ def test_library_path_uses_the_environment_and_never_creates_the_file(tmp_path: 
 
 
 def test_library_rejects_unknown_subcommand_with_exit_2(tmp_path: Path) -> None:
+    """A user mistypes a subcommand and is told the accepted ones, with exit code 2."""
     result = run_cli(tmp_path, "library", "drop")
-    assert result.returncode == 2 and "accepted: path, migrate, init, status, export" in result.stderr
+
+    assert "accepted: path, migrate, init, status, export" in result.stderr
+    assert result.returncode == 2
 
 
 def test_library_help_lists_every_subcommand(tmp_path: Path) -> None:
+    """A user reads `3d library --help` to learn the subcommands and flags."""
     result = run_cli(tmp_path, "library", "--help")
     assert result.returncode == 0
     for word in ("path", "migrate", "status", "export", "--db PATH", "--json"):
