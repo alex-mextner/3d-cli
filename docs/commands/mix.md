@@ -16,13 +16,14 @@ layer between the others, never on two layers in a row, and layers over a mixed 
 3d mix gcode FILE.gcode [--project FILE.3mf] [--layer-cap MM] [--max-run-mm MM] [--json]
 3d mix pattern PATTERN [--layer MM | --heights MM,MM,...] [--layer-cap MM] [--max-run-mm MM] [--json]
 3d mix target IMAGE --box x0,y0,x1,y1 (--white x0,y0,x1,y1 | --no-wb) [--white-level N] [--json]
-3d mix recipes TARGET (--slots N=HEX,... | --printer NAME) [--count N] [--max-cycle N]
+3d mix recipes TARGET (--slots N=HEX,... | --printer NAME [--shelf]) [--count N] [--max-cycle N]
                [--layer MM] [--layer-cap MM] [--max-run-mm MM] [--printops-api URL] [--json]
-3d mix tester  TARGET (--slots N=HEX,... | --printer NAME) -o OUT/NAME [--count N]
+3d mix tester  TARGET (--slots N=HEX,... | --printer NAME [--shelf]) -o OUT/NAME [--count N]
                [--max-cycle N] [--layer MM] [--layer-cap MM] [--max-run-mm MM] [--height MM]
                [--base-3mf FILE.3mf] [--printops-api URL] [--json]
   TARGET: --target HEX | --target-photo IMAGE --box x0,y0,x1,y1 (--white x0,y0,x1,y1 | --no-wb)
           [--white-level N]
+               [--shelf: --max-swaps N --material NAME --min-g G]
 3d mix readout PHOTO --manifest NAME.mix.json -o OUT/NAME [--white card|N] [--white-level N]
                [--no-qr-check] [--json]
 3d mix fit READOUT.json [READOUT.json ...] [-o OUT/NAME] [--lambda W] [--json]
@@ -270,6 +271,14 @@ mostly head changes (a change every layer); `3d print-preflight` passes its `hea
 - `--slots N=HEX,...` — the loaded filaments by U1 head number (1-9): `--slots 1=#000000,3=#1B5E20,4=#FFFFFF`
 - `--printer NAME` — read the usable slots of NAME from 3d-api (`GET /v1/printers/NAME/slots`, then
   `/v1/spools/ID` for the filament id). Read-only. With filament ids, the manifest has mix keys: `--printer u1`
+- `--shelf` — with `--printer`: also use the spools in stock but not loaded (3d-api `GET /v1/spools`, Spoolman).
+  Loadouts = the loaded spools plus up to `--max-swaps` (default 2, at most 4) shelf spools, each on a free head or
+  on the head of a loaded spool taken out; ranked by the best mix they reach (ΔE + stripes), equal results by fewer
+  swaps. The plan names each spool, its head and ΔE before/after, and prints `3d printops spool load ID PRINTER/Tn`
+  (`--replace-to LOCATION` where a loaded spool comes out). Left out, with the reason printed: spools under
+  `--min-g` (default 30 g, "empty") and of another material than the loaded ones (`--material NAME` to choose).
+  A current `filament_color` record replaces a spool's Spoolman colour. `tester --shelf` builds the plate for
+  option 1 (its manifest names the spools): load them first. `3d mix recipes --target '#E59520' --printer u1 --shelf`
 - `--count N` — candidates to keep (default 6, 1-20): `--count 4`
 - `--max-cycle N` — longest layer cycle (default 3, 1-12). Short cycles read best (SPEC 58): `--max-cycle 4`
 - `--layer MM` — layer height (default 0.12). Without `--base-3mf` it must be a U1 system process: 0.08, 0.12, 0.16 or 0.2: `--layer 0.16`
