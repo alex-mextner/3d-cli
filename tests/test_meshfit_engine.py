@@ -282,3 +282,115 @@ def test_report_carries_per_op_counts_volume_and_timing() -> None:
         and report["volume_after_mm3"] != report["volume_before_mm3"]
     )
     assert report["timing_s"] > 0 and len(report["mesh_sha256"]) == 64
+
+
+@pytest.mark.parametrize(
+    "key, value",
+    [
+        ("version", "nope"),
+        ("seed", "abc"),
+        ("keepout_tolerance_mm", "big"),
+        ("keepout_tolerance_mm", [1]),
+        ("seed", None),
+    ],
+)
+def test_malformed_top_level_scalars_are_usage_errors_not_value_errors(
+    key: str, value: Any
+) -> None:
+    from geometry.meshfit import spec as spec_mod
+
+    raw = {"ops": [{"op": "smooth"}], key: value}
+    with pytest.raises(UsageError, match=key):
+        spec_mod.normalise_spec(raw, ".")
+
+
+def test_zero_length_rotate_axis_is_a_usage_error() -> None:
+    handle = {"region": {"all": True}, "rotate": {"axis": [0, 0, 0], "deg": 90}}
+    with pytest.raises(UsageError, match="axis"):
+        spec(ops=[{"op": "grab", "handles": [handle]}])
+
+
+def test_zero_length_fit_handle_direction_is_a_usage_error() -> None:
+    handle = {"region": {"all": True}, "direction": [0, 0, 0]}
+    views = [{"mask": "m.png"}]
+    with pytest.raises(UsageError, match="direction"):
+        spec(ops=[{"op": "fit_silhouette", "views": views, "handles": [handle]}])
+
+
+def test_the_gate_measures_every_missing_keepout_vertex_not_a_sample() -> None:
+    V, F = cube_sphere(16, 20.0)
+    count = 25000  # above the 20k chunk, so a strided sample would skip every other row
+    rng = np.random.default_rng(0)
+    locked = V[rng.integers(0, len(V), count)].copy()  # on the surface: distance 0
+    locked[count - 2] = [
+        0.0,
+        0.0,
+        30.0,
+    ]  # one outlier at an index a stride of 2 never visits
+    assert engine._surface_distance(V, F, locked) == pytest.approx(10.0, abs=0.5)
+
+
+def test_the_gate_counts_locked_vertices_that_survive_not_final_vertices_on_them() -> (
+    None
+):
+    V, F = cube_sphere(24, 20.0)
+    sp = spec(regions=REGIONS, keepout=["eye"], ops=[{"op": "smooth"}])
+    pipe = engine.Pipeline(V, F, sp)
+    locked = np.nonzero(pipe.lock)[0]
+    assert len(locked) > 2
+    # one locked vertex collapses onto another: the final mesh has two rows on a locked point
+    # but the first locked vertex is gone.
+    pipe.V = pipe.V.copy()
+    pipe.V[locked[0]] = pipe.V[locked[-1]]
+    gate = pipe.keepout_gate()
+    assert gate["missing_vertices"] == 1
+    assert gate["max_displacement_mm"] > 0.0 and gate["gate"] == "FAIL"
+
+
+def test_refine_refuses_a_round_that_would_exceed_the_face_budget() -> None:
+    V, F = cube_sphere(8, 20.0)
+    with pytest.raises(UsageError, match="face budget"):
+        meshmath.refine_edges(V, F, 0.001, 10, None, max_faces=10 * len(F))
+    sp = spec(ops=[{"op": "remesh", "target_edge": 0.001, "max_faces": 5000}])
+    with pytest.raises(UsageError, match="face budget"):
+        engine.run_spec(V, F, sp, self_intersections=False)
+
+
+def test_a_big_seed_is_kept_exactly_and_booleans_are_not_numbers() -> None:
+    from geometry.meshfit import spec as spec_mod
+
+    big = 9007199254740993  # 2**53 + 1: not representable as a float
+    out = spec_mod.normalise_spec({"seed": big, "ops": [{"op": "smooth"}]}, ".")
+    assert out["seed"] == big
+    with pytest.raises(UsageError, match="seed"):
+        spec_mod.normalise_spec({"seed": True, "ops": [{"op": "smooth"}]}, ".")
+
+
+@pytest.mark.parametrize(
+    "key, value",
+    [("max_faces", "abc"), ("max_faces", 0), ("max_rounds", -1), ("max_faces", None)],
+)
+def test_remesh_budget_knobs_are_validated_in_the_spec(key: str, value: Any) -> None:
+    with pytest.raises(UsageError, match=key):
+        spec(ops=[{"op": "remesh", "target_edge": 2.0, key: value}])
+
+
+@pytest.mark.parametrize("axis", [[0, 0, 0], [float("nan"), 0, 0], [1, 0], "z"])
+def test_rotate_axis_must_be_a_finite_non_zero_triple(axis: Any) -> None:
+    handle = {"region": {"all": True}, "rotate": {"axis": axis, "deg": 90}}
+    with pytest.raises(UsageError, match="axis"):
+        spec(ops=[{"op": "grab", "handles": [handle]}])
+    with pytest.raises(UsageError, match="deg"):
+        spec(
+            ops=[
+                {
+                    "op": "grab",
+                    "handles": [
+                        {
+                            "region": {"all": True},
+                            "rotate": {"axis": [0, 0, 1], "deg": "x"},
+                        }
+                    ],
+                }
+            ]
+        )

@@ -18,6 +18,7 @@ Top-level keys: version (1), seed (int), units (mm), keepout_tolerance_mm, landm
 from __future__ import annotations
 
 import json
+import math
 import os
 from typing import Any
 
@@ -63,6 +64,7 @@ OP_KEYS: dict[str, set[str]] = {
         "target_edge",
         "max_edge",
         "max_rounds",
+        "max_faces",
         "iterations",
         "feature_deg",
         "max_surface_dist",
@@ -112,6 +114,50 @@ def _fail(where: str, message: str) -> UsageError:
     )
 
 
+def _number(where: str, value: Any) -> float:
+    """A finite number (YAML int/float or a numeric string such as "3"); anything else is a spec error, not a ValueError."""
+    if isinstance(value, bool):
+        raise _fail(where, f"must be a number, got {value!r}")
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        raise _fail(where, f"must be a number, got {value!r}") from None
+    if not math.isfinite(out):
+        raise _fail(where, f"must be a finite number, got {value!r}")
+    return out
+
+
+def _integer(where: str, value: Any) -> int:
+    """An exact integer (YAML int, an integral float, or an integer string); never routed through float, so big seeds survive."""
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value.strip())
+        except ValueError:
+            pass
+    number = _number(where, value)
+    if number != int(number):
+        raise _fail(where, f"must be a whole number, got {value!r}")
+    return int(number)
+
+
+def _require_nonzero_vector(where: str, value: Any) -> None:
+    ok = (
+        isinstance(value, list)
+        and len(value) == 3
+        and all(
+            isinstance(c, (int, float)) and not isinstance(c, bool) and math.isfinite(c)
+            for c in value
+        )
+        and any(value)
+    )
+    if not ok:
+        raise _fail(
+            where, f"must be a finite [x, y, z] with a non-zero length, got {value!r}"
+        )
+
+
 def load_spec(path: str) -> dict[str, Any]:
     """Read + validate a spec file; returns the normalised spec (regions merged, op names canonical)."""
     if not os.path.isfile(path):
@@ -137,15 +183,17 @@ def normalise_spec(raw: Any, base_dir: str = ".") -> dict[str, Any]:
         raise _fail(
             "<root>", f"unknown keys {unknown}; accepted: {', '.join(sorted(TOP_KEYS))}"
         )
-    if int(raw.get("version", SPEC_VERSION)) != SPEC_VERSION:
+    if _integer("version", raw.get("version", SPEC_VERSION)) != SPEC_VERSION:
         raise _fail(
             "version",
             f"only version {SPEC_VERSION} is supported, got {raw['version']!r}",
         )
     spec: dict[str, Any] = {
         "version": SPEC_VERSION,
-        "seed": int(raw.get("seed", 0)),
-        "keepout_tolerance_mm": float(raw.get("keepout_tolerance_mm", 0.0)),
+        "seed": _integer("seed", raw.get("seed", 0)),
+        "keepout_tolerance_mm": _number(
+            "keepout_tolerance_mm", raw.get("keepout_tolerance_mm", 0.0)
+        ),
         "base_dir": base_dir,
         "description": str(raw.get("description", "")),
     }
@@ -247,6 +295,16 @@ def _validate_op(index: int, op: Any, known: set[str]) -> dict[str, Any]:
             if not isinstance(h, dict) or "region" not in h:
                 raise _fail(where, "each handle needs a region")
             regions_mod.validate_ref(h["region"], known, f"{where}.handles")
+            rotate = h.get("rotate")
+            if rotate is not None:
+                if (
+                    not isinstance(rotate, dict)
+                    or "axis" not in rotate
+                    or "deg" not in rotate
+                ):
+                    raise _fail(where, "rotate needs {axis: [x, y, z], deg: degrees}")
+                _require_nonzero_vector(f"{where}.handles.rotate.axis", rotate["axis"])
+                _number(f"{where}.handles.rotate.deg", rotate["deg"])
         for ref in op.get("anchors", []) or []:
             regions_mod.validate_ref(ref, known, f"{where}.anchors")
     if name == "fit_silhouette":
@@ -274,8 +332,13 @@ def _validate_op(index: int, op: Any, known: set[str]) -> dict[str, Any]:
             )
         for h in handles:
             regions_mod.validate_ref(h["region"], known, f"{where}.handles")
+            _require_nonzero_vector(f"{where}.handles.direction", h["direction"])
         for ref in op.get("anchors", []) or []:
             regions_mod.validate_ref(ref, known, f"{where}.anchors")
+    if name == "remesh":
+        for key in ("max_faces", "max_rounds"):
+            if key in op and _integer(f"{where}.{key}", op[key]) < 1:
+                raise _fail(f"{where}.{key}", f"must be at least 1, got {op[key]!r}")
     if name == "displace":
         direction = op.get("direction")
         if not (
