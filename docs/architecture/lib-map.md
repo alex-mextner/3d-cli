@@ -47,6 +47,7 @@ rendering, slicing support, and verification:
 - `dimension_check.py`
 - `dimension_legend.py`
 - `dimension_model.py`
+- `dimension_options.py`
 - `dimension_parts.py`
 - `dimension_render.py`
 - `fit_camera.py`
@@ -314,6 +315,7 @@ Every current root Python module is listed here so future additions are intentio
 - `dimension_check.py` — the legibility gate of dimensioned renders (`3d dimension --check`): sidecar + pixel checks of every label.
 - `dimension_legend.py` — the colour -> part legend strip under a multi-part render (`3d dimension`).
 - `dimension_model.py` — reads 3MF (stdlib zipfile + ElementTree, no lxml), OBJ+MTL, `.scad` (via openscad's coloured 3MF) and STL into raw geometry with its colour groups (`3d dimension`).
+- `dimension_options.py` — `--up` reorientation and the groups of separated parts behind `--overall auto` (`3d dimension`).
 - `dimension_parts.py` — names the parts of a model, resolves one distinct colour per part (authored colour, else the `parts.py` palette; stand-ins muted) and builds the mesh to paint (`3d dimension`).
 - `dimension_render.py` — shaded top/front/side/iso renders with mm dimension arrows, per-part colours + legend and the `.dims.json` sidecar (`3d dimension`).
 - `backdrop_mask.py` — subject mask of a studio render: everything that is not the smooth neutral backdrop connected to the frame border (`3d preprocess --backdrop`; numpy + scipy).

@@ -41,7 +41,10 @@ from dimension_args import (
     parse_bed,
     parse_define,
     parse_dim,
+    parse_dims_file,
+    parse_overall,
     parse_part,
+    parse_up,
     parse_width,
     positive,
 )
@@ -53,6 +56,7 @@ from dimension_check import (
 )
 from dimension_legend import draw_legend, layout_legend
 from dimension_model import RenderError, load_raw
+from dimension_options import PERM, letters, reorient, separated_groups
 from dimension_parts import Model, build_model
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
 
@@ -614,11 +618,19 @@ def render(
     label_px: float | None = None,
     defines: list[str] | None = None,
     parts: list[str] | None = None,
+    up: str = "Z",
+    overall: str = "auto",
+    required: list[str] | None = None,
 ) -> dict[str, Any]:
     """Render `model` to `out` (+ sidecar); returns the sidecar dict."""
     title = name or os.path.splitext(os.path.basename(model_path))[0]
-    model = build_model(load_raw(model_path, defines), title, parts or [])
+    if up != "Z" and bed is not None:
+        raise RenderError(
+            "3d dimension: --bed is in bed coordinates (Z up); drop --up or --bed"
+        )
+    model = reorient(build_model(load_raw(model_path, defines), title, parts or []), up)
     mesh = model.mesh
+    axis_letters = letters(up)
     scale = width / REFERENCE_WIDTH
     px_font = (label_px if label_px is not None else 20.0) * scale
     panel_w, panel_h = width // 2, int(round(560 * scale))
@@ -631,15 +643,19 @@ def render(
     font = _font(px_font)
     head_font, view_font = _font(26 * scale, bold=True), _font(18 * scale, bold=True)
     ext = mesh.extents
+    by_letter = {letter: float(ext[i]) for i, letter in enumerate(axis_letters)}
+    groups = separated_groups(model)
+    draw_overall = overall == "always" or (overall == "auto" and not groups)
+    per_part_dims = overall == "auto" and bool(groups)
     draw.text((16, 10 * scale), title, font=head_font, fill=(20, 20, 20))
-    draw.text(
-        (16, 40 * scale),
-        f"overall X {ext[0]:.1f} x Y {ext[1]:.1f} x Z {ext[2]:.1f} mm",
-        font=size_font,
-        fill=(60, 60, 60),
+    overall_text = (
+        f"overall X {by_letter['X']:.1f} x Y {by_letter['Y']:.1f} x Z {by_letter['Z']:.1f} mm"
+        if draw_overall or not groups
+        else f"{len(groups)} separate parts: sizes per part"
     )
+    draw.text((16, 40 * scale), overall_text, font=size_font, fill=(60, 60, 60))
     custom = [
-        (cname, np.array(c1), np.array(c2))
+        (cname, np.array(c1)[list(PERM[up])], np.array(c2)[list(PERM[up])])
         for cname, c1, c2 in (parse_dim(d) for d in (dims or []))
     ]
     # A slanted part's own length (its oriented box) beats the longest side of the axis-aligned box;
@@ -649,7 +665,11 @@ def render(
     sidecar: dict[str, Any] = {
         "part": title,
         "source": os.path.abspath(model_path),
-        "bbox_mm": [float(v) for v in ext],
+        "bbox_mm": [float(ext[axis_letters.index(c)]) for c in "XYZ"],
+        "up": up,
+        "overall": "drawn"
+        if draw_overall
+        else ("per-part" if per_part_dims else "none"),
         "views": {},
     }
     placed: list[Placed] = []
@@ -683,23 +703,44 @@ def render(
         panel.labels.append(title_box)
         if bed is not None and view == "top":
             sidecar["bed"] = _draw_bed(draw, panel, bed, view_font)
-        for axis, p, q in bbox_edges(np.asarray(mesh.bounds), panel):
-            letter = "XYZ"[axis]
-            item = place_dimension(
-                draw,
-                panel,
-                p,
-                q,
-                letter,
-                float(ext[axis]),
-                "bbox",
-                AXIS_COLORS[letter],
-                font,
-                px_font,
-                (AXIS_SIDE[axis][0], -AXIS_SIDE[axis][1]),
-            )
-            if item:
-                placed.append(item)
+        if draw_overall:
+            for axis, p, q in bbox_edges(np.asarray(mesh.bounds), panel):
+                letter = axis_letters[axis]
+                item = place_dimension(
+                    draw,
+                    panel,
+                    p,
+                    q,
+                    letter,
+                    float(ext[axis]),
+                    "bbox",
+                    AXIS_COLORS[letter],
+                    font,
+                    px_font,
+                    (AXIS_SIDE[axis][0], -AXIS_SIDE[axis][1]),
+                )
+                if item:
+                    placed.append(item)
+        elif per_part_dims:
+            for group in groups:
+                span = group.bounds[1] - group.bounds[0]
+                for axis, p, q in bbox_edges(group.bounds, panel):
+                    letter = axis_letters[axis]
+                    item = place_dimension(
+                        draw,
+                        panel,
+                        p,
+                        q,
+                        f"{letter} {group.name[:16]}",
+                        float(span[axis]),
+                        "part",
+                        AXIS_COLORS[letter],
+                        font,
+                        px_font,
+                        (AXIS_SIDE[axis][0], -AXIS_SIDE[axis][1]),
+                    )
+                    if item:
+                        placed.append(item)
         for cname, c1, c2 in custom:
             item = place_dimension(
                 draw,
@@ -719,6 +760,16 @@ def render(
             "rect": list(rect),
             "silhouette_grid": panel.silhouette_grid(),
         }
+    required_names = [parse_dim(d)[0] for d in (required or [])]
+    drawn_names = {p.label for p in placed}
+    missing = [n for n in required_names if n not in drawn_names]
+    if missing:
+        raise RenderError(
+            f"3d dimension: --dims-from: not drawn in any view: {', '.join(missing)} "
+            "(an arrow is shown only where it keeps >= 90% of its true length and finds a clean spot)"
+        )
+    if required_names:
+        sidecar["required_dims"] = required_names
     legend = (
         draw_legend(canvas, legend_rows, header + 2 * panel_h, size_font, scale)
         if legend_rows
@@ -785,13 +836,20 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--part", action="append", default=[], type=_arg_type(_checked_part_spec)
     )
+    ap.add_argument("--up", type=_arg_type(parse_up), default="Z")
+    ap.add_argument("--overall", type=_arg_type(parse_overall), default="auto")
+    ap.add_argument("--dims-from", type=_arg_type(parse_dims_file), default=None)
     args = ap.parse_args(argv)
+    required = args.dims_from or []
     try:
         sidecar = render(
             args.model,
             args.out,
             name=args.name,
-            dims=args.dim,
+            dims=[*args.dim, *required],
+            up=args.up,
+            overall=args.overall,
+            required=required,
             bed=args.bed,
             width=args.width,
             label_px=args.label_px,
