@@ -421,6 +421,7 @@ selection flags it runs ALL applicable gates; selectors run a subset; `--skip` e
 | `3d check … --skip GATE` | exclude a gate (`manifold\|consistency\|printability\|collision\|silhouette`). |
 | `3d check … --collision cfg.json` / `--ref img` | supply data; the collision/silhouette gate then runs (never narrows the core set). |
 | `3d acceptance <assembly.scad>` | back-compat alias for `check` (all gates). |
+| `3d scad <validate\|preview\|multi-preview\|export-stl\|params\|section\|section-color\|next-version>` | plain OpenSCAD tools with libs auto-resolved; `export-stl` prints `STATUS: PASSED/FAILED` (non-manifold / self-intersection / `assert()` failures exit 1). See [docs/commands/scad.md](docs/commands/scad.md). |
 | `3d mesh <file.stl\|3mf\|.scad>` | watertight / manifold / self-intersection / volume (trimesh + open3d/manifold3d; falls back to openscad warnings). |
 | `3d mesh deform <mesh> <spec.yaml>` | deterministic, GUI-free sculpting from a spec: regions + keep-out zones, ARAP grab, smooth/inflate/crease, fur relief (overhang-safe), remesh; same spec = same SHA-256. `3d mesh fit-silhouette` = heuristic silhouette-IoU handle fit. |
 | `3d printability <file.scad>` | wall / min-feature / overhang / orientation (FDM, PLA/PETG). |
