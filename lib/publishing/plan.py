@@ -296,7 +296,7 @@ def render_text(ev: Evaluation, *, dry_run: bool) -> str:
         out.append(f"\n== {plan.platform} [{state}] — {plan.route}")
         out.append("  fields")
         for key, value in plan.fields.items():
-            shown = ", ".join(value) if isinstance(value, list) else str(value)
+            shown = ", ".join(map(str, value)) if isinstance(value, list) else str(value)
             flat = " ".join(shown.split())
             out.append(f"    {key}: {flat if len(flat) <= 100 else flat[:99] + '…'}")
         out.append("  steps")
