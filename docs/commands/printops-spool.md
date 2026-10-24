@@ -57,6 +57,7 @@ No tare → `measure` refuses (409) and says why; pass `--tare G` (recorded for 
 3d printops spool receive --from-photo IMG|TXT [any receive flag …] [--yes]
 3d printops spool scan IMG|TXT [IMG|TXT …] [--location LOC]
 3d printops spool move ID LOCATION
+3d printops spool preset ID (NAME | --clear) [--filament]
 3d printops spool load ID PRINTER/SLOT [--replace-to LOCATION] [--no-printer-write] [--force-official]
 3d printops spool unload PRINTER/SLOT [--to LOCATION] [--gross G] [--no-printer-write]
 3d printops spool use ID GRAMS [--source S] [--confidence G] [--job JOB] [--note TEXT]
@@ -94,6 +95,11 @@ Every action takes `--json` (the API answer), `--api URL`, `--token TOKEN`.
   `3d printops spool scan ~/.cache/spool-labels/*.jpg --location WH:default`
 - `move` — store or move to a location (`WH:A/S2/B3/04`, `cell:…`, a tag uid — see `3d printops loc`).
   A loaded spool is unloaded on the way. `3d printops spool move 7 WH:A/S1`
+- `preset` — the slicer filament preset (a user preset name such as `Orange PLA @K1SE`) the spool
+  prints with, kept in the Spoolman extra field `slicer_filament_preset` (`--filament`: on the spool's
+  Spoolman filament, for every spool of it; the spool's own value wins; `--clear` empties it).
+  `3d calibrate gen --printer P` uses it as the default `--filament-preset`. The printed value is the
+  effective one (the spool's own, else its filament's). `3d printops spool preset 7 'Orange PLA @K1SE' --filament`
 - `load` — bind to a printer head (`u1/T3`) or AMS slot (`p1s/ams1/2`): Spoolman extra
   `printops_slot` = `u1/T3`, location `slot:u1/T3`, `opened_at` if unset. Refused: an unknown
   printer/slot, a head [`fleet/printers.yaml`](../../fleet/printers.yaml) marks unusable (with
@@ -275,7 +281,7 @@ Errors: `{"detail": message, "info": {...}}` — 404 unknown spool/printer/slot/
 unusable head / occupied slot / archived spool / no tare / duplicate import key, 422 invalid
 input, 502 Spoolman failed.
 
-Events: `spool.received`, `spool.moved`, `slot.loaded` / `slot.unloaded` (subject
+Events: `spool.received`, `spool.moved`, `spool.preset_set`, `slot.loaded` / `slot.unloaded` (subject
 `slot:u1/T3`, payload `printer`, `head`, `spool_id`), `spool.used`, `spool.measured` (gross,
 tare and its source, net, ±, previous interval), `spool.empty`, and after a load
 `slot.printer_written` (payload `printer`, `head`, `spool_id`, `wanted`, `after`,

@@ -11,6 +11,7 @@ from fleet_fixtures import REPO_FLEET
 from printops_fixtures import LiveApi
 
 from printops import db, events
+from printops.client import ApiClient, ApiError
 from printops.spoolman import encode_extra
 
 from .workflow_helper import run_cli
@@ -332,6 +333,146 @@ def test_gen_plate_with_the_printers_and_spools_presets(tmp_path: Path) -> None:
     data = json.loads(out.with_suffix(".json").read_text())
     assert data["presets"]["filament"] == "Orange PLA @K1SE"
     assert [o["name"] for o in data["objects"]][-3:] == ["bridge_8", "bridge_11", "bridge_14"]
+
+
+def _k1_gen_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
+    """A K1 fleet entry with machine/process presets, user presets, and a (fake) Orca — the filament
+    preset is left to the spool binding. The API thread reads the same fleet file."""
+    profiles, orca = write_plate_orca(tmp_path)
+    user = tmp_path / "user"
+    for kind, data in (
+        ("machine", {"name": "K1 SE - Copy", "inherits": "Creality K1 SE 0.4 nozzle"}),
+        ("process", {"name": "Std 8900", "inherits": "0.20mm Standard @Creality K1 SE", "default_acceleration": "8000"}),
+        ("filament", {"name": "Orange PLA @K1SE", "inherits": "Creality Generic PLA @K1-all",
+                      "filament_flow_ratio": ["0.931"], "filament_type": ["PLA"]}),
+    ):
+        (user / kind).mkdir(parents=True, exist_ok=True)
+        (user / kind / f"{data['name']}.json").write_text(json.dumps(data))
+    fleet = tmp_path / "fleet.yaml"
+    fleet.write_text(
+        "k1:\n  model: Creality K1 SE\n  owner: own\n  access: offline\n"
+        "  heads: [{label: T1, index: 0}]\n  slicer: {machine: K1 SE - Copy, process: Std 8900}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("THREED_FLEET", str(fleet))
+    return {"THREED_FLEET": str(fleet), "ORCA_PROFILES": str(profiles), "ORCA_USER_PRESETS": str(user),
+            "SLICER": str(orca)}
+
+
+def _bound_spool(live: LiveApi, *, spool_extra: str | None = None, filament_extra: str | None = None,
+                 slot: str = "k1/T1") -> int:
+    sm = live.spoolman
+    vendor = sm.create("vendor", {"name": "Elegoo"})
+    fil: dict[str, object] = {"name": "Orange", "vendor_id": vendor["id"], "material": "PLA", "density": 1.24,
+                              "diameter": 1.75, "weight": 1000}
+    if filament_extra:
+        fil["extra"] = {"slicer_filament_preset": encode_extra(filament_extra)}
+    fid = sm.create("filament", fil)["id"]
+    extra = {"printops_slot": encode_extra(slot)}
+    if spool_extra:
+        extra["slicer_filament_preset"] = encode_extra(spool_extra)
+    return int(sm.create("spool", {"filament_id": fid, "extra": extra})["id"])
+
+
+def test_gen_takes_the_filament_preset_from_the_spool_on_the_head(
+    tmp_path: Path, live_api: LiveApi, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The user loads the orange spool on the K1 and runs `calibrate gen` without --filament-preset:
+    the preset comes from the spool's filament (a spool's own value wins) and the G-code stamp and
+    the map name the 3d-api binding as the source."""
+    env = {**_k1_gen_env(tmp_path, monkeypatch), **_env(live_api)}
+    sid = _bound_spool(live_api, filament_extra="Orange PLA @K1SE")
+    out = tmp_path / "plate.gcode"
+    made = run_cli(tmp_path, "calibrate", "gen", "plate1", "--printer", "k1", "--only", "bridge", "-o", str(out),
+                   env_extra=env)
+    assert made.returncode == 0, made.stderr
+    source = f"3d-api spool #{sid} slicer_filament_preset on filament, bound to k1"
+    assert ("; 3d calibrate presets: machine=K1 SE - Copy (fleet k1.slicer); process=Std 8900 (fleet k1.slicer); "
+            f"filament=Orange PLA @K1SE ({source})") in out.read_text().splitlines()
+    assert "; filament_flow_ratio = 0.931" in out.read_text().splitlines()
+    assert json.loads(out.with_suffix(".json").read_text())["presets"]["chosen_by"]["filament"] == source
+
+    live_api.spoolman.update("spool", sid, {"extra": {"slicer_filament_preset": encode_extra("Orange PLA @K1SE")}})
+    again = run_cli(tmp_path, "calibrate", "gen", "plate1", "--printer", "k1", "--head", "T1", "--only", "bridge",
+                    "-o", str(out), env_extra=env)
+    assert again.returncode == 0, again.stderr
+    assert f"filament=Orange PLA @K1SE (3d-api spool #{sid} slicer_filament_preset on spool, bound to k1/T1)" in (
+        out.read_text()
+    )
+
+    by_id = run_cli(tmp_path, "calibrate", "gen", "plate1", "--printer", "k1", "--spool", str(sid), "--only", "bridge",
+                    "-o", str(out), env_extra=env)
+    assert by_id.returncode == 0, by_id.stderr
+    assert f"filament=Orange PLA @K1SE (3d-api spool #{sid} slicer_filament_preset on spool)" in out.read_text()
+
+    flagged = run_cli(tmp_path, "calibrate", "gen", "plate1", "--printer", "k1", "--filament-preset",
+                      "Orange PLA @K1SE", "--only", "bridge", "-o", str(out), env_extra=env)
+    assert flagged.returncode == 0, flagged.stderr
+    assert "filament=Orange PLA @K1SE (--filament-preset)" in out.read_text()
+
+
+def test_gen_refuses_without_a_binding_or_a_preset_or_the_api(
+    tmp_path: Path, live_api: LiveApi, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No spool on the head, a spool without a preset, or 3d-api down: the command refuses with the
+    fix and writes nothing — never the stock preset; without 3d-api configured the flag is required."""
+    base = _k1_gen_env(tmp_path, monkeypatch)
+    out = tmp_path / "plate.gcode"
+    args = ("calibrate", "gen", "plate1", "--printer", "k1", "-o", str(out))
+
+    unbound = run_cli(tmp_path, *args, env_extra={**base, **_env(live_api)})
+    assert unbound.returncode == 2
+    assert "no filament preset for k1" in unbound.stderr and "no spool bound to k1/T1" in unbound.stderr
+
+    sid = _bound_spool(live_api)
+    bare = run_cli(tmp_path, *args, env_extra={**base, **_env(live_api)})
+    assert bare.returncode == 2
+    assert f"spool #{sid} carries no slicer filament preset (bound to k1)" in bare.stderr
+    assert f"3d printops spool preset {sid}" in bare.stderr
+
+    down = run_cli(tmp_path, *args, env_extra={**base, "PRINTOPS_API": "http://127.0.0.1:1", "PRINTOPS_TOKEN": "x"})
+    assert down.returncode == 2
+    assert "no filament preset for k1: 3d-api" in down.stderr and "--filament-preset" in down.stderr
+
+    unconfigured = run_cli(tmp_path, *args, env_extra=base)
+    assert unconfigured.returncode == 2 and "no filament preset for k1: name the slicer presets" in unconfigured.stderr
+    assert "3d-api" not in unconfigured.stderr  # nothing was asked of 3d-api
+
+    (tmp_path / "bare.yaml").write_text(
+        "k1:\n  model: Creality K1 SE\n  owner: own\n  access: offline\n  heads: [{label: T1, index: 0}]\n"
+    )
+    monkeypatch.setenv("THREED_FLEET", str(tmp_path / "bare.yaml"))
+    no_machine = run_cli(tmp_path, *args, env_extra={**base, "THREED_FLEET": str(tmp_path / "bare.yaml"),
+                                                      **_env(live_api)})
+    assert no_machine.returncode == 2  # the missing machine/process presets come first, 3d-api is not asked
+    assert "no machine, process, filament preset for k1" in no_machine.stderr
+    assert not out.exists()
+
+
+def test_spool_preset_command_sets_the_spool_and_filament_preset(
+    tmp_path: Path, live_api: LiveApi, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`3d printops spool preset` writes the Spoolman extra field `calibrate gen` reads."""
+    env = {**_k1_gen_env(tmp_path, monkeypatch), **_env(live_api)}
+    sid = _bound_spool(live_api)
+    on_filament = run_cli(tmp_path, "printops", "spool", "preset", str(sid), "Orange PLA @K1SE", "--filament",
+                          env_extra=env)
+    assert on_filament.returncode == 0, on_filament.stderr
+    assert "slicer filament preset: Orange PLA @K1SE" in on_filament.stdout
+    made = run_cli(tmp_path, "calibrate", "gen", "plate1", "--printer", "k1", "--only", "bridge", "-o",
+                   str(tmp_path / "p.gcode"), env_extra=env)
+    assert made.returncode == 0, made.stderr
+    cleared = run_cli(tmp_path, "printops", "spool", "preset", str(sid), "--clear", "--filament", env_extra=env)
+    assert cleared.returncode == 0 and "(none)" in cleared.stdout
+    for bad_name in ("A\nM104 S300", "  "):
+        bad = run_cli(tmp_path, "printops", "spool", "preset", str(sid), bad_name, env_extra=env)
+        assert bad.returncode == 1 and "non-blank and free of control characters" in bad.stderr
+    ApiClient(live_api.url, live_api.tokens["rw"]).post(f"/v1/spools/{sid}/slicer-preset", {"preset": "Kept", "scope": "spool"})
+    with pytest.raises(ApiError) as err:  # a body without `preset` must not wipe the stored one
+        ApiClient(live_api.url, live_api.tokens["rw"]).post(f"/v1/spools/{sid}/slicer-preset", {})
+    assert err.value.status == 422
+    kept = ApiClient(live_api.url, live_api.tokens["rw"]).get(f"/v1/spools/{sid}")
+    assert kept["slicer_filament_preset"] == "Kept"
 
 
 def test_gen_combo_and_temp_through_bin_3d(tmp_path: Path) -> None:

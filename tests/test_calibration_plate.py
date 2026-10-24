@@ -383,24 +383,54 @@ def test_no_presets_is_refused_not_stock(orca: str, tmp_path: Path) -> None:
         cg.generate("flow", "Creality K1 SE", orca, tmp_path / "f.gcode", material="PETG", presets=wrong)
 
 
-def test_cli_presets_from_flags_then_fleet(tmp_path: Path) -> None:
+@pytest.fixture
+def no_printops_api(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """No 3d-api configured anywhere: `calibrate gen` keeps --filament-preset required."""
+    for var in ("PRINTOPS_API", "PRINTOPS_TOKEN"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-config"))
+    monkeypatch.setenv("HOME", str(tmp_path / "no-home"))
+
+
+def test_cli_presets_from_flags_then_fleet(no_printops_api: None) -> None:
     from types import SimpleNamespace
 
     from commands.calibrate import _preset_choice
     from errors import UsageError
+    from printops.cli._common import Parsed
+
+    def pick(opts: dict[str, str], entry: SimpleNamespace) -> cg.PresetChoice:
+        return _preset_choice(Parsed(opts=opts), entry)  # type: ignore[arg-type]  # a FleetPrinter stand-in
 
     entry = SimpleNamespace(name="k1se", slicer={"machine": "M - Copy", "process": "P 8900"})
-    choice = _preset_choice({"--filament-preset": "Orange PLA @K1SE"}, entry)  # type: ignore[arg-type]
+    choice = pick({"--filament-preset": "Orange PLA @K1SE"}, entry)
     assert (choice.machine, choice.process, choice.filament) == ("M - Copy", "P 8900", "Orange PLA @K1SE")
     assert dict(choice.sources) == {"machine": "fleet k1se.slicer", "process": "fleet k1se.slicer",
                                     "filament": "--filament-preset"}
-    flagged = _preset_choice({"--filament-preset": "F", "--process-preset": "Other"}, entry)  # type: ignore[arg-type]
+    flagged = pick({"--filament-preset": "F", "--process-preset": "Other"}, entry)
     assert flagged.process == "Other" and dict(flagged.sources)["process"] == "--process-preset"
     with pytest.raises(UsageError, match="no filament preset for k1se"):
-        _preset_choice({}, entry)  # type: ignore[arg-type]
+        pick({}, entry)
     bare = SimpleNamespace(name="u1", slicer={})
     with pytest.raises(UsageError, match="no machine, process, filament preset for u1"):
-        _preset_choice({}, bare)  # type: ignore[arg-type]
+        pick({}, bare)
+
+
+def test_a_broken_printops_config_is_reported_not_taken_for_no_api(
+    tmp_path: Path, no_printops_api: None
+) -> None:
+    from types import SimpleNamespace
+
+    from commands.calibrate import _preset_choice
+    from errors import UsageError
+    from printops.cli._common import Parsed
+
+    cfg = tmp_path / "no-config" / "3d-cli"
+    cfg.mkdir(parents=True)
+    (cfg / "printops.yaml").write_text("- not\n- a mapping\n")
+    entry = SimpleNamespace(name="k1se", slicer={"machine": "M", "process": "P"})
+    with pytest.raises(UsageError, match="must be a mapping"):
+        _preset_choice(Parsed(), entry)  # type: ignore[arg-type]  # a FleetPrinter stand-in
 
 
 def test_fleet_slicer_key(tmp_path: Path) -> None:
