@@ -4,7 +4,7 @@ WHAT: `parse(path)` reads an Orca/Snapmaker-dialect G-code in one pass into `Par
   extrusion runs by `;TYPE:` with tool and XY points, tool sequence, header comments incl. print time and
   filament grams). `check_gcode(path, spec, expectations)` runs the gates on it and returns a `GcodeReport`
   (a `contracts.StepResult`): `walls`, `infill`, `supports`, `layer-heights`, `mix-layer-cap`, `tools-allowed`,
-  `region-tools`, `mix-minor-adjacent`, `prime-tower`, `bed-bounds`.
+  `region-tools`, `mix-minor-adjacent`, `prime-tower`, `bed-bounds`, `feedrates`, `overrides`.
   `GateExpectations` carries what only the project builder knows (which tool/mix pattern prints in which Z slab);
   `GateExpectations.from_manifest(path)` reads the `NAME.manifest.json` the builder writes next to the 3MF.
 WHY: the Chekhov U1 print needed hours of slice-inspect-reslice because wrong wall counts, 30 % infill, a stray
@@ -89,7 +89,7 @@ _HEADER_KEYS = frozenset(
         "estimated printing time (normal mode)",
     }
 )
-_WORD = re.compile(r"([XYE])(-?\d*\.?\d+)")
+_WORD = re.compile(r"([XYEF])(-?\d*\.?\d+)")
 _TOOL = re.compile(r"T(\d+)\s*(?:;.*)?$")
 _E_WORD = re.compile(r"E(-?\d*\.?\d+)")
 _DURATION = re.compile(r"(\d+)\s*([dhms])")
@@ -147,6 +147,11 @@ class Parsed:
         tuple[float, float, float, float] | None
     )  # x0, x1, y0, y1 of model extrusion (no `Custom`)
     parse_s: float
+    #: fastest feedrate (mm/s) the G-code commands for each feature (`;TYPE:` name), plus `travel` (moves without
+    #: extrusion) and `wipe` (retracting XY moves); only moves inside a layer count, the start G-code does not
+    feed_max: dict[str, float] = field(default_factory=dict)
+    #: every `; key = value` comment of the file (the slicer's config block): the settings the slice really used
+    config: dict[str, str] = field(default_factory=dict)
 
     def tools_used(self) -> set[int]:
         """Tools that extruded anything inside a layer (the start-G-code purge does not count)."""
@@ -195,6 +200,9 @@ def parse(path: str | Path) -> Parsed:
     y: float | None = None
     rel_e = False
     e_abs = 0.0
+    feed = 0.0  # modal F, mm/min
+    feed_max: dict[str, float] = {}
+    config: dict[str, str] = {}
     in_layer = False
     z: float | None = None
     h: float | None = None
@@ -218,6 +226,8 @@ def parse(path: str | Path) -> Parsed:
                     for k, v in find(line):
                         if k == "E":
                             ev = float(v)
+                        elif k == "F":
+                            feed = float(v)
                         elif k == "X":
                             nx = float(v)
                             moved = True
@@ -254,6 +264,14 @@ def parse(path: str | Path) -> Parsed:
                                 y1 = ny
                     else:
                         run = None
+                    if moved and in_layer and feed > 0:
+                        name = (
+                            kind
+                            if extruding
+                            else ("wipe" if ev is not None and ev < 0 else "travel")
+                        )
+                        if feed > feed_max.get(name, 0.0):
+                            feed_max[name] = feed
                     x, y = nx, ny
                 elif line.startswith("G92"):
                     m = _E_WORD.search(line)
@@ -262,6 +280,10 @@ def parse(path: str | Path) -> Parsed:
             elif c == ";":
                 if line.startswith(";TYPE:"):
                     kind = line[6:].strip()
+                    types[kind] += 1
+                    run = None
+                elif line.startswith("; FEATURE:"):
+                    kind = line[10:].strip()
                     types[kind] += 1
                     run = None
                 elif line.startswith(";LAYER_CHANGE"):
@@ -278,6 +300,7 @@ def parse(path: str | Path) -> Parsed:
                     h = float(line[8:])
                 elif line.startswith("; ") and " = " in line:
                     key, _, val = line[2:].partition(" = ")
+                    config[key] = val.strip()
                     if key in _HEADER_KEYS:
                         header.setdefault(key, val.strip())
             elif c == "T":
@@ -322,6 +345,8 @@ def parse(path: str | Path) -> Parsed:
         n_lines=n_lines,
         extents=(x0, x1, y0, y1) if x0 <= x1 else None,
         parse_s=time.perf_counter() - started,
+        feed_max={k: v / 60.0 for k, v in feed_max.items()},
+        config=config,
     )
 
 
@@ -356,6 +381,12 @@ class GateSpec:
         None  # Z slab for walls/infill; None -> manifest `structural`, else all layers
     )
     line_width_mm: float = _DEFAULT_LINE_MM  # used when the G-code header does not say
+    #: feature (`;TYPE:` name or `travel`) -> the speed in mm/s the slicer was asked for; the `feedrates` gate FAILs
+    #: when the G-code commands more than that. `None`: the gate only reports what the G-code does.
+    speed_limits: dict[str, float] | None = None
+    #: setting -> the value the G-code's config block must show (what the slicer was asked for); the `overrides`
+    #: gate FAILs on a setting the slicer did not take. `None`: not requested.
+    expect_settings: dict[str, str] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -373,6 +404,8 @@ class GateSpec:
             "tools": sorted(self.tools) if self.tools is not None else None,
             "zone": list(self.zone) if self.zone is not None else None,
             "line_width_mm": self.line_width_mm,
+            "speed_limits": self.speed_limits,
+            "expect_settings": self.expect_settings,
         }
 
 
@@ -581,7 +614,21 @@ class GcodeReport:
         return (
             f"{self.stats.get('layers', 0)} layers, {self.stats.get('tool_changes', 0)} tool changes, "
             f"{counts['PASS']} PASS / {counts['WARN']} WARN / {counts['FAIL']} FAIL / {counts['SKIP']} SKIP{tail}"
+            f"{self.print_facts()}"
         )
+
+    def print_facts(self) -> str:
+        """`; 32m 51s, 13.56 g, x 66.0..159.8 y 107.2..149.6` of what the G-code itself says (empty when it says nothing)."""
+        facts: list[str] = []
+        if self.stats.get("time"):
+            facts.append(str(self.stats["time"]))
+        grams = self.stats.get("filament_g") or []
+        if grams:
+            facts.append(f"{sum(grams):.2f} g")
+        ext = self.stats.get("extents")
+        if ext:
+            facts.append(f"x {ext[0]:.1f}..{ext[1]:.1f} y {ext[2]:.1f}..{ext[3]:.1f}")
+        return f"; {', '.join(facts)}" if facts else ""
 
 
 # ---------------------------------------------------------------- gates
@@ -1146,6 +1193,76 @@ def _gate_bed(parsed: Parsed, spec: GateSpec) -> Gate:
     )
 
 
+_SPEED_TOL = 1.005  # the G-code rounds F to whole mm/min
+_CAP_NOTE_RATIO = 0.9  # a feature running below this share of the requested speed is reported as capped
+
+
+def _gate_feedrates(parsed: Parsed, spec: GateSpec) -> Gate:
+    """The real maximum feedrate per feature, read from the `F` words of the moves (not from the slicer's config
+    comments). With `spec.speed_limits` a feature faster than requested FAILs; a feature slower than 90 % of its
+    limit is listed (volumetric limit, cornering, layer-time slowdown; the limit is the highest setting that can
+    apply, so a feature set by a lower sub-setting, e.g. an overhang step, is listed without being wrong)."""
+    feed = parsed.feed_max
+    if not feed:
+        return Gate("feedrates", "SKIP", "no feedrate (F word) on any move inside a layer")
+    shown = ", ".join(f"{k} {v:.0f}" for k, v in sorted(feed.items()))
+    limits = spec.speed_limits
+    if limits is None:
+        return Gate("feedrates", "PASS", f"max mm/s per feature: {shown} (no limits requested)")
+    over = [
+        f"{k} {feed[k]:.0f} > {lim:g}"
+        for k, lim in sorted(limits.items())
+        if k in feed and feed[k] > lim * _SPEED_TOL
+    ]
+    capped = [
+        f"{k} {feed[k]:.0f} of {lim:g}"
+        for k, lim in sorted(limits.items())
+        if k in feed and feed[k] < lim * _CAP_NOTE_RATIO
+    ]
+    note = f"; below 90 % of the highest setting that can apply (volumetric cap, cornering, layer time): {', '.join(capped)}" if capped else ""
+    if over:
+        return Gate("feedrates", "FAIL", f"faster than requested (mm/s): {', '.join(over)}; max per feature: {shown}")
+    return Gate("feedrates", "PASS", f"max mm/s per feature: {shown}{note}")
+
+
+def _same_setting(want: str, got: str) -> bool:
+    """Equal as text (quotes around a name ignored) or as numbers (`0.40` = `0.4`) element by element."""
+    want, got = want.strip('"'), got.strip('"')
+    if want == got:
+        return True
+    a, b = want.split(","), got.split(",")
+    if len(a) != len(b):
+        return False
+    try:
+        return all(abs(float(x) - float(y)) < 1e-9 for x, y in zip(a, b, strict=True))
+    except ValueError:
+        return False
+
+
+def _gate_overrides(parsed: Parsed, spec: GateSpec) -> Gate:
+    """Every requested setting is echoed with that value in the G-code's config block: a misspelt key or a value
+    the slicer replaced would otherwise print at the old setting without a word."""
+    want = spec.expect_settings
+    if not want:
+        return Gate("overrides", "SKIP", "no settings requested (spec.expect_settings is None)")
+    if not parsed.config:
+        return Gate("overrides", "SKIP", "the G-code has no `; key = value` config block to compare with")
+    missing = sorted(k for k in want if k not in parsed.config)
+    wrong = [
+        f"{k} = {parsed.config[k]} (asked {want[k]})"
+        for k in sorted(want)
+        if k in parsed.config and not _same_setting(want[k], parsed.config[k])
+    ]
+    if missing or wrong:
+        parts = []
+        if missing:
+            parts.append(f"not in the G-code config block (a misspelt key? the slicer ignored it): {', '.join(missing)}")
+        if wrong:
+            parts.append(f"slicer used another value: {'; '.join(wrong)}")
+        return Gate("overrides", "FAIL", "; ".join(parts))
+    return Gate("overrides", "PASS", f"{len(want)} requested setting(s) confirmed in the G-code config block")
+
+
 # ---------------------------------------------------------------- driver
 
 
@@ -1167,6 +1284,8 @@ def check_gcode(
         _gate_mix_minor(parsed, spec, expectations, partials),
         _gate_prime_tower(parsed, expectations),
         _gate_bed(parsed, spec),
+        _gate_feedrates(parsed, spec),
+        _gate_overrides(parsed, spec),
     ]
     hs = [layer.h for layer in parsed.layers]
     stats: dict[str, Any] = {
@@ -1179,6 +1298,7 @@ def check_gcode(
         "time_s": parsed.time_s,
         "filament_g": parsed.filament_g,
         "types": dict(parsed.types),
+        "feed_max_mm_s": {k: round(v, 1) for k, v in parsed.feed_max.items()},
         "extents": list(parsed.extents) if parsed.extents else None,
         "n_lines": parsed.n_lines,
         "parse_s": round(parsed.parse_s, 3),

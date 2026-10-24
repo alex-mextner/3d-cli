@@ -356,6 +356,9 @@ def _project(pipe: Pipeline, d: dict[str, Any], final: trimesh.Trimesh) -> Conte
     rows = _rows(
         [
             ("3MF", d.get("project")),
+            ("STL on the bed", d.get("stl")),
+            ("presets", ", ".join((d.get("preset_names") or {}).values()) or None),
+            ("supports", d.get("supports")),
             ("prime tower", d.get("prime_tower")),
             ("tower xy", d.get("tower_xy")),
             ("parts", len(d.get("parts", [])) or None),

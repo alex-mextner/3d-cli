@@ -46,6 +46,15 @@ What each step decided on the Chekhov STL (411 213 faces, 62 components, 37 open
 | colors / layers | 8 colour parts, eyes `WG`, nose `WR` mixes, every mixed layer <= 0.12 mm, no filament on adjacent layers |
 | project / slice / gates | one multi-part object 3MF with a prime tower, headless slice, G-code gates |
 
+## A K1 SE plate
+
+`--printer k1se` takes a single part to the Creality K1 SE (one head, no colours) through the same cache: the
+`project` step writes the placed STL and three flat Orca presets instead of a 3MF, `slice` runs them with
+`--load-settings`, and `gates` judges the real feedrates per feature from the G-code. The soil-sensor mole plate
+(2 parts, 94 x 43 x 24.6 mm, Elegoo RAPID PLA+) reproduces the owner's reference slice: 123 layers, 13.56 g, 32 min 52 s
+(reference 32 min 51 s), every feature's fastest move equal to the reference. See
+[K1 SE in the command doc](../commands/prep.md#k1-se) for the flags and the overlay file.
+
 ## Re-running
 
 ```bash

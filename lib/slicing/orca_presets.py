@@ -126,7 +126,9 @@ def _preference(ref: PresetRef) -> tuple[int, bool, int, str]:
 class PresetCatalog:
     """The presets visible from this machine, scanned lazily once per kind."""
 
-    def __init__(self, extra: Sequence[Path] = ()) -> None:
+    def __init__(self, extra: Sequence[Path] = (), *, command: str = "retarget") -> None:
+        #: the command named in the errors this catalog raises
+        self.command = command
         self._roots = preset_roots(extra)
         self._index: dict[str, dict[str, list[PresetRef]]] = {}
 
@@ -188,7 +190,7 @@ class PresetCatalog:
             f"{kind} preset",
             query,
             hints or ["(no presets found)"],
-            command="retarget",
+            command=self.command,
             extra=(
                 "Searched --preset-dir dirs, the repo profiles/ dir and the Orca-family slicer data "
                 f"dirs; found {len(index)} {kind} preset name(s). Install/open the slicer once so its "
@@ -205,10 +207,10 @@ class PresetCatalog:
         while current is not None:
             if current.path in seen or len(chain) > _MAX_DEPTH:
                 raise InvalidArgument(
-                    f"{ref.kind} preset", ref.name, ["a preset without an inherits cycle"], command="retarget"
+                    f"{ref.kind} preset", ref.name, ["a preset without an inherits cycle"], command=self.command
                 )
             seen.add(current.path)
-            data = _read(current)
+            data = _read(current, self.command)
             chain.append(data)
             parent = data.get("inherits")
             current = self._parent(current, str(parent)) if parent else None
@@ -225,7 +227,7 @@ class PresetCatalog:
                 f"{child.kind} preset",
                 child.name,
                 [f"a preset whose parent {name!r} is installed"],
-                command="retarget",
+                command=self.command,
                 extra=f"{child.path} inherits {name!r}, which is not in any searched preset dir.",
             )
         beside = [r for r in candidates if r.path.parent == child.path.parent]
@@ -233,7 +235,7 @@ class PresetCatalog:
         return (beside or same_root or candidates)[0]
 
 
-def _read(ref: PresetRef) -> dict[str, Any]:
+def _read(ref: PresetRef, command: str) -> dict[str, Any]:
     try:
         data = json.loads(ref.path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
@@ -241,11 +243,11 @@ def _read(ref: PresetRef) -> dict[str, Any]:
             f"{ref.kind} preset",
             str(ref.path),
             ["a readable Orca-family preset .json"],
-            command="retarget",
+            command=command,
             extra=f"{ref.path}: {exc}",
         ) from exc
     if not isinstance(data, dict):
         raise InvalidArgument(
-            f"{ref.kind} preset", str(ref.path), ["a JSON object"], command="retarget"
+            f"{ref.kind} preset", str(ref.path), ["a JSON object"], command=command
         )
     return data
