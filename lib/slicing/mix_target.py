@@ -179,7 +179,7 @@ def lab_to_hex(lab: tuple[float, float, float]) -> str:
     return hex_from_linear(rgb)
 
 
-def _load(path: Path) -> tuple[Any, str]:
+def load_image(path: Path) -> tuple[Any, str]:
     """The image as an (h, w, 3) uint8 array, upright as a viewer shows it (EXIF orientation),
     and the sha256 of the very bytes decoded (so the record cannot name another file state)."""
     import numpy as np
@@ -187,9 +187,15 @@ def _load(path: Path) -> tuple[Any, str]:
 
     try:
         data = path.read_bytes()
+        digest = hashlib.sha256(data).hexdigest()
         with Image.open(io.BytesIO(data)) as im:
             upright = ImageOps.exif_transpose(im)
             profile = upright.info.get("icc_profile")
+            if upright.mode.startswith("I;16"):
+                # a 16-bit grey frame (a camera still): Pillow's RGB conversion would clip it to white
+                grey = np.asarray(upright, dtype=np.float64) / 257.0
+                rgb8 = np.clip(np.rint(grey), 0, 255).astype(np.uint8)
+                return np.repeat(rgb8[:, :, None], 3, axis=2), digest
             rgb = upright.convert("RGB")
             if profile:
                 # a phone saves Display P3, a camera Adobe RGB: the pixels are not sRGB until converted
@@ -206,7 +212,7 @@ def _load(path: Path) -> tuple[Any, str]:
                     raise MixTargetError(
                         f"{path} carries a colour profile that cannot be converted to sRGB: {e}"
                     ) from e
-            return np.asarray(rgb), hashlib.sha256(data).hexdigest()
+            return np.asarray(rgb), digest
     except (UnidentifiedImageError, Image.DecompressionBombError, OSError) as e:
         raise MixTargetError(f"{path} cannot be read as an image: {e}") from e
 
@@ -223,6 +229,42 @@ def _pixels(img: Any, box: Box, flag: str) -> Any:
     return px
 
 
+def white_gain(
+    white_px: Any, white_level: int = DEFAULT_WHITE_LEVEL, flag: str = "--white"
+) -> tuple[Any, tuple[int, int, int]]:
+    """The linear-light gain per channel that maps the median of `white_px` (n, 3) to `white_level`,
+    and that median as 8-bit RGB. A median with a channel under MIN_WHITE_CHANNEL is not white."""
+    import numpy as np
+
+    med = np.median(white_px, axis=0)
+    if med.min() < MIN_WHITE_CHANNEL:
+        raise MixTargetError(
+            f"{flag} box has median RGB {tuple(int(v) for v in med)}: a white reference "
+            f"needs every channel at {MIN_WHITE_CHANNEL} or more"
+        )
+    rgb8 = [int(v) for v in np.rint(med)]
+    gain = decode_srgb(np.full(3, white_level / 255.0)) / decode_srgb(med / 255.0)
+    return gain, (rgb8[0], rgb8[1], rgb8[2])
+
+
+def lab_pixels(px: Any, gain: Any | None = None) -> Any:
+    """CIELAB (n, 3) of the 8-bit RGB pixels `px` (n, 3), after the linear-light `gain` (None: none)."""
+    import numpy as np
+
+    lin = decode_srgb(px.astype(np.float64) / 255.0)
+    if gain is not None:
+        lin = np.clip(lin * gain, 0.0, 1.0)
+    return lab_of_linear(lin)
+
+
+def median_lab(px: Any, gain: Any | None = None) -> tuple[float, float, float]:
+    """Median in CIELAB of the 8-bit RGB pixels `px` (n, 3), after the linear-light `gain` (None: none)."""
+    import numpy as np
+
+    m = np.median(lab_pixels(px, gain), axis=0)
+    return float(m[0]), float(m[1]), float(m[2])
+
+
 def read_target(
     image: Path,
     box: Box,
@@ -230,32 +272,17 @@ def read_target(
     white_level: int = DEFAULT_WHITE_LEVEL,
 ) -> Reading:
     """The target colour of `box`, balanced on the white reference `white` (None: a render)."""
-    import numpy as np
-
     if not 1 <= white_level <= 255:
         raise MixTargetError(f"white level {white_level} must be 1..255")
-    img, sha256 = _load(image)
+    img, sha256 = load_image(image)
     px = _pixels(img, box, "--box")
-    lin = decode_srgb(px.astype(np.float64) / 255.0)
     white_rgb: tuple[int, int, int] | None = None
     gain: tuple[float, float, float] | None = None
+    gain_vec = None
     if white is not None:
-        wpx = _pixels(img, white, "--white")
-        med = np.median(wpx, axis=0)
-        if med.min() < MIN_WHITE_CHANNEL:
-            raise MixTargetError(
-                f"--white box has median RGB {tuple(int(v) for v in med)}: a white reference "
-                f"needs every channel at {MIN_WHITE_CHANNEL} or more"
-            )
-        rgb8 = [int(v) for v in np.rint(med)]
-        white_rgb = (rgb8[0], rgb8[1], rgb8[2])
-        gain_vec = decode_srgb(np.full(3, white_level / 255.0)) / decode_srgb(
-            med / 255.0
-        )
+        gain_vec, white_rgb = white_gain(_pixels(img, white, "--white"), white_level)
         gain = (float(gain_vec[0]), float(gain_vec[1]), float(gain_vec[2]))
-        lin = np.clip(lin * gain_vec, 0.0, 1.0)
-    median = np.median(lab_of_linear(lin), axis=0)
-    lab = (float(median[0]), float(median[1]), float(median[2]))
+    lab = median_lab(px, gain_vec)
     return Reading(
         target=lab_to_hex(lab),
         lab=lab,
