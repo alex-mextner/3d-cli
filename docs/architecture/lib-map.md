@@ -49,6 +49,7 @@ rendering, slicing support, and verification:
 - `fit_camera.py`
 - `fit_camera_math.py`
 - `fit_check.py`
+- `fits.py`
 - `frame_check.py`
 - `gcode_resume.py`
 - `gcode_labels.py`
@@ -65,6 +66,7 @@ rendering, slicing support, and verification:
 - `mesh_check.py`
 - `mesh_repair.py`
 - `niche_fit.py`
+- `parts.py`
 - `orca_project_3mf.py`
 - `packing.py`
 - `printability_mesh.py`
@@ -247,6 +249,7 @@ Every current root Python module is listed here so future additions are intentio
 - `fit_camera.py` — camera fitting implementation.
 - `fit_camera_math.py` — import-light camera pose and proof-status math helpers.
 - `fit_check.py` — already-printed insert vs its socket: printed-size lock, per-layer clearance (manifold3d slices, shapely distances) and the open path along the insertion direction; backs `3d fit-check`.
+- `fits.py` — the one fit/tolerance table (`data/fits.yaml`, schema `3d.fits/1`): fit types, aliases, printer x material x nozzle x layer corrections, `resolve()` with provenance and `fit_clearance` calibration readings.
 - `gcode_resume.py` — resume a stopped multi-head Orca print above a layer (layer walk, machine state at a byte, resume header from the device's `resume:` profile, per-head retraction tracking, `--no-tower` off-bed purges); stdlib-only; backs `3d gcode-resume`. Its per-line parser (`advance`) and the streamed `state_at` (machine state at a printer's byte cursor or a layer) also give PrintOps incidents their G-code context.
 - `gcode_labels.py` — the slicer's own labels in a G-code: object labels in both dialects (Klipper `EXCLUDE_OBJECT_*`, Bambu Studio `; start printing object` / `M624`…`M625` blocks named by their `; printing object` comment, `M486`, PrusaSlicer comments), layer-change markers, feature tags and line widths; stdlib-only; the one parser behind head-sequence, overhangs, visible-faces and the print-area plate section.
 - `gcode_overhangs.py` — extrusion printed on nothing per object and layer of a sliced G-code (numpy/scipy raster of each layer's carrier, sparse reach/bridge/step-out tests on the pixels that stick out, layers split over forked workers); backs `3d gcode-overhangs` and the `overhangs` gate of `print-preflight`.
@@ -290,7 +293,8 @@ Every current root Python module is listed here so future additions are intentio
 - `object_model.py` — semantic object-model structures.
 - `ollama.py` — local Ollama endpoint validation and dry-run request planning.
 - `opdag.py` — operation graph validation, dependency ordering, and query helpers.
-- `niche_fit.py` — cavity/niche clearance math and parametric insert `.scad` emission.
+- `niche_fit.py` — cavity/niche clearance math and parametric insert `.scad` emission; its `--fit` labels resolve through `fits.py`.
+- `parts.py` — shared part contract: roles (`printed|vitamin|reference|stand_in`), the `assert_printable` print guardrail, 3MF role tags and the stable per-part palette/legend.
 - `packing.py` — deterministic 2D print-bed layout planning helpers.
 - `printing.py` — compatibility wrapper re-exporting `slicing.printing`.
 - `preprocess_reference.py` — reference image preprocessing.
