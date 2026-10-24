@@ -111,6 +111,38 @@ def test_user_bad_finish_raises(tmp_path, monkeypatch):
     assert "finish" in str(exc.value)
 
 
+# ---- optional shrink fields (consumed by `3d fits resolve`) ------------------
+
+def test_builtin_shrink_is_recorded_for_xy_only(tmp_path):
+    mats = materials.load_materials(start=tmp_path)
+    assert {n: m.shrink_xy_pct for n, m in mats.items()} == {
+        "PLA": 0.3, "PETG": 0.4, "ABS": 0.8, "ASA": 0.7, "TPU": 0.6}
+    assert all(m.shrink_z_pct is None for m in mats.values())   # no sourced Z figure: not recorded, not zero
+
+
+def test_user_layer_sets_and_clears_shrink_fields(tmp_path, monkeypatch):
+    cfg = tmp_path / "xdg"
+    (cfg / "3d-cli").mkdir(parents=True)
+    (cfg / "3d-cli" / "materials.yaml").write_text(
+        "PLA:\n  shrink_xy_pct: 0.5\n  shrink_z_pct: 1.2\nPETG:\n  shrink_xy_pct: null\n", encoding="utf-8")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(cfg))
+
+    mats = materials.load_materials(start=tmp_path)
+    assert (mats["PLA"].shrink_xy_pct, mats["PLA"].shrink_z_pct) == (0.5, 1.2)
+    assert mats["PETG"].shrink_xy_pct is None
+
+
+@pytest.mark.parametrize("value", ["-1", "25", "lots"])
+def test_bad_shrink_percentage_raises(tmp_path, monkeypatch, value):
+    cfg = tmp_path / "xdg"
+    (cfg / "3d-cli").mkdir(parents=True)
+    (cfg / "3d-cli" / "materials.yaml").write_text(f"PLA:\n  shrink_xy_pct: {value}\n", encoding="utf-8")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(cfg))
+
+    with pytest.raises(materials.MaterialError, match="shrink_xy_pct"):
+        materials.load_materials(start=tmp_path)
+
+
 # ---- project layer (./materials.yaml next to 3d.yaml) ----------------------
 
 def test_project_layer_overrides_user_and_builtin(tmp_path, monkeypatch):

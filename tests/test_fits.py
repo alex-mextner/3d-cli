@@ -179,3 +179,67 @@ def test_coupon_readings_become_calibration_rows_that_resolve_applies() -> None:
     # another shape of the same printer is untouched
     assert fits.resolve("sliding", "round", "k1se", "PLA", 0.4, extra_corrections=rows).clearance_mm == 0.2
     assert fits.median_delta(rows) == 0.05 and fits.median_delta([]) is None
+
+
+# --------------------------------------------------------------------------- S1: provenance of the registries and rows
+def test_a_correction_row_moves_the_clearance_by_exactly_delta_and_only_for_its_printer_material_nozzle() -> None:
+    base = fits.resolve("sliding", "round").clearance_mm
+    row = Correction(delta_mm=-0.035, source="manual", printer="k1se", material="PLA", nozzle_mm=0.4,
+                     measured_at="2026-10-24T10:00:00Z")
+    hit = fits.resolve("sliding", "round", "k1se", "PLA", 0.4, extra_corrections=[row])
+    assert hit.clearance_mm == round(base + row.delta_mm, 4)
+    for other in (("u1", "PLA", 0.4), ("k1se", "ABS", 0.4), ("k1se", "PLA", 0.6)):
+        assert fits.resolve("sliding", "round", *other, extra_corrections=[row]).clearance_mm != hit.clearance_mm
+    assert fits.resolve("sliding", "round", "u1", "PLA", 0.4, extra_corrections=[row]).clearance_mm == base
+
+
+def test_every_applied_row_says_where_it_came_from() -> None:
+    default = next(p for p in fits.resolve("sliding", "planar", "k1se", "PLA").provenance if p["kind"] == "correction")
+    assert default["status"] == "default, not calibrated"
+    manual = Correction(delta_mm=0.01, source="manual", printer="k1se", measured_at="2026-10-24T10:00:00Z")
+    cal = Correction(delta_mm=0.02, source="calibration", printer="k1se", measured_at="2026-10-24T10:00:00Z")
+    statuses = {
+        c.source: next(p for p in fits.resolve("sliding", "planar", "k1se", extra_corrections=[c]).provenance
+                       if p["kind"] == "correction")["status"]
+        for c in (manual, cal)
+    }
+    assert statuses == {"manual": "manual override", "calibration": "calibrated"}
+
+
+def test_provenance_keeps_fit_type_first_and_alias_or_correction_second_whatever_is_named() -> None:
+    res = fits.resolve("loose", "round", "k1se", "PETG", 0.4)
+    kinds = [p["kind"] for p in res.provenance]
+    assert kinds[:3] == ["fit_type", "alias", "correction"]
+    assert {"printer", "material", "material_correction"} <= set(kinds)
+
+
+def test_material_shrink_is_reported_as_a_scale_and_never_changes_the_clearance() -> None:
+    pla = fits.resolve("sliding", "planar", material="PLA")
+    plain = fits.resolve("sliding", "planar")
+    assert pla.clearance_mm == plain.clearance_mm and pla.xy_scale == 1.003009
+    entry = next(p for p in pla.provenance if p["kind"] == "material_correction")
+    assert entry["id"] == "shrink_xy" and entry["shrink_xy_pct"] == 0.3 and "not changed" in entry["applied_as"]
+    assert pla.to_dict()["xy_scale"] == 1.003009
+
+
+def test_a_material_without_shrink_gets_an_explicit_no_correction_entry_not_a_silent_zero() -> None:
+    for material, why in ((None, "no material given"), ("unobtainium", "'unobtainium' has no shrink_xy_pct recorded")):
+        res = fits.resolve("sliding", "planar", material=material)
+        entries = [p for p in res.provenance if p["kind"] == "material_correction"]
+        assert res.xy_scale is None and [e["id"] for e in entries] == ["none"]
+        assert entries[0]["message"] == f"no material correction ({why})"
+
+
+def test_unknown_printer_is_flagged_in_the_provenance_and_the_row_stays_default_not_calibrated() -> None:
+    res = fits.resolve("snap", "round", printer="mystery-printer", material="PETG", nozzle=0.4)
+    printer = next(p for p in res.provenance if p["kind"] == "printer")
+    assert printer["known"] is False and printer["input"] == "mystery-printer"
+    corr = next(p for p in res.provenance if p["kind"] == "correction")
+    assert res.fallback is True and corr["status"] == "default, not calibrated"
+    assert corr["fallback_reason"] == ["printer"]    # the PETG row is a material row: only the printer fell back
+
+
+def test_a_caller_named_in_the_error_gets_the_accepted_values() -> None:
+    with pytest.raises(InvalidArgument, match="accepted: snap") as err:
+        fits.resolve("squishy", "planar", command="fit-check")
+    assert err.value.command == "fit-check"
