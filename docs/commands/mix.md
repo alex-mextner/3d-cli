@@ -23,6 +23,8 @@ layer between the others, never on two layers in a row, and layers over a mixed 
                [--base-3mf FILE.3mf] [--printops-api URL] [--json]
   TARGET: --target HEX | --target-photo IMAGE --box x0,y0,x1,y1 (--white x0,y0,x1,y1 | --no-wb)
           [--white-level N]
+3d mix readout PHOTO --manifest NAME.mix.json -o OUT/NAME [--white card|N] [--white-level N]
+               [--no-qr-check] [--json]
 ```
 
 ## The layer rules
@@ -80,6 +82,53 @@ the pixels it came from. The summary and `--json` of both commands repeat it.
 3d mix tester --target-photo mockup.jpg --box 410,220,470,300 --white 20,30,80,90 --printer u1 -o out/mix/wall
 ```
 
+## `readout` — a photo of the tester card → the measured colour of every swatch
+
+[#416](https://github.com/alex-mextner/3d-cli/issues/416), plan §20.5. A standing swatch shows the top
+camera only its top (one layer), so the printed swatches come off the bed and lie **face up on a
+white card**. `3d mix tester` writes that card next to the project: `NAME.card.png`, 102 mm wide, at
+10 px/mm — print it **at 100 %** (no fit-to-page; the PNG carries 254 dpi) on plain white paper.
+It has four ArUco fiducials (DICT_4X4_50, ids 0-3, 12 mm, the corners), a QR naming the manifest
+(`3dmix:<id>`, the manifest's `id`), three blank paper regions (keep them blank: they are the white
+reference), and a numbered frame per swatch: lay swatch *n* in frame *n*, wide face up. The layout
+is the manifest's `readout` section (`mix-card/1`, card millimetres, +Y up, as `3d calibrate
+rectify` takes plate fiducials), so the reader takes every box from the manifest.
+
+Then photograph the card — a phone, or the top camera (`3d camera still --depth 16 --out frame.png`)
+— and `3d mix readout frame.png --manifest out/mix/wall.mix.json -o out/mix/wall-readout`:
+
+1. **Rectify.** The four fiducials are found (`calib_rectify.detect`; 3 of 4 are enough) and fit a
+   homography image px → card mm; the photo is warped to a straight 10 px/mm image. Fewer than 3
+   fiducials, or a card under 2.5 px/mm in the photo, is refused with what to reshoot. A fit worse
+   than 1 mm rms is a warning (a bent card, a distorting lens).
+2. **Which tester.** The QR is decoded and must be this manifest's. A card that names another
+   tester is refused (exit 1, both ids in the message); so is a card whose QR cannot be read, unless
+   `--no-qr-check` says to read it anyway (the record then says `QR skipped`).
+3. **White balance** on the blank paper regions (`--white card`, default): a per-channel gain in
+   linear light that maps the paper to `--white-level` (235, as `3d mix target`), fitted as a plane
+   over the three regions so an uneven light across the card is corrected. A paper region darker
+   than 64 in any channel (a shadow) is refused. With `--white N` the balance is on the pure
+   reference swatch *N* (a white spool) instead, mapped to that spool's own colour.
+4. **Per swatch**, the median in CIELAB of its **patch**: the face without its 1.5 mm border (the
+   rounded edge never reads; the number is printed on the card outside the face). The record has
+   the measured hex and Lab, ΔE2000 to the predicted colour and to the target, the pixel count and
+   the patch's spread (90th-percentile Lab distance from its median). A spread over 8 is a
+   warning: the swatch is not flat — not in its frame, glare, a shadow across it.
+5. **Files.** `OUT/NAME.readout.json` (`mix-readout/1`: manifest id and target, photo sha256 and
+   size, fiducials, QR, white balance, every swatch, a summary with the mix closest to the target,
+   warnings), `OUT/NAME.readout.png` (the rectified card with every patch boxed, beside the
+   predicted | measured | target colours and ΔE per swatch) and `OUT/NAME.rectified.png`.
+
+Exit 1 when the photo cannot be read; exit 2 for a bad argument or a manifest without a card layout
+(a tester written before #416: run `3d mix tester` again). OpenCV is needed
+(`uv sync --extra vision`); the command is import-light, the reader runs through `cli.pyrun`.
+
+```
+3d mix tester --target '#B5654F' --printer u1 -o out/mix/wall      # writes out/mix/wall.card.png
+3d mix readout phone.jpg --manifest out/mix/wall.mix.json -o out/mix/wall-readout
+3d mix readout frame.png --manifest out/mix/wall.mix.json -o out/mix/wall-readout --white 9 --json
+```
+
 ## `recipes` — which layer patterns come closest to a target
 
 The recipe model of [#116](https://github.com/alex-mextner/3d-cli/issues/116)
@@ -101,7 +150,7 @@ chosen so equal layers do not meet across the repeat seam where that is possible
 
 ## `tester` — a numbered plate of swatches for one target
 
-Writes three files ([#413](https://github.com/alex-mextner/3d-cli/issues/413)):
+Writes four files ([#413](https://github.com/alex-mextner/3d-cli/issues/413)):
 
 - `NAME.3mf` — a Snapmaker Orca project. The loaded spools are the physical filaments. Each
   candidate gets a `mixed_filament_definitions` row (manual pattern, components 1/2, so every
@@ -115,6 +164,7 @@ Writes three files ([#413](https://github.com/alex-mextner/3d-cli/issues/413)):
   `[x0, y0, x1, y1]`, `calibration: {kind: mix_color, mix: <key or null>}`), references
   (`calibration: {kind: filament_color, filament_id}`), and the file names.
 - `NAME.png` — the swatch sheet: for each number, the target next to the predicted colour.
+- `NAME.card.png` — the white card for the readout photo (see [`readout`](#readout--a-photo-of-the-tester-card--the-measured-colour-of-every-swatch)); the manifest's `id` and `readout` describe it.
 
 The project settings come from the installed Snapmaker Orca: its CLI exports a probe project
 with the U1 system presets (`Snapmaker U1 (0.4 nozzle)`, the `--layer` process,
@@ -138,6 +188,9 @@ mostly head changes (a change every layer); `3d print-preflight` passes its `hea
 - `--target-photo IMAGE` — take the target from a region of an image instead of `--target`: `--target-photo mockup.jpg --box 410,220,470,300 --white 20,30,80,90`
 - `--box x0,y0,x1,y1` — the region to match, in pixels (`x1`, `y1` exclusive; origin top-left as a viewer shows the image): `--box 410,220,470,300`
 - `--white x0,y0,x1,y1` — a region of white on the same photo (the white balance): `--white 20,30,80,90`
+- `--manifest FILE` — `readout`: the tester manifest the photo belongs to: `--manifest out/mix/wall.mix.json`
+- `--white card|N` — `readout`: balance on the card's paper (default) or on pure reference swatch N: `--white 9`
+- `--no-qr-check` — `readout`: read a card whose QR is unreadable without confirming the tester: `--no-qr-check`
 - `--no-wb` — the image is a render, no colour cast: `3d mix target render.png --box 100,100,160,160 --no-wb`
 - `--white-level N` — the 8-bit value the white region is mapped to (default 235, 1-255): `--white-level 240`
 - `--slots N=HEX,...` — the loaded filaments by U1 head number (1-9): `--slots 1=#000000,3=#1B5E20,4=#FFFFFF`
@@ -266,6 +319,8 @@ Solid colour bands, however many are stacked, are never measured.
 3d mix target render.png --box 100,100,160,160 --no-wb --json
 3d mix tester --target-photo mockup.jpg --box 410,220,470,300 --white 20,30,80,90 --printer u1 -o out/mix/wall
 3d mix tester --target '#808080' --slots 1=#000000,4=#FFFFFF --base-3mf print/u1.3mf -o out/grey
+3d mix readout phone.jpg --manifest out/mix/wall.mix.json -o out/mix/wall-readout
+3d mix readout frame.png --manifest out/mix/wall.mix.json -o out/mix/wall-readout --white 9 --json
 ```
 
 A 20×20×3 mm tile lying flat in mix `431` next to a reference tile in a physical filament:
