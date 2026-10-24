@@ -185,3 +185,22 @@ def test_the_test_override_runs_the_agent_on_its_own_tmux_server(tmp_path: Path,
     assert [r["argv"][0] for r in spawns if r["argv"][0] != "tmux"] == ["systemd-run"]   # omp itself never ran
     assert f"attach: tmux -L {sock} attach -t 3d-printer-agent-u1" in listed.stdout, listed.stdout + listed.stderr
 
+
+
+def test_agent_stop_and_handoff_refuse_cleanly_under_pytest_without_touching_state(tmp_path: Path) -> None:
+    """`printer agent stop`/`handoff` in a test: a one-line error (exit 1, no traceback) and the
+    delivery state is exactly as it was: the refusal comes before the restart-limit slot is freed
+    or `handed_over`/`stopped` is recorded for an agent nothing killed."""
+    state = tmp_path / "xdg-state" / "3d-cli" / "printer-subscriptions.json"
+    state.parent.mkdir(parents=True)
+    body = json.dumps({"subscriptions": {}, "agents": {"u1": {"start_claimed": "2026-10-21T16:08:00+00:00"}}})
+    state.write_text(body, encoding="utf-8")
+
+    stop = run_cli(tmp_path, "printer", "agent", "stop", "u1")
+    handoff = run_cli(tmp_path, "printer", "agent", "handoff", "u1", "--summary", "false alarm")
+
+    for res in (stop, handoff):
+        assert res.returncode == 1, res.stderr
+        assert "Traceback" not in res.stderr and "refusing to run the real tmux/omp" in res.stderr, res.stderr
+    assert state.read_text(encoding="utf-8") == body
+    assert agent_spawns(tmp_path) == []
