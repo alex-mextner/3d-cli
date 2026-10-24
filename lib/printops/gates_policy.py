@@ -26,6 +26,9 @@ SCHEMA (all keys required unless noted):
           hardness; a nonzero minimum alone does not classify a filament as abrasive.
   enclosure_material: {materials: [NAME]}   materials that want a closed printer (warping, fumes)
   plate_material: [{materials: [NAME], plates: [fleet PLATE_TYPES], why}]   bad pairings
+  mix_color: {max_delta_e}   optional (default 6): the `mix_calibration` check's largest CIEDE2000
+          between a measured mix and the colour the project gives the part (#418); above it the
+          finding is hard (FAIL under `block`, WARN under `warn`)
 """
 
 from __future__ import annotations
@@ -51,6 +54,7 @@ CHECKS: tuple[str, ...] = (
     "enclosure_material",
     "plate_material",
     "preset_match",
+    "mix_calibration",
 )
 LEVELS: tuple[str, ...] = ("block", "warn", "off")
 _TOP_KEYS = (
@@ -62,7 +66,8 @@ _TOP_KEYS = (
     "enclosure_material",
     "plate_material",
 )
-_OPTIONAL_TOP = ("printers", "material_aliases")
+_OPTIONAL_TOP = ("printers", "material_aliases", "mix_color")
+DEFAULT_MIX_MAX_DELTA_E = 6.0
 
 
 @dataclass(frozen=True)
@@ -95,13 +100,17 @@ class GatesPolicy:
     abrasive_markers: tuple[str, ...]
     enclosure_materials: tuple[str, ...]
     plate_rules: tuple[PlateRule, ...]
+    mix_max_delta_e: float = DEFAULT_MIX_MAX_DELTA_E
 
     def level(self, check: str, printer: str | None) -> str:
         """block | warn | off for `check` on `printer` (per-printer override, else `levels`)."""
         return self.printers.get(printer or "", {}).get(check, self.levels[check])
 
     def colour_rule(self, gcode_path: str) -> ColourRule:
-        return next((r for r in self.colour_projects if fnmatch(gcode_path, r.match)), self.colour)
+        return next(
+            (r for r in self.colour_projects if fnmatch(gcode_path, r.match)),
+            self.colour,
+        )
 
     def material(self, name: str | None) -> str | None:
         """Canonical spelling: upper-case, runs of space/underscore → '-', then the alias table."""
@@ -119,11 +128,15 @@ def _num(where: str, value: Any, *, lo: float = 0.0, lo_open: bool = False) -> f
     if not isinstance(value, (int, float)) or isinstance(value, bool):
         raise PolicyError(f"{where} must be a number, got {value!r}")
     if value < lo or (lo_open and value == lo):
-        raise PolicyError(f"{where} must be {'>' if lo_open else '≥'} {lo:g}, got {value}")
+        raise PolicyError(
+            f"{where} must be {'>' if lo_open else '≥'} {lo:g}, got {value}"
+        )
     return float(value)
 
 
-def _keys(where: str, body: Any, required: tuple[str, ...], optional: tuple[str, ...] = ()) -> Mapping[str, Any]:
+def _keys(
+    where: str, body: Any, required: tuple[str, ...], optional: tuple[str, ...] = ()
+) -> Mapping[str, Any]:
     if not isinstance(body, dict):
         raise PolicyError(f"{where} must be a mapping")
     missing = [k for k in required if k not in body]
@@ -135,17 +148,27 @@ def _keys(where: str, body: Any, required: tuple[str, ...], optional: tuple[str,
     return body
 
 
-def _names(where: str, value: Any, *, allowed: tuple[str, ...] | None = None) -> tuple[str, ...]:
-    if not isinstance(value, list) or not value or not all(isinstance(v, str) and v.strip() for v in value):
+def _names(
+    where: str, value: Any, *, allowed: tuple[str, ...] | None = None
+) -> tuple[str, ...]:
+    if (
+        not isinstance(value, list)
+        or not value
+        or not all(isinstance(v, str) and v.strip() for v in value)
+    ):
         raise PolicyError(f"{where} must be a non-empty list of names")
     if allowed is not None:
         bad = [v for v in value if v not in allowed]
         if bad:
-            raise PolicyError(f"{where}: unknown value(s) {', '.join(bad)}; known: {', '.join(allowed)}")
+            raise PolicyError(
+                f"{where}: unknown value(s) {', '.join(bad)}; known: {', '.join(allowed)}"
+            )
         return tuple(value)
     upper = [v for v in value if v != v.strip().upper()]
     if upper:
-        raise PolicyError(f"{where}: names must be upper-case without surrounding spaces: {', '.join(upper)}")
+        raise PolicyError(
+            f"{where}: names must be upper-case without surrounding spaces: {', '.join(upper)}"
+        )
     return tuple(value)
 
 
@@ -154,24 +177,34 @@ def _levels(where: str, body: Any, *, complete: bool) -> dict[str, str]:
         raise PolicyError(f"{where} must be a mapping of check → block|warn|off")
     unknown = [str(k) for k in body if k not in CHECKS]
     if unknown:
-        raise PolicyError(f"{where}: unknown check(s) {', '.join(unknown)}; known: {', '.join(CHECKS)}")
+        raise PolicyError(
+            f"{where}: unknown check(s) {', '.join(unknown)}; known: {', '.join(CHECKS)}"
+        )
     if complete:
         missing = [c for c in CHECKS if c not in body]
         if missing:
             raise PolicyError(f"{where}: missing check(s) {', '.join(missing)}")
     for check, level in body.items():
         if level not in LEVELS:
-            raise PolicyError(f"{where}.{check} must be one of {', '.join(LEVELS)}, got {level!r}")
+            raise PolicyError(
+                f"{where}.{check} must be one of {', '.join(LEVELS)}, got {level!r}"
+            )
     return {str(k): str(v) for k, v in body.items()}
 
 
 def _colour_rule(where: str, body: Any, *, project: bool) -> ColourRule:
-    keys = ("match", "warn_delta_e", "fail_delta_e", "why") if project else ("warn_delta_e", "fail_delta_e")
+    keys = (
+        ("match", "warn_delta_e", "fail_delta_e", "why")
+        if project
+        else ("warn_delta_e", "fail_delta_e")
+    )
     row = _keys(where, body, keys, () if project else ("projects",))
     warn = _num(f"{where}.warn_delta_e", row["warn_delta_e"], lo_open=True)
     fail = _num(f"{where}.fail_delta_e", row["fail_delta_e"], lo_open=True)
     if warn > fail:
-        raise PolicyError(f"{where}: warn_delta_e {warn:g} must be ≤ fail_delta_e {fail:g}")
+        raise PolicyError(
+            f"{where}: warn_delta_e {warn:g} must be ≤ fail_delta_e {fail:g}"
+        )
     if project and not (isinstance(row["match"], str) and row["match"].strip()):
         raise PolicyError(f"{where}.match must be a non-empty shell glob")
     return ColourRule(warn, fail, str(row.get("match", "")), str(row.get("why", "")))
@@ -183,7 +216,10 @@ def parse(body: Mapping[str, Any]) -> GatesPolicy:
     printers_raw = top.get("printers") or {}
     if not isinstance(printers_raw, dict):
         raise PolicyError("printers must be a mapping of printer → {check: level}")
-    printers = {str(p): _levels(f"printers.{p}", v, complete=False) for p, v in printers_raw.items()}
+    printers = {
+        str(p): _levels(f"printers.{p}", v, complete=False)
+        for p, v in printers_raw.items()
+    }
 
     aliases_raw = top.get("material_aliases") or {}
     if not isinstance(aliases_raw, dict):
@@ -199,11 +235,18 @@ def parse(body: Mapping[str, Any]) -> GatesPolicy:
     if not isinstance(projects_raw, list):
         raise PolicyError("colour.projects must be a list")
     projects = tuple(
-        _colour_rule(f"colour.projects[{i}]", p, project=True) for i, p in enumerate(projects_raw)
+        _colour_rule(f"colour.projects[{i}]", p, project=True)
+        for i, p in enumerate(projects_raw)
     )
 
-    fs = _keys("filament_sufficient", top["filament_sufficient"], ("purge_g_per_tool", "margin_g", "margin_pct"))
-    nz = _keys("nozzle_compat", top["nozzle_compat"], ("abrasive_ok", "abrasive_markers"))
+    fs = _keys(
+        "filament_sufficient",
+        top["filament_sufficient"],
+        ("purge_g_per_tool", "margin_g", "margin_pct"),
+    )
+    nz = _keys(
+        "nozzle_compat", top["nozzle_compat"], ("abrasive_ok", "abrasive_markers")
+    )
     enc = _keys("enclosure_material", top["enclosure_material"], ("materials",))
     plates_raw = top["plate_material"]
     if not isinstance(plates_raw, list):
@@ -212,26 +255,42 @@ def parse(body: Mapping[str, Any]) -> GatesPolicy:
     for i, raw in enumerate(plates_raw):
         row = _keys(f"plate_material[{i}]", raw, ("materials", "plates", "why"))
         if not (isinstance(row["why"], str) and row["why"].strip()):
-            raise PolicyError(f"plate_material[{i}].why must say why the pairing is bad")
+            raise PolicyError(
+                f"plate_material[{i}].why must say why the pairing is bad"
+            )
         plate_rules.append(
             PlateRule(
                 _names(f"plate_material[{i}].materials", row["materials"]),
-                _names(f"plate_material[{i}].plates", row["plates"], allowed=PLATE_TYPES),
+                _names(
+                    f"plate_material[{i}].plates", row["plates"], allowed=PLATE_TYPES
+                ),
                 row["why"].strip(),
             )
         )
+    mix_raw = top.get("mix_color", {"max_delta_e": DEFAULT_MIX_MAX_DELTA_E})
+    mix = _keys("mix_color", mix_raw, ("max_delta_e",))
+    mix_max = _num("mix_color.max_delta_e", mix["max_delta_e"], lo_open=True)
     return GatesPolicy(
-        snapshot_max_age_h=_num("snapshot_max_age_h", top["snapshot_max_age_h"], lo_open=True),
+        snapshot_max_age_h=_num(
+            "snapshot_max_age_h", top["snapshot_max_age_h"], lo_open=True
+        ),
         levels=levels,
         printers=printers,
         material_aliases=aliases,
         colour=colour,
         colour_projects=projects,
-        purge_g_per_tool=_num("filament_sufficient.purge_g_per_tool", fs["purge_g_per_tool"]),
+        purge_g_per_tool=_num(
+            "filament_sufficient.purge_g_per_tool", fs["purge_g_per_tool"]
+        ),
         margin_g=_num("filament_sufficient.margin_g", fs["margin_g"]),
         margin_pct=_num("filament_sufficient.margin_pct", fs["margin_pct"]),
-        abrasive_ok=_names("nozzle_compat.abrasive_ok", nz["abrasive_ok"], allowed=NOZZLE_MATERIALS),
-        abrasive_markers=_names("nozzle_compat.abrasive_markers", nz["abrasive_markers"]),
+        abrasive_ok=_names(
+            "nozzle_compat.abrasive_ok", nz["abrasive_ok"], allowed=NOZZLE_MATERIALS
+        ),
+        abrasive_markers=_names(
+            "nozzle_compat.abrasive_markers", nz["abrasive_markers"]
+        ),
         enclosure_materials=_names("enclosure_material.materials", enc["materials"]),
         plate_rules=tuple(plate_rules),
+        mix_max_delta_e=mix_max,
     )
