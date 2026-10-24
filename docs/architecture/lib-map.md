@@ -45,10 +45,14 @@ rendering, slicing support, and verification:
 - `collision_viz.py`
 - `dimension_args.py`
 - `dimension_check.py`
+- `dimension_legend.py`
+- `dimension_model.py`
+- `dimension_parts.py`
 - `dimension_render.py`
 - `fit_camera.py`
 - `fit_camera_math.py`
 - `fit_check.py`
+- `fits.py`
 - `frame_check.py`
 - `gcode_resume.py`
 - `gcode_labels.py`
@@ -65,6 +69,7 @@ rendering, slicing support, and verification:
 - `mesh_check.py`
 - `mesh_repair.py`
 - `niche_fit.py`
+- `parts.py`
 - `orca_project_3mf.py`
 - `packing.py`
 - `printability_mesh.py`
@@ -240,6 +245,7 @@ Every current root Python module is listed here so future additions are intentio
 - `fit_camera.py` — camera fitting implementation.
 - `fit_camera_math.py` — import-light camera pose and proof-status math helpers.
 - `fit_check.py` — already-printed insert vs its socket: printed-size lock, per-layer clearance (manifold3d slices, shapely distances) and the open path along the insertion direction; backs `3d fit-check`.
+- `fits.py` — the one fit/tolerance table (`data/fits.yaml`, schema `3d.fits/1`): fit types, aliases, printer x material x nozzle x layer corrections, `resolve()` with provenance and `fit_clearance` calibration readings.
 - `gcode_resume.py` — resume a stopped multi-head Orca print above a layer (layer walk, machine state at a byte, resume header from the device's `resume:` profile, per-head retraction tracking, `--no-tower` off-bed purges); stdlib-only; backs `3d gcode-resume`. Its per-line parser (`advance`) and the streamed `state_at` (machine state at a printer's byte cursor or a layer) also give PrintOps incidents their G-code context.
 - `gcode_labels.py` — the slicer's own labels in a G-code: object labels in both dialects (Klipper `EXCLUDE_OBJECT_*`, Bambu Studio `; start printing object` / `M624`…`M625` blocks named by their `; printing object` comment, `M486`, PrusaSlicer comments), layer-change markers, feature tags and line widths; stdlib-only; the one parser behind head-sequence, overhangs, visible-faces and the print-area plate section.
 - `gcode_overhangs.py` — extrusion printed on nothing per object and layer of a sliced G-code (numpy/scipy raster of each layer's carrier, sparse reach/bridge/step-out tests on the pixels that stick out, layers split over forked workers); backs `3d gcode-overhangs` and the `overhangs` gate of `print-preflight`.
@@ -282,7 +288,8 @@ Every current root Python module is listed here so future additions are intentio
 - `object_model.py` — semantic object-model structures.
 - `ollama.py` — local Ollama endpoint validation and dry-run request planning.
 - `opdag.py` — operation graph validation, dependency ordering, and query helpers.
-- `niche_fit.py` — cavity/niche clearance math and parametric insert `.scad` emission.
+- `niche_fit.py` — cavity/niche clearance math and parametric insert `.scad` emission; its `--fit` labels resolve through `fits.py`.
+- `parts.py` — shared part contract: roles (`printed|vitamin|reference|stand_in`), the `assert_printable` print guardrail, 3MF role tags and the stable per-part palette/legend.
 - `packing.py` — deterministic 2D print-bed layout planning helpers.
 - `printing.py` — compatibility wrapper re-exporting `slicing.printing`.
 - `preprocess_reference.py` — reference image preprocessing.
@@ -295,9 +302,12 @@ Every current root Python module is listed here so future additions are intentio
 - `projects_registry.py` — compatibility wrapper re-exporting `registries.projects`.
 - `reporting.py` — deterministic gate and metric artifact report composition.
 - `workspaces.py` — web dashboard workspace metadata registry.
-- `dimension_args.py` — the stdlib-only option grammar of `3d dimension` (`--bed`, `--dim`, `--width`), shared by the command and the renderer.
+- `dimension_args.py` — the stdlib-only option grammar of `3d dimension` (`--bed`, `--dim`, `--width`, `--part`, `-D`), shared by the command and the renderer.
 - `dimension_check.py` — the legibility gate of dimensioned renders (`3d dimension --check`): sidecar + pixel checks of every label.
-- `dimension_render.py` — shaded top/front/side/iso renders with mm dimension arrows and the `.dims.json` sidecar (`3d dimension`).
+- `dimension_legend.py` — the colour -> part legend strip under a multi-part render (`3d dimension`).
+- `dimension_model.py` — reads 3MF (stdlib zipfile + ElementTree, no lxml), OBJ+MTL, `.scad` (via openscad's coloured 3MF) and STL into raw geometry with its colour groups (`3d dimension`).
+- `dimension_parts.py` — names the parts of a model, resolves one distinct colour per part (authored colour, else the `parts.py` palette; stand-ins muted) and builds the mesh to paint (`3d dimension`).
+- `dimension_render.py` — shaded top/front/side/iso renders with mm dimension arrows, per-part colours + legend and the `.dims.json` sidecar (`3d dimension`).
 - `backdrop_mask.py` — subject mask of a studio render: everything that is not the smooth neutral backdrop connected to the frame border (`3d preprocess --backdrop`; numpy + scipy).
 - `refmatch.py` — image/reference matching helpers.
 - `ref_measure.py` — `3d measure-ref`: the same feature shape (an eye opening with iris / pupil, a nostril ...) measured on a reference image and on a render (corner line, aspect, tilt, extents, lid cover), delta gate.

@@ -10,6 +10,8 @@ Each parser raises ValueError with a message naming what was expected.
 from __future__ import annotations
 
 import math
+import re
+from typing import NamedTuple
 
 Point = tuple[float, float, float]
 MIN_WIDTH_PX = 640
@@ -69,3 +71,56 @@ def parse_width(raw: str) -> int:
             f"--width {raw!r}: expected an integer {MIN_WIDTH_PX}..{MAX_WIDTH_PX}"
         )
     return int(raw)
+
+
+def parse_define(raw: str) -> str:
+    """`NAME=VALUE` — an OpenSCAD `-D` override; VALUE is passed to openscad untouched."""
+    name, eq, value = raw.partition("=")
+    if not eq or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) or not value:
+        raise ValueError(f"-D {raw!r}: expected NAME=VALUE, e.g. standin=true")
+    return raw
+
+
+class PartSpec(NamedTuple):
+    """A parsed `--part`: which part (`selector`), its new `name` and/or `role`."""
+
+    selector: str
+    name: str | None
+    role: str | None
+
+
+def parse_part(spec: str) -> PartSpec:
+    """`SELECTOR=NAME[:ROLE]` — rename and/or set the role of one part.
+
+    SELECTOR is a part name or a colour (#RGB / #RRGGBB, normalised to upper-case #RRGGBB); NAME may be
+    empty when only the ROLE changes (`#2a62c9=:stand_in`); a NAME holds no ':'.
+    """
+    from parts import ROLES  # lazy: this module is imported on every `3d` call
+
+    selector, eq, rest = spec.partition("=")
+    selector = selector.strip()
+    if not eq or not selector:
+        raise ValueError(
+            f"--part {spec!r}: expected SELECTOR=NAME[:ROLE], e.g. '#2a62c9=PCB:stand_in'"
+        )
+    if selector.startswith("#"):
+        digits = selector[1:]
+        if not re.fullmatch(r"[0-9a-fA-F]{3}|[0-9a-fA-F]{6}", digits):
+            raise ValueError(
+                f"--part {spec!r}: {selector!r} is not a #RGB or #RRGGBB colour"
+            )
+        if len(digits) == 3:
+            digits = "".join(ch * 2 for ch in digits)
+        selector = "#" + digits.upper()
+    name, sep, tail = rest.rpartition(":")
+    if not sep:
+        name, tail = rest, ""
+    role = tail.strip().lower().replace("-", "_")
+    if sep and role not in ROLES:
+        raise ValueError(
+            f"--part {spec!r}: role {tail!r} is not one of {', '.join(ROLES)}"
+        )
+    new_name = name.strip() or None
+    if new_name is None and not role:
+        raise ValueError(f"--part {spec!r}: give a NAME, a :ROLE or both")
+    return PartSpec(selector, new_name, role or None)

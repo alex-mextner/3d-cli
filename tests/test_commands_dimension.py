@@ -399,7 +399,7 @@ def test_scad_input_renders_through_openscad(tmp_path: pathlib.Path) -> None:
 def test_missing_openscad_is_a_structured_failure_without_leaking_a_temp_file(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from dimension_render import RenderError
+    from dimension_model import RenderError
 
     scad = tmp_path / "block.scad"
     scad.write_text("cube(10);\n")

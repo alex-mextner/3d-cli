@@ -22,7 +22,7 @@ from cli.pyrun import exec_tool
 from cli.registry import Command
 from errors import InputNotFound, InvalidArgument, UsageError
 
-USAGE = """3d dimension MODEL.(stl|3mf|obj|scad) -o OUT.png [--bed WxD] [--dim NAME:x,y,z:x,y,z]... [options]
+USAGE = """3d dimension MODEL.(stl|3mf|obj|scad) -o OUT.png [--bed WxD] [--dim NAME:x,y,z:x,y,z]... [--part SEL=NAME[:ROLE]]... [-D NAME=VALUE]... [options]
 3d dimension --check IMAGE.png [--json]
   Render the part from top / front / side / iso with dimension arrows and values in mm, or
   verify that such a render is legible. The render also writes OUT.png.dims.json (every
@@ -38,6 +38,18 @@ Render options:
   --name TEXT          part name in the header (default: the file name)
   --width PX           image width 640..8192 (default 1280, the width the legibility rules are set at)
   --label-px PX        label font size at 1280 px width (default 20; below 14 the check fails)
+  -D NAME=VALUE        override an OpenSCAD variable of a .scad input (repeatable), e.g. -D standin=true
+  --part SEL=NAME[:ROLE]
+                       name a part and/or set its role; SEL is a part name or a colour (#RGB/#RRGGBB)
+                       (repeatable), e.g. --part "#2a62c9=PCB:stand_in". ROLE is printed|vitamin|
+                       reference|stand_in; a stand_in is drawn muted (washed toward white).
+
+Parts and colours: every part of the model is drawn in its OWN colour and a legend under the four views
+names them. Parts come from the file: 3MF objects (or colour groups), OBJ o/g groups + usemtl, OpenSCAD
+color() groups; geometry without any colour is split into its separate bodies ("body 1", ...). Colours:
+the authored one (3MF material, OBJ+MTL Kd, OpenSCAD color()) when it differs clearly from the others,
+else the deterministic palette keyed by part NAME (same assembly -> same colours). 3MF objects tagged
+3d:role=stand_in|vitamin|reference are drawn muted or per role. A single-part model stays one colour with no legend.
 
 Automatic dimensions: overall X / Y / Z of the bounding box in every view where the edge is
 visible, and "span" (the longest distance between two points) when the part's oriented box is more
@@ -53,12 +65,23 @@ Check (--check IMAGE): needs IMAGE.dims.json beside it and verifies
 Examples:
   3d dimension print/spoon.stl -o ~/.cache/3d-cli/spoon_dims.png --bed 220x220
   3d dimension boss.scad -o boss.png --dim "hole d:10,10,0:16,10,0"
+  3d dimension assembly.scad -D standin=true -o assembly.png --part "#2a62c9=PCB:stand_in" --part "#c01818=red wire"
+  3d dimension box.3mf -o box.png --part "lid=top cover"
   3d dimension --check ~/.cache/3d-cli/spoon_dims.png"""
 
 DEPS = "trimesh,numpy,pillow,scipy"
 
 
-RENDER_FLAGS = ("--bed", "--dim", "--name", "--width", "--label-px")
+RENDER_FLAGS = (
+    "--bed",
+    "--dim",
+    "--name",
+    "--width",
+    "--label-px",
+    "--part",
+    "--define",
+)
+FLAG_ALIASES = {"-D": "--define"}
 
 
 def _value(argv: list[str], index: int, flag: str) -> str:
@@ -86,6 +109,11 @@ def _validate(flag: str, value: str) -> None:
         "--label-px": (
             lambda raw: dimension_args.positive(raw, flag),
             "a positive finite number",
+        ),
+        "--define": (dimension_args.parse_define, "NAME=VALUE, e.g. standin=true"),
+        "--part": (
+            dimension_args.parse_part,
+            "SELECTOR=NAME[:ROLE], e.g. '#2a62c9=PCB:stand_in'",
         ),
     }
     parse, accepted = parsers.get(flag, (None, ""))
@@ -123,11 +151,17 @@ def run(argv: list[str]) -> int:
         elif arg == "--json":
             as_json = True
             i += 1
-        elif arg in RENDER_FLAGS:
+        elif (
+            arg.startswith("-D") and len(arg) > 2
+        ):  # -Dname=value, as openscad takes it
+            _validate("--define", arg[2:])
+            render_flags.append(f"--define={arg[2:]}")
+            i += 1
+        elif (flag := FLAG_ALIASES.get(arg, arg)) in RENDER_FLAGS:
             value = _value(argv, i, arg)
-            _validate(arg, value)
+            _validate(flag, value)
             render_flags.append(
-                f"{arg}={value}"
+                f"{flag}={value}"
             )  # `=` form: a value may start with '-'
             i += 2
         elif arg.startswith("-"):
@@ -164,6 +198,18 @@ def run(argv: list[str]) -> int:
             "--json belongs to --check",
             command="dimension",
             remediation=["3d dimension --check IMAGE.png --json"],
+        )
+    if (
+        model is not None
+        and not model.lower().endswith(".scad")
+        and any(f.startswith("--define=") for f in render_flags)
+    ):
+        raise UsageError(
+            "-D NAME=VALUE only applies to a .scad input",
+            command="dimension",
+            remediation=[
+                "Pass the .scad file, e.g. 3d dimension box.scad -D standin=true -o box.png"
+            ],
         )
     if model is None or out is None:
         raise UsageError(
