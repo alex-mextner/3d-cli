@@ -84,6 +84,8 @@ Options:
   --tol MM            shell-volume, transfer, snap: the same transfer tolerance (0.25); classify: part match
                       distance (0.06)
   --force             build: rebuild every patch even when cached
+  --full-reach        build, shell-volume: the voxel grid grows by `depth` and the faces reaching into the growth compete too
+                      (a plate coloured from both sides); default = the grid and candidate set the Chekhov build was proven with
   --labels LABELS     shell-volume, transfer, snap: the label file
   --select REGEX      shell-volume: label names to take (full match), repeatable
   --depth MM          shell-volume: depth of the volume around the skin
@@ -93,11 +95,15 @@ Options:
   --shift X,Y,Z       classify: frame offset of the parts, mm
   --split-edge MM     classify: split skin faces with an edge longer than MM and judge them by surface distance
   --split-box BOX     classify: limit --split-edge to faces inside BOX = x0,x1,y0,y1,z0,z1
+  --surface-parts N,N classify: with --split-edge, the parts judged by surface distance inside the box (default: all);
+                      the others keep their parent face's decision (a mixed-colour part is decided by its cut pieces' centroids)
   --source LABELS@MESH  transfer-class: the approved labels and their mesh
   --positive NAMES    transfer-class: comma-separated label names of the class to carry over
   --exclude NAMES     transfer-class: comma-separated label names that are not a source
   --as NAME           transfer-class: the label name of the result
   --max-dist MM       transfer-class: faces farther than MM from the source get no label (default 6)
+  --match MODE        transfer-class: `centroid` = nearest source face by centroid (default, how the approved borders were
+                      made), `surface` = nearest source surface point (independent of the source face size)
   --fill-box BOX:AREA transfer-class: other-class islands under AREA mm2 centred inside BOX = x0,x1,y0,y1,z0,z1
                       with only positive neighbours become positive; repeatable
   --band MM           snap: how far a border may move
@@ -107,6 +113,10 @@ Options:
   --work DIR          verify: the --out directory of `build`
   --regions FILE      verify: regions.json holding the volumes of gate 2 (default WORK/regions.json)
   --skip-volumes      verify: gate 1 only
+  --parts STEM        verify: gate 2 against the colour PARTS of a built project (STEM.manifest.json + STEM.parts/) instead of
+                      the patches: the part holding the point under the skin must carry the group's filament assign
+  --default-key K     verify --parts: the filament key of the default colour (default K)
+  --max-nz F          verify --parts: gate 2 skips faces whose normal has |z| >= F (print frame, Z up; default 0.97, above 1 = none)
   --waive G,G         verify: groups that are reported but not gated (labels with no relief to follow)
   --approved-groups G,G  verify: groups with owner-approved borders: gated against chance only
   --json              print the result as JSON instead of the text report (every subcommand; verify keeps its exit code)
@@ -134,6 +144,11 @@ Examples:
   3d colour-regions verify cat.stl --work work --regions work/regions.json --dihedral 30 --crease 30 --min-share 0.5 --min-group 0.35 --shift-mm 1.5 --agree 0.97
   3d colour-regions verify cat.stl --work work --skip-volumes
   3d colour-regions verify cat.stl --work work --samples 5000
+  3d colour-regions verify cat.stl --work work --parts work/project --default-key K --max-nz 0.97
+  3d colour-regions classify approved_skin.stl --part white=white.stl --out approved.npz --split-edge 0.5 --split-box=-34,34,-62,-26.5,3,46 --surface-parts white
+  3d colour-regions transfer-class new.stl --source approved.npz@approved.mesh.ply --positive white --as white_approved --out white.npz --match surface
+  3d colour-regions build cat.stl --track sculpt=sculpt.npz --rules rules.json --out work --full-reach
+  3d colour-regions shell-volume plate.stl --labels top.npz --select top --depth 3 --pitch 0.25 --out top.ply --full-reach
   3d colour-regions verify cat.stl --work work --shift-margin 0.1 --chance-margin 0.3
   3d colour-regions build cat.stl --track sculpt=sculpt.npz --rules rules.json --out work --json --memory-max 10G --no-lock"""
 
