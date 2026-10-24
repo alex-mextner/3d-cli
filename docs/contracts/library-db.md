@@ -33,10 +33,13 @@ imports - `library.db.insert_row(conn, table, values, source_key=K)` returns the
 ## Actions
 
 `lib/library/actions.py` fixes eight functions - `search, rank, download, open_slicer, launch_agent, queue,
-photo, publish` - returning `{schema: "3d.action/1", action, ok, data, errors[], warnings[]}`. They never
-print, prompt or exit. The TUI (S7) binds keys to `ACTIONS[name]` and the CLI exposes the same functions as
-flags with `--json`. `queue`, `photo` (register an existing file), `search` and `download` (S5, #576) and `rank`
-(S6, #577: LLM relevance and query planning, `docs/contracts/search-events.md`) are implemented; the other actions raise `NotImplementedByDesign(owner_issue)` until their slice lands (`OWNERS` maps
+photo, publish` - plus two for the model browser - `open_browser`, `preview` (S7, #578) - returning `{schema:
+"3d.action/1", action, ok, data, errors[], warnings[]}`. They never print, prompt or exit. The TUI binds keys to
+`ACTIONS[name]` and `3d models act` exposes the same functions as flags with `--json`
+(`docs/commands/tui.md`). `queue`, `photo` (register an existing file), `search` and `download` (S5, #576),
+`rank` (S6, #577: LLM relevance and query planning, `docs/contracts/search-events.md`) and `open_slicer`,
+`launch_agent`, `open_browser`, `preview` (S7, #578: configured launchers, `lib/library/launch.py`) are implemented;
+`publish` raises `NotImplementedByDesign(owner_issue)` until its slice lands (`OWNERS` maps
 action -> issue). `search` takes `deep` and `idempotency_key` besides the contract arguments and returns a flat
 `results[]` (site, model_id, url, title, rank, image_url, license, paid, cad, size_mm, reference_suitable) plus the
 session uid; a site that failed is a `site_failed` warning and only "no site answered" is `ok: false`. `download`

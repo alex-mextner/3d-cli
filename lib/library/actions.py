@@ -1,6 +1,7 @@
 """library/actions.py — the action contract shared by the TUI (S7) and the CLI flags/`--json` of the library.
 
-WHAT: eight pure functions — `search, rank, download, open_slicer, launch_agent, queue, photo, publish` — that
+WHAT: eight pure functions — `search, rank, download, open_slicer, launch_agent, queue, photo, publish` — plus the two
+read/launch helpers of the model browser (`open_browser`, `preview`, S7 #578) that
 take plain arguments and return a JSON-able `ActionResult` (`schema: "3d.action/1"`, `ok`, `data`, `errors[]`,
 `warnings[]`). They never print, prompt or `sys.exit`. The TUI binds a key to `ACTIONS[name]`; the CLI exposes
 the same function as flags with `--json`; that is the TUI <-> CLI parity guarantee of umbrella #570.
@@ -9,9 +10,10 @@ ACCESSED VIA: `ACTIONS[name](**kwargs)` or `invoke(name, **kwargs)`. `invoke` is
 raised `ThreeDError` (exit-code classes of `errors.py`) or `NotImplementedByDesign` into an `ok: false` result
 with a machine-readable error `code`, so a key press never crashes the UI.
 
-OWNERSHIP: this slice (S0, #571) fixes the signatures and the result shape and implements only what is
-trivial (`queue`, and `photo` for an already existing file). Every other action raises
-`NotImplementedByDesign(owner_issue)`: a typed seam for the slice named in `OWNERS`, not a fake feature.
+OWNERSHIP: slice S0 (#571) fixed the signatures and the result shape; each other slice implemented its actions
+(`OWNERS`). An action whose slice has not landed raises `NotImplementedByDesign(owner_issue)`: a typed seam for
+that slice, not a fake feature. The model browser (S7, #578) implements `open_slicer`, `launch_agent`,
+`open_browser` and `preview`; the programs they start come from `library/launch.py`.
 
 IMPORT RULE: stdlib-only at module top (checked by tests/test_imports.py); the library DB is imported lazily
 inside the actions that need it.
@@ -22,7 +24,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, TypedDict
 
-from errors import InvalidArgument, ThreeDError
+from errors import InvalidArgument, MissingDependency, ThreeDError
 
 SCHEMA = "3d.action/1"
 SEARCH_KINDS = ("wide", "narrow", "followup", "rewrite", "user")
@@ -92,7 +94,7 @@ def error_result(
     }
 
 
-# --------------------------------------------------------------------------- the eight actions
+# --------------------------------------------------------------------------- the actions
 def search(
     query: str,
     *,
@@ -369,30 +371,235 @@ def download(
 
 
 def open_slicer(
-    path: str, *, slicer: str | None = None, dry_run: bool = True
+    path: str | Sequence[str],
+    *,
+    slicer: str | None = None,
+    dry_run: bool = True,
 ) -> ActionResult:
-    """Open a model/3MF in the desktop slicer; `dry_run` (default) only reports the command it would run.
+    """Open one model file (or several, as plates of one project) in the desktop slicer.
 
-    `data`: `{slicer, command: [...], started: bool}`.
+    `slicer` is a kind (`orca`, `snapmaker-orca`, `creality-print`, `bambu-studio`) or a command with `{path}` /
+    `{paths}`; absent it comes from `$THREED_SLICER`, `browser.json` or the first installed slicer
+    (`library/launch.py`). `dry_run` (default) only reports the command. A missing file is `not_found`, a missing
+    slicer MissingDependency (127). `data`: `{slicer, command: [...], paths: [...], started: bool, pid}`.
     """
-    raise NotImplementedByDesign("open_slicer", 578, "slicer discovery and launch")
+    from pathlib import Path
+
+    from library import launch
+
+    files = [path] if isinstance(path, str) else list(path)
+    if not files:
+        raise InvalidArgument(
+            "path", "(none)", ["one or more model files"], command="models"
+        )
+    missing = [f for f in files if not Path(f).is_file()]
+    if missing:
+        return error_result(
+            "open_slicer",
+            [
+                issue("not_found", f"no such file: {m}", ["Download the model first."])
+                for m in missing
+            ],
+        )
+    choice = launch.resolve_slicer(slicer)
+    absolute = [str(Path(f).resolve()) for f in files]
+    command = launch.slicer_argv(choice, absolute)
+    data: dict[str, Any] = {
+        "slicer": choice.kind,
+        "command": command,
+        "paths": absolute,
+        "started": False,
+        "pid": None,
+    }
+    if not dry_run:
+        data["pid"] = launch.spawn_detached(command)
+        data["started"] = True
+    return ok_result("open_slicer", data)
 
 
 def launch_agent(
     prompt: str,
     *,
     cwd: str | None = None,
-    backend: str = "omp",
+    backend: str | None = None,
     dry_run: bool = True,
     context: dict[str, Any] | None = None,
+    mode: str = "auto",
 ) -> ActionResult:
-    """Start a coding agent (`backend` in BACKENDS) on `prompt` in `cwd`; `dry_run` (default) reports only.
+    """Start a coding agent (`backend` in BACKENDS, default omp) on `prompt` in `cwd`, seeded with a brief.
 
-    `data`: `{backend, command: [...], cwd, started: bool}`.
+    `context` (`{query, session, models: [{title, url, verdict, dir, files, provenance...}]}`) is written with
+    `prompt` as `brief.md` + `context.json` under the state dir (`library/launch.py`) and the agent is started with
+    the brief attached. `mode`: `attach` (this terminal, waits), `tmux` (a detached tmux session), `detached` (no
+    terminal, output in the bundle's log) or `auto` (attach on a terminal, else tmux, else detached). `dry_run`
+    (default) reports the command and writes nothing. `data`: `{backend, command: [...], cwd, mode, brief,
+    started: bool, pid | tmux | exit_code}`.
     """
-    if backend not in BACKENDS:
+    import os
+    import shutil
+    import sys
+    from pathlib import Path
+
+    from library import launch
+
+    if backend is not None and backend not in BACKENDS:
         raise InvalidArgument("backend", backend, list(BACKENDS), command="library")
-    raise NotImplementedByDesign("launch_agent", 578, "agent launch (tmux/omp)")
+    if mode not in launch.AGENT_MODES:
+        raise InvalidArgument("mode", mode, list(launch.AGENT_MODES), command="models")
+    chosen = launch.agent_backend(backend)
+    work = str(Path(cwd).resolve()) if cwd else os.getcwd()
+    if not Path(work).is_dir():
+        return error_result(
+            "launch_agent", [issue("not_found", f"no such directory: {work}")]
+        )
+    ctx = dict(context or {})
+    key = str(ctx.get("session") or "adhoc")
+    plan = launch.plan_agent(prompt, cwd=work, backend=chosen, bundle_key=key)
+    if mode == "auto":
+        if sys.stdin.isatty() and sys.stdout.isatty():
+            mode = "attach"
+        else:
+            mode = "tmux" if shutil.which("tmux") else "detached"
+    data: dict[str, Any] = {
+        "backend": plan.backend,
+        "command": plan.argv,
+        "cwd": work,
+        "mode": mode,
+        "brief": str(plan.brief),
+        "started": False,
+    }
+    if dry_run:
+        return ok_result("launch_agent", data)
+    launch.write_brief(plan, prompt, ctx)
+    if mode == "attach":
+        data["exit_code"] = launch.run_attached(plan.argv, cwd=work)
+    elif mode == "tmux":
+        data["tmux"] = launch.start_in_tmux(
+            plan.argv, cwd=work, name=launch.tmux_session_name(key)
+        )
+    else:
+        data["pid"] = launch.spawn_detached(
+            plan.argv, cwd=work, log=plan.brief.parent / "agent.log"
+        )
+    data["started"] = True
+    return ok_result("launch_agent", data)
+
+
+def open_browser(
+    urls: str | Sequence[str],
+    *,
+    browser: str | None = None,
+    dry_run: bool = True,
+) -> ActionResult:
+    """Open model pages in the web browser (`browser` command with `{url}`, `$THREED_BROWSER`, `browser.json`,
+    `$BROWSER`, else the platform opener). `dry_run` (default) reports the commands. `data`: `{urls,
+    commands: [[...]], started: bool}`."""
+    from library import launch
+
+    wanted = [urls] if isinstance(urls, str) else list(urls)
+    if not wanted or not all(u.startswith(("http://", "https://")) for u in wanted):
+        raise InvalidArgument(
+            "urls",
+            ", ".join(wanted) or "(none)",
+            ["one or more http(s) URLs"],
+            command="models",
+        )
+    commands = [launch.browser_argv(u, explicit=browser) for u in wanted]
+    started = False
+    if not dry_run:
+        for command in commands:
+            launch.spawn_detached(command)
+        started = True
+    return ok_result(
+        "open_browser", {"urls": wanted, "commands": commands, "started": started}
+    )
+
+
+def preview(
+    card: Mapping[str, Any],
+    *,
+    image: str | None = None,
+    cols: int = 36,
+) -> ActionResult:
+    """What the browser's preview pane shows for one result card (`3d.models.search/2` record): details,
+    description, tags, the file list and the analytics, plus the verdict when the card carries one.
+
+    `image` is a terminal protocol (`kitty`, `iterm2`, `sixel`, `blocks`) or `auto` (what the terminal can show,
+    `blocks` as the fallback, nothing without a TTY); the picture is fetched and encoded about `cols` cells wide.
+    `data.image`: `{url, protocol, sequence}`; `sequence` is null when there is no picture or no support. Read-only.
+    """
+    import sys
+
+    from library import textview
+
+    if image not in (None, "auto", "kitty", "iterm2", "sixel", "blocks"):
+        raise InvalidArgument(
+            "image",
+            str(image),
+            ["auto", "kitty", "iterm2", "sixel", "blocks"],
+            command="models",
+        )
+    facts = card.get("analytics") or {}
+    files = [
+        {k: f.get(k) for k in ("name", "size", "class")} for f in card.get("files", [])
+    ]
+    data: dict[str, Any] = {
+        "site": card.get("site"),
+        "id": card.get("id"),
+        "title": card.get("title"),
+        "url": card.get("url"),
+        "author": card.get("author"),
+        "license": card.get("license") or None,
+        "price": card.get("price") or None,
+        "description": textview.flat(str(card.get("summary") or "")),
+        "tags": list(card.get("tags") or []),
+        "files": files,
+        "cad": card.get("cad"),
+        "cad_formats": list(card.get("cad_formats") or []),
+        "size_mm": card.get("size_mm"),
+        "analytics": {
+            k: facts[k]
+            for k in (
+                "file_count",
+                "formats",
+                "total_bytes",
+                "is_multi_part",
+                "is_assembly",
+                "reference",
+                "deep",
+            )
+            if k in facts
+        },
+        "verdict": card.get("verdict"),
+        "score": card.get("score"),
+        "rationale": card.get("rationale"),
+        "image": {"url": card.get("image") or None, "protocol": None, "sequence": None},
+    }
+    warnings: list[ActionIssue] = []
+    if image is not None and card.get("image"):
+        from cli import termimage
+        from library import images as imagelib
+
+        protocol = (
+            termimage.preview_protocol(is_tty=sys.stdout.isatty())
+            if image == "auto"
+            else image
+        )
+        if protocol is not None:
+            shown = imagelib.render_images(
+                [(str(card.get("site")), str(card["image"]))], protocol, cols=cols
+            )
+            sequence = shown.get(str(card["image"]))
+            data["image"]["protocol"] = protocol
+            data["image"]["sequence"] = sequence
+            if sequence is None:
+                warnings.append(
+                    issue(
+                        "image_unavailable",
+                        "the picture could not be fetched or encoded; details only",
+                    )
+                )
+    return ok_result("preview", data, warnings)
 
 
 def queue(
@@ -562,6 +769,8 @@ ACTIONS: dict[str, Callable[..., ActionResult]] = {
     "queue": queue,
     "photo": photo,
     "publish": publish,
+    "open_browser": open_browser,
+    "preview": preview,
 }
 
 # action -> issue of the slice that implements it (None = implemented in this contract slice).
@@ -574,12 +783,14 @@ OWNERS: dict[str, int | None] = {
     "queue": None,
     "photo": 579,
     "publish": 579,
+    "open_browser": 578,
+    "preview": 578,
 }
 
 
 def invoke(name: str, **kwargs: Any) -> ActionResult:
     """Run an action by name and never raise: unknown names, structured errors and unimplemented seams
-    become `ok: false` results (codes `unknown_action`, `invalid_argument`, `error`, `not_implemented`)."""
+    become `ok: false` results (codes `unknown_action`, `invalid_argument`, `missing_dependency`, `error`, `not_implemented`)."""
     fn = ACTIONS.get(name)
     if fn is None:
         return error_result(
@@ -600,6 +811,10 @@ def invoke(name: str, **kwargs: Any) -> ActionResult:
         )
     except InvalidArgument as e:
         return error_result(name, [issue("invalid_argument", e.message, e.remediation)])
+    except MissingDependency as e:
+        return error_result(
+            name, [issue("missing_dependency", e.message, e.remediation)]
+        )
     except ThreeDError as e:
         return error_result(name, [issue("error", e.message, e.remediation)])
     except TypeError as e:  # unknown/missing keyword for this action
