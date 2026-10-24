@@ -65,7 +65,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from errors import UsageError
+from errors import ThreeDError, UsageError
 from printer_ops.subscriptions import (
     DeliveryState,
     Registry,
@@ -211,6 +211,10 @@ def agent_alert(events: list[Event], printer: str) -> str:
                       [f"Event history: {agent_dir(printer) / 'events.jsonl'}. You stay running for the next alert."])
 
 
+class SpawnRefused(RuntimeError):
+    """The real tmux/omp must not run here (a test): raised before anything is spawned or recorded."""
+
+
 class AgentUnavailable(RuntimeError):
     """The printer's agent cannot take the alert now; `counter` is the chain counter it bumps."""
 
@@ -279,7 +283,7 @@ class PrinterAgents:
         """Raise before any real tmux/omp/omp-live call under pytest: an injected runner is a fake,
         the default one spawns real processes on the user's machine."""
         if self.runner is _REAL_RUN and (why := spawn_refusal()):
-            raise RuntimeError(f"refusing to run the real tmux/omp for the temporary printer agent under a test ({why}); "
+            raise SpawnRefused(f"refusing to run the real tmux/omp for the temporary printer agent under a test ({why}); "
                                f"fake the runner, or set {ALLOW_UNDER_TEST_ENV}=1 with fake tmux/omp on PATH")
 
     # ---- tmux -----------------------------------------------------------------------------
@@ -418,6 +422,7 @@ class PrinterAgents:
     def stop(self, printer: str, *, release: bool = True) -> bool:
         """Kill the agent's tmux session. `release` frees the restart-limit slot: the limit guards
         against crash-looping starts, not against a new agent after a deliberate stop/handoff."""
+        self._refuse_under_test()   # before any state change: a refused stop must leave the slot claimed
         if release:  # before the kill: `agent handoff` runs inside the session it kills
             self.state.set_agent(printer, start_claimed=None)
         stopped = self._tmux("kill-session", "-t", f"={session_name(printer)}").returncode == 0
@@ -667,7 +672,11 @@ def cmd_stop(argv: list[str]) -> int:
         raise UsageError("`printer agent stop` takes one PRINTER", command="printer",
                          remediation=["3d printer agent stop u1"])
     printer = names(pos[0], "PRINTER")[0]
-    print(f"stopped {session_name(printer)}" if PrinterAgents().stop(printer) else f"no {session_name(printer)} running")
+    try:
+        stopped = PrinterAgents().stop(printer)
+    except SpawnRefused as exc:
+        raise ThreeDError(str(exc), command="printer") from exc
+    print(f"stopped {session_name(printer)}" if stopped else f"no {session_name(printer)} running")
     return 0
 
 
@@ -678,6 +687,10 @@ def cmd_handoff(argv: list[str]) -> int:
                          remediation=["3d printer agent handoff u1 --summary 'one false noodle alarm; user not told'"])
     printer = names(pos[0], "PRINTER")[0]
     agents = PrinterAgents()
+    try:
+        agents._refuse_under_test()   # first: nothing is sent or recorded for a stop that cannot happen
+    except SpawnRefused as exc:
+        raise ThreeDError(str(exc), command="printer") from exc
     try:
         hosts = agents.live.sessions()
     except RuntimeError as exc:
