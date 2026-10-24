@@ -23,7 +23,8 @@ WHAT (issue https://github.com/alex-mextner/3d-cli/issues/96), one PASS/WARN/FAI
   - head seq     every object prints each layer on its recipe's heads (slicing/head_sequence.py,
                  issue #103) — needs the project 3MF: --source-3mf or NAME.3mf next to the G-code;
   - mix face     every part in a mixed filament shows its colour on walls: FAIL when its top
-                 outweighs half its walls (slicing/mix_faces.py, issue #411; same project 3MF);
+                 outweighs half its walls (slicing/mix_faces.py, issue #411; same project 3MF; without one
+                 the G-code alone, objects printed by several heads: WARN, slicing/mix_gcode_faces.py, #419);
   - mix layers   the layer rules on what was printed: the additional colour never on consecutive
                  layers, no colour band or mixed layer thicker than 0.12 mm, measured on the
                  real per-layer heads and Z (slicing/mix_gcode.py, issue #116; with the project
@@ -408,13 +409,21 @@ def check_head_sequence(
     )
 
 
-def check_mix_faces(project: Path | None, project_source: str) -> Check:
-    """Issue #411: a part in a mixed filament shows its colour on walls, not on a flat top."""
+def check_mix_faces(project: Path | None, project_source: str, gcode: Path) -> Check:
+    """Issues #411 / #419: a part in a mixed filament shows its colour on walls, not on a flat top.
+    By the project 3MF when there is one (exact: it knows which parts are mixed, FAIL); else by the
+    G-code alone (objects printed on more than one head; WARN, a multi-colour part matches too)."""
     if project is None:
+        from slicing.mix_gcode_faces import preflight_check as gcode_check
+
+        got = gcode_check(str(gcode))
+        lines = got.get("lines")
         return Check(
             "mix face",
-            SKIP,
-            "no project 3MF: pass --source-3mf FILE.3mf or keep NAME.3mf next to NAME.gcode",
+            str(got.get("status", FAIL)),
+            f"{got.get('detail')} (G-code only: no project 3MF; --source-3mf FILE.3mf or NAME.3mf next to "
+            "NAME.gcode judges by the project)",
+            [str(x) for x in lines] if isinstance(lines, list) else [],
         )
     from slicing.mix_faces import preflight_check
 
@@ -756,7 +765,7 @@ def run_preflight(
     report.checks.append(check_slice_warnings(origin or gcode, gcode))
     project, project_source = find_project_3mf(origin or gcode, source_3mf)
     report.checks.append(check_head_sequence(gcode, project, project_source))
-    report.checks.append(check_mix_faces(project, project_source))
+    report.checks.append(check_mix_faces(project, project_source, gcode))
     report.checks.append(check_mix_layers(gcode, project, project_source))
     report.checks.append(check_visible(gcode, visible))
     if source_3mf is not None:

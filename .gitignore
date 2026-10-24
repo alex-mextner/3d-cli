@@ -24,6 +24,7 @@ score/
 !models/*/stl/*.stl
 !models/*/stl/*/*.stl
 !models/*/viewer/*.3mf
+!tests/data/mix_gcode_faces/*.3mf
 
 # local tooling state
 .serena/

@@ -257,8 +257,9 @@ Exit 1 on FAIL, 0 otherwise; 2 when the file is not an Orca-family project 3MF (
 `3D/3dmodel.model`, `Metadata/project_settings.config`, `Metadata/model_settings.config`).
 
 `3d print-preflight` runs the faces check as its `mix face` line on the project 3MF next to the
-G-code (`--source-3mf`, else `NAME.3mf` next to `NAME.gcode`); see
-[print-preflight](print-preflight.md).
+G-code (`--source-3mf`, else `NAME.3mf` next to `NAME.gcode`); without a project it measures the
+G-code itself (top-surface vs outer-wall extrusion of every object printed by more than one head, WARN
+only, #419) and the line says which source it used; see [print-preflight](print-preflight.md).
 
 ## `profile` — cap the layers over the mixed parts
 
