@@ -43,6 +43,7 @@ def _setup(tmp_path: Path, render_tilt: float) -> None:
 
 
 def test_matching_render_prints_the_table_and_passes(tmp_path: Path) -> None:
+    """A user compares a render that matches the reference: the table is printed and the gate passes."""
     _setup(tmp_path, 18)
     result = run_cli(tmp_path, "measure-ref", "ref.png", "render.png", "--spec", "eyes.json")
     assert result.returncode == 0, result.stdout + result.stderr
@@ -53,6 +54,7 @@ def test_matching_render_prints_the_table_and_passes(tmp_path: Path) -> None:
 
 
 def test_wrong_tilt_exits_one_and_names_the_feature_and_metric(tmp_path: Path) -> None:
+    """A user compares a render whose eye is 14 degrees too flat: exit 1, the feature and the tilt metric are named."""
     _setup(tmp_path, 4)  # 14 degrees flatter than the reference
     result = run_cli(tmp_path, "measure-ref", "ref.png", "render.png", "--spec", "eyes.json")
     assert result.returncode == 1, result.stdout + result.stderr
@@ -63,14 +65,17 @@ def test_wrong_tilt_exits_one_and_names_the_feature_and_metric(tmp_path: Path) -
 
 
 def test_tol_override_turns_the_same_pair_into_a_pass(tmp_path: Path) -> None:
+    """A user loosens the tilt tolerances for a pair that failed the defaults: the same pair passes."""
     _setup(tmp_path, 4)
     result = run_cli(
         tmp_path, "measure-ref", "ref.png", "render.png", "--spec", "eyes.json", "--tol", "tilt=20", "--tol", "pca_tilt=20"
     )
     assert result.returncode == 0, result.stdout + result.stderr
+    assert "eye_R: PASS" in result.stdout
 
 
 def test_json_report_overlay_and_out_file_are_written(tmp_path: Path) -> None:
+    """A user asks for the JSON report, the saved report file and the overlay sheet: all three are written and agree."""
     _setup(tmp_path, 18)
     result = run_cli(
         tmp_path, "measure-ref", "ref.png", "render.png", "--spec", "eyes.json", "--json", "-o", "report.json", "--overlay", "overlay.png"
@@ -87,6 +92,7 @@ def test_json_report_overlay_and_out_file_are_written(tmp_path: Path) -> None:
 
 
 def test_usage_errors_exit_two(tmp_path: Path) -> None:
+    """A user forgets the spec, passes a bad tolerance or a missing image: each is a usage error that says what is wrong."""
     _setup(tmp_path, 18)
     no_spec = run_cli(tmp_path, "measure-ref", "ref.png", "render.png")
     assert no_spec.returncode == 2
@@ -94,9 +100,11 @@ def test_usage_errors_exit_two(tmp_path: Path) -> None:
     assert bad_tol.returncode == 2 and "tilt" in bad_tol.stderr
     missing = run_cli(tmp_path, "measure-ref", "nope.png", "render.png", "--spec", "eyes.json")
     assert missing.returncode == 2
+    assert "tilt" in bad_tol.stderr
 
 
 def test_help_documents_every_option(tmp_path: Path) -> None:
+    """A user reads `3d measure-ref --help` and the doc page: every option is in both."""
     result = run_cli(tmp_path, "measure-ref", "--help")
     assert result.returncode == 0
     for flag in ("--spec", "--tol", "--cand-scale", "--overlay", "--out", "--json"):

@@ -46,6 +46,7 @@ def _setup(tmp_path: Path) -> tuple[Path, np.ndarray]:
 def test_labels_are_carried_to_the_refined_faces_and_extra_arrays_are_copied(
     tmp_path: Path,
 ) -> None:
+    """A user refines a patch of a labelled mesh: every output face has its parent label, other per-face arrays follow and the rest is copied."""
     model, labels = _setup(tmp_path)
     result = run_cli(
         tmp_path,
@@ -91,6 +92,7 @@ def test_labels_are_carried_to_the_refined_faces_and_extra_arrays_are_copied(
 def test_label_count_that_does_not_match_the_loaded_mesh_is_an_input_error(
     tmp_path: Path,
 ) -> None:
+    """A user passes labels for a different face count: the run stops with an input error and writes nothing."""
     model, labels = _setup(tmp_path)
     np.savez(tmp_path / "short.npz", face_label=labels[:-5])
     result = run_cli(
@@ -107,6 +109,7 @@ def test_label_count_that_does_not_match_the_loaded_mesh_is_an_input_error(
 def test_labels_with_an_op_that_cannot_map_faces_is_refused_before_anything_is_written(
     tmp_path: Path,
 ) -> None:
+    """A user combines --labels with a decimate op: it is refused up front and no mesh is written."""
     model, _ = _setup(tmp_path)
     (tmp_path / "decimate.yaml").write_text(
         "seed: 1\nops:\n  - {op: decimate, tolerance: 0.05}\n"
@@ -130,6 +133,7 @@ def test_labels_with_an_op_that_cannot_map_faces_is_refused_before_anything_is_w
 def test_out_labels_without_labels_and_missing_face_label_array_are_usage_errors(
     tmp_path: Path,
 ) -> None:
+    """A user passes --out-labels alone or an npz without face_label: both are usage errors."""
     model, _ = _setup(tmp_path)
     alone = run_cli(
         tmp_path, "mesh", "deform", str(model), "spec.yaml", "--out-labels", "x.npz"
@@ -140,9 +144,11 @@ def test_out_labels_without_labels_and_missing_face_label_array_are_usage_errors
         tmp_path, "mesh", "deform", str(model), "spec.yaml", "--labels", "wrong.npz"
     )
     assert wrong.returncode == 2 and "no `face_label` array" in wrong.stderr
+    assert "--out-labels needs --labels" in alone.stderr
 
 
 def test_help_documents_the_label_options_and_the_new_op() -> None:
+    """A user reads `3d mesh deform --help` and the doc page: the label options and the displace op are in both."""
     from commands.mesh import DEFORM_USAGE
 
     for word in ("--labels FILE.npz", "--out-labels FILE.npz", "displace", "max_edge"):

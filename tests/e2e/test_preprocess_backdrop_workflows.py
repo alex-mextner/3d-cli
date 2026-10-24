@@ -27,6 +27,7 @@ def _studio(path: Path) -> np.ndarray:
 
 
 def test_backdrop_mask_keeps_the_dark_white_and_pink_parts(tmp_path: Path) -> None:
+    """A user masks a studio render with --backdrop: the black, white and pink parts are all subject."""
     truth = _studio(tmp_path / "studio.png")
     result = run_cli(tmp_path, "preprocess", "studio.png", "--backdrop", "--force-fallback", "-o", "out")
     assert result.returncode == 0, result.stdout + result.stderr
@@ -37,6 +38,7 @@ def test_backdrop_mask_keeps_the_dark_white_and_pink_parts(tmp_path: Path) -> No
 
 
 def test_no_backdrop_at_the_border_exits_two_with_the_remedy(tmp_path: Path) -> None:
+    """A user runs --backdrop on an image with no backdrop at the border: exit 2 with the remedy."""
     Image.new("RGB", (SIZE, SIZE), (230, 40, 40)).save(tmp_path / "red.png")
     result = run_cli(tmp_path, "preprocess", "red.png", "--backdrop", "--force-fallback", "-o", "out")
     assert result.returncode == 2, result.stdout + result.stderr
@@ -44,12 +46,15 @@ def test_no_backdrop_at_the_border_exits_two_with_the_remedy(tmp_path: Path) -> 
 
 
 def test_backdrop_value_range_must_be_two_numbers(tmp_path: Path) -> None:
+    """A user passes a malformed --backdrop-value: a usage error naming the expected form."""
     _studio(tmp_path / "studio.png")
     result = run_cli(tmp_path, "preprocess", "studio.png", "--backdrop", "--backdrop-value", "dark", "--force-fallback", "-o", "out")
     assert result.returncode == 2 and "--backdrop-value must be LO,HI" in result.stderr
+    assert "--backdrop-value must be LO,HI" in result.stderr
 
 
 def test_backdrop_options_are_documented_in_help_and_docs(tmp_path: Path) -> None:
+    """A user reads `3d preprocess --help` and the doc page: the backdrop options are in both."""
     result = run_cli(tmp_path, "preprocess", "--help")
     doc = (Path(__file__).resolve().parents[2] / "docs" / "commands" / "preprocess.md").read_text()
     for flag in ("--backdrop", "--backdrop-saturation S", "--backdrop-value LO,HI"):
