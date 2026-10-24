@@ -380,6 +380,12 @@ skills (`atomic-commits`, `ai-review-before-commit`, `pre-commit-gate`,
   `printers-doctor.md`, `printers-fw.md`, `docs/printers/firmware-profiles.md`.
 - `retarget` moves a slicer project `.3mf` to another printer in seconds (target preset, one extruder, kept
   objects, fit to the bed, `--set`/`--preset`); `slicing/{retarget_3mf,orca_presets,bed_fit}.py`, `docs/commands/retarget.md`.
+- `colour-regions` turns per-face surface labels into colour groups and conformal colour volumes (`build`,
+  `shell-volume`), carries labels or one approved class onto a newer mesh (`transfer`, `transfer-class`, `classify`),
+  snaps label borders onto creases (`snap`) and judges the result (`verify`: border on a geometric edge, volumes follow
+  the labels, each with a teeth test that must be able to FAIL). The colour of a label name lives in the project's
+  rules file, never in the code; `colour_regions/`, `docs/commands/colour-regions.md`. A colour border is a mesh edge
+  between two label groups, not an outline drawn from a picture.
 - `print-preflight` runs EVERY G-code gate (bounds, overhangs, slicer warnings, head
   sequence, mix face, mix layers, thumbnails, visible faces); a new G-code gate is added to
   `printer_ops/preflight.run_preflight`, never left as a separate step, and a gate without

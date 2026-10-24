@@ -33,6 +33,7 @@ explain why the command exists, what its inputs mean, and how it fits into the l
 | `import` | [import.md](import.md) | Generate OpenSCAD wrappers or conversion plans for imported model formats. |
 | `pack` | [pack.md](pack.md) | Plan deterministic print-bed layouts from explicit part footprints. |
 | `prep` | [prep.md](prep.md) | Model to print-ready plate with cached steps: repair, orientation, no-support adaptation, fit table, stability, colour regions, layers, Orca project, slice, G-code gates, proof pack. |
+| `colour-regions` | [colour-regions.md](colour-regions.md) | Per-face surface labels to colour groups and conformal colour volumes (`build`, `shell-volume`), nearest-face `transfer` / approved-class `transfer-class`, `classify` by part meshes, `snap` onto creases, `verify` gates with teeth tests. |
 | `props` | [props.md](props.md) | Snap-off support ribs for a part printed standing, with the height/base stability gate. |
 | `validate` | [validate.md](validate.md) | Fast OpenSCAD parse check without rendering. |
 | `params` | [params.md](params.md) | Extract Customizer-style parameters. |
