@@ -11,8 +11,14 @@ Paid models are listed with their price but never downloaded.
 ```bash
 3d models search QUERY [--site S[,S...]] [--limit N] [--json] [--images[=PROTO]] [--columns C[,C...]]
                        [--deep] [--cad] [--for-vitamin KIND] [--no-details] [--no-save]
+                       [--rank[=MODEL]] [--classifier M] [--planner M] [--rewrite sonnet|MODEL|off]
+                       [--max-queries N] [--max-calls N] [--token-budget N] [--llm-timeout S] [--batch-size N]
+                       [--answer KEY=VALUE]... [--no-llm] [--llm auto|require] [--ndjson] [--background|--wait]
 3d models searches list [--limit N] [--json]
 3d models searches show ID [--json] [--images[=PROTO]] [--columns C[,C...]]
+3d models rerank ID [--classifier M] [--planner M] [--rewrite sonnet|MODEL|off] [--answer KEY=VALUE]...
+                    [--follow N]... [--refresh] [--llm auto|require] [--ndjson|--json] [--db PATH]
+3d models followups ID [--json] [--answer KEY=VALUE]... [--follow N]...
 3d models show URL [--json]
 3d models download URL [--dir D] [--file NAME]... [--role ROLE [--vitamin KIND]] [--deep] [--json]
 3d models analyze FILE... [--json] [--no-save]
@@ -223,6 +229,100 @@ standard library (core spec: components, transforms, units).
 "metadata", "analytics": {"facts", "files"}, "source": {"uid", "created", "role", "license"} | null,
 "warnings": [{"code", "message"}]}`.
 
+## Ranking
+
+Everything here is optional: without `--rank` (and without `llm.enabled` in `ai.json`) `3d models search` is the
+deterministic search above, byte for byte, and `--no-llm` forces that path even when ai.json enables ranking.
+`omp` (the agent runner) is the model backend; it is never auto-picked, so a search never starts a subscription
+CLI unless you ask for it.
+
+```bash
+3d models search "soil moisture sensor probe case" --rank
+3d models search "little mole shaped box that holds a plant moisture probe" --rank --ndjson
+3d models rerank latest --answer need_cad=yes --follow 1
+3d models followups latest --json
+```
+
+**Two phases.** (1) The search runs (50 results per site when ranking is on and `--limit` is absent) and the
+normal view is printed at once — before any model call. (2) A haiku-class **classifier** judges every result
+from its title, description, tags, licence, price and the deterministic file analytics (CAD formats, STL/3MF/STEP,
+multi-part, assembly, size class, measured bounding box with `--deep`): `verdict fits|maybe|no`, `score 0..1`
+and a one-line `rationale`, as strict JSON (`3d.models.verdicts/1`). Results go in batches of 25, several
+batches at once; every finished batch prints its verdict lines immediately, and at the end the ranking lists the
+`fits` and `maybe` results, best first (fits, maybe, unjudged, no; by score; the search's own order breaks ties).
+Verdicts are cached in the library DB per (question + answered constraints, model, result card), so a repeat run,
+a `rerank` or another search that finds the same card makes no call. The text view is for people;
+`--ndjson` / `--json` are for agents (below).
+
+**Rewriting.** When fewer than `llm.rewrite_below` (default 3) results `fit` — or nothing was found — a
+sonnet-class **planner** reworks the query: a descriptive phrase becomes marketplace vocabulary (technical
+terms, synonyms, other languages). It may use omp's `web_search` and `read` (web fetch) tools and sees the top
+results with their verdicts and every query already run. It returns up to `--max-queries` (default 4) queries
+to run now: `rewrite` (same intent, new words), `wide` (the general category, similar models) and `narrow` (a
+precise variant), always at least one `wide` and one `narrow`. They run in parallel, each as its own saved search
+(`kind` rewrite|wide|narrow, `parent_id` = the original search), are merged into the result pool by (site, id),
+and the new hits are judged too. A query equal (case, punctuation and spacing folded) to one already run in the
+search tree is skipped and recorded as `skipped`. With enough fits the planner is still asked once for
+**follow-ups** and **questions** only; `--rewrite off` skips the planner altogether.
+
+**Follow-ups and questions.** Follow-up queries (`kind followup`, numbered 1..N) are suggestions that are not run
+until you ask: `--follow N`. Questions are typed — `single` (one of `choices`), `multi` (a comma-separated
+subset) or `text` — with a snake_case `key`. Answer one with `--answer KEY=VALUE` (repeatable, validated against
+its question; a key nobody asked is stored as a free-text constraint). An answer is saved, applied to the
+classifier as a constraint ("Constraints the user gave"), and re-judges the results; questions already answered
+are never asked again. `3d models followups ID` lists them; with `--answer` / `--follow` it works like `rerank`.
+The terminal UI (#578) binds the same actions (`library.actions.rank`) to keys.
+
+**Guards and degradation.** `--max-calls N` (default 12), `--token-budget N` (default none), `--llm-timeout S`
+(default 120 per call; the planner has its own `planner_timeout_s`, default 300) and `--batch-size N` bound the
+cost. Invalid JSON is retried once (the retry names what was wrong; a partial answer re-asks only the missing
+results); a timeout is not retried. If omp is missing, fails, times out, or answers invalid twice, the
+deterministic results stay on screen, ONE line `LLM: unavailable (...)` says why, and the exit code is 0. With
+`--llm require` a missing omp exits 127 before any request goes out. Every call (role, model, status, latency,
+tokens) is saved in `llm_call`.
+
+**Configuration.** One section of `~/.config/3d-cli/ai.json` (the file `3d ai` uses); every key is optional and
+every flag overrides it:
+
+```json
+{"llm": {"enabled": false, "backend": "omp", "classifier": "haiku", "planner": "sonnet",
+         "batch_size": 25, "parallel": 4, "timeout_s": 120, "planner_timeout_s": 300,
+         "max_calls": 12, "token_budget": 0, "rewrite_below": 3, "max_queries": 4,
+         "planner_tools": ["web_search", "read"], "thinking": "off",
+         "prompts": {"classify": "...", "plan": "..."}}}
+```
+
+`prompts` replaces a system prompt; the replacement must keep the JSON contract of `3d.models.verdicts/1` /
+`3d.models.plan/1`. Model names are whatever omp accepts (`haiku`, `sonnet`, `anthropic/claude-haiku-4-5`).
+`$THREED_OMP` points at a specific omp binary (tests use a fake).
+
+**Output modes.** Text (default); `--ndjson` streams `3d.models.rank/1` events, one JSON object per line, flushed
+as they happen — `start`, `search`, `result`, `phase`, `verdict`, `plan`, `query`, `question`, `warning`, `done`
+(schema and the order guarantees: `docs/contracts/search-events.md`); `--json` prints one
+`3d.models.rank-result/1` document at the end (the root `3d.models.search/2` document and one per child search,
+judged results carry `verdict`/`score`/`rationale`, plus `ranking`, `queries`, `followups`, `questions`, `llm`).
+`--background` prints phase 1 and hands the judging to a detached `3d models rerank` process; read the outcome
+with `3d models searches show ID`. `searches show` prints each verdict under its result.
+
+Flags (each also in `3d models --help`):
+
+- `--rank[=MODEL]` — rank with the classifier model; `3d models search "cable clip" --rank` or `--rank=haiku`.
+- `--classifier M` / `--planner M` — the two models; `3d models search "cable clip" --classifier haiku --planner sonnet`.
+- `--rewrite sonnet|MODEL|off` — the planner model, or no planner call; `3d models search "cable clip" --rank --rewrite off`.
+- `--max-queries N` — queries the planner runs, >= 2; `3d models search "mole probe box" --rank --max-queries 6`.
+- `--max-calls N` / `--token-budget N` — cost guards; `3d models search "cable clip" --rank --max-calls 4 --token-budget 200000`.
+- `--llm-timeout S` / `--batch-size N` — per-call timeout and results per call; `3d models search "cable clip" --rank --llm-timeout 60 --batch-size 10`.
+- `--answer KEY=VALUE` — answer a question (repeatable); `3d models rerank latest --answer need_cad=yes`.
+- `--follow N` (alias `--followup`) — run suggested follow-up N; `3d models rerank latest --follow 1`.
+- `--refresh` — ignore cached verdicts; `3d models rerank latest --refresh`.
+- `--no-llm` — never start omp; `3d models search "cable clip" --no-llm`.
+- `--llm auto|require` — `require` exits 127 before searching when omp is missing; `3d models search "cable clip" --llm require`.
+- `--ndjson` — event stream; `3d models search "cable clip" --rank --ndjson`.
+- `--background` / `--wait` — judge detached / before returning (default); `3d models search "cable clip" --rank --background`.
+
+Exit codes are those of `search` (0 when any site answered); `--llm require` without omp is 127, bad `--answer`
+values or flag combinations are 2. A model failure never changes the exit code.
+
 ## Library DB
 
 `search` writes one `search_session` (query, kind, `meta`: sites, limit, timings, errors, warnings) and one
@@ -230,8 +330,10 @@ standard library (core spec: components, transforms, units).
 which is what `searches show` returns). `download` writes a `model_source` (site, model id, URL, licence,
 author, directory, files with sha256, `role`, `vitamin_kind`, `analytics`); one row per site+model, a repeat
 download refreshes it. Deep meshes are cached in `analytics_cache` (by file key and by content sha256).
-Schema: `docs/contracts/library-db.md`. Persisting is best effort: an unwritable database adds a warning and the
-search output is still printed.
+Ranking adds the verdict, score and rationale on each `search_result`, and (migration 0030) `llm_verdict_cache`,
+`search_plan_query` (every planner query with its status), `search_question` (questions and answers) and
+`llm_call` (the model-call ledger). Schema: `docs/contracts/library-db.md`. Persisting is best effort: an
+unwritable database adds a warning and the search output is still printed.
 
 ## Merge order with #564 (`models publish`)
 

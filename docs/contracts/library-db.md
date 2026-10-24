@@ -35,8 +35,8 @@ imports - `library.db.insert_row(conn, table, values, source_key=K)` returns the
 `lib/library/actions.py` fixes eight functions - `search, rank, download, open_slicer, launch_agent, queue,
 photo, publish` - returning `{schema: "3d.action/1", action, ok, data, errors[], warnings[]}`. They never
 print, prompt or exit. The TUI (S7) binds keys to `ACTIONS[name]` and the CLI exposes the same functions as
-flags with `--json`. `queue`, `photo` (register an existing file), `search` and `download` (S5, #576) are
-implemented; the other actions raise `NotImplementedByDesign(owner_issue)` until their slice lands (`OWNERS` maps
+flags with `--json`. `queue`, `photo` (register an existing file), `search` and `download` (S5, #576) and `rank`
+(S6, #577: LLM relevance and query planning, `docs/contracts/search-events.md`) are implemented; the other actions raise `NotImplementedByDesign(owner_issue)` until their slice lands (`OWNERS` maps
 action -> issue). `search` takes `deep` and `idempotency_key` besides the contract arguments and returns a flat
 `results[]` (site, model_id, url, title, rank, image_url, license, paid, cad, size_mm, reference_suitable) plus the
 session uid; a site that failed is a `site_failed` warning and only "no site answered" is `ok: false`. `download`
@@ -61,5 +61,24 @@ clash) adds:
 Idempotency keys: a session's `source_key` is `search:<sha256(idempotency_key, query)>` when the caller gives
 `idempotency_key` (none = a fresh session per search); a result's is `<session uid>:<site>:<model id>`; a
 `model_source`'s is `source:<site>:<model id>` (a repeat download updates that row). `3d library status` lists
-the applied migrations `[1, 10]`. `invoke(name,
+the applied migrations `[1, 10, 30]`. `invoke(name,
 **kwargs)` is the never-raising edge for UIs.
+
+## Migration 0030 - LLM ranking (S6, #577)
+
+`lib/library/migrations/0030_llm_ranking.sql` adds (the verdict itself lives in the existing
+`search_result.verdict / score / rationale`; `verdict` is `fits | maybe | no`, `score` 0..1):
+
+- `llm_verdict_cache(query, model, site, model_id, input_hash, verdict, score, rationale, created_at)` - primary
+  key on the first five: the judged question (the user's query plus answered constraints), the classifier model
+  name, the result and the hash of the exact card the model saw (title, description, tags, licence, price and the
+  deterministic file analytics, plus the prompt version). A cache: not exported, safe to delete.
+- `search_plan_query(session_id -> root search, seq, query, kind wide|narrow|rewrite|followup, rationale, status
+  run|skipped|suggested, skip_reason, run_session_id)` - every query the planner proposed. `run` rows point at the
+  `search_session` they created (whose `parent_id` is the root search); `skipped` are duplicates of queries already
+  run; `suggested` are follow-ups waiting for `--follow N` (N = their order among the `followup` rows).
+- `search_question(session_id -> root search, key, type single|multi|text, prompt, choices, answer, answered_at)` -
+  `UNIQUE(session_id, key)`; `answer` is JSON (a string, or a list for `multi`), NULL until answered.
+- `llm_call(session_id, role classify|plan, model, status ok|invalid|timeout|error|budget, items, elapsed_s,
+  input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd, detail)` - the ledger of model
+  calls of a search; tokens and cost are NULL when the backend does not report them.

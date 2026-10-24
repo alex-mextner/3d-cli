@@ -173,6 +173,14 @@ def render_result(
         f"  [{rec['site']}]" if "site" in columns else ""
     )
     lines = [clip(title, width)]
+    if rec.get("verdict"):  # a ranked result (3d models --rank): its verdict and why
+        lines.append(
+            INDENT
+            + clip(
+                f"{rec['verdict']} {float(rec['score']):.2f} — {flat(str(rec.get('rationale') or ''))}",
+                body,
+            )
+        )
     stats = "  ".join(_token(c, rec) for c in columns if c in STAT_COLUMNS)
     facts = "  ".join(_token(c, rec) for c in columns if c in FACT_COLUMNS)
     if stats:
