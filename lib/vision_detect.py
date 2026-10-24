@@ -844,6 +844,7 @@ def run_guard(args: argparse.Namespace) -> int:
     from printer_ops.base import PrinterCommError
     from printer_ops.guard import PauseGuard, _write_result, guard_device, validate_args
     from printer_ops.vision import ContextTap
+    from printer_ops.vision_config import monitor_limits
 
     validate_args(args)
     device = guard_device(args.printer)
@@ -862,7 +863,8 @@ def run_guard(args: argparse.Namespace) -> int:
     root = state_dir() / "guard"
     guard = PauseGuard.arm(make_adapter(device), args.job_id, state_dir=root,
                            evidence_dir=Path(args.evidence).expanduser() if args.evidence else cache_dir() / "guard",
-                           clock=time.time, sleep=time.sleep, dry_run=args.dry_run, interval=args.interval)
+                           clock=time.time, sleep=time.sleep, dry_run=args.dry_run, interval=args.interval,
+                           limits=monitor_limits(cfg))
     root.mkdir(parents=True, exist_ok=True)
 
     def report(value: dict[str, Any]) -> None:
