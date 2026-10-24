@@ -427,6 +427,16 @@ Sinks — several at once:
   `+N more: kinds` line sent when it ends; a higher severity passes once.
   The old `--tg` / `--tg-always` flags and `tg:` key are read as `tg_fallback: true` with a
   deprecation warning.
+  At start the watcher (and `3d printer vision`) sends ONE `[TEST]` message through the same `tg`
+  command line an alert uses and asserts tg's exit code, on its own thread (a hung tg never delays the
+  watching) and at most once an hour per service across restarts (a service restarting in a loop must
+  not spam; `watch` and `vision` each prove their own tg): a tg that refuses every message is otherwise silent
+  until the first real alert fails (Chekhov 2026-10-23: `tg --tag answer` without `--reply-to`, the
+  error buried in a log, a paused print waited 6 h). A refusal is an `ERROR: the Telegram test message
+  FAILED` line on stderr (the journal of the service) and, for `watch`, `failed` / `last_error` of the `tg`
+  sink in the heartbeat file (`vision` has no heartbeat: the log line is its only surface); the watcher
+  keeps running, its other sinks may still reach someone, and the next start tries again at once. A state
+  directory the service cannot write only turns the once-an-hour throttle off. Not sent with `--dry-run`.
 - pause — before that message, a high-confidence critical finding pauses the print itself when
   `watch.pause_without_agent` is `critical-only` (default for own, `access: full` printers with a
   camera): [Pause without an agent](printer-vision.md#pause-without-an-agent). The stream itself

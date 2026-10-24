@@ -47,6 +47,7 @@ INVARIANTS: stdlib only; a failing sink is logged to stderr and counted, never f
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import queue
@@ -180,6 +181,10 @@ class Ledger(Protocol):
 
     def restore_limiter(self, printer: str, before: dict[str, Any]) -> None: ...
 
+    def claim_warning(self, key: str, now: float, every_s: float, *, fail_open: bool = False) -> bool: ...
+
+    def release_warning(self, key: str) -> None: ...
+
 
 class Pauser(Protocol):
     """auto_pause.AutoPauser: pauses the print for a qualifying critical event, once per job."""
@@ -294,6 +299,7 @@ def tg_frames(events: list[Event]) -> list[str]:
 
 MAX_HEADLINE = 200
 DEFAULT_COOLDOWN_S = 600.0   # `watch.message_cooldown_minutes`
+STARTUP_TEST_EVERY_S = 3600.0   # a service that restarts in a loop sends its Telegram test message once an hour
 
 
 def _first_line(text: str, limit: int = MAX_HEADLINE) -> str:
@@ -386,18 +392,51 @@ class TgSink(Sink):
             out[printer] = pause_lines(result)
         return out
 
-    def _send(self, printer: str, text: str, frames: list[str]) -> None:
+    def startup_test(self, printers: list[str], *, role: str = "watch", now: float | None = None) -> bool | None:
+        """Prove at start that the user can be reached: ONE `[TEST]` message through the same `tg` command line
+        a real alert uses, its exit code asserted. A watcher whose tg silently refuses every message looks
+        healthy and tells nobody (Chekhov 2026-10-23: `tg --tag answer` without `--reply-to`, the error buried
+        in the log, a paused print sat for 6 h). A failure is logged as an ERROR and kept in the sink's stats
+        (the heartbeat file shows `failed` / `last_error`); the watcher keeps running because its other sinks
+        may still reach someone. `role` (watch, vision) is part of the once-per-STARTUP_TEST_EVERY_S throttle: a
+        service has its own environment, so another service's success proves nothing about this one.
+        -> True sent, False failed, None skipped (already sent within the hour: restarts in a loop must not spam).
+        Never raises: a broken state file only turns the throttle off."""
+        key = f"tg-startup-test:{role}:{','.join(sorted(printers))}"
+        stamp = self.clock() if now is None else now
+        try:
+            if self.ledger is not None and not self.ledger.claim_warning(
+                key, stamp, STARTUP_TEST_EVERY_S, fail_open=True
+            ):
+                return None
+        except Exception as exc:  # an unreadable state file must not stop the test
+            _log(f"startup test throttle unavailable: {exc.__class__.__name__}: {exc}")
+        label = ", ".join(printers)
+        try:
+            self._send(f"[TEST] {label}: the printer watcher has started. This message checks that "
+                                    "printer alerts reach you on Telegram; no action is needed.", [])
+        except Exception as exc:
+            self.stats.failed += 1
+            self.stats.last_error = f"startup test: {exc.__class__.__name__}: {exc}"
+            _log(f"ERROR: the Telegram test message FAILED ({exc}); alerts that only tg could deliver for "
+                 f"{label} will NOT reach you until `tg` works")
+            with contextlib.suppress(Exception):   # the next start tries again at once
+                if self.ledger is not None:
+                    self.ledger.release_warning(key)
+            return False
+        _log(f"Telegram test message for {label} delivered")
+        return True
+
+    def _send(self, text: str, frames: list[str]) -> None:
         rich = [self.binary, "--tag", "problem", *[x for f in frames for x in ("--photo", f)], text]
         r = self.runner(rich, text=True, capture_output=True, timeout=60)
         if r.returncode != 0:
             first = f"tg exit {r.returncode}: {(r.stderr or r.stdout or '').strip()[:300]}"
             r = self.runner([self.binary, text], text=True, capture_output=True, timeout=60)
             if r.returncode != 0:
-                self._count(printer, "fallback_tg_failed")
                 raise RuntimeError(f"{first}; plain retry: tg exit {r.returncode}: "
                                    f"{(r.stderr or r.stdout or '').strip()[:300]}")
             _log(f"tg refused the tagged/photo message ({first}); sent the text alone")
-        self._count(printer, "fallback_tg_sent")
 
     def deliver(self, events: list[Event], suppressed: int = 0) -> None:
         paused = self._paused(events)   # before any limiting: the safety step is never held back
@@ -416,8 +455,10 @@ class TgSink(Sink):
                      f"({', '.join(dict.fromkeys(e.kind for e in mine))})")
                 continue
             try:
-                self._send(printer, short_text(printer, mine, paused.get(printer, []), adm), tg_frames(mine))
+                self._send(short_text(printer, mine, paused.get(printer, []), adm), tg_frames(mine))
+                self._count(printer, "fallback_tg_sent")
             except Exception as exc:  # the other printers of the batch still get theirs
+                self._count(printer, "fallback_tg_failed")
                 if self.ledger is not None:
                     self.ledger.restore_limiter(printer, adm.before)
                 errors.append(exc)
@@ -434,8 +475,10 @@ class TgSink(Sink):
             if not adm.send:
                 continue
             try:
-                self._send(printer, f"{printer}: +{adm.more} more: {', '.join(adm.more_kinds)}", [])
+                self._send(f"{printer}: +{adm.more} more: {', '.join(adm.more_kinds)}", [])
+                self._count(printer, "fallback_tg_sent")
             except Exception as exc:
+                self._count(printer, "fallback_tg_failed")
                 self.ledger.restore_limiter(printer, adm.before)
                 _log(f"{printer}: the folded-alerts summary was not sent: {exc}")
 
@@ -605,6 +648,7 @@ class Dispatcher:
         self._seen: dict[str, tuple[float, float]] = {}  # key -> (last accepted, its window)
         self._q: queue.Queue[Event | None] = queue.Queue()
         self._thread: threading.Thread | None = None
+        self._startup: threading.Thread | None = None
         self._lock = threading.RLock()   # process() vs late fallbacks from sink threads
         self.last_event: dict[str, dict[str, Any]] = {}
 
@@ -657,6 +701,24 @@ class Dispatcher:
 
                 pauser = AutoPauser(printer)
             tg.attach(printer, pauser=pauser, cooldown_s=settings.get("message_cooldown_s", DEFAULT_COOLDOWN_S))
+
+    def startup_test(self, printers: list[str], role: str = "watch") -> dict[str, bool | None]:
+        """Send each real tg route's `[TEST]` message (`TgSink.startup_test`); a dry-run route is not tg and sends none.
+        -> route ident -> sent / failed / skipped."""
+        out: dict[str, bool | None] = {}
+        for ident, route in self.routes.items():
+            if isinstance(route.sink, TgSink):
+                mine = [p for p in printers if p in route.printers]
+                if mine:
+                    out[ident] = route.sink.startup_test(mine, role=role)
+        return out
+
+    def start_startup_test(self, printers: list[str], role: str = "watch") -> threading.Thread:
+        """`startup_test` on its own thread: a hung `tg` (60 s per call) must not delay the watching. `close()` waits for it."""
+        self._startup = threading.Thread(target=self.startup_test, args=(printers, role), name="watch-startup-test",
+                                         daemon=True)
+        self._startup.start()
+        return self._startup
 
     @classmethod
     def for_devices(cls, devices: Iterable[Device], *, dry_run: bool = False,
@@ -769,6 +831,8 @@ class Dispatcher:
         self._q.put(None)
         if self._thread is not None:
             self._thread.join(timeout)
+        if self._startup is not None:
+            self._startup.join(max(0.0, deadline - time.monotonic()))
         for route in list(self.routes.values()):
             route.sink.close(max(0.0, deadline - time.monotonic()))
 
