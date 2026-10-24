@@ -1,7 +1,8 @@
 """calibration_plates — the plate series of `3d calibrate gen plateN` (lib/slicing/calibration_plate.py).
 
 Each module declares one plate: PLATE_ID, TESTS (test id -> description, for --only/--skip) and
-`build(ctx: PlateContext) -> Plate`, which prints only the tests `ctx.wants()`.
+`build(ctx: PlateContext) -> Plate`, which prints only the tests `ctx.wants()`, and UNDERLAY (test id
+-> UnderlayDecl: `on` the shared underlay or `cutout` of it, with the reason; #320).
 """
 
 from __future__ import annotations
@@ -10,6 +11,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
 from ..calibration_plate import Plate, PlateContext
+from ..calibration_underlay import UnderlayDecl, check_declarations
 from . import dense, dense2, filament
 
 
@@ -17,12 +19,16 @@ from . import dense, dense2, filament
 class PlateDef:
     build: Callable[[PlateContext], Plate]
     tests: Mapping[str, str]
+    underlay: Mapping[str, UnderlayDecl]
+
+    def __post_init__(self) -> None:
+        check_declarations(self.tests, self.underlay)
 
 
 PLATES: dict[str, PlateDef] = {
-    filament.PLATE_ID: PlateDef(filament.build, filament.TESTS),
-    dense.PLATE_ID: PlateDef(dense.build, dense.TESTS),
-    dense2.PLATE_ID: PlateDef(dense2.build, dense2.TESTS),
+    filament.PLATE_ID: PlateDef(filament.build, filament.TESTS, filament.UNDERLAY),
+    dense.PLATE_ID: PlateDef(dense.build, dense.TESTS, dense.UNDERLAY),
+    dense2.PLATE_ID: PlateDef(dense2.build, dense2.TESTS, dense2.UNDERLAY),
 }
 
 

@@ -7,6 +7,14 @@ import pytest
 
 from slicing.calibration_plates import u1_underlay as u1
 
+@pytest.fixture(autouse=True)
+def _two_layer_underlay():  # type: ignore[no-untyped-def]
+    """These synthetic G-codes are the two-layer (U = 0.45) underlay; the default is one layer (#320)."""
+    u1.configure(2, 4)
+    yield
+    u1.configure(1, 4)
+
+
 CFG = {
     "filament_diameter": ["1.75"],
     "filament_flow_ratio": ["1"],

@@ -18,6 +18,9 @@ REASONS:
   gcode_mismatch     the G-code footer carries a value other than the recorded one
 
 SCHEMA:
+  underlay_layers: 1 | 2                       layers of the calibration plates' shared underlay (#320) on a
+                                               multi-head printer (default 1; a single-head printer always
+                                               prints exactly 1); anything else fails `3d lint`
   levels:   {REASON: block|warn|off}           every reason, required
   kinds:    {KIND: LEVEL | {REASON: LEVEL}}    optional per-kind overrides
   printers: {PRINTER: LEVEL | {KIND: LEVEL | {REASON: LEVEL}}}   optional; KIND may be `all`
@@ -48,7 +51,9 @@ REASONS = (
 )
 ALL = "all"  # wildcard key: every kind of a printer
 _ANY = "*"  # internal wildcard for "every reason"
-_TOP = ("levels", "kinds", "printers")
+UNDERLAY_LAYERS = (1, 2)
+DEFAULT_UNDERLAY_LAYERS = 1
+_TOP = ("underlay_layers", "levels", "kinds", "printers")
 
 
 @dataclass(frozen=True)
@@ -56,6 +61,7 @@ class CalibrationPolicy:
     levels: dict[str, str]
     kinds: dict[str, dict[str, str]]  # kind -> reason|* -> level
     printers: dict[str, dict[str, dict[str, str]]]  # printer -> kind|all -> reason|* -> level
+    underlay_layers: int = DEFAULT_UNDERLAY_LAYERS
 
     def level(self, printer: str | None, kind: str, reason: str) -> str:
         if reason not in REASONS:
@@ -123,6 +129,11 @@ def parse(body: Mapping[str, Any]) -> CalibrationPolicy:
     if unknown:
         raise PolicyError(f"levels: unknown reason(s) {', '.join(unknown)}")
     levels = {r: _level(f"levels.{r}", raw_levels[r]) for r in REASONS}
+    layers = body.get("underlay_layers", DEFAULT_UNDERLAY_LAYERS)
+    if isinstance(layers, bool) or not isinstance(layers, int) or layers not in UNDERLAY_LAYERS:
+        raise PolicyError(
+            f"underlay_layers must be 1 or 2 (layers of the calibration underlay), got {layers!r}"
+        )
 
     raw_kinds = body.get("kinds") or {}
     if not isinstance(raw_kinds, dict):
@@ -141,4 +152,6 @@ def parse(body: Mapping[str, Any]) -> CalibrationPolicy:
         if not isinstance(rules, dict) or not rules:
             raise PolicyError(f"printers.{p} must be a level or a non-empty {{kind: …}} mapping")
         printers[str(p)] = {str(k): _by_reason(f"printers.{p}.{k}", v) for k, v in rules.items()}
-    return CalibrationPolicy(levels=levels, kinds=kinds, printers=printers)
+    return CalibrationPolicy(
+        levels=levels, kinds=kinds, printers=printers, underlay_layers=layers
+    )

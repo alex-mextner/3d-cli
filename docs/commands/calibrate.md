@@ -205,8 +205,9 @@ and acceleration measures settings you do not print with). The G-code ends with
   tower prints last, alone (`print_sequence` by object), `extruder_clearance_radius` behind the
   rest and under `extruder_clearance_height_to_rod`. `--only`/`--skip` pick tests (`pa`, `mvs`,
   `flow`, `bridge`, `overhang`, `retraction`, `temp`); the layout is packed again, so a skipped test
-  leaves no hole. Next to the G-code: `NAME.json`, the map object → parameters, bbox, Z bands,
-  labelled items, how to read it, the `record` command. K1 SE, PLA: ~25 min (all tests).
+  leaves no hole. Next to the G-code: `NAME.json`, the map `calib-plate/1` (object → parameters, bbox,
+  Z bands, labelled items, how to read it, the `record` command, the `underlay` block). K1 SE, PLA:
+  ~25 min (all tests). Every plate stands on the [shared underlay](#the-shared-underlay-320).
   `--pa-range LOW:HIGH --pa-step S` set the PA lines (combo and plates; refused when `pa` is
   skipped); `-o` must not end in `.json` (that name is the map's). A plate keeps at least one
   test Orca slices by layer (`flow`, `bridge`, `overhang`, `retraction`): for PA lines alone use
@@ -223,7 +224,7 @@ and acceleration measures settings you do not print with). The G-code ends with
   a VFA tube (wall speed 50→300 mm/s in the same bands, ACCEL 6000), a 50×50 frame (size; skew from
   the diagonals), pins printed in place (gaps 0.1–0.5), hinges (0.3/0.4), M3/M4 holes, slots for a
   2 mm insert with the insert, Ø1–4 holes, thin walls 0.3–1.0 along X and Y, first-layer patches
-  and a top-surface patch. Ringing and VFA print by layer: their bands rewrite only their own lines,
+  (`--no-underlay` only: the bare underlay is the first-layer map) and a top-surface patch. Ringing and VFA print by layer: their bands rewrite only their own lines,
   and after each visit the engine re-sends the slicer's acceleration and fan and balances any
   extrusion a band changed. Labels are one-layer digits on the bed. The 22 mm bridge needs
   `print-preflight --bridge-max 25`. K1 SE, PLA: ~44 min + START_PRINT, ~13 g; OpenSCAD on PATH.
@@ -238,10 +239,13 @@ and acceleration measures settings you do not print with). The G-code ends with
   blocks without/with the chamfer; M3 2.7/3.0/3.6, M4 3.5/4.0/4.7; slots 2.05/2.15/2.25 and the
   2 mm tab; hinges 0.25/0.35; thin walls 0.25/0.35/0.45 along Y and X; the 14 mm bridge and the
   60° overhang on 8 mm bases; MVS strip 24–32 mm³/s; stringing pillars; a top tile; a temperature
-  mini-tower last and alone; corner fiducials (ring + rulers) and 20 mm one-layer patches on the
-  free cells. Brims: 3 mm on every object whose base side is under 10 mm or that is taller than
+  mini-tower last and alone; corner fiducials (ring + rulers) and, with `--no-underlay`, 20 mm
+  one-layer patches on the free cells. Brims: only with `--no-underlay` (or for an object outside
+  the underlay), 3 mm on every object whose base side is under 10 mm or that is taller than
   its base is wide (`Plate.brim`): hand-written for objects printed by layer (Orca's own brim
-  would go on every object), Orca's own in the sequential slice for the tower. MVS 20
+  would go on every object), Orca's own in the sequential slice for the tower. On the underlay the
+  bridge and overhang stand on their 8 mm bases with no brim, the thin walls and stringing pillars
+  on no tile at all. MVS 20
   and inner walls at 8000 come from the user presets (#266); the map's `slicer_overrides` lists
   what the plate sets on top of them. The engine now picks a Z band by the layer's range (Orca's
   `;Z:` is the layer's top), so a band's setting starts on the layer its step does (#301).
@@ -255,6 +259,62 @@ and acceleration measures settings you do not print with). The G-code ends with
 `calc_exclude_triangles` error is accepted in the sidecar only when the machine has no bed
 exclude area.
 
+#### The shared underlay ([#320](https://github.com/alex-mextner/3d-cli/issues/320))
+
+Every plate of `gen` (`plate1`, `dense`, `dense2`) prints all its tests on ONE underlay: a solid
+layer under the whole test area, so the plate comes off in one piece and stays as a labelled sample
+of the spool. It replaces the per-test brims and the separate tile bases.
+
+- **Layers.** A single-head printer prints exactly 1 layer. A multi-head printer prints 1–2
+  (`calibrations.underlay_layers` in `fleet/policy.yaml`, default 1; anything else fails `3d lint`),
+  in its own contrasting filament: the head is the one that contrasts most with the tests'
+  (CIEDE2000 ≥ 40, the [#263](https://github.com/alex-mextner/3d-cli/issues/263) check), or
+  `--underlay-tool` (the same check applies). `gen` on a printer with several heads needs the colours
+  loaded on them (`--head-colours T1=#000000,T4=#FFFFFF`; the tests' head, `--head`, defaults to the
+  first and to `--color`): the G-code selects the underlay's head before the first layer and changes
+  to the tests' head once, after the underlay's last layer (`T3` … `T0`). A single-head printer has
+  no tool change and rejects `--underlay-tool`. The U1's own plate (one Orca object per test, white
+  and black parts) is [below](#u1-plate-1-every-test-on-a-white-underlay-320-322-308).
+- **Outline.** The union of every test's footprint, the label strips and the hand-written blocks
+  (PA lines, MVS strip), each grown by 3 mm, joined into one connected piece. A test stands on it
+  (`on`: a foot of the underlay's height under its base, so it starts at the underlay's top) or in a
+  hole of it (`cutout`, the footprint plus 1 mm). The outline minus the cut-outs stays one piece;
+  the generator refuses a layout that splits it.
+- **Catalog.** Every test declares `on` or `cutout` with a reason (`UNDERLAY` of its plate
+  module). Print-in-place parts (pins in holes, hinges), loose parts (the insert, the slot tab),
+  elephant-foot blocks and through holes that are measured with a pin (hole tiles, M3/M4 holes,
+  small holes) are `cutout`; a test with a movable part cannot be `on`.
+- **Order.** The underlay is the first object of the print. The hand-written blocks, lifted by its
+  height, print right after its layers; the sequential temperature tower is sliced alone and lifted
+  by its height, so it starts on the finished underlay; the gantry clearance check includes the
+  underlay height.
+- **Brims.** None on an underlay plate (`Plate.brim`/`brim_width` apply only to an object outside
+  it) and no first-layer patches: the bare underlay between the tests is the first-layer map.
+- **Map.** `NAME.json` (`calib-plate/1`) carries `underlay`: `layers`, `top_mm`, `bbox`, `area_mm2`,
+  `pieces` (1), `cutouts`, `bare` (the cells where nothing stands), `head` and `read.light`
+  (`raking` on a single-head printer, `contrast` on a multi-head one).
+- **Single tests.** `pa`, `flow`, `combo` and `temp` carry no underlay: each declares `cutout` with
+  its reason (`KIND_UNDERLAY` in `lib/slicing/calibration_gen.py`: a lone tower or tile row has no
+  small part to tip, and a sheet would hide the first layer or shift the Z steps they read);
+  `--no-underlay` and the head flags are refused for them.
+- `--no-underlay` prints on the bare bed with the old brim rule and the first-layer patches.
+
+`3d calibrate underlay-map PLATE.json --rectify R.json [--image IMG] [--cell-mm N] [--json]` reads
+the bare underlay of a rectified photo (`calibrate rectify`) as the first-layer map: per cell the
+mean brightness and texture, the uniformity of the plate and the hints `bed_tilt`, `z_offset`
+(gaps = nozzle too high under contrast light; rough cells under raking light) and `patchy`, with
+their place in bed mm. The hints are advice to confirm, never applied; fewer than 4 whole cells
+in the photo is `needs_manual` (exit 1).
+
+```bash
+# multi-head printer: underlay in T4 (white), tests in T1 (black); the check refuses a pair under ΔE 40
+3d calibrate gen plate1 --printer MULTI --filament-preset 'Orange PLA @K1SE' --color '#000000' \
+  --head-colours T1=#000000,T3=#2D9E59,T4=#FFFFFF --underlay-tool T4 --head T1 -o multi_plate1.gcode
+3d calibrate gen plate1 --printer k1se --filament-preset 'Orange PLA @K1SE' --no-underlay -o k1se_bare.gcode
+# read the first-layer map from a rectified photo, in 5 mm cells
+3d calibrate underlay-map k1se_plate1.json --rectify rect/rect.json --image rect/rectified.png --cell-mm 5 --json
+```
+
 ### U1 plate 1: every test on a white underlay ([#320](https://github.com/alex-mextner/3d-cli/issues/320), [#322](https://github.com/alex-mextner/3d-cli/issues/322), [#308](https://github.com/alex-mextner/3d-cli/issues/308))
 
 The Snapmaker U1 plate is generated as a Snapmaker Orca project by
@@ -266,9 +326,13 @@ cd lib && uv run --project .. --with segno --with pillow \
   python -m slicing.calibration_plates.u1_underlay -o ~/.cache/u1-calib/u1_plate1_underlay_bw.gcode [--date YYYY-MM-DD] [--preview-only]
 ```
 
-- The underlay is 2 layers in white on T4 (G-code `T3`), with a 5 mm brim, part fan 0 and the bed
-  at 70 °C for the first layer. The tests are in black on T1 (`T0`) from layer 3. The G-code has
-  exactly one tool change, T4 → T1, above the underlay (#308), and no prime tower.
+- The underlay is 1–2 layers (`calibrations.underlay_layers`, default 1; `--underlay-layers`), no
+  brim, part fan 0 and the bed at 70 °C for the first layer, in the head that contrasts most with
+  the tests' T1 (T4 white by default; `--underlay-tool T2|T3|T4`; `--slot-colours` names what is
+  loaded; the contrast check refuses ΔE < 40, override included). The tests are in black on T1
+  (`T0`) from the layer above. The G-code has exactly one tool change, underlay head → T1, above
+  the underlay (#308), and no prime tower. The map's `underlay` block has the head, ΔE, `bare`
+  cells and `read.light: contrast`.
 - Each test is its own Orca object, so it has its own `EXCLUDE_OBJECT`. The test's white base
   overlaps the underlay sheet by 0.05 mm so the perimeters fuse. Loose pieces (pins, the tab,
   hinges, elephant-foot blocks) stand on white feet in cut-outs of the base.

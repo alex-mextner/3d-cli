@@ -33,9 +33,25 @@ import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from slicing.calibration_plate import UnderlayHeads
 
 KINDS = ("pa", "flow", "combo", "temp", "shaper")
+# The single tests carry no shared underlay (#320): each declares `cutout` and why. A plate (the
+# series of calibration_plates) stands on the underlay; these are one object each.
+KIND_UNDERLAY = {
+    "pa": "one hollow single-wall tower: no small part to tip, the tower's own first layer is the "
+    "test of the bed (a sheet under it would hide the first layer it measures)",
+    "flow": "five 20 mm tiles whose top skin is read: they are big and flat and do not tip; a sheet "
+    "would add layers under the M221 steps",
+    "combo": "PA lines are a one-layer test read on the bare bed; the flow tiles beside them are as "
+    "above — the combo is the express pass, the plates are the underlay's",
+    "temp": "one tall tower on its own 1 mm base plate; the base plate is its underlay, and a sheet "
+    "would raise the blocks' Z against the temperature steps",
+    "shaper": "console commands only, nothing is printed",
+}
 SLICE_TIMEOUT_S = 600
 
 
@@ -1318,6 +1334,15 @@ def all_kinds() -> tuple[str, ...]:
     return KINDS + tuple(PLATES)
 
 
+def all_plates() -> tuple[str, ...]:
+    """The plates of the series (calibration_plates.PLATES)."""
+    from slicing.calibration_plates import (
+        PLATES,
+    )  # lazy: the plate engine imports this module
+
+    return tuple(PLATES)
+
+
 def generate(
     kind: str,
     model: str,
@@ -1332,10 +1357,14 @@ def generate(
     pa_range: tuple[float, float] | None = None,
     pa_step: float | None = None,
     presets: PresetChoice | None = None,
+    underlay_layers: int | None = 1,
+    heads: UnderlayHeads | None = None,
 ) -> Generated:
     """One calibration print. `only`/`skip` pick the tests of a plate (plateN kinds only);
     `pa_range`/`pa_step` set the PA line values (combo, plates) instead of the material's;
-    `presets` are the slicer presets to slice with (required for everything but shaper)."""
+    `presets` are the slicer presets to slice with (required for everything but shaper);
+    `underlay_layers` are the layers of the plates' shared underlay (#320; None: bare bed, with
+    the brim rule)."""
     if kind not in all_kinds():
         raise GenError(f"unknown kind {kind!r} (accepted: {', '.join(all_kinds())})")
     if kind not in KINDS:  # a plate of the series (lib/slicing/calibration_plates)
@@ -1359,6 +1388,8 @@ def generate(
             tests,
             pa_values(material, pa_range, pa_step) if wants_pa else (),
             presets,
+            underlay_layers,
+            heads,
         )
         return build_plate(ctx, PLATES[kind].build(ctx), slicer, out)
     if (pa_range is not None or pa_step is not None) and kind != "combo":
@@ -1368,6 +1399,10 @@ def generate(
     if only or skip:
         raise GenError(
             f"--only/--skip pick the tests of a plate; {kind!r} is a single test"
+        )
+    if underlay_layers != 1:
+        raise GenError(
+            f"the underlay belongs to the plates ({', '.join(all_plates())}), not to the single test {kind!r}"
         )
     if kind == "shaper":
         return gen_shaper(presets_for(model), out)
