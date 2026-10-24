@@ -412,9 +412,50 @@ def check_image(
         for second in labels[i + 1 :]
         if rects_overlap(first.box, second.box)
     )
+    offenders.extend(_spanning_separated(side))
     if require_dims:
         offenders.extend(_missing_required(side, labels))
     return offenders
+
+
+def _spanning_separated(side: str) -> list[Offender]:
+    """Offenders for every dimension that measures across separate parts of an exploded / multi-part layout.
+
+    `3d dimension` refuses to draw one and records `spans_separated` on each dimension; a sidecar that
+    says so (a render by an old tool cannot, a hand-edited one is out of luck) fails the gate. The one
+    allowed form is a mating gap declared `kind: gap` between two named parts.
+    """
+    try:
+        with open(side, encoding="utf-8") as handle:
+            raw = json.load(handle)["dimensions"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return []
+    seen: set[str] = set()
+    out: list[Offender] = []
+    for entry in raw:
+        if not isinstance(entry, dict) or entry.get("spans_separated") is not True:
+            continue
+        if entry.get("kind") == "gap":
+            continue
+        label = str(entry.get("label"))
+        if label in seen:
+            continue
+        seen.add(label)
+        parts = entry.get("parts")
+        named = (
+            f" ({' / '.join(map(str, parts))})"
+            if isinstance(parts, list) and parts
+            else ""
+        )
+        out.append(
+            Offender(
+                label,
+                "spans-separated-parts",
+                f"measures across separate parts of an exploded / multi-part layout{named}; "
+                "keep it on one part or declare a `kind: gap` between two named parts",
+            )
+        )
+    return out
 
 
 def _missing_required(side: str, labels: list[_Label]) -> list[Offender]:

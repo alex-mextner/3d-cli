@@ -42,6 +42,7 @@ from dimension_args import (
     parse_define,
     parse_dim,
     parse_dims_file,
+    parse_dims_gaps,
     parse_overall,
     parse_part,
     parse_up,
@@ -56,7 +57,15 @@ from dimension_check import (
 )
 from dimension_legend import draw_legend, layout_legend
 from dimension_model import RenderError, load_raw
-from dimension_options import PERM, letters, reorient, separated_groups
+from dimension_options import (
+    PERM,
+    SpanError,
+    classify_dimension,
+    letters,
+    part_bounds,
+    reorient,
+    separated_groups,
+)
 from dimension_parts import Model, build_model
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
 
@@ -607,6 +616,19 @@ def _draw_bed(
     }
 
 
+def _span_fields(
+    item: Placed, info: dict[str, dict[str, object]], separated: bool
+) -> dict[str, object]:
+    """The sidecar fields `--check` uses to refuse a dimension across separate parts."""
+    if item.kind == "bbox":
+        return {
+            "spans_separated": separated
+        }  # an overall size of a layout whose parts are apart
+    if item.kind == "part":
+        return {"spans_separated": False}
+    return info.get(item.label, {"spans_separated": False})
+
+
 def render(
     model_path: str,
     out: str,
@@ -621,6 +643,7 @@ def render(
     up: str = "Z",
     overall: str = "auto",
     required: list[str] | None = None,
+    gaps: dict[str, tuple[str, str]] | None = None,
 ) -> dict[str, Any]:
     """Render `model` to `out` (+ sidecar); returns the sidecar dict."""
     title = name or os.path.splitext(os.path.basename(model_path))[0]
@@ -645,6 +668,12 @@ def render(
     ext = mesh.extents
     by_letter = {letter: float(ext[i]) for i, letter in enumerate(axis_letters)}
     groups = separated_groups(model)
+    if overall == "always" and groups:
+        raise RenderError(
+            f"3d dimension: --overall always would draw one size across {len(groups)} separate parts "
+            "of an exploded / multi-part layout (a number that measures the gaps between them); "
+            "use --overall auto for each part's own size"
+        )
     draw_overall = overall == "always" or (overall == "auto" and not groups)
     per_part_dims = overall == "auto" and bool(groups)
     draw.text((16, 10 * scale), title, font=head_font, fill=(20, 20, 20))
@@ -660,8 +689,22 @@ def render(
     ]
     # A slanted part's own length (its oriented box) beats the longest side of the axis-aligned box;
     # an axis-aligned block, strap or pyramid has no such length, so it gets no space-diagonal "span".
-    if is_slanted(mesh):
+    # Never across separated parts: the farthest pair of an exploded layout is a gap, not a length.
+    if not groups and is_slanted(mesh):
         custom.insert(0, ("span", *longest_span(mesh)))
+    bounds = part_bounds(model)
+    gap_parts = gaps or {}
+    dim_info: dict[str, dict[str, object]] = {}
+    for cname, c1, c2 in custom:
+        if cname == "span":
+            dim_info[cname] = {"parts": [], "spans_separated": False}
+            continue
+        try:
+            dim_info[cname] = classify_dimension(
+                model, bounds, cname, c1, c2, gap_parts.get(cname), bool(groups)
+            )
+        except SpanError as exc:
+            raise RenderError(f"3d dimension: {exc}") from exc
     sidecar: dict[str, Any] = {
         "part": title,
         "source": os.path.abspath(model_path),
@@ -749,7 +792,7 @@ def render(
                 c2,
                 cname,
                 float(np.linalg.norm(c2 - c1)),
-                "custom",
+                "gap" if cname in gap_parts else "custom",
                 CUSTOM_COLOR,
                 font,
                 px_font,
@@ -782,7 +825,10 @@ def render(
         "height": height,
         "sha256": sha256_file(out),
     }
-    sidecar["dimensions"] = [p.as_dict() for p in placed]
+    sidecar["separated_parts"] = bool(groups)
+    sidecar["dimensions"] = [
+        {**p.as_dict(), **_span_fields(p, dim_info, bool(groups))} for p in placed
+    ]
     sidecar["parts"] = [p.as_dict() for p in model.parts]
     if legend is not None:
         sidecar["legend"] = legend
@@ -795,6 +841,12 @@ def render(
 def _checked_dim_spec(raw: str) -> str:
     """Validate a --dim spec but keep the raw string: `render` parses it again."""
     parse_dim(raw)
+    return raw
+
+
+def _checked_dims_file(raw: str) -> str:
+    """Validate a --dims-from file but keep its path: `main` reads the dims and the gaps from it."""
+    parse_dims_file(raw)
     return raw
 
 
@@ -838,9 +890,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     ap.add_argument("--up", type=_arg_type(parse_up), default="Z")
     ap.add_argument("--overall", type=_arg_type(parse_overall), default="auto")
-    ap.add_argument("--dims-from", type=_arg_type(parse_dims_file), default=None)
+    ap.add_argument("--dims-from", type=_arg_type(_checked_dims_file), default=None)
     args = ap.parse_args(argv)
-    required = args.dims_from or []
+    required = parse_dims_file(args.dims_from) if args.dims_from else []
+    gaps = parse_dims_gaps(args.dims_from) if args.dims_from else {}
     try:
         sidecar = render(
             args.model,
@@ -850,6 +903,7 @@ def main(argv: list[str] | None = None) -> int:
             up=args.up,
             overall=args.overall,
             required=required,
+            gaps=gaps,
             bed=args.bed,
             width=args.width,
             label_px=args.label_px,

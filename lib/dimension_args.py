@@ -154,12 +154,8 @@ def _point_text(raw: object, where: str) -> str:
     return ",".join(str(finite(str(v), where)) for v in raw)
 
 
-def parse_dims_file(path: str) -> list[str]:
-    """Read a `--dims-from` spec (JSON, or YAML when pyyaml is there) as `--dim` strings.
-
-    Shape: a list, or {"dims": [...]}, of {"name": ..., "from": [x,y,z], "to": [x,y,z]}.
-    Names must be unique (the check matches the image's labels by name).
-    """
+def _load_dims_data(path: str) -> list[object]:
+    """The raw list of a `--dims-from` file (JSON, or YAML when pyyaml is there)."""
     try:
         with open(path, encoding="utf-8") as handle:
             text = handle.read()
@@ -182,7 +178,41 @@ def parse_dims_file(path: str) -> list[str]:
         raise ValueError(
             f"--dims-from {path!r}: expected a non-empty list of measurements"
         )
+    return data
+
+
+def parse_dims_file(path: str) -> list[str]:
+    """Read a `--dims-from` spec (JSON, or YAML when pyyaml is there) as `--dim` strings.
+
+    Shape: a list, or {"dims": [...]}, of {"name": ..., "from": [x,y,z], "to": [x,y,z]} and, for the
+    mating gap between two parts, {"name": ..., "kind": "gap", "parts": [A, B], "from": ..., "to": ...}.
+    Names must be unique (the check matches the image's labels by name).
+    """
+    data = _load_dims_data(path)
     out: list[str] = []
+    for name, p1, p2, _gap in _dims_entries(data, path):
+        out.append(f"{name}:{p1}:{p2}")
+    return out
+
+
+def parse_dims_gaps(path: str) -> dict[str, tuple[str, str]]:
+    """The `kind: gap` entries of a `--dims-from` spec: measurement name -> its two named parts."""
+    return {
+        name: gap
+        for name, _p1, _p2, gap in _dims_entries(_load_dims_data(path), path)
+        if gap is not None
+    }
+
+
+def _dims_entries(
+    data: list[object], path: str
+) -> list[tuple[str, str, str, tuple[str, str] | None]]:
+    """Validated (name, from-text, to-text, gap parts or None) of every entry.
+
+    `kind` is `dim` (default: both ends on ONE part) or `gap` (the declared mating gap between two
+    NAMED parts: `parts: [A, B]`). Anything else is refused.
+    """
+    out: list[tuple[str, str, str, tuple[str, str] | None]] = []
     seen: set[str] = set()
     for i, item in enumerate(data):
         where = f"--dims-from {path!r} entry {i + 1}"
@@ -194,7 +224,28 @@ def parse_dims_file(path: str) -> list[str]:
                 f"{where}: name {name!r} is empty, contains ':' or repeats"
             )
         seen.add(name)
+        kind = str(item.get("kind", "dim")).strip().lower()
+        gap: tuple[str, str] | None = None
+        if kind == "gap":
+            named = item.get("parts")
+            if (
+                not isinstance(named, (list, tuple))
+                or len(named) != 2
+                or not all(isinstance(n, str) and n.strip() for n in named)
+                or named[0].strip() == named[1].strip()
+            ):
+                raise ValueError(
+                    f"{where}: a `kind: gap` needs `parts: [A, B]`, two different part names"
+                )
+            gap = (named[0].strip(), named[1].strip())
+        elif kind != "dim":
+            raise ValueError(f"{where}: kind {kind!r} is not `dim` or `gap`")
         out.append(
-            f"{name}:{_point_text(item.get('from'), where)}:{_point_text(item.get('to'), where)}"
+            (
+                name,
+                _point_text(item.get("from"), where),
+                _point_text(item.get("to"), where),
+                gap,
+            )
         )
     return out
