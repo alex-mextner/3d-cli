@@ -71,6 +71,11 @@ Views and dimensions:
                        declared {name, kind: gap, parts: [A, B], from, to}.
                        Example: 3d dimension box.stl --dims-from dims.yaml -o box.png
 
+Occlusion: a --dim / --dims-from measurement is drawn in a view only if both endpoints are visible there
+(a ray toward the eye meets no surface more than 0.5 mm away); otherwise it is listed under `hidden_in_view`
+in the sidecar. One hidden in every view fails a --dims-from render. An explicit arrow is anchored on the part
+(drawn dashed where it runs over it); name it after the object it measures.
+
 No dimension across separate parts: on an exploded assembly or a plate (parts that do not touch) a
 --dim / --dims-from measurement whose two endpoints are on DIFFERENT parts (within 0.5 mm of a part's
 bounding box) is refused with exit 2, naming both parts, because the number would only measure the gap

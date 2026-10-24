@@ -65,6 +65,7 @@ from dimension_options import (
     part_bounds,
     reorient,
     separated_groups,
+    visible_from,
 )
 from dimension_parts import Model, build_model
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
@@ -85,6 +86,7 @@ HEADER_PX = 64
 PANEL_MARGIN_X = 118
 PANEL_MARGIN_TOP = 52
 PANEL_MARGIN_BOTTOM = 84
+ON_PART_OFFSETS = (200, 250, 310, 380)
 OFFSETS = (26, 42, 58, 76, 96, 118, 140, 166)
 CLEAN_PLACEMENT = 300.0  # a score above this means a label collision remains
 GRID_CELL = 4
@@ -418,10 +420,14 @@ def place_dimension(
         0.5
     ]
     beside = abs(normal[0]) * half_w + abs(normal[1]) * half_h + 6
-    # A custom/span arrow must not cut across the part; a bbox edge sits on the silhouette
-    # anyway, so only its offset line is judged.
-    line_weight = 300.0 if kind == "bbox" else 3000.0
-    for base_off in OFFSETS:
+    # The auto span of a slanted part must not cut across it; a bbox edge sits on the silhouette anyway,
+    # so only its offset line is judged. An explicit measurement (--dim / --dims-from, `custom` or `gap`)
+    # is anchored ON the part (a feature seen on the surface or on a cut face), so its arrow may run over
+    # the part: only its label must find clean paper, and the arrow is drawn dashed where it crosses.
+    on_part = kind in ("custom", "gap") and name != "span"
+    line_weight = 300.0 if kind == "bbox" else (0.0 if on_part else 3000.0)
+    # An arrow over the part may need to leave it entirely to give its label clean paper.
+    for base_off in OFFSETS + (ON_PART_OFFSETS if on_part else ()):
         off = base_off * panel.ui
         for sign in (sign0, -sign0):
             a2, b2 = a + normal * sign * off, b + normal * sign * off
@@ -480,11 +486,16 @@ def place_dimension(
             fill=color,
             width=1,
         )
-    draw.line(
-        [tuple(a2 + along * arrow_px), tuple(b2 - along * arrow_px)],
-        fill=color,
-        width=2,
-    )
+    inside = on_part and _line_silhouette(panel, a2, b2) > 0.3
+    start, end = a2 + along * arrow_px, b2 - along * arrow_px
+    if inside:  # dashed: the arrow runs over the part, it measures a feature on / in it
+        run = float(np.linalg.norm(end - start))
+        for k in np.arange(0.0, run, 12.0):
+            seg_a = start + along * k
+            seg_b = start + along * min(k + 7.0, run)
+            draw.line([tuple(seg_a), tuple(seg_b)], fill=color, width=2)
+    else:
+        draw.line([tuple(start), tuple(end)], fill=color, width=2)
     _arrowhead(draw, a2, -along, color, arrow_px)
     _arrowhead(draw, b2, along, color, arrow_px)
     draw.rectangle(box, fill=(255, 255, 255), outline=color, width=1)
@@ -716,6 +727,8 @@ def render(
         "views": {},
     }
     placed: list[Placed] = []
+    all_tris = np.asarray(mesh.triangles, dtype=float)
+    hidden: dict[str, list[str]] = {}
     for index, view in enumerate(VIEWS):
         col, row = index % 2, index // 2
         rect = (
@@ -785,6 +798,14 @@ def render(
                     if item:
                         placed.append(item)
         for cname, c1, c2 in custom:
+            # Only geometry the eye sees can be measured in this view: an endpoint behind a surface
+            # (a PCB inside its case) would leave the arrow floating in the air next to the part.
+            if cname != "span" and not (
+                visible_from(all_tris, c1, panel.cam)
+                and visible_from(all_tris, c2, panel.cam)
+            ):
+                hidden.setdefault(cname, []).append(view)
+                continue
             item = place_dimension(
                 draw,
                 panel,
@@ -807,9 +828,17 @@ def render(
     drawn_names = {p.label for p in placed}
     missing = [n for n in required_names if n not in drawn_names]
     if missing:
+        inside = [n for n in missing if len(hidden.get(n, [])) == len(VIEWS)]
+        why = (
+            f"; {', '.join(inside)} lies inside the model, hidden in every view "
+            "(measure it in a section, or choose endpoints on visible surfaces)"
+            if inside
+            else ""
+        )
         raise RenderError(
             f"3d dimension: --dims-from: not drawn in any view: {', '.join(missing)} "
-            "(an arrow is shown only where it keeps >= 90% of its true length and finds a clean spot)"
+            f"(an arrow is shown only where it keeps >= 90% of its true length, finds a clean spot "
+            f"and both endpoints are visible){why}"
         )
     if required_names:
         sidecar["required_dims"] = required_names
@@ -826,6 +855,7 @@ def render(
         "sha256": sha256_file(out),
     }
     sidecar["separated_parts"] = bool(groups)
+    sidecar["hidden_in_view"] = hidden
     sidecar["dimensions"] = [
         {**p.as_dict(), **_span_fields(p, dim_info, bool(groups))} for p in placed
     ]
