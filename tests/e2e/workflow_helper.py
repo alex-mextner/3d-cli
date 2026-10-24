@@ -30,9 +30,15 @@ with open({log!r}, "a", encoding="utf-8") as fh:
     fh.write(json.dumps({{"argv": [name, *sys.argv[1:]], "TMUX_TMPDIR": os.environ.get("TMUX_TMPDIR")}}) + "\\n")
 args = sys.argv[1:]
 if name == "systemd-run":  # run the wrapped command (the fake tmux) so it is recorded too
-    while args and args[0].startswith("-"):
-        args = args[1:]
-    os.execvp(args[0], args)
+    while args and args[0].startswith("-"):   # skip the options and the value of -p/--property/-E/...
+        opt = args.pop(0)
+        if opt == "--":
+            break
+        if opt in ("-p", "--property", "-E", "--setenv", "-u", "--unit", "-d", "--description", "--slice") and args:
+            args.pop(0)
+    if args:
+        os.execvp(args[0], args)
+    sys.exit(0)
 sys.exit(1 if name == "tmux" and "has-session" in args else 0)
 """
 
@@ -63,10 +69,24 @@ def agent_spawns(tmp_path: Path) -> list[AgentSpawn]:
     return [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
-def _agent_fakes_first(env: dict[str, str], tmp_path: Path) -> None:
+def _agent_fakes_first(env: dict[str, str], tmp_path: Path, own: int = 0) -> None:
+    """Put the recording fakes first on PATH, but behind the dirs a test added itself (`own`): a
+    test's own `tmux`/`omp` fake must still win; whatever it did not fake resolves to ours."""
     bindir = str(agent_fakebin(tmp_path))
     parts = [p for p in env.get("PATH", "").split(os.pathsep) if p and p != bindir]
-    env["PATH"] = os.pathsep.join([bindir, *parts])
+    env["PATH"] = os.pathsep.join([*parts[:own], bindir, *parts[own:]])
+
+
+def _apply_env_extra(env: dict[str, str], env_extra: dict[str, str], tmp_path: Path) -> None:
+    """Merge a test's env_extra; the dirs it prepends to PATH stay ahead of the agent fakes."""
+    known = set(env.get("PATH", "").split(os.pathsep))
+    env.update(env_extra)
+    own = 0
+    for part in env.get("PATH", "").split(os.pathsep):
+        if part in known:
+            break
+        own += 1
+    _agent_fakes_first(env, tmp_path, own)
 
 
 def isolated_env(tmp_path: Path) -> dict[str, str]:
@@ -126,8 +146,7 @@ def run_cli(
 ) -> subprocess.CompletedProcess[str]:
     env = isolated_env(tmp_path)
     if env_extra:
-        env.update(env_extra)
-        _agent_fakes_first(env, tmp_path)  # an env_extra PATH (a test's own fakes) keeps the agent fakes first
+        _apply_env_extra(env, env_extra, tmp_path)
     return subprocess.run(
         [sys.executable, str(THREED), *argv],
         cwd=str(cwd or tmp_path),
@@ -154,8 +173,7 @@ def run_cli_with_hatch(
     env["THREED_TEST_HATCH_VERDICT"] = verdict
     env["THREED_TEST_HATCH_LOG"] = str(tmp_path / "hatch-requests.jsonl")
     if env_extra:
-        env.update(env_extra)
-        _agent_fakes_first(env, tmp_path)
+        _apply_env_extra(env, env_extra, tmp_path)
     return subprocess.run(
         [sys.executable, str(HATCH_RUNNER), *argv],
         cwd=str(tmp_path),
