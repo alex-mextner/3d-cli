@@ -32,11 +32,14 @@ USAGE = """3d mix check FILE.3mf [--layer-cap MM] [--max-run-mm MM] [--json]
 3d mix profile FILE.3mf -o OUT.3mf [--layer-cap MM] [--min-layer MM] [--max-layer MM] [--json]
 3d mix gcode FILE.gcode [--project FILE.3mf] [--layer-cap MM] [--max-run-mm MM] [--json]
 3d mix pattern PATTERN [--layer MM | --heights MM,MM,...] [--layer-cap MM] [--max-run-mm MM] [--json]
-3d mix recipes --target HEX (--slots N=HEX,... | --printer NAME) [--count N] [--max-cycle N]
+3d mix target IMAGE --box x0,y0,x1,y1 (--white x0,y0,x1,y1 | --no-wb) [--white-level N] [--json]
+3d mix recipes TARGET (--slots N=HEX,... | --printer NAME) [--count N] [--max-cycle N]
                [--layer MM] [--layer-cap MM] [--max-run-mm MM] [--printops-api URL] [--json]
-3d mix tester  --target HEX (--slots N=HEX,... | --printer NAME) -o OUT/NAME [--count N]
+3d mix tester  TARGET (--slots N=HEX,... | --printer NAME) -o OUT/NAME [--count N]
                [--max-cycle N] [--layer MM] [--layer-cap MM] [--max-run-mm MM] [--height MM]
                [--base-3mf FILE.3mf] [--printops-api URL] [--json]
+  TARGET: --target HEX | --target-photo IMAGE --box x0,y0,x1,y1 (--white x0,y0,x1,y1 | --no-wb)
+          [--white-level N]
   Colour mixing by layers (Snapmaker Orca mixed filaments, U1).
 
   check FILE.3mf
@@ -84,6 +87,16 @@ USAGE = """3d mix check FILE.3mf [--layer-cap MM] [--max-run-mm MM] [--json]
       --layer MM is the layer height (default: the cap); --heights lists one per pattern
       character for a variable layer height.
 
+  target IMAGE
+      The colour to match, read from a region of a mockup photo or a render: the pixels of --box
+      are white-balanced on the --white region (a per-channel gain in linear light that maps the
+      median of the white region to --white-level, which removes the colour cast and the
+      exposure), converted to CIELAB one by one, and the target is the median in Lab. A render
+      (Blender, a mockup tool) has no cast: --no-wb skips the balance. Prints the target hex, its
+      Lab, the image sha256 and the regions; with --json the `mix-target/1` record. `recipes`
+      and `tester` take the same region as --target-photo and print the target they used;
+      the tester manifest records the image, boxes, balance and sha256 as `target_source`.
+
   recipes
       Rank every layer pattern of the loaded filaments with a cycle of at most --max-cycle
       layers that passes the layer rules: the wall colour is the mean of the layers in linear
@@ -100,6 +113,12 @@ USAGE = """3d mix check FILE.3mf [--layer-cap MM] [--max-run-mm MM] [--json]
       `3d print-preflight` as usual.
 
   --target HEX        the colour to match (#RRGGBB)
+  --target-photo IMAGE  take the target from a region of this image instead of --target
+  --box x0,y0,x1,y1   the region to match in pixels (x1, y1 exclusive; origin top-left as a viewer
+                      shows the image, EXIF orientation applied)
+  --white x0,y0,x1,y1 a region of white on the same photo (trim, paper): the white balance
+  --no-wb             the image is a render, not a photo: no colour cast, skip the balance
+  --white-level N     the 8-bit value the white region is mapped to (default 235)
   --slots N=HEX,...   the loaded filaments by U1 head number (1-9), e.g. 1=#000000,4=#FFFFFF
   --printer NAME      read the loaded spools of NAME from 3d-api instead (colour, spool and
                       Spoolman filament id; the filament ids give the manifest its mix keys)
@@ -133,11 +152,20 @@ Examples:
   3d mix recipes --target '#B5654F' --slots 1=#F6C700,3=#E8732A,4=#B0284F
   3d mix recipes --target '#B5654F' --printer u1 --max-cycle 4 --json
   3d mix tester --target '#B5654F' --printer u1 -o out/mix/terracotta
+  3d mix target mockup.jpg --box 410,220,470,300 --white 20,30,80,90
+  3d mix target render.png --box 100,100,160,160 --no-wb --json
+  3d mix tester --target-photo mockup.jpg --box 410,220,470,300 --white 20,30,80,90 --printer u1 -o out/mix/wall
   3d mix tester --target '#808080' --slots 1=#000000,4=#FFFFFF --base-3mf print/u1.3mf -o out/grey"""
 
 _CMD = "mix"
+# flags without a value (--json is handled on its own)
+_SWITCHES = {"--no-wb"}
 _FLAGS = {
     "--target",
+    "--target-photo",
+    "--box",
+    "--white",
+    "--white-level",
     "--slots",
     "--printer",
     "--count",
@@ -149,7 +177,7 @@ _FLAGS = {
     "--base-3mf",
     "-o",
     "--printops-api",
-}
+} | _SWITCHES
 
 
 def _check(argv: list[str]) -> int:
@@ -307,6 +335,10 @@ def _options(argv: list[str], allowed: set[str]) -> tuple[dict[str, str], bool]:
                 command=_CMD,
                 remediation=["See `3d mix --help`."],
             )
+        if a in _SWITCHES:
+            opts[a] = "1"
+            i += 1
+            continue
         if i + 1 >= len(argv):
             raise UsageError(f"{a} needs a value", command=_CMD)
         opts[a] = argv[i + 1]
@@ -438,16 +470,110 @@ class _Plan:
     count: int
     max_cycle: int
     rules: MixRules
+    target_source: dict[str, Any] | None = None
+
+
+def _photo_reading(opts: dict[str, str], image: Path) -> dict[str, Any]:
+    """The `mix-target/1` record of the region of `image` per --box / --white / --no-wb /
+    --white-level. numpy and Pillow are needed, so the reading runs through cli.pyrun."""
+    import json
+    import subprocess
+
+    from cli.pyrun import tool_argv
+    from slicing.mix_target import DEFAULT_WHITE_LEVEL
+
+    if "--box" not in opts:
+        raise UsageError(
+            "--box x0,y0,x1,y1 (the region to match, in pixels) is required",
+            command=_CMD,
+            remediation=[
+                "3d mix target mockup.jpg --box 410,220,470,300 --white 20,30,80,90"
+            ],
+        )
+    if ("--white" in opts) == ("--no-wb" in opts):
+        raise UsageError(
+            "pass exactly one of --white x0,y0,x1,y1 (a photo: white balance on that region) "
+            "and --no-wb (a render: no colour cast)",
+            command=_CMD,
+        )
+    if "--no-wb" in opts and "--white-level" in opts:
+        raise UsageError(
+            "--white-level needs --white (--no-wb skips the balance)", command=_CMD
+        )
+    level = _integer(opts, "--white-level", DEFAULT_WHITE_LEVEL, 1, 255)
+    if not image.is_file():
+        raise InputNotFound(str(image), command=_CMD)
+    # `--opt=value` and `--` keep a value or a file name that starts with "-" from reading as an option
+    args = [f"--box={opts['--box']}", f"--white-level={level}"]
+    if "--white" in opts:
+        args.append(f"--white={opts['--white']}")
+    args += ["--", str(image)]
+    proc = subprocess.run(  # noqa: S603 — argv from cli.pyrun
+        tool_argv("numpy,pillow", "mix_target_cli.py", args),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    try:
+        record = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        record = None
+    if not isinstance(record, dict) and proc.returncode == 2:
+        raise UsageError(proc.stderr.strip() or "the target options are invalid", command=_CMD)
+    if not isinstance(record, dict):
+        raise GateFailure(
+            f"reading {image} failed: {proc.stderr.strip() or 'the reader printed no result'}",
+            command=_CMD,
+        )
+    if proc.returncode != 0:
+        raise UsageError(
+            str(record.get("error", "the target region cannot be read")), command=_CMD
+        )
+    return record
+
+
+def _resolve_target(opts: dict[str, str]) -> tuple[str, dict[str, Any] | None]:
+    """--target HEX, or --target-photo IMAGE with its region: (hex, the manifest's target_source)."""
+    from printops.color import parse_hex
+    from slicing.mix_target import source_of
+
+    photo_flags = {"--box", "--white", "--white-level", "--no-wb"} & opts.keys()
+    if "--target-photo" in opts:
+        if "--target" in opts:
+            raise UsageError("pass --target or --target-photo, not both", command=_CMD)
+        record = _photo_reading(opts, Path(opts["--target-photo"]))
+        return record["target"], source_of(record)
+    if photo_flags:
+        raise UsageError(
+            f"{', '.join(sorted(photo_flags))} only goes with --target-photo IMAGE",
+            command=_CMD,
+        )
+    target = parse_hex(opts.get("--target"))
+    if target is None:
+        raise UsageError(
+            "--target #RRGGBB or --target-photo IMAGE --box x0,y0,x1,y1 is required",
+            command=_CMD,
+        )
+    return target, None
+
+
+def _source_line(src: dict[str, Any]) -> str:
+    wb = (
+        f"white balance on {src['white_box']} to {src['white_level']}"
+        if src["white_balance"]
+        else "no white balance"
+    )
+    return (
+        f"  target from {src['kind']} {src['image']} (sha256 {src['sha256'][:12]}) "
+        f"box {src['box']}, {wb}"
+    )
 
 
 def _plan(opts: dict[str, str], layer: float | None = None) -> _Plan:
     """What recipes and tester share; `layer` overrides --layer (a base project's own)."""
-    from printops.color import parse_hex
     from slicing.mix_model import MixModelError, Slot, rank
 
-    target = parse_hex(opts.get("--target"))
-    if target is None:
-        raise UsageError("--target #RRGGBB is required", command=_CMD)
+    target, target_source = _resolve_target(opts)
     if ("--slots" in opts) == ("--printer" in opts):
         raise UsageError("pass exactly one of --slots and --printer", command=_CMD)
     slots = (
@@ -472,7 +598,7 @@ def _plan(opts: dict[str, str], layer: float | None = None) -> _Plan:
         )
     except MixModelError as e:
         raise UsageError(str(e), command=_CMD) from e
-    return _Plan(target, slots, ranked, layer, count, max_cycle, rules)
+    return _Plan(target, slots, ranked, layer, count, max_cycle, rules, target_source)
 
 
 def _emit(summary: dict[str, Any], lines: list[str], as_json: bool) -> None:
@@ -597,6 +723,33 @@ def _pattern(argv: list[str]) -> int:
     return 0
 
 
+def _target_cmd(argv: list[str]) -> int:
+    if not argv or argv[0].startswith("-"):
+        raise UsageError(
+            "target takes the image first",
+            command=_CMD,
+            remediation=[
+                "3d mix target mockup.jpg --box 410,220,470,300 --white 20,30,80,90"
+            ],
+        )
+    opts, as_json = _options(argv[1:], {"--box", "--white", "--white-level", "--no-wb"})
+    d = _photo_reading(opts, Path(argv[0]))
+    lines = [
+        f"mix target {d['target']}  ({d['kind']} {d['image']}, {d['image_size'][0]}x{d['image_size'][1]}, "
+        f"box {d['box']}, {d['samples']} px)",
+        f"  Lab {d['lab'][0]:.1f} {d['lab'][1]:.1f} {d['lab'][2]:.1f} (median of the box)",
+        (
+            f"  white balance: box {d['white_box']} median RGB {tuple(d['white_rgb'])} -> {d['white_level']}, "
+            f"gain {d['gain'][0]:.3f} {d['gain'][1]:.3f} {d['gain'][2]:.3f} (linear light)"
+            if d["white_balance"]
+            else "  white balance: none (render)"
+        ),
+        f"  sha256 {d['sha256']}",
+    ]
+    _emit(d, lines, as_json)
+    return 0
+
+
 def _recipes(argv: list[str]) -> int:
     from slicing.mix_model import pick
 
@@ -604,7 +757,7 @@ def _recipes(argv: list[str]) -> int:
     p = _plan(opts)
     target, slots, layer, max_cycle = p.target, p.slots, p.layer, p.max_cycle
     chosen = [c.to_dict() for c in pick(p.ranked, p.count)]
-    summary = {
+    summary: dict[str, Any] = {
         "target": target,
         "layer_height": layer,
         "layer_cap_mm": p.rules.layer_cap_mm,
@@ -613,12 +766,17 @@ def _recipes(argv: list[str]) -> int:
         "slots": [s.to_dict() for s in slots],
         "candidates": [{"number": i + 1, **c} for i, c in enumerate(chosen)],
     }
+    if p.target_source is not None:
+        summary["target_source"] = p.target_source
     lines = [
         f"mix recipes for {target} (layer {layer:g} mm, cycle ≤ {max_cycle}, "
         f"no colour band over {p.rules.run_limit_mm:g} mm, "
         + ", ".join(f"T{s.slot} {s.hex}" for s in slots)
         + ")"
-    ] + [_cand_line(i + 1, c) for i, c in enumerate(chosen)]
+    ]
+    if p.target_source is not None:
+        lines.append(_source_line(p.target_source))
+    lines += [_cand_line(i + 1, c) for i, c in enumerate(chosen)]
     _emit(summary, lines, as_json)
     return 0
 
@@ -686,6 +844,7 @@ def _tester(argv: list[str]) -> int:
             base_settings=settings,
             app=app,
             source=source,
+            target_source=p.target_source,
         )
     except MixTesterError as e:
         raise UsageError(str(e), command=_CMD) from e
@@ -706,9 +865,15 @@ def _tester(argv: list[str]) -> int:
             {k: r[k] for k in ("number", "slot", "hex")} for r in manifest["references"]
         ],
     }
+    if p.target_source is not None:
+        summary["target_source"] = p.target_source
     lines = [
         f"mix tester for {summary['target']}: {len(mixes)} mixes + {len(summary['references'])} references, labels on T{summary['label_slot']}",
         *(f"  {k}: {v}" for k, v in summary["files"].items()),
+    ]
+    if p.target_source is not None:
+        lines.append(_source_line(p.target_source))
+    lines += [
         f"  settings: {summary['settings_source']}",
         *(
             f"  {c['number']:>2} {c['role']:<8} {c['pattern']:<8} {c['hex']}  ΔE {c['delta_e']:.2f}  filament {c['filament']}"
@@ -740,12 +905,14 @@ def run(argv: list[str]) -> int:
         return _gcode(rest)
     if sub == "pattern":
         return _pattern(rest)
+    if sub == "target":
+        return _target_cmd(rest)
     if sub == "recipes":
         return _recipes(rest)
     if sub == "tester":
         return _tester(rest)
     raise InvalidArgument(
-        "subcommand", sub, ["check", "gcode", "pattern", "profile", "recipes", "tester"], command=_CMD
+        "subcommand", sub, ["check", "gcode", "pattern", "profile", "recipes", "target", "tester"], command=_CMD
     )
 
 

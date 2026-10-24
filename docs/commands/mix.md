@@ -15,11 +15,14 @@ layer between the others, never on two layers in a row, and layers over a mixed 
 3d mix profile FILE.3mf -o OUT.3mf [--layer-cap MM] [--min-layer MM] [--max-layer MM] [--json]
 3d mix gcode FILE.gcode [--project FILE.3mf] [--layer-cap MM] [--max-run-mm MM] [--json]
 3d mix pattern PATTERN [--layer MM | --heights MM,MM,...] [--layer-cap MM] [--max-run-mm MM] [--json]
-3d mix recipes --target HEX (--slots N=HEX,... | --printer NAME) [--count N] [--max-cycle N]
+3d mix target IMAGE --box x0,y0,x1,y1 (--white x0,y0,x1,y1 | --no-wb) [--white-level N] [--json]
+3d mix recipes TARGET (--slots N=HEX,... | --printer NAME) [--count N] [--max-cycle N]
                [--layer MM] [--layer-cap MM] [--max-run-mm MM] [--printops-api URL] [--json]
-3d mix tester  --target HEX (--slots N=HEX,... | --printer NAME) -o OUT/NAME [--count N]
+3d mix tester  TARGET (--slots N=HEX,... | --printer NAME) -o OUT/NAME [--count N]
                [--max-cycle N] [--layer MM] [--layer-cap MM] [--max-run-mm MM] [--height MM]
                [--base-3mf FILE.3mf] [--printops-api URL] [--json]
+  TARGET: --target HEX | --target-photo IMAGE --box x0,y0,x1,y1 (--white x0,y0,x1,y1 | --no-wb)
+          [--white-level N]
 ```
 
 ## The layer rules
@@ -40,6 +43,42 @@ a mix and always passes. With the default limits only patterns where no colour t
 qualify: 1:1 pairs (`WR`), 1:1:1 triples, 2:1:1 and so on; for two colours that is only `WR`. A target
 that needs a 3:1 mix of two spools gets the nearest legal mix, or a pure spool.
 
+
+## `target` — the colour to match, read from a mockup photo or a render
+
+[#415](https://github.com/alex-mextner/3d-cli/issues/415), plan §20.2. The target of a mix is
+usually a spot in a photo of the mockup, not a hex. `3d mix target IMAGE --box x0,y0,x1,y1
+--white x0,y0,x1,y1` reads it (a port of `photo_colours` of babushkin-dom `gen/colour_match.py`):
+
+1. the pixels of `--box` and of `--white` (a region of white trim or paper on the same photo) are
+   cut from the upright image (EXIF orientation applied; pixel coordinates as a viewer shows
+   them, `x1`/`y1` exclusive; a box outside the image is an error, never clipped);
+2. **white balance**: a per-channel gain in linear light maps the median of the white region to
+   `--white-level` (default 235, the level babushkin-dom maps its trim to). It removes the colour
+   cast and the exposure in one step. A white region with a channel median under 64 is refused
+   (it is not white);
+3. the balanced pixels of the box go to CIELAB (D65) one by one and the target is the **median
+   in Lab** of the box, so a shadow edge or a glint inside the box does not move it. A box above
+   one million pixels is read with a fixed stride.
+
+A render (Blender, a mockup tool) has no colour cast: `--no-wb` skips step 2. A photo needs
+`--white`; the command refuses a photo without one rather than silently trusting the camera.
+
+Text and `--json` carry the same numbers. The text starts with the target hex, then the Lab, the
+white region's median RGB and gain, and the image's sha256; `--json` is the `mix-target/1` record
+(`target`, `lab`, `kind` photo/render, `image`, `sha256`, `image_size`, `box`, `samples`,
+`white_balance`, `white_box`, `white_level`, `white_rgb`, `gain`).
+
+`recipes` and `tester` take `--target-photo IMAGE --box ... (--white ... | --no-wb)` instead of
+`--target HEX` (not both) and use the same reading. The tester manifest keeps `target` as the
+hex (the readout and the records read it) and adds `target_source`: `kind`, `image`, `sha256`,
+`image_size`, `box`, `white_balance`, `white_box`, `white_level`, so the colour can be traced to
+the pixels it came from. The summary and `--json` of both commands repeat it.
+
+```
+3d mix target mockup.jpg --box 410,220,470,300 --white 20,30,80,90
+3d mix tester --target-photo mockup.jpg --box 410,220,470,300 --white 20,30,80,90 --printer u1 -o out/mix/wall
+```
 
 ## `recipes` — which layer patterns come closest to a target
 
@@ -70,7 +109,7 @@ Writes three files ([#413](https://github.com/alex-mextner/3d-cli/issues/413)):
   gets a pure reference swatch, used for white balance and spool correction. A flat
   seven-segment number lies in front of every swatch, printed in the darkest loaded spool. The
   prime tower goes in a free corner. Swatches stand, so `3d mix check` passes the plate.
-- `NAME.mix.json` — the manifest, schema `printops.mix_tester/1`: target, slots (head, hex,
+- `NAME.mix.json` — the manifest, schema `printops.mix_tester/1`: target (with `--target-photo`, also `target_source`: image, sha256, boxes), slots (head, hex,
   spool and Spoolman filament id when known), candidates (number, role, pattern, weights,
   predicted hex, ΔE, stripe ΔE, virtual filament, swatch and label boxes on the bed as
   `[x0, y0, x1, y1]`, `calibration: {kind: mix_color, mix: <key or null>}`), references
@@ -96,6 +135,11 @@ mostly head changes (a change every layer); `3d print-preflight` passes its `hea
 ## Options
 
 - `--target HEX` — the colour to match: `3d mix recipes --target '#B5654F' --printer u1`
+- `--target-photo IMAGE` — take the target from a region of an image instead of `--target`: `--target-photo mockup.jpg --box 410,220,470,300 --white 20,30,80,90`
+- `--box x0,y0,x1,y1` — the region to match, in pixels (`x1`, `y1` exclusive; origin top-left as a viewer shows the image): `--box 410,220,470,300`
+- `--white x0,y0,x1,y1` — a region of white on the same photo (the white balance): `--white 20,30,80,90`
+- `--no-wb` — the image is a render, no colour cast: `3d mix target render.png --box 100,100,160,160 --no-wb`
+- `--white-level N` — the 8-bit value the white region is mapped to (default 235, 1-255): `--white-level 240`
 - `--slots N=HEX,...` — the loaded filaments by U1 head number (1-9): `--slots 1=#000000,3=#1B5E20,4=#FFFFFF`
 - `--printer NAME` — read the usable slots of NAME from 3d-api (`GET /v1/printers/NAME/slots`, then
   `/v1/spools/ID` for the filament id). Read-only. With filament ids, the manifest has mix keys: `--printer u1`
@@ -218,6 +262,9 @@ Solid colour bands, however many are stacked, are never measured.
 3d mix check out/u1_tiles.3mf --json
 3d mix recipes --target '#B5654F' --slots 1=#F6C700,3=#E8732A,4=#B0284F
 3d mix tester --target '#B5654F' --printer u1 -o out/mix/terracotta
+3d mix target mockup.jpg --box 410,220,470,300 --white 20,30,80,90
+3d mix target render.png --box 100,100,160,160 --no-wb --json
+3d mix tester --target-photo mockup.jpg --box 410,220,470,300 --white 20,30,80,90 --printer u1 -o out/mix/wall
 3d mix tester --target '#808080' --slots 1=#000000,4=#FFFFFF --base-3mf print/u1.3mf -o out/grey
 ```
 
