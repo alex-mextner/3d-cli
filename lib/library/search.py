@@ -21,10 +21,12 @@ INVARIANTS:
 
 from __future__ import annotations
 
+import datetime
 import hashlib
 import json
 import sqlite3
 import tempfile
+import threading
 import time
 from collections.abc import Iterable, Sequence
 from concurrent.futures import ThreadPoolExecutor
@@ -42,6 +44,7 @@ SCHEMA = "3d.models.search/2"
 DEEP_MAX_BYTES = 25 * 1024 * 1024
 DEEP_BUDGET_S = 90.0
 DEEP_WORKERS = 4
+DETAIL_MAX_AGE_S = 6 * 3600.0  # how long a stored Thingiverse follow-up answer is trusted
 VITAMIN_DEEP_TOP = (
     10  # `--for-vitamin` measures this many candidates per site unless told otherwise
 )
@@ -155,7 +158,7 @@ def cache_by_sha(conn: sqlite3.Connection | None, sha: str) -> dict[str, Any] | 
 
 
 def cache_put(
-    conn: sqlite3.Connection | None, key: str, sha: str, doc: dict[str, Any]
+    conn: sqlite3.Connection | None, key: str, sha: str | None, doc: dict[str, Any]
 ) -> None:
     if conn is None:
         return
@@ -179,6 +182,66 @@ def file_sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1 << 16), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+class LibraryDetailStore:
+    """`marketplaces.base.DetailStore` in the library DB (`analytics_cache`, keys `thingiverse:<id>`): the follow-up
+    answers of Thingiverse hits survive the process, so the next `3d models search` of the same hits makes no
+    follow-up request (the API allows 300 requests per 5 minutes). Entries older than `max_age_s` are ignored.
+    Thread-safe (one connection per worker thread, all closed by `close()`) and best effort: any SQLite or OS
+    error reads as a miss and a skipped write."""
+
+    def __init__(self, db_path: str | None, *, max_age_s: float | None = None) -> None:
+        self._db_path = db_path
+        self._max_age_s = DETAIL_MAX_AGE_S if max_age_s is None else max_age_s
+        self._local = threading.local()
+        self._lock = threading.Lock()
+        self._connections: list[sqlite3.Connection] = []
+
+    def _conn(self) -> sqlite3.Connection | None:
+        conn: sqlite3.Connection | None = getattr(self._local, "conn", None)
+        if conn is None:
+            from library import db as librarydb
+
+            try:
+                conn = librarydb.open_library(self._db_path)
+            except (sqlite3.Error, OSError):
+                return None
+            self._local.conn = conn
+            with self._lock:
+                self._connections.append(conn)
+        return conn
+
+    def get(self, key: str) -> dict[str, Any] | None:
+        conn = self._conn()
+        if conn is None:
+            return None
+        try:
+            row = conn.execute("SELECT analytics, created_at FROM analytics_cache WHERE key = ?", (key,)).fetchone()
+            if row is None:
+                return None
+            stored = datetime.datetime.fromisoformat(row["created_at"].replace("Z", "+00:00"))
+            if (datetime.datetime.now(datetime.timezone.utc) - stored).total_seconds() > self._max_age_s:
+                return None
+            value = json.loads(row["analytics"])
+        except (sqlite3.Error, ValueError):
+            return None
+        return value if isinstance(value, dict) else None
+
+    def put(self, key: str, value: dict[str, Any]) -> None:
+        conn = self._conn()
+        if conn is None:
+            return
+        try:
+            cache_put(conn, key, None, value)
+        except sqlite3.Error:
+            return
+
+    def close(self) -> None:
+        with self._lock:
+            for conn in self._connections:
+                conn.close()
+            self._connections.clear()
 
 
 def _skipped(reason: str) -> dict[str, Any]:
@@ -283,11 +346,16 @@ def run_search(query: str, options: SearchOptions | None = None) -> SearchRun:
         raise InvalidArgument("kind", opts.kind, list(SEARCH_KINDS), command="models")
     effective = effective_query(query, opts.vitamin)
     started = time.monotonic()
-    site_results = catalog.search(
-        effective, list(opts.sites), opts.limit, details=opts.details
-    )
     conn, warnings = _open_cache(opts)
+    store = LibraryDetailStore(opts.db_path) if conn is not None else None
     try:
+        site_results = catalog.search(
+            effective,
+            list(opts.sites),
+            opts.limit,
+            details=opts.details,
+            store=store,
+        )
         deep: dict[tuple[str, str], dict[str, Any]] = {}
         models_by_site: dict[str, list[tuple[int, Model]]] = {}
         for r in site_results:
@@ -344,6 +412,8 @@ def run_search(query: str, options: SearchOptions | None = None) -> SearchRun:
             _persist(conn, doc, opts)
         return SearchRun(doc, {r.site: r.error for r in site_results if r.error is not None})
     finally:
+        if store is not None:
+            store.close()
         if conn is not None:
             conn.close()
 

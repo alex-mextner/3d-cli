@@ -308,6 +308,43 @@ def test_search_kind_is_validated() -> None:
         search.run_search("x", search.SearchOptions(kind="bogus", save=False))
 
 
+# -- Thingiverse follow-ups persist across processes -------------------------------------------------------
+def test_thingiverse_follow_ups_are_cached_in_the_library_between_runs(server: BulkServer, dbpath: str) -> None:
+    first = _run("case", dbpath, sites=("thingiverse",), limit=20)
+    assert server.calls["thingiverse:detail"] == server.calls["thingiverse:files"] == 20
+    thingiverse.clear_cache()  # a new process remembers nothing in memory
+    again = _run("case", dbpath, sites=("thingiverse",), limit=20)
+    assert server.calls["thingiverse:detail"] == server.calls["thingiverse:files"] == 20  # no new follow-up request
+    assert again["results"] == first["results"] | {"thingiverse": again["results"]["thingiverse"]}
+    assert all(r["analytics"]["files_known"] and r["license"] for r in again["results"]["thingiverse"])
+    assert [f["name"] for f in again["results"]["thingiverse"][1]["files"]] == ["base_2.stl", "top_2.stl",
+                                                                                 "assembled_2.3mf"]
+    thingiverse.clear_cache()
+    _run("case", None, sites=("thingiverse",), limit=20)  # --no-save: the stored answers are not used
+    assert server.calls["thingiverse:detail"] == 40
+
+
+def test_a_stored_follow_up_answer_expires(server: BulkServer, dbpath: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    _run("case", dbpath, sites=("thingiverse",), limit=5)
+    thingiverse.clear_cache()
+    monkeypatch.setattr(search, "DETAIL_MAX_AGE_S", -1.0)
+    _run("case", dbpath, sites=("thingiverse",), limit=5)
+    assert server.calls["thingiverse:detail"] == 10
+
+
+def test_the_detail_store_reads_garbage_and_a_dead_database_as_a_miss(tmp_path: Path) -> None:
+    store = search.LibraryDetailStore(str(tmp_path / "blocker" / "library.db"))
+    (tmp_path / "blocker").write_text("a file", encoding="utf-8")
+    assert store.get("thingiverse:1") is None
+    store.put("thingiverse:1", {"thing": {}, "files": []})  # no error either
+    store.close()
+    ok = search.LibraryDetailStore(str(tmp_path / "library.db"))
+    ok.put("thingiverse:9", {"thing": "not an object"})
+    assert ok.get("thingiverse:9") == {"thing": "not an object"}
+    assert thingiverse._stored(ok, "9") is None  # a malformed entry is ignored, not trusted
+    ok.close()
+
+
 # -- deep analytics --------------------------------------------------------------------------------------
 def test_deep_measures_the_smallest_mesh_and_the_second_run_uses_the_cache(
     server: BulkServer, dbpath: str
