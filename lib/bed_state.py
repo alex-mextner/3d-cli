@@ -91,6 +91,7 @@ if TYPE_CHECKING:
     from printer_ops.devices import Device
     from vision_geometry import CameraModel
 
+MAX_Z_MM = 1000.0  # ceiling for the search for a Z the camera sees: above any printer's Z travel
 PROC_W = 480  # processing width; a 1920x1080 frame is decoded at 1/4, a 1280x720 one at 1/2
 ACTIVE = ("printing", "paused", "busy")  # base.py states in which the bed belongs to the job
 _REDUCED = {1: "IMREAD_COLOR", 2: "IMREAD_REDUCED_COLOR_2", 4: "IMREAD_REDUCED_COLOR_4", 8: "IMREAD_REDUCED_COLOR_8"}
@@ -310,16 +311,19 @@ def bed_in_view(cam: CameraModel, z: float) -> float:
 @functools.lru_cache(maxsize=512)
 def view_shift_px(cam: CameraModel, z0: float, z1: float, height_mm: float) -> float:
     """Largest move, in pixels of the PROC_W frame, of a bed point or a point `height_mm` above it
-    that is in the frame at either Z, when the bed goes from Z `z0` to `z1` (inf: nothing in view)."""
+    that is in the frame at either Z, when the bed goes from Z `z0` to `z1` (inf: nothing in view, or a point in view at one Z is behind the camera at the other)."""
     import numpy as np
 
     pts = _bed_points(cam, (0.0, height_mm), 9)
     a, b = cam.project(pts, z0), cam.project(pts, z1)
-    seen = np.isfinite(a).all(axis=1) & np.isfinite(b).all(axis=1) & (_in_frame(cam, a) | _in_frame(cam, b))
+    fa, fb = np.isfinite(a).all(axis=1), np.isfinite(b).all(axis=1)
+    in_a, in_b = _in_frame(cam, a), _in_frame(cam, b)
+    if ((in_a & ~fb) | (in_b & ~fa)).any():  # in the frame at one Z, behind the camera at the other
+        return math.inf
+    seen = in_a | in_b
     if not seen.any():
         return math.inf
-    d = np.linalg.norm(a[seen] - b[seen], axis=1)
-    return float(d.max()) * PROC_W / cam.width if np.isfinite(d).all() else math.inf
+    return float(np.linalg.norm(a[seen] - b[seen], axis=1).max()) * PROC_W / cam.width
 
 
 @dataclass(frozen=True)
@@ -345,8 +349,9 @@ class ZMatch:
         return None if self.cam is None or z is None else bed_in_view(self.cam, round(z, 1))
 
     def nearest_view(self, z: float, view_min: float) -> float | None:
-        """The highest Z (5 mm steps) at or below `z` where at least `view_min` of the bed is in view."""
-        return next((z - 5 * i for i in range(int(z // 5) + 1) if (self.in_view(z - 5 * i) or 0.0) >= view_min),
+        """The highest Z (5 mm steps) at or below `min(z, MAX_Z_MM)` where at least `view_min` of the bed is in view."""
+        top = min(z, MAX_Z_MM)  # a typo'd --z of 1e9 must not walk 2e8 steps
+        return next((top - 5 * i for i in range(int(top // 5) + 1) if (self.in_view(top - 5 * i) or 0.0) >= view_min),
                     None)
 
 
