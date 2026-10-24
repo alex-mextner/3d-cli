@@ -20,7 +20,7 @@ from typing import Any
 from cli.resources import pool_size
 from errors import ThreeDError, UsageError
 from marketplaces import cults, makerworld, printables, thingiverse, transport
-from marketplaces.base import SITES, DownloadLinks, MarketplaceError, Model, ModelFile, safe_name
+from marketplaces.base import SITES, DetailStore, DownloadLinks, MarketplaceError, Model, ModelFile, safe_name
 
 
 FileLink = Callable[[Model, ModelFile], tuple[str, dict[str, str]]]
@@ -38,7 +38,7 @@ class Client:
     show: Callable[[str], Model]
     download_links: Callable[[Model], DownloadLinks]
     file_link: FileLink | None = None
-    enrich: Callable[[list[Model]], list[Model]] | None = None
+    enrich: Callable[[list[Model], DetailStore | None], list[Model]] | None = None
 
 
 CLIENTS: dict[str, Client] = {
@@ -78,9 +78,11 @@ def error_json(site: str, exc: ThreeDError) -> dict[str, Any]:
     return {"site": site, "kind": kind, "message": exc.message, "remediation": list(exc.remediation)}
 
 
-def search(query: str, sites: Sequence[str], limit: int, *, details: bool = True) -> list[SiteResult]:
+def search(query: str, sites: Sequence[str], limit: int, *, details: bool = True,
+           store: DetailStore | None = None) -> list[SiteResult]:
     """Search every site in parallel. `details=False` skips the per-hit follow-up requests of
-    sites that need them (Thingiverse: one request per page, but no license or file list)."""
+    sites that need them (Thingiverse: one request per page, but no license or file list); `store`
+    is the persistent cache those follow-ups read and fill."""
     def one(site: str) -> SiteResult:
         client = CLIENTS[site]
         started = time.monotonic()
@@ -88,7 +90,7 @@ def search(query: str, sites: Sequence[str], limit: int, *, details: bool = True
             models = client.search(query, limit)
             warnings: list[str] = []
             if details and client.enrich is not None:
-                models = client.enrich(models)
+                models = client.enrich(models, store)
                 missing = sum(1 for m in models if not m.files_known)
                 if missing:
                     warnings.append(f"{missing} of {len(models)} hits have no file list or license "

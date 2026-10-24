@@ -25,6 +25,7 @@ from cli.resources import pool_size
 from marketplaces import credentials, transport
 from marketplaces.base import (
     Deadline,
+    DetailStore,
     DownloadLinks,
     MarketplaceError,
     Model,
@@ -191,11 +192,26 @@ def _apply(model: Model, thing: dict[str, Any], files: tuple[ModelFile, ...]) ->
     )
 
 
-def _enrich_one(model: Model, deadline: Deadline) -> Model:
+_DETAIL_KEYS = ("license", "download_count", "view_count", "description", "tags")
+
+
+def _stored(store: DetailStore | None, thing_id: str) -> tuple[dict[str, Any], tuple[ModelFile, ...]] | None:
+    """The answer a previous process stored for `thing_id`, decoded; None when absent or malformed."""
+    raw = store.get(f"thingiverse:{thing_id}") if store is not None else None
+    if not isinstance(raw, dict) or not isinstance(raw.get("thing"), dict):
+        return None
+    files = tuple(ModelFile(name=as_str(f.get("name")), size=as_int(f.get("size")), ref=as_str(f.get("ref")),
+                            kind="file") for f in dict_list(raw.get("files")))
+    return raw["thing"], files
+
+
+def _enrich_one(model: Model, deadline: Deadline, store: DetailStore | None) -> Model:
     """License/tags from GET /things/{id} and the file list from GET /things/{id}/files; the
-    hit stays as it was on any site error (a deleted thing, a 429) or once the budget is gone."""
-    cached = _cached(model.id)
+    hit stays as it was on any site error (a deleted thing, a 429) or once the budget is gone.
+    Answers come from the in-process cache, then from `store`, before any request is made."""
+    cached = _cached(model.id) or _stored(store, model.id)
     if cached is not None:
+        _remember(model.id, *cached)
         return _apply(model, *cached)
     if deadline.expired():
         return model
@@ -206,18 +222,23 @@ def _enrich_one(model: Model, deadline: Deadline) -> Model:
         files = parse_files(_get(f"/things/{model.id}/files"))
     except MarketplaceError:
         return model
-    _remember(model.id, thing, files)
-    return _apply(model, thing, files)
+    slim = {k: thing[k] for k in _DETAIL_KEYS if k in thing}
+    _remember(model.id, slim, files)
+    if store is not None:
+        store.put(f"thingiverse:{model.id}", {"thing": slim, "files": [
+            {"name": f.name, "size": f.size, "ref": f.ref} for f in files]})
+    return _apply(model, slim, files)
 
 
-def enrich(models: list[Model], *, budget_s: float | None = None) -> list[Model]:
+def enrich(models: list[Model], store: DetailStore | None = None, *, budget_s: float | None = None) -> list[Model]:
     """Add license and file lists to search hits: at most two follow-up calls per hit, at most
-    `_DETAIL_WORKERS` in flight, none started after the time budget is spent."""
+    `_DETAIL_WORKERS` in flight, none started after the time budget is spent. `store` (optional) is the
+    persistent cache consulted before, and filled after, every request."""
     if not models:
         return models
     deadline = Deadline(budget_seconds() if budget_s is None else budget_s)
     with ThreadPoolExecutor(max_workers=min(_DETAIL_WORKERS, pool_size(len(models)))) as pool:
-        return list(pool.map(lambda m: _enrich_one(m, deadline), models))
+        return list(pool.map(lambda m: _enrich_one(m, deadline, store), models))
 
 
 def show(ref: str) -> Model:

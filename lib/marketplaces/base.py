@@ -5,7 +5,7 @@ import re
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, field
-from typing import Any
+from typing import Any, Protocol
 
 from errors import ThreeDError
 
@@ -199,3 +199,14 @@ class Deadline:
 
     def expired(self) -> bool:
         return time.monotonic() >= self._end
+
+
+class DetailStore(Protocol):
+    """Persistent home of per-hit follow-up answers (Thingiverse licence + file list), so a repeat CLI search,
+    a separate process with no memory of the last one, does not spend the site's request allowance again.
+    Implementations must be thread-safe and best effort: `get` returns None and `put` does nothing when the
+    storage is unavailable."""
+
+    def get(self, key: str) -> dict[str, Any] | None: ...
+
+    def put(self, key: str, value: dict[str, Any]) -> None: ...

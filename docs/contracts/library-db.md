@@ -56,7 +56,7 @@ clash) adds:
   `model_source.analytics` - JSON object with the file facts and mesh measurements of the downloaded files;
 - `analytics_cache(key PRIMARY KEY, sha256, analytics, created_at)` - deep mesh measurements keyed by
   `file:<site>:<model id>:<name>:<size>` (a marketplace file, so a repeat `--deep` search needs no download) and by
-  `sha:<sha256>` (content, so a local file or a re-uploaded copy is not measured twice). Not exported; a cache.
+  `sha:<sha256>` (content, so a local file or a re-uploaded copy is not measured twice), and the Thingiverse follow-up answers (licence, counts, file list) by `thingiverse:<id>` for 6 hours (`LibraryDetailStore`). Not exported; a cache.
 
 Idempotency keys: a session's `source_key` is `search:<sha256(idempotency_key, query)>` when the caller gives
 `idempotency_key` (none = a fresh session per search); a result's is `<session uid>:<site>:<model id>`; a
