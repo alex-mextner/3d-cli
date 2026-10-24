@@ -66,6 +66,7 @@ def test_strength_screens_a_bracket_then_checks_it_with_fea(tmp_path: Path) -> N
 
 
 def test_strength_exits_1_below_the_required_safety_factor(tmp_path: Path) -> None:
+    """A user checks a bar against a safety factor it cannot meet: exit 1 and a WEAK verdict, a harsher load FAILs."""
     _bar(tmp_path)
     weak = run_cli(
         tmp_path,
@@ -99,6 +100,7 @@ def test_strength_exits_1_below_the_required_safety_factor(tmp_path: Path) -> No
 
 
 def test_strength_rejects_bad_input_with_exit_2(tmp_path: Path) -> None:
+    """A user passes a NaN or negative load, an unknown material or a missing file: each exits 2 with a readable error."""
     _bar(tmp_path)
     for argv in (
         ["bar.stl", "--material", "PLA", "--load", "nan"],
@@ -125,6 +127,7 @@ def test_strength_rejects_bad_input_with_exit_2(tmp_path: Path) -> None:
 def test_strength_orientation_changes_the_verdict_and_records_the_source(
     tmp_path: Path,
 ) -> None:
+    """A user changes the print orientation: the verdict follows it and the report records where the orientation came from."""
     _bar(tmp_path)
     base = [
         "strength",
@@ -149,6 +152,7 @@ def test_strength_orientation_changes_the_verdict_and_records_the_source(
 
 
 def test_strength_hook_check_runs_without_a_file(tmp_path: Path) -> None:
+    """A user runs the snap-hook check with no model file: it still gives a verdict."""
     ok = run_cli(
         tmp_path,
         "strength",
@@ -177,6 +181,7 @@ def test_strength_hook_check_runs_without_a_file(tmp_path: Path) -> None:
 
 
 def test_strength_project_assembly_uses_mates_and_loads(tmp_path: Path) -> None:
+    """A user runs strength on a project assembly: mates and loads from the project file drive the solve."""
     pytest.importorskip("skfem")
     bar(60.0, 10.0, 6.0).export(tmp_path / "base.stl")
     plate = bar(60.0, 10.0, 3.0)
@@ -206,6 +211,7 @@ def test_strength_project_assembly_uses_mates_and_loads(tmp_path: Path) -> None:
 
 
 def test_strength_help_lists_the_surface(tmp_path: Path) -> None:
+    """A user reads `3d strength --help`: every flag of the surface is listed."""
     result = run_cli(tmp_path, "strength", "--help")
     assert result.returncode == 0
     for flag in (
