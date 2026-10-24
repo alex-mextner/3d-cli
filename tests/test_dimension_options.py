@@ -7,6 +7,7 @@ import pathlib
 import shutil
 from typing import Any
 
+import numpy as np
 import pytest
 from dimension_fixtures import BLUE, GREEN, RED, Box, write_3mf
 
@@ -74,7 +75,7 @@ def test_up_x_and_custom_dims_follow_the_model_axes(tmp_path: pathlib.Path) -> N
     path = tmp_path / "beam.stl"
     trimesh.creation.box(extents=(50, 10, 10)).export(path)
     data = render(
-        str(path), str(tmp_path / "x.png"), up="X", dims=["along:-25,0,0:25,0,0"]
+        str(path), str(tmp_path / "x.png"), up="X", dims=["along:-25,6,6:25,6,6"]
     )
     assert any(
         d["label"] == "along" and d["value_mm"] == 50.0 for d in data["dimensions"]
@@ -266,7 +267,7 @@ def test_a_dim_inside_one_part_is_drawn_on_a_separated_layout(
     plate: str, tmp_path: pathlib.Path
 ) -> None:
     out = str(tmp_path / "ok.png")
-    data = render(plate, out, dims=["edge:0,5,5:10,5,5"])
+    data = render(plate, out, dims=["edge:0,5,10:10,5,10"])
     item = next(d for d in data["dimensions"] if d["label"] == "edge")
     assert item["value_mm"] == 10.0 and item["spans_separated"] is False
     assert item["parts"] == ["left"] and data["separated_parts"] is True
@@ -295,8 +296,8 @@ def _gap_spec(tmp_path: pathlib.Path, parts: list[str]) -> list[str]:
                     "name": "mate",
                     "kind": "gap",
                     "parts": parts,
-                    "from": [10, 5, 5],
-                    "to": [60, 5, 5],
+                    "from": [10, 5, 10],
+                    "to": [60, 5, 10],
                 }
             ]
         ),
@@ -368,7 +369,7 @@ def test_the_gate_fails_an_image_whose_sidecar_has_a_dimension_across_separate_p
     plate: str, tmp_path: pathlib.Path
 ) -> None:
     out = str(tmp_path / "ok.png")
-    render(plate, out, dims=["edge:0,5,5:10,5,5"])
+    render(plate, out, dims=["edge:0,5,10:10,5,10"])
     assert check_image(out) == []
     side = pathlib.Path(sidecar_path(out))
     data = json.loads(side.read_text(encoding="utf-8"))
@@ -446,3 +447,78 @@ def test_an_exploded_scad_assembly_has_no_dimension_across_its_halves(
         d["value_mm"] == 10.0 for d in data["dimensions"]
     )  # none is the 50 mm overall Y
     assert check_image(out) == []
+
+
+# --- occlusion: only geometry the eye sees can be measured (see the occlusion ticket) ------------------------------
+
+
+@pytest.fixture
+def boxed(tmp_path: pathlib.Path) -> str:
+    """A closed 40 mm cube shell (case) with a 10 x 10 x 10 'board' sealed inside it."""
+    case = trimesh.creation.box(extents=(40, 40, 40))
+    board = trimesh.creation.box(extents=(10, 10, 10))
+    path = tmp_path / "boxed.stl"
+    trimesh.util.concatenate([case, board]).export(path)
+    return str(path)
+
+
+def test_a_dimension_of_something_inside_the_case_is_hidden_in_every_view_and_named(
+    boxed: str, tmp_path: pathlib.Path
+) -> None:
+    spec = ["head+plug:-5,0,0:5,0,0"]  # the board's width: inside the closed case
+    with pytest.raises(RenderError) as excinfo:
+        render(boxed, str(tmp_path / "x.png"), dims=spec, required=spec)
+    assert "head+plug" in str(excinfo.value) and "inside the model" in str(
+        excinfo.value
+    )
+    data = render(boxed, str(tmp_path / "h.png"), dims=spec)
+    assert data["hidden_in_view"] == {"head+plug": ["top", "front", "side", "iso"]}
+    assert "head+plug" not in _labels(
+        data
+    )  # no arrow floating in the air next to the case
+
+
+def test_a_dimension_on_the_visible_surface_is_drawn_and_not_reported_hidden(
+    boxed: str, tmp_path: pathlib.Path
+) -> None:
+    out = str(tmp_path / "v.png")
+    data = render(boxed, out, dims=["top edge:-20,0,20:20,0,20"])  # the case's top face
+    drawn = {d["view"] for d in data["dimensions"] if d["label"] == "top edge"}
+    assert "top" in drawn
+    assert "top" not in data["hidden_in_view"].get("top edge", [])
+    assert check_image(out) == []
+
+
+def test_a_dimension_is_drawn_only_in_the_views_that_see_both_ends(
+    boxed: str, tmp_path: pathlib.Path
+) -> None:
+    # On the +x face of the case: seen from the side (eye +x) and the iso, not from the top or front.
+    data = render(boxed, str(tmp_path / "s.png"), dims=["face:20,-15,0:20,15,0"])
+    views = {d["view"] for d in data["dimensions"] if d["label"] == "face"}
+    assert "side" in views
+    assert not views & set(data["hidden_in_view"].get("face", []))
+    assert (
+        "front" in data["hidden_in_view"]["face"]
+        or "top" in data["hidden_in_view"]["face"]
+    )
+
+
+def test_visible_from_ray_test_has_teeth() -> None:
+    from dimension_options import visible_from
+
+    wall = np.array(
+        [[[-5, -5, 5], [5, -5, 5], [0, 5, 5]]], dtype=float
+    )  # a triangle at z = 5
+    up = np.array([0.0, 0.0, 1.0])
+    assert not visible_from(wall, np.array([0.0, 0.0, 0.0]), up)  # behind it
+    assert visible_from(wall, np.array([0.0, 0.0, 5.0]), up)  # on it
+    assert visible_from(
+        wall, np.array([0.0, 0.0, 4.7]), up
+    )  # within the 0.5 mm tolerance
+    assert not visible_from(
+        wall, np.array([0.0, 0.0, 4.4]), up
+    )  # 0.6 mm behind: hidden
+    assert visible_from(wall, np.array([0.0, 0.0, 6.0]), up)  # in front of it
+    assert visible_from(
+        wall, np.array([20.0, 0.0, 0.0]), up
+    )  # beside it: nothing in the way

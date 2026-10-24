@@ -118,6 +118,12 @@ On an **exploded assembly or a plate** (the parts do not touch: a `separated_par
 
 `--check` fails an image whose `.dims.json` holds a dimension with `spans_separated: true` that is not a `kind: gap` (rule `spans-separated-parts`), so an image from a tool that did not enforce this cannot pass as legible when its sidecar says so. Touching parts (an assembled model) are not restricted.
 
+## Occlusion: only what the eye sees can be measured
+
+An explicit measurement (`--dim`, `--dims-from`) is drawn in a view only if BOTH endpoints are visible in that view: a ray from each endpoint toward the (orthographic) eye must not meet a surface more than 0.5 mm away. A PCB sealed inside its case is hidden in every view, so its arrow can no longer float in the air next to the case. A dimension hidden in a view is listed in the sidecar as `hidden_in_view` (`{"name": ["front", "side"]}`); it is still drawn in the views that do see it. A `--dims-from` measurement that is drawn in NO view fails the render (exit 2, "lies inside the model, hidden in every view" when that is why), and `--check --require-dims` fails an image that declares it but does not show it. The automatic overall dims and per-part footprints, whose endpoints are bounding-box corners, are not tested.
+
+To measure something inside, cut the model so the feature is exposed (`-D cut=true` on an assembly that supports it, or measure on a cut STL): the exposed faces are visible geometry. An explicit measurement is anchored ON the part: its arrow may run over the part and is then drawn **dashed**; only its label must find clean paper (the legibility gate is unchanged). Name the measurement after the object it measures (`--dim "PCB head + plug (inside):0,1.1,0:0,1.1,27.6"`): the name is the label text. A cut-face anchored dimension in `3d section` itself is not implemented yet (#632).
+
 ## Sidecar `OUT.png.dims.json`
 
 `image` (path, width, height, sha256), `part`, `bbox_mm`, optional `bed`, `views`

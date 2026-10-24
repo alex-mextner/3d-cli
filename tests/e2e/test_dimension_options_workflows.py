@@ -31,8 +31,8 @@ def test_plate_render_has_per_part_dims_and_declared_measurements_gate(
                     "name": "gap",
                     "kind": "gap",
                     "parts": ["left", "right"],
-                    "from": [10, 5, 5],
-                    "to": [60, 5, 5],
+                    "from": [10, 5, 10],
+                    "to": [60, 5, 10],
                 }
             ]
         ),

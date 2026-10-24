@@ -173,3 +173,36 @@ def classify_dimension(
         "parts": sorted(model.parts[i].name for i in common),
         "spans_separated": False,
     }
+
+
+OCCLUSION_TOLERANCE_MM = (
+    0.5  # a surface this close in front of a point does not hide it
+)
+
+
+def visible_from(tris: np.ndarray, point: np.ndarray, toward_eye: np.ndarray) -> bool:
+    """Is `point` seen from an orthographic eye in direction `toward_eye` (a unit vector)?
+
+    A ray from the point toward the eye (Moeller-Trumbore against every triangle) that meets a surface
+    more than OCCLUSION_TOLERANCE_MM away means something is in front: the point is hidden. A point on
+    a visible surface (its own triangle is at t ~ 0) or in the air is visible.
+    """
+    v0 = tris[:, 0]
+    e1, e2 = tris[:, 1] - v0, tris[:, 2] - v0
+    h = np.cross(toward_eye, e2)
+    a = np.einsum("ij,ij->i", e1, h)
+    ok = np.abs(a) > 1e-12
+    f = np.divide(1.0, a, out=np.zeros_like(a), where=ok)
+    s = point - v0
+    u = f * np.einsum("ij,ij->i", s, h)
+    q = np.cross(s, e1)
+    v = f * (q @ toward_eye)
+    t = f * np.einsum("ij,ij->i", e2, q)
+    hit = (
+        ok
+        & (u >= -1e-9)
+        & (v >= -1e-9)
+        & (u + v <= 1 + 1e-9)
+        & (t > OCCLUSION_TOLERANCE_MM)
+    )
+    return not bool(hit.any())
