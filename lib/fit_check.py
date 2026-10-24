@@ -29,6 +29,10 @@ it, so --gap is the gap on the tightest side.
 Pairs come from the command line (--insert/--socket/--gap …) or from a YAML/JSON spec
 (--spec fits.yaml) for many inserts at once; see docs/commands/fit-check.md.
 
+The gap and its tolerance need not be literals: `--fit snap|sliding|tight|glue|<alias>` (`fit:` in a spec, with
+shape/printer/material/nozzle/layer) takes them from the shared fit table through `fits_sources.resolve`, the
+same call `3d fit-niche --fit` and `3d fits resolve` make; an explicit --gap / --gap-tol wins.
+
 Exit: 0 PASS, 1 FAIL, 2 usage / spec / load error.
 """
 
@@ -67,6 +71,13 @@ SPEC_KEYS = {
     "step",
     "min_depth",
     "open",
+    "fit",
+    "fit_type",
+    "shape",
+    "printer",
+    "material",
+    "nozzle",
+    "layer",
 }
 DEFAULT_KEYS = SPEC_KEYS - {"name", "insert", "socket", "printed_size"}
 
@@ -89,6 +100,7 @@ class Fit:
     min_depth: float | None = None
     open: str = "above"
     socket_name: str = ""
+    fit_info: dict[str, Any] | None = None  # the `3d fits resolve` answer the gap/tolerance came from
 
     def __post_init__(self) -> None:
         if not self.name:
@@ -192,7 +204,9 @@ def load_spec(path: str) -> list[Fit]:
             f"spec {path}: unknown top-level key(s) {', '.join(sorted(unknown))} "
             f"(allowed: fits, {', '.join(sorted(DEFAULT_KEYS))})"
         )
-    defaults = {k: doc[k] for k in DEFAULT_KEYS if k in doc}
+    defaults = _canonical_fit_key(
+        {k: doc[k] for k in DEFAULT_KEYS if k in doc}, f"spec {path}"
+    )
     base = os.path.dirname(os.path.abspath(path))
     fits = []
     for i, entry in enumerate(doc["fits"], 1):
@@ -204,8 +218,12 @@ def load_spec(path: str) -> list[Fit]:
             raise FitError(
                 f"{where}: unknown key(s) {', '.join(sorted(unknown))} (allowed: {', '.join(sorted(SPEC_KEYS))})"
             )
-        merged = {**defaults, **entry}
-        missing = [k for k in ("insert", "socket", "gap") if k not in merged]
+        merged = {**defaults, **_canonical_fit_key(entry, where)}
+        if "gap" not in merged and "fit" not in merged:
+            missing = ["gap (or fit)"]
+        else:
+            missing = []
+        missing += [k for k in ("insert", "socket") if k not in merged]
         if missing:
             raise FitError(f"{where} is missing {', '.join(missing)}")
         any_turn = merged.get("any_turn", False)
@@ -224,42 +242,150 @@ def load_spec(path: str) -> list[Fit]:
                 socket=expand(
                     _paths(merged["socket"], f"{where} socket"), base, "socket"
                 ),
-                gap=merged["gap"],
+                gap=merged.get("gap"),
                 name=str(name) if name is not None else "",
                 printed_size=merged.get("printed_size"),
                 any_turn=any_turn,
                 size_tol=merged.get("size_tol", SIZE_TOL),
-                gap_tol=merged.get("gap_tol", GAP_TOL),
+                gap_tol=merged.get("gap_tol"),
                 step=merged.get("step", STEP),
                 min_depth=merged.get("min_depth"),
                 open=merged.get("open", "above"),
+                fit=merged.get("fit"),
+                shape=merged.get("shape"),
+                printer=merged.get("printer"),
+                material=merged.get("material"),
+                nozzle=merged.get("nozzle"),
+                layer=merged.get("layer"),
                 where=where,
             )
         )
     return fits
 
 
+def _canonical_fit_key(mapping: dict[str, Any], where: str) -> dict[str, Any]:
+    """`fit_type` is the spelling of the fit table, `fit` the one of the CLI: accept either, store `fit`"""
+    if "fit_type" not in mapping:
+        return dict(mapping)
+    if "fit" in mapping:
+        raise FitError(f"{where}: give `fit` or `fit_type`, not both")
+    out = {k: v for k, v in mapping.items() if k != "fit_type"}
+    out["fit"] = mapping["fit_type"]
+    return out
+
+
+def _resolve_fit(
+    fit: Any,
+    shape: Any,
+    printer: Any,
+    material: Any,
+    nozzle: float | None,
+    layer: float | None,
+    pre: str,
+) -> Any:
+    """`fits_sources.resolve` (table + manual + calibration rows); its structured errors become FitError"""
+    import fits_sources
+    from errors import ThreeDError
+
+    for what, value in (("fit", fit), ("shape", shape), ("printer", printer), ("material", material)):
+        if value is not None and (not isinstance(value, str) or not value.strip()):
+            raise FitError(f"{pre}{what} must be a name, got {value!r}")
+    try:
+        return fits_sources.resolve(
+            fit, shape or "planar", printer, material, nozzle, layer, command="fit-check"
+        )
+    except ThreeDError as e:
+        raise FitError(
+            pre + e.message + "".join(f"\n  -> {step}" for step in e.remediation)
+        ) from None
+
+
 def make_fit(
     *,
     insert: list[str],
     socket: list[str],
-    gap: Any,
+    gap: Any = None,
     name: str = "",
     printed_size: Any = None,
     any_turn: bool = False,
     size_tol: Any = SIZE_TOL,
-    gap_tol: Any = GAP_TOL,
+    gap_tol: Any = None,
     step: Any = STEP,
     min_depth: Any = None,
     open: Any = "above",
+    fit: Any = None,
+    shape: Any = None,
+    printer: Any = None,
+    material: Any = None,
+    nozzle: Any = None,
+    layer: Any = None,
     where: str = "",
 ) -> Fit:
-    """validate the numbers of one fit; `where` prefixes error messages"""
+    """validate the numbers of one fit; `where` prefixes error messages.
+
+    `fit` (a fit-table type or alias: snap, sliding, tight, glue, ...) takes the gap and the gap tolerance
+    from `fits.resolve` for the given shape/printer/material/nozzle/layer; an explicit `gap` / `gap_tol` wins."""
     pre = f"{where}: " if where else ""
     if open not in OPEN_DIRECTIONS:
         raise FitError(
             f"{pre}open must be one of {', '.join(OPEN_DIRECTIONS)}, got {open!r}"
         )
+    fit_info: dict[str, Any] | None = None
+    if fit is None:
+        stray = [
+            k
+            for k, v in (
+                ("shape", shape),
+                ("printer", printer),
+                ("material", material),
+                ("nozzle", nozzle),
+                ("layer", layer),
+            )
+            if v is not None
+        ]
+        if stray:
+            raise FitError(
+                f"{pre}{', '.join(stray)} only apply together with a fit type (fit: snap|sliding|tight|glue)"
+            )
+    else:
+        res = _resolve_fit(
+            fit,
+            shape,
+            printer,
+            material,
+            None if nozzle is None else _number(nozzle, f"{pre}nozzle", positive=True),
+            None if layer is None else _number(layer, f"{pre}layer", positive=True),
+            pre,
+        )
+        gap_from = "explicit gap" if gap is not None else "fit"
+        if gap is None:
+            if res.clearance_mm <= 0:
+                raise FitError(
+                    f"{pre}fit {res.fit_type!r} resolves to {res.clearance_mm:+g} mm per face "
+                    "(an interference fit): fit-check measures a free gap and fails on any overlap; "
+                    "give an explicit gap, or use a clearance fit (snap, sliding, tight, glue)"
+                )
+            gap = res.clearance_mm
+        corr = next(p for p in res.provenance if p["kind"] == "correction")
+        fit_info = {
+            "fit_type": res.fit_type,
+            "requested": res.requested,
+            "shape": res.shape,
+            "printer": res.printer,
+            "material": res.material,
+            "nozzle_mm": res.nozzle_mm,
+            "layer_height_mm": res.layer_height_mm,
+            "clearance_mm": res.clearance_mm,
+            "tol_mm": res.tol_mm,
+            "fallback": res.fallback,
+            "correction_status": corr["status"],
+            "gap_from": gap_from,
+            "gap_tol_from": "explicit gap_tol" if gap_tol is not None else "fit",
+        }
+        if gap_tol is None:
+            gap_tol = res.tol_mm
+    if gap is None:
+        raise FitError(f"{pre}needs a gap (or a fit type)")
     return Fit(
         insert=insert,
         socket=socket,
@@ -270,12 +396,15 @@ def make_fit(
         else parse_size(printed_size, f"{pre}printed size"),
         any_turn=any_turn,
         size_tol=_number(size_tol, f"{pre}size tolerance", positive=False),
-        gap_tol=_number(gap_tol, f"{pre}gap tolerance", positive=False),
+        gap_tol=_number(
+            GAP_TOL if gap_tol is None else gap_tol, f"{pre}gap tolerance", positive=False
+        ),
         step=_number(step, f"{pre}step", positive=True),
         min_depth=None
         if min_depth is None
         else _number(min_depth, f"{pre}min depth", positive=True),
         open=open,
+        fit_info=fit_info,
     )
 
 
@@ -537,6 +666,7 @@ def check_fit(fit: Fit) -> dict[str, Any]:
         "size_tol_mm": fit.size_tol,
         "gap_set_mm": fit.gap,
         "gap_tol_mm": fit.gap_tol,
+        "fit": fit.fit_info,
         "step_mm": fit.step,
         "min_depth_mm": fit.min_depth,
         "open": fit.open,
@@ -557,6 +687,14 @@ def _layer_list(layers: list[dict[str, float]]) -> str:
     )
 
 
+def _fit_label(info: dict[str, Any] | None) -> str:
+    """` from fit snap/planar k1se petg: default, not calibrated` in the gap text; empty without a fit"""
+    if info is None:
+        return ""
+    who = " ".join(str(x) for x in (info["printer"], info["material"]) if x)
+    return f" from fit {info['fit_type']}/{info['shape']}{' ' + who if who else ''}: {info['correction_status']}"
+
+
 def _line(r: dict[str, Any]) -> str:
     size = " x ".join(map(_fmt_mm, r["insert_size_mm"]))
     printed = (
@@ -569,7 +707,7 @@ def _line(r: dict[str, Any]) -> str:
     else:
         gap = (
             f"gap {_fmt_mm(r['gap_mm'])}–{_fmt_mm(r['gap_max_mm'])} mm (set {_fmt_mm(r['gap_set_mm'])}"
-            f"±{_fmt_mm(r['gap_tol_mm'])}) over {_fmt_mm(r['socket_depth_mm'])} mm"
+            f"±{_fmt_mm(r['gap_tol_mm'])}{_fit_label(r['fit'])}) over {_fmt_mm(r['socket_depth_mm'])} mm"
         )
     open_ = (
         "open: not checked (captured)"
@@ -629,7 +767,21 @@ def main(argv: list[str]) -> int:
         action="append",
         help="socket mesh(es), comma-joined or repeated (unioned); globs ok",
     )
-    ap.add_argument("--gap", help="designed clearance per side, mm")
+    ap.add_argument(
+        "--gap",
+        help="designed clearance per side, mm (explicit; overrides the number of --fit)",
+    )
+    ap.add_argument(
+        "--fit",
+        help="fit type of the fit table (snap, sliding, tight, glue, aliases): gap and --gap-tol come from it",
+    )
+    ap.add_argument(
+        "--shape", help="feature shape for --fit (default planar; round, slot, pin, hinge)"
+    )
+    ap.add_argument("--printer", help="printer for the --fit correction rows, e.g. k1se")
+    ap.add_argument("--material", help="material for the --fit correction rows, e.g. PETG")
+    ap.add_argument("--nozzle", help="nozzle diameter for the --fit correction rows, mm")
+    ap.add_argument("--layer", help="layer height for the --fit correction rows, mm")
     ap.add_argument("--printed-size", help="X,Y,Z of the printed insert, mm")
     ap.add_argument(
         "--any-turn",
@@ -640,7 +792,10 @@ def main(argv: list[str]) -> int:
     ap.add_argument(
         "--size-tol", help=f"printed-size tolerance, mm (default {SIZE_TOL})"
     )
-    ap.add_argument("--gap-tol", help=f"clearance tolerance, mm (default {GAP_TOL})")
+    ap.add_argument(
+        "--gap-tol",
+        help=f"clearance tolerance, mm (default {GAP_TOL}; with --fit the tolerance of the fit)",
+    )
     ap.add_argument("--step", help=f"layer step up the socket, mm (default {STEP})")
     ap.add_argument(
         "--min-depth", help="FAIL when the socket is shallower than this, mm"
@@ -661,6 +816,12 @@ def main(argv: list[str]) -> int:
                     ("--insert", a.insert),
                     ("--socket", a.socket),
                     ("--gap", a.gap),
+                    ("--fit", a.fit),
+                    ("--shape", a.shape),
+                    ("--printer", a.printer),
+                    ("--material", a.material),
+                    ("--nozzle", a.nozzle),
+                    ("--layer", a.layer),
                     ("--printed-size", a.printed_size),
                     ("--any-turn", a.any_turn),
                     ("--name", a.name),
@@ -684,7 +845,7 @@ def main(argv: list[str]) -> int:
                 for f, v in (
                     ("--insert", a.insert),
                     ("--socket", a.socket),
-                    ("--gap", a.gap),
+                    ("--gap (or --fit)", a.gap or a.fit),
                 )
                 if not v
             ]
@@ -699,11 +860,17 @@ def main(argv: list[str]) -> int:
                     insert=expand(_paths(",".join(a.insert), "--insert"), "", "insert"),
                     socket=expand(_paths(",".join(a.socket), "--socket"), "", "socket"),
                     gap=a.gap,
+                    fit=a.fit,
+                    shape=a.shape,
+                    printer=a.printer,
+                    material=a.material,
+                    nozzle=a.nozzle,
+                    layer=a.layer,
                     name=a.name,
                     printed_size=a.printed_size,
                     any_turn=a.any_turn,
                     size_tol=SIZE_TOL if a.size_tol is None else a.size_tol,
-                    gap_tol=GAP_TOL if a.gap_tol is None else a.gap_tol,
+                    gap_tol=a.gap_tol,
                     step=STEP if a.step is None else a.step,
                     min_depth=a.min_depth,
                     open=a.open or "above",

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import math
+from pathlib import Path
 
 import pytest
 
@@ -10,35 +11,58 @@ from commands import fit_niche as cmd
 from errors import InvalidArgument, UsageError
 from niche_fit import (
     DEFAULT_CLEARANCE,
-    FIT_LABELS,
     emit_scad,
     make_spec,
     resolve_clearance,
     spec_from_json,
 )
 
+LEGACY_FIT_LABELS = ("snug", "normal", "loose")  # aliases of the fit table, not a table of their own
+
+
+@pytest.fixture(autouse=True)
+def _no_manual_corrections(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """a developer's own fits-corrections.yaml must not move the clearances under test"""
+    monkeypatch.setenv("THREED_FITS_CORRECTIONS", str(tmp_path / "none.yaml"))
+
 
 # --------------------------------------------------------------------------- clearance
-def test_fit_presets_map_to_documented_clearances() -> None:
-    assert {label: resolve_clearance(label, None)[0] for label in FIT_LABELS} == {
+def test_legacy_fit_labels_are_aliases_with_their_documented_clearances() -> None:
+    assert {label: resolve_clearance(label, None)[0] for label in LEGACY_FIT_LABELS} == {
         "snug": 0.10, "normal": 0.20, "loose": 0.35,
     }
     assert DEFAULT_CLEARANCE == 0.20
 
 
 def test_resolve_clearance_defaults_to_normal_preset() -> None:
-    assert resolve_clearance(None, None) == (0.20, "normal")
+    clearance, label, resolution = resolve_clearance(None, None)
+    assert (clearance, label) == (0.20, "normal")
+    assert resolution is not None and resolution.fit_type == "sliding"
 
 
 def test_resolve_clearance_explicit_override_wins_and_labels_custom() -> None:
-    assert resolve_clearance(None, 0.15) == (0.15, "custom")
+    assert resolve_clearance(None, 0.15) == (0.15, "custom", None)
     # a named fit alongside an explicit clearance keeps the fit label
-    assert resolve_clearance("loose", 0.5) == (0.5, "loose")
+    assert resolve_clearance("loose", 0.5) == (0.5, "loose", None)
 
 
-def test_resolve_clearance_rejects_unknown_fit() -> None:
-    with pytest.raises(InvalidArgument):
-        resolve_clearance("tight", None)
+def test_resolve_clearance_accepts_every_fit_type_of_the_table() -> None:
+    got = {fit: resolve_clearance(fit, None, shape="round")[0] for fit in ("snap", "sliding", "tight", "press", "glue")}
+    assert got == {"snap": 0.30, "sliding": 0.20, "tight": 0.10, "press": -0.10, "glue": 0.15}
+
+
+def test_resolve_clearance_rejects_unknown_fit_listing_the_table_names() -> None:
+    with pytest.raises(InvalidArgument) as err:
+        resolve_clearance("squishy", None)
+    assert "snap" in str(err.value) and "loose" in str(err.value)
+
+
+def test_resolve_clearance_corrects_for_printer_and_material_and_rejects_them_with_an_explicit_clearance() -> None:
+    plain = resolve_clearance("sliding", None)[0]
+    petg = resolve_clearance("sliding", None, printer="k1se", material="PETG", nozzle=0.4)[0]
+    assert plain == 0.20 and petg == 0.25  # the generic PETG row of the table: +0.05, not calibrated
+    with pytest.raises(UsageError, match="--clearance is explicit"):
+        resolve_clearance("sliding", 0.3, printer="k1se")
 
 
 def test_resolve_clearance_rejects_unknown_fit_even_with_explicit_clearance() -> None:
@@ -240,3 +264,31 @@ def test_command_missing_required_dimension_reports_missing_not_zero() -> None:
         cmd.run(["--width", "20", "--depth", "16"])
     with pytest.raises(UsageError, match="missing required --diameter"):
         cmd.run(["--shape", "round", "--height", "10"])
+
+
+def test_command_takes_any_fit_type_with_printer_and_material_and_reports_the_resolution(  # type: ignore[no-untyped-def]
+    tmp_path, capsys
+) -> None:
+    out = tmp_path / "plug.scad"
+    rc = cmd.run(["--shape", "round", "--diameter", "8", "--height", "10", "--fit", "snap", "--printer", "k1se",
+                  "--material", "PETG", "--nozzle", "0.4", "--json", "-o", str(out)])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["clearance"] == 0.35 and payload["fit"] == "snap"
+    res = payload["fit_resolution"]
+    assert res["schema"] == "3d.fits/1" and res["fit_type"] == "snap" and res["shape"] == "round"
+    assert next(p for p in res["provenance"] if p["kind"] == "correction")["status"] == "default, not calibrated"
+    # the declared clearance carries the marker `3d fits apply FILE.scad` re-corrects
+    assert "clearance = 0.35;" in out.read_text(encoding="utf-8")
+    assert "// @fit snap shape=round " in out.read_text(encoding="utf-8")
+
+
+def test_press_fit_is_a_negative_clearance_and_the_insert_is_larger_than_the_cavity(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    spec = make_spec(shape="round", diameter=8, height=10, fit="press")
+    assert spec.clearance == -0.10 and math.isclose(spec.insert_diameter, 8.2)
+    assert "negative = interference" in emit_scad(spec)
+
+
+def test_explicit_clearance_carries_no_fit_marker_and_no_resolution() -> None:
+    spec = make_spec(shape="rect", width=20, depth=16, height=12, clearance=0.15)
+    assert "@fit" not in emit_scad(spec) and "fit_resolution" not in spec.summary()

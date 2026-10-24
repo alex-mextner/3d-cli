@@ -37,9 +37,18 @@ Cavity shape + size (or use --spec):
                         Example: 3d fit-niche --width 20 --depth 16 --height 12
 
 Fit / clearance:
-  --fit snug|normal|loose   clearance preset (snug 0.10, normal 0.20, loose 0.35 mm).
-                        Default: normal.
-                        Example: 3d fit-niche --width 20 --depth 16 --height 12 --fit snug
+  --fit TYPE            fit type of the shared fit table (`3d fits list`): snap, sliding, tight, press, glue,
+                        or the aliases snug (= tight, 0.10), normal (= sliding, 0.20) and loose (= sliding
+                        + 0.15, 0.35 mm). Default: normal. press is an interference fit (negative clearance).
+                        Example: 3d fit-niche --width 20 --depth 16 --height 12 --fit snap
+  --printer NAME        printer whose correction rows adjust --fit, e.g. k1se (unknown name = table default).
+                        Example: 3d fit-niche --width 20 --depth 16 --height 12 --fit sliding --printer k1se
+  --material NAME       material whose correction rows adjust --fit, e.g. PETG.
+                        Example: 3d fit-niche --width 20 --depth 16 --height 12 --printer k1se --material PETG
+  --nozzle MM           nozzle diameter for the correction rows, e.g. 0.4.
+                        Example: 3d fit-niche --width 20 --depth 16 --height 12 --printer k1se --nozzle 0.4
+  --layer MM            layer height for the correction rows, e.g. 0.2.
+                        Example: 3d fit-niche --width 20 --depth 16 --height 12 --printer k1se --layer 0.2
   --clearance MM        explicit clearance per mating face (radial for round); overrides
                         --fit. Example: 3d fit-niche --width 20 --depth 16 --height 12 --clearance 0.15
 
@@ -54,8 +63,8 @@ Features:
 
 Input / output / proof:
   --spec FILE           read the cavity spec from a JSON file (same field names as the
-                        flags: shape/width/depth/diameter/height/clearance/fit/lead_in/
-                        groove/snap_tab). Flags override matching JSON fields.
+                        flags: shape/width/depth/diameter/height/clearance/fit/printer/material/nozzle/layer/
+                        lead_in/groove/snap_tab). Flags override matching JSON fields.
                         Example: 3d fit-niche --spec cavity.json -o insert.scad
   -o, --out PATH        output .scad path. Default: insert.scad
                         Example: 3d fit-niche --width 20 --depth 16 --height 12 -o plug.scad
@@ -70,6 +79,7 @@ Examples:
   3d fit-niche --width 20 --depth 16 --height 12 -o insert.scad
   3d fit-niche --shape round --diameter 20 --height 14 --lead-in --render
   3d fit-niche --width 24 --depth 18 --height 12 --fit loose --groove --snap
+  3d fit-niche --shape round --diameter 8 --height 10 --fit press --printer k1se --material PETG --json
   3d fit-niche --spec cavity.json -o plug.scad --check
   # Seated-in-cavity section proof (shows the clearance gap):
   3d render insert.scad --section --plane YZ -D show_cavity=true -o proof.png"""
@@ -80,13 +90,15 @@ _FLOAT_FLAGS = {
     "--diameter": "diameter",
     "--height": "height",
     "--clearance": "clearance",
+    "--nozzle": "nozzle",
+    "--layer": "layer",
 }
 
 
 def _parse_args(argv: list[str]) -> dict[str, object]:
     """Parse argv into a plain options dict (floats as float, flags as bool)."""
     opts: dict[str, object] = {
-        "shape": None, "fit": None, "spec": None, "out": "insert.scad",
+        "shape": None, "fit": None, "printer": None, "material": None, "spec": None, "out": "insert.scad",
         "lead_in": False, "groove": False, "snap_tab": False,
         "render": False, "check": False, "json": False,
     }
@@ -96,11 +108,8 @@ def _parse_args(argv: list[str]) -> dict[str, object]:
         if a in _FLOAT_FLAGS:
             opts[_FLOAT_FLAGS[a]] = _need_float(argv, i, a)
             i += 2
-        elif a == "--shape":
-            opts["shape"] = _need_value(argv, i, a)
-            i += 2
-        elif a == "--fit":
-            opts["fit"] = _need_value(argv, i, a)
+        elif a in ("--shape", "--fit", "--printer", "--material"):
+            opts[a[2:]] = _need_value(argv, i, a)
             i += 2
         elif a == "--spec":
             opts["spec"] = _need_value(argv, i, a)
@@ -176,6 +185,10 @@ def _build_spec(opts: dict[str, object]) -> NicheSpec:
         lead_in=bool(opts["lead_in"]),
         groove=bool(opts["groove"]),
         snap_tab=bool(opts["snap_tab"]),
+        printer=(str(opts["printer"]) if opts["printer"] is not None else None),
+        material=(str(opts["material"]) if opts["material"] is not None else None),
+        nozzle=_opt_float_or_none(opts, "nozzle"),
+        layer=_opt_float_or_none(opts, "layer"),
     )
 
 
@@ -195,7 +208,8 @@ def _require_dims(opts: dict[str, object]) -> None:
 
 def _overlay_flags(data: dict[str, object], opts: dict[str, object]) -> None:
     """Let explicitly-passed flags override matching fields from the spec file."""
-    for key in ("shape", "fit", "width", "depth", "diameter", "height", "clearance"):
+    for key in ("shape", "fit", "width", "depth", "diameter", "height", "clearance",
+                "printer", "material", "nozzle", "layer"):
         val = opts.get(key)
         if val is not None:
             data[key] = val

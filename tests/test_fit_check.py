@@ -344,3 +344,112 @@ def test_widening_insert_in_a_stepped_pocket_is_open(
     fit = rep["fits"][0]
     assert rc == 0, fit["errors"]
     assert fit["open_blocked_mm3"] is None
+
+
+# --------------------------------------------------------------------------- fit types from the shared table
+@pytest.fixture(autouse=True)
+def _no_manual_corrections(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """a developer's own fits-corrections.yaml must not move the gaps under test"""
+    monkeypatch.setenv("THREED_FITS_CORRECTIONS", str(tmp_path / "none.yaml"))
+
+
+def _pair(tmp_path: Path) -> tuple[str, str]:
+    """an insert in a pocket that leaves 0.2 mm per side"""
+    return str(write_insert(tmp_path / "ins.stl")), str(write_plate(tmp_path / "plate.stl"))
+
+
+def test_fit_takes_gap_and_tolerance_from_the_table(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    ins, plate = _pair(tmp_path)
+    rc, rep = _json(capsys, "--insert", ins, "--socket", plate, "--fit", "sliding")
+    fit = rep["fits"][0]
+    assert rc == 0, fit["errors"]
+    assert (fit["gap_set_mm"], fit["gap_tol_mm"]) == (0.2, 0.1)
+    assert fit["fit"]["fit_type"] == "sliding" and fit["fit"]["correction_status"] == "default, not calibrated"
+    assert fit["fit"]["gap_from"] == "fit" and fit["fit"]["gap_tol_from"] == "fit"
+
+
+def test_fit_text_line_names_the_fit_and_the_correction_status(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    ins, plate = _pair(tmp_path)
+    rc, out, _ = _run(capsys, "--insert", ins, "--socket", plate, "--fit", "sliding", "--printer", "k1se",
+                      "--material", "PETG", "--nozzle", "0.4")
+    assert rc == 0
+    assert "(set 0.25±0.1 from fit sliding/planar k1se PETG: default, not calibrated)" in out
+
+
+def test_printer_and_material_corrections_move_the_gap_and_an_explicit_tolerance_can_fail_it(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    ins, plate = _pair(tmp_path)
+    rc, rep = _json(capsys, "--insert", ins, "--socket", plate, "--fit", "sliding", "--printer", "k1se",
+                    "--material", "PETG", "--gap-tol", "0.03")
+    fit = rep["fits"][0]
+    assert fit["gap_set_mm"] == 0.25 and fit["gap_tol_mm"] == 0.03 and fit["fit"]["gap_tol_from"] == "explicit gap_tol"
+    assert rc == 1 and any("gap off 0.25±0.03" in e for e in fit["errors"])
+
+
+def test_explicit_gap_beats_the_fit(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    ins, plate = _pair(tmp_path)
+    rc, rep = _json(capsys, "--insert", ins, "--socket", plate, "--fit", "snap", "--gap", "0.2")
+    fit = rep["fits"][0]
+    assert fit["gap_set_mm"] == 0.2 and fit["gap_tol_mm"] == 0.1 and fit["fit"]["gap_from"] == "explicit gap"
+
+
+def test_fit_check_and_fit_niche_resolve_the_same_clearance() -> None:
+    from niche_fit import resolve_clearance
+    for fit in ("snap", "sliding", "tight", "glue", "normal", "loose", "snug"):
+        made = fit_check.make_fit(insert=["a"], socket=["b"], fit=fit, shape="planar", printer="k1se",
+                                  material="PETG", nozzle=0.4, layer=0.2)
+        niche = resolve_clearance(fit, None, shape="rect", printer="k1se", material="PETG", nozzle=0.4, layer=0.2)[0]
+        assert made.gap == niche, fit
+
+
+def test_a_press_fit_needs_an_explicit_gap(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    ins, plate = _pair(tmp_path)
+    rc, _, err = _run(capsys, "--insert", ins, "--socket", plate, "--fit", "press", "--shape", "pin")
+    assert rc == 2 and "interference fit" in err and "explicit gap" in err
+
+
+@pytest.mark.parametrize(("extra", "message"), [
+    (["--fit", "squishy"], "accepted: snap, sliding, tight, press, glue"),
+    (["--fit", "snap", "--shape", "cube"], "accepted: planar, round, slot, pin, hinge"),
+    (["--gap", "0.2", "--printer", "k1se"], "only apply together with a fit type"),
+    (["--fit", "snap", "--nozzle", "0"], "nozzle must be a finite number > 0"),
+])
+def test_bad_fit_options_are_usage_errors(tmp_path: Path, capsys: pytest.CaptureFixture[str], extra: list[str],
+                                          message: str) -> None:
+    ins, plate = _pair(tmp_path)
+    rc, _, err = _run(capsys, "--insert", ins, "--socket", plate, *extra)
+    assert rc == 2 and message in err
+
+
+def test_spec_fits_say_fit_instead_of_gap(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    write_insert(tmp_path / "A.stl")
+    write_insert(tmp_path / "B.stl")
+    write_plate(tmp_path / "plate.stl")
+    spec = tmp_path / "fits.yaml"
+    spec.write_text(
+        "printer: k1se\nmaterial: PETG\nfit: sliding\n"
+        "fits:\n"
+        "  - {name: A, insert: A.stl, socket: plate.stl}\n"
+        "  - {name: B, insert: B.stl, socket: plate.stl, fit_type: tight, gap_tol: 0.15}\n",
+        encoding="utf-8")
+    rc, rep = _json(capsys, "--spec", str(spec))
+    a, b = rep["fits"]
+    assert (a["gap_set_mm"], a["gap_tol_mm"], a["fit"]["fit_type"]) == (0.25, 0.1, "sliding")
+    assert (b["gap_set_mm"], b["gap_tol_mm"], b["fit"]["fit_type"]) == (0.15, 0.15, "tight")
+    assert b["status"] == "PASS"                      # 0.2 measured vs 0.15 ± 0.15
+    assert rc == 0, [a["errors"], b["errors"]]
+
+
+@pytest.mark.parametrize(("spec", "message"), [
+    ("fits: [{insert: a.stl, socket: a.stl, fit: snap, fit_type: tight}]\n", "give `fit` or `fit_type`, not both"),
+    ("fits: [{insert: a.stl, socket: a.stl, printer: k1se, gap: 0.2}]\n", "only apply together with a fit type"),
+    ("fits: [{insert: a.stl, socket: a.stl, fit: nope}]\n", "accepted: snap, sliding, tight, press, glue"),
+    ("fits: [{insert: a.stl, socket: a.stl, fit: snap, nozzle: -1}]\n", "nozzle must be a finite number > 0"),
+])
+def test_bad_fit_in_a_spec_is_a_usage_error(tmp_path: Path, capsys: pytest.CaptureFixture[str], spec: str,
+                                            message: str) -> None:
+    write_insert(tmp_path / "a.stl")
+    (tmp_path / "fits.yaml").write_text(spec, encoding="utf-8")
+    rc, _, err = _run(capsys, "--spec", str(tmp_path / "fits.yaml"))
+    assert rc == 2 and message in err
