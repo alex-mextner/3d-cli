@@ -42,6 +42,7 @@ from typing import Any
 
 from printops.color import parse_hex, srgb_to_lab
 from slicing.mix_model import Candidate
+from slicing.mix_target import validate_source
 
 SCHEMA = "printops.mix_tester/1"
 VENDOR = "Snapmaker"
@@ -726,6 +727,7 @@ def build(
     base_settings: dict[str, Any],
     app: str,
     source: str,
+    target_source: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Write OUT.3mf, OUT.mix.json, OUT.png; return the manifest."""
     target_hex = parse_hex(target)
@@ -777,6 +779,8 @@ def build(
         "references": [],
         "files": {k: p.name for k, p in paths.items()},
     }
+    if target_source is not None:
+        manifest["target_source"] = target_source
     for sw in swatches:
         if sw.candidate is not None:
             c = sw.candidate
@@ -823,6 +827,8 @@ def validate_manifest(m: Any) -> list[str]:
         errs.append(f"schema must be {SCHEMA}")
     if parse_hex(m.get("target")) is None:
         errs.append("target is not a colour")
+    if "target_source" in m:
+        errs.extend(validate_source(m["target_source"]))
     errs.extend(
         f"{key} must be a list"
         for key in ("slots", "candidates", "references")
