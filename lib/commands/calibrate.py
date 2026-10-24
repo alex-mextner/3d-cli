@@ -18,6 +18,7 @@ import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import calibrate_fit_cli
 from cli.registry import Command
 from errors import GateFailure, InputNotFound, UsageError
 from topcam import photo_cli
@@ -34,7 +35,7 @@ USAGE = """3d calibrate plan --printer P [--head T] [--spool ID] [--plate PLATE]
 3d calibrate show ID
 3d calibrate check FILE.gcode --printer P [--spools T1=ID,…] [--plate PLATE]
                    [--accept calibration:KIND[,…] --reason TEXT]
-3d calibrate gen pa|flow|combo|temp|shaper|plate1|dense|dense2 --printer P -o OUT [--material PLA] [--color #RRGGBB]
+3d calibrate gen pa|flow|combo|temp|shaper|plate1|dense|dense2|fit --printer P -o OUT [--material PLA] [--color #RRGGBB]
                  [--nozzle-temp C] [--only T,…] [--skip T,…] [--pa-range LOW:HIGH] [--pa-step S]
                  [--machine-preset NAME] [--process-preset NAME] --filament-preset NAME
   common (all but gen): [--json] [--api URL] [--token TOKEN]
@@ -131,7 +132,9 @@ Examples:
   3d calibrate gen plate1 --printer k1se --filament-preset 'Orange PLA @K1SE' --skip pa,flow -o k1se_plate1_orange.gcode
   3d calibrate gen plate1 --printer k1se --filament-preset 'Orange PLA @K1SE' --only pa,flow --pa-range 0.03:0.05 --pa-step 0.0025 -o k1se_pa_fine.gcode
   3d calibrate gen dense --printer k1se --filament-preset 'Orange PLA @K1SE' -o k1se_dense_orange.gcode
-  3d calibrate gen dense2 --printer k1se --filament-preset 'Orange PLA @K1SE' -o k1se_dense2_orange.gcode"""
+  3d calibrate gen dense2 --printer k1se --filament-preset 'Orange PLA @K1SE' -o k1se_dense2_orange.gcode
+  3d calibrate gen fit --printer k1se --filament-preset 'Orange PLA @K1SE' -o k1se_fit_orange.gcode
+  3d calibrate fit quick --printer k1se --material PLA --yes"""
 
 USAGE += (
     "\n\nTop-camera photo (#342):\n"
@@ -143,6 +146,8 @@ USAGE += (
     + "\n\nExamples:\n"
     + photo_cli.EXAMPLES
 )
+
+USAGE += "\n\nQuick fit calibration (#573; `3d calibrate fit --help` prints the same):\n" + calibrate_fit_cli.USAGE
 
 PREFIX = "calibrate"
 COMMON_VALUES = {"--api", "--token"}
@@ -622,6 +627,7 @@ SUBS = {
     "show": _show,
     "check": _check,
     "gen": _gen,
+    "fit": calibrate_fit_cli.run,
     "photo": photo_cli.photo,
     "rectify": photo_cli.rectify,
 }

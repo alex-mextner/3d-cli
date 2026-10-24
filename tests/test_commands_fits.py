@@ -497,8 +497,9 @@ def test_corrections_list_shows_table_manual_and_sources(
         ]
         == "*"
     )
-    with pytest.raises(InvalidArgument, match="accepted: table, manual"):
-        cmd.run(["corrections", "list", "--origin", "calibration"])
+    with pytest.raises(InvalidArgument, match="accepted: table, calibration, manual"):
+        cmd.run(["corrections", "list", "--origin", "lab"])
+    assert run_json(capsys, "corrections", "list", "--origin", "calibration")["corrections"] == []
 
 
 def test_corrections_remove_is_a_dry_run_until_yes_and_needs_the_exact_scope(

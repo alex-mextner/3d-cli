@@ -151,6 +151,8 @@ calibrations:
     retraction: warn
     # A measured colour corrects the mix model (plan §20.4, #412); a print never needs one.
     filament_color: off
+    # A fit coupon only tightens the fit table's clearances (#573): a print never needs one.
+    fit_clearance: warn
   printers:
     # D7: other people's printers are never contacted and not ours to calibrate.
     p1s: off
