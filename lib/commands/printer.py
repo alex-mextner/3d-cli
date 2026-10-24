@@ -55,6 +55,11 @@ USAGE = """3d printer [-n NAME] <subcommand> [args]
                                        watch.bed.auto_view has its bed moved in Z to where the
                                        camera sees the whole plate, and back: --no-bed-move)
   cancel NAME --yes                    cancel the running/paused job
+  evidence NAME [--job ID | --last] [--out DIR] [--gcode F] [--note T]
+                                       after EVERY print (done/cancelled/failed): save the Moonraker
+                                       history job + the klippy.log lines around its pauses/errors as
+                                       DIR/<date>-<outcome>.md/.json, with the layer of each stop when
+                                       --gcode is given; GET only (see `3d printer evidence --help`)
   guard NAME --job-id ID --yes         one-job automatic PAUSE on confirmed camera failure;
                                        local evidence only (see `3d printer guard --help`)
   watch NAME...|--all [options]        live read-only subscription: anomaly events to
@@ -126,6 +131,7 @@ Examples:
   RIG_HATCH_REQUEST_3D_PRINTER_START_FORCE="roof overhang FAIL is a stale map, issue #N" \\
     3d printer start k1se out/roof.gcode --yes --force   # waits for the owner's Telegram tap
   3d printer cancel k1se --yes
+  3d printer evidence u1 --out projects/chekhov/print/runs --gcode print/chekhov.gcode
   3d printer watch u1 k1se --steer 01a12cd6
   3d printer vision u1 --once --save /tmp/u1.jpg
   3d printer vision u1
@@ -500,6 +506,10 @@ def run(argv: list[str]) -> int:
         return _cmd_start(rest)
     if sub == "cancel":
         return _cmd_cancel(rest)
+    if sub == "evidence":
+        from printer_ops.evidence import run as evidence
+
+        return evidence(rest)
     if sub == "watch":
         from printer_ops.watch_run import run as watch
 
@@ -529,7 +539,7 @@ def run(argv: list[str]) -> int:
 
         return todo(rest, printer=name)
     raise UsageError(f"unknown subcommand '{sub}'", command="printer",
-                     remediation=["Use list, status, upload, start, cancel, watch, vision, guard, bed, subscribe, unsubscribe, "
+                     remediation=["Use list, status, upload, start, cancel, evidence, watch, vision, guard, bed, subscribe, unsubscribe, "
                                   "subscriptions, agent, doctor or todo (issues) — see `3d printer --help`."])
 
 
@@ -552,7 +562,7 @@ def _printer_name(argv: list[str]) -> tuple[str | None, list[str]]:
 COMMAND = Command(
     name="printer",
     group="SLICING",
-    summary="drive configured printers: list / status / upload / start --yes / cancel --yes / watch / vision / subscribe / agent / todo",
+    summary="drive configured printers: list / status / upload / start --yes / cancel --yes / evidence / watch / vision / subscribe / agent / todo",
     usage=USAGE,
     run=run,
 )

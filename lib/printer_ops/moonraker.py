@@ -10,6 +10,7 @@ https://github.com/alex-mextner/3d-cli/issues/92:
   cancel  POST /printer/print/cancel
   queue   GET  /server/job_queue/status        (read-only: `3d printers show`)
   history GET  /server/history/list?limit=N&order=desc, /server/history/totals   (read-only: same)
+          GET  /server/history/job?uid=ID, /server/files/logs/klippy.log   (read-only: `3d printer evidence`)
   gcode   POST /printer/gcode/script?script=<line>   (the bed-clear ack, printer_ops/bed.py; the
                head-filament write and pressure advance below)
   spool   GET  /server/spoolman/status          {spoolman_connected, pending_reports, spool_id}
@@ -67,6 +68,8 @@ import json
 import math
 import re
 from collections.abc import Callable
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, TypeVar
 from urllib.parse import quote, urlsplit
@@ -96,6 +99,7 @@ from printer_ops.base import (
     UploadResult,
     http_json,
     http_request,
+    http_request_full,
     http_upload,
 )
 from printer_ops.move_bounds import Limits
@@ -297,6 +301,16 @@ def parse_totals(result: Any) -> HistoryTotals:
     )
 
 
+def _http_date(value: str | None) -> datetime | None:
+    """An HTTP date header -> UTC datetime; None when absent or unparseable."""
+    if not value:
+        return None
+    try:
+        return parsedate_to_datetime(value).astimezone(timezone.utc)
+    except (TypeError, ValueError):
+        return None
+
+
 class MoonrakerAdapter(Adapter):
     kind = "moonraker"
     upload_while_busy = (
@@ -363,6 +377,70 @@ class MoonrakerAdapter(Adapter):
 
     def history_totals(self) -> HistoryTotals:
         return self._parsed("/server/history/totals", parse_totals)
+
+    def history_job(self, uid: str) -> dict[str, Any] | None:
+        """The raw history record of job `uid` (Moonraker's `job_id`, e.g. "000070"), None when the history
+        has no such job. Read-only."""
+        path = f"/server/history/job?uid={quote(uid, safe='')}"
+        try:
+            status, _, body = http_request_full("GET", self.base + path, timeout=self.timeout)
+        except (OSError, http.client.HTTPException) as exc:
+            raise self._comm_error(f"GET {path}", exc) from exc
+        if status == 404 and re.search(rb"job|uid", body, re.IGNORECASE):  # Moonraker's "Invalid job uid"
+            return None
+        if status >= 400:  # a 404 that does not mention the job: no [history] component, or a proxy
+            raise self._comm_error(f"GET {path}", f"HTTP {status}: {body[:200]!r}")
+        try:
+            data = json.loads(body or b"null")
+        except ValueError as exc:
+            raise self._comm_error(f"GET {path}", f"not JSON ({exc})") from exc
+        result = data.get("result", data) if isinstance(data, dict) else None
+        job = result.get("job") if isinstance(result, dict) else None
+        if not isinstance(job, dict) or not job:
+            raise self._comm_error(f"GET {path}", f"no 'job' in {str(data)[:120]!r}")
+        return job
+
+    def history_finished_job(self, look_at: int = 20) -> dict[str, Any] | None:
+        """The newest raw history record that is not `in_progress` among the newest `look_at`; None when
+        there is none. Read-only."""
+        path = f"/server/history/list?limit={look_at}&order=desc"
+        try:
+            result = self._get(path)
+        except http.client.HTTPException as exc:
+            raise self._comm_error(f"GET {path}", exc) from exc
+        jobs = result.get("jobs") if isinstance(result, dict) else None
+        if not isinstance(jobs, list):
+            raise self._comm_error(f"GET {path}", f"no 'jobs' list in {str(result)[:120]!r}")
+        return next((j for j in jobs if isinstance(j, dict) and j.get("status") != "in_progress"), None)
+
+    def print_stats(self) -> dict[str, Any]:
+        """Klipper's `print_stats` object (state, message, filename, durations). Read-only."""
+        try:
+            stats = self.query("print_stats").get("print_stats")
+        except http.client.HTTPException as exc:
+            raise self._comm_error("objects/query", exc) from exc
+        if not isinstance(stats, dict):
+            raise self._comm_error("objects/query", "no print_stats in the reply")
+        return stats
+
+    def klippy_log(self, *, timeout: float, max_bytes: int) -> tuple[str, datetime]:
+        """klippy.log as the printer serves it (`/server/files/logs/klippy.log`) and when its newest line was
+        written: the file's HTTP `Last-Modified` (an idle printer writes nothing, so the moment of the request
+        can be days later), else the HTTP `Date` of the reply, else the host's clock. Both are the printer's
+        clock, the one that stamps the log. Read-only. A log larger than `max_bytes` is refused, not truncated."""
+        path = "/server/files/logs/klippy.log"
+        try:
+            status, headers, body = http_request_full("GET", self.base + path, timeout=timeout, max_bytes=max_bytes + 1)
+        except (OSError, http.client.HTTPException) as exc:
+            raise self._comm_error(f"GET {path}", exc) from exc
+        if status >= 400:
+            raise self._comm_error(f"GET {path}", f"HTTP {status}")
+        if len(body) > max_bytes:
+            raise self._comm_error(f"GET {path}", f"larger than {max_bytes >> 20} MiB")
+        anchor = (
+            _http_date(headers.get("last-modified")) or _http_date(headers.get("date")) or datetime.now(timezone.utc)
+        )
+        return body.decode("utf-8", "replace"), anchor
 
     def axis_limits(self) -> tuple[Limits | None, str]:
         """Configured limits win; otherwise Klipper's own stepper_x/stepper_y position_min/max."""

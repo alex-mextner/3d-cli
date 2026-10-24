@@ -333,6 +333,15 @@ def http_json(method: str, url: str, *, timeout: float = 10.0, body: bytes | Non
 def http_request(method: str, url: str, *, timeout: float = 10.0, body: bytes | None = None,
                  headers: dict[str, str] | None = None, max_bytes: int | None = None) -> tuple[int, bytes]:
     """One HTTP request -> (status, body); `max_bytes` caps how much of the body is read."""
+    status, _, data = http_request_full(method, url, timeout=timeout, body=body, headers=headers, max_bytes=max_bytes)
+    return status, data
+
+
+def http_request_full(method: str, url: str, *, timeout: float = 10.0, body: bytes | None = None,
+                      headers: dict[str, str] | None = None,
+                      max_bytes: int | None = None) -> tuple[int, dict[str, str], bytes]:
+    """One HTTP request -> (status, lower-cased response headers, body); `max_bytes` caps how much of the body
+    is read. Raises OSError, or `http.client.HTTPException` for a half-read response (as `http_request` always did)."""
     parts = urlsplit(url)
     conn = http.client.HTTPConnection(parts.hostname or "", parts.port or 80, timeout=timeout)
     try:
@@ -341,7 +350,7 @@ def http_request(method: str, url: str, *, timeout: float = 10.0, body: bytes | 
             path += "?" + parts.query
         conn.request(method, path, body=body, headers=headers or {})
         r = conn.getresponse()
-        return r.status, r.read(max_bytes)
+        return r.status, {k.lower(): v for k, v in r.getheaders()}, r.read(max_bytes)
     finally:
         conn.close()
 

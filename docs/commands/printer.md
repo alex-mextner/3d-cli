@@ -19,6 +19,7 @@ Epic: [#90](https://github.com/alex-mextner/3d-cli/issues/90).
 3d printer upload NAME FILE.gcode [--as REMOTE]
 3d printer start NAME FILE.gcode --yes [--as REMOTE] [--source-3mf X.3mf] [--bridge-max MM] [--force] [--secs S] [--no-bed-move]
 3d printer cancel NAME --yes
+3d printer evidence NAME [--job ID | --last] [--out DIR] [--gcode FILE.gcode] [--note TEXT] [--klippy-log FILE] [--job-file FILE]
 3d printer guard NAME --job-id ID --yes [--interval S] [--evidence DIR]
 3d printer guard NAME --job-id ID --dry-run
 3d printer watch NAME... | --all [--steer SESSION] [--exec CMD] [--min-severity LEVEL] ...
@@ -43,6 +44,7 @@ Epic: [#90](https://github.com/alex-mextner/3d-cli/issues/90).
 | `upload NAME FILE` | Store the file on the printer and verify its size there. Never starts a print. |
 | `start NAME FILE --yes` | Start a file that was uploaded before. Runs [`3d print-preflight`](print-preflight.md) first. |
 | `cancel NAME --yes` | Cancel the running or paused job. |
+| `evidence NAME --out DIR` | After EVERY print (done, cancelled, failed): save the Moonraker history job and the klippy.log lines around its pauses and errors as `DIR/<date>-<outcome>.md` + `.json`, with the layer of each stop when `--gcode` is given; GET only. See [printer-evidence.md](printer-evidence.md). |
 | `guard NAME --job-id ID --yes` | Authorize one automatic native PAUSE of this exact live Moonraker job on confirmed camera failure; [policy and readiness](printer-vision.md#one-job-automatic-pause). |
 | `watch NAME...` | Stay subscribed (read-only) and report anomalies as events — see [Watching printers](#watching-printers). |
 | `vision NAME` | Watch the camera for failed prints (spaghetti, stale/dark camera, the U1's own NPU verdicts) — see [Camera failure detection](#camera-failure-detection). |
