@@ -6,8 +6,10 @@ WHAT: pure functions that turn a host entry + a project name into the exact `rsy
 WHY: the heavy box (16 cores, `~/projects/<name>-<date>/{repo,work,out,logs,cache}`, `~/projects/bin/heavy`)
   turned into hand-typed rsync/ssh lines in the Chekhov session; a typo in the quoting or the lock wrapper
   costs a retry per slow step over a ~1.7 MB/s uplink.
-INVARIANTS: stdlib + yaml (lazy). Remote paths are relative to the remote $HOME and always go through
-  shlex.quote; nothing here talks to the network.
+INVARIANTS: stdlib + yaml (lazy). Remote paths are relative to the remote $HOME; in ssh command lines they
+  go through shlex.quote, and in rsync `host:path` operands (which an old rsync gives to a remote shell) the
+  project and subdir are limited to `_SAFE_COMPONENT`; rsync local/remote operands follow `--`.
+  Nothing here talks to the network.
 
 Config (`~/.config/3d-cli/remote.yaml`, or `$THREED_REMOTE_CONFIG`):
     default: heavy
@@ -21,6 +23,7 @@ Config (`~/.config/3d-cli/remote.yaml`, or `$THREED_REMOTE_CONFIG`):
 from __future__ import annotations
 
 import os
+import re
 import shlex
 from dataclasses import dataclass
 from datetime import date
@@ -31,6 +34,9 @@ from errors import InvalidArgument, UsageError
 CONFIG_ENV = "THREED_REMOTE_CONFIG"
 DEFAULT_CONFIG = "~/.config/3d-cli/remote.yaml"
 RSYNC_EXCLUDES = (".git", "__pycache__", ".venv", "node_modules", ".DS_Store")
+#: one remote path component: word characters, `.`, `-`; never leading `.`/`-` (no `..`, no rsync/ssh option), no
+#: shell metacharacters or spaces (an rsync older than 3.2.4 runs the remote path through the remote shell)
+_SAFE_COMPONENT = re.compile(r"\w[\w.-]*")
 
 
 @dataclass(frozen=True)
@@ -42,14 +48,29 @@ class Host:
     root: str = "projects"
     heavy: str | None = "projects/bin/heavy"
 
+    def project_dir(self, project: str) -> str:
+        """`<root>/<project>`; the project is ONE safe path component so it cannot leave the root."""
+        _check_component("--project", project)
+        return f"{self.root}/{project}"
+
     def work(self, project: str) -> str:
-        return f"{self.root}/{project}/work"
+        return f"{self.project_dir(project)}/work"
 
     def out(self, project: str) -> str:
-        return f"{self.root}/{project}/out"
+        return f"{self.project_dir(project)}/out"
 
     def logs(self, project: str) -> str:
-        return f"{self.root}/{project}/logs"
+        return f"{self.project_dir(project)}/logs"
+
+
+def _check_component(label: str, value: str) -> None:
+    if not _SAFE_COMPONENT.fullmatch(value):
+        raise InvalidArgument(
+            label,
+            value,
+            ["letters, digits, `.`, `_`, `-` only, starting with a letter or digit"],
+            command="remote",
+        )
 
 
 def config_path(env: dict[str, str] | None = None) -> Path:
@@ -75,11 +96,13 @@ def load_hosts(path: Path | None = None) -> tuple[dict[str, Host], str | None]:
                 ["a mapping with an `ssh:` target"],
                 command="remote",
             )
+        # absent key = the box wrapper; only an explicit null runs commands bare
+        raw_heavy = entry.get("heavy", Host.heavy)
         hosts[str(name)] = Host(
             name=str(name),
             ssh=str(entry["ssh"]),
             root=str(entry.get("root", "projects")).strip("/"),
-            heavy=(str(entry["heavy"]).strip("/") if entry.get("heavy") else None),
+            heavy=str(raw_heavy).strip("/") if raw_heavy else None,
         )
     default = data.get("default")
     return hosts, (str(default) if default else None)
@@ -106,8 +129,8 @@ def pick_host(hosts: dict[str, Host], default: str | None, wanted: str | None) -
 
 
 def default_project(cwd: Path | None = None, today: date | None = None) -> str:
-    """`<dir>-<YYYY-MM-DD>`, the `projects/<name>-<date>` convention of the box."""
-    base = (cwd or Path.cwd()).name or "job"
+    """`<dir>-<YYYY-MM-DD>`, the `projects/<name>-<date>` convention of the box (dir name made path-safe)."""
+    base = re.sub(r"[^\w.-]+", "-", (cwd or Path.cwd()).name).strip("-.") or "job"
     return f"{base}-{(today or date.today()).isoformat()}"
 
 
@@ -126,17 +149,20 @@ def rsync_push_argv(host: Host, project: str, sources: list[str]) -> list[str]:
     argv = ["rsync", "-az", "--partial", "--mkpath"]
     for pattern in RSYNC_EXCLUDES:
         argv += ["--exclude", pattern]
-    return [*argv, *sources, f"{host.ssh}:{host.work(project)}/"]
+    return [*argv, "--", *sources, f"{host.ssh}:{host.work(project)}/"]
 
 
 def rsync_pull_argv(host: Host, project: str, remote_sub: str, dest: str) -> list[str]:
     """Copy `<root>/<project>/<remote_sub>/` (default `out`) into the local `dest` dir."""
     sub = remote_sub.strip("/") or "out"
+    for part in sub.split("/"):  # no `..`, no empty component: stays inside the project
+        _check_component("--sub", part)
     return [
         "rsync",
         "-az",
         "--partial",
-        f"{host.ssh}:{host.root}/{project}/{sub}/",
+        "--",
+        f"{host.ssh}:{host.project_dir(project)}/{sub}/",
         dest.rstrip("/") + "/",
     ]
 

@@ -27,12 +27,15 @@ hosts:
   heavy:
     ssh: ultra@65.21.40.51
     root: projects            # remote dir holding <project>/{work,out,logs}, relative to $HOME
-    heavy: projects/bin/heavy # the box's lock wrapper; null to run commands directly
+    heavy: projects/bin/heavy # the box's lock wrapper (the default when the key is absent); an explicit null runs commands directly
 ```
 
 - `--host` takes a name from the config or an ad hoc `user@host`; without it the config default (or the only
   host) is used.
-- `--project` defaults to `<current dir>-<YYYY-MM-DD>`, the `projects/<name>-<date>` convention of the box.
+- `--project` defaults to `<current dir>-<YYYY-MM-DD>` (characters outside letters, digits, `.`, `_`, `-` in the
+  directory name become `-`), the `projects/<name>-<date>` convention of the box. An explicit `--project`, `--sub`
+  or `--pull SUBDIR` must be path components of those characters (no spaces, `..`, shell characters, leading `-`):
+  anything else exits 2 before ssh/rsync run, because rsync before 3.2.4 hands the remote path to a shell.
 - `push` rsyncs into `<root>/<project>/work/` (skips `.git`, `__pycache__`, `.venv`).
 - `run` does `cd <work> && heavy -n NAME [--wait] -- CMD` over ssh and returns the remote exit code;
   `--wait` queues behind another heavy job instead of failing (exit 75); `--no-heavy` runs CMD directly;
