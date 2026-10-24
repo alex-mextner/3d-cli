@@ -20,7 +20,7 @@ inside the actions that need it.
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any, TypedDict
 
 from errors import InvalidArgument, ThreeDError
@@ -29,6 +29,7 @@ SCHEMA = "3d.action/1"
 SEARCH_KINDS = ("wide", "narrow", "followup", "rewrite", "user")
 PHOTO_KINDS = ("table", "bed", "render")
 BACKENDS = ("omp", "claude", "codex", "opencode")
+RANK_MODES = ("deterministic", "llm")
 
 
 class ActionIssue(TypedDict):
@@ -136,7 +137,9 @@ def search(
     ]
     if not doc["results"]:
         return error_result(
-            "search", problems, {"session": doc["search_id"], "query": query, "results": []}
+            "search",
+            problems,
+            {"session": doc["search_id"], "query": query, "results": []},
         )
     flat = [
         {
@@ -157,7 +160,12 @@ def search(
     ]
     return ok_result(
         "search",
-        {"session": doc["search_id"], "query": query, "results": flat, "timings": doc["timings"]},
+        {
+            "session": doc["search_id"],
+            "query": query,
+            "results": flat,
+            "timings": doc["timings"],
+        },
         warnings,
     )
 
@@ -168,12 +176,151 @@ def rank(
     mode: str = "deterministic",
     limit: int | None = None,
     db_path: str | None = None,
+    classifier: str | None = None,
+    planner: str | None = None,
+    rewrite: bool = True,
+    answers: Mapping[str, str] | None = None,
+    follow: Sequence[int] = (),
+    refresh: bool = False,
+    require: bool = False,
 ) -> ActionResult:
-    """Score and order the results of one session (`mode`: `deterministic` | `llm`); writes score/verdict/rationale.
+    """Order the results of one saved search tree; `mode` `deterministic` | `llm`.
 
-    `data`: `{session: uid, ranked: [{result: uid, rank, score, verdict, rationale}]}`.
+    `deterministic` reads the stored order (the search's own, plus any verdicts a previous run saved) and calls no
+    model. `llm` runs the ranking pipeline of `3d models rerank` (library/rankflow.py, events
+    docs/contracts/search-events.md) on the saved search `session` (uid, id or `latest`): the classifier judges every
+    result (`fits|maybe|no`, `score 0..1`, `rationale`; cached per query+model+card), `answers` ({question key:
+    value}) are applied as constraints and saved, `follow` runs suggested follow-up queries by number, and when
+    few results fit and `rewrite` is true the planner proposes and runs wide/narrow/rewrite queries
+    (`classifier`/`planner` override the configured models; `refresh` ignores cached verdicts). A model that is
+    unavailable is a warning `llm_unavailable`, never an error, unless `require` (then MissingDependency).
+
+    `data`: `{session: uid, query, ranked: [{result: uid|None, session: uid, site, model_id, rank, score, verdict,
+    rationale}], counts: {results, fits, maybe, no, unjudged}, queries: [...], questions: [...], followups: [...],
+    llm: {backend, calls, tokens...} | None}`. `rank` is the 1-based final position; `limit` cuts the list.
     """
-    raise NotImplementedByDesign("rank", 577, "LLM relevance and query planning")
+    if mode not in RANK_MODES:
+        raise InvalidArgument("mode", mode, list(RANK_MODES), command="models")
+    from library import rankflow, rankstore
+    from library import db as librarydb
+    from library.llm import load_llm_config, with_overrides
+
+    if mode == "deterministic":
+        conn = librarydb.open_library(db_path)
+        try:
+            row = rankstore.session_row(conn, session)
+            seen: set[tuple[str, str]] = set()
+            ranked: list[dict[str, Any]] = []
+            for s in rankstore.tree_sessions(conn, int(row["id"])):
+                for r in rankstore.session_results(conn, int(s["id"])):
+                    key = (r["site"], r["model_id"])
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    uid = conn.execute(
+                        "SELECT uid FROM search_result WHERE session_id = ? AND site = ? AND model_id = ?",
+                        (s["id"], r["site"], r["model_id"]),
+                    ).fetchone()["uid"]
+                    ranked.append(
+                        {
+                            "result": uid,
+                            "session": s["uid"],
+                            "site": r["site"],
+                            "model_id": r["model_id"],
+                            "rank": len(ranked) + 1,
+                            "score": r["score"],
+                            "verdict": r["verdict"],
+                            "rationale": r["rationale"],
+                        }
+                    )
+            data: dict[str, Any] = {
+                "session": row["uid"],
+                "query": row["query"],
+                "ranked": ranked[:limit] if limit else ranked,
+                "counts": {"results": len(ranked)},
+                "queries": [
+                    p
+                    for p in rankstore.list_plan_queries(conn, int(row["id"]))
+                    if p["kind"] != "followup"
+                ],
+                "questions": rankstore.list_questions(conn, int(row["id"])),
+                "followups": [
+                    p
+                    for p in rankstore.list_plan_queries(conn, int(row["id"]))
+                    if p["kind"] == "followup"
+                ],
+                "llm": None,
+            }
+        finally:
+            conn.close()
+        return ok_result("rank", data)
+
+    from library.search import SearchOptions
+
+    config = with_overrides(load_llm_config(), classifier=classifier, planner=planner)
+    options = rankflow.RankOptions(
+        config,
+        enabled=True,
+        require=require,
+        rewrite=rewrite,
+        answers=dict(answers or {}),
+        follow=tuple(follow),
+        refresh=refresh,
+    )
+    pipeline = rankflow.Pipeline(options, SearchOptions(db_path=db_path))
+    warnings: list[ActionIssue] = []
+    done: dict[str, Any] | None = None
+    for event in pipeline.session(session):
+        if event["event"] == "warning":
+            warnings.append(issue(str(event["code"]), str(event["message"])))
+        elif event["event"] == "done":
+            done = event
+    if done is None:
+        return error_result(
+            "rank", [issue("error", "the ranking stream ended without a result")]
+        )
+    conn = librarydb.open_library(db_path)
+    try:
+        row = rankstore.session_row(conn, str(done["search"]))
+        results = {
+            (r["site"], r["model_id"]): r["uid"]
+            for r in conn.execute(
+                "SELECT site, model_id, uid FROM search_result WHERE session_id IN "
+                "(SELECT id FROM search_session WHERE id = ? OR parent_id = ?) ORDER BY id DESC",
+                (row["id"], row["id"]),
+            )
+        }
+        followups = [
+            p
+            for p in rankstore.list_plan_queries(conn, int(row["id"]))
+            if p["kind"] == "followup"
+        ]
+    finally:
+        conn.close()
+    ranked_out = [
+        {
+            "result": results.get((e["site"], e["id"])),
+            "session": e["search"],
+            "site": e["site"],
+            "model_id": e["id"],
+            "rank": n,
+            "score": e["score"],
+            "verdict": e["verdict"],
+            "rationale": e["rationale"],
+        }
+        for n, e in enumerate(done["ranking"], start=1)
+    ]
+    data = {
+        "session": done["search"],
+        "query": done["query"],
+        "ranked": ranked_out[:limit] if limit else ranked_out,
+        "counts": done["counts"],
+        "queries": done["queries"],
+        "questions": done["questions"],
+        "followups": followups,
+        "llm": done["llm"],
+    }
+    return ok_result("rank", data, warnings)
 
 
 def download(
@@ -212,7 +359,9 @@ def download(
         {
             "source": source["uid"] if source else None,
             "dir": result["dir"],
-            "files": [{k: f[k] for k in ("name", "size", "sha256")} for f in result["files"]],
+            "files": [
+                {k: f[k] for k in ("name", "size", "sha256")} for f in result["files"]
+            ],
             "license": result["model"]["license"] or None,
             "role": role,
         },
