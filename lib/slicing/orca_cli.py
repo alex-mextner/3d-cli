@@ -18,7 +18,9 @@ INVARIANTS:
 ASSUMPTIONS:
   * CLI 01.10.01.50 (Snapmaker Orca 2.4.0 line). Option spelling is the one the AppImage's `--help` prints.
   * The CLI writes `plate_N.gcode`, `result.json` and the `--export-3mf` file into `--outputdir`.
-  * Without GNU `timeout` (macOS) the deadline is enforced by this module and includes the lock wait.
+  * Without GNU `timeout` (macOS) the deadline is enforced by this module and includes the lock wait; with it,
+    this module still SIGKILLs the process group `TIMEOUT_GRACE_S` after `timeout_s` plus the lock-wait window
+    (a TERM-ignoring slicer); `timeout --foreground` keeps the slicer in the group that kill reaches.
 PAST BUGS: see KNOWN_QUIRKS (each entry names its evidence).
 """
 
@@ -53,6 +55,10 @@ _RESOURCES_HINT = (
     "when the slicer lives elsewhere)"
 )
 EXIT_TIMEOUT = 124  # GNU `timeout`
+EXIT_KILLED = 137  # GNU `timeout -k` after its KILL, or SIGKILL seen through a shell
+TIMEOUT_GRACE_S = (
+    30  # how long past GNU `timeout`'s TERM the process group may live before SIGKILL
+)
 _SEGFAULT_CODES = (
     -11,
     139,
@@ -296,32 +302,43 @@ def slicing_copy(
     Dropped: every `<plate>` block of Metadata/model_settings.config and every Metadata/plate_N.json (and
     Metadata/layer_heights_profile.txt with `drop_layer_profile`). `set_cfg` overrides keys of
     Metadata/project_settings.config. Every other member keeps its bytes and its zip metadata."""
-    with (
-        zipfile.ZipFile(src) as zi,
-        zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED) as zo,
-    ):
-        names = zi.namelist()
-        if set_cfg and "Metadata/project_settings.config" not in names:
-            raise MissingDependency(
-                f"Metadata/project_settings.config in {src}",
-                install="rebuild the project with `3d prep` / project3mf.build_project",
-                degrades="set_cfg overrides cannot be applied",
-                command="prep",
-            )
-        for item in zi.infolist():
-            name = item.filename
-            data = zi.read(name)
-            if name == "Metadata/model_settings.config":
-                data = _PLATE_BLOCK.sub(b"", data)
-            elif _PLATE_JSON.fullmatch(name) or (
-                name == "Metadata/layer_heights_profile.txt" and drop_layer_profile
-            ):
-                continue
-            elif name == "Metadata/project_settings.config" and set_cfg:
-                cfg = json.loads(data)
-                cfg.update(set_cfg)
-                data = json.dumps(cfg, indent=4, ensure_ascii=False).encode()
-            zo.writestr(item, data)
+    dst = Path(dst)
+    # Written beside `dst` and renamed over it: `dst` may be `src` itself, and a rejected input leaves nothing.
+    with tempfile.NamedTemporaryFile(
+        dir=dst.parent, prefix=f".{dst.name}.", suffix=".partial", delete=False
+    ) as handle:
+        tmp = Path(handle.name)
+    try:
+        with (
+            zipfile.ZipFile(src) as zi,
+            zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zo,
+        ):
+            names = zi.namelist()
+            if set_cfg and "Metadata/project_settings.config" not in names:
+                raise ThreeDError(
+                    f"{src} has no Metadata/project_settings.config, so set_cfg overrides cannot be applied",
+                    command="prep",
+                    remediation=[
+                        "rebuild the project with `3d prep` / project3mf.build_project"
+                    ],
+                )
+            for item in zi.infolist():
+                name = item.filename
+                data = zi.read(name)
+                if name == "Metadata/model_settings.config":
+                    data = _PLATE_BLOCK.sub(b"", data)
+                elif _PLATE_JSON.fullmatch(name) or (
+                    name == "Metadata/layer_heights_profile.txt" and drop_layer_profile
+                ):
+                    continue
+                elif name == "Metadata/project_settings.config" and set_cfg:
+                    cfg = json.loads(data)
+                    cfg.update(set_cfg)
+                    data = json.dumps(cfg, indent=4, ensure_ascii=False).encode()
+                zo.writestr(item, data)
+        tmp.replace(dst)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 # --------------------------------------------------------------------------- failures
@@ -540,26 +557,51 @@ def _read_result(workdir: Path) -> dict[str, Any] | None:
 
 
 def _run(
-    argv: list[str], timeout_s: float, *, python_deadline: bool
+    argv: list[str], timeout_s: float, *, grace_s: float = 0.0
 ) -> tuple[int, str, bool]:
-    """Run `argv`, return (returncode, merged output, timed_out). With `python_deadline` the whole process
-    group is killed after `timeout_s`; otherwise GNU `timeout` in argv enforces it."""
-    proc = subprocess.Popen(  # noqa: S603 — argv is built here
-        argv,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        errors="replace",
-        start_new_session=True,
+    """Run `argv`, return (returncode, merged output, timed_out). The process group is SIGKILLed after
+    `timeout_s + grace_s` (a GNU `timeout` in argv should have ended the run first: pass the grace), when
+    the leader has exited (stragglers a wrapper script left behind keep the heavy lock and the CPU) and on
+    any exception, e.g. Ctrl-C. Output goes to a file, not a pipe: waiting on the leader must not depend on
+    every descendant closing its end."""
+    with tempfile.TemporaryFile() as sink:
+        proc = subprocess.Popen(  # noqa: S603 — argv is built here
+            argv,
+            stdout=sink,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+        timed_out = False
+        try:
+            try:
+                proc.wait(timeout=timeout_s + grace_s)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+        except BaseException:
+            _kill_group(proc)
+            proc.wait()
+            raise
+        _kill_group(proc)
+        proc.wait()
+        sink.seek(0)
+        out = sink.read().decode(errors="replace")
+    return (EXIT_TIMEOUT if timed_out else proc.returncode), out, timed_out
+
+
+def _gnu_timeout() -> str | None:
+    """A `timeout` that takes `--foreground` and `-k` (coreutils, uutils); BusyBox's rejects both."""
+    found = shutil.which("timeout")
+    if found is None:
+        return None
+    probe = subprocess.run(  # noqa: S603 — fixed argv
+        [found, "--help"], capture_output=True, text=True, errors="replace"
     )
-    try:
-        out, _ = proc.communicate(timeout=timeout_s if python_deadline else None)
-    except subprocess.TimeoutExpired:
-        with contextlib.suppress(ProcessLookupError, PermissionError):
-            os.killpg(proc.pid, signal.SIGKILL)
-        out, _ = proc.communicate()
-        return EXIT_TIMEOUT, out or "", True
-    return proc.returncode, out or "", False
+    return found if "--foreground" in probe.stdout + probe.stderr else None
+
+
+def _kill_group(proc: subprocess.Popen[bytes]) -> None:
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(proc.pid, signal.SIGKILL)
 
 
 def slice_project(
@@ -587,6 +629,13 @@ def slice_project(
         )
     work = Path(workdir).resolve()
     work.mkdir(parents=True, exist_ok=True)
+    previous_output = work / "sliced.3mf"
+    if previous_output.exists() and os.path.samefile(project, previous_output):
+        raise ThreeDError(
+            f"{project} is the previous slice output of {work} and would be deleted as stale",
+            command="prep",
+            remediation=["copy it elsewhere, or slice into another workdir"],
+        )
     for stale in (
         *work.glob("plate_*.gcode"),
         work / "result.json",
@@ -598,13 +647,21 @@ def slice_project(
 
     prefix: list[str] = []
     lock_busy_code: int | None = None
+    lock_wait_s = 0
     if heavy:
-        from cli.heavy import EXIT_BUSY, heavy_prefix
+        from cli.heavy import DEFAULT_WAIT_S, EXIT_BUSY, heavy_prefix
 
         prefix = heavy_prefix()
         lock_busy_code = EXIT_BUSY
-    timeout_bin = shutil.which("timeout")
-    guard = [timeout_bin, str(timeout_s)] if timeout_bin else []
+        lock_wait_s = DEFAULT_WAIT_S if prefix else 0
+    timeout_bin = _gnu_timeout()
+    # --foreground: no setpgid, so `timeout` and the slicer stay in the group `_run` kills. Without it
+    # (behind `flock`, which is no session leader) they move to a group of their own and escape the kill.
+    guard = (
+        [timeout_bin, "--foreground", "-k", str(TIMEOUT_GRACE_S), str(timeout_s)]
+        if timeout_bin
+        else []
+    )
     command = [
         *prefix,
         *guard,
@@ -625,9 +682,18 @@ def slice_project(
     ]
     started = time.monotonic()
     returncode, log, timed_out = _run(
-        command, timeout_s, python_deadline=timeout_bin is None
+        command,
+        timeout_s,
+        grace_s=lock_wait_s + TIMEOUT_GRACE_S if timeout_bin else 0.0,
     )
     seconds = time.monotonic() - started
+    # `timeout -k` ends a TERM-ignoring slicer with 137 once `timeout_s + TIMEOUT_GRACE_S` of slicing have passed;
+    # a 137 before that is an OOM kill (`seconds` includes the lock wait, so this only ever errs towards OOM)
+    timed_out = timed_out or (
+        timeout_bin is not None
+        and returncode == EXIT_KILLED
+        and seconds >= timeout_s + TIMEOUT_GRACE_S
+    )
     log_path = work / "slice.log"
     log_path.write_text(log, encoding="utf-8")
 
@@ -665,6 +731,18 @@ def slice_project(
 
 
 PRESET_KINDS = ("machine", "process", "filament")
+
+
+class PresetFileError(ThreeDError):
+    """A vendor preset file that is unreadable or not a JSON object (not a ValueError: that is a cycle)."""
+
+    def __init__(self, path: Path, why: str) -> None:
+        super().__init__(
+            f"vendor preset {path} is not readable: {why}",
+            command="prep",
+            remediation=["reinstall the slicer, or restore that vendor preset file"],
+        )
+        self.path, self.why = path, why
 
 
 class SystemPresets:
@@ -731,7 +809,8 @@ class SystemPresets:
         return data if isinstance(data, dict) else None
 
     def chain(self, kind: str, name: str) -> list[tuple[Path, dict[str, Any]]]:
-        """`name` and its ancestors, child first. KeyError names the first missing preset; ValueError a cycle."""
+        """`name` and its ancestors, child first. KeyError names the first missing preset; ValueError a cycle;
+        PresetFileError an ancestor file that cannot be read as a JSON object."""
         out: list[tuple[Path, dict[str, Any]]] = []
         near: Path | None = None
         current: str | None = name
@@ -743,7 +822,12 @@ class SystemPresets:
             path = self.path(kind, current, near)
             if path is None:
                 raise KeyError(current)
-            data = json.loads(path.read_text(encoding="utf-8"))
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                if not isinstance(data, dict):
+                    raise ValueError("the top level is not a JSON object")
+            except (OSError, ValueError) as exc:
+                raise PresetFileError(path, str(exc)) from exc
             out.append((path, data))
             near = path
             parent = data.get("inherits")
@@ -819,8 +903,9 @@ def reference_project_settings(
                     command="prep",
                 ) from exc
             flat.update({"name": name, "from": "system", "instantiation": "true"})
-            f = tmp / f"{kind}_{name}".replace("/", "_")
-            f = f.with_suffix(".json")
+            f = (
+                tmp / f"{kind}_{len(files)}.json"
+            )  # by index: names hold dots, `;` and `/`
             f.write_text(json.dumps(flat, indent=1), encoding="utf-8")
             files[kind, name] = f
         probe = tmp / "probe.stl"
@@ -847,7 +932,7 @@ def reference_project_settings(
             "probe.3mf",
             str(probe),
         ]
-        returncode, log, timed_out = _run(command, timeout_s, python_deadline=True)
+        returncode, log, timed_out = _run(command, timeout_s)
         out = tmp / "probe.3mf"
         if not out.exists():
             why = "timed out" if timed_out else f"exit {returncode}"
@@ -867,6 +952,7 @@ def reference_project_settings(
             cfg = json.loads(z.read("Metadata/project_settings.config"))
     if not isinstance(cfg, dict):
         raise ThreeDError(
-            "the Orca CLI's project_settings.config is not a JSON object", command="prep"
+            "the Orca CLI's project_settings.config is not a JSON object",
+            command="prep",
         )
     return cfg
