@@ -45,6 +45,9 @@ rendering, slicing support, and verification:
 - `collision_viz.py`
 - `dimension_args.py`
 - `dimension_check.py`
+- `dimension_legend.py`
+- `dimension_model.py`
+- `dimension_parts.py`
 - `dimension_render.py`
 - `fit_camera.py`
 - `fit_camera_math.py`
@@ -295,9 +298,12 @@ Every current root Python module is listed here so future additions are intentio
 - `projects_registry.py` — compatibility wrapper re-exporting `registries.projects`.
 - `reporting.py` — deterministic gate and metric artifact report composition.
 - `workspaces.py` — web dashboard workspace metadata registry.
-- `dimension_args.py` — the stdlib-only option grammar of `3d dimension` (`--bed`, `--dim`, `--width`), shared by the command and the renderer.
+- `dimension_args.py` — the stdlib-only option grammar of `3d dimension` (`--bed`, `--dim`, `--width`, `--part`, `-D`), shared by the command and the renderer.
 - `dimension_check.py` — the legibility gate of dimensioned renders (`3d dimension --check`): sidecar + pixel checks of every label.
-- `dimension_render.py` — shaded top/front/side/iso renders with mm dimension arrows and the `.dims.json` sidecar (`3d dimension`).
+- `dimension_legend.py` — the colour -> part legend strip under a multi-part render (`3d dimension`).
+- `dimension_model.py` — reads 3MF (stdlib zipfile + ElementTree, no lxml), OBJ+MTL, `.scad` (via openscad's coloured 3MF) and STL into raw geometry with its colour groups (`3d dimension`).
+- `dimension_parts.py` — names the parts of a model, resolves one distinct colour per part (authored colour, else the `parts.py` palette; stand-ins muted) and builds the mesh to paint (`3d dimension`).
+- `dimension_render.py` — shaded top/front/side/iso renders with mm dimension arrows, per-part colours + legend and the `.dims.json` sidecar (`3d dimension`).
 - `backdrop_mask.py` — subject mask of a studio render: everything that is not the smooth neutral backdrop connected to the frame border (`3d preprocess --backdrop`; numpy + scipy).
 - `refmatch.py` — image/reference matching helpers.
 - `ref_measure.py` — `3d measure-ref`: the same feature shape (an eye opening with iris / pupil, a nostril ...) measured on a reference image and on a render (corner line, aspect, tilt, extents, lid cover), delta gate.

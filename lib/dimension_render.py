@@ -17,6 +17,11 @@ HOW: each label is placed by trying offsets/sides from the part until it clears 
   the other labels and the panel edge; the check re-verifies the result from the sidecar and the
   pixels, so a placement that could not be satisfied is reported rather than hidden.
 
+PARTS: every part of the model is painted in its own colour (authored 3MF / OBJ+MTL / OpenSCAD `color()`
+  colours, else the shared part palette, stand-ins muted) and a legend strip under the four views
+  names them; see dimension_model.py (reading) and dimension_parts.py (naming + colours). The sidecar
+  gains `parts`, `legend` and `warnings`; the legibility check ignores them (#580).
+
 INVARIANTS: the tool measures the mesh itself (bbox) — `--dim` points are the caller's feature
   points; labels are drawn at >= MIN_FONT_PX at the 1280 px reference width unless a caller
   asks for a smaller `--label-px` (tests do, to prove the gate fails).
@@ -27,20 +32,28 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import subprocess
 import sys
-import tempfile
 from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
-from dimension_args import parse_bed, parse_dim, parse_width, positive
+from dimension_args import (
+    parse_bed,
+    parse_define,
+    parse_dim,
+    parse_part,
+    parse_width,
+    positive,
+)
 from dimension_check import (
     REFERENCE_WIDTH,
     rects_overlap,
     sha256_file,
     sidecar_path,
 )
+from dimension_legend import draw_legend, layout_legend
+from dimension_model import RenderError, load_raw
+from dimension_parts import Model, build_model
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
 
 VIEWS = ("top", "front", "side", "iso")
@@ -65,7 +78,6 @@ GRID_CELL = 4
 # A custom/span arrow is drawn only where it keeps >= 90% of its true length.
 MIN_TRUE_LENGTH_RATIO = 0.9
 SPAN_MIN_GAIN = 1.03  # show the part's longest span when its oriented box beats the axis-aligned one by 3%
-BODY_COLOR = (0.46, 0.62, 0.84)
 AMBIENT, DIFFUSE = 0.34, 0.66
 FONT_CANDIDATES = (
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
@@ -131,50 +143,6 @@ def view_basis(view: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     return cam, right, _unit(np.cross(cam, right))
 
 
-class RenderError(Exception):
-    """A failure the user can act on; `main` prints it and exits with `exit_code`."""
-
-    def __init__(self, message: str, exit_code: int = 2) -> None:
-        super().__init__(message)
-        self.exit_code = exit_code
-
-
-def _scad_to_stl(path: str, out: str) -> None:
-    try:
-        done = subprocess.run(
-            ["openscad", "-o", out, path], capture_output=True, text=True
-        )
-    except FileNotFoundError as exc:
-        raise RenderError(
-            "3d dimension: openscad is not installed, so a .scad input cannot be rendered "
-            "(pass an STL/3MF, or install openscad: https://openscad.org/downloads.html)",
-            exit_code=127,
-        ) from exc
-    if done.returncode != 0:
-        raise RenderError(
-            f"3d dimension: openscad failed on {path}: {done.stderr.strip()[-300:]}"
-        )
-
-
-def load_mesh(path: str) -> Any:
-    """STL/3MF/OBJ via trimesh; .scad is exported through openscad first."""
-    import trimesh
-
-    if path.lower().endswith(".scad"):
-        fd, tmp = tempfile.mkstemp(suffix=".stl")
-        os.close(fd)
-        try:
-            _scad_to_stl(path, tmp)
-            mesh: Any = trimesh.load(tmp, force="mesh")
-        finally:
-            os.unlink(tmp)
-    else:
-        mesh = trimesh.load(path, force="mesh")
-    if mesh.is_empty or len(mesh.faces) == 0:
-        raise RenderError(f"3d dimension: no triangles in {path}")
-    return mesh
-
-
 class Panel:
     """One view: projection into pixel space, shaded body, silhouette mask, placed labels."""
 
@@ -182,14 +150,15 @@ class Panel:
         self,
         view: str,
         rect: tuple[int, int, int, int],
-        mesh: Any,
+        model: Model,
         bed: tuple[float, float] | None,
         ui: float,
     ) -> None:
         self.view = view
         self.ui = ui  # image width / 1280: margins and offsets scale with the image
         self.rect = rect
-        self.mesh = mesh
+        self.model = model
+        mesh = self.mesh = model.mesh
         self.cam, self.right, self.up = view_basis(view)
         pts = [np.asarray(mesh.bounds[0]), np.asarray(mesh.bounds[1])]
         corner_pts = np.array(
@@ -249,14 +218,12 @@ class Panel:
         normals = np.asarray(self.mesh.face_normals, dtype=float)
         tris = np.asarray(self.mesh.triangles, dtype=float)
         facing = normals @ self.cam
-        keep = (
-            facing > 1e-9
-            if self.mesh.is_watertight
-            else np.ones(len(normals), dtype=bool)
-        )
+        # Back faces are skipped only on watertight parts (a surface soup needs them all).
+        keep = ~self.model.cullable | (facing > 1e-9)
         if not keep.any():
             keep = np.ones(len(normals), dtype=bool)
         tris, normals = tris[keep], normals[keep].copy()
+        part_of = self.model.face_part[keep]
         normals[normals @ self.cam < 0] *= -1
         light = _unit(self.cam + 0.45 * self.right + 0.30 * self.up)
         shade = AMBIENT + DIFFUSE * np.clip(normals @ light, 0.0, 1.0)
@@ -266,7 +233,7 @@ class Panel:
         pix[:, :, 0] = (pix[:, :, 0] - x0) * ss
         pix[:, :, 1] = (pix[:, :, 1] - y0) * ss
         cols = np.clip(
-            np.asarray(BODY_COLOR)[None, :] * shade[order, None] * 255.0, 0, 255
+            self.model.colors[part_of[order]] * shade[order, None] * 255.0, 0, 255
         ).astype(int)
         for tri, col in zip(pix, cols, strict=True):
             poly = [tuple(p) for p in tri]
@@ -637,7 +604,7 @@ def _draw_bed(
 
 
 def render(
-    model: str,
+    model_path: str,
     out: str,
     *,
     name: str | None = None,
@@ -645,20 +612,24 @@ def render(
     bed: tuple[float, float] | None = None,
     width: int = REFERENCE_WIDTH,
     label_px: float | None = None,
+    defines: list[str] | None = None,
+    parts: list[str] | None = None,
 ) -> dict[str, Any]:
     """Render `model` to `out` (+ sidecar); returns the sidecar dict."""
-    mesh = load_mesh(model)
-    title = name or os.path.splitext(os.path.basename(model))[0]
+    title = name or os.path.splitext(os.path.basename(model_path))[0]
+    model = build_model(load_raw(model_path, defines), title, parts or [])
+    mesh = model.mesh
     scale = width / REFERENCE_WIDTH
     px_font = (label_px if label_px is not None else 20.0) * scale
     panel_w, panel_h = width // 2, int(round(560 * scale))
     header = int(round(HEADER_PX * scale))
-    height = header + 2 * panel_h
+    size_font = _font(20 * scale)
+    legend_rows, legend_h = layout_legend(model, size_font, width, scale)
+    height = header + 2 * panel_h + legend_h
     canvas = Image.new("RGB", (width, height), (255, 255, 255))
     draw = ImageDraw.Draw(canvas)
     font = _font(px_font)
     head_font, view_font = _font(26 * scale, bold=True), _font(18 * scale, bold=True)
-    size_font = _font(20 * scale)
     ext = mesh.extents
     draw.text((16, 10 * scale), title, font=head_font, fill=(20, 20, 20))
     draw.text(
@@ -677,7 +648,7 @@ def render(
         custom.insert(0, ("span", *longest_span(mesh)))
     sidecar: dict[str, Any] = {
         "part": title,
-        "source": os.path.abspath(model),
+        "source": os.path.abspath(model_path),
         "bbox_mm": [float(v) for v in ext],
         "views": {},
     }
@@ -693,7 +664,7 @@ def render(
         draw.rectangle(
             [rect[0], rect[1], rect[2] - 1, rect[3] - 1], outline=(200, 205, 212)
         )
-        panel = Panel(view, rect, mesh, bed, scale)
+        panel = Panel(view, rect, model, bed, scale)
         panel.paint_body(canvas)
         draw = ImageDraw.Draw(canvas)
         tl, tt, tr, tb = _text_bbox(view_font, view.upper())
@@ -748,6 +719,11 @@ def render(
             "rect": list(rect),
             "silhouette_grid": panel.silhouette_grid(),
         }
+    legend = (
+        draw_legend(canvas, legend_rows, header + 2 * panel_h, size_font, scale)
+        if legend_rows
+        else None
+    )
     canvas.save(out, format="PNG")
     sidecar["image"] = {
         "path": os.path.abspath(out),
@@ -756,6 +732,10 @@ def render(
         "sha256": sha256_file(out),
     }
     sidecar["dimensions"] = [p.as_dict() for p in placed]
+    sidecar["parts"] = [p.as_dict() for p in model.parts]
+    if legend is not None:
+        sidecar["legend"] = legend
+    sidecar["warnings"] = model.warnings
     with open(sidecar_path(out), "w", encoding="utf-8") as handle:
         json.dump(sidecar, handle, indent=1)
     return sidecar
@@ -764,6 +744,12 @@ def render(
 def _checked_dim_spec(raw: str) -> str:
     """Validate a --dim spec but keep the raw string: `render` parses it again."""
     parse_dim(raw)
+    return raw
+
+
+def _checked_part_spec(raw: str) -> str:
+    """Validate a --part spec but keep the raw string: `build_model` parses it again."""
+    parse_part(raw)
     return raw
 
 
@@ -793,6 +779,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--bed", type=_arg_type(parse_bed))
     ap.add_argument("--width", type=_arg_type(parse_width), default=REFERENCE_WIDTH)
     ap.add_argument("--label-px", type=_arg_type(lambda r: positive(r, "--label-px")))
+    ap.add_argument(
+        "--define", action="append", default=[], type=_arg_type(parse_define)
+    )
+    ap.add_argument(
+        "--part", action="append", default=[], type=_arg_type(_checked_part_spec)
+    )
     args = ap.parse_args(argv)
     try:
         sidecar = render(
@@ -803,12 +795,17 @@ def main(argv: list[str] | None = None) -> int:
             bed=args.bed,
             width=args.width,
             label_px=args.label_px,
+            defines=args.define,
+            parts=args.part,
         )
     except RenderError as exc:
         print(exc, file=sys.stderr)
         return exc.exit_code
+    for warning in sidecar["warnings"]:
+        print(f"3d dimension: warning: {warning}", file=sys.stderr)
     print(
-        f"wrote {args.out} + {sidecar_path(args.out)}: {len(sidecar['dimensions'])} dimension label(s)"
+        f"wrote {args.out} + {sidecar_path(args.out)}: {len(sidecar['dimensions'])} dimension label(s), "
+        f"{len(sidecar['parts'])} part(s)"
     )
     return 0
 
