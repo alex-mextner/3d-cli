@@ -64,6 +64,7 @@ u1:
       camera: {kind: moonraker-monitor}   # stock firmware has no stream: unisrv rewrites /server/files/camera/monitor.jpg while camera.start_monitor is renewed (keepalive, automatic)
     bed:                    # camera bed state (#303, `3d printer bed --help`): bed_clear/bed_occupied, start gate
       enabled: true         # ROI from the bundled camera calibration; references at the PRINT_END park (Z 200) and the post-G28 rest (Z 10); at Z >= ~215 the bed is out of the camera's view (#402)
+      auto_view: true       # idle printer: the bed check moves the bed in Z only to where the camera sees >= 85 % of the plate (Z 70: 89 %; at the Z 200 rest 15 %), judges, restores it (lib/bed_view.py). Needs the height of what may stand on the bed: Moonraker's object_height of the last job, or auto_view_part_mm
       clear_ack:            # one motor sound after bed_clear; no beeper/M300 on the U1 (configfile, 2026-10-16)
         enabled: false      # to enable, also add STEPPER_BUZZ (Klipper built-in, net-zero ±1 mm) to trusted_macros
         command: STEPPER_BUZZ STEPPER=stepper_z

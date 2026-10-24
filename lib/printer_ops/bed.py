@@ -18,11 +18,13 @@ WHAT: the camera can tell whether the bed is clear (the parts were taken off) an
   * `clear_ack`   optional `watch.bed.clear_ack`: one short motor sound after bed_clear so the
                   person at the printer hears that the camera saw the clear bed.
 
-WRITES: `clear_ack` is the only write to a printer anywhere in the bed code, and the only one
-  `3d printer watch` can cause: one G-code line that the printer's `trusted_macros` lists, only
-  when the printer reads idle/complete/cancelled just before, at most once per bed_clear event
-  and per debounce window, never below `min_z_mm` (a Z buzz must not reach the nozzle).
-  Everything else only reads (camera snapshot, print_stats, toolhead).
+WRITES: two, both guarded by the printer reading idle/complete/cancelled just before the write.
+  `clear_ack` is the first: one G-code line that the printer's `trusted_macros` lists, at most once
+  per bed_clear event and per debounce window, never below `min_z_mm` (a Z buzz must not reach the
+  nozzle). The second is the auto view (lib/bed_view.py, `watch.bed.auto_view`): a Z-only move of
+  the bed to where the camera sees the whole plate and back, only from `3d printer bed status`
+  and the checks built on it (preflight `bed`, the one-shot `bed-free` subscription); the watch
+  monitor never moves anything. Everything else only reads (camera snapshot, print_stats, toolhead).
 
 INVARIANTS: stdlib only at import time; numpy/OpenCV live in bed_state.py.
 """
@@ -58,7 +60,20 @@ KINDS = ("bed_clear", "bed_occupied", "plate_present", "plate_missing", "bed_unk
 # Printer states in which the bed may be judged and acknowledged (base.py normalized states).
 QUIET_STATES = ("idle", "complete", "cancelled")
 
-BED_KEYS = ("enabled", "interval_s", "roi", "volume_height_mm", "z_tol_mm", "stale_s", "clear_ack", "thresholds")
+# Auto view (the bed is moved in Z to where the camera sees the whole plate; lib/bed_view.py).
+# `watch.bed.auto_view` is off unless a printer's entry turns it on (fleet/printers.yaml sets it for
+# the U1, the printer whose Z axis is the bed and whose camera calibration is bundled).
+AUTO_VIEW_MIN = 0.85          # share of the plate that must be in the frame for the bed to be judged
+AUTO_VIEW_FEED = 600          # mm/min of the Z-only move (10 mm/s)
+AUTO_VIEW_Z_FLOOR = 10.0      # the bed is never raised closer to the nozzles than this (the post-G28 rest Z)
+AUTO_VIEW_Z_TOP_MARGIN = 5.0  # ... nor lowered to within this of stepper_z.position_max (resume.z_max_mm)
+AUTO_VIEW_CLEARANCE = 15.0    # mm between the tallest thing that may stand on the bed and the nozzles
+AUTO_VIEW_SETTLE_S = 8.0      # after the move: the camera's own frame rewrite (~4 s) plus vibration
+BED_VIEW_EVENT = "bed_free"   # the event of the one-shot `3d printer subscribe --once --on bed-free`
+
+BED_KEYS = ("enabled", "interval_s", "roi", "volume_height_mm", "z_tol_mm", "stale_s", "clear_ack", "thresholds",
+            "auto_view", "auto_view_min", "auto_view_part_mm")
+
 # The per-printer overrides of bed_state.Thresholds (tuned on the U1 and K1 SE frames of tests/data/bed;
 # another camera may need other values): every field of that dataclass, a test keeps the two in step.
 THRESHOLD_KEYS = ("level", "detrend_px", "edge_px", "clear_blob_px", "clear_max", "occupied_blob_px", "occupied_min",
@@ -89,6 +104,9 @@ class BedConfig:
     stale_s: float = 120.0                # the gate re-checks when the last verdict is older
     clear_ack: AckConfig | None = None
     thresholds: tuple[tuple[str, float], ...] = ()  # overrides of bed_state.Thresholds fields (THRESHOLD_KEYS)
+    auto_view: bool = False               # move the bed in Z to where the camera sees the whole plate (bed_view.py)
+    auto_view_min: float = AUTO_VIEW_MIN  # share of the plate in the frame below which the bed is moved
+    auto_view_part_mm: float | None = None  # declared height of the tallest thing that may stand on the bed
 
 
 def _num(value: Any, what: str, minimum: float) -> float:
@@ -102,6 +120,14 @@ def _flag(value: Any, what: str) -> bool:
     if not isinstance(value, bool):
         raise InvalidArgument(what, str(value), ["true", "false"], command="printer")
     return value
+
+
+def _fraction(value: Any, what: str) -> float:
+    n = _num(value, what, 0.0)
+    if not 0.0 < n <= 1.0:
+        raise InvalidArgument(what, str(value), ["a share of the plate in the frame, above 0 and at most 1"],
+                              command="printer")
+    return n
 
 
 def _thresholds(value: Any, what: str) -> tuple[tuple[str, float], ...]:
@@ -177,6 +203,10 @@ def bed_config(device: Device) -> BedConfig:
         stale_s=_num(raw.get("stale_s", 120.0), f"{where}.stale_s", 1),
         clear_ack=_ack(raw["clear_ack"], device) if "clear_ack" in raw else None,
         thresholds=_thresholds(raw["thresholds"], f"{where}.thresholds") if "thresholds" in raw else (),
+        auto_view=_flag(raw.get("auto_view", False), f"{where}.auto_view"),
+        auto_view_min=_fraction(raw.get("auto_view_min", AUTO_VIEW_MIN), f"{where}.auto_view_min"),
+        auto_view_part_mm=_num(raw["auto_view_part_mm"], f"{where}.auto_view_part_mm", 0)
+        if "auto_view_part_mm" in raw else None,
     )
     if cfg.enabled:
         from printer_ops.camera import camera_spec
@@ -368,5 +398,47 @@ def clear_ack(device: Device, ack: AckConfig, *, z: float | None, last_ack: floa
     return True, f"sent {' | '.join(ack.command)}"
 
 
-__all__ = ["BED_DEPS", "BED_TOOL", "KINDS", "AckConfig", "BedChild", "BedConfig", "bed_config", "clear_ack",
-           "event_from", "read_state", "refs_dir", "state_path", "transitions", "write_state"]
+# ---- the status tool ------------------------------------------------------------------------
+
+STATUS_TIMEOUT_S = 90.0        # one camera check
+STATUS_MOVE_TIMEOUT_S = 300.0  # with a move: two Z moves (each bounded at 60 s), the settle wait, the frame wait
+
+
+def status_argv(printer: str, *, max_age: float | None = None, move: str = "auto") -> list[str]:
+    """`bed_state.py status NAME --json` through cli.pyrun. `move`: auto (watch.bed.auto_view decides),
+    never (--no-move) or force (--best-view: move even when auto_view is off)."""
+    from cli.pyrun import tool_argv
+
+    args = ["status", printer, "--json"]
+    if max_age is not None:
+        args += ["--max-age", f"{max_age:g}"]
+    if move == "never":
+        args.append("--no-move")
+    elif move == "force":
+        args.append("--best-view")
+    elif move != "auto":
+        raise ValueError(f"move must be auto, never or force, not {move!r}")
+    return tool_argv(BED_DEPS, BED_TOOL, args)
+
+
+def run_status(printer: str, *, move: str = "force", max_age: float | None = None,
+               runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+               timeout: float = STATUS_MOVE_TIMEOUT_S) -> dict[str, Any]:
+    """The verdict dict of `bed_state.py status NAME --json`; RuntimeError (with the tool's last line) when it
+    cannot be had. The tool restores a moved bed in its own `finally`; the timeout is far above its worst case."""
+    r = runner(status_argv(printer, max_age=max_age, move=move), capture_output=True, text=True, timeout=timeout)
+    try:
+        verdict = json.loads(r.stdout)
+    except ValueError:
+        tail = (r.stderr or r.stdout or "").strip().splitlines()[-1:] or ["no output"]
+        raise RuntimeError(f"bed check failed (exit {r.returncode}): {tail[0][:300]}") from None
+    if not isinstance(verdict, dict):
+        raise RuntimeError(f"bed check returned {str(verdict)[:200]}")
+    return verdict
+
+
+__all__ = ["AUTO_VIEW_CLEARANCE", "AUTO_VIEW_FEED", "AUTO_VIEW_MIN", "AUTO_VIEW_SETTLE_S",
+           "AUTO_VIEW_Z_FLOOR", "AUTO_VIEW_Z_TOP_MARGIN", "BED_DEPS", "BED_TOOL", "BED_VIEW_EVENT", "KINDS",
+           "STATUS_MOVE_TIMEOUT_S", "STATUS_TIMEOUT_S", "AckConfig", "BedChild", "BedConfig", "bed_config",
+           "clear_ack", "event_from", "read_state", "refs_dir", "run_status", "state_path", "status_argv",
+           "transitions", "write_state"]

@@ -47,10 +47,13 @@ USAGE = """3d printer [-n NAME] <subcommand> [args]
                                        history, settings: `3d printers show NAME`)
   upload NAME FILE.gcode [--as REMOTE] store the file on the printer; never starts a print
   start NAME FILE.gcode --yes [--as REMOTE] [--source-3mf X.3mf] [--bridge-max MM] [--force] [--secs S]
+                                       [--no-bed-move]
                                        start a file that was uploaded before; runs
                                        `3d print-preflight` first, plus the camera bed check
                                        (objects on the bed / plate missing FAIL) when the
-                                       printer has watch.bed.enabled
+                                       printer has watch.bed.enabled (an idle printer with
+                                       watch.bed.auto_view has its bed moved in Z to where the
+                                       camera sees the whole plate, and back: --no-bed-move)
   cancel NAME --yes                    cancel the running/paused job
   guard NAME --job-id ID --yes         one-job automatic PAUSE on confirmed camera failure;
                                        local evidence only (see `3d printer guard --help`)
@@ -65,10 +68,15 @@ USAGE = """3d printer [-n NAME] <subcommand> [args]
                                        (see docs/commands/printer-vision.md)
   bed status|reference|monitor NAME    bed state from the camera: clear/occupied, build plate
                                        present/missing; `reference NAME --capture` takes the
-                                       empty-bed reference (see `3d printer bed --help`)
+                                       empty-bed reference; `status` moves an idle printer's bed
+                                       in Z only to where the whole plate is in view and back
+                                       (watch.bed.auto_view; --no-move, --best-view)
+                                       (see `3d printer bed --help`)
   subscribe --session ID [..]          printer alerts go to that omp session (it looks at the
                                        frame, tells the user only if real); `unsubscribe`,
-                                       `subscriptions [list|test]` (see `3d printer subscribe --help`)
+                                       `subscriptions [list|test]`; `--printer P --once --on
+                                       bed-free`: one bed verdict when the running job ends
+                                       (see `3d printer subscribe --help`)
   agent list|stop|handoff              the temporary per-printer omp agent that gets the alerts
                                        no live subscriber took (see `3d printer agent --help`)
   doctor [NAME|--all] [--fix] [--yes] [--json]
@@ -97,6 +105,7 @@ Options:
                      (without it the head-sequence check uses NAME.3mf next to the G-code)
   --bridge-max MM    preflight overhangs gate: longest bridge; overrides the printer's
                      bridge_max_mm in printer-devices.yaml (default 15)
+  --no-bed-move      start: the camera bed check judges at the current Z (the bed is not moved)
 
 Safety: start refuses while the printer is printing, paused, busy or unreadable, and when
 the content-addressed remote file is missing, differs in size, or (Moonraker, read back)
@@ -130,7 +139,7 @@ Examples:
   3d printer -n k1se issues add --title "X belt squeaks" --type inspect"""
 
 _VALUE = {"--secs", "--as", "--source-3mf", "--bridge-max"}
-_FLAGS = {"--json", "--yes", "--force"}
+_FLAGS = {"--json", "--yes", "--force", "--no-bed-move"}
 
 
 def _parse(argv: list[str], allowed: set[str], n_pos: int, sub: str) -> tuple[list[str], dict[str, str]]:
@@ -310,7 +319,8 @@ def _cmd_start(argv: list[str]) -> int:
     import tempfile
     from pathlib import Path
 
-    (name, file), opts = _parse(argv, {"--yes", "--force", "--as", "--source-3mf", "--secs", "--bridge-max"}, 2, "start")
+    (name, file), opts = _parse(argv, {"--yes", "--force", "--as", "--source-3mf", "--secs", "--bridge-max", "--no-bed-move"}, 2,
+                           "start")
     if "--yes" not in opts:
         raise UsageError(
             "start is a physical action and needs --yes",
@@ -376,7 +386,8 @@ def _start_snapshot(name: str, file: str, original: Path, local: Path, source: P
     report = run_preflight(local, status=st, source_3mf=source, axis_limits=limits, limits_source=limits_source,
                            trusted_macros=adapter.trusted_macros, origin=original,
                            bridge_max=bridge, bridge_source=bridge_source, printops=printops,
-                           bed=check_bed(adapter.device) if adapter.device is not None else None)
+                           bed=check_bed(adapter.device, move="--no-bed-move" not in opts) if adapter.device is not None
+                           else None)
     report.file = f"{original} (snapshot)"
     print(report.render())
     if report.overall == FAIL:

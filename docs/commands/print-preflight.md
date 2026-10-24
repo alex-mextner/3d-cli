@@ -10,14 +10,14 @@ input is missing is SKIP and its line says what to pass — it never passes sile
 ```
 3d print-preflight FILE.gcode [--printer NAME] [--axis-limits X0:X1,Y0:Y1|NAME] [--source-3mf FILE.3mf]
                    [--visible [OBJ:]SPEC]... [--bridge-max MM] [--printops-api URL] [--offline]
-                   [--printops-snapshot FILE] [--json] [--secs S]
+                   [--printops-snapshot FILE] [--json] [--secs S] [--no-bed-move]
 ```
 
 | Check | When | FAIL means |
 |---|---|---|
 | `thumbnails` | always | The G-code lacks preview images its `; thumbnails =` spec asks for (fix: `3d gcode-thumbnails add FILE`). |
 | `printer` | `--printer` | The printer is printing, paused, busy, or its state cannot be read. |
-| `bed` | `--printer` with `watch.bed.enabled` (SKIP otherwise) | The camera sees objects on the bed or the build plate missing against the empty-bed reference; WARN when it cannot tell (no reference at this Z, plate out of view, camera down). See [Bed state](printer.md#bed-state). |
+| `bed` | `--printer` with `watch.bed.enabled` (SKIP otherwise) | The camera sees objects on the bed or the build plate missing against the empty-bed reference; WARN when it cannot tell (no reference at this Z, plate out of view, camera down). See [Bed state](printer.md#bed-state). On an idle printer with `watch.bed.auto_view` (the U1: its camera sees 15 % of the plate at the Z 200 rest) the bed is moved in Z only to where the whole plate is in view, judged there and put back, and the line names the Z used; never while printing/paused, never homing; `--no-bed-move` judges at the current Z. |
 | `slot Tn` | `--printer` on a printer with per-head data (Snapmaker U1) | Tool *n* is used by the G-code but head T*n+1* is empty, or its colour/material differs from `; filament_colour` / `; filament_type`. |
 | `axis travel` | always (SKIP when the limits are unknown) | A move, or the bulge of an arc, leaves the printer's X/Y travel anywhere in the file. See [`3d gcode-bounds`](gcode-bounds.md). |
 | `print area` | always | A plate move leaves the G-code's `; printable_area`, or an extruding path crosses `; bed_exclude_area` (vendor blocks exempt: `;TYPE:Custom`; on Bambu Studio G-code everything outside its object blocks, wipe tower and features — see [`3d gcode-bounds`](gcode-bounds.md)). |
@@ -107,6 +107,7 @@ Options:
 - `--visible [OBJ:]SPEC` — a visible side for `3d visible-faces --gcode` (`x<V`, `y>V`, `all`; repeatable): `3d print-preflight out/walls.gcode --visible 'WALL*:y<104.8'`
 - `--bridge-max MM` — longest span the overhangs gate counts as a bridge; overrides the printer's `bridge_max_mm`: `3d print-preflight out/porch.gcode --axis-limits u1 --bridge-max 25`
 - `--json` — JSON report (`checks[]` with `name`, `status`, `detail`, `lines`): `3d print-preflight out/part.gcode --printer u1 --json | jq '.checks[] | select(.status=="FAIL")'`
+- `--no-bed-move` — the `bed` line judges at the current Z: the printer's bed is not moved to the best inspection Z (`watch.bed.auto_view`): `3d print-preflight out/part.gcode --printer u1 --no-bed-move`
 - `--secs S` — Creality: seconds to listen for pushed state: `3d print-preflight out/roof.gcode --printer k1se --secs 5`
 - `--printops-api URL` — 3d-api for the PrintOps gates (default `$PRINTOPS_API`, else `printops.yaml`): `3d print-preflight out/part.gcode --printer u1 --printops-api http://192.168.0.39:8765`
 - `--offline` — no network: no printer contact, PrintOps state from the snapshot (the slicer hook mode); together with `--printops-api` it is a usage error: `3d print-preflight out/part.gcode --offline`

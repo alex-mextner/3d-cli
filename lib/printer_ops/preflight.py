@@ -633,7 +633,8 @@ def bounds_report(
 
 
 def check_bed_verdict(v: dict[str, Any]) -> Check:
-    """`bed_state.py status --json` (issue #303) -> the `bed` line."""
+    """`bed_state.py status --json` (issue #303) -> the `bed` line. A verdict judged after the auto view
+    moved the bed names the Z it was judged at; a bed left away from where it was found is a WARN."""
     bed, plate = v.get("bed", "unknown"), v.get("plate", "unknown")
     age = v.get("age_s")
     when = (
@@ -641,8 +642,19 @@ def check_bed_verdict(v: dict[str, Any]) -> Check:
         if isinstance(age, (int, float))
         else str(v.get("source", "?"))
     )
+    raw_view = v.get("view")
+    view: dict[str, Any] = raw_view if isinstance(raw_view, dict) else {}
+    if view.get("action") == "moved":
+        when += (
+            f", judged at Z {view.get('z_used', v.get('z'))} after moving the bed from Z "
+            f"{view.get('moved_from')}" + (" and back" if view.get("restored") else "")
+        )
     frame = [f"frame: {v['frame']}"] if v.get("frame") else []
     why = str(v.get("reason") or "")
+    if view.get("action") == "moved" and not view.get("restored"):
+        frame.append(f"BED NOT PUT BACK to Z {view.get('moved_from')}: {view.get('restore_error')}")
+        if plate != "missing" and bed != "occupied":
+            return Check("bed", WARN, f"bed state {bed} ({when}): {why}", frame)
     if plate == "missing":
         return Check("bed", FAIL, f"build plate missing ({when}): {why}", frame)
     if bed == "occupied":
@@ -657,13 +669,16 @@ def check_bed_verdict(v: dict[str, Any]) -> Check:
 def check_bed(
     device: Device,
     *,
+    move: bool = True,
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
-    timeout: float = 90.0,
+    timeout: float | None = None,
 ) -> Check:
     """The camera `bed` line (printer_ops/bed.py): SKIP when the printer's bed monitor is off,
     else the watcher's verdict when fresher than `stale_s` at the same Z, else a fresh one-shot
-    camera check (`bed_state.py status`). A check that cannot run is a WARN, never a crash."""
-    from printer_ops.bed import BED_DEPS, BED_TOOL, bed_config
+    camera check (`bed_state.py status`). With `watch.bed.auto_view` and an idle printer that check
+    moves the bed in Z to where the camera sees the whole plate and back (`move=False`: --no-move).
+    A check that cannot run is a WARN, never a crash."""
+    from printer_ops.bed import STATUS_MOVE_TIMEOUT_S, STATUS_TIMEOUT_S, bed_config, status_argv
 
     cfg = bed_config(device)
     if not cfg.enabled:
@@ -672,14 +687,10 @@ def check_bed(
             SKIP,
             f"bed camera check off for {device.name} (watch.bed.enabled in {device.source})",
         )
+    if timeout is None:  # a move is two Z moves, a settle wait and a frame wait; never kill it half-way
+        timeout = STATUS_MOVE_TIMEOUT_S if move and cfg.auto_view else STATUS_TIMEOUT_S
     try:
-        from cli.pyrun import tool_argv
-
-        argv = tool_argv(
-            BED_DEPS,
-            BED_TOOL,
-            ["status", device.name, "--json", "--max-age", f"{cfg.stale_s:g}"],
-        )
+        argv = status_argv(device.name, max_age=cfg.stale_s, move="auto" if move else "never")
         r = runner(argv, capture_output=True, text=True, timeout=timeout)
     except Exception as exc:  # no runtime / timeout
         return Check("bed", WARN, f"bed check could not run: {exc}")

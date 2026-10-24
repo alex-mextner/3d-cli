@@ -503,6 +503,11 @@ class MoonrakerAdapter(Adapter):
         finally:
             self.timeout = saved
 
+    def file_metadata(self, filename: str) -> dict[str, Any]:
+        """Moonraker's parsed metadata of a stored G-code file (`object_height`, `layer_count`, ...); read-only."""
+        result = self._get("/server/files/metadata?filename=" + quote(filename, safe=""))
+        return result if isinstance(result, dict) else {}
+
     def _head_state(self, index: int) -> tuple[PrinterStatus, Slot, float | None]:
         """One read of the job state, head `index` of print_task_config and its extruder's K."""
         ext = extruder_name(index)
