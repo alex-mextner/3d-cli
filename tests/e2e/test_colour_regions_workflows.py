@@ -21,6 +21,7 @@ from colour_regions_fixtures import (  # noqa: E402
     save_mesh,
     sphere,
     sphere_labels,
+    write_project,
     write_rules,
 )
 
@@ -177,3 +178,37 @@ def test_help_lists_every_subcommand_and_no_arguments_exits_1(tmp_path: Path) ->
     assert run_cli(tmp_path, *CR).returncode == 1
     typo = run_cli(tmp_path, *CR, "bild", "x.stl", *LOCKLESS)
     assert typo.returncode == 2 and "build" in typo.stderr
+
+
+def test_the_legacy_parity_flags_work_through_the_cli(tmp_path: Path) -> None:
+    """A re-sculpt story with every parity flag: classify --surface-parts, transfer-class --match surface, build
+    --full-reach, and verify --parts/--default-key/--max-nz against a built project's parts."""
+    old = sphere(subdivisions=3)
+    z = centroid_z(old)
+    skin = save_mesh(old, tmp_path / "skin.ply")
+    part = save_mesh(trimesh.Trimesh(np.asarray(old.vertices), np.asarray(old.faces)[z > 0], process=False), tmp_path / "white.ply")
+    c = run_cli(tmp_path, *CR, "classify", str(skin), "--part", f"white={part}", "--out", str(tmp_path / "c.npz"), "--split-edge", "0.8", "--surface-parts", "white", "--json", *LOCKLESS)
+    assert c.returncode == 0, c.stderr
+    assert json.loads(c.stdout)["counts"]["white"] > int((z > 0).sum()) and (tmp_path / "c.mesh.ply").is_file()
+    new = save_mesh(sphere(subdivisions=3, jitter=0.02), tmp_path / "new.ply")
+    t = run_cli(
+        tmp_path, *CR, "transfer-class", str(new), "--source", f"{tmp_path / 'c.npz'}@{tmp_path / 'c.mesh.ply'}", "--positive", "white", "--as", "w",
+        "--out", str(tmp_path / "w.npz"), "--match", "surface", "--json", *LOCKLESS,
+    )
+    assert t.returncode == 0, t.stderr
+    assert json.loads(t.stdout)["match"] == "surface"
+    bad = run_cli(tmp_path, *CR, "classify", str(skin), "--part", f"white={part}", "--out", str(tmp_path / "x.npz"), "--surface-parts", "white", *LOCKLESS)
+    assert bad.returncode == 2 and "--split-edge" in bad.stderr
+
+    mesh, labels, rules = _ball(tmp_path)
+    work = tmp_path / "work"
+    b = run_cli(tmp_path, *CR, "build", str(mesh), "--track", f"s={labels}", "--rules", str(rules), "--out", str(work), "--full-reach", "--quiet", *LOCKLESS)
+    assert b.returncode == 0, b.stderr
+    stem = write_project(tmp_path / "proj", sphere(subdivisions=4), work, [5.0, -3.0, 2.0], {"slot": 2}, {"mix": "23"})
+    v = run_cli(
+        tmp_path, *CR, "verify", str(mesh), "--work", str(work), "--parts", str(stem), "--default-key", "K", "--max-nz", "0.97", "--samples", "1500", *LOCKLESS
+    )
+    # the smooth ball has no relief: gate 1 FAILs (exit 1) while gate 2 reads the project parts and PASSes
+    assert v.returncode == 1 and "GATE 2 volumes follow the labels" in v.stdout and "->  PASS" in v.stdout, v.stdout + v.stderr
+    clash = run_cli(tmp_path, *CR, "verify", str(mesh), "--work", str(work), "--parts", str(stem), "--skip-volumes", *LOCKLESS)
+    assert clash.returncode == 2 and "contradict" in clash.stderr

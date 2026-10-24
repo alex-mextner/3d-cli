@@ -126,6 +126,7 @@ def build(
     *,
     force: bool = False,
     verbose: bool = True,
+    full_reach: bool = False,
 ) -> BuildResult:
     """Run the whole labels -> regions pipeline; writes the work directory described in the module docstring."""
     if not tracks:
@@ -174,7 +175,7 @@ def build(
         rel = f"patches/{k}.ply"
         path = wdir / rel
         sha = path.with_name(path.name + ".sha")
-        key = json.dumps([rule.depth_mm, rule.pitch_mm, code]).encode()
+        key = json.dumps([rule.depth_mm, rule.pitch_mm, full_reach, code]).encode()
         stamp = hashlib.sha1(np.packbits(sel).tobytes() + key).hexdigest()
         if force or not (path.exists() and sha.exists() and sha.read_text() == stamp):
             if verbose:
@@ -184,7 +185,7 @@ def build(
                     flush=True,
                 )
             sha.unlink(missing_ok=True)  # a failed rebuild must not leave an old stamp over a new, bad patch
-            volume_mod.shell_volume(s, sel, rule.depth_mm, rule.pitch_mm, path)
+            volume_mod.shell_volume(s, sel, rule.depth_mm, rule.pitch_mm, path, full_reach=full_reach)
             sha.write_text(stamp)
         regions.append({"name": k, "assign": dict(rule.assign or {}), "shape": {"type": "stl", "path": rel}})
         groups.append(
