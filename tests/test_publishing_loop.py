@@ -4,8 +4,10 @@ and Cults are loopback fakes, the browser routes run through a recording runner,
 
 from __future__ import annotations
 
+import base64
 import json
 import sqlite3
+import tempfile
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -58,6 +60,9 @@ def hermetic(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         "no_proxy", "*"
     )  # the loopback fakes must never go through an inherited proxy
     monkeypatch.setenv("NO_PROXY", "*")
+    monkeypatch.setattr(
+        tempfile, "tempdir", str(tmp_path)
+    )  # the browser publication lock lives in the temp dir
 
 
 @pytest.fixture
@@ -486,7 +491,8 @@ def test_cults_route_resolves_ids_then_creates_with_basic_auth(tmp_path: Path) -
         ("categories" in q, "licenses" in q, "createCreation" in q)
         for _, q, _ in fake.calls
     ] == [(True, False, False), (False, True, False), (False, False, True)]
-    assert all(auth.startswith("Basic ") for auth, _, _ in fake.calls)
+    expected = base64.b64encode(f"{CULTS_USER}:{CULTS_KEY}".encode()).decode()
+    assert all(auth == f"Basic {expected}" for auth, _, _ in fake.calls)
     variables = fake.calls[2][2]
     assert (
         variables["categoryId"] == "Q2F0ZWdvcnkvMQ=="
