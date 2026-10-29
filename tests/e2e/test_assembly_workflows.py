@@ -89,11 +89,8 @@ def test_a_clean_assembly_exits_0_and_a_blocking_boss_exits_1_with_pair_depth_an
     bad = write_spec(tmp_path, peg_pocket(tmp_path, boss=True), "boss.yaml")
     res = cli(tmp_path, "check", str(bad))
     assert res.returncode == 1
-    assert (
-        "BLOCKING intersections" in res.stdout
-        and "socket x peg" in res.stdout
-        or "peg x socket" in res.stdout
-    )
+    assert "BLOCKING intersections" in res.stdout
+    assert any(pair in res.stdout for pair in ("socket x peg", "peg x socket"))
     assert re.search(r"depth 1\.7\d\d mm", res.stdout) and "at (4.15" in res.stdout
     assert (
         "fix: open the clearance" in res.stdout
