@@ -20,6 +20,7 @@ def _sidecar(image: Path) -> dict:  # type: ignore[type-arg]
 def test_plate_render_has_per_part_dims_and_declared_measurements_gate(
     tmp_path: Path,
 ) -> None:
+    """A user renders a plate of separate parts and gets per-part footprint dimensions, then gates the sidecar with `--check --require-dims`."""
     model = write_3mf(
         tmp_path / "plate.3mf", [Box("left", 0, RED), Box("right", 60, GREEN)]
     )
@@ -54,6 +55,7 @@ def test_plate_render_has_per_part_dims_and_declared_measurements_gate(
 
 
 def test_up_and_overall_flags_reach_the_renderer(tmp_path: Path) -> None:
+    """A user with a Y-up model renders it with `--up y --overall always` and the sidecar records the axis."""
     post = tmp_path / "post.stl"
     trimesh.creation.box(extents=(10, 40, 10)).export(post)
     out = tmp_path / "post.png"
@@ -80,17 +82,19 @@ def test_up_and_overall_flags_reach_the_renderer(tmp_path: Path) -> None:
 def test_bad_values_are_structured_usage_errors(
     tmp_path: Path, flag: str, value: str
 ) -> None:
+    """A user mistypes `--up`, `--overall` or `--dims-from` and gets a usage error naming the flag, not a traceback."""
     post = tmp_path / "post.stl"
     trimesh.creation.box(extents=(10, 40, 10)).export(post)
     done = run_cli(
         tmp_path, "dimension", str(post), "-o", str(tmp_path / "x.png"), flag, value
     )
-    assert (
-        done.returncode == 2 and flag in done.stderr and "Traceback" not in done.stderr
-    )
+    assert done.returncode == 2
+    assert flag in done.stderr
+    assert "Traceback" not in done.stderr
 
 
 def test_a_declared_measurement_that_fits_no_view_exits_2(tmp_path: Path) -> None:
+    """A user declares a measurement no view can show and is told which one, with exit 2."""
     post = tmp_path / "post.stl"
     trimesh.creation.box(extents=(10, 40, 10)).export(post)
     spec = tmp_path / "dims.json"
@@ -107,10 +111,13 @@ def test_a_declared_measurement_that_fits_no_view_exits_2(tmp_path: Path) -> Non
         "--dims-from",
         str(spec),
     )
-    assert done.returncode == 2 and "eye" in done.stderr
+    assert done.returncode == 2
+    assert "eye" in done.stderr
+    assert "Traceback" not in done.stderr
 
 
 def test_require_dims_is_only_for_check(tmp_path: Path) -> None:
+    """A user passing `--require-dims` to a render is told it belongs to `--check`."""
     post = tmp_path / "post.stl"
     trimesh.creation.box(extents=(10, 40, 10)).export(post)
     done = run_cli(
@@ -121,12 +128,14 @@ def test_require_dims_is_only_for_check(tmp_path: Path) -> None:
         str(tmp_path / "x.png"),
         "--require-dims",
     )
-    assert done.returncode == 2 and "belongs to --check" in done.stderr
+    assert done.returncode == 2
+    assert "belongs to --check" in done.stderr
 
 
 def test_a_dim_across_separate_parts_exits_2_naming_both_and_a_declared_gap_passes(
     tmp_path: Path,
 ) -> None:
+    """A user dimensioning across two separate parts is refused naming both, while a dimension inside one part is drawn and passes `--check`."""
     model = write_3mf(
         tmp_path / "plate.3mf", [Box("left", 0, RED), Box("right", 60, GREEN)]
     )
@@ -134,7 +143,8 @@ def test_a_dim_across_separate_parts_exits_2_naming_both_and_a_declared_gap_pass
         tmp_path, "dimension", str(model), "-o", str(tmp_path / "x.png"),
         "--dim", "across:5,5,5:65,5,5",
     )  # fmt: skip
-    assert refused.returncode == 2 and "Traceback" not in refused.stderr
+    assert refused.returncode == 2
+    assert "Traceback" not in refused.stderr
     assert (
         "left" in refused.stderr
         and "right" in refused.stderr
@@ -156,6 +166,7 @@ def test_a_dim_across_separate_parts_exits_2_naming_both_and_a_declared_gap_pass
 
 
 def test_check_fails_a_sidecar_that_spans_separate_parts(tmp_path: Path) -> None:
+    """A user's `--check` fails a sidecar whose dimension spans separate parts."""
     model = write_3mf(
         tmp_path / "plate.3mf", [Box("left", 0, RED), Box("right", 60, GREEN)]
     )
@@ -166,4 +177,5 @@ def test_check_fails_a_sidecar_that_spans_separate_parts(tmp_path: Path) -> None
     data["dimensions"][0]["spans_separated"] = True
     side.write_text(json.dumps(data), encoding="utf-8")
     failed = run_cli(tmp_path, "dimension", "--check", str(out))
-    assert failed.returncode == 1 and "spans-separated-parts" in failed.stdout
+    assert failed.returncode == 1
+    assert "spans-separated-parts" in failed.stdout
