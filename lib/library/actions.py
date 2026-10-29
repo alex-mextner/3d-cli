@@ -19,6 +19,7 @@ inside the actions that need it.
 
 from __future__ import annotations
 
+import sqlite3
 from collections.abc import Callable, Sequence
 from typing import Any, TypedDict
 
@@ -183,6 +184,10 @@ def queue(
     This records intent only; it never uploads or starts a print. `source` is the uid of the `model_source`
     the design was made from; `source_key` makes the call idempotent. `data`: `{design, make, status}` (uids).
     """
+    if not isinstance(design, str) or not design.strip():
+        raise InvalidArgument(
+            "design", repr(design), ["a non-empty design name"], command="library"
+        )
     from library import db as librarydb
 
     conn = librarydb.open_library(db_path)
@@ -220,12 +225,18 @@ def queue(
             },
             source_key=source_key,
         )
+        state = conn.execute(
+            "SELECT d.uid AS design_uid, m.status FROM make m JOIN design d ON d.id = m.design_id"
+            " WHERE m.id = ?",
+            (made.id,),
+        ).fetchone()
+        # an idempotency hit reports the make that already exists, not what this call asked for
         return ok_result(
             "queue",
             {
-                "design": design_row[1],
+                "design": state["design_uid"],
                 "make": made.uid,
-                "status": "queued",
+                "status": state["status"],
                 "created": made.created,
             },
         )
@@ -265,6 +276,9 @@ def photo(
 
     conn = librarydb.open_library(db_path)
     try:
+        resolved = Path(path).resolve()
+        if not resolved.is_file():
+            raise InvalidArgument("path", path, ["an existing file"], command="library")
         column, table, uid = (
             ("make_id", "make", make) if make else ("design_id", "design", design)
         )
@@ -285,14 +299,14 @@ def photo(
             "photo",
             {
                 column: int(row["id"]),
-                "path": str(Path(path).resolve()),
+                "path": str(resolved),
                 "kind": kind,
                 "z_mm": z_mm,
                 "taken_at": librarydb.db.utc_now(),
             },
         )
         return ok_result(
-            "photo", {"photo": ins.uid, "path": str(Path(path).resolve()), "kind": kind}
+            "photo", {"photo": ins.uid, "path": str(resolved), "kind": kind}
         )
     finally:
         conn.close()
@@ -316,8 +330,6 @@ def publish(
 
 def _get_or_create_design(conn: Any, name: str) -> tuple[int, str]:
     """The design row for `name`; a concurrent first insert (UNIQUE name) is read back, not raised."""
-    import sqlite3
-
     from library import db as librarydb
 
     lookup = "SELECT id, uid FROM design WHERE name = ?"
@@ -359,8 +371,9 @@ OWNERS: dict[str, int | None] = {
 
 
 def invoke(name: str, **kwargs: Any) -> ActionResult:
-    """Run an action by name and never raise: unknown names, structured errors and unimplemented seams
-    become `ok: false` results (codes `unknown_action`, `invalid_argument`, `error`, `not_implemented`)."""
+    """Run an action by name and never raise: unknown names, structured errors, storage failures and
+    unimplemented seams become `ok: false` results (codes `unknown_action`, `invalid_argument`, `error`,
+    `storage_error`, `not_implemented`)."""
     fn = ACTIONS.get(name)
     if fn is None:
         return error_result(
@@ -386,4 +399,20 @@ def invoke(name: str, **kwargs: Any) -> ActionResult:
     except TypeError as e:  # unknown/missing keyword for this action
         return error_result(
             name, [issue("invalid_argument", str(e), [f"See `help(actions.{name})`."])]
+        )
+    except (
+        sqlite3.Error,
+        OSError,
+    ) as e:  # locked/unreadable database, unwritable data dir
+        return error_result(
+            name,
+            [
+                issue(
+                    "storage_error",
+                    f"{type(e).__name__}: {e}",
+                    [
+                        "Check `3d library path` and that no other process holds the database."
+                    ],
+                )
+            ],
         )

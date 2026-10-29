@@ -170,6 +170,17 @@ def test_fit_clearance_record_validation() -> None:
             fits.validate_fit_clearance(bad)
 
 
+def test_non_finite_numbers_are_refused_in_records_and_tables() -> None:
+    ok = {"fit_type": "sliding", "shape": "planar", "gap_mm": 0.2, "result": "free"}
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        with pytest.raises(FitTableError, match="finite"):
+            fits.validate_fit_clearance({**ok, "gap_mm": bad})
+    table = raw()
+    table["fit_types"]["snap"]["tol_mm"] = float("nan")
+    with pytest.raises(FitTableError, match="finite"):
+        fits.parse_table(table)
+
+
 def test_coupon_readings_become_calibration_rows_that_resolve_applies() -> None:
     records = [
         {"fit_type": "sliding", "shape": "planar", "gap_mm": 0.15, "result": "fused"},

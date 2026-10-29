@@ -113,6 +113,29 @@ def test_photo_registers_an_existing_file_for_a_make(dbpath: str, tmp_path: Path
     assert missing["ok"] is False and missing["errors"][0]["code"] == "not_found"
 
 
+def test_queue_idempotency_hit_reports_the_existing_make_not_the_new_arguments(dbpath: str) -> None:
+    first = actions.queue("design-a", db_path=dbpath, source_key="retry")
+    conn = librarydb.open_library(dbpath)
+    conn.execute("UPDATE make SET status = 'done'")
+    again = actions.queue("design-b", db_path=dbpath, source_key="retry")
+    assert again["data"]["make"] == first["data"]["make"] and again["data"]["created"] is False
+    assert again["data"]["design"] == first["data"]["design"] and again["data"]["status"] == "done"
+
+
+def test_photo_refuses_a_path_that_is_not_an_existing_file(dbpath: str, tmp_path: Path) -> None:
+    made = actions.queue("case", db_path=dbpath)["data"]["make"]
+    for bad in (str(tmp_path / "nope.jpg"), str(tmp_path)):
+        res = actions.invoke("photo", path=bad, make=made, db_path=dbpath)
+        assert res["ok"] is False and res["errors"][0]["code"] == "invalid_argument"
+    assert librarydb.open_library(dbpath).execute("SELECT COUNT(*) FROM photo").fetchone()[0] == 0
+
+
+def test_invoke_turns_storage_failures_and_null_design_into_error_results(tmp_path: Path) -> None:
+    assert actions.invoke("queue", design=None)["errors"][0]["code"] == "invalid_argument"
+    unusable = actions.invoke("queue", design="case", db_path=str(tmp_path))  # a directory is not a database
+    assert unusable["ok"] is False and unusable["errors"][0]["code"] == "storage_error"
+
+
 def test_invoke_turns_bad_input_into_results_never_exceptions(dbpath: str) -> None:
     assert actions.invoke("nope")["errors"][0]["code"] == "unknown_action"
     assert actions.invoke("photo", path="x.jpg", kind="selfie", make="m")["errors"][0]["code"] == "invalid_argument"

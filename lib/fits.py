@@ -23,6 +23,7 @@ INVARIANTS:
 from __future__ import annotations
 
 import functools
+import math
 import re
 import statistics
 from collections.abc import Iterable, Mapping, Sequence
@@ -149,8 +150,12 @@ class Resolution:
 
 # --------------------------------------------------------------------------- loading / validation
 def _num(value: Any, where: str, *, minimum: float | None = None) -> float:
-    if isinstance(value, bool) or not isinstance(value, _NUMBER):
-        raise FitTableError(f"{where}: expected a number, got {value!r}")
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, _NUMBER)
+        or not math.isfinite(value)
+    ):
+        raise FitTableError(f"{where}: expected a finite number, got {value!r}")
     if minimum is not None and value < minimum:
         raise FitTableError(f"{where}: {value} is below the minimum {minimum}")
     return float(value)
