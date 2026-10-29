@@ -41,8 +41,12 @@ from printer_ops.vision import (
 
 # SOI, APP0 (16-byte segment), SOS (8-byte header), scan data with a stuffed 0xFF, EOI.
 JPEG = (
-    b"\xff\xd8\xff\xe0\x00\x10" + b"\x00" * 14 + b"\xff\xda\x00\x08" + b"\x00" * 6
-    + b"\x12\x34\xff\x00\x56" * 8 + b"\xff\xd9"
+    b"\xff\xd8\xff\xe0\x00\x10"
+    + b"\x00" * 14
+    + b"\xff\xda\x00\x08"
+    + b"\x00" * 6
+    + b"\x12\x34\xff\x00\x56" * 8
+    + b"\xff\xd9"
 )
 NOW = datetime(2026, 10, 14, 13, 50, tzinfo=timezone.utc).timestamp()
 
@@ -145,9 +149,13 @@ def test_streamer_frame_accepts_encoder_padding_after_eoi() -> None:
     # K1 SE mjpg-streamer: 25 filler bytes after FFD9 (captured 2026-10-15).
     padded = JPEG + b"\x14E\x14\x00Q" * 5
     assert is_complete_jpeg(padded, EOI_TAIL_MAX)
-    assert jpeg_frame(padded, EOI_TAIL_MAX) == JPEG  # filler dropped: frozen camera hashes same
+    assert (
+        jpeg_frame(padded, EOI_TAIL_MAX) == JPEG
+    )  # filler dropped: frozen camera hashes same
     assert not is_complete_jpeg(JPEG + b"\x14" * 200, EOI_TAIL_MAX)
-    assert jpeg_frame(JPEG + b"\x14\xff\xd9", EOI_TAIL_MAX) == JPEG  # FFD9 in filler ignored
+    assert (
+        jpeg_frame(JPEG + b"\x14\xff\xd9", EOI_TAIL_MAX) == JPEG
+    )  # FFD9 in filler ignored
 
 
 def test_in_place_file_rejects_a_tail_after_eoi() -> None:
@@ -158,7 +166,9 @@ def test_in_place_file_rejects_a_tail_after_eoi() -> None:
 
 def test_markers_inside_segment_payloads_do_not_count() -> None:
     # FFD9 in a COM payload of a file cut before its scan.
-    assert not is_complete_jpeg(b"\xff\xd8\xff\xfe\x00\x06\xff\xd9\x00\x00", EOI_TAIL_MAX)
+    assert not is_complete_jpeg(
+        b"\xff\xd8\xff\xfe\x00\x06\xff\xd9\x00\x00", EOI_TAIL_MAX
+    )
     # Fake SOS and EOI both inside a COM payload, no real scan.
     assert not is_complete_jpeg(
         b"\xff\xd8\xff\xfe\x00\x0a\xff\xda\x11\x22\xff\xd9\x33\x44", EOI_TAIL_MAX
@@ -170,7 +180,9 @@ def test_markers_inside_segment_payloads_do_not_count() -> None:
 def test_grab_from_a_streamer_drops_encoder_padding() -> None:
     with FakeCam(replies=[(200, JPEG + b"\x14E\x14\x00Q" * 5)]).serve() as fake:
         url = f"http://127.0.0.1:{fake.port}/webcam/?action=snapshot"
-        frame = MoonrakerCamera("127.0.0.1", fake.port, snapshot=url, retry_delay=0).grab()
+        frame = MoonrakerCamera(
+            "127.0.0.1", fake.port, snapshot=url, retry_delay=0
+        ).grab()
     assert frame.jpeg == JPEG
 
 
@@ -182,14 +194,19 @@ def test_full_u1_monitor_url_is_still_treated_as_an_in_place_file() -> None:
 
 
 def test_tem_marker_in_scan_is_standalone() -> None:
-    assert jpeg_frame(JPEG[:-2] + b"\xff\x01" + JPEG[-2:]) == JPEG[:-2] + b"\xff\x01\xff\xd9"
+    assert (
+        jpeg_frame(JPEG[:-2] + b"\xff\x01" + JPEG[-2:])
+        == JPEG[:-2] + b"\xff\x01\xff\xd9"
+    )
 
 
 def test_grab_retries_500_and_truncated_frames_then_returns_the_complete_one() -> None:
     with FakeCam(
         replies=[(500, b"FileNotFoundError"), (200, JPEG[:40])]
     ).serve() as fake:
-        frame = MoonrakerCamera("127.0.0.1", fake.port, snapshot=MONITOR_PATH, retry_delay=0).grab()
+        frame = MoonrakerCamera(
+            "127.0.0.1", fake.port, snapshot=MONITOR_PATH, retry_delay=0
+        ).grab()
     assert frame.jpeg == JPEG
     assert (
         frame.modified
@@ -200,7 +217,9 @@ def test_grab_retries_500_and_truncated_frames_then_returns_the_complete_one() -
 
 def test_grab_gives_up_with_a_structured_error() -> None:
     with FakeCam(replies=[(500, b"x")] * 3).serve() as fake:
-        cam = MoonrakerCamera("127.0.0.1", fake.port, snapshot=MONITOR_PATH, retry_delay=0)
+        cam = MoonrakerCamera(
+            "127.0.0.1", fake.port, snapshot=MONITOR_PATH, retry_delay=0
+        )
         with pytest.raises(PrinterCommError, match="after 3 tries: HTTP 500"):
             cam.grab()
 
@@ -385,7 +404,9 @@ def test_monitor_reports_the_printers_own_noodle_verdict_once_per_episode() -> N
 
 
 def _printing_monitor() -> VisionMonitor:
-    pytest.importorskip("printer_ops.watch")  # events are watch.Event, like the other npu tests
+    pytest.importorskip(
+        "printer_ops.watch"
+    )  # events are watch.Event, like the other npu tests
     mon = VisionMonitor("u1", _Scores([]))
     mon.set_job("printing", "a.gcode")
     return mon
@@ -397,9 +418,14 @@ def test_the_nozzle_check_label_is_not_a_noodle_verdict() -> None:
     mon = _printing_monitor()
     assert mon.npu([NpuVerdict(NOW, "nozzle", 0.9287, 0.0003, 1)], NOW) == []
     assert mon.npu([NpuVerdict(NOW + 1, "nozzle", 0.95, 0.0002, 1)], NOW + 1) == []
-    assert mon.last_npu is None                                 # nor does it start an episode
-    mixed = mon.npu([NpuVerdict(NOW + 5, "nozzle", 0.95, 0.0002, 1),
-                     NpuVerdict(NOW + 5, "noodle", 0.85, 0.0629, 1)], NOW + 5)
+    assert mon.last_npu is None  # nor does it start an episode
+    mixed = mon.npu(
+        [
+            NpuVerdict(NOW + 5, "nozzle", 0.95, 0.0002, 1),
+            NpuVerdict(NOW + 5, "noodle", 0.85, 0.0629, 1),
+        ],
+        NOW + 5,
+    )
     assert [(e.kind, e.data["label"], e.data["hits"]) for e in mixed] == [
         ("printer_noodle_verdict", "noodle", 1)
     ]
@@ -409,7 +435,7 @@ def test_nozzle_verdicts_do_not_extend_a_noodle_episode() -> None:
     mon = _printing_monitor()
     assert len(mon.npu([NpuVerdict(NOW, "noodle", 0.9, 0.1, 1)], NOW)) == 1
     mon.npu([NpuVerdict(NOW + 200, "nozzle", 0.95, 0.0002, 1)], NOW + 200)
-    mon.npu([], NOW + 400)                                     # 400 s after the last noodle: over
+    mon.npu([], NOW + 400)  # 400 s after the last noodle: over
     assert len(mon.npu([NpuVerdict(NOW + 410, "noodle", 0.9, 0.1, 1)], NOW + 410)) == 1
 
 
@@ -418,25 +444,36 @@ def test_the_log_parser_normalises_labels() -> None:
     assert [v.label for v in parse_klippy_verdicts(line, now=NOW)] == ["nozzle", "7"]
 
 
-@pytest.mark.parametrize("label", ["noodle", "residue", "item", "spaghetti"])  # spaghetti: a label a firmware update may add
+@pytest.mark.parametrize(
+    "label", ["noodle", "residue", "item", "spaghetti"]
+)  # spaghetti: a label a firmware update may add
 def test_defect_and_unknown_npu_labels_count(label: str) -> None:
     mon = _printing_monitor()
-    assert [e.data["label"] for e in mon.npu([NpuVerdict(NOW, label, 0.9, 0.1, 1)], NOW)] == [label]
+    assert [
+        e.data["label"] for e in mon.npu([NpuVerdict(NOW, label, 0.9, 0.1, 1)], NOW)
+    ] == [label]
 
 
 # The clean-bed check at the start of u1_night_v4 (U1 klippy.log, 2026-10-16 10:27:32).
-U1_BED_CHECK = ("10:27:32.402:[defect_detection] response info: {'id': 3367, 'jsonrpc': '2.0', 'result': {"
-                "'extrusion_line': {'obj_areas': 0.0, 'obj_cnts': 0, 'obj_probs': 0.0, 'obj_weighted_probs': 0.0}, "
-                "'item': {'obj_areas': 0.0, 'obj_cnts': 0, 'obj_probs': 0.0, 'obj_weighted_probs': 0.0}, "
-                "'legend_text': {'obj_areas': 0.0885, 'obj_cnts': 4, 'obj_probs': 0.9507, 'obj_weighted_probs': 0.9487}, "
-                "'nozzle': {'obj_areas': 0.0011, 'obj_cnts': 5, 'obj_probs': 0.9316, 'obj_weighted_probs': 0.93}}}")
+U1_BED_CHECK = (
+    "10:27:32.402:[defect_detection] response info: {'id': 3367, 'jsonrpc': '2.0', 'result': {"
+    "'extrusion_line': {'obj_areas': 0.0, 'obj_cnts': 0, 'obj_probs': 0.0, 'obj_weighted_probs': 0.0}, "
+    "'item': {'obj_areas': 0.0, 'obj_cnts': 0, 'obj_probs': 0.0, 'obj_weighted_probs': 0.0}, "
+    "'legend_text': {'obj_areas': 0.0885, 'obj_cnts': 4, 'obj_probs': 0.9507, 'obj_weighted_probs': 0.9487}, "
+    "'nozzle': {'obj_areas': 0.0011, 'obj_cnts': 5, 'obj_probs': 0.9316, 'obj_weighted_probs': 0.93}}}"
+)
 
 
 def test_the_clean_bed_check_of_a_clean_plate_raises_nothing() -> None:
     """#324: legend_text (the plate's printed markings) p 0.95 and nozzle p 0.93 are no defects."""
     mon = _printing_monitor()
     verdicts = parse_klippy_verdicts(U1_BED_CHECK, now=NOW)
-    assert sorted(v.label for v in verdicts) == ["extrusion_line", "item", "legend_text", "nozzle"]
+    assert sorted(v.label for v in verdicts) == [
+        "extrusion_line",
+        "item",
+        "legend_text",
+        "nozzle",
+    ]
     assert mon.npu(verdicts, NOW) == []
     for label in ("legend_text", "extrusion_line", "nozzle"):
         assert mon.npu([NpuVerdict(NOW + 1, label, 0.99, 0.5, 9)], NOW + 1) == []
@@ -449,9 +486,17 @@ def test_a_dirty_bed_verdict_says_what_it_is() -> None:
     assert "dirty bed" in ev[0].text and "several hits" not in ev[0].text
 
 
-def test_a_dirty_bed_is_not_hidden_by_a_stronger_plate_marking_in_the_same_answer() -> None:
+def test_a_dirty_bed_is_not_hidden_by_a_stronger_plate_marking_in_the_same_answer() -> (
+    None
+):
     mon = _printing_monitor()
-    ev = mon.npu([NpuVerdict(NOW, "legend_text", 0.95, 0.09, 4), NpuVerdict(NOW, "item", 0.9, 0.05, 1)], NOW)
+    ev = mon.npu(
+        [
+            NpuVerdict(NOW, "legend_text", 0.95, 0.09, 4),
+            NpuVerdict(NOW, "item", 0.9, 0.05, 1),
+        ],
+        NOW,
+    )
     assert [(e.data["label"], e.data["hits"]) for e in ev] == [("item", 1)]
 
 
@@ -472,6 +517,84 @@ def test_a_new_print_restarts_the_per_print_history_but_a_pause_does_not() -> No
     assert mon.tracker.frames == 0
     mon.set_job("complete", "b.gcode")
     assert mon.set_job("printing", "b.gcode") is True  # the same file printed again
+
+
+def _running(progress: float = 0.5, now: float = 1000.0) -> VisionMonitor:
+    mon = VisionMonitor("u1", _Scores([]))
+    assert mon.set_job("printing", "a.gcode", progress, now) is True
+    mon.tracker.frames = mon.raw_tracker.frames = 50
+    return mon
+
+
+def test_a_network_blip_is_not_a_new_print_and_keeps_the_per_print_state() -> None:
+    mon = _running()
+    mon.lost_contact(1010.0)
+    assert (
+        mon.set_job("printing", "a.gcode", 0.5, 1010.0 + vision.LOST_CONTACT_S - 1)
+        is False
+    )
+    assert (mon.tracker.frames, mon.raw_tracker.frames) == (50, 50)
+
+
+def test_the_same_file_printing_from_the_start_after_a_long_gap_is_a_new_print() -> (
+    None
+):
+    mon = _running(progress=0.5)
+    mon.lost_contact(1010.0)  # switched off during the job ...
+    assert (
+        mon.set_job("printing", "a.gcode", 0.01, 1010.0 + vision.LOST_CONTACT_S) is True
+    )  # ... and printing it again
+    assert (mon.tracker.frames, mon.raw_tracker.frames) == (0, 0)
+    assert mon.progress == 0.01  # the progress of the previous print is forgotten
+
+
+def test_only_the_first_failure_of_an_outage_starts_the_gap() -> None:
+    mon = _running()
+    mon.lost_contact(1010.0)
+    mon.lost_contact(
+        1100.0
+    )  # a later failure of the same outage does not restart the clock
+    assert mon.set_job("printing", "a.gcode", 0.1, 1105.0) is True
+
+
+def test_a_long_gap_with_the_same_job_further_along_is_not_a_new_print() -> None:
+    mon = _running(progress=0.5)
+    mon.lost_contact(1010.0)
+    assert mon.set_job("printing", "a.gcode", 0.55, 5000.0) is False
+    assert mon.tracker.frames == 50
+    mon.lost_contact(5010.0)
+    # progress that jitters back by no more than the tolerance is the same print
+    assert (
+        mon.set_job("printing", "a.gcode", 0.55 - vision.PROGRESS_REGRESSION, 9000.0)
+        is False
+    )
+
+
+def test_a_progress_drop_without_a_gap_is_not_a_new_print() -> None:
+    mon = _running(progress=0.5)
+    assert mon.set_job("printing", "a.gcode", 0.1, 1010.0) is False
+    assert mon.tracker.frames == 50
+
+
+def test_a_long_gap_after_which_the_printer_idles_and_prints_again_is_a_new_print() -> (
+    None
+):
+    mon = _running(progress=0.5)
+    mon.lost_contact(1010.0)
+    assert mon.set_job("standby", None, None, 4000.0) is False
+    assert mon.set_job("printing", "a.gcode", 0.0, 4010.0) is True
+
+
+def test_a_long_gap_and_another_file_is_a_new_print_and_a_gap_without_progress_is_not_judged() -> (
+    None
+):
+    mon = _running()
+    mon.lost_contact(1010.0)
+    assert mon.set_job("printing", "b.gcode", 0.9, 4000.0) is True
+    mon.lost_contact(4010.0)
+    assert (
+        mon.set_job("printing", "b.gcode", None, 9000.0) is False
+    )  # nothing to compare: not new
 
 
 # ---- vision_detect helpers ----------------------------------------------------------------------
@@ -659,7 +782,9 @@ def test_vision_deps_cover_every_third_party_import() -> None:
     assert needed <= set(printer.VISION_DEPS.split(","))
 
 
-def test_get_turns_http_protocol_errors_into_oserror(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_get_turns_http_protocol_errors_into_oserror(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     import http.client
 
     class Conn:
@@ -667,6 +792,7 @@ def test_get_turns_http_protocol_errors_into_oserror(monkeypatch: pytest.MonkeyP
         def request(self, *a: Any, **k: Any) -> None: ...
         def getresponse(self) -> Any:
             raise http.client.IncompleteRead(b"\xff\xd8", 100)
+
         def close(self) -> None: ...
 
     monkeypatch.setattr(http.client, "HTTPConnection", Conn)
@@ -682,13 +808,19 @@ def test_ensure_model_refetches_a_corrupted_cache_file(
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
     good = b"weights"
     spec = vision_detect.ModelSpec(
-        "m.onnx", "https://example.invalid/m.onnx", hashlib.sha256(good).hexdigest(),
-        len(good), "AGPL-3.0", "https://example.invalid",
+        "m.onnx",
+        "https://example.invalid/m.onnx",
+        hashlib.sha256(good).hexdigest(),
+        len(good),
+        "AGPL-3.0",
+        "https://example.invalid",
     )
     models = tmp_path / "3d-cli" / "vision" / "models"
     models.mkdir(parents=True)
     (models / "m.onnx").write_bytes(b"bit-rotted")
-    path = vision_detect.ensure_model(spec, opener=lambda url, timeout: io.BytesIO(good))
+    path = vision_detect.ensure_model(
+        spec, opener=lambda url, timeout: io.BytesIO(good)
+    )
     assert path.read_bytes() == good
     assert [p.name for p in models.iterdir()] == ["m.onnx"]  # no temp file left behind
 

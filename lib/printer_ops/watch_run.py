@@ -10,7 +10,8 @@ WHAT: one thread per printer keeps a websocket open and feeds its detector (watc
                   notify_status_update / notify_gcode_response / notify_klippy_* pushes.
   creality-stock  ws://host:9999 pushes JSON state deltas; "heart_beat" is answered "ok".
   A stream with no data for `silence_s` is treated as dead (Moonraker pushes proc stats every
-  second, the K1 heartbeats), then reconnects with exponential backoff (2 s .. 60 s).
+  second, the K1 heartbeats), then reconnects with exponential backoff (2 s .. 30 s: a printer that is
+  switched off is polled at most 30 s apart, so the first answer after power-on is seen at once, #640).
 
 READ-ONLY: the only frames ever sent on the stream are the JSON-RPC queries above and the K1
   heartbeat reply — never a G-code, start, pause or cancel. The single, opt-out exception is
@@ -20,28 +21,31 @@ READ-ONLY: the only frames ever sent on the stream are the JSON-RPC queries abov
 
 HEARTBEAT: a JSON file (default ~/.local/state/3d-cli/watch/<names>.json) rewritten every
   `heartbeat_s` with per-printer connection/state/last-message age and per-sink counters,
-  so a supervisor (or a human) can tell a quiet printer from a dead watcher.
+  so a supervisor (or a human) can tell a quiet printer from a dead watcher. Per printer it also
+  carries `last_poll_ok` (epoch of the last data from the printer, null before the first),
+  `unreachable_since` (epoch while no session is up, else null), `job` ({file, started, adopted}
+  while a job is printing/paused, else null; kept as last known while unreachable) and `quiet`
+  (the printer is unreachable and its intentional-off marker is set, intentional_off.py).
 
-SERVICE: `--install-service NAME...` writes the user unit template
-  ~/.config/systemd/user/3d-printer-watch@.service (ExecStart = `3d printer watch %i
-  $WATCH_ARGS`, Restart=always) and ~/.config/3d-cli/watch/<name>.env with the other flags.
+SERVICE: the user units are shipped and installed by `3d printer supervise install` (supervise_units.py): one
+  `3d-printer-watch@NAME` per owned printer running `3d printer watch NAME`, Restart=always, no --dry-run.
 """
 from __future__ import annotations
 
 import json
 import math
 import os
-import shutil
 import signal
-import subprocess
 import sys
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from errors import InvalidArgument, UsageError
+from printer_ops import intentional_off
 from printer_ops.watch import (
     INFO,
     SEVERITIES,
@@ -57,7 +61,6 @@ if TYPE_CHECKING:
     from printer_ops.bed import BedChild
     from printer_ops.devices import Device
 
-UNIT_NAME = "3d-printer-watch@.service"
 # printer-devices.yaml `<name>.watch:` keys and their CLI flags.
 # `vision` belongs to `3d printer vision` (issue #150), which shares the same sinks; watch ignores it.
 # `bed` starts the bed monitor child (printer_ops/bed.py, issue #303).
@@ -67,6 +70,9 @@ WATCH_KEYS = ("agent_fallback", "agent_ack_seconds", "tg_fallback", "message_coo
 DEFAULT_AGENT_ACK_S = 90.0
 DEFAULT_MESSAGE_COOLDOWN_MIN = 10.0
 MAINTAIN_EVERY_S = 300.0   # how often the watcher prunes dead subscriptions (Dispatcher.maintain)
+RETRY_FIRST_S = 2.0        # first wait before reconnecting; doubles up to RETRY_MAX_S
+RETRY_MAX_S = 30.0         # a powered-off printer is polled at most this far apart
+GOOD_SESSION_S = 120.0     # a session that ran this long resets the wait to RETRY_FIRST_S
 
 USAGE = """3d printer watch NAME... | --all [options]
   Subscribe to the printers' live state (read-only) and report anomalies as events:
@@ -76,6 +82,10 @@ USAGE = """3d printer watch NAME... | --all [options]
   while printing/paused, no progress while printing, homing lost while paused/printing,
   Klipper shutdown/disconnect, connection loss. The first reading is reported as a
   `snapshot` plus anything already wrong. Runs until stopped (or --duration).
+  A printer that is switched off is not an alarm: the watcher keeps polling it (every 2-30 s), says
+  so once (info; warning only if a job was running), and supervises it the moment it answers,
+  however a print was started (`print_started` event). The marker
+  ~/.local/state/3d-cli/NAME.intentional-off silences even that one event; the first answer clears it.
   Printers with `watch.bed.enabled: true` also get the camera bed monitor (`3d printer bed
   --help`): bed_clear / bed_occupied / plate_present / plate_missing (info) once the parts are
   taken off, put on, or the plate goes missing, and bed_unknown (warning) when the camera cannot
@@ -123,8 +133,7 @@ Options:
   --duration S             stop after S seconds (demo / smoke test)
   --dry-run                steer/exec/subscribers/agent/tg print what they would send (stderr);
                            refused in a service (stderr is the journal): a service never holds alerts
-  --install-service        write the user systemd unit for each NAME (other flags go to
-                           ~/.config/3d-cli/watch/NAME.env) and print the enable command
+  --install-service        gone: `3d printer supervise install` ships and installs the units
 
 Delivery: events arriving within 2 s are batched into one message; steer sends at most 6
 messages per 10 min (critical events always go through), tg at most one per incident. Severity:
@@ -143,7 +152,7 @@ Examples:
   3d printer watch u1 --duration 20
   3d printer watch u1 k1se --steer 01a12cd6
   3d printer watch --all --min-severity warning --exec 'logger -t printer'
-  3d printer watch u1 --install-service
+  3d printer supervise install --all --yes   # the always-on units (watch + vision) for every owned printer
   systemctl --user enable --now 3d-printer-watch@u1"""
 
 _VALUE = {"--exec", "--steer", "--min-severity", "--stall-min", "--heat-timeout-min", "--milestones",
@@ -336,6 +345,15 @@ class Heartbeat:
 
 # ---- streams --------------------------------------------------------------------------------
 
+@dataclass(frozen=True)
+class IntentionalOffMarker:
+    """The `NAME.intentional-off` marker as the stream uses it (printer_ops/intentional_off.py).
+    A seam: tests hand in recording callables instead of the state dir."""
+
+    is_set: Callable[[str], bool] = intentional_off.is_set
+    clear: Callable[[str], bool] = intentional_off.clear_marker
+
+
 class _Stream:
     """Reconnect loop around `session()` on its own daemon thread; subclasses implement one
     connected session. (Composition, not a Thread subclass: Thread's private attributes,
@@ -345,14 +363,20 @@ class _Stream:
     tick_s = 5.0
 
     def __init__(self, device: Device, submit: Callable[[Event], None], stop: threading.Event,
-                 heartbeat: Heartbeat, limits: WatchLimits) -> None:
+                 heartbeat: Heartbeat, limits: WatchLimits, *, marker: IntentionalOffMarker | None = None,
+                 wall: Callable[[], float] = time.time, mono: Callable[[], float] = time.monotonic) -> None:
         self.device = device
         self.submit = submit
-        self.stop = stop
+        self.stop = stop   # the wait between reconnect attempts is `stop.wait(...)`: tests inject a fake clock
         self.heartbeat = heartbeat
+        self.marker = marker or IntentionalOffMarker()
+        self._wall = wall
+        self._mono = mono
         self.detector: MoonrakerDetector | CrealityDetector = self._detector(limits)
         self._last_tick = 0.0
         self._last_rx = 0.0
+        self._unreachable_since: float | None = None
+        heartbeat.update(device.name, last_poll_ok=None, unreachable_since=None, job=None, quiet=False)
         self.thread = threading.Thread(target=self.run, name=f"watch-{device.name}", daemon=True)
 
     def start(self) -> None:
@@ -374,24 +398,29 @@ class _Stream:
         if frame is not None:
             self.heartbeat.update(self.device.name, state=frame.state, raw_state=frame.raw_state,
                                   file=frame.filename, progress=frame.progress)
+        self.heartbeat.update(self.device.name, job=self.detector.job_info())
 
     def received(self) -> None:
-        self._last_rx = time.monotonic()
-        self.heartbeat.update(self.device.name, last_rx=time.time())
+        self._last_rx = self._mono()
+        wall = self._wall()
+        self.heartbeat.update(self.device.name, last_rx=wall, last_poll_ok=wall)
 
     def idle_checks(self) -> None:
         """Called after every recv: periodic detector tick + silence watchdog."""
-        now = time.monotonic()
+        now = self._mono()
         if now - self._last_tick >= self.tick_s:
             self._last_tick = now
-            self.emit(self.detector.tick(time.time()))
+            self.emit(self.detector.tick(self._wall()))
         if now - self._last_rx > self.silence_s:
             raise WebSocketError(f"no data for {self.silence_s:.0f} s")
 
     def run(self) -> None:
-        backoff = 2.0
+        """Keep a session up. While the printer is unreachable (switched off between prints) it is
+        retried after 2, 4, 8, 16, then every 30 s; the outage is reported once (watch.py) unless the
+        printer's intentional-off marker is set, and the first answer clears that marker."""
+        backoff = RETRY_FIRST_S
         while not self.stop.is_set():
-            started = time.monotonic()
+            started = self._mono()
             try:
                 self.session()
                 reason = "closed"
@@ -402,17 +431,27 @@ class _Stream:
                 _log(f"{self.device.name}: {reason}")
             if self.stop.is_set():
                 break
-            self.heartbeat.update(self.device.name, connected=False, last_error=reason)
-            self.emit(self.detector.on_connection(False, reason, time.time()))
-            if time.monotonic() - started > 120:
-                backoff = 2.0  # it was a working session: retry quickly
+            now = self._wall()
+            if self._unreachable_since is None:
+                self._unreachable_since = now
+            quiet = self.marker.is_set(self.device.name)
+            self.heartbeat.update(self.device.name, connected=False, last_error=reason,
+                                  unreachable_since=self._unreachable_since, quiet=quiet)
+            self.emit(self.detector.on_connection(False, reason, now, quiet=quiet))
+            if self._mono() - started > GOOD_SESSION_S:
+                backoff = RETRY_FIRST_S  # it was a working session: retry quickly
             self.stop.wait(backoff)
-            backoff = min(backoff * 2, 60.0)
+            backoff = min(backoff * 2, RETRY_MAX_S)
 
     def _connected(self) -> None:
-        self._last_rx = self._last_tick = time.monotonic()
-        self.heartbeat.update(self.device.name, connected=True, last_error=None, last_rx=time.time())
-        self.emit(self.detector.on_connection(True, "", time.time()))
+        now = self._wall()
+        self._last_rx = self._last_tick = self._mono()
+        self._unreachable_since = None
+        self.heartbeat.update(self.device.name, connected=True, last_error=None, last_rx=now,
+                              unreachable_since=None, quiet=False)
+        self.emit(self.detector.on_connection(True, "", now))
+        if self.marker.clear(self.device.name):
+            _log(f"{self.device.name}: answered again, cleared the intentional-off marker")
 
 
 class MoonrakerStream(_Stream):
@@ -433,7 +472,7 @@ class MoonrakerStream(_Stream):
             info = self._call(ws, "server.info")
             klippy = str(info.get("klippy_state", "ready")) if isinstance(info, dict) else "ready"
             if klippy != "ready":  # subscribe once notify_klippy_ready arrives
-                self.emit(self.mr.on_klippy(klippy, time.time()))
+                self.emit(self.mr.on_klippy(klippy, self._wall()))
             self._need_sub = klippy == "ready"
             while not self.stop.is_set():
                 if self._need_sub:
@@ -456,8 +495,8 @@ class MoonrakerStream(_Stream):
         if params is not None:
             req["params"] = params
         ws.send_text(json.dumps(req))
-        deadline = time.monotonic() + self.rpc_timeout_s
-        while (left := deadline - time.monotonic()) > 0 and not self.stop.is_set():
+        deadline = self._mono() + self.rpc_timeout_s
+        while (left := deadline - self._mono()) > 0 and not self.stop.is_set():
             msg = ws.recv(min(left, 1.0))
             if msg is None:
                 continue
@@ -482,7 +521,7 @@ class MoonrakerStream(_Stream):
         if isinstance(status, dict):
             # The subscription is live now: pushes that arrive while a later call waits for its
             # reply are evaluated at once, so the full status goes in first.
-            self.emit(self.mr.on_status(status, time.time(), full=True))
+            self.emit(self.mr.on_status(status, self._wall(), full=True))
             self._fetch_file_body(ws, self.mr.wants_file_body())
 
     def _fetch_file_body(self, ws: WebSocket, filename: str | None) -> None:
@@ -490,7 +529,7 @@ class MoonrakerStream(_Stream):
         exclude a slicer header/footer (#255). Asked once per job; after an error it is asked
         again at most once a minute (whole-file progress meanwhile). Known bounds re-evaluate
         the current status, so held events see the body progress."""
-        now = time.monotonic()
+        now = self._mono()
         key = (filename or "", self.mr.jobs)  # a new job with the same file name asks at once
         if not filename or now < self._meta_retry_at.get(key, 0.0):
             return
@@ -504,7 +543,7 @@ class MoonrakerStream(_Stream):
             return  # a new job started while waiting (maybe a re-slice under the same name): ask again
         self.mr.set_file_body(filename, meta)
         if self.mr.file_body is not None and self.mr.file_body[1] is not None:
-            self.emit(self.mr.on_status({}, time.time()))
+            self.emit(self.mr.on_status({}, self._wall()))
 
     def _on_text(self, msg: str) -> None:
         try:
@@ -517,7 +556,7 @@ class MoonrakerStream(_Stream):
         if not isinstance(obj, dict):
             return
         method, params = obj.get("method"), obj.get("params") or []
-        now = time.time()
+        now = self._wall()
         d = self.mr
         if method == "notify_status_update" and params and isinstance(params[0], dict):
             self.emit(d.on_status(params[0], now))
@@ -566,7 +605,7 @@ class CrealityStream(_Stream):
                         except ValueError:
                             obj = None
                         if isinstance(obj, dict):
-                            self.emit(d.on_push(obj, time.time()))
+                            self.emit(d.on_push(obj, self._wall()))
                 self.idle_checks()
         finally:
             ws.close()
@@ -576,68 +615,6 @@ def stream_for(device: Device, submit: Callable[[Event], None], stop: threading.
                limits: WatchLimits) -> _Stream:
     cls = MoonrakerStream if device.adapter == "moonraker" else CrealityStream
     return cls(device, submit, stop, heartbeat, limits)
-
-
-# ---- systemd user service ------------------------------------------------------------------
-
-def unit_text(exe: str, env_dir: Path) -> str:
-    """The user unit template. `env_dir` and XDG_CONFIG_HOME are pinned to what the installing
-    shell used, so the service reads the same printer-devices.yaml and NAME.env."""
-    xdg = os.environ.get("XDG_CONFIG_HOME")
-    pin = f"Environment=XDG_CONFIG_HOME={xdg}\n" if xdg else ""
-    return f"""[Unit]
-Description=3d printer watch %i (printer anomaly events, read-only)
-Documentation=https://github.com/alex-mextner/3d-cli/blob/main/docs/commands/printer.md
-After=network-online.target
-
-[Service]
-Type=simple
-Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
-Environment=PYTHONUNBUFFERED=1
-{pin}EnvironmentFile=-{env_dir}/%i.env
-ExecStart={exe} printer watch %i $WATCH_ARGS
-Restart=always
-RestartSec=15
-
-[Install]
-WantedBy=default.target
-"""
-
-
-def install_service(names: list[str], forwarded: list[str]) -> int:
-    from cli.paths import config_dir
-    from printer_ops.devices import get_device
-
-    for flag in ("--duration", "--dry-run", "--heartbeat"):
-        if flag in forwarded:
-            raise UsageError(f"{flag} makes no sense in a service (restart loop / silent sinks / shared heartbeat)",
-                             command="printer", remediation=[f"Drop {flag} from the --install-service call."])
-    for a in forwarded:
-        if not a or any(c.isspace() for c in a) or "$" in a:
-            raise InvalidArgument("--install-service flag", a, ["values without spaces or $"], command="printer",
-                                  extra="Put commands with spaces in printer-devices.yaml: <name>.watch.exec.")
-    devices = [get_device(n) for n in names]
-    exe = shutil.which("3d") or str(Path(sys.argv[0]).resolve())
-    unit_dir = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "systemd" / "user"
-    unit_dir.mkdir(parents=True, exist_ok=True)
-    unit = unit_dir / UNIT_NAME
-    env_dir = config_dir() / "watch"
-    env_dir.mkdir(parents=True, exist_ok=True)
-    unit.write_text(unit_text(exe, env_dir), encoding="utf-8")
-    print(f"wrote {unit}")
-    for d in devices:
-        env = env_dir / f"{d.name}.env"
-        env.write_text(f"# flags for `3d printer watch {d.name}` (3d-printer-watch@{d.name}.service)\n"
-                       f"WATCH_ARGS={' '.join(forwarded)}\n", encoding="utf-8")
-        print(f"wrote {env}: WATCH_ARGS={' '.join(forwarded)}")
-    if shutil.which("systemctl"):
-        r = subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True, text=True, timeout=30)
-        print("systemctl --user daemon-reload: " + ("ok" if r.returncode == 0 else (r.stderr or "").strip()))
-    print("Start (and enable at login):")
-    for d in devices:
-        print(f"  systemctl --user enable --now 3d-printer-watch@{d.name}")
-    print("Follow: journalctl --user -fu '3d-printer-watch@*'")
-    return 0
 
 
 # ---- entry ----------------------------------------------------------------------------------
@@ -678,7 +655,13 @@ def run(argv: list[str]) -> int:
         if not names:
             get_device("-")  # raises the "no printers configured" guidance
     if opts.get("--install-service"):
-        return install_service(names, opts["tokens"])
+        raise UsageError(
+            "`--install-service` is gone: the watch and vision units are shipped from the repo and installed for "
+            "every owned printer by one command (a second writer of 3d-printer-watch@.service would undo it)",
+            command="printer",
+            remediation=["3d printer supervise install --all --plan   # what it would do",
+                         "3d printer supervise install --all --yes    # templates, enable --now, linger",
+                         "docs/commands/printer.md#always-on-supervision"])
     devices = [get_device(n) for n in names]
     settings = {d.name: settings_for(d, opts) for d in devices}
     from printer_ops.bed import bed_config
@@ -734,4 +717,4 @@ def run(argv: list[str]) -> int:
     return 0
 
 
-__all__ = ["USAGE", "WATCH_KEYS", "Heartbeat", "install_service", "parse_args", "run", "settings_for", "unit_text"]
+__all__ = ["USAGE", "WATCH_KEYS", "Heartbeat", "parse_args", "run", "settings_for"]

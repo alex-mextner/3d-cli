@@ -50,6 +50,11 @@ GRAB_RETRIES = (
 TAIL_BYTES = (
     64 * 1024
 )  # first klippy.log read: the last 64 KiB (a few minutes of verdicts)
+# A printer that did not answer for this long (a power cycle takes longer; a network blip or one
+# slow poll does not) may have started another print of the SAME file; see `VisionMonitor.set_job`.
+LOST_CONTACT_S = 90.0
+# Progress (0..1) falling by more than this between two sightings of the same file is a new print.
+PROGRESS_REGRESSION = 0.02
 
 
 @dataclass
@@ -646,6 +651,8 @@ class VisionMonitor:
     # The raw stage-1 trend, kept only to report what the verifier vetoed (info events).
     raw_tracker: FailureTracker = field(default_factory=FailureTracker)
     job: tuple[str, str | None] | None = None  # (state, filename) last seen
+    progress: float | None = None  # 0..1 of the job last seen printing or paused
+    lost_since: float | None = None  # first failed status poll of the current outage
     last_change: float | None = None  # when the frame last changed
     last_digest: int | None = None
     last_npu: NpuVerdict | None = (
@@ -658,17 +665,52 @@ class VisionMonitor:
     _npu: _Edge = field(default_factory=_Edge)
     _findings: dict[str, _Edge] = field(default_factory=dict)  # per Finding.kind
 
-    def set_job(self, state: str, filename: str | None) -> bool:
-        """A new print (another file, or printing again after a stop) starts a fresh per-print
-        history; pause/resume of the same file keeps it. -> True when a new print started, so
-        the caller can reset its own per-print state (the scorer's bed-change references)."""
-        prev = self.job
+    def lost_contact(self, now: float) -> None:
+        """The printer did not answer a status poll. Only the FIRST failure of an outage counts: the
+        next `set_job` measures how long the printer was gone. Trackers and the last job stay as
+        they are, so a blip changes nothing."""
+        if self.lost_since is None:
+            self.lost_since = now
+
+    def set_job(
+        self,
+        state: str,
+        filename: str | None,
+        progress: float | None = None,
+        now: float | None = None,
+    ) -> bool:
+        """A new print starts a fresh per-print history; pause/resume of the same file keeps it.
+        -> True when a new print started, so the caller can reset its own per-print state (the
+        scorer's bed-change references).
+
+        A print is new when the state turns PRINTING and: there was no job, or another file, or the
+        last state seen was not printing/paused (the same file printed again); or, after the printer
+        was out of reach for LOST_CONTACT_S or longer (`lost_contact`), the same file shows a
+        progress lower than before by more than PROGRESS_REGRESSION (switched off during a job,
+        started over after boot). A shorter gap with the same job is a blip and keeps everything."""
+        now = time.time() if now is None else now
+        prev, prev_progress = self.job, self.progress
+        gap = 0.0 if self.lost_since is None else now - self.lost_since
+        self.lost_since = None
         started = state == PRINTING and (
             prev is None or prev[1] != filename or prev[0] not in (PRINTING, PAUSED)
         )
+        if (
+            state == PRINTING
+            and not started
+            and gap >= LOST_CONTACT_S
+            and progress is not None
+            and prev_progress is not None
+            and progress < prev_progress - PROGRESS_REGRESSION
+        ):
+            started = True
         if started:
             self.tracker.reset_print()
             self.raw_tracker.reset_print()
+        if state not in (PRINTING, PAUSED):
+            self.progress = None
+        elif progress is not None or started:
+            self.progress = progress
         self.job = (state, filename)
         return started
 

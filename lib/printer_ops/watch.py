@@ -14,8 +14,20 @@ WHY: a paused or failed print (U1 noodle detection pause, a macro error that can
 
 EVENTS are edge-triggered: a condition fires once when it appears and re-arms when it
   clears; state transitions carry a counter in their key so a second pause in the same job
-  is a new event. Kinds: snapshot, state, exception, gcode_error, gcode_warning, filament,
-  temperature, bed_off, stall, homing_lost, klippy, connection, milestone.
+  is a new event. Kinds: snapshot, state, print_started, exception, gcode_error, gcode_warning,
+  filament, temperature, bed_off, stall, homing_lost, klippy, connection, milestone.
+
+PRINT START (#641): `print_started` (info) fires on every transition into PRINTING from a non-job
+  state, whoever started the job (our CLI, Fluidd/Mainsail, the touchscreen, a slicer upload, Home
+  Assistant, a macro): a detector only sees state edges. A job already running when the watcher
+  starts is announced once with `adopted: true`; so is a NEW job found on the first frame after the
+  printer was unreachable for POWER_CYCLE_GAP_S or longer (other file, progress went backwards, or
+  the state before the outage was not a job); a same-job reconnect says nothing.
+
+CONNECTION (#640): one `connection` event per outage. A printer that is simply off is not an alarm:
+  INFO (`waiting for the printer`), WARNING only when a job was running when the link dropped, no
+  event at all while the intentional-off marker is set. The first answer after an outage is one
+  INFO event.
 
 SNAPSHOT: the first status after start is reported as an info `snapshot` plus events for
   anomalies already present (a paused job, an exception, a lost homing, a cold bed while
@@ -46,6 +58,15 @@ INFO, WARNING, CRITICAL = "info", "warning", "critical"
 SEVERITIES = (INFO, WARNING, CRITICAL)
 
 JOB_ACTIVE = frozenset({PRINTING, PAUSED})
+
+# A link down for at least this long is a printer power cycle (boot + Klipper start take about a
+# minute), not a websocket blip: the first frame after it may be a different job.
+POWER_CYCLE_GAP_S = 60.0
+# Progress going back by more than this versus the last frame before the outage is a new job.
+PROGRESS_REGRESSION = 0.02
+
+# Headline of a job the watcher did not see start (found at watcher start, or after an outage).
+ADOPTED_HEADLINE = "printing (adopted: the watcher was not running at its start)"
 
 
 def severity_rank(severity: str) -> int:
@@ -185,6 +206,15 @@ class _Detector:
         self._job_state: str | None = None  # last printing/paused/idle/... state (never unknown/busy)
         self._held: dict[str, _Held] = {}  # kind -> event awaiting confirmation
         self._job_started: float | None = None  # when this watcher saw the job start printing
+        self._adopted = False  # the running job began before this watcher could see it
+        # Power-cycle bookkeeping (#640): `_down_since` starts an outage and survives reconnects that
+        # deliver no data, `_reconnect_gap` is the outage length handed to the first real frame after
+        # it, `_last_real` is the last frame with a real (not unknown/busy) state.
+        self._down_since: float | None = None
+        self._data_since_up = False
+        self._reconnect_gap: float | None = None
+        self._up_announced = False  # the outage's "answered again" event went out and no data followed yet
+        self._last_real: Frame | None = None
 
     # ---- helpers ------------------------------------------------------------------------
     def _context(self, f: Frame | None = None) -> dict[str, Any]:
@@ -238,6 +268,7 @@ class _Detector:
     # ---- the generic rules --------------------------------------------------------------
     def _evaluate(self, f: Frame, now: float) -> list[Event]:
         prev, self.frame = self.frame, f  # events describe the new frame
+        self._data_since_up, self._up_announced = True, False
         out: list[Event] = []
         if prev is None:
             out.append(self._snapshot_event(f, now))
@@ -246,6 +277,8 @@ class _Detector:
         out += self._heater_rules(prev, f, now)
         out += self._progress_rules(prev, f, now)
         out += self._release_held(now)
+        if f.state not in (UNKNOWN, BUSY):
+            self._last_real = f
         return out
 
     def _at_end(self, f: Frame) -> bool:
@@ -300,6 +333,11 @@ class _Detector:
         if f.state in (UNKNOWN, BUSY):
             return []  # klippy/connection events explain these; keep the last real job state
         before = self._job_state
+        gap, self._reconnect_gap = self._reconnect_gap, None
+        if gap is not None and gap >= POWER_CYCLE_GAP_S:
+            self._heaters.clear()  # a power-cycled printer's heater history is void (cold, targets reset)
+            if f.state == PRINTING and before is not None and self._new_job_after_outage(f, before):
+                return [self._restart_job(before, f, now)]
         if f.state == before:
             return []
         self._job_state = f.state
@@ -307,6 +345,10 @@ class _Detector:
         why = f" (last error: {reason})" if reason else ""
         if before is None:
             # Watch start: only a job that is stuck right now is news; the snapshot covers the rest.
+            if f.state in JOB_ACTIVE:
+                self._adopted = True
+            if f.state == PRINTING:
+                return [self._print_started(None, f, now, ADOPTED_HEADLINE, job_started=None, adopted=True)]
             if f.state == PAUSED:
                 return [self._state_event(None, f, WARNING, "is PAUSED" + why,
                                           "check the camera, then resume or cancel", now)]
@@ -319,8 +361,10 @@ class _Detector:
             self._milestones_done.clear()
             self._reason = None
             self._job_started = now
-            return [self._state_event(before, f, INFO, "started printing", "", now)]
+            self._adopted = False
+            return [self._print_started(before, f, now, "started printing", job_started=now, adopted=False)]
         if f.state == PAUSED:
+            self._adopted = False
             return [self._state_event(before, f, WARNING, "PAUSED" + why, "check the camera, then resume or cancel", now)]
         if f.state == ERROR:
             return [self._state_event(before, f, CRITICAL, "ERROR" + why, "the job stopped; inspect before reprinting", now)]
@@ -334,12 +378,62 @@ class _Detector:
                                       "", now)]
         return []
 
+    def _new_job_after_outage(self, f: Frame, before: str) -> bool:
+        """The first real frame after a power-cycle-long outage is PRINTING: is it another job than
+        the one the last frame before the outage showed? A job that was not running then, another file
+        name, or progress that went back by more than PROGRESS_REGRESSION all say yes; the same job
+        (progress equal or further on) says no."""
+        last = self._last_real
+        if before not in JOB_ACTIVE or last is None:
+            return True
+        if f.filename and last.filename and f.filename != last.filename:
+            return True
+        return (f.progress is not None and last.progress is not None
+                and f.progress < last.progress - PROGRESS_REGRESSION)
+
+    def _restart_job(self, before: str, f: Frame, now: float) -> Event:
+        """A new job found after an outage: per-job state restarts. The watcher never saw the edge
+        (`adopted`), but the job is certainly newer than the outage, so the start phase counts from now."""
+        self._job_state = PRINTING
+        self._milestones_done.clear()
+        self._reason = None
+        self._held.clear()
+        self._stall_since, self._stall_alerted = None, False
+        self._job_started = now
+        self._adopted = True
+        if before in JOB_ACTIVE:
+            self._new_job_started()
+        return self._print_started(before, f, now, ADOPTED_HEADLINE, job_started=now, adopted=True)
+
+    def _new_job_started(self) -> None:
+        """A job replaced the previous one without an idle frame in between (firmware-specific caches)."""
+
+    def job_info(self) -> dict[str, Any] | None:
+        """The running job for the heartbeat: `{"file", "started", "adopted"}` while printing/paused,
+        else None. `started` is None for a job that began before this watcher could see it; `file`
+        is whatever the latest frame carries (a name that arrives a push late shows up here)."""
+        if self._job_state not in JOB_ACTIVE:
+            return None
+        return {"file": self.frame.filename if self.frame is not None else None,
+                "started": self._job_started, "adopted": self._adopted}
+
     def _state_event(self, before: str | None, f: Frame, severity: str, headline: str, hint: str,
                      now: float) -> Event:
         self._transitions += 1
         return self._event("state", severity, headline, hint=hint, now=now,
                            key=f"{self.printer}:state:{before}->{f.state}:{self._transitions}",
                            data={"from": before, "to": f.state, "reason": self._recent_reason(now, f)})
+
+    def _print_started(self, before: str | None, f: Frame, now: float, headline: str, *,
+                       job_started: float | None, adopted: bool) -> Event:
+        """`print_started`: one per job. The key carries the file and the job start (never the file
+        alone: a reprint of the same file is a new print) plus the transition counter."""
+        self._transitions += 1
+        stamp = "adopted" if job_started is None else f"{job_started:.0f}"
+        return self._event("print_started", INFO, headline, now=now,
+                           key=f"{self.printer}:print_started:{f.filename or '-'}:{stamp}:{self._transitions}",
+                           data={"from": before, "to": f.state, "reason": self._recent_reason(now, f),
+                                 "job_started": job_started, "adopted": adopted})
 
     def _homing_rules(self, prev: Frame | None, f: Frame, now: float) -> list[Event]:
         if f.state not in JOB_ACTIVE:
@@ -458,21 +552,34 @@ class _Detector:
             return []
         return self._heater_rules(self.frame, self.frame, now) + self._stall_check(now) + self._release_held(now)
 
-    def on_connection(self, up: bool, reason: str, now: float) -> list[Event]:
+    def on_connection(self, up: bool, reason: str, now: float, *, quiet: bool = False) -> list[Event]:
+        """The link to the printer came up or went down. One event per outage: a printer that is off is
+        not an alarm (INFO, WARNING only when a job was running when the link dropped), and `quiet`
+        (the intentional-off marker is set) emits no down event at all; the first answer afterwards is
+        one INFO event either way."""
         was = self.connected
         self.connected = up
         if up:
             if was is False:
+                self._reconnect_gap = now - self._down_since if self._down_since is not None else None
+                self._data_since_up = False
+                if self._up_announced:
+                    return []  # a session that died before any data: the outage goes on, already told
+                self._up_announced = True
                 head = "reconnected" if self.frame is not None else "connected (was unreachable at start)"
                 return [self._event("connection", INFO, head, now=now, key=f"{self.printer}:connection:up:{now:.0f}")]
             return []
         if was is False:
             return []  # still down: reported once
-        active = self.frame is not None and self.frame.state in JOB_ACTIVE
-        sev = WARNING if active or was is None else INFO
-        head = "cannot connect" if was is None else "connection lost"
+        silent = was is True and not self._data_since_up and self._down_since is not None
+        if not silent:
+            self._down_since = now  # (a session that delivered nothing continues the outage before it)
+        if silent or quiet:
+            return []
+        active = self._job_state in JOB_ACTIVE
+        head = "waiting for the printer" if was is None else "connection lost"
         hint = "a job was running: check the printer" if active else ""
-        return [self._event("connection", sev, f"{head}: {reason}", hint=hint, now=now,
+        return [self._event("connection", WARNING if active else INFO, f"{head}: {reason}", hint=hint, now=now,
                             key=f"{self.printer}:connection:down:{now:.0f}")]
 
 
@@ -537,6 +644,12 @@ class MoonrakerDetector(_Detector):
         # job starts, since a re-sliced file may be uploaded under the same name.
         self.file_body: tuple[str, tuple[int, int] | None] | None = None
         self.jobs = 0  # jobs seen starting; keys per-job state such as the stream's metadata retry
+
+    def _new_job_started(self) -> None:
+        """Another job replaced the running one (a power cycle in between): its file may be a
+        re-slice under the same name, so the body bounds are asked again."""
+        self.file_body = None
+        self.jobs += 1
 
     def wants_file_body(self) -> str | None:
         """The current job's file whose body bounds are not known yet (the stream fetches them

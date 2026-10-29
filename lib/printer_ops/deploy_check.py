@@ -67,7 +67,8 @@ def systemctl_show(unit: str) -> str:
     if shutil.which("systemctl") is None:
         return ""
     r = subprocess.run(
-        ["systemctl", "--user", "show", unit, "-p", "LoadState", "-p", "ActiveState",
+        ["systemctl", "--user", "show", unit, "-p", "LoadState", "-p", "ActiveState", "-p", "SubState",
+         "-p", "UnitFileState", "-p", "NRestarts", "-p", "ActiveEnterTimestamp",
          "-p", "ExecStart", "-p", "EnvironmentFiles"],
         capture_output=True, text=True, timeout=15, check=False,
     )

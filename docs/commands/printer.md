@@ -23,6 +23,10 @@ Epic: [#90](https://github.com/alex-mextner/3d-cli/issues/90).
 3d printer guard NAME --job-id ID --yes [--interval S] [--evidence DIR]
 3d printer guard NAME --job-id ID --dry-run
 3d printer watch NAME... | --all [--steer SESSION] [--exec CMD] [--min-severity LEVEL] ...
+3d printer supervise status [NAME...|--all] [--json] [--no-live] [--unit-dir DIR]
+3d printer supervise install [NAME...|--all] [--yes] [--plan] [--repo DIR] [--unit-dir DIR]
+3d printer supervise uninstall [NAME...|--all] [--yes] [--unit-dir DIR]
+3d printer supervise quiet NAME [--reason TEXT] | --clear
 3d printer vision NAME [--interval S] [--once] [--dry-run] [--scene] [--no-detach] ...  |  vision eval ...  |  vision record NAME DIR [--timeout S]  |  vision fetch-model
 3d printer bed status NAME [--json] [--max-age S] [--best-view | --no-move] [--part-height MM]  |  bed reference NAME [--capture [--no-plate]]  |  bed monitor NAME
 3d printer subscribe --session ID [--printer P,P] [--kinds K,K] [--min-severity LEVEL] ...
@@ -47,6 +51,7 @@ Epic: [#90](https://github.com/alex-mextner/3d-cli/issues/90).
 | `evidence NAME --out DIR` | After EVERY print (done, cancelled, failed): save the Moonraker history job and the klippy.log lines around its pauses and errors as `DIR/<date>-<outcome>.md` + `.json`, with the layer of each stop when `--gcode` is given; GET only. See [printer-evidence.md](printer-evidence.md). |
 | `guard NAME --job-id ID --yes` | Authorize one automatic native PAUSE of this exact live Moonraker job on confirmed camera failure; [policy and readiness](printer-vision.md#one-job-automatic-pause). |
 | `watch NAME...` | Stay subscribed (read-only) and report anomalies as events — see [Watching printers](#watching-printers). |
+| `supervise status\|install\|uninstall\|quiet` | The ALWAYS-ON supervision: one watch + one vision systemd user unit per owned printer from the fleet registry, running without a login, waiting for a switched-off printer, catching every print start; `status` FAILs when a printing/answering printer is unsupervised — see [Always-on supervision](#always-on-supervision). |
 | `vision NAME` | Watch the camera for failed prints (spaghetti, stale/dark camera, the U1's own NPU verdicts) — see [Camera failure detection](#camera-failure-detection). |
 | `bed status` / `reference` / `monitor` | Is the bed clear, is the build plate on — from the camera against an empty-bed reference; also the `bed` start gate and the `bed_clear` event — see [Bed state](#bed-state). |
 | `subscribe` / `unsubscribe` / `subscriptions` | Route printer alerts to an AI agent first: it looks at the frame and tells the user only if the failure is real — see [printer-subscribe.md](printer-subscribe.md). |
@@ -101,6 +106,9 @@ RIG_HATCH_REQUEST_3D_PRINTER_START_FORCE="roof overhang FAIL: stale map, issue #
 3d printer watch u1 --duration 20
 3d printer watch u1 k1se --steer 01a12cd6
 3d printer subscribe --session 01a12cd6 --printer u1,k1se
+3d printer supervise install --all --plan      # what the always-on units would do; then --yes
+3d printer supervise status                    # exit 1 when a printing/answering printer is unsupervised
+3d printer supervise quiet k1se --reason "off for the week"
 3d printer subscribe --session 01a12cd6 --printer u1 --kinds 'vision_*,printer_noodle_verdict'
 3d printer subscriptions
 3d printer agent list
@@ -369,7 +377,8 @@ progress is used.
 | Event `kind` | Severity | When |
 |---|---|---|
 | `snapshot` | info | First reading after start: state, file, progress, heated heaters. |
-| `state` | info / warning / critical | Started, resumed, complete (info); paused, cancelled, job ended without completing (warning); error (critical). Found paused/in error at start: reported too. Pause/cancel/error text carries the last error seen in the 5 min before. |
+| `print_started` | info | The printer went from standby/complete/cancelled/error to `printing` — whoever started it (CLI, Fluidd/Mainsail, touchscreen, slicer upload, Home Assistant, macro) and also after a power cycle; `data.job_started`, `data.adopted`. A job already printing when the watcher starts or reconnects is announced once with `adopted: true`. |
+| `state` | info / warning / critical | Resumed, complete (info); paused, cancelled, job ended without completing (warning); error (critical). Found paused/in error at start: reported too. Pause/cancel/error text carries the last error seen in the 5 min before. |
 | `exception` | critical (warning for level ≤ 1) | U1 `print_stats.exception` / `exception_manager` (e.g. code 2 "detected noodle" from defect detection, id 532); K1 `err.errcode`. |
 | `gcode_error` | critical while a job is active, else warning | A G-code response starting with `!!` — e.g. `!! Error evaluating 'gcode_macro INNER_PREEXTRUDE_FILAMENT:gcode'`. |
 | `gcode_warning` | warning | `// Warning…` / `Warning:` responses. |
@@ -379,7 +388,7 @@ progress is used.
 | `temperature` | warning (critical when drifting while printing) | A heater target not reached after `--heat-timeout-min`; or, after reaching, more than 15 °C off for 60 s. |
 | `stall` | warning (info when it moves again) | Printing, but file position/progress/layer unchanged for `--stall-min`. |
 | `klippy` | critical (shutdown/error, or any loss during a job) / info (ready again) | Klipper shutdown, error, disconnect. |
-| `connection` | warning / info | Cannot connect, connection lost (once; reconnects with 2–60 s backoff), reconnected. |
+| `connection` | info / warning | The printer is unreachable (once per outage; reconnects every 2–30 s, silent): info, warning only when a job was printing or paused when the link dropped; silent with the `NAME.intentional-off` marker; one info line when it is back (which clears the marker). |
 | `milestone` | info | Progress passed a `--milestones` percentage. |
 
 End macros (`END_PRINT`, `PRINT_END`, `CANCEL_PRINT`) switch the bed off and disable the
@@ -474,21 +483,135 @@ u1:
 
 Heartbeat: `~/.local/state/3d-cli/watch/<names>.json` (`--heartbeat` overrides), rewritten
 every 15 s with each printer's connection, state, last-message age, last event and the
-per-sink delivered/failed/suppressed counters.
+per-sink delivered/failed/suppressed counters. Per printer it also has `last_poll_ok` (epoch of the last data
+from the printer), `unreachable_since` (epoch while no session is up), `job` (`{file, started, adopted}` while a
+job prints or is paused) and `quiet` (unreachable with its intentional-off marker set); `supervise status`
+and the doctor read them ([Liveness](#liveness)).
 
-As a user service:
+As a user service use the shipped units — `3d printer supervise install --all --yes`, then
+`3d printer subscribe --session 01a12cd6 --printer u1,k1se` and `journalctl --user -fu '3d-printer-watch@*'`
+([Always-on supervision](#always-on-supervision)). `--install-service` is gone (it wrote the same
+`3d-printer-watch@.service` with another definition); units it installed earlier, with `$WATCH_ARGS` in an
+`EnvironmentFile`, still run, and `supervise install --yes` replaces the template (a `.bak` copy stays).
+Flags with spaces (an `--exec` command) belong in `printer-devices.yaml` `<name>.watch`.
+
+## Always-on supervision
+
+`3d printer supervise status|install|uninstall|quiet` ([#639](https://github.com/alex-mextner/3d-cli/issues/639),
+[#640](https://github.com/alex-mextner/3d-cli/issues/640), [#641](https://github.com/alex-mextner/3d-cli/issues/641),
+[#642](https://github.com/alex-mextner/3d-cli/issues/642), [#643](https://github.com/alex-mextner/3d-cli/issues/643))
+installs, checks and repairs the AI supervision of the owned printers.
+
+### Requirement (the owner, 2026-10-24)
+
+> AI control of printers must ALWAYS work while a print runs. It must also work when the printer is powered off
+> between prints, and it must catch the start of a print however it was started — with Home Assistant and without it.
+
+That sentence is the test of every change to `watch`, `vision`, the alert chain and these units. "However it was
+started" means our CLI, Fluidd/Mainsail, the printer's touchscreen, an Orca/Creality Print upload, Home Assistant or a
+G-code macro: the watcher sees only the printer's own state edge, never who caused it.
+
+### What runs always
+
+| Process | What it does | Needs | Never needs |
+|---|---|---|---|
+| `3d-printer-watch@NAME` (systemd user unit) | websocket to the printer (Moonraker, creality-stock ws:9999): errors, pauses, progress, `print_started`; waits for a printer that is off (retries every ≤ 30 s, silent) | the printer's own API | Home Assistant, an omp session, a login |
+| `3d-printer-vision@NAME` (only with a camera) | polls the printer's state, fetches camera frames only while it prints, resets the per-print baselines at every print start, finds spaghetti / a detached part | the printer's own camera URL (`watch.vision.camera`) | Home Assistant, go2rtc, an omp session |
+| the alert chain, inside both | live omp subscriber → temporary omp agent → `tg` → autonomous pause (`watch.pause_without_agent`: once per job, only PAUSE, never resume or cancel) | `tg`; `tmux`+`omp` for the agent | Home Assistant |
+| `loginctl enable-linger` | the units start at boot and survive logout | — | — |
+
+The units are generated from `fleet/printers.yaml`: every printer with `owner: own`, `access: full` and an adapter with
+a watch stream (`moonraker`, `creality-stock`) gets a watch unit, and a vision unit when `watch.vision.camera` (or its
+model's default) exists. They carry no `--dry-run` (a service holding its alerts is the 2026-10-22 incident), have
+`Restart=always` with `StartLimitIntervalSec=0` (a crash loop never gives up), `After=network-online.target
+hsw-observer-agent.service` (ordering only — no `Wants=`, so nothing depends on that session; a drop-in with
+`Wants=hsw-observer-agent.service` keeps working) and `WantedBy=default.target`.
 
 ```bash
-3d printer watch u1 k1se --install-service
-3d printer subscribe --session 01a12cd6 --printer u1,k1se
-systemctl --user enable --now 3d-printer-watch@u1 3d-printer-watch@k1se
-journalctl --user -fu '3d-printer-watch@*'
+3d printer supervise install --all --plan   # what it would do, changes nothing
+3d printer supervise install --all --yes    # templates, daemon-reload, enable --now, enable-linger
+3d printer supervise status                 # exit 1 (FAIL) when a printing/answering printer is unsupervised
+3d printer supervise status u1 --json
+3d printer supervise uninstall k1se --yes
+3d printers doctor --check printer-supervision [--fix --yes]
 ```
 
-`--install-service` writes `~/.config/systemd/user/3d-printer-watch@.service`
-(`ExecStart=3d printer watch %i $WATCH_ARGS`, `Restart=always`) and
-`~/.config/3d-cli/watch/NAME.env` with the other flags, then runs `systemctl --user daemon-reload`.
-Flags with spaces (an `--exec` command) belong in `printer-devices.yaml` instead.
+`install` never touches a file you made without `--yes`: a hand-made `3d-printer-watch@.service` (for example the
+`--dry-run` one), and a `ConditionPathExists=!…intentional-off` drop-in, are listed as `[needs --yes]`, nothing at all
+is changed, and with `--yes` the old file is kept next to the new one as `….bak-<time>` / `….conf.retired-<time>`.
+Other drop-ins (`live.conf`, `live-observer.conf`, anything with `After=`/`Wants=`) are left alone and shown. A running
+unit is restarted by `install` only when its running definition still carries `--dry-run`; otherwise restart it
+yourself when the printer is idle (`systemctl --user restart 3d-printer-watch@NAME`). Run `install` from the main
+checkout: the units run from the checkout it is started in (it warns when that is a worktree; `--repo DIR` overrides).
+
+### The printer is switched off between prints
+
+An unreachable printer is the normal state, not an incident. The watcher and the vision loop poll it at most every
+30 s (2 s, 4 s, … capped at 30 s), log one line when it goes away and one when it is back, raise **no** alert for a
+printer that was idle (a `connection` warning only when a job was active when the link dropped), and supervise it
+the moment it answers. A print that starts after a power cycle is a new print even when it is the same file name
+(see below).
+
+**The `NAME.intentional-off` marker** (`~/.local/state/3d-cli/NAME.intentional-off`) means exactly one thing: *silence
+the "printer unreachable" events while it is unreachable*. It is **not** a gate: no unit is conditioned on it, the
+units are always up. The first successful answer from the printer clears it, so "switched off once" never outlives a
+power cycle. Before [#640](https://github.com/alex-mextner/3d-cli/issues/640) the owner's hand-made
+`intentional-off.conf` drop-ins (`ConditionPathExists=!<marker>`) kept both units stopped while the file existed, so a
+printer switched on again and printed from its touchscreen was unwatched.
+
+| | Where |
+|---|---|
+| Writers | `3d printer supervise quiet NAME [--reason TEXT]` (`printer_ops/intentional_off.py`); by hand: `echo '{}' > ~/.local/state/3d-cli/NAME.intentional-off` |
+| Readers | `watch_run.py` (silences the unreachable event, clears the marker on the first answer), `vision_cycle.py` (the same for its log lines), `supervise status` (shows it) |
+| Clear | the first answer of the printer; `3d printer supervise quiet NAME --clear` |
+| Retired | the systemd `ConditionPathExists` gate; `supervise install --yes` retires such a drop-in, `status`/doctor warn about it |
+
+### A print starts, whoever started it
+
+The watcher emits a `print_started` event on every transition to `printing` from a non-job state (standby, complete,
+cancelled, error), from the Moonraker websocket and the creality-stock `ws:9999` path alike. A job that is already
+printing when the watcher starts, or when it reconnects after an outage, is announced once as `print_started` with
+`adopted: true`. The vision loop polls the state itself, so it needs no start event: it resets the tracker and the
+detached-part baseline when the state turns `printing`, also after a power cycle with the same file name (a gap ≥ 90 s
+in which the printer did not answer, followed by a file that changed, a progress that went back by more than 2 %, or a
+state that was not a job in between). The automatic pause binds the job from the printer's own history, once per job
+(`<state>/guard/NAME-JOBID.json`), so it covers every job without a per-job `printer guard`. Nothing in
+`watch`, `vision` or the pause reads state that `3d printer start` writes.
+
+### Liveness
+
+Each unit writes a heartbeat: `watch/NAME.json` every 15 s (`last_poll_ok`, `unreachable_since`, `job`, `quiet` per
+printer) and `vision/NAME.json` every cycle (`ts`, `last_poll_ok`, `reachable`, `last_frame_ts`, `supervising`, `job`).
+`supervise status` and the doctor check `printer-supervision` FAIL when a printer that **answers** (printing or idle)
+has a missing/stopped unit, a heartbeat older than 75 s (watch) or max(90 s, 4 cycles) (vision), a watcher that is
+disconnected for over 2 min from a printer that answers us, no camera frame for 3 min while a print is supervised,
+two watchers for one printer, a `--dry-run` unit, or linger off. The same gaps on a printer that does not answer are
+warnings: nothing is being missed, but the next print would be.
+
+If a supervisor dies while a print runs the user gets **one** short `tg` line and systemd restarts it
+(`Restart=always`). The units run `3d printer supervise notify-failure NAME KIND` as `ExecStopPost=`: systemd never
+puts a `Restart=always` unit into the `failed` state, so `OnFailure=` would never fire, while `ExecStopPost=` runs after
+every exit. The hook is silent for a clean stop (`SERVICE_RESULT=success`, `systemctl restart`), silent when the
+heartbeat says no job was running, and sends one line per unit per 30 min through the delivery ledger (a crash loop
+does not repeat it; a refused `tg` frees the slot). A *hung* process that is alive but stopped writing is not restarted
+by systemd; it is what the stale-heartbeat FAIL is for.
+
+### Migrating the hand-made units (2026-10-24)
+
+On the owner's workstation the templates ended in `--dry-run` and live behaviour came from drop-ins
+(`3d-printer-*@u1.service.d/live-observer.conf`, `…@k1se.service.d/live.conf` + `live-observer.conf`) plus
+`intentional-off.conf` on `k1se`. The migration is `install --all --plan`, then `install --all --yes`: the templates are
+replaced (copies kept), the `intentional-off.conf` gates retired, the `live*.conf` drop-ins stay (they set the same
+`ExecStart` and the `After=`/`Wants=hsw-observer-agent.service` ordering). The `k1se` marker file itself is left
+where it is: it now only silences its unreachable alarms and is removed when the K1 answers.
+
+### Home Assistant
+
+Nothing above reads Home Assistant, go2rtc or an ingress URL: the camera snapshot comes from the printer
+(`/server/files/camera/monitor.jpg` on its Moonraker origin, or its own mjpg-streamer), the state from its own API.
+`tests/test_printer_supervision_ha_free.py` fails when a module of the supervision path imports or names Home
+Assistant, and checks that every fleet camera is read from the printer's host. HA stays an optional consumer of the
+`vision/NAME.json` status file ([Status for Home Assistant](printer-vision.md#status-for-home-assistant)).
 
 ## Camera failure detection
 

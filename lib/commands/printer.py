@@ -65,6 +65,12 @@ USAGE = """3d printer [-n NAME] <subcommand> [args]
   watch NAME...|--all [options]        live read-only subscription: anomaly events to
                                        stdout JSONL / --exec / --steer SESSION / subscribers
                                        (see `3d printer watch --help`)
+  supervise status|install|uninstall|quiet [NAME...|--all]
+                                       the ALWAYS-ON supervision: one watch + one vision systemd user unit per
+                                       owned printer from the fleet registry, running without a login, waiting
+                                       for a switched-off printer, catching every print start; `status` FAILs
+                                       when a printing/answering printer is unsupervised
+                                       (see `3d printer supervise --help`)
   vision NAME [options]                camera failure detection (spaghetti, detached part, stale/dark camera)
                                        into the same event sinks as watch; also
                                        `vision eval --pos P.. --neg N..`, `vision record NAME DIR [--timeout S]`,
@@ -514,6 +520,12 @@ def run(argv: list[str]) -> int:
         from printer_ops.watch_run import run as watch
 
         return watch(rest)
+
+    if sub == "supervise":
+        from printer_ops.supervise import run as supervise
+
+        return supervise(rest)
+
     if sub == "vision":
         return _cmd_vision(rest)
     if sub == "guard":
@@ -539,7 +551,7 @@ def run(argv: list[str]) -> int:
 
         return todo(rest, printer=name)
     raise UsageError(f"unknown subcommand '{sub}'", command="printer",
-                     remediation=["Use list, status, upload, start, cancel, evidence, watch, vision, guard, bed, subscribe, unsubscribe, "
+                     remediation=["Use list, status, upload, start, cancel, evidence, watch, supervise, vision, guard, bed, subscribe, unsubscribe, "
                                   "subscriptions, agent, doctor or todo (issues) — see `3d printer --help`."])
 
 

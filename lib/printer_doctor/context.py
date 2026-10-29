@@ -193,6 +193,18 @@ class AgentSources:
 
 
 @dataclass
+class SupervisionSources:
+    """Where the always-on-supervision data comes from (`printer-supervision` check); None = the real thing.
+    Tests inject `linger`, a temp `unit_dir`, a fake systemctl/loginctl `runner` and a pid probe."""
+
+    linger: Callable[[], bool | None] | None = None
+    unit_dir: Path | None = None
+    runner: Callable[[Sequence[str]], subprocess.CompletedProcess[str]] | None = None
+    alive: Callable[[int], bool] | None = None
+
+
+
+@dataclass
 class Services:
     """Every seam a test may replace; None = the real implementation."""
 
@@ -210,6 +222,7 @@ class Services:
     poll_s: float = 45.0  # how long a restart fix waits for Klipper to come back
     subscriptions: SubscriptionSources = field(default_factory=SubscriptionSources)
     agents: AgentSources = field(default_factory=AgentSources)
+    supervision: SupervisionSources = field(default_factory=SupervisionSources)
     down: DownTracker = field(
         default_factory=DownTracker
     )  # shared by every Context of the run

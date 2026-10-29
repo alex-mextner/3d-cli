@@ -677,9 +677,9 @@ def _calibration(device: Any, args: argparse.Namespace) -> Any:
 def run_live(args: argparse.Namespace) -> int:
     from cli.paths import cache_dir
     from printer_ops import make_adapter
-    from printer_ops.base import PrinterCommError
     from printer_ops.devices import get_device
     from printer_ops.vision import ContextTap, KlippyLogTap, VisionMonitor
+    from printer_ops.vision_cycle import VisionCycle
     from printer_ops.vision_status import VisionStatus
     from printer_ops.watch import severity_rank
     from printer_ops.watch_sinks import Dispatcher
@@ -720,50 +720,34 @@ def run_live(args: argparse.Namespace) -> int:
         if args.min_severity:
             severity_rank(args.min_severity)
             dispatcher.min_severity[device.name] = args.min_severity
+
+    def set_context(ctx: Any) -> None:
+        scorer.context = ctx
+
+    # a one-shot look is not a supervision run: it neither logs outage lines nor clears the marker
+    once_quiet: dict[str, Any] = (
+        {"log": lambda line: None, "clear_quiet": lambda: None} if args.once else {}
+    )
+    cycle = VisionCycle(
+        device.name,
+        adapter=adapter,
+        camera=camera,
+        monitor=monitor,
+        reset_print=scorer.reset_print,
+        interval_s=args.interval,
+        context_tap=context_tap,
+        set_context=set_context,
+        npu_tap=tap,
+        status=status,
+        dispatcher=dispatcher,
+        force_frame=args.once,
+        **once_quiet,
+        after_keepalive=lambda: time.sleep(WAKE_S),  # a sleeping monitor writes its first fresh frame within ~4 s
+    )
     while True:
-        t0 = time.time()
-        report: dict[str, Any] = {"printer": device.name}
-        try:
-            st = adapter.status()
-            if monitor.set_job(st.state, st.filename):
-                scorer.reset_print()  # the same file printed again is a new print too
-            report.update(state=st.state, file=st.filename)
-        except PrinterCommError as exc:
-            report["error"] = str(exc)
-        frame = None
-        # Keep the U1 camera awake and fetch frames only while printing (or for --once): the
-        # monitor costs the printer a capture every ~0.5 s for as long as it is awake.
-        if monitor.printing or args.once:
-            try:
-                if camera.keepalive(t0) and args.once:
-                    time.sleep(
-                        WAKE_S
-                    )  # a sleeping monitor writes its first fresh frame within ~4 s
-                frame = camera.grab()
-            except PrinterCommError as exc:
-                report["camera_error"] = str(exc)
-            if context_tap is not None:
-                try:
-                    scorer.context = context_tap.poll()
-                    report["z"] = round(scorer.context.z, 2)
-                except PrinterCommError as exc:
-                    scorer.context = None  # no masks this frame rather than stale ones
-                    report["context_error"] = str(exc)
-        score, events = monitor.step(frame)
-        if tap is not None:
-            try:
-                events += monitor.npu(tap.poll(), time.time())
-            except PrinterCommError as exc:
-                report["npu_error"] = str(exc)
-        if status is not None:
-            status.update(
-                state=report.get("state"),
-                filename=report.get("file"),
-                score=score,
-                events=events,
-                trend=monitor.tracker.adjusted,
-                camera_error=report.get("camera_error"),
-            )
+        rep = cycle.cycle()
+        frame, score, events = rep.frame, rep.score, rep.events
+        report = rep.as_json(device.name)
         if args.once:
             if score is None and frame is not None:
                 score = scorer(
@@ -808,8 +792,6 @@ def run_live(args: argparse.Namespace) -> int:
                 report["frame"] = str(out)
             print(json.dumps(report, ensure_ascii=False))
             return 0
-        if events and dispatcher is not None:
-            dispatcher.process(events)
         if args.verbose:
             print(
                 json.dumps(
@@ -825,7 +807,7 @@ def run_live(args: argparse.Namespace) -> int:
                 file=sys.stderr,
                 flush=True,
             )
-        time.sleep(max(0.5, args.interval - (time.time() - t0)))
+        time.sleep(rep.next_delay_s)
 
 
 def _frame_score_errors() -> tuple[type[Exception], ...]:

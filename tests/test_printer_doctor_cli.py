@@ -127,7 +127,7 @@ def test_all_includes_the_offline_printers_and_never_contacts_them(
             "--all",
             "--json",
             "--skip",
-            "watch-units-dry-run,camera-snapshot,camera-config,alert-subscribers,alert-fallback-agent",
+            "watch-units-dry-run,camera-snapshot,camera-config,alert-subscribers,alert-fallback-agent,printer-supervision",
         ],
         services(),
     ) in (0,)

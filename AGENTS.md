@@ -367,6 +367,16 @@ skills (`atomic-commits`, `ai-review-before-commit`, `pre-commit-gate`,
   (a FAIL blocks; `--force` alone does not override it: a forced start needs the owner's one-time Telegram
   hatch approval, `lib/printer_ops/force_hatch.py`; fix the cause of each FAIL instead). Tests use the loopback fakes in `tests/printer_fakes.py`;
   agents never point tests or ad-hoc runs at real printers. See `docs/commands/printer.md`.
+- `printer supervise status|install|uninstall|quiet` is the ALWAYS-ON AI supervision (`printer_ops/supervise.py`,
+  `supervise_units.py`, doctor check `printer-supervision`): the `3d-printer-watch@NAME` / `3d-printer-vision@NAME` user
+  units are SHIPPED from the repo (no hand-made unit, no `--dry-run`, no gate on a marker; `watch --install-service`
+  is gone), `Restart=always`, linger, waiting for a switched-off printer, catching a print start from any route, with
+  a heartbeat that `status`/doctor judge and an `ExecStopPost` one-line tg when a supervisor dies during a print.
+  The owner's requirement (2026-10-24): AI control of printers must ALWAYS work while a print runs, also when the
+  printer is powered off between prints, however a print was started, with Home Assistant and without it
+  (`tests/test_printer_supervision_ha_free.py`, `tests/test_printer_supervision_e2e.py`). The `NAME.intentional-off`
+  marker only silences unreachable alarms. Tests never touch `~/.local/state/3d-cli` (`conftest` redirects
+  `XDG_STATE_HOME` per test). See `docs/commands/printer.md#always-on-supervision`.
 - `printers` (plural) is the model registry AND the fleet-wide actions, as self-registering subs in
   `lib/printers_cli/<sub>.py` (`SUB = Sub(...)`, found by `printers_cli.discover()`; adding one edits no
   shared file): `spools|load|unload|swap|filament` (the filament in the printers, thin over printops and the
