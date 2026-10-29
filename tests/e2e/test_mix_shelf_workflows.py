@@ -189,5 +189,7 @@ def test_shelf_flags_are_checked(tmp_path: Path) -> None:
         "--max-swaps",
         "1",
     )
-    assert no_printer.returncode == 2 and "pass --printer NAME" in no_printer.stderr
-    assert orphan.returncode == 2 and "need --shelf" in orphan.stderr
+    assert no_printer.returncode == 2
+    assert "pass --printer NAME" in no_printer.stderr
+    assert orphan.returncode == 2
+    assert "need --shelf" in orphan.stderr
