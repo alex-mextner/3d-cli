@@ -421,15 +421,19 @@ def platform_list(raw: str) -> list[str]:
 def _photo_images(
     spec_images: tuple[Path, ...], photos: Sequence[Photo]
 ) -> tuple[tuple[Path, ...], list[str]]:
-    """The spec's images plus the library photos that exist on disk; the missing ones are warnings."""
+    """The spec's images plus the library photos that exist on disk; the missing ones are warnings. A picture is
+    one file however it is spelled (a relative project path against the absolute path the library registered),
+    so two spellings of it never both go to the listing."""
     images = list(spec_images)
+    seen = {p.resolve() for p in images}
     warnings: list[str] = []
     for photo in photos:
         if not photo.path.is_file():
             warnings.append(
                 f"photo {photo.path} ({photo.kind}) is in the library but the file is gone: skipped"
             )
-        elif photo.path not in images:
+        elif (real := photo.path.resolve()) not in seen:
+            seen.add(real)
             images.append(photo.path)
     return tuple(images), warnings
 

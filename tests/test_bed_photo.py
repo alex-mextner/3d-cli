@@ -539,3 +539,95 @@ def test_an_existing_out_file_is_refused_before_the_bed_moves_and_never_overwrit
     ):  # a file that appeared meanwhile
         bed_photo._saved({}, out, b"\xff\xd8new", True, 70.0)
     assert out.read_bytes() == b"earlier photo"
+
+
+def test_a_read_only_printer_is_never_sent_the_recovery_move(tmp_path: Path) -> None:
+    printer, camera = FakePrinter(z=70.0), FakeCamera()
+    bed_view._write_pending(  # a fresh marker: a full-access capture would first send G1 Z200
+        "u1",
+        bed_view.Motion("complete", "complete", 200.0, 200.0, "xyz", True, None),
+        time.time(),
+    )
+    with pytest.raises(GateFailure, match="read-only: no writes"):
+        bed_photo.capture_table_photo(
+            device(access="read-only"),
+            CFG,
+            adapter=printer,
+            camera=camera,
+            out=tmp_path / "t.jpg",
+            lift=70.0,
+            part_height_mm=20.0,
+            dry_run=False,
+            settle_s=0.0,
+            sleep=lambda s: None,
+        )
+    assert printer.scripts == [] and camera.grabs == 0
+    pending = bed_view._read_pending("u1")
+    assert pending is not None and pending["z"] == 200.0  # still on record
+
+
+class BlindPrinter(FakePrinter):
+    """A printer whose G-code position is `gcode_move_value` (absent when `...`): the offset is unknowable."""
+
+    def __init__(self, gcode_position: Any, **kw: Any) -> None:
+        super().__init__(**kw)
+        self.gcode_position = gcode_position
+
+    def query(self, objects: str) -> dict[str, Any]:
+        st = super().query(objects)
+        if self.gcode_position is ...:
+            del st["gcode_move"]
+        else:
+            st["gcode_move"] = {"gcode_position": self.gcode_position}
+        return st
+
+
+UNKNOWN_GCODE_Z = [
+    pytest.param(..., id="no-gcode_move"),
+    pytest.param(None, id="null-position"),
+    pytest.param([100.0, 100.0], id="short-position"),
+    pytest.param([100.0, 100.0, None, 0.0], id="null-z"),
+    pytest.param([100.0, 100.0, float("nan"), 0.0], id="nan-z"),
+    pytest.param([100.0, 100.0, float("inf"), 0.0], id="inf-z"),
+]
+
+
+@pytest.mark.parametrize("gcode_position", UNKNOWN_GCODE_Z)
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_a_capture_without_the_gcode_z_is_refused_before_any_move(
+    tmp_path: Path, gcode_position: Any, dry_run: bool
+) -> None:
+    printer = BlindPrinter(gcode_position, z=200.0)
+    printer.offset = (
+        -50.0
+    )  # the real offset, invisible: guessing 0 would land Z70 at physical Z20
+    camera = FakeCamera()
+    with pytest.raises(GateFailure, match=r"G-code Z .* unknown"):
+        shoot(printer, tmp_path / "t.jpg", camera=camera, lift=70.0, dry_run=dry_run)
+    assert printer.scripts == [] and camera.grabs == 0 and printer.z == 200.0
+    assert bed_view._read_pending("u1") is None
+
+
+@pytest.mark.parametrize("gcode_position", UNKNOWN_GCODE_Z)
+def test_the_shared_move_and_restore_refuse_without_the_gcode_z(
+    gcode_position: Any,
+) -> None:
+    printer = BlindPrinter(gcode_position, z=200.0)
+    with pytest.raises(bed_view.MoveRefused, match="G-code Z .* unknown"):
+        bed_view.guarded_z_move(printer, to_gcode_z=70.0)
+    why = bed_view.restore_physical_z(printer, 70.0)
+    assert why is not None and "G-code Z" in why
+    assert printer.scripts == []
+
+
+def test_a_pending_marker_is_not_recovered_without_the_gcode_z() -> None:
+    printer = BlindPrinter(None, z=70.0)
+    bed_view._write_pending(
+        "u1",
+        bed_view.Motion("complete", "complete", 200.0, 200.0, "xyz", True, None),
+        time.time(),
+    )
+    note = bed_view.recover_pending(printer, "u1", time.time())
+    assert note is not None and "G-code Z" in note
+    assert printer.scripts == []
+    assert bed_view._read_pending("u1") is not None

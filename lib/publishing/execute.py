@@ -27,6 +27,7 @@ from typing import Any
 from marketplaces import thingiverse, transport
 from marketplaces.base import MarketplaceError, as_int, as_str
 from publishing.plan import AGENT_BROWSER, PlatformPlan
+from publishing.source import split_url
 
 SITE = "thingiverse"
 LOGIN_HINTS = ("login", "signin", "sign-in", "sign_in", "/auth")
@@ -252,11 +253,15 @@ def publish_browser(
 
 
 def _login_outcome(
-    plan: PlatformPlan, base: list[str], runner: Runner
+    plan: PlatformPlan,
+    base: list[str],
+    runner: Runner,
+    landed: tuple[int, str] | None = None,
 ) -> BrowserOutcome | None:
-    """When the page is a login wall: fill it (and stop for the owner), or say why not."""
+    """When the page is a login wall: fill it (and stop for the owner), or say why not. `landed` is a `get url`
+    answer the caller already has."""
     session = base[2]
-    code, url = runner([*base, "get", "url"])
+    code, url = landed if landed is not None else runner([*base, "get", "url"])
     if code != 0 or not any(hint in url.lower() for hint in LOGIN_HINTS):
         return None
     problem = _login(plan.platform, base, runner)
@@ -268,6 +273,35 @@ def _login_outcome(
         f"credentials typed into the {plan.platform} login page of browser session {session}: press Sign in, "
         "finish any 2FA/captcha yourself, then run the same command again (the login is kept)",
     )
+
+
+def _wrong_page_outcome(
+    plan: PlatformPlan, session: str, landed: tuple[int, str]
+) -> BrowserOutcome | None:
+    """A make post is attached to the model page it asked for: when the browser landed anywhere else (another
+    model, another site, a page whose address cannot be read), refuse before any photo is uploaded."""
+    wanted = str(plan.fields.get("model_url", ""))
+    if not wanted:
+        return None
+    code, url = landed
+    if code == 0 and _same_model_page(wanted, url):
+        return None
+    seen = url if code == 0 else f"an unreadable address ({url})"
+    return BrowserOutcome(
+        False,
+        session,
+        f"the browser is on {seen}, not the requested model page {wanted}: nothing was uploaded or filled. "
+        "Check the model URL and run the command again",
+    )
+
+
+def _same_model_page(wanted: str, landed: str) -> bool:
+    """Whether `landed` is the model page `wanted` names: the same site and model id. A site may redirect to the
+    page's canonical slug or locale, so those parts are not compared; the query and fragment a page adds are
+    ignored, but another model or another host is not the page."""
+    site_and_id = split_url(wanted)
+    page = landed.split("#", 1)[0].split("?", 1)[0]
+    return site_and_id != ("", "") and split_url(page) == site_and_id
 
 
 def _run_steps(
@@ -307,9 +341,13 @@ def _publish_browser_locked(plan: PlatformPlan, runner: Runner) -> BrowserOutcom
         return BrowserOutcome(
             False, session, f"could not open {plan.browser_steps[0][-1]}: {out}"
         )
-    login = _login_outcome(plan, base, runner)
+    landed = runner([*base, "get", "url"])
+    login = _login_outcome(plan, base, runner, landed)
     if login is not None:
         return login
+    wrong = _wrong_page_outcome(plan, session, landed)
+    if wrong is not None:
+        return wrong
     failed, out = _run_steps(plan, base, runner)
     if failed is not None:
         return failed

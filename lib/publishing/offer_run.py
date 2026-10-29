@@ -31,10 +31,11 @@ import shlex
 import sqlite3
 import sys
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from errors import InputNotFound, InvalidArgument, UsageError
+from errors import InputNotFound, InvalidArgument, ThreeDError, UsageError
 from publishing import flow
 from publishing.offer import MODES, default_mode, latest_make
 from publishing.source import SourceRef
@@ -159,20 +160,31 @@ def _downloaded_source(project: Path) -> SourceRef | None:
     return load_source(str(project))
 
 
+def _listed_license(source: SourceRef) -> str:
+    """The licence text the remix evaluation will see for `source`: the lookup it uses (recorded licence, else
+    the marketplace's), so the licence the offer defaults to is the one the evaluation then holds it to. A
+    lookup that fails is "unknown", which the evaluation reports itself."""
+    from publishing.source import lookup_for
+
+    try:
+        return lookup_for(source)(source.url).strip()
+    except ThreeDError:
+        return ""
+
+
 def _source_license(
     src_url: str | None, db_path: str | None, source: SourceRef | None = None
 ) -> tuple[str, str]:
     """(licence id, why) the offer defaults to for a source url (None: an original); `source` is the already
-    loaded source (a model.json) whose recorded licence stands."""
+    loaded source (a model.json) whose recorded licence stands. A source with no recorded licence is looked up
+    as the evaluation does, before a default is chosen."""
     if source is None and src_url:
         from publishing.source import load_source
 
         with flow.library(db_path, create=False) as conn:
-            source = (
-                load_source(src_url, conn)
-                if conn is not None
-                else SourceRef(src_url, "", "", "", "", "", "url")
-            )
+            source = load_source(src_url, conn)
+    if source is not None and not source.license:
+        source = replace(source, license=_listed_license(source))
     return flow.default_license(source)
 
 

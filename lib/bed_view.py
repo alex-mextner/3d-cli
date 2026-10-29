@@ -248,6 +248,13 @@ def read_motion(adapter: Any) -> Motion:
                   ready, name if isinstance(name, str) and name else None)
 
 
+def _unknown_coordinates(m: Motion) -> str:
+    """Which of the two Zs a move needs is missing (null, absent or non-finite in the printer's answer). The
+    offset between them is only known when both are: a missing G-code Z must never read as "offset 0"."""
+    missing = [n for n, v in (("toolhead Z", m.z), ("G-code Z (gcode_move.gcode_position)", m.gcode_z)) if v is None]
+    return " and ".join(missing) + " unknown"
+
+
 def _landing_refusal(m: Motion, to_gcode_z: float, floor: float | None, ceiling: float | None,
                      target_toolhead_z: float | None) -> str | None:
     """Why the move may not be sent, judged on the read right before it: outside [floor, ceiling], or the
@@ -277,8 +284,8 @@ def guarded_z_move(adapter: Any, *, to_gcode_z: float, floor: float | None = Non
         raise MoveRefused(f"cannot move: printer is {m.state} [{m.raw_state}], the bed belongs to the job")
     if "z" not in m.homed.lower():
         raise MoveRefused(f"cannot move: not homed (homed axes: {m.homed or 'none'}); the bed check never homes")
-    if m.z is None:
-        raise MoveRefused("cannot move: toolhead Z unknown")
+    if m.z is None or m.gcode_z is None:
+        raise MoveRefused(f"cannot move: {_unknown_coordinates(m)}")
     if not math.isfinite(to_gcode_z) or not math.isfinite(feed) or feed <= 0:
         raise MoveRefused(f"cannot move: Z {to_gcode_z} F{feed} is not a finite move")
     why = _landing_refusal(m, to_gcode_z, floor, ceiling, target_toolhead_z)
@@ -430,6 +437,8 @@ def restore_physical_z(adapter: Any, z: float, *, tol: float = 0.15,
         now = read(adapter)
     except Exception as exc:  # an unreadable printer is reported, never hidden behind the verdict
         return f"restore failed: {exc.__class__.__name__}: {exc}"
+    if now.z is None or now.gcode_z is None:  # no offset to convert the physical Z with: nothing is sent
+        return f"cannot move: {_unknown_coordinates(now)}"
     return restore_z(adapter, replace(now, z=z, gcode_z=z - now.offset), tol=tol, read=read)
 
 
@@ -544,15 +553,22 @@ def auto_view(device: Any, cfg: BedConfig, *, mode: str, adapter: Any, judge: Ca
         return _moved_check(device, adapter, m, pick, limits, base, note, judge, settle_s, sleep, clock, read)
 
 
+def no_write_access(device: Any) -> str | None:
+    """Why the printer may not be sent anything (not a full-access device), or None."""
+    access = getattr(device, "access", "full")
+    return None if access == "full" else f"{device.name} is {access}: no writes"
+
+
 def _may_move(device: Any, adapter: Any, cfg: BedConfig, m: Motion, override: float | None) -> Limits | str:
-    if getattr(device, "access", "full") != "full":
-        return f"{device.name} is {device.access}: no writes"
+    why = no_write_access(device)
+    if why is not None:
+        return why
     if not m.ready:
         return "Klipper is not ready"
     if m.state not in QUIET_STATES:
         return f"cannot move: printer is {m.state} [{m.raw_state}]"
-    if m.z is None:
-        return "cannot move: toolhead Z unknown"
+    if m.z is None or m.gcode_z is None:
+        return f"cannot move: {_unknown_coordinates(m)}"
     if "z" not in m.homed.lower():
         return f"cannot move: not homed (homed axes: {m.homed or 'none'}); the bed check never homes"
     return move_limits(device, adapter, cfg, m, override)
@@ -608,5 +624,5 @@ def _moved_check(device: Any, adapter: Any, m: Motion, pick: ViewPick, limits: L
 
 
 __all__ = ["Candidate", "Limits", "MoveRefused", "Motion", "ViewPick", "auto_view", "guarded_z_move",
-           "move_limits", "part_height", "pick_inspection_z", "read_motion", "recover_pending", "restore_z",
+           "move_limits", "no_write_access", "part_height", "pick_inspection_z", "read_motion", "recover_pending", "restore_z",
            "view_in_progress"]

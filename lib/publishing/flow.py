@@ -369,8 +369,9 @@ def record_renders(db_path: str | None, design_uid: str, ev: Evaluation) -> int:
     from library import actions
 
     n = 0
-    for image in ev.spec.images:
-        if any(p.path == image for p in ev.photos):
+    known = {p.path.resolve() for p in ev.photos}
+    for image in (i.resolve() for i in ev.spec.images):
+        if image in known:
             continue
         key = (
             "render:"
@@ -412,6 +413,18 @@ def record_remix(
     return str(row["uid"])
 
 
+def evaluated_source(prep: Prepared) -> SourceRef | None:
+    """The source the remix check was run against, which is the one to record: the make's or `--of` source
+    when that is the page that was checked, else the checked URL itself (publish.yaml `remix_of` names another
+    page than a make's recorded source, and the library must say which model the licence was verified for)."""
+    remix = prep.ev.remix
+    if remix is None:
+        return prep.source if prep.kind == "remix" else None
+    if prep.source is not None and prep.source.url == remix.source_url:
+        return prep.source
+    return SourceRef(remix.source_url, "", "", "", "", "", "url")
+
+
 def send(
     prep: Prepared,
     *,
@@ -440,12 +453,8 @@ def send(
         _emit_overrides(conn, prep, design_uid)
         if prep.kind != "make":
             record_renders(prep.db_path, design_uid, ev)
-        if prep.kind == "remix" or (ev.remix is not None):
-            source = prep.source or (
-                SourceRef(ev.remix.source_url, "", "", "", "", "", "url")
-                if ev.remix is not None
-                else None
-            )
+        source = evaluated_source(prep)
+        if source is not None:
             record_remix(conn, design_uid, source)
         for item in ev.plans:
             suffix = MAKE_SUFFIX if prep.kind == "make" else ""

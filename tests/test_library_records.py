@@ -214,6 +214,24 @@ def test_the_graph_shows_source_remix_make_in_both_directions(
     )
 
 
+def test_a_queued_make_of_a_source_shows_in_the_graph(
+    conn: sqlite3.Connection, tmp_path: Path
+) -> None:
+    from library import actions
+
+    src = source(conn)
+    queued = actions.queue(
+        "mole", source=str(src["uid"]), db_path=str(tmp_path / "library.db")
+    )
+    assert queued["ok"], queued
+    graph = records.graph(conn, "mole")
+    assert {(e["rel"], e["from"]["kind"], e["to"]["kind"]) for e in graph["edges"]} == {
+        ("make_of", "make", "design"),
+        ("derived_from", "design", "model_source"),
+    }
+    assert str(src["uid"]) in {n["uid"] for n in graph["nodes"]}
+
+
 def test_makes_list_counts_photos_and_names_the_source(
     conn: sqlite3.Connection, tmp_path: Path
 ) -> None:

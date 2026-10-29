@@ -640,7 +640,9 @@ is a model page and at least one photo of the make (`render` photos do not count
 agent-browser route as a listing (open the page, press the site's make button, attach the photos, fill the
 note, screenshot) and **stop before the final Post button**. Their labels (`Add make`, `Share your print`,
 `I Made One`, `Add a make`) are unverified against the live pages. `--note TEXT` is the post text; printer and
-filament come from the make. An explicit `--of` always wins over a publication the library already knows.
+filament come from the make. An explicit `--of` always wins over a publication the library already knows. After
+opening the page the run checks where the browser landed: the same site and the same model id (a redirect to the
+canonical slug or locale is fine); any other model, host, scheme or sub-page is refused before a photo is uploaded.
 
 ### Photos and renders in the listing
 

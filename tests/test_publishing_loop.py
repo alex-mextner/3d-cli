@@ -605,6 +605,27 @@ def test_publishing_records_publication_remix_relation_and_renders_and_deletes_n
         c.close()
 
 
+def test_a_relative_project_path_never_lists_one_render_twice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    make_project(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    project, db = Path("proj"), tmp_path / "library.db"
+    fake = FakeThingiverse()
+    try:
+        for _ in range(2):
+            prep = prepared(project, db, platform="thingiverse")
+            assert [i.name for i in prep.ev.plans[0].images] == ["iso.png"]
+            flow.send(prep, thingiverse_api=fake.base, token_for=lambda: "tok")
+    finally:
+        fake.close()
+    c = librarydb.open_library(db)
+    try:
+        assert c.execute("SELECT COUNT(*) FROM photo").fetchone()[0] == 1
+    finally:
+        c.close()
+
+
 def test_a_failed_platform_stays_as_a_failed_row(tmp_path: Path) -> None:
     project = make_project(tmp_path)
     db = tmp_path / "library.db"
@@ -663,6 +684,53 @@ def test_the_chain_source_remix_make_is_in_the_library(tmp_path: Path) -> None:
     }
 
 
+def test_a_remix_records_the_source_that_was_checked_not_the_makes_other_source(
+    tmp_path: Path,
+) -> None:
+    checked = "https://www.printables.com/model/777-checked-one"
+    project = make_project(tmp_path, f"{YAML}remix_of: {checked}\n")
+    db = tmp_path / "library.db"
+    c = librarydb.open_library(db)
+    make_source, _ = records.ensure_source(
+        c, site="printables", model_id="1", url="https://www.printables.com/model/1-a"
+    )
+    make, _ = records.add_make(
+        c, "proj", status="done", source_uid=str(make_source["uid"])
+    )
+    c.close()
+    asked: list[str] = []
+
+    def lookup(url: str) -> str:
+        asked.append(url)
+        return "Creative Commons - Attribution"
+
+    fake = FakeThingiverse()
+    try:
+        prep = prepared(
+            project,
+            db,
+            platform="thingiverse",
+            kind="remix",
+            make=str(make["uid"]),
+            lookup=lookup,
+        )
+        flow.refuse_if_blocked(prep)
+        flow.send(prep, thingiverse_api=fake.base, token_for=lambda: "tok")
+    finally:
+        fake.close()
+    assert asked == [checked]
+    c = librarydb.open_library(db)
+    try:
+        (remixed,) = (
+            r["to"]["label"]
+            for r in records.list_relations(c, "proj")
+            if r["rel"] == "remix_of"
+        )
+    finally:
+        c.close()
+    assert remixed == f"source {checked}"
+
+
 def test_an_override_is_logged_as_a_library_event(tmp_path: Path) -> None:
     project = pcb_project(tmp_path)
     db = tmp_path / "library.db"
@@ -716,13 +784,11 @@ def test_a_make_post_is_recorded_as_a_make_publication(tmp_path: Path) -> None:
         "table.jpg"
     ]
     calls: list[list[str]] = []
+    requested = str(prep.ev.plans[0].fields["model_url"])
 
     def runner(argv: Any) -> tuple[int, str]:
         calls.append(list(argv))
-        return (
-            0,
-            "ws://x" if "cdp-url" in argv else "https://www.printables.com/model/1",
-        )
+        return 0, "ws://x" if "cdp-url" in argv else requested
 
     out = flow.send(prep, runner=runner)
     assert out[0].state == "draft" and out[0].ok
@@ -747,6 +813,59 @@ def test_a_make_post_is_recorded_as_a_make_publication(tmp_path: Path) -> None:
         ]
     finally:
         c.close()
+
+
+@pytest.mark.parametrize(
+    "landed",
+    [
+        "https://www.printables.com/model/1-another-model",  # another model of the same site
+        "https://attacker.example/upload",  # another origin
+        "https://www.printables.com.attacker.example/model/311253-spoon-drawer-pull",
+        "http://www.printables.com/model/311253-spoon-drawer-pull",  # not https
+        "https://www.printables.com/model/311253-spoon-drawer-pull/comments",  # a sub-page
+    ],
+)
+def test_a_make_post_refuses_a_page_that_is_not_the_requested_model_before_uploading(
+    tmp_path: Path, landed: str
+) -> None:
+    project = make_project(tmp_path)
+    db = tmp_path / "library.db"
+    table = tmp_path / "table.jpg"
+    table.write_bytes(b"jpg")
+    c = librarydb.open_library(db)
+    make, _ = records.add_make(c, "proj", printer="k1se", status="done")
+    records.add_photo(c, str(table), make=str(make["uid"]), kind="table", z_mm=70)
+    c.close()
+    prep = prepared(
+        project,
+        db,
+        platform="printables",
+        kind="make",
+        of=str(model_json(tmp_path / "dl")),
+        make=str(make["uid"]),
+    )
+    calls: list[list[str]] = []
+
+    def runner(argv: Any) -> tuple[int, str]:
+        calls.append(list(argv))
+        return 0, landed if "url" in argv else ""
+
+    out = flow.send(prep, runner=runner)
+    assert not out[0].ok and out[0].state != "draft"
+    assert "not the requested model page" in out[0].message
+    assert not any("upload" in c or "fill" in c for c in calls)
+
+
+def test_a_make_post_accepts_the_canonical_slug_and_locale_of_the_same_model(
+    tmp_path: Path,
+) -> None:
+    wanted = "https://www.printables.com/model/311253"
+    for landed in (
+        "https://www.printables.com/model/311253-spoon-drawer-pull",
+        "https://www.printables.com/de/model/311253-spoon-drawer-pull?utm=x#files",
+    ):
+        assert execute._same_model_page(wanted, landed)
+    assert not execute._same_model_page("https://example.com/model/1", "x")
 
 
 # ------------------------------------------------------------------------------------------ actions
@@ -1153,6 +1272,30 @@ def test_a_remix_offer_inherits_what_the_source_licence_requires(
     assert doc["plans"][0]["problems"] == [] or all(
         "licence" not in p for p in doc["plans"][0]["problems"]
     )
+
+
+def test_an_uncached_share_alike_source_is_looked_up_before_the_licence_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    asked: list[str] = []
+
+    def listed(url: str) -> str:
+        asked.append(url)
+        return "CC BY-SA 4.0"
+
+    monkeypatch.setattr("publishing.source.marketplace_license", listed)
+    project = make_project(
+        tmp_path,
+        f"category: Household\nremix_of: {PRINTABLES}\n",  # no library knows the source
+    )
+    built = offer_run.build(
+        project, trigger="modify", db_path=str(tmp_path / "no-library.db")
+    )
+    assert built["license"]["id"] == "cc-by-sa"
+    (prep,) = built["plans"]
+    assert prep.ev.spec.license.id == "cc-by-sa"
+    assert prep.ev.all_problems() == ()
+    assert set(asked) == {PRINTABLES}
 
 
 def test_an_nd_source_offers_the_plan_but_it_is_refused_so_nothing_is_sent(

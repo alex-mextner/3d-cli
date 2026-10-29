@@ -9,6 +9,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from photo_fixtures import ZMoonraker, write_devices
 from publish_fixtures import FakeThingiverse, make_project, three_d_yaml
 
@@ -24,7 +26,14 @@ BLANK = {
 
 
 def env(tmp_path: Path, **extra: str) -> dict[str, str]:
-    return {**BLANK, "THREED_LIBRARY_DB": str(tmp_path / "library.db"), **extra}
+    """The CLI environment of a test: the offer mode is pinned to `ask` so an exported `THREED_PUBLISH_OFFER`
+    of the machine running the tests cannot change what the CLI does; a call passes its own to override."""
+    return {
+        **BLANK,
+        "THREED_LIBRARY_DB": str(tmp_path / "library.db"),
+        "THREED_PUBLISH_OFFER": "ask",
+        **extra,
+    }
 
 
 def model_json(tmp_path: Path, license: str = "Creative Commons - Attribution") -> Path:
@@ -484,10 +493,13 @@ def test_register_the_project_renders_as_photos(tmp_path: Path) -> None:
 
 
 def test_the_offer_is_silent_when_off_and_never_publishes_without_yes(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """After a print the user is offered to publish: silent with the offer off, a plan and a command without a
     terminal, and a publish only together with --yes."""
+    monkeypatch.setenv(
+        "THREED_PUBLISH_OFFER", "off"
+    )  # the owner's shell must not leak into the CLI env
     project = make_project(tmp_path, "category: Household\n")
     jcli(
         tmp_path,

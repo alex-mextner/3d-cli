@@ -703,7 +703,9 @@ def queue(
     source_key: str | None = None,
     db_path: str | None = None,
 ) -> ActionResult:
-    """Add a make to the print queue: get-or-create the design by name and insert a `queued` make.
+    """Add a make to the print queue: get-or-create the design by name and insert a `queued` make, through
+    the same writer as `make add` (so the make's `make_of` and, with a source, `derived_from` relations exist
+    for the provenance graph).
 
     This records intent only; it never uploads or starts a print. `source` is the uid of the `model_source`
     the design was made from; `source_key` makes the call idempotent. `data`: `{design, make, status}` (uids).
@@ -713,6 +715,7 @@ def queue(
             "design", repr(design), ["a non-empty design name"], command="library"
         )
     from library import db as librarydb
+    from library import records
 
     conn = librarydb.open_library(db_path)
     try:
@@ -724,10 +727,10 @@ def queue(
             ).fetchone()
             if hit is not None:
                 return _queued_result(conn, int(hit["id"]), str(hit["uid"]), False)
-        source_id: int | None = None
+        source_uid: str | None = None
         if source is not None:
             src = conn.execute(
-                "SELECT id FROM model_source WHERE uid = ?", (source,)
+                "SELECT uid FROM model_source WHERE uid = ?", (source,)
             ).fetchone()
             if src is None:
                 return error_result(
@@ -740,23 +743,17 @@ def queue(
                         )
                     ],
                 )
-            source_id = int(src["id"])
-        design_id, _ = _get_or_create_design(conn, design)
-        made = librarydb.insert_row(
+            source_uid = str(src["uid"])
+        made, created = records.add_make(
             conn,
-            "make",
-            {
-                "design_id": design_id,
-                "source_id": source_id,
-                "printer": printer,
-                "filament": filament,
-                "status": "queued",
-                "queued_at": librarydb.db.utc_now(),
-                "gcode": gcode,
-            },
+            design,
+            printer=printer,
+            filament=filament,
+            gcode=gcode,
+            source_uid=source_uid,
             source_key=source_key,
         )
-        return _queued_result(conn, made.id, made.uid, made.created)
+        return _queued_result(conn, int(made["id"]), str(made["uid"]), created)
     finally:
         conn.close()
 
@@ -996,23 +993,6 @@ def publish(
             data,
         )
     return ok_result("publish", data)
-
-
-def _get_or_create_design(conn: Any, name: str) -> tuple[int, str]:
-    """The design row for `name`; a concurrent first insert (UNIQUE name) is read back, not raised."""
-    from library import db as librarydb
-
-    lookup = "SELECT id, uid FROM design WHERE name = ?"
-    row = conn.execute(lookup, (name,)).fetchone()
-    if row is None:
-        try:
-            made = librarydb.insert_row(conn, "design", {"name": name})
-            return made.id, made.uid
-        except sqlite3.IntegrityError:
-            row = conn.execute(lookup, (name,)).fetchone()
-            if row is None:
-                raise
-    return int(row["id"]), str(row["uid"])
 
 
 # --------------------------------------------------------------------------- registry

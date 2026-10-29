@@ -235,6 +235,8 @@ def capture_table_photo(
 ) -> dict[str, Any]:
     """Photograph the print at a lifted bed. -> `{printer, dry_run, plan, path, z_mm, moved, restored, ...}`.
 
+    Nothing is sent to a printer that is not full-access (checked before any marker recovery), nor to one whose
+    toolhead Z or G-code Z is missing/non-finite (the Z offset would be guessed): both refuse with GateFailure.
     Raises GateFailure when the printer is not idle (nothing moved, the camera is not asked), when a guard
     refuses the lift, or when the camera gives no frame. A failed restore is NOT raised: the photo exists, so it
     is returned with `restored: false` and `restore_error` for the caller to report and exit 1.
@@ -260,6 +262,15 @@ def capture_table_photo(
             device, adapter, cfg, m, lift=lift, part_height_mm=part_height_mm, view=view
         )
         return _new_doc(device, plan, dry_run=True)
+    no_write = bed_view.no_write_access(device)
+    if (
+        no_write is not None
+    ):  # before any recovery: a read-only printer is never sent anything
+        raise GateFailure(
+            f"the bed is not lifted for the photo: {no_write}",
+            command="photo",
+            remediation=["Use a full-access printer; nothing was moved."],
+        )
     note = bed_view.recover_pending(adapter, device.name, clock(), read)
     if note:
         bed_view._log(f"{device.name}: {note}")
