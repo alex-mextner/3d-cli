@@ -159,7 +159,7 @@ def test_fast_main_runs_only_the_selection_and_keeps_pytest_args(
         calls.append(cmd)
         return subprocess.CompletedProcess(cmd, 0)
 
-    monkeypatch.setenv("REPO_ROOT", str(repo))
+    monkeypatch.setattr(run_gate, "_resolve_root", lambda: str(repo))
     monkeypatch.setattr(run_gate, "changed_files", lambda _root: ["lib/geo.py"])
     monkeypatch.setattr(run_gate, "run_shellcheck", lambda _root: 0)
     monkeypatch.setattr(run_gate.subprocess, "run", fake_run)
@@ -180,7 +180,7 @@ def test_full_main_runs_the_whole_tests_dir_and_the_ha_integration_tests(
         calls.append(cmd)
         return subprocess.CompletedProcess(cmd, 0)
 
-    monkeypatch.setenv("REPO_ROOT", str(repo))
+    monkeypatch.setattr(run_gate, "_resolve_root", lambda: str(repo))
     monkeypatch.setattr(run_gate, "run_shellcheck", lambda _root: 0)
     monkeypatch.setattr(run_gate.subprocess, "run", fake_run)
 
