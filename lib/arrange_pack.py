@@ -243,6 +243,32 @@ def _load_meshes(
     return out
 
 
+def _load_tagged(
+    path: str, *, min_volume: float
+) -> tuple[list[tuple[str, trimesh.Trimesh]], dict[str, dict[str, str]]]:
+    """Load a part-role-tagged 3MF (`3d:role`, see lib/parts.py): bodies plus the tags of each body's object.
+
+    Read with `assembly.threemf.tagged_objects` (stdlib XML, object names and tags exact, no lxml), so every split
+    body keeps the `3d:*` tags of the object it came from.
+    """
+    from assembly.threemf import tagged_objects
+
+    out: list[tuple[str, trimesh.Trimesh]] = []
+    tags: dict[str, dict[str, str]] = {}
+    dropped: list[DroppedBody] = []
+    for obj_name, mesh, meta in tagged_objects(path):
+        bodies, body_drops = _split_bodies(mesh, base=obj_name, min_volume=min_volume)
+        dropped.extend(body_drops)
+        for bi, body in enumerate(bodies):
+            label = obj_name if len(bodies) == 1 else f"{obj_name}_{bi + 1}"
+            out.append((label, body))
+            tags[label] = meta
+    _log_dropped(dropped)
+    if not out:
+        _die("no usable geometry found in the inputs", 2)
+    return out, tags
+
+
 def _split_bodies(
     mesh: trimesh.Trimesh, *, base: str, min_volume: float
 ) -> tuple[list[trimesh.Trimesh], list[DroppedBody]]:
@@ -286,6 +312,43 @@ def _split_bodies(
         # drops (they're really the kept fallback now).
         return [mesh], []
     return kept, dropped
+
+
+def _is_tagged(path: str) -> bool:
+    import parts_3mf
+
+    return parts_3mf.has_tags(path)
+
+
+def _apply_print_guard(
+    named: list[tuple[str, trimesh.Trimesh]],
+    tags: dict[str, dict[str, str]],
+    *,
+    include_non_printable: bool,
+    reason: str,
+) -> tuple[list[tuple[str, trimesh.Trimesh]], list[str], list[str]]:
+    """Keep non-printable bodies (vitamins, references, stand-ins) off the plates.
+
+    `(kept, dropped names, overridden names)`. They are dropped and REPORTED (never silently); with the explicit
+    `--include-non-printable` they stay, the override is logged (`parts.assert_printable`) and returned.
+    """
+    import logging
+
+    from parts import META_PRINTABLE, assert_printable, part_from_metadata
+
+    nonprint = [
+        n for n, _ in named if tags.get(n, {}).get(META_PRINTABLE) == "false" or tags.get(n, {}).get("3d:role", "printed") != "printed"
+    ]
+    if not nonprint:
+        return named, [], []
+    if include_non_printable:
+        guard = assert_printable(
+            [part_from_metadata(n, tags[n]) for n in nonprint], include_non_printable=True, command="arrange"
+        )
+        if reason:
+            logging.getLogger("3d.parts").warning("override reason (arrange): %s", reason)
+        return named, [], [p.name for p in guard.overridden]
+    return [(n, m) for n, m in named if n not in set(nonprint)], nonprint, []
 
 
 def _log_dropped(dropped: list[DroppedBody]) -> None:
@@ -337,6 +400,7 @@ def _write_single_project(
     *,
     bed: float,
     out_path: str,
+    tags: dict[str, dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     """Build ALL plates into one Orca multi-plate project .3mf and verify it.
 
@@ -356,7 +420,13 @@ def _write_single_project(
             verts = _placed_vertices(body, dx=pl.x + ox, dy=pl.y + oy)
             tris = [(int(f[0]), int(f[1]), int(f[2])) for f in body.faces]
             parts.append(
-                MeshPart(name=pl.name, vertices=verts, triangles=tris, plate=plate.index - 1)
+                MeshPart(
+                    name=pl.name,
+                    vertices=verts,
+                    triangles=tris,
+                    plate=plate.index - 1,
+                    metadata=(tags or {}).get(pl.name, {}),
+                )
             )
 
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
@@ -516,6 +586,8 @@ def arrange(
     emit_json: bool,
     single: bool = True,
     min_volume: float = _DEFAULT_MIN_VOLUME,
+    include_non_printable: bool = False,
+    reason: str = "",
 ) -> int:
     """Full pipeline: load+split -> lay flat -> pack -> write 3MF(s) -> verify.
 
@@ -528,7 +600,28 @@ def arrange(
     if usable <= 0:
         _die(f"usable plate area is non-positive: bed {bed} - 2*margin {margin}", 2)
 
-    named = _load_meshes(inputs, min_volume=min_volume)
+    tags: dict[str, dict[str, str]] = {}
+    tagged = [p for p in inputs if p.lower().endswith(".3mf") and _is_tagged(p)]
+    if tagged:
+        if not single:
+            _die(
+                "a part-role-tagged 3MF cannot be split into per-plate files: the role tags only survive in the "
+                "single project output. Drop --per-plate.",
+                2,
+            )
+        named, tags = _load_tagged(tagged[0], min_volume=min_volume)
+    else:
+        named = _load_meshes(inputs, min_volume=min_volume)
+    named, dropped_np, overridden = _apply_print_guard(
+        named, tags, include_non_printable=include_non_printable, reason=reason
+    )
+    if not named:
+        _die(
+            "nothing printable is left: every object is tagged non-printable ("
+            + ", ".join(dropped_np)
+            + "). Pass --include-non-printable to place them on purpose.",
+            1,
+        )
     flat_by_index: dict[int, Any] = {}
     boxes: list[PartBox] = []
     for idx, (name, mesh) in enumerate(named):
@@ -545,13 +638,18 @@ def arrange(
     summaries: list[dict[str, Any]] = []
     if single:
         out_path = out_prefix if out_prefix.lower().endswith(".3mf") else f"{out_prefix}.3mf"
-        summaries.append(_write_single_project(plates, flat_by_index, bed=bed, out_path=out_path))
+        summaries.append(
+            _write_single_project(plates, flat_by_index, bed=bed, out_path=out_path, tags=tags)
+        )
     else:
         for plate in plates:
             out_path = f"{out_prefix}_plate{plate.index}.3mf"
             summaries.append(_write_plate(plate, flat_by_index, bed=bed, out_path=out_path))
 
-    _report(boxes, plates, summaries, bed=bed, usable=usable, gap=gap, single=single, emit_json=emit_json)
+    _report(
+        boxes, plates, summaries, bed=bed, usable=usable, gap=gap, single=single, emit_json=emit_json,
+        dropped_non_printable=dropped_np, overridden=overridden,
+    )
     # If any reloaded plate count mismatches or a part escaped the bed, fail loudly.
     bad = [s for s in summaries if not s["within_bed"] or s["reloaded_objects"] != s["objects"]]
     return 1 if bad else 0
@@ -567,9 +665,13 @@ def _report(
     gap: float,
     single: bool,
     emit_json: bool,
+    dropped_non_printable: list[str] | None = None,
+    overridden: list[str] | None = None,
 ) -> None:
     if emit_json:
         payload = {
+            "dropped_non_printable": dropped_non_printable or [],
+            "override": overridden or [],
             "bed": bed,
             "usable": usable,
             "gap": gap,
@@ -584,6 +686,10 @@ def _report(
         print(json.dumps(payload, indent=2, sort_keys=True))
         return
 
+    for name in dropped_non_printable or []:
+        print(f"arrange: NOT placed (non-printable part, role tag): {name}")
+    for name in overridden or []:
+        print(f"arrange: OVERRIDE (logged): non-printable part {name} placed on a plate")
     mode = "single multi-plate project" if single else "one 3MF per plate"
     print(f"ARRANGE bed {bed:g}x{bed:g} mm  usable {usable:g}x{usable:g} mm  gap {gap:g} mm  [{mode}]")
     print(f"parts: {len(boxes)}   plates: {len(plates)}")
@@ -642,6 +748,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     ap.add_argument("--min-volume", dest="min_volume", type=float, default=_DEFAULT_MIN_VOLUME)
     ap.add_argument("-o", "--out", dest="out", default="")
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--include-non-printable", dest="include_non_printable", action="store_true")
+    ap.add_argument("--reason", default="")
     # Output mode: single multi-plate project (default) vs one 3MF per plate (legacy).
     ap.add_argument("--single", dest="single", action="store_true", default=True)
     ap.add_argument("--per-plate", dest="single", action="store_false")
@@ -664,6 +772,8 @@ def main(argv: list[str]) -> int:
             emit_json=args.json,
             single=args.single,
             min_volume=args.min_volume,
+            include_non_printable=args.include_non_printable,
+            reason=args.reason,
         )
     except SystemExit as exc:
         return int(exc.code) if isinstance(exc.code, int) else 2

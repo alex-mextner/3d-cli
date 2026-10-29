@@ -99,6 +99,7 @@ class Fit:
     step: float = STEP
     min_depth: float | None = None
     open: str = "above"
+    open_dir: tuple[float, float, float] | None = None  # declared extraction axis other than +Z / -Z (#553)
     socket_name: str = ""
     fit_info: dict[str, Any] | None = None  # the `3d fits resolve` answer the gap/tolerance came from
 
@@ -300,6 +301,27 @@ def _resolve_fit(
         ) from None
 
 
+def parse_open(value: Any, pre: str = "") -> tuple[str, tuple[float, float, float] | None]:
+    """`open:` -> (label, axis). `above` / `below` / `none` as before; a signed axis (`+Y`, `-X`), a vector
+    (`[0, 1, 1]` / `0,1,1`) is the declared extraction direction in the assembly frame (#553). `+Z` is `above`,
+    `-Z` is `below`. A zero, non-finite or malformed vector fails here, before any geometry is read."""
+    from assembly.vec import format_direction, parse_direction
+    from errors import InvalidArgument
+
+    if isinstance(value, str) and value in OPEN_DIRECTIONS:
+        return value, None
+    try:
+        vec = parse_direction(value, "open", command="fit-check")
+    except InvalidArgument as exc:
+        accepted = ", ".join([*OPEN_DIRECTIONS, "+X", "-X", "+Y", "-Y", "+Z", "-Z", "x,y,z"])
+        raise FitError(f"{pre}open must be one of {accepted} (a non-zero finite vector), got {value!r}") from exc
+    if vec == (0.0, 0.0, 1.0):
+        return "above", None
+    if vec == (0.0, 0.0, -1.0):
+        return "below", None
+    return format_direction(vec), vec
+
+
 def make_fit(
     *,
     insert: list[str],
@@ -326,10 +348,7 @@ def make_fit(
     `fit` (a fit-table type or alias: snap, sliding, tight, glue, ...) takes the gap and the gap tolerance
     from `fits.resolve` for the given shape/printer/material/nozzle/layer; an explicit `gap` / `gap_tol` wins."""
     pre = f"{where}: " if where else ""
-    if open not in OPEN_DIRECTIONS:
-        raise FitError(
-            f"{pre}open must be one of {', '.join(OPEN_DIRECTIONS)}, got {open!r}"
-        )
+    open, open_dir = parse_open(open, pre)
     fit_info: dict[str, Any] | None = None
     if fit is None:
         stray = [
@@ -404,6 +423,7 @@ def make_fit(
         if min_depth is None
         else _number(min_depth, f"{pre}min depth", positive=True),
         open=open,
+        open_dir=open_dir,
         fit_info=fit_info,
     )
 
@@ -499,6 +519,15 @@ def _socket_top(
 def _blocked_path(
     insert: Any, socket: Any, direction: str, step: float
 ) -> tuple[float, float, float] | None:
+    """(volume mm3, z low, z high) of the socket material blocking the way out, or None when the path is clear."""
+    hit = _blocked_hit(insert, socket, direction, step)
+    if hit is None:
+        return None
+    box = hit.bounding_box()
+    return float(hit.volume()), box[2], box[5]
+
+
+def _blocked_hit(insert: Any, socket: Any, direction: str, step: float) -> Any | None:
     """Socket material in the way of the insert moving out along +Z (`above`) or -Z (`below`),
     outside the insert itself (an overlap is reported on its own): (volume mm3, z low, z high),
     or None when the path is clear. The swept insert is built in
@@ -540,11 +569,22 @@ def _blocked_path(
     if not slabs:
         return None
     hit = (Manifold.batch_boolean(slabs, OpType.Add) ^ socket) - insert
-    volume = float(hit.volume())
-    if volume <= OVERLAP_VOLUME:
+    if float(hit.volume()) <= OVERLAP_VOLUME:
         return None
+    return hit
+
+
+def _blocked_centre(insert: Any, socket: Any, rotation: list[list[float]], step: float) -> list[float]:
+    """Centre of the blocking socket material, turned back into the assembly frame (the inverse of `rotation`)."""
+    import numpy as np
+
+    hit = _blocked_hit(insert, socket, "above", step)
+    if hit is None:
+        return [0.0, 0.0, 0.0]
     box = hit.bounding_box()
-    return volume, box[2], box[5]
+    centre = np.array([(box[0] + box[3]) / 2, (box[1] + box[4]) / 2, (box[2] + box[5]) / 2])
+    back = np.asarray(rotation).T @ centre
+    return [float(back[0]), float(back[1]), float(back[2])]
 
 
 def check_fit(fit: Fit) -> dict[str, Any]:
@@ -556,6 +596,20 @@ def check_fit(fit: Fit) -> dict[str, Any]:
     socket = union(fit.socket)
     lo_x, lo_y, lo_z, hi_x, hi_y, hi_z = insert.bounding_box()
     raw_size = (hi_x - lo_x, hi_y - lo_y, hi_z - lo_z)
+    frame: dict[str, Any] | None = None
+    open_mode = fit.open
+    if fit.open_dir is not None:
+        # #553: evaluate section clearance, socket depth and the open path in the declared frame: both solids are
+        # turned (copies, the files are never touched) so the extraction axis becomes +Z; `z` of the report is then
+        # the coordinate along that axis, and locations are turned back below.
+        from assembly.vec import rotation_taking
+
+        rot = rotation_taking(fit.open_dir, (0.0, 0.0, 1.0))
+        rows = [[*row, 0.0] for row in rot]
+        insert, socket = insert.transform(rows), socket.transform(rows)
+        lo_x, lo_y, lo_z, hi_x, hi_y, hi_z = insert.bounding_box()
+        open_mode = "above"
+        frame = {"axis": fit.open, "direction": list(fit.open_dir), "rotation": [list(r) for r in rot]}
     size = tuple(round(s, 3) for s in raw_size)
     errors: list[str] = []
     if fit.printed_size is not None and not size_matches(
@@ -612,8 +666,11 @@ def check_fit(fit: Fit) -> dict[str, Any]:
     blocked = (
         None
         if fit.open == "none"
-        else _blocked_path(insert, socket, fit.open, fit.step)
+        else _blocked_path(insert, socket, open_mode, fit.step)
     )
+    blocked_at: list[float] | None = None
+    if blocked is not None and frame is not None:
+        blocked_at = _blocked_centre(insert, socket, frame["rotation"], fit.step)
     if overlap_layers:
         shown = ", ".join(f"{z:.2f}" for z, _ in overlap_layers[:5]) + (
             ", …" if len(overlap_layers) > 5 else ""
@@ -643,8 +700,10 @@ def check_fit(fit: Fit) -> dict[str, Any]:
     if blocked is not None:
         vol, z_lo, z_hi = blocked
         errors.append(
-            f"not open {fit.open}: {vol:.3g} mm³ of socket in the insert's way out at z {z_lo:.2f}–{z_hi:.2f} "
-            "(capped or undercut); `open: none` for an insert captured between parts"
+            f"not open {fit.open}: {vol:.3g} mm³ of socket in the insert's way out at "
+            f"{'z' if frame is None else 'along ' + fit.open} {z_lo:.2f}–{z_hi:.2f}"
+            + ("" if blocked_at is None else f" (around x {blocked_at[0]:.2f}, y {blocked_at[1]:.2f}, z {blocked_at[2]:.2f})")
+            + " (capped or undercut); `open: none` for an insert captured between parts"
         )
     if fit.min_depth is not None and depth is not None and depth < fit.min_depth:
         errors.append(
@@ -670,7 +729,9 @@ def check_fit(fit: Fit) -> dict[str, Any]:
         "step_mm": fit.step,
         "min_depth_mm": fit.min_depth,
         "open": fit.open,
+        "open_frame": frame,
         "open_blocked_mm3": None if blocked is None else round(blocked[0], 4),
+        "open_blocked_at": None if blocked_at is None else [round(c, 3) for c in blocked_at],
         "gap_mm": min(gaps) if gaps else None,
         "gap_max_mm": max(gaps) if gaps else None,
         "socket_depth_mm": None if depth is None else round(depth, 2),
@@ -802,8 +863,8 @@ def main(argv: list[str]) -> int:
     )
     ap.add_argument(
         "--open",
-        choices=OPEN_DIRECTIONS,
-        help="insertion direction the socket must be open to (default above; none = captured)",
+        help="direction the socket must be open to: above (default), below, none (captured), a signed axis "
+        "(+X -X +Y -Y), or a vector x,y,z in the assembly frame",
     )
     ap.add_argument("--spec", help="YAML/JSON file listing many fits")
     ap.add_argument("--json", action="store_true", help="JSON report on stdout")

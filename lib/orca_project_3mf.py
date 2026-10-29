@@ -57,8 +57,8 @@ from __future__ import annotations
 
 import math
 import zipfile
-from dataclasses import dataclass
-from collections.abc import Sequence
+from dataclasses import dataclass, field
+from collections.abc import Mapping, Sequence
 from xml.sax.saxutils import quoteattr
 
 # OPC / 3MF entry paths (mirror bbs_3mf.cpp constants).
@@ -86,6 +86,10 @@ class MeshPart:
     vertices: Sequence[tuple[float, float, float]]
     triangles: Sequence[tuple[int, int, int]]
     plate: int
+    # per-object `<metadata key= value=>` rows of model_settings.config (e.g. the `3d:role` / `3d:printable` tags
+    # of lib/parts.py, which survive arrange/retarget) and an optional `#RRGGBB` display colour (3MF basematerials)
+    metadata: Mapping[str, str] = field(default_factory=dict)
+    color: str | None = None
 
 
 def plate_columns(num_plates: int) -> int:
@@ -152,9 +156,10 @@ def _transform_attr(dx: float, dy: float, dz: float = 0.0) -> str:
     return " ".join(_fmt(v) for col in cols for v in col)
 
 
-def _object_mesh_xml(object_id: int, part: MeshPart) -> str:
+def _object_mesh_xml(object_id: int, part: MeshPart, material: tuple[int, int] | None = None) -> str:
     rows: list[str] = []
-    rows.append(f'  <object id="{object_id}" type="model">')
+    pid = f' pid="{material[0]}" pindex="{material[1]}"' if material else ""
+    rows.append(f'  <object id="{object_id}" type="model"{pid}>')
     rows.append("   <mesh>")
     rows.append("    <vertices>")
     for x, y, z in part.vertices:
@@ -169,6 +174,21 @@ def _object_mesh_xml(object_id: int, part: MeshPart) -> str:
     return "\n".join(rows)
 
 
+def _materials_xml(parts: Sequence[MeshPart]) -> tuple[str, dict[int, tuple[int, int]]]:
+    """A `<basematerials>` group for the coloured parts and each part's (group id, index); empty if none."""
+    coloured = [(i, p) for i, p in enumerate(parts) if p.color]
+    if not coloured:
+        return "", {}
+    group = len(parts) + 1
+    rows = [f'  <basematerials id="{group}">']
+    index: dict[int, tuple[int, int]] = {}
+    for n, (i, part) in enumerate(coloured):
+        rows.append(f'   <base name={quoteattr(part.name)} displaycolor="{part.color}"/>')
+        index[i] = (group, n)
+    rows.append("  </basematerials>")
+    return "\n".join(rows) + "\n", index
+
+
 def _build_3dmodel_xml(parts: Sequence[MeshPart], *, bed: float, cols: int) -> str:
     """`3D/3dmodel.model`: resources (one object per part) + positioned build items."""
     head = (
@@ -178,7 +198,10 @@ def _build_3dmodel_xml(parts: Sequence[MeshPart], *, bed: float, cols: int) -> s
         'xmlns:BambuStudio="http://schemas.bambulab.com/package/2021">\n'
         " <resources>\n"
     )
-    objects = "\n".join(_object_mesh_xml(i + 1, p) for i, p in enumerate(parts))
+    materials, material_of = _materials_xml(parts)
+    objects = materials + "\n".join(
+        _object_mesh_xml(i + 1, p, material_of.get(i)) for i, p in enumerate(parts)
+    )
     mid = "\n </resources>\n <build>\n"
     items: list[str] = []
     for i, part in enumerate(parts):
@@ -197,6 +220,8 @@ def _model_settings_xml(parts: Sequence[MeshPart], *, num_plates: int) -> str:
     for i, part in enumerate(parts):
         rows.append(f'  <object id="{i + 1}">')
         rows.append(f'    <metadata key="name" value={quoteattr(part.name)}/>')
+        for key, value in part.metadata.items():
+            rows.append(f"    <metadata key={quoteattr(key)} value={quoteattr(value)}/>")
         rows.append("  </object>")
     for plate in range(num_plates):
         rows.append("  <plate>")
@@ -216,7 +241,13 @@ def _model_settings_xml(parts: Sequence[MeshPart], *, num_plates: int) -> str:
     return "\n".join(rows)
 
 
-def write_project_3mf(out_path: str, parts: Sequence[MeshPart], *, bed: float) -> int:
+def write_project_3mf(
+    out_path: str,
+    parts: Sequence[MeshPart],
+    *,
+    bed: float,
+    extra_entries: Mapping[str, bytes] | None = None,
+) -> int:
     """Write a single multi-plate Orca project .3mf. Returns the number of plates.
 
     `parts` must be non-empty; each part's `.plate` is a 0-based plate index. Plates are
@@ -237,4 +268,6 @@ def write_project_3mf(out_path: str, parts: Sequence[MeshPart], *, bed: float) -
         zf.writestr(_MODEL_FILE, model_xml)
         zf.writestr(_MODEL_RELS, _model_rels_xml())
         zf.writestr(_MODEL_SETTINGS, settings_xml)
+        for name, data in (extra_entries or {}).items():
+            zf.writestr(name, data)
     return num_plates

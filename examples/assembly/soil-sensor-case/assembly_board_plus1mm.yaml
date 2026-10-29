@@ -1,0 +1,64 @@
+# The deliberately broken variant: the board sits 1 mm to the side. `3d assembly check` must report it BLOCKING.
+#   export MOLE_STANDINS=$(bash examples/assembly/soil-sensor-case/build_standins.sh "$MOLE_PROJECT")
+#   3d assembly check examples/assembly/soil-sensor-case/assembly.yaml
+schema: 3d.assembly/1
+name: soil-sensor-mole
+root: $MOLE_PROJECT          # the soil-sensor-case project dir (garage-band#81); read-only
+context: {printer: k1se, material: "Rapid PLA+", nozzle: 0.4, layer: 0.2}
+parts:
+  mole_back: {role: printed, mesh: print/mole_back.stl, pose: {translate: [0, 0, -10]}}
+  mole_front: {role: printed, mesh: print/mole_front.stl}
+  hw080_pcb: {role: stand_in, mesh: $MOLE_STANDINS/pcb.stl, pose: {translate: [1, 0, 0]}}
+  dupont_housing: {role: stand_in, mesh: $MOLE_STANDINS/housing.stl}
+  wire_red: {role: stand_in, mesh: $MOLE_STANDINS/wire_red.stl}
+  wire_brown: {role: stand_in, mesh: $MOLE_STANDINS/wire_brown.stl}
+mates:
+  - name: pcb_ribs
+    a: mole_back
+    b: hw080_pcb
+    kind: press
+    fit: press
+    zone: {min: [-10.6, 2.0, -2.1], max: [10.6, 13.0, -0.1]}
+  - name: pcb_pocket
+    a: mole_back
+    b: hw080_pcb
+    kind: sliding
+    fit: snap
+    zone: {min: [-11, 7.2, -2.1], max: [11, 7.8, -0.1]}
+    insertion: {part: hw080_pcb, axis: -Z, distance_mm: 12, carry: [dupont_housing, wire_red, wire_brown], ignore: [mole_front]}
+  - name: housing_pocket
+    a: mole_front
+    b: dupont_housing
+    kind: sliding
+    fit: snap
+  - name: lid_catch
+    a: mole_back
+    b: mole_front
+    kind: snap
+    clearance_mm: 0.15
+    tol_mm: 0.05
+    zone: {min: [10.5, 14.0, 5.2], max: [13.5, 19.0, 7.2]}
+  - name: lid_snap
+    a: mole_back
+    b: mole_front
+    kind: snap
+    fit: snap
+    seat: true
+    insertion: {part: mole_front, axis: -Z, distance_mm: 8}
+    access:
+      - {name: grip_front_dome, target: [0, 16, 16.78], from: +Z, probe: finger, purpose: pull}
+      - {name: grip_back_flat, target: [0, 20, -10.0], from: -Z, probe: finger, purpose: pull}
+      - {name: pry_seam_right, target: [17.4, 20, 0], from: +X, probe: nail, purpose: pry}
+    snap:
+      part: mole_back
+      flex_limit_mm: 0.326
+      strain_limit: 0.01
+      material: PLA
+      modulus_mpa: 2450
+      lead_angle_deg: 30
+      retention_angle_deg: 45
+      hooks:
+        - {name: h1, point: [11.6, 16.5, 6.0], deflect: -X, barb_mm: 0.4, release: pull, region: {min: [10.9, 13.5, 0.0], max: [12.7, 19.5, 7.2]}, arm: {thickness_mm: 1.0, length_mm: 7.0, width_mm: 6.0}}
+        - {name: h2, point: [11.6, 25.5, 6.0], deflect: -X, barb_mm: 0.4, release: pull, region: {min: [10.9, 22.5, 0.0], max: [12.7, 28.5, 7.2]}, arm: {thickness_mm: 1.0, length_mm: 7.0, width_mm: 6.0}}
+        - {name: h3, point: [-11.6, 16.5, 6.0], deflect: +X, barb_mm: 0.4, release: pull, region: {min: [-12.7, 13.5, 0.0], max: [-10.9, 19.5, 7.2]}, arm: {thickness_mm: 1.0, length_mm: 7.0, width_mm: 6.0}}
+        - {name: h4, point: [-11.6, 25.5, 6.0], deflect: +X, barb_mm: 0.4, release: pull, region: {min: [-12.7, 22.5, 0.0], max: [-10.9, 28.5, 7.2]}, arm: {thickness_mm: 1.0, length_mm: 7.0, width_mm: 6.0}}
