@@ -25,10 +25,12 @@ Where the library comes from (first that works, never touches the network at imp
 
 Stdlib-only at import time; numpy / trimesh are imported inside the functions.
 """
+
 from __future__ import annotations
 
 import contextlib
 import importlib
+import importlib.util
 import os
 import shutil
 import subprocess
@@ -128,25 +130,83 @@ def _ensure_checkout_and_build() -> tuple[str, str]:
             return os.path.join(src, "python"), lib
         if not os.path.isdir(os.path.join(src, ".git")):
             os.makedirs(os.path.dirname(src), exist_ok=True)
-            sys.stderr.write(f"3d: first use of mesh repair - fetching meshfix {MESHFIX_TAG} into libs/meshfix (once)...\n")
+            sys.stderr.write(
+                f"3d: first use of mesh repair - fetching meshfix {MESHFIX_TAG} into libs/meshfix (once)...\n"
+            )
             part = src + ".part"
             shutil.rmtree(part, ignore_errors=True)
-            _run(["git", "-c", "http.connectTimeout=10", "clone", "--depth", "1", "--branch", MESHFIX_TAG, MESHFIX_URL, part],
-                 "git clone")
+            _run(
+                [
+                    "git",
+                    "-c",
+                    "http.connectTimeout=10",
+                    "clone",
+                    "--depth",
+                    "1",
+                    "--branch",
+                    MESHFIX_TAG,
+                    MESHFIX_URL,
+                    part,
+                ],
+                "git clone",
+            )
             shutil.rmtree(src, ignore_errors=True)  # a leftover without .git
-            os.replace(part, src)  # a half-finished clone is never mistaken for a checkout
+            os.replace(
+                part, src
+            )  # a half-finished clone is never mistaken for a checkout
+        lib = _shared_library(build)
+        if lib:  # built from another worktree's checkout of the same pinned tag: reuse, never re-configure the shared cache
+            return os.path.join(src, "python"), lib
         sys.stderr.write("3d: building the meshfix library (once)...\n")
         try:
-            _run(["cmake", "-S", src, "-B", build, "-DCMAKE_BUILD_TYPE=Release", "-DMESHFIX_BUILD_CLI=OFF",
-                  "-DMESHFIX_BUILD_TESTS=OFF", "-DMESHFIX_BUILD_STATIC=OFF"], "cmake configure")
-            _run(["cmake", "--build", build, "--config", "Release", "--parallel"], "cmake build")
+            _run(
+                [
+                    "cmake",
+                    "-S",
+                    src,
+                    "-B",
+                    build,
+                    "-DCMAKE_BUILD_TYPE=Release",
+                    "-DMESHFIX_BUILD_CLI=OFF",
+                    "-DMESHFIX_BUILD_TESTS=OFF",
+                    "-DMESHFIX_BUILD_STATIC=OFF",
+                ],
+                "cmake configure",
+            )
+            from cli.resources import max_workers
+
+            _run(
+                [
+                    "cmake",
+                    "--build",
+                    build,
+                    "--config",
+                    "Release",
+                    "--parallel",
+                    str(max_workers()),
+                ],
+                "cmake build",
+            )
         except BaseException:
-            shutil.rmtree(build, ignore_errors=True)  # no half-configured cache for the next attempt to trip over
+            shutil.rmtree(
+                build, ignore_errors=True
+            )  # no half-configured cache for the next attempt to trip over
             raise
         lib = _shared_library(build)
         if lib is None:
             raise _missing("the build produced no shared library")
         return os.path.join(src, "python"), lib
+
+
+def available() -> bool:
+    """True when meshfix can run without a clone or build: importable, or a cached build plus a checkout exist."""
+    if _module is not None:
+        return True
+    if importlib.util.find_spec("meshfix") is not None:
+        return True
+    return _shared_library(_build_dir()) is not None and os.path.isdir(
+        os.path.join(_repo_root(), "libs", "meshfix", "python", "meshfix")
+    )
 
 
 def load_meshfix() -> Any:
@@ -155,7 +215,9 @@ def load_meshfix() -> Any:
     if _module is not None:
         return _module
     try:
-        _module = importlib.import_module("meshfix")  # an installed package (wheel or editable)
+        _module = importlib.import_module(
+            "meshfix"
+        )  # an installed package (wheel or editable)
     except ImportError:
         python_dir, lib = _ensure_checkout_and_build()
         os.environ.setdefault("MESHFIX_LIBRARY", lib)
@@ -173,7 +235,9 @@ def _with_aliases(report: Any, engine: str) -> dict[str, Any]:
     return out
 
 
-def repair_mesh(vertices: Any, faces: Any, **opts: Any) -> tuple[Any, Any, dict[str, Any]]:
+def repair_mesh(
+    vertices: Any, faces: Any, **opts: Any
+) -> tuple[Any, Any, dict[str, Any]]:
     """Repair (N,3) vertices / (M,3) faces. Returns (vertices, faces, report_dict); see the module docstring."""
     meshfix = load_meshfix()
     out_v, out_f, report = meshfix.repair(vertices, faces, **opts)
@@ -185,8 +249,13 @@ def repair_file(src: str, dst: str | None = None, **opts: Any) -> dict[str, Any]
     if dst is not None and os.path.splitext(dst)[1].lower() not in OUTPUT_EXTENSIONS:
         from errors import InvalidArgument
 
-        raise InvalidArgument("-o", dst, list(OUTPUT_EXTENSIONS), command="mesh",
-                              extra="the repaired mesh is written by file extension")
+        raise InvalidArgument(
+            "-o",
+            dst,
+            list(OUTPUT_EXTENSIONS),
+            command="mesh",
+            extra="the repaired mesh is written by file extension",
+        )
     meshfix = load_meshfix()
     engine = f"meshfix {meshfix.version()}"
     in_ext = os.path.splitext(src)[1].lower()
