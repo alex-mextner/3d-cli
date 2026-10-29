@@ -192,7 +192,14 @@ def queue(
 
     conn = librarydb.open_library(db_path)
     try:
-        design_row = _get_or_create_design(conn, design)
+        if (
+            source_key is not None
+        ):  # an idempotent retry creates nothing, not even the design
+            hit = conn.execute(
+                "SELECT id, uid FROM make WHERE source_key = ?", (source_key,)
+            ).fetchone()
+            if hit is not None:
+                return _queued_result(conn, int(hit["id"]), str(hit["uid"]), False)
         source_id: int | None = None
         if source is not None:
             src = conn.execute(
@@ -210,38 +217,44 @@ def queue(
                     ],
                 )
             source_id = int(src["id"])
-        now = librarydb.db.utc_now()
+        design_id, _ = _get_or_create_design(conn, design)
         made = librarydb.insert_row(
             conn,
             "make",
             {
-                "design_id": design_row[0],
+                "design_id": design_id,
                 "source_id": source_id,
                 "printer": printer,
                 "filament": filament,
                 "status": "queued",
-                "queued_at": now,
+                "queued_at": librarydb.db.utc_now(),
                 "gcode": gcode,
             },
             source_key=source_key,
         )
-        state = conn.execute(
-            "SELECT d.uid AS design_uid, m.status FROM make m JOIN design d ON d.id = m.design_id"
-            " WHERE m.id = ?",
-            (made.id,),
-        ).fetchone()
-        # an idempotency hit reports the make that already exists, not what this call asked for
-        return ok_result(
-            "queue",
-            {
-                "design": state["design_uid"],
-                "make": made.uid,
-                "status": state["status"],
-                "created": made.created,
-            },
-        )
+        return _queued_result(conn, made.id, made.uid, made.created)
     finally:
         conn.close()
+
+
+def _queued_result(
+    conn: Any, make_id: int, make_uid: str, created: bool
+) -> ActionResult:
+    """The `queue` result for a make; an idempotency hit reports the make as it is now, not the new arguments."""
+    state = conn.execute(
+        "SELECT d.uid AS design_uid, m.status FROM make m JOIN design d ON d.id = m.design_id"
+        " WHERE m.id = ?",
+        (make_id,),
+    ).fetchone()
+    return ok_result(
+        "queue",
+        {
+            "design": state["design_uid"],
+            "make": make_uid,
+            "status": state["status"],
+            "created": created,
+        },
+    )
 
 
 def photo(
@@ -274,11 +287,11 @@ def photo(
 
     from library import db as librarydb
 
+    resolved = Path(path).resolve()
+    if not resolved.is_file():
+        raise InvalidArgument("path", path, ["an existing file"], command="library")
     conn = librarydb.open_library(db_path)
     try:
-        resolved = Path(path).resolve()
-        if not resolved.is_file():
-            raise InvalidArgument("path", path, ["an existing file"], command="library")
         column, table, uid = (
             ("make_id", "make", make) if make else ("design_id", "design", design)
         )
@@ -403,6 +416,7 @@ def invoke(name: str, **kwargs: Any) -> ActionResult:
     except (
         sqlite3.Error,
         OSError,
+        RuntimeError,  # printops.db.MigrationError: a mismatched or unreadable migration
     ) as e:  # locked/unreadable database, unwritable data dir
         return error_result(
             name,

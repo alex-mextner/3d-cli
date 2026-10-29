@@ -28,6 +28,7 @@ import re
 import statistics
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -161,6 +162,23 @@ def _num(value: Any, where: str, *, minimum: float | None = None) -> float:
     return float(value)
 
 
+_EPOCH = datetime.min.replace(tzinfo=timezone.utc)
+
+
+def _instant(text: str, where: str) -> datetime:
+    """An ISO-8601 timestamp as an aware datetime (`Z` accepted on 3.10, a naive one is UTC).
+
+    Rows are ordered by this value, so `…:00Z` and `…:00.500Z` compare as the instants they are.
+    """
+    try:
+        value = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as e:
+        raise FitTableError(
+            f"{where}: {text!r} is not an ISO-8601 UTC timestamp"
+        ) from e
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
 def _str_list(value: Any, where: str) -> tuple[str, ...]:
     if not isinstance(value, list) or not all(isinstance(v, str) and v for v in value):
         raise FitTableError(
@@ -240,6 +258,8 @@ def _parse_correction(
         raise FitTableError(
             f"{where}.measured_at: a {source} row needs an ISO-8601 UTC timestamp"
         )
+    if isinstance(measured_at, str):
+        _instant(measured_at, f"{where}.measured_at")
     return Correction(
         delta_mm=_num(raw["delta_mm"], f"{where}.delta_mm"),
         source=source,
@@ -446,7 +466,8 @@ def select_correction(
             c, shape, (fit_type, alias), printer, material, nozzle_mm, layer_height_mm
         )
         if score is not None:
-            scored.append((score, -SOURCES.index(c.source), c.measured_at or "", c))
+            when = _instant(c.measured_at, "measured_at") if c.measured_at else _EPOCH
+            scored.append((score, -SOURCES.index(c.source), when, c))
     if not scored:
         raise FitTableError(
             "no correction row matches (the table needs its default '*' row)"
@@ -622,6 +643,7 @@ def corrections_from_fit_clearance(
     to what the coupon proved. A group with no `free` gap yields no row (the coupon did not bracket the fit).
     press/glue records are validated but not converted: a press result needs an interference sweep.
     """
+    _instant(measured_at, "measured_at")
     tbl = table or load_table()
     free_gaps: dict[tuple[str, str], list[float]] = {}
     for record in records:

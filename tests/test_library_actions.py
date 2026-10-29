@@ -122,6 +122,14 @@ def test_queue_idempotency_hit_reports_the_existing_make_not_the_new_arguments(d
     assert again["data"]["design"] == first["data"]["design"] and again["data"]["status"] == "done"
 
 
+def test_queue_creates_no_design_for_an_idempotent_retry_or_an_unknown_source(dbpath: str) -> None:
+    actions.queue("design-a", db_path=dbpath, source_key="retry")
+    actions.queue("design-b", db_path=dbpath, source_key="retry")
+    assert actions.queue("design-c", source="0000", db_path=dbpath)["errors"][0]["code"] == "not_found"
+    names = [r["name"] for r in librarydb.open_library(dbpath).execute("SELECT name FROM design")]
+    assert names == ["design-a"]
+
+
 def test_photo_refuses_a_path_that_is_not_an_existing_file(dbpath: str, tmp_path: Path) -> None:
     made = actions.queue("case", db_path=dbpath)["data"]["make"]
     for bad in (str(tmp_path / "nope.jpg"), str(tmp_path)):
@@ -142,3 +150,17 @@ def test_invoke_turns_bad_input_into_results_never_exceptions(dbpath: str) -> No
     assert actions.invoke("photo", path="x.jpg", db_path=dbpath)["errors"][0]["code"] == "invalid_argument"
     assert actions.invoke("launch_agent", prompt="x", backend="vim")["errors"][0]["code"] == "invalid_argument"
     assert actions.invoke("queue", bogus=1)["errors"][0]["code"] == "invalid_argument"
+
+
+def test_invoke_turns_a_migration_mismatch_into_a_storage_error(dbpath: str) -> None:
+    conn = librarydb.open_library(dbpath)
+    conn.execute("UPDATE schema_migrations SET checksum = 'tampered'")
+    res = actions.invoke("queue", design="case", db_path=dbpath)
+    assert res["ok"] is False and res["errors"][0]["code"] == "storage_error"
+    assert "MigrationError" in res["errors"][0]["message"]
+
+
+def test_photo_with_a_missing_file_does_not_create_the_database(tmp_path: Path) -> None:
+    db = tmp_path / "never.db"
+    res = actions.invoke("photo", path=str(tmp_path / "nope.jpg"), make="m", db_path=str(db))
+    assert res["errors"][0]["code"] == "invalid_argument" and not db.exists()

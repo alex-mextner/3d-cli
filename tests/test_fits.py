@@ -181,6 +181,26 @@ def test_non_finite_numbers_are_refused_in_records_and_tables() -> None:
         fits.parse_table(table)
 
 
+def test_correction_rows_are_ordered_by_instant_not_by_timestamp_text() -> None:
+    older = Correction(delta_mm=0.01, source="manual", printer="k1se", measured_at="2026-10-24T10:00:00Z")
+    newer = Correction(delta_mm=0.09, source="manual", printer="k1se", measured_at="2026-10-24T10:00:00.500Z")
+    for rows in ([older, newer], [newer, older]):
+        assert fits.resolve("sliding", "planar", "k1se", extra_corrections=rows).clearance_mm == 0.29
+
+
+def test_a_malformed_measured_at_is_refused_in_tables_selection_and_calibration() -> None:
+    table = raw()
+    table["corrections"].append({"printer": "k1se", "material": "*", "delta_mm": 0.1, "source": "manual",
+                                 "measured_at": "yesterday"})
+    with pytest.raises(FitTableError, match="ISO-8601"):
+        fits.parse_table(table)
+    bad = Correction(delta_mm=0.1, source="manual", printer="k1se", measured_at="yesterday")
+    with pytest.raises(FitTableError, match="ISO-8601"):
+        fits.resolve("sliding", "planar", "k1se", extra_corrections=[bad])
+    with pytest.raises(FitTableError, match="ISO-8601"):
+        fits.corrections_from_fit_clearance([], printer="k1se", material="PLA", nozzle_mm=0.4, measured_at="soon")
+
+
 def test_coupon_readings_become_calibration_rows_that_resolve_applies() -> None:
     records = [
         {"fit_type": "sliding", "shape": "planar", "gap_mm": 0.15, "result": "fused"},

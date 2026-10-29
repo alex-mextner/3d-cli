@@ -149,3 +149,18 @@ def test_one_name_with_two_roles_is_refused_in_either_order() -> None:
         with pytest.raises(InvalidArgument, match="one role per part name"):
             legend(order)
     assert list(assign_styles([a, Part("same")])) == ["same"]  # the same declaration twice is fine
+
+
+def test_metadata_tags_that_contradict_each_other_are_refused() -> None:
+    with pytest.raises(InvalidArgument, match="printable"):
+        part_from_metadata("lid", {META_ROLE: "printed", META_PRINTABLE: "false"})
+    with pytest.raises(InvalidArgument, match="printable"):
+        part_from_metadata("bolt", {META_ROLE: "vitamin", META_PRINTABLE: "true"})
+    assert part_from_metadata("lid", {META_ROLE: "printed", META_PRINTABLE: "true"}).printable is True
+    assert part_from_metadata("ghost", {META_ROLE: "stand_in", META_PRINTABLE: "false"}).printable is False
+
+
+def test_reference_source_fields_must_be_strings() -> None:
+    for bad in ({"url": None, "license": "MIT"}, {"url": "https://x", "license": 3}):
+        with pytest.raises(InvalidArgument, match="reference_source"):
+            part_from_dict({"name": "bolt", "role": "vitamin", "reference_source": bad})

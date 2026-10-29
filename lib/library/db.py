@@ -4,7 +4,7 @@ WHAT: one SQLite file (`data_dir()/library/library.db`, or `$THREED_LIBRARY_DB`)
 results, downloaded model sources, designs, makes, photos, publications and relations between them. It reuses
 `printops.db` for the connection (WAL, foreign_keys=ON, `BEGIN IMMEDIATE` transactions) and migrations
 (checksummed `NNNN_<name>.sql`), with its OWN migration directory `lib/library/migrations/` numbered from 0001
-(engine decision: docs/library-db.md).
+(engine decision: docs/contracts/library-db.md).
 
 ACCESSED VIA: `3d library` (`lib/commands/library.py`), `library.actions` and the slices S5/S7/S8 which write
 rows with `insert_row` and read with plain SQL on the `sqlite3.Row` connection.

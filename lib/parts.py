@@ -40,9 +40,8 @@ META_PRINTABLE = "3d:printable"
 _LOG = logging.getLogger("3d.parts")
 _GOLDEN = 0.618033988749895
 _MIN_HUE_GAP = 0.02
-_SHADE_STEPS = (
-    40  # brightness steps from the brightest role look down to the 0.25 floor
-)
+# brightness steps from the brightest role look down to the 0.25 floor
+_SHADE_STEPS = 40
 
 
 class NonPrintableParts(GateFailure):
@@ -132,9 +131,16 @@ def _source_from_dict(name: str, raw: Any) -> ReferenceSource | None:
             ["a mapping with url, license and note"],
             command="parts",
         )
-    return ReferenceSource(
-        str(raw.get("url", "")), str(raw.get("license", "")), str(raw.get("note", ""))
-    )
+    fields = {key: raw.get(key, "") for key in ("url", "license", "note")}
+    bad = [key for key, value in fields.items() if not isinstance(value, str)]
+    if bad:
+        raise InvalidArgument(
+            f"part {name!r}.reference_source.{bad[0]}",
+            repr(fields[bad[0]]),
+            ["a string"],
+            command="parts",
+        )
+    return ReferenceSource(fields["url"], fields["license"], fields["note"])
 
 
 def part_from_dict(raw: Mapping[str, Any]) -> Part:
@@ -169,8 +175,17 @@ def part_from_metadata(name: str, metadata: Mapping[str, str]) -> Part:
     A tag of `3d:printable=false` on an object without a role is read as `stand_in`, never silently as printed.
     """
     role = metadata.get(META_ROLE)
+    tag = metadata.get(META_PRINTABLE)
     if role is None:
-        role = "stand_in" if metadata.get(META_PRINTABLE) == "false" else "printed"
+        role = "stand_in" if tag == "false" else "printed"
+    elif tag is not None and tag != ("true" if role == "printed" else "false"):
+        raise InvalidArgument(
+            f"part {name!r}.{META_PRINTABLE}",
+            tag,
+            ["true" if role == "printed" else "false"],
+            command="parts",
+            extra=f"`{META_PRINTABLE}` contradicts `{META_ROLE}={role}`; fix or drop one of the two tags.",
+        )
     if role in REFERENCE_REQUIRED_ROLES:
         # A 3MF carries only the tag; the source lives in the parts file. Keep the role without raising.
         return Part(
