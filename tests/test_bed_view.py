@@ -456,6 +456,15 @@ def test_guarded_z_move_refuses_everything_that_is_not_an_idle_homed_printer() -
     assert len(ok.scripts) == 1
 
 
+def test_guarded_z_move_refuses_a_gcode_z_that_would_land_elsewhere_under_the_current_offset() -> None:
+    shifted = FakePrinter("complete", 70.0, offset=-190.0)
+    with pytest.raises(V.MoveRefused, match="Z offset changed"):
+        V.guarded_z_move(shifted, to_gcode_z=200.0, target_toolhead_z=200.0)  # planned under offset 0: lands at Z10
+    assert shifted.scripts == []
+    V.guarded_z_move(shifted, to_gcode_z=390.0, target_toolhead_z=200.0)  # recomputed under -190: lands at Z200
+    assert shifted.z == 200.0
+
+
 # ---- the preflight `bed` line uses the moved view --------------------------------------------------
 
 def run_status_in_process(printer: FakePrinter, seen: list[list[str]]) -> Callable[..., subprocess.CompletedProcess[str]]:

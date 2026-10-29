@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import base64
 import json
+import shutil
 import sqlite3
 import tempfile
 from collections.abc import Iterator
@@ -19,6 +20,7 @@ from library import actions, records
 from library import db as librarydb
 from marketplaces.base import MarketplaceError
 from parts import NonPrintableParts
+from printops import db as pdb
 from publishing import execute, flow, guard, offer, offer_run, plan
 from publishing.source import load_source
 from publishing.spec import load_spec
@@ -756,6 +758,7 @@ def test_the_publish_action_plans_by_default_and_reports_refusals(
     c = librarydb.open_library(db)
     records.ensure_design(c, "proj", str(project))
     c.close()
+    before = snapshot(Path(db))
     res = actions.publish("proj", platforms=["thingiverse"], db_path=db)
     assert (
         res["ok"]
@@ -767,13 +770,7 @@ def test_the_publish_action_plans_by_default_and_reports_refusals(
         res["data"]["plan"]["schema"] == "3d.publish/1"
         and res["warnings"][0]["code"] == "dry_run"
     )
-    c = librarydb.open_library(db)
-    try:
-        assert (
-            c.execute("SELECT COUNT(*) FROM publication").fetchone()[0] == 0
-        )  # a plan writes nothing
-    finally:
-        c.close()
+    assert snapshot(Path(db)) == before  # a plan writes nothing and migrates nothing
     three_d_yaml(project, PARTS)
     (project / "print" / "probe_pcb.stl").write_bytes(b"solid\nendsolid\n")
     blocked = actions.invoke(
@@ -788,6 +785,73 @@ def test_the_publish_action_plans_by_default_and_reports_refusals(
         actions.invoke("publish", design="ghost", db_path=db)["errors"][0]["code"]
         == "error"
     )
+
+
+def v1_library(path: Path, project_dir: Path | None) -> None:
+    """A genuine library as an older release left it: only migration 0001 applied, one design `proj`."""
+    only_v1 = path.parent / "migrations-v1"
+    only_v1.mkdir()
+    shutil.copy(librarydb.MIGRATIONS_DIR / "0001_library.sql", only_v1)
+    c = pdb.open_db(path)
+    try:
+        assert pdb.migrate(c, only_v1) == [1]
+        librarydb.insert_row(
+            c,
+            "design",
+            {"name": "proj", "project_dir": str(project_dir) if project_dir else None},
+        )
+    finally:
+        c.close()
+
+
+def snapshot(path: Path) -> tuple[list[str], int, list[tuple[int, str]]]:
+    """Everything the file holds: a full SQL dump, `user_version` and the applied migrations."""
+    raw = sqlite3.connect(path)
+    try:
+        return (
+            list(raw.iterdump()),
+            raw.execute("PRAGMA user_version").fetchone()[0],
+            [
+                (int(v), str(s))
+                for v, s in raw.execute(
+                    "SELECT version, checksum FROM schema_migrations ORDER BY version"
+                )
+            ],
+        )
+    finally:
+        raw.close()
+
+
+@pytest.mark.parametrize("with_project", [True, False])
+def test_a_dry_run_publish_neither_migrates_nor_writes_an_older_library(
+    tmp_path: Path, with_project: bool
+) -> None:
+    project = make_project(tmp_path)
+    db = tmp_path / "library.db"
+    v1_library(db, project if with_project else None)
+    before = snapshot(db)
+    assert [v for v, _ in before[2]] == [1]
+    res = actions.publish("proj", platforms=["thingiverse"], db_path=str(db))
+    assert res["ok"] is with_project
+    if not with_project:
+        assert res["errors"][0]["code"] == "no_project"
+    assert snapshot(db) == before
+
+
+def test_publishing_for_real_still_migrates_the_library(tmp_path: Path) -> None:
+    db = tmp_path / "library.db"
+    v1_library(db, None)
+    res = actions.publish("proj", dry_run=False, db_path=str(db))
+    assert res["errors"][0]["code"] == "no_project"
+    assert [v for v, _ in snapshot(db)[2]] == [1, 10, 30]
+
+
+def test_a_dry_run_publish_of_a_design_in_a_missing_library_creates_no_library(
+    tmp_path: Path,
+) -> None:
+    db = tmp_path / "never" / "library.db"
+    res = actions.invoke("publish", design="proj", db_path=str(db))
+    assert not res["ok"] and not db.parent.exists()
 
 
 def test_the_photo_action_registers_files_and_is_idempotent_under_a_source_key(

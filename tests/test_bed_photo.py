@@ -4,6 +4,7 @@ after each grab, XDG dirs are tmp."""
 
 from __future__ import annotations
 
+import json
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -431,6 +432,85 @@ def test_restore_refuses_when_the_offset_changes_again_before_the_send(
     assert doc["restored"] is False and "Z offset changed" in doc["restore_error"]
     pending = bed_view._read_pending("u1")
     assert pending is not None and pending["z"] == 200.0  # the recovery marker survives
+    assert pending["offset"] == 0.0  # the frame the Z was found under
+    # a later recovery (what a retried capture runs first) goes back to PHYSICAL Z200 in the new frame:
+    # the saved G-code Z200 would land at physical Z10, below the floor, before failure is even reported
+    note = bed_view.recover_pending(printer, "u1", time.time())
+    assert note is not None and "put the bed back to Z 200.0" in note
+    assert moves(printer) == ["G1 Z70.000 F600", "G1 Z390.000 F600"]
+    assert printer.z == 200.0 and bed_view._read_pending("u1") is None
+
+
+def _record_landings(printer: FakePrinter) -> list[float]:
+    landed: list[float] = []
+    printer.on_script = lambda p: landed.append(p.z)
+    return landed
+
+
+def test_a_retried_capture_after_a_refused_restore_never_lands_below_the_floor(
+    tmp_path: Path,
+) -> None:
+    printer = FakePrinter(z=70.0)  # left lifted by the refused restore ...
+    printer.offset = -190.0  # ... under an offset that changed since
+    bed_view._write_pending(
+        "u1",
+        bed_view.Motion("complete", "complete", 200.0, 200.0, "xyz", True, None),
+        time.time(),
+    )
+    landed = _record_landings(printer)
+    doc = shoot(printer, tmp_path / "t.jpg", lift=70.0)
+    assert moves(printer) == [
+        "G1 Z390.000 F600",
+        "G1 Z260.000 F600",
+        "G1 Z390.000 F600",
+    ]
+    assert landed == [200.0, 70.0, 200.0] and min(landed) >= 35.0
+    assert doc["restored"] and bed_view._read_pending("u1") is None
+
+
+def test_an_older_marker_with_only_the_gcode_z_is_recovered_in_the_current_frame() -> (
+    None
+):
+    printer = FakePrinter(z=70.0)
+    printer.offset = -190.0
+    marker = bed_view._view_path("u1", ".json")
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(
+        json.dumps({"printer": "u1", "z": 200.0, "gcode_z": 200.0, "ts": time.time()})
+    )
+    landed = _record_landings(printer)
+    assert bed_view.recover_pending(printer, "u1", time.time()) is not None
+    assert moves(printer) == ["G1 Z390.000 F600"] and landed == [200.0]
+    assert bed_view._read_pending("u1") is None
+
+
+def test_recovery_refuses_without_moving_when_the_offset_changes_before_the_send() -> (
+    None
+):
+    printer = FakePrinter(z=70.0)
+    bed_view._write_pending(
+        "u1",
+        bed_view.Motion("complete", "complete", 200.0, 200.0, "xyz", True, None),
+        time.time(),
+    )
+    reads = 0
+
+    def read(adapter: Any) -> bed_view.Motion:
+        nonlocal reads
+        reads += 1
+        if (
+            reads == 4
+        ):  # the read of the guarded move itself, after the target was computed
+            printer.offset = -190.0
+        return bed_view.read_motion(adapter)
+
+    note = bed_view.recover_pending(printer, "u1", time.time(), read)
+    assert note is not None and "Z offset changed" in note
+    assert printer.scripts == [] and printer.z == 70.0  # nothing was sent
+    pending = bed_view._read_pending("u1")
+    assert (
+        pending is not None and pending["z"] == 200.0
+    )  # the marker stays for the next try
 
 
 @pytest.mark.parametrize("dry_run", [True, False])

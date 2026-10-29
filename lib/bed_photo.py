@@ -15,8 +15,9 @@ WHAT (stdlib only; the pixels/calibration stay in bed_state.py, loaded lazily by
                         (a marker that cannot be undone is never overwritten: refuse), refuse unless the
                         printer is idle/complete/cancelled with Z homed, decide the target Z (`--lift MM` or
                         `auto`), write the displaced-Z marker, `guarded_z_move` (refused when the gcode Z
-                        offset changed since the plan), settle, grab a FRESH frame, restore Z in a `finally`.
-                        The photo is saved even when the restore fails; the failure is returned.
+                        offset changed since the plan: the G-code Z must still land at the planned Z), settle,
+                        grab a FRESH frame, restore the PHYSICAL Z found (`bed_view.restore_physical_z`, in the
+                        offset now in force) in a `finally`. The photo is saved even when the restore fails.
 
 RULES (same as bed_view): the only writes are `G90`, `G1 Z<z> F<feed>`, `M400` through `guarded_z_move` (it
   re-reads the printer right before each send); nothing moves while a job owns the bed; the move is bounded by
@@ -31,7 +32,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -45,9 +46,6 @@ FRESH_TRIES = (
     6  # grabs of the camera for a frame that differs from the one before the move
 )
 LIFT_TOLERANCE_MM = 0.15  # already this close to the target: no move
-OFFSET_TOLERANCE_MM = (
-    0.01  # the gcode Z offset moved more than this since the plan: refuse
-)
 
 # The displaced-Z marker and the "may the bed move" decision are bed_view's own (private) helpers: this module
 # is their second user and must not copy them, or the two flows would disagree about what is safe.
@@ -335,48 +333,6 @@ def _new_doc(device: Any, plan: LiftPlan, *, dry_run: bool) -> dict[str, Any]:
     }
 
 
-def _same_coordinate_frame(
-    read: Callable[[Any], bed_view.Motion], planned: bed_view.Motion
-) -> Callable[[Any], bed_view.Motion]:
-    """`read` for `guarded_z_move`: it reads right before the G-code is sent, so refusing there closes the gap
-    between the plan and the send. A changed gcode Z offset makes the planned `G1 Z` land elsewhere."""
-
-    def checked(adapter: Any) -> bed_view.Motion:
-        now = read(adapter)
-        if abs(now.offset - planned.offset) > OFFSET_TOLERANCE_MM:
-            raise bed_view.MoveRefused(
-                f"the Z offset changed from {planned.offset:g} to {now.offset:g} since the plan; "
-                "the planned G-code Z would land at another height"
-            )
-        return now
-
-    return checked
-
-
-def _restore_original_z(
-    adapter: Any, original: bed_view.Motion, read: Callable[[Any], bed_view.Motion]
-) -> str | None:
-    """Put the bed back to the PHYSICAL Z it was found at, in the coordinate frame in force NOW.
-
-    The G-code Z recorded before the lift is only valid under the Z offset of that time: replayed after an
-    offset change it lands at another height (possibly below the clearance floor, into a part). So the offset is
-    re-read first and the G-code target is recomputed from the original toolhead Z; the move itself is refused
-    when the offset changes again between this read and the send. A refusal is returned as the restore error
-    (the caller keeps the recovery marker) and nothing was sent."""
-    try:
-        now = read(adapter)
-    except (
-        Exception
-    ) as exc:  # an unreadable printer is reported, never hidden behind the photo
-        return f"restore failed: {exc.__class__.__name__}: {exc}"
-    if (
-        original.z is not None
-        and abs(now.offset - original.offset) > OFFSET_TOLERANCE_MM
-    ):
-        original = replace(original, gcode_z=original.z - now.offset)
-    return bed_view.restore_z(adapter, original, read=_same_coordinate_frame(read, now))
-
-
 def _lifted_photo(
     device: Any,
     adapter: Any,
@@ -409,7 +365,7 @@ def _lifted_photo(
                 floor=plan.floor,
                 ceiling=plan.ceiling,
                 target_toolhead_z=plan.target_z,
-                read=_same_coordinate_frame(read, m),
+                read=read,
             )
             doc["moved"] = True
             sleep(settle_s)
@@ -426,7 +382,11 @@ def _lifted_photo(
             ) from exc
         finally:
             if attempted:
-                restore_error = _restore_original_z(adapter, m, read)
+                restore_error = (
+                    "the Z it was found at is unknown"
+                    if m.z is None
+                    else bed_view.restore_physical_z(adapter, m.z, read=read)
+                )
                 if restore_error is None:
                     _clear_displaced(device.name)
                 else:

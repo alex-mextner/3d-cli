@@ -5,16 +5,19 @@ licence is read where it was recorded: a `model.json` carries the licence the ma
 time; a URL that the library knows as a `model_source` carries the licence S5's download stored. Only when
 neither says anything is the marketplace asked (the existing `remix.marketplace_license`, network).
 
-Stdlib only; the marketplace URL matchers are imported lazily.
+Stdlib only. The marketplace URL routes are matched strictly here (see `split_url`), not by the loose
+`marketplaces.*.match` prefix matchers: a source URL is later opened by a browser.
 """
 
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from errors import InputNotFound, InvalidArgument, ThreeDError
 from publishing.remix import LicenseLookup, marketplace_license
@@ -42,22 +45,94 @@ class SourceRef:
         }
 
 
-def split_url(url: str) -> tuple[str, str]:
-    """(site, model id) of a marketplace URL, or ("", "") for an unsupported one. No network."""
-    from marketplaces import catalog
+_SLUG = r"[A-Za-z0-9][A-Za-z0-9._-]*"
+# Exact model-page route of each marketplace: (hostnames, path pattern whose group 1 is the model id). A route
+# has no query, fragment or sub-path, so anything else is not "the model page" the browser flows would open.
+_MODEL_PAGES: dict[str, tuple[frozenset[str], re.Pattern[str]]] = {
+    "printables": (
+        frozenset({"printables.com", "www.printables.com"}),
+        re.compile(rf"/(?:[a-z]{{2}}/)?model/(\d+)(?:-{_SLUG})?/?"),
+    ),
+    "makerworld": (
+        frozenset({"makerworld.com", "www.makerworld.com"}),
+        re.compile(rf"/(?:[a-z]{{2}}(?:-[a-z]{{2}})?/)?models/(\d+)(?:-{_SLUG})?/?"),
+    ),
+    "thingiverse": (
+        frozenset({"thingiverse.com", "www.thingiverse.com"}),
+        re.compile(r"/thing:(\d+)/?"),
+    ),
+    "cults": (
+        frozenset({"cults3d.com", "www.cults3d.com"}),
+        re.compile(rf"/(?:[a-z]{{2}}/)?3d-model/{_SLUG}/({_SLUG})/?"),
+    ),
+}
+_UNSAFE_URL_CHARS = re.compile(r"[\s\x00-\x1f\x7f\\]")
 
-    for client in catalog.CLIENTS.values():
-        ref = client.match(url)
-        if ref:
-            return client.site, str(ref)
+
+def split_url(url: str) -> tuple[str, str]:
+    """(site, model id) of a canonical marketplace model-page URL, or ("", "") for anything else. No network.
+
+    Canonical means `https://[www.]HOST/<the site's model route>` and nothing more: no userinfo or port, no
+    query or fragment, no `.`/`..`/percent-encoded segments, no sub-path. A URL that merely starts like a model
+    page (`.../model/311253/../../model/999`) names another page once a browser normalises it, so the id read
+    from the path must be the id of the page that is opened."""
+    if _UNSAFE_URL_CHARS.search(url):
+        return "", ""
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return "", ""
+    if (
+        parts.scheme != "https"
+        or parts.query
+        or parts.fragment
+        or "?" in url
+        or "#" in url
+    ):
+        return "", ""
+    host = parts.netloc.lower()
+    for site, (hosts, route) in _MODEL_PAGES.items():
+        found = route.fullmatch(parts.path) if host in hosts else None
+        if found:
+            return site, found.group(1)
     return "", ""
+
+
+def is_marketplace_host(url: str) -> bool:
+    """Whether `url` names a supported marketplace domain anywhere (decides if a non-canonical URL is a
+    malformed model page rather than an unrelated link). Deliberately a substring test: lookalike hosts and
+    `host\\@evil` backslash tricks must not slip through as "some other site"."""
+    lowered = url.lower()
+    return any(
+        h.removeprefix("www.") in lowered
+        for hosts, _ in _MODEL_PAGES.values()
+        for h in hosts
+    )
+
+
+def require_model_page(url: str, shown: str) -> tuple[str, str]:
+    """`split_url`, but a URL that mentions a marketplace host and is not that site's exact model page is
+    refused (InvalidArgument, exit 2) instead of passing as an unknown site. Other URLs give ("", "")."""
+    site, model_id = split_url(url)
+    if not site and is_marketplace_host(url):
+        raise InvalidArgument(
+            "--of",
+            shown,
+            [
+                "the plain model page of a marketplace model, e.g. "
+                "https://www.printables.com/model/311253-spoon-drawer-pull "
+                f"(no query, fragment, extra path or `..`; got {url!r})"
+            ],
+            command="models",
+        )
+    return site, model_id
 
 
 def _checked_identity(path: Path, src: dict[str, Any], url: str) -> tuple[str, str]:
     """(site, id) of a model.json source, derived from its URL. A declared site/id that the URL does not
     back is forged or corrupt: the make/remix flows would open that URL, so it must be a marketplace page
     of the declared model."""
-    site, model_id = split_url(url)
+    site, model_id = require_model_page(url, str(path))
     declared_site, declared_id = str(src.get("site", "")), str(src.get("id", ""))
     if (declared_site and declared_site != site) or (
         declared_id and declared_id != model_id
@@ -118,7 +193,7 @@ def load_source(of: str, conn: sqlite3.Connection | None = None) -> SourceRef:
         return _from_json(path)
     if not of.startswith(("http://", "https://")):
         raise InputNotFound(of, command="models")
-    site, model_id = split_url(of)
+    site, model_id = require_model_page(of, of)
     if conn is not None and site:
         row = conn.execute(
             "SELECT url, license, author FROM model_source WHERE site = ? AND model_id = ?",

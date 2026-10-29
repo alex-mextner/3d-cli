@@ -107,6 +107,126 @@ def test_a_model_json_source_takes_site_and_id_from_its_url(tmp_path: Path) -> N
     assert (src.site, src.model_id, src.url) == ("printables", "311253", PRINTABLES)
 
 
+# site -> (declared id, canonical model-page URLs, URLs that start like that page but name another/no page)
+MODEL_PAGES: dict[str, tuple[str, tuple[str, ...], tuple[str, ...]]] = {
+    "printables": (
+        "311253",
+        (
+            PRINTABLES,
+            "https://printables.com/model/311253",
+            "https://www.printables.com/de/model/311253-spoon-drawer-pull/",
+        ),
+        (
+            "https://www.printables.com/model/311253/../../model/999-other",
+            "https://www.printables.com/model/311253-spoon/../999-other",
+            "https://www.printables.com/model/311253/./../999",
+            "https://www.printables.com/model/311253%2f..%2f..%2fmodel%2f999-other",
+            "https://www.printables.com/model/311253%2F%2E%2E/999",
+            "https://www.printables.com/model/311253-spoon?next=/model/999-other",
+            "https://www.printables.com/model/311253-spoon#/model/999",
+            "https://www.printables.com/model/311253-spoon?",
+            "https://www.printables.com/model/311253-spoon/comments",
+            "https://attacker@www.printables.com/model/311253-spoon",
+            "https://www.printables.com:8443/model/311253-spoon",
+            "https://www.printables.com\\@attacker.example/model/311253-spoon",
+            "http://www.printables.com/model/311253-spoon",
+            "https://www.printables.com/model/311253-spoon\n/../999",
+        ),
+    ),
+    "makerworld": (
+        "4242",
+        (
+            "https://makerworld.com/en/models/4242-spoon-pull",
+            "https://makerworld.com/models/4242",
+        ),
+        (
+            "https://makerworld.com/en/models/4242/../../models/999-other",
+            "https://makerworld.com/en/models/4242-spoon-pull?from=search",
+            "https://makerworld.com/en/models/4242#profile/../999",
+            "https://makerworld.com/en/models/4242-spoon-pull/comments",
+            "https://makerworld.com/en/models/4242%2f..%2f999",
+        ),
+    ),
+    "thingiverse": (
+        "1234",
+        (
+            "https://www.thingiverse.com/thing:1234",
+            "https://thingiverse.com/thing:1234/",
+        ),
+        (
+            "https://www.thingiverse.com/thing:1234/../thing:999",
+            "https://www.thingiverse.com/thing:1234/files",
+            "https://www.thingiverse.com/thing:1234?ref=x",
+            "https://www.thingiverse.com/thing:1234%2f..%2fthing:999",
+            "https://www.thingiverse.com/thing:1234#/../thing:999",
+        ),
+    ),
+    "cults": (
+        "spoon-pull",
+        (
+            CULTS,
+            "https://cults3d.com/3d-model/home/spoon-pull",
+        ),
+        (
+            "https://cults3d.com/en/3d-model/home/spoon-pull/../other-model",
+            "https://cults3d.com/en/3d-model/home/spoon-pull/../../../3d-model/art/other",
+            "https://cults3d.com/en/3d-model/home/spoon-pull?utm=x",
+            "https://cults3d.com/en/3d-model/home/spoon-pull#frag",
+            "https://cults3d.com/en/3d-model/home/spoon-pull%2f..%2fother",
+            "https://cults3d.com/en/3d-model/home/spoon-pull/reviews",
+        ),
+    ),
+}
+CANONICAL = [
+    (site, model_id, url)
+    for site, (model_id, urls, _) in MODEL_PAGES.items()
+    for url in urls
+]
+NON_CANONICAL = [
+    (site, model_id, url)
+    for site, (model_id, _, urls) in MODEL_PAGES.items()
+    for url in urls
+]
+
+
+@pytest.mark.parametrize(("site", "model_id", "url"), NON_CANONICAL)
+def test_a_marketplace_url_that_is_not_the_exact_model_page_is_refused_with_exit_2_before_any_plan(
+    tmp_path: Path, site: str, model_id: str, url: str
+) -> None:
+    """`/model/311253/../../model/999-other` starts like model 311253 but a browser opens model 999-other:
+    the declared id must be the id of the page that is opened, so the URL is refused outright."""
+    path = write_model_json(tmp_path / "dl", site=site, model_id=model_id, url=url)
+    with pytest.raises(InvalidArgument) as from_json:
+        load_source(str(path))
+    assert from_json.value.exit_code == 2
+    with pytest.raises(InvalidArgument) as from_flag:
+        load_source(url)
+    assert from_flag.value.exit_code == 2
+
+
+@pytest.mark.parametrize(("site", "model_id", "url"), NON_CANONICAL)
+def test_a_non_canonical_url_is_refused_even_when_the_model_json_declares_no_identity(
+    tmp_path: Path, site: str, model_id: str, url: str
+) -> None:
+    path = tmp_path / "dl" / "model.json"
+    path.parent.mkdir()
+    path.write_text(json.dumps({"source": {"url": url}}), encoding="utf-8")
+    with pytest.raises(InvalidArgument):
+        load_source(str(path))
+
+
+@pytest.mark.parametrize(("site", "model_id", "url"), CANONICAL)
+def test_a_canonical_model_page_yields_the_site_and_id_the_marketplace_client_reads(
+    tmp_path: Path, site: str, model_id: str, url: str
+) -> None:
+    from marketplaces import catalog
+
+    path = write_model_json(tmp_path / "dl", site=site, model_id=model_id, url=url)
+    for src in (load_source(str(path)), load_source(url)):
+        assert (src.site, src.model_id, src.url) == (site, model_id, url)
+    assert catalog.CLIENTS[site].match(url) == model_id
+
+
 # ------------------------------------------------------------------------------------------ make planning
 def test_makes_of_different_models_do_not_share_a_browser_session(
     tmp_path: Path,

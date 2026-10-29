@@ -24,9 +24,12 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Callable, Mapping, Sequence
-from typing import Any, TypedDict
+from typing import TYPE_CHECKING, Any, TypedDict
 
 from errors import InvalidArgument, MissingDependency, ThreeDError
+
+if TYPE_CHECKING:
+    from publishing.plan import Evaluation
 
 SCHEMA = "3d.action/1"
 SEARCH_KINDS = ("wide", "narrow", "followup", "rewrite", "user")
@@ -204,60 +207,130 @@ def rank(
     """
     if mode not in RANK_MODES:
         raise InvalidArgument("mode", mode, list(RANK_MODES), command="models")
-    from library import rankflow, rankstore
-    from library import db as librarydb
-    from library.llm import load_llm_config, with_overrides
-
     if mode == "deterministic":
-        conn = librarydb.open_library(db_path)
-        try:
-            row = rankstore.session_row(conn, session)
-            seen: set[tuple[str, str]] = set()
-            ranked: list[dict[str, Any]] = []
-            for s in rankstore.tree_sessions(conn, int(row["id"])):
-                for r in rankstore.session_results(conn, int(s["id"])):
-                    key = (r["site"], r["model_id"])
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    uid = conn.execute(
-                        "SELECT uid FROM search_result WHERE session_id = ? AND site = ? AND model_id = ?",
-                        (s["id"], r["site"], r["model_id"]),
-                    ).fetchone()["uid"]
-                    ranked.append(
-                        {
-                            "result": uid,
-                            "session": s["uid"],
-                            "site": r["site"],
-                            "model_id": r["model_id"],
-                            "rank": len(ranked) + 1,
-                            "score": r["score"],
-                            "verdict": r["verdict"],
-                            "rationale": r["rationale"],
-                        }
-                    )
-            data: dict[str, Any] = {
-                "session": row["uid"],
-                "query": row["query"],
-                "ranked": ranked[:limit] if limit else ranked,
-                "counts": {"results": len(ranked)},
-                "queries": [
-                    p
-                    for p in rankstore.list_plan_queries(conn, int(row["id"]))
-                    if p["kind"] != "followup"
-                ],
-                "questions": rankstore.list_questions(conn, int(row["id"])),
-                "followups": [
-                    p
-                    for p in rankstore.list_plan_queries(conn, int(row["id"]))
-                    if p["kind"] == "followup"
-                ],
-                "llm": None,
-            }
-        finally:
-            conn.close()
-        return ok_result("rank", data)
+        return _rank_deterministic(session, limit, db_path)
+    return _rank_llm(
+        session,
+        limit=limit,
+        db_path=db_path,
+        classifier=classifier,
+        planner=planner,
+        rewrite=rewrite,
+        answers=answers,
+        follow=follow,
+        refresh=refresh,
+        require=require,
+    )
 
+
+def _ranked_entry(
+    result: str | None,
+    session: str,
+    site: str,
+    model_id: str,
+    position: int,
+    score: Any,
+    verdict: Any,
+    rationale: Any,
+) -> dict[str, Any]:
+    """One `ranked` row of `rank`'s `data`."""
+    return {
+        "result": result,
+        "session": session,
+        "site": site,
+        "model_id": model_id,
+        "rank": position,
+        "score": score,
+        "verdict": verdict,
+        "rationale": rationale,
+    }
+
+
+def _plan_queries(conn: Any, session_id: int, *, followup: bool) -> list[Any]:
+    """The saved plan queries of a search session that are follow-ups (or, with `followup=False`, are not)."""
+    from library import rankstore
+
+    return [
+        p
+        for p in rankstore.list_plan_queries(conn, session_id)
+        if (p["kind"] == "followup") == followup
+    ]
+
+
+def _stored_ranking(conn: Any, root_id: int) -> list[dict[str, Any]]:
+    """Results of a search tree in stored order, first occurrence of each (site, model_id) only."""
+    from library import rankstore
+
+    seen: set[tuple[str, str]] = set()
+    ranked: list[dict[str, Any]] = []
+    for s in rankstore.tree_sessions(conn, root_id):
+        for r in rankstore.session_results(conn, int(s["id"])):
+            key = (r["site"], r["model_id"])
+            if key in seen:
+                continue
+            seen.add(key)
+            uid = conn.execute(
+                "SELECT uid FROM search_result WHERE session_id = ? AND site = ? AND model_id = ?",
+                (s["id"], r["site"], r["model_id"]),
+            ).fetchone()["uid"]
+            ranked.append(
+                _ranked_entry(
+                    uid,
+                    s["uid"],
+                    r["site"],
+                    r["model_id"],
+                    len(ranked) + 1,
+                    r["score"],
+                    r["verdict"],
+                    r["rationale"],
+                )
+            )
+    return ranked
+
+
+def _rank_deterministic(
+    session: str, limit: int | None, db_path: str | None
+) -> ActionResult:
+    """`rank` in `deterministic` mode: the stored order, no model."""
+    from library import db as librarydb
+    from library import rankstore
+
+    conn = librarydb.open_library(db_path)
+    try:
+        row = rankstore.session_row(conn, session)
+        ranked = _stored_ranking(conn, int(row["id"]))
+        data: dict[str, Any] = {
+            "session": row["uid"],
+            "query": row["query"],
+            "ranked": ranked[:limit] if limit else ranked,
+            "counts": {"results": len(ranked)},
+            "queries": _plan_queries(conn, int(row["id"]), followup=False),
+            "questions": rankstore.list_questions(conn, int(row["id"])),
+            "followups": _plan_queries(conn, int(row["id"]), followup=True),
+            "llm": None,
+        }
+    finally:
+        conn.close()
+    return ok_result("rank", data)
+
+
+def _rank_llm(
+    session: str,
+    *,
+    limit: int | None,
+    db_path: str | None,
+    classifier: str | None,
+    planner: str | None,
+    rewrite: bool,
+    answers: Mapping[str, str] | None,
+    follow: Sequence[int],
+    refresh: bool,
+    require: bool,
+) -> ActionResult:
+    """`rank` in `llm` mode: run the ranking pipeline on the saved search."""
+    from library import db as librarydb
+    from library import rankflow, rankstore
+    from library.llm import load_llm_config, with_overrides
     from library.search import SearchOptions
 
     config = with_overrides(load_llm_config(), classifier=classifier, planner=planner)
@@ -293,24 +366,20 @@ def rank(
                 (row["id"], row["id"]),
             )
         }
-        followups = [
-            p
-            for p in rankstore.list_plan_queries(conn, int(row["id"]))
-            if p["kind"] == "followup"
-        ]
+        followups = _plan_queries(conn, int(row["id"]), followup=True)
     finally:
         conn.close()
     ranked_out = [
-        {
-            "result": results.get((e["site"], e["id"])),
-            "session": e["search"],
-            "site": e["site"],
-            "model_id": e["id"],
-            "rank": n,
-            "score": e["score"],
-            "verdict": e["verdict"],
-            "rationale": e["rationale"],
-        }
+        _ranked_entry(
+            results.get((e["site"], e["id"])),
+            e["search"],
+            e["site"],
+            e["id"],
+            n,
+            e["score"],
+            e["verdict"],
+            e["rationale"],
+        )
         for n, e in enumerate(done["ranking"], start=1)
     ]
     data = {
@@ -438,8 +507,6 @@ def launch_agent(
     started: bool, pid | tmux | exit_code}`.
     """
     import os
-    import shutil
-    import sys
     from pathlib import Path
 
     from library import launch
@@ -457,11 +524,7 @@ def launch_agent(
     ctx = dict(context or {})
     key = str(ctx.get("session") or "adhoc")
     plan = launch.plan_agent(prompt, cwd=work, backend=chosen, bundle_key=key)
-    if mode == "auto":
-        if sys.stdin.isatty() and sys.stdout.isatty():
-            mode = "attach"
-        else:
-            mode = "tmux" if shutil.which("tmux") else "detached"
+    mode = _agent_mode(mode)
     data: dict[str, Any] = {
         "backend": plan.backend,
         "command": plan.argv,
@@ -485,6 +548,18 @@ def launch_agent(
         )
     data["started"] = True
     return ok_result("launch_agent", data)
+
+
+def _agent_mode(mode: str) -> str:
+    """`auto` resolved to attach (on a terminal), else tmux (when installed), else detached; others unchanged."""
+    import shutil
+    import sys
+
+    if mode != "auto":
+        return mode
+    if sys.stdin.isatty() and sys.stdout.isatty():
+        return "attach"
+    return "tmux" if shutil.which("tmux") else "detached"
 
 
 def open_browser(
@@ -530,10 +605,6 @@ def preview(
     `blocks` as the fallback, nothing without a TTY); the picture is fetched and encoded about `cols` cells wide.
     `data.image`: `{url, protocol, sequence}`; `sequence` is null when there is no picture or no support. Read-only.
     """
-    import sys
-
-    from library import textview
-
     if image not in (None, "auto", "kitty", "iterm2", "sixel", "blocks"):
         raise InvalidArgument(
             "image",
@@ -541,11 +612,22 @@ def preview(
             ["auto", "kitty", "iterm2", "sixel", "blocks"],
             command="models",
         )
+    data = _preview_details(card)
+    warnings: list[ActionIssue] = []
+    if image is not None and card.get("image"):
+        warnings = _preview_image(card, image, cols, data["image"])
+    return ok_result("preview", data, warnings)
+
+
+def _preview_details(card: Mapping[str, Any]) -> dict[str, Any]:
+    """The picture-less `data` of `preview` for one result card."""
+    from library import textview
+
     facts = card.get("analytics") or {}
     files = [
         {k: f.get(k) for k in ("name", "size", "class")} for f in card.get("files", [])
     ]
-    data: dict[str, Any] = {
+    return {
         "site": card.get("site"),
         "id": card.get("id"),
         "title": card.get("title"),
@@ -577,31 +659,38 @@ def preview(
         "rationale": card.get("rationale"),
         "image": {"url": card.get("image") or None, "protocol": None, "sequence": None},
     }
-    warnings: list[ActionIssue] = []
-    if image is not None and card.get("image"):
-        from cli import termimage
-        from library import images as imagelib
 
-        protocol = (
-            termimage.preview_protocol(is_tty=sys.stdout.isatty())
-            if image == "auto"
-            else image
+
+def _preview_image(
+    card: Mapping[str, Any], image: str, cols: int, slot: dict[str, Any]
+) -> list[ActionIssue]:
+    """Fetch and encode the card's picture into `slot` (`protocol`, `sequence`); the warnings it raised."""
+    import sys
+
+    from cli import termimage
+    from library import images as imagelib
+
+    protocol = (
+        termimage.preview_protocol(is_tty=sys.stdout.isatty())
+        if image == "auto"
+        else image
+    )
+    if protocol is None:
+        return []
+    shown = imagelib.render_images(
+        [(str(card.get("site")), str(card["image"]))], protocol, cols=cols
+    )
+    sequence = shown.get(str(card["image"]))
+    slot["protocol"] = protocol
+    slot["sequence"] = sequence
+    if sequence is not None:
+        return []
+    return [
+        issue(
+            "image_unavailable",
+            "the picture could not be fetched or encoded; details only",
         )
-        if protocol is not None:
-            shown = imagelib.render_images(
-                [(str(card.get("site")), str(card["image"]))], protocol, cols=cols
-            )
-            sequence = shown.get(str(card["image"]))
-            data["image"]["protocol"] = protocol
-            data["image"]["sequence"] = sequence
-            if sequence is None:
-                warnings.append(
-                    issue(
-                        "image_unavailable",
-                        "the picture could not be fetched or encoded; details only",
-                    )
-                )
-    return ok_result("preview", data, warnings)
+    ]
 
 
 def queue(
@@ -792,6 +881,31 @@ def photo(
         conn.close()
 
 
+def _publish_design(db_path: str | None, design: str, *, write: bool) -> sqlite3.Row:
+    """The design row `publish` acts on. A plan only reads: the library is opened without migrating or
+    creating it (as `flow.prepare` does); only a real publish (`write`) opens it migrating."""
+    from library import records
+    from publishing import flow
+
+    with flow.library(db_path, create=write) as conn:
+        if conn is None:
+            raise records.RecordNotFound("design", design, command="publish")
+        return records.resolve(conn, "design", design, command="publish")
+
+
+def _refused_plan(ev: Evaluation, data: dict[str, Any]) -> ActionResult | None:
+    """The `ok: false` result of a plan that must not be sent (the gate message, then every problem), if any."""
+    refusals = [ev.gate.message] if ev.gate is not None else []
+    refusals += ev.all_problems()
+    if not refusals:
+        return None
+    return error_result(
+        "publish",
+        [issue("refused", r, ["Fix it, then run the plan again."]) for r in refusals],
+        data,
+    )
+
+
 def publish(
     design: str,
     *,
@@ -816,15 +930,9 @@ def publish(
     """
     from pathlib import Path
 
-    from library import db as librarydb
-    from library import records
     from publishing import flow, plan
 
-    conn = librarydb.open_library(db_path)
-    try:
-        row = records.resolve(conn, "design", design, command="publish")
-    finally:
-        conn.close()
+    row = _publish_design(db_path, design, write=not dry_run)
     if not row["project_dir"]:
         return error_result(
             "publish",
@@ -856,17 +964,9 @@ def publish(
         "publications": [],
         "plan": doc,
     }
-    if prep.ev.gate is not None or prep.ev.all_problems():
-        refusals = [prep.ev.gate.message] if prep.ev.gate is not None else []
-        refusals += list(prep.ev.all_problems())
-        return error_result(
-            "publish",
-            [
-                issue("refused", r, ["Fix it, then run the plan again."])
-                for r in refusals
-            ],
-            data,
-        )
+    refused = _refused_plan(prep.ev, data)
+    if refused is not None:
+        return refused
     if dry_run:
         data["publications"] = [
             {"platform": p.platform, "state": "planned", "url": None}
