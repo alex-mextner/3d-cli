@@ -157,6 +157,16 @@ def test_a_symlinked_print_folder_is_not_scanned(tmp_path: Path) -> None:
     assert "private.scad" not in [f.name for f in select_files(project).files]
 
 
+def test_a_print_folder_linked_to_references_is_not_scanned(tmp_path: Path) -> None:
+    project = make_project(tmp_path)
+    refs = project / "references"
+    refs.mkdir(exist_ok=True)
+    (refs / "original.scad").write_text("cube(2);", encoding="utf-8")
+    shutil.rmtree(project / "print")
+    (project / "print").symlink_to(refs, target_is_directory=True)
+    assert "original.scad" not in [f.name for f in select_files(project).files]
+
+
 def test_whitespace_only_required_fields_are_refused(tmp_path: Path) -> None:
     project = make_project(tmp_path, YAML.replace("title: Wall plug", 'title: "   "'))
     with pytest.raises(InvalidArgument):
@@ -548,6 +558,20 @@ def test_thingiverse_publish_runs_create_upload_finalize_publish_in_order(
     assert [u["rank"] for u in finalize["pending_uploads"]] == [10, 20, 30, 40]
 
 
+def test_a_file_that_vanishes_after_planning_leaves_a_named_draft(
+    tmp_path: Path,
+) -> None:
+    ev = evaluate(make_project(tmp_path), "thingiverse")
+    ev.plans[0].files[0].unlink()
+    fake = FakeThingiverse()
+    try:
+        with pytest.raises(MarketplaceError) as caught:
+            execute.publish_thingiverse(ev.plans[0], token="tok", api=fake.base)
+    finally:
+        fake.close()
+    assert "thing 777 stays an unpublished draft" in caught.value.message
+
+
 def test_thingiverse_refusal_to_publish_leaves_a_named_draft(tmp_path: Path) -> None:
     ev = evaluate(make_project(tmp_path), "thingiverse")
     fake = FakeThingiverse(fail_publish=True)
@@ -628,7 +652,7 @@ def test_browser_publish_fills_the_form_and_stops_before_the_final_click(
     assert rec.calls[0][:6] == [
         "agent-browser",
         "--session",
-        "3d-publish-makerworld",
+        execute._session_name(item),
         "--headed",
         "--restore",
         "open",

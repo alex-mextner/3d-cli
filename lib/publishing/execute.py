@@ -4,7 +4,7 @@
   `marketplaces.credentials.thingiverse_upload_token()` (env / keychain / auth.json, never the
   repo). A failure after the draft exists leaves an unpublished draft and says where.
 * MakerWorld, Printables: agent-browser drives the website in its own headed, restorable
-  session `3d-publish-<platform>`. A login wall is passed with `keychain fill` (the value goes
+  session `3d-publish-<platform>-<title hash>` (one per publication). A login wall is passed with `keychain fill` (the value goes
   keychain -> browser, this process never sees it); 2FA, captcha and the final Publish click
   stay with the owner, and so does any step the site's page no longer answers: the run stops
   there, leaves the window open and says what is left.
@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import hashlib
 import subprocess
 import tempfile
 import uuid
@@ -121,12 +122,15 @@ def publish_thingiverse(
             raise MarketplaceError(
                 SITE, "http", f"Thingiverse refused to publish: {errors}"
             )
-    except MarketplaceError as exc:
+    except (MarketplaceError, OSError) as exc:
+        kind = exc.kind if isinstance(exc, MarketplaceError) else "parse"
+        reason = exc.reason if isinstance(exc, MarketplaceError) else f"cannot read an upload file: {exc}"
+        remediation = exc.remediation if isinstance(exc, MarketplaceError) else []
         raise MarketplaceError(
             SITE,
-            exc.kind,
-            f"{exc.reason} (thing {thing_id} stays an unpublished draft)",
-            remediation=[*exc.remediation, f"Finish or delete the draft at {web}."],
+            kind,
+            f"{reason} (thing {thing_id} stays an unpublished draft)",
+            remediation=[*remediation, f"Finish or delete the draft at {web}."],
         ) from exc
     return as_str(published.get("public_url")) or web
 
@@ -186,15 +190,21 @@ def _login(platform: str, base: list[str], runner: Runner) -> str | None:
     return None
 
 
+def _session_name(plan: PlatformPlan) -> str:
+    title = str(plan.fields.get("title", ""))
+    return f"3d-publish-{plan.platform}-{hashlib.sha256(title.encode()).hexdigest()[:8]}"
+
+
 def publish_browser(
     plan: PlatformPlan, runner: Runner = run_agent_browser
 ) -> BrowserOutcome:
     """Run the plan's agent-browser steps; stop at the first one the page does not answer.
 
-    The platform's browser session is shared by every project, so concurrent publishes to one
-    platform queue on a lock instead of interleaving their page navigation and form fills.
+    Every publication gets its own browser session (platform + title), so a draft awaiting its
+    owner's final click is never navigated away by the next project; two runs of the same
+    publication queue on a lock instead of interleaving their page navigation and form fills.
     """
-    lock_path = Path(tempfile.gettempdir()) / f"3d-publish-{plan.platform}.lock"
+    lock_path = Path(tempfile.gettempdir()) / f"{_session_name(plan)}.lock"
     with lock_path.open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         try:
@@ -248,7 +258,7 @@ def _run_steps(
 
 
 def _publish_browser_locked(plan: PlatformPlan, runner: Runner) -> BrowserOutcome:
-    session = f"3d-publish-{plan.platform}"
+    session = _session_name(plan)
     base = [AGENT_BROWSER, "--session", session]
     code, out = runner([*base, "--headed", "--restore", *plan.browser_steps[0]])
     if code != 0:

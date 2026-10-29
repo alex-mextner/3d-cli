@@ -379,13 +379,13 @@ def test_yes_on_a_browser_platform_fills_the_draft_and_leaves_the_last_click_to_
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert (
-        "makerworld: the makerworld draft is filled in browser session 3d-publish-makerworld"
+        "makerworld: the makerworld draft is filled in browser session 3d-publish-makerworld-"
         in result.stdout
     )
     steps = log.read_text(encoding="utf-8")
     assert (
-        "--session 3d-publish-makerworld --headed --restore open https://makerworld.com/en"
-        in steps
+        "--headed --restore open https://makerworld.com/en" in steps
+        and "--session 3d-publish-makerworld-" in steps
     )
     assert (
         "upload input[type=file]" in steps

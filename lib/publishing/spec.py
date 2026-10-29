@@ -83,11 +83,9 @@ class PublishSpec:
 
 def select_files(project: Path) -> FileSet:
     found: list[PublishFile] = []
-    root = project.resolve()
     for sub in SCAN_DIRS:
         folder = project / sub
-        inside = folder.resolve() == root or root in folder.resolve().parents
-        if not folder.is_dir() or not inside:
+        if not folder.is_dir() or (sub != "." and folder.is_symlink()):
             continue  # a symlinked folder must not smuggle in files from outside
         for path in sorted(folder.iterdir()):
             role = ROLE_BY_EXT.get(path.suffix.lower())
@@ -132,7 +130,7 @@ def _text(data: dict[str, Any], key: str, *, required: bool = False) -> str:
 
 def _default_images(project: Path) -> tuple[Path, ...]:
     folder = project / IMAGE_DIR
-    if not folder.is_dir():
+    if not folder.is_dir() or folder.is_symlink():
         return ()
     root = project.resolve()
     return tuple(
