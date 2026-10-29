@@ -64,7 +64,6 @@ restored, or the camera gave no frame; 2 bad usage or an unknown make/design; 12
 """
 
 SCHEMA = "3d.photo/1"
-IMAGE_EXTS = (".png", ".jpg", ".jpeg")
 _VALUE = {
     "--make",
     "--design",
@@ -220,11 +219,7 @@ def _capture(positional: list[str], opts: dict[str, str]) -> int:
     return code
 
 
-def _renders(positional: list[str], opts: dict[str, str]) -> int:
-    import hashlib
-
-    from library import actions
-
+def _require_renders_args(positional: list[str], opts: dict[str, str]) -> None:
     if len(positional) != 1:
         raise UsageError(
             "photo renders needs PROJECT_DIR",
@@ -237,32 +232,48 @@ def _renders(positional: list[str], opts: dict[str, str]) -> int:
             command="photo",
             remediation=["3d photo renders projects/mole --design mole"],
         )
+
+
+def _render_source_key(design: str, image: Path) -> str:
+    import hashlib
+
+    return (
+        "render:"
+        + hashlib.sha256(f"{design}:{image.resolve()}".encode()).hexdigest()[:32]
+    )
+
+
+def _print_renders(design: str, rows: list[dict[str, Any]], dry_run: bool) -> None:
+    head = (
+        "DRY RUN, nothing registered (add --yes)"
+        if dry_run
+        else f"{sum(r['registered'] for r in rows)} new of {len(rows)}"
+    )
+    print(f"renders of {design}: {head}")
+    print("\n".join(f"  {r['path']}" for r in rows))
+
+
+def _renders(positional: list[str], opts: dict[str, str]) -> int:
+    from library import actions
+    from publishing.spec import default_images
+
+    _require_renders_args(positional, opts)
     project = Path(positional[0]).expanduser()
     previews = project / "previews"
     if not previews.is_dir():
         raise InputNotFound(str(previews), command="photo")
-    images = [
-        p
-        for p in sorted(previews.iterdir())
-        if p.suffix.lower() in IMAGE_EXTS and p.is_file() and not p.name.startswith(".")
-    ]
+    images = default_images(project)
     dry_run = "--yes" not in opts
     rows: list[dict[str, Any]] = []
     for image in images:
         row: dict[str, Any] = {"path": str(image), "registered": False, "photo": None}
         if not dry_run:
-            key = (
-                "render:"
-                + hashlib.sha256(
-                    f"{opts['--design']}:{image.resolve()}".encode()
-                ).hexdigest()[:32]
-            )
             res = actions.photo(
                 str(image),
                 design=opts["--design"],
                 kind="render",
                 db_path=opts.get("--db"),
-                source_key=key,
+                source_key=_render_source_key(opts["--design"], image),
             )
             if not res["ok"]:
                 return _show(dict(res), opts, "")
@@ -279,13 +290,7 @@ def _renders(positional: list[str], opts: dict[str, str]) -> int:
     if "--json" in opts:
         print(json.dumps(doc, indent=2, sort_keys=True, ensure_ascii=False))
     else:
-        head = (
-            "DRY RUN, nothing registered (add --yes)"
-            if dry_run
-            else f"{sum(r['registered'] for r in rows)} new of {len(rows)}"
-        )
-        print(f"renders of {opts['--design']}: {head}")
-        print("\n".join(f"  {r['path']}" for r in rows))
+        _print_renders(opts["--design"], rows, dry_run)
     return 0
 
 

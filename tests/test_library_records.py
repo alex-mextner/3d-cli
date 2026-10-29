@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from typing import Any
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -220,3 +221,43 @@ def test_makes_list_counts_photos_and_names_the_source(
         and row["source_url"].endswith("311253-spoon")
         and row["source"] == src["uid"]
     )
+
+
+def test_project_dir_is_recorded_absolute(
+    conn: sqlite3.Connection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    make, _ = records.add_make(conn, "mole", project_dir="projects/mole")
+    design = conn.execute(
+        "SELECT project_dir FROM design WHERE id = ?", (make["design_id"],)
+    ).fetchone()
+    assert design["project_dir"] == str((tmp_path / "projects" / "mole").resolve())
+
+
+def test_ensure_design_survives_a_concurrent_first_writer(tmp_path: Path) -> None:
+    db_path = tmp_path / "race.db"
+    first = librarydb.open_library(db_path)
+    second = librarydb.open_library(db_path)
+
+    class Racing:
+        """Lets `second` create the design right after `first` saw none."""
+
+        def __init__(self) -> None:
+            self.raced = False
+
+        def __getattr__(self, name: str):  # noqa: ANN204
+            return getattr(first, name)
+
+        def execute(self, sql: str, params: tuple[Any, ...] = ()) -> sqlite3.Cursor:
+            cur = first.execute(sql, params)
+            if "FROM design WHERE name" in sql and not self.raced:
+                self.raced = True
+                records.ensure_design(second, "mole")
+            return cur
+
+    row = records.ensure_design(Racing(), "mole")  # type: ignore[arg-type]
+    assert row["name"] == "mole"
+    count = first.execute("SELECT COUNT(*) FROM design").fetchone()[0]
+    first.close()
+    second.close()
+    assert count == 1

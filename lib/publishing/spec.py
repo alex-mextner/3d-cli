@@ -136,7 +136,9 @@ def _text(data: dict[str, Any], key: str, *, required: bool = False) -> str:
     return value
 
 
-def _default_images(project: Path) -> tuple[Path, ...]:
+def default_images(project: Path) -> tuple[Path, ...]:
+    """The listing images of `<project>/previews/`: regular image files that stay inside the project (a
+    symlinked folder or file is skipped so it cannot smuggle in a file from outside)."""
     folder = project / IMAGE_DIR
     if not folder.is_dir() or folder.is_symlink():
         return ()
@@ -148,14 +150,15 @@ def _default_images(project: Path) -> tuple[Path, ...]:
         and p.is_file()
         and not p.name.startswith(".")
         and not p.is_symlink()
-        and root in p.resolve().parents  # a symlink must not smuggle in a file from outside
+        and root
+        in p.resolve().parents  # a symlink must not smuggle in a file from outside
     )
 
 
 def _images(project: Path, data: dict[str, Any]) -> tuple[Path, ...]:
     declared = data.get("images")
     if declared is None:
-        return _default_images(project)
+        return default_images(project)
     if not isinstance(declared, list) or not all(isinstance(i, str) for i in declared):
         raise InvalidArgument(
             f"{SPEC_NAME}: images",

@@ -36,6 +36,7 @@ from typing import Any
 from errors import InputNotFound, InvalidArgument, UsageError
 from publishing import flow
 from publishing.offer import MODES, default_mode, latest_make
+from publishing.source import SourceRef
 
 SCHEMA = "3d.publish.offer/1"
 TRIGGERS = ("print", "modify")
@@ -43,12 +44,14 @@ TRIGGERS = ("print", "modify")
 
 # --------------------------------------------------------------------------- finding what to offer
 def _design_source(
-    conn: sqlite3.Connection, design: sqlite3.Row
+    conn: sqlite3.Connection, design: sqlite3.Row, make_uid: str | None = None
 ) -> tuple[str | None, bool]:
     """(url of the source the design came from, True when it is a published REMIX of it).
 
     `remix_of` = a modified, published remix; `derived_from` = printed/studied but not modified; a make's own
-    `source_id` counts as derived."""
+    `source_id` counts as derived. The make being offered (`make_uid`) names its own source: another, newer
+    make of the design must not redirect it."""
+    own = _make_source_url(conn, make_uid)
     for rel, remix in (("remix_of", True), ("derived_from", False)):
         row = conn.execute(
             "SELECT s.url FROM relation r JOIN model_source s ON s.uid = r.to_id "
@@ -56,13 +59,27 @@ def _design_source(
             (rel, design["uid"]),
         ).fetchone()
         if row is not None:
+            if own is not None and own != str(row["url"]):
+                return own, False
             return str(row["url"]), remix
+    if own is not None:
+        return own, False
     row = conn.execute(
         "SELECT s.url FROM make m JOIN model_source s ON s.id = m.source_id WHERE m.design_id = ? "
         "ORDER BY m.id DESC LIMIT 1",
         (design["id"],),
     ).fetchone()
     return (str(row["url"]), False) if row is not None else (None, False)
+
+
+def _make_source_url(conn: sqlite3.Connection, make_uid: str | None) -> str | None:
+    if make_uid is None:
+        return None
+    row = conn.execute(
+        "SELECT s.url FROM make m JOIN model_source s ON s.id = m.source_id WHERE m.uid = ?",
+        (make_uid,),
+    ).fetchone()
+    return str(row["url"]) if row is not None else None
 
 
 def _already_published(conn: sqlite3.Connection, design: sqlite3.Row) -> list[str]:
@@ -124,16 +141,28 @@ def _from_library(
         name = str(design_row["name"])
         if project is None and design_row["project_dir"]:
             project = Path(str(design_row["project_dir"]))
-        src_url, remixed = _design_source(conn, design_row)
+        src_url, remixed = _design_source(conn, design_row, make_uid)
         published = _already_published(conn, design_row)
     return name, make_uid, project, src_url, remixed, published
 
 
-def _source_license(src_url: str | None, db_path: str | None) -> tuple[str, str]:
-    """(licence id, why) the offer defaults to for a source url (None: an original)."""
-    source = None
-    if src_url:
-        from publishing.source import SourceRef, load_source
+def _downloaded_source(project: Path) -> SourceRef | None:
+    """The source a downloaded project names in its model.json (None: not a downloaded project). A project
+    modified from a download is a remix of that model even when the library never heard of it."""
+    if not (project / "model.json").is_file():
+        return None
+    from publishing.source import load_source
+
+    return load_source(str(project))
+
+
+def _source_license(
+    src_url: str | None, db_path: str | None, source: SourceRef | None = None
+) -> tuple[str, str]:
+    """(licence id, why) the offer defaults to for a source url (None: an original); `source` is the already
+    loaded source (a model.json) whose recorded licence stands."""
+    if source is None and src_url:
+        from publishing.source import load_source
 
         with flow.library(db_path, create=False) as conn:
             source = (
@@ -190,7 +219,11 @@ def build(
         raise InputNotFound(str(project), command="models")
     name = flow.design_name(project, name)
     spec_remix = _publish_yaml_remix(project)
-    lic, lic_why = _source_license(src_url, db_path)
+    downloaded = None if src_url else _downloaded_source(project)
+    if downloaded is not None:
+        src_url = downloaded.url
+    of = str(project / "model.json") if downloaded is not None else src_url
+    lic, lic_why = _source_license(src_url, db_path, downloaded)
     title = name.replace("_", " ").replace("-", " ").strip().capitalize()
     defaults = {
         "title": title,
@@ -205,7 +238,7 @@ def build(
                 project,
                 platform=platform,
                 kind=publish_kind,
-                of=src_url if publish_kind == "remix" else None,
+                of=of if publish_kind == "remix" else None,
                 design=name,
                 make=make_uid,
                 db_path=db_path,
@@ -221,7 +254,7 @@ def build(
                 project,
                 platform=platform,
                 kind="make",
-                of=src_url,
+                of=of,
                 design=name,
                 make=make_uid,
                 db_path=db_path,
@@ -232,12 +265,29 @@ def build(
         "design": name,
         "project": project,
         "make": make_uid,
-        "license": {"id": lic, "why": lic_why, "open": flow.is_open(lic)},
+        "license": _effective_license(plans, lic, lic_why),
         "source": src_url,
         "already_published": published,
         "plans": plans,
         "db_path": db_path,
+        "allow": allow,
+        "reason": reason,
+        "drop": drop,
     }
+
+
+def _effective_license(
+    plans: list[flow.Prepared], fallback: str, why: str
+) -> dict[str, Any]:
+    """The licence the offer would really publish under: the evaluated spec's (publish.yaml wins over the
+    default), not the default that was only a stand-in for a missing one."""
+    for p in plans:
+        if p.kind != "make":
+            lic = p.ev.spec.license.id
+            if "license" not in p.ev.spec.defaults_used:
+                why = "set in publish.yaml"
+            return {"id": lic, "why": why, "open": flow.is_open(lic)}
+    return {"id": fallback, "why": why, "open": flow.is_open(fallback)}
 
 
 def _publish_yaml_remix(project: Path) -> str:
@@ -286,7 +336,9 @@ def _command(built: dict[str, Any], trigger: str, mode: str) -> list[list[str]]:
     """The exact command that publishes what was offered (the agent runs it after the user said yes).
 
     It re-runs the offer with `--yes`, not `3d models publish`: only the offer fills the title / description /
-    licence that publish.yaml leaves out, so a replayed `models publish` would be refused for those projects."""
+    licence that publish.yaml leaves out, so a replayed `models publish` would be refused for those projects.
+    Every input that shaped the offer is replayed (design, make, db, non-printable overrides): a replay that
+    dropped one would evaluate a different offer than the one the user confirmed."""
     plans = built["plans"]
     if not plans:
         return []
@@ -297,6 +349,8 @@ def _command(built: dict[str, Any], trigger: str, mode: str) -> list[list[str]]:
         str(built["project"]),
         "--trigger",
         trigger,
+        "--design",
+        str(built["design"]),
         "--platform",
         plans[0].platform,
         "--publish",
@@ -306,6 +360,12 @@ def _command(built: dict[str, Any], trigger: str, mode: str) -> list[list[str]]:
         cmd += ["--make", str(built["make"])]
     if built["db_path"]:
         cmd += ["--db", str(built["db_path"])]
+    if built["allow"]:
+        cmd += ["--allow-nonprintable", ",".join(built["allow"])]
+    if built["reason"]:
+        cmd += ["--reason", str(built["reason"])]
+    if built["drop"]:
+        cmd.append("--drop-nonprintable")
     return [[*cmd, "--yes"]]
 
 

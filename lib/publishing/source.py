@@ -53,6 +53,27 @@ def split_url(url: str) -> tuple[str, str]:
     return "", ""
 
 
+def _checked_identity(path: Path, src: dict[str, Any], url: str) -> tuple[str, str]:
+    """(site, id) of a model.json source, derived from its URL. A declared site/id that the URL does not
+    back is forged or corrupt: the make/remix flows would open that URL, so it must be a marketplace page
+    of the declared model."""
+    site, model_id = split_url(url)
+    declared_site, declared_id = str(src.get("site", "")), str(src.get("id", ""))
+    if (declared_site and declared_site != site) or (
+        declared_id and declared_id != model_id
+    ):
+        raise InvalidArgument(
+            "--of",
+            str(path),
+            [
+                f"a model.json whose source.url ({url}) is the {declared_site or 'declared'} model page "
+                f"{declared_id or ''}".rstrip()
+            ],
+            command="models",
+        )
+    return site, model_id
+
+
 def _from_json(path: Path) -> SourceRef:
     try:
         data: Any = json.loads(path.read_text(encoding="utf-8"))
@@ -65,7 +86,7 @@ def _from_json(path: Path) -> SourceRef:
         ) from exc
     src = data.get("source") if isinstance(data, dict) else None
     url = str(src.get("url", "")) if isinstance(src, dict) else ""
-    if not isinstance(src, dict) or not url.startswith(("http://", "https://")):
+    if not isinstance(src, dict) or not url.startswith("https://"):
         raise InvalidArgument(
             "--of",
             str(path),
@@ -73,9 +94,7 @@ def _from_json(path: Path) -> SourceRef:
             command="models",
         )
     author = data.get("author")
-    site, model_id = str(src.get("site", "")), str(src.get("id", ""))
-    if not site or not model_id:
-        site, model_id = split_url(url)
+    site, model_id = _checked_identity(path, src, url)
     return SourceRef(
         url=url,
         site=site,

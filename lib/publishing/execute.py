@@ -20,7 +20,7 @@ import subprocess
 import tempfile
 import uuid
 from pathlib import Path
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -136,7 +136,11 @@ def publish_thingiverse(
             )
     except (MarketplaceError, OSError) as exc:
         kind = exc.kind if isinstance(exc, MarketplaceError) else "parse"
-        reason = exc.reason if isinstance(exc, MarketplaceError) else f"cannot read an upload file: {exc}"
+        reason = (
+            exc.reason
+            if isinstance(exc, MarketplaceError)
+            else f"cannot read an upload file: {exc}"
+        )
         remediation = exc.remediation if isinstance(exc, MarketplaceError) else []
         raise MarketplaceError(
             SITE,
@@ -155,7 +159,9 @@ class BrowserOutcome:
 
 
 BROWSER_TIMEOUT = 180
-KEYCHAIN_APPROVAL_TIMEOUT = 330  # keychain waits up to 300 s for the owner's approval of a fill
+KEYCHAIN_APPROVAL_TIMEOUT = (
+    330  # keychain waits up to 300 s for the owner's approval of a fill
+)
 
 
 def run_agent_browser(argv: Sequence[str]) -> tuple[int, str]:
@@ -213,8 +219,16 @@ def _login(platform: str, base: list[str], runner: Runner) -> str | None:
 
 
 def _session_name(plan: PlatformPlan) -> str:
-    """One session per publication: the title plus where its files live (two projects may share a title)."""
-    identity = "\0".join([str(plan.fields.get("title", "")), *(str(p.resolve()) for p in plan.files)])
+    """One session per publication: the title plus where its files live (two projects may share a title). A
+    make post has neither: its identity is the model page it is posted on and the photos it attaches."""
+    identity = "\0".join(
+        [
+            str(plan.fields.get("title", "")),
+            str(plan.fields.get("model_url", "")),
+            *(str(p.resolve()) for p in plan.files),
+            *(str(p.resolve()) for p in plan.images if plan.fields.get("model_url")),
+        ]
+    )
     return f"3d-publish-{plan.platform}-{hashlib.sha256(identity.encode()).hexdigest()[:8]}"
 
 
@@ -237,7 +251,9 @@ def publish_browser(
                 fcntl.flock(lock, fcntl.LOCK_UN)
 
 
-def _login_outcome(plan: PlatformPlan, base: list[str], runner: Runner) -> BrowserOutcome | None:
+def _login_outcome(
+    plan: PlatformPlan, base: list[str], runner: Runner
+) -> BrowserOutcome | None:
     """When the page is a login wall: fill it (and stop for the owner), or say why not."""
     session = base[2]
     code, url = runner([*base, "get", "url"])
@@ -264,7 +280,10 @@ def _run_steps(
         if code != 0:
             login = _login_outcome(plan, base, runner)
             if login is not None:
-                return login, out  # the step bounced to a login wall: fill it, do not report a form error
+                return (
+                    login,
+                    out,
+                )  # the step bounced to a login wall: fill it, do not report a form error
             left = "; ".join(
                 f"{k}: {v}" for k, v in plan.fields.items() if k not in ("remix_of",)
             )
@@ -327,29 +346,10 @@ def _cults_call(
     )
 
 
-def publish_cults(
-    plan: PlatformPlan,
-    license_id: str,
-    *,
-    credentials: tuple[str, str],
-    api: str | None = None,
-) -> str:
-    """Create the Cults3D creation from the plan: resolve the category and licence ids with two read-only
-    queries, then `createCreation` with the hosted file/image URLs. Returns the creation URL.
-
-    The shapes follow the community-documented API (github.com/CheekyCodexConjurer/cults3d-api-docs) and are
-    NOT verified against a real account (#565); the loopback test uses fixtures of those shapes."""
-    import base64
-
-    from marketplaces import cults
-    from publishing.licenses import parse_license
-
-    username, key = credentials
-    basic = base64.b64encode(f"{username}:{key}".encode()).decode("ascii")
-    auth = {"Authorization": f"Basic {basic}"}
-    url = api or cults.api_url()
-    fields = plan.fields
-    cats = _cults_call(CULTS_CATEGORIES, {}, auth, url).get("categories") or []
+def _cults_category(
+    response: Mapping[str, Any], fields: Mapping[str, Any]
+) -> Mapping[str, Any]:
+    cats = response.get("categories") or []
     wanted = str(fields["category"]).strip().casefold()
     category = next(
         (c for c in cats if str(c.get("name", "")).strip().casefold() == wanted), None
@@ -364,7 +364,15 @@ def publish_cults(
                 f"Set `category` in publish.yaml to one of: {names or '(the query returned none)'}"
             ],
         )
-    lics = _cults_call(CULTS_LICENSES, {}, auth, url).get("licenses") or []
+    return category
+
+
+def _cults_licence(
+    response: Mapping[str, Any], fields: Mapping[str, Any], license_id: str
+) -> Mapping[str, Any]:
+    from publishing.licenses import parse_license
+
+    lics = response.get("licenses") or []
     licence = next(
         (
             lic
@@ -384,6 +392,34 @@ def publish_cults(
                 f"Pick a publish.yaml `license` Cults offers: {offered or '(the query returned none)'}"
             ],
         )
+    return licence
+
+
+def publish_cults(
+    plan: PlatformPlan,
+    license_id: str,
+    *,
+    credentials: tuple[str, str],
+    api: str | None = None,
+) -> str:
+    """Create the Cults3D creation from the plan: resolve the category and licence ids with two read-only
+    queries, then `createCreation` with the hosted file/image URLs. Returns the creation URL.
+
+    The shapes follow the community-documented API (github.com/CheekyCodexConjurer/cults3d-api-docs) and are
+    NOT verified against a real account (#565); the loopback test uses fixtures of those shapes."""
+    import base64
+
+    from marketplaces import cults
+
+    username, key = credentials
+    basic = base64.b64encode(f"{username}:{key}".encode()).decode("ascii")
+    auth = {"Authorization": f"Basic {basic}"}
+    url = api or cults.api_url()
+    fields = plan.fields
+    category = _cults_category(_cults_call(CULTS_CATEGORIES, {}, auth, url), fields)
+    licence = _cults_licence(
+        _cults_call(CULTS_LICENSES, {}, auth, url), fields, license_id
+    )
     variables = {
         "name": fields["name"],
         "description": fields["description"],

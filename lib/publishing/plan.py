@@ -276,13 +276,10 @@ CULTS_MAX_URLS = 10  # fileUrls / imageUrls per createCreation call (Cults API)
 CULTS_CURRENCY = "EUR"
 
 
-def _plan_cults(spec: PublishSpec, files: FileSet) -> PlatformPlan:
-    """Cults3D: GraphQL `createCreation`. Cults PULLS files and images from public https URLs (the API takes
-    no upload), so every file and image needs a `hosted:` URL in publish.yaml; category and licence ids are
-    resolved by two read-only queries just before the mutation."""
+def _cults_problems(
+    spec: PublishSpec, files: FileSet, hosted: Mapping[str, str], paths: Sequence[Path]
+) -> list[str]:
     problems: list[str] = []
-    hosted = dict(spec.hosted)
-    paths = tuple(f.path for f in files.files)
     names = [*(p.name for p in paths), *(i.name for i in spec.images)]
     missing = [n for n in names if n not in hosted]
     if missing:
@@ -303,6 +300,16 @@ def _plan_cults(spec: PublishSpec, files: FileSet) -> PlatformPlan:
         problems.append(
             "a cover image is required: put renders in previews/ or list them under `images` in publish.yaml"
         )
+    return problems
+
+
+def _plan_cults(spec: PublishSpec, files: FileSet) -> PlatformPlan:
+    """Cults3D: GraphQL `createCreation`. Cults PULLS files and images from public https URLs (the API takes
+    no upload), so every file and image needs a `hosted:` URL in publish.yaml; category and licence ids are
+    resolved by two read-only queries just before the mutation."""
+    hosted = dict(spec.hosted)
+    paths = tuple(f.path for f in files.files)
+    problems = _cults_problems(spec, files, hosted, paths)
     fields: dict[str, Any] = {
         "name": spec.title,
         "description": description_for(spec),
@@ -427,17 +434,8 @@ def _photo_images(
     return tuple(images), warnings
 
 
-def evaluate(
-    project: Path,
-    platforms: Sequence[str],
-    lookup: LicenseLookup,
-    options: Options | None = None,
-) -> Evaluation:
-    """Load the spec, select the files, apply every refusal rule and build one plan per platform."""
-    opts = options or Options()
-    if opts.kind not in KINDS:
-        raise InvalidArgument("--kind", opts.kind, list(KINDS), command="models")
-    spec = load_spec(project, opts.defaults)
+def _resolve_kind(opts: Options, spec: PublishSpec) -> str:
+    """`auto` becomes remix when a source is known, else original; contradictory kind/--of pairs are refused."""
     kind = opts.kind
     if kind == "auto":
         kind = "remix" if (opts.of or spec.remix_of) else "original"
@@ -457,11 +455,43 @@ def evaluate(
                 "3d models publish DIR --kind remix --of https://www.printables.com/model/311253 --platform all"
             ],
         )
+    return kind
+
+
+def _file_problems(project: Path, files: FileSet) -> list[str]:
+    """Missing 3mf/scad roles and upload-name clashes in the selected file set."""
+    problems: list[str] = []
+    for role, hint in (
+        ("3mf", "slice the model and save the project 3mf as print/<name>.3mf"),
+        ("scad", "the OpenSCAD source must be published with the model"),
+    ):
+        if role in files.missing():
+            problems.append(
+                f"no .{role} file in {project} (looked in the project root and print/): {hint}"
+            )
+    problems.extend(
+        f"two files are named {name}: rename one so the upload names stay unique"
+        for name in files.clashes
+    )
+    return problems
+
+
+def evaluate(
+    project: Path,
+    platforms: Sequence[str],
+    lookup: LicenseLookup,
+    options: Options | None = None,
+) -> Evaluation:
+    """Load the spec, select the files, apply every refusal rule and build one plan per platform."""
+    opts = options or Options()
+    if opts.kind not in KINDS:
+        raise InvalidArgument("--kind", opts.kind, list(KINDS), command="models")
+    spec = load_spec(project, opts.defaults)
+    kind = _resolve_kind(opts, spec)
     if kind == "make":
         return _evaluate_make(project, platforms, spec, opts)
     if opts.of is not None:
         spec = replace(spec, remix_of=opts.of.url)
-    problems: list[str] = []
     files = select_files(project)
     report, files = guard.evaluate_parts(
         project,
@@ -480,18 +510,7 @@ def evaluate(
         images=images,
         description=spec.description + (f"\n\n{attribution}" if attribution else ""),
     )
-    for role, hint in (
-        ("3mf", "slice the model and save the project 3mf as print/<name>.3mf"),
-        ("scad", "the OpenSCAD source must be published with the model"),
-    ):
-        if role in files.missing():
-            problems.append(
-                f"no .{role} file in {project} (looked in the project root and print/): {hint}"
-            )
-    problems.extend(
-        f"two files are named {name}: rename one so the upload names stay unique"
-        for name in files.clashes
-    )
+    problems = _file_problems(project, files)
     remix = check_remix(spec, lookup)
     if remix is not None:
         problems.extend(remix.problems)
@@ -516,18 +535,18 @@ def evaluate(
     )
 
 
-def _evaluate_make(
-    project: Path, platforms: Sequence[str], spec: PublishSpec, opts: Options
-) -> Evaluation:
-    """A make post: one plan per platform that has a model page to attach the make to. Licence rules of a
-    remix do not apply (printing a model is what every licence allows); the photos are the whole payload."""
+def _make_targets(opts: Options) -> dict[str, str]:
+    """Platform -> model page URL the make attaches to: the library's records, overridden by --of."""
     targets = dict(opts.targets)
-    if opts.of is not None and opts.of.site and opts.of.site not in targets:
-        targets[opts.of.site] = opts.of.url
+    if opts.of is not None and opts.of.site:
+        targets[opts.of.site] = (
+            opts.of.url
+        )  # an explicit --of beats a recorded publication
+    return targets
+
+
+def _make_problems(chosen: Sequence[str], targets: Mapping[str, str]) -> list[str]:
     problems: list[str] = []
-    chosen = (
-        [p for p in platforms if p in targets] if opts.platform_all else list(platforms)
-    )
     if not chosen:
         problems.append(
             "no model page to attach a make to: pass --of URL_OR_MODEL_JSON (a marketplace model) or publish "
@@ -538,6 +557,21 @@ def _evaluate_make(
         for p in chosen
         if p not in targets
     )
+    return problems
+
+
+def _evaluate_make(
+    project: Path, platforms: Sequence[str], spec: PublishSpec, opts: Options
+) -> Evaluation:
+    """A make post: one plan per platform that has a model page to attach the make to. Licence rules of a
+    remix do not apply (printing a model is what every licence allows); the photos are the whole payload."""
+    targets = _make_targets(opts)
+    chosen = (
+        [p for p in targets if p in MAKE_LABELS]
+        if opts.platform_all
+        else list(platforms)
+    )
+    problems = _make_problems(chosen, targets)
     real = tuple(p for p in opts.photos if p.kind != "render")
     photos, warnings = _photo_images((), real)
     plans = tuple(
@@ -586,68 +620,78 @@ def _parts_lines(report: guard.PartsReport) -> list[str]:
     return out
 
 
-def render_text(ev: Evaluation, *, dry_run: bool) -> str:
-    spec, out = ev.spec, []
-    out.append(
-        f"3d models publish — {'DRY RUN, nothing is sent' if dry_run else 'PUBLISH'}"
-    )
-    out.append(f"project   {ev.project}")
-    out.append(f"kind      {ev.kind}")
-    out.append(f"title     {spec.title}")
-    out.append(f"licence   {spec.license.label} ({spec.license.id})")
+def _header_lines(ev: Evaluation, *, dry_run: bool) -> list[str]:
+    spec = ev.spec
+    out = [
+        f"3d models publish — {'DRY RUN, nothing is sent' if dry_run else 'PUBLISH'}",
+        f"project   {ev.project}",
+        f"kind      {ev.kind}",
+        f"title     {spec.title}",
+        f"licence   {spec.license.label} ({spec.license.id})",
+    ]
     if spec.defaults_used:
         out.append(
             f"          (assumed: {', '.join(spec.defaults_used)} — not set in publish.yaml)"
         )
     if ev.kind == "make" and ev.source is not None:
         out.append(f"make of   {ev.source.url}")
-    if ev.remix is not None:
-        out.append(f"remix of  {ev.remix.source_url}")
-        out.extend(f"          - {line}" for line in ev.remix.evidence)
-        if ev.source is not None and ev.source.origin != "url":
-            out.append(
-                f"          - the source licence above was read from the {ev.source.origin}, not asked of the site"
-            )
-        if ev.remix.permission_ref:
-            out.append(f"          - permission_ref: {ev.remix.permission_ref}")
-        out.extend(
-            f"          - lifted by permission_ref: {line}" for line in ev.remix.waived
-        )
+    return out
+
+
+def _remix_lines(ev: Evaluation, remix: RemixCheck) -> list[str]:
+    out = [f"remix of  {remix.source_url}"]
+    out.extend(f"          - {line}" for line in remix.evidence)
+    if ev.source is not None and ev.source.origin != "url":
         out.append(
-            "          => " + ("REFUSED, see below" if ev.remix.problems else "allowed")
+            f"          - the source licence above was read from the {ev.source.origin}, not asked of the site"
         )
-    if ev.kind != "make":
-        out.append(
-            f"\nfiles ({len(ev.fileset.files)}) — the same set goes to every platform"
-        )
-        out.extend(
-            f"  {f.role:<5} {_rel(f.path, ev.project)}  ({f.size} B)"
-            for f in ev.fileset.files
-        )
-        out.append(f"images ({len(spec.images)})")
-        out.extend(f"  {_rel(i, ev.project)}" for i in spec.images)
-    if ev.photos:
-        out.append(f"photos from the library ({len(ev.photos)})")
-        out.extend(
-            f"  {p.kind:<6} {_rel(p.path, ev.project)}"
-            + (f"  (bed at Z {p.z_mm:g})" if p.z_mm is not None else "")
-            for p in ev.photos
-        )
-    if ev.parts is not None:
-        out.extend(_parts_lines(ev.parts))
-    out.extend(f"warning: {w}" for w in ev.warnings)
-    for plan in ev.plans:
-        state = "REFUSED" if plan.problems or ev.problems else "ready"
-        out.append(f"\n== {plan.platform} [{state}] — {plan.route}")
-        out.append("  fields")
-        for key, value in plan.fields.items():
-            shown = (
-                ", ".join(map(str, value)) if isinstance(value, list) else str(value)
-            )
-            flat = " ".join(shown.split())
-            out.append(f"    {key}: {flat if len(flat) <= 100 else flat[:99] + '…'}")
-        out.append("  steps")
-        out.extend(f"    {n}. {s}" for n, s in enumerate(plan.steps, start=1))
+    if remix.permission_ref:
+        out.append(f"          - permission_ref: {remix.permission_ref}")
+    out.extend(f"          - lifted by permission_ref: {line}" for line in remix.waived)
+    out.append(
+        "          => " + ("REFUSED, see below" if remix.problems else "allowed")
+    )
+    return out
+
+
+def _files_lines(ev: Evaluation) -> list[str]:
+    out = [f"\nfiles ({len(ev.fileset.files)}) — the same set goes to every platform"]
+    out.extend(
+        f"  {f.role:<5} {_rel(f.path, ev.project)}  ({f.size} B)"
+        for f in ev.fileset.files
+    )
+    out.append(f"images ({len(ev.spec.images)})")
+    out.extend(f"  {_rel(i, ev.project)}" for i in ev.spec.images)
+    return out
+
+
+def _photo_lines(ev: Evaluation) -> list[str]:
+    out = [f"photos from the library ({len(ev.photos)})"]
+    out.extend(
+        f"  {p.kind:<6} {_rel(p.path, ev.project)}"
+        + (f"  (bed at Z {p.z_mm:g})" if p.z_mm is not None else "")
+        for p in ev.photos
+    )
+    return out
+
+
+def _field_line(key: str, value: Any) -> str:
+    shown = ", ".join(map(str, value)) if isinstance(value, list) else str(value)
+    flat = " ".join(shown.split())
+    return f"    {key}: {flat if len(flat) <= 100 else flat[:99] + '…'}"
+
+
+def _plan_lines(plan: PlatformPlan, *, refused: bool) -> list[str]:
+    state = "REFUSED" if refused else "ready"
+    out = [f"\n== {plan.platform} [{state}] — {plan.route}", "  fields"]
+    out.extend(_field_line(key, value) for key, value in plan.fields.items())
+    out.append("  steps")
+    out.extend(f"    {n}. {s}" for n, s in enumerate(plan.steps, start=1))
+    return out
+
+
+def _verdict_lines(ev: Evaluation, *, dry_run: bool) -> list[str]:
+    out: list[str] = []
     problems = ev.all_problems()
     if ev.gate is not None:
         out.append(f"\nREFUSED — {ev.gate.message}")
@@ -657,7 +701,44 @@ def render_text(ev: Evaluation, *, dry_run: bool) -> str:
         out.extend(f"  - {p}" for p in problems)
     elif dry_run and ev.gate is None:
         out.append("\nOK — rerun with --yes to publish.")
+    return out
+
+
+def render_text(ev: Evaluation, *, dry_run: bool) -> str:
+    out = _header_lines(ev, dry_run=dry_run)
+    if ev.remix is not None:
+        out.extend(_remix_lines(ev, ev.remix))
+    if ev.kind != "make":
+        out.extend(_files_lines(ev))
+    if ev.photos:
+        out.extend(_photo_lines(ev))
+    if ev.parts is not None:
+        out.extend(_parts_lines(ev.parts))
+    out.extend(f"warning: {w}" for w in ev.warnings)
+    for plan in ev.plans:
+        out.extend(_plan_lines(plan, refused=bool(plan.problems or ev.problems)))
+    out.extend(_verdict_lines(ev, dry_run=dry_run))
     return "\n".join(out)
+
+
+def _remix_json(remix: RemixCheck) -> dict[str, Any]:
+    return {
+        "source": remix.source_url,
+        "evidence": list(remix.evidence),
+        "permission_ref": remix.permission_ref,
+        "source_licenses": [lic.id for lic in remix.source_licenses],
+    }
+
+
+def _platform_json(plan: PlatformPlan, project: Path) -> dict[str, Any]:
+    return {
+        "route": plan.route,
+        "fields": plan.fields,
+        "steps": list(plan.steps),
+        "problems": list(plan.problems),
+        "files": [_rel(f, project) for f in plan.files],
+        "images": [_rel(i, project) for i in plan.images],
+    }
 
 
 def to_json(ev: Evaluation, *, dry_run: bool) -> dict[str, Any]:
@@ -671,14 +752,7 @@ def to_json(ev: Evaluation, *, dry_run: bool) -> dict[str, Any]:
         "license": ev.spec.license.id,
         "defaults_used": list(ev.spec.defaults_used),
         "source": None if ev.source is None else ev.source.to_json(),
-        "remix": None
-        if ev.remix is None
-        else {
-            "source": ev.remix.source_url,
-            "evidence": list(ev.remix.evidence),
-            "permission_ref": ev.remix.permission_ref,
-            "source_licenses": [lic.id for lic in ev.remix.source_licenses],
-        },
+        "remix": None if ev.remix is None else _remix_json(ev.remix),
         "files": [
             {"role": f.role, "path": _rel(f.path, ev.project), "size": f.size}
             for f in ev.fileset.files
@@ -687,17 +761,7 @@ def to_json(ev: Evaluation, *, dry_run: bool) -> dict[str, Any]:
         "photos": [p.to_json(ev.project) for p in ev.photos],
         "parts": None if ev.parts is None else ev.parts.to_json(),
         "warnings": list(ev.warnings),
-        "platforms": {
-            p.platform: {
-                "route": p.route,
-                "fields": p.fields,
-                "steps": list(p.steps),
-                "problems": list(p.problems),
-                "files": [_rel(f, ev.project) for f in p.files],
-                "images": [_rel(i, ev.project) for i in p.images],
-            }
-            for p in ev.plans
-        },
+        "platforms": {p.platform: _platform_json(p, ev.project) for p in ev.plans},
         "problems": problems,
         "gate": None if ev.gate is None else ev.gate.message,
         "refused": bool(problems) or ev.gate is not None,

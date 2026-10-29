@@ -4,6 +4,7 @@ after each grab, XDG dirs are tmp."""
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
@@ -55,6 +56,7 @@ class FakePrinter:
         self, state: str = "complete", z: float = 200.0, *, homed: str = "xyz"
     ) -> None:
         self.raw, self.z, self.homed = state, z, homed
+        self.offset = 0.0  # toolhead Z minus gcode Z (the gcode Z offset in force)
         self.scripts: list[str] = []
         self.on_script: Callable[[FakePrinter], None] | None = None
 
@@ -66,14 +68,14 @@ class FakePrinter:
                 "position": [100.0, 100.0, self.z, 0.0],
                 "homed_axes": self.homed,
             },
-            "gcode_move": {"gcode_position": [100.0, 100.0, self.z, 0.0]},
+            "gcode_move": {"gcode_position": [100.0, 100.0, self.z - self.offset, 0.0]},
         }
 
     def run_gcode(self, script: str, *, timeout: float = 120.0) -> None:
         self.scripts.append(script)
         for line in script.splitlines():
             if line.startswith("G1 Z"):
-                self.z = float(line.split()[1][1:])
+                self.z = float(line.split()[1][1:]) + self.offset
         if self.on_script is not None:
             self.on_script(self)
 
@@ -88,12 +90,15 @@ class FakeCamera:
         self.grabs, self.frozen = 0, frozen
         self.fail: BaseException | None = None
         self.fail_after = 1  # the first grab (the resting frame, before the move) works
+        self.on_grab: Callable[[int], None] | None = None
 
     def keepalive(self) -> bool:
         return False
 
     def grab(self) -> Any:
         self.grabs += 1
+        if self.on_grab is not None:
+            self.on_grab(self.grabs)
         if self.fail is not None and self.grabs > self.fail_after:
             raise self.fail
         return SimpleNamespace(
@@ -294,3 +299,85 @@ def test_parse_lift() -> None:
     for bad in ("0", "-5", "nan", "high"):
         with pytest.raises(InvalidArgument):
             bed_photo.parse_lift(bad)
+
+
+def test_an_offset_changed_during_the_camera_request_refuses_the_move(
+    tmp_path: Path,
+) -> None:
+    printer, camera = FakePrinter(z=200.0), FakeCamera()
+    # the resting frame is requested after the plan: the offset changes while it is in flight
+    camera.on_grab = lambda n: setattr(printer, "offset", -50.0)
+    with pytest.raises(GateFailure, match="Z offset changed"):
+        shoot(printer, tmp_path / "t.jpg", camera=camera, lift=70.0)
+    assert (
+        printer.scripts == [] and printer.z == 200.0
+    )  # nothing was sent: floor 35 is safe
+    assert bed_view.view_in_progress("u1", 10**12) is False  # no marker left behind
+
+
+def test_a_view_running_elsewhere_blocks_the_capture_before_anything_is_read(
+    tmp_path: Path,
+) -> None:
+    reads: list[int] = []
+
+    def read(adapter: Any) -> bed_view.Motion:
+        reads.append(1)
+        return bed_view.read_motion(adapter)
+
+    for lift, z in ((70.0, 200.0), (70.0, 70.0)):  # the move path and the no-move path
+        printer = FakePrinter(z=z)
+        with bed_view.view_lock("u1") as held:
+            assert held
+            with pytest.raises(GateFailure, match="another bed view"):
+                bed_photo.capture_table_photo(
+                    device(),
+                    CFG,
+                    adapter=printer,
+                    camera=FakeCamera(),
+                    out=tmp_path / "t.jpg",
+                    lift=lift,
+                    part_height_mm=20.0,
+                    dry_run=False,
+                    settle_s=0.0,
+                    sleep=lambda s: None,
+                    read=read,
+                )
+        assert reads == [] and printer.scripts == []
+
+
+def test_a_pending_marker_is_undone_first_so_the_original_z_survives(
+    tmp_path: Path,
+) -> None:
+    printer = FakePrinter(
+        z=70.0
+    )  # stranded by an interrupted view that found it at Z 200
+    bed_view._write_pending(
+        "u1",
+        bed_view.Motion("complete", "complete", 200.0, 200.0, "xyz", True, None),
+        time.time(),
+    )
+    doc = shoot(printer, tmp_path / "t.jpg", lift=70.0)
+    assert moves(printer) == ["G1 Z200.000 F600", "G1 Z70.000 F600", "G1 Z200.000 F600"]
+    assert printer.z == 200.0 and doc["restored"] and doc["moved"]
+    assert bed_view.view_in_progress("u1", time.time()) is False
+
+
+def test_a_pending_marker_that_cannot_be_undone_is_never_overwritten(
+    tmp_path: Path,
+) -> None:
+    printer, camera = (
+        FakePrinter(z=70.0, homed=""),
+        FakeCamera(),
+    )  # recovery refuses: not homed
+    bed_view._write_pending(
+        "u1",
+        bed_view.Motion("complete", "complete", 200.0, 200.0, "xyz", True, None),
+        time.time(),
+    )
+    with pytest.raises(GateFailure, match="interrupted bed view"):
+        shoot(printer, tmp_path / "t.jpg", camera=camera, lift=70.0)
+    assert printer.scripts == [] and camera.grabs == 0
+    pending = bed_view._read_pending("u1")
+    assert (
+        pending is not None and pending["z"] == 200.0
+    )  # the original Z is still on record

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Iterable, Sequence
+from pathlib import Path
 from typing import Any
 
 from errors import InvalidArgument, UsageError
@@ -125,16 +126,33 @@ def update_row(
 
 
 # --------------------------------------------------------------------------- designs and makes
+def _absolute_dir(project_dir: str | None) -> str | None:
+    """A recorded project directory is absolute so it means the same thing from any cwd."""
+    return str(Path(project_dir).expanduser().resolve()) if project_dir else None
+
+
 def ensure_design(
     conn: sqlite3.Connection, name: str, project_dir: str | None = None
 ) -> sqlite3.Row:
     """The design called `name` (created when new); a known project directory is filled in when it was unset."""
     if not name.strip():
         raise InvalidArgument("design", name, ["a non-empty name"], command="library")
+    project_dir = _absolute_dir(project_dir)
     row = conn.execute("SELECT * FROM design WHERE name = ?", (name,)).fetchone()
     if row is None:
-        librarydb.insert_row(conn, "design", {"name": name, "project_dir": project_dir})
-    elif project_dir and not row["project_dir"]:
+        try:
+            librarydb.insert_row(
+                conn, "design", {"name": name, "project_dir": project_dir}
+            )
+        except (
+            sqlite3.IntegrityError
+        ):  # a concurrent writer created it between our SELECT and INSERT
+            row = conn.execute(
+                "SELECT * FROM design WHERE name = ?", (name,)
+            ).fetchone()
+            if row is None:
+                raise
+    if row is not None and project_dir and not row["project_dir"]:
         update_row(conn, "design", str(row["uid"]), {"project_dir": project_dir})
     return resolve(conn, "design", name)
 
@@ -508,7 +526,43 @@ def graph(conn: sqlite3.Connection, design: str) -> dict[str, Any]:
     source -> remix -> make chains and the makes of a remix all show up. -> `{schema, design, nodes, edges,
     text}`; `text` is the indented tree (sources at the top)."""
     start = resolve(conn, "design", design)
-    seen = _design_uids(conn, str(start["uid"]))
+    seen, edges = _walk_relations(conn, str(start["uid"]))
+    nodes: dict[str, dict[str, str]] = {}
+    for uid in sorted(seen):
+        kind = _kind_of(conn, uid)
+        if kind:
+            nodes[uid] = {"kind": kind, "label": _label(conn, kind, uid)}
+    ordered = list(edges.values())
+    return {
+        "schema": "3d.library.graph/1",
+        "design": {"uid": str(start["uid"]), "name": str(start["name"])},
+        "nodes": [{"uid": u, **n} for u, n in nodes.items()],
+        "edges": [_labelled_edge(e, nodes) for e in ordered],
+        "text": _tree_text(nodes, ordered, str(start["uid"])),
+    }
+
+
+def _labelled_edge(
+    edge: dict[str, Any], nodes: dict[str, dict[str, str]]
+) -> dict[str, Any]:
+    return {
+        **edge,
+        "from": {
+            **edge["from"],
+            "label": nodes.get(edge["from"]["uid"], {}).get("label", ""),
+        },
+        "to": {
+            **edge["to"],
+            "label": nodes.get(edge["to"]["uid"], {}).get("label", ""),
+        },
+    }
+
+
+def _walk_relations(
+    conn: sqlite3.Connection, design_uid: str
+) -> tuple[set[str], dict[str, dict[str, Any]]]:
+    """Breadth-first walk of relation rows from the design and its makes: (reached uids, edges by uid)."""
+    seen = _design_uids(conn, design_uid)
     edges: dict[str, dict[str, Any]] = {}
     frontier = set(seen)
     while frontier:
@@ -532,32 +586,7 @@ def graph(conn: sqlite3.Connection, design: str) -> dict[str, Any]:
         extra = _siblings(conn, seen)
         frontier |= extra - seen
         seen |= extra
-    nodes: dict[str, dict[str, str]] = {}
-    for uid in sorted(seen):
-        kind = _kind_of(conn, uid)
-        if kind:
-            nodes[uid] = {"kind": kind, "label": _label(conn, kind, uid)}
-    ordered = list(edges.values())
-    return {
-        "schema": "3d.library.graph/1",
-        "design": {"uid": str(start["uid"]), "name": str(start["name"])},
-        "nodes": [{"uid": u, **n} for u, n in nodes.items()],
-        "edges": [
-            {
-                **e,
-                "from": {
-                    **e["from"],
-                    "label": nodes.get(e["from"]["uid"], {}).get("label", ""),
-                },
-                "to": {
-                    **e["to"],
-                    "label": nodes.get(e["to"]["uid"], {}).get("label", ""),
-                },
-            }
-            for e in ordered
-        ],
-        "text": _tree_text(nodes, ordered, str(start["uid"])),
-    }
+    return seen, edges
 
 
 def _siblings(conn: sqlite3.Connection, uids: Iterable[str]) -> set[str]:

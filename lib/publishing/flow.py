@@ -81,18 +81,39 @@ class Outcome:
 def library(
     db_path: str | None, *, create: bool
 ) -> Iterator[sqlite3.Connection | None]:
-    """The library connection; with `create=False` None when the file does not exist (a dry run never makes it)."""
+    """The library connection. `create=True` opens and migrates it (the --yes path); `create=False` is a
+    read-only connection that never migrates or creates anything, and yields None when the file does not
+    exist or does not hold the library tables yet (a dry run plans as if there were no library)."""
     from library import db as librarydb
 
     path = Path(db_path).expanduser() if db_path else librarydb.library_db_path()
-    if not create and not path.exists():
+    conn = librarydb.open_library(path) if create else _open_read_only(path)
+    if conn is None:
         yield None
         return
-    conn = librarydb.open_library(path)
     try:
         yield conn
     finally:
         conn.close()
+
+
+def _open_read_only(path: Path) -> sqlite3.Connection | None:
+    if not path.exists():
+        return None
+    conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=5)
+    conn.row_factory = sqlite3.Row
+    try:
+        tables = {
+            r[0]
+            for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+    except sqlite3.DatabaseError:
+        conn.close()
+        raise
+    if not {"design", "make", "photo", "publication"} <= tables:
+        conn.close()
+        return None
+    return conn
 
 
 def design_name(project: Path, explicit: str | None) -> str:
@@ -170,6 +191,22 @@ def library_photos(
     )
 
 
+def _name_of_make_design(
+    design_row: sqlite3.Row | None, design: str | None, make: str, name: str
+) -> str:
+    """The design name a `--make` selects; refuses an explicit `--design` that names another design."""
+    if design_row is None:
+        return name
+    actual = str(design_row["name"])
+    if design is not None and design not in (actual, str(design_row["uid"])):
+        raise UsageError(
+            f"--design {design} conflicts with --make {make}, which belongs to design {actual}",
+            command="models",
+            remediation=[f"Drop --design, or pass --design {actual}."],
+        )
+    return actual
+
+
 def prepare(
     project: Path,
     *,
@@ -187,8 +224,6 @@ def prepare(
     lookup: LicenseLookup | None = None,
 ) -> Prepared:
     """Build the evaluation. Reads the library when it exists (photos, the make, known model pages)."""
-    from library import records
-
     name = design_name(project, design)
     platforms = plan.platform_list(platform)
     with library(db_path, create=False) as conn:
@@ -199,50 +234,15 @@ def prepare(
         )
         make_row = None
         if make is not None:
-            if conn is None:
-                raise UsageError(
-                    f"--make {make}: there is no library database to find it in",
-                    command="models",
-                    remediation=[
-                        "Record the make first: `3d make add --design NAME ...` (or pass --db PATH)."
-                    ],
-                )
-            make_row = records.resolve(conn, "make", make, command="models")
-            design_row = conn.execute(
-                "SELECT * FROM design WHERE id = ?", (make_row["design_id"],)
-            ).fetchone()
-            name = (
-                str(design_row["name"])
-                if design_row is not None and design is None
-                else name
-            )
-        source: SourceRef | None = None
-        if of is not None:
-            source = load_source(of, conn)
-        elif (
-            make_row is not None
-            and make_row["source_id"] is not None
-            and conn is not None
-        ):
-            source = _source_from_row(
-                conn.execute(
-                    "SELECT * FROM model_source WHERE id = ?", (make_row["source_id"],)
-                ).fetchone()
-            )
+            make_row, design_row, name = _resolve_make(conn, make, design, name)
+        source = _prepare_source(conn, of, make_row)
         photos = library_photos(
             conn,
             int(design_row["id"]) if design_row is not None else None,
             int(make_row["id"]) if make_row is not None else None,
         )
-        targets: dict[str, str] = {}
+        targets = _published_targets(conn, design_row)
         printer = filament = ""
-        if conn is not None and design_row is not None:
-            for r in conn.execute(
-                "SELECT platform, url FROM publication WHERE design_id = ? AND url IS NOT NULL "
-                "AND state IN ('draft', 'published') AND platform NOT LIKE ? ORDER BY id",
-                (design_row["id"], f"%{MAKE_SUFFIX}"),
-            ):
-                targets[str(r["platform"])] = str(r["url"])
         if make_row is not None:
             printer, filament = (
                 str(make_row["printer"] or ""),
@@ -279,6 +279,58 @@ def prepare(
             make_uid=str(make_row["uid"]) if make_row is not None else None,
             source=source,
         )
+
+
+def _resolve_make(
+    conn: sqlite3.Connection | None, make: str, design: str | None, name: str
+) -> tuple[sqlite3.Row, sqlite3.Row, str]:
+    """The make row, its design row and design name (refusing a conflicting `--design`)."""
+    from library import records
+
+    if conn is None:
+        raise UsageError(
+            f"--make {make}: there is no library database to find it in",
+            command="models",
+            remediation=[
+                "Record the make first: `3d make add --design NAME ...` (or pass --db PATH)."
+            ],
+        )
+    make_row = records.resolve(conn, "make", make, command="models")
+    design_row = conn.execute(
+        "SELECT * FROM design WHERE id = ?", (make_row["design_id"],)
+    ).fetchone()
+    return make_row, design_row, _name_of_make_design(design_row, design, make, name)
+
+
+def _prepare_source(
+    conn: sqlite3.Connection | None, of: str | None, make_row: sqlite3.Row | None
+) -> SourceRef | None:
+    """The model source: `--of`, else the one recorded on the make."""
+    if of is not None:
+        return load_source(of, conn)
+    if make_row is None or make_row["source_id"] is None or conn is None:
+        return None
+    return _source_from_row(
+        conn.execute(
+            "SELECT * FROM model_source WHERE id = ?", (make_row["source_id"],)
+        ).fetchone()
+    )
+
+
+def _published_targets(
+    conn: sqlite3.Connection | None, design_row: sqlite3.Row | None
+) -> dict[str, str]:
+    """platform -> url of the design's existing drafts/publications (make rows excluded)."""
+    targets: dict[str, str] = {}
+    if conn is None or design_row is None:
+        return targets
+    for r in conn.execute(
+        "SELECT platform, url FROM publication WHERE design_id = ? AND url IS NOT NULL "
+        "AND state IN ('draft', 'published') AND platform NOT LIKE ? ORDER BY id",
+        (design_row["id"], f"%{MAKE_SUFFIX}"),
+    ):
+        targets[str(r["platform"])] = str(r["url"])
+    return targets
 
 
 def refuse_if_blocked(prep: Prepared) -> None:
@@ -364,16 +416,9 @@ def send(
     """Publish for real and record it. Credentials are resolved first, so a missing token cannot leave one
     platform published and the rest not. The caller has already refused blocked plans."""
     from library import records
-    from marketplaces import credentials
-    from printops import events
 
     ev = prep.ev
-    token = ""
-    if any(p.platform == "thingiverse" for p in ev.plans) and prep.kind != "make":
-        token = (token_for or credentials.thingiverse_upload_token)()
-    cults_auth = ("", "")
-    if any(p.platform == "cults" for p in ev.plans) and prep.kind != "make":
-        cults_auth = (cults_credentials or credentials.cults_basic_auth)()
+    token, cults_auth = _resolve_credentials(prep, token_for, cults_credentials)
     outcomes: list[Outcome] = []
     with library(prep.db_path, create=True) as conn:
         assert conn is not None
@@ -383,21 +428,7 @@ def send(
         design_uid = str(design["uid"])
         if prep.make_uid is not None:
             records.relate(conn, "make_of", "make", prep.make_uid, "design", design_uid)
-        if ev.parts is not None:
-            for part in ev.parts.overridden:
-                with _tx(conn):
-                    events.emit(
-                        conn,
-                        "library.publish.override",
-                        f"design:{design_uid}",
-                        {
-                            "part": part.name,
-                            "role": part.role,
-                            "reason": ev.parts.reason,
-                            "kind": prep.kind,
-                        },
-                        "cli:models",
-                    )
+        _emit_overrides(conn, prep, design_uid)
         if prep.kind != "make":
             record_renders(prep.db_path, design_uid, ev)
         if prep.kind == "remix" or (ev.remix is not None):
@@ -429,6 +460,47 @@ def send(
                 )
             )
     return outcomes
+
+
+def _resolve_credentials(
+    prep: Prepared,
+    token_for: Callable[[], str] | None,
+    cults_credentials: Callable[[], tuple[str, str]] | None,
+) -> tuple[str, tuple[str, str]]:
+    """Thingiverse token and Cults basic auth, resolved up front (a make publishes with neither)."""
+    from marketplaces import credentials
+
+    ev = prep.ev
+    token = ""
+    if any(p.platform == "thingiverse" for p in ev.plans) and prep.kind != "make":
+        token = (token_for or credentials.thingiverse_upload_token)()
+    cults_auth = ("", "")
+    if any(p.platform == "cults" for p in ev.plans) and prep.kind != "make":
+        cults_auth = (cults_credentials or credentials.cults_basic_auth)()
+    return token, cults_auth
+
+
+def _emit_overrides(conn: sqlite3.Connection, prep: Prepared, design_uid: str) -> None:
+    """One `library.publish.override` event per non-printable part the user explicitly allowed."""
+    from printops import events
+
+    parts = prep.ev.parts
+    if parts is None:
+        return
+    for part in parts.overridden:
+        with _tx(conn):
+            events.emit(
+                conn,
+                "library.publish.override",
+                f"design:{design_uid}",
+                {
+                    "part": part.name,
+                    "role": part.role,
+                    "reason": parts.reason,
+                    "kind": prep.kind,
+                },
+                "cli:models",
+            )
 
 
 @contextlib.contextmanager
@@ -471,7 +543,7 @@ def _send_one(
         )
     except ThreeDError as exc:
         return Outcome(item.platform, False, "failed", None, exc.render())
-    except OSError as exc:  # lock file, temp dir, unreadable upload: say so instead of a traceback
-        return Outcome(
-            item.platform, False, "failed", None, f"publish failed: {exc}"
-        )
+    except (
+        OSError
+    ) as exc:  # lock file, temp dir, unreadable upload: say so instead of a traceback
+        return Outcome(item.platform, False, "failed", None, f"publish failed: {exc}")

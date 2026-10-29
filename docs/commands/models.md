@@ -630,6 +630,8 @@ hosted:
 directory holding one. The source's licence is read where it was recorded (the `model.json`, else the library's
 `model_source` row, else the marketplace), and the #564 remix rules above apply unchanged: ND / NC-ND /
 all-rights-reserved / unknown is refused without `permission_ref`; NC, SA and GPL conditions are inherited.
+A `model.json` is trusted only when its `source.url` is an https page of a supported marketplace and the
+`site` / `id` it declares match that URL; anything else is refused (exit 2) because the make flow opens that URL.
 
 `--kind make --make ID --of SRC` posts a **make** — "I printed this" with the photos of make `ID` — to the model
 page of the source (or of the design's own recorded publications): `--platform all` means the platforms that
@@ -638,7 +640,7 @@ is a model page and at least one photo of the make (`render` photos do not count
 agent-browser route as a listing (open the page, press the site's make button, attach the photos, fill the
 note, screenshot) and **stop before the final Post button**. Their labels (`Add make`, `Share your print`,
 `I Made One`, `Add a make`) are unverified against the live pages. `--note TEXT` is the post text; printer and
-filament come from the make.
+filament come from the make. An explicit `--of` always wins over a publication the library already knows.
 
 ### Photos and renders in the listing
 

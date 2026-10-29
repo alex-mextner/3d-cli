@@ -10,10 +10,13 @@ WHAT (stdlib only; the pixels/calibration stay in bed_state.py, loaded lazily by
                         qualifies when the plate share in the frame is >= `threshold`; views within VIEW_TIE of
                         the best are equal and the nearest to the current Z wins (least motion). No qualifying Z
                         -> a refusal with the reason, never a guess.
-  `capture_table_photo` the flow: refuse unless the printer is idle/complete/cancelled with Z homed, decide the
-                        target Z (`--lift MM` or `auto`), and unless `dry_run`: take the per-printer view lock,
-                        write the displaced-Z marker, `guarded_z_move`, settle, grab a FRESH frame, restore Z in a
-                        `finally`. The photo is saved even when the restore fails; the failure is returned.
+  `capture_table_photo` the flow: unless `dry_run`, take the per-printer view lock FIRST (every read that
+                        decides the move happens under it), put back a bed an interrupted view left displaced
+                        (a marker that cannot be undone is never overwritten: refuse), refuse unless the
+                        printer is idle/complete/cancelled with Z homed, decide the target Z (`--lift MM` or
+                        `auto`), write the displaced-Z marker, `guarded_z_move` (refused when the gcode Z
+                        offset changed since the plan), settle, grab a FRESH frame, restore Z in a `finally`.
+                        The photo is saved even when the restore fails; the failure is returned.
 
 RULES (same as bed_view): the only writes are `G90`, `G1 Z<z> F<feed>`, `M400` through `guarded_z_move` (it
   re-reads the printer right before each send); nothing moves while a job owns the bed; the move is bounded by
@@ -42,12 +45,16 @@ FRESH_TRIES = (
     6  # grabs of the camera for a frame that differs from the one before the move
 )
 LIFT_TOLERANCE_MM = 0.15  # already this close to the target: no move
+OFFSET_TOLERANCE_MM = (
+    0.01  # the gcode Z offset moved more than this since the plan: refuse
+)
 
 # The displaced-Z marker and the "may the bed move" decision are bed_view's own (private) helpers: this module
 # is their second user and must not copy them, or the two flows would disagree about what is safe.
 _mark_displaced = bed_view._write_pending
 _clear_displaced = bed_view._clear_pending
 _may_move = bed_view._may_move
+_pending = bed_view._read_pending
 
 ViewFn = Callable[[float], float | None]
 
@@ -222,7 +229,65 @@ def capture_table_photo(
     Raises GateFailure when the printer is not idle (nothing moved, the camera is not asked), when a guard
     refuses the lift, or when the camera gives no frame. A failed restore is NOT raised: the photo exists, so it
     is returned with `restored: false` and `restore_error` for the caller to report and exit 1.
+
+    Everything that decides the move (the Z read, the plan) happens under the per-printer view lock, so a
+    concurrent view cannot change the bed between the read and the restore. A displaced-Z marker left by an
+    interrupted view is undone first; one that cannot be undone is never overwritten (its original Z would be
+    lost) and refuses the capture.
     """
+    if dry_run:
+        m = _quiet_motion(device, adapter, read)
+        plan = plan_lift(
+            device, adapter, cfg, m, lift=lift, part_height_mm=part_height_mm, view=view
+        )
+        return _new_doc(device, plan, dry_run=True)
+    note = bed_view.recover_pending(adapter, device.name, clock(), read)
+    if note:
+        bed_view._log(f"{device.name}: {note}")
+    with bed_view.view_lock(device.name) as held:
+        if not held:
+            raise GateFailure(
+                f"another bed view of {device.name} is running",
+                command="photo",
+                remediation=["Retry in a minute."],
+            )
+        if _pending(device.name) is not None:
+            raise GateFailure(
+                f"{device.name}: an interrupted bed view left the bed away from where it was found and it "
+                "could not be put back yet; no photo lift",
+                command="photo",
+                remediation=[
+                    f"Check `3d printer status {device.name}`, run `3d printer bed status {device.name}` once the "
+                    "printer is idle (it puts the bed back), then retry."
+                ],
+            )
+        m = _quiet_motion(device, adapter, read)
+        plan = plan_lift(
+            device, adapter, cfg, m, lift=lift, part_height_mm=part_height_mm, view=view
+        )
+        doc = _new_doc(device, plan, dry_run=False)
+        if not plan.move:
+            jpeg, fresh = fresh_frame(camera, None, sleep)
+            return _saved(doc, out, jpeg, fresh, m.z)
+        return _lifted_photo(
+            device,
+            adapter,
+            camera,
+            out,
+            doc,
+            plan,
+            m,
+            settle_s=settle_s,
+            sleep=sleep,
+            clock=clock,
+            read=read,
+        )
+
+
+def _quiet_motion(
+    device: Any, adapter: Any, read: Callable[[Any], bed_view.Motion]
+) -> bed_view.Motion:
+    """The printer's motion, or GateFailure when a job owns the bed."""
     m = read(adapter)
     if m.state in bed_view.ACTIVE_STATES or m.state not in QUIET_STATES:
         raise GateFailure(
@@ -232,10 +297,11 @@ def capture_table_photo(
                 f"Wait for the job to end (`3d printer status {device.name}`), then retry."
             ],
         )
-    plan = plan_lift(
-        device, adapter, cfg, m, lift=lift, part_height_mm=part_height_mm, view=view
-    )
-    doc: dict[str, Any] = {
+    return m
+
+
+def _new_doc(device: Any, plan: LiftPlan, *, dry_run: bool) -> dict[str, Any]:
+    return {
         "printer": device.name,
         "dry_run": dry_run,
         "plan": plan.to_json(),
@@ -246,74 +312,93 @@ def capture_table_photo(
         "restore_error": None,
         "fresh": None,
     }
-    if dry_run:
-        return doc
-    if not plan.move:
-        jpeg, fresh = fresh_frame(camera, None, sleep)
-        return _saved(doc, out, jpeg, fresh, m.z)
-    with bed_view.view_lock(device.name) as held:
-        if not held:
-            raise GateFailure(
-                f"another bed view of {device.name} is running",
-                command="photo",
-                remediation=["Retry in a minute."],
+
+
+def _same_coordinate_frame(
+    read: Callable[[Any], bed_view.Motion], planned: bed_view.Motion
+) -> Callable[[Any], bed_view.Motion]:
+    """`read` for `guarded_z_move`: it reads right before the G-code is sent, so refusing there closes the gap
+    between the plan and the send. A changed gcode Z offset makes the planned `G1 Z` land elsewhere."""
+
+    def checked(adapter: Any) -> bed_view.Motion:
+        now = read(adapter)
+        if abs(now.offset - planned.offset) > OFFSET_TOLERANCE_MM:
+            raise bed_view.MoveRefused(
+                f"the Z offset changed from {planned.offset:g} to {now.offset:g} since the plan; "
+                "the planned G-code Z would land at another height"
             )
-        before, _ = fresh_frame(
-            camera, None, sleep, tries=1
-        )  # the frame at the resting Z: not "fresh" later
-        attempted = False
-        restore_error: str | None = None
-        after_z: float | None = None
-        jpeg, fresh = b"", False
-        with bed_view.terminate_as_exit():
-            try:
-                _mark_displaced(device.name, m, clock())
-                attempted = True
-                bed_view.guarded_z_move(
-                    adapter,
-                    to_gcode_z=plan.target_z - m.offset,
-                    floor=plan.floor,
-                    ceiling=plan.ceiling,
-                    target_toolhead_z=plan.target_z,
-                    read=read,
-                )
-                doc["moved"] = True
-                sleep(settle_s)
-                moved = read(adapter)
-                after_z = moved.z
-                jpeg, fresh = fresh_frame(camera, before, sleep)
-            except bed_view.MoveRefused as exc:  # a guard fired before anything moved
-                attempted = False
-                _clear_displaced(device.name)
-                raise GateFailure(
-                    f"the bed was not lifted: {exc}",
-                    command="photo",
-                    remediation=["Nothing was moved."],
-                ) from exc
-            finally:
-                if attempted:
-                    restore_error = bed_view.restore_z(adapter, m, read=read)
-                    if restore_error is None:
-                        _clear_displaced(device.name)
-                    else:
-                        bed_view._log(
-                            f"{device.name}: BED NOT RESTORED to Z {m.z}: {restore_error}"
-                        )
-        doc["restored"] = restore_error is None
-        doc["restore_error"] = restore_error
-        if not jpeg:
-            raise GateFailure(
-                f"{device.name}: the camera returned no frame"
-                + (
-                    ""
-                    if restore_error is None
-                    else f"; BED NOT RESTORED: {restore_error}"
-                ),
-                command="photo",
+        return now
+
+    return checked
+
+
+def _lifted_photo(
+    device: Any,
+    adapter: Any,
+    camera: Any,
+    out: Path,
+    doc: dict[str, Any],
+    plan: LiftPlan,
+    m: bed_view.Motion,
+    *,
+    settle_s: float,
+    sleep: Callable[[float], None],
+    clock: Callable[[], float],
+    read: Callable[[Any], bed_view.Motion],
+) -> dict[str, Any]:
+    """Lift (marker, guarded move), settle, grab a fresh frame, restore; the caller holds the view lock."""
+    before, _ = fresh_frame(
+        camera, None, sleep, tries=1
+    )  # the frame at the resting Z: not "fresh" later
+    attempted = False
+    restore_error: str | None = None
+    after_z: float | None = None
+    jpeg, fresh = b"", False
+    with bed_view.terminate_as_exit():
+        try:
+            _mark_displaced(device.name, m, clock())
+            attempted = True
+            bed_view.guarded_z_move(
+                adapter,
+                to_gcode_z=plan.target_z - m.offset,
+                floor=plan.floor,
+                ceiling=plan.ceiling,
+                target_toolhead_z=plan.target_z,
+                read=_same_coordinate_frame(read, m),
             )
-        return _saved(
-            doc, out, jpeg, fresh, after_z if after_z is not None else plan.target_z
+            doc["moved"] = True
+            sleep(settle_s)
+            moved = read(adapter)
+            after_z = moved.z
+            jpeg, fresh = fresh_frame(camera, before, sleep)
+        except bed_view.MoveRefused as exc:  # a guard fired before anything moved
+            attempted = False
+            _clear_displaced(device.name)
+            raise GateFailure(
+                f"the bed was not lifted: {exc}",
+                command="photo",
+                remediation=["Nothing was moved."],
+            ) from exc
+        finally:
+            if attempted:
+                restore_error = bed_view.restore_z(adapter, m, read=read)
+                if restore_error is None:
+                    _clear_displaced(device.name)
+                else:
+                    bed_view._log(
+                        f"{device.name}: BED NOT RESTORED to Z {m.z}: {restore_error}"
+                    )
+    doc["restored"] = restore_error is None
+    doc["restore_error"] = restore_error
+    if not jpeg:
+        raise GateFailure(
+            f"{device.name}: the camera returned no frame"
+            + ("" if restore_error is None else f"; BED NOT RESTORED: {restore_error}"),
+            command="photo",
         )
+    return _saved(
+        doc, out, jpeg, fresh, after_z if after_z is not None else plan.target_z
+    )
 
 
 def _saved(
