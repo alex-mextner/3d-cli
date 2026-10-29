@@ -152,6 +152,7 @@ def test_a_remix_of_a_no_derivatives_licence_is_refused_until_permission_is_give
 
 
 def test_an_unverifiable_source_licence_is_refused(tmp_path: Path) -> None:
+    """A user remixes a model whose licence cannot be looked up: publishing is refused, not assumed free."""
     project = make_project(
         tmp_path, YAML + "remix_of: https://example.invalid/model/1\n"
     )
@@ -174,6 +175,7 @@ def test_an_unverifiable_source_licence_is_refused(tmp_path: Path) -> None:
 def test_a_project_without_3mf_or_scad_is_refused_before_any_platform_is_touched(
     tmp_path: Path,
 ) -> None:
+    """A user publishes a project missing its .3mf and .scad: refused before any platform is touched."""
     project = make_project(tmp_path, mf3=False, scad=False)
     result = run_cli(
         tmp_path,
@@ -191,6 +193,7 @@ def test_a_project_without_3mf_or_scad_is_refused_before_any_platform_is_touched
 
 
 def test_json_output_feeds_a_script(tmp_path: Path) -> None:
+    """A user pipes `--json` into a script and reads the plan: files, licence and platform fields."""
     project = make_project(tmp_path)
     result = run_cli(
         tmp_path,
@@ -214,12 +217,11 @@ def test_json_output_feeds_a_script(tmp_path: Path) -> None:
 
 
 def test_bad_invocations_are_structured_errors(tmp_path: Path) -> None:
+    """A user forgets or mistypes the platform, contradicts flags or names a missing project and gets structured errors."""
     project = make_project(tmp_path)
     missing = run_cli(tmp_path, "models", "publish", str(project), env_extra=BLANK)
-    assert (
-        missing.returncode == 2
-        and "accepted: makerworld, printables, thingiverse, all" in missing.stderr
-    )
+    assert missing.returncode == 2
+    assert "accepted: makerworld, printables, thingiverse, all" in missing.stderr
     wrong = run_cli(
         tmp_path,
         "models",
@@ -229,10 +231,8 @@ def test_bad_invocations_are_structured_errors(tmp_path: Path) -> None:
         "cults",
         env_extra=BLANK,
     )
-    assert (
-        wrong.returncode == 2
-        and "accepted: makerworld, printables, thingiverse, all" in wrong.stderr
-    )
+    assert wrong.returncode == 2
+    assert "accepted: makerworld, printables, thingiverse, all" in wrong.stderr
     both = run_cli(
         tmp_path,
         "models",
@@ -244,7 +244,8 @@ def test_bad_invocations_are_structured_errors(tmp_path: Path) -> None:
         "--dry-run",
         env_extra=BLANK,
     )
-    assert both.returncode == 2 and "contradict" in both.stderr
+    assert both.returncode == 2
+    assert "contradict" in both.stderr
     nodir = run_cli(
         tmp_path,
         "models",
@@ -260,7 +261,8 @@ def test_bad_invocations_are_structured_errors(tmp_path: Path) -> None:
     spec = run_cli(
         tmp_path, "models", "publish", str(nospec), "--platform", "all", env_extra=BLANK
     )
-    assert spec.returncode == 2 and "publish.yaml" in spec.stderr
+    assert spec.returncode == 2
+    assert "publish.yaml" in spec.stderr
 
 
 def test_yes_publishes_to_thingiverse_through_its_api(tmp_path: Path) -> None:
@@ -297,6 +299,7 @@ def test_yes_publishes_to_thingiverse_through_its_api(tmp_path: Path) -> None:
 
 
 def test_yes_without_the_upload_token_publishes_nothing(tmp_path: Path) -> None:
+    """A user passes `--yes` without the Thingiverse upload token: nothing is published."""
     project = make_project(tmp_path)
     fake = FakeThingiverse()
     try:
