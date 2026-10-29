@@ -124,6 +124,8 @@ An explicit measurement (`--dim`, `--dims-from`) is drawn in a view only if BOTH
 
 To measure something inside, cut the model so the feature is exposed (`-D cut=true` on an assembly that supports it, or measure on a cut STL): the exposed faces are visible geometry. An explicit measurement is anchored ON the part: its arrow may run over the part and is then drawn **dashed**; only its label must find clean paper (the legibility gate is unchanged). Name the measurement after the object it measures (`--dim "PCB head + plug (inside):0,1.1,0:0,1.1,27.6"`): the name is the label text. A cut-face anchored dimension in `3d section` itself is not implemented yet (#632).
 
+Reserved names: the automatic dimensions are labelled `span`, `X`, `Y`, `Z` and `X <part>` / `Y <part>` / `Z <part>`, and the renderer tells them from yours by that text. A `--dim` or `--dims-from` name equal to `span`, `X`, `Y`, `Z`, or starting with `X `, `Y `, `Z ` is refused (exit 2) so it cannot bypass the separated-parts and occlusion checks. A `--dims-from` YAML file needs pyyaml; without it the command exits 127 (missing dependency) while JSON files still work.
+
 ## Sidecar `OUT.png.dims.json`
 
 `image` (path, width, height, sha256), `part`, `bbox_mm`, optional `bed`, `views`

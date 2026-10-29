@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import pathlib
 import shutil
+import sys
 from typing import Any
 
 import numpy as np
@@ -15,6 +16,7 @@ pytest.importorskip("PIL")
 trimesh = pytest.importorskip("trimesh")
 
 from dimension_args import (  # noqa: E402
+    parse_dim,
     parse_dims_file,
     parse_dims_gaps,
     parse_overall,
@@ -23,6 +25,7 @@ from dimension_args import (  # noqa: E402
 from dimension_check import check_image, sidecar_path  # noqa: E402
 from dimension_model import RenderError  # noqa: E402
 from dimension_render import render  # noqa: E402
+from errors import MissingDependency  # noqa: E402
 
 
 def _silhouette(data: dict[str, Any], view: str) -> tuple[int, int]:
@@ -180,6 +183,31 @@ def test_bad_dims_files_are_refused(tmp_path: pathlib.Path, body: str) -> None:
     path = tmp_path / "bad.json"
     path.write_text(body, encoding="utf-8")
     with pytest.raises(ValueError, match="--dims-from"):
+        parse_dims_file(str(path))
+
+
+@pytest.mark.parametrize("name", ["span", "X", "Y", "Z", "X lid", "Z base plate"])
+def test_automatic_labels_are_reserved_for_dim_and_dims_from(
+    tmp_path: pathlib.Path, name: str
+) -> None:
+    with pytest.raises(ValueError, match="reserved"):
+        parse_dim(f"{name}:0,0,0:1,0,0")
+    with pytest.raises(ValueError, match="reserved"):
+        parse_dims_file(_spec(tmp_path, (name, [0, 0, 0], [1, 0, 0])))
+
+
+def test_names_merely_starting_with_an_axis_letter_stay_allowed() -> None:
+    assert parse_dim("Xtra:0,0,0:1,0,0")[0] == "Xtra"
+    assert parse_dim("spanner:0,0,0:1,0,0")[0] == "spanner"
+
+
+def test_yaml_dims_file_without_pyyaml_is_a_dependency_error(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "dims.yaml"
+    path.write_text("dims:\n  - name: a\n", encoding="utf-8")
+    monkeypatch.setitem(sys.modules, "yaml", None)  # `import yaml` -> ImportError
+    with pytest.raises(MissingDependency, match="pyyaml"):
         parse_dims_file(str(path))
 
 
