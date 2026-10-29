@@ -25,7 +25,9 @@ from errors import GateFailure, InputNotFound, InvalidArgument, UsageError
 
 if TYPE_CHECKING:
     from slicing.mix_model import Candidate
+    from slicing.mix_shelf import Spool
     from slicing.mix_pattern import MixRules
+    from slicing.mix_shelf import ShelfPlan
     from slicing.mix_tester import LoadedSlot
 
 USAGE = """3d mix check FILE.3mf [--layer-cap MM] [--max-run-mm MM] [--json]
@@ -33,13 +35,14 @@ USAGE = """3d mix check FILE.3mf [--layer-cap MM] [--max-run-mm MM] [--json]
 3d mix gcode FILE.gcode [--project FILE.3mf] [--layer-cap MM] [--max-run-mm MM] [--json]
 3d mix pattern PATTERN [--layer MM | --heights MM,MM,...] [--layer-cap MM] [--max-run-mm MM] [--json]
 3d mix target IMAGE --box x0,y0,x1,y1 (--white x0,y0,x1,y1 | --no-wb) [--white-level N] [--json]
-3d mix recipes TARGET (--slots N=HEX,... | --printer NAME) [--count N] [--max-cycle N]
+3d mix recipes TARGET (--slots N=HEX,... | --printer NAME [--shelf]) [--count N] [--max-cycle N]
                [--layer MM] [--layer-cap MM] [--max-run-mm MM] [--printops-api URL] [--json]
-3d mix tester  TARGET (--slots N=HEX,... | --printer NAME) -o OUT/NAME [--count N]
+3d mix tester  TARGET (--slots N=HEX,... | --printer NAME [--shelf]) -o OUT/NAME [--count N]
                [--max-cycle N] [--layer MM] [--layer-cap MM] [--max-run-mm MM] [--height MM]
                [--base-3mf FILE.3mf] [--printops-api URL] [--json]
   TARGET: --target HEX | --target-photo IMAGE --box x0,y0,x1,y1 (--white x0,y0,x1,y1 | --no-wb)
           [--white-level N]
+               [--shelf: --max-swaps N --material NAME --min-g G]
 3d mix readout PHOTO --manifest NAME.mix.json -o OUT/NAME [--white card|N] [--white-level N]
                [--no-qr-check] [--json]
 3d mix fit READOUT.json [READOUT.json ...] [-o OUT/NAME] [--lambda W] [--json]
@@ -184,6 +187,17 @@ USAGE = """3d mix check FILE.3mf [--layer-cap MM] [--max-run-mm MM] [--json]
   --base-3mf FILE     take the project settings from this Snapmaker Orca project instead of
                       exporting the U1 system presets with the installed Snapmaker Orca
   -o OUT/NAME         output path without extension (tester)
+  --shelf             (with --printer) also use the spools in stock but not loaded (Spoolman through
+                      3d-api): rank loadouts of the loaded spools plus up to --max-swaps shelf spools by
+                      the best reachable mix and print the load plan (which spool on which head, ΔE
+                      before/after; `3d printops spool load ID PRINTER/Tn` performs it). Equal results
+                      prefer fewer swaps. Empty spools (under --min-g, default 30 g) and spools of
+                      another material than the loaded ones (--material overrides) are left out; a
+                      measured `filament_color` record replaces a spool's Spoolman colour. `tester`
+                      builds the plate for the best loadout, its manifest names the spools
+  --max-swaps N       shelf spools a loadout may add (--shelf, default 2, at most 4)
+  --material NAME     material the shelf spools must have (--shelf; default: the loaded spools')
+  --min-g G           spools lighter than this are empty (--shelf, default 30)
   --printops-api URL  3d-api for --printer (default $PRINTOPS_API, else printops.yaml)
   --json              the same summary as JSON
 
@@ -200,6 +214,7 @@ Examples:
   3d mix profile out/cat.3mf -o out/cat.capped.3mf --layer-cap 0.1 --min-layer 0.06
   3d mix recipes --target '#B5654F' --slots 1=#F6C700,3=#E8732A,4=#B0284F
   3d mix recipes --target '#B5654F' --printer u1 --max-cycle 4 --json
+  3d mix recipes --target '#B5654F' --printer u1 --shelf
   3d mix tester --target '#B5654F' --printer u1 -o out/mix/terracotta
   3d mix target mockup.jpg --box 410,220,470,300 --white 20,30,80,90
   3d mix target render.png --box 100,100,160,160 --no-wb --json
@@ -236,7 +251,11 @@ _FLAGS = {
     "--printops-api",
     "--no-wb",
     "--fit",
+    "--max-swaps",
+    "--material",
+    "--min-g",
 }
+_BOOL_FLAGS = {"--shelf"}
 
 
 def _check(argv: list[str]) -> int:
@@ -308,14 +327,19 @@ def _profile_args(argv: list[str]) -> tuple[Path, Path, MixRules, float, float, 
     src, rest = Path(argv[0]), argv[1:]
     opts, as_json = _options(rest, {"-o", "--layer-cap", "--min-layer", "--max-layer"})
     if "-o" not in opts:
-        raise UsageError("-o OUT.3mf is required (the input is never overwritten)", command=_CMD)
+        raise UsageError(
+            "-o OUT.3mf is required (the input is never overwritten)", command=_CMD
+        )
     dst = Path(opts["-o"])
     if dst.suffix.lower() != ".3mf":
         raise UsageError(f"-o {dst}: the output must be a .3mf file", command=_CMD)
     if not src.is_file():
         raise InputNotFound(str(src), command=_CMD)
     if dst.exists() and dst.samefile(src):
-        raise UsageError("-o must differ from the input: the input is never overwritten", command=_CMD)
+        raise UsageError(
+            "-o must differ from the input: the input is never overwritten",
+            command=_CMD,
+        )
     rules = _rules(opts)
     hmin = _number(opts, "--min-layer", layer_heights.HMIN_MM, 0.02, 0.4)
     hmax = _number(opts, "--max-layer", layer_heights.HMAX_MM, 0.04, 0.8)
@@ -346,10 +370,14 @@ def _profile(argv: list[str]) -> int:
         raise UsageError(
             f"cannot write {dst}: {exc.strerror or exc}",
             command=_CMD,
-            remediation=["Create the output directory first, or pick a writable -o path."],
+            remediation=[
+                "Create the output directory first, or pick a writable -o path."
+            ],
         ) from exc
     except ValueError as exc:  # a mixed part Orca cannot cap (an empty z range, a cap below the thinnest layer)
-        raise UsageError(f"cannot cap the layers of {src.name}: {exc}", command=_CMD) from exc
+        raise UsageError(
+            f"cannot cap the layers of {src.name}: {exc}", command=_CMD
+        ) from exc
     objects = [
         {
             "object": p.object,
@@ -386,7 +414,10 @@ def _profile(argv: list[str]) -> int:
     return 0
 
 
-def _options(argv: list[str], allowed: set[str]) -> tuple[dict[str, str], bool]:
+def _options(
+    argv: list[str], allowed: set[str], flags: set[str] | None = None
+) -> tuple[dict[str, str], bool]:
+    """(--flag value pairs and `flags` as {flag: "1"}, --json)."""
     opts: dict[str, str] = {}
     as_json = False
     i = 0
@@ -394,6 +425,10 @@ def _options(argv: list[str], allowed: set[str]) -> tuple[dict[str, str], bool]:
         a = argv[i]
         if a == "--json":
             as_json = True
+            i += 1
+            continue
+        if flags and a in flags:
+            opts[a] = "1"
             i += 1
             continue
         if a not in allowed:
@@ -537,6 +572,126 @@ def _printer_slots(name: str, api_url: str | None) -> list[LoadedSlot]:
     return out
 
 
+def _shelf_inputs(
+    name: str, api_url: str | None, loaded: list[LoadedSlot]
+) -> tuple[list[int], list[Spool], list[Spool]]:
+    """(usable heads, loaded spools, shelf spools) of `name` from 3d-api: the loaded ones with their
+    material and weight from the spool list, the shelf ones = in stock, on no printer head. A measured
+    `filament_color` record replaces the Spoolman colour of its filament (read-only)."""
+    from printops.client import ApiClient, ApiConfigError, ApiError
+    from printops.color import parse_hex
+    from slicing.mix_shelf import Spool
+
+    try:
+        api = ApiClient.from_config(api=api_url)
+        heads_view = api.get(f"/v1/printers/{name}/slots")
+        listed = api.get("/v1/spools")
+    except (ApiConfigError, ApiError) as e:
+        raise UsageError(
+            f"cannot read the shelf of {name}: {e}",
+            command=_CMD,
+            remediation=["--shelf needs 3d-api: --printops-api URL or $PRINTOPS_API"],
+        ) from e
+    try:
+        records = api.get(
+            "/v1/calibrations", kind="filament_color", current="true", limit=1000
+        ).get("calibrations")
+    except ApiError:
+        records = []  # no calibration engine: Spoolman colours only
+    measured: dict[int, str] = {}
+    for rec in records or []:
+        fil = rec.get("filament") or {}
+        hex_ = parse_hex((rec.get("values") or {}).get("hex"))
+        if isinstance(fil.get("filament_id"), int) and hex_:
+            measured.setdefault(fil["filament_id"], hex_)  # newest first
+    heads = sorted(
+        s["index"] + 1
+        for s in heads_view.get("slots") or []
+        if s.get("usable") and isinstance(s.get("index"), int)
+    )
+    views = {
+        v["id"]: v for v in listed.get("spools") or [] if isinstance(v.get("id"), int)
+    }
+
+    def remaining(v: dict[str, Any]) -> float | None:
+        r = v.get("remaining") or {}
+        mid = r.get("mid_g") if isinstance(r, dict) else None
+        return float(mid) if isinstance(mid, (int, float)) else None
+
+    def spool(v: dict[str, Any], hex_: str | None, head: int | None) -> Spool | None:
+        fid = v.get("filament_id") if isinstance(v.get("filament_id"), int) else None
+        base = hex_ or parse_hex(v.get("color_hex"))
+        if base is None:
+            return None
+        hex_now, source = (
+            (measured[fid], "measured") if fid in measured else (base, "spoolman")
+        )
+        return Spool(
+            v["id"],
+            hex_now,
+            str(v.get("name") or ""),
+            str(v.get("material") or ""),
+            fid,
+            remaining(v),
+            head,
+            source,
+        )
+
+    loaded_out = []
+    for ls in loaded:
+        v = views.get(ls.spool_id) if ls.spool_id is not None else None
+        if v is None:
+            loaded_out.append(
+                Spool(ls.spool_id, ls.hex, ls.name, "", ls.filament_id, None, ls.slot)
+            )
+        else:
+            sp = spool(v, ls.hex, ls.slot)
+            if sp is not None:
+                loaded_out.append(sp)
+    shelf = [
+        sp
+        for v in views.values()
+        if not v.get("slot") and not v.get("archived")
+        for sp in [spool(v, None, None)]
+        if sp is not None
+    ]
+    shelf.sort(key=lambda s: s.spool_id or 0)
+    return heads, loaded_out, shelf
+
+
+def _shelf_lines(plan: ShelfPlan, printer: str, target: str) -> list[str]:
+    base = plan.baseline
+    lines = [
+        f"shelf for {target} on {printer} (material {plan.material or 'any'}): loaded spools reach "
+        f"ΔE {base.best.delta_e:.2f} ({base.best.pattern})"
+    ]
+    if not plan.options:
+        lines.append("  no shelf spool gets closer: keep the loaded spools")
+    for i, lo in enumerate(plan.options, 1):
+        gone = {u.head: u for u in lo.unloads}
+        steps = []
+        for s in lo.loads:
+            out = gone.get(s.head)
+            label = f'spool {s.spool_id} "{s.name}" {s.hex}'
+            where = f"T{s.head}" + (
+                f', taking out spool {out.spool_id} "{out.name}"' if out else ""
+            )
+            steps.append(f"{label} on {where}")
+        lines.append(
+            f"  option {i}: load {'; '.join(steps)} -> ΔE {lo.best.delta_e:.2f} ({lo.best.pattern}), "
+            f"was {base.best.delta_e:.2f}; {lo.swaps} swap(s)"
+        )
+        for s in lo.loads:
+            out = gone.get(s.head)
+            lines.append(
+                f"    3d printops spool load {s.spool_id} {printer}/T{s.head}"
+                + (" --replace-to LOCATION" if out else "")
+            )
+    for s, why in plan.excluded:
+        lines.append(f"  left out: spool {s.spool_id} {s.name or s.hex}: {why}")
+    return lines
+
+
 @dataclass(frozen=True)
 class _Plan:
     target: str
@@ -547,6 +702,8 @@ class _Plan:
     max_cycle: int
     rules: MixRules
     target_source: dict[str, Any] | None = None
+
+    shelf: ShelfPlan | None = None
 
 
 def _run_reader(
@@ -720,6 +877,14 @@ def _plan(opts: dict[str, str], layer: float | None = None) -> _Plan:
         if "--slots" in opts
         else _printer_slots(opts["--printer"], opts.get("--printops-api"))
     )
+    shelf_opts = ("--max-swaps", "--material", "--min-g")
+    if "--shelf" not in opts and any(f in opts for f in shelf_opts):
+        raise UsageError(f"{', '.join(shelf_opts)} need --shelf", command=_CMD)
+    if "--shelf" in opts and "--printer" not in opts:
+        raise UsageError(
+            "--shelf reads the spools in stock from 3d-api: pass --printer NAME, not --slots",
+            command=_CMD,
+        )
     if layer is None:
         layer = _number(opts, "--layer", 0.12, 0.04, 0.4)
     if abs(round(layer, 4) - layer) > 1e-9:
@@ -728,6 +893,31 @@ def _plan(opts: dict[str, str], layer: float | None = None) -> _Plan:
     count = _integer(opts, "--count", 6, 1, 20)
     max_cycle = _integer(opts, "--max-cycle", 3, 1, 12)
     rules = _rules(opts)
+    shelf = None
+    if "--shelf" in opts:
+        from slicing.mix_shelf import MIN_SPOOL_G, plan as shelf_plan
+
+        heads, loaded, stock = _shelf_inputs(
+            opts["--printer"], opts.get("--printops-api"), slots
+        )
+        shelf = shelf_plan(
+            target,
+            loaded,
+            stock,
+            heads,
+            max_swaps=_integer(opts, "--max-swaps", 2, 0, 4),
+            max_cycle=max_cycle,
+            layer_h=layer,
+            rules=rules,
+            material=opts.get("--material"),
+            min_g=_number(opts, "--min-g", MIN_SPOOL_G, 0.0, 1000.0),
+        )
+        from slicing.mix_tester import LoadedSlot as _Loaded
+
+        slots = [
+            _Loaded(s.head or 0, s.hex, s.name, s.spool_id, s.filament_id)
+            for s in shelf.chosen.placed
+        ]
     try:
         ranked = rank(
             target,
@@ -742,7 +932,7 @@ def _plan(opts: dict[str, str], layer: float | None = None) -> _Plan:
         from slicing.mix_measured import measured_mixes
 
         ranked = measured_mixes(ranked, slots, layer, target, mix_records)
-    return _Plan(target, slots, ranked, layer, count, max_cycle, rules, target_source)
+    return _Plan(target, slots, ranked, layer, count, max_cycle, rules, target_source, shelf)
 
 
 def _emit(summary: dict[str, Any], lines: list[str], as_json: bool) -> None:
@@ -1285,7 +1475,9 @@ def _record(argv: list[str]) -> int:
 def _recipes(argv: list[str]) -> int:
     from slicing.mix_model import pick
 
-    opts, as_json = _options(argv, _FLAGS - {"--height", "--base-3mf", "-o"})
+    opts, as_json = _options(
+        argv, _FLAGS - {"--height", "--base-3mf", "-o"}, _BOOL_FLAGS
+    )
     p = _plan(opts)
     target, slots, layer, max_cycle = p.target, p.slots, p.layer, p.max_cycle
     chosen = [c.to_dict() for c in pick(p.ranked, p.count)]
@@ -1300,6 +1492,8 @@ def _recipes(argv: list[str]) -> int:
     }
     if p.target_source is not None:
         summary["target_source"] = p.target_source
+    if p.shelf is not None:
+        summary["shelf"] = p.shelf.to_dict()
     lines = [
         f"mix recipes for {target} (layer {layer:g} mm, cycle ≤ {max_cycle}, "
         f"no colour band over {p.rules.run_limit_mm:g} mm, "
@@ -1309,6 +1503,8 @@ def _recipes(argv: list[str]) -> int:
     if p.target_source is not None:
         lines.append(_source_line(p.target_source))
     lines += [_cand_line(i + 1, c) for i, c in enumerate(chosen)]
+    if p.shelf is not None:
+        lines = _shelf_lines(p.shelf, opts["--printer"], target) + lines
     _emit(summary, lines, as_json)
     return 0
 
@@ -1404,7 +1600,7 @@ def _tester(argv: list[str]) -> int:
     from slicing.mix_model import pick
     from slicing.mix_tester import MixTesterError, build
 
-    opts, as_json = _options(argv, _FLAGS)
+    opts, as_json = _options(argv, _FLAGS, _BOOL_FLAGS)
     if "-o" not in opts:
         raise UsageError("-o OUT/NAME is required", command=_CMD)
     if Path(opts["-o"]).suffix.lower() in (".3mf", ".json", ".png"):
@@ -1440,7 +1636,19 @@ def _tester(argv: list[str]) -> int:
     summary = _tester_summary(manifest, Path(opts["-o"]).parent)
     if p.target_source is not None:
         summary["target_source"] = p.target_source
-    _emit(summary, _tester_lines(summary, p, len(mixes)), as_json)
+    lines = _tester_lines(summary, p, len(mixes))
+    if p.shelf is not None:
+        summary["shelf"] = p.shelf.to_dict()
+        lines = (
+            _shelf_lines(p.shelf, opts["--printer"], p.target)
+            + (
+                ["the plate is built for option 1: load its spools first"]
+                if p.shelf.options
+                else []
+            )
+            + lines
+        )
+    _emit(summary, lines, as_json)
     return 0
 
 
@@ -1473,7 +1681,10 @@ def run(argv: list[str]) -> int:
     if sub == "record":
         return _record(rest)
     raise InvalidArgument(
-        "subcommand", sub, ["check", "fit", "gcode", "pattern", "profile", "readout", "recipes", "record", "target", "tester"], command=_CMD
+        "subcommand",
+        sub,
+        ["check", "fit", "gcode", "pattern", "profile", "readout", "recipes", "record", "target", "tester"],
+        command=_CMD,
     )
 
 
