@@ -24,7 +24,6 @@
 #                             in-plane strength by this for a worst-case across-layer estimate.
 #                             Approximate typical values (printed-part literature): PLA ~0.45,
 #                             PETG ~0.7, ABS ~0.6, ASA ~0.6, TPU ~0.8. Brand/temp dependent.
-<<<<<<< .merge_file_oYcrFs
 #   shrink_xy_pct  %        — OPTIONAL linear XY shrink of the printed part (consumed by `3d fits resolve`
 #                             as slicer shrinkage compensation: scale the model by 100/(100-pct)).
 #                             Typical values from https://printfarmcalc.com/reference/shrinkage/ (2026-10):
@@ -32,8 +31,6 @@
 #   shrink_z_pct   %        — OPTIONAL linear Z shrink. No source records a per-material Z figure, so none is
 #                             shipped: `3d fits resolve` says "no Z compensation recorded" until you add one.
 #                             A missing field is "not recorded" (provenance entry), never a silent zero.
-||||||| .merge_file_UhFGLP
-=======
 #
 # Optional structural fields (read by `3d strength`; a material that omits them gets generic
 # defaults, and the strength report lists them as assumptions):
@@ -49,7 +46,6 @@
 #                    guide; ASA is taken at the ABS value minus 0.5; TPU is a flexible, non-linear
 #                    material for which this small-strain figure is only a ceiling for the
 #                    linear solver.
->>>>>>> .merge_file_2HmyDD
 
 PLA:
   density: 1.24
