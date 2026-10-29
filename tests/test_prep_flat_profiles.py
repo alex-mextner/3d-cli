@@ -110,19 +110,26 @@ def test_requested_settings_are_what_the_gcode_must_echo() -> None:
         filament={"filament_max_volumetric_speed": 30},
         machine={"machine_max_acceleration_extruding": 12000},
     )
-    p = build_profiles("k1se", process_flags={"wall_loops": "3", "sparse_infill_density": "15%"}, overlay=overlay)
-    assert p.requested == {
-        "wall_loops": "3",
-        "sparse_infill_density": "15%",
-        "enable_support": "0",
-        "outer_wall_speed": "250",
-        "small_perimeter_speed": "120",  # not in the preset chain, still a real Orca setting: accepted
-        "filament_max_volumetric_speed": "30",
-        "machine_max_acceleration_extruding": "12000,12000",
-        "printer_settings_id": p.names["machine"],
-        "print_settings_id": p.names["process"],
-        "filament_settings_id": FILAMENT,
-    }
+    p = build_profiles(
+        "k1se",
+        process_flags={"wall_loops": "3", "sparse_infill_density": "15%"},
+        overlay=overlay,
+    )
+    assert (
+        p.requested
+        == {
+            "wall_loops": "3",
+            "sparse_infill_density": "15%",
+            "enable_support": "0",
+            "outer_wall_speed": "250",
+            "small_perimeter_speed": "120",  # not in the preset chain, still a real Orca setting: accepted
+            "filament_max_volumetric_speed": "30",
+            "machine_max_acceleration_extruding": "12000,12000",
+            "printer_settings_id": p.names["machine"],
+            "print_settings_id": p.names["process"],
+            "filament_settings_id": FILAMENT,
+        }
+    )
 
 
 def test_supports_none_forces_them_off_and_auto_is_the_tear_off_recipe() -> None:
@@ -187,6 +194,11 @@ def test_overlay_file_sections_and_errors(tmp_path: Path) -> None:
     f.write_text(json.dumps({"process": ["a"]}))
     with pytest.raises(InvalidArgument):
         load_overlay(f)
+    falsy_sections: list[object] = [[], False, 0, ""]
+    for falsy in falsy_sections:
+        f.write_text(json.dumps({"process": falsy}))
+        with pytest.raises(InvalidArgument):
+            load_overlay(f)
     f.write_text("{not json")
     with pytest.raises(InvalidArgument):
         load_overlay(f)
@@ -221,7 +233,9 @@ def test_speed_limits_are_the_largest_setting_that_can_set_a_feature() -> None:
     limits = speed_limits(p.process)
     assert limits["Sparse infill"] == 550 and limits["travel"] == 600
     assert limits["Inner wall"] == 500
-    assert limits["Outer wall"] == 250  # `small_perimeter_speed` is "50%" of it in the preset
+    assert (
+        limits["Outer wall"] == 250
+    )  # `small_perimeter_speed` is "50%" of it in the preset
     assert (
         limits["Overhang wall"] == 500
     )  # the largest of the overhang steps and the wall speeds
@@ -232,7 +246,9 @@ def test_speed_limits_are_the_largest_setting_that_can_set_a_feature() -> None:
 
 
 def test_a_percentage_other_than_the_small_perimeter_one_gives_no_limit() -> None:
-    limits = speed_limits({"outer_wall_speed": "200", "bridge_speed": "50%", "travel_speed": "500"})
+    limits = speed_limits(
+        {"outer_wall_speed": "200", "bridge_speed": "50%", "travel_speed": "500"}
+    )
     assert limits == {"Outer wall": 200.0, "Overhang wall": 200.0, "travel": 500.0}
 
 

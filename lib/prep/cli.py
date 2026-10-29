@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from errors import InputNotFound, InvalidArgument, UsageError
-from prep.flat_profiles import parse_assignments
+from prep.flat_profiles import parse_assignments, scalar
 from prep.pipeline import DEPS, STEPS, Pipeline, PrepConfig
 
 _SPEC_KEYS = {
@@ -139,12 +139,22 @@ def _adapt_spec(raw: Any) -> tuple[bool, list[dict[str, Any]]]:
 
 
 def _spec_assignments(raw: Any, where: str) -> dict[str, str]:
-    """`set:` / `fset:` of a spec file: a mapping of setting -> value, values kept as text."""
+    """`set:` / `fset:` of a spec file: a mapping of setting -> scalar, normalised the way --overlay values are."""
     if raw is None:
         return {}
     if not isinstance(raw, dict):
-        raise InvalidArgument(where, str(raw), ["a mapping of setting: value"], command="prep")
-    return {str(k): str(v) for k, v in raw.items()}
+        raise InvalidArgument(
+            where, str(raw), ["a mapping of setting: value"], command="prep"
+        )
+    for key, value in raw.items():
+        if isinstance(value, (dict, list)):
+            raise InvalidArgument(
+                f"{where} {key}",
+                str(value),
+                ["a string, number or boolean"],
+                command="prep",
+            )
+    return {str(k): scalar(v) for k, v in raw.items()}
 
 
 def make_config(ns: argparse.Namespace) -> PrepConfig:
@@ -217,7 +227,10 @@ def make_config(ns: argparse.Namespace) -> PrepConfig:
 
 
 def show_steps() -> str:
-    lines = ["step       needs", *(f"{s:<10} {', '.join(DEPS[s]) or '-'}" for s in STEPS)]
+    lines = [
+        "step       needs",
+        *(f"{s:<10} {', '.join(DEPS[s]) or '-'}" for s in STEPS),
+    ]
     return "\n".join(lines)
 
 

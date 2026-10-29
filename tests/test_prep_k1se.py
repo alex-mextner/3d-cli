@@ -22,7 +22,9 @@ from errors import InvalidArgument
 from prep import cli as prep_cli
 from prep.pipeline import Pipeline, PrepConfig, PrepOutcome, StepRecord
 
-SKIP = frozenset({"repair", "fit", "stability", "proof"})  # repair needs the meshfix build
+SKIP = frozenset(
+    {"repair", "fit", "stability", "proof"}
+)  # repair needs the meshfix build
 
 
 @pytest.fixture
@@ -177,6 +179,23 @@ def test_supports_auto_reaches_the_preset_and_the_gate_allows_them(
     )
 
 
+def test_the_gates_expect_the_walls_the_generated_process_has_after_a_set(
+    tmp_path: Path, slicer: Path
+) -> None:
+    out = run(
+        config(
+            box(tmp_path / "part.stl"),
+            tmp_path / "out",
+            walls=4,
+            set_process={"wall_loops": "3"},
+        )
+    )
+    project = rec(out, "project").result
+    assert project["walls"] == 3
+    assert project["infill"] == 0.15
+    assert project["supports_enabled"] is False
+
+
 def test_an_overlay_file_sets_speeds_acceleration_and_the_volumetric_cap(
     tmp_path: Path, slicer: Path
 ) -> None:
@@ -229,12 +248,23 @@ def test_changing_a_setting_recomputes_from_the_project_step_only(
 def test_a_misspelt_setting_is_caught_by_the_gates_because_the_slicer_does_not_echo_it(
     tmp_path: Path, slicer: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("FAKE_SLICER_DROP", "outer_wal_speed")  # Orca ignores a key it does not know
-    out = run(config(box(tmp_path / "part.stl"), tmp_path / "out", walls=3, set_process={"outer_wal_speed": "250"}))
+    monkeypatch.setenv(
+        "FAKE_SLICER_DROP", "outer_wal_speed"
+    )  # Orca ignores a key it does not know
+    out = run(
+        config(
+            box(tmp_path / "part.stl"),
+            tmp_path / "out",
+            walls=3,
+            set_process={"outer_wal_speed": "250"},
+        )
+    )
     gates = rec(out, "gates")
     overrides = next(g for g in gates.result["gates"] if g["name"] == "overrides")
     assert gates.verdict == "FAIL" and overrides["verdict"] == "FAIL"
-    assert "outer_wal_speed" in overrides["detail"] and "misspelt" in overrides["detail"]
+    assert (
+        "outer_wal_speed" in overrides["detail"] and "misspelt" in overrides["detail"]
+    )
 
 
 def test_a_value_the_slicer_replaced_is_caught(tmp_path: Path, slicer: Path) -> None:
@@ -243,7 +273,11 @@ def test_a_value_the_slicer_replaced_is_caught(tmp_path: Path, slicer: Path) -> 
     gcode.write_text(gcode.read_text().replace("; wall_loops = 3", "; wall_loops = 2"))
     from prep import gcode_gates
 
-    spec = gcode_gates.GateSpec(walls=None, infill=None, expect_settings=rec(out, "project").result["requested_settings"])
+    spec = gcode_gates.GateSpec(
+        walls=None,
+        infill=None,
+        expect_settings=rec(out, "project").result["requested_settings"],
+    )
     g = gcode_gates.check_gcode(gcode, spec).gate("overrides")
     assert g.verdict == "FAIL" and "wall_loops = 2 (asked 3)" in g.detail
 
@@ -356,6 +390,27 @@ def test_a_spec_file_carries_supports_set_fset_and_a_relative_overlay(
     assert (
         make([str(model), "--spec", str(spec), "--supports", "none"]).supports == "none"
     )  # a flag wins
+
+
+def test_a_spec_set_normalises_booleans_like_an_overlay_and_rejects_lists(
+    tmp_path: Path,
+) -> None:
+    model = box(tmp_path / "part.stl")
+    spec = tmp_path / "prep.yaml"
+    spec.write_text(
+        "process:\n  set: {enable_support: true, brim_width: 0, wall_loops: 3.0}\n"
+    )
+    cfg = make([str(model), "--spec", str(spec)])
+    assert cfg.set_process == {
+        "enable_support": "1",
+        "brim_width": "0",
+        "wall_loops": "3",
+    }
+    spec.write_text(
+        "process:\n  set: {machine_max_acceleration_extruding: [8000, 9000]}\n"
+    )
+    with pytest.raises(InvalidArgument):
+        make([str(model), "--spec", str(spec)])
 
 
 def test_a_set_without_equals_is_an_invalid_argument(tmp_path: Path) -> None:

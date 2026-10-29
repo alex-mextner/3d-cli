@@ -230,8 +230,15 @@ def _fit_loads(pipe: Pipeline) -> list[Any]:
         for d in pipe.cfg.loads
     ]
     fit_data = pipe.record_data("fit")
-    if not fit_data or fit_data.get("mode") != "lean":
-        return loads
+    if fit_data and fit_data.get("mode") == "lean":
+        loads.extend(_lean_loads(fit_data))
+    return loads
+
+
+def _lean_loads(fit_data: Mapping[str, Any]) -> list[Any]:
+    """The lightest and heaviest posed item of a lean fit at their rest pose, as tap loads."""
+    from prep import stability
+
     sign = -int((fit_data.get("spec") or {}).get("front_sign", -1))
     x_c = float((fit_data.get("spec") or {}).get("x_centre_mm", 0.0))
     posed = [
@@ -241,6 +248,7 @@ def _fit_loads(pipe: Pipeline) -> list[Any]:
         and r["verdict"] in ("PASS", "RISK")
         and r["phi_deg"] is not None
     ]
+    loads: list[Any] = []
     for tag, pick in (("light", min), ("heavy", max)):
         if not posed:
             break
@@ -257,11 +265,7 @@ def _fit_loads(pipe: Pipeline) -> list[Any]:
             y0 + sign * ((h - 10) * math.sin(phi) - t * math.cos(phi)),
             z0 + (h - 10) * math.cos(phi) + t * math.sin(phi),
         )
-        normal = (
-            0.0,
-            -sign * math.cos(phi),
-            math.sin(phi),
-        )
+        normal = (0.0, -sign * math.cos(phi), math.sin(phi))
         loads.append(
             stability.ExternalLoad(
                 f"{tag}: {r['item']} / {r['case']}",
@@ -385,21 +389,22 @@ def _project_flat(pipe: Pipeline) -> StepOutput:
     from prep import flat_profiles
 
     cfg = pipe.cfg
-    flags: dict[str, Any] = dict(_process_overrides(pipe, 0.2).to_config())
-    flags.pop("enable_support", None)  # `--supports` decides, in build_profiles
-    for key in ("layer_height", "initial_layer_print_height"):
-        flags.pop(key, None)  # the process preset's own layer height stands (`--set layer_height=` overrides)
+    # the settings `3d prep` owns; everything else (layer height, infill pattern, ...) stays the preset's own
+    flags: dict[str, Any] = {
+        "wall_loops": str(cfg.walls),
+        "sparse_infill_density": f"{cfg.infill_pct}%",
+        "adaptive_layer_height": "0",
+        "raft_layers": "0",
+    }
     if cfg.brim_mm:
         flags.update({"brim_type": "outer_only", "brim_width": f"{cfg.brim_mm:g}"})
     else:
         flags["brim_type"] = "no_brim"
     overlay = flat_profiles.load_overlay(cfg.overlay) if cfg.overlay else None
-    overlay = (overlay or flat_profiles.Overlay()).merged({}, cfg.set_filament)
-    # `--set` outranks the overlay file, which outranks the flags above; to_config() carried the extras, so drop
-    # them from the flags and hand them over as the top layer
-    for key in cfg.set_process:
-        flags.pop(key, None)
-    overlay = overlay.merged(cfg.set_process, {})
+    # `--set`/`--fset` outrank the overlay file, which outranks the flags above
+    overlay = (overlay or flat_profiles.Overlay()).merged(
+        cfg.set_process, cfg.set_filament
+    )
     profiles = flat_profiles.build_profiles(
         cfg.printer,
         process_preset=cfg.process_name,
@@ -412,14 +417,24 @@ def _project_flat(pipe: Pipeline) -> StepOutput:
     mesh = pipe.final_mesh().copy()
     lo, hi = mesh.bounds
     mesh.apply_translation(
-        np.array([bed[0] / 2 - (lo[0] + hi[0]) / 2, bed[1] / 2 - (lo[1] + hi[1]) / 2, -lo[2]])
+        np.array(
+            [bed[0] / 2 - (lo[0] + hi[0]) / 2, bed[1] / 2 - (lo[1] + hi[1]) / 2, -lo[2]]
+        )
     )
     lo, hi = mesh.bounds
-    if lo[0] < 1 or lo[1] < 1 or hi[0] > bed[0] - 1 or hi[1] > bed[1] - 1 or hi[2] > bed[2]:
+    if (
+        lo[0] < 1
+        or lo[1] < 1
+        or hi[0] > bed[0] - 1
+        or hi[1] > bed[1] - 1
+        or hi[2] > bed[2]
+    ):
         raise InvalidArgument(
             "model size",
             f"{(hi - lo).round(1).tolist()} mm",
-            [f"inside the {bed[0]:g} x {bed[1]:g} x {bed[2]:g} mm bed of the {cfg.printer}"],
+            [
+                f"inside the {bed[0]:g} x {bed[1]:g} x {bed[2]:g} mm bed of the {cfg.printer}"
+            ],
             command="prep",
         )
     stl = pipe.work / f"{cfg.name}.print.stl"
@@ -433,6 +448,11 @@ def _project_flat(pipe: Pipeline) -> StepOutput:
         "preset_names": profiles.names,
         "renamed": profiles.renamed,
         "supports": cfg.supports,
+        # what the generated process actually asks for (overrides applied): the gates check the G-code against these
+        "walls": int(str(profiles.process["wall_loops"])),
+        "infill": float(str(profiles.process["sparse_infill_density"]).rstrip("%"))
+        / 100.0,
+        "supports_enabled": str(profiles.process["enable_support"]) == "1",
         "layer_height": float(profiles.process.get("layer_height", 0.2)),
         "speed_limits": limits,
         "requested_settings": profiles.requested,
@@ -486,15 +506,13 @@ def _project(pipe: Pipeline) -> StepOutput:
     )
 
 
-def _slice(pipe: Pipeline) -> StepOutput:
-    from slicing import orca_cli, slice_warnings
+def _run_slicer(pipe: Pipeline) -> Any:
+    """Slice the flat presets + STL (single-extruder printers) or the 3MF project."""
+    from slicing import orca_cli
 
-    cfg = pipe.cfg
-    if not cfg.slice:
-        return StepOutput({}, "SKIP", "slicing disabled (--no-slice)")
-    if cfg.flat_profile:
+    if pipe.cfg.flat_profile:
         files = pipe.record_data("project")
-        outcome = orca_cli.slice_stl_with_profiles(
+        return orca_cli.slice_stl_with_profiles(
             pipe.work / files["stl"],
             pipe.work / "slice",
             machine=pipe.work / files["profiles"]["machine"],
@@ -502,29 +520,56 @@ def _slice(pipe: Pipeline) -> StepOutput:
             filament=pipe.work / files["profiles"]["filament"],
             heavy=True,
         )
-    else:
-        project = pipe.work / f"{cfg.name}.3mf"
-        outcome = orca_cli.slice_project(project, pipe.work / "slice", heavy=True)
+    return orca_cli.slice_project(
+        pipe.work / f"{pipe.cfg.name}.3mf", pipe.work / "slice", heavy=True
+    )
+
+
+def _record_slicer_warnings(pipe: Pipeline, gcode: Path) -> Path:
+    """Every slicer warning is recorded next to the G-code, bound to its SHA-256 (print-preflight's `slicer warn` gate)."""
+    from slicing import slice_warnings
+
+    slice_dir = pipe.work / "slice"
+    log = slice_dir / "slice.log"
+    sidecar = slice_warnings.record(
+        gcode,
+        logs=[("slice.log", log.read_text(errors="replace"))] if log.is_file() else (),
+        results=[p for p in (slice_dir / "result.json",) if p.is_file()],
+        sliced_3mfs=[p for p in (slice_dir / "sliced.3mf",) if p.is_file()],
+    )
+    return sidecar.path
+
+
+def _slice(pipe: Pipeline) -> StepOutput:
+    cfg = pipe.cfg
+    if not cfg.slice:
+        return StepOutput({}, "SKIP", "slicing disabled (--no-slice)")
+    outcome = _run_slicer(pipe)
     data = result_dict(outcome)
     artifacts: list[Path] = []
     if outcome.gcode is not None:
         gcode = pipe.copy_out(outcome.gcode, f"{cfg.name}.gcode")
         data["gcode"] = gcode.name
-        artifacts.append(gcode)
-        # every slicer warning is recorded next to the G-code, bound to its SHA-256 (print-preflight's `slicer warn` gate)
-        slice_dir = pipe.work / "slice"
-        log = slice_dir / "slice.log"
-        sidecar = slice_warnings.record(
-            gcode,
-            logs=[("slice.log", log.read_text(errors="replace"))]
-            if log.is_file()
-            else (),
-            results=[p for p in (slice_dir / "result.json",) if p.is_file()],
-            sliced_3mfs=[p for p in (slice_dir / "sliced.3mf",) if p.is_file()],
-        )
-        data["warnings_sidecar"] = sidecar.path.name
-        artifacts.append(sidecar.path)
+        sidecar = _record_slicer_warnings(pipe, gcode)
+        data["warnings_sidecar"] = sidecar.name
+        artifacts.extend([gcode, sidecar])
     return StepOutput(data, outcome.verdict, outcome.summary(), artifacts)
+
+
+def _flat_gate_fields(project: Mapping[str, Any]) -> dict[str, Any]:
+    """GateSpec fields of a flat-profile print: what the generated process asks for, not the CLI flags it started from."""
+    height = float(project.get("layer_height", 0.2))
+    return {
+        "walls": project.get("walls"),
+        "infill": project.get("infill"),
+        "supports": project.get("supports_enabled", False),
+        # fixed layer height: every layer sits at the preset's value, which is also the "rare" thin layer
+        "hmin": height,
+        "hmax": height,
+        "rare_fraction": 1.0,
+        "speed_limits": project.get("speed_limits"),
+        "expect_settings": project.get("requested_settings"),
+    }
 
 
 def _gates(pipe: Pipeline) -> StepOutput:
@@ -546,15 +591,7 @@ def _gates(pipe: Pipeline) -> StepOutput:
         "supports": cfg.supports == "auto",
     }
     if cfg.flat_profile:
-        # fixed layer height: every layer sits at the preset's value, which is also the "rare" thin layer
-        height = float(pipe.record_data("project").get("layer_height", 0.2))
-        fields.update(
-            hmin=height,
-            hmax=height,
-            rare_fraction=1.0,
-            speed_limits=pipe.record_data("project").get("speed_limits"),
-            expect_settings=pipe.record_data("project").get("requested_settings"),
-        )
+        fields.update(_flat_gate_fields(pipe.record_data("project")))
     spec = gcode_gates.GateSpec(**{**fields, **cfg.gate})
     manifest = pipe.work / f"{cfg.name}.manifest.json"
     expectations = (

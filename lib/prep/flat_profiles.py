@@ -128,7 +128,7 @@ def load_overlay(path: Path) -> Overlay:
         )
     sections: dict[str, dict[str, Value]] = {}
     for kind in KINDS:
-        section = raw.get(kind) or {}
+        section = raw.get(kind, {})
         if not isinstance(section, dict):
             raise InvalidArgument(
                 f"--overlay {kind}",
@@ -151,7 +151,8 @@ def parse_assignments(items: list[str], flag: str) -> dict[str, str]:
     return out
 
 
-def _scalar(value: Value) -> str:
+def scalar(value: Value) -> str:
+    """One setting value the way Orca stores it: booleans as 1/0, whole floats without the ".0"."""
     if isinstance(value, bool):
         return "1" if value else "0"
     if isinstance(value, float) and value.is_integer():
@@ -163,10 +164,10 @@ def coerce(existing: Any, value: Value) -> str | list[str]:
     """`value` in the shape the slicer stores `existing`: a list stays a list (a scalar is repeated for every
     entry, e.g. both accelerations of a machine), a string stays a string."""
     if isinstance(value, list):
-        return [_scalar(v) for v in value]
+        return [scalar(v) for v in value]
     if isinstance(existing, list):
-        return [_scalar(value)] * max(len(existing), 1)
-    return _scalar(value)
+        return [scalar(value)] * max(len(existing), 1)
+    return scalar(value)
 
 
 def _apply(base: dict[str, Any], overrides: Mapping[str, Value]) -> list[str]:
@@ -217,6 +218,77 @@ class FlatProfiles:
         return paths
 
 
+def _stamp_identity(
+    machine: dict[str, Any],
+    process: dict[str, Any],
+    filament: dict[str, Any],
+    names: Mapping[str, str],
+) -> None:
+    """Give the three presets their (possibly renamed) identity. The system presets list only their stock printer
+    as compatible; the machine here carries the fleet name (or the renamed one), so that name is the compatible
+    printer."""
+    machine.update({"name": names["machine"], _IDENTITY["machine"]: names["machine"]})
+    process.update(
+        {
+            "name": names["process"],
+            _IDENTITY["process"]: names["process"],
+            "compatible_printers": [names["machine"]],
+        }
+    )
+    filament.update(
+        {
+            "name": names["filament"],
+            _IDENTITY["filament"]: [names["filament"]],
+            "compatible_printers": [names["machine"]],
+        }
+    )
+    for kind, preset in (
+        ("machine", machine),
+        ("process", process),
+        ("filament", filament),
+    ):
+        preset.update({"type": kind, "from": "system", "instantiation": "true"})
+
+
+def _requested_settings(
+    machine: Mapping[str, Any],
+    process: Mapping[str, Any],
+    filament: Mapping[str, Any],
+    overlay: Overlay,
+    names: Mapping[str, str],
+) -> dict[str, str]:
+    """setting -> value the G-code config block must show: the overrides, the settings `3d prep` owns, the names."""
+    requested = {
+        key: echoed(process[key])
+        for key in (
+            "wall_loops",
+            "sparse_infill_density",
+            "enable_support",
+            *overlay.process,
+        )
+        if key in process
+    }
+    requested.update({key: echoed(filament[key]) for key in overlay.filament})
+    requested.update({key: echoed(machine[key]) for key in overlay.machine})
+    requested.update(
+        {
+            "printer_settings_id": names["machine"],
+            "print_settings_id": names["process"],
+            "filament_settings_id": names["filament"],
+        }
+    )
+    return requested
+
+
+def _check_inputs(printer: str, supports: str) -> None:
+    if printer not in FLAT_PRINTERS:
+        raise InvalidArgument(
+            "--printer", printer, sorted(FLAT_PRINTERS), command="prep"
+        )
+    if supports not in ("none", "auto"):
+        raise InvalidArgument("--supports", supports, ["none", "auto"], command="prep")
+
+
 def build_profiles(
     printer: str,
     *,
@@ -232,12 +304,7 @@ def build_profiles(
     `none` or `auto`; `overlay` holds the overlay file merged with `--set`/`--fset`."""
     from slicing.orca_presets import PresetCatalog
 
-    if printer not in FLAT_PRINTERS:
-        raise InvalidArgument(
-            "--printer", printer, sorted(FLAT_PRINTERS), command="prep"
-        )
-    if supports not in ("none", "auto"):
-        raise InvalidArgument("--supports", supports, ["none", "auto"], command="prep")
+    _check_inputs(printer, supports)
     fleet = FLAT_PRINTERS[printer]
     overlay = overlay or Overlay()
     catalog = PresetCatalog(command="prep")
@@ -270,43 +337,8 @@ def build_profiles(
         "process": process_name,
         "filament": filament_name,
     }
-    # the system presets list only their stock printer as compatible; the machine here carries the fleet name
-    # (or the renamed one), so that name is the compatible printer
-    machine.update({"name": machine_name, _IDENTITY["machine"]: machine_name})
-    process.update(
-        {
-            "name": process_name,
-            _IDENTITY["process"]: process_name,
-            "compatible_printers": [machine_name],
-        }
-    )
-    filament.update(
-        {
-            "name": filament_name,
-            _IDENTITY["filament"]: [filament_name],
-            "compatible_printers": [machine_name],
-        }
-    )
-    for kind, preset in (
-        ("machine", machine),
-        ("process", process),
-        ("filament", filament),
-    ):
-        preset.update({"type": kind, "from": "system", "instantiation": "true"})
-    requested = {
-        key: echoed(process[key])
-        for key in ("wall_loops", "sparse_infill_density", "enable_support", *overlay.process)
-        if key in process
-    }
-    requested.update({key: echoed(filament[key]) for key in overlay.filament})
-    requested.update({key: echoed(machine[key]) for key in overlay.machine})
-    requested.update(
-        {
-            "printer_settings_id": machine_name,
-            "print_settings_id": process_name,
-            "filament_settings_id": filament_name,
-        }
-    )
+    _stamp_identity(machine, process, filament, names)
+    requested = _requested_settings(machine, process, filament, overlay, names)
     return FlatProfiles(
         machine, process, filament, names, renamed_machine or renamed_process, requested
     )
@@ -358,18 +390,30 @@ def _speed(process: Mapping[str, Any], key: str) -> float | None:
         return None
 
 
+def _feature_limit(
+    process: Mapping[str, Any],
+    feature: str,
+    keys: tuple[str, ...],
+    first_layer: list[float],
+) -> float | None:
+    """The fastest speed one feature can run at, or None when any of its settings is not a plain number."""
+    present = [k for k in keys if k in process]
+    if not present:
+        return None
+    values = [_speed(process, k) for k in present]
+    known = [v for v in values if v is not None]
+    if len(known) != len(values):
+        return None
+    limit = max(known if feature == "travel" else [*known, *first_layer])
+    return limit if limit > 0 else None
+
+
 def speed_limits(process: Mapping[str, Any]) -> dict[str, float]:
     """Feature -> the fastest speed (mm/s) the process asks for. Features whose settings are not all plain numbers
     are left out (no limit rather than a wrong one)."""
     first = [v for k in _FIRST_LAYER_KEYS if (v := _speed(process, k)) is not None]
-    out: dict[str, float] = {}
-    for feature, keys in _FEATURE_SPEED_KEYS.items():
-        present = [k for k in keys if k in process]
-        values = [_speed(process, k) for k in present]
-        if not present or any(v is None for v in values):
-            continue
-        known = [v for v in values if v is not None]
-        limit = max([*known, *([] if feature == "travel" else first)])
-        if limit > 0:
-            out[feature] = limit
-    return out
+    limits = {
+        f: _feature_limit(process, f, keys, first)
+        for f, keys in _FEATURE_SPEED_KEYS.items()
+    }
+    return {f: v for f, v in limits.items() if v is not None}
