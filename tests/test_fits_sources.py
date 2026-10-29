@@ -108,7 +108,7 @@ def test_a_stored_row_is_a_correction_the_resolver_applies_exactly() -> None:
         ("schema: 3d.fits/1\ncorrections: [{printer: k1se}]\n", "missing required key"),
         (
             "schema: 3d.fits/1\ncorrections: [{printer: k1se, material: PLA, delta_mm: 0.1, source: calibration,"
-            " measured_at: x}]\n",
+            " measured_at: '2026-10-24T10:00:00Z'}]\n",
             "not 'manual'",
         ),
     ],
