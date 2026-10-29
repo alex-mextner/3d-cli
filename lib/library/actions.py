@@ -101,14 +101,64 @@ def search(
     kind: str = "wide",
     parent_session: str | None = None,
     db_path: str | None = None,
+    deep: bool = False,
+    idempotency_key: str | None = None,
 ) -> ActionResult:
     """Search model sites and record a `search_session` with its `search_result` rows.
 
-    `kind` is one of SEARCH_KINDS, `parent_session` the uid of the session this one refines.
-    `data`: `{session: uid, query, results: [{site, model_id, url, title, rank, ...}]}`.
+    `kind` is one of SEARCH_KINDS, `parent_session` the uid of the session this one refines, `deep` measures
+    the smallest mesh of every hit (trimesh), `idempotency_key` makes a retried call return the first session.
+    `data`: `{session: uid, query, results: [{site, model_id, url, title, rank, ...}]}`; a site that failed is a
+    warning with code `site_failed`; when no site answered the result is `ok: false`.
     """
-    raise NotImplementedByDesign(
-        "search", 576, "search core (50 results/site, analytics, persistence)"
+    from library import search as searchcore
+    from marketplaces.base import SITES
+
+    run = searchcore.run_search(
+        query,
+        searchcore.SearchOptions(
+            sites=tuple(sites) if sites else SITES,
+            limit=limit,
+            deep=deep,
+            kind=kind,
+            parent_session=parent_session,
+            idempotency_key=idempotency_key,
+            db_path=db_path,
+        ),
+    )
+    doc = run.doc
+    problems = [
+        issue("site_failed", f"{e['site']}: {e['message']}", e.get("remediation", []))
+        for e in doc["errors"]
+    ]
+    warnings = problems + [
+        issue("search_warning", f"{w['site']}: {w['message']}") for w in doc["warnings"]
+    ]
+    if not doc["results"]:
+        return error_result(
+            "search", problems, {"session": doc["search_id"], "query": query, "results": []}
+        )
+    flat = [
+        {
+            "site": site,
+            "model_id": rec["id"],
+            "url": rec["url"],
+            "title": rec["title"],
+            "rank": rec["rank"],
+            "image_url": rec["image"] or None,
+            "license": rec["license"],
+            "paid": rec["paid"],
+            "cad": rec["cad"],
+            "size_mm": rec.get("size_mm"),
+            "reference_suitable": rec["reference_suitable"],
+        }
+        for site, records in doc["results"].items()
+        for rec in records
+    ]
+    return ok_result(
+        "search",
+        {"session": doc["search_id"], "query": query, "results": flat, "timings": doc["timings"]},
+        warnings,
     )
 
 
@@ -132,13 +182,41 @@ def download(
     dest_dir: str | None = None,
     select: Sequence[str] | None = None,
     db_path: str | None = None,
+    role: str | None = None,
+    vitamin_kind: str | None = None,
+    deep: bool = False,
 ) -> ActionResult:
     """Download a model (all files, or the `select`ed names) and record a `model_source` with sha256 + licence.
 
-    `data`: `{source: uid, dir, files: [{name, size, sha256}], license}`.
+    `role` (printed|vitamin|reference|stand_in) and `vitamin_kind` (pcb|connector|screw|wire) go into the
+    `model_source`; a vitamin/reference download also measures the meshes. `data`: `{source: uid, dir,
+    files: [{name, size, sha256}], license, role}`; `source` is null when the library DB was unavailable
+    (a warning says so, the files are still on disk).
     """
-    raise NotImplementedByDesign(
-        "download", 576, "model download with provenance (reuses `3d models download`)"
+    from pathlib import Path
+
+    from library import sources
+
+    result = sources.download_model(
+        url,
+        Path(dest_dir) if dest_dir else None,
+        select=select,
+        role=role,
+        vitamin_kind=vitamin_kind,
+        deep=deep,
+        db_path=db_path,
+    )
+    source = result["source"]
+    return ok_result(
+        "download",
+        {
+            "source": source["uid"] if source else None,
+            "dir": result["dir"],
+            "files": [{k: f[k] for k in ("name", "size", "sha256")} for f in result["files"]],
+            "license": result["model"]["license"] or None,
+            "role": role,
+        },
+        [issue(w["code"], w["message"]) for w in result["warnings"]],
     )
 
 

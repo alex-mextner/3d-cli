@@ -41,13 +41,13 @@ def _read_json(path: Path) -> dict[str, Any]:
         raise UsageError(
             f"auth file is not valid JSON: {path}",
             command="auth",
-            remediation=["Fix or remove the file and run `3d auth hf login` again."],
+            remediation=["Fix or remove the file, then store the credentials again: `3d auth hf login` (Hugging Face) or `3d models auth set SITE` (marketplaces)."],
         ) from None
     if not isinstance(data, dict):
         raise UsageError(
             f"auth file must contain a JSON object: {path}",
             command="auth",
-            remediation=["Fix or remove the file and run `3d auth hf login` again."],
+            remediation=["Fix or remove the file, then store the credentials again: `3d auth hf login` (Hugging Face) or `3d models auth set SITE` (marketplaces)."],
         )
     return data
 
@@ -86,7 +86,7 @@ def _ensure_private_auth_path(path: Path) -> None:
         os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
     except OSError as exc:
         raise UsageError(
-            f"cannot secure Hugging Face auth file permissions: {path}",
+            f"cannot secure the auth file permissions (it holds more than the Hugging Face token): {path}",
             command="auth",
             remediation=["Fix file ownership/permissions, then run `3d auth hf status` again."],
         ) from exc
