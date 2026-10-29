@@ -796,6 +796,10 @@ def test_a_make_post_is_recorded_as_a_make_publication(tmp_path: Path) -> None:
     assert [c[3:] for c in calls[1:]] == [
         ["get", "url"],
         ["find", "text", "Add make", "click"],
+        [
+            "get",
+            "url",
+        ],  # the destination of the click, read right before the photos go up
         ["upload", "input[type=file]", str(table)],
         [
             "find",

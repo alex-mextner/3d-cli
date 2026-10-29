@@ -217,6 +217,39 @@ def check_part_height(part_height_mm: float | None) -> None:
         )
 
 
+def _refuse_recovery_below_floor(
+    device: Any,
+    adapter: Any,
+    cfg: BedConfig,
+    part_height_mm: float | None,
+    clock: Callable[[], float],
+    read: Callable[[Any], bed_view.Motion],
+) -> None:
+    """A fresh marker would send the bed back to the Z it was found at; when the part now declared stands
+    taller than that Z allows (below the clearance floor), refuse before any move: the marker is kept."""
+    pending = _pending(device.name)
+    if pending is None:
+        return
+    z, ts = bed_view._finite(pending.get("z")), bed_view._finite(pending.get("ts"))
+    if z is None or ts is None or not 0 <= clock() - ts <= bed_view.PENDING_MAX_AGE_S:
+        return
+    m = read(adapter)
+    if m.state in bed_view.ACTIVE_STATES or (m.z is not None and abs(m.z - z) <= 0.15):
+        return  # recovery sends nothing in these cases
+    limits = _may_move(device, adapter, cfg, m, part_height_mm)
+    if isinstance(limits, bed_view.Limits) and z < limits.z_floor:
+        raise GateFailure(
+            f"{device.name}: putting the bed back to Z {z:.0f} (left there by an interrupted view) would "
+            f"go below the clearance floor Z {limits.z_floor:.0f} of the {limits.part_mm:g} mm part from "
+            f"{limits.part_source}; nothing was moved and the marker is kept",
+            command="photo",
+            remediation=[
+                f"Run `3d printer bed status {device.name}` once the part is removed or with the height it "
+                "had, then retry."
+            ],
+        )
+
+
 def capture_table_photo(
     device: Any,
     cfg: BedConfig,
@@ -271,6 +304,7 @@ def capture_table_photo(
             command="photo",
             remediation=["Use a full-access printer; nothing was moved."],
         )
+    _refuse_recovery_below_floor(device, adapter, cfg, part_height_mm, clock, read)
     note = bed_view.recover_pending(adapter, device.name, clock(), read)
     if note:
         bed_view._log(f"{device.name}: {note}")

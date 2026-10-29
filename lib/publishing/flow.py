@@ -232,6 +232,7 @@ def prepare(
     lookup: LicenseLookup | None = None,
 ) -> Prepared:
     """Build the evaluation. Reads the library when it exists (photos, the make, known model pages)."""
+    _require_make_for_post(kind, make)
     name = design_name(project, design)
     platforms = plan.platform_list(platform)
     with library(db_path, create=False) as conn:
@@ -287,6 +288,18 @@ def prepare(
             design_uid=str(design_row["uid"]) if design_row is not None else None,
             make_uid=str(make_row["uid"]) if make_row is not None else None,
             source=source,
+        )
+
+
+def _require_make_for_post(kind: str, make: str | None) -> None:
+    """A make post shows one make's photos: without a make id there is nothing to select them by."""
+    if kind == "make" and make is None:
+        raise UsageError(
+            "--kind make needs --make ID: the make whose photos are posted",
+            command="models",
+            remediation=[
+                "3d models publish DIR --kind make --make MAKE_UID --of URL --platform printables"
+            ],
         )
 
 

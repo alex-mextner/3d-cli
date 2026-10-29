@@ -361,6 +361,33 @@ def test_a_pending_marker_is_undone_first_so_the_original_z_survives(
     assert bed_view._read_pending("u1") is None
 
 
+def test_recovery_below_the_current_clearance_floor_is_refused_before_any_move(
+    tmp_path: Path,
+) -> None:
+    printer, camera = FakePrinter(z=270.0), FakeCamera()
+    bed_view._write_pending(
+        "u1",
+        bed_view.Motion("complete", "complete", 200.0, 200.0, "xyz", True, None),
+        time.time(),
+    )
+    with pytest.raises(GateFailure, match="clearance floor Z 245"):
+        bed_photo.capture_table_photo(
+            device(),
+            CFG,
+            adapter=printer,
+            camera=camera,
+            out=tmp_path / "t.jpg",
+            lift=250.0,
+            part_height_mm=230.0,
+            dry_run=False,
+            settle_s=0.0,
+            sleep=lambda s: None,
+        )
+    assert printer.scripts == [] and camera.grabs == 0 and printer.z == 270.0
+    pending = bed_view._read_pending("u1")
+    assert pending is not None and pending["z"] == 200.0  # the marker is kept
+
+
 def test_a_pending_marker_that_cannot_be_undone_is_never_overwritten(
     tmp_path: Path,
 ) -> None:

@@ -33,7 +33,7 @@ from typing import Any
 from errors import InvalidArgument, UsageError
 from parts import NonPrintableParts, Part, assert_printable, part_from_dict
 from publishing.remix import RemixCheck, check_remix
-from publishing.spec import FileSet, PublishFile, PublishSpec
+from publishing.spec import FileSet, PublishFile, PublishSpec, name_clashes
 
 PROJECT_FILE = "3d.yaml"
 
@@ -175,19 +175,8 @@ def match_files(
     return tuple(found)
 
 
-def evaluate_parts(
-    project: Path,
-    spec: PublishSpec,
-    files: FileSet,
-    *,
-    allow: Sequence[str] = (),
-    reason: str = "",
-    drop: bool = False,
-) -> tuple[PartsReport, FileSet]:
-    """Apply the guardrail. -> (report, the file set to publish). Raises NonPrintableParts (exit 1) when a
-    non-printable part's file is in the set and neither `allow` nor `drop` says what to do with it."""
-    parts = load_parts(project)
-    stems = _part_files(project) if parts else {}
+def _check_allow(parts: Sequence[Part], allow: Sequence[str], reason: str) -> None:
+    """`--allow-nonprintable` must name declared parts and carry a reason (InvalidArgument/UsageError, exit 2)."""
     names = {p.name for p in parts}
     unknown = sorted(set(allow) - names)
     if unknown:
@@ -206,28 +195,59 @@ def evaluate_parts(
                 '3d models publish DIR --platform all --allow-nonprintable probe_pcb --reason "assembly kit, reviewed"'
             ],
         )
+
+
+def _without(files: FileSet, matched: Sequence[tuple[Part, PublishFile]]) -> FileSet:
+    """`files` minus the matched ones, with the name clashes recomputed from what is left."""
+    gone = {f.path for _, f in matched}
+    retained = tuple(f for f in files.files if f.path not in gone)
+    return replace(files, files=retained, clashes=name_clashes(retained))
+
+
+def _resolve_matches(
+    matched: Sequence[tuple[Part, PublishFile]],
+    files: FileSet,
+    *,
+    allow: Sequence[str],
+    drop: bool,
+) -> tuple[FileSet, tuple[str, ...], tuple[Part, ...], tuple[Part, ...]]:
+    """(file set to publish, dropped names, overridden parts, still-blocked parts) for the matched files."""
+    blocked = tuple(dict.fromkeys(p for p, _ in matched))
+    if not matched:
+        return files, (), (), blocked
+    if drop:
+        return _without(files, matched), tuple(f.name for _, f in matched), (), ()
+    allowed = [p for p in blocked if p.name in allow]
+    overridden = assert_printable(
+        allowed, include_non_printable=True, command="models publish"
+    ).overridden
+    return files, (), overridden, tuple(p for p in blocked if p.name not in allow)
+
+
+def evaluate_parts(
+    project: Path,
+    spec: PublishSpec,
+    files: FileSet,
+    *,
+    allow: Sequence[str] = (),
+    reason: str = "",
+    drop: bool = False,
+) -> tuple[PartsReport, FileSet]:
+    """Apply the guardrail. -> (report, the file set to publish). Raises NonPrintableParts (exit 1) when a
+    non-printable part's file is in the set and neither `allow` nor `drop` says what to do with it."""
+    parts = load_parts(project)
+    stems = _part_files(project) if parts else {}
+    _check_allow(parts, allow, reason)
     matched = match_files(parts, stems, files)
-    dropped: list[str] = []
-    kept = files
-    overridden: tuple[Part, ...] = ()
-    blocked_parts = tuple(dict.fromkeys(p for p, _ in matched))
-    if matched and drop:
-        gone = {f.path for _, f in matched}
-        kept = replace(files, files=tuple(f for f in files.files if f.path not in gone))
-        dropped = [f.name for _, f in matched]
-        blocked_parts = ()
-    elif matched:
-        allowed = [p for p in blocked_parts if p.name in allow]
-        overridden = assert_printable(
-            allowed, include_non_printable=True, command="models publish"
-        ).overridden
-        blocked_parts = tuple(p for p in blocked_parts if p.name not in allow)
+    kept, dropped, overridden, blocked_parts = _resolve_matches(
+        matched, files, allow=allow, drop=drop
+    )
     references = tuple(p for p in parts if p.reference_source is not None)
     checks = tuple(_check_reference(spec, p) for p in references)
     report = PartsReport(
         parts,
         matched,
-        tuple(dropped),
+        dropped,
         overridden,
         reason.strip(),
         blocked_parts,

@@ -20,6 +20,7 @@ import subprocess
 import tempfile
 import uuid
 from pathlib import Path
+from urllib.parse import urlsplit
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -30,7 +31,8 @@ from publishing.plan import AGENT_BROWSER, PlatformPlan
 from publishing.source import split_url
 
 SITE = "thingiverse"
-LOGIN_HINTS = ("login", "signin", "sign-in", "sign_in", "/auth")
+LOGIN_SEGMENTS = frozenset({"login", "log-in", "signin", "sign-in", "sign_in", "auth"})
+LOGIN_HOSTS = frozenset({"login", "auth", "signin", "accounts"})
 KEYCHAIN_CALLER = "3d-cli"
 USERNAME_SELECTOR = "input[autocomplete=username], input[type=email], input[name=email]"
 Fetch = Callable[..., transport.Response]
@@ -252,6 +254,18 @@ def publish_browser(
                 fcntl.flock(lock, fcntl.LOCK_UN)
 
 
+def _is_login_url(url: str) -> bool:
+    """Whether `url` is a login route: a whole path segment (`/login`, `/en/sign-in`) or a login host
+    (`login.site.com`). A model slug that merely contains the word (`/model/123-login-card-holder`) is not."""
+    try:
+        parts = urlsplit(url.strip())
+    except ValueError:
+        return False
+    segments = {s.lower() for s in parts.path.split("/") if s}
+    host = (parts.hostname or "").lower()
+    return bool(segments & LOGIN_SEGMENTS) or host.split(".", 1)[0] in LOGIN_HOSTS
+
+
 def _login_outcome(
     plan: PlatformPlan,
     base: list[str],
@@ -262,7 +276,7 @@ def _login_outcome(
     answer the caller already has."""
     session = base[2]
     code, url = landed if landed is not None else runner([*base, "get", "url"])
-    if code != 0 or not any(hint in url.lower() for hint in LOGIN_HINTS):
+    if code != 0 or not _is_login_url(url):
         return None
     problem = _login(plan.platform, base, runner)
     if problem is not None:
@@ -304,32 +318,94 @@ def _same_model_page(wanted: str, landed: str) -> bool:
     return site_and_id != ("", "") and split_url(page) == site_and_id
 
 
+def _on_model_or_make_route(wanted: str, landed: str) -> bool:
+    """Whether `landed` is the requested model's page or a sub-route of it (the make form the click opened):
+    some leading part of the path is that model's page, on the same https origin. Dot segments and escapes
+    are refused (a browser reports a normalised address, so they are never a real destination)."""
+    page = landed.split("#", 1)[0].split("?", 1)[0]
+    try:
+        parts = urlsplit(page)
+    except ValueError:
+        return False
+    segments = parts.path.split("/")
+    if any(s in (".", "..") or "%" in s for s in segments) or parts.scheme != "https":
+        return False
+    wanted_id = split_url(wanted)
+    for end in range(len(segments), 1, -1):
+        prefix = parts._replace(path="/".join(segments[:end])).geturl()
+        if _same_model_page(wanted, prefix) and split_url(prefix) == wanted_id:
+            return True
+    return False
+
+
+def _form_destination_outcome(
+    plan: PlatformPlan, base: list[str], runner: Runner
+) -> BrowserOutcome | None:
+    """Right before photos are attached: the click may have navigated anywhere. Refuse (window stays open)
+    unless the browser is on the requested model's page or one of its sub-routes."""
+    wanted = str(plan.fields.get("model_url", ""))
+    code, url = runner([*base, "get", "url"])
+    if not wanted or (code == 0 and _on_model_or_make_route(wanted, url)):
+        return None
+    if code == 0 and _is_login_url(url) and _same_site(wanted, url):
+        return _login_outcome(plan, base, runner, (code, url))
+    seen = url if code == 0 else f"an unreadable address ({url})"
+    return BrowserOutcome(
+        False,
+        base[2],
+        f"after pressing the make button the browser is on {seen}, not the requested model page {wanted} or "
+        f"its make form: nothing was uploaded or filled; the window of session {base[2]} stays open. "
+        "Check the page and run the command again",
+    )
+
+
+def _same_site(wanted: str, landed: str) -> bool:
+    site = split_url(wanted)[0]
+    try:
+        host = (urlsplit(landed).hostname or "").lower().removeprefix("www.")
+    except ValueError:
+        return False
+    return bool(site) and host == (
+        urlsplit(wanted).hostname or ""
+    ).lower().removeprefix("www.")
+
+
+def _step_failed(
+    plan: PlatformPlan,
+    base: list[str],
+    runner: Runner,
+    number: int,
+    step: Sequence[str],
+    out: str,
+) -> BrowserOutcome:
+    login = _login_outcome(plan, base, runner)
+    if login is not None:
+        return login  # the step bounced to a login wall: fill it, do not report a form error
+    session = base[2]
+    left = "; ".join(
+        f"{k}: {v}" for k, v in plan.fields.items() if k not in ("remix_of",)
+    )
+    return BrowserOutcome(
+        False,
+        session,
+        f"step {number} ({' '.join(step[:4])}) failed: {out}. The page may have changed; the window of "
+        f"session {session} stays open — finish the form by hand with: {left}",
+    )
+
+
 def _run_steps(
     plan: PlatformPlan, base: list[str], runner: Runner
 ) -> tuple[BrowserOutcome | None, str]:
     """Run the form steps after the first; the failure (if any) and the last step's output."""
-    session, out = base[2], ""
+    out = ""
     for number, step in enumerate(plan.browser_steps[1:], start=2):
+        uploads = step[0] == "upload" and plan.fields.get("model_url")
+        refused = _form_destination_outcome(plan, base, runner) if uploads else None
+        if refused is not None:
+            return refused, out
         code, out = runner([*base, *step])
         if code != 0:
-            login = _login_outcome(plan, base, runner)
-            if login is not None:
-                return (
-                    login,
-                    out,
-                )  # the step bounced to a login wall: fill it, do not report a form error
-            left = "; ".join(
-                f"{k}: {v}" for k, v in plan.fields.items() if k not in ("remix_of",)
-            )
-            return (
-                BrowserOutcome(
-                    False,
-                    session,
-                    f"step {number} ({' '.join(step[:4])}) failed: {out}. The page may have changed; the window of "
-                    f"session {session} stays open — finish the form by hand with: {left}",
-                ),
-                out,
-            )
+            return _step_failed(plan, base, runner, number, step, out), out
     return None, out
 
 

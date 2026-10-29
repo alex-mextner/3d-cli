@@ -10,7 +10,7 @@ along.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -106,14 +106,19 @@ def select_files(project: Path) -> FileSet:
                 continue
             found.append(PublishFile(path, path.name, role, path.stat().st_size))
     found.sort(key=lambda f: (ROLE_ORDER.index(f.role), f.name.casefold()))
+    return FileSet(tuple(found), name_clashes(found))
+
+
+def name_clashes(files: Sequence[PublishFile]) -> tuple[str, ...]:
+    """Basenames (case-folded) that two different files of `files` both carry."""
     seen: dict[str, Path] = {}
     clashes: list[str] = []
-    for f in found:
+    for f in files:
         key = f.name.casefold()
         if key in seen and seen[key] != f.path:
             clashes.append(f.name)
         seen.setdefault(key, f.path)
-    return FileSet(tuple(found), tuple(dict.fromkeys(clashes)))
+    return tuple(dict.fromkeys(clashes))
 
 
 def _text(data: dict[str, Any], key: str, *, required: bool = False) -> str:
@@ -206,6 +211,20 @@ def _tags(data: dict[str, Any]) -> tuple[str, ...]:
     return tuple(t.strip() for t in raw_tags)
 
 
+def _is_public_https(url: str) -> bool:
+    """A usable hosted URL: https, a host, no whitespace, no userinfo."""
+    from urllib.parse import urlsplit
+
+    if any(c.isspace() for c in url):
+        return False
+    try:
+        parts = urlsplit(url)
+        host = parts.hostname
+    except ValueError:
+        return False
+    return parts.scheme == "https" and bool(host) and "@" not in parts.netloc
+
+
 def _hosted(data: dict[str, Any]) -> tuple[tuple[str, str], ...]:
     """`hosted:` maps an uploaded file's name to the public HTTPS URL it is reachable at (Cults pulls its
     files and images from URLs; it takes no upload)."""
@@ -213,7 +232,7 @@ def _hosted(data: dict[str, Any]) -> tuple[tuple[str, str], ...]:
     if raw is None:
         return ()
     if not isinstance(raw, dict) or not all(
-        isinstance(k, str) and isinstance(v, str) and v.startswith("https://")
+        isinstance(k, str) and isinstance(v, str) and _is_public_https(v)
         for k, v in raw.items()
     ):
         raise InvalidArgument(

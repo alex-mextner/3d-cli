@@ -183,6 +183,20 @@ def _from_json(path: Path) -> SourceRef:
     )
 
 
+def _require_wellformed_url(url: str) -> None:
+    """A URL `urlsplit` cannot parse (`https://[`) or without a host is refused (InvalidArgument, exit 2)."""
+    from urllib.parse import urlsplit
+
+    try:
+        host = urlsplit(url).hostname
+    except ValueError:
+        host = None
+    if not host:
+        raise InvalidArgument(
+            "--of", url, ["a well-formed http(s) URL with a host"], command="models"
+        )
+
+
 def load_source(of: str, conn: sqlite3.Connection | None = None) -> SourceRef:
     """Resolve `--of`. A path (file or directory with model.json) wins over a URL; a URL is looked up in the
     library's `model_source` table (`conn`) for its recorded licence."""
@@ -193,6 +207,7 @@ def load_source(of: str, conn: sqlite3.Connection | None = None) -> SourceRef:
         return _from_json(path)
     if not of.startswith(("http://", "https://")):
         raise InputNotFound(of, command="models")
+    _require_wellformed_url(of)
     site, model_id = require_model_page(of, of)
     if conn is not None and site:
         row = conn.execute(
