@@ -12,6 +12,7 @@ offline `3d help`/`render` guarantee (tests/test_imports.py).
 mapping (or `{}`), so `resolve_backend(config=...)` can honor a configured `backend`
 WITHOUT the eager `claude` default that `ai_tools.load_config` applies.
 """
+
 from __future__ import annotations
 
 import json
@@ -26,8 +27,10 @@ from .backends import (
     BackendError,
     ClaudeBackend,
     CodexBackend,
+    Completion,
     MockBackend,
     OllamaBackend,
+    OmpBackend,
     OpencodeBackend,
     resolve_backend,
 )
@@ -39,8 +42,10 @@ __all__ = [
     "BackendError",
     "ClaudeBackend",
     "CodexBackend",
+    "Completion",
     "MockBackend",
     "OllamaBackend",
+    "OmpBackend",
     "OpencodeBackend",
     "resolve_backend",
     "load_backend_config",
@@ -71,7 +76,9 @@ def load_backend_config(path: str | os.PathLike[str] | None = None) -> dict[str,
     auto-picked backend on a typo). This mirrors `ai_tools.load_config`'s behavior so
     the shared `ai.json` has one parse contract.
     """
-    from ai_tools import AIConfigError  # shared parse contract for ~/.config/3d-cli/ai.json
+    from ai_tools import (
+        AIConfigError,
+    )  # shared parse contract for ~/.config/3d-cli/ai.json
 
     cfg_path = _config_path(path)
     if not cfg_path.exists():

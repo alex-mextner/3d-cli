@@ -247,7 +247,7 @@ use a compatibility import.
 - `lib/data/fits.yaml` — the shared fit/tolerance table, read by `lib/fits.py` ([contract](../contracts/fits.md)).
 - `lib/assembly/` — the assembly toolkit behind `3d assembly` (`spec` YAML schema `3d.assembly/1`, `scene`, `overlap`, `check`, `sweep`, `ergonomics`, `forces`, `viz`, `position`, `threemf`, `report`, `vec`); see [docs/commands/assembly.md](../commands/assembly.md).
 - `lib/fits_sources/` — where the correction rows of `fits.resolve` come from, one drop-in module per source (`manual.py`: `3d fits corrections`; the calibration source of S2 is one more module); backs `3d fits`, `3d fit-check --fit`, `3d fit-niche --fit` ([contract](../contracts/fits.md)).
-- `lib/library/` — the local model-library database (`db.py`, own `migrations/`) and the action contract (`actions.py`); backs `3d library` ([contract](../contracts/library-db.md)).
+- `lib/library/` — the local model-library database (`db.py`, own `migrations/`) and the action contract (`actions.py`); backs `3d library` ([contract](../contracts/library-db.md)). The LLM ranking of `3d models search --rank` lives here too: `llm.py` (config, call guards, ledger), `ranking.py` (haiku-class verdicts), `planner.py` (sonnet-class query planning), `rankstore.py` (what is saved), `rankflow.py` (the streaming pipeline), `rankcli.py` (flags and output modes) — events in [search-events.md](../contracts/search-events.md); the `omp` backend is `lib/ai/backends.py`.
 
 Data files stay under `lib/data/` until a packaging pass decides whether they should move
 to a dedicated resources package.
