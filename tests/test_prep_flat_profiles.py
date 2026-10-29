@@ -291,6 +291,12 @@ def test_a_zero_feature_speed_is_automatic_and_has_no_limit_whatever_the_first_l
     assert limits["Sparse infill"] == 100.0
 
 
+def test_a_zero_inner_wall_speed_is_not_limited_by_small_perimeter_speed() -> None:
+    limits = speed_limits({"inner_wall_speed": "0", "small_perimeter_speed": "30", "outer_wall_speed": "200"})
+    assert "Inner wall" not in limits
+    assert limits["Outer wall"] == 200.0
+
+
 def test_arc_fitting_is_refused_because_the_feedrates_gate_cannot_read_arcs() -> None:
     with pytest.raises(InvalidArgument):
         build_profiles("k1se", overlay=Overlay(process={"enable_arc_fitting": 1}))

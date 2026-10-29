@@ -27,6 +27,7 @@ INVARIANTS:
     ignored when attributing a layer to tools.
   * A mix pattern's index is the layer number counted from the first print layer (Orca's `MixedFilament::resolve`),
     one entry per layer, repeating.
+  * Parse state lives in `_Scan` (one method per line kind: move, comment, tool); `parse` only streams lines into it.
   * Parse speed: ~1 M lines in a few seconds (one regex per move line, points kept as flat float lists until a layer
     is closed, then one numpy array per run).
 ASSUMPTIONS: sparse-infill density is only estimated on layers with exactly one outer-wall loop (one island, no
@@ -182,150 +183,182 @@ def _make_layer(
     return Layer(z, z - prev_z if h is None else h, runs, changes)
 
 
+class _Scan:
+    """Mutable state of the single streaming pass of `parse`; one small method per line kind."""
+
+    def __init__(self) -> None:
+        self.layers: list[Layer] = []
+        self.header: dict[str, str] = {}
+        self.types: Counter[str] = Counter()
+        self.tool_seq: list[int] = []
+        self.n_changes = 0
+        self.tool: int | None = None
+        self.kind = "Unknown"
+        self.x: float | None = None
+        self.y: float | None = None
+        self.rel_e = False
+        self.e_abs = 0.0
+        self.feed = 0.0  # modal F, mm/min
+        self.feed_max: dict[str, float] = {}
+        self.config: dict[str, str] = {}
+        self.in_layer = False
+        self.z: float | None = None
+        self.h: float | None = None
+        self.raw: list[tuple[str, int | None, list[float]]] = []
+        self.changes: list[int] = []
+        self.run: list[float] | None = None
+        self.x0 = self.y0 = math.inf
+        self.x1 = self.y1 = -math.inf
+
+    def feed_line(self, line: str) -> None:
+        c = line[:1]
+        if c == "G":
+            if line.startswith(("G1 ", "G0 ")):
+                self._move(line)
+            elif line.startswith("G92"):
+                m = _E_WORD.search(line)
+                if m:
+                    self.e_abs = float(m.group(1))
+        elif c == ";":
+            self._comment(line)
+        elif c == "T":
+            self._tool(line)
+        elif c == "M":
+            if line.startswith("M83"):
+                self.rel_e = True
+            elif line.startswith("M82"):
+                self.rel_e = False
+
+    def _move(self, line: str) -> None:
+        if ";" in line:
+            line = line.partition(";")[0]
+        nx, ny, ev, moved = self._words(line)
+        extruding = ev is not None and line[1] == "1" and self._extrudes(ev)
+        if extruding and moved and self.in_layer and nx is not None and ny is not None:
+            self._extrude_to(nx, ny)
+        else:
+            self.run = None
+        # `;TYPE:Custom` is the start/end/tool-change G-code (parking, purge), not the print's own travel
+        if moved and self.in_layer and self.feed > 0 and self.kind != "Custom":
+            self._note_feed(extruding, ev)
+        self.x, self.y = nx, ny
+
+    def _words(self, line: str) -> tuple[float | None, float | None, float | None, bool]:
+        """(new x, new y, E word, whether X/Y given) of a move; an F word updates the modal feed."""
+        nx, ny, ev = self.x, self.y, None
+        moved = False
+        for k, v in _WORD.findall(line):
+            if k == "E":
+                ev = float(v)
+            elif k == "F":
+                self.feed = float(v)
+            else:
+                moved = True
+                if k == "X":
+                    nx = float(v)
+                else:
+                    ny = float(v)
+        return nx, ny, ev, moved
+
+    def _extrudes(self, ev: float) -> bool:
+        """Does this E word extrude (relative: E > 0; absolute: E above the last E, which it then becomes)?"""
+        if self.rel_e:
+            return ev > 0
+        extruding = ev > self.e_abs
+        self.e_abs = ev
+        return extruding
+
+    def _extrude_to(self, nx: float, ny: float) -> None:
+        run = self.run
+        if run is None:
+            x, y = self.x, self.y
+            run = [nx if x is None else x, ny if y is None else y]
+            self.run = run
+            self.raw.append((self.kind, self.tool, run))
+        run.append(nx)
+        run.append(ny)
+        if self.kind != "Custom":
+            if nx < self.x0:
+                self.x0 = nx
+            if nx > self.x1:
+                self.x1 = nx
+            if ny < self.y0:
+                self.y0 = ny
+            if ny > self.y1:
+                self.y1 = ny
+
+    def _note_feed(self, extruding: bool, ev: float | None) -> None:
+        name = (
+            self.kind
+            if extruding
+            else ("wipe" if ev is not None and ev < 0 else "travel")
+        )
+        if self.feed > self.feed_max.get(name, 0.0):
+            self.feed_max[name] = self.feed
+
+    def _close_layer(self) -> None:
+        done = _make_layer(
+            self.z, self.h, self.raw, self.changes,
+            self.layers[-1].z if self.layers else 0.0,
+        )  # fmt: skip
+        if done is not None:
+            self.layers.append(done)
+
+    def _comment(self, line: str) -> None:
+        if line.startswith(";TYPE:"):
+            self._set_kind(line[6:])
+        elif line.startswith("; FEATURE:"):
+            self._set_kind(line[10:])
+        elif line.startswith(";LAYER_CHANGE"):
+            if self.in_layer:
+                self._close_layer()
+            self.in_layer, self.z, self.h = True, None, None
+            self.raw, self.changes, self.run = [], [], None
+        elif line.startswith(";Z:") and self.in_layer:
+            self.z = float(line[3:])
+        elif line.startswith(";HEIGHT:") and self.in_layer and self.h is None:
+            self.h = float(line[8:])
+        elif line.startswith("; ") and " = " in line:
+            key, _, val = line[2:].partition(" = ")
+            self.config[key] = val.strip()
+            if key in _HEADER_KEYS:
+                self.header.setdefault(key, val.strip())
+
+    def _set_kind(self, name: str) -> None:
+        self.kind = name.strip()
+        self.types[self.kind] += 1
+        self.run = None
+
+    def _tool(self, line: str) -> None:
+        m = _TOOL.match(line)
+        if m and int(m.group(1)) < 200:  # Tn >= 200 would be a macro, not a tool
+            t = int(m.group(1))
+            if self.tool is not None and t != self.tool:
+                self.n_changes += 1
+            self.tool = t
+            self.tool_seq.append(t)
+            if self.in_layer:
+                self.changes.append(t)
+            self.run = None
+
+
 def parse(path: str | Path) -> Parsed:
     """One pass over the G-code: layers, extrusion runs by feature and tool, tool sequence, header comments."""
     p = Path(path)
     if not p.is_file():
         raise InputNotFound(str(p), command="prep")
     started = time.perf_counter()
-    layers: list[Layer] = []
-    header: dict[str, str] = {}
-    types: Counter[str] = Counter()
-    tool_seq: list[int] = []
-    n_changes = 0
+    s = _Scan()
     n_lines = 0
-    tool: int | None = None
-    kind = "Unknown"
-    x: float | None = None
-    y: float | None = None
-    rel_e = False
-    e_abs = 0.0
-    feed = 0.0  # modal F, mm/min
-    feed_max: dict[str, float] = {}
-    config: dict[str, str] = {}
-    in_layer = False
-    z: float | None = None
-    h: float | None = None
-    raw: list[tuple[str, int | None, list[float]]] = []
-    changes: list[int] = []
-    run: list[float] | None = None
-    x0 = y0 = math.inf
-    x1 = y1 = -math.inf
-    find = _WORD.findall
-
+    feed_line = s.feed_line
     with open(p, errors="replace") as fh:
         for line in fh:
             n_lines += 1
-            c = line[:1]
-            if c == "G":
-                if line.startswith(("G1 ", "G0 ")):
-                    if ";" in line:
-                        line = line.partition(";")[0]
-                    nx, ny, ev = x, y, None
-                    moved = False
-                    for k, v in find(line):
-                        if k == "E":
-                            ev = float(v)
-                        elif k == "F":
-                            feed = float(v)
-                        elif k == "X":
-                            nx = float(v)
-                            moved = True
-                        else:
-                            ny = float(v)
-                            moved = True
-                    extruding = False
-                    if ev is not None and line[1] == "1":
-                        if rel_e:
-                            extruding = ev > 0
-                        else:
-                            extruding = ev > e_abs
-                            e_abs = ev
-                    if (
-                        extruding
-                        and moved
-                        and in_layer
-                        and nx is not None
-                        and ny is not None
-                    ):
-                        if run is None:
-                            run = [nx if x is None else x, ny if y is None else y]
-                            raw.append((kind, tool, run))
-                        run.append(nx)
-                        run.append(ny)
-                        if kind != "Custom":
-                            if nx < x0:
-                                x0 = nx
-                            if nx > x1:
-                                x1 = nx
-                            if ny < y0:
-                                y0 = ny
-                            if ny > y1:
-                                y1 = ny
-                    else:
-                        run = None
-                    if moved and in_layer and feed > 0:
-                        name = (
-                            kind
-                            if extruding
-                            else ("wipe" if ev is not None and ev < 0 else "travel")
-                        )
-                        if feed > feed_max.get(name, 0.0):
-                            feed_max[name] = feed
-                    x, y = nx, ny
-                elif line.startswith("G92"):
-                    m = _E_WORD.search(line)
-                    if m:
-                        e_abs = float(m.group(1))
-            elif c == ";":
-                if line.startswith(";TYPE:"):
-                    kind = line[6:].strip()
-                    types[kind] += 1
-                    run = None
-                elif line.startswith("; FEATURE:"):
-                    kind = line[10:].strip()
-                    types[kind] += 1
-                    run = None
-                elif line.startswith(";LAYER_CHANGE"):
-                    if in_layer:
-                        done = _make_layer(
-                            z, h, raw, changes, layers[-1].z if layers else 0.0
-                        )
-                        if done is not None:
-                            layers.append(done)
-                    in_layer, z, h, raw, changes, run = True, None, None, [], [], None
-                elif line.startswith(";Z:") and in_layer:
-                    z = float(line[3:])
-                elif line.startswith(";HEIGHT:") and in_layer and h is None:
-                    h = float(line[8:])
-                elif line.startswith("; ") and " = " in line:
-                    key, _, val = line[2:].partition(" = ")
-                    config[key] = val.strip()
-                    if key in _HEADER_KEYS:
-                        header.setdefault(key, val.strip())
-            elif c == "T":
-                m = _TOOL.match(line)
-                if (
-                    m and int(m.group(1)) < 200
-                ):  # Tn >= 200 would be a macro, not a tool
-                    t = int(m.group(1))
-                    if tool is not None and t != tool:
-                        n_changes += 1
-                    tool = t
-                    tool_seq.append(t)
-                    if in_layer:
-                        changes.append(t)
-                    run = None
-            elif c == "M":
-                if line.startswith("M83"):
-                    rel_e = True
-                elif line.startswith("M82"):
-                    rel_e = False
-    if in_layer:
-        done = _make_layer(z, h, raw, changes, layers[-1].z if layers else 0.0)
-        if done is not None:
-            layers.append(done)
+            feed_line(line)
+    if s.in_layer:
+        s._close_layer()
 
+    header = s.header
     grams = header.get("filament used [g]", "")
     try:
         filament_g = [float(v) for v in grams.split(",")] if grams else []
@@ -334,19 +367,19 @@ def parse(path: str | Path) -> Parsed:
     time_text = header.get("estimated printing time (normal mode)")
     return Parsed(
         path=str(p),
-        layers=layers,
+        layers=s.layers,
         header=header,
-        types=dict(types),
+        types=dict(s.types),
         filament_g=filament_g,
         time=time_text,
         time_s=_duration_s(time_text) if time_text else None,
-        tool_sequence=tool_seq,
-        n_tool_changes=n_changes,
+        tool_sequence=s.tool_seq,
+        n_tool_changes=s.n_changes,
         n_lines=n_lines,
-        extents=(x0, x1, y0, y1) if x0 <= x1 else None,
+        extents=(s.x0, s.x1, s.y0, s.y1) if s.x0 <= s.x1 else None,
         parse_s=time.perf_counter() - started,
-        feed_max={k: v / 60.0 for k, v in feed_max.items()},
-        config=config,
+        feed_max={k: v / 60.0 for k, v in s.feed_max.items()},
+        config=s.config,
     )
 
 
@@ -463,26 +496,28 @@ class GateExpectations:
         if not regions:
             parts = (_part_region(r, str(p)) for r in data.get("parts") or [])
             regions = tuple(r for r in parts if r is not None)
-        allowed: frozenset[int] | None = None
-        if data.get("allowed_tools") is not None:
-            allowed = frozenset(
-                _tool_list(data["allowed_tools"], 0, "allowed_tools", str(p))
-            )
-        elif data.get("heads_slots") is not None:
-            allowed = frozenset(
-                _tool_list(data["heads_slots"], -1, "heads_slots", str(p))
-            )
         tower = data.get("prime_tower")
-        zone: tuple[float, float] | None = None
-        st = data.get("structural")
-        if isinstance(st, dict) and "z_min" in st and "z_max" in st:
-            zone = (float(st["z_min"]), float(st["z_max"]))
         return cls(
             regions=regions,
-            allowed_tools=allowed,
+            allowed_tools=_manifest_allowed(data, str(p)),
             prime_tower=tower if isinstance(tower, bool) else None,
-            structural_zone=zone,
+            structural_zone=_manifest_zone(data),
         )
+
+
+def _manifest_allowed(data: dict[str, Any], src: str) -> frozenset[int] | None:
+    if data.get("allowed_tools") is not None:
+        return frozenset(_tool_list(data["allowed_tools"], 0, "allowed_tools", src))
+    if data.get("heads_slots") is not None:
+        return frozenset(_tool_list(data["heads_slots"], -1, "heads_slots", src))
+    return None
+
+
+def _manifest_zone(data: dict[str, Any]) -> tuple[float, float] | None:
+    st = data.get("structural")
+    if isinstance(st, dict) and "z_min" in st and "z_max" in st:
+        return (float(st["z_min"]), float(st["z_max"]))
+    return None
 
 
 def _tool_list(value: object, shift: int, key: str, src: str) -> tuple[int, ...]:
@@ -661,11 +696,8 @@ def _zone_text(zone: tuple[float, float] | None) -> str:
     return "all layers" if zone is None else f"z {zone[0]:g}..{zone[1]:g}"
 
 
-def _gate_walls(
-    parsed: Parsed, spec: GateSpec, zone: tuple[float, float] | None
-) -> Gate:
-    if spec.walls is None:
-        return Gate("walls", "SKIP", "not requested (spec.walls is None)")
+def _wall_counts(layers: list[Layer]) -> list[tuple[float, int]]:
+    """(z, wall loop count) of every layer that has any wall loop."""
     counts = [
         (
             layer.z,
@@ -675,9 +707,17 @@ def _gate_walls(
                 if r.kind in WALL_KINDS and len(r.pts) > _MIN_LOOP_POINTS
             ),
         )
-        for layer in _zone_layers(parsed, zone)
+        for layer in layers
     ]
-    counts = [(z, n) for z, n in counts if n]
+    return [(z, n) for z, n in counts if n]
+
+
+def _gate_walls(
+    parsed: Parsed, spec: GateSpec, zone: tuple[float, float] | None
+) -> Gate:
+    if spec.walls is None:
+        return Gate("walls", "SKIP", "not requested (spec.walls is None)")
+    counts = _wall_counts(_zone_layers(parsed, zone))
     if not counts:
         return Gate("walls", "SKIP", f"no Outer/Inner wall loops in {_zone_text(zone)}")
     short = [(z, n) for z, n in counts if n < spec.walls]
@@ -691,6 +731,25 @@ def _gate_walls(
     )
 
 
+def _loops(layer: Layer, kind: str) -> list[Run]:
+    return [r for r in layer.runs if r.kind == kind and len(r.pts) > _MIN_LOOP_POINTS]
+
+
+def _layer_density(layer: Layer, wi: float, ww: float) -> float | None:
+    """Sparse-infill density of a single-island layer, or None when the layer cannot be estimated."""
+    outer = _loops(layer, "Outer wall")
+    inner = _loops(layer, "Inner wall")
+    sparse = [r for r in layer.runs if r.kind == "Sparse infill"]
+    if len(outer) != 1 or not inner or not sparse:
+        return None
+    loop = min(inner, key=lambda r: _poly_area(r.pts))
+    # area inside the innermost wall's outer edge: centre-line area less half a line width all round
+    area = _poly_area(loop.pts) - _path_len(loop.pts) * ww / 2
+    if area > 50:
+        return sum(_path_len(r.pts) for r in sparse) * wi / area
+    return None
+
+
 def _gate_infill(
     parsed: Parsed, spec: GateSpec, zone: tuple[float, float] | None
 ) -> Gate:
@@ -699,26 +758,11 @@ def _gate_infill(
     h = parsed.header
     wi = _float(h.get("sparse_infill_line_width"), spec.line_width_mm)
     ww = _float(h.get("inner_wall_line_width"), spec.line_width_mm)
-    dens: list[float] = []
-    for layer in _zone_layers(parsed, zone):
-        outer = [
-            r
-            for r in layer.runs
-            if r.kind == "Outer wall" and len(r.pts) > _MIN_LOOP_POINTS
-        ]
-        inner = [
-            r
-            for r in layer.runs
-            if r.kind == "Inner wall" and len(r.pts) > _MIN_LOOP_POINTS
-        ]
-        sparse = [r for r in layer.runs if r.kind == "Sparse infill"]
-        if len(outer) != 1 or not inner or not sparse:
-            continue
-        loop = min(inner, key=lambda r: _poly_area(r.pts))
-        # area inside the innermost wall's outer edge: centre-line area less half a line width all round
-        area = _poly_area(loop.pts) - _path_len(loop.pts) * ww / 2
-        if area > 50:
-            dens.append(sum(_path_len(r.pts) for r in sparse) * wi / area)
+    dens = [
+        d
+        for d in (_layer_density(layer, wi, ww) for layer in _zone_layers(parsed, zone))
+        if d is not None
+    ]
     if len(dens) < spec.infill_min_layers:
         return Gate(
             "infill",
@@ -794,6 +838,19 @@ def _mix_regions(exp: GateExpectations | None) -> list[Region]:
     return [r for r in exp.regions if r.mix] if exp else []
 
 
+def _cap_region(parsed: Parsed, reg: Region, cap: float) -> tuple[int, str | None]:
+    """(layers in the region's slab, defect text when some are thicker than `cap`)."""
+    layers = [layer for layer in parsed.layers if _in_slab(layer, reg.z_min, reg.z_max)]
+    thick = [layer for layer in layers if layer.h > cap + 5e-4]
+    if not thick:
+        return len(layers), None
+    worst_l = max(thick, key=lambda layer: layer.h)
+    return len(layers), (
+        f"{reg.name}: {len(thick)} of {len(layers)} layers above {cap:g} mm "
+        f"(thickest {worst_l.h:.3f} at z={worst_l.z:g})"
+    )
+
+
 def _gate_mix_layer_cap(
     parsed: Parsed, spec: GateSpec, exp: GateExpectations | None
 ) -> Gate:
@@ -807,17 +864,10 @@ def _gate_mix_layer_cap(
     bad: list[str] = []
     seen = 0
     for reg in mixes:
-        layers = [
-            layer for layer in parsed.layers if _in_slab(layer, reg.z_min, reg.z_max)
-        ]
-        seen += len(layers)
-        thick = [layer for layer in layers if layer.h > spec.mix_cap + 5e-4]
-        if thick:
-            worst_l = max(thick, key=lambda layer: layer.h)
-            bad.append(
-                f"{reg.name}: {len(thick)} of {len(layers)} layers above {spec.mix_cap:g} mm "
-                f"(thickest {worst_l.h:.3f} at z={worst_l.z:g})"
-            )
+        n_layers, defect = _cap_region(parsed, reg, spec.mix_cap)
+        seen += n_layers
+        if defect:
+            bad.append(defect)
     if not seen:
         return Gate(
             "mix-layer-cap", "SKIP", "no layers fall inside any mix region's z range"
@@ -931,29 +981,46 @@ def _partial_mix(parsed: Parsed, reg: Region, exp: GateExpectations) -> _Partial
     if not slab:
         return _Partial(f"no layers in z {reg.z_min:g}..{reg.z_max:g}", [], [])
     present = {k: _tools_inside(layer, reg.bbox, excl) for k, layer in slab}
-    pat = reg.mix
     adjacent: list[str] = []
     follow: list[str] = []
     ks = [k for k, _ in slab]
     for tool in sorted(excl):
-        pairs = [k for k in ks if tool in present[k] and tool in present.get(k + 1, ())]
-        if pairs:
-            adjacent.append(
-                f"{reg.name}: T{tool} prints inside the part's bbox on {len(pairs)} adjacent layer pair(s) "
-                f"(first layers {pairs[0]}-{pairs[0] + 1}, z={parsed.layers[pairs[0]].z:g})"
-            )
-        missing = [
-            k for k in ks if pat[k % len(pat)] == tool and tool not in present[k]
-        ]
-        extra = [k for k in ks if pat[k % len(pat)] != tool and tool in present[k]]
-        if missing or extra:
-            follow.append(
-                f"{reg.name}: T{tool} does not follow mix {''.join(map(str, pat))} inside the bbox — "
-                f"absent on {len(missing)} layer(s) where the pattern wants it"
-                f"{' (first ' + str(missing[0]) + ')' if missing else ''}, present on {len(extra)} where it must not be"
-                f"{' (first ' + str(extra[0]) + ')' if extra else ''}"
-            )
+        adj = _tool_adjacent(parsed, reg, tool, ks, present)
+        if adj:
+            adjacent.append(adj)
+        fol = _tool_follow(reg, tool, ks, present)
+        if fol:
+            follow.append(fol)
     return _Partial(None, adjacent, follow)
+
+
+def _tool_adjacent(
+    parsed: Parsed, reg: Region, tool: int, ks: list[int], present: dict[int, set[int]]
+) -> str | None:
+    pairs = [k for k in ks if tool in present[k] and tool in present.get(k + 1, ())]
+    if not pairs:
+        return None
+    return (
+        f"{reg.name}: T{tool} prints inside the part's bbox on {len(pairs)} adjacent layer pair(s) "
+        f"(first layers {pairs[0]}-{pairs[0] + 1}, z={parsed.layers[pairs[0]].z:g})"
+    )
+
+
+def _tool_follow(
+    reg: Region, tool: int, ks: list[int], present: dict[int, set[int]]
+) -> str | None:
+    pat = reg.mix
+    assert pat
+    missing = [k for k in ks if pat[k % len(pat)] == tool and tool not in present[k]]
+    extra = [k for k in ks if pat[k % len(pat)] != tool and tool in present[k]]
+    if not (missing or extra):
+        return None
+    return (
+        f"{reg.name}: T{tool} does not follow mix {''.join(map(str, pat))} inside the bbox — "
+        f"absent on {len(missing)} layer(s) where the pattern wants it"
+        f"{' (first ' + str(missing[0]) + ')' if missing else ''}, present on {len(extra)} where it must not be"
+        f"{' (first ' + str(extra[0]) + ')' if extra else ''}"
+    )
 
 
 def _partials(parsed: Parsed, exp: GateExpectations | None) -> dict[Region, _Partial]:
@@ -964,6 +1031,67 @@ def _partials(parsed: Parsed, exp: GateExpectations | None) -> dict[Region, _Par
         for r in exp.regions
         if r.mix and not r.exclusive
     }
+
+
+def _region_outcome(
+    parsed: Parsed, reg: Region, partials: dict[Region, _Partial]
+) -> tuple[str | None, list[str]]:
+    """(skip reason, defects) of one region; a skip reason means the region was not judged."""
+    if reg.exclusive:
+        return None, _exclusive_region_defects(parsed, reg)
+    return _overlapping_region(reg, partials)
+
+
+def _overlapping_region(
+    reg: Region, partials: dict[Region, _Partial]
+) -> tuple[str | None, list[str]]:
+    """(skip reason, follow defects) for a region whose tools other parts share."""
+    if not reg.mix:
+        return f"{reg.name}: part overlaps other parts' tools", []
+    part = partials[reg]
+    if part.skip:
+        return f"{reg.name}: {part.skip}", []
+    return None, part.follow
+
+
+def _exclusive_region_defects(parsed: Parsed, reg: Region) -> list[str]:
+    idx = [
+        (k, layer)
+        for k, layer in enumerate(parsed.layers)
+        if _in_slab(layer, reg.z_min, reg.z_max)
+    ]
+    used = [(k, layer) for k, layer in idx if layer.model_tools]
+    if not used:
+        return [f"{reg.name}: no extrusion in z {reg.z_min:g}..{reg.z_max:g}"]
+    if reg.mix:
+        return _mix_follow(reg, used)
+    assert reg.tools is not None
+    off = [k for k, layer in used if not layer.model_tools <= set(reg.tools)]
+    if not off:
+        return []
+    return [
+        f"{reg.name}: {len(off)} of {len(used)} layers print with tools outside {_t(reg.tools)} "
+        f"(first layer {off[0]}: {_t(parsed.layers[off[0]].model_tools)})"
+    ]
+
+
+def _judge_regions(
+    parsed: Parsed,
+    regs: list[Region],
+    partials: dict[Region, _Partial],
+    bad: list[str],
+    skipped: list[str],
+) -> int:
+    """Judge every region, appending defects to `bad` and skip reasons to `skipped`; returns how many were judged."""
+    checked = 0
+    for reg in regs:
+        skip, defects = _region_outcome(parsed, reg, partials)
+        if skip:
+            skipped.append(skip)
+        else:
+            checked += 1
+            bad += defects
+    return checked
 
 
 def _gate_region_tools(
@@ -978,39 +1106,7 @@ def _gate_region_tools(
         )
     bad: list[str] = []
     skipped: list[str] = []
-    checked = 0
-    for reg in regs:
-        if not reg.exclusive:
-            if not reg.mix:
-                skipped.append(f"{reg.name}: part overlaps other parts' tools")
-                continue
-            part = partials[reg]
-            if part.skip:
-                skipped.append(f"{reg.name}: {part.skip}")
-                continue
-            checked += 1
-            bad += part.follow
-            continue
-        checked += 1
-        idx = [
-            (k, layer)
-            for k, layer in enumerate(parsed.layers)
-            if _in_slab(layer, reg.z_min, reg.z_max)
-        ]
-        used = [(k, layer) for k, layer in idx if layer.model_tools]
-        if not used:
-            bad.append(f"{reg.name}: no extrusion in z {reg.z_min:g}..{reg.z_max:g}")
-            continue
-        if reg.mix:
-            bad += _mix_follow(reg, used)
-        else:
-            assert reg.tools is not None
-            off = [k for k, layer in used if not layer.model_tools <= set(reg.tools)]
-            if off:
-                bad.append(
-                    f"{reg.name}: {len(off)} of {len(used)} layers print with tools outside {_t(reg.tools)} "
-                    f"(first layer {off[0]}: {_t(parsed.layers[off[0]].model_tools)})"
-                )
+    checked = _judge_regions(parsed, regs, partials, bad, skipped)
     note = f" (skipped: {'; '.join(skipped)})" if skipped else ""
     if not checked and not bad:
         return Gate("region-tools", "SKIP", "; ".join(skipped))
@@ -1023,6 +1119,16 @@ def _gate_region_tools(
     )
 
 
+def _best_phase(pat: tuple[int, ...], single: dict[int, int]) -> int:
+    """Pattern phase shift that matches the most single-tool layers (the first best one wins)."""
+    best_off, best_hits = 0, -1
+    for off in range(len(pat)):
+        hits = sum(1 for k, t in single.items() if pat[(k + off) % len(pat)] == t)
+        if hits > best_hits:
+            best_off, best_hits = off, hits
+    return best_off
+
+
 def _mix_follow(reg: Region, used: list[tuple[int, Layer]]) -> list[str]:
     assert reg.mix
     pat = reg.mix
@@ -1032,11 +1138,7 @@ def _mix_follow(reg: Region, used: list[tuple[int, Layer]]) -> list[str]:
         if len(layer.model_tools) == 1
     }
     multi = [k for k, layer in used if len(layer.model_tools) > 1]
-    best_off, best_hits = 0, -1
-    for off in range(len(pat)):
-        hits = sum(1 for k, t in single.items() if pat[(k + off) % len(pat)] == t)
-        if hits > best_hits:
-            best_off, best_hits = off, hits
+    best_off = _best_phase(pat, single)
     ok_here = sum(1 for k, t in single.items() if pat[k % len(pat)] == t)
     if ok_here == len(single) and not multi:
         return []
@@ -1072,6 +1174,24 @@ def _minor_adjacent(seq: list[str], heights: list[float], cap: float) -> int:
     )
 
 
+def _minor_defects(parsed: Parsed, spec: GateSpec, reg: Region) -> tuple[bool, list[str]]:
+    """(judged, defects) of the minor-adjacent rule for a region whose tools no other part shares."""
+    layers = [
+        layer
+        for layer in parsed.layers
+        if _in_slab(layer, reg.z_min, reg.z_max) and layer.model_tools
+    ]
+    if len(layers) < 2:
+        return False, []
+    seq = ["+".join(str(t) for t in sorted(layer.model_tools)) for layer in layers]
+    n = _minor_adjacent(seq, [layer.h for layer in layers], spec.mix_cap)
+    if not n:
+        return True, []
+    return True, [
+        f"{reg.name}: {n} adjacent layer pair(s) print the same minor colour (sequence {','.join(seq[:12])}...)"
+    ]
+
+
 def _gate_mix_minor(
     parsed: Parsed,
     spec: GateSpec,
@@ -1089,28 +1209,16 @@ def _gate_mix_minor(
     skipped: list[str] = []
     seen = 0
     for reg in mixes:
-        if not reg.exclusive:
+        if reg.exclusive:
+            judged, defects = _minor_defects(parsed, spec, reg)
+        else:
             part = partials[reg]
             if part.skip:
                 skipped.append(f"{reg.name}: {part.skip}")
                 continue
-            seen += 1
-            bad += part.adjacent
-            continue
-        layers = [
-            layer
-            for layer in parsed.layers
-            if _in_slab(layer, reg.z_min, reg.z_max) and layer.model_tools
-        ]
-        if len(layers) < 2:
-            continue
-        seen += 1
-        seq = ["+".join(str(t) for t in sorted(layer.model_tools)) for layer in layers]
-        n = _minor_adjacent(seq, [layer.h for layer in layers], spec.mix_cap)
-        if n:
-            bad.append(
-                f"{reg.name}: {n} adjacent layer pair(s) print the same minor colour (sequence {','.join(seq[:12])}...)"
-            )
+            judged, defects = True, part.adjacent
+        seen += judged
+        bad += defects
     note = f" (skipped: {'; '.join(skipped)})" if skipped else ""
     if not seen and not bad:
         return Gate(

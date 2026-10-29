@@ -412,6 +412,8 @@ _FEATURE_SPEED_KEYS: dict[str, tuple[str, ...]] = {
     "Brim": ("skirt_speed", "initial_layer_speed"),
     "travel": ("travel_speed", "initial_layer_travel_speed"),
 }
+#: features whose first setting is the wall's own speed; 0 there is automatic whatever the small-perimeter speed says
+_WALL_FEATURES = frozenset({"Outer wall", "Inner wall"})
 #: the first layer runs every feature at these, which may exceed the feature's own setting
 _FIRST_LAYER_KEYS = ("initial_layer_speed", "initial_layer_infill_speed")
 
@@ -438,13 +440,16 @@ def _feature_limit(
     first_layer: list[float],
 ) -> float | None:
     """The fastest speed one feature can run at, or None when any of its settings is not a plain number or none is
-    positive (0 is automatic: the slicer picks the speed, so a first-layer speed must not become the limit)."""
+    positive (0 is automatic: the slicer picks the speed, so a first-layer speed must not become the limit). A wall
+    whose own speed is 0 is automatic too: `small_perimeter_speed` only covers its small perimeters."""
     present = [k for k in keys if k in process]
     if not present:
         return None
     values = [_speed(process, k) for k in present]
     known = [v for v in values if v is not None]
     if len(known) != len(values) or max(known) <= 0:
+        return None
+    if feature in _WALL_FEATURES and (values[0] or 0) <= 0:
         return None
     return max(known if feature == "travel" else [*known, *first_layer])
 

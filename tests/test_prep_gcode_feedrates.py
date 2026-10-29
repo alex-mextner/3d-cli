@@ -53,6 +53,18 @@ def test_start_gcode_z_hops_and_unretracts_are_not_feature_speeds(
     assert feed == {"Outer wall": 100.0, "wipe": 300.0}
 
 
+def test_end_gcode_parking_moves_are_not_print_travel(tmp_path: Path) -> None:
+    text = "\n".join(
+        [
+            ";LAYER_CHANGE", ";Z:0.2", ";HEIGHT:0.2", ";TYPE:Outer wall",
+            "G1 F6000", "G1 X10 Y10 E1", "G1 X20 Y20 F12000",
+            ";TYPE:Custom", "G1 X0 Y200 F30000",
+        ]
+    )  # fmt: skip
+    feed = parse(gcode(tmp_path, text + "\n")).feed_max
+    assert feed == {"Outer wall": 100.0, "travel": 200.0}
+
+
 def test_the_feature_comment_of_other_slicers_is_understood(tmp_path: Path) -> None:
     text = "\n".join(
         [
