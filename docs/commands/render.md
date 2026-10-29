@@ -34,7 +34,7 @@ Engineering-drawing convention: **cut faces violet with 45-degree hatch**, uncut
 | Option | Default | What |
 |---|---|---|
 | `--plane YZ\|XZ\|XY` | `YZ` | Cut plane |
-| `--at MM` | middle of the model | Plane position along its axis (model mm) |
+| `--at MM` | middle of the bounding box on the plane's axis | Plane position along its axis (model mm); not the centroid |
 | `--keep neg\|pos` | `neg` | Which half to keep |
 | `--part SEL=NAME[:ROLE]` | — | Name a part / set its role (`stand_in` is drawn muted); repeatable |
 | `--color` | — | Accepted for old scripts; a section is always per-part coloured |

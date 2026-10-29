@@ -151,6 +151,24 @@ def test_size_too_small_for_the_legend_is_a_clear_error(tmp_path: pathlib.Path) 
         )
 
 
+def test_size_with_no_room_inside_the_margins_is_a_clear_error(
+    hollow: str, tmp_path: pathlib.Path
+) -> None:
+    with pytest.raises(RenderError, match="--size"):
+        render(hollow, str(tmp_path / "a.png"), plane="XZ", size=(2400, 300))
+
+
+def test_a_plane_between_two_parts_warns_that_the_cut_face_is_empty(
+    tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    model = write_3mf(tmp_path / "a.3mf", [Box("left", 0), Box("right", 20)])
+    from section_render import main
+
+    code = main([str(model), "-o", str(tmp_path / "a.png")])
+    assert code == 0
+    assert "touches no material" in capsys.readouterr().err
+
+
 def test_a_plane_grazing_the_far_face_stays_inside_the_model(
     hollow: str, tmp_path: pathlib.Path
 ) -> None:
@@ -181,7 +199,9 @@ def test_the_nearer_surface_is_painted_over_the_farther_one(
 
     eye, right, up = sr._basis("YZ", "neg")
     centre = np.array([-20.0, 0.0, 0.0])
-    near = np.array([centre - 2 * right - 2 * up, centre + 2 * right - 2 * up, centre + 2 * up])
+    near = np.array(
+        [centre - 2 * right - 2 * up, centre + 2 * right - 2 * up, centre + 2 * up]
+    )
     far = near - 10 * eye  # farther from the viewer along the eye
     anchor = trimesh.creation.box(extents=(2, 2, 2))
     anchor.apply_translation([0, 40, 0])
@@ -200,7 +220,9 @@ def test_the_nearer_surface_is_painted_over_the_farther_one(
     monkeypatch.setattr(sr, "load_raw", lambda *a, **k: raw)
     out = tmp_path / "depth.png"
     sr.render("unused.3mf", str(out), at=0)
-    arr = np.asarray(Image.open(out).convert("RGB")).astype(int)[:700]  # the view, not the legend swatches
+    arr = np.asarray(Image.open(out).convert("RGB")).astype(int)[
+        :700
+    ]  # the view, not the legend swatches
     red = (arr[:, :, 0] > 120) & (arr[:, :, 1] < 80) & (arr[:, :, 2] < 80)
     green = (arr[:, :, 1] > 120) & (arr[:, :, 0] < 80) & (arr[:, :, 2] < 80)
     # orthographic: the green triangle sits exactly behind the red one, so none of it may show

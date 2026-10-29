@@ -8,6 +8,7 @@ through pyrun; this module only parses args and picks the per-mode dep set.
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass, field
 
 import dimension_args
 from cli.env import require_openscad
@@ -58,8 +59,8 @@ Section options:
   Engineering-drawing convention: the CUT FACES are violet with 45-degree hatch lines, every
   uncut surface keeps the colour of its PART, a legend names the parts and the cut face; colours
   come from .scad color(), 3MF and OBJ+MTL files, see `3d dimension --help`.
-  --plane YZ|XZ|XY     cut plane orientation. The plane passes through the model's
-                        centroid by default. Use this to show the internal layout
+  --plane YZ|XZ|XY     cut plane orientation. The plane sits at the middle of the
+                        model's bounding box on that axis by default (--at moves it). Use this to show the internal layout
                         on a specific face.
                         Default: YZ
                         Example: 3d render bracket.scad --section --plane XZ
@@ -112,6 +113,146 @@ def _validate_part(spec: str) -> None:
         ) from exc
 
 
+@dataclass
+class _Options:
+    mode: str = "single"
+    args: list[str] = field(default_factory=list)  # pass-through to render.py
+    # section-only flags, already in section_render.py's own spelling
+    section: list[str] = field(default_factory=list)
+    defines: list[str] = field(default_factory=list)
+    out: str = ""
+    size: str = ""
+    multi_outdir: str = ""
+
+
+def _value(rest: list[str], i: int) -> str:
+    if i + 1 >= len(rest):
+        raise UsageError(f"option {rest[i]} needs a value", command="render")
+    return rest[i + 1]
+
+
+def _opt_multi(o: _Options, rest: list[str], i: int) -> int:
+    o.mode = "multi"
+    # optional positional outdir (next token if not a flag)
+    if i + 1 < len(rest) and not rest[i + 1].startswith("-"):
+        o.multi_outdir = rest[i + 1]
+        return i + 2
+    return i + 1
+
+
+def _opt_section(o: _Options, rest: list[str], i: int) -> int:
+    o.mode = "section"
+    return i + 1
+
+
+def _opt_camera(o: _Options, rest: list[str], i: int) -> int:
+    o.args += [rest[i], _value(rest, i)]
+    return i + 2
+
+
+def _opt_section_value(o: _Options, rest: list[str], i: int) -> int:
+    value = _value(rest, i)
+    if rest[i] == "--part":
+        _validate_part(value)
+    o.section.append(f"{rest[i]}={value}")  # `=` form: a value may start with '-'
+    return i + 2
+
+
+def _opt_module(o: _Options, rest: list[str], i: int) -> int:
+    raise UsageError(
+        "option --module was removed: a section now cuts the model mesh itself",
+        command="render",
+        remediation=["Drop --module; use --part and --at to choose what to show."],
+    )
+
+
+def _opt_color(o: _Options, rest: list[str], i: int) -> int:
+    o.section.append(
+        rest[i]
+    )  # accepted for old scripts; a section is always per-part coloured
+    return i + 1
+
+
+def _opt_flag(o: _Options, rest: list[str], i: int) -> int:
+    o.args.append(rest[i])
+    return i + 1
+
+
+def _opt_out(o: _Options, rest: list[str], i: int) -> int:
+    o.out = _value(rest, i)
+    return i + 2
+
+
+def _opt_size(o: _Options, rest: list[str], i: int) -> int:
+    o.size = _value(rest, i)
+    return i + 2
+
+
+def _opt_define(o: _Options, rest: list[str], i: int) -> int:
+    o.defines.append(_value(rest, i))
+    return i + 2
+
+
+_OPTION_HANDLERS = {
+    "--multi": _opt_multi,
+    "--section": _opt_section,
+    "--view": _opt_camera,
+    "--cam": _opt_camera,
+    "--colorscheme": _opt_camera,
+    "--plane": _opt_section_value,
+    "--keep": _opt_section_value,
+    "--at": _opt_section_value,
+    "--part": _opt_section_value,
+    "--module": _opt_module,
+    "--color": _opt_color,
+    "--ortho": _opt_flag,
+    "--render": _opt_flag,
+    "-o": _opt_out,
+    "--out": _opt_out,
+    "--size": _opt_size,
+    "-D": _opt_define,
+}
+
+
+def _parse_options(rest: list[str]) -> _Options:
+    o = _Options()
+    i = 0
+    while i < len(rest):
+        handler = _OPTION_HANDLERS.get(rest[i])
+        if handler is None:
+            print(USAGE)
+            raise UsageError(f"unknown option '{rest[i]}'", command="render")
+        i = handler(o, rest, i)
+    return o
+
+
+def _check_inputs(inp: str, o: _Options) -> None:
+    if o.section and o.mode != "section":
+        raise UsageError(
+            f"{o.section[0].split('=')[0]} belongs to --section",
+            command="render",
+            remediation=["3d render model.scad --section --plane XZ -o sec.png"],
+        )
+    if not os.path.isfile(inp):
+        raise InputNotFound(inp, command="render")
+    # openscad renders single/multi views and exports a .scad for the section; a section of a
+    # mesh file (STL/3MF/OBJ) needs no openscad at all.
+    if o.mode != "section" or inp.lower().endswith(".scad"):
+        require_openscad("render")
+
+
+def _run_section(inp: str, o: _Options) -> int:
+    target = o.out or os.path.splitext(inp)[0] + ".png"
+    section_args = [inp, f"--out={target}", *(f"--define={d}" for d in o.defines)]
+    if o.size:
+        section_args.append(f"--size={o.size}")
+    return run_tool(
+        SECTION_DEPS,
+        "section_render.py",
+        [*section_args, *(s for s in o.section if s != "--color")],
+    )
+
+
 def run(argv: list[str]) -> int:
     if not argv:
         print(USAGE)
@@ -120,120 +261,29 @@ def run(argv: list[str]) -> int:
         print(USAGE)
         return 0
     inp = argv[0]
-    rest = argv[1:]
-
-    mode = "single"
-    args: list[str] = []  # pass-through to render.py
-    section: list[
-        str
-    ] = []  # section-only flags, already in section_render.py's own spelling
-    defines: list[str] = []
-    out = ""
-    size = ""
-    multi_outdir = ""
-
-    i = 0
-    n = len(rest)
-    while i < n:
-        a = rest[i]
-        if a == "--multi":
-            mode = "multi"
-            # optional positional outdir (next token if not a flag)
-            if i + 1 < n and not rest[i + 1].startswith("-"):
-                multi_outdir = rest[i + 1]
-                i += 2
-            else:
-                i += 1
-        elif a == "--section":
-            mode = "section"
-            i += 1
-        elif a in ("--view", "--cam", "--colorscheme"):
-            if i + 1 >= n:
-                raise UsageError(f"option {a} needs a value", command="render")
-            args += [a, rest[i + 1]]
-            i += 2
-        elif a in ("--plane", "--keep", "--at", "--part"):
-            if i + 1 >= n:
-                raise UsageError(f"option {a} needs a value", command="render")
-            if a == "--part":
-                _validate_part(rest[i + 1])
-            section.append(f"{a}={rest[i + 1]}")  # `=` form: a value may start with '-'
-            i += 2
-        elif a == "--module":
-            raise UsageError(
-                "option --module was removed: a section now cuts the model mesh itself",
-                command="render",
-                remediation=[
-                    "Drop --module; use --part and --at to choose what to show."
-                ],
-            )
-        elif a == "--color":
-            section.append(
-                a
-            )  # accepted for old scripts; a section is always per-part coloured
-            i += 1
-        elif a in ("--ortho", "--render"):
-            args.append(a)
-            i += 1
-        elif a in ("-o", "--out"):
-            if i + 1 >= n:
-                raise UsageError(f"option {a} needs a value", command="render")
-            out = rest[i + 1]
-            i += 2
-        elif a == "--size":
-            if i + 1 >= n:
-                raise UsageError("option --size needs a value", command="render")
-            size = rest[i + 1]
-            i += 2
-        elif a == "-D":
-            if i + 1 >= n:
-                raise UsageError("option -D needs a value", command="render")
-            defines.append(rest[i + 1])
-            i += 2
-        else:
-            print(USAGE)
-            raise UsageError(f"unknown option '{a}'", command="render")
-
-    if section and mode != "section":
-        raise UsageError(
-            f"{section[0].split('=')[0]} belongs to --section",
-            command="render",
-            remediation=["3d render model.scad --section --plane XZ -o sec.png"],
-        )
-    if not os.path.isfile(inp):
-        raise InputNotFound(inp, command="render")
-    # openscad renders single/multi views and exports a .scad for the section; a section of a
-    # mesh file (STL/3MF/OBJ) needs no openscad at all.
-    if mode != "section" or inp.lower().endswith(".scad"):
-        require_openscad("render")
-    for define in defines:
+    o = _parse_options(argv[1:])
+    _check_inputs(inp, o)
+    args = o.args
+    for define in o.defines:
         args += ["-D", define]
 
     # Per-mode python deps (see lib/render.py): single/multi need NO deps (mesh stack is
     # a pure enhancement, render.py degrades to --autocenter --viewall offline); the
     # section (lib/section_render.py) cuts the mesh itself.
-    if mode == "single":
-        if out:
-            args += ["-o", out]
-        if size:
-            args += ["--size", size]
+    if o.mode == "single":
+        if o.out:
+            args += ["-o", o.out]
+        if o.size:
+            args += ["--size", o.size]
         return run_tool("", "render.py", ["single", inp, *args])
-    if mode == "multi":
+    if o.mode == "multi":
         tool_args = ["multi", inp]
-        if multi_outdir:
-            tool_args.append(multi_outdir)
-        if size:
-            args += ["--size", size]
+        if o.multi_outdir:
+            tool_args.append(o.multi_outdir)
+        if o.size:
+            args += ["--size", o.size]
         return run_tool("", "render.py", [*tool_args, *args])
-    target = out or os.path.splitext(inp)[0] + ".png"
-    section_args = [inp, f"--out={target}", *(f"--define={d}" for d in defines)]
-    if size:
-        section_args.append(f"--size={size}")
-    return run_tool(
-        SECTION_DEPS,
-        "section_render.py",
-        [*section_args, *(s for s in section if s != "--color")],
-    )
+    return _run_section(inp, o)
 
 
 COMMAND = Command(

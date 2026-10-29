@@ -435,6 +435,11 @@ def render(
         raise RenderError(
             f"3d section: --size {width}x{height} leaves no room for the view next to the legend"
         )
+    if view_h - 2 * MARGIN_PX * scale <= 0:
+        raise RenderError(
+            f"3d section: --size {width}x{height} leaves no room for the view "
+            "inside its margins; use a taller --size"
+        )
     canvas = Image.new("RGB", size, (255, 255, 255))
     draw = ImageDraw.Draw(canvas)
     axis_letter = "XYZ"[AXIS[plane]]
@@ -545,6 +550,12 @@ def main(argv: list[str] | None = None) -> int:
         print(
             f"3d section: warning: {info['open_outlines']} section outline(s) did not close "
             "(the mesh is not watertight there): the cut face is incomplete",
+            file=sys.stderr,
+        )
+    elif info["cap_triangles"] == 0:
+        print(
+            "3d section: warning: the plane passes between parts and touches no material: "
+            "the cut face is empty (move it with --at)",
             file=sys.stderr,
         )
     axis_letter = "XYZ"[AXIS[info["plane"]]]

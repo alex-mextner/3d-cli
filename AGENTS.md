@@ -335,7 +335,7 @@ skills (`atomic-commits`, `ai-review-before-commit`, `pre-commit-gate`,
 ## Command surface (post-refactor)
 
 - `render` is the unified view/section command: `--view <name>`, `--multi [outdir]`,
-  `--section [--plane …] [--color] [--keep …] [--module …]`, `--cam` manual override.
+  `--section [--plane …] [--at MM] [--part …] [--color] [--keep …]`, `--cam` manual override.
 - `check` is the unified verification command (the acceptance master gate): with no
   selection flags it runs ALL applicable gates (manifold, consistency, printability,
   collision, silhouette); `--mesh/--printability/--collision/--manifold/--silhouette`
