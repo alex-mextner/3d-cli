@@ -44,6 +44,7 @@ def _env(tmp_path: Path, slicer: Path) -> dict[str, str]:
 def test_k1se_prep_slices_with_the_flat_presets_and_reports_the_real_speeds(
     tmp_path: Path,
 ) -> None:
+    """A user preps a plate for the K1 SE with --set speed overrides: flat presets are used and the real speeds are reported."""
     model = _box(tmp_path / "plate.stl")
     out = tmp_path / "out"
     res = run_cli(
@@ -78,6 +79,7 @@ def test_k1se_prep_slices_with_the_flat_presets_and_reports_the_real_speeds(
 def test_k1se_prep_exits_one_when_the_gcode_is_faster_than_requested(
     tmp_path: Path,
 ) -> None:
+    """A user asks the K1 SE prep for a 200 mm/s outer wall; the G-code is slower, so the gates FAIL and prep exits 1."""
     res = run_cli(
         tmp_path, *K1SE, str(_box(tmp_path / "plate.stl")), "--out", str(tmp_path / "out"), "--walls", "3",
         "--set", "outer_wall_speed=200", "--quiet", timeout=300,
@@ -88,6 +90,7 @@ def test_k1se_prep_exits_one_when_the_gcode_is_faster_than_requested(
 
 
 def test_k1se_prep_refuses_colours_and_u1_prep_refuses_supports(tmp_path: Path) -> None:
+    """A user passing --colors to the K1 SE or --supports to the U1 is refused with a usage error naming the flag."""
     model = _box(tmp_path / "plate.stl")
     colors = tmp_path / "colors.yaml"
     colors.write_text("filaments: []\n")
@@ -100,7 +103,8 @@ def test_k1se_prep_refuses_colours_and_u1_prep_refuses_supports(tmp_path: Path) 
         "--out",
         str(tmp_path / "o"),
     )
-    assert res.returncode == 2 and "colors" in res.stderr
+    assert res.returncode == 2
+    assert "colors" in res.stderr
     res = run_cli(
         tmp_path,
         "prep",
@@ -111,12 +115,14 @@ def test_k1se_prep_refuses_colours_and_u1_prep_refuses_supports(tmp_path: Path) 
         str(tmp_path / "o2"),
         "--no-lock",
     )
-    assert res.returncode == 2 and "supports" in res.stderr
+    assert res.returncode == 2
+    assert "supports" in res.stderr
 
 
 def test_k1se_prep_with_an_overlay_file_renames_the_presets_for_a_changed_acceleration(
     tmp_path: Path,
 ) -> None:
+    """A user passes --overlay with a higher inner-wall acceleration to K1 SE prep; the presets are renamed to match."""
     overlay = tmp_path / "o.json"
     overlay.write_text(json.dumps({"process": {"inner_wall_acceleration": 12000}}))
     res = run_cli(
@@ -166,7 +172,9 @@ def test_k1se_prep_real_slice_of_a_small_block(tmp_path: Path) -> None:
         "--max-volumetric", "30", "--no-lock", "--json", timeout=900, env_extra=env,
     )  # fmt: skip
     steps = {s["name"]: s for s in json.loads(res.stdout)["steps"]}
-    assert res.returncode == 0, f"{steps['slice']['verdict']}: {steps['slice']['summary']}"
+    assert res.returncode == 0, (
+        f"{steps['slice']['verdict']}: {steps['slice']['summary']}"
+    )
     gates = {g["name"]: g for g in steps["gates"]["result"]["gates"]}
     assert gates["overrides"]["verdict"] == "PASS", gates["overrides"]
     assert gates["feedrates"]["verdict"] == "PASS", gates["feedrates"]
