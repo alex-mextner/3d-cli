@@ -34,13 +34,19 @@ dev = [
     { name = "pytest" },
     { name = "pytest-cov" },
     { name = "pytest-timeout" },
+    { name = "pytetwild" },
     { name = "ruff" },
+    { name = "scikit-fem" },
     { name = "scikit-image", version = "0.25.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "scikit-image", version = "0.26.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "shapely", version = "2.1.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "shapely", version = "2.2.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "uvicorn" },
     { name = "yamllint" },
+]
+fea = [
+    { name = "pytetwild" },
+    { name = "scikit-fem" },
 ]
 fit = [
     { name = "shapely", version = "2.1.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
@@ -95,10 +101,14 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=5.0" },
     { name = "pytest-timeout", marker = "extra == 'dev'", specifier = ">=2.0" },
+    { name = "pytetwild", marker = "extra == 'dev'", specifier = ">=0.2,<0.3" },
+    { name = "pytetwild", marker = "extra == 'fea'", specifier = ">=0.2,<0.3" },
     { name = "pyvista", marker = "extra == 'viz'", specifier = ">=0.43" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "rtree", specifier = ">=1.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.5.0" },
+    { name = "scikit-fem", marker = "extra == 'dev'", specifier = ">=12.0" },
+    { name = "scikit-fem", marker = "extra == 'fea'", specifier = ">=12.0" },
     { name = "scikit-image", marker = "extra == 'dev'", specifier = ">=0.22" },
     { name = "scikit-image", marker = "extra == 'prep'", specifier = ">=0.22" },
     { name = "scipy", specifier = ">=1.10" },
@@ -110,7 +120,7 @@ requires-dist = [
     { name = "uvicorn", marker = "extra == 'web'", specifier = ">=0.27" },
     { name = "yamllint", marker = "extra == 'dev'", specifier = ">=1.35" },
 ]
-provides-extras = ["solid", "preprocess", "viz", "web", "fit", "prep", "vision", "dev"]
+provides-extras = ["solid", "preprocess", "viz", "web", "fea", "fit", "prep", "vision", "dev"]
 
 [[package]]
 name = "annotated-doc"
@@ -1987,6 +1997,30 @@ wheels = [
 ]
 
 [[package]]
+name = "pytetwild"
+version = "0.2.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/0b/b0/6fd3f4f4df2ce882d12a610913631a7e5bad8e31672dfe2a9836f22c5e4c/pytetwild-0.2.3.tar.gz", hash = "sha256:406c8dd06d0c2e0860a7715af370fd6832abdd1362d909f2f954d90426f37446", size = 2615001, upload-time = "2026-02-04T15:40:49.604Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/05/67/e206c04704e835c5d0b911c000aa44ec1b7ca9ae48adc723c1280c0c5bc5/pytetwild-0.2.3-cp310-cp310-macosx_15_0_arm64.whl", hash = "sha256:75d7f509d25ab60f250e8488189a7035241266d3d9e986fdc74e95e61b6766f8", size = 2392605, upload-time = "2026-02-04T15:40:19.738Z" },
+    { url = "https://files.pythonhosted.org/packages/06/c9/bea7f254997c731a543e6464fe4b1f5643db17207ea842e233c157c7d071/pytetwild-0.2.3-cp310-cp310-macosx_15_0_x86_64.whl", hash = "sha256:c9b2a5169017527b3ba3dbb907b503cb377f7eee8d38da7503910994dd5fda72", size = 2757899, upload-time = "2026-02-04T15:40:22.007Z" },
+    { url = "https://files.pythonhosted.org/packages/1d/fc/0c5b459a171b9129e9271475a1fb4f518d0021cf4579ff1380b479ea4c04/pytetwild-0.2.3-cp310-cp310-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:85392f7d3d5543871f98560e373c5ed2e9c3b61c8f455d9bd897bbfb08f83a91", size = 3100694, upload-time = "2026-02-04T15:40:24.386Z" },
+    { url = "https://files.pythonhosted.org/packages/88/f5/06400c0ed63a774b7ddc71886c37253e65c0d63a18a4c68f9d08b9b7d4f9/pytetwild-0.2.3-cp310-cp310-win_amd64.whl", hash = "sha256:4c7a9643596e278010f9019e36d908700e74d8a33759d2cd356d33bdc7be74bb", size = 2109603, upload-time = "2026-02-04T15:40:26.003Z" },
+    { url = "https://files.pythonhosted.org/packages/d0/85/3df1f0101daaf390d69256c0dda6747f9340d144b2d0683a0a6dc41abe43/pytetwild-0.2.3-cp311-cp311-macosx_15_0_arm64.whl", hash = "sha256:f78b704b8ebe97a5f224837043f14a1121f482b5261bb7dd1e825d10d1c67617", size = 2392483, upload-time = "2026-02-04T15:40:29.259Z" },
+    { url = "https://files.pythonhosted.org/packages/b2/da/8ceb9b6efad7df50130ebdfb0bdfd8213c1958a4ab2663905e26a1c1171e/pytetwild-0.2.3-cp311-cp311-macosx_15_0_x86_64.whl", hash = "sha256:de02a188d3975be9c9b0ab92f5002f119fa1ab4762fa0137aec4cae486876667", size = 2757915, upload-time = "2026-02-04T15:40:31.746Z" },
+    { url = "https://files.pythonhosted.org/packages/96/06/bbfb06144d41a115e586d5a03759a855d3bb31e5eb7df48b87a88a71b7fb/pytetwild-0.2.3-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:cc29aa2160630f3d4111d2a3b2927787b13c1f922270f747176098c79100e51e", size = 3100431, upload-time = "2026-02-04T15:40:33.399Z" },
+    { url = "https://files.pythonhosted.org/packages/3c/96/21c0f9172fb78acc6db54b18ba81ed172475329f7353df6eed085e4d5443/pytetwild-0.2.3-cp311-cp311-win_amd64.whl", hash = "sha256:042559013e3c2fe9afc41d8dcc4ed43837974ad83e5f37da984cd766e3565904", size = 2109367, upload-time = "2026-02-04T15:40:40.179Z" },
+    { url = "https://files.pythonhosted.org/packages/fe/98/1383bb1205fe928093dd9893d55675c46a5ba237b5d01ead5f991e185ee1/pytetwild-0.2.3-cp312-abi3-macosx_15_0_arm64.whl", hash = "sha256:c3082a789262d358c5f471785e7d70204f2e65132f360e979aa201c8db2cbff5", size = 2391126, upload-time = "2026-02-04T15:40:41.811Z" },
+    { url = "https://files.pythonhosted.org/packages/9f/f0/edca864530a697c1b96dd4c604f48cd51706c28f114f227acd7291e632ff/pytetwild-0.2.3-cp312-abi3-macosx_15_0_x86_64.whl", hash = "sha256:e692f956f4db511d27521049377a449ccc962224527d0b27c8e3703c3523296b", size = 2755788, upload-time = "2026-02-04T15:40:43.339Z" },
+    { url = "https://files.pythonhosted.org/packages/84/ea/1db79f6b3379f964ee8c8bcf0651c4b62ac96d5c34a9cba5daffc43dcc6b/pytetwild-0.2.3-cp312-abi3-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:ad6617e4d01f695bee0e246a2d7ef986282f5967afe11e06129ae4e6f00e2022", size = 3097328, upload-time = "2026-02-04T15:40:45.679Z" },
+    { url = "https://files.pythonhosted.org/packages/e1/06/458cee4b67eee745bac68c06898954d1d111fa65ed0899ecfe5fdfd2bd67/pytetwild-0.2.3-cp312-abi3-win_amd64.whl", hash = "sha256:b6174cb7595e8a06926a2114d7a845990cf9082a505ba91d26b742ecfb4b9b87", size = 2107659, upload-time = "2026-02-04T15:40:47.272Z" },
+]
+
+[[package]]
 name = "python-dateutil"
 version = "2.9.0.post0"
 source = { registry = "https://pypi.org/simple" }
@@ -2162,6 +2196,21 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/74/0d/f2cd247ad32633a5c36e97141a2c21b11c6279f7957bc2ff360b1e08fddd/ruff-0.15.16-py3-none-win32.whl", hash = "sha256:580378f7bd4aa25f72e74aa54948a9622f142b1e509521dd10902e886681cc1e", size = 10735541, upload-time = "2026-06-04T16:32:30.145Z" },
     { url = "https://files.pythonhosted.org/packages/8b/9e/02e845ef151b1dee585e55c4739f8e1734ae1d9f1221dff65761c162208b/ruff-0.15.16-py3-none-win_amd64.whl", hash = "sha256:408256017284eddf98fff77b29aa4fb30f586042d535b2d9befc6512f400aaec", size = 11843403, upload-time = "2026-06-04T16:32:39.76Z" },
     { url = "https://files.pythonhosted.org/packages/15/19/016553f86f207450aebebc2b2b5088d086b901cc8186c02ac4284db3bd88/ruff-0.15.16-py3-none-win_arm64.whl", hash = "sha256:8cd61783afb39638a7133ef0d2dfb1e91277593962f81b5a8423eb0b888a6121", size = 11134555, upload-time = "2026-06-04T16:33:00.136Z" },
+]
+
+[[package]]
+name = "scikit-fem"
+version = "12.0.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/a7/5f/77643ece20e33a770fdfb6cafb9b2a5a1dd51b8a1ee1d3dc5bac8c72bdfa/scikit_fem-12.0.2.tar.gz", hash = "sha256:0a38764cdb93411c5a994451c22c1da07808ebabf920f462c6253f78f5703f8a", size = 130353, upload-time = "2026-06-05T20:45:50.903Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/5b/13/d46cf943bd1b04b1b010094eb08493d6660c99c49652fa46cf7c3bf36ab5/scikit_fem-12.0.2-py3-none-any.whl", hash = "sha256:34cd891f80072c0c1eb759a2371e82f0eeec91ff7c08acab96d27b6edbbe1b05", size = 178478, upload-time = "2026-06-05T20:45:49.084Z" },
 ]
 
 [[package]]

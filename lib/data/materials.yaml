@@ -31,6 +31,21 @@
 #   shrink_z_pct   %        — OPTIONAL linear Z shrink. No source records a per-material Z figure, so none is
 #                             shipped: `3d fits resolve` says "no Z compensation recorded" until you add one.
 #                             A missing field is "not recorded" (provenance entry), never a silent zero.
+#
+# Optional structural fields (read by `3d strength`; a material that omits them gets generic
+# defaults, and the strength report lists them as assumptions):
+#   poisson          in-plane Poisson ratio (0 < nu < 0.5).
+#   z_modulus_factor E across the layers / E in-plane, in (0, 1]. FDM parts are transversely
+#                    isotropic: the layer plane is isotropic, the build (Z) axis is the weak one.
+#                    Ahn et al. 2002 and later tensile series put the modulus loss at 5-20 % while
+#                    the strength loss (layer_adhesion) is far larger.
+#   strain_limit_pct permissible SHORT-TERM strain in-plane for a single snap-fit assembly, percent.
+#                    Across the layers it is scaled by layer_adhesion. For repeated assembly use
+#                    ~60 % of it (Bayer "Snap-Fit Joints for Plastics", Table 2 note). PLA 2.0 /
+#                    PETG 4.5 / ABS 3.5 are the 10-cycle FDM (XY) figures of the FabFlow snap-fit
+#                    guide; ASA is taken at the ABS value minus 0.5; TPU is a flexible, non-linear
+#                    material for which this small-strain figure is only a ceiling for the
+#                    linear solver.
 
 PLA:
   density: 1.24
@@ -42,6 +57,9 @@ PLA:
   finish: matte
   layer_adhesion: 0.45
   shrink_xy_pct: 0.3
+  poisson: 0.36
+  z_modulus_factor: 0.85
+  strain_limit_pct: 2.0
 
 PETG:
   density: 1.27
@@ -53,6 +71,9 @@ PETG:
   finish: gloss
   layer_adhesion: 0.7
   shrink_xy_pct: 0.4
+  poisson: 0.38
+  z_modulus_factor: 0.9
+  strain_limit_pct: 4.5
 
 ABS:
   density: 1.04
@@ -64,6 +85,9 @@ ABS:
   finish: matte
   layer_adhesion: 0.6
   shrink_xy_pct: 0.8
+  poisson: 0.35
+  z_modulus_factor: 0.9
+  strain_limit_pct: 3.5
 
 ASA:
   density: 1.07
@@ -75,6 +99,9 @@ ASA:
   finish: matte
   layer_adhesion: 0.6
   shrink_xy_pct: 0.7
+  poisson: 0.35
+  z_modulus_factor: 0.9
+  strain_limit_pct: 3.0
 
 TPU:
   density: 1.21
@@ -86,3 +113,6 @@ TPU:
   finish: matte
   layer_adhesion: 0.8
   shrink_xy_pct: 0.6
+  poisson: 0.45
+  z_modulus_factor: 1.0
+  strain_limit_pct: 15.0

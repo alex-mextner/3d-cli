@@ -1227,6 +1227,7 @@ def test_user_exports_a_structural_load_case_before_running_a_solver(tmp_path: P
                 "--safety-factor",
                 "2.5",
                 "--json",
+                "--dry-run",
             ],
             cwd=REPO_ROOT,
             env=_story_env(tmp_path),
@@ -1238,14 +1239,14 @@ def test_user_exports_a_structural_load_case_before_running_a_solver(tmp_path: P
 
     assert planned.returncode == 0, planned.stderr
     payload = json.loads(report_json.read_text(encoding="utf-8"))
-    assert payload["status"] == "DRY-RUN"
-    assert payload["verdict"] == "NOT_EVALUATED"
-    assert payload["request"]["axis"] == "Z"
-    assert payload["request"]["fixture"] == "cantilever"
-    assert payload["request"]["safety_factor"] == 2.5
-    assert payload["material"]["name"] == "PLA"
-    assert payload["material"]["controlling_strength_mpa"] == 20.25
-    assert [check["status"] for check in payload["checks"]] == ["planned"] * 5
+    assert payload["status"] == "PLAN"
+    assert payload["verdict"] is None
+    assert payload["safety_factor_required"] == 2.5
+    assert payload["cases"][0]["name"] == "cantilever"
+    assert payload["cases"][0]["verdict"] == "PLAN"
+    assert payload["materials"][0]["name"] == "PLA"
+    assert payload["materials"][0]["allowables"]["across_layers_mpa"] == 20.25
+    assert payload["input"]["bodies"][0]["volume_mm3"] == 5760.0
 
     read_cmd = " ".join(shlex.quote(part) for part in ("cat", str(report_json)))
     inspect_cmd = " ".join(
@@ -1253,7 +1254,7 @@ def test_user_exports_a_structural_load_case_before_running_a_solver(tmp_path: P
         for part in (
             sys.executable,
             "-c",
-            "import json,sys; p=json.load(sys.stdin); print(p['request']['material'] + ':' + p['verdict'])",
+            "import json,sys; p=json.load(sys.stdin); print(p['materials'][0]['name'] + ':' + p['status'])",
         )
     )
     piped = subprocess.run(
@@ -1267,7 +1268,7 @@ def test_user_exports_a_structural_load_case_before_running_a_solver(tmp_path: P
     )
 
     assert piped.returncode == 0, piped.stderr
-    assert piped.stdout.strip() == "PLA:NOT_EVALUATED"
+    assert piped.stdout.strip() == "PLA:PLAN"
     assert "Traceback" not in planned.stderr + piped.stderr
 
 

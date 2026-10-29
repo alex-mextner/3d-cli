@@ -37,6 +37,7 @@ _IMPORT_NAMES = {
     "python-dotenv": "dotenv",
     "python-dateutil": "dateutil",
     "pyyaml": "yaml",
+    "scikit-fem": "skfem",
     "scikit-image": "skimage",
     "scikit-learn": "sklearn",
     "usd-core": "pxr",

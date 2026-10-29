@@ -27,6 +27,10 @@ preprocess = ["opencv-python-headless>=4.8", "pillow>=10.0"]
 viz = ["pyvista>=0.43"]
 # Web dashboard (`3d web`). markdown degrades gracefully; fastapi+uvicorn serve. (pyyaml is core.)
 web = ["fastapi>=0.110", "uvicorn>=0.27", "markdown>=3.5"]
+# Linear-elastic FEA behind `3d strength --method fea`: scikit-fem (BSD, pure Python) + pytetwild
+# (fTetWild wheels, MPL-2.0, tet meshes from arbitrary STL). pytetwild >= 0.3 imports pyvista (plus
+# its ~560 MB vtk) at package import, so it is capped below 0.3. See docs/notes/2026-10-24-strength-solver-evaluation.md.
+fea = ["scikit-fem>=12.0", "pytetwild>=0.2,<0.3"]
 # Insert/socket section distances (`3d fit-check`).
 fit = ["shapely>=2.0"]
 # `3d prep`: proof-pack renders (pillow) and voxel -> mesh surfaces for the adaptation operators (scikit-image).
@@ -35,7 +39,7 @@ prep = ["pillow>=10.0", "scikit-image>=0.22", "shapely>=2.0"]
 vision = ["onnxruntime>=1.17", "opencv-python-headless>=4.8"]
 # Test gate (`dev run test`): pytest + mypy (+ web deps/httpx for the web TestClient), yamllint
 # for integrations/homeassistant/.
-dev = ["pytest>=8.0", "pytest-cov>=5.0", "pytest-timeout>=2.0", "mypy>=1.8", "httpx>=0.27", "ruff>=0.5.0", "fastapi>=0.110", "uvicorn>=0.27", "markdown>=3.5", "shapely>=2.0", "yamllint>=1.35", "pillow>=10.0", "scikit-image>=0.22"]
+dev = ["pytest>=8.0", "pytest-cov>=5.0", "pytest-timeout>=2.0", "mypy>=1.8", "httpx>=0.27", "ruff>=0.5.0", "fastapi>=0.110", "uvicorn>=0.27", "markdown>=3.5", "shapely>=2.0", "yamllint>=1.35", "pillow>=10.0", "scikit-image>=0.22", "scikit-fem>=12.0", "pytetwild>=0.2,<0.3"]
 
 # TARGET (ROADMAP §29): ship as a standard installable package with a `3d` console entry point.
 # Activate after the layout restructure (lib/ -> an importable `threed` package):

@@ -87,6 +87,7 @@ rendering, slicing support, and verification:
 - `section_render.py`
 - `standing_props.py`
 - `strength.py`
+- `strength_run.py`
 - `usdz.py`
 - `visible_faces.py`
 - `video.py`
@@ -358,7 +359,9 @@ Every current root Python module is listed here so future additions are intentio
 - `section_render.py` — engineering cross-sections (`3d section`, `3d render --section`): mesh-level cut, violet 45-degree hatched cut faces, per-part colours, legend.
 - `spatial_fit_metrics.py` — contour-first camera-fit diagnostics and warning metrics.
 - `standing_props.py` — snap-off props for a part printed standing (the `3d props` backend): per-station back profile from manifold3d slices, sloped ribs with a straight inner edge behind the hindmost back point, tabs, foot strip, keep-out of the part dilated by the gap, height/base stability ratio; reads STL/3MF (core + production components, Orca part extruders) and writes a 3MF with the props as an extra part of the object.
-- `strength.py` — deterministic structural-check dry-run report helpers.
+- `strength.py` — `3d strength` request, argv parsing, `3d.strength/2` verdict rules and text report (stdlib only; imported by the command at `3d help` time).
+- `strength_run.py` — the solver tool `3d strength` execs through `cli.pyrun` (numpy, scipy, trimesh, manifold3d, scikit-fem, pytetwild): parse, `structural.run.analyze`, print, exit code.
+- `lib/structural/` — the solver behind `3d strength` (#575): `beams`/`hooks` (closed forms, pure `math`), `fdm` (transversely isotropic card, directional allowables, in-plane / across-layer failure indices), `orientation` (build axis from a flag, 3MF transform or the mesh), `model` (bodies, mates -> contacts, `3d.yaml` loads, fixtures), `mesh` (fTetWild sizing and tet meshing), `fea` (scikit-fem P1/P2 assembly, tied / frictionless node-to-surface contact, direct solve, vertex stress recovery), `section` (mesh cross-sections for the beam path), `viz` (stress PNG), `run` / `fea_run` (orchestration and the `3d.strength/2` result). The library choice and timings are in `docs/notes/2026-10-24-strength-solver-evaluation.md`.
 - `usdz.py` — USDZ export helpers.
 - `video.py` — video turntable and progress-frame planning / encoding helpers.
 

@@ -227,7 +227,7 @@ code is what AI agents, version control, and shell pipes all operate on natively
   numbers last.
 
 ## 6. Physics / math tools
-- 📋 **`3d strength <part|3d.yaml>`** — strength-of-materials (beam/wall/hoop stress vs
+- ✅ (#575) **`3d strength <part|3d.yaml>`** — strength-of-materials (beam/wall/hoop stress vs
   allowable, FDM anisotropy by print orientation, SF per load-case at anchors).
   - **Anisotropic knockdown (from research, P4.1):** multiply the allowable stress for any component
     **normal to the layer plane** by a citable, material-specific knockdown — **PETG ~0.7–0.75×**,

@@ -23,12 +23,15 @@ def test_materials_runs(monkeypatch: Any, capsys: Any) -> None:
 
 
 def test_materials_info(monkeypatch: Any, capsys: Any) -> None:
-    m = type("M", (), {"name": "PLA", "density": 1.2, "e_modulus_mpa": 3500, "tensile_mpa": 65, "yield_mpa": 55, "max_temp_c": 60, "color": "#1f9c4b", "finish": "matte", "layer_adhesion": 0.45, "shrink_xy_pct": 0.3, "shrink_z_pct": None})()
+    m = type("M", (), {"name": "PLA", "density": 1.2, "e_modulus_mpa": 3500, "tensile_mpa": 65, "yield_mpa": 55, "max_temp_c": 60, "color": "#1f9c4b", "finish": "matte", "layer_adhesion": 0.45, "shrink_xy_pct": 0.3, "shrink_z_pct": None,
+                       "poisson": 0.36, "z_modulus_factor": 0.85, "strain_limit_pct": 2.0, "defaulted": ("poisson",)})()
     monkeypatch.setattr("materials.get_material", lambda name: m)
     rc = run(["show", "PLA"])
     assert rc == 0
     out = capsys.readouterr().out
     assert "shrink_xy" in out and "0.3 %" in out and "shrink_z" not in out
+    assert "z_modulus_factor  0.85" in out and "strain_limit" in out and "2 %" in out
+    assert "poisson           0.36  (in-plane)  [generic default, not on the card]" in out
 
 
 def test_materials_not_found(monkeypatch: Any, capsys: Any) -> None:
