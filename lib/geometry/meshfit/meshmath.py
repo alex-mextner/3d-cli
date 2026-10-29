@@ -14,6 +14,8 @@ import numpy as np
 import scipy.sparse as sp
 from numpy.typing import NDArray
 
+from errors import UsageError
+
 Array = NDArray[np.float64]
 IntArray = NDArray[np.int64]
 
@@ -145,6 +147,7 @@ def refine_edges(
     max_edge: float,
     max_rounds: int = 10,
     zone: NDArray[np.bool_] | None = None,
+    max_faces: int | None = None,
 ) -> tuple[Array, IntArray, int, IntArray, NDArray[np.bool_] | None]:
     """`refine_long_edges` with an optional vertex `zone` and the parent of every output face.
 
@@ -173,6 +176,18 @@ def refine_edges(
         split = np.isin(
             key, ukeys
         )  # every face edge that is split, also those of faces outside the zone
+        count = split.sum(axis=1)
+        projected = len(F) + int(
+            count.sum()
+        )  # a face with k split edges becomes k + 1 faces
+        if max_faces is not None and projected > max_faces:
+            raise UsageError(
+                f"remesh refine: round {rounds + 1} would grow the mesh to {projected:,} faces, above the {max_faces:,}-face budget",
+                command="mesh deform",
+                remediation=[
+                    "Use a larger target_edge / max_edge, limit the op with a `region`, or raise `max_faces` on the op."
+                ],
+            )
         mid_index = n + np.searchsorted(ukeys, key)  # only read where split is True
         mid = V[ukeys // n] * 0.5 + V[ukeys % n] * 0.5
         Vn = np.concatenate([V, mid])
@@ -180,7 +195,6 @@ def refine_edges(
             zone_now = np.concatenate(
                 [zone_now, zone_now[ukeys // n] | zone_now[ukeys % n]]
             )
-        count = split.sum(axis=1)
         keep = count == 0
         parts = [F[keep]]
         sources = [np.nonzero(keep)[0]]

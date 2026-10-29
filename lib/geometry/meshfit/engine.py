@@ -48,6 +48,11 @@ BRUSHES: dict[str, BrushFn] = {
     "scale_local": brushes.scale_local,
     "symmetrize": brushes.symmetrize,
 }
+# Points per closest-point query of the tolerance gate: bounds the memory of one query, never the count measured.
+DISTANCE_CHUNK = 20000
+# Ops that apply the keep-out fade themselves (the displacement they return is already faded and locked rows are
+# zero): fur limits overhangs on the faded field, fit_silhouette scores the faded pose. The engine must not fade again.
+SELF_FADING_OPS = frozenset({"fur", "fit_silhouette"})
 TOPOLOGY: dict[str, Callable[[Array, IntArray, Mapping[str, Any]], retopo.Result]] = {
     "remesh": retopo.remesh,
     "decimate": retopo.decimate,
@@ -100,6 +105,12 @@ class Pipeline:
         )
         self.records.append(record)
 
+    def _keepout_scale(self, wk: Array) -> Array:
+        """Per-vertex factor a displacement is multiplied by: the keep-out fade, zero on locked vertices."""
+        scale = 1.0 - wk
+        scale[self.lock] = 0.0
+        return scale
+
     def _apply_vertex_op(self, name: str, op: Mapping[str, Any]) -> dict[str, Any]:
         ctx = RegionContext(self.V, self.F, self.spec["regions"], self.spec["base_dir"])
         wk = self._keepout_weight(ctx)
@@ -109,12 +120,16 @@ class Pipeline:
         if name in BRUSHES:
             V_new = BRUSHES[name](ctx, op, w)
         elif name == "fur":
-            V_new, details = relief.fur(ctx, op, w, int(self.spec["seed"]))
+            V_new, details = relief.fur(
+                ctx, op, w, int(self.spec["seed"]), self._keepout_scale(wk)
+            )
         elif name == "fit_silhouette":
             V_new, details = fit.fit_silhouette(ctx, op, self.lock, wk)
         else:
             V_new, details = self._grab(ctx, op, w)
-        delta = (V_new - self.V) * (1.0 - wk)[:, None]
+        delta = V_new - self.V
+        if name not in SELF_FADING_OPS:
+            delta *= (1.0 - wk)[:, None]
         delta[self.lock] = 0.0
         moved = np.linalg.norm(delta, axis=1)
         self.V = self.V + delta
@@ -249,14 +264,14 @@ class Pipeline:
                 else "keep-out zone selects no vertex at weight 1",
             )
             return result
-        present = _locate_rows(
-            self.V, locked
-        )  # mask over final vertices that equal a locked original
-        found = int(present.sum())
+        survived = _locate_rows(
+            locked, self.V
+        )  # mask over locked originals that still exist, bit-for-bit, in the final mesh
+        found = int(survived.sum())
         missing = len(locked) - found
         max_disp = 0.0
         if missing:
-            max_disp = _surface_distance_of_missing(self.V, self.F, locked, present)
+            max_disp = _surface_distance(self.V, self.F, locked[~survived])
         result.update(
             max_displacement_mm=round(max_disp, 9),
             exact_vertices_preserved=found,
@@ -279,26 +294,18 @@ def _locate_rows(V: Array, points: Array) -> BoolArray:
     return np.asarray(np.isin(_row_key(V), _row_key(points)), dtype=bool)
 
 
-def _surface_distance_of_missing(
-    V: Array, F: IntArray, locked: Array, present: BoolArray
-) -> float:
+def _surface_distance(V: Array, F: IntArray, points: Array) -> float:
+    """Largest distance from any of `points` to the surface (V, F); every point is measured, in chunks."""
     import trimesh
 
-    keys_present = set(_row_key(V[present]).tolist())
-    missing = np.array(
-        [
-            row
-            for row, key in zip(locked, _row_key(locked).tolist(), strict=True)
-            if key not in keys_present
-        ],
-        dtype=np.float64,
-    ).reshape(-1, 3)
-    if len(missing) > 20000:
-        missing = missing[:: int(np.ceil(len(missing) / 20000))]
-    _, dist, _ = trimesh.proximity.closest_point(
-        trimesh.Trimesh(V, F, process=False), missing
-    )
-    return float(dist.max())
+    mesh = trimesh.Trimesh(V, F, process=False)
+    worst = 0.0
+    for start in range(0, len(points), DISTANCE_CHUNK):
+        _, dist, _ = trimesh.proximity.closest_point(
+            mesh, points[start : start + DISTANCE_CHUNK]
+        )
+        worst = max(worst, float(dist.max()))
+    return worst
 
 
 def spec_sha256(spec: Mapping[str, Any]) -> str:

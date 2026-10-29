@@ -162,6 +162,23 @@ def test_invalid_spec_and_missing_files_are_usage_errors(tmp_path: Path) -> None
     assert "file not found" in missing.stderr
 
 
+def test_malformed_scalars_and_zero_vectors_in_a_spec_are_usage_errors_not_tracebacks(
+    tmp_path: Path,
+) -> None:
+    """A user writes `seed: abc` or a zero rotation axis: exit 2 naming the key, never a traceback."""
+    model = _model(tmp_path)
+    cases = {
+        "seed: abc\nops:\n  - {op: smooth}\n": "seed",
+        "ops:\n  - op: grab\n    handles:\n      - {region: {all: true}, rotate: {axis: [0, 0, 0], deg: 90}}\n": "axis",
+    }
+    for i, (text, key) in enumerate(cases.items()):
+        (tmp_path / f"bad{i}.yaml").write_text(text)
+        run = run_cli(tmp_path, "mesh", "deform", str(model), f"bad{i}.yaml")
+        assert run.returncode == 2
+        assert f"spec: {key}" in run.stderr or f".{key}" in run.stderr
+        assert not (tmp_path / "ball.deformed.stl").exists()
+
+
 def test_help_documents_every_flag_and_the_docs_page_matches() -> None:
     """A user reads the help text and the docs page: both document every flag and op."""
     from commands import mesh

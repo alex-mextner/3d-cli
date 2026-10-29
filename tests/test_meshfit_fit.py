@@ -213,3 +213,28 @@ def test_fit_silhouette_needs_anchors_and_handles(tmp_path: Path) -> None:
         engine.run_spec(V, F, sp, self_intersections=False)
     with pytest.raises(UsageError, match="needs handles"):
         spec(ops=[{"op": "fit_silhouette", "views": op["views"], "handles": []}])
+
+
+def test_fit_silhouette_writes_the_mesh_it_scored_with_a_keepout_fade_nearby(
+    tmp_path: Path,
+) -> None:
+    from geometry.meshfit.regions import RegionContext
+
+    V, F, _, op = _scene(tmp_path)
+    regions = {
+        "nose": {
+            "sphere": {"center": [14.0, 10.0, 0.0], "radius": 3.0},
+            "falloff": 10.0,
+        }
+    }
+    sp = spec(regions=regions, keepout=["nose"], ops=[op])
+    sp["base_dir"] = str(tmp_path)
+    V2, _, _ = engine.run_spec(V, F, sp, self_intersections=False)
+    pipe = engine.Pipeline(V, F, sp)
+    ctx = RegionContext(V, F, sp["regions"], sp["base_dir"])
+    wk = pipe._keepout_weight(ctx)
+    assert ((wk > 0.0) & (wk < 1.0)).sum() > 20  # a real fade band
+    scored, _ = fit.fit_silhouette(ctx, sp["ops"][0], pipe.lock, wk)
+    assert np.array_equal(
+        V2, scored
+    )  # the fade is applied once, not again by the engine

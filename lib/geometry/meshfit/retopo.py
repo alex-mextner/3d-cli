@@ -31,6 +31,9 @@ Array = NDArray[np.float64]
 IntArray = NDArray[np.int64]
 Result = tuple[Array, IntArray, dict[str, Any], bool]
 
+# Face budget of one `refine`: a tiny target_edge multiplies the faces ~4x per round, so it is refused before allocating.
+MAX_REFINE_FACES = 10_000_000
+
 
 def refine(
     V: Array,
@@ -58,7 +61,12 @@ def refine(
     limit = value if has_max else value * 4.0 / 3.0
     before = meshmath.mean_edge_length(V, F)
     V2, F2, rounds, parent, zone2 = meshmath.refine_edges(
-        V, F, limit, int(params.get("max_rounds", 10)), zone
+        V,
+        F,
+        limit,
+        int(params.get("max_rounds", 10)),
+        zone,
+        int(params.get("max_faces", MAX_REFINE_FACES)),
     )
     tri = V2[F2]
     longest = np.linalg.norm(tri[:, [1, 2, 0]] - tri, axis=2).max(axis=1)

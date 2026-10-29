@@ -176,3 +176,24 @@ def test_limit_overhang_leaves_already_overhanging_faces_no_worse() -> None:
     bed = V[F][:, :, 2].max(axis=1) < 0.3
     worse = (nz1 < -np.sin(np.radians(45.0))) & (nz1 < nz0 - 1e-9) & ~bed
     assert not worse.any()
+
+
+def test_overhang_safe_fur_holds_its_limit_on_the_faded_displacement() -> None:
+    """The keep-out fade scales the relief per vertex; the limiter must see that scaled field, not the unscaled one."""
+    V, F = _bell()
+    ctx = RegionContext(V, F, {"all": {"all": True}}, ".")
+    w = np.ones(len(V))
+    big = {
+        "amplitude": 3.0,
+        "pitch": 1.6,
+        "length": 3.0,
+        "flow": [1, 0, 0],
+        "overhang_safe": {"max_angle_deg": 45.0},
+    }
+    scale = np.random.default_rng(5).uniform(0.0, 1.0, len(V))  # a ragged fade band
+    unscaled, _ = relief.fur(ctx, big, w, seed=7)
+    faded_after = V + (unscaled - V) * scale[:, None]  # what the engine used to do
+    faded_inside, _ = relief.fur(ctx, big, w, seed=7, scale=scale)
+    assert _worst_overhang_angle_from_vertical(faded_after, F) > 45.0  # teeth
+    assert _worst_overhang_angle_from_vertical(faded_inside, F) <= 45.0 + 1e-9
+    assert np.abs(faded_inside - V).max() > 0.2
