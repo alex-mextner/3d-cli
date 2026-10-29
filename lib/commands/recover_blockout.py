@@ -49,7 +49,8 @@ Options:
   --out DIR             output directory (default ./recover_out)
   --size WxH            render size (default 240x200)
   --backend NAME        veto AI backend: claude|codex|opencode|ollama|mock
-                        (default: ai.json backend, else first available)
+                        (default: ai.json backend, else first available,
+                        preferring one that can see images; mock never reads ai.json)
 
 Artifacts (in --out):
   proof_panel.png       6 cells: reference, mask, recovered render, contour error,
@@ -65,15 +66,8 @@ Examples:
 _VALUE_FLAGS = {"--template", "--out", "--size", "--backend"}
 
 
-def run(argv: list[str]) -> int:
-    if argv and argv[0] in ("-h", "--help"):
-        print(USAGE)
-        return 0
-    if not argv:
-        print(USAGE)
-        return 1
-    require_openscad("recover-blockout")
-
+def _parse_argv(argv: list[str]) -> tuple[list[str], str | None, bool]:
+    """Split argv into (flags forwarded to the tool, reference image or None, synthetic)."""
     tool_args: list[str] = []
     reference: str | None = None
     synthetic = False
@@ -84,15 +78,14 @@ def run(argv: list[str]) -> int:
             synthetic = True
             tool_args.append(a)
             i += 1
-        elif a in _VALUE_FLAGS or ("=" in a and a.split("=", 1)[0] in _VALUE_FLAGS):
-            if "=" in a:
-                tool_args.append(a)
-                i += 1
-            else:
-                if i + 1 >= len(argv):
-                    raise UsageError(f"option {a} needs a value", command="recover-blockout")
-                tool_args += [a, argv[i + 1]]
-                i += 2
+        elif a in _VALUE_FLAGS:
+            if i + 1 >= len(argv):
+                raise UsageError(f"option {a} needs a value", command="recover-blockout")
+            tool_args += [a, argv[i + 1]]
+            i += 2
+        elif "=" in a and a.split("=", 1)[0] in _VALUE_FLAGS:
+            tool_args.append(a)
+            i += 1
         elif a.startswith("-"):
             print(USAGE)
             raise UsageError(f"unknown option '{a}'", command="recover-blockout")
@@ -101,7 +94,19 @@ def run(argv: list[str]) -> int:
                 raise UsageError("only one reference image is accepted", command="recover-blockout")
             reference = a
             i += 1
+    return tool_args, reference, synthetic
 
+
+def run(argv: list[str]) -> int:
+    if argv and argv[0] in ("-h", "--help"):
+        print(USAGE)
+        return 0
+    if not argv:
+        print(USAGE)
+        return 1
+    require_openscad("recover-blockout")
+
+    tool_args, reference, synthetic = _parse_argv(argv)
     if not synthetic and reference is None:
         print(USAGE)
         raise UsageError(
