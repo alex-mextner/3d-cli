@@ -686,7 +686,7 @@ ever published without a confirmation:
 
 | `--publish` | Terminal | Not a terminal / `--json` |
 |---|---|---|
-| `ask` (default) | prints the summary, asks `Publish to all platforms with CAD files, renders and photos? [Y/n]` — the default is yes only for an open licence with no refusal | prints the plan and the exact `3d models publish … --yes` commands; publishes nothing |
+| `ask` (default) | prints the summary, asks `Publish to all platforms with CAD files, renders and photos? [Y/n]` — the default is yes only for an open licence with no refusal | prints the plan and the exact `3d models offer … --yes` command (the offer, not `models publish`, fills the title, description and licence publish.yaml leaves out); publishes nothing |
 | `auto` | publishes only together with `--yes` | `--yes` publishes; without it `status: needs_confirmation` |
 | `off` | nothing at all: no output, the library is not even opened, exit 0 | the same (`{"status": "off"}` with `--json`) |
 

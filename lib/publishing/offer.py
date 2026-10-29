@@ -135,6 +135,85 @@ def _already_published(conn: sqlite3.Connection, design: sqlite3.Row) -> list[st
     ]
 
 
+def _from_library(
+    project: Path | None,
+    design: str | None,
+    make: str | None,
+    printer: str | None,
+    db_path: str | None,
+) -> tuple[str | None, str | None, Path | None, str | None, bool, list[str]]:
+    """What the library knows about the offer: (design name, make uid, project dir, source url, is-a-remix,
+    platforms already published). The arguments stand when the library is absent or knows nothing."""
+    name, make_uid, src_url, remixed = design, make, None, False
+    published: list[str] = []
+    with flow.library(db_path, create=False) as conn:
+        if conn is None:
+            return name, make_uid, project, src_url, remixed, published
+        from library import records
+
+        make_row = None
+        if make:
+            make_row = records.resolve(conn, "make", make, command="models")
+        elif printer:
+            make_row = _latest_make(conn, printer)
+        design_row = None
+        if make_row is not None:
+            design_row = conn.execute(
+                "SELECT * FROM design WHERE id = ?", (make_row["design_id"],)
+            ).fetchone()
+            make_uid = str(make_row["uid"])
+        elif design:
+            design_row = conn.execute(
+                "SELECT * FROM design WHERE name = ?", (design,)
+            ).fetchone()
+        elif project is not None:
+            design_row = conn.execute(
+                "SELECT * FROM design WHERE project_dir = ? OR name = ? ORDER BY project_dir IS NULL LIMIT 1",
+                (str(project), flow.design_name(project, None)),
+            ).fetchone()
+        if design_row is None:
+            return name, make_uid, project, src_url, remixed, published
+        if make_uid is None:
+            latest = conn.execute(
+                "SELECT uid FROM make WHERE design_id = ? AND status IN ('printing', 'done') "
+                "ORDER BY id DESC LIMIT 1",
+                (design_row["id"],),
+            ).fetchone()
+            make_uid = str(latest["uid"]) if latest is not None else None
+        name = str(design_row["name"])
+        if project is None and design_row["project_dir"]:
+            project = Path(str(design_row["project_dir"]))
+        src_url, remixed = _design_source(conn, design_row)
+        published = _already_published(conn, design_row)
+    return name, make_uid, project, src_url, remixed, published
+
+
+def _source_license(src_url: str | None, db_path: str | None) -> tuple[str, str]:
+    """(licence id, why) the offer defaults to for a source url (None: an original)."""
+    source = None
+    if src_url:
+        from publishing.source import SourceRef, load_source
+
+        with flow.library(db_path, create=False) as conn:
+            source = (
+                load_source(src_url, conn)
+                if conn is not None
+                else SourceRef(src_url, "", "", "", "", "", "url")
+            )
+    return flow.default_license(source)
+
+
+def _publish_kind(
+    trigger: str, src_url: str | None, spec_remix: bool, remixed: bool
+) -> str | None:
+    """`remix` / `original` for the design itself, None when this trigger offers no design post."""
+    if trigger == "modify":
+        return "remix" if (src_url or spec_remix) else "original"
+    if remixed or spec_remix or src_url is None:
+        return "remix" if (remixed or spec_remix) else "original"
+    return None
+
+
 # --------------------------------------------------------------------------- the offer
 def build(
     project: Path | None,
@@ -154,44 +233,9 @@ def build(
     Raises UsageError when neither a project directory nor a library design/make says what to offer."""
     if trigger not in TRIGGERS:
         raise InvalidArgument("--trigger", trigger, list(TRIGGERS), command="models")
-    name, make_uid, src_url, remixed, published = design, make, None, False, []
-    with flow.library(db_path, create=False) as conn:
-        if conn is not None:
-            from library import records
-
-            make_row = None
-            if make:
-                make_row = records.resolve(conn, "make", make, command="models")
-            elif printer:
-                make_row = _latest_make(conn, printer)
-            design_row = None
-            if make_row is not None:
-                design_row = conn.execute(
-                    "SELECT * FROM design WHERE id = ?", (make_row["design_id"],)
-                ).fetchone()
-                make_uid = str(make_row["uid"])
-            elif design:
-                design_row = conn.execute(
-                    "SELECT * FROM design WHERE name = ?", (design,)
-                ).fetchone()
-            elif project is not None:
-                design_row = conn.execute(
-                    "SELECT * FROM design WHERE project_dir = ? OR name = ? ORDER BY project_dir IS NULL LIMIT 1",
-                    (str(project), flow.design_name(project, None)),
-                ).fetchone()
-            if design_row is not None and make_uid is None:
-                latest = conn.execute(
-                    "SELECT uid FROM make WHERE design_id = ? AND status IN ('printing', 'done') "
-                    "ORDER BY id DESC LIMIT 1",
-                    (design_row["id"],),
-                ).fetchone()
-                make_uid = str(latest["uid"]) if latest is not None else None
-            if design_row is not None:
-                name = str(design_row["name"])
-                if project is None and design_row["project_dir"]:
-                    project = Path(str(design_row["project_dir"]))
-                src_url, remixed = _design_source(conn, design_row)
-                published = _already_published(conn, design_row)
+    name, make_uid, project, src_url, remixed, published = _from_library(
+        project, design, make, printer, db_path
+    )
     if project is None:
         raise UsageError(
             "nothing to offer: no PROJECT_DIR given and the library knows no design/make with a project directory",
@@ -205,17 +249,7 @@ def build(
         raise InputNotFound(str(project), command="models")
     name = flow.design_name(project, name)
     spec_remix = _publish_yaml_remix(project)
-    source_for_license = None
-    if src_url:
-        from publishing.source import SourceRef, load_source
-
-        with flow.library(db_path, create=False) as conn:
-            source_for_license = (
-                load_source(src_url, conn)
-                if conn is not None
-                else SourceRef(src_url, "", "", "", "", "", "url")
-            )
-    lic, lic_why = flow.default_license(source_for_license)
+    lic, lic_why = _source_license(src_url, db_path)
     title = name.replace("_", " ").replace("-", " ").strip().capitalize()
     defaults = {
         "title": title,
@@ -223,11 +257,7 @@ def build(
         "license": lic,
     }
     plans: list[flow.Prepared] = []
-    publish_kind = None
-    if trigger == "modify":
-        publish_kind = "remix" if (src_url or spec_remix) else "original"
-    elif remixed or spec_remix or src_url is None:
-        publish_kind = "remix" if (remixed or spec_remix) else "original"
+    publish_kind = _publish_kind(trigger, src_url, bool(spec_remix), remixed)
     if publish_kind is not None:
         plans.append(
             flow.prepare(
@@ -305,31 +335,32 @@ def offer_doc(
         "source": built["source"],
         "already_published": built["already_published"],
         "plans": [plan.to_json(p.ev, dry_run=outcomes is None) for p in plans],
-        "command": _command(built),
+        "command": _command(built, trigger),
         "outcomes": None if outcomes is None else [o.to_json() for o in outcomes],
     }
 
 
-def _command(built: dict[str, Any]) -> list[list[str]]:
-    """The exact commands that publish what was offered (the agent runs them after the user said yes)."""
-    cmds: list[list[str]] = []
-    for p in built["plans"]:
-        cmd = [
-            "3d",
-            "models",
-            "publish",
-            str(built["project"]),
-            "--platform",
-            p.platform,
-            "--kind",
-            p.kind,
-        ]
-        if p.kind == "make":
-            cmd += ["--make", str(built["make"])]
-        if p.source is not None and p.kind in ("remix", "make"):
-            cmd += ["--of", p.source.url]
-        cmds.append([*cmd, "--yes"])
-    return cmds
+def _command(built: dict[str, Any], trigger: str) -> list[list[str]]:
+    """The exact command that publishes what was offered (the agent runs it after the user said yes).
+
+    It re-runs the offer with `--yes`, not `3d models publish`: only the offer fills the title / description /
+    licence that publish.yaml leaves out, so a replayed `models publish` would be refused for those projects."""
+    plans = built["plans"]
+    if not plans:
+        return []
+    cmd = [
+        "3d",
+        "models",
+        "offer",
+        str(built["project"]),
+        "--trigger",
+        trigger,
+        "--platform",
+        plans[0].platform,
+    ]
+    if built["make"]:
+        cmd += ["--make", str(built["make"])]
+    return [[*cmd, "--yes"]]
 
 
 def summary_text(built: dict[str, Any]) -> str:
@@ -407,58 +438,42 @@ def run_offer(
     plans: list[flow.Prepared] = built["plans"]
     tty = (interactive or (lambda: sys.stdin.isatty() and sys.stdout.isatty()))()
     if not plans:
-        doc = offer_doc(built, mode=mode, trigger=trigger, status="nothing_to_offer")
-        out(
-            json.dumps(doc, indent=2, ensure_ascii=False)
-            if as_json
-            else summary_text(built) + "\n  nothing to offer for this trigger"
+        _emit(
+            offer_doc(built, mode=mode, trigger=trigger, status="nothing_to_offer"),
+            summary_text(built) + "\n  nothing to offer for this trigger",
+            as_json,
+            out,
         )
         return 0
-    publishable = [p for p in plans if p.ev.gate is None and not p.ev.all_problems()]
-    confirmed = yes
-    status = "offered"
-    if not as_json and tty and not yes and mode == "ask":
-        out(summary_text(built))
-        default_yes = built["license"]["open"] and len(publishable) == len(plans)
-        answer = (
-            ask(
-                f"Publish to all platforms with CAD files, renders and photos? [{'Y/n' if default_yes else 'y/N'}] "
-            )
-            .strip()
-            .lower()
-        )
-        confirmed = answer in ("y", "yes") or (answer == "" and default_yes)
-        status = "offered" if confirmed else "declined"
-    elif not yes and mode == "auto":
-        status = "needs_confirmation"
+    confirmed, status = _confirmation(built, mode, yes, as_json, tty, ask, out)
     if not confirmed:
         doc = offer_doc(built, mode=mode, trigger=trigger, status=status)
-        if as_json:
-            out(json.dumps(doc, indent=2, ensure_ascii=False))
-        elif status != "declined" or not tty:
-            out(summary_text(built))
-            out(
-                "  not published: confirm with the command below"
-                if status == "offered"
-                else "  not published: auto needs --yes"
-            )
-            out("\n".join("  " + " ".join(c) for c in doc["command"]))
+        _report_unconfirmed(built, doc, status, as_json, tty, out)
         return 0
-    outcomes: list[flow.Outcome] = []
-    failed = False
+    return _publish(built, mode, trigger, as_json, send, out)
+
+
+def _publish(
+    built: dict[str, Any],
+    mode: str,
+    trigger: str,
+    as_json: bool,
+    send: Callable[[flow.Prepared], list[flow.Outcome]],
+    out: Callable[[str], None],
+) -> int:
+    """Send every plan (none when any is blocked) and report; the process exit code."""
+    plans: list[flow.Prepared] = built["plans"]
     blocked = [p for p in plans if p.ev.gate is not None or p.ev.all_problems()]
     if blocked:  # show why, and send NOTHING of any plan (a half-published offer is worse than none)
-        doc = offer_doc(built, mode=mode, trigger=trigger, status="refused")
-        out(
-            json.dumps(doc, indent=2, ensure_ascii=False)
-            if as_json
-            else summary_text(built)
+        _emit(
+            offer_doc(built, mode=mode, trigger=trigger, status="refused"),
+            summary_text(built),
+            as_json,
+            out,
         )
         flow.refuse_if_blocked(blocked[0])
-    for p in plans:
-        results = send(p)
-        outcomes.extend(results)
-        failed = failed or not all(r.ok for r in results)
+    outcomes = [o for p in plans for o in send(p)]
+    failed = not all(o.ok for o in outcomes)
     doc = offer_doc(
         built,
         mode=mode,
@@ -466,12 +481,77 @@ def run_offer(
         status="failed" if failed else "published",
         outcomes=outcomes,
     )
+    summary = (
+        summary_text(built)
+        + "\n"
+        + "\n".join(f"  {o.platform}: {o.message}" for o in outcomes)
+    )
+    _emit(doc, summary, as_json, out)
+    return 1 if failed else 0
+
+
+def _report_unconfirmed(
+    built: dict[str, Any],
+    doc: dict[str, Any],
+    status: str,
+    as_json: bool,
+    tty: bool,
+    out: Callable[[str], None],
+) -> None:
+    """Nothing was published: show the plan and the command that would (a declined answer on a terminal is silent)."""
     if as_json:
         out(json.dumps(doc, indent=2, ensure_ascii=False))
-    else:
+    elif status != "declined" or not tty:
         out(summary_text(built))
-        out("\n".join(f"  {o.platform}: {o.message}" for o in outcomes))
-    return 1 if failed else 0
+        out(
+            "  not published: confirm with the command below"
+            if status == "offered"
+            else "  not published: auto needs --yes"
+        )
+        out("\n".join("  " + " ".join(c) for c in doc["command"]))
+
+
+def _ask_user(
+    built: dict[str, Any], ask: Callable[[str], str], out: Callable[[str], None]
+) -> bool:
+    """Show the summary and ask; the default answer is yes only for an open licence with nothing refused."""
+    plans = built["plans"]
+    clean = [p for p in plans if p.ev.gate is None and not p.ev.all_problems()]
+    out(summary_text(built))
+    default_yes = built["license"]["open"] and len(clean) == len(plans)
+    answer = (
+        ask(
+            f"Publish to all platforms with CAD files, renders and photos? [{'Y/n' if default_yes else 'y/N'}] "
+        )
+        .strip()
+        .lower()
+    )
+    return answer in ("y", "yes") or (answer == "" and default_yes)
+
+
+def _emit(
+    doc: dict[str, Any], text: str, as_json: bool, out: Callable[[str], None]
+) -> None:
+    """The offer document as JSON, or the human text."""
+    out(json.dumps(doc, indent=2, ensure_ascii=False) if as_json else text)
+
+
+def _confirmation(
+    built: dict[str, Any],
+    mode: str,
+    yes: bool,
+    as_json: bool,
+    tty: bool,
+    ask: Callable[[str], str],
+    out: Callable[[str], None],
+) -> tuple[bool, str]:
+    """(confirmed, status): asks on a terminal in `ask` mode; `--yes` confirms; `auto` without it waits."""
+    if not as_json and tty and not yes and mode == "ask":
+        confirmed = _ask_user(built, ask, out)
+        return confirmed, "offered" if confirmed else "declined"
+    if not yes and mode == "auto":
+        return False, "needs_confirmation"
+    return yes, "offered"
 
 
 # --------------------------------------------------------------------------- hooks

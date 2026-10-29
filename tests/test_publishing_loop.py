@@ -937,9 +937,23 @@ def test_the_offer_is_for_all_platforms_with_cad_renders_and_photos_under_a_stat
     )
     assert set(p["defaults_used"]) == {"title", "description", "license"}
     assert (
-        doc["command"][0][:3] == ["3d", "models", "publish"]
+        doc["command"][0][:3] == ["3d", "models", "offer"]
+        and "--trigger" in doc["command"][0]
         and doc["command"][0][-1] == "--yes"
     )
+    argv = doc["command"][0]
+    replay_code, _, replay = run(
+        tmp_path,
+        capsys,
+        db,
+        project=Path(argv[3]),
+        trigger=argv[argv.index("--trigger") + 1],
+        platform=argv[argv.index("--platform") + 1],
+        make=argv[argv.index("--make") + 1] if "--make" in argv else None,
+        yes=True,
+        mode="ask",
+    )
+    assert replay_code == 0 and replay.sent == ["original"]
 
 
 def test_ask_on_a_terminal_publishes_only_after_a_yes(
@@ -985,7 +999,7 @@ def test_without_a_terminal_ask_prints_the_plan_and_the_command_but_never_publis
         code == 0
         and spy.sent == []
         and "not published: confirm" in text
-        and "3d models publish" in text
+        and "3d models offer" in text
         and "--yes" in text
     )
 
