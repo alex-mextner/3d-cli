@@ -592,6 +592,18 @@ def test_external_backend_forwards_the_arrays_and_no_builtin_options_to_mesh_rep
     assert json.loads(json.dumps(r.to_dict()))["report"] == {"filled": 1}
 
 
+def test_auto_ignores_the_meshfix_adapter_when_the_library_cannot_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = types.ModuleType("mesh_repair")
+    module.repair_mesh = lambda *a, **k: pytest.fail("must not run")  # type: ignore[attr-defined]
+    module.available = lambda: False  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "mesh_repair", module)
+    assert ExternalBackend().available() is False
+    r = repair(without_faces(cube(), [0]))
+    assert r.backend == "builtin"
+
+
 def test_registering_same_name_replaces_and_unregister_removes() -> None:
     register_backend(FakeBackend("dup"))
     second = FakeBackend("dup")
