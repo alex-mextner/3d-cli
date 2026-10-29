@@ -334,3 +334,35 @@ def test_section_color_refuses_a_non_finite_center(tmp_path: Path) -> None:
 
     assert result.returncode == 2
     assert "--center" in result.stderr
+
+
+def test_export_stl_refuses_to_overwrite_its_own_input(tmp_path: Path) -> None:
+    """A history typo `export-stl a.scad a.scad` must not delete the model."""
+    model = _write(tmp_path, "bracket.scad", "cube(10);\n")
+
+    result = run_cli(tmp_path, "scad", "export-stl", str(model), str(model))
+
+    assert result.returncode == 2
+    assert "is the input file" in result.stderr
+    assert model.read_text(encoding="utf-8") == "cube(10);\n"
+
+
+def test_export_stl_of_a_model_without_geometry_is_not_passed(tmp_path: Path) -> None:
+    """A file with only module definitions exports nothing: the status is FAILED, not 'ready for slicer'."""
+    model = _write(tmp_path, "mods.scad", "module shaft() { cylinder(h=4, r=1); }\n")
+
+    result = run_cli(tmp_path, "scad", "export-stl", str(model), str(tmp_path / "m.stl"))
+
+    assert result.returncode == 1
+    assert "STATUS: FAILED" in result.stdout
+    assert "ready for slicer" not in result.stdout
+
+
+def test_validate_ignores_the_word_assertion_in_echoed_text(tmp_path: Path) -> None:
+    """A model that echoes 'Assertion checks passed' is still a valid model."""
+    model = _write(tmp_path, "echo.scad", 'echo("Assertion checks passed");\ncube(1);\n')
+
+    result = run_cli(tmp_path, "scad", "validate", str(model))
+
+    assert result.returncode == 0
+    assert "Syntax OK" in result.stdout

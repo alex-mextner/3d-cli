@@ -39,6 +39,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from cli.env import openscad_display_prefix, require_openscad
+from cli.paths import cache_dir
 from cli.registry import Command
 from errors import InputNotFound, InvalidArgument, UsageError
 
@@ -220,7 +221,7 @@ def _require_file(path: str, sub: str) -> Path:
 # A missing include/use is only a WARNING that still lets the rest of the model export, so it
 # counts as a failure too: the STL would silently lack the library's geometry.
 _ERROR_RE = re.compile(
-    r"^\s*(ERROR:.*|.*\bAssertion\b.*|WARNING: Can't (?:open|find) (?:include|library|use)\b.*)$",
+    r"^\s*(ERROR:.*|(?!ECHO:).*\bAssertion\b.*|WARNING: Can't (?:open|find) (?:include|library|use)\b.*)$",
     re.MULTILINE | re.IGNORECASE,
 )
 
@@ -303,7 +304,7 @@ def cmd_validate(argv: list[str]) -> int:
     _need_positionals(p, "validate", 1, "3d scad validate <in.scad>")
     inp = _require_file(p.positionals[0], "validate")
     print(f"Validating: {inp}")
-    out = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "3d-cli"
+    out = cache_dir()
     out.mkdir(parents=True, exist_ok=True)
     echo = out / f"validate-{os.getpid()}.echo"
     try:
@@ -432,8 +433,13 @@ def _open_mesh_issue(stl: Path) -> list[str]:
         import trimesh
     except ImportError:
         return []
-    mesh = trimesh.load_mesh(str(stl))
-    if len(mesh.faces) and not mesh.is_watertight:
+    try:
+        mesh = trimesh.load_mesh(str(stl))
+    except (ValueError, OSError) as exc:
+        return [f"The exported STL cannot be read back ({exc})"]
+    if not len(mesh.faces):
+        return ["The export is empty (no top-level geometry, or every part degenerate)"]
+    if not mesh.is_watertight:
         return ["Non-manifold geometry (open mesh: holes or unpaired edges)"]
     return []
 
@@ -456,6 +462,12 @@ def cmd_export_stl(argv: list[str]) -> int:
         print(f"Parameters: {' '.join(_define_args(p.defines))}")
     print("=" * 40)
 
+    if out.exists() and out.resolve() == inp.resolve():
+        raise UsageError(
+            f"the output {out} is the input file; exporting would delete the model",
+            command="scad export-stl",
+            remediation=["Give a different .stl output path."],
+        )
     out.unlink(missing_ok=True)  # a stale file must not pass for this run's result
     res = _openscad(
         ["--export-format", fmt, *_define_args(p.defines), "-o", str(out), str(inp)]
@@ -630,19 +642,26 @@ def cmd_section(argv: list[str]) -> int:
     call = module.rstrip()
     if not call.endswith((";", "}")):
         call += ";"  # else the cut box would become a child of the module call
-    with tempfile.NamedTemporaryFile(
-        "w",
-        dir=inp.resolve().parent,
-        prefix=".section_tmp_",
-        suffix=".scad",
-        delete=False,
-        encoding="utf-8",
-    ) as handle:
-        handle.write(
-            f"// AUTO-GENERATED cross-section (3d scad section) — safe to delete\n"
-            f"use <{inp.name}>\n"
-            f"difference() {{\n    {call}\n    {cut}\n}}\n"
-        )
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            dir=inp.parent,
+            prefix=".section_tmp_",
+            suffix=".scad",
+            delete=False,
+            encoding="utf-8",
+        ) as handle:
+            handle.write(
+                f"// AUTO-GENERATED cross-section (3d scad section) — safe to delete\n"
+                f"use <{inp.name}>\n"
+                f"difference() {{\n    {call}\n    {cut}\n}}\n"
+            )
+    except OSError as exc:
+        raise UsageError(
+            f"cannot write the section wrapper next to {inp}: {exc.strerror or exc}",
+            command="scad section",
+            remediation=["Copy the model (and what it use<>s) to a writable directory."],
+        ) from exc
     tmp = Path(handle.name)
     print(f"Section: {inp}  plane={plane} keep={keep} -> {out}")
     try:
