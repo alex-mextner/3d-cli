@@ -114,6 +114,7 @@ def wait_for(log: Path, count: int = 1) -> list[dict[str, Any]]:
 def test_an_agent_reads_the_ranked_list_with_numbers_verdicts_questions_and_followups(
     world: World,
 ) -> None:
+    """An agent runs act --do list and reads the ranked rows with numbers, verdicts, questions and follow-ups."""
     listing = world.listing()
     assert (
         listing["schema"] == "3d.models.act/1"
@@ -143,6 +144,7 @@ def test_an_agent_reads_the_ranked_list_with_numbers_verdicts_questions_and_foll
 def test_selectors_combine_and_a_filter_narrows_the_numbers_stay_the_rankings(
     world: World,
 ) -> None:
+    """A user combines selectors and a filter: only matching rows stay, numbered as in the ranking."""
     everything = world.listing()["results"]
     fits = world.listing("--select-verdict", "fits")["results"]
     assert fits and all(r["verdict"] == "fits" for r in fits)
@@ -171,6 +173,7 @@ def test_selectors_combine_and_a_filter_narrows_the_numbers_stay_the_rankings(
 def test_nothing_is_downloaded_or_started_without_yes_and_the_plan_names_the_command(
     world: World, tmp_path: Path
 ) -> None:
+    """A user runs an action without --yes: nothing starts and the plan names the command it would run."""
     dest = tmp_path / "dl"
     dry = doc(
         world.act("--select", "1,2", "--do", "download", "--dir", str(dest), "--json")
@@ -215,56 +218,26 @@ def test_nothing_is_downloaded_or_started_without_yes_and_the_plan_names_the_com
 
 
 # --------------------------------------------------------------------------- download -> slicer -> agent
-def test_download_then_slicer_then_agent_is_the_documented_agent_workflow(
-    world: World, tmp_path: Path
-) -> None:
-    dest = tmp_path / "dl"
-    rows = world.listing("--select-verdict", "fits")["results"]
-    pick = rows[0]
-    got = doc(
-        world.act(
-            "--select",
-            str(pick["n"]),
-            "--do",
-            "download",
-            "--dir",
-            str(dest),
-            "--yes",
-            "--json",
-        )
-    )
+def _download_pick(world: World, pick: dict[str, Any], dest: Path) -> Path:
+    args = ("--select", str(pick["n"]), "--do", "download", "--dir", str(dest), "--yes", "--json")
+    got = doc(world.act(*args))
     assert got["ok"] is True and got["exit_code"] == 0 and got["dry_run"] is False
     result = got["results"][0]
-    assert (
-        result["schema"] == "3d.action/1"
-        and result["action"] == "download"
-        and result["ok"] is True
-    )
+    assert result["schema"] == "3d.action/1"
+    assert result["action"] == "download" and result["ok"] is True
     folder = Path(result["data"]["dir"])
-    assert (
-        folder.parent == dest
-        and (folder / "model.json").is_file()
-        and result["data"]["files"]
-    )
+    assert folder.parent == dest and (folder / "model.json").is_file()
+    assert result["data"]["files"]
     assert result["data"]["source"]  # recorded as a model_source in the library DB
-    again = doc(
-        world.act(
-            "--select",
-            str(pick["n"]),
-            "--do",
-            "download",
-            "--dir",
-            str(dest),
-            "--yes",
-            "--json",
-        )
-    )
-    assert again["results"] == [] and any(
-        "already downloaded" in p for p in again["plan"]
-    )  # never overwritten
+    again = doc(world.act(*args))
+    assert again["results"] == []
+    assert any("already downloaded" in p for p in again["plan"])  # never overwritten
     shown = world.listing("--select", str(pick["n"]))["results"][0]
     assert shown["downloaded"] == str(folder)
+    return folder
 
+
+def _open_in_slicer(world: World, pick: dict[str, Any], dest: Path, folder: Path) -> None:
     sliced = doc(
         world.act(
             "--select",
@@ -279,18 +252,19 @@ def test_download_then_slicer_then_agent_is_the_documented_agent_workflow(
             str(dest),
         )
     )
-    assert [r["action"] for r in sliced["results"]] == ["open_slicer"] and sliced[
-        "exit_code"
-    ] == 0
+    assert [r["action"] for r in sliced["results"]] == ["open_slicer"]
+    assert sliced["exit_code"] == 0
     started = sliced["results"][0]["data"]
     assert started["started"] is True and started["slicer"] == "custom"
     ran = wait_for(world.slicer_log)[0]
-    assert (
-        ran["argv"][:2] == ["fake-slicer", "--open"]
-        and ran["argv"][2].startswith(str(folder))
-        and ran["argv"][2].endswith((".stl", ".3mf"))
-    )
+    assert ran["argv"][:2] == ["fake-slicer", "--open"]
+    assert ran["argv"][2].startswith(str(folder))
+    assert ran["argv"][2].endswith((".stl", ".3mf"))
 
+
+def _launch_agent(
+    world: World, tmp_path: Path, pick: dict[str, Any], dest: Path, folder: Path
+) -> None:
     agent = doc(
         world.act(
             "--select",
@@ -308,33 +282,41 @@ def test_download_then_slicer_then_agent_is_the_documented_agent_workflow(
         )
     )
     launched = agent["results"][0]
-    assert (
-        launched["action"] == "launch_agent"
-        and launched["ok"]
-        and launched["data"]["backend"] == "omp"
-    )
-    spawned = agent_spawns(tmp_path)
+    assert launched["action"] == "launch_agent" and launched["ok"]
+    assert launched["data"]["backend"] == "omp"
     new_session = next(
-        s["argv"] for s in spawned if s["argv"][:2] == ["tmux", "new-session"]
+        s["argv"]
+        for s in agent_spawns(tmp_path)
+        if s["argv"][:2] == ["tmux", "new-session"]
     )
-    assert launched["data"]["tmux"] in new_session and new_session[
-        new_session.index("-c") + 1
-    ] == str(dest.resolve())
+    assert launched["data"]["tmux"] in new_session
+    assert new_session[new_session.index("-c") + 1] == str(dest.resolve())
     brief_path = Path(launched["data"]["brief"])
     brief = brief_path.read_text(encoding="utf-8")
     assert "Original query: case" in brief and "Task: judge this model" in brief
-    assert (
-        pick["url"] in brief
-        and f"downloaded to: {folder}" in brief
-        and '"license"' in brief
-        or "provenance" in brief
-    )
-    assert str(brief_path) in new_session[-1] and "judge this model" in new_session[-1]
+    assert pick["url"] in brief and f"downloaded to: {folder}" in brief
+    assert '"license"' in brief or "provenance" in brief
+    assert str(brief_path) in new_session[-1]
+    assert "judge this model" in new_session[-1]
+
+
+def test_download_then_slicer_then_agent_is_the_documented_agent_workflow(
+    world: World, tmp_path: Path
+) -> None:
+    """An agent downloads the picks, opens them in the slicer and then launches an agent, as the docs describe."""
+    dest = tmp_path / "dl"
+    rows = world.listing("--select-verdict", "fits")["results"]
+    pick = rows[0]
+    folder = _download_pick(world, pick, dest)
+    assert folder.is_dir()
+    _open_in_slicer(world, pick, dest, folder)
+    _launch_agent(world, tmp_path, pick, dest, folder)
 
 
 def test_open_starts_the_configured_browser_for_every_selected_page(
     world: World,
 ) -> None:
+    """A user opens the selected pages: the configured browser starts once per page."""
     urls = [r["url"] for r in world.listing("--select", "1,2")["results"]]
     out = doc(
         world.act(
@@ -359,6 +341,7 @@ def test_open_starts_the_configured_browser_for_every_selected_page(
 
 
 def test_preview_is_read_only_and_needs_no_yes(world: World) -> None:
+    """A user previews rows: nothing is written and --yes is not needed."""
     out = doc(world.act("--select", "1", "--do", "preview", "--json"))
     result = out["results"][0]
     assert (
@@ -380,6 +363,7 @@ def test_preview_is_read_only_and_needs_no_yes(world: World) -> None:
 def test_answer_and_follow_twins_rerank_and_persist_under_the_same_root(
     world: World,
 ) -> None:
+    """A user answers a question and follows a query through act: it behaves like rerank and saves under the same search root."""
     streamed = world.act(
         "--answer", "need_cad=yes", "--follow", "1", "--do", "list", "--ndjson"
     )
@@ -409,6 +393,7 @@ def test_answer_and_follow_twins_rerank_and_persist_under_the_same_root(
 
 
 def test_refine_searches_again_under_the_root_and_merges_the_hits(world: World) -> None:
+    """A user refines a saved search: a child search runs under the same root and its hits merge in."""
     out = world.act("--refine", "probe holder", "--do", "list", "--ndjson")
     assert out.returncode == 0, out.stderr
     final = json.loads(out.stdout.splitlines()[-1])
@@ -418,6 +403,7 @@ def test_refine_searches_again_under_the_root_and_merges_the_hits(world: World) 
 
 # --------------------------------------------------------------------------- exit codes and errors
 def test_exit_codes_follow_the_repo_convention(world: World, tmp_path: Path) -> None:
+    """A user makes mistakes with act and browse: bad usage exits 2 and a missing program exits 127."""
     missing_library = run_cli(
         tmp_path / "other",
         "models",
@@ -465,6 +451,7 @@ def test_exit_codes_follow_the_repo_convention(world: World, tmp_path: Path) -> 
 def test_browse_without_a_terminal_is_a_numbered_prompt_driven_by_stdin(
     world: World, tmp_path: Path
 ) -> None:
+    """A user pipes commands into browse without a terminal: the numbered prompt answers them."""
     env = isolated_env(tmp_path) | world.env
     proc = subprocess.run(
         [
@@ -547,6 +534,7 @@ def test_search_tui_without_a_terminal_prints_exactly_the_normal_search(
 def test_the_help_and_the_docs_name_every_new_flag_with_an_example(
     tmp_path: Path,
 ) -> None:
+    """A user reads the help and the docs: every new flag is named with an example."""
     out = run_cli(tmp_path, "models", "--help").stdout
     for flag in (
         "--tui",

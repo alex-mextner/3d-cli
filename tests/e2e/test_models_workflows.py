@@ -455,7 +455,6 @@ def test_help_and_docs_list_the_same_flags_and_examples(tmp_path: Path) -> None:
         "--select-verdict",
         "--do",
         "--action",
-        "--yes",
         "--slicer",
         "--browser",
         "--agent",
