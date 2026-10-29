@@ -715,7 +715,7 @@ def test_a_make_post_is_recorded_as_a_make_publication(tmp_path: Path) -> None:
     out = flow.send(prep, runner=runner)
     assert out[0].state == "draft" and out[0].ok
     assert any("upload" in c for c in calls) and not any(
-        "Publish" in " ".join(c) for c in calls
+        "Publish" in " ".join(c) or "Post" in " ".join(c) for c in calls
     )
     c = librarydb.open_library(db)
     try:
@@ -1157,7 +1157,8 @@ def test_after_modify_is_silent_when_off_and_a_stderr_hint_otherwise(
     out.write_bytes(b"solid")
     monkeypatch.setenv("THREED_PUBLISH_OFFER", "off")
     offer.after_modify(out)
-    assert capsys.readouterr() == ("", "") or capsys.readouterr().err == ""
+    silent = capsys.readouterr()
+    assert (silent.out, silent.err) == ("", "")
     monkeypatch.setenv("THREED_PUBLISH_OFFER", "ask")
     offer.after_modify(out)
     err = capsys.readouterr().err
