@@ -965,6 +965,9 @@ def test_the_offer_is_for_all_platforms_with_cad_renders_and_photos_under_a_stat
     argv = doc["command"][0]
     assert "--db" in argv  # a replay must not depend on the default library
     monkeypatch.delenv("THREED_LIBRARY_DB")
+    monkeypatch.setenv(
+        "THREED_PUBLISH_OFFER", "off"
+    )  # the replay still publishes: --publish is explicit
     replay_code, _, replay = run(
         tmp_path,
         capsys,
@@ -974,7 +977,7 @@ def test_the_offer_is_for_all_platforms_with_cad_renders_and_photos_under_a_stat
         platform=argv[argv.index("--platform") + 1],
         make=argv[argv.index("--make") + 1] if "--make" in argv else None,
         yes=True,
-        mode="ask",
+        mode=argv[argv.index("--publish") + 1],
     )
     assert replay_code == 0 and replay.sent == ["original"]
 

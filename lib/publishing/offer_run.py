@@ -277,12 +277,12 @@ def offer_doc(
         "source": built["source"],
         "already_published": built["already_published"],
         "plans": [plan.to_json(p.ev, dry_run=outcomes is None) for p in plans],
-        "command": _command(built, trigger),
+        "command": _command(built, trigger, mode),
         "outcomes": None if outcomes is None else [o.to_json() for o in outcomes],
     }
 
 
-def _command(built: dict[str, Any], trigger: str) -> list[list[str]]:
+def _command(built: dict[str, Any], trigger: str, mode: str) -> list[list[str]]:
     """The exact command that publishes what was offered (the agent runs it after the user said yes).
 
     It re-runs the offer with `--yes`, not `3d models publish`: only the offer fills the title / description /
@@ -299,6 +299,8 @@ def _command(built: dict[str, Any], trigger: str) -> list[list[str]]:
         trigger,
         "--platform",
         plans[0].platform,
+        "--publish",
+        mode,  # explicit: a replay must not fall back to a config default of `off`
     ]
     if built["make"]:
         cmd += ["--make", str(built["make"])]
