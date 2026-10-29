@@ -12,14 +12,14 @@ INVARIANTS: only `prep.raster` / `prep.panels` / `prep.report` draw (pure numpy,
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import trimesh
 
 from prep import frame, panels, raster
-from prep.contracts import Verdict
+from prep.contracts import Assign, Filament, Verdict
 from prep.pipeline import STEPS, StepOutput
 from prep.report import REPORT_NAME, ProofReport
 
@@ -65,7 +65,9 @@ def build(pipe: Pipeline) -> StepOutput:
         images: list[Any] = []
         rows: list[tuple[str, str]] = []
         notes: list[str] = []
-        if rec.verdict != "SKIP":
+        if (
+            rec.verdict != "SKIP" and "error" not in rec.result
+        ):  # an errored step has no result to draw
             images, rows, notes = _section_content(pipe, name, rec.result, final)
         verdict, summary = rec.verdict, rec.summary
         repair = pipe.records.get("repair")
@@ -254,12 +256,16 @@ def _fit(pipe: Pipeline, d: dict[str, Any], final: trimesh.Trimesh) -> Content:
 def _stability(pipe: Pipeline, d: dict[str, Any], final: trimesh.Trimesh) -> Content:
     scenarios = d.get("scenarios", [])
     loaded = scenarios[-1] if len(scenarios) > 1 else None
-    img = panels.stability_diagram(
-        np.asarray(d["support_polygon_mm"], dtype=np.float64),
-        d["com_mm"][:2],
-        loaded["com_mm"][:2] if loaded else None,
-        loaded["min_margin_mm"] if loaded else None,
-    )
+    images: list[Any] = []
+    if d["support_polygon_mm"]:  # a "no solid" FAIL has no support polygon to draw
+        images.append(
+            panels.stability_diagram(
+                np.asarray(d["support_polygon_mm"], dtype=np.float64),
+                d["com_mm"][:2],
+                loaded["com_mm"][:2] if loaded else None,
+                loaded["min_margin_mm"] if loaded else None,
+            )
+        )
     rows = _rows(
         [
             ("mass g", d.get("mass_g")),
@@ -274,7 +280,36 @@ def _stability(pipe: Pipeline, d: dict[str, Any], final: trimesh.Trimesh) -> Con
                 f"tip angle {s['tip_angle_deg']:.1f} deg, margin {s['min_margin_mm']:.1f} mm, {s['verdict']}",
             )
         )
-    return [img], rows, list(d.get("reasons", []))
+    return images, rows, list(d.get("reasons", []))
+
+
+def _mix_rgb(
+    mix: str, fil: Mapping[str, Filament], by_slot: Mapping[str, Filament]
+) -> tuple[int, int, int] | None:
+    """Average display colour of a mix's known components (the stripe-average model of the colour rules)."""
+    parts = [
+        _hex_rgb((fil.get(c) or by_slot[c]).hex)
+        for c in mix
+        if c in fil or c in by_slot
+    ]
+    if not parts:
+        return None
+    n = len(parts)
+    return (
+        sum(p[0] for p in parts) // n,
+        sum(p[1] for p in parts) // n,
+        sum(p[2] for p in parts) // n,
+    )
+
+
+def _region_rgb(
+    a: Assign, fil: Mapping[str, Filament], by_slot: Mapping[str, Filament]
+) -> tuple[int, int, int] | None:
+    """Display colour of one region's assignment; None when it names no known filament."""
+    if a.mix:
+        return _mix_rgb(a.mix, fil, by_slot)
+    f = fil.get(a.key) if a.key else by_slot.get(str(a.slot))
+    return _hex_rgb(f.hex) if f is not None else None
 
 
 def _colors(pipe: Pipeline, d: dict[str, Any], final: trimesh.Trimesh) -> Content:
@@ -289,24 +324,9 @@ def _colors(pipe: Pipeline, d: dict[str, Any], final: trimesh.Trimesh) -> Conten
     by_slot = {str(f.slot): f for f in spec.filaments}
     palette: dict[int, tuple[int, int, int]] = {}
     for i, region in enumerate(spec.regions):
-        a = region.assign
-        if a.mix:  # a mix reads as the average of its components (the stripe-average model of the colour rules)
-            parts = [
-                _hex_rgb((fil.get(c) or by_slot[c]).hex)
-                for c in a.mix
-                if c in fil or c in by_slot
-            ]
-            if parts:
-                n = len(parts)
-                palette[i] = (
-                    sum(p[0] for p in parts) // n,
-                    sum(p[1] for p in parts) // n,
-                    sum(p[2] for p in parts) // n,
-                )
-            continue
-        f = fil.get(a.key) if a.key else by_slot.get(str(a.slot))
-        if f is not None:
-            palette[i] = _hex_rgb(f.hex)
+        rgb = _region_rgb(region.assign, fil, by_slot)
+        if rgb is not None:
+            palette[i] = rgb
     names = dict(enumerate(lab.names))
     imgs = panels.region_map(
         final, lab.labels, palette, names, views=("iso", "back", "top"), size=SIZE
@@ -382,11 +402,10 @@ def _slice(pipe: Pipeline, d: dict[str, Any], final: trimesh.Trimesh) -> Content
 def _gates(pipe: Pipeline, d: dict[str, Any], final: trimesh.Trimesh) -> Content:
     from prep import gcode_gates, gcode_view
 
-    cfg = pipe.cfg
     rows = [(g["name"], f"{g['verdict']}: {g['detail']}") for g in d.get("gates", [])]
     images: list[Any] = []
-    gcode = pipe.work / f"{cfg.name}.gcode"
-    if gcode.is_file():
+    gcode = pipe.gcode_path()
+    if gcode is not None:
         parsed = gcode_gates.parse(gcode)
         colours = _tool_colours(pipe)
         paths = gcode_view.render_layers(

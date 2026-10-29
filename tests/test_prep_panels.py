@@ -170,6 +170,29 @@ def test_diff_masks_respect_tolerance() -> None:
     )  # within a 2 mm tolerance
 
 
+def test_diff_masks_query_the_tree_with_the_machine_worker_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from typing import Any
+
+    from prep import panels
+
+    seen: list[object] = []
+
+    class RecordingTree(panels.cKDTree):  # type: ignore[misc]
+        def query(self, x: Any, *args: Any, **kw: Any) -> Any:
+            seen.append(kw.get("workers"))
+            return super().query(x, *args, **kw)
+
+    monkeypatch.setattr(panels, "cKDTree", RecordingTree)
+    monkeypatch.setenv("THREED_MAX_WORKERS", "2")
+    base = trimesh.creation.box(extents=(20, 20, 10))
+    diff_face_masks(base, _box_with_bump(4.0))
+    assert seen and set(seen) == {
+        2
+    }  # never `workers=-1`: one thread per core on the shared box
+
+
 def test_before_after_marks_added_material_red_and_nothing_else() -> None:
     base = trimesh.creation.box(extents=(20, 20, 10))
     sheet = before_after(base, _box_with_bump(4.0), views=("iso",), size=(S, S))

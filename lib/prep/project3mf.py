@@ -44,9 +44,9 @@ from errors import InvalidArgument, MissingDependency
 from orca_project_3mf import _content_types_xml, _root_rels_xml
 from prep.contracts import Filament, Part, Verdict
 from slicing import orca_cli
+from slicing.mix_pattern import LAYER_CAP_MM, MixRules, analyse_pattern
 from standing_props import CORE, PROD, REL_3DMODEL
 
-MIX_LAYER_CAP_MM = 0.12
 _NAME_RE = re.compile(r"[A-Za-z0-9_.-]+")
 _PRESET_META = frozenset(
     {
@@ -179,6 +179,8 @@ class ProjectSpec:
     tower_xy: tuple[float, float] | None = None
     #: layer height assumed for the mix-pattern thickness rule when no layer plan says otherwise
     mix_layer_mm: float = 0.10
+    #: thickest layer a mixed part may print at (the colour spec's `process.mix_cap`)
+    mix_cap_mm: float = LAYER_CAP_MM
     app_version: str = orca_cli.CLI_FALLBACK_VERSION
 
 
@@ -208,27 +210,12 @@ class ProjectManifest:
 # --------------------------------------------------------------------------- mix
 
 
-def check_mix_pattern(pattern: str, layer_mm: float) -> list[str]:
-    """Reasons a slot-digit layer pattern is illegal (empty when fine)."""
-    try:
-        from slicing.mix_pattern import analyse_pattern  # type: ignore[import-not-found]  # #410 not on main yet
-    except ImportError:
-        pass
-    else:
-        report = analyse_pattern(pattern, layer_mm)
-        return [f"{v.rule}: {v.detail}" for v in report.violations]
-    reasons: list[str] = []
-    n = len(pattern)
-    adjacent = [i for i in range(n) if pattern[i] == pattern[(i + 1) % n]]
-    if adjacent:
-        reasons.append(
-            f"same filament on neighbouring layers (cyclic, positions {adjacent}): a thick band"
-        )
-    if layer_mm > MIX_LAYER_CAP_MM:
-        reasons.append(
-            f"layer {layer_mm} mm exceeds the {MIX_LAYER_CAP_MM} mm mix layer cap"
-        )
-    return reasons
+def check_mix_pattern(
+    pattern: str, layer_mm: float, cap_mm: float = LAYER_CAP_MM
+) -> list[str]:
+    """Reasons a slot-digit layer pattern is illegal at `layer_mm` under a `cap_mm` layer cap (empty when fine)."""
+    report = analyse_pattern(pattern, layer_mm, MixRules(layer_cap_mm=cap_mm))
+    return [f"{v.rule}: {v.detail}" for v in report.violations]
 
 
 def _key_map(filaments: Sequence[Filament]) -> dict[str, int]:
@@ -417,16 +404,8 @@ def _reference_settings(
 # --------------------------------------------------------------------------- build
 
 
-def build_project(
-    spec: ProjectSpec,
-    out_path: str | Path,
-    *,
-    base_settings: Mapping[str, Any] | None = None,
-) -> ProjectManifest:
-    """Write the project 3MF and `NAME.manifest.json` beside it.
-
-    `base_settings` is a ready `project_settings.config` (as the CLI writes it for this printer, process and
-    filaments); without it the CLI generates one from the vendor presets (seconds, needs the Orca install)."""
+def _validate_spec(spec: ProjectSpec) -> PrinterModel:
+    """The target printer, after the name / printer / parts / filament-slot checks."""
     if not _NAME_RE.fullmatch(spec.name):
         raise InvalidArgument(
             "name",
@@ -441,7 +420,6 @@ def build_project(
             "parts", "[]", ["at least one colour part"], command="prep"
         )
     printer = PRINTERS[spec.printer]
-    n = len(spec.filaments)
     if [f.slot for f in spec.filaments] != list(range(1, printer.extruders + 1)):
         raise InvalidArgument(
             "filaments",
@@ -449,36 +427,38 @@ def build_project(
             [f"slots 1..{printer.extruders} in order (use a stub for an unused slot)"],
             command="prep",
         )
-    keymap = _key_map(spec.filaments)
-    out = Path(out_path)
+    return printer
 
-    # 1. parts -> extruders, mixed rows
-    mixes = _Mixes(n)
-    resolved = [_resolve(p, keymap, n) for p in spec.parts]
+
+def _check_part_mixes(spec: ProjectSpec, resolved: list[_Resolved]) -> None:
+    """Raise InvalidArgument for a mix part that is a single slot or breaks the layer pattern rules."""
     for p, r in zip(spec.parts, resolved, strict=True):
-        if r.mix is not None:
-            slots = set(r.mix)
-            reasons = (
-                []
-                if len(slots) > 1
-                else [f"uses one slot: assign slot {r.mix[0]} directly"]
+        if r.mix is None:
+            continue
+        reasons = (
+            []
+            if len(set(r.mix)) > 1
+            else [f"uses one slot: assign slot {r.mix[0]} directly"]
+        )
+        reasons += check_mix_pattern(r.mix, spec.mix_layer_mm, spec.mix_cap_mm)
+        if reasons:
+            raise InvalidArgument(
+                f"part {p.name!r} mix",
+                str(p.assign.mix),
+                ["a legal Full Spectrum layer pattern"],
+                command="prep",
+                extra="; ".join(reasons),
             )
-            reasons += check_mix_pattern(r.mix, spec.mix_layer_mm)
-            if reasons:
-                raise InvalidArgument(
-                    f"part {p.name!r} mix",
-                    str(p.assign.mix),
-                    ["a legal Full Spectrum layer pattern"],
-                    command="prep",
-                    extra="; ".join(reasons),
-                )
-    extruders = [mixes.extruder(r) for r in resolved]
-    arrays = [
-        (np.asarray(p.mesh.vertices, float), np.asarray(p.mesh.faces, int))
-        for p in spec.parts
-    ]
 
-    # 2. placement: lowest point on the bed, footprint centre on `position`
+
+def _place_parts(
+    spec: ProjectSpec,
+    printer: PrinterModel,
+    arrays: list[tuple[np.ndarray, np.ndarray]],
+) -> tuple[list[tuple[np.ndarray, np.ndarray]], np.ndarray, np.ndarray, np.ndarray]:
+    """Shift the parts so the lowest point sits on the bed and the footprint centre on `position`.
+
+    Returns the shifted arrays, the model's lo / hi corners and the shift; raises when it leaves the bed."""
     all_v = np.vstack([v for v, _ in arrays])
     lo, hi = all_v.min(0), all_v.max(0)
     pos = np.array(spec.position or (printer.bed / 2, printer.bed / 2), float)
@@ -502,57 +482,65 @@ def build_project(
             ],
             command="prep",
         )
+    return arrays, lo, hi, shift
 
-    # 3. layer profile (object 1)
-    profile: list[float] | None = None
-    if spec.layer_plan is not None:
-        object_id, profile = _parse_profile(spec.layer_plan.profile_text)
-        if object_id != 1 or abs(profile[-2] - float(hi[2])) > 1e-3:
-            raise InvalidArgument(
-                "layer_plan.profile_text",
-                f"object_id={object_id}, top z={profile[-2]:.4f}",
-                [
-                    f"object_id=1 and a last z equal to the object height {hi[2]:.4f} mm (+-0.001)"
-                ],
-                command="prep",
-                extra="the slicer would drop the profile silently (quirk layer-profile-top-mismatch)",
-            )
 
-    # 4. heads, tower
-    heads: set[int] = set()
-    for e in extruders:
-        heads |= mixes.heads(e)
-    use_tower = len(heads) > 1 if spec.prime_tower is None else spec.prime_tower
-    presets = [spec.filament_preset or printer.default_filament] * n
-    cfg: dict[str, Any] = (
-        dict(base_settings)
-        if base_settings is not None
-        else _reference_settings(spec, printer, presets)
+def _layer_profile(spec: ProjectSpec, hi: np.ndarray) -> list[float] | None:
+    """The layer-height profile of object 1, checked against the object height."""
+    if spec.layer_plan is None:
+        return None
+    object_id, profile = _parse_profile(spec.layer_plan.profile_text)
+    if object_id != 1 or abs(profile[-2] - float(hi[2])) > 1e-3:
+        raise InvalidArgument(
+            "layer_plan.profile_text",
+            f"object_id={object_id}, top z={profile[-2]:.4f}",
+            [
+                f"object_id=1 and a last z equal to the object height {hi[2]:.4f} mm (+-0.001)"
+            ],
+            command="prep",
+            extra="the slicer would drop the profile silently (quirk layer-profile-top-mismatch)",
+        )
+    return profile
+
+
+def _tower_position(
+    spec: ProjectSpec,
+    cfg: Mapping[str, Any],
+    lo: np.ndarray,
+    hi: np.ndarray,
+    printer: PrinterModel,
+) -> tuple[float, float]:
+    """Prime-tower corner: the requested one, else the first free bed spot beside the model."""
+    if spec.tower_xy is not None:
+        return spec.tower_xy
+    ring = (
+        float(cfg.get("prime_tower_brim_width", "5"))
+        + float(cfg.get("wipe_tower_extra_rib_length", "8"))
+        + 2.0
     )
-    tower_xy = (0.0, 0.0)
-    if use_tower:
-        if spec.tower_xy is not None:
-            tower_xy = spec.tower_xy
-        else:
-            ring = (
-                float(cfg.get("prime_tower_brim_width", "5"))
-                + float(cfg.get("wipe_tower_extra_rib_length", "8"))
-                + 2.0
-            )
-            side = float(cfg.get("prime_tower_width", "30")) + 2 * ring
-            spot = free_spot(
-                [(lo[0], lo[1], hi[0], hi[1])], side, side + 10, printer.bed
-            )
-            if spot is None:
-                raise InvalidArgument(
-                    "prime tower",
-                    f"{side:.0f} mm square",
-                    ["free bed area beside the model"],
-                    command="prep",
-                )
-            tower_xy = (spot[0] + ring, spot[1] + ring)
+    side = float(cfg.get("prime_tower_width", "30")) + 2 * ring
+    spot = free_spot([(lo[0], lo[1], hi[0], hi[1])], side, side + 10, printer.bed)
+    if spot is None:
+        raise InvalidArgument(
+            "prime tower",
+            f"{side:.0f} mm square",
+            ["free bed area beside the model"],
+            command="prep",
+        )
+    return (spot[0] + ring, spot[1] + ring)
 
-    # 5. project_settings
+
+def _apply_project_settings(
+    spec: ProjectSpec,
+    printer: PrinterModel,
+    cfg: dict[str, Any],
+    presets: list[str],
+    mixes: _Mixes,
+    use_tower: bool,
+    tower_xy: tuple[float, float],
+) -> dict[str, Any]:
+    """Write colours, process overrides, machine overlay, brim, mixes and tower into `cfg`; returns the process overrides."""
+    n = len(spec.filaments)
     ig = list(cfg.get("inherits_group") or [""] * (n + 2))
     ds = list(cfg.get("different_settings_to_system") or [""] * (n + 2))
     colours = [f.hex for f in spec.filaments]
@@ -592,8 +580,39 @@ def build_project(
     )
     _mark(ds, -1, list(printer.machine_overlay))
     cfg["inherits_group"], cfg["different_settings_to_system"] = ig, ds
+    return process_cfg
 
-    # 6. XML
+
+def _part_config_xml(
+    pid: int, name: str, source: str, off: np.ndarray, ext: int
+) -> str:
+    """The `<part>` block of model_settings.config for one volume."""
+    return (
+        f'    <part id="{pid}" subtype="normal_part">\n'
+        f'      <metadata key="name" value={quoteattr(name)}/>\n'
+        f'      <metadata key="matrix" value="{_mat4(off)}"/>\n'
+        f'      <metadata key="source_file" value={quoteattr(source)}/>\n'
+        '      <metadata key="source_object_id" value="0"/>\n'
+        f'      <metadata key="source_volume_id" value="{pid - 1}"/>\n'
+        f'      <metadata key="source_offset_x" value="{off[0]:.6f}"/>\n'
+        f'      <metadata key="source_offset_y" value="{off[1]:.6f}"/>\n'
+        f'      <metadata key="source_offset_z" value="{off[2]:.6f}"/>\n'
+        f'      <metadata key="extruder" value="{ext}"/>\n'
+        '      <mesh_stat edges_fixed="0" degenerate_facets="0" facets_removed="0" facets_reversed="0" backwards_edges="0"/>\n'
+        "    </part>"
+    )
+
+
+def _model_files(
+    spec: ProjectSpec,
+    arrays: list[tuple[np.ndarray, np.ndarray]],
+    resolved: list[_Resolved],
+    extruders: list[int],
+    lo: np.ndarray,
+    hi: np.ndarray,
+    obj_id: int,
+) -> tuple[str, str, str]:
+    """The XML of 3dmodel.model, the object_1.model sub-model and model_settings.config."""
     uid = _Uid(spec.name)
     oc = np.array([(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, 0.0])
     sub: list[str] = []
@@ -613,20 +632,8 @@ def build_project(
         )
         label = f"mix {r.mix_src}" if r.mix is not None else f"slot {r.slot}"
         part_cfg.append(
-            f'    <part id="{pid}" subtype="normal_part">\n'
-            f'      <metadata key="name" value={quoteattr(part.name + " · " + label)}/>\n'
-            f'      <metadata key="matrix" value="{_mat4(off)}"/>\n'
-            f'      <metadata key="source_file" value={quoteattr(spec.name)}/>\n'
-            '      <metadata key="source_object_id" value="0"/>\n'
-            f'      <metadata key="source_volume_id" value="{i}"/>\n'
-            f'      <metadata key="source_offset_x" value="{off[0]:.6f}"/>\n'
-            f'      <metadata key="source_offset_y" value="{off[1]:.6f}"/>\n'
-            f'      <metadata key="source_offset_z" value="{off[2]:.6f}"/>\n'
-            f'      <metadata key="extruder" value="{ext}"/>\n'
-            '      <mesh_stat edges_fixed="0" degenerate_facets="0" facets_removed="0" facets_reversed="0" backwards_edges="0"/>\n'
-            "    </part>"
+            _part_config_xml(pid, part.name + " · " + label, spec.name, off, ext)
         )
-    obj_id = 1000
     resources = (
         f'  <object id="{obj_id}" p:UUID="{uid()}" type="model">\n   <components>\n'
         + "\n".join(comps)
@@ -646,6 +653,7 @@ def build_project(
         + "\n </resources>\n <build/>\n</model>\n"
     )
     name_attr = quoteattr(spec.name)
+    n = len(spec.filaments)
     model_settings = (
         '<?xml version="1.0" encoding="UTF-8"?>\n<config>\n'
         f'  <object id="{obj_id}">\n    <metadata key="name" value={name_attr}/>\n'
@@ -658,8 +666,19 @@ def build_project(
         f'    <model_instance>\n      <metadata key="object_id" value="{obj_id}"/>\n      <metadata key="instance_id" value="0"/>\n'
         '      <metadata key="identify_id" value="2000"/>\n    </model_instance>\n  </plate>\n  <assemble>\n  </assemble>\n</config>\n'
     )
+    return main, sub_xml, model_settings
+
+
+def _plate_json(
+    spec: ProjectSpec,
+    cfg: Mapping[str, Any],
+    lo: np.ndarray,
+    hi: np.ndarray,
+    obj_id: int,
+) -> dict[str, Any]:
     bbox2 = [float(lo[0]), float(lo[1]), float(hi[0]), float(hi[1])]
-    plate_json = {
+    n = len(spec.filaments)
+    return {
         "bbox_all": bbox2,
         "bbox_objects": [
             {
@@ -671,7 +690,7 @@ def build_project(
             }
         ],
         "bed_type": cfg["curr_bed_type"],
-        "filament_colors": colours,
+        "filament_colors": [f.hex for f in spec.filaments],
         "filament_ids": list(range(n)),
         "first_extruder": 1,
         "is_seq_print": False,
@@ -679,6 +698,15 @@ def build_project(
         "version": 2,
     }
 
+
+def _write_package(
+    out: Path,
+    spec: ProjectSpec,
+    files: tuple[str, str, str],
+    cfg: Mapping[str, Any],
+    plate_json: Mapping[str, Any],
+) -> None:
+    main, sub_xml, model_settings = files
     out.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr("[Content_Types].xml", _content_types_xml())
@@ -697,13 +725,110 @@ def build_project(
                 "Metadata/layer_heights_profile.txt", spec.layer_plan.profile_text
             )
 
-    # 7. manifest
+
+def _manifest_parts(
+    spec: ProjectSpec,
+    arrays: list[tuple[np.ndarray, np.ndarray]],
+    resolved: list[_Resolved],
+    extruders: list[int],
+    mixes: _Mixes,
+) -> list[dict[str, Any]]:
+    volumes = [float(p.mesh.volume) for p in spec.parts]
+    return [
+        {
+            "name": part.name,
+            "assign": {"slot": r.slot}
+            if r.mix is None
+            else {"mix": r.mix, "mix_src": r.mix_src},
+            "extruder": ext,
+            "tools": sorted(h - 1 for h in mixes.heads(ext)),
+            "volume_mm3": round(vol, 2),
+            "bbox": [v.min(0).round(3).tolist(), v.max(0).round(3).tolist()],
+            "z_range": [
+                round(float(v[:, 2].min()), 3),
+                round(float(v[:, 2].max()), 3),
+            ],
+        }
+        for part, (v, _), r, ext, vol in zip(
+            spec.parts, arrays, resolved, extruders, volumes, strict=True
+        )
+    ]
+
+
+def _layer_height_band(cfg: Mapping[str, Any]) -> list[float] | None:
+    """[largest min, smallest max] layer height over the extruders, when the settings carry both lists."""
     mins, maxs = cfg.get("min_layer_height"), cfg.get("max_layer_height")
-    band = (
-        [max(float(x) for x in mins), min(float(x) for x in maxs)]
-        if isinstance(mins, list) and isinstance(maxs, list) and mins and maxs
-        else None
+    if isinstance(mins, list) and isinstance(maxs, list) and mins and maxs:
+        return [max(float(x) for x in mins), min(float(x) for x in maxs)]
+    return None
+
+
+def _profile_manifest(profile: list[float] | None) -> dict[str, Any] | None:
+    if profile is None:
+        return None
+    return {
+        "points": len(profile) // 2,
+        "top_mm": profile[-2],
+        "min_h": min(profile[1::2]),
+        "max_h": max(profile[1::2]),
+    }
+
+
+def build_project(
+    spec: ProjectSpec,
+    out_path: str | Path,
+    *,
+    base_settings: Mapping[str, Any] | None = None,
+) -> ProjectManifest:
+    """Write the project 3MF and `NAME.manifest.json` beside it.
+
+    `base_settings` is a ready `project_settings.config` (as the CLI writes it for this printer, process and
+    filaments); without it the CLI generates one from the vendor presets (seconds, needs the Orca install)."""
+    printer = _validate_spec(spec)
+    n = len(spec.filaments)
+    keymap = _key_map(spec.filaments)
+    out = Path(out_path)
+
+    # 1. parts -> extruders, mixed rows
+    mixes = _Mixes(n)
+    resolved = [_resolve(p, keymap, n) for p in spec.parts]
+    _check_part_mixes(spec, resolved)
+    extruders = [mixes.extruder(r) for r in resolved]
+    arrays = [
+        (np.asarray(p.mesh.vertices, float), np.asarray(p.mesh.faces, int))
+        for p in spec.parts
+    ]
+
+    # 2. placement: lowest point on the bed, footprint centre on `position`
+    arrays, lo, hi, shift = _place_parts(spec, printer, arrays)
+
+    # 3. layer profile (object 1)
+    profile = _layer_profile(spec, hi)
+
+    # 4. heads, tower
+    heads: set[int] = set()
+    for e in extruders:
+        heads |= mixes.heads(e)
+    use_tower = len(heads) > 1 if spec.prime_tower is None else spec.prime_tower
+    presets = [spec.filament_preset or printer.default_filament] * n
+    cfg: dict[str, Any] = (
+        dict(base_settings)
+        if base_settings is not None
+        else _reference_settings(spec, printer, presets)
     )
+    tower_xy = _tower_position(spec, cfg, lo, hi, printer) if use_tower else (0.0, 0.0)
+
+    # 5. project_settings
+    process_cfg = _apply_project_settings(
+        spec, printer, cfg, presets, mixes, use_tower, tower_xy
+    )
+
+    # 6. XML and package
+    obj_id = 1000
+    files = _model_files(spec, arrays, resolved, extruders, lo, hi, obj_id)
+    _write_package(out, spec, files, cfg, _plate_json(spec, cfg, lo, hi, obj_id))
+
+    # 7. manifest
     manifest_path = out.with_name(out.stem + ".manifest.json")
     data: dict[str, Any] = {
         "file": str(out),
@@ -736,42 +861,17 @@ def build_project(
             for i, p in enumerate(mixes.patterns)
         ],
         "mixed_filament_definitions": mixes.definitions(),
-        "parts": [
-            {
-                "name": part.name,
-                "assign": {"slot": r.slot}
-                if r.mix is None
-                else {"mix": r.mix, "mix_src": r.mix_src},
-                "extruder": ext,
-                "tools": sorted(h - 1 for h in mixes.heads(ext)),
-                "volume_mm3": round(vol, 2),
-                "bbox": [v.min(0).round(3).tolist(), v.max(0).round(3).tolist()],
-                "z_range": [
-                    round(float(v[:, 2].min()), 3),
-                    round(float(v[:, 2].max()), 3),
-                ],
-            }
-            for part, (v, _), r, ext, vol in zip(
-                spec.parts, arrays, resolved, extruders, volumes, strict=True
-            )
-        ],
+        "parts": _manifest_parts(spec, arrays, resolved, extruders, mixes),
         "process": process_cfg,
-        "layer_profile": None
-        if profile is None
-        else {
-            "points": len(profile) // 2,
-            "top_mm": profile[-2],
-            "min_h": min(profile[1::2]),
-            "max_h": max(profile[1::2]),
-        },
+        "layer_profile": _profile_manifest(profile),
         "gates": {
             "wall_loops": spec.overrides.wall_loops,
             "sparse_infill_density": spec.overrides.sparse_infill_density,
             "supports": False,
-            "layer_height_band": band,
+            "layer_height_band": _layer_height_band(cfg),
             "bed": [printer.bed, printer.bed, printer.bed_height],
             "prime_tower": bool(use_tower),
-            "mix_layer_cap_mm": MIX_LAYER_CAP_MM,
+            "mix_layer_cap_mm": spec.mix_cap_mm,
             "tool_of_slot": "slot - 1",
         },
     }

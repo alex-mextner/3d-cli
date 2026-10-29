@@ -137,6 +137,9 @@ class _Analysis:
     debris: NDArray[np.bool_]  # (C,)
     degenerate: int  # index-degenerate + zero-area faces
     volume: float
+    cavity: NDArray[
+        np.bool_
+    ]  # (C,) closed inward-facing shells nested in another shell: hollows, not defects
 
     @property
     def boundary_edges(self) -> int:
@@ -161,7 +164,7 @@ class _Analysis:
         bad = np.bincount(
             self.labels, weights=self.bad_edge_face, minlength=len(self.comp_faces)
         )
-        return np.asarray((bad == 0) & (self.comp_volume < 0))
+        return np.asarray((bad == 0) & (self.comp_volume < 0) & ~self.cavity)
 
     def debris_faces(self) -> NDArray[np.bool_]:
         """Per kept face: it belongs to a debris shell."""
@@ -190,6 +193,68 @@ class _Analysis:
         )
 
 
+def _ray_crossings(origin: Array, direction: Array, tri: Array) -> int:
+    """How many of the triangles `tri` (T, 3, 3) the ray from `origin` along `direction` crosses (Moeller-Trumbore)."""
+    e1 = tri[:, 1] - tri[:, 0]
+    e2 = tri[:, 2] - tri[:, 0]
+    p = np.cross(direction, e2)
+    det = np.einsum("ij,ij->i", e1, p)
+    ok = np.abs(det) > 1e-12
+    inv_det = 1.0 / np.where(ok, det, 1.0)
+    s = origin - tri[:, 0]
+    u = np.einsum("ij,ij->i", s, p) * inv_det
+    q = np.cross(s, e1)
+    v = (q @ direction) * inv_det
+    t = np.einsum("ij,ij->i", e2, q) * inv_det
+    return int((ok & (u >= 0) & (v >= 0) & (u + v <= 1) & (t > 1e-9)).sum())
+
+
+#: a ray direction that is parallel to no axis plane, so it does not graze the edges of axis-aligned models
+_RAY = np.array([0.5773502691896258, 0.2672612419124244, 0.7715167498104595])
+
+
+#: how many vertices of a candidate cavity shell are tested for containment (each test scans the outer faces)
+_PROBES = 64
+
+
+def _probe_points(shell_vertices: Array) -> Array:
+    """At most `_PROBES` vertices spread evenly along the coordinate-sorted vertices: the same points for the
+    same geometry whatever the face or vertex order."""
+    ordered = shell_vertices[np.lexsort(shell_vertices.T[::-1])]
+    pick = np.unique(np.linspace(0, len(ordered) - 1, min(len(ordered), _PROBES)).astype(np.int64))
+    return ordered[pick]
+
+
+def _cavity_shells(
+    vertices: Array,
+    f: IntArray,
+    labels: IntArray,
+    comp_volume: Array,
+    closed: NDArray[np.bool_],
+) -> NDArray[np.bool_]:
+    """Per component: a closed shell with inward normals that lies inside another closed shell (an internal cavity).
+
+    Such a shell is right as it is: a separate inward-facing body, or an inverted whole model, is not nested.
+    A point is inside ONE outer shell (a closed, outward-facing component) when a ray from it crosses an odd
+    number of that shell's faces; counting every other shell together would let a second part behind the
+    outer shell flip the parity. The shell is nested only when every sampled vertex is inside the same outer
+    shell (`_probe_points`: a bounded, geometry-ordered sample, so a shell poking out of the outer one is
+    caught and the order of its faces cannot matter)."""
+    cavity = np.zeros(len(comp_volume), dtype=bool)
+    candidates = np.flatnonzero(closed & (comp_volume < 0))
+    outers = np.flatnonzero(closed & (comp_volume > 0))
+    if len(candidates) == 0 or len(outers) == 0:
+        return cavity
+    tri = vertices[f]
+    for c in candidates:
+        probes = _probe_points(vertices[np.unique(f[labels == c])])
+        cavity[c] = any(
+            all(_ray_crossings(pt, _RAY, tri[labels == o]) % 2 == 1 for pt in probes)
+            for o in outers
+        )
+    return cavity
+
+
 def _analyse(vertices: Array, faces: IntArray, options: MeshFixOptions) -> _Analysis:
     nv = len(vertices)
     keep = (
@@ -205,7 +270,7 @@ def _analyse(vertices: Array, faces: IntArray, options: MeshFixOptions) -> _Anal
         return _Analysis(
             keep, f, np.zeros((0, 3), dtype=np.int64), empty_i, 0, np.zeros((0, 2), dtype=np.int64),
             np.zeros(0, dtype=bool), nv, empty_i, empty_i, np.zeros(0),
-            np.zeros(0, dtype=bool), index_degenerate, 0.0,
+            np.zeros(0, dtype=bool), index_degenerate, 0.0, np.zeros(0, dtype=bool),
         )  # fmt: skip
 
     # --- edges: valence and direction ------------------------------------------------------------
@@ -247,7 +312,14 @@ def _analyse(vertices: Array, faces: IntArray, options: MeshFixOptions) -> _Anal
     area = 0.5 * np.linalg.norm(cross, axis=1)
     zero_area = area < _MIN_AREA_MM2
     face_volume = np.einsum("ij,ij->i", p[:, 0], np.cross(p[:, 1], p[:, 2])) / 6.0
-    comp_volume = np.bincount(labels, weights=face_volume, minlength=n_comp)
+    comp_volume = np.bincount(labels, weights=face_volume, minlength=n_comp).astype(
+        np.float64
+    )
+
+    # --- cavities: a closed inward-facing shell nested inside another shell is a hollow, not debris or a defect
+    bad_face = (valence[inv] != 2).any(axis=1)
+    closed = np.bincount(labels, weights=bad_face, minlength=n_comp) == 0
+    cavity = _cavity_shells(vertices, f, labels, comp_volume, closed)
 
     # --- debris: small shells next to a bigger body ----------------------------------------------
     debris = np.zeros(n_comp, dtype=bool)
@@ -257,6 +329,7 @@ def _analyse(vertices: Array, faces: IntArray, options: MeshFixOptions) -> _Anal
             (comp_faces < options.debris_max_faces)
             & (np.abs(comp_volume) < options.debris_max_volume_mm3)
             & (comp_faces < comp_faces[body])
+            & ~cavity
         )
 
     return _Analysis(
@@ -274,6 +347,7 @@ def _analyse(vertices: Array, faces: IntArray, options: MeshFixOptions) -> _Anal
         debris=debris,
         degenerate=index_degenerate + int(zero_area.sum()),
         volume=float(face_volume.sum()),
+        cavity=cavity,
     )
 
 
@@ -383,7 +457,8 @@ def _diagnosis(vertices: Array, faces: IntArray, a: _Analysis) -> Diagnosis:
     n_debris = int(a.debris.sum())
     watertight = a.watertight
     consistent = a.inconsistent_edges == 0
-    is_volume = watertight and consistent and a.volume > 0
+    n_inverted = int(a.inverted.sum())
+    is_volume = watertight and consistent and a.volume > 0 and n_inverted == 0
     defects: list[str] = []
     if a.boundary_edges:
         defects.append(f"{a.boundary_edges} open edge(s)")
@@ -395,6 +470,8 @@ def _diagnosis(vertices: Array, faces: IntArray, a: _Analysis) -> Diagnosis:
         defects.append(f"inconsistent winding on {a.inconsistent_edges} edge(s)")
     if watertight and consistent and a.volume <= 0:
         defects.append("inside-out (non-positive volume)")
+    elif consistent and n_inverted:
+        defects.append(f"{n_inverted} inside-out shell(s)")
     if len(a.faces) == 0:
         defects.append("no non-degenerate faces")
     if a.degenerate:

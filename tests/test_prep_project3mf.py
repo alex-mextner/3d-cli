@@ -494,6 +494,17 @@ def test_mix_pattern_rule(pattern: str, layer: float, legal: bool) -> None:
     assert (check_mix_pattern(pattern, layer) == []) is legal
 
 
+def test_the_configured_mix_cap_is_the_limit_of_the_mix_rule(tmp_path: Path) -> None:
+    assert check_mix_pattern("24", 0.15) != []  # the default cap is 0.12 mm
+    assert check_mix_pattern("24", 0.15, cap_mm=0.15) == []
+    man = build_project(
+        two_part_spec(mix_layer_mm=0.15, mix_cap_mm=0.15),
+        tmp_path / "cat.3mf",
+        base_settings=BASE,
+    )
+    assert man.data["gates"]["mix_layer_cap_mm"] == 0.15
+
+
 def test_the_printer_table_has_the_270_mm_u1() -> None:
     u1 = project3mf.PRINTERS["u1"]
     assert u1.bed == 270.0 and u1.extruders == 4

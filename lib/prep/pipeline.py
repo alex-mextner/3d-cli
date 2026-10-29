@@ -25,8 +25,8 @@ import json
 import re
 import shutil
 import time
-from collections.abc import Callable
-from dataclasses import dataclass, field
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -280,6 +280,24 @@ class PrepOutcome:
         return "\n".join(rows)
 
 
+def _call_step(fn: Callable[[], StepOutput]) -> StepOutput:
+    """Run a step body, turning its structured errors into that step's SKIP/FAIL output."""
+    try:
+        return fn()
+    except MissingDependency as exc:
+        return StepOutput(
+            {"missing": exc.message, "fix": exc.remediation},
+            "SKIP",
+            f"SKIP: {exc.message}; {'; '.join(exc.remediation)}",
+        )
+    except ThreeDError as exc:  # a structured failure of one step is that step's FAIL, the flow reports the rest
+        return StepOutput(
+            {"error": exc.message, "details": exc.remediation},
+            "FAIL",
+            f"{exc.message}; {' '.join(exc.remediation)}"[:400],
+        )
+
+
 def save_mesh(path: Path, mesh: trimesh.Trimesh) -> None:
     np.savez(
         path,
@@ -332,7 +350,7 @@ class Pipeline:
         cfg.validate()
         self.cfg = cfg
         self.log = log
-        self.work = cfg.out
+        self.work = cfg.out.resolve()  # step artifacts are stored relative to it
         self.work.mkdir(parents=True, exist_ok=True)
         (self.work / "meshes").mkdir(exist_ok=True)
         self.cache = StepCache(self.work)
@@ -397,7 +415,11 @@ class Pipeline:
         table: dict[str, dict[str, Any]] = {
             "diagnose": {"model": self._model_digest},
             "repair": {"model": self._model_digest},
-            "orient": {"mode": c.orient, "angle": c.angle_deg},
+            "orient": {
+                "mode": c.orient,
+                "angle": c.angle_deg,
+                "model": self._model_digest,  # `--skip repair` leaves no upstream key to carry the model
+            },
             "adapt": {
                 "on": c.adapt,
                 "angle": c.angle_deg,
@@ -492,24 +514,17 @@ class Pipeline:
         upstream = "|".join(self.keys.get(d, "") for d in DEPS[name])
         key = make_key(name, self.params(name), upstream)
         self.keys[name] = key
-        if name != "proof":
-            errored = [
-                d
-                for d in DEPS[name]
-                if (r := self.records.get(d))
-                and r.verdict == "FAIL"
-                and "error" in r.result
-            ]
-            if errored:  # its input never came to exist: say so instead of crashing on a missing artifact
-                self._record(
-                    name,
-                    "SKIP",
-                    f"needs {', '.join(errored)}, which errored",
-                    0.0,
-                    False,
-                    {},
-                )
-                return
+        errored = self._errored_deps(name)
+        if errored:  # its input never came to exist: say so instead of crashing on a missing artifact
+            self._record(
+                name,
+                "SKIP",
+                f"needs {', '.join(errored)}, which errored",
+                0.0,
+                False,
+                {},
+            )
+            return
         hit = None if self.cfg.force else self.cache.load(name, key)
         if hit is not None:
             self._adopt(name, hit.artifacts)
@@ -531,20 +546,7 @@ class Pipeline:
             return
         self.log(f"[{name}] running ...")
         t0 = time.perf_counter()
-        try:
-            out = fn()
-        except MissingDependency as exc:
-            out = StepOutput(
-                {"missing": exc.message, "fix": exc.remediation},
-                "SKIP",
-                f"SKIP: {exc.message}; {'; '.join(exc.remediation)}",
-            )
-        except ThreeDError as exc:  # a structured failure of one step is that step's FAIL, the flow reports the rest
-            out = StepOutput(
-                {"error": exc.message, "details": exc.remediation},
-                "FAIL",
-                f"{exc.message}; {' '.join(exc.remediation)}"[:400],
-            )
+        out = _call_step(fn)
         seconds = time.perf_counter() - t0
         if (
             out.verdict != "SKIP"
@@ -564,6 +566,18 @@ class Pipeline:
         self.log(f"[{name}] {out.verdict} in {seconds:.1f} s: {out.summary}")
         if out.verdict == "FAIL" and name in BLOCKING:
             self.blocked = name
+
+    def _errored_deps(self, name: str) -> list[str]:
+        """Upstream steps of `name` that failed with an error (proof reports on whatever exists)."""
+        if name == "proof":
+            return []
+        return [
+            d
+            for d in DEPS[name]
+            if (r := self.records.get(d))
+            and r.verdict == "FAIL"
+            and "error" in r.result
+        ]
 
     def _adopt(self, name: str, artifacts: list[str]) -> None:
         """Remember a mesh stage's npz so later steps can load it."""
@@ -600,6 +614,14 @@ class Pipeline:
         shutil.copyfile(src, dest)
         return dest
 
+    def gcode_path(self) -> Path | None:
+        """The G-code this run's slice step produced or replayed from its cache (None: nothing was sliced).
+
+        A `<name>.gcode` left in the output directory by an earlier run is not evidence about this run's model."""
+        name = self.record_data("slice").get("gcode")
+        path = self.work / name if name else None
+        return path if path is not None and path.is_file() else None
+
 
 def result_dict(result: StepResult) -> dict[str, Any]:
     """`to_dict()` of a step result with its verdict and summary folded in."""
@@ -617,3 +639,16 @@ def default_filaments(n: int = 4) -> list[Filament]:
         )
         for i in range(n)
     ]
+
+
+def complete_filaments(filaments: Sequence[Filament], n: int = 4) -> list[Filament]:
+    """`filaments` ordered by slot, with a keyless stub for every slot 1..n the colour spec does not list.
+
+    The 3MF builder needs one entry per physical head; a spec that only names the colours it uses is complete.
+    """
+    by_slot = {f.slot: f for f in filaments}
+    stubs = {f.slot: f for f in default_filaments(n)}
+    full = [
+        by_slot.get(slot) or replace(stubs[slot], key="") for slot in range(1, n + 1)
+    ]
+    return [*full, *sorted((f for f in filaments if f.slot > n), key=lambda f: f.slot)]

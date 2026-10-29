@@ -11,6 +11,7 @@ INVARIANTS: heavy libraries are imported inside the runners (a `3d prep --help` 
 from __future__ import annotations
 
 import dataclasses
+import inspect
 import math
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -25,7 +26,9 @@ from prep.contracts import Assign, Part, Verdict, worst
 from prep.pipeline import (
     DEFAULT_PROCESS_PRESET,
     PRINTER_BED_MM,
+    PrepConfig,
     StepOutput,
+    complete_filaments,
     default_filaments,
     load_parts,
     result_dict,
@@ -34,6 +37,7 @@ from prep.pipeline import (
 )
 
 if TYPE_CHECKING:
+    from prep.gcode_gates import GateSpec
     from prep.pipeline import Pipeline
 
 
@@ -291,6 +295,14 @@ def _stability(pipe: Pipeline) -> StepOutput:
         "sf_fail": 0.0,
         "sf_warn": 1.0,
     }
+    accepted = [
+        p
+        for p in inspect.signature(stability.analyse).parameters
+        if p not in ("mesh", "loads")
+    ]
+    for key in cfg.stability:
+        if key not in accepted:
+            raise InvalidArgument("stability", key, accepted, command="prep")
     opts.update(cfg.stability)
     rep = stability.analyse(pipe.final_mesh(), loads=tuple(_fit_loads(pipe)), **opts)
     return StepOutput(result_dict(rep), rep.verdict, rep.summary())
@@ -483,16 +495,17 @@ def _project_flat(pipe: Pipeline) -> StepOutput:
 
 def _project(pipe: Pipeline) -> StepOutput:
     from prep import regions
-    from prep.project3mf import ProjectSpec, build_project
+    from prep.project3mf import PRINTERS, ProjectSpec, build_project
 
     cfg = pipe.cfg
     if cfg.flat_profile:
         return _project_flat(pipe)
     parts = _parts(pipe)
-    filaments = (
-        list(regions.load_colour_spec(cfg.colors, mix_cap=cfg.mix_cap).filaments)
+    filaments = complete_filaments(
+        regions.load_colour_spec(cfg.colors, mix_cap=cfg.mix_cap).filaments
         if cfg.colors
-        else default_filaments()
+        else default_filaments(),
+        PRINTERS[cfg.printer].extruders,
     )
     if not parts:
         parts = [Part("model", pipe.final_mesh(), Assign(slot=1))]
@@ -509,6 +522,7 @@ def _project(pipe: Pipeline) -> StepOutput:
         layer_plan=plan,
         brim_mm=cfg.brim_mm,
         mix_layer_mm=cfg.mix_cap,
+        mix_cap_mm=cfg.mix_cap,
     )
     out = pipe.work / f"{cfg.name}.3mf"
     manifest = build_project(spec, out)
@@ -604,16 +618,14 @@ def _set_gate_fields(set_process: Mapping[str, str]) -> dict[str, Any]:
     return fields
 
 
-def _gates(pipe: Pipeline) -> StepOutput:
+def gate_spec(
+    cfg: PrepConfig, process_fields: Mapping[str, Any] | None = None
+) -> GateSpec:
+    """The G-code gate limits: the run's process settings (plus `process_fields`), overridden by the spec's `gcode:`
+    mapping (None = gate off)."""
     from prep import gcode_gates
 
-    cfg = pipe.cfg
-    gcode = pipe.work / f"{cfg.name}.gcode"
-    if not gcode.is_file():
-        return StepOutput(
-            {}, "SKIP", "no G-code (slice step did not produce one): gates not run"
-        )
-    fields: dict[str, Any] = {
+    limits: dict[str, Any] = {
         "walls": cfg.walls,
         "infill": cfg.infill_pct / 100.0,
         "hmin": cfg.hmin,
@@ -621,12 +633,30 @@ def _gates(pipe: Pipeline) -> StepOutput:
         "mix_cap": cfg.mix_cap,
         "bed_mm": PRINTER_BED_MM[cfg.printer],
         "supports": cfg.supports == "auto",
+        **(process_fields or {}),
     }
-    if cfg.flat_profile:
-        fields.update(_flat_gate_fields(pipe.record_data("project")))
-    else:
-        fields.update(_set_gate_fields(cfg.set_process))
-    spec = gcode_gates.GateSpec(**{**fields, **cfg.gate})
+    known = [f.name for f in dataclasses.fields(gcode_gates.GateSpec)]
+    for key in cfg.gate:
+        if key not in known:
+            raise InvalidArgument("gcode", key, known, command="prep")
+    return gcode_gates.GateSpec(**{**limits, **cfg.gate})
+
+
+def _gates(pipe: Pipeline) -> StepOutput:
+    from prep import gcode_gates
+
+    cfg = pipe.cfg
+    gcode = pipe.gcode_path()
+    if gcode is None:
+        return StepOutput(
+            {}, "SKIP", "no G-code (slice step did not produce one): gates not run"
+        )
+    extra = (
+        _flat_gate_fields(pipe.record_data("project"))
+        if cfg.flat_profile
+        else _set_gate_fields(cfg.set_process)
+    )
+    spec = gate_spec(cfg, extra)
     manifest = pipe.work / f"{cfg.name}.manifest.json"
     expectations = (
         gcode_gates.GateExpectations.from_manifest(manifest)

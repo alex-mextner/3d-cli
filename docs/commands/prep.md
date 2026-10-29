@@ -61,8 +61,10 @@ everything; `--only a,b` runs just those steps and what they need; `--skip a,b` 
 - `--spec FILE.yaml` — settings file: `printer`, `orient`, `angle`, `pitch`, `adapt` (bool, or `{zones: [...]}`),
   `overhang: {bridge_max_mm}`, `fit` (items file), `holder` (the `fit.HolderSpec` fields), `loads` (extra
   stability loads), `stability` (analysis options), `colors`, `process: {preset, filament_preset, walls,
-  infill, layer_min, layer_max, brim, mix_cap}`, `gcode` (gate thresholds). Relative paths resolve against the
-  spec file. A flag always wins over the spec. See `examples/prep/chekhov/prep.yaml`.
+  infill, layer_min, layer_max, brim, mix_cap}`, `gcode` (gate thresholds; `null` switches a gate off). Relative
+  paths resolve against the spec file. A flag always wins over the spec. An option name that `stability` or
+  `gcode` does not know fails that step and lists the accepted names. A colour spec only needs the filaments it
+  uses: the printer's other slots get stub spools. See `examples/prep/chekhov/prep.yaml`.
 - `--printer u1|k1se` — target printer. `u1`: 270 mm bed, 4 heads, a 3MF project. `k1se`: Creality K1 SE, 220 x 220 x 250
   bed, one head; see [K1 SE](#k1-se).
 - `--orient auto|keep` — `auto` (default) rotates only when a candidate clearly cuts the overhang area;

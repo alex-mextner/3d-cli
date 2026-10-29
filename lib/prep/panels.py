@@ -33,6 +33,7 @@ from scipy.spatial import cKDTree
 from shapely.geometry import Point, Polygon
 from shapely.ops import nearest_points
 
+from cli.resources import max_workers
 from errors import InvalidArgument
 from prep.raster import (
     RGB,
@@ -255,8 +256,9 @@ def _far_from(
         + (r1 * r2)[:, None] * tri[:, 2]
     )
     tree = cKDTree(samples)
-    d_vert = tree.query(np.asarray(mesh.vertices), workers=-1)[0]
-    d_cent = tree.query(np.asarray(mesh.triangles_center), workers=-1)[0]
+    workers = max_workers()  # never `workers=-1`: one thread per core on the shared box
+    d_vert = tree.query(np.asarray(mesh.vertices), workers=workers)[0]
+    d_cent = tree.query(np.asarray(mesh.triangles_center), workers=workers)[0]
     worst = np.maximum(d_vert[mesh.faces].max(axis=1), d_cent)
     return worst > eff, eff
 
