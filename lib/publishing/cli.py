@@ -1,7 +1,7 @@
 """The argv side of `3d models publish` and `3d models offer` (the `publish` / `offer` subcommands of
 commands/models.py, kept here so that command module stays about marketplace search and download).
 
-`publish` is a dry run unless `--yes`; a refusal still prints the plan first. `offer` is `publishing.offer`.
+`publish` is a dry run unless `--yes`; a refusal still prints the plan first. `offer` is `publishing.offer_run`.
 Both take `parse(argv, value_flags=..., bool_flags=...) -> Parsed` (`.positional`, `.opts`) from the caller so
 the flag grammar (`--flag value`, `--flag=value`) is the one `3d models` already has.
 """
@@ -156,14 +156,14 @@ def publish(argv: list[str], parse: Parse) -> int:
 
 
 def offer(argv: list[str], parse: Parse) -> int:
-    from publishing import offer as offering
+    from publishing import offer, offer_run
 
     parsed = parse(argv, value_flags=OFFER_VALUES, bool_flags=OFFER_FLAGS)
     opts = parsed.opts
     project = _project(parsed.positional) if parsed.positional else None
     mode = opts.get("--publish")
-    if mode is not None and mode not in offering.MODES:
-        raise InvalidArgument("--publish", mode, list(offering.MODES), command="models")
+    if mode is not None and mode not in offer.MODES:
+        raise InvalidArgument("--publish", mode, list(offer.MODES), command="models")
     trigger = opts.get("--trigger", "print")
     if project is None and not any(
         k in opts for k in ("--design", "--make", "--printer")
@@ -176,7 +176,7 @@ def offer(argv: list[str], parse: Parse) -> int:
                 "3d models offer --make MAKE_UID --json",
             ],
         )
-    return offering.run_offer(
+    return offer_run.run_offer(
         project,
         trigger=trigger,
         mode=mode,

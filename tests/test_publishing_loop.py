@@ -17,7 +17,7 @@ from library import actions, records
 from library import db as librarydb
 from marketplaces.base import MarketplaceError
 from parts import NonPrintableParts
-from publishing import execute, flow, guard, offer, plan
+from publishing import execute, flow, guard, offer, offer_run, plan
 from publishing.source import load_source
 from publishing.spec import load_spec
 from publish_fixtures import (
@@ -860,7 +860,7 @@ def run(
     kw.setdefault("yes", False)
     kw.setdefault("as_json", False)
     out: list[str] = []
-    code = offer.run_offer(project, db_path=str(db), send=spy, out=out.append, **kw)
+    code = offer_run.run_offer(project, db_path=str(db), send=spy, out=out.append, **kw)
     return code, "\n".join(out), spy
 
 
@@ -969,7 +969,7 @@ def test_ask_on_a_terminal_publishes_only_after_a_yes(
 
         spy = Spy()
         out: list[str] = []
-        code = offer.run_offer(
+        code = offer_run.run_offer(
             project,
             trigger="print",
             mode="ask",
@@ -1072,7 +1072,7 @@ def test_an_nd_source_offers_the_plan_but_it_is_refused_so_nothing_is_sent(
     spy = Spy()
     out: list[str] = []
     with pytest.raises(UsageError, match="publish refused"):
-        offer.run_offer(
+        offer_run.run_offer(
             project,
             trigger="modify",
             mode="auto",
@@ -1170,11 +1170,11 @@ def test_after_modify_is_silent_when_off_and_a_stderr_hint_otherwise(
     out = project / "mole.deformed.stl"
     out.write_bytes(b"solid")
     monkeypatch.setenv("THREED_PUBLISH_OFFER", "off")
-    offer.after_modify(out)
+    offer_run.after_modify(out)
     silent = capsys.readouterr()
     assert (silent.out, silent.err) == ("", "")
     monkeypatch.setenv("THREED_PUBLISH_OFFER", "ask")
-    offer.after_modify(out)
+    offer_run.after_modify(out)
     err = capsys.readouterr().err
     assert (
         "3d models offer" in err

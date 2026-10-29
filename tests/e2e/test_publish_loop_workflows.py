@@ -176,6 +176,8 @@ def test_from_a_downloaded_model_to_a_published_remix_and_back_through_the_libra
 
 
 def test_make_post_dry_run_plans_the_photos_for_the_source_page(tmp_path: Path) -> None:
+    """A user prints somebody else's model, photographs it and asks for a make post to that model's page; the dry run
+    plans the photos for the source page and publishes nothing."""
     project = make_project(tmp_path)
     src = model_json(tmp_path, "CC BY-NC-ND 4.0")
     made = jcli(
@@ -237,6 +239,8 @@ def test_make_post_dry_run_plans_the_photos_for_the_source_page(tmp_path: Path) 
 def test_a_pcb_reference_model_in_the_publish_set_is_refused_and_the_override_is_explicit_and_logged(
     tmp_path: Path,
 ) -> None:
+    """A user puts a PCB reference model in the publish set: the publish is refused, and only an explicit override
+    with a reason goes through and is logged."""
     project = make_project(tmp_path)
     three_d_yaml(
         project,
@@ -336,6 +340,8 @@ def test_a_pcb_reference_model_in_the_publish_set_is_refused_and_the_override_is
 def test_the_table_photo_lifts_the_bed_photographs_restores_and_records_the_height(
     tmp_path: Path,
 ) -> None:
+    """After a print a user captures the table photo: the bed lifts, the camera shoots, the bed goes back and the
+    library records the photo with its height."""
     moon = ZMoonraker(state="complete", z=200.0)
     with moon.serve():
         write_devices(tmp_path / "xdg-config", moon)
@@ -399,6 +405,8 @@ def test_the_table_photo_lifts_the_bed_photographs_restores_and_records_the_heig
 def test_the_table_photo_is_refused_while_the_printer_prints_or_the_lift_is_out_of_range(
     tmp_path: Path,
 ) -> None:
+    """A user asks for a table photo while the printer is printing or with a lift out of range: both are refused
+    and the bed does not move."""
     busy = ZMoonraker(state="printing", z=10.0)
     with busy.serve():
         write_devices(tmp_path / "xdg-config", busy)
@@ -449,6 +457,7 @@ def test_the_table_photo_is_refused_while_the_printer_prints_or_the_lift_is_out_
 
 
 def test_register_the_project_renders_as_photos(tmp_path: Path) -> None:
+    """A user registers the project's renders as photos of the design so a listing can use them."""
     project = make_project(tmp_path)
     jcli(
         tmp_path, "make", "add", "--design", "wall-plug", "--project-dir", str(project)
@@ -477,6 +486,8 @@ def test_register_the_project_renders_as_photos(tmp_path: Path) -> None:
 def test_the_offer_is_silent_when_off_and_never_publishes_without_yes(
     tmp_path: Path,
 ) -> None:
+    """After a print the user is offered to publish: silent with the offer off, a plan and a command without a
+    terminal, and a publish only together with --yes."""
     project = make_project(tmp_path, "category: Household\n")
     jcli(
         tmp_path,
@@ -513,7 +524,7 @@ def test_the_offer_is_silent_when_off_and_never_publishes_without_yes(
             code == 0
             and "licence: cc-by" in out
             and "not published: confirm" in out
-            and "3d models publish" in out
+            and "3d models offer" in out
         )
         doc = jcli(
             tmp_path, "models", "offer", "--printer", "k1se", "--publish", "auto", **api
@@ -545,6 +556,7 @@ def test_the_offer_is_silent_when_off_and_never_publishes_without_yes(
 
 
 def test_bad_invocations_are_structured_errors(tmp_path: Path) -> None:
+    """A user mistypes a publish, make or photo command and gets a structured error, not a traceback."""
     code, _, err = cli(tmp_path, "make", "add")
     assert code == 2 and "--design" in err
     code, _, err = cli(tmp_path, "make", "add", "--design", "x", "--status", "burning")
