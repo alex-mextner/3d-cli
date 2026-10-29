@@ -44,15 +44,14 @@ def test_every_site_returns_fifty_results_with_the_normalised_card(
             )
         }
     assert {site: len(r.models) for site, r in results.items()} == dict.fromkeys(
-        results, 50
+        ("printables", "makerworld", "thingiverse", "cults"), 50
     )
     assert all(r.error is None for r in results.values())
     for site, r in results.items():
         first = r.models[0]
         assert first.site == site and first.title and first.url.startswith("http")
-        assert (
-            first.image and first.summary or site == "makerworld"
-        )  # MakerWorld search hits carry no summary
+        assert first.image, site
+        assert first.summary or site == "makerworld"  # MakerWorld search hits carry no summary
         assert first.files_known and first.files, site
         assert (
             first.license
