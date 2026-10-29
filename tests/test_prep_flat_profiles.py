@@ -199,6 +199,17 @@ def test_overlay_file_sections_and_errors(tmp_path: Path) -> None:
         f.write_text(json.dumps({"process": falsy}))
         with pytest.raises(InvalidArgument):
             load_overlay(f)
+    bad_values: list[object] = [None, {"a": 1}, [[1]], [None]]
+    for bad in bad_values:
+        f.write_text(json.dumps({"process": {"wall_loops": bad}}))
+        with pytest.raises(InvalidArgument):
+            load_overlay(f)
+    f.write_text(
+        json.dumps({"machine": {"machine_max_acceleration_extruding": [8000, 9000]}})
+    )
+    assert load_overlay(f).machine == {
+        "machine_max_acceleration_extruding": [8000, 9000]
+    }
     f.write_text("{not json")
     with pytest.raises(InvalidArgument):
         load_overlay(f)

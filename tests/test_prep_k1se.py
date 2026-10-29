@@ -196,6 +196,17 @@ def test_the_gates_expect_the_walls_the_generated_process_has_after_a_set(
     assert project["supports_enabled"] is False
 
 
+def test_a_list_for_wall_loops_fails_the_project_step_instead_of_crashing(
+    tmp_path: Path, slicer: Path
+) -> None:
+    overlay = tmp_path / "list.json"
+    overlay.write_text(json.dumps({"process": {"wall_loops": [3]}}))
+    out = run(config(box(tmp_path / "part.stl"), tmp_path / "out", overlay=overlay))
+    project = rec(out, "project")
+    assert project.verdict == "FAIL"
+    assert "wall_loops" in project.summary
+
+
 def test_an_overlay_file_sets_speeds_acceleration_and_the_volumetric_cap(
     tmp_path: Path, slicer: Path
 ) -> None:

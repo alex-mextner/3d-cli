@@ -109,6 +109,12 @@ class Overlay:
         )
 
 
+def _is_setting_value(value: object) -> bool:
+    if isinstance(value, list):
+        return all(_is_setting_value(v) and not isinstance(v, list) for v in value)
+    return isinstance(value, (str, int, float, bool))
+
+
 def load_overlay(path: Path) -> Overlay:
     """Read an overlay file; any other top-level key, or a non-object section, is an InvalidArgument."""
     if not path.is_file():
@@ -136,6 +142,14 @@ def load_overlay(path: Path) -> Overlay:
                 ["a JSON object of setting: value"],
                 command="prep",
             )
+        for key, value in section.items():
+            if not _is_setting_value(value):
+                raise InvalidArgument(
+                    f"--overlay {kind} {key}",
+                    json.dumps(value),
+                    ["a string, number, boolean or a list of them"],
+                    command="prep",
+                )
         sections[kind] = section
     return Overlay(**sections)
 

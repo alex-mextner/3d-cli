@@ -382,6 +382,26 @@ def _process_overrides(pipe: Pipeline, first_height: float) -> Any:
     )
 
 
+def _effective_process(process: Mapping[str, Any]) -> dict[str, Any]:
+    """Walls, infill, supports and layer height of the generated process; a setting an override gave an unusable
+    shape (a list, say) is an InvalidArgument rather than a crash."""
+    try:
+        return {
+            "walls": int(process["wall_loops"]),
+            "infill": float(str(process["sparse_infill_density"]).rstrip("%")) / 100.0,
+            "supports_enabled": process["enable_support"] == "1",
+            "layer_height": float(process.get("layer_height", 0.2)),
+        }
+    except (TypeError, ValueError) as exc:
+        raise InvalidArgument(
+            "process settings",
+            "wall_loops / sparse_infill_density / layer_height",
+            ["plain numbers (a percentage for the infill density)"],
+            command="prep",
+            extra=str(exc),
+        ) from exc
+
+
 def _project_flat(pipe: Pipeline) -> StepOutput:
     """Single-extruder printers: the placed STL and three flat preset files instead of a 3MF project."""
     import numpy as np
@@ -449,11 +469,7 @@ def _project_flat(pipe: Pipeline) -> StepOutput:
         "renamed": profiles.renamed,
         "supports": cfg.supports,
         # what the generated process actually asks for (overrides applied): the gates check the G-code against these
-        "walls": int(str(profiles.process["wall_loops"])),
-        "infill": float(str(profiles.process["sparse_infill_density"]).rstrip("%"))
-        / 100.0,
-        "supports_enabled": str(profiles.process["enable_support"]) == "1",
-        "layer_height": float(profiles.process.get("layer_height", 0.2)),
+        **_effective_process(profiles.process),
         "speed_limits": limits,
         "requested_settings": profiles.requested,
         "bbox": [lo.round(3).tolist(), hi.round(3).tolist()],
