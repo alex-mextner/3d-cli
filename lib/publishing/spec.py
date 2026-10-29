@@ -126,19 +126,25 @@ def _text(data: dict[str, Any], key: str, *, required: bool = False) -> str:
     return value.strip()
 
 
+def _default_images(project: Path) -> tuple[Path, ...]:
+    folder = project / IMAGE_DIR
+    if not folder.is_dir():
+        return ()
+    root = project.resolve()
+    return tuple(
+        p
+        for p in sorted(folder.iterdir())
+        if p.suffix.lower() in IMAGE_EXTS
+        and p.is_file()
+        and not p.name.startswith(".")
+        and root in p.resolve().parents  # a symlink must not smuggle in a file from outside
+    )
+
+
 def _images(project: Path, data: dict[str, Any]) -> tuple[Path, ...]:
     declared = data.get("images")
     if declared is None:
-        folder = project / IMAGE_DIR
-        if not folder.is_dir():
-            return ()
-        return tuple(
-            p
-            for p in sorted(folder.iterdir())
-            if p.suffix.lower() in IMAGE_EXTS
-            and p.is_file()
-            and not p.name.startswith(".")
-        )
+        return _default_images(project)
     if not isinstance(declared, list) or not all(isinstance(i, str) for i in declared):
         raise InvalidArgument(
             f"{SPEC_NAME}: images",
@@ -170,8 +176,21 @@ def _images(project: Path, data: dict[str, Any]) -> tuple[Path, ...]:
     return tuple(images)
 
 
-def load_spec(project: Path) -> PublishSpec:
-    """Read and validate `<project>/publish.yaml`; every defect is a structured exit-2 error."""
+def _tags(data: dict[str, Any]) -> tuple[str, ...]:
+    raw_tags = data.get("tags") or []
+    if not isinstance(raw_tags, list) or not all(
+        isinstance(t, str) and t.strip() for t in raw_tags
+    ):
+        raise InvalidArgument(
+            f"{SPEC_NAME}: tags",
+            repr(raw_tags),
+            ["a list of non-empty texts"],
+            command="models",
+        )
+    return tuple(t.strip() for t in raw_tags)
+
+
+def _read_mapping(project: Path) -> dict[str, Any]:
     import yaml  # lazy: only `publish` needs it
 
     path = project / SPEC_NAME
@@ -198,16 +217,12 @@ def load_spec(project: Path) -> PublishSpec:
             command="models",
             remediation=[f"Accepted keys: {', '.join(KEYS)}."],
         )
-    raw_tags = data.get("tags") or []
-    if not isinstance(raw_tags, list) or not all(
-        isinstance(t, str) and t.strip() for t in raw_tags
-    ):
-        raise InvalidArgument(
-            f"{SPEC_NAME}: tags",
-            repr(raw_tags),
-            ["a list of non-empty texts"],
-            command="models",
-        )
+    return data
+
+
+def load_spec(project: Path) -> PublishSpec:
+    """Read and validate `<project>/publish.yaml`; every defect is a structured exit-2 error."""
+    data = _read_mapping(project)
     license_text = _text(data, "license", required=True)
     license_ = parse_license(license_text)
     if license_ is None:
@@ -226,7 +241,7 @@ def load_spec(project: Path) -> PublishSpec:
         title=_text(data, "title", required=True),
         description=_text(data, "description", required=True),
         summary=_text(data, "summary"),
-        tags=tuple(t.strip() for t in raw_tags),
+        tags=_tags(data),
         license=license_,
         category=_text(data, "category"),
         remix_of=remix_of,

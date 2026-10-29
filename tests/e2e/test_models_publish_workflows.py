@@ -298,6 +298,33 @@ def test_yes_publishes_to_thingiverse_through_its_api(tmp_path: Path) -> None:
     assert "tok-123" not in result.stdout + result.stderr
 
 
+def test_yes_json_keeps_stdout_a_single_json_document(tmp_path: Path) -> None:
+    """A script runs `--yes --json`: stdout parses as the plan, the publish line goes to stderr."""
+    project = make_project(tmp_path)
+    fake = FakeThingiverse()
+    try:
+        result = run_cli(
+            tmp_path,
+            "models",
+            "publish",
+            str(project),
+            "--platform",
+            "thingiverse",
+            "--yes",
+            "--json",
+            env_extra={
+                **BLANK,
+                "THREED_THINGIVERSE_API": fake.base,
+                "THINGIVERSE_UPLOAD_TOKEN": "tok-123",
+            },
+        )
+    finally:
+        fake.close()
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert json.loads(result.stdout)["dry_run"] is False
+    assert "thingiverse: published" in result.stderr
+
+
 def test_yes_without_the_upload_token_publishes_nothing(tmp_path: Path) -> None:
     """A user passes `--yes` without the Thingiverse upload token: nothing is published."""
     project = make_project(tmp_path)

@@ -12,8 +12,12 @@
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import subprocess
+import tempfile
 import uuid
+from pathlib import Path
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -185,36 +189,75 @@ def _login(platform: str, base: list[str], runner: Runner) -> str | None:
 def publish_browser(
     plan: PlatformPlan, runner: Runner = run_agent_browser
 ) -> BrowserOutcome:
-    """Run the plan's agent-browser steps; stop at the first one the page does not answer."""
-    session = f"3d-publish-{plan.platform}"
-    base = [AGENT_BROWSER, "--session", session]
-    steps = plan.browser_steps
-    code, out = runner([*base, "--headed", "--restore", *steps[0]])
-    if code != 0:
-        return BrowserOutcome(False, session, f"could not open {steps[0][-1]}: {out}")
+    """Run the plan's agent-browser steps; stop at the first one the page does not answer.
+
+    The platform's browser session is shared by every project, so concurrent publishes to one
+    platform queue on a lock instead of interleaving their page navigation and form fills.
+    """
+    lock_path = Path(tempfile.gettempdir()) / f"3d-publish-{plan.platform}.lock"
+    with lock_path.open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            return _publish_browser_locked(plan, runner)
+        finally:
+            with contextlib.suppress(OSError):
+                fcntl.flock(lock, fcntl.LOCK_UN)
+
+
+def _login_outcome(plan: PlatformPlan, base: list[str], runner: Runner) -> BrowserOutcome | None:
+    """When the page is a login wall: fill it (and stop for the owner), or say why not."""
+    session = base[2]
     code, url = runner([*base, "get", "url"])
-    if code == 0 and any(hint in url.lower() for hint in LOGIN_HINTS):
-        problem = _login(plan.platform, base, runner)
-        if problem is not None:
-            return BrowserOutcome(False, session, problem)
-        return BrowserOutcome(
-            False,
-            session,
-            f"credentials typed into the {plan.platform} login page of browser session {session}: press Sign in, "
-            "finish any 2FA/captcha yourself, then run the same command again (the login is kept)",
-        )
-    for number, step in enumerate(steps[1:], start=2):
+    if code != 0 or not any(hint in url.lower() for hint in LOGIN_HINTS):
+        return None
+    problem = _login(plan.platform, base, runner)
+    if problem is not None:
+        return BrowserOutcome(False, session, problem)
+    return BrowserOutcome(
+        False,
+        session,
+        f"credentials typed into the {plan.platform} login page of browser session {session}: press Sign in, "
+        "finish any 2FA/captcha yourself, then run the same command again (the login is kept)",
+    )
+
+
+def _run_steps(
+    plan: PlatformPlan, base: list[str], runner: Runner
+) -> tuple[BrowserOutcome | None, str]:
+    """Run the form steps after the first; the failure (if any) and the last step's output."""
+    session, out = base[2], ""
+    for number, step in enumerate(plan.browser_steps[1:], start=2):
         code, out = runner([*base, *step])
         if code != 0:
             left = "; ".join(
                 f"{k}: {v}" for k, v in plan.fields.items() if k not in ("remix_of",)
             )
-            return BrowserOutcome(
-                False,
-                session,
-                f"step {number} ({' '.join(step[:4])}) failed: {out}. The page may have changed; the window of "
-                f"session {session} stays open — finish the form by hand with: {left}",
+            return (
+                BrowserOutcome(
+                    False,
+                    session,
+                    f"step {number} ({' '.join(step[:4])}) failed: {out}. The page may have changed; the window of "
+                    f"session {session} stays open — finish the form by hand with: {left}",
+                ),
+                out,
             )
+    return None, out
+
+
+def _publish_browser_locked(plan: PlatformPlan, runner: Runner) -> BrowserOutcome:
+    session = f"3d-publish-{plan.platform}"
+    base = [AGENT_BROWSER, "--session", session]
+    code, out = runner([*base, "--headed", "--restore", *plan.browser_steps[0]])
+    if code != 0:
+        return BrowserOutcome(
+            False, session, f"could not open {plan.browser_steps[0][-1]}: {out}"
+        )
+    login = _login_outcome(plan, base, runner)
+    if login is not None:
+        return login
+    failed, out = _run_steps(plan, base, runner)
+    if failed is not None:
+        return failed
     return BrowserOutcome(
         True,
         session,

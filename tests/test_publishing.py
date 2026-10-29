@@ -47,6 +47,7 @@ def lookup_failing(url: str) -> str:
         ("Creative Commons - Attribution - No Derivatives", "cc-by-nd"),
         ("cc-nc-nd", "cc-by-nc-nd"),
         ("cc", "cc-by"),
+        ("BY", "cc-by"),
         ("pd0", "cc0"),
         ("Public Domain", "cc0"),
         ("GNU - GPL", "gpl"),
@@ -143,6 +144,14 @@ def test_load_spec_reads_every_field_and_defaults_images_to_previews(
     assert [i.name for i in spec.images] == [
         "iso.png"
     ]  # the .dims.json is not an image
+
+
+def test_default_images_skip_symlinks_that_leave_the_project(tmp_path: Path) -> None:
+    project = make_project(tmp_path)
+    outside = tmp_path / "private.png"
+    outside.write_bytes(b"\x89PNG")
+    (project / "previews" / "leak.png").symlink_to(outside)
+    assert [i.name for i in load_spec(project).images] == ["iso.png"]
 
 
 def test_load_spec_accepts_a_licence_written_as_text(tmp_path: Path) -> None:
@@ -531,6 +540,43 @@ class Recorder:
         if self.fail_on and self.fail_on in argv:
             return 1, "no element matches"
         return 0, "shot.png" if "screenshot" in argv else ""
+
+
+def test_concurrent_browser_publishes_to_one_platform_do_not_interleave(
+    tmp_path: Path,
+) -> None:
+    import threading
+    import time
+
+    item = evaluate(make_project(tmp_path), "makerworld").plans[0]
+    active = 0
+    overlap = False
+    guard = threading.Lock()
+
+    def runner(argv: Sequence[str]) -> tuple[int, str]:
+        nonlocal active, overlap
+        if "open" in argv:
+            with guard:
+                active += 1
+                overlap = overlap or active > 1
+            time.sleep(0.05)
+        if "screenshot" in argv:
+            with guard:
+                active -= 1
+            return 0, "shot.png"
+        if "get" in argv and "url" in argv:
+            return 0, "https://makerworld.com/en"
+        return 0, ""
+
+    threads = [
+        threading.Thread(target=execute.publish_browser, args=(item, runner))
+        for _ in range(2)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert not overlap
 
 
 def test_browser_publish_fills_the_form_and_stops_before_the_final_click(

@@ -155,6 +155,39 @@ def _stats(model: Model) -> str:
     return "  ".join(parts)
 
 
+def _search_text(results: list[Any]) -> None:
+    for r in results:
+        if r.error is not None:
+            reason = r.error.reason if isinstance(r.error, MarketplaceError) else r.error.message
+            print(f"{r.site}: unavailable — {reason}")
+            for step in r.error.remediation:
+                print(f"  -> {step}")
+            continue
+        print(f"{r.site} ({len(r.models)})")
+        for n, model in enumerate(r.models, start=1):
+            print(f"  {n}. {model.title}\n     {_stats(model)}\n     {model.url}")
+
+
+def _search_json(query: str, results: list[Any]) -> None:
+    from marketplaces import catalog
+
+    print(json.dumps({
+        "query": query,
+        "results": {r.site: [m.to_json() for m in r.models] for r in results if r.error is None},
+        "errors": [catalog.error_json(r.site, r.error) for r in results if r.error is not None],
+    }, indent=2, ensure_ascii=False))
+
+
+def _search_exit_code(results: list[Any]) -> int:
+    errors = [r.error for r in results if r.error is not None]
+    if len(errors) != len(results):
+        return 0
+    # Every reason is already on stdout (text or JSON): exit with the code the failures
+    # share — 2 when every site wants credentials — else 1.
+    codes = {e.exit_code for e in errors}
+    return codes.pop() if len(codes) == 1 else 1
+
+
 def _search(argv: list[str]) -> int:
     from marketplaces import catalog
 
@@ -162,34 +195,14 @@ def _search(argv: list[str]) -> int:
     query = _one_positional(positional, "QUERY")
     sites, limit = _sites(opts.get("--site")), _limit(opts.get("--limit"))
     results = catalog.search(query, sites, limit)
-    failed = [r for r in results if r.error is not None]
     only = results[0].error if len(results) == 1 else None
     if only is not None and "--json" not in opts:
         raise only  # the only site failed: its structured error, printed once
     if "--json" in opts:
-        print(json.dumps({
-            "query": query,
-            "results": {r.site: [m.to_json() for m in r.models] for r in results if r.error is None},
-            "errors": [catalog.error_json(r.site, r.error) for r in results if r.error is not None],
-        }, indent=2, ensure_ascii=False))
+        _search_json(query, results)
     else:
-        for r in results:
-            if r.error is not None:
-                reason = r.error.reason if isinstance(r.error, MarketplaceError) else r.error.message
-                print(f"{r.site}: unavailable — {reason}")
-                for step in r.error.remediation:
-                    print(f"  -> {step}")
-                continue
-            print(f"{r.site} ({len(r.models)})")
-            for n, model in enumerate(r.models, start=1):
-                print(f"  {n}. {model.title}\n     {_stats(model)}\n     {model.url}")
-    if len(failed) == len(results):
-        errors = [r.error for r in failed if r.error is not None]
-        # Every reason is already on stdout (text or JSON): exit with the code the failures
-        # share — 2 when every site wants credentials — else 1.
-        codes = {e.exit_code for e in errors}
-        return codes.pop() if len(codes) == 1 else 1
-    return 0
+        _search_text(results)
+    return _search_exit_code(results)
 
 
 def _print_model(model: Model) -> None:
@@ -269,49 +282,64 @@ def _read_secret(prompt: str) -> str:
     return value
 
 
-def _auth(argv: list[str]) -> int:
+def _keychain_state(credentials: Any) -> str:
+    if credentials.secret_store() is not None:
+        return "available"
+    if credentials.keychain_disabled():
+        return "switched off (THREED_KEYCHAIN=off)"
+    return "not available (keychain-cli not installed)"
+
+
+def _auth_status(rest: list[str]) -> int:
     from marketplaces import credentials
 
+    positional, opts = _parse(rest, value_flags=set(), bool_flags={"--json"})
+    if positional:
+        raise UsageError("auth status takes no arguments", command="models",
+                         remediation=["Run '3d models auth status'."])
+    report = {site: {f.key: credentials.sources(f) for f in fields}
+              for site, fields in credentials.FIELDS.items()}
+    if "--json" in opts:
+        print(json.dumps({"keychain": credentials.secret_store() is not None, "sites": report}, indent=2))
+        return 0
+    print(f"keychain: {_keychain_state(credentials)}")
+    for site, fields in report.items():
+        for key, found in fields.items():
+            print(f"  {site}.{key}: {', '.join(found) if found else 'not configured'}")
+    return 0
+
+
+def _auth_set(rest: list[str]) -> int:
+    from marketplaces import credentials
+
+    positional, _ = _parse(rest, value_flags=set(), bool_flags=set())
+    site = _auth_site(positional)
+    store = credentials.require_store()
+    values = [(f, _read_secret(f.prompt)) for f in credentials.FIELDS[site]]
+    for field, value in values:
+        store.set(field.keychain, value, label=f"3d-cli {field.prompt}")
+        print(f"stored {field.keychain} in the keychain")
+    return 0
+
+
+def _auth_delete(rest: list[str]) -> int:
+    from marketplaces import credentials
+
+    positional, _ = _parse(rest, value_flags=set(), bool_flags=set())
+    site = _auth_site(positional)
+    store = credentials.require_store()
+    for field in credentials.FIELDS[site]:
+        print(f"{'deleted' if store.delete(field.keychain) else 'absent'} {field.keychain}")
+    return 0
+
+
+def _auth(argv: list[str]) -> int:
     action, rest = (argv[0], argv[1:]) if argv else ("", [])
-    if action == "status":
-        positional, opts = _parse(rest, value_flags=set(), bool_flags={"--json"})
-        if positional:
-            raise UsageError("auth status takes no arguments", command="models",
-                             remediation=["Run '3d models auth status'."])
-        keychain = credentials.secret_store() is not None
-        if keychain:
-            state = "available"
-        elif credentials.keychain_disabled():
-            state = "switched off (THREED_KEYCHAIN=off)"
-        else:
-            state = "not available (keychain-cli not installed)"
-        report = {site: {f.key: credentials.sources(f) for f in fields}
-                  for site, fields in credentials.FIELDS.items()}
-        if "--json" in opts:
-            print(json.dumps({"keychain": keychain, "sites": report}, indent=2))
-            return 0
-        print(f"keychain: {state}")
-        for site, fields in report.items():
-            for key, found in fields.items():
-                print(f"  {site}.{key}: {', '.join(found) if found else 'not configured'}")
-        return 0
-    if action == "set":
-        positional, _ = _parse(rest, value_flags=set(), bool_flags=set())
-        site = _auth_site(positional)
-        store = credentials.require_store()
-        values = [(f, _read_secret(f.prompt)) for f in credentials.FIELDS[site]]
-        for field, value in values:
-            store.set(field.keychain, value, label=f"3d-cli {field.prompt}")
-            print(f"stored {field.keychain} in the keychain")
-        return 0
-    if action == "delete":
-        positional, _ = _parse(rest, value_flags=set(), bool_flags=set())
-        site = _auth_site(positional)
-        store = credentials.require_store()
-        for field in credentials.FIELDS[site]:
-            print(f"{'deleted' if store.delete(field.keychain) else 'absent'} {field.keychain}")
-        return 0
-    raise InvalidArgument("auth action", action or "(none)", ["status", "set", "delete"], command="models")
+    handlers = {"status": _auth_status, "set": _auth_set, "delete": _auth_delete}
+    handler = handlers.get(action)
+    if handler is None:
+        raise InvalidArgument("auth action", action or "(none)", ["status", "set", "delete"], command="models")
+    return handler(rest)
 
 
 def _publish(argv: list[str]) -> int:
@@ -341,20 +369,24 @@ def _publish(argv: list[str]) -> int:
         return 0
     # Credentials first, so a missing token cannot leave one platform published and the rest not.
     token = credentials.thingiverse_upload_token() if any(p.platform == "thingiverse" for p in ev.plans) else ""
-    results = [_publish_one(item, token) for item in ev.plans]
+    results = [_publish_one(item, token, to_stderr="--json" in opts) for item in ev.plans]
     return 0 if all(results) else 1
 
 
-def _publish_one(item: Any, token: str) -> bool:
-    """Publish one platform's plan; True when it went through, False after printing why not."""
+def _publish_one(item: Any, token: str, *, to_stderr: bool = False) -> bool:
+    """Publish one platform's plan; True when it went through, False after printing why not.
+
+    With `--json` stdout holds only the plan document, so progress lines go to stderr.
+    """
     from publishing import execute
 
+    out = sys.stderr if to_stderr else sys.stdout
     try:
         if item.platform == "thingiverse":
-            print(f"thingiverse: published {execute.publish_thingiverse(item, token=token)}")
+            print(f"thingiverse: published {execute.publish_thingiverse(item, token=token)}", file=out)
             return True
         outcome = execute.publish_browser(item)
-        print(f"{item.platform}: {outcome.message}")
+        print(f"{item.platform}: {outcome.message}", file=out)
         return outcome.ok
     except ThreeDError as exc:
         print(exc.render(), file=sys.stderr)

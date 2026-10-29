@@ -112,8 +112,15 @@ def parse_license(text: str) -> License | None:
     for plain in ("lgpl", "gpl", "bsd"):
         if plain in word:
             return LICENSES[plain]
-    is_cc = bool(word & {"cc", "creative", "commons", "attribution"}) or (
-        "by" in word and bool(word & {"nc", "sa", "nd"})
+    return _cc_license(tokens, word, joined)
+
+
+def _cc_license(tokens: list[str], word: set[str], joined: str) -> License | None:
+    """The Creative Commons licence the tokens name, or None when they are not CC at all."""
+    is_cc = (
+        bool(word & {"cc", "creative", "commons", "attribution"})
+        or tokens == ["by"]  # MakerWorld's bare label for CC BY
+        or ("by" in word and bool(word & {"nc", "sa", "nd"}))
     )
     if not is_cc:
         return None
