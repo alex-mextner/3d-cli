@@ -117,6 +117,7 @@ def test_the_results_are_printed_before_the_model_has_answered(tmp_path: Path) -
 def test_an_invalid_model_answer_costs_one_line_and_keeps_the_results(
     tmp_path: Path,
 ) -> None:
+    """A user ranks a search and the model answers garbage: one warning line, the unranked results still print."""
     omp, state = write_fake_omp(tmp_path, {"mode_classify": "garbage"})
     with BulkServer(total=60) as server:
         done = _run(
@@ -145,6 +146,7 @@ def test_an_invalid_model_answer_costs_one_line_and_keeps_the_results(
 
 
 def test_a_failing_omp_costs_one_line_and_keeps_the_results(tmp_path: Path) -> None:
+    """A user ranks a search while omp fails: one warning line, the results still print."""
     omp, _ = write_fake_omp(tmp_path, {"mode_classify": "fail"})
     with BulkServer(total=60) as server:
         done = _run(
@@ -166,6 +168,7 @@ def test_a_failing_omp_costs_one_line_and_keeps_the_results(tmp_path: Path) -> N
 
 
 def test_llm_require_without_omp_exits_127_before_searching(tmp_path: Path) -> None:
+    """A user requires LLM ranking without omp installed: exit 127 before any site is searched."""
     with BulkServer(total=60) as server:
         done = _run(
             tmp_path,
@@ -203,6 +206,7 @@ def test_llm_require_without_omp_exits_127_before_searching(tmp_path: Path) -> N
 def test_no_llm_never_starts_omp_even_when_ai_json_enables_ranking(
     tmp_path: Path,
 ) -> None:
+    """A user passes --no-llm while ai.json enables ranking: omp is never started."""
     omp, state = write_fake_omp(tmp_path, {})
     config = tmp_path / "xdg-config" / "3d-cli"
     config.mkdir(parents=True, exist_ok=True)
@@ -301,6 +305,96 @@ def test_the_plain_search_output_is_identical_with_and_without_the_ranking_code(
     assert fake_calls(state) == []
 
 
+def _assert_first_pass_events(events: list[dict[str, Any]]) -> None:
+    order = [e["event"] for e in events]
+    assert order[:2] == ["start", "search"] and order[-1] == "done"
+    last_result = max(i for i, n in enumerate(order) if n == "result")
+    # every phase-1 result precedes phase 2
+    assert order.index("phase") > last_result
+    assert order.count("result") >= 10 and order.count("verdict") == 10
+    assert all(e["schema"] == "3d.models.rank/1" for e in events)
+    _assert_plan_questions_and_totals(events)
+
+
+def _assert_plan_questions_and_totals(events: list[dict[str, Any]]) -> None:
+    plan = next(e for e in events if e["event"] == "plan" and e["status"] == "ready")
+    assert plan["mode"] == "rewrite"
+    assert [q["kind"] for q in plan["queries"]] == ["wide", "narrow", "rewrite"]
+    questions = [e for e in events if e["event"] == "question"]
+    assert [(q["key"], q["type"], q["choices"]) for q in questions] == [
+        ("need_cad", "single", ["yes", "no"]),
+        ("max_size", "text", []),
+    ]
+    suggested = [
+        e for e in events if e["event"] == "query" and e["status"] == "suggested"
+    ]
+    assert [(e["n"], e["query"]) for e in suggested] == [(1, "plant stake holder")]
+    done = events[-1]
+    assert done["counts"]["results"] == 10 and done["counts"]["fits"] == 1
+    assert done["llm"]["calls"] >= 2
+    assert done["llm"]["input_tokens"] == 12 * done["llm"]["calls"]
+    assert done["llm"]["total_tokens"] == 102 * done["llm"]["calls"]
+
+
+def _assert_answered_followup(
+    tmp_path: Path, env: dict[str, str], search_id: str
+) -> None:
+    second = _run(
+        tmp_path,
+        env,
+        "rerank",
+        search_id,
+        "--answer",
+        "need_cad=yes",
+        "--answer",
+        "max_size=60",
+        "--follow",
+        "1",
+        "--ndjson",
+    )
+    assert second.returncode == 0, second.stderr
+    again = _events(second.stdout)
+    ran = [e for e in again if e["event"] == "query" and e["status"] == "run"]
+    assert [(e["query"], e["kind"]) for e in ran] == [("plant stake holder", "followup")]
+    assert again[0]["answers"] == {"max_size": "60", "need_cad": "yes"}
+    bad = _run(tmp_path, env, "rerank", search_id, "--answer", "need_cad=maybe")
+    assert bad.returncode == 2
+    assert "accepted: yes, no" in bad.stderr
+
+
+def _assert_saved_flow(tmp_path: Path, env: dict[str, str], search_id: str) -> None:
+    listed = json.loads(_run(tmp_path, env, "followups", search_id, "--json").stdout)
+    assert listed["schema"] == "3d.models.followups/1"
+    assert listed["answers"] == {"max_size": "60", "need_cad": "yes"}
+    assert [(f["n"], f["status"]) for f in listed["followups"]] == [(1, "run")]
+    assert [(q["query"], q["status"]) for q in listed["queries"]] == [
+        ("sensor enclosure", "run"),
+        ("capacitive probe case", "run"),
+        ("Sensorgehäuse", "run"),
+    ]
+    shown = json.loads(
+        _run(tmp_path, env, "searches", "show", search_id, "--json").stdout
+    )
+    rows = shown["results"]["printables"]
+    verdicts = [r["verdict"] for r in rows]
+    assert len(verdicts) == 10 and set(verdicts) == {"fits", "maybe", "no"}
+    assert all(r["rationale"] for r in rows)
+    assert len(shown["queries"]) == 4
+    assert {q["key"] for q in shown["questions"]} == {"need_cad", "max_size"}
+
+
+def _assert_omp_invocations(state: Path) -> None:
+    calls = fake_calls(state)
+    classify = [c for c in calls if c["role"] == "classify"]
+    planner = [c for c in calls if c["role"] == "plan"]
+    assert len(planner) == 1 and planner[0]["model"] == "sonnet"
+    assert "--model" in planner[0]["argv"]
+    assert planner[0]["argv"][planner[0]["argv"].index("--tools") + 1] == "web_search,read"
+    assert classify[0]["model"] == "haiku"
+    assert "--no-tools" in classify[0]["argv"]
+    assert "--no-session" in classify[0]["argv"]
+
+
 def test_an_agent_drives_the_whole_flow_with_ndjson_answers_and_follows(
     tmp_path: Path,
 ) -> None:
@@ -323,109 +417,18 @@ def test_an_agent_drives_the_whole_flow_with_ndjson_answers_and_follows(
         )
         assert first.returncode == 0, first.stderr
         events = _events(first.stdout)
-        order = [e["event"] for e in events]
-        assert order[:2] == ["start", "search"] and order[-1] == "done"
-        last_result = max(i for i, n in enumerate(order) if n == "result")
-        assert (
-            order.index("phase") > last_result
-        )  # every phase-1 result precedes phase 2
-        assert order.count("result") >= 10 and order.count("verdict") == 10
-        assert all(e["schema"] == "3d.models.rank/1" for e in events)
+        _assert_first_pass_events(events)
         search_id = events[1]["search"]
-        plan = next(
-            e for e in events if e["event"] == "plan" and e["status"] == "ready"
-        )
-        assert plan["mode"] == "rewrite" and [q["kind"] for q in plan["queries"]] == [
-            "wide",
-            "narrow",
-            "rewrite",
-        ]
-        questions = [e for e in events if e["event"] == "question"]
-        assert [(q["key"], q["type"], q["choices"]) for q in questions] == [
-            ("need_cad", "single", ["yes", "no"]),
-            ("max_size", "text", []),
-        ]
-        suggested = [
-            e for e in events if e["event"] == "query" and e["status"] == "suggested"
-        ]
-        assert [(e["n"], e["query"]) for e in suggested] == [(1, "plant stake holder")]
-        done = events[-1]
-        assert (
-            done["counts"]["results"] == 10
-            and done["counts"]["fits"] == 1
-            and done["llm"]["calls"] >= 2
-        )
-        assert (
-            done["llm"]["input_tokens"] == 12 * done["llm"]["calls"]
-            and done["llm"]["total_tokens"] == 102 * done["llm"]["calls"]
-        )
-        # the agent answers and follows, non-interactively
-        second = _run(
-            tmp_path,
-            env,
-            "rerank",
-            search_id,
-            "--answer",
-            "need_cad=yes",
-            "--answer",
-            "max_size=60",
-            "--follow",
-            "1",
-            "--ndjson",
-        )
-        assert second.returncode == 0, second.stderr
-        again = _events(second.stdout)
-        ran = [e for e in again if e["event"] == "query" and e["status"] == "run"]
-        assert [(e["query"], e["kind"]) for e in ran] == [
-            ("plant stake holder", "followup")
-        ]
-        assert again[0]["answers"] == {"max_size": "60", "need_cad": "yes"}
-        bad = _run(tmp_path, env, "rerank", search_id, "--answer", "need_cad=maybe")
-        assert bad.returncode == 2 and "accepted: yes, no" in bad.stderr
-        listed = json.loads(
-            _run(tmp_path, env, "followups", search_id, "--json").stdout
-        )
-        assert listed["schema"] == "3d.models.followups/1" and listed["answers"] == {
-            "max_size": "60",
-            "need_cad": "yes",
-        }
-        assert [(f["n"], f["status"]) for f in listed["followups"]] == [(1, "run")]
-        assert [(q["query"], q["status"]) for q in listed["queries"]] == [
-            ("sensor enclosure", "run"),
-            ("capacitive probe case", "run"),
-            ("Sensorgehäuse", "run"),
-        ]
-        shown = json.loads(
-            _run(tmp_path, env, "searches", "show", search_id, "--json").stdout
-        )
-        verdicts = [r["verdict"] for r in shown["results"]["printables"]]
-        assert len(verdicts) == 10 and set(verdicts) == {"fits", "maybe", "no"}
-        assert (
-            all(r["rationale"] for r in shown["results"]["printables"])
-            and len(shown["queries"]) == 4
-        )
-        assert {q["key"] for q in shown["questions"]} == {"need_cad", "max_size"}
-    calls = fake_calls(state)
-    classify = [c for c in calls if c["role"] == "classify"]
-    planner = [c for c in calls if c["role"] == "plan"]
-    assert (
-        len(planner) == 1
-        and "--model" in planner[0]["argv"]
-        and planner[0]["model"] == "sonnet"
-    )
-    assert (
-        planner[0]["argv"][planner[0]["argv"].index("--tools") + 1] == "web_search,read"
-    )
-    assert (
-        classify[0]["model"] == "haiku"
-        and "--no-tools" in classify[0]["argv"]
-        and "--no-session" in classify[0]["argv"]
-    )
+        assert events[-1]["event"] == "done" and search_id
+        _assert_answered_followup(tmp_path, env, search_id)
+        _assert_saved_flow(tmp_path, env, search_id)
+    _assert_omp_invocations(state)
 
 
 def test_the_json_document_carries_the_search_with_verdicts_and_the_ranking(
     tmp_path: Path,
 ) -> None:
+    """A user asks for --json and gets the search with verdicts and the ranking in one document."""
     omp, _ = write_fake_omp(tmp_path, {"plan": PLAN, "fits_mod": 2})
     with BulkServer(total=60) as server:
         done = _run(
@@ -463,6 +466,7 @@ def test_the_json_document_carries_the_search_with_verdicts_and_the_ranking(
 def test_a_rewrite_creates_wide_and_narrow_searches_linked_to_the_original(
     tmp_path: Path,
 ) -> None:
+    """A user asks for a query rewrite: wide and narrow searches are created and linked to the original."""
     omp, _ = write_fake_omp(tmp_path, {"plan": PLAN})
     with BulkServer(total=60) as server:
         env = _env(server, tmp_path, omp)
@@ -513,6 +517,7 @@ def test_a_rewrite_creates_wide_and_narrow_searches_linked_to_the_original(
 def test_background_prints_the_results_and_a_detached_worker_saves_the_verdicts(
     tmp_path: Path,
 ) -> None:
+    """A user runs with --background: results print at once and a detached worker saves the verdicts later."""
     omp, state = write_fake_omp(
         tmp_path, {"delay_classify": 1.0, "plan": PLAN, "fits_mod": 2}
     )

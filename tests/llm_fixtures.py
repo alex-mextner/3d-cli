@@ -71,7 +71,12 @@ class ScriptedBackend(Backend):
         return True
 
     def complete(
-        self, system: str, user: str, images: Any = None, timeout: float = 0.0
+        self,
+        system: str,
+        user: str,
+        images: Any = None,
+        timeout: float = 0.0,
+        temperature: float | None = None,
     ) -> str:
         return self.complete_detailed(system, user).text
 

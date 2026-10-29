@@ -47,7 +47,8 @@ import sys
 import tempfile
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from collections.abc import Iterator
+from dataclasses import dataclass, replace
 from typing import Any
 from urllib.parse import urlparse
 
@@ -453,14 +454,8 @@ def _omp_usage(message: dict[str, Any]) -> dict[str, float]:
     return out
 
 
-def parse_omp_events(stdout: str) -> Completion | None:
-    """The answer of an `omp --mode json` run: the text of the LAST assistant message plus usage summed over
-    every assistant message (a tool-using run has several). None when stdout holds no assistant message
-    (a fake or an older omp printing plain text)."""
-    text: str | None = None
-    model: str | None = None
-    totals: dict[str, float] = {}
-    error: str | None = None
+def _assistant_messages(stdout: str) -> Iterator[dict[str, Any]]:
+    """The `message_end` events of an `omp --mode json` run that carry an assistant message."""
     for line in stdout.splitlines():
         line = line.strip()
         if not line.startswith("{"):
@@ -469,36 +464,25 @@ def parse_omp_events(stdout: str) -> Completion | None:
             event = json.loads(line)
         except json.JSONDecodeError:
             continue
-        message = event.get("message") if isinstance(event, dict) else None
-        if (
-            event.get("type") != "message_end"
-            or not isinstance(message, dict)
-            or message.get("role") != "assistant"
-        ):
+        if not isinstance(event, dict) or event.get("type") != "message_end":
             continue
-        parts = message.get("content")
-        chunks = (
-            [
-                c.get("text", "")
-                for c in parts
-                if isinstance(c, dict) and c.get("type") == "text"
-            ]
-            if isinstance(parts, list)
-            else []
-        )
-        if message.get("stopReason") == "error":
-            error = str(message.get("errorMessage") or "the model call failed")
-        if chunks:
-            text = "".join(chunks)
-        if isinstance(message.get("model"), str):
-            model = message["model"]
-        for key, value in _omp_usage(message).items():
-            totals[key] = totals.get(key, 0) + value
-    if error is not None and not text:
-        raise BackendError(f"omp: {error}", command="ai")
-    if text is None:
-        return None
+        message = event.get("message")
+        if isinstance(message, dict) and message.get("role") == "assistant":
+            yield message
 
+
+def _text_chunks(message: dict[str, Any]) -> list[str]:
+    parts = message.get("content")
+    if not isinstance(parts, list):
+        return []
+    return [
+        c.get("text", "")
+        for c in parts
+        if isinstance(c, dict) and c.get("type") == "text"
+    ]
+
+
+def _completion_from(text: str, model: str | None, totals: dict[str, float]) -> Completion:
     def tokens(key: str) -> int | None:
         return int(totals[key]) if key in totals else None
 
@@ -511,6 +495,31 @@ def parse_omp_events(stdout: str) -> Completion | None:
         cache_write_tokens=tokens("cacheWrite"),
         cost_usd=totals.get("cost"),
     )
+
+
+def parse_omp_events(stdout: str) -> Completion | None:
+    """The answer of an `omp --mode json` run: the text of the LAST assistant message plus usage summed over
+    every assistant message (a tool-using run has several). None when stdout holds no assistant message
+    (a fake or an older omp printing plain text)."""
+    text: str | None = None
+    model: str | None = None
+    totals: dict[str, float] = {}
+    error: str | None = None
+    for message in _assistant_messages(stdout):
+        chunks = _text_chunks(message)
+        if message.get("stopReason") == "error":
+            error = str(message.get("errorMessage") or "the model call failed")
+        if chunks:
+            text = "".join(chunks)
+        if isinstance(message.get("model"), str):
+            model = message["model"]
+        for key, value in _omp_usage(message).items():
+            totals[key] = totals.get(key, 0) + value
+    if error is not None and not text:
+        raise BackendError(f"omp: {error}", command="ai")
+    if text is None:
+        return None
+    return _completion_from(text, model, totals)
 
 
 class OmpBackend(Backend):
@@ -539,19 +548,13 @@ class OmpBackend(Backend):
         user: str,
         images: list[pathlib.Path] | None = None,
         timeout: float = DEFAULT_TIMEOUT,
+        temperature: float | None = None,
     ) -> str:
         return self.complete_detailed(system, user, timeout=timeout).text
 
-    def complete_detailed(
-        self,
-        system: str,
-        user: str,
-        *,
-        model: str | None = None,
-        tools: tuple[str, ...] = (),
-        timeout: float = DEFAULT_TIMEOUT,
-    ) -> Completion:
-        self._require_binary(self.binary)
+    def _argv(
+        self, system: str, user: str, model: str | None, tools: tuple[str, ...]
+    ) -> list[str]:
         cmd = [
             self.binary,
             "-p",
@@ -572,9 +575,12 @@ class OmpBackend(Backend):
         if system.strip():
             cmd += ["--system-prompt", system.strip()]
         cmd.append(user.strip())
+        return cmd
+
+    def _run(self, cmd: list[str], timeout: float) -> subprocess.CompletedProcess[str]:
         try:
             with tempfile.TemporaryDirectory(prefix="3d-omp-") as scratch:
-                proc = subprocess.run(
+                return subprocess.run(
                     cmd,
                     capture_output=True,
                     text=True,
@@ -592,31 +598,39 @@ class OmpBackend(Backend):
             ) from e
         except OSError as e:
             raise BackendError(f"could not run {self.binary}: {e}", command="ai") from e
+
+    def complete_detailed(
+        self,
+        system: str,
+        user: str,
+        *,
+        model: str | None = None,
+        tools: tuple[str, ...] = (),
+        timeout: float = DEFAULT_TIMEOUT,
+    ) -> Completion:
+        self._require_binary(self.binary)
+        proc = self._run(self._argv(system, user, model, tools), timeout)
         parsed = parse_omp_events(proc.stdout or "")
         if parsed is None:
-            plain = (proc.stdout or "").strip()
-            if proc.returncode != 0 or not plain:
-                tail = " ".join(((proc.stderr or "") or plain).split())[-300:]
-                raise BackendError(
-                    f"omp exited {proc.returncode} without an answer"
-                    + (f": {tail}" if tail else ""),
-                    command="ai",
-                    remediation=[
-                        'Run `omp -p "hello"` by hand to see why; check `omp login` for the model\'s provider.'
-                    ],
-                )
-            parsed = Completion(plain)
+            parsed = self._plain_answer(proc)
         if parsed.model is None and model:
-            parsed = Completion(
-                parsed.text,
-                model,
-                parsed.input_tokens,
-                parsed.output_tokens,
-                parsed.cache_read_tokens,
-                parsed.cache_write_tokens,
-                parsed.cost_usd,
-            )
+            parsed = replace(parsed, model=model)
         return parsed
+
+    @staticmethod
+    def _plain_answer(proc: subprocess.CompletedProcess[str]) -> Completion:
+        plain = (proc.stdout or "").strip()
+        if proc.returncode != 0 or not plain:
+            tail = " ".join(((proc.stderr or "") or plain).split())[-300:]
+            raise BackendError(
+                f"omp exited {proc.returncode} without an answer"
+                + (f": {tail}" if tail else ""),
+                command="ai",
+                remediation=[
+                    'Run `omp -p "hello"` by hand to see why; check `omp login` for the model\'s provider.'
+                ],
+            )
+        return Completion(plain)
 
 
 class MockBackend(Backend):
