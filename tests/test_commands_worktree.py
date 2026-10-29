@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+import os
 from typing import Any
 
 import pytest
@@ -37,9 +38,9 @@ def test_worktree_create_bootstraps_dev_env(monkeypatch: Any, tmp_path: Any) -> 
 
     def fake_run_in(path: Any, args: list[str]) -> subprocess.CompletedProcess[str]:
         calls.append(("run", args, str(path)))
-        (target / ".venv" / "bin").mkdir(parents=True)
+        (target / ".venv" / ("Scripts" if os.name == "nt" else "bin")).mkdir(parents=True)
         for tool in worktree.DEV_TOOLS:
-            (target / ".venv" / "bin" / tool).write_text("")
+            (target / ".venv" / ("Scripts" if os.name == "nt" else "bin") / (tool + ".exe" if os.name == "nt" else tool)).write_text("")
         return _ok()
 
     monkeypatch.setattr(worktree, "_run_git", fake_git)
@@ -65,9 +66,9 @@ def test_worktree_create_resolves_relative_path(monkeypatch: Any, tmp_path: Any)
 
     def fake_run_in(path: Any, args: list[str]) -> subprocess.CompletedProcess[str]:
         calls.append(("run", args, str(path)))
-        (target / ".venv" / "bin").mkdir(parents=True)
+        (target / ".venv" / ("Scripts" if os.name == "nt" else "bin")).mkdir(parents=True)
         for tool in worktree.DEV_TOOLS:
-            (target / ".venv" / "bin" / tool).write_text("")
+            (target / ".venv" / ("Scripts" if os.name == "nt" else "bin") / (tool + ".exe" if os.name == "nt" else tool)).write_text("")
         return _ok()
 
     monkeypatch.setattr(worktree, "_run_git", fake_git)
@@ -123,10 +124,10 @@ def test_worktree_doctor_reports_missing_tools(tmp_path: Any) -> None:
 
 
 def test_worktree_doctor_accepts_ready_venv(tmp_path: Any) -> None:
-    bin_dir = tmp_path / ".venv" / "bin"
+    bin_dir = tmp_path / ".venv" / ("Scripts" if os.name == "nt" else "bin")
     bin_dir.mkdir(parents=True)
     for tool in worktree.DEV_TOOLS:
-        (bin_dir / tool).write_text("")
+        (bin_dir / (tool + ".exe" if os.name == "nt" else tool)).write_text("")
 
     assert worktree.run(["doctor", str(tmp_path), "--json"]) == 0
 

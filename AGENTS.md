@@ -304,7 +304,9 @@ the same commit.
 > Generic rule: global skill `cli/idempotent-bootstrap` (idempotent, non-fatal if offline).
 > Project specifics:
 
-On ANY `3d` invocation, if `~/.config/3d-cli/.bootstrapped` is absent, the dispatcher
+On any `3d` invocation (except commands that declare `bootstrap_openscad=False` on their
+`Command`, e.g. `solid` and `qymcad`, which need no OpenSCAD libraries), if
+`~/.config/3d-cli/.bootstrapped` is absent, the dispatcher
 auto-installs the OpenSCAD libraries (BOSL2, NopSCADlib) into the repo `libs/` ONCE,
 quietly (one-line notice), then touches the marker. It is **idempotent** and **non-fatal
 if offline** (must never block `render`/`help`). `OPENSCADPATH` is auto-exported from
