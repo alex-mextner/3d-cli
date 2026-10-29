@@ -337,14 +337,14 @@ class MoonrakerAdapter(Adapter):
     def _get(self, path: str) -> Any:
         try:
             body = http_json("GET", self.base + path, timeout=self.timeout)
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError, http.client.HTTPException) as exc:
             raise self._comm_error(f"GET {path}", exc) from exc
         return body.get("result", body) if isinstance(body, dict) else body
 
     def _post(self, path: str) -> Any:
         try:
             body = http_json("POST", self.base + path, timeout=self.timeout, body=b"")
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError, http.client.HTTPException) as exc:
             raise self._comm_error(f"POST {path}", exc) from exc
         return body.get("result", body) if isinstance(body, dict) else body
 
