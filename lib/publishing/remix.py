@@ -49,10 +49,39 @@ def _unknown_problem(spec: PublishSpec, why: str) -> str:
     )
 
 
-def check_remix(spec: PublishSpec, lookup: LicenseLookup) -> RemixCheck | None:
-    """None when the project is not a remix, else the verdict with every problem found."""
-    if not spec.remix_of:
-        return None
+def _inheritance_problems(src: License, out: License) -> list[str]:
+    """What a derivative under `out` still owes the licence `src` of its source."""
+    problems: list[str] = []
+    if src.non_commercial and not out.non_commercial:
+        problems.append(
+            f"the source is {src.label} (non-commercial): publish under a non-commercial licence, "
+            f"not {out.label}"
+        )
+    if src.share_alike and not out.share_alike:
+        problems.append(
+            f"the source is {src.label} (share-alike): publish under a share-alike licence, not {out.label}"
+        )
+    elif src.share_alike and src.id.startswith("cc-") and out.id != src.id:
+        # CC's compatibility rules: a share-alike adaptation goes out under the very same licence
+        # (BY-NC-SA is not a substitute for BY-SA).
+        problems.append(
+            f"the source is {src.label} (share-alike): publish under {src.label}, not {out.label}"
+        )
+    if src.id == "gpl" and out.id != "gpl":
+        problems.append(
+            f"the source is GNU GPL: publish under GPL, not {out.label}"
+        )
+    if src.id == "lgpl" and out.id not in ("lgpl", "gpl"):
+        problems.append(
+            f"the source is GNU LGPL: publish under LGPL or GPL, not {out.label}"
+        )
+    return problems
+
+
+def _source_licence_texts(
+    spec: PublishSpec, lookup: LicenseLookup
+) -> tuple[list[str], list[str]]:
+    """The evidence lines and the licence texts the marketplace and publish.yaml give for the source."""
     evidence: list[str] = []
     texts: list[str] = []
     try:
@@ -68,11 +97,17 @@ def check_remix(spec: PublishSpec, lookup: LicenseLookup) -> RemixCheck | None:
     if spec.remix_license:
         texts.append(spec.remix_license)
         evidence.append(f"publish.yaml declares '{spec.remix_license}'")
+    return evidence, texts
 
-    parsed = [(text, parse_license(text)) for text in texts]
-    known = tuple(lic for _, lic in parsed if lic is not None)
-    problems: list[str] = []
 
+def _barrier_problems(
+    spec: PublishSpec,
+    evidence: list[str],
+    texts: list[str],
+    parsed: list[tuple[str, License | None]],
+    known: tuple[License, ...],
+) -> list[str]:
+    """What stops the remix unless the owner's permission_ref waives it."""
     barrier: list[str] = []  # what the permission_ref can waive
     if not texts:
         barrier.append(_unknown_problem(spec, "; ".join(evidence)))
@@ -86,6 +121,19 @@ def check_remix(spec: PublishSpec, lookup: LicenseLookup) -> RemixCheck | None:
         for lic in dict.fromkeys(known)
         if lic.forbids_derivatives
     )
+    return barrier
+
+
+def check_remix(spec: PublishSpec, lookup: LicenseLookup) -> RemixCheck | None:
+    """None when the project is not a remix, else the verdict with every problem found."""
+    if not spec.remix_of:
+        return None
+    evidence, texts = _source_licence_texts(spec, lookup)
+    parsed = [(text, parse_license(text)) for text in texts]
+    known = tuple(lic for _, lic in parsed if lic is not None)
+    problems: list[str] = []
+
+    barrier = _barrier_problems(spec, evidence, texts, parsed, known)
     waived = tuple(barrier) if spec.permission_ref else ()
     if barrier and not spec.permission_ref:
         problems.extend(
@@ -97,23 +145,7 @@ def check_remix(spec: PublishSpec, lookup: LicenseLookup) -> RemixCheck | None:
     for src in dict.fromkeys(known):
         if src.id in ("cc0", "arr", "sdfl"):
             continue  # nothing to inherit; the barrier above already judged these
-        if src.non_commercial and not out.non_commercial:
-            problems.append(
-                f"the source is {src.label} (non-commercial): publish under a non-commercial licence, "
-                f"not {out.label}"
-            )
-        if src.share_alike and not out.share_alike:
-            problems.append(
-                f"the source is {src.label} (share-alike): publish under a share-alike licence, not {out.label}"
-            )
-        if src.id == "gpl" and out.id != "gpl":
-            problems.append(
-                f"the source is GNU GPL: publish under GPL, not {out.label}"
-            )
-        if src.id == "lgpl" and out.id not in ("lgpl", "gpl"):
-            problems.append(
-                f"the source is GNU LGPL: publish under LGPL or GPL, not {out.label}"
-            )
+        problems.extend(_inheritance_problems(src, out))
     return RemixCheck(
         spec.remix_of, tuple(evidence), tuple(dict.fromkeys(known)), spec.permission_ref, waived, tuple(problems)
     )

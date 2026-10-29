@@ -168,8 +168,8 @@ permission when given), and a Thingiverse source is also linked as `ancestors`.
 | Platform | Route | What `--yes` does |
 |---|---|---|
 | Thingiverse | the official REST API: `POST /things`, `POST /files/0/uploadFile` per file and image, `POST /files/0/FinalizeFiles`, `POST /things/{id}/publish` | creates the thing, uploads, finalizes and publishes; a failure after the draft exists leaves it unpublished and names it |
-| MakerWorld | no public upload API; the website driven with `agent-browser` in its own headed session per publication, `3d-publish-makerworld-<title hash>` | opens the site, uploads the files, fills title, description, tags, licence and category, takes a screenshot and **stops before the final Publish button** |
-| Printables | no public upload API (its GraphQL is internal); `agent-browser` in session `3d-publish-printables-<title hash>` | the same, plus the summary |
+| MakerWorld | no public upload API; the website driven with `agent-browser` in its own headed session per publication, `3d-publish-makerworld-<hash of title and files>` | opens the site, uploads the files, fills title, description, tags, licence and category, takes a screenshot and **stops before the final Publish button** |
+| Printables | no public upload API (its GraphQL is internal); `agent-browser` in session `3d-publish-printables-<hash of title and files>` | the same, plus the summary |
 
 Thingiverse's token goes in the `Authorization: Bearer` header only. For the two browser sites
 the login is passed with `keychain fill` from `3d-cli/<site>-user` and `3d-cli/<site>-password`

@@ -333,6 +333,23 @@ def test_a_share_alike_source_needs_a_share_alike_result(tmp_path: Path) -> None
     assert allowed is not None and allowed.problems == ()
 
 
+def test_a_by_sa_source_is_not_republished_under_by_nc_sa(tmp_path: Path) -> None:
+    refused = check_remix(
+        spec_for(tmp_path, f"remix_of: {SDFL_URL}\n", "cc-by-nc-sa"),
+        lookup_returning("CC BY-SA"),
+    )
+    assert refused is not None
+    assert any("publish under CC BY-SA" in p for p in refused.problems)
+
+
+def test_two_projects_with_one_title_get_separate_browser_sessions(
+    tmp_path: Path,
+) -> None:
+    first = evaluate(make_project(tmp_path / "a"), "makerworld").plans[0]
+    second = evaluate(make_project(tmp_path / "b"), "makerworld").plans[0]
+    assert execute._session_name(first) != execute._session_name(second)
+
+
 def test_a_gpl_source_needs_a_gpl_result(tmp_path: Path) -> None:
     verdict = check_remix(
         spec_for(tmp_path, f"remix_of: {SDFL_URL}\n", "cc-by"),

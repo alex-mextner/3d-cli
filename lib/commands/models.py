@@ -10,11 +10,17 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from cli.registry import Command
 from errors import InputNotFound, InvalidArgument, ThreeDError, UsageError
 from marketplaces.base import SITES, MarketplaceError, Model
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from marketplaces.catalog import SiteResult
+    from publishing.plan import PlatformPlan
 
 DEFAULT_LIMIT = 10
 
@@ -155,7 +161,7 @@ def _stats(model: Model) -> str:
     return "  ".join(parts)
 
 
-def _search_text(results: list[Any]) -> None:
+def _search_text(results: Sequence[SiteResult]) -> None:
     for r in results:
         if r.error is not None:
             reason = r.error.reason if isinstance(r.error, MarketplaceError) else r.error.message
@@ -168,7 +174,7 @@ def _search_text(results: list[Any]) -> None:
             print(f"  {n}. {model.title}\n     {_stats(model)}\n     {model.url}")
 
 
-def _search_json(query: str, results: list[Any]) -> None:
+def _search_json(query: str, results: Sequence[SiteResult]) -> None:
     from marketplaces import catalog
 
     print(json.dumps({
@@ -178,7 +184,7 @@ def _search_json(query: str, results: list[Any]) -> None:
     }, indent=2, ensure_ascii=False))
 
 
-def _search_exit_code(results: list[Any]) -> int:
+def _search_exit_code(results: Sequence[SiteResult]) -> int:
     errors = [r.error for r in results if r.error is not None]
     if len(errors) != len(results):
         return 0
@@ -282,7 +288,9 @@ def _read_secret(prompt: str) -> str:
     return value
 
 
-def _keychain_state(credentials: Any) -> str:
+def _keychain_state() -> str:
+    from marketplaces import credentials
+
     if credentials.secret_store() is not None:
         return "available"
     if credentials.keychain_disabled():
@@ -302,7 +310,7 @@ def _auth_status(rest: list[str]) -> int:
     if "--json" in opts:
         print(json.dumps({"keychain": credentials.secret_store() is not None, "sites": report}, indent=2))
         return 0
-    print(f"keychain: {_keychain_state(credentials)}")
+    print(f"keychain: {_keychain_state()}")
     for site, fields in report.items():
         for key, found in fields.items():
             print(f"  {site}.{key}: {', '.join(found) if found else 'not configured'}")
@@ -373,7 +381,7 @@ def _publish(argv: list[str]) -> int:
     return 0 if all(results) else 1
 
 
-def _publish_one(item: Any, token: str, *, to_stderr: bool = False) -> bool:
+def _publish_one(item: PlatformPlan, token: str, *, to_stderr: bool = False) -> bool:
     """Publish one platform's plan; True when it went through, False after printing why not.
 
     With `--json` stdout holds only the plan document, so progress lines go to stderr.

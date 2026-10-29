@@ -4,7 +4,7 @@
   `marketplaces.credentials.thingiverse_upload_token()` (env / keychain / auth.json, never the
   repo). A failure after the draft exists leaves an unpublished draft and says where.
 * MakerWorld, Printables: agent-browser drives the website in its own headed, restorable
-  session `3d-publish-<platform>-<title hash>` (one per publication). A login wall is passed with `keychain fill` (the value goes
+  session `3d-publish-<platform>-<hash of title and files>` (one per publication). A login wall is passed with `keychain fill` (the value goes
   keychain -> browser, this process never sees it); 2FA, captcha and the final Publish click
   stay with the owner, and so does any step the site's page no longer answers: the run stops
   there, leaves the window open and says what is left.
@@ -15,6 +15,7 @@ from __future__ import annotations
 import contextlib
 import fcntl
 import hashlib
+import json
 import subprocess
 import tempfile
 import uuid
@@ -65,6 +66,19 @@ def _json(response: transport.Response, what: str) -> dict[str, Any]:
     return payload
 
 
+def _post_json(
+    fetch: Fetch, url: str, payload: dict[str, Any], headers: dict[str, str]
+) -> transport.Response:
+    """POST a JSON body through the injected `fetch`, never the global transport."""
+    return fetch(
+        SITE,
+        url,
+        method="POST",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json", **headers},
+    )
+
+
 def publish_thingiverse(
     plan: PlatformPlan,
     *,
@@ -76,7 +90,7 @@ def publish_thingiverse(
     base = (api or thingiverse.api_url()).rstrip("/")
     auth = {"Authorization": f"Bearer {token}"}
     created = _json(
-        transport.post_json(SITE, f"{base}/things", plan.fields, headers=auth),
+        _post_json(fetch, f"{base}/things", plan.fields, auth),
         "POST /things",
     )
     thing_id = as_int(created.get("id"))
@@ -106,9 +120,7 @@ def publish_thingiverse(
             "target_type": "thing",
         }
         _json(
-            transport.post_json(
-                SITE, f"{base}/files/0/FinalizeFiles", finalize, headers=auth
-            ),
+            _post_json(fetch, f"{base}/files/0/FinalizeFiles", finalize, auth),
             "FinalizeFiles",
         )
         published = _json(
@@ -191,8 +203,9 @@ def _login(platform: str, base: list[str], runner: Runner) -> str | None:
 
 
 def _session_name(plan: PlatformPlan) -> str:
-    title = str(plan.fields.get("title", ""))
-    return f"3d-publish-{plan.platform}-{hashlib.sha256(title.encode()).hexdigest()[:8]}"
+    """One session per publication: the title plus where its files live (two projects may share a title)."""
+    identity = "\0".join([str(plan.fields.get("title", "")), *map(str, plan.files)])
+    return f"3d-publish-{plan.platform}-{hashlib.sha256(identity.encode()).hexdigest()[:8]}"
 
 
 def publish_browser(
@@ -200,7 +213,7 @@ def publish_browser(
 ) -> BrowserOutcome:
     """Run the plan's agent-browser steps; stop at the first one the page does not answer.
 
-    Every publication gets its own browser session (platform + title), so a draft awaiting its
+    Every publication gets its own browser session (platform + title + file locations), so a draft awaiting its
     owner's final click is never navigated away by the next project; two runs of the same
     publication queue on a lock instead of interleaving their page navigation and form fills.
     """
