@@ -12,10 +12,12 @@ import json
 import sys
 from collections.abc import Callable
 from pathlib import Path
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from errors import InputNotFound, InvalidArgument, UsageError
 
+if TYPE_CHECKING:
+    from publishing.flow import Outcome, Prepared
 
 
 class Parsed(Protocol):
@@ -70,12 +72,10 @@ def _allow(opts: dict[str, str]) -> tuple[str, ...]:
     )
 
 
-def publish(argv: list[str], parse: Parse) -> int:
-    from publishing import flow, plan
+def _publish_kind(opts: dict[str, str]) -> str:
+    """Validate the flags of `publish` that need no project or library; -> the publication kind."""
+    from publishing import plan
 
-    parsed = parse(argv, value_flags=PUBLISH_VALUES, bool_flags=PUBLISH_FLAGS)
-    opts = parsed.opts
-    project = _project(parsed.positional)
     if "--platform" not in opts:
         raise InvalidArgument(
             "--platform",
@@ -100,6 +100,29 @@ def publish(argv: list[str], parse: Parse) -> int:
                 "3d models publish DIR --kind make --make MAKE_UID --of URL --platform printables"
             ],
         )
+    return kind
+
+
+def _report_outcomes(prep: Prepared, outcomes: list[Outcome], as_json: bool) -> None:
+    from publishing import plan
+
+    if as_json:
+        doc = plan.to_json(prep.ev, dry_run=False)
+        doc["outcomes"] = [o.to_json() for o in outcomes]
+        print(json.dumps(doc, indent=2, ensure_ascii=False))
+    for o in outcomes:
+        # With --json stdout holds only the plan document, so the progress lines go to stderr.
+        out = sys.stdout if o.ok and not as_json else sys.stderr
+        print(f"{o.platform}: {o.message}", file=out)
+
+
+def publish(argv: list[str], parse: Parse) -> int:
+    from publishing import flow, plan
+
+    parsed = parse(argv, value_flags=PUBLISH_VALUES, bool_flags=PUBLISH_FLAGS)
+    opts = parsed.opts
+    project = _project(parsed.positional)
+    kind = _publish_kind(opts)
     dry_run = "--yes" not in opts
     prep = flow.prepare(
         project,
@@ -128,14 +151,7 @@ def publish(argv: list[str], parse: Parse) -> int:
     if dry_run:
         return 0
     outcomes = flow.send(prep)
-    if as_json:
-        doc = plan.to_json(prep.ev, dry_run=False)
-        doc["outcomes"] = [o.to_json() for o in outcomes]
-        print(json.dumps(doc, indent=2, ensure_ascii=False))
-    for o in outcomes:
-        # With --json stdout holds only the plan document, so the progress lines go to stderr.
-        out = sys.stdout if o.ok and not as_json else sys.stderr
-        print(f"{o.platform}: {o.message}", file=out)
+    _report_outcomes(prep, outcomes, as_json)
     return 0 if all(o.ok for o in outcomes) else 1
 
 
