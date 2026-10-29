@@ -57,18 +57,18 @@ def test_help_lists_every_subcommand_and_flag(tmp_path: Path) -> None:
 
 
 def test_usage_errors_exit_2_with_the_accepted_values(tmp_path: Path) -> None:
+    """A user mistypes the subcommand, omits the spec or gives a zero insertion axis: exit 2 names what is accepted."""
     bad_sub = run_cli(tmp_path, "assembly", "weld", "x.yaml")
-    assert bad_sub.returncode == 2 and "check, sweep, order" in bad_sub.stderr
+    assert bad_sub.returncode == 2
+    assert "check, sweep, order" in bad_sub.stderr
     assert run_cli(tmp_path, "assembly", "check").returncode == 2
     doc = peg_pocket(tmp_path)
     doc["mates"][0]["insertion"]["axis"] = [0, 0, 0]
     spec = write_spec(tmp_path, doc)
     res = cli(tmp_path, "check", str(spec))
-    assert (
-        res.returncode == 2
-        and "mates[0].insertion.axis" in res.stderr
-        and "+X" in res.stderr
-    )
+    assert res.returncode == 2
+    assert "mates[0].insertion.axis" in res.stderr
+    assert "+X" in res.stderr
     assert cli(tmp_path, "check", str(tmp_path / "missing.yaml")).returncode == 2
 
 
@@ -105,6 +105,7 @@ def test_a_clean_assembly_exits_0_and_a_blocking_boss_exits_1_with_pair_depth_an
 def test_the_check_writes_section_pngs_with_a_legend_and_distinct_part_colours(
     tmp_path: Path,
 ) -> None:
+    """A user runs assembly check on a blocked spec and gets section PNGs with a legend and distinct part colours."""
     from PIL import Image
 
     bad = write_spec(tmp_path, board_in_case(tmp_path, board_dx=1.0))
@@ -123,6 +124,7 @@ def test_the_check_writes_section_pngs_with_a_legend_and_distinct_part_colours(
 def test_mole_pattern_designed_ribs_are_allowed_and_the_board_one_millimetre_off_is_blocking(
     tmp_path: Path,
 ) -> None:
+    """A designer declares the mole-pattern ribs as allowed interference; a board one millimetre off still blocks."""
     good = as_json(
         cli(
             tmp_path,
@@ -148,6 +150,7 @@ def test_mole_pattern_designed_ribs_are_allowed_and_the_board_one_millimetre_off
 def test_the_verdict_changes_with_printer_and_material_through_the_fit_table(
     tmp_path: Path,
 ) -> None:
+    """A user checks the same assembly for another printer and material and the fit table changes the verdict."""
     doc = peg_pocket(tmp_path)
     doc["mates"][0]["fit"] = "snap"
     spec = write_spec(tmp_path, doc)
@@ -200,6 +203,7 @@ def test_the_verdict_changes_with_printer_and_material_through_the_fit_table(
 def test_sweep_reports_the_first_blocking_distance_on_any_axis(
     tmp_path: Path, axis: str
 ) -> None:
+    """A user sweeps a part along any axis and reads the first blocking distance."""
     free = write_spec(tmp_path, drawer(tmp_path, axis=axis), "free.yaml")
     assert (
         cli(
@@ -230,6 +234,7 @@ def test_sweep_reports_the_first_blocking_distance_on_any_axis(
 
 
 def test_a_snap_hook_is_swept_against_its_flex_limit(tmp_path: Path) -> None:
+    """A user sweeps a snap hook and reads the needed tip deflection against its flex limit."""
     ok = cli(
         tmp_path,
         "sweep",
@@ -266,6 +271,7 @@ def test_a_snap_hook_is_swept_against_its_flex_limit(tmp_path: Path) -> None:
 def test_order_prints_the_assembly_sequence_and_exits_1_when_there_is_none(
     tmp_path: Path,
 ) -> None:
+    """A user asks for the assembly order and gets the sequence, or exit 1 when no order exists."""
     doc = peg_pocket(tmp_path)
     write_stl(tmp_path / "cover.stl", box((-8, -8, 20.5), (8, 8, 22.5)))
     doc["parts"]["cover"] = {"mesh": "cover.stl"}
@@ -305,6 +311,7 @@ def test_order_prints_the_assembly_sequence_and_exits_1_when_there_is_none(
 def test_ergonomics_flags_a_buried_hook_and_passes_one_a_nail_reaches(
     tmp_path: Path,
 ) -> None:
+    """A user runs the ergonomics check: a buried hook is flagged and one a fingernail reaches passes."""
     buried = cli(
         tmp_path,
         "ergonomics",
@@ -339,6 +346,7 @@ def test_ergonomics_flags_a_buried_hook_and_passes_one_a_nail_reaches(
 def test_explode_bom_and_show_label_stand_ins_and_colour_every_part(
     tmp_path: Path,
 ) -> None:
+    """A user runs explode, bom and show and sees stand-ins labelled and every part coloured."""
     spec = write_spec(tmp_path, board_in_case(tmp_path))
     png = tmp_path / "out" / "exploded.png"
     res = cli(tmp_path, "explode", str(spec), "--viz", str(png), "--json")
@@ -357,6 +365,7 @@ def test_explode_bom_and_show_label_stand_ins_and_colour_every_part(
 def test_position_is_a_dry_run_until_yes_and_keeps_stand_ins_off_the_plates(
     tmp_path: Path,
 ) -> None:
+    """A user runs position: it is a dry run until --yes and keeps stand-ins off the plates."""
     spec = write_spec(tmp_path, board_in_case(tmp_path))
     out = tmp_path / "out" / "plates.3mf"
     dry = cli(tmp_path, "position", str(spec), "--3mf", str(out))
