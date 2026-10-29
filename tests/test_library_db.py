@@ -5,6 +5,7 @@ import re
 import sqlite3
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -143,6 +144,33 @@ def test_relation_make_and_status_export(conn: sqlite3.Connection) -> None:
     doc = json.loads(json.dumps(librarydb.export(conn)))
     assert doc["tables"]["model_source"][0]["files"] == [{"name": "a.stl"}]
     assert doc["tables"]["relation"][0]["rel"] == "remix_of"
+
+
+class _WriterAfterFirstRead:
+    """Connection stand-in: another writer commits a design right after export reads its first table."""
+
+    def __init__(self, inner: sqlite3.Connection, other: sqlite3.Connection) -> None:
+        self.inner, self.other, self.fired = inner, other, False
+
+    def execute(self, sql: str, *args: Any) -> sqlite3.Cursor:
+        cur = self.inner.execute(sql, *args)
+        if sql.startswith("SELECT * FROM") and not self.fired:
+            self.fired = True
+            librarydb.insert_row(self.other, "design", {"name": "late"})
+        return cur
+
+
+def test_export_is_one_snapshot_a_concurrent_commit_is_not_half_exported(tmp_path: Path) -> None:
+    path = tmp_path / "library.db"
+    reader, writer = librarydb.open_library(path), librarydb.open_library(path)
+    try:
+        librarydb.insert_row(reader, "design", {"name": "early"})
+        doc = librarydb.export(_WriterAfterFirstRead(reader, writer))  # type: ignore[arg-type]
+        assert [d["name"] for d in doc["tables"]["design"]] == ["early"]
+        assert [d["name"] for d in librarydb.export(reader)["tables"]["design"]] == ["early", "late"]
+    finally:
+        reader.close()
+        writer.close()
 
 
 def test_db_path_honours_env_then_data_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

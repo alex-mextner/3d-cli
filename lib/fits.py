@@ -164,13 +164,8 @@ def _str_list(value: Any, where: str) -> tuple[str, ...]:
     return tuple(value)
 
 
-def _parse_correction(
-    raw: Any, index: int, shapes: Sequence[str], fit_names: Sequence[str]
-) -> Correction:
-    where = f"corrections[{index}]"
-    if not isinstance(raw, dict):
-        raise FitTableError(f"{where}: expected a mapping")
-    unknown = set(raw) - {
+_CORRECTION_KEYS = frozenset(
+    {
         "printer",
         "material",
         "nozzle_mm",
@@ -182,21 +177,53 @@ def _parse_correction(
         "measured_at",
         "note",
     }
+)
+_FIT_TYPE_KEYS = frozenset(
+    {
+        "clearance_mm_per_face",
+        "interference_mm",
+        "tol_mm",
+        "applies_to",
+        "features",
+        "notes",
+    }
+)
+
+
+def _check_correction_row(raw: Any, where: str) -> None:
+    """Shape of one correction row: a mapping with known keys, the required ones and a valid source."""
+    if not isinstance(raw, dict):
+        raise FitTableError(f"{where}: expected a mapping")
+    unknown = set(raw) - _CORRECTION_KEYS
     if unknown:
         raise FitTableError(f"{where}: unknown keys {sorted(unknown)}")
     for key in ("printer", "material", "delta_mm", "source"):
         if key not in raw:
             raise FitTableError(f"{where}: missing required key {key!r}")
-    source = raw["source"]
-    if source not in SOURCES:
-        raise FitTableError(f"{where}.source: {source!r} is not one of {list(SOURCES)}")
+    if raw["source"] not in SOURCES:
+        raise FitTableError(
+            f"{where}.source: {raw['source']!r} is not one of {list(SOURCES)}"
+        )
     for key in ("printer", "material"):
         if not isinstance(raw[key], str) or not raw[key]:
             raise FitTableError(
                 f"{where}.{key}: expected a non-empty string or {WILDCARD!r}"
             )
-    nozzle = raw.get("nozzle_mm")
-    layer = raw.get("layer_height_mm")
+
+
+def _optional_num(
+    raw: Mapping[str, Any], key: str, where: str, minimum: float
+) -> float | None:
+    value = raw.get(key)
+    return None if value is None else _num(value, f"{where}.{key}", minimum=minimum)
+
+
+def _parse_correction(
+    raw: Any, index: int, shapes: Sequence[str], fit_names: Sequence[str]
+) -> Correction:
+    where = f"corrections[{index}]"
+    _check_correction_row(raw, where)
+    source = raw["source"]
     shape = raw.get("shape")
     fit_type = raw.get("fit_type")
     if shape is not None and shape not in shapes:
@@ -213,12 +240,8 @@ def _parse_correction(
         source=source,
         printer=raw["printer"],
         material=raw["material"],
-        nozzle_mm=None
-        if nozzle is None
-        else _num(nozzle, f"{where}.nozzle_mm", minimum=0.05),
-        layer_height_mm=None
-        if layer is None
-        else _num(layer, f"{where}.layer_height_mm", minimum=0.01),
+        nozzle_mm=_optional_num(raw, "nozzle_mm", where, 0.05),
+        layer_height_mm=_optional_num(raw, "layer_height_mm", where, 0.01),
         shape=shape,
         fit_type=fit_type,
         measured_at=measured_at,
@@ -226,54 +249,51 @@ def _parse_correction(
     )
 
 
-def parse_table(data: Any) -> FitTable:
-    """Validate a decoded `fits.yaml` document and return it typed; raises `FitTableError`."""
-    if not isinstance(data, dict):
-        raise FitTableError("fits table must be a mapping")
-    if data.get("schema") != SCHEMA:
-        raise FitTableError(f"schema: expected {SCHEMA!r}, got {data.get('schema')!r}")
-    shapes = _str_list(data.get("shapes"), "shapes")
+def _parse_fit_type(name: str, raw: Any, shapes: Sequence[str]) -> FitType:
+    where = f"fit_types.{name}"
+    if not isinstance(raw, dict):
+        raise FitTableError(f"{where}: expected a mapping")
+    missing = _FIT_TYPE_KEYS - set(raw)
+    if missing:
+        raise FitTableError(f"{where}: missing keys {sorted(missing)}")
+    applies = _str_list(raw["applies_to"], f"{where}.applies_to")
+    if not set(applies) <= set(shapes):
+        raise FitTableError(
+            f"{where}.applies_to: {sorted(set(applies) - set(shapes))} not in shapes"
+        )
+    return FitType(
+        name=name,
+        clearance_mm_per_face=_num(
+            raw["clearance_mm_per_face"], f"{where}.clearance_mm_per_face", minimum=0
+        ),
+        interference_mm=_num(
+            raw["interference_mm"], f"{where}.interference_mm", minimum=0
+        ),
+        tol_mm=_num(raw["tol_mm"], f"{where}.tol_mm", minimum=0),
+        applies_to=applies,
+        features=_str_list(raw["features"], f"{where}.features"),
+        notes=str(raw["notes"]).strip(),
+    )
+
+
+def _parse_fit_types(
+    data: Mapping[str, Any], shapes: Sequence[str]
+) -> dict[str, FitType]:
     raw_types = data.get("fit_types")
     if not isinstance(raw_types, dict) or not raw_types:
         raise FitTableError("fit_types: expected a non-empty mapping")
-    fit_types: dict[str, FitType] = {}
-    for name, raw in raw_types.items():
-        where = f"fit_types.{name}"
-        if not isinstance(raw, dict):
-            raise FitTableError(f"{where}: expected a mapping")
-        missing = {
-            "clearance_mm_per_face",
-            "interference_mm",
-            "tol_mm",
-            "applies_to",
-            "features",
-            "notes",
-        } - set(raw)
-        if missing:
-            raise FitTableError(f"{where}: missing keys {sorted(missing)}")
-        applies = _str_list(raw["applies_to"], f"{where}.applies_to")
-        if not set(applies) <= set(shapes):
-            raise FitTableError(
-                f"{where}.applies_to: {sorted(set(applies) - set(shapes))} not in shapes"
-            )
-        fit_types[name] = FitType(
-            name=name,
-            clearance_mm_per_face=_num(
-                raw["clearance_mm_per_face"],
-                f"{where}.clearance_mm_per_face",
-                minimum=0,
-            ),
-            interference_mm=_num(
-                raw["interference_mm"], f"{where}.interference_mm", minimum=0
-            ),
-            tol_mm=_num(raw["tol_mm"], f"{where}.tol_mm", minimum=0),
-            applies_to=applies,
-            features=_str_list(raw["features"], f"{where}.features"),
-            notes=str(raw["notes"]).strip(),
-        )
+    fit_types = {
+        name: _parse_fit_type(name, raw, shapes) for name, raw in raw_types.items()
+    }
     missing_types = {"snap", "sliding", "tight", "press", "glue"} - set(fit_types)
     if missing_types:
         raise FitTableError(f"fit_types: missing {sorted(missing_types)}")
+    return fit_types
+
+
+def _parse_aliases(
+    data: Mapping[str, Any], fit_types: Mapping[str, FitType]
+) -> dict[str, Alias]:
     aliases: dict[str, Alias] = {}
     for name, raw in (data.get("aliases") or {}).items():
         where = f"aliases.{name}"
@@ -286,6 +306,29 @@ def parse_table(data: Any) -> FitTable:
         aliases[name] = Alias(
             name, raw["fit_type"], _num(raw.get("extra_mm", 0.0), f"{where}.extra_mm")
         )
+    return aliases
+
+
+def _is_default_row(c: Correction) -> bool:
+    return (
+        c.printer == WILDCARD
+        and c.material == WILDCARD
+        and c.nozzle_mm is None
+        and c.layer_height_mm is None
+        and c.shape is None
+        and c.fit_type is None
+    )
+
+
+def parse_table(data: Any) -> FitTable:
+    """Validate a decoded `fits.yaml` document and return it typed; raises `FitTableError`."""
+    if not isinstance(data, dict):
+        raise FitTableError("fits table must be a mapping")
+    if data.get("schema") != SCHEMA:
+        raise FitTableError(f"schema: expected {SCHEMA!r}, got {data.get('schema')!r}")
+    shapes = _str_list(data.get("shapes"), "shapes")
+    fit_types = _parse_fit_types(data, shapes)
+    aliases = _parse_aliases(data, fit_types)
     raw_corrections = data.get("corrections")
     if not isinstance(raw_corrections, list):
         raise FitTableError("corrections: expected a list")
@@ -293,15 +336,7 @@ def parse_table(data: Any) -> FitTable:
         _parse_correction(row, i, shapes, [*fit_types, *aliases])
         for i, row in enumerate(raw_corrections)
     )
-    if not any(
-        c.printer == WILDCARD
-        and c.material == WILDCARD
-        and c.nozzle_mm is None
-        and c.layer_height_mm is None
-        and c.shape is None
-        and c.fit_type is None
-        for c in corrections
-    ):
+    if not any(_is_default_row(c) for c in corrections):
         raise FitTableError(
             "corrections: the fully wildcard default row (printer '*', material '*') is required"
         )
@@ -333,44 +368,51 @@ def _norm(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", name.lower())
 
 
+def _same_name(wanted: str, got: str | None) -> bool:
+    return got is not None and _norm(wanted) == _norm(got)
+
+
+def _same_dim(wanted: float | None, got: float | None) -> bool:
+    return wanted is not None and got is not None and abs(wanted - got) <= _NOZZLE_EPS
+
+
 def _matches(
     correction: Correction,
     shape: str,
-    fit_type: str,
+    fit_names: tuple[str, str | None],
     printer: str | None,
     material: str | None,
     nozzle_mm: float | None,
     layer_height_mm: float | None,
 ) -> int | None:
     """Specificity score when `correction` applies to the query, None when it does not."""
+    # (the row constrains this dimension, the query satisfies it, specificity weight)
+    constraints = (
+        (correction.printer != WILDCARD, _same_name(correction.printer, printer), 32),
+        (
+            correction.material != WILDCARD,
+            _same_name(correction.material, material),
+            16,
+        ),
+        (
+            correction.nozzle_mm is not None,
+            _same_dim(correction.nozzle_mm, nozzle_mm),
+            8,
+        ),
+        (
+            correction.layer_height_mm is not None,
+            _same_dim(correction.layer_height_mm, layer_height_mm),
+            4,
+        ),
+        (correction.shape is not None, correction.shape == shape, 2),
+        (correction.fit_type is not None, correction.fit_type in fit_names, 1),
+    )
     score = 0
-    if correction.printer != WILDCARD:
-        if printer is None or _norm(correction.printer) != _norm(printer):
-            return None
-        score += 32
-    if correction.material != WILDCARD:
-        if material is None or _norm(correction.material) != _norm(material):
-            return None
-        score += 16
-    if correction.nozzle_mm is not None:
-        if nozzle_mm is None or abs(correction.nozzle_mm - nozzle_mm) > _NOZZLE_EPS:
-            return None
-        score += 8
-    if correction.layer_height_mm is not None:
-        if (
-            layer_height_mm is None
-            or abs(correction.layer_height_mm - layer_height_mm) > _NOZZLE_EPS
-        ):
-            return None
-        score += 4
-    if correction.shape is not None:
-        if correction.shape != shape:
-            return None
-        score += 2
-    if correction.fit_type is not None:
-        if correction.fit_type != fit_type:
-            return None
-        score += 1
+    for constrained, satisfied, weight in constraints:
+        if constrained:
+            if not satisfied:
+                return None
+            score += weight
     return score
 
 
@@ -379,6 +421,7 @@ def select_correction(
     *,
     shape: str,
     fit_type: str,
+    alias: str | None = None,
     printer: str | None = None,
     material: str | None = None,
     nozzle_mm: float | None = None,
@@ -387,13 +430,15 @@ def select_correction(
     """The one correction to apply and the matching rows it supersedes.
 
     Order: specificity (printer > material > nozzle > layer > shape > fit_type), then source
-    (calibration > manual > default), then newest `measured_at`. Raises `FitTableError` without a match
-    (the table loader guarantees a default row, so only caller-supplied lists can trigger it).
+    (calibration > manual > default), then newest `measured_at`. A row's `fit_type` matches the canonical
+    `fit_type` or the `alias` the caller asked for (an alias-tagged row stays specific to that alias).
+    Raises `FitTableError` without a match (the table loader guarantees a default row, so only
+    caller-supplied lists can trigger it).
     """
     scored = []
     for c in corrections:
         score = _matches(
-            c, shape, fit_type, printer, material, nozzle_mm, layer_height_mm
+            c, shape, (fit_type, alias), printer, material, nozzle_mm, layer_height_mm
         )
         if score is not None:
             scored.append((score, -SOURCES.index(c.source), c.measured_at or "", c))
@@ -403,6 +448,64 @@ def select_correction(
         )
     scored.sort(key=lambda t: t[:3], reverse=True)
     return scored[0][3], [t[3] for t in scored[1:]]
+
+
+def _fit_type_provenance(
+    base: FitType, alias: Alias | None, shape: str
+) -> tuple[float, list[dict[str, Any]]]:
+    """The fit row's per-face clearance (alias extra included) and the provenance entries that explain it."""
+    provenance: list[dict[str, Any]] = [
+        {
+            "kind": "fit_type",
+            "id": base.name,
+            "source": f"{TABLE_PATH.name}:fit_types.{base.name}",
+            "clearance_mm_per_face": base.clearance_mm_per_face,
+            "interference_mm": base.interference_mm,
+            "tol_mm": base.tol_mm,
+        }
+    ]
+    clearance = base.clearance_mm_per_face
+    if alias:
+        clearance += alias.extra_mm
+        provenance.append(
+            {
+                "kind": "alias",
+                "id": alias.name,
+                "source": f"{TABLE_PATH.name}:aliases.{alias.name}",
+                "fit_type": alias.fit_type,
+                "extra_mm": alias.extra_mm,
+            }
+        )
+    if shape not in base.applies_to:
+        provenance.append(
+            {
+                "kind": "note",
+                "id": "shape_outside_applies_to",
+                "message": f"{base.name} is meant for {list(base.applies_to)}; {shape} is outside that list",
+            }
+        )
+    return clearance, provenance
+
+
+def _correction_entry(
+    chosen: Correction, fallback: bool, printer: str | None, material: str | None
+) -> dict[str, Any]:
+    """The provenance entry of the applied correction; a fallback names the dimensions it fell back on."""
+    entry: dict[str, Any] = {
+        "kind": "correction",
+        **chosen.to_dict(),
+        "fallback": fallback,
+    }
+    if fallback:
+        entry["fallback_reason"] = [
+            dim
+            for dim, asked, got in (
+                ("printer", printer, chosen.printer),
+                ("material", material, chosen.material),
+            )
+            if asked is not None and got == WILDCARD
+        ]
+    return entry
 
 
 def resolve(
@@ -432,41 +535,12 @@ def resolve(
     if shape not in tbl.shapes:
         raise InvalidArgument("shape", shape, list(tbl.shapes), command="fits")
 
-    provenance: list[dict[str, Any]] = [
-        {
-            "kind": "fit_type",
-            "id": name,
-            "source": f"{TABLE_PATH.name}:fit_types.{name}",
-            "clearance_mm_per_face": base.clearance_mm_per_face,
-            "interference_mm": base.interference_mm,
-            "tol_mm": base.tol_mm,
-        }
-    ]
-    clearance = base.clearance_mm_per_face
-    if alias:
-        clearance += alias.extra_mm
-        provenance.append(
-            {
-                "kind": "alias",
-                "id": alias.name,
-                "source": f"{TABLE_PATH.name}:aliases.{alias.name}",
-                "fit_type": alias.fit_type,
-                "extra_mm": alias.extra_mm,
-            }
-        )
-    if shape not in base.applies_to:
-        provenance.append(
-            {
-                "kind": "note",
-                "id": "shape_outside_applies_to",
-                "message": f"{name} is meant for {list(base.applies_to)}; {shape} is outside that list",
-            }
-        )
-
+    clearance, provenance = _fit_type_provenance(base, alias, shape)
     chosen, superseded = select_correction(
         [*extra_corrections, *tbl.corrections],
         shape=shape,
         fit_type=name,
+        alias=alias.name if alias else None,
         printer=printer,
         material=material,
         nozzle_mm=nozzle,
@@ -475,21 +549,7 @@ def resolve(
     fallback = (printer is not None and chosen.printer == WILDCARD) or (
         material is not None and chosen.material == WILDCARD
     )
-    entry: dict[str, Any] = {
-        "kind": "correction",
-        **chosen.to_dict(),
-        "fallback": fallback,
-    }
-    if fallback:
-        entry["fallback_reason"] = [
-            dim
-            for dim, asked, got in (
-                ("printer", printer, chosen.printer),
-                ("material", material, chosen.material),
-            )
-            if asked is not None and got == WILDCARD
-        ]
-    provenance.append(entry)
+    provenance.append(_correction_entry(chosen, fallback, printer, material))
     provenance.extend(
         {"kind": "correction_superseded", **c.to_dict()}
         for c in superseded

@@ -103,6 +103,14 @@ def test_a_matching_correction_row_is_applied_and_explained() -> None:
     assert res.provenance[1]["source"] == "calibration" and res.provenance[1]["delta_mm"] == 0.07
 
 
+def test_a_correction_tagged_with_an_alias_applies_to_that_alias_only() -> None:
+    row = Correction(delta_mm=0.05, source="manual", printer="k1se", fit_type="normal",
+                     measured_at="2026-10-24T10:00:00.000Z")
+    assert fits.resolve("normal", "planar", "k1se", extra_corrections=[row]).clearance_mm == 0.25
+    assert fits.resolve("sliding", "planar", "k1se", extra_corrections=[row]).clearance_mm == 0.2
+    assert fits.resolve("loose", "planar", "k1se", extra_corrections=[row]).clearance_mm == 0.35
+
+
 def test_a_correction_for_another_nozzle_layer_or_shape_does_not_apply() -> None:
     row = Correction(delta_mm=0.5, source="manual", printer="k1se", material="PLA", nozzle_mm=0.6,
                      measured_at="2026-10-24T10:00:00.000Z")

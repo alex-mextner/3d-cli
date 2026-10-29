@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import inspect
 import json
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -74,6 +76,24 @@ def test_queue_creates_design_and_queued_make_idempotently(dbpath: str) -> None:
     conn = librarydb.open_library(dbpath)
     assert conn.execute("SELECT COUNT(*) FROM design").fetchone()[0] == 1
     assert [r["status"] for r in conn.execute("SELECT status FROM make")] == ["queued", "queued"]
+
+
+def test_queue_reads_back_a_design_another_writer_created_first(dbpath: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    real = librarydb.insert_row
+    raced: list[str] = []
+
+    def losing_race(conn: sqlite3.Connection, table: str, values: dict[str, Any], **kw: Any) -> Any:
+        if table == "design" and not raced:
+            raced.append(values["name"])
+            real(conn, table, values)  # the other writer's insert lands between our SELECT and INSERT
+        return real(conn, table, values, **kw)
+
+    monkeypatch.setattr(librarydb, "insert_row", losing_race)
+    res = actions.queue("case", db_path=dbpath)
+    assert raced == ["case"] and res["ok"] is True and res["errors"] == []
+    conn = librarydb.open_library(dbpath)
+    assert conn.execute("SELECT COUNT(*) FROM design").fetchone()[0] == 1
+    assert conn.execute("SELECT uid FROM design").fetchone()["uid"] == res["data"]["design"]
 
 
 def test_queue_unknown_source_is_an_error_result(dbpath: str) -> None:

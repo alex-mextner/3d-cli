@@ -187,14 +187,7 @@ def queue(
 
     conn = librarydb.open_library(db_path)
     try:
-        existing = conn.execute(
-            "SELECT id, uid FROM design WHERE name = ?", (design,)
-        ).fetchone()
-        design_row = (
-            (int(existing["id"]), str(existing["uid"]))
-            if existing
-            else _inserted(librarydb.insert_row(conn, "design", {"name": design}))
-        )
+        design_row = _get_or_create_design(conn, design)
         source_id: int | None = None
         if source is not None:
             src = conn.execute(
@@ -321,8 +314,23 @@ def publish(
     )
 
 
-def _inserted(ins: Any) -> tuple[int, str]:
-    return ins.id, ins.uid
+def _get_or_create_design(conn: Any, name: str) -> tuple[int, str]:
+    """The design row for `name`; a concurrent first insert (UNIQUE name) is read back, not raised."""
+    import sqlite3
+
+    from library import db as librarydb
+
+    lookup = "SELECT id, uid FROM design WHERE name = ?"
+    row = conn.execute(lookup, (name,)).fetchone()
+    if row is None:
+        try:
+            made = librarydb.insert_row(conn, "design", {"name": name})
+            return made.id, made.uid
+        except sqlite3.IntegrityError:
+            row = conn.execute(lookup, (name,)).fetchone()
+            if row is None:
+                raise
+    return int(row["id"]), str(row["uid"])
 
 
 # --------------------------------------------------------------------------- registry

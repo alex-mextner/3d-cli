@@ -178,14 +178,22 @@ def status(conn: sqlite3.Connection, path: str | Path | None = None) -> dict[str
 
 
 def export(conn: sqlite3.Connection) -> dict[str, Any]:
-    """Every library table as decoded JSON rows (JSON columns parsed), for backup and agent hand-off."""
+    """Every library table as decoded JSON rows (JSON columns parsed), for backup and agent hand-off.
+
+    All tables are read inside one read transaction, so a writer that commits between two tables cannot
+    leave a make in the export without its design.
+    """
     out: dict[str, Any] = {"schema": SCHEMA, "exported_at": db.utc_now(), "tables": {}}
-    for table, (_, json_columns) in TABLES.items():
-        rows = []
-        for r in conn.execute(f"SELECT * FROM {table} ORDER BY id"):
-            d = dict(r)
-            for col in json_columns:
-                d[col] = json.loads(d[col])
-            rows.append(d)
-        out["tables"][table] = rows
+    conn.execute("BEGIN")
+    try:
+        for table, (_, json_columns) in TABLES.items():
+            rows = []
+            for r in conn.execute(f"SELECT * FROM {table} ORDER BY id"):
+                d = dict(r)
+                for col in json_columns:
+                    d[col] = json.loads(d[col])
+                rows.append(d)
+            out["tables"][table] = rows
+    finally:
+        conn.execute("COMMIT")
     return out
