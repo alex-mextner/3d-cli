@@ -162,7 +162,12 @@ def run_agent_browser(argv: Sequence[str]) -> tuple[int, str]:
     limit = KEYCHAIN_APPROVAL_TIMEOUT if argv[0] == "keychain" else BROWSER_TIMEOUT
     try:
         done = subprocess.run(
-            list(argv), capture_output=True, text=True, timeout=limit, check=False
+            list(argv),
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=limit,
+            check=False,
         )
     except FileNotFoundError:
         return 127, f"{argv[0]} is not installed"

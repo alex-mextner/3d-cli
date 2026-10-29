@@ -139,6 +139,7 @@ def _default_images(project: Path) -> tuple[Path, ...]:
         if p.suffix.lower() in IMAGE_EXTS
         and p.is_file()
         and not p.name.startswith(".")
+        and not p.is_symlink()
         and root in p.resolve().parents  # a symlink must not smuggle in a file from outside
     )
 
@@ -158,7 +159,7 @@ def _images(project: Path, data: dict[str, Any]) -> tuple[Path, ...]:
     images: list[Path] = []
     for rel in declared:
         path = (project / rel).resolve()
-        if root not in path.parents:
+        if root not in path.parents or "references" in path.relative_to(root).parts:
             raise InvalidArgument(
                 f"{SPEC_NAME}: images",
                 rel,

@@ -86,10 +86,8 @@ def test_dry_run_sends_nothing_even_when_the_remix_source_is_looked_up(
         )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "marketplace lists 'Creative Commons - Attribution'" in result.stdout
-    assert "=> allowed" in result.stdout and '"ancestors"' not in result.stdout
-    assert (
-        "ancestors: [5594736]" not in result.stdout
-    )  # fields print as key: value; asserted below via JSON
+    assert "=> allowed" in result.stdout
+    assert "ancestors: 5594736" in result.stdout and "is_remix: True" in result.stdout
     assert server.requests and all(method == "GET" for method, _, _ in server.requests)
 
 

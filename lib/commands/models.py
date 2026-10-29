@@ -399,6 +399,9 @@ def _publish_one(item: PlatformPlan, token: str, *, to_stderr: bool = False) -> 
     except ThreeDError as exc:
         print(exc.render(), file=sys.stderr)
         return False
+    except OSError as exc:  # lock file, temp dir, unreadable upload: say so instead of a traceback
+        print(f"{item.platform}: publish failed: {exc}", file=sys.stderr)
+        return False
 
 
 SUBCOMMANDS = {"search": _search, "show": _show, "download": _download, "publish": _publish, "auth": _auth}

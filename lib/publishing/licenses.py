@@ -102,7 +102,9 @@ def parse_license(text: str) -> License | None:
         return LICENSES["sdfl"]
     if "all rights reserved" in joined or "proprietary" in word:
         return LICENSES["arr"]
-    if (
+    if "arr" in word:
+        return LICENSES["arr"]
+    if "not" not in word and (
         word & {"cc0", "pd0"}
         or "public domain" in joined
         or "cc zero" in joined
@@ -118,7 +120,8 @@ def parse_license(text: str) -> License | None:
 def _cc_license(tokens: list[str], word: set[str], joined: str) -> License | None:
     """The Creative Commons licence the tokens name, or None when they are not CC at all."""
     is_cc = (
-        bool(word & {"cc", "attribution"})  # "Creative Commons" alone names no licence
+        "cc" in word
+        or ("creative commons" in joined and "attribution" in word)  # "Creative Commons" alone names no licence
         or tokens == ["by"]  # MakerWorld's bare label for CC BY
         or ("by" in word and bool(word & {"nc", "sa", "nd"}))
     )

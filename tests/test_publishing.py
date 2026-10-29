@@ -48,6 +48,7 @@ def lookup_failing(url: str) -> str:
         ("Creative Commons - Attribution - No Derivatives", "cc-by-nd"),
         ("cc-nc-nd", "cc-by-nc-nd"),
         ("cc", "cc-by"),
+        ("arr", "arr"),
         ("BY", "cc-by"),
         ("pd0", "cc0"),
         ("Public Domain", "cc0"),
@@ -65,7 +66,8 @@ def test_parse_license_recognises_what_the_sites_print(
 
 @pytest.mark.parametrize(
     "text",
-    ["", "   ", "my own terms", "share-alike nd", "Creative Commons", "Creative Commons custom terms"],
+    ["", "   ", "my own terms", "share-alike nd", "Creative Commons", "Creative Commons custom terms",
+     "Free to use, attribution required, no remixing", "Not public domain - personal use only"],
 )
 def test_parse_license_returns_none_for_what_it_does_not_know(text: str) -> None:
     assert parse_license(text) is None
@@ -173,6 +175,14 @@ def test_a_print_folder_linked_to_references_is_not_scanned(tmp_path: Path) -> N
 @pytest.mark.parametrize("tags", ["false", "0", '""', "{}"])
 def test_malformed_tags_are_refused_not_dropped(tmp_path: Path, tags: str) -> None:
     project = make_project(tmp_path, YAML + f"tags: {tags}\n")
+    with pytest.raises(InvalidArgument):
+        load_spec(project)
+
+
+def test_images_from_references_are_refused(tmp_path: Path) -> None:
+    project = make_project(tmp_path, YAML + "images: [references/orig.png]\n")
+    (project / "references").mkdir(exist_ok=True)
+    (project / "references" / "orig.png").write_bytes(b"\x89PNG")
     with pytest.raises(InvalidArgument):
         load_spec(project)
 
