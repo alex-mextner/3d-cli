@@ -67,6 +67,27 @@ def _px_box(lay: dict[str, Any], box: list[float]) -> tuple[int, int, int, int]:
     )
 
 
+def _photo_px_per_mm(
+    found: dict[int, Any], ids: list[int], wanted: dict[int, dict[str, Any]]
+) -> float:
+    """Resolution of the card in the photo, from the fiducial edge lengths."""
+    import numpy as np
+
+    marker_mm = float(next(iter(wanted.values()))["size_mm"])
+    edges = [
+        np.linalg.norm(found[i][(k + 1) % 4] - found[i][k])
+        for i in ids
+        for k in range(4)
+    ]
+    photo_ppm = float(np.mean(edges)) / marker_mm
+    if photo_ppm < MIN_PX_PER_MM:
+        raise ReadoutError(
+            f"the card is {photo_ppm:.1f} px/mm in the photo, under {MIN_PX_PER_MM:g}: "
+            "move the camera closer so the card fills the frame"
+        )
+    return photo_ppm
+
+
 def _rectify(img: Any, lay: dict[str, Any]) -> tuple[Any, dict[str, Any]]:
     """The photo warped to the card at px_per_mm, and what the fiducials said about the photo."""
     import calib_rectify as cr
@@ -104,18 +125,7 @@ def _rectify(img: Any, lay: dict[str, Any]) -> tuple[Any, dict[str, Any]]:
             "is another plate or card with the same markers in the frame, or the card bent or crumpled? "
             "lay it flat and shoot again"
         )
-    marker_mm = float(next(iter(wanted.values()))["size_mm"])
-    edges = [
-        np.linalg.norm(found[i][(k + 1) % 4] - found[i][k])
-        for i in ids
-        for k in range(4)
-    ]
-    photo_ppm = float(np.mean(edges)) / marker_mm
-    if photo_ppm < MIN_PX_PER_MM:
-        raise ReadoutError(
-            f"the card is {photo_ppm:.1f} px/mm in the photo, under {MIN_PX_PER_MM:g}: "
-            "move the camera closer so the card fills the frame"
-        )
+    photo_ppm = _photo_px_per_mm(found, ids, wanted)
     ppm = int(lay["px_per_mm"])
     work = ppm * max(1, min(MAX_WORK_FACTOR, int(photo_ppm // ppm)))
     w_mm, h_mm = lay["card_mm"]
@@ -238,94 +248,99 @@ def _spread(px: Any, gain: Any, lab: tuple[float, float, float]) -> float:
     return float(np.percentile(d, 90))
 
 
-def read_photo(
-    manifest: dict[str, Any],
-    photo: Path,
-    out: Path,
-    *,
-    white: str = "card",
-    white_level: int = DEFAULT_WHITE_LEVEL,
-    check_qr: bool = True,
-    manifest_name: str = "",
+def _check_qr(
+    img: Any, rect: Any, lay: dict[str, Any], mid: str, check_qr: bool
 ) -> dict[str, Any]:
-    """Read the photo, write OUT.rectified.png, OUT.readout.png, OUT.readout.json; return the record."""
-    import numpy as np
-    from PIL import Image
-
-    lay = manifest["readout"]
-    mid = manifest["id"]
-    if not 1 <= white_level <= 255:
-        raise ReadoutError(f"white level {white_level} must be 1..255")
-    try:
-        img, sha = load_image(photo)
-    except MixTargetError as e:
-        raise ReadoutError(f"{e}: send a JPEG or PNG of the card") from e
-    rect, fid = _rectify(img, lay)
-
+    """The QR section of the record; raises when the card is not this tester's."""
     qr: dict[str, Any] = {"expected": mix_card.payload(mid)}
-    if check_qr:
-        text = _decode_qr(img, rect, lay)
-        qr["read"] = text or None
-        if not text:
-            raise ReadoutError(
-                "no QR code found on the card: reshoot with the QR sharp, or pass --no-qr-check "
-                "to read the card without confirming which tester it belongs to"
-            )
-        if text != mix_card.payload(mid):
-            named = text.removeprefix(mix_card.PAYLOAD_PREFIX)
-            raise ReadoutError(
-                f"the photo's QR names {named!r}, not this manifest ({mid}): "
-                "it is the card of another tester"
-            )
-        qr["status"] = "match"
-    else:
+    if not check_qr:
         qr["status"] = "skipped"
+        return qr
+    text = _decode_qr(img, rect, lay)
+    qr["read"] = text or None
+    if not text:
+        raise ReadoutError(
+            "no QR code found on the card: reshoot with the QR sharp, or pass --no-qr-check "
+            "to read the card without confirming which tester it belongs to"
+        )
+    if text != mix_card.payload(mid):
+        named = text.removeprefix(mix_card.PAYLOAD_PREFIX)
+        raise ReadoutError(
+            f"the photo's QR names {named!r}, not this manifest ({mid}): "
+            "it is the card of another tester"
+        )
+    qr["status"] = "match"
+    return qr
 
-    entries: list[dict[str, Any]] = [
-        {"kind": "candidate", **c} for c in manifest["candidates"]
-    ] + [{"kind": "reference", **r} for r in manifest["references"]]
-    by_number = {e["number"]: e for e in entries}
-    cells = {c["number"]: c for c in lay["cells"]}
 
-    paper: _PaperLight | None = None
-    swatch_gain: Any = None
+def _swatch_white(
+    rect: Any,
+    lay: dict[str, Any],
+    white: str,
+    white_level: int,
+    by_number: dict[int, dict[str, Any]],
+    cells: dict[int, dict[str, Any]],
+) -> tuple[Any, dict[str, Any]]:
+    """Gain that maps the pure reference swatch named by `white` to its known colour."""
+    import numpy as np
+
+    try:
+        num = int(white)
+    except ValueError:
+        raise ReadoutError(
+            f"--white {white!r}: card, or the number of a pure reference swatch"
+        ) from None
+    ref = by_number.get(num)
+    if ref is None or ref["kind"] != "reference":
+        raise ReadoutError(
+            f"--white {num}: not a pure reference swatch of this tester "
+            f"(references: {sorted(n for n, e in by_number.items() if e['kind'] == 'reference')})"
+        )
+    try:
+        px = _patch_pixels(rect, lay, cells[num]["patch_box"])
+        _, ref_rgb = white_gain(px, white_level, f"swatch {num}")
+    except MixTargetError as e:
+        raise ReadoutError(f"{e}: swatch {num} is too dark to balance on") from e
+    want = decode_srgb(
+        np.array([int(ref["hex"][i : i + 2], 16) for i in (1, 3, 5)]) / 255.0
+    )
+    gain = want / decode_srgb(np.median(px, axis=0) / 255.0)
+    return gain, {
+        "mode": "swatch",
+        "number": num,
+        "rgb": list(ref_rgb),
+        "maps_to": ref["hex"],
+    }
+
+
+def _white_reference(
+    rect: Any,
+    lay: dict[str, Any],
+    white: str,
+    white_level: int,
+    by_number: dict[int, dict[str, Any]],
+    cells: dict[int, dict[str, Any]],
+) -> tuple[_PaperLight | None, Any, dict[str, Any]]:
+    """(paper light, swatch gain, white description): the card paper or one swatch is white."""
     if white == "card":
         paper = _PaperLight(rect, lay, white_level)
-        white_info = paper.describe()
-    else:
-        try:
-            num = int(white)
-        except ValueError:
-            raise ReadoutError(
-                f"--white {white!r}: card, or the number of a pure reference swatch"
-            ) from None
-        ref = by_number.get(num)
-        if ref is None or ref["kind"] != "reference":
-            raise ReadoutError(
-                f"--white {num}: not a pure reference swatch of this tester "
-                f"(references: {sorted(n for n, e in by_number.items() if e['kind'] == 'reference')})"
-            )
-        try:
-            px = _patch_pixels(rect, lay, cells[num]["patch_box"])
-            _, ref_rgb = white_gain(px, white_level, f"swatch {num}")
-        except MixTargetError as e:
-            raise ReadoutError(f"{e}: swatch {num} is too dark to balance on") from e
-        want = decode_srgb(
-            np.array([int(ref["hex"][i : i + 2], 16) for i in (1, 3, 5)]) / 255.0
-        )
-        swatch_gain = want / decode_srgb(np.median(px, axis=0) / 255.0)
-        white_info = {
-            "mode": "swatch",
-            "number": num,
-            "rgb": list(ref_rgb),
-            "maps_to": ref["hex"],
-        }
+        return paper, None, paper.describe()
+    gain, info = _swatch_white(rect, lay, white, white_level, by_number, cells)
+    return None, gain, info
 
-    target = manifest["target"]
+
+def _read_rows(
+    rect: Any,
+    lay: dict[str, Any],
+    by_number: dict[int, dict[str, Any]],
+    cells: dict[int, dict[str, Any]],
+    paper: _PaperLight | None,
+    swatch_gain: Any,
+    target: str,
+    warnings: list[str],
+) -> list[dict[str, Any]]:
+    """One measured row per swatch; flat-patch warnings are appended to `warnings`."""
     rows: list[dict[str, Any]] = []
-    warnings: list[str] = []
-    if "warning" in fid:
-        warnings.append(fid["warning"])
     for num in sorted(by_number):
         entry, cell = by_number[num], cells[num]
         box = cell["patch_box"]
@@ -335,6 +350,9 @@ def read_photo(
             if paper is not None
             else swatch_gain
         )
+        # a tester built from measured colours predicts from the model's colour, not from the last
+        # measurement: `nominal_hex` (a pure spool) and `model_hex` (a mix) keep it in the manifest
+        predicted = entry.get("nominal_hex") or entry.get("model_hex") or entry["hex"]
         lab = median_lab(px, gain)
         measured = lab_to_hex(lab)
         spread = _spread(px, gain, lab)
@@ -349,10 +367,10 @@ def read_photo(
                 "kind": entry["kind"],
                 "pattern": entry.get("pattern"),
                 "slot": entry.get("slot"),
-                "predicted_hex": entry["hex"],
+                "predicted_hex": predicted,
                 "measured_hex": measured,
                 "measured_lab": [round(v, 2) for v in lab],
-                "delta_e_predicted": round(hex_delta_e(measured, entry["hex"]), 2),
+                "delta_e_predicted": round(hex_delta_e(measured, predicted), 2),
                 "delta_e_target": round(hex_delta_e(measured, target), 2),
                 "samples": len(px),
                 "spread": round(spread, 2),
@@ -360,6 +378,10 @@ def read_photo(
                 "calibration": entry.get("calibration"),
             }
         )
+    return rows
+
+
+def _readout_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
     mixes = [r for r in rows if r["kind"] == "candidate"]
     summary: dict[str, Any] = {
         "swatches": len(rows),
@@ -376,6 +398,48 @@ def read_photo(
             "measured_hex": best["measured_hex"],
             "delta_e_target": best["delta_e_target"],
         }
+    return summary
+
+
+def read_photo(
+    manifest: dict[str, Any],
+    photo: Path,
+    out: Path,
+    *,
+    white: str = "card",
+    white_level: int = DEFAULT_WHITE_LEVEL,
+    check_qr: bool = True,
+    manifest_name: str = "",
+) -> dict[str, Any]:
+    """Read the photo, write OUT.rectified.png, OUT.readout.png, OUT.readout.json; return the record."""
+    from PIL import Image
+
+    lay = manifest["readout"]
+    mid = manifest["id"]
+    if not 1 <= white_level <= 255:
+        raise ReadoutError(f"white level {white_level} must be 1..255")
+    try:
+        img, sha = load_image(photo)
+    except MixTargetError as e:
+        raise ReadoutError(f"{e}: send a JPEG or PNG of the card") from e
+    rect, fid = _rectify(img, lay)
+
+    qr = _check_qr(img, rect, lay, mid, check_qr)
+
+    entries: list[dict[str, Any]] = [
+        {"kind": "candidate", **c} for c in manifest["candidates"]
+    ] + [{"kind": "reference", **r} for r in manifest["references"]]
+    by_number = {e["number"]: e for e in entries}
+    cells = {c["number"]: c for c in lay["cells"]}
+
+    paper, swatch_gain, white_info = _white_reference(
+        rect, lay, white, white_level, by_number, cells
+    )
+
+    target = manifest["target"]
+    warnings: list[str] = [fid["warning"]] if "warning" in fid else []
+    rows = _read_rows(rect, lay, by_number, cells, paper, swatch_gain, target, warnings)
+    summary = _readout_summary(rows)
 
     out.parent.mkdir(parents=True, exist_ok=True)
     files = {

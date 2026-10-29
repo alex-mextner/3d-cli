@@ -25,6 +25,8 @@ layer between the others, never on two layers in a row, and layers over a mixed 
           [--white-level N]
 3d mix readout PHOTO --manifest NAME.mix.json -o OUT/NAME [--white card|N] [--white-level N]
                [--no-qr-check] [--json]
+3d mix fit READOUT.json [READOUT.json ...] [-o OUT/NAME] [--lambda W] [--json]
+3d mix record READOUT.json --printer NAME [--fit FIT.json] [--yes] [--offline] [--printops-api URL] [--json]
 ```
 
 ## The layer rules
@@ -127,7 +129,75 @@ Exit 1 when the photo cannot be read; exit 2 for a bad argument or a manifest wi
 3d mix tester --target '#B5654F' --printer u1 -o out/mix/wall      # writes out/mix/wall.card.png
 3d mix readout phone.jpg --manifest out/mix/wall.mix.json -o out/mix/wall-readout
 3d mix readout frame.png --manifest out/mix/wall.mix.json -o out/mix/wall-readout --white 9 --json
+3d mix fit out/mix/wall-readout.readout.json -o out/mix/wall
+3d mix record out/mix/wall-readout.readout.json --printer u1 --fit out/mix/wall.fit.json --yes
 ```
+
+## `fit` — per-filament colours from the measured mixes
+
+[#417](https://github.com/alex-mextner/3d-cli/issues/417), plan §20.3. `3d mix fit READOUT.json
+[READOUT.json ...] [-o OUT/NAME] [--lambda W]` reads one or more `mix-readout/1` records
+(`readout`) and fits, per filament, the colour it shows on a wall in a mix:
+
+- the **pure reference swatch** of each filament is its printed colour (measured, not Spoolman's);
+- the **mixes** then adjust it: least squares over every measured mix of the CIELAB distance between
+  the model colour (the mean of the layers in linear light, as `recipes`) and the measured swatch,
+  with 3 parameters per filament (linear sRGB, bounded 0..1). A light filament that looks darker in
+  thin layers over a dark one gets its effective colour from this;
+- a **regulariser** pulls each filament back to its pure swatch (`--lambda`, default 0.1: the pure
+  swatch counts as 0.1 of a mix swatch). A filament that no mix constrains (black next to a white
+  that dominates every mix) stays near its pure swatch; one with no mix swatch at all keeps it
+  exactly and is listed under `notes`.
+
+The report lists per filament the nominal (Spoolman), pure and fitted colours, and per mix the ΔE
+of the prediction from the nominal, the pure and the fitted colours, then the mean error **before
+and after**:
+
+```
+mix fit of 1 readout(s): 3 filaments, 4 mixes (lambda 0.1)
+  filament   slot  nominal   pure      fitted     dE nominal>fitted
+  f21           1  #000000   #1E1E21   #1D1D20    ...
+  mean mix error: nominal 7.29 > pure 1.32 > fitted 0.23
+```
+
+Several readouts pool by Spoolman filament id (else by head number): two testers of the same
+spools fit together. `-o OUT/NAME` writes `OUT/NAME.fit.json` (`mix-fit/1`: filaments, mixes,
+summary, notes). numpy and scipy are needed (the reader runs through `cli.pyrun`).
+
+## `record` — measured colours into 3d-api
+
+`3d mix record READOUT.json --printer NAME [--fit FIT.json] [--yes] [--offline] [--printops-api URL]`
+writes the readout's measurements as calibration records of the printer, in the order of plan
+§20.4: first one **`filament_color`** per pure swatch whose Spoolman filament id the tester knew
+(`hex` = the fitted colour when `--fit` is given, else the measured swatch; `spoolman_hex` = the
+nominal colour it corrects; `delta_e`; `lab_l/a/b`), then one **`mix_color`** per mix swatch with a
+mix key (`hex` = measured, `predicted_hex`, `delta_e_predicted`). Method `mix_tester_photo`. A swatch
+without a filament id or mix key is listed as `skipped` with the reason, never recorded under a guess.
+
+Every record carries in `params` the **sha256 of the readout file** (`readout_sha256`), the photo's
+sha256, the swatch number and the manifest id, and lists the photo and the readout as `evidence`.
+
+- Without `--yes` it only prints the plan (exit 0).
+- With `--yes` it `POST`s `/v1/calibrations` (`GET /v1/calibrations` and `3d calibrate ls` show the
+  records). **Repeating the same readout adds nothing**: a record of the same readout and swatch is
+  reported as `already recorded #N`. A later readout of the same filament or mix supersedes the
+  earlier record (§20.4).
+- When 3d-api cannot be reached (or with `--offline`) the same records are **appended to the
+  settings-history buffer** `<data dir>/printer-history/<printer>.jsonl` (`printops.settings_change/1`,
+  status `measured`, uid from the readout sha256 and the record's scope; a repeat appends nothing).
+  `3d settings import` brings them into 3d-api later, idempotent by uid; a mix line maps to a `mix_color`
+  record by its `mix` key. A refusal by 3d-api (unknown filament, validation) is reported per record and
+  exits 1.
+
+## Measured colours in `recipes` and `tester`
+
+`3d mix recipes` and `3d mix tester` take `--fit FIT.json`: the fitted colour of a head replaces the
+slot's colour. With `--printer NAME` the **current `filament_color` records** of 3d-api replace the
+colours of the loaded spools' filaments and the **current `mix_color` records** of the printer
+replace the model's prediction of those mixes (plan §20.3, first in the order of trust); the list is
+re-ranked with them. Measured colours are marked: `T4 #EFEBE1 measured (nominal #FFFFFF)` in the
+header, `measured` after a mix, `"measured": true` and `"nominal_hex"` in `--json` (slots and
+candidates). If the records cannot be read, the nominal colours are used and a line on stderr says so.
 
 ## `recipes` — which layer patterns come closest to a target
 
@@ -188,6 +258,10 @@ mostly head changes (a change every layer); `3d print-preflight` passes its `hea
 - `--target-photo IMAGE` — take the target from a region of an image instead of `--target`: `--target-photo mockup.jpg --box 410,220,470,300 --white 20,30,80,90`
 - `--box x0,y0,x1,y1` — the region to match, in pixels (`x1`, `y1` exclusive; origin top-left as a viewer shows the image): `--box 410,220,470,300`
 - `--white x0,y0,x1,y1` — a region of white on the same photo (the white balance): `--white 20,30,80,90`
+- `--fit FILE` — a `mix-fit/1` file whose fitted colours replace the slots' (`recipes`, `tester`, `record`): `--fit out/mix/wall.fit.json`
+- `--lambda W` — `fit`: weight of the pure swatch against one mix swatch (default 0.1): `--lambda 0.5`
+- `--yes` — `record`: write the records (otherwise only the plan): `--yes`
+- `--offline` — `record`: write the settings-history buffer, do not call 3d-api: `--offline`
 - `--manifest FILE` — `readout`: the tester manifest the photo belongs to: `--manifest out/mix/wall.mix.json`
 - `--white card|N` — `readout`: balance on the card's paper (default) or on pure reference swatch N: `--white 9`
 - `--no-qr-check` — `readout`: read a card whose QR is unreadable without confirming the tester: `--no-qr-check`

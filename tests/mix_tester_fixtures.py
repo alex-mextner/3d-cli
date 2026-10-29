@@ -38,16 +38,34 @@ LOADED = [
 
 
 def build_tester(
-    out_dir: Path, target: str = "#808080", count: int = 4, height: float = 6.0
+    out_dir: Path,
+    target: str = "#808080",
+    count: int = 4,
+    height: float = 6.0,
+    filament_ids: tuple[int, int, int] = (21, 23, 24),
+    measured: dict[int, str] | None = None,
 ) -> dict[str, Any]:
-    """Write a real tester (project, manifest, sheet, card) into `out_dir`; return its manifest."""
+    """Write a real tester (project, manifest, sheet, card) into `out_dir`; return its manifest.
+    `filament_ids` are the Spoolman filament ids of the black, green and white spools; `measured`
+    ({head: hex}) builds the tester from measured colours (Spoolman's kept as `nominal_hex`)."""
+    loaded = [
+        LoadedSlot(
+            s.slot,
+            (measured or {}).get(s.slot, s.hex),
+            s.name,
+            s.spool_id,
+            fid,
+            s.hex if s.slot in (measured or {}) else None,
+        )
+        for s, fid in zip(LOADED, filament_ids, strict=True)
+    ]
     out_dir.mkdir(parents=True, exist_ok=True)
     base = out_dir / "base.3mf"
     write_base_project(base)
     settings, app = read_base(base)
     ranked = rank(
         target,
-        [Slot(s.slot, s.hex, s.name) for s in LOADED],
+        [Slot(s.slot, s.hex, s.name) for s in loaded],
         max_cycle=3,
         layer_h=0.12,
         rules=MixRules(0.12),
@@ -55,7 +73,7 @@ def build_tester(
     mixes = pick([c for c in ranked if c.cycle > 1], count)
     manifest = build(
         target=target,
-        slots=LOADED,
+        slots=loaded,
         candidates=mixes,
         out=out_dir / "tester",
         layer=0.12,

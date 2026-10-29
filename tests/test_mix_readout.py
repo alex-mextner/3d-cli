@@ -302,3 +302,21 @@ def test_a_photo_pillow_cannot_decode_is_a_reshoot_message_not_a_traceback(
         ReadoutError, match="cannot be read as an image.*send a JPEG or PNG"
     ):
         read_photo(m, junk, tmp_path / "out")
+
+
+def test_a_tester_built_from_measured_colours_predicts_from_the_nominal_ones(
+    tmp_path: Path,
+) -> None:
+    """The reference swatch of a measured white keeps Spoolman's white as its prediction: a record made
+    from this readout corrects Spoolman's colour, not the previous measurement."""
+    m = build_tester(tmp_path / "second", measured={4: "#E8E4D8"})
+    ref = next(r for r in m["references"] if r["slot"] == 4)
+    assert ref["hex"] == "#E8E4D8" and ref["nominal_hex"] == "#FFFFFF"
+    assert all("nominal_hex" not in r for r in m["references"] if r["slot"] != 4)
+    lin = scene(tmp_path / "second" / "tester.card.png", m, truths(m))
+    photo = phone_photo(tmp_path / "phone.jpg", lin)
+    rec = read_photo(m, photo, tmp_path / "out")
+    row = next(
+        r for r in rec["swatches"] if r["kind"] == "reference" and r["slot"] == 4
+    )
+    assert row["predicted_hex"] == "#FFFFFF"
