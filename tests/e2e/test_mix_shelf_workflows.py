@@ -6,12 +6,12 @@ import json
 from pathlib import Path
 
 import pytest
+from mix_tester_fixtures import write_base_project
 from printops_fixtures import LiveApi
 
 from printops.client import ApiClient
 from printops.spoolman import ensure_extra_fields
 
-from .test_mix_tester_workflows import _base
 from .workflow_helper import run_cli
 
 FLEET = """\
@@ -114,7 +114,7 @@ def test_shelf_names_the_spool_the_head_and_both_errors(
     )
     assert opt["best"]["delta_e"] < 4 < shelf["baseline"]["best"]["delta_e"]
 
-    _base(tmp_path / "base.3mf")
+    write_base_project(tmp_path / "base.3mf")
     out = run_cli(
         tmp_path, "mix", "tester", "--target", "#E59520", "--printer", "u1", "--shelf",
         "-o", "out/orange", "--base-3mf", "base.3mf", "--count", "4", env_extra=env,
