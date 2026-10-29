@@ -748,9 +748,8 @@ def test_bed_child_turns_lines_into_events_and_restarts() -> None:
     assert child.restarts >= 1
 
 
-def test_a_point_behind_the_camera_at_one_z_does_not_veto_the_view_shift(monkeypatch: pytest.MonkeyPatch) -> None:
-    """One sampled point that goes behind the camera between the two Zs counts as not seen; the
-    other points' small shift decides the match instead of an inf from the NaN difference."""
+def _stub_cam(behind_at_both: bool) -> Any:
+    """Three sampled points; the third is behind the camera at Z > 5 (or at every Z)."""
     import numpy as np
 
     class StubCam:
@@ -758,10 +757,41 @@ def test_a_point_behind_the_camera_at_one_z_does_not_veto_the_view_shift(monkeyp
 
         def project(self, pts: Any, z: float) -> Any:
             px = np.array([[10.0, 10.0], [50.0, 50.0], [20.0, 20.0]]) + z * 0.1
-            if z > 5:
-                px[2] = np.nan  # behind the camera at the higher Z
+            if behind_at_both or z > 5:
+                px[2] = np.nan  # behind the camera
             return px
 
+    return StubCam()
+
+
+def test_a_point_seen_at_only_one_z_vetoes_the_view_shift(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A sampled point in the frame at one Z but behind the camera at the other moved out of
+    view: the reference does not stand for that Z, however little the other points shifted."""
     monkeypatch.setattr(B, "_bed_points", lambda cam, heights, n: np.zeros((3, 3)))
-    shift = B.view_shift_px.__wrapped__(StubCam(), 0.0, 10.0, 80.0)  # type: ignore[arg-type]
+    assert B.view_shift_px.__wrapped__(_stub_cam(False), 0.0, 10.0, 80.0) == float("inf")
+
+
+def test_a_point_behind_the_camera_at_both_zs_does_not_veto_the_view_shift(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A point that is behind the camera at both Zs was never seen; the others' shift decides."""
+    monkeypatch.setattr(B, "_bed_points", lambda cam, heights, n: np.zeros((3, 3)))
+    shift = B.view_shift_px.__wrapped__(_stub_cam(True), 0.0, 10.0, 80.0)
     assert shift == pytest.approx(2**0.5 * B.PROC_W / 100)
+
+
+def test_nearest_view_of_a_huge_z_is_bounded_by_the_axis_travel() -> None:
+    """`--z 1e9` must not walk 2e8 five-millimetre steps: the search starts at MAX_Z_MM."""
+    from vision_geometry import bundled_calibration
+
+    cam = bundled_calibration("u1")
+    assert cam is not None
+    m = B.ZMatch(cam=cam)
+    asked: list[float] = []
+    real = m.in_view
+
+    def spy(z: float | None) -> float | None:
+        asked.append(z or 0.0)
+        return real(z)
+
+    object.__setattr__(m, "in_view", spy)  # frozen dataclass
+    assert m.nearest_view(1e9, 0.1) is not None
+    assert len(asked) <= B.MAX_Z_MM // 5 + 1
