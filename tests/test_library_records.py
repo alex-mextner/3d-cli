@@ -204,7 +204,14 @@ def test_the_graph_shows_source_remix_make_in_both_directions(
     records.relate(
         conn, "remix_of", "design", str(other["uid"]), "model_source", str(src["uid"])
     )
-    assert make["uid"] in {n["uid"] for n in records.graph(conn, "mole")["nodes"]}
+    reached = records.graph(conn, "mole")
+    assert other["uid"] in {n["uid"] for n in reached["nodes"]}
+    assert any(
+        e["rel"] == "remix_of"
+        and e["from"]["uid"] == other["uid"]
+        and e["to"]["uid"] == src["uid"]
+        for e in reached["edges"]
+    )
 
 
 def test_makes_list_counts_photos_and_names_the_source(

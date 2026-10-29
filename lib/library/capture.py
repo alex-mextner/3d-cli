@@ -12,6 +12,7 @@ imported inside the functions that need them.
 from __future__ import annotations
 
 import datetime as dt
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -23,7 +24,16 @@ def default_out(make_uid: str, kind: str) -> Path:
     from cli import paths
 
     stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    return paths.data_dir() / "library" / "photos" / make_uid / f"{stamp}-{kind}.jpg"
+    unique = uuid.uuid4().hex[
+        :8
+    ]  # two captures within one second must not share a file
+    return (
+        paths.data_dir()
+        / "library"
+        / "photos"
+        / make_uid
+        / f"{stamp}-{kind}-{unique}.jpg"
+    )
 
 
 def capture(
@@ -44,6 +54,7 @@ def capture(
     from printer_ops.camera import open_camera, require_camera
     from printer_ops.devices import get_device
 
+    bed_photo.check_part_height(part_height_mm)
     conn = librarydb.open_library(db_path)
     try:
         make_row = records.resolve(conn, "make", make, command="photo")

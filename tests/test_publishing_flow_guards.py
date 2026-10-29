@@ -67,21 +67,34 @@ def test_photo_renders_skip_a_symlinked_previews_folder(
     assert _renders(project, capsys) == []
 
 
+def _snapshot(db: Path) -> list[str]:
+    """Schema and data of a database: every statement `iterdump()` emits."""
+    conn = sqlite3.connect(db)
+    try:
+        return list(conn.iterdump())
+    finally:
+        conn.close()
+
+
 def test_dry_run_planning_leaves_an_old_library_unmigrated(tmp_path: Path) -> None:
     db = tmp_path / "library.db"
     conn = librarydb.open_library(db)
     conn.execute("DELETE FROM schema_migrations WHERE version IN (10, 30)")
+    conn.commit()
     conn.close()
-    before = db.read_bytes()
+    before = _snapshot(db)
+    assert before
     with flow.library(str(db), create=False) as ro:
         assert ro is not None
         with pytest.raises(sqlite3.OperationalError):
             ro.execute("CREATE TABLE nope (x)")
+    after = _snapshot(db)
+    assert after == before
+    assert not any("nope" in line for line in after)
     check = sqlite3.connect(db)
     versions = {r[0] for r in check.execute("SELECT version FROM schema_migrations")}
     check.close()
     assert versions == {1}
-    assert db.exists() and before
 
 
 def test_dry_run_planning_on_a_library_without_tables_plans_without_it(
@@ -109,3 +122,34 @@ def test_a_design_that_contradicts_the_make_is_refused(tmp_path: Path) -> None:
         project, platform="thingiverse", design="B", make=uid, db_path=str(db)
     )
     assert prep.design_name == "B"
+
+
+def test_listing_photos_ignore_the_selected_make_but_a_make_post_keeps_to_it(
+    tmp_path: Path,
+) -> None:
+    project = make_project(tmp_path, images=False)
+    db = tmp_path / "library.db"
+    conn = librarydb.open_library(db)
+    for name in ("design.jpg", "old.jpg"):
+        (tmp_path / name).write_bytes(b"jpg")
+    design = records.ensure_design(conn, "proj")
+    old, _ = records.add_make(conn, "proj", status="done")
+    new, _ = records.add_make(conn, "proj", status="done")
+    records.add_photo(conn, str(tmp_path / "design.jpg"), design=str(design["uid"]))
+    records.add_photo(conn, str(tmp_path / "old.jpg"), make=str(old["uid"]))
+    conn.close()
+
+    def shown(kind: str) -> set[str]:
+        prep = flow.prepare(
+            project,
+            platform="makerworld",
+            kind=kind,
+            design="proj",
+            make=str(new["uid"]),
+            db_path=str(db),
+        )
+        return {p.path.name for p in prep.ev.photos}
+
+    # the newest make has no photo, yet an original/remix listing keeps the design's and the older make's
+    assert shown("original") == {"design.jpg", "old.jpg"}
+    assert shown("make") == set()

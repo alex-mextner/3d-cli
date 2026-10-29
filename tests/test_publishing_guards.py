@@ -4,12 +4,13 @@ browser sessions, and what the offer reports and replays. No site is contacted."
 from __future__ import annotations
 
 import json
+import shlex
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from errors import InvalidArgument
+from errors import InvalidArgument, UsageError
 from library import db as librarydb
 from library import records
 from publishing import execute, flow, offer_run, plan
@@ -265,3 +266,100 @@ def test_the_replay_command_carries_every_effective_input(tmp_path: Path) -> Non
     )[0]
     assert argv[argv.index("--allow-nonprintable") + 1] == "probe_pcb,fan"
     assert argv[argv.index("--reason") + 1] == "a stand-in"
+
+
+# ------------------------------------------------------------------------------------------ the offer's inputs
+def library_with_sources(tmp_path: Path, **licences: str) -> Path:
+    """A library holding the model_source rows `licences` (model id -> licence text)."""
+    db = tmp_path / "library.db"
+    c = librarydb.open_library(db)
+    try:
+        for model_id, lic in licences.items():
+            records.ensure_source(
+                c,
+                site="printables",
+                model_id=model_id,
+                url=f"https://www.printables.com/model/{model_id}-m",
+                license=lic,
+                author="ann",
+            )
+    finally:
+        c.close()
+    return db
+
+
+def test_the_confirmation_command_is_shell_quoted(tmp_path: Path) -> None:
+    hostile = "holder; printf REVIEW_INJECTED; #"
+    project = make_project(tmp_path / "my projects")
+    shown: list[str] = []
+    code = offer_run.run_offer(
+        project,
+        trigger="modify",
+        mode="ask",
+        yes=False,
+        as_json=False,
+        design=hostile,
+        db_path=str(tmp_path / "no-library.db"),
+        interactive=lambda: False,
+        out=shown.append,
+    )
+    assert code == 0
+    argv = shlex.split(shown[-1])
+    assert argv[argv.index("--design") + 1] == hostile
+    assert argv[argv.index("offer") + 1] == str(project)
+    assert ";" not in shown[-1].replace(shlex.quote(hostile), "")
+
+
+def test_the_source_publish_yaml_declares_beats_the_librarys_provenance(
+    tmp_path: Path,
+) -> None:
+    declared = "https://www.printables.com/model/999-m"
+    project = make_project(tmp_path, YAML + f"remix_of: {declared}\n")
+    db = library_with_sources(tmp_path, **{"101": "CC BY 4.0", "999": "CC BY-ND 4.0"})
+    c = librarydb.open_library(db)
+    try:
+        design = records.ensure_design(c, "proj", str(project))
+        old = c.execute(
+            "SELECT uid FROM model_source WHERE model_id = '101'"
+        ).fetchone()
+        records.relate(
+            c, "remix_of", "design", str(design["uid"]), "model_source", str(old["uid"])
+        )
+    finally:
+        c.close()
+    built = offer_run.build(project, trigger="modify", db_path=str(db))
+    (item,) = built["plans"]
+    assert item.ev.spec.remix_of == declared and built["source"] == declared
+    assert any("derivative" in p.lower() for p in item.ev.all_problems())
+
+
+def test_a_yaml_only_remix_defaults_to_the_licence_its_source_requires(
+    tmp_path: Path,
+) -> None:
+    declared = "https://www.printables.com/model/555-m"
+    project = make_project(
+        tmp_path,
+        f"title: Wall plug\ndescription: A spiral plug.\ncategory: Household\nremix_of: {declared}\n",
+    )
+    db = library_with_sources(tmp_path, **{"555": "CC BY-SA 4.0"})
+    built = offer_run.build(project, trigger="modify", db_path=str(db))
+    (item,) = built["plans"]
+    assert item.ev.spec.license.id == "cc-by-sa"
+    assert built["license"]["id"] == "cc-by-sa"
+    assert item.ev.all_problems() == ()
+
+
+def test_a_design_that_contradicts_the_make_is_refused_before_the_offer_defaults(
+    tmp_path: Path,
+) -> None:
+    project = make_project(tmp_path)
+    db = tmp_path / "library.db"
+    c = librarydb.open_library(db)
+    try:
+        records.ensure_design(c, "B")
+        made, _ = records.add_make(c, "A", status="done")
+        uid = str(made["uid"])
+    finally:
+        c.close()
+    with pytest.raises(UsageError, match="B.*A|A.*B"):
+        offer_run.build(project, trigger="print", design="B", make=uid, db_path=str(db))

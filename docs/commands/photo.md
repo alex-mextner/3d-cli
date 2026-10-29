@@ -59,8 +59,8 @@ Moonraker (see Tests below) and still needs a live check ([#565](https://github.
 | `--printer P` | `capture`: the printer (default: the make's). Example: `3d photo capture --make 0199a1c2-7d3e --printer k1se` |
 | `--lift L` | `capture`: `auto` (default) or the toolhead Z in mm. Example: `3d photo capture --make 0199a1c2-7d3e --lift 70` |
 | `--camera URL` | `capture`: snapshot URL/path instead of the printer's configured camera. Example: `3d photo capture --make 0199a1c2-7d3e --camera /server/files/camera/monitor.jpg` |
-| `--part-height MM` | `capture`: the height of the tallest thing on the bed (the floor of the lift). Example: `3d photo capture --make 0199a1c2-7d3e --part-height 40` |
-| `--out FILE` | `capture`: where to save the frame (default `<data dir>/library/photos/<make>/<time>-table.jpg`). Example: `3d photo capture --make 0199a1c2-7d3e --out /tmp/table.jpg --yes` |
+| `--part-height MM` | `capture`: the height of the tallest thing on the bed (the floor of the lift; 0 or more, negative is refused). Example: `3d photo capture --make 0199a1c2-7d3e --part-height 40` |
+| `--out FILE` | `capture`: where to save the frame (default `<data dir>/library/photos/<make>/<time>-table-<id>.jpg`; an existing FILE is refused, never overwritten). Example: `3d photo capture --make 0199a1c2-7d3e --out /tmp/table.jpg --yes` |
 | `--yes` | `capture`: really move the bed and take the photo; `renders`: register. Example: `3d photo renders projects/mole --design mole --yes` |
 | `--db PATH` | Library database file. Example: `3d photo list --db /tmp/library.db` |
 | `--json` | The `3d.action/1` result of the photo action (`list`: `3d.photo/1`). Example: `3d photo capture --make 0199a1c2-7d3e --json` |

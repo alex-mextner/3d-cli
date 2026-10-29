@@ -27,6 +27,7 @@ runs the offer with `--json`); `after_modify(path)` is what a modify step (`3d m
 from __future__ import annotations
 
 import json
+import shlex
 import sqlite3
 import sys
 from collections.abc import Callable
@@ -120,6 +121,8 @@ def _from_library(
                 "SELECT * FROM design WHERE id = ?", (make_row["design_id"],)
             ).fetchone()
             make_uid = str(make_row["uid"])
+            if make:
+                flow.name_of_make_design(design_row, design, make, design or "")
         elif design:
             design_row = conn.execute(
                 "SELECT * FROM design WHERE name = ?", (design,)
@@ -218,12 +221,17 @@ def build(
     if not project.is_dir():
         raise InputNotFound(str(project), command="models")
     name = flow.design_name(project, name)
-    spec_remix = _publish_yaml_remix(project)
+    spec_remix = _declared_remix_source(project)
     downloaded = None if src_url else _downloaded_source(project)
     if downloaded is not None:
         src_url = downloaded.url
     of = str(project / "model.json") if downloaded is not None else src_url
-    lic, lic_why = _source_license(src_url, db_path, downloaded)
+    remix_url, remix_of = _remix_source(spec_remix, src_url, of)
+    lic, lic_why = _source_license(
+        remix_url,
+        db_path,
+        downloaded if downloaded is not None and downloaded.url == remix_url else None,
+    )
     title = name.replace("_", " ").replace("-", " ").strip().capitalize()
     defaults = {
         "title": title,
@@ -238,7 +246,7 @@ def build(
                 project,
                 platform=platform,
                 kind=publish_kind,
-                of=of if publish_kind == "remix" else None,
+                of=remix_of if publish_kind == "remix" else None,
                 design=name,
                 make=make_uid,
                 db_path=db_path,
@@ -266,7 +274,7 @@ def build(
         "project": project,
         "make": make_uid,
         "license": _effective_license(plans, lic, lic_why),
-        "source": src_url,
+        "source": remix_url,
         "already_published": published,
         "plans": plans,
         "db_path": db_path,
@@ -301,6 +309,23 @@ def _publish_yaml_remix(project: Path) -> str:
     except (yaml.YAMLError, OSError, UnicodeDecodeError):
         return ""
     return str(data.get("remix_of") or "") if isinstance(data, dict) else ""
+
+
+def _declared_remix_source(project: Path) -> str:
+    """The `remix_of` URL publish.yaml declares ("" when none or not an http(s) URL: the spec refuses that)."""
+    declared = _publish_yaml_remix(project)
+    return declared if declared.startswith(("http://", "https://")) else ""
+
+
+def _remix_source(
+    declared: str, src_url: str | None, of: str | None
+) -> tuple[str | None, str | None]:
+    """(url, `--of` argument) of the source the design post is a remix of. The source publish.yaml declares
+    wins over the library's/model.json's provenance: that is what the remix gate must judge, and its licence
+    drives the licence defaults. A make post keeps the provenance (it is a print of what was downloaded)."""
+    if declared and declared != src_url:
+        return declared, declared
+    return src_url, of
 
 
 def offer_doc(
@@ -514,7 +539,7 @@ def _report_unconfirmed(
             if status == "offered"
             else "  not published: auto needs --yes"
         )
-        out("\n".join("  " + " ".join(c) for c in doc["command"]))
+        out("\n".join("  " + shlex.join(c) for c in doc["command"]))
 
 
 def _ask_user(

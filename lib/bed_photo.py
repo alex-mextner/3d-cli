@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -208,6 +208,17 @@ def fresh_frame(
     return jpeg, False
 
 
+def check_part_height(part_height_mm: float | None) -> None:
+    """A declared part height is a finite height >= 0 mm; anything else would lower the clearance floor."""
+    if part_height_mm is not None and not 0 <= part_height_mm < float("inf"):
+        raise InvalidArgument(
+            "--part-height",
+            str(part_height_mm),
+            ["a finite height in mm, 0 or more"],
+            command="photo",
+        )
+
+
 def capture_table_photo(
     device: Any,
     cfg: BedConfig,
@@ -235,6 +246,16 @@ def capture_table_photo(
     interrupted view is undone first; one that cannot be undone is never overwritten (its original Z would be
     lost) and refuses the capture.
     """
+    check_part_height(part_height_mm)
+    if (
+        not dry_run and out.exists()
+    ):  # refused before the bed moves: the photo would have nowhere to go
+        raise InvalidArgument(
+            "--out",
+            str(out),
+            ["a path that does not exist yet; a saved photo is never overwritten"],
+            command="photo",
+        )
     if dry_run:
         m = _quiet_motion(device, adapter, read)
         plan = plan_lift(
@@ -332,6 +353,30 @@ def _same_coordinate_frame(
     return checked
 
 
+def _restore_original_z(
+    adapter: Any, original: bed_view.Motion, read: Callable[[Any], bed_view.Motion]
+) -> str | None:
+    """Put the bed back to the PHYSICAL Z it was found at, in the coordinate frame in force NOW.
+
+    The G-code Z recorded before the lift is only valid under the Z offset of that time: replayed after an
+    offset change it lands at another height (possibly below the clearance floor, into a part). So the offset is
+    re-read first and the G-code target is recomputed from the original toolhead Z; the move itself is refused
+    when the offset changes again between this read and the send. A refusal is returned as the restore error
+    (the caller keeps the recovery marker) and nothing was sent."""
+    try:
+        now = read(adapter)
+    except (
+        Exception
+    ) as exc:  # an unreadable printer is reported, never hidden behind the photo
+        return f"restore failed: {exc.__class__.__name__}: {exc}"
+    if (
+        original.z is not None
+        and abs(now.offset - original.offset) > OFFSET_TOLERANCE_MM
+    ):
+        original = replace(original, gcode_z=original.z - now.offset)
+    return bed_view.restore_z(adapter, original, read=_same_coordinate_frame(read, now))
+
+
 def _lifted_photo(
     device: Any,
     adapter: Any,
@@ -381,7 +426,7 @@ def _lifted_photo(
             ) from exc
         finally:
             if attempted:
-                restore_error = bed_view.restore_z(adapter, m, read=read)
+                restore_error = _restore_original_z(adapter, m, read)
                 if restore_error is None:
                     _clear_displaced(device.name)
                 else:
@@ -407,6 +452,16 @@ def _saved(
     if not jpeg:
         raise UsageError("the camera returned no frame", command="photo")
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_bytes(jpeg)
+    try:
+        with out.open(
+            "xb"
+        ) as fh:  # exclusive: a photo already on disk is never overwritten
+            fh.write(jpeg)
+    except FileExistsError as exc:
+        raise UsageError(
+            f"{out} already exists; the photo was not saved over it",
+            command="photo",
+            remediation=["Pass a --out path that does not exist yet."],
+        ) from exc
     doc.update(path=str(out), z_mm=None if z is None else round(z, 2), fresh=fresh)
     return doc

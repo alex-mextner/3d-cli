@@ -697,6 +697,12 @@ then `ask`. `--yes` with `ask` publishes (it is the confirmation). The final cli
 drafts stays yours as always; a refused plan (licence, missing 3mf/scad, non-printable part) exits 2/1 and sends
 nothing.
 
+The printed confirmation command is shell-quoted (`shlex.join`), so a design name or path with spaces or shell
+metacharacters replays as one argument each. `--design NAME` with a `--make` of another design is refused (exit 2)
+before anything is planned, as for `publish`. When `publish.yaml` declares `remix_of`, that source — not the
+library's recorded provenance of the design — is what the remix gate judges and what the default licence is derived
+from (a share-alike source gives a share-alike default); a make post still goes to the model that was printed.
+
 **Licence default (stated in the offer, `defaults_used` in `--json`).** A design whose `publish.yaml` lacks
 `license` — or has no `publish.yaml`; `title`/`description` are then assumed from the design name — is offered under
 **CC BY** (open, available on every platform). A remix inherits what its source requires: share-alike → CC BY-SA,

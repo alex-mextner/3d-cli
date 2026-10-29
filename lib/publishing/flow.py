@@ -177,21 +177,29 @@ def _source_from_row(row: sqlite3.Row) -> SourceRef:
 
 
 def library_photos(
-    conn: sqlite3.Connection | None, design_id: int | None, make_id: int | None
+    conn: sqlite3.Connection | None,
+    design_id: int | None,
+    make_id: int | None,
+    kind: str,
 ) -> tuple[Photo, ...]:
-    if conn is None or (design_id is None and make_id is None):
+    """The library photos of a post. A `make` post shows the photos of its own make only; an original/remix
+    listing shows the design's photos and those of all its makes, whichever make the offer selected."""
+    make_only = kind == "make" and make_id is not None
+    if conn is None or (design_id is None and not make_only):
         return ()
     from library import records
 
     return tuple(
         Photo(Path(p["path"]), p["kind"], p["z_mm"])
         for p in records.photos_of(
-            conn, design_id=None if make_id else design_id, make_id=make_id
+            conn,
+            design_id=None if make_only else design_id,
+            make_id=make_id if make_only else None,
         )
     )
 
 
-def _name_of_make_design(
+def name_of_make_design(
     design_row: sqlite3.Row | None, design: str | None, make: str, name: str
 ) -> str:
     """The design name a `--make` selects; refuses an explicit `--design` that names another design."""
@@ -240,6 +248,7 @@ def prepare(
             conn,
             int(design_row["id"]) if design_row is not None else None,
             int(make_row["id"]) if make_row is not None else None,
+            kind,
         )
         targets = _published_targets(conn, design_row)
         printer = filament = ""
@@ -299,7 +308,7 @@ def _resolve_make(
     design_row = conn.execute(
         "SELECT * FROM design WHERE id = ?", (make_row["design_id"],)
     ).fetchone()
-    return make_row, design_row, _name_of_make_design(design_row, design, make, name)
+    return make_row, design_row, name_of_make_design(design_row, design, make, name)
 
 
 def _prepare_source(

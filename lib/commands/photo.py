@@ -49,9 +49,9 @@ Options:
   --lift L           capture: auto (default) or the toolhead Z in mm. Example: 3d photo capture --make 0199a1c2-7d3e --lift 70
   --camera URL       capture: snapshot URL/path instead of the printer's configured camera.
                      Example: 3d photo capture --make 0199a1c2-7d3e --camera /server/files/camera/monitor.jpg
-  --part-height MM   capture: height of the tallest thing on the bed (the floor of the lift).
+  --part-height MM   capture: height of the tallest thing on the bed (the floor of the lift; 0 or more).
                      Example: 3d photo capture --make 0199a1c2-7d3e --part-height 40
-  --out FILE         capture: where to save the frame (default: <data dir>/library/photos/<make>/...).
+  --out FILE         capture: where to save the frame (default: <data dir>/library/photos/<make>/...; an existing file is refused).
                      Example: 3d photo capture --make 0199a1c2-7d3e --out /tmp/table.jpg --yes
   --yes              capture: really move the bed and take the photo; renders: register. Example: 3d photo renders projects/mole --design mole --yes
   --db PATH          library database file. Example: 3d photo list --db /tmp/library.db

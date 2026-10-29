@@ -14,7 +14,7 @@ import pytest
 
 import bed_photo
 import bed_view
-from errors import GateFailure, InvalidArgument
+from errors import GateFailure, InvalidArgument, UsageError
 from printer_ops.bed import BedConfig
 from printer_ops.devices import Device, ResumeProfile
 
@@ -166,9 +166,7 @@ def test_the_bed_is_lifted_within_limits_photographed_and_put_back(
     assert (
         doc["plan"]["floor"] == 35.0 and doc["plan"]["ceiling"] == 270.0
     )  # part 20 + 15 clearance .. z_max 275 - 5
-    assert (
-        bed_view.view_in_progress("u1", 10**12) is False
-    )  # the displaced-Z marker is cleared
+    assert bed_view._read_pending("u1") is None  # the displaced-Z marker file is gone
 
 
 def test_dry_run_reads_the_printer_and_sends_nothing(tmp_path: Path) -> None:
@@ -312,7 +310,7 @@ def test_an_offset_changed_during_the_camera_request_refuses_the_move(
     assert (
         printer.scripts == [] and printer.z == 200.0
     )  # nothing was sent: floor 35 is safe
-    assert bed_view.view_in_progress("u1", 10**12) is False  # no marker left behind
+    assert bed_view._read_pending("u1") is None  # no marker file left behind
 
 
 def test_a_view_running_elsewhere_blocks_the_capture_before_anything_is_read(
@@ -359,7 +357,7 @@ def test_a_pending_marker_is_undone_first_so_the_original_z_survives(
     doc = shoot(printer, tmp_path / "t.jpg", lift=70.0)
     assert moves(printer) == ["G1 Z200.000 F600", "G1 Z70.000 F600", "G1 Z200.000 F600"]
     assert printer.z == 200.0 and doc["restored"] and doc["moved"]
-    assert bed_view.view_in_progress("u1", time.time()) is False
+    assert bed_view._read_pending("u1") is None
 
 
 def test_a_pending_marker_that_cannot_be_undone_is_never_overwritten(
@@ -381,3 +379,83 @@ def test_a_pending_marker_that_cannot_be_undone_is_never_overwritten(
     assert (
         pending is not None and pending["z"] == 200.0
     )  # the original Z is still on record
+
+
+def test_restore_after_an_offset_change_targets_the_original_physical_z(
+    tmp_path: Path,
+) -> None:
+    printer = FakePrinter(z=200.0)
+
+    def shift_offset(p: FakePrinter) -> None:
+        if p.z == 70.0:
+            p.offset = -190.0  # the G-code Z offset changes while the bed is lifted
+
+    printer.on_script = shift_offset
+    doc = shoot(printer, tmp_path / "t.jpg", lift=70.0)
+    # the old gcode Z200 would land at physical Z10 (floor 35); the target is recomputed from physical Z200
+    assert moves(printer) == ["G1 Z70.000 F600", "G1 Z390.000 F600"]
+    assert printer.z == 200.0 and doc["restored"] and doc["restore_error"] is None
+    assert bed_view._read_pending("u1") is None
+
+
+def test_restore_refuses_when_the_offset_changes_again_before_the_send(
+    tmp_path: Path,
+) -> None:
+    printer = FakePrinter(z=200.0)
+    lifted_reads = 0
+
+    def read(adapter: Any) -> bed_view.Motion:
+        nonlocal lifted_reads
+        if printer.z == 70.0:
+            lifted_reads += 1
+            if lifted_reads == 4:  # the read of the guarded restore move itself
+                printer.offset = -190.0
+        return bed_view.read_motion(adapter)
+
+    doc = bed_photo.capture_table_photo(
+        device(),
+        CFG,
+        adapter=printer,
+        camera=FakeCamera(),
+        out=tmp_path / "t.jpg",
+        lift=70.0,
+        part_height_mm=20.0,
+        dry_run=False,
+        settle_s=0.0,
+        sleep=lambda s: None,
+        read=read,
+    )
+    assert moves(printer) == [
+        "G1 Z70.000 F600"
+    ]  # no restore move was sent into the new frame
+    assert doc["restored"] is False and "Z offset changed" in doc["restore_error"]
+    pending = bed_view._read_pending("u1")
+    assert pending is not None and pending["z"] == 200.0  # the recovery marker survives
+
+
+@pytest.mark.parametrize("dry_run", [True, False])
+@pytest.mark.parametrize("bad", [-100.0, float("nan"), float("inf")])
+def test_a_negative_or_non_finite_part_height_is_refused_before_anything_is_read(
+    tmp_path: Path, dry_run: bool, bad: float
+) -> None:
+    printer = FakePrinter(z=200.0)
+    with pytest.raises(InvalidArgument) as exc:
+        shoot(printer, tmp_path / "t.jpg", part=bad, dry_run=dry_run)
+    assert exc.value.exit_code == 2 and "--part-height" in exc.value.message
+    assert printer.scripts == []
+
+
+def test_an_existing_out_file_is_refused_before_the_bed_moves_and_never_overwritten(
+    tmp_path: Path,
+) -> None:
+    out = tmp_path / "t.jpg"
+    out.write_bytes(b"earlier photo")
+    printer = FakePrinter(z=200.0)
+    with pytest.raises(InvalidArgument):
+        shoot(printer, out)
+    assert printer.scripts == [] and out.read_bytes() == b"earlier photo"
+    with pytest.raises(
+        UsageError, match="already exists"
+    ):  # a file that appeared meanwhile
+        bed_photo._saved({}, out, b"\xff\xd8new", True, 70.0)
+    assert out.read_bytes() == b"earlier photo"
