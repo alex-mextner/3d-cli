@@ -59,6 +59,80 @@ def _font(size: int) -> Any:
         return ImageFont.load_default()
 
 
+def node_averages(tets: np.ndarray, per_vertex: np.ndarray, n_nodes: int) -> np.ndarray:
+    """Average an (elements, 4) per-vertex value over the elements sharing each node.
+    `tets` is skfem's (4, elements) connectivity: transposed to line up with the values."""
+    total = np.zeros(n_nodes)
+    count = np.zeros(n_nodes)
+    np.add.at(total, tets.T.ravel(), per_vertex.ravel())
+    np.add.at(count, tets.T.ravel(), 1.0)
+    return total / np.maximum(count, 1.0)
+
+
+def _body_surface(f: BodyField, exaggeration: float) -> tuple[np.ndarray, np.ndarray]:
+    """(deformed surface triangles (nf, 3, 3), their mean node von Mises (nf,)) of one body."""
+    mesh = f.body.mesh
+    node_vm = node_averages(mesh.t, f.failure["von_mises"], mesh.p.shape[1])
+    facets = mesh.facets[:, f.body.facet_ids]  # (3, nf)
+    corner = mesh.p.T + exaggeration * f.u
+    colour = np.stack(
+        [node_vm[facets[0]], node_vm[facets[1]], node_vm[facets[2]]], axis=1
+    ).mean(axis=1)
+    return corner[facets.T], colour
+
+
+def _exaggeration(fields: Sequence[BodyField]) -> float:
+    """Deformation scale: the largest displacement drawn as 4 % of the model diagonal (1 = true scale, at most 200)."""
+    all_nodes = np.vstack([f.body.mesh.p.T for f in fields])
+    diag = float(np.linalg.norm(all_nodes.max(axis=0) - all_nodes.min(axis=0))) or 1.0
+    max_disp = max(float(np.linalg.norm(f.u, axis=1).max()) for f in fields)
+    scale = 1.0 if max_disp <= 0.0 else min(0.04 * diag / max_disp, 200.0)
+    return max(scale, 1.0)
+
+
+def _colour_max(value: np.ndarray, value_max: float | None, vm_peak: float) -> float:
+    """Top of the colour scale: the caller's, else the 99th percentile (a singular spike must not flatten the picture)."""
+    if value_max and value_max > 0:
+        return value_max
+    return max(float(np.percentile(value, 99.0)), 0.15 * vm_peak, 1e-9)
+
+
+def _draw_colour_bar(
+    draw: Any, size: tuple[int, int], scale_ss: int, vmax: float
+) -> None:
+    """The von Mises legend: gradient bar, outline, five tick labels and the unit caption."""
+    width, height = size
+    bar_x, bar_y, bar_w, bar_h = (
+        (width - 90) * scale_ss,
+        120 * scale_ss,
+        28 * scale_ss,
+        (height - 240) * scale_ss,
+    )
+    for row in range(bar_h):
+        r, g, b = _colour(1.0 - row / bar_h)
+        draw.rectangle(
+            (bar_x, bar_y + row, bar_x + bar_w, bar_y + row + 1), fill=(r, g, b)
+        )
+    draw.rectangle((bar_x, bar_y, bar_x + bar_w, bar_y + bar_h), outline=(40, 40, 40))
+    small = _font(13 * scale_ss)
+    for frac in (0.0, 0.25, 0.5, 0.75, 1.0):
+        ty = bar_y + bar_h * (1.0 - frac)
+        draw.text(
+            (bar_x + bar_w + 6 * scale_ss, ty),
+            f"{vmax * frac:.3g}",
+            fill=(0, 0, 0),
+            font=small,
+            anchor="lm",
+        )
+    draw.text(
+        (bar_x, bar_y - 16 * scale_ss),
+        "von Mises MPa",
+        fill=(0, 0, 0),
+        font=small,
+        anchor="lm",
+    )
+
+
 def render_stress_png(
     fields: Sequence[BodyField],
     out: pathlib.Path,
@@ -73,35 +147,18 @@ def render_stress_png(
     width, height = size
     scale_ss = 2
     view = _view_matrix()
-    all_nodes = np.vstack([f.body.mesh.p.T for f in fields])
-    diag = float(np.linalg.norm(all_nodes.max(axis=0) - all_nodes.min(axis=0))) or 1.0
-    max_disp = max(float(np.linalg.norm(f.u, axis=1).max()) for f in fields)
-    exaggeration = 1.0 if max_disp <= 0.0 else min(0.04 * diag / max_disp, 200.0)
-    exaggeration = max(exaggeration, 1.0)
+    exaggeration = _exaggeration(fields)
 
     tris: list[np.ndarray] = []
     colours: list[np.ndarray] = []
     vm_peak = max(float(f.failure["von_mises"].max()) for f in fields)
-    vmax = value_max if value_max and value_max > 0 else (vm_peak or 1.0)
     for f in fields:
-        mesh = f.body.mesh
-        node_sum = np.zeros(mesh.p.shape[1])
-        node_count = np.zeros(mesh.p.shape[1])
-        np.add.at(node_sum, mesh.t.ravel(), f.failure["von_mises"].ravel())
-        np.add.at(node_count, mesh.t.ravel(), 1.0)
-        node_vm = node_sum / np.maximum(node_count, 1.0)
-        facets = mesh.facets[:, f.body.facet_ids]  # (3, nf)
-        corner = mesh.p.T + exaggeration * f.u
-        tris.append(corner[facets.T])  # (nf, 3, 3)
-        colours.append(
-            np.stack(
-                [node_vm[facets[0]], node_vm[facets[1]], node_vm[facets[2]]], axis=1
-            ).mean(axis=1)
-        )
+        triangles, colour = _body_surface(f, exaggeration)
+        tris.append(triangles)
+        colours.append(colour)
     tri = np.vstack(tris)
     value = np.concatenate(colours)
-    if not (value_max and value_max > 0):  # a singular spike must not flatten the whole picture
-        vmax = max(float(np.percentile(value, 99.0)), 0.15 * vm_peak, 1e-9)
+    vmax = _colour_max(value, value_max, vm_peak)
     centre = (tri.reshape(-1, 3).max(axis=0) + tri.reshape(-1, 3).min(axis=0)) / 2.0
     rotated = (tri - centre) @ view.T
     depth = rotated[:, :, 2].mean(axis=1)
@@ -141,36 +198,8 @@ def render_stress_png(
         )
         draw.text((x, y), str(i), fill=(0, 0, 0), font=font, anchor="mm")
 
-    # colour bar
-    bar_x, bar_y, bar_w, bar_h = (
-        (width - 90) * scale_ss,
-        120 * scale_ss,
-        28 * scale_ss,
-        (height - 240) * scale_ss,
-    )
-    for row in range(bar_h):
-        r, g, b = _colour(1.0 - row / bar_h)
-        draw.rectangle(
-            (bar_x, bar_y + row, bar_x + bar_w, bar_y + row + 1), fill=(r, g, b)
-        )
-    draw.rectangle((bar_x, bar_y, bar_x + bar_w, bar_y + bar_h), outline=(40, 40, 40))
+    _draw_colour_bar(draw, size, scale_ss, vmax)
     small = _font(13 * scale_ss)
-    for frac in (0.0, 0.25, 0.5, 0.75, 1.0):
-        ty = bar_y + bar_h * (1.0 - frac)
-        draw.text(
-            (bar_x + bar_w + 6 * scale_ss, ty),
-            f"{vmax * frac:.3g}",
-            fill=(0, 0, 0),
-            font=small,
-            anchor="lm",
-        )
-    draw.text(
-        (bar_x, bar_y - 16 * scale_ss),
-        "von Mises MPa",
-        fill=(0, 0, 0),
-        font=small,
-        anchor="lm",
-    )
     draw.text(
         (24 * scale_ss, 22 * scale_ss),
         title,

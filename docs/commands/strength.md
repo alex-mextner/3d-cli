@@ -52,7 +52,7 @@ Pick one:
 | `--hook SPEC` | Closed-form snap hook without a file: `t=1.0,L=7,w=6,y=0.2[,taper=0.5,lead=30,retention=45,mu=0.4]` (arm thickness, free length, width, tip deflection in mm; optional tip/root thickness ratio, barb angles in degrees, friction). |
 | `--arm-axis X\|Y\|Z` | Direction of the hook arm's bending fibre (its length axis), relative to the build axis. Default `Z`. |
 | `--order 1\|2` | FEA element order. Default `2` (quadratic tets: bending is accurate with 1.5 elements across a wall; linear tets need ~3). |
-| `--mesh-size MM`, `--max-elements N` | Target tet edge length, or the total tet budget (default 8000; 40000 for `--order 1`). |
+| `--mesh-size MM`, `--max-elements N` | Target tet edge length, or the total tet budget (default 6000; 40000 for `--order 1`). |
 | `--contact tied\|frictionless\|none` | Contact for touching bodies that have no declared mate. Default `tied`. |
 | `--crop x0,y0,z0,x1,y1,z1` | Analyse only this box of every body: a sub-model of a large part. The cut faces need a support (a `kind: fixed` load), they are not fixed for you. |
 | `-D NAME=VALUE` | OpenSCAD define, repeatable (e.g. `-D 'view="bottom"'`). |

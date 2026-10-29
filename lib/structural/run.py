@@ -25,8 +25,6 @@ from structural import beams, fdm, hooks, model, orientation, section
 if TYPE_CHECKING:
     from structural.fea import ContactPair, LoadCase
 
-DEFAULT_TETS_P2 = 8_000
-DEFAULT_TETS_P1 = 40_000
 
 
 # ---- material / orientation -------------------------------------------------------------------
@@ -90,69 +88,54 @@ def _is_project_path(path: pathlib.Path) -> bool:
     return path.is_dir() or path.suffix.lower() in (".yaml", ".yml")
 
 
-def build_model(req: StrengthRequest) -> tuple[model.Model, list[str]]:
-    """Load bodies, mates and load cases. Returns (model, warnings)."""
+def _project_bodies(
+    project: Any, req: StrengthRequest, warnings: list[str]
+) -> list[model.Body]:
+    """One body per `parts:` entry of the project, at the pose its file / module defines."""
     import trimesh
 
-    warnings: list[str] = []
-    assumptions: list[str] = []
-    project, project_path = _project_for(req)
-    bodies: list[model.Body] = []
-    input_3mf: pathlib.Path | None = None
-    default_material = req.material or (
-        project.material if project is not None else None
-    )
-
-    if project is not None and req.path is not None and _is_project_path(req.path):
-        if project.units != "mm":
-            raise InvalidArgument(
-                "project.units",
-                str(project.units),
-                ["mm"],
-                command="strength",
-                extra="`3d strength` works in millimetres only; convert the project first.",
-            )
-        if not project.parts:
-            raise UsageError(f"{project.path} has no `parts:`", command="strength")
-        for name, part in project.parts.items():
-            suffix = part.path.suffix.lower()
-            if suffix == ".scad":
-                stl = model.render_scad(part.path, req.defines, module=part.module)
-                surface = trimesh.load(stl, force="mesh")
-            else:
-                surface = trimesh.load(part.path, force="mesh")
-            infill = part.infill if part.infill is not None else None
-            bodies.append(
-                model.Body(
-                    name=name,
-                    surface=model.clean_surface(
-                        model.as_mesh(surface), f"{project.path.name}:{name}", warnings
-                    ),
-                    material=part.material or project.material or req.material,
-                    orientation=part.orientation,
-                    infill=model.parse_infill(infill, f"parts.{name}.infill")
-                    if infill is not None
-                    else None,
-                    source=str(part.path),
-                )
-            )
-        assumptions.append(
-            "parts are analysed at the pose their file / module defines (the assembled pose)"
+    if project.units != "mm":
+        raise InvalidArgument(
+            "project.units",
+            str(project.units),
+            ["mm"],
+            command="strength",
+            extra="`3d strength` works in millimetres only; convert the project first.",
         )
-    else:
-        assert req.path is not None
-        if req.path.suffix.lower() == ".3mf":
-            input_3mf = req.path
-        for name, surface in model.load_surfaces(req.path, req.defines, warnings):
-            bodies.append(
-                model.Body(
-                    name=name,
-                    surface=surface,
-                    material=req.material,
-                    source=str(req.path),
-                )
+    if not project.parts:
+        raise UsageError(f"{project.path} has no `parts:`", command="strength")
+    bodies: list[model.Body] = []
+    for name, part in project.parts.items():
+        if part.path.suffix.lower() == ".scad":
+            stl = model.render_scad(part.path, req.defines, module=part.module)
+            surface = trimesh.load(stl, force="mesh")
+        else:
+            surface = trimesh.load(part.path, force="mesh")
+        infill = part.infill if part.infill is not None else None
+        bodies.append(
+            model.Body(
+                name=name,
+                surface=model.clean_surface(
+                    model.as_mesh(surface), f"{project.path.name}:{name}", warnings
+                ),
+                material=part.material or project.material or req.material,
+                orientation=part.orientation,
+                infill=model.parse_infill(infill, f"parts.{name}.infill")
+                if infill is not None
+                else None,
+                source=str(part.path),
             )
+        )
+    return bodies
 
+
+def _finish_bodies(
+    bodies: list[model.Body],
+    req: StrengthRequest,
+    default_material: str | None,
+    assumptions: list[str],
+) -> None:
+    """Fill in materials / infill, apply --crop, and insist on unique names."""
     for body in bodies:
         if body.material is None:
             body.material = default_material
@@ -172,13 +155,22 @@ def build_model(req: StrengthRequest) -> tuple[model.Model, list[str]]:
         assumptions.append(
             f"sub-model: every body is cut to the box {list(req.crop)} mm"
         )
-
     names = [b.name for b in bodies]
     if len(set(names)) != len(names):
         raise UsageError("body names are not unique", command="strength")
 
+
+def _contact_pairs(
+    project: Any,
+    req: StrengthRequest,
+    bodies: list[model.Body],
+    from_project_input: bool,
+    assumptions: list[str],
+    warnings: list[str],
+) -> list[ContactPair]:
+    names = [b.name for b in bodies]
     pairs: list[ContactPair] = []
-    if project is not None and req.path is not None and _is_project_path(req.path):
+    if from_project_input:
         # validated even for a single body, so a typo in `mates:` is never silently ignored
         declared, notes = model.pairs_from_project(
             project, names, "tied" if req.contact == "none" else req.contact
@@ -187,48 +179,86 @@ def build_model(req: StrengthRequest) -> tuple[model.Model, list[str]]:
         assumptions.extend(notes)
     elif project is not None and project.raw.get("mates"):
         assumptions.append("`mates:` of the --loads project are ignored: the input is a single file, not that project")
-    if len(bodies) > 1:
-        if req.contact != "none":
-            extra = model.auto_pairs(bodies, pairs, req.contact, 0.1)
-            pairs.extend(extra)
-            if extra:
-                assumptions.append(
-                    f"bodies that touch without a declared mate ({', '.join(p.a + '<->' + p.b for p in extra)}) "
-                    f"get a {req.contact} contact (--contact)"
-                )
-        elif not pairs:
-            warnings.append(
-                "--contact none and no declared mates: the bodies are analysed as separate, uncoupled parts"
+    if len(bodies) > 1 and req.contact != "none":
+        extra = model.auto_pairs(bodies, pairs, req.contact, 0.1)
+        pairs.extend(extra)
+        if extra:
+            assumptions.append(
+                f"bodies that touch without a declared mate ({', '.join(p.a + '<->' + p.b for p in extra)}) "
+                f"get a {req.contact} contact (--contact)"
             )
+    elif len(bodies) > 1 and not pairs:
+        warnings.append(
+            "--contact none and no declared mates: the bodies are analysed as separate, uncoupled parts"
+        )
+    return pairs
 
-    fixture_notes: list[str] = []
-    cases: list[LoadCase]
-    from_fixture = False
+
+def _load_cases(
+    project: Any,
+    req: StrengthRequest,
+    bodies: list[model.Body],
+    assumptions: list[str],
+    warnings: list[str],
+) -> tuple[list[LoadCase], bool]:
+    """(load cases, whether they come from a --fixture rather than `loads:` in 3d.yaml)."""
     if project is not None and project.loads:
-        cases = model.cases_from_project(project)
         if req.load_n is not None:
             warnings.append(
                 "--load is ignored: the load cases come from `loads:` in 3d.yaml"
             )
-    else:
-        if req.load_n is None:
-            raise UsageError(
-                "no load case: pass --load N (with --fixture) or declare `loads:` in 3d.yaml",
-                command="strength",
-                remediation=[
-                    "Example: 3d strength bracket.scad --material PLA --load 25 --fixture cantilever"
-                ],
-            )
-        from_fixture = True
-        cases = model.fixture_case(
-            bodies,
-            fixture=req.fixture,
-            load_n=req.load_n,
-            axis=model.parse_axis(req.axis),
-            span_axis=req.span_axis,
-            notes=fixture_notes,
+        return model.cases_from_project(project), False
+    if req.load_n is None:
+        raise UsageError(
+            "no load case: pass --load N (with --fixture) or declare `loads:` in 3d.yaml",
+            command="strength",
+            remediation=[
+                "Example: 3d strength bracket.scad --material PLA --load 25 --fixture cantilever"
+            ],
         )
+    fixture_notes: list[str] = []
+    cases = model.fixture_case(
+        bodies,
+        fixture=req.fixture,
+        load_n=req.load_n,
+        axis=model.parse_axis(req.axis),
+        span_axis=req.span_axis,
+        notes=fixture_notes,
+    )
     assumptions.extend(fixture_notes)
+    return cases, True
+
+
+def build_model(req: StrengthRequest) -> tuple[model.Model, list[str]]:
+    """Load bodies, mates and load cases. Returns (model, warnings)."""
+    warnings: list[str] = []
+    assumptions: list[str] = []
+    project, project_path = _project_for(req)
+    default_material = req.material or (
+        project.material if project is not None else None
+    )
+    from_project_input = (
+        project is not None and req.path is not None and _is_project_path(req.path)
+    )
+
+    input_3mf: pathlib.Path | None = None
+    if from_project_input:
+        bodies = _project_bodies(project, req, warnings)
+        assumptions.append(
+            "parts are analysed at the pose their file / module defines (the assembled pose)"
+        )
+    else:
+        assert req.path is not None
+        if req.path.suffix.lower() == ".3mf":
+            input_3mf = req.path
+        bodies = [
+            model.Body(name=name, surface=surface, material=req.material, source=str(req.path))
+            for name, surface in model.load_surfaces(req.path, req.defines, warnings)
+        ]
+
+    _finish_bodies(bodies, req, default_material, assumptions)
+    pairs = _contact_pairs(project, req, bodies, from_project_input, assumptions, warnings)
+    cases, from_fixture = _load_cases(project, req, bodies, assumptions, warnings)
     return (
         model.Model(
             bodies=bodies,
@@ -287,14 +317,14 @@ def analyze(req: StrengthRequest) -> dict[str, Any]:
     method = _choose_method(req, mdl)
     orients = _orientations(req, mdl)
     cards = {
-        b.material: material_card(str(b.material), req.path or mdl.project_path)[0]
+        b.material: material_card(str(b.material), mdl.project_path or req.path)[0]
         for b in mdl.bodies
         if b.material
     }
-    if method == "beam":
-        result = _beam_result(req, mdl, orients, cards)
-    elif req.dry_run:
+    if req.dry_run:
         result = _plan_result(req, mdl, orients, cards, method)
+    elif method == "beam":
+        result = _beam_result(req, mdl, orients, cards)
     else:
         from structural import fea_run
 
@@ -447,13 +477,13 @@ def _beam_result(
             )
         )
         i_weak = min(i_min, i_other)
-        p_cr = beams.euler_buckling_load(modulus, i_weak, prof.length, k_factor=1.0)
+        p_cr = beams.euler_buckling_load(modulus, i_weak, prof.length, k_factor=2.0)
         safety["euler buckling"] = p_cr / req.load_n
         detail.append(
             f"axial stress {sigma:.3g} MPa on the smallest section {area_min:.3g} mm^2"
         )
         detail.append(
-            f"Euler critical load {p_cr:.3g} N (pinned-pinned, K=1; meaningful only for slender parts)"
+            f"Euler critical load {p_cr:.3g} N (fixed-free, K=2: the fixture clamps the base and leaves the top free; meaningful only for slender parts)"
         )
         max_vm, deflection = (
             sigma,
@@ -535,6 +565,36 @@ def _hook_result(req: StrengthRequest, started: float) -> dict[str, Any]:
             extra="`flat` needs a mesh; give the build axis explicitly for --hook.",
         )
     orient = orientation.resolve(spec, extents=(1.0, 1.0, 1.0))
+    if req.dry_run:
+        return {
+            "schema": SCHEMA,
+            "status": "PLAN",
+            "verdict": None,
+            "method": "beam",
+            "label": LABELS["beam"],
+            "safety_factor": None,
+            "safety_factor_required": req.safety_factor,
+            "input": {
+                "file": None,
+                "loads_from": None,
+                "bodies": [
+                    {
+                        "name": "hook arm",
+                        "material": card.name,
+                        "orientation": {**orient.to_dict(), "arm_axis": req.arm_axis},
+                    }
+                ],
+                "hook": {**req.hook, "arm_axis": req.arm_axis},
+            },
+            "materials": [material_record(card)],
+            "contacts": [],
+            "cases": [{"name": "snap hook", "verdict": "PLAN", "safety_factor": None}],
+            "assumptions": ["dry run: inputs validated; nothing was solved"],
+            "unverified": list(UNVERIFIED),
+            "artifacts": {},
+            "warnings": [],
+            "timing_s": {"total": round(time.perf_counter() - started, 4)},
+        }
     build = np.array(orient.build_axis)
     arm = np.array(
         {"X": (1.0, 0.0, 0.0), "Y": (0.0, 1.0, 0.0), "Z": (0.0, 0.0, 1.0)}[req.arm_axis]

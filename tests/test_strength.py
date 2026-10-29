@@ -513,3 +513,23 @@ def test_dry_run_plans_without_solving(tmp_path) -> None:  # type: ignore[no-unt
     assert result["status"] == "PLAN" and result["verdict"] is None
     assert result["cases"][0]["verdict"] == "PLAN"
     assert json.dumps(result)
+
+
+def test_dry_run_plans_the_beam_and_hook_paths_without_solving(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    beam = _analyze(
+        [str(_bar_stl(tmp_path)), "--material", "PLA", "--load", "10", "--method", "beam", "--dry-run"]
+    )
+    hook = _analyze(["--hook", "t=1,L=7,w=6,y=.6", "--material", "PLA", "--dry-run"])
+    for result in (beam, hook):
+        assert result["status"] == "PLAN"
+        assert result["verdict"] is None
+        assert result["safety_factor"] is None
+
+
+def test_compression_buckling_uses_the_fixed_free_restraint(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    part = _stl(tmp_path, "slim.stl", bar(100.0, 2.0, 2.0))
+    result = _analyze(
+        [str(part), "--material", "PLA", "--load", "1.5", "--fixture", "compression",
+         "--axis", "X", "--method", "beam"]
+    )
+    assert result["cases"][0]["safety_factors"]["euler buckling"] < 1.0

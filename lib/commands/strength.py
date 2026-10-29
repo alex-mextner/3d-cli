@@ -5,7 +5,8 @@ from __future__ import annotations
 from cli.pyrun import exec_tool
 from cli.registry import Command
 
-DEPS = "numpy,scipy,trimesh,manifold3d,rtree,pillow,pyyaml,scikit-fem,pytetwild"
+DEPS = "numpy,scipy,trimesh,manifold3d,rtree,pillow,pyyaml"
+FEA_DEPS = f"{DEPS},scikit-fem,pytetwild"  # the closed-form beam and hook paths need no FEA stack
 
 USAGE = """3d strength <part.scad|.stl|.3mf | 3d.yaml | project-dir> --material NAME [--load NEWTONS] [options]
 3d strength --hook t=T,L=L,w=W,y=Y --material NAME [--orientation SPEC] [--arm-axis X|Y|Z] [options]
@@ -34,7 +35,7 @@ Options:
   --hook SPEC              closed-form snap hook, no file: t=1.0,L=7,w=6,y=0.2[,taper=0.5,lead=30,retention=45,mu=0.4]
   --arm-axis X|Y|Z         bending fibre direction of the --hook arm (default: Z)
   --order 1|2              FEA element order (default: 2, quadratic tets)
-  --mesh-size MM           target tet edge length;  --max-elements N  total tet budget (default 8000, order 1: 40000)
+  --mesh-size MM           target tet edge length;  --max-elements N  total tet budget (default 6000, order 1: 40000)
   --contact tied|frictionless|none   contact for touching bodies without a declared mate (default: tied)
   --crop x0,y0,z0,x1,y1,z1 analyse only this box of the model (sub-model of a big part; cut faces need a support)
   -D NAME=VALUE            OpenSCAD define, repeatable
@@ -63,8 +64,9 @@ def run(argv: list[str]) -> int:
 
     from strength import parse_args
 
-    parse_args(argv)  # fail fast (exit 2) before starting the solver runtime
-    return exec_tool(DEPS, "strength_run.py", argv)
+    req = parse_args(argv)  # fail fast (exit 2) before starting the solver runtime
+    closed_form = req.hook is not None or req.method == "beam"
+    return exec_tool(DEPS if closed_form else FEA_DEPS, "strength_run.py", argv)
 
 
 COMMAND = Command(

@@ -227,7 +227,10 @@ def failure_fields(
         (np.maximum(sigma_n, 0.0) / (card.yield_z * scale)) ** 2
         + (tau_n / (card.shear_z * scale)) ** 2
     )
-    worst = np.maximum(fi_p, fi_z)
+    # Compression across the layers is not a delamination mode, but it still yields: it is held
+    # to the in-plane yield strength (the weakest compressive figure the card carries).
+    fi_c = np.maximum(-sigma_n, 0.0) / (card.yield_p * scale)
+    worst = np.maximum(np.maximum(fi_p, fi_z), fi_c)
     sf = np.where(worst > 0.0, 1.0 / np.where(worst > 0.0, worst, 1.0), np.inf)
     return {
         "von_mises": von_mises,

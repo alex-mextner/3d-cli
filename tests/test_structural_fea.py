@@ -47,7 +47,7 @@ def test_cantilever_tip_deflection_within_two_percent() -> None:
     assert sol.reaction_n[2] == pytest.approx(p, rel=1e-6)
 
 
-def test_cantilever_root_stress_within_ten_percent_and_reports_the_singularity_flag() -> (
+def test_cantilever_stress_away_from_the_clamp_is_within_ten_percent_and_the_corner_never_reads_low() -> (
     None
 ):
     length, b, h, p = 100.0, 10.0, 10.0, 10.0
@@ -111,7 +111,7 @@ def test_three_point_bend_matches_timoshenko_and_euler_bernoulli() -> None:
     bottom_mid = (np.abs(nodes[0] - span / 2) < 1.0) & (nodes[2] < under + 1e-3)
     deflection = abs(float(field.u[bottom_mid][:, 2].mean()))
     # span/depth = 10: shear deformation adds ~3 % that Euler-Bernoulli leaves out, so check both
-    g_xz = card().g_p
+    g_xz = card().g_z  # the bar is built standing on Z: XZ shear is the across-layer modulus
     timoshenko = analytic + f * span / (4.0 * (5.0 / 6.0) * g_xz * b * h)
     assert deflection == pytest.approx(analytic, rel=0.05)
     assert deflection == pytest.approx(timoshenko, rel=0.015)
@@ -346,3 +346,18 @@ def test_unsupported_model_is_reported_as_under_constrained() -> None:
     )
     with pytest.raises(fea.SolveError):
         solve([("beam", bar(length, b, h))], sliding, edge=3.0)
+
+
+def test_compression_across_the_layers_yields_and_fails() -> None:
+    pla = card()
+    sigma = np.diag([0.0, 0.0, -1000.0])
+    sf = float(fdm.failure_fields(sigma, np.array(Z), pla)["sf"])
+    assert sf == pytest.approx(pla.yield_p / 1000.0, rel=1e-9)
+
+
+def test_stress_colours_land_on_the_vertices_of_their_own_element() -> None:
+    from structural.viz import node_averages
+
+    tets = np.array([[0, 4], [1, 5], [2, 6], [3, 7]])  # (4, elements) like skfem's mesh.t
+    per_vertex = np.array([[10.0] * 4, [100.0] * 4])  # (elements, 4)
+    assert node_averages(tets, per_vertex, 8).tolist() == [10.0] * 4 + [100.0] * 4
