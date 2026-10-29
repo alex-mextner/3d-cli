@@ -724,9 +724,20 @@ def test_a_make_post_is_recorded_as_a_make_publication(tmp_path: Path) -> None:
 
     out = flow.send(prep, runner=runner)
     assert out[0].state == "draft" and out[0].ok
-    uploads = [c for c in calls if "upload" in c]
-    assert [c[c.index("upload") + 2 :] for c in uploads] == [[str(table)]]
-    assert not any("Publish" in " ".join(c) or "Post" in " ".join(c) for c in calls)
+    # exactly the draft steps, nothing after the screenshot: no submit click can slip in
+    assert [c[3:] for c in calls[1:]] == [
+        ["get", "url"],
+        ["find", "text", "Add make", "click"],
+        ["upload", "input[type=file]", str(table)],
+        [
+            "find",
+            "label",
+            "Description",
+            "fill",
+            "A spiral plug.\n\nPrinted with printer k1se.",
+        ],
+        ["screenshot"],
+    ]
     c = librarydb.open_library(db)
     try:
         assert [(p["platform"], p["state"]) for p in records.list_publications(c)] == [
