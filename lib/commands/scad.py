@@ -410,6 +410,10 @@ def _human_size(n: int) -> str:
 def _geometry_issues(output: str) -> tuple[list[str], list[str]]:
     """(blocking issues, warnings) found in OpenSCAD's export output."""
     blocking: list[str] = []
+    # Text the model itself echoes is not a diagnostic.
+    output = "\n".join(
+        line for line in output.splitlines() if not line.lstrip().startswith("ECHO:")
+    )
     # OpenSCAD 2021.01 (CGAL) says "The given mesh is not closed! Unable to convert to
     # CGAL_Nef_Polyhedron"; newer builds say "Input mesh is not closed" / "NotManifold".
     if re.search(
@@ -426,22 +430,23 @@ def _geometry_issues(output: str) -> tuple[list[str], list[str]]:
     return blocking, warnings
 
 
-def _open_mesh_issue(stl: Path) -> list[str]:
-    """OpenSCAD exports a bare open polyhedron() without a word of warning: read the STL back.
-    Skipped quietly when trimesh is not installed (the output checks above still apply)."""
+def _open_mesh_issue(stl: Path) -> tuple[list[str], list[str]]:
+    """(blocking issues, warnings) from reading the exported STL back: OpenSCAD writes a bare
+    open polyhedron() without a word of warning. Without trimesh the read-back is skipped
+    and that is said out loud instead of certifying the mesh."""
     try:
         import trimesh
     except ImportError:
-        return []
+        return [], ["mesh read-back skipped (trimesh not importable): only OpenSCAD's own diagnostics were checked"]
     try:
         mesh = trimesh.load_mesh(str(stl))
     except (ValueError, OSError) as exc:
-        return [f"The exported STL cannot be read back ({exc})"]
+        return [f"The exported STL cannot be read back ({exc})"], []
     if not len(mesh.faces):
-        return ["The export is empty (no top-level geometry, or every part degenerate)"]
+        return ["The export is empty (no top-level geometry, or every part degenerate)"], []
     if not mesh.is_watertight:
-        return ["Non-manifold geometry (open mesh: holes or unpaired edges)"]
-    return []
+        return ["Non-manifold geometry (open mesh: holes or unpaired edges)"], []
+    return [], []
 
 
 def cmd_export_stl(argv: list[str]) -> int:
@@ -482,7 +487,9 @@ def cmd_export_stl(argv: list[str]) -> int:
         return 1
 
     blocking, warnings = _geometry_issues(res.output)
-    blocking.extend(_open_mesh_issue(out))
+    mesh_blocking, mesh_warnings = _open_mesh_issue(out)
+    blocking.extend(mesh_blocking)
+    warnings.extend(mesh_warnings)
     print(f"\nOutput: {out} ({_human_size(out.stat().st_size)})")
     if fmt == "binstl":
         with out.open("rb") as fh:
@@ -534,6 +541,10 @@ def _classify(value: str) -> tuple[str, str]:
     return "expression", value
 
 
+# strings and // comments are kept as they are; only a real /* block */ comment (group 1) is blanked
+_BLANK_BLOCKS = re.compile(r'"(?:\\.|[^"\\])*"|//[^\n]*|(/\*.*?\*/)', re.S)
+
+
 def _brace_delta(line: str) -> int:
     """Net `{` minus `}` of one line, ignoring braces inside string literals and // comments."""
     bare = re.sub(r'"(?:\\.|[^"\\])*"', '""', line).split("//", 1)[0]
@@ -545,7 +556,10 @@ def extract_params(text: str) -> list[Param]:
     params: list[Param] = []
     depth = 0
     # Block comments are blanked (newlines kept) so assignments inside them are not parameters.
-    code = re.sub(r"/\*.*?\*/", lambda m: "\n" * m.group(0).count("\n"), text, flags=re.S)
+    code = _BLANK_BLOCKS.sub(
+        lambda m: m.group(0) if m.group(1) is None else "\n" * m.group(0).count("\n"),
+        text,
+    )
     for line in code.splitlines():
         depth += _brace_delta(line)
         if depth > 0:

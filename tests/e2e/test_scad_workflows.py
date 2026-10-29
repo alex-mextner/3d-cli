@@ -286,7 +286,7 @@ def test_export_stl_rejects_a_bare_open_polyhedron(tmp_path: Path) -> None:
 
 
 def test_section_cuts_a_module_call_written_without_a_semicolon(tmp_path: Path) -> None:
-    """`--module='shaft()'` must really subtract the cut box: the written model keeps only half."""
+    """A module call written as `--module='shaft()'` (no semicolon) still renders its section PNG."""
     model = _write(
         tmp_path, "part.scad", "module shaft() { cylinder(h=40, r=10, $fn=24); }\n"
     )
@@ -366,3 +366,31 @@ def test_validate_ignores_the_word_assertion_in_echoed_text(tmp_path: Path) -> N
 
     assert result.returncode == 0
     assert "Syntax OK" in result.stdout
+
+
+def test_params_keeps_assignments_between_comment_markers_inside_strings(
+    tmp_path: Path,
+) -> None:
+    """A label whose text holds /* and */ must not swallow the parameters between them."""
+    model = _write(
+        tmp_path,
+        "q.scad",
+        'a = "/*";\nwidth = 40;\nb = "*/";\nheight = 20;\n',
+    )
+
+    result = run_cli(tmp_path, "scad", "params", str(model), "--json")
+
+    assert result.returncode == 0, result.stderr
+    assert [r["name"] for r in json.loads(result.stdout)] == ["a", "width", "b", "height"]
+
+
+def test_export_ignores_diagnostic_words_in_echoed_text(tmp_path: Path) -> None:
+    """echo("this is not manifold") in a model is chatter; the closed cube still passes."""
+    model = _write(
+        tmp_path, "chat.scad", 'echo("not manifold, no self-intersections");\ncube(5);\n'
+    )
+
+    result = run_cli(tmp_path, "scad", "export-stl", str(model), str(tmp_path / "c.stl"))
+
+    assert result.returncode == 0, result.stdout
+    assert "STATUS: PASSED" in result.stdout
