@@ -127,3 +127,40 @@ def test_legend_lists_each_part_once_with_source() -> None:
     assert pcb["reference_source"]["license"] == "CC-BY-4.0" and pcb["printable"] is False
     text = legend_text(sample())
     assert "battery_box" in text and "(ghost)" in text
+
+
+def test_part_from_dict_validates_its_boundary_types() -> None:
+    for bad in ({"name": None}, {"name": ""}, {"name": 3}, {"role": "printed"}):
+        with pytest.raises(InvalidArgument, match="part.name"):
+            part_from_dict(bad)
+    for stored in ("false", "true", 0, 1, None):
+        with pytest.raises(InvalidArgument, match="printable"):
+            part_from_dict({"name": "board", "printable": stored})
+    with pytest.raises(InvalidArgument, match="reference_source"):
+        part_from_dict({"name": "bolt", "role": "vitamin", "reference_source": "https://x"})
+    assert part_from_dict({"name": "lid", "printable": True}).printable is True
+
+
+def test_one_name_with_two_roles_is_refused_in_either_order() -> None:
+    a, b = Part("same"), Part("same", "stand_in")
+    for order in ([a, b], [b, a]):
+        with pytest.raises(InvalidArgument, match="one role per part name"):
+            assign_styles(order)
+        with pytest.raises(InvalidArgument, match="one role per part name"):
+            legend(order)
+    assert list(assign_styles([a, Part("same")])) == ["same"]  # the same declaration twice is fine
+
+
+def test_metadata_tags_that_contradict_each_other_are_refused() -> None:
+    with pytest.raises(InvalidArgument, match="printable"):
+        part_from_metadata("lid", {META_ROLE: "printed", META_PRINTABLE: "false"})
+    with pytest.raises(InvalidArgument, match="printable"):
+        part_from_metadata("bolt", {META_ROLE: "vitamin", META_PRINTABLE: "true"})
+    assert part_from_metadata("lid", {META_ROLE: "printed", META_PRINTABLE: "true"}).printable is True
+    assert part_from_metadata("ghost", {META_ROLE: "stand_in", META_PRINTABLE: "false"}).printable is False
+
+
+def test_reference_source_fields_must_be_strings() -> None:
+    for bad in ({"url": None, "license": "MIT"}, {"url": "https://x", "license": 3}):
+        with pytest.raises(InvalidArgument, match="reference_source"):
+            part_from_dict({"name": "bolt", "role": "vitamin", "reference_source": bad})

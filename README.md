@@ -540,6 +540,7 @@ per-OS install command (e.g. `brew install --cask orcaslicer`) — never broken.
 | `3d init [path]` | scaffold a `3d.yaml` project skeleton. |
 | `3d projects list\|add\|remove` | manage the project registry used by `3d web`. |
 | `3d materials list\|show` | inspect FDM material names and properties. |
+| `3d library path\|migrate\|status\|export` | the local model-library database (searches, sources, designs, makes, photos, publications; offline, `--json`) and its shared fit/part/action contracts ([docs](docs/commands/library.md)). |
 | `3d printers list\|show` | inspect printer models (bed, nozzle, firmware); `show u1` is the one-screen dossier of a fleet printer: machine, web UIs, live status, job queue, job history. |
 | `3d printers spools\|load\|unload\|swap\|filament` | which spool is in which printer (remaining interval, Moonraker active-spool agreement), put one in, take it out, swap it; `--dry-run` and `--json` everywhere ([docs](docs/commands/printers.md)). |
 | `3d printers doctor [PRINTER\|--all] [--fix]` | diagnose a printer's setup (Klippy, Moonraker, Spoolman link and CORS, active spool, camera, watch services, ...); `--fix` repairs what is safe, risky fixes need `--yes`, manual ones print their steps ([docs](docs/commands/printers-doctor.md)). |

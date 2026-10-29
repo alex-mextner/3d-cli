@@ -229,6 +229,8 @@ use a compatibility import.
 
 - `lib/data/materials.yaml`
 - `lib/data/printers.yaml`
+- `lib/data/fits.yaml` — the shared fit/tolerance table, read by `lib/fits.py` ([contract](../contracts/fits.md)).
+- `lib/library/` — the local model-library database (`db.py`, own `migrations/`) and the action contract (`actions.py`); backs `3d library` ([contract](../contracts/library-db.md)).
 
 Data files stay under `lib/data/` until a packaging pass decides whether they should move
 to a dedicated resources package.

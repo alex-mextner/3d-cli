@@ -1,0 +1,123 @@
+# fits.yaml — the ONE shared fit/tolerance table of `3d` (schema 3d.fits/1, umbrella #570, slice S0 #571).
+#
+# ACCESSED VIA: lib/fits.py (`load_table()`, `resolve()`); consumers are `3d fit-niche` (lib/niche_fit.py)
+# today and `3d fits`, `3d calibrate fit` (S1/S2), the assembly runner (S3) later. Nobody keeps a second
+# clearance table: a number in a report must be explainable from this file via the provenance `resolve` returns.
+#
+# CONVENTIONS
+#   clearance_mm_per_face  gap on EACH mating face (rect wall) / radial for a round bore; total slop on an
+#                          axis is twice this. Same convention as fit-niche (lib/niche_fit.py docstring).
+#   interference_mm        designed overlap per face (press fits). `resolve` returns the signed
+#                          clearance_mm = clearance_mm_per_face - interference_mm + correction, so a
+#                          negative clearance_mm means "overlap by that much".
+#   tol_mm                 +/- expected scatter of the resulting gap for a calibrated desktop FDM printer
+#                          (XY, 0.4 mm nozzle). A printed gap smaller than tol_mm is not reliable.
+#   applies_to             shapes the fit type is meant for; a shape outside it still resolves but
+#                          the provenance carries a note.
+#
+# SOURCES (retrieved 2026-10; every guide agrees to within the ranges below, none is normative):
+#   [1] x3dstudios "3D Printing Tolerances: A Practical Guide to Parts That Fit":
+#       press 0.1 per side, snug/tight 0.1-0.2, sliding 0.2-0.3, loose 0.4-0.5.
+#       https://x3dstudios.com/blog/3d-printing-tolerances-guide
+#   [2] Sovol "FDM 3D Printing Tolerances & Clearances": press fit starts at 0.05-0.15 per side,
+#       0.2 mm per side is a sliding-fit starting point; always test on your printer + material.
+#       https://www.sovol3d.com/blogs/news/fdm-3d-printing-tolerances-clearances-how-to-design-parts-that-fit
+#   [3] 3DPut "Tolerances and Fit Guide for Moving Parts": slip fit / hinge 0.15-0.20 per side (0.4 mm nozzle).
+#       https://3dput.com/complete-guide-to-3d-printing-tolerances-and-fit-clearance-for-moving-parts-2/
+#   [4] Creative3DP "Press-Fit Tolerances for 3D Printing": desktop FDM press fits land at -0.1 to -0.2 mm
+#       interference; Prusa guidelines call for at least 0.3 mm modelled clearance for snap/free parts.
+#       https://tools.creative3dp.com/blog/press-fit-tolerances-3d-printing/
+#   [5] 3dprintcalcs "Tolerance & Fit Guide": per-side clearances, assume a calibrated 0.4 mm nozzle printer.
+#       https://3dprintcalcs.uk/reference/common-tolerances/
+#   [H] garage-band house defaults (AGENTS): snap 0.3, sliding 0.2, press 0.1 per side.
+#   [N] fit-niche presets before the cutover (snug 0.10 / normal 0.20 / loose 0.35 mm per face), kept bit-exact.
+
+schema: 3d.fits/1
+
+# Vocabulary the validator and `resolve` accept for the `shape` argument.
+shapes: [planar, round, slot, pin, hinge]
+
+fit_types:
+  snap:
+    clearance_mm_per_face: 0.30       # [H] house default; [4] >= 0.3 for snap/free parts
+    interference_mm: 0.0
+    tol_mm: 0.10
+    applies_to: [planar, round, slot]
+    features: [snap_hook, cantilever_latch, lid_lip]
+    notes: >-
+      Parts that must pop together and hold: the extra gap leaves room for the hook to deflect and for
+      layer-line stair-stepping on the lip. Tighten only after a coupon (`fit_clearance` record).
+
+  sliding:
+    clearance_mm_per_face: 0.20       # [H] house default; [1] 0.2-0.3; [2] 0.2; [3] 0.15-0.20; [N] normal
+    interference_mm: 0.0
+    tol_mm: 0.10
+    applies_to: [planar, round, slot, pin, hinge]
+    features: [drawer, insert, hinge_pin, dovetail, lid_slide]
+    notes: >-
+      Free running / slip fit: moves by hand without force. Also the `free_running` alias.
+
+  tight:
+    clearance_mm_per_face: 0.10       # [1] snug/tight 0.1-0.2; [N] snug
+    interference_mm: 0.0
+    tol_mm: 0.05
+    applies_to: [planar, round, slot, pin]
+    features: [locating_pin, dowel, close_fit_insert]
+    notes: >-
+      Tight running / snug: no visible play, assembles by hand or with a light push; may need a
+      light sanding on the first print. Also the `tight_running` alias.
+
+  press:
+    clearance_mm_per_face: 0.0
+    interference_mm: 0.10             # [H] 0.1 per side; [4] -0.1..-0.2 is the field range for FDM
+    tol_mm: 0.05
+    applies_to: [round, pin, slot]
+    features: [press_pin, magnet_pocket, bearing_seat]
+    notes: >-
+      Designed overlap per face; relies on the printed hole being slightly undersized and on PLA/PETG
+      yielding. Start from a coupon: interference above ~0.15 mm per face cracks brittle PLA.
+
+  glue:
+    clearance_mm_per_face: 0.15       # adhesive film: CA 0.05-0.1, epoxy 0.1-0.2; keep centred ([2], [5])
+    interference_mm: 0.0
+    tol_mm: 0.10
+    applies_to: [planar, round, slot, pin]
+    features: [glued_halves, glued_seam, dowel_glue]
+    notes: >-
+      Gap that a joint adhesive fills; large enough to absorb stair-stepping, small enough to keep
+      the glue line thin. Pair with a dowel/pin (paired-halves rule) for alignment.
+
+# Alternative spellings. `extra_mm` is added to the base clearance and shows up in the provenance, so a
+# legacy label stays a pure function of this file (clean cutover of niche_fit.FIT_CLEARANCES).
+aliases:
+  free_running: {fit_type: sliding}
+  tight_running: {fit_type: tight}
+  snug: {fit_type: tight}              # fit-niche 0.10
+  normal: {fit_type: sliding}          # fit-niche 0.20
+  loose: {fit_type: sliding, extra_mm: 0.15}   # fit-niche 0.35
+
+# Corrections: printer x material x nozzle x layer deltas added to the base clearance.
+#   printer / material   exact (case/punctuation-insensitive) name or "*" (any)
+#   nozzle_mm            number, or null = any nozzle
+#   layer_height_mm      optional; absent/null = any layer height
+#   shape / fit_type     optional; absent/null = any
+#   delta_mm             signed mm added to the per-face clearance (positive = bigger gap)
+#   source               calibration | manual | default
+#   measured_at          ISO-8601 UTC for calibration/manual rows, null for defaults
+# Exactly ONE row is applied per resolve: the most specific match (printer, material, nozzle, layer, shape,
+# fit_type, in that order of weight), then calibration > manual > default, then newest measured_at. The rest are
+# listed in the provenance as `superseded`. The `*`/`*` row is the fallback for an unknown printer/material and is
+# flagged `fallback: true` in the provenance.
+corrections:
+  - {printer: "*", material: "*", nozzle_mm: null, delta_mm: 0.0, source: default, measured_at: null,
+     note: "baseline: calibrated 0.4 mm desktop FDM printer, table values as written"}
+  # Generic material starting points (NOT measurements): materials that shrink or ooze print holes smaller.
+  # Replace by a calibration row (3d calibrate fit, S2) as soon as a coupon exists for the printer.
+  - {printer: "*", material: PETG, nozzle_mm: null, delta_mm: 0.05, source: default, measured_at: null,
+     note: "PETG strings/oozes into small gaps; start 0.05 mm looser [5]"}
+  - {printer: "*", material: ABS, nozzle_mm: null, delta_mm: 0.05, source: default, measured_at: null,
+     note: "ABS/ASA shrink on cooling; start 0.05 mm looser [5]"}
+  - {printer: "*", material: ASA, nozzle_mm: null, delta_mm: 0.05, source: default, measured_at: null,
+     note: "ABS/ASA shrink on cooling; start 0.05 mm looser [5]"}
+  - {printer: "*", material: TPU, nozzle_mm: null, delta_mm: 0.10, source: default, measured_at: null,
+     note: "flexible parts squash and bridge poorly; start 0.10 mm looser [5]"}

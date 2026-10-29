@@ -40,6 +40,8 @@ META_PRINTABLE = "3d:printable"
 _LOG = logging.getLogger("3d.parts")
 _GOLDEN = 0.618033988749895
 _MIN_HUE_GAP = 0.02
+# brightness steps from the brightest role look down to the 0.25 floor
+_SHADE_STEPS = 40
 
 
 class NonPrintableParts(GateFailure):
@@ -119,25 +121,50 @@ class Part:
         }
 
 
+def _source_from_dict(name: str, raw: Any) -> ReferenceSource | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, Mapping):
+        raise InvalidArgument(
+            f"part {name!r}.reference_source",
+            repr(raw),
+            ["a mapping with url, license and note"],
+            command="parts",
+        )
+    fields = {key: raw.get(key, "") for key in ("url", "license", "note")}
+    bad = [key for key, value in fields.items() if not isinstance(value, str)]
+    if bad:
+        raise InvalidArgument(
+            f"part {name!r}.reference_source.{bad[0]}",
+            repr(fields[bad[0]]),
+            ["a string"],
+            command="parts",
+        )
+    return ReferenceSource(fields["url"], fields["license"], fields["note"])
+
+
 def part_from_dict(raw: Mapping[str, Any]) -> Part:
     """Build a `Part` from a parts-file entry; a stored `printable` that contradicts `role` is rejected."""
-    role = str(raw.get("role", "printed"))
-    part_src = raw.get("reference_source")
-    source = None
-    if part_src is not None:
-        source = ReferenceSource(
-            str(part_src.get("url", "")),
-            str(part_src.get("license", "")),
-            str(part_src.get("note", "")),
+    name = raw.get("name")
+    if not isinstance(name, str) or not name:
+        raise InvalidArgument(
+            "part.name", repr(name), ["a non-empty string"], command="parts"
         )
-    part = Part(str(raw.get("name", "")), role, source)
-    if "printable" in raw and bool(raw["printable"]) != part.printable:
+    part = Part(
+        name,
+        str(raw.get("role", "printed")),
+        _source_from_dict(name, raw.get("reference_source")),
+    )
+    stored = raw.get("printable")
+    if "printable" in raw and (
+        not isinstance(stored, bool) or stored != part.printable
+    ):
         raise InvalidArgument(
             f"part {part.name!r}.printable",
-            str(raw["printable"]),
+            str(stored),
             [str(part.printable).lower()],
             command="parts",
-            extra="`printable` is derived from `role`; drop the field or fix the role.",
+            extra="`printable` is a boolean derived from `role`; drop the field or fix the role.",
         )
     return part
 
@@ -148,8 +175,17 @@ def part_from_metadata(name: str, metadata: Mapping[str, str]) -> Part:
     A tag of `3d:printable=false` on an object without a role is read as `stand_in`, never silently as printed.
     """
     role = metadata.get(META_ROLE)
+    tag = metadata.get(META_PRINTABLE)
     if role is None:
-        role = "stand_in" if metadata.get(META_PRINTABLE) == "false" else "printed"
+        role = "stand_in" if tag == "false" else "printed"
+    elif tag is not None and tag != ("true" if role == "printed" else "false"):
+        raise InvalidArgument(
+            f"part {name!r}.{META_PRINTABLE}",
+            tag,
+            ["true" if role == "printed" else "false"],
+            command="parts",
+            extra=f"`{META_PRINTABLE}` contradicts `{META_ROLE}={role}`; fix or drop one of the two tags.",
+        )
     if role in REFERENCE_REQUIRED_ROLES:
         # A 3MF carries only the tag; the source lives in the parts file. Keep the role without raising.
         return Part(
@@ -248,15 +284,57 @@ def _hex(h: float, s: float, v: float) -> str:
     return f"#{round(r * 255):02X}{round(g * 255):02X}{round(b * 255):02X}"
 
 
+def _unique_by_name(parts: Iterable[Part]) -> dict[str, Part]:
+    """Parts keyed by name; one name declared with two different roles is ambiguous and refused."""
+    by_name: dict[str, Part] = {}
+    for p in parts:
+        first = by_name.setdefault(p.name, p)
+        if first.role != p.role:
+            raise InvalidArgument(
+                "part.name",
+                p.name,
+                ["one role per part name"],
+                command="parts",
+                extra=f"{p.name!r} is declared as both {first.role} and {p.role}.",
+            )
+    return by_name
+
+
+def _place_hue(name: str, role: str, placed: Sequence[float], gap: float) -> float:
+    hue = _base_hue(name, role)
+    for _ in range(512):
+        if all(_hue_gap(hue, h) >= gap for h in placed):
+            break
+        hue = (hue + _GOLDEN) % 1.0
+    return hue
+
+
+def _distinct_color(
+    name: str, hue: float, sat: float, val: float, used: set[str]
+) -> str:
+    """The first unused shade of `hue`: a step of brightness keeps two parts apart. Bounded, then refused."""
+    for _ in range(_SHADE_STEPS):
+        color = _hex(hue, sat, val)
+        if color not in used:
+            return color
+        val = max(0.25, val - 0.02)
+    raise InvalidArgument(
+        "parts",
+        name,
+        ["fewer parts"],
+        command="parts",
+        extra=f"no free colour is left for {name!r}: too many parts for a distinct palette.",
+    )
+
+
 def assign_styles(parts: Iterable[Part]) -> dict[str, PartStyle]:
     """A deterministic, pairwise distinct style per part name.
 
     The first-choice hue is a hash of (role, name); parts are placed in sorted order and a hue too close to an
-    already placed one steps by the golden ratio, so the result depends on the set of parts only.
+    already placed one steps by the golden ratio, so the result depends on the set of parts only. The same
+    name with two different roles raises `InvalidArgument`.
     """
-    by_name: dict[str, Part] = {}
-    for p in parts:
-        by_name.setdefault(p.name, p)
+    by_name = _unique_by_name(parts)
     placed: list[float] = []
     used: set[str] = set()
     gap = min(_MIN_HUE_GAP, 0.5 / max(len(by_name), 1))  # n parts need a gap below 1/n
@@ -264,16 +342,9 @@ def assign_styles(parts: Iterable[Part]) -> dict[str, PartStyle]:
     for name in sorted(by_name):
         part = by_name[name]
         sat, val, alpha, style = _ROLE_LOOK[part.role]
-        hue = _base_hue(name, part.role)
-        for _ in range(512):
-            if all(_hue_gap(hue, h) >= gap for h in placed):
-                break
-            hue = (hue + _GOLDEN) % 1.0
+        hue = _place_hue(name, part.role, placed, gap)
         placed.append(hue)
-        color = _hex(hue, sat, val)
-        while color in used:  # last resort: a step of brightness keeps two parts apart
-            val = max(0.25, val - 0.02)
-            color = _hex(hue, sat, val)
+        color = _distinct_color(name, hue, sat, val, used)
         used.add(color)
         out[name] = PartStyle(name, part.role, color, alpha, style)
     return out
@@ -281,21 +352,17 @@ def assign_styles(parts: Iterable[Part]) -> dict[str, PartStyle]:
 
 def legend(parts: Iterable[Part]) -> list[dict[str, Any]]:
     """Legend rows (sorted by name) for text/JSON output: name, role, colour, style, printable, source."""
-    plist = list(parts)
-    styles = assign_styles(plist)
-    seen: set[str] = set()
+    by_name = _unique_by_name(parts)
+    styles = assign_styles(by_name.values())
     rows = []
-    for p in sorted(plist, key=lambda x: x.name):
-        if p.name in seen:
-            continue
-        seen.add(p.name)
+    for name in sorted(by_name):
+        part = by_name[name]
+        source = part.reference_source
         rows.append(
             {
-                **styles[p.name].to_dict(),
-                "printable": p.printable,
-                "reference_source": p.reference_source.to_dict()
-                if p.reference_source
-                else None,
+                **styles[name].to_dict(),
+                "printable": part.printable,
+                "reference_source": source.to_dict() if source else None,
             }
         )
     return rows
