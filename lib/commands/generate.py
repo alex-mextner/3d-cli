@@ -26,6 +26,9 @@ class _Options:
     rounds: int = 3
     out: str = "generated.scad"
     json: bool = False
+    visual_review: bool = False
+    reference: str | None = None
+    visual_threshold: float | None = None
 
 USAGE = """3d generate "<description>" [--dim name=value ...] [options]
   Turn a text description plus explicit named dimensions into a parametric OpenSCAD
@@ -61,6 +64,18 @@ Backend / loop:
   --rounds N            max generate->fix rounds. Default: 3.
                         Example: 3d generate "gear" --dim teeth=12 --rounds 5
 
+Visual review (opt-in — default OFF, non-visual path is unchanged):
+  --visual-review       after each candidate renders, score the render against a REFERENCE
+                        image with the VLM judge (3d judge). A below-threshold render is
+                        blocked from `ok` and the judge's critique is fed into the next
+                        round's prompt. Requires --reference (or a spec "reference" key).
+                        Example: 3d generate "a teapot" --dim height=90 --visual-review --reference teapot.jpg
+  --reference PATH      reference image to review the render against (required with
+                        --visual-review; --spec may supply it via a "reference" key).
+                        Example: 3d generate "a mug" --dim d=80 --visual-review --reference mug.png
+  --visual-threshold F  minimum judge mean (0-4 rubric) for a render to count as `ok`.
+                        Default: 3.0. Example: --visual-review --reference r.jpg --visual-threshold 2.5
+
 Output:
   -o, --out FILE        output .scad path. Default: generated.scad
                         Example: 3d generate "cube" --dim size=20 -o cube.scad
@@ -72,6 +87,7 @@ Examples:
   3d generate "a hollow box" --dim width=30 --dim depth=20 --dim height=16 --dim wall=2 -o box.scad
   3d generate "a round coaster with a rim" --dim diameter=90 --dim rim=3 --rounds 4
   3d generate --spec bracket.json -o bracket.scad --json
+  3d generate "a teapot" --dim height=90 --visual-review --reference teapot.jpg --visual-threshold 2.5
   # deterministic (no network): feed a known .scad via the mock backend
   THREED_AI_MOCK_RESPONSE="$(cat cube.scad)" 3d generate "cube" --dim width=20 --backend mock"""
 
@@ -85,9 +101,9 @@ def run(argv: list[str]) -> int:
         return 0
 
     opts = _parse_args(argv)
-    description, dims = _resolve_inputs(opts)
+    description, dims, reference = _resolve_inputs(opts)
 
-    from ai.design import GenerateRequest, generate  # lazy: heavy-ish import graph
+    from ai.design import DEFAULT_VISUAL_THRESHOLD, GenerateRequest, generate  # lazy import graph
 
     result = generate(
         GenerateRequest(
@@ -97,6 +113,12 @@ def run(argv: list[str]) -> int:
             rounds=opts.rounds,
             backend=opts.backend,
             config_path=opts.config,
+            reference=reference,
+            visual_review=opts.visual_review,
+            visual_threshold=(
+                opts.visual_threshold if opts.visual_threshold is not None
+                else DEFAULT_VISUAL_THRESHOLD
+            ),
         )
     )
 
@@ -108,6 +130,21 @@ def run(argv: list[str]) -> int:
     if result.status == "failure":
         raise GateFailure(">>> GENERATE: FAILURE", command="generate", silent=True)
     return 0
+
+
+_VISUAL_FLAGS = ("--visual-review", "--reference", "--visual-threshold")
+
+
+def _parse_visual_flag(opts: _Options, argv: list[str], i: int, flag: str) -> int:
+    """Apply one visual-review flag to `opts`; returns how many argv slots it consumed."""
+    if flag == "--visual-review":
+        opts.visual_review = True
+        return 1
+    if flag == "--reference":
+        opts.reference = _need_value(argv, i, flag)
+    else:
+        opts.visual_threshold = _need_float(argv, i, flag)
+    return 2
 
 
 def _parse_args(argv: list[str]) -> _Options:
@@ -135,6 +172,8 @@ def _parse_args(argv: list[str]) -> _Options:
         elif a in ("-o", "--out"):
             opts.out = _need_value(argv, i, a)
             i += 2
+        elif a in _VISUAL_FLAGS:
+            i += _parse_visual_flag(opts, argv, i, a)
         elif a == "--json":
             opts.json = True
             i += 1
@@ -142,28 +181,38 @@ def _parse_args(argv: list[str]) -> _Options:
             print(USAGE)
             raise UsageError(f"unknown option '{a}'", command="generate")
         else:
-            if opts.description is not None:
-                raise UsageError(
-                    "only one positional description is allowed "
-                    f"(got a second: {a!r})",
-                    command="generate",
-                    remediation=['Quote the whole description: 3d generate "a hollow box" ...'],
-                )
-            opts.description = a
+            _set_description(opts, a)
             i += 1
     return opts
 
 
-def _resolve_inputs(opts: _Options) -> tuple[str, dict[str, str]]:
-    """Merge the --spec file (if any) with CLI flags. CLI wins over the spec."""
+def _set_description(opts: _Options, value: str) -> None:
+    if opts.description is not None:
+        raise UsageError(
+            "only one positional description is allowed "
+            f"(got a second: {value!r})",
+            command="generate",
+            remediation=['Quote the whole description: 3d generate "a hollow box" ...'],
+        )
+    opts.description = value
+
+
+def _resolve_inputs(opts: _Options) -> tuple[str, dict[str, str], str | None]:
+    """Merge the --spec file (if any) with CLI flags. CLI wins over the spec.
+
+    Returns (description, dims, reference). `reference` comes from --reference, else the
+    spec's "reference" key. When --visual-review is set a reference is REQUIRED (exit 2)."""
     description = opts.description
     dims: dict[str, str] = {}
+    reference = opts.reference
 
     if opts.spec is not None:
-        spec_desc, spec_dims = _load_spec(opts.spec)
+        spec_desc, spec_dims, spec_ref = _load_spec(opts.spec)
         if description is None:
             description = spec_desc
         dims.update(spec_dims)
+        if reference is None:
+            reference = spec_ref
 
     dims.update(opts.dims)
 
@@ -179,10 +228,25 @@ def _resolve_inputs(opts: _Options) -> tuple[str, dict[str, str]]:
             command="generate",
             remediation=["Pass at least one --dim name=value, or --spec FILE with dims."],
         )
-    return str(description), dims
+    if opts.visual_review and not reference:
+        raise UsageError(
+            "--visual-review requires a reference image",
+            command="generate",
+            remediation=["Pass --reference PATH, or add a 'reference' key to --spec FILE."],
+        )
+    if opts.visual_review:
+        from ai.design import check_visual_threshold
+
+        # Fail fast (exit 2) before any backend work: a typo'd reference would otherwise be
+        # silently dropped by the backend and the judge would "score" a reference it never saw.
+        if not os.path.isfile(str(reference)):
+            raise InputNotFound(str(reference), command="generate")
+        if opts.visual_threshold is not None:
+            check_visual_threshold(opts.visual_threshold)
+    return str(description), dims, reference
 
 
-def _load_spec(path: str) -> tuple[str | None, dict[str, str]]:
+def _load_spec(path: str) -> tuple[str | None, dict[str, str], str | None]:
     if not os.path.isfile(path):
         raise InputNotFound(path, command="generate")
     try:
@@ -200,12 +264,15 @@ def _load_spec(path: str) -> tuple[str | None, dict[str, str]]:
     description = data.get("description")
     if description is not None and not isinstance(description, str):
         raise UsageError("spec 'description' must be a string", command="generate")
+    reference = data.get("reference")
+    if reference is not None and not isinstance(reference, str):
+        raise UsageError("spec 'reference' must be a string", command="generate")
     dims_field = data.get("dims")
     raw_dims: dict[str, object] = (
         dims_field if isinstance(dims_field, dict)
-        else {k: v for k, v in data.items() if k != "description"}
+        else {k: v for k, v in data.items() if k not in ("description", "reference")}
     )
-    return description, {str(k): _dim_token(str(k), v) for k, v in raw_dims.items()}
+    return description, {str(k): _dim_token(str(k), v) for k, v in raw_dims.items()}, reference
 
 
 def _dim_token(name: str, value: object) -> str:
@@ -259,6 +326,14 @@ def _need_int(argv: list[str], i: int, flag: str) -> int:
     if value < 1:
         raise UsageError(f"option {flag} must be >= 1, got {value}", command="generate")
     return value
+
+
+def _need_float(argv: list[str], i: int, flag: str) -> float:
+    raw = _need_value(argv, i, flag)
+    try:
+        return float(raw)
+    except ValueError:
+        raise UsageError(f"option {flag} needs a number, got {raw!r}", command="generate") from None
 
 
 COMMAND = Command(
