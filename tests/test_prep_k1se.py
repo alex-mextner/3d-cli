@@ -207,6 +207,19 @@ def test_a_list_for_wall_loops_fails_the_project_step_instead_of_crashing(
     assert "wall_loops" in project.summary
 
 
+def test_a_stale_u1_manifest_in_the_output_dir_does_not_reach_the_k1se_gates(
+    tmp_path: Path, slicer: Path
+) -> None:
+    (tmp_path / "out").mkdir()
+    (tmp_path / "out" / "part.manifest.json").write_text(
+        "{not json"
+    )  # left by an earlier U1 run of this model
+    out = run(config(box(tmp_path / "part.stl"), tmp_path / "out", walls=3))
+    gates = rec(out, "gates")
+    assert gates.verdict != "SKIP"
+    assert "manifest" not in gates.summary
+
+
 def test_a_set_on_the_3mf_project_moves_the_gate_expectations_too() -> None:
     from prep.steps import _set_gate_fields
 

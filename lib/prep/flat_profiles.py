@@ -310,6 +310,18 @@ def _filament_name(filament: Mapping[str, Any], default: str) -> str:
     return ident
 
 
+def _refuse_arc_fitting(process: Mapping[str, Any]) -> None:
+    """Arc fitting makes the slicer emit G2/G3, which the `feedrates` gate does not read: a speed above a limit
+    would pass unseen. Refuse it rather than judge only the straight moves."""
+    if str(process.get("enable_arc_fitting", "0")) not in ("0", "", "false"):
+        raise InvalidArgument(
+            "enable_arc_fitting",
+            str(process["enable_arc_fitting"]),
+            ["0 (the feedrates gate reads G0/G1 moves only)"],
+            command="prep",
+        )
+
+
 def _check_inputs(printer: str, supports: str) -> None:
     if printer not in FLAT_PRINTERS:
         raise InvalidArgument(
@@ -352,6 +364,7 @@ def build_profiles(
     }.items():
         process[key] = coerce(process.get(key), value)
     changed_process = _apply(process, overlay.process)
+    _refuse_arc_fitting(process)
     _apply(filament, overlay.filament)
     renamed_machine = bool(_apply(machine, overlay.machine))
     renamed_process = any(_is_accel(k) for k in changed_process) or renamed_machine
@@ -424,16 +437,16 @@ def _feature_limit(
     keys: tuple[str, ...],
     first_layer: list[float],
 ) -> float | None:
-    """The fastest speed one feature can run at, or None when any of its settings is not a plain number."""
+    """The fastest speed one feature can run at, or None when any of its settings is not a plain number or none is
+    positive (0 is automatic: the slicer picks the speed, so a first-layer speed must not become the limit)."""
     present = [k for k in keys if k in process]
     if not present:
         return None
     values = [_speed(process, k) for k in present]
     known = [v for v in values if v is not None]
-    if len(known) != len(values):
+    if len(known) != len(values) or max(known) <= 0:
         return None
-    limit = max(known if feature == "travel" else [*known, *first_layer])
-    return limit if limit > 0 else None
+    return max(known if feature == "travel" else [*known, *first_layer])
 
 
 def speed_limits(process: Mapping[str, Any]) -> dict[str, float]:

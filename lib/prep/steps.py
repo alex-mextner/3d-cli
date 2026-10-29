@@ -631,6 +631,7 @@ def _gates(pipe: Pipeline) -> StepOutput:
     expectations = (
         gcode_gates.GateExpectations.from_manifest(manifest)
         if manifest.is_file()
+        and not cfg.flat_profile  # a flat-profile print has no project manifest; an old U1 one is stale
         else None
     )
     rep = gcode_gates.check_gcode(gcode, spec, expectations)

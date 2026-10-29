@@ -282,3 +282,16 @@ def test_a_zero_speed_means_auto_and_gives_no_limit() -> None:
         {"bridge_speed": "0", "initial_layer_speed": "0"}
     )
     assert speed_limits({}) == {}
+
+
+def test_a_zero_feature_speed_is_automatic_and_has_no_limit_whatever_the_first_layer_does() -> None:
+    process = {"bridge_speed": "0", "outer_wall_speed": "0", "initial_layer_speed": "30", "sparse_infill_speed": "100"}
+    limits = speed_limits(process)
+    assert "Bridge" not in limits and "Outer wall" not in limits
+    assert limits["Sparse infill"] == 100.0
+
+
+def test_arc_fitting_is_refused_because_the_feedrates_gate_cannot_read_arcs() -> None:
+    with pytest.raises(InvalidArgument):
+        build_profiles("k1se", overlay=Overlay(process={"enable_arc_fitting": 1}))
+    assert build_profiles("k1se", overlay=Overlay(process={"enable_arc_fitting": 0})).process["enable_arc_fitting"] == "0"
