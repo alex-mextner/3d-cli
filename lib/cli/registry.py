@@ -35,12 +35,14 @@ THE COMMAND-AUTHORING CONTRACT (read this before adding a command):
   a tiny dedicated module whose `run()` prepends args and calls the target's run. Both
   patterns are fine; pick whichever reads cleaner for the case.
 """
+
 from __future__ import annotations
 
 import importlib
 import pkgutil
 from dataclasses import dataclass, field
 from collections.abc import Callable
+from types import ModuleType
 
 # A command's entry point: argv (everything after the subcommand name) -> exit code.
 RunFn = Callable[[list[str]], int]
@@ -107,6 +109,7 @@ class Registry:
 
     def commands(self) -> list[Command]:
         """All Commands, sorted by group order then name (for `3d help`)."""
+
         def key(c: Command) -> tuple[int, str]:
             try:
                 gi = GROUP_ORDER.index(c.group)
@@ -120,12 +123,28 @@ class Registry:
         return dict(self._aliases)
 
 
+# Stdlib modules that exist only on POSIX. A command module that imports one at the top cannot
+# run where it is missing (native Windows), but it must not take every other command down with it.
+POSIX_ONLY_MODULES = frozenset({"fcntl"})
+
+
+def _import_command_module(name: str) -> ModuleType | None:
+    try:
+        return importlib.import_module(name)
+    except ModuleNotFoundError as exc:
+        if exc.name in POSIX_ONLY_MODULES:
+            return None
+        raise
+
+
 def discover(package: str = "commands") -> Registry:
     """Import every `lib/commands/*.py` and build the registry from their COMMAND objects.
 
     `package` is imported by name, so `lib/` must already be on sys.path (the dispatcher
     arranges that). A module without a `COMMAND` attribute is skipped silently — that lets
-    a module be a shared helper rather than a command if it ever needs to be.
+    a module be a shared helper rather than a command if it ever needs to be. A command whose
+    module needs a POSIX-only stdlib module (`fcntl`) that this platform lacks is left out of the
+    registry instead of failing discovery for every command.
     """
     reg = Registry()
     pkg = importlib.import_module(package)
@@ -133,7 +152,7 @@ def discover(package: str = "commands") -> Registry:
     for mod_info in pkgutil.iter_modules(pkg.__path__):
         if mod_info.name.startswith("_"):
             continue
-        mod = importlib.import_module(f"{package}.{mod_info.name}")
+        mod = _import_command_module(f"{package}.{mod_info.name}")
         cmd = getattr(mod, "COMMAND", None)
         if isinstance(cmd, Command):
             reg.add(cmd)
