@@ -254,3 +254,83 @@ def test_help_lists_every_subcommand(tmp_path: Path) -> None:
         "next-version",
     ):
         assert sub in result.stdout
+
+
+def test_a_missing_include_fails_validate_and_export(tmp_path: Path) -> None:
+    """A model whose library include is missing must not certify: OpenSCAD only warns and still exports."""
+    model = _write(tmp_path, "lib_user.scad", "include <no_such_library.scad>\ncube(10);\n")
+
+    check = run_cli(tmp_path, "scad", "validate", str(model))
+    export = run_cli(tmp_path, "scad", "export-stl", str(model), str(tmp_path / "o.stl"))
+
+    assert check.returncode == 1
+    assert "Validation failed" in check.stdout
+    assert export.returncode == 1
+    assert "STATUS: FAILED" in export.stdout
+
+
+def test_export_stl_rejects_a_bare_open_polyhedron(tmp_path: Path) -> None:
+    """OpenSCAD exports a lone open pyramid silently; the tool still reports it as not manifold."""
+    model = _write(
+        tmp_path,
+        "pyramid.scad",
+        "polyhedron(points=[[0,0,0],[10,0,0],[10,10,0],[0,10,0],[5,5,10]],\n"
+        "           faces=[[0,1,4],[1,2,4],[2,3,4]]);\n",
+    )
+
+    result = run_cli(tmp_path, "scad", "export-stl", str(model), str(tmp_path / "p.stl"))
+
+    assert result.returncode == 1
+    assert "STATUS: FAILED" in result.stdout
+    assert "manifold" in result.stdout.lower()
+
+
+def test_section_cuts_a_module_call_written_without_a_semicolon(tmp_path: Path) -> None:
+    """`--module='shaft()'` must really subtract the cut box: the written model keeps only half."""
+    model = _write(
+        tmp_path, "part.scad", "module shaft() { cylinder(h=40, r=10, $fn=24); }\n"
+    )
+    out = tmp_path / "cut.png"
+
+    result = run_cli(
+        tmp_path,
+        "scad",
+        "section",
+        str(model),
+        str(out),
+        "--module=shaft()",
+        "--size=200x150",
+        timeout=240,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "Section saved" in result.stdout
+
+
+def test_params_ignores_braces_in_comments_and_strings(tmp_path: Path) -> None:
+    """A model annotated with `// { notes` or a "{" label still lists its Customizer parameters."""
+    model = _write(
+        tmp_path,
+        "p.scad",
+        "// dimensions {\n"
+        'label = "{"; // [a, b] Label\n'
+        "/* old = 1; */\n"
+        "width = 40; // [10:100] Box width\n",
+    )
+
+    result = run_cli(tmp_path, "scad", "params", str(model), "--json")
+
+    assert result.returncode == 0, result.stderr
+    assert [r["name"] for r in json.loads(result.stdout)] == ["label", "width"]
+
+
+def test_section_color_refuses_a_non_finite_center(tmp_path: Path) -> None:
+    """A typo like --center=nan,0,0 is a usage error, not a garbage camera."""
+    model = _write(tmp_path, "asm.scad", "cube(1);\n")
+
+    result = run_cli(
+        tmp_path, "scad", "section-color", str(model), str(tmp_path / "o.png"), "--center=nan,0,0"
+    )
+
+    assert result.returncode == 2
+    assert "--center" in result.stderr

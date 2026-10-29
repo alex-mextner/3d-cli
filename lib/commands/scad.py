@@ -30,8 +30,10 @@ import contextlib
 import json
 import os
 import re
+import math
 import subprocess
 import sys
+import tempfile
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -215,7 +217,12 @@ def _require_file(path: str, sub: str) -> Path:
 # ---------------------------------------------------------------------------
 # OpenSCAD exits 0 on a failed assert() and on a missing include; both only show up in the
 # output as `ERROR: ...` / `Assertion ...` lines.
-_ERROR_RE = re.compile(r"^\s*(ERROR:.*|.*\bAssertion\b.*)$", re.MULTILINE)
+# A missing include/use is only a WARNING that still lets the rest of the model export, so it
+# counts as a failure too: the STL would silently lack the library's geometry.
+_ERROR_RE = re.compile(
+    r"^\s*(ERROR:.*|.*\bAssertion\b.*|WARNING: Can't (?:open|find) (?:include|library|use)\b.*)$",
+    re.MULTILINE | re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -418,6 +425,19 @@ def _geometry_issues(output: str) -> tuple[list[str], list[str]]:
     return blocking, warnings
 
 
+def _open_mesh_issue(stl: Path) -> list[str]:
+    """OpenSCAD exports a bare open polyhedron() without a word of warning: read the STL back.
+    Skipped quietly when trimesh is not installed (the output checks above still apply)."""
+    try:
+        import trimesh
+    except ImportError:
+        return []
+    mesh = trimesh.load_mesh(str(stl))
+    if len(mesh.faces) and not mesh.is_watertight:
+        return ["Non-manifold geometry (open mesh: holes or unpaired edges)"]
+    return []
+
+
 def cmd_export_stl(argv: list[str]) -> int:
     p = _parse(argv, "export-stl", bools=("--ascii",))
     _need_positionals(
@@ -450,6 +470,7 @@ def cmd_export_stl(argv: list[str]) -> int:
         return 1
 
     blocking, warnings = _geometry_issues(res.output)
+    blocking.extend(_open_mesh_issue(out))
     print(f"\nOutput: {out} ({_human_size(out.stat().st_size)})")
     if fmt == "binstl":
         with out.open("rb") as fh:
@@ -501,12 +522,20 @@ def _classify(value: str) -> tuple[str, str]:
     return "expression", value
 
 
+def _brace_delta(line: str) -> int:
+    """Net `{` minus `}` of one line, ignoring braces inside string literals and // comments."""
+    bare = re.sub(r'"(?:\\.|[^"\\])*"', '""', line).split("//", 1)[0]
+    return bare.count("{") - bare.count("}")
+
+
 def extract_params(text: str) -> list[Param]:
     """Top-level `name = value; // [range|options] description` assignments (brace depth 0)."""
     params: list[Param] = []
     depth = 0
-    for line in text.splitlines():
-        depth += line.count("{") - line.count("}")
+    # Block comments are blanked (newlines kept) so assignments inside them are not parameters.
+    code = re.sub(r"/\*.*?\*/", lambda m: "\n" * m.group(0).count("\n"), text, flags=re.S)
+    for line in code.splitlines():
+        depth += _brace_delta(line)
         if depth > 0:
             continue
         m = _PARAM_RE.match(line)
@@ -597,13 +626,24 @@ def cmd_section(argv: list[str]) -> int:
 
     # The temp file lives next to the INPUT: use/include resolve against the file's own
     # directory, not the cwd.
-    tmp = inp.resolve().parent / f".section_tmp_{os.getpid()}.scad"
-    tmp.write_text(
-        f"// AUTO-GENERATED cross-section (3d scad section) — safe to delete\n"
-        f"use <{inp.name}>\n"
-        f"difference() {{\n    {module}\n    {cut}\n}}\n",
+    # An exclusive, unpredictable name (never an existing file or symlink).
+    call = module.rstrip()
+    if not call.endswith((";", "}")):
+        call += ";"  # else the cut box would become a child of the module call
+    with tempfile.NamedTemporaryFile(
+        "w",
+        dir=inp.resolve().parent,
+        prefix=".section_tmp_",
+        suffix=".scad",
+        delete=False,
         encoding="utf-8",
-    )
+    ) as handle:
+        handle.write(
+            f"// AUTO-GENERATED cross-section (3d scad section) — safe to delete\n"
+            f"use <{inp.name}>\n"
+            f"difference() {{\n    {call}\n    {cut}\n}}\n"
+        )
+    tmp = Path(handle.name)
     print(f"Section: {inp}  plane={plane} keep={keep} -> {out}")
     try:
         rc = _render_png(
@@ -647,6 +687,10 @@ def _parse_center(raw: str) -> tuple[float, float, float]:
         raise InvalidArgument(
             "--center", raw, ["X,Y,Z numbers"], command="scad section-color"
         ) from None
+    if not all(math.isfinite(v) for v in (x, y, z)):
+        raise InvalidArgument(
+            "--center", raw, ["finite X,Y,Z numbers"], command="scad section-color"
+        )
     return x, y, z
 
 
@@ -673,9 +717,11 @@ def cmd_section_color(argv: list[str]) -> int:
     try:
         dist = float(dist_raw)
     except ValueError:
+        dist = math.nan
+    if not math.isfinite(dist):
         raise InvalidArgument(
-            "--dist", dist_raw, ["a number"], command="scad section-color"
-        ) from None
+            "--dist", dist_raw, ["a finite number"], command="scad section-color"
+        )
     size = _size(p.values.get("--size", "1200x900"), "section-color")
     ex, ey, ez = section_eye(plane, keep, center, dist)
     camera = f"{ex:.4f},{ey:.4f},{ez:.4f},{center[0]},{center[1]},{center[2]}"
