@@ -168,6 +168,7 @@ def _from_json(path: Path) -> SourceRef:
             ["a model.json with source.url (re-download the model to get one)"],
             command="models",
         )
+    _require_wellformed_url(url)
     author = data.get("author")
     site, model_id = _checked_identity(path, src, url)
     return SourceRef(

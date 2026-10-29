@@ -131,7 +131,7 @@ def _from_library(
         elif project is not None:
             design_row = conn.execute(
                 "SELECT * FROM design WHERE project_dir = ? OR name = ? ORDER BY project_dir IS NULL LIMIT 1",
-                (str(project), flow.design_name(project, None)),
+                (str(project.expanduser().resolve()), flow.design_name(project, None)),
             ).fetchone()
         if design_row is None:
             return name, make_uid, project, src_url, remixed, published
@@ -613,7 +613,7 @@ def after_modify(path: Path, *, out: Callable[[str], None] | None = None) -> Non
             run_offer(project, trigger="modify", mode=mode, yes=False, as_json=False)
         else:
             print(
-                f"publish offer: `3d models offer {project} --trigger modify --json` prepares a remix listing "
+                f"publish offer: `{shlex.join(['3d', 'models', 'offer', str(project), '--trigger', 'modify', '--json'])}` prepares a remix listing "
                 "(dry run); --publish off silences this",
                 file=sys.stderr,
             )

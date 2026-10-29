@@ -106,9 +106,9 @@ def _offer_target(argv: list[str]) -> Path | None:
 
         if offer.default_mode() == "off":
             return None
-        out = next(
-            (argv[i + 1] for i, a in enumerate(argv[:-1]) if a in ("-o", "--out")), None
-        )
+        from geometry.deform_args import output_option
+
+        out = output_option(argv[0], argv[1:])
         target = Path(out) if out else Path(argv[1]).with_suffix(".deformed.stl")
         return target if offer_run.project_of(target) is not None else None
     except Exception:

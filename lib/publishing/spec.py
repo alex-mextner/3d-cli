@@ -276,7 +276,17 @@ def _read_mapping(project: Path, *, allow_missing: bool = False) -> dict[str, An
     return data
 
 
-def load_spec(project: Path, defaults: Mapping[str, str] | None = None) -> PublishSpec:
+def listing_images(project: Path, *, allow_missing: bool = False) -> tuple[Path, ...]:
+    """The listing images of an original/remix post (publish.yaml `images`, else previews/)."""
+    return _images(project, _read_mapping(project, allow_missing=allow_missing))
+
+
+def load_spec(
+    project: Path,
+    defaults: Mapping[str, str] | None = None,
+    *,
+    with_images: bool = True,
+) -> PublishSpec:
     """Read and validate `<project>/publish.yaml`; every defect is a structured exit-2 error.
 
     `defaults` (the publish OFFER only) fills title / description / license that publish.yaml leaves out, or
@@ -312,7 +322,7 @@ def load_spec(project: Path, defaults: Mapping[str, str] | None = None) -> Publi
         remix_of=remix_of,
         remix_license=_text(data, "remix_license"),
         permission_ref=_text(data, "permission_ref"),
-        images=_images(project, data),
+        images=_images(project, data) if with_images else (),
         hosted=_hosted(data),
         defaults_used=tuple(used),
     )

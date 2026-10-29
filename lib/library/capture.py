@@ -49,12 +49,20 @@ def capture(
     db_path: str | None,
 ) -> actions.ActionResult:
     import bed_photo
+    from publishing.spec import IMAGE_EXTS
     from printer_ops import make_adapter
     from printer_ops.bed import bed_config
     from printer_ops.camera import open_camera, require_camera
     from printer_ops.devices import get_device
 
     bed_photo.check_part_height(part_height_mm)
+    if out and Path(out).suffix.lower() not in IMAGE_EXTS:
+        raise InvalidArgument(
+            "--out",
+            out,
+            [f"a file name ending in {', '.join(IMAGE_EXTS)}"],
+            command="photo",
+        )
     conn = librarydb.open_library(db_path)
     try:
         make_row = records.resolve(conn, "make", make, command="photo")

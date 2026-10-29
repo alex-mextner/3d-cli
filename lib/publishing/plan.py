@@ -24,8 +24,15 @@ from marketplaces import cults, thingiverse
 from publishing import guard
 from publishing.licenses import PLATFORM_LICENSES
 from publishing.remix import LicenseLookup, RemixCheck, check_remix
-from publishing.source import SourceRef
-from publishing.spec import FileSet, PublishSpec, load_spec, select_files
+from publishing.source import SourceRef, split_url
+from publishing.spec import (
+    IMAGE_EXTS,
+    FileSet,
+    PublishSpec,
+    listing_images,
+    load_spec,
+    select_files,
+)
 
 SCHEMA = "3d.publish/1"
 PLATFORMS = ("makerworld", "printables", "thingiverse")
@@ -276,11 +283,21 @@ CULTS_MAX_URLS = 10  # fileUrls / imageUrls per createCreation call (Cults API)
 CULTS_CURRENCY = "EUR"
 
 
+def _image_name_clashes(images: Sequence[Path]) -> list[str]:
+    """Cults finds an image's hosted URL by its name, so two images with one name would send one twice."""
+    names = [i.name for i in images]
+    return [
+        f"two Cults images are named {name}: the hosted URL is looked up by name, so rename one"
+        for name in sorted({n for n in names if names.count(n) > 1})
+    ]
+
+
 def _cults_problems(
     spec: PublishSpec, files: FileSet, hosted: Mapping[str, str], paths: Sequence[Path]
 ) -> list[str]:
     problems: list[str] = []
     names = [*(p.name for p in paths), *(i.name for i in spec.images)]
+    problems.extend(_image_name_clashes(spec.images))
     missing = [n for n in names if n not in hosted]
     if missing:
         problems.append(
@@ -421,9 +438,9 @@ def platform_list(raw: str) -> list[str]:
 def _photo_images(
     spec_images: tuple[Path, ...], photos: Sequence[Photo]
 ) -> tuple[tuple[Path, ...], list[str]]:
-    """The spec's images plus the library photos that exist on disk; the missing ones are warnings. A picture is
-    one file however it is spelled (a relative project path against the absolute path the library registered),
-    so two spellings of it never both go to the listing."""
+    """The spec's images plus the library photos that exist on disk and are pictures; the others are
+    warnings. A picture is one file however it is spelled (a relative project path against the absolute path
+    the library registered), so two spellings of it never both go to the listing."""
     images = list(spec_images)
     seen = {p.resolve() for p in images}
     warnings: list[str] = []
@@ -431,6 +448,10 @@ def _photo_images(
         if not photo.path.is_file():
             warnings.append(
                 f"photo {photo.path} ({photo.kind}) is in the library but the file is gone: skipped"
+            )
+        elif photo.path.suffix.lower() not in IMAGE_EXTS:
+            warnings.append(
+                f"photo {photo.path} ({photo.kind}) is not a {'/'.join(IMAGE_EXTS)} picture: skipped"
             )
         elif (real := photo.path.resolve()) not in seen:
             seen.add(real)
@@ -480,6 +501,18 @@ def _file_problems(project: Path, files: FileSet) -> list[str]:
     return problems
 
 
+def _same_source(declared: str, given: str) -> bool:
+    """The two URLs name one model: equal, or the same marketplace model id (slug, locale, www and the
+    declared URL's http/https aside). The scheme is relaxed for this comparison only: `split_url` stays
+    https-only wherever a URL is validated."""
+    if declared == given:
+        return True
+    if declared[:7].lower() == "http://":
+        declared = "https://" + declared[7:]
+    site, model_id = split_url(declared)
+    return bool(site) and (site, model_id) == split_url(given)
+
+
 def evaluate(
     project: Path,
     platforms: Sequence[str],
@@ -490,11 +523,17 @@ def evaluate(
     opts = options or Options()
     if opts.kind not in KINDS:
         raise InvalidArgument("--kind", opts.kind, list(KINDS), command="models")
-    spec = load_spec(project, opts.defaults)
+    spec = load_spec(project, opts.defaults, with_images=False)
     kind = _resolve_kind(opts, spec)
     if kind == "make":
         return _evaluate_make(project, platforms, spec, opts)
+    spec = replace(
+        spec, images=listing_images(project, allow_missing=bool(opts.defaults))
+    )
     if opts.of is not None:
+        if spec.remix_of and not _same_source(spec.remix_of, opts.of.url):
+            # permission and licence declaration name the declared source, not --of
+            spec = replace(spec, permission_ref="", remix_license="")
         spec = replace(spec, remix_of=opts.of.url)
     files = select_files(project)
     report, files = guard.evaluate_parts(

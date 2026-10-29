@@ -443,12 +443,17 @@ def restore_physical_z(adapter: Any, z: float, *, tol: float = 0.15,
 
 
 def recover_pending(adapter: Any, printer: str, now: float,
-                    read: Callable[[Any], Motion] = read_motion) -> str | None:
+                    read: Callable[[Any], Motion] = read_motion,
+                    clearance: Callable[[Motion, float], None] | None = None) -> str | None:
     """A check that died between the move and the restore left a marker: undo it now (only a fresh
     marker, only a quiet printer). -> a note for the verdict, or None.
 
     The marker holds the PHYSICAL Z the bed was found at, never a G-code Z to replay: that one is only
-    valid under the Z offset of its time. Recovery goes through `restore_physical_z` (offset read now)."""
+    valid under the Z offset of its time. Recovery goes through `restore_physical_z` (offset read now).
+
+    `clearance(m, z)` is the caller's veto on the move: it is called with the SAME state read the move is
+    based on and the marker's Z, only when a move would be sent, and raises to refuse; nothing is sent and
+    the marker is kept. The guarantee thus never rests on a second read of a printer that may change state."""
     pending = _read_pending(printer)
     if pending is None:
         return None
@@ -465,6 +470,8 @@ def recover_pending(adapter: Any, printer: str, now: float,
         if m.z is not None and abs(m.z - z) <= 0.15:
             _clear_pending(printer)
             return None
+        if clearance is not None:
+            clearance(m, z)
         why = restore_physical_z(adapter, z, read=read)
         if why is None:
             _clear_pending(printer)

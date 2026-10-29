@@ -658,3 +658,77 @@ def test_a_pending_marker_is_not_recovered_without_the_gcode_z() -> None:
     assert note is not None and "G-code Z" in note
     assert printer.scripts == []
     assert bed_view._read_pending("u1") is not None
+
+
+def test_a_fresh_marker_is_not_recovered_when_no_clearance_limits_exist() -> None:
+    printer = FakePrinter(z=200.0)
+    bed_view._write_pending(
+        "u1",
+        bed_view.Motion("complete", "complete", 70.0, 70.0, "xyz", True, None),
+        time.time(),
+    )
+    with pytest.raises(GateFailure, match="marker is kept"):
+        shoot(printer, Path("unused.jpg"), part=None)
+    assert printer.scripts == [] and printer.z == 200.0
+    pending = bed_view._read_pending("u1")
+    assert pending is not None and pending["z"] == 70.0
+
+
+@pytest.mark.parametrize("printing_reads", [0, 1, 2, 3])
+def test_a_state_change_between_reads_never_sends_the_recovery_move_without_clearance(
+    tmp_path: Path, printing_reads: int
+) -> None:
+    """Unknown part height + a fresh marker at Z70: whichever read the recovery moves on (the printer reads
+    `printing` for the first N reads, then `complete`) the clearance veto sees THAT read: no G1 is sent."""
+    printer, camera = FakePrinter(z=200.0), FakeCamera()
+    bed_view._write_pending(
+        "u1",
+        bed_view.Motion("complete", "complete", 70.0, 70.0, "xyz", True, None),
+        time.time(),
+    )
+    reads = 0
+
+    def flaky_read(adapter: Any) -> bed_view.Motion:
+        nonlocal reads
+        reads += 1
+        adapter.raw = "printing" if reads <= printing_reads else "complete"
+        return bed_view.read_motion(adapter)
+
+    with pytest.raises(GateFailure):
+        bed_photo.capture_table_photo(
+            device(),
+            CFG,
+            adapter=printer,
+            camera=camera,
+            out=tmp_path / "t.jpg",
+            lift=100.0,
+            part_height_mm=None,
+            dry_run=False,
+            settle_s=0.0,
+            sleep=lambda s: None,
+            read=flaky_read,
+        )
+    assert moves(printer) == [] and camera.grabs == 0 and printer.z == 200.0
+    pending = bed_view._read_pending("u1")
+    assert pending is not None and pending["z"] == 70.0  # the marker is kept
+
+
+def test_recover_pending_refuses_through_the_clearance_veto_and_keeps_the_marker() -> (
+    None
+):
+    printer = FakePrinter(z=200.0)
+    bed_view._write_pending(
+        "u1",
+        bed_view.Motion("complete", "complete", 70.0, 70.0, "xyz", True, None),
+        time.time(),
+    )
+    seen: list[tuple[str, float]] = []
+
+    def veto(m: bed_view.Motion, z: float) -> None:
+        seen.append((m.state, z))
+        raise GateFailure("below the floor", command="photo")
+
+    with pytest.raises(GateFailure, match="below the floor"):
+        bed_view.recover_pending(printer, "u1", time.time(), clearance=veto)
+    assert seen == [("complete", 70.0)] and printer.scripts == []
+    assert bed_view._read_pending("u1") is not None

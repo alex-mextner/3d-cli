@@ -69,3 +69,11 @@ def test_two_default_names_of_one_make_and_kind_within_a_second_differ(
     )
     assert first != second
     assert first.parent == second.parent and first.suffix == ".jpg"
+
+
+def test_capture_refuses_an_out_name_that_is_not_a_picture_file_name() -> None:
+    with pytest.raises(InvalidArgument) as exc:
+        actions.photo(
+            capture=True, make="m1", out="/tmp/table", lift=70.0, dry_run=True
+        )
+    assert exc.value.exit_code == 2 and "--out" in exc.value.message
