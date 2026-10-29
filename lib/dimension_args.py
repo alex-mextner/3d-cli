@@ -9,9 +9,12 @@ Each parser raises ValueError with a message naming what was expected.
 
 from __future__ import annotations
 
+import json
 import math
 import re
 from typing import NamedTuple
+
+from errors import MissingDependency
 
 Point = tuple[float, float, float]
 MIN_WIDTH_PX = 640
@@ -54,6 +57,43 @@ def parse_point(raw: str, spec: str) -> Point:
     return x, y, z
 
 
+RESERVED_AXES = ("X", "Y", "Z")
+
+
+def reject_reserved_name(name: str, where: str) -> None:
+    """The renderer finds its automatic labels (`span`, `X`, `Y`, `Z`, `X <part>`) by text, so a
+    user dimension may not take one."""
+    first = name.split(" ", 1)[0]
+    if (
+        name == "span"
+        or name in RESERVED_AXES
+        or (" " in name and first in RESERVED_AXES)
+    ):
+        word = "span" if name == "span" else first
+        raise ValueError(
+            f"{where}: name {name!r} is reserved ({word!r} labels the automatic dimensions: "
+            "span, X, Y, Z and 'X|Y|Z <part>')"
+        )
+
+
+def _load_yaml(text: str, path: str) -> object:
+    try:
+        import yaml
+    except ImportError as exc:
+        raise MissingDependency(
+            "pyyaml",
+            install="uv sync",
+            degrades="--dims-from cannot read YAML (JSON still works)",
+            command="dimension",
+        ) from exc
+    try:
+        return yaml.safe_load(text)
+    except Exception as exc:  # noqa: BLE001 - yaml raises its own error family
+        raise ValueError(
+            f"--dims-from {path!r}: not valid JSON or YAML: {exc}"
+        ) from exc
+
+
 def parse_dim(spec: str) -> tuple[str, Point, Point]:
     """`NAME:x,y,z:x,y,z` — a labelled distance between two model-space points."""
     parts = spec.split(":")
@@ -62,6 +102,7 @@ def parse_dim(spec: str) -> tuple[str, Point, Point]:
     name = parts[0].strip()
     if not name:
         raise ValueError(f"--dim {spec!r}: empty name")
+    reject_reserved_name(name, f"--dim {spec!r}")
     return name, parse_point(parts[1], spec), parse_point(parts[2], spec)
 
 
@@ -104,14 +145,7 @@ def parse_part(spec: str) -> PartSpec:
             f"--part {spec!r}: expected SELECTOR=NAME[:ROLE], e.g. '#2a62c9=PCB:stand_in'"
         )
     if selector.startswith("#"):
-        digits = selector[1:]
-        if not re.fullmatch(r"[0-9a-fA-F]{3}|[0-9a-fA-F]{6}", digits):
-            raise ValueError(
-                f"--part {spec!r}: {selector!r} is not a #RGB or #RRGGBB colour"
-            )
-        if len(digits) == 3:
-            digits = "".join(ch * 2 for ch in digits)
-        selector = "#" + digits.upper()
+        selector = _normalise_colour(selector, spec)
     name, sep, tail = rest.rpartition(":")
     if not sep:
         name, tail = rest, ""
@@ -124,3 +158,138 @@ def parse_part(spec: str) -> PartSpec:
     if new_name is None and not role:
         raise ValueError(f"--part {spec!r}: give a NAME, a :ROLE or both")
     return PartSpec(selector, new_name, role or None)
+
+
+def _normalise_colour(selector: str, spec: str) -> str:
+    """`#RGB`/`#RRGGBB` as upper-case `#RRGGBB`."""
+    digits = selector[1:]
+    if not re.fullmatch(r"[0-9a-fA-F]{3}|[0-9a-fA-F]{6}", digits):
+        raise ValueError(
+            f"--part {spec!r}: {selector!r} is not a #RGB or #RRGGBB colour"
+        )
+    if len(digits) == 3:
+        digits = "".join(ch * 2 for ch in digits)
+    return "#" + digits.upper()
+
+
+UP_AXES = ("Z", "Y", "X")
+OVERALL_MODES = ("auto", "always", "never")
+
+
+def parse_up(raw: str) -> str:
+    """`Z`, `Y` or `X` (any case): the model's vertical axis."""
+    value = raw.strip().upper()
+    if value not in UP_AXES:
+        raise ValueError(f"--up {raw!r}: expected one of {', '.join(UP_AXES)}")
+    return value
+
+
+def parse_overall(raw: str) -> str:
+    value = raw.strip().lower()
+    if value not in OVERALL_MODES:
+        raise ValueError(
+            f"--overall {raw!r}: expected one of {', '.join(OVERALL_MODES)}"
+        )
+    return value
+
+
+def _point_text(raw: object, where: str) -> str:
+    if not isinstance(raw, (list, tuple)) or len(raw) != 3:
+        raise ValueError(f"{where}: a point is three numbers [x, y, z]")
+    return ",".join(str(finite(str(v), where)) for v in raw)
+
+
+def _load_dims_data(path: str) -> list[object]:
+    """The raw list of a `--dims-from` file (JSON, or YAML when pyyaml is there)."""
+    try:
+        with open(path, encoding="utf-8") as handle:
+            text = handle.read()
+    except OSError as exc:
+        raise ValueError(f"--dims-from {path!r}: cannot read it: {exc}") from exc
+    try:
+        data = json.loads(text)
+    except ValueError:
+        data = _load_yaml(text, path)
+    if isinstance(data, dict):
+        data = data.get("dims")
+    if not isinstance(data, list) or not data:
+        raise ValueError(
+            f"--dims-from {path!r}: expected a non-empty list of measurements"
+        )
+    return data
+
+
+def parse_dims_file(path: str) -> list[str]:
+    """Read a `--dims-from` spec (JSON, or YAML when pyyaml is there) as `--dim` strings.
+
+    Shape: a list, or {"dims": [...]}, of {"name": ..., "from": [x,y,z], "to": [x,y,z]} and, for the
+    mating gap between two parts, {"name": ..., "kind": "gap", "parts": [A, B], "from": ..., "to": ...}.
+    Names must be unique (the check matches the image's labels by name).
+    """
+    data = _load_dims_data(path)
+    out: list[str] = []
+    for name, p1, p2, _gap in _dims_entries(data, path):
+        out.append(f"{name}:{p1}:{p2}")
+    return out
+
+
+def parse_dims_gaps(path: str) -> dict[str, tuple[str, str]]:
+    """The `kind: gap` entries of a `--dims-from` spec: measurement name -> its two named parts."""
+    return {
+        name: gap
+        for name, _p1, _p2, gap in _dims_entries(_load_dims_data(path), path)
+        if gap is not None
+    }
+
+
+def _dims_entries(
+    data: list[object], path: str
+) -> list[tuple[str, str, str, tuple[str, str] | None]]:
+    """Validated (name, from-text, to-text, gap parts or None) of every entry.
+
+    `kind` is `dim` (default: both ends on ONE part) or `gap` (the declared mating gap between two
+    NAMED parts: `parts: [A, B]`). Anything else is refused.
+    """
+    out: list[tuple[str, str, str, tuple[str, str] | None]] = []
+    seen: set[str] = set()
+    for i, item in enumerate(data):
+        where = f"--dims-from {path!r} entry {i + 1}"
+        if not isinstance(item, dict) or not isinstance(item.get("name"), str):
+            raise ValueError(f"{where}: needs a string `name`, `from` and `to`")
+        name = item["name"].strip()
+        if not name or ":" in name or name in seen:
+            raise ValueError(
+                f"{where}: name {name!r} is empty, contains ':' or repeats"
+            )
+        reject_reserved_name(name, where)
+        seen.add(name)
+        gap = _entry_gap(item, where)
+        out.append(
+            (
+                name,
+                _point_text(item.get("from"), where),
+                _point_text(item.get("to"), where),
+                gap,
+            )
+        )
+    return out
+
+
+def _entry_gap(item: dict[str, object], where: str) -> tuple[str, str] | None:
+    """The two named parts of a `kind: gap` entry; None for a plain `dim`."""
+    kind = str(item.get("kind", "dim")).strip().lower()
+    if kind == "dim":
+        return None
+    if kind != "gap":
+        raise ValueError(f"{where}: kind {kind!r} is not `dim` or `gap`")
+    named = item.get("parts")
+    if (
+        not isinstance(named, (list, tuple))
+        or len(named) != 2
+        or not all(isinstance(n, str) and n.strip() for n in named)
+        or named[0].strip() == named[1].strip()
+    ):
+        raise ValueError(
+            f"{where}: a `kind: gap` needs `parts: [A, B]`, two different part names"
+        )
+    return named[0].strip(), named[1].strip()

@@ -43,7 +43,7 @@ def part(tmp_path_factory: pytest.TempPathFactory) -> str:
 @pytest.fixture(scope="module")
 def rendered(part: str, tmp_path_factory: pytest.TempPathFactory) -> str:
     out = str(tmp_path_factory.mktemp("dimout") / "plate_dims.png")
-    render(part, out, bed=(220.0, 220.0), dims=["boss height:125,110,20:125,110,45"])
+    render(part, out, bed=(220.0, 220.0), dims=["boss height:135,110,21:135,110,46"])
     return out
 
 
