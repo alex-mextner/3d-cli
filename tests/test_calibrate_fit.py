@@ -157,7 +157,7 @@ def test_press_picks_the_largest_gap_that_still_grips() -> None:
     pick = cf.pick(readings("press", "round", "step=3"), "press", "round")
     assert pick.ok and pick.gap_mm == -0.1 and pick.delta_mm == 0.0  # exactly the table's 0.10 interference
     rows = fits.corrections_from_fit_clearance(
-        [r.to_dict() for r in pick.readings], printer="k1se", material="PLA", nozzle_mm=0.4, measured_at="x"
+        [r.to_dict() for r in pick.readings], printer="k1se", material="PLA", nozzle_mm=0.4, measured_at="2026-10-24T10:00:00Z"
     )
     assert fits.resolve("press", "round", "k1se", "PLA", 0.4, extra_corrections=rows).clearance_mm == -0.1
     looser = cf.pick(readings("press", "round", "step=5"), "press", "round")

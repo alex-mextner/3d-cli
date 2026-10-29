@@ -16,11 +16,25 @@ import fit_coupon
 from slicing.calibration_gen import GenError
 from slicing.calibration_plate import Item, Plate, PlateContext, PlateObject
 from slicing.calibration_plates.dense import openscad_stl
+from slicing.calibration_underlay import UnderlayDecl
 
 PLATE_ID = "fit"
 TITLE = "fit coupon: 7-step ladders of holes and slots"
 TESTS = {
     f"{fit}_{shape}": f"{fit} fit, {'pin in round holes' if shape == 'round' else 'tab in slots'}"
+    for fit, shape in fit_coupon.LADDER_SPECS
+}
+
+
+# Where each ladder stands on the shared underlay (#320): every ladder is a block of through holes or slots
+# that the user tries with a loose pin or tab, so a foot or a sheet under it would close the openings.
+UNDERLAY = {
+    f"{fit}_{shape}": UnderlayDecl(
+        "cutout",
+        "through holes are tried with the loose Ø4 pins: a foot would close them"
+        if shape == "round"
+        else "slots take the loose 2 mm tab and are read by sliding it in",
+    )
     for fit, shape in fit_coupon.LADDER_SPECS
 }
 
