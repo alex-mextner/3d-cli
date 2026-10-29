@@ -54,6 +54,10 @@ def hermetic(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("THREED_LIBRARY_DB", str(tmp_path / "library.db"))
     monkeypatch.setenv("THREED_KEYCHAIN", "off")
     monkeypatch.delenv("THREED_PUBLISH_OFFER", raising=False)
+    monkeypatch.setenv(
+        "no_proxy", "*"
+    )  # the loopback fakes must never go through an inherited proxy
+    monkeypatch.setenv("NO_PROXY", "*")
 
 
 @pytest.fixture
@@ -894,7 +898,7 @@ def test_off_is_silent_and_does_not_even_open_the_library(
 
 
 def test_the_offer_is_for_all_platforms_with_cad_renders_and_photos_under_a_stated_default_licence(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     project, db = offer_world(tmp_path)
     c = librarydb.open_library(db)
@@ -942,10 +946,12 @@ def test_the_offer_is_for_all_platforms_with_cad_renders_and_photos_under_a_stat
         and doc["command"][0][-1] == "--yes"
     )
     argv = doc["command"][0]
+    assert "--db" in argv  # a replay must not depend on the default library
+    monkeypatch.delenv("THREED_LIBRARY_DB")
     replay_code, _, replay = run(
         tmp_path,
         capsys,
-        db,
+        Path(argv[argv.index("--db") + 1]),
         project=Path(argv[3]),
         trigger=argv[argv.index("--trigger") + 1],
         platform=argv[argv.index("--platform") + 1],

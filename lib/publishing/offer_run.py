@@ -236,6 +236,7 @@ def build(
         "source": src_url,
         "already_published": published,
         "plans": plans,
+        "db_path": db_path,
     }
 
 
@@ -301,6 +302,8 @@ def _command(built: dict[str, Any], trigger: str) -> list[list[str]]:
     ]
     if built["make"]:
         cmd += ["--make", str(built["make"])]
+    if built["db_path"]:
+        cmd += ["--db", str(built["db_path"])]
     return [[*cmd, "--yes"]]
 
 
