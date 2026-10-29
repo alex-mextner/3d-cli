@@ -43,7 +43,7 @@ from __future__ import annotations
 import importlib
 import json
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
@@ -219,24 +219,23 @@ def parse_colour_spec(
     return ColourSpec(filaments, default, regions, landmarks)
 
 
+def _parse_filament(item: object, where: str) -> Filament:
+    f = _mapping(item, where)
+    _only_keys(f, _FILAMENT_KEYS, where)
+    slot, key, hexc = f.get("slot"), f.get("key"), f.get("hex")
+    if not isinstance(slot, int) or isinstance(slot, bool) or not 1 <= slot <= 9:
+        raise _bad(f"{where}.slot", slot, ["an integer 1..9 (one pattern digit)"])
+    if not isinstance(key, str) or len(key) != 1 or key.isdigit():
+        raise _bad(f"{where}.key", key, ["one non-digit character (K, W, R, G ...)"])
+    if not isinstance(hexc, str) or not _HEX.match(hexc):
+        raise _bad(f"{where}.hex", hexc, ["#RRGGBB"])
+    return Filament(slot, key, str(f.get("name", key)), hexc.lower())
+
+
 def _parse_filaments(raw: object) -> tuple[Filament, ...]:
     if not isinstance(raw, Sequence) or isinstance(raw, str) or not raw:
         raise _bad("filaments", raw, ["a non-empty list of {slot, key, name, hex}"])
-    out: list[Filament] = []
-    for i, item in enumerate(raw):
-        where = f"filaments[{i}]"
-        f = _mapping(item, where)
-        _only_keys(f, _FILAMENT_KEYS, where)
-        slot, key, hexc = f.get("slot"), f.get("key"), f.get("hex")
-        if not isinstance(slot, int) or isinstance(slot, bool) or not 1 <= slot <= 9:
-            raise _bad(f"{where}.slot", slot, ["an integer 1..9 (one pattern digit)"])
-        if not isinstance(key, str) or len(key) != 1 or key.isdigit():
-            raise _bad(
-                f"{where}.key", key, ["one non-digit character (K, W, R, G ...)"]
-            )
-        if not isinstance(hexc, str) or not _HEX.match(hexc):
-            raise _bad(f"{where}.hex", hexc, ["#RRGGBB"])
-        out.append(Filament(slot, key, str(f.get("name", key)), hexc.lower()))
+    out = [_parse_filament(item, f"filaments[{i}]") for i, item in enumerate(raw)]
     for attr in ("slot", "key"):
         seen = [getattr(f, attr) for f in out]
         dup = sorted({str(v) for v in seen if seen.count(v) > 1})
@@ -247,6 +246,21 @@ def _parse_filaments(raw: object) -> tuple[Filament, ...]:
     return tuple(out)
 
 
+def _assign_of(k: str, value: Any, where: str, filaments: Sequence[Filament]) -> Assign:
+    """The `Assign` for the one given field `k` ('slot', 'key' or 'mix') holding `value`."""
+    if k == "slot":
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise _bad(f"{where}.slot", value, ["an integer slot of a loaded filament"])
+        return Assign(slot=value)
+    if k == "key":
+        if not isinstance(value, str):
+            raise _bad(f"{where}.key", value, sorted(f.key for f in filaments))
+        return Assign(key=value)
+    if not isinstance(value, str) or not value.strip():
+        raise _bad(f"{where}.mix", value, ["one character per layer, e.g. GWG or 424"])
+    return Assign(mix=value.strip())
+
+
 def _parse_assign(raw: object, where: str, filaments: Sequence[Filament]) -> Assign:
     a = _mapping(raw, where)
     _only_keys(a, _ASSIGN_KEYS, where)
@@ -255,26 +269,32 @@ def _parse_assign(raw: object, where: str, filaments: Sequence[Filament]) -> Ass
         raise _bad(
             where, ", ".join(given) or "no field", ["exactly one of slot, key, mix"]
         )
-    k = given[0]
-    value = a[k]
-    if k == "slot":
-        if not isinstance(value, int) or isinstance(value, bool):
-            raise _bad(f"{where}.slot", value, ["an integer slot of a loaded filament"])
-        assign = Assign(slot=value)
-    elif k == "key":
-        if not isinstance(value, str):
-            raise _bad(f"{where}.key", value, sorted(f.key for f in filaments))
-        assign = Assign(key=value)
-    else:
-        if not isinstance(value, str) or not value.strip():
-            raise _bad(
-                f"{where}.mix", value, ["one character per layer, e.g. GWG or 424"]
-            )
-        assign = Assign(mix=value.strip())
+    assign = _assign_of(given[0], a[given[0]], where, filaments)
     resolve_assign(
         assign, filaments, where=where
     )  # unknown keys / slots / one-colour mixes
     return assign
+
+
+def _expand_mirror(
+    name: str, box: Box, b: Sequence[float], mirror: object, where: str
+) -> dict[str, Box]:
+    """The named boxes a landmark stands for: itself, or its left/right pair when mirrored across X = 0."""
+    if mirror is None:
+        return {name: box}
+    if mirror != "x":
+        raise _bad(f"{where}.mirror", mirror, ["x"])
+    if box[0] < 0 < box[1]:
+        raise _bad(
+            f"{where}.box",
+            list(b),
+            [
+                "a box on one side of the X = 0 plane (a box crossing it overlaps its own mirror image)"
+            ],
+        )
+    mirrored: Box = (-box[1], -box[0], box[2], box[3], box[4], box[5])
+    right, left = (box, mirrored) if box[0] >= 0 else (mirrored, box)
+    return {f"{name}_L": left, f"{name}_R": right}
 
 
 def _parse_landmarks(raw: object) -> dict[str, Box]:
@@ -292,21 +312,7 @@ def _parse_landmarks(raw: object) -> dict[str, Box]:
                 f"{where}.box", list(b), ["[x0, x1, y0, y1, z0, z1] with every lo < hi"]
             )
         box: Box = (b[0], b[1], b[2], b[3], b[4], b[5])
-        mirror = entry.get("mirror")
-        if mirror is None:
-            expanded = {str(name): box}
-        elif mirror == "x":
-            mirrored: Box = (-box[1], -box[0], box[2], box[3], box[4], box[5])
-            if box[0] + box[1] == 0:
-                raise _bad(
-                    f"{where}.box",
-                    list(b),
-                    ["a box off the X = 0 plane (it is its own mirror image)"],
-                )
-            right, left = (box, mirrored) if box[0] + box[1] > 0 else (mirrored, box)
-            expanded = {f"{name}_L": left, f"{name}_R": right}
-        else:
-            raise _bad(f"{where}.mirror", mirror, ["x"])
+        expanded = _expand_mirror(str(name), box, b, entry.get("mirror"), where)
         for n, bx in expanded.items():
             if n in out:
                 raise _bad("landmarks: duplicate name", n, ["unique landmark names"])
@@ -314,52 +320,152 @@ def _parse_landmarks(raw: object) -> dict[str, Box]:
     return out
 
 
+def _shape_sphere(s: Mapping[str, Any], where: str, base_dir: Path) -> Shape:
+    _only_keys(s, ("type", "center", "radius"), where)
+    radius = s.get("radius")
+    if not isinstance(radius, int | float) or isinstance(radius, bool) or radius <= 0:
+        raise _bad(f"{where}.radius", radius, ["a positive number (mm)"])
+    c = _floats(s.get("center"), 3, f"{where}.center")
+    return SphereShape((c[0], c[1], c[2]), float(radius))
+
+
+def _shape_box(s: Mapping[str, Any], where: str, base_dir: Path) -> Shape:
+    _only_keys(s, ("type", "min", "max"), where)
+    lo = _floats(s.get("min"), 3, f"{where}.min")
+    hi = _floats(s.get("max"), 3, f"{where}.max")
+    if not all(a < b for a, b in zip(lo, hi, strict=True)):
+        raise _bad(
+            f"{where}",
+            f"min={list(lo)} max={list(hi)}",
+            ["min < max on every axis"],
+        )
+    return BoxShape((lo[0], lo[1], lo[2]), (hi[0], hi[1], hi[2]))
+
+
+def _shape_halfspace(s: Mapping[str, Any], where: str, base_dir: Path) -> Shape:
+    _only_keys(s, ("type", "normal", "offset"), where)
+    n = np.array(_floats(s.get("normal"), 3, f"{where}.normal"))
+    length = float(np.linalg.norm(n))
+    if length == 0:
+        raise _bad(f"{where}.normal", list(n), ["a non-zero vector"])
+    off = s.get("offset")
+    if not isinstance(off, int | float) or isinstance(off, bool):
+        raise _bad(f"{where}.offset", off, ["a number (mm along the normal)"])
+    u = n / length
+    return HalfspaceShape((float(u[0]), float(u[1]), float(u[2])), float(off))
+
+
+def _shape_stl(s: Mapping[str, Any], where: str, base_dir: Path) -> Shape:
+    _only_keys(s, ("type", "path"), where)
+    rel = s.get("path")
+    if not isinstance(rel, str) or not rel:
+        raise _bad(f"{where}.path", rel, ["a path to a closed STL"])
+    full = (base_dir / rel).resolve()
+    if not full.is_file():
+        raise InputNotFound(str(full), command=CMD_NAME)
+    return StlShape(str(full))
+
+
+_SHAPE_PARSERS: dict[str, Callable[[Mapping[str, Any], str, Path], Shape]] = {
+    "sphere": _shape_sphere,
+    "box": _shape_box,
+    "halfspace": _shape_halfspace,
+    "stl": _shape_stl,
+}
+
+
 def _parse_shape(raw: object, where: str, base_dir: Path) -> Shape:
     s = _mapping(raw, where)
     kind = s.get("type")
-    if kind == "sphere":
-        _only_keys(s, ("type", "center", "radius"), where)
-        radius = s.get("radius")
-        if (
-            not isinstance(radius, int | float)
-            or isinstance(radius, bool)
-            or radius <= 0
-        ):
-            raise _bad(f"{where}.radius", radius, ["a positive number (mm)"])
-        c = _floats(s.get("center"), 3, f"{where}.center")
-        return SphereShape((c[0], c[1], c[2]), float(radius))
-    if kind == "box":
-        _only_keys(s, ("type", "min", "max"), where)
-        lo = _floats(s.get("min"), 3, f"{where}.min")
-        hi = _floats(s.get("max"), 3, f"{where}.max")
-        if not all(a < b for a, b in zip(lo, hi, strict=True)):
-            raise _bad(
-                f"{where}",
-                f"min={list(lo)} max={list(hi)}",
-                ["min < max on every axis"],
-            )
-        return BoxShape((lo[0], lo[1], lo[2]), (hi[0], hi[1], hi[2]))
-    if kind == "halfspace":
-        _only_keys(s, ("type", "normal", "offset"), where)
-        n = np.array(_floats(s.get("normal"), 3, f"{where}.normal"))
-        length = float(np.linalg.norm(n))
-        if length == 0:
-            raise _bad(f"{where}.normal", list(n), ["a non-zero vector"])
-        off = s.get("offset")
-        if not isinstance(off, int | float) or isinstance(off, bool):
-            raise _bad(f"{where}.offset", off, ["a number (mm along the normal)"])
-        u = n / length
-        return HalfspaceShape((float(u[0]), float(u[1]), float(u[2])), float(off))
-    if kind == "stl":
-        _only_keys(s, ("type", "path"), where)
-        rel = s.get("path")
-        if not isinstance(rel, str) or not rel:
-            raise _bad(f"{where}.path", rel, ["a path to a closed STL"])
-        full = (base_dir / rel).resolve()
-        if not full.is_file():
-            raise InputNotFound(str(full), command=CMD_NAME)
-        return StlShape(str(full))
-    raise _bad(f"{where}.type", kind, _SHAPE_TYPES)
+    parse = _SHAPE_PARSERS.get(kind) if isinstance(kind, str) else None
+    if parse is None:
+        raise _bad(f"{where}.type", kind, _SHAPE_TYPES)
+    return parse(s, where, base_dir)
+
+
+def _region_geometry(
+    r: Mapping[str, Any], where: str, landmarks: Mapping[str, Box], base_dir: Path
+) -> tuple[list[Shape], tuple[str, ...]]:
+    """The shapes of a region and the landmark names it used (none for an inline shape)."""
+    geometry = [k for k in ("landmark", "landmarks", "shape") if r.get(k) is not None]
+    if len(geometry) != 1:
+        raise _bad(
+            where,
+            ", ".join(geometry) or "no geometry",
+            ["exactly one of landmark, landmarks, shape"],
+        )
+    if geometry[0] == "shape":
+        return [_parse_shape(r["shape"], f"{where}.shape", base_dir)], ()
+    field = geometry[0]
+    return _landmark_shapes(
+        r["landmark"] if field == "landmark" else r["landmarks"],
+        f"{where}.{field}",
+        landmarks,
+    )
+
+
+def _landmark_shapes(
+    wanted: object, where: str, landmarks: Mapping[str, Box]
+) -> tuple[list[Shape], tuple[str, ...]]:
+    """Box shapes of the named landmark(s) plus the names used."""
+    used = (
+        (wanted,)
+        if isinstance(wanted, str)
+        else tuple(wanted)
+        if isinstance(wanted, Sequence)
+        else ()
+    )
+    if not used or not all(isinstance(u, str) for u in used):
+        raise _bad(where, wanted, ["landmark name(s)"])
+    shapes: list[Shape] = []
+    for u in used:
+        if u not in landmarks:
+            raise _bad(where, u, sorted(landmarks) or ["(no landmarks defined)"])
+        b = landmarks[u]
+        shapes.append(BoxShape((b[0], b[2], b[4]), (b[1], b[3], b[5])))
+    return shapes, used
+
+
+def _parse_region(
+    i: int,
+    item: object,
+    names: set[str],
+    landmarks: Mapping[str, Box],
+    filaments: Sequence[Filament],
+    base_dir: Path,
+    mix_cap: float,
+    max_cycle: int,
+) -> RegionSpec:
+    r = _mapping(item, f"regions[{i}]")
+    name = r.get("name")
+    where = f"regions[{name!r}]" if isinstance(name, str) else f"regions[{i}]"
+    _only_keys(r, _REGION_KEYS, where)
+    if not isinstance(name, str) or not name:
+        raise _bad(f"{where}.name", name, ["a non-empty string"])
+    if name in names:
+        raise _bad(
+            "regions: duplicate name",
+            name,
+            [f"unique names ({DEFAULT_PART!r} is the default part)"],
+        )
+    names.add(name)
+    shapes, used = _region_geometry(r, where, landmarks, base_dir)
+    if (r.get("assign") is None) == (r.get("target") is None):
+        raise _bad(
+            where,
+            "both" if r.get("assign") is not None else "neither",
+            ["exactly one of assign, target"],
+        )
+    if r.get("target") is None:
+        assign = _parse_assign(r["assign"], f"{where}.assign", filaments)
+        return RegionSpec(name, tuple(shapes), assign, used)
+    target = r["target"]
+    if not isinstance(target, str) or not _HEX.match(target):
+        raise _bad(f"{where}.target", target, ["#RRGGBB"])
+    assign, delta_e = _search_mix(
+        target, filaments, mix_cap=mix_cap, max_cycle=max_cycle
+    )
+    return RegionSpec(name, tuple(shapes), assign, used, target.lower(), delta_e)
 
 
 def _parse_regions(
@@ -372,81 +478,13 @@ def _parse_regions(
 ) -> tuple[RegionSpec, ...]:
     if not isinstance(raw, Sequence) or isinstance(raw, str):
         raise _bad("regions", raw, ["a list of regions"])
-    out: list[RegionSpec] = []
     names: set[str] = {DEFAULT_PART}
-    for i, item in enumerate(raw):
-        r = _mapping(item, f"regions[{i}]")
-        name = r.get("name")
-        where = f"regions[{name!r}]" if isinstance(name, str) else f"regions[{i}]"
-        _only_keys(r, _REGION_KEYS, where)
-        if not isinstance(name, str) or not name:
-            raise _bad(f"{where}.name", name, ["a non-empty string"])
-        if name in names:
-            raise _bad(
-                "regions: duplicate name",
-                name,
-                [f"unique names ({DEFAULT_PART!r} is the default part)"],
-            )
-        names.add(name)
-        geometry = [
-            k for k in ("landmark", "landmarks", "shape") if r.get(k) is not None
-        ]
-        if len(geometry) != 1:
-            raise _bad(
-                where,
-                ", ".join(geometry) or "no geometry",
-                ["exactly one of landmark, landmarks, shape"],
-            )
-        shapes: list[Shape] = []
-        used: tuple[str, ...] = ()
-        if geometry[0] == "shape":
-            shapes.append(_parse_shape(r["shape"], f"{where}.shape", base_dir))
-        else:
-            wanted = r["landmark"] if geometry[0] == "landmark" else r["landmarks"]
-            used = (
-                (wanted,)
-                if isinstance(wanted, str)
-                else tuple(wanted)
-                if isinstance(wanted, Sequence)
-                else ()
-            )
-            if not used or not all(isinstance(u, str) for u in used):
-                raise _bad(f"{where}.{geometry[0]}", wanted, ["landmark name(s)"])
-            for u in used:
-                if u not in landmarks:
-                    raise _bad(
-                        f"{where}.{geometry[0]}",
-                        u,
-                        sorted(landmarks) or ["(no landmarks defined)"],
-                    )
-                b = landmarks[u]
-                shapes.append(BoxShape((b[0], b[2], b[4]), (b[1], b[3], b[5])))
-        if (r.get("assign") is None) == (r.get("target") is None):
-            raise _bad(
-                where,
-                "both" if r.get("assign") is not None else "neither",
-                ["exactly one of assign, target"],
-            )
-        if r.get("target") is not None:
-            target = r["target"]
-            if not isinstance(target, str) or not _HEX.match(target):
-                raise _bad(f"{where}.target", target, ["#RRGGBB"])
-            assign, delta_e = _search_mix(
-                target, filaments, mix_cap=mix_cap, max_cycle=max_cycle
-            )
-            out.append(
-                RegionSpec(name, tuple(shapes), assign, used, target.lower(), delta_e)
-            )
-        else:
-            out.append(
-                RegionSpec(
-                    name,
-                    tuple(shapes),
-                    _parse_assign(r["assign"], f"{where}.assign", filaments),
-                    used,
-                )
-            )
-    return tuple(out)
+    return tuple(
+        _parse_region(
+            i, item, names, landmarks, filaments, base_dir, mix_cap, max_cycle
+        )
+        for i, item in enumerate(raw)
+    )
 
 
 # ---------------------------------------------------------------------------------------------- assigns
@@ -663,6 +701,23 @@ class RegionLabels:
         return {"regions": [s.to_dict() for s in self.stats], "empty": list(self.empty)}
 
 
+def _region_volumes(
+    mesh: trimesh.Trimesh,
+    spec: ColourSpec,
+    contains: _Containment,
+    n_names: int,
+    volume_pitch: float,
+) -> NDArray[np.float64] | None:
+    """Per-region volume (mm3) from a voxel grid; None when the mesh is open or the pitch is 0."""
+    if not (mesh.is_watertight and volume_pitch > 0):
+        return None
+    grid = voxelize(mesh, volume_pitch)
+    cells = np.argwhere(grid.occ)
+    centres = np.stack([grid.centres(a)[cells[:, a]] for a in range(3)], axis=1)
+    counts = np.bincount(_first_match(spec, centres, contains), minlength=n_names)
+    return np.asarray(counts * volume_pitch**3, dtype=np.float64)
+
+
 def label_faces(
     mesh: trimesh.Trimesh, spec: ColourSpec, *, volume_pitch: float = 0.5
 ) -> RegionLabels:
@@ -674,15 +729,7 @@ def label_faces(
     )
     names = (*(r.name for r in spec.regions), DEFAULT_PART)
     area = np.asarray(mesh.area_faces, dtype=np.float64)
-    vol: NDArray[np.float64] | None = None
-    if mesh.is_watertight and volume_pitch > 0:
-        grid = voxelize(mesh, volume_pitch)
-        cells = np.argwhere(grid.occ)
-        centres = np.stack([grid.centres(a)[cells[:, a]] for a in range(3)], axis=1)
-        counts = np.bincount(
-            _first_match(spec, centres, contains), minlength=len(names)
-        )
-        vol = np.asarray(counts * volume_pitch**3, dtype=np.float64)
+    vol = _region_volumes(mesh, spec, contains, len(names), volume_pitch)
     total = float(vol.sum()) if vol is not None else 0.0
     stats: list[RegionStat] = []
     for i, name in enumerate(names):
@@ -823,6 +870,42 @@ def _fallback_rules(
     return out
 
 
+def _check_mix(
+    name: str,
+    assign: Assign,
+    spec: ColourSpec,
+    layer_heights: Sequence[float] | Mapping[str, Sequence[float]] | None,
+    mix_cap: float,
+    engine: tuple[ModuleType, ...] | None,
+    rules: Any,
+) -> tuple[float, list[MixViolation]]:
+    """Thickest mixed layer judged for one mix assign, and the layer-rule violations found."""
+    pattern = mix_digits(assign, spec.filaments)
+    heights = (
+        layer_heights.get(name, ())
+        if isinstance(layer_heights, Mapping)
+        else (layer_heights or ())
+    )
+    thickness = max(heights) if heights else mix_cap
+    if len(set(pattern)) < 2:
+        return thickness, [
+            MixViolation(
+                name,
+                "not-a-mix",
+                f"{pattern!r} is one filament: assign the slot directly",
+            )
+        ]
+    if engine and rules is not None:
+        report = engine[0].analyse_pattern(pattern, float(thickness), rules)
+        return thickness, [
+            MixViolation(name, v.rule, v.detail) for v in report.violations
+        ]
+    return thickness, [
+        MixViolation(name, rule, d)
+        for rule, d in _fallback_rules(pattern, thickness, mix_cap)
+    ]
+
+
 def check_mixes(
     spec: ColourSpec,
     layer_heights: Sequence[float] | Mapping[str, Sequence[float]] | None = None,
@@ -847,33 +930,12 @@ def check_mixes(
     for name, assign in entries:
         if assign.mix is None:
             continue
-        pattern = mix_digits(assign, spec.filaments)
-        heights = (
-            layer_heights.get(name, ())
-            if isinstance(layer_heights, Mapping)
-            else (layer_heights or ())
+        thickness, found = _check_mix(
+            name, assign, spec, layer_heights, mix_cap, engine, rules
         )
-        thickness = max(heights) if heights else mix_cap
         worst_mm = max(worst_mm, thickness)
         checked.append(name)
-        if len(set(pattern)) < 2:
-            violations.append(
-                MixViolation(
-                    name,
-                    "not-a-mix",
-                    f"{pattern!r} is one filament: assign the slot directly",
-                )
-            )
-        elif engine and rules is not None:
-            report = engine[0].analyse_pattern(pattern, float(thickness), rules)
-            violations += [
-                MixViolation(name, v.rule, v.detail) for v in report.violations
-            ]
-        else:
-            violations += [
-                MixViolation(name, rule, d)
-                for rule, d in _fallback_rules(pattern, thickness, mix_cap)
-            ]
+        violations += found
     return MixCheck(
         tuple(checked),
         tuple(violations),
@@ -972,6 +1034,26 @@ def _unresolvable(spec: ColourSpec) -> list[str]:
     return [f for f in found if f is not None]
 
 
+def _cut_parts(
+    mesh: trimesh.Trimesh, spec: ColourSpec, reasons: list[str]
+) -> tuple[list[Part], tuple[str, ...], float, float]:
+    """Cut the mesh into colour parts; appends FAIL reasons (open mesh, volume mismatch) to `reasons`."""
+    if not mesh.is_watertight:
+        reasons.append(
+            "model is not watertight: repair it before cutting colour regions"
+        )
+        return [], (), 0.0, 0.0
+    split = _split(mesh, spec)
+    model_volume = float(mesh.volume)
+    parts_volume = float(sum(p.mesh.volume for p in split.parts))
+    err = abs(parts_volume - model_volume) / model_volume if model_volume > 0 else 0.0
+    if err > VOLUME_TOL:
+        reasons.append(
+            f"parts add up to {err * 100:.2f}% off the model volume (tolerance {VOLUME_TOL * 100:.1f}%)"
+        )
+    return split.parts, split.empty, model_volume, parts_volume
+
+
 def plan_colours(
     mesh: trimesh.Trimesh,
     spec: ColourSpec,
@@ -990,25 +1072,7 @@ def plan_colours(
     check = check_mixes(spec, layer_heights, mix_cap=mix_cap)
     for region, found in check.violations_by_region().items():
         reasons += [f"mix of {region!r} breaks the layer rules — {f}" for f in found]
-    parts: list[Part] = []
-    empty: tuple[str, ...] = ()
-    model_volume = parts_volume = 0.0
-    if not mesh.is_watertight:
-        reasons.append(
-            "model is not watertight: repair it before cutting colour regions"
-        )
-    else:
-        split = _split(mesh, spec)
-        parts, empty = split.parts, split.empty
-        model_volume = float(mesh.volume)
-        parts_volume = float(sum(p.mesh.volume for p in parts))
-        err = (
-            abs(parts_volume - model_volume) / model_volume if model_volume > 0 else 0.0
-        )
-        if err > VOLUME_TOL:
-            reasons.append(
-                f"parts add up to {err * 100:.2f}% off the model volume (tolerance {VOLUME_TOL * 100:.1f}%)"
-            )
+    parts, empty, model_volume, parts_volume = _cut_parts(mesh, spec, reasons)
     failed = bool(reasons)
     warned = [
         f"region {n!r} has no volume (no overlap with the remaining model), dropped"

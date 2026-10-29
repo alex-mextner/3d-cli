@@ -209,6 +209,23 @@ def test_report_is_a_strict_json_step_result() -> None:
     assert "tip angle" in report.summary()
 
 
+def test_a_tap_that_lifts_the_part_has_no_sliding_friction_and_stays_strict_json() -> (
+    None
+):
+    # an upward push (normal tilted down) of 5 N on a part that weighs a few hundredths of a newton
+    load = ExternalLoad("p", 1.0, (0.0, 0.0, 10.0), (0.0, 0.0, 10.0), (-1.0, 0.0, -0.3))
+    report = analyse(_cube(10.0), loads=(load,))
+    taps = [
+        t
+        for s in report.scenarios
+        for t in s.tests
+        if t.kind == "tap" and t.force_n == 5.0
+    ]
+    assert taps and all(t.mu_slide is None and t.verdict != "PASS" for t in taps)
+    json.dumps(report.to_dict(), allow_nan=False)
+    assert "lifts" in " ".join(report.reasons)
+
+
 def test_invalid_inputs_are_rejected() -> None:
     with pytest.raises(InvalidArgument):
         analyse(_cube(), infill=1.5)

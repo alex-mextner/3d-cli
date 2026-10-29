@@ -428,6 +428,36 @@ def _edges(
     return poly, outward
 
 
+def _tip_verdict(
+    margin: float, tip: float, tip_min_deg: float, tip_warn_deg: float
+) -> tuple[list[Verdict], list[str]]:
+    """Verdict and reason of the static tip check (empty when the part sits safely)."""
+    if margin < 0.0:
+        return ["FAIL"], [
+            f"centre of mass is {-margin:.1f} mm outside the support polygon"
+        ]
+    if tip < tip_min_deg:
+        return ["FAIL"], [f"tip angle {tip:.1f} deg is below {tip_min_deg:g} deg"]
+    if tip < tip_warn_deg:
+        return ["WARN"], [f"tip angle {tip:.1f} deg is below {tip_warn_deg:g} deg"]
+    return [], []
+
+
+def _tap_reason(t: TapTest, mu_bed: float) -> str:
+    """One-line reason a tap test did not pass."""
+    sf = (
+        "no overturning"
+        if t.safety_factor is None
+        else f"safety factor {t.safety_factor:.2f}"
+    )
+    slide = (
+        "lifts the part off the bed"
+        if t.mu_slide is None
+        else f"needs mu {t.mu_slide:.2f} (bed {mu_bed:g})"
+    )
+    return f"{t.kind} {t.force_n:g} N on {t.load}: {sf}, {slide}"
+
+
 def _scenario(
     name: str,
     mass_g: float,
@@ -467,30 +497,13 @@ def _scenario(
         if load
         else []
     )
-    reasons: list[str] = []
-    verdicts: list[Verdict] = []
-    if float(margins[worst_edge]) < 0.0:
-        verdicts.append("FAIL")
-        reasons.append(
-            f"centre of mass is {-margins[worst_edge]:.1f} mm outside the support polygon"
-        )
-    elif tip < tip_min_deg:
-        verdicts.append("FAIL")
-        reasons.append(f"tip angle {tip:.1f} deg is below {tip_min_deg:g} deg")
-    elif tip < tip_warn_deg:
-        verdicts.append("WARN")
-        reasons.append(f"tip angle {tip:.1f} deg is below {tip_warn_deg:g} deg")
+    verdicts, reasons = _tip_verdict(
+        float(margins[worst_edge]), tip, tip_min_deg, tip_warn_deg
+    )
     for t in tests:
         verdicts.append(t.verdict)
         if t.verdict != "PASS":
-            sf = (
-                "no overturning"
-                if t.safety_factor is None
-                else f"safety factor {t.safety_factor:.2f}"
-            )
-            reasons.append(
-                f"{t.kind} {t.force_n:g} N on {t.load}: {sf}, needs mu {t.mu_slide:.2f} (bed {mu_bed:g})"
-            )
+            reasons.append(_tap_reason(t, mu_bed))
     return Scenario(
         name=name,
         mass_g=float(mass_g),
@@ -585,14 +598,12 @@ def _one_test(
         vec[2]
     )  # a downward tap (vec z < 0) adds to the bed reaction
     mu = (
-        float(np.hypot(vec[0], vec[1]) / normal_force)
-        if normal_force > 0.0
-        else float("inf")
-    )
+        float(np.hypot(vec[0], vec[1]) / normal_force) if normal_force > 0.0 else None
+    )  # None: the force lifts the part off the bed, there is no friction to rely on
     verdict: Verdict = "PASS"
     if sf is not None and sf < sf_fail:
         verdict = "FAIL"
-    elif (sf is not None and sf < sf_warn) or mu > mu_bed:
+    elif (sf is not None and sf < sf_warn) or mu is None or mu > mu_bed:
         verdict = "WARN"
     return TapTest(
         kind=kind,
