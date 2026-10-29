@@ -1171,7 +1171,7 @@ def test_the_deterministic_rank_action_reads_the_stored_order_and_the_llm_action
     required = actions.invoke(
         "rank", session=str(first.root_uid), mode="llm", db_path=dbpath, require=True
     )
-    assert required["ok"] is False and required["errors"][0]["code"] == "error"
+    assert required["ok"] is False and required["errors"][0]["code"] == "missing_dependency"
     bad = actions.invoke("rank", session="x", mode="telepathy", db_path=dbpath)
     assert bad["ok"] is False and bad["errors"][0]["code"] == "invalid_argument"
     assert bad["errors"][0]["message"].startswith("got mode='telepathy'")

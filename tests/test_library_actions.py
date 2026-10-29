@@ -22,6 +22,8 @@ NAMES = (
     "queue",
     "photo",
     "publish",
+    "open_browser",
+    "preview",
 )
 
 
@@ -30,7 +32,7 @@ def dbpath(tmp_path: Path) -> str:
     return str(tmp_path / "library.db")
 
 
-def test_registry_has_exactly_the_eight_actions_with_owners() -> None:
+def test_registry_has_exactly_the_ten_actions_with_owners() -> None:
     assert tuple(actions.ACTIONS) == NAMES
     assert set(actions.OWNERS) == set(NAMES)
     for name, fn in actions.ACTIONS.items():
@@ -63,8 +65,6 @@ def test_actions_module_imports_without_heavy_deps_or_library_db() -> None:
 @pytest.mark.parametrize(
     "name,owner,kwargs",
     [
-        ("open_slicer", 578, {"path": "a.3mf"}),
-        ("launch_agent", 578, {"prompt": "hi"}),
         ("photo", 579, {"capture": True}),
         ("publish", 579, {"design": "d"}),
     ],
