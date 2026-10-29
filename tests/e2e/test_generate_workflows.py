@@ -117,5 +117,45 @@ def test_generate_help_lists_flags_and_labels(tmp_path: Path) -> None:
     """A user reads `3d generate --help` and sees every flag plus the three proof labels."""
     result = run_cli(tmp_path, "generate", "--help")
     assert result.returncode == 0
-    for token in ("--dim", "--spec", "--backend", "--rounds", "ok", "diagnostic", "failure"):
+    for token in (
+        "--dim", "--spec", "--backend", "--rounds",
+        "--visual-review", "--reference", "--visual-threshold",
+        "ok", "diagnostic", "failure",
+    ):
         assert token in result.stdout
+
+
+def test_generate_visual_review_without_reference_errors_exit_2(tmp_path: Path) -> None:
+    """--visual-review with no --reference (and no spec 'reference') is a usage error: it
+    fails BEFORE any backend/OpenSCAD work, so it needs neither a model nor a render."""
+    result = run_cli(
+        tmp_path, "generate", "a box", "--dim", "width=20", "--visual-review",
+        "--backend", "mock",
+        env_extra={"THREED_AI_MOCK_RESPONSE": CUBE_SCAD},
+    )
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "reference" in (result.stdout + result.stderr).lower()
+
+
+def test_generate_visual_review_missing_reference_file_errors_exit_2(tmp_path: Path) -> None:
+    """A typo'd --reference path fails fast (exit 2) instead of letting the backend drop it."""
+    result = run_cli(
+        tmp_path, "generate", "a box", "--dim", "width=20", "--visual-review",
+        "--reference", str(tmp_path / "nope.png"), "--backend", "mock",
+        env_extra={"THREED_AI_MOCK_RESPONSE": CUBE_SCAD},
+    )
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "nope.png" in (result.stdout + result.stderr)
+
+
+def test_generate_visual_review_threshold_out_of_range_errors_exit_2(tmp_path: Path) -> None:
+    """--visual-threshold outside the judge's 0-4 scale is a usage error before backend work."""
+    ref = tmp_path / "ref.png"
+    ref.write_bytes(b"\x89PNG\r\n")
+    result = run_cli(
+        tmp_path, "generate", "a box", "--dim", "width=20", "--visual-review",
+        "--reference", str(ref), "--visual-threshold", "5", "--backend", "mock",
+        env_extra={"THREED_AI_MOCK_RESPONSE": CUBE_SCAD},
+    )
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "threshold" in (result.stdout + result.stderr).lower()
