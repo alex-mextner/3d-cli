@@ -128,7 +128,7 @@ class Registry:
 POSIX_ONLY_MODULES = frozenset({"fcntl"})
 
 
-def _import_command_module(name: str) -> ModuleType | None:
+def import_command_module(name: str) -> ModuleType | None:
     try:
         return importlib.import_module(name)
     except ModuleNotFoundError as exc:
@@ -152,7 +152,7 @@ def discover(package: str = "commands") -> Registry:
     for mod_info in pkgutil.iter_modules(pkg.__path__):
         if mod_info.name.startswith("_"):
             continue
-        mod = _import_command_module(f"{package}.{mod_info.name}")
+        mod = import_command_module(f"{package}.{mod_info.name}")
         cmd = getattr(mod, "COMMAND", None)
         if isinstance(cmd, Command):
             reg.add(cmd)
