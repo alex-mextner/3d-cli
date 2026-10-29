@@ -20,6 +20,14 @@ is layered so users and projects can override built-in defaults field-by-field.
 3d materials show PETG
 ```
 
+## Fit-table fields
+
+Two optional fields feed `3d fits resolve` ([fits](fits.md)): `shrink_xy_pct` and `shrink_z_pct`, the linear
+shrink of the printed part in percent. They are reported as the slicer's shrinkage compensation (`xy_scale` =
+`100 / (100 - pct)`) and never change a clearance. The built-in materials ship `shrink_xy_pct` (PLA 0.3, PETG 0.4,
+TPU 0.6, ASA 0.7, ABS 0.8; typical values, source in `lib/data/materials.yaml`) and no Z value; a material without
+the field is reported as "no material correction", never as zero. `3d materials show` prints them when set.
+
 ## Registry Layers
 
 Later layers override earlier ones:

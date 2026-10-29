@@ -22,6 +22,7 @@ from cli.registry import Command
 from errors import InputNotFound, UsageError
 
 USAGE = """3d fit-check --insert A.stl[,B.stl] --socket S1.stl[,S2.stl] --gap MM [options]
+3d fit-check --insert A.stl --socket S.stl --fit snap [--shape round] [--printer k1se --material PETG] [options]
 3d fit-check --spec fits.yaml [--json]
   Check an insert that is already printed against its socket, both in the assembly frame:
     size    the insert's bounding box equals --printed-size within --size-tol
@@ -39,12 +40,21 @@ USAGE = """3d fit-check --insert A.stl[,B.stl] --socket S1.stl[,S2.stl] --gap MM
 Options:
   --insert A[,B]        insert mesh(es), unioned (STL/3MF/OBJ; globs ok; repeatable)
   --socket S1[,S2]      socket part(s), unioned (globs ok, quote them; repeatable)
-  --gap MM              designed clearance per side (tightest side)
+  --gap MM              designed clearance per side (tightest side); with --fit it overrides the number
+                        taken from the fit table
+  --fit TYPE            fit type of the shared fit table (`3d fits list`): snap, sliding, tight, glue or an
+                        alias (free_running, snug, normal, loose). The gap and --gap-tol come from
+                        `3d fits resolve` instead of literals; `press` (interference) needs an explicit --gap
+  --shape SHAPE         feature shape for --fit: planar (default), round, slot, pin, hinge
+  --printer NAME        printer whose correction rows apply to --fit, e.g. k1se (unknown name = table default)
+  --material NAME       material whose correction rows apply to --fit, e.g. PETG
+  --nozzle MM           nozzle diameter for the correction rows, e.g. 0.4
+  --layer MM            layer height for the correction rows, e.g. 0.2
   --printed-size X,Y,Z  size of the printed insert, mm; omitted = size not checked
   --any-turn            accept the printed size in any axis order (a turned insert)
   --name NAME           insert name in the report (default: insert file names)
   --size-tol MM         printed-size tolerance (default 0.02)
-  --gap-tol MM          clearance tolerance (default 0.03)
+  --gap-tol MM          clearance tolerance (default 0.03; with --fit the tolerance of the fit type)
   --step MM             slice step up the socket (default 0.25)
   --min-depth MM        FAIL when the socket is shallower (default: not checked)
   --open DIR            insertion direction the socket must be open to: above
@@ -61,6 +71,8 @@ Examples:
   3d fit-check --insert plug.stl --socket plate.stl --gap 0.2 --gap-tol 0.05 --size-tol 0.05 --step 0.1 --min-depth 3.5
   3d fit-check --insert magnet.stl --socket 'HALF_*.stl' --gap 0.1 --open none
   3d fit-check --insert foot.stl --socket base.stl --gap 0.2 --open below
+  3d fit-check --insert plug.stl --socket plate.stl --fit sliding --shape round --printer k1se --material PETG
+  3d fit-check --insert lid.stl --socket box.stl --fit snap --gap-tol 0.05
   3d fit-check --spec fits.yaml
   3d fit-check --spec fits.yaml --json | jq '.fits[] | {insert, status, gap_mm, socket_depth_mm}'"""
 
@@ -102,7 +114,7 @@ def run(argv: list[str]) -> int:
         return 0
     values = _path_values(argv)
     if "--spec" not in values and not ("--insert" in values and "--socket" in values):
-        raise UsageError("fit-check needs --insert A.stl --socket S.stl --gap MM, or --spec fits.yaml",
+        raise UsageError("fit-check needs --insert A.stl --socket S.stl --gap MM (or --fit TYPE), or --spec fits.yaml",
                          command="fit-check")
     _require_existing(values)
     return exec_tool(DEPS, "fit_check.py", argv)

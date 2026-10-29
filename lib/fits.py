@@ -5,9 +5,11 @@ clearance / interference / tolerance, aliases (`free_running`, `snug`, `normal`,
 printer x material x nozzle x layer corrections. `resolve()` turns "I want a sliding fit on a round feature
 printed in PETG on k1se with a 0.4 nozzle" into a number plus the provenance that explains it.
 
-ACCESSED VIA: `niche_fit.resolve_clearance` (`3d fit-niche --fit`), the `3d fits` command (S1), the fit
-coupon (`3d calibrate fit`, S2: writes `fit_clearance` records that `corrections_from_fit_clearance` turns
-into correction rows) and the assembly runner (S3).
+ACCESSED VIA: `3d fits` (list/resolve/show/apply/corrections), `3d fit-check --fit`, `3d fit-niche --fit`
+(`niche_fit.resolve_clearance`), the fit coupon (`3d calibrate fit`, S2: writes `fit_clearance` records that
+`corrections_from_fit_clearance` turns into correction rows) and the assembly runner (S3). Callers that must
+honour manual and calibration rows go through `fits_sources.resolve`, which feeds `resolve` the rows of every
+registered correction source; `resolve` itself stays pure (table + the rows it is handed).
 
 INVARIANTS:
   - The table file is the only clearance table in the code base. A legacy label is an alias row, never a
@@ -17,7 +19,13 @@ INVARIANTS:
   - Exactly one correction row is applied per `resolve` (the most specific match, see `select_correction`);
     the others are listed as `superseded`, so the number can always be reproduced by hand.
   - A caller who names a printer/material the table has no exact row for gets the `*` row and
-    `fallback: true` in the provenance instead of an error: a fit estimate is still better than none.
+    `fallback: true` in the provenance instead of an error: a fit estimate is still better than none. The
+    named printer/material is also looked up in the fleet/printer/material registries (`fits_registry`) and the
+    provenance says whether it is known, so a row keyed `k1se` also answers `Creality K1 SE`.
+  - A correction row says where it came from (`status`: calibrated | manual override | default, not
+    calibrated); no row is ever presented as a measurement unless a calibration produced it.
+  - Material shrink (`materials.yaml: shrink_xy_pct`) is reported as `xy_scale` for the slicer's shrinkage
+    compensation; it never changes `clearance_mm`. A material without it gets a "no material correction" entry.
 """
 
 from __future__ import annotations
@@ -26,15 +34,18 @@ import functools
 import math
 import re
 import statistics
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import yaml
 
 from errors import InvalidArgument
+
+if TYPE_CHECKING:
+    from fits_registry import MaterialIdentity, PrinterIdentity
 
 SCHEMA = "3d.fits/1"
 TABLE_PATH = Path(__file__).resolve().parent / "data" / "fits.yaml"
@@ -46,6 +57,11 @@ CLEARANCE_FIT_TYPES = (
     "tight",
 )  # types whose coupon reads a free/press/fused gap
 WILDCARD = "*"
+CORRECTION_STATUS = {
+    "calibration": "calibrated",
+    "manual": "manual override",
+    "default": "default, not calibrated",
+}
 _NUMBER = (int, float)
 _NOZZLE_EPS = 0.005  # mm: 0.4 vs 0.40 and nozzle sizes are never closer than 0.05
 
@@ -130,6 +146,9 @@ class Resolution:
     tol_mm: float
     fallback: bool
     provenance: tuple[dict[str, Any], ...] = field(default_factory=tuple)
+    xy_scale: float | None = (
+        None  # model scale from the material's XY shrink; None = no material correction
+    )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -146,6 +165,7 @@ class Resolution:
             "tol_mm": self.tol_mm,
             "fallback": self.fallback,
             "provenance": [dict(p) for p in self.provenance],
+            "xy_scale": self.xy_scale,
         }
 
 
@@ -274,6 +294,16 @@ def _parse_correction(
     )
 
 
+def correction_from_dict(
+    raw: Mapping[str, Any], table: FitTable | None = None, index: int = 0
+) -> Correction:
+    """Validate one correction row (the keys of `Correction.to_dict`) against the table's vocabulary."""
+    tbl = table or load_table()
+    return _parse_correction(
+        dict(raw), index, tbl.shapes, [*tbl.fit_types, *tbl.aliases]
+    )
+
+
 def _parse_fit_type(name: str, raw: Any, shapes: Sequence[str]) -> FitType:
     where = f"fit_types.{name}"
     if not isinstance(raw, dict):
@@ -389,12 +419,25 @@ def _default_table() -> FitTable:
 
 
 # --------------------------------------------------------------------------- resolve
-def _norm(name: str) -> str:
+def norm_name(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", name.lower())
 
 
-def _same_name(wanted: str, got: str | None) -> bool:
-    return got is not None and _norm(wanted) == _norm(got)
+Spellings = (
+    str | Collection[str] | None
+)  # one name, or every spelling of the same printer/material
+
+
+def _spellings(value: Spellings) -> frozenset[str] | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return frozenset({norm_name(value)})
+    return frozenset(norm_name(v) for v in value)
+
+
+def _same_name(wanted: str, got: frozenset[str] | None) -> bool:
+    return got is not None and norm_name(wanted) in got
 
 
 def _same_dim(wanted: float | None, got: float | None) -> bool:
@@ -405,8 +448,8 @@ def _matches(
     correction: Correction,
     shape: str,
     fit_names: tuple[str, str | None],
-    printer: str | None,
-    material: str | None,
+    printer: frozenset[str] | None,
+    material: frozenset[str] | None,
     nozzle_mm: float | None,
     layer_height_mm: float | None,
 ) -> int | None:
@@ -447,8 +490,8 @@ def select_correction(
     shape: str,
     fit_type: str,
     alias: str | None = None,
-    printer: str | None = None,
-    material: str | None = None,
+    printer: Spellings = None,
+    material: Spellings = None,
     nozzle_mm: float | None = None,
     layer_height_mm: float | None = None,
 ) -> tuple[Correction, list[Correction]]:
@@ -460,10 +503,17 @@ def select_correction(
     Raises `FitTableError` without a match (the table loader guarantees a default row, so only
     caller-supplied lists can trigger it).
     """
+    printer_ids, material_ids = _spellings(printer), _spellings(material)
     scored = []
     for c in corrections:
         score = _matches(
-            c, shape, (fit_type, alias), printer, material, nozzle_mm, layer_height_mm
+            c,
+            shape,
+            (fit_type, alias),
+            printer_ids,
+            material_ids,
+            nozzle_mm,
+            layer_height_mm,
         )
         if score is not None:
             when = _instant(c.measured_at, "measured_at") if c.measured_at else _EPOCH
@@ -521,6 +571,7 @@ def _correction_entry(
         "kind": "correction",
         **chosen.to_dict(),
         "fallback": fallback,
+        "status": CORRECTION_STATUS[chosen.source],
     }
     if fallback:
         entry["fallback_reason"] = [
@@ -544,12 +595,14 @@ def resolve(
     *,
     extra_corrections: Sequence[Correction] = (),
     table: FitTable | None = None,
+    command: str = "fits",
 ) -> Resolution:
     """Resolve a fit to a per-face clearance (signed), tolerance and provenance.
 
     `fit_type` is a canonical name or an alias; `shape` one of the table's shapes. `extra_corrections`
     (e.g. from `corrections_from_fit_clearance`) compete with the table rows under `select_correction`.
-    Unknown printer/material is not an error: the `*` row applies and `fallback` is True.
+    Unknown printer/material is not an error: the `*` row applies and `fallback` is True. `command` names the
+    caller in the `InvalidArgument` raised for an unknown fit type or shape.
     """
     tbl = table or load_table()
     requested = fit_type
@@ -557,18 +610,30 @@ def resolve(
     name = alias.fit_type if alias else fit_type
     base = tbl.fit_types.get(name)
     if base is None:
-        raise InvalidArgument("fit_type", requested, tbl.names(), command="fits")
+        raise InvalidArgument("fit_type", requested, tbl.names(), command=command)
     if shape not in tbl.shapes:
-        raise InvalidArgument("shape", shape, list(tbl.shapes), command="fits")
+        raise InvalidArgument("shape", shape, list(tbl.shapes), command=command)
 
     clearance, provenance = _fit_type_provenance(base, alias, shape)
+
+    printer_id: PrinterIdentity | None = None
+    material_id: MaterialIdentity | None = None
+    if printer is not None:
+        from fits_registry import printer_identity
+
+        printer_id = printer_identity(printer)
+    if material is not None:
+        from fits_registry import material_identity
+
+        material_id = material_identity(material)
+
     chosen, superseded = select_correction(
         [*extra_corrections, *tbl.corrections],
         shape=shape,
         fit_type=name,
         alias=alias.name if alias else None,
-        printer=printer,
-        material=material,
+        printer=printer_id.names() if printer_id else None,
+        material=material_id.names() if material_id else None,
         nozzle_mm=nozzle,
         layer_height_mm=layer,
     )
@@ -581,6 +646,49 @@ def resolve(
         for c in superseded
         if c.delta_mm != 0.0 or c.source != "default"
     )
+    # the registry lookups come after the rows they explain, so provenance[0] is the fit type and [1] the
+    # alias or the correction, whatever the caller named
+    provenance.extend(
+        i.to_provenance() for i in (printer_id, material_id) if i is not None
+    )
+    xy_scale = None
+    if material_id and material_id.shrink_xy_pct is not None:
+        xy_scale = round(100.0 / (100.0 - material_id.shrink_xy_pct), 6)
+        provenance.append(
+            {
+                "kind": "material_correction",
+                "id": "shrink_xy",
+                "source": f"materials.yaml:{material_id.name}",
+                "shrink_xy_pct": material_id.shrink_xy_pct,
+                "xy_scale": xy_scale,
+                "applied_as": "slicer shrinkage compensation (scale the model XY by xy_scale); "
+                "clearance_mm is not changed",
+            }
+        )
+    else:
+        why = (
+            "no material given"
+            if material is None
+            else f"{material!r} has no shrink_xy_pct recorded"
+        )
+        provenance.append(
+            {
+                "kind": "material_correction",
+                "id": "none",
+                "message": f"no material correction ({why})",
+            }
+        )
+    if material_id and material_id.shrink_z_pct is not None:
+        provenance.append(
+            {
+                "kind": "material_correction",
+                "id": "shrink_z",
+                "source": f"materials.yaml:{material_id.name}",
+                "shrink_z_pct": material_id.shrink_z_pct,
+                "z_scale": round(100.0 / (100.0 - material_id.shrink_z_pct), 6),
+                "applied_as": "slicer Z shrinkage compensation; clearance_mm is not changed",
+            }
+        )
 
     return Resolution(
         fit_type=name,
@@ -595,6 +703,7 @@ def resolve(
         tol_mm=base.tol_mm,
         fallback=fallback,
         provenance=tuple(provenance),
+        xy_scale=xy_scale,
     )
 
 

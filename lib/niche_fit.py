@@ -33,12 +33,15 @@ from errors import InvalidArgument, UsageError
 
 # ---------------------------------------------------------------------------
 # Fit presets. `--clearance` overrides any of these. The numbers live in the shared fit
-# table (`lib/data/fits.yaml`, `lib/fits.py`): snug = tight, normal = sliding, loose =
-# sliding + 0.15 mm. Millimetres of gap PER MATING FACE (rect) / RADIAL (round).
+# table (`lib/data/fits.yaml`, `lib/fits.py`); `--fit` takes any fit type or alias of it
+# (snap, sliding, tight, press, glue, snug, normal, loose, ...), corrected for `--printer`,
+# `--material`, `--nozzle` and `--layer` through `fits_sources.resolve`: the same call
+# `3d fit-check --fit` makes. Millimetres of gap PER MATING FACE (rect) / RADIAL (round);
+# an interference fit (press) is a negative clearance.
 # ---------------------------------------------------------------------------
-FIT_LABELS = ("snug", "normal", "loose")  # the --fit enum of `3d fit-niche`; aliases in fits.yaml
 DEFAULT_FIT = "normal"
 DEFAULT_CLEARANCE = fits.resolve(DEFAULT_FIT, "planar").clearance_mm
+FIT_SHAPE = {"rect": "planar", "round": "round"}  # the fit-table shape of each cavity shape
 
 SHAPES = ("rect", "round")
 
@@ -72,6 +75,7 @@ class NicheSpec:
     lead_in: bool = False
     groove: bool = False
     snap_tab: bool = False
+    fit_resolution: dict[str, Any] | None = None  # `fits.resolve` answer when the clearance came from the table
 
     # ---- derived insert geometry -------------------------------------------
     @property
@@ -102,6 +106,8 @@ class NicheSpec:
                 "snap_tab": self.snap_tab,
             },
         }
+        if self.fit_resolution is not None:
+            data["fit_resolution"] = self.fit_resolution
         if self.shape == "rect":
             data["cavity"] = {"width": self.width, "depth": self.depth, "height": self.height}
             data["insert"] = {
@@ -121,19 +127,37 @@ class NicheSpec:
 # ---------------------------------------------------------------------------
 # Resolution + validation
 # ---------------------------------------------------------------------------
-def resolve_clearance(fit: str | None, override: float | None) -> tuple[float, str]:
-    """Resolve the effective clearance and its label from `--fit`/`--clearance`.
+def resolve_clearance(
+    fit: str | None,
+    override: float | None,
+    *,
+    shape: str = "rect",
+    printer: str | None = None,
+    material: str | None = None,
+    nozzle: float | None = None,
+    layer: float | None = None,
+) -> tuple[float, str, fits.Resolution | None]:
+    """Resolve the effective clearance, its label and the fit-table answer from `--fit`/`--clearance`.
 
-    An explicit `--clearance` always wins; the label becomes ``custom`` unless a `--fit`
-    was also named. With no override the fit preset supplies the value. A named `--fit` is
-    validated against the closed enum whether or not a clearance override is also given.
+    An explicit `--clearance` always wins (resolution None); the label becomes ``custom`` unless a `--fit`
+    was also named. With no override the fit supplies the value, corrected for printer/material/nozzle/layer
+    (default fit: `normal`). A named `--fit` is validated against the fit table's names whether or not a
+    clearance override is also given.
     """
-    if fit is not None and fit not in FIT_LABELS:
+    names = fits.load_table().names()
+    if fit is not None and fit not in names:
         raise InvalidArgument(
-            "--fit", fit, list(FIT_LABELS),
+            "--fit", fit, names,
             command="fit-niche",
             extra="Or pass an explicit --clearance MM.",
         )
+    correction_flags = [
+        flag
+        for flag, value in (
+            ("--printer", printer), ("--material", material), ("--nozzle", nozzle), ("--layer", layer),
+        )
+        if value is not None
+    ]
     if override is not None:
         if override < 0:
             raise InvalidArgument(
@@ -141,9 +165,20 @@ def resolve_clearance(fit: str | None, override: float | None) -> tuple[float, s
                 command="fit-niche",
                 extra="Clearance is millimetres of gap per mating face; it cannot be negative.",
             )
-        return override, (fit or "custom")
+        if correction_flags:
+            raise UsageError(
+                f"{', '.join(correction_flags)} correct a fit-table clearance, but --clearance is explicit",
+                command="fit-niche",
+                remediation=["Drop --clearance to use --fit with the correction, or drop the correction flags."],
+            )
+        return override, (fit or "custom"), None
+    import fits_sources
+
     label = fit or DEFAULT_FIT
-    return fits.resolve(label, "planar").clearance_mm, label
+    res = fits_sources.resolve(
+        label, FIT_SHAPE.get(shape, shape), printer, material, nozzle, layer, command="fit-niche"
+    )
+    return res.clearance_mm, label, res
 
 
 def _require_positive(name: str, value: float) -> None:
@@ -211,6 +246,10 @@ def make_spec(
     lead_in: bool = False,
     groove: bool = False,
     snap_tab: bool = False,
+    printer: str | None = None,
+    material: str | None = None,
+    nozzle: float | None = None,
+    layer: float | None = None,
 ) -> NicheSpec:
     """Validate inputs and build a resolved `NicheSpec` (the single construction path)."""
     if shape not in SHAPES:
@@ -221,7 +260,9 @@ def make_spec(
         _require_positive("--depth", depth)
     else:
         _require_positive("--diameter", diameter)
-    resolved, label = resolve_clearance(fit, clearance)
+    resolved, label, resolution = resolve_clearance(
+        fit, clearance, shape=shape, printer=printer, material=material, nozzle=nozzle, layer=layer
+    )
     spec = NicheSpec(
         shape=shape,
         height=height,
@@ -233,6 +274,7 @@ def make_spec(
         lead_in=lead_in,
         groove=groove,
         snap_tab=snap_tab,
+        fit_resolution=resolution.to_dict() if resolution is not None else None,
     )
     _validate_insert_positive(spec)
     _validate_features(spec)
@@ -241,7 +283,7 @@ def make_spec(
 
 _ALLOWED_JSON_KEYS = {
     "shape", "height", "clearance", "fit", "width", "depth", "diameter",
-    "lead_in", "groove", "snap_tab",
+    "lead_in", "groove", "snap_tab", "printer", "material", "nozzle", "layer",
 }
 
 
@@ -272,6 +314,10 @@ def spec_from_json(data: dict[str, Any]) -> NicheSpec:
         lead_in=bool(data.get("lead_in", False)),
         groove=bool(data.get("groove", False)),
         snap_tab=bool(data.get("snap_tab", False)),
+        printer=(str(data["printer"]) if "printer" in data else None),
+        material=(str(data["material"]) if "material" in data else None),
+        nozzle=_as_opt_float(data, "nozzle"),
+        layer=_as_opt_float(data, "layer"),
     )
 
 
@@ -317,6 +363,13 @@ def _shape_dims(spec: NicheSpec) -> tuple[float, float, float]:
     return (spec.width or side), (spec.depth or side), spec.diameter
 
 
+def _fit_marker(spec: NicheSpec) -> str:
+    """`@fit TYPE shape=SHAPE ` when the clearance came from the fit table: `3d fits apply` re-corrects it"""
+    if spec.fit_resolution is None:
+        return ""
+    return f"@fit {spec.fit} shape={FIT_SHAPE[spec.shape]} "
+
+
 def _emit_header(spec: NicheSpec) -> str:
     b = lambda flag: "true" if flag else "false"  # noqa: E731
     width, depth, diameter = _shape_dims(spec)
@@ -336,7 +389,8 @@ def _emit_header(spec: NicheSpec) -> str:
             f"cavity_height = {_fmt(spec.height)};      // mm, Z depth of the cavity",
             "",
             "/* [Fit] */",
-            f"clearance = {_fmt(spec.clearance)};        // mm gap per mating face (rect) / radial (round)",
+            f"clearance = {_fmt(spec.clearance)};        // {_fit_marker(spec)}mm gap per mating face (rect) / radial (round)"
+            + ("; negative = interference" if spec.clearance < 0 else ""),
             "",
             "/* [Features] */",
             f"lead_in = {b(spec.lead_in)};          // 45-degree entry chamfer at the top rim",
