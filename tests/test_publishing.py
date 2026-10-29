@@ -67,6 +67,7 @@ def test_parse_license_recognises_what_the_sites_print(
 @pytest.mark.parametrize(
     "text",
     ["", "   ", "my own terms", "share-alike nd", "Creative Commons", "Creative Commons custom terms",
+     "cc-by-ncc", "CC custom terms", "CC BY-NC-ND (not GPL)",
      "Free to use, attribution required, no remixing", "Not public domain - personal use only"],
 )
 def test_parse_license_returns_none_for_what_it_does_not_know(text: str) -> None:

@@ -89,6 +89,35 @@ PLATFORM_LICENSES: dict[str, dict[str, str]] = {
 }
 
 _WORD = re.compile(r"[a-z0-9]+")
+_CC_VOCABULARY = frozenset(
+    {
+        "cc",
+        "by",
+        "nc",
+        "sa",
+        "nd",
+        "creative",
+        "commons",
+        "attribution",
+        "non",
+        "commercial",
+        "noncommercial",
+        "share",
+        "alike",
+        "sharealike",
+        "no",
+        "derivatives",
+        "derivative",
+        "derivs",
+        "noderivatives",
+        "noderivs",
+        "license",
+        "licence",
+        "international",
+        "unported",
+        "generic",
+    }
+)
 
 
 def parse_license(text: str) -> License | None:
@@ -112,13 +141,15 @@ def parse_license(text: str) -> License | None:
     ):
         return LICENSES["cc0"]
     for plain in ("lgpl", "gpl", "bsd"):
-        if plain in word:
+        if plain in word and not word & {"cc", "by", "nc", "sa", "nd"}:
             return LICENSES[plain]
     return _cc_license(tokens, word, joined)
 
 
 def _cc_license(tokens: list[str], word: set[str], joined: str) -> License | None:
     """The Creative Commons licence the tokens name, or None when they are not CC at all."""
+    if not (word <= _CC_VOCABULARY or all(t.isdigit() for t in word - _CC_VOCABULARY)):
+        return None  # any word that is not part of a CC licence name: unknown terms, never assumed free
     is_cc = (
         "cc" in word
         or ("creative commons" in joined and "attribution" in word)  # "Creative Commons" alone names no licence
