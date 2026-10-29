@@ -149,3 +149,59 @@ def test_size_too_small_for_the_legend_is_a_clear_error(tmp_path: pathlib.Path) 
         render(
             str(model), str(tmp_path / "a.png"), plane="XZ", at=5.0, size=(1200, 300)
         )
+
+
+def test_a_plane_grazing_the_far_face_stays_inside_the_model(
+    hollow: str, tmp_path: pathlib.Path
+) -> None:
+    """9.9999999 is inside a [-10, 10] cube: the grazing nudge must not push it past the face."""
+    info = render(
+        hollow,
+        str(tmp_path / "s.png"),
+        plane="YZ",
+        keep="pos",
+        at=OUTER / 2 - 1e-7,
+        size=(600, 450),
+    )
+    assert OUTER / 2 - 1e-2 < info["at_mm"] < OUTER / 2
+
+
+def test_the_output_folder_is_created(hollow: str, tmp_path: pathlib.Path) -> None:
+    out = tmp_path / "previews" / "deeper" / "sec.png"
+    render(hollow, str(out), plane="XZ", size=(600, 450))
+    assert out.is_file()
+
+
+def test_the_nearer_surface_is_painted_over_the_farther_one(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """Two overlapping triangles, red nearer the viewer than green: the overlap shows red."""
+    import section_render as sr
+    from dimension_model import RawGroup, RawModel
+
+    eye, right, up = sr._basis("YZ", "neg")
+    centre = np.array([-20.0, 0.0, 0.0])
+    near = np.array([centre - 2 * right - 2 * up, centre + 2 * right - 2 * up, centre + 2 * up])
+    far = near - 10 * eye  # farther from the viewer along the eye
+    anchor = trimesh.creation.box(extents=(2, 2, 2))
+    anchor.apply_translation([0, 40, 0])
+    verts = np.vstack([near, far, anchor.vertices])
+    faces = np.vstack([[0, 1, 2], [3, 4, 5], anchor.faces + 6])
+    raw = RawModel(
+        verts,
+        faces,
+        np.array([0, 1] + [2] * len(anchor.faces)),
+        [
+            RawGroup("near", "red", "#FF0000", object_id="near"),
+            RawGroup("far", "green", "#00FF00", object_id="far"),
+            RawGroup("anchor", "blue", "#0000FF", object_id="anchor"),
+        ],
+    )
+    monkeypatch.setattr(sr, "load_raw", lambda *a, **k: raw)
+    out = tmp_path / "depth.png"
+    sr.render("unused.3mf", str(out), at=0)
+    arr = np.asarray(Image.open(out).convert("RGB")).astype(int)[:700]  # the view, not the legend swatches
+    red = (arr[:, :, 0] > 120) & (arr[:, :, 1] < 80) & (arr[:, :, 2] < 80)
+    green = (arr[:, :, 1] > 120) & (arr[:, :, 0] < 80) & (arr[:, :, 2] < 80)
+    # orthographic: the green triangle sits exactly behind the red one, so none of it may show
+    assert red.sum() > 0 and green.sum() < 0.02 * red.sum()

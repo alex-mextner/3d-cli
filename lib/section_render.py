@@ -86,10 +86,12 @@ def _plane_coords(axis: int) -> tuple[int, int]:
     return first, second
 
 
-def _loops(
+def _adjacency(
     segments: list[tuple[np.ndarray, np.ndarray]],
-) -> tuple[list[np.ndarray], int]:
-    """Closed loops (2D) and the number of open chains in a bag of 2D segments."""
+) -> tuple[
+    dict[tuple[int, int], list[tuple[int, int]]], dict[tuple[int, int], np.ndarray]
+]:
+    """Quantised-endpoint adjacency lists and the point each key stands for."""
 
     def key(p: np.ndarray) -> tuple[int, int]:
         return (round(float(p[0]) * 1e4), round(float(p[1]) * 1e4))
@@ -103,37 +105,46 @@ def _loops(
         adjacent[ka].append(kb)
         adjacent[kb].append(ka)
         point[ka], point[kb] = a, b
+    return adjacent, point
+
+
+def _walk_chain(
+    adjacent: dict[tuple[int, int], list[tuple[int, int]]], start: tuple[int, int]
+) -> tuple[list[tuple[int, int]], bool]:
+    """Consume the chain of edges from `start`; returns its keys and whether it closed."""
+    chain = [start]
+    here = start
+    while adjacent[here]:
+        nxt = adjacent[here].pop()
+        adjacent[nxt].remove(here)
+        if nxt == start:
+            return chain, True
+        chain.append(nxt)
+        here = nxt
+    return chain, False
+
+
+def _loops(
+    segments: list[tuple[np.ndarray, np.ndarray]],
+) -> tuple[list[np.ndarray], int]:
+    """Closed loops (2D) and the number of open chains in a bag of 2D segments."""
+    adjacent, point = _adjacency(segments)
     loops: list[np.ndarray] = []
     open_chains = 0
     while True:
         start = next((k for k, nbrs in adjacent.items() if nbrs), None)
         if start is None:
             return loops, open_chains
-        chain = [start]
-        here = start
-        closed = False
-        while adjacent[here]:
-            nxt = adjacent[here].pop()
-            adjacent[nxt].remove(here)
-            if nxt == start:
-                closed = True
-                break
-            chain.append(nxt)
-            here = nxt
+        chain, closed = _walk_chain(adjacent, start)
         if closed and len(chain) >= 3:
             loops.append(np.array([point[k] for k in chain]))
         else:
             open_chains += 1
 
 
-def cut_model(model: Model, plane: str, keep: str, at: float | None) -> Cut:
-    """Clip `model` at `plane` (position `at` mm on its axis; the middle by default), keeping `keep`."""
-    import manifold3d
-
-    axis = AXIS[plane]
+def _resolve_position(model: Model, axis: int, at: float | None) -> float:
+    """The plane position on `axis`: validated against the model and nudged off any vertex."""
     mesh = model.mesh
-    tris = np.asarray(mesh.triangles, dtype=float)
-    size = float(np.max(mesh.extents))
     lo, hi = float(mesh.bounds[0][axis]), float(mesh.bounds[1][axis])
     position = (lo + hi) / 2.0 if at is None else at
     if not lo < position < hi:
@@ -141,37 +152,52 @@ def cut_model(model: Model, plane: str, keep: str, at: float | None) -> Cut:
             f"3d section: the plane at {'XYZ'[axis]} = {position:g} mm misses the model "
             f"({lo:.2f} .. {hi:.2f} mm); pick --at inside that range"
         )
-    coords = tris[:, :, axis]
-    graze = GRAZE * max(size, 1.0)
+    coords = np.asarray(mesh.triangles, dtype=float)[:, :, axis]
+    graze = GRAZE * max(float(np.max(mesh.extents)), 1.0)
     if np.any(np.abs(coords - position) < graze):
-        position += 100 * graze  # never let the plane touch a vertex exactly
-    sign = -1.0 if keep == "neg" else 1.0  # s > 0 on the kept side
-    s = sign * (coords - position)
-    count = (s > 0).sum(axis=1)
-    kept = [tris[count == 3]]
-    kept_part = [model.face_part[count == 3]]
-    kept_cull = [model.cullable[count == 3]]
+        # never let the plane touch a vertex exactly; step towards the middle so it stays inside the model
+        step = 100 * graze
+        position += step if position + step < hi else -step
+    return position
+
+
+def _clip_triangle(
+    tri: np.ndarray, sv: np.ndarray
+) -> tuple[list[np.ndarray], list[np.ndarray]]:
+    """The kept polygon of a straddling triangle and the two plane crossings (if any)."""
+    poly: list[np.ndarray] = []
+    added: list[np.ndarray] = []
+    for i in range(3):
+        p, q, sp, sq = tri[i], tri[(i + 1) % 3], sv[i], sv[(i + 1) % 3]
+        if sp > 0:
+            poly.append(p)
+        if (sp > 0) != (sq > 0):
+            # The crossing is computed from the edge's endpoints in a fixed order, so the two
+            # triangles sharing the edge get bit-identical points and the outline links up.
+            if tuple(p) > tuple(q):
+                p, q, sp, sq = q, p, sq, sp
+            crossing = p + (sp / (sp - sq)) * (q - p)
+            poly.append(crossing)
+            added.append(crossing)
+    return poly, added
+
+
+def _clip_straddling(
+    model: Model, tris: np.ndarray, s: np.ndarray, count: np.ndarray, axis: int
+) -> tuple[
+    list[np.ndarray],
+    list[int],
+    list[bool],
+    dict[int, list[tuple[np.ndarray, np.ndarray]]],
+]:
+    """Clip triangles with 1 or 2 vertices kept: new triangles, their part/cull, outline segments."""
     segments: dict[int, list[tuple[np.ndarray, np.ndarray]]] = defaultdict(list)
     a2, b2 = _plane_coords(axis)
     extra: list[np.ndarray] = []
     extra_part: list[int] = []
     extra_cull: list[bool] = []
     for idx in np.flatnonzero((count == 1) | (count == 2)):
-        tri, sv = tris[idx], s[idx]
-        poly: list[np.ndarray] = []
-        added: list[np.ndarray] = []
-        for i in range(3):
-            p, q, sp, sq = tri[i], tri[(i + 1) % 3], sv[i], sv[(i + 1) % 3]
-            if sp > 0:
-                poly.append(p)
-            if (sp > 0) != (sq > 0):
-                # The crossing is computed from the edge's endpoints in a fixed order, so the two
-                # triangles sharing the edge get bit-identical points and the outline links up.
-                if tuple(p) > tuple(q):
-                    p, q, sp, sq = q, p, sq, sp
-                crossing = p + (sp / (sp - sq)) * (q - p)
-                poly.append(crossing)
-                added.append(crossing)
+        poly, added = _clip_triangle(tris[idx], s[idx])
         for k in range(1, len(poly) - 1):
             extra.append(np.array([poly[0], poly[k], poly[k + 1]]))
             extra_part.append(int(model.face_part[idx]))
@@ -180,10 +206,17 @@ def cut_model(model: Model, plane: str, keep: str, at: float | None) -> Cut:
             segments[int(model.face_solid[idx])].append(
                 (added[0][[a2, b2]], added[1][[a2, b2]])
             )
-    if extra:
-        kept.append(np.array(extra))
-        kept_part.append(np.array(extra_part, dtype=np.int64))
-        kept_cull.append(np.array(extra_cull, dtype=bool))
+    return extra, extra_part, extra_cull, segments
+
+
+def _cap_and_outline(
+    segments: dict[int, list[tuple[np.ndarray, np.ndarray]]],
+    axis: int,
+    position: float,
+) -> tuple[np.ndarray, list[np.ndarray], int]:
+    """The cap triangles, the 3D outline polylines and the open-chain count from section segments."""
+    import manifold3d
+
     sections = []
     outline: list[np.ndarray] = []
     open_total = 0
@@ -203,6 +236,28 @@ def cut_model(model: Model, plane: str, keep: str, at: float | None) -> Cut:
             flat_pts = np.vstack(polygons)
             index = manifold3d.triangulate(polygons)
             cap = np.insert(flat_pts, axis, position, axis=1)[index]
+    return cap, outline, open_total
+
+
+def cut_model(model: Model, plane: str, keep: str, at: float | None) -> Cut:
+    """Clip `model` at `plane` (position `at` mm on its axis; the middle by default), keeping `keep`."""
+    axis = AXIS[plane]
+    tris = np.asarray(model.mesh.triangles, dtype=float)
+    position = _resolve_position(model, axis, at)
+    sign = -1.0 if keep == "neg" else 1.0  # s > 0 on the kept side
+    s = sign * (tris[:, :, axis] - position)
+    count = (s > 0).sum(axis=1)
+    kept = [tris[count == 3]]
+    kept_part = [model.face_part[count == 3]]
+    kept_cull = [model.cullable[count == 3]]
+    extra, extra_part, extra_cull, segments = _clip_straddling(
+        model, tris, s, count, axis
+    )
+    if extra:
+        kept.append(np.array(extra))
+        kept_part.append(np.array(extra_part, dtype=np.int64))
+        kept_cull.append(np.array(extra_cull, dtype=bool))
+    cap, outline, open_total = _cap_and_outline(segments, axis, position)
     return Cut(
         np.vstack(kept),
         np.concatenate(kept_part),
@@ -233,6 +288,122 @@ def _hatch_mask(size: tuple[int, int], scale: float) -> Image.Image:
         draw.line([(x, height), (x + height, 0)], fill=255, width=line)
         x += step
     return mask
+
+
+def _projector(
+    cut: Cut,
+    right: np.ndarray,
+    up: np.ndarray,
+    size: tuple[int, int],
+    header: int,
+    view_h: int,
+    scale: float,
+) -> Any:
+    """A function mapping 3D points (..., 3) to fitted pixel coordinates (..., 2)."""
+    width = size[0]
+    everything = np.concatenate([cut.tris.reshape(-1, 3), cut.cap.reshape(-1, 3)])
+    uv = np.column_stack([everything @ right, everything @ up])
+    lo, hi = uv.min(axis=0), uv.max(axis=0)
+    margin = MARGIN_PX * scale
+    fit = float(
+        min(
+            (width - 2 * margin) / max(hi[0] - lo[0], 1e-6),
+            (view_h - 2 * margin) / max(hi[1] - lo[1], 1e-6),
+        )
+    )
+    centre_px = np.array([width / 2.0, header + view_h / 2.0])
+    centre_uv = (lo + hi) / 2.0
+
+    def project(points: np.ndarray) -> np.ndarray:
+        flat = points.reshape(-1, 3)
+        return np.column_stack(
+            [
+                centre_px[0] + (flat @ right - centre_uv[0]) * fit,
+                centre_px[1] - (flat @ up - centre_uv[1]) * fit,
+            ]
+        ).reshape(points.shape[:-1] + (2,))
+
+    return project
+
+
+def _shaded_triangles(
+    model: Model, cut: Cut, basis: tuple[np.ndarray, np.ndarray, np.ndarray]
+) -> tuple[np.ndarray, np.ndarray]:
+    """Visible kept triangles, far first, with their shaded RGB colours (0..255)."""
+    eye, right, up = basis
+    tris = cut.tris
+    normals = np.cross(tris[:, 1] - tris[:, 0], tris[:, 2] - tris[:, 0])
+    norm = np.linalg.norm(normals, axis=1, keepdims=True)
+    normals = np.divide(normals, norm, out=np.zeros_like(normals), where=norm > 0)
+    keep_face = ~cut.cullable | (normals @ eye > 1e-9)
+    if not keep_face.any():
+        keep_face = np.ones(len(tris), dtype=bool)
+    tris, normals, part_of = tris[keep_face], normals[keep_face], cut.part[keep_face]
+    normals[
+        normals @ eye < 0
+    ] *= -1  # shade a back face as seen, as the dimension views do
+    light = _unit(eye + 0.45 * right + 0.30 * up)
+    shade = AMBIENT + DIFFUSE * np.clip(normals @ light, 0.0, 1.0)
+    order = np.argsort(
+        (tris @ eye).mean(axis=1)
+    )  # far first: the eye points at the viewer, so a larger dot is nearer
+    colors = np.clip(
+        model.colors[part_of[order]] * shade[order, None] * 255.0, 0, 255
+    ).astype(int)
+    return tris[order], colors
+
+
+def _draw_surfaces(
+    model: Model,
+    cut: Cut,
+    project: Any,
+    basis: tuple[np.ndarray, np.ndarray, np.ndarray],
+    size: tuple[int, int],
+) -> tuple[Image.Image, Image.Image, Image.Image]:
+    """Supersampled shaded layer, body mask and cap mask, resized to `size`."""
+    width, height = size
+    ss = SUPERSAMPLE
+    layer = Image.new("RGB", (width * ss, height * ss), (255, 255, 255))
+    body = Image.new("L", (width * ss, height * ss), 0)
+    capmask = Image.new("L", (width * ss, height * ss), 0)
+    ldraw, bdraw, cdraw = (ImageDraw.Draw(im) for im in (layer, body, capmask))
+    ordered, colors = _shaded_triangles(model, cut, basis)
+    for tri, col in zip(project(ordered) * ss, colors, strict=True):
+        poly = [tuple(p) for p in tri]
+        rgb = (int(col[0]), int(col[1]), int(col[2]))
+        ldraw.polygon(poly, fill=rgb, outline=rgb)
+        bdraw.polygon(poly, fill=255, outline=255)
+    for tri in project(cut.cap) * ss:
+        poly = [tuple(p) for p in tri]
+        cdraw.polygon(poly, fill=255, outline=255)
+        bdraw.polygon(poly, fill=255, outline=255)
+    resample = Image.Resampling.LANCZOS
+    return (
+        layer.resize(size, resample),
+        body.resize(size, resample),
+        capmask.resize(size, resample),
+    )
+
+
+def _composite(
+    canvas: Image.Image,
+    layer: Image.Image,
+    body: Image.Image,
+    capmask: Image.Image,
+    scale: float,
+) -> None:
+    """Paste the shaded layer, body edge, cap fill and cap hatching onto `canvas`."""
+    size = canvas.size
+    edge = ImageChops.subtract(body.filter(ImageFilter.MaxFilter(3)), body)
+    fill = tuple(round(c * 255) for c in from_hex(CUT_FILL))
+    canvas.paste(layer, (0, 0), body)
+    canvas.paste(Image.new("RGB", size, (50, 60, 80)), (0, 0), edge)
+    canvas.paste(Image.new("RGB", size, fill), (0, 0), capmask)
+    canvas.paste(
+        Image.new("RGB", size, CUT_HATCH),
+        (0, 0),
+        ImageChops.multiply(_hatch_mask(size, scale), capmask),
+    )
 
 
 def render(
@@ -275,73 +446,9 @@ def render(
         fill=(20, 20, 20),
     )
     eye, right, up = _basis(plane, keep)
-    everything = np.concatenate([cut.tris.reshape(-1, 3), cut.cap.reshape(-1, 3)])
-    uv = np.column_stack([everything @ right, everything @ up])
-    lo, hi = uv.min(axis=0), uv.max(axis=0)
-    margin = MARGIN_PX * scale
-    fit = float(
-        min(
-            (width - 2 * margin) / max(hi[0] - lo[0], 1e-6),
-            (view_h - 2 * margin) / max(hi[1] - lo[1], 1e-6),
-        )
-    )
-    centre_px = np.array([width / 2.0, header + view_h / 2.0])
-    centre_uv = (lo + hi) / 2.0
-
-    def project(points: np.ndarray) -> np.ndarray:
-        flat = points.reshape(-1, 3)
-        return np.column_stack(
-            [
-                centre_px[0] + (flat @ right - centre_uv[0]) * fit,
-                centre_px[1] - (flat @ up - centre_uv[1]) * fit,
-            ]
-        ).reshape(points.shape[:-1] + (2,))
-
-    ss = SUPERSAMPLE
-    layer = Image.new("RGB", (width * ss, height * ss), (255, 255, 255))
-    body = Image.new("L", (width * ss, height * ss), 0)
-    capmask = Image.new("L", (width * ss, height * ss), 0)
-    ldraw, bdraw, cdraw = (ImageDraw.Draw(im) for im in (layer, body, capmask))
-    tris = cut.tris
-    normals = np.cross(tris[:, 1] - tris[:, 0], tris[:, 2] - tris[:, 0])
-    norm = np.linalg.norm(normals, axis=1, keepdims=True)
-    normals = np.divide(normals, norm, out=np.zeros_like(normals), where=norm > 0)
-    keep_face = ~cut.cullable | (normals @ eye > 1e-9)
-    if not keep_face.any():
-        keep_face = np.ones(len(tris), dtype=bool)
-    tris, normals, part_of = tris[keep_face], normals[keep_face], cut.part[keep_face]
-    normals[
-        normals @ eye < 0
-    ] *= -1  # shade a back face as seen, as the dimension views do
-    light = _unit(eye + 0.45 * right + 0.30 * up)
-    shade = AMBIENT + DIFFUSE * np.clip(normals @ light, 0.0, 1.0)
-    order = np.argsort(-(tris @ eye).mean(axis=1))  # far first
-    pix = project(tris[order]) * ss
-    colors = np.clip(
-        model.colors[part_of[order]] * shade[order, None] * 255.0, 0, 255
-    ).astype(int)
-    for tri, col in zip(pix, colors, strict=True):
-        poly = [tuple(p) for p in tri]
-        rgb = (int(col[0]), int(col[1]), int(col[2]))
-        ldraw.polygon(poly, fill=rgb, outline=rgb)
-        bdraw.polygon(poly, fill=255, outline=255)
-    for tri in project(cut.cap) * ss:
-        poly = [tuple(p) for p in tri]
-        cdraw.polygon(poly, fill=255, outline=255)
-        bdraw.polygon(poly, fill=255, outline=255)
-    layer = layer.resize(size, Image.Resampling.LANCZOS)
-    body = body.resize(size, Image.Resampling.LANCZOS)
-    capmask = capmask.resize(size, Image.Resampling.LANCZOS)
-    edge = ImageChops.subtract(body.filter(ImageFilter.MaxFilter(3)), body)
-    fill = tuple(round(c * 255) for c in from_hex(CUT_FILL))
-    canvas.paste(layer, (0, 0), body)
-    canvas.paste(Image.new("RGB", size, (50, 60, 80)), (0, 0), edge)
-    canvas.paste(Image.new("RGB", size, fill), (0, 0), capmask)
-    canvas.paste(
-        Image.new("RGB", size, CUT_HATCH),
-        (0, 0),
-        ImageChops.multiply(_hatch_mask(size, scale), capmask),
-    )
+    project = _projector(cut, right, up, size, header, view_h, scale)
+    layer, body, capmask = _draw_surfaces(model, cut, project, (eye, right, up), size)
+    _composite(canvas, layer, body, capmask, scale)
     draw = ImageDraw.Draw(canvas)
     line = max(int(round(2 * scale)), 1)
     for loop in cut.outline:
@@ -351,6 +458,7 @@ def render(
         if legend_rows
         else None
     )
+    os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
     canvas.save(out, format="PNG")
     return {
         "image": os.path.abspath(out),
