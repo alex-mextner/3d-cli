@@ -10,6 +10,7 @@ Responsibilities (and nothing more — real work lives in the command modules):
 `bin/3d` is ~3 lines: resolve repo root through the symlink, put lib/ on sys.path,
 call `main(sys.argv[1:])`.
 """
+
 from __future__ import annotations
 
 import contextlib
@@ -126,18 +127,29 @@ def _test_command_migration_error(argv: list[str]) -> UsageError:
     )
 
 
+def _report_unknown_command(reg: Registry, cmd: str) -> int:
+    bold, _cyan, red, z = _color()
+    sys.stderr.write(f"{red}3d: unknown command '{cmd}'{z}\n")
+    sys.stderr.write("Run '3d help' for the list of commands. Closest matches:\n")
+    for s in _suggest(reg, cmd):
+        sys.stderr.write(f"  {s}\n")
+    return 2
+
+
 def main(argv: list[str]) -> int:
     # 1. startup (must run before any subprocess so OpenSCAD/children inherit the path and
     #    the native thread caps: numpy/scipy/BLAS/numba otherwise start a thread per core).
     export_openscadpath()
     cap_threads()
-    maybe_bootstrap()
 
     # 2. registry.
     reg = discover()
 
     cmd = argv[0] if argv else "help"
     rest = argv[1:]
+    resolved = reg.resolve(cmd)
+    if resolved is None or resolved.bootstrap_openscad:
+        maybe_bootstrap()
 
     if cmd in ("help", "-h", "--help"):
         print(usage(reg))
@@ -150,14 +162,8 @@ def main(argv: list[str]) -> int:
         sys.stderr.write(err.render() + "\n")
         return err.exit_code
 
-    resolved = reg.resolve(cmd)
     if resolved is None:
-        bold, _cyan, red, z = _color()
-        sys.stderr.write(f"{red}3d: unknown command '{cmd}'{z}\n")
-        sys.stderr.write("Run '3d help' for the list of commands. Closest matches:\n")
-        for s in _suggest(reg, cmd):
-            sys.stderr.write(f"  {s}\n")
-        return 2
+        return _report_unknown_command(reg, cmd)
 
     # 3. route + catch structured errors.
     try:

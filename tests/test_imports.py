@@ -41,9 +41,9 @@ def test_command_modules_import_stdlib_only() -> None:
         "            raise ImportError('blocked heavy dep at import time: ' + name)\n"
         "        return None\n"
         "sys.meta_path.insert(0, _Block())\n"
-        "import importlib\n"
+        "from cli.registry import import_command_module\n"
         "for n in " + repr(names) + ":\n"
-        "    importlib.import_module(n)\n"
+        "    import_command_module(n)\n"
         "print('OK')\n"
     )
     env = dict(os.environ)

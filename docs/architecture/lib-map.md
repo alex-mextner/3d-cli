@@ -19,6 +19,7 @@ compatibility wrappers.
 - `lib/cli/vision_env.py` launches `packages/threed-vision` stages (`python -m threed_vision <stage>`) from the thin
   `3d detect|segment|recognise|...` commands; the algorithms live in the package, not in `lib/`.
 - `lib/cli/paths.py` contains shared path helpers.
+- `lib/cli/venv_paths.py` resolves the platform-specific venv executable paths (`.venv/bin` vs `.venv/Scripts`) shared by `env`, `pyrun`, `worktree` and the solid worker.
 - `lib/cli/heavy.py` is the machine-wide heavy lock (`flock` + `systemd-run` cap), re-entrant through `THREED_HEAVY_HELD` with a bounded wait; backs `3d heavy` and every heavy run inside `3d prep` / `slicing.orca_cli`.
 - `lib/cli/remote.py` builds the rsync/ssh argv and loads `~/.config/3d-cli/remote.yaml` for `3d remote`.
 - `lib/cli/resources.py` sizes every worker pool and caps native thread pools
@@ -309,6 +310,10 @@ Every current root Python module is listed here so future additions are intentio
 - `project.py` — project model and discovery.
 - `projects_registry.py` — compatibility wrapper re-exporting `registries.projects`.
 - `reporting.py` — deterministic gate and metric artifact report composition.
+- `solid_conversion.py` — local faceted STL-to-B-rep construction, geometry checks and STEP readback.
+- `solid_job.py` — bounded geometry worker invocation and acknowledged no-clobber STEP publication.
+- `solid_artifacts.py` — staging cleanup with warnings that cannot reverse a committed result.
+- `qymcad_tools.py` — explicit external QymCAD discovery and startup diagnostics.
 - `workspaces.py` — web dashboard workspace metadata registry.
 - `dimension_args.py` — the stdlib-only option grammar of `3d dimension` (`--bed`, `--dim`, `--width`, `--part`, `-D`), shared by the command and the renderer.
 - `dimension_check.py` — the legibility gate of dimensioned renders (`3d dimension --check`): sidecar + pixel checks of every label.

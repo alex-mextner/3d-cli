@@ -1,4 +1,5 @@
 """3d worktree - create agent git worktrees with a ready dev .venv."""
+
 from __future__ import annotations
 
 import json
@@ -9,6 +10,7 @@ from typing import Any
 
 from cli.env import install_cmd, repo_root
 from cli.registry import Command
+from cli.venv_paths import executable
 from errors import InvalidArgument, MissingDependency, UsageError
 
 USAGE = """3d worktree <subcommand> [options]
@@ -19,7 +21,7 @@ Subcommands:
   create <branch> [--path DIR] [--base REF] [--json] [--no-sync]
       create a git worktree and run `uv sync --extra dev` in it
   doctor [DIR] [--json]
-      verify DIR (default cwd) has .venv/bin/{ruff,pytest,mypy}
+      verify DIR has platform-native venv tools (.venv/Scripts on Windows)
   list [--json]
       list git worktrees known to this repository
 
@@ -63,7 +65,12 @@ def _require_uv() -> str:
 
 
 def _branch_exists(branch: str) -> bool:
-    return _run_git(["rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"]).returncode == 0
+    return (
+        _run_git(
+            ["rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"]
+        ).returncode
+        == 0
+    )
 
 
 def _safe_name(branch: str) -> str:
@@ -78,43 +85,34 @@ def _parse_common_json(argv: list[str]) -> tuple[list[str], bool]:
     return [arg for arg in argv if arg != "--json"], "--json" in argv
 
 
-def _parse_create(argv: list[str]) -> tuple[str, Path, str, bool, bool]:
-    if not argv:
-        raise UsageError(
-            "create needs a branch name",
-            command="worktree",
-            remediation=["Example:  3d worktree create roadmap/e2e-expansion --base main"],
-        )
-    branch = argv[0]
-    if branch.startswith("-"):
-        # A flag in the branch position would reach `git worktree add` as a ref.
-        raise UsageError(
-            f"create needs a branch name before options, got {branch!r}",
-            command="worktree",
-            remediation=["Example:  3d worktree create roadmap/e2e-expansion --base main"],
-        )
-    path: Path | None = None
-    base = "main"
-    sync = True
-    as_json = False
-    i = 1
+_CREATE_FLAGS = {"--json": ("as_json", True), "--no-sync": ("sync", False)}
+_CREATE_VALUES = {"--base": ("base", "a git ref"), "--path": ("path", "a directory")}
+
+
+def _option_value(argv: list[str], i: int, what: str) -> str:
+    if i + 1 >= len(argv) or argv[i + 1].startswith("--"):
+        raise UsageError(f"{argv[i]} needs {what}", command="worktree")
+    return argv[i + 1]
+
+
+def _parse_create_options(argv: list[str]) -> dict[str, Any]:
+    opts: dict[str, Any] = {
+        "path": None,
+        "base": "main",
+        "sync": True,
+        "as_json": False,
+    }
+    i = 0
     while i < len(argv):
         arg = argv[i]
-        if arg == "--json":
-            as_json = True
+        if arg in _CREATE_FLAGS:
+            key, value = _CREATE_FLAGS[arg]
+            opts[key] = value
             i += 1
-        elif arg == "--no-sync":
-            sync = False
-            i += 1
-        elif arg == "--base":
-            if i + 1 >= len(argv) or argv[i + 1].startswith("--"):
-                raise UsageError("--base needs a git ref", command="worktree")
-            base = argv[i + 1]
-            i += 2
-        elif arg == "--path":
-            if i + 1 >= len(argv) or argv[i + 1].startswith("--"):
-                raise UsageError("--path needs a directory", command="worktree")
-            path = Path(argv[i + 1]).expanduser()
+        elif arg in _CREATE_VALUES:
+            key, what = _CREATE_VALUES[arg]
+            raw = _option_value(argv, i, what)
+            opts[key] = Path(raw).expanduser() if key == "path" else raw
             i += 2
         else:
             raise UsageError(
@@ -122,12 +120,35 @@ def _parse_create(argv: list[str]) -> tuple[str, Path, str, bool, bool]:
                 command="worktree",
                 remediation=["Run `3d worktree --help` for accepted options."],
             )
-    resolved_path = (path or _default_path(branch)).resolve()
-    return branch, resolved_path, base, sync, as_json
+    return opts
+
+
+def _parse_create(argv: list[str]) -> tuple[str, Path, str, bool, bool]:
+    if not argv:
+        raise UsageError(
+            "create needs a branch name",
+            command="worktree",
+            remediation=[
+                "Example:  3d worktree create roadmap/e2e-expansion --base main"
+            ],
+        )
+    branch = argv[0]
+    if branch.startswith("-"):
+        # A flag in the branch position would reach `git worktree add` as a ref.
+        raise UsageError(
+            f"create needs a branch name before options, got {branch!r}",
+            command="worktree",
+            remediation=[
+                "Example:  3d worktree create roadmap/e2e-expansion --base main"
+            ],
+        )
+    opts = _parse_create_options(argv[1:])
+    resolved_path = (opts["path"] or _default_path(branch)).resolve()
+    return branch, resolved_path, opts["base"], opts["sync"], opts["as_json"]
 
 
 def _dev_tool_status(path: Path) -> dict[str, bool]:
-    return {tool: (path / ".venv" / "bin" / tool).exists() for tool in DEV_TOOLS}
+    return {tool: executable(path, tool).is_file() for tool in DEV_TOOLS}
 
 
 def _print_json(payload: dict[str, Any]) -> None:
@@ -154,7 +175,7 @@ def _raise_missing_dev_tools(path: Path, missing: list[str]) -> None:
         "agent worktree dev environment is incomplete",
         command="worktree",
         remediation=[
-            f"Missing tools in {path / '.venv' / 'bin'}: {', '.join(missing)}",
+            f"Missing tools in {executable(path, 'python').parent}: {', '.join(missing)}",
             f"Inspect the worktree:  cd {path}",
             "Retry bootstrap:  uv sync --extra dev",
             "Then verify:  3d worktree doctor .",
@@ -162,13 +183,7 @@ def _raise_missing_dev_tools(path: Path, missing: list[str]) -> None:
     )
 
 
-def _create(argv: list[str]) -> int:
-    if argv and argv[0] in ("-h", "--help"):
-        _print_usage()
-        return 0
-    branch, path, base, sync, as_json = _parse_create(argv)
-    if sync:
-        _require_uv()
+def _add_worktree(branch: str, path: Path, base: str) -> None:
     if path.exists():
         raise InvalidArgument(
             "--path",
@@ -178,14 +193,11 @@ def _create(argv: list[str]) -> int:
             extra="Choose another --path, or remove the existing worktree with `git worktree remove`.",
         )
     path.parent.mkdir(parents=True, exist_ok=True)
-    args = ["worktree", "add", str(path), branch] if _branch_exists(branch) else [
-        "worktree",
-        "add",
-        "-b",
-        branch,
-        str(path),
-        base,
-    ]
+    args = (
+        ["worktree", "add", str(path), branch]
+        if _branch_exists(branch)
+        else ["worktree", "add", "-b", branch, str(path), base]
+    )
     result = _run_git(args)
     if result.returncode != 0:
         raise UsageError(
@@ -196,31 +208,48 @@ def _create(argv: list[str]) -> int:
                 "Check the branch/base ref and path, then retry.",
             ],
         )
+
+
+def _print_created(
+    branch: str, path: Path, base: str, sync: bool, missing: list[str]
+) -> None:
+    print(f"Created worktree: {path}")
+    print(f"  branch: {branch}")
+    print(f"  base: {base}")
+    print(f"  dev sync: {'yes' if sync else 'no'}")
+    if missing:
+        print(f"  missing dev tools: {', '.join(missing)}")
+        print("  run: uv sync --extra dev")
+    else:
+        print("  dev tools: ruff, pytest, mypy")
+
+
+def _create(argv: list[str]) -> int:
+    if argv and argv[0] in ("-h", "--help"):
+        _print_usage()
+        return 0
+    branch, path, base, sync, as_json = _parse_create(argv)
+    if sync:
+        _require_uv()
+    _add_worktree(branch, path, base)
     if sync:
         _sync_dev(path)
     tools = _dev_tool_status(path)
     missing = [tool for tool, ok in tools.items() if not ok]
     if sync and missing:
         _raise_missing_dev_tools(path, missing)
-    payload = {
-        "branch": branch,
-        "path": str(path),
-        "base": base,
-        "synced": sync,
-        "dev_tools": tools,
-    }
     if as_json:
-        _print_json(payload)
+        _print_json(
+            {
+                "branch": branch,
+                "path": str(path),
+                "base": base,
+                "synced": sync,
+                "dev_tools": tools,
+            }
+        )
     else:
-        print(f"Created worktree: {path}")
-        print(f"  branch: {branch}")
-        print(f"  base: {base}")
-        print(f"  dev sync: {'yes' if sync else 'no'}")
-        if missing:
-            print(f"  missing dev tools: {', '.join(missing)}")
-            print("  run: uv sync --extra dev")
-        else:
-            print("  dev tools: ruff, pytest, mypy")
+        _print_created(branch, path, base, sync, missing)
     return 0
 
 
@@ -252,7 +281,9 @@ def _list(argv: list[str]) -> int:
         raise UsageError(
             "git worktree list failed",
             command="worktree",
-            remediation=[result.stderr or "Run `git worktree list --porcelain` for details."],
+            remediation=[
+                result.stderr or "Run `git worktree list --porcelain` for details."
+            ],
         )
     items: list[dict[str, str]] = []
     current: dict[str, str] = {}

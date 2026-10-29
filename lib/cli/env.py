@@ -22,6 +22,7 @@ import subprocess
 import sys
 
 from cli import paths
+from cli.venv_paths import executable
 from errors import MissingDependency
 
 # ---------------------------------------------------------------------------
@@ -331,8 +332,8 @@ def pypkg_for(mod: str) -> str:
 
 
 def resolve_python() -> str | None:
-    venv = os.path.join(repo_root(), ".venv", "bin", "python")
-    if os.access(venv, os.X_OK):
+    venv = os.fspath(executable(repo_root(), "python"))
+    if os.path.isfile(venv) and os.access(venv, os.X_OK):
         return venv
     w = shutil.which("python3")
     return w if w else None
