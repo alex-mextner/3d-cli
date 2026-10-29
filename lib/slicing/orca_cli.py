@@ -551,6 +551,9 @@ def _run(
         text=True,
         errors="replace",
         start_new_session=True,
+        # an AppImage without FUSE (a headless box, a container) only runs when it unpacks itself; any other
+        # binary ignores the variable
+        env={"APPIMAGE_EXTRACT_AND_RUN": "1", **os.environ},
     )
     try:
         out, _ = proc.communicate(timeout=timeout_s if python_deadline else None)
@@ -562,21 +565,7 @@ def _run(
     return proc.returncode, out or "", False
 
 
-def slice_project(
-    project: str | Path,
-    workdir: str | Path,
-    *,
-    orca: OrcaCli | None = None,
-    heavy: bool = True,
-    timeout_s: int = 3600,
-    set_cfg: Mapping[str, str | list[str]] | None = None,
-    drop_layer_profile: bool = False,
-) -> SliceOutcome:
-    """Slice `project` headlessly in `workdir` (created; stale outputs removed).
-
-    Runs `ORCA --debug 2 --datadir WORK/dd --arrange 0 --slice 0 --outputdir WORK --export-3mf sliced.3mf
-    in.3mf` on a `slicing_copy`. `heavy=True` puts the call under the machine-wide heavy lock/cap
-    (`cli.heavy.heavy_prefix`, `[]` when the caller already holds it). Writes WORK/slice.log."""
+def _orca_or_raise(orca: OrcaCli | None) -> OrcaCli:
     cli = orca or find_orca()
     if cli is None:
         raise MissingDependency(
@@ -585,17 +574,24 @@ def slice_project(
             degrades="headless slicing",
             command="prep",
         )
-    work = Path(workdir).resolve()
-    work.mkdir(parents=True, exist_ok=True)
-    for stale in (
-        *work.glob("plate_*.gcode"),
-        work / "result.json",
-        work / "sliced.3mf",
-    ):
-        stale.unlink(missing_ok=True)
-    copy = work / "in.3mf"
-    slicing_copy(project, copy, set_cfg=set_cfg, drop_layer_profile=drop_layer_profile)
+    return cli
 
+
+def _prepare_workdir(work: Path) -> Path:
+    """`work` created, with the outputs of an earlier run removed (a failed slice must not look like the last one)."""
+    work = work.resolve()
+    work.mkdir(parents=True, exist_ok=True)
+    for stale in (*work.glob("*.gcode"), work / "result.json", work / "sliced.3mf"):
+        stale.unlink(missing_ok=True)
+    return work
+
+
+def _run_slicer(
+    cli: OrcaCli, args: list[str], work: Path, *, heavy: bool, timeout_s: int
+) -> SliceOutcome:
+    """Run `CLI --debug 2 --datadir WORK/dd ARGS` in `work` and collect the outcome. `heavy=True` puts the call
+    under the machine-wide heavy lock/cap (`cli.heavy.heavy_prefix`, `[]` when the caller already holds it).
+    Writes WORK/slice.log."""
     prefix: list[str] = []
     lock_busy_code: int | None = None
     if heavy:
@@ -613,15 +609,7 @@ def slice_project(
         "2",
         "--datadir",
         str(work / "dd"),
-        "--arrange",
-        "0",
-        "--slice",
-        "0",
-        "--outputdir",
-        str(work),
-        "--export-3mf",
-        "sliced.3mf",
-        str(copy),
+        *args,
     ]
     started = time.monotonic()
     returncode, log, timed_out = _run(
@@ -632,7 +620,7 @@ def slice_project(
     log_path.write_text(log, encoding="utf-8")
 
     result = _read_result(work)
-    gcodes = sorted(work.glob("plate_*.gcode"))
+    gcodes = sorted(work.glob("*.gcode"))
     gcode = gcodes[0] if gcodes and gcodes[0].stat().st_size > 0 else None
     failure = classify_failure(
         returncode,
@@ -659,6 +647,78 @@ def slice_project(
         command=command,
         result=result or {},
     )
+
+
+def slice_project(
+    project: str | Path,
+    workdir: str | Path,
+    *,
+    orca: OrcaCli | None = None,
+    heavy: bool = True,
+    timeout_s: int = 3600,
+    set_cfg: Mapping[str, str | list[str]] | None = None,
+    drop_layer_profile: bool = False,
+) -> SliceOutcome:
+    """Slice `project` headlessly in `workdir` (created; stale outputs removed).
+
+    Runs `ORCA --debug 2 --datadir WORK/dd --arrange 0 --slice 0 --outputdir WORK --export-3mf sliced.3mf
+    in.3mf` on a `slicing_copy` (see `_run_slicer` for `heavy`). Writes WORK/slice.log."""
+    cli = _orca_or_raise(orca)
+    work = _prepare_workdir(Path(workdir))
+    copy = work / "in.3mf"
+    slicing_copy(project, copy, set_cfg=set_cfg, drop_layer_profile=drop_layer_profile)
+    args = [
+        "--arrange",
+        "0",
+        "--slice",
+        "0",
+        "--outputdir",
+        str(work),
+        "--export-3mf",
+        "sliced.3mf",
+        str(copy),
+    ]
+    return _run_slicer(cli, args, work, heavy=heavy, timeout_s=timeout_s)
+
+
+def slice_stl_with_profiles(
+    stl: str | Path,
+    workdir: str | Path,
+    *,
+    machine: str | Path,
+    process: str | Path,
+    filament: str | Path,
+    orca: OrcaCli | None = None,
+    heavy: bool = True,
+    timeout_s: int = 3600,
+) -> SliceOutcome:
+    """Slice a model that already sits on the bed (no arrange, no auto-orient) with three flat preset files
+    (`--load-settings MACHINE;PROCESS --load-filaments FILAMENT`, see `prep.flat_profiles`) in `workdir`.
+
+    The STL is copied into `workdir` first: the CLI writes next to its input name. The G-code is the one
+    `*.gcode` the run leaves in `workdir`. Writes WORK/slice.log (see `_run_slicer` for `heavy`)."""
+    cli = _orca_or_raise(orca)
+    work = _prepare_workdir(Path(workdir))
+    model = work / Path(stl).name
+    shutil.copyfile(stl, model)
+    args = [
+        "--load-settings",
+        f"{Path(machine).resolve()};{Path(process).resolve()}",
+        "--load-filaments",
+        str(Path(filament).resolve()),
+        "--arrange",
+        "0",
+        "--orient",
+        "0",
+        "--slice",
+        "0",
+        "--outputdir",
+        str(work),
+        "--export-3mf",
+        "sliced.3mf",
+        str(model),
+    ]
+    return _run_slicer(cli, args, work, heavy=heavy, timeout_s=timeout_s)
 
 
 # --------------------------------------------------------------------------- vendor system presets

@@ -84,8 +84,13 @@ DEPS: dict[str, tuple[str, ...]] = {
 MESH_STEPS: tuple[str, ...] = ("repair", "orient", "adapt")
 #: a FAIL here stops the flow: later steps need a sound mesh (a bad orientation FAIL is only a finding: adapt fixes it)
 BLOCKING = frozenset({"repair", "adapt"})
-PRINTER_BED_MM: dict[str, tuple[float, float, float]] = {"u1": (270.0, 270.0, 270.0)}
+PRINTER_BED_MM: dict[str, tuple[float, float, float]] = {
+    "u1": (270.0, 270.0, 270.0),
+    "k1se": (220.0, 220.0, 250.0),
+}
 DEFAULT_PROCESS_PRESET = "0.20mm Standard @Snapmaker U1 (0.4 nozzle)"
+#: printers sliced from the STL with three flat presets (`prep.flat_profiles`); the others go through the 3MF project
+FLAT_PROFILE_PRINTERS = frozenset({"k1se"})
 
 
 @dataclass
@@ -108,7 +113,8 @@ class PrepConfig:
     loads: list[dict[str, Any]] = field(default_factory=list)
     stability: dict[str, Any] = field(default_factory=dict)
     colors: Path | None = None
-    process_preset: str = DEFAULT_PROCESS_PRESET
+    #: None: the printer's own default (U1: `DEFAULT_PROCESS_PRESET`, K1 SE: the fleet process preset)
+    process_preset: str | None = None
     filament_preset: str | None = None
     walls: int = 4
     infill_pct: int = 15
@@ -116,6 +122,12 @@ class PrepConfig:
     hmax: float = 0.32
     mix_cap: float = 0.12
     brim_mm: float = 0.0
+    #: `none` | `auto` (K1 SE only: easy tear-off supports)
+    supports: str = "none"
+    #: `--set` / `--fset` / `--max-volumetric` and the overlay file: slicer settings over the preset (`flat_profiles`)
+    set_process: dict[str, str] = field(default_factory=dict)
+    set_filament: dict[str, str] = field(default_factory=dict)
+    overlay: Path | None = None
     gate: dict[str, Any] = field(default_factory=dict)
     only: frozenset[str] = frozenset()
     skip: frozenset[str] = frozenset()
@@ -124,13 +136,40 @@ class PrepConfig:
     slice: bool = True
 
     def validate(self) -> None:
-        for path in (self.model, self.items, self.colors):
+        for path in (self.model, self.items, self.colors, self.overlay):
             if path is not None and not path.is_file():
                 raise InputNotFound(str(path), command="prep")
         if self.printer not in PRINTER_BED_MM:
             raise InvalidArgument(
                 "--printer", self.printer, sorted(PRINTER_BED_MM), command="prep"
             )
+        if self.supports not in ("none", "auto"):
+            raise InvalidArgument(
+                "--supports", self.supports, ["none", "auto"], command="prep"
+            )
+        if self.flat_profile:
+            if self.colors is not None:
+                raise InvalidArgument(
+                    "--colors",
+                    str(self.colors),
+                    [f"no colour spec: the {self.printer} prints one filament"],
+                    command="prep",
+                )
+        else:
+            if self.supports != "none":
+                raise InvalidArgument(
+                    "--supports",
+                    self.supports,
+                    ["none (the U1 flow adapts the model to need no supports)"],
+                    command="prep",
+                )
+            if self.set_filament or self.overlay:
+                raise InvalidArgument(
+                    "--fset/--max-volumetric/--overlay",
+                    self.printer,
+                    [f"--printer {sorted(FLAT_PROFILE_PRINTERS)[0]}"],
+                    command="prep",
+                )
         if self.orient not in ("keep", "auto"):
             raise InvalidArgument(
                 "--orient", self.orient, ["keep", "auto"], command="prep"
@@ -150,6 +189,18 @@ class PrepConfig:
             raise InvalidArgument(
                 "--pitch", str(self.pitch), ["0.05 .. 1.0 mm"], command="prep"
             )
+
+    @property
+    def flat_profile(self) -> bool:
+        """True when the printer is sliced from an STL with flat presets instead of a 3MF project."""
+        return self.printer in FLAT_PROFILE_PRINTERS
+
+    @property
+    def process_name(self) -> str | None:
+        """The process preset the user asked for, else the U1 default; None = the flat-profile printer's own."""
+        if self.process_preset is not None:
+            return self.process_preset
+        return None if self.flat_profile else DEFAULT_PROCESS_PRESET
 
     @property
     def name(self) -> str:
@@ -375,16 +426,23 @@ class Pipeline:
             "layers": {"hmin": c.hmin, "hmax": c.hmax, "mix_cap": c.mix_cap},
             "project": {
                 "printer": c.printer,
-                "preset": c.process_preset,
+                "preset": c.process_name,
                 "filament": c.filament_preset,
                 "walls": c.walls,
                 "infill": c.infill_pct,
                 "brim": c.brim_mm,
                 "name": c.name,
+                "supports": c.supports,
+                "set": c.set_process,
+                "fset": c.set_filament,
+                "overlay": frame.file_digest(c.overlay)
+                if c.overlay and c.overlay.is_file()
+                else None,
             },
             "slice": {"on": c.slice},
             "gates": {
                 "gate": c.gate,
+                "printer": c.printer,
                 "walls": c.walls,
                 "infill": c.infill_pct,
                 "hmin": c.hmin,

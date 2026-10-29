@@ -15,7 +15,8 @@ from pathlib import Path
 from typing import Any
 
 from errors import InputNotFound, InvalidArgument, UsageError
-from prep.pipeline import DEFAULT_PROCESS_PRESET, DEPS, STEPS, Pipeline, PrepConfig
+from prep.flat_profiles import parse_assignments, scalar
+from prep.pipeline import DEPS, STEPS, Pipeline, PrepConfig
 
 _SPEC_KEYS = {
     "printer",
@@ -41,6 +42,10 @@ _PROCESS_KEYS = {
     "layer_max",
     "brim",
     "mix_cap",
+    "supports",
+    "set",
+    "fset",
+    "overlay",
 }
 
 
@@ -64,6 +69,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--layer-min", type=float, default=None)
     p.add_argument("--layer-max", type=float, default=None)
     p.add_argument("--brim", type=float, default=None)
+    p.add_argument("--supports", default=None)
+    p.add_argument("--set", action="append", default=[], dest="set_process")
+    p.add_argument("--fset", action="append", default=[])
+    p.add_argument("--max-volumetric", type=float, default=None)
+    p.add_argument("--overlay", default=None)
     p.add_argument("--only", default="")
     p.add_argument("--skip", default="")
     p.add_argument("--from", dest="from_step", default=None)
@@ -104,6 +114,8 @@ def load_spec(path: Path) -> dict[str, Any]:
     for key in ("fit", "colors"):
         if data.get(key):
             data[key] = str((base / str(data[key])).resolve())
+    if process.get("overlay"):
+        process["overlay"] = str((base / str(process["overlay"])).resolve())
     return data
 
 
@@ -124,6 +136,25 @@ def _adapt_spec(raw: Any) -> tuple[bool, list[dict[str, Any]]]:
     raise InvalidArgument(
         "--spec adapt", str(raw), ["true | false | {enabled, zones}"], command="prep"
     )
+
+
+def _spec_assignments(raw: Any, where: str) -> dict[str, str]:
+    """`set:` / `fset:` of a spec file: a mapping of setting -> scalar, normalised the way --overlay values are."""
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise InvalidArgument(
+            where, str(raw), ["a mapping of setting: value"], command="prep"
+        )
+    for key, value in raw.items():
+        if isinstance(value, (dict, list)):
+            raise InvalidArgument(
+                f"{where} {key}",
+                str(value),
+                ["a string, number or boolean"],
+                command="prep",
+            )
+    return {str(k): scalar(v) for k, v in raw.items()}
 
 
 def make_config(ns: argparse.Namespace) -> PrepConfig:
@@ -147,6 +178,17 @@ def make_config(ns: argparse.Namespace) -> PrepConfig:
     colors = pick(ns.colors, spec.get("colors"), None)
     adapt_on, adapt_zones = _adapt_spec(spec.get("adapt", True))
     overhang = spec.get("overhang") or {}
+    set_process = {
+        **_spec_assignments(process.get("set"), "--spec process set"),
+        **parse_assignments(ns.set_process, "--set"),
+    }
+    set_filament = {
+        **_spec_assignments(process.get("fset"), "--spec process fset"),
+        **parse_assignments(ns.fset, "--fset"),
+    }
+    if ns.max_volumetric is not None:
+        set_filament["filament_max_volumetric_speed"] = f"{ns.max_volumetric:g}"
+    overlay = pick(ns.overlay, process.get("overlay"), None)
     cfg = PrepConfig(
         model=model,
         out=out,
@@ -162,9 +204,7 @@ def make_config(ns: argparse.Namespace) -> PrepConfig:
         loads=list(spec.get("loads") or []),
         stability=dict(spec.get("stability") or {}),
         colors=Path(colors) if colors else None,
-        process_preset=str(
-            pick(ns.process, process.get("preset"), DEFAULT_PROCESS_PRESET)
-        ),
+        process_preset=pick(ns.process, process.get("preset"), None),
         filament_preset=pick(ns.filament, process.get("filament_preset"), None),
         walls=int(pick(ns.walls, process.get("walls"), 4)),
         infill_pct=int(pick(ns.infill, process.get("infill"), 15)),
@@ -172,6 +212,10 @@ def make_config(ns: argparse.Namespace) -> PrepConfig:
         hmax=float(pick(ns.layer_max, process.get("layer_max"), 0.32)),
         mix_cap=float(pick(None, process.get("mix_cap"), 0.12)),
         brim_mm=float(pick(ns.brim, process.get("brim"), 0.0)),
+        supports=str(pick(ns.supports, process.get("supports"), "none")),
+        set_process=set_process,
+        set_filament=set_filament,
+        overlay=Path(overlay) if overlay else None,
         gate=dict(spec.get("gcode") or {}),
         only=_csv(ns.only),
         skip=_csv(ns.skip),
@@ -183,7 +227,10 @@ def make_config(ns: argparse.Namespace) -> PrepConfig:
 
 
 def show_steps() -> str:
-    lines = ["step       needs", *(f"{s:<10} {', '.join(DEPS[s]) or '-'}" for s in STEPS)]
+    lines = [
+        "step       needs",
+        *(f"{s:<10} {', '.join(DEPS[s]) or '-'}" for s in STEPS),
+    ]
     return "\n".join(lines)
 
 
