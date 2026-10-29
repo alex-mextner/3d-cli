@@ -136,7 +136,7 @@ def test_of_reads_the_licence_from_model_json_file_or_directory_without_the_netw
 
 
 def test_of_a_url_takes_the_licence_the_library_recorded(
-    conn: sqlite3.Connection,
+    conn: sqlite3.Connection, tmp_path: Path
 ) -> None:
     records.ensure_source(
         conn,
@@ -150,7 +150,7 @@ def test_of_a_url_takes_the_licence_the_library_recorded(
     assert src.license == "CC BY-ND 4.0" and src.origin == "library"
     assert load_source("https://example.com/m/1", conn).origin == "url"
     with pytest.raises(InputNotFound, match="not found"):
-        load_source("nope.json")
+        load_source(str(tmp_path / "nope.json"))
 
 
 # ------------------------------------------------------------------------------------------ remix / original
