@@ -41,7 +41,12 @@ class _Scripted:
         self.systems: list[str] = []
 
     def complete(
-        self, system: str, user: str, images: Any = None, timeout: float = 1200.0
+        self,
+        system: str,
+        user: str,
+        images: Any = None,
+        timeout: float = 1200.0,
+        temperature: float | None = None,
     ) -> str:
         self.systems.append(system)
         reply = self.replies[min(self.calls, len(self.replies) - 1)]

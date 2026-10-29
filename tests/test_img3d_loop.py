@@ -186,3 +186,34 @@ def test_recover_does_not_pass_veto_on_stale_render_in_reused_out_dir(
     assert result["veto"]["passed"] is False, "must not pass against a stale prior render"
     assert result["recovery_status"] == "failed"
     assert not stale.exists(), "stale render must be removed before the final render"
+
+
+class _StopAfterResolve(Exception):
+    pass
+
+
+def test_run_reference_skips_ai_json_under_the_mock_hook(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    # A mocked reference run must not read (or die on) a malformed personal ai.json, yet it
+    # must ask the resolver for a vision-preferring pick.
+    from PIL import Image
+
+    ref = tmp_path / "ref.png"
+    Image.new("RGB", (8, 8), "white").save(ref)
+    bad = tmp_path / "ai.json"
+    bad.write_text("{not json", encoding="utf-8")
+    monkeypatch.setenv("THREED_AI_CONFIG", str(bad))
+    monkeypatch.setenv("THREED_AI_MOCK_RESPONSE", "{}")
+    seen: dict[str, Any] = {}
+
+    def _fake_resolve(name: Any = None, **kwargs: Any) -> Any:
+        seen.update(kwargs)
+        raise _StopAfterResolve
+
+    monkeypatch.setattr(img3d_loop, "resolve_backend", _fake_resolve)
+    monkeypatch.setattr(img3d_loop, "_reference_mask", lambda *a, **k: None)
+    with pytest.raises(_StopAfterResolve):
+        img3d_loop._run_reference(str(ref), str(tmp_path), "t", (8, 8), None, str(tmp_path))
+    assert seen == {"config": {}, "prefer_vision": True}
+

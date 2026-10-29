@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+from collections.abc import Callable
 from typing import Any
 
 from cli.registry import Command
@@ -93,56 +94,30 @@ class _Opts:
         self.max_mean: float | None = None
 
 
+def _split_inline(arg: str) -> tuple[str, str | None]:
+    """`--flag=value` -> (`--flag`, `value`); anything else -> (arg, None)."""
+    if not (arg.startswith("--") and "=" in arg):
+        return arg, None
+    flag, value = arg.split("=", 1)
+    if value == "":
+        raise UsageError(f"option {flag} needs a value", command="judge")
+    return flag, value
+
+
 def _parse_opts(argv: list[str]) -> _Opts:
     opts = _Opts()
     i = 0
     while i < len(argv):
-        arg = argv[i]
-        value: str | None = None
-        if arg.startswith("--") and "=" in arg:
-            arg, value = arg.split("=", 1)
-            if value == "":
-                raise UsageError(f"option {arg} needs a value", command="judge")
-        if arg == "--backend":
-            opts.backends.append(
-                value if value is not None else _need_value(argv, i, arg)
-            )
-            i += 1 if value is not None else 2
-        elif arg == "--stability-n":
-            raw = value if value is not None else _need_value(argv, i, arg)
-            try:
-                opts.stability_n = max(0, int(raw))
-            except ValueError as exc:
-                raise UsageError(
-                    f"--stability-n must be an integer, got {raw!r}", command="judge"
-                ) from exc
-            i += 1 if value is not None else 2
-        elif arg == "--feature-context":
-            opts.feature_context = (
-                value if value is not None else _need_value(argv, i, arg)
-            )
-            i += 1 if value is not None else 2
-        elif arg == "--config":
-            opts.config = value if value is not None else _need_value(argv, i, arg)
-            i += 1 if value is not None else 2
-        elif arg == "--json":
+        arg, value = _split_inline(argv[i])
+        if arg == "--json":
             opts.as_json = True
             i += 1
-        elif arg == "--rubric":
-            opts.rubric = value if value is not None else _need_value(argv, i, arg)
-            i += 1 if value is not None else 2
-        elif arg == "--min-dim":
-            opts.min_dim = _number(
-                value if value is not None else _need_value(argv, i, arg), arg
-            )
-            i += 1 if value is not None else 2
-        elif arg == "--max-mean":
-            opts.max_mean = _number(
-                value if value is not None else _need_value(argv, i, arg), arg
-            )
-            i += 1 if value is not None else 2
-        else:
+            continue
+        setter = _VALUE_SETTERS.get(arg)
+        if setter is None:
             raise UsageError(f"unknown option '{arg}'", command="judge")
+        setter(opts, value if value is not None else _need_value(argv, i, arg), arg)
+        i += 1 if value is not None else 2
     return opts
 
 
@@ -153,6 +128,49 @@ def _number(raw: str, flag: str) -> float:
         raise UsageError(
             f"{flag} must be a number, got {raw!r}", command="judge"
         ) from exc
+
+
+def _set_backend(opts: _Opts, raw: str, flag: str) -> None:
+    opts.backends.append(raw)
+
+
+def _set_stability_n(opts: _Opts, raw: str, flag: str) -> None:
+    try:
+        opts.stability_n = max(0, int(raw))
+    except ValueError as exc:
+        raise UsageError(f"{flag} must be an integer, got {raw!r}", command="judge") from exc
+
+
+def _set_feature_context(opts: _Opts, raw: str, flag: str) -> None:
+    opts.feature_context = raw
+
+
+def _set_config(opts: _Opts, raw: str, flag: str) -> None:
+    opts.config = raw
+
+
+def _set_rubric(opts: _Opts, raw: str, flag: str) -> None:
+    opts.rubric = raw
+
+
+def _set_min_dim(opts: _Opts, raw: str, flag: str) -> None:
+    opts.min_dim = _number(raw, flag)
+
+
+def _set_max_mean(opts: _Opts, raw: str, flag: str) -> None:
+    opts.max_mean = _number(raw, flag)
+
+
+# Every option that takes a value: flag -> setter(opts, raw value, flag).
+_VALUE_SETTERS: dict[str, Callable[[_Opts, str, str], None]] = {
+    "--backend": _set_backend,
+    "--stability-n": _set_stability_n,
+    "--feature-context": _set_feature_context,
+    "--config": _set_config,
+    "--rubric": _set_rubric,
+    "--min-dim": _set_min_dim,
+    "--max-mean": _set_max_mean,
+}
 
 
 def _load_rubric(path: str) -> list[Any]:
@@ -201,8 +219,11 @@ def _resolve_backends(opts: _Opts) -> list[Any]:
     from ai.backends import resolve_backend
 
     cfg = load_backend_config(opts.config)
+    # `judge` always attaches images, so the auto-pick (no --backend) prefers a sighted
+    # backend over a text-only one. An explicit --backend is honored verbatim (a blind
+    # choice is still surfaced by the judge's BLIND label).
     if not opts.backends:
-        return [resolve_backend(config=cfg)]
+        return [resolve_backend(config=cfg, prefer_vision=True)]
     return [resolve_backend(name, config=cfg) for name in opts.backends]
 
 

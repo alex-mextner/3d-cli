@@ -78,6 +78,7 @@ class _FakeVisionBackend(Backend):
         self._constant = responses if isinstance(responses, str) else None
         self._queue = list(responses) if isinstance(responses, list) else []
         self.calls = 0
+        self.temperatures: list[float | None] = []  # per-call temperature (transport proof)
 
     def available(self) -> bool:
         return True
@@ -88,8 +89,10 @@ class _FakeVisionBackend(Backend):
         user: str,
         images: list[pathlib.Path] | None = None,
         timeout: float = 1200.0,
+        temperature: float | None = None,
     ) -> str:
         self.calls += 1
+        self.temperatures.append(temperature)
         if self._constant is not None:
             return self._constant
         if not self._queue:
@@ -312,6 +315,32 @@ def test_judge_blind_backend_is_never_a_real_visual_score() -> None:
     assert any("BLIND" in n for n in result.notes)
 
 
+def test_judge_threads_canonical_temp0_then_stability_temp01() -> None:
+    # The reproducibility split must reach the TRANSPORT: the canonical read at temp 0.0,
+    # every stability sample at temp 0.1 (metadata-only enforcement was the Codex finding).
+    b = _FakeVisionBackend(_score_json(3, 3, 3, 3), name="temp")
+    judge(_RENDER, _REFERENCE, backend=b, judges=1, stability_n=3)
+    assert b.calls == 4  # 1 canonical + 3 stability
+    assert b.temperatures[0] == 0.0  # canonical is greedy/deterministic
+    assert b.temperatures[1:] == [0.1, 0.1, 0.1]  # stability samples near-greedy
+
+
+def test_judge_auto_resolve_prefers_a_sighted_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    # judge always attaches images, so its backend=None auto-resolve must ask the resolver
+    # to prefer a sighted backend (prefer_vision=True), not silently accept a blind one.
+    seen: dict[str, object] = {}
+
+    def _fake_resolve(name: object = None, **kwargs: object) -> Backend:
+        seen["name"] = name
+        seen.update(kwargs)
+        return _FakeVisionBackend(_score_json(3, 3, 3, 3), name="auto")
+
+    monkeypatch.setattr("ai.judge.resolve_backend", _fake_resolve)
+    monkeypatch.setattr("ai.judge.load_backend_config_for", lambda name: {})  # hermetic
+    judge(_RENDER, _REFERENCE, backend=None, judges=1, stability_n=0)
+    assert seen["prefer_vision"] is True
+
+
 def test_judge_excludes_blind_judge_from_sighted_aggregate() -> None:
     sighted = _FakeVisionBackend(_score_json(2, 2, 2, 2), name="see")  # mean 2
     blind = MockBackend(_score_json(4, 4, 4, 4))  # would pull the mean to 3 if counted
@@ -389,3 +418,53 @@ def test_pairwise_backend_name_string(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("THREED_AI_MOCK_RESPONSE", _pw_json("second"))
     res = judge_pairwise(_RENDER, pathlib.Path("/tmp/b.png"), _REFERENCE, backend="mock")
     assert res.blind is True
+
+
+def test_pairwise_threads_canonical_temp_in_both_orders() -> None:
+    b = _FakeVisionBackend([_pw_json("first"), _pw_json("second")], name="ab")
+    judge_pairwise(_RENDER, pathlib.Path("/tmp/b.png"), _REFERENCE, backend=b)
+    assert b.temperatures == [0.0, 0.0]
+
+
+def test_library_auto_resolve_honors_ai_json_backend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # judge()/judge_pairwise() with backend=None must read ai.json like `3d judge` does: a
+    # configured backend wins verbatim over the vision-preferring auto-pick (here claude is
+    # configured while the sighted codex is also installed).
+    monkeypatch.delenv("THREED_AI_MOCK_RESPONSE", raising=False)
+    monkeypatch.setattr("ai.backends.shutil.which", lambda name: "/usr/bin/" + name)
+    monkeypatch.setattr("ai.judge.load_backend_config_for", lambda name: {"backend": "claude"})
+    from ai.judge import _resolve_judges
+
+    assert [j.name for j in _resolve_judges(None)] == ["claude"]
+
+
+def test_mock_hook_skips_reading_a_malformed_ai_json(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,
+) -> None:
+    # Under the offline mock hook the config file is not consulted, so a broken ai.json
+    # cannot make a mocked run raise.
+    bad = tmp_path / "ai.json"
+    bad.write_text("{not json", encoding="utf-8")
+    monkeypatch.setenv("THREED_AI_CONFIG", str(bad))
+    monkeypatch.setenv("THREED_AI_MOCK_RESPONSE", _pw_json("first"))
+    res = judge_pairwise(_RENDER, pathlib.Path("/tmp/b.png"), _REFERENCE)
+    assert res.blind is True
+
+
+def test_library_named_backend_applies_ai_json_model(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,
+) -> None:
+    # judge(backend="ollama") must see ai.json's `model`, exactly like `3d judge --backend
+    # ollama` — otherwise the library and the CLI disagree for identical input.
+    cfg = tmp_path / "ai.json"
+    cfg.write_text('{"model": "llava"}', encoding="utf-8")
+    monkeypatch.setenv("THREED_AI_CONFIG", str(cfg))
+    monkeypatch.delenv("THREED_AI_MOCK_RESPONSE", raising=False)
+    monkeypatch.setattr("ai.backends.OllamaBackend.available", lambda self: True)
+    from ai.judge import _resolve_judges
+
+    [ollama] = _resolve_judges("ollama")
+    assert getattr(ollama, "model", None) == "llava"
+

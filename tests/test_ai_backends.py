@@ -9,7 +9,7 @@ import pathlib
 
 import pytest
 
-from ai import load_backend_config
+from ai import load_backend_config, load_backend_config_for
 from ai.backends import (
     BACKEND_ORDER,
     ClaudeBackend,
@@ -42,6 +42,18 @@ def test_mock_backend_reads_env_when_no_constructor_response(monkeypatch: pytest
 def test_mock_backend_has_stable_default_when_unconfigured(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv(MOCK_RESPONSE_ENV, raising=False)
     assert MockBackend().complete("", "").startswith("MOCK:")
+
+
+def test_mock_backend_records_temperature_per_call() -> None:
+    # The transport must actually RECEIVE the temperature so a test can assert the judge's
+    # canonical(0.0)/stability(0.1) split reaches the backend, not just metadata.
+    backend = MockBackend("x")
+    assert backend.last_temperature is None  # nothing called yet
+    backend.complete("s", "u", temperature=0.0)
+    backend.complete("s", "u", temperature=0.1)
+    backend.complete("s", "u")  # unset -> None (leave backend default untouched)
+    assert backend.last_temperature is None
+    assert backend.temperatures == [0.0, 0.1, None]
 
 
 # ── resolver: explicit / config / first-available / mock fallback ────────────
@@ -181,6 +193,24 @@ def test_ollama_backend_reads_endpoint_and_model_from_config() -> None:
     assert backend._host_port() == ("127.0.0.1", 9999)
 
 
+def test_ollama_threads_temperature_into_options(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Ollama is the backend that HONORS temperature: it must land in the HTTP `options`
+    # block when set, and be absent when None (never force a value on the server default).
+    backend = OllamaBackend({"endpoint": "http://127.0.0.1:11434", "model": "llava"})
+    captured: dict[str, object] = {}
+
+    def _fake_post(self: OllamaBackend, body: dict[str, object], timeout: float) -> str:
+        captured.clear()
+        captured.update(body)
+        return "ok"
+
+    monkeypatch.setattr(OllamaBackend, "_post_generate", _fake_post)
+    backend.complete("sys", "user", temperature=0.1)
+    assert captured["options"] == {"temperature": 0.1}
+    backend.complete("sys", "user")  # unset -> no options block
+    assert "options" not in captured
+
+
 def test_ollama_complete_without_model_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     from ai.backends import BackendError
 
@@ -223,6 +253,92 @@ def test_vision_capability_flags_are_declared() -> None:
     }
 
 
+# ── vision-aware auto-pick (prefer_vision) ──────────────────────────────────
+def test_prefer_vision_picks_a_sighted_backend_over_a_blind_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv(MOCK_RESPONSE_ENV, raising=False)
+    # Everything installed: claude (blind) is first in BACKEND_ORDER, codex (sighted) next.
+    monkeypatch.setattr("ai.backends.shutil.which", lambda name: "/usr/bin/" + name)
+    # Default auto-pick keeps claude-first (blind) — unchanged behavior.
+    assert isinstance(resolve_backend(), ClaudeBackend)
+    # prefer_vision skips the blind claude for the first SIGHTED backend (codex).
+    sighted = resolve_backend(prefer_vision=True)
+    assert isinstance(sighted, CodexBackend)
+    assert sighted.supports_images is True
+
+
+def test_prefer_vision_falls_back_to_blind_with_surfaced_label(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.delenv(MOCK_RESPONSE_ENV, raising=False)
+    # Only claude (blind) is installed; the sighted codex/ollama are absent.
+    monkeypatch.setattr(
+        "ai.backends.shutil.which",
+        lambda name: "/usr/bin/claude" if name == "claude" else None,
+    )
+    monkeypatch.setattr(OllamaBackend, "available", lambda self: False)
+    backend = resolve_backend(prefer_vision=True)
+    # It does NOT raise — it degrades to the blind backend, but the fallback is SURFACED on
+    # stderr (never a silent blind vision run).
+    assert isinstance(backend, ClaudeBackend)
+    assert backend.supports_images is False
+    err = capsys.readouterr().err
+    assert "vision requested" in err
+    assert "BLIND" in err
+
+
+def test_default_autopick_short_circuits_without_probing_later_backends(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Regression guard: the default (prefer_vision=False) path must EARLY-RETURN on the
+    # first available backend (claude) and never fall through to OllamaBackend.available()'s
+    # socket probe. A list-comprehension over all backends would break this.
+    monkeypatch.delenv(MOCK_RESPONSE_ENV, raising=False)
+    monkeypatch.setattr("ai.backends.shutil.which", lambda name: "/usr/bin/" + name)
+    probed = {"ollama": False}
+
+    def _spy(self: OllamaBackend) -> bool:
+        probed["ollama"] = True
+        return True
+
+    monkeypatch.setattr(OllamaBackend, "available", _spy)
+    assert isinstance(resolve_backend(), ClaudeBackend)
+    assert probed["ollama"] is False  # claude short-circuited; no ollama probe
+
+
+def test_config_backend_is_honored_verbatim_even_under_prefer_vision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A configured ai.json backend is a deliberate choice: prefer_vision must NOT override
+    # it with a sighted backend. claude (blind) is configured, codex (sighted) is available;
+    # the configured claude wins (the judge still labels it blind).
+    monkeypatch.delenv(MOCK_RESPONSE_ENV, raising=False)
+    monkeypatch.setattr("ai.backends.shutil.which", lambda name: "/usr/bin/" + name)
+    backend = resolve_backend(config={"backend": "claude"}, prefer_vision=True)
+    assert isinstance(backend, ClaudeBackend)
+    assert backend.supports_images is False
+
+
+def test_cli_backend_accepts_but_does_not_fake_temperature(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The CLI backends (claude here) have NO temperature flag: complete() must accept the
+    # argument without crashing and WITHOUT injecting it anywhere into the argv (never faked).
+    monkeypatch.setattr("ai.backends.shutil.which", lambda name: "/usr/bin/" + name)
+    captured: dict[str, list[str]] = {}
+
+    def _fake_run_capture(cmd: list[str], *, stdin: object, timeout: float, name: str) -> str:
+        captured["cmd"] = cmd
+        return "ok"
+
+    monkeypatch.setattr("ai.backends._run_capture", _fake_run_capture)
+    assert ClaudeBackend().complete("sys", "user", temperature=0.1) == "ok"
+    joined = " ".join(captured["cmd"]).lower()
+    assert "temperature" not in joined
+    assert "0.1" not in joined
+
+
 # ── match_loop drives the backend (no real model call) ──────────────────────
 def test_match_loop_critic_drives_mock_backend(tmp_path: pathlib.Path) -> None:
     import match_loop
@@ -252,7 +368,7 @@ def test_match_loop_critic_treats_backend_error_as_no_improve(tmp_path: pathlib.
         def available(self) -> bool:
             return True
 
-        def complete(self, system, user, images=None, timeout=0.0):  # type: ignore[no-untyped-def]
+        def complete(self, system, user, images=None, timeout=0.0, temperature=None):  # type: ignore[no-untyped-def]
             raise BackendError("kaboom", command="ai")
 
     edit = match_loop.critic_backend(
@@ -260,3 +376,41 @@ def test_match_loop_critic_treats_backend_error_as_no_improve(tmp_path: pathlib.
         metric="IoU", better="higher", work=str(tmp_path), changelog=str(tmp_path / "cl.md"),
     )
     assert edit is None
+
+
+def test_prefer_vision_survives_a_malformed_ollama_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # An unparsable ollama endpoint (non-numeric port) must make ollama "unavailable" during
+    # the optional vision probe — not raise ValueError out of auto-pick. claude (blind) is
+    # the only usable backend, so the vision path falls back to it.
+    monkeypatch.delenv(MOCK_RESPONSE_ENV, raising=False)
+    monkeypatch.setattr(
+        "ai.backends.shutil.which",
+        lambda name: "/usr/bin/claude" if name == "claude" else None,
+    )
+    cfg = {"model": "llava", "endpoint": "http://localhost:bad"}
+    assert OllamaBackend(cfg).available() is False
+    assert isinstance(resolve_backend(config=cfg, prefer_vision=True), ClaudeBackend)
+
+
+def test_load_backend_config_for_skips_the_file_when_resolve_ignores_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,
+) -> None:
+    # resolve_backend never consults the config for an explicit "mock" or, with no name, under
+    # the offline mock hook: the loader must then not even read (or die on) a malformed file.
+    bad = tmp_path / "ai.json"
+    bad.write_text("{not json", encoding="utf-8")
+    monkeypatch.setenv("THREED_AI_CONFIG", str(bad))
+    monkeypatch.delenv(MOCK_RESPONSE_ENV, raising=False)
+    assert load_backend_config_for("mock") == {}
+    with pytest.raises(Exception, match="could not parse AI config"):
+        load_backend_config_for(None)
+    with pytest.raises(Exception, match="could not parse AI config"):
+        load_backend_config_for("claude")
+    monkeypatch.setenv(MOCK_RESPONSE_ENV, "x")
+    assert load_backend_config_for(None) == {}
+    # An explicit non-mock NAME still reads the config even under the hook (the name wins).
+    with pytest.raises(Exception, match="could not parse AI config"):
+        load_backend_config_for("claude")
+

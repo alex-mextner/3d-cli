@@ -44,6 +44,7 @@ __all__ = [
     "OpencodeBackend",
     "resolve_backend",
     "load_backend_config",
+    "load_backend_config_for",
 ]
 
 
@@ -90,3 +91,18 @@ def load_backend_config(path: str | os.PathLike[str] | None = None) -> dict[str,
             remediation=['Use keys like {"backend": "codex", "model": "..."}.'],
         )
     return raw
+
+
+def load_backend_config_for(name: str | None) -> dict[str, Any]:
+    """`load_backend_config()` for a caller about to `resolve_backend(name, config=...)`.
+
+    Returns `{}` WITHOUT reading the file when `resolve_backend` will not consult the config:
+    an explicit `name == "mock"`, or no name with the offline `$THREED_AI_MOCK_RESPONSE` hook
+    set (both short-circuit to MockBackend). A mocked run must not depend on — or die on a
+    malformed — personal `ai.json`. Otherwise it is the fail-closed `load_backend_config()`.
+    """
+    from .backends import MOCK_RESPONSE_ENV
+
+    if name == "mock" or (name is None and os.environ.get(MOCK_RESPONSE_ENV) is not None):
+        return {}
+    return load_backend_config()
