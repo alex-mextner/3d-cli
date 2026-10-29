@@ -14,7 +14,7 @@ from typing import Any
 
 import pytest
 
-from errors import GateFailure, InvalidArgument, UsageError
+from errors import GateFailure, InputNotFound, InvalidArgument, UsageError
 from library import actions, records
 from library import db as librarydb
 from marketplaces.base import MarketplaceError
@@ -149,7 +149,7 @@ def test_of_a_url_takes_the_licence_the_library_recorded(
     src = load_source(PRINTABLES, conn)
     assert src.license == "CC BY-ND 4.0" and src.origin == "library"
     assert load_source("https://example.com/m/1", conn).origin == "url"
-    with pytest.raises(Exception, match="not found"):
+    with pytest.raises(InputNotFound, match="not found"):
         load_source("nope.json")
 
 
@@ -724,9 +724,9 @@ def test_a_make_post_is_recorded_as_a_make_publication(tmp_path: Path) -> None:
 
     out = flow.send(prep, runner=runner)
     assert out[0].state == "draft" and out[0].ok
-    assert any("upload" in c for c in calls) and not any(
-        "Publish" in " ".join(c) or "Post" in " ".join(c) for c in calls
-    )
+    uploads = [c for c in calls if "upload" in c]
+    assert [c[c.index("upload") + 2 :] for c in uploads] == [[str(table)]]
+    assert not any("Publish" in " ".join(c) or "Post" in " ".join(c) for c in calls)
     c = librarydb.open_library(db)
     try:
         assert [(p["platform"], p["state"]) for p in records.list_publications(c)] == [
