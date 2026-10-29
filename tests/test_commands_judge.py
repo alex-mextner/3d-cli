@@ -92,7 +92,10 @@ def test_judge_sighted_path_emits_numbers_and_ok(
         def __init__(self, name: str) -> None:
             self.name = name
 
-        def complete(self, system: str, user: str, images: Any = None, timeout: float = 1200.0) -> str:
+        def complete(
+            self, system: str, user: str, images: Any = None,
+            timeout: float = 1200.0, temperature: float | None = None,
+        ) -> str:
             return _CANNED  # silhouette=3 feature=2 structural=4 detail=3 -> mean 3.0
 
     monkeypatch.setattr(
@@ -172,3 +175,27 @@ def test_judge_bin_3d_end_to_end_blind(tmp_path: pathlib.Path) -> None:
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "LABEL=blind" in proc.stdout
     assert "MEAN=NA" in proc.stdout  # blind score is masked, never a real number
+
+
+def test_cli_auto_pick_prefers_a_sighted_backend_but_explicit_names_do_not(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # `3d judge` always attaches images: with no --backend the resolver is asked to prefer a
+    # sighted backend; an explicit --backend NAME is passed through verbatim.
+    from commands import judge as judge_cmd
+
+    calls: list[tuple[object, dict[str, object]]] = []
+
+    def _fake_resolve(name: object = None, **kwargs: object) -> str:
+        calls.append((name, kwargs))
+        return "backend"
+
+    monkeypatch.setattr("ai.backends.resolve_backend", _fake_resolve)
+    monkeypatch.setattr("ai.load_backend_config", lambda path=None: {})
+    opts = judge_cmd._Opts()
+    assert judge_cmd._resolve_backends(opts) == ["backend"]
+    assert calls == [(None, {"config": {}, "prefer_vision": True})]
+    calls.clear()
+    opts.backends = ["claude"]
+    judge_cmd._resolve_backends(opts)
+    assert calls == [("claude", {"config": {}})]

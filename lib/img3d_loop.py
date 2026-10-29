@@ -45,6 +45,7 @@ from collections.abc import Sequence
 import numpy as np
 from PIL import Image, ImageDraw
 
+from ai import load_backend_config_for
 from ai.backends import Backend, MockBackend, resolve_backend
 from ai.blockout import CONTINUOUS_TUNABLES, BlockoutParams, params_from_dict, render_scad, with_values
 from ai.veto import FEATURE_SPECS, CriticalFeature, VetoResult, evaluate, perceive, run_veto
@@ -194,6 +195,31 @@ def _refine_steps(params: BlockoutParams) -> dict[str, float]:
     }
 
 
+def _refine_step(
+    cur: BlockoutParams, best: float, rnd: int, key: str, delta: float,
+    az: float, el: float, refm: Any, size: tuple[int, int], tmp: str,
+    *, backend: Backend, expected: dict[str, float], features: Sequence[CriticalFeature],
+    changelog: str,
+) -> tuple[BlockoutParams, float, int, bool]:
+    """Try ONE signed step on `key`: accept it IFF the boundary loss strictly improves AND
+    the veto still passes. Returns (params, loss, round counter, accepted)."""
+    cand = with_values(cur, **{key: max(0.5, getattr(cur, key) + delta)})
+    cand_loss = boundary_loss(cand, az, el, refm, size, tmp)
+    if not strictly_better(cand_loss, best, "lower", 1e-3):
+        return cur, best, rnd, False
+    rnd += 1
+    veto = _veto_candidate(cand, az, el, size, tmp, backend, expected, features)
+    verdict = "ok" if veto.passed else "reverted"
+    changelog_append(
+        changelog, rnd, key, round(getattr(cur, key), 3),
+        round(getattr(cand, key), 3), round(best, 4), round(cand_loss, 4),
+        "PASS" if veto.passed else "FAIL", verdict,
+    )
+    if veto.passed:
+        return cand, cand_loss, rnd, True
+    return cur, best, rnd, False
+
+
 def monotonic_refine(
     params: BlockoutParams, az: float, el: float, refm: Any, size: tuple[int, int], tmp: str,
     *, backend: Backend, expected: dict[str, float], features: Sequence[CriticalFeature],
@@ -209,20 +235,11 @@ def monotonic_refine(
         improved = False
         for key in CONTINUOUS_TUNABLES:
             for delta in (steps[key], -steps[key]):
-                cand = with_values(cur, **{key: max(0.5, getattr(cur, key) + delta)})
-                cand_loss = boundary_loss(cand, az, el, refm, size, tmp)
-                if not strictly_better(cand_loss, best, "lower", 1e-3):
-                    continue
-                rnd += 1
-                veto = _veto_candidate(cand, az, el, size, tmp, backend, expected, features)
-                verdict = "ok" if veto.passed else "reverted"
-                changelog_append(
-                    changelog, rnd, key, round(getattr(cur, key), 3),
-                    round(getattr(cand, key), 3), round(best, 4), round(cand_loss, 4),
-                    "PASS" if veto.passed else "FAIL", verdict,
+                cur, best, rnd, accepted = _refine_step(
+                    cur, best, rnd, key, delta, az, el, refm, size, tmp,
+                    backend=backend, expected=expected, features=features, changelog=changelog,
                 )
-                if veto.passed:
-                    best, cur, improved = cand_loss, cand, True
+                improved = improved or accepted
         if not improved:
             steps = {k: v * 0.5 for k, v in steps.items()}
             if max(steps.values()) < 0.35:
@@ -509,7 +526,11 @@ def _run_reference(
 ) -> dict[str, Any]:
     reference_rgb = np.asarray(Image.open(reference).convert("RGB").resize(size), dtype=np.int16)
     refm = _reference_mask(reference, size)
-    backend = resolve_backend(backend_name)
+    # The veto READS the reference image, so this is a vision task: honor ai.json (e.g. an
+    # ollama vision model) and prefer a sighted backend over a text-only one on auto-pick.
+    # An explicit --backend name still selects that backend; config is loaded the same way
+    # `commands/judge` does (fail-closed on a malformed ai.json — the shared parse contract).
+    backend = resolve_backend(backend_name, config=load_backend_config_for(backend_name), prefer_vision=True)
     perceived = perceive(backend, reference, FEATURE_SPECS[template])
     if perceived["column_count"] is None:
         raise SystemExit("img3d-loop: veto backend could not read column_count from reference")

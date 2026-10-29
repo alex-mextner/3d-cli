@@ -84,3 +84,9 @@ This is a **closed parametric-recovery loop, synthetic-proven** — not photo→
 Needs `openscad` plus `numpy`, `pillow`, and `scipy` (resolved via `pyrun`). The veto
 backend is optional in `--synthetic` mode (it uses the deterministic mock); real-image
 mode needs an available AI backend or `--backend mock`.
+
+Real-image mode reads `~/.config/3d-cli/ai.json` like `3d judge` does: a configured `backend`
+(and its `model`/`endpoint`) is honored, a malformed file is an error (not silently ignored),
+and with no `--backend` and no configured `backend` the auto-pick prefers a sighted
+(image-capable) backend over a text-only one. `--backend mock` and `$THREED_AI_MOCK_RESPONSE`
+never read the file.
