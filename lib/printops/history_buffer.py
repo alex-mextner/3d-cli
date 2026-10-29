@@ -123,14 +123,26 @@ def buffer_files() -> tuple[Path, list[Path]]:
     return d, _files(d)
 
 
+def _printer_file(printer: str) -> Path:
+    """`<buffer_dir>/<printer>.jsonl`; a name that is not a file name is refused first."""
+    if not printer or "/" in printer or printer.startswith("."):
+        raise HistoryBufferError(f"printer {printer!r} is not a fleet printer name")
+    return buffer_dir() / f"{printer}.jsonl"
+
+
+def buffered_uids(printer: str) -> set[str]:
+    """The uids already in the printer's buffer file (none when it does not exist)."""
+    path = _printer_file(printer)
+    if not path.is_file():
+        return set()
+    return {ln.uid for ln in parse_lines(path.read_text(encoding="utf-8").splitlines())}
+
+
 def append(printer: str, record: Mapping[str, Any]) -> Path:
     """Append one record as a line to `<buffer_dir>/<printer>.jsonl`: flock, one O_APPEND write,
     fsync (module doc, FORMAT). Raises HistoryBufferError for a name that is not a file name."""
-    if not printer or "/" in printer or printer.startswith("."):
-        raise HistoryBufferError(f"printer {printer!r} is not a fleet printer name")
-    d = buffer_dir()
-    d.mkdir(parents=True, exist_ok=True)
-    path = d / f"{printer}.jsonl"
+    path = _printer_file(printer)
+    path.parent.mkdir(parents=True, exist_ok=True)
     line = (
         json.dumps(dict(record), ensure_ascii=False, separators=(", ", ": ")) + "\n"
     ).encode("utf-8")

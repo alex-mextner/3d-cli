@@ -335,6 +335,9 @@ def read_photo(
             if paper is not None
             else swatch_gain
         )
+        # a tester built from measured colours predicts from the model's colour, not from the last
+        # measurement: `nominal_hex` (a pure spool) and `model_hex` (a mix) keep it in the manifest
+        predicted = entry.get("nominal_hex") or entry.get("model_hex") or entry["hex"]
         lab = median_lab(px, gain)
         measured = lab_to_hex(lab)
         spread = _spread(px, gain, lab)
@@ -349,10 +352,10 @@ def read_photo(
                 "kind": entry["kind"],
                 "pattern": entry.get("pattern"),
                 "slot": entry.get("slot"),
-                "predicted_hex": entry["hex"],
+                "predicted_hex": predicted,
                 "measured_hex": measured,
                 "measured_lab": [round(v, 2) for v in lab],
-                "delta_e_predicted": round(hex_delta_e(measured, entry["hex"]), 2),
+                "delta_e_predicted": round(hex_delta_e(measured, predicted), 2),
                 "delta_e_target": round(hex_delta_e(measured, target), 2),
                 "samples": len(px),
                 "spread": round(spread, 2),

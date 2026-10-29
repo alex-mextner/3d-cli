@@ -488,6 +488,7 @@ def _record_for(
         plate=d.get("plate")
         if "plate" in kind.scope and isinstance(d.get("plate"), str)
         else None,
+        mix=d.get("mix") if kind.mix_scoped and isinstance(d.get("mix"), str) else None,
         params=params,
         gcode_path=gcode_path,
         gcode_sha=gcode_sha,

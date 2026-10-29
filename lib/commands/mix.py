@@ -42,6 +42,8 @@ USAGE = """3d mix check FILE.3mf [--layer-cap MM] [--max-run-mm MM] [--json]
           [--white-level N]
 3d mix readout PHOTO --manifest NAME.mix.json -o OUT/NAME [--white card|N] [--white-level N]
                [--no-qr-check] [--json]
+3d mix fit READOUT.json [READOUT.json ...] [-o OUT/NAME] [--lambda W] [--json]
+3d mix record READOUT.json --printer NAME [--fit FIT.json] [--yes] [--offline] [--printops-api URL] [--json]
   Colour mixing by layers (Snapmaker Orca mixed filaments, U1).
 
   check FILE.3mf
@@ -99,6 +101,27 @@ USAGE = """3d mix check FILE.3mf [--layer-cap MM] [--max-run-mm MM] [--json]
       and `tester` take the same region as --target-photo and print the target they used;
       the tester manifest records the image, boxes, balance and sha256 as `target_source`.
 
+  fit READOUT.json [READOUT.json ...]
+      Fit per-filament effective wall colours to the measured mixes of one or more readouts
+      (`mix-readout/1`). The pure reference swatches give each filament's printed colour; the
+      mixes then adjust it by least squares over every mix (a mix is the mean of its layers in
+      linear light, the residual is the CIELAB distance to the measured swatch), regularised to
+      the pure swatch (--lambda, default 0.1: a pure swatch counts as that much of a mix).
+      Prints, per filament, the nominal (Spoolman), pure and fitted colours and, per mix, the
+      ΔE of the prediction from the nominal, the pure and the fitted colours, and the mean error
+      before and after. -o OUT/NAME writes OUT/NAME.fit.json (`mix-fit/1`).
+
+  record READOUT.json
+      Write the readout's measurements as calibration records of printer --printer: one
+      `filament_color` per pure swatch whose Spoolman filament id the tester knew (hex = the
+      fitted colour when --fit FIT.json is given, else the measured swatch), then one `mix_color`
+      per mix swatch with a mix key. Each record carries the readout's sha256, the photo's and
+      the swatch number in params, and both files as evidence. Without --yes it only prints the
+      plan. With --yes it POSTs to 3d-api (POST /v1/calibrations; GET /v1/calibrations shows them);
+      repeating the same readout adds nothing. When 3d-api is unreachable (or with --offline) it
+      appends the same records as lines of the settings-history buffer instead; `3d settings
+      import` brings them in later (idempotent by uid).
+
   recipes
       Rank every layer pattern of the loaded filaments with a cycle of at most --max-cycle
       layers that passes the layer rules: the wall colour is the mean of the layers in linear
@@ -134,6 +157,13 @@ USAGE = """3d mix check FILE.3mf [--layer-cap MM] [--max-run-mm MM] [--json]
   --white x0,y0,x1,y1 a region of white on the same photo (trim, paper): the white balance
   --no-wb             the image is a render, not a photo: no colour cast, skip the balance
   --white-level N     the 8-bit value the white region is mapped to (default 235)
+  --fit FILE          a `mix-fit/1` file: its fitted colours replace the slots' colours (recipes, tester
+                      and record). With --printer the current `filament_color` and `mix_color` records
+                      of 3d-api do it already: a measured colour is marked, and a mix with a record
+                      shows its measured colour
+  --lambda W          fit: weight of the pure swatch against one mix swatch (default 0.1)
+  --yes               record: write (otherwise only the plan is printed)
+  --offline           record: write the settings-history buffer, do not call 3d-api
   --manifest FILE     the tester manifest NAME.mix.json the photo belongs to (readout)
   --white card|N      readout white balance: the card's blank paper (default) or the number N of a
                       pure reference swatch (a white spool): --white 9
@@ -174,13 +204,19 @@ Examples:
   3d mix target mockup.jpg --box 410,220,470,300 --white 20,30,80,90
   3d mix target render.png --box 100,100,160,160 --no-wb --json
   3d mix readout phone.jpg --manifest out/mix/wall.mix.json -o out/mix/wall-readout
+  3d mix fit out/mix/wall-readout.readout.json -o out/mix/wall
+  3d mix record out/mix/wall-readout.readout.json --printer u1 --fit out/mix/wall.fit.json --yes
+  3d mix record out/mix/wall-readout.readout.json --printer u1 --offline --yes
+  3d mix recipes --target '#B5654F' --printer u1 --fit out/mix/wall.fit.json
   3d mix readout frame.png --manifest out/mix/wall.mix.json -o out/mix/wall-readout --white 9 --json
   3d mix tester --target-photo mockup.jpg --box 410,220,470,300 --white 20,30,80,90 --printer u1 -o out/mix/wall
   3d mix tester --target '#808080' --slots 1=#000000,4=#FFFFFF --base-3mf print/u1.3mf -o out/grey"""
 
 _CMD = "mix"
+_PAGE = 1000  # the most records one GET /v1/calibrations returns
+_UNREACHABLE = 0  # ApiError.status of a request that got no answer
 # flags without a value (--json is handled on its own)
-_SWITCHES = {"--no-wb", "--no-qr-check"}  # readout alone takes --no-qr-check
+_SWITCHES = {"--no-wb", "--no-qr-check", "--offline", "--yes"}  # each only where its command allows it
 _FLAGS = {
     "--target",
     "--target-photo",
@@ -199,6 +235,7 @@ _FLAGS = {
     "-o",
     "--printops-api",
     "--no-wb",
+    "--fit",
 }
 
 
@@ -600,6 +637,60 @@ def _source_line(src: dict[str, Any]) -> str:
     )
 
 
+def _parse_object(raw: bytes, path: Path, flag: str, what: str) -> dict[str, Any]:
+    import json
+
+    try:
+        doc = json.loads(raw.decode("utf-8"))
+    except ValueError as e:  # includes UnicodeDecodeError and JSONDecodeError
+        raise UsageError(f"{flag} {path}: not JSON ({e})", command=_CMD) from e
+    if not isinstance(doc, dict):
+        raise UsageError(f"{flag} {path}: {what} must be a JSON object", command=_CMD)
+    return doc
+
+
+def _load_json(path: str, flag: str, what: str) -> dict[str, Any]:
+    p = Path(path)
+    if not p.is_file():
+        raise InputNotFound(str(p), command=_CMD)
+    return _parse_object(p.read_bytes(), p, flag, what)
+
+
+def _load_fit(path: str) -> dict[str, Any]:
+    """A `mix-fit/1` file given as --fit, validated."""
+    from slicing.mix_fit import validate_fit
+
+    fit = _load_json(path, "--fit", "a mix-fit/1 record")
+    if problems := validate_fit(fit):
+        raise UsageError(f"--fit {path}: {'; '.join(problems)}", command=_CMD)
+    return fit
+
+
+def _with_measured(
+    opts: dict[str, str], slots: list[LoadedSlot]
+) -> tuple[list[LoadedSlot], list[dict[str, Any]]]:
+    """The slots with measured colours (a --fit file; for --printer also 3d-api's current
+    `filament_color` records) and the printer's current `mix_color` records (--printer only)."""
+    import sys
+
+    from printops.client import ApiClient, ApiConfigError, ApiError
+    from slicing.mix_measured import measured_slots
+
+    fit = _load_fit(opts["--fit"]) if "--fit" in opts else None
+    fil_records: list[dict[str, Any]] = []
+    mix_records: list[dict[str, Any]] = []
+    if "--printer" in opts:
+        try:
+            api = ApiClient.from_config(api=opts.get("--printops-api"))
+            fil_records = api.get("/v1/calibrations", kind="filament_color", current="true", limit=1000)["calibrations"]
+            mix_records = api.get(
+                "/v1/calibrations", kind="mix_color", printer=opts["--printer"], current="true", limit=1000
+            )["calibrations"]
+        except (ApiConfigError, ApiError) as e:
+            print(f"colour calibrations unavailable ({e}): nominal colours used", file=sys.stderr)
+    return measured_slots(slots, fil_records, fit), mix_records
+
+
 def _plan(opts: dict[str, str], layer: float | None = None) -> _Plan:
     """What recipes and tester share; `layer` overrides --layer (a base project's own)."""
     from slicing.mix_model import MixModelError, Slot, rank
@@ -616,6 +707,7 @@ def _plan(opts: dict[str, str], layer: float | None = None) -> _Plan:
         layer = _number(opts, "--layer", 0.12, 0.04, 0.4)
     if abs(round(layer, 4) - layer) > 1e-9:
         raise UsageError(f"layer {layer!r} must have at most 4 decimals", command=_CMD)
+    slots, mix_records = _with_measured(opts, slots)
     count = _integer(opts, "--count", 6, 1, 20)
     max_cycle = _integer(opts, "--max-cycle", 3, 1, 12)
     rules = _rules(opts)
@@ -629,6 +721,10 @@ def _plan(opts: dict[str, str], layer: float | None = None) -> _Plan:
         )
     except MixModelError as e:
         raise UsageError(str(e), command=_CMD) from e
+    if mix_records:
+        from slicing.mix_measured import measured_mixes
+
+        ranked = measured_mixes(ranked, slots, layer, target, mix_records)
     return _Plan(target, slots, ranked, layer, count, max_cycle, rules, target_source)
 
 
@@ -641,11 +737,18 @@ def _emit(summary: dict[str, Any], lines: list[str], as_json: bool) -> None:
         print("\n".join(lines))
 
 
+def _slot_text(s: LoadedSlot) -> str:
+    """`T1 #F6C700`, or `T1 #F6C700 measured (nominal #F5D000)` when the colour was measured."""
+    base = f"T{s.slot} {s.hex}"
+    return base if s.nominal_hex is None else f"{base} measured (nominal {s.nominal_hex})"
+
+
 def _cand_line(n: int, c: dict[str, Any]) -> str:
     stripes = c["stripe_delta_e_30cm"]
     return (
         f"  {n:>2} {c['role']:<8} {c['pattern']:<8} {c['hex']}  ΔE {c['delta_e']:.2f}"
         + ("" if stripes is None else f"  stripes {stripes:.2f} @30cm")
+        + ("  measured" if c.get("measured") else "")
     )
 
 
@@ -893,6 +996,187 @@ def _target_cmd(argv: list[str]) -> int:
     return 0
 
 
+def _leading_paths(argv: list[str], what: str) -> tuple[list[str], list[str]]:
+    """The positional file names before the first option, and the rest."""
+    i = 0
+    while i < len(argv) and not argv[i].startswith("-"):
+        i += 1
+    if i == 0:
+        raise UsageError(f"{what} takes the readout JSON first", command=_CMD)
+    return argv[:i], argv[i:]
+
+
+def _fit(argv: list[str]) -> int:
+    import json
+
+    from slicing.mix_fit import DEFAULT_LAMBDA
+
+    paths, rest = _leading_paths(argv, "fit")
+    opts, as_json = _options(rest, {"-o", "--lambda"})
+    lam = _number(opts, "--lambda", DEFAULT_LAMBDA, 0.0, 100.0)
+    for p in paths:
+        if not Path(p).is_file():
+            raise InputNotFound(p, command=_CMD)
+    code, rec = _run_reader(
+        "numpy,scipy", "mix_fit_cli.py", [f"--lambda={lam}", "--", *paths], "fitting"
+    )
+    if code != 0:
+        raise UsageError(str(rec.get("error", "the readouts cannot be fitted")), command=_CMD)
+    if "-o" in opts:
+        out = Path(opts["-o"])
+        if out.suffix.lower() == ".json":
+            raise UsageError(f"-o {out}: give the path without an extension (NAME.fit.json is written)", command=_CMD)
+        target = out.with_name(out.name + ".fit.json")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(rec, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        rec["file"] = str(target)
+    sm = rec["summary"]
+    lines = [
+        f"mix fit of {len(paths)} readout(s): {sm['filaments']} filaments, {sm['mixes']} mixes (lambda {rec['lambda']:g})",
+        f"  {'filament':<10} {'slot':>4}  {'nominal':<9} {'pure':<9} {'fitted':<9}  dE nominal>fitted",
+    ]
+    lines.extend(
+        f"  {f['key']:<10} {f['slot']:>4}  {f['nominal_hex']:<9} {f['pure_hex']:<9} {f['fitted_hex']:<9}  "
+        f"{f['delta_e_nominal_fitted']:>6.2f}" + ("" if f["constrained_by_mixes"] else "  (no mix: pure swatch)")
+        for f in rec["filaments"]
+    )
+    if rec["mixes"]:
+        lines.append(f"  {'mix':<8} {'measured':<9}  dE nominal  dE pure  dE fitted")
+    lines.extend(
+        f"  {m['pattern']:<8} {m['measured_hex']:<9}  {m['delta_e_nominal']:>10.2f}  {m['delta_e_pure']:>7.2f}  {m['delta_e_fitted']:>9.2f}"
+        for m in rec["mixes"]
+    )
+    if sm["mixes"]:
+        lines.append(
+            f"  mean mix error: nominal {sm['mean_delta_e_nominal']:.2f} > pure {sm['mean_delta_e_pure']:.2f} > fitted {sm['mean_delta_e_fitted']:.2f}"
+            + ("" if sm["improved"] else "  (not improved)")
+        )
+    lines += [f"  note: {n}" for n in rec["notes"]]
+    if "file" in rec:
+        lines.append(f"  fit: {rec['file']}")
+    _emit(rec, lines, as_json)
+    return 0
+
+
+def _record(argv: list[str]) -> int:
+    import hashlib
+    import sys
+
+    from printops import history_buffer as hb
+    from printops.client import ApiClient, ApiConfigError, ApiError
+    from slicing import mix_record
+
+    if not argv or argv[0].startswith("-"):
+        raise UsageError(
+            "record takes the readout JSON first",
+            command=_CMD,
+            remediation=["3d mix record out/wall-readout.readout.json --printer u1 --yes"],
+        )
+    path = Path(argv[0])
+    opts, as_json = _options(argv[1:], {"--printer", "--fit", "--printops-api", "--offline", "--yes"})
+    if "--printer" not in opts:
+        raise UsageError("record needs --printer NAME: the records are per printer", command=_CMD)
+    if not path.is_file():
+        raise InputNotFound(str(path), command=_CMD)
+    raw = path.read_bytes()  # one read: the sha256 is of the bytes that were parsed
+    readout = _parse_object(raw, path, "READOUT", "a mix-readout/1 record")
+    fit = _load_fit(opts["--fit"]) if "--fit" in opts else None
+    sha = hashlib.sha256(raw).hexdigest()
+    try:
+        pl = mix_record.plan(
+            readout, sha, opts["--printer"], readout_name=path.name, at=mix_record.now_utc(), fit=fit
+        )
+    except mix_record.RecordError as e:
+        raise UsageError(str(e), command=_CMD) from e
+    results: list[dict[str, Any]] = [
+        {"kind": i.kind, "scope": i.scope, "swatch": i.number, "label": i.label(), "status": "planned"}
+        for i in pl.items
+    ]
+    mode = "plan"
+    notes: list[str] = []
+    failed = 0
+    if "--yes" in opts:
+        api = None
+        mode = "buffer"
+        if "--offline" not in opts:
+            try:
+                api = ApiClient.from_config(api=opts.get("--printops-api"))
+                stored = {
+                    "filament_color": api.get("/v1/calibrations", kind="filament_color", limit=_PAGE)[
+                        "calibrations"
+                    ],
+                    "mix_color": api.get(
+                        "/v1/calibrations", kind="mix_color", printer=opts["--printer"], limit=_PAGE
+                    )["calibrations"],
+                }
+                if any(len(rows) >= _PAGE for rows in stored.values()):
+                    raise GateFailure(
+                        f"3d-api holds {_PAGE} or more records of a kind: cannot tell whether this readout "
+                        "was recorded before; record it with --offline and `3d settings import`",
+                        command=_CMD,
+                    )
+                mode = "api"
+            except (ApiConfigError, ApiError) as e:
+                if isinstance(e, ApiError) and e.status != _UNREACHABLE:
+                    raise UsageError(f"3d-api refused the request: {e}", command=_CMD) from e
+                notes.append(f"3d-api unreachable ({e}): writing the settings-history buffer instead")
+        if mode == "api":
+            assert api is not None
+            for item, res in zip(pl.items, results, strict=True):
+                hit = mix_record.existing(item, stored[item.kind], sha)
+                if hit is not None:
+                    res.update(status="exists", id=hit["id"])
+                    continue
+                try:
+                    rec = api.post("/v1/calibrations", item.body)
+                except ApiError as e:
+                    res.update(status="refused", error=e.message)
+                    failed += 1
+                    continue
+                res.update(status="recorded", id=rec["id"])
+        else:
+            try:
+                have = hb.buffered_uids(opts["--printer"])
+                bfile = None
+                for item, res in zip(pl.items, results, strict=True):
+                    if item.uid in have:
+                        res["status"] = "buffered-already"
+                        continue
+                    bfile = hb.append(opts["--printer"], item.line)
+                    res["status"] = "buffered"
+            except hb.HistoryBufferError as e:
+                raise UsageError(f"settings-history buffer: {e}", command=_CMD) from e
+            where = bfile or "the buffer of " + opts["--printer"]
+            notes.append(f"buffer: {where}; next: `3d settings import` (idempotent by uid)")
+    summary = {
+        "readout": str(path),
+        "sha256": sha,
+        "printer": opts["--printer"],
+        "mode": mode,
+        "records": results,
+        "skipped": pl.skipped,
+        "notes": notes,
+    }
+    verb = {"planned": "would record", "recorded": "recorded", "exists": "already recorded",
+            "refused": "REFUSED", "buffered": "buffered", "buffered-already": "already buffered"}
+    lines = [f"mix record {path.name} (sha256 {sha[:12]}) for {opts['--printer']}: {mode}"]
+    lines.extend(
+        f"  {verb[r['status']]}"
+        + (f" #{r['id']}" if "id" in r else "")
+        + f" {r['label']} (swatch {r['swatch']})"
+        + (f": {r['error']}" if "error" in r else "")
+        for r in results
+    )
+    lines += [f"  skipped: {t}" for t in pl.skipped] + [f"  {n}" for n in notes]
+    if mode == "plan":
+        lines.append("add --yes to write these records")
+    _emit(summary, lines, as_json)
+    if failed:
+        print(f"{failed} record(s) refused by 3d-api", file=sys.stderr)
+        raise GateFailure(f"{failed} record(s) refused by 3d-api", command=_CMD, silent=True)
+    return 0
+
+
 def _recipes(argv: list[str]) -> int:
     from slicing.mix_model import pick
 
@@ -914,7 +1198,7 @@ def _recipes(argv: list[str]) -> int:
     lines = [
         f"mix recipes for {target} (layer {layer:g} mm, cycle ≤ {max_cycle}, "
         f"no colour band over {p.rules.run_limit_mm:g} mm, "
-        + ", ".join(f"T{s.slot} {s.hex}" for s in slots)
+        + ", ".join(_slot_text(s) for s in slots)
         + ")"
     ]
     if p.target_source is not None:
@@ -1000,7 +1284,10 @@ def _tester(argv: list[str]) -> int:
         "candidates": [
             {
                 k: c[k]
-                for k in ("number", "role", "pattern", "hex", "delta_e", "filament")
+                for k in (
+                    "number", "role", "pattern", "hex", "delta_e", "filament", "measured"
+                )
+                if k in c
             }
             for c in manifest["candidates"]
         ],
@@ -1019,7 +1306,13 @@ def _tester(argv: list[str]) -> int:
     lines += [
         f"  settings: {summary['settings_source']}",
         *(
+            [f"  colours: {', '.join(_slot_text(s) for s in p.slots)}"]
+            if any(s.nominal_hex for s in p.slots)
+            else []
+        ),
+        *(
             f"  {c['number']:>2} {c['role']:<8} {c['pattern']:<8} {c['hex']}  ΔE {c['delta_e']:.2f}  filament {c['filament']}"
+            + ("  measured" if c.get("measured") else "")
             for c in summary["candidates"]
         ),
         *(
@@ -1056,8 +1349,12 @@ def run(argv: list[str]) -> int:
         return _tester(rest)
     if sub == "readout":
         return _readout(rest)
+    if sub == "fit":
+        return _fit(rest)
+    if sub == "record":
+        return _record(rest)
     raise InvalidArgument(
-        "subcommand", sub, ["check", "gcode", "pattern", "profile", "readout", "recipes", "target", "tester"], command=_CMD
+        "subcommand", sub, ["check", "fit", "gcode", "pattern", "profile", "readout", "recipes", "record", "target", "tester"], command=_CMD
     )
 
 

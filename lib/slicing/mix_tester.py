@@ -101,15 +101,20 @@ class LoadedSlot:
     name: str = ""
     spool_id: int | None = None
     filament_id: int | None = None
+    nominal_hex: str | None = None  # Spoolman's colour when `hex` is a measured (corrected) one
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        d: dict[str, Any] = {
             "slot": self.slot,
             "hex": self.hex,
             "name": self.name,
             "spool_id": self.spool_id,
             "filament_id": self.filament_id,
         }
+        if self.nominal_hex is not None:
+            d["measured"] = True
+            d["nominal_hex"] = self.nominal_hex
+        return d
 
 
 @dataclass
@@ -813,6 +818,7 @@ def build(
                     "number": sw.number,
                     "slot": sw.slot.slot,
                     "hex": sw.hex,
+                    **({"nominal_hex": sw.slot.nominal_hex} if sw.slot.nominal_hex else {}),
                     "swatch_box": box(sw.swatch_box),
                     "label_box": box(sw.label_box),
                     "calibration": {

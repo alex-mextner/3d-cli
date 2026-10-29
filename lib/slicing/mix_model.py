@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Iterator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import lru_cache
 
 from printops.color import (
@@ -83,6 +83,8 @@ class Candidate:
     )
     stripe_far: float | None = None
     role: str = ""
+    measured: bool = False  # hex is a measured mix_color record, not the model's prediction
+    model_hex: str | None = None  # the model's prediction, kept when `hex` is a measurement
 
     @property
     def cycle(self) -> int:
@@ -108,6 +110,7 @@ class Candidate:
             if self.stripe_far is None
             else round(self.stripe_far, 2),
             "score": round(self.score, 2),
+            **({"measured": True, "model_hex": self.model_hex} if self.measured else {}),
         }
 
 
@@ -372,14 +375,4 @@ def pick(ranked: Sequence[Candidate], count: int) -> list[Candidate]:
 
 
 def _role(c: Candidate, role: str) -> Candidate:
-    return Candidate(
-        c.weights,
-        c.slots,
-        c.pattern,
-        c.hex,
-        c.lab,
-        c.delta_e,
-        c.stripe_near,
-        c.stripe_far,
-        role,
-    )
+    return replace(c, role=role)
