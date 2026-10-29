@@ -229,6 +229,9 @@ def _run_steps(
     for number, step in enumerate(plan.browser_steps[1:], start=2):
         code, out = runner([*base, *step])
         if code != 0:
+            login = _login_outcome(plan, base, runner)
+            if login is not None:
+                return login, out  # the step bounced to a login wall: fill it, do not report a form error
             left = "; ".join(
                 f"{k}: {v}" for k, v in plan.fields.items() if k not in ("remix_of",)
             )

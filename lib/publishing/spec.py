@@ -83,10 +83,12 @@ class PublishSpec:
 
 def select_files(project: Path) -> FileSet:
     found: list[PublishFile] = []
+    root = project.resolve()
     for sub in SCAN_DIRS:
         folder = project / sub
-        if not folder.is_dir():
-            continue
+        inside = folder.resolve() == root or root in folder.resolve().parents
+        if not folder.is_dir() or not inside:
+            continue  # a symlinked folder must not smuggle in files from outside
         for path in sorted(folder.iterdir()):
             role = ROLE_BY_EXT.get(path.suffix.lower())
             if (
@@ -110,6 +112,8 @@ def select_files(project: Path) -> FileSet:
 
 def _text(data: dict[str, Any], key: str, *, required: bool = False) -> str:
     value = data.get(key)
+    if isinstance(value, str):
+        value = value.strip()
     if value is None or value == "":
         if required:
             raise InvalidArgument(
@@ -123,7 +127,7 @@ def _text(data: dict[str, Any], key: str, *, required: bool = False) -> str:
         raise InvalidArgument(
             f"{SPEC_NAME}: {key}", repr(value), ["a text"], command="models"
         )
-    return value.strip()
+    return value
 
 
 def _default_images(project: Path) -> tuple[Path, ...]:

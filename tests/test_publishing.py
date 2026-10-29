@@ -5,6 +5,7 @@ loopback Thingiverse fake and a recording agent-browser runner. No real site is 
 from __future__ import annotations
 
 import json
+import shutil
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
@@ -144,6 +145,44 @@ def test_load_spec_reads_every_field_and_defaults_images_to_previews(
     assert [i.name for i in spec.images] == [
         "iso.png"
     ]  # the .dims.json is not an image
+
+
+def test_a_symlinked_print_folder_is_not_scanned(tmp_path: Path) -> None:
+    project = make_project(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "private.scad").write_text("cube(1);", encoding="utf-8")
+    shutil.rmtree(project / "print")
+    (project / "print").symlink_to(outside, target_is_directory=True)
+    assert "private.scad" not in [f.name for f in select_files(project).files]
+
+
+def test_whitespace_only_required_fields_are_refused(tmp_path: Path) -> None:
+    project = make_project(tmp_path, YAML.replace("title: Wall plug", 'title: "   "'))
+    with pytest.raises(InvalidArgument):
+        load_spec(project)
+
+
+def test_a_form_step_that_lands_on_a_login_page_fills_the_login(
+    tmp_path: Path,
+) -> None:
+    item = evaluate(make_project(tmp_path), "makerworld").plans[0]
+
+    calls: list[list[str]] = []
+
+    def bounced(argv: Sequence[str]) -> tuple[int, str]:
+        calls.append(list(argv))
+        if "get" in argv and "cdp-url" in argv:
+            return 0, "ws://127.0.0.1:9222/devtools/browser/x"
+        if "get" in argv and "url" in argv:
+            # the home page is fine; after the failed Upload click the site shows its login page
+            return 0, "https://makerworld.com/en/login" if len(calls) > 3 else "https://makerworld.com/en"
+        return (1, "no element matches") if "click" in argv else (0, "")
+
+    outcome = execute.publish_browser(item, bounced)
+    assert not outcome.ok
+    assert "press Sign in" in outcome.message
+    assert any(c[:2] == ["keychain", "fill"] for c in calls)
 
 
 def test_default_images_skip_symlinks_that_leave_the_project(tmp_path: Path) -> None:
