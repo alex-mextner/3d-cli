@@ -102,6 +102,29 @@ class Parsed:
     defines: list[str] = field(default_factory=list)
 
 
+def _next_value(argv: Sequence[str], i: int, what: str, sub: str) -> str:
+    if i + 1 >= len(argv):
+        raise UsageError(what, command=f"scad {sub}")
+    return argv[i + 1]
+
+
+def _long_option(
+    argv: Sequence[str], i: int, valued: Sequence[str], sub: str
+) -> tuple[str, str, int]:
+    """(name, value, index of the last consumed argument) of `--opt=v` / `--opt v`."""
+    arg = argv[i]
+    name, eq, val = arg.partition("=")
+    if name not in valued:
+        raise UsageError(
+            f"unknown option: {arg}",
+            command=f"scad {sub}",
+            remediation=[f"Run `3d scad {sub} --help` for the accepted options."],
+        )
+    if eq:
+        return name, val, i
+    return name, _next_value(argv, i, f"{name} needs a value", sub), i + 1
+
+
 def _parse(
     argv: Sequence[str],
     sub: str,
@@ -116,31 +139,14 @@ def _parse(
     while i < len(argv):
         arg = argv[i]
         if arg == "-D" and defines:
+            out.defines.append(_next_value(argv, i, "-D needs a 'var=value' argument", sub))
             i += 1
-            if i >= len(argv):
-                raise UsageError(
-                    "-D needs a 'var=value' argument", command=f"scad {sub}"
-                )
-            out.defines.append(argv[i])
         elif arg.startswith("-D") and len(arg) > 2 and defines:
             out.defines.append(arg[2:])
         elif arg in bools:
             out.flags.add(arg)
         elif arg.startswith("--"):
-            name, eq, val = arg.partition("=")
-            if name not in valued:
-                raise UsageError(
-                    f"unknown option: {arg}",
-                    command=f"scad {sub}",
-                    remediation=[
-                        f"Run `3d scad {sub} --help` for the accepted options."
-                    ],
-                )
-            if not eq:
-                i += 1
-                if i >= len(argv):
-                    raise UsageError(f"{name} needs a value", command=f"scad {sub}")
-                val = argv[i]
+            name, val, i = _long_option(argv, i, valued, sub)
             out.values[name] = val
         else:
             out.positionals.append(arg)
@@ -396,7 +402,13 @@ def _human_size(n: int) -> str:
 def _geometry_issues(output: str) -> tuple[list[str], list[str]]:
     """(blocking issues, warnings) found in OpenSCAD's export output."""
     blocking: list[str] = []
-    if re.search(r"not.*manifold|non-manifold", output, re.IGNORECASE):
+    # OpenSCAD 2021.01 (CGAL) says "The given mesh is not closed! Unable to convert to
+    # CGAL_Nef_Polyhedron"; newer builds say "Input mesh is not closed" / "NotManifold".
+    if re.search(
+        r"not.*manifold|non-manifold|mesh is not closed|unable to convert to cgal",
+        output,
+        re.IGNORECASE,
+    ):
         blocking.append("Non-manifold geometry (holes in mesh)")
     if re.search(r"self-intersect", output, re.IGNORECASE):
         blocking.append("Self-intersecting geometry")
@@ -515,35 +527,36 @@ def extract_params(text: str) -> list[Param]:
     return params
 
 
+def _param_row(q: Param) -> dict[str, str]:
+    row = {"name": q.name, "value": q.value, "type": q.type}
+    if q.range:
+        row["range"] = q.range
+    if q.options:
+        row["options"] = q.options
+    if q.description:
+        row["description"] = q.description
+    return row
+
+
+def _param_constraint(q: Param) -> str:
+    constraint = f"[{q.range}]" if q.range else f"[{q.options}]" if q.options else ""
+    return f"{constraint} {q.description}".strip() if q.description else constraint
+
+
 def cmd_params(argv: list[str]) -> int:
     p = _parse(argv, "params", bools=("--json",), defines=False)
     _need_positionals(p, "params", 1, "3d scad params <in.scad> [--json]")
     inp = _require_file(p.positionals[0], "params")
     params = extract_params(inp.read_text(encoding="utf-8", errors="replace"))
     if "--json" in p.flags:
-        rows = []
-        for q in params:
-            row = {"name": q.name, "value": q.value, "type": q.type}
-            if q.range:
-                row["range"] = q.range
-            if q.options:
-                row["options"] = q.options
-            if q.description:
-                row["description"] = q.description
-            rows.append(row)
-        print(json.dumps(rows, indent=2))
+        print(json.dumps([_param_row(q) for q in params], indent=2))
         return 0
     print(f"Parameters in: {inp}")
     print("=" * 47)
     print(f"{'NAME':<20} {'VALUE':<15} {'TYPE':<10} CONSTRAINT/DESC")
     print("-" * 47)
     for q in params:
-        constraint = (
-            f"[{q.range}]" if q.range else f"[{q.options}]" if q.options else ""
-        )
-        if q.description:
-            constraint = f"{constraint} {q.description}".strip()
-        print(f"{q.name:<20} {q.value:<15} {q.type:<10} {constraint}")
+        print(f"{q.name:<20} {q.value:<15} {q.type:<10} {_param_constraint(q)}")
     return 0
 
 

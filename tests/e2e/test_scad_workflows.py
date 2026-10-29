@@ -82,6 +82,7 @@ def test_export_stl_fails_on_non_manifold_geometry(tmp_path: Path) -> None:
 
 
 def test_export_stl_missing_input_is_a_usage_error(tmp_path: Path) -> None:
+    """A modeller mistypes the .scad path: export-stl exits 2 and says the file was not found."""
     result = run_cli(
         tmp_path,
         "scad",
@@ -95,17 +96,21 @@ def test_export_stl_missing_input_is_a_usage_error(tmp_path: Path) -> None:
 
 
 def test_validate_reports_syntax_ok_and_failure(tmp_path: Path) -> None:
+    """A modeller validates a good model and one with a failing assert(): only the second is rejected."""
     good = _write(tmp_path, "good.scad", "echo(hello=1);\ncube(1);\n")
     bad = _write(tmp_path, "bad.scad", 'assert(false, "nope");\ncube(1);\n')
 
     ok = run_cli(tmp_path, "scad", "validate", str(good))
     fail = run_cli(tmp_path, "scad", "validate", str(bad))
 
-    assert ok.returncode == 0 and "Syntax OK" in ok.stdout and "hello" in ok.stdout
-    assert fail.returncode == 1 and "Validation failed" in fail.stdout
+    assert ok.returncode == 0
+    assert "Syntax OK" in ok.stdout and "hello" in ok.stdout
+    assert fail.returncode == 1
+    assert "Validation failed" in fail.stdout
 
 
 def test_params_lists_customizer_parameters_as_json(tmp_path: Path) -> None:
+    """A script reads the Customizer parameters of a model as JSON, ignoring module-local variables."""
     model = _write(
         tmp_path,
         "p.scad",
@@ -130,6 +135,7 @@ def test_params_lists_customizer_parameters_as_json(tmp_path: Path) -> None:
 
 
 def test_next_version_counts_from_existing_files(tmp_path: Path) -> None:
+    """A modeller asks for the next free version number of a part saved as part_NNN.scad."""
     (tmp_path / "bracket_001.scad").write_text("", encoding="utf-8")
     (tmp_path / "bracket_002.scad").write_text("", encoding="utf-8")
 
@@ -165,6 +171,7 @@ def test_section_writes_png_and_removes_its_temp_file(tmp_path: Path) -> None:
 
 
 def test_section_requires_module(tmp_path: Path) -> None:
+    """A modeller runs section without --module: it exits 2 and names the missing option."""
     model = _write(tmp_path, "part.scad", "cube(1);\n")
 
     result = run_cli(tmp_path, "scad", "section", str(model), str(tmp_path / "c.png"))
@@ -176,6 +183,7 @@ def test_section_requires_module(tmp_path: Path) -> None:
 def test_section_color_renders_an_assembly_honouring_the_cut_contract(
     tmp_path: Path,
 ) -> None:
+    """A modeller cuts a coloured assembly in half: the camera line is printed and the PNG written."""
     model = _write(
         tmp_path,
         "asm.scad",
@@ -204,6 +212,7 @@ def test_section_color_renders_an_assembly_honouring_the_cut_contract(
 
 
 def test_preview_and_multi_preview_write_pngs(tmp_path: Path) -> None:
+    """A modeller renders one preview PNG and the six-view gallery of a cube."""
     model = _write(tmp_path, "cube.scad", "cube(10);\n")
     single = tmp_path / "one.png"
     gallery = tmp_path / "gallery"
@@ -230,6 +239,7 @@ def test_preview_and_multi_preview_write_pngs(tmp_path: Path) -> None:
 
 
 def test_help_lists_every_subcommand(tmp_path: Path) -> None:
+    """A user runs `3d scad --help` and sees every subcommand."""
     result = run_cli(tmp_path, "scad", "--help")
 
     assert result.returncode == 0
