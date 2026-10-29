@@ -12,7 +12,7 @@ from dataclasses import dataclass
 
 from ..calibration_plate import Plate, PlateContext
 from ..calibration_underlay import UnderlayDecl, check_declarations
-from . import dense, dense2, filament
+from . import dense, dense2, filament, fit
 
 
 @dataclass(frozen=True)
@@ -29,6 +29,7 @@ PLATES: dict[str, PlateDef] = {
     filament.PLATE_ID: PlateDef(filament.build, filament.TESTS, filament.UNDERLAY),
     dense.PLATE_ID: PlateDef(dense.build, dense.TESTS, dense.UNDERLAY),
     dense2.PLATE_ID: PlateDef(dense2.build, dense2.TESTS, dense2.UNDERLAY),
+    fit.PLATE_ID: PlateDef(fit.build, fit.TESTS, fit.UNDERLAY),
 }
 
 

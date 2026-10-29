@@ -18,6 +18,7 @@ import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import calibrate_fit_cli
 from cli.registry import Command
 from errors import GateFailure, InputNotFound, UsageError
 from topcam import photo_cli
@@ -37,7 +38,7 @@ USAGE = """3d calibrate plan --printer P [--head T] [--spool ID] [--plate PLATE]
 3d calibrate check FILE.gcode --printer P [--spools T1=ID,…] [--plate PLATE]
                    [--accept calibration:KIND[,…] --reason TEXT]
 3d calibrate underlay-map PLATE.json --rectify R.json [--image IMG] [--cell-mm N] [--json]
-3d calibrate gen pa|flow|combo|temp|shaper|plate1|dense|dense2 --printer P -o OUT [--material PLA] [--color #RRGGBB]
+3d calibrate gen pa|flow|combo|temp|shaper|plate1|dense|dense2|fit --printer P -o OUT [--material PLA] [--color #RRGGBB]
                  [--nozzle-temp C] [--only T,…] [--skip T,…] [--pa-range LOW:HIGH] [--pa-step S] [--no-underlay]
                  [--underlay-tool T] [--head-colours T1=#RRGGBB,…]
                  [--machine-preset NAME] [--process-preset NAME] [--filament-preset NAME]
@@ -161,6 +162,8 @@ Examples:
   3d calibrate gen dense2 --printer k1se --filament-preset 'Orange PLA @K1SE' -o k1se_dense2_orange.gcode
   3d calibrate gen plate1 --printer k1se --filament-preset 'Orange PLA @K1SE' --no-underlay -o k1se_plate1_bare.gcode
   3d calibrate gen plate1 --printer MULTI --filament-preset 'Orange PLA @K1SE' --color '#000000' --head-colours T1=#000000,T3=#2D9E59,T4=#FFFFFF --underlay-tool T4 --head T1 -o multi_plate1.gcode
+  3d calibrate gen fit --printer k1se --filament-preset 'Orange PLA @K1SE' -o k1se_fit_orange.gcode
+  3d calibrate fit quick --printer k1se --material PLA --yes
   3d calibrate underlay-map k1se_plate1.json --rectify rect/rect.json --cell-mm 5 --json"""
 
 USAGE += (
@@ -173,6 +176,8 @@ USAGE += (
     + "\n\nExamples:\n"
     + photo_cli.EXAMPLES
 )
+
+USAGE += "\n\nQuick fit calibration (#573; `3d calibrate fit --help` prints the same):\n" + calibrate_fit_cli.USAGE
 
 PREFIX = "calibrate"
 COMMON_VALUES = {"--api", "--token"}
@@ -971,6 +976,7 @@ SUBS = {
     "show": _show,
     "check": _check,
     "gen": _gen,
+    "fit": calibrate_fit_cli.run,
     "photo": photo_cli.photo,
     "rectify": photo_cli.rectify,
     "underlay-map": _underlay_map,

@@ -55,7 +55,9 @@ CLEARANCE_FIT_TYPES = (
     "snap",
     "sliding",
     "tight",
-)  # types whose coupon reads a free/press/fused gap
+)  # types whose coupon reads the smallest free gap
+COUPON_FIT_TYPES = (*CLEARANCE_FIT_TYPES, "press")  # types a coupon ladder calibrates
+PRESS_MAX_INTERFERENCE_MM = 1.0  # a press reading below -1 mm is a typo, not a calibration
 WILDCARD = "*"
 CORRECTION_STATUS = {
     "calibration": "calibrated",
@@ -731,7 +733,13 @@ def validate_fit_clearance(
         raise FitTableError(
             f"fit_clearance.result: {result!r} is not one of {list(FIT_RESULTS)}"
         )
-    gap = _num(record.get("gap_mm"), "fit_clearance.gap_mm", minimum=0)
+    # a press reading is signed: the gap of an undersized hole is NEGATIVE (-interference); every other
+    # fit type is a clearance, never below zero
+    gap = _num(
+        record.get("gap_mm"),
+        "fit_clearance.gap_mm",
+        minimum=-PRESS_MAX_INTERFERENCE_MM if fit_type == "press" else 0,
+    )
     return {"fit_type": fit_type, "shape": shape, "gap_mm": gap, "result": result}
 
 
@@ -740,30 +748,37 @@ def corrections_from_fit_clearance(
     *,
     printer: str,
     material: str,
-    nozzle_mm: float,
+    nozzle_mm: float | None,
     measured_at: str,
     layer_height_mm: float | None = None,
+    note: str = "",
     table: FitTable | None = None,
 ) -> list[Correction]:
     """Turn coupon readings into correction rows (source `calibration`), one per fit type x shape.
 
     For every clearance fit type (snap, sliding, tight) the smallest gap that read `free` is the measured
-    real clearance; the correction is that gap minus the table's base clearance, so the resolved number moves
-    to what the coupon proved. A group with no `free` gap yields no row (the coupon did not bracket the fit).
-    press/glue records are validated but not converted: a press result needs an interference sweep.
+    real clearance; for `press` the LARGEST gap that still read `press` (the least interference that holds).
+    The correction is that gap minus the table's signed target (clearance - interference), so the resolved
+    number moves to what the coupon proved. A group without such a reading yields no row (the coupon did not
+    bracket the fit). `glue` is validated but not converted: no coupon ladder exists for an adhesive film.
+    `note` is appended to each row's note (the record id of the caller's store).
     """
     _instant(measured_at, "measured_at")
     tbl = table or load_table()
-    free_gaps: dict[tuple[str, str], list[float]] = {}
+    picked: dict[tuple[str, str], list[float]] = {}
     for record in records:
         rec = validate_fit_clearance(record, tbl)
-        if rec["fit_type"] in CLEARANCE_FIT_TYPES and rec["result"] == "free":
-            free_gaps.setdefault((rec["fit_type"], rec["shape"]), []).append(
+        wanted = "press" if rec["fit_type"] == "press" else "free"
+        if rec["fit_type"] in COUPON_FIT_TYPES and rec["result"] == wanted:
+            picked.setdefault((rec["fit_type"], rec["shape"]), []).append(
                 rec["gap_mm"]
             )
     rows = []
-    for (fit_type, shape), gaps in sorted(free_gaps.items()):
-        delta = round(min(gaps) - tbl.fit_types[fit_type].clearance_mm_per_face, 4)
+    for (fit_type, shape), gaps in sorted(picked.items()):
+        base = tbl.fit_types[fit_type]
+        gap = max(gaps) if fit_type == "press" else min(gaps)
+        delta = round(gap - (base.clearance_mm_per_face - base.interference_mm), 4)
+        reading = "largest press gap" if fit_type == "press" else "smallest free gap"
         rows.append(
             Correction(
                 delta_mm=delta,
@@ -775,7 +790,14 @@ def corrections_from_fit_clearance(
                 shape=shape,
                 fit_type=fit_type,
                 measured_at=measured_at,
-                note=f"smallest free gap {min(gaps)} mm of {len(gaps)} free reading(s)",
+                note="; ".join(
+                    s
+                    for s in (
+                        f"{reading} {gap:g} mm of {len(gaps)} reading(s)",
+                        note,
+                    )
+                    if s
+                ),
             )
         )
     return rows

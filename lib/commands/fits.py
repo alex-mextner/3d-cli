@@ -190,7 +190,8 @@ def _describe(p: dict[str, Any]) -> str:
             else ""
         )
         note = f"  ({p['note']})" if p["note"] else ""
-        return f"{label:<12} {p['delta_mm']:+g} mm [{status}] {scope}{extra}{note}"
+        when = f", measured {p['measured_at']}" if p.get("measured_at") else ""
+        return f"{label:<12} {p['delta_mm']:+g} mm [{status}{when}] {scope}{extra}{note}"
     if kind == "material_correction":
         if p["id"] == "none":
             return f"material     {p['message']}"

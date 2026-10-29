@@ -58,6 +58,11 @@ rendering, slicing support, and verification:
 - `fits.py`
 - `fits_apply.py`
 - `fits_registry.py`
+- `calibrate_fit.py`
+- `calibrate_fit_cli.py`
+- `calibrate_fit_store.py`
+- `fit_coupon.py`
+- `fit_coupon_export.py`
 - `frame_check.py`
 - `gcode_resume.py`
 - `gcode_labels.py`
@@ -300,6 +305,11 @@ Every current root Python module is listed here so future additions are intentio
 - `vision_fit.py` — `3d printer vision fit-head`: numpy ridge-logistic head for tier (b) on user-labelled frames, block cross-validation, `tier-b-head.json`.
 - `calib_rectify.py` — calibration photo → rectified bed-mm image: ArUco fiducials (DICT_4X4_50), homography, external scale reference (`3d calibrate photo|rectify`, #342).
 - `calib_underlay_map.py` — the bare underlay of a rectified plate photo as the first-layer map: per-cell brightness/texture, uniformity, bed-tilt/z-offset hints (`3d calibrate underlay-map`, #320).
+- `calibrate_fit.py` — logic of `3d calibrate fit` (#573): the coupon plan (ladders, bed fit, print time, readout per ladder), the result reader (`--result step=N`/words/`--measured` caliper numbers → readings → the gap to trust with ties, non-monotonic and all-fused handling) and the per-printer x material MISSING/STALE/PARTIAL check.
+- `calibrate_fit_cli.py` — the `3d calibrate fit plan|gen|quick|read|record|check` front end (argparse + printing only, stdlib-only at import; forwarded from `commands/calibrate.py`).
+- `calibrate_fit_store.py` — where `fit_clearance` calibration records live: 3d-api (`/v1/calibrations`, kind `fit_clearance`) plus the offline settings-history JSONL buffer; turns records into `fits.Correction` rows for `fits_sources/calibration.py`.
+- `fit_coupon.py` — the quick fit coupon: six 7-step ladders (sliding/tight/press holes, sliding/snap/press slots) stepped around the fit table, OpenSCAD source and bed layout, raised 1 mm-stroke step digits, print-time estimate.
+- `fit_coupon_export.py` — writes the coupon as OpenSCAD, STL, 3MF (stdlib zip writer, bed coordinates) and a JSON map; renders with OpenSCAD.
 - `vision_detach.py` — tier-a detached-part check for `3d printer vision` (`vision_part_detached`): bare build plate in the near wall band of a part's footprint prism, from the camera calibration; see `docs/research/printer-vision-detached-part.md`.
 - `vision_geometry.py` — printer camera model (pinhole/fisheye), bed/volume/silhouette masks at the current Z, calibration fit CLI; the U1 calibration ships in `lib/data/vision/`.
 - `vision_ghost.py` — 3D ghost of the rest of a print over a printer camera frame: collects a job's walls from one G-code pass, paints them through a `vision_geometry` camera into a sparse per-frame blend table (used by the U1 camera proxy).

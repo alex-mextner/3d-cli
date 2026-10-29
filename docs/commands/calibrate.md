@@ -13,10 +13,11 @@ Talks to 3d-api like [`3d printops`](printops.md) (`PRINTOPS_API`, `PRINTOPS_TOK
 3d calibrate show ID
 3d calibrate check FILE.gcode --printer P [--spools T1=ID,…] [--plate PLATE]
                    [--accept calibration:KIND[,…] --reason TEXT]
-3d calibrate gen pa|flow|combo|temp|shaper|plate1|dense|dense2 --printer P -o OUT [--material PLA] [--color #RRGGBB]
+3d calibrate gen pa|flow|combo|temp|shaper|plate1|dense|dense2|fit --printer P -o OUT [--material PLA] [--color #RRGGBB]
                  [--nozzle-temp C] [--only T,…] [--skip T,…] [--pa-range LOW:HIGH] [--pa-step S]
                  [--machine-preset NAME] [--process-preset NAME] [--filament-preset NAME]
                  [--head T] [--spool ID] [--api URL] [--token TOKEN]
+3d calibrate fit plan|gen|quick|read|record|check …   quick fit calibration (section `fit` below)
   common (all but gen, which takes --api/--token only for its default filament preset): [--json] [--api URL] [--token TOKEN]
 ```
 
@@ -45,6 +46,7 @@ other values than the recorded ones.
 | `belt_tension` | printer | — | assumed | belts, kinematics | — |
 | `filament_color` | filament | yes | required, policy `off` | — | — (read by the mix model, `3d mix`) |
 | `mix_color` | printer × mix | — | assumed | — | — (read by the mix check of a plate, #418) |
+| `fit_clearance` | head × nozzle × filament | no | required, policy `warn` | nozzle_swap, nozzle_diameter, hotend | — (the readings of `3d calibrate fit`, read by `3d fits resolve`) |
 
 *Baseline* `required`: a head without a record for the loaded filament needs one.
 *Baseline* `assumed`: no record means the factory state, which holds until maintenance invalidates
@@ -348,6 +350,104 @@ cd lib && uv run --project .. --with segno --with pillow \
 - Before printing: `3d gcode-thumbnails add`, `3d slice-warnings record` with
   `NAME.slice.log`, and `3d print-preflight --printer u1`.
 
+## `fit` — quick fit calibration ([#573](https://github.com/alex-mextner/3d-cli/issues/573))
+
+One short print (about 10 minutes) and the fit table knows your printer and plastic. The coupon is six
+LADDERS of 7 steps, each a fit type on a shape stepped around the value of the
+[fit table](../contracts/fits.md) (`lib/data/fits.yaml`):
+
+| # | Ladder | Part | Gaps per face (mm) |
+|---|---|---|---|
+| 1 | sliding / round | Ø4 pin in holes | 0.05 0.10 … 0.35 |
+| 2 | tight / round | the same pin | 0.00 0.05 … 0.30 |
+| 3 | press / round | the same pin, UNDERSIZED holes | −0.15 −0.125 … 0.00 (negative = interference) |
+| 4 | sliding / slot | 2 mm tab in slots | 0.05 … 0.35 |
+| 5 | snap / slot | the tab of a snap hook | 0.15 … 0.45 |
+| 6 | press / slot | the tab, undersized slots | −0.15 … 0.00 |
+
+Each step has a raised seven-segment digit (strokes 1 mm, 0.6 mm high) on a lip in front of it; the ladder number
+is at the left end of its row; step 1 is the smallest gap. Two spare pins Ø4.00 and two tabs 2.00×6.00 are printed
+upright, like the holes, so the XY accuracy that fits depend on is what you measure. `--gap-offset MM` shifts every
+gap (negative = tighter). The coupon is 98.5×55×4.5 mm and fits both the K1 SE (220×220) and the U1 (270×270) bed
+with a 5 mm margin.
+
+```
+3d calibrate fit plan --printer P [--material M] [--fit snap,sliding,tight,press] [--shape round,slot] [--nozzle MM] [--gap-offset MM]
+3d calibrate fit gen --printer P [--material M] --out coupon.3mf [--fit ..] [--shape ..] [--gap-offset MM]
+3d calibrate fit quick --printer P [--material M] [--out FILE.3mf] [--yes]
+3d calibrate fit read --printer P [--material M] --fit F --shape S (--result R | --measured D1,..,D7) [--mating-mm MM] | --from-readout FILE.json
+3d calibrate fit record (the flags of read) [--head T1] [--spool ID | --filament ID] [--coupon NAME] [--note TEXT] [--yes]
+3d calibrate fit check [--printer P] [--material M] [--max-age-days N] [--nozzle MM]
+  common: [--json] (schema `3d.calibrate_fit/1`)   3d-api: [--api URL] [--token TOKEN] (read, record, check)
+```
+
+- **`plan`** lists the coupons, their gaps and hole/slot sizes, footprint and bed fit, the print-time estimate
+  (house model: plastic volume at 10 mm³/s plus 0.6 s per object visit of a layer, without heating) and the
+  exact readout instruction and `record` command of every ladder. Both the K1 SE and the U1 are known (bed, nozzle
+  and head come from `lib/data/printers.yaml` and `fleet/printers.yaml`).
+- **`gen`** renders every object with OpenSCAD and writes `NAME.3mf` (one build item per ladder, millimetres, in
+  bed coordinates, centred on the printer's bed), `NAME.stl` (one watertight mesh, passes `3d mesh`), `NAME.scad`
+  and `NAME.json` (the map: plan + object boxes). Take the 3MF through the usual flow: `3d prep` / `3d arrange` /
+  `3d retarget` for the printer, so the slicer settings are those of the real profile. For G-code with the
+  printer's slicer presets in one step, the same coupon is a plate of the existing machinery:
+  `3d calibrate gen fit --printer k1se --filament-preset 'Orange PLA @K1SE' -o fit.gcode` (`--only
+  sliding_round,snap_slot` prints single ladders).
+- **`quick`** = plan + gen with the defaults (all ladders, the printer's nozzle and head and material). Dry run
+  until `--yes`; the file is `fit-coupon-<printer>-<material>.3mf` unless `--out`.
+- **`read`** is the result reader. Per ladder push the spare pin/tab into every step and report one word per step:
+  `free` goes in and out by hand without force, `press` needs a push and then holds, `fused` will not go in (hole
+  closed) or cracked. Pass `--result step=N` (N = the first `free` step; for a press ladder the last step that still
+  grips), seven words (`fused,press,press,free,free,free,free`) or `K=word` pairs. With calipers pass
+  `--measured D1,…,D7` (the hole diameters / slot widths; `--mating-mm` is the measured pin/tab, default the
+  nominal): a step reads `free` when its real gap `(D − pin)/2` reaches the table's value. The reader picks, per
+  ladder, the smallest `free` gap (the largest `press` gap for press fits) and prints `delta_mm` against the table
+  and the clearance before → after.
+  - two readings of one gap keep the tighter result (reported); a looser step below a tighter one is
+    **non-monotonic**: recorded with a warning; every step free (or every press step gripping) records with a
+    warning that the ladder did not bracket the fit from that side;
+  - **no `free` step** (all fused, or only fused/press) is exit 1: `every step is fused: … widen the range (print the
+    coupon with a positive --gap-offset, e.g. --gap-offset 0.3)`; nothing is stored. The same for a press ladder that
+    never grips or always cracks. Read the wider coupon with the same `--gap-offset`.
+- **`record`** is `read` plus the store: a `fit_clearance` calibration record
+  (`fleet/calibrations.yaml`, scope head × nozzle × filament, values `readings` = JSON list of the S0 contract
+  `{fit_type, shape, gap_mm, result}`). Dry run (the pick, the clearance before → after, where it would go)
+  unless `--yes`. The new ladders replace the older readings of the same fit × shape; the others are carried over
+  (a record of the same scope supersedes the previous one in 3d-api). In 3d-api the record takes the spool bound to
+  the head (`3d printops spool load`) or `--spool ID` / `--filament ID`; a `--material` that is not what is loaded is
+  refused before anything is stored. Without 3d-api (no URL configured, or it does not answer) the record is one
+  `printops.settings_change/1` line in `~/.local/share/3d-cli/printer-history/<printer>.jsonl` — the offline buffer
+  `3d settings import --spool UID=ID` replays into 3d-api (idempotent by uid; the imported record replaces the
+  buffer line in every read).
+- **`check`** reports per printer × material (all fleet printers × the materials they have records for and the
+  model's default, or `--printer`/`--material`): `MISSING` (no record), `STALE` (older than `--max-age-days`,
+  default 180, or taken with another nozzle than the printer has now), `PARTIAL` (a ladder never read), `OK`. Exit 1
+  when any pair is MISSING or STALE; every line says the command that fixes it. Maintenance invalidations
+  (nozzle swap, hotend) and a new material type show up in `3d calibrate plan --printer P` as the kind
+  `fit_clearance` (policy `warn`, never a block).
+
+`3d fits resolve --fit sliding --shape round --printer k1se --material PLA` then shows
+`status calibrated`, the row `-0.05 mm [calibrated, measured 2026-10-24T…Z] printer k1se, material PLA, nozzle 0.4,
+shape round, fit sliding (smallest free gap 0.15 mm of 5 reading(s); calibration record #12)`; the same number
+goes into `3d fit-check --fit` and `3d fit-niche --fit` (`lib/fits_sources/calibration.py`). Rows of other
+printers, materials, nozzles and shapes are untouched. `THREED_FIT_CALIBRATION_API=off` keeps every `3d fits` run
+away from 3d-api (the offline buffer only); with 3d-api configured but unreachable the buffer answers and stderr
+says so.
+
+```bash
+3d calibrate fit plan --printer k1se --material PLA --json | jq '.coupons[] | {ladder, id, readout}'
+3d calibrate fit quick --printer k1se --material PLA --yes     # fit-coupon-k1se-pla.3mf (+ .stl .scad .json)
+3d calibrate fit record --printer k1se --material PLA --fit sliding --shape round --result step=3 --yes
+3d calibrate fit record --printer k1se --material PLA --fit tight --shape round --measured 4.02,4.07,4.12,4.17,4.22,4.27,4.32 --yes
+3d calibrate fit record --printer k1se --material PLA --from-readout readout.json --yes
+3d calibrate fit check --printer k1se --material PLA
+3d calibrate fit check --printer k1se --material PLA --nozzle 0.6 --max-age-days 90 --api http://192.168.0.39:8765
+3d calibrate fit plan --printer u1 --material PETG --fit sliding,snap --shape slot
+3d calibrate fit gen --printer k1se --material PLA --out wide.3mf --fit tight --gap-offset 0.3
+3d calibrate fit read --printer k1se --material PLA --fit sliding --shape round --measured 4.1,4.2,4.3,4.4,4.5,4.6,4.7 --mating-mm 4.05
+3d calibrate fit record --printer k1se --material PLA --fit press --shape round --result step=3 --spool 12 --coupon "k1se-pla-2026-10-24" --note "grey spool" --head T1 --yes
+3d calibrate fit record --printer k1se --material PLA --fit snap --shape slot --result step=5 --filament 7 --yes
+```
+
 ## `photo` — the top-camera photo mode ([#342](https://github.com/alex-mextner/3d-cli/issues/342))
 
 ```bash
@@ -500,3 +600,6 @@ and `calibrations/stale-run` (a run planned more than 14 days ago without a resu
 ## Exit codes
 
 0 success (and `check` without FAIL), 1 `check` FAIL or an API error, 2 usage error or missing file.
+`calibrate fit`: 0 ok; 1 a readout that cannot be used (no `free` step: widen the range) or `fit check` with a
+MISSING/STALE pair; 2 bad input (unknown printer/fit/shape, a `--result` that does not fit the ladder, a `--material`
+that is not what is loaded); 127 OpenSCAD missing (`gen`, `quick --yes`).
