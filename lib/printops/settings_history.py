@@ -174,16 +174,20 @@ def calibration_kind(catalog: Catalog, d: Mapping[str, Any]) -> Kind | None:
     return None
 
 
+def _aliases(kind: Kind, name: str) -> list[str]:
+    aliases = [name] + [g.key for g in kind.gcode if g.value == name]
+    if len(kind.values) == 1:
+        aliases += [a.split(":", 1)[1] for a in kind.apply if a.startswith("orca:")]
+    return aliases
+
+
 def catalog_values(kind: Kind, obj: Any) -> dict[str, Any]:
     """The kind's values found in a buffer `old`/`new` object, by value name or its keys."""
     if not isinstance(obj, dict):
         return {}
     out: dict[str, Any] = {}
     for name in kind.values:
-        aliases = [name] + [g.key for g in kind.gcode if g.value == name]
-        if len(kind.values) == 1:
-            aliases += [a.split(":", 1)[1] for a in kind.apply if a.startswith("orca:")]
-        hit = next((a for a in aliases if a in obj), None)
+        hit = next((a for a in _aliases(kind, name) if a in obj), None)
         if hit is not None:
             out[name] = obj[hit]
     return out
@@ -358,6 +362,53 @@ def _obj(d: Mapping[str, Any], key: str) -> dict[str, Any]:
     return v if isinstance(v, dict) else {}
 
 
+def _named_filament(desc: Mapping[str, Any], color: str | None) -> str:
+    return (
+        " ".join(
+            str(x) for x in (desc.get("filament"), f"#{color}" if color else None) if x
+        )
+        or "no filament"
+    )
+
+
+def _unbound_why(b: Binding | None, where: str) -> str:
+    if b is None:
+        return f"no spool_binding of {where} is imported"
+    if b.spool is None:
+        return f"{where} had no spool bound then ({b.at[:16]})"
+    return f"the spool bound to {where} then (#{b.spool}, {b.at[:16]}) is #{b.color or '?'}"
+
+
+def _bound_spool(
+    d: Mapping[str, Any],
+    uid: str,
+    kind: Kind,
+    at: str,
+    bindings: Bindings,
+) -> tuple[int | None, int | None, str, str | None]:
+    """The spool bound to the line's head at `at`, when its colour matches; _Refused otherwise."""
+    desc = _obj(d, "spool")
+    color = _color(desc.get("color_hex"))
+    raw_head = d.get("head")
+    where = f"{d.get('printer')}/{raw_head if isinstance(raw_head, str) else '?'}"
+    key = (
+        str(d.get("printer")),
+        raw_head.casefold() if isinstance(raw_head, str) else "",
+    )
+    b = bound_at(bindings.get(key, []), at)
+    if b is not None and b.spool is not None and color is not None and b.color == color:
+        return (
+            b.spool,
+            None,
+            f"spool #{b.spool} (bound to {where}, colour #{color})",
+            b.uid,
+        )
+    raise _Refused(
+        f"{kind.id} is per filament and the line names {_named_filament(desc, color)}: "
+        f"{_unbound_why(b, where)}; pass --spool {uid}=<spool id>"
+    )
+
+
 def _spool_for(
     d: Mapping[str, Any],
     uid: str,
@@ -374,36 +425,94 @@ def _spool_for(
         return spool, None, f"spool #{spool}", None
     if fil is not None:
         return None, fil, f"filament #{fil}", None
-    desc = _obj(d, "spool")
-    color = _color(desc.get("color_hex"))
-    raw_head = d.get("head")
-    where = f"{d.get('printer')}/{raw_head if isinstance(raw_head, str) else '?'}"
-    named = (
-        " ".join(
-            str(x) for x in (desc.get("filament"), f"#{color}" if color else None) if x
+    return _bound_spool(d, uid, kind, at, bindings)
+
+
+def _journal_only_reason(
+    kind: Kind, status: str, d: Mapping[str, Any], values: Mapping[str, Any]
+) -> str | None:
+    """Why a line is journal-only (no calibration record), or None when it maps to a record."""
+    if status == "measured_not_applied":
+        if not values or catalog_values(kind, d.get("old")) != values:
+            return f"{kind.id} measured, not applied (the printer runs `old`): journal only"
+        return None
+    if status not in RECORD_STATUSES:
+        return f"{kind.id} {status}: not a measurement, journal only"
+    return None
+
+
+def _method_for(
+    kind: Kind,
+    uid: str,
+    overrides: Overrides,
+    line_method: str | None,
+    params: dict[str, Any],
+) -> str:
+    """The calibration method of a line; a method outside the catalog falls back to `manual`."""
+    method = overrides.methods.get(uid) or line_method
+    if method in kind.methods:
+        return str(method)
+    if uid in overrides.methods:
+        raise _Refused(
+            f"{kind.id}: --method {method!r} is not one of {', '.join(kind.methods)}"
         )
-        or "no filament"
-    )
-    key = (
-        str(d.get("printer")),
-        raw_head.casefold() if isinstance(raw_head, str) else "",
-    )
-    b = bound_at(bindings.get(key, []), at)
-    if b is not None and b.spool is not None and color is not None and b.color == color:
-        return (
-            b.spool,
-            None,
-            f"spool #{b.spool} (bound to {where}, colour #{color})",
-            b.uid,
+    if "manual" not in kind.methods:
+        raise _Refused(
+            f"{kind.id}: the line's method {line_method or '(none)'} is not in the catalog and "
+            f"the kind has no `manual`; pass --method {uid}=<{'|'.join(kind.methods)}>"
         )
-    if b is None:
-        why = f"no spool_binding of {where} is imported"
-    elif b.spool is None:
-        why = f"{where} had no spool bound then ({b.at[:16]})"
-    else:
-        why = f"the spool bound to {where} then (#{b.spool}, {b.at[:16]}) is #{b.color or '?'}"
-    raise _Refused(
-        f"{kind.id} is per filament and the line names {named}: {why}; pass --spool {uid}=<spool id>"
+    if line_method:
+        params["buffer_method"] = line_method
+    return "manual"
+
+
+def _applied_entries(
+    kind: Kind,
+    d: Mapping[str, Any],
+    values: Mapping[str, Any],
+    at: str,
+    actor: str,
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "target": kind.apply[0] if kind.apply else "journal",
+            "before": catalog_values(kind, d.get("old")) or None,
+            "after": values,
+            "at": at,
+            "confirmed_by": d.get("decided_by") or actor,
+            "note": d.get("applied_to") if isinstance(d.get("applied_to"), str) else None,
+        }
+    ]
+
+
+def _run_request(
+    d: Mapping[str, Any],
+    uid: str,
+    kind: Kind,
+    method: str,
+    scope: tuple[int | None, int | None],
+    params: dict[str, Any],
+) -> cal.RunRequest:
+    gcode_path, gcode_sha = _gcode(d.get("evidence"))
+    note = d.get("note") if isinstance(d.get("note"), str) else None
+    return cal.RunRequest(
+        kind=kind.id,
+        method=method,
+        printer=str(d["printer"]),
+        head=d.get("head")
+        if kind.head_scoped and isinstance(d.get("head"), str)
+        else None,
+        spool_id=scope[0],
+        filament_id=scope[1],
+        lot_nr=d.get("lot_nr") if isinstance(d.get("lot_nr"), str) else None,
+        plate=d.get("plate")
+        if "plate" in kind.scope and isinstance(d.get("plate"), str)
+        else None,
+        mix=d.get("mix") if kind.mix_scoped and isinstance(d.get("mix"), str) else None,
+        params=params,
+        gcode_path=gcode_path,
+        gcode_sha=gcode_sha,
+        note=f"imported from settings history {uid}" + (f": {note}" if note else ""),
     )
 
 
@@ -420,15 +529,9 @@ def _record_for(
     the spool_binding line the record's spool comes from (colour binding only)."""
     status = str(d["status"]).strip()  # _plan validated the stripped value
     values = catalog_values(kind, d.get("new"))
-    if status == "measured_not_applied":
-        if not values or catalog_values(kind, d.get("old")) != values:
-            return (
-                None,
-                f"{kind.id} measured, not applied (the printer runs `old`): journal only",
-                None,
-            )
-    elif status not in RECORD_STATUSES:
-        return None, f"{kind.id} {status}: not a measurement, journal only", None
+    journal_only = _journal_only_reason(kind, status, d, values)
+    if journal_only is not None:
+        return None, journal_only, None
     if not values:
         raise _Refused(f"{kind.id}: `new` carries none of {', '.join(kind.values)}")
     spool_id = filament_id = binding_uid = None
@@ -442,64 +545,18 @@ def _record_for(
         dict(d["params"]) if isinstance(d.get("params"), dict) else {}
     )
     params["settings_change_uid"] = uid
-    method = overrides.methods.get(uid) or line_method
-    if method not in kind.methods:
-        if uid in overrides.methods:
-            raise _Refused(
-                f"{kind.id}: --method {method!r} is not one of {', '.join(kind.methods)}"
-            )
-        if "manual" not in kind.methods:
-            raise _Refused(
-                f"{kind.id}: the line's method {line_method or '(none)'} is not in the catalog and "
-                f"the kind has no `manual`; pass --method {uid}=<{'|'.join(kind.methods)}>"
-            )
-        if line_method:
-            params["buffer_method"] = line_method
-        method = "manual"
-    gcode_path, gcode_sha = _gcode(d.get("evidence"))
-    nozzle = _obj(d, "nozzle")
-    diameter = nozzle.get("diameter_mm")
+    method = _method_for(kind, uid, overrides, line_method, params)
+    diameter = _obj(d, "nozzle").get("diameter_mm")
     actor = _text(d, "actor")
-    applied: list[dict[str, Any]] = []
-    if status == "applied":
-        applied.append(
-            {
-                "target": kind.apply[0] if kind.apply else "journal",
-                "before": catalog_values(kind, d.get("old")) or None,
-                "after": values,
-                "at": at,
-                "confirmed_by": d.get("decided_by") or actor,
-                "note": d.get("applied_to")
-                if isinstance(d.get("applied_to"), str)
-                else None,
-            }
-        )
-    note = d.get("note") if isinstance(d.get("note"), str) else None
-    req = cal.RunRequest(
-        kind=kind.id,
-        method=str(method),
-        printer=str(d["printer"]),
-        head=d.get("head")
-        if kind.head_scoped and isinstance(d.get("head"), str)
-        else None,
-        spool_id=spool_id,
-        filament_id=filament_id,
-        lot_nr=d.get("lot_nr") if isinstance(d.get("lot_nr"), str) else None,
-        plate=d.get("plate")
-        if "plate" in kind.scope and isinstance(d.get("plate"), str)
-        else None,
-        params=params,
-        gcode_path=gcode_path,
-        gcode_sha=gcode_sha,
-        note=f"imported from settings history {uid}" + (f": {note}" if note else ""),
-    )
     past = cal.PastRecord(
-        req=req,
+        req=_run_request(d, uid, kind, method, (spool_id, filament_id), params),
         values=values,
         at=at,
         by=actor,
         evidence=d["evidence"] if isinstance(d.get("evidence"), list) else [],
-        applied_to=applied,
+        applied_to=_applied_entries(kind, d, values, at, actor)
+        if status == "applied"
+        else [],
         nozzle_diameter_mm=float(diameter)
         if isinstance(diameter, (int, float))
         else None,
@@ -526,6 +583,112 @@ def _text(d: Mapping[str, Any], key: str) -> str:
     if not isinstance(v, str) or not v.strip():
         raise _Refused(f"{key} must be a non-empty string, got {v!r}")
     return v.strip()
+
+
+def _head_of(printer: str, p: Any, raw_head: Any) -> str | None:
+    """The printer's head label a line names (case-insensitive); _Refused when it has no such head."""
+    if raw_head is None:
+        return None
+    label = raw_head.casefold() if isinstance(raw_head, str) else None
+    head = next((h.label for h in p.heads if h.label.casefold() == label), None)
+    if head is None:
+        raise _Refused(f"{printer} has no head {raw_head!r}")
+    return head
+
+
+@dataclass(frozen=True)
+class _Header:
+    """The validated common fields of a buffer line."""
+
+    printer: str
+    kind: str
+    key: str
+    status: str
+    actor: str
+    source: str
+    head: str | None
+    at: str
+    recorded: str
+    reverts: str | None
+
+
+def _header(ctx: cal.Ctx, d: Mapping[str, Any]) -> _Header:
+    printer, kind_s, key, status = (
+        _text(d, "printer"),
+        _text(d, "kind"),
+        _text(d, "key"),
+        _text(d, "status"),
+    )
+    actor, source = _text(d, "actor"), _text(d, "source")
+    if status not in STATUSES:
+        raise _Refused(f"status must be one of {', '.join(STATUSES)}, got {status!r}")
+    p = ctx.fleet.printers.get(printer)
+    if p is None:
+        raise _Refused(
+            f"unknown printer {printer!r}; fleet has: {', '.join(sorted(ctx.fleet.printers))}"
+        )
+    head = _head_of(printer, p, d.get("head"))
+    try:
+        at = instant(d.get("at") or d.get("recorded_at"))
+        recorded = instant(d.get("recorded_at") or d.get("at"))
+    except ValueError as e:
+        raise _Refused(f"at/recorded_at: {e}") from e
+    reverts = d.get("reverts")
+    if reverts is not None and not isinstance(reverts, str):
+        raise _Refused(
+            f"reverts must be the uid of the reverted change, got {reverts!r}"
+        )
+    return _Header(printer, kind_s, key, status, actor, source, head, at, recorded, reverts)
+
+
+def _row_spool_id(d: Mapping[str, Any], prep: cal.PreparedRecord | None) -> int | None:
+    snap_fil = prep.snap.filament if prep is not None else None
+    if snap_fil and snap_fil.spool_id is not None:
+        return snap_fil.spool_id
+    if prep:
+        return prep.past.req.spool_id
+    return _int_or_none(d.get("spool_id"))
+
+
+def _row_of(
+    line: hb.Line, h: _Header, prep: cal.PreparedRecord | None
+) -> dict[str, Any]:
+    """The settings_change columns of an imported line."""
+    d = line.data
+    snap_fil = prep.snap.filament if prep is not None else None
+    spool_id = _row_spool_id(d, prep)
+    return {
+        "uid": line.uid,
+        "at": h.at,
+        "recorded_at": h.recorded,
+        "printer": h.printer,
+        "head": h.head,
+        "plate": d.get("plate") if isinstance(d.get("plate"), str) else None,
+        "nozzle_install_id": _int_or_none((d.get("nozzle") or {}).get("install_id"))
+        if isinstance(d.get("nozzle"), dict)
+        else None,
+        "spool_id": spool_id,
+        "filament_id": snap_fil.filament_id
+        if snap_fil
+        else _int_or_none(d.get("filament_id")),
+        "lot_nr": snap_fil.lot_nr
+        if snap_fil
+        else (d.get("lot_nr") if isinstance(d.get("lot_nr"), str) else None),
+        "kind": h.kind,
+        "key": h.key,
+        "old": json.dumps(d.get("old"), ensure_ascii=False) if "old" in d else None,
+        "new": json.dumps(d.get("new"), ensure_ascii=False) if "new" in d else None,
+        "status": h.status,
+        "source": h.source,
+        "actor": h.actor,
+        "command": d.get("command") if isinstance(d.get("command"), str) else None,
+        "evidence": json.dumps(
+            d.get("evidence") if isinstance(d.get("evidence"), list) else [],
+            ensure_ascii=False,
+        ),
+        "maintenance_id": _int_or_none(d.get("maintenance_id")),
+        "entry": _canonical(d),
+    }
 
 
 def _plan(
@@ -555,90 +718,19 @@ def _plan(
         )
         return plan
     try:
-        printer, kind_s, key, status = (
-            _text(d, "printer"),
-            _text(d, "kind"),
-            _text(d, "key"),
-            _text(d, "status"),
-        )
-        actor, source = _text(d, "actor"), _text(d, "source")
-        if status not in STATUSES:
-            raise _Refused(
-                f"status must be one of {', '.join(STATUSES)}, got {status!r}"
-            )
-        p = ctx.fleet.printers.get(printer)
-        if p is None:
-            raise _Refused(
-                f"unknown printer {printer!r}; fleet has: {', '.join(sorted(ctx.fleet.printers))}"
-            )
-        raw_head = d.get("head")
-        head = None
-        if raw_head is not None:
-            label = raw_head.casefold() if isinstance(raw_head, str) else None
-            head = next((h.label for h in p.heads if h.label.casefold() == label), None)
-            if head is None:
-                raise _Refused(f"{printer} has no head {raw_head!r}")
-        try:
-            at = instant(d.get("at") or d.get("recorded_at"))
-            recorded = instant(d.get("recorded_at") or d.get("at"))
-        except ValueError as e:
-            raise _Refused(f"at/recorded_at: {e}") from e
-        reverts = d.get("reverts")
-        if reverts is not None and not isinstance(reverts, str):
-            raise _Refused(
-                f"reverts must be the uid of the reverted change, got {reverts!r}"
-            )
+        h = _header(ctx, d)
         kind = calibration_kind(ctx.catalog, d)
         prep, detail, binding_uid = (
             (None, "journal only", None)
             if kind is None
-            else _record_for(ctx, d, line.uid, kind, at, bindings, overrides)
+            else _record_for(ctx, d, line.uid, kind, h.at, bindings, overrides)
         )
     except _Refused as e:
         res.detail = str(e)
         return plan
-    snap_fil = prep.snap.filament if prep is not None else None
-    spool_id = (
-        snap_fil.spool_id
-        if snap_fil and snap_fil.spool_id is not None
-        else prep.past.req.spool_id
-        if prep
-        else _int_or_none(d.get("spool_id"))
-    )
-    plan.row = {
-        "uid": line.uid,
-        "at": at,
-        "recorded_at": recorded,
-        "printer": printer,
-        "head": head,
-        "plate": d.get("plate") if isinstance(d.get("plate"), str) else None,
-        "nozzle_install_id": _int_or_none((d.get("nozzle") or {}).get("install_id"))
-        if isinstance(d.get("nozzle"), dict)
-        else None,
-        "spool_id": spool_id,
-        "filament_id": snap_fil.filament_id
-        if snap_fil
-        else _int_or_none(d.get("filament_id")),
-        "lot_nr": snap_fil.lot_nr
-        if snap_fil
-        else (d.get("lot_nr") if isinstance(d.get("lot_nr"), str) else None),
-        "kind": kind_s,
-        "key": key,
-        "old": json.dumps(d.get("old"), ensure_ascii=False) if "old" in d else None,
-        "new": json.dumps(d.get("new"), ensure_ascii=False) if "new" in d else None,
-        "status": status,
-        "source": source,
-        "actor": actor,
-        "command": d.get("command") if isinstance(d.get("command"), str) else None,
-        "evidence": json.dumps(
-            d.get("evidence") if isinstance(d.get("evidence"), list) else [],
-            ensure_ascii=False,
-        ),
-        "maintenance_id": _int_or_none(d.get("maintenance_id")),
-        "entry": _canonical(d),
-    }
+    plan.row = _row_of(line, h, prep)
     plan.record = prep
-    plan.reverts_uid = reverts
+    plan.reverts_uid = h.reverts
     plan.binding_uid = binding_uid
     res.outcome, res.detail = "imported", detail
     return plan
@@ -716,6 +808,119 @@ def _execute(ctx: cal.Ctx, plan: _Plan, now: str) -> None:
     )
 
 
+def _stored_entries(ctx: cal.Ctx, uids: Sequence[str]) -> dict[str, str]:
+    """uid -> canonical entry of the lines already imported."""
+    stored: dict[str, str] = {}
+    # one bind parameter per uid; SQLite caps them per statement
+    for i in range(0, len(uids), _CHUNK):
+        chunk = uids[i : i + _CHUNK]
+        stored.update(
+            (str(r["uid"]), str(r["entry"]))
+            for r in ctx.conn.execute(
+                f"SELECT uid, entry FROM settings_change WHERE uid IN ({', '.join('?' * len(chunk))})",
+                chunk,
+            )
+        )
+    return stored
+
+
+def _repeat_plan(line: hb.Line, same: bool) -> _Plan:
+    """The plan of a line whose uid an earlier line of the file already used."""
+    return _Plan(
+        line,
+        LineResult(
+            line.n,
+            line.uid,
+            str(line.data.get("kind") or "?"),
+            str(line.data.get("key") or "?"),
+            "skipped" if same else "refused",
+            "repeats an earlier line"
+            if same
+            else "uid of an earlier line with a different entry",
+        ),
+    )
+
+
+def _plan_lines(
+    ctx: cal.Ctx,
+    lines: Sequence[hb.Line],
+    stored: Mapping[str, str],
+    overrides: Overrides,
+) -> tuple[list[_Plan], set[str]]:
+    """The plan of every line, in file order, and the uids the file holds. Calibration lines are
+    planned once the bindings that do import are known."""
+    plans: dict[int, _Plan] = {}
+    seen: dict[str, str] = {}
+    calibration_lines: list[hb.Line] = []
+    for line in lines:
+        canon = _canonical(line.data)
+        if line.uid in seen:
+            plans[line.n] = _repeat_plan(line, seen[line.uid] == canon)
+            continue
+        seen[line.uid] = canon
+        if calibration_kind(ctx.catalog, line.data) is not None:
+            calibration_lines.append(line)
+        else:
+            plans[line.n] = _plan(ctx, line, stored, {}, overrides)
+    printers = sorted(
+        {p for ln in lines if isinstance(p := ln.data.get("printer"), str)}
+    )
+    importing = [p.line for p in plans.values() if p.result.outcome == "imported"]
+    bindings = _bindings(ctx.conn, printers, importing)
+    for line in calibration_lines:
+        plans[line.n] = _plan(ctx, line, stored, bindings, overrides)
+    return [plans[ln.n] for ln in lines], set(seen)
+
+
+def _binding_lost(
+    ctx: cal.Ctx, p: _Plan, todo: Sequence[_Plan], lost: set[str]
+) -> bool:
+    """Whether the spool binding `p` relies on was refused (or taken by a concurrent import with
+    other content, which is then added to `lost`)."""
+    uid = p.binding_uid
+    if uid is None:
+        return False
+    if uid not in lost:
+        hit = ctx.conn.execute(
+            "SELECT entry FROM settings_change WHERE uid = ?", (uid,)
+        ).fetchone()
+        mine = next((q for q in todo if q.line.uid == uid), None)
+        if (
+            hit is None
+            or mine is None
+            or hit["entry"] == _canonical(mine.line.data)
+        ):
+            return False
+        lost.add(uid)
+    p.result.outcome = "refused"
+    p.result.detail = f"its spool binding {uid} was refused: import again"
+    return True
+
+
+def _run_plans(
+    ctx: cal.Ctx, todo: Sequence[_Plan], now: str, dry_run: bool
+) -> None:
+    try:
+        with db.transaction(ctx.conn):
+            lost: set[str] = (
+                set()
+            )  # binding uids a concurrent import took with other content
+            for p in todo:
+                if _binding_lost(ctx, p, todo, lost):
+                    continue
+                _execute(ctx, p, now)
+                if (
+                    p.result.outcome == "refused"
+                    and p.row is not None
+                    and p.row["kind"] == "spool_binding"
+                ):
+                    lost.add(p.line.uid)
+            if dry_run:
+                raise _Rollback
+    except _Rollback:
+        pass
+
+
 def import_lines(
     ctx: cal.Ctx,
     raw_lines: Sequence[str],
@@ -735,55 +940,8 @@ def import_lines(
         raise HistoryError(
             422, f"{file or 'buffer'}: {e}", detail={"line": e.line}
         ) from e
-    stored: dict[str, str] = {}
-    uids = [ln.uid for ln in lines]
-    for i in range(
-        0, len(uids), _CHUNK
-    ):  # one bind parameter per uid; SQLite caps them per statement
-        chunk = uids[i : i + _CHUNK]
-        stored.update(
-            (str(r["uid"]), str(r["entry"]))
-            for r in ctx.conn.execute(
-                f"SELECT uid, entry FROM settings_change WHERE uid IN ({', '.join('?' * len(chunk))})",
-                chunk,
-            )
-        )
-    plans: dict[int, _Plan] = {}
-    seen: dict[str, str] = {}
-    calibration_lines: list[hb.Line] = []
-    for line in lines:
-        canon = _canonical(line.data)
-        if line.uid in seen:
-            same = seen[line.uid] == canon
-            plans[line.n] = _Plan(
-                line,
-                LineResult(
-                    line.n,
-                    line.uid,
-                    str(line.data.get("kind") or "?"),
-                    str(line.data.get("key") or "?"),
-                    "skipped" if same else "refused",
-                    "repeats an earlier line"
-                    if same
-                    else "uid of an earlier line with a different entry",
-                ),
-            )
-            continue
-        seen[line.uid] = canon
-        if calibration_kind(ctx.catalog, line.data) is not None:
-            calibration_lines.append(
-                line
-            )  # planned once the bindings that do import are known
-        else:
-            plans[line.n] = _plan(ctx, line, stored, {}, overrides)
-    printers = sorted(
-        {p for ln in lines if isinstance(p := ln.data.get("printer"), str)}
-    )
-    importing = [p.line for p in plans.values() if p.result.outcome == "imported"]
-    bindings = _bindings(ctx.conn, printers, importing)
-    for line in calibration_lines:
-        plans[line.n] = _plan(ctx, line, stored, bindings, overrides)
-    ordered = [plans[ln.n] for ln in lines]
+    stored = _stored_entries(ctx, [ln.uid for ln in lines])
+    ordered, seen = _plan_lines(ctx, lines, stored, overrides)
     report = ImportReport(
         file,
         dry_run,
@@ -793,48 +951,12 @@ def import_lines(
     # journal-only lines (spool bindings among them) first: a binding refused inside the
     # transaction (reverts target missing, concurrent import) is then known before any
     # calibration line that relies on it
-    todo = sorted((p for p in ordered if p.result.outcome == "imported"), key=lambda p: p.record is not None)
-    if not todo:
-        return report
-    now = db.utc_now()
-    try:
-        with db.transaction(ctx.conn):
-            lost: set[str] = (
-                set()
-            )  # binding uids a concurrent import took with other content
-            for p in todo:
-                if p.binding_uid is not None and p.binding_uid in lost:
-                    p.result.outcome = "refused"
-                    p.result.detail = (
-                        f"its spool binding {p.binding_uid} was refused: import again"
-                    )
-                    continue
-                if p.binding_uid is not None:
-                    hit = ctx.conn.execute(
-                        "SELECT entry FROM settings_change WHERE uid = ?",
-                        (p.binding_uid,),
-                    ).fetchone()
-                    mine = next((q for q in todo if q.line.uid == p.binding_uid), None)
-                    if (
-                        hit is not None
-                        and mine is not None
-                        and hit["entry"] != _canonical(mine.line.data)
-                    ):
-                        lost.add(p.binding_uid)
-                        p.result.outcome = "refused"
-                        p.result.detail = f"its spool binding {p.binding_uid} was refused: import again"
-                        continue
-                _execute(ctx, p, now)
-                if (
-                    p.result.outcome == "refused"
-                    and p.row is not None
-                    and p.row["kind"] == "spool_binding"
-                ):
-                    lost.add(p.line.uid)
-            if dry_run:
-                raise _Rollback
-    except _Rollback:
-        pass
+    todo = sorted(
+        (p for p in ordered if p.result.outcome == "imported"),
+        key=lambda p: p.record is not None,
+    )
+    if todo:
+        _run_plans(ctx, todo, db.utc_now(), dry_run)
     return report
 
 

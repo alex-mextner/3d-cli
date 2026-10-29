@@ -33,8 +33,8 @@ INVARIANTS: stdlib only (`3d mix` imports it in-process); deterministic: ties br
 from __future__ import annotations
 
 import math
-from collections.abc import Iterator, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Iterator, Sequence
+from dataclasses import dataclass, replace
 from functools import lru_cache
 
 from printops.color import (
@@ -83,6 +83,8 @@ class Candidate:
     )
     stripe_far: float | None = None
     role: str = ""
+    measured: bool = False  # hex is a measured mix_color record, not the model's prediction
+    model_hex: str | None = None  # the model's prediction, kept when `hex` is a measurement
 
     @property
     def cycle(self) -> int:
@@ -108,6 +110,7 @@ class Candidate:
             if self.stripe_far is None
             else round(self.stripe_far, 2),
             "score": round(self.score, 2),
+            **({"measured": True, "model_hex": self.model_hex} if self.measured else {}),
         }
 
 
@@ -257,16 +260,9 @@ def _weight_vectors(n_slots: int, max_cycle: int) -> list[tuple[int, ...]]:
     ]
 
 
-def rank(
-    target: str,
-    slots: Sequence[Slot],
-    *,
-    max_cycle: int = 3,
-    layer_h: float = 0.12,
-    rules: MixRules = MixRules(),  # noqa: B008 — frozen dataclass, safe as a default
-) -> list[Candidate]:
-    """Every candidate whose pattern passes `rules` at `layer_h`, best score first (stripes
-    scored only near the best ΔE). Pure filaments (one-layer cycles) always qualify."""
+def _check_rank_args(
+    slots: Sequence[Slot], max_cycle: int, layer_h: float, rules: MixRules
+) -> None:
     if not slots:
         raise MixModelError("no slots: pass the loaded filaments")
     if len({s.slot for s in slots}) != len(slots) or any(
@@ -283,6 +279,30 @@ def rank(
             "layers: stripes that thick read as bands. Use a thinner layer, raise --layer-cap, "
             "or --max-cycle 1 for pure filaments only"
         )
+
+
+def with_stripes(
+    c: Candidate, by_slot: dict[int, str], layer_h: float
+) -> Candidate:
+    layers = [by_slot[int(d)] for d in c.pattern]
+    return replace(
+        c,
+        stripe_near=stripe_delta_e(layers, layer_h, VIEW_NEAR_MM),
+        stripe_far=stripe_delta_e(layers, layer_h, VIEW_FAR_MM),
+    )
+
+
+def rank(
+    target: str,
+    slots: Sequence[Slot],
+    *,
+    max_cycle: int = 3,
+    layer_h: float = 0.12,
+    rules: MixRules = MixRules(),  # noqa: B008 — frozen dataclass, safe as a default
+) -> list[Candidate]:
+    """Every candidate whose pattern passes `rules` at `layer_h`, best score first (stripes
+    scored only near the best ΔE). Pure filaments (one-layer cycles) always qualify."""
+    _check_rank_args(slots, max_cycle, layer_h, rules)
     tl = linear_to_lab(linear_rgb(_hex(target)))
     hexes = [_hex(s.hex) for s in slots]
     linears = [linear_rgb(h) for h in hexes]
@@ -305,21 +325,7 @@ def rank(
         key=lambda c: (c.delta_e, c.cycle, c.weights),
     )[:_STRIPE_MAX]
     near = {c.weights for c in window}
-    scored = []
-    for c in cands:
-        if c.weights in near:
-            layers = [by_slot[int(d)] for d in c.pattern]
-            c = Candidate(
-                c.weights,
-                c.slots,
-                c.pattern,
-                c.hex,
-                c.lab,
-                c.delta_e,
-                stripe_delta_e(layers, layer_h, VIEW_NEAR_MM),
-                stripe_delta_e(layers, layer_h, VIEW_FAR_MM),
-            )
-        scored.append(c)
+    scored = [with_stripes(c, by_slot, layer_h) if c.weights in near else c for c in cands]
     # unscored candidates (far from the best) rank after every scored one
     return sorted(
         scored,
@@ -341,6 +347,24 @@ _VARIANTS = (
 _VARIANT_REACH = 8.0  # a variant stays within the best ΔE + this
 
 
+def _variant_pick(
+    ranked: Sequence[Candidate],
+    best: Candidate,
+    taken: set[tuple[int, ...]],
+    ok: Callable[[Candidate, Candidate], bool],
+) -> Candidate | None:
+    pool = [
+        c
+        for c in ranked
+        if c.weights not in taken
+        and c.delta_e <= best.delta_e + _VARIANT_REACH
+        and ok(c, best)
+    ]
+    if not pool:
+        return None
+    return min(pool, key=lambda c: (round(c.delta_e, 6), c.cycle, c.weights))
+
+
 def pick(ranked: Sequence[Candidate], count: int) -> list[Candidate]:
     """The best candidate, then one per variant rule (closest ΔE first), then the next best."""
     if not ranked:
@@ -351,15 +375,8 @@ def pick(ranked: Sequence[Candidate], count: int) -> list[Candidate]:
     for name, ok in _VARIANTS:
         if len(out) >= count:
             break
-        pool = [
-            c
-            for c in ranked
-            if c.weights not in taken
-            and c.delta_e <= best.delta_e + _VARIANT_REACH
-            and ok(c, best)
-        ]
-        if pool:
-            c = min(pool, key=lambda c: (round(c.delta_e, 6), c.cycle, c.weights))
+        c = _variant_pick(ranked, best, taken, ok)
+        if c is not None:
             out.append(_role(c, name))
             taken.add(c.weights)
     for c in ranked:
@@ -372,14 +389,4 @@ def pick(ranked: Sequence[Candidate], count: int) -> list[Candidate]:
 
 
 def _role(c: Candidate, role: str) -> Candidate:
-    return Candidate(
-        c.weights,
-        c.slots,
-        c.pattern,
-        c.hex,
-        c.lab,
-        c.delta_e,
-        c.stripe_near,
-        c.stripe_far,
-        role,
-    )
+    return replace(c, role=role)

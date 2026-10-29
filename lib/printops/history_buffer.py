@@ -123,30 +123,72 @@ def buffer_files() -> tuple[Path, list[Path]]:
     return d, _files(d)
 
 
-def append(printer: str, record: Mapping[str, Any]) -> Path:
-    """Append one record as a line to `<buffer_dir>/<printer>.jsonl`: flock, one O_APPEND write,
-    fsync (module doc, FORMAT). Raises HistoryBufferError for a name that is not a file name."""
+def _printer_file(printer: str) -> Path:
+    """`<buffer_dir>/<printer>.jsonl`; a name that is not a file name is refused first."""
     if not printer or "/" in printer or printer.startswith("."):
         raise HistoryBufferError(f"printer {printer!r} is not a fleet printer name")
-    d = buffer_dir()
-    d.mkdir(parents=True, exist_ok=True)
-    path = d / f"{printer}.jsonl"
-    line = (
+    return buffer_dir() / f"{printer}.jsonl"
+
+
+def buffered_uids(printer: str) -> set[str]:
+    """The uids already in the printer's buffer file (none when it does not exist)."""
+    path = _printer_file(printer)
+    if not path.is_file():
+        return set()
+    return {ln.uid for ln in parse_lines(path.read_text(encoding="utf-8").splitlines())}
+
+
+def _encode(record: Mapping[str, Any]) -> bytes:
+    return (
         json.dumps(dict(record), ensure_ascii=False, separators=(", ", ": ")) + "\n"
     ).encode("utf-8")
-    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+
+
+def _write_all(fd: int, line: bytes) -> None:
+    view = memoryview(line)
+    while view:  # a short write must not leave a torn line behind silently
+        view = view[os.write(fd, view) :]
+    os.fsync(fd)
+
+
+def _uids_in_fd(fd: int) -> set[str]:
+    size = os.fstat(fd).st_size
+    raw = os.pread(fd, size, 0).decode("utf-8") if size else ""
+    return {ln.uid for ln in parse_lines(raw.splitlines())}
+
+
+def _append_locked(
+    printer: str, record: Mapping[str, Any], skip_uid: str | None
+) -> tuple[Path, bool]:
+    """Append under the file's `flock`; with `skip_uid` the uid check happens under the same lock,
+    so two concurrent writers of the same record cannot both append it. Returns (path, written)."""
+    path = _printer_file(printer)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    line = _encode(record)
+    fd = os.open(path, os.O_RDWR | os.O_APPEND | os.O_CREAT, 0o644)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
         try:
-            view = memoryview(line)
-            while view:  # a short write must not leave a torn line behind silently
-                view = view[os.write(fd, view) :]
-            os.fsync(fd)
+            if skip_uid is not None and skip_uid in _uids_in_fd(fd):
+                return path, False
+            _write_all(fd, line)
         finally:
             fcntl.flock(fd, fcntl.LOCK_UN)
     finally:
         os.close(fd)
-    return path
+    return path, True
+
+
+def append(printer: str, record: Mapping[str, Any]) -> Path:
+    """Append one record as a line to `<buffer_dir>/<printer>.jsonl`: flock, one O_APPEND write,
+    fsync (module doc, FORMAT). Raises HistoryBufferError for a name that is not a file name."""
+    return _append_locked(printer, record, None)[0]
+
+
+def append_if_absent(printer: str, record: Mapping[str, Any], uid: str) -> tuple[Path, bool]:
+    """`append`, unless a line with `uid` is already buffered; the check and the write share one lock.
+    Returns (path, written)."""
+    return _append_locked(printer, record, uid)
 
 
 def _no_constant(name: str) -> Any:

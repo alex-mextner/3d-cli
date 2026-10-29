@@ -101,15 +101,20 @@ class LoadedSlot:
     name: str = ""
     spool_id: int | None = None
     filament_id: int | None = None
+    nominal_hex: str | None = None  # Spoolman's colour when `hex` is a measured (corrected) one
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        d: dict[str, Any] = {
             "slot": self.slot,
             "hex": self.hex,
             "name": self.name,
             "spool_id": self.spool_id,
             "filament_id": self.filament_id,
         }
+        if self.nominal_hex is not None:
+            d["measured"] = True
+            d["nominal_hex"] = self.nominal_hex
+        return d
 
 
 @dataclass
@@ -720,20 +725,49 @@ def mix_key_of(c: Candidate, slots: Sequence[LoadedSlot], layer: float) -> str |
         raise MixTesterError(str(e)) from e
 
 
-def build(
-    *,
+def _box(r: Rect) -> list[float]:
+    return [round(v, 2) for v in r]
+
+
+def _candidate_entry(
+    sw: Swatch, slots: Sequence[LoadedSlot], layer: float
+) -> dict[str, Any]:
+    c = sw.candidate
+    assert c is not None
+    return {
+        "number": sw.number,
+        "filament": sw.extruder,
+        **c.to_dict(),
+        "swatch_box": _box(sw.swatch_box),
+        "label_box": _box(sw.label_box),
+        "calibration": {"kind": "mix_color", "mix": mix_key_of(c, slots, layer)},
+    }
+
+
+def _reference_entry(sw: Swatch) -> dict[str, Any]:
+    assert sw.slot is not None
+    return {
+        "number": sw.number,
+        "slot": sw.slot.slot,
+        "hex": sw.hex,
+        **({"nominal_hex": sw.slot.nominal_hex} if sw.slot.nominal_hex else {}),
+        "swatch_box": _box(sw.swatch_box),
+        "label_box": _box(sw.label_box),
+        "calibration": {
+            "kind": "filament_color",
+            "filament_id": sw.slot.filament_id,
+        },
+    }
+
+
+def _checked_inputs(
     target: str,
     slots: Sequence[LoadedSlot],
     candidates: Sequence[Candidate],
-    out: Path,
     layer: float,
-    height: float,
     base_settings: dict[str, Any],
-    app: str,
-    source: str,
-    target_source: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Write OUT.3mf, OUT.mix.json, OUT.png; return the manifest."""
+) -> tuple[str, list[Candidate], int]:
+    """(target hex, mix candidates, physical extruder count); raises on bad input."""
     target_hex = parse_hex(target)
     if target_hex is None:
         raise MixTesterError(f"{target!r} is not a colour")
@@ -749,6 +783,24 @@ def build(
         raise MixTesterError(
             "candidates must be layer mixes (the pure spools are references)"
         )
+    return target_hex, mixes, n_phys
+
+
+def build(
+    *,
+    target: str,
+    slots: Sequence[LoadedSlot],
+    candidates: Sequence[Candidate],
+    out: Path,
+    layer: float,
+    height: float,
+    base_settings: dict[str, Any],
+    app: str,
+    source: str,
+    target_source: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Write OUT.3mf, OUT.mix.json, OUT.png; return the manifest."""
+    target_hex, mixes, n_phys = _checked_inputs(target, slots, candidates, layer, base_settings)
     swatches = [
         Swatch(i + 1, n_phys + 1 + i, c.hex, candidate=c) for i, c in enumerate(mixes)
     ]
@@ -773,9 +825,6 @@ def build(
     write_3mf(paths["3mf"], objs, cfg, app, f"mix tester {target_hex}")
     paths["png"].write_bytes(sheet_png(target_hex, swatches))
 
-    def box(r: Rect) -> list[float]:
-        return [round(v, 2) for v in r]
-
     manifest: dict[str, Any] = {
         "schema": SCHEMA,
         "target": target_hex,
@@ -792,35 +841,9 @@ def build(
         manifest["target_source"] = target_source
     for sw in swatches:
         if sw.candidate is not None:
-            c = sw.candidate
-            manifest["candidates"].append(
-                {
-                    "number": sw.number,
-                    "filament": sw.extruder,
-                    **c.to_dict(),
-                    "swatch_box": box(sw.swatch_box),
-                    "label_box": box(sw.label_box),
-                    "calibration": {
-                        "kind": "mix_color",
-                        "mix": mix_key_of(c, slots, layer),
-                    },
-                }
-            )
+            manifest["candidates"].append(_candidate_entry(sw, slots, layer))
         else:
-            assert sw.slot is not None
-            manifest["references"].append(
-                {
-                    "number": sw.number,
-                    "slot": sw.slot.slot,
-                    "hex": sw.hex,
-                    "swatch_box": box(sw.swatch_box),
-                    "label_box": box(sw.label_box),
-                    "calibration": {
-                        "kind": "filament_color",
-                        "filament_id": sw.slot.filament_id,
-                    },
-                }
-            )
+            manifest["references"].append(_reference_entry(sw))
     manifest["id"] = mix_card.manifest_id(manifest)
     manifest["readout"] = mix_card.layout(len(swatches), height, manifest["id"])
     paths["card"].write_bytes(mix_card.render(manifest["readout"]))
@@ -830,11 +853,8 @@ def build(
     return manifest
 
 
-def validate_manifest(m: Any) -> list[str]:
-    """Problems with a printops.mix_tester/1 manifest ([] = valid)."""
+def _structure_errors(m: dict[str, Any]) -> list[str]:
     errs: list[str] = []
-    if not isinstance(m, dict):
-        return ["manifest is not an object"]
     if m.get("schema") != SCHEMA:
         errs.append(f"schema must be {SCHEMA}")
     if parse_hex(m.get("target")) is None:
@@ -846,32 +866,59 @@ def validate_manifest(m: Any) -> list[str]:
         for key in ("slots", "candidates", "references")
         if not isinstance(m.get(key), list)
     )
+    return errs
+
+
+def _number_errors(entries: list[dict[str, Any]]) -> list[str]:
+    numbers = [e.get("number") for e in entries]
+    ints = [n for n in numbers if isinstance(n, int) and not isinstance(n, bool)]
+    if len(ints) != len(numbers) or sorted(ints) != list(range(1, len(numbers) + 1)):
+        return [f"swatch numbers must be 1..{len(numbers)}, got {numbers}"]
+    return []
+
+
+def _candidate_errors(c: dict[str, Any]) -> list[str]:
+    errs = []
+    if not re.fullmatch(r"[1-9]+", str(c.get("pattern", ""))):
+        errs.append(f"candidate {c.get('number')}: pattern must be slot digits")
+    if parse_hex(c.get("hex")) is None:
+        errs.append(f"candidate {c.get('number')}: hex is not a colour")
+    return errs
+
+
+def _is_box(b: Any) -> bool:
+    return bool(
+        isinstance(b, list)
+        and len(b) == 4
+        and all(isinstance(v, (int, float)) for v in b)
+        and b[0] < b[2]
+        and b[1] < b[3]
+    )
+
+
+def _box_errors(e: dict[str, Any]) -> list[str]:
+    return [
+        f"swatch {e.get('number')}: {k} must be [x0, y0, x1, y1]"
+        for k in ("swatch_box", "label_box")
+        if not _is_box(e.get(k))
+    ]
+
+
+def validate_manifest(m: Any) -> list[str]:
+    """Problems with a printops.mix_tester/1 manifest ([] = valid)."""
+    if not isinstance(m, dict):
+        return ["manifest is not an object"]
+    errs = _structure_errors(m)
     if errs:
         return errs
     entries = m["candidates"] + m["references"]
     if not all(isinstance(e, dict) for e in entries):
         return [*errs, "every candidate and reference must be an object"]
-    numbers = [e.get("number") for e in entries]
-    if not all(
-        isinstance(n, int) and not isinstance(n, bool) for n in numbers
-    ) or sorted(numbers) != list(range(1, len(numbers) + 1)):
-        errs.append(f"swatch numbers must be 1..{len(numbers)}, got {numbers}")
+    errs.extend(_number_errors(entries))
     for c in m["candidates"]:
-        if not re.fullmatch(r"[1-9]+", str(c.get("pattern", ""))):
-            errs.append(f"candidate {c.get('number')}: pattern must be slot digits")
-        if parse_hex(c.get("hex")) is None:
-            errs.append(f"candidate {c.get('number')}: hex is not a colour")
+        errs.extend(_candidate_errors(c))
     for e in entries:
-        for k in ("swatch_box", "label_box"):
-            b = e.get(k)
-            if not (
-                isinstance(b, list)
-                and len(b) == 4
-                and all(isinstance(v, (int, float)) for v in b)
-                and b[0] < b[2]
-                and b[1] < b[3]
-            ):
-                errs.append(f"swatch {e.get('number')}: {k} must be [x0, y0, x1, y1]")
+        errs.extend(_box_errors(e))
     if "readout" in m:
         mid = m.get("id")
         if not isinstance(mid, str) or mid != mix_card.manifest_id(m):
