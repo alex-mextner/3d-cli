@@ -207,6 +207,17 @@ def test_a_list_for_wall_loops_fails_the_project_step_instead_of_crashing(
     assert "wall_loops" in project.summary
 
 
+def test_a_set_on_the_3mf_project_moves_the_gate_expectations_too() -> None:
+    from prep.steps import _set_gate_fields
+
+    assert _set_gate_fields({"wall_loops": "3", "sparse_infill_density": "20%"}) == {
+        "walls": 3,
+        "infill": 0.2,
+    }
+    assert _set_gate_fields({"travel_speed": "600"}) == {}
+    assert _set_gate_fields({"wall_loops": "three"}) == {}
+
+
 def test_an_overlay_file_sets_speeds_acceleration_and_the_volumetric_cap(
     tmp_path: Path, slicer: Path
 ) -> None:

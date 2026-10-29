@@ -588,6 +588,22 @@ def _flat_gate_fields(project: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _set_gate_fields(set_process: Mapping[str, str]) -> dict[str, Any]:
+    """Walls/infill a `--set` changed on the 3MF project: the gates expect what the process asks for. A value that is
+    not a plain number is left to the settings-echo gate."""
+    fields: dict[str, Any] = {}
+    try:
+        if "wall_loops" in set_process:
+            fields["walls"] = int(set_process["wall_loops"])
+        if "sparse_infill_density" in set_process:
+            fields["infill"] = (
+                float(set_process["sparse_infill_density"].rstrip("%")) / 100.0
+            )
+    except ValueError:
+        return {}
+    return fields
+
+
 def _gates(pipe: Pipeline) -> StepOutput:
     from prep import gcode_gates
 
@@ -608,6 +624,8 @@ def _gates(pipe: Pipeline) -> StepOutput:
     }
     if cfg.flat_profile:
         fields.update(_flat_gate_fields(pipe.record_data("project")))
+    else:
+        fields.update(_set_gate_fields(cfg.set_process))
     spec = gcode_gates.GateSpec(**{**fields, **cfg.gate})
     manifest = pipe.work / f"{cfg.name}.manifest.json"
     expectations = (

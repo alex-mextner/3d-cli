@@ -104,6 +104,20 @@ def test_a_scalar_takes_the_shape_of_the_presets_own_value() -> None:
     assert flat_profiles.coerce("x", 250.0) == "250"
 
 
+def test_a_filament_identity_override_is_one_name_or_an_error() -> None:
+    named = build_profiles(
+        "k1se", overlay=Overlay(filament={"filament_settings_id": "Custom PLA"})
+    )
+    assert named.names["filament"] == "Custom PLA"
+    assert named.filament["filament_settings_id"] == ["Custom PLA"]
+    with pytest.raises(InvalidArgument):
+        build_profiles("k1se", overlay=Overlay(filament={"filament_settings_id": []}))
+    with pytest.raises(InvalidArgument):
+        build_profiles(
+            "k1se", overlay=Overlay(filament={"filament_settings_id": ["a", "b"]})
+        )
+
+
 def test_requested_settings_are_what_the_gcode_must_echo() -> None:
     overlay = Overlay(
         process={"outer_wall_speed": 250, "small_perimeter_speed": 120},

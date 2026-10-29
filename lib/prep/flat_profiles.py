@@ -294,6 +294,22 @@ def _requested_settings(
     return requested
 
 
+def _filament_name(filament: Mapping[str, Any], default: str) -> str:
+    """The filament preset name after the overrides: `filament_settings_id` is a one-entry list (a plain string is
+    taken as is); an empty or non-text identity is an InvalidArgument."""
+    ident = filament.get("filament_settings_id", [default])
+    if isinstance(ident, list) and len(ident) == 1:
+        ident = ident[0]
+    if not isinstance(ident, str) or not ident:
+        raise InvalidArgument(
+            "filament_settings_id",
+            str(ident),
+            ["one non-empty preset name"],
+            command="prep",
+        )
+    return ident
+
+
 def _check_inputs(printer: str, supports: str) -> None:
     if printer not in FLAT_PRINTERS:
         raise InvalidArgument(
@@ -343,9 +359,7 @@ def build_profiles(
     process_name = (process_preset or fleet.process) + (
         _OVERRIDE_SUFFIX if renamed_process else ""
     )
-    filament_name = str(
-        filament.get("filament_settings_id", [filament_preset or fleet.filament])[0]
-    )
+    filament_name = _filament_name(filament, filament_preset or fleet.filament)
     names = {
         "machine": machine_name,
         "process": process_name,
