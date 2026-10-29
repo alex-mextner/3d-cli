@@ -63,7 +63,10 @@ def test_parse_license_recognises_what_the_sites_print(
     assert parsed is not None and parsed.id == expected
 
 
-@pytest.mark.parametrize("text", ["", "   ", "my own terms", "share-alike nd"])
+@pytest.mark.parametrize(
+    "text",
+    ["", "   ", "my own terms", "share-alike nd", "Creative Commons", "Creative Commons custom terms"],
+)
 def test_parse_license_returns_none_for_what_it_does_not_know(text: str) -> None:
     assert parse_license(text) is None
 
@@ -165,6 +168,13 @@ def test_a_print_folder_linked_to_references_is_not_scanned(tmp_path: Path) -> N
     shutil.rmtree(project / "print")
     (project / "print").symlink_to(refs, target_is_directory=True)
     assert "original.scad" not in [f.name for f in select_files(project).files]
+
+
+@pytest.mark.parametrize("tags", ["false", "0", '""', "{}"])
+def test_malformed_tags_are_refused_not_dropped(tmp_path: Path, tags: str) -> None:
+    project = make_project(tmp_path, YAML + f"tags: {tags}\n")
+    with pytest.raises(InvalidArgument):
+        load_spec(project)
 
 
 def test_whitespace_only_required_fields_are_refused(tmp_path: Path) -> None:

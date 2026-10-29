@@ -154,15 +154,20 @@ class BrowserOutcome:
     message: str
 
 
+BROWSER_TIMEOUT = 180
+KEYCHAIN_APPROVAL_TIMEOUT = 330  # keychain waits up to 300 s for the owner's approval of a fill
+
+
 def run_agent_browser(argv: Sequence[str]) -> tuple[int, str]:
+    limit = KEYCHAIN_APPROVAL_TIMEOUT if argv[0] == "keychain" else BROWSER_TIMEOUT
     try:
         done = subprocess.run(
-            list(argv), capture_output=True, text=True, timeout=180, check=False
+            list(argv), capture_output=True, text=True, timeout=limit, check=False
         )
     except FileNotFoundError:
         return 127, f"{argv[0]} is not installed"
     except subprocess.TimeoutExpired:
-        return 124, f"{argv[0]} timed out after 180 s"
+        return 124, f"{argv[0]} timed out after {limit} s"
     return done.returncode, (done.stdout + done.stderr).strip()
 
 
@@ -204,7 +209,7 @@ def _login(platform: str, base: list[str], runner: Runner) -> str | None:
 
 def _session_name(plan: PlatformPlan) -> str:
     """One session per publication: the title plus where its files live (two projects may share a title)."""
-    identity = "\0".join([str(plan.fields.get("title", "")), *map(str, plan.files)])
+    identity = "\0".join([str(plan.fields.get("title", "")), *(str(p.resolve()) for p in plan.files)])
     return f"3d-publish-{plan.platform}-{hashlib.sha256(identity.encode()).hexdigest()[:8]}"
 
 

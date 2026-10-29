@@ -179,7 +179,9 @@ def _images(project: Path, data: dict[str, Any]) -> tuple[Path, ...]:
 
 
 def _tags(data: dict[str, Any]) -> tuple[str, ...]:
-    raw_tags = data.get("tags") or []
+    raw_tags = data.get("tags")
+    if raw_tags is None:
+        return ()
     if not isinstance(raw_tags, list) or not all(
         isinstance(t, str) and t.strip() for t in raw_tags
     ):

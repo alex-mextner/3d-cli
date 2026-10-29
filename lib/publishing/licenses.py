@@ -118,7 +118,7 @@ def parse_license(text: str) -> License | None:
 def _cc_license(tokens: list[str], word: set[str], joined: str) -> License | None:
     """The Creative Commons licence the tokens name, or None when they are not CC at all."""
     is_cc = (
-        bool(word & {"cc", "creative", "commons", "attribution"})
+        bool(word & {"cc", "attribution"})  # "Creative Commons" alone names no licence
         or tokens == ["by"]  # MakerWorld's bare label for CC BY
         or ("by" in word and bool(word & {"nc", "sa", "nd"}))
     )
