@@ -121,7 +121,9 @@ def test_the_unjudged_list_is_on_screen_while_the_model_is_still_thinking(
             ],
             env=env,
             cwd=str(tmp_path),
-            script=[(r"10 results", ""), (r"done: 10 results", "q")],
+            # the status line, not the header: "10 results" is in the header before the status line says
+            # "judging", and the first screen then lacks the text this test is about
+            script=[(r"judging 10 results", ""), (r"done: 10 results", "q")],
             size=(100, 30),
             timeout=90,
         )
@@ -247,7 +249,9 @@ def test_a_small_terminal_keeps_the_status_and_key_lines_on_screen(
             ],
             env=env,
             cwd=str(tmp_path),
-            script=[(r"10 results", "q")],
+            # the status line, not the header: "10 results" is in the header while the status line still says
+            # "searching...", and the key line is then asserted on a screen that has no "done:" yet
+            script=[(r"done: 10 results", "q")],
             size=(80, 24),
             timeout=60,
         )
