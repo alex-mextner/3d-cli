@@ -31,6 +31,7 @@ from publishing.spec import (
     PublishSpec,
     listing_images,
     load_spec,
+    read_mapping,
     select_files,
 )
 
@@ -523,13 +524,13 @@ def evaluate(
     opts = options or Options()
     if opts.kind not in KINDS:
         raise InvalidArgument("--kind", opts.kind, list(KINDS), command="models")
-    spec = load_spec(project, opts.defaults, with_images=False)
+    # publish.yaml is read once: the spec and the listing images below come from the same snapshot of it
+    data = read_mapping(project, allow_missing=bool(opts.defaults))
+    spec = load_spec(project, opts.defaults, with_images=False, data=data)
     kind = _resolve_kind(opts, spec)
     if kind == "make":
         return _evaluate_make(project, platforms, spec, opts)
-    spec = replace(
-        spec, images=listing_images(project, allow_missing=bool(opts.defaults))
-    )
+    spec = replace(spec, images=listing_images(project, data))
     if opts.of is not None:
         if spec.remix_of and not _same_source(spec.remix_of, opts.of.url):
             # permission and licence declaration name the declared source, not --of

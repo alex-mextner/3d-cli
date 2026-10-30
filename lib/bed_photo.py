@@ -219,17 +219,24 @@ def check_part_height(part_height_mm: float | None) -> None:
 
 def _recovery_clearance(
     device: Any, adapter: Any, cfg: BedConfig, part_height_mm: float | None
-) -> Callable[[bed_view.Motion, float], None]:
-    """The veto `recover_pending` runs on the single state read it moves on: a fresh marker would send the
-    bed back to the Z it was found at, so refuse (nothing sent, marker kept) when no valid clearance limits
-    exist (part height / Z range unknown) or that Z lies below the clearance floor."""
+) -> Callable[[bed_view.Motion, float], Callable[[bed_view.Motion], None]]:
+    """The clearance rules of a recovery move, for `bed_view.recover_pending`.
 
-    def veto(m: bed_view.Motion, z: float) -> None:
+    A fresh marker would send the bed back to the Z it was found at, so recovery is refused (nothing sent,
+    marker kept) when no valid clearance limits exist (part height / Z range unknown) or that Z lies below the
+    clearance floor. The limits may need a Moonraker metadata request, which must not happen between the
+    read a move is sent from and the send (the printer changes while it waits): `clearance(m, z)` does the
+    lookup for the first read `m` and the marker's Z `z` and returns the veto for the read the move is sent
+    from, which only checks that the limits still hold for it and does no I/O."""
+    # a declared part height does not depend on the job: only a metadata lookup does
+    job_matters = part_height_mm is None and cfg.auto_view_part_mm is None
+
+    def clearance(m: bed_view.Motion, z: float) -> Callable[[bed_view.Motion], None]:
         limits = _may_move(device, adapter, cfg, m, part_height_mm)
         if not isinstance(limits, bed_view.Limits):
             raise GateFailure(  # no valid clearance limits: recovery could land anywhere, so it sends nothing
-                f"{device.name}: an interrupted bed view left the bed away and it is not put back for the photo: "
-                f"{limits}; nothing was moved and the marker is kept",
+                f"{device.name}: an interrupted bed view left the bed away and it is not put back for the "
+                f"photo: {limits}; nothing was moved and the marker is kept",
                 command="photo",
                 remediation=[
                     "Fix what is named above, then retry; the marker is kept."
@@ -242,12 +249,26 @@ def _recovery_clearance(
                 f"{limits.part_source}; nothing was moved and the marker is kept",
                 command="photo",
                 remediation=[
-                    f"Run `3d printer bed status {device.name}` once the part is removed or with the height it "
-                    "had, then retry."
+                    "Remove the part and retry with --part-height 0 (or the height of what still stands on "
+                    "the bed): nothing senses the bed, the floor comes from the height you give or the last "
+                    "job's metadata."
                 ],
             )
+        job = m.filename
 
-    return veto
+        def veto(m_send: bed_view.Motion) -> None:
+            if job_matters and m_send.filename != job:
+                raise GateFailure(
+                    f"{device.name}: the last job changed from {job or 'none'} to {m_send.filename or 'none'} "
+                    "between the reads of the recovery, so the clearance looked up for it no longer holds; "
+                    "nothing was moved and the marker is kept",
+                    command="photo",
+                    remediation=["Retry; the marker is kept."],
+                )
+
+        return veto
+
+    return clearance
 
 
 def capture_table_photo(

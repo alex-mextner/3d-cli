@@ -175,3 +175,31 @@ def test_cults_images_sharing_a_basename_are_a_plan_problem(tmp_path: Path) -> N
     assert any(
         "two Cults images are named table.jpg" in p for p in ev.plans[0].problems
     )
+
+
+def test_one_evaluation_reads_publish_yaml_once_so_a_save_cannot_mix_versions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A save of publish.yaml landing right after the evaluation read it (its title and its listing images
+    come from the same read, or the post would pair one version's text with another's pictures)."""
+    import yaml
+
+    first = YAML.replace("Wall plug", "First") + "images: [previews/one.png]\n"
+    second = YAML.replace("Wall plug", "Second") + "images: [previews/two.png]\n"
+    project = make_project(tmp_path, first)
+    for name in ("one.png", "two.png"):
+        (project / "previews" / name).write_bytes(b"\x89PNG")
+    real_load = yaml.safe_load
+    reads: list[object] = []
+
+    def load_then_save(stream: object) -> object:
+        data = real_load(stream)  # type: ignore[arg-type]
+        reads.append(data)
+        (project / "publish.yaml").write_text(second, encoding="utf-8")
+        return data
+
+    monkeypatch.setattr(yaml, "safe_load", load_then_save)
+    ev = run(project, ["thingiverse"], plan.Options(kind="original"))
+    assert len(reads) == 1
+    assert ev.spec.title == "First"
+    assert [p.name for p in ev.spec.images] == ["one.png"]

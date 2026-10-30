@@ -160,7 +160,9 @@ def default_images(project: Path) -> tuple[Path, ...]:
     )
 
 
-def _images(project: Path, data: dict[str, Any]) -> tuple[Path, ...]:
+def listing_images(project: Path, data: dict[str, Any]) -> tuple[Path, ...]:
+    """The listing images of an original/remix post: `images` of the mapping `read_mapping` returned, else
+    previews/."""
     declared = data.get("images")
     if declared is None:
         return default_images(project)
@@ -244,7 +246,7 @@ def _hosted(data: dict[str, Any]) -> tuple[tuple[str, str], ...]:
     return tuple(raw.items())
 
 
-def _read_mapping(project: Path, *, allow_missing: bool = False) -> dict[str, Any]:
+def read_mapping(project: Path, *, allow_missing: bool = False) -> dict[str, Any]:
     import yaml  # lazy: only `publish` needs it
 
     path = project / SPEC_NAME
@@ -276,23 +278,26 @@ def _read_mapping(project: Path, *, allow_missing: bool = False) -> dict[str, An
     return data
 
 
-def listing_images(project: Path, *, allow_missing: bool = False) -> tuple[Path, ...]:
-    """The listing images of an original/remix post (publish.yaml `images`, else previews/)."""
-    return _images(project, _read_mapping(project, allow_missing=allow_missing))
-
-
 def load_spec(
     project: Path,
     defaults: Mapping[str, str] | None = None,
     *,
     with_images: bool = True,
+    data: dict[str, Any] | None = None,
 ) -> PublishSpec:
     """Read and validate `<project>/publish.yaml`; every defect is a structured exit-2 error.
 
     `defaults` (the publish OFFER only) fills title / description / license that publish.yaml leaves out, or
     stands in for a missing publish.yaml; every key it supplied is listed in `PublishSpec.defaults_used` so
-    the offer can say what it assumed. `3d models publish` passes none: it stays strict."""
-    data = _read_mapping(project, allow_missing=bool(defaults))
+    the offer can say what it assumed. `3d models publish` passes none: it stays strict.
+
+    `data` is the mapping a caller already read with `read_mapping` (and also uses for `listing_images`): the
+    file is then not read again, so one evaluation never mixes two saves of it."""
+    data = (
+        dict(data)
+        if data is not None
+        else read_mapping(project, allow_missing=bool(defaults))
+    )
     used: list[str] = []
     for key, value in (defaults or {}).items():
         if data.get(key) in (None, ""):
@@ -322,7 +327,7 @@ def load_spec(
         remix_of=remix_of,
         remix_license=_text(data, "remix_license"),
         permission_ref=_text(data, "permission_ref"),
-        images=_images(project, data) if with_images else (),
+        images=listing_images(project, data) if with_images else (),
         hosted=_hosted(data),
         defaults_used=tuple(used),
     )

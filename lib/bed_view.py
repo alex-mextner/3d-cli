@@ -210,6 +210,15 @@ class MoveRefused(Exception):
     """A guard stopped a move; nothing was sent."""
 
 
+class MoveVetoed(MoveRefused):
+    """The caller's `veto` of `guarded_z_move` stopped a move by raising `cause`; nothing was sent. Unlike the
+    guards' own refusals the restore helpers re-raise it instead of reporting it as a note."""
+
+    def __init__(self, cause: Exception) -> None:
+        super().__init__(str(cause))
+        self.cause = cause
+
+
 @dataclass(frozen=True)
 class Motion:
     state: str            # base.py normalized: idle | printing | paused | complete | cancelled | error | busy | unknown
@@ -272,10 +281,14 @@ def _landing_refusal(m: Motion, to_gcode_z: float, floor: float | None, ceiling:
 
 def guarded_z_move(adapter: Any, *, to_gcode_z: float, floor: float | None = None, ceiling: float | None = None,
                    target_toolhead_z: float | None = None, feed: float = AUTO_VIEW_FEED,
-                   read: Callable[[Any], Motion] = read_motion) -> Motion:
+                   read: Callable[[Any], Motion] = read_motion,
+                   veto: Callable[[Motion], None] | None = None) -> Motion:
     """THE ONLY WRITE: `G90`, `G1 Z<to_gcode_z> F<feed>`, `M400` as one script, after a fresh read of the
     printer says: Klipper ready, state idle/complete/cancelled, Z homed. `floor`/`ceiling` bound
     `target_toolhead_z`, and the G-code Z must land AT it under the Z offset of that fresh read.
+    `veto(m)` is the caller's last word: it is called with THAT SAME read once every guard above has passed
+    and raises to stop the move (nothing is sent; what it raised surfaces as MoveVetoed, a MoveRefused). It
+    runs between the read and the send, so it does no I/O.
     Returns the Motion read before the move; MoveRefused when a guard stops it."""
     m = read(adapter)
     if not m.ready:
@@ -291,6 +304,11 @@ def guarded_z_move(adapter: Any, *, to_gcode_z: float, floor: float | None = Non
     why = _landing_refusal(m, to_gcode_z, floor, ceiling, target_toolhead_z)
     if why is not None:
         raise MoveRefused(f"cannot move: {why}")
+    if veto is not None:
+        try:
+            veto(m)
+        except Exception as exc:
+            raise MoveVetoed(exc) from exc
     adapter.run_gcode(f"G90\nG1 Z{to_gcode_z:.3f} F{feed:g}\nM400", timeout=MOVE_TIMEOUT_S)
     return m
 
@@ -407,9 +425,11 @@ def terminate_as_exit() -> Iterator[None]:
 
 
 def restore_z(adapter: Any, before: Motion, *, tol: float = 0.15,
-              read: Callable[[Any], Motion] = read_motion) -> str | None:
+              read: Callable[[Any], Motion] = read_motion,
+              veto: Callable[[Motion], None] | None = None) -> str | None:
     """Put the bed back where `before` found it. None = done (or never left); else why it is NOT back.
-    Refused (nothing sent) when the Z offset at the send is not the one `before.gcode_z` was read under."""
+    Refused (nothing sent) when the Z offset at the send is not the one `before.gcode_z` was read under, or
+    when `veto` (see `guarded_z_move`) refuses the read the move is sent from."""
     try:
         now = read(adapter)
         if now.z is not None and before.z is not None and abs(now.z - before.z) <= tol:
@@ -417,11 +437,13 @@ def restore_z(adapter: Any, before: Motion, *, tol: float = 0.15,
         target = before.gcode_z if before.gcode_z is not None else before.z
         if target is None:
             return "the Z it was found at is unknown"
-        guarded_z_move(adapter, to_gcode_z=target, target_toolhead_z=before.z, read=read)
+        guarded_z_move(adapter, to_gcode_z=target, target_toolhead_z=before.z, read=read, veto=veto)
         after = read(adapter)
         if after.z is not None and before.z is not None and abs(after.z - before.z) > max(tol, 0.5):
             return f"the bed is at Z {after.z:.1f}, it was found at Z {before.z:.1f}"
         return None
+    except MoveVetoed:  # the caller's refusal is its own error, not a restore note
+        raise
     except MoveRefused as exc:
         return str(exc)
     except Exception as exc:  # never hide the bed verdict behind a failed restore: report it
@@ -429,31 +451,36 @@ def restore_z(adapter: Any, before: Motion, *, tol: float = 0.15,
 
 
 def restore_physical_z(adapter: Any, z: float, *, tol: float = 0.15,
-                       read: Callable[[Any], Motion] = read_motion) -> str | None:
+                       read: Callable[[Any], Motion] = read_motion,
+                       veto: Callable[[Motion], None] | None = None) -> str | None:
     """Put the bed back to the PHYSICAL (toolhead) Z `z` in the coordinate frame in force NOW: the G-code Z
     is recomputed from the offset read first, and `guarded_z_move` refuses (nothing sent) when the offset
-    differs again at its own read right before the send. None = done; else why it is NOT back."""
+    differs again at its own read right before the send. `veto` is applied to that same read.
+    None = done; else why it is NOT back."""
     try:
         now = read(adapter)
     except Exception as exc:  # an unreadable printer is reported, never hidden behind the verdict
         return f"restore failed: {exc.__class__.__name__}: {exc}"
     if now.z is None or now.gcode_z is None:  # no offset to convert the physical Z with: nothing is sent
         return f"cannot move: {_unknown_coordinates(now)}"
-    return restore_z(adapter, replace(now, z=z, gcode_z=z - now.offset), tol=tol, read=read)
+    return restore_z(adapter, replace(now, z=z, gcode_z=z - now.offset), tol=tol, read=read, veto=veto)
 
 
 def recover_pending(adapter: Any, printer: str, now: float,
                     read: Callable[[Any], Motion] = read_motion,
-                    clearance: Callable[[Motion, float], None] | None = None) -> str | None:
+                    clearance: Callable[[Motion, float], Callable[[Motion], None]] | None = None) -> str | None:
     """A check that died between the move and the restore left a marker: undo it now (only a fresh
     marker, only a quiet printer). -> a note for the verdict, or None.
 
     The marker holds the PHYSICAL Z the bed was found at, never a G-code Z to replay: that one is only
     valid under the Z offset of its time. Recovery goes through `restore_physical_z` (offset read now).
 
-    `clearance(m, z)` is the caller's veto on the move: it is called with the SAME state read the move is
-    based on and the marker's Z, only when a move would be sent, and raises to refuse; nothing is sent and
-    the marker is kept. The guarantee thus never rests on a second read of a printer that may change state."""
+    `clearance(m, z)` is the caller's check of the move, in two steps. It is called once with the first read
+    `m` and the marker's Z `z`, before any read the move is sent from: it may do I/O (a metadata lookup) and
+    raises to refuse. It returns the veto: `guarded_z_move` calls that with the very state read it sends the
+    move from (not an earlier one: the printer may change between reads), only when a move would be sent, and
+    it raises to refuse. It runs between that read and the send, so it does no I/O. A refusal of either step
+    sends nothing, keeps the marker and propagates as raised."""
     pending = _read_pending(printer)
     if pending is None:
         return None
@@ -470,9 +497,11 @@ def recover_pending(adapter: Any, printer: str, now: float,
         if m.z is not None and abs(m.z - z) <= 0.15:
             _clear_pending(printer)
             return None
-        if clearance is not None:
-            clearance(m, z)
-        why = restore_physical_z(adapter, z, read=read)
+        veto = None if clearance is None else clearance(m, z)
+        try:
+            why = restore_physical_z(adapter, z, read=read, veto=veto)
+        except MoveVetoed as exc:  # the caller's refusal is its own error, not a note: nothing was sent
+            raise exc.cause from None
         if why is None:
             _clear_pending(printer)
             return f"put the bed back to Z {z:.1f} (left there by an interrupted view check)"
@@ -630,6 +659,6 @@ def _moved_check(device: Any, adapter: Any, m: Motion, pick: ViewPick, limits: L
     return _annotate(verdict, {**base, **used}, _join(note, text))
 
 
-__all__ = ["Candidate", "Limits", "MoveRefused", "Motion", "ViewPick", "auto_view", "guarded_z_move",
+__all__ = ["Candidate", "Limits", "MoveRefused", "MoveVetoed", "Motion", "ViewPick", "auto_view", "guarded_z_move",
            "move_limits", "no_write_access", "part_height", "pick_inspection_z", "read_motion", "recover_pending", "restore_z",
            "view_in_progress"]

@@ -678,8 +678,9 @@ def test_a_fresh_marker_is_not_recovered_when_no_clearance_limits_exist() -> Non
 def test_a_state_change_between_reads_never_sends_the_recovery_move_without_clearance(
     tmp_path: Path, printing_reads: int
 ) -> None:
-    """Unknown part height + a fresh marker at Z70: whichever read the recovery moves on (the printer reads
-    `printing` for the first N reads, then `complete`) the clearance veto sees THAT read: no G1 is sent."""
+    """Unknown part height + a fresh marker at Z70, the printer reads `printing` for the first N reads, then
+    `complete`: whichever read the recovery works on, no G1 is sent (a `printing` first read leaves the bed to
+    the job, a `complete` one has no part height to judge the clearance by)."""
     printer, camera = FakePrinter(z=200.0), FakeCamera()
     bed_view._write_pending(
         "u1",
@@ -713,9 +714,19 @@ def test_a_state_change_between_reads_never_sends_the_recovery_move_without_clea
     assert pending is not None and pending["z"] == 70.0  # the marker is kept
 
 
-def test_recover_pending_refuses_through_the_clearance_veto_and_keeps_the_marker() -> (
-    None
-):
+@pytest.mark.parametrize(
+    "refusal",
+    [
+        GateFailure("below the floor", command="photo"),
+        bed_view.MoveRefused("below the floor"),
+        ValueError("below the floor"),
+    ],
+    ids=["GateFailure", "MoveRefused", "ValueError"],
+)
+def test_recover_pending_refuses_through_the_clearance_veto_and_keeps_the_marker(
+    refusal: Exception,
+) -> None:
+    """Whatever the veto raises reaches the caller as itself (not as a note) and nothing is sent."""
     printer = FakePrinter(z=200.0)
     bed_view._write_pending(
         "u1",
@@ -724,11 +735,186 @@ def test_recover_pending_refuses_through_the_clearance_veto_and_keeps_the_marker
     )
     seen: list[tuple[str, float]] = []
 
-    def veto(m: bed_view.Motion, z: float) -> None:
-        seen.append((m.state, z))
-        raise GateFailure("below the floor", command="photo")
+    def clearance(
+        first: bed_view.Motion, z: float
+    ) -> Callable[[bed_view.Motion], None]:
+        assert (first.state, z) == ("complete", 70.0)
 
-    with pytest.raises(GateFailure, match="below the floor"):
-        bed_view.recover_pending(printer, "u1", time.time(), clearance=veto)
-    assert seen == [("complete", 70.0)] and printer.scripts == []
+        def veto(m: bed_view.Motion) -> None:
+            seen.append((m.state, m.z or 0.0))
+            raise refusal
+
+        return veto
+
+    with pytest.raises(type(refusal), match="below the floor") as caught:
+        bed_view.recover_pending(printer, "u1", time.time(), clearance=clearance)
+    assert caught.value is refusal
+    assert seen == [("complete", 200.0)] and printer.scripts == []
     assert bed_view._read_pending("u1") is not None
+
+
+class ScriptedReadsPrinter(FakePrinter):
+    """A printer whose state and last job (print_stats.filename, hence the part height) are scripted per read:
+    read N shows `script[N-1]` (state, job), every read after the script repeats its last entry."""
+
+    def __init__(
+        self, script: list[tuple[str, str]], heights: dict[str, float]
+    ) -> None:
+        super().__init__(z=200.0)
+        self.script = script
+        self.heights = heights
+        self.queries = 0
+        self.lookups = 0
+
+    def query(self, objects: str) -> dict[str, Any]:
+        self.raw, job = self.script[min(self.queries, len(self.script) - 1)]
+        self.queries += 1
+        state = super().query(objects)
+        state["print_stats"]["filename"] = job
+        return state
+
+    def file_metadata(self, filename: str) -> dict[str, Any]:
+        self.lookups += 1
+        return {"object_height": self.heights[filename]}
+
+
+HEIGHTS = {"short.gcode": 5.0, "tall.gcode": 100.0}
+
+
+def marker_at_70() -> None:
+    bed_view._write_pending(
+        "u1",
+        bed_view.Motion("complete", "complete", 70.0, 70.0, "xyz", True, None),
+        time.time(),
+    )
+
+
+def recover(printer: FakePrinter, part_height_mm: float | None = None) -> str | None:
+    return bed_view.recover_pending(
+        printer,
+        "u1",
+        time.time(),
+        clearance=bed_photo._recovery_clearance(device(), printer, CFG, part_height_mm),
+    )
+
+
+def test_a_job_change_between_the_recovery_reads_sends_nothing_and_keeps_the_marker() -> (
+    None
+):
+    """Marker at Z70. Read 1: complete, last job 5 mm tall (floor Z20: Z70 is fine). Read 2: printing, 100 mm.
+    Every read after: complete, 100 mm (floor Z115: Z70 would drive the bed into the part). The G1 would be sent
+    from the last read, which no clearance was looked up for: nothing is sent, the marker stays."""
+    printer = ScriptedReadsPrinter(
+        [
+            ("complete", "short.gcode"),
+            ("printing", "tall.gcode"),
+            ("complete", "tall.gcode"),
+        ],
+        HEIGHTS,
+    )
+    marker_at_70()
+    with pytest.raises(
+        GateFailure, match="last job changed from short.gcode to tall.gcode"
+    ):
+        recover(printer)
+    assert printer.scripts == [] and printer.z == 200.0
+    pending = bed_view._read_pending("u1")
+    assert pending is not None and pending["z"] == 70.0
+
+
+def test_the_clearance_is_looked_up_once_before_the_reads_the_move_is_sent_from() -> (
+    None
+):
+    printer = ScriptedReadsPrinter([("complete", "short.gcode")], HEIGHTS)
+    marker_at_70()
+    note = recover(printer)
+    assert note is not None and "put the bed back to Z 70.0" in note
+    assert moves(printer) == ["G1 Z70.000 F600"] and printer.z == 70.0
+    assert printer.lookups == 1 and bed_view._read_pending("u1") is None
+
+
+class PrintStartsDuringLookupPrinter(FakePrinter):
+    """Asking for the last job's metadata takes long enough for a print to start."""
+
+    def __init__(self) -> None:
+        super().__init__(z=200.0)
+        self.lookups = 0
+
+    def file_metadata(self, filename: str) -> dict[str, Any]:
+        self.lookups += 1
+        self.raw = "printing"
+        return {"object_height": 5.0}
+
+
+def test_a_print_starting_during_the_clearance_lookup_is_not_sent_the_recovery_move() -> (
+    None
+):
+    """The lookup is an HTTP request: made between the final read and the send it would let a print start
+    unseen. It is made before the reads, so the move's own read sees the print and refuses."""
+    printer = PrintStartsDuringLookupPrinter()
+    marker_at_70()
+    note = recover(printer)
+    assert note is not None and "printer is printing" in note
+    assert printer.scripts == [] and printer.lookups == 1
+    assert bed_view._read_pending("u1") is not None
+
+
+def test_a_clearance_that_refuses_the_first_read_sends_nothing() -> None:
+    printer = FakePrinter(z=200.0)
+    marker_at_70()
+    with pytest.raises(GateFailure, match="below the clearance floor Z 115"):
+        recover(printer, part_height_mm=100.0)
+    assert printer.scripts == [] and bed_view._read_pending("u1") is not None
+
+
+def test_a_job_change_does_not_stop_a_recovery_judged_by_a_declared_part_height() -> (
+    None
+):
+    """With --part-height the floor never came from the job's metadata, so another last job changes nothing."""
+    printer = ScriptedReadsPrinter(
+        [("complete", "short.gcode"), ("complete", "tall.gcode")], HEIGHTS
+    )
+    marker_at_70()
+    note = recover(printer, part_height_mm=20.0)
+    assert note is not None and "put the bed back to Z 70.0" in note
+    assert moves(printer) == ["G1 Z70.000 F600"] and printer.lookups == 0
+
+
+def test_a_veto_that_fails_unexpectedly_stops_the_move_as_a_veto() -> None:
+    printer = FakePrinter(z=200.0)
+
+    def broken(m: bed_view.Motion) -> None:
+        raise ValueError("bad limits")
+
+    with pytest.raises(bed_view.MoveVetoed, match="bad limits") as caught:
+        bed_view.guarded_z_move(printer, to_gcode_z=70.0, veto=broken)
+    assert isinstance(caught.value.cause, ValueError) and printer.scripts == []
+
+
+def test_guarded_z_move_hands_the_veto_the_read_it_sends_from() -> None:
+    printer = FakePrinter(z=200.0)
+    reads: list[bed_view.Motion] = []
+
+    def read(adapter: Any) -> bed_view.Motion:
+        reads.append(bed_view.read_motion(adapter))
+        return reads[-1]
+
+    vetoed: list[bed_view.Motion] = []
+
+    def refuse(m: bed_view.Motion) -> None:
+        vetoed.append(m)
+        raise bed_view.MoveRefused("vetoed")
+
+    with pytest.raises(bed_view.MoveRefused, match="vetoed"):
+        bed_view.guarded_z_move(printer, to_gcode_z=70.0, read=read, veto=refuse)
+    assert len(reads) == 1 and vetoed == reads and printer.scripts == []
+    bed_view.guarded_z_move(printer, to_gcode_z=70.0, veto=lambda m: None)
+    assert moves(printer) == ["G1 Z70.000 F600"]
+
+
+def test_guarded_z_move_asks_the_veto_only_when_every_guard_has_passed() -> None:
+    printing = FakePrinter("printing", z=200.0)
+    asked: list[bed_view.Motion] = []
+    with pytest.raises(bed_view.MoveRefused, match="printer is printing"):
+        bed_view.guarded_z_move(printing, to_gcode_z=70.0, veto=asked.append)
+    assert asked == [] and printing.scripts == []
