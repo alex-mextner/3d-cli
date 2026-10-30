@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import itertools
+import math
+
 import numpy as np
 import trimesh
 from materials import get_material
@@ -11,6 +14,60 @@ from structural import mesh as meshing
 
 def card(name: str = "PLA") -> fdm.FdmCard:
     return fdm.FdmCard.from_material(get_material(name))
+
+
+def grid_tetrahedralize(
+    surface: trimesh.Trimesh,
+    edge_length_mm: float,
+    *,
+    min_thickness_mm: float | None = None,
+) -> meshing.TetMesh:
+    """A deterministic stand-in for `meshing.tetrahedralize` on a box: its bounding box in cells of about
+    `edge_length_mm`, each cut into the 6 tets of its main diagonal (the mesh conforms across cells).
+
+    fTetWild returns a different mesh on every call, even on one thread, and a peak stress at a clamp or a
+    load patch moves by tens of percent with it: a test that compares two analyses by stress uses this.
+    Only boxes: anything else is refused, and the mesh checks itself (positive tets filling the box)."""
+    lo, hi = surface.bounds
+    box_volume = float(np.prod(hi - lo))
+    assert math.isclose(abs(surface.volume), box_volume, rel_tol=1e-6), (
+        "the grid stand-in meshes boxes only"
+    )
+    # the epsilon keeps an extent that is an exact multiple of the edge from gaining a cell
+    cells = [
+        max(1, math.ceil((hi[a] - lo[a]) / edge_length_mm - 1e-9)) for a in range(3)
+    ]
+    dims = [c + 1 for c in cells]
+    nodes = np.arange(math.prod(dims)).reshape(dims)
+    axes = [np.linspace(lo[a], hi[a], dims[a]) for a in range(3)]
+    points = np.stack(np.meshgrid(*axes, indexing="ij"), axis=-1).reshape(-1, 3)
+    tets = []
+    paths = list(
+        itertools.permutations(range(3))
+    )  # the 6 monotone paths corner 000 -> 111
+    for cell in itertools.product(*(range(c) for c in cells)):
+        for order in paths:
+            corner = list(cell)
+            path = [nodes[tuple(corner)]]
+            for axis in order:
+                corner[axis] += 1
+                path.append(nodes[tuple(corner)])
+            tets.append(path)
+    elements = np.array(tets, dtype=np.int64)
+    p = points[elements]
+    volume = np.einsum(
+        "ij,ij->i", np.cross(p[:, 1] - p[:, 0], p[:, 2] - p[:, 0]), p[:, 3] - p[:, 0]
+    )
+    flip = volume < 0.0
+    elements[flip] = elements[flip][:, [0, 2, 1, 3]]
+    assert math.isclose(float(np.abs(volume).sum()) / 6.0, box_volume, rel_tol=1e-9)
+    assert np.all(np.abs(volume) > 0.0)
+    return meshing.TetMesh(
+        points=points,
+        tets=elements,
+        edge_length_mm=edge_length_mm,
+        min_thickness_mm=min_thickness_mm,
+    )
 
 
 def bar(
