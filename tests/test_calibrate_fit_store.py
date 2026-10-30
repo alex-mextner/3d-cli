@@ -82,6 +82,15 @@ def test_the_newest_record_of_a_scope_wins_and_other_materials_are_untouched() -
     assert fits_sources.resolve("sliding", "round", "k1se", "PETG", 0.4).clearance_mm == 0.1
 
 
+def test_two_records_written_in_the_same_second_resolve_to_the_later_one(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cf, "utc_now", lambda: "2026-10-24T10:00:00Z")  # the whole test inside one second
+    store.write(new_record(readings=readings(("sliding", "round", "step=3"))), None)
+    later = store.write(new_record(readings=readings(("sliding", "round", "step=5"))), None)
+    read = store.read_all().records
+    assert read[0].id == later.id and read[0].measured_at == read[1].measured_at
+    assert resolved().clearance_mm == 0.25
+
+
 def test_a_record_for_one_nozzle_does_not_answer_another() -> None:
     store.write(new_record(), None)
     wide = fits_sources.resolve("sliding", "round", "k1se", "PLA", 0.6)
