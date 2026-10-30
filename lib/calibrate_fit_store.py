@@ -56,7 +56,9 @@ class StoredRecord:
     measured_at: str
     readings: list[dict[str, Any]]
     coupon: str | None = None
-    uid: str | None = None  # the settings-history line uid (an imported record carries it in params)
+    uid: str | None = (
+        None  # the settings-history line uid (an imported record carries it in params)
+    )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -76,7 +78,9 @@ class StoredRecord:
 @dataclass
 class ReadResult:
     records: list[StoredRecord] = field(default_factory=list)
-    notes: list[str] = field(default_factory=list)  # what could not be read, for the caller to show
+    notes: list[str] = field(
+        default_factory=list
+    )  # what could not be read, for the caller to show
 
 
 # --------------------------------------------------------------------------- 3d-api
@@ -106,7 +110,10 @@ def _parse_readings(raw: Any, where: str) -> list[dict[str, Any]]:
             f"{where}: `readings` is not JSON ({e})", command="calibrate fit"
         ) from e
     if not isinstance(rows, list):
-        raise ThreeDError(f"{where}: `readings` must be a list of fit_clearance readings", command="calibrate fit")
+        raise ThreeDError(
+            f"{where}: `readings` must be a list of fit_clearance readings",
+            command="calibrate fit",
+        )
     try:
         return [fits.validate_fit_clearance(row) for row in rows]
     except (fits.FitTableError, AttributeError, TypeError) as e:
@@ -156,7 +163,9 @@ def _from_line(path: Path, line: Any) -> StoredRecord | None:
     where = f"{path}:{line.n}"
     new = d.get("new")
     if not isinstance(new, dict) or "readings" not in new:
-        raise ThreeDError(f"{where}: a {KIND} line needs `new.readings`", command="calibrate fit")
+        raise ThreeDError(
+            f"{where}: a {KIND} line needs `new.readings`", command="calibrate fit"
+        )
     nozzle = d.get("nozzle") if isinstance(d.get("nozzle"), dict) else {}
     uid = line.uid
     return StoredRecord(
@@ -174,7 +183,10 @@ def _from_line(path: Path, line: Any) -> StoredRecord | None:
 
 
 def read_buffer() -> list[StoredRecord]:
-    """Every fit_clearance line of the settings-history buffer (imported or not; `read_all` drops the imported)."""
+    """Every fit_clearance line of the settings-history buffer (imported or not; `read_all` drops the imported).
+
+    Within a file the newest line (the last one appended) comes first; files are in name order, which says
+    nothing about their age."""
     from printops import history_buffer as hb
 
     d = _buffer_dir()
@@ -186,41 +198,51 @@ def read_buffer() -> list[StoredRecord]:
             raise ThreeDError(
                 f"{path}: {e.message}" + (f" (line {e.line})" if e.line else ""),
                 command="calibrate fit",
-                remediation=["Fix or remove that buffer line: a torn write is never skipped silently."],
+                remediation=[
+                    "Fix or remove that buffer line: a torn write is never skipped silently."
+                ],
             ) from e
-        for line in lines:
+        for line in reversed(lines):
             rec = _from_line(path, line)
             if rec is not None:
                 out.append(rec)
     return out
 
 
-def read_all(api: ApiClient | None = None, *, warn: bool = True) -> ReadResult:
-    """The current records, newest first: 3d-api (when `api` or the config names one) + not-yet-imported buffer lines."""
+def _read_api_records(client: ApiClient, result: ReadResult, *, warn: bool) -> set[str]:
+    """Append 3d-api's records (newest first) to `result`; -> their uids (those buffer lines are imported)."""
     from printops.client import ApiError
 
+    imported: set[str] = set()
+    try:
+        for rec in read_api(client):
+            result.records.append(rec)
+            if rec.uid:
+                imported.add(rec.uid)
+    except ApiError as e:
+        if e.status != 0:
+            raise ThreeDError(
+                f"3d-api refused the fit_clearance read: {e.message}",
+                command="calibrate fit",
+                remediation=["Check PRINTOPS_TOKEN / `3d printops token --help`."],
+            ) from e
+        note = f"3d-api is unreachable ({e.message}): fit calibrations come from the offline buffer only"
+        result.notes.append(note)
+        if warn:
+            print(f"calibrate fit: {note}", file=sys.stderr)
+    return imported
+
+
+def read_all(api: ApiClient | None = None, *, warn: bool = True) -> ReadResult:
+    """The current records, newest first: 3d-api (when `api` or the config names one) + not-yet-imported buffer lines."""
     result = ReadResult()
     client = api if api is not None else api_client()
-    imported: set[str] = set()
-    if client is not None:
-        try:
-            for rec in read_api(client):
-                result.records.append(rec)
-                if rec.uid:
-                    imported.add(rec.uid)
-        except ApiError as e:
-            if e.status != 0:
-                raise ThreeDError(
-                    f"3d-api refused the fit_clearance read: {e.message}",
-                    command="calibrate fit",
-                    remediation=["Check PRINTOPS_TOKEN / `3d printops token --help`."],
-                ) from e
-            note = (
-                f"3d-api is unreachable ({e.message}): fit calibrations come from the offline buffer only"
-            )
-            result.notes.append(note)
-            if warn:
-                print(f"calibrate fit: {note}", file=sys.stderr)
+    imported = (
+        _read_api_records(client, result, warn=warn) if client is not None else set()
+    )
+    # 3d-api and every buffer file are newest first, so the stable sort below leaves records of one source that
+    # tie on `measured_at` (a resolution of one second) newest first, and `fits.select_correction` keeps the
+    # first of equal instants; across buffer files there is no order to keep (their names are printer ids)
     result.records.extend(r for r in read_buffer() if r.uid not in imported)
     result.records.sort(key=lambda r: r.measured_at, reverse=True)
     return result
@@ -230,7 +252,11 @@ def rows_of(record: StoredRecord) -> list[Correction]:
     """`fits.Correction` rows of one record (smallest free gap / largest press gap per fit x shape)."""
     import fits
 
-    where = " (offline buffer, not imported into 3d-api yet)" if record.origin == "buffer" else ""
+    where = (
+        " (offline buffer, not imported into 3d-api yet)"
+        if record.origin == "buffer"
+        else ""
+    )
     return fits.corrections_from_fit_clearance(
         record.readings,
         printer=record.printer,
@@ -294,7 +320,9 @@ def _preflight_material(client: ApiClient, new: NewRecord) -> None:
         for i in data.get("items", [])
         if (i.get("filament") or {}).get("material")
     }
-    if materials and not any(fits.norm_name(m) == fits.norm_name(new.material) for m in materials):
+    if materials and not any(
+        fits.norm_name(m) == fits.norm_name(new.material) for m in materials
+    ):
         raise UsageError(
             f"--material {new.material} but {new.printer}/{new.head} has {', '.join(sorted(materials))} loaded",
             command="calibrate fit record",
@@ -378,5 +406,7 @@ def _write_buffer(new: NewRecord) -> Written:
     try:
         path = hb.append(new.printer, line)
     except hb.HistoryBufferError as e:
-        raise ThreeDError(e.message, command="calibrate fit record", remediation=e.remediation) from e
+        raise ThreeDError(
+            e.message, command="calibrate fit record", remediation=e.remediation
+        ) from e
     return Written("buffer", f"buffer:{uid[:8]}", str(path), uid, line)
