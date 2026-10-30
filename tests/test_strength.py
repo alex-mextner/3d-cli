@@ -8,7 +8,7 @@ import pathlib
 
 import pytest
 from errors import InputNotFound, InvalidArgument, UsageError
-from structural_fixtures import bar, tapered_bar
+from structural_fixtures import bar, grid_mesher, tapered_bar  # noqa: F401  (a fixture)
 
 
 def _stl(tmp_path: pathlib.Path, name: str, mesh) -> pathlib.Path:  # type: ignore[no-untyped-def]
@@ -388,21 +388,8 @@ def test_assembled_project_uses_loads_mates_and_per_part_materials(tmp_path) -> 
     assert result["unverified"]
 
 
-@pytest.fixture
-def grid_mesher(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    """Tests that compare two analyses by stress run on the deterministic grid mesh of box parts, at one size.
-
-    fTetWild meshes differ from call to call (even on one thread), and the peak von Mises at a clamp / load
-    patch moves by tens of percent with them (40 runs of the assembled bracket: assembled / alone = 0.34 .. 1.05,
-    bound 0.75; 2 of 50 runs of the orientation test broke its bound of 0.6). What such a test compares is then
-    the model (a glued plate carries load, layers are weak across), not mesh luck."""
-    from structural import mesh as meshing
-    from structural_fixtures import grid_tetrahedralize
-
-    monkeypatch.setattr(meshing, "tetrahedralize", grid_tetrahedralize)
-
-
-def test_assembled_stress_differs_from_the_parts_analysed_separately(tmp_path, grid_mesher) -> None:  # type: ignore[no-untyped-def]
+@pytest.mark.usefixtures("grid_mesher")
+def test_assembled_stress_differs_from_the_parts_analysed_separately(tmp_path) -> None:  # type: ignore[no-untyped-def]
     pytest.importorskip("skfem")
     pytest.importorskip("pytetwild")  # the method choice needs it, though the mesher is replaced
     project = _two_part_project(tmp_path)
@@ -431,7 +418,8 @@ def test_assembled_stress_differs_from_the_parts_analysed_separately(tmp_path, g
     )
 
 
-def test_fea_fixture_run_and_orientation_changes_the_safety_factor(tmp_path, grid_mesher) -> None:  # type: ignore[no-untyped-def]
+@pytest.mark.usefixtures("grid_mesher")
+def test_fea_fixture_run_and_orientation_changes_the_safety_factor(tmp_path) -> None:  # type: ignore[no-untyped-def]
     pytest.importorskip("skfem")
     pytest.importorskip("pytetwild")
     part = _bar_stl(tmp_path)

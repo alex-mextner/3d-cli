@@ -6,6 +6,7 @@ import itertools
 import math
 
 import numpy as np
+import pytest
 import trimesh
 from materials import get_material
 from structural import fdm, fea
@@ -132,3 +133,14 @@ def tip_deflection(sol: fea.CaseSolution, body: str, x_tip: float, comp: int) ->
     field = next(f for f in sol.fields if f.body.name == body)
     nodes = field.body.mesh.p
     return float(field.u[nodes[0] > x_tip - 1e-6][:, comp].mean())
+
+
+@pytest.fixture
+def grid_mesher(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tests that compare an analysis by stress or strain peaks run on the deterministic grid mesh of box parts.
+
+    fTetWild meshes differ from call to call (even on one thread) and a peak at a clamp / load patch moves by
+    tens of percent with them (40 runs of the assembled bracket: assembled / alone = 0.34 .. 1.05, bound 0.75;
+    2 of 50 runs of the orientation test broke its bound of 0.6; 5 of 40 of the snap-hook band strain broke
+    its 10 %). What such a test compares is then the model, not mesh luck."""
+    monkeypatch.setattr(meshing, "tetrahedralize", grid_tetrahedralize)

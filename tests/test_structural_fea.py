@@ -13,6 +13,7 @@ from structural_fixtures import (
     bar,
     card,
     end_slab,
+    grid_mesher,  # noqa: F401  (a fixture)
     pipe,
     solve,
     tapered_bar,
@@ -149,7 +150,10 @@ def test_pipe_hoop_stress_matches_lame_within_five_percent() -> None:
     assert float(np.mean(hoop_values)) == pytest.approx(lame, rel=0.05)
 
 
+@pytest.mark.usefixtures("grid_mesher")
 def test_snap_hook_root_strain_matches_closed_form_within_ten_percent() -> None:
+    # on the deterministic grid mesh: the maximum strain of a band on a random fTetWild mesh fell outside the
+    # bound in 5 of 40 runs (0.00578 against 0.00525 +- 10 %)
     t, length, w, y = 1.0, 7.0, 6.0, 0.2
     arm = bar(length, w, t)  # length along x, thickness along z
     tip = fea.Region("slab", axis=X, lo=length - 1e-6, hi=length + 1e-6, min_alignment=0.9)
