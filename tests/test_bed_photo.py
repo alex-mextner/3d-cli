@@ -822,9 +822,7 @@ def test_a_job_change_between_the_recovery_reads_sends_nothing_and_keeps_the_mar
     assert pending is not None and pending["z"] == 70.0
 
 
-def test_the_clearance_is_looked_up_once_before_the_reads_the_move_is_sent_from() -> (
-    None
-):
+def test_a_recovery_whose_clearance_holds_is_sent_after_one_lookup() -> None:
     printer = ScriptedReadsPrinter([("complete", "short.gcode")], HEIGHTS)
     marker_at_70()
     note = recover(printer)
@@ -918,3 +916,42 @@ def test_guarded_z_move_asks_the_veto_only_when_every_guard_has_passed() -> None
     with pytest.raises(bed_view.MoveRefused, match="printer is printing"):
         bed_view.guarded_z_move(printing, to_gcode_z=70.0, veto=asked.append)
     assert asked == [] and printing.scripts == []
+
+
+def test_the_floor_refusal_names_a_way_out_that_works_for_the_marker_it_refuses() -> (
+    None
+):
+    marker_z = 12.0  # between the post-G28 rest Z and the lowest clearance floor: no --part-height helps
+    bed_view._write_pending(
+        "u1",
+        bed_view.Motion("complete", "complete", marker_z, marker_z, "xyz", True, None),
+        time.time(),
+    )
+    with pytest.raises(GateFailure) as low:
+        recover(FakePrinter(z=200.0), part_height_mm=0.0)
+    assert any(
+        "no --part-height lowers" in r and "bed status" in r
+        for r in low.value.remediation
+    )
+    marker_at_70()
+    with pytest.raises(GateFailure) as high:
+        recover(FakePrinter(z=200.0), part_height_mm=100.0)
+    assert any("--part-height 0" in r for r in high.value.remediation)
+
+
+def test_a_job_change_does_not_stop_a_recovery_judged_by_the_configured_part_height() -> (
+    None
+):
+    printer = ScriptedReadsPrinter(
+        [("complete", "short.gcode"), ("complete", "tall.gcode")], HEIGHTS
+    )
+    marker_at_70()
+    cfg = BedConfig(enabled=True, auto_view_part_mm=20.0)
+    note = bed_view.recover_pending(
+        printer,
+        "u1",
+        time.time(),
+        clearance=bed_photo._recovery_clearance(device(), printer, cfg, None),
+    )
+    assert note is not None and "put the bed back to Z 70.0" in note
+    assert printer.lookups == 0

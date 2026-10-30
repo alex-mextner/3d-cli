@@ -38,7 +38,13 @@ from typing import Any
 
 import bed_view
 from errors import GateFailure, InvalidArgument, UsageError
-from printer_ops.bed import AUTO_VIEW_SETTLE_S, QUIET_STATES, BedConfig
+from printer_ops.bed import (
+    AUTO_VIEW_CLEARANCE,
+    AUTO_VIEW_SETTLE_S,
+    AUTO_VIEW_Z_FLOOR,
+    QUIET_STATES,
+    BedConfig,
+)
 
 GRID_MM = bed_view.GRID_MM
 VIEW_TIE = bed_view.VIEW_TIE
@@ -217,6 +223,19 @@ def check_part_height(part_height_mm: float | None) -> None:
         )
 
 
+def _below_floor_advice(printer: str, z: float) -> str:
+    """What can get a marker below the clearance floor out of the way. Nothing senses the bed: the floor
+    comes from the height given or the last job's metadata, and no height lowers it under the minimum."""
+    lowest = max(AUTO_VIEW_Z_FLOOR, AUTO_VIEW_CLEARANCE)
+    if z >= lowest:
+        return "Remove the part and retry with --part-height 0 (or the height of what still stands on the bed)."
+    return (
+        f"Z {z:.0f} is under the lowest clearance floor (Z {lowest:.0f}), which no --part-height lowers: with "
+        f"the bed clear, run `3d printer bed status {printer}` (it puts the bed back, without a floor check), "
+        "or wait for the marker to expire."
+    )
+
+
 def _recovery_clearance(
     device: Any, adapter: Any, cfg: BedConfig, part_height_mm: float | None
 ) -> Callable[[bed_view.Motion, float], Callable[[bed_view.Motion], None]]:
@@ -248,11 +267,7 @@ def _recovery_clearance(
                 f"go below the clearance floor Z {limits.z_floor:.0f} of the {limits.part_mm:g} mm part from "
                 f"{limits.part_source}; nothing was moved and the marker is kept",
                 command="photo",
-                remediation=[
-                    "Remove the part and retry with --part-height 0 (or the height of what still stands on "
-                    "the bed): nothing senses the bed, the floor comes from the height you give or the last "
-                    "job's metadata."
-                ],
+                remediation=[_below_floor_advice(device.name, z)],
             )
         job = m.filename
 

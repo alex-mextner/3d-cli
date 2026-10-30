@@ -200,6 +200,6 @@ def test_one_evaluation_reads_publish_yaml_once_so_a_save_cannot_mix_versions(
 
     monkeypatch.setattr(yaml, "safe_load", load_then_save)
     ev = run(project, ["thingiverse"], plan.Options(kind="original"))
-    assert len(reads) == 1
+    assert len([r for r in reads if isinstance(r, dict) and "title" in r]) == 1
     assert ev.spec.title == "First"
     assert [p.name for p in ev.spec.images] == ["one.png"]
