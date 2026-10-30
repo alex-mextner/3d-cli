@@ -402,6 +402,7 @@ tickets implement the clients.
 - Two parsers diverging on grams (`exposure` vs `job_tool`): one shared function (§4.4).
 - `printer status` exit-code change surprising a script outside this repo: mitigated by `--strict`
   and the docs line; noted in the changelog entry.
-- K1 SE usage may be estimate-only (§5): labelled by `source = gcode_estimate`, never presented as observed.
+- creality-stock fallback (a K1 SE set by hand to that adapter) may give estimate-only usage (§5): labelled by
+  `source = gcode_estimate`, never presented as observed. The default K1 SE path is Moonraker and is not affected.
 - The status vocabulary is new (plan §5.2 gives none): this spec fixes it in §4.3; changing it later
   needs a migration.
