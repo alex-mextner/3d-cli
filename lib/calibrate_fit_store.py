@@ -183,7 +183,10 @@ def _from_line(path: Path, line: Any) -> StoredRecord | None:
 
 
 def read_buffer() -> list[StoredRecord]:
-    """Every fit_clearance line of the settings-history buffer (imported or not; `read_all` drops the imported)."""
+    """Every fit_clearance line of the settings-history buffer (imported or not; `read_all` drops the imported).
+
+    Within a file the newest line (the last one appended) comes first; files are in name order, which says
+    nothing about their age."""
     from printops import history_buffer as hb
 
     d = _buffer_dir()
@@ -199,7 +202,7 @@ def read_buffer() -> list[StoredRecord]:
                     "Fix or remove that buffer line: a torn write is never skipped silently."
                 ],
             ) from e
-        for line in lines:
+        for line in reversed(lines):
             rec = _from_line(path, line)
             if rec is not None:
                 out.append(rec)
@@ -237,10 +240,10 @@ def read_all(api: ApiClient | None = None, *, warn: bool = True) -> ReadResult:
     imported = (
         _read_api_records(client, result, warn=warn) if client is not None else set()
     )
-    # the buffer is written oldest line first, 3d-api answers newest first: both newest first here, so that the
-    # stable sort below leaves records that tie on `measured_at` (a resolution of one second) newest first, and
-    # `fits.select_correction` keeps the first of equal instants
-    result.records.extend(reversed([r for r in read_buffer() if r.uid not in imported]))
+    # 3d-api and every buffer file are newest first, so the stable sort below leaves records of one source that
+    # tie on `measured_at` (a resolution of one second) newest first, and `fits.select_correction` keeps the
+    # first of equal instants; across buffer files there is no order to keep (their names are printer ids)
+    result.records.extend(r for r in read_buffer() if r.uid not in imported)
     result.records.sort(key=lambda r: r.measured_at, reverse=True)
     return result
 
