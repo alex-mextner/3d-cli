@@ -63,13 +63,14 @@ New migration `lib/printops/migrations/0110_jobs.sql` (next free number after `0
 | Column | Notes |
 |---|---|
 | `id` INTEGER PK | |
-| `uid` TEXT UNIQUE NOT NULL | client-generated; makes `add`, the offline buffer replay and the import idempotent (same pattern as `history_buffer.py`) |
+| `uid` TEXT UNIQUE NOT NULL | client-generated; makes `add` and the offline buffer replay idempotent (same pattern as `history_buffer.py`) |
 | `printer` TEXT NULL | fleet printer name; NULL = planned, not assigned |
 | `status` TEXT NOT NULL | `planned`, `queued`, `printing`, `done`, `failed`, `cancelled`, `interrupted` (§4.3) |
-| `queue_rank` INTEGER NULL | position in that printer's queue, 1 = next; NULL unless `status = queued`. Dense per printer, rewritten in one transaction on every reorder |
-| `file`, `artifact_sha256` | file name as the slicer/printer sees it; sha256 of the G-code or 3MF when known (links a start on the printer to its job) |
+| `queue_rank` INTEGER NULL | position in that printer's queue, 1 = next; NULL unless `status = queued`. Dense per printer, compacted in the same transaction on every reorder and every transition out of `queued` |
+| `file`, `local_path`, `artifact_sha256` | `file` as the printer sees it, `local_path` of the artifact `queue next` starts from (NULL for native-adopted), sha256 of the G-code or 3MF when known |
 | `source` | `3d`, `slicer`, `touchscreen`, `cloud`, `manual`, `import` (plan §5.2 plus the two this spec needs) |
-| `ext_key` TEXT NULL | id in the system the job came from, e.g. `u1:000070` (Moonraker job id) or `babushkin:<hash>`; `UNIQUE(printer, ext_key)` where not NULL, so re-ingestion never duplicates |
+| `printer_job_id` TEXT NULL | the printer's own id (Moonraker job id, `000070`); `UNIQUE(printer, printer_job_id)` where not NULL; set when sync links the printer's job, so re-ingestion never duplicates |
+| `import_key` TEXT NULL | `babushkin:<hash>` of the `import-queue` entry (§6.4); globally `UNIQUE` where not NULL, independent of `printer` so assigning/starting does not change it |
 | `queued_at`, `started_at`, `ended_at` | UTC ISO |
 | `attempt_of` INTEGER NULL → `job.id` | a reprint after a failure |
 | `order_ref`, `note`, `actor` | free text; `actor` as in the other printops tables |
@@ -78,8 +79,10 @@ New migration `lib/printops/migrations/0110_jobs.sql` (next free number after `0
 
 ### 4.2 `job_tool`
 
-`PRIMARY KEY (job_id, tool)`; columns `slot`, `spool_id`, `material`, `g_est`, `g_reported`,
-`mm_reported`, `ledger_id` (the ledger row booked for this tool, NULL until booked).
+`PRIMARY KEY (job_id, tool, segment)` (segment 0 unless the spool was replaced mid-print, e.g. paused swap);
+columns `slot`, `spool_id`, `material`, `g_est`, `g_reported`, `mm_reported`, `mm_total` (per job, as
+`exposure.py` parses it), `ledger_id` (the ledger row booked for this segment, NULL until booked), `booked`
+(`NULL | booked | skipped`).
 
 Estimated and observed plastic stay separate (plan §5.3 item 3):
 
@@ -89,10 +92,21 @@ Estimated and observed plastic stay separate (plan §5.3 item 3):
   applies), else `g_est` only for a job that finished `done`. A job that ends `failed`/`cancelled`
   with no reported usage books nothing and leaves a `note` ledger row: "cancelled on layer 1 does
   not debit the full estimate".
-- Booking writes one `ledger` row per tool with `job_id = str(job.id)`, `source` ∈
-  `moonraker_live | printer_reported | gcode_estimate | manual` and the matching `confidence_g`,
-  then stores `job_tool.ledger_id` in the same transaction. A second booking attempt is a no-op
-  because `ledger_id` is set. `ledger.job_id` stays free text (no FK), as in `0020_spools.sql`.
+- Booking writes one `ledger` row per tool segment with `job_id = "job:<id>"` (prefixed so it cannot collide with
+  the printer-style ids of `spool use --job`), `source` ∈
+  `moonraker_live | printer_reported | gcode_estimate | manual` and the matching `confidence_g`. The check
+  `ledger_id IS NULL`, the ledger insert and `job_tool.ledger_id` run in ONE `BEGIN IMMEDIATE` transaction:
+  `ledger.book` (which opens its own non-reentrant `db.transaction`) gets an inner variant taking the open
+  connection. A second attempt is a no-op. `ledger.job_id` stays free text (no FK), as in `0020_spools.sql`.
+- Zero grams (unused tool footers show `0.00`) and an unresolved `spool_id` (ledger.spool_id is NOT NULL)
+  book nothing and set `job_tool.booked = 'skipped'` with a reason, so sync does not retry them and no
+  note row is appended twice. The note row for failed/cancelled jobs is written once, guarded the same way.
+- Moonraker-written usage: for a printer whose usage Moonraker books itself (K1 SE with `[spoolman]`), a
+  ledger-only row is written (local estimate drops, no Spoolman `/use`), so Spoolman is not debited twice.
+- Anchor guard: `ledger.estimate` takes deltas by insertion id after the newest anchor, so a delayed booking
+  would be subtracted from a weighing that already includes it. Book only when `job.ended_at` is later than
+  the spool's newest anchor `at`; otherwise write a `note` row and no delta. The first `jobs sync` and every
+  `done` job created by the import never book (cutover: only jobs ended after the first sync's start book).
 
 ### 4.3 Status machine
 
@@ -103,6 +117,15 @@ stateDiagram-v2
     planned --> queued: assign
     queued --> planned: assign --none
     queued --> printing: printer reports start
+    queued --> done: finish (manual, offline printer)
+    queued --> failed: finish
+    queued --> interrupted: reconcile, printer says otherwise
+    [*] --> done: ingested history, no queue row
+    [*] --> failed
+    [*] --> cancelled
+    [*] --> printing: ingested running job, import `now`
+    [*] --> interrupted: import `now` not on the printer
+    interrupted --> cancelled: finish --status cancelled
     printing --> done
     printing --> failed
     printing --> cancelled
@@ -132,10 +155,10 @@ one rule. No second parser.
 
 | Printer | Source of truth | How |
 |---|---|---|
-| U1 and other Moonraker printers | `/server/history/list` (+ `/server/job_queue/status` for what waits on the printer) | `3d printops jobs sync [PRINTER]` and the same function on a 3d-api timer; idempotent by `(printer, ext_key = Moonraker job_id)` |
-| K1 SE (`creality-stock`, ws :9999) | only live `status()`; the adapter has no history/queue | the always-on watcher (`printer_ops/watch.py`, `supervise`) already sees print start/end transitions; it writes the job (`source = touchscreen`/`3d`) and, on finish, the filament counters the status carries. Slice S3 first reads what the status frame really carries (file, used length); if there is no used-length, usage is `g_est` only and is labelled so. [INFERENCE: not yet verified against a K1 SE frame] |
+| U1 and other Moonraker printers | `/server/history/list` (+ `/server/job_queue/status` for what waits on the printer) | `3d printops jobs sync [PRINTER]` and the same function on a 3d-api timer; idempotent by `(printer, printer_job_id = Moonraker job_id)` |
+| K1 SE (`moonraker` since #221; `creality-stock`, ws :9999 only as a hand-set fallback) | Moonraker history as the U1 row. Fallback only: live `status()`, the adapter has no history/queue | Moonraker `[spoolman]` books the K1 SE usage itself (single-writer rule, `head_sync.py`, `docs/printops/oss.md` §9.6), so its jobs use the ledger-only booking of §4.2. For the creality-stock fallback the watcher (`printer_ops/watch.py`) writes the job from start/end transitions; slice S3 first reads what the status frame carries; without a used-length, usage is `g_est` only and labelled so. [INFERENCE: not verified against a K1 SE frame] |
 | `access: offline` (P1S, A1 mini, …) | nobody | `3d printops jobs add --manual` / REST / bot; D7 |
-| A job started on the printer's touchscreen or sent from a slicer | the printer's history | ingested as `source = touchscreen`/`slicer`; if its file matches a queued job by `artifact_sha256` or `(printer, file)`, that job moves to `printing` instead of a duplicate appearing |
+| A job started on the printer's touchscreen or sent from a slicer | the printer's history | ingested as `source = touchscreen`/`slicer`; it moves a queued job to `printing` instead of duplicating only if the job is `queued` on that printer, the history entry started at or after the job's `queued_at`, and the file matches by the `<sha16>` tag in the remote name (`<stem>-<sha16>.gcode`, `lib/printer_ops/base.py`) or by exact `(printer, file)`; among identical candidates the lowest `queue_rank` wins. Anything older is plain history |
 
 Durable intent (#68) vs live state: `3d printops jobs reconcile` (also run after every sync) compares
 `printing`/`queued` rows with what the printer reports. Mismatches become `interrupted` or an
@@ -157,15 +180,15 @@ heavy imports lazy). Three entry points share it so there is one behaviour:
 ### 6.1 Read
 
 ```
-3d queue [show] [PRINTER ...] [--all] [--status S,...] [--history N] [--since DATE] [--no-live] [--strict] [--json] [--secs N]
+3d queue [show] [PRINTER ...] [--all] [--status S,...] [--history N] [--since DATE] [--no-live] [--strict] [--json] [--secs N]   # subcommand names win over a printer of the same name; use `3d printer queue NAME` for that printer
 3d printer queue [NAME] [same flags]
 3d queue job ID [--json]                           # one job: tools, spools, ledger rows, events
-3d queue next PRINTER                              # head job + the exact `3d printer start` line; no hardware write
+3d queue next PRINTER                              # head job + the exact `3d printer start` line using the job's stored local path; no hardware write. A job without a local file (native-adopted) prints "no local artifact: bind with `3d queue adopt PRINTER FILE --local PATH`" and exits 1
 3d queue report [--out DIR]                         # replaces gen/queue_report.py: QUEUE.md, plates table, shopping_list.md from the ledger
 ```
 
 Default `3d queue` = every fleet printer that is not `access: offline` plus a block of unassigned
-(`planned`) jobs; offline printers are listed with their manually entered jobs and never contacted.
+(`planned`) jobs; with `--all` offline printers are listed with their manually entered jobs and never contacted.
 `--all` includes finished jobs beyond `--history N` (default 5, same cap and validation as
 `printers show --history`).
 
@@ -192,26 +215,28 @@ vocabulary and shape of `printers show --json` (`printer_ops/dossier.py` `_secti
 ### 6.2 Write (#171)
 
 ```
-3d queue add FILE [--printer P] [--first | --after JOB | --before JOB] [--qty N] [--material T0=PLA,T1=PETG] [--order-ref R] [--note T] [--uid U] [--json]
+3d queue add FILE [--printer P] [--first | --after JOB | --before JOB] [--qty N] [--material T0=PLA,T1=PETG] [--order-ref R] [--note T] [--uid U] [--json]   # --first/--after/--before need --printer; --qty N derives uids as `<U>-1..N`
 3d queue reorder JOB (--first | --last | --before JOB | --after JOB | --to N)
 3d queue assign JOB PRINTER | --none
-3d queue cancel JOB [--note T]
+3d queue cancel JOB [--note T]                      # `queued`/`planned` only; a `printing` job is refused (stop it on the printer, sync records the end and books the plastic)
 3d queue adopt PRINTER FILE
-3d queue finish JOB --status done|failed|cancelled [--g T0=38.2,...] [--ended DATE]    # manual jobs (offline printers) and corrections
+3d queue finish JOB --status done|failed|cancelled [--g T0=38.2,...] [--ended DATE]    # manual jobs (offline printers); also confirms an `interrupted` job. Never edits an already booked job: a correction is a new `manual` ledger delta
 3d printops import-queue --queue gen/queue.json [--plates gen/plates.json] [--dry-run] [--json]
 ```
 
-Rules: `reorder`/`assign` accept only `planned`/`queued` jobs (refuse `printing`/terminal with exit 1 and the
-reason). `add FILE` takes the sha256 and, when the file is a G-code/3MF with a footer, fills `g_est`, `est_s`
+Rules: `reorder` accepts only `queued` jobs, `assign` `planned`/`queued` ones (a `planned` job has no rank); `printing`/terminal jobs are refused with exit 1 and the
+reason. `add FILE` takes the sha256 and, when the file is a G-code/3MF with a footer, fills `g_est`, `est_s`
 and per-tool `material` from it. `--qty N` creates N jobs with distinct `uid`s. Assigning to an
 `access: offline` printer is allowed (manual queue); assigning to an unknown printer is exit 2.
-Mutations are single transactions; `queue_rank` stays dense and unique per printer
-(property tested, §9).
+Mutations are single transactions; every transition out of `queued` (start, cancel, assign, finish)
+compacts `queue_rank`, so it stays dense and unique per printer (property tested, §9).
 
 ### 6.3 Material check
 
 For each `queued` job on a printer with known slots: per `job_tool`/`requires`, compare needed grams
-with the remaining grams of the spool loaded in that slot (`ledger.remaining()`), and the material and
+with the estimate of the spool loaded in that slot (`ledger.estimate()` from the local ledger, no Spoolman
+call, so a Spoolman outage degrades to `unknown` per job, never fails `/v1/queue`; an unweighed spool is
+`unknown`, not `SHORT`), and the material and
 colour with what `requires` asks. Result per job: `ok`, `SHORT: need X g, slot has Y g`,
 `MISMATCH: wants PETG, slot T1 has PLA`, or `unknown (printer not read | no slot data)`. The check is
 advisory; the real gate is `print-preflight`/`printer start`. Queue totals by material feed
@@ -224,7 +249,7 @@ entry has `file`, `load`, `status`, `what`). Its statuses and what each becomes:
 
 | queue.json status | n | `job.status` | Notes |
 |---|---|---|---|
-| `printed` | 17 | `done` | `source = import`; usage from the G-code footer when the file is found, else no `job_tool` usage |
+| `printed` | 17 | `done` | `source = import`; usage from the G-code footer when the file is found, else no `job_tool` usage. Imported jobs NEVER book the ledger: `plates.json` `owned` is already net of them and `import-owned` anchors from it (§4.2 cutover) |
 | `queued` | 6 | `queued` | order = position in `entries`; `queue_rank` follows it |
 | `deferred` | 7 | `planned` | not assigned to run now; keeps its printer in `printer` only as a hint in `note` |
 | `cancelled` | 3 | `cancelled` | books nothing |
@@ -234,14 +259,17 @@ entry has `file`, `load`, `status`, `what`). Its statuses and what each becomes:
 `load` (e.g. `{T1: "синий"}`) becomes `job_tool.material`/colour hint, resolved to a spool only when exactly
 one owned spool matches; otherwise left unresolved and listed in the `--dry-run` report. Spools come from
 `plates.json` `owned` through the existing `3d printops spool import-owned` path (not a second importer).
-`ext_key = babushkin:<sha1(printer|file|index)>` makes re-import a no-op. The count reconciliation prints
+Idempotency uses two separate keys, see §4.1: `import_key = babushkin:<sha1(file|what|status)>` (content, not
+list position, so a new entry at the top does not re-import the rest; duplicates of one content get a `#n`
+suffix in file order) is globally `UNIQUE`, also for the `printer = NULL` rows. The count reconciliation prints
 per status and per printer: 35 in, 35 jobs out, with the mapped totals above for this file.
 
 ### 6.5 Exit codes
 
-0 ok, including when some sections are `unreachable`/`skipped`; 2 usage/unknown printer/job
+0 ok, including when some sections are `unreachable`/`skipped`/`unsupported`; 2 usage/unknown printer/job
 (`InvalidArgument`/`InputNotFound`); 1 `GateFailure` for a refused mutation; with `--strict` 1 if any
-selected section is not `ok` (for scripts). Errors use `lib/errors.py`, no ad-hoc `sys.exit`.
+selected section is `unreachable` (`access: offline` and `unsupported` sections are expected, not failures,
+so the real fleet with four offline printers can exit 0). Errors use `lib/errors.py`, no ad-hoc `sys.exit`.
 
 ## 7. Offline tolerance
 
@@ -254,7 +282,7 @@ The degradation unit is the **section**, not the command. Reuse the dossier voca
 | `access: offline` printer | live sections `never contacted`; manual jobs shown | 0 |
 | `creality-stock` | `n/a (creality-stock adapter does not expose a queue)` for the native queue; ledger jobs shown | 0 |
 | 3d-api unreachable | printer-native sections as today; `ledger: unreachable: <reason>`; spool/material check `unknown` | 0 |
-| 3d-api unreachable, `queue add` | job written to the local buffer `<data_dir>/printer-queue/<printer>.jsonl` (flock + fsync, idempotent by `uid`, same mechanics as `printops/history_buffer.py`) and replayed on the next reachable call; the output says "buffered" | 0 |
+| 3d-api unreachable, `queue add` | job written to the single buffer `<data_dir>/printer-queue/pending.jsonl` (flock + fsync, idempotent by `uid`, one file so an add without `--printer` is buffered too; mechanics of `printops/history_buffer.py`, except a refused line is moved to `rejected.jsonl` instead of blocking later lines; replay appends under the same lock, truncating only what it consumed) and replayed on the next reachable call; `--after/--before JOB` that no longer applies at replay falls back to the end of the queue with a note; the output says "buffered" | 0 |
 | 3d-api unreachable, `reorder`/`assign`/`cancel`/`finish` | refused, the reason names the missing 3d-api and that these edits are api-only | 1 |
 | Both down | static facts (model, fleet entry) plus both reasons | 0 |
 
@@ -271,9 +299,12 @@ one per section: sections are read concurrently as `dossier.collect` does today.
   `lib/printer_ops/sections.py`; `dossier.py` imports them (clean cutover, no copy).
 - `printer status NAME`: build the live section through `_section`. Reachable → output unchanged.
   Unreachable → static facts (`printer list` row), `live: unreachable: <reason>`, plus the last known
-  job/spools from 3d-api when reachable; exit 0. Offline fleet printer → `never contacted`, exit 0.
+  job/spools from 3d-api when reachable (slice S5; S1 prints the static facts and the reason only);
+  exit 0. Offline fleet printer → `never contacted`, exit 0.
   `--strict` restores exit 1 for scripts. `--json` gains `live.status`/`live.error` (additive).
-- Unknown printer and bad config stay exit 2.
+- Only the live read moves inside `_section`. Building the adapter (`_adapter`/`get_device`) stays outside
+  it, because `_section` swallows every `ThreeDError`: unknown printer, "no printers configured" and a bad
+  device config keep exit 2.
 - The exit-code change is a behaviour change. Callers checked: `lib/printer_ops/printer_agent.py`,
   `subscriptions.py`, `watch.py`, `moonraker.py`, `creality.py`, `library/capture.py`, `bed_photo.py`
   only print `` `3d printer status NAME` `` as a hint for a human or agent to run; none inspects its
@@ -328,9 +359,22 @@ Behaviour that must be pinned (each with a version of the test that can FAIL):
    3d-api down (read, buffered `add`, refused `reorder`), both down; each asserts exit code, which
    sections are present and that the others still render.
 8. `printer status` against an unreachable fake: exit 0 with `live: unreachable`, exit 1 with `--strict`,
-   exit 2 for an unknown name; reachable output byte-identical to today's golden.
-9. A start observed on a printer for a file matching a queued job moves that job to `printing` and does
-   not create a duplicate.
+   exit 2 for an unknown name, for "no printers configured" and for a bad device config; an offline fleet
+   printer exits 0 (the pinned `test_contacting_an_offline_printer_is_refused` and
+   `docs/commands/printer.md` exit-code line are updated in the same commit); reachable output
+   byte-identical to today's golden.
+9. A start observed on a printer for a file matching a queued job moves exactly one job to `printing` and
+   does not create a duplicate; the remote name `clip-<sha16>.gcode` (what `printer upload` writes)
+   matches a job added as `clip.gcode`; a completed history entry older than the job's `queued_at` does
+   NOT match it; with `--qty 4` the lowest `queue_rank` moves.
+10. Delayed ingestion: a spool weighed at 900 g, then a job that ended before the weighing synced afterwards:
+    the estimate stays 900 g (note row, no delta). A job ended after the weighing books and lowers it.
+11. Moonraker-written usage (K1 SE with `[spoolman]`): sync books a ledger-only row, Spoolman `/use` is
+    called zero times, the local estimate drops by the job's grams.
+12. Spool swapped mid-print on one tool (20 g from spool A, then 30 g from spool B): two segments, two
+    ledger rows, each spool debited its own grams.
+13. Manual `queued -> done` on an offline printer, `finish` on a `printing` job, `cancel` of a `printing`
+    job refused, and rank compaction after every transition out of `queued`.
 
 Docs in the same commits as code: `docs/commands/queue.md` (new), `docs/commands/printops.md` (queue,
 jobs, import-queue rows), `docs/commands/printer.md` (`queue`, status exit codes), `docs/commands/printers.md`
@@ -341,11 +385,11 @@ into PrintOps, `docs/architecture/lib-map.md` if the repo keeps it generated.
 
 | Slice | Content | Depends on |
 |---|---|---|
-| S1 | `printer_ops/sections.py` extraction, offline-tolerant `printer status` (+ fleet form), docs, tests §9.7–8 | — |
-| S2 | `0110_jobs.sql`, jobs repository, status machine, ledger booking, `/v1/jobs`, `/v1/history`, `ApiClient` methods (#170 core) | — |
-| S3 | Ingestion: shared history parser with `exposure`, `jobs sync`, reconcile, K1 SE watcher hook, manual `finish` (#170 rest) | S2 |
+| S1 | `printer_ops/sections.py` extraction, offline-tolerant `printer status` (+ fleet form) without the 3d-api "last known" block, docs, test §9.8 | — |
+| S2 | `0110_jobs.sql`, jobs repository, status machine, ledger booking (§4.2: ledger-only variant, anchor guard), `/v1/jobs`, `/v1/history`, `ApiClient` methods (#170 core) | — |
+| S3 | Ingestion: shared history parser with `exposure`, `jobs sync`, reconcile, creality-stock watcher hook (fallback adapter only), manual `finish` (#170 rest) | S2 |
 | S4 | Queue writes: `add/reorder/assign/cancel/adopt`, local buffer, `printer start` ↔ job linkage (#171 core) | S2 |
-| S5 | The view: `3d queue`, `3d printer queue`, material check, `/v1/queue`, `queue next`, `queue report` | S1, S2 (renders with an empty ledger) |
+| S5 | The view: `3d queue`, `3d printer queue`, material check, `/v1/queue`, `queue next`, `queue report`, the 3d-api "last known" block of `printer status`, offline matrix test §9.7 | S1, S2, S4 (buffered `add` and refused `reorder` rows of §9.7; renders with an empty ledger) |
 | S6 | `import-queue`, golden for `queue report`, retire `queue_report.py` usage (#171 rest) | S4, S5 |
 
 S1 and S2 start in parallel. Hooks for #361 (TUI) and #173 (HA) are `GET /v1/queue` only; their own
