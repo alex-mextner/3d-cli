@@ -310,8 +310,13 @@ def test_an_unverifiable_source_licence_is_refused_not_assumed_free(
 
 
 def test_a_source_licence_text_nobody_knows_is_refused_too(tmp_path: Path) -> None:
-    verdict = check_remix(spec_for(tmp_path, f"remix_of: {SDFL_URL}\n"), lookup_returning("my own terms"))
-    assert verdict is not None and "'my own terms' is not a licence this tool knows" in verdict.problems[0]
+    verdict = check_remix(
+        spec_for(tmp_path, f"remix_of: {SDFL_URL}\n"), lookup_returning("my own terms")
+    )
+    assert (
+        verdict is not None
+        and "'my own terms' is not a licence this tool knows" in verdict.problems[0]
+    )
 
 
 def test_a_declared_licence_stands_in_when_the_lookup_fails(tmp_path: Path) -> None:
@@ -389,7 +394,9 @@ def test_a_permissive_source_allows_any_result(tmp_path: Path) -> None:
 # -- plans ----------------------------------------------------------------------------
 
 
-def evaluate(project: Path, platform: str = "all", lookup: LicenseLookup = lookup_failing) -> plan.Evaluation:
+def evaluate(
+    project: Path, platform: str = "all", lookup: LicenseLookup = lookup_failing
+) -> plan.Evaluation:
     return plan.evaluate(project, plan.platform_list(platform), lookup)
 
 
@@ -409,8 +416,10 @@ def test_a_complete_project_is_ready_on_every_platform(tmp_path: Path) -> None:
 def test_platform_names_are_validated_and_all_expands() -> None:
     assert plan.platform_list("all") == ["makerworld", "printables", "thingiverse"]
     assert plan.platform_list("thingiverse") == ["thingiverse"]
+    assert plan.platform_list("cults") == ["cults"]
+    assert plan.platform_list("printables, cults") == ["printables", "cults"]
     with pytest.raises(InvalidArgument):
-        plan.platform_list("cults")
+        plan.platform_list("etsy")
 
 
 @pytest.mark.parametrize(
@@ -530,8 +539,13 @@ def test_dry_run_text_lists_files_fields_steps_and_the_refusal(tmp_path: Path) -
 
 
 def test_dry_run_text_prints_a_thingiverse_remix_link(tmp_path: Path) -> None:
-    remix = YAML + "remix_of: https://www.thingiverse.com/thing:4000001\nremix_license: CC BY\n"
-    text = plan.render_text(evaluate(make_project(tmp_path, remix), "thingiverse"), dry_run=True)
+    remix = (
+        YAML
+        + "remix_of: https://www.thingiverse.com/thing:4000001\nremix_license: CC BY\n"
+    )
+    text = plan.render_text(
+        evaluate(make_project(tmp_path, remix), "thingiverse"), dry_run=True
+    )
     assert "is_remix: True" in text and "ancestors: 4000001" in text
 
 

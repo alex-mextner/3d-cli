@@ -12,8 +12,9 @@ with a machine-readable error `code`, so a key press never crashes the UI.
 
 OWNERSHIP: slice S0 (#571) fixed the signatures and the result shape; each other slice implemented its actions
 (`OWNERS`). An action whose slice has not landed raises `NotImplementedByDesign(owner_issue)`: a typed seam for
-that slice, not a fake feature. The model browser (S7, #578) implements `open_slicer`, `launch_agent`,
-`open_browser` and `preview`; the programs they start come from `library/launch.py`.
+that slice, not a fake feature. The table-photo / publish slice (S8, #579) implements `photo` (register a file,
+or capture the table photo with a lifted bed) and `publish`; the model browser (S7, #578) implements
+`open_slicer`, `launch_agent`, `open_browser` and `preview`; the programs they start come from `library/launch.py`.
 
 IMPORT RULE: stdlib-only at module top (checked by tests/test_imports.py); the library DB is imported lazily
 inside the actions that need it.
@@ -23,9 +24,12 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Callable, Mapping, Sequence
-from typing import Any, TypedDict
+from typing import TYPE_CHECKING, Any, TypedDict
 
 from errors import InvalidArgument, MissingDependency, ThreeDError
+
+if TYPE_CHECKING:
+    from publishing.plan import Evaluation
 
 SCHEMA = "3d.action/1"
 SEARCH_KINDS = ("wide", "narrow", "followup", "rewrite", "user")
@@ -203,60 +207,130 @@ def rank(
     """
     if mode not in RANK_MODES:
         raise InvalidArgument("mode", mode, list(RANK_MODES), command="models")
-    from library import rankflow, rankstore
-    from library import db as librarydb
-    from library.llm import load_llm_config, with_overrides
-
     if mode == "deterministic":
-        conn = librarydb.open_library(db_path)
-        try:
-            row = rankstore.session_row(conn, session)
-            seen: set[tuple[str, str]] = set()
-            ranked: list[dict[str, Any]] = []
-            for s in rankstore.tree_sessions(conn, int(row["id"])):
-                for r in rankstore.session_results(conn, int(s["id"])):
-                    key = (r["site"], r["model_id"])
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    uid = conn.execute(
-                        "SELECT uid FROM search_result WHERE session_id = ? AND site = ? AND model_id = ?",
-                        (s["id"], r["site"], r["model_id"]),
-                    ).fetchone()["uid"]
-                    ranked.append(
-                        {
-                            "result": uid,
-                            "session": s["uid"],
-                            "site": r["site"],
-                            "model_id": r["model_id"],
-                            "rank": len(ranked) + 1,
-                            "score": r["score"],
-                            "verdict": r["verdict"],
-                            "rationale": r["rationale"],
-                        }
-                    )
-            data: dict[str, Any] = {
-                "session": row["uid"],
-                "query": row["query"],
-                "ranked": ranked[:limit] if limit else ranked,
-                "counts": {"results": len(ranked)},
-                "queries": [
-                    p
-                    for p in rankstore.list_plan_queries(conn, int(row["id"]))
-                    if p["kind"] != "followup"
-                ],
-                "questions": rankstore.list_questions(conn, int(row["id"])),
-                "followups": [
-                    p
-                    for p in rankstore.list_plan_queries(conn, int(row["id"]))
-                    if p["kind"] == "followup"
-                ],
-                "llm": None,
-            }
-        finally:
-            conn.close()
-        return ok_result("rank", data)
+        return _rank_deterministic(session, limit, db_path)
+    return _rank_llm(
+        session,
+        limit=limit,
+        db_path=db_path,
+        classifier=classifier,
+        planner=planner,
+        rewrite=rewrite,
+        answers=answers,
+        follow=follow,
+        refresh=refresh,
+        require=require,
+    )
 
+
+def _ranked_entry(
+    result: str | None,
+    session: str,
+    site: str,
+    model_id: str,
+    position: int,
+    score: Any,
+    verdict: Any,
+    rationale: Any,
+) -> dict[str, Any]:
+    """One `ranked` row of `rank`'s `data`."""
+    return {
+        "result": result,
+        "session": session,
+        "site": site,
+        "model_id": model_id,
+        "rank": position,
+        "score": score,
+        "verdict": verdict,
+        "rationale": rationale,
+    }
+
+
+def _plan_queries(conn: Any, session_id: int, *, followup: bool) -> list[Any]:
+    """The saved plan queries of a search session that are follow-ups (or, with `followup=False`, are not)."""
+    from library import rankstore
+
+    return [
+        p
+        for p in rankstore.list_plan_queries(conn, session_id)
+        if (p["kind"] == "followup") == followup
+    ]
+
+
+def _stored_ranking(conn: Any, root_id: int) -> list[dict[str, Any]]:
+    """Results of a search tree in stored order, first occurrence of each (site, model_id) only."""
+    from library import rankstore
+
+    seen: set[tuple[str, str]] = set()
+    ranked: list[dict[str, Any]] = []
+    for s in rankstore.tree_sessions(conn, root_id):
+        for r in rankstore.session_results(conn, int(s["id"])):
+            key = (r["site"], r["model_id"])
+            if key in seen:
+                continue
+            seen.add(key)
+            uid = conn.execute(
+                "SELECT uid FROM search_result WHERE session_id = ? AND site = ? AND model_id = ?",
+                (s["id"], r["site"], r["model_id"]),
+            ).fetchone()["uid"]
+            ranked.append(
+                _ranked_entry(
+                    uid,
+                    s["uid"],
+                    r["site"],
+                    r["model_id"],
+                    len(ranked) + 1,
+                    r["score"],
+                    r["verdict"],
+                    r["rationale"],
+                )
+            )
+    return ranked
+
+
+def _rank_deterministic(
+    session: str, limit: int | None, db_path: str | None
+) -> ActionResult:
+    """`rank` in `deterministic` mode: the stored order, no model."""
+    from library import db as librarydb
+    from library import rankstore
+
+    conn = librarydb.open_library(db_path)
+    try:
+        row = rankstore.session_row(conn, session)
+        ranked = _stored_ranking(conn, int(row["id"]))
+        data: dict[str, Any] = {
+            "session": row["uid"],
+            "query": row["query"],
+            "ranked": ranked[:limit] if limit else ranked,
+            "counts": {"results": len(ranked)},
+            "queries": _plan_queries(conn, int(row["id"]), followup=False),
+            "questions": rankstore.list_questions(conn, int(row["id"])),
+            "followups": _plan_queries(conn, int(row["id"]), followup=True),
+            "llm": None,
+        }
+    finally:
+        conn.close()
+    return ok_result("rank", data)
+
+
+def _rank_llm(
+    session: str,
+    *,
+    limit: int | None,
+    db_path: str | None,
+    classifier: str | None,
+    planner: str | None,
+    rewrite: bool,
+    answers: Mapping[str, str] | None,
+    follow: Sequence[int],
+    refresh: bool,
+    require: bool,
+) -> ActionResult:
+    """`rank` in `llm` mode: run the ranking pipeline on the saved search."""
+    from library import db as librarydb
+    from library import rankflow, rankstore
+    from library.llm import load_llm_config, with_overrides
     from library.search import SearchOptions
 
     config = with_overrides(load_llm_config(), classifier=classifier, planner=planner)
@@ -292,24 +366,20 @@ def rank(
                 (row["id"], row["id"]),
             )
         }
-        followups = [
-            p
-            for p in rankstore.list_plan_queries(conn, int(row["id"]))
-            if p["kind"] == "followup"
-        ]
+        followups = _plan_queries(conn, int(row["id"]), followup=True)
     finally:
         conn.close()
     ranked_out = [
-        {
-            "result": results.get((e["site"], e["id"])),
-            "session": e["search"],
-            "site": e["site"],
-            "model_id": e["id"],
-            "rank": n,
-            "score": e["score"],
-            "verdict": e["verdict"],
-            "rationale": e["rationale"],
-        }
+        _ranked_entry(
+            results.get((e["site"], e["id"])),
+            e["search"],
+            e["site"],
+            e["id"],
+            n,
+            e["score"],
+            e["verdict"],
+            e["rationale"],
+        )
         for n, e in enumerate(done["ranking"], start=1)
     ]
     data = {
@@ -437,8 +507,6 @@ def launch_agent(
     started: bool, pid | tmux | exit_code}`.
     """
     import os
-    import shutil
-    import sys
     from pathlib import Path
 
     from library import launch
@@ -456,11 +524,7 @@ def launch_agent(
     ctx = dict(context or {})
     key = str(ctx.get("session") or "adhoc")
     plan = launch.plan_agent(prompt, cwd=work, backend=chosen, bundle_key=key)
-    if mode == "auto":
-        if sys.stdin.isatty() and sys.stdout.isatty():
-            mode = "attach"
-        else:
-            mode = "tmux" if shutil.which("tmux") else "detached"
+    mode = _agent_mode(mode)
     data: dict[str, Any] = {
         "backend": plan.backend,
         "command": plan.argv,
@@ -484,6 +548,18 @@ def launch_agent(
         )
     data["started"] = True
     return ok_result("launch_agent", data)
+
+
+def _agent_mode(mode: str) -> str:
+    """`auto` resolved to attach (on a terminal), else tmux (when installed), else detached; others unchanged."""
+    import shutil
+    import sys
+
+    if mode != "auto":
+        return mode
+    if sys.stdin.isatty() and sys.stdout.isatty():
+        return "attach"
+    return "tmux" if shutil.which("tmux") else "detached"
 
 
 def open_browser(
@@ -529,10 +605,6 @@ def preview(
     `blocks` as the fallback, nothing without a TTY); the picture is fetched and encoded about `cols` cells wide.
     `data.image`: `{url, protocol, sequence}`; `sequence` is null when there is no picture or no support. Read-only.
     """
-    import sys
-
-    from library import textview
-
     if image not in (None, "auto", "kitty", "iterm2", "sixel", "blocks"):
         raise InvalidArgument(
             "image",
@@ -540,11 +612,22 @@ def preview(
             ["auto", "kitty", "iterm2", "sixel", "blocks"],
             command="models",
         )
+    data = _preview_details(card)
+    warnings: list[ActionIssue] = []
+    if image is not None and card.get("image"):
+        warnings = _preview_image(card, image, cols, data["image"])
+    return ok_result("preview", data, warnings)
+
+
+def _preview_details(card: Mapping[str, Any]) -> dict[str, Any]:
+    """The picture-less `data` of `preview` for one result card."""
+    from library import textview
+
     facts = card.get("analytics") or {}
     files = [
         {k: f.get(k) for k in ("name", "size", "class")} for f in card.get("files", [])
     ]
-    data: dict[str, Any] = {
+    return {
         "site": card.get("site"),
         "id": card.get("id"),
         "title": card.get("title"),
@@ -576,31 +659,38 @@ def preview(
         "rationale": card.get("rationale"),
         "image": {"url": card.get("image") or None, "protocol": None, "sequence": None},
     }
-    warnings: list[ActionIssue] = []
-    if image is not None and card.get("image"):
-        from cli import termimage
-        from library import images as imagelib
 
-        protocol = (
-            termimage.preview_protocol(is_tty=sys.stdout.isatty())
-            if image == "auto"
-            else image
+
+def _preview_image(
+    card: Mapping[str, Any], image: str, cols: int, slot: dict[str, Any]
+) -> list[ActionIssue]:
+    """Fetch and encode the card's picture into `slot` (`protocol`, `sequence`); the warnings it raised."""
+    import sys
+
+    from cli import termimage
+    from library import images as imagelib
+
+    protocol = (
+        termimage.preview_protocol(is_tty=sys.stdout.isatty())
+        if image == "auto"
+        else image
+    )
+    if protocol is None:
+        return []
+    shown = imagelib.render_images(
+        [(str(card.get("site")), str(card["image"]))], protocol, cols=cols
+    )
+    sequence = shown.get(str(card["image"]))
+    slot["protocol"] = protocol
+    slot["sequence"] = sequence
+    if sequence is not None:
+        return []
+    return [
+        issue(
+            "image_unavailable",
+            "the picture could not be fetched or encoded; details only",
         )
-        if protocol is not None:
-            shown = imagelib.render_images(
-                [(str(card.get("site")), str(card["image"]))], protocol, cols=cols
-            )
-            sequence = shown.get(str(card["image"]))
-            data["image"]["protocol"] = protocol
-            data["image"]["sequence"] = sequence
-            if sequence is None:
-                warnings.append(
-                    issue(
-                        "image_unavailable",
-                        "the picture could not be fetched or encoded; details only",
-                    )
-                )
-    return ok_result("preview", data, warnings)
+    ]
 
 
 def queue(
@@ -613,7 +703,9 @@ def queue(
     source_key: str | None = None,
     db_path: str | None = None,
 ) -> ActionResult:
-    """Add a make to the print queue: get-or-create the design by name and insert a `queued` make.
+    """Add a make to the print queue: get-or-create the design by name and insert a `queued` make, through
+    the same writer as `make add` (so the make's `make_of` and, with a source, `derived_from` relations exist
+    for the provenance graph).
 
     This records intent only; it never uploads or starts a print. `source` is the uid of the `model_source`
     the design was made from; `source_key` makes the call idempotent. `data`: `{design, make, status}` (uids).
@@ -623,6 +715,7 @@ def queue(
             "design", repr(design), ["a non-empty design name"], command="library"
         )
     from library import db as librarydb
+    from library import records
 
     conn = librarydb.open_library(db_path)
     try:
@@ -634,10 +727,10 @@ def queue(
             ).fetchone()
             if hit is not None:
                 return _queued_result(conn, int(hit["id"]), str(hit["uid"]), False)
-        source_id: int | None = None
+        source_uid: str | None = None
         if source is not None:
             src = conn.execute(
-                "SELECT id FROM model_source WHERE uid = ?", (source,)
+                "SELECT uid FROM model_source WHERE uid = ?", (source,)
             ).fetchone()
             if src is None:
                 return error_result(
@@ -650,23 +743,17 @@ def queue(
                         )
                     ],
                 )
-            source_id = int(src["id"])
-        design_id, _ = _get_or_create_design(conn, design)
-        made = librarydb.insert_row(
+            source_uid = str(src["uid"])
+        made, created = records.add_make(
             conn,
-            "make",
-            {
-                "design_id": design_id,
-                "source_id": source_id,
-                "printer": printer,
-                "filament": filament,
-                "status": "queued",
-                "queued_at": librarydb.db.utc_now(),
-                "gcode": gcode,
-            },
+            design,
+            printer=printer,
+            filament=filament,
+            gcode=gcode,
+            source_uid=source_uid,
             source_key=source_key,
         )
-        return _queued_result(conn, made.id, made.uid, made.created)
+        return _queued_result(conn, int(made["id"]), str(made["uid"]), created)
     finally:
         conn.close()
 
@@ -700,16 +787,53 @@ def photo(
     z_mm: float | None = None,
     capture: bool = False,
     db_path: str | None = None,
+    source_key: str | None = None,
+    printer: str | None = None,
+    lift: str | float = "auto",
+    camera: str | None = None,
+    part_height_mm: float | None = None,
+    out: str | None = None,
+    dry_run: bool = True,
 ) -> ActionResult:
-    """Attach a photo of a make/design (`kind` in PHOTO_KINDS): register `path`, or `capture` one.
+    """Attach a photo of a make/design (`kind` in PHOTO_KINDS): register the file at `path`, or `capture` one.
 
-    Registering an existing file is implemented here; `capture=True` (top camera, bed lift to `z_mm`) belongs
-    to the make/photo slice. `data`: `{photo: uid, path, kind}`.
+    Registering (`path` + exactly one of `make`/`design`) is immediate; `source_key` makes it idempotent.
+    `capture=True` takes the table photo of a MAKE: the printer's bed is lifted to `lift` (`"auto"` or a toolhead
+    Z in mm) by the guarded Z move of `bed_view`, a fresh camera frame is saved to `out`, the bed is put back
+    (also on error) and the file is registered with its `z_mm`. `dry_run` (default) only reads the printer and
+    reports the lift it would make. A busy printer, an unknown height of the parts on the bed or a lift outside
+    the allowed Z range raise `GateFailure` (nothing moves). `data`: `{photo: uid|None, path, kind, z_mm}`; for a
+    capture also `{make, plan, moved, restored, restore_error, fresh, dry_run}`.
     """
     if kind not in PHOTO_KINDS:
         raise InvalidArgument("kind", kind, list(PHOTO_KINDS), command="library")
-    if capture or path is None:
-        raise NotImplementedByDesign("photo", 579, "photo capture with bed lift")
+    if capture:
+        if make is None or design is not None or path is not None:
+            raise InvalidArgument(
+                "capture",
+                "make/design/path",
+                [
+                    "--make ID only: a capture belongs to a make and takes its file from the camera"
+                ],
+                command="photo",
+            )
+        from library import capture as capturing
+
+        return capturing.capture(
+            make=make,
+            kind=kind,
+            printer=printer,
+            lift=lift,
+            camera=camera,
+            part_height_mm=part_height_mm,
+            out=out,
+            dry_run=dry_run,
+            db_path=db_path,
+        )
+    if path is None:
+        raise InvalidArgument(
+            "path", "(missing)", ["a photo file, or capture=True"], command="library"
+        )
     if (make is None) == (design is None):
         raise InvalidArgument(
             "make/design",
@@ -720,43 +844,63 @@ def photo(
     from pathlib import Path
 
     from library import db as librarydb
+    from library import records
 
     resolved = Path(path).resolve()
     if not resolved.is_file():
         raise InvalidArgument("path", path, ["an existing file"], command="library")
     conn = librarydb.open_library(db_path)
     try:
-        column, table, uid = (
-            ("make_id", "make", make) if make else ("design_id", "design", design)
-        )
-        row = conn.execute(f"SELECT id FROM {table} WHERE uid = ?", (uid,)).fetchone()
-        if row is None:
-            return error_result(
-                "photo",
-                [
-                    issue(
-                        "not_found",
-                        f"{table} {uid!r} does not exist",
-                        ["Use the uid printed by `queue`."],
-                    )
-                ],
+        try:
+            row, created = records.add_photo(
+                conn,
+                path,
+                make=make,
+                design=design,
+                kind=kind,
+                z_mm=z_mm,
+                source_key=source_key,
             )
-        ins = librarydb.insert_row(
-            conn,
+        except records.RecordNotFound as exc:
+            return error_result(
+                "photo", [issue("not_found", exc.message, exc.remediation)]
+            )
+        return ok_result(
             "photo",
             {
-                column: int(row["id"]),
+                "photo": str(row["uid"]),
                 "path": str(resolved),
                 "kind": kind,
-                "z_mm": z_mm,
-                "taken_at": librarydb.db.utc_now(),
+                "created": created,
             },
-        )
-        return ok_result(
-            "photo", {"photo": ins.uid, "path": str(resolved), "kind": kind}
         )
     finally:
         conn.close()
+
+
+def _publish_design(db_path: str | None, design: str, *, write: bool) -> sqlite3.Row:
+    """The design row `publish` acts on. A plan only reads: the library is opened without migrating or
+    creating it (as `flow.prepare` does); only a real publish (`write`) opens it migrating."""
+    from library import records
+    from publishing import flow
+
+    with flow.library(db_path, create=write) as conn:
+        if conn is None:
+            raise records.RecordNotFound("design", design, command="publish")
+        return records.resolve(conn, "design", design, command="publish")
+
+
+def _refused_plan(ev: Evaluation, data: dict[str, Any]) -> ActionResult | None:
+    """The `ok: false` result of a plan that must not be sent (the gate message, then every problem), if any."""
+    refusals = [ev.gate.message] if ev.gate is not None else []
+    refusals += ev.all_problems()
+    if not refusals:
+        return None
+    return error_result(
+        "publish",
+        [issue("refused", r, ["Fix it, then run the plan again."]) for r in refusals],
+        data,
+    )
 
 
 def publish(
@@ -764,32 +908,91 @@ def publish(
     *,
     platforms: Sequence[str] = (),
     dry_run: bool = True,
+    kind: str = "auto",
+    of: str | None = None,
+    make: str | None = None,
+    allow_nonprintable: Sequence[str] = (),
+    reason: str = "",
+    drop_nonprintable: bool = False,
     db_path: str | None = None,
 ) -> ActionResult:
-    """Publish a design to `platforms`; `dry_run` (default) plans only. Records `publication` rows.
+    """Publish a design to `platforms` (default: all); `dry_run` (default) plans only and writes nothing.
 
-    `data`: `{design: uid, publications: [{platform, state, url}]}`.
+    The design's `project_dir` (set by `3d make add --project-dir` / `queue`) is the project that is published;
+    `kind`: auto | original | remix | make (`of` = the source model, `make` = the make whose photos go).
+    Publishing (`dry_run=False`) records `publication` rows (planned -> draft|published|failed), the `remix_of`
+    relation and the render photos. A refused plan (licence, missing 3mf/scad, a non-printable part in the
+    publish set) is an `ok: false` result carrying the whole plan; nothing is sent.
+    `data`: `{design: uid, kind, dry_run, publications: [{platform, state, url}], plan: {3d.publish/1}}`.
     """
-    raise NotImplementedByDesign(
-        "publish", 579, "publishing (lands #564 models publish)"
+    from pathlib import Path
+
+    from publishing import flow, plan
+
+    row = _publish_design(db_path, design, write=not dry_run)
+    if not row["project_dir"]:
+        return error_result(
+            "publish",
+            [
+                issue(
+                    "no_project",
+                    f"design {row['name']!r} has no project directory to publish",
+                    ["Record it: `3d make add --design NAME --project-dir DIR`."],
+                )
+            ],
+        )
+    prep = flow.prepare(
+        Path(str(row["project_dir"])),
+        platform=",".join(platforms) or "all",
+        kind=kind,
+        of=of,
+        design=str(row["name"]),
+        make=make,
+        db_path=db_path,
+        allow=tuple(allow_nonprintable),
+        reason=reason,
+        drop=drop_nonprintable,
     )
-
-
-def _get_or_create_design(conn: Any, name: str) -> tuple[int, str]:
-    """The design row for `name`; a concurrent first insert (UNIQUE name) is read back, not raised."""
-    from library import db as librarydb
-
-    lookup = "SELECT id, uid FROM design WHERE name = ?"
-    row = conn.execute(lookup, (name,)).fetchone()
-    if row is None:
-        try:
-            made = librarydb.insert_row(conn, "design", {"name": name})
-            return made.id, made.uid
-        except sqlite3.IntegrityError:
-            row = conn.execute(lookup, (name,)).fetchone()
-            if row is None:
-                raise
-    return int(row["id"]), str(row["uid"])
+    doc = plan.to_json(prep.ev, dry_run=dry_run)
+    data: dict[str, Any] = {
+        "design": str(row["uid"]),
+        "kind": prep.kind,
+        "dry_run": dry_run,
+        "publications": [],
+        "plan": doc,
+    }
+    refused = _refused_plan(prep.ev, data)
+    if refused is not None:
+        return refused
+    if dry_run:
+        data["publications"] = [
+            {"platform": p.platform, "state": "planned", "url": None}
+            for p in prep.ev.plans
+        ]
+        return ok_result(
+            "publish",
+            data,
+            [issue("dry_run", "nothing was sent", ["Pass dry_run=False to publish."])],
+        )
+    outcomes = flow.send(prep)
+    data["publications"] = [
+        {"platform": o.platform, "state": o.state, "url": o.url} for o in outcomes
+    ]
+    failed = [o for o in outcomes if not o.ok]
+    if failed:
+        return error_result(
+            "publish",
+            [
+                issue(
+                    "publish_failed",
+                    f"{o.platform}: {o.message}",
+                    ["See the message; the row stays `failed`."],
+                )
+                for o in failed
+            ],
+            data,
+        )
+    return ok_result("publish", data)
 
 
 # --------------------------------------------------------------------------- registry
@@ -814,8 +1017,8 @@ OWNERS: dict[str, int | None] = {
     "open_slicer": 578,
     "launch_agent": 578,
     "queue": None,
-    "photo": 579,
-    "publish": 579,
+    "photo": None,
+    "publish": None,
     "open_browser": 578,
     "preview": 578,
 }

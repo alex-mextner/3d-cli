@@ -44,19 +44,9 @@ PROG = "3d mesh"
 
 
 def _parser(sub: str) -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog=f"{PROG} {sub}", add_help=False)
-    p.add_argument("mesh")
-    p.add_argument("spec")
-    p.add_argument("-o", "--out")
-    p.add_argument("--report")
-    p.add_argument("--collage")
-    p.add_argument("--seed", type=int)
-    p.add_argument("--labels")
-    p.add_argument("--out-labels")
-    p.add_argument("--verify-determinism", action="store_true")
-    p.add_argument("--no-self-intersections", action="store_true")
-    p.add_argument("--json", action="store_true")
-    return p
+    from geometry.deform_args import build_parser
+
+    return build_parser(sub)
 
 
 def _load_labels(path: str, n_faces: int) -> dict[str, NDArray[Any]]:
@@ -101,16 +91,19 @@ def _save_labels(
     return path
 
 
-def run_deform(argv: list[str], sub: str = "deform") -> int:
-    from geometry.meshfit import engine, meshio, spec as spec_mod
-
+def _parse_args(argv: list[str], sub: str) -> argparse.Namespace:
     try:
-        args = _parser(sub).parse_args(argv)
+        return _parser(sub).parse_args(argv)
     except SystemExit as exc:
         raise UsageError(
             f"{PROG} {sub}: bad arguments; usage: {PROG} {sub} <mesh> <spec.yaml> [-o OUT] [--report FILE]",
             command="mesh",
         ) from exc
+
+
+def _load_checked_spec(args: argparse.Namespace, sub: str) -> dict[str, Any]:
+    from geometry.meshfit import spec as spec_mod
+
     spec = spec_mod.load_spec(args.spec)
     if args.seed is not None:
         spec["seed"] = args.seed
@@ -124,7 +117,10 @@ def run_deform(argv: list[str], sub: str = "deform") -> int:
                 "Add an op `fit_silhouette` with views and handles, see docs/commands/mesh.md."
             ],
         )
-    out = args.out or os.path.splitext(args.mesh)[0] + ".deformed.stl"
+    return spec
+
+
+def _require_labels_for_out_labels(args: argparse.Namespace, sub: str) -> None:
     if args.out_labels and not args.labels:
         raise UsageError(
             "--out-labels needs --labels",
@@ -134,30 +130,25 @@ def run_deform(argv: list[str], sub: str = "deform") -> int:
             ],
         )
 
-    loaded = time.perf_counter()
-    V, F = meshio.load_mesh(args.mesh)
-    load_s = time.perf_counter() - loaded
-    face_data = _load_labels(args.labels, len(F)) if args.labels else None
-    V1, F1, report, parents = engine.run_spec_with_parents(
-        V,
-        F,
-        spec,
-        self_intersections=not args.no_self_intersections,
-        carry_faces=face_data is not None,
-    )
-    if face_data is not None:
-        report["labels"] = {
-            "input": args.labels,
-            "faces_in": int(len(F)),
-            "classes": int(len(np.unique(face_data["face_label"]))),
-            "per_face_arrays": sorted(
-                k for k, v in face_data.items() if v.ndim and len(v) == len(F)
-            ),
-        }
-    report["timing_s"] = {"load": round(load_s, 4), "run": report["timing_s"]}
-    report["input"]["path"] = args.mesh
-    report["input"]["sha256"] = meshio.file_sha256(args.mesh)
-    report["spec"] = os.path.abspath(args.spec)
+
+def _labels_report(
+    path: str, face_data: dict[str, NDArray[Any]], n_faces: int
+) -> dict[str, Any]:
+    return {
+        "input": path,
+        "faces_in": n_faces,
+        "classes": int(len(np.unique(face_data["face_label"]))),
+        "per_face_arrays": sorted(
+            k for k, v in face_data.items() if v.ndim and len(v) == n_faces
+        ),
+    }
+
+
+def _verify_determinism(
+    args: argparse.Namespace, spec: dict[str, Any], report: dict[str, Any]
+) -> dict[str, Any]:
+    """Record the first run's hash and, with --verify-determinism, re-run and compare (a mismatch fails the report)."""
+    from geometry.meshfit import engine, meshio
 
     determinism: dict[str, Any] = {
         "mesh_sha256": report["mesh_sha256"],
@@ -172,44 +163,95 @@ def run_deform(argv: list[str], sub: str = "deform") -> int:
         determinism["identical"] = again["mesh_sha256"] == report["mesh_sha256"]
         if not determinism["identical"]:
             report["status"] = "FAIL"
-    report["determinism"] = determinism
+    return determinism
 
-    if report["status"] == "PASS":
-        report["output"]["path"] = out
-        report["output"]["sha256"] = meshio.save_mesh(out, V1, F1)
-        if face_data is not None:
-            assert parents is not None
-            labels_out = args.out_labels or os.path.splitext(out)[0] + ".labels.npz"
-            report["labels"]["output"] = _save_labels(
-                labels_out, face_data, len(F), parents
-            )
-            report["labels"]["faces_out"] = int(len(parents))
-        if args.collage:
-            from geometry.meshfit import collage
 
-            collage.render_collage(args.collage, V, F, V1, F1)
-            report["collage"] = args.collage
-    report_path = args.report or (out + ".report.json")
+def _write_passing_outputs(
+    args: argparse.Namespace,
+    report: dict[str, Any],
+    out: str,
+    mesh: tuple[NDArray[Any], NDArray[Any], NDArray[Any], NDArray[Any]],
+    face_data: dict[str, NDArray[Any]] | None,
+    parents: NDArray[np.int64] | None,
+) -> None:
+    """Write the mesh, the carried labels and the collage of a PASS run, noting each in the report."""
+    from geometry.meshfit import meshio
+
+    V, F, V1, F1 = mesh
+    report["output"]["path"] = out
+    report["output"]["sha256"] = meshio.save_mesh(out, V1, F1)
+    if face_data is not None:
+        assert parents is not None
+        labels_out = args.out_labels or os.path.splitext(out)[0] + ".labels.npz"
+        report["labels"]["output"] = _save_labels(
+            labels_out, face_data, len(F), parents
+        )
+        report["labels"]["faces_out"] = int(len(parents))
+    if args.collage:
+        from geometry.meshfit import collage
+
+        collage.render_collage(args.collage, V, F, V1, F1)
+        report["collage"] = args.collage
+
+
+def _write_report(report: dict[str, Any], report_path: str) -> None:
     os.makedirs(os.path.dirname(os.path.abspath(report_path)), exist_ok=True)
     with open(report_path, "w", encoding="utf-8") as fh:
         json.dump(report, fh, indent=2, sort_keys=True)
         fh.write("\n")
+
+
+def _gate_failure(report: dict[str, Any]) -> GateFailure:
+    reasons = []
+    if report["keepout"]["gate"] != "PASS":
+        reasons.append(
+            f"keep-out zone moved by {report['keepout']['max_displacement_mm']} mm (tolerance {report['keepout']['tolerance_mm']} mm)"
+        )
+    if report["determinism"].get("identical") is False:
+        reasons.append("two runs produced different meshes")
+    return GateFailure(
+        ">>> DEFORM: FAIL — " + "; ".join(reasons), command="mesh", silent=False
+    )
+
+
+def run_deform(argv: list[str], sub: str = "deform") -> int:
+    from geometry.meshfit import engine, meshio
+
+    args = _parse_args(argv, sub)
+    spec = _load_checked_spec(args, sub)
+    out = args.out or os.path.splitext(args.mesh)[0] + ".deformed.stl"
+    _require_labels_for_out_labels(args, sub)
+
+    loaded = time.perf_counter()
+    V, F = meshio.load_mesh(args.mesh)
+    load_s = time.perf_counter() - loaded
+    face_data = _load_labels(args.labels, len(F)) if args.labels else None
+    V1, F1, report, parents = engine.run_spec_with_parents(
+        V,
+        F,
+        spec,
+        self_intersections=not args.no_self_intersections,
+        carry_faces=face_data is not None,
+    )
+    if face_data is not None:
+        report["labels"] = _labels_report(args.labels, face_data, int(len(F)))
+    report["timing_s"] = {"load": round(load_s, 4), "run": report["timing_s"]}
+    report["input"]["path"] = args.mesh
+    report["input"]["sha256"] = meshio.file_sha256(args.mesh)
+    report["spec"] = os.path.abspath(args.spec)
+    report["determinism"] = _verify_determinism(args, spec, report)
+
+    if report["status"] == "PASS":
+        _write_passing_outputs(args, report, out, (V, F, V1, F1), face_data, parents)
+    report_path = args.report or (out + ".report.json")
+    _write_report(report, report_path)
 
     if args.json:
         print(json.dumps(report, indent=2, sort_keys=True))
     else:
         _print_summary(report, out, report_path, sub)
     if report["status"] != "PASS":
-        reasons = []
-        if report["keepout"]["gate"] != "PASS":
-            reasons.append(
-                f"keep-out zone moved by {report['keepout']['max_displacement_mm']} mm (tolerance {report['keepout']['tolerance_mm']} mm)"
-            )
-        if determinism.get("identical") is False:
-            reasons.append("two runs produced different meshes")
-        raise GateFailure(
-            ">>> DEFORM: FAIL — " + "; ".join(reasons), command="mesh", silent=False
-        )
+        raise _gate_failure(report)
     return 0
 
 

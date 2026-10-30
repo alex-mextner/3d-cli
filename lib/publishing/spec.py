@@ -10,6 +10,7 @@ along.
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -43,6 +44,7 @@ KEYS = (
     "remix_license",
     "permission_ref",
     "images",
+    "hosted",
 )
 
 
@@ -79,6 +81,12 @@ class PublishSpec:
     remix_license: str
     permission_ref: str
     images: tuple[Path, ...]
+    hosted: tuple[
+        tuple[str, str], ...
+    ] = ()  # (file name, public https URL) pairs for Cults
+    defaults_used: tuple[
+        str, ...
+    ] = ()  # keys the offer filled in because publish.yaml left them out
 
 
 def select_files(project: Path) -> FileSet:
@@ -98,14 +106,19 @@ def select_files(project: Path) -> FileSet:
                 continue
             found.append(PublishFile(path, path.name, role, path.stat().st_size))
     found.sort(key=lambda f: (ROLE_ORDER.index(f.role), f.name.casefold()))
+    return FileSet(tuple(found), name_clashes(found))
+
+
+def name_clashes(files: Sequence[PublishFile]) -> tuple[str, ...]:
+    """Basenames (case-folded) that two different files of `files` both carry."""
     seen: dict[str, Path] = {}
     clashes: list[str] = []
-    for f in found:
+    for f in files:
         key = f.name.casefold()
         if key in seen and seen[key] != f.path:
             clashes.append(f.name)
         seen.setdefault(key, f.path)
-    return FileSet(tuple(found), tuple(dict.fromkeys(clashes)))
+    return tuple(dict.fromkeys(clashes))
 
 
 def _text(data: dict[str, Any], key: str, *, required: bool = False) -> str:
@@ -128,7 +141,9 @@ def _text(data: dict[str, Any], key: str, *, required: bool = False) -> str:
     return value
 
 
-def _default_images(project: Path) -> tuple[Path, ...]:
+def default_images(project: Path) -> tuple[Path, ...]:
+    """The listing images of `<project>/previews/`: regular image files that stay inside the project (a
+    symlinked folder or file is skipped so it cannot smuggle in a file from outside)."""
     folder = project / IMAGE_DIR
     if not folder.is_dir() or folder.is_symlink():
         return ()
@@ -140,14 +155,17 @@ def _default_images(project: Path) -> tuple[Path, ...]:
         and p.is_file()
         and not p.name.startswith(".")
         and not p.is_symlink()
-        and root in p.resolve().parents  # a symlink must not smuggle in a file from outside
+        and root
+        in p.resolve().parents  # a symlink must not smuggle in a file from outside
     )
 
 
-def _images(project: Path, data: dict[str, Any]) -> tuple[Path, ...]:
+def listing_images(project: Path, data: dict[str, Any]) -> tuple[Path, ...]:
+    """The listing images of an original/remix post: `images` of the mapping `read_mapping` returned, else
+    previews/."""
     declared = data.get("images")
     if declared is None:
-        return _default_images(project)
+        return default_images(project)
     if not isinstance(declared, list) or not all(isinstance(i, str) for i in declared):
         raise InvalidArgument(
             f"{SPEC_NAME}: images",
@@ -195,11 +213,46 @@ def _tags(data: dict[str, Any]) -> tuple[str, ...]:
     return tuple(t.strip() for t in raw_tags)
 
 
-def _read_mapping(project: Path) -> dict[str, Any]:
+def _is_public_https(url: str) -> bool:
+    """A usable hosted URL: https, a host, no whitespace, no userinfo."""
+    from urllib.parse import urlsplit
+
+    if any(c.isspace() for c in url):
+        return False
+    try:
+        parts = urlsplit(url)
+        host = parts.hostname
+    except ValueError:
+        return False
+    return parts.scheme == "https" and bool(host) and "@" not in parts.netloc
+
+
+def _hosted(data: dict[str, Any]) -> tuple[tuple[str, str], ...]:
+    """`hosted:` maps an uploaded file's name to the public HTTPS URL it is reachable at (Cults pulls its
+    files and images from URLs; it takes no upload)."""
+    raw = data.get("hosted")
+    if raw is None:
+        return ()
+    if not isinstance(raw, dict) or not all(
+        isinstance(k, str) and isinstance(v, str) and _is_public_https(v)
+        for k, v in raw.items()
+    ):
+        raise InvalidArgument(
+            f"{SPEC_NAME}: hosted",
+            repr(raw),
+            ["a mapping of file name to a public https:// URL"],
+            command="models",
+        )
+    return tuple(raw.items())
+
+
+def read_mapping(project: Path, *, allow_missing: bool = False) -> dict[str, Any]:
     import yaml  # lazy: only `publish` needs it
 
     path = project / SPEC_NAME
     if not path.is_file():
+        if allow_missing:
+            return {}
         raise InputNotFound(str(path), command="models")
     try:
         data = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -225,9 +278,31 @@ def _read_mapping(project: Path) -> dict[str, Any]:
     return data
 
 
-def load_spec(project: Path) -> PublishSpec:
-    """Read and validate `<project>/publish.yaml`; every defect is a structured exit-2 error."""
-    data = _read_mapping(project)
+def load_spec(
+    project: Path,
+    defaults: Mapping[str, str] | None = None,
+    *,
+    with_images: bool = True,
+    data: dict[str, Any] | None = None,
+) -> PublishSpec:
+    """Read and validate `<project>/publish.yaml`; every defect is a structured exit-2 error.
+
+    `defaults` (the publish OFFER only) fills title / description / license that publish.yaml leaves out, or
+    stands in for a missing publish.yaml; every key it supplied is listed in `PublishSpec.defaults_used` so
+    the offer can say what it assumed. `3d models publish` passes none: it stays strict.
+
+    `data` is the mapping a caller already read with `read_mapping` (and also uses for `listing_images`): the
+    file is then not read again, so one evaluation never mixes two saves of it."""
+    data = (
+        dict(data)
+        if data is not None
+        else read_mapping(project, allow_missing=bool(defaults))
+    )
+    used: list[str] = []
+    for key, value in (defaults or {}).items():
+        if data.get(key) in (None, ""):
+            data[key] = value
+            used.append(key)
     license_text = _text(data, "license", required=True)
     license_ = parse_license(license_text)
     if license_ is None:
@@ -252,5 +327,7 @@ def load_spec(project: Path) -> PublishSpec:
         remix_of=remix_of,
         remix_license=_text(data, "remix_license"),
         permission_ref=_text(data, "permission_ref"),
-        images=_images(project, data),
+        images=listing_images(project, data) if with_images else (),
+        hosted=_hosted(data),
+        defaults_used=tuple(used),
     )

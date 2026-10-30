@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import inspect
-import json
 import sqlite3
 import subprocess
 import sys
@@ -60,32 +59,6 @@ def test_actions_module_imports_without_heavy_deps_or_library_db() -> None:
         env={"PYTHONPATH": str(lib), "PATH": ""},
     )
     assert r.returncode == 0 and "OK" in r.stdout, r.stderr
-
-
-@pytest.mark.parametrize(
-    "name,owner,kwargs",
-    [
-        ("photo", 579, {"capture": True}),
-        ("publish", 579, {"design": "d"}),
-    ],
-)
-def test_unimplemented_actions_name_their_owning_issue(
-    name: str, owner: int, kwargs: dict[str, object]
-) -> None:
-    with pytest.raises(actions.NotImplementedByDesign) as exc:
-        actions.ACTIONS[name](**kwargs)
-    assert exc.value.owner_issue == owner and f"#{owner}" in str(exc.value)
-    assert actions.OWNERS[name] == owner
-    res = actions.invoke(name, **kwargs)
-    assert (
-        res["schema"] == "3d.action/1" and res["ok"] is False and res["action"] == name
-    )
-    assert (
-        res["errors"][0]["code"] == "not_implemented"
-        and f"#{owner}" in res["errors"][0]["remediation"][0]
-    )
-    assert res["data"] == {} and res["warnings"] == []
-    json.dumps(res)
 
 
 def test_queue_creates_design_and_queued_make_idempotently(dbpath: str) -> None:

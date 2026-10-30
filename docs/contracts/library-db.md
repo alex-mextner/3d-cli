@@ -36,10 +36,10 @@ imports - `library.db.insert_row(conn, table, values, source_key=K)` returns the
 photo, publish` - plus two for the model browser - `open_browser`, `preview` (S7, #578) - returning `{schema:
 "3d.action/1", action, ok, data, errors[], warnings[]}`. They never print, prompt or exit. The TUI binds keys to
 `ACTIONS[name]` and `3d models act` exposes the same functions as flags with `--json`
-(`docs/commands/tui.md`). `queue`, `photo` (register an existing file), `search` and `download` (S5, #576),
+(`docs/commands/tui.md`). `queue`, `photo` (register a file, or `capture=True`: the table photo with the printer's bed lifted, restored afterwards; dry run by default), `publish` (plan by default, `dry_run=False` records the rows; S8, #579), `search` and `download` (S5, #576),
 `rank` (S6, #577: LLM relevance and query planning, `docs/contracts/search-events.md`) and `open_slicer`,
 `launch_agent`, `open_browser`, `preview` (S7, #578: configured launchers, `lib/library/launch.py`) are implemented;
-`publish` raises `NotImplementedByDesign(owner_issue)` until its slice lands (`OWNERS` maps
+an action whose slice has not landed raises `NotImplementedByDesign(owner_issue)` (`OWNERS` maps
 action -> issue). `search` takes `deep` and `idempotency_key` besides the contract arguments and returns a flat
 `results[]` (site, model_id, url, title, rank, image_url, license, paid, cad, size_mm, reference_suitable) plus the
 session uid; a site that failed is a `site_failed` warning and only "no site answered" is `ok: false`. `download`
@@ -85,3 +85,11 @@ the applied migrations `[1, 10, 30]`. `invoke(name,
 - `llm_call(session_id, role classify|plan, model, status ok|invalid|timeout|error|budget, items, elapsed_s,
   input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd, detail)` - the ledger of model
   calls of a search; tokens and cost are NULL when the backend does not report them.
+
+## Writers of makes, photos, publications and relations (#579)
+
+`library/records.py` is the one place that writes them; `3d make`, `3d photo` and `3d models publish --yes` call
+it. Relations: `make --make_of--> design` (every make), `design --derived_from--> model_source` (a make printed from
+a download), `design --remix_of--> model_source` (a published remix). `publication.platform` is the platform name,
+or `<platform>:make` for a make post; a publication goes `planned` -> `draft|published|failed` and is never deleted.
+Read them with `3d library makes|publications|relations list` and `3d library graph DESIGN`.

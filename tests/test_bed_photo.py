@@ -1,0 +1,957 @@
+"""bed_photo.py: the table photo with a lifted bed. NOTHING here touches a real printer: `FakePrinter` simulates
+the Z moves of a Moonraker adapter and records every G-code script, the camera is a fake that serves a new frame
+after each grab, XDG dirs are tmp."""
+
+from __future__ import annotations
+
+import json
+import time
+from collections.abc import Callable
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+
+import pytest
+
+import bed_photo
+import bed_view
+from errors import GateFailure, InvalidArgument, UsageError
+from printer_ops.bed import BedConfig
+from printer_ops.devices import Device, ResumeProfile
+
+RESUME = ResumeProfile(
+    "SM_PRINT_PREEXTRUDE_FILAMENT", 30, 0.5, 12, 5, 3, 1.75, 170, 10000, 275.0, ()
+)
+CFG = BedConfig(enabled=True)
+
+
+@pytest.fixture(autouse=True)
+def xdg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    for var, sub in (
+        ("XDG_CONFIG_HOME", "config"),
+        ("XDG_STATE_HOME", "state"),
+        ("XDG_DATA_HOME", "data"),
+        ("XDG_CACHE_HOME", "cache"),
+    ):
+        monkeypatch.setenv(var, str(tmp_path / sub))
+    return tmp_path
+
+
+def device(*, access: str = "full", resume: ResumeProfile | None = RESUME) -> Device:
+    return Device(
+        "u1",
+        "moonraker",
+        "127.0.0.1",
+        7125,
+        "Snapmaker U1",
+        Path("t.yaml"),
+        access=access,
+        resume=resume,
+    )
+
+
+class FakePrinter:
+    """The Moonraker adapter surface bed_view uses; `G1 Z..` moves the toolhead; every script is recorded."""
+
+    def __init__(
+        self, state: str = "complete", z: float = 200.0, *, homed: str = "xyz"
+    ) -> None:
+        self.raw, self.z, self.homed = state, z, homed
+        self.offset = 0.0  # toolhead Z minus gcode Z (the gcode Z offset in force)
+        self.scripts: list[str] = []
+        self.on_script: Callable[[FakePrinter], None] | None = None
+
+    def query(self, objects: str) -> dict[str, Any]:
+        return {
+            "webhooks": {"state": "ready"},
+            "print_stats": {"state": self.raw, "filename": "mole.gcode"},
+            "toolhead": {
+                "position": [100.0, 100.0, self.z, 0.0],
+                "homed_axes": self.homed,
+            },
+            "gcode_move": {"gcode_position": [100.0, 100.0, self.z - self.offset, 0.0]},
+        }
+
+    def run_gcode(self, script: str, *, timeout: float = 120.0) -> None:
+        self.scripts.append(script)
+        for line in script.splitlines():
+            if line.startswith("G1 Z"):
+                self.z = float(line.split()[1][1:]) + self.offset
+        if self.on_script is not None:
+            self.on_script(self)
+
+    def file_metadata(self, filename: str) -> dict[str, Any]:
+        return {}
+
+
+class FakeCamera:
+    """A live camera: every grab is a different frame, unless `frozen`."""
+
+    def __init__(self, *, frozen: bool = False) -> None:
+        self.grabs, self.frozen = 0, frozen
+        self.fail: BaseException | None = None
+        self.fail_after = 1  # the first grab (the resting frame, before the move) works
+        self.on_grab: Callable[[int], None] | None = None
+
+    def keepalive(self) -> bool:
+        return False
+
+    def grab(self) -> Any:
+        self.grabs += 1
+        if self.on_grab is not None:
+            self.on_grab(self.grabs)
+        if self.fail is not None and self.grabs > self.fail_after:
+            raise self.fail
+        return SimpleNamespace(
+            jpeg=b"\xff\xd8frame"
+            + (b"0" if self.frozen else str(self.grabs).encode())
+            + b"\xff\xd9"
+        )
+
+
+def moves(printer: FakePrinter) -> list[str]:
+    return [
+        ln
+        for s in printer.scripts
+        for ln in s.splitlines()
+        if ln.startswith(("G0", "G1"))
+    ]
+
+
+def shoot(
+    printer: FakePrinter,
+    out: Path,
+    *,
+    camera: FakeCamera | None = None,
+    lift: str | float = 70.0,
+    dry_run: bool = False,
+    view: bed_photo.ViewFn | None = None,
+    part: float | None = 20.0,
+) -> dict[str, Any]:
+    return bed_photo.capture_table_photo(
+        device(),
+        CFG,
+        adapter=printer,
+        camera=camera or FakeCamera(),
+        out=out,
+        lift=lift,
+        part_height_mm=part,
+        view=view,
+        dry_run=dry_run,
+        settle_s=0.0,
+        sleep=lambda s: None,
+    )
+
+
+def test_the_bed_is_lifted_within_limits_photographed_and_put_back(
+    tmp_path: Path,
+) -> None:
+    printer = FakePrinter(z=200.0)
+    out = tmp_path / "table.jpg"
+    doc = shoot(printer, out, lift=70.0)
+    assert moves(printer) == [
+        "G1 Z70.000 F600",
+        "G1 Z200.000 F600",
+    ]  # up to the photo Z, then back
+    assert (
+        printer.z == 200.0
+        and doc["moved"]
+        and doc["restored"]
+        and doc["restore_error"] is None
+    )
+    assert (
+        doc["z_mm"] == 70.0
+        and doc["fresh"] is True
+        and out.read_bytes().startswith(b"\xff\xd8frame")
+    )
+    assert (
+        doc["plan"]["floor"] == 35.0 and doc["plan"]["ceiling"] == 270.0
+    )  # part 20 + 15 clearance .. z_max 275 - 5
+    assert bed_view._read_pending("u1") is None  # the displaced-Z marker file is gone
+
+
+def test_dry_run_reads_the_printer_and_sends_nothing(tmp_path: Path) -> None:
+    printer, camera = FakePrinter(z=200.0), FakeCamera()
+    doc = shoot(printer, tmp_path / "t.jpg", camera=camera, dry_run=True)
+    assert (
+        printer.scripts == []
+        and camera.grabs == 0
+        and not (tmp_path / "t.jpg").exists()
+    )
+    assert (
+        doc["dry_run"]
+        and doc["plan"]["move"]
+        and doc["plan"]["target_z"] == 70.0
+        and doc["path"] is None
+    )
+
+
+@pytest.mark.parametrize("state", ["printing", "paused", "busy"])
+def test_a_printer_that_is_not_idle_is_refused_and_nothing_moves(
+    tmp_path: Path, state: str
+) -> None:
+    printer, camera = FakePrinter(state=state), FakeCamera()
+    with pytest.raises(GateFailure) as exc:
+        shoot(printer, tmp_path / "t.jpg", camera=camera)
+    assert "belongs to the job" in exc.value.message
+    assert printer.scripts == [] and camera.grabs == 0
+
+
+def test_a_not_homed_printer_or_unknown_part_height_is_refused(tmp_path: Path) -> None:
+    with pytest.raises(GateFailure, match="not homed"):
+        shoot(FakePrinter(homed=""), tmp_path / "t.jpg")
+    printer = FakePrinter()
+    with pytest.raises(
+        GateFailure, match="height of what may stand on the bed is unknown"
+    ):
+        shoot(printer, tmp_path / "t.jpg", part=None)
+    assert printer.scripts == []
+
+
+@pytest.mark.parametrize("lift", [20.0, 272.0])
+def test_a_lift_outside_floor_and_z_max_minus_5_is_refused(
+    tmp_path: Path, lift: float
+) -> None:
+    printer = FakePrinter()
+    with pytest.raises(GateFailure, match="outside the allowed Z 35..270"):
+        shoot(printer, tmp_path / "t.jpg", lift=lift)
+    assert printer.scripts == []
+
+
+def test_the_bed_is_restored_even_when_the_camera_fails(tmp_path: Path) -> None:
+    printer, camera = FakePrinter(z=200.0), FakeCamera()
+    camera.fail = OSError("camera unplugged")
+    with pytest.raises(OSError, match="unplugged"):
+        shoot(printer, tmp_path / "t.jpg", camera=camera)
+    assert printer.z == 200.0 and moves(printer)[-1] == "G1 Z200.000 F600"
+
+
+def test_the_restore_is_guarded_a_print_started_meanwhile_gets_no_move(
+    tmp_path: Path,
+) -> None:
+    printer = FakePrinter(z=200.0)
+
+    def start_print(p: FakePrinter) -> None:
+        if p.z == 70.0:
+            p.raw = "printing"
+
+    printer.on_script = start_print
+    doc = shoot(printer, tmp_path / "t.jpg")
+    assert moves(printer) == ["G1 Z70.000 F600"]  # no second move into a running job
+    assert doc["restored"] is False and "belongs to the job" in doc["restore_error"]
+    assert Path(
+        doc["path"]
+    ).is_file()  # the photo exists; the failure is reported, never swallowed
+
+
+def test_a_frozen_camera_is_reported_as_not_fresh(tmp_path: Path) -> None:
+    doc = shoot(FakePrinter(), tmp_path / "t.jpg", camera=FakeCamera(frozen=True))
+    assert doc["fresh"] is False and doc["restored"]
+
+
+def test_a_bed_already_at_the_height_is_not_moved(tmp_path: Path) -> None:
+    printer = FakePrinter(z=70.0)
+    doc = shoot(printer, tmp_path / "t.jpg", lift=70.0)
+    assert printer.scripts == [] and doc["moved"] is False and doc["z_mm"] == 70.0
+
+
+def test_auto_picks_the_z_that_shows_the_plate_nearest_to_where_the_bed_is() -> None:
+    share = {
+        35.0: 0.5,
+        40.0: 0.9,
+        45.0: 0.95,
+        50.0: 0.97,
+        100.0: 0.96,
+        150.0: 0.4,
+        200.0: 0.15,
+        270.0: 0.1,
+    }
+    z, why = bed_photo.pick_photo_z(
+        lambda z: share.get(z, 0.2), 150.0, floor=35.0, ceiling=270.0, threshold=0.85
+    )
+    assert (
+        z == 100.0 and "96%" in why
+    )  # views within 10 points of the best (97%) tie: the nearest to Z 150 wins
+    none, reason = bed_photo.pick_photo_z(
+        lambda z: 0.3, 150.0, floor=35.0, ceiling=270.0, threshold=0.85
+    )
+    assert none is None and "no allowed Z" in reason
+
+
+def test_auto_without_a_camera_calibration_refuses_instead_of_guessing(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(GateFailure, match="no camera calibration"):
+        shoot(FakePrinter(), tmp_path / "t.jpg", lift="auto", view=None)
+    printer = FakePrinter(z=200.0)
+    doc = shoot(
+        printer,
+        tmp_path / "t.jpg",
+        lift="auto",
+        view=lambda z: 0.95 if z <= 100 else 0.2,
+    )
+    assert doc["plan"]["target_z"] == 100.0 and moves(printer)[0] == "G1 Z100.000 F600"
+
+
+def test_parse_lift() -> None:
+    assert bed_photo.parse_lift("auto") == "auto" and bed_photo.parse_lift("70") == 70.0
+    for bad in ("0", "-5", "nan", "high"):
+        with pytest.raises(InvalidArgument):
+            bed_photo.parse_lift(bad)
+
+
+def test_an_offset_changed_during_the_camera_request_refuses_the_move(
+    tmp_path: Path,
+) -> None:
+    printer, camera = FakePrinter(z=200.0), FakeCamera()
+    # the resting frame is requested after the plan: the offset changes while it is in flight
+    camera.on_grab = lambda n: setattr(printer, "offset", -50.0)
+    with pytest.raises(GateFailure, match="Z offset changed"):
+        shoot(printer, tmp_path / "t.jpg", camera=camera, lift=70.0)
+    assert (
+        printer.scripts == [] and printer.z == 200.0
+    )  # nothing was sent: floor 35 is safe
+    assert bed_view._read_pending("u1") is None  # no marker file left behind
+
+
+def test_a_view_running_elsewhere_blocks_the_capture_before_anything_is_read(
+    tmp_path: Path,
+) -> None:
+    reads: list[int] = []
+
+    def read(adapter: Any) -> bed_view.Motion:
+        reads.append(1)
+        return bed_view.read_motion(adapter)
+
+    for lift, z in ((70.0, 200.0), (70.0, 70.0)):  # the move path and the no-move path
+        printer = FakePrinter(z=z)
+        with bed_view.view_lock("u1") as held:
+            assert held
+            with pytest.raises(GateFailure, match="another bed view"):
+                bed_photo.capture_table_photo(
+                    device(),
+                    CFG,
+                    adapter=printer,
+                    camera=FakeCamera(),
+                    out=tmp_path / "t.jpg",
+                    lift=lift,
+                    part_height_mm=20.0,
+                    dry_run=False,
+                    settle_s=0.0,
+                    sleep=lambda s: None,
+                    read=read,
+                )
+        assert reads == [] and printer.scripts == []
+
+
+def test_a_pending_marker_is_undone_first_so_the_original_z_survives(
+    tmp_path: Path,
+) -> None:
+    printer = FakePrinter(
+        z=70.0
+    )  # stranded by an interrupted view that found it at Z 200
+    bed_view._write_pending(
+        "u1",
+        bed_view.Motion("complete", "complete", 200.0, 200.0, "xyz", True, None),
+        time.time(),
+    )
+    doc = shoot(printer, tmp_path / "t.jpg", lift=70.0)
+    assert moves(printer) == ["G1 Z200.000 F600", "G1 Z70.000 F600", "G1 Z200.000 F600"]
+    assert printer.z == 200.0 and doc["restored"] and doc["moved"]
+    assert bed_view._read_pending("u1") is None
+
+
+def test_recovery_below_the_current_clearance_floor_is_refused_before_any_move(
+    tmp_path: Path,
+) -> None:
+    printer, camera = FakePrinter(z=270.0), FakeCamera()
+    bed_view._write_pending(
+        "u1",
+        bed_view.Motion("complete", "complete", 200.0, 200.0, "xyz", True, None),
+        time.time(),
+    )
+    with pytest.raises(GateFailure, match="clearance floor Z 245"):
+        bed_photo.capture_table_photo(
+            device(),
+            CFG,
+            adapter=printer,
+            camera=camera,
+            out=tmp_path / "t.jpg",
+            lift=250.0,
+            part_height_mm=230.0,
+            dry_run=False,
+            settle_s=0.0,
+            sleep=lambda s: None,
+        )
+    assert printer.scripts == [] and camera.grabs == 0 and printer.z == 270.0
+    pending = bed_view._read_pending("u1")
+    assert pending is not None and pending["z"] == 200.0  # the marker is kept
+
+
+def test_a_pending_marker_that_cannot_be_undone_is_never_overwritten(
+    tmp_path: Path,
+) -> None:
+    printer, camera = (
+        FakePrinter(z=70.0, homed=""),
+        FakeCamera(),
+    )  # recovery refuses: not homed
+    bed_view._write_pending(
+        "u1",
+        bed_view.Motion("complete", "complete", 200.0, 200.0, "xyz", True, None),
+        time.time(),
+    )
+    with pytest.raises(GateFailure, match="interrupted bed view"):
+        shoot(printer, tmp_path / "t.jpg", camera=camera, lift=70.0)
+    assert printer.scripts == [] and camera.grabs == 0
+    pending = bed_view._read_pending("u1")
+    assert (
+        pending is not None and pending["z"] == 200.0
+    )  # the original Z is still on record
+
+
+def test_restore_after_an_offset_change_targets_the_original_physical_z(
+    tmp_path: Path,
+) -> None:
+    printer = FakePrinter(z=200.0)
+
+    def shift_offset(p: FakePrinter) -> None:
+        if p.z == 70.0:
+            p.offset = -190.0  # the G-code Z offset changes while the bed is lifted
+
+    printer.on_script = shift_offset
+    doc = shoot(printer, tmp_path / "t.jpg", lift=70.0)
+    # the old gcode Z200 would land at physical Z10 (floor 35); the target is recomputed from physical Z200
+    assert moves(printer) == ["G1 Z70.000 F600", "G1 Z390.000 F600"]
+    assert printer.z == 200.0 and doc["restored"] and doc["restore_error"] is None
+    assert bed_view._read_pending("u1") is None
+
+
+def test_restore_refuses_when_the_offset_changes_again_before_the_send(
+    tmp_path: Path,
+) -> None:
+    printer = FakePrinter(z=200.0)
+    lifted_reads = 0
+
+    def read(adapter: Any) -> bed_view.Motion:
+        nonlocal lifted_reads
+        if printer.z == 70.0:
+            lifted_reads += 1
+            if lifted_reads == 4:  # the read of the guarded restore move itself
+                printer.offset = -190.0
+        return bed_view.read_motion(adapter)
+
+    doc = bed_photo.capture_table_photo(
+        device(),
+        CFG,
+        adapter=printer,
+        camera=FakeCamera(),
+        out=tmp_path / "t.jpg",
+        lift=70.0,
+        part_height_mm=20.0,
+        dry_run=False,
+        settle_s=0.0,
+        sleep=lambda s: None,
+        read=read,
+    )
+    assert moves(printer) == [
+        "G1 Z70.000 F600"
+    ]  # no restore move was sent into the new frame
+    assert doc["restored"] is False and "Z offset changed" in doc["restore_error"]
+    pending = bed_view._read_pending("u1")
+    assert pending is not None and pending["z"] == 200.0  # the recovery marker survives
+    assert pending["offset"] == 0.0  # the frame the Z was found under
+    # a later recovery (what a retried capture runs first) goes back to PHYSICAL Z200 in the new frame:
+    # the saved G-code Z200 would land at physical Z10, below the floor, before failure is even reported
+    note = bed_view.recover_pending(printer, "u1", time.time())
+    assert note is not None and "put the bed back to Z 200.0" in note
+    assert moves(printer) == ["G1 Z70.000 F600", "G1 Z390.000 F600"]
+    assert printer.z == 200.0 and bed_view._read_pending("u1") is None
+
+
+def _record_landings(printer: FakePrinter) -> list[float]:
+    landed: list[float] = []
+    printer.on_script = lambda p: landed.append(p.z)
+    return landed
+
+
+def test_a_retried_capture_after_a_refused_restore_never_lands_below_the_floor(
+    tmp_path: Path,
+) -> None:
+    printer = FakePrinter(z=70.0)  # left lifted by the refused restore ...
+    printer.offset = -190.0  # ... under an offset that changed since
+    bed_view._write_pending(
+        "u1",
+        bed_view.Motion("complete", "complete", 200.0, 200.0, "xyz", True, None),
+        time.time(),
+    )
+    landed = _record_landings(printer)
+    doc = shoot(printer, tmp_path / "t.jpg", lift=70.0)
+    assert moves(printer) == [
+        "G1 Z390.000 F600",
+        "G1 Z260.000 F600",
+        "G1 Z390.000 F600",
+    ]
+    assert landed == [200.0, 70.0, 200.0] and min(landed) >= 35.0
+    assert doc["restored"] and bed_view._read_pending("u1") is None
+
+
+def test_an_older_marker_with_only_the_gcode_z_is_recovered_in_the_current_frame() -> (
+    None
+):
+    printer = FakePrinter(z=70.0)
+    printer.offset = -190.0
+    marker = bed_view._view_path("u1", ".json")
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(
+        json.dumps({"printer": "u1", "z": 200.0, "gcode_z": 200.0, "ts": time.time()})
+    )
+    landed = _record_landings(printer)
+    assert bed_view.recover_pending(printer, "u1", time.time()) is not None
+    assert moves(printer) == ["G1 Z390.000 F600"] and landed == [200.0]
+    assert bed_view._read_pending("u1") is None
+
+
+def test_recovery_refuses_without_moving_when_the_offset_changes_before_the_send() -> (
+    None
+):
+    printer = FakePrinter(z=70.0)
+    bed_view._write_pending(
+        "u1",
+        bed_view.Motion("complete", "complete", 200.0, 200.0, "xyz", True, None),
+        time.time(),
+    )
+    reads = 0
+
+    def read(adapter: Any) -> bed_view.Motion:
+        nonlocal reads
+        reads += 1
+        if (
+            reads == 4
+        ):  # the read of the guarded move itself, after the target was computed
+            printer.offset = -190.0
+        return bed_view.read_motion(adapter)
+
+    note = bed_view.recover_pending(printer, "u1", time.time(), read)
+    assert note is not None and "Z offset changed" in note
+    assert printer.scripts == [] and printer.z == 70.0  # nothing was sent
+    pending = bed_view._read_pending("u1")
+    assert (
+        pending is not None and pending["z"] == 200.0
+    )  # the marker stays for the next try
+
+
+@pytest.mark.parametrize("dry_run", [True, False])
+@pytest.mark.parametrize("bad", [-100.0, float("nan"), float("inf")])
+def test_a_negative_or_non_finite_part_height_is_refused_before_anything_is_read(
+    tmp_path: Path, dry_run: bool, bad: float
+) -> None:
+    printer = FakePrinter(z=200.0)
+    with pytest.raises(InvalidArgument) as exc:
+        shoot(printer, tmp_path / "t.jpg", part=bad, dry_run=dry_run)
+    assert exc.value.exit_code == 2 and "--part-height" in exc.value.message
+    assert printer.scripts == []
+
+
+def test_an_existing_out_file_is_refused_before_the_bed_moves_and_never_overwritten(
+    tmp_path: Path,
+) -> None:
+    out = tmp_path / "t.jpg"
+    out.write_bytes(b"earlier photo")
+    printer = FakePrinter(z=200.0)
+    with pytest.raises(InvalidArgument):
+        shoot(printer, out)
+    assert printer.scripts == [] and out.read_bytes() == b"earlier photo"
+    with pytest.raises(
+        UsageError, match="already exists"
+    ):  # a file that appeared meanwhile
+        bed_photo._saved({}, out, b"\xff\xd8new", True, 70.0)
+    assert out.read_bytes() == b"earlier photo"
+
+
+def test_a_read_only_printer_is_never_sent_the_recovery_move(tmp_path: Path) -> None:
+    printer, camera = FakePrinter(z=70.0), FakeCamera()
+    bed_view._write_pending(  # a fresh marker: a full-access capture would first send G1 Z200
+        "u1",
+        bed_view.Motion("complete", "complete", 200.0, 200.0, "xyz", True, None),
+        time.time(),
+    )
+    with pytest.raises(GateFailure, match="read-only: no writes"):
+        bed_photo.capture_table_photo(
+            device(access="read-only"),
+            CFG,
+            adapter=printer,
+            camera=camera,
+            out=tmp_path / "t.jpg",
+            lift=70.0,
+            part_height_mm=20.0,
+            dry_run=False,
+            settle_s=0.0,
+            sleep=lambda s: None,
+        )
+    assert printer.scripts == [] and camera.grabs == 0
+    pending = bed_view._read_pending("u1")
+    assert pending is not None and pending["z"] == 200.0  # still on record
+
+
+class BlindPrinter(FakePrinter):
+    """A printer whose G-code position is `gcode_move_value` (absent when `...`): the offset is unknowable."""
+
+    def __init__(self, gcode_position: Any, **kw: Any) -> None:
+        super().__init__(**kw)
+        self.gcode_position = gcode_position
+
+    def query(self, objects: str) -> dict[str, Any]:
+        st = super().query(objects)
+        if self.gcode_position is ...:
+            del st["gcode_move"]
+        else:
+            st["gcode_move"] = {"gcode_position": self.gcode_position}
+        return st
+
+
+UNKNOWN_GCODE_Z = [
+    pytest.param(..., id="no-gcode_move"),
+    pytest.param(None, id="null-position"),
+    pytest.param([100.0, 100.0], id="short-position"),
+    pytest.param([100.0, 100.0, None, 0.0], id="null-z"),
+    pytest.param([100.0, 100.0, float("nan"), 0.0], id="nan-z"),
+    pytest.param([100.0, 100.0, float("inf"), 0.0], id="inf-z"),
+]
+
+
+@pytest.mark.parametrize("gcode_position", UNKNOWN_GCODE_Z)
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_a_capture_without_the_gcode_z_is_refused_before_any_move(
+    tmp_path: Path, gcode_position: Any, dry_run: bool
+) -> None:
+    printer = BlindPrinter(gcode_position, z=200.0)
+    printer.offset = (
+        -50.0
+    )  # the real offset, invisible: guessing 0 would land Z70 at physical Z20
+    camera = FakeCamera()
+    with pytest.raises(GateFailure, match=r"G-code Z .* unknown"):
+        shoot(printer, tmp_path / "t.jpg", camera=camera, lift=70.0, dry_run=dry_run)
+    assert printer.scripts == [] and camera.grabs == 0 and printer.z == 200.0
+    assert bed_view._read_pending("u1") is None
+
+
+@pytest.mark.parametrize("gcode_position", UNKNOWN_GCODE_Z)
+def test_the_shared_move_and_restore_refuse_without_the_gcode_z(
+    gcode_position: Any,
+) -> None:
+    printer = BlindPrinter(gcode_position, z=200.0)
+    with pytest.raises(bed_view.MoveRefused, match="G-code Z .* unknown"):
+        bed_view.guarded_z_move(printer, to_gcode_z=70.0)
+    why = bed_view.restore_physical_z(printer, 70.0)
+    assert why is not None and "G-code Z" in why
+    assert printer.scripts == []
+
+
+def test_a_pending_marker_is_not_recovered_without_the_gcode_z() -> None:
+    printer = BlindPrinter(None, z=70.0)
+    bed_view._write_pending(
+        "u1",
+        bed_view.Motion("complete", "complete", 200.0, 200.0, "xyz", True, None),
+        time.time(),
+    )
+    note = bed_view.recover_pending(printer, "u1", time.time())
+    assert note is not None and "G-code Z" in note
+    assert printer.scripts == []
+    assert bed_view._read_pending("u1") is not None
+
+
+def test_a_fresh_marker_is_not_recovered_when_no_clearance_limits_exist() -> None:
+    printer = FakePrinter(z=200.0)
+    bed_view._write_pending(
+        "u1",
+        bed_view.Motion("complete", "complete", 70.0, 70.0, "xyz", True, None),
+        time.time(),
+    )
+    with pytest.raises(GateFailure, match="marker is kept"):
+        shoot(printer, Path("unused.jpg"), part=None)
+    assert printer.scripts == [] and printer.z == 200.0
+    pending = bed_view._read_pending("u1")
+    assert pending is not None and pending["z"] == 70.0
+
+
+@pytest.mark.parametrize("printing_reads", [0, 1, 2, 3])
+def test_a_state_change_between_reads_never_sends_the_recovery_move_without_clearance(
+    tmp_path: Path, printing_reads: int
+) -> None:
+    """Unknown part height + a fresh marker at Z70, the printer reads `printing` for the first N reads, then
+    `complete`: whichever read the recovery works on, no G1 is sent (a `printing` first read leaves the bed to
+    the job, a `complete` one has no part height to judge the clearance by)."""
+    printer, camera = FakePrinter(z=200.0), FakeCamera()
+    bed_view._write_pending(
+        "u1",
+        bed_view.Motion("complete", "complete", 70.0, 70.0, "xyz", True, None),
+        time.time(),
+    )
+    reads = 0
+
+    def flaky_read(adapter: Any) -> bed_view.Motion:
+        nonlocal reads
+        reads += 1
+        adapter.raw = "printing" if reads <= printing_reads else "complete"
+        return bed_view.read_motion(adapter)
+
+    with pytest.raises(GateFailure):
+        bed_photo.capture_table_photo(
+            device(),
+            CFG,
+            adapter=printer,
+            camera=camera,
+            out=tmp_path / "t.jpg",
+            lift=100.0,
+            part_height_mm=None,
+            dry_run=False,
+            settle_s=0.0,
+            sleep=lambda s: None,
+            read=flaky_read,
+        )
+    assert moves(printer) == [] and camera.grabs == 0 and printer.z == 200.0
+    pending = bed_view._read_pending("u1")
+    assert pending is not None and pending["z"] == 70.0  # the marker is kept
+
+
+@pytest.mark.parametrize(
+    "refusal",
+    [
+        GateFailure("below the floor", command="photo"),
+        bed_view.MoveRefused("below the floor"),
+        ValueError("below the floor"),
+    ],
+    ids=["GateFailure", "MoveRefused", "ValueError"],
+)
+def test_recover_pending_refuses_through_the_clearance_veto_and_keeps_the_marker(
+    refusal: Exception,
+) -> None:
+    """Whatever the veto raises reaches the caller as itself (not as a note) and nothing is sent."""
+    printer = FakePrinter(z=200.0)
+    bed_view._write_pending(
+        "u1",
+        bed_view.Motion("complete", "complete", 70.0, 70.0, "xyz", True, None),
+        time.time(),
+    )
+    seen: list[tuple[str, float]] = []
+
+    def clearance(
+        first: bed_view.Motion, z: float
+    ) -> Callable[[bed_view.Motion], None]:
+        assert (first.state, z) == ("complete", 70.0)
+
+        def veto(m: bed_view.Motion) -> None:
+            seen.append((m.state, m.z or 0.0))
+            raise refusal
+
+        return veto
+
+    with pytest.raises(type(refusal), match="below the floor") as caught:
+        bed_view.recover_pending(printer, "u1", time.time(), clearance=clearance)
+    assert caught.value is refusal
+    assert seen == [("complete", 200.0)] and printer.scripts == []
+    assert bed_view._read_pending("u1") is not None
+
+
+class ScriptedReadsPrinter(FakePrinter):
+    """A printer whose state and last job (print_stats.filename, hence the part height) are scripted per read:
+    read N shows `script[N-1]` (state, job), every read after the script repeats its last entry."""
+
+    def __init__(
+        self, script: list[tuple[str, str]], heights: dict[str, float]
+    ) -> None:
+        super().__init__(z=200.0)
+        self.script = script
+        self.heights = heights
+        self.queries = 0
+        self.lookups = 0
+
+    def query(self, objects: str) -> dict[str, Any]:
+        self.raw, job = self.script[min(self.queries, len(self.script) - 1)]
+        self.queries += 1
+        state = super().query(objects)
+        state["print_stats"]["filename"] = job
+        return state
+
+    def file_metadata(self, filename: str) -> dict[str, Any]:
+        self.lookups += 1
+        return {"object_height": self.heights[filename]}
+
+
+HEIGHTS = {"short.gcode": 5.0, "tall.gcode": 100.0}
+
+
+def marker_at_70() -> None:
+    bed_view._write_pending(
+        "u1",
+        bed_view.Motion("complete", "complete", 70.0, 70.0, "xyz", True, None),
+        time.time(),
+    )
+
+
+def recover(printer: FakePrinter, part_height_mm: float | None = None) -> str | None:
+    return bed_view.recover_pending(
+        printer,
+        "u1",
+        time.time(),
+        clearance=bed_photo._recovery_clearance(device(), printer, CFG, part_height_mm),
+    )
+
+
+def test_a_job_change_between_the_recovery_reads_sends_nothing_and_keeps_the_marker() -> (
+    None
+):
+    """Marker at Z70. Read 1: complete, last job 5 mm tall (floor Z20: Z70 is fine). Read 2: printing, 100 mm.
+    Every read after: complete, 100 mm (floor Z115: Z70 would drive the bed into the part). The G1 would be sent
+    from the last read, which no clearance was looked up for: nothing is sent, the marker stays."""
+    printer = ScriptedReadsPrinter(
+        [
+            ("complete", "short.gcode"),
+            ("printing", "tall.gcode"),
+            ("complete", "tall.gcode"),
+        ],
+        HEIGHTS,
+    )
+    marker_at_70()
+    with pytest.raises(
+        GateFailure, match="last job changed from short.gcode to tall.gcode"
+    ):
+        recover(printer)
+    assert printer.scripts == [] and printer.z == 200.0
+    pending = bed_view._read_pending("u1")
+    assert pending is not None and pending["z"] == 70.0
+
+
+def test_a_recovery_whose_clearance_holds_is_sent_after_one_lookup() -> None:
+    printer = ScriptedReadsPrinter([("complete", "short.gcode")], HEIGHTS)
+    marker_at_70()
+    note = recover(printer)
+    assert note is not None and "put the bed back to Z 70.0" in note
+    assert moves(printer) == ["G1 Z70.000 F600"] and printer.z == 70.0
+    assert printer.lookups == 1 and bed_view._read_pending("u1") is None
+
+
+class PrintStartsDuringLookupPrinter(FakePrinter):
+    """Asking for the last job's metadata takes long enough for a print to start."""
+
+    def __init__(self) -> None:
+        super().__init__(z=200.0)
+        self.lookups = 0
+
+    def file_metadata(self, filename: str) -> dict[str, Any]:
+        self.lookups += 1
+        self.raw = "printing"
+        return {"object_height": 5.0}
+
+
+def test_a_print_starting_during_the_clearance_lookup_is_not_sent_the_recovery_move() -> (
+    None
+):
+    """The lookup is an HTTP request: made between the final read and the send it would let a print start
+    unseen. It is made before the reads, so the move's own read sees the print and refuses."""
+    printer = PrintStartsDuringLookupPrinter()
+    marker_at_70()
+    note = recover(printer)
+    assert note is not None and "printer is printing" in note
+    assert printer.scripts == [] and printer.lookups == 1
+    assert bed_view._read_pending("u1") is not None
+
+
+def test_a_clearance_that_refuses_the_first_read_sends_nothing() -> None:
+    printer = FakePrinter(z=200.0)
+    marker_at_70()
+    with pytest.raises(GateFailure, match="below the clearance floor Z 115"):
+        recover(printer, part_height_mm=100.0)
+    assert printer.scripts == [] and bed_view._read_pending("u1") is not None
+
+
+def test_a_job_change_does_not_stop_a_recovery_judged_by_a_declared_part_height() -> (
+    None
+):
+    """With --part-height the floor never came from the job's metadata, so another last job changes nothing."""
+    printer = ScriptedReadsPrinter(
+        [("complete", "short.gcode"), ("complete", "tall.gcode")], HEIGHTS
+    )
+    marker_at_70()
+    note = recover(printer, part_height_mm=20.0)
+    assert note is not None and "put the bed back to Z 70.0" in note
+    assert moves(printer) == ["G1 Z70.000 F600"] and printer.lookups == 0
+
+
+def test_a_veto_that_fails_unexpectedly_stops_the_move_as_a_veto() -> None:
+    printer = FakePrinter(z=200.0)
+
+    def broken(m: bed_view.Motion) -> None:
+        raise ValueError("bad limits")
+
+    with pytest.raises(bed_view.MoveVetoed, match="bad limits") as caught:
+        bed_view.guarded_z_move(printer, to_gcode_z=70.0, veto=broken)
+    assert isinstance(caught.value.cause, ValueError) and printer.scripts == []
+
+
+def test_guarded_z_move_hands_the_veto_the_read_it_sends_from() -> None:
+    printer = FakePrinter(z=200.0)
+    reads: list[bed_view.Motion] = []
+
+    def read(adapter: Any) -> bed_view.Motion:
+        reads.append(bed_view.read_motion(adapter))
+        return reads[-1]
+
+    vetoed: list[bed_view.Motion] = []
+
+    def refuse(m: bed_view.Motion) -> None:
+        vetoed.append(m)
+        raise bed_view.MoveRefused("vetoed")
+
+    with pytest.raises(bed_view.MoveRefused, match="vetoed"):
+        bed_view.guarded_z_move(printer, to_gcode_z=70.0, read=read, veto=refuse)
+    assert len(reads) == 1 and vetoed == reads and printer.scripts == []
+    bed_view.guarded_z_move(printer, to_gcode_z=70.0, veto=lambda m: None)
+    assert moves(printer) == ["G1 Z70.000 F600"]
+
+
+def test_guarded_z_move_asks_the_veto_only_when_every_guard_has_passed() -> None:
+    printing = FakePrinter("printing", z=200.0)
+    asked: list[bed_view.Motion] = []
+    with pytest.raises(bed_view.MoveRefused, match="printer is printing"):
+        bed_view.guarded_z_move(printing, to_gcode_z=70.0, veto=asked.append)
+    assert asked == [] and printing.scripts == []
+
+
+def test_the_floor_refusal_names_a_way_out_that_works_for_the_marker_it_refuses() -> (
+    None
+):
+    marker_z = 12.0  # between the post-G28 rest Z and the lowest clearance floor: no --part-height helps
+    bed_view._write_pending(
+        "u1",
+        bed_view.Motion("complete", "complete", marker_z, marker_z, "xyz", True, None),
+        time.time(),
+    )
+    with pytest.raises(GateFailure) as low:
+        recover(FakePrinter(z=200.0), part_height_mm=0.0)
+    assert any(
+        "no --part-height lowers" in r and "bed status" in r
+        for r in low.value.remediation
+    )
+    marker_at_70()
+    with pytest.raises(GateFailure) as high:
+        recover(FakePrinter(z=200.0), part_height_mm=100.0)
+    assert any("--part-height 0" in r for r in high.value.remediation)
+
+
+def test_a_job_change_does_not_stop_a_recovery_judged_by_the_configured_part_height() -> (
+    None
+):
+    printer = ScriptedReadsPrinter(
+        [("complete", "short.gcode"), ("complete", "tall.gcode")], HEIGHTS
+    )
+    marker_at_70()
+    cfg = BedConfig(enabled=True, auto_view_part_mm=20.0)
+    note = bed_view.recover_pending(
+        printer,
+        "u1",
+        time.time(),
+        clearance=bed_photo._recovery_clearance(device(), printer, cfg, None),
+    )
+    assert note is not None and "put the bed back to Z 70.0" in note
+    assert printer.lookups == 0

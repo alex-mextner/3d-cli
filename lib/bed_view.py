@@ -42,7 +42,13 @@ WRITES (the only ones): `G90`, `G1 Z<z> F<feed>`, `M400` as one script through t
 
 COORDINATES: references and the camera calibration are in toolhead Z (`toolhead.position`); G1 is in
   gcode Z. They differ by the gcode offset (Z offset of the last job: the U1 parks at 199.7 or
-  200.3). The move converts through `gcode_move.gcode_position`; the restore sends the Z found.
+  200.3). The move converts through `gcode_move.gcode_position`; `guarded_z_move` refuses a move whose
+  G-code Z would not land at the intended toolhead Z under the offset read right before the send.
+  The displaced-Z marker stores the PHYSICAL Z (`z`) the bed was found at, never a G-code Z to replay
+  (an older marker's `gcode_z` is ignored): recovery (`recover_pending`, also run before each capture)
+  reads the offset in force NOW, recomputes the G-code Z for that physical Z, and refuses WITHOUT moving,
+  keeping the marker, if the offset changes before the send. Markers from older versions carry the same
+  `z`, so they are recovered the same safe way.
 """
 from __future__ import annotations
 
@@ -55,7 +61,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable, Iterator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -77,6 +83,7 @@ from printer_ops.bed import (  # noqa: E402
 GRID_MM = 5.0         # the Z grid searched for a view beside the Zs of the references
 VIEW_TIE = 0.10       # views this close (share of the plate) to the best count as equally good
 MOVE_TIMEOUT_S = 60.0  # a 270 mm Z move at 10 mm/s takes 27 s
+LANDING_TOLERANCE_MM = 0.01  # a G-code Z may land this far from its planned toolhead Z (the Z offset moved)
 PENDING_MAX_AGE_S = 1800.0  # a displaced-Z marker older than this is not trusted (the bed may have moved since)
 ACTIVE_STATES = ("printing", "paused", "busy")  # printer_ops.base: the bed belongs to the job
 
@@ -117,6 +124,23 @@ def _r(x: float | None) -> float | None:
     return None if x is None else round(x, 3)
 
 
+def _candidates(view: Callable[[float], float | None], zs: list[float], referenced: Callable[[float], bool],
+                z_floor: float, z_ceiling: float) -> list[Candidate]:
+    cands = []
+    for z in zs:
+        v = view(z)
+        if v is not None and math.isfinite(v):
+            cands.append(Candidate(z, float(v), referenced(z), z_floor <= z <= z_ceiling))
+    return cands
+
+
+def _nearest_best(good: list[Candidate], current_z: float | None) -> Candidate:
+    """Among the views within VIEW_TIE of the best: the nearest to the current Z (least motion)."""
+    best = max(c.visible for c in good)
+    near = [c for c in good if c.visible >= best - VIEW_TIE]
+    return min(near, key=lambda c: (abs(c.z - current_z) if current_z is not None else c.z, -c.visible))
+
+
 def pick_inspection_z(view: Callable[[float], float | None], ref_zs: Sequence[float],
                       stands: Callable[[float | None, float | None], bool], current_z: float | None, *,
                       z_floor: float, z_ceiling: float, threshold: float) -> ViewPick:
@@ -131,20 +155,14 @@ def pick_inspection_z(view: Callable[[float], float | None], ref_zs: Sequence[fl
     top = max([z_ceiling, *refs, current_z or 0.0])
     grid = {round(i * GRID_MM, 1) for i in range(int(top // GRID_MM) + 1)}
     zs = sorted(grid | set(refs) | ({round(current_z, 1)} if current_z is not None else set()))
-    cands = []
-    for z in zs:
-        v = view(z)
-        if v is not None and math.isfinite(v):
-            cands.append(Candidate(z, float(v), referenced(z), z_floor <= z <= z_ceiling))
+    cands = _candidates(view, zs, referenced, z_floor, z_ceiling)
     cur = view(current_z) if current_z is not None else None
     if cur is not None and cur >= threshold and referenced(current_z or 0.0):
         return ViewPick("stay", current_z, cur, cur, f"{cur:.0%} of the plate is in the frame at Z {_fz(current_z)}",
                         tuple(cands))
     good = [c for c in cands if c.allowed and c.referenced and c.visible >= threshold]
     if good:
-        best = max(c.visible for c in good)
-        near = [c for c in good if c.visible >= best - VIEW_TIE]
-        pick = min(near, key=lambda c: (abs(c.z - current_z) if current_z is not None else c.z, -c.visible))
+        pick = _nearest_best(good, current_z)
         return ViewPick("move", pick.z, pick.visible, cur,
                         f"{pick.visible:.0%} of the plate is in the frame at Z {pick.z:.1f} "
                         f"(a reference stands there; {_fz(current_z)} shows {_pct(cur)})", tuple(cands))
@@ -170,21 +188,35 @@ def _why_none(cands: list[Candidate], current_z: float | None, cur: float | None
     if not shows:
         best = max(cands, key=lambda c: c.visible, default=None)
         return f"{have}; no Z shows that much" + (f" (best: Z {best.z:.0f} with {best.visible:.0%})" if best else "")
+    return f"{have}; {_why_not_usable(shows, floor, ceiling)}"
+
+
+def _why_not_usable(shows: list[Candidate], floor: float, ceiling: float) -> str:
+    """Why the Zs that show enough of the plate cannot be used: out of range, or no reference stands there."""
     inside = [c for c in shows if c.allowed]
     if not inside:
-        return (f"{have}; {_span([c.z for c in shows])} would show it but the bed may only move within "
+        return (f"{_span([c.z for c in shows])} would show it but the bed may only move within "
                 f"Z {floor:.0f}..{ceiling:.0f} (the floor keeps the bed clear of the tallest part that may stand on it)")
     if not any(c.referenced for c in inside):
-        return (f"{have}; {_span([c.z for c in inside])} would show it but no empty-bed reference stands there: "
+        return (f"{_span([c.z for c in inside])} would show it but no empty-bed reference stands there: "
                 "with the bed clear and the plate on, move it to such a Z and run "
                 "`3d printer bed reference NAME --capture` (or `--from FRAME.jpg --z Z`)")
-    return f"{have}; nothing qualifies"
+    return "nothing qualifies"
 
 
 # ---- the printer (read + guarded Z move) ----------------------------------------------------
 
 class MoveRefused(Exception):
     """A guard stopped a move; nothing was sent."""
+
+
+class MoveVetoed(MoveRefused):
+    """The caller's `veto` of `guarded_z_move` stopped a move by raising `cause`; nothing was sent. Unlike the
+    guards' own refusals the restore helpers re-raise it instead of reporting it as a note."""
+
+    def __init__(self, cause: Exception) -> None:
+        super().__init__(str(cause))
+        self.cause = cause
 
 
 @dataclass(frozen=True)
@@ -225,12 +257,39 @@ def read_motion(adapter: Any) -> Motion:
                   ready, name if isinstance(name, str) and name else None)
 
 
+def _unknown_coordinates(m: Motion) -> str:
+    """Which of the two Zs a move needs is missing (null, absent or non-finite in the printer's answer). The
+    offset between them is only known when both are: a missing G-code Z must never read as "offset 0"."""
+    missing = [n for n, v in (("toolhead Z", m.z), ("G-code Z (gcode_move.gcode_position)", m.gcode_z)) if v is None]
+    return " and ".join(missing) + " unknown"
+
+
+def _landing_refusal(m: Motion, to_gcode_z: float, floor: float | None, ceiling: float | None,
+                     target_toolhead_z: float | None) -> str | None:
+    """Why the move may not be sent, judged on the read right before it: outside [floor, ceiling], or the
+    G-code Z would not land at `target_toolhead_z` under the Z offset in force now."""
+    if target_toolhead_z is None:
+        return None
+    if (floor is not None and target_toolhead_z < floor) or (ceiling is not None and target_toolhead_z > ceiling):
+        return f"Z {target_toolhead_z:.1f} is outside {_fz(floor)}..{_fz(ceiling)}"
+    lands = to_gcode_z + m.offset
+    if abs(lands - target_toolhead_z) > LANDING_TOLERANCE_MM:
+        return (f"the Z offset changed ({m.offset:g} now): G-code Z {to_gcode_z:.3f} would land at "
+                f"Z {lands:.1f}, not {target_toolhead_z:.1f}")
+    return None
+
+
 def guarded_z_move(adapter: Any, *, to_gcode_z: float, floor: float | None = None, ceiling: float | None = None,
                    target_toolhead_z: float | None = None, feed: float = AUTO_VIEW_FEED,
-                   read: Callable[[Any], Motion] = read_motion) -> Motion:
+                   read: Callable[[Any], Motion] = read_motion,
+                   veto: Callable[[Motion], None] | None = None) -> Motion:
     """THE ONLY WRITE: `G90`, `G1 Z<to_gcode_z> F<feed>`, `M400` as one script, after a fresh read of the
     printer says: Klipper ready, state idle/complete/cancelled, Z homed. `floor`/`ceiling` bound
-    `target_toolhead_z`. Returns the Motion read before the move; MoveRefused when a guard stops it."""
+    `target_toolhead_z`, and the G-code Z must land AT it under the Z offset of that fresh read.
+    `veto(m)` is the caller's last word: it is called with THAT SAME read once every guard above has passed
+    and raises to stop the move (nothing is sent; what it raised surfaces as MoveVetoed, a MoveRefused). It
+    runs between the read and the send, so it does no I/O.
+    Returns the Motion read before the move; MoveRefused when a guard stops it."""
     m = read(adapter)
     if not m.ready:
         raise MoveRefused("cannot move: Klipper is not ready")
@@ -238,13 +297,18 @@ def guarded_z_move(adapter: Any, *, to_gcode_z: float, floor: float | None = Non
         raise MoveRefused(f"cannot move: printer is {m.state} [{m.raw_state}], the bed belongs to the job")
     if "z" not in m.homed.lower():
         raise MoveRefused(f"cannot move: not homed (homed axes: {m.homed or 'none'}); the bed check never homes")
-    if m.z is None:
-        raise MoveRefused("cannot move: toolhead Z unknown")
+    if m.z is None or m.gcode_z is None:
+        raise MoveRefused(f"cannot move: {_unknown_coordinates(m)}")
     if not math.isfinite(to_gcode_z) or not math.isfinite(feed) or feed <= 0:
         raise MoveRefused(f"cannot move: Z {to_gcode_z} F{feed} is not a finite move")
-    if target_toolhead_z is not None and ((floor is not None and target_toolhead_z < floor)
-                                          or (ceiling is not None and target_toolhead_z > ceiling)):
-        raise MoveRefused(f"cannot move: Z {target_toolhead_z:.1f} is outside {_fz(floor)}..{_fz(ceiling)}")
+    why = _landing_refusal(m, to_gcode_z, floor, ceiling, target_toolhead_z)
+    if why is not None:
+        raise MoveRefused(f"cannot move: {why}")
+    if veto is not None:
+        try:
+            veto(m)
+        except Exception as exc:
+            raise MoveVetoed(exc) from exc
     adapter.run_gcode(f"G90\nG1 Z{to_gcode_z:.3f} F{feed:g}\nM400", timeout=MOVE_TIMEOUT_S)
     return m
 
@@ -325,9 +389,10 @@ def view_in_progress(printer: str, now: float) -> bool:
 
 
 def _write_pending(printer: str, m: Motion, now: float) -> None:
+    """The marker holds the physical (toolhead) Z the bed was found at and the Z offset it was read under."""
     path = _view_path(printer, ".json")
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"printer": printer, "z": m.z, "gcode_z": m.gcode_z, "ts": now}), encoding="utf-8")
+    path.write_text(json.dumps({"printer": printer, "z": m.z, "offset": m.offset, "ts": now}), encoding="utf-8")
 
 
 def _clear_pending(printer: str) -> None:
@@ -360,8 +425,11 @@ def terminate_as_exit() -> Iterator[None]:
 
 
 def restore_z(adapter: Any, before: Motion, *, tol: float = 0.15,
-              read: Callable[[Any], Motion] = read_motion) -> str | None:
-    """Put the bed back where `before` found it. None = done (or never left); else why it is NOT back."""
+              read: Callable[[Any], Motion] = read_motion,
+              veto: Callable[[Motion], None] | None = None) -> str | None:
+    """Put the bed back where `before` found it. None = done (or never left); else why it is NOT back.
+    Refused (nothing sent) when the Z offset at the send is not the one `before.gcode_z` was read under, or
+    when `veto` (see `guarded_z_move`) refuses the read the move is sent from."""
     try:
         now = read(adapter)
         if now.z is not None and before.z is not None and abs(now.z - before.z) <= tol:
@@ -369,21 +437,50 @@ def restore_z(adapter: Any, before: Motion, *, tol: float = 0.15,
         target = before.gcode_z if before.gcode_z is not None else before.z
         if target is None:
             return "the Z it was found at is unknown"
-        guarded_z_move(adapter, to_gcode_z=target, read=read)
+        guarded_z_move(adapter, to_gcode_z=target, target_toolhead_z=before.z, read=read, veto=veto)
         after = read(adapter)
         if after.z is not None and before.z is not None and abs(after.z - before.z) > max(tol, 0.5):
             return f"the bed is at Z {after.z:.1f}, it was found at Z {before.z:.1f}"
         return None
+    except MoveVetoed:  # the caller's refusal is its own error, not a restore note
+        raise
     except MoveRefused as exc:
         return str(exc)
     except Exception as exc:  # never hide the bed verdict behind a failed restore: report it
         return f"restore failed: {exc.__class__.__name__}: {exc}"
 
 
+def restore_physical_z(adapter: Any, z: float, *, tol: float = 0.15,
+                       read: Callable[[Any], Motion] = read_motion,
+                       veto: Callable[[Motion], None] | None = None) -> str | None:
+    """Put the bed back to the PHYSICAL (toolhead) Z `z` in the coordinate frame in force NOW: the G-code Z
+    is recomputed from the offset read first, and `guarded_z_move` refuses (nothing sent) when the offset
+    differs again at its own read right before the send. `veto` is applied to that same read.
+    None = done; else why it is NOT back."""
+    try:
+        now = read(adapter)
+    except Exception as exc:  # an unreadable printer is reported, never hidden behind the verdict
+        return f"restore failed: {exc.__class__.__name__}: {exc}"
+    if now.z is None or now.gcode_z is None:  # no offset to convert the physical Z with: nothing is sent
+        return f"cannot move: {_unknown_coordinates(now)}"
+    return restore_z(adapter, replace(now, z=z, gcode_z=z - now.offset), tol=tol, read=read, veto=veto)
+
+
 def recover_pending(adapter: Any, printer: str, now: float,
-                    read: Callable[[Any], Motion] = read_motion) -> str | None:
+                    read: Callable[[Any], Motion] = read_motion,
+                    clearance: Callable[[Motion, float], Callable[[Motion], None]] | None = None) -> str | None:
     """A check that died between the move and the restore left a marker: undo it now (only a fresh
-    marker, only a quiet printer). -> a note for the verdict, or None."""
+    marker, only a quiet printer). -> a note for the verdict, or None.
+
+    The marker holds the PHYSICAL Z the bed was found at, never a G-code Z to replay: that one is only
+    valid under the Z offset of its time. Recovery goes through `restore_physical_z` (offset read now).
+
+    `clearance(m, z)` is the caller's check of the move, in two steps. It is called once with the first read
+    `m` and the marker's Z `z`, before any read the move is sent from: it may do I/O (a metadata lookup) and
+    raises to refuse. It returns the veto: `guarded_z_move` calls that with the very state read it sends the
+    move from (not an earlier one: the printer may change between reads), only when a move would be sent, and
+    it raises to refuse. It runs between that read and the send, so it does no I/O. A refusal of either step
+    sends nothing, keeps the marker and propagates as raised."""
     pending = _read_pending(printer)
     if pending is None:
         return None
@@ -400,7 +497,11 @@ def recover_pending(adapter: Any, printer: str, now: float,
         if m.z is not None and abs(m.z - z) <= 0.15:
             _clear_pending(printer)
             return None
-        why = restore_z(adapter, Motion("", "", z, _finite(pending.get("gcode_z")), "", True, None), read=read)
+        veto = None if clearance is None else clearance(m, z)
+        try:
+            why = restore_physical_z(adapter, z, read=read, veto=veto)
+        except MoveVetoed as exc:  # the caller's refusal is its own error, not a note: nothing was sent
+            raise exc.cause from None
         if why is None:
             _clear_pending(printer)
             return f"put the bed back to Z {z:.1f} (left there by an interrupted view check)"
@@ -414,6 +515,36 @@ def _annotate(v: dict[str, Any], view: dict[str, Any], note: str | None) -> dict
     if note:
         v["reason"] = f"{v.get('reason', '')}; view: {note}".lstrip("; ")
     return v
+
+
+def _join(*parts: str | None) -> str:
+    return "; ".join(x for x in parts if x)
+
+
+def _not_moved(judge: Callable[[float | None], dict[str, Any]], max_age: float | None, base: dict[str, Any],
+               note: str | None, why: str, text: str) -> dict[str, Any]:
+    """The old verdict of `judge`, annotated with why the bed was left where it is."""
+    return _annotate(judge(max_age), {**base, "action": "not moved", "why": why}, _join(note, text))
+
+
+def _no_move_reason(mode: str, cfg: BedConfig) -> str | None:
+    """Why this run may not move the bed at all (--no-move, or auto_view off without --best-view)."""
+    if mode == "never":
+        return "--no-move"
+    if mode == "auto" and not cfg.auto_view:
+        return "watch.bed.auto_view is off; --best-view moves it"
+    return None
+
+
+def _pick_move(view: Callable[[float], float | None], ref_zs: Sequence[float],
+               stands: Callable[[float | None, float | None], bool], m: Motion, limits: Limits, cfg: BedConfig,
+               base: dict[str, Any]) -> ViewPick:
+    """The Z to judge at, recorded in `base` together with the limits it was picked within."""
+    pick = pick_inspection_z(view, ref_zs, stands, m.z, z_floor=limits.z_floor, z_ceiling=limits.z_ceiling,
+                             threshold=cfg.auto_view_min)
+    base.update(pick=pick.to_json(), part_mm=limits.part_mm, part_source=limits.part_source,
+                z_floor=limits.z_floor, z_ceiling=limits.z_ceiling)
+    return pick
 
 
 def auto_view(device: Any, cfg: BedConfig, *, mode: str, adapter: Any, judge: Callable[[float | None], dict[str, Any]],
@@ -442,42 +573,52 @@ def auto_view(device: Any, cfg: BedConfig, *, mode: str, adapter: Any, judge: Ca
     if seen is None or seen >= cfg.auto_view_min:  # 2. already a good view (or no calibration to say)
         return _annotate(judge(max_age), {**base, "action": "none"}, note)
     shown = f"{seen:.0%} of the plate is in the frame at Z {_fz(m.z)}"
-    if mode == "never" or (mode == "auto" and not cfg.auto_view):
-        off = "--no-move" if mode == "never" else "watch.bed.auto_view is off; --best-view moves it"
-        return _annotate(judge(max_age), {**base, "action": "not moved", "why": off},
-                         "; ".join(x for x in (note, f"{shown}, bed not moved ({off})") if x))
-    why = _may_move(device, adapter, cfg, m, part_height_mm)
-    limits = why if isinstance(why, Limits) else None
-    if limits is None:  # 3.-5. the guards that stop a move
-        return _annotate(judge(max_age), {**base, "action": "not moved", "why": str(why)},
-                         "; ".join(x for x in (note, f"{shown}, bed not moved: {why}") if x))
-    pick = pick_inspection_z(view, ref_zs, stands, m.z, z_floor=limits.z_floor, z_ceiling=limits.z_ceiling,
-                             threshold=cfg.auto_view_min)
-    base.update(pick=pick.to_json(), part_mm=limits.part_mm, part_source=limits.part_source,
-                z_floor=limits.z_floor, z_ceiling=limits.z_ceiling)
+    off = _no_move_reason(mode, cfg)
+    if off is not None:
+        return _not_moved(judge, max_age, base, note, off, f"{shown}, bed not moved ({off})")
+    limits = _may_move(device, adapter, cfg, m, part_height_mm)
+    if not isinstance(limits, Limits):  # 3.-5. the guards that stop a move
+        return _not_moved(judge, max_age, base, note, str(limits), f"{shown}, bed not moved: {limits}")
+    pick = _pick_move(view, ref_zs, stands, m, limits, cfg, base)
     if pick.status != "move" or pick.z is None:
-        return _annotate(judge(max_age), {**base, "action": "not moved", "why": pick.reason},
-                         "; ".join(x for x in (note, f"bed not moved: {pick.reason}") if x))
+        return _not_moved(judge, max_age, base, note, pick.reason, f"bed not moved: {pick.reason}")
     with view_lock(device.name) as held:
         if not held:
             why = "another view check of this printer is running"
-            return _annotate(judge(max_age), {**base, "action": "not moved", "why": why},
-                             "; ".join(x for x in (note, f"{shown}, bed not moved: {why}") if x))
+            return _not_moved(judge, max_age, base, note, why, f"{shown}, bed not moved: {why}")
         return _moved_check(device, adapter, m, pick, limits, base, note, judge, settle_s, sleep, clock, read)
 
 
+def no_write_access(device: Any) -> str | None:
+    """Why the printer may not be sent anything (not a full-access device), or None."""
+    access = getattr(device, "access", "full")
+    return None if access == "full" else f"{device.name} is {access}: no writes"
+
+
 def _may_move(device: Any, adapter: Any, cfg: BedConfig, m: Motion, override: float | None) -> Limits | str:
-    if getattr(device, "access", "full") != "full":
-        return f"{device.name} is {device.access}: no writes"
+    why = no_write_access(device)
+    if why is not None:
+        return why
     if not m.ready:
         return "Klipper is not ready"
     if m.state not in QUIET_STATES:
         return f"cannot move: printer is {m.state} [{m.raw_state}]"
-    if m.z is None:
-        return "cannot move: toolhead Z unknown"
+    if m.z is None or m.gcode_z is None:
+        return f"cannot move: {_unknown_coordinates(m)}"
     if "z" not in m.homed.lower():
         return f"cannot move: not homed (homed axes: {m.homed or 'none'}); the bed check never homes"
     return move_limits(device, adapter, cfg, m, override)
+
+
+def _restore_and_clear(device: Any, adapter: Any, m: Motion, read: Callable[[Any], Motion]) -> str | None:
+    """Put the bed back where `m` found it; the marker goes only when it is back. -> why not, or None."""
+    restore_error = restore_z(adapter, m, read=read)
+    if restore_error is None:
+        _clear_pending(device.name)
+        _log(f"{device.name}: bed restored to Z {m.z:.1f}")
+    else:
+        _log(f"{device.name}: BED NOT RESTORED to Z {m.z:.1f}: {restore_error}")
+    return restore_error
 
 
 def _moved_check(device: Any, adapter: Any, m: Motion, pick: ViewPick, limits: Limits, base: dict[str, Any],
@@ -502,17 +643,10 @@ def _moved_check(device: Any, adapter: Any, m: Motion, pick: ViewPick, limits: L
         except MoveRefused as exc:  # a guard fired before anything moved: the old verdict, with the reason
             attempted = False
             _clear_pending(device.name)
-            verdict = judge(None)
-            return _annotate(verdict, {**base, "action": "not moved", "why": str(exc)},
-                             "; ".join(x for x in (note, f"bed not moved: {exc}") if x))
+            return _not_moved(judge, None, base, note, str(exc), f"bed not moved: {exc}")
         finally:
             if attempted:
-                restore_error = restore_z(adapter, m, read=read)
-                if restore_error is None:
-                    _clear_pending(device.name)
-                    _log(f"{device.name}: bed restored to Z {m.z:.1f}")
-                else:
-                    _log(f"{device.name}: BED NOT RESTORED to Z {m.z:.1f}: {restore_error}")
+                restore_error = _restore_and_clear(device, adapter, m, read)
                 if verdict is not None:
                     verdict["_restore_error"] = restore_error
     assert verdict is not None
@@ -522,9 +656,9 @@ def _moved_check(device: Any, adapter: Any, m: Motion, pick: ViewPick, limits: L
     text = (f"judged at Z {_fz(verdict.get('z'))} after moving the bed from Z {m.z:.1f} "
             f"({_pct(base.get('visible'))} -> {pick.visible:.0%} of the plate in the frame), "
             + ("bed put back" if restore_error is None else f"BED NOT PUT BACK: {restore_error}"))
-    return _annotate(verdict, {**base, **used}, "; ".join(x for x in (note, text) if x))
+    return _annotate(verdict, {**base, **used}, _join(note, text))
 
 
-__all__ = ["Candidate", "Limits", "MoveRefused", "Motion", "ViewPick", "auto_view", "guarded_z_move",
-           "move_limits", "part_height", "pick_inspection_z", "read_motion", "recover_pending", "restore_z",
+__all__ = ["Candidate", "Limits", "MoveRefused", "MoveVetoed", "Motion", "ViewPick", "auto_view", "guarded_z_move",
+           "move_limits", "no_write_access", "part_height", "pick_inspection_z", "read_motion", "recover_pending", "restore_z",
            "view_in_progress"]

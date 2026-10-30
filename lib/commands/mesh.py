@@ -19,7 +19,10 @@ ROADMAP §3: "mesh — watertight/manifold/self-intersect/volume report.
 
 from __future__ import annotations
 
-from cli.pyrun import exec_tool
+import subprocess
+from pathlib import Path
+
+from cli.pyrun import exec_tool, tool_argv
 from cli.registry import Command
 
 USAGE = """3d mesh <file.stl|.3mf|.scad> [-D k=v ...] [--repair [-o OUT]]
@@ -95,6 +98,51 @@ def _spec_mentions(argv: list[str], word: str) -> bool:
         return False
 
 
+def _offer_target(argv: list[str]) -> Path | None:
+    """The file a deform/fit-silhouette run writes when it sits in a project (or a downloaded model's
+    directory) and the publish offer is not switched off; else None (the plain exec path)."""
+    try:
+        from publishing import offer, offer_run
+
+        if offer.default_mode() == "off":
+            return None
+        from geometry.deform_args import output_option
+
+        out = output_option(argv[0], argv[1:])
+        target = Path(out) if out else Path(argv[1]).with_suffix(".deformed.stl")
+        return target if offer_run.project_of(target) is not None else None
+    except Exception:
+        return (
+            None  # an offer that cannot be decided must not change how the tool is run
+        )
+
+
+def _run_deform(argv: list[str]) -> int:
+    if len(argv) == 1 or argv[1] in ("-h", "--help"):
+        print(DEFORM_USAGE)
+        return 0 if len(argv) > 1 else 1
+    # Pillow only for reference masks (fit-silhouette) and the collage PNG.
+    needs_pillow = (
+        argv[0] == "fit-silhouette"
+        or "--collage" in argv
+        or _spec_mentions(argv, "fit_silhouette")
+    )
+    deps = "trimesh,manifold3d,numpy,scipy,rtree,pyyaml" + (
+        ",pillow" if needs_pillow else ""
+    )
+    offered = _offer_target(argv)
+    if offered is None:
+        return exec_tool(deps, "geometry/mesh_deform.py", argv)
+    # A modify step that lands in a project: run the tool as a child (not exec) so the publish offer can
+    # follow it. The child's exit code is returned unchanged; the offer never changes it.
+    done = subprocess.run(tool_argv(deps, "geometry/mesh_deform.py", argv), check=False)
+    if done.returncode == 0:
+        from publishing import offer_run
+
+        offer_run.after_modify(offered)
+    return done.returncode
+
+
 def run(argv: list[str]) -> int:
     if not argv:
         print(USAGE)
@@ -103,19 +151,7 @@ def run(argv: list[str]) -> int:
         print(USAGE)
         return 0
     if argv[0] in DEFORM_SUBCOMMANDS:
-        if len(argv) == 1 or argv[1] in ("-h", "--help"):
-            print(DEFORM_USAGE)
-            return 0 if len(argv) > 1 else 1
-        # Pillow only for reference masks (fit-silhouette) and the collage PNG.
-        needs_pillow = (
-            argv[0] == "fit-silhouette"
-            or "--collage" in argv
-            or _spec_mentions(argv, "fit_silhouette")
-        )
-        deps = "trimesh,manifold3d,numpy,scipy,rtree,pyyaml" + (
-            ",pillow" if needs_pillow else ""
-        )
-        return exec_tool(deps, "geometry/mesh_deform.py", argv)
+        return _run_deform(argv)
     return exec_tool("trimesh,manifold3d,numpy,scipy,rtree", "mesh_check.py", argv)
 
 
