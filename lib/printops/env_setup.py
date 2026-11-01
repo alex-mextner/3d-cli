@@ -46,7 +46,7 @@ from urllib.parse import urlsplit
 
 from cli import paths
 from errors import GateFailure, InvalidArgument, MissingDependency, ThreeDError, UsageError
-from printops import deploy
+from printops import deploy, env_stage, env_stage_install
 from printops.cli._common import parse
 from printops.client import (
     ApiClient,
@@ -121,6 +121,12 @@ Options:
                      change nothing; refused with --api and script, which would write a file
   --allow-discouraged  --no-input only: accept a "possible but not recommended" printer host
   --no-input, --yes, -y  never prompt, never install unless an explicit target is named
+  --stage-only       skip the install: only the backup + Home Assistant stage below, for a stack that already runs
+                     (needs --spoolman local|printer:NAME|ssh:USER@HOST naming where it runs)
+
+After the stack answers (or with --stage-only) the BACKUP + HOME ASSISTANT stage runs: it looks (read-only) for disks
+that could hold backups and for Home Assistant, asks before every write, and never auto-selects a disk.
+{env_stage.STAGE_USAGE}
 
 Examples:
   3d init --env                                             # interactive menu
@@ -200,6 +206,9 @@ class Options:
     dry_run: bool = False
     allow_discouraged: bool = False
     bind: str | None = None  # deploy.normalize_bind form; None = the target's default
+    stage: env_stage.StageOptions = field(default_factory=env_stage.StageOptions)
+    stage_only: bool = False
+    deployed: deploy.DeployConfig | None = None  # set by install(): what the backup/HA stage works on
 
 
 def _ask(prompt: str) -> str:
@@ -298,8 +307,8 @@ def parse_options(argv: Sequence[str]) -> Options:
         args,
         "--env",
         prefix="init",
-        values={"--spoolman", "--script-out", "--api", "--token", "--ssh-user", "--bind"},
-        flags={"--no-input", "--yes", "--dry-run", "--allow-discouraged"},
+        values={"--spoolman", "--script-out", "--api", "--token", "--ssh-user", "--bind", *env_stage.STAGE_VALUE_FLAGS},
+        flags={"--no-input", "--yes", "--dry-run", "--allow-discouraged", "--stage-only", *env_stage.STAGE_BOOL_FLAGS},
     )
     o = Options(
         spoolman=p.opts.get("--spoolman", "auto"),
@@ -311,6 +320,8 @@ def parse_options(argv: Sequence[str]) -> Options:
         dry_run="--dry-run" in p.flags,
         allow_discouraged="--allow-discouraged" in p.flags,
         bind=_bind_option(p.opts.get("--bind")),
+        stage=env_stage.parse_stage_options(p.opts, p.flags),
+        stage_only="--stage-only" in p.flags,
     )
     _check_combinations(o, parse_target(o.spoolman))
     problem = _api_url_problem(o.api) if o.api else None
@@ -554,7 +565,7 @@ def _token_name() -> str:
     return f"cli-{host[:room]}-{time.strftime('%Y%m%d%H%M%S')}"
 
 
-def mint_token(host: str, env: Env) -> str:
+def mint_token(host: str, env: Env, name: str | None = None) -> str:
     """`docker exec printops-api 3d printops token create …` here or over ssh; the plaintext is
     printed once by the service and kept only in the config file we write next."""
     remote = shlex.join(
@@ -566,7 +577,7 @@ def mint_token(host: str, env: Env) -> str:
             "printops",
             "token",
             "create",
-            _token_name(),
+            f"{name}-{time.strftime('%Y%m%d%H%M%S')}" if name else _token_name(),
             "--scopes",
             TOKEN_SCOPES,
         ]
@@ -651,7 +662,7 @@ def _deploy_config(host: str, pr: HostProbe, env: Env, opts: Options) -> deploy.
         http_host = _http_host(host, env)
         api_url = f"http://{f'[{http_host}]' if ':' in http_host else http_host}:{deploy.API_PORT}"
     return deploy.DeployConfig(repo_root=root, host=host, local=not host, remote_dir=base, backup_dir=f"{base}/backup",
-                               api_url=api_url, version=deploy.git_version(root), timer_required=False,
+                               api_url=api_url, version=deploy.git_version(root),
                                bind_addr=opts.bind or (None if host else deploy.LOOPBACK), pin_host_env=True)
 
 
@@ -670,6 +681,7 @@ def install(host: str, label: str, env: Env, opts: Options) -> tuple[str, str | 
     _warn_if_busy(pr, label, env, opts)
     root = _repo_root(env)
     cfg = _deploy_config(host, pr, env, opts)
+    opts.deployed = cfg
     steps = deploy.plan(cfg, dry_run=opts.dry_run)
     env.say(f"deploy printops {cfg.version} -> {host or 'this machine'}:{cfg.remote_dir}"
             + ("  [dry run]" if opts.dry_run else ""))
@@ -1006,13 +1018,46 @@ def _setup(target: Target, health: Health | None, cur_api: str | None, opts: Opt
     if target.kind == "ssh" and _interactive(env, opts):
         env.say(f"Installing over ssh on {label}: it will run docker compose there (project printops).")
     api, token = install(host, label, env, opts)
-    return 0 if opts.dry_run else _finish(api, token, check_health(api, token), env)
+    if opts.dry_run:
+        return 0
+    rc = _finish(api, token, check_health(api, token), env)
+    if rc != 0 or opts.deployed is None:
+        return rc
+    return max(rc, _backup_ha_stage(host, label, opts.deployed, env, opts))
+
+
+def _backup_ha_stage(host: str, label: str, cfg: deploy.DeployConfig, env: Env, opts: Options) -> int:
+    """Backups + Home Assistant (printops.env_stage): runs after the stack answered its health check."""
+    root = _repo_root(env)
+    return env_stage_install.stage_after_install(
+        host=host, label=label, cfg=cfg, container=CONTAINER, repo_root=root, opts=opts.stage,
+        ask=env.ask, say=env.say, interactive=_interactive(env, opts),
+        run_steps=lambda steps: deploy.run_steps(steps, cwd=root, dry_run=False, log=env.say,
+                                                 runner=env.deploy_runner),
+        mint=lambda name: mint_token(host, env, name), env=dict(os.environ))
+
+
+def _stage_only(target: Target, opts: Options, env: Env) -> int:
+    """`--stage-only`: backups + Home Assistant for a stack that already runs (no install, no deploy)."""
+    if target.kind not in INSTALL_KINDS:
+        raise UsageError("--stage-only needs --spoolman local|printer:NAME|ssh:USER@HOST (where Spoolman runs)",
+                         command=CLI_NAME)
+    host, label = resolve_host(target, candidates(), opts)
+    pr = probe(host, env)
+    base = str(paths.data_dir() / "printops") if not host else f"{pr.home}/printops"
+    root = _repo_root(env)
+    cfg = deploy.DeployConfig(repo_root=root, host=host, local=not host, remote_dir=base, backup_dir=f"{base}/backup",
+                              version=deploy.git_version(root))
+    opts.deployed = cfg
+    return _backup_ha_stage(host, label, cfg, env, opts)
 
 
 def run(argv: Sequence[str], env: Env | None = None) -> int:
     env = env or Env()
     opts = parse_options(argv)
     target = parse_target(opts.spoolman)
+    if opts.stage_only:
+        return _stage_only(target, opts, env)
     cur_api, cur_token = _current_config(env)
     if opts.api:
         return _connect(opts, cur_api, cur_token, env)

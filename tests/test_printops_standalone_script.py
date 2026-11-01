@@ -80,7 +80,6 @@ def _run_script(
             "FAKE_TOKENS": str(root / "tokens.txt"),
             "PRINTOPS_DIR": str(root / "base"),
             "PRINTOPS_HOST": "10.1.2.3",
-            "PRINTOPS_BACKUP_TIMER": "0",
             "WAIT_SECONDS": "30",
             "PRINTOPS_CONTAINER_PREFIX": "pogb",
             "PRINTOPS_SPOOLMAN_PORT": "17912",

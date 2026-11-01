@@ -7,6 +7,7 @@ from pathlib import Path
 
 from cli import paths
 from errors import InvalidArgument, MissingDependency, ThreeDError, UsageError
+
 from printops import deploy
 from printops.cli import Sub
 from printops.cli._common import Parsed, parse
@@ -15,12 +16,13 @@ from printops.client import ApiError
 USAGE = f"""3d printops deploy [--dry-run] [--host USER@HOST | --local] [--dir DIR] [--backup-dir DIR] [--api URL]
                        [--bind ADDR]
   Deploy services/3d-api (Spoolman v0.27.0 + 3d-api) as the separate compose project
-  `printops` on the Odroid, install the daily backup timer, then wait until /v1/health is "ok"
+  `printops` on the Odroid, then wait until /v1/health is "ok"
   (DB migrated, Spoolman reachable, all PrintOps extra fields registered). Never touches the
   Home Assistant compose project and never restarts HA.
 
   Steps: mkdir data dirs → rsync bin/3d lib fleet pyproject.toml services/3d-api to DIR/src →
-  `docker compose -p printops up -d --build` → enable printops-backup.timer → wait healthy.
+  `docker compose -p printops up -d --build` → wait healthy. No backup timer is installed: Home
+  Assistant schedules the backup (integrations/homeassistant/packages/printops_backup.yaml).
 
 Options:
   --dry-run          show what rsync would change and the remote commands; change nothing
@@ -28,9 +30,10 @@ Options:
                      never "this machine" (that is --local)
   --local            deploy on THIS machine instead (docker compose from this checkout; no ssh/rsync).
                      --dir defaults to <data dir>/printops (~/.local/share/3d-cli/printops) and
-                     --backup-dir to DIR/backup; a missing systemd --user only skips the backup timer
+                     --backup-dir to DIR/backup
   --dir DIR          base dir on the target (default {deploy.DEFAULT_DIR}; data in DIR/data)
-  --backup-dir DIR   snapshot dir inside HA's backed-up config dir (default {deploy.DEFAULT_BACKUP_DIR})
+  --backup-dir DIR   host dir bound as /backup in 3d-api: the BACKUP DISK (default {deploy.DEFAULT_BACKUP_DIR});
+                     register it afterwards: `3d printops backup target add` (see `3d printops backup --help`)
   --api URL          health URL to wait on (default http://<host>:{deploy.API_PORT}, 127.0.0.1 with --local)
   --bind ADDR        host address Spoolman (:{deploy.SPOOLMAN_PORT}) and 3d-api (:{deploy.API_PORT}) listen on: an IP address.
                      Default {deploy.ALL_INTERFACES} (all interfaces; the Odroid is behind NAT), {deploy.LOOPBACK} with --local.
@@ -86,8 +89,7 @@ def _local_config(p: Parsed, root: Path) -> deploy.DeployConfig:
     base = _absolute(p.opts.get("--dir") or str(paths.data_dir() / "printops"))
     return deploy.DeployConfig(repo_root=root, host="", local=True, remote_dir=base,
                                backup_dir=_absolute(p.opts.get("--backup-dir") or f"{base}/backup"),
-                               api_url=p.opts.get("--api"), version=deploy.git_version(root), timer_required=False,
-                               bind_addr=_bind(p, deploy.LOOPBACK), pin_host_env=True)
+                               api_url=p.opts.get("--api"), version=deploy.git_version(root), bind_addr=_bind(p, deploy.LOOPBACK), pin_host_env=True)
 
 
 def _config(p: Parsed, root: Path) -> deploy.DeployConfig:

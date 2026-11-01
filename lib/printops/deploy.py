@@ -13,13 +13,16 @@ WHAT IT DOES (each step is a plain ssh/rsync argv, printed before it runs):
   3. ssh: `docker compose -p printops -f services/3d-api/compose.yaml up -d --build` with
      PRINTOPS_VERSION=<git sha>. Separate compose project — the HA compose project is never
      touched, and nothing here restarts Home Assistant.
-  4. ssh: install + enable the `printops-backup.timer` systemd --user unit.
-  5. poll http://<host>:8765/v1/health until status "ok" (DB migrated, Spoolman reachable,
+  4. poll http://<host>:8765/v1/health until status "ok" (DB migrated, Spoolman reachable,
      every extra field registered by 3d-api's startup task).
 
+NO BACKUP TIMER: the daily backup is scheduled by Home Assistant (04:00, integrations/homeassistant/packages/
+printops_backup.yaml -> POST /v1/backup/run); the backup disk is `backup_dir`, registered with
+`3d printops backup target add`.
+
 TARGETS: `DeployConfig.host` is `USER@HOST` (ssh + rsync) or "" for THIS machine: the same steps run
-through `bash -c`, the build context is the checkout itself (no rsync, no `<dir>/src` copy) and the
-timer units come from it. One path for every target — never a second deploy implementation.
+through `bash -c`, the build context is the checkout itself (no rsync, no `<dir>/src` copy).
+One path for every target — never a second deploy implementation.
 
 `--dry-run` runs step 2 as `rsync --dry-run --itemize-changes` (shows what would change, writes
 nothing) and only prints the other steps.
@@ -46,7 +49,6 @@ SPOOLMAN_PORT = 7912
 COMPOSE_FILE = "services/3d-api/compose.yaml"
 PROJECT = "printops"
 SYNC_PATHS = ("bin/3d", "lib", "fleet", "pyproject.toml", "services/3d-api")
-TIMER_UNITS = ("printops-backup.service", "printops-backup.timer")
 CONTAINER_PREFIX = "printops"  # compose's default PRINTOPS_CONTAINER_PREFIX, and the unit's container
 API_CONTAINER = f"{CONTAINER_PREFIX}-api"
 # the host's own time zone, as the standalone script finds it; PRINTOPS_TZ="${tz:-UTC}" follows
@@ -83,7 +85,6 @@ class DeployConfig:
     backup_dir: str = DEFAULT_BACKUP_DIR
     api_url: str | None = None
     version: str = "dev"
-    timer_required: bool = True  # False: a host without `systemctl --user` still gets the stack
     api_port: int = API_PORT
     spoolman_port: int = SPOOLMAN_PORT
     bind_addr: str | None = None  # normalize_bind form; None leaves compose's default (ALL_INTERFACES)
@@ -175,32 +176,6 @@ def _compose_script(cfg: DeployConfig, src: str) -> str:
     )
 
 
-def _timer_script(cfg: DeployConfig, src: str) -> str:
-    q = shlex.quote
-    unit_dir = f"{src}/services/3d-api/systemd"
-    units = " ".join(q(f"{unit_dir}/{u}") for u in TIMER_UNITS)
-    copy = f"cp {units} ~/.config/systemd/user/"
-    if cfg.pin_host_env:
-        # The shipped unit says /usr/bin/docker (the Odroid's); another host's docker lives wherever
-        # `command -v` finds it (snap, /usr/local/bin), else the timer fails every night unseen.
-        service = q(f"{unit_dir}/{TIMER_UNITS[0]}")
-        copy = (f"cp {q(f'{unit_dir}/{TIMER_UNITS[1]}')} ~/.config/systemd/user/"
-                f" && docker_bin=\"$(command -v docker)\" && sed \"s|^ExecStart=/usr/bin/docker |ExecStart=$docker_bin |\""
-                f" {service} > ~/.config/systemd/user/{TIMER_UNITS[0]}")
-    timer = (
-        f"mkdir -p ~/.config/systemd/user && {copy}"
-        " && systemctl --user daemon-reload && systemctl --user enable --now printops-backup.timer"
-    )
-    if cfg.timer_required:
-        return timer
-    # A systemd --user manager stops with the user's last session unless lingering is on: a
-    # headless host would report "installed" and never run the backup. Say so, with the command.
-    linger = ('{ [ "$(loginctl show-user "$(id -un)" -p Linger 2>/dev/null)" = Linger=yes ]'
-              ' || echo "note: lingering is off, so the backup timer only runs while you are logged in:'
-              ' sudo loginctl enable-linger $(id -un)"; }')
-    return f"( {timer} && {linger} ) || echo 'note: no systemd --user here; the daily backup timer was not installed'"
-
-
 def _rsync_host(host: str) -> str:
     """`USER@HOST` as rsync wants it before the `:path`: an IPv6 literal in brackets (rsync splits
     `me@2001:db8::7:/dir` at the first colon and syncs to the host `2001`). ssh takes it bare."""
@@ -224,7 +199,6 @@ def plan(cfg: DeployConfig, *, dry_run: bool = False) -> list[Step]:
         steps.append(_sync_step(cfg, dry_run))
     steps += [
         _script_step(cfg, "build + start spoolman and 3d-api (compose project printops)", _compose_script(cfg, src)),
-        _script_step(cfg, "install daily backup timer", _timer_script(cfg, src)),
     ]
     return steps
 

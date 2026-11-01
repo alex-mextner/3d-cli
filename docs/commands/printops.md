@@ -34,7 +34,7 @@ service is never exposed to the internet.
 3d printops token list [--file PATH | --ssh HOST]
 3d printops token revoke NAME [--file PATH | --ssh HOST]
 3d printops deploy [--dry-run] [--host USER@HOST | --local] [--dir DIR] [--backup-dir DIR] [--api URL] [--bind ADDR]
-3d printops backup [--dest DIR] [--spoolman-db PATH]
+3d printops backup run|ls|verify|prune|restore|selftest|target|discover …
 3d printops loc tree|add|show|set|mv|archive|unarchive|label|resolve|sync-fleet|resync …
 3d printops spool ls|show|receive|move|load|unload|use|measure|empty|import-owned …
 3d printops tare ls|add|show …
@@ -56,8 +56,8 @@ service is never exposed to the internet.
 | `health` | 3d-api status: DB migrations, Spoolman reachability and version, PrintOps extra fields registered. No token needed. Exit 0 = ok, 1 = degraded/unreachable. |
 | `events` | The PrintOps event log (`slot.mismatch`, `spool.measured`, `drying.due`, …), oldest first; `--follow` streams new ones (SSE). |
 | `token` | Mint, list and revoke 3d-api bearer tokens. Only sha256 is stored; `create` prints the token once. |
-| `deploy` | Ship Spoolman + 3d-api to the Odroid (or `--host` any ssh host, or `--local`) as the compose project `printops`, install the backup timer, wait until healthy. [`3d init --env`](init.md#environment-stage-3d-init---env) is the guided front end (target menu, token, config). |
-| `backup` | Consistent snapshots of the PrintOps DB, tokens file and Spoolman DB (runs daily on the Odroid). |
+| `deploy` | Ship Spoolman + 3d-api to the Odroid (or `--host` any ssh host, or `--local`) as the compose project `printops`, wait until healthy. [`3d init --env`](init.md#environment-stage-3d-init---env) is the guided front end (target menu, token, config, backup disk, Home Assistant). |
+| `backup` | Rotated, verified backups of Spoolman + PrintOps DBs to a marker-checked disk; scheduled by Home Assistant at 04:00 (`run|ls|verify|prune|restore|selftest|target|discover`). |
 | `loc` | The location tree: warehouse cells, dry boxes, dryers and the printer slots from `fleet/printers.yaml`; moves re-sync Spoolman's `location`; printable QR label sheets. |
 | `spool` | Spool lifecycle — receive → store/move → load into a printer slot → unload → empty — with remaining as an interval (ledger), weighing and the idempotent `gen/plates.json` import. See [printops-spool.md](printops-spool.md). |
 | `tare` | The sourced empty-spool weight DB (SpoolmanDB seed + own weighings) and the tare chain of a spool. See [printops-spool.md](printops-spool.md#3d-printops-tare). |
@@ -118,8 +118,8 @@ Odroid is `/home/ultra/printops/data/api/tokens.json` (`/data/tokens.json` in th
 
 Steps, each printed before it runs: create `DIR/data/{api,spoolman}` and the backup dir →
 rsync `bin/3d lib fleet pyproject.toml services/3d-api` to `DIR/src` →
-`docker compose -p printops -f services/3d-api/compose.yaml up -d --build` → enable
-`printops-backup.timer` (systemd `--user`) → poll `/v1/health` until `ok` (up to 5 minutes).
+`docker compose -p printops -f services/3d-api/compose.yaml up -d --build` → poll `/v1/health` until `ok` (up to 5 minutes).
+No backup timer is installed: Home Assistant schedules the backup (see `backup`).
 It never touches the Home Assistant compose project and never restarts HA.
 
 - `--dry-run` — run rsync with `--dry-run --itemize-changes` (shows what would change) and only print the rest.
@@ -129,12 +129,13 @@ It never touches the Home Assistant compose project and never restarts HA.
   `3d printops deploy --host ultra@odroidn2 --api http://100.116.57.66:8765`
 - `--local` — deploy on THIS machine instead: the same steps through `bash -c`, built from this
   checkout (no rsync, no `DIR/src` copy). `--dir` defaults to `~/.local/share/3d-cli/printops`,
-  `--backup-dir` to `DIR/backup`; a machine without `systemd --user` only skips the backup timer.
+  `--backup-dir` to `DIR/backup`.
   Exclusive with `--host`. `3d printops deploy --local --dry-run`
 - `--dir DIR` — base dir on the target (default `/home/ultra/printops`).
   `3d printops deploy --dir /home/ultra/printops`
-- `--backup-dir DIR` — snapshot dir inside HA's backed-up config dir (default `/home/ultra/homeassistant/printops-backup`).
-  `3d printops deploy --backup-dir /home/ultra/homeassistant/printops-backup`
+- `--backup-dir DIR` — host dir bound as `/backup` in 3d-api: the BACKUP DISK (default `/home/ultra/homeassistant/printops-backup`);
+  register it with `3d printops backup target add default /backup --init-marker` (inside the container).
+  `3d printops deploy --backup-dir /mnt/backup512`
 - `--api URL` — health URL to wait on (default `http://<host>:8765`).
 - `--bind ADDR` — the host address Spoolman (`:7912`) and 3d-api (`:8765`) listen on, an IP address.
   Default: all interfaces (`0.0.0.0`; the Odroid is behind NAT), `127.0.0.1` with `--local`.
@@ -145,18 +146,39 @@ It never touches the Home Assistant compose project and never restarts HA.
 
 ### `backup`
 
-Writes `DIR/printops.db`, `DIR/tokens.json` (if present) and `DIR/spoolman.db` (if
-`--spoolman-db`/`$SPOOLMAN_DB` is set), each via the SQLite online-backup API, checked with
-`PRAGMA integrity_check`, then atomically renamed. Exit 1 if any item failed. On the Odroid
-`printops-backup.timer` runs it daily at 04:15 into `/home/ultra/homeassistant/printops-backup/`,
-which Home Assistant's automatic daily backup (it ran 04:50–05:11 on the last three days; 3 copies kept) then includes.
+Rotated, verified backups of Spoolman's DB, the PrintOps DB and the tokens file. **Home Assistant is the only scheduler**
+(04:00 daily, `integrations/homeassistant/packages/printops_backup.yaml` → `POST /v1/backup/run` on 3d-api); there is no
+cron job or systemd timer. A set is `3d-backup-<UTC>/` under `<disk>/<subdir>/`: gzip'd SQLite snapshots (online backup API in
+small steps, `nice 19` + `ionice` idle, gzip level 1), `MANIFEST.json` (row counts, sha256) and `SHA256SUMS`; it is
+verified (every DB decompressed again + `PRAGMA integrity_check`) in a temp dir and published with one rename.
 
-- `--dest DIR` — backup directory (default `$PRINTOPS_BACKUP_DIR`).
-  `3d printops backup --dest ~/printops-backup`
-- `--spoolman-db PATH` — Spoolman's `spoolman.db` (default `$SPOOLMAN_DB`).
-  `3d printops backup --dest /backup --spoolman-db /spoolman-data/spoolman.db`
+```
+3d printops backup run [--target NAME | --dest DIR] [--subdir D] [--keep daily=7,weekly=4,monthly=6] [--min-free-gb N] [--no-spoolman] [--json]
+3d printops backup ls | verify [SET|latest] | prune [--dry-run] | restore [SET|latest] --into DIR [--layout flat|data --yes] | selftest
+3d printops backup target add NAME PATH [--init-marker] | target ls
+3d printops backup discover [--ssh USER@HOST] [--data-dir DIR] [--hint-gb 512] [--json]
+```
 
-Run it by hand on the Odroid: `ssh ultra@192.168.0.39 docker exec printops-api 3d printops backup`.
+- **Disk guard.** A run refuses (exit 1, nothing written, notification) unless `<disk>/.3d-backup-disk` exists and carries the id
+  recorded in `backup.yaml` (next to the PrintOps DB; `/data/backup.yaml` in the container). An unmounted disk never fills the
+  root filesystem. `target add … --init-marker` writes that one marker file; discovery never writes. Free space ≥ run size + `--min-free-gb`.
+- **Rotation.** Newest set of each of the last N days / ISO weeks / months (default 7 + 4 + 6); retention comes with every
+  run from the HA package (the single place to edit it); a hand-run `prune` without `--keep` re-uses the policy of the last
+  run on that disk. Prune touches only directories named `3d-backup-YYYYMMDDTHHMMSSZ` that hold a `MANIFEST.json`, and always
+  keeps the newest one; other files/dirs on the disk are never touched.
+- **Failure** (disk missing/wrong, full, bad integrity, 3d-api down): exit 1 + the notification payload on stderr; with
+  `PRINTOPS_HA_URL` + `<data>/api/ha_token` 3d-api posts the HA persistent notification `printops_backup_failed`; the HA package
+  raises the same id itself (also when 3d-api is unreachable) and warns after 36 h without a good run; a PrintOps anomaly
+  `backup_failed` (scope `backup`) is opened (`3d printops anomalies`) and resolved by the next good run.
+- **Restore.** `3d printops backup restore latest --into ~/restore` unpacks verified files (`spoolman.db`, `printops.db`, `tokens.json`);
+  `--layout data --into <PRINTOPS_DATA_DIR> --yes` writes the compose layout (stop the stack first; old files become `*.pre-restore`).
+  `selftest` = one real run + restore into a scratch dir + integrity/row-count comparison (what `3d init --env` runs).
+- **Discovery** (`discover`, and `3d init --env`) reads `lsblk`/`df` on the Spoolman host (this machine or ssh): mounted disks, USB/removable,
+  network mounts (nfs/cifs), existing backup dirs and markers, unmounted filesystems (listed, never mounted), HA's own backup locations;
+  shows size/free; flags a disk near the `--hint-gb` size (default 512) as LIKELY and the disk holding the Spoolman data as not-a-backup.
+  Nothing is auto-selected, mounted, formatted or written.
+
+Inside the container: `docker exec printops-api 3d printops backup run --target default --json`.
 
 ### `loc`
 

@@ -77,6 +77,27 @@ def cfg_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return tmp_path
 
 
+@pytest.fixture(autouse=True)
+def stage_calls(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    """The backup + Home Assistant stage (printops.env_stage) has its own tests (test_printops_ha_stage.py) and
+    probes the network (mDNS, homeassistant.local), so these install-flow tests replace it with a recorder."""
+    calls: list[dict[str, Any]] = []
+
+    def fake(**kwargs: Any) -> int:
+        calls.append(kwargs)
+        return 0
+
+    monkeypatch.setattr(env_setup.env_stage_install, "stage_after_install", fake)
+    return calls
+
+
+def test_stage_flags_reach_the_backup_stage_options() -> None:
+    o = env_setup.parse_options(["--spoolman", "local", "--backup", "path:/mnt/b", "--ha", "skip", "--keep", "daily=3"])
+    assert o.stage.backup == "path:/mnt/b" and o.stage.ha == "skip" and o.stage.keep == "daily=3"
+    with pytest.raises(InvalidArgument):
+        env_setup.parse_options(["--backup", "bogus"])
+
+
 @pytest.fixture
 def service() -> Iterator[FakeService]:
     svc = FakeService()
@@ -1020,14 +1041,13 @@ def test_odroid_deploy_plan_keeps_its_shape_and_defaults(tmp_path: Path) -> None
         "ssh",
         "rsync",
         "ssh",
-        "ssh",
     ] and cfg.health_url == "http://192.168.0.39:8765"
+    assert not any("systemctl" in s.argv[-1] or "timer" in s.title for s in steps)  # HA schedules the backup
     compose = steps[2].argv[-1]
     assert "PRINTOPS_API_PORT=8765" in compose and "PRINTOPS_SPOOLMAN_PORT=7912" in compose
     assert (
         "PRINTOPS_GCODE_HOST_DIR=/home/ultra/printops/gcodes" in compose
     )  # = the compose default
-    assert "|| echo" not in steps[3].argv[-1]  # the timer stays mandatory there
 
 
 def test_local_deploy_plan_and_nondefault_ports(tmp_path: Path) -> None:
@@ -1037,17 +1057,15 @@ def test_local_deploy_plan_and_nondefault_ports(tmp_path: Path) -> None:
         local=True,
         remote_dir=str(tmp_path / "p"),
         backup_dir=str(tmp_path / "p" / "backup"),
-        timer_required=False,
         api_port=18765,
         spoolman_port=17912,
     )
     steps = deploy.plan(cfg)
-    assert [s.argv[:2] for s in steps] == [["bash", "-c"]] * 3
+    assert [s.argv[:2] for s in steps] == [["bash", "-c"]] * 2
     assert (
         "PRINTOPS_API_PORT=18765" in steps[1].argv[-1]
         and "PRINTOPS_SPOOLMAN_PORT=17912" in steps[1].argv[-1]
     )
-    assert "|| echo 'note: no systemd --user" in steps[2].argv[-1]
     assert cfg.health_url == "http://127.0.0.1:18765"
 
 
