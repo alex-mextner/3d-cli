@@ -1,12 +1,8 @@
-"""backup.py — consistent snapshots of the PrintOps and Spoolman SQLite DBs (+ the tokens file).
+"""backup.py — the two low-level copy primitives of the backups: a consistent SQLite snapshot and an
+atomic file copy.
 
-ACCESSED VIA: `3d printops backup`, run daily inside the 3d-api container by the
-`printops-backup.timer` user unit on the Odroid (services/3d-api/systemd/).
-
-WHERE IT FITS: the Odroid's existing backup contour is Home Assistant's automatic daily backup
-(`backup.local`, 3 copies) of its config dir /home/ultra/homeassistant. The snapshots are written
-to /home/ultra/homeassistant/printops-backup/, so HA's next backup tar carries them; no parallel
-backup system. The timer runs before HA's ~04:45–05:15 window.
+ACCESSED VIA: `printops.backup_store` (which builds the backup sets `3d printops backup run` writes;
+the schedule is Home Assistant's, integrations/homeassistant/packages/printops_backup.yaml).
 
 INVARIANTS:
   - SQLite online-backup API (the same mechanism as `sqlite3 .backup`): consistent while the
@@ -42,8 +38,11 @@ def _refuse_overwriting_source(src: Path, dest: Path) -> None:
         raise BackupError(f"backup destination {dest} is the source itself; choose another --dest")
 
 
-def snapshot_db(src: Path, dest: Path) -> Snapshot:
-    """Copy SQLite DB `src` to `dest` consistently (online backup + integrity check + rename)."""
+def snapshot_db(src: Path, dest: Path, *, pages: int = -1, pause: float = 0.0) -> Snapshot:
+    """Copy SQLite DB `src` to `dest` consistently (online backup + integrity check + rename).
+
+    `pages`/`pause`: copy that many pages per step and sleep between steps, so a weak host (the
+    Odroid) keeps serving while the copy runs; the default copies everything in one step."""
     if not src.is_file():
         raise BackupError(f"database {src} does not exist")
     _refuse_overwriting_source(src, dest)
@@ -56,7 +55,7 @@ def snapshot_db(src: Path, dest: Path) -> Snapshot:
         try:
             target = sqlite3.connect(str(tmp))
             try:
-                source.backup(target)
+                source.backup(target, pages=pages, sleep=pause)
                 verdict = target.execute("PRAGMA integrity_check").fetchone()[0]
                 # A snapshot must be self-contained: no -wal sidecar next to it.
                 target.execute("PRAGMA journal_mode = DELETE")

@@ -118,23 +118,26 @@ def test_printops_token_create_then_use_then_revoke(tmp_path: Path, live_api: Li
     assert bad_scope.returncode == 2 and "accepted: read, write, printer-control, camera" in bad_scope.stderr
 
 
-def test_printops_backup_writes_consistent_snapshots(tmp_path: Path, live_api: LiveApi) -> None:
-    """The nightly backup snapshots the live PrintOps DB and the tokens file into the backup dir
-    that Home Assistant's own backup picks up."""
-    _emit(live_api, "spool.moved", "spool:1", {"to": "WH:A/S1"})
-    dest = tmp_path / "printops-backup"
-    env = {"PRINTOPS_DB": str(live_api.settings.db_path), "PRINTOPS_TOKENS_FILE": str(live_api.settings.tokens_file)}
-    result = run_cli(tmp_path, "printops", "backup", "--dest", str(dest), env_extra=env)
-    missing = run_cli(tmp_path, "printops", "backup", "--dest", str(dest), "--spoolman-db",
-                      str(tmp_path / "nope.db"), env_extra=env)
+def test_printops_backup_snapshots_the_live_db_into_a_verified_set(tmp_path: Path, live_api: LiveApi) -> None:
+    """A backup of the LIVE PrintOps DB (the API keeps running) restores to the same events."""
+    from printops import backup_store
 
-    assert result.returncode == 0, result.stderr
-    assert "printops.db" in result.stdout and "tokens.json" in result.stdout
-    snap = sqlite3.connect(dest / "printops.db")
+    _emit(live_api, "spool.moved", "spool:1", {"to": "WH:A/S1"})
+    disk = tmp_path / "disk"
+    disk.mkdir()
+    backup_store.write_marker(disk)
+    env = {"PRINTOPS_DB": str(live_api.settings.db_path), "PRINTOPS_TOKENS_FILE": str(live_api.settings.tokens_file),
+           "PRINTOPS_HA_URL": ""}
+    ran = run_cli(tmp_path, "printops", "backup", "run", "--dest", str(disk), "--no-spoolman", env_extra=env)
+    assert ran.returncode == 0, ran.stderr
+    assert "printops:" in ran.stdout and "tokens:" in ran.stdout
+    restored = run_cli(tmp_path, "printops", "backup", "restore", "latest", "--dest", str(disk), "--into", str(tmp_path / "r"),
+                       env_extra=env)
+    assert restored.returncode == 0, restored.stderr
+    snap = sqlite3.connect(tmp_path / "r" / "printops.db")
     assert snap.execute("SELECT subject FROM events").fetchall() == [("spool:1",)]
     snap.close()
-    assert json.loads((dest / "tokens.json").read_text(encoding="utf-8"))["tokens"]
-    assert missing.returncode == 1 and "FAIL  spoolman" in missing.stdout
+    assert json.loads((tmp_path / "r" / "tokens.json").read_text(encoding="utf-8"))["tokens"]
 
 
 def test_printops_help_lists_every_sub(tmp_path: Path) -> None:
@@ -146,11 +149,12 @@ def test_printops_help_lists_every_sub(tmp_path: Path) -> None:
     assert "unknown printops subcommand" in run_cli(tmp_path, "printops", "nope").stderr
 
 
-def test_printops_backup_refuses_to_overwrite_a_live_db(tmp_path: Path, live_api: LiveApi) -> None:
-    """Pointing the backup at the live data dir must not swap the running DB for a snapshot."""
+def test_printops_backup_refuses_the_live_data_dir_as_a_disk(tmp_path: Path, live_api: LiveApi) -> None:
+    """Pointing the backup at the live data dir (no disk marker there) is refused and the running DB is untouched."""
     data_dir = live_api.settings.db_path.parent
-    env = {"PRINTOPS_DB": str(live_api.settings.db_path), "PRINTOPS_TOKENS_FILE": str(live_api.settings.tokens_file)}
+    env = {"PRINTOPS_DB": str(live_api.settings.db_path), "PRINTOPS_TOKENS_FILE": str(live_api.settings.tokens_file),
+           "PRINTOPS_HA_URL": ""}
     before = live_api.settings.db_path.stat().st_ino
-    clash = run_cli(tmp_path, "printops", "backup", "--dest", str(data_dir), env_extra=env)
-    assert clash.returncode == 2 and "would overwrite a live source" in clash.stderr
-    assert live_api.settings.db_path.stat().st_ino == before
+    clash = run_cli(tmp_path, "printops", "backup", "run", "--dest", str(data_dir), "--no-spoolman", env_extra=env)
+    assert clash.returncode == 1 and "is not the backup disk" in clash.stderr
+    assert live_api.settings.db_path.stat().st_ino == before and not list(data_dir.glob("3d-printops"))
