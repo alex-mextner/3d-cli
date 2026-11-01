@@ -26,6 +26,17 @@ PRINTOPS_API=http://192.168.0.39:8765 3d printops health
 registers every PrintOps extra field in Spoolman (`printops.spoolman.EXTRA_FIELDS`), retrying
 until Spoolman answers and re-checking every 10 minutes.
 
+### Any other host, this computer, or by hand
+
+`3d printops deploy --local` (this computer) and `--host USER@HOST` run the same plan elsewhere;
+`3d init --env` wraps them in a guided flow (target menu, token, `~/.config/3d-cli/printops.yaml`)
+— see [docs/commands/init.md](../../docs/commands/init.md#environment-stage-3d-init---env).
+`3d init --env --spoolman script` writes one idempotent bash file for a server that has docker
+compose and nothing from 3d-cli (template: `lib/printops/standalone_template.py`, filled in with this
+build context by `lib/printops/standalone_script.py`). `compose.yaml` takes its host-specific values from `PRINTOPS_UID/GID`,
+`PRINTOPS_SPOOLMAN_PORT`, `PRINTOPS_API_PORT`, `PRINTOPS_CONTAINER_PREFIX`, `PRINTOPS_TZ` and
+`PRINTOPS_GCODE_HOST_DIR`; the defaults are the Odroid's values.
+
 ## Ports (LAN + tailnet only)
 
 | Port | Service | Auth |
