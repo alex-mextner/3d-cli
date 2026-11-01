@@ -1,16 +1,18 @@
-"""`3d printops deploy` — ship Spoolman + 3d-api to the Odroid (see printops/deploy.py for the steps)."""
+"""`3d printops deploy` — ship Spoolman + 3d-api to the Odroid, any ssh host, or this machine
+(see printops/deploy.py for the steps; `3d init --env` is the guided front end)."""
 from __future__ import annotations
 
 import os
 from pathlib import Path
 
-from errors import ThreeDError
+from cli import paths
+from errors import ThreeDError, UsageError
 from printops import deploy
 from printops.cli import Sub
-from printops.cli._common import parse
+from printops.cli._common import Parsed, parse
 from printops.client import ApiError
 
-USAGE = f"""3d printops deploy [--dry-run] [--host USER@HOST] [--dir DIR] [--backup-dir DIR] [--api URL]
+USAGE = f"""3d printops deploy [--dry-run] [--host USER@HOST | --local] [--dir DIR] [--backup-dir DIR] [--api URL]
   Deploy services/3d-api (Spoolman v0.27.0 + 3d-api) as the separate compose project
   `printops` on the Odroid, install the daily backup timer, then wait until /v1/health is "ok"
   (DB migrated, Spoolman reachable, all PrintOps extra fields registered). Never touches the
@@ -22,33 +24,50 @@ USAGE = f"""3d printops deploy [--dry-run] [--host USER@HOST] [--dir DIR] [--bac
 Options:
   --dry-run          show what rsync would change and the remote commands; change nothing
   --host USER@HOST   ssh target (default {deploy.DEFAULT_HOST})
-  --dir DIR          remote base dir (default {deploy.DEFAULT_DIR}; data in DIR/data)
+  --local            deploy on THIS machine instead (docker compose from this checkout; no ssh/rsync).
+                     --dir defaults to <data dir>/printops (~/.local/share/3d-cli/printops) and
+                     --backup-dir to DIR/backup; a missing systemd --user only skips the backup timer
+  --dir DIR          base dir on the target (default {deploy.DEFAULT_DIR}; data in DIR/data)
   --backup-dir DIR   snapshot dir inside HA's backed-up config dir (default {deploy.DEFAULT_BACKUP_DIR})
-  --api URL          health URL to wait on (default http://<host>:{deploy.API_PORT})
+  --api URL          health URL to wait on (default http://<host>:{deploy.API_PORT}, 127.0.0.1 with --local)
 
 Examples:
   3d printops deploy --dry-run
   3d printops deploy
+  3d printops deploy --local --dry-run
   3d printops deploy --host ultra@odroidn2 --api http://100.116.57.66:8765"""
+
+
+def _config(p: Parsed, root: Path) -> deploy.DeployConfig:
+    if "--local" not in p.flags:
+        return deploy.DeployConfig(
+            repo_root=root,
+            host=p.opts.get("--host", deploy.DEFAULT_HOST),
+            remote_dir=p.opts.get("--dir", deploy.DEFAULT_DIR),
+            backup_dir=p.opts.get("--backup-dir", deploy.DEFAULT_BACKUP_DIR),
+            api_url=p.opts.get("--api"),
+            version=deploy.git_version(root),
+        )
+    if "--host" in p.opts:
+        raise UsageError("--local and --host are exclusive", command="printops deploy",
+                         remediation=["Use --local for this machine, --host USER@HOST for a remote one."])
+    base = p.opts.get("--dir") or str(paths.data_dir() / "printops")
+    return deploy.DeployConfig(repo_root=root, host="", remote_dir=base,
+                               backup_dir=p.opts.get("--backup-dir") or f"{base}/backup",
+                               api_url=p.opts.get("--api"), version=deploy.git_version(root), timer_required=False)
 
 
 def run(argv: list[str]) -> int:
     if argv and argv[0] in ("-h", "--help"):
         print(USAGE)
         return 0
-    p = parse(argv, "deploy", values={"--host", "--dir", "--backup-dir", "--api"}, flags={"--dry-run"})
+    p = parse(argv, "deploy", values={"--host", "--dir", "--backup-dir", "--api"}, flags={"--dry-run", "--local"})
     root = Path(os.environ.get("REPO_ROOT") or Path(__file__).resolve().parents[3])
-    cfg = deploy.DeployConfig(
-        repo_root=root,
-        host=p.opts.get("--host", deploy.DEFAULT_HOST),
-        remote_dir=p.opts.get("--dir", deploy.DEFAULT_DIR),
-        backup_dir=p.opts.get("--backup-dir", deploy.DEFAULT_BACKUP_DIR),
-        api_url=p.opts.get("--api"),
-        version=deploy.git_version(root),
-    )
+    cfg = _config(p, root)
     dry = "--dry-run" in p.flags
     steps = deploy.plan(cfg, dry_run=dry)
-    print(f"deploy printops {cfg.version} -> {cfg.host}:{cfg.remote_dir}" + ("  [dry run]" if dry else ""))
+    target = f"{cfg.host}:{cfg.remote_dir}" if cfg.host else f"this machine:{cfg.remote_dir}"
+    print(f"deploy printops {cfg.version} -> {target}" + ("  [dry run]" if dry else ""))
     try:
         deploy.run_steps(steps, cwd=root, dry_run=dry)
         if dry:
@@ -58,13 +77,13 @@ def run(argv: list[str]) -> int:
         h = deploy.wait_healthy(cfg.health_url)
     except (RuntimeError, ApiError) as e:
         raise ThreeDError(str(e), command="printops deploy",
-                          remediation=[f"Inspect: ssh {cfg.host} docker logs --tail 80 printops-api "
-                                       f"(and printops-spoolman)"]) from e
+                          remediation=[f"Inspect: {'ssh ' + cfg.host + ' ' if cfg.host else ''}docker logs --tail 80 "
+                                       "printops-api (and printops-spoolman)"]) from e
     sp = h.get("spoolman") or {}
     print(f"healthy: 3d-api {h.get('version')}  spoolman v{sp.get('version')}  "
           f"extra fields {((sp.get('extra_fields') or {}).get('status'))}")
     return 0
 
 
-SUB = Sub(name="deploy", summary="deploy Spoolman + 3d-api to the Odroid (compose project printops)",
+SUB = Sub(name="deploy", summary="deploy Spoolman + 3d-api to the Odroid, an ssh host or --local (compose project printops)",
           usage=USAGE, run=run)
