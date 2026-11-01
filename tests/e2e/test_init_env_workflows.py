@@ -6,6 +6,8 @@ The service is a local stand-in on a random 127.0.0.1 port; the user config is t
 
 from __future__ import annotations
 
+import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -209,3 +211,31 @@ def test_printops_deploy_local_dry_run_prints_the_plan_and_runs_nothing(
     assert "rsync" not in r.stdout and not base.exists()
     both = run_cli(tmp_path, "printops", "deploy", "--local", "--host", "me@nas")
     assert both.returncode == 2 and "exclusive" in both.stderr
+
+
+def test_init_env_never_triggers_the_openscad_library_bootstrap(tmp_path: Path) -> None:
+    """A status-only `3d init --env` (a dotfiles installer's report run) must not git-clone BOSL2/NopSCADlib or
+    write the .bootstrapped marker; the project scaffold `3d init` still bootstraps."""
+    fakebin = tmp_path / "fakebin"
+    fakebin.mkdir()
+    log = tmp_path / "git-calls.log"
+    git = fakebin / "git"
+    git.write_text(f'#!/bin/sh\necho "git $*" >> "{log}"\nexit 1\n', encoding="utf-8")
+    git.chmod(0o755)
+    fresh = tmp_path / "fresh-config"  # the helper's own config dir ships a ready marker; this one has none
+    marker = fresh / "3d-cli" / ".bootstrapped"
+
+    def run(*argv: str) -> subprocess.CompletedProcess[str]:
+        shutil.rmtree(fresh, ignore_errors=True)
+        log.unlink(missing_ok=True)
+        path = f"{fakebin}{os.pathsep}{os.environ['PATH']}"
+        return run_cli(tmp_path, *argv, env_extra={"PATH": path, "XDG_CONFIG_HOME": str(fresh)})
+
+    env_run = run("init", "--env", "--no-input", "--spoolman", "auto")
+    assert env_run.returncode == 0, env_run.stderr
+    assert not log.exists() and not marker.exists()
+    assert "libs" not in env_run.stderr
+
+    project = run("init", str(tmp_path / "proj"), "--no-input", "--no-git")
+    assert project.returncode == 0, project.stderr
+    assert marker.exists()  # the bootstrap ran (its libs may already be present, so no clone is required)

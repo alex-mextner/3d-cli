@@ -71,6 +71,8 @@ the token, the health check and the config.
 
 Behaviour:
 
+- **No OpenSCAD bootstrap.** `3d init --env` skips the first-run clone of the OpenSCAD libraries (BOSL2, NopSCADlib) and
+  the `.bootstrapped` marker; `3d init [path]` and the other commands keep it.
 - **Idempotent.** When the configured `api:` answers `GET /v1/health` (3d-api; a configured token is
   checked too) or `GET /api/v1/health` (bare Spoolman) it prints `already configured` and exits 0
   without touching the file. An install target on an already configured machine is ignored for the
