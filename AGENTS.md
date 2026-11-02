@@ -98,6 +98,15 @@ asking for review of a cross-cutting change. pytest's `tmp_path` dirs live in
 `$XDG_CACHE_HOME/3d-cli/pytest` (default `~/.cache/3d-cli/pytest`), not `/tmp`, which is a RAM
 tmpfs on the shared workstation (`tests/conftest.py`; `--basetemp` still overrides).
 
+**Complexity gate (#707).** The pre-commit hook `30-lint-check` runs `rig lint check` on the WHOLE
+content of every staged file (cognitive complexity <= 15, cyclomatic <= 20), not on your diff, and
+`rig.yaml` has no baseline. The decision is to refactor: before you commit a change to a file, split
+every function in it that `rig lint check --json <file>` reports (behavior-preserving extraction of
+private helpers, guarded by the existing tests, one commit per file or area, `(Refs #707)`) —
+never raise the limits, suppress, or hand the patch over. The legacy findings in `lib/printops/`,
+`lib/printer_ops/printops_checks.py` and the FakeSpoolman test double are already cleared; run
+`rig lint check --staged --json` before each commit.
+
 **Tests that run git get a clean `GIT_*` environment — always.** A git hook exports
 `GIT_DIR`, `GIT_INDEX_FILE` and friends for the repo being committed, and every subprocess
 inherits them: on 2026-10-14 a test's `git init` in `tmp_path`, run by the pre-commit hook in
