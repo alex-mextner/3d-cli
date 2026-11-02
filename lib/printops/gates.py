@@ -33,7 +33,7 @@ import json
 import os
 import sqlite3
 import tempfile
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -144,6 +144,65 @@ def _spool(conn: sqlite3.Connection, sp: Mapping[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _spools_by_slot(
+    pool: Sequence[Mapping[str, Any]],
+) -> dict[str, list[Mapping[str, Any]]]:
+    by_slot: dict[str, list[Mapping[str, Any]]] = {}
+    for sp in pool:
+        key = spools.slot_of(sp)
+        if key and not sp.get("archived"):
+            by_slot.setdefault(key, []).append(sp)
+    return by_slot
+
+
+def _bind_spools(
+    conn: sqlite3.Connection,
+    fp: FleetPrinter,
+    state: dict[str, Any],
+    by_slot: Mapping[str, list[Mapping[str, Any]]],
+) -> dict[int, Mapping[str, Any]]:
+    """Put the lowest-id spool of each slot on its tool (extras → `conflict`)."""
+    bound: dict[int, Mapping[str, Any]] = {}
+    for tool in state["tools"]:
+        here = sorted(
+            by_slot.get(f"{fp.name}/{tool['slot']}", []), key=lambda s: int(s["id"])
+        )
+        if not here:
+            continue
+        tool["spool"] = _spool(conn, here[0])
+        tool["spool"]["conflict"] = [int(s["id"]) for s in here[1:]]
+        bound[int(here[0]["id"])] = here[0]
+    return bound
+
+
+def _assessments(
+    conn: sqlite3.Connection,
+    spoolman: Spoolman,
+    drying_policy: DryingPolicy | None,
+    humidity: HaStates | None,
+    moment: datetime.datetime,
+    spool_ids: Iterable[int],
+) -> dict[int, dict[str, Any]]:
+    if drying_policy is None:
+        return {}
+    return {
+        a.spool_id: {
+            "state": a.state,
+            "class": a.hygroscopic_class,
+            "reasons": a.reasons,
+            "notes": a.notes,
+        }
+        for a in drying.assess_all(
+            conn,
+            spoolman,
+            drying_policy,
+            humidity=humidity,
+            now=moment,
+            spool_ids=sorted(spool_ids),
+        )
+    }
+
+
 def printer_state(
     conn: sqlite3.Connection,
     spoolman: Spoolman,
@@ -163,38 +222,9 @@ def printer_state(
     state = fleet_state(fp, now=drying.format_ts(moment))
     state["bindings"], state["source"] = "ledger", "3d-api"
     pool = all_spools if all_spools is not None else spools.all_spools(spoolman)
-    by_slot: dict[str, list[Mapping[str, Any]]] = {}
-    for sp in pool:
-        key = spools.slot_of(sp)
-        if key and not sp.get("archived"):
-            by_slot.setdefault(key, []).append(sp)
-    bound: dict[int, Mapping[str, Any]] = {}
-    for tool in state["tools"]:
-        here = sorted(
-            by_slot.get(f"{fp.name}/{tool['slot']}", []), key=lambda s: int(s["id"])
-        )
-        if not here:
-            continue
-        tool["spool"] = _spool(conn, here[0])
-        tool["spool"]["conflict"] = [int(s["id"]) for s in here[1:]]
-        bound[int(here[0]["id"])] = here[0]
+    bound = _bind_spools(conn, fp, state, _spools_by_slot(pool))
     if bound:
-        assessed: dict[int, dict[str, Any]] = {}
-        if drying_policy is not None:
-            for a in drying.assess_all(
-                conn,
-                spoolman,
-                drying_policy,
-                humidity=humidity,
-                now=moment,
-                spool_ids=sorted(bound),
-            ):
-                assessed[a.spool_id] = {
-                    "state": a.state,
-                    "class": a.hygroscopic_class,
-                    "reasons": a.reasons,
-                    "notes": a.notes,
-                }
+        assessed = _assessments(conn, spoolman, drying_policy, humidity, moment, bound)
         for tool in state["tools"]:
             sp = tool["spool"]
             if sp is not None:
