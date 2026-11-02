@@ -13,7 +13,10 @@ import re
 import shutil
 import subprocess
 import tarfile
+import tempfile
+import threading
 from pathlib import Path
+from typing import Any
 
 import pytest
 from printops_env_fakes import fake_docker_bin
@@ -67,7 +70,7 @@ def test_script_carries_the_compose_stack_and_is_deterministic(
 
 
 def _run_script(
-    script: Path, root: Path, *args: str, **extra: str
+    script: Path, root: Path, *args: str, cwd: Path | None = None, **extra: str
 ) -> subprocess.CompletedProcess[str]:
     env = dict(os.environ)
     env.update(
@@ -93,6 +96,7 @@ def _run_script(
         text=True,
         timeout=120,
         check=False,
+        cwd=cwd,
     )
 
 
@@ -171,3 +175,101 @@ def test_script_rejects_a_truncated_payload(script_file: Path, tmp_path: Path) -
     )
     r = _run_script(broken, tmp_path / "run")
     assert r.returncode != 0
+
+
+def test_script_waits_for_the_top_level_health_status(script_file: Path, tmp_path: Path) -> None:
+    degraded = '{"status":"degraded","spoolman":{"ok":false,"extra_fields":{"status":"ok"}}}'
+    bad = _run_script(script_file, tmp_path / "a", WAIT_SECONDS="1", FAKE_API_HEALTH=degraded)
+    assert bad.returncode != 0 and "3d-api did not become healthy" in bad.stderr
+    assert "3d-api is healthy" not in bad.stdout
+    ok = '{"status":"ok","spoolman":{"ok":true,"extra_fields":{"status":"degraded"}}}'
+    good = _run_script(script_file, tmp_path / "b", FAKE_API_HEALTH=ok)
+    assert good.returncode == 0, good.stderr
+    assert "3d-api is healthy" in good.stdout
+
+
+def test_script_resolves_a_relative_base_dir_before_compose_sees_it(
+    script_file: Path, tmp_path: Path
+) -> None:
+    here = tmp_path / "here"
+    here.mkdir()
+    r = _run_script(script_file, tmp_path, cwd=here, PRINTOPS_DIR="./printops")
+    assert r.returncode == 0, r.stderr
+    calls = (tmp_path / "calls.log").read_text()
+    assert f"PRINTOPS_DATA_DIR={here.resolve()}/printops/data" in calls
+    assert f"PRINTOPS_BACKUP_DIR={here.resolve()}/printops/backup" in calls
+    assert (here / "printops" / "data" / "spoolman").is_dir()  # prepared where compose mounts it
+
+
+def test_script_token_name_is_compared_literally(script_file: Path, tmp_path: Path) -> None:
+    (tmp_path / "tokens.txt").write_text("cli-axb        read,write  now  sha256 abcdef\n", encoding="utf-8")
+    r = _run_script(script_file, tmp_path, TOKEN_NAME="cli-a.b")  # '.' is not a wildcard
+    assert r.returncode == 0, r.stderr
+    assert "po_fakeminted" in r.stdout
+    assert "cli-a.b " in (tmp_path / "tokens.txt").read_text()
+
+
+def test_script_does_not_open_spoolman_to_every_browser_origin(
+    script_file: Path, tmp_path: Path
+) -> None:
+    default = _run_script(script_file, tmp_path / "a")
+    assert default.returncode == 0, default.stderr
+    calls = (tmp_path / "a" / "calls.log").read_text()
+    assert "PRINTOPS_SPOOLMAN_CORS_ORIGIN=http://10.1.2.3:17912\n" in calls and "CORS_ORIGIN=*" not in calls
+    custom = _run_script(script_file, tmp_path / "b", PRINTOPS_SPOOLMAN_CORS_ORIGIN="http://fluidd.lan")
+    assert custom.returncode == 0, custom.stderr
+    assert "PRINTOPS_SPOOLMAN_CORS_ORIGIN=http://fluidd.lan\n" in (tmp_path / "b" / "calls.log").read_text()
+
+
+# ------------------------------------------------------------------ writing the script file
+
+
+def test_write_never_follows_a_planted_tmp_symlink(tmp_path: Path) -> None:
+    victim = tmp_path / "victim.txt"
+    victim.write_text("precious", encoding="utf-8")
+    out = tmp_path / "spoolman-setup.sh"
+    for planted in (out.with_name(out.name + ".tmp"), out.with_name("." + out.name + ".tmp")):
+        planted.symlink_to(victim)
+    standalone_script.write(REPO, "test-version", out)
+    assert victim.read_text(encoding="utf-8") == "precious"
+    assert out.is_file() and not out.is_symlink() and os.access(out, os.X_OK)
+    assert (out.stat().st_mode & 0o777) == 0o755
+
+
+def test_concurrent_writers_use_their_own_temp_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    out = tmp_path / "spoolman-setup.sh"
+    both_rendered = threading.Barrier(2, timeout=30)
+
+    def render(_root: Path, version: str) -> str:
+        both_rendered.wait()  # both writers hold their text before either touches the disk
+        return f"#!/bin/sh\n# {version}\n"
+
+    names: list[str] = []
+    real_mkstemp = tempfile.mkstemp
+
+    def mkstemp(**kw: Any) -> tuple[int, str]:
+        fd, name = real_mkstemp(**kw)
+        names.append(name)
+        return fd, name
+
+    monkeypatch.setattr(standalone_script, "render", render)
+    monkeypatch.setattr(standalone_script.tempfile, "mkstemp", mkstemp)
+    errors: list[BaseException] = []
+
+    def writer(version: str) -> None:
+        try:
+            standalone_script.write(REPO, version, out)
+        except BaseException as e:
+            errors.append(e)
+
+    threads = [threading.Thread(target=writer, args=(v,)) for v in ("one", "two")]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(60)
+    assert not errors
+    assert len(names) == 2 and len(set(names)) == 2
+    assert out.read_text(encoding="utf-8") in ("#!/bin/sh\n# one\n", "#!/bin/sh\n# two\n")
+    assert [p.name for p in tmp_path.iterdir()] == [out.name]  # no temp file left behind

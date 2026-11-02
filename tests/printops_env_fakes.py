@@ -97,7 +97,8 @@ exit 0
 FAKE_CURL = """#!/bin/sh
 case "$*" in
   *"/api/v1/health"*) echo '{"status": "healthy"}' ;;
-  *"/v1/health"*) echo '{"status": "ok"}' ;;
+  *"/v1/health"*)
+    if [ -n "$FAKE_API_HEALTH" ]; then echo "$FAKE_API_HEALTH"; else echo '{"status": "ok"}'; fi ;;
   *) exit 22 ;;
 esac
 """

@@ -24,7 +24,9 @@ import base64
 import gzip
 import hashlib
 import io
+import os
 import tarfile
+import tempfile
 from pathlib import Path
 
 from printops.deploy import SYNC_PATHS
@@ -80,8 +82,15 @@ def write(repo_root: Path, version: str, out: Path) -> Path:
     text = render(repo_root, version)
     out = out.expanduser()
     out.parent.mkdir(parents=True, exist_ok=True)
-    tmp = out.with_name(out.name + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
-    tmp.chmod(0o755)
-    tmp.replace(out)
+    # mkstemp creates the file exclusively (O_EXCL, 0600) under a unique name: a planted
+    # `<out>.tmp` symlink is never followed and concurrent generators never share a temp file
+    fd, tmp = tempfile.mkstemp(dir=out.parent, prefix=f".{out.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.chmod(tmp, 0o755)
+        os.replace(tmp, out)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
     return out

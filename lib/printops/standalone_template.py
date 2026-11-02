@@ -22,12 +22,15 @@ TEMPLATE = r'''#!/usr/bin/env bash
 #   ./spoolman-setup.sh --dry-run    check the prerequisites and print the plan, change nothing
 #
 # Environment (all optional):
-#   PRINTOPS_DIR                  base dir (default ~/printops; data in DIR/data)
+#   PRINTOPS_DIR                  base dir (default ~/printops; data in DIR/data; a relative path
+#                                 is taken from the directory you run this in)
 #   PRINTOPS_SPOOLMAN_PORT        Spoolman port on the host (default 7912)
 #   PRINTOPS_API_PORT             3d-api port on the host (default 8765)
 #   PRINTOPS_CONTAINER_PREFIX     compose project + container name prefix (default printops)
 #   PRINTOPS_TZ                   container time zone (default: this host's)
-#   PRINTOPS_SPOOLMAN_CORS_ORIGIN Spoolman's allowed browser origins (default *: no check)
+#   PRINTOPS_SPOOLMAN_CORS_ORIGIN Spoolman's allowed browser origins, comma-separated full origins
+#                                 (default: Spoolman's own address only; list your Fluidd/Mainsail
+#                                 origins here, never *: Spoolman has no authentication)
 #   PRINTOPS_HOST                 address shown in the printed URLs (default: first host IP)
 #   PRINTOPS_BACKUP_TIMER=0       do not install the daily backup timer (systemd --user)
 #   SPOOLMAN_ONLY=1               start only Spoolman (no 3d-api image build, no token)
@@ -41,6 +44,9 @@ GENERATED_BY="@GENERATED_BY@"
 PAYLOAD_SHA256="@PAYLOAD_SHA256@"
 
 DIR="${PRINTOPS_DIR:-$HOME/printops}"
+# docker compose resolves bind sources against the compose file's directory, so a relative DIR
+# would be created here but mounted from inside the unpacked build context
+case "$DIR" in /*) ;; *) DIR="$PWD/${DIR#./}" ;; esac
 PREFIX="${PRINTOPS_CONTAINER_PREFIX:-printops}"
 SPOOLMAN_PORT="${PRINTOPS_SPOOLMAN_PORT:-7912}"
 API_PORT="${PRINTOPS_API_PORT:-8765}"
@@ -80,12 +86,25 @@ http_get() {
   fi
 }
 
-# wait_for NAME URL ERE: poll URL until its body matches the ERE
+# top_level_json BODY: the body's outermost object with every nested object removed, so a pattern
+# sees only top-level keys ({"status":"degraded","spoolman":{"status":"ok"}} is not "ok")
+top_level_json() {
+  local s="${1//$'\n'/ }" prev=""
+  s="${s#*\{}"
+  s="${s%\}*}"
+  while [ "$s" != "$prev" ]; do
+    prev="$s"
+    s="$(sed -E 's/\{[^{}]*\}//g' <<<"$s")"
+  done
+  printf '%s' "$s"
+}
+
+# wait_for NAME URL ERE: poll URL until its top-level JSON keys match the ERE
 wait_for() {
   local name="$1" url="$2" pattern="$3" deadline body
   deadline=$((SECONDS + WAIT_SECONDS))
   while (( SECONDS < deadline )); do
-    if body="$(http_get "$url" 2>/dev/null)" && grep -Eq "$pattern" <<<"$body"; then
+    if body="$(http_get "$url" 2>/dev/null)" && grep -Eq "$pattern" <<<"$(top_level_json "$body")"; then
       log "$name is healthy: $url"
       return 0
     fi
@@ -136,7 +155,7 @@ compose() {
     PRINTOPS_UID="$(id -u)" \
     PRINTOPS_GID="$(id -g)" \
     PRINTOPS_TZ="${PRINTOPS_TZ:-$(detect_tz)}" \
-    PRINTOPS_SPOOLMAN_CORS_ORIGIN="${PRINTOPS_SPOOLMAN_CORS_ORIGIN:-*}" \
+    PRINTOPS_SPOOLMAN_CORS_ORIGIN="${PRINTOPS_SPOOLMAN_CORS_ORIGIN:-http://$(host_address):$SPOOLMAN_PORT}" \
       docker compose -p "$PREFIX" -f "$COMPOSE_FILE" "$@"
   )
 }
@@ -145,7 +164,7 @@ compose() {
 mint_token() {
   local name="$1" existing
   existing="$(docker exec "${PREFIX}-api" 3d printops token list 2>/dev/null || true)"
-  if grep -q "^${name} " <<<"$existing"; then
+  if NAME="$name" awk '$1 == ENVIRON["NAME"] { found = 1 } END { exit !found }' <<<"$existing"; then
     TOKEN=""
     return 0
   fi
