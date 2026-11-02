@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
+from typing import Any
 
 import pytest
 from calibration_fixtures import fake_orca, write_plate_orca
@@ -932,7 +933,8 @@ def _tool_changes(gcode: Path) -> list[str]:
 
 def _check_plate_underlay_first(
     tmp_path: Path, env: dict[str, str], presets: list[str]
-) -> None:
+) -> dict[str, Any]:
+    """The plate map the generator wrote, after checking the underlay is the first G-code object."""
     out = tmp_path / "plate.gcode"
     made = _gen(
         tmp_path, env, presets, "plate1", "k1", "--only", "flow,bridge", "-o", str(out)
@@ -951,7 +953,7 @@ def _check_plate_underlay_first(
         and data["underlay"]["pieces"] == 1
         and data["underlay"]["head"] == "T1"
     )
-    assert data["print_order"][0] == "layer: underlay"
+    return data
 
 
 def _check_plate_no_underlay(
@@ -1082,7 +1084,8 @@ def test_gen_plate_stands_on_the_shared_underlay_unless_told_not_to(
     the underlay in the contrasting head (or `--underlay-tool`, contrast-checked) and changes to the tests' head;
     a single test has no underlay."""
     env, presets = _plate_gen_env(tmp_path)
-    _check_plate_underlay_first(tmp_path, env, presets)
+    plate_map = _check_plate_underlay_first(tmp_path, env, presets)
+    assert plate_map["print_order"][0] == "layer: underlay"
     _check_plate_no_underlay(tmp_path, env, presets)
     _check_u1_underlay_head(
         tmp_path, env, presets, "T1=#000000,T2=#FFFFFF,T3=#2D9E59,T4=#FFFFFF"
