@@ -187,6 +187,32 @@ def _record_label(api: Any, loc_id: int, path: str, payload: str) -> bool:
     return True
 
 
+def _chosen_locations(api: Any, p: Parsed) -> list[dict[str, Any]]:
+    flat = {loc["path"].lower(): loc for loc in api.get("/v1/locations", flat="true")["locations"]}
+    chosen: dict[int, dict[str, Any]] = {}
+    for ref in p.pos:
+        loc = api.get(f"/v1/locations/{_ref(ref)}")
+        if loc["archived"]:
+            raise UsageError(f"location {loc['path']!r} is archived; unarchive it before labelling",
+                             command="printops loc label")
+        chosen[loc["id"]] = loc
+        if "--subtree" in p.flags:
+            prefix = loc["path"].lower() + "/"
+            chosen.update({d["id"]: d for k, d in sorted(flat.items()) if k.startswith(prefix)})
+    return sorted(chosen.values(), key=lambda x: x["path"].lower())
+
+
+def _write_pages(out: Path, rendered: list[str | bytes]) -> list[Path]:
+    files = [out if i == 0 else out.with_name(f"{out.stem}-{i + 1}{out.suffix}") for i in range(len(rendered))]
+    out.parent.mkdir(parents=True, exist_ok=True)
+    for f, doc in zip(files, rendered, strict=True):
+        if isinstance(doc, bytes):
+            f.write_bytes(doc)
+        else:
+            f.write_text(doc, encoding="utf-8")
+    return files
+
+
 def _label(p: Parsed) -> int:
     from printops.labels import Label, ntag213_ndef, render_pdf, render_svg_pages
 
@@ -194,30 +220,12 @@ def _label(p: Parsed) -> int:
     fmt, out = _label_out(p)
     api = client(p, "loc label")
     with api_errors("loc label"):
-        flat = {loc["path"].lower(): loc for loc in api.get("/v1/locations", flat="true")["locations"]}
-        chosen: dict[int, dict[str, Any]] = {}
-        for ref in p.pos:
-            loc = api.get(f"/v1/locations/{_ref(ref)}")
-            if loc["archived"]:
-                raise UsageError(f"location {loc['path']!r} is archived; unarchive it before labelling",
-                                 command="printops loc label")
-            chosen[loc["id"]] = loc
-            if "--subtree" in p.flags:
-                prefix = loc["path"].lower() + "/"
-                chosen.update({d["id"]: d for k, d in sorted(flat.items()) if k.startswith(prefix)})
-        labels = [Label(loc["id"], loc["path"], loc["kind"], loc["qr_payload"])
-                  for loc in sorted(chosen.values(), key=lambda x: x["path"].lower())]
+        labels = [Label(loc["id"], loc["path"], loc["kind"], loc["qr_payload"]) for loc in _chosen_locations(api, p)]
         try:  # render first: a label that cannot fit must not leave a half-written sheet behind
             rendered: list[str | bytes] = [render_pdf(labels, sheet)] if fmt == "pdf" else list(render_svg_pages(labels, sheet))
         except ValueError as e:
             raise UsageError(str(e), command="printops loc label") from e
-        files = [out if i == 0 else out.with_name(f"{out.stem}-{i + 1}{out.suffix}") for i in range(len(rendered))]
-        out.parent.mkdir(parents=True, exist_ok=True)
-        for f, doc in zip(files, rendered, strict=True):
-            if isinstance(doc, bytes):
-                f.write_bytes(doc)
-            else:
-                f.write_text(doc, encoding="utf-8")
+        files = _write_pages(out, rendered)
     print(f"wrote {len(labels)} label(s) on {len(files)} page(s): {', '.join(str(f) for f in files)}")
     # remember what is printed, so `show` can flag the sticker once it goes stale
     unrecorded = [lb.path for lb in labels if not _record_label(api, lb.loc_id, lb.path, lb.payload)]
@@ -228,6 +236,156 @@ def _label(p: Parsed) -> int:
         print(f"{len(unrecorded)} label(s) printed but not recorded; re-run the same `loc label` to record them",
               file=sys.stderr)
     return 1 if unrecorded else 0
+
+
+def _run_tree(rest: list[str], sub: str) -> int:
+    p = parse(rest, sub, values=_COMMON, flags={"--archived", "--json"}, n_pos=(0, 1))
+    api = client(p, sub)
+    with api_errors(sub):
+        data = api.get("/v1/locations", archived="true" if "--archived" in p.flags else None)
+    nodes = data["tree"]
+    if p.pos:
+        node = _find(nodes, p.pos[0])
+        if node is None:
+            raise ThreeDError(f"no location {p.pos[0]!r} in the tree", command="printops loc tree")
+        nodes = [node]
+    if "--json" in p.flags:
+        print(json.dumps(nodes, ensure_ascii=False, indent=2))
+    elif not nodes:
+        print("no locations yet — add one: 3d printops loc add WH:default --kind warehouse")
+    else:
+        _print_tree(nodes)
+    return 0
+
+
+def _run_add_set(action: str, rest: list[str], sub: str) -> int:
+    p = parse(rest, sub, values=_COMMON | set(_ATTRS), n_pos=1)
+    body = _attrs(p, sub)
+    api = client(p, sub)
+    with api_errors(sub):
+        if action == "add":
+            if not body.get("kind"):
+                raise UsageError("add needs --kind (e.g. --kind shelf)", command="printops loc add")
+            loc = api.post("/v1/locations", {"path": p.pos[0], **body})
+        else:
+            if not body:
+                raise UsageError("set needs at least one of " + ", ".join(_ATTRS), command="printops loc set")
+            loc = api.patch(f"/v1/locations/{_ref(p.pos[0])}", body)["location"]
+    print(f"{'added' if action == 'add' else 'updated'} {loc['path']}  ({_flags(loc)})  #{loc['id']}")
+    return 0
+
+
+def _label_line(loc: dict[str, Any]) -> str:
+    if loc["label_stale"]:
+        note = f"  (printed: {loc['qr']} — STALE, reprint with `3d printops loc label {loc['path']}`)"
+    else:
+        note = "" if loc["qr"] else "  (not printed yet)"
+    return f"  label    {loc['qr_payload']}{note}"
+
+
+def _print_show(loc: dict[str, Any], spools: list[dict[str, Any]]) -> None:
+    print(f"{loc['path']}  #{loc['id']}  ({_flags(loc)})")
+    if loc["ancestors"]:
+        print("  in       " + " < ".join(a["path"] for a in loc["ancestors"]))
+    print(_label_line(loc))
+    if loc.get("humidity_sensor"):
+        print(f"  RH       {loc['humidity_sensor']}")
+    for c in loc["children"]:
+        print(f"  child    {c['path']}  ({_flags(c)})")
+    cap = f" / {loc['capacity']}" if loc.get("capacity") else ""
+    print(f"  spools   {len(spools)}{cap}")
+    for s in spools:
+        print(f"    {spool_line(s)}")
+
+
+def _run_show(rest: list[str], sub: str) -> int:
+    p = parse(rest, sub, values=_COMMON, flags={"--json", "--recursive"}, n_pos=1)
+    api = client(p, sub)
+    with api_errors(sub):
+        loc = api.get(f"/v1/locations/{_ref(p.pos[0])}")
+        inside = api.get(f"/v1/locations/{_ref(loc['path'])}/contents",
+                         recursive="true" if "--recursive" in p.flags else None)
+    if "--json" in p.flags:
+        print(json.dumps({**loc, "spools": inside["spools"]}, ensure_ascii=False, indent=2))
+        return 0
+    _print_show(loc, inside["spools"])
+    return 0
+
+
+def _print_failed_resync(failed: list[dict[str, Any]], prefix: str, suffix: str) -> None:
+    for f in failed:
+        what = f"spool #{f['spool_id']}" if f["spool_id"] is not None else "listing spools"
+        print(f"{prefix}({what}): {f['error']}{suffix}", file=sys.stderr)
+
+
+def _run_mv(rest: list[str], sub: str) -> int:
+    p = parse(rest, sub, values=_COMMON, flags={"--json"}, n_pos=2)
+    api = client(p, sub)
+    with api_errors(sub):
+        res = api.patch(f"/v1/locations/{_ref(p.pos[0])}", {"path": p.pos[1]})
+    if "--json" in p.flags:
+        print(json.dumps(res, ensure_ascii=False, indent=2))
+    else:
+        for old, new in res["renamed"]:
+            print(f"{old} -> {new}")
+        print(f"Spoolman: {len(res['spoolman']['updated'])} spool(s) re-synced")
+    _print_failed_resync(res["spoolman"]["failed"], "Spoolman re-sync FAILED ",
+                         " — the move is saved; run `3d printops loc resync` when Spoolman is back")
+    return 1 if res["spoolman"]["failed"] else 0
+
+
+def _run_archive(action: str, rest: list[str], sub: str) -> int:
+    p = parse(rest, sub, values=_COMMON, n_pos=1)
+    api = client(p, sub)
+    with api_errors(sub):
+        if action == "archive":
+            loc = api.delete(f"/v1/locations/{_ref(p.pos[0])}")
+        else:
+            loc = api.patch(f"/v1/locations/{_ref(p.pos[0])}", {"archived": False})["location"]
+    print(f"{action}d {loc['path']}  #{loc['id']}")
+    return 0
+
+
+def _run_label(rest: list[str], sub: str) -> int:
+    p = parse(rest, sub, values=_COMMON | {"-o", "--format", "--grid", "--page", "--margin", "--start"},
+              flags={"--subtree", "--no-border", "--ntag"}, n_pos=(1, 500))
+    return _label(p)
+
+
+def _run_resolve(rest: list[str], sub: str) -> int:
+    p = parse(rest, sub, values=_COMMON, flags={"--json"}, n_pos=1)
+    api = client(p, sub)
+    with api_errors(sub):
+        loc = api.get("/v1/locations/resolve", q=p.pos[0])
+    print(json.dumps(loc, ensure_ascii=False, indent=2) if "--json" in p.flags
+          else f"{loc['path']}  #{loc['id']}  ({_flags(loc)})")
+    return 0
+
+
+def _print_sync_fleet(res: dict[str, Any]) -> None:
+    for key in ("created", "revived", "updated", "archived"):
+        if res[key]:
+            print(f"{key:<9} {' '.join(res[key])}")
+    for k in res["kept"]:
+        print(f"kept      {k['path']}: {k['reason']}")
+    if not any(res[k] for k in ("created", "revived", "updated", "archived", "kept")):
+        print("printer slots already match fleet/printers.yaml")
+
+
+def _run_sync(action: str, rest: list[str], sub: str) -> int:
+    p = parse(rest, sub, values=_COMMON, flags={"--json"})
+    api = client(p, sub)
+    with api_errors(sub):
+        res = api.post("/v1/locations/sync-fleet" if action == "sync-fleet" else "/v1/locations/resync")
+    if "--json" in p.flags:
+        print(json.dumps(res, ensure_ascii=False, indent=2))
+        return 0
+    if action == "sync-fleet":
+        _print_sync_fleet(res)
+        return 0
+    print(f"Spoolman: {len(res['updated'])} spool(s) re-synced" + "".join(f"\n  #{i}" for i in res["updated"]))
+    _print_failed_resync(res["failed"], "FAILED ", "")
+    return 1 if res["failed"] else 0
 
 
 def run(argv: list[str]) -> int:
@@ -243,124 +401,20 @@ def run(argv: list[str]) -> int:
         return 0
     sub = f"loc {action}"
     if action == "tree":
-        p = parse(rest, sub, values=_COMMON, flags={"--archived", "--json"}, n_pos=(0, 1))
-        api = client(p, sub)
-        with api_errors(sub):
-            data = api.get("/v1/locations", archived="true" if "--archived" in p.flags else None)
-        nodes = data["tree"]
-        if p.pos:
-            node = _find(nodes, p.pos[0])
-            if node is None:
-                raise ThreeDError(f"no location {p.pos[0]!r} in the tree", command="printops loc tree")
-            nodes = [node]
-        if "--json" in p.flags:
-            print(json.dumps(nodes, ensure_ascii=False, indent=2))
-        elif not nodes:
-            print("no locations yet — add one: 3d printops loc add WH:default --kind warehouse")
-        else:
-            _print_tree(nodes)
-        return 0
+        return _run_tree(rest, sub)
     if action in ("add", "set"):
-        p = parse(rest, sub, values=_COMMON | set(_ATTRS), n_pos=1)
-        body = _attrs(p, sub)
-        api = client(p, sub)
-        with api_errors(sub):
-            if action == "add":
-                if not body.get("kind"):
-                    raise UsageError("add needs --kind (e.g. --kind shelf)", command="printops loc add")
-                loc = api.post("/v1/locations", {"path": p.pos[0], **body})
-            else:
-                if not body:
-                    raise UsageError("set needs at least one of " + ", ".join(_ATTRS), command="printops loc set")
-                loc = api.patch(f"/v1/locations/{_ref(p.pos[0])}", body)["location"]
-        print(f"{'added' if action == 'add' else 'updated'} {loc['path']}  ({_flags(loc)})  #{loc['id']}")
-        return 0
+        return _run_add_set(action, rest, sub)
     if action == "show":
-        p = parse(rest, sub, values=_COMMON, flags={"--json", "--recursive"}, n_pos=1)
-        api = client(p, sub)
-        with api_errors(sub):
-            loc = api.get(f"/v1/locations/{_ref(p.pos[0])}")
-            inside = api.get(f"/v1/locations/{_ref(loc['path'])}/contents",
-                             recursive="true" if "--recursive" in p.flags else None)
-        if "--json" in p.flags:
-            print(json.dumps({**loc, "spools": inside["spools"]}, ensure_ascii=False, indent=2))
-            return 0
-        print(f"{loc['path']}  #{loc['id']}  ({_flags(loc)})")
-        if loc["ancestors"]:
-            print("  in       " + " < ".join(a["path"] for a in loc["ancestors"]))
-        print(f"  label    {loc['qr_payload']}" + (f"  (printed: {loc['qr']} — STALE, reprint with "
-                                                     f"`3d printops loc label {loc['path']}`)" if loc["label_stale"] else
-                                                     "" if loc["qr"] else "  (not printed yet)"))
-        if loc.get("humidity_sensor"):
-            print(f"  RH       {loc['humidity_sensor']}")
-        for c in loc["children"]:
-            print(f"  child    {c['path']}  ({_flags(c)})")
-        spools = inside["spools"]
-        cap = f" / {loc['capacity']}" if loc.get("capacity") else ""
-        print(f"  spools   {len(spools)}{cap}")
-        for s in spools:
-            print(f"    {spool_line(s)}")
-        return 0
+        return _run_show(rest, sub)
     if action == "mv":
-        p = parse(rest, sub, values=_COMMON, flags={"--json"}, n_pos=2)
-        api = client(p, sub)
-        with api_errors(sub):
-            res = api.patch(f"/v1/locations/{_ref(p.pos[0])}", {"path": p.pos[1]})
-        if "--json" in p.flags:
-            print(json.dumps(res, ensure_ascii=False, indent=2))
-        else:
-            for old, new in res["renamed"]:
-                print(f"{old} -> {new}")
-            sm = res["spoolman"]
-            print(f"Spoolman: {len(sm['updated'])} spool(s) re-synced")
-        for f in res["spoolman"]["failed"]:
-            what = f"spool #{f['spool_id']}" if f["spool_id"] is not None else "listing spools"
-            print(f"Spoolman re-sync FAILED ({what}): {f['error']} — the move is saved; "
-                  "run `3d printops loc resync` when Spoolman is back", file=sys.stderr)
-        return 1 if res["spoolman"]["failed"] else 0
+        return _run_mv(rest, sub)
     if action in ("archive", "unarchive"):
-        p = parse(rest, sub, values=_COMMON, n_pos=1)
-        api = client(p, sub)
-        with api_errors(sub):
-            if action == "archive":
-                loc = api.delete(f"/v1/locations/{_ref(p.pos[0])}")
-            else:
-                loc = api.patch(f"/v1/locations/{_ref(p.pos[0])}", {"archived": False})["location"]
-        print(f"{action}d {loc['path']}  #{loc['id']}")
-        return 0
+        return _run_archive(action, rest, sub)
     if action == "label":
-        p = parse(rest, sub, values=_COMMON | {"-o", "--format", "--grid", "--page", "--margin", "--start"},
-                  flags={"--subtree", "--no-border", "--ntag"}, n_pos=(1, 500))
-        return _label(p)
+        return _run_label(rest, sub)
     if action == "resolve":
-        p = parse(rest, sub, values=_COMMON, flags={"--json"}, n_pos=1)
-        api = client(p, sub)
-        with api_errors(sub):
-            loc = api.get("/v1/locations/resolve", q=p.pos[0])
-        print(json.dumps(loc, ensure_ascii=False, indent=2) if "--json" in p.flags
-              else f"{loc['path']}  #{loc['id']}  ({_flags(loc)})")
-        return 0
-    p = parse(rest, sub, values=_COMMON, flags={"--json"})
-    api = client(p, sub)
-    with api_errors(sub):
-        res = api.post("/v1/locations/sync-fleet" if action == "sync-fleet" else "/v1/locations/resync")
-    if "--json" in p.flags:
-        print(json.dumps(res, ensure_ascii=False, indent=2))
-        return 0
-    if action == "sync-fleet":
-        for key in ("created", "revived", "updated", "archived"):
-            if res[key]:
-                print(f"{key:<9} {' '.join(res[key])}")
-        for k in res["kept"]:
-            print(f"kept      {k['path']}: {k['reason']}")
-        if not any(res[k] for k in ("created", "revived", "updated", "archived", "kept")):
-            print("printer slots already match fleet/printers.yaml")
-        return 0
-    print(f"Spoolman: {len(res['updated'])} spool(s) re-synced" + "".join(f"\n  #{i}" for i in res["updated"]))
-    for f in res["failed"]:
-        what = f"spool #{f['spool_id']}" if f["spool_id"] is not None else "listing spools"
-        print(f"FAILED ({what}): {f['error']}", file=sys.stderr)
-    return 1 if res["failed"] else 0
+        return _run_resolve(rest, sub)
+    return _run_sync(action, rest, sub)
 
 
 SUB = Sub(name="loc", summary="location tree: add/tree/show/mv/archive + QR label sheets", usage=USAGE, run=run)
