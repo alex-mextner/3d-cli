@@ -416,3 +416,25 @@ def test_concurrent_writers_use_their_own_temp_files(
     assert len(names) == 2 and len(set(names)) == 2
     assert out.read_text(encoding="utf-8") in ("#!/bin/sh\n# one\n", "#!/bin/sh\n# two\n")
     assert [p.name for p in tmp_path.iterdir()] == [out.name]  # no temp file left behind
+
+
+def test_script_rerun_retires_the_backup_timer_an_older_run_installed(
+    script_file: Path, tmp_path: Path
+) -> None:
+    """Upgrading must not leave a timer that runs `3d printops backup` (now a no-op that exits 1)."""
+    home = tmp_path / "home"
+    units = home / ".config" / "systemd" / "user"
+    units.mkdir(parents=True)
+    for name in ("pogb-backup.timer", "pogb-backup.service", "other-backup.timer"):
+        (units / name).write_text("x\n", encoding="utf-8")
+    shim = tmp_path / "shim"
+    shim.mkdir()
+    (shim / "systemctl").write_text(f'#!/bin/sh\necho "$@" >> {tmp_path}/systemctl.log\n', encoding="utf-8")
+    (shim / "systemctl").chmod(0o755)
+    path = f"{shim}{os.pathsep}{os.environ['PATH']}"
+    r = _run_script(script_file, tmp_path, HOME=str(home), PATH=f"{fake_docker_bin(tmp_path)}{os.pathsep}{path}")
+    assert r.returncode == 0, r.stderr
+    assert not (units / "pogb-backup.timer").exists() and not (units / "pogb-backup.service").exists()
+    assert (units / "other-backup.timer").exists()  # only this project's units
+    assert "disable --now pogb-backup.timer" in (tmp_path / "systemctl.log").read_text()
+    assert "removed the legacy pogb-backup.timer" in r.stdout

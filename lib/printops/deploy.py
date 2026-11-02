@@ -13,10 +13,13 @@ WHAT IT DOES (each step is a plain ssh/rsync argv, printed before it runs):
   3. ssh: `docker compose -p printops -f services/3d-api/compose.yaml up -d --build` with
      PRINTOPS_VERSION=<git sha>. Separate compose project — the HA compose project is never
      touched, and nothing here restarts Home Assistant.
-  4. poll http://<host>:8765/v1/health until status "ok" (DB migrated, Spoolman reachable,
+  4. ssh: retire the legacy `printops-backup.timer` systemd --user units an older deploy installed (idempotent;
+     nothing to do on a host that never had them).
+  5. poll http://<host>:8765/v1/health until status "ok" (DB migrated, Spoolman reachable,
      every extra field registered by 3d-api's startup task).
 
-NO BACKUP TIMER: the daily backup is scheduled by Home Assistant (04:00, integrations/homeassistant/packages/
+NO BACKUP TIMER: the legacy timer ran `3d printops backup` with no subcommand, which now exits 1 without
+backing anything up, so a redeploy removes it instead of leaving a schedule that fails every night. The daily backup is scheduled by Home Assistant (04:00, integrations/homeassistant/packages/
 printops_backup.yaml -> POST /v1/backup/run); the backup disk is `backup_dir`, registered with
 `3d printops backup target add`.
 
@@ -48,6 +51,7 @@ API_PORT = 8765
 SPOOLMAN_PORT = 7912
 COMPOSE_FILE = "services/3d-api/compose.yaml"
 PROJECT = "printops"
+LEGACY_BACKUP_UNITS = ("printops-backup.timer", "printops-backup.service")
 SYNC_PATHS = ("bin/3d", "lib", "fleet", "pyproject.toml", "services/3d-api")
 CONTAINER_PREFIX = "printops"  # compose's default PRINTOPS_CONTAINER_PREFIX, and the unit's container
 API_CONTAINER = f"{CONTAINER_PREFIX}-api"
@@ -183,6 +187,22 @@ def _rsync_host(host: str) -> str:
     return f"{user}{at}[{name}]" if ":" in name and not name.startswith("[") else host
 
 
+def _retire_legacy_timer_script() -> str:
+    """Remove the `printops-backup.{timer,service}` units an older deploy installed (systemd --user)."""
+    timer, service = LEGACY_BACKUP_UNITS
+    systemctl = "command -v systemctl >/dev/null 2>&1"
+    return (
+        'u="$HOME/.config/systemd/user"; '
+        f'if [ -e "$u/{timer}" ] || [ -e "$u/{service}" ]; then '
+        f"if {systemctl}; then systemctl --user disable --now {timer} >/dev/null 2>&1 || true; fi; "
+        f'rm -f "$u/{timer}" "$u/{service}"; '
+        f"if {systemctl}; then systemctl --user daemon-reload >/dev/null 2>&1 || true; fi; "
+        "echo 'note: removed the legacy printops-backup.timer (it ran a command that no longer backs anything up);"
+        " Home Assistant schedules backups now: run `3d init --env --stage-only` to set the backup disk up'; "
+        "fi"
+    )
+
+
 def _sync_step(cfg: DeployConfig, dry_run: bool) -> Step:
     sync = [p for p in SYNC_PATHS if (cfg.repo_root / p).exists()]
     rsync = ["rsync", "-az", "--relative", "--delete", "--exclude", "__pycache__", "--exclude", "*.pyc"]
@@ -199,6 +219,8 @@ def plan(cfg: DeployConfig, *, dry_run: bool = False) -> list[Step]:
         steps.append(_sync_step(cfg, dry_run))
     steps += [
         _script_step(cfg, "build + start spoolman and 3d-api (compose project printops)", _compose_script(cfg, src)),
+        _script_step(cfg, "retire the legacy backup timer (Home Assistant schedules backups)",
+                     _retire_legacy_timer_script()),
     ]
     return steps
 

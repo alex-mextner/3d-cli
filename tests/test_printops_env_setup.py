@@ -7,6 +7,7 @@ runner instead of ssh/docker. No test can reach a real host, docker or printer.
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 from collections.abc import Iterator
 from pathlib import Path
@@ -1041,8 +1042,9 @@ def test_odroid_deploy_plan_keeps_its_shape_and_defaults(tmp_path: Path) -> None
         "ssh",
         "rsync",
         "ssh",
+        "ssh",
     ] and cfg.health_url == "http://192.168.0.39:8765"
-    assert not any("systemctl" in s.argv[-1] or "timer" in s.title for s in steps)  # HA schedules the backup
+    assert not any("enable" in s.argv[-1] for s in steps)  # HA schedules the backup; only the legacy timer goes
     compose = steps[2].argv[-1]
     assert "PRINTOPS_API_PORT=8765" in compose and "PRINTOPS_SPOOLMAN_PORT=7912" in compose
     assert (
@@ -1061,7 +1063,7 @@ def test_local_deploy_plan_and_nondefault_ports(tmp_path: Path) -> None:
         spoolman_port=17912,
     )
     steps = deploy.plan(cfg)
-    assert [s.argv[:2] for s in steps] == [["bash", "-c"]] * 2
+    assert [s.argv[:2] for s in steps] == [["bash", "-c"]] * 3  # mkdirs, compose, legacy-timer retirement
     assert (
         "PRINTOPS_API_PORT=18765" in steps[1].argv[-1]
         and "PRINTOPS_SPOOLMAN_PORT=17912" in steps[1].argv[-1]
@@ -1075,7 +1077,7 @@ def test_compose_publishes_the_port_the_health_check_polls(tmp_path: Path) -> No
 
     cfg = deploy.DeployConfig(
         repo_root=tmp_path, host="", local=True, remote_dir=str(tmp_path / "p"),
-        backup_dir=str(tmp_path / "p" / "backup"), timer_required=False,
+        backup_dir=str(tmp_path / "p" / "backup"),
     )
     step = next(s for s in deploy.plan(cfg) if "docker compose" in s.argv[-1])
     env = {
@@ -1090,6 +1092,57 @@ def test_compose_publishes_the_port_the_health_check_polls(tmp_path: Path) -> No
     calls = (tmp_path / "calls.log").read_text()
     assert "PRINTOPS_API_PORT=8765" in calls and "PRINTOPS_SPOOLMAN_PORT=7912" in calls
     assert "18765" not in calls and cfg.health_url == "http://127.0.0.1:8765"
+
+
+def _fake_systemctl(tmp_path: Path) -> tuple[dict[str, str], Path]:
+    """A HOME holding the units an OLD deploy installed + a recording fake `systemctl`."""
+    home = tmp_path / "home"
+    units = home / ".config" / "systemd" / "user"
+    units.mkdir(parents=True)
+    (units / "printops-backup.timer").write_text("[Timer]\n", encoding="utf-8")
+    (units / "printops-backup.service").write_text("[Service]\nExecStart=3d printops backup\n", encoding="utf-8")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    log = tmp_path / "systemctl.log"
+    fake = bin_dir / "systemctl"
+    fake.write_text(f'#!/bin/sh\necho "$@" >> {log}\n', encoding="utf-8")
+    fake.chmod(0o755)
+    env = {"HOME": str(home), "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}
+    return env, units
+
+
+def test_redeploy_retires_a_backup_timer_an_older_deploy_installed(tmp_path: Path) -> None:
+    """The old timer ran `3d printops backup` (no subcommand): it now exits 1 every night while health
+    stays green. A redeploy must disable + delete it, and a second redeploy must be a quiet no-op."""
+    env, units = _fake_systemctl(tmp_path)
+    cfg = deploy.DeployConfig(repo_root=tmp_path, host="", remote_dir=str(tmp_path / "p"),
+                              backup_dir=str(tmp_path / "p" / "backup"))
+    retire = deploy.plan(cfg)[-1]
+    assert retire.title.startswith("retire the legacy backup timer")
+    first = subprocess.run(retire.argv, env=env, capture_output=True, text=True, check=False)
+    assert first.returncode == 0, first.stderr
+    assert not (units / "printops-backup.timer").exists() and not (units / "printops-backup.service").exists()
+    assert "disable --now printops-backup.timer" in (tmp_path / "systemctl.log").read_text()
+    assert "daemon-reload" in (tmp_path / "systemctl.log").read_text()
+    assert "removed the legacy printops-backup.timer" in first.stdout
+    (tmp_path / "systemctl.log").unlink()
+    again = subprocess.run(retire.argv, env=env, capture_output=True, text=True, check=False)
+    assert again.returncode == 0 and again.stdout == "" and not (tmp_path / "systemctl.log").exists()
+
+
+def test_redeploy_retire_step_survives_a_host_without_systemd(tmp_path: Path) -> None:
+    env, units = _fake_systemctl(tmp_path)
+    (tmp_path / "bin" / "systemctl").unlink()
+    cfg = deploy.DeployConfig(repo_root=tmp_path, host="", remote_dir=str(tmp_path / "p"),
+                              backup_dir=str(tmp_path / "p" / "backup"))
+    bare = tmp_path / "bare"
+    bare.mkdir()
+    for tool in ("bash", "rm"):  # a PATH with no systemctl on it
+        (bare / tool).symlink_to(shutil.which(tool) or tool)
+    run = subprocess.run(deploy.plan(cfg)[-1].argv, env={**env, "PATH": str(bare)},
+                         capture_output=True, text=True, check=False)
+    assert run.returncode == 0, run.stderr
+    assert not (units / "printops-backup.timer").exists()
 
 
 def test_local_deploy_hands_compose_absolute_dirs_for_relative_options(

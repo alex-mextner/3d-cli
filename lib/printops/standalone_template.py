@@ -214,6 +214,21 @@ mint_token() {
     die "could not mint a token: docker exec ${PREFIX}-api 3d printops token create $name --scopes read,write"
 }
 
+# An older run of this script installed `${PREFIX}-backup.timer` (systemd --user); it runs a command
+# that no longer backs anything up, so a re-run removes it. A host that never had it is untouched.
+retire_legacy_backup_timer() {
+  local unit_dir="$HOME/.config/systemd/user"
+  [ -e "$unit_dir/${PREFIX}-backup.timer" ] || [ -e "$unit_dir/${PREFIX}-backup.service" ] || return 0
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl --user disable --now "${PREFIX}-backup.timer" >/dev/null 2>&1 || true
+  fi
+  rm -f "$unit_dir/${PREFIX}-backup.timer" "$unit_dir/${PREFIX}-backup.service"
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl --user daemon-reload >/dev/null 2>&1 || true
+  fi
+  log "removed the legacy ${PREFIX}-backup.timer: Home Assistant schedules the backup now (3d init --env sets that up)"
+}
+
 summary() {
   local addr token_name="$1" token="$2"
   addr="$(host_address)"
@@ -265,6 +280,7 @@ main() {
   fi
   mkdir -p "$DIR/data/api" "$DIR/data/spoolman" "$DIR/backup" "$DIR/gcodes"
   extract_payload
+  retire_legacy_backup_timer
   if [ "$SPOOLMAN_ONLY" = 1 ]; then
     compose up -d spoolman
   else
