@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
+import threading
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -683,3 +685,193 @@ def test_a_backup_dir_on_another_partition_of_the_data_disk_counts_as_the_same_d
     assert env_stage._same_disk(ctx, "/srv/data/backup")  # the same filesystem
     assert env_stage._same_disk(ctx, "/mnt/second")  # sda2 vs sda1: one physical disk
     assert not env_stage._same_disk(ctx, "/mnt/other")  # sdb: a real second disk
+
+
+# ------------------------------------------------------------------------- the token goes only to a trusted origin
+
+
+def _only_the_fake(fake: FakeHa) -> ha_detect.Fetch:
+    """Real HTTP to the fake HA; every other well-known name (homeassistant.local, ...) is unreachable."""
+
+    def fetch(url: str) -> tuple[int, str]:
+        return ha_detect.http_get(url) if url.startswith(fake.url) else (0, "")
+
+    return fetch
+
+
+def _discovered_stage(fake: FakeHa, prompts: Prompts, *, interactive: bool, out: list[str]) -> env_stage.StageEnv:
+    base = stage(Host(), prompts, out, interactive=interactive, ha=fake, redeploys=[])
+    return dataclasses.replace(base, mdns=lambda: [fake.url], fetch=_only_the_fake(fake))
+
+
+@pytest.mark.parametrize("wire", ["no", "yes"])
+def test_an_ha_that_only_answered_on_the_lan_never_receives_the_token_with_no_input(
+    fake_ha: FakeHa, cfg_home: Path, wire: str
+) -> None:
+    """The sole mDNS answer used to get the saved token over a WebSocket auth frame before any confirmation,
+    even with `--ha-wire no --backup skip`. Credentials, not just writes, must not reach it."""
+    out: list[str] = []
+    se = _discovered_stage(fake_ha, Prompts(), interactive=False, out=out)
+    rc = env_stage.run_stage(se, env_stage.parse_stage_options({"--backup": "skip", "--ha-wire": wire}, set()))
+    assert fake_ha.tokens_received() == [] and fake_ha.writes() == []
+    assert rc == (1 if wire == "yes" else 0)
+    if wire == "yes":
+        assert any("only discovered on the network" in line and f"--ha {fake_ha.url}" in line for line in out)
+
+
+def test_an_interactive_user_must_approve_a_discovered_origin_before_the_token_is_sent(
+    fake_ha: FakeHa, ha_dir: Path, cfg_home: Path
+) -> None:
+    out: list[str] = []
+    declined = Prompts("1", "y", "n")  # which HA, "add it?", "send the token to this origin?"
+    se = _discovered_stage(fake_ha, declined, interactive=True, out=out)
+    env_stage.run_stage(se, env_stage.parse_stage_options({"--backup": "skip", "--ha-dir": str(ha_dir)}, set()))
+    assert fake_ha.tokens_received() == [] and not declined.answers
+    assert any("Send your Home Assistant token to it?" in q for q in declined.asked)
+
+    approved = Prompts("1", "y", "y", "y")  # ... then yes to the origin, then "Do that?" for the package
+    se = _discovered_stage(fake_ha, approved, interactive=True, out=out)
+    env_stage.run_stage(se, env_stage.parse_stage_options({"--backup": "skip", "--ha-dir": str(ha_dir)}, set()))
+    assert TOKEN in fake_ha.tokens_received() and fake_ha.entries
+
+
+def test_a_configured_url_is_trusted_without_asking(fake_ha: FakeHa, cfg_home: Path) -> None:
+    out: list[str] = []
+    base = _discovered_stage(fake_ha, Prompts(), interactive=False, out=out)
+    se = dataclasses.replace(base, env={"HA_TOKEN": TOKEN, "HA_URL": fake_ha.url})
+    env_stage.run_stage(se, env_stage.parse_stage_options({"--backup": "skip", "--ha-wire": "no"}, set()))
+    assert TOKEN in fake_ha.tokens_received()  # the user named this origin: HA's backup locations were read
+
+
+# ------------------------------------------------------------------------- the API secret stays private
+
+
+def test_the_api_secret_is_created_private_and_its_token_never_appears_in_a_command_line(
+    tmp_path: Path,
+) -> None:
+    secrets = tmp_path / "ha" / "secrets.yaml"
+    secrets.parent.mkdir()
+    seen: list[tuple[str, str | None]] = []
+    real = backup_setup.local_shell()
+
+    def spy(script: str, stdin: str | None = None) -> tuple[int, str]:
+        seen.append((script, stdin))
+        return real(script, stdin)
+
+    old = os.umask(0o022)  # the umask that made the old `touch` + append world-readable
+    try:
+        assert ha_wire._ensure_secret(spy, str(secrets), lambda: "po_supersecret") == (0, "")
+        assert secrets.stat().st_mode & 0o077 == 0 and "Bearer po_supersecret" in secrets.read_text(encoding="utf-8")
+        assert all("po_supersecret" not in script for script, _ in seen)  # not in argv / ssh command
+        assert any(stdin and "po_supersecret" in stdin for _, stdin in seen)
+        minted: list[str] = []
+
+        def mint() -> str:
+            minted.append("again")
+            return "x"
+
+        assert ha_wire._ensure_secret(spy, str(secrets), mint) == (0, "")
+        assert minted == []  # already there: nothing minted, nothing appended
+        other = tmp_path / "ha" / "existing.yaml"
+        other.write_text("keep: 1\n", encoding="utf-8")
+        other.chmod(0o640)
+        ha_wire._ensure_secret(real, str(other), lambda: "po_second")
+        assert other.stat().st_mode & 0o777 == 0o640  # an existing file keeps the owner's mode
+        assert other.read_text(encoding="utf-8").startswith("keep: 1\n")
+    finally:
+        os.umask(old)
+
+
+# ------------------------------------------------------------------------- activation is retried
+
+
+class _FlakyHa(HaRest):
+    def __init__(self, url: str) -> None:
+        super().__init__(url, TOKEN)
+        self.fail_next_post = True
+
+    def post(self, path: str, body: object = None) -> object:
+        if self.fail_next_post:
+            self.fail_next_post = False
+            raise HaRestError("Home Assistant is unreachable: connection reset")
+        return super().post(path, body)
+
+
+def _install_values() -> dict[str, object]:
+    return {"api_url": "http://10.0.0.9:8765", "target": "default", "subdir": "3d-printops",
+            "keep_daily": 7, "keep_weekly": 4, "keep_monthly": 6}
+
+
+def test_a_package_written_before_an_api_failure_is_activated_by_the_retry(
+    fake_ha: FakeHa, ha_dir: Path
+) -> None:
+    """check_config died after the file landed; the retry saw identical content and returned `unchanged`
+    without validating or reloading, so the schedule was never loaded."""
+    ha = _FlakyHa(fake_ha.url)
+    shell = backup_setup.local_shell()
+    first = ha_wire.install_package(shell, ha, str(ha_dir), REPO, _install_values(), lambda: "po_t")
+    assert first.status == "failed" and "retry" in first.detail
+    assert (ha_dir / "packages" / "printops_backup.yaml").is_file()
+    assert [r for r in fake_ha.requests if r[1] == "/api/config/core/check_config"] == []
+    second = ha_wire.install_package(shell, ha, str(ha_dir), REPO, _install_values(), lambda: "po_t")
+    assert second.status == "unchanged" and "validated and reloaded" in second.detail
+    paths = [r[1] for r in fake_ha.requests if r[0] == "POST"]
+    assert "/api/config/core/check_config" in paths and "/api/services/script/reload" in paths
+
+
+def test_an_identical_package_that_ha_rejects_on_retry_is_reported_not_deleted(
+    fake_ha: FakeHa, ha_dir: Path
+) -> None:
+    ha = HaRest(fake_ha.url, TOKEN)
+    shell = backup_setup.local_shell()
+    assert ha_wire.install_package(shell, ha, str(ha_dir), REPO, _install_values(), lambda: "po_t").status == "done"
+    fake_ha.check_valid = False
+    again = ha_wire.install_package(shell, ha, str(ha_dir), REPO, _install_values(), lambda: "po_t")
+    assert again.status == "failed" and "left in place" in again.detail
+    assert (ha_dir / "packages" / "printops_backup.yaml").is_file()  # only a package THIS call wrote is put back
+
+
+# ------------------------------------------------------------------------- the mDNS parser
+
+
+def _name(s: str) -> bytes:
+    return b"".join(bytes([len(p)]) + p.encode() for p in s.split(".")) + b"\x00"
+
+
+def _returns_quickly(packet: bytes) -> list[str]:
+    result: list[list[str]] = []
+    worker = threading.Thread(target=lambda: result.append(ha_detect.parse_mdns(packet)), daemon=True)
+    worker.start()
+    worker.join(5)
+    assert not worker.is_alive(), "parse_mdns is spinning on this packet"
+    return result[0]
+
+
+def test_a_dns_compression_pointer_loop_is_rejected_not_followed_forever() -> None:
+    import struct
+
+    header = struct.pack(">HHHHHH", 0, 0, 1, 0, 0, 0)
+    assert _returns_quickly(header + b"\xc0\x0c" + struct.pack(">HH", 12, 1)) == []  # points at itself
+    two = header + b"\xc0\x0e\xc0\x0c"  # a -> b -> a
+    assert _returns_quickly(two) == []
+
+
+def test_truncated_dns_names_are_rejected() -> None:
+    import struct
+
+    header = struct.pack(">HHHHHH", 0, 0, 1, 0, 0, 0)
+    assert _returns_quickly(header + b"\x05ab") == []  # label longer than the packet
+    assert _returns_quickly(header + b"\xc0") == []  # pointer cut in half
+    assert _returns_quickly(header + b"\x01a") == []  # no terminating zero
+
+
+def test_a_compressed_srv_target_still_resolves() -> None:
+    """Legitimate compression (the SRV target points back at the A record's name) keeps working."""
+    import socket
+    import struct
+
+    a_record = _name("ha.local") + struct.pack(">HHIH", 1, 1, 120, 4) + socket.inet_aton("192.168.7.7")
+    srv_data = struct.pack(">HHH", 0, 0, 8123) + b"\xc0\x0c"  # target = the name at offset 12
+    srv_record = _name("x._home-assistant._tcp.local") + struct.pack(">HHIH", 33, 1, 120, len(srv_data)) + srv_data
+    packet = struct.pack(">HHHHHH", 0, 0x8400, 0, 2, 0, 0) + a_record + srv_record
+    assert ha_detect.parse_mdns(packet) == ["http://192.168.7.7:8123"]

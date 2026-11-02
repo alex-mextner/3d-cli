@@ -28,7 +28,7 @@ from pathlib import Path
 from errors import InvalidArgument
 
 from printops import backup_setup, ha_detect, ha_locations, ha_wire
-from printops.backup_discovery import Candidate, Discovery, RunHost
+from printops.backup_discovery import Candidate, Discovery, Shell
 from printops.backup_policy import parse_keep
 from printops.backup_setup import SUBDIR, TARGET, BackupContext
 from printops.ha_rest import HaRest, HaRestError
@@ -49,7 +49,8 @@ STAGE_USAGE = """  --backup WHAT        backups of Spoolman + PrintOps: auto (me
                        hand-off prompt for an AI agent or yourself), path:DIR (a directory on the Spoolman host)
   --backup-disk-gb N   size hint (default 512) used only to mark a found disk as LIKELY; nothing is chosen by it
   --allow-same-disk    accept a backup directory on the same disk as the Spoolman data (it is not a backup)
-  --ha WHAT            Home Assistant: auto (detect, ask), skip, or URL (e.g. http://homeassistant.local:8123)
+  --ha WHAT            Home Assistant: auto (detect, ask), skip, or URL (e.g. http://homeassistant.local:8123); the token
+                       goes only to a URL you named (--ha URL, $HA_URL, ha.yaml url:) or approved, never to a discovered one
   --ha-wire ask|yes|no add the Spoolman integration + the 04:00 backup package to HA (ask = confirm; --no-input: yes needed)
   --ha-dir DIR         HA config dir (where configuration.yaml is) for the package;  --ha-ssh USER@HOST  if it is on another host
   --keep SPEC          retention for the HA package, default daily=7,weekly=4,monthly=6;  --backup-at HH:MM  default 04:00"""
@@ -83,7 +84,7 @@ class StageEnv:
     host_names: Sequence[str] = ()  # the Spoolman host name/IP: HA often runs there too
     fetch: ha_detect.Fetch = ha_detect.http_get
     mdns: Callable[[], list[str]] = ha_detect.mdns_browse
-    ha_shell: Callable[[str | None], RunHost] = lambda host: (
+    ha_shell: Callable[[str | None], Shell] = lambda host: (
         backup_setup.ssh_shell(host) if host else backup_setup.local_shell()
     )
     ha_factory: Callable[[str, str], HaRest] = lambda url, token: HaRest(url, token)
@@ -269,6 +270,32 @@ def _ha_url(se: StageEnv, opts: StageOptions) -> str | None:
     )
 
 
+def _trusted_origin(se: StageEnv, opts: StageOptions, url: str) -> bool:
+    """The user NAMED this Home Assistant (`--ha URL`, $HA_URL / $PRINTOPS_HA_URL, `url:` in ha.yaml). A URL that
+    was only discovered (mDNS, homeassistant.local, the Spoolman host) is whatever answered on the LAN: the
+    long-lived token must not be sent to it unless the user approves that origin."""
+    if opts.ha not in ("auto", "skip"):
+        return True
+    named = (se.env.get("HA_URL"), se.env.get("PRINTOPS_HA_URL"), ha_detect.load_ha_config().get("url"))
+    return url.rstrip("/") in {str(u).rstrip("/") for u in named if u}
+
+
+def _origin_approved(se: StageEnv, opts: StageOptions, url: str) -> bool:
+    if _trusted_origin(se, opts, url):
+        return True
+    ctx = se.ctx
+    if not ctx.interactive:
+        ctx.say(
+            f"Home Assistant at {url} was only discovered on the network, not configured: the token is not sent "
+            f"to it. Pass --ha {url} (or set $HA_URL / `url:` in ha.yaml) to trust it."
+        )
+        return False
+    return _yes(
+        ctx,
+        f"{url} was discovered on the network, it is not a URL you configured. Send your Home Assistant token to it?",
+    )
+
+
 def _confirm_wire(
     ctx: BackupContext, opts: StageOptions, url: str, with_backup: bool
 ) -> bool:
@@ -358,6 +385,8 @@ def ha_stage(se: StageEnv, opts: StageOptions, url: str | None, backup_ok: bool)
             "Home Assistant: left alone (nothing was written there). Re-run with --ha-wire yes to add it later."
         )
         return 0
+    if not _origin_approved(se, opts, url):
+        return 1 if opts.ha_wire == "yes" else 0
     token = _ha_token(se, url)
     if token is None:
         return 1 if opts.ha_wire == "yes" else 0
@@ -376,16 +405,19 @@ def ha_stage(se: StageEnv, opts: StageOptions, url: str | None, backup_ok: bool)
         return 1
 
 
-def _ha_backup_candidates(se: StageEnv, url: str | None) -> list[Candidate]:
-    """HA's own backup locations as discovery hints — only with a token that needs no prompt."""
+def _ha_backup_candidates(se: StageEnv, opts: StageOptions, url: str | None) -> list[Candidate]:
+    """HA's own backup locations as discovery hints — only with a token that needs no prompt, and only
+    from an origin the user named (this authenticates, before any confirmation)."""
+    if not url or not _trusted_origin(se, opts, url):
+        return []
     token, _ = ha_detect.resolve_token(se.env, None)
-    return ha_locations.ha_backup_locations(url, token) if url and token else []
+    return ha_locations.ha_backup_locations(url, token) if token else []
 
 
 def run_stage(se: StageEnv, opts: StageOptions) -> int:
     """Home Assistant detection (read-only), backups, then the HA writes. 0 = ok or skipped, 1 = a requested step failed."""
     url = _ha_url(se, opts)
-    se.ctx.ha_candidates = _ha_backup_candidates(se, url)
+    se.ctx.ha_candidates = _ha_backup_candidates(se, opts, url)
     try:
         configured = backup_stage(se.ctx, opts)
     except OSError as e:

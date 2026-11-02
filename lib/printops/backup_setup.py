@@ -28,6 +28,7 @@ from printops.backup_discovery import (
     Candidate,
     Discovery,
     RunHost,
+    Shell,
     describe,
     discover_backup_targets,
 )
@@ -37,10 +38,10 @@ TARGET = "default"
 CONTAINER_ROOT = "/backup"
 
 
-def local_shell() -> RunHost:
-    def run(script: str) -> tuple[int, str]:
+def local_shell() -> Shell:
+    def run(script: str, stdin: str | None = None) -> tuple[int, str]:
         done = subprocess.run(
-            ["bash", "-c", script], capture_output=True, text=True, check=False
+            ["bash", "-c", script], capture_output=True, text=True, check=False, input=stdin
         )
         return done.returncode, done.stdout + (done.stderr if done.returncode else "")
 
@@ -50,10 +51,10 @@ def local_shell() -> RunHost:
 def ssh_shell(
     host: str,
     opts: tuple[str, ...] = ("-o", "BatchMode=yes", "-o", "ConnectTimeout=40"),
-) -> RunHost:
-    def run(script: str) -> tuple[int, str]:
+) -> Shell:
+    def run(script: str, stdin: str | None = None) -> tuple[int, str]:
         done = subprocess.run(
-            ["ssh", *opts, host, script], capture_output=True, text=True, check=False
+            ["ssh", *opts, host, script], capture_output=True, text=True, check=False, input=stdin
         )
         return done.returncode, done.stdout + (done.stderr if done.returncode else "")
 

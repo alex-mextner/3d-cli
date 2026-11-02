@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from printops.backup_discovery import RunHost
+from printops.backup_discovery import RunHost, Shell
 from printops.ha_rest import HaRest, HaRestError
 
 PACKAGE_REL = "integrations/homeassistant/packages/printops_backup.yaml"
@@ -116,14 +116,18 @@ def _write_script(path: str, text: str) -> str:
 
 
 def _ensure_secret(
-    run: RunHost, secrets: str, bearer: Callable[[], str]
+    run: Shell, secrets: str, bearer: Callable[[], str]
 ) -> tuple[int, str]:
-    """Add `printops_api_auth` to secrets.yaml unless it is there; the token is minted only when it is needed."""
-    rc, _ = run(f"touch '{secrets}' && grep -q '^{AUTH_SECRET_NAME}:' '{secrets}'")
+    """Add `printops_api_auth` to secrets.yaml unless it is there; the token is minted only when it is needed.
+
+    The bearer token travels on the script's STDIN (not in argv, where `ps` and ssh logs would show it) and
+    is appended under `umask 077`: a secrets.yaml that did not exist is created 0600, never briefly 0644 (an
+    existing one keeps the mode its owner gave it)."""
+    rc, _ = run(f"[ -f '{secrets}' ] && grep -q '^{AUTH_SECRET_NAME}:' '{secrets}'")
     if rc == 0:
         return 0, ""
     line = f'{AUTH_SECRET_NAME}: "Bearer {bearer()}"'
-    return run(f"printf '\\n%s\\n' '{line}' >> '{secrets}'")
+    return run(f"umask 077; cat >> '{secrets}'", f"\n{line}\n")
 
 
 def plan_install(ha_dir: str, values: Mapping[str, object], at: str) -> list[str]:
@@ -176,8 +180,64 @@ def _restore(run: RunHost, path: str) -> None:
     )
 
 
+def _activate(ha: HaRest) -> tuple[str, str]:
+    """check_config, then the targeted reloads. (status, detail): `valid`, `invalid` or `api-failed`."""
+    try:
+        verdict = ha.post("/api/config/core/check_config")
+        if not isinstance(verdict, dict) or verdict.get("result") != "valid":
+            return "invalid", f"HA check_config rejected the package: {verdict}"
+        missing = _reload(ha)
+    except HaRestError as e:
+        return "api-failed", f"HA API failed: {e.message}"
+    return "valid", ", ".join(missing)
+
+
+def _put_files(
+    run: Shell, path: str, text: str, secrets: str, bearer: Callable[[], str]
+) -> tuple[bool, str]:
+    """Write the package when it differs and make sure the secret exists. (wrote, problem)."""
+    rc, current = run(f"cat '{path}' 2>/dev/null")
+    wrote = not (rc == 0 and current == text)
+    if wrote:
+        rc, out = run(_write_script(path, text))
+        if rc != 0:
+            return False, f"could not write {path}: {out.strip()}"
+    rc, out = _ensure_secret(run, secrets, bearer)
+    if rc != 0:
+        if wrote:
+            _restore(run, path)
+        return wrote, f"could not update secrets.yaml: {out.strip()}"
+    return wrote, ""
+
+
+def _outcome(
+    run: Shell, steps: list[str], path: str, wrote: bool, state: str, detail: str
+) -> WireOutcome:
+    if state == "invalid":
+        if wrote:
+            _restore(run, path)
+        left = f"; the package already on disk is left in place (fix or remove {path})"
+        return WireOutcome("failed", steps, detail + (", put back" if wrote else left))
+    if state == "api-failed":
+        return WireOutcome(
+            "failed", steps, f"package on disk but not activated ({detail}); run again to retry"
+        )
+    if detail:
+        return WireOutcome(
+            "needs-restart",
+            steps,
+            "written and valid; restart Home Assistant once to load: " + detail,
+        )
+    reloaded = ", ".join(r.split(".")[0] for r in RELOADS)
+    if wrote:
+        return WireOutcome("done", steps, f"installed; HA reloaded {reloaded}")
+    return WireOutcome(
+        "unchanged", steps, f"the same package was already installed; HA validated and reloaded {reloaded}"
+    )
+
+
 def install_package(
-    run: RunHost,
+    run: Shell,
     ha: HaRest,
     ha_dir: str,
     repo_root: Path,
@@ -185,6 +245,9 @@ def install_package(
     bearer: Callable[[], str],
     at: str = "04:00:00",
 ) -> WireOutcome:
+    """Write (when it differs), then ALWAYS activate: a file already on disk proves nothing about whether HA
+    loaded it (a previous run may have died between the write and check_config/reload), so an identical
+    package is validated and reloaded again — `unchanged` means "was there and is active now"."""
     steps = plan_install(ha_dir, values, at)
     reason = _refuse_reason(run, ha_dir)
     if reason:
@@ -193,44 +256,11 @@ def install_package(
         (repo_root / PACKAGE_REL).read_text(encoding="utf-8"), values, at
     )
     path = f"{ha_dir}/packages/{PACKAGE_NAME}"
-    rc, current = run(f"cat '{path}' 2>/dev/null")
-    if rc == 0 and current == text:
-        return WireOutcome("unchanged", steps, "the same package is already installed")
-    rc, out = run(_write_script(path, text))
-    if rc != 0:
-        return WireOutcome("failed", steps, f"could not write {path}: {out.strip()}")
-    rc, out = _ensure_secret(run, f"{ha_dir}/secrets.yaml", bearer)
-    if rc != 0:
-        _restore(run, path)
-        return WireOutcome(
-            "failed", steps, f"could not update secrets.yaml: {out.strip()}"
-        )
-    try:
-        verdict = ha.post("/api/config/core/check_config")
-        if not isinstance(verdict, dict) or verdict.get("result") != "valid":
-            _restore(run, path)
-            return WireOutcome(
-                "failed",
-                steps,
-                f"HA check_config rejected the package, put back: {verdict}",
-            )
-        missing = _reload(ha)
-    except HaRestError as e:
-        return WireOutcome(
-            "failed", steps, f"package written, HA API failed: {e.message}"
-        )
-    if missing:
-        return WireOutcome(
-            "needs-restart",
-            steps,
-            "written and valid; restart Home Assistant once to load: "
-            + ", ".join(missing),
-        )
-    return WireOutcome(
-        "done",
-        steps,
-        f"installed; HA reloaded {', '.join(r.split('.')[0] for r in RELOADS)}",
-    )
+    wrote, problem = _put_files(run, path, text, f"{ha_dir}/secrets.yaml", bearer)
+    if problem:
+        return WireOutcome("failed", steps, problem)
+    state, detail = _activate(ha)
+    return _outcome(run, steps, path, wrote, state, detail)
 
 
 # ----------------------------------------------------------------------- Spoolman integration

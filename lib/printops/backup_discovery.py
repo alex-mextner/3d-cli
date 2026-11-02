@@ -25,11 +25,17 @@ import json
 import shlex
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Protocol
 
 RunHost = Callable[
     [str], tuple[int, str]
 ]  # shell script on the Spoolman host -> (exit code, stdout)
+
+
+class Shell(Protocol):
+    """A RunHost that can also feed the script's stdin: a secret goes there, never into argv (`ps`, ssh logs)."""
+
+    def __call__(self, script: str, stdin: str | None = None) -> tuple[int, str]: ...
 
 DEFAULT_HINT_GB = 512
 HINT_TOLERANCE = 0.08

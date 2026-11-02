@@ -149,6 +149,9 @@ yourself), `s` skip. Nothing is pre-selected and discovery never mounts, formats
 directory is bound as `/backup` in the 3d-api container (Spoolman is not restarted), the disk marker `.3d-backup-disk` and
 `backup.yaml` are written, and `3d printops backup selftest` does a real backup, verifies it and restores it into a scratch dir.
 
+Your HA token is sent only to a URL you named (`--ha URL`, `$HA_URL`/`$PRINTOPS_HA_URL`, `url:` in `ha.yaml`); an instance that merely
+answered on the network is asked about first and, with `--no-input`, never receives it.
+
 If Home Assistant answered and you confirm (`--ha-wire ask|yes|no`; `--no-input` needs `yes`), it adds (1) the Spoolman
 integration through HA's config-flow API — Home Assistant core has **no** Spoolman integration, the one that exists is the
 community `Disane87/spoolman-homeassistant` (HACS, restart HA once; if missing you get the install steps and nothing is created) —

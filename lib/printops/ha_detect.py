@@ -143,22 +143,39 @@ def _query() -> bytes:
     return struct.pack(">HHHHHH", 0, 0, 1, 0, 0, 0) + name + struct.pack(">HH", 12, 1)
 
 
+def _pointer(buf: bytes, pos: int) -> int:
+    if pos + 1 >= len(buf):
+        raise ValueError("truncated DNS compression pointer")
+    return ((buf[pos] & 0x3F) << 8) | buf[pos + 1]
+
+
+def _label(buf: bytes, pos: int, n: int) -> str:
+    if pos + 1 + n > len(buf):
+        raise ValueError("truncated DNS label")
+    return buf[pos + 1 : pos + 1 + n].decode("utf-8", "replace")
+
+
 def _read_name(buf: bytes, pos: int) -> tuple[str, int]:
+    """A DNS name at `pos`. Each compression-pointer target is followed at most once: a packet whose
+    pointers loop (`c0 0c` at offset 12 points at itself) or that is cut short raises ValueError instead
+    of spinning — the packet comes from anyone on the LAN."""
     labels: list[str] = []
     jumped_to = -1
+    visited: set[int] = set()
     while pos < len(buf):
         n = buf[pos]
         if n == 0:
-            pos += 1
-            break
+            return ".".join(labels), jumped_to if jumped_to >= 0 else pos + 1
         if n & 0xC0 == 0xC0:
-            if jumped_to < 0:
-                jumped_to = pos + 2
-            pos = ((n & 0x3F) << 8) | buf[pos + 1]
+            jumped_to = pos + 2 if jumped_to < 0 else jumped_to
+            pos = _pointer(buf, pos)
+            if pos in visited:
+                raise ValueError("DNS compression pointer loop")
+            visited.add(pos)
             continue
-        labels.append(buf[pos + 1 : pos + 1 + n].decode("utf-8", "replace"))
+        labels.append(_label(buf, pos, n))
         pos += 1 + n
-    return ".".join(labels), jumped_to if jumped_to >= 0 else pos
+    raise ValueError("truncated DNS name")
 
 
 def parse_mdns(buf: bytes) -> list[str]:
@@ -182,7 +199,7 @@ def parse_mdns(buf: bytes) -> list[str]:
             elif rtype == 1 and rdlen == 4:  # A
                 addrs[name] = socket.inet_ntoa(buf[rdata : rdata + 4])
             pos = rdata + rdlen
-    except (struct.error, IndexError):
+    except (struct.error, IndexError, ValueError):
         return []
     return [f"http://{addrs[h]}:{p}" for h, p in ports.items() if h in addrs]
 

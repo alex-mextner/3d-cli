@@ -4,7 +4,9 @@
 `printops.backup_notify` send: /manifest.json, /api/, /api/config, the config-entries + config-flow API of the
 community `spoolman` integration, /api/config/core/check_config, /api/services/<domain>/<service>, and the
 WebSocket commands backup/agents/info, backup/config/info, supervisor/api. Every request is recorded, so a test
-can assert that a declined flow sent no write (`writes()` is empty).
+can assert that a declined flow sent no write (`writes()` is empty), and `tokens_received()` lists every
+credential a client presented (REST Authorization header or WebSocket auth frame), so a test can prove a
+token never reached an origin it should not have.
 """
 
 from __future__ import annotations
@@ -35,6 +37,7 @@ class FakeHa:
         self.entries: list[dict[str, Any]] = []
         self.requests: list[tuple[str, str, Any]] = []
         self.ws_commands: list[str] = []
+        self.presented: list[str] = []
         outer = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -70,6 +73,8 @@ class FakeHa:
                 body = self._body()
                 path = self.path.split("?")[0]
                 outer.requests.append((self.command, self.path, body))
+                if self.headers.get("Authorization"):
+                    outer.presented.append(self.headers["Authorization"].removeprefix("Bearer "))
                 if path == "/manifest.json":
                     return self._send(200, {"name": "Home Assistant"})
                 if path == "/api/websocket":
@@ -184,6 +189,7 @@ class FakeHa:
                     return
                 msg = json.loads(data)
                 if not authed:
+                    self.presented.append(str(msg.get("access_token")))
                     authed = msg.get("access_token") == TOKEN
                     send({"type": "auth_ok" if authed else "auth_invalid"})
                     continue
@@ -219,6 +225,9 @@ class FakeHa:
         }
 
     # ------------------------------------------------------------------------- assertions
+
+    def tokens_received(self) -> list[str]:
+        return list(self.presented)
 
     def writes(self) -> list[tuple[str, str, Any]]:
         return [r for r in self.requests if r[0] != "GET"]
