@@ -309,8 +309,23 @@ def _spoolman_health(client: ApiClient, first_error: str) -> Health:
     )
 
 
+def _write_private(path: Path, text: str) -> None:
+    """Atomically write `text` to `path`, mode 0600 from the moment the file exists (mkstemp)."""
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+
 def write_config(api: str, token: str | None, say: Callable[[str], None]) -> Path:
-    """Merge api/token into printops.yaml (atomic, 0600); keep a different old one as .bak."""
+    """Merge api/token into printops.yaml (atomic, 0600); keep a different old one as .bak.
+
+    A token belongs to the endpoint it was issued for: moving to another api without a
+    replacement token drops the old one instead of sending it to the new host."""
     import yaml
 
     path = config_path()
@@ -320,23 +335,17 @@ def write_config(api: str, token: str | None, say: Callable[[str], None]) -> Pat
         old = path.read_text(encoding="utf-8")
         loaded = yaml.safe_load(old) or {}
         data = dict(loaded) if isinstance(loaded, dict) else {}
-        if data.get("api") != api or (token and data.get("token") != token):
+        old_api = str(data.get("api") or "").rstrip("/")
+        if old_api != api.rstrip("/") and not token:
+            data.pop("token", None)
+        if old_api != api.rstrip("/") or (token and data.get("token") != token):
             bak = path.with_name(path.name + ".bak")
-            bak.write_text(old, encoding="utf-8")
-            bak.chmod(0o600)
+            _write_private(bak, old)
             say(f"kept the previous config as {bak}")
     data["api"] = api
     if token:
         data["token"] = token
-    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".printops.yaml.")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            yaml.safe_dump(data, fh, default_flow_style=False, sort_keys=False)
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, path)
-    except BaseException:
-        Path(tmp).unlink(missing_ok=True)
-        raise
+    _write_private(path, yaml.safe_dump(data, default_flow_style=False, sort_keys=False))
     return path
 
 
@@ -437,6 +446,10 @@ def _repo_root(env: Env) -> Path:
     )
 
 
+TOKEN_NAME_MAX = 64  # printops.tokens.NAME_RE: [a-z0-9][a-z0-9_.-]{0,63}
+TOKEN_STAMP_LEN = len("20260101000000")
+
+
 def _token_name() -> str:
     import socket
 
@@ -444,7 +457,8 @@ def _token_name() -> str:
         re.sub(r"[^a-z0-9._-]", "-", socket.gethostname().split(".")[0].lower())
         or "host"
     )
-    return f"cli-{host}-{time.strftime('%Y%m%d%H%M%S')}"
+    room = TOKEN_NAME_MAX - len("cli--") - TOKEN_STAMP_LEN  # a 63-char hostname must still mint
+    return f"cli-{host[:room]}-{time.strftime('%Y%m%d%H%M%S')}"
 
 
 def mint_token(host: str, env: Env) -> str:
@@ -501,6 +515,21 @@ def _warn_if_busy(pr: HostProbe, label: str, env: Env, opts: Options) -> None:
                           remediation=["Pick another target, or run again when its load is lower."])
 
 
+def _http_host(host: str, env: Env) -> str:
+    """The address an HTTP client reaches the ssh target `host` on: a `Host` alias that only ssh
+    knows resolves through ssh's own config (`ssh -G`), a plain name or address comes back as is."""
+    name = host.rsplit("@", 1)[-1]
+    try:
+        r = env.runner(["ssh", "-G", host], capture_output=True, text=True, check=False, timeout=15)
+    except (OSError, subprocess.TimeoutExpired):
+        return name
+    for line in (r.stdout or "").splitlines() if r.returncode == 0 else []:
+        key, _, value = line.partition(" ")
+        if key == "hostname" and value.strip():
+            return value.strip()
+    return name
+
+
 def install(host: str, label: str, env: Env, opts: Options) -> tuple[str, str | None]:
     """Deploy to `host` ("" = this machine); returns (api_url, token or None on --dry-run)."""
     pr = probe(host, env)
@@ -509,8 +538,12 @@ def install(host: str, label: str, env: Env, opts: Options) -> tuple[str, str | 
     _warn_if_busy(pr, label, env, opts)
     root = _repo_root(env)
     base = str(paths.data_dir() / "printops") if not host else f"{pr.home}/printops"
+    api_url = None
+    if host:
+        http_host = _http_host(host, env)
+        api_url = f"http://{f'[{http_host}]' if ':' in http_host else http_host}:{deploy.API_PORT}"
     cfg = deploy.DeployConfig(repo_root=root, host=host, remote_dir=base, backup_dir=f"{base}/backup",
-                              version=deploy.git_version(root), timer_required=False)
+                              api_url=api_url, version=deploy.git_version(root), timer_required=False)
     steps = deploy.plan(cfg, dry_run=opts.dry_run)
     env.say(f"deploy printops {cfg.version} -> {host or 'this machine'}:{base}" + ("  [dry run]" if opts.dry_run else ""))
     try:

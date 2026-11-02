@@ -79,7 +79,8 @@ Behaviour:
   same reason; `--spoolman script` and `--api URL` still run. A configured but dead api is an
   error (exit 1) with the commands that fix it.
 - **Config last.** `printops.yaml` is written only after the service is healthy and the token was
-  accepted; a different old file is kept as `printops.yaml.bak` (mode 600).
+  accepted; a different old file is kept as `printops.yaml.bak` (mode 600). Pointing `--api` at another
+  server without `--token` drops the old token: it belongs to the old server and is never sent to the new one.
 - **Nothing is chosen for you.** The menu has no default and no host is contacted before you pick
   it; then its load, cores, RAM, architecture and docker are shown, and a busy host asks first.
 - **Which printers can host it.** Only registry printers that speak Moonraker and that 3d may
@@ -95,7 +96,9 @@ Behaviour:
   `~/printops`), waits for health, mints a token and prints both URLs plus the
   `3d init --env --api URL --token TOKEN` line. Re-runs change nothing (`--dry-run` checks
   prerequisites). Knobs: `PRINTOPS_DIR`, `PRINTOPS_SPOOLMAN_PORT`, `PRINTOPS_API_PORT`,
-  `PRINTOPS_CONTAINER_PREFIX`, `SPOOLMAN_ONLY=1`, `TOKEN_NAME` (header of the script). Spoolman has no
+  `PRINTOPS_CONTAINER_PREFIX`, `PRINTOPS_SPOOLMAN_CORS_ORIGIN` (default: Spoolman's own address only,
+  never `*`; add your Fluidd/Mainsail origins), `SPOOLMAN_ONLY=1`, `TOKEN_NAME` (header of the script).
+  A relative `PRINTOPS_DIR` is taken from the directory you run the script in. Spoolman has no
   auth: keep its port inside the LAN/VPN.
 
 Exit codes: 0 configured / skipped / already configured, 1 a step or the health check failed,

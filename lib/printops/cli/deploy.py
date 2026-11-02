@@ -38,6 +38,10 @@ Examples:
   3d printops deploy --host ultra@odroidn2 --api http://100.116.57.66:8765"""
 
 
+def _absolute(path: str) -> str:
+    return os.path.abspath(os.path.expanduser(path))
+
+
 def _config(p: Parsed, root: Path) -> deploy.DeployConfig:
     if "--local" not in p.flags:
         return deploy.DeployConfig(
@@ -51,9 +55,10 @@ def _config(p: Parsed, root: Path) -> deploy.DeployConfig:
     if "--host" in p.opts:
         raise UsageError("--local and --host are exclusive", command="printops deploy",
                          remediation=["Use --local for this machine, --host USER@HOST for a remote one."])
-    base = p.opts.get("--dir") or str(paths.data_dir() / "printops")
+    # compose resolves bind sources against services/3d-api/, not the cwd: hand it absolute paths
+    base = _absolute(p.opts.get("--dir") or str(paths.data_dir() / "printops"))
     return deploy.DeployConfig(repo_root=root, host="", remote_dir=base,
-                               backup_dir=p.opts.get("--backup-dir") or f"{base}/backup",
+                               backup_dir=_absolute(p.opts.get("--backup-dir") or f"{base}/backup"),
                                api_url=p.opts.get("--api"), version=deploy.git_version(root), timer_required=False)
 
 

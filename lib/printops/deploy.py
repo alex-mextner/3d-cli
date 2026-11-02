@@ -103,11 +103,9 @@ def _mkdirs_script(cfg: DeployConfig) -> str:
 def _compose_script(cfg: DeployConfig, src: str) -> str:
     q = shlex.quote
     d, b = cfg.remote_dir, cfg.backup_dir
-    ports = "".join(
-        f" {name}={port}" for name, port, default in
-        (("PRINTOPS_API_PORT", cfg.api_port, API_PORT), ("PRINTOPS_SPOOLMAN_PORT", cfg.spoolman_port, SPOOLMAN_PORT))
-        if port != default
-    )
+    # Always explicit: a default left to compose would be overridden by the caller's own
+    # PRINTOPS_*_PORT environment while cfg.health_url still polls cfg.api_port.
+    ports = f" PRINTOPS_API_PORT={cfg.api_port} PRINTOPS_SPOOLMAN_PORT={cfg.spoolman_port}"
     return (
         f"cd {q(src)} && PRINTOPS_VERSION={q(cfg.version)} PRINTOPS_DATA_DIR={q(d + '/data')}"
         f" PRINTOPS_BACKUP_DIR={q(b)} PRINTOPS_GCODE_HOST_DIR={q(d + '/gcodes')}"

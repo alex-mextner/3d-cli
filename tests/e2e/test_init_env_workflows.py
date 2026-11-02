@@ -188,6 +188,34 @@ def test_connecting_to_a_running_service_writes_the_config_only_when_it_answers(
         svc.close()
 
 
+def test_moving_to_a_new_server_does_not_carry_the_old_token_along(tmp_path: Path) -> None:
+    """A user who re-runs `3d init --env --api NEW` without a token ends with a config that no longer holds the
+    old server's bearer token, so the next printops command cannot send it to the new host."""
+    svc = FakeService()
+    try:
+        cfg = _config(tmp_path)
+        cfg.write_text("api: http://10.255.255.1:8765\ntoken: po_oldserver\n", encoding="utf-8")
+        r = run_cli(tmp_path, "init", "--env", "--no-input", "--api", svc.url)
+        assert r.returncode == 0, r.stderr
+        written = cfg.read_text(encoding="utf-8")
+        assert f"api: {svc.url}" in written and "po_oldserver" not in written and "token" not in written
+        assert cfg.stat().st_mode & 0o777 == 0o600
+        bak = cfg.with_name("printops.yaml.bak")
+        assert "po_oldserver" in bak.read_text(encoding="utf-8") and bak.stat().st_mode & 0o777 == 0o600
+    finally:
+        svc.close()
+
+
+def test_a_relative_deploy_dir_is_shown_as_the_absolute_path_compose_will_mount(tmp_path: Path) -> None:
+    """A user typing `3d printops deploy --local --dry-run --dir ./state` sees the plan use the absolute directory
+    under the folder they ran it in, not a path compose would resolve inside the checkout."""
+    r = run_cli(tmp_path, "printops", "deploy", "--local", "--dry-run", "--dir", "./state")
+    assert r.returncode == 0, r.stderr
+    state = tmp_path.resolve() / "state"
+    assert f"PRINTOPS_DATA_DIR={state}/data" in r.stdout and "=./state" not in r.stdout
+    assert not state.exists()
+
+
 def test_option_mistakes_exit_2_with_the_accepted_values(tmp_path: Path) -> None:
     """A user who mistypes `--spoolman` or combines clashing flags gets exit 2 and the accepted values on stderr."""
     bad = run_cli(tmp_path, "init", "--env", "--no-input", "--spoolman", "cloud")

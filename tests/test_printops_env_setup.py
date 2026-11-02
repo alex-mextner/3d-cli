@@ -17,7 +17,7 @@ from errors import InvalidArgument, ThreeDError, UsageError
 from printops_env_fakes import GOOD_TOKEN, FakeService
 
 from printops import deploy, env_setup
-from printops.client import config_path
+from printops.client import config_path, load_config
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -84,11 +84,19 @@ def service() -> Iterator[FakeService]:
 class Recorder:
     """Stands in for subprocess.run: records argv, answers probes/token mints, never executes."""
 
-    def __init__(self, probe_out: str = PROBE_OK) -> None:
+    def __init__(
+        self, probe_out: str = PROBE_OK, ssh_hostnames: dict[str, str] | None = None
+    ) -> None:
         self.calls: list[list[str]] = []
+        self.ssh_queries: list[list[str]] = []  # `ssh -G HOST` lookups, kept out of `calls`
         self.probe_out = probe_out
+        self.ssh_hostnames = ssh_hostnames or {}  # ssh target -> HostName of the ssh config
 
     def __call__(self, argv: list[str], **_kw: Any) -> subprocess.CompletedProcess[str]:
+        if argv[:2] == ["ssh", "-G"]:
+            self.ssh_queries.append(list(argv))
+            name = self.ssh_hostnames.get(argv[2], argv[2].rsplit("@", 1)[-1])
+            return subprocess.CompletedProcess(argv, 0, f"user me\nhostname {name}\nport 22\n", "")
         self.calls.append(list(argv))
         script = argv[-1]
         if "token create" in script:
@@ -303,6 +311,46 @@ def test_a_different_old_config_is_kept_as_bak(
     assert service.url in old.read_text()
 
 
+def test_moving_to_another_api_drops_the_old_token(
+    cfg_home: Path, service: FakeService
+) -> None:
+    old = write_cfg("http://10.0.0.99:8765", "po_old")
+    env, _, _, _ = make_env(cfg_home)
+    assert env_setup.run(["--no-input", "--api", service.url], env) == 0  # no --token
+    assert "po_old" not in old.read_text()  # never sent to the new host
+    assert load_config() == (service.url, None)
+    assert "po_old" in old.with_name("printops.yaml.bak").read_text()  # still recoverable
+
+
+def test_the_same_api_without_a_token_keeps_the_token(
+    cfg_home: Path, service: FakeService
+) -> None:
+    old = write_cfg(service.url, GOOD_TOKEN)
+    env_setup.write_config(service.url + "/", None, lambda _m: None)  # same endpoint, spelled with a slash
+    assert load_config() == (service.url + "/", GOOD_TOKEN) and GOOD_TOKEN in old.read_text()
+
+
+def test_config_and_bak_are_private_from_the_moment_they_exist(
+    cfg_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    old = write_cfg("http://10.0.0.99:8765", "po_old")
+    seen: list[tuple[str, int]] = []
+    real_replace = os.replace
+
+    def replace(src: str | Path, dst: str | Path) -> None:
+        seen.append((Path(dst).name, os.stat(src).st_mode & 0o777))  # before it has its final name
+        real_replace(src, dst)
+
+    monkeypatch.setattr(env_setup.os, "replace", replace)
+    previous = os.umask(0o022)
+    try:
+        env_setup.write_config("http://10.0.0.5:8765", GOOD_TOKEN, lambda _m: None)
+    finally:
+        os.umask(previous)
+    assert sorted(seen) == [("printops.yaml", 0o600), ("printops.yaml.bak", 0o600)]
+    assert (old.with_name("printops.yaml.bak").stat().st_mode & 0o777) == 0o600
+
+
 def test_a_bare_spoolman_answers_the_fallback_health(cfg_home: Path) -> None:
     svc = FakeService(api=False)
     try:
@@ -505,6 +553,44 @@ def test_printer_install_uses_registry_host_and_ssh_user(
     assert "api: http://10.9.9.3:8765" in config_path().read_text()
 
 
+def test_an_ssh_only_alias_is_resolved_for_the_health_check_and_the_config(
+    cfg_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    log: list[str] = []
+    _patch_health(monkeypatch, log)
+    rec = Recorder(ssh_hostnames={"me@printops-server": "192.0.2.10"})  # the alias is not in DNS
+    env, out, _, drec = make_env(cfg_home, runner=rec)
+    assert env_setup.run(["--no-input", "--spoolman", "ssh:me@printops-server"], env) == 0
+    assert rec.ssh_queries == [["ssh", "-G", "me@printops-server"]]
+    assert log == ["wait http://192.0.2.10:8765", f"check http://192.0.2.10:8765 {GOOD_TOKEN}"]
+    assert "api: http://192.0.2.10:8765" in config_path().read_text()
+    assert "printops-server" not in config_path().read_text()
+    assert any(c[0] == "rsync" and c[-1].startswith("me@printops-server:") for c in drec.calls)  # ssh keeps the alias
+
+
+def test_http_host_falls_back_to_the_ssh_target_name_and_brackets_ipv6(cfg_home: Path) -> None:
+    class Failing:
+        def __call__(self, argv: list[str], **_kw: Any) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(argv, 255, "", "ssh: bad config")
+
+    env, _, _, _ = make_env(cfg_home, runner=Failing())
+    assert env_setup._http_host("me@nas.lan", env) == "nas.lan"
+    env6, _, _, _ = make_env(cfg_home, runner=Recorder(ssh_hostnames={"v6": "2001:db8::7"}))
+    assert env_setup._http_host("v6", env6) == "2001:db8::7"
+
+
+def test_token_names_stay_within_the_token_name_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    import socket
+
+    from printops.tokens import NAME_RE
+
+    for length in (1, 45, 46, 63):  # 46 chars used to give a 65-char name
+        monkeypatch.setattr(socket, "gethostname", lambda n=length: "a" * n)
+        name = env_setup._token_name()
+        assert NAME_RE.match(name) and len(name) <= 64, (length, name)
+        assert name.startswith("cli-a") and name[-14:].isdigit()
+
+
 def test_u1_is_possible_but_only_with_the_explicit_flag(
     cfg_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -548,9 +634,7 @@ def test_odroid_deploy_plan_keeps_its_shape_and_defaults(tmp_path: Path) -> None
         "ssh",
     ] and cfg.health_url == "http://192.168.0.39:8765"
     compose = steps[2].argv[-1]
-    assert (
-        "PRINTOPS_API_PORT" not in compose and "PRINTOPS_SPOOLMAN_PORT" not in compose
-    )  # default ports: no override
+    assert "PRINTOPS_API_PORT=8765" in compose and "PRINTOPS_SPOOLMAN_PORT=7912" in compose
     assert (
         "PRINTOPS_GCODE_HOST_DIR=/home/ultra/printops/gcodes" in compose
     )  # = the compose default
@@ -575,6 +659,46 @@ def test_local_deploy_plan_and_nondefault_ports(tmp_path: Path) -> None:
     )
     assert "|| echo 'note: no systemd --user" in steps[2].argv[-1]
     assert cfg.health_url == "http://127.0.0.1:18765"
+
+
+def test_compose_publishes_the_port_the_health_check_polls(tmp_path: Path) -> None:
+    """A caller's own PRINTOPS_API_PORT must not move the published port away from health_url."""
+    from printops_env_fakes import fake_docker_bin
+
+    cfg = deploy.DeployConfig(
+        repo_root=tmp_path, host="", remote_dir=str(tmp_path / "p"),
+        backup_dir=str(tmp_path / "p" / "backup"), timer_required=False,
+    )
+    step = next(s for s in deploy.plan(cfg) if "docker compose" in s.argv[-1])
+    env = {
+        **os.environ,
+        "PATH": f"{fake_docker_bin(tmp_path)}{os.pathsep}{os.environ['PATH']}",
+        "FAKE_LOG": str(tmp_path / "calls.log"),
+        "PRINTOPS_API_PORT": "18765",
+        "PRINTOPS_SPOOLMAN_PORT": "17912",
+    }
+    done = subprocess.run(step.argv, env=env, capture_output=True, text=True, check=False)
+    assert done.returncode == 0, done.stderr
+    calls = (tmp_path / "calls.log").read_text()
+    assert "PRINTOPS_API_PORT=8765" in calls and "PRINTOPS_SPOOLMAN_PORT=7912" in calls
+    assert "18765" not in calls and cfg.health_url == "http://127.0.0.1:8765"
+
+
+def test_local_deploy_hands_compose_absolute_dirs_for_relative_options(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--dir ./state` is prepared where it was typed; compose resolves bind sources against
+    services/3d-api/, so both must see the same absolute directory."""
+    from printops.cli import deploy as deploy_cli
+
+    monkeypatch.chdir(tmp_path)
+    assert deploy_cli.run(["--local", "--dry-run", "--dir", "./state", "--backup-dir", "bk"]) == 0
+    shown = capsys.readouterr().out
+    state = str(tmp_path.resolve() / "state")
+    assert f"PRINTOPS_DATA_DIR={state}/data" in shown
+    assert f"mkdir -p {state}/data/api" in shown
+    assert f"PRINTOPS_BACKUP_DIR={tmp_path.resolve()}/bk" in shown
+    assert " ./state" not in shown and "=./state" not in shown
 
 
 def test_compose_knobs_default_to_the_odroid_values() -> None:
