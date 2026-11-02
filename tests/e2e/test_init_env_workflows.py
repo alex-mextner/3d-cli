@@ -42,6 +42,7 @@ def _config(tmp_path: Path) -> Path:
 
 
 def test_init_help_points_at_the_environment_stage(tmp_path: Path) -> None:
+    """A user reading `3d init --help` is pointed at `3d init --env`, whose own help lists every environment flag."""
     plain = run_cli(tmp_path, "init", "--help")
     assert plain.returncode == 0 and "3d init --env" in plain.stdout
     env = run_cli(tmp_path, "init", "--env", "--help")
@@ -61,6 +62,7 @@ def test_init_help_points_at_the_environment_stage(tmp_path: Path) -> None:
 
 
 def test_a_configured_machine_is_left_alone(tmp_path: Path) -> None:
+    """A user re-running `3d init --env` on an already configured machine sees it reported as configured and nothing is rewritten."""
     svc = FakeService()
     try:
         cfg = _config(tmp_path)
@@ -78,6 +80,7 @@ def test_a_configured_machine_is_left_alone(tmp_path: Path) -> None:
 def test_an_unconfigured_agent_run_reports_the_commands_and_installs_nothing(
     tmp_path: Path,
 ) -> None:
+    """An agent running `3d init --env --no-input` on an unconfigured machine gets the commands to run and nothing is installed."""
     fleet = tmp_path / "fleet.yaml"
     fleet.write_text(FLEET, encoding="utf-8")
     r = run_cli(
@@ -101,6 +104,7 @@ def test_an_unconfigured_agent_run_reports_the_commands_and_installs_nothing(
 def test_the_standalone_script_is_generated_even_on_a_configured_machine(
     tmp_path: Path,
 ) -> None:
+    """A user asking for `--script-out` gets the standalone installer script even when the machine is already configured."""
     svc = FakeService()
     try:
         _config(tmp_path).write_text(
@@ -133,6 +137,7 @@ def test_the_standalone_script_is_generated_even_on_a_configured_machine(
 def test_connecting_to_a_running_service_writes_the_config_only_when_it_answers(
     tmp_path: Path,
 ) -> None:
+    """A user pointing `3d init --env` at a running service gets the config written only after the health check answers."""
     dead = FakeService()
     dead_url = dead.url
     dead.close()
@@ -184,8 +189,10 @@ def test_connecting_to_a_running_service_writes_the_config_only_when_it_answers(
 
 
 def test_option_mistakes_exit_2_with_the_accepted_values(tmp_path: Path) -> None:
+    """A user who mistypes `--spoolman` or combines clashing flags gets exit 2 and the accepted values on stderr."""
     bad = run_cli(tmp_path, "init", "--env", "--no-input", "--spoolman", "cloud")
-    assert bad.returncode == 2 and "printer:NAME" in bad.stderr
+    assert bad.returncode == 2
+    assert "printer:NAME" in bad.stderr
     clash = run_cli(
         tmp_path,
         "init",
@@ -196,12 +203,14 @@ def test_option_mistakes_exit_2_with_the_accepted_values(tmp_path: Path) -> None
         "--spoolman",
         "local",
     )
-    assert clash.returncode == 2 and "cannot be combined" in clash.stderr
+    assert clash.returncode == 2
+    assert "cannot be combined" in clash.stderr
 
 
 def test_printops_deploy_local_dry_run_prints_the_plan_and_runs_nothing(
     tmp_path: Path,
 ) -> None:
+    """A user running `3d printops deploy --local --dry-run` sees the plan for this machine and nothing is run or created."""
     base = tmp_path / "printops"
     r = run_cli(
         tmp_path, "printops", "deploy", "--local", "--dry-run", "--dir", str(base)
