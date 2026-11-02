@@ -1145,6 +1145,22 @@ def test_redeploy_retire_step_survives_a_host_without_systemd(tmp_path: Path) ->
     assert not (units / "printops-backup.timer").exists()
 
 
+STAGE_ONLY = ["--stage-only", "--no-input", "--spoolman", "local", "--backup", "path:/mnt/backup", "--ha", "skip"]
+
+
+def test_stage_only_dry_run_runs_nothing_at_all(cfg_home: Path, stage_calls: list[dict[str, Any]]) -> None:
+    """`--stage-only --dry-run` used to skip the install path's dry-run check and register the target, recreate
+    the 3d-api container and run the selftest."""
+    env, out, rec, drec = make_env(cfg_home)
+    assert env_setup.run([*STAGE_ONLY, "--dry-run"], env) == 0
+    assert stage_calls == [] and not rec.calls and not drec.calls and not config_path().exists()
+    assert any("dry run" in line and "nothing was probed, written or changed" in line for line in out)
+
+    env, out, rec, _ = make_env(cfg_home)  # the same command without --dry-run does reach the stage
+    assert env_setup.run(STAGE_ONLY, env) == 0
+    assert len(stage_calls) == 1
+
+
 def test_local_deploy_hands_compose_absolute_dirs_for_relative_options(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

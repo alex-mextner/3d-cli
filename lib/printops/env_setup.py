@@ -119,6 +119,7 @@ Options:
                      --bind 0.0.0.0 or one LAN address), 0.0.0.0 for ssh/printer hosts and for `script`
   --dry-run          install targets only (local, printer:NAME, ssh:USER@HOST): print the steps (rsync dry run),
                      change nothing; refused with --api and script, which would write a file
+                     (with --stage-only: runs nothing)
   --allow-discouraged  --no-input only: accept a "possible but not recommended" printer host
   --no-input, --yes, -y  never prompt, never install unless an explicit target is named
   --stage-only       skip the install: only the backup + Home Assistant stage below, for a stack that already runs
@@ -1042,6 +1043,10 @@ def _stage_only(target: Target, opts: Options, env: Env) -> int:
     if target.kind not in INSTALL_KINDS:
         raise UsageError("--stage-only needs --spoolman local|printer:NAME|ssh:USER@HOST (where Spoolman runs)",
                          command=CLI_NAME)
+    if opts.dry_run:  # the stage registers targets, runs compose and writes to HA: a dry run runs none of it
+        env.say("dry run: --stage-only would look for backup disks and Home Assistant (read-only), then ask before "
+                "every write; nothing was probed, written or changed")
+        return 0
     host, label = resolve_host(target, candidates(), opts)
     pr = probe(host, env)
     base = str(paths.data_dir() / "printops") if not host else f"{pr.home}/printops"
