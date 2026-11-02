@@ -144,9 +144,16 @@ def _yes(ctx: BackupContext, question: str) -> bool:
 
 
 def _same_disk(ctx: BackupContext, path: str) -> bool:
+    """`path` and the Spoolman data sit on the same filesystem device OR on partitions/volumes of one
+    physical disk (lsblk -s walks a device up to its `disk` ancestors); a copy there dies with the data."""
+    q = shlex.quote
     rc, out = ctx.run(
-        f"[ \"$(df -P {shlex.quote(path)} | tail -n 1 | cut -d' ' -f1)\" = "
-        f"\"$(df -P {shlex.quote(ctx.data_dir)} | tail -n 1 | cut -d' ' -f1)\" ] && echo same"
+        "dev() { df -P \"$1\" | tail -n 1 | cut -d' ' -f1; }\n"
+        "disks() { lsblk -s -n -r -o NAME,TYPE \"$1\" 2>/dev/null | awk '$2 == \"disk\" { print $1 }'; }\n"
+        f"a=\"$(dev {q(path)})\"; b=\"$(dev {q(ctx.data_dir)})\"\n"
+        "if [ -n \"$a\" ] && [ \"$a\" = \"$b\" ]; then echo same; else\n"
+        "  for x in $(disks \"$a\"); do for y in $(disks \"$b\"); do [ \"$x\" = \"$y\" ] && echo same; done; done\n"
+        "fi"
     )
     return rc == 0 and "same" in out
 

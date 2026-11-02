@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -644,3 +645,41 @@ def test_stage_flag_validation() -> None:
     assert (
         parsed.hint_gb == 256 and parsed.allow_same_disk and parsed.backup == "path:/x"
     )
+
+
+@pytest.fixture
+def fake_block_tools(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`df` + `lsblk -s` for: /srv/data on sda1, /mnt/second on sda2 (same disk sda), /mnt/other on sdb1."""
+    bin_dir = tmp_path / "blockbin"
+    bin_dir.mkdir()
+    (bin_dir / "df").write_text(
+        "#!/bin/sh\necho 'Filesystem 1024-blocks Used Available Capacity Mounted on'\n"
+        'case "$2" in\n  /srv/data*) echo "/dev/sda1 1 1 1 1% /srv/data";;\n'
+        '  /mnt/second*) echo "/dev/sda2 1 1 1 1% /mnt/second";;\n  *) echo "/dev/sdb1 1 1 1 1% /mnt/other";;\nesac\n',
+        encoding="utf-8",
+    )
+    (bin_dir / "lsblk").write_text(
+        '#!/bin/sh\nfor last; do :; done\ncase "$last" in\n'
+        "  /dev/sda1) printf 'sda1 part\\nsda disk\\n';;\n  /dev/sda2) printf 'sda2 part\\nsda disk\\n';;\n"
+        "  /dev/sdb1) printf 'sdb1 part\\nsdb disk\\n';;\nesac\n",
+        encoding="utf-8",
+    )
+    for tool in bin_dir.iterdir():
+        tool.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+
+
+def _stage_ctx(host: backup_setup.RunHost) -> BackupContext:
+    return BackupContext(
+        run=host, where="this machine", data_dir="/srv/data", container="printops-api",
+        redeploy=lambda _d: None, ask=lambda _q: "", say=lambda _m: None, interactive=False,
+    )
+
+
+def test_a_backup_dir_on_another_partition_of_the_data_disk_counts_as_the_same_disk(
+    fake_block_tools: None,
+) -> None:
+    ctx = _stage_ctx(backup_setup.local_shell())
+    assert env_stage._same_disk(ctx, "/srv/data/backup")  # the same filesystem
+    assert env_stage._same_disk(ctx, "/mnt/second")  # sda2 vs sda1: one physical disk
+    assert not env_stage._same_disk(ctx, "/mnt/other")  # sdb: a real second disk

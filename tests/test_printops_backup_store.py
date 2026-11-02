@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import datetime
 import gzip
+import hashlib
+import json
 import sqlite3
 from pathlib import Path
 
@@ -303,3 +305,90 @@ def test_restore_refuses_a_set_that_fails_verification(tmp_path: Path) -> None:
     with pytest.raises(BackupBroken, match="not restorable"):
         store.restore_set(info, tmp_path / "out")
     assert not (tmp_path / "out").exists()
+
+
+def _rewrite_manifest(info: store.SetInfo, edit: object) -> None:
+    path = info.path / store.MANIFEST
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    edit(manifest)  # type: ignore[operator]
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+
+
+@pytest.mark.parametrize("kind", ["parent", "absolute", "nested", "item-name"])
+def test_a_manifest_cannot_name_a_path_outside_its_set(tmp_path: Path, kind: str) -> None:
+    """A hostile set: the manifest points at a file outside the set dir whose checksum matches. verify and
+    restore must refuse it, and nothing may be written to the escaped destination."""
+    root = disk(tmp_path)
+    info = store.write_set(root, sources(tmp_path))
+    victim = tmp_path / "victim" / ".ssh"
+    victim.mkdir(parents=True)
+    payload = tmp_path / "payload.bin"
+    payload.write_bytes(b"ssh-ed25519 attacker\n")
+    digest = hashlib.sha256(payload.read_bytes()).hexdigest()
+    ref = {"parent": "../../payload.bin", "absolute": str(payload), "nested": "sub/payload.bin",
+           "item-name": "tokens.json"}[kind]
+
+    def edit(m: dict[str, object]) -> None:
+        items = m["items"]
+        assert isinstance(items, dict)
+        item = items["tokens"]
+        item.update(file=ref, sha256=digest)
+        if kind == "item-name":
+            items["../../victim/.ssh/authorized_keys"] = items.pop("tokens")
+
+    _rewrite_manifest(info, edit)
+    info = store.SetInfo(info.name, info.path, info.created, json.loads((info.path / store.MANIFEST).read_text()))
+    assert any("outside the set" in p or "not a regular file" in p for p in store.verify_dir(info.path))
+    into = tmp_path / "victim" / "restore"
+    with pytest.raises(BackupBroken, match="not restorable"):
+        store.restore_set(info, into)
+    assert list(victim.iterdir()) == [] and not into.exists()
+
+
+def test_a_set_file_that_is_a_link_out_of_the_set_is_not_restorable(tmp_path: Path) -> None:
+    info = store.write_set(disk(tmp_path), sources(tmp_path))
+    secret = tmp_path / "secret.json"
+    secret.write_text('{"tokens": []}', encoding="utf-8")  # same bytes: the checksum still matches
+    (info.path / "tokens.json").unlink()
+    (info.path / "tokens.json").symlink_to(secret)
+    assert any("not a regular file inside the set" in p for p in store.verify_dir(info.path))
+    with pytest.raises(BackupBroken, match="not restorable"):
+        store.restore_set(info, tmp_path / "out")
+
+
+def test_a_non_mapping_manifest_item_is_a_problem_not_a_crash(tmp_path: Path) -> None:
+    info = store.write_set(disk(tmp_path), sources(tmp_path))
+    _rewrite_manifest(info, lambda m: m["items"].update(tokens="oops"))  # type: ignore[attr-defined]
+    assert any("outside the set" in p for p in store.verify_dir(info.path))
+
+
+@pytest.mark.parametrize("layout", ["flat", "data"])
+def test_restoring_a_set_taken_without_a_tokens_file_removes_the_stale_one(
+    tmp_path: Path, layout: str
+) -> None:
+    """No tokens file is deny-all. Restoring that state over a live data dir must not keep an authorised token."""
+    srcs = [s for s in sources(tmp_path) if s.name != "tokens"]
+    info = store.write_set(disk(tmp_path), srcs, absent={"tokens": "tokens.json"})
+    assert info.manifest["absent"] == {"tokens": "tokens.json"}  # type: ignore[index]
+    assert store.verify_dir(info.path) == []
+    into = tmp_path / "live"
+    stale = into / ("api" if layout == "data" else ".") / "tokens.json"
+    stale.parent.mkdir(parents=True)
+    stale.write_text('{"tokens": [{"name": "old"}]}', encoding="utf-8")
+    written = store.restore_set(info, into, layout=layout)
+    assert not stale.exists() and stale.with_name("tokens.json.pre-restore").is_file()
+    assert all(p.name != "tokens.json" for p in written)
+
+
+def test_a_set_that_had_tokens_does_not_record_them_absent(tmp_path: Path) -> None:
+    info = store.write_set(disk(tmp_path), sources(tmp_path))
+    assert info.manifest["absent"] == {}  # type: ignore[index]
+    assert store.absent_items(info) == {}
+
+
+def test_a_manifest_absent_entry_cannot_name_a_path_outside_the_restore_dir(tmp_path: Path) -> None:
+    info = store.write_set(disk(tmp_path), sources(tmp_path))
+    _rewrite_manifest(info, lambda m: m.update(absent={"tokens": "../../etc/passwd"}))
+    assert any("absent" in p for p in store.verify_dir(info.path))
+    with pytest.raises(BackupBroken, match="not restorable"):
+        store.restore_set(info, tmp_path / "out")

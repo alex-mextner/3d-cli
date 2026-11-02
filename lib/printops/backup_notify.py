@@ -9,7 +9,7 @@ THREE SIGNALS on failure, each independent (one failing never hides another):
      token are configured (the same variables 3d-api uses for humidity, printops.homeassistant);
      the HA package raises the same notification id when 3d-api itself is unreachable, so the two
      replace each other instead of piling up;
-  3. a PrintOps anomaly `backup_failed` (scope `backup`, subject `backup:<target>`) in the PrintOps DB,
+  3. a PrintOps anomaly `backup_failed` (scope `backup:<target>`, subject `backup:<target>`) in the PrintOps DB,
      listed by `3d printops anomalies` and resolved by the next good run.
 A good run dismisses the notification and resolves the anomaly.
 """
@@ -30,7 +30,7 @@ from printops.homeassistant import HaError, HaStates
 
 NOTIFICATION_ID = "printops_backup_failed"
 ANOMALY_KIND = "backup_failed"
-ANOMALY_SCOPE = "backup"
+ANOMALY_SCOPE = "backup"  # one reconcile scope PER TARGET: `backup:<target>` (see `anomaly_scope`)
 
 
 @dataclass(frozen=True)
@@ -38,6 +38,12 @@ class Context:
     target: str
     db_path: Path | None  # the PrintOps DB; None = no anomaly can be recorded
     env: Mapping[str, str]
+
+
+def anomaly_scope(target: str) -> str:
+    """reconcile.sync resolves every open anomaly of a scope that its findings do not repeat, so targets
+    must not share one: target A's good run would otherwise close target B's still-open failure."""
+    return f"{ANOMALY_SCOPE}:{target}"
 
 
 def notification_payload(target: str, error: str) -> dict[str, Any]:
@@ -68,7 +74,7 @@ def _record_anomaly(ctx: Context, error: str | None) -> None:
         else [
             reconcile.Finding(
                 kind=ANOMALY_KIND,
-                scope=ANOMALY_SCOPE,
+                scope=anomaly_scope(ctx.target),
                 subject=f"backup:{ctx.target}",
                 evidence={"target": ctx.target, "error": error[:500]},
             )
@@ -77,7 +83,7 @@ def _record_anomaly(ctx: Context, error: str | None) -> None:
     conn = open_db(ctx.db_path)
     try:
         with transaction(conn):
-            reconcile.sync(conn, ANOMALY_SCOPE, finding, live_ok=True, now=utc_now())
+            reconcile.sync(conn, anomaly_scope(ctx.target), finding, live_ok=True, now=utc_now())
     finally:
         conn.close()
 

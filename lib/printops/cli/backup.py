@@ -260,6 +260,8 @@ def _restore(p: Parsed) -> int:
         raise GateFailure(str(e), command="printops backup restore") from e
     for f in written:
         print(f"restored {f}")
+    for name, filename in backup_store.absent_items(info).items():
+        print(f"{info.name} has no {name} ({filename}): an existing one was moved to {filename}.pre-restore")
     print(
         f"from {info.name}. Start the stack again: `docker compose -p printops -f services/3d-api/compose.yaml up -d`"
     )

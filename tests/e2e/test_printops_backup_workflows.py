@@ -16,7 +16,9 @@ from printops_fixtures import LiveApi
 from printops_ha_fakes import TOKEN, FakeHa
 
 from printops import backup_store as store
+from printops import backup_notify as notify
 from printops import db
+from printops.backup_policy import Retention, plan_prune
 
 from .workflow_helper import run_cli
 
@@ -105,6 +107,8 @@ def test_full_cycle_run_ls_verify_prune_restore_selftest(tmp_path: Path) -> None
     verified = backup(tmp_path, env, "verify", "latest", "--target", "default")
     dry = backup(tmp_path, env, "prune", "--target", "default", "--dry-run")
     after_dry = len(list(dest.glob("3d-backup-2026*Z")))
+    # the run's own set carries the real clock, so how many the policy keeps depends on today's calendar position
+    keep_names, drop_names = plan_prune([p.name for p in dest.glob("3d-backup-2026*Z")], Retention())
     pruned = backup(tmp_path, env, "prune", "--target", "default")
     assert (
         listing.returncode == 0
@@ -116,10 +120,8 @@ def test_full_cycle_run_ls_verify_prune_restore_selftest(tmp_path: Path) -> None
         and "integrity_check and row counts match" in verified.stdout
     )
     assert "would remove" in dry.stdout and after_dry == 31  # a dry run removes nothing
-    assert pruned.returncode == 0 and "keep 10, removed 21" in pruned.stdout.replace(
-        "policy 7 daily + 4 weekly + 6 monthly: ", ""
-    )
-    assert len(list(dest.glob("3d-backup-2026*Z"))) == 10
+    assert pruned.returncode == 0 and f"keep {len(keep_names)}, removed {len(drop_names)}" in pruned.stdout
+    assert sorted(p.name for p in dest.glob("3d-backup-2026*Z")) == sorted(keep_names)
     assert (
         (dest / "notes.txt").read_text(encoding="utf-8") == "mine"
         and (dest / "photos").is_dir()
@@ -165,6 +167,28 @@ def test_full_cycle_run_ls_verify_prune_restore_selftest(tmp_path: Path) -> None
     )
 
 
+def test_restoring_a_backup_taken_without_tokens_leaves_no_authorised_token(tmp_path: Path) -> None:
+    """Story: the operator revoked every token (file gone), the nightly run recorded that, and a later restore
+    into the live data dir must not bring the old, still-authorised token file back (3d-api would accept it)."""
+    env = make_world(tmp_path)
+    disk = tmp_path / "disk"
+    assert backup(tmp_path, env, "target", "add", "default", str(disk), "--init-marker").returncode == 0
+    tokens = Path(env["PRINTOPS_TOKENS_FILE"])
+    tokens.unlink()
+    ran = backup(tmp_path, env, "run", "--target", "default", "--json")
+    assert ran.returncode == 0, ran.stderr
+    assert json.loads(ran.stdout)["items"].keys() == {"printops", "spoolman"}
+    live = tmp_path / "live"
+    (live / "api").mkdir(parents=True)
+    (live / "api" / "tokens.json").write_text('{"tokens": [{"name": "stale"}]}', encoding="utf-8")
+    restored = backup(tmp_path, env, "restore", "latest", "--target", "default", "--into", str(live),
+                      "--layout", "data", "--yes")
+    assert restored.returncode == 0, restored.stderr
+    assert not (live / "api" / "tokens.json").exists()
+    assert "stale" in (live / "api" / "tokens.json.pre-restore").read_text(encoding="utf-8")
+    assert "has no tokens" in restored.stdout
+
+
 def _anomaly_rows(env: dict[str, str]) -> list[tuple[str, ...]]:
     conn = db.open_db(Path(env["PRINTOPS_DB"]))
     try:
@@ -174,6 +198,31 @@ def _anomaly_rows(env: dict[str, str]) -> list[tuple[str, ...]]:
         ]
     finally:
         conn.close()
+
+
+def test_a_targets_good_run_never_closes_another_targets_failure(tmp_path: Path) -> None:
+    """Two targets (e.g. a USB disk and a NAS): A fails, B fails, then only B recovers. A is still broken, so
+    its anomaly must stay open — and A's own later recovery must still resolve it."""
+    env = make_world(tmp_path)
+    db_path = Path(env["PRINTOPS_DB"])
+    def quiet(_line: str) -> None:
+        return None
+
+    def ctx(target: str) -> notify.Context:
+        return notify.Context(target, db_path, {})
+
+    def status() -> dict[str, str]:
+        return {row[1]: row[3] for row in _anomaly_rows(env)}
+
+    notify.report_failure(ctx("a"), "disk a missing", quiet)
+    notify.report_failure(ctx("b"), "disk b missing", quiet)
+    assert status() == {"backup:a": "open", "backup:b": "open"}
+    notify.report_recovered(ctx("b"), quiet)
+    assert status() == {"backup:a": "open", "backup:b": "resolved"}
+    notify.report_failure(ctx("a"), "disk a still missing", quiet)  # a repeat does not resolve the other either
+    assert status() == {"backup:a": "open", "backup:b": "resolved"}
+    notify.report_recovered(ctx("a"), quiet)
+    assert status() == {"backup:a": "resolved", "backup:b": "resolved"}
 
 
 def _assert_ha_got_the_payload(payload: dict[str, str], ha: FakeHa) -> None:
@@ -241,7 +290,7 @@ def test_wrong_disk_writes_nothing_and_notifies_ha_and_opens_an_anomaly(
         payload = json.loads(payload_line.removeprefix("notification: "))
         _assert_ha_got_the_payload(payload, ha)
         assert _anomaly_rows(env) == [
-            ("backup_failed", "backup:default", "backup", "open")
+            ("backup_failed", "backup:default", "backup:default", "open")
         ]
         last = json.loads(
             (Path(env["PRINTOPS_DB"]).parent / "backup-last.json").read_text(

@@ -259,3 +259,42 @@ def test_the_probe_scripts_are_read_only() -> None:
 def test_a_failing_probe_reports_it_and_lists_nothing_selectable() -> None:
     found = d.discover_backup_targets(lambda _s: (127, ""), data_dir="/")
     assert found.candidates == [] and "probe failed" in found.skipped[0]
+
+
+def _one_disk_two_partitions() -> tuple[str, str]:
+    part = lambda n, mount: {  # noqa: E731
+        "name": f"sda{n}", "path": f"/dev/sda{n}", "size": 250 * GB, "fstype": "ext4",
+        "mountpoints": [mount], "type": "part",
+    }
+    lsblk = json.dumps({"blockdevices": [{
+        "name": "sda", "path": "/dev/sda", "size": 500 * GB, "type": "disk", "rm": False, "hotplug": False,
+        "tran": "sata", "model": "WDC", "children": [part(1, "/srv/data"), part(2, "/mnt/second")],
+    }, {
+        "name": "sdb", "path": "/dev/sdb", "size": 500 * GB, "type": "disk", "rm": False, "hotplug": False,
+        "tran": "sata", "model": "WDC", "children": [{
+            "name": "sdb1", "path": "/dev/sdb1", "size": 500 * GB, "fstype": "ext4",
+            "mountpoints": ["/mnt/other"], "type": "part"}],
+    }]})
+    df = (
+        "Filesystem Type 1024-blocks Used Available Capacity Mounted on\n"
+        f"/dev/sda1 ext4 {250 * GB // 1024} 1000 {200 * GB // 1024} 1% /srv/data\n"
+        f"/dev/sda2 ext4 {250 * GB // 1024} 1000 {200 * GB // 1024} 1% /mnt/second\n"
+        f"/dev/sdb1 ext4 {500 * GB // 1024} 1000 {400 * GB // 1024} 1% /mnt/other\n"
+    )
+    return lsblk, df
+
+
+def test_another_partition_of_the_data_disk_is_not_a_separate_backup_disk() -> None:
+    """Data on /dev/sda1, backup dir on /dev/sda2: one physical disk, so one failure loses both copies."""
+    lsblk, df = _one_disk_two_partitions()
+
+    def run(script: str) -> tuple[int, str]:
+        if "@@lsblk" in script:
+            return 0, f"@@lsblk\n{lsblk}\n@@df\n{df}\n@@data\n/dev/sda1  1 1 1 1% /srv/data\n"
+        return 0, ""
+
+    by = {c.path: c for c in d.discover_backup_targets(run, data_dir="/srv/data").candidates}
+    assert by["/srv/data"].same_as_data
+    assert by["/mnt/second"].same_as_data and not by["/mnt/second"].selectable
+    assert "SAME DISK AS THE SPOOLMAN DATA" in d.describe(by["/mnt/second"])
+    assert not by["/mnt/other"].same_as_data and by["/mnt/other"].selectable  # a different disk stays pickable

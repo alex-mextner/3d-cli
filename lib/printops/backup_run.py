@@ -159,6 +159,13 @@ def build_sources(
     return sources
 
 
+def absent_sources(sources: list[Source], settings: Settings) -> dict[str, str]:
+    """Items a run backs up when they exist and must RESTORE as absent when they do not: a missing tokens
+    file is the valid deny-all state, so a restore may not leave a stale (authorised) one in place."""
+    has_tokens = any(s.name == "tokens" for s in sources)
+    return {} if has_tokens else {"tokens": settings.tokens_file.name}
+
+
 def lower_priority() -> None:
     """nice 19 + idle I/O class for this process (best effort: a container may forbid it)."""
     with contextlib.suppress(OSError):
@@ -200,7 +207,9 @@ def run_backup(req: RunRequest, env: Mapping[str, str] | None = None) -> RunResu
     dest.mkdir(parents=True, exist_ok=True)
     free = backup_store.check_space(dest, sources, req.min_free_bytes)
     with exclusive(dest):
-        info = backup_store.write_set(dest, sources, target=target.name)
+        info = backup_store.write_set(
+            dest, sources, target=target.name, absent=absent_sources(sources, settings)
+        )
         retention = req.retention or backup_store.read_state(dest) or Retention()
         kept, pruned = backup_store.prune(dest, retention)
         backup_store.write_state(dest, retention)

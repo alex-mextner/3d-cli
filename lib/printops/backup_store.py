@@ -5,7 +5,9 @@ ACCESSED VIA: `printops.backup_run` (the nightly run), `3d printops backup verif
 LAYOUT (one backup SET per run, written under `<disk>/<subdir>/`):
     3d-backup-20261101T040003Z/
         spoolman.db.gz   printops.db.gz   tokens.json      the items (SQLite files gzipped at level 1)
-        MANIFEST.json    what, from where, sizes, row counts per table, sha256 of every stored file
+        MANIFEST.json    what, from where, sizes, row counts per table, sha256 of every stored file, and
+                         `absent`: items whose source did not exist (a missing tokens file is a valid
+                         deny-all state; restoring must not resurrect a stale one)
         SHA256SUMS       `sha256sum -c` compatible
     <disk>/.3d-backup-disk    the DISK MARKER: JSON {"id": ...}; a run refuses a disk whose marker
                               is missing or has another id (an unmounted disk must not fill the root FS)
@@ -231,7 +233,11 @@ def _write_item(src: Source, tmp: Path, level: int) -> dict[str, Any]:
 
 
 def _seal(
-    tmp: Path, items: dict[str, dict[str, Any]], created: str, target: str
+    tmp: Path,
+    items: dict[str, dict[str, Any]],
+    created: str,
+    target: str,
+    absent: dict[str, str],
 ) -> None:
     manifest = {
         "format": FORMAT,
@@ -240,6 +246,7 @@ def _seal(
         "target": target,
         "tool": "3d printops backup",
         "items": items,
+        "absent": absent,
     }
     (tmp / MANIFEST).write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
@@ -264,8 +271,12 @@ def write_set(
     target: str = "",
     level: int = 1,
     now: datetime.datetime | None = None,
+    absent: dict[str, str] | None = None,
 ) -> SetInfo:
-    """Write, verify and atomically publish one set under `dest` (which must exist)."""
+    """Write, verify and atomically publish one set under `dest` (which must exist).
+
+    `absent` maps an item name to the file name it would have been restored as, for a source that
+    did not exist at backup time (`{"tokens": "tokens.json"}`): restoring this set removes that file."""
     when = now or datetime.datetime.now(datetime.timezone.utc)
     final = dest / set_name(stamp_now(when))
     if final.exists():
@@ -274,7 +285,7 @@ def write_set(
     try:
         tmp.chmod(0o700)
         items = {s.name: _write_item(s, tmp, level) for s in sources}
-        _seal(tmp, items, when.isoformat(timespec="seconds"), target)
+        _seal(tmp, items, when.isoformat(timespec="seconds"), target, absent or {})
         problems = verify_dir(tmp)
         if problems:
             raise BackupBroken(
@@ -319,8 +330,21 @@ def _sum_problems(root: Path) -> list[str]:
     return out
 
 
+def _plain_name(value: object) -> bool:
+    """A single path component: nothing a manifest says may name a place outside its own directory."""
+    return (
+        isinstance(value, str)
+        and value not in ("", ".", "..", MANIFEST, SUMS)
+        and not any(c in value for c in "/\\\0")
+    )
+
+
 def _item_problems(root: Path, name: str, item: dict[str, Any]) -> list[str]:
-    file = root / str(item.get("file", ""))
+    if not isinstance(item, dict) or not _plain_name(name) or not _plain_name(item.get("file")):
+        return [f"{name!r}: the manifest names a path outside the set (item or file is not a plain name)"]
+    file = root / item["file"]
+    if file.is_symlink() or file.resolve().parent != root.resolve():
+        return [f"{name}: file {item['file']!r} is not a regular file inside the set"]
     if not file.is_file():
         return [f"{name}: file {item.get('file')!r} is missing"]
     if sha256_file(file) != item.get("sha256"):
@@ -341,6 +365,13 @@ def _item_problems(root: Path, name: str, item: dict[str, Any]) -> list[str]:
     )
 
 
+def _absent_problems(manifest: dict[str, Any]) -> list[str]:
+    absent = manifest.get("absent", {})
+    if isinstance(absent, dict) and all(_plain_name(k) and _plain_name(v) for k, v in absent.items()):
+        return []
+    return [f"{MANIFEST}: `absent` must map plain item names to plain file names"]
+
+
 def verify_dir(root: Path) -> list[str]:
     """Every problem of the set at `root` ([] = good): checksums, manifest, integrity, row counts."""
     try:
@@ -350,7 +381,7 @@ def verify_dir(root: Path) -> list[str]:
     items = manifest.get("items") if isinstance(manifest, dict) else None
     if not isinstance(items, dict) or not items:
         return [f"{MANIFEST} lists no items"]
-    problems = _sum_problems(root)
+    problems = _sum_problems(root) + _absent_problems(manifest)
     for name, item in items.items():
         problems += _item_problems(root, name, item)
     return problems
@@ -447,7 +478,9 @@ def restore_set(info: SetInfo, into: Path, *, layout: str = "flat") -> list[Path
 
     flat: `<into>/<item>.db` / `<into>/tokens.json`.  data: the compose data-dir layout —
     `<into>/spoolman/spoolman.db`, `<into>/api/printops.db`, `<into>/api/tokens.json`. An existing
-    target file is moved to `<name>.pre-restore` first (and stale -wal/-shm sidecars are removed)."""
+    target file is moved to `<name>.pre-restore` first (and stale -wal/-shm sidecars are removed). An
+    item the set records as absent (no tokens file when it was taken) is moved aside the same way, so
+    the restored state is the backed-up one: nothing there, deny-all."""
     problems = verify_dir(info.path)
     if problems:
         raise BackupBroken(f"{info.name} is not restorable: " + "; ".join(problems))
@@ -458,6 +491,7 @@ def restore_set(info: SetInfo, into: Path, *, layout: str = "flat") -> list[Path
         out.parent.mkdir(parents=True, exist_ok=True)
         _move_aside(out)
         tmp = out.with_name(f".{out.name}.restoring")
+        tmp.unlink(missing_ok=True)  # never write through a leftover link
         if item.get("kind") == "sqlite":
             _gunzip(info.path / item["file"], tmp)
         else:
@@ -465,7 +499,15 @@ def restore_set(info: SetInfo, into: Path, *, layout: str = "flat") -> list[Path
         tmp.chmod(0o600)
         os.replace(tmp, out)
         written.append(out)
+    for name, filename in absent_items(info).items():
+        _move_aside(_restore_path(into, name, {"kind": "file", "file": filename}, layout))
     return written
+
+
+def absent_items(info: SetInfo) -> dict[str, str]:
+    """Items the set records as ABSENT at backup time (item name -> restored file name)."""
+    absent = (info.manifest or {}).get("absent", {})
+    return dict(absent) if isinstance(absent, dict) else {}
 
 
 def _restore_path(into: Path, name: str, item: dict[str, Any], layout: str) -> Path:

@@ -198,6 +198,24 @@ def _whole_disk_size(node: dict[str, Any]) -> int:
     return int(_top(node).get("size") or 0)
 
 
+def same_physical_disk(a: str, b: str, blocks: dict[str, dict[str, Any]]) -> bool:
+    """Two filesystem devices (`/dev/sda1`, `/dev/sda2`, an LV on `/dev/sda3`) share one physical disk.
+    A copy on another PARTITION of the data's disk dies with it, so it is not a separate backup."""
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    na, nb = blocks.get(a), blocks.get(b)
+    if na is None or nb is None:
+        return False
+    return _disk_path(na) == _disk_path(nb)
+
+
+def _disk_path(node: dict[str, Any]) -> str:
+    top = _top(node)
+    return str(top.get("path") or f"/dev/{top.get('name')}")
+
+
 def is_likely(size_bytes: int, hint_gb: int) -> bool:
     """Within ±8 % of the size hint (decimal GB: a '512 GB' SSD is 512e9 bytes, a '500 GB' HDD 500e9)."""
     want = hint_gb * 1e9
@@ -233,7 +251,7 @@ def _candidate(
         likely=is_likely(row["size"] if network else whole, hint_gb),
         removable=_removable(node) if node else False,
     )
-    cand.same_as_data = bool(data_device) and row["device"] == data_device
+    cand.same_as_data = same_physical_disk(row["device"], data_device, blocks)
     return cand
 
 

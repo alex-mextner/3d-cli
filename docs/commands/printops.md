@@ -119,7 +119,9 @@ Odroid is `/home/ultra/printops/data/api/tokens.json` (`/data/tokens.json` in th
 Steps, each printed before it runs: create `DIR/data/{api,spoolman}` and the backup dir →
 rsync `bin/3d lib fleet pyproject.toml services/3d-api` to `DIR/src` →
 `docker compose -p printops -f services/3d-api/compose.yaml up -d --build` → poll `/v1/health` until `ok` (up to 5 minutes).
-No backup timer is installed: Home Assistant schedules the backup (see `backup`).
+No backup timer is installed: Home Assistant schedules the backup (see `backup`). A redeploy removes the
+`printops-backup.timer`/`.service` systemd --user units an older deploy installed (they ran a command that no longer backs
+anything up); it is idempotent and a no-op on a host that never had them.
 It never touches the Home Assistant compose project and never restarts HA.
 
 - `--dry-run` — run rsync with `--dry-run --itemize-changes` (shows what would change) and only print the rest.
@@ -169,9 +171,11 @@ verified (every DB decompressed again + `PRAGMA integrity_check`) in a temp dir 
 - **Failure** (disk missing/wrong, full, bad integrity, 3d-api down): exit 1 + the notification payload on stderr; with
   `PRINTOPS_HA_URL` + `<data>/api/ha_token` 3d-api posts the HA persistent notification `printops_backup_failed`; the HA package
   raises the same id itself (also when 3d-api is unreachable) and warns after 36 h without a good run; a PrintOps anomaly
-  `backup_failed` (scope `backup`) is opened (`3d printops anomalies`) and resolved by the next good run.
+  `backup_failed` (scope `backup:<target>`: each target is reconciled on its own) is opened (`3d printops anomalies`) and resolved by the next good run.
 - **Restore.** `3d printops backup restore latest --into ~/restore` unpacks verified files (`spoolman.db`, `printops.db`, `tokens.json`);
   `--layout data --into <PRINTOPS_DATA_DIR> --yes` writes the compose layout (stop the stack first; old files become `*.pre-restore`).
+  A set taken while there was no tokens file (deny-all) restores that state: an existing tokens file is moved aside too.
+  A set whose manifest names a file outside the set directory, or a link, is refused (`verify` reports it).
   `selftest` = one real run + restore into a scratch dir + integrity/row-count comparison (what `3d init --env` runs).
 - **Discovery** (`discover`, and `3d init --env`) reads `lsblk`/`df` on the Spoolman host (this machine or ssh): mounted disks, USB/removable,
   network mounts (nfs/cifs), existing backup dirs and markers, unmounted filesystems (listed, never mounted), HA's own backup locations;
