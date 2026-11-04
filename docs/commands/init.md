@@ -76,10 +76,12 @@ Behaviour:
 - **No OpenSCAD bootstrap.** `3d init --env` skips the first-run clone of the OpenSCAD libraries (BOSL2, NopSCADlib) and
   the `.bootstrapped` marker; `3d init [path]` and the other commands keep it.
 - **Idempotent.** When the configured `api:` answers `GET /v1/health` (3d-api; a configured token is
-  checked too) or `GET /api/v1/health` (bare Spoolman) it prints `already configured` and exits 0
-  without touching the file. An install target on an already configured machine is ignored for the
-  same reason; `--spoolman script` and `--api URL` still run. A configured but dead api is an
-  error (exit 1) with the commands that fix it.
+  checked too) it prints `already configured` and exits 0 without touching the file. A bare
+  Spoolman (it answers `GET /api/v1/health` but has no `/v1` routes) is not a 3d-api: it is never
+  counted as configured and never written as `api:`; `--api URL` for it exits 1 and names the
+  3d-api URL (same host, port 8765). An install target on an already configured machine is
+  ignored for the same reason; `--spoolman script` and `--api URL` still run. A configured but
+  dead (or Spoolman-only) api is an error (exit 1) with the commands that fix it.
 - **Config last.** `printops.yaml` is written only after the service is healthy and the token was
   accepted; a different old file is kept as `printops.yaml.bak` (mode 600). Pointing `--api` at another
   server without `--token` drops the old token: it belongs to the old server and is never sent to the new one.

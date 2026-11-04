@@ -5,8 +5,8 @@ ACCESSED VIA: `3d init --env [...]` (lib/commands/init.py hands everything after
 `3d init [path]` without `--env` stays the per-project scaffold; the two stages never mix.
 
 FLOW (each arrow is one function):
-  status()      the configured `api:` answers /v1/health (3d-api) or /api/v1/health (Spoolman)
-                -> "already configured", exit 0, NOTHING changes (not even the file's mtime).
+  status()      the configured `api:` answers /v1/health (3d-api; a bare Spoolman is NOT enough: `3d printops`
+                needs the /v1 routes) -> "already configured", exit 0, NOTHING changes (not even the file's mtime).
   choose        --spoolman auto|skip|local|printer:NAME|ssh:USER@HOST|script, or the interactive
                 menu. `--no-input` NEVER prompts and NEVER installs unless an explicit target is
                 named; with `auto` it prints the exact commands instead.
@@ -42,6 +42,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from cli import paths
 from errors import GateFailure, InvalidArgument, ThreeDError, UsageError
@@ -91,7 +92,7 @@ USAGE = f"""3d init --env [--no-input] [--spoolman TARGET] [--script-out PATH] [
   The MACHINE stage of `3d init` (plain `3d init [path]` still scaffolds a project): make Spoolman +
   the 3d-api that `3d printops` talks to run somewhere, and write {config_path()} (api: + token:,
   mode 600) once the service answered its health check. Safe to re-run: when the configured api
-  already answers /v1/health (or Spoolman's /api/v1/health) it says "already configured" and
+  already answers /v1/health (3d-api; a bare Spoolman does not count) it says "already configured" and
   changes nothing. Exit 0 = configured / skipped / already configured; nonzero = failed, with the fix.
 
   Without --no-input (and on a terminal) it asks where to install:
@@ -172,9 +173,10 @@ class HostProbe:
 
 @dataclass(frozen=True)
 class Health:
-    state: str  # ok | degraded | unreachable | token-rejected
+    state: str  # ok | degraded | unreachable | token-rejected | spoolman-only
     kind: str = ""  # 3d-api | spoolman
     detail: str = ""
+    hint: str = ""  # the fix when the state is not ok and it is more specific than "check the URL"
 
 
 @dataclass
@@ -286,8 +288,8 @@ def parse_options(argv: Sequence[str]) -> Options:
 
 
 def check_health(api: str, token: str | None) -> Health:
-    """3d-api first (/v1/health, then the token against /v1/events); a bare Spoolman answers
-    /api/v1/health. Network errors become state "unreachable", never an exception."""
+    """3d-api first (/v1/health, then the token against /v1/events); a bare Spoolman (/api/v1/health)
+    is reported as state "spoolman-only". Network errors become state "unreachable", never an exception."""
     client = ApiClient(api, token, timeout=5.0)
     try:
         body = client.health()
@@ -313,16 +315,26 @@ def check_health(api: str, token: str | None) -> Health:
     return Health("ok", "3d-api", f"version {body.get('version', '?')}")
 
 
+def _api_url_beside(base_url: str) -> str:
+    """The 3d-api URL that goes with a Spoolman URL: the same host on the 3d-api port."""
+    parts = urlsplit(base_url)
+    host = parts.hostname or ""
+    return f"{parts.scheme}://{f'[{host}]' if ':' in host else host}:{deploy.API_PORT}"
+
+
 def _spoolman_health(client: ApiClient, first_error: str) -> Health:
+    """A bare Spoolman answers /api/v1/health but has no /v1 routes, so no `3d printops` command
+    can use it as `api:`: it is reported, never counted as "ok"."""
     try:
         body = client.get("/api/v1/health")
     except ApiError as e:
         return Health("unreachable", detail=f"{first_error}; {e.message}")
     if isinstance(body, dict) and body.get("status") == "healthy":
         return Health(
-            "ok",
+            "spoolman-only",
             "spoolman",
-            "answers /api/v1/health (a bare Spoolman: the 3d printops commands need 3d-api)",
+            f"{client.base_url} is a bare Spoolman (it answers /api/v1/health), not the 3d-api that `3d printops` talks to",
+            hint=f"Use the 3d-api URL instead: {_api_url_beside(client.base_url)} (3d-api listens on port {deploy.API_PORT}).",
         )
     return Health(
         "unreachable",
@@ -765,16 +777,16 @@ def make_script(opts: Options, env: Env) -> int:
 # ----------------------------------------------------------------------------------- entry
 
 
-def _finish(api: str, token: str | None, env: Env) -> int:
-    """Check, then write: the config never points at something that did not answer."""
-    h = check_health(api, token)
+def _finish(api: str, token: str | None, h: Health, env: Env) -> int:
+    """Write the config for `api`, given its health `h` (checked with this very `token`): the
+    config never points at something that did not answer, and a token is never saved unverified."""
     if h.state != "ok":
         raise ThreeDError(
-            f"{api} is not healthy: {h.state} {h.detail}",
+            f"{api} is not healthy: {h.state}: {h.detail}",
             command=CLI_NAME,
             remediation=[
                 "Nothing was written to the config.",
-                "Check the URL/token, then `3d printops health --api URL`.",
+                h.hint or "Check the URL/token, then `3d printops health --api URL`.",
             ],
         )
     path = write_config(api, token, env.say)
@@ -801,7 +813,7 @@ def _connect(opts: Options, cur_api: str | None, cur_token: str | None, env: Env
     if h.state == "ok" and same and token == cur_token:
         env.say(f"already configured: {api} ({h.kind}, {h.detail})")
         return 0
-    return _finish(api, token, env)
+    return _finish(api, token, h, env)
 
 
 def _settle_existing(health: Health, cur_api: str, cur_token: str | None, target: Target, opts: Options,
@@ -818,7 +830,8 @@ def _settle_existing(health: Health, cur_api: str, cur_token: str | None, target
     if target.kind == "auto" and not _interactive(env, opts):
         raise ThreeDError(
             f"configured {cur_api} is {health.state}: {health.detail}", command=CLI_NAME,
-            remediation=["Fix the service, or point 3d at a new one: 3d init --env --api URL --token TOKEN",
+            remediation=[*([health.hint] if health.hint else []),
+                         "Fix the service, or point 3d at a new one: 3d init --env --api URL --token TOKEN",
                          f"or install a new one: 3d init --env --spoolman {TARGET_HELP}"])
     if target.kind in INSTALL_KINDS:
         env.say(f"note: configured {cur_api} is {health.state}; a new install replaces the config")
@@ -830,6 +843,8 @@ def _choose_interactively(cands: Sequence[Candidate], health: Health | None, cur
     """The menu, after a word about a dead configured api; None = the user declined to replace it."""
     if health is not None and health.state != "ok":
         env.say(f"configured {cur_api} is {health.state}: {health.detail}")
+        if health.hint:
+            env.say(health.hint)
         if not _confirm(env, "Set up a new Spoolman/PrintOps instead?"):
             return None
     return menu(cands, env, opts)
@@ -867,7 +882,7 @@ def _setup(target: Target, health: Health | None, cur_api: str | None, opts: Opt
     if target.kind == "ssh" and _interactive(env, opts):
         env.say(f"Installing over ssh on {label}: it will run docker compose there (project printops).")
     api, token = install(host, label, env, opts)
-    return 0 if opts.dry_run else _finish(api, token, env)
+    return 0 if opts.dry_run else _finish(api, token, check_health(api, token), env)
 
 
 def run(argv: Sequence[str], env: Env | None = None) -> int:

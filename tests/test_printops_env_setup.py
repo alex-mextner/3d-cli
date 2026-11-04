@@ -351,15 +351,61 @@ def test_config_and_bak_are_private_from_the_moment_they_exist(
     assert (old.with_name("printops.yaml.bak").stat().st_mode & 0o777) == 0o600
 
 
-def test_a_bare_spoolman_answers_the_fallback_health(cfg_home: Path) -> None:
+def test_a_bare_spoolman_is_reported_but_never_counted_as_the_3d_api(cfg_home: Path) -> None:
     svc = FakeService(api=False)
     try:
         h = env_setup.check_health(svc.url, None)
-        assert (h.state, h.kind) == ("ok", "spoolman")
+        assert (h.state, h.kind) == ("spoolman-only", "spoolman")
+        assert "bare Spoolman" in h.detail and "http://127.0.0.1:8765" in h.hint  # the 3d-api: same host, port 8765
         dead = FakeService(api=False, spoolman=False)
         dead_url = dead.url
         dead.close()
         assert env_setup.check_health(dead_url, None).state == "unreachable"
+    finally:
+        svc.close()
+
+
+def test_api_pointing_at_a_bare_spoolman_fails_and_names_the_3d_api_url(cfg_home: Path) -> None:
+    """The URL the script prints for Spoolman (:7912) pasted as --api: no config, no unverified token."""
+    svc = FakeService(api=False)
+    try:
+        for argv in (["--api", svc.url, "--token", GOOD_TOKEN], ["--api", svc.url]):
+            env, _, _, _ = make_env(cfg_home)
+            with pytest.raises(ThreeDError, match="bare Spoolman") as err:
+                env_setup.run(["--no-input", *argv], env)
+            assert err.value.exit_code == 1
+            assert "http://127.0.0.1:8765" in err.value.render()
+            assert not config_path().exists()
+        old = write_cfg("http://10.0.0.99:8765", "po_old")
+        before = old.read_bytes()
+        with pytest.raises(ThreeDError, match="bare Spoolman"):
+            env_setup.run(["--no-input", "--api", svc.url, "--token", GOOD_TOKEN], make_env(cfg_home)[0])
+        assert old.read_bytes() == before and not old.with_name("printops.yaml.bak").exists()
+    finally:
+        svc.close()
+
+
+def test_a_configured_bare_spoolman_is_not_already_configured(cfg_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    svc = FakeService(api=False)
+    try:
+        write_cfg(svc.url, None)
+        env, out, rec, _ = make_env(cfg_home)
+        with pytest.raises(ThreeDError, match="spoolman-only") as err:  # status-only run: a failure with the fix
+            env_setup.run(["--no-input", "--spoolman", "auto"], env)
+        assert "http://127.0.0.1:8765" in err.value.render() and not rec.calls
+        assert not any("already configured" in line for line in out)
+
+        real = env_setup.check_health  # the configured Spoolman is judged for real, the new install is faked ok
+        monkeypatch.setattr(
+            env_setup, "check_health",
+            lambda api, token: real(api, token) if api == svc.url else env_setup.Health("ok", "3d-api", "fake"),
+        )
+        monkeypatch.setattr(deploy, "wait_healthy", lambda url, **_kw: {"status": "ok"})
+        env2, out2, rec2, _ = make_env(cfg_home)
+        assert env_setup.run(["--no-input", "--spoolman", "ssh:me@nas.lan"], env2) == 0  # an install target is not skipped
+        assert rec2.calls and any("spoolman-only" in line for line in out2)
+        assert "api: http://nas.lan:8765" in config_path().read_text()
+        assert svc.url in config_path().with_name("printops.yaml.bak").read_text()
     finally:
         svc.close()
 
