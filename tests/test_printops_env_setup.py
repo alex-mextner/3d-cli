@@ -615,9 +615,12 @@ def test_local_install_builds_from_this_checkout_without_rsync(
     assert all(c[0] == "bash" for c in drec.calls)  # no ssh, no rsync
     compose = next(c[-1] for c in drec.calls if "docker compose" in c[-1])
     assert (
-        compose.startswith(f"cd {REPO} &&")
+        f"cd {REPO} &&" in compose
         and str(cfg_home / "xdg-data" / "3d-cli" / "printops" / "data") in compose
     )
+    # this host's own settings, not the Odroid's compose defaults nor the caller's environment
+    assert "PRINTOPS_CONTAINER_PREFIX=printops" in compose and 'PRINTOPS_TZ="${tz:-UTC}"' in compose
+    assert "PRINTOPS_SPOOLMAN_CORS_ORIGIN=http://127.0.0.1:7912,http://localhost:7912" in compose
     assert "api: http://127.0.0.1:8765" in config_path().read_text()
 
 

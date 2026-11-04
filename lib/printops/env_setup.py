@@ -60,7 +60,7 @@ TARGET_HELP = "auto|skip|local|printer:NAME|ssh:USER@HOST|script"
 DEFAULT_SCRIPT_OUT = "spoolman-setup.sh"
 DOCKER_INSTALL = "https://docs.docker.com/engine/install/"
 TOKEN_SCOPES = "read,write"
-CONTAINER = "printops-api"
+CONTAINER = deploy.API_CONTAINER
 SSH_OPTS = (
     "-o",
     "BatchMode=yes",
@@ -561,7 +561,7 @@ def _deploy_config(host: str, pr: HostProbe, env: Env, opts: Options) -> deploy.
         api_url = f"http://{f'[{http_host}]' if ':' in http_host else http_host}:{deploy.API_PORT}"
     return deploy.DeployConfig(repo_root=root, host=host, remote_dir=base, backup_dir=f"{base}/backup",
                                api_url=api_url, version=deploy.git_version(root), timer_required=False,
-                               bind_addr=opts.bind or (None if host else deploy.LOOPBACK))
+                               bind_addr=opts.bind or (None if host else deploy.LOOPBACK), pin_host_env=True)
 
 
 def _say_bind(cfg: deploy.DeployConfig, env: Env) -> None:

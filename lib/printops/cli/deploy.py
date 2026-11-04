@@ -78,7 +78,7 @@ def _config(p: Parsed, root: Path) -> deploy.DeployConfig:
     return deploy.DeployConfig(repo_root=root, host="", remote_dir=base,
                                backup_dir=_absolute(p.opts.get("--backup-dir") or f"{base}/backup"),
                                api_url=p.opts.get("--api"), version=deploy.git_version(root), timer_required=False,
-                               bind_addr=_bind(p, deploy.LOOPBACK))
+                               bind_addr=_bind(p, deploy.LOOPBACK), pin_host_env=True)
 
 
 def run(argv: list[str]) -> int:

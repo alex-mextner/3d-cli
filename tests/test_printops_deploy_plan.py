@@ -1,12 +1,15 @@
 """The shared deploy plan (printops.deploy) and `3d printops deploy`: what is published where.
 
 Behaviour tests on the plan's argv/scripts and on the compose file as docker compose would
-interpolate it. Nothing is executed: no ssh, rsync or docker.
+interpolate it. Plan steps that run are `bash -c` scripts on this machine against recording
+`docker`/`systemctl`/`timedatectl` shims in front of PATH: no ssh, rsync or real docker.
 """
 
 from __future__ import annotations
 
+import os
 import re
+import subprocess
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -156,3 +159,96 @@ def test_printops_deploy_to_a_host_keeps_the_default_bind_unless_asked(
 def test_printops_deploy_rejects_a_bind_that_is_not_an_ip_address() -> None:
     with pytest.raises(InvalidArgument, match="--bind"):
         deploy_cli.run(["--local", "--dry-run", "--bind", "nas.lan"])
+
+
+# ------------------------------------------------------------------ a host that is not the Odroid
+
+
+def _step(cfg: deploy.DeployConfig, title: str) -> deploy.Step:
+    return next(s for s in deploy.plan(cfg) if s.title.startswith(title))
+
+
+def _shims(root: Path) -> Path:
+    """`docker`/`curl` recorders plus a `timedatectl` and a `systemctl` that answer without a system."""
+    from printops_env_fakes import fake_docker_bin
+
+    bindir = fake_docker_bin(root)
+    (bindir / "timedatectl").write_text("#!/bin/sh\necho Europe/Paris\n", encoding="utf-8")
+    (bindir / "systemctl").write_text('#!/bin/sh\necho "systemctl $*" >> "$FAKE_LOG"\n', encoding="utf-8")
+    for name in ("timedatectl", "systemctl"):
+        (bindir / name).chmod(0o755)
+    return bindir
+
+
+def _run_step(step: deploy.Step, root: Path, **env: str) -> subprocess.CompletedProcess[str]:
+    full = {
+        **os.environ,
+        "PATH": f"{_shims(root)}{os.pathsep}{os.environ['PATH']}",
+        "FAKE_LOG": str(root / "calls.log"),
+        "HOME": str(root / "home"),
+        **env,
+    }
+    (root / "home").mkdir(exist_ok=True)
+    return subprocess.run(step.argv, env=full, capture_output=True, text=True, check=False)
+
+
+def test_the_odroid_compose_script_leaves_prefix_tz_and_cors_to_compose(tmp_path: Path) -> None:
+    compose = _compose_script(deploy.DeployConfig(repo_root=tmp_path, version="v1"))
+    for knob in ("PRINTOPS_CONTAINER_PREFIX", "PRINTOPS_TZ", "PRINTOPS_SPOOLMAN_CORS_ORIGIN", "timedatectl"):
+        assert knob not in compose  # the owner's Fluidd origins and Europe/Belgrade stay compose's defaults
+
+
+def test_a_pinned_deploy_ignores_the_callers_container_prefix_tz_and_cors(tmp_path: Path) -> None:
+    """The caller's own PRINTOPS_* environment must not rename the containers (the token mint and the
+    backup unit exec into `printops-api`), pick the owner's time zone or widen Spoolman's origins."""
+    done = _run_step(
+        _step(_local(tmp_path, pin_host_env=True), "build + start"),
+        tmp_path,
+        PRINTOPS_CONTAINER_PREFIX="x",
+        PRINTOPS_TZ="Mars/Olympus",
+        PRINTOPS_SPOOLMAN_CORS_ORIGIN="http://evil.example",
+    )
+    assert done.returncode == 0, done.stderr
+    calls = (tmp_path / "calls.log").read_text()
+    assert "PRINTOPS_CONTAINER_PREFIX=printops\n" in calls and "-p printops" in calls
+    assert "PRINTOPS_TZ=Europe/Paris\n" in calls  # this host's, not the caller's and not Europe/Belgrade
+    assert "PRINTOPS_SPOOLMAN_CORS_ORIGIN=http://127.0.0.1:7912,http://localhost:7912\n" in calls
+    assert "evil.example" not in calls and "Mars" not in calls
+
+
+def test_the_spoolman_origin_is_the_address_the_service_is_reached_on() -> None:
+    nas = deploy.DeployConfig(repo_root=REPO, host="me@nas.lan", api_url="http://nas.lan:8765", pin_host_env=True)
+    assert nas.spoolman_origins == "http://nas.lan:7912"
+    v6 = deploy.DeployConfig(repo_root=REPO, host="me@v6", api_url="http://[2001:db8::7]:8765", pin_host_env=True)
+    assert v6.spoolman_origins == "http://[2001:db8::7]:7912"
+    assert _local(REPO, bind_addr="192.168.0.20").spoolman_origins == "http://192.168.0.20:7912"
+
+
+def test_a_pinned_backup_unit_execs_the_docker_this_host_has(tmp_path: Path) -> None:
+    """The shipped unit says /usr/bin/docker; with docker in snap or /usr/local/bin the timer would
+    be enabled and fail every night unseen."""
+    cfg = _local(REPO, pin_host_env=True)
+    done = _run_step(_step(cfg, "install daily backup timer"), tmp_path)
+    assert done.returncode == 0, done.stderr
+    unit = (tmp_path / "home" / ".config" / "systemd" / "user" / "printops-backup.service").read_text()
+    docker = tmp_path / "fakebin" / "docker"
+    assert f"ExecStart={docker} exec {deploy.API_CONTAINER} 3d printops backup" in unit
+    assert "systemctl --user enable --now printops-backup.timer" in (tmp_path / "calls.log").read_text()
+    assert (tmp_path / "home" / ".config" / "systemd" / "user" / "printops-backup.timer").is_file()
+
+
+def test_the_odroid_backup_unit_is_copied_as_shipped(tmp_path: Path) -> None:
+    cfg = deploy.DeployConfig(repo_root=REPO, host="", remote_dir=str(tmp_path / "p"), backup_dir=str(tmp_path / "b"))
+    done = _run_step(_step(cfg, "install daily backup timer"), tmp_path)
+    assert done.returncode == 0, done.stderr
+    copied = tmp_path / "home" / ".config" / "systemd" / "user" / "printops-backup.service"
+    shipped = REPO / "services" / "3d-api" / "systemd" / "printops-backup.service"
+    assert copied.read_bytes() == shipped.read_bytes()
+
+
+def test_the_shipped_backup_unit_and_the_token_mint_name_the_same_container() -> None:
+    from printops.cli import token
+
+    shipped = (REPO / "services" / "3d-api" / "systemd" / "printops-backup.service").read_text(encoding="utf-8")
+    exec_start = next(ln for ln in shipped.splitlines() if ln.startswith("ExecStart="))
+    assert f" exec {deploy.API_CONTAINER} " in exec_start and token.CONTAINER == deploy.API_CONTAINER
