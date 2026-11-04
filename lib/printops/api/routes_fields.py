@@ -14,13 +14,14 @@ Spoolman fails. docs/printops/native-fields.md has the field audit.
 
 from __future__ import annotations
 
+import sqlite3
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Body, Depends
 from fastapi.responses import JSONResponse
 
-from printops import filament_defaults, native_fields
-from printops.api.deps import Principal, get_spoolman, require
+from printops import filament_defaults, locations, native_fields
+from printops.api.deps import Db, Principal, get_spoolman, require
 from printops.spoolman import Spoolman, SpoolmanError
 
 router = APIRouter()
@@ -31,21 +32,33 @@ Writer = Annotated[Principal, Depends(require("write"))]
 OptBody = Annotated[dict[str, Any] | None, Body()]
 
 
-def _migrate(sm: Spoolman, *, apply: bool) -> Any:
+def _location_path(conn: sqlite3.Connection) -> native_fields.LocationPath:
+    """PrintOps location id -> the path Spoolman stores (None: no such location)."""
+
+    def resolve(location_id: int) -> str | None:
+        loc = locations.find(conn, location_id)
+        return None if loc is None else locations.spoolman_path(loc)
+
+    return resolve
+
+
+def _migrate(sm: Spoolman, conn: sqlite3.Connection, *, apply: bool) -> Any:
     try:
-        return native_fields.migrate_native(sm, apply=apply).to_dict()
+        return native_fields.migrate_native(
+            sm, apply=apply, location_path=_location_path(conn)
+        ).to_dict()
     except SpoolmanError as e:
         return JSONResponse({"detail": e.message, "info": {}}, status_code=502)
 
 
 @router.get("/v1/fields/migrate-native", response_model=None)
-def migrate_native_dry_run(sm: Sm, who: Reader) -> Any:
-    return _migrate(sm, apply=False)
+def migrate_native_dry_run(sm: Sm, conn: Db, who: Reader) -> Any:
+    return _migrate(sm, conn, apply=False)
 
 
 @router.post("/v1/fields/migrate-native", response_model=None)
-def migrate_native_apply(sm: Sm, who: Writer, body: OptBody = None) -> Any:
-    return _migrate(sm, apply=True)
+def migrate_native_apply(sm: Sm, conn: Db, who: Writer, body: OptBody = None) -> Any:
+    return _migrate(sm, conn, apply=True)
 
 
 def _fill(sm: Spoolman, *, apply: bool) -> Any:

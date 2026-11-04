@@ -430,7 +430,7 @@ degraded until they are gone). **Dry run by default**: `3d printops fields migra
 per item and writes nothing; `3d printops fields migrate-native --apply` writes (token scope `write`);
 `--json` prints the report (`3d printops fields migrate-native --apply --json`). Moves:
 vendor `spool_tare_g` → `empty_spool_weight`; spool `printops_slot` → `location` `slot:<printer>/<head>`;
-`printops_location_id` dropped; `opened_at` → `first_used` (the earlier of the two, `adjust`);
+`printops_location_id` → `location` = that PrintOps location's path where the text is empty (dropped where the text is there, where the id names no location, or where the spool is loaded and keeps its slot); `opened_at` → `first_used` (the earlier of the two, `adjust`);
 `tag_uids` → Spoolman tags; the filament temperature ranges stay and fill an empty native
 `settings_extruder_temp` / `settings_bed_temp` with their midpoint (`fill`). Per item: `copy`, `drop`
 (native value already equal), `adjust`, `link`, `fill` are written in one Spoolman call that also clears the

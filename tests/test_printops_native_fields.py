@@ -24,6 +24,12 @@ from printops.spoolman import (
     missing_extra_fields,
 )
 
+
+def no_locations(location_id: int) -> str | None:
+    """No PrintOps locations exist: no recorded id resolves."""
+    return None
+
+
 LEGACY_PARAMS: dict[tuple[str, str], dict[str, Any]] = {
     ("vendor", "spool_tare_g"): {"name": "Tare", "field_type": "float", "unit": "g"},
     ("spool", "printops_slot"): {"name": "Slot", "field_type": "text"},
@@ -144,7 +150,7 @@ def test_vendor_with_only_the_legacy_extra_yields_no_tare_until_migrated(
         tares.resolve_new(printops_db, sm.get("filament", fil)).tare is None
     )  # the extra is ignored
 
-    native_fields.migrate_native(sm, apply=True)
+    native_fields.migrate_native(sm, location_path=no_locations, apply=True)
 
     tare = tares.resolve_new(printops_db, sm.get("filament", fil)).tare
     assert tare is not None
@@ -209,7 +215,7 @@ def test_dry_run_plans_every_case_and_writes_nothing(sm: FakeSpoolman) -> None:
     }
     writes_before = sm.writes()
 
-    report = native_fields.migrate_native(sm, apply=False)
+    report = native_fields.migrate_native(sm, location_path=no_locations, apply=False)
 
     assert sm.writes() == writes_before  # GETs only
     assert {
@@ -250,7 +256,7 @@ def test_dry_run_plans_every_case_and_writes_nothing(sm: FakeSpoolman) -> None:
 
 def test_apply_moves_vendor_tares_and_never_overwrites(sm: FakeSpoolman) -> None:
     ids = _legacy_world(sm)
-    native_fields.migrate_native(sm, apply=True)
+    native_fields.migrate_native(sm, location_path=no_locations, apply=True)
 
     vendors = {n: sm.get("vendor", i) for n, i in ids.items() if n.startswith("tare")}
     assert (
@@ -268,7 +274,7 @@ def test_apply_moves_vendor_tares_and_never_overwrites(sm: FakeSpoolman) -> None
 
 def test_apply_moves_spool_values_and_never_overwrites(sm: FakeSpoolman) -> None:
     ids = _legacy_world(sm)
-    native_fields.migrate_native(sm, apply=True)
+    native_fields.migrate_native(sm, location_path=no_locations, apply=True)
 
     spools = {n: sm.get("spool", i) for n, i in ids.items() if not n.startswith("tare")}
     assert (
@@ -302,7 +308,7 @@ def test_apply_moves_spool_values_and_never_overwrites(sm: FakeSpoolman) -> None
 
 def test_apply_keeps_a_definition_while_an_item_still_holds_a_value(sm: FakeSpoolman) -> None:
     _legacy_world(sm)
-    report = native_fields.migrate_native(sm, apply=True)
+    report = native_fields.migrate_native(sm, location_path=no_locations, apply=True)
 
     states = {f.field: f.state for f in report.fields}
     assert states[
@@ -334,7 +340,7 @@ def test_opened_at_earlier_than_first_used_adjusts_first_used(sm: FakeSpoolman) 
         first_used="2026-09-01T00:00:00Z",
         extra={"opened_at": "2026-10-01T10:00:00Z"},
     )
-    report = native_fields.migrate_native(sm, apply=True)
+    report = native_fields.migrate_native(sm, location_path=no_locations, apply=True)
     assert _actions(report, "spool.opened_at") == ["adjust", "drop"]
     assert (
         sm.get("spool", early)["first_used"] == "2026-10-01T10:00:00Z"
@@ -357,7 +363,7 @@ def test_fully_resolvable_world_finishes_deletes_every_definition_and_second_run
             "tag_uids": '["AA11"]',
         },
     )
-    first = native_fields.migrate_native(sm, apply=True)
+    first = native_fields.migrate_native(sm, location_path=no_locations, apply=True)
     assert not first.blocked and all(f.state == "deleted" for f in first.fields)
     assert not {k for _, k in LEGACY_EXTRA_FIELDS} & (
         _keys(sm, "vendor") | _keys(sm, "spool")
@@ -373,7 +379,7 @@ def test_fully_resolvable_world_finishes_deletes_every_definition_and_second_run
     assert [t["uid"] for t in spool["tags"]] == ["AA11"]
 
     writes = len(sm.writes())
-    again = native_fields.migrate_native(sm, apply=True)
+    again = native_fields.migrate_native(sm, location_path=no_locations, apply=True)
     assert again.changes == [] and not again.blocked and not again.pending
     assert all(f.state == "absent" for f in again.fields)
     assert len(sm.writes()) == writes
@@ -386,16 +392,16 @@ def test_tag_held_by_another_spool_is_a_conflict_and_keeps_the_extra(
     holder = _spool(sm)
     sm.link_tag(holder, "04AA")
     sid = _spool(sm, extra={"tag_uids": '["04:aa", "BB22"]'})
-    planned = native_fields.migrate_native(sm, apply=False)  # the dry run already knows the holder
+    planned = native_fields.migrate_native(sm, location_path=no_locations, apply=False)  # the dry run already knows the holder
     assert [c.action for c in planned.changes if c.field == "spool.tag_uids"] == ["conflict"]
-    report = native_fields.migrate_native(sm, apply=True)
+    report = native_fields.migrate_native(sm, location_path=no_locations, apply=True)
     change = next(c for c in report.changes if c.field == "spool.tag_uids")
     assert change.action == "conflict" and "another spool" in change.detail
     assert sm.get("spool", sid)["extra"] == {"tag_uids": encode_extra('["04:aa", "BB22"]')}
     assert next(f for f in report.fields if f.field == "spool.tag_uids").state == "kept"
     # the user unlinks it from the other spool (here: deletes that spool), the re-run finishes
     sm.delete("spool", holder)
-    done = native_fields.migrate_native(sm, apply=True)
+    done = native_fields.migrate_native(sm, location_path=no_locations, apply=True)
     assert not done.blocked and {t["uid"] for t in sm.get("spool", sid)["tags"]} == {
         "04AA",
         "BB22",
@@ -421,19 +427,19 @@ def test_temperature_midpoint_fills_only_empty_native_values(sm: FakeSpoolman) -
         },
     )
     half = _filament(sm, extra={"nozzle_temp_min": encode_extra(190)})
-    dry = native_fields.migrate_native(sm, apply=False)
+    dry = native_fields.migrate_native(sm, location_path=no_locations, apply=False)
     assert [(c.field, c.item_id, c.action) for c in dry.changes] == [
         ("filament.settings_extruder_temp", empty, "fill"),
         ("filament.settings_bed_temp", empty, "fill"),
     ]
     assert "settings_extruder_temp" not in sm.get("filament", empty)
-    native_fields.migrate_native(sm, apply=True)
+    native_fields.migrate_native(sm, location_path=no_locations, apply=True)
     got = sm.get("filament", empty)
     assert (got["settings_extruder_temp"], got["settings_bed_temp"]) == (205, 56)
     assert sm.get("filament", set_already)["settings_extruder_temp"] == 200
     assert "settings_extruder_temp" not in sm.get("filament", half)
     assert (
-        native_fields.migrate_native(sm, apply=True).changes == []
+        native_fields.migrate_native(sm, location_path=no_locations, apply=True).changes == []
     )  # ranges stay: nothing left to fill
 
 
@@ -450,7 +456,7 @@ def test_one_failed_write_does_not_abort_the_others_and_keeps_the_definition(
         return real_update(entity, item_id, data)  # type: ignore[arg-type]
 
     monkeypatch.setattr(sm, "update", flaky)
-    report = native_fields.migrate_native(sm, apply=True)
+    report = native_fields.migrate_native(sm, location_path=no_locations, apply=True)
     assert _actions(report, "vendor.spool_tare_g") == ["failed", "copy"]
     assert "boom" in report.changes[0].detail
     assert sm.get("vendor", good)["empty_spool_weight"] == 135.0
@@ -467,7 +473,7 @@ def test_a_write_the_reply_does_not_confirm_is_failed_not_trusted(
     monkeypatch.setattr(
         sm, "update", lambda e, i, d: stale if e == "vendor" else real_update(e, i, d)
     )  # type: ignore[arg-type]
-    report = native_fields.migrate_native(sm, apply=True)
+    report = native_fields.migrate_native(sm, location_path=no_locations, apply=True)
     assert _actions(report, "vendor.spool_tare_g") == [
         "failed"
     ] and "spool_tare_g" in _keys(sm, "vendor")
@@ -480,7 +486,7 @@ def test_a_failing_field_delete_is_reported_and_blocks(
         raise SpoolmanError("Spoolman DELETE: HTTP 500: no", status=500)
 
     monkeypatch.setattr(sm, "delete_field", refuse)
-    report = native_fields.migrate_native(sm, apply=True)
+    report = native_fields.migrate_native(sm, location_path=no_locations, apply=True)
     assert report.blocked and {f.state for f in report.fields} == {"failed"}
 
 
@@ -583,3 +589,107 @@ def test_health_reports_legacy_fields_as_degraded_until_migrated(
     )
     healed = printops_client.get("/v1/health").json()
     assert healed["status"] == "ok" and healed["spoolman"]["legacy_fields"] == []
+
+
+# ------------------------------------------- #712: a recorded location id is not lost with its field
+
+LOCATION_ID = "printops_location_id"
+
+
+def _location_by_id(paths: Mapping[int, str]) -> native_fields.LocationPath:
+    def resolve(location_id: int) -> str | None:
+        return paths.get(location_id)
+
+    return resolve
+
+
+def _location_changes(report: native_fields.MigrationReport) -> dict[int, native_fields.Change]:
+    return {c.item_id: c for c in report.changes if c.field == f"spool.{LOCATION_ID}"}
+
+
+def test_empty_location_text_takes_the_path_of_the_recorded_location_id(sm: FakeSpoolman) -> None:
+    sid = _spool(sm, extra={LOCATION_ID: 3})
+    paths = _location_by_id({3: "WH:A/S1"})
+
+    planned = native_fields.migrate_native(sm, apply=False, location_path=paths)
+
+    change = _location_changes(planned)[sid]
+    assert (change.action, "WH:A/S1" in change.detail) == ("copy", True)
+    assert not sm.get("spool", sid).get("location")  # a dry run writes nothing
+    assert planned.pending
+
+    done = native_fields.migrate_native(sm, apply=True, location_path=paths)
+
+    assert _location_changes(done)[sid].action == "copy" and not done.blocked
+    spool = sm.get("spool", sid)
+    assert spool["location"] == "WH:A/S1" and LOCATION_ID not in spool["extra"]
+
+
+def test_location_text_already_there_wins_over_the_recorded_id(sm: FakeSpoolman) -> None:
+    sid = _spool(sm, location="WH:A", extra={LOCATION_ID: 3})
+
+    done = native_fields.migrate_native(sm, apply=True, location_path=_location_by_id({3: "WH:A/S1"}))
+
+    assert _location_changes(done)[sid].action == "drop"
+    assert sm.get("spool", sid)["location"] == "WH:A"  # Spoolman's text is the truth, never overwritten
+
+
+def test_an_id_of_no_location_is_dropped_and_says_so(sm: FakeSpoolman) -> None:
+    sid = _spool(sm, extra={LOCATION_ID: 99})
+
+    done = native_fields.migrate_native(sm, apply=True, location_path=_location_by_id({}))
+
+    change = _location_changes(done)[sid]
+    assert change.action == "drop" and "no PrintOps location" in change.detail
+    assert not done.blocked and LOCATION_ID not in sm.get("spool", sid)["extra"]
+
+
+def test_a_loaded_spool_keeps_its_slot_not_the_stored_location(sm: FakeSpoolman) -> None:
+    """The slot is where the spool is now; the id only says where it was stored. The dry run already
+    plans it that way (the slot's copy has not happened yet when the id is looked at)."""
+    sid = _spool(sm, extra={"printops_slot": "u1/T3", LOCATION_ID: 3})
+    paths = _location_by_id({3: "WH:A/S1"})
+
+    planned = native_fields.migrate_native(sm, apply=False, location_path=paths)
+    assert _location_changes(planned)[sid].action == "drop"
+
+    native_fields.migrate_native(sm, apply=True, location_path=paths)
+    assert sm.get("spool", sid)["location"] == "slot:u1/T3"
+
+
+def test_a_slot_that_cannot_be_copied_leaves_the_stored_location_to_the_id(sm: FakeSpoolman) -> None:
+    sid = _spool(sm, extra={"printops_slot": "x" * 80, LOCATION_ID: 3})  # too long for Spoolman's location
+    paths = _location_by_id({3: "WH:A/S1"})
+
+    planned = native_fields.migrate_native(sm, apply=False, location_path=paths)
+    assert _location_changes(planned)[sid].action == "copy"
+
+    native_fields.migrate_native(sm, apply=True, location_path=paths)
+    assert sm.get("spool", sid)["location"] == "WH:A/S1"
+
+
+def test_route_migrates_the_recorded_location_id_of_a_spool_without_location_text(
+    printops_client: Any,
+    printops_tokens: dict[str, str],
+    fake_spoolman: FakeSpoolman,
+    printops_db: sqlite3.Connection,
+) -> None:
+    """3d-api knows the PrintOps locations, so `fields migrate-native` (dry run, then apply) restores the
+    placement the legacy extra recorded instead of dropping it with the field."""
+    from printops import locations
+
+    locations.add(printops_db, "WH:A", "zone", actor="test")
+    shelf = locations.add(printops_db, "WH:A/S1", "shelf", actor="test")
+    for (entity, key), params in LEGACY_PARAMS.items():
+        fake_spoolman.set_field(entity, key, params)  # type: ignore[arg-type]
+    placed = _spool(fake_spoolman, extra={LOCATION_ID: shelf.id})
+
+    dry = printops_client.get("/v1/fields/migrate-native", headers=_auth(printops_tokens, "read")).json()
+    change = next(c for c in dry["changes"] if c["field"] == f"spool.{LOCATION_ID}")
+    assert change["action"] == "copy" and "WH:A/S1" in change["detail"]
+    assert not fake_spoolman.get("spool", placed).get("location")
+
+    done = printops_client.post("/v1/fields/migrate-native", headers=_auth(printops_tokens, "write")).json()
+    assert done["blocked"] is False
+    spool = fake_spoolman.get("spool", placed)
+    assert spool["location"] == "WH:A/S1" and LOCATION_ID not in spool["extra"]

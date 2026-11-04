@@ -544,6 +544,35 @@ def test_fields_fill_defaults_dry_run_apply_and_noop(tmp_path: Path, shop: LiveA
 
 
 
+def test_fields_migrate_native_restores_the_placement_the_location_id_recorded(
+    tmp_path: Path, shop: LiveApi
+) -> None:
+    """#712: a spool with a recorded PrintOps location id and no location text used to lose its place
+    when the legacy field went; the dry run lists the path it will write and the apply writes it."""
+    sm = shop.spoolman
+    _legacy_world(shop)
+    shelf = {loc.path: loc.id for loc in _locations(shop)}["WH:A/S1"]
+    fil = sm.create("filament", {"name": "PETG", "material": "PETG", "density": 1.27, "diameter": 1.75, "weight": 1000})
+    spool = sm.create("spool", {"filament_id": fil["id"], "extra": {"printops_location_id": str(shelf)}})
+
+    dry = _cli(tmp_path, shop, "printops", "fields", "migrate-native")
+    assert "location := 'WH:A/S1' (recorded as PrintOps location #" in dry.stdout
+    assert not sm.get("spool", spool["id"]).get("location")
+
+    applied = _cli(tmp_path, shop, "printops", "fields", "migrate-native", "--apply")
+    assert applied.returncode == 0, applied.stdout + applied.stderr
+    placed = sm.get("spool", spool["id"])
+    assert placed["location"] == "WH:A/S1" and placed["extra"] == {}
+
+
+def _locations(shop: LiveApi) -> list[locations.Location]:
+    conn = db.open_db(shop.settings.db_path)
+    try:
+        return locations.all_locations(conn)
+    finally:
+        conn.close()
+
+
 def _received_max_speed(tmp_path: Path, shop: LiveApi, *flags: str) -> int | None:
     got = _cli(tmp_path, shop, "printops", "spool", "receive", "--vendor", "Elegoo", "--material", "PETG",
                "--name", "Grey", "--net", "1000", "--json", *flags)

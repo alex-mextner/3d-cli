@@ -2,12 +2,18 @@
 Spoolman's native fields (docs/printops/native-fields.md has the field-by-field audit).
 
 ACCESSED VIA: `3d printops fields migrate-native` (printops.cli.fields) and 3d-api
-`GET|POST /v1/fields/migrate-native` (routes_fields.py). Pure Spoolman work: no PrintOps DB.
+`GET|POST /v1/fields/migrate-native` (routes_fields.py). Spoolman work plus one lookup the caller
+supplies, `location_path` (PrintOps location id -> path): the id is meaningless without the
+PrintOps DB, so this module does not open it.
 
 WHAT MOVES (legacy extra → native):
   vendor.spool_tare_g          → vendor.empty_spool_weight
   spool.printops_slot          → spool.location = `slot:<printer>/<head>`
-  spool.printops_location_id   → dropped (spool.location text is the only placement record)
+  spool.printops_location_id   → spool.location = that location's path when the text is empty (the
+                                 id was the only record of the placement then); dropped when the
+                                 text is there (Spoolman's text is the truth) or the id names no
+                                 location. A spool that is loaded keeps its slot (it is where the
+                                 spool is now; the id only says where it was stored).
   spool.opened_at              → spool.first_used (the earlier of the two)
   spool.tag_uids               → spool tags (POST /spool/{id}/tag)
   filament.nozzle/bed_temp_min/max (kept, they are ranges) → native settings_extruder_temp /
@@ -51,6 +57,8 @@ BLOCKING = frozenset({"conflict", "invalid", "failed"})
 WRITING = frozenset({"copy", "drop", "adjust", "link", "fill"})
 ACTIONS = ("copy", "drop", "adjust", "link", "fill", "conflict", "invalid", "failed")
 MAX_LOCATION = 64  # Spoolman spool.location is VARCHAR(64)
+
+LocationPath = Callable[[int], str | None]  # PrintOps location id -> the path Spoolman stores, None if unknown
 
 
 @dataclass(frozen=True)
@@ -215,6 +223,19 @@ def _plan_tare(vendor: Mapping[str, Any], raw: str) -> _Plan:
     )
 
 
+def _copy_location(wanted: str, detail: str) -> _Plan:
+    """The plan that writes `wanted` into the native location and checks the reply."""
+
+    def verify(reply: JSON) -> str:
+        return (
+            ""
+            if reply.get("location") == wanted
+            else f"Spoolman answered location {reply.get('location')!r}"
+        )
+
+    return _Plan("copy", detail, None, {"location": wanted}, verify=verify)
+
+
 def _plan_slot(spool: Mapping[str, Any], raw: str) -> _Plan:
     value, ok = _stored(spool, "printops_slot")
     location = str(spool.get("location") or "").strip()
@@ -251,29 +272,33 @@ def _plan_slot(spool: Mapping[str, Any], raw: str) -> _Plan:
             location,
         )
 
-    def verify(reply: JSON) -> str:
-        return (
-            ""
-            if reply.get("location") == wanted
-            else f"Spoolman answered location {reply.get('location')!r}"
-        )
-
-    return _Plan(
-        "copy", f"location := {wanted!r}", None, {"location": wanted}, verify=verify
-    )
+    return _copy_location(wanted, f"location := {wanted!r}")
 
 
-def _plan_location_id(spool: Mapping[str, Any], raw: str) -> _Plan:
+def _plan_location_id(
+    spool: Mapping[str, Any], raw: str, location_path: LocationPath
+) -> _Plan:
     location = str(spool.get("location") or "").strip()
-    note = (
-        ""
-        if location
-        else " (the location text is empty, so the spool has no recorded place)"
+    if location:
+        return _Plan("drop", f"id {raw} duplicates the location text; dropped", location)
+    value, ok = _stored(spool, "printops_location_id")
+    path = (
+        location_path(value)
+        if ok and isinstance(value, int) and not isinstance(value, bool)
+        else None
     )
-    return _Plan(
-        "drop",
-        f"id {raw} duplicates the location text; dropped{note}",
-        location or None,
+    if path is None:
+        return _Plan(
+            "drop",
+            f"id {raw} names no PrintOps location; dropped (the location text is empty, so the spool has no recorded place)",
+        )
+    if len(path) > MAX_LOCATION:
+        return _Plan(
+            "invalid",
+            f"{path!r} does not fit Spoolman's {MAX_LOCATION}-character location",
+        )
+    return _copy_location(
+        path, f"location := {path!r} (recorded as PrintOps location #{value})"
     )
 
 
@@ -366,7 +391,6 @@ def _plan_tags(spool: Mapping[str, Any], raw: str, holders: dict[str, int]) -> _
 _PLANNERS: dict[tuple[Entity, str], Callable[[Mapping[str, Any], str], _Plan]] = {
     ("vendor", "spool_tare_g"): _plan_tare,
     ("spool", "printops_slot"): _plan_slot,
-    ("spool", "printops_location_id"): _plan_location_id,
     ("spool", "opened_at"): _plan_opened,
 }
 
@@ -402,23 +426,53 @@ def _execute(
     return ("failed", failure) if failure else (plan.action, plan.detail)
 
 
-def _migrate_field(
-    spoolman: Spoolman, entity: Entity, key: str, *, apply: bool
-) -> list[Change]:
-    listing = spoolman.find(entity, {"allow_archived": "true"} if entity == "spool" else None)
+def _planner(
+    key: str,
+    entity: Entity,
+    listing: list[JSON],
+    location_path: LocationPath,
+) -> Callable[[Mapping[str, Any], str], _Plan]:
+    if key == "printops_location_id":
+
+        def plan_location(item: Mapping[str, Any], raw: str) -> _Plan:
+            return _plan_location_id(item, raw, location_path)
+
+        return plan_location
     planner = _PLANNERS.get((entity, key))
-    if planner is None:  # spool.tag_uids: needs who holds which tag now
-        holders = {normalize_uid(str(t["uid"])): int(i["id"]) for i in listing for t in i.get("tags") or []}
+    if planner is not None:
+        return planner
+    # spool.tag_uids: needs who holds which tag now
+    holders = {normalize_uid(str(t["uid"])): int(i["id"]) for i in listing for t in i.get("tags") or []}
 
-        def planner(item: Mapping[str, Any], raw: str) -> _Plan:
-            return _plan_tags(item, raw, holders)
+    def plan_tags(item: Mapping[str, Any], raw: str) -> _Plan:
+        return _plan_tags(item, raw, holders)
 
+    return plan_tags
+
+
+def _migrate_field(
+    spoolman: Spoolman,
+    entity: Entity,
+    key: str,
+    *,
+    apply: bool,
+    location_path: LocationPath,
+    planned_location: dict[int, str],
+) -> list[Change]:
+    """The changes of one legacy field. A dry run writes nothing, so a location an earlier field
+    would write (the slot's) is kept in `planned_location` and seen by the later fields as if the
+    write had happened: the plan is what an apply does."""
+    listing = spoolman.find(entity, {"allow_archived": "true"} if entity == "spool" else None)
+    planner = _planner(key, entity, listing, location_path)
     out: list[Change] = []
     for item in listing:
         raw = (item.get("extra") or {}).get(key)
         if raw is None:
             continue
-        plan = planner(item, str(raw))
+        seen = {**item, "location": planned_location[int(item["id"])]} if int(item["id"]) in planned_location else item
+        plan = planner(seen, str(raw))
+        if not apply and plan.action == "copy" and "location" in (plan.body or {}):
+            planned_location[int(item["id"])] = str((plan.body or {})["location"])
         action, detail = plan.action, plan.detail
         if apply and action in WRITING:
             action, detail = _execute(spoolman, entity, int(item["id"]), key, plan)
@@ -480,17 +534,28 @@ def _fill_temps(spoolman: Spoolman, *, apply: bool) -> list[Change]:
     return out
 
 
-def migrate_native(spoolman: Spoolman, *, apply: bool) -> MigrationReport:
+def migrate_native(
+    spoolman: Spoolman, *, apply: bool, location_path: LocationPath
+) -> MigrationReport:
     """Move every legacy extra field's values to Spoolman's native fields (see the module doc).
-    Dry run unless `apply`; the report lists every item and the fate of every legacy definition."""
+    Dry run unless `apply`; the report lists every item and the fate of every legacy definition.
+    `location_path` turns a recorded PrintOps location id into the path Spoolman stores."""
     legacy_entities: tuple[Entity, ...] = ("vendor", "spool")
     defined = {
         (e, str(f["key"])) for e in legacy_entities for f in spoolman.list_fields(e)
     }
     changes: list[Change] = []
     outcomes: list[FieldOutcome] = []
+    planned_location: dict[int, str] = {}
     for entity, key in LEGACY_EXTRA_FIELDS:
-        moved = _migrate_field(spoolman, entity, key, apply=apply)
+        moved = _migrate_field(
+            spoolman,
+            entity,
+            key,
+            apply=apply,
+            location_path=location_path,
+            planned_location=planned_location,
+        )
         changes.extend(moved)
         label = f"{entity}.{key}"
         if (entity, key) not in defined:

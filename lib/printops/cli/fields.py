@@ -15,7 +15,8 @@ USAGE = """3d printops fields migrate-native [--apply] [--json] [--api URL] [--t
   per item, nothing written); --apply writes. What moves:
     vendor spool_tare_g    -> vendor "empty spool weight" (empty_spool_weight)
     spool printops_slot    -> spool location `slot:<printer>/<head>`
-    spool printops_location_id -> dropped (the location text is the only placement record)
+    spool printops_location_id -> spool location = that PrintOps location's path where the text is empty
+                           (dropped where the text is there, the id names no location, or the spool is loaded)
     spool opened_at        -> spool first_used (the earlier of the two)
     spool tag_uids         -> Spoolman spool tags
     filament nozzle/bed_temp_min+max (kept) -> native single temperatures, as the midpoint, where empty
