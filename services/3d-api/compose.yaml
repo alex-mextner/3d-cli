@@ -7,11 +7,15 @@
 # /mnt/wd500/odroid-rt/ultra); override with PRINTOPS_DATA_DIR / PRINTOPS_BACKUP_DIR.
 # Every other host (`3d init --env`, the standalone script of `3d init --env --spoolman script`)
 # sets the knobs below: PRINTOPS_UID/GID (the host user that owns the bind-mounted data),
-# PRINTOPS_SPOOLMAN_PORT / PRINTOPS_API_PORT, PRINTOPS_CONTAINER_PREFIX, PRINTOPS_TZ,
-# PRINTOPS_GCODE_HOST_DIR. Their defaults are the Odroid values, so its deploy is unchanged.
-# Ports are published on all host interfaces: the Odroid sits behind the home router's NAT,
-# so that means LAN + tailnet (remote access is Tailscale-only). Spoolman has no auth — never
-# port-forward 7912; 3d-api requires bearer tokens on everything but /v1/health.
+# PRINTOPS_SPOOLMAN_PORT / PRINTOPS_API_PORT, PRINTOPS_BIND_ADDR, PRINTOPS_CONTAINER_PREFIX,
+# PRINTOPS_TZ, PRINTOPS_GCODE_HOST_DIR. Their defaults are the Odroid values, so its deploy is
+# unchanged.
+# Ports are published on PRINTOPS_BIND_ADDR, default 0.0.0.0 = all host interfaces: the Odroid sits
+# behind the home router's NAT, so that means LAN + tailnet (remote access is Tailscale-only).
+# Spoolman has no auth — never port-forward 7912, and on a host that is not behind such a router
+# (a laptop on public Wi-Fi, a VPS) set PRINTOPS_BIND_ADDR to 127.0.0.1 or the one LAN address that
+# needs it (`3d init --env --bind ADDR`; docker's own iptables rules bypass ufw/firewalld).
+# 3d-api requires bearer tokens on everything but /v1/health.
 name: printops
 
 services:
@@ -36,7 +40,7 @@ services:
     volumes:
       - ${PRINTOPS_DATA_DIR:-/home/ultra/printops/data}/spoolman:/home/app/.local/share/spoolman
     ports:
-      - "${PRINTOPS_SPOOLMAN_PORT:-7912}:8000"
+      - "${PRINTOPS_BIND_ADDR:-0.0.0.0}:${PRINTOPS_SPOOLMAN_PORT:-7912}:8000"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health', timeout=5)"]
       interval: 30s
@@ -82,4 +86,4 @@ services:
       # sliced plates for the incident auto-context (read-only)
       - ${PRINTOPS_GCODE_HOST_DIR:-/home/ultra/printops/gcodes}:/gcodes:ro
     ports:
-      - "${PRINTOPS_API_PORT:-8765}:8765"
+      - "${PRINTOPS_BIND_ADDR:-0.0.0.0}:${PRINTOPS_API_PORT:-8765}:8765"

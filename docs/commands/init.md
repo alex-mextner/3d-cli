@@ -45,7 +45,7 @@ the token, the health check and the config.
 
 ```
 3d init --env [--no-input] [--spoolman TARGET] [--script-out PATH] [--api URL] [--token TOKEN]
-              [--ssh-user USER] [--dry-run] [--allow-discouraged]
+              [--ssh-user USER] [--bind ADDR] [--dry-run] [--allow-discouraged]
 ```
 
 | Option | What |
@@ -57,6 +57,7 @@ the token, the health check and the config.
 | `--spoolman ssh:USER@HOST` | Any server with docker compose you can `ssh` into without a password prompt; data in `~/printops` there. |
 | `--spoolman script` | Write a self-contained installer (`--script-out`, default `./spoolman-setup.sh`); installs nothing here. |
 | `--api URL` `--token TOKEN` | Connect to a Spoolman/3d-api that already runs (what the script prints): the URL and the token are checked, then written. |
+| `--bind ADDR` | The host address Spoolman and 3d-api listen on (an IP address). Default `127.0.0.1` for `--spoolman local`, `0.0.0.0` (all interfaces) for ssh/printer hosts and for `script`. See [Network exposure](#network-exposure). |
 | `--dry-run` | Install targets: print the steps (rsync `--dry-run`), change nothing. |
 | `--allow-discouraged` | With `--no-input`: accept a printer marked "possible but not recommended". |
 | `--no-input`, `--yes`, `-y` | Never prompt, and never install unless an explicit target is named. |
@@ -65,6 +66,7 @@ the token, the health check and the config.
 3d init --env                                            # interactive menu
 3d init --env --no-input --spoolman auto                 # CI/agent: "already configured" or the commands to run
 3d init --env --no-input --spoolman local
+3d init --env --no-input --spoolman local --bind 192.168.0.20   # reachable from the LAN on that address only
 3d init --env --no-input --spoolman script --script-out ~/spoolman-setup.sh
 3d init --env --no-input --api http://nas.lan:8765 --token po_...
 ```
@@ -96,10 +98,28 @@ Behaviour:
   `~/printops`), waits for health, mints a token and prints both URLs plus the
   `3d init --env --api URL --token TOKEN` line. Re-runs change nothing (`--dry-run` checks
   prerequisites). Knobs: `PRINTOPS_DIR`, `PRINTOPS_SPOOLMAN_PORT`, `PRINTOPS_API_PORT`,
-  `PRINTOPS_CONTAINER_PREFIX`, `PRINTOPS_SPOOLMAN_CORS_ORIGIN` (default: Spoolman's own address only,
+  `PRINTOPS_BIND_ADDR` (or `--bind ADDR` on the script), `PRINTOPS_CONTAINER_PREFIX`,
+  `PRINTOPS_SPOOLMAN_CORS_ORIGIN` (default: Spoolman's own address only,
   never `*`; add your Fluidd/Mainsail origins), `SPOOLMAN_ONLY=1`, `TOKEN_NAME` (header of the script).
   A relative `PRINTOPS_DIR` is taken from the directory you run the script in. Spoolman has no
   auth: keep its port inside the LAN/VPN.
+
+### Network exposure
+
+Spoolman has **no authentication** (3d-api needs a bearer token for everything but
+`/v1/health`). Docker publishes ports on every interface and bypasses ufw/firewalld, so the bind
+address is the control that works:
+
+- `--spoolman local` listens on `127.0.0.1`: nothing else on the network can reach Spoolman. The
+  consequence is that **no other machine and no printer can use it either** (another computer
+  running `3d`, Moonraker's `[spoolman]` section, Fluidd). Give `--bind` the LAN address they
+  reach it on (or `--bind 0.0.0.0` on a network you trust).
+- ssh and printer hosts, and the script, listen on `0.0.0.0` so the machine running `3d` can reach
+  them. On a VPS or any host without a trusted router in front, pass `--bind ADDR` with the LAN/VPN
+  address (the script prints a warning when it listens on every interface).
+- The same knob for the compose project: `PRINTOPS_BIND_ADDR`
+  ([services/3d-api/README.md](../../services/3d-api/README.md#ports-lan--tailnet-only),
+  [`3d printops deploy --bind`](printops.md#deploy)).
 
 Exit codes: 0 configured / skipped / already configured, 1 a step or the health check failed,
 2 bad options.

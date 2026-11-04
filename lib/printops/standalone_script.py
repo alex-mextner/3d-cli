@@ -29,7 +29,7 @@ import tarfile
 import tempfile
 from pathlib import Path
 
-from printops.deploy import SYNC_PATHS
+from printops.deploy import ALL_INTERFACES, SYNC_PATHS, normalize_bind
 from printops.standalone_template import TEMPLATE
 
 WRAP = 76
@@ -64,8 +64,9 @@ def _payload(repo_root: Path) -> bytes:
     return buf.getvalue()
 
 
-def render(repo_root: Path, version: str) -> str:
-    """The complete script text for the checkout at `repo_root`."""
+def render(repo_root: Path, version: str, bind: str = ALL_INTERFACES) -> str:
+    """The complete script text for the checkout at `repo_root`; `bind` is the script's default
+    PRINTOPS_BIND_ADDR (an IP address; ValueError otherwise)."""
     payload = _payload(repo_root)
     b64 = base64.b64encode(payload).decode("ascii")
     wrapped = "\n".join(b64[i:i + WRAP] for i in range(0, len(b64), WRAP))
@@ -74,12 +75,13 @@ def render(repo_root: Path, version: str) -> str:
             raise ValueError(f"the script template must contain {marker} exactly once")
     return (TEMPLATE.replace("@GENERATED_BY@", f"3d-cli {version}")
             .replace("@PAYLOAD_SHA256@", hashlib.sha256(payload).hexdigest())
+            .replace("@BIND_ADDR@", normalize_bind(bind))
             .replace("@PAYLOAD@", wrapped))
 
 
-def write(repo_root: Path, version: str, out: Path) -> Path:
+def write(repo_root: Path, version: str, out: Path, bind: str = ALL_INTERFACES) -> Path:
     """Write the script to `out` (mode 0755, atomically); returns the path."""
-    text = render(repo_root, version)
+    text = render(repo_root, version, bind)
     out = out.expanduser()
     out.parent.mkdir(parents=True, exist_ok=True)
     # mkstemp creates the file exclusively (O_EXCL, 0600) under a unique name: a planted

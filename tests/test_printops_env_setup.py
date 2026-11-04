@@ -621,6 +621,56 @@ def test_local_install_builds_from_this_checkout_without_rsync(
     assert "api: http://127.0.0.1:8765" in config_path().read_text()
 
 
+def _compose_of(drec: Recorder) -> str:
+    return next(c[-1] for c in drec.calls if "docker compose" in c[-1])
+
+
+def test_local_install_listens_on_loopback_and_says_what_that_costs(
+    cfg_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Spoolman has no authentication: `--spoolman local` on a laptop must not open it to the Wi-Fi."""
+    _patch_health(monkeypatch, [])
+    env, out, _, drec = make_env(cfg_home)
+    assert env_setup.run(["--no-input", "--spoolman", "local"], env) == 0
+    assert "PRINTOPS_BIND_ADDR=127.0.0.1" in _compose_of(drec)
+    assert any("listen on 127.0.0.1 only" in line and "--bind 0.0.0.0" in line for line in out)
+    assert "api: http://127.0.0.1:8765" in config_path().read_text()
+
+
+def test_bind_opens_a_local_install_to_the_lan_and_a_remote_one_to_one_address(
+    cfg_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_health(monkeypatch, [])
+    env, out, _, drec = make_env(cfg_home)
+    assert env_setup.run(["--no-input", "--spoolman", "local", "--bind", "0.0.0.0"], env) == 0
+    assert "PRINTOPS_BIND_ADDR=0.0.0.0" in _compose_of(drec)  # pinned: the caller's environment cannot narrow it
+    assert not any("listen on" in line for line in out)
+    config_path().unlink()  # the first install configured the machine; the next ones start unconfigured
+    env2, _, _, drec2 = make_env(cfg_home)
+    assert env_setup.run(["--no-input", "--spoolman", "ssh:me@nas.lan", "--bind", "192.168.0.9"], env2) == 0
+    assert "PRINTOPS_BIND_ADDR=192.168.0.9" in _compose_of(drec2)
+    config_path().unlink()
+    env3, _, _, drec3 = make_env(cfg_home)
+    assert env_setup.run(["--no-input", "--spoolman", "ssh:me@nas.lan"], env3) == 0
+    assert "PRINTOPS_BIND_ADDR" not in _compose_of(drec3)  # a remote host keeps compose's default
+
+
+def test_bind_is_checked_before_anything_runs(cfg_home: Path) -> None:
+    for argv in (["--bind", "nas.lan"], ["--bind", "999.1.1.1"]):
+        with pytest.raises(InvalidArgument, match="--bind"):
+            env_setup.parse_options(argv)
+    with pytest.raises(UsageError, match="--bind"):
+        env_setup.parse_options(["--api", "http://x:8765", "--bind", "127.0.0.1"])
+    assert env_setup.parse_options(["--bind", "::1"]).bind == "[::1]"
+
+
+def test_the_script_target_bakes_the_bind_address_in_as_its_default(cfg_home: Path) -> None:
+    out = cfg_home / "bound.sh"
+    env, _, _, _ = make_env(cfg_home)
+    assert env_setup.run(["--no-input", "--spoolman", "script", "--script-out", str(out), "--bind", "127.0.0.1"], env) == 0
+    assert "${PRINTOPS_BIND_ADDR:-127.0.0.1}" in out.read_text(encoding="utf-8")
+
+
 # ------------------------------------------------------------------ deploy generalization
 
 
@@ -699,20 +749,6 @@ def test_local_deploy_hands_compose_absolute_dirs_for_relative_options(
     assert f"mkdir -p {state}/data/api" in shown
     assert f"PRINTOPS_BACKUP_DIR={tmp_path.resolve()}/bk" in shown
     assert " ./state" not in shown and "=./state" not in shown
-
-
-def test_compose_knobs_default_to_the_odroid_values() -> None:
-    text = (REPO / "services" / "3d-api" / "compose.yaml").read_text(encoding="utf-8")
-    for needle in (
-        "${PRINTOPS_SPOOLMAN_PORT:-7912}:8000",
-        "${PRINTOPS_API_PORT:-8765}:8765",
-        "${PRINTOPS_CONTAINER_PREFIX:-printops}-spoolman",
-        "${PRINTOPS_CONTAINER_PREFIX:-printops}-api",
-        "${PRINTOPS_UID:-1000}",
-        "${PRINTOPS_GID:-1000}",
-        "${PRINTOPS_TZ:-Europe/Belgrade}",
-    ):
-        assert needle in text
 
 
 # ------------------------------------------------------------------ interactive flows

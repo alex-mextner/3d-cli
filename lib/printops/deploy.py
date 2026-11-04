@@ -26,6 +26,7 @@ nothing) and only prints the other steps.
 """
 from __future__ import annotations
 
+import ipaddress
 import shlex
 import subprocess
 import time
@@ -45,6 +46,15 @@ COMPOSE_FILE = "services/3d-api/compose.yaml"
 PROJECT = "printops"
 SYNC_PATHS = ("bin/3d", "lib", "fleet", "pyproject.toml", "services/3d-api")
 TIMER_UNITS = ("printops-backup.service", "printops-backup.timer")
+ALL_INTERFACES = "0.0.0.0"  # compose's default for PRINTOPS_BIND_ADDR: the Odroid is behind NAT
+LOOPBACK = "127.0.0.1"
+
+
+def normalize_bind(raw: str) -> str:
+    """`raw` as compose's PRINTOPS_BIND_ADDR wants it (an IPv6 literal in brackets); ValueError
+    when it is not an IP address — a hostname would let docker publish on whatever it resolves to."""
+    addr = ipaddress.ip_address(raw.strip().removeprefix("[").removesuffix("]"))
+    return f"[{addr}]" if addr.version == 6 else str(addr)
 
 
 @dataclass(frozen=True)
@@ -58,6 +68,7 @@ class DeployConfig:
     timer_required: bool = True  # False: a host without `systemctl --user` still gets the stack
     api_port: int = API_PORT
     spoolman_port: int = SPOOLMAN_PORT
+    bind_addr: str | None = None  # normalize_bind form; None leaves compose's default (ALL_INTERFACES)
 
     @property
     def local(self) -> bool:
@@ -65,7 +76,10 @@ class DeployConfig:
 
     @property
     def health_url(self) -> str:
-        host = "127.0.0.1" if self.local else self.host.rsplit("@", 1)[-1]
+        host = self.host.rsplit("@", 1)[-1]
+        if self.local:  # a wildcard bind is reached through loopback, a specific one through itself
+            bind = self.bind_addr or ALL_INTERFACES
+            host = LOOPBACK if bind in (ALL_INTERFACES, "[::]") else bind
         return self.api_url or f"http://{host}:{self.api_port}"
 
 
@@ -106,6 +120,8 @@ def _compose_script(cfg: DeployConfig, src: str) -> str:
     # Always explicit: a default left to compose would be overridden by the caller's own
     # PRINTOPS_*_PORT environment while cfg.health_url still polls cfg.api_port.
     ports = f" PRINTOPS_API_PORT={cfg.api_port} PRINTOPS_SPOOLMAN_PORT={cfg.spoolman_port}"
+    if cfg.bind_addr is not None:  # an unset bind keeps the Odroid's script exactly as it was
+        ports += f" PRINTOPS_BIND_ADDR={q(cfg.bind_addr)}"
     return (
         f"cd {q(src)} && PRINTOPS_VERSION={q(cfg.version)} PRINTOPS_DATA_DIR={q(d + '/data')}"
         f" PRINTOPS_BACKUP_DIR={q(b)} PRINTOPS_GCODE_HOST_DIR={q(d + '/gcodes')}"

@@ -54,6 +54,7 @@ def test_init_help_points_at_the_environment_stage(tmp_path: Path) -> None:
         "--token TOKEN",
         "--no-input",
         "--dry-run",
+        "--bind ADDR",
         "printer:NAME",
         "ssh:USER@HOST",
         "already configured",

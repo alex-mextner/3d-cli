@@ -33,7 +33,7 @@ service is never exposed to the internet.
 3d printops token create NAME --scopes SCOPES [--file PATH | --ssh HOST]
 3d printops token list [--file PATH | --ssh HOST]
 3d printops token revoke NAME [--file PATH | --ssh HOST]
-3d printops deploy [--dry-run] [--host USER@HOST | --local] [--dir DIR] [--backup-dir DIR] [--api URL]
+3d printops deploy [--dry-run] [--host USER@HOST | --local] [--dir DIR] [--backup-dir DIR] [--api URL] [--bind ADDR]
 3d printops backup [--dest DIR] [--spoolman-db PATH]
 3d printops loc tree|add|show|set|mv|archive|unarchive|label|resolve|sync-fleet|resync …
 3d printops spool ls|show|receive|move|load|unload|use|measure|empty|import-owned …
@@ -135,6 +135,12 @@ It never touches the Home Assistant compose project and never restarts HA.
 - `--backup-dir DIR` — snapshot dir inside HA's backed-up config dir (default `/home/ultra/homeassistant/printops-backup`).
   `3d printops deploy --backup-dir /home/ultra/homeassistant/printops-backup`
 - `--api URL` — health URL to wait on (default `http://<host>:8765`).
+- `--bind ADDR` — the host address Spoolman (`:7912`) and 3d-api (`:8765`) listen on, an IP address.
+  Default: all interfaces (`0.0.0.0`; the Odroid is behind NAT), `127.0.0.1` with `--local`.
+  Spoolman has no authentication: on a laptop or a VPS keep it on loopback or one LAN address.
+  Consequence of a narrow bind: other machines and printers (Moonraker's `[spoolman]`, Fluidd) can
+  only reach it on that address, so pass the address they use (or `0.0.0.0` on a trusted network).
+  `3d printops deploy --local --bind 192.168.0.20`
 
 ### `backup`
 

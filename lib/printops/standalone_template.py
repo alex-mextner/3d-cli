@@ -20,12 +20,16 @@ TEMPLATE = r'''#!/usr/bin/env bash
 #
 #   ./spoolman-setup.sh              install / update, print the URLs and the token
 #   ./spoolman-setup.sh --dry-run    check the prerequisites and print the plan, change nothing
+#   ./spoolman-setup.sh --bind ADDR  listen on this host address only (same as PRINTOPS_BIND_ADDR)
 #
 # Environment (all optional):
 #   PRINTOPS_DIR                  base dir (default ~/printops; data in DIR/data; a relative path
 #                                 is taken from the directory you run this in)
 #   PRINTOPS_SPOOLMAN_PORT        Spoolman port on the host (default 7912)
 #   PRINTOPS_API_PORT             3d-api port on the host (default 8765)
+#   PRINTOPS_BIND_ADDR            host address Spoolman and 3d-api listen on, an IP address
+#                                 (default @BIND_ADDR@; 0.0.0.0 = every interface, 127.0.0.1 = this
+#                                 host only: then other machines and printers cannot reach it)
 #   PRINTOPS_CONTAINER_PREFIX     compose project + container name prefix (default printops)
 #   PRINTOPS_TZ                   container time zone (default: this host's)
 #   PRINTOPS_SPOOLMAN_CORS_ORIGIN Spoolman's allowed browser origins, comma-separated full origins
@@ -37,7 +41,9 @@ TEMPLATE = r'''#!/usr/bin/env bash
 #   TOKEN_NAME                    name of the 3d-api token to mint (default cli-<hostname>)
 #   WAIT_SECONDS                  how long to wait for the services to become healthy (default 300)
 #
-# Spoolman has no authentication: keep its port inside your LAN/VPN, never forward it.
+# Spoolman has no authentication: keep its port inside your LAN/VPN, never forward it; on a server
+# that is reachable from the internet give --bind the one LAN/VPN address (docker's iptables rules
+# bypass ufw/firewalld).
 set -euo pipefail
 
 GENERATED_BY="@GENERATED_BY@"
@@ -58,11 +64,27 @@ log() { printf '==> %s\n' "$*"; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "$1 is required: $2"; }
 
+# normalize_bind ADDR: an IPv4/IPv6 literal in the form compose's port syntax wants (IPv6 bracketed)
+normalize_bind() {
+  local a="${1#\[}"
+  a="${a%\]}"
+  if [[ "$a" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then printf '%s' "$a"
+  elif [[ "$a" == *:* && "$a" =~ ^[0-9a-fA-F:.]+$ ]]; then printf '[%s]' "$a"
+  else die "--bind / PRINTOPS_BIND_ADDR must be an IP address (127.0.0.1, 192.168.0.20, 0.0.0.0, ::1), got '$1'"
+  fi
+}
+BIND_ADDR="$(normalize_bind "${PRINTOPS_BIND_ADDR:-@BIND_ADDR@}")"
+
+wildcard_bind() { [ "$BIND_ADDR" = 0.0.0.0 ] || [ "$BIND_ADDR" = "[::]" ]; }
+# local_host: where this host's own health probes reach the services (a wildcard bind answers on loopback)
+local_host() { if wildcard_bind; then printf 127.0.0.1; else printf '%s' "$BIND_ADDR"; fi; }
+
 host_name() { hostname -s 2>/dev/null | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9._\n-' '-'; }
 
 host_address() {
   local ip
   ip="$(hostname -I 2>/dev/null | awk '{print $1}')" || ip=""
+  if [ -z "${PRINTOPS_HOST:-}" ] && ! wildcard_bind; then ip="$BIND_ADDR"; fi
   printf '%s' "${PRINTOPS_HOST:-${ip:-$(hostname)}}"
 }
 
@@ -169,6 +191,7 @@ compose() {
     PRINTOPS_DATA_DIR="$DIR/data" \
     PRINTOPS_BACKUP_DIR="$DIR/backup" \
     PRINTOPS_GCODE_HOST_DIR="$DIR/gcodes" \
+    PRINTOPS_BIND_ADDR="$BIND_ADDR" \
     PRINTOPS_CONTAINER_PREFIX="$PREFIX" \
     PRINTOPS_SPOOLMAN_PORT="$SPOOLMAN_PORT" \
     PRINTOPS_API_PORT="$API_PORT" \
@@ -231,6 +254,9 @@ summary() {
   addr="$(host_address)"
   printf '\n'
   printf 'Spoolman  http://%s:%s\n' "$addr" "$SPOOLMAN_PORT"
+  if wildcard_bind; then
+    printf '\nSpoolman has no authentication and listens on every interface of this host. Unless it sits behind a\nrouter/VPN you trust, restrict it: %s --bind ADDR (the one LAN/VPN address; machines and printers that must\nreach it need that address).\n' "$0"
+  fi
   if [ "$SPOOLMAN_ONLY" = 1 ]; then
     printf '\nSpoolman only (SPOOLMAN_ONLY=1): 3d printops needs the 3d-api; re-run without SPOOLMAN_ONLY.\n'
     return 0
@@ -250,15 +276,22 @@ summary() {
 
 main() {
   local token_name="${TOKEN_NAME:-cli-$(host_name)}" dry=0
-  case "${1:-}" in
-    "") ;;
-    --dry-run) dry=1 ;;
-    -h | --help) sed -n '2,/^set -euo/p' "$0" | sed '$d; s/^# \{0,1\}//'; return 0 ;;
-    *) die "unknown argument $1 (accepted: --dry-run, --help)" ;;
-  esac
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --dry-run) dry=1 ;;
+      --bind)
+        [ $# -ge 2 ] || die "--bind needs an IP address"
+        BIND_ADDR="$(normalize_bind "$2")"
+        shift
+        ;;
+      -h | --help) sed -n '2,/^set -euo/p' "$0" | sed '$d; s/^# \{0,1\}//'; return 0 ;;
+      *) die "unknown argument $1 (accepted: --dry-run, --bind ADDR, --help)" ;;
+    esac
+    shift
+  done
   log "PrintOps standalone installer ($GENERATED_BY)"
   preflight
-  log "base dir $DIR, project $PREFIX, Spoolman :$SPOOLMAN_PORT, 3d-api :$API_PORT$([ "$SPOOLMAN_ONLY" = 1 ] && printf ' (Spoolman only)')"
+  log "base dir $DIR, project $PREFIX, Spoolman :$SPOOLMAN_PORT, 3d-api :$API_PORT, listening on $BIND_ADDR$([ "$SPOOLMAN_ONLY" = 1 ] && printf ' (Spoolman only)')"
   guard_src # a real run would refuse too: say so before creating anything
   if [ "$dry" = 1 ]; then
     log "dry run: $DIR/src is $(src_state); would unpack the build context there, run docker compose up, wait for health and mint token $token_name; nothing changed"
@@ -271,10 +304,10 @@ main() {
   else
     compose up -d --build --remove-orphans
   fi
-  wait_for Spoolman "http://127.0.0.1:${SPOOLMAN_PORT}/api/v1/health" '"status": *"healthy"'
+  wait_for Spoolman "http://$(local_host):${SPOOLMAN_PORT}/api/v1/health" '"status": *"healthy"'
   local token=""
   if [ "$SPOOLMAN_ONLY" != 1 ]; then
-    wait_for 3d-api "http://127.0.0.1:${API_PORT}/v1/health" '"status": *"ok"'
+    wait_for 3d-api "http://$(local_host):${API_PORT}/v1/health" '"status": *"ok"'
     mint_token "$token_name"
     token="$TOKEN"
     install_backup_timer

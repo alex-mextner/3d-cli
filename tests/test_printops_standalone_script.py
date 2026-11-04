@@ -259,6 +259,50 @@ def test_script_does_not_open_spoolman_to_every_browser_origin(
     assert "PRINTOPS_SPOOLMAN_CORS_ORIGIN=http://fluidd.lan\n" in (tmp_path / "b" / "calls.log").read_text()
 
 
+def test_script_listens_on_every_interface_by_default_and_warns_that_spoolman_has_no_auth(
+    script_file: Path, tmp_path: Path
+) -> None:
+    r = _run_script(script_file, tmp_path)
+    assert r.returncode == 0, r.stderr
+    assert "PRINTOPS_BIND_ADDR=0.0.0.0\n" in (tmp_path / "calls.log").read_text()
+    assert "no authentication and listens on every interface" in r.stdout and "--bind ADDR" in r.stdout
+
+
+def test_script_bind_flag_and_environment_restrict_the_published_address(
+    script_file: Path, tmp_path: Path
+) -> None:
+    by_flag = _run_script(script_file, tmp_path / "a", "--bind", "127.0.0.1")
+    assert by_flag.returncode == 0, by_flag.stderr
+    assert "PRINTOPS_BIND_ADDR=127.0.0.1\n" in (tmp_path / "a" / "calls.log").read_text()
+    assert "listens on every interface" not in by_flag.stdout and "listening on 127.0.0.1" in by_flag.stdout
+    by_env = _run_script(script_file, tmp_path / "b", PRINTOPS_BIND_ADDR="192.168.0.9")
+    assert by_env.returncode == 0, by_env.stderr
+    assert "PRINTOPS_BIND_ADDR=192.168.0.9\n" in (tmp_path / "b" / "calls.log").read_text()
+    v6 = _run_script(script_file, tmp_path / "c", "--bind", "::1")
+    assert v6.returncode == 0, v6.stderr
+    assert "PRINTOPS_BIND_ADDR=[::1]\n" in (tmp_path / "c" / "calls.log").read_text()
+
+
+def test_script_prints_the_bind_address_when_that_is_the_only_way_to_reach_it(script_file: Path, tmp_path: Path) -> None:
+    r = _run_script(script_file, tmp_path, "--bind", "192.168.0.9", PRINTOPS_HOST="")
+    assert r.returncode == 0, r.stderr
+    assert "Spoolman  http://192.168.0.9:17912" in r.stdout and "3d-api    http://192.168.0.9:18765" in r.stdout
+
+
+def test_script_rejects_a_bind_that_is_not_an_ip_address(script_file: Path, tmp_path: Path) -> None:
+    for args, bind_env in ((("--bind", "nas.lan"), "0.0.0.0"), ((), "a b"), (("--bind",), "0.0.0.0")):
+        r = _run_script(script_file, tmp_path, *args, PRINTOPS_BIND_ADDR=bind_env)
+        assert r.returncode != 0 and "IP address" in r.stderr, (args, r.stderr)
+    assert not (tmp_path / "base").exists()
+
+
+def test_a_generated_script_carries_the_bind_address_it_was_asked_for(tmp_path: Path) -> None:
+    baked = standalone_script.write(REPO, "test-version", tmp_path / "baked.sh", "127.0.0.1")
+    r = _run_script(baked, tmp_path / "run")
+    assert r.returncode == 0, r.stderr
+    assert "PRINTOPS_BIND_ADDR=127.0.0.1\n" in (tmp_path / "run" / "calls.log").read_text()
+
+
 # ------------------------------------------------------------------ writing the script file
 
 
@@ -280,7 +324,7 @@ def test_concurrent_writers_use_their_own_temp_files(
     out = tmp_path / "spoolman-setup.sh"
     both_rendered = threading.Barrier(2, timeout=30)
 
-    def render(_root: Path, version: str) -> str:
+    def render(_root: Path, version: str, _bind: str) -> str:
         both_rendered.wait()  # both writers hold their text before either touches the disk
         return f"#!/bin/sh\n# {version}\n"
 

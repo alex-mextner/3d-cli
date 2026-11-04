@@ -87,7 +87,7 @@ HOST_LIMITS: tuple[tuple[str, str, str], ...] = (
 )
 
 USAGE = f"""3d init --env [--no-input] [--spoolman TARGET] [--script-out PATH] [--api URL] [--token TOKEN]
-                [--ssh-user USER] [--dry-run] [--allow-discouraged]
+                [--ssh-user USER] [--bind ADDR] [--dry-run] [--allow-discouraged]
   The MACHINE stage of `3d init` (plain `3d init [path]` still scaffolds a project): make Spoolman +
   the 3d-api that `3d printops` talks to run somewhere, and write {config_path()} (api: + token:,
   mode 600) once the service answered its health check. Safe to re-run: when the configured api
@@ -113,6 +113,9 @@ Options:
                      it, then write the config. With --token TOKEN (checked against the API before writing)
   --token TOKEN      3d-api bearer token for --api (an install target mints its own)
   --ssh-user USER    ssh user for printer:NAME (default: your ssh config's)
+  --bind ADDR        host address Spoolman and 3d-api listen on (an IP address). Default 127.0.0.1 for `local`
+                     (Spoolman has no authentication; other machines and printers then cannot reach it: pass
+                     --bind 0.0.0.0 or one LAN address), 0.0.0.0 for ssh/printer hosts and for `script`
   --dry-run          install targets: print the steps (rsync dry run), change nothing
   --allow-discouraged  --no-input only: accept a "possible but not recommended" printer host
   --no-input, --yes, -y  never prompt, never install unless an explicit target is named
@@ -184,6 +187,7 @@ class Options:
     no_input: bool = False
     dry_run: bool = False
     allow_discouraged: bool = False
+    bind: str | None = None  # deploy.normalize_bind form; None = the target's default
 
 
 @dataclass
@@ -225,13 +229,42 @@ def parse_target(raw: str) -> Target:
     )
 
 
+def _bind_option(raw: str | None) -> str | None:
+    if raw is None:
+        return None
+    try:
+        return deploy.normalize_bind(raw)
+    except ValueError as e:
+        raise InvalidArgument(
+            "--bind", raw, ["an IP address such as 127.0.0.1, 192.168.0.20, 0.0.0.0 or ::1"], command=CLI_NAME
+        ) from e
+
+
+def _check_combinations(o: Options, target: Target) -> None:
+    if o.api and target.kind not in ("auto", "skip"):
+        raise UsageError(
+            "--api connects to a service that already runs; it cannot be combined with "
+            f"--spoolman {o.spoolman}",
+            command=CLI_NAME,
+            remediation=["Install first (drop --api), or connect (drop --spoolman)."],
+        )
+    if o.api and o.bind:
+        raise UsageError("--bind is for a service 3d installs; --api connects to one that already runs", command=CLI_NAME)
+    if o.token and not o.api:
+        raise UsageError("--token needs --api URL (an install target mints its own token)", command=CLI_NAME)
+    if o.script_out and target.kind != "script":
+        raise UsageError(
+            "--script-out only goes with --spoolman script", command=CLI_NAME
+        )
+
+
 def parse_options(argv: Sequence[str]) -> Options:
     args = ["--no-input" if a == "-y" else a for a in argv]
     p = parse(
         args,
         "--env",
         prefix="init",
-        values={"--spoolman", "--script-out", "--api", "--token", "--ssh-user"},
+        values={"--spoolman", "--script-out", "--api", "--token", "--ssh-user", "--bind"},
         flags={"--no-input", "--yes", "--dry-run", "--allow-discouraged"},
     )
     o = Options(
@@ -243,21 +276,9 @@ def parse_options(argv: Sequence[str]) -> Options:
         no_input=bool(p.flags & {"--no-input", "--yes"}),
         dry_run="--dry-run" in p.flags,
         allow_discouraged="--allow-discouraged" in p.flags,
+        bind=_bind_option(p.opts.get("--bind")),
     )
-    target = parse_target(o.spoolman)
-    if o.api and target.kind not in ("auto", "skip"):
-        raise UsageError(
-            "--api connects to a service that already runs; it cannot be combined with "
-            f"--spoolman {o.spoolman}",
-            command=CLI_NAME,
-            remediation=["Install first (drop --api), or connect (drop --spoolman)."],
-        )
-    if o.token and not o.api:
-        raise UsageError("--token needs --api URL (an install target mints its own token)", command=CLI_NAME)
-    if o.script_out and target.kind != "script":
-        raise UsageError(
-            "--script-out only goes with --spoolman script", command=CLI_NAME
-        )
+    _check_combinations(o, parse_target(o.spoolman))
     return o
 
 
@@ -530,6 +551,26 @@ def _http_host(host: str, env: Env) -> str:
     return name
 
 
+def _deploy_config(host: str, pr: HostProbe, env: Env, opts: Options) -> deploy.DeployConfig:
+    """The shared deploy plan's config for `host` ("" = this machine)."""
+    root = _repo_root(env)
+    base = str(paths.data_dir() / "printops") if not host else f"{pr.home}/printops"
+    api_url = None
+    if host:
+        http_host = _http_host(host, env)
+        api_url = f"http://{f'[{http_host}]' if ':' in http_host else http_host}:{deploy.API_PORT}"
+    return deploy.DeployConfig(repo_root=root, host=host, remote_dir=base, backup_dir=f"{base}/backup",
+                               api_url=api_url, version=deploy.git_version(root), timer_required=False,
+                               bind_addr=opts.bind or (None if host else deploy.LOOPBACK))
+
+
+def _say_bind(cfg: deploy.DeployConfig, env: Env) -> None:
+    """Spoolman has no authentication, so a local install listens on loopback: say what that costs."""
+    if cfg.local and cfg.bind_addr == deploy.LOOPBACK:
+        env.say(f"Spoolman and 3d-api listen on {cfg.bind_addr} only: other machines and printers cannot reach them "
+                f"(re-run with --bind {deploy.ALL_INTERFACES}, or one LAN address, to allow that)")
+
+
 def install(host: str, label: str, env: Env, opts: Options) -> tuple[str, str | None]:
     """Deploy to `host` ("" = this machine); returns (api_url, token or None on --dry-run)."""
     pr = probe(host, env)
@@ -537,15 +578,10 @@ def install(host: str, label: str, env: Env, opts: Options) -> tuple[str, str | 
     _require_docker(pr, label)
     _warn_if_busy(pr, label, env, opts)
     root = _repo_root(env)
-    base = str(paths.data_dir() / "printops") if not host else f"{pr.home}/printops"
-    api_url = None
-    if host:
-        http_host = _http_host(host, env)
-        api_url = f"http://{f'[{http_host}]' if ':' in http_host else http_host}:{deploy.API_PORT}"
-    cfg = deploy.DeployConfig(repo_root=root, host=host, remote_dir=base, backup_dir=f"{base}/backup",
-                              api_url=api_url, version=deploy.git_version(root), timer_required=False)
+    cfg = _deploy_config(host, pr, env, opts)
     steps = deploy.plan(cfg, dry_run=opts.dry_run)
-    env.say(f"deploy printops {cfg.version} -> {host or 'this machine'}:{base}" + ("  [dry run]" if opts.dry_run else ""))
+    env.say(f"deploy printops {cfg.version} -> {host or 'this machine'}:{cfg.remote_dir}"
+            + ("  [dry run]" if opts.dry_run else ""))
     try:
         deploy.run_steps(steps, cwd=root, dry_run=opts.dry_run, log=env.say, runner=env.deploy_runner)
         if opts.dry_run:
@@ -557,6 +593,7 @@ def install(host: str, label: str, env: Env, opts: Options) -> tuple[str, str | 
         where = f"ssh {host} " if host else ""
         raise ThreeDError(str(e), command=CLI_NAME,
                           remediation=[f"Inspect: {where}docker logs --tail 80 {CONTAINER} (and printops-spoolman)"]) from e
+    _say_bind(cfg, env)
     return cfg.health_url, mint_token(host, env)
 
 
@@ -708,7 +745,7 @@ def make_script(opts: Options, env: Env) -> int:
         ans = env.ask(f"Write the script to [{out}]: ").strip()
         out = Path(ans).expanduser() if ans else out
     try:
-        written = standalone_script.write(root, deploy.git_version(root), out)
+        written = standalone_script.write(root, deploy.git_version(root), out, opts.bind or deploy.ALL_INTERFACES)
     except (OSError, FileNotFoundError, ValueError) as e:
         raise ThreeDError(
             f"cannot write the install script: {e}",
