@@ -23,6 +23,8 @@ INVARIANTS: stdlib-only at import time; printer_ops imported lazily inside run()
 """
 from __future__ import annotations
 
+from typing import Any
+
 from cli.registry import Command
 from errors import GateFailure, InputNotFound, UsageError
 
@@ -137,24 +139,20 @@ Examples:
   3d print-preflight out/plate.gcode --printer k1se --accept preset_match --reason 'stock flow on purpose'"""
 
 
-def run(argv: list[str]) -> int:
-    if not argv:
-        print(USAGE)
-        return 1
-    if argv[0] in ("-h", "--help"):
-        print(USAGE)
-        return 0
-    import json
-    from pathlib import Path
+VALUE_OPTS = ("--printer", "--source-3mf", "--secs", "--axis-limits", "--visible", "--bridge-max",
+              "--printops-api", "--printops-snapshot", "--accept", "--reason")
+FLAG_OPTS = ("--json", "--offline", "--no-bed-move")
 
+
+def _parse(argv: list[str]) -> tuple[list[str], dict[str, str], list[str]]:
+    """(positionals, options, every --visible spec) of the command line."""
     pos: list[str] = []
     opts: dict[str, str] = {}
     visible: list[str] = []
     i = 0
     while i < len(argv):
         a = argv[i]
-        if a in ("--printer", "--source-3mf", "--secs", "--axis-limits", "--visible", "--bridge-max",
-                 "--printops-api", "--printops-snapshot", "--accept", "--reason"):
+        if a in VALUE_OPTS:
             if i + 1 >= len(argv):
                 raise UsageError(f"{a} needs a value", command="print-preflight")
             if a == "--visible":
@@ -163,7 +161,7 @@ def run(argv: list[str]) -> int:
                 opts[a] = argv[i + 1]
             i += 2
             continue
-        if a in ("--json", "--offline", "--no-bed-move"):
+        if a in FLAG_OPTS:
             opts[a] = "1"
         elif a.startswith("--"):
             raise UsageError(f"unknown option {a}", command="print-preflight",
@@ -171,35 +169,27 @@ def run(argv: list[str]) -> int:
         else:
             pos.append(a)
         i += 1
-    if len(pos) != 1:
-        raise UsageError(f"expected one G-code file, got {len(pos)}", command="print-preflight")
-    gcode = Path(pos[0])
-    if not gcode.is_file():
-        raise InputNotFound(str(gcode), command="print-preflight")
-    source = Path(opts["--source-3mf"]) if "--source-3mf" in opts else None
-    if source is not None and not source.is_file():
-        raise InputNotFound(str(source), command="print-preflight")
+    return pos, opts, visible
 
-    from printer_ops.preflight import FAIL, run_preflight
-    from printer_ops.printops_checks import context_from_options
 
-    from printer_ops import adapter_by_name, bridge_max_for, device_for, limits_from_option, trusted_macros_for
+def _offline_profile(opts: dict[str, str]) -> Any:
+    """The static fleet profile that stands in for --printer when it is offline (an offline fleet
+    printer, or --offline): the printer is never contacted and an explicit --axis-limits replaces
+    only its limits. Moves --printer into --axis-limits then; None when the printer is contacted."""
     from printer_ops.devices import get_device
 
     printer = opts.get("--printer")
-    offline = "--offline" in opts
     profile = get_device(printer, offline_ok=True) if printer is not None else None
-    if profile is not None and (offline or profile.access == "offline"):
-        # an offline fleet printer, or --offline: never contacted, its static profile stands in for
-        # --printer, an explicit --axis-limits replaces only its limits
-        del opts["--printer"]
-        opts.setdefault("--axis-limits", profile.name)
-    else:
-        profile = None
-    printops = context_from_options(printer, opts.get("--axis-limits"), api=opts.get("--printops-api"),
-                                    offline=offline, snapshot=opts.get("--printops-snapshot"),
-                                    command="print-preflight", accept=opts.get("--accept"),
-                                    reason=opts.get("--reason"))
+    if profile is None or not ("--offline" in opts or profile.access == "offline"):
+        return None
+    del opts["--printer"]
+    opts.setdefault("--axis-limits", profile.name)
+    return profile
+
+
+def _device_and_limits(opts: dict[str, str], profile: Any) -> tuple[Any, Any, str, Any, Any]:
+    """(device, axis limits, where the limits came from, trusted macros, printer status)."""
+    from printer_ops import adapter_by_name, device_for, limits_from_option, trusted_macros_for
 
     status = None
     device = profile or (None if "--printer" in opts else device_for(opts.get("--axis-limits")))
@@ -215,7 +205,43 @@ def run(argv: list[str]) -> int:
         status = adapter.status()
         if "--axis-limits" not in opts:
             limits, limits_source = adapter.axis_limits()
+    return device, limits, limits_source, trusted, status
 
+
+def run(argv: list[str]) -> int:
+    if not argv:
+        print(USAGE)
+        return 1
+    if argv[0] in ("-h", "--help"):
+        print(USAGE)
+        return 0
+    import json
+    from pathlib import Path
+
+    pos, opts, visible = _parse(argv)
+    if len(pos) != 1:
+        raise UsageError(f"expected one G-code file, got {len(pos)}", command="print-preflight")
+    gcode = Path(pos[0])
+    if not gcode.is_file():
+        raise InputNotFound(str(gcode), command="print-preflight")
+    source = Path(opts["--source-3mf"]) if "--source-3mf" in opts else None
+    if source is not None and not source.is_file():
+        raise InputNotFound(str(source), command="print-preflight")
+
+    from printer_ops.preflight import FAIL, run_preflight
+    from printer_ops.printops_checks import context_from_options
+
+    from printer_ops import bridge_max_for
+
+    printer = opts.get("--printer")
+    offline = "--offline" in opts
+    profile = _offline_profile(opts)
+    printops = context_from_options(printer, opts.get("--axis-limits"), api=opts.get("--printops-api"),
+                                    offline=offline, snapshot=opts.get("--printops-snapshot"),
+                                    command="print-preflight", accept=opts.get("--accept"),
+                                    reason=opts.get("--reason"))
+
+    device, limits, limits_source, trusted, status = _device_and_limits(opts, profile)
     bed = None
     if "--printer" in opts and device is not None:
         from printer_ops.preflight import check_bed
