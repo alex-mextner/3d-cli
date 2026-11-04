@@ -53,7 +53,8 @@ No tare → `measure` refuses (409) and says why; pass `--tare G` (recorded for 
 3d printops spool show ID [--ledger N]
 3d printops spool receive (--filament-id N | --material M --name NAME [--vendor V] [--color #HEX] [--density D] [--diameter MM])
                           [--net G] [--remaining G [--confidence G]] [--tare G [--tare-source TEXT]]
-                          [--spool-kind cardboard|plastic|refill] [--lot LOT] [--price P] [--location LOC] [--opened] [--comment TEXT]
+                          [--spool-kind cardboard|plastic|refill] [--lot LOT] [--price P] [--location LOC] [--opened]
+                          [--max-speed MM_S] [--comment TEXT]
 3d printops spool receive --from-photo IMG|TXT [any receive flag …] [--yes]
 3d printops spool scan IMG|TXT [IMG|TXT …] [--location LOC]
 3d printops spool move ID LOCATION
@@ -78,6 +79,9 @@ Every action takes `--json` (the API answer), `--api URL`, `--token TOKEN`.
   by vendor + material + name + colour (+ net), else created (density defaults per material:
   PLA 1.24, PETG 1.27, ABS 1.04, …; diameter 1.75). The location must be storage, not a
   printer slot. `--opened` sets `opened_at` now (drying policy reads it).
+  `--max-speed MM_S` sets the max print speed (extra field `max_speed_mm_s`, mm/s, a positive
+  integer) of a filament this call creates; without it the default is 300, PLA+ 600, and a filament
+  that already exists keeps the value it has (`3d printops fields fill-defaults` fills the empty ones).
   `3d printops spool receive --vendor Elegoo --material PLA+ --name "RAPID PLA+ Green" --color #4FE44D --net 1000 --price 1499 --location WH:default`
 - `receive --from-photo IMG` — the same, filled from the spool label (see
   [Label photos](#label-photos)): every flag you pass overrides what was read. The proposal is
@@ -264,7 +268,7 @@ label.jpg  (OCR, turned 0°, score 87.8)
 | Method | Path | Scope | Body / query |
 |---|---|---|---|
 | GET | `/v1/spools` | read | `material, color, vendor, location, loaded, archived` |
-| POST | `/v1/spools` | write | receive fields (`vendor, material, name, color_hex, net_g, remaining_g, tare_g, spool_kind, lot_nr, price, location, opened, …`) |
+| POST | `/v1/spools` | write | receive fields (`vendor, material, name, color_hex, net_g, remaining_g, tare_g, spool_kind, lot_nr, price, location, opened, max_speed_mm_s, …`) |
 | POST | `/v1/spools/import` | write | `{items: [receive fields + external_key], dry_run}` |
 | GET | `/v1/spools/{id}` | read | `ledger=N` |
 | GET | `/v1/spools/{id}/ledger`, `/v1/spools/{id}/tare` | read | |

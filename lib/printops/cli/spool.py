@@ -35,9 +35,11 @@ Actions:
   receive (--filament-id N | --material M --name NAME [--vendor V] [--color #HEX] [--density D]
            [--diameter MM]) [--net G] [--remaining G [--confidence G]] [--tare G [--tare-source TEXT]]
            [--spool-kind cardboard|plastic|refill] [--lot LOT] [--price P] [--location LOC] [--opened]
-           [--comment TEXT]
+           [--max-speed MM_S] [--comment TEXT]
       a new spool: the vendor/filament is matched in Spoolman or created; --net = label net
-      (sealed: the ledger is anchored at it), --remaining = already used, roughly this much left
+      (sealed: the ledger is anchored at it), --remaining = already used, roughly this much left;
+      --max-speed = the max print speed in mm/s of a filament this call creates (default 300,
+      PLA+ 600; an existing filament keeps its value)
   receive --from-photo IMG|TXT [any receive flag …] [--yes]
       the same, filled from the spool label: the photo is OCR'd (tesseract), the rules read
       vendor, material, colour, net, diameter, lot (and nozzle/bed temperatures, kept in the
@@ -279,15 +281,20 @@ RECEIVE_NUM = (
     ("--tare", "tare_g"),
     ("--price", "price"),
 )
-RECEIVE_VALUES = {"--filament-id"} | {o for o, _ in RECEIVE_STR + RECEIVE_NUM}
+RECEIVE_INT = (
+    ("--filament-id", "filament_id"),
+    ("--max-speed", "max_speed_mm_s"),
+)
+RECEIVE_VALUES = {o for o, _ in RECEIVE_INT + RECEIVE_STR + RECEIVE_NUM}
 
 
 def _receive_fields(p: Parsed, sub: str) -> dict[str, Any]:
     """The receive body fields given as flags (nothing checked yet)."""
     body: dict[str, Any] = {}
-    fid = p.int_opt("--filament-id", sub)
-    if fid is not None:
-        body["filament_id"] = fid
+    for opt, key in RECEIVE_INT:
+        n = p.int_opt(opt, sub)
+        if n is not None:
+            body[key] = n
     for opt, key in RECEIVE_STR:
         if opt in p.opts:
             body[key] = p.opts[opt]
@@ -303,9 +310,7 @@ def _receive_fields(p: Parsed, sub: str) -> dict[str, Any]:
 def receive_command(body: dict[str, Any]) -> str:
     """The `3d printops spool receive …` line that sends `body`."""
     args = ["3d", "printops", "spool", "receive"]
-    if "filament_id" in body:
-        args += ["--filament-id", str(body["filament_id"])]
-    for opt, key in RECEIVE_STR + RECEIVE_NUM:
+    for opt, key in RECEIVE_INT + RECEIVE_STR + RECEIVE_NUM:
         v = body.get(key)
         if v is not None:
             args += [opt, f"{v:g}" if isinstance(v, float) else str(v)]

@@ -246,6 +246,7 @@ def test_ensure_extra_fields_registers_every_contract_field_idempotently() -> No
     filament = {f["key"]: f for f in fake.list_fields("filament")}
     assert filament["hygroscopic_class"]["choices"] == ["low", "medium", "high", "extreme"]
     assert filament["abrasive"]["field_type"] == "boolean"
+    assert (filament["max_speed_mm_s"]["field_type"], filament["max_speed_mm_s"]["unit"]) == ("integer", "mm/s")
     assert filament["max_volumetric_mm3_s"]["unit"] == "mm³/s"  # a different quantity, untouched
     vendor = {f["key"]: f for f in fake.list_fields("vendor")}
     assert vendor["spool_kind"]["field_type"] == "choice"

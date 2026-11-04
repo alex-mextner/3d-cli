@@ -1,4 +1,4 @@
-"""`3d printops fields …` — Spoolman extra fields: the legacy migration to native fields (docs/printops/native-fields.md)."""
+"""`3d printops fields …` — Spoolman extra fields: the legacy migration and the filament defaults (docs/printops/native-fields.md)."""
 
 from __future__ import annotations
 
@@ -25,6 +25,15 @@ USAGE = """3d printops fields migrate-native [--apply] [--json] [--api URL] [--t
   is deleted only when no item still holds a value (Spoolman destroys the values with it).
   Exit 0 when nothing is left to do or the apply fully succeeded, 1 while conflict/invalid/failed remain.
 
+3d printops fields fill-defaults [--apply] [--json] [--api URL] [--token TOKEN]
+  Give every existing filament the default "max speed" (extra field max_speed_mm_s, mm/s) where it
+  is EMPTY: 600 for PLA+ (material PLA+, or a name containing "PLA+"), 300 for everything else. A
+  value already there (also one typed in the Spoolman UI, whatever the number) is never touched.
+  New filaments created by `spool receive` / import get the same default. DRY RUN by default: one
+  line per filament (id, name, material, old, new, set|keep), nothing written; --apply writes.
+  Idempotent. Exit 0 unless a write failed (then 1). Needs the `max_speed_mm_s` field registered
+  (3d-api does that at start).
+
 Options:
   --apply        write (the default is a dry run)
   --json         print the API's JSON answer
@@ -33,7 +42,10 @@ Options:
 Examples:
   3d printops fields migrate-native
   3d printops fields migrate-native --apply
-  3d printops fields migrate-native --apply --json"""
+  3d printops fields migrate-native --apply --json
+  3d printops fields fill-defaults
+  3d printops fields fill-defaults --apply
+  3d printops fields fill-defaults --apply --json"""
 
 VALUES = {"--api", "--token"}
 
@@ -54,13 +66,28 @@ def fmt(res: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def fmt_fill(res: dict[str, Any]) -> str:
+    lines = [
+        f"#{r['filament_id']:<4} {r['filament']:<34} {r['material']:<8} old {r['old']!s:<6} new {r['new']!s:<5} {r['action']}"
+        + (f"  ({r['detail']})" if r["action"] == "failed" else "")
+        for r in res["rows"]
+    ]
+    counts = ", ".join(f"{n} {a}" for a, n in res["summary"].items() if n) or "no filaments"
+    lines.append(counts)
+    if not res["apply"]:
+        lines.append("DRY RUN — nothing written; re-run with --apply" if res["pending"] else "DRY RUN — nothing written; nothing to do")
+    else:
+        lines.append("applied, but some writes failed; re-run" if res["failed"] else "applied")
+    return "\n".join(lines)
+
+
 def run(argv: list[str]) -> int:
     if not argv or argv[0] in ("-h", "--help", "help") or (len(argv) > 1 and argv[1] in ("-h", "--help")):
         print(USAGE)
         return 0 if argv else 1
-    if argv[0] != "migrate-native":
+    if argv[0] not in ("migrate-native", "fill-defaults"):
         raise UsageError(
-            f"unknown fields action {argv[0]!r}; accepted: migrate-native",
+            f"unknown fields action {argv[0]!r}; accepted: migrate-native, fill-defaults",
             command="printops fields",
             remediation=["Run `3d printops fields --help`."],
         )
@@ -71,13 +98,14 @@ def run(argv: list[str]) -> int:
     path = f"/v1/fields/{action}"
     with api_errors(sub):
         res = api.post(path, {}) if "--apply" in p.flags else api.get(path)
-    print(json.dumps(res, indent=2, ensure_ascii=False) if "--json" in p.flags else fmt(res))
-    return 1 if res.get("blocked") else 0
+    render = fmt_fill if action == "fill-defaults" else fmt
+    print(json.dumps(res, indent=2, ensure_ascii=False) if "--json" in p.flags else render(res))
+    return 1 if res.get("blocked") or res.get("failed") else 0
 
 
 SUB = Sub(
     name="fields",
-    summary="Spoolman extra fields: migrate-native (legacy -> native)",
+    summary="Spoolman extra fields: migrate-native (legacy -> native), fill-defaults (max speed)",
     usage=USAGE,
     run=run,
 )

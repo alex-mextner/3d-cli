@@ -36,7 +36,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NoReturn
 
-from printops import db, head_sync, ledger, locations, maintenance, tares
+from printops import db, filament_defaults, head_sync, ledger, locations, maintenance, tares
 from printops import events as ev
 from printops.spool_mirror import slot_of_location
 from printops.spoolman import JSON, Spoolman, SpoolmanError, decode_extra, encode_extra
@@ -292,6 +292,7 @@ class Receive:
     opened: bool = False
     comment: str | None = None
     external_key: str | None = None
+    max_speed_mm_s: int | None = None  # filament max print speed, mm/s (default: filament_defaults)
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> Receive:
@@ -327,6 +328,8 @@ class Receive:
             v = getattr(self, name)
             if v is not None and (not math.isfinite(v) or v < 0):
                 raise SpoolError(422, f"{name} must be a finite number ≥ 0, got {v}")
+        if self.max_speed_mm_s is not None and self.max_speed_mm_s <= 0:
+            raise SpoolError(422, f"max_speed_mm_s must be > 0 mm/s, got {self.max_speed_mm_s}")
         for name in ("density", "diameter"):
             v = getattr(self, name)
             if v is not None and (not math.isfinite(v) or v <= 0):
@@ -347,6 +350,7 @@ def _matches_type(v: Any, want: type | tuple[type, ...]) -> bool:
 _NUMBER = (int, float)
 _RECEIVE_TYPES: dict[str, type | tuple[type, ...]] = {
     "filament_id": int,
+    "max_speed_mm_s": int,
     "opened": bool,
     **dict.fromkeys(
         (
@@ -436,6 +440,7 @@ def _resolve_filament(ctx: Ctx, r: Receive) -> tuple[JSON, bool]:
     body = {k: v for k, v in spec.items() if v is not None}
     if vendor is not None:
         body["vendor_id"] = vendor["id"]
+    body["extra"] = filament_defaults.creation_extra(spec, r.max_speed_mm_s)
     return sm.create("filament", body), True
 
 

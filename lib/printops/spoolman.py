@@ -289,6 +289,9 @@ EXTRA_FIELDS: tuple[ExtraField, ...] = (
         "spool", "slicer_filament_preset", "Slicer filament preset", "text"
     ),  # spools.PRESET_FIELD
     ExtraField("filament", "slicer_filament_preset", "Slicer filament preset", "text"),
+    # Max print speed of the filament, mm/s (printops.filament_defaults: 300, PLA+ 600). Not
+    # max_volumetric_mm3_s, which is mm³/s.
+    ExtraField("filament", "max_speed_mm_s", "Max speed", "integer", unit="mm/s"),
 )
 
 # Extra fields PrintOps used to register and no longer wants: each has a native Spoolman twin

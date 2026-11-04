@@ -504,3 +504,67 @@ def test_fields_migrate_native_needs_write_scope_for_apply(
     denied = _cli(tmp_path, shop, "printops", "fields", "migrate-native", "--apply", token="read")
     assert denied.returncode != 0
     assert shop.spoolman.get("vendor", ids["vendor"])["extra"] == {"spool_tare_g": "135.0"}
+
+
+def test_fields_fill_defaults_dry_run_apply_and_noop(tmp_path: Path, shop: LiveApi) -> None:
+    """`fields fill-defaults` shows the plan, `--apply` sets 300 / 600 (PLA+) only where empty, keeps a
+    number typed in the Spoolman UI, and a second run writes nothing."""
+    sm = shop.spoolman
+    vendor = sm.create("vendor", {"name": "Elegoo"})
+
+    def fil(material: str, name: str, **extra: str) -> int:
+        body = {"name": name, "vendor_id": vendor["id"], "material": material, "density": 1.24,
+                "diameter": 1.75, "weight": 1000, "extra": extra}
+        return int(sm.create("filament", body)["id"])
+
+    plus, petg = fil("PLA", "RAPID PLA+ Green"), fil("PETG", "Grey")
+    typed = fil("PLA+", "Typed", max_speed_mm_s="450")
+    writes = len(sm.writes())
+
+    dry = _cli(tmp_path, shop, "printops", "fields", "fill-defaults")
+    assert dry.returncode == 0, dry.stderr
+    assert "RAPID PLA+ Green" in dry.stdout and "new 600" in dry.stdout and "new 300" in dry.stdout
+    assert "keep" in dry.stdout and "DRY RUN — nothing written; re-run with --apply" in dry.stdout
+    assert len(sm.writes()) == writes
+
+    applied = _cli(tmp_path, shop, "printops", "fields", "fill-defaults", "--apply")
+    assert applied.returncode == 0, applied.stdout + applied.stderr
+    assert applied.stdout.rstrip().endswith("applied") and "2 set, 1 keep" in applied.stdout
+    got = {f: json.loads(sm.get("filament", f)["extra"]["max_speed_mm_s"]) for f in (plus, petg, typed)}
+    assert got == {plus: 600, petg: 300, typed: 450}
+
+    writes = len(sm.writes())
+    again = _cli(tmp_path, shop, "printops", "fields", "fill-defaults", "--apply", "--json")
+    assert again.returncode == 0, again.stderr
+    assert json.loads(again.stdout)["summary"] == {"set": 0, "keep": 3, "failed": 0}
+    assert len(sm.writes()) == writes
+
+    denied = _cli(tmp_path, shop, "printops", "fields", "fill-defaults", "--apply", token="read")
+    assert denied.returncode != 0
+
+
+
+def _received_max_speed(tmp_path: Path, shop: LiveApi, *flags: str) -> int | None:
+    got = _cli(tmp_path, shop, "printops", "spool", "receive", "--vendor", "Elegoo", "--material", "PETG",
+               "--name", "Grey", "--net", "1000", "--json", *flags)
+    assert got.returncode == 0, got.stderr
+    filament_id = json.loads(got.stdout)["filament_id"]
+    raw = shop.spoolman.get("filament", filament_id)["extra"].get("max_speed_mm_s")
+    return None if raw is None else int(json.loads(raw))
+
+
+def test_spool_receive_max_speed_flag_sets_the_new_filaments_max_speed(tmp_path: Path, shop: LiveApi) -> None:
+    """`spool receive --max-speed N` overrides the default (300, PLA+ 600) for the filament it creates."""
+    assert _received_max_speed(tmp_path, shop, "--max-speed", "450") == 450
+
+
+def test_spool_receive_without_max_speed_flag_keeps_the_default(tmp_path: Path, shop: LiveApi) -> None:
+    assert _received_max_speed(tmp_path, shop) == 300
+
+
+def test_spool_receive_max_speed_must_be_a_positive_integer(tmp_path: Path, shop: LiveApi) -> None:
+    for bad, why in (("fast", "needs an integer"), ("4.5", "needs an integer"), ("0", "must be > 0"), ("-5", "must be > 0")):
+        got = _cli(tmp_path, shop, "printops", "spool", "receive", "--vendor", "Elegoo", "--material", "PETG",
+                   "--name", "Grey", "--net", "1000", "--max-speed", bad)
+        assert got.returncode != 0 and why in got.stderr, (bad, got.stderr)
+    assert shop.spoolman.find("spool") == []  # nothing was created by a refused flag
