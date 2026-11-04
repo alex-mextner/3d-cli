@@ -65,6 +65,8 @@ class Spoolman(Protocol):
     def set_field(
         self, entity: Entity, key: str, params: Mapping[str, Any]
     ) -> list[JSON]: ...  # POST /field/{entity}/{key}
+    def delete_field(self, entity: Entity, key: str) -> list[JSON]: ...  # DELETE /field/{entity}/{key} (also drops every stored value)
+    def link_tag(self, spool_id: int, uid: str) -> JSON: ...      # POST /spool/{id}/tag (409 = another spool holds the UID)
     def find(
         self, entity: Entity, params: Mapping[str, str] | None = None
     ) -> list[JSON]: ...  # GET /{entity}
@@ -95,6 +97,11 @@ def encode_extra(value: Any) -> str:
 
 def decode_extra(raw: str | None) -> Any:
     return None if raw is None else json.loads(raw)
+
+
+def normalize_uid(uid: str) -> str:
+    """A tag UID the way Spoolman stores it: separators (: - _ space) stripped, upper case."""
+    return "".join(c for c in uid if c not in ":-_ ").upper()
 
 
 class HttpSpoolman:
@@ -153,6 +160,12 @@ class HttpSpoolman:
         return list(
             self._call("POST", f"/field/{entity}/{urllib.parse.quote(key)}", params)
         )
+
+    def delete_field(self, entity: Entity, key: str) -> list[JSON]:
+        return list(self._call("DELETE", f"/field/{entity}/{urllib.parse.quote(key)}"))
+
+    def link_tag(self, spool_id: int, uid: str) -> JSON:
+        return dict(self._call("POST", f"/spool/{int(spool_id)}/tag", {"uid": uid}))
 
     def find(
         self, entity: Entity, params: Mapping[str, str] | None = None
