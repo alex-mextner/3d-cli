@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from printer_ops.devices import Device
+    from printer_ops.macros import MacroCatalog
 from urllib.parse import urlsplit
 
 from errors import InvalidArgument, ThreeDError
@@ -251,6 +252,18 @@ class Adapter:
         printer_ops/bed.py and the `3d calibrate photo` pose/light in topcam/photo.py). Returns
         once the printer ran it, waiting at most `timeout` seconds."""
         raise self._unsupported("run_gcode")
+
+    def gcode_request(self, script: str) -> str:
+        """The request `run_gcode(script)` sends, as one line (`POST <url>`), for `--dry-run`. Sends nothing."""
+        raise self._unsupported("macros and aliases (no G-code channel)")
+
+    def macro_catalog(self) -> MacroCatalog:
+        """The macros and extended commands the printer defines. Read-only."""
+        raise self._unsupported("macros and aliases (no G-code channel)")
+
+    def catalog_requests(self) -> list[str]:
+        """The requests `macro_catalog()` sends, one line each (`GET <url>`), for `macro list --dry-run`."""
+        raise self._unsupported("macros and aliases (no G-code channel)")
 
     def set_head_filament(self, index: int, filament: HeadFilament, *,
                           force_official: bool = False) -> HeadWrite:
