@@ -50,6 +50,8 @@ from printops.incidents import IncidentError, obj as _obj, spool_snapshot
 from printops.spoolman import Spoolman, SpoolmanError
 
 if TYPE_CHECKING:
+    from gcode_resume import Cursor
+
     from printer_ops.base import PrinterStatus
     from printer_ops.devices import Device
 
@@ -506,7 +508,9 @@ def _put_telemetry(ctx: Context, head: Head | None, status: PrinterStatus) -> No
         ctx.telemetry["bed"] = {"actual": actual, "target": target}
 
 
-def _read_cursor(ctx: Context, path: Path, job: Job, deadline: Any) -> tuple[Any, str]:
+def _read_cursor(
+    ctx: Context, path: Path, job: Job, deadline: float | None
+) -> tuple[Cursor | None, str]:
     """G-code machine state at the job's position; (None, "") when the printer gave no position."""
     from gcode_resume import state_at
 

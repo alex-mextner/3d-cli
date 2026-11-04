@@ -1390,22 +1390,22 @@ def evaluate(
     invs: Sequence[Invalidation],
     now: str,
 ) -> Requirement:
-    ev = _Evaluation(policy, e, invs, now)
-    unscoped = ev.unscoped()
+    verdicts = _Evaluation(policy, e, invs, now)
+    unscoped = verdicts.unscoped()
     if unscoped is not None:
         return unscoped
     cands = _candidates(conn, e)
-    nozzle_ok = [c for c in cands if ev.nozzle_matches(c)]
+    nozzle_ok = [c for c in cands if verdicts.nozzle_matches(c)]
     f = e.filament
     exact = [c for c in nozzle_ok if f is None or _tier(c, f) == "filament"]
-    valid = [c for c in exact if ev.is_valid(c)]
+    valid = [c for c in exact if verdicts.is_valid(c)]
     if valid:
-        return ev.current(valid)
+        return verdicts.current(valid)
     if exact:
-        return ev.lapsed(exact[0])
+        return verdicts.lapsed(exact[0])
     if e.kind.baseline == "assumed":
-        return ev.assumed()
-    return ev.unrecorded(cands, nozzle_ok)
+        return verdicts.assumed()
+    return verdicts.unrecorded(cands, nozzle_ok)
 
 
 def _values_text(c: Calibration) -> str:

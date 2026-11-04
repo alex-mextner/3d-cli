@@ -31,7 +31,7 @@ import math
 import threading
 from collections.abc import Iterator, Mapping
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any
+from typing import Any, NoReturn
 from urllib.parse import parse_qs, urlsplit
 
 from printops.spoolman import ENTITIES, Entity, SpoolmanError
@@ -380,7 +380,7 @@ class FakeSpoolman:
             if any(c not in new["choices"] for c in old.get("choices") or []):
                 self._bad("Cannot remove existing choices.")
 
-    def _bad(self, message: str) -> list[JSON]:
+    def _bad(self, message: str) -> NoReturn:
         raise _err(400, message)
 
     def find(

@@ -103,9 +103,12 @@ content of every staged file (cognitive complexity <= 15, cyclomatic <= 20), not
 `rig.yaml` has no baseline. The decision is to refactor: before you commit a change to a file, split
 every function in it that `rig lint check --json <file>` reports (behavior-preserving extraction of
 private helpers, guarded by the existing tests, one commit per file or area, `(Refs #707)`) —
-never raise the limits, suppress, or hand the patch over. The legacy findings in `lib/printops/`,
-`lib/printer_ops/printops_checks.py` and the FakeSpoolman test double are already cleared; run
-`rig lint check --staged --json` before each commit.
+never raise the limits, suppress findings, or park the change as an uncommitted patch. Many files
+still carry findings (for example `lib/printops/watch_incidents.py`, `printer_tasks.py` and
+`todo_cli.py`; `rig lint check --json lib/printops` lists them), so run
+`rig lint check --staged --json` before each commit and expect to split the flagged functions of
+any file you stage. The files #707 had to touch (the printops spool, location, drying, calibration
+and gate modules, `printops_checks.py` and the FakeSpoolman test double) are already cleared.
 
 **Tests that run git get a clean `GIT_*` environment — always.** A git hook exports
 `GIT_DIR`, `GIT_INDEX_FILE` and friends for the repo being committed, and every subprocess
