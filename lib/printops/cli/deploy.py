@@ -24,7 +24,8 @@ USAGE = f"""3d printops deploy [--dry-run] [--host USER@HOST | --local] [--dir D
 
 Options:
   --dry-run          show what rsync would change and the remote commands; change nothing
-  --host USER@HOST   ssh target (default {deploy.DEFAULT_HOST})
+  --host USER@HOST   ssh target (default {deploy.DEFAULT_HOST}); an empty value or one starting with "-" is an error,
+                     never "this machine" (that is --local)
   --local            deploy on THIS machine instead (docker compose from this checkout; no ssh/rsync).
                      --dir defaults to <data dir>/printops (~/.local/share/3d-cli/printops) and
                      --backup-dir to DIR/backup; a missing systemd --user only skips the backup timer
@@ -59,26 +60,38 @@ def _bind(p: Parsed, default: str | None) -> str | None:
                               command="printops deploy") from e
 
 
-def _config(p: Parsed, root: Path) -> deploy.DeployConfig:
-    if "--local" not in p.flags:
-        return deploy.DeployConfig(
-            repo_root=root,
-            host=p.opts.get("--host", deploy.DEFAULT_HOST),
-            remote_dir=p.opts.get("--dir", deploy.DEFAULT_DIR),
-            backup_dir=p.opts.get("--backup-dir", deploy.DEFAULT_BACKUP_DIR),
-            api_url=p.opts.get("--api"),
-            version=deploy.git_version(root),
-            bind_addr=_bind(p, None),
-        )
+def _remote_config(p: Parsed, root: Path) -> deploy.DeployConfig:
+    host = p.opts.get("--host", deploy.DEFAULT_HOST)
+    problem = deploy.ssh_destination_problem(host)
+    if problem:
+        raise UsageError(
+            f"--host {host!r} {problem}", command="printops deploy",
+            remediation=["Pass USER@HOST (an empty `--host \"$VAR\"` does not mean this machine: use --local for that)."])
+    return deploy.DeployConfig(
+        repo_root=root,
+        host=host,
+        remote_dir=p.opts.get("--dir", deploy.DEFAULT_DIR),
+        backup_dir=p.opts.get("--backup-dir", deploy.DEFAULT_BACKUP_DIR),
+        api_url=p.opts.get("--api"),
+        version=deploy.git_version(root),
+        bind_addr=_bind(p, None),
+    )
+
+
+def _local_config(p: Parsed, root: Path) -> deploy.DeployConfig:
     if "--host" in p.opts:
         raise UsageError("--local and --host are exclusive", command="printops deploy",
                          remediation=["Use --local for this machine, --host USER@HOST for a remote one."])
     # compose resolves bind sources against services/3d-api/, not the cwd: hand it absolute paths
     base = _absolute(p.opts.get("--dir") or str(paths.data_dir() / "printops"))
-    return deploy.DeployConfig(repo_root=root, host="", remote_dir=base,
+    return deploy.DeployConfig(repo_root=root, host="", local=True, remote_dir=base,
                                backup_dir=_absolute(p.opts.get("--backup-dir") or f"{base}/backup"),
                                api_url=p.opts.get("--api"), version=deploy.git_version(root), timer_required=False,
                                bind_addr=_bind(p, deploy.LOOPBACK), pin_host_env=True)
+
+
+def _config(p: Parsed, root: Path) -> deploy.DeployConfig:
+    return _local_config(p, root) if "--local" in p.flags else _remote_config(p, root)
 
 
 def run(argv: list[str]) -> int:

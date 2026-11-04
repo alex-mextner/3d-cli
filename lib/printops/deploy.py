@@ -63,10 +63,22 @@ def normalize_bind(raw: str) -> str:
     return f"[{addr}]" if addr.version == 6 else str(addr)
 
 
+def ssh_destination_problem(dest: str) -> str | None:
+    """Why `dest` cannot be handed to ssh/rsync as the host argument, None when it can. A leading
+    "-" would be read as an option (`-oProxyCommand=…` runs a local command), whitespace splits it."""
+    if not dest:
+        return "is empty"
+    if dest.startswith("-"):
+        return "starts with '-', which ssh would read as an option"
+    if any(ch.isspace() for ch in dest):
+        return "contains whitespace"
+    return None
+
+
 @dataclass(frozen=True)
 class DeployConfig:
     repo_root: Path
-    host: str = DEFAULT_HOST  # USER@HOST for ssh, "" for this machine
+    host: str = DEFAULT_HOST  # USER@HOST for ssh; "" with local=True
     remote_dir: str = DEFAULT_DIR
     backup_dir: str = DEFAULT_BACKUP_DIR
     api_url: str | None = None
@@ -79,10 +91,15 @@ class DeployConfig:
     # to this deploy's own values. Left to compose they would be the Odroid's (Europe/Belgrade, the
     # owner's LAN allowlist) or whatever the caller's own PRINTOPS_* environment says.
     pin_host_env: bool = False
+    # THIS machine, said explicitly: an empty host (an unset `--host "$VAR"`) is never "here".
+    local: bool = False
 
-    @property
-    def local(self) -> bool:
-        return not self.host
+    def __post_init__(self) -> None:
+        if self.local and self.host:
+            raise ValueError(f"a local deploy has no ssh host (got {self.host!r})")
+        problem = None if self.local else ssh_destination_problem(self.host)
+        if problem:
+            raise ValueError(f"deploy host {self.host!r} {problem}")
 
     @property
     def health_url(self) -> str:

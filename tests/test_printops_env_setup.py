@@ -744,6 +744,7 @@ def test_local_deploy_plan_and_nondefault_ports(tmp_path: Path) -> None:
     cfg = deploy.DeployConfig(
         repo_root=tmp_path,
         host="",
+        local=True,
         remote_dir=str(tmp_path / "p"),
         backup_dir=str(tmp_path / "p" / "backup"),
         timer_required=False,
@@ -765,7 +766,7 @@ def test_compose_publishes_the_port_the_health_check_polls(tmp_path: Path) -> No
     from printops_env_fakes import fake_docker_bin
 
     cfg = deploy.DeployConfig(
-        repo_root=tmp_path, host="", remote_dir=str(tmp_path / "p"),
+        repo_root=tmp_path, host="", local=True, remote_dir=str(tmp_path / "p"),
         backup_dir=str(tmp_path / "p" / "backup"), timer_required=False,
     )
     step = next(s for s in deploy.plan(cfg) if "docker compose" in s.argv[-1])

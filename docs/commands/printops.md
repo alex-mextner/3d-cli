@@ -124,7 +124,8 @@ It never touches the Home Assistant compose project and never restarts HA.
 
 - `--dry-run` — run rsync with `--dry-run --itemize-changes` (shows what would change) and only print the rest.
   `3d printops deploy --dry-run`
-- `--host USER@HOST` — ssh target (default `ultra@192.168.0.39`).
+- `--host USER@HOST` — ssh target (default `ultra@192.168.0.39`). An empty value (an unset
+  `--host "$VAR"`) or one starting with `-` is an error (exit 2), never "this machine": that is `--local`.
   `3d printops deploy --host ultra@odroidn2 --api http://100.116.57.66:8765`
 - `--local` — deploy on THIS machine instead: the same steps through `bash -c`, built from this
   checkout (no rsync, no `DIR/src` copy). `--dir` defaults to `~/.local/share/3d-cli/printops`,

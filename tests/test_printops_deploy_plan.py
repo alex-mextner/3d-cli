@@ -16,7 +16,7 @@ from typing import Any
 
 import pytest
 import yaml
-from errors import InvalidArgument
+from errors import InvalidArgument, UsageError
 
 from printops import deploy
 from printops.cli import deploy as deploy_cli
@@ -76,6 +76,7 @@ def _local(tmp_path: Path, **kw: Any) -> deploy.DeployConfig:
     return deploy.DeployConfig(
         repo_root=tmp_path,
         host="",
+        local=True,
         remote_dir=str(tmp_path / "p"),
         backup_dir=str(tmp_path / "p" / "backup"),
         timer_required=False,
@@ -238,7 +239,9 @@ def test_a_pinned_backup_unit_execs_the_docker_this_host_has(tmp_path: Path) -> 
 
 
 def test_the_odroid_backup_unit_is_copied_as_shipped(tmp_path: Path) -> None:
-    cfg = deploy.DeployConfig(repo_root=REPO, host="", remote_dir=str(tmp_path / "p"), backup_dir=str(tmp_path / "b"))
+    cfg = deploy.DeployConfig(
+        repo_root=REPO, host="", local=True, remote_dir=str(tmp_path / "p"), backup_dir=str(tmp_path / "b")
+    )
     done = _run_step(_step(cfg, "install daily backup timer"), tmp_path)
     assert done.returncode == 0, done.stderr
     copied = tmp_path / "home" / ".config" / "systemd" / "user" / "printops-backup.service"
@@ -252,3 +255,30 @@ def test_the_shipped_backup_unit_and_the_token_mint_name_the_same_container() ->
     shipped = (REPO / "services" / "3d-api" / "systemd" / "printops-backup.service").read_text(encoding="utf-8")
     exec_start = next(ln for ln in shipped.splitlines() if ln.startswith("ExecStart="))
     assert f" exec {deploy.API_CONTAINER} " in exec_start and token.CONTAINER == deploy.API_CONTAINER
+
+
+# ------------------------------------------------------------------ "this machine" is never a default
+
+
+def test_an_empty_host_is_not_this_machine() -> None:
+    """`--host "$ODROID"` with the variable unset must not quietly deploy here as `ultra`."""
+    with pytest.raises(ValueError, match="empty"):
+        deploy.DeployConfig(repo_root=REPO, host="")
+    for bad in ("-oProxyCommand=x", "me@nas lan"):
+        with pytest.raises(ValueError, match="deploy host"):
+            deploy.DeployConfig(repo_root=REPO, host=bad)
+    with pytest.raises(ValueError, match="no ssh host"):
+        deploy.DeployConfig(repo_root=REPO, host="me@nas", local=True)
+    assert deploy.DeployConfig(repo_root=REPO, host="", local=True).local
+
+
+def test_printops_deploy_refuses_an_empty_or_option_like_host_before_running_anything(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ran: list[object] = []
+    monkeypatch.setattr(deploy, "run_steps", lambda steps, **_kw: ran.append(steps))
+    for host in ("", "-oProxyCommand=sh", "a b"):
+        with pytest.raises(UsageError, match="--host") as err:
+            deploy_cli.run(["--host", host, "--dry-run"])
+        assert err.value.exit_code == 2 and "--local" in err.value.render()
+    assert not ran  # nothing was planned, let alone executed

@@ -571,7 +571,7 @@ def _deploy_config(host: str, pr: HostProbe, env: Env, opts: Options) -> deploy.
     if host:
         http_host = _http_host(host, env)
         api_url = f"http://{f'[{http_host}]' if ':' in http_host else http_host}:{deploy.API_PORT}"
-    return deploy.DeployConfig(repo_root=root, host=host, remote_dir=base, backup_dir=f"{base}/backup",
+    return deploy.DeployConfig(repo_root=root, host=host, local=not host, remote_dir=base, backup_dir=f"{base}/backup",
                                api_url=api_url, version=deploy.git_version(root), timer_required=False,
                                bind_addr=opts.bind or (None if host else deploy.LOOPBACK), pin_host_env=True)
 
