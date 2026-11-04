@@ -18,13 +18,17 @@ WHAT: the camera can tell whether the bed is clear (the parts were taken off) an
   * `clear_ack`   optional `watch.bed.clear_ack`: one short motor sound after bed_clear so the
                   person at the printer hears that the camera saw the clear bed.
 
-WRITES: two, both guarded by the printer reading idle/complete/cancelled just before the write.
+WRITES: three, all guarded by the printer reading idle/complete/cancelled just before the write (the light,
+  while a job prints, only for the job watch's frame).
   `clear_ack` is the first: one G-code line that the printer's `trusted_macros` lists, at most once
   per bed_clear event and per debounce window, never below `min_z_mm` (a Z buzz must not reach the
   nozzle). The second is the auto view (lib/bed_view.py, `watch.bed.auto_view`): a Z-only move of
   the bed to where the camera sees the whole plate and back, only from `3d printer bed status`
   and the checks built on it (preflight `bed`, the one-shot `bed-free` subscription); the watch
-  monitor never moves anything. Everything else only reads (camera snapshot, print_stats, toolhead).
+  monitor never moves anything. The third is the printer's light (printer_ops/bed_light.py,
+  `watch.bed.light`): switched on before a camera frame of those checks, a reference capture and the
+  job watch's frame, and back off after it; the watch monitor only reads idle frames and never
+  touches it. Everything else only reads (camera snapshot, print_stats, toolhead).
 
 INVARIANTS: stdlib only at import time; numpy/OpenCV live in bed_state.py.
 """
@@ -44,6 +48,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from errors import InvalidArgument
+from printer_ops.bed_light import BUILTIN_LIGHT_COMMANDS, LIGHT_KINDS, LightConfig
 
 if TYPE_CHECKING:
     from printer_ops.devices import Device
@@ -72,7 +77,7 @@ AUTO_VIEW_SETTLE_S = 8.0      # after the move: the camera's own frame rewrite (
 BED_VIEW_EVENT = "bed_free"   # the event of the one-shot `3d printer subscribe --once --on bed-free`
 
 BED_KEYS = ("enabled", "interval_s", "roi", "volume_height_mm", "z_tol_mm", "stale_s", "clear_ack", "thresholds",
-            "auto_view", "auto_view_min", "auto_view_part_mm")
+            "auto_view", "auto_view_min", "auto_view_part_mm", "light")
 
 # The per-printer overrides of bed_state.Thresholds (tuned on the U1 and K1 SE frames of tests/data/bed;
 # another camera may need other values): every field of that dataclass, a test keeps the two in step.
@@ -80,6 +85,7 @@ THRESHOLD_KEYS = ("level", "detrend_px", "edge_px", "clear_blob_px", "clear_max"
                   "plate_missing_min", "plate_tie", "surface_min", "change_min", "settle_frames", "match_px", "view_min",
                   "shift_px", "open_px", "low_view", "occupied_blob_low_px")
 ACK_KEYS = ("enabled", "command", "debounce_minutes", "min_z_mm")
+LIGHT_KEYS = ("enabled", "object", "on_gcode", "off_gcode", "settle_s")
 
 
 def _log(msg: str) -> None:
@@ -108,6 +114,7 @@ class BedConfig:
     auto_view: bool = False               # move the bed in Z to where the camera sees the whole plate (bed_view.py)
     auto_view_min: float = AUTO_VIEW_MIN  # share of the plate in the frame below which the bed is moved
     auto_view_part_mm: float | None = None  # declared height of the tallest thing that may stand on the bed
+    light: LightConfig = LightConfig()    # the printer's light for every camera frame (bed_light.py)
 
 
 def _num(value: Any, what: str, minimum: float) -> float:
@@ -187,6 +194,46 @@ def _ack(value: Any, device: Device) -> AckConfig | None:
                      _num(value.get("min_z_mm", 10), f"{where}.min_z_mm", 0))
 
 
+def _light_object(value: Any, where: str, device: Device) -> str:
+    parts = value.split() if isinstance(value, str) else []
+    if len(parts) != 2 or parts[0] not in LIGHT_KINDS:
+        raise InvalidArgument(f"{where}.object", str(value), [f"{kind} NAME" for kind in LIGHT_KINDS],
+                              command="printer", extra=f"Name the light as Moonraker lists it. Fix {device.source}.")
+    return " ".join(parts)
+
+
+def _light_lines(raw: Any, where: str, device: Device) -> tuple[str, ...]:
+    lines = [raw] if isinstance(raw, str) else raw
+    if (not isinstance(lines, list) or not lines
+            or not all(isinstance(c, str) and c.strip() and not any(ch in c for ch in "\n\r;") for c in lines)):
+        raise InvalidArgument(where, str(raw), ["one G-code line (LIGHT_ON) or a list of lines, no comments"],
+                              command="printer", extra=f"Fix {device.source}.")
+    for line in lines:
+        word = line.split()[0].upper()
+        if word not in BUILTIN_LIGHT_COMMANDS and word not in device.trusted_macros:
+            raise InvalidArgument(where, line, [f"SET_LED, SET_PIN or a command listed in {device.name}.trusted_macros"],
+                                  command="printer",
+                                  extra=f"Add {word} to {device.name}.trusted_macros in {device.source} first "
+                                        "(it is the list of commands 3d may let the printer run).")
+    return tuple(c.strip() for c in lines)
+
+
+def _light(value: Any, device: Device) -> LightConfig:
+    where = f"{device.name}.watch.bed.light"
+    if not isinstance(value, dict):
+        raise InvalidArgument(where, str(value), ["a mapping: {object, on_gcode, off_gcode, settle_s, enabled}"],
+                              command="printer", extra=f"Fix {device.source}.")
+    unknown = sorted(set(value) - set(LIGHT_KEYS))
+    if unknown:
+        raise InvalidArgument(where, ", ".join(unknown), LIGHT_KEYS, command="printer", extra=f"Fix {device.source}.")
+    return LightConfig(
+        enabled=_flag(value.get("enabled", True), f"{where}.enabled"),
+        object=_light_object(value["object"], where, device) if "object" in value else None,
+        on_gcode=_light_lines(value["on_gcode"], f"{where}.on_gcode", device) if "on_gcode" in value else (),
+        off_gcode=_light_lines(value["off_gcode"], f"{where}.off_gcode", device) if "off_gcode" in value else (),
+        settle_s=_num(value.get("settle_s", LightConfig.settle_s), f"{where}.settle_s", 0))
+
+
 def bed_config(device: Device) -> BedConfig:
     """`watch.bed` of a device, validated (absent = monitor off)."""
     raw = (device.watch or {}).get("bed")
@@ -212,6 +259,7 @@ def bed_config(device: Device) -> BedConfig:
         auto_view_min=_fraction(raw.get("auto_view_min", AUTO_VIEW_MIN), f"{where}.auto_view_min"),
         auto_view_part_mm=_num(raw["auto_view_part_mm"], f"{where}.auto_view_part_mm", 0)
         if "auto_view_part_mm" in raw else None,
+        light=_light(raw["light"], device) if "light" in raw else LightConfig(),
     )
     if cfg.enabled:
         from printer_ops.camera import camera_spec
