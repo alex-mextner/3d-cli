@@ -71,7 +71,7 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
 from urllib.parse import quote, urlsplit
 
 from printer_ops.base import (
@@ -104,6 +104,9 @@ from printer_ops.base import (
 )
 from printer_ops.move_bounds import Limits
 
+if TYPE_CHECKING:
+    from printer_ops.macros import MacroCatalog
+
 _STATE = {
     "standby": IDLE,
     "printing": PRINTING,
@@ -114,6 +117,8 @@ _STATE = {
 }
 _HEATERS = ("extruder", "extruder1", "extruder2", "extruder3", "heater_bed")
 _T = TypeVar("_T")
+# Macro discovery: the `gcode_macro NAME` objects and every extended command with its help text.
+_CATALOG_PATHS = ("/printer/objects/list", "/printer/gcode/help")
 _QUERY = (
     "webhooks&print_stats&virtual_sdcard&display_status&"
     + "&".join(_HEATERS)
@@ -209,22 +214,17 @@ def _differs(after: Slot, want: HeadFilament) -> list[str]:
     ]
 
 
-def parse_status(status: dict[str, Any]) -> PrinterStatus:
-    """Moonraker `objects/query` status dict -> normalized PrinterStatus."""
-    hooks = status.get("webhooks") or {}
-    ps = status.get("print_stats") or {}
+def _job_state(hooks: dict[str, Any], ps: dict[str, Any]) -> tuple[str, str, Any]:
+    """(normalized state, raw state, message) of the job: Klipper not ready (startup/shutdown/error)
+    means nothing about the job can be trusted."""
     klippy = hooks.get("state", "ready")
     raw_state = str(ps.get("state", "")) or "?"
     if klippy != "ready":
-        # Klipper not ready (startup/shutdown/error): nothing about the job can be trusted.
-        state, raw_state = UNKNOWN, f"klippy:{klippy}"
-        message = hooks.get("state_message")
-    else:
-        state = _STATE.get(raw_state, UNKNOWN)
-        message = ps.get("message") or None
-    progress = (status.get("virtual_sdcard") or {}).get("progress")
-    if progress is None:
-        progress = (status.get("display_status") or {}).get("progress")
+        return UNKNOWN, f"klippy:{klippy}", hooks.get("state_message")
+    return _STATE.get(raw_state, UNKNOWN), raw_state, ps.get("message") or None
+
+
+def _temps(status: dict[str, Any]) -> dict[str, tuple[float | None, float | None]]:
     temps: dict[str, tuple[float | None, float | None]] = {}
     for h in _HEATERS:
         obj = status.get(h)
@@ -233,12 +233,22 @@ def parse_status(status: dict[str, Any]) -> PrinterStatus:
                 obj.get("temperature"),
                 obj.get("target"),
             )
+    return temps
+
+
+def parse_status(status: dict[str, Any]) -> PrinterStatus:
+    """Moonraker `objects/query` status dict -> normalized PrinterStatus."""
+    ps = status.get("print_stats") or {}
+    state, raw_state, message = _job_state(status.get("webhooks") or {}, ps)
+    progress = (status.get("virtual_sdcard") or {}).get("progress")
+    if progress is None:
+        progress = (status.get("display_status") or {}).get("progress")
     return PrinterStatus(
         state=state,
         raw_state=raw_state,
         filename=ps.get("filename") or None,
         progress=float(progress) if progress is not None else None,
-        temps=temps,
+        temps=_temps(status),
         message=message,
         slots=parse_slots(status.get("print_task_config") or {}),
         raw=status,
@@ -577,9 +587,30 @@ class MoonrakerAdapter(Adapter):
         STEPPER_BUZZ takes ~10 s), so the read timeout is at least `timeout`."""
         saved, self.timeout = self.timeout, max(self.timeout, timeout)
         try:
-            self._post("/printer/gcode/script?script=" + quote(script, safe=""))
+            self._post(self._script_path(script))
         finally:
             self.timeout = saved
+
+    @staticmethod
+    def _script_path(script: str) -> str:
+        return "/printer/gcode/script?script=" + quote(script, safe="")
+
+    def gcode_request(self, script: str) -> str:
+        return f"POST {self.base}{self._script_path(script)}"
+
+    def catalog_requests(self) -> list[str]:
+        return [f"GET {self.base}{path}" for path in _CATALOG_PATHS]
+
+    def macro_catalog(self) -> MacroCatalog:
+        """`gcode_macro NAME` objects (`/printer/objects/list`) and every extended command with its help text
+        (`/printer/gcode/help`, macros included). Read-only."""
+        from printer_ops.macros import parse_catalog
+
+        objects, help_text = (self._get(path) for path in _CATALOG_PATHS)
+        try:
+            return parse_catalog(objects, help_text)
+        except ValueError as exc:
+            raise self._comm_error("macro discovery", exc) from exc
 
     def file_metadata(self, filename: str) -> dict[str, Any]:
         """Moonraker's parsed metadata of a stored G-code file (`object_height`, `layer_count`, ...); read-only."""
