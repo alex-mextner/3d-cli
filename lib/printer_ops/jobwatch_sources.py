@@ -4,8 +4,9 @@ camera, or a fixture (a scenario file with saved frames; no network at all).
 `LiveSource`     one GET per poll of the objects the always-on watch subscribes to (`moonraker_subscription`),
                  fed to the SAME `MoonrakerDetector` (filament runout, heater loss, bed off, exception, G-code
                  error, homing lost) plus the layer, progress, file position and toolhead Z; the printer's own
-                 defect detection from klippy.log (`KlippyLogTap`); the camera snapshot (`open_camera`). Read-only:
-                 GETs and the `camera.start_monitor` keepalive only.
+                 defect detection from klippy.log (`KlippyLogTap`); the camera snapshot (`open_camera`), taken
+                 with the printer's light on when it was off and restored right after (bed_light.py; the only
+                 write, and only for the frame). Otherwise read-only: GETs and the `camera.start_monitor` keepalive.
 `FixtureSource`  the same surface from a scenario JSON on a virtual clock, with a `FixtureAdapter` that records
                  the PAUSE/CANCEL it is given. This is the dry-run/demo mode: `3d printer watch NAME --job
                  --fixture scenario.json`, nothing is ever sent to a printer or a phone.
@@ -34,6 +35,8 @@ from printer_ops.base import (
     PrinterCommError,
     PrinterStatus,
 )
+from printer_ops.bed import bed_config
+from printer_ops.bed_light import LightConfig, LightReport, LightSession, write_block
 from printer_ops.jobwatch import Observation
 from printer_ops.watch import Event, MoonrakerDetector, moonraker_subscription
 
@@ -68,15 +71,31 @@ class LiveSource:
         self.tap = tap
         self.detector = MoonrakerDetector(adapter.name)
         self._query: str | None = None
+        self._names: list[str] | None = None
+        # `watch.bed.light` of the printer (the job watch has no bed block of its own: a printer
+        # without one uses the defaults; an invalid block fails here, at the start of the watch)
+        self._device = getattr(adapter, "device", None)
+        self.light_config = (
+            bed_config(self._device).light if self._device is not None else LightConfig()
+        )
+        self.light_report: LightReport | None = (
+            None  # what the light did for the last frame
+        )
         self._layers: tuple[float, float] | None | bool = (
             False  # (first layer height, layer height); False = unasked
         )
 
-    def _objects_query(self) -> str:
-        if self._query is None:
+    def _object_names(self) -> list[str]:
+        """`printer.objects.list`, read once."""
+        if self._names is None:
             listed = self.adapter._get("/printer/objects/list")
             names = listed.get("objects", []) if isinstance(listed, dict) else []
-            self._query = query_string([n for n in names if isinstance(n, str)])
+            self._names = [n for n in names if isinstance(n, str)]
+        return self._names
+
+    def _objects_query(self) -> str:
+        if self._query is None:
+            self._query = query_string(self._object_names())
         return self._query
 
     def poll(self, now: float) -> Observation:
@@ -133,8 +152,27 @@ class LiveSource:
             return []
 
     def grab(self) -> bytes:
+        """One camera frame, taken with the printer's light on when it was off and put back right after.
+        The job is printing, so this is the only moment the light is touched (`printing_ok`), and only
+        when it was off; no light, or a failed switch, only means an unlit frame (`self.light_report`)."""
         self.camera.keepalive()
-        return bytes(self.camera.grab().jpeg)
+        try:
+            names: list[str] | None = self._object_names()
+        except PrinterCommError:
+            names = None  # the light session reads the list itself and reports it as unreadable
+        light = LightSession(
+            self.adapter,
+            self.light_config,
+            printing_ok=True,
+            note="the job watch frame",
+            blocked=write_block(self._device),
+            objects=names,
+        )
+        with light:
+            light.on()
+            jpeg = bytes(self.camera.grab().jpeg)
+        self.light_report = light.report
+        return jpeg
 
 
 # ---- fixtures ---------------------------------------------------------------------------------

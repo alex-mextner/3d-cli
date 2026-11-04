@@ -40,8 +40,10 @@ OUTPUT (monitor): one JSON object per stdout line — `{"event": {...}}` on a tr
   after each verdict; logs on stderr. Evidence frames (ROI outlined, changed pixels red) go to
   ~/.cache/3d-cli/vision/bed/.
 
-READ-ONLY except `watch.bed.clear_ack` (printer_ops/bed.py WRITES) and the auto view of `status`
-(lib/bed_view.py: a Z-only move of the bed to where the camera sees the whole plate, and back).
+READ-ONLY except `watch.bed.clear_ack` (printer_ops/bed.py WRITES), the auto view of `status`
+(lib/bed_view.py: a Z-only move of the bed to where the camera sees the whole plate, and back) and the
+printer's light (printer_ops/bed_light.py: on before a frame of `status`/`check`/`reference --capture`,
+back as found after; the `monitor` only reads idle frames and never touches it).
 """
 
 from __future__ import annotations
@@ -82,6 +84,7 @@ from printer_ops.bed import (  # noqa: E402
     transitions,
     write_state,
 )
+from printer_ops.bed_light import LightSession, write_block  # noqa: E402
 
 from bed_view import view_in_progress  # noqa: E402
 
@@ -578,6 +581,16 @@ def classify(img: np.ndarray, refs: list[Reference], z: float | None, printer: s
     return _objects_verdict(d, blob_px, ref, (plate, plate_why, metrics), inner, match.in_view(z), z, printer, th)
 
 
+def occupied_confident(v: Verdict, th: Thresholds, view_min: float) -> bool:
+    """Is this `occupied` one a start gate may FAIL on? A changed region of the normal occupied size (blob
+    `occupied_blob_px` or `occupied_min` of the ROI: not the lenient low-view size) seen with at least
+    `view_min` (watch.bed.auto_view_min) of the plate in the frame. At a poor view most of the ROI is the
+    machine and the room behind the bed, so the same pixels are a suspicion, not a finding."""
+    m = v.metrics
+    big = m.get("blob_px", 0.0) >= th.occupied_blob_px or m.get("changed", 0.0) >= th.occupied_min
+    return v.bed == OCCUPIED and big and m.get("bed_in_view", 1.0) >= view_min  # no calibration: the ROI is the view
+
+
 # ---- the change gate ------------------------------------------------------------------------
 
 class Monitor:
@@ -947,9 +960,11 @@ FROZEN_CHECK_S = 6.0  # one_shot waits this long for a new frame (the U1 rewrite
 def one_shot(device: Device, cfg: BedConfig, *, max_age: float | None, camera: Any = None,
              printer_fn: Callable[[Device], tuple[str, float | None]] = read_printer,
              th: Thresholds | None = None, now: float | None = None,
-             sleep: Callable[[float], None] = time.sleep) -> dict[str, Any]:
+             sleep: Callable[[float], None] = time.sleep,
+             before_frame: Callable[[], object] | None = None) -> dict[str, Any]:
     """The bed now: the monitor's last verdict when it is fresher than `max_age` at this Z,
-    else one fresh camera frame classified here (never written to the monitor's state)."""
+    else one fresh camera frame classified here (never written to the monitor's state).
+    `before_frame` runs right before the first camera grab of a fresh judgement (the light, status_view)."""
     th = thresholds_for(cfg) if th is None else th
     now = time.time() if now is None else now
     state, z = printer_fn(device)
@@ -963,6 +978,8 @@ def one_shot(device: Device, cfg: BedConfig, *, max_age: float | None, camera: A
             and now - float(last["checked"]) <= max_age and last.get("bed") not in (None, PRINTING)
             and isinstance(last.get("z"), (int, float)) and match(float(last["z"]), z)):
         return {**last, "source": "watch", "age_s": round(now - float(last["checked"]), 1)}
+    if before_frame is not None:
+        before_frame()
     camera = camera if camera is not None else camera_for(device)
     first = jpeg = grab(camera)
     waited = 0.0
@@ -987,7 +1004,7 @@ def one_shot(device: Device, cfg: BedConfig, *, max_age: float | None, camera: A
     frame = save_evidence(device.name, jpeg, v, f"status-{v.bed}", now)
     return {"printer": device.name, "bed": v.bed, "plate": v.plate, "z": z, "source": "camera now", "age_s": 0.0,
             "reason": v.reason, "metrics": {k: round(x, 4) for k, x in v.metrics.items()}, "frame": frame,
-            "raw_frame": str(raw_frame_path(frame))}
+            "raw_frame": str(raw_frame_path(frame)), "occupied_confident": occupied_confident(v, th, cfg.auto_view_min)}
 
 
 def status_view(device: Device, cfg: BedConfig, *, mode: str = "auto", max_age: float | None = None,
@@ -1010,16 +1027,24 @@ def status_view(device: Device, cfg: BedConfig, *, mode: str = "auto", max_age: 
         m = bed_view.read_motion(adapter)
         return m.state, m.z
 
+    light = LightSession(adapter, cfg.light, note="the bed check", blocked=write_block(device), sleep=sleep)
+
     def judge(age: float | None) -> dict[str, Any]:
-        return one_shot(device, cfg, max_age=age, camera=camera, printer_fn=printer_fn, th=th, now=now, sleep=sleep)
+        return one_shot(device, cfg, max_age=age, camera=camera, printer_fn=printer_fn, th=th, now=now, sleep=sleep,
+                        before_frame=light.on)
 
     def view(z: float) -> float | None:
         return 1.0 if match.cam is None else match.in_view(z)  # a roi polygon is in the frame by definition
 
-    return bed_view.auto_view(device, cfg, mode=mode, adapter=adapter, judge=judge, view=view,
-                              ref_zs=[r.z for r in refs if r.z is not None], stands=match, max_age=max_age,
-                              part_height_mm=part_height, sleep=sleep,
-                              settle_s=AUTO_VIEW_SETTLE_S if settle_s is None else settle_s)
+    with light:  # the light is back as it was found after the bed is back (restore order: Z, then light)
+        if max_age is None:  # a fresh frame is certain: the settle overlaps the Z move
+            light.on()
+        verdict = bed_view.auto_view(device, cfg, mode=mode, adapter=adapter, judge=judge, view=view,
+                                     ref_zs=[r.z for r in refs if r.z is not None], stands=match, max_age=max_age,
+                                     part_height_mm=part_height, sleep=sleep,
+                                     settle_s=AUTO_VIEW_SETTLE_S if settle_s is None else settle_s)
+    verdict["light"] = light.report.to_dict()
+    return verdict
 
 
 def check_result(v: dict[str, Any], expect: str | None) -> tuple[str, bool]:
@@ -1063,7 +1088,8 @@ def capture_reference_best_view(device: Device, cfg: BedConfig, *, plate: bool, 
                                 sleep: Callable[[float], None] = time.sleep,
                                 settle_s: float | None = None) -> dict[str, Any]:
     """`3d printer bed reference --capture --best-view`: the bed is moved in Z (the same guarded Z-only
-    move as `check`) to where the camera sees the plate, the empty bed is stored as the reference THERE,
+    move as `check`) to where the camera sees the plate, the empty bed is stored as the reference THERE
+    with the printer's light on (restored after the bed is back; `light` in the result says what happened),
     and the bed is put back. No reference has to stand at that Z yet. The caller asserts the plate is empty."""
     import bed_view
     from printer_ops import make_adapter
@@ -1071,24 +1097,31 @@ def capture_reference_best_view(device: Device, cfg: BedConfig, *, plate: bool, 
     adapter = adapter if adapter is not None else make_adapter(device, timeout=10.0)
     camera = camera if camera is not None else camera_for(device)
     match = z_match(device, cfg)
+    light = LightSession(adapter, cfg.light, note="the reference frame", blocked=write_block(device), sleep=sleep)
 
     def printer_fn(_: Device) -> tuple[str, float | None]:
         m = bed_view.read_motion(adapter)
         return m.state, m.z
 
     def take(_: float | None) -> dict[str, Any]:
-        return capture_reference(device, cfg, plate=plate, camera=camera, printer_fn=printer_fn, now=now)
+        return capture_reference(device, cfg, plate=plate, camera=camera, printer_fn=printer_fn, now=now,
+                                 before_frame=light.on)
 
     def view(z: float) -> float | None:
         return 1.0 if match.cam is None else match.in_view(z)
 
-    return bed_view.auto_view(device, cfg, mode="force", adapter=adapter, judge=take, view=view, ref_zs=[],
-                              stands=match, part_height_mm=part_height, sleep=sleep, need_reference=False,
-                              settle_s=AUTO_VIEW_SETTLE_S if settle_s is None else settle_s)
+    with light:
+        light.on()  # before the move: the settle overlaps the Z travel
+        ref = bed_view.auto_view(device, cfg, mode="force", adapter=adapter, judge=take, view=view, ref_zs=[],
+                                 stands=match, part_height_mm=part_height, sleep=sleep, need_reference=False,
+                                 settle_s=AUTO_VIEW_SETTLE_S if settle_s is None else settle_s)
+    ref["light"] = light.report.to_dict()
+    return ref
 
 
 def _reference_frame(device: Device, camera: Any, printer_fn: Callable[[Device], tuple[str, float | None]],
-                     frame: bytes | None, frame_z: float | None) -> tuple[float, bytes]:
+                     frame: bytes | None, frame_z: float | None,
+                     before_frame: Callable[[], object] | None = None) -> tuple[float, bytes]:
     from errors import UsageError
 
     if frame is not None:
@@ -1104,19 +1137,22 @@ def _reference_frame(device: Device, camera: Any, printer_fn: Callable[[Device],
     if z is None:
         raise UsageError(f"{device.name}: toolhead Z unknown (Klipper not ready?)", command="printer bed",
                          remediation=["Retry when `3d printer status` reads the printer."])
+    if before_frame is not None:
+        before_frame()
     return z, grab(camera if camera is not None else camera_for(device))
 
 
 def capture_reference(device: Device, cfg: BedConfig, *, plate: bool, camera: Any = None,
                       printer_fn: Callable[[Device], tuple[str, float | None]] = read_printer,
                       now: float | None = None, frame: bytes | None = None,
-                      frame_z: float | None = None) -> dict[str, Any]:
+                      frame_z: float | None = None, before_frame: Callable[[], object] | None = None) -> dict[str, Any]:
     """Store the current camera frame (or `frame`, a saved JPEG of the empty bed taken at gcode
-    Z `frame_z`, e.g. an earlier snapshot) as the printer's reference at that Z."""
+    Z `frame_z`, e.g. an earlier snapshot) as the printer's reference at that Z. `before_frame` runs right
+    before the camera is asked (the light), never for a saved frame."""
     from errors import UsageError
 
     now = time.time() if now is None else now
-    z, jpeg = _reference_frame(device, camera, printer_fn, frame, frame_z)
+    z, jpeg = _reference_frame(device, camera, printer_fn, frame, frame_z, before_frame)
     match = z_match(device, cfg)
     hidden = out_of_view(match, z, thresholds_for(cfg))
     if hidden is not None:  # a reference there would read every low part as a clear bed
@@ -1241,6 +1277,8 @@ Config (fleet/printers.yaml or printer-devices.yaml, `<name>.watch.bed`):
                            view"); off unless set (fleet/printers.yaml: true for the U1)
   auto_view_min: 0.85      share of the plate that must be in the frame; below it the bed is moved
   auto_view_part_mm: 60    declared height of the tallest thing that may stand on the bed (mm)
+  light: {object: "output_pin chamber_light", on_gcode: LIGHT_ON, off_gcode: LIGHT_OFF, settle_s: 1.5,
+          enabled: false}  the printer's light for every camera frame (see "Light"); all keys optional
 
 Auto view (status; also the `bed` line of `3d print-preflight --printer` and `3d printer start`):
   The U1 rests at Z 200 after a job, where its camera sees ~15 % of the plate: window light there
@@ -1260,6 +1298,20 @@ Auto view (status; also the `bed` line of `3d print-preflight --printer` and `3d
   --no-move     never move (the camera judges at the current Z)
   --part-height MM   the tallest thing that may stand on the bed, for this call
   The `3d printer watch` monitor never moves the bed and judges nothing while a check has it away.
+
+Light (check, status, reference --capture, the `bed` line of the preflight, `printer watch --job`):
+  A frame of a dark chamber is not comparable to the reference, so the printer's own light is switched
+  on before every frame and put back as it was found (also after a failure). The light is the Moonraker
+  object `led NAME` / `neopixel NAME` / `dotstar NAME` (SET_LED) or `output_pin NAME` (SET_PIN) whose
+  name contains light, lamp, led or chamber; `watch.bed.light.object` names it when the guess is wrong
+  and `on_gcode` / `off_gcode` run a macro instead (each command must be SET_LED, SET_PIN or in
+  trusted_macros). Its state is read first (read-only objects/query): a light that is already on is
+  left alone; settle_s (1.5 s) is the wait after switching on. No light found: the verdict says
+  "no light found" and the frame is taken as it is. While a job prints nothing is touched, except
+  that the job watch takes its frame with the light on when it was off and restores it right after.
+  The `light` key of the verdict (`--json`) and a `light:` line of the text say what happened. The
+  `3d printer watch` monitor only reads idle frames and never touches the light; `enabled: false`
+  turns the whole thing off for a printer.
 
 Examples:
   3d printer bed check u1                        # move the bed to the camera, look, put it back
@@ -1293,12 +1345,33 @@ def _cmd_reference(args: argparse.Namespace, device: Device, cfg: BedConfig) -> 
     if args.best_view:
         ref = capture_reference_best_view(device, cfg, plate=not args.no_plate, part_height=args.part_height)
     else:
-        ref = capture_reference(device, cfg, plate=not args.no_plate, frame=frame, frame_z=args.z)
-    print(json.dumps(ref, indent=1) if args.json else
+        ref = _capture_lit(device, cfg, plate=not args.no_plate, frame=frame, frame_z=args.z)
+    print(json.dumps(ref, indent=1, default=str) if args.json else
           f"{ref['kind']} reference of {device.name} at Z {ref['z']:.1f}: {ref['path']}\n"
           f"  ROI: {ref['roi_source']} ({ref['volume_share']:.1%} of the frame; "
-          f"bed surface {ref['surface_share']:.1%})")
+          f"bed surface {ref['surface_share']:.1%})" + _light_line(ref))
     return 0
+
+
+def _capture_lit(device: Device, cfg: BedConfig, *, plate: bool, frame: bytes | None,
+                 frame_z: float | None) -> dict[str, Any]:
+    """`capture_reference`; a camera frame (not a saved one) is taken with the printer's light on."""
+    if frame is not None:
+        return capture_reference(device, cfg, plate=plate, frame=frame, frame_z=frame_z)
+    from printer_ops import make_adapter
+
+    light = LightSession(make_adapter(device, timeout=10.0), cfg.light, note="the reference frame",
+                         blocked=write_block(device))
+    with light:
+        ref = capture_reference(device, cfg, plate=plate, frame_z=frame_z, before_frame=light.on)
+    ref["light"] = light.report.to_dict()
+    return ref
+
+
+def _light_line(v: dict[str, Any]) -> str:
+    """The `light:` line of a check / status / reference text ('' when the verdict has no light report)."""
+    light = v.get("light")
+    return f"\n  light: {light['text']}" if isinstance(light, dict) and light.get("text") else ""
 
 
 def _list_references_cmd(args: argparse.Namespace, device: Device) -> int:
@@ -1326,7 +1399,7 @@ def _cmd_check(args: argparse.Namespace, device: Device, cfg: BedConfig) -> int:
     print(f"{device.name}: {c['result']}{frac}; Z {_fz(c.get('z'))}"
           + (f", bed {moved}" if moved else "") + f"\n  {c.get('reason', '')}"
           + (f"\n  frame: {c['frame']}" if c.get("frame") else "")
-          + (f"\n  camera frame: {c['raw_frame']}" if c.get("raw_frame") else ""))
+          + (f"\n  camera frame: {c['raw_frame']}" if c.get("raw_frame") else "") + _light_line(c))
     return 0 if c["ok"] else 1
 
 
@@ -1337,7 +1410,8 @@ def _cmd_status(args: argparse.Namespace, device: Device, cfg: BedConfig) -> int
         print(json.dumps(v, indent=1, default=str))
     else:
         print(f"{device.name}: bed {v['bed']}, plate {v['plate']} (Z {_fz(v.get('z'))}; {v['source']}, "
-              f"{v.get('age_s', 0):.0f} s ago)\n  {v.get('reason', '')}" + (f"\n  frame: {v['frame']}" if v.get("frame") else ""))
+              f"{v.get('age_s', 0):.0f} s ago)\n  {v.get('reason', '')}" + (f"\n  frame: {v['frame']}" if v.get("frame") else "")
+              + _light_line(v))
     return 0
 
 
