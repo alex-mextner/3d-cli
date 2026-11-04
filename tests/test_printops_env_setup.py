@@ -410,6 +410,50 @@ def test_a_configured_bare_spoolman_is_not_already_configured(cfg_home: Path, mo
         svc.close()
 
 
+# ------------------------------------------------------------------ the file, not the environment
+
+
+def test_status_reads_the_config_file_not_an_exported_dead_url(
+    cfg_home: Path, service: FakeService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    write_cfg(service.url)
+    monkeypatch.setenv("PRINTOPS_API", "http://127.0.0.1:9")  # exported and dead
+    env, out, _, _ = make_env(cfg_home)
+    assert env_setup.run(["--no-input", "--spoolman", "auto"], env) == 0
+    assert any(f"already configured: {service.url}" in line for line in out)
+    assert any("PRINTOPS_API is set in the environment and overrides" in line for line in out)
+
+
+def test_a_healthy_exported_api_does_not_make_an_unwritten_file_configured(
+    cfg_home: Path, service: FakeService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A dotfiles installer exports PRINTOPS_API and runs `3d init --env --no-input`: cron and
+    systemd units without that variable still have no config, so nothing is "already configured"."""
+    monkeypatch.setenv("PRINTOPS_API", service.url)
+    monkeypatch.setenv("PRINTOPS_TOKEN", GOOD_TOKEN)
+    env, out, _, _ = make_env(cfg_home)
+    assert env_setup.run(["--no-input"], env) == 0
+    assert not any("already configured" in line for line in out)
+    assert any("not configured" in line for line in out) and not config_path().exists()
+    assert sum("is set in the environment" in line for line in out) == 2  # PRINTOPS_API and PRINTOPS_TOKEN
+    assert GOOD_TOKEN not in "\n".join(out)  # the warning names the variable, never its value
+
+
+def test_api_is_compared_with_the_file_not_with_the_environment(
+    cfg_home: Path, service: FakeService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """env -> A with a token, file -> B, `--api A`: the file must end up at A, not stay at B as
+    "already configured"; the exported token is not the file's, so it is not written unverified."""
+    write_cfg("http://10.0.0.99:8765", "po_old")
+    monkeypatch.setenv("PRINTOPS_API", service.url)
+    monkeypatch.setenv("PRINTOPS_TOKEN", GOOD_TOKEN)
+    env, out, _, _ = make_env(cfg_home)
+    assert env_setup.run(["--no-input", "--api", service.url], env) == 0
+    assert not any("already configured" in line for line in out)
+    assert load_config(env={}) == (service.url, None)
+    assert "10.0.0.99" in config_path().with_name("printops.yaml.bak").read_text()
+
+
 # ------------------------------------------------------------------ candidates and the menu
 
 

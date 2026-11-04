@@ -85,6 +85,10 @@ Behaviour:
 - **Config last.** `printops.yaml` is written only after the service is healthy and the token was
   accepted; a different old file is kept as `printops.yaml.bak` (mode 600). Pointing `--api` at another
   server without `--token` drops the old token: it belongs to the old server and is never sent to the new one.
+- **The file, not the environment.** `PRINTOPS_API` / `PRINTOPS_TOKEN` override the file for every
+  `3d printops` command, but `3d init --env` checks, keeps and replaces the *file* only (cron and
+  systemd units do not inherit your shell's variables). When an exported variable differs from the
+  file it prints a warning (the variable's name, never the token).
 - **Nothing is chosen for you.** The menu has no default and no host is contacted before you pick
   it; then its load, cores, RAM, architecture and docker are shown, and a busy host asks first.
 - **Which printers can host it.** Only registry printers that speak Moonraker and that 3d may

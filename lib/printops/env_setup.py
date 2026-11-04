@@ -830,11 +830,27 @@ def _finish(api: str, token: str | None, h: Health, env: Env) -> int:
 INSTALL_KINDS = ("local", "printer", "ssh")
 
 
-def _current_config() -> tuple[str | None, str | None]:
+def _warn_env_override(file_api: str | None, file_token: str | None, env: Env) -> None:
+    """PRINTOPS_API / PRINTOPS_TOKEN win over the file in every `3d printops` command (load_config),
+    but this stage reads and writes the FILE: say so when the two disagree."""
+    for var, value, in_file in (
+        ("PRINTOPS_API", os.environ.get("PRINTOPS_API"), file_api),
+        ("PRINTOPS_TOKEN", os.environ.get("PRINTOPS_TOKEN"), file_token),
+    ):
+        if value and value != in_file:
+            env.say(f"warning: {var} is set in the environment and overrides {config_path()} for every `3d printops` "
+                    f"command; `3d init --env` reads and writes the file only (unset {var} to use it)")
+
+
+def _current_config(env: Env) -> tuple[str | None, str | None]:
+    """api and token of the config FILE: an exported PRINTOPS_API (a dotfiles installer, a dead old
+    URL) is not "the configuration" this stage checks, keeps or replaces."""
     try:
-        return load_config()
+        api, token = load_config(env={})
     except ApiConfigError as e:
         raise UsageError(str(e), command=CLI_NAME, remediation=[f"Fix or remove {config_path()}."]) from e
+    _warn_env_override(api, token, env)
+    return api, token
 
 
 def _connect(opts: Options, cur_api: str | None, cur_token: str | None, env: Env) -> int:
@@ -924,7 +940,7 @@ def run(argv: Sequence[str], env: Env | None = None) -> int:
     env = env or Env()
     opts = parse_options(argv)
     target = parse_target(opts.spoolman)
-    cur_api, cur_token = _current_config()
+    cur_api, cur_token = _current_config(env)
     if opts.api:
         return _connect(opts, cur_api, cur_token, env)
     health = check_health(cur_api, cur_token) if cur_api else None
