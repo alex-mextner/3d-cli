@@ -179,6 +179,29 @@ def add_tare(
     )
 
 
+def _narrow(
+    rows: list[TareRow], spool_kind: str | None, net_g: float | None
+) -> list[TareRow]:
+    """Prefer rows matching the spool kind, then the net weight; a filter that matches nothing is skipped."""
+    for narrow in (
+        lambda r: r.spool_kind == spool_kind if spool_kind else True,
+        lambda r: r.net_g == net_g if net_g else True,
+    ):
+        kept = [r for r in rows if narrow(r)]
+        rows = kept or rows
+    return rows
+
+
+def _ambiguity(vendor: str, rows: list[TareRow]) -> str:
+    listing = ", ".join(
+        f"{r.tare_g:g} g ({r.spool_kind or 'kind ?'}, net {r.net_g or '?'})"
+        for r in rows
+    )
+    return (
+        f"ambiguous tare for {vendor!r}: {listing}; give the spool kind/net or --tare"
+    )
+
+
 def lookup(
     conn: sqlite3.Connection,
     vendor: str,
@@ -190,26 +213,13 @@ def lookup(
     rows = list_tares(conn, vendor)
     if not rows:
         return Resolution(None, [], f"no tare known for vendor {vendor!r}")
-    for narrow in (
-        lambda r: r.spool_kind == spool_kind if spool_kind else True,
-        lambda r: r.net_g == net_g if net_g else True,
-    ):
-        kept = [r for r in rows if narrow(r)]
-        rows = kept or rows
+    rows = _narrow(rows, spool_kind, net_g)
     # Our own weighings beat a catalogue: if any row was measured here (sigma ≤ MEASURED_SIGMA), use those.
     measured = [r for r in rows if r.sigma_g <= MEASURED_SIGMA]
     rows = measured or rows
     values = sorted({r.tare_g for r in rows})
     if values[-1] - values[0] > AGREE_WITHIN_G:
-        listing = ", ".join(
-            f"{r.tare_g:g} g ({r.spool_kind or 'kind ?'}, net {r.net_g or '?'})"
-            for r in rows
-        )
-        return Resolution(
-            None,
-            rows,
-            f"ambiguous tare for {vendor!r}: {listing}; give the spool kind/net or --tare",
-        )
+        return Resolution(None, rows, _ambiguity(vendor, rows))
     best = min(rows, key=lambda r: (r.sigma_g, -r.id))
     return Resolution(
         Tare(best.tare_g, best.sigma_g, best.source, "db", best.id), rows, ""

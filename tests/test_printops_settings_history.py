@@ -356,16 +356,9 @@ def test_buffer_dir_moves_the_legacy_buffer_once(
 # -- import ---------------------------------------------------------------------------------------
 
 
-def test_import_maps_calibrations_binds_spools_and_is_idempotent(
-    ctx: cal.Ctx, fake_spoolman: FakeSpoolman
+def _check_first_import_outcomes(
+    rep: sh.ImportReport, got: dict[str, tuple[str, int | None]]
 ) -> None:
-    orange_spool = add_spool(fake_spoolman, "PLA оранжевый", ORANGE, slot="k1se/T1")
-    add_spool(
-        fake_spoolman, "оранжевый (Борис)", ORANGE
-    )  # same colour, never bound to the K1
-    rep = sh.import_lines(ctx, lines(buffer(orange_spool)), file="k1se.jsonl")
-    got = outcomes(rep)
-
     assert got["u-black-pa"][0] == "refused"  # no binding of k1se/T1 with #000000
     black_detail = next(r.detail for r in rep.results if r.uid == "u-black-pa")
     assert (
@@ -394,6 +387,10 @@ def test_import_maps_calibrations_binds_spools_and_is_idempotent(
         "refused": 2,
     }
 
+
+def _check_imported_calibrations(
+    ctx: cal.Ctx, got: dict[str, tuple[str, int | None]], orange_spool: int
+) -> cal.Calibration:
     pa = cal.get(ctx.conn, got["u-pa"][1] or 0)
     # pa_lines is a catalog method (`3d calibrate gen pa|combo`): kept as the buffer wrote it.
     assert pa.values == {"pressure_advance": 0.05} and pa.method == "pa_lines"
@@ -428,7 +425,12 @@ def test_import_maps_calibrations_binds_spools_and_is_idempotent(
     assert (
         mvs22.values == {"max_volumetric_speed": 22.0} and mvs22.superseded_by is None
     )
+    return pa
 
+
+def _check_journal_row_and_requirements(
+    ctx: cal.Ctx, pa: cal.Calibration, orange_spool: int
+) -> None:
     row = ctx.conn.execute(
         "SELECT * FROM settings_change WHERE uid = 'u-pa'"
     ).fetchone()
@@ -455,6 +457,8 @@ def test_import_maps_calibrations_binds_spools_and_is_idempotent(
     )
     assert need["input_shaper"].status == "assumed"
 
+
+def _check_reimport_is_idempotent(ctx: cal.Ctx, orange_spool: int) -> None:
     events_before = ctx.conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
     again = sh.import_lines(ctx, lines(buffer(orange_spool)), file="k1se.jsonl")
     assert again.to_dict()["counts"] == {
@@ -467,6 +471,10 @@ def test_import_maps_calibrations_binds_spools_and_is_idempotent(
         ctx.conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == events_before
     )
 
+
+def _check_import_with_overrides(
+    ctx: cal.Ctx, fake_spoolman: FakeSpoolman, orange_spool: int, pa: cal.Calibration
+) -> None:
     black_spool = add_spool(fake_spoolman, "чёрный PLA", BLACK, slot="u1/T1")
     bad = sh.import_lines(
         ctx, lines(buffer(orange_spool)), methods={"u-shaper": "guess"}
@@ -506,6 +514,23 @@ def test_import_maps_calibrations_binds_spools_and_is_idempotent(
         if r.kind is not None and r.kind.id == "input_shaper"
     )
     assert shaper_need.status == "current"
+
+
+def test_import_maps_calibrations_binds_spools_and_is_idempotent(
+    ctx: cal.Ctx, fake_spoolman: FakeSpoolman
+) -> None:
+    orange_spool = add_spool(fake_spoolman, "PLA оранжевый", ORANGE, slot="k1se/T1")
+    add_spool(
+        fake_spoolman, "оранжевый (Борис)", ORANGE
+    )  # same colour, never bound to the K1
+    rep = sh.import_lines(ctx, lines(buffer(orange_spool)), file="k1se.jsonl")
+    got = outcomes(rep)
+
+    _check_first_import_outcomes(rep, got)
+    pa = _check_imported_calibrations(ctx, got, orange_spool)
+    _check_journal_row_and_requirements(ctx, pa, orange_spool)
+    _check_reimport_is_idempotent(ctx, orange_spool)
+    _check_import_with_overrides(ctx, fake_spoolman, orange_spool, pa)
 
 
 def test_import_dry_run_writes_nothing(
