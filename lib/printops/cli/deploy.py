@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 
 from cli import paths
-from errors import InvalidArgument, ThreeDError, UsageError
+from errors import InvalidArgument, MissingDependency, ThreeDError, UsageError
 from printops import deploy
 from printops.cli import Sub
 from printops.cli._common import Parsed, parse
@@ -113,10 +113,13 @@ def run(argv: list[str]) -> int:
             return 0
         print(f"waiting for {cfg.health_url}/v1/health …")
         h = deploy.wait_healthy(cfg.health_url)
+    except deploy.ToolMissing as e:
+        raise MissingDependency(e.tool, install=deploy.TOOL_INSTALL.get(e.tool, f"install {e.tool}"),
+                                degrades="`3d printops deploy` cannot run its steps", command="printops deploy") from e
     except (RuntimeError, ApiError) as e:
         raise ThreeDError(str(e), command="printops deploy",
                           remediation=[f"Inspect: {'ssh ' + cfg.host + ' ' if cfg.host else ''}docker logs --tail 80 "
-                                       "printops-api (and printops-spoolman)"]) from e
+                                       f"{deploy.API_CONTAINER} (and printops-spoolman)"]) from e
     sp = h.get("spoolman") or {}
     print(f"healthy: 3d-api {h.get('version')}  spoolman v{sp.get('version')}  "
           f"extra fields {((sp.get('extra_fields') or {}).get('status'))}")

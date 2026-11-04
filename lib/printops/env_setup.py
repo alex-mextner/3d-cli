@@ -45,7 +45,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from cli import paths
-from errors import GateFailure, InvalidArgument, ThreeDError, UsageError
+from errors import GateFailure, InvalidArgument, MissingDependency, ThreeDError, UsageError
 from printops import deploy
 from printops.cli._common import parse
 from printops.client import (
@@ -193,11 +193,21 @@ class Options:
     bind: str | None = None  # deploy.normalize_bind form; None = the target's default
 
 
+def _ask(prompt: str) -> str:
+    try:
+        return input(prompt)
+    except EOFError as e:  # Ctrl-D, or stdin closed under a script that forgot --no-input
+        raise UsageError(
+            "no answer: stdin was closed while asking a question", command=CLI_NAME,
+            remediation=["Run it on a terminal, or pass --no-input with an explicit --spoolman TARGET."],
+        ) from e
+
+
 @dataclass
 class Env:
     """Everything with a side effect, injectable: tests run the whole flow with fakes."""
 
-    ask: Callable[[str], str] = input
+    ask: Callable[[str], str] = _ask
     say: Callable[[str], None] = print
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run
     deploy_runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run
@@ -294,7 +304,24 @@ def parse_options(argv: Sequence[str]) -> Options:
         bind=_bind_option(p.opts.get("--bind")),
     )
     _check_combinations(o, parse_target(o.spoolman))
+    problem = _api_url_problem(o.api) if o.api else None
+    if problem:
+        raise InvalidArgument("--api", str(o.api), [f"http(s)://HOST:{deploy.API_PORT}"], command=CLI_NAME,
+                              extra=f"{o.api!r} {problem}. Example: --api http://nas.lan:{deploy.API_PORT}")
     return o
+
+
+def _api_url_problem(url: str) -> str | None:
+    """Why `url` cannot be an api endpoint (urllib would raise on a scheme-less one, and file:/data:
+    URLs are not an API), None when it can."""
+    try:
+        parts = urlsplit(url)
+        port = parts.port
+    except ValueError as e:
+        return f"is not a valid URL ({e})"
+    if parts.scheme not in ("http", "https") or not parts.hostname or port == 0:
+        return "must be an http:// or https:// URL with a host"
+    return None
 
 
 # ----------------------------------------------------------------------------------- health
@@ -303,6 +330,9 @@ def parse_options(argv: Sequence[str]) -> Options:
 def check_health(api: str, token: str | None) -> Health:
     """3d-api first (/v1/health, then the token against /v1/events); a bare Spoolman (/api/v1/health)
     is reported as state "spoolman-only". Network errors become state "unreachable", never an exception."""
+    problem = _api_url_problem(api)
+    if problem:
+        return Health("unreachable", detail=f"{api!r} {problem}")
     client = ApiClient(api, token, timeout=5.0)
     try:
         body = client.health()
@@ -379,7 +409,11 @@ def write_config(api: str, token: str | None, say: Callable[[str], None]) -> Pat
     data: dict[str, Any] = {}
     if path.is_file():
         old = path.read_text(encoding="utf-8")
-        loaded = yaml.safe_load(old) or {}
+        try:
+            loaded = yaml.safe_load(old) or {}
+        except yaml.YAMLError as e:
+            raise UsageError(f"{path} is not valid YAML: {e}", command=CLI_NAME,
+                             remediation=[f"Fix or remove {path}; nothing was written."]) from e
         data = dict(loaded) if isinstance(loaded, dict) else {}
         old_api = str(data.get("api") or "").rstrip("/")
         if old_api != api.rstrip("/") and not token:
@@ -524,8 +558,13 @@ def mint_token(host: str, env: Env) -> str:
             TOKEN_SCOPES,
         ]
     )
+    by_hand = remote if not host else f"ssh {host} {shlex.quote(remote)}"
     argv = ["bash", "-c", remote] if not host else ["ssh", *SSH_OPTS, host, remote]
-    r = env.runner(argv, capture_output=True, text=True, check=False, timeout=120)
+    try:
+        r = env.runner(argv, capture_output=True, text=True, check=False, timeout=120)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise ThreeDError(f"could not mint a 3d-api token: {e}", command=CLI_NAME,
+                          remediation=_mint_remediation(by_hand)) from e
     lines = [
         ln.strip()
         for ln in (r.stdout or "").splitlines()
@@ -535,12 +574,13 @@ def mint_token(host: str, env: Env) -> str:
         raise ThreeDError(
             f"could not mint a 3d-api token (exit {r.returncode}): {(r.stderr or '').strip()[:300]}",
             command=CLI_NAME,
-            remediation=[
-                f"Run it by hand: {remote}",
-                "then `3d init --env --api URL --token TOKEN`.",
-            ],
+            remediation=_mint_remediation(by_hand),
         )
     return lines[0]
+
+
+def _mint_remediation(by_hand: str) -> list[str]:
+    return [f"Run it by hand: {by_hand}", "then `3d init --env --api URL --token TOKEN`."]
 
 
 def _require_docker(pr: HostProbe, label: str) -> None:
@@ -614,6 +654,9 @@ def install(host: str, label: str, env: Env, opts: Options) -> tuple[str, str | 
             return cfg.health_url, None
         env.say(f"waiting for {cfg.health_url}/v1/health …")
         deploy.wait_healthy(cfg.health_url, log=env.say)
+    except deploy.ToolMissing as e:
+        raise MissingDependency(e.tool, install=deploy.TOOL_INSTALL.get(e.tool, f"install {e.tool}"),
+                                degrades="`3d init --env` cannot run the deploy steps", command=CLI_NAME) from e
     except (RuntimeError, ApiError) as e:
         where = f"ssh {host} " if host else ""
         raise ThreeDError(str(e), command=CLI_NAME,
@@ -822,7 +865,11 @@ def _finish(api: str, token: str | None, h: Health, env: Env) -> int:
                 h.hint or "Check the URL/token, then `3d printops health --api URL`.",
             ],
         )
-    path = write_config(api, token, env.say)
+    try:
+        path = write_config(api, token, env.say)
+    except OSError as e:
+        raise ThreeDError(f"cannot write {config_path()}: {e}", command=CLI_NAME,
+                          remediation=[f"Make {config_path().parent} writable, then re-run."]) from e
     env.say(f"configured: {api} ({h.kind}, {h.detail}); wrote {path} (mode 600)")
     return 0
 

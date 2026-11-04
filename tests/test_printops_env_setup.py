@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from errors import InvalidArgument, ThreeDError, UsageError
+from errors import InvalidArgument, MissingDependency, ThreeDError, UsageError
 from printops_env_fakes import GOOD_TOKEN, FakeService
 
 from printops import deploy, env_setup
@@ -452,6 +452,115 @@ def test_api_is_compared_with_the_file_not_with_the_environment(
     assert not any("already configured" in line for line in out)
     assert load_config(env={}) == (service.url, None)
     assert "10.0.0.99" in config_path().with_name("printops.yaml.bak").read_text()
+
+
+# ------------------------------------------------------------------ failures are structured errors, not tracebacks
+
+
+def test_an_html_catch_all_answering_200_is_unreachable_not_a_traceback(cfg_home: Path) -> None:
+    """An nginx `try_files … /index.html` or a Mainsail port answers every path with 200 HTML."""
+    from printops.client import ApiClient, ApiError
+
+    web = FakeService(html=True)
+    try:
+        h = env_setup.check_health(web.url, GOOD_TOKEN)
+        assert h.state == "unreachable" and "not JSON" in h.detail
+        with pytest.raises(ApiError, match="not JSON") as err:
+            ApiClient(web.url).get("/anything")
+        assert err.value.status == 200
+        env, _, _, _ = make_env(cfg_home)
+        with pytest.raises(ThreeDError, match="not healthy") as exc:
+            env_setup.run(["--no-input", "--api", web.url], env)
+        assert exc.value.exit_code == 1 and not config_path().exists()
+    finally:
+        web.close()
+
+
+class Missing:
+    """A deploy runner on a machine without the program (subprocess.run raises FileNotFoundError)."""
+
+    def __call__(self, argv: list[str], **_kw: Any) -> subprocess.CompletedProcess[str]:
+        raise FileNotFoundError(2, "No such file or directory", argv[0])
+
+
+def test_a_missing_local_rsync_is_a_missing_dependency_even_in_a_dry_run(cfg_home: Path) -> None:
+    env, _, _, _ = make_env(cfg_home, deploy_runner=Missing())
+    with pytest.raises(MissingDependency, match="rsync") as err:  # the dry run really executes rsync
+        env_setup.run(["--no-input", "--spoolman", "ssh:me@nas.lan", "--dry-run"], env)
+    assert err.value.exit_code == 127 and "apt install rsync" in err.value.render()
+    with pytest.raises(deploy.ToolMissing) as plain:
+        deploy.run_steps(deploy.plan(deploy.DeployConfig(repo_root=REPO, host="me@nas.lan"), dry_run=True),
+                         cwd=REPO, dry_run=True, log=lambda _m: None, runner=Missing())
+    assert plain.value.tool == "rsync"
+
+
+class MintFails(Recorder):
+    def __init__(self, exc: BaseException) -> None:
+        super().__init__()
+        self.exc = exc
+
+    def __call__(self, argv: list[str], **kw: Any) -> subprocess.CompletedProcess[str]:
+        if "token create" in argv[-1]:
+            raise self.exc
+        return super().__call__(argv, **kw)
+
+
+def test_a_hung_or_unstartable_token_mint_is_a_structured_error_with_the_hand_command(
+    cfg_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_health(monkeypatch, [])
+    for exc in (subprocess.TimeoutExpired("ssh", 120), FileNotFoundError(2, "No such file", "ssh")):
+        env, _, _, _ = make_env(cfg_home, runner=MintFails(exc))
+        with pytest.raises(ThreeDError, match="could not mint") as err:
+            env_setup.run(["--no-input", "--spoolman", "ssh:me@nas.lan"], env)
+        # the hand-run command names the host: without `ssh HOST` it would run on the wrong machine
+        assert "ssh me@nas.lan " in err.value.render() and "docker exec printops-api" in err.value.render()
+        assert not config_path().exists()
+
+
+def test_a_corrupt_config_file_is_a_usage_error_everywhere(cfg_home: Path, service: FakeService) -> None:
+    path = config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("api: [unclosed\n", encoding="utf-8")
+    with pytest.raises(UsageError, match="not valid YAML"):
+        env_setup.write_config(service.url, GOOD_TOKEN, lambda _m: None)
+    env, _, _, _ = make_env(cfg_home)
+    with pytest.raises(UsageError, match="not valid YAML"):
+        env_setup.run(["--no-input", "--api", service.url, "--token", GOOD_TOKEN], env)
+    assert path.read_text(encoding="utf-8") == "api: [unclosed\n"  # kept as it was, and no .bak of garbage
+    assert not path.with_name("printops.yaml.bak").exists()
+
+
+def test_end_of_input_at_a_prompt_is_a_usage_error(cfg_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import builtins
+
+    def eof(_prompt: str = "") -> str:
+        raise EOFError
+
+    monkeypatch.setattr(builtins, "input", eof)
+    out: list[str] = []
+    env = env_setup.Env(say=out.append, is_tty=True, repo_root=REPO)  # the real `ask`, a closed stdin
+    with pytest.raises(UsageError, match="stdin was closed") as err:
+        env_setup.run([], env)
+    assert err.value.exit_code == 2 and "--no-input" in err.value.render()
+
+
+def test_an_api_without_a_scheme_or_host_is_refused_before_any_request(
+    cfg_home: Path, service: FakeService
+) -> None:
+    for bad in ("192.168.0.5", "nas.lan:8765", "file:///etc/passwd", "ftp://nas.lan", "http://", "http://nas.lan:99999"):
+        with pytest.raises(InvalidArgument, match="--api") as err:
+            env_setup.run(["--no-input", "--api", bad], make_env(cfg_home)[0])
+        assert err.value.exit_code == 2 and "http://nas.lan:8765" in err.value.render()
+    assert not config_path().exists() and service.requests == []
+
+
+def test_a_configured_api_without_a_scheme_is_reported_not_raised(cfg_home: Path) -> None:
+    write_cfg("nas.lan:8765")
+    env, _, rec, _ = make_env(cfg_home)
+    with pytest.raises(ThreeDError, match="must be an http") as err:
+        env_setup.run(["--no-input"], env)
+    assert err.value.exit_code == 1 and "--api URL" in err.value.render() and not rec.calls
 
 
 # ------------------------------------------------------------------ candidates and the menu

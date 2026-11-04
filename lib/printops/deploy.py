@@ -241,6 +241,20 @@ def wait_healthy(url: str, *, timeout_s: float = 300.0, interval_s: float = 3.0,
         sleep(interval_s)
 
 
+class ToolMissing(RuntimeError):
+    """A program a step runs (ssh, rsync, bash) is not installed on THIS machine."""
+
+    def __init__(self, tool: str, step: str) -> None:
+        super().__init__(f"{step}: `{tool}` is not installed on this machine")
+        self.tool = tool
+
+
+TOOL_INSTALL = {
+    "rsync": "sudo apt install rsync  (macOS: brew install rsync)",
+    "ssh": "sudo apt install openssh-client  (macOS: ssh ships with the system)",
+}
+
+
 def run_steps(steps: Sequence[Step], *, cwd: Path, dry_run: bool, log: Callable[[str], None] = print,
               runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run) -> None:
     """Print every step; execute it unless dry_run (read-only steps execute even then).
@@ -250,6 +264,9 @@ def run_steps(steps: Sequence[Step], *, cwd: Path, dry_run: bool, log: Callable[
         log(f"[{i}/{len(steps)}] {step.title}\n  $ {shown}")
         if dry_run and not step.read_only:
             continue
-        r = runner(step.argv, cwd=str(cwd), check=False)
+        try:
+            r = runner(step.argv, cwd=str(cwd), check=False)
+        except FileNotFoundError as e:
+            raise ToolMissing(step.argv[0], f"step {i} ({step.title})") from e
         if r.returncode != 0:
             raise RuntimeError(f"step {i} ({step.title}) failed with exit {r.returncode}")

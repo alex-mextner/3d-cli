@@ -18,11 +18,12 @@ GOOD_TOKEN = "po_goodtoken"
 
 class FakeService:
     def __init__(
-        self, *, api: bool = True, spoolman: bool = True, status: str = "ok"
+        self, *, api: bool = True, spoolman: bool = True, status: str = "ok", html: bool = False
     ) -> None:
         self.api = api  # serve /v1/health + /v1/events
         self.spoolman = spoolman  # serve /api/v1/health
         self.status = status  # "ok" | "degraded"
+        self.html = html  # answer EVERY path 200 with an HTML page (a web server's catch-all, not an API)
         self.requests: list[tuple[str, str]] = []
         outer = self
 
@@ -41,6 +42,14 @@ class FakeService:
             def _handle(self) -> None:
                 outer.requests.append((self.command, self.path))
                 path = self.path.split("?")[0]
+                if outer.html:
+                    raw = b"<html><body>Welcome to nginx</body></html>"
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html")
+                    self.send_header("Content-Length", str(len(raw)))
+                    self.end_headers()
+                    self.wfile.write(raw)
+                    return
                 if self.command != "GET":
                     self._send(405, {"detail": "read-only fake"})
                 elif path == "/v1/health" and outer.api:
