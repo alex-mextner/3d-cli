@@ -154,6 +154,44 @@ def test_script_install_is_idempotent_and_prints_the_paste_line(
     assert (tmp_path / "tokens.txt").read_text().count("cli-test") == 1  # minted once
 
 
+def test_script_never_deletes_a_src_dir_it_did_not_create(script_file: Path, tmp_path: Path) -> None:
+    """PRINTOPS_DIR=$HOME style base dirs hold the user's own `src/`: refuse, keep every file."""
+    mine = tmp_path / "base" / "src"
+    mine.mkdir(parents=True)
+    (mine / "precious.txt").write_text("keep me", encoding="utf-8")
+    r = _run_script(script_file, tmp_path)
+    assert r.returncode != 0 and "refusing to replace" in r.stderr and "PRINTOPS_DIR" in r.stderr
+    assert (mine / "precious.txt").read_text(encoding="utf-8") == "keep me"
+    assert not (tmp_path / "base" / "data").exists()  # nothing was created before the refusal
+    assert "up -d" not in (tmp_path / "calls.log").read_text()  # preflight ran, compose never did
+
+
+def test_script_dry_run_reports_a_src_dir_it_would_refuse_to_replace(script_file: Path, tmp_path: Path) -> None:
+    (tmp_path / "base" / "src").mkdir(parents=True)
+    (tmp_path / "base" / "src" / "mine.txt").write_text("x", encoding="utf-8")
+    refused = _run_script(script_file, tmp_path, "--dry-run")
+    assert refused.returncode != 0 and "refusing to replace" in refused.stderr
+    (tmp_path / "other").mkdir()
+    ok = _run_script(script_file, tmp_path / "other", "--dry-run")
+    assert ok.returncode == 0, ok.stderr
+    assert "is missing; would unpack" in ok.stderr + ok.stdout
+
+
+def test_script_replaces_an_empty_src_and_its_own_older_unpack(script_file: Path, tmp_path: Path) -> None:
+    src = tmp_path / "base" / "src"
+    src.mkdir(parents=True)  # empty: nothing to lose
+    first = _run_script(script_file, tmp_path)
+    assert first.returncode == 0, first.stderr
+    assert (src / "services" / "3d-api" / "compose.yaml").is_file()
+    (src / ".payload-sha256").write_text("an-older-payload\n", encoding="utf-8")
+    (src / "stale-file").write_text("from the old unpack", encoding="utf-8")
+    again = _run_script(script_file, tmp_path)
+    assert again.returncode == 0, again.stderr
+    assert not (src / "stale-file").exists()  # our own previous unpack is replaced wholesale
+    assert (src / "services" / "3d-api" / "compose.yaml").is_file()
+    assert [p.name for p in (tmp_path / "base").iterdir() if p.name.startswith("src.new")] == []
+
+
 def test_script_spoolman_only_skips_the_api(script_file: Path, tmp_path: Path) -> None:
     r = _run_script(script_file, tmp_path, SPOOLMAN_ONLY="1")
     assert r.returncode == 0, r.stderr

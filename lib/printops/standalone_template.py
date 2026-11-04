@@ -126,8 +126,25 @@ preflight() {
   fi
 }
 
+# src_state: what $DIR/src is right now: missing | empty | ours (carries this installer's marker) |
+# foreign (somebody's own files: PRINTOPS_DIR=$HOME would otherwise make ~/src ours to delete)
+src_state() {
+  local src="$DIR/src"
+  if [ ! -e "$src" ] && [ ! -L "$src" ]; then printf missing
+  elif [ -f "$src/.payload-sha256" ]; then printf ours
+  elif [ -d "$src" ] && [ -z "$(find "$src" -mindepth 1 -maxdepth 1 -print -quit)" ]; then printf empty
+  else printf foreign
+  fi
+}
+
+guard_src() {
+  [ "$(src_state)" != foreign ] ||
+    die "refusing to replace $DIR/src: it exists, is not empty and was not created by this installer (no .payload-sha256 marker); pick another base dir (PRINTOPS_DIR=...) or move it away"
+}
+
 extract_payload() {
-  local src="$DIR/src" tmp="$DIR/payload.tgz.tmp"
+  local src="$DIR/src" tmp="$DIR/payload.tgz.tmp" stage
+  guard_src
   if [ -f "$src/.payload-sha256" ] && [ "$(cat "$src/.payload-sha256")" = "$PAYLOAD_SHA256" ]; then
     log "build context already unpacked ($src)"
     return 0
@@ -135,11 +152,14 @@ extract_payload() {
   log "unpacking the build context to $src"
   payload | base64 -d >"$tmp"
   [ "$(sha256_of "$tmp")" = "$PAYLOAD_SHA256" ] || { rm -f "$tmp"; die "the embedded payload is corrupt (was this script truncated while copying?)"; }
-  rm -rf "${src:?}"
-  mkdir -p "$src"
-  tar -xzf "$tmp" -C "$src"
+  # unpack beside src and rename: an interrupted unpack never leaves a half-filled src behind
+  stage="$(mktemp -d "$DIR/src.new.XXXXXX")"
+  tar -xzf "$tmp" -C "$stage" || { rm -rf "${stage:?}" "$tmp"; die "could not unpack the build context"; }
   rm -f "$tmp"
-  printf '%s\n' "$PAYLOAD_SHA256" >"$src/.payload-sha256"
+  printf '%s\n' "$PAYLOAD_SHA256" >"$stage/.payload-sha256"
+  chmod 755 "$stage"
+  rm -rf "${src:?}"
+  mv "$stage" "$src"
 }
 
 compose() {
@@ -239,8 +259,9 @@ main() {
   log "PrintOps standalone installer ($GENERATED_BY)"
   preflight
   log "base dir $DIR, project $PREFIX, Spoolman :$SPOOLMAN_PORT, 3d-api :$API_PORT$([ "$SPOOLMAN_ONLY" = 1 ] && printf ' (Spoolman only)')"
+  guard_src # a real run would refuse too: say so before creating anything
   if [ "$dry" = 1 ]; then
-    log "dry run: would unpack the build context, run docker compose up, wait for health and mint token $token_name; nothing changed"
+    log "dry run: $DIR/src is $(src_state); would unpack the build context there, run docker compose up, wait for health and mint token $token_name; nothing changed"
     return 0
   fi
   mkdir -p "$DIR/data/api" "$DIR/data/spoolman" "$DIR/backup" "$DIR/gcodes"
