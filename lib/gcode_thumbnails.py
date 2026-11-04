@@ -12,7 +12,7 @@ WHAT: a printer screen (Klipper/Moonraker, Snapmaker U1, Creality K1 stock firmw
 
   `check()` compares the blocks present in the first MiB (Moonraker only reads that much
   of the head) with the sizes the slicer profile asks for (`; thumbnails = 48x48/PNG,
-  300x300/PNG` in the config block). `ensure()` adds the missing blocks right after
+  300x300/PNG` in the config block; DEFAULT_SIZES when it names none). `ensure()` adds the missing blocks right after
   `; HEADER_BLOCK_END` — where Orca's GUI writes them, before the first move — byte for
   byte in Orca's own block format.
 
@@ -47,7 +47,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, BinaryIO, NamedTuple
 from collections.abc import Callable
 
-from errors import InputNotFound
+from errors import InputNotFound, ThreeDError
 
 if TYPE_CHECKING:
     import numpy as np
@@ -100,6 +100,23 @@ class ThumbnailError(ValueError):
     """A G-code or option this module cannot handle (unsupported format, no size spec)."""
 
 
+# What every G-code must carry when its slicer profile names no `; thumbnails =` of its own: the
+# 48x48 icon, the 96x96 list view (Snapmaker U1 file list) and the 300x300 job picture
+# (Klipper/Moonraker, Creality). The slicing wrappers also write this set into the slicer's
+# `thumbnails` setting (`merge_spec`), so the config block of a freshly sliced G-code names all three.
+DEFAULT_SIZES = (Thumb(48, 48, "PNG"), Thumb(96, 96, "PNG"), Thumb(300, 300, "PNG"))
+
+
+def merge_spec(existing: str | list[str] | None, default_fmt: str = "PNG") -> str:
+    """The slicer `thumbnails` value that asks for everything `existing` asks for plus DEFAULT_SIZES
+    (Orca's `48x48/PNG, 300x300/PNG` form; existing sizes keep their order and format, a bare `WxH`
+    takes `default_fmt` — the preset's `thumbnails_format`). `existing` is the preset's string or list."""
+    text = ", ".join(existing) if isinstance(existing, list) else existing or ""
+    sizes = parse_spec(text, default_fmt)
+    sizes += [t for t in DEFAULT_SIZES if t not in sizes]
+    return ", ".join(str(t) for t in sizes)
+
+
 # ---------------------------------------------------------------- reading
 
 
@@ -144,7 +161,7 @@ def parse_spec(spec: str, default_fmt: str = "PNG") -> list[Thumb]:
 
 
 def required(path: str) -> list[Thumb]:
-    """Thumbnail sizes the slicer profile asks for (`; thumbnails = …`); [] when the G-code has no spec."""
+    """Thumbnail sizes the G-code must carry: its profile's `; thumbnails = …`, else DEFAULT_SIZES."""
     head, tail = _head_tail(path)
     return _required(head, tail)
 
@@ -152,7 +169,7 @@ def required(path: str) -> list[Thumb]:
 def _required(head: str, tail: str) -> list[Thumb]:
     spec = _config_value("thumbnails", head, tail)
     if not spec:
-        return []
+        return list(DEFAULT_SIZES)
     return parse_spec(spec, (_config_value("thumbnails_format", head, tail) or "PNG").upper())
 
 
@@ -188,19 +205,15 @@ def present(path: str) -> list[Thumb]:
 
 
 def check(path: str) -> ThumbCheck:
-    """ok = every profile-required size is present; without a spec, ok = at least one thumbnail."""
+    """ok = every required size is present (the profile's `; thumbnails =`, else DEFAULT_SIZES)."""
     if not os.path.isfile(path):
         raise InputNotFound(path, command="gcode-thumbnails")
     head, tail = _head_tail(path)
     req, pres = _required(head, tail), _present(head)
     have = set(pres)
     missing = [t for t in req if t not in have]
-    if req:
-        ok = not missing
-        reason = "all required thumbnails present" if ok else "missing " + ", ".join(map(str, missing))
-    else:
-        ok = bool(pres)
-        reason = "no thumbnails spec; thumbnail present" if ok else "no thumbnails (and no `; thumbnails =` spec)"
+    ok = not missing
+    reason = "all required thumbnails present" if ok else "missing " + ", ".join(map(str, missing))
     return ThumbCheck(path, ok, req, pres, missing, reason)
 
 
@@ -399,141 +412,232 @@ def _hex_rgb(c: str) -> tuple[int, int, int]:
 _NUM = re.compile(rb"([XYZEIJF])(-?\d*\.?\d+)")
 
 
+_TOOL = re.compile(rb"T(\d+)")
+_FEATURE_COMMENTS = (b";TYPE:", b"; FEATURE:")
+
+
+def _words(body: bytes) -> dict[str, float]:
+    """`X10.5 E-0.2` → {"X": 10.5, "E": -0.2} (only the letters the preview needs)."""
+    return {k.decode(): float(v) for k, v in _NUM.findall(body)}
+
+
+def _relative(p: dict[str, float], x: float, y: float, z: float) -> tuple[float, float, float]:
+    """The target of a G91 move: each axis word is an offset, a missing one stays put."""
+    return (x + p["X"] if "X" in p else x, y + p["Y"] if "Y" in p else y, z + p["Z"] if "Z" in p else z)
+
+
+def _arc_segments(g: bytes, p: dict[str, float], start: tuple[float, float], end: tuple[float, float],
+                  z: float, tool: int) -> list[float]:
+    """G2 (clockwise) / G3 (counter-clockwise) arc about the centre start+(I, J), flattened to ≤0.5 mm chords."""
+    (x, y), (nx, ny) = start, end
+    cx, cy = x + p.get("I", 0.0), y + p.get("J", 0.0)
+    a0, a1 = math.atan2(y - cy, x - cx), math.atan2(ny - cy, nx - cx)
+    sweep = a1 - a0
+    if g == b"2" and sweep >= 0:
+        sweep -= 2 * math.pi
+    if g == b"3" and sweep <= 0:
+        sweep += 2 * math.pi
+    r = math.hypot(x - cx, y - cy)
+    n = max(2, min(64, int(abs(sweep) * r / 0.5) + 1))
+    out: list[float] = []
+    px_, py_ = x, y
+    for k in range(1, n + 1):
+        a = a0 + sweep * k / n
+        qx, qy = cx + r * math.cos(a), cy + r * math.sin(a)
+        out.extend((px_, py_, qx, qy, z, tool))
+        px_, py_ = qx, qy
+    return out
+
+
+class _Cursor:
+    """Interpreter state of toolpaths(): position, extrusion/positioning modes, tool, feature skip.
+    A class with __slots__ (not a dict of locals) so the per-line helpers share it without
+    allocating anything per line."""
+
+    __slots__ = ("seg", "x", "y", "z", "e", "abs_xyz", "abs_e", "tool", "skip")
+
+    def __init__(self) -> None:
+        self.seg = array("d")
+        self.x = self.y = self.z = self.e = 0.0
+        self.abs_xyz, self.abs_e, self.tool, self.skip = True, False, 0, False
+
+    def set_feature(self, line: bytes) -> None:
+        """`;TYPE:Outer wall` / `; FEATURE: Outer wall` → whether the following extrusion is drawn."""
+        feat = line.split(b":", 1)[1].strip().decode("ascii", "ignore").lower()
+        self.skip = feat in SKIP_FEATURES
+
+    def gcode(self, line: bytes) -> None:
+        """G0–G3 moves, G90/G91 positioning and G92 extruder reset; any other G-word is ignored."""
+        code = line[1:3]
+        if code[:1] in b"0123" and (len(code) == 1 or not code[1:2].isdigit()):
+            self.move(line, code[:1])
+        elif line.startswith(b"G90"):
+            self.abs_xyz = True
+        elif line.startswith(b"G91"):
+            self.abs_xyz = False
+        elif line.startswith(b"G92"):
+            self.e = _words(line.split(b";", 1)[0][3:]).get("E", self.e)
+
+    def mcode(self, line: bytes) -> None:
+        """M82/M83: absolute / relative extruder."""
+        if line.startswith(b"M82"):
+            self.abs_e = True
+        elif line.startswith(b"M83"):
+            self.abs_e = False
+
+    def move(self, line: bytes, g: bytes) -> None:
+        """One G0–G3 line: advance the position and record the segment when it extrudes visibly."""
+        p = _words(line.split(b";", 1)[0][2:])
+        x, y, z = self.x, self.y, self.z
+        nx, ny, nz = (p.get("X", x), p.get("Y", y), p.get("Z", z)) if self.abs_xyz else _relative(p, x, y, z)
+        pe = p.get("E")
+        de = 0.0
+        if pe is not None:
+            de = pe - self.e if self.abs_e else pe
+            self.e = pe if self.abs_e else self.e + pe
+        if de > 0 and not self.skip and (nx != x or ny != y):
+            if g in b"23" and ("I" in p or "J" in p):
+                self.seg.extend(_arc_segments(g, p, (x, y), (nx, ny), nz, self.tool))
+            else:
+                self.seg.extend((x, y, nx, ny, nz, self.tool))
+        self.x, self.y, self.z = nx, ny, nz
+
+
 def toolpaths(f: BinaryIO) -> array[float]:
     """Visible extrusion segments as a flat array [x0, y0, x1, y1, z, tool, …] (6 doubles per segment).
-    Tracks G90/G91, M82/M83, G92, T<n>, ;TYPE:/; FEATURE:, G2/G3 arcs (I/J)."""
-    seg = array("d")
-    x = y = z = e = 0.0
-    abs_xyz, abs_e, tool, skip = True, False, 0, False
+    Tracks G90/G91, M82/M83, G92, T<n>, ;TYPE:/; FEATURE:, G2/G3 arcs (I/J).
+    Reads 100+ MB G-codes line by line: the loop only dispatches on the first byte."""
+    cur = _Cursor()
+    gcode, mcode = cur.gcode, cur.mcode
     for line in f:
         c = line[:1]
         if c == b";":
-            if line.startswith(b";TYPE:") or line.startswith(b"; FEATURE:"):
-                feat = line.split(b":", 1)[1].strip().decode("ascii", "ignore").lower()
-                skip = feat in SKIP_FEATURES
-            continue
-        if c == b"G":
-            code = line[1:3]
-            if code[:1] in b"0123" and (len(code) == 1 or not code[1:2].isdigit()):
-                g = code[:1]
-                body = line.split(b";", 1)[0]
-                p = {k.decode(): float(v) for k, v in _NUM.findall(body[2:])}
-                nx = (p["X"] if abs_xyz else x + p["X"]) if "X" in p else x
-                ny = (p["Y"] if abs_xyz else y + p["Y"]) if "Y" in p else y
-                nz = (p["Z"] if abs_xyz else z + p["Z"]) if "Z" in p else z
-                de = 0.0
-                if "E" in p:
-                    de = p["E"] - e if abs_e else p["E"]
-                    e = p["E"] if abs_e else e + p["E"]
-                if de > 0 and not skip and (nx != x or ny != y):
-                    if g in b"23" and ("I" in p or "J" in p):
-                        cx, cy = x + p.get("I", 0.0), y + p.get("J", 0.0)
-                        a0, a1 = math.atan2(y - cy, x - cx), math.atan2(ny - cy, nx - cx)
-                        sweep = a1 - a0
-                        if g == b"2" and sweep >= 0:
-                            sweep -= 2 * math.pi
-                        if g == b"3" and sweep <= 0:
-                            sweep += 2 * math.pi
-                        r = math.hypot(x - cx, y - cy)
-                        n = max(2, min(64, int(abs(sweep) * r / 0.5) + 1))
-                        px_, py_ = x, y
-                        for k in range(1, n + 1):
-                            a = a0 + sweep * k / n
-                            qx, qy = cx + r * math.cos(a), cy + r * math.sin(a)
-                            seg.extend((px_, py_, qx, qy, nz, tool))
-                            px_, py_ = qx, qy
-                    else:
-                        seg.extend((x, y, nx, ny, nz, tool))
-                x, y, z = nx, ny, nz
-            elif line.startswith(b"G90"):
-                abs_xyz = True
-            elif line.startswith(b"G91"):
-                abs_xyz = False
-            elif line.startswith(b"G92"):
-                p = {k.decode(): float(v) for k, v in _NUM.findall(line.split(b";", 1)[0][3:])}
-                e = p.get("E", e)
-            continue
-        if c == b"M":
-            if line.startswith(b"M82"):
-                abs_e = True
-            elif line.startswith(b"M83"):
-                abs_e = False
-            continue
-        if c == b"T" and line[1:2].isdigit():
-            tool = int(re.match(rb"T(\d+)", line).group(1))  # type: ignore[union-attr]
-    return seg
+            if line.startswith(_FEATURE_COMMENTS):
+                cur.set_feature(line)
+        elif c == b"G":
+            gcode(line)
+        elif c == b"M":
+            mcode(line)
+        elif c == b"T" and line[1:2].isdigit():
+            cur.tool = int(_TOOL.match(line).group(1))  # type: ignore[union-attr]
+    return cur.seg
 
 
-def render_gcode(path: str, size: int = 600) -> Image:
-    """Isometric z-buffered preview (front-right, from above) of the G-code's visible extrusion,
-    coloured by each tool's filament_colour and lit from screen-space normals. RGBA, transparent bg."""
+_AZIMUTH, _ELEVATION = math.radians(-45.0), math.radians(35.264)  # camera at front-right, true isometric elevation
+_CA, _SA, _CE, _SE = math.cos(_AZIMUTH), math.sin(_AZIMUTH), math.cos(_ELEVATION), math.sin(_ELEVATION)
+
+
+def _project(px: np.ndarray, py: np.ndarray, pz: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    rx = px * _CA - py * _SA
+    ry = px * _SA + py * _CA  # +ry = away from the camera on the bed
+    return rx, -(pz * _CE + ry * _SE), ry * _CE - pz * _SE  # screen u, screen v (down), depth (far = big)
+
+
+def _palette(head: str, tail: str) -> np.ndarray:
+    """Per-tool RGB from the G-code config's filament/extruder colours (grey when it names none)."""
     import numpy as np
 
-    head, tail = _head_tail(path)
     colours = (_config_value("filament_colour", head, tail) or _config_value("extruder_colour", head, tail) or "")
     palette = np.array([_hex_rgb(c) for c in re.split(r"[;,]", colours) if c.strip()] or [(200, 200, 200)], np.float64)
-    palette = 45.0 + palette * (210.0 / 255.0)  # lift near-black filament so shading still shows the form
-    width = float(_config_value("outer_wall_line_width", head, tail) or _config_value("line_width", head, tail) or 0.42)
-    with open(path, "rb") as f:
-        seg = toolpaths(f)
-    n = len(seg) // 6
-    if n == 0:
-        raise ThumbnailError(f"{path}: no visible extrusion moves to draw a preview from")
-    s = np.frombuffer(seg, np.float64).reshape(n, 6)
-    x0, y0, x1, y1, z, tool = s.T
+    return 45.0 + palette * (210.0 / 255.0)  # lift near-black filament so shading still shows the form
 
-    az, el = math.radians(-45.0), math.radians(35.264)  # camera at front-right, true isometric elevation
-    ca, sa, ce, se = math.cos(az), math.sin(az), math.cos(el), math.sin(el)
 
-    def project(px: np.ndarray, py: np.ndarray, pz: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        rx = px * ca - py * sa
-        ry = px * sa + py * ca  # +ry = away from the camera on the bed
-        return rx, -(pz * ce + ry * se), ry * ce - pz * se  # screen u, screen v (down), depth (far = big)
+class _View(NamedTuple):
+    """Screen-space framing of the toolpaths: bounds (u/v), the square `extent` they fit in, its
+    `margin`, the pixel size `res` (mm per pixel) and the picture's `side` in pixels."""
+    umin: float
+    umax: float
+    vmin: float
+    vmax: float
+    extent: float
+    margin: float
+    res: float
+    side: int
 
-    u0, v0, _ = project(np.concatenate([x0, x1]), np.concatenate([y0, y1]), np.concatenate([z, z]))
+
+def _frame(s: np.ndarray, size: int, width: float) -> _View:
+    """Fit the projected toolpaths (n×6 rows from toolpaths()) into about size×size pixels."""
+    import numpy as np
+
+    x0, y0, x1, y1, z, _ = s.T
+    u0, v0, _ = _project(np.concatenate([x0, x1]), np.concatenate([y0, y1]), np.concatenate([z, z]))
     umin, umax, vmin, vmax = u0.min(), u0.max(), v0.min(), v0.max()
     extent = max(umax - umin, vmax - vmin, 1.0)
     margin = 0.03 * extent
     # a pixel no finer than ~0.4 line widths: neighbouring lines then touch and surfaces close up
     res = max((extent + 2 * margin) / size, 0.4 * width)
     side = int(math.ceil((extent + 2 * margin) / res))
+    return _View(umin, umax, vmin, vmax, extent, margin, res, side)
 
-    # sample every segment at half-pixel steps; float32 / int32 per point keeps a 115 MB G-code under ~1 GB
+
+def _sample_pixels(s: np.ndarray, view: _View, n_tools: int) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Sample every segment at half-pixel steps → per-sample pixel column, pixel row, depth, tool index.
+    float32 / int32 per point keeps a 115 MB G-code under ~1 GB."""
+    import numpy as np
+
+    x0, y0, x1, y1, z, tool = s.T
     seg_len = np.hypot(x1 - x0, y1 - y0)
-    steps = np.maximum(1, np.ceil(seg_len / (0.5 * res)).astype(np.int64))
-    idx = np.repeat(np.arange(n, dtype=np.int32), steps + 1)
+    steps = np.maximum(1, np.ceil(seg_len / (0.5 * view.res)).astype(np.int64))
+    idx = np.repeat(np.arange(len(s), dtype=np.int32), steps + 1)
     t = (np.arange(len(idx)) - np.repeat(np.cumsum(steps + 1) - (steps + 1), steps + 1)).astype(np.float32)
     t /= steps[idx].astype(np.float32)
     px = (x0[idx] + (x1 - x0)[idx] * t).astype(np.float32)
     py = (y0[idx] + (y1 - y0)[idx] * t).astype(np.float32)
     del t
-    u, v, d = project(px, py, z[idx].astype(np.float32))
+    u, v, d = _project(px, py, z[idx].astype(np.float32))
     del px, py
-    ti = np.minimum(tool[idx], len(palette) - 1).astype(np.int16)
+    ti = np.minimum(tool[idx], n_tools - 1).astype(np.int16)
     del idx
-    iu0 = np.floor((u - umin + margin + (extent - (umax - umin)) / 2) / res).astype(np.int32)
-    iv0 = np.floor((v - vmin + margin + (extent - (vmax - vmin)) / 2) / res).astype(np.int32)
+    iu0 = np.floor((u - view.umin + view.margin + (view.extent - (view.umax - view.umin)) / 2) / view.res).astype(np.int32)
+    iv0 = np.floor((v - view.vmin + view.margin + (view.extent - (view.vmax - view.vmin)) / 2) / view.res).astype(np.int32)
     del u, v
-    d = d.astype(np.float32)
+    return iu0, iv0, d.astype(np.float32), ti
 
+
+def _window_pixels(iu0: np.ndarray, iv0: np.ndarray, dx: int, dy: int, side: int) -> tuple[np.ndarray, np.ndarray]:
+    """Flat pixel index of every sample shifted by (dx, dy), and the mask of those that land inside the picture."""
+    iu, iv = iu0 + dx, iv0 + dy
+    ok = (iu >= 0) & (iu < side) & (iv >= 0) & (iv < side)
+    return iv[ok] * side + iu[ok], ok
+
+
+def _depth_buffers(samples: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray], view: _View,
+                   width: float) -> tuple[np.ndarray, np.ndarray]:
+    """Z-buffer (side², nearest depth, inf where empty) and tool index per pixel; each sample is
+    stamped over a disc as wide as the extrusion line."""
+    import numpy as np
+
+    iu0, iv0, d, ti = samples
+    side = view.side
     zbuf = np.full(side * side, np.inf, np.float32)
     tbuf = np.zeros(side * side, np.int16)
-    r_px = max(0.0, 0.5 * width / res - 0.5)
+    r_px = max(0.0, 0.5 * width / view.res - 0.5)
     offs = [(dx, dy) for dx in range(-2, 3) for dy in range(-2, 3) if dx * dx + dy * dy <= r_px * r_px + 0.25]
-
-    def pixels(dx: int, dy: int) -> tuple[np.ndarray, np.ndarray]:
-        iu, iv = iu0 + dx, iv0 + dy
-        ok = (iu >= 0) & (iu < side) & (iv >= 0) & (iv < side)
-        return iv[ok] * side + iu[ok], ok
-
     for dx, dy in offs:
-        pix, ok = pixels(dx, dy)
+        pix, ok = _window_pixels(iu0, iv0, dx, dy, side)
         np.minimum.at(zbuf, pix, d[ok])
     for dx, dy in offs:  # the nearest sample of each pixel gives its tool colour
-        pix, ok = pixels(dx, dy)
+        pix, ok = _window_pixels(iu0, iv0, dx, dy, side)
         win = d[ok] <= zbuf[pix]
         tbuf[pix[win]] = ti[ok][win]
-    rgb = palette[tbuf]
+    return zbuf, tbuf
+
+
+def _depth_edges(zf: np.ndarray, filled: np.ndarray, res: float) -> np.ndarray:
+    """Silhouette / step edges: a filled pixel whose neighbour is empty or a depth jump away."""
+    import numpy as np
+
+    edge = np.zeros_like(filled)
+    for ax in (0, 1):
+        for sh in (1, -1):
+            nb = np.roll(zf, sh, axis=ax)
+            edge |= filled & (~np.isfinite(nb) | (np.abs(nb - zf) > 3 * res))
+    return edge
+
+
+def _shade(zbuf: np.ndarray, rgb: np.ndarray, side: int, res: float) -> Image:
+    """RGBA picture: tool colours lit by the screen-space normals of the depth buffer, edges darkened."""
+    import numpy as np
 
     zb = zbuf.reshape(side, side)
     filled = np.isfinite(zb)
@@ -545,17 +649,30 @@ def render_gcode(path: str, size: int = 600) -> Image:
     light /= np.linalg.norm(light)
     lambert = np.clip((nrm * light).sum(axis=2), 0.0, 1.0)
     shade = 0.45 + 0.55 * lambert
-    # silhouette / step edges: a depth jump to a neighbour darkens the pixel
-    edge = np.zeros_like(filled)
-    for ax in (0, 1):
-        for sh in (1, -1):
-            nb = np.roll(zf, sh, axis=ax)
-            edge |= filled & (~np.isfinite(nb) | (np.abs(nb - zf) > 3 * res))
-    shade = np.where(edge, shade * 0.7, shade)
+    shade = np.where(_depth_edges(zf, filled, res), shade * 0.7, shade)
     img = np.zeros((side, side, 4), np.uint8)
     img[..., :3] = np.clip(rgb.reshape(side, side, 3) * shade[..., None], 0, 255).round().astype(np.uint8)
     img[..., 3] = np.where(filled, 255, 0).astype(np.uint8)
     return img
+
+
+def render_gcode(path: str, size: int = 600) -> Image:
+    """Isometric z-buffered preview (front-right, from above) of the G-code's visible extrusion,
+    coloured by each tool's filament_colour and lit from screen-space normals. RGBA, transparent bg."""
+    import numpy as np
+
+    head, tail = _head_tail(path)
+    palette = _palette(head, tail)
+    width = float(_config_value("outer_wall_line_width", head, tail) or _config_value("line_width", head, tail) or 0.42)
+    with open(path, "rb") as f:
+        seg = toolpaths(f)
+    n = len(seg) // 6
+    if n == 0:
+        raise ThumbnailError(f"{path}: no visible extrusion moves to draw a preview from")
+    s = np.frombuffer(seg, np.float64).reshape(n, 6)
+    view = _frame(s, size, width)
+    zbuf, tbuf = _depth_buffers(_sample_pixels(s, view, len(palette)), view, width)
+    return _shade(zbuf, palette[tbuf], view.side, view.res)
 
 
 # ---------------------------------------------------------------- ensure
@@ -566,28 +683,38 @@ def render_side(sizes: list[Thumb]) -> int:
     return min(2 * max([max(t.width, t.height) for t in sizes] or [300]), RENDER_MAX_SIDE)
 
 
+def _missing_sizes(before: ThumbCheck, sizes: list[Thumb] | None, replace: bool) -> list[Thumb]:
+    """The sizes ensure() must write: required + requested ones not yet present (all of them with `replace`,
+    which also redraws the sizes the file has but nobody asked for)."""
+    want = before.required + [t for t in sizes or [] if t not in before.required]
+    if replace:
+        want += [t for t in before.present if t not in want]
+    have = set() if replace else set(before.present)
+    return [t for t in want if t not in have]
+
+
+def _require_writable(todo: list[Thumb]) -> None:
+    bad = [t for t in todo if t.fmt not in WRITABLE]
+    if bad:
+        raise ThumbnailError(f"cannot write {', '.join(map(str, bad))}: supported formats are {', '.join(WRITABLE)}")
+
+
 def ensure(path: str, image: str | None = None, sizes: list[Thumb] | None = None, out: str | None = None,
            source: Callable[[str], Image] | None = None, replace: bool = False) -> ThumbCheck:
-    """Add every missing required thumbnail (or `sizes`, when the G-code declares none).
-    No-op (file untouched) when check() already passes. `replace` redraws every size,
+    """Add every missing required thumbnail (the profile's sizes, else DEFAULT_SIZES) and every
+    missing one of `sizes`. No-op (file untouched) when check() already passes. `replace` redraws every size,
     dropping the existing blocks. Returns the check after writing, with `.added` listing
     what was inserted."""
     before = check(path)
     seen = os.stat(path)
-    want = before.required or list(sizes or []) or (list(before.present) if replace else [])
-    if not want and not before.present:
-        raise ThumbnailError(f"{path}: no `; thumbnails =` spec in the G-code; pass sizes (e.g. --size 300x300/PNG)")
-    have = set() if replace else set(before.present)
-    todo = [t for t in want if t not in have]
+    todo = _missing_sizes(before, sizes, replace)
     if not todo:
         if out and out != path:
             import shutil
 
             shutil.copy2(path, out)          # keep mode + mtime like splice() does
         return before
-    bad = [t for t in todo if t.fmt not in WRITABLE]
-    if bad:
-        raise ThumbnailError(f"cannot write {', '.join(map(str, bad))}: supported formats are {', '.join(WRITABLE)}")
+    _require_writable(todo)
     pic = load_image(image) if image else (source or (lambda p: render_gcode(p, size=render_side(todo))))(path)
     text = "".join(block(t, encode(fit(pic, t.width, t.height), t.fmt)) for t in todo)
     splice(path, text, out, expect=seen, replace=replace)
@@ -597,6 +724,48 @@ def ensure(path: str, image: str | None = None, sizes: list[Thumb] | None = None
 
 
 # ---------------------------------------------------------------- CLI (lib tool entry: `3d gcode-thumbnails`)
+
+
+def _check_any(path: str) -> ThumbCheck:
+    if path.lower().endswith(".3mf"):
+        from pathlib import Path
+
+        from slicing.thumbnails import check_plate_images
+
+        if not os.path.isfile(path):
+            raise InputNotFound(path, command="gcode-thumbnails")
+        return check_plate_images(Path(path))
+    return check(path)
+
+
+def _image_source(image: str | None, gcode: str) -> Callable[[str], Image]:
+    from pathlib import Path
+
+    from slicing.thumbnails import Picture
+
+    return (lambda _p: load_image(image)) if image else Picture(Path(gcode))
+
+
+def _add_3mf(path: str, image: str | None) -> ThumbCheck:
+    """`add X.3mf`: the plate images drawn from the embedded plate G-codes (or from --image)."""
+    from pathlib import Path
+
+    from slicing.thumbnails import finalize_embedded
+
+    if not os.path.isfile(path):
+        raise InputNotFound(path, command="gcode-thumbnails")
+    return finalize_embedded(Path(path), (lambda _p: load_image(image)) if image else None)
+
+
+def _add_plate_images(three_mf: str, plate: int, gcode: str, image: str | None) -> None:
+    from pathlib import Path
+
+    from slicing.thumbnails import finalize_plate_images
+
+    if not os.path.isfile(three_mf):
+        raise InputNotFound(three_mf, command="gcode-thumbnails")
+    for member in finalize_plate_images(Path(three_mf), plate, _image_source(image, gcode)):
+        print(f"added {member} to {three_mf}", file=sys.stderr)
 
 
 def _describe(c: ThumbCheck) -> str:
@@ -610,7 +779,7 @@ def _describe(c: ThumbCheck) -> str:
     return line
 
 
-def main(argv: list[str] | None = None) -> int:
+def _build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="3d gcode-thumbnails", description="check/add G-code thumbnails")
     sub = ap.add_subparsers(dest="cmd", required=True)
     pc = sub.add_parser("check")
@@ -623,41 +792,69 @@ def main(argv: list[str] | None = None) -> int:
     pa.add_argument("--out")
     pa.add_argument("--replace", action="store_true", help="redraw all sizes, dropping existing thumbnails")
     pa.add_argument("--preview", help="also save the source picture (PNG) here")
+    pa.add_argument("--3mf", dest="three_mf", help="also add the missing Metadata/plate_N.png to this 3MF project")
+    pa.add_argument("--plate", type=int, default=1, help="plate number for --3mf (default 1)")
     pa.add_argument("--json", action="store_true")
-    a = ap.parse_args(argv)
-    results: list[ThumbCheck] = []
+    return ap
+
+
+def _preview_saver(keep: str, sizes: list[Thumb]) -> Callable[[str], Image]:
+    """Image source for `--preview`: render the G-code as ensure() would, and save that picture to `keep`."""
+    def src(gp: str) -> Image:
+        want = check(gp).required + sizes
+        pic = render_gcode(gp, size=render_side(want))
+        with open(keep, "wb") as fh:
+            fh.write(encode_png(pic))
+        return pic
+    return src
+
+
+def _add_gcode(path: str, a: argparse.Namespace, sizes: list[Thumb]) -> ThumbCheck:
+    """`add X.gcode`: ensure() the thumbnails, then the plate images of `--3mf` when asked."""
+    src = _preview_saver(a.preview, sizes) if a.preview else None
+    result = ensure(path, image=a.image, sizes=sizes, out=a.out, source=src, replace=a.replace)
+    if a.three_mf:
+        _add_plate_images(a.three_mf, a.plate, a.out or path, a.image)
+    return result
+
+
+def _run_check(a: argparse.Namespace) -> list[ThumbCheck]:
+    return [_check_any(p) for p in a.files]
+
+
+def _run_add(a: argparse.Namespace) -> list[ThumbCheck]:
+    if a.out and len(a.files) != 1:
+        raise ThumbnailError("--out takes exactly one input file")
+    sizes = [t for s in a.size for t in parse_spec(s)]
+    return [_add_3mf(p, a.image) if p.lower().endswith(".3mf") else _add_gcode(p, a, sizes) for p in a.files]
+
+
+def _print_results(results: list[ThumbCheck], as_json: bool) -> None:
+    if not as_json:
+        for c in results:
+            print(_describe(c))
+        return
+    import json
+
+    print(json.dumps([{"path": c.path, "ok": c.ok, "reason": c.reason, "required": [str(t) for t in c.required],
+                       "present": [str(t) for t in c.present], "missing": [str(t) for t in c.missing],
+                       "added": [str(t) for t in c.added]} for c in results], indent=2))
+
+
+def main(argv: list[str] | None = None) -> int:
+    a = _build_parser().parse_args(argv)
     try:
-        if a.cmd == "check":
-            results = [check(p) for p in a.files]
-        else:
-            if a.out and len(a.files) != 1:
-                raise ThumbnailError("--out takes exactly one input file")
-            sizes = [t for s in a.size for t in parse_spec(s)]
-            for p in a.files:
-                src: Callable[[str], Image] | None = None
-                if a.preview:
-                    def src(gp: str, keep: str = a.preview) -> Image:
-                        want = check(gp).required or sizes
-                        pic = render_gcode(gp, size=render_side(want))
-                        with open(keep, "wb") as fh:
-                            fh.write(encode_png(pic))
-                        return pic
-                results.append(ensure(p, image=a.image, sizes=sizes, out=a.out, source=src, replace=a.replace))
+        results = _run_check(a) if a.cmd == "check" else _run_add(a)
     except (ThumbnailError, InputNotFound) as e:
         print(f"gcode-thumbnails: {e}", file=sys.stderr)
         return 2
+    except ThreeDError as e:  # a slicing.thumbnails GateFailure: the message names the fix
+        print(e.render(), file=sys.stderr)
+        return e.exit_code
     except ImportError as e:  # Pillow for --image / JPG output, numpy for rendering
         print(f"gcode-thumbnails: {e}; install it (e.g. `uv sync --extra preprocess` for Pillow)", file=sys.stderr)
         return 127
-    if a.json:
-        import json
-
-        print(json.dumps([{"path": c.path, "ok": c.ok, "reason": c.reason, "required": [str(t) for t in c.required],
-                           "present": [str(t) for t in c.present], "missing": [str(t) for t in c.missing],
-                           "added": [str(t) for t in c.added]} for c in results], indent=2))
-    else:
-        for c in results:
-            print(_describe(c))
+    _print_results(results, a.json)
     return 0 if all(c.ok for c in results) else 1
 
 
