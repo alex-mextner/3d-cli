@@ -39,6 +39,10 @@ Epic: [#90](https://github.com/alex-mextner/3d-cli/issues/90).
 3d printer todo dismiss ID --reason TEXT | snooze ID [--until DATE] [--reason TEXT] | reopen ID
 3d printer todo import [FILE...] [--dry-run] [--json]
 3d printer -n PRINTER issues|todo list|add|done|dismiss|snooze|reopen|import …
+3d printer -n PRINTER macro list [--offline | --dry-run] [--all] [--json]
+3d printer -n PRINTER macro run MACRO [KEY=VALUE ...] [--yes] [--dry-run] [--offline] [--timeout S]
+3d printer -n PRINTER aliases [--json]
+3d printer -n PRINTER ALIAS [args] [--yes] [--dry-run] [--offline] [--timeout S]   # home, level, load, preheat, ...
 ```
 
 | Subcommand | What |
@@ -57,6 +61,8 @@ Epic: [#90](https://github.com/alex-mextner/3d-cli/issues/90).
 | `subscribe` / `unsubscribe` / `subscriptions` | Route printer alerts to an AI agent first: it looks at the frame and tells the user only if the failure is real — see [printer-subscribe.md](printer-subscribe.md). |
 | `agent list` / `stop` / `handoff` | The temporary per-printer omp agent (tmux) that gets the warning+ alerts no live subscriber took — see [printer-subscribe.md#the-temporary-printer-agent](printer-subscribe.md#the-temporary-printer-agent). |
 | `doctor [NAME\|--all]` | Diagnose the printer's setup (Klippy, Moonraker, Spoolman link and CORS, active spool, camera, watch services, ...) and with `--fix` repair what is safe — the same command as `3d printers doctor`, see [printers-doctor.md](printers-doctor.md). |
+| `macro list\|run` | The macros a Klipper printer defines, and ONE macro run with typed `KEY=VALUE` parameters — see [Macros and aliases](#macros-and-aliases-3d-printer-n-name-macro-home-load-). |
+| `aliases`, `home`, `level`, `load`, `preheat`, ... | Short names for the usual operations, mapped per adapter, model and printer to the real macros — see [Macros and aliases](#macros-and-aliases-3d-printer-n-name-macro-home-load-). |
 | `todo …` (alias `issues`) | The to-do list of each printer: needed calibrations, due maintenance, repairs of open faults, manual tasks — see [To-do list](#to-do-list-3d-printer-todo). A printer's problems are tasks of this list, not GitHub tickets. |
 
 Options:
@@ -339,6 +345,95 @@ Telegram approval). With `--printer A --axis-limits B` only A's list counts.
 `bridge_max_mm` is the longest span this printer bridges cleanly (measure it with a bridge test
 print). The preflight overhangs gate counts uncarried runs up to it as bridges; `--bridge-max`
 overrides it, and without either the limit is 15 mm. The gate's line names where the limit came from.
+
+## Macros and aliases (`3d printer -n NAME macro`, `home`, `load`, ...)
+
+Issue [#718](https://github.com/alex-mextner/3d-cli/issues/718). Two ways to run what the printer's own
+firmware knows, both through the adapter's G-code channel (`moonraker`: `POST /printer/gcode/script`).
+The `creality-stock` adapter has no G-code channel (ws:9999 only starts and stops a file): every command
+below refuses it with "does not support macros and aliases". The printer is named with `-n NAME`, like `todo`.
+
+### `macro list` and `macro run`
+
+```
+3d printer -n u1 macro list                       # what the printer defines; * = in its trusted_macros
+3d printer -n u1 macro list --offline --json      # registry data only (trusted_macros + alias targets); nothing contacted
+3d printer -n u1 macro list --dry-run             # print the two GET requests, send none
+3d printer -n u1 macro run SM_PRINT_AUTO_FEED EXTRUDER=1 --yes --dry-run
+3d printer -n k1se macro run PAUSE
+```
+
+`macro list` reads `GET /printer/objects/list` (the `gcode_macro NAME` objects) and `GET /printer/gcode/help`
+(every extended command with its description); `_private` macros need `--all`. `macro run` prints the exact
+line that is sent (`gcode:` block) and the request on `--dry-run`. Gates, in this order, nothing is sent before
+all passed:
+
+1. **Typed tokens.** The name is an identifier (`[A-Za-z_][A-Za-z0-9_]*`, upper-cased); each value is one token of
+   `A-Za-z0-9_.,:+/-` (at most 64 characters). A newline, `;`, space, quote, `{`, `%`, `#` or `*` is refused as an
+   invalid argument, so a value can never append a second command.
+2. **No emergency stop.** `M112` and `EMERGENCY_STOP`, as a name or inside a value, are refused whatever the flags:
+   the printer's own stop control is the way to stop it.
+3. **Access.** Only `access: full` printers; `read-only` and `offline` (never contacted) refuse, also with `--dry-run`.
+4. **Defined on the printer.** The name must appear in the printer's `gcode/help`. A standard code (`G28`, `M104`, `T0`)
+   is run only if the printer defines a macro of that name (the K1's `G29`) or through an alias.
+5. **`--yes`** for a macro outside the printer's `trusted_macros` and for dangerous commands (`FIRMWARE_RESTART`, `RESTART`,
+   `SAVE_CONFIG`, `FORCE_MOVE`, `M84`, calibrations that write config, ...), trusted or not.
+6. **An idle printer** (state re-read now; printing, paused, busy and unreadable all refuse) for motion, heating and
+   unknown macros. `PAUSE`, `RESUME`, `CANCEL_PRINT`, `M600`, `M220`, `M221` and the `SET_PAUSE_*` pair are allowed during a job.
+
+A macro body is the printer's own config and is not checked, so any macro that is not known to be harmless is treated
+as motion. `--offline` prints the script from registry data without contacting the printer (it cannot check 4 and 6).
+
+**There is no raw `gcode` passthrough.** `3d printer gcode SCRIPT` does not exist: `/printer/gcode/script` runs any text, newlines
+and `;` included, the model of this tool is that an agent never sends a free-text line to hardware, and a stock G-code
+(`G1`, `M104`) cannot be tied to a trusted list. A command the table lacks is added as a named, typed alias in the
+printer's own alias file (below) or run as a macro the printer defines.
+
+### Aliases
+
+`3d printer -n NAME ALIAS [args] [--yes] [--dry-run] [--offline]`. An alias is a table entry (`kind`, a `summary`, typed
+`args`, `gcode` lines); its lines are vetted, so only `dangerous` ones and entries marked `yes: true` ask for `--yes`; the
+idle-printer rule (6) and the definition check (4) still apply. The table is
+[`lib/data/printer-aliases.yaml`](../../lib/data/printer-aliases.yaml) (schema in its header), layered per adapter, then
+every model whose name contains the entry's `contains` text, then the printer's own entries in
+`~/.config/3d-cli/printer-aliases.yaml` and `./printer-aliases.yaml` (the project file wins per alias):
+
+```yaml
+# ~/.config/3d-cli/printer-aliases.yaml or ./printer-aliases.yaml: printer name -> its aliases
+u1:
+  home: {summary: home X and Y only, kind: motion, gcode: ["G28 X Y"]}   # replaces the table's home
+  nozzle-wipe: {summary: wipe the nozzle, kind: motion, gcode: [ROUGHLY_CLEAN_NOZZLE]}   # a new alias
+  park: null                                                              # removed for this printer
+  cooldown: {unsupported: "close the chamber door first"}                 # removed, with the reason shown
+```
+
+An alias that a model does not have says so (`alias park is not defined for k1se ...`, with the aliases it does have);
+it is never guessed. `3d printer -n NAME aliases` lists what each alias sends on that printer and which are unsupported;
+`3d printer ALIAS --help` shows one.
+
+| Alias | Sends | Where |
+|---|---|---|
+| `home [XYZ]` | `G28` / `G28 X Y` | every `moonraker` printer |
+| `level` | `BED_MESH_CALIBRATE`; Creality K1: the stock `G29` (heats, probes) | `moonraker`; K1 family |
+| `qgl`, `z-tilt` | `QUAD_GANTRY_LEVEL`, `Z_TILT_ADJUST` | `moonraker`, refused with a reason on the K1 SE (its stock `printer.cfg` defines neither) and when the firmware does not define the command |
+| `pause`, `resume` | `PAUSE`, `RESUME` (allowed during a job) | `moonraker` |
+| `preheat MATERIAL` / `--nozzle C` / `--bed C` / `--head T2` | `SET_HEATER_TEMPERATURE` for the nozzle of the head (fleet `heads:`, default T1) and `heater_bed`; PLA 210/60, PETG 235/80, ABS 250/100, ASA 255/100, TPU 225/50 (nozzle/bed, typical values), nozzle 0-300, bed 0-120 | `moonraker` |
+| `cooldown` | `TURN_OFF_HEATERS` | `moonraker` |
+| `load`, `unload` | generic: `LOAD_FILAMENT`, `UNLOAD_FILAMENT` (Fluidd/Mainsail convention, refused when the printer has no such macro); K1: `LOAD_MATERIAL`, `QUIT_MATERIAL`; U1: `load T1..T4` = `AUTO_FEEDING EXTRUDER=n LOAD=1`, `unload T1..T4` = `AUTO_FEEDING EXTRUDER=n UNLOAD=1 STAGE=prepare` then `STAGE=doing` | per adapter/model |
+| `level-heated [--bed C]` | `AUTO_BED_MESH_CALIBRATE TEMP=C` (heats the bed to 55 by default, soaks 2 min, meshes) | Snapmaker U1 |
+| `clean-nozzle` | `ROUGHLY_CLEAN_NOZZLE` | Snapmaker U1 |
+| `park [T1..T4]`, `idle-position [T1..T4]` | `PARK_EXTRUDER[n]`, `MOVE_TO_XY_IDLE_POSITION_EXTRUDER[n]` | Snapmaker U1 |
+| `purifier idle\|cool\|preheat\|hot` | `SET_PURIFIER_MODE MODE=0..3` | Snapmaker U1 |
+
+U1 facts come from the firmware config of [Snapmaker/u1-klipper](https://github.com/Snapmaker/u1-klipper)
+(`lava/fluidd.cfg`, `lava/printer.cfg`, `klippy/extras/filament_feed.py`, `purifier.py`, `kinematics/extruder.py`); the
+K1 SE ones from [CrealityOfficial/K1_Series_Klipper](https://github.com/CrealityOfficial/K1_Series_Klipper)
+`config/K1_SE_CR4CU220812S12/gcode_macro.cfg`. None of them was run on a real printer by the author: the tests use
+the loopback fake Moonraker only. Head arguments are the fleet labels (`T1`..), never a bare number, and an unusable
+head (fleet `usable: false`) is refused with its reason.
+
+Models without an adapter here (Bambu Lab, Prusa) have no aliases: they are `offline` in the fleet and every command above
+refuses them; a Bambu/Prusa adapter would bring its own `adapters:` layer in the table.
 
 ## Adapters
 
