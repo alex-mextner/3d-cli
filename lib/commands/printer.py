@@ -1,4 +1,4 @@
-"""3d printer — drive configured physical printers: list, status, upload, start, cancel, watch, vision, bed, subscribe, agent, todo.
+"""3d printer — drive configured physical printers: list, status, upload, start, cancel, macro, aliases, watch, vision, bed, subscribe, agent, todo.
 
 WHAT: talks to the printers named in printer-devices.yaml through a protocol adapter —
   `moonraker` (Klipper/Moonraker, Snapmaker U1) or `creality-stock` (Creality K1 family on
@@ -16,6 +16,9 @@ SAFETY (enforced here, before any write):
     `bed` check (printer_ops/bed.py; a FAIL blocks; --force needs the owner's Telegram hatch
     approval, printer_ops/force_hatch.py);
   - a failed/timed-out start is reported as UNKNOWN and never resent automatically.
+
+MACROS AND ALIASES (`-n NAME macro list|run`, `aliases`, `home`, `load`, ...): printer_ops/macro_cli.py and alias_cli.py;
+  a macro is a checked passthrough, an alias a per-adapter/model/printer table entry (issue #718).
 
 INVARIANTS: stdlib-only at import time (registry contract); printer_ops is imported lazily.
 """
@@ -99,8 +102,35 @@ USAGE = """3d printer [-n NAME] <subcommand> [args]
                                        maintenance, repairs, manual tasks (3d-api; offline a
                                        JSONL buffer — see `3d printer todo --help`). A printer's
                                        problems are tasks of this list, not GitHub tickets.
-  -n, --name NAME                      the printer for `todo`/`issues`:
-                                       `3d printer -n u1 issues list`
+  macro list|run MACRO [KEY=VALUE ...] [--yes] [--dry-run] [--offline]
+                                       the macros the printer defines / run ONE macro (Klipper: any
+                                       gcode_macro or extended command) with typed KEY=VALUE params;
+                                       the exact line sent is printed. Names are identifiers, values
+                                       one safe token; M112/EMERGENCY_STOP never; read-only/offline
+                                       printers refuse; a macro outside the printer's trusted_macros
+                                       and dangerous ones need --yes; motion/heating ones need an
+                                       idle printer (PAUSE/RESUME/CANCEL_PRINT style do not).
+                                       There is no raw `gcode` passthrough (see docs/commands/printer.md)
+                                       (see `3d printer macro --help`)
+  aliases [--json]                     what each alias below sends on this printer (-n NAME) or per
+                                       adapter/model; `3d printer ALIAS --help` for one
+  -n, --name NAME                      the printer for `todo`/`issues`, `macro`, `aliases` and the aliases:
+                                       `3d printer -n u1 issues list`, `3d printer -n u1 home`
+                                       (own aliases per printer: ~/.config/3d-cli/printer-aliases.yaml, ./printer-aliases.yaml)
+
+Aliases (thin subcommands, need -n NAME; each maps per adapter/model to real macros and says so
+when a model has none: `3d printer -n NAME ALIAS [args] [--yes] [--dry-run] [--offline]`):
+  home [XYZ]                           home all axes, or only X/Y/Z (G28)
+  level                                bed mesh (BED_MESH_CALIBRATE; Creality K1: stock G29)
+  qgl | z-tilt                         quad gantry level / Z tilt adjust (printers that define them)
+  pause | resume                       PAUSE / RESUME (allowed while a job runs)
+  preheat MATERIAL | --nozzle C --bed C [--head T2]
+                                       PLA|PETG|ABS|ASA|TPU typical temperatures (SET_HEATER_TEMPERATURE)
+  cooldown                             TURN_OFF_HEATERS
+  load T1..T4 | unload T1..T4          filament in/out: U1 AUTO_FEEDING per head; K1 LOAD_MATERIAL /
+                                       QUIT_MATERIAL (no head); other Klipper LOAD_FILAMENT / UNLOAD_FILAMENT
+  Snapmaker U1 only: level-heated [--bed C], clean-nozzle, park [T1..T4], idle-position [T1..T4],
+                     purifier idle|cool|preheat|hot
 
 Options:
   --json             list/status as JSON (status: normalized state + raw firmware payload)
@@ -150,6 +180,11 @@ Examples:
   3d printer todo list u1
   3d printer -n k1se issues add --title "X belt squeaks" --type inspect"""
 
+# Subcommands that take the printer as a positional NAME: `-n` is refused for them.
+_NAME_AS_POSITIONAL = frozenset({
+    "list", "status", "upload", "start", "cancel", "evidence", "watch", "supervise", "vision", "guard", "bed",
+    "subscribe", "unsubscribe", "subscriptions", "agent", "doctor",
+})
 _VALUE = {"--secs", "--as", "--source-3mf", "--bridge-max"}
 _FLAGS = {"--json", "--yes", "--force", "--no-bed-move"}
 
@@ -499,8 +534,8 @@ def run(argv: list[str]) -> int:
     if sub in ("-h", "--help", "help"):
         print(USAGE)
         return 0
-    if name is not None and sub not in ("todo", "issues"):
-        raise UsageError(f"-n/--name selects the printer for `todo`/`issues`; `{sub}` takes the printer as NAME",
+    if name is not None and sub in _NAME_AS_POSITIONAL:
+        raise UsageError(f"-n/--name selects the printer for `todo`/`issues`, `macro`, `aliases` and the aliases; `{sub}` takes the printer as NAME",
                          command="printer", remediation=[f"3d printer {sub} {name} …"])
     if sub == "list":
         return _cmd_list(rest)
@@ -550,9 +585,22 @@ def run(argv: list[str]) -> int:
         from printops.todo_cli import run as todo
 
         return todo(rest, printer=name)
+    if sub == "macro":
+        from printer_ops.macro_cli import run_macro
+
+        return run_macro(name, rest)
+    if sub == "aliases":
+        from printer_ops.alias_cli import run_aliases
+
+        return run_aliases(name, rest)
+    from printer_ops.alias_cli import run_alias
+
+    aliased = run_alias(name, sub, rest)
+    if aliased is not None:
+        return aliased
     raise UsageError(f"unknown subcommand '{sub}'", command="printer",
                      remediation=["Use list, status, upload, start, cancel, evidence, watch, supervise, vision, guard, bed, subscribe, unsubscribe, "
-                                  "subscriptions, agent, doctor or todo (issues) — see `3d printer --help`."])
+                                  "subscriptions, agent, doctor, todo (issues), macro, aliases or an alias (home, level, load, ...) — see `3d printer --help`."])
 
 
 def _printer_name(argv: list[str]) -> tuple[str | None, list[str]]:
@@ -574,7 +622,7 @@ def _printer_name(argv: list[str]) -> tuple[str | None, list[str]]:
 COMMAND = Command(
     name="printer",
     group="SLICING",
-    summary="drive configured printers: list / status / upload / start --yes / cancel --yes / evidence / watch / vision / subscribe / agent / todo",
+    summary="drive configured printers: list / status / upload / start --yes / cancel --yes / macro / aliases (home, level, load, ...) / evidence / watch / vision / subscribe / agent / todo",
     usage=USAGE,
     run=run,
 )
