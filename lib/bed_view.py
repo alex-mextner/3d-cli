@@ -143,14 +143,15 @@ def _nearest_best(good: list[Candidate], current_z: float | None) -> Candidate:
 
 def pick_inspection_z(view: Callable[[float], float | None], ref_zs: Sequence[float],
                       stands: Callable[[float | None, float | None], bool], current_z: float | None, *,
-                      z_floor: float, z_ceiling: float, threshold: float) -> ViewPick:
+                      z_floor: float, z_ceiling: float, threshold: float, need_reference: bool = True) -> ViewPick:
     """The best Z to judge the bed at. `view(z)` = share of the plate in the frame (None: cannot tell),
     `ref_zs` = Zs of the empty-bed references, `stands(ref_z, z)` = the reference stands for the bed at z
-    (bed_state.ZMatch). See the module docstring for the rule."""
+    (bed_state.ZMatch). `need_reference` False: any Z in the range qualifies (taking a NEW reference: none
+    stands there yet). See the module docstring for the rule."""
     refs = sorted({round(float(z), 1) for z in ref_zs})
 
     def referenced(z: float) -> bool:
-        return any(stands(r, z) for r in refs)
+        return not need_reference or any(stands(r, z) for r in refs)
 
     top = max([z_ceiling, *refs, current_z or 0.0])
     grid = {round(i * GRID_MM, 1) for i in range(int(top // GRID_MM) + 1)}
@@ -538,10 +539,10 @@ def _no_move_reason(mode: str, cfg: BedConfig) -> str | None:
 
 def _pick_move(view: Callable[[float], float | None], ref_zs: Sequence[float],
                stands: Callable[[float | None, float | None], bool], m: Motion, limits: Limits, cfg: BedConfig,
-               base: dict[str, Any]) -> ViewPick:
+               base: dict[str, Any], need_reference: bool = True) -> ViewPick:
     """The Z to judge at, recorded in `base` together with the limits it was picked within."""
     pick = pick_inspection_z(view, ref_zs, stands, m.z, z_floor=limits.z_floor, z_ceiling=limits.z_ceiling,
-                             threshold=cfg.auto_view_min)
+                             threshold=cfg.auto_view_min, need_reference=need_reference)
     base.update(pick=pick.to_json(), part_mm=limits.part_mm, part_source=limits.part_source,
                 z_floor=limits.z_floor, z_ceiling=limits.z_ceiling)
     return pick
@@ -552,10 +553,12 @@ def auto_view(device: Any, cfg: BedConfig, *, mode: str, adapter: Any, judge: Ca
               stands: Callable[[float | None, float | None], bool], max_age: float | None = None,
               part_height_mm: float | None = None, settle_s: float = AUTO_VIEW_SETTLE_S,
               sleep: Callable[[float], None] = time.sleep, clock: Callable[[], float] = time.time,
-              read: Callable[[Any], Motion] = read_motion) -> dict[str, Any]:
+              read: Callable[[Any], Motion] = read_motion, need_reference: bool = True) -> dict[str, Any]:
     """The bed verdict of `judge`, at a better Z when the current one shows too little of the plate.
     `mode`: auto (cfg.auto_view decides) | force (--best-view) | never (--no-move). `judge(max_age)` is
-    `bed_state.one_shot` (max_age None = a fresh frame). The verdict carries `view`: what was done and why."""
+    `bed_state.one_shot` (max_age None = a fresh frame). `need_reference` False: the Z needs no empty-bed
+    reference because `judge` TAKES one (`bed reference --capture --best-view`). The verdict carries `view`:
+    what was done and why."""
     if mode not in ("auto", "force", "never"):
         raise ValueError(f"mode must be auto, force or never, not {mode!r}")
     m = read(adapter)
@@ -579,7 +582,7 @@ def auto_view(device: Any, cfg: BedConfig, *, mode: str, adapter: Any, judge: Ca
     limits = _may_move(device, adapter, cfg, m, part_height_mm)
     if not isinstance(limits, Limits):  # 3.-5. the guards that stop a move
         return _not_moved(judge, max_age, base, note, str(limits), f"{shown}, bed not moved: {limits}")
-    pick = _pick_move(view, ref_zs, stands, m, limits, cfg, base)
+    pick = _pick_move(view, ref_zs, stands, m, limits, cfg, base, need_reference)
     if pick.status != "move" or pick.z is None:
         return _not_moved(judge, max_age, base, note, pick.reason, f"bed not moved: {pick.reason}")
     with view_lock(device.name) as held:

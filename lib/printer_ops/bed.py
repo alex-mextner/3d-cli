@@ -77,7 +77,8 @@ BED_KEYS = ("enabled", "interval_s", "roi", "volume_height_mm", "z_tol_mm", "sta
 # The per-printer overrides of bed_state.Thresholds (tuned on the U1 and K1 SE frames of tests/data/bed;
 # another camera may need other values): every field of that dataclass, a test keeps the two in step.
 THRESHOLD_KEYS = ("level", "detrend_px", "edge_px", "clear_blob_px", "clear_max", "occupied_blob_px", "occupied_min",
-                  "plate_missing_min", "plate_tie", "surface_min", "change_min", "settle_frames", "match_px", "view_min")
+                  "plate_missing_min", "plate_tie", "surface_min", "change_min", "settle_frames", "match_px", "view_min",
+                  "shift_px", "open_px", "low_view", "occupied_blob_low_px")
 ACK_KEYS = ("enabled", "command", "debounce_minutes", "min_z_mm")
 
 
@@ -150,17 +151,7 @@ def _roi(value: Any, what: str) -> tuple[tuple[float, float], ...]:
     return tuple((float(x), float(y)) for x, y in value)
 
 
-def _ack(value: Any, device: Device) -> AckConfig | None:
-    where = f"{device.name}.watch.bed.clear_ack"
-    if not isinstance(value, dict):
-        raise InvalidArgument(where, str(value), ["a mapping: {enabled, command, debounce_minutes, min_z_mm}"],
-                              command="printer", extra=f"Fix {device.source}.")
-    unknown = sorted(set(value) - set(ACK_KEYS))
-    if unknown:
-        raise InvalidArgument(where, ", ".join(unknown), ACK_KEYS, command="printer", extra=f"Fix {device.source}.")
-    if not _flag(value.get("enabled", False), f"{where}.enabled"):
-        return None
-    raw = value.get("command")
+def _ack_lines(raw: Any, where: str, device: Device) -> list[str]:
     lines = [raw] if isinstance(raw, str) else raw
     if (not isinstance(lines, list) or not lines
             or not all(isinstance(c, str) and c.strip() and not any(ch in c for ch in "\n\r;") for c in lines)):
@@ -177,6 +168,20 @@ def _ack(value: Any, device: Device) -> AckConfig | None:
                                   command="printer",
                                   extra=f"Add {word} to {device.name}.trusted_macros in {device.source} first "
                                         "(it is the list of commands 3d may let the printer run).")
+    return lines
+
+
+def _ack(value: Any, device: Device) -> AckConfig | None:
+    where = f"{device.name}.watch.bed.clear_ack"
+    if not isinstance(value, dict):
+        raise InvalidArgument(where, str(value), ["a mapping: {enabled, command, debounce_minutes, min_z_mm}"],
+                              command="printer", extra=f"Fix {device.source}.")
+    unknown = sorted(set(value) - set(ACK_KEYS))
+    if unknown:
+        raise InvalidArgument(where, ", ".join(unknown), ACK_KEYS, command="printer", extra=f"Fix {device.source}.")
+    if not _flag(value.get("enabled", False), f"{where}.enabled"):
+        return None
+    lines = _ack_lines(value.get("command"), where, device)
     return AckConfig(tuple(c.strip() for c in lines),
                      _num(value.get("debounce_minutes", 10), f"{where}.debounce_minutes", 0) * 60,
                      _num(value.get("min_z_mm", 10), f"{where}.min_z_mm", 0))
@@ -370,6 +375,11 @@ class BedChild:
 
 # ---- the clear acknowledgement --------------------------------------------------------------
 
+def _toolhead_z(adapter: Any) -> float | None:
+    pos = (adapter.query("toolhead").get("toolhead") or {}).get("position")
+    return pos[2] if isinstance(pos, list) and len(pos) > 2 and isinstance(pos[2], (int, float)) else None
+
+
 def clear_ack(device: Device, ack: AckConfig, *, z: float | None, last_ack: float | None, now: float,
               adapter: Any = None) -> tuple[bool, str]:
     """Send `ack.command` once (see WRITES above). -> (sent, what happened)."""
@@ -389,8 +399,7 @@ def clear_ack(device: Device, ack: AckConfig, *, z: float | None, last_ack: floa
     st = adapter.status()  # re-read right before the write: the bed may have been jogged since the frame
     if st.state not in QUIET_STATES:
         return False, f"printer is {st.state} [{st.raw_state}]"
-    pos = (adapter.query("toolhead").get("toolhead") or {}).get("position")
-    z_now = pos[2] if isinstance(pos, list) and len(pos) > 2 and isinstance(pos[2], (int, float)) else None
+    z_now = _toolhead_z(adapter)
     if z_now is None or not math.isfinite(z_now) or z_now < ack.min_z_mm:
         return False, f"bed Z now {z_now} is unknown or below min_z_mm {ack.min_z_mm:g}"
     script = "\n".join(ack.command)
