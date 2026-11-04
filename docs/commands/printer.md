@@ -415,7 +415,7 @@ it is never guessed. `3d printer -n NAME aliases` lists what each alias sends on
 |---|---|---|
 | `home [XYZ]` | `G28` / `G28 X Y` | every `moonraker` printer |
 | `level` | `BED_MESH_CALIBRATE`; Creality K1: the stock `G29` (heats, probes) | `moonraker`; K1 family |
-| `qgl`, `z-tilt` | `QUAD_GANTRY_LEVEL`, `Z_TILT_ADJUST` | `moonraker`, refused with a reason on the K1 SE (its stock `printer.cfg` defines neither) and when the firmware does not define the command |
+| `qgl`, `z-tilt` | `QUAD_GANTRY_LEVEL`, `Z_TILT_ADJUST` | `moonraker`; refused with a reason on the U1 and the K1 SE (their stock `printer.cfg` define neither) and, on any printer, when the firmware does not define the command |
 | `pause`, `resume` | `PAUSE`, `RESUME` (allowed during a job) | `moonraker` |
 | `preheat MATERIAL` / `--nozzle C` / `--bed C` / `--head T2` | `SET_HEATER_TEMPERATURE` for the nozzle of the head (fleet `heads:`, default T1) and `heater_bed`; PLA 210/60, PETG 235/80, ABS 250/100, ASA 255/100, TPU 225/50 (nozzle/bed, typical values), nozzle 0-300, bed 0-120 | `moonraker` |
 | `cooldown` | `TURN_OFF_HEATERS` | `moonraker` |

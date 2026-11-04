@@ -14,7 +14,7 @@ from typing import Any
 
 import pytest
 import yaml
-from printer_fakes import FakeCreality, FakeMoonraker, u1_status, write_devices
+from printer_fakes import FakeCreality, u1_status, write_devices
 from printer_macro_fakes import FakeMoonrakerMacros, write_fleet
 
 from commands.printer import USAGE, run
@@ -78,7 +78,7 @@ class Shop:
     """The two shop printers as fakes, plus a way to run `3d printer ...` and read what it printed."""
 
     def __init__(
-        self, u1: FakeMoonraker, k1se: FakeMoonraker, capsys: pytest.CaptureFixture[str]
+        self, u1: FakeMoonrakerMacros, k1se: FakeMoonrakerMacros, capsys: pytest.CaptureFixture[str]
     ) -> None:
         self.u1, self.k1se, self.capsys = u1, k1se, capsys
 
@@ -620,15 +620,20 @@ def test_an_alias_a_model_marks_unsupported_gives_the_reason(shop: Shop) -> None
     assert shop.k1se.requests == []
 
 
-def test_an_alias_whose_macro_the_firmware_lacks_is_refused_not_guessed(
-    shop: Shop,
-) -> None:
-    err = shop.fails(
-        PrinterRefused, "-n", "u1", "qgl"
-    )  # generic Klipper alias; the U1 defines no such command
+def test_an_alias_whose_macro_the_firmware_lacks_is_refused_not_guessed(shop: Shop) -> None:
+    del shop.k1se.macros["LOAD_MATERIAL"]  # a K1 without the stock Creality macro
 
-    assert err.message == "u1 does not define QUAD_GANTRY_LEVEL"
-    assert shop.u1.writes() == []
+    err = shop.fails(PrinterRefused, "-n", "k1se", "load")
+
+    assert err.message == "k1se does not define LOAD_MATERIAL"
+    assert shop.k1se.writes() == []
+
+
+def test_u1_has_no_gantry_to_level(shop: Shop) -> None:
+    err = shop.fails(UsageError, "-n", "u1", "qgl")
+
+    assert "not supported on u1" in err.message and "defines no quad_gantry_level" in err.message
+    assert shop.u1.requests == []
 
 
 def test_alias_help_and_listing_name_what_each_alias_sends(shop: Shop) -> None:
@@ -644,7 +649,7 @@ def test_alias_help_and_listing_name_what_each_alias_sends(shop: Shop) -> None:
     )
     assert (
         table["load"]["gcode"] == ["AUTO_FEEDING EXTRUDER={slot} LOAD=1"]
-        and table["qgl"]["unsupported"] is None
+        and table["qgl"]["unsupported"] is not None
     )
     assert (
         "level" in k1

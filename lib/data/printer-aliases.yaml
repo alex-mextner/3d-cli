@@ -156,6 +156,10 @@ models:
               preheat: {code: 2}
               hot: {code: 3}
         gcode: ["SET_PURIFIER_MODE MODE={code}"]
+      qgl:
+        unsupported: "the U1 printer.cfg (Snapmaker/u1-klipper lava/printer.cfg) defines no quad_gantry_level"
+      z-tilt:
+        unsupported: "the U1 printer.cfg (Snapmaker/u1-klipper lava/printer.cfg) defines no z_tilt"
   - contains: creality k1
     aliases:
       level:
