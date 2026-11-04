@@ -206,7 +206,7 @@ def _ls(p: Parsed) -> int:
 def _verify(p: Parsed) -> int:
     dest, _ = _dest(p)
     info = _find_set(dest, p.pos[1] if len(p.pos) > 1 else None)
-    problems = backup_store.verify_dir(info.path)
+    manifest, problems = backup_store.verify_dir(info.path)
     if problems:
         for line in problems:
             print(f"FAIL  {line}")
@@ -214,7 +214,7 @@ def _verify(p: Parsed) -> int:
             f"{info.name} failed verification ({len(problems)} problem(s))",
             command="printops backup verify",
         )
-    items = (info.manifest or {}).get("items", {})
+    items = (manifest or {}).get("items", {})
     print(
         f"ok  {info.name}: {len(items)} item(s), checksums, integrity_check and row counts match"
     )
@@ -253,15 +253,17 @@ def _restore(p: Parsed) -> int:
     dest, _ = _dest(p)
     info = _find_set(dest, p.pos[1] if len(p.pos) > 1 else None)
     try:
-        written = backup_store.restore_set(
+        restored = backup_store.restore_set(
             info, Path(p.opts["--into"]).expanduser(), layout=layout
         )
     except BackupBroken as e:
         raise GateFailure(str(e), command="printops backup restore") from e
-    for f in written:
+    for f in restored.written:
         print(f"restored {f}")
-    for name, filename in backup_store.absent_items(info).items():
-        print(f"{info.name} has no {name} ({filename}): an existing one was moved to {filename}.pre-restore")
+    for name, filename in restored.absent.items():
+        print(
+            f"{info.name} has no {name} ({filename}): an existing one was moved to {filename}.pre-restore"
+        )
     print(
         f"from {info.name}. Start the stack again: `docker compose -p printops -f services/3d-api/compose.yaml up -d`"
     )

@@ -286,7 +286,7 @@ def write_set(
         tmp.chmod(0o700)
         items = {s.name: _write_item(s, tmp, level) for s in sources}
         _seal(tmp, items, when.isoformat(timespec="seconds"), target, absent or {})
-        problems = verify_dir(tmp)
+        _manifest, problems = verify_dir(tmp)
         if problems:
             raise BackupBroken(
                 "the new set failed its own verification: " + "; ".join(problems)
@@ -340,8 +340,14 @@ def _plain_name(value: object) -> bool:
 
 
 def _item_problems(root: Path, name: str, item: dict[str, Any]) -> list[str]:
-    if not isinstance(item, dict) or not _plain_name(name) or not _plain_name(item.get("file")):
-        return [f"{name!r}: the manifest names a path outside the set (item or file is not a plain name)"]
+    if (
+        not isinstance(item, dict)
+        or not _plain_name(name)
+        or not _plain_name(item.get("file"))
+    ):
+        return [
+            f"{name!r}: the manifest names a path outside the set (item or file is not a plain name)"
+        ]
     file = root / item["file"]
     if file.is_symlink() or file.resolve().parent != root.resolve():
         return [f"{name}: file {item['file']!r} is not a regular file inside the set"]
@@ -367,24 +373,27 @@ def _item_problems(root: Path, name: str, item: dict[str, Any]) -> list[str]:
 
 def _absent_problems(manifest: dict[str, Any]) -> list[str]:
     absent = manifest.get("absent", {})
-    if isinstance(absent, dict) and all(_plain_name(k) and _plain_name(v) for k, v in absent.items()):
+    if isinstance(absent, dict) and all(
+        _plain_name(k) and _plain_name(v) for k, v in absent.items()
+    ):
         return []
     return [f"{MANIFEST}: `absent` must map plain item names to plain file names"]
 
 
-def verify_dir(root: Path) -> list[str]:
-    """Every problem of the set at `root` ([] = good): checksums, manifest, integrity, row counts."""
+def verify_dir(root: Path) -> tuple[dict[str, Any] | None, list[str]]:
+    """(the manifest parsed ONCE, every problem of the set at `root`; [] = good): checksums, manifest,
+    integrity, row counts. Callers that go on to use the set must use this manifest, never re-read it."""
     try:
         manifest = json.loads((root / MANIFEST).read_text(encoding="utf-8"))
     except (OSError, ValueError) as e:
-        return [f"{MANIFEST}: {e}"]
+        return None, [f"{MANIFEST}: {e}"]
     items = manifest.get("items") if isinstance(manifest, dict) else None
     if not isinstance(items, dict) or not items:
-        return [f"{MANIFEST} lists no items"]
+        return None, [f"{MANIFEST} lists no items"]
     problems = _sum_problems(root) + _absent_problems(manifest)
     for name, item in items.items():
         problems += _item_problems(root, name, item)
-    return problems
+    return manifest, problems
 
 
 # ------------------------------------------------------------------------------ list / prune
@@ -473,41 +482,74 @@ def read_state(dest: Path) -> Retention | None:
 # ---------------------------------------------------------------------------------- restore
 
 
-def restore_set(info: SetInfo, into: Path, *, layout: str = "flat") -> list[Path]:
-    """Unpack a VERIFIED set into `into`; returns the files written.
+@dataclass(frozen=True)
+class Restored:
+    """What a restore did, taken from the manifest that was verified (not from the listing)."""
+
+    written: list[Path]
+    absent: dict[
+        str, str
+    ]  # items the set records as absent -> the file name moved aside
+    items: dict[str, dict[str, Any]]
+
+
+def _stage_set(root: Path, scratch: Path) -> tuple[dict[str, Any], list[str]]:
+    """Copy the set's files into the private `scratch` dir, then verify THAT copy: a set on a NAS can
+    change between two reads, so everything restore uses is parsed and hashed from one stable copy."""
+    problems: list[str] = []
+    for entry in root.iterdir():
+        if entry.is_symlink():
+            problems.append(f"{entry.name}: not a regular file inside the set (a link)")
+        elif entry.is_file():
+            shutil.copyfile(entry, scratch / entry.name)
+    manifest, found = verify_dir(scratch)
+    return manifest or {}, problems + found
+
+
+def restore_set(info: SetInfo, into: Path, *, layout: str = "flat") -> Restored:
+    """Unpack a VERIFIED set into `into`.
 
     flat: `<into>/<item>.db` / `<into>/tokens.json`.  data: the compose data-dir layout —
     `<into>/spoolman/spoolman.db`, `<into>/api/printops.db`, `<into>/api/tokens.json`. An existing
-    target file is moved to `<name>.pre-restore` first (and stale -wal/-shm sidecars are removed). An
-    item the set records as absent (no tokens file when it was taken) is moved aside the same way, so
-    the restored state is the backed-up one: nothing there, deny-all."""
-    problems = verify_dir(info.path)
-    if problems:
-        raise BackupBroken(f"{info.name} is not restorable: " + "; ".join(problems))
-    items = (info.manifest or {}).get("items", {})
-    written: list[Path] = []
-    for name, item in items.items():
-        out = _restore_path(into, name, item, layout)
-        out.parent.mkdir(parents=True, exist_ok=True)
-        _move_aside(out)
-        tmp = out.with_name(f".{out.name}.restoring")
-        tmp.unlink(missing_ok=True)  # never write through a leftover link
-        if item.get("kind") == "sqlite":
-            _gunzip(info.path / item["file"], tmp)
-        else:
-            shutil.copyfile(info.path / item["file"], tmp)
-        tmp.chmod(0o600)
-        os.replace(tmp, out)
-        written.append(out)
-    for name, filename in absent_items(info).items():
-        _move_aside(_restore_path(into, name, {"kind": "file", "file": filename}, layout))
-    return written
+    target file is moved to `<name>.pre-restore` first, together with its -wal/-shm sidecars, and an
+    existing `.pre-restore` is never overwritten (`.pre-restore.1`, ...). An item the set records as
+    absent (no tokens file when it was taken) is moved aside the same way, so the restored state is
+    the backed-up one: nothing there, deny-all.
 
-
-def absent_items(info: SetInfo) -> dict[str, str]:
-    """Items the set records as ABSENT at backup time (item name -> restored file name)."""
-    absent = (info.manifest or {}).get("absent", {})
-    return dict(absent) if isinstance(absent, dict) else {}
+    Every new file is unpacked next to its target BEFORE any live file is moved, so a full disk
+    leaves the live databases where they are."""
+    with tempfile.TemporaryDirectory(prefix="3d-backup-stage-") as scratch_dir:
+        scratch = Path(scratch_dir)
+        manifest, problems = _stage_set(info.path, scratch)
+        if problems:
+            raise BackupBroken(f"{info.name} is not restorable: " + "; ".join(problems))
+        items: dict[str, dict[str, Any]] = manifest["items"]
+        absent: dict[str, str] = dict(manifest.get("absent", {}))
+        pending: list[tuple[Path, Path]] = []
+        try:
+            for name, item in items.items():
+                out = _restore_path(into, name, item, layout)
+                out.parent.mkdir(parents=True, exist_ok=True)
+                tmp = out.with_name(f".{out.name}.restoring")
+                tmp.unlink(missing_ok=True)  # never write through a leftover link
+                pending.append((tmp, out))
+                if item.get("kind") == "sqlite":
+                    _gunzip(scratch / item["file"], tmp)
+                else:
+                    shutil.copyfile(scratch / item["file"], tmp)
+                tmp.chmod(0o600)
+        except BaseException:
+            for tmp, _out in pending:
+                tmp.unlink(missing_ok=True)
+            raise
+        for tmp, out in pending:
+            _move_aside(out)
+            os.replace(tmp, out)
+        for name, filename in absent.items():
+            _move_aside(
+                _restore_path(into, name, {"kind": "file", "file": filename}, layout)
+            )
+    return Restored([out for _tmp, out in pending], absent, items)
 
 
 def _restore_path(into: Path, name: str, item: dict[str, Any], layout: str) -> Path:
@@ -517,21 +559,34 @@ def _restore_path(into: Path, name: str, item: dict[str, Any], layout: str) -> P
     return into / ("spoolman" if name == "spoolman" else "api") / filename
 
 
+SIDECARS = ("", "-wal", "-shm")
+
+
 def _move_aside(out: Path) -> None:
-    for suffix in ("-wal", "-shm"):
-        out.with_name(out.name + suffix).unlink(missing_ok=True)
-    if out.exists():
-        os.replace(out, out.with_name(out.name + ".pre-restore"))
+    """Rename `out` and its -wal/-shm to `<out>.pre-restore[...]`: the WAL of a database that was not shut
+    down cleanly holds committed rows. A `.pre-restore` that is already there stays; the next free
+    `.pre-restore.N` is used."""
+    if not any(out.with_name(out.name + s).exists() for s in SIDECARS):
+        return
+    base = out.name + ".pre-restore"
+    n = 0
+    while any(out.with_name(base + s).exists() for s in SIDECARS):
+        n += 1
+        base = f"{out.name}.pre-restore.{n}"
+    for s in SIDECARS:
+        src = out.with_name(out.name + s)
+        if src.exists():
+            os.replace(src, out.with_name(base + s))
 
 
 def restore_check(info: SetInfo) -> list[str]:
     """Restore the set into a scratch directory and prove it: every SQLite item opens, passes
     integrity_check and has the manifest's row counts. Returns report lines; BackupBroken on a mismatch."""
-    items = (info.manifest or {}).get("items", {})
     report: list[str] = []
     with tempfile.TemporaryDirectory(prefix="3d-backup-restore-") as scratch:
-        written = {p.name: p for p in restore_set(info, Path(scratch))}
-        for name, item in items.items():
+        restored = restore_set(info, Path(scratch))
+        written = {p.name: p for p in restored.written}
+        for name, item in restored.items.items():
             if item.get("kind") != "sqlite":
                 report.append(
                     f"{name}: restored {item['file']} ({item['raw_bytes']} bytes)"

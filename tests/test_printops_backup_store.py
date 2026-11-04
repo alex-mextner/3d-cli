@@ -164,7 +164,7 @@ def test_write_set_is_verified_published_atomically_and_self_describing(
     assert items["spoolman"]["tables"] == {"spool": 7} and items["printops"][
         "tables"
     ] == {"spool": 3}
-    assert store.verify_dir(info.path) == []
+    assert store.verify_dir(info.path)[1] == []
     assert (info.path / "spoolman.db.gz").stat().st_mode & 0o077 == 0
     assert info.path.stat().st_mode & 0o077 == 0
 
@@ -181,10 +181,10 @@ def test_verify_catches_tampering_missing_files_and_a_corrupt_database(
     gz = info.path / "spoolman.db.gz"
     original = gz.read_bytes()
     gz.write_bytes(original[:-4] + b"\x00\x00\x00\x00")
-    assert any("sha256 differs" in p for p in store.verify_dir(info.path))
+    assert any("sha256 differs" in p for p in store.verify_dir(info.path)[1])
     gz.write_bytes(original)
     (info.path / "tokens.json").unlink()
-    assert any("tokens" in p for p in store.verify_dir(info.path))
+    assert any("tokens" in p for p in store.verify_dir(info.path)[1])
 
 
 def test_a_corrupt_source_database_aborts_the_run_and_publishes_nothing(
@@ -289,6 +289,9 @@ def test_restore_flat_and_data_layouts_reproduce_the_databases(tmp_path: Path) -
         encoding="utf-8"
     ) == "old"
     assert not (data / "spoolman" / "spoolman.db-wal").exists()
+    assert (data / "spoolman" / "spoolman.db.pre-restore-wal").read_text(
+        encoding="utf-8"
+    ) == "stale wal"
     assert sqlite3.connect(data / "api" / "printops.db").execute(
         "SELECT count(*) FROM spool"
     ).fetchone() == (3,)
@@ -315,7 +318,9 @@ def _rewrite_manifest(info: store.SetInfo, edit: object) -> None:
 
 
 @pytest.mark.parametrize("kind", ["parent", "absolute", "nested", "item-name"])
-def test_a_manifest_cannot_name_a_path_outside_its_set(tmp_path: Path, kind: str) -> None:
+def test_a_manifest_cannot_name_a_path_outside_its_set(
+    tmp_path: Path, kind: str
+) -> None:
     """A hostile set: the manifest points at a file outside the set dir whose checksum matches. verify and
     restore must refuse it, and nothing may be written to the escaped destination."""
     root = disk(tmp_path)
@@ -325,8 +330,12 @@ def test_a_manifest_cannot_name_a_path_outside_its_set(tmp_path: Path, kind: str
     payload = tmp_path / "payload.bin"
     payload.write_bytes(b"ssh-ed25519 attacker\n")
     digest = hashlib.sha256(payload.read_bytes()).hexdigest()
-    ref = {"parent": "../../payload.bin", "absolute": str(payload), "nested": "sub/payload.bin",
-           "item-name": "tokens.json"}[kind]
+    ref = {
+        "parent": "../../payload.bin",
+        "absolute": str(payload),
+        "nested": "sub/payload.bin",
+        "item-name": "tokens.json",
+    }[kind]
 
     def edit(m: dict[str, object]) -> None:
         items = m["items"]
@@ -337,21 +346,35 @@ def test_a_manifest_cannot_name_a_path_outside_its_set(tmp_path: Path, kind: str
             items["../../victim/.ssh/authorized_keys"] = items.pop("tokens")
 
     _rewrite_manifest(info, edit)
-    info = store.SetInfo(info.name, info.path, info.created, json.loads((info.path / store.MANIFEST).read_text()))
-    assert any("outside the set" in p or "not a regular file" in p for p in store.verify_dir(info.path))
+    info = store.SetInfo(
+        info.name,
+        info.path,
+        info.created,
+        json.loads((info.path / store.MANIFEST).read_text()),
+    )
+    assert any(
+        "outside the set" in p or "not a regular file" in p
+        for p in store.verify_dir(info.path)[1]
+    )
     into = tmp_path / "victim" / "restore"
     with pytest.raises(BackupBroken, match="not restorable"):
         store.restore_set(info, into)
     assert list(victim.iterdir()) == [] and not into.exists()
 
 
-def test_a_set_file_that_is_a_link_out_of_the_set_is_not_restorable(tmp_path: Path) -> None:
+def test_a_set_file_that_is_a_link_out_of_the_set_is_not_restorable(
+    tmp_path: Path,
+) -> None:
     info = store.write_set(disk(tmp_path), sources(tmp_path))
     secret = tmp_path / "secret.json"
-    secret.write_text('{"tokens": []}', encoding="utf-8")  # same bytes: the checksum still matches
+    secret.write_text(
+        '{"tokens": []}', encoding="utf-8"
+    )  # same bytes: the checksum still matches
     (info.path / "tokens.json").unlink()
     (info.path / "tokens.json").symlink_to(secret)
-    assert any("not a regular file inside the set" in p for p in store.verify_dir(info.path))
+    assert any(
+        "not a regular file inside the set" in p for p in store.verify_dir(info.path)[1]
+    )
     with pytest.raises(BackupBroken, match="not restorable"):
         store.restore_set(info, tmp_path / "out")
 
@@ -359,7 +382,7 @@ def test_a_set_file_that_is_a_link_out_of_the_set_is_not_restorable(tmp_path: Pa
 def test_a_non_mapping_manifest_item_is_a_problem_not_a_crash(tmp_path: Path) -> None:
     info = store.write_set(disk(tmp_path), sources(tmp_path))
     _rewrite_manifest(info, lambda m: m["items"].update(tokens="oops"))  # type: ignore[attr-defined]
-    assert any("outside the set" in p for p in store.verify_dir(info.path))
+    assert any("outside the set" in p for p in store.verify_dir(info.path)[1])
 
 
 @pytest.mark.parametrize("layout", ["flat", "data"])
@@ -370,25 +393,112 @@ def test_restoring_a_set_taken_without_a_tokens_file_removes_the_stale_one(
     srcs = [s for s in sources(tmp_path) if s.name != "tokens"]
     info = store.write_set(disk(tmp_path), srcs, absent={"tokens": "tokens.json"})
     assert info.manifest["absent"] == {"tokens": "tokens.json"}  # type: ignore[index]
-    assert store.verify_dir(info.path) == []
+    assert store.verify_dir(info.path)[1] == []
     into = tmp_path / "live"
     stale = into / ("api" if layout == "data" else ".") / "tokens.json"
     stale.parent.mkdir(parents=True)
     stale.write_text('{"tokens": [{"name": "old"}]}', encoding="utf-8")
     written = store.restore_set(info, into, layout=layout)
     assert not stale.exists() and stale.with_name("tokens.json.pre-restore").is_file()
-    assert all(p.name != "tokens.json" for p in written)
+    assert all(p.name != "tokens.json" for p in written.written)
 
 
 def test_a_set_that_had_tokens_does_not_record_them_absent(tmp_path: Path) -> None:
     info = store.write_set(disk(tmp_path), sources(tmp_path))
     assert info.manifest["absent"] == {}  # type: ignore[index]
-    assert store.absent_items(info) == {}
 
 
-def test_a_manifest_absent_entry_cannot_name_a_path_outside_the_restore_dir(tmp_path: Path) -> None:
+def test_a_manifest_absent_entry_cannot_name_a_path_outside_the_restore_dir(
+    tmp_path: Path,
+) -> None:
     info = store.write_set(disk(tmp_path), sources(tmp_path))
     _rewrite_manifest(info, lambda m: m.update(absent={"tokens": "../../etc/passwd"}))
-    assert any("absent" in p for p in store.verify_dir(info.path))
+    assert any("absent" in p for p in store.verify_dir(info.path)[1])
     with pytest.raises(BackupBroken, match="not restorable"):
         store.restore_set(info, tmp_path / "out")
+
+
+def test_restore_uses_the_manifest_it_verified_not_the_one_listed_earlier(
+    tmp_path: Path,
+) -> None:
+    """The listing parsed a good manifest; the disk now serves a hostile one (a NAS can). Restore must
+    parse and verify what is on disk at restore time, once, and write only names that passed."""
+    info = store.write_set(disk(tmp_path), sources(tmp_path))
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    payload = tmp_path / "payload.bin"
+    payload.write_bytes(b"attacker\n")
+    digest = hashlib.sha256(payload.read_bytes()).hexdigest()
+
+    def edit(m: dict[str, object]) -> None:
+        items = m["items"]
+        assert isinstance(items, dict)
+        items["tokens"].update(file="../../payload.bin", sha256=digest)
+        m["absent"] = {"../../victim/x": "../../victim/x"}
+
+    _rewrite_manifest(info, edit)  # `info.manifest` still holds the good, earlier copy
+    assert info.manifest is not None and "../../payload.bin" not in json.dumps(
+        info.manifest
+    )
+    into = tmp_path / "victim" / "restore"
+    with pytest.raises(BackupBroken, match="not restorable"):
+        store.restore_set(info, into)
+    with pytest.raises(BackupBroken, match="not restorable"):
+        store.restore_check(info)
+    assert list(victim.iterdir()) == [] and not into.exists()
+
+
+@pytest.mark.parametrize("hostile", ["../x", "a/../x", ".."])
+def test_hostile_absent_and_item_names_are_refused(
+    tmp_path: Path, hostile: str
+) -> None:
+    info = store.write_set(disk(tmp_path), sources(tmp_path))
+    _rewrite_manifest(info, lambda m: m.update(absent={hostile: "tokens.json"}))
+    with pytest.raises(BackupBroken, match="not restorable"):
+        store.restore_set(info, tmp_path / "out")
+    _rewrite_manifest(
+        info,
+        lambda m: (
+            m.update(absent={}) or m["items"].update({hostile: m["items"]["tokens"]})
+        ),
+    )  # type: ignore[attr-defined]
+    with pytest.raises(BackupBroken, match="not restorable"):
+        store.restore_set(info, tmp_path / "out")
+
+
+def test_a_second_restore_never_overwrites_the_first_safety_copy(
+    tmp_path: Path,
+) -> None:
+    info = store.write_set(disk(tmp_path), sources(tmp_path))
+    live = tmp_path / "live"
+    live.mkdir()
+    (live / "spoolman.db").write_text("the real one", encoding="utf-8")
+    store.restore_set(info, live)
+    store.restore_set(
+        info, live
+    )  # the first restore's result is now "live" and gets moved aside too
+    assert (live / "spoolman.db.pre-restore").read_text(
+        encoding="utf-8"
+    ) == "the real one"
+    assert (live / "spoolman.db.pre-restore.1").read_bytes()[:6] == b"SQLite"
+
+
+def test_restore_unpacks_before_it_moves_the_live_database(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A full disk while unpacking must leave the live DB where it is."""
+    info = store.write_set(disk(tmp_path), sources(tmp_path))
+    live = tmp_path / "live"
+    live.mkdir()
+    (live / "spoolman.db").write_text("keep me", encoding="utf-8")
+    (live / "spoolman.db-wal").write_text("wal", encoding="utf-8")
+
+    def full_disk(src: Path, dst: Path) -> None:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(store, "_gunzip", full_disk)
+    with pytest.raises(OSError):
+        store.restore_set(info, live)
+    assert (live / "spoolman.db").read_text(encoding="utf-8") == "keep me"
+    assert (live / "spoolman.db-wal").read_text(encoding="utf-8") == "wal"
+    assert not list(live.glob("*.pre-restore*")) and not list(live.glob(".*.restoring"))
