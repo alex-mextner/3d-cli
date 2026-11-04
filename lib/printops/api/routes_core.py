@@ -46,7 +46,7 @@ from printops import events as ev
 from printops.api.deps import authenticate, bearer_token, get_state, require
 from printops.api.state import ApiState
 from printops.db import applied_versions, open_db
-from printops.spoolman import SpoolmanError, missing_extra_fields
+from printops.spoolman import SpoolmanError, audit_extra_fields
 from printops.tokens import TokenRecord
 
 router = APIRouter()
@@ -81,12 +81,23 @@ def _spoolman_health(state: ApiState) -> dict[str, Any]:
         return {"ok": False, "error": "SPOOLMAN_URL is not set"}
     try:
         info = sp.info()
-        missing = missing_extra_fields(sp)
+        audit = audit_extra_fields(sp)
     except SpoolmanError as e:
         return {"ok": False, "error": e.message, "extra_fields": state.fields}
     fields = dict(state.fields)
-    fields["missing"] = missing
-    return {"ok": not missing, "version": info.get("version"), "extra_fields": fields}
+    fields["missing"] = audit.missing
+    body: dict[str, Any] = {
+        "ok": not audit.missing and not audit.legacy,
+        "version": info.get("version"),
+        "extra_fields": fields,
+        "legacy_fields": audit.legacy,
+    }
+    if audit.legacy:
+        body["message"] = (
+            f"legacy Spoolman extra field(s) {', '.join(audit.legacy)} still defined: run "
+            "`3d printops fields migrate-native` (dry run), then `3d printops fields migrate-native --apply`"
+        )
+    return body
 
 
 @router.get("/v1/live")

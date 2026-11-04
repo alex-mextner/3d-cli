@@ -17,7 +17,7 @@ import fit_coupon
 import fits_sources
 from errors import ThreeDError
 from printops.client import ApiClient, ApiError, Response
-from printops.spoolman import ensure_extra_fields, encode_extra
+from printops.spoolman import ensure_extra_fields
 
 
 @pytest.fixture(autouse=True)
@@ -157,7 +157,7 @@ def load_spool(sm: FakeSpoolman, material: str, name: str, slot: str, vendor: st
     v = sm.create("vendor", {"name": vendor})
     f = sm.create("filament", {"name": name, "vendor_id": v["id"], "material": material, "density": 1.24,
                                "diameter": 1.75, "weight": 1000})
-    return int(sm.create("spool", {"filament_id": f["id"], "lot_nr": "L1", "extra": {"printops_slot": encode_extra(slot)}})["id"])
+    return int(sm.create("spool", {"filament_id": f["id"], "lot_nr": "L1", "location": f"slot:{slot}"})["id"])
 
 
 def test_api_a_record_is_a_calibration_scoped_to_head_nozzle_and_the_bound_filament(

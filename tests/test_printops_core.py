@@ -240,13 +240,16 @@ def test_ensure_extra_fields_registers_every_contract_field_idempotently() -> No
     assert not second.created and not second.updated and len(second.unchanged) == len(EXTRA_FIELDS)
     spool_keys = {f["key"] for f in fake.list_fields("spool")}
     # the #158 contract set; slices may only APPEND fields, so >= rather than ==
-    assert spool_keys >= {"printops_slot", "opened_at", "last_dried_at", "dry_state", "remaining_confidence_g",
-                          "tag_uids", "printops_location_id"}
+    assert spool_keys >= {"last_dried_at", "dry_state", "remaining_confidence_g"}
+    # fields with a native Spoolman twin are not registered any more (docs/printops/native-fields.md)
+    assert not spool_keys & {"printops_slot", "opened_at", "tag_uids", "printops_location_id"}
     filament = {f["key"]: f for f in fake.list_fields("filament")}
     assert filament["hygroscopic_class"]["choices"] == ["low", "medium", "high", "extreme"]
     assert filament["abrasive"]["field_type"] == "boolean"
+    assert filament["max_volumetric_mm3_s"]["unit"] == "mm³/s"  # a different quantity, untouched
     vendor = {f["key"]: f for f in fake.list_fields("vendor")}
-    assert vendor["spool_tare_g"]["unit"] == "g" and vendor["spool_kind"]["field_type"] == "choice"
+    assert vendor["spool_kind"]["field_type"] == "choice"
+    assert "spool_tare_g" not in vendor  # the tare is Spoolman's native vendor.empty_spool_weight
 
 
 def test_ensure_extra_fields_keeps_user_choices_and_repairs_drift() -> None:
@@ -261,10 +264,10 @@ def test_ensure_extra_fields_keeps_user_choices_and_repairs_drift() -> None:
 
 def test_ensure_extra_fields_refuses_a_type_conflict() -> None:
     fake = FakeSpoolman()
-    fake.set_field("vendor", "spool_tare_g", {"name": "tare", "field_type": "text"})
-    with pytest.raises(ExtraFieldConflict, match=r"vendor\.spool_tare_g exists as 'text'"):
+    fake.set_field("vendor", "spool_kind", {"name": "kind", "field_type": "text"})
+    with pytest.raises(ExtraFieldConflict, match=r"vendor\.spool_kind exists as 'text'"):
         ensure_extra_fields(fake)
-    assert "vendor.spool_tare_g" in missing_extra_fields(fake)
+    assert "vendor.spool_kind" in missing_extra_fields(fake)
 
 
 def test_multi_choice_drift_is_a_conflict_not_healthy() -> None:
@@ -295,7 +298,7 @@ def test_extra_values_round_trip_and_are_validated_like_spoolman() -> None:
     fil = fake.create("filament", {"vendor_id": vendor["id"], "material": "PLA", "density": 1.24,
                                    "diameter": 1.75, "weight": 1000})
     spool = fake.create("spool", {"filament_id": fil["id"], "location": "WH:A/S2/B3/04",
-                                  "extra": {"dry_state": encode_extra("ok"), "tag_uids": encode_extra('["04AB"]')}})
+                                  "extra": {"dry_state": encode_extra("ok"), "remaining_confidence_g": encode_extra(2.5)}})
     assert decode_extra(spool["extra"]["dry_state"]) == "ok"
     assert spool["spool_weight"] == 160 and spool["remaining_weight"] == 1000
     with pytest.raises(SpoolmanError, match="valid choice") as e:
@@ -304,7 +307,7 @@ def test_extra_values_round_trip_and_are_validated_like_spoolman() -> None:
     with pytest.raises(SpoolmanError, match="Unknown extra field"):
         fake.update("spool", spool["id"], {"extra": {"nope": "1"}})
     cleared = fake.update("spool", spool["id"], {"extra": {"dry_state": None}})
-    assert "dry_state" not in cleared["extra"] and "tag_uids" in cleared["extra"]
+    assert "dry_state" not in cleared["extra"] and "remaining_confidence_g" in cleared["extra"]
 
 
 def _pla_spool(fake: FakeSpoolman, **spool: Any) -> dict[str, Any]:
@@ -352,7 +355,7 @@ def test_http_spoolman_speaks_the_wire_format_of_the_fake() -> None:
         report = ensure_extra_fields(sp)
         assert len(report.created) == len(EXTRA_FIELDS)
         assert missing_extra_fields(sp) == []
-        vendor = sp.create("vendor", {"name": "Sunlu", "extra": {"spool_tare_g": encode_extra(135.0)}})
+        vendor = sp.create("vendor", {"name": "Sunlu", "extra": {"spool_kind": encode_extra("plastic")}})
         fil = sp.create("filament", {"vendor_id": vendor["id"], "material": "PETG", "density": 1.27,
                                      "diameter": 1.75, "weight": 1000})
         spool = sp.create("spool", {"filament_id": fil["id"], "remaining_weight": 700})
@@ -375,17 +378,15 @@ def test_extra_field_definitions_follow_the_contract_rules() -> None:
     keys = [(f.entity, f.key) for f in EXTRA_FIELDS]
     assert len(keys) == len(set(keys))
     # The #158 contract, frozen: slices may only APPEND (renaming/retyping would orphan data).
-    assert [(f.entity, f.key, f.field_type) for f in EXTRA_FIELDS[:19]] == [
-        ("spool", "printops_slot", "text"), ("spool", "opened_at", "datetime"),
+    assert [(f.entity, f.key, f.field_type) for f in EXTRA_FIELDS[:14]] == [
         ("spool", "last_dried_at", "datetime"), ("spool", "dry_state", "choice"),
-        ("spool", "remaining_confidence_g", "float"), ("spool", "tag_uids", "text"),
-        ("spool", "printops_location_id", "integer"),
+        ("spool", "remaining_confidence_g", "float"),
         ("filament", "nozzle_temp_min", "integer"), ("filament", "nozzle_temp_max", "integer"),
         ("filament", "bed_temp_min", "integer"), ("filament", "bed_temp_max", "integer"),
         ("filament", "abrasive", "boolean"), ("filament", "hygroscopic_class", "choice"),
         ("filament", "drying_temp_c", "integer"), ("filament", "drying_hours", "float"),
         ("filament", "measured_hex", "text"), ("filament", "max_volumetric_mm3_s", "float"),
-        ("vendor", "spool_tare_g", "float"), ("vendor", "spool_kind", "choice"),
+        ("vendor", "spool_kind", "choice"),
     ]
     for f in EXTRA_FIELDS:
         assert (f.field_type == "choice") == (f.choices is not None)
@@ -508,14 +509,14 @@ def test_extra_field_conflict_surfaces_in_health(printops_settings: Settings) ->
     from printops.api.app import create_app
 
     fake = FakeSpoolman()
-    fake.set_field("spool", "opened_at", {"name": "opened", "field_type": "text"})
+    fake.set_field("spool", "last_dried_at", {"name": "dried", "field_type": "text"})
     app = create_app(printops_settings, spoolman=fake)
     with TestClient(app) as client:
         wait_fields(app)
         body = client.get("/v1/health").json()
     fields = body["spoolman"]["extra_fields"]
     assert body["status"] == "degraded" and fields["status"] == "error"
-    assert "spool.opened_at" in fields["missing"] and "cannot change a field type" in fields["error"]
+    assert "spool.last_dried_at" in fields["missing"] and "cannot change a field type" in fields["error"]
 
 
 def test_extra_fields_get_registered_once_spoolman_comes_up(printops_settings: Settings) -> None:

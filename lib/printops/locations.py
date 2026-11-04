@@ -19,12 +19,11 @@ INVARIANTS:
     unarchived; `parent_id` always equals the row of `parent_path(path)`.
   - The `slot:` scheme belongs to the fleet: only `sync_fleet` creates, archives or revives it;
     manual add/move/archive under it is refused.
-  - Spoolman holds, per spool, `location` = path and extra `printops_location_id` = id; both are
-    written together by `place_spool`, and `resync` repairs any drift (e.g. after a move whose
-    Spoolman writes failed). A spool "is in" a location when its printops_location_id is that
-    id, or — set by hand in the Spoolman UI — it has no id and its `location` string is the
-    location's path or a former path of it (`location_alias`, kept from a move until resync
-    finds no spool naming it; meanwhile no other location may take that path).
+  - Spoolman's native `location` text is the ONLY record of where a spool is (no id copy: a UI
+    move is a move). A spool "is in" a location when its `location` string is the location's path
+    or a former path of it (`location_alias`, kept from a move until resync finds no spool naming
+    it; meanwhile no other location may take that path). `resync` rewrites only former-path text
+    to the current path; it never moves a spool back from where someone put it.
   - A printed label belongs to the location that printed it (`qr`): `resolve` maps a scanned
     label to it even after a move and a reuse of the old path.
   - Archiving refuses a location that still holds spools or active children; archived rows stay
@@ -39,7 +38,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from printops import db, events
-from printops.spoolman import JSON, Spoolman, SpoolmanError, decode_extra, encode_extra
+from printops.spoolman import JSON, Spoolman, SpoolmanError
 
 KINDS = ("warehouse", "zone", "shelf", "box", "slot", "printer", "ams", "printer_slot", "dryer", "dry_box")
 MAX_PATH = 64  # Spoolman spool.location is VARCHAR(64)
@@ -50,7 +49,6 @@ QR_PREFIX = "cell:"
 SELF_ID_SCHEMES = ("dryer", "slot")
 RESERVED_SEGMENTS = ("contents",)
 TAG_PREFIX = "loc-"  # HA tag id on the location's NTAG213: loc-<id> (stable across moves)
-LOCATION_EXTRA = "printops_location_id"
 
 _SCHEME = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,15}")
 _SEGMENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,31}")
@@ -444,15 +442,6 @@ def update(conn: sqlite3.Connection, loc: Location, changes: Mapping[str, Any], 
 
 
 # -- Spoolman side ------------------------------------------------------------------------
-def _spool_location_id(spool: Mapping[str, Any]) -> int | None:
-    raw = (spool.get("extra") or {}).get(LOCATION_EXTRA)
-    try:
-        value = decode_extra(raw)
-    except ValueError:
-        return None
-    return value if isinstance(value, int) and not isinstance(value, bool) else None
-
-
 def _owners(conn: sqlite3.Connection) -> tuple[dict[int, Location], dict[str, int]]:
     """(id → location incl. archived, lower-case path text → location id). A former path
     (`location_alias`) names the location that moved away from it; a current path wins."""
@@ -464,8 +453,7 @@ def _owners(conn: sqlite3.Connection) -> tuple[dict[int, Location], dict[str, in
 
 
 def _owner_id(spool: Mapping[str, Any], by_text: Mapping[str, int]) -> int | None:
-    lid = _spool_location_id(spool)
-    return lid if lid is not None else by_text.get(str(spool.get("location") or "").strip().lower())
+    return by_text.get(str(spool.get("location") or "").strip().lower())
 
 
 def spools_in(conn: sqlite3.Connection, spools: Iterable[Mapping[str, Any]], locs: Sequence[Location]) -> list[JSON]:
@@ -482,9 +470,9 @@ def contents(conn: sqlite3.Connection, spoolman: Spoolman, loc: Location, *, rec
 
 
 def place_spool(conn: sqlite3.Connection, spoolman: Spoolman, spool_id: int, loc: Location | None, *,
-                extra: Mapping[str, Any] | None = None) -> JSON:
-    """Put a spool in `loc` (None = nowhere) in ONE Spoolman PATCH: `location` = path and extra
-    `printops_location_id` = id, plus the caller's other extra fields (python values).
+                fields: Mapping[str, Any] | None = None) -> JSON:
+    """Put a spool in `loc` (None = nowhere) in ONE Spoolman PATCH: native `location` = path, plus
+    the caller's other native spool fields (`fields`, e.g. `first_used`).
 
     `loc` is re-read from the DB (the caller's object may be stale). `_archive` sets the flag
     before its emptiness check, so a placement racing an archive is either seen by that check or
@@ -494,14 +482,10 @@ def place_spool(conn: sqlite3.Connection, spoolman: Spoolman, spool_id: int, loc
         if loc.archived:
             raise LocationError(f"location {loc.path!r} is archived", status=409)
         before = spoolman.get("spool", spool_id)
-    fields = {k: encode_extra(v) if v is not None else None for k, v in (extra or {}).items()}
-    fields[LOCATION_EXTRA] = None if loc is None else encode_extra(loc.id)
-    body: dict[str, Any] = {"location": "" if loc is None else spoolman_path(loc), "extra": fields}
+    body: dict[str, Any] = {**(fields or {}), "location": "" if loc is None else spoolman_path(loc)}
     placed = spoolman.update("spool", spool_id, body)
     if loc is not None and get(conn, loc.id).archived:
-        prev_extra = (before.get("extra") or {}).get(LOCATION_EXTRA)
-        spoolman.update("spool", spool_id, {"location": before.get("location") or "",
-                                            "extra": {LOCATION_EXTRA: prev_extra}})
+        spoolman.update("spool", spool_id, {"location": before.get("location") or ""})
         raise LocationError(f"location {loc.path!r} was archived meanwhile; spool #{spool_id} left where it was", status=409)
     return placed
 
@@ -530,7 +514,7 @@ def _resync_one(conn: sqlite3.Connection, spoolman: Spoolman, s: JSON, loc: Loca
             # placed elsewhere since the listing: whatever path it names now must survive the alias cleanup
             return str(fresh.get("location") or "").strip().lower()
         loc = get(conn, loc.id)  # and the path as it is now: a concurrent move may have renamed it
-        spoolman.update("spool", int(s["id"]), {"location": loc.path, "extra": {LOCATION_EXTRA: encode_extra(loc.id)}})
+        spoolman.update("spool", int(s["id"]), {"location": loc.path})
         report.updated.append(int(s["id"]))
     except SpoolmanError as e:
         report.failed.append({"spool_id": int(s["id"]), "error": e.message})
@@ -539,10 +523,11 @@ def _resync_one(conn: sqlite3.Connection, spoolman: Spoolman, s: JSON, loc: Loca
 
 
 def resync(conn: sqlite3.Connection, spoolman: Spoolman) -> SyncReport:
-    """Make every spool that belongs to a location carry exactly that location's path and id:
-    spools whose string drifted (a move whose Spoolman writes failed) and spools located by a
-    typed path or a former path get both fields rewritten. Former paths no spool still names
-    are then forgotten. Never raises SpoolmanError: failures are in the report."""
+    """Rewrite the `location` text of every spool still naming a FORMER path of a location (a
+    move whose Spoolman writes failed) to the current path. A spool whose text is a current path
+    is left alone — Spoolman's text is the truth, so a move made in its UI is never reverted.
+    Former paths no spool still names are then forgotten. Never raises SpoolmanError: failures
+    are in the report."""
     report = SyncReport()
     by_id, by_text = _owners(conn)
     try:
@@ -553,7 +538,7 @@ def resync(conn: sqlite3.Connection, spoolman: Spoolman) -> SyncReport:
     still_named: set[str] = set()
     for s in spools:
         loc = by_id.get(_owner_id(s, by_text) or -1)
-        if loc is None or (s.get("location") == loc.path and _spool_location_id(s) == loc.id):
+        if loc is None or s.get("location") == loc.path:
             continue
         named = _resync_one(conn, spoolman, s, loc, by_text, report)
         if named is not None:

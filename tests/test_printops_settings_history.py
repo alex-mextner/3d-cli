@@ -19,7 +19,7 @@ from printops import settings_history as sh
 from printops.calibration_catalog import load_catalog
 from printops.client import ApiClient, ApiError
 from printops.fleet import load_fleet
-from printops.spoolman import encode_extra, ensure_extra_fields
+from printops.spoolman import ensure_extra_fields
 
 ORANGE, BLACK = "E8732A", "000000"
 
@@ -62,8 +62,8 @@ def add_spool(sm: FakeSpoolman, name: str, color: str, slot: str | None = None) 
             "color_hex": color,
         },
     )
-    extra = {"printops_slot": encode_extra(slot)} if slot else {}
-    return int(sm.create("spool", {"filament_id": fil["id"], "extra": extra})["id"])
+    loc = {"location": f"slot:{slot}"} if slot else {}
+    return int(sm.create("spool", {"filament_id": fil["id"], **loc})["id"])
 
 
 def entry(

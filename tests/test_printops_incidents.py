@@ -291,7 +291,7 @@ def make_spool(
     name: str = "Green",
     lot: str | None = "L2409",
     extra: dict[str, Any] | None = None,
-) -> dict[str, Any]:
+    location: str | None = None) -> dict[str, Any]:
     v = next((x for x in sm.find("vendor") if x["name"] == vendor), None) or sm.create(
         "vendor", {"name": vendor}
     )
@@ -319,6 +319,8 @@ def make_spool(
     }
     if lot:
         data["lot_nr"] = lot
+    if location:
+        data["location"] = location
     return sm.create("spool", data)
 
 
@@ -373,7 +375,7 @@ def test_context_from_fake_u1_status_and_gcode_fills_job_layer_temps_spool_lot_d
     g.write_text(text)
     remote = hashed_name(g)
     dried = (datetime.datetime.now(UTC) - datetime.timedelta(days=3)).isoformat()
-    spool = make_spool(sm, extra={"printops_slot": "u1/T3", "last_dried_at": dried})
+    spool = make_spool(sm, location="slot:u1/T3", extra={"last_dried_at": dried})
     status = printing_u1(
         remote,
         size=g.stat().st_size,
@@ -463,7 +465,7 @@ def test_context_on_real_babushkin_dom_gcode(
         material="PLA",
         name="PLA Basic Green",
         lot="SM-2410",
-        extra={"printops_slot": "u1/T4"},
+        location="slot:u1/T4",
     )
     status = printing_u1(REAL_GCODE.name, size=len(raw), position=None, layer=5)
     rd, _ = readers_for(status, (REAL_GCODE.parent,))
@@ -515,7 +517,7 @@ def test_context_head_from_the_gcode_active_tool_and_rh_from_the_dry_box(
         actor="t",
         humidity_sensor_entity="sensor.box1_rh",
     )
-    spool = make_spool(sm, lot=None, extra={"printops_location_id": box.id})
+    spool = make_spool(sm, lot=None, location=box.path)
     status = printing_u1("plate.gcode", size=len(text.encode()), position=None, layer=2)
     rd, _ = readers_for(status, (tmp_path,), humidity=StubHA("http://ha", "t"))
     ctx = resolve(printops_db, sm, printer="u1", spool_id=spool["id"], readers=rd)
@@ -1383,7 +1385,7 @@ def test_api_report_with_auto_context_list_show_resolve(
     po, use = api
     text = orca_gcode()
     (tmp_path / "plate.gcode").write_text(text)
-    spool = make_spool(fake_spoolman, lot="L42", extra={"printops_slot": "u1/T3"})
+    spool = make_spool(fake_spoolman, lot="L42", location="slot:u1/T3")
     use(
         printing_u1("plate.gcode", size=len(text.encode()), position=None, layer=2),
         (tmp_path,),

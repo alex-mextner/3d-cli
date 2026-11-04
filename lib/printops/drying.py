@@ -10,7 +10,8 @@ MODEL:
   - Finishing writes Spoolman spool extras `last_dried_at` = end time and `dry_state` = fresh,
     and records optional before/after weights as ledger NOTES — water loss is not filament
     usage, so it never reaches Spoolman `/use` and never anchors the remaining weight.
-  - The exposure clock of a spool runs from `last_dried_at`, else `opened_at` (Spoolman extras);
+  - The exposure clock of a spool runs from extra `last_dried_at`, else native `first_used` (Spoolman's first-use stamp, which `load` and
+    `receive --opened` also set when the spool is opened before it is used);
     the class limit (days) and the storage RH (location humidity sensor, read from Home Assistant)
     give its state: fresh → ok → due → wet. Never opened and never dried → `unknown` (sealed).
 
@@ -649,14 +650,14 @@ class Assessment:
 
 
 def _read_clock(
-    a: Assessment, extra: Mapping[str, Any], limits: ClassLimits, now: datetime.datetime
+    a: Assessment, spool: Mapping[str, Any], limits: ClassLimits, now: datetime.datetime
 ) -> None:
-    """Fill the age/limit of the first usable clock (last_dried_at, then opened_at)."""
-    for key, clock, limit in (
-        ("last_dried_at", "dried", limits.max_days_since_dried),
-        ("opened_at", "opened", limits.max_days_opened),
+    """Fill the age/limit of the first usable clock (extra last_dried_at, then native first_used)."""
+    extra = decoded_extra(spool)
+    for key, clock, limit, raw in (
+        ("last_dried_at", "dried", limits.max_days_since_dried, extra.get("last_dried_at")),
+        ("first_used", "opened", limits.max_days_opened, spool.get("first_used")),
     ):
-        raw = extra.get(key)
         if not raw:
             continue
         try:
@@ -679,7 +680,7 @@ def _compute_state(
     if a.age_days is None or a.limit_days is None:
         if not rh_high:
             a.reasons.append(
-                "never opened or dried as far as Spoolman knows (no opened_at / last_dried_at)"
+                "never opened or dried as far as Spoolman knows (no first_used / last_dried_at)"
             )
         return "due" if rh_high else "unknown"
     if a.age_days >= a.limit_days * policy.wet_factor:
@@ -738,7 +739,7 @@ def assess(
         a.state = "drying"
         a.reasons.append("in an open drying session")
         return a
-    _read_clock(a, extra, limits, now)
+    _read_clock(a, spool, limits, now)
     computed = _compute_state(a, policy, recipe, limits.max_rh)
     if stored in ALERT_STATES and computed in ("fresh", "ok", "unknown"):
         a.notes.append(
@@ -752,9 +753,7 @@ def assess(
 def _spool_location(
     conn: sqlite3.Connection, spool: Mapping[str, Any], notes: list[str]
 ) -> locations.Location | None:
-    ref: str | int | None = decoded_extra(spool).get("printops_location_id")
-    if not isinstance(ref, int) or isinstance(ref, bool):
-        ref = spool.get("location") or None
+    ref: str | None = spool.get("location") or None
     if ref is None:
         return None
     try:
