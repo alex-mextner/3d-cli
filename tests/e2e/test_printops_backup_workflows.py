@@ -108,7 +108,9 @@ def test_full_cycle_run_ls_verify_prune_restore_selftest(tmp_path: Path) -> None
     dry = backup(tmp_path, env, "prune", "--target", "default", "--dry-run")
     after_dry = len(list(dest.glob("3d-backup-2026*Z")))
     # the run's own set carries the real clock, so how many the policy keeps depends on today's calendar position
-    keep_names, drop_names = plan_prune([p.name for p in dest.glob("3d-backup-2026*Z")], Retention())
+    keep_names, drop_names = plan_prune(
+        [p.name for p in dest.glob("3d-backup-2026*Z")], Retention()
+    )
     pruned = backup(tmp_path, env, "prune", "--target", "default")
     assert (
         listing.returncode == 0
@@ -120,7 +122,10 @@ def test_full_cycle_run_ls_verify_prune_restore_selftest(tmp_path: Path) -> None
         and "integrity_check and row counts match" in verified.stdout
     )
     assert "would remove" in dry.stdout and after_dry == 31  # a dry run removes nothing
-    assert pruned.returncode == 0 and f"keep {len(keep_names)}, removed {len(drop_names)}" in pruned.stdout
+    assert (
+        pruned.returncode == 0
+        and f"keep {len(keep_names)}, removed {len(drop_names)}" in pruned.stdout
+    )
     assert sorted(p.name for p in dest.glob("3d-backup-2026*Z")) == sorted(keep_names)
     assert (
         (dest / "notes.txt").read_text(encoding="utf-8") == "mine"
@@ -167,12 +172,19 @@ def test_full_cycle_run_ls_verify_prune_restore_selftest(tmp_path: Path) -> None
     )
 
 
-def test_restoring_a_backup_taken_without_tokens_leaves_no_authorised_token(tmp_path: Path) -> None:
+def test_restoring_a_backup_taken_without_tokens_leaves_no_authorised_token(
+    tmp_path: Path,
+) -> None:
     """Story: the operator revoked every token (file gone), the nightly run recorded that, and a later restore
     into the live data dir must not bring the old, still-authorised token file back (3d-api would accept it)."""
     env = make_world(tmp_path)
     disk = tmp_path / "disk"
-    assert backup(tmp_path, env, "target", "add", "default", str(disk), "--init-marker").returncode == 0
+    assert (
+        backup(
+            tmp_path, env, "target", "add", "default", str(disk), "--init-marker"
+        ).returncode
+        == 0
+    )
     tokens = Path(env["PRINTOPS_TOKENS_FILE"])
     tokens.unlink()
     ran = backup(tmp_path, env, "run", "--target", "default", "--json")
@@ -180,12 +192,27 @@ def test_restoring_a_backup_taken_without_tokens_leaves_no_authorised_token(tmp_
     assert json.loads(ran.stdout)["items"].keys() == {"printops", "spoolman"}
     live = tmp_path / "live"
     (live / "api").mkdir(parents=True)
-    (live / "api" / "tokens.json").write_text('{"tokens": [{"name": "stale"}]}', encoding="utf-8")
-    restored = backup(tmp_path, env, "restore", "latest", "--target", "default", "--into", str(live),
-                      "--layout", "data", "--yes")
+    (live / "api" / "tokens.json").write_text(
+        '{"tokens": [{"name": "stale"}]}', encoding="utf-8"
+    )
+    restored = backup(
+        tmp_path,
+        env,
+        "restore",
+        "latest",
+        "--target",
+        "default",
+        "--into",
+        str(live),
+        "--layout",
+        "data",
+        "--yes",
+    )
     assert restored.returncode == 0, restored.stderr
     assert not (live / "api" / "tokens.json").exists()
-    assert "stale" in (live / "api" / "tokens.json.pre-restore").read_text(encoding="utf-8")
+    assert "stale" in (live / "api" / "tokens.json.pre-restore").read_text(
+        encoding="utf-8"
+    )
     assert "has no tokens" in restored.stdout
 
 
@@ -200,11 +227,14 @@ def _anomaly_rows(env: dict[str, str]) -> list[tuple[str, ...]]:
         conn.close()
 
 
-def test_a_targets_good_run_never_closes_another_targets_failure(tmp_path: Path) -> None:
+def test_a_targets_good_run_never_closes_another_targets_failure(
+    tmp_path: Path,
+) -> None:
     """Two targets (e.g. a USB disk and a NAS): A fails, B fails, then only B recovers. A is still broken, so
     its anomaly must stay open — and A's own later recovery must still resolve it."""
     env = make_world(tmp_path)
     db_path = Path(env["PRINTOPS_DB"])
+
     def quiet(_line: str) -> None:
         return None
 
@@ -219,7 +249,9 @@ def test_a_targets_good_run_never_closes_another_targets_failure(tmp_path: Path)
     assert status() == {"backup:a": "open", "backup:b": "open"}
     notify.report_recovered(ctx("b"), quiet)
     assert status() == {"backup:a": "open", "backup:b": "resolved"}
-    notify.report_failure(ctx("a"), "disk a still missing", quiet)  # a repeat does not resolve the other either
+    notify.report_failure(
+        ctx("a"), "disk a still missing", quiet
+    )  # a repeat does not resolve the other either
     assert status() == {"backup:a": "open", "backup:b": "resolved"}
     notify.report_recovered(ctx("a"), quiet)
     assert status() == {"backup:a": "resolved", "backup:b": "resolved"}
@@ -405,22 +437,50 @@ def test_the_api_route_runs_the_backup_niced_child_and_reports_failure_as_an_ans
         except urllib.error.HTTPError as e:
             return e.code, json.loads(e.read() or b"{}")
 
+    lowest = {
+        "target": "default",
+        "subdir": "ha",
+        "keep_daily": 1,
+        "keep_weekly": 0,
+        "keep_monthly": 0,
+    }
+    status, raised = call("POST", "/v1/backup/run", lowest)
+    assert status == 200 and raised["status"] == "ok"
+    assert raised["retention"] == {
+        "daily": 7,
+        "weekly": 4,
+        "monthly": 6,
+    }  # a write token cannot go below the default
+    assert store.read_state(disk / "ha") == Retention(
+        7, 4, 6
+    )  # and a lower policy is never recorded
+
+    config = Path(env["PRINTOPS_BACKUP_CONFIG"])
+    config.write_text(
+        config.read_text(encoding="utf-8")
+        + "retention_floor: {daily: 3, weekly: 1, monthly: 1}\n",
+        encoding="utf-8",
+    )
     status, ok = call(
         "POST",
         "/v1/backup/run",
         {
-            "target": "default",
-            "subdir": "ha",
+            **lowest,
+            "subdir": "ha2",
             "keep_daily": 3,
             "keep_weekly": 1,
             "keep_monthly": 1,
         },
     )
-    assert (
-        status == 200
-        and ok["status"] == "ok"
-        and ok["retention"] == {"daily": 3, "weekly": 1, "monthly": 1}
-    )
+    assert status == 200 and ok["status"] == "ok"
+    assert ok["retention"] == {
+        "daily": 3,
+        "weekly": 1,
+        "monthly": 1,
+    }  # the host lowered its own floor
+    status, clamped = call("POST", "/v1/backup/run", {**lowest, "subdir": "ha3"})
+    assert clamped["retention"] == {"daily": 3, "weekly": 1, "monthly": 1}
+    assert store.read_state(disk / "ha3") == Retention(3, 1, 1)
     assert len(list((disk / "ha").glob("3d-backup-*"))) == 1
 
     state, current = call("GET", "/v1/backup")
@@ -437,6 +497,16 @@ def test_the_api_route_runs_the_backup_niced_child_and_reports_failure_as_an_ans
         and failed["status"] == "failed"
         and "not the backup disk" in str(failed["error"])
     )  # an answer, not an HTTP error
+
+    config.write_text("targets: [unclosed\n", encoding="utf-8")
+    broken_status, _detail = call("GET", "/v1/backup")
+    assert broken_status == 422  # a bad backup.yaml is the operator's to fix: not a 500
+    status, answer = call("POST", "/v1/backup/run", {"target": "default"})
+    assert (
+        status == 200
+        and answer["status"] == "failed"
+        and "not valid YAML" in str(answer["error"])
+    )
     assert call("POST", "/v1/backup/run", {"target": "../etc"})[0] == 422
     assert call("POST", "/v1/backup/run", {"subdir": "../x"})[0] == 422
     assert call("POST", "/v1/backup/run", {}, token="read")[0] == 403

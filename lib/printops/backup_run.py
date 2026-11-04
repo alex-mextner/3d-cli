@@ -9,6 +9,7 @@ WHO DECIDES WHAT:
   - WHEN, which sub-directory and how many sets to keep: Home Assistant
     (integrations/homeassistant/packages/printops_backup.yaml) — passed with every run. A run by hand
     without `--keep` re-uses the last policy a run recorded on the disk, then the built-in default.
+    Through the API a run is never kept below `retention_floor:` of that same backup.yaml (default 7/4/6).
 
 LIGHT ON A WEAK HOST: the process lowers its own CPU (nice 19) and I/O (ionice idle) priority, the
 SQLite copy runs in small steps with pauses, and compression is gzip level 1.
@@ -110,10 +111,41 @@ def load_config(path: Path) -> dict[str, Any]:
         return {}
     import yaml
 
-    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except (yaml.YAMLError, UnicodeDecodeError) as e:
+        raise BackupRefused(f"{path}: not valid YAML ({e})") from e
     if not isinstance(data, dict):
         raise BackupRefused(f"{path}: expected a mapping with `targets:`")
     return data
+
+
+def retention_floor(cfg: Mapping[str, Any]) -> dict[str, int]:
+    """The least retention a remote caller may ask for: `retention_floor: {daily, weekly, monthly}` in the
+    host-side backup.yaml (absent keys count as 0), else the built-in default. A write token must not be
+    able to prune the history that would restore data the same token could corrupt."""
+    raw = cfg.get("retention_floor")
+    if raw is None:
+        return Retention().to_dict()
+    keys = Retention().to_dict()
+    if (
+        not isinstance(raw, dict)
+        or not set(raw) <= set(keys)
+        or not all(
+            isinstance(v, int) and not isinstance(v, bool) and v >= 0
+            for v in raw.values()
+        )
+    ):
+        raise BackupRefused(
+            "backup.yaml `retention_floor` must map daily/weekly/monthly to non-negative integers"
+        )
+    return {k: int(raw.get(k, 0)) for k in keys}
+
+
+def clamp_to_floor(requested: Retention, cfg: Mapping[str, Any]) -> Retention:
+    """`requested`, raised wherever it is below the host's retention floor."""
+    floor = retention_floor(cfg)
+    return Retention(**{k: max(v, floor[k]) for k, v in requested.to_dict().items()})
 
 
 def resolve_target(req: RunRequest, cfg: Mapping[str, Any], cfg_file: Path) -> Target:

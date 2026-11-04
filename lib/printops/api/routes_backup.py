@@ -1,6 +1,9 @@
 """routes_backup.py — the API Home Assistant's schedule calls (and `3d printops backup` reads).
 
   POST /v1/backup/run   scope write. {target?, subdir?, keep_daily?, keep_weekly?, keep_monthly?, min_free_gb?}
+                        The keep_* values are raised to the host's `retention_floor` (backup.yaml next to the DB,
+                        default 7/4/6): a write token must not be able to prune the history that restores data it
+                        could corrupt, and what is raised is what the run records on the disk.
                         Runs `3d printops backup run … --json` as a CHILD process (niced, own memory) and
                         answers 200 with its JSON: {"status": "ok", "set": …, "pruned": […], …} or, when the run
                         failed, {"status": "failed", "error": "…"} — a failed backup is an ANSWER, not an
@@ -24,10 +27,12 @@ from pathlib import Path
 from typing import Annotated, Any
 
 from cli.env import repo_root
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, field_validator
 
 from printops import backup_config, backup_run
+from printops.backup_policy import Retention
+from printops.backup_store import BackupRefused
 from printops.api.deps import Principal, get_state, require
 from printops.api.state import ApiState
 
@@ -61,7 +66,12 @@ def cli_argv() -> list[str]:
     return [sys.executable, str(Path(repo_root()) / "bin" / "3d")]
 
 
-def argv_for(body: RunBody) -> list[str]:
+def effective_retention(body: RunBody, cfg: dict[str, Any]) -> Retention:
+    asked = Retention(body.keep_daily, body.keep_weekly, body.keep_monthly)
+    return backup_run.clamp_to_floor(asked, cfg)
+
+
+def argv_for(body: RunBody, retention: Retention) -> list[str]:
     return [
         *cli_argv(),
         "printops",
@@ -72,7 +82,7 @@ def argv_for(body: RunBody) -> list[str]:
         "--subdir",
         body.subdir,
         "--keep",
-        f"daily={body.keep_daily},weekly={body.keep_weekly},monthly={body.keep_monthly}",
+        f"daily={retention.daily},weekly={retention.weekly},monthly={retention.monthly}",
         "--min-free-gb",
         str(body.min_free_gb),
         "--json",
@@ -94,11 +104,18 @@ def _answer(done: subprocess.CompletedProcess[str]) -> dict[str, Any]:
 
 @router.post("/v1/backup/run")
 def run_backup(
-    body: RunBody, _who: Annotated[Principal, Depends(require("write"))]
+    body: RunBody,
+    state: Annotated[ApiState, Depends(get_state)],
+    _who: Annotated[Principal, Depends(require("write"))],
 ) -> dict[str, Any]:
     try:
+        cfg = backup_run.load_config(backup_run.config_path(os.environ, state.settings))
+        retention = effective_retention(body, cfg)
+    except BackupRefused as e:
+        return {"status": "failed", "error": str(e)}
+    try:
         done = subprocess.run(
-            argv_for(body),
+            argv_for(body, retention),
             capture_output=True,
             text=True,
             timeout=RUN_TIMEOUT_S,
@@ -123,7 +140,10 @@ def backup_status(
         last = json.loads(
             (settings.db_path.parent / backup_run.LAST_FILE).read_text(encoding="utf-8")
         )
-    cfg = backup_run.load_config(backup_run.config_path(os.environ, settings))
+    try:
+        cfg = backup_run.load_config(backup_run.config_path(os.environ, settings))
+    except BackupRefused as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
     targets = {
         name: {"path": spec.get("path"), "state": backup_config.target_state(spec)}
         for name, spec in (cfg.get("targets") or {}).items()
