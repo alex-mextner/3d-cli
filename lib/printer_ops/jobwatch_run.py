@@ -92,7 +92,14 @@ Examples:
   3d printer watch u1 --job --yes --on-fail pause --out projects/chekhov/print/runs
   3d printer watch k1se --job --fixture tests/data/jobwatch/detached.json --dry-run"""
 
-STATE_FILES = ("baseline.jpg", "baseline.json", "footprint.png", "candidate.png")
+STATE_FILES = (
+    "baseline.jpg",
+    "baseline.json",
+    "footprint.png",
+    "candidate.png",
+    "track.json",
+    "candidate-track.json",
+)
 
 
 @dataclass
@@ -344,6 +351,8 @@ class CameraCheck:
             str(o.z),
             "--save-footprint",
             str(self.dir / "candidate.png"),
+            "--save-track",
+            str(self.dir / "candidate-track.json"),
             "--annotated",
             str(annotated),
             "--label",
@@ -354,18 +363,25 @@ class CameraCheck:
             str(self.cfg.z_tol_mm),
             "--json",
         ]
-        if (self.dir / "footprint.png").is_file():
-            argv += ["--footprint", str(self.dir / "footprint.png")]
+        for flag, name in (("--footprint", "footprint.png"), ("--track", "track.json")):
+            if (self.dir / name).is_file():
+                argv += [flag, str(self.dir / name)]
         nums = self.tool(argv)
         return PartReading(
             str(nums.get("status", "blind")), nums, str(frame), str(annotated)
         )
 
     def learn(self, verdict: Verdict) -> None:
-        """Keep this reading's changed mask as the part's footprint (armed / refreshed)."""
-        cand = self.dir / "candidate.png"
-        if (verdict.arm or verdict.refresh) and cand.is_file():
-            os.replace(cand, self.dir / "footprint.png")
+        """Keep this reading's changed mask (and the transform that carried the baseline onto it) as the
+        part's footprint: armed / refreshed. The two move together or the footprint would not be carried."""
+        if not (verdict.arm or verdict.refresh):
+            return
+        for cand, final in (
+            ("candidate.png", "footprint.png"),
+            ("candidate-track.json", "track.json"),
+        ):
+            if (self.dir / cand).is_file():
+                os.replace(self.dir / cand, self.dir / final)
 
 
 def reference_baseline(name: str, z: float) -> tuple[bytes, float] | None:

@@ -10,6 +10,7 @@ printer, camera or phone: the real `tg` is refused under pytest and the fixture 
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -65,7 +66,8 @@ def in_process_tool(argv: list[str]) -> dict[str, Any]:
 
 def scenario(tmp_path: Path, steps: list[dict[str, Any]]) -> Path:
     for name in {s["frame"] for s in steps if "frame" in s}:
-        (tmp_path / name).write_bytes((DATA / name).read_bytes())
+        if (DATA / name).is_file():  # the rest was generated into tmp_path (drifted())
+            (tmp_path / name).write_bytes((DATA / name).read_bytes())
     path = tmp_path / "scenario.json"
     path.write_text(
         json.dumps({"printer": "k1se", "file": "part.gcode", "steps": steps}),
@@ -297,6 +299,180 @@ def test_without_yes_a_real_watch_is_refused_but_a_fixture_is_not(
         R.run(["k1se", "--job", "--fixture", str(scenario_path), "--wait-start", "5"])
         == 1
     )  # not printing
+
+
+# ---- the bed goes down (a printer without a camera calibration): the baseline is chained --------
+
+ROI = (
+    (0.31, 0.48),
+    (0.72, 0.27),
+    (0.92, 0.55),
+    (0.92, 0.97),
+    (0.41, 0.97),
+)  # DEVICES' plate
+DRIFT_PX_PER_MM = (
+    0.8,
+    2.2,
+)  # what the K1 SE picture of the plate does per mm the bed goes down
+DRIFT_SCALE_PER_MM = (
+    -0.003
+)  # ... and the plate shrinks a little (perspective) about its middle
+
+
+def layer_z(layer: int) -> float:
+    return round(0.2 * layer, 2)
+
+
+def drifted(tmp_path: Path, name: str, mm: float) -> str:
+    """DATA/name as the camera sees it with the bed `mm` lower: the content of the plate polygon moves
+    (shift + shrink), the machine around it stands still. Written into tmp_path; returns its name."""
+    img = cv2.imread(str(DATA / name))
+    h, w = img.shape[:2]
+    plate = bed_part.B.polygon_mask(ROI, (h, w)).astype(np.uint8)
+    s = 1 + DRIFT_SCALE_PER_MM * mm
+    cx, cy = 0.62 * w, 0.7 * h
+    m = np.array(
+        [
+            [s, 0, (1 - s) * cx + DRIFT_PX_PER_MM[0] * mm],
+            [0, s, (1 - s) * cy + DRIFT_PX_PER_MM[1] * mm],
+        ],
+        np.float32,
+    )
+    moved = cv2.warpAffine(img, m, (w, h), borderMode=cv2.BORDER_REPLICATE)
+    inside = cv2.warpAffine(plate, m, (w, h), flags=cv2.INTER_NEAREST) > 0
+    img[inside] = moved[inside]
+    out = f"{Path(name).stem}@{mm:.1f}.jpg"
+    cv2.imwrite(str(tmp_path / out), img)
+    return out
+
+
+def layers(
+    tmp_path: Path, name: str, first: int, last: int, **extra: Any
+) -> list[dict[str, Any]]:
+    """One reading a minute, one layer each: layer n shows `name` with the bed 0.2 mm lower than at n-1."""
+    return [
+        at(
+            60 * n,
+            drifted(tmp_path, name, layer_z(n) - layer_z(1)),
+            n,
+            z=layer_z(n),
+            **extra,
+        )
+        for n in range(first, last + 1)
+    ]
+
+
+def camera_labels(out: str) -> dict[int, str]:
+    """layer -> the camera label of its reading, from the watch log."""
+    found = re.findall(r"layer (\d+)/\d+ .*?camera (\w+)", out)
+    return {int(n): label for n, label in found}
+
+
+def drift_watch(
+    tmp_path: Path, steps: list[dict[str, Any]], capsys: pytest.CaptureFixture[str]
+) -> tuple[int, str, list[dict[str, Any]]]:
+    return watch(
+        tmp_path,
+        [at(0, "empty.jpg", 1, z=layer_z(1)), *steps],
+        "--tg-dry-run",
+        "--duration",
+        "5000",
+        capsys=capsys,
+    )
+
+
+def test_a_healthy_part_stays_present_over_30_layers_of_drift(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], xdg: Path
+) -> None:
+    """6 mm of bed travel is far beyond z_tol (2 mm): the plate is followed, the camera never goes blind."""
+    steps = [*layers(tmp_path, "part.jpg", 3, 30), end(60 * 31)]
+    code, out, outcomes = drift_watch(tmp_path, steps, capsys)
+    assert code == 0 and outcomes == [] and would_run(out) == []
+    labels = camera_labels(out)
+    assert set(range(5, 31)) <= set(labels)
+    assert {labels[n] for n in range(5, 31)} == {"present"}, out
+    assert all(label != "blind" for n, label in labels.items() if n >= 3)
+    run_dir = xdg / "state" / "3d-cli" / "jobwatch" / "k1se"
+    assert (run_dir / "track.json").is_file()  # the chain: the last healthy transform
+
+
+def test_a_detached_part_at_layer_30_is_gone_and_cancels_through_the_drift(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    steps = [
+        *layers(tmp_path, "part.jpg", 3, 29),
+        *layers(tmp_path, "empty.jpg", 30, 32),
+    ]
+    code, _, outcomes = drift_watch(tmp_path, steps, capsys)
+    assert code == 3
+    (o,) = outcomes
+    assert o["action"] == "cancel" and o["findings"][0]["kind"] == J.PART_GONE
+    assert o["findings"][0]["data"]["layer"] == 30  # after two readings, never one
+
+
+@pytest.mark.parametrize("name", ["part.jpg", "part_dark_room.jpg"])
+def test_a_lighting_change_at_layer_30_with_the_part_standing_is_no_finding(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], name: str
+) -> None:
+    steps = [
+        *layers(tmp_path, "part.jpg", 3, 29),
+        *layers(tmp_path, name, 30, 34),
+        end(60 * 35),
+    ]
+    code, out, outcomes = drift_watch(tmp_path, steps, capsys)
+    assert code == 0 and outcomes == [] and would_run(out) == []
+    assert {camera_labels(out)[n] for n in range(30, 35)} == {"present"}, out
+
+
+@pytest.mark.parametrize("name", ["empty.jpg", "part.jpg"])
+def test_a_camera_that_jumps_beyond_what_can_be_followed_is_blind_never_gone(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], name: str
+) -> None:
+    """The picture moves 90 px at once (a bumped camera): the chain cannot follow, it must not say gone."""
+    jump = [
+        at(60 * n, drifted(tmp_path, name, 40.0), n, z=layer_z(n)) for n in (30, 31, 32)
+    ]
+    steps = [*layers(tmp_path, "part.jpg", 3, 29), *jump, end(60 * 33)]
+    code, out, outcomes = drift_watch(tmp_path, steps, capsys)
+    assert code == 0 and outcomes == [] and would_run(out) == []
+    assert {camera_labels(out)[n] for n in (30, 31, 32)} == {"blind"}, out
+    assert "the plate cannot be followed on the picture" in out
+
+
+def pixel_check(tmp_path: Path, frame: str, z: float, chained: bool = False) -> dict[str, Any]:
+    """bed_part.py on one frame against DATA/empty.jpg (Z 0.2); `chained`: start from the files of the last call."""
+    argv = [
+        *("check", "k1se", "--json", "--baseline", str(DATA / "empty.jpg")),
+        *("--baseline-z", "0.2", "--frame", str(tmp_path / frame), "--z", str(z)),
+        *("--save-footprint", str(tmp_path / "fp.png")),
+        *("--save-track", str(tmp_path / "t.json")),
+    ]
+    if chained:
+        argv += [
+            "--footprint",
+            str(tmp_path / "fp.png"),
+            "--track",
+            str(tmp_path / "t.json"),
+        ]
+    return bed_part.run_check(bed_part.build_parser().parse_args(argv))
+
+
+def test_the_pixel_tool_chains_small_steps_to_a_drift_no_single_step_could_follow(
+    tmp_path: Path,
+) -> None:
+    """Each call starts from the transform the last healthy one saved (--track) and carries the footprint
+    along: 8 mm (18+ px) of bed travel in 5 steps of ~1.6 mm; the same 8 mm in ONE step is blind."""
+    zs = [0.2 + 1.6 * k for k in range(1, 6)]
+    names = [drifted(tmp_path, "part.jpg", z - 0.2) for z in zs]
+    first = pixel_check(tmp_path, names[0], zs[0])
+    assert first["status"] == "ok"
+    for name, z in zip(names[1:], zs[1:], strict=True):
+        nums = pixel_check(tmp_path, name, z, chained=True)
+        assert nums["status"] == "ok" and nums["overlap"] >= 0.8, nums
+        assert nums["outside"] < 0.3 and nums["track_corr"] >= 0.9, nums
+    assert nums["drift_px"] > bed_part.TRACK_STEP_PX  # beyond what one step may jump
+    cold = pixel_check(tmp_path, names[-1], zs[-1])  # no --track: the chain is lost
+    assert cold["status"] == "blind" and "cannot be followed" in cold["reason"]
 
 
 # ---- the pure judge --------------------------------------------------------------------------

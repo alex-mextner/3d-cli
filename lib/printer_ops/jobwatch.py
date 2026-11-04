@@ -19,8 +19,9 @@ WHAT (pure, stdlib, no clock, no I/O: feed `Observation`s, get `Finding`s and a 
                   printer's own defect detection (`noodle` verdicts in klippy.log).
   `decide`        pause | cancel | alert from the findings, the layer and `--on-fail`.
 
-BLIND IS NOT GONE: with the plate out of view at this Z, no baseline, or no calibration to warp it, the camera
-  says `blind` and contributes nothing; the signals keep running. A job that was never seen on the camera
+BLIND IS NOT GONE: with the plate out of view at this Z, no baseline, or (no camera calibration) a plate that
+  cannot be followed on the picture (bed_part.py: the chained baseline), the camera says `blind` and
+  contributes nothing; the signals keep running. A job that was never seen on the camera
   (`no_part_seen`) is a WARNING, never a cancel: black PLA on a black plate is invisible to a camera, a part that
   came off during the first layers is not, and the two cannot be told apart from one still frame.
 
@@ -130,7 +131,7 @@ class JobConfig:
     on_fail: str = "auto"
     checkpoints: tuple[Checkpoint, ...] = ()
     min_view: float = 0.5  # share of the plate in the frame to judge the part
-    z_tol_mm: float = 2.0  # an uncalibrated baseline stands this far
+    z_tol_mm: float = 2.0  # without tracking an uncalibrated baseline stands this far
     present_min: float = (
         0.004  # changed share of the plate region that says "something stands there"
     )

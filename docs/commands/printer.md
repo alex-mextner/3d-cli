@@ -826,7 +826,8 @@ quarter, half and all of the first layer — the first-layer marks need `--gcode
   footprint is learnt from layer 3 on, then `part_gone` (little of it left), `part_moved`,
   `spaghetti` (much new material beyond it) and the `arm` state. A finding needs **2 readings of the
   last 4**: a toolhead passing over the part is not a finding. With the plate out of view, no
-  baseline, or no camera calibration to warp it the camera says `blind` — **never "gone"**.
+  baseline, or a plate that cannot be followed (no camera calibration: see
+  [below](#job-watch-no-calibration)) the camera says `blind` — **never "gone"**.
 - *Signals.* The same Moonraker events as the always-on watch (filament runout, heater loss, bed off,
   exception, G-code error, homing lost), and the printer's own defect detection (`noodle` verdicts
   with p >= 0.8, read from klippy.log).
@@ -853,6 +854,37 @@ G-code, no resume, no start. In particular **the bed is not moved during a print
 98 % of the plate up to Z 30 and 77 % at Z 100, so the watcher looks at the print's own Z. Above about
 Z 130 the plate is mostly out of view and the camera is `blind` (`min_view` 0.5): the signals keep
 running, the part check does not.
+
+<a id="job-watch-no-calibration"></a>
+**A printer without a camera calibration (the K1 SE, a `watch.bed.roi` polygon) follows the plate.**
+Nothing says how the bed's move in Z shows in its picture, and the old rule (judge the part only within
+`z_tol_mm` = 2 mm of the baseline's Z) blinded the camera after ~10 layers. The job watch now *chains*
+the baseline:
+
+- Every healthy reading (label `present`, overlap >= `heal_overlap`, outside < 0.3) saves, next to the
+  part's footprint, the affine transform that carries the empty baseline's plate onto that frame
+  (`track.json` in the watcher's working folder).
+- The next reading starts from that transform and refines it by ECC (OpenCV `findTransformECC`:
+  correlation based, so a global light change does not move it) on the plate pixels only, **without the
+  part's footprint neighbourhood**: the part is excluded from the measurement of the drift. Layer to
+  layer the bed moves 0.2 mm (about a pixel), so the chain never has to jump, and every step is anchored
+  to the true empty first-layer baseline, so errors do not accumulate. The footprint is carried along by
+  the change of transform, the baseline is warped onto the frame, the compared region is the plate as it
+  moved.
+- **Gone** is then the footprint of the current frame matching the empty plate again whatever the Z:
+  a vanished part reads as overlap ~0, a part that stands as overlap ~1, a lighting change as neither.
+- Within `z_tol_mm` of the baseline's Z a failed tracking falls back to the baseline as it stands (the
+  old behaviour); beyond it the camera is `blind` with the reason (`... the plate cannot be followed on
+  the picture: ...`), never `gone`.
+
+*Limits.* The plate must show texture (a blank plate cannot be followed). The transform may not jump
+more than `TRACK_STEP_PX` (12 px of the 480-px frame, a few mm of bed) between two healthy readings (the
+camera was bumped, the watch was blind for a long time while the bed went far, a pause with a big Z
+hop): `blind`. An ECC correlation under 0.6 is `blind`. The model is affine, the real bed move is a
+perspective one: approximate over a big drift, absorbed by the comparison's shift tolerance. A part so
+tall that its top leaves the plate polygon, or spaghetti over most of the plate, may make the plate
+untrackable: `blind`, the signals keep running. A toolhead or a hand over the plate for one reading
+only lowers the correlation of that reading.
 
 **Exit codes.** 0 the job ended, nothing lost; 3 a lost print was found and the stop attempted;
 1 it could not run.
@@ -896,7 +928,10 @@ working files (baseline, footprint) live in `~/.local/state/3d-cli/jobwatch/NAME
 - Camera latency: how stale a frame can be when a part comes off is not measured.
 - Per-model Z positions: the 98 % / 77 % / blind-above-Z-130 numbers are the U1's; other models need
   their own calibration.
-- Printers without a camera calibration go blind after a few mm of Z (no way to warp the baseline).
+- Printers without a camera calibration (K1 SE): the chained baseline ([above](#job-watch-no-calibration))
+  was validated on frames of the real K1 SE bed moved by a synthetic affine drift, not on a real print of
+  many layers; the real picture's correlation (noise, the toolhead, shadows) may sit lower than the
+  fixtures' and `TRACK_MIN_CORR` (0.6) / `TRACK_STEP_PX` (12) may need tuning from the first real run.
 - Black-on-black parts (dark filament on a dark plate) give the footprint too little contrast.
 
 ## Safety
