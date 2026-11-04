@@ -5,9 +5,13 @@ Part of [`3d printops`](printops.md) (configuration, tokens, service). Issues:
 [#163](https://github.com/alex-mextner/3d-cli/issues/163) (weighing + tare DB),
 [#379](https://github.com/alex-mextner/3d-cli/issues/379) (spool label photos). Plan §5.2–5.3, F6.
 
-A spool's identity, lot, price, remaining weight and location live in Spoolman; 3d-api is
-the only writer. On top of that 3d-api keeps a **ledger**: every change of remaining filament
-with its own uncertainty, so remaining is always shown as an **interval**.
+A spool's identity, lot, price, remaining weight and location live in Spoolman, and **Spoolman is the
+authority for the current value of every spool field** — the web UI (weighing, edits, archive, new spools)
+and Moonraker's `[spoolman]` write to it directly. On top of that 3d-api keeps a **ledger**: every change of
+remaining filament with its own uncertainty, so remaining is always shown as an **interval**, plus events and
+a bookmark of what it last processed. 3d-api catches up with every change made in Spoolman by itself (below,
+[`spool drift`](#keeping-spoolman-and-printops-in-step)); the design is in
+[spool-sync.md](../printops/spool-sync.md).
 
 ## Remaining as an interval
 
@@ -28,8 +32,10 @@ with its own uncertainty, so remaining is always shown as an **interval**.
 - The ledger is append-only (DB triggers): a wrong booking is fixed by booking a correction
   (`use ID -12`).
 
-Spoolman's own `remaining_weight` follows the mid value (`/use`, `/measure`); its extra field
-`remaining_confidence_g` caches the ±.
+The interval's mid equals Spoolman's `remaining_weight` (± 0.5 g) — that is the invariant `spool drift`
+checks; its extra field `remaining_confidence_g` caches the ±. A weight typed or measured in the Spoolman UI
+becomes an anchor (`source weigh`, ± scale and tare), usage Moonraker booked into Spoolman a
+`moonraker_live` row, both by `spool-sync`, never written back to Spoolman.
 
 ## Tares (empty-spool weights)
 
@@ -37,7 +43,10 @@ A weighing needs the spool's tare. The chain, first hit wins:
 
 1. the tare 3d-api wrote into the spool's Spoolman `spool_weight` (with its recorded source);
 2. a `spool_weight` someone typed into Spoolman (unsourced, ±15 g);
-3. Spoolman `filament.spool_weight`, vendor extra `spool_tare_g`, vendor `empty_spool_weight` (±15 g);
+3. Spoolman `filament.spool_weight`, then the vendor's native `empty_spool_weight` (±15 g) — the same
+   native fields Spoolman's own `/measure` reads. The old vendor extra field `spool_tare_g` is no longer
+   read: a Spoolman that still has vendors holding it must run `3d printops fields migrate-native` once
+   ([native-fields.md](../printops/native-fields.md); `3d printops health` reports the leftover field as degraded);
 4. the **tare DB**: rows for the spool's vendor, narrowed by spool kind and label net. Seeded
    from [SpoolmanDB](https://github.com/Donkie/SpoolmanDB) — every distinct
    manufacturer / spool type / net / spool weight (151 rows, ±10 g) — plus your own entries
@@ -65,6 +74,7 @@ No tare → `measure` refuses (409) and says why; pass `--tare G` (recorded for 
 3d printops spool measure ID GROSS_G [--tare G [--tare-source TEXT]] [--scale-sigma G] [--note TEXT]
 3d printops spool empty ID [--note TEXT]
 3d printops spool import-owned FILE [--location LOC] [--project NAME] [--apply]
+3d printops spool drift [--spool ID] [--heal]
 ```
 
 Every action takes `--json` (the API answer), `--api URL`, `--token TOKEN`.
@@ -78,7 +88,7 @@ Every action takes `--json` (the API answer), `--api URL`, `--token TOKEN`.
 - `receive` — a new spool. The vendor is matched case/punctuation-insensitively, the filament
   by vendor + material + name + colour (+ net), else created (density defaults per material:
   PLA 1.24, PETG 1.27, ABS 1.04, …; diameter 1.75). The location must be storage, not a
-  printer slot. `--opened` sets `opened_at` now (drying policy reads it).
+  printer slot. `--opened` sets Spoolman's native `first_used` now (the drying policy's opened clock).
   `--max-speed MM_S` sets the max print speed (extra field `max_speed_mm_s`, mm/s, a positive
   integer) of a filament this call creates; without it the default is 300, PLA+ 600, and a filament
   that already exists keeps the value it has (`3d printops fields fill-defaults` fills the empty ones).
@@ -104,8 +114,8 @@ Every action takes `--json` (the API answer), `--api URL`, `--token TOKEN`.
   Spoolman filament, for every spool of it; the spool's own value wins; `--clear` empties it).
   `3d calibrate gen --printer P` uses it as the default `--filament-preset`. The printed value is the
   effective one (the spool's own, else its filament's). `3d printops spool preset 7 'Orange PLA @K1SE' --filament`
-- `load` — bind to a printer head (`u1/T3`) or AMS slot (`p1s/ams1/2`): Spoolman extra
-  `printops_slot` = `u1/T3`, location `slot:u1/T3`, `opened_at` if unset. Refused: an unknown
+- `load` — bind to a printer head (`u1/T3`) or AMS slot (`p1s/ams1/2`): Spoolman
+  `location` = `slot:u1/T3` (that text IS the binding) and `first_used` if unset. Refused: an unknown
   printer/slot, a head [`fleet/printers.yaml`](../../fleet/printers.yaml) marks unusable (with
   its reason, e.g. U1 T2), a head with open faults (`3d printops maint fault open PRINTER/HEAD`;
   the refusal lists them, and loads work again once all are closed with `maint fault close`;
@@ -177,8 +187,10 @@ Every action takes `--json` (the API answer), `--api URL`, `--token TOKEN`.
   `spool empty` and a `load` that takes a spool out of another slot do not touch the old
   printer's active spool: `unload` it first.
 
-  Who books usage: Moonraker does, from its `[spoolman]` section; PrintOps never books those
-  jobs (`docs/printops/oss.md` section 9.6). `spool use` stays the manual correction.
+  Who books usage: Moonraker does, from its `[spoolman]` section, straight into Spoolman; PrintOps does not
+  book those jobs a second time. 3d-api's sync (below) reads Moonraker's usage back from Spoolman and
+  writes it into the ledger as a `moonraker_live` row exactly once, so the interval follows. `spool use`
+  stays the manual correction.
 - `--no-printer-write` — change Spoolman only; the head and Moonraker's active spool stay as
   they are (`unload` takes it too).
   `3d printops spool load 7 u1/T3 --no-printer-write`
@@ -263,12 +275,44 @@ label.jpg  (OCR, turned 0°, score 87.8)
 - `show` — the tare a weighing of this spool would subtract, and where it comes from; for an
   ambiguous vendor, the candidate rows. `3d printops tare show 7`
 
+The old vendor extra field `spool_tare_g` is gone; `3d printops fields migrate-native` (see
+[printops.md](printops.md#fields) and [native-fields.md](../printops/native-fields.md)) moves its values to
+Spoolman's native vendor empty spool weight.
+
+## Keeping Spoolman and PrintOps in step
+
+```
+3d printops spool drift [--spool ID] [--heal] [--json]
+```
+
+Why this exists: the Spoolman web UI (your inventory and weighing) and Moonraker's `[spoolman]` change spools
+without PrintOps. **Spoolman holds the current value; PrintOps follows by appending** (ledger rows, events,
+notes) and never writes a weight back; it keeps a bookmark of what it last processed, so its own writes are not
+mistaken for somebody else's. The whole model, and what was wrong before, is in
+[spool-sync.md](../printops/spool-sync.md).
+
+- 3d-api runs a pass every `PRINTOPS_SPOOL_SYNC_S` seconds (default 60, at least 10, `0` = off): a weight typed
+  or measured in the UI becomes an anchor, Moonraker usage a `moonraker_live` delta, and creates / archives /
+  deletes / moves are recorded. What it cannot fix opens an anomaly of scope `spools`
+  (`3d printops anomalies --printer spools`) that clears by itself.
+- `drift` — read-only: lists every difference (kind, spool, both values, what `--heal` would do). Exit 0 when
+  nothing drifts, 1 otherwise. The tolerance is 0.5 g between the ledger's mid and Spoolman's remaining.
+  `3d printops spool drift --json | jq '.drifts[].kind'`
+- `drift --heal` — the same pass the schedule runs, now: exit 0 when nothing is left, 1 when something needs a
+  person (listed). `3d printops spool drift --heal`
+- `3d printops health` shows the drift count, the last pass and stuck anomalies, and exits 1 on drift;
+  `3d print-preflight` grades a drifted loaded spool with the policy check `spool_in_sync`.
+
+Kinds: `remaining`, `unknown_spool`, `spool_returned`, `spool_deleted`, `archived`, `location`, `tare`,
+`confidence` (healable) and `location_unknown`, `slot_conflict`, `spoolman_rolled_back`, `spoolman_empty`
+(a person decides). After restoring Spoolman or the PrintOps DB from a backup run `drift`, then `--heal`.
+
 ## REST (3d-api)
 
 | Method | Path | Scope | Body / query |
 |---|---|---|---|
 | GET | `/v1/spools` | read | `material, color, vendor, location, loaded, archived` |
-| POST | `/v1/spools` | write | receive fields (`vendor, material, name, color_hex, net_g, remaining_g, tare_g, spool_kind, lot_nr, price, location, opened, max_speed_mm_s, …`) |
+| POST | `/v1/spools` | write | receive fields (`vendor, material, name, color_hex, net_g, remaining_g, tare_g, spool_kind, lot_nr, price, location, opened, max_speed_mm_s, …` (`max_speed_mm_s`: filament max print speed, mm/s, for a filament this receive creates; default 300, PLA+ 600)) |
 | POST | `/v1/spools/import` | write | `{items: [receive fields + external_key], dry_run}` |
 | GET | `/v1/spools/{id}` | read | `ledger=N` |
 | GET | `/v1/spools/{id}/ledger`, `/v1/spools/{id}/tare` | read | |
@@ -280,6 +324,9 @@ label.jpg  (OCR, turned 0°, score 87.8)
 | POST | `/v1/printers/{p}/slots/{s}/unload` | write | `{to?, gross_g?, spool_id?, printer_write? (true)}`; the answer adds `printer_write.active_spool` (same shape; `written` with `after: null` = cleared) |
 | GET / POST | `/v1/tares` | read / write | `vendor` / `{vendor, tare_g, source, spool_kind?, net_g?, sigma_g?, note?}` |
 | GET | `/v1/lint` | read | `weigh_days` — the data rules below |
+| GET | `/v1/spool-sync` | read | `spool` — live drift report: `{ok, tolerance_g, checked, drift, healable, unhealable, drifts[{spool_id, kind, summary, healable, blocks, action, detail}], last_pass, interval_s}` |
+| GET | `/v1/spool-sync/status` | none | what the scheduled pass last saw, no Spoolman request: `{enabled, interval_s, last_pass, anomalies_open}` |
+| POST | `/v1/spool-sync/heal` | write | `{spool_id?}` — heal now (what the schedule does); `{ok, before, healed, failed, after}` |
 
 Errors: `{"detail": message, "info": {...}}` — 404 unknown spool/printer/slot/location, 409
 unusable head / occupied slot / archived spool / no tare / duplicate import key, 422 invalid
@@ -294,9 +341,16 @@ reason, spool_id, before, after}` instead) or `slot.printer_write_failed` (`want
 `pressure_advance` | `active_spool`). An active-spool event carries `write: "active_spool"`; an
 `unload` emits none, its answer says what happened.
 
+Events written by the sync (actor `spool-sync`): `spool.synced` (`field`, `cause`, `from`, `to`, `ledger_id`),
+`spool.used` with `observed: true` (usage somebody else booked), `spool.adopted` / `spool.returned` (a spool
+created in Spoolman / back after a restore), `spool.archived` / `spool.unarchived` / `spool.deleted`, and
+`spool.moved`, `slot.loaded`, `slot.unloaded` with `via: "spoolman"` for placement changes made there.
+
 Python API for other slices: `printops.ledger.book(conn, spoolman, spool_id, grams, source,
 confidence_g, job_id=None, note=None, *, actor)`, `ledger.remaining(conn, spoolman, spool_id)
 -> Interval`, `ledger.note(conn, spool_id, text, *, actor)` (inside the caller's transaction).
+`ledger.observe_usage(conn, spool_id, delta_g, source, *, actor, confidence_g=None, note=None)` records usage
+somebody else already booked in Spoolman: a ledger row and its event, never a Spoolman write.
 
 ## Lint (`3d lint --printops`)
 

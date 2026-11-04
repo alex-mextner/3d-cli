@@ -256,9 +256,9 @@ calibration on screen, or compare against the backup JSON and restore it over SS
    Enabled**, URL `http://192.168.0.39:7912`; the printer checks it can reach it. SpoolLink
    registers extra fields `card_uids` (spool) and `variant` (filament), PATCHes spools when it links
    a tag, and Moonraker's `[spoolman]` reports usage for the active spool. **This conflicts with
-   our "3d-api is the single writer to Spoolman" rule (D2) and duplicates our `tag_uids` extra
-   field.** Before enabling, decide one of: (a) SpoolLink owns U1 usage and `card_uids`, and 3d-api
-   skips `/use` for U1 jobs and maps `tag_uids` ↔ `card_uids`; (b) keep SpoolLink off, and 3d-api
+   our "3d-api is the single writer to Spoolman" rule (D2) and overlaps Spoolman's native
+   tags (which PrintOps now uses instead of a `tag_uids` extra).** Before enabling, decide one of: (a) SpoolLink owns U1 usage and `card_uids`, and 3d-api
+   skips `/use` for U1 jobs and maps the native tags ↔ `card_uids`; (b) keep SpoolLink off, and 3d-api
    writes U1 slot data itself through `POST /printer/filament_detect/set` (Moonraker does no
    Spoolman accounting on the printer).
 3. **OpenRFID + NTAG215/OpenSpool.** firmware-config **RFID Detection System: OpenRFID** reads

@@ -38,6 +38,8 @@ service is never exposed to the internet.
 3d printops loc tree|add|show|set|mv|archive|unarchive|label|resolve|sync-fleet|resync …
 3d printops spool ls|show|receive|move|load|unload|use|measure|empty|import-owned …
 3d printops tare ls|add|show …
+3d printops fields migrate-native [--apply] [--json] [--api URL] [--token TOKEN]
+3d printops fields fill-defaults [--apply] [--json] [--api URL] [--token TOKEN]
 3d printops dry start DRYER SPOOL_ID... [--temp C] [--hours H] [--rh PCT] [--weights ID=G,...] [--note TEXT]
 3d printops dry finish SESSION_ID [--rh PCT] [--weights ID=G,...]
 3d printops dry ls [--open] [--spool ID] [--limit N]
@@ -53,7 +55,7 @@ service is never exposed to the internet.
 
 | Subcommand | What |
 |---|---|
-| `health` | 3d-api status: DB migrations, Spoolman reachability and version, PrintOps extra fields registered. No token needed. Exit 0 = ok, 1 = degraded/unreachable. |
+| `health` | 3d-api status: DB migrations, Spoolman reachability and version, PrintOps extra fields registered, and the spool sync (how many spools differ between Spoolman and PrintOps, when the scheduled pass last ran, anomalies it could not fix). No token needed. Exit 0 = ok and nothing drifts, 1 = degraded/unreachable/drift. |
 | `events` | The PrintOps event log (`slot.mismatch`, `spool.measured`, `drying.due`, …), oldest first; `--follow` streams new ones (SSE). |
 | `token` | Mint, list and revoke 3d-api bearer tokens. Only sha256 is stored; `create` prints the token once. |
 | `deploy` | Ship Spoolman + 3d-api to the Odroid (or `--host` any ssh host, or `--local`) as the compose project `printops`, wait until healthy. [`3d init --env`](init.md#environment-stage-3d-init---env) is the guided front end (target menu, token, config, backup disk, Home Assistant). |
@@ -61,6 +63,7 @@ service is never exposed to the internet.
 | `loc` | The location tree: warehouse cells, dry boxes, dryers and the printer slots from `fleet/printers.yaml`; moves re-sync Spoolman's `location`; printable QR label sheets. |
 | `spool` | Spool lifecycle — receive → store/move → load into a printer slot → unload → empty — with remaining as an interval (ledger), weighing and the idempotent `gen/plates.json` import. See [printops-spool.md](printops-spool.md). |
 | `tare` | The sourced empty-spool weight DB (SpoolmanDB seed + own weighings) and the tare chain of a spool. See [printops-spool.md](printops-spool.md#3d-printops-tare). |
+| `fields` | One-off, idempotent migration of the legacy PrintOps Spoolman extra fields (`spool_tare_g`, `printops_slot`, `printops_location_id`, `opened_at`, `tag_uids`) to Spoolman's native fields; dry run by default; `fill-defaults` gives filaments a default max print speed. See [`fields`](#fields) and [native-fields.md](../printops/native-fields.md). |
 | `dry` | Drying sessions (start / finish / ls) and the spools due for drying by the `drying:` policy in `fleet/policy.yaml`. |
 | `slots` | Every fleet printer slot by slot: what the printer reports loaded (live, read by 3d-api's poller), the spool bound to it in Spoolman, open anomalies. |
 | `anomalies` | Slot reconciliation anomalies (type/colour/tag mismatch, empty slot with a spool, unknown filament, impossible bindings, a printer head `spool load` could not write); `ack` / `resolve` them. |
@@ -73,8 +76,9 @@ add theirs there.
 
 ### `health`
 
-- `--json` — print the raw `/v1/health` body.
+- `--json` — print the raw `/v1/health` body plus `spool_sync` (the `/v1/spool-sync/status` answer).
   `3d printops health --json | jq '.spoolman.extra_fields.missing'`
+  `3d printops health --json | jq '.spool_sync.last_pass.drift'`
 - `--api URL` — 3d-api base URL.
   `PRINTOPS_API=http://192.168.0.39:8765 3d printops health`
 - `--token TOKEN` — bearer token (health itself does not need one).
@@ -83,7 +87,12 @@ add theirs there.
 3d-api http://192.168.0.39:8765  ok  (version 3f9c2a1b7d10)
   db        ok  migrations 1  last event #0
   spoolman  ok  v0.27.0  extra fields ok
+  spool sync  ok  0 drift, last pass 2026-11-01T21:40:11.312Z, every 60 s
 ```
+
+A drifting spool prints `spool sync  DRIFT  3 drift, … → 3d printops spool drift` and the command exits 1
+([spool-sync.md](../printops/spool-sync.md)).
+
 
 ### `events`
 
@@ -209,10 +218,9 @@ reason in its note) and, for AMS-like units, `slot:<printer>/<unit>/<n>` follow
 `fleet/printers.yaml`: 3d-api re-syncs them on the first write request after the file changed
 (a deploy) and on `loc sync-fleet` (reads never sync: run `loc sync-fleet` after a deploy); slots that left the fleet are archived once empty.
 
-**Spoolman link.** A spool stored in a location has Spoolman `location` = the path and the extra
-field `printops_location_id` = the location id (both written in one PATCH). `show` lists the
-spools whose id points at the location, plus spools without an id whose `location` string was
-typed to the path in the Spoolman UI. `mv` renames the whole subtree in one DB transaction,
+**Spoolman link.** A spool stored in a location has Spoolman `location` = the path — that text is
+the only record of where it is (a move made in the Spoolman UI is a move). `show` lists the
+spools whose `location` string is the path or a former path of the location. `mv` renames the whole subtree in one DB transaction,
 remembers every old path as a former path of its location, then runs `resync`; if Spoolman is
 down then, the move stays, the failure is printed (exit 1), spools still naming an old path
 keep counting as inside the moved location, and `loc resync` repairs them later. `resync`
@@ -307,7 +315,7 @@ wet     spool 3 (Polymaker PA6-CF PA6-CF)  [extreme]  dried 7.5 d ago ≥ 2 × 3
 ```
 
 **How "due" is decided.** `fleet/policy.yaml` → `drying:` gives every hygroscopic class
-(`low|medium|high|extreme`) three limits: `max_days_opened` (days since Spoolman `opened_at` for a
+(`low|medium|high|extreme`) three limits: `max_days_opened` (days since Spoolman's native `first_used` for a
 spool we never dried), `max_days_since_dried` (days since `last_dried_at`) and `max_rh` (% RH of the
 spool's storage location — its own or nearest ancestor's `humidity_sensor_entity`, read from Home
 Assistant). The class comes from the filament's material (`materials:` table: PLA low, PETG/ABS/ASA
@@ -357,20 +365,19 @@ A head the fleet marks `usable: false` is annotated `T<n> (unusable: <reason>)` 
 ### `anomalies`
 
 Each reconcile pass (after every poll, and right after `slot.loaded` / `slot.unloaded` /
-`slot.printer_written` / `slot.printer_write_failed` / `spool.*` events) compares each slot with the spools whose Spoolman extra field
-`printops_slot` names it (`u1/T3`):
+`slot.printer_written` / `slot.printer_write_failed` / `spool.*` events) compares each slot with the spools whose Spoolman `location` is
+`slot:<printer>/<head>` (`slot:u1/T3`):
 
 | Kind | When |
 |---|---|
 | `type_mismatch` | printer material ≠ spool filament material (case/space-insensitive) |
 | `color_mismatch` | CIEDE2000 between the printer colour and the spool colour (filament `measured_hex`, else `color_hex` / nearest of `multi_color_hexes`) > `PRINTOPS_COLOR_DE_MAX` (default 15) |
-| `tag_mismatch` | the slot read an RFID UID that is not in the spool's `tag_uids` |
+| `tag_mismatch` | the slot read an RFID UID that is not among the spool's native Spoolman tags |
 | `empty_with_spool` | the printer says the slot is empty but a spool is bound to it |
 | `unbound_filament` | filament is loaded but no spool is bound to the slot |
 | `multiple_spools` | two or more spools bound to one slot |
 | `unusable_head` | a spool bound to a head the fleet marks `usable: false` |
-| `unknown_slot` | `printops_slot` names a printer or head not in the fleet |
-| `location_conflict` | the spool's Spoolman location is set and is not `slot:<printer>/<head>` |
+| `unknown_slot` | the spool's `slot:<printer>/<head>` location names a printer or head not in the fleet |
 | `printer_write_failed` | the latest head write of `spool load` (event `slot.printer_write_failed`) failed for the spool still bound there. Clears after a successful write (run the load again), when the binding changes, or — for a failed filament write — when the printer shows the spool's material and colour (set on the touchscreen). Stage `active_spool` = Moonraker's active spool could not be set (K1 SE: usage would be booked to the old spool); it is its own write, tracked apart from the head's (both can be open at once), and a successful head write does not clear it |
 
 A new anomaly emits `anomaly.opened` (and `slot.mismatch` for the slot kinds); one that is no
@@ -414,6 +421,36 @@ REST: `GET /v1/gates/state?printer=NAME` (404 unknown printer, 503 no fleet file
 `GET /v1/gates/snapshot` → `{version, taken_at, api, printers: {name: state}}`. State schema:
 `lib/printops/gates.py`. Later slices add keys (maintenance #166, calibrations #167); a gate reads
 an absent key as "not known" (UNVERIFIED).
+
+### `fields`
+
+`3d printops fields migrate-native [--apply] [--json] [--api URL] [--token TOKEN]` — run it once per
+Spoolman after upgrading (`3d printops health` lists the leftovers as `spoolman.legacy_fields` and is
+degraded until they are gone). **Dry run by default**: `3d printops fields migrate-native` prints one line
+per item and writes nothing; `3d printops fields migrate-native --apply` writes (token scope `write`);
+`--json` prints the report (`3d printops fields migrate-native --apply --json`). Moves:
+vendor `spool_tare_g` → `empty_spool_weight`; spool `printops_slot` → `location` `slot:<printer>/<head>`;
+`printops_location_id` dropped; `opened_at` → `first_used` (the earlier of the two, `adjust`);
+`tag_uids` → Spoolman tags; the filament temperature ranges stay and fill an empty native
+`settings_extruder_temp` / `settings_bed_temp` with their midpoint (`fill`). Per item: `copy`, `drop`
+(native value already equal), `adjust`, `link`, `fill` are written in one Spoolman call that also clears the
+legacy value (the reply is checked); `conflict` (a different native value, a tag held by another spool),
+`invalid` and `failed` are never overwritten and make the command exit 1. A field definition is deleted only
+once no item holds a value (Spoolman destroys stored values with the definition). Idempotent. REST:
+`GET /v1/fields/migrate-native` (scope read, dry run) and `POST /v1/fields/migrate-native` (scope write).
+
+`3d printops fields fill-defaults [--apply] [--json] [--api URL] [--token TOKEN]` — gives every existing
+filament the default **max speed** (extra field `max_speed_mm_s`, mm/s; not the mm³/s
+`max_volumetric_mm3_s`) where it is **empty**: 600 for PLA+ (material `PLA+`, or a name containing `PLA+`,
+e.g. `Elegoo RAPID PLA+`), 300 for everything else. A value already there — also one typed in the Spoolman
+UI, whatever the number — is never touched. **Dry run by default**: `3d printops fields fill-defaults`
+prints one line per filament (id, name, material, old, new, `set`/`keep`) and writes nothing;
+`3d printops fields fill-defaults --apply` writes (token scope `write`); `--json` prints the report
+(`3d printops fields fill-defaults --apply --json`). Idempotent: a second `--apply` writes nothing.
+Exit 1 only when a write failed. New filaments created by `spool receive` / `spool import-owned` / scan get
+the same default (a `max_speed_mm_s` in the receive body wins). REST: `GET /v1/fields/fill-defaults`
+(scope read, dry run) and `POST /v1/fields/fill-defaults` (scope write). Nothing in PrintOps consumes the
+value yet.
 
 ## Exit codes
 
