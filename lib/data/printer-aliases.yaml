@@ -1,0 +1,179 @@
+# printer-aliases.yaml — the `3d printer -n NAME <alias>` shortcuts, per adapter and per printer model.
+#
+# Read by lib/printer_ops/aliases.py (schema checked at load). Issue #718. An alias is a name for
+# G-code lines that THIS kind of printer understands, so what exists differs per firmware:
+# a missing alias is reported as "not defined for <model>", never guessed.
+#
+# LAYERS (later wins per alias name, whole entry replaced):
+#   1. adapters.<adapter>      the protocol's own commands (stock Klipper for `moonraker`)
+#   2. models[].aliases        every `contains` (case-insensitive, in the printer's `model:`) that matches
+#   3. the printer's own entries in ~/.config/3d-cli/printer-aliases.yaml, then ./printer-aliases.yaml:
+#      `NAME: {alias: entry, ...}` (same entry schema; the project file wins per alias)
+# An entry `unsupported: <reason>` (or `null` in a printer's own entries) removes an alias from that
+# layer on, with the reason shown to the user.
+#
+# ENTRY:
+#   summary    one line for `--help`
+#   kind       inert | job | heating | motion | dangerous   (lib/printer_ops/macros.py: job = allowed while
+#              a job runs; heating/motion/dangerous need an idle printer; dangerous also needs --yes)
+#   yes        true: the alias needs --yes (extra confirmation)
+#   timeout    seconds Moonraker may take to answer (default 120)
+#   args       ordered mapping, filled from positional words, `--name VALUE` or `NAME=VALUE`:
+#                type axes    X, Y, Z letters, any order      -> "X Y"
+#                type head    T1..Tn (the fleet heads); also {name}_extruder, {name}_suffix ("" for T1, "1" for T2)
+#                type int | float   min / max
+#                type choice  choices: {name: {placeholder: value}}; the extra values fill unset placeholders
+#                optional: true | default: VALUE; a line whose placeholder has no value is left out
+#   gcode      lines sent as ONE script; {arg} placeholders are replaced by validated values only
+#
+# Sources of the printer-specific entries (nothing was run on a real printer):
+#   Snapmaker U1:  https://github.com/Snapmaker/u1-klipper  lava/fluidd.cfg, lava/printer.cfg,
+#                  klippy/extras/filament_feed.py, klippy/extras/purifier.py, klippy/kinematics/extruder.py
+#   Creality K1 SE: https://github.com/CrealityOfficial/K1_Series_Klipper
+#                  config/K1_SE_CR4CU220812S12/gcode_macro.cfg
+#   Stock Klipper: https://www.klipper3d.org/G-Codes.html
+
+adapters:
+  moonraker:
+    home:
+      summary: "home all axes (G28), or only the given ones - `home X Y`"
+      kind: motion
+      timeout: 300
+      args:
+        axes: {type: axes, optional: true, default: ""}
+      gcode: ["G28 {axes}"]
+    level:
+      summary: "bed mesh (BED_MESH_CALIBRATE)"
+      kind: motion
+      timeout: 600
+      gcode: [BED_MESH_CALIBRATE]
+    qgl:
+      summary: "quad gantry level (QUAD_GANTRY_LEVEL), only on printers that define it"
+      kind: motion
+      timeout: 300
+      gcode: [QUAD_GANTRY_LEVEL]
+    z-tilt:
+      summary: "Z tilt adjust (Z_TILT_ADJUST), only on printers that define it"
+      kind: motion
+      timeout: 300
+      gcode: [Z_TILT_ADJUST]
+    pause:
+      summary: "pause the running print (PAUSE)"
+      kind: job
+      gcode: [PAUSE]
+    resume:
+      summary: "resume a paused print (RESUME)"
+      kind: job
+      gcode: [RESUME]
+    preheat:
+      summary: "heat to a material's typical temperatures, or `--nozzle C` / `--bed C` (`--head T2`)"
+      kind: heating
+      args:
+        material:
+          type: choice
+          optional: true
+          choices:
+            PLA: {nozzle: 210, bed: 60}
+            PETG: {nozzle: 235, bed: 80}
+            ABS: {nozzle: 250, bed: 100}
+            ASA: {nozzle: 255, bed: 100}
+            TPU: {nozzle: 225, bed: 50}
+        nozzle: {type: float, min: 0, max: 300, optional: true}
+        bed: {type: float, min: 0, max: 120, optional: true}
+        head: {type: head, default: T1}
+      gcode:
+        - SET_HEATER_TEMPERATURE HEATER={head_extruder} TARGET={nozzle}
+        - SET_HEATER_TEMPERATURE HEATER=heater_bed TARGET={bed}
+    cooldown:
+      summary: "switch every heater off (TURN_OFF_HEATERS)"
+      kind: heating
+      gcode: [TURN_OFF_HEATERS]
+    load:
+      summary: "load filament with the printer's LOAD_FILAMENT macro (a Fluidd/Mainsail convention, not core Klipper)"
+      kind: motion
+      timeout: 300
+      gcode: [LOAD_FILAMENT]
+    unload:
+      summary: "unload filament with the printer's UNLOAD_FILAMENT macro (a Fluidd/Mainsail convention, not core Klipper)"
+      kind: motion
+      timeout: 300
+      gcode: [UNLOAD_FILAMENT]
+
+models:
+  - contains: snapmaker u1
+    aliases:
+      level-heated:
+        summary: "heat the bed, soak, then bed mesh (AUTO_BED_MESH_CALIBRATE; `--bed C`, default 55; waits 2 min)"
+        kind: motion
+        timeout: 900
+        args:
+          bed: {type: float, min: 30, max: 100, default: 55}
+        gcode: ["AUTO_BED_MESH_CALIBRATE TEMP={bed}"]
+      clean-nozzle:
+        summary: "rough nozzle clean at the discard position (ROUGHLY_CLEAN_NOZZLE)"
+        kind: motion
+        timeout: 300
+        gcode: [ROUGHLY_CLEAN_NOZZLE]
+      load:
+        summary: "feed the filament of head T1..T4 (AUTO_FEEDING EXTRUDER=n LOAD=1)"
+        kind: motion
+        timeout: 600
+        args:
+          slot: {type: head}
+        gcode: ["AUTO_FEEDING EXTRUDER={slot} LOAD=1"]
+      unload:
+        summary: "unload the filament of head T1..T4 (AUTO_FEEDING UNLOAD=1, stages prepare then doing)"
+        kind: motion
+        timeout: 600
+        args:
+          slot: {type: head}
+        gcode:
+          - AUTO_FEEDING EXTRUDER={slot} UNLOAD=1 STAGE=prepare
+          - AUTO_FEEDING EXTRUDER={slot} UNLOAD=1 STAGE=doing
+      park:
+        summary: "park a head in its dock (PARK_EXTRUDER, PARK_EXTRUDER1..; default T1)"
+        kind: motion
+        timeout: 120
+        args:
+          head: {type: head, default: T1}
+        gcode: ["PARK_EXTRUDER{head_suffix}"]
+      idle-position:
+        summary: "move a head to the idle XY position (MOVE_TO_XY_IDLE_POSITION_EXTRUDER; default T1)"
+        kind: motion
+        timeout: 120
+        args:
+          head: {type: head, default: T1}
+        gcode: ["MOVE_TO_XY_IDLE_POSITION_EXTRUDER{head_suffix}"]
+      purifier:
+        summary: "chamber purifier mode idle|cool|preheat|hot (SET_PURIFIER_MODE MODE=0..3)"
+        kind: heating
+        args:
+          mode:
+            type: choice
+            choices:
+              idle: {code: 0}
+              cool: {code: 1}
+              preheat: {code: 2}
+              hot: {code: 3}
+        gcode: ["SET_PURIFIER_MODE MODE={code}"]
+  - contains: creality k1
+    aliases:
+      level:
+        summary: "heat and bed mesh with the stock G29 macro (it heats the bed and nozzle itself)"
+        kind: motion
+        timeout: 900
+        gcode: [G29]
+      load:
+        summary: "load filament (stock LOAD_MATERIAL: heats to the default temperature, feeds 80 mm)"
+        kind: motion
+        timeout: 300
+        gcode: [LOAD_MATERIAL]
+      unload:
+        summary: "unload filament (stock QUIT_MATERIAL: heats, purges and retracts)"
+        kind: motion
+        timeout: 300
+        gcode: [QUIT_MATERIAL]
+      qgl:
+        unsupported: "the K1 SE stock printer.cfg defines no quad_gantry_level (bed mesh only: `level`)"
+      z-tilt:
+        unsupported: "the K1 SE stock printer.cfg defines no z_tilt (bed mesh only: `level`)"
