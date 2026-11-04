@@ -58,7 +58,7 @@ the token, the health check and the config.
 | `--spoolman script` | Write a self-contained installer (`--script-out`, default `./spoolman-setup.sh`); installs nothing here. |
 | `--api URL` `--token TOKEN` | Connect to a Spoolman/3d-api that already runs (what the script prints): the URL and the token are checked, then written. |
 | `--bind ADDR` | The host address Spoolman and 3d-api listen on (an IP address). Default `127.0.0.1` for `--spoolman local`, `0.0.0.0` (all interfaces) for ssh/printer hosts and for `script`. See [Network exposure](#network-exposure). |
-| `--dry-run` | Install targets: print the steps (rsync `--dry-run`), change nothing. |
+| `--dry-run` | Install targets (`local`, `printer:NAME`, `ssh:USER@HOST`): print the steps (rsync `--dry-run`), change nothing. Refused (exit 2) with `--api` and `--spoolman script`, which would write a file. |
 | `--allow-discouraged` | With `--no-input`: accept a printer marked "possible but not recommended". |
 | `--no-input`, `--yes`, `-y` | Never prompt, and never install unless an explicit target is named. |
 

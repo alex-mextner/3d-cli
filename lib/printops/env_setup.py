@@ -117,7 +117,8 @@ Options:
   --bind ADDR        host address Spoolman and 3d-api listen on (an IP address). Default 127.0.0.1 for `local`
                      (Spoolman has no authentication; other machines and printers then cannot reach it: pass
                      --bind 0.0.0.0 or one LAN address), 0.0.0.0 for ssh/printer hosts and for `script`
-  --dry-run          install targets: print the steps (rsync dry run), change nothing
+  --dry-run          install targets only (local, printer:NAME, ssh:USER@HOST): print the steps (rsync dry run),
+                     change nothing; refused with --api and script, which would write a file
   --allow-discouraged  --no-input only: accept a "possible but not recommended" printer host
   --no-input, --yes, -y  never prompt, never install unless an explicit target is named
 
@@ -258,6 +259,18 @@ def _check_combinations(o: Options, target: Target) -> None:
         raise UsageError(
             "--script-out only goes with --spoolman script", command=CLI_NAME
         )
+    if o.dry_run and o.api:
+        raise dry_run_unsupported("--api", str(config_path()))
+    if o.dry_run and target.kind == "script":
+        raise dry_run_unsupported("--spoolman script", "the script file")
+
+
+def dry_run_unsupported(what: str, writes: str) -> UsageError:
+    return UsageError(
+        f"--dry-run previews an install target (local, printer:NAME, ssh:USER@HOST); {what} would still write {writes}",
+        command=CLI_NAME,
+        remediation=["Drop --dry-run, or pick an install target to preview."],
+    )
 
 
 def parse_options(argv: Sequence[str]) -> Options:
@@ -895,7 +908,9 @@ def _setup(target: Target, health: Health | None, cur_api: str | None, opts: Opt
     if target.kind == "skip":
         env.say("skipped: Spoolman/PrintOps not configured (3d init --env when you want it)")
         return 0
-    if target.kind == "script":
+    if target.kind == "script":  # also reached from the menu, which parse_options never saw
+        if opts.dry_run:
+            raise dry_run_unsupported("the script target", "the script file")
         return make_script(opts, env)
     _confirm_discouraged(target, cands, opts, env)
     host, label = resolve_host(target, cands, opts)

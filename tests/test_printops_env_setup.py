@@ -594,6 +594,35 @@ def test_busy_host_warns_and_interactive_can_decline(cfg_home: Path) -> None:
     assert any("BUSY" in line for line in out) and not drec.calls
 
 
+def test_dry_run_with_api_or_script_is_refused_and_writes_nothing(
+    cfg_home: Path, service: FakeService
+) -> None:
+    """`--api URL --dry-run` used to rewrite printops.yaml (keeping the old one only as .bak) and
+    `--spoolman script --dry-run` wrote the script: a preview flag must never write."""
+    old = write_cfg("http://10.0.0.99:8765", "po_old")
+    before = old.read_bytes()
+    out_file = cfg_home / "preview.sh"
+    for argv in (
+        ["--api", service.url, "--token", GOOD_TOKEN, "--dry-run"],
+        ["--spoolman", "script", "--script-out", str(out_file), "--dry-run"],
+    ):
+        env, _, rec, drec = make_env(cfg_home)
+        with pytest.raises(UsageError, match="--dry-run") as err:
+            env_setup.run(["--no-input", *argv], env)
+        assert err.value.exit_code == 2
+        assert not rec.calls and not drec.calls
+    assert old.read_bytes() == before and not old.with_name("printops.yaml.bak").exists()
+    assert not out_file.exists() and service.requests == []  # refused before any request, too
+
+
+def test_dry_run_chosen_from_the_menu_cannot_write_the_script(cfg_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(cfg_home)
+    env, _, _, _ = make_env(cfg_home, tty=True, ask=Prompts("4", "preview.sh"))
+    with pytest.raises(UsageError, match="--dry-run"):
+        env_setup.run(["--dry-run"], env)
+    assert not (cfg_home / "preview.sh").exists()
+
+
 def test_dry_run_prints_the_plan_and_changes_nothing(cfg_home: Path) -> None:
     env, out, rec, drec = make_env(cfg_home)
     assert (
