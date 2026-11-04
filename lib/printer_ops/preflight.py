@@ -5,7 +5,9 @@ WHAT (issue https://github.com/alex-mextner/3d-cli/issues/96), one PASS/WARN/FAI
                  (lib/gcode_thumbnails.py check(), the `3d gcode-thumbnails` checker);
   - printer      the target printer is free (not printing/paused/busy/unknown);
   - bed          (printers with `watch.bed.enabled`) the camera saw the bed clear with the plate
-                 on (printer_ops/bed.py, issue #303): objects or no plate FAIL, unknown WARN;
+                 on, from the best view with the printer's light on (printer_ops/bed.py, issue
+                 #303/#723): a missing plate or a CONFIDENT occupied FAIL, unknown or an occupied
+                 seen at a poor view WARN with the command to run;
   - slot Tn      for every tool the G-code uses: the printer's head is loaded, and its colour
                  and material equal the G-code's `; filament_colour` / `; filament_type`
                  (needs per-head data: Moonraker printers exposing print_task_config, i.e. U1);
@@ -151,8 +153,8 @@ def _hex(value: str | None) -> str | None:
     )
 
 
-def read_gcode_meta(path: Path) -> GcodeMeta:
-    """Filament colours/types and the tools actually used, from slicer comments + Tn lines."""
+def _scan_gcode(path: Path) -> tuple[dict[str, str], set[int]]:
+    """The slicer's `; key = value` config comments and the tools named by `Tn` lines."""
     config: dict[str, str] = {}
     tool_lines: set[int] = set()
     with open(path, encoding="utf-8", errors="replace") as fh:
@@ -165,16 +167,23 @@ def read_gcode_meta(path: Path) -> GcodeMeta:
                 t = _TOOL_LINE.match(line.strip())
                 if t:
                     tool_lines.add(int(t.group(1)))
+    return config, tool_lines
+
+
+def _amount(value: str) -> float:
+    try:
+        return float(value)
+    except ValueError:  # an unparsable amount counts as unused, keep reading
+        return 0.0
+
+
+def read_gcode_meta(path: Path) -> GcodeMeta:
+    """Filament colours/types and the tools actually used, from slicer comments + Tn lines."""
+    config, tool_lines = _scan_gcode(path)
     used: list[int]
     used_mm = config.get("filament used [mm]")
     if used_mm:
-        amounts = []
-        for v in used_mm.split(","):
-            try:
-                amounts.append(float(v))
-            except ValueError:  # noqa: PERF203 — an unparsable amount counts as unused, keep reading
-                amounts.append(0.0)
-        used = [i for i, a in enumerate(amounts) if a > 0]
+        used = [i for i, a in enumerate(map(_amount, used_mm.split(","))) if a > 0]
     elif tool_lines:
         used = sorted(tool_lines)
     else:
@@ -211,58 +220,47 @@ def check_printer_free(status: PrinterStatus) -> Check:
     return Check("printer", PASS, f"{status.state} [{status.raw_state}]")
 
 
+def _check_slot(meta: GcodeMeta, status: PrinterStatus, t: int) -> Check:
+    """The `slot Tn` line of one tool the G-code uses."""
+    name = f"slot T{t}"
+    if t >= len(status.slots):
+        return Check(
+            name,
+            FAIL,
+            f"G-code uses tool {t} but the printer has {len(status.slots)} heads",
+        )
+    slot = status.slots[t]
+    if not slot.present:
+        return Check(
+            name,
+            FAIL,
+            f"head {slot.label} is used by the G-code but has no filament / is disabled",
+        )
+    want_c = meta.colours[t] if t < len(meta.colours) else None
+    want_m = meta.types[t] if t < len(meta.types) else None
+    problems = []
+    if want_c and slot.color and want_c != slot.color:
+        problems.append(f"colour: G-code {want_c}, loaded {slot.color}")
+    if want_m and slot.material and want_m.upper() != slot.material.upper():
+        problems.append(f"material: G-code {want_m}, loaded {slot.material}")
+    if problems:
+        return Check(name, FAIL, f"head {slot.label}: " + "; ".join(problems))
+    if not want_c:
+        return Check(
+            name,
+            WARN,
+            f"head {slot.label}: G-code has no filament_colour for tool {t}; "
+            f"loaded {slot.color} {slot.material}",
+        )
+    return Check(
+        name, PASS, f"head {slot.label}: {slot.color} {slot.material or ''}".rstrip()
+    )
+
+
 def check_slots(meta: GcodeMeta, status: PrinterStatus) -> list[Check]:
     if not status.slots:
         return [Check("slots", SKIP, "the printer reports no per-head filament data")]
-    out = []
-    for t in meta.used_tools:
-        name = f"slot T{t}"
-        if t >= len(status.slots):
-            out.append(
-                Check(
-                    name,
-                    FAIL,
-                    f"G-code uses tool {t} but the printer has {len(status.slots)} heads",
-                )
-            )
-            continue
-        slot = status.slots[t]
-        if not slot.present:
-            out.append(
-                Check(
-                    name,
-                    FAIL,
-                    f"head {slot.label} is used by the G-code but has no filament / is disabled",
-                )
-            )
-            continue
-        want_c = meta.colours[t] if t < len(meta.colours) else None
-        want_m = meta.types[t] if t < len(meta.types) else None
-        problems = []
-        if want_c and slot.color and want_c != slot.color:
-            problems.append(f"colour: G-code {want_c}, loaded {slot.color}")
-        if want_m and slot.material and want_m.upper() != slot.material.upper():
-            problems.append(f"material: G-code {want_m}, loaded {slot.material}")
-        if problems:
-            out.append(Check(name, FAIL, f"head {slot.label}: " + "; ".join(problems)))
-        elif not want_c:
-            out.append(
-                Check(
-                    name,
-                    WARN,
-                    f"head {slot.label}: G-code has no filament_colour for tool {t}; "
-                    f"loaded {slot.color} {slot.material}",
-                )
-            )
-        else:
-            out.append(
-                Check(
-                    name,
-                    PASS,
-                    f"head {slot.label}: {slot.color} {slot.material or ''}".rstrip(),
-                )
-            )
-    return out
+    return [_check_slot(meta, status, t) for t in meta.used_tools]
 
 
 def run_halves_check(source: Path) -> tuple[int, str, str]:
@@ -390,22 +388,28 @@ def check_head_sequence(
             f"({len(objs)} object(s), {project_source})",
         )
     if status == FAIL:
-        lines = [
-            f"{o.get('status')} {o.get('name')}: {o.get('detail') or 'heads ' + str(o.get('heads'))}"
-            for o in objs
-            if o.get("status") != "ok"
-        ]
-        return Check(
-            "head seq",
-            FAIL,
-            f"{result.get('failures')} object(s) off their recipes ({project_source})",
-            lines,
-        )
+        return _head_seq_failed(result, objs, project_source)
     return Check(
         "head seq",
         PASS,
         f"{len(objs)} object(s) on their recipes, {result.get('mixed_rows')} mixed row(s) "
         f"({project_source})",
+    )
+
+
+def _head_seq_failed(
+    result: dict[str, Any], objs: list[dict[str, Any]], project_source: str
+) -> Check:
+    lines = [
+        f"{o.get('status')} {o.get('name')}: {o.get('detail') or 'heads ' + str(o.get('heads'))}"
+        for o in objs
+        if o.get("status") != "ok"
+    ]
+    return Check(
+        "head seq",
+        FAIL,
+        f"{result.get('failures')} object(s) off their recipes ({project_source})",
+        lines,
     )
 
 
@@ -531,90 +535,80 @@ def check_macros(rep: BoundsReport, trusted: frozenset[str]) -> list[Check]:
     ]
 
 
+def _check_axis_travel(
+    rep: BoundsReport, axis_limits: Limits | None, limits_source: str
+) -> Check:
+    if axis_limits is None:
+        why = f"{limits_source}; " if limits_source else ""
+        return Check(
+            "axis travel",
+            SKIP,
+            f"printer axis limits unknown ({why}pass --axis-limits "
+            f"X0:X1,Y0:Y1 or set axis_limits in {PROFILE_FILES})",
+        )
+    if rep.axis_out_count:
+        return Check(
+            "axis travel",
+            FAIL,
+            f"{fmt_limits(axis_limits)} ({limits_source}): "
+            + _first(rep.axis_out, rep.axis_out_count),
+        )
+    return Check(
+        "axis travel",
+        PASS,
+        f"all moves {fmt_extent(rep.all_extent)} within "
+        f"{fmt_limits(axis_limits)} ({limits_source})",
+    )
+
+
+def _check_print_area(rep: BoundsReport) -> Check:
+    if not rep.plate_found:
+        return Check(
+            "print area",
+            WARN,
+            "UNVERIFIED: no ;LAYER_CHANGE / ; CHANGE_LAYER markers, "
+            "the plate section cannot be told from start/end G-code",
+        )
+    # bed_exclude_area is evaluated on its own: a missing printable_area must not hide it
+    parts = []
+    if rep.area_out_count and rep.printable_area:
+        parts.append(
+            f"printable_area {fmt_area(rep.printable_area)}: "
+            + _first(rep.area_out, rep.area_out_count)
+        )
+    if rep.excluded_in_count and rep.exclude_area:
+        parts.append(
+            f"bed_exclude_area {fmt_area(rep.exclude_area)}: "
+            + _first(rep.excluded_in, rep.excluded_in_count, "inside")
+        )
+    if parts:
+        return Check(
+            "print area",
+            FAIL,
+            f"plate moves {fmt_extent(rep.plate_extent)}; " + "; ".join(parts),
+        )
+    if rep.printable_area is None:
+        return Check(
+            "print area", WARN, "UNVERIFIED: the G-code has no `; printable_area`"
+        )
+    return Check(
+        "print area",
+        PASS,
+        f"plate moves {fmt_extent(rep.plate_extent)} within "
+        f"{fmt_area(rep.printable_area)}",
+    )
+
+
 def check_moves(
     rep: BoundsReport,
     axis_limits: Limits | None,
     limits_source: str,
     trusted_macros: frozenset[str] = frozenset(),
 ) -> list[Check]:
-    out: list[Check] = []
-    if axis_limits is None:
-        why = f"{limits_source}; " if limits_source else ""
-        out.append(
-            Check(
-                "axis travel",
-                SKIP,
-                f"printer axis limits unknown ({why}pass --axis-limits "
-                f"X0:X1,Y0:Y1 or set axis_limits in {PROFILE_FILES})",
-            )
-        )
-    elif rep.axis_out_count:
-        out.append(
-            Check(
-                "axis travel",
-                FAIL,
-                f"{fmt_limits(axis_limits)} ({limits_source}): "
-                + _first(rep.axis_out, rep.axis_out_count),
-            )
-        )
-    else:
-        out.append(
-            Check(
-                "axis travel",
-                PASS,
-                f"all moves {fmt_extent(rep.all_extent)} within "
-                f"{fmt_limits(axis_limits)} ({limits_source})",
-            )
-        )
-
-    if not rep.plate_found:
-        out.append(
-            Check(
-                "print area",
-                WARN,
-                "UNVERIFIED: no ;LAYER_CHANGE / ; CHANGE_LAYER markers, "
-                "the plate section cannot be told from start/end G-code",
-            )
-        )
-    else:
-        # bed_exclude_area is evaluated on its own: a missing printable_area must not hide it
-        parts = []
-        if rep.area_out_count and rep.printable_area:
-            parts.append(
-                f"printable_area {fmt_area(rep.printable_area)}: "
-                + _first(rep.area_out, rep.area_out_count)
-            )
-        if rep.excluded_in_count and rep.exclude_area:
-            parts.append(
-                f"bed_exclude_area {fmt_area(rep.exclude_area)}: "
-                + _first(rep.excluded_in, rep.excluded_in_count, "inside")
-            )
-        if parts:
-            out.append(
-                Check(
-                    "print area",
-                    FAIL,
-                    f"plate moves {fmt_extent(rep.plate_extent)}; " + "; ".join(parts),
-                )
-            )
-        elif rep.printable_area is None:
-            out.append(
-                Check(
-                    "print area",
-                    WARN,
-                    "UNVERIFIED: the G-code has no `; printable_area`",
-                )
-            )
-        else:
-            out.append(
-                Check(
-                    "print area",
-                    PASS,
-                    f"plate moves {fmt_extent(rep.plate_extent)} within "
-                    f"{fmt_area(rep.printable_area)}",
-                )
-            )
-
+    out: list[Check] = [
+        _check_axis_travel(rep, axis_limits, limits_source),
+        _check_print_area(rep),
+    ]
     if rep.unverified_count:
         more = ", ..." if rep.unverified_count > len(rep.unverified) else ""
         out.append(
@@ -645,40 +639,96 @@ def bounds_report(
     )
 
 
-def check_bed_verdict(v: dict[str, Any]) -> Check:
-    """`bed_state.py status --json` (issue #303) -> the `bed` line. A verdict judged after the auto view
-    moved the bed names the Z it was judged at; a bed left away from where it was found is a WARN."""
-    bed, plate = v.get("bed", "unknown"), v.get("plate", "unknown")
+def _bed_when(v: dict[str, Any], view: dict[str, Any]) -> str:
+    """Where the verdict came from, and how the bed got to the Z it was judged at."""
     age = v.get("age_s")
     when = (
         f"{v.get('source', '?')}, {age:.0f} s ago"
         if isinstance(age, (int, float))
         else str(v.get("source", "?"))
     )
-    raw_view = v.get("view")
-    view: dict[str, Any] = raw_view if isinstance(raw_view, dict) else {}
     if view.get("action") == "moved":
         when += (
             f", judged at Z {view.get('z_used', v.get('z'))} after moving the bed from Z "
             f"{view.get('moved_from')}" + (" and back" if view.get("restored") else "")
         )
-    frame = [f"frame: {v['frame']}"] if v.get("frame") else []
-    why = str(v.get("reason") or "")
+    return when
+
+
+def _bed_evidence(v: dict[str, Any], view: dict[str, Any]) -> list[str]:
+    """The frame, a bed left away from where it was found, and what the printer's light did."""
+    lines = [f"frame: {v['frame']}"] if v.get("frame") else []
     if view.get("action") == "moved" and not view.get("restored"):
-        frame.append(
+        lines.append(
             f"BED NOT PUT BACK to Z {view.get('moved_from')}: {view.get('restore_error')}"
         )
-        if plate != "missing" and bed != "occupied":
-            return Check("bed", WARN, f"bed state {bed} ({when}): {why}", frame)
+    light = v.get("light")
+    if isinstance(light, dict) and light.get("text"):
+        lines.append(f"light: {light['text']}")
+    return lines
+
+
+def _bed_check_command(v: dict[str, Any]) -> str:
+    return f"3d printer bed check {v.get('printer') or 'NAME'}"
+
+
+def _check_bed_occupied(
+    v: dict[str, Any], when: str, lines: list[str], view_min: float
+) -> Check:
+    """FAIL only on a CONFIDENT `occupied` (bed_state.occupied_confident: a region of the normal
+    occupied size with at least `view_min` of the plate in the frame). The same pixels at a poor view
+    (the U1 at Z 200 sees 15 % of the plate: a window light read as 16 % changed) or in a verdict
+    that does not say it is confident are a WARN with the way to look properly."""
+    why = str(v.get("reason") or "")
+    if v.get("occupied_confident") is True:
+        return Check("bed", FAIL, f"objects on the bed ({when}): {why}", lines)
+    in_view = (v.get("metrics") or {}).get("bed_in_view")
+    low = (
+        f"only {in_view:.0%} of the plate is in the camera's view at this Z (needs {view_min:.0%})"
+        if isinstance(in_view, (int, float)) and in_view < view_min
+        else "the verdict does not mark it as a confident find"
+    )
+    return Check(
+        "bed",
+        WARN,
+        f"objects suspected on the bed but not confirmed: {low} ({when}): {why}; "
+        f"run `{_bed_check_command(v)}` (best view, light on) and look at the frame",
+        lines,
+    )
+
+
+def check_bed_verdict(v: dict[str, Any], *, view_min: float | None = None) -> Check:
+    """`bed_state.py status --json` (issue #303) -> the `bed` line. A verdict judged after the auto view
+    moved the bed names the Z it was judged at; a bed left away from where it was found is a WARN.
+    FAIL on a missing plate or a CONFIDENT `occupied` only; `unknown` and an occupied that is not
+    confident (low view of the plate, `view_min` = watch.bed.auto_view_min) are a WARN naming the command."""
+    from printer_ops.bed import AUTO_VIEW_MIN
+
+    bed, plate = v.get("bed", "unknown"), v.get("plate", "unknown")
+    raw_view = v.get("view")
+    view: dict[str, Any] = raw_view if isinstance(raw_view, dict) else {}
+    when, lines = _bed_when(v, view), _bed_evidence(v, view)
+    why = str(v.get("reason") or "")
+    left_away = view.get("action") == "moved" and not view.get("restored")
+    if left_away and plate != "missing" and bed != "occupied":
+        return Check("bed", WARN, f"bed state {bed} ({when}): {why}", lines)
     if plate == "missing":
-        return Check("bed", FAIL, f"build plate missing ({when}): {why}", frame)
+        return Check("bed", FAIL, f"build plate missing ({when}): {why}", lines)
     if bed == "occupied":
-        return Check("bed", FAIL, f"objects on the bed ({when}): {why}", frame)
+        return _check_bed_occupied(
+            v, when, lines, AUTO_VIEW_MIN if view_min is None else view_min
+        )
     if bed == "clear" and plate == "present":
-        return Check("bed", PASS, f"clear, plate present ({when})", frame)
+        return Check("bed", PASS, f"clear, plate present ({when})", lines)
     if bed == "clear":
-        return Check("bed", WARN, f"clear, plate not judged ({when}): {why}", frame)
-    return Check("bed", WARN, f"bed state {bed} ({when}): {why}", frame)
+        return Check("bed", WARN, f"clear, plate not judged ({when}): {why}", lines)
+    return Check(
+        "bed",
+        WARN,
+        f"bed state {bed} ({when}): {why}; "
+        f"run `{_bed_check_command(v)}` for the best view with the light on",
+        lines,
+    )
 
 
 def check_bed(
@@ -688,11 +738,12 @@ def check_bed(
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
     timeout: float | None = None,
 ) -> Check:
-    """The camera `bed` line (printer_ops/bed.py): SKIP when the printer's bed monitor is off,
-    else the watcher's verdict when fresher than `stale_s` at the same Z, else a fresh one-shot
-    camera check (`bed_state.py status`). With `watch.bed.auto_view` and an idle printer that check
-    moves the bed in Z to where the camera sees the whole plate and back (`move=False`: --no-move).
-    A check that cannot run is a WARN, never a crash."""
+    """The camera `bed` line (printer_ops/bed.py): SKIP when the printer's bed monitor is off, else
+    the FULL bed check path of an idle printer (`bed_state.py status --best-view`, what `3d printer
+    bed check` does): a fresh frame judged from the best view (the bed moved in Z only, put back),
+    with the printer's light on and restored, instead of the watcher's verdict at whatever Z the
+    bed rests at. `move=False` (--no-bed-move) judges at the current Z, light still on. FAIL only
+    on a confident `occupied` (check_bed_verdict). A check that cannot run is a WARN, never a crash."""
     from printer_ops.bed import (
         STATUS_MOVE_TIMEOUT_S,
         STATUS_TIMEOUT_S,
@@ -710,11 +761,9 @@ def check_bed(
     if (
         timeout is None
     ):  # a move is two Z moves, a settle wait and a frame wait; never kill it half-way
-        timeout = STATUS_MOVE_TIMEOUT_S if move and cfg.auto_view else STATUS_TIMEOUT_S
+        timeout = STATUS_MOVE_TIMEOUT_S if move else STATUS_TIMEOUT_S
     try:
-        argv = status_argv(
-            device.name, max_age=cfg.stale_s, move="auto" if move else "never"
-        )
+        argv = status_argv(device.name, move="force" if move else "never")
         r = runner(argv, capture_output=True, text=True, timeout=timeout)
     except Exception as exc:  # no runtime / timeout
         return Check("bed", WARN, f"bed check could not run: {exc}")
@@ -727,7 +776,7 @@ def check_bed(
         )
     if not isinstance(verdict, dict):
         return Check("bed", WARN, f"bed check returned {str(verdict)[:200]}")
-    return check_bed_verdict(verdict)
+    return check_bed_verdict(verdict, view_min=cfg.auto_view_min)
 
 
 def run_preflight(

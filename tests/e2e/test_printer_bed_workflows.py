@@ -6,7 +6,10 @@ from __future__ import annotations
 import json
 import threading
 import time
+from dataclasses import dataclass
+from http.server import BaseHTTPRequestHandler
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -37,7 +40,10 @@ def u1_after_job(state: str = "complete") -> FakeMoonraker:
     return FakeMoonraker(status=status, camera=jpeg("u1_z200_clear_ref.jpg"))
 
 
-def write_u1(tmp_path: Path, moon: FakeMoonraker) -> None:
+HAND_ROI = "[[0.05, 0.05], [0.95, 0.05], [0.95, 0.95], [0.05, 0.95]]"
+
+
+def write_u1(tmp_path: Path, moon: FakeMoonraker, bed: str = "{enabled: true, interval_s: 0.2}") -> None:
     d = tmp_path / "xdg-config" / "3d-cli"
     d.mkdir(parents=True, exist_ok=True)
     (d / "printer-devices.yaml").write_text(f"""u1:
@@ -48,7 +54,7 @@ def write_u1(tmp_path: Path, moon: FakeMoonraker) -> None:
   trusted_macros: [T0, T1, T2, T3]
   watch:
     vision: {{keepalive: false}}
-    bed: {{enabled: true, interval_s: 0.2}}
+    bed: {bed}
 """, encoding="utf-8")
 
 
@@ -78,11 +84,12 @@ def test_reference_then_status_sees_parts_and_the_cleared_bed(tmp_path: Path) ->
 
 
 def test_start_is_refused_while_parts_are_on_the_bed(tmp_path: Path) -> None:
-    """The user starts a print with the last job's parts still on the bed: start refuses; --force overrides only with the owner's Telegram approval."""
+    """The user starts a print with the last job's parts still on the bed: start refuses; --force overrides only with the owner's Telegram approval.
+    The printer's bed ROI is drawn by hand (no camera calibration, so the whole polygon is the view): a find in it is confident."""
     moon = u1_after_job()
     (tmp_path / "part.gcode").write_text(GCODE, encoding="utf-8")
     with moon.serve():
-        write_u1(tmp_path, moon)
+        write_u1(tmp_path, moon, bed=f"{{enabled: true, interval_s: 0.2, roi: {HAND_ROI}}}")
         assert run_cli(tmp_path, "printer", "bed", "reference", "u1", "--capture").returncode == 0
         assert run_cli(tmp_path, "printer", "upload", "u1", "part.gcode").returncode == 0
         moon.camera = jpeg("u1_occupied_1351.jpg")
@@ -95,6 +102,111 @@ def test_start_is_refused_while_parts_are_on_the_bed(tmp_path: Path) -> None:
     assert writes_refused == ["/server/files/upload"]
     assert forced.returncode == 0, forced.stdout + forced.stderr
     assert "FORCED" in forced.stdout and "bed" in forced.stdout.split("FORCED", 1)[1]
+
+
+def test_a_poor_view_of_parts_is_a_warn_with_the_command_not_a_refusal(tmp_path: Path) -> None:
+    """#723: the calibrated U1 at its Z 200 rest sees 15 % of the plate. The same frame that failed the start
+    (parts on the bed) is now only a WARN that names `3d printer bed check u1`; the start is not blocked by it."""
+    moon = u1_after_job()
+    (tmp_path / "part.gcode").write_text(GCODE, encoding="utf-8")
+    with moon.serve():
+        write_u1(tmp_path, moon)
+        assert run_cli(tmp_path, "printer", "bed", "reference", "u1", "--capture").returncode == 0
+        assert run_cli(tmp_path, "printer", "upload", "u1", "part.gcode").returncode == 0
+        moon.camera = jpeg("u1_occupied_1351.jpg")
+        pre = run_cli(tmp_path, "printer", "start", "u1", "part.gcode", "--yes")
+
+    assert "WARN  bed" in pre.stdout and "FAIL  bed" not in pre.stdout
+    assert "3d printer bed check u1" in pre.stdout and "not confirmed" in pre.stdout
+
+
+@dataclass
+class LightMoonraker(FakeMoonraker):
+    """A U1 with a chamber light: Moonraker lists it, reports its value and obeys SET_PIN."""
+
+    lit: bool = False
+    light: str = "output_pin chamber_light"
+
+    def run_script(self, script: str) -> str | None:
+        error = super().run_script(script)
+        if script.startswith("SET_PIN") and error is None:
+            self.lit = "VALUE=1" in script
+        return error
+
+    def handler(self) -> type[BaseHTTPRequestHandler]:
+        fake = self
+        base = super().handler()
+
+        class H(base):  # type: ignore[valid-type, misc]
+            def do_GET(self) -> None:
+                if urlsplit(self.path).path == "/printer/objects/list":
+                    self._reply({"result": {"objects": ["print_stats", "toolhead", fake.light]}})  # type: ignore[attr-defined]
+                    return
+                fake.status[fake.light] = {"value": 1.0 if fake.lit else 0.0}
+                super().do_GET()
+
+        return H
+
+
+def u1_with_light(lit: bool = False) -> LightMoonraker:
+    moon = u1_after_job()
+    return LightMoonraker(status=moon.status, camera=moon.camera, lit=lit)
+
+
+LIGHT_ON, LIGHT_OFF = "SET_PIN PIN=chamber_light VALUE=1", "SET_PIN PIN=chamber_light VALUE=0"
+
+
+def test_reference_status_and_check_switch_the_chamber_light_on_and_put_it_back(tmp_path: Path) -> None:
+    """#723: every frame is taken with the printer's light on; it is back off after each command."""
+    moon = u1_with_light()
+    with moon.serve():
+        write_u1(tmp_path, moon, bed="{enabled: true, interval_s: 0.2, light: {settle_s: 0}}")
+        ref = run_cli(tmp_path, "printer", "bed", "reference", "u1", "--capture")
+        after_ref = list(moon.scripts)
+        status = run_cli(tmp_path, "printer", "bed", "status", "u1", "--json")
+        after_status = list(moon.scripts)
+        check = run_cli(tmp_path, "printer", "bed", "check", "u1", "--no-move")
+        lit_at_end = moon.lit
+
+    assert ref.returncode == 0, ref.stderr
+    assert after_ref == [LIGHT_ON, LIGHT_OFF]
+    assert "light: light output_pin chamber_light switched on for the reference frame and restored" in ref.stdout
+    light = json.loads(status.stdout)["light"]
+    assert after_status == [LIGHT_ON, LIGHT_OFF, LIGHT_ON, LIGHT_OFF]
+    assert (light["found"], light["object"], light["was_on"], light["switched"], light["restored"]) == (
+        True, "output_pin chamber_light", False, True, True)
+    assert check.returncode in (0, 1) and "light: light output_pin chamber_light switched on" in check.stdout
+    assert moon.scripts == [LIGHT_ON, LIGHT_OFF] * 3 and lit_at_end is False
+
+
+def test_a_light_that_is_already_on_is_left_on_and_never_written(tmp_path: Path) -> None:
+    moon = u1_with_light(lit=True)
+    with moon.serve():
+        write_u1(tmp_path, moon, bed="{enabled: true, interval_s: 0.2, light: {settle_s: 0}}")
+        status = run_cli(tmp_path, "printer", "bed", "status", "u1", "--json")
+
+    assert json.loads(status.stdout)["light"]["was_on"] is True
+    assert moon.scripts == [] and moon.lit is True
+
+
+def test_no_light_on_the_printer_is_said_in_the_verdict_and_the_bed_is_still_judged(tmp_path: Path) -> None:
+    moon = u1_after_job()  # this fake lists no objects at all
+    with moon.serve():
+        write_u1(tmp_path, moon)
+        status = run_cli(tmp_path, "printer", "bed", "status", "u1")
+
+    assert status.returncode == 0, status.stderr
+    assert "bed unknown" in status.stdout and "light: no light found" in status.stdout
+    assert moon.writes() == []
+
+
+def test_a_light_macro_outside_trusted_macros_is_refused_when_the_config_is_read(tmp_path: Path) -> None:
+    moon = u1_with_light()
+    with moon.serve():
+        write_u1(tmp_path, moon, bed="{enabled: true, light: {on_gcode: LIGHT_ON}}")
+        out = run_cli(tmp_path, "printer", "bed", "status", "u1")
+
+    assert out.returncode != 0 and "trusted_macros" in out.stderr and moon.scripts == []
 
 
 def _swap_after(moon: FakeMoonraker, delay: float, name: str) -> threading.Thread:

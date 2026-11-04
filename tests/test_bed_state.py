@@ -436,7 +436,7 @@ def test_clear_ack_through_moonraker_posts_one_gcode_script(xdg: Path) -> None:
 ])
 def test_verdict_check(bed: str, plate: str, status: str) -> None:
     c = preflight.check_bed_verdict({"bed": bed, "plate": plate, "source": "watch", "age_s": 12.0, "reason": "r",
-                            "frame": "/f.jpg"})
+                                     "frame": "/f.jpg", "occupied_confident": True})
     assert (c.name, c.status) == ("bed", status)
     assert c.lines == ["frame: /f.jpg"] and "watch, 12 s ago" in c.detail
 
@@ -455,8 +455,8 @@ def test_bed_check_runs_the_tool_and_degrades_to_warn() -> None:
         return subprocess.CompletedProcess(argv, 0, json.dumps({"bed": "occupied", "plate": "present",
                                                                   "source": "camera now", "age_s": 0}), "")
 
-    assert preflight.check_bed(dev, runner=ok).status == "FAIL"
-    assert seen[0][-5:] == ["status", "u1", "--json", "--max-age", "30"]
+    assert preflight.check_bed(dev, runner=ok).status == "WARN"  # occupied, but the verdict is not marked confident
+    assert seen[0][-4:] == ["status", "u1", "--json", "--best-view"]  # the full check path, not the watcher's verdict
     broken = preflight.check_bed(dev, runner=lambda argv, **kw: subprocess.CompletedProcess(argv, 1, "", "boom"))
     assert broken.status == "WARN" and "boom" in broken.detail
 

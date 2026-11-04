@@ -708,6 +708,28 @@ until someone takes them off. The camera can see that, so nobody has to tell an 
   The `3d printer watch` monitor never moves the bed, and judges nothing (no verdict, no event, no
   ack) while a check has the bed away from where it was found. Config: `watch.bed.auto_view: true|false`,
   `auto_view_min`, `auto_view_part_mm` (see below).
+- **The light** (`watch.bed.light`, on unless `enabled: false`). A frame of a dark chamber is not
+  comparable to the reference, so every camera frame of the bed — `bed check`, `bed status` when it
+  takes a frame, `bed reference --capture`, the preflight `bed` line and the [job
+  watch](#job-watch) frame — is taken with the printer's own light on, and the light goes back as it
+  was found (in a `finally`: also after a failed frame, Ctrl-C or SIGTERM). The light is found among
+  Moonraker's `printer.objects.list`: `led NAME`, `neopixel NAME`, `dotstar NAME` (switched with
+  `SET_LED`) or `output_pin NAME` (`SET_PIN`) whose name says light, lamp, led or chamber (light/lamp
+  first, LEDs before pins). Its state is read first (read-only `objects/query`: `value` of a pin,
+  `color_data` of a LED chain); a light that is already on is not touched; after switching on it waits
+  `settle_s` (1.5). Name it when the guess is wrong, or give a macro:
+  `light: {object: "output_pin chamber_light", on_gcode: LIGHT_ON, off_gcode: LIGHT_OFF, settle_s: 1.5}`.
+  Every `on_gcode`/`off_gcode` command must be `SET_LED`, `SET_PIN` or listed in the printer's
+  `trusted_macros` (checked when the config is read, like `clear_ack`); a macro whose light state
+  cannot be read is switched on and, its previous state being unknown, left on (the report says so).
+  `enabled: false` opts out. **No light found:** the verdict says `no light found (...)` and the
+  frame is taken as it is. **Never touched while a job prints or is paused**, nor on a printer that is
+  not full-access; the one exception is the job watch, whose frame is taken during the print: only
+  when the light was off, switched on for the frame and off right after. The `3d printer watch` bed
+  *monitor* only reads idle frames and never touches the light. The verdict (`--json`) carries
+  `light`: `found`, `object`, `was_on`, `switched`, `restored`, `on_for_frame`, `error`, `text`, and
+  `check` / `status` / `reference` print it as a `light:` line. `light.on_for_frame` tells a later
+  comparison whether the frame was lit.
 - **Bed free, once.** `3d printer subscribe --session ID --printer u1 --once --on bed-free`: when
   the running job ends (a `3d printer watch` sees printing/paused → idle / complete / cancelled) the
   watcher waits 20 s for the end macro, runs the auto-view bed check, sends **one** `bed_free`
@@ -754,16 +776,23 @@ until someone takes them off. The camera can see that, so nobody has to tell an 
   (`watch.tg_fallback`). Subscribe an agent to them:
   `3d printer subscribe --session ID --kinds 'bed_*,plate_*' --min-severity info`.
   The last verdict is in `~/.local/state/3d-cli/bed/NAME.json` and in the watch heartbeat.
-- **Start gate.** `3d printer start` and `3d print-preflight --printer` add a `bed` line: FAIL on
-  objects or a missing plate, PASS on a clear bed with the plate, WARN when the camera cannot
-  tell (no reference at this Z, out of view, stale, plate out of view, camera down); a [forced start](#forcing-a-start) overrides it.
-  On an idle printer with `watch.bed.auto_view` the line is judged at the best Z (the bed moved in Z
-  only, and back; `--no-bed-move` judges at the current Z), see *Auto view* above.
+- **Start gate.** `3d printer start` and `3d print-preflight --printer` add a `bed` line. On an idle printer
+  the line runs the **full [bed check](#3d-printer-bed-check) path itself**: a fresh frame from the best
+  view (the bed moved in Z only, and back, even when `watch.bed.auto_view` is off), with the printer's
+  light on (see *The light* above) and restored — never the watcher's verdict at whatever Z the bed rests at.
+  `--no-bed-move` judges at the current Z (light still on). **FAIL only on a confident `occupied`**
+  (a changed region of the normal occupied size with at least `watch.bed.auto_view_min` of the plate in
+  the frame at the Z it was judged at; the verdict's `occupied_confident`) or a missing plate. PASS on a
+  clear bed with the plate. **WARN** (never FAIL) for `unknown` (no reference at this Z, out of view,
+  plate out of view, camera down) and for an occupied seen at a poor view: the U1 at Z 200 sees 15 % of
+  the plate and a window light there once read as «16.0 % changed: occupied», so that line is a WARN
+  that gives the reason, the share of the plate in view and `3d printer bed check NAME` to run. A
+  [forced start](#forcing-a-start) overrides a FAIL.
 - **Clear acknowledgement** (`watch.bed.clear_ack`, off by default): after `bed_clear` the
   printer makes one motor sound so the person at it knows the camera saw the empty bed. Neither
   printer has a beeper, so the command is `STEPPER_BUZZ STEPPER=stepper_z` (Klipper: ±1 mm ×10,
   ~10 s, net zero, works unhomed); a list of lines is allowed (the K1 SE can use shorter
-  `FORCE_MOVE` pulses). It is the only write the bed code makes: every command word must be in
+  `FORCE_MOVE` pulses). Besides the auto view's Z move and the light's on/off, it is the only write the bed code makes: every command word must be in
   `trusted_macros`, it is sent only when the printer reads idle/complete/cancelled right before,
   once per `bed_clear`, at most once per `debounce_minutes` (10), never below `min_z_mm` (10).
 
@@ -777,6 +806,7 @@ u1:
       auto_view: true           # move the bed in Z to where the camera sees the whole plate (fleet U1: true; default false)
       auto_view_min: 0.85       # share of the plate in the frame below which it is moved
       auto_view_part_mm: 60     # optional: the tallest thing that may stand on the bed (else the last job's object_height)
+      light: {object: "output_pin chamber_light", on_gcode: LIGHT_ON, off_gcode: LIGHT_OFF, settle_s: 1.5}  # optional: autodetected when absent; enabled: false opts out
 k1se:
   watch:
     bed:
@@ -791,7 +821,8 @@ A Home Assistant bed sensor is a follow-up: [#305](https://github.com/alex-mextn
 `3d printer bed check NAME [--expect empty|part] [--no-move] [--part-height MM] [--json]` is **the** tool
 to look at the bed: a fresh frame judged from where the camera sees the plate. An idle printer's bed is
 moved in Z only (the guarded move of auto view, even when `watch.bed.auto_view` is off), judged and put
-back; `--no-move` judges at the current Z.
+back; `--no-move` judges at the current Z. The frame is taken with the printer's light on (switched on
+before the bed moves, restored after the bed is back; see *The light* under [Bed state](#bed-state)).
 
 - **Result:** `empty` | `objects` | `out-of-view` | `unknown` | `busy` (printing: the bed belongs to
   the job, nothing is moved; use `3d printer watch NAME --job`). `--expect part` reads the same
@@ -827,7 +858,9 @@ quarter, half and all of the first layer — the first-layer marks need `--gcode
   `spaghetti` (much new material beyond it) and the `arm` state. A finding needs **2 readings of the
   last 4**: a toolhead passing over the part is not a finding. With the plate out of view, no
   baseline, or a plate that cannot be followed (no camera calibration: see
-  [below](#job-watch-no-calibration)) the camera says `blind` — **never "gone"**.
+  [below](#job-watch-no-calibration)) the camera says `blind` — **never "gone"**. Every
+  frame is taken with the printer's light on when it was off (and off again right after: the only
+  write the watcher makes besides pause/cancel; `watch.bed.light`, see *The light* under [Bed state](#bed-state)).
 - *Signals.* The same Moonraker events as the always-on watch (filament runout, heater loss, bed off,
   exception, G-code error, homing lost), and the printer's own defect detection (`noodle` verdicts
   with p >= 0.8, read from klippy.log).
