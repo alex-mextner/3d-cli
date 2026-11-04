@@ -215,6 +215,8 @@ mint_token() {
     die "could not mint a token: docker exec ${PREFIX}-api 3d printops token create $name --scopes read,write"
 }
 
+# Every command carries `|| return 1`: the caller runs this under `if !`, where errexit is off, and a
+# failure here must neither stop the script before it prints the one-time token nor go unnoticed.
 install_backup_timer() {
   [ "${PRINTOPS_BACKUP_TIMER:-1}" = 1 ] || return 0
   if ! command -v systemctl >/dev/null 2>&1 || ! systemctl --user show-environment >/dev/null 2>&1; then
@@ -222,9 +224,9 @@ install_backup_timer() {
     return 0
   fi
   local unit_dir="$HOME/.config/systemd/user" docker_bin
-  docker_bin="$(command -v docker)"
-  mkdir -p "$unit_dir"
-  cat >"$unit_dir/${PREFIX}-backup.service" <<EOF
+  docker_bin="$(command -v docker)" || return 1
+  mkdir -p "$unit_dir" || return 1
+  cat >"$unit_dir/${PREFIX}-backup.service" <<EOF || return 1
 [Unit]
 Description=PrintOps: snapshot the PrintOps + Spoolman SQLite DBs into $DIR/backup
 
@@ -232,7 +234,7 @@ Description=PrintOps: snapshot the PrintOps + Spoolman SQLite DBs into $DIR/back
 Type=oneshot
 ExecStart=$docker_bin exec ${PREFIX}-api 3d printops backup
 EOF
-  cat >"$unit_dir/${PREFIX}-backup.timer" <<EOF
+  cat >"$unit_dir/${PREFIX}-backup.timer" <<EOF || return 1
 [Unit]
 Description=Daily PrintOps DB snapshot
 
@@ -244,8 +246,8 @@ RandomizedDelaySec=5min
 [Install]
 WantedBy=timers.target
 EOF
-  systemctl --user daemon-reload
-  systemctl --user enable --now "${PREFIX}-backup.timer" >/dev/null
+  systemctl --user daemon-reload || return 1
+  systemctl --user enable --now "${PREFIX}-backup.timer" >/dev/null || return 1
   log "daily backup timer installed (${PREFIX}-backup.timer)"
 }
 
@@ -275,7 +277,8 @@ summary() {
 }
 
 main() {
-  local token_name="${TOKEN_NAME:-cli-$(host_name)}" dry=0
+  # NAME_RE allows 64 characters: "cli-" + at most 60 of the host name (a longer name failed after the stack was up)
+  local token_name="${TOKEN_NAME:-cli-$(host_name | cut -c1-60)}" dry=0
   while [ $# -gt 0 ]; do
     case "$1" in
       --dry-run) dry=1 ;;
@@ -310,7 +313,9 @@ main() {
     wait_for 3d-api "http://$(local_host):${API_PORT}/v1/health" '"status": *"ok"'
     mint_token "$token_name"
     token="$TOKEN"
-    install_backup_timer
+    if ! install_backup_timer; then
+      log "warning: the daily backup timer was not installed; the stack and the token are fine (by hand: docker exec ${PREFIX}-api 3d printops backup)"
+    fi
   fi
   summary "$token_name" "$token"
 }

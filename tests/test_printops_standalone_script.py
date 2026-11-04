@@ -239,6 +239,52 @@ def test_script_resolves_a_relative_base_dir_before_compose_sees_it(
     assert (here / "printops" / "data" / "spoolman").is_dir()  # prepared where compose mounts it
 
 
+def _shim(root: Path, name: str, body: str) -> None:
+    bindir = fake_docker_bin(root)  # the dir `_run_script` puts first on PATH
+    (bindir / name).write_text(f"#!/bin/sh\n{body}\n", encoding="utf-8")
+    (bindir / name).chmod(0o755)
+
+
+def test_script_token_name_never_exceeds_the_token_name_limit(script_file: Path, tmp_path: Path) -> None:
+    """NAME_RE is [a-z0-9][a-z0-9_.-]{0,63}: a 61+ character host name made the mint fail after the stack was up."""
+    from printops.tokens import NAME_RE
+
+    _shim(tmp_path, "hostname", 'case "$1" in -s) echo ' + "a" * 70 + " ;; *) ;; esac")
+    r = _run_script(script_file, tmp_path, TOKEN_NAME="")  # empty = the default name
+    assert r.returncode == 0, r.stderr
+    name = (tmp_path / "tokens.txt").read_text().split()[0]
+    assert NAME_RE.match(name) and len(name) == 64 and name.startswith("cli-aaaa")
+    assert "po_fakeminted" in r.stdout
+
+
+def test_script_prints_the_token_even_when_the_backup_timer_cannot_be_installed(
+    script_file: Path, tmp_path: Path
+) -> None:
+    """The token is shown once: a failure after minting it (no writable systemd dir, a failing
+    `systemctl --user`) must not exit before the summary, or a re-run says it is never shown again."""
+    _shim(tmp_path, "systemctl", 'case "$2" in daemon-reload) exit 1 ;; esac; exit 0')
+    r = _run_script(script_file, tmp_path, PRINTOPS_BACKUP_TIMER="1", HOME=str(tmp_path / "home"))
+    assert r.returncode == 0, r.stderr
+    assert "token: po_fakeminted" in r.stdout and "backup timer was not installed" in r.stdout
+    assert "docker exec pogb-api 3d printops backup" in r.stdout  # the by-hand fallback
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can write to a read-only directory")
+def test_script_prints_the_token_when_the_unit_directory_cannot_be_created(
+    script_file: Path, tmp_path: Path
+) -> None:
+    _shim(tmp_path, "systemctl", "exit 0")
+    home = tmp_path / "ro-home"
+    home.mkdir()
+    home.chmod(0o500)
+    try:
+        r = _run_script(script_file, tmp_path, PRINTOPS_BACKUP_TIMER="1", HOME=str(home))
+    finally:
+        home.chmod(0o700)
+    assert r.returncode == 0, r.stderr
+    assert "token: po_fakeminted" in r.stdout and "backup timer was not installed" in r.stdout
+
+
 def test_script_token_name_is_compared_literally(script_file: Path, tmp_path: Path) -> None:
     (tmp_path / "tokens.txt").write_text("cli-axb        read,write  now  sha256 abcdef\n", encoding="utf-8")
     r = _run_script(script_file, tmp_path, TOKEN_NAME="cli-a.b")  # '.' is not a wildcard
