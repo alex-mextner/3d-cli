@@ -212,7 +212,7 @@ def parse_target(raw: str) -> Target:
         return Target(raw)
     kind, _, name = raw.partition(":")
     if kind in ("printer", "ssh") and name:
-        if kind == "ssh" and (name.startswith("-") or any(ch.isspace() for ch in name)):
+        if kind == "ssh" and deploy.ssh_destination_problem(name):
             raise InvalidArgument(
                 "--spoolman",
                 raw,
@@ -627,7 +627,7 @@ def resolve_host(
     if target.kind == "local":
         return "", "this machine"
     if target.kind == "ssh":
-        return target.name, target.name
+        return _destination(target.name, "--spoolman ssh:"), target.name
     by_name = {c.name: c for c in cands}
     cand = by_name.get(target.name)
     if cand is None:
@@ -656,8 +656,21 @@ def resolve_host(
                 "Otherwise use `local`, `ssh:USER@HOST` or `script`.",
             ],
         )
-    user = f"{opts.ssh_user}@" if opts.ssh_user else ""
-    return f"{user}{cand.host}", f"{cand.name} ({cand.host})"
+    host = _destination(cand.host, f"the host of printer {cand.name}")
+    if not opts.ssh_user:
+        return host, f"{cand.name} ({cand.host})"
+    return f"{_destination(opts.ssh_user, '--ssh-user')}@{host}", f"{cand.name} ({cand.host})"
+
+
+def _destination(dest: str, what: str) -> str:
+    """`dest` for ssh/rsync, or InvalidArgument: it comes from a flag, a prompt or a printer file
+    (./printer-devices.yaml of a cloned project), and `-oProxyCommand=…` would run a local command."""
+    problem = deploy.ssh_destination_problem(dest)
+    if problem:
+        raise InvalidArgument(
+            what, dest, ["USER@HOST, or a host name: not empty, no whitespace, not starting with '-'"],
+            command=CLI_NAME, extra=f"{dest!r} {problem}.")
+    return dest
 
 
 SIMPLE_CHOICES = {"0": "skip", "skip": "skip", "2": "local", "4": "script"}
@@ -686,7 +699,10 @@ def _menu_answer(ans: str, cands: Sequence[Candidate], env: Env, opts: Options) 
         return _menu_printer(cands, env, opts)
     if ans == "3":
         host = env.ask("ssh target (USER@HOST): ").strip()
-        return Target("ssh", host) if host and not host.startswith("-") else None
+        problem = deploy.ssh_destination_problem(host)
+        if problem:
+            env.say(f"{host!r} {problem}")
+        return None if problem else Target("ssh", host)
     env.say("Enter 1, 2, 3, 4 or 0.")
     return None
 
@@ -719,6 +735,10 @@ def _menu_printer(cands: Sequence[Candidate], env: Env, opts: Options) -> Target
     opts.allow_discouraged = True
     if opts.ssh_user is None:
         user = env.ask("ssh user on the printer (empty = your ssh default): ").strip()
+        problem = deploy.ssh_destination_problem(user) if user else None
+        if problem:
+            say(f"{user!r} {problem}")
+            return None
         opts.ssh_user = user or None
     return Target("printer", c.name)
 

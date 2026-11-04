@@ -483,6 +483,34 @@ def test_printer_target_guards(cfg_home: Path) -> None:
     assert not rec.calls and not drec.calls  # every refusal came before any contact
 
 
+def test_an_option_like_printer_host_or_ssh_user_never_reaches_ssh(
+    cfg_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cloned project's ./printer-devices.yaml can name a host `-oProxyCommand=…`; `--ssh-user` and
+    the menu prompt are the same hole: ssh reads such an argument as an option and runs it locally."""
+    evil = env_setup.Candidate("evil", "Voron 2.4", "-oProxyCommand=touch-pwned", "ok")
+    registry = env_setup.candidates()
+    monkeypatch.setattr(env_setup, "candidates", lambda: [evil, *registry])
+    env, _, rec, drec = make_env(cfg_home)
+    for argv in (["printer:evil"], ["printer:evil", "--ssh-user", "pi"]):
+        with pytest.raises(InvalidArgument, match="host of printer evil"):
+            env_setup.run(["--no-input", "--spoolman", *argv], env)
+    for user in ("-oProxyCommand=x", "a b"):
+        with pytest.raises(InvalidArgument, match="--ssh-user"):
+            env_setup.run(["--no-input", "--spoolman", "printer:voron", "--ssh-user", user], env)
+    assert not rec.calls and not drec.calls  # not even the read-only probe was started
+
+
+def test_the_menu_asks_again_for_an_option_like_ssh_target_or_user(cfg_home: Path) -> None:
+    env, out, _, _ = make_env(cfg_home, tty=True, ask=Prompts("3", "-oProxyCommand=x", "3", "a b", "3", "me@nas"))
+    assert env_setup.menu(env_setup.candidates(), env, env_setup.Options()) == env_setup.Target("ssh", "me@nas")
+    assert sum("starts with '-'" in line or "contains whitespace" in line for line in out) == 2
+    opts = env_setup.Options()
+    env2, out2, _, _ = make_env(cfg_home, tty=True, ask=Prompts("1", "3", "-oX", "1", "3", "pi"))  # voron is #3
+    assert env_setup.menu(env_setup.candidates(), env2, opts) == env_setup.Target("printer", "voron")
+    assert opts.ssh_user == "pi" and any("starts with '-'" in line for line in out2)
+
+
 def _patch_health(monkeypatch: pytest.MonkeyPatch, log: list[str]) -> None:
     def wait_healthy(url: str, **_kw: Any) -> dict[str, Any]:
         log.append(f"wait {url}")
