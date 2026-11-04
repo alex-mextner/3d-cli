@@ -166,6 +166,7 @@ def spool(
         "drying": {"state": drying, "class": "low", "reasons": []},
         "conflict": [],
         "spoolman_remaining_g": mid,
+        "sync": {"status": "ok", "findings": []},
     }
 
 
@@ -352,6 +353,7 @@ def test_matching_plate_passes_every_gate(tmp_path: Path) -> None:
             "filament_temp_range": "PASS",
             "loaded_filament_match": "PASS",
             "slot_binding_known": "PASS",
+            "spool_in_sync": "PASS",
             "filament_sufficient": "PASS",
             "drying_due": "PASS",
             "maintenance_due": "UNVERIFIED",  # no maintenance records until #166 reports them

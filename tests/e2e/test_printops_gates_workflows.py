@@ -22,6 +22,7 @@ PRINTOPS_GATES = (
     "filament_temp_range",
     "loaded_filament_match",
     "slot_binding_known",
+    "spool_in_sync",
     "filament_sufficient",
     "drying_due",
     "maintenance_due",
@@ -185,6 +186,7 @@ def test_preflight_reads_3d_api_then_the_offline_snapshot(
         "filament_temp_range",
         "loaded_filament_match",
         "slot_binding_known",
+        "spool_in_sync",
         "filament_sufficient",
         "drying_due",
         "plate_material",
@@ -418,7 +420,10 @@ def test_preflight_catches_a_plate_sliced_with_stock_presets(tmp_path: Path) -> 
     )
     for argv, message in (
         (["--accept", "preset_match"], "--accept needs --reason"),
-        (["--accept", "plate_material", "--reason", "x"], "accepted: mix_calibration, preset_match"),
+        (
+            ["--accept", "plate_material", "--reason", "x"],
+            "accepted: mix_calibration, preset_match",
+        ),
         (["--accept", "", "--reason", "x"], "--accept needs a check name"),
         (["--reason", "x"], "--reason belongs to --accept"),
     ):
