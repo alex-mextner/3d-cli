@@ -30,7 +30,7 @@ from errors import GateFailure, InputNotFound, UsageError
 
 USAGE = """3d print-preflight FILE.gcode [--printer NAME] [--axis-limits X0:X1,Y0:Y1|NAME] [--source-3mf FILE.3mf]
                    [--visible [OBJ:]SPEC]... [--bridge-max MM] [--printops-api URL] [--offline]
-                   [--printops-snapshot FILE] [--accept preset_match|mix_calibration --reason TEXT] [--json] [--secs S]
+                   [--printops-snapshot FILE] [--accept preset_match|mix_calibration|spool_in_sync --reason TEXT] [--json] [--secs S]
                    [--no-bed-move]
   Read-only checks before a print. `3d printer start` runs the same checks and refuses on FAIL.
   Every G-code gate runs; one whose input is missing is SKIP and says what to pass.
@@ -114,10 +114,11 @@ Options:
                           used) and the PrintOps state comes from the snapshot file; not with --printops-api
   --printops-snapshot F   snapshot for --offline (default: $PRINTOPS_SNAPSHOT, else
                           ~/.cache/3d-cli/printops-snapshot.json; `3d printops gates snapshot`)
-  --accept CHECK          turn the FAIL of preset_match (printing with other presets on purpose) or of
+  --accept CHECK          turn the FAIL of preset_match (printing with other presets on purpose),
                           mix_calibration (a measured mix too far from the part's colour; the
-                          acceptance is also logged in 3d-api, needs a write token) into a WARN that
-                          carries --reason; only those two; needs --reason TEXT
+                          acceptance is also logged in 3d-api, needs a write token) or spool_in_sync
+                          (Spoolman and PrintOps disagree about the loaded spool, and you know why)
+                          into a WARN that carries --reason; only those three; needs --reason TEXT
   --reason TEXT           why the accepted mismatch is printed
   --no-bed-move           the bed line judges at the current Z: the printer's bed is not moved
   --json                  JSON report on stdout

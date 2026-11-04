@@ -367,8 +367,11 @@ class PrintopsContext:
 
 
 # Checks `--accept NAME --reason TEXT` may downgrade from FAIL to WARN: a mismatch the user knowingly
-# prints (other presets on purpose, #506). The reason is printed under the WARN.
-ACCEPTABLE = frozenset({"preset_match", "mix_calibration"})
+# prints (other presets on purpose #506, a spool whose Spoolman and PrintOps numbers differ and that
+# was weighed by hand #712). The reason is printed under the WARN. docs/commands/print-preflight.md
+# and the `--accept` synopsis of `3d print-preflight --help` list exactly these
+# (tests/test_printops_gates.py keeps the three in step).
+ACCEPTABLE = frozenset({"preset_match", "mix_calibration", "spool_in_sync"})
 
 
 def _parse_accept(

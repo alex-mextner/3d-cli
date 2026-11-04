@@ -318,6 +318,29 @@ def test_offline_preflight_with_an_explicit_api_is_a_usage_error(
     assert "no PrintOps snapshot" in env_only.stdout
 
 
+def test_preflight_cli_takes_accept_spool_in_sync_as_the_doc_says(tmp_path: Path) -> None:
+    """#712: docs/commands/print-preflight.md says `--accept spool_in_sync --reason TEXT` works; the
+    CLI used to refuse it as an unknown check (exit 2)."""
+    fleet = tmp_path / "k1.yaml"
+    fleet.write_text(
+        "k1se:\n  model: Creality K1 SE\n  owner: own\n  access: offline\n"
+        "  heads: [{label: T1, index: 0, usable: true}]\n",
+        encoding="utf-8",
+    )
+    gcode = tmp_path / "plate.gcode"
+    gcode.write_text("M140 S60\nM104 S215\nG1 X10 Y10 E1\n; filament_type = PLA\n", encoding="utf-8")
+    env = {"THREED_FLEET": str(fleet), "PRINTOPS_SNAPSHOT": str(tmp_path / "none.json")}
+
+    run = run_cli(
+        tmp_path, "print-preflight", str(gcode), "--printer", "k1se", "--offline", "--json",
+        "--accept", "spool_in_sync", "--reason", "weighed it on the scale", env_extra=env,
+    )
+
+    assert run.returncode in (0, 1), run.stderr  # 2 = the usage error that refused the name
+    assert "--accept names" not in run.stderr
+    assert json.loads(run.stdout)["checks"]  # it ran: the name was accepted, not a usage error
+
+
 def test_preflight_catches_a_plate_sliced_with_stock_presets(tmp_path: Path) -> None:
     """The user slices a K1 SE plate with Orca's stock presets instead of the ones the printer
     prints with (#293): `3d print-preflight --offline` names the presets and FAILs; the same
@@ -422,7 +445,7 @@ def test_preflight_catches_a_plate_sliced_with_stock_presets(tmp_path: Path) -> 
         (["--accept", "preset_match"], "--accept needs --reason"),
         (
             ["--accept", "plate_material", "--reason", "x"],
-            "accepted: mix_calibration, preset_match",
+            "accepted: mix_calibration, preset_match, spool_in_sync",
         ),
         (["--accept", "", "--reason", "x"], "--accept needs a check name"),
         (["--reason", "x"], "--reason belongs to --accept"),

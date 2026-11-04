@@ -1561,7 +1561,7 @@ def test_preset_match_filament_mismatch_can_be_accepted_with_a_reason(
     assert any("filament_flow_ratio 0.98" in ln for ln in check.lines)
 
 
-def test_preset_match_accept_needs_a_reason_and_only_names_preset_match() -> None:
+def test_accept_needs_a_reason_and_refuses_checks_that_cannot_be_accepted() -> None:
     from errors import UsageError
 
     from printer_ops.printops_checks import context_from_options
@@ -1582,10 +1582,51 @@ def test_preset_match_accept_needs_a_reason_and_only_names_preset_match() -> Non
     )
     with pytest.raises(UsageError, match="--accept needs --reason"):
         ctx(accept="preset_match")
-    with pytest.raises(UsageError, match="accepted: mix_calibration, preset_match"):
+    with pytest.raises(
+        UsageError, match="accepted: mix_calibration, preset_match, spool_in_sync"
+    ):
         ctx(accept="plate_material", reason="why")
     with pytest.raises(UsageError, match="--reason belongs to --accept"):
         ctx(reason="why")
+
+
+def test_accept_takes_spool_in_sync_as_the_preflight_doc_says() -> None:
+    """#712: docs/commands/print-preflight.md names `--accept spool_in_sync`; the CLI refused it."""
+    from printer_ops.printops_checks import context_from_options
+
+    ctx = context_from_options(
+        "k1se",
+        None,
+        api=None,
+        offline=True,
+        snapshot=None,
+        command="print-preflight",
+        accept="spool_in_sync",
+        reason="weighed it on the scale",
+    )
+    assert ctx.accept == frozenset({"spool_in_sync"})
+    assert ctx.reason == "weighed it on the scale"
+
+
+def _accept_names(text: str) -> frozenset[str]:
+    """The names in a `--accept a|b|c` synopsis."""
+    found = re.search(r"--accept ([a-z_]+(?:\|[a-z_]+)*) --reason", text)
+    assert found, "no `--accept a|b --reason` synopsis"
+    return frozenset(found.group(1).split("|"))
+
+
+def test_accept_names_in_the_cli_usage_and_the_doc_equal_the_acceptable_checks() -> None:
+    from commands.print_preflight import USAGE
+    from printer_ops.printops_checks import ACCEPTABLE
+
+    doc = Path(__file__).parents[1] / "docs" / "commands" / "print-preflight.md"
+    text = doc.read_text(encoding="utf-8")
+    assert _accept_names(USAGE) == ACCEPTABLE
+    assert _accept_names(text) == ACCEPTABLE
+    # every `--accept NAME` the doc and the usage mention (the table, the prose, the examples)
+    # names an acceptable check, and the doc mentions each acceptable check
+    mentioned = frozenset(re.findall(r"--accept ([a-z_]+)\b", text + USAGE))
+    assert mentioned == ACCEPTABLE
 
 
 def test_preset_match_filament_calibration_print_compares_the_name_only(
