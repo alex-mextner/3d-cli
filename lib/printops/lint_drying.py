@@ -3,7 +3,7 @@
 RULES (run by printops.datalint; read-only):
   drying/policy          error  fleet/policy.yaml (as 3d-api sees it) breaks its schema — the
                                 periodic drying check and GET /v1/drying/due are off until fixed
-  drying/bad-date        error  spool extra `opened_at` / `last_dried_at` is not an ISO date, so
+  drying/bad-date        error  spool `first_used` / extra `last_dried_at` is not an ISO date, so
                                 its drying clock cannot run
   drying/forgotten       warn   a drying session still open more than FORGOTTEN_H after its
                                 target time — finish it (`3d printops dry finish ID`) so the
@@ -22,16 +22,11 @@ from printops.datalint import ERROR, WARN, Finding, LintContext
 FORGOTTEN_H = 24
 
 
-def lint(ctx: LintContext) -> list[Finding]:
-    problems = policy.check()
-    out: list[Finding] = [
-        Finding("drying/policy", ERROR, str(policy.policy_path()), p) for p in problems
-    ]
-
+def _bad_dates(ctx: LintContext) -> list[Finding]:
+    out: list[Finding] = []
     for sp in ctx.spools:
         extra = drying.decoded_extra(sp)
-        for key in ("opened_at", "last_dried_at"):
-            raw = extra.get(key)
+        for key, raw in (("first_used", sp.get("first_used")), ("last_dried_at", extra.get("last_dried_at"))):
             if not raw:
                 continue
             try:
@@ -45,7 +40,11 @@ def lint(ctx: LintContext) -> list[Finding]:
                         f"{key} {raw!r} is not an ISO date; fix it in Spoolman",
                     )
                 )
+    return out
 
+
+def _forgotten(ctx: LintContext) -> list[Finding]:
+    out: list[Finding] = []
     for session in drying.list_sessions(ctx.conn, open_only=True, limit=1000):
         overdue = ctx.now - drying.parse_ts(session.ends_at)
         if overdue > datetime.timedelta(hours=FORGOTTEN_H):
@@ -58,22 +57,35 @@ def lint(ctx: LintContext) -> list[Finding]:
                     f"and is still open: 3d printops dry finish {session.id}",
                 )
             )
+    return out
 
-    if not problems:
-        dpolicy = policy.section("drying")
-        drying_now = drying.spools_drying(ctx.conn)
-        for sp in ctx.spools:
-            a = drying.assess(
-                dpolicy, sp, now=ctx.now, drying=int(sp["id"]) in drying_now
-            )
-            if a.state in drying.STATES and a.state != a.stored_state:
-                out.append(
-                    Finding(
-                        "drying/state-stale",
-                        WARN,
-                        f"spool:{a.spool_id}",
-                        f"{a.label}: Spoolman dry_state is {a.stored_state or 'unset'}, assessment says {a.state} "
-                        "(storage RH not considered here); run 3d printops dry due --check",
-                    )
+
+def _stale_states(ctx: LintContext) -> list[Finding]:
+    out: list[Finding] = []
+    dpolicy = policy.section("drying")
+    drying_now = drying.spools_drying(ctx.conn)
+    for sp in ctx.spools:
+        a = drying.assess(dpolicy, sp, now=ctx.now, drying=int(sp["id"]) in drying_now)
+        if a.state in drying.STATES and a.state != a.stored_state:
+            out.append(
+                Finding(
+                    "drying/state-stale",
+                    WARN,
+                    f"spool:{a.spool_id}",
+                    f"{a.label}: Spoolman dry_state is {a.stored_state or 'unset'}, assessment says {a.state} "
+                    "(storage RH not considered here); run 3d printops dry due --check",
                 )
+            )
+    return out
+
+
+def lint(ctx: LintContext) -> list[Finding]:
+    problems = policy.check()
+    out: list[Finding] = [
+        Finding("drying/policy", ERROR, str(policy.policy_path()), p) for p in problems
+    ]
+    out += _bad_dates(ctx)
+    out += _forgotten(ctx)
+    if not problems:
+        out += _stale_states(ctx)
     return out

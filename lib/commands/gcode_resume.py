@@ -16,8 +16,14 @@ INVARIANTS: stdlib-only at import time; never contacts a printer; printer-specif
 """
 from __future__ import annotations
 
+from pathlib import Path
+from typing import TYPE_CHECKING
+
 from cli.registry import Command
 from errors import InputNotFound, UsageError
+
+if TYPE_CHECKING:
+    from printer_ops.devices import ResumeProfile
 
 USAGE = """3d gcode-resume FILE.gcode --printer NAME (--top-z Z | --layer N) [options]
 3d gcode-resume FILE.gcode --where BYTE
@@ -76,15 +82,8 @@ def _number(opts: dict[str, str], key: str, kind: type[int] | type[float]) -> in
                          command="gcode-resume") from exc
 
 
-def run(argv: list[str]) -> int:
-    if not argv:
-        print(USAGE)
-        return 1
-    if argv[0] in ("-h", "--help"):
-        print(USAGE)
-        return 0
-    from pathlib import Path
-
+def _parse_args(argv: list[str]) -> tuple[list[str], dict[str, str]]:
+    """Split argv into positionals and an option dict (`-o` is stored as `--out`)."""
     pos: list[str] = []
     opts: dict[str, str] = {}
     i = 0
@@ -104,6 +103,11 @@ def run(argv: list[str]) -> int:
         else:
             pos.append(a)
         i += 1
+    return pos, opts
+
+
+def _input_gcode(pos: list[str], opts: dict[str, str]) -> Path:
+    """Validate the single input file and that exactly one mode was chosen."""
     if len(pos) != 1:
         raise UsageError(f"expected one G-code file, got {len(pos)}", command="gcode-resume")
     gcode = Path(pos[0])
@@ -113,6 +117,56 @@ def run(argv: list[str]) -> int:
     if len(modes) != 1:
         raise UsageError(f"give exactly one of --where, --table, --top-z, --layer (got {', '.join(modes) or 'none'})",
                          command="gcode-resume", remediation=["See `3d gcode-resume --help`."])
+    return gcode
+
+
+def _resume_device(opts: dict[str, str]) -> ResumeProfile:
+    """The --printer device's `resume:` block (required to build)."""
+    if "--printer" not in opts:
+        raise UsageError("building a resume needs --printer NAME (its `resume:` block in printer-devices.yaml)",
+                         command="gcode-resume", remediation=["Run `3d printer list` to see configured printers."])
+    from printer_ops.devices import get_device
+
+    device = get_device(opts["--printer"])
+    if device.resume is None:
+        raise UsageError(f"printer {device.name!r} has no `resume:` block in {device.source}",
+                         command="gcode-resume", remediation=["Add one; the keys are listed in `3d gcode-resume --help`."])
+    return device.resume
+
+
+def _build(gcode: Path, opts: dict[str, str]) -> int:
+    """Build the resume G-code, write it beside the input (never over it) and print the summary."""
+    import gcode_resume as gr
+
+    profile = _resume_device(opts)
+    top_z, layer = _number(opts, "--top-z", float), _number(opts, "--layer", int)
+    paused = _number(opts, "--paused-at", int)
+    tower_top = _number(opts, "--tower-top", float)
+    res = gr.build(gr.Walk.read(gcode), profile, name=gcode.name, top_z=top_z,
+                   layer=None if layer is None else int(layer), paused_at=None if paused is None else int(paused),
+                   tower_top=None if tower_top is None else float(tower_top),
+                   no_tower="--no-tower" in opts, home_xy="--home-xy" in opts)
+    dest = Path(opts["--out"]) if "--out" in opts else gcode.with_name(f"{gcode.stem}_resume_L{res.layer}.gcode")
+    if dest.exists() and dest.samefile(gcode):
+        raise UsageError(f"--out {dest} is the input G-code; the original must stay", command="gcode-resume",
+                         remediation=["Give another -o path, or omit it for <FILE>_resume_L<N>.gcode."])
+    dest.write_bytes(b"\n".join(res.lines))
+    from slicing.thumbnails import finalize_gcode
+
+    finalize_gcode(dest)  # the resume copies the head of a G-code that may have had none
+    print(res.summary(dest))
+    return 0
+
+
+def run(argv: list[str]) -> int:
+    if not argv:
+        print(USAGE)
+        return 1
+    if argv[0] in ("-h", "--help"):
+        print(USAGE)
+        return 0
+    pos, opts = _parse_args(argv)
+    gcode = _input_gcode(pos, opts)
 
     import gcode_resume as gr
 
@@ -123,29 +177,7 @@ def run(argv: list[str]) -> int:
     if "--table" in opts:
         print(gr.table(gr.Walk.read(gcode), opts["--table"]))
         return 0
-    if "--printer" not in opts:
-        raise UsageError("building a resume needs --printer NAME (its `resume:` block in printer-devices.yaml)",
-                         command="gcode-resume", remediation=["Run `3d printer list` to see configured printers."])
-    from printer_ops.devices import get_device
-
-    device = get_device(opts["--printer"])
-    if device.resume is None:
-        raise UsageError(f"printer {device.name!r} has no `resume:` block in {device.source}",
-                         command="gcode-resume", remediation=["Add one; the keys are listed in `3d gcode-resume --help`."])
-    top_z, layer = _number(opts, "--top-z", float), _number(opts, "--layer", int)
-    paused = _number(opts, "--paused-at", int)
-    tower_top = _number(opts, "--tower-top", float)
-    res = gr.build(gr.Walk.read(gcode), device.resume, name=gcode.name, top_z=top_z,
-                   layer=None if layer is None else int(layer), paused_at=None if paused is None else int(paused),
-                   tower_top=None if tower_top is None else float(tower_top),
-                   no_tower="--no-tower" in opts, home_xy="--home-xy" in opts)
-    dest = Path(opts["--out"]) if "--out" in opts else gcode.with_name(f"{gcode.stem}_resume_L{res.layer}.gcode")
-    if dest.exists() and dest.samefile(gcode):
-        raise UsageError(f"--out {dest} is the input G-code; the original must stay", command="gcode-resume",
-                         remediation=["Give another -o path, or omit it for <FILE>_resume_L<N>.gcode."])
-    dest.write_bytes(b"\n".join(res.lines))
-    print(res.summary(dest))
-    return 0
+    return _build(gcode, opts)
 
 
 COMMAND = Command(

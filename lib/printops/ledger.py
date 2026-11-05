@@ -356,6 +356,62 @@ def anchor(
     )
 
 
+def observe_usage(
+    conn: sqlite3.Connection,
+    spool_id: int,
+    delta_g: float,
+    source: str,
+    *,
+    actor: str,
+    confidence_g: float | None = None,
+    note: str | None = None,
+) -> int:
+    """Record usage somebody ELSE already booked in Spoolman (Moonraker's `[spoolman]` `/use`,
+    the web UI's use dialog): a delta row and its `spool.used` event, and NOTHING written to
+    Spoolman — the grams are already there, so booking them again would count them twice.
+    `delta_g` is the change of remaining (< 0 for usage). Call inside the caller's transaction."""
+    if source not in DELTA_SOURCES:
+        raise LedgerError(
+            f"usage source must be one of {', '.join(DELTA_SOURCES)}; got {source!r}"
+        )
+    if not math.isfinite(delta_g) or delta_g >= 0:
+        raise LedgerError(
+            f"observed usage must be a finite negative change of remaining, got {delta_g}"
+        )
+    _check_confidence(confidence_g)
+    conf = (
+        default_confidence(source, delta_g)
+        if confidence_g is None
+        else float(confidence_g)
+    )
+    row_id = _insert(
+        conn,
+        spool_id=spool_id,
+        kind="delta",
+        delta_g=delta_g,
+        anchor_g=None,
+        source=source,
+        confidence_g=conf,
+        actor=actor,
+        note=note,
+    )
+    ev.emit(
+        conn,
+        "spool.used",
+        f"spool:{spool_id}",
+        {
+            "grams": -delta_g,
+            "source": source,
+            "confidence_g": conf,
+            "job_id": None,
+            "ledger_id": row_id,
+            "observed": True,
+        },
+        actor,
+    )
+    return row_id
+
+
 def note(conn: sqlite3.Connection, spool_id: int, text: str, *, actor: str) -> int:
     """A ledger note (e.g. drying water loss): changes nothing, never touches Spoolman."""
     if not text.strip():

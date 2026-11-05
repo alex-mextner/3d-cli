@@ -9,6 +9,8 @@ WHAT: `check` lists the thumbnail blocks in a G-code's head and compares them wi
 WHY: the Orca-family CLI (`--slice`) exports G-code without thumbnails — it passes a null
   thumbnail callback to export_gcode — so every headless slice shows a blank preview on the
   Snapmaker U1 / Klipper / Creality K1 screen even though the profile sets `thumbnails`.
+  Nobody has to remember this command: the slicing wrappers, `3d printer upload|start` and
+  `3d print-preflight --fix` run it themselves (docs/commands/gcode-thumbnails.md, "Layers").
 
 ACCESSED VIA: `3d gcode-thumbnails check|add`; printer preflights import
   lib/gcode_thumbnails.py `check()` directly. `check` runs in-process (stdlib only); `add`
@@ -25,14 +27,19 @@ USAGE = """3d gcode-thumbnails <check|add> <file.gcode>... [options]
   for a job comes from base64 blocks in the G-code header. Orca's CLI never writes them.
 
   check FILE...            PASS/FAIL per file: every size in the profile's `; thumbnails =`
-                           is present (no spec: at least one thumbnail). Exit 1 on FAIL.
+                           is present (no spec: 48x48, 96x96 and 300x300 PNG). A `.3mf`:
+                           every plate has Metadata/plate_N.png and plate_N_small.png.
+                           Exit 1 on FAIL.
   add FILE...              insert the missing sizes after `; HEADER_BLOCK_END` (before the
                            first move), file rewritten atomically, mtime kept. A file that
                            already has them is left untouched.
     --image PNG            picture to use (e.g. a plate render) instead of drawing the
                            preview from the G-code's extrusion moves
-    --size WxH[/FMT]       sizes for a G-code without a `; thumbnails =` spec (repeatable);
+    --size WxH[/FMT]       sizes added on top of the required ones (repeatable);
                            1..4096 px per side (the G-code render is capped at 2048 px)
+    --3mf X.3mf [--plate N] also add the missing Metadata/plate_N.png/_small.png to this project
+                           (drawn from the same render); `add X.3mf` alone draws them from
+                           the plate G-codes embedded in a `.gcode.3mf`
     --out FILE             write the result there instead of in place (one input only)
     --preview PNG          also save the full-size G-code render
     --replace              redraw every size, dropping the thumbnails already there
@@ -42,6 +49,7 @@ Examples:
   3d gcode-thumbnails add print/*.gcode
   3d gcode-thumbnails add plate.gcode --image plate.png
   3d gcode-thumbnails add other.gcode --size 300x300/PNG --size 32x32/PNG
+  3d gcode-thumbnails add sliced.gcode --3mf sliced.3mf
 """
 
 

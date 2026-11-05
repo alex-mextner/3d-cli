@@ -32,7 +32,7 @@ it keeps the orientation, supports and tuned settings and fails loudly when the 
 Every slice records the slicer's own warnings next to the G-code, bound to its SHA-256:
 `3d slice` does it itself; a project script that runs the slicer CLI keeps its stdout+stderr,
 `result.json` and (with `--export-3mf`) the sliced 3MF, and after the last edit of the G-code
-(`3d gcode-thumbnails add` moves a current record along) calls
+(`3d gcode-thumbnails add` moves a current record along; `3d prep`, `3d slice` and `3d retarget` add the thumbnails themselves) calls
 [`3d slice-warnings record`](../commands/slice-warnings.md):
 
 ```bash
@@ -57,7 +57,7 @@ All of these run inside `3d print-preflight FILE.gcode`; each is also a command 
 | 4 | head sequence | [`3d slice-check PLATE.3mf --gcode FILE.gcode --check head-sequence`](../commands/slice-check.md) | an object printed on the wrong head on some layer (mixed-filament patterns); needs the project 3MF |
 | 4a | mix face | [`3d mix check PLATE.3mf`](../commands/mix.md) (the same check, on the project 3MF next to the G-code) | a part in a mixed filament whose top outweighs half its walls; by the project 3MF (FAIL), else by the G-code alone for objects printed by several heads (WARN) |
 | 4b | mix layers | [`3d mix gcode FILE.gcode --project PLATE.3mf`](../commands/mix.md) (the same check) | the additional colour printed on consecutive layers, a colour band or a mixed layer thicker than 0.12 mm, measured on the real per-layer heads and Z; works without the project for objects that alternate one head per layer |
-| 5 | thumbnails | [`3d gcode-thumbnails check FILE.gcode`](../commands/gcode-thumbnails.md) | missing printer-screen previews |
+| 5 | thumbnails | [`3d gcode-thumbnails check FILE.gcode`](../commands/gcode-thumbnails.md) | missing printer-screen previews (added automatically by every slicing wrapper, `upload`/`start` and `print-preflight --fix`) |
 | 6 | visible faces | [`3d visible-faces --gcode FILE.gcode --visible 'WALL*:y<104.8'`](../commands/visible-faces.md) | support or sagging islands on a visible side, in the real toolpaths |
 
 ## 4. `print-preflight`, then `printer start`

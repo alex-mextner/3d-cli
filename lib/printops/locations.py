@@ -19,12 +19,11 @@ INVARIANTS:
     unarchived; `parent_id` always equals the row of `parent_path(path)`.
   - The `slot:` scheme belongs to the fleet: only `sync_fleet` creates, archives or revives it;
     manual add/move/archive under it is refused.
-  - Spoolman holds, per spool, `location` = path and extra `printops_location_id` = id; both are
-    written together by `place_spool`, and `resync` repairs any drift (e.g. after a move whose
-    Spoolman writes failed). A spool "is in" a location when its printops_location_id is that
-    id, or — set by hand in the Spoolman UI — it has no id and its `location` string is the
-    location's path or a former path of it (`location_alias`, kept from a move until resync
-    finds no spool naming it; meanwhile no other location may take that path).
+  - Spoolman's native `location` text is the ONLY record of where a spool is (no id copy: a UI
+    move is a move). A spool "is in" a location when its `location` string is the location's path
+    or a former path of it (`location_alias`, kept from a move until resync finds no spool naming
+    it; meanwhile no other location may take that path). `resync` rewrites only former-path text
+    to the current path; it never moves a spool back from where someone put it.
   - A printed label belongs to the location that printed it (`qr`): `resolve` maps a scanned
     label to it even after a move and a reuse of the old path.
   - Archiving refuses a location that still holds spools or active children; archived rows stay
@@ -39,7 +38,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from printops import db, events
-from printops.spoolman import JSON, Spoolman, SpoolmanError, decode_extra, encode_extra
+from printops.spoolman import JSON, Spoolman, SpoolmanError
 
 KINDS = ("warehouse", "zone", "shelf", "box", "slot", "printer", "ams", "printer_slot", "dryer", "dry_box")
 MAX_PATH = 64  # Spoolman spool.location is VARCHAR(64)
@@ -50,7 +49,6 @@ QR_PREFIX = "cell:"
 SELF_ID_SCHEMES = ("dryer", "slot")
 RESERVED_SEGMENTS = ("contents",)
 TAG_PREFIX = "loc-"  # HA tag id on the location's NTAG213: loc-<id> (stable across moves)
-LOCATION_EXTRA = "printops_location_id"
 
 _SCHEME = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,15}")
 _SEGMENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,31}")
@@ -213,6 +211,32 @@ def get(conn: sqlite3.Connection, path_or_id: str | int) -> Location:
     return loc
 
 
+def _printed_by(conn: sqlite3.Connection, text: str) -> Location | None:
+    printed = [Location.from_row(r) for r in conn.execute("SELECT * FROM location WHERE qr = ?", (text,))]
+    # the location whose current label this is, else the one that printed it most recently
+    printed.sort(key=lambda r: (qr_payload(r.path) == text, not r.archived, r.updated_at), reverse=True)
+    return printed[0] if printed else None
+
+
+def _by_path_or_alias(conn: sqlite3.Connection, path: str) -> Location | None:
+    row = conn.execute("SELECT * FROM location WHERE path = ?", (path,)).fetchone()
+    if row is None:
+        row = conn.execute("SELECT location.* FROM location_alias JOIN location ON location.id = location_id"
+                           " WHERE location_alias.path = ?", (path,)).fetchone()
+    return None if row is None else Location.from_row(row)
+
+
+def _by_tag_uid(conn: sqlite3.Connection, text: str) -> Location | None:
+    try:
+        uid = _check_tag_uid(text)
+    except LocationError:
+        return None
+    if uid is None:
+        return None
+    row = conn.execute("SELECT * FROM location WHERE tag_uid = ?", (uid,)).fetchone()
+    return None if row is None else Location.from_row(row)
+
+
 def resolve(conn: sqlite3.Connection, scanned: str) -> Location:
     """A location from anything a person or reader may hand us: its path or id, a QR/NFC text
     (`cell:<path>`, `dryer:1`, `slot:u1/T3`), an HA tag id `loc-<id>`, or an NTAG UID.
@@ -230,27 +254,15 @@ def resolve(conn: sqlite3.Connection, scanned: str) -> Location:
         row = conn.execute("SELECT * FROM location WHERE tag_uid = ?", (text,)).fetchone()
         return Location.from_row(row) if row is not None else get(conn, int(text))
     if low.startswith(QR_PREFIX) or low.split(":", 1)[0] in SELF_ID_SCHEMES:
-        printed = [Location.from_row(r) for r in conn.execute("SELECT * FROM location WHERE qr = ?", (text,))]
-        # the location whose current label this is, else the one that printed it most recently
-        printed.sort(key=lambda r: (qr_payload(r.path) == text, not r.archived, r.updated_at), reverse=True)
-        if printed:
-            return printed[0]
+        printed = _printed_by(conn, text)
+        if printed is not None:
+            return printed
     path = text[len(QR_PREFIX):] if low.startswith(QR_PREFIX) else text
-    if path:
-        row = conn.execute("SELECT * FROM location WHERE path = ?", (path,)).fetchone()
-        if row is None:
-            row = conn.execute("SELECT location.* FROM location_alias JOIN location ON location.id = location_id"
-                               " WHERE location_alias.path = ?", (path,)).fetchone()
-        if row is not None:
-            return Location.from_row(row)
-    try:
-        uid = _check_tag_uid(text)
-    except LocationError:
-        uid = None
-    if uid is not None:
-        row = conn.execute("SELECT * FROM location WHERE tag_uid = ?", (uid,)).fetchone()
-        if row is not None:
-            return Location.from_row(row)
+    found = _by_path_or_alias(conn, path) if path else None
+    if found is None:
+        found = _by_tag_uid(conn, text)
+    if found is not None:
+        return found
     raise LocationNotFound(scanned)
 
 
@@ -369,6 +381,40 @@ def add(conn: sqlite3.Connection, path: str, kind: str, *, actor: str, capacity:
 UPDATABLE = ("kind", "capacity", "humidity_sensor_entity", "tag_uid", "qr", "note", "archived")
 
 
+def _clean_kind(loc: Location, value: Any) -> str:
+    _refuse_fleet(loc.path, "change the kind of")
+    kind = _check_kind(str(value))
+    if kind in ("printer", "ams", "printer_slot"):
+        raise LocationError(f"kind {kind!r} is only for fleet printer slots (slot:…)")
+    return kind
+
+
+def _clean_text(key: str, value: Any) -> str | None:
+    if value is not None and not isinstance(value, str):
+        raise LocationError(f"{key} must be a string, got {value!r}")
+    return value or None
+
+
+def _clean_unarchive(loc: Location) -> int:
+    _refuse_fleet(loc.path, "unarchive")
+    return 0
+
+
+def _clean_change(loc: Location, key: str, value: Any) -> Any:
+    """The validated column value for one UPDATABLE `key`."""
+    if key == "kind":
+        return _clean_kind(loc, value)
+    if key == "capacity":
+        return _check_capacity(value)
+    if key == "humidity_sensor_entity":
+        return _check_entity(value)
+    if key == "tag_uid":
+        return _check_tag_uid(value)
+    if key == "archived":
+        return _clean_unarchive(loc)
+    return _clean_text(key, value)  # qr, note
+
+
 def update(conn: sqlite3.Connection, loc: Location, changes: Mapping[str, Any], *, actor: str) -> Location:
     """Change attributes (not the path: see `move`; not archiving: see `archive`). `archived=False`
     revives an archived location whose parent is active. Emits `location.updated`."""
@@ -377,26 +423,7 @@ def update(conn: sqlite3.Connection, loc: Location, changes: Mapping[str, Any], 
         raise LocationError(f"cannot update {', '.join(unknown)}; updatable: {', '.join(UPDATABLE)} (path: use move)")
     if changes.get("archived") is True:
         raise LocationError("archive with DELETE /v1/locations/{path} (`3d printops loc archive`), which checks it is empty")
-    clean: dict[str, Any] = {}
-    for key, value in changes.items():
-        if key == "kind":
-            _refuse_fleet(loc.path, "change the kind of")
-            clean[key] = _check_kind(str(value))
-            if clean[key] in ("printer", "ams", "printer_slot"):
-                raise LocationError(f"kind {clean[key]!r} is only for fleet printer slots (slot:…)")
-        elif key == "capacity":
-            clean[key] = _check_capacity(value)
-        elif key == "humidity_sensor_entity":
-            clean[key] = _check_entity(value)
-        elif key == "tag_uid":
-            clean[key] = _check_tag_uid(value)
-        elif key in ("qr", "note"):
-            if value is not None and not isinstance(value, str):
-                raise LocationError(f"{key} must be a string, got {value!r}")
-            clean[key] = value or None
-        elif key == "archived":
-            _refuse_fleet(loc.path, "unarchive")
-            clean[key] = 0
+    clean = {key: _clean_change(loc, key, value) for key, value in changes.items()}
     if not clean:
         return loc
     with db.transaction(conn):
@@ -415,15 +442,6 @@ def update(conn: sqlite3.Connection, loc: Location, changes: Mapping[str, Any], 
 
 
 # -- Spoolman side ------------------------------------------------------------------------
-def _spool_location_id(spool: Mapping[str, Any]) -> int | None:
-    raw = (spool.get("extra") or {}).get(LOCATION_EXTRA)
-    try:
-        value = decode_extra(raw)
-    except ValueError:
-        return None
-    return value if isinstance(value, int) and not isinstance(value, bool) else None
-
-
 def _owners(conn: sqlite3.Connection) -> tuple[dict[int, Location], dict[str, int]]:
     """(id → location incl. archived, lower-case path text → location id). A former path
     (`location_alias`) names the location that moved away from it; a current path wins."""
@@ -435,8 +453,7 @@ def _owners(conn: sqlite3.Connection) -> tuple[dict[int, Location], dict[str, in
 
 
 def _owner_id(spool: Mapping[str, Any], by_text: Mapping[str, int]) -> int | None:
-    lid = _spool_location_id(spool)
-    return lid if lid is not None else by_text.get(str(spool.get("location") or "").strip().lower())
+    return by_text.get(str(spool.get("location") or "").strip().lower())
 
 
 def spools_in(conn: sqlite3.Connection, spools: Iterable[Mapping[str, Any]], locs: Sequence[Location]) -> list[JSON]:
@@ -453,9 +470,9 @@ def contents(conn: sqlite3.Connection, spoolman: Spoolman, loc: Location, *, rec
 
 
 def place_spool(conn: sqlite3.Connection, spoolman: Spoolman, spool_id: int, loc: Location | None, *,
-                extra: Mapping[str, Any] | None = None) -> JSON:
-    """Put a spool in `loc` (None = nowhere) in ONE Spoolman PATCH: `location` = path and extra
-    `printops_location_id` = id, plus the caller's other extra fields (python values).
+                fields: Mapping[str, Any] | None = None) -> JSON:
+    """Put a spool in `loc` (None = nowhere) in ONE Spoolman PATCH: native `location` = path, plus
+    the caller's other native spool fields (`fields`, e.g. `first_used`).
 
     `loc` is re-read from the DB (the caller's object may be stale). `_archive` sets the flag
     before its emptiness check, so a placement racing an archive is either seen by that check or
@@ -465,14 +482,10 @@ def place_spool(conn: sqlite3.Connection, spoolman: Spoolman, spool_id: int, loc
         if loc.archived:
             raise LocationError(f"location {loc.path!r} is archived", status=409)
         before = spoolman.get("spool", spool_id)
-    fields = {k: encode_extra(v) if v is not None else None for k, v in (extra or {}).items()}
-    fields[LOCATION_EXTRA] = None if loc is None else encode_extra(loc.id)
-    body: dict[str, Any] = {"location": "" if loc is None else spoolman_path(loc), "extra": fields}
+    body: dict[str, Any] = {**(fields or {}), "location": "" if loc is None else spoolman_path(loc)}
     placed = spoolman.update("spool", spool_id, body)
     if loc is not None and get(conn, loc.id).archived:
-        prev_extra = (before.get("extra") or {}).get(LOCATION_EXTRA)
-        spoolman.update("spool", spool_id, {"location": before.get("location") or "",
-                                            "extra": {LOCATION_EXTRA: prev_extra}})
+        spoolman.update("spool", spool_id, {"location": before.get("location") or ""})
         raise LocationError(f"location {loc.path!r} was archived meanwhile; spool #{spool_id} left where it was", status=409)
     return placed
 
@@ -488,11 +501,33 @@ class SyncReport:
         return {"updated": self.updated, "failed": self.failed}
 
 
+def _resync_one(conn: sqlite3.Connection, spoolman: Spoolman, s: JSON, loc: Location,
+                by_text: Mapping[str, int], report: SyncReport) -> str | None:
+    """Rewrite one drifted spool; returns the path text the spool still names (so its alias must
+    survive the cleanup) when it was left alone or the write failed, else None."""
+    try:
+        # Spoolman has no compare-and-set: re-read the spool right before the write so a
+        # placement made since the listing (another request) is not overwritten from the
+        # stale snapshot. The remaining window is one GET→PATCH round trip.
+        fresh = spoolman.get("spool", int(s["id"]))
+        if _owner_id(fresh, by_text) != loc.id:
+            # placed elsewhere since the listing: whatever path it names now must survive the alias cleanup
+            return str(fresh.get("location") or "").strip().lower()
+        loc = get(conn, loc.id)  # and the path as it is now: a concurrent move may have renamed it
+        spoolman.update("spool", int(s["id"]), {"location": loc.path})
+        report.updated.append(int(s["id"]))
+    except SpoolmanError as e:
+        report.failed.append({"spool_id": int(s["id"]), "error": e.message})
+        return str(s.get("location") or "").strip().lower()
+    return None
+
+
 def resync(conn: sqlite3.Connection, spoolman: Spoolman) -> SyncReport:
-    """Make every spool that belongs to a location carry exactly that location's path and id:
-    spools whose string drifted (a move whose Spoolman writes failed) and spools located by a
-    typed path or a former path get both fields rewritten. Former paths no spool still names
-    are then forgotten. Never raises SpoolmanError: failures are in the report."""
+    """Rewrite the `location` text of every spool still naming a FORMER path of a location (a
+    move whose Spoolman writes failed) to the current path. A spool whose text is a current path
+    is left alone — Spoolman's text is the truth, so a move made in its UI is never reverted.
+    Former paths no spool still names are then forgotten. Never raises SpoolmanError: failures
+    are in the report."""
     report = SyncReport()
     by_id, by_text = _owners(conn)
     try:
@@ -503,23 +538,11 @@ def resync(conn: sqlite3.Connection, spoolman: Spoolman) -> SyncReport:
     still_named: set[str] = set()
     for s in spools:
         loc = by_id.get(_owner_id(s, by_text) or -1)
-        if loc is None or (s.get("location") == loc.path and _spool_location_id(s) == loc.id):
+        if loc is None or s.get("location") == loc.path:
             continue
-        try:
-            # Spoolman has no compare-and-set: re-read the spool right before the write so a
-            # placement made since the listing (another request) is not overwritten from the
-            # stale snapshot. The remaining window is one GET→PATCH round trip.
-            fresh = spoolman.get("spool", int(s["id"]))
-            if _owner_id(fresh, by_text) != loc.id:
-                # placed elsewhere since the listing: whatever path it names now must survive the alias cleanup
-                still_named.add(str(fresh.get("location") or "").strip().lower())
-                continue
-            loc = get(conn, loc.id)  # and the path as it is now: a concurrent move may have renamed it
-            spoolman.update("spool", int(s["id"]), {"location": loc.path, "extra": {LOCATION_EXTRA: encode_extra(loc.id)}})
-            report.updated.append(int(s["id"]))
-        except SpoolmanError as e:
-            report.failed.append({"spool_id": int(s["id"]), "error": e.message})
-            still_named.add(str(s.get("location") or "").strip().lower())
+        named = _resync_one(conn, spoolman, s, loc, by_text, report)
+        if named is not None:
+            still_named.add(named)
     with db.transaction(conn):
         for row in conn.execute("SELECT path FROM location_alias").fetchall():
             if str(row["path"]).lower() not in still_named:
@@ -690,6 +713,42 @@ class FleetSyncReport:
         return asdict(self)
 
 
+def _create_slot(conn: sqlite3.Connection, s: FleetSlot, actor: str) -> None:
+    parent = _active_parent(conn, s.path)
+    loc = _insert(conn, s.path, s.kind, parent, capacity=1 if s.kind == "printer_slot" else None,
+                  humidity_sensor_entity=None, tag_uid=None, note=s.note, source="fleet")
+    events.emit(conn, "location.created", f"location:{loc.id}",
+                {"path": loc.path, "kind": loc.kind, "source": "fleet"}, actor)
+
+
+def _refresh_slot(conn: sqlite3.Connection, have: Location, s: FleetSlot, report: FleetSyncReport, actor: str) -> None:
+    sets: dict[str, Any] = {}
+    if have.archived:
+        sets["archived"] = 0
+        report.revived.append(s.path)
+    if have.kind != s.kind or have.note != s.note or have.source != "fleet":
+        sets.update(kind=s.kind, note=s.note, source="fleet")
+        if not have.archived:
+            report.updated.append(s.path)
+    if not sets:
+        return
+    cols = ", ".join(f"{k} = ?" for k in sets)
+    conn.execute(f"UPDATE location SET {cols}, updated_at = ? WHERE id = ?",  # noqa: S608 — fixed keys
+                 (*sets.values(), db.utc_now(), have.id))
+    payload = {"path": have.path, **{k: bool(v) if k == "archived" else v for k, v in sets.items()}}
+    events.emit(conn, "location.updated", f"location:{have.id}", payload, actor)
+
+
+def _sync_slot(conn: sqlite3.Connection, s: FleetSlot, report: FleetSyncReport, actor: str) -> None:
+    with db.transaction(conn):
+        have = find(conn, s.path)
+        if have is None:
+            _create_slot(conn, s, actor)
+            report.created.append(s.path)
+        else:
+            _refresh_slot(conn, have, s, report, actor)
+
+
 def sync_fleet(conn: sqlite3.Connection, slots: Sequence[FleetSlot], spoolman: Spoolman | None, *,
                actor: str = "system") -> FleetSyncReport:
     """Make the `slot:` subtree match `slots`: create missing ones, revive archived ones that are
@@ -701,30 +760,7 @@ def sync_fleet(conn: sqlite3.Connection, slots: Sequence[FleetSlot], spoolman: S
     report = FleetSyncReport()
     wanted = {s.path.lower() for s in slots}
     for s in slots:
-        with db.transaction(conn):
-            have = find(conn, s.path)
-            if have is None:
-                parent = _active_parent(conn, s.path)
-                loc = _insert(conn, s.path, s.kind, parent, capacity=1 if s.kind == "printer_slot" else None,
-                              humidity_sensor_entity=None, tag_uid=None, note=s.note, source="fleet")
-                events.emit(conn, "location.created", f"location:{loc.id}",
-                            {"path": loc.path, "kind": loc.kind, "source": "fleet"}, actor)
-                report.created.append(s.path)
-                continue
-            sets: dict[str, Any] = {}
-            if have.archived:
-                sets["archived"] = 0
-                report.revived.append(s.path)
-            if have.kind != s.kind or have.note != s.note or have.source != "fleet":
-                sets.update(kind=s.kind, note=s.note, source="fleet")
-                if not have.archived:
-                    report.updated.append(s.path)
-            if sets:
-                cols = ", ".join(f"{k} = ?" for k in sets)
-                conn.execute(f"UPDATE location SET {cols}, updated_at = ? WHERE id = ?",  # noqa: S608 — fixed keys
-                             (*sets.values(), db.utc_now(), have.id))
-                payload = {"path": have.path, **{k: bool(v) if k == "archived" else v for k, v in sets.items()}}
-                events.emit(conn, "location.updated", f"location:{have.id}", payload, actor)
+        _sync_slot(conn, s, report, actor)
     gone = [loc for loc in all_locations(conn) if loc.scheme.lower() == FLEET_SCHEME and loc.path.lower() not in wanted]
     for loc in sorted(gone, key=lambda x: -x.path.count("/")):
         refusal = _archive_or_reason(conn, spoolman, loc, actor=actor)

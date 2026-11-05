@@ -180,6 +180,8 @@ def test_reference_status_and_check_switch_the_chamber_light_on_and_put_it_back(
 
 
 def test_a_light_that_is_already_on_is_left_on_and_never_written(tmp_path: Path) -> None:
+    """The chamber light is already on when the user asks for the bed state: the check reads it, leaves it on
+    and sends no light command."""
     moon = u1_with_light(lit=True)
     with moon.serve():
         write_u1(tmp_path, moon, bed="{enabled: true, interval_s: 0.2, light: {settle_s: 0}}")
@@ -190,6 +192,7 @@ def test_a_light_that_is_already_on_is_left_on_and_never_written(tmp_path: Path)
 
 
 def test_no_light_on_the_printer_is_said_in_the_verdict_and_the_bed_is_still_judged(tmp_path: Path) -> None:
+    """A printer that lists no light: the verdict says so, the bed is still judged and nothing is written."""
     moon = u1_after_job()  # this fake lists no objects at all
     with moon.serve():
         write_u1(tmp_path, moon)
@@ -201,12 +204,15 @@ def test_no_light_on_the_printer_is_said_in_the_verdict_and_the_bed_is_still_jud
 
 
 def test_a_light_macro_outside_trusted_macros_is_refused_when_the_config_is_read(tmp_path: Path) -> None:
+    """The user configures a light macro the printer does not trust: the bed command refuses with the reason
+    and no macro runs."""
     moon = u1_with_light()
     with moon.serve():
         write_u1(tmp_path, moon, bed="{enabled: true, light: {on_gcode: LIGHT_ON}}")
         out = run_cli(tmp_path, "printer", "bed", "status", "u1")
 
-    assert out.returncode != 0 and "trusted_macros" in out.stderr and moon.scripts == []
+    assert "trusted_macros" in out.stderr and moon.scripts == []
+    assert out.returncode != 0
 
 
 def _swap_after(moon: FakeMoonraker, delay: float, name: str) -> threading.Thread:

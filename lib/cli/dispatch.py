@@ -22,7 +22,7 @@ import sys
 
 from cli.env import export_openscadpath, maybe_bootstrap, repo_root
 from cli.resources import cap_threads
-from cli.registry import Registry, discover
+from cli.registry import Command, Registry, discover
 from errors import ThreeDError, UsageError
 
 # Distribution name as declared in pyproject `[project] name`.
@@ -136,6 +136,16 @@ def _report_unknown_command(reg: Registry, cmd: str) -> int:
     return 2
 
 
+def _wants_openscad_bootstrap(resolved: Command | None, rest: list[str]) -> bool:
+    """First-run OpenSCAD library clone. `3d init --env` is the machine stage (Spoolman/PrintOps): a
+    status-only run (e.g. a dotfiles installer's `--no-input --spoolman auto`) must not clone BOSL2/NopSCADlib."""
+    if resolved is None:
+        return True
+    if resolved.name == "init" and "--env" in rest:
+        return False
+    return resolved.bootstrap_openscad
+
+
 def main(argv: list[str]) -> int:
     # 1. startup (must run before any subprocess so OpenSCAD/children inherit the path and
     #    the native thread caps: numpy/scipy/BLAS/numba otherwise start a thread per core).
@@ -148,7 +158,7 @@ def main(argv: list[str]) -> int:
     cmd = argv[0] if argv else "help"
     rest = argv[1:]
     resolved = reg.resolve(cmd)
-    if resolved is None or resolved.bootstrap_openscad:
+    if _wants_openscad_bootstrap(resolved, rest):
         maybe_bootstrap()
 
     if cmd in ("help", "-h", "--help"):

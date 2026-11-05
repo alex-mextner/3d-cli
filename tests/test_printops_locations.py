@@ -174,27 +174,27 @@ def test_tree_nests_by_parent(conn: sqlite3.Connection) -> None:
 
 
 # ------------------------------------------------------------------------- Spoolman side
-def test_place_spool_writes_path_id_and_caller_extras_in_one_patch(conn: sqlite3.Connection, sm: FakeSpoolman) -> None:
+def test_place_spool_writes_path_and_native_fields_in_one_patch(conn: sqlite3.Connection, sm: FakeSpoolman) -> None:
     loc = _tree(conn, "WH:A")["WH:A"]
     sid = _spool(sm)
     before = len(sm.writes())
-    spool = locs.place_spool(conn, sm, sid, loc, extra={"printops_slot": "", "dry_state": "ok"})
+    spool = locs.place_spool(conn, sm, sid, loc, fields={"first_used": "2026-10-01T00:00:00Z"})
     assert sm.writes()[before:] == [("PATCH", f"/spool/{sid}")]
     assert spool["location"] == "WH:A"
-    assert spool["extra"]["printops_location_id"] == str(loc.id) and spool["extra"]["dry_state"] == '"ok"'
+    assert spool["first_used"] == "2026-10-01T00:00:00Z" and spool["extra"] == {}  # no id copy of the place
     cleared = locs.place_spool(conn, sm, sid, None)
-    assert cleared["location"] == "" and "printops_location_id" not in cleared["extra"]
+    assert cleared["location"] == ""
 
 
-def test_contents_by_id_or_by_hand_typed_location(conn: sqlite3.Connection, sm: FakeSpoolman) -> None:
+def test_contents_follow_the_location_text_even_when_it_was_moved_in_the_spoolman_ui(conn: sqlite3.Connection, sm: FakeSpoolman) -> None:
     t = _tree(conn, "WH:A", "WH:A/S1")
     bound = _spool(sm)
     locs.place_spool(conn, sm, bound, t["WH:A/S1"])
-    by_hand = _spool(sm, "wh:a/s1")  # typed in the Spoolman UI, no id
+    by_hand = _spool(sm, "wh:a/s1")  # typed in the Spoolman UI
     elsewhere = _spool(sm)
     locs.place_spool(conn, sm, elsewhere, t["WH:A"])
-    sm.update("spool", elsewhere, {"location": "WH:A/S1"})  # a stale string: the id wins
-    assert {s["id"] for s in locs.contents(conn, sm, t["WH:A/S1"])} == {bound, by_hand}
+    sm.update("spool", elsewhere, {"location": "WH:A/S1"})  # moved in the UI: the text is the truth
+    assert {s["id"] for s in locs.contents(conn, sm, t["WH:A/S1"])} == {bound, by_hand, elsewhere}
     assert {s["id"] for s in locs.contents(conn, sm, t["WH:A"], recursive=True)} == {bound, by_hand, elsewhere}
 
 
@@ -207,7 +207,7 @@ def test_move_renames_subtree_and_resyncs_spoolman(conn: sqlite3.Connection, sm:
     assert res.renamed == [("WH:A/S1", "WH:B/S9"), ("WH:A/S1/B1", "WH:B/S9/B1")]
     assert res.location.parent_id == t["WH:B"].id and sorted(res.spoolman.updated) == sorted([deep, typed])
     assert sm.get("spool", deep)["location"] == "WH:B/S9/B1"
-    assert sm.get("spool", typed)["extra"]["printops_location_id"] == str(t["WH:A/S1"].id)
+    assert sm.get("spool", typed)["location"] == "WH:B/S9"
     assert locs.get(conn, "WH:B/S9/B1").id == t["WH:A/S1/B1"].id
     assert events.last(conn, 1)[0].payload == {"from": "WH:A/S1", "to": "WH:B/S9", "subtree": 2}
     # case-only rename of a root
@@ -318,7 +318,7 @@ def test_api_tree_show_contents_move_archive(api_client: ApiClient, fake_spoolma
     s1 = api_client.post("/v1/locations", {"path": "WH:A/S1", "kind": "shelf", "capacity": 4})
     ensure_extra_fields(fake_spoolman)
     sid = _spool(fake_spoolman)
-    fake_spoolman.update("spool", sid, {"location": "WH:A/S1", "extra": {"printops_location_id": str(s1["id"])}})
+    fake_spoolman.update("spool", sid, {"location": "WH:A/S1"})
     tree = api_client.get("/v1/locations")
     assert tree["count"] == 2 and tree["tree"][0]["children"][0]["path"] == "WH:A/S1"
     shown = api_client.get("/v1/locations/WH:A/S1")
@@ -376,7 +376,7 @@ def test_a_stale_location_object_cannot_create_a_parent_cycle(conn: sqlite3.Conn
 def test_hand_typed_spools_follow_a_move_made_while_spoolman_was_down(conn: sqlite3.Connection,
                                                                      sm: FakeSpoolman) -> None:
     t = _tree(conn, "WH:A", "WH:A/S1")
-    typed = _spool(sm, "WH:A/S1")  # no printops_location_id
+    typed = _spool(sm, "WH:A/S1")
     sm.down = True
     res = locs.move(conn, sm, t["WH:A/S1"], "WH:A/S2", actor="t")
     sm.down = False
@@ -387,7 +387,7 @@ def test_hand_typed_spools_follow_a_move_made_while_spoolman_was_down(conn: sqli
         locs.add(conn, "WH:A/S1", "shelf", actor="t")
     assert locs.resync(conn, sm).updated == [typed]
     spool = sm.get("spool", typed)
-    assert spool["location"] == "WH:A/S2" and spool["extra"]["printops_location_id"] == str(t["WH:A/S1"].id)
+    assert spool["location"] == "WH:A/S2" and spool["extra"] == {}
     assert locs.add(conn, "WH:A/S1", "shelf", actor="t").path == "WH:A/S1"  # alias forgotten after resync
 
 
@@ -509,22 +509,21 @@ def test_an_archive_racing_a_placement_is_undone(conn: sqlite3.Connection, sm: F
     assert not locs.get(conn, "WH:A/S1").archived
 
 
-def test_resync_keeps_a_former_path_a_spool_was_just_placed_by(conn: sqlite3.Connection, sm: FakeSpoolman,
-                                                               monkeypatch: pytest.MonkeyPatch) -> None:
+def test_resync_never_overwrites_a_placement_made_since_the_listing(conn: sqlite3.Connection, sm: FakeSpoolman,
+                                                                    monkeypatch: pytest.MonkeyPatch) -> None:
     t = _tree(conn, "WH:A", "WH:B", "WH:B/S1")
     sm.down = True
     locs.move(conn, sm, t["WH:B/S1"], "WH:B/S9", actor="t")  # WH:B/S1 is now a former path
     sm.down = False
-    sid = _spool(sm)
-    locs.place_spool(conn, sm, sid, t["WH:A"])
-    sm.update("spool", sid, {"location": "WH:A/x"})  # drifted: resync will look at it
+    sid = _spool(sm, "WH:B/S1")  # still names the former path: resync wants to rewrite it
     real_get = sm.get
 
-    def hand_typed_meanwhile(kind: Entity, id_: int) -> Any:
-        sm.update("spool", id_, {"location": "WH:B/S1", "extra": {"printops_location_id": None}})
+    def moved_in_the_ui_meanwhile(kind: Entity, id_: int) -> Any:
+        sm.update("spool", id_, {"location": "WH:A"})
         return real_get(kind, id_)
 
-    monkeypatch.setattr(sm, "get", hand_typed_meanwhile)
+    monkeypatch.setattr(sm, "get", moved_in_the_ui_meanwhile)
     locs.resync(conn, sm)
     monkeypatch.setattr(sm, "get", real_get)
-    assert {s["id"] for s in locs.contents(conn, sm, locs.get(conn, "WH:B/S9"))} == {sid}
+    assert real_get("spool", sid)["location"] == "WH:A"  # the UI move won; the stale listing did not
+    assert {s["id"] for s in locs.contents(conn, sm, locs.get(conn, "WH:A"))} == {sid}

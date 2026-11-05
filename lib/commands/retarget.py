@@ -34,7 +34,7 @@ from errors import GateFailure, InvalidArgument, MissingDependency, UsageError
 
 if TYPE_CHECKING:
     from slicing.orca_presets import PresetRef
-    from slicing.retarget_3mf import Report
+    from slicing.retarget_3mf import PresetSource, Report
 
 USAGE = """3d retarget <project.3mf> --to PRINTER [options]
   Retarget a slicer project .3mf (Orca / Snapmaker Orca / Bambu Studio) to another printer:
@@ -121,48 +121,41 @@ def _margin(value: str) -> float:
     return margin
 
 
-def _parse(argv: list[str]) -> _Options:
-    opts = _Options()
-    i = 0
-    while i < len(argv):
-        arg = argv[i]
-        if arg in _VALUED or arg in _REPEATED or arg == "--margin":
-            if i + 1 >= len(argv):
-                raise UsageError(
-                    f"{arg} needs a value",
-                    command="retarget",
-                    remediation=["Run '3d retarget --help'."],
-                )
-            value = argv[i + 1]
-            i += 2
-            if arg == "--margin":
-                opts.margin = _margin(value)
-            elif arg in _VALUED:
-                setattr(opts, _VALUED[arg], value)
-            else:
-                getattr(opts, _REPEATED[arg]).append(value)
-            continue
-        if arg == "--include-non-printable":
-            opts.include_non_printable = True
-        elif arg == "--dry-run":
-            opts.dry_run = True
-        elif arg in ("-v", "--verbose"):
-            opts.verbose = True
-        elif arg.startswith("-"):
-            raise UsageError(
-                f"unknown option {arg}",
-                command="retarget",
-                remediation=["Run '3d retarget --help'."],
-            )
-        elif opts.src:
-            raise UsageError(
-                f"unexpected extra argument {arg!r}",
-                command="retarget",
-                remediation=["One project .3mf per run."],
-            )
-        else:
-            opts.src = arg
-        i += 1
+def _store_value(opts: _Options, arg: str, value: str) -> None:
+    """Apply one `--flag VALUE` pair to the options."""
+    if arg == "--margin":
+        opts.margin = _margin(value)
+    elif arg in _VALUED:
+        setattr(opts, _VALUED[arg], value)
+    else:
+        getattr(opts, _REPEATED[arg]).append(value)
+
+
+def _store_bare(opts: _Options, arg: str) -> None:
+    """Apply a value-less argument: a boolean flag, or the single positional project path."""
+    if arg == "--include-non-printable":
+        opts.include_non_printable = True
+    elif arg == "--dry-run":
+        opts.dry_run = True
+    elif arg in ("-v", "--verbose"):
+        opts.verbose = True
+    elif arg.startswith("-"):
+        raise UsageError(
+            f"unknown option {arg}",
+            command="retarget",
+            remediation=["Run '3d retarget --help'."],
+        )
+    elif opts.src:
+        raise UsageError(
+            f"unexpected extra argument {arg!r}",
+            command="retarget",
+            remediation=["One project .3mf per run."],
+        )
+    else:
+        opts.src = arg
+
+
+def _check_required(opts: _Options) -> None:
     if not opts.src:
         raise UsageError(
             "missing project .3mf",
@@ -175,6 +168,26 @@ def _parse(argv: list[str]) -> _Options:
             command="retarget",
             remediation=["Name the target machine preset, e.g. --to k1se"],
         )
+
+
+def _parse(argv: list[str]) -> _Options:
+    opts = _Options()
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg in _VALUED or arg in _REPEATED or arg == "--margin":
+            if i + 1 >= len(argv):
+                raise UsageError(
+                    f"{arg} needs a value",
+                    command="retarget",
+                    remediation=["Run '3d retarget --help'."],
+                )
+            _store_value(opts, arg, argv[i + 1])
+            i += 2
+            continue
+        _store_bare(opts, arg)
+        i += 1
+    _check_required(opts)
     return opts
 
 
@@ -182,20 +195,8 @@ def _slug(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-") or "target"
 
 
-def run(argv: list[str]) -> int:
-    if not argv:
-        print(USAGE)
-        return 1
-    if argv[0] in ("-h", "--help"):
-        print(USAGE)
-        return 0
-    opts = _parse(argv)
-
-    # Imported lazily so `3d help` and command discovery stay light.
-    from slicing import orca_presets, retarget_3mf as rt
-
-    started = time.perf_counter()
-    src = Path(opts.src)
+def _output_path(opts: _Options, src: Path) -> Path:
+    """Resolve the output project path and refuse to overwrite the source or the G-code target."""
     out = (
         Path(opts.out)
         if opts.out
@@ -219,12 +220,14 @@ def run(argv: list[str]) -> int:
                     command="retarget",
                     extra="The G-code would overwrite a project file; pick another name.",
                 )
-    for pname in opts.setting_sets:
-        if pname not in rt.PRESETS:
-            raise InvalidArgument(
-                "--preset", pname, sorted(rt.PRESETS), command="retarget"
-            )
-    overrides = [rt.parse_assignment(s) for s in opts.sets]
+    return out
+
+
+def _resolve_sources(opts: _Options) -> tuple[
+    dict[str, PresetRef], dict[str, list[str]], dict[str, PresetSource]
+]:
+    """Look up the machine/process/filament presets: (refs, other matches, flattened sources)."""
+    from slicing import orca_presets, retarget_3mf as rt
 
     catalog = orca_presets.PresetCatalog([Path(p) for p in opts.preset_dirs])
     queries = {"machine": opts.to, "process": opts.process, "filament": opts.filament}
@@ -244,6 +247,54 @@ def run(argv: list[str]) -> int:
         kind: rt.PresetSource(ref.name, catalog.flatten(ref))
         for kind, ref in refs.items()
     }
+    return refs, others, sources
+
+
+def _finish(
+    problems: list[str], opts: _Options, out: Path, elapsed: float
+) -> None:
+    """Print the validation verdict; a failed validation raises."""
+    if problems:
+        print(f"VALIDATION: FAIL ({len(problems)} problem(s))")
+        for p in problems:
+            print(f"  - {p}")
+        raise GateFailure(
+            "retargeted 3MF failed validation; no file kept",
+            command="retarget",
+            silent=True,
+        )
+    size = "" if opts.dry_run else f" ({out.stat().st_size / 1024:.0f} KiB)"
+    print(
+        "VALIDATION: PASS (XML/JSON well-formed, required settings present, extruder/filament count, footprint inside bed)"
+    )
+    print(
+        f"RESULT: PASS  {'dry run, nothing written' if opts.dry_run else out}{size}  in {elapsed:.1f} s"
+    )
+
+
+def run(argv: list[str]) -> int:
+    if not argv:
+        print(USAGE)
+        return 1
+    if argv[0] in ("-h", "--help"):
+        print(USAGE)
+        return 0
+    opts = _parse(argv)
+
+    # Imported lazily so `3d help` and command discovery stay light.
+    from slicing import retarget_3mf as rt
+
+    started = time.perf_counter()
+    src = Path(opts.src)
+    out = _output_path(opts, src)
+    for pname in opts.setting_sets:
+        if pname not in rt.PRESETS:
+            raise InvalidArgument(
+                "--preset", pname, sorted(rt.PRESETS), command="retarget"
+            )
+    overrides = [rt.parse_assignment(s) for s in opts.sets]
+
+    refs, others, sources = _resolve_sources(opts)
     machine = sources["machine"]
 
     parts, report = rt.retarget(
@@ -267,23 +318,7 @@ def run(argv: list[str]) -> int:
     report.problems = problems
 
     _print_report(report, refs, opts, others)
-    elapsed = time.perf_counter() - started
-    if problems:
-        print(f"VALIDATION: FAIL ({len(problems)} problem(s))")
-        for p in problems:
-            print(f"  - {p}")
-        raise GateFailure(
-            "retargeted 3MF failed validation; no file kept",
-            command="retarget",
-            silent=True,
-        )
-    size = "" if opts.dry_run else f" ({out.stat().st_size / 1024:.0f} KiB)"
-    print(
-        "VALIDATION: PASS (XML/JSON well-formed, required settings present, extruder/filament count, footprint inside bed)"
-    )
-    print(
-        f"RESULT: PASS  {'dry run, nothing written' if opts.dry_run else out}{size}  in {elapsed:.1f} s"
-    )
+    _finish(problems, opts, out, time.perf_counter() - started)
 
     if opts.gcode and not opts.dry_run:
         return _slice_and_check(
@@ -347,6 +382,7 @@ def _slice_and_check(
     from commands import gcode_bounds
     from commands.slice import _record_warnings
     from slicing import retarget_3mf as rt
+    from slicing.thumbnails import spec_for as thumbnail_spec_for
 
     binary = _find_orca_cli()
     presets = rt.split_project_settings(
@@ -358,6 +394,8 @@ def _slice_and_check(
         work = Path(tmp)
         paths = {kind: work / f"{kind}.json" for kind in presets}
         for kind, body in presets.items():
+            if kind == "machine":  # layer (a): the machine preset also asks for the thumbnail sizes
+                body = {**body, "thumbnails": thumbnail_spec_for(body)}
             paths[kind].write_text(json.dumps(body, indent=1), encoding="utf-8")
         stl = work / "part.stl"
         stl.write_bytes(rt.export_stl(parts))
@@ -380,6 +418,9 @@ def _slice_and_check(
                 command="retarget",
                 remediation=[tail or "no slicer output"],
             )
+        from slicing.thumbnails import finalize_slice
+
+        finalize_slice(produced[0])  # the CLI writes no thumbnails; before the move, so the sidecar hashes the final bytes
         shutil.move(produced[0], gcode)
         _record_warnings(str(gcode), proc.stdout + proc.stderr, str(work))
     print(f"sliced OK -> {gcode} ({gcode.stat().st_size} bytes)")
@@ -395,14 +436,9 @@ def _fmt(value: object, limit: int = 40) -> str:
     return text if text else "''"
 
 
-def _print_report(
-    report: Report,
-    refs: dict[str, PresetRef],
-    opts: _Options,
-    others: dict[str, list[str]],
+def _print_presets(
+    refs: dict[str, PresetRef], others: dict[str, list[str]]
 ) -> None:
-    print("=" * 72)
-    print(f"retarget: {report.source} -> {report.target}")
     for kind, ref in refs.items():
         print(f"  {kind:<8} preset: {ref.name}  [{ref.origin}]")
         if kind in others:
@@ -410,9 +446,9 @@ def _print_report(
                 ", ..." if len(others[kind]) > 4 else ""
             )
             print(f"           also matched: {also} (pass the exact name to choose)")
-    for label in report.objects:
-        state = "KEPT" if int(label.split(":")[0]) in report.kept else "dropped"
-        print(f"  object   {label}  -> {state}")
+
+
+def _print_fit(report: Report) -> None:
     p = report.placement
     w, d = report.footprint
     turn = (
@@ -424,27 +460,44 @@ def _print_report(
         f"  fit      footprint {w:.1f} x {d:.1f} mm in bed {report.bed.width:g} x {report.bed.depth:g} mm "
         f"(margin {report.margin:g}); {turn}moved by ({p.dx:+.1f}, {p.dy:+.1f}) mm; top z {report.zmax:.1f} mm"
     )
+
+
+def _print_group(origin: str, rows: list[tuple[str, object, object]], verbose: bool) -> None:
+    print(f"    {origin}: {len(rows)}")
+    shown = rows if verbose or len(rows) <= _SHOWN_PER_GROUP else rows[:_SHOWN_PER_GROUP]
+    for key, old, new in shown:
+        print(f"      {key}: {_fmt(old)} -> {_fmt(new)}")
+    if len(shown) < len(rows):
+        print(
+            f"      ... {len(rows) - len(shown)} more (-v lists all): "
+            + ", ".join(k for k, _, _ in rows[_SHOWN_PER_GROUP : _SHOWN_PER_GROUP + 8])
+            + (", ..." if len(rows) - len(shown) > 8 else "")
+        )
+
+
+def _print_changes(report: Report, verbose: bool) -> None:
     groups: dict[str, list[tuple[str, object, object]]] = {}
     for c in report.changes:
         groups.setdefault(c.origin, []).append((c.key, c.old, c.new))
     print(f"  changed  {len(report.changes)} setting key(s)")
     for origin, rows in groups.items():
-        print(f"    {origin}: {len(rows)}")
-        shown = (
-            rows
-            if opts.verbose or len(rows) <= _SHOWN_PER_GROUP
-            else rows[:_SHOWN_PER_GROUP]
-        )
-        for key, old, new in shown:
-            print(f"      {key}: {_fmt(old)} -> {_fmt(new)}")
-        if len(shown) < len(rows):
-            print(
-                f"      ... {len(rows) - len(shown)} more (-v lists all): "
-                + ", ".join(
-                    k for k, _, _ in rows[_SHOWN_PER_GROUP : _SHOWN_PER_GROUP + 8]
-                )
-                + (", ..." if len(rows) - len(shown) > 8 else "")
-            )
+        _print_group(origin, rows, verbose)
+
+
+def _print_report(
+    report: Report,
+    refs: dict[str, PresetRef],
+    opts: _Options,
+    others: dict[str, list[str]],
+) -> None:
+    print("=" * 72)
+    print(f"retarget: {report.source} -> {report.target}")
+    _print_presets(refs, others)
+    for label in report.objects:
+        state = "KEPT" if int(label.split(":")[0]) in report.kept else "dropped"
+        print(f"  object   {label}  -> {state}")
+    _print_fit(report)
+    _print_changes(report, opts.verbose)
     for note in report.notes:
         print(f"  note     {note}")
     print("-" * 72)

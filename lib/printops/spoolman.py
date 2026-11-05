@@ -17,19 +17,29 @@ INVARIANTS:
     Spoolman cannot change a field type, and silently using a differently-typed field would
     corrupt data. Adding a field = append to EXTRA_FIELDS (contract: append-only, via PR).
 """
+
 from __future__ import annotations
 
 import json
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
 
 Entity = Literal["vendor", "filament", "spool"]
 ENTITIES: tuple[Entity, ...] = ("vendor", "filament", "spool")
-FieldType = Literal["text", "integer", "integer_range", "float", "float_range", "datetime", "boolean", "choice"]
+FieldType = Literal[
+    "text",
+    "integer",
+    "integer_range",
+    "float",
+    "float_range",
+    "datetime",
+    "boolean",
+    "choice",
+]
 
 JSON = dict[str, Any]
 
@@ -50,16 +60,34 @@ class ExtraFieldConflict(SpoolmanError):
 class Spoolman(Protocol):
     """The subset of the Spoolman v0.27 API PrintOps uses (paths relative to /api/v1)."""
 
-    def info(self) -> JSON: ...                                   # GET /info
-    def list_fields(self, entity: Entity) -> list[JSON]: ...      # GET /field/{entity}
-    def set_field(self, entity: Entity, key: str, params: Mapping[str, Any]) -> list[JSON]: ...  # POST /field/{entity}/{key}
-    def find(self, entity: Entity, params: Mapping[str, str] | None = None) -> list[JSON]: ...    # GET /{entity}
-    def get(self, entity: Entity, item_id: int) -> JSON: ...      # GET /{entity}/{id}
-    def create(self, entity: Entity, data: Mapping[str, Any]) -> JSON: ...   # POST /{entity}
-    def update(self, entity: Entity, item_id: int, data: Mapping[str, Any]) -> JSON: ...  # PATCH /{entity}/{id}
-    def delete(self, entity: Entity, item_id: int) -> None: ...   # DELETE /{entity}/{id}
-    def use(self, spool_id: int, *, use_weight: float | None = None, use_length: float | None = None) -> JSON: ...  # PUT /spool/{id}/use
-    def measure(self, spool_id: int, weight: float) -> JSON: ...  # PUT /spool/{id}/measure (gross g)
+    def info(self) -> JSON: ...  # GET /info
+    def list_fields(self, entity: Entity) -> list[JSON]: ...  # GET /field/{entity}
+    def set_field(
+        self, entity: Entity, key: str, params: Mapping[str, Any]
+    ) -> list[JSON]: ...  # POST /field/{entity}/{key}
+    def delete_field(self, entity: Entity, key: str) -> list[JSON]: ...  # DELETE /field/{entity}/{key} (also drops every stored value)
+    def link_tag(self, spool_id: int, uid: str) -> JSON: ...      # POST /spool/{id}/tag (409 = another spool holds the UID)
+    def find(
+        self, entity: Entity, params: Mapping[str, str] | None = None
+    ) -> list[JSON]: ...  # GET /{entity}
+    def get(self, entity: Entity, item_id: int) -> JSON: ...  # GET /{entity}/{id}
+    def create(
+        self, entity: Entity, data: Mapping[str, Any]
+    ) -> JSON: ...  # POST /{entity}
+    def update(
+        self, entity: Entity, item_id: int, data: Mapping[str, Any]
+    ) -> JSON: ...  # PATCH /{entity}/{id}
+    def delete(self, entity: Entity, item_id: int) -> None: ...  # DELETE /{entity}/{id}
+    def use(
+        self,
+        spool_id: int,
+        *,
+        use_weight: float | None = None,
+        use_length: float | None = None,
+    ) -> JSON: ...  # PUT /spool/{id}/use
+    def measure(
+        self, spool_id: int, weight: float
+    ) -> JSON: ...  # PUT /spool/{id}/measure (gross g)
 
 
 def encode_extra(value: Any) -> str:
@@ -71,6 +99,11 @@ def decode_extra(raw: str | None) -> Any:
     return None if raw is None else json.loads(raw)
 
 
+def normalize_uid(uid: str) -> str:
+    """A tag UID the way Spoolman stores it: separators (: - _ space) stripped, upper case."""
+    return "".join(c for c in uid if c not in ":-_ ").upper()
+
+
 class HttpSpoolman:
     """Spoolman over HTTP. `base_url` is the server root, e.g. http://spoolman:8000."""
 
@@ -78,8 +111,13 @@ class HttpSpoolman:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
 
-    def _call(self, method: str, path: str, body: Mapping[str, Any] | None = None,
-              params: Mapping[str, str] | None = None) -> Any:
+    def _call(
+        self,
+        method: str,
+        path: str,
+        body: Mapping[str, Any] | None = None,
+        params: Mapping[str, str] | None = None,
+    ) -> Any:
         url = f"{self.base_url}/api/v1{path}"
         if params:
             url += "?" + urllib.parse.urlencode(dict(params))
@@ -92,15 +130,23 @@ class HttpSpoolman:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:  # noqa: S310 — operator-configured URL
                 raw = resp.read()
         except urllib.error.HTTPError as e:
-            raise SpoolmanError(f"Spoolman {method} {path}: HTTP {e.code}: {_error_text(e.read())}", status=e.code) from e
+            raise SpoolmanError(
+                f"Spoolman {method} {path}: HTTP {e.code}: {_error_text(e.read())}",
+                status=e.code,
+            ) from e
         except (urllib.error.URLError, OSError) as e:
             reason = getattr(e, "reason", e)
-            raise SpoolmanError(f"Spoolman at {self.base_url} is unreachable: {reason}") from e
+            raise SpoolmanError(
+                f"Spoolman at {self.base_url} is unreachable: {reason}"
+            ) from e
         try:
             return json.loads(raw) if raw else None
         except ValueError as e:
             # e.g. a proxy's HTML error page: report it as a Spoolman failure, not a crash
-            raise SpoolmanError(f"Spoolman {method} {path}: reply is not JSON: {raw[:120]!r}", status=502) from e
+            raise SpoolmanError(
+                f"Spoolman {method} {path}: reply is not JSON: {raw[:120]!r}",
+                status=502,
+            ) from e
 
     def info(self) -> JSON:
         return dict(self._call("GET", "/info"))
@@ -108,10 +154,22 @@ class HttpSpoolman:
     def list_fields(self, entity: Entity) -> list[JSON]:
         return list(self._call("GET", f"/field/{entity}"))
 
-    def set_field(self, entity: Entity, key: str, params: Mapping[str, Any]) -> list[JSON]:
-        return list(self._call("POST", f"/field/{entity}/{urllib.parse.quote(key)}", params))
+    def set_field(
+        self, entity: Entity, key: str, params: Mapping[str, Any]
+    ) -> list[JSON]:
+        return list(
+            self._call("POST", f"/field/{entity}/{urllib.parse.quote(key)}", params)
+        )
 
-    def find(self, entity: Entity, params: Mapping[str, str] | None = None) -> list[JSON]:
+    def delete_field(self, entity: Entity, key: str) -> list[JSON]:
+        return list(self._call("DELETE", f"/field/{entity}/{urllib.parse.quote(key)}"))
+
+    def link_tag(self, spool_id: int, uid: str) -> JSON:
+        return dict(self._call("POST", f"/spool/{int(spool_id)}/tag", {"uid": uid}))
+
+    def find(
+        self, entity: Entity, params: Mapping[str, str] | None = None
+    ) -> list[JSON]:
         return list(self._call("GET", f"/{entity}", params=params))
 
     def get(self, entity: Entity, item_id: int) -> JSON:
@@ -126,12 +184,24 @@ class HttpSpoolman:
     def delete(self, entity: Entity, item_id: int) -> None:
         self._call("DELETE", f"/{entity}/{int(item_id)}")
 
-    def use(self, spool_id: int, *, use_weight: float | None = None, use_length: float | None = None) -> JSON:
-        body = {k: v for k, v in (("use_weight", use_weight), ("use_length", use_length)) if v is not None}
+    def use(
+        self,
+        spool_id: int,
+        *,
+        use_weight: float | None = None,
+        use_length: float | None = None,
+    ) -> JSON:
+        body = {
+            k: v
+            for k, v in (("use_weight", use_weight), ("use_length", use_length))
+            if v is not None
+        }
         return dict(self._call("PUT", f"/spool/{int(spool_id)}/use", body))
 
     def measure(self, spool_id: int, weight: float) -> JSON:
-        return dict(self._call("PUT", f"/spool/{int(spool_id)}/measure", {"weight": weight}))
+        return dict(
+            self._call("PUT", f"/spool/{int(spool_id)}/measure", {"weight": weight})
+        )
 
 
 def _error_text(raw: bytes) -> str:
@@ -170,33 +240,70 @@ class ExtraField:
 # retype or reorder an entry — Spoolman cannot change a field's type, and `order` is derived
 # from the position here.
 EXTRA_FIELDS: tuple[ExtraField, ...] = (
-    ExtraField("spool", "printops_slot", "PrintOps slot", "text"),
-    ExtraField("spool", "opened_at", "Opened at", "datetime"),
     ExtraField("spool", "last_dried_at", "Last dried at", "datetime"),
-    ExtraField("spool", "dry_state", "Dry state", "choice", choices=("fresh", "ok", "due", "wet")),
-    ExtraField("spool", "remaining_confidence_g", "Remaining ± (confidence)", "float", unit="g"),
-    ExtraField("spool", "tag_uids", "Tag UIDs (JSON list)", "text"),
-    ExtraField("spool", "printops_location_id", "PrintOps location id", "integer"),
+    ExtraField(
+        "spool",
+        "dry_state",
+        "Dry state",
+        "choice",
+        choices=("fresh", "ok", "due", "wet"),
+    ),
+    ExtraField(
+        "spool", "remaining_confidence_g", "Remaining ± (confidence)", "float", unit="g"
+    ),
     ExtraField("filament", "nozzle_temp_min", "Nozzle temp min", "integer", unit="°C"),
     ExtraField("filament", "nozzle_temp_max", "Nozzle temp max", "integer", unit="°C"),
     ExtraField("filament", "bed_temp_min", "Bed temp min", "integer", unit="°C"),
     ExtraField("filament", "bed_temp_max", "Bed temp max", "integer", unit="°C"),
     ExtraField("filament", "abrasive", "Abrasive", "boolean"),
-    ExtraField("filament", "hygroscopic_class", "Hygroscopic class", "choice",
-               choices=("low", "medium", "high", "extreme")),
+    ExtraField(
+        "filament",
+        "hygroscopic_class",
+        "Hygroscopic class",
+        "choice",
+        choices=("low", "medium", "high", "extreme"),
+    ),
     ExtraField("filament", "drying_temp_c", "Drying temp", "integer", unit="°C"),
     ExtraField("filament", "drying_hours", "Drying time", "float", unit="h"),
     ExtraField("filament", "measured_hex", "Measured colour (hex)", "text"),
-    ExtraField("filament", "max_volumetric_mm3_s", "Max volumetric speed", "float", unit="mm³/s"),
-    ExtraField("vendor", "spool_tare_g", "Empty spool weight (tare)", "float", unit="g"),
-    ExtraField("vendor", "spool_kind", "Spool kind", "choice", choices=("cardboard", "plastic", "refill")),
+    ExtraField(
+        "filament",
+        "max_volumetric_mm3_s",
+        "Max volumetric speed",
+        "float",
+        unit="mm³/s",
+    ),
+    ExtraField(
+        "vendor",
+        "spool_kind",
+        "Spool kind",
+        "choice",
+        choices=("cardboard", "plastic", "refill"),
+    ),
     # #160: key of the source record a spool was imported from ("babushkin-dom:owned:белый"),
     # so re-running an import changes nothing.
     ExtraField("spool", "external_key", "PrintOps import key", "text"),
     # #294: the slicer filament preset (user preset name) this spool / filament prints with;
     # `3d calibrate gen` takes it as the default --filament-preset. The spool's wins.
-    ExtraField("spool", "slicer_filament_preset", "Slicer filament preset", "text"),  # spools.PRESET_FIELD
+    ExtraField(
+        "spool", "slicer_filament_preset", "Slicer filament preset", "text"
+    ),  # spools.PRESET_FIELD
     ExtraField("filament", "slicer_filament_preset", "Slicer filament preset", "text"),
+    # Max print speed of the filament, mm/s (printops.filament_defaults: 300, PLA+ 600). Not
+    # max_volumetric_mm3_s, which is mm³/s.
+    ExtraField("filament", "max_speed_mm_s", "Max speed", "integer", unit="mm/s"),
+)
+
+# Extra fields PrintOps used to register and no longer wants: each has a native Spoolman twin
+# (docs/printops/native-fields.md). `3d printops fields migrate-native` moves the values over and
+# only then deletes the definition (Spoolman destroys every stored value with it); health reports
+# a still-present definition as a warning (`legacy_fields`; the API status stays ok).
+LEGACY_EXTRA_FIELDS: tuple[tuple[Entity, str], ...] = (
+    ("vendor", "spool_tare_g"),  # -> vendor.empty_spool_weight
+    ("spool", "printops_slot"),  # -> spool.location = "slot:<printer>/<head>"
+    ("spool", "printops_location_id"),  # -> spool.location (the text is the only placement record)
+    ("spool", "opened_at"),  # -> spool.first_used
+    ("spool", "tag_uids"),  # -> spool tags (POST /spool/{id}/tag)
 )
 
 # PrintOps fields sort after any fields the user added by hand in the Spoolman UI.
@@ -210,7 +317,11 @@ class FieldsReport:
     unchanged: list[str]
 
     def to_dict(self) -> JSON:
-        return {"created": self.created, "updated": self.updated, "unchanged": self.unchanged}
+        return {
+            "created": self.created,
+            "updated": self.updated,
+            "unchanged": self.unchanged,
+        }
 
 
 def _differs(existing: Mapping[str, Any], wanted: Mapping[str, Any]) -> bool:
@@ -243,45 +354,109 @@ def _registered(have: Mapping[str, Any] | None, wanted: ExtraField) -> bool:
     return all(c in (have.get("choices") or []) for c in wanted.choices or ())
 
 
-def ensure_extra_fields(spoolman: Spoolman, fields: tuple[ExtraField, ...] = EXTRA_FIELDS) -> FieldsReport:
+def _field_params(
+    have: Mapping[str, Any] | None, f: ExtraField, order: int, label: str
+) -> dict[str, Any]:
+    """The registration payload for `f`, merged with what Spoolman already holds; raises on a type clash."""
+    params = f.params(order)
+    if have is not None and not _compatible(have, f):
+        raise ExtraFieldConflict(
+            f"Spoolman extra field {label} exists as {_shape(have)}, PrintOps needs "
+            f"{_shape(f.params(0))}; Spoolman cannot change a field type or multi_choice — "
+            "rename or delete the conflicting field in Spoolman (Settings → Extra fields) and re-run"
+        )
+    if have is not None and f.choices is not None:
+        # Spoolman refuses to drop choices: keep the user's extra ones, add ours.
+        params["choices"] = list(
+            dict.fromkeys([*(have.get("choices") or []), *f.choices])
+        )
+    return params
+
+
+def _ensure_entity_fields(
+    spoolman: Spoolman,
+    entity: Entity,
+    wanted: Sequence[ExtraField],
+    fields: tuple[ExtraField, ...],
+    report: FieldsReport,
+) -> None:
+    existing = {str(f["key"]): f for f in spoolman.list_fields(entity)}
+    for f in wanted:
+        label = f"{entity}.{f.key}"
+        have = existing.get(f.key)
+        params = _field_params(have, f, ORDER_BASE + fields.index(f), label)
+        if have is None:
+            spoolman.set_field(entity, f.key, params)
+            report.created.append(label)
+        elif _differs(have, params):
+            spoolman.set_field(entity, f.key, params)
+            report.updated.append(label)
+        else:
+            report.unchanged.append(label)
+
+
+def ensure_extra_fields(
+    spoolman: Spoolman, fields: tuple[ExtraField, ...] = EXTRA_FIELDS
+) -> FieldsReport:
     """Register every PrintOps extra field in Spoolman (idempotent; see module invariants)."""
     report = FieldsReport(created=[], updated=[], unchanged=[])
     for entity in ENTITIES:
         wanted = [f for f in fields if f.entity == entity]
-        if not wanted:
-            continue
-        existing = {str(f["key"]): f for f in spoolman.list_fields(entity)}
-        for f in wanted:
-            label = f"{entity}.{f.key}"
-            order = ORDER_BASE + fields.index(f)
-            params = f.params(order)
-            have = existing.get(f.key)
-            if have is not None and not _compatible(have, f):
-                raise ExtraFieldConflict(
-                    f"Spoolman extra field {label} exists as {_shape(have)}, PrintOps needs "
-                    f"{_shape(f.params(0))}; Spoolman cannot change a field type or multi_choice — "
-                    "rename or delete the conflicting field in Spoolman (Settings → Extra fields) and re-run"
-                )
-            if have is not None and f.choices is not None:
-                # Spoolman refuses to drop choices: keep the user's extra ones, add ours.
-                params["choices"] = list(dict.fromkeys([*(have.get("choices") or []), *f.choices]))
-            if have is None:
-                spoolman.set_field(entity, f.key, params)
-                report.created.append(label)
-            elif _differs(have, params):
-                spoolman.set_field(entity, f.key, params)
-                report.updated.append(label)
-            else:
-                report.unchanged.append(label)
+        if wanted:
+            _ensure_entity_fields(spoolman, entity, wanted, fields, report)
     return report
+
+
+@dataclass(frozen=True)
+class FieldsAudit:
+    """What Spoolman's field lists say about the PrintOps registry: `entity.key` labels."""
+
+    missing: list[str]  # needed but absent or registered incompatibly
+    legacy: list[str]  # LEGACY_EXTRA_FIELDS definitions still present
+
+
+def audit_extra_fields(
+    spoolman: Spoolman, fields: tuple[ExtraField, ...] = EXTRA_FIELDS
+) -> FieldsAudit:
+    """One `GET /field/{entity}` per entity, shared by the missing and the legacy check."""
+    missing: list[str] = []
+    legacy: list[str] = []
+    for entity in ENTITIES:
+        have = {str(f["key"]): f for f in spoolman.list_fields(entity)}
+        missing.extend(
+            f"{entity}.{f.key}"
+            for f in fields
+            if f.entity == entity and not _registered(have.get(f.key), f)
+        )
+        legacy.extend(f"{e}.{k}" for e, k in LEGACY_EXTRA_FIELDS if e == entity and k in have)
+    return FieldsAudit(missing=missing, legacy=legacy)
 
 
 def missing_extra_fields(spoolman: Spoolman, fields: tuple[ExtraField, ...] = EXTRA_FIELDS) -> list[str]:
     """`entity.key` of every PrintOps field missing in Spoolman or registered incompatibly."""
-    missing: list[str] = []
-    for entity in ENTITIES:
-        have = {str(f["key"]): f for f in spoolman.list_fields(entity)}
-        missing.extend(
-            f"{entity}.{f.key}" for f in fields if f.entity == entity and not _registered(have.get(f.key), f)
-        )
-    return missing
+    return audit_extra_fields(spoolman, fields).missing
+
+
+def legacy_holders(items: list[JSON], key: str) -> list[JSON]:
+    """The items whose extra `key` still holds a value."""
+    return [i for i in items if (i.get("extra") or {}).get(key) is not None]
+
+
+def close_legacy_field(spoolman: Spoolman, entity: Entity, key: str, *, blocking: int, apply: bool) -> tuple[str, str]:
+    """(state, detail) of a legacy field definition after its values were migrated: `would_delete`
+    / `kept` (dry run, from the `blocking` items that would still hold a value), else a fresh read
+    decides — `kept` while any item holds a value (Spoolman destroys the stored values together
+    with the definition), `deleted`, or `failed`."""
+    if not apply:
+        if blocking:
+            return "kept", f"{blocking} {entity}(s) would still hold a value"
+        return "would_delete", f"no {entity} would hold a value afterwards"
+    try:
+        listing = spoolman.find(entity, {"allow_archived": "true"} if entity == "spool" else None)
+        remaining = legacy_holders(listing, key)
+        if remaining:
+            return "kept", f"{len(remaining)} {entity}(s) still hold a value; definition kept"
+        spoolman.delete_field(entity, key)
+    except SpoolmanError as e:
+        return "failed", f"could not delete the field definition: {e.message}"
+    return "deleted", f"no {entity} held a value; definition deleted"

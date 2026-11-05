@@ -107,10 +107,9 @@ def _tick(state: ApiState, run_check: bool) -> int:
         if not run_check:
             return FALLBACK_CHECK_MIN
         policy: DryingPolicy = section("drying")
-        if state.spoolman is not None:
-            report = drying.check(
-                conn, state.spoolman, policy, humidity=humidity_reader()
-            )
+        spoolman = state.synced(conn)
+        if spoolman is not None:
+            report = drying.check(conn, spoolman, policy, humidity=humidity_reader())
             if report.changed or report.errors:
                 log.info(
                     "drying check: changed=%s alerts=%s errors=%s",

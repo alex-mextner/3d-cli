@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
+from typing import Any
 
 import pytest
 from calibration_fixtures import fake_orca, write_plate_orca
@@ -49,7 +50,7 @@ def _load(live: LiveApi, material: str, name: str, slot: str, lot: str = "L1") -
             {
                 "filament_id": fil["id"],
                 "lot_nr": lot,
-                "extra": {"printops_slot": encode_extra(slot)},
+                "location": f"slot:{slot}",
             },
         )["id"]
     )
@@ -296,9 +297,23 @@ def test_gen_plate_with_the_printers_and_spools_presets(tmp_path: Path) -> None:
     user = tmp_path / "user"
     for kind, data in (
         ("machine", {"name": "K1 SE - Copy", "inherits": "Creality K1 SE 0.4 nozzle"}),
-        ("process", {"name": "Std 8900", "inherits": "0.20mm Standard @Creality K1 SE", "default_acceleration": "8000"}),
-        ("filament", {"name": "Orange PLA @K1SE", "inherits": "Creality Generic PLA @K1-all",
-                      "filament_flow_ratio": ["0.931"], "filament_type": ["PLA"]}),
+        (
+            "process",
+            {
+                "name": "Std 8900",
+                "inherits": "0.20mm Standard @Creality K1 SE",
+                "default_acceleration": "8000",
+            },
+        ),
+        (
+            "filament",
+            {
+                "name": "Orange PLA @K1SE",
+                "inherits": "Creality Generic PLA @K1-all",
+                "filament_flow_ratio": ["0.931"],
+                "filament_type": ["PLA"],
+            },
+        ),
     ):
         (user / kind).mkdir(parents=True, exist_ok=True)
         (user / kind / f"{data['name']}.json").write_text(json.dumps(data))
@@ -308,32 +323,76 @@ def test_gen_plate_with_the_printers_and_spools_presets(tmp_path: Path) -> None:
         "  heads: [{label: T1, index: 0}]\n  slicer: {machine: K1 SE - Copy, process: Std 8900}\n",
         encoding="utf-8",
     )
-    env = {"THREED_FLEET": str(fleet), "ORCA_PROFILES": str(profiles), "ORCA_USER_PRESETS": str(user),
-           "SLICER": str(orca)}
+    env = {
+        "THREED_FLEET": str(fleet),
+        "ORCA_PROFILES": str(profiles),
+        "ORCA_USER_PRESETS": str(user),
+        "SLICER": str(orca),
+    }
     out = tmp_path / "plate.gcode"
 
-    missing = run_cli(tmp_path, "calibrate", "gen", "plate1", "--printer", "k1", "-o", str(out), env_extra=env)
+    missing = run_cli(
+        tmp_path,
+        "calibrate",
+        "gen",
+        "plate1",
+        "--printer",
+        "k1",
+        "-o",
+        str(out),
+        env_extra=env,
+    )
     assert missing.returncode == 2
     assert "no filament preset for k1" in missing.stderr
     assert not out.exists()
 
-    newline = run_cli(tmp_path, "calibrate", "gen", "plate1", "--printer", "k1", "--filament-preset",
-                      "Orange PLA @K1SE\nM104 S300", "-o", str(out), env_extra=env)
+    newline = run_cli(
+        tmp_path,
+        "calibrate",
+        "gen",
+        "plate1",
+        "--printer",
+        "k1",
+        "--filament-preset",
+        "Orange PLA @K1SE\nM104 S300",
+        "-o",
+        str(out),
+        env_extra=env,
+    )
     assert newline.returncode == 2
     assert "control character" in newline.stderr
     assert not out.exists()
 
-    made = run_cli(tmp_path, "calibrate", "gen", "plate1", "--printer", "k1", "--filament-preset",
-                   "Orange PLA @K1SE", "--only", "bridge", "-o", str(out), env_extra=env)
+    made = run_cli(
+        tmp_path,
+        "calibrate",
+        "gen",
+        "plate1",
+        "--printer",
+        "k1",
+        "--filament-preset",
+        "Orange PLA @K1SE",
+        "--only",
+        "bridge",
+        "-o",
+        str(out),
+        env_extra=env,
+    )
     assert made.returncode == 0, made.stderr
     lines = out.read_text().splitlines()
     assert "; default_acceleration = 8000" in lines
     assert "; filament_flow_ratio = 0.931" in lines
-    assert ("; 3d calibrate presets: machine=K1 SE - Copy (fleet k1.slicer); process=Std 8900 (fleet k1.slicer); "
-            "filament=Orange PLA @K1SE (--filament-preset)") in lines
+    assert (
+        "; 3d calibrate presets: machine=K1 SE - Copy (fleet k1.slicer); process=Std 8900 (fleet k1.slicer); "
+        "filament=Orange PLA @K1SE (--filament-preset)"
+    ) in lines
     data = json.loads(out.with_suffix(".json").read_text())
     assert data["presets"]["filament"] == "Orange PLA @K1SE"
-    assert [o["name"] for o in data["objects"]][-3:] == ["bridge_8", "bridge_11", "bridge_14"]
+    assert [o["name"] for o in data["objects"]][-3:] == [
+        "bridge_8",
+        "bridge_11",
+        "bridge_14",
+    ]
 
 
 def _k1_gen_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
@@ -343,9 +402,23 @@ def _k1_gen_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, st
     user = tmp_path / "user"
     for kind, data in (
         ("machine", {"name": "K1 SE - Copy", "inherits": "Creality K1 SE 0.4 nozzle"}),
-        ("process", {"name": "Std 8900", "inherits": "0.20mm Standard @Creality K1 SE", "default_acceleration": "8000"}),
-        ("filament", {"name": "Orange PLA @K1SE", "inherits": "Creality Generic PLA @K1-all",
-                      "filament_flow_ratio": ["0.931"], "filament_type": ["PLA"]}),
+        (
+            "process",
+            {
+                "name": "Std 8900",
+                "inherits": "0.20mm Standard @Creality K1 SE",
+                "default_acceleration": "8000",
+            },
+        ),
+        (
+            "filament",
+            {
+                "name": "Orange PLA @K1SE",
+                "inherits": "Creality Generic PLA @K1-all",
+                "filament_flow_ratio": ["0.931"],
+                "filament_type": ["PLA"],
+            },
+        ),
     ):
         (user / kind).mkdir(parents=True, exist_ok=True)
         (user / kind / f"{data['name']}.json").write_text(json.dumps(data))
@@ -356,23 +429,38 @@ def _k1_gen_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, st
         encoding="utf-8",
     )
     monkeypatch.setenv("THREED_FLEET", str(fleet))
-    return {"THREED_FLEET": str(fleet), "ORCA_PROFILES": str(profiles), "ORCA_USER_PRESETS": str(user),
-            "SLICER": str(orca)}
+    return {
+        "THREED_FLEET": str(fleet),
+        "ORCA_PROFILES": str(profiles),
+        "ORCA_USER_PRESETS": str(user),
+        "SLICER": str(orca),
+    }
 
 
-def _bound_spool(live: LiveApi, *, spool_extra: str | None = None, filament_extra: str | None = None,
-                 slot: str = "k1/T1") -> int:
+def _bound_spool(
+    live: LiveApi,
+    *,
+    spool_extra: str | None = None,
+    filament_extra: str | None = None,
+    slot: str = "k1/T1",
+) -> int:
     sm = live.spoolman
     vendor = sm.create("vendor", {"name": "Elegoo"})
-    fil: dict[str, object] = {"name": "Orange", "vendor_id": vendor["id"], "material": "PLA", "density": 1.24,
-                              "diameter": 1.75, "weight": 1000}
+    fil: dict[str, object] = {
+        "name": "Orange",
+        "vendor_id": vendor["id"],
+        "material": "PLA",
+        "density": 1.24,
+        "diameter": 1.75,
+        "weight": 1000,
+    }
     if filament_extra:
         fil["extra"] = {"slicer_filament_preset": encode_extra(filament_extra)}
     fid = sm.create("filament", fil)["id"]
-    extra = {"printops_slot": encode_extra(slot)}
+    extra: dict[str, str] = {}
     if spool_extra:
         extra["slicer_filament_preset"] = encode_extra(spool_extra)
-    return int(sm.create("spool", {"filament_id": fid, "extra": extra})["id"])
+    return int(sm.create("spool", {"filament_id": fid, "location": f"slot:{slot}", "extra": extra})["id"])
 
 
 def test_gen_takes_the_filament_preset_from_the_spool_on_the_head(
@@ -384,30 +472,95 @@ def test_gen_takes_the_filament_preset_from_the_spool_on_the_head(
     env = {**_k1_gen_env(tmp_path, monkeypatch), **_env(live_api)}
     sid = _bound_spool(live_api, filament_extra="Orange PLA @K1SE")
     out = tmp_path / "plate.gcode"
-    made = run_cli(tmp_path, "calibrate", "gen", "plate1", "--printer", "k1", "--only", "bridge", "-o", str(out),
-                   env_extra=env)
+    made = run_cli(
+        tmp_path,
+        "calibrate",
+        "gen",
+        "plate1",
+        "--printer",
+        "k1",
+        "--only",
+        "bridge",
+        "-o",
+        str(out),
+        env_extra=env,
+    )
     assert made.returncode == 0, made.stderr
     source = f"3d-api spool #{sid} slicer_filament_preset on filament, bound to k1"
-    assert ("; 3d calibrate presets: machine=K1 SE - Copy (fleet k1.slicer); process=Std 8900 (fleet k1.slicer); "
-            f"filament=Orange PLA @K1SE ({source})") in out.read_text().splitlines()
+    assert (
+        "; 3d calibrate presets: machine=K1 SE - Copy (fleet k1.slicer); process=Std 8900 (fleet k1.slicer); "
+        f"filament=Orange PLA @K1SE ({source})"
+    ) in out.read_text().splitlines()
     assert "; filament_flow_ratio = 0.931" in out.read_text().splitlines()
-    assert json.loads(out.with_suffix(".json").read_text())["presets"]["chosen_by"]["filament"] == source
-
-    live_api.spoolman.update("spool", sid, {"extra": {"slicer_filament_preset": encode_extra("Orange PLA @K1SE")}})
-    again = run_cli(tmp_path, "calibrate", "gen", "plate1", "--printer", "k1", "--head", "T1", "--only", "bridge",
-                    "-o", str(out), env_extra=env)
-    assert again.returncode == 0, again.stderr
-    assert f"filament=Orange PLA @K1SE (3d-api spool #{sid} slicer_filament_preset on spool, bound to k1/T1)" in (
-        out.read_text()
+    assert (
+        json.loads(out.with_suffix(".json").read_text())["presets"]["chosen_by"][
+            "filament"
+        ]
+        == source
     )
 
-    by_id = run_cli(tmp_path, "calibrate", "gen", "plate1", "--printer", "k1", "--spool", str(sid), "--only", "bridge",
-                    "-o", str(out), env_extra=env)
-    assert by_id.returncode == 0, by_id.stderr
-    assert f"filament=Orange PLA @K1SE (3d-api spool #{sid} slicer_filament_preset on spool)" in out.read_text()
+    live_api.spoolman.update(
+        "spool",
+        sid,
+        {"extra": {"slicer_filament_preset": encode_extra("Orange PLA @K1SE")}},
+    )
+    again = run_cli(
+        tmp_path,
+        "calibrate",
+        "gen",
+        "plate1",
+        "--printer",
+        "k1",
+        "--head",
+        "T1",
+        "--only",
+        "bridge",
+        "-o",
+        str(out),
+        env_extra=env,
+    )
+    assert again.returncode == 0, again.stderr
+    assert (
+        f"filament=Orange PLA @K1SE (3d-api spool #{sid} slicer_filament_preset on spool, bound to k1/T1)"
+        in (out.read_text())
+    )
 
-    flagged = run_cli(tmp_path, "calibrate", "gen", "plate1", "--printer", "k1", "--filament-preset",
-                      "Orange PLA @K1SE", "--only", "bridge", "-o", str(out), env_extra=env)
+    by_id = run_cli(
+        tmp_path,
+        "calibrate",
+        "gen",
+        "plate1",
+        "--printer",
+        "k1",
+        "--spool",
+        str(sid),
+        "--only",
+        "bridge",
+        "-o",
+        str(out),
+        env_extra=env,
+    )
+    assert by_id.returncode == 0, by_id.stderr
+    assert (
+        f"filament=Orange PLA @K1SE (3d-api spool #{sid} slicer_filament_preset on spool)"
+        in out.read_text()
+    )
+
+    flagged = run_cli(
+        tmp_path,
+        "calibrate",
+        "gen",
+        "plate1",
+        "--printer",
+        "k1",
+        "--filament-preset",
+        "Orange PLA @K1SE",
+        "--only",
+        "bridge",
+        "-o",
+        str(out),
+        env_extra=env,
+    )
     assert flagged.returncode == 0, flagged.stderr
     assert "filament=Orange PLA @K1SE (--filament-preset)" in out.read_text()
 
@@ -423,29 +576,53 @@ def test_gen_refuses_without_a_binding_or_a_preset_or_the_api(
 
     unbound = run_cli(tmp_path, *args, env_extra={**base, **_env(live_api)})
     assert unbound.returncode == 2
-    assert "no filament preset for k1" in unbound.stderr and "no spool bound to k1/T1" in unbound.stderr
+    assert (
+        "no filament preset for k1" in unbound.stderr
+        and "no spool bound to k1/T1" in unbound.stderr
+    )
 
     sid = _bound_spool(live_api)
     bare = run_cli(tmp_path, *args, env_extra={**base, **_env(live_api)})
     assert bare.returncode == 2
-    assert f"spool #{sid} carries no slicer filament preset (bound to k1)" in bare.stderr
+    assert (
+        f"spool #{sid} carries no slicer filament preset (bound to k1)" in bare.stderr
+    )
     assert f"3d printops spool preset {sid}" in bare.stderr
 
-    down = run_cli(tmp_path, *args, env_extra={**base, "PRINTOPS_API": "http://127.0.0.1:1", "PRINTOPS_TOKEN": "x"})
+    down = run_cli(
+        tmp_path,
+        *args,
+        env_extra={**base, "PRINTOPS_API": "http://127.0.0.1:1", "PRINTOPS_TOKEN": "x"},
+    )
     assert down.returncode == 2
-    assert "no filament preset for k1: 3d-api" in down.stderr and "--filament-preset" in down.stderr
+    assert (
+        "no filament preset for k1: 3d-api" in down.stderr
+        and "--filament-preset" in down.stderr
+    )
 
     unconfigured = run_cli(tmp_path, *args, env_extra=base)
-    assert unconfigured.returncode == 2 and "no filament preset for k1: name the slicer presets" in unconfigured.stderr
+    assert (
+        unconfigured.returncode == 2
+        and "no filament preset for k1: name the slicer presets" in unconfigured.stderr
+    )
     assert "3d-api" not in unconfigured.stderr  # nothing was asked of 3d-api
 
     (tmp_path / "bare.yaml").write_text(
         "k1:\n  model: Creality K1 SE\n  owner: own\n  access: offline\n  heads: [{label: T1, index: 0}]\n"
     )
     monkeypatch.setenv("THREED_FLEET", str(tmp_path / "bare.yaml"))
-    no_machine = run_cli(tmp_path, *args, env_extra={**base, "THREED_FLEET": str(tmp_path / "bare.yaml"),
-                                                      **_env(live_api)})
-    assert no_machine.returncode == 2  # the missing machine/process presets come first, 3d-api is not asked
+    no_machine = run_cli(
+        tmp_path,
+        *args,
+        env_extra={
+            **base,
+            "THREED_FLEET": str(tmp_path / "bare.yaml"),
+            **_env(live_api),
+        },
+    )
+    assert (
+        no_machine.returncode == 2
+    )  # the missing machine/process presets come first, 3d-api is not asked
     assert "no machine, process, filament preset for k1" in no_machine.stderr
     assert not out.exists()
 
@@ -456,21 +633,60 @@ def test_spool_preset_command_sets_the_spool_and_filament_preset(
     """`3d printops spool preset` writes the Spoolman extra field `calibrate gen` reads."""
     env = {**_k1_gen_env(tmp_path, monkeypatch), **_env(live_api)}
     sid = _bound_spool(live_api)
-    on_filament = run_cli(tmp_path, "printops", "spool", "preset", str(sid), "Orange PLA @K1SE", "--filament",
-                          env_extra=env)
+    on_filament = run_cli(
+        tmp_path,
+        "printops",
+        "spool",
+        "preset",
+        str(sid),
+        "Orange PLA @K1SE",
+        "--filament",
+        env_extra=env,
+    )
     assert on_filament.returncode == 0, on_filament.stderr
     assert "slicer filament preset: Orange PLA @K1SE" in on_filament.stdout
-    made = run_cli(tmp_path, "calibrate", "gen", "plate1", "--printer", "k1", "--only", "bridge", "-o",
-                   str(tmp_path / "p.gcode"), env_extra=env)
+    made = run_cli(
+        tmp_path,
+        "calibrate",
+        "gen",
+        "plate1",
+        "--printer",
+        "k1",
+        "--only",
+        "bridge",
+        "-o",
+        str(tmp_path / "p.gcode"),
+        env_extra=env,
+    )
     assert made.returncode == 0, made.stderr
-    cleared = run_cli(tmp_path, "printops", "spool", "preset", str(sid), "--clear", "--filament", env_extra=env)
+    cleared = run_cli(
+        tmp_path,
+        "printops",
+        "spool",
+        "preset",
+        str(sid),
+        "--clear",
+        "--filament",
+        env_extra=env,
+    )
     assert cleared.returncode == 0 and "(none)" in cleared.stdout
     for bad_name in ("A\nM104 S300", "  "):
-        bad = run_cli(tmp_path, "printops", "spool", "preset", str(sid), bad_name, env_extra=env)
-        assert bad.returncode == 1 and "non-blank and free of control characters" in bad.stderr
-    ApiClient(live_api.url, live_api.tokens["rw"]).post(f"/v1/spools/{sid}/slicer-preset", {"preset": "Kept", "scope": "spool"})
-    with pytest.raises(ApiError) as err:  # a body without `preset` must not wipe the stored one
-        ApiClient(live_api.url, live_api.tokens["rw"]).post(f"/v1/spools/{sid}/slicer-preset", {})
+        bad = run_cli(
+            tmp_path, "printops", "spool", "preset", str(sid), bad_name, env_extra=env
+        )
+        assert (
+            bad.returncode == 1
+            and "non-blank and free of control characters" in bad.stderr
+        )
+    ApiClient(live_api.url, live_api.tokens["rw"]).post(
+        f"/v1/spools/{sid}/slicer-preset", {"preset": "Kept", "scope": "spool"}
+    )
+    with pytest.raises(
+        ApiError
+    ) as err:  # a body without `preset` must not wipe the stored one
+        ApiClient(live_api.url, live_api.tokens["rw"]).post(
+            f"/v1/spools/{sid}/slicer-preset", {}
+        )
     assert err.value.status == 422
     kept = ApiClient(live_api.url, live_api.tokens["rw"]).get(f"/v1/spools/{sid}")
     assert kept["slicer_filament_preset"] == "Kept"
@@ -482,14 +698,36 @@ def test_gen_combo_and_temp_through_bin_3d(tmp_path: Path) -> None:
     profiles, orca = fake_orca(tmp_path)
     fleet = tmp_path / "fleet.yaml"
     fleet.write_text(K1_FLEET, encoding="utf-8")
-    env = {"THREED_FLEET": str(fleet), "ORCA_PROFILES": str(profiles),
-           "ORCA_USER_PRESETS": str(tmp_path / "user"), "SLICER": str(orca)}
-    presets = ["--machine-preset", "Creality K1 SE 0.4 nozzle", "--process-preset",
-               "0.20mm Standard @Creality K1 SE", "--filament-preset", "Creality Generic PLA @K1-all"]
+    env = {
+        "THREED_FLEET": str(fleet),
+        "ORCA_PROFILES": str(profiles),
+        "ORCA_USER_PRESETS": str(tmp_path / "user"),
+        "SLICER": str(orca),
+    }
+    presets = [
+        "--machine-preset",
+        "Creality K1 SE 0.4 nozzle",
+        "--process-preset",
+        "0.20mm Standard @Creality K1 SE",
+        "--filament-preset",
+        "Creality Generic PLA @K1-all",
+    ]
 
     combo = tmp_path / "combo.gcode"
-    made = run_cli(tmp_path, "calibrate", "gen", "combo", "--printer", "k1", "--color", "#000000", *presets,
-                   "-o", str(combo), env_extra=env)
+    made = run_cli(
+        tmp_path,
+        "calibrate",
+        "gen",
+        "combo",
+        "--printer",
+        "k1",
+        "--color",
+        "#000000",
+        *presets,
+        "-o",
+        str(combo),
+        env_extra=env,
+    )
     assert made.returncode == 0, made.stderr
     text = combo.read_text()
     assert "; 3d calibrate gen combo: end of PA lines" in text
@@ -497,16 +735,40 @@ def test_gen_combo_and_temp_through_bin_3d(tmp_path: Path) -> None:
     assert combo.with_name("combo.slice-warnings.json").exists()
 
     temp = tmp_path / "temp.gcode"
-    made = run_cli(tmp_path, "calibrate", "gen", "temp", "--printer", "k1", "--material", "PLA+", *presets,
-                   "-o", str(temp), env_extra=env)
+    made = run_cli(
+        tmp_path,
+        "calibrate",
+        "gen",
+        "temp",
+        "--printer",
+        "k1",
+        "--material",
+        "PLA+",
+        *presets,
+        "-o",
+        str(temp),
+        env_extra=env,
+    )
     assert made.returncode == 0, made.stderr
     assert [
         ln.split()[1] for ln in temp.read_text().splitlines() if ln.startswith("M104 S")
     ] == ["S225", "S220", "S215", "S210", "S205", "S200"]
     assert "--method temp_tower" in made.stdout
 
-    refused = run_cli(tmp_path, "calibrate", "gen", "temp", "--printer", "k1", "--nozzle-temp", "215", *presets,
-                      "-o", str(tmp_path / "t2.gcode"), env_extra=env)
+    refused = run_cli(
+        tmp_path,
+        "calibrate",
+        "gen",
+        "temp",
+        "--printer",
+        "k1",
+        "--nozzle-temp",
+        "215",
+        *presets,
+        "-o",
+        str(tmp_path / "t2.gcode"),
+        env_extra=env,
+    )
     assert refused.returncode == 2
     assert "drop --nozzle-temp" in refused.stderr
     assert not (tmp_path / "t2.gcode").exists()
@@ -519,45 +781,105 @@ def test_gen_plate1_with_only_skip_and_a_fine_pa_range(tmp_path: Path) -> None:
     profiles, orca = write_plate_orca(tmp_path)
     fleet = tmp_path / "fleet.yaml"
     fleet.write_text(K1_FLEET, encoding="utf-8")
-    env = {"THREED_FLEET": str(fleet), "ORCA_PROFILES": str(profiles),
-           "ORCA_USER_PRESETS": str(tmp_path / "user"), "SLICER": str(orca)}
-    presets = ["--machine-preset", "Creality K1 SE 0.4 nozzle", "--process-preset",
-               "0.20mm Standard @Creality K1 SE", "--filament-preset", "Creality Generic PLA @K1-all"]
+    env = {
+        "THREED_FLEET": str(fleet),
+        "ORCA_PROFILES": str(profiles),
+        "ORCA_USER_PRESETS": str(tmp_path / "user"),
+        "SLICER": str(orca),
+    }
+    presets = [
+        "--machine-preset",
+        "Creality K1 SE 0.4 nozzle",
+        "--process-preset",
+        "0.20mm Standard @Creality K1 SE",
+        "--filament-preset",
+        "Creality Generic PLA @K1-all",
+    ]
 
     fine = tmp_path / "pa_fine.gcode"
-    made = run_cli(tmp_path, "calibrate", "gen", "plate1", "--printer", "k1", *presets, "--only", "pa,flow",
-                   "--pa-range", "0.03:0.05", "--pa-step", "0.0025", "-o", str(fine), env_extra=env)
+    made = run_cli(
+        tmp_path,
+        "calibrate",
+        "gen",
+        "plate1",
+        "--printer",
+        "k1",
+        *presets,
+        "--only",
+        "pa,flow",
+        "--pa-range",
+        "0.03:0.05",
+        "--pa-step",
+        "0.0025",
+        "-o",
+        str(fine),
+        env_extra=env,
+    )
     assert made.returncode == 0, made.stderr
     data = json.loads(fine.with_suffix(".json").read_text())
     pa = next(o for o in data["objects"] if o["name"] == "pa_lines")
-    assert [it["params"]["pressure_advance"] for it in pa["items"]][:2] == [0.03, 0.0325]
+    assert [it["params"]["pressure_advance"] for it in pa["items"]][:2] == [
+        0.03,
+        0.0325,
+    ]
     assert len(pa["items"]) == 9
     assert {o["name"] for o in data["objects"]} >= {"pa_lines", "flow_m10"}
     assert "temp_tower" not in fine.read_text()
 
     rest = tmp_path / "rest.gcode"
-    made = run_cli(tmp_path, "calibrate", "gen", "plate1", "--printer", "k1", *presets, "--skip", "pa,flow",
-                   "-o", str(rest), env_extra=env)
+    made = run_cli(
+        tmp_path,
+        "calibrate",
+        "gen",
+        "plate1",
+        "--printer",
+        "k1",
+        *presets,
+        "--skip",
+        "pa,flow",
+        "-o",
+        str(rest),
+        env_extra=env,
+    )
     assert made.returncode == 0, made.stderr
     text = rest.read_text()
     assert "PA lines" not in text and "flow_m10" not in text and "temp_tower" in text
 
-    refused = run_cli(tmp_path, "calibrate", "gen", "plate1", "--printer", "k1", *presets, "--skip", "pa",
-                      "--pa-range", "0.03:0.05", "-o", str(tmp_path / "x.gcode"), env_extra=env)
+    refused = run_cli(
+        tmp_path,
+        "calibrate",
+        "gen",
+        "plate1",
+        "--printer",
+        "k1",
+        *presets,
+        "--skip",
+        "pa",
+        "--pa-range",
+        "0.03:0.05",
+        "-o",
+        str(tmp_path / "x.gcode"),
+        env_extra=env,
+    )
     assert refused.returncode != 0 and "skips them" in refused.stderr
-    as_json = run_cli(tmp_path, "calibrate", "gen", "plate1", "--printer", "k1", *presets, "-o",
-                      str(tmp_path / "plate.json"), env_extra=env)
+    as_json = run_cli(
+        tmp_path,
+        "calibrate",
+        "gen",
+        "plate1",
+        "--printer",
+        "k1",
+        *presets,
+        "-o",
+        str(tmp_path / "plate.json"),
+        env_extra=env,
+    )
     assert as_json.returncode != 0 and ".gcode" in as_json.stderr
     assert not (tmp_path / "plate.json").exists()
 
 
-def test_gen_plate_stands_on_the_shared_underlay_unless_told_not_to(
-    tmp_path: Path,
-) -> None:
-    """The user generates plate 1 through bin/3d: the underlay is the first thing in the G-code and the map
-    `calib-plate/1` carries its block; `--no-underlay` prints on the bare bed; a four-head printer prints
-    the underlay in the contrasting head (or `--underlay-tool`, contrast-checked) and changes to the tests' head;
-    a single test has no underlay."""
+def _plate_gen_env(tmp_path: Path) -> tuple[dict[str, str], list[str]]:
+    """Fleet with a K1 and a four-head u1, the fake Orca, and the K1 presets every plate-1 run passes."""
     profiles, orca = write_plate_orca(tmp_path)
     k1 = tmp_path / "fleet.yaml"
     k1.write_text(
@@ -579,21 +901,43 @@ def test_gen_plate_stands_on_the_shared_underlay_unless_told_not_to(
         "--filament-preset",
         "Creality Generic PLA @K1-all",
     ]
+    return env, presets
 
-    out = tmp_path / "plate.gcode"
-    made = run_cli(
+
+def _gen(
+    tmp_path: Path,
+    env: dict[str, str],
+    presets: list[str],
+    what: str,
+    printer: str,
+    *rest: str,
+) -> subprocess.CompletedProcess[str]:
+    return run_cli(
         tmp_path,
         "calibrate",
         "gen",
-        "plate1",
+        what,
         "--printer",
-        "k1",
+        printer,
         *presets,
-        "--only",
-        "flow,bridge",
-        "-o",
-        str(out),
+        *rest,
         env_extra=env,
+    )
+
+
+def _tool_changes(gcode: Path) -> list[str]:
+    return [
+        ln for ln in gcode.read_text().splitlines() if ln in ("T0", "T1", "T2", "T3")
+    ]
+
+
+def _check_plate_underlay_first(
+    tmp_path: Path, env: dict[str, str], presets: list[str]
+) -> dict[str, Any]:
+    """The plate map the generator wrote, after checking the underlay is the first G-code object."""
+    out = tmp_path / "plate.gcode"
+    made = _gen(
+        tmp_path, env, presets, "plate1", "k1", "--only", "flow,bridge", "-o", str(out)
     )
     assert made.returncode == 0, made.stderr
     starts = [
@@ -609,51 +953,52 @@ def test_gen_plate_stands_on_the_shared_underlay_unless_told_not_to(
         and data["underlay"]["pieces"] == 1
         and data["underlay"]["head"] == "T1"
     )
-    assert data["print_order"][0] == "layer: underlay"
+    return data
 
+
+def _check_plate_no_underlay(
+    tmp_path: Path, env: dict[str, str], presets: list[str]
+) -> None:
     bare = tmp_path / "bare.gcode"
-    made = run_cli(
+    made = _gen(
         tmp_path,
-        "calibrate",
-        "gen",
+        env,
+        presets,
         "plate1",
-        "--printer",
         "k1",
-        *presets,
         "--only",
         "flow,bridge",
         "--no-underlay",
         "-o",
         str(bare),
-        env_extra=env,
     )
     assert made.returncode == 0, made.stderr
     assert "NAME=underlay" not in bare.read_text()
     assert json.loads(bare.with_suffix(".json").read_text())["underlay"] is None
 
+
+def _check_u1_underlay_head(
+    tmp_path: Path, env: dict[str, str], presets: list[str], colours: str
+) -> None:
     u1 = tmp_path / "u1.gcode"
-    colours = "T1=#000000,T2=#FFFFFF,T3=#2D9E59,T4=#FFFFFF"
-    made = run_cli(
+    made = _gen(
         tmp_path,
-        "calibrate",
-        "gen",
+        env,
+        presets,
         "plate1",
-        "--printer",
         "u1",
-        *presets,
         "--only",
         "flow,bridge",
         "--head-colours",
         colours,
         "-o",
         str(u1),
-        env_extra=env,
     )
     assert made.returncode == 0, made.stderr
-    changes = [
-        ln for ln in u1.read_text().splitlines() if ln in ("T0", "T1", "T2", "T3")
-    ]
-    assert changes == ["T3", "T0"]  # T4 (the later white head) under the tests in T1
+    assert _tool_changes(u1) == [
+        "T3",
+        "T0",
+    ]  # T4 (the later white head) under the tests in T1
     block = json.loads(u1.with_suffix(".json").read_text())["underlay"]
     assert (
         block["head"] == "T4"
@@ -662,14 +1007,12 @@ def test_gen_plate_stands_on_the_shared_underlay_unless_told_not_to(
     )
 
     forced = tmp_path / "u1_t2.gcode"
-    made = run_cli(
+    made = _gen(
         tmp_path,
-        "calibrate",
-        "gen",
+        env,
+        presets,
         "plate1",
-        "--printer",
         "u1",
-        *presets,
         "--only",
         "flow,bridge",
         "--head-colours",
@@ -678,76 +1021,76 @@ def test_gen_plate_stands_on_the_shared_underlay_unless_told_not_to(
         "T2",
         "-o",
         str(forced),
-        env_extra=env,
     )
     assert made.returncode == 0, made.stderr
-    assert [
-        ln for ln in forced.read_text().splitlines() if ln in ("T0", "T1", "T2", "T3")
-    ] == ["T1", "T0"]
+    assert _tool_changes(forced) == ["T1", "T0"]
 
-    low = run_cli(
+
+def _check_underlay_refusals(
+    tmp_path: Path, env: dict[str, str], presets: list[str]
+) -> None:
+    low = _gen(
         tmp_path,
-        "calibrate",
-        "gen",
+        env,
+        presets,
         "plate1",
-        "--printer",
         "u1",
-        *presets,
         "--head-colours",
         "T1=#000000,T3=#0A0A0A",
         "--underlay-tool",
         "T3",
         "-o",
         str(tmp_path / "low.gcode"),
-        env_extra=env,
     )
     assert low.returncode == 2 and "contrast too low" in low.stderr
-    nocolour = run_cli(
-        tmp_path,
-        "calibrate",
-        "gen",
-        "plate1",
-        "--printer",
-        "u1",
-        *presets,
-        "-o",
-        str(tmp_path / "nc.gcode"),
-        env_extra=env,
+    nocolour = _gen(
+        tmp_path, env, presets, "plate1", "u1", "-o", str(tmp_path / "nc.gcode")
     )
     assert nocolour.returncode == 2 and "colour" in nocolour.stderr
     assert (
         not (tmp_path / "low.gcode").exists() and not (tmp_path / "nc.gcode").exists()
     )
-    one_head = run_cli(
+    one_head = _gen(
         tmp_path,
-        "calibrate",
-        "gen",
+        env,
+        presets,
         "plate1",
-        "--printer",
         "k1",
-        *presets,
         "--underlay-tool",
         "T2",
         "-o",
         str(tmp_path / "oh.gcode"),
-        env_extra=env,
     )
     assert one_head.returncode == 2 and "one head" in one_head.stderr
 
-    single = run_cli(
+    single = _gen(
         tmp_path,
-        "calibrate",
-        "gen",
+        env,
+        presets,
         "temp",
-        "--printer",
         "k1",
-        *presets,
         "--no-underlay",
         "-o",
         str(tmp_path / "t.gcode"),
-        env_extra=env,
     )
     assert single.returncode == 2 and "single test" in single.stderr
+
+
+def test_gen_plate_stands_on_the_shared_underlay_unless_told_not_to(
+    tmp_path: Path,
+) -> None:
+    """The user generates plate 1 through bin/3d: the underlay is the first thing in the G-code and the map
+    `calib-plate/1` carries its block; `--no-underlay` prints on the bare bed; a four-head printer prints
+    the underlay in the contrasting head (or `--underlay-tool`, contrast-checked) and changes to the tests' head;
+    a single test has no underlay."""
+    env, presets = _plate_gen_env(tmp_path)
+    plate_map = _check_plate_underlay_first(tmp_path, env, presets)
+    assert plate_map["print_order"][0] == "layer: underlay"
+    _check_plate_no_underlay(tmp_path, env, presets)
+    _check_u1_underlay_head(
+        tmp_path, env, presets, "T1=#000000,T2=#FFFFFF,T3=#2D9E59,T4=#FFFFFF"
+    )
+    _check_underlay_refusals(tmp_path, env, presets)
 
 
 def test_underlay_map_reads_the_bare_underlay_of_a_plate_photo(tmp_path: Path) -> None:
@@ -809,16 +1152,32 @@ def test_underlay_map_reads_the_bare_underlay_of_a_plate_photo(tmp_path: Path) -
     assert no_rect.returncode == 2 and "--rectify" in no_rect.stderr
 
 
-def test_gen_on_the_u1_is_its_underlay_plate_and_refuses_what_it_cannot_make(tmp_path: Path) -> None:
+def test_gen_on_the_u1_is_its_underlay_plate_and_refuses_what_it_cannot_make(
+    tmp_path: Path,
+) -> None:
     """`gen` on the four-head U1 goes to the U1 plate generator (underlay in the contrasting head,
     one change to T1); the K1-only kinds, --no-underlay, test selection, a colour list that does
     not name every head and a contrast the check refuses are all errors before any slicing."""
     profiles, orca = write_plate_orca(tmp_path)
-    env = {"THREED_FLEET": str(REPO_FLEET), "SLICER": str(orca), "ORCA_PROFILES": str(profiles)}
+    env = {
+        "THREED_FLEET": str(REPO_FLEET),
+        "SLICER": str(orca),
+        "ORCA_PROFILES": str(profiles),
+    }
     out = tmp_path / "u1.gcode"
 
     def gen(*args: str) -> subprocess.CompletedProcess[str]:
-        return run_cli(tmp_path, "calibrate", "gen", *args, "--printer", "u1", "-o", str(out), env_extra=env)
+        return run_cli(
+            tmp_path,
+            "calibrate",
+            "gen",
+            *args,
+            "--printer",
+            "u1",
+            "-o",
+            str(out),
+            env_extra=env,
+        )
 
     single = gen("pa")
     assert single.returncode == 2 and "plate1 only" in single.stderr
@@ -829,7 +1188,17 @@ def test_gen_on_the_u1_is_its_underlay_plate_and_refuses_what_it_cannot_make(tmp
     only = gen("plate1", "--only", "flow")
     assert only.returncode == 2 and "own tests and presets" in only.stderr
     partial = gen("plate1", "--head-colours", "T1=#000000,T4=#FFFFFF")
-    assert partial.returncode == 2 and "every head" in partial.stderr and "missing T2, T3" in partial.stderr
-    low = gen("plate1", "--head-colours", "T1=#000000,T2=#FFFFFF,T3=#0A0A0A,T4=#FFFFFF", "--underlay-tool", "T3")
+    assert (
+        partial.returncode == 2
+        and "every head" in partial.stderr
+        and "missing T2, T3" in partial.stderr
+    )
+    low = gen(
+        "plate1",
+        "--head-colours",
+        "T1=#000000,T2=#FFFFFF,T3=#0A0A0A,T4=#FFFFFF",
+        "--underlay-tool",
+        "T3",
+    )
     assert low.returncode == 2 and "contrast too low" in low.stderr
     assert not out.exists()

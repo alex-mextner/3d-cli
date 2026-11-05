@@ -124,6 +124,19 @@ def config_path() -> Path:
     return paths.config_dir() / "printops.yaml"
 
 
+def _read_config_file(cfg: Path) -> dict[str, Any]:
+    """The mapping in printops.yaml; ApiConfigError when it is not valid YAML or not a mapping."""
+    import yaml
+
+    try:
+        data = yaml.safe_load(cfg.read_text(encoding="utf-8")) or {}
+    except yaml.YAMLError as e:
+        raise ApiConfigError(f"{cfg} is not valid YAML: {e}") from e
+    if not isinstance(data, dict):
+        raise ApiConfigError(f"{cfg} must be a mapping with `api:` and `token:` keys")
+    return data
+
+
 def load_config(env: Mapping[str, str] | None = None, *, api: str | None = None,
                 token: str | None = None) -> tuple[str | None, str | None]:
     """(api_url, token): explicit args, then env, then ~/.config/3d-cli/printops.yaml (read only
@@ -133,14 +146,7 @@ def load_config(env: Mapping[str, str] | None = None, *, api: str | None = None,
     token = token or env.get("PRINTOPS_TOKEN") or None
     cfg = config_path()
     if (api is None or token is None) and cfg.is_file():
-        import yaml
-
-        try:
-            data = yaml.safe_load(cfg.read_text(encoding="utf-8")) or {}
-        except yaml.YAMLError as e:
-            raise ApiConfigError(f"{cfg} is not valid YAML: {e}") from e
-        if not isinstance(data, dict):
-            raise ApiConfigError(f"{cfg} must be a mapping with `api:` and `token:` keys")
+        data = _read_config_file(cfg)
         api = api or (str(data["api"]) if data.get("api") else None)
         token = token or (str(data["token"]) if data.get("token") else None)
     return api, token
@@ -206,7 +212,11 @@ class ApiClient:
         resp = self.transport.request(method, self._url(path, params), headers, body, self.timeout)
         if not 200 <= resp.status < 300:
             raise ApiError(_error_message(resp.status, resp.body), status=resp.status)
-        return resp.json()
+        try:
+            return resp.json()
+        except ValueError as e:  # a 200 HTML page: a web server or proxy, not 3d-api
+            raise ApiError(f"{self._url(path)} answered HTTP {resp.status} with a body that is not JSON "
+                           "(is this the 3d-api URL?)", status=resp.status) from e
 
     def get(self, path: str, **params: Any) -> Any:
         return self.request("GET", path, params=params)

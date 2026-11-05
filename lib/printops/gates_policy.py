@@ -48,6 +48,7 @@ CHECKS: tuple[str, ...] = (
     "filament_temp_range",
     "loaded_filament_match",
     "slot_binding_known",
+    "spool_in_sync",
     "filament_sufficient",
     "drying_due",
     "maintenance_due",
@@ -148,14 +149,18 @@ def _keys(
     return body
 
 
+def _is_name_list(value: Any) -> bool:
+    return (
+        isinstance(value, list)
+        and bool(value)
+        and all(isinstance(v, str) and v.strip() for v in value)
+    )
+
+
 def _names(
     where: str, value: Any, *, allowed: tuple[str, ...] | None = None
 ) -> tuple[str, ...]:
-    if (
-        not isinstance(value, list)
-        or not value
-        or not all(isinstance(v, str) and v.strip() for v in value)
-    ):
+    if not _is_name_list(value):
         raise PolicyError(f"{where} must be a non-empty list of names")
     if allowed is not None:
         bad = [v for v in value if v not in allowed]
@@ -172,9 +177,7 @@ def _names(
     return tuple(value)
 
 
-def _levels(where: str, body: Any, *, complete: bool) -> dict[str, str]:
-    if not isinstance(body, dict):
-        raise PolicyError(f"{where} must be a mapping of check → block|warn|off")
+def _level_keys(where: str, body: Mapping[str, Any], *, complete: bool) -> None:
     unknown = [str(k) for k in body if k not in CHECKS]
     if unknown:
         raise PolicyError(
@@ -184,6 +187,12 @@ def _levels(where: str, body: Any, *, complete: bool) -> dict[str, str]:
         missing = [c for c in CHECKS if c not in body]
         if missing:
             raise PolicyError(f"{where}: missing check(s) {', '.join(missing)}")
+
+
+def _levels(where: str, body: Any, *, complete: bool) -> dict[str, str]:
+    if not isinstance(body, dict):
+        raise PolicyError(f"{where} must be a mapping of check → block|warn|off")
+    _level_keys(where, body, complete=complete)
     for check, level in body.items():
         if level not in LEVELS:
             raise PolicyError(

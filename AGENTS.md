@@ -98,6 +98,18 @@ asking for review of a cross-cutting change. pytest's `tmp_path` dirs live in
 `$XDG_CACHE_HOME/3d-cli/pytest` (default `~/.cache/3d-cli/pytest`), not `/tmp`, which is a RAM
 tmpfs on the shared workstation (`tests/conftest.py`; `--basetemp` still overrides).
 
+**Complexity gate (#707).** The pre-commit hook `30-lint-check` runs `rig lint check` on the WHOLE
+content of every staged file (cognitive complexity <= 15, cyclomatic <= 20), not on your diff, and
+`rig.yaml` has no baseline. The decision is to refactor: before you commit a change to a file, split
+every function in it that `rig lint check --json <file>` reports (behavior-preserving extraction of
+private helpers, guarded by the existing tests, one commit per file or area, `(Refs #707)`) —
+never raise the limits, suppress findings, or park the change as an uncommitted patch. Many files
+still carry findings (for example `lib/printops/watch_incidents.py`, `printer_tasks.py` and
+`todo_cli.py`; `rig lint check --json lib/printops` lists them), so run
+`rig lint check --staged --json` before each commit and expect to split the flagged functions of
+any file you stage. The files #707 had to touch (the printops spool, location, drying, calibration
+and gate modules, `printops_checks.py` and the FakeSpoolman test double) are already cleared.
+
 **Tests that run git get a clean `GIT_*` environment — always.** A git hook exports
 `GIT_DIR`, `GIT_INDEX_FILE` and friends for the repo being committed, and every subprocess
 inherits them: on 2026-10-14 a test's `git init` in `tmp_path`, run by the pre-commit hook in
@@ -405,6 +417,11 @@ skills (`atomic-commits`, `ai-review-before-commit`, `pre-commit-gate`,
   recorded in `NAME.slice-warnings.json` (`3d slice-warnings record`, or `3d slice`) and
   resolved or accepted with a reason. The full model → slice → G-code → start order is
   `docs/workflows/print-pipeline.md`.
+- A G-code never lacks its thumbnails (the Orca CLI writes none): every code path that runs a
+  slicer calls `slicing.thumbnails.finalize_*` on its output before the G-code is hashed or moved,
+  `3d printer upload|start` call `fix_in_place`, `print-preflight --fix` repairs. A new slicing
+  entry point without it fails `tests/test_thumbnail_guard.py`; layers in
+  `docs/commands/gcode-thumbnails.md`.
 
 ## Verification before "done"
 

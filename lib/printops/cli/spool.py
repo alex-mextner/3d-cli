@@ -35,9 +35,11 @@ Actions:
   receive (--filament-id N | --material M --name NAME [--vendor V] [--color #HEX] [--density D]
            [--diameter MM]) [--net G] [--remaining G [--confidence G]] [--tare G [--tare-source TEXT]]
            [--spool-kind cardboard|plastic|refill] [--lot LOT] [--price P] [--location LOC] [--opened]
-           [--comment TEXT]
+           [--max-speed MM_S] [--comment TEXT]
       a new spool: the vendor/filament is matched in Spoolman or created; --net = label net
-      (sealed: the ledger is anchored at it), --remaining = already used, roughly this much left
+      (sealed: the ledger is anchored at it), --remaining = already used, roughly this much left;
+      --max-speed = the max print speed in mm/s of a filament this call creates (default 300,
+      PLA+ 600; an existing filament keeps its value)
   receive --from-photo IMG|TXT [any receive flag …] [--yes]
       the same, filled from the spool label: the photo is OCR'd (tesseract), the rules read
       vendor, material, colour, net, diameter, lot (and nozzle/bed temperatures, kept in the
@@ -177,60 +179,69 @@ def fmt_show(s: dict[str, Any]) -> str:
         if t
         else f"  tare       UNKNOWN — {s.get('tare_problem')}"
     )
-    for k, label in (
-        ("lot_nr", "lot"),
-        ("price", "price"),
-        ("opened_at", "opened"),
-        ("external_key", "import key"),
-        ("comment", "comment"),
-    ):
-        if s.get(k) not in (None, ""):
-            lines.append(f"  {label:<10} {s[k]}")
+    lines.extend(
+        f"  {label:<10} {s[k]}"
+        for k, label in (
+            ("lot_nr", "lot"),
+            ("price", "price"),
+            ("opened_at", "opened"),
+            ("external_key", "import key"),
+            ("comment", "comment"),
+        )
+        if s.get(k) not in (None, "")
+    )
     if s.get("ledger"):
         lines.append("  ledger:")
-        for row in s["ledger"]:
-            if row["kind"] == "anchor":
-                what = f"= {row['anchor_g']:.1f} g"
-                if row.get("gross_g") is not None:
-                    what += f" (gross {row['gross_g']:g} − tare {row['tare_g']:g})"
-            elif row["kind"] == "note":
-                what = "note"
-            else:
-                what = f"{row['delta_g']:+.1f} g"
-            conf = f" ±{row['confidence_g']:g}" if row["kind"] != "note" else ""
-            extra = "".join(f"  {k}={row[k]}" for k in ("job_id", "note") if row.get(k))
-            lines.append(
-                f"    #{row['id']} {row['at']}  {row['source']:<16} {what}{conf}  by {row['actor']}{extra}"
-            )
+        lines.extend(_ledger_line(row) for row in s["ledger"])
     return "\n".join(lines)
 
 
+def _ledger_line(row: dict[str, Any]) -> str:
+    if row["kind"] == "anchor":
+        what = f"= {row['anchor_g']:.1f} g"
+        if row.get("gross_g") is not None:
+            what += f" (gross {row['gross_g']:g} − tare {row['tare_g']:g})"
+    elif row["kind"] == "note":
+        what = "note"
+    else:
+        what = f"{row['delta_g']:+.1f} g"
+    conf = f" ±{row['confidence_g']:g}" if row["kind"] != "note" else ""
+    extra = "".join(f"  {k}={row[k]}" for k in ("job_id", "note") if row.get(k))
+    return f"    #{row['id']} {row['at']}  {row['source']:<16} {what}{conf}  by {row['actor']}{extra}"
+
+
+def _import_create_line(a: dict[str, Any]) -> str:
+    f = a["filament"]
+    fil = f"filament #{a['filament_id']}" if a.get("filament_id") else "NEW filament"
+    vendor = a.get("vendor") or "no vendor"
+    if a.get("vendor") and not a.get("vendor_exists"):
+        vendor += " (NEW vendor)"
+    price = f", price {a['price']:g}" if a.get("price") is not None else ""
+    return (
+        f"+ {a['key']}: {vendor} {f.get('material')} {f.get('name')!r} #{f.get('color_hex')} "
+        f"({fil}) → {a.get('location') or '(no location)'}{price}"
+    )
+
+
+def _import_lines(a: dict[str, Any]) -> list[str]:
+    """The line(s) one import action prints."""
+    if a["action"] == "create":
+        return [_import_create_line(a)]
+    if a["action"] == "created":
+        return [
+            f"+ {a['key']}: created spool #{a['spool_id']} (filament #{a['filament_id']}"
+            f"{', new' if a.get('filament_created') else ''}) → {a.get('location') or '(no location)'}"
+        ]
+    return [
+        f"= {a['key']}: spool #{a['spool_id']} already imported",
+        *(f"    ! {d} (not changed)" for d in a.get("differs") or []),
+    ]
+
+
 def fmt_import(res: dict[str, Any]) -> str:
-    lines = []
+    lines: list[str] = []
     for a in res["actions"]:
-        if a["action"] == "create":
-            f = a["filament"]
-            fil = (
-                f"filament #{a['filament_id']}"
-                if a.get("filament_id")
-                else "NEW filament"
-            )
-            vendor = a.get("vendor") or "no vendor"
-            if a.get("vendor") and not a.get("vendor_exists"):
-                vendor += " (NEW vendor)"
-            price = f", price {a['price']:g}" if a.get("price") is not None else ""
-            lines.append(
-                f"+ {a['key']}: {vendor} {f.get('material')} {f.get('name')!r} #{f.get('color_hex')} "
-                f"({fil}) → {a.get('location') or '(no location)'}{price}"
-            )
-        elif a["action"] == "created":
-            lines.append(
-                f"+ {a['key']}: created spool #{a['spool_id']} (filament #{a['filament_id']}"
-                f"{', new' if a.get('filament_created') else ''}) → {a.get('location') or '(no location)'}"
-            )
-        else:
-            lines.append(f"= {a['key']}: spool #{a['spool_id']} already imported")
-            lines.extend(f"    ! {d} (not changed)" for d in a.get("differs") or [])
+        lines.extend(_import_lines(a))
     mode = (
         "DRY RUN — nothing written; re-run with --apply"
         if res["dry_run"]
@@ -270,15 +281,20 @@ RECEIVE_NUM = (
     ("--tare", "tare_g"),
     ("--price", "price"),
 )
-RECEIVE_VALUES = {"--filament-id"} | {o for o, _ in RECEIVE_STR + RECEIVE_NUM}
+RECEIVE_INT = (
+    ("--filament-id", "filament_id"),
+    ("--max-speed", "max_speed_mm_s"),
+)
+RECEIVE_VALUES = {o for o, _ in RECEIVE_INT + RECEIVE_STR + RECEIVE_NUM}
 
 
 def _receive_fields(p: Parsed, sub: str) -> dict[str, Any]:
     """The receive body fields given as flags (nothing checked yet)."""
     body: dict[str, Any] = {}
-    fid = p.int_opt("--filament-id", sub)
-    if fid is not None:
-        body["filament_id"] = fid
+    for opt, key in RECEIVE_INT:
+        n = p.int_opt(opt, sub)
+        if n is not None:
+            body[key] = n
     for opt, key in RECEIVE_STR:
         if opt in p.opts:
             body[key] = p.opts[opt]
@@ -294,9 +310,7 @@ def _receive_fields(p: Parsed, sub: str) -> dict[str, Any]:
 def receive_command(body: dict[str, Any]) -> str:
     """The `3d printops spool receive …` line that sends `body`."""
     args = ["3d", "printops", "spool", "receive"]
-    if "filament_id" in body:
-        args += ["--filament-id", str(body["filament_id"])]
-    for opt, key in RECEIVE_STR + RECEIVE_NUM:
+    for opt, key in RECEIVE_INT + RECEIVE_STR + RECEIVE_NUM:
         v = body.get(key)
         if v is not None:
             args += [opt, f"{v:g}" if isinstance(v, float) else str(v)]
@@ -588,6 +602,26 @@ def fmt_scan_table(rows: list[tuple[Proposal, dict[str, Any]]]) -> str:
     )
 
 
+def _read_proposals(
+    photos: list[str], vendors: list[str], extra: dict[str, Any], sub: str
+) -> tuple[list[tuple[Proposal, OcrText | None, dict[str, Any]]], list[dict[str, str]]]:
+    """(proposals with their receive bodies, unreadable photos): one unreadable photo does not
+    cost the rest of the batch."""
+    done = []
+    failed: list[dict[str, str]] = []
+    for raw in photos:
+        path = Path(raw).expanduser()
+        try:
+            prop, ocr = read_proposal(path, vendors, sub)
+        except MissingDependency:
+            raise  # no photo can be read: stop at once with the install line
+        except ThreeDError as e:
+            failed.append({"source": clean(path.name), "error": e.message})
+            continue
+        done.append((prop, ocr, {**prop.receive_body(), **extra}))
+    return done, failed
+
+
 def _scan(argv: list[str], sub: str) -> int:
     p = parse(
         argv,
@@ -603,20 +637,7 @@ def _scan(argv: list[str], sub: str) -> int:
         api = None
     vendors = _vendors(api)
     extra = {"location": p.opts["--location"]} if "--location" in p.opts else {}
-    done = []
-    failed: list[dict[str, str]] = []
-    for raw in p.pos:
-        path = Path(raw).expanduser()
-        try:
-            prop, ocr = read_proposal(path, vendors, sub)
-        except MissingDependency:
-            raise  # no photo can be read: stop at once with the install line
-        except (
-            ThreeDError
-        ) as e:  # one unreadable photo does not cost the rest of the batch
-            failed.append({"source": clean(path.name), "error": e.message})
-            continue
-        done.append((prop, ocr, {**prop.receive_body(), **extra}))
+    done, failed = _read_proposals(p.pos, vendors, extra, sub)
     if "--json" in p.flags:
         print(
             json.dumps(

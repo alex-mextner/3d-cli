@@ -15,7 +15,7 @@ compose file or restarts HA.
 
 ```
 3d printops deploy --dry-run     # what would change
-3d printops deploy               # rsync → compose up --build → backup timer → wait healthy
+3d printops deploy               # rsync → compose up --build → wait healthy (no timer: Home Assistant schedules backups)
 PRINTOPS_API=http://192.168.0.39:8765 3d printops health
 ```
 
@@ -26,6 +26,17 @@ PRINTOPS_API=http://192.168.0.39:8765 3d printops health
 registers every PrintOps extra field in Spoolman (`printops.spoolman.EXTRA_FIELDS`), retrying
 until Spoolman answers and re-checking every 10 minutes.
 
+### Any other host, this computer, or by hand
+
+`3d printops deploy --local` (this computer) and `--host USER@HOST` run the same plan elsewhere;
+`3d init --env` wraps them in a guided flow (target menu, token, `~/.config/3d-cli/printops.yaml`)
+— see [docs/commands/init.md](../../docs/commands/init.md#environment-stage-3d-init---env).
+`3d init --env --spoolman script` writes one idempotent bash file for a server that has docker
+compose and nothing from 3d-cli (template: `lib/printops/standalone_template.py`, filled in with this
+build context by `lib/printops/standalone_script.py`). `compose.yaml` takes its host-specific values from `PRINTOPS_UID/GID`,
+`PRINTOPS_SPOOLMAN_PORT`, `PRINTOPS_API_PORT`, `PRINTOPS_BIND_ADDR`, `PRINTOPS_CONTAINER_PREFIX`, `PRINTOPS_TZ` and
+`PRINTOPS_GCODE_HOST_DIR`; the defaults are the Odroid's values.
+
 ## Ports (LAN + tailnet only)
 
 | Port | Service | Auth |
@@ -33,10 +44,21 @@ until Spoolman answers and re-checking every 10 minutes.
 | `7912` | Spoolman web UI + REST (`/api/v1`) | none (Spoolman has no auth by design) |
 | `8765` | 3d-api (`/v1/...`) | bearer token on everything except `GET /v1/health` |
 
-Ports are published on all host interfaces. The Odroid sits behind the home router's NAT with
-no port forwards for these ports, so that means the LAN plus the Tailscale tailnet. **Remote
-access is via Tailscale only** (`http://100.116.57.66:8765`, `http://100.116.57.66:7912`);
-never add a router port-forward or a public reverse proxy for them.
+Ports are published on `PRINTOPS_BIND_ADDR`, default `0.0.0.0` (all host interfaces). The Odroid
+sits behind the home router's NAT with no port forwards for these ports, so that means the LAN
+plus the Tailscale tailnet. **Remote access is via Tailscale only**
+(`http://100.116.57.66:8765`, `http://100.116.57.66:7912`); never add a router port-forward or a
+public reverse proxy for them.
+
+**A host that is not behind such a router** (a laptop on a café network, a VPS) must not publish
+Spoolman on every interface, and docker's own iptables rules bypass ufw/firewalld, so the default
+cannot be fixed with a firewall alone. Set the bind address instead: `3d init --env --spoolman local`
+and `3d printops deploy --local` listen on `127.0.0.1` by default (`--bind ADDR` changes it), the
+standalone script takes `--bind ADDR` / `PRINTOPS_BIND_ADDR`, and `3d printops deploy --bind ADDR`
+sets it for a host. The consequence: with a loopback bind **no other machine and no printer can
+reach Spoolman or 3d-api** (Moonraker's `[spoolman]` section, Fluidd, another computer running
+`3d`): give `--bind` the one LAN/VPN address they reach it on, or `0.0.0.0` when the network is
+trusted.
 
 Accepted risk: Spoolman's REST API has no auth, so any LAN/tailnet client can change spools
 directly, bypassing 3d-api's token scopes. This is deliberate (plan §5.1, D4): Moonraker's
@@ -73,37 +95,37 @@ see `/etc/fstab`), so everything below lives on the HDD, not on the eMMC.
 | `/home/ultra/printops/data/spoolman/` | `printops-spoolman:/home/app/.local/share/spoolman` | `spoolman.db` + Spoolman's own rolling backups |
 | `/home/ultra/printops/data/api/` | `printops-api:/data` | `printops.db` (WAL), `tokens.json` |
 | `/home/ultra/printops/data/spoolman/` | `printops-api:/spoolman-data` | read by `3d printops backup` only |
-| `/home/ultra/homeassistant/printops-backup/` | `printops-api:/backup` | daily snapshots (below) |
+| `/mnt/<backup disk>` (`PRINTOPS_BACKUP_DIR`) | `printops-api:/backup` | rotated backup sets (below) |
 
 Both containers run as uid/gid 1000 (`ultra`), so the files stay owned by the host user.
 
 ## Backup
 
-The Odroid's existing backup contour is Home Assistant's automatic daily backup
-(`backup.local`, 3 copies, includes the whole config dir `/home/ultra/homeassistant` except
-logs, `*.db-shm`, `tts/` and the backup tars themselves). PrintOps adds to it instead of running
-a parallel system:
-
-1. `printops-backup.timer` (systemd `--user`, installed by `deploy`) fires daily at 04:15 and
-   runs `docker exec printops-api 3d printops backup`.
-2. That writes consistent snapshots (SQLite online backup = `sqlite3 .backup`, then
-   `PRAGMA integrity_check`, then atomic rename) to
-   `/home/ultra/homeassistant/printops-backup/{printops.db,spoolman.db,tokens.json}`. The dir holds
-   a `.gitignore` with `*`, so the HA git checkout stays clean.
-3. HA's automatic backup (it ran 04:50–05:11 on recent days) packs that dir into its daily tar
-   in `/home/ultra/homeassistant/backups/`.
-
-Check / run by hand:
+Schedule: **Home Assistant** (`integrations/homeassistant/packages/printops_backup.yaml`, 04:00, retention 7 daily + 4 weekly + 6 monthly;
+one EDIT HERE block) calls `POST /v1/backup/run`; 3d-api runs `3d printops backup run` as a niced child process. There is no
+systemd timer or cron. Destination: the host dir `PRINTOPS_BACKUP_DIR` bound as `/backup`, which must carry the disk marker
+(`docker exec printops-api 3d printops backup target add default /backup --init-marker`). The disk bound by `3d init --env` is
+remembered in `<--dir>/backup-dir`, so a later `3d printops deploy` keeps it; `/backup` is mounted `rslave`, so a disk mounted after the
+container started becomes visible. Over the API a run is never kept below `retention_floor:` in `backup.yaml` (default 7/4/6).
+`3d printops health` says `NOT CONFIGURED` when no backup disk is registered. Full reference: `docs/commands/printops.md#backup`.
 
 ```
-ssh ultra@192.168.0.39 systemctl --user list-timers printops-backup.timer
-ssh ultra@192.168.0.39 docker exec printops-api 3d printops backup
+docker exec printops-api 3d printops backup run --target default      # by hand
+docker exec printops-api 3d printops backup ls --target default
+docker exec printops-api 3d printops backup restore latest --target default --into /data/restore-test
 ```
 
-Restore: stop the stack (`docker compose -p printops -f services/3d-api/compose.yaml down` in
-`/home/ultra/printops/src`), copy `printops.db` → `data/api/printops.db`, `tokens.json` →
-`data/api/tokens.json`, `spoolman.db` → `data/spoolman/spoolman.db` (delete any `-wal`/`-shm`
-next to the targets), then `up -d`.
+Restore into a live stack, from the HOST (the container is stopped, and `backup.yaml` names the container's `/backup`, which
+does not exist on the host, so name the disk itself with `--dest`):
+
+```
+docker compose -p printops -f services/3d-api/compose.yaml down
+3d printops backup restore latest --dest <host disk root> --subdir 3d-printops --into <PRINTOPS_DATA_DIR> --layout data --yes
+docker compose -p printops -f services/3d-api/compose.yaml up -d
+```
+
+Old files, with their `-wal`/`-shm`, become `*.pre-restore` (never overwritten: `.pre-restore.1`, ...). The set is copied to a private
+scratch dir and verified there before anything is written.
 
 ## Tokens
 

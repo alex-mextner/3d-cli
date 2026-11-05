@@ -1,4 +1,4 @@
-"""3d init — scaffold a new 3d project (the `3d.yaml` + directory skeleton).
+"""3d init — scaffold a new 3d project (the `3d.yaml` + directory skeleton); `3d init --env` sets up the machine.
 
 WHAT: creates a valid 3d.yaml, directory skeleton (parts/, references/, previews/),
   .gitignore, git repo, and agent environment (MCP, skills, AGENTS.md) in one command.
@@ -12,6 +12,10 @@ Examples:
   3d init                                   # scaffold current directory, prompting
   3d init my-bracket --no-input             # CI-safe: name from dir, all defaults
   3d init --name pantheon --reference pantheon.jpg --printer X1C --no-input
+
+ENVIRONMENT STAGE (`3d init --env ...`): a separate, per-MACHINE stage — it makes sure Spoolman + 3d-api
+  run somewhere and `~/.config/3d-cli/printops.yaml` points at them. It shares nothing with the project
+  scaffold below and is delegated whole to printops.env_setup (imported lazily, only for `--env`).
 
 ROADMAP §28: "3d init [path] — fully sets up a new 3d project in one command:
   git init, 3d.yaml (§5), directory skeleton, MCP, skills, git hooks, agents docs,
@@ -48,6 +52,7 @@ from cli.registry import Command
 from errors import InputNotFound, InvalidArgument
 
 USAGE = """3d init [path] [options]
+3d init --env [--no-input] [--spoolman TARGET] [...]   (machine stage: Spoolman + PrintOps; `3d init --env --help`)
   Scaffold a PRODUCTIVE agent project: write a 3d.yaml (project, parts, anchors, sections,
   loads, gates), create parts/ references/ previews/,
   add a .gitignore, init a git repo, register the project, AND install the agent environment —
@@ -100,12 +105,25 @@ Options:
                         WHY: REQUIRED for CI and agents; -y is the alias.
                         Example: 3d init --name gear --no-input
 
+  --env                 switch to the MACHINE stage instead of scaffolding a project: install/configure
+                        Spoolman + 3d-api (a registry printer, this computer, an ssh server, or a
+                        standalone script) and write ~/.config/3d-cli/printops.yaml. Idempotent.
+                        Full flags: `3d init --env --help`. Example: 3d init --env --no-input --spoolman auto
+
 Examples:
   3d init                                   # scaffold the current directory, prompting
   3d init my-bracket --no-input             # CI-safe: name from dir, all defaults
   3d init --name pantheon --reference pantheon.jpg --printer X1C --no-input"""
 
 _VALID_UNITS = ("mm", "cm")
+
+
+# flag -> (option key, value it sets): the agent-environment pieces install by default, flags turn them off
+_SWITCHES: dict[str, tuple[str, bool]] = {
+    "--no-git": ("no_git", True), "--no-mcp": ("mcp", False), "--no-skills": ("skills", False),
+    "--no-agents": ("agents", False), "--no-hooks": ("hooks", False),
+    "--no-input": ("no_input", True), "--yes": ("no_input", True), "-y": ("no_input", True),
+}
 
 
 def _parse_args(argv: list[str]) -> dict[str, object]:
@@ -145,18 +163,9 @@ def _parse_args(argv: list[str]) -> dict[str, object]:
             opts[needs_value[a]] = argv[i + 1]
             i += 2
             continue
-        if a in ("--no-git",):
-            opts["no_git"] = True
-        elif a == "--no-mcp":
-            opts["mcp"] = False
-        elif a == "--no-skills":
-            opts["skills"] = False
-        elif a == "--no-agents":
-            opts["agents"] = False
-        elif a == "--no-hooks":
-            opts["hooks"] = False
-        elif a in ("--no-input", "--yes", "-y"):
-            opts["no_input"] = True
+        if a in _SWITCHES:
+            key, value = _SWITCHES[a]
+            opts[key] = value
         elif a.startswith("-"):
             raise InvalidArgument(
                 "argument", a, ["see `3d init --help`"], command="init",
@@ -396,21 +405,8 @@ def _install_hooks(root: pathlib.Path, opts: dict[str, object], notes: list[str]
         )
 
 
-def run(argv: list[str]) -> int:
-    if argv and argv[0] in ("-h", "--help"):
-        print(USAGE)
-        return 0
-
-    opts = _parse_args(argv)
-
-    # Resolve the target directory (positional path or cwd), create it if needed.
-    raw_path = opts["path"]
-    root = (pathlib.Path(str(raw_path)) if raw_path else pathlib.Path.cwd()).resolve()
-    root.mkdir(parents=True, exist_ok=True)
-
-    interactive = (not opts["no_input"]) and sys.stdin.isatty()
-
-    # Fill name/printer/material/units: flags first, then prompts (interactive only), then defaults.
+def _fill_prompts(opts: dict[str, object], root: pathlib.Path, interactive: bool) -> None:
+    """name/units/printer/material: flags first, then prompts (interactive only), then defaults."""
     if opts["name"] is None:
         opts["name"] = _prompt("Project name", root.name) if interactive else root.name
     if opts["units"] is None:
@@ -420,16 +416,9 @@ def run(argv: list[str]) -> int:
     if interactive and opts["material"] is None:
         opts["material"] = _prompt("Default material (blank = none)", None)
 
-    units = str(opts["units"])
-    if units not in _VALID_UNITS:
-        raise InvalidArgument("--units", units, list(_VALID_UNITS), command="init")
 
-    if opts["bed"] is not None:
-        opts["bed"] = _parse_bed(str(opts["bed"]))
-
-    notes: list[str] = []
-
-    # Directory skeleton (idempotent).
+def _write_skeleton(root: pathlib.Path, opts: dict[str, object], notes: list[str]) -> None:
+    """Directory skeleton, the reference image, 3d.yaml and .gitignore (never clobbers)."""
     for d in ("parts", "references", "previews"):
         (root / d).mkdir(exist_ok=True)
 
@@ -460,27 +449,29 @@ def run(argv: list[str]) -> int:
         gi.write_text(_gitignore_body(), encoding="utf-8")
         notes.append("wrote .gitignore")
 
-    # git init — best-effort, only when not --no-git and not ALREADY under a worktree.
-    # Use `rev-parse --is-inside-work-tree` (not just a local .git) so scaffolding into a
-    # subdir of an existing repo does NOT create a nested repository that hides the files
-    # from the parent.
-    if not opts["no_git"]:
-        if shutil.which("git") is None:
-            notes.append("git not on PATH — skipped git init")
-        elif _inside_work_tree(root):
-            notes.append("already inside a git work tree — skipped git init")
-        else:
-            try:
-                subprocess.run(
-                    ["git", "init", "-q"], cwd=root, check=True,
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                )
-                notes.append("ran git init")
-            except (OSError, subprocess.CalledProcessError) as exc:
-                notes.append(f"git init failed ({exc}) — continuing")
 
-    # Agent environment (all default ON; each piece idempotent + independently skippable).
-    # Installed AFTER git init so the pre-commit hook can wire core.hooksPath on a fresh repo.
+def _git_init(root: pathlib.Path, notes: list[str]) -> None:
+    """Best-effort `git init`, only when not ALREADY under a worktree. Uses
+    `rev-parse --is-inside-work-tree` (not just a local .git) so scaffolding into a subdir of an
+    existing repo does NOT create a nested repository that hides the files from the parent."""
+    if shutil.which("git") is None:
+        notes.append("git not on PATH — skipped git init")
+    elif _inside_work_tree(root):
+        notes.append("already inside a git work tree — skipped git init")
+    else:
+        try:
+            subprocess.run(
+                ["git", "init", "-q"], cwd=root, check=True,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            notes.append("ran git init")
+        except (OSError, subprocess.CalledProcessError) as exc:
+            notes.append(f"git init failed ({exc}) — continuing")
+
+
+def _install_agent_env(root: pathlib.Path, opts: dict[str, object], notes: list[str]) -> None:
+    """Agent environment (all default ON; each piece idempotent + independently skippable).
+    Installed AFTER git init so the pre-commit hook can wire core.hooksPath on a fresh repo."""
     if opts["mcp"]:
         _install_mcp(root, notes)
     if opts["skills"]:
@@ -490,6 +481,45 @@ def run(argv: list[str]) -> int:
     if opts["hooks"]:
         _install_hooks(root, opts, notes)
 
+
+def _run_env(argv: list[str]) -> int:
+    """`3d init --env`: the machine stage (Spoolman + PrintOps), imported only when asked for."""
+    from printops import env_setup
+
+    if "-h" in argv or "--help" in argv:
+        print(env_setup.USAGE)
+        return 0
+    return env_setup.run([a for a in argv if a != "--env"])
+
+
+def run(argv: list[str]) -> int:
+    if "--env" in argv:
+        return _run_env(argv)
+    if argv and argv[0] in ("-h", "--help"):
+        print(USAGE)
+        return 0
+
+    opts = _parse_args(argv)
+
+    # Resolve the target directory (positional path or cwd), create it if needed.
+    raw_path = opts["path"]
+    root = (pathlib.Path(str(raw_path)) if raw_path else pathlib.Path.cwd()).resolve()
+    root.mkdir(parents=True, exist_ok=True)
+
+    _fill_prompts(opts, root, (not opts["no_input"]) and sys.stdin.isatty())
+
+    units = str(opts["units"])
+    if units not in _VALID_UNITS:
+        raise InvalidArgument("--units", units, list(_VALID_UNITS), command="init")
+
+    if opts["bed"] is not None:
+        opts["bed"] = _parse_bed(str(opts["bed"]))
+
+    notes: list[str] = []
+    _write_skeleton(root, opts, notes)
+    if not opts["no_git"]:
+        _git_init(root, notes)
+    _install_agent_env(root, opts, notes)
     notes.append(_register(root))
 
     print(f"Initialized 3d project '{opts['name']}' at {root}")
@@ -502,7 +532,7 @@ def run(argv: list[str]) -> int:
 COMMAND = Command(
     name="init",
     group="ENVIRONMENT",
-    summary="scaffold a new 3d project (3d.yaml + skeleton; --no-input for CI)",
+    summary="scaffold a new 3d project (3d.yaml + skeleton; --no-input for CI); --env sets up Spoolman/PrintOps",
     usage=USAGE,
     run=run,
 )

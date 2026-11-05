@@ -15,7 +15,7 @@ USAGE = """3d printops anomalies [--status open,ack|resolved|all] [--printer NAM
   Reconciliation anomalies: a printer slot that disagrees with the spool bound to it in Spoolman
   (type_mismatch, color_mismatch — CIEDE2000 above the threshold, tag_mismatch,
   empty_with_spool, unbound_filament) or a binding that cannot be right (multiple_spools,
-  unusable_head, unknown_slot, location_conflict), or a printer head that `spool load` could not
+  unusable_head, unknown_slot), or a printer head that `spool load` could not
   write (printer_write_failed; re-run the load to retry). 3d-api opens and resolves them by itself;
   `ack` marks one as known ("leave it") until it clears, `resolve` closes it now (if the
   condition is still there, the next pass opens a new one). Listing needs scope `read`,
@@ -37,31 +37,43 @@ Examples:
   3d printops anomalies resolve 7"""
 
 
-def line(a: dict[str, Any]) -> str:
-    ev = a["evidence"]
-    bits = []
+def _printer_bit(seen: dict[str, Any]) -> str:
+    shown = " ".join(
+        str(x)
+        for x in (seen.get("material"), seen.get("color"), seen.get("tag_uid"))
+        if x
+    )
+    return (
+        f"printer: {shown or ('empty' if seen.get('present') is False else 'loaded')}"
+    )
+
+
+def _spool_bit(spool: dict[str, Any]) -> str:
+    colors = ",".join(spool.get("colors") or [])
+    return (
+        f"spool {spool['spool_id']}: {spool.get('material') or '?'} {colors}".rstrip()
+    )
+
+
+def _evidence_bits(ev: dict[str, Any]) -> list[str]:
+    bits: list[str] = []
     seen = ev.get("printer")
     if isinstance(seen, dict):
-        shown = " ".join(
-            str(x)
-            for x in (seen.get("material"), seen.get("color"), seen.get("tag_uid"))
-            if x
-        )
-        bits.append(
-            f"printer: {shown or ('empty' if seen.get('present') is False else 'loaded')}"
-        )
+        bits.append(_printer_bit(seen))
     spool = ev.get("spool")
     if isinstance(spool, dict):
-        colors = ",".join(spool.get("colors") or [])
-        bits.append(
-            f"spool {spool['spool_id']}: {spool.get('material') or '?'} {colors}".rstrip()
-        )
+        bits.append(_spool_bit(spool))
     bits.extend(f"spool {s['spool_id']}" for s in ev.get("spools") or [])
     if "delta_e2000" in ev:
         bits.append(f"ΔE2000 {ev['delta_e2000']} > {ev['max_delta_e']}")
     bits.extend(
         f"{key}: {ev[key]}" for key in ("why", "location", "reason") if ev.get(key)
     )
+    return bits
+
+
+def line(a: dict[str, Any]) -> str:
+    bits = _evidence_bits(a["evidence"])
     tail = (
         f"  [{a['status']}"
         + (f" by {a['resolved_by'] or a['acked_by']}" if a["status"] != "open" else "")
