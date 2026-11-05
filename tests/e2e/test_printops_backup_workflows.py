@@ -57,14 +57,13 @@ def backup(tmp_path: Path, env: dict[str, str], *argv: str):  # type: ignore[no-
 
 
 def test_full_cycle_run_ls_verify_prune_restore_selftest(tmp_path: Path) -> None:
+    """An operator writes a backup, lists, verifies and prunes the sets, restores into a data layout and runs the selftest, all through `3d printops backup`."""
     env = make_world(tmp_path)
     disk = tmp_path / "disk"
     refused = backup(tmp_path, env, "target", "add", "default", str(disk))
-    assert (
-        refused.returncode == 1
-        and "--init-marker" in refused.stderr
-        and not (disk / store.MARKER).exists()
-    )
+    assert refused.returncode == 1
+    assert "--init-marker" in refused.stderr
+    assert not (disk / store.MARKER).exists()
     added = backup(
         tmp_path, env, "target", "add", "default", str(disk), "--init-marker"
     )
@@ -78,7 +77,8 @@ def test_full_cycle_run_ls_verify_prune_restore_selftest(tmp_path: Path) -> None
         "--keep",
         "daily=7,weekly=4,monthly=6",
     )
-    assert added.returncode == 0 and (disk / store.MARKER).is_file()
+    assert added.returncode == 0
+    assert (disk / store.MARKER).is_file()
     assert ran.returncode == 0, ran.stderr
     result = json.loads(ran.stdout)
     assert result["status"] == "ok" and set(result["items"]) == {
@@ -113,20 +113,14 @@ def test_full_cycle_run_ls_verify_prune_restore_selftest(tmp_path: Path) -> None
         [p.name for p in dest.glob("3d-backup-2026*Z")], Retention()
     )
     pruned = backup(tmp_path, env, "prune", "--target", "default")
-    assert (
-        listing.returncode == 0
-        and "31 set(s)" in listing.stdout
-        and "prune" in listing.stdout
-    )
-    assert (
-        verified.returncode == 0
-        and "integrity_check and row counts match" in verified.stdout
-    )
+    assert listing.returncode == 0
+    assert "31 set(s)" in listing.stdout
+    assert "prune" in listing.stdout
+    assert verified.returncode == 0
+    assert "integrity_check and row counts match" in verified.stdout
     assert "would remove" in dry.stdout and after_dry == 31  # a dry run removes nothing
-    assert (
-        pruned.returncode == 0
-        and f"keep {len(keep_names)}, removed {len(drop_names)}" in pruned.stdout
-    )
+    assert pruned.returncode == 0
+    assert f"keep {len(keep_names)}, removed {len(drop_names)}" in pruned.stdout
     assert sorted(p.name for p in dest.glob("3d-backup-2026*Z")) == sorted(keep_names)
     assert (
         (dest / "notes.txt").read_text(encoding="utf-8") == "mine"
@@ -159,18 +153,17 @@ def test_full_cycle_run_ls_verify_prune_restore_selftest(tmp_path: Path) -> None
         "data",
         "--yes",
     )
-    assert restored.returncode == 2 and "--yes" in restored.stderr
+    assert restored.returncode == 2
+    assert "--yes" in restored.stderr
     assert unsafe.returncode == 0, unsafe.stderr
     assert sqlite3.connect(tmp_path / "out" / "spoolman" / "spoolman.db").execute(
         "SELECT count(*) FROM spool"
     ).fetchone() == (12,)
 
     selftest = backup(tmp_path, env, "selftest", "--target", "default")
-    assert (
-        selftest.returncode == 0
-        and "selftest ok" in selftest.stdout
-        and "restore-check  spoolman: restored, integrity ok" in selftest.stdout
-    )
+    assert selftest.returncode == 0
+    assert "selftest ok" in selftest.stdout
+    assert "restore-check  spoolman: restored, integrity ok" in selftest.stdout
 
 
 def test_restoring_a_backup_taken_without_tokens_leaves_no_authorised_token(
@@ -326,6 +319,7 @@ def _disk_returns_and_the_next_run_recovers(
 def test_wrong_disk_writes_nothing_and_notifies_ha_and_opens_an_anomaly(
     tmp_path: Path,
 ) -> None:
+    """An operator whose backup disk is replaced by another one sees the run refused, nothing written, Home Assistant notified and a PrintOps anomaly opened; the right disk back recovers both."""
     env = make_world(tmp_path)
     disk = tmp_path / "disk"
     assert (
@@ -373,45 +367,44 @@ def test_wrong_disk_writes_nothing_and_notifies_ha_and_opens_an_anomaly(
 
 
 def test_another_disk_with_a_marker_is_refused_too(tmp_path: Path) -> None:
+    """An operator who mounts a different backup disk (another marker id) at the configured path sees the run refused and nothing created on it."""
     env = make_world(tmp_path)
     disk = tmp_path / "disk"
     backup(tmp_path, env, "target", "add", "default", str(disk), "--init-marker")
     (disk / store.MARKER).write_text(json.dumps({"id": "f" * 32}), encoding="utf-8")
     r = backup(tmp_path, env, "run", "--target", "default")
-    assert (
-        r.returncode == 1
-        and "another disk is mounted there" in r.stderr
-        and not (disk / "3d-printops").exists()
-    )
+    assert r.returncode == 1
+    assert "another disk is mounted there" in r.stderr
+    assert not (disk / "3d-printops").exists()
 
 
 def test_unconfigured_target_and_missing_disk_are_clear_errors(tmp_path: Path) -> None:
+    """An operator who runs a backup with no configured target, or a disk that is not mounted, gets a clear message naming the fix."""
     env = make_world(tmp_path)
     unconfigured = backup(tmp_path, env, "run")
-    assert (
-        unconfigured.returncode == 1
-        and "is not configured" in unconfigured.stderr
-        and "3d init --env" in unconfigured.stderr
-    )
+    assert unconfigured.returncode == 1
+    assert "is not configured" in unconfigured.stderr
+    assert "3d init --env" in unconfigured.stderr
     adhoc = backup(tmp_path, env, "run", "--dest", str(tmp_path / "nope"))
-    assert adhoc.returncode == 1 and "is not there (not mounted?)" in adhoc.stderr
+    assert adhoc.returncode == 1
+    assert "is not there (not mounted?)" in adhoc.stderr
 
 
 def test_a_full_disk_is_refused_before_anything_is_written(tmp_path: Path) -> None:
+    """An operator whose backup disk has less free space than the run needs sees the run refused before a single set directory is written."""
     env = make_world(tmp_path)
     disk = tmp_path / "disk"
     backup(tmp_path, env, "target", "add", "default", str(disk), "--init-marker")
     r = backup(
         tmp_path, env, "run", "--target", "default", "--min-free-gb", "100000000"
     )
-    assert (
-        r.returncode == 1
-        and "nothing was written" in r.stderr
-        and not list((disk / "3d-printops").glob("3d-backup-*"))
-    )
+    assert r.returncode == 1
+    assert "nothing was written" in r.stderr
+    assert not list((disk / "3d-printops").glob("3d-backup-*"))
 
 
 def test_help_and_discover_are_wired(tmp_path: Path) -> None:
+    """A user reading `3d printops backup --help` sees every verb, and `backup discover --json` lists disk candidates."""
     env = make_world(tmp_path)
     helped = backup(tmp_path, env, "--help")
     assert helped.returncode == 0
@@ -428,7 +421,8 @@ def test_help_and_discover_are_wired(tmp_path: Path) -> None:
     ):
         assert verb in helped.stdout
     bad = backup(tmp_path, env, "frobnicate")
-    assert bad.returncode == 2 and "unknown backup subcommand" in bad.stderr
+    assert bad.returncode == 2
+    assert "unknown backup subcommand" in bad.stderr
     found = backup(tmp_path, env, "discover", "--json", "--data-dir", str(tmp_path))
     assert found.returncode == 0, found.stderr
     body = json.loads(found.stdout)
@@ -438,6 +432,7 @@ def test_help_and_discover_are_wired(tmp_path: Path) -> None:
 def test_the_api_route_runs_the_backup_niced_child_and_reports_failure_as_an_answer(
     tmp_path: Path, live_api: LiveApi, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Home Assistant calls POST /v1/backup/run: a good run answers ok with the retention applied, a failed run is a 200 answer, retention is never lowered below the floor, and bad input is a 422."""
     env = make_world(tmp_path)
     env.update(
         {
@@ -627,15 +622,18 @@ def test_a_live_stack_is_restored_from_the_host_with_dest_and_subdir(
 def test_min_free_gb_must_be_a_finite_number_not_below_zero(
     tmp_path: Path, bad: str
 ) -> None:
+    """An operator who passes `--min-free-gb inf`, a negative number or text gets exit 2 and an explanation, never a traceback."""
     env = make_world(tmp_path)
     r = backup(tmp_path, env, "run", "--target", "default", "--min-free-gb", bad)
-    assert r.returncode == 2 and "--min-free-gb needs a finite number" in r.stderr
+    assert r.returncode == 2
+    assert "--min-free-gb needs a finite number" in r.stderr
     assert "Traceback" not in r.stderr
 
 
 def test_a_prune_waits_for_no_one_and_refuses_while_a_run_holds_the_disk_lock(
     tmp_path: Path,
 ) -> None:
+    """An operator who prunes while a backup run holds the disk lock is refused; a dry run still works and a prune after the run succeeds."""
     import fcntl
 
     env = make_world(tmp_path)
@@ -646,12 +644,14 @@ def test_a_prune_waits_for_no_one_and_refuses_while_a_run_holds_the_disk_lock(
         fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)  # what a running backup holds
         blocked = backup(tmp_path, env, "prune", "--target", "default")
         peek = backup(tmp_path, env, "prune", "--target", "default", "--dry-run")
-    assert blocked.returncode == 1 and "another backup run holds" in blocked.stderr
+    assert blocked.returncode == 1
+    assert "another backup run holds" in blocked.stderr
     assert peek.returncode == 0  # a dry run removes nothing, so it needs no lock
     assert backup(tmp_path, env, "prune", "--target", "default").returncode == 0
 
 
 def test_a_broken_backup_yaml_is_a_clear_error_for_every_verb(tmp_path: Path) -> None:
+    """An operator with a mistyped backup.yaml gets a "not valid YAML" error from every verb instead of a traceback."""
     env = make_world(tmp_path)
     Path(env["PRINTOPS_BACKUP_CONFIG"]).write_text(
         "targets: [unclosed\n", encoding="utf-8"
@@ -662,11 +662,9 @@ def test_a_broken_backup_yaml_is_a_clear_error_for_every_verb(tmp_path: Path) ->
         ("ls", "--target", "default"),
     ):
         r = backup(tmp_path, env, *verb)
-        assert (
-            r.returncode == 1
-            and "not valid YAML" in r.stderr
-            and "Traceback" not in r.stderr
-        ), verb
+        assert r.returncode == 1
+        assert "not valid YAML" in r.stderr
+        assert "Traceback" not in r.stderr
 
 
 def test_discover_over_ssh_does_not_use_this_machines_data_dir(tmp_path: Path) -> None:

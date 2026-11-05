@@ -164,6 +164,7 @@ def test_stage_only_with_backup_path_binds_the_disk_and_proves_a_restore(
 
 
 def test_backup_skip_writes_nothing_and_exits_zero(stack: Stack) -> None:
+    """A user running `3d init --env --stage-only --backup skip` is told backups were skipped; no container is touched and no disk marker is written."""
     r = run_cli(
         stack.tmp,
         "init",
@@ -178,7 +179,8 @@ def test_backup_skip_writes_nothing_and_exits_zero(stack: Stack) -> None:
         "skip",
         env_extra=stack.env,
     )
-    assert r.returncode == 0 and "backups: skipped" in r.stdout
+    assert r.returncode == 0
+    assert "backups: skipped" in r.stdout
     assert (
         "compose -p" not in stack.log and not (stack.disk / ".3d-backup-disk").exists()
     )
@@ -212,6 +214,7 @@ def test_backup_agent_prints_a_hand_off_prompt_sized_by_backup_disk_gb(
 
 
 def test_backup_auto_with_no_input_chooses_nothing(stack: Stack) -> None:
+    """An agent running the stage with `--backup auto --no-input` is shown what was found and told that nothing is chosen for it; nothing is bound or written."""
     r = run_cli(
         stack.tmp,
         "init",
@@ -226,7 +229,8 @@ def test_backup_auto_with_no_input_chooses_nothing(stack: Stack) -> None:
         "skip",
         env_extra=stack.env,
     )
-    assert r.returncode == 0 and "--no-input chooses nothing" in r.stdout
+    assert r.returncode == 0
+    assert "--no-input chooses nothing" in r.stdout
     assert "compose -p" not in stack.log
 
 
@@ -278,6 +282,7 @@ def test_ha_wire_yes_installs_the_package_with_keep_and_backup_at_and_wires_spoo
 
 
 def test_ha_wire_no_leaves_home_assistant_alone(stack: Stack) -> None:
+    """A user who passes `--ha-wire no` has Home Assistant left alone: no write request is sent and no package file appears."""
     r = stack.init("--ha-wire", "no", "--ha-dir", str(stack.ha_dir), with_ha=True)
     assert r.returncode == 0, r.stdout + r.stderr
     assert "left alone" in r.stdout
@@ -320,6 +325,7 @@ def test_ha_ssh_writes_the_package_through_ssh_to_the_ha_host(stack: Stack) -> N
 def test_stage_flag_mistakes_exit_2_naming_the_flag(
     stack: Stack, flags: tuple[str, ...], needle: str
 ) -> None:
+    """A user who mistypes a stage flag gets exit 2 with the flag named on stderr, no traceback, and no container is touched."""
     r = run_cli(
         stack.tmp,
         "init",
@@ -331,7 +337,9 @@ def test_stage_flag_mistakes_exit_2_naming_the_flag(
         *flags,
         env_extra=stack.env,
     )
-    assert r.returncode == 2 and needle in r.stderr and "Traceback" not in r.stderr
+    assert r.returncode == 2
+    assert needle in r.stderr
+    assert "Traceback" not in r.stderr
     assert "compose -p" not in stack.log
 
 
@@ -349,6 +357,7 @@ def test_stage_only_refuses_when_the_stack_is_not_running_and_changes_nothing(
 
 
 def test_the_chosen_disk_is_remembered_next_to_the_data_dir(stack: Stack) -> None:
+    """A user who chose a backup disk in the stage finds it saved beside the data dir, so a later plain `3d printops deploy` binds the same disk."""
     ok = stack.init()
     assert ok.returncode == 0, ok.stdout + ok.stderr
     saved = stack.tmp / "xdg-data" / "3d-cli" / "printops" / "backup-dir"
