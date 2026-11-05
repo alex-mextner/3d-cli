@@ -80,6 +80,7 @@ from printer_ops.bed import (  # noqa: E402
     bed_config,
     clear_ack,
     evidence_dir,
+    read_calibration,
     read_state,
     refs_dir,
     state_path,
@@ -383,6 +384,7 @@ class ZMatch:
     cam: CameraModel | None = None
     height_mm: float = 80.0
     max_px: float = TH.match_px
+    views: tuple[tuple[float, float], ...] = ()  # (toolhead Z, share of the plate in the frame): learnt or declared
 
     def __call__(self, ref_z: float | None, z: float | None) -> bool:
         if ref_z is None or z is None:
@@ -392,8 +394,21 @@ class ZMatch:
         return view_shift_px(self.cam, round(ref_z, 2), round(z, 2), self.height_mm) <= self.max_px
 
     def in_view(self, z: float | None) -> float | None:
-        """Share of the bed in the frame at `z`; None without a calibration or a Z."""
-        return None if self.cam is None or z is None else bed_in_view(self.cam, round(z, 1))
+        """Share of the bed in the frame at `z`: from `views` (`3d printer bed calibrate`, `watch.bed.views`;
+        None beyond the Zs they cover) else from the camera calibration; None without either or a Z."""
+        if z is None:
+            return None
+        if self.views:
+            return _interp_view(self.views, z)
+        return None if self.cam is None else bed_in_view(self.cam, round(z, 1))
+
+    def picker_view(self, z: float) -> float | None:
+        """`bed_view`'s view(z): the share in the frame. Without a calibration or views the plate is in the
+        frame by definition (a roi polygon): 1.0. With views, a Z beyond them is not known to show it: 0.0."""
+        seen = self.in_view(z)
+        if seen is not None:
+            return seen
+        return 0.0 if self.views else (1.0 if self.cam is None else None)
 
     def nearest_view(self, z: float, view_min: float) -> float | None:
         """The highest Z (5 mm steps) at or below `min(z, MAX_Z_MM)` where at least `view_min` of the bed is in view."""
@@ -402,8 +417,31 @@ class ZMatch:
                     None)
 
 
+def _interp_view(views: tuple[tuple[float, float], ...], z: float) -> float | None:
+    """The share of the plate in the frame at `z`, interpolated linearly between the Zs of `views`; None beyond
+    them (the camera is never guessed to see the plate where nobody looked)."""
+    if not views[0][0] <= z <= views[-1][0]:
+        return None
+    for (z0, f0), (z1, f1) in zip(views, views[1:], strict=False):
+        if z0 <= z <= z1:
+            return f0 if z1 == z0 else f0 + (f1 - f0) * (z - z0) / (z1 - z0)
+    return views[-1][1]
+
+
+def _views_for(device: Device, cfg: BedConfig, cam: CameraModel | None) -> tuple[tuple[float, float], ...]:
+    """The Z views in force: `watch.bed.views` when the owner declared them, else what `bed calibrate` learnt
+    for a printer that has neither a camera calibration nor a `watch.bed.roi`."""
+    if cfg.views:
+        return cfg.views
+    if cam is not None or cfg.roi is not None:
+        return ()
+    learnt = read_calibration(device.name)
+    return () if learnt is None else learnt.views
+
+
 def z_match(device: Device, cfg: BedConfig) -> ZMatch:
-    return ZMatch(cfg.z_tol_mm, camera_model(device, cfg), cfg.volume_height_mm, thresholds_for(cfg).match_px)
+    cam = camera_model(device, cfg)
+    return ZMatch(cfg.z_tol_mm, cam, cfg.volume_height_mm, thresholds_for(cfg).match_px, _views_for(device, cfg, cam))
 
 
 def out_of_view(match: ZMatch, z: float | None, th: Thresholds = TH) -> str | None:
@@ -418,6 +456,11 @@ def out_of_view(match: ZMatch, z: float | None, th: Thresholds = TH) -> str | No
             f"frame, under {th.view_min:.0%}){where}")
 
 
+def reference_files(d: Path) -> list[Path]:
+    """The reference meta files of a printer's data dir (calibration.json lies beside them: not a reference)."""
+    return sorted(p for p in d.glob("*.json") if p.name != "calibration.json")
+
+
 class RefStore:
     """The references of one printer, re-read when the directory changes."""
 
@@ -428,14 +471,14 @@ class RefStore:
 
     def signature(self) -> tuple[tuple[str, int], ...]:
         try:
-            return tuple(sorted((p.name, p.stat().st_mtime_ns) for p in self.dir.glob("*.json")))
+            return tuple(sorted((p.name, p.stat().st_mtime_ns) for p in reference_files(self.dir)))
         except OSError:
             return ()
 
     def load(self) -> list[Reference]:
         sig = self.signature()
         if sig != self._sig:
-            loaded = [_load_reference(p) for p in sorted(self.dir.glob("*.json"))]
+            loaded = [_load_reference(p) for p in reference_files(self.dir)]
             self._sig, self._refs = sig, [r for r in loaded if r is not None]
         return self._refs
 
@@ -765,15 +808,18 @@ def read_printer(device: Device) -> tuple[str, float | None]:
     return _STATE.get(raw, STATE_UNKNOWN), z
 
 
-def camera_for(device: Device) -> Any:
-    """The same snapshot source as `3d printer vision` (printer_ops.camera: `watch.vision.camera`,
-    else the printer model's default camera); a printer without one is refused."""
+def camera_for(device: Device, cfg: BedConfig | None = None) -> Any:
+    """The snapshot source of the bed check: `watch.bed.camera` (a URL) when set, else the same one as
+    `3d printer vision` (printer_ops.camera: `watch.vision.camera`, else the printer model's default camera);
+    a printer without one is refused."""
     from errors import UsageError
-    from printer_ops.camera import open_camera, require_camera
+    from printer_ops.camera import SNAPSHOT_URL, CameraSpec, open_camera, require_camera
 
     if device.adapter != "moonraker":
         raise UsageError(f"{device.name}: no camera or Z access for adapter {device.adapter}", command="printer bed",
                          remediation=["The bed check needs a Moonraker printer (adapter: moonraker)."])
+    if cfg is not None and cfg.camera is not None:
+        return open_camera(device, CameraSpec(SNAPSHOT_URL, cfg.camera, False, (), f"{device.name}.watch.bed.camera"))
     return open_camera(device, require_camera(device, "printer bed"))
 
 
@@ -1030,7 +1076,7 @@ def _run_monitor(device: Device, cfg: BedConfig, *, duration: float | None = Non
                 busy_interval: float = 10.0) -> Monitor:
     name = device.name
     th = thresholds_for(cfg) if th is None else th
-    camera = camera if camera is not None else camera_for(device)
+    camera = camera if camera is not None else camera_for(device, cfg)
     store = RefStore(name)
     prev = read_state(name) or {}
     known_bed, known_plate = prev.get("known_bed", prev.get("bed")), prev.get("known_plate", prev.get("plate"))
@@ -1087,7 +1133,7 @@ def one_shot(device: Device, cfg: BedConfig, *, max_age: float | None, camera: A
         return {**last, "source": "watch", "age_s": round(now - float(last["checked"]), 1)}
     if before_frame is not None:
         before_frame()
-    jpeg, frozen = _fresh_frame(device, camera, sleep)
+    jpeg, frozen = _fresh_frame(device, camera, sleep, cfg)
     img = _decode_frame(device, jpeg)
     ctx = bed_refs.JudgeContext(bed_refs.LIGHT_UNKNOWN if light_state is None else light_state(), cfg.plate,
                                 cfg.reference_max_age_days, now)
@@ -1105,10 +1151,11 @@ def one_shot(device: Device, cfg: BedConfig, *, max_age: float | None, camera: A
             **v.info}
 
 
-def _fresh_frame(device: Device, camera: Any, sleep: Callable[[float], None]) -> tuple[bytes, bool]:
+def _fresh_frame(device: Device, camera: Any, sleep: Callable[[float], None],
+                 cfg: BedConfig | None = None) -> tuple[bytes, bool]:
     """(a fresh camera frame, whether the camera looks frozen): a live camera never repeats a frame byte for
     byte, so the same frame over FROZEN_CHECK_S seconds is a frozen one (the newer frame is the one judged)."""
-    camera = camera if camera is not None else camera_for(device)
+    camera = camera if camera is not None else camera_for(device, cfg)
     first = jpeg = grab(camera)
     waited = 0.0
     while jpeg == first and waited < FROZEN_CHECK_S:
@@ -1139,7 +1186,7 @@ def status_view(device: Device, cfg: BedConfig, *, mode: str = "auto", max_age: 
     from printer_ops import make_adapter
 
     adapter = adapter if adapter is not None else make_adapter(device, timeout=10.0)
-    camera = camera if camera is not None else camera_for(device)
+    camera = camera if camera is not None else camera_for(device, cfg)
     match = z_match(device, cfg)
     refs = RefStore(device.name).load()
 
@@ -1154,7 +1201,7 @@ def status_view(device: Device, cfg: BedConfig, *, mode: str = "auto", max_age: 
                         before_frame=light.on, light_state=lambda: bed_refs.light_state(light.report.to_dict()))
 
     def view(z: float) -> float | None:
-        return 1.0 if match.cam is None else match.in_view(z)  # a roi polygon is in the frame by definition
+        return match.picker_view(z)
 
     with light:  # the light is back as it was found after the bed is back (restore order: Z, then light)
         if max_age is None:  # a fresh frame is certain: the settle overlaps the Z move
@@ -1219,7 +1266,7 @@ def capture_reference_best_view(device: Device, cfg: BedConfig, *, plate: bool, 
     from printer_ops import make_adapter
 
     adapter = adapter if adapter is not None else make_adapter(device, timeout=10.0)
-    camera = camera if camera is not None else camera_for(device)
+    camera = camera if camera is not None else camera_for(device, cfg)
     match = z_match(device, cfg)
     light = LightSession(adapter, cfg.light, note="the reference frame", blocked=write_block(device), sleep=sleep)
 
@@ -1233,7 +1280,7 @@ def capture_reference_best_view(device: Device, cfg: BedConfig, *, plate: bool, 
                                  light_state=lambda: bed_refs.light_state(light.report.to_dict()))
 
     def view(z: float) -> float | None:
-        return 1.0 if match.cam is None else match.in_view(z)
+        return match.picker_view(z)
 
     with light:
         light.on()  # before the move: the settle overlaps the Z travel
@@ -1246,7 +1293,8 @@ def capture_reference_best_view(device: Device, cfg: BedConfig, *, plate: bool, 
 
 def _reference_frame(device: Device, camera: Any, printer_fn: Callable[[Device], tuple[str, float | None]],
                      frame: bytes | None, frame_z: float | None,
-                     before_frame: Callable[[], object] | None = None) -> tuple[float, bytes]:
+                     before_frame: Callable[[], object] | None = None,
+                     cfg: BedConfig | None = None) -> tuple[float, bytes]:
     from errors import UsageError
 
     if frame is not None:
@@ -1264,7 +1312,7 @@ def _reference_frame(device: Device, camera: Any, printer_fn: Callable[[Device],
                          remediation=["Retry when `3d printer status` reads the printer."])
     if before_frame is not None:
         before_frame()
-    return z, grab(camera if camera is not None else camera_for(device))
+    return z, grab(camera if camera is not None else camera_for(device, cfg))
 
 
 def capture_reference(device: Device, cfg: BedConfig, *, plate: bool, camera: Any = None,
@@ -1281,7 +1329,7 @@ def capture_reference(device: Device, cfg: BedConfig, *, plate: bool, camera: An
     from errors import UsageError
 
     now = time.time() if now is None else now
-    z, jpeg = _reference_frame(device, camera, printer_fn, frame, frame_z, before_frame)
+    z, jpeg = _reference_frame(device, camera, printer_fn, frame, frame_z, before_frame, cfg)
     match = z_match(device, cfg)
     hidden = out_of_view(match, z, thresholds_for(cfg))
     if hidden is not None:  # a reference there would read every low part as a clear bed
@@ -1344,7 +1392,7 @@ def list_references(printer: str, cfg: BedConfig | None = None, now: float | Non
     now = time.time() if now is None else now
     max_days = None if cfg is None else cfg.reference_max_age_days
     out = []
-    for p in sorted(refs_dir(printer).glob("*.json")):
+    for p in reference_files(refs_dir(printer)):
         try:
             meta = json.loads(p.read_text(encoding="utf-8"))
             if not isinstance(meta, dict) or meta.get("kind") not in ("plate", "noplate") \
@@ -1366,6 +1414,7 @@ USAGE = """3d printer bed check NAME [--expect empty|part] [--no-move] [--part-h
 3d printer bed status NAME [--json] [--max-age S] [--best-view | --no-move] [--part-height MM]
 3d printer bed reference NAME [--capture [--best-view] [--no-plate] [--from FRAME.jpg --z Z]] [--json]
 3d printer bed reference NAME --refresh [--assume-empty "WHY"] [--part-height MM] [--json]
+3d printer bed calibrate NAME [--z-from A --z-to B --z-step S] [--part-height MM] [--json]
 3d printer bed monitor NAME [--duration S]
   Bed state from the printer's camera (issue #303): is the bed clear, is the build plate on.
   Needs one reference frame of the EMPTY bed WITH the plate per printer and resting Z, taken
@@ -1402,6 +1451,16 @@ USAGE = """3d printer bed check NAME [--expect empty|part] [--no-move] [--part-h
               with the plate on in a good view with the light on (else it refuses, with the reason,
               and nothing is stored); --assume-empty "WHY" is the owner's word that the bed is empty:
               it replaces that check (WHY is kept in the reference and in the journal).
+  calibrate   learn how much of the plate the camera sees at each Z, for a printer with neither a
+              camera calibration nor a `watch.bed.roi`: an IDLE printer's bed is moved in Z only (the
+              guarded move of `check`, within its floor and ceiling: --part-height MM, default the last
+              job's object_height; --z-from/--z-to default to those limits, --z-step to 20 mm), a frame
+              is taken at every Z of the grid with the light on, the plate is FOLLOWED from the empty-bed
+              reference (or `watch.bed.plate_mask`) frame to frame, its visible share per Z and its
+              polygon are stored in ~/.local/share/3d-cli/bed/NAME/calibration.json, and the bed is put
+              back. `check` / `status` / the auto view then know where the plate shows (`watch.bed.views`
+              overrides). Without a reference and a plate_mask the largest dark low-saturation region
+              of each frame is used: rough, check the result. Refused while the printer is not idle.
   monitor     the loop `3d printer watch` runs per printer with `watch.bed.enabled: true`:
               JSON lines on stdout (events bed_clear, bed_occupied, plate_present,
               plate_missing; the warning bed_unknown when the first verdict after a job
@@ -1410,7 +1469,12 @@ USAGE = """3d printer bed check NAME [--expect empty|part] [--no-move] [--part-h
 Config (fleet/printers.yaml or printer-devices.yaml, `<name>.watch.bed`):
   enabled: true            run the monitor in `3d printer watch` and the `bed` start gate
   roi: [[x, y], ...]       bed polygon (0..1 of the frame) at the reference Z; default: the
-                           camera calibration, else the whole frame
+                           camera calibration, else the whole frame (`plate_mask` is the same key)
+  views: {70: 1.0, 200: 0.15}  Z (mm) -> share of the plate in the frame there, for a camera without
+                           a calibration; overrides what `bed calibrate` learnt (linear between the
+                           Zs, unknown beyond them)
+  camera: http://HOST:8080/?action=snapshot   the bed camera's snapshot URL (default
+                           watch.vision.camera, else the printer model's camera)
   interval_s, stale_s, volume_height_mm
   z_tol_mm                 reference Z tolerance for a watch.bed.roi (uncalibrated) camera
   thresholds: {clear_max: 0.05, level: 30}   per-printer overrides of the tuned pixel thresholds
@@ -1498,6 +1562,8 @@ Examples:
   3d printer bed reference u1 --capture
   3d printer bed reference u1 --refresh                       # new reference after a confident clear check
   3d printer bed reference u1 --refresh --assume-empty "plate wiped and empty, I looked"
+  3d printer bed calibrate k1se --part-height 40            # learn the plate's view per Z
+  3d printer bed calibrate k1se --z-from 40 --z-to 200 --z-step 10 --json
   3d printer bed status u1
   3d printer bed status u1 --no-move
   3d printer bed status u1 --best-view --part-height 0   # the plate is empty: look at the whole of it
@@ -1611,7 +1677,7 @@ def _allowed_flags(args: argparse.Namespace) -> set[str]:
         reference |= {"assume_empty", "part_height"}
     return {"check": {"json", "expect", "no_move", "part_height"},
             "status": {"json", "max_age", "best_view", "no_move", "part_height"}, "monitor": {"duration"},
-            "reference": reference}[args.sub]
+            "calibrate": {"json", "z_from", "z_to", "z_step", "part_height"}, "reference": reference}[args.sub]
 
 
 def _validate_refresh(args: argparse.Namespace) -> None:
@@ -1660,7 +1726,7 @@ def main(argv: list[str]) -> int:
     from printer_ops.devices import get_device
 
     ap = argparse.ArgumentParser(prog="3d printer bed", add_help=False)
-    ap.add_argument("sub", choices=("check", "status", "reference", "monitor"))
+    ap.add_argument("sub", choices=("check", "status", "reference", "monitor", "calibrate"))
     ap.add_argument("name")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--max-age", type=float)
@@ -1673,6 +1739,9 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--no-move", action="store_true")
     ap.add_argument("--part-height", type=float)
     ap.add_argument("--expect", choices=("empty", "part"))
+    ap.add_argument("--z-from", dest="z_from", type=float)
+    ap.add_argument("--z-to", dest="z_to", type=float)
+    ap.add_argument("--z-step", dest="z_step", type=float)
     ap.add_argument("--refresh", action="store_true")
     ap.add_argument("--assume-empty", dest="assume_empty")
     ap.add_argument("-h", "--help", action="store_true")
@@ -1684,11 +1753,15 @@ def main(argv: list[str]) -> int:
     device = get_device(args.name)
     cfg = bed_config(device)
     capturing = args.refresh or (args.capture and not args.from_file)
-    if args.sub in ("monitor", "status", "check") or (args.sub == "reference" and capturing):
-        camera_for(device)  # a printer without a camera is refused here, before any printer request
+    if args.sub in ("monitor", "status", "check", "calibrate") or (args.sub == "reference" and capturing):
+        camera_for(device, cfg)  # a printer without a camera is refused here, before any printer request
     if args.sub == "monitor":
         run_monitor(device, cfg, duration=args.duration)
         return 0
+    if args.sub == "calibrate":
+        import bed_calibrate
+
+        return bed_calibrate.cmd_calibrate(args, device, cfg)
     if args.sub == "reference":
         return _cmd_reference(args, device, cfg)
     if args.sub == "check":

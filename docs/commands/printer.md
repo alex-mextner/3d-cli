@@ -28,7 +28,7 @@ Epic: [#90](https://github.com/alex-mextner/3d-cli/issues/90).
 3d printer supervise uninstall [NAME...|--all] [--yes] [--unit-dir DIR]
 3d printer supervise quiet NAME [--reason TEXT] | --clear
 3d printer vision NAME [--interval S] [--once] [--dry-run] [--scene] [--no-detach] ...  |  vision eval ...  |  vision record NAME DIR [--timeout S]  |  vision fetch-model
-3d printer bed status NAME [--json] [--max-age S] [--best-view | --no-move] [--part-height MM]  |  bed reference NAME [--capture [--best-view] [--no-plate]] | bed reference NAME --refresh [--assume-empty WHY]  |  bed monitor NAME
+3d printer bed status NAME [--json] [--max-age S] [--best-view | --no-move] [--part-height MM]  |  bed reference NAME [--capture [--best-view] [--no-plate]] | bed reference NAME --refresh [--assume-empty WHY]  |  bed calibrate NAME [--z-from A --z-to B --z-step S] [--part-height MM]  |  bed monitor NAME
 3d printer subscribe --session ID [--printer P,P] [--kinds K,K] [--min-severity LEVEL] ...
 3d printer subscribe --session ID --printer P --once --on bed-free
 3d printer unsubscribe --session ID | --id SUBID | --all
@@ -675,6 +675,29 @@ until someone takes them off. The camera can see that, so nobody has to tell an 
   `manual` | `assumed` | `auto`, `why`, `z`, `light`, `verdict`) in
   `~/.local/state/3d-cli/bed/NAME.refs.log`. Config: `plate`, `reference_max_age_days`,
   `auto_reference` under `watch.bed`.
+- **Calibrate** (`3d printer bed calibrate NAME [--z-from A --z-to B --z-step S] [--part-height MM] [--json]`,
+  [#723](https://github.com/alex-mextner/3d-cli/issues/723)). A printer without a camera calibration (the
+  K1 SE) used to count the plate as «in the frame by definition» at every Z, so the check never knew a poor view
+  and never moved the bed to a better one. `bed calibrate` learns it: on an **idle, homed, writable** printer
+  (refused otherwise, nothing moves) the bed goes through a grid of Zs **in Z only** — the guarded move of
+  `bed check`, within the clearance floor (`--part-height` + 15 mm, never below Z 10) and the axis ceiling
+  (`resume.z_max_mm` - 5), `--z-from` / `--z-to` default to those limits and `--z-step` to 20 mm (at most 60
+  Zs; a grid outside the limits is refused), with the printer's light on — takes one fresh frame per Z, and puts the
+  bed back in a `finally` (exceptions, Ctrl-C, SIGTERM; the displaced-Z marker is the same as the auto view's).
+  Then, without touching the printer, the plate is **followed** over the frames: from its outline in the
+  nearest empty-bed reference (`watch.bed.plate_mask`, the alias of `roi`, drawn on it; else the reference's own
+  bed surface; with neither, the largest dark low-saturation region of the frame — rough, the result says
+  «check it») frame to frame by the affine transform that carries the plate onto the next frame (ECC,
+  correlation based, so a light change does not move it; the polygon moves with it, so the part of the plate that
+  has left the frame is still counted). The visible share of the polygon per Z, the plate polygon where most of it
+  shows and the grid are stored in `~/.local/share/3d-cli/bed/NAME/calibration.json`. A plate that cannot be
+  followed (too little of it in the frame, no texture, correlation under 0.5) ends the chain: those Zs are listed
+  as `unfollowed` and **not stored** (no view is invented). `bed_in_view` / the auto view / `out of view` then use
+  the learnt shares (linear between the Zs, unknown beyond them) for a printer that has **neither a camera
+  calibration nor a `watch.bed.roi`**; `watch.bed.views: {70: 1.0, 200: 0.15}` overrides them. Limits: the
+  model is affine (a big move's perspective is followed approximately), the plate must show texture, the step must
+  be small enough for the plate to move a few tens of px between two Zs, and the share is relative to the plate's
+  area at that Z. Exit 1 when the bed could not be put back.
 - **Out of view.** The calibration also says how much of the bed is in the frame: the U1 camera
   sits about 12 mm above the bed's Z 0, so the lower the bed goes the less of it shows (Z 10: 98 %,
   Z 200: 15 %, Z 215: under 10 %, Z 275 — where a home leaves it — none). Under 10 % the state is
@@ -839,6 +862,9 @@ u1:
       plate: textured           # plate type in use (default `default`): references are kept per plate type
       reference_max_age_days: 30  # an older reference never makes the verdict `occupied`
       auto_reference: false     # refresh the reference after a confident clear check (default false)
+      views: {70: 1.0, 200: 0.15}  # a camera without a calibration: share of the plate in the frame per Z (overrides `bed calibrate`)
+      camera: http://k1se:8080/?action=snapshot   # the bed camera's snapshot URL (default watch.vision.camera, else the model's)
+      plate_mask: [[0.31, 0.48], [0.72, 0.27], [0.92, 0.55], [0.92, 0.97], [0.41, 0.97]]  # the plate polygon (alias of roi)
 k1se:
   watch:
     bed:

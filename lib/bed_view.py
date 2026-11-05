@@ -662,6 +662,45 @@ def _moved_check(device: Any, adapter: Any, m: Motion, pick: ViewPick, limits: L
     return _annotate(verdict, {**base, **used}, _join(note, text))
 
 
-__all__ = ["Candidate", "Limits", "MoveRefused", "MoveVetoed", "Motion", "ViewPick", "auto_view", "guarded_z_move",
-           "move_limits", "no_write_access", "part_height", "pick_inspection_z", "read_motion", "recover_pending", "restore_z",
-           "view_in_progress"]
+@dataclass
+class Excursion:
+    """A bed that leaves where it was found for several Zs (`excursion`): `go(z)` moves it, `restore_error` is
+    None once it is back, else why not."""
+
+    device: Any
+    adapter: Any
+    start: Motion
+    limits: Limits
+    read: Callable[[Any], Motion] = read_motion
+    restore_error: str | None = None
+
+    def go(self, z: float) -> None:
+        """Move the bed to toolhead Z `z` (G-code Z under the offset found at the start), guarded: MoveRefused
+        when the printer is no longer idle and homed, `z` is outside the limits, or the offset changed."""
+        assert self.start.z is not None
+        guarded_z_move(self.adapter, to_gcode_z=z - self.start.offset, floor=self.limits.z_floor,
+                       ceiling=self.limits.z_ceiling, target_toolhead_z=z, read=self.read)
+
+
+@contextlib.contextmanager
+def excursion(device: Any, adapter: Any, m: Motion, limits: Limits, *, read: Callable[[Any], Motion] = read_motion,
+              clock: Callable[[], float] = time.time) -> Iterator[Excursion]:
+    """The bed's trips to several Zs and back, the same safety net as `auto_view` has for one: the per-printer
+    lock (MoveRefused when another view check runs), the displaced-Z marker, SIGTERM unwinding like an
+    exception, and the restore to where the bed was found (`m`) in the `finally`, after any exception. The
+    result of the restore is `Excursion.restore_error` (None = back)."""
+    trip = Excursion(device, adapter, m, limits, read)
+    with view_lock(device.name) as held:
+        if not held:
+            raise MoveRefused("another view check of this printer is running")
+        with terminate_as_exit():
+            _write_pending(device.name, m, clock())
+            try:
+                yield trip
+            finally:
+                trip.restore_error = _restore_and_clear(device, adapter, m, read)
+
+
+__all__ = ["Candidate", "Excursion", "Limits", "MoveRefused", "MoveVetoed", "Motion", "ViewPick", "auto_view",
+           "excursion", "guarded_z_move", "move_limits", "no_write_access", "part_height", "pick_inspection_z",
+           "read_motion", "recover_pending", "restore_z", "view_in_progress"]

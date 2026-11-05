@@ -89,7 +89,7 @@ USAGE = """3d printer [-n NAME] <subcommand> [args]
                                        `vision fetch-model [--tier a|b|all]`, `vision fit-head ..`,
                                        `vision doctor` (read-only: does any service run --dry-run?)
                                        (see docs/commands/printer-vision.md)
-  bed check|status|reference|monitor NAME
+  bed check|status|reference|calibrate|monitor NAME
                                        bed state from the camera: clear/occupied, build plate
                                        present/missing; `check NAME` is THE look at the bed: it moves
                                        an idle bed in Z only to where the camera sees the plate, judges
@@ -99,6 +99,8 @@ USAGE = """3d printer [-n NAME] <subcommand> [args]
                                        takes the empty-bed reference, `reference NAME --refresh
                                        [--assume-empty WHY]` replaces a stale one (confident clear
                                        check, or your word)
+                                       `calibrate NAME [--z-from A --z-to B --z-step S]` learns the
+                                       plate's visible share per Z (idle printer, bed moved in Z only)
                                        (see `3d printer bed --help`)
   subscribe --session ID [..]          printer alerts go to that omp session (it looks at the
                                        frame, tells the user only if real); `unsubscribe`,

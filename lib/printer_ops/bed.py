@@ -76,9 +76,9 @@ AUTO_VIEW_CLEARANCE = 15.0    # mm between the tallest thing that may stand on t
 AUTO_VIEW_SETTLE_S = 8.0      # after the move: the camera's own frame rewrite (~4 s) plus vibration
 BED_VIEW_EVENT = "bed_free"   # the event of the one-shot `3d printer subscribe --once --on bed-free`
 
-BED_KEYS = ("enabled", "interval_s", "roi", "volume_height_mm", "z_tol_mm", "stale_s", "clear_ack", "thresholds",
-            "auto_view", "auto_view_min", "auto_view_part_mm", "light", "plate", "reference_max_age_days",
-            "auto_reference")
+BED_KEYS = ("enabled", "interval_s", "roi", "plate_mask", "volume_height_mm", "z_tol_mm", "stale_s", "clear_ack",
+            "thresholds", "auto_view", "auto_view_min", "auto_view_part_mm", "light", "plate", "reference_max_age_days",
+            "auto_reference", "views", "camera")
 
 # The per-printer overrides of bed_state.Thresholds (tuned on the U1 and K1 SE frames of tests/data/bed;
 # another camera may need other values): every field of that dataclass, a test keeps the two in step.
@@ -119,6 +119,8 @@ class BedConfig:
     plate: str = "default"                # the plate type in use: references are kept per plate type (bed_refs.py)
     reference_max_age_days: float = 30.0  # an older reference never makes a verdict `occupied`
     auto_reference: bool = False          # refresh the reference after a confident clear check (bed_refresh.py)
+    views: tuple[tuple[float, float], ...] = ()  # (toolhead Z, share of the plate in the frame): the owner's override
+    camera: str | None = None             # snapshot URL of the bed camera (else watch.vision.camera / the model's)
 
 
 def _num(value: Any, what: str, minimum: float) -> float:
@@ -160,6 +162,51 @@ def _roi(value: Any, what: str) -> tuple[tuple[float, float], ...]:
         raise InvalidArgument(what, str(value), ["a polygon of >= 3 [x, y] points, x and y in 0..1 of the frame"],
                               command="printer")
     return tuple((float(x), float(y)) for x, y in value)
+
+
+def _roi_config(raw: dict[str, Any], where: str) -> tuple[tuple[float, float], ...] | None:
+    """`roi`, or its alias `plate_mask`: the plate polygon (0..1 of the frame) at the reference Z."""
+    if "roi" in raw and "plate_mask" in raw:
+        raise InvalidArgument(f"{where}.plate_mask", "given with roi", ["only one of roi and plate_mask: the same polygon"],
+                              command="printer")
+    key = "roi" if "roi" in raw else "plate_mask"
+    return _roi(raw[key], f"{where}.{key}") if key in raw else None
+
+
+def _views(value: Any, what: str) -> tuple[tuple[float, float], ...]:
+    """`views: {Z: share of the plate in the frame}`, sorted by Z."""
+    if not isinstance(value, dict) or not value:
+        raise InvalidArgument(what, str(value), ["a mapping of toolhead Z (mm) to the share of the plate in the frame "
+                                                 "there (0..1), e.g. {70: 1.0, 200: 0.15}"], command="printer")
+    out = []
+    for key, share in value.items():
+        z = _num(key if not isinstance(key, str) else _number_text(key, what), f"{what} Z", 0)
+        frac = _num(share, f"{what}[{key}]", 0)
+        if frac > 1:
+            raise InvalidArgument(f"{what}[{key}]", str(share), ["a share of the plate in the frame, 0..1"],
+                                  command="printer")
+        out.append((z, frac))
+    return tuple(sorted(out))
+
+
+def _number_text(text: str, what: str) -> float:
+    try:
+        return float(text)
+    except ValueError:
+        raise InvalidArgument(what, text, ["a number of mm as the key"], command="printer") from None
+
+
+def _camera_url(value: Any, what: str) -> str:
+    if not isinstance(value, str) or not value.strip() or any(ch in value for ch in " \n\r\t"):
+        raise InvalidArgument(what, str(value), ["a snapshot URL (http://HOST:PORT/?action=snapshot) or a path on the "
+                                                 "printer's Moonraker"], command="printer")
+    return value.strip()
+
+
+def _view_config(raw: dict[str, Any], where: str) -> dict[str, Any]:
+    """The keys of `watch.bed` about what the camera sees: the Z views and the camera URL."""
+    return {"views": _views(raw["views"], f"{where}.views") if "views" in raw else (),
+            "camera": _camera_url(raw["camera"], f"{where}.camera") if "camera" in raw else None}
 
 
 def _ack_lines(raw: Any, where: str, device: Device) -> list[str]:
@@ -268,7 +315,7 @@ def bed_config(device: Device) -> BedConfig:
     cfg = BedConfig(
         enabled=_flag(raw.get("enabled", False), f"{where}.enabled"),
         interval_s=_num(raw.get("interval_s", 1.0), f"{where}.interval_s", 0.2),
-        roi=_roi(raw["roi"], f"{where}.roi") if "roi" in raw else None,
+        roi=_roi_config(raw, where),
         volume_height_mm=_num(raw.get("volume_height_mm", 80.0), f"{where}.volume_height_mm", 0),
         z_tol_mm=_num(raw.get("z_tol_mm", 0.5), f"{where}.z_tol_mm", 0),
         stale_s=_num(raw.get("stale_s", 120.0), f"{where}.stale_s", 1),
@@ -280,8 +327,9 @@ def bed_config(device: Device) -> BedConfig:
         if "auto_view_part_mm" in raw else None,
         light=_light(raw["light"], device) if "light" in raw else LightConfig(),
         **_reference_config(raw, where),
+        **_view_config(raw, where),
     )
-    if cfg.enabled:
+    if cfg.enabled and cfg.camera is None:
         from printer_ops.camera import camera_spec
 
         spec = camera_spec(device)
@@ -310,6 +358,47 @@ def evidence_dir() -> Path:
     from cli.paths import cache_dir
 
     return cache_dir() / "vision" / "bed"
+
+
+@dataclass(frozen=True)
+class Calibration:
+    """What `3d printer bed calibrate NAME` learnt (calibration.json next to the references)."""
+
+    views: tuple[tuple[float, float], ...]  # (toolhead Z, share of the plate in the frame), by Z
+    plate_mask: tuple[tuple[float, float], ...] | None  # the plate polygon (0..1 of the frame) where most of it shows
+    ts: float
+    method: str
+
+
+def calibration_path(printer: str) -> Path:
+    return refs_dir(printer) / "calibration.json"
+
+
+def read_calibration(printer: str) -> Calibration | None:
+    """The learnt Z views of `printer`, or None (never calibrated, or the file is unusable: logged)."""
+    path = calibration_path(printer)
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        views = tuple(sorted((float(z), float(f)) for z, f in doc["views"]))
+        if len(views) < 2 or not all(math.isfinite(z) and math.isfinite(f) and 0.0 <= f <= 1.0 for z, f in views):
+            raise ValueError("needs at least two finite Z views with a share of 0..1")
+        mask = doc.get("plate_mask")
+        return Calibration(views, None if not mask else tuple((float(x), float(y)) for x, y in mask),
+                           float(doc.get("ts", 0)), str(doc.get("method", "")))
+    except OSError:
+        return None
+    except (ValueError, KeyError, TypeError) as exc:
+        _log(f"ignoring {path}: {exc}")
+        return None
+
+
+def write_calibration(printer: str, doc: dict[str, Any]) -> Path:
+    path = calibration_path(printer)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(doc, indent=1, default=str), encoding="utf-8")
+    tmp.replace(path)
+    return path
 
 
 def read_state(printer: str) -> dict[str, Any] | None:
@@ -516,6 +605,6 @@ def run_status(printer: str, *, move: str = "force", max_age: float | None = Non
 
 __all__ = ["AUTO_VIEW_CLEARANCE", "AUTO_VIEW_FEED", "AUTO_VIEW_MIN", "AUTO_VIEW_SETTLE_S",
            "AUTO_VIEW_Z_FLOOR", "AUTO_VIEW_Z_TOP_MARGIN", "BED_DEPS", "BED_TOOL", "BED_VIEW_EVENT", "KINDS",
-           "STATUS_MOVE_TIMEOUT_S", "STATUS_TIMEOUT_S", "AckConfig", "BedChild", "BedConfig", "bed_config",
-           "clear_ack", "event_from", "read_state", "refs_dir", "run_status", "state_path", "status_argv",
-           "transitions", "write_state"]
+           "STATUS_MOVE_TIMEOUT_S", "STATUS_TIMEOUT_S", "AckConfig", "BedChild", "BedConfig", "Calibration",
+           "bed_config", "calibration_path", "clear_ack", "event_from", "read_calibration", "read_state", "refs_dir",
+           "run_status", "state_path", "status_argv", "transitions", "write_calibration", "write_state"]

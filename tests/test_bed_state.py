@@ -23,7 +23,7 @@ import pytest
 from errors import InvalidArgument
 from printer_fakes import FakeMoonraker, u1_status
 from printer_ops import bed as pbed
-from printer_ops import preflight
+import printer_ops.preflight as preflight
 from printer_ops.devices import Device
 
 np = pytest.importorskip("numpy")
