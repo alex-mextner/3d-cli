@@ -176,7 +176,8 @@ def _shims(root: Path) -> Path:
     bindir = fake_docker_bin(root)
     (bindir / "timedatectl").write_text("#!/bin/sh\necho Europe/Paris\n", encoding="utf-8")
     (bindir / "systemctl").write_text('#!/bin/sh\necho "systemctl $*" >> "$FAKE_LOG"\n', encoding="utf-8")
-    for name in ("timedatectl", "systemctl"):
+    (bindir / "loginctl").write_text('#!/bin/sh\necho "Linger=${FAKE_LINGER:-yes}"\n', encoding="utf-8")
+    for name in ("timedatectl", "systemctl", "loginctl"):
         (bindir / name).chmod(0o755)
     return bindir
 
@@ -282,3 +283,18 @@ def test_printops_deploy_refuses_an_empty_or_option_like_host_before_running_any
             deploy_cli.run(["--host", host, "--dry-run"])
         assert err.value.exit_code == 2 and "--local" in err.value.render()
     assert not ran  # nothing was planned, let alone executed
+
+
+def test_a_host_without_lingering_is_told_the_backup_timer_stops_with_the_session(tmp_path: Path) -> None:
+    cfg = _local(REPO, pin_host_env=True)
+    off = _run_step(_step(cfg, "install daily backup timer"), tmp_path, FAKE_LINGER="no")
+    assert off.returncode == 0, off.stderr
+    assert "sudo loginctl enable-linger" in off.stdout and "only runs while you are logged in" in off.stdout
+    on = _run_step(_step(cfg, "install daily backup timer"), tmp_path / "on", FAKE_LINGER="yes")
+    assert on.returncode == 0, on.stderr
+    assert "linger" not in on.stdout
+
+
+def test_the_odroid_timer_step_has_no_linger_check(tmp_path: Path) -> None:
+    """Its plan output stays byte-identical, and the Odroid's linger is already on."""
+    assert "loginctl" not in _step(deploy.DeployConfig(repo_root=tmp_path), "install daily backup timer").argv[-1]

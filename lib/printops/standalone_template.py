@@ -249,6 +249,17 @@ EOF
   systemctl --user daemon-reload || return 1
   systemctl --user enable --now "${PREFIX}-backup.timer" >/dev/null || return 1
   log "daily backup timer installed (${PREFIX}-backup.timer)"
+  warn_if_no_linger
+}
+
+# A systemd --user manager (and so the timer) stops when the last session of the user ends, unless
+# lingering is on: on a headless server the nightly backup would silently never run.
+warn_if_no_linger() {
+  local user linger
+  user="$(id -un)"
+  linger="$(loginctl show-user "$user" -p Linger 2>/dev/null)" || linger=""
+  [ "$linger" = "Linger=yes" ] ||
+    log "warning: lingering is off for $user, so the backup timer only runs while you are logged in; enable it: sudo loginctl enable-linger $user"
 }
 
 summary() {

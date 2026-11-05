@@ -285,6 +285,22 @@ def test_script_prints_the_token_when_the_unit_directory_cannot_be_created(
     assert "token: po_fakeminted" in r.stdout and "backup timer was not installed" in r.stdout
 
 
+def test_script_warns_when_lingering_is_off_so_the_backup_timer_would_stop_with_the_session(
+    script_file: Path, tmp_path: Path
+) -> None:
+    _shim(tmp_path / "a", "systemctl", "exit 0")
+    _shim(tmp_path / "a", "loginctl", "echo Linger=no")
+    off = _run_script(script_file, tmp_path / "a", PRINTOPS_BACKUP_TIMER="1", HOME=str(tmp_path / "home"))
+    assert off.returncode == 0, off.stderr
+    assert "daily backup timer installed" in off.stdout
+    assert "lingering is off" in off.stdout and "sudo loginctl enable-linger" in off.stdout
+    _shim(tmp_path / "b", "systemctl", "exit 0")
+    _shim(tmp_path / "b", "loginctl", "echo Linger=yes")
+    on = _run_script(script_file, tmp_path / "b", PRINTOPS_BACKUP_TIMER="1", HOME=str(tmp_path / "home"))
+    assert on.returncode == 0, on.stderr
+    assert "daily backup timer installed" in on.stdout and "lingering" not in on.stdout
+
+
 def test_script_token_name_is_compared_literally(script_file: Path, tmp_path: Path) -> None:
     (tmp_path / "tokens.txt").write_text("cli-axb        read,write  now  sha256 abcdef\n", encoding="utf-8")
     r = _run_script(script_file, tmp_path, TOKEN_NAME="cli-a.b")  # '.' is not a wildcard

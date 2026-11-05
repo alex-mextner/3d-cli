@@ -193,7 +193,12 @@ def _timer_script(cfg: DeployConfig, src: str) -> str:
     )
     if cfg.timer_required:
         return timer
-    return f"( {timer} ) || echo 'note: no systemd --user here; the daily backup timer was not installed'"
+    # A systemd --user manager stops with the user's last session unless lingering is on: a
+    # headless host would report "installed" and never run the backup. Say so, with the command.
+    linger = ('{ [ "$(loginctl show-user "$(id -un)" -p Linger 2>/dev/null)" = Linger=yes ]'
+              ' || echo "note: lingering is off, so the backup timer only runs while you are logged in:'
+              ' sudo loginctl enable-linger $(id -un)"; }')
+    return f"( {timer} && {linger} ) || echo 'note: no systemd --user here; the daily backup timer was not installed'"
 
 
 def _sync_step(cfg: DeployConfig, dry_run: bool) -> Step:
