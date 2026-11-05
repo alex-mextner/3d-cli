@@ -30,6 +30,7 @@ from cli.registry import Command
 from errors import InputNotFound, UsageError
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from printer_ops.base import Adapter, PrinterStatus
@@ -231,32 +232,81 @@ def _adapter(name: str, opts: dict[str, str], *, write: bool = False) -> Adapter
     return adapter_by_name(name, secs=opts.get("--secs"))
 
 
-def _list_row(name: str, printer: FleetPrinter | None, device: Device | None) -> dict[str, Any]:
-    """One `printer list` entry: fleet facts (owner, topology) + the device that would be contacted."""
+def _fleet_facts(printer: FleetPrinter | None) -> dict[str, Any]:
+    """The fleet-declared columns of a `printer list` row (empty facts when the printer is not in the fleet)."""
     from dataclasses import asdict
 
+    if printer is None:
+        return {"owner": None, "fleet": None, "heads": [], "ams": None, "enclosure": None,
+                "chamber_heater": None, "plates": None}
+    return {
+        "owner": printer.owner,
+        "fleet": str(printer.source),
+        "heads": [asdict(h) for h in printer.heads],
+        "ams": [asdict(u) for u in printer.ams] if printer.ams is not None else None,
+        "enclosure": printer.enclosure,
+        "chamber_heater": printer.chamber_heater,
+        "plates": list(printer.plates) if printer.plates is not None else None,
+    }
+
+
+def _device_facts(device: Device | None) -> dict[str, Any]:
+    """The device-derived columns of a `printer list` row (the device that would be contacted)."""
+    if device is None:
+        return {"adapter": None, "address": None, "settings": None}
+    return {"adapter": device.adapter, "address": f"{device.host}:{device.port}", "settings": str(device.source)}
+
+
+def _list_row(name: str, printer: FleetPrinter | None, device: Device | None) -> dict[str, Any]:
+    """One `printer list` entry: fleet facts (owner, topology) + the device that would be contacted."""
+    fleet = _fleet_facts(printer)
+    dev = _device_facts(device)
     return {
         "name": name,
         "model": (device.model if device else None) or (printer.model if printer else None),
-        "owner": printer.owner if printer else None,
+        "owner": fleet["owner"],
         "access": device.access if device else printer.access if printer else None,
-        "adapter": device.adapter if device else None,
-        "address": f"{device.host}:{device.port}" if device else None,
-        "settings": str(device.source) if device else None,
-        "fleet": str(printer.source) if printer else None,
-        "heads": [asdict(h) for h in printer.heads] if printer else [],
-        "ams": [asdict(u) for u in printer.ams] if printer and printer.ams is not None else None,
-        "enclosure": printer.enclosure if printer else None,
-        "chamber_heater": printer.chamber_heater if printer else None,
-        "plates": list(printer.plates) if printer and printer.plates is not None else None,
+        "adapter": dev["adapter"],
+        "address": dev["address"],
+        "settings": dev["settings"],
+        "fleet": fleet["fleet"],
+        "heads": fleet["heads"],
+        "ams": fleet["ams"],
+        "enclosure": fleet["enclosure"],
+        "chamber_heater": fleet["chamber_heater"],
+        "plates": fleet["plates"],
     }
+
+
+def _print_no_printers() -> None:
+    """The `printer list` hint when nothing is configured: where we looked and an example."""
+    from printer_ops.devices import EXAMPLE, search_paths
+    from printops.fleet import fleet_path
+
+    print("No printers configured. Looked in:")
+    for p in [fleet_path(), *search_paths()]:
+        print(f"  {p}")
+    print("\nCreate one of them, e.g.:\n" + EXAMPLE)
+
+
+def _print_list_row(r: dict[str, Any]) -> None:
+    """One human-readable `printer list` line plus its unusable-head and settings notes."""
+    address = f"{r['adapter']} {r['address']}" if r["adapter"] else "- (never contacted)"
+    heads = " | ".join(h["label"] + ("" if h["usable"] else " UNUSABLE") for h in r["heads"]) or "-"
+    print(f"  {r['name']:<13} {r['owner'] or '-':<12} {r['access']:<9} {r['model'] or '-':<20} "
+          f"{address:<31} {heads}")
+    for h in r["heads"]:
+        if not h["usable"]:
+            print(f"      {h['label']}: {h['reason']}")
+    if r["settings"] and r["settings"] != r["fleet"]:
+        print(f"      device settings: {r['settings']}")
 
 
 def _cmd_list(argv: list[str]) -> int:
     import json
 
-    from printer_ops.devices import EXAMPLE, load_devices, search_paths
-    from printops.fleet import fleet_path, load_fleet
+    from printer_ops.devices import load_devices
+    from printops.fleet import load_fleet
 
     _, opts = _parse(argv, {"--json"}, 0, "list")
     fleet = load_fleet()
@@ -267,22 +317,11 @@ def _cmd_list(argv: list[str]) -> int:
         print(json.dumps(rows, indent=1, ensure_ascii=False))
         return 0
     if not rows:
-        print("No printers configured. Looked in:")
-        for p in [fleet_path(), *search_paths()]:
-            print(f"  {p}")
-        print("\nCreate one of them, e.g.:\n" + EXAMPLE)
+        _print_no_printers()
         return 0
     print(f"  {'NAME':<13} {'OWNER':<12} {'ACCESS':<9} {'MODEL':<20} {'ADDRESS':<31} HEADS")
     for r in rows:
-        address = f"{r['adapter']} {r['address']}" if r["adapter"] else "- (never contacted)"
-        heads = " | ".join(h["label"] + ("" if h["usable"] else " UNUSABLE") for h in r["heads"]) or "-"
-        print(f"  {r['name']:<13} {r['owner'] or '-':<12} {r['access']:<9} {r['model'] or '-':<20} "
-              f"{address:<31} {heads}")
-        for h in r["heads"]:
-            if not h["usable"]:
-                print(f"      {h['label']}: {h['reason']}")
-        if r["settings"] and r["settings"] != r["fleet"]:
-            print(f"      device settings: {r['settings']}")
+        _print_list_row(r)
     if fleet is not None:
         print(f"\nfleet: {fleet.path}")
     return 0
@@ -386,20 +425,11 @@ def _cmd_start(argv: list[str]) -> int:
         return _start_snapshot(name, file, original, local, source, opts)
 
 
-def _start_snapshot(name: str, file: str, original: Path, local: Path, source: Path | None,
-                    opts: dict[str, str]) -> int:
-    from printer_ops.base import UNKNOWN, PrinterCommError, PrinterRefused, file_sha256, safe_remote_name
-    from printer_ops.render import render_status
-    from printer_ops import bridge_max_for
-    from printer_ops.preflight import FAIL, run_preflight
-    from printer_ops.printops_checks import context_from_options
+def _require_stored_file(adapter: Adapter, name: str, file: str, remote: str, size: int,
+                        opts: dict[str, str]) -> None:
+    """Refuse unless the printer holds `remote` with exactly the local size."""
+    from printer_ops.base import PrinterRefused
 
-    remote = safe_remote_name(local, opts.get("--as"))  # content-addressed: <stem>-<sha256[:16]>.gcode
-    size = local.stat().st_size
-    adapter = _adapter(name, opts, write=True)
-
-    st = adapter.status()
-    _refuse_if_busy(name, st, "before preflight")
     stored = adapter.list_files(expect=(remote, size)).get(remote)
     if stored is None or stored.size != size:
         got = "absent" if stored is None else f"{stored.size} B"
@@ -408,6 +438,12 @@ def _start_snapshot(name: str, file: str, original: Path, local: Path, source: P
             command="printer", remediation=[f"Upload it first: 3d printer upload {name} {file}"
                                             + (f" --as {opts['--as']}" if "--as" in opts else "")],
         )
+
+
+def _verify_remote_identity(adapter: Adapter, name: str, file: str, remote: str, local: Path) -> str:
+    """Check the stored file is the local one; returns the local sha256."""
+    from printer_ops.base import PrinterRefused, file_sha256
+
     # Identity of what will be printed with what is checked below: the read-back hash where
     # the firmware can return the file, else the hash in the name plus the size.
     remote_hash = adapter.remote_sha256(remote)
@@ -420,11 +456,19 @@ def _start_snapshot(name: str, file: str, original: Path, local: Path, source: P
         )
     identity = "read-back sha256 matches" if remote_hash else "content hash in the file name + size"
     print(f"remote file {remote}: {identity}")
+    return local_hash
+
+
+def _preflight_report(name: str, adapter: Adapter, st: PrinterStatus, original: Path, local: Path,
+                      source: Path | None, opts: dict[str, str]) -> Any:
+    """Run and print the preflight on the snapshot; the report is relabelled with the original path."""
+    from printer_ops import bridge_max_for
+    from printer_ops.preflight import check_bed, run_preflight
+    from printer_ops.printops_checks import context_from_options
 
     limits, limits_source = adapter.axis_limits()
     bridge, bridge_source = bridge_max_for(opts.get("--bridge-max"), adapter.device, command="printer")
     # the snapshot lives in a temp dir: NAME.3mf and NAME.slice-warnings.json sit next to the original
-    from printer_ops.preflight import check_bed
 
     # plus the PrintOps material gates of `3d print-preflight --printer NAME` (live 3d-api state
     # when configured, else fleet facts only)
@@ -437,18 +481,34 @@ def _start_snapshot(name: str, file: str, original: Path, local: Path, source: P
                            else None)
     report.file = f"{original} (snapshot)"
     print(report.render())
-    if report.overall == FAIL:
-        if "--force" not in opts:
-            raise PrinterRefused("preflight FAIL; start refused", command="printer",
-                                 remediation=["Fix the cause of each FAIL line above (a gate's false positive is a bug: "
-                                              "file an issue and fix it).",
-                                              "Forcing needs a one-time Telegram approval, not a flag: see --force in "
-                                              "`3d printer --help`."])
-        from printer_ops.force_hatch import require_force_approval
+    return report
 
-        forced = ", ".join(c.name for c in report.checks if c.status == FAIL)
-        approval = require_force_approval(printer=name, file=str(original), sha256=local_hash, checks=report.checks)
-        print(f"FORCED: starting despite preflight FAIL ({forced}); owner approved on Telegram ({approval})")
+
+def _require_preflight_pass(report: Any, name: str, original: Path, local_hash: str,
+                            opts: dict[str, str]) -> None:
+    """Refuse on a preflight FAIL unless --force is given and the owner approves it."""
+    from printer_ops.base import PrinterRefused
+    from printer_ops.preflight import FAIL
+
+    if report.overall != FAIL:
+        return
+    if "--force" not in opts:
+        raise PrinterRefused("preflight FAIL; start refused", command="printer",
+                             remediation=["Fix the cause of each FAIL line above (a gate's false positive is a bug: "
+                                          "file an issue and fix it).",
+                                          "Forcing needs a one-time Telegram approval, not a flag: see --force in "
+                                          "`3d printer --help`."])
+    from printer_ops.force_hatch import require_force_approval
+
+    forced = ", ".join(c.name for c in report.checks if c.status == FAIL)
+    approval = require_force_approval(printer=name, file=str(original), sha256=local_hash, checks=report.checks)
+    print(f"FORCED: starting despite preflight FAIL ({forced}); owner approved on Telegram ({approval})")
+
+
+def _start_and_report(adapter: Adapter, name: str, remote: str) -> None:
+    """Send the start and print the state after it; any unreadable outcome is reported as UNKNOWN."""
+    from printer_ops.base import UNKNOWN, PrinterCommError
+    from printer_ops.render import render_status
 
     _refuse_if_busy(name, adapter.status(), "state changed during preflight")
     dont_resend = [f"Do NOT resend blindly. Check: 3d printer status {name}"]
@@ -475,6 +535,23 @@ def _start_snapshot(name: str, file: str, original: Path, local: Path, source: P
             command="printer", remediation=dont_resend,
         )
     print(render_status(name, adapter, after))
+
+
+def _start_snapshot(name: str, file: str, original: Path, local: Path, source: Path | None,
+                    opts: dict[str, str]) -> int:
+    from printer_ops.base import safe_remote_name
+
+    remote = safe_remote_name(local, opts.get("--as"))  # content-addressed: <stem>-<sha256[:16]>.gcode
+    size = local.stat().st_size
+    adapter = _adapter(name, opts, write=True)
+
+    st = adapter.status()
+    _refuse_if_busy(name, st, "before preflight")
+    _require_stored_file(adapter, name, file, remote, size, opts)
+    local_hash = _verify_remote_identity(adapter, name, file, remote, local)
+    report = _preflight_report(name, adapter, st, original, local, source, opts)
+    _require_preflight_pass(report, name, original, local_hash, opts)
+    _start_and_report(adapter, name, remote)
     return 0
 
 
@@ -522,6 +599,106 @@ def _cmd_bed(argv: list[str]) -> int:
     return exec_tool(BED_DEPS, BED_TOOL, argv)
 
 
+def _run_evidence(rest: list[str], name: str | None) -> int:
+    from printer_ops.evidence import run as evidence
+
+    return evidence(rest)
+
+
+def _run_watch(rest: list[str], name: str | None) -> int:
+    from printer_ops.watch_run import run as watch
+
+    return watch(rest)
+
+
+def _run_supervise(rest: list[str], name: str | None) -> int:
+    from printer_ops.supervise import run as supervise
+
+    return supervise(rest)
+
+
+def _run_guard(rest: list[str], name: str | None) -> int:
+    from printer_ops.guard import run as guard
+
+    return guard(rest, vision_deps=VISION_DEPS)
+
+
+def _run_agent(rest: list[str], name: str | None) -> int:
+    from printer_ops.printer_agent import run as agent
+
+    return agent(rest)
+
+
+def _run_doctor(rest: list[str], name: str | None) -> int:
+    from printers_cli import dispatch
+
+    return dispatch(["doctor", *rest])
+
+
+def _run_todo(rest: list[str], name: str | None) -> int:
+    from printops.todo_cli import run as todo
+
+    return todo(rest, printer=name)
+
+
+def _run_macro(rest: list[str], name: str | None) -> int:
+    from printer_ops.macro_cli import run_macro
+
+    return run_macro(name, rest)
+
+
+def _run_aliases(rest: list[str], name: str | None) -> int:
+    from printer_ops.alias_cli import run_aliases
+
+    return run_aliases(name, rest)
+
+
+def _run_alias(sub: str, rest: list[str], name: str | None) -> int:
+    """A subcommand that is none of the above: an alias of printer NAME (home, load, ...), else unknown."""
+    from printer_ops.alias_cli import run_alias
+
+    aliased = run_alias(name, sub, rest)
+    if aliased is not None:
+        return aliased
+    raise UsageError(f"unknown subcommand '{sub}'", command="printer",
+                     remediation=["Use list, status, upload, start, cancel, evidence, watch, supervise, vision, guard, bed, subscribe, unsubscribe, "
+                                  "subscriptions, agent, doctor, todo (issues), macro, aliases or an alias (home, level, load, ...) — see `3d printer --help`."])
+
+
+def _run_subscriptions(sub: str) -> Callable[[list[str], str | None], int]:
+    """Handler for subscribe/unsubscribe/subscriptions: the module takes the subcommand word too."""
+    def handler(rest: list[str], name: str | None) -> int:
+        from printer_ops.subscriptions import run as subscriptions
+
+        return subscriptions(sub, rest)
+    return handler
+
+
+# subcommand -> handler(rest, -n/--name value). Add new subcommands here.
+_SUBCOMMANDS: dict[str, Callable[[list[str], str | None], int]] = {
+    "list": lambda rest, name: _cmd_list(rest),
+    "status": lambda rest, name: _cmd_status(rest),
+    "upload": lambda rest, name: _cmd_upload(rest),
+    "start": lambda rest, name: _cmd_start(rest),
+    "cancel": lambda rest, name: _cmd_cancel(rest),
+    "evidence": _run_evidence,
+    "watch": _run_watch,
+    "supervise": _run_supervise,
+    "vision": lambda rest, name: _cmd_vision(rest),
+    "guard": _run_guard,
+    "bed": lambda rest, name: _cmd_bed(rest),
+    "subscribe": _run_subscriptions("subscribe"),
+    "unsubscribe": _run_subscriptions("unsubscribe"),
+    "subscriptions": _run_subscriptions("subscriptions"),
+    "agent": _run_agent,
+    "doctor": _run_doctor,
+    "todo": _run_todo,
+    "issues": _run_todo,
+    "macro": _run_macro,
+    "aliases": _run_aliases,
+}
+
+
 def run(argv: list[str]) -> int:
     if not argv:
         print(USAGE)
@@ -537,70 +714,10 @@ def run(argv: list[str]) -> int:
     if name is not None and sub in _NAME_AS_POSITIONAL:
         raise UsageError(f"-n/--name selects the printer for `todo`/`issues`, `macro`, `aliases` and the aliases; `{sub}` takes the printer as NAME",
                          command="printer", remediation=[f"3d printer {sub} {name} …"])
-    if sub == "list":
-        return _cmd_list(rest)
-    if sub == "status":
-        return _cmd_status(rest)
-    if sub == "upload":
-        return _cmd_upload(rest)
-    if sub == "start":
-        return _cmd_start(rest)
-    if sub == "cancel":
-        return _cmd_cancel(rest)
-    if sub == "evidence":
-        from printer_ops.evidence import run as evidence
-
-        return evidence(rest)
-    if sub == "watch":
-        from printer_ops.watch_run import run as watch
-
-        return watch(rest)
-
-    if sub == "supervise":
-        from printer_ops.supervise import run as supervise
-
-        return supervise(rest)
-
-    if sub == "vision":
-        return _cmd_vision(rest)
-    if sub == "guard":
-        from printer_ops.guard import run as guard
-
-        return guard(rest, vision_deps=VISION_DEPS)
-    if sub == "bed":
-        return _cmd_bed(rest)
-    if sub in ("subscribe", "unsubscribe", "subscriptions"):
-        from printer_ops.subscriptions import run as subscriptions
-
-        return subscriptions(sub, rest)
-    if sub == "agent":
-        from printer_ops.printer_agent import run as agent
-
-        return agent(rest)
-    if sub == "doctor":
-        from printers_cli import dispatch
-
-        return dispatch(["doctor", *rest])
-    if sub in ("todo", "issues"):
-        from printops.todo_cli import run as todo
-
-        return todo(rest, printer=name)
-    if sub == "macro":
-        from printer_ops.macro_cli import run_macro
-
-        return run_macro(name, rest)
-    if sub == "aliases":
-        from printer_ops.alias_cli import run_aliases
-
-        return run_aliases(name, rest)
-    from printer_ops.alias_cli import run_alias
-
-    aliased = run_alias(name, sub, rest)
-    if aliased is not None:
-        return aliased
-    raise UsageError(f"unknown subcommand '{sub}'", command="printer",
-                     remediation=["Use list, status, upload, start, cancel, evidence, watch, supervise, vision, guard, bed, subscribe, unsubscribe, "
-                                  "subscriptions, agent, doctor, todo (issues), macro, aliases or an alias (home, level, load, ...) — see `3d printer --help`."])
+    handler = _SUBCOMMANDS.get(sub)
+    if handler is None:
+        return _run_alias(sub, rest, name)
+    return handler(rest, name)
 
 
 def _printer_name(argv: list[str]) -> tuple[str | None, list[str]]:
@@ -622,7 +739,7 @@ def _printer_name(argv: list[str]) -> tuple[str | None, list[str]]:
 COMMAND = Command(
     name="printer",
     group="SLICING",
-    summary="drive configured printers: list / status / upload / start --yes / cancel --yes / macro / aliases (home, level, load, ...) / evidence / watch / vision / subscribe / agent / todo",
+    summary="drive configured printers: list / status / upload / start --yes / cancel --yes / evidence / watch / vision / subscribe / agent / todo",
     usage=USAGE,
     run=run,
 )
