@@ -26,6 +26,17 @@ PRINTOPS_API=http://192.168.0.39:8765 3d printops health
 registers every PrintOps extra field in Spoolman (`printops.spoolman.EXTRA_FIELDS`), retrying
 until Spoolman answers and re-checking every 10 minutes.
 
+### Any other host, this computer, or by hand
+
+`3d printops deploy --local` (this computer) and `--host USER@HOST` run the same plan elsewhere;
+`3d init --env` wraps them in a guided flow (target menu, token, `~/.config/3d-cli/printops.yaml`)
+— see [docs/commands/init.md](../../docs/commands/init.md#environment-stage-3d-init---env).
+`3d init --env --spoolman script` writes one idempotent bash file for a server that has docker
+compose and nothing from 3d-cli (template: `lib/printops/standalone_template.py`, filled in with this
+build context by `lib/printops/standalone_script.py`). `compose.yaml` takes its host-specific values from `PRINTOPS_UID/GID`,
+`PRINTOPS_SPOOLMAN_PORT`, `PRINTOPS_API_PORT`, `PRINTOPS_BIND_ADDR`, `PRINTOPS_CONTAINER_PREFIX`, `PRINTOPS_TZ` and
+`PRINTOPS_GCODE_HOST_DIR`; the defaults are the Odroid's values.
+
 ## Ports (LAN + tailnet only)
 
 | Port | Service | Auth |
@@ -33,10 +44,21 @@ until Spoolman answers and re-checking every 10 minutes.
 | `7912` | Spoolman web UI + REST (`/api/v1`) | none (Spoolman has no auth by design) |
 | `8765` | 3d-api (`/v1/...`) | bearer token on everything except `GET /v1/health` |
 
-Ports are published on all host interfaces. The Odroid sits behind the home router's NAT with
-no port forwards for these ports, so that means the LAN plus the Tailscale tailnet. **Remote
-access is via Tailscale only** (`http://100.116.57.66:8765`, `http://100.116.57.66:7912`);
-never add a router port-forward or a public reverse proxy for them.
+Ports are published on `PRINTOPS_BIND_ADDR`, default `0.0.0.0` (all host interfaces). The Odroid
+sits behind the home router's NAT with no port forwards for these ports, so that means the LAN
+plus the Tailscale tailnet. **Remote access is via Tailscale only**
+(`http://100.116.57.66:8765`, `http://100.116.57.66:7912`); never add a router port-forward or a
+public reverse proxy for them.
+
+**A host that is not behind such a router** (a laptop on a café network, a VPS) must not publish
+Spoolman on every interface, and docker's own iptables rules bypass ufw/firewalld, so the default
+cannot be fixed with a firewall alone. Set the bind address instead: `3d init --env --spoolman local`
+and `3d printops deploy --local` listen on `127.0.0.1` by default (`--bind ADDR` changes it), the
+standalone script takes `--bind ADDR` / `PRINTOPS_BIND_ADDR`, and `3d printops deploy --bind ADDR`
+sets it for a host. The consequence: with a loopback bind **no other machine and no printer can
+reach Spoolman or 3d-api** (Moonraker's `[spoolman]` section, Fluidd, another computer running
+`3d`): give `--bind` the one LAN/VPN address they reach it on, or `0.0.0.0` when the network is
+trusted.
 
 Accepted risk: Spoolman's REST API has no auth, so any LAN/tailnet client can change spools
 directly, bypassing 3d-api's token scopes. This is deliberate (plan §5.1, D4): Moonraker's

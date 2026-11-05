@@ -33,7 +33,7 @@ service is never exposed to the internet.
 3d printops token create NAME --scopes SCOPES [--file PATH | --ssh HOST]
 3d printops token list [--file PATH | --ssh HOST]
 3d printops token revoke NAME [--file PATH | --ssh HOST]
-3d printops deploy [--dry-run] [--host USER@HOST] [--dir DIR] [--backup-dir DIR] [--api URL]
+3d printops deploy [--dry-run] [--host USER@HOST | --local] [--dir DIR] [--backup-dir DIR] [--api URL] [--bind ADDR]
 3d printops backup [--dest DIR] [--spoolman-db PATH]
 3d printops loc tree|add|show|set|mv|archive|unarchive|label|resolve|sync-fleet|resync …
 3d printops spool ls|show|receive|move|load|unload|use|measure|empty|import-owned …
@@ -56,7 +56,7 @@ service is never exposed to the internet.
 | `health` | 3d-api status: DB migrations, Spoolman reachability and version, PrintOps extra fields registered. No token needed. Exit 0 = ok, 1 = degraded/unreachable. |
 | `events` | The PrintOps event log (`slot.mismatch`, `spool.measured`, `drying.due`, …), oldest first; `--follow` streams new ones (SSE). |
 | `token` | Mint, list and revoke 3d-api bearer tokens. Only sha256 is stored; `create` prints the token once. |
-| `deploy` | Ship Spoolman + 3d-api to the Odroid as the compose project `printops`, install the backup timer, wait until healthy. |
+| `deploy` | Ship Spoolman + 3d-api to the Odroid (or `--host` any ssh host, or `--local`) as the compose project `printops`, install the backup timer, wait until healthy. [`3d init --env`](init.md#environment-stage-3d-init---env) is the guided front end (target menu, token, config). |
 | `backup` | Consistent snapshots of the PrintOps DB, tokens file and Spoolman DB (runs daily on the Odroid). |
 | `loc` | The location tree: warehouse cells, dry boxes, dryers and the printer slots from `fleet/printers.yaml`; moves re-sync Spoolman's `location`; printable QR label sheets. |
 | `spool` | Spool lifecycle — receive → store/move → load into a printer slot → unload → empty — with remaining as an interval (ledger), weighing and the idempotent `gen/plates.json` import. See [printops-spool.md](printops-spool.md). |
@@ -124,13 +124,24 @@ It never touches the Home Assistant compose project and never restarts HA.
 
 - `--dry-run` — run rsync with `--dry-run --itemize-changes` (shows what would change) and only print the rest.
   `3d printops deploy --dry-run`
-- `--host USER@HOST` — ssh target (default `ultra@192.168.0.39`).
+- `--host USER@HOST` — ssh target (default `ultra@192.168.0.39`). An empty value (an unset
+  `--host "$VAR"`) or one starting with `-` is an error (exit 2), never "this machine": that is `--local`.
   `3d printops deploy --host ultra@odroidn2 --api http://100.116.57.66:8765`
-- `--dir DIR` — remote base dir (default `/home/ultra/printops`).
+- `--local` — deploy on THIS machine instead: the same steps through `bash -c`, built from this
+  checkout (no rsync, no `DIR/src` copy). `--dir` defaults to `~/.local/share/3d-cli/printops`,
+  `--backup-dir` to `DIR/backup`; a machine without `systemd --user` only skips the backup timer.
+  Exclusive with `--host`. `3d printops deploy --local --dry-run`
+- `--dir DIR` — base dir on the target (default `/home/ultra/printops`).
   `3d printops deploy --dir /home/ultra/printops`
 - `--backup-dir DIR` — snapshot dir inside HA's backed-up config dir (default `/home/ultra/homeassistant/printops-backup`).
   `3d printops deploy --backup-dir /home/ultra/homeassistant/printops-backup`
 - `--api URL` — health URL to wait on (default `http://<host>:8765`).
+- `--bind ADDR` — the host address Spoolman (`:7912`) and 3d-api (`:8765`) listen on, an IP address.
+  Default: all interfaces (`0.0.0.0`; the Odroid is behind NAT), `127.0.0.1` with `--local`.
+  Spoolman has no authentication: on a laptop or a VPS keep it on loopback or one LAN address.
+  Consequence of a narrow bind: other machines and printers (Moonraker's `[spoolman]`, Fluidd) can
+  only reach it on that address, so pass the address they use (or `0.0.0.0` on a trusted network).
+  `3d printops deploy --local --bind 192.168.0.20`
 
 ### `backup`
 

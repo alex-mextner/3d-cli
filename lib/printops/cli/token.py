@@ -12,12 +12,12 @@ import sys
 from pathlib import Path
 
 from errors import ThreeDError, UsageError
-from printops import tokens
+from printops import deploy, tokens
 from printops.cli import Sub
-from printops.cli._common import parse
+from printops.cli._common import Parsed, parse
 from printops.settings import Settings
 
-CONTAINER = "printops-api"
+CONTAINER = deploy.API_CONTAINER
 
 USAGE = f"""3d printops token create NAME --scopes SCOPES [--file PATH | --ssh HOST]
 3d printops token list [--file PATH | --ssh HOST]
@@ -70,25 +70,41 @@ def run(argv: list[str]) -> int:
         forwarded = [action, *p.pos] + (["--scopes", p.opts["--scopes"]] if "--scopes" in p.opts else [])
         return _remote(p.opts["--ssh"], forwarded)
 
+    return _local(action, p)
+
+
+def _create(path: Path, p: Parsed) -> None:
+    if "--scopes" not in p.opts:
+        raise UsageError("create needs --scopes (e.g. --scopes read,write)", command="printops token")
+    plaintext, rec = tokens.create(path, p.pos[0], tokens.parse_scopes(p.opts["--scopes"]))
+    print(plaintext)
+    print(f"token {rec.name!r} scopes {','.join(rec.scopes)} stored as sha256 in {path}; "
+          "this is the only time it is shown", file=sys.stderr)
+
+
+def _list(path: Path) -> None:
+    records = tokens.load(path)
+    if not records:
+        print(f"no tokens in {path}")
+    for rec in records:
+        print(f"{rec.name:<20} {','.join(rec.scopes):<28} {rec.created_at}  sha256 {rec.sha256[:12]}…")
+
+
+def _revoke(path: Path, name: str) -> None:
+    if not tokens.revoke(path, name):
+        raise UsageError(f"no token named {name!r} in {path}", command="printops token")
+    print(f"revoked {name!r} in {path}")
+
+
+def _local(action: str, p: Parsed) -> int:
     path = Path(p.opts["--file"]).expanduser() if "--file" in p.opts else Settings.from_env().tokens_file
     try:
         if action == "create":
-            if "--scopes" not in p.opts:
-                raise UsageError("create needs --scopes (e.g. --scopes read,write)", command="printops token")
-            plaintext, rec = tokens.create(path, p.pos[0], tokens.parse_scopes(p.opts["--scopes"]))
-            print(plaintext)
-            print(f"token {rec.name!r} scopes {','.join(rec.scopes)} stored as sha256 in {path}; "
-                  "this is the only time it is shown", file=sys.stderr)
+            _create(path, p)
         elif action == "list":
-            records = tokens.load(path)
-            if not records:
-                print(f"no tokens in {path}")
-            for rec in records:
-                print(f"{rec.name:<20} {','.join(rec.scopes):<28} {rec.created_at}  sha256 {rec.sha256[:12]}…")
-        elif not tokens.revoke(path, p.pos[0]):
-            raise UsageError(f"no token named {p.pos[0]!r} in {path}", command="printops token")
+            _list(path)
         else:
-            print(f"revoked {p.pos[0]!r} in {path}")
+            _revoke(path, p.pos[0])
     except tokens.TokenError as e:
         raise UsageError(str(e), command="printops token") from e
     return 0
