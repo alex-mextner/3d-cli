@@ -11,6 +11,7 @@ input is missing is SKIP and its line says what to pass — it never passes sile
 3d print-preflight FILE.gcode [--printer NAME] [--axis-limits X0:X1,Y0:Y1|NAME] [--source-3mf FILE.3mf]
                    [--visible [OBJ:]SPEC]... [--bridge-max MM] [--printops-api URL] [--offline]
                    [--printops-snapshot FILE] [--accept preset_match|mix_calibration --reason TEXT] [--json] [--secs S] [--no-bed-move]
+                   [--colour-delta-e N] [--fix [--fix-max-delta-e N]]
 ```
 
 | Check | When | FAIL means |
@@ -18,7 +19,7 @@ input is missing is SKIP and its line says what to pass — it never passes sile
 | `thumbnails` | always | The G-code lacks preview images its `; thumbnails =` spec asks for (fix: `3d gcode-thumbnails add FILE`). |
 | `printer` | `--printer` | The printer is printing, paused, busy, or its state cannot be read. |
 | `bed` | `--printer` with `watch.bed.enabled` (SKIP otherwise) | The camera sees objects on the bed or the build plate missing against the empty-bed reference; WARN when it cannot tell (no reference at this Z, plate out of view, camera down). See [Bed state](printer.md#bed-state). On an idle printer with `watch.bed.auto_view` (the U1: its camera sees 15 % of the plate at the Z 200 rest) the bed is moved in Z only to where the whole plate is in view, judged there and put back, and the line names the Z used; never while printing/paused, never homing; `--no-bed-move` judges at the current Z. |
-| `slot Tn` | `--printer` on a printer with per-head data (Snapmaker U1) | Tool *n* is used by the G-code but head T*n+1* is empty, or its colour/material differs from `; filament_colour` / `; filament_type`. |
+| `slot Tn` | `--printer` on a printer with per-head data (Snapmaker U1) | Tool *n* is used by the G-code but head T*n+1* is empty, its material differs from `; filament_type`, or its colour is further than `--colour-delta-e` (CIEDE2000, default 10) from `; filament_colour`. The line shows the distance; `--fix` aligns the file with the printer, [`3d printer slot set`](printer.md#slot-colour) the printer with the file. |
 | `axis travel` | always (SKIP when the limits are unknown) | A move, or the bulge of an arc, leaves the printer's X/Y travel anywhere in the file. See [`3d gcode-bounds`](gcode-bounds.md). |
 | `print area` | always | A plate move leaves the G-code's `; printable_area`, or an extruding path crosses `; bed_exclude_area` (vendor blocks exempt: `;TYPE:Custom`; on Bambu Studio G-code everything outside its object blocks, wipe tower and features — see [`3d gcode-bounds`](gcode-bounds.md)). |
 | `macros` | when the G-code calls macros | A macro (PAUSE, a vendor toolchange, …) is not in the printer's `trusted_macros`: its moves cannot be checked. |
@@ -133,6 +134,9 @@ Options:
 - `--bridge-max MM` — longest span the overhangs gate counts as a bridge; overrides the printer's `bridge_max_mm`: `3d print-preflight out/porch.gcode --axis-limits u1 --bridge-max 25`
 - `--json` — JSON report (`checks[]` with `name`, `status`, `detail`, `lines`): `3d print-preflight out/part.gcode --printer u1 --json | jq '.checks[] | select(.status=="FAIL")'`
 - `--no-bed-move` — the `bed` line judges at the current Z: the printer's bed is not moved to the best inspection Z (`watch.bed.auto_view`): `3d print-preflight out/part.gcode --printer u1 --no-bed-move`
+- `--colour-delta-e N` — the `slot Tn` colour tolerance, CIEDE2000 (default 10, the `colour.warn_delta_e` of `fleet/policy.yaml`). The slot line shows the distance either way. The beige PETG of 2026-11-04 (sliced `#E8D8B0`, shown by the U1 as `#FEE5A5`) is ΔE 6.4 and passes; white against that beige is 20.0 and fails; red against blue is 52.9. A **material** mismatch is always a FAIL, whatever the colour: `3d print-preflight out/part.gcode --printer u1 --colour-delta-e 5`
+- `--fix` — needs a live `--printer`. Before the checks, rewrite `; filament_colour` / `; extruder_colour` for every tool the G-code uses to the colour the printer reports, in the G-code **and** in its project 3MF (`--source-3mf`, else `NAME.3mf` next to the G-code; `Metadata/project_settings.config`, `Metadata/plate_N.json`). The toolpath bytes, mode and mtime stay; `NAME.slice-warnings.json` follows the new G-code SHA-256 and `NAME.manifest.json` gets the new slot colour; the old and new SHA-256 of every rewritten file go to stderr (the file's hash changed: upload it again). A head further than `--fix-max-delta-e` away is refused with nothing written (another filament, not the same one reported differently). It is the one option that writes: `3d print-preflight out/plate.gcode --printer u1 --fix`
+- `--fix-max-delta-e N` — the largest ΔE `--fix` rewrites across (default 30): `3d print-preflight out/plate.gcode --printer u1 --fix --fix-max-delta-e 40`
 - `--secs S` — Creality: seconds to listen for pushed state: `3d print-preflight out/roof.gcode --printer k1se --secs 5`
 - `--printops-api URL` — 3d-api for the PrintOps gates (default `$PRINTOPS_API`, else `printops.yaml`): `3d print-preflight out/part.gcode --printer u1 --printops-api http://192.168.0.39:8765`
 - `--offline` — no network: no printer contact, PrintOps state from the snapshot (the slicer hook mode); together with `--printops-api` it is a usage error: `3d print-preflight out/part.gcode --offline`

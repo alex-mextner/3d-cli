@@ -6,8 +6,11 @@ WHAT (issue https://github.com/alex-mextner/3d-cli/issues/96), one PASS/WARN/FAI
   - printer      the target printer is free (not printing/paused/busy/unknown);
   - bed          (printers with `watch.bed.enabled`) the camera saw the bed clear with the plate
                  on (printer_ops/bed.py, issue #303): objects or no plate FAIL, unknown WARN;
-  - slot Tn      for every tool the G-code uses: the printer's head is loaded, and its colour
-                 and material equal the G-code's `; filament_colour` / `; filament_type`
+  - slot Tn      for every tool the G-code uses: the printer's head is loaded, its material
+                 equals the G-code's `; filament_type` and its colour is within a CIEDE2000
+                 tolerance of `; filament_colour` (default 10, the distance is shown; a beige
+                 reported as #FEE5A5 for a #E8D8B0 slice passes) — printer_ops/colour_fix.py,
+                 which `print-preflight --fix` uses to rewrite the file to the loaded colour
                  (needs per-head data: Moonraker printers exposing print_task_config, i.e. U1);
   - halves       `3d halves-check <3mf> --json` when the source 3MF is given;
   - axis travel  every move (arcs by their real extremes) inside the printer's X/Y limits,
@@ -57,7 +60,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from printer_ops.base import PrinterStatus
+from printer_ops.base import PrinterStatus, Slot
+from printer_ops.colour_fix import DEFAULT_SLOT_DELTA_E, colour_delta
 from printer_ops.move_bounds import (
     BoundsReport,
     Limits,
@@ -151,8 +155,8 @@ def _hex(value: str | None) -> str | None:
     )
 
 
-def read_gcode_meta(path: Path) -> GcodeMeta:
-    """Filament colours/types and the tools actually used, from slicer comments + Tn lines."""
+def _scan_gcode_config(path: Path) -> tuple[dict[str, str], set[int]]:
+    """(first value of every `; key = value` slicer comment, tool numbers of the `Tn` lines)."""
     config: dict[str, str] = {}
     tool_lines: set[int] = set()
     with open(path, encoding="utf-8", errors="replace") as fh:
@@ -165,24 +169,34 @@ def read_gcode_meta(path: Path) -> GcodeMeta:
                 t = _TOOL_LINE.match(line.strip())
                 if t:
                     tool_lines.add(int(t.group(1)))
-    used: list[int]
+    return config, tool_lines
+
+
+def _amount(value: str) -> float:
+    """One entry of `; filament used [mm]`; an unparsable amount counts as unused."""
+    try:
+        return float(value)
+    except ValueError:
+        return 0.0
+
+
+def _used_tools(config: dict[str, str], tool_lines: set[int]) -> list[int]:
+    """Non-zero entries of `; filament used [mm]`, else the `Tn` lines, else tool 0."""
     used_mm = config.get("filament used [mm]")
     if used_mm:
-        amounts = []
-        for v in used_mm.split(","):
-            try:
-                amounts.append(float(v))
-            except ValueError:  # noqa: PERF203 — an unparsable amount counts as unused, keep reading
-                amounts.append(0.0)
-        used = [i for i, a in enumerate(amounts) if a > 0]
-    elif tool_lines:
-        used = sorted(tool_lines)
-    else:
-        used = [0]
+        return [
+            i for i, a in enumerate(_amount(v) for v in used_mm.split(",")) if a > 0
+        ]
+    return sorted(tool_lines) or [0]
+
+
+def read_gcode_meta(path: Path) -> GcodeMeta:
+    """Filament colours/types and the tools actually used, from slicer comments + Tn lines."""
+    config, tool_lines = _scan_gcode_config(path)
     return GcodeMeta(
         colours=[_hex(c) for c in _split(config.get("filament_colour", ""))],
         types=[(t or None) for t in _split(config.get("filament_type", ""))],
-        used_tools=used,
+        used_tools=_used_tools(config, tool_lines),
     )
 
 
@@ -211,58 +225,74 @@ def check_printer_free(status: PrinterStatus) -> Check:
     return Check("printer", PASS, f"{status.state} [{status.raw_state}]")
 
 
-def check_slots(meta: GcodeMeta, status: PrinterStatus) -> list[Check]:
-    if not status.slots:
-        return [Check("slots", SKIP, "the printer reports no per-head filament data")]
-    out = []
-    for t in meta.used_tools:
-        name = f"slot T{t}"
-        if t >= len(status.slots):
-            out.append(
-                Check(
-                    name,
-                    FAIL,
-                    f"G-code uses tool {t} but the printer has {len(status.slots)} heads",
-                )
-            )
-            continue
-        slot = status.slots[t]
-        if not slot.present:
-            out.append(
-                Check(
-                    name,
-                    FAIL,
-                    f"head {slot.label} is used by the G-code but has no filament / is disabled",
-                )
-            )
-            continue
-        want_c = meta.colours[t] if t < len(meta.colours) else None
-        want_m = meta.types[t] if t < len(meta.types) else None
-        problems = []
-        if want_c and slot.color and want_c != slot.color:
-            problems.append(f"colour: G-code {want_c}, loaded {slot.color}")
-        if want_m and slot.material and want_m.upper() != slot.material.upper():
-            problems.append(f"material: G-code {want_m}, loaded {slot.material}")
-        if problems:
-            out.append(Check(name, FAIL, f"head {slot.label}: " + "; ".join(problems)))
-        elif not want_c:
-            out.append(
-                Check(
-                    name,
-                    WARN,
-                    f"head {slot.label}: G-code has no filament_colour for tool {t}; "
-                    f"loaded {slot.color} {slot.material}",
-                )
+def _slot_problems(
+    want_c: str | None, want_m: str | None, slot: Slot, colour_delta_e: float
+) -> tuple[list[str], str]:
+    """(problems, colour note): the mismatches of one loaded slot against the G-code's colour and
+    material, and the ΔE note of a colour that differs but is within tolerance."""
+    problems: list[str] = []
+    note = ""
+    if want_c and slot.color and want_c != slot.color:
+        de = colour_delta(want_c, slot.color)
+        if de is None or de > colour_delta_e:
+            shown = "" if de is None else f" (ΔE {de:.1f} > {colour_delta_e:g})"
+            problems.append(
+                f"colour: G-code {want_c}, loaded {slot.color}{shown}; "
+                "fix: print-preflight --fix / printer start --fix-colour"
             )
         else:
-            out.append(
-                Check(
-                    name,
-                    PASS,
-                    f"head {slot.label}: {slot.color} {slot.material or ''}".rstrip(),
-                )
+            note = (
+                f" (colour ΔE {de:.1f} from G-code {want_c}, within {colour_delta_e:g})"
             )
-    return out
+    if want_m and slot.material and want_m.upper() != slot.material.upper():
+        problems.append(f"material: G-code {want_m}, loaded {slot.material}")
+    return problems, note
+
+
+def _slot_check(
+    tool: int, meta: GcodeMeta, status: PrinterStatus, colour_delta_e: float
+) -> Check:
+    name = f"slot T{tool}"
+    if tool >= len(status.slots):
+        return Check(
+            name,
+            FAIL,
+            f"G-code uses tool {tool} but the printer has {len(status.slots)} heads",
+        )
+    slot = status.slots[tool]
+    if not slot.present:
+        return Check(
+            name,
+            FAIL,
+            f"head {slot.label} is used by the G-code but has no filament / is disabled",
+        )
+    want_c = meta.colours[tool] if tool < len(meta.colours) else None
+    want_m = meta.types[tool] if tool < len(meta.types) else None
+    problems, note = _slot_problems(want_c, want_m, slot, colour_delta_e)
+    if problems:
+        return Check(name, FAIL, f"head {slot.label}: " + "; ".join(problems))
+    if not want_c:
+        return Check(
+            name,
+            WARN,
+            f"head {slot.label}: G-code has no filament_colour for tool {tool}; "
+            f"loaded {slot.color} {slot.material}",
+        )
+    return Check(
+        name,
+        PASS,
+        f"head {slot.label}: {slot.color} {slot.material or ''}".rstrip() + note,
+    )
+
+
+def check_slots(
+    meta: GcodeMeta, status: PrinterStatus, colour_delta_e: float = DEFAULT_SLOT_DELTA_E
+) -> list[Check]:
+    """One line per used tool. The colour matches within `colour_delta_e` (CIEDE2000, the distance is
+    in the line); a material mismatch is always a FAIL."""
+    if not status.slots:
+        return [Check("slots", SKIP, "the printer reports no per-head filament data")]
+    return [_slot_check(t, meta, status, colour_delta_e) for t in meta.used_tools]
 
 
 def run_halves_check(source: Path) -> tuple[int, str, str]:
@@ -377,6 +407,11 @@ def check_head_sequence(
         result = preflight_check(str(gcode), str(project))
     except ProjectError as exc:
         return Check("head seq", SKIP, f"{project_source}: {exc}")
+    return _head_sequence_verdict(result, project_source)
+
+
+def _head_sequence_verdict(result: dict[str, Any], project_source: str) -> Check:
+    """The `head seq` line of one `slicing.head_sequence.preflight_check` result."""
     objects = result.get("objects")
     objs = (
         [o for o in objects if isinstance(o, dict)] if isinstance(objects, list) else []
@@ -531,90 +566,86 @@ def check_macros(rep: BoundsReport, trusted: frozenset[str]) -> list[Check]:
     ]
 
 
+def _axis_travel_check(
+    rep: BoundsReport, axis_limits: Limits | None, limits_source: str
+) -> Check:
+    if axis_limits is None:
+        why = f"{limits_source}; " if limits_source else ""
+        return Check(
+            "axis travel",
+            SKIP,
+            f"printer axis limits unknown ({why}pass --axis-limits "
+            f"X0:X1,Y0:Y1 or set axis_limits in {PROFILE_FILES})",
+        )
+    if rep.axis_out_count:
+        return Check(
+            "axis travel",
+            FAIL,
+            f"{fmt_limits(axis_limits)} ({limits_source}): "
+            + _first(rep.axis_out, rep.axis_out_count),
+        )
+    return Check(
+        "axis travel",
+        PASS,
+        f"all moves {fmt_extent(rep.all_extent)} within "
+        f"{fmt_limits(axis_limits)} ({limits_source})",
+    )
+
+
+def _print_area_violations(rep: BoundsReport) -> list[str]:
+    """printable_area / bed_exclude_area breaches; each is evaluated on its own, so a missing
+    printable_area must not hide an exclusion."""
+    parts = []
+    if rep.area_out_count and rep.printable_area:
+        parts.append(
+            f"printable_area {fmt_area(rep.printable_area)}: "
+            + _first(rep.area_out, rep.area_out_count)
+        )
+    if rep.excluded_in_count and rep.exclude_area:
+        parts.append(
+            f"bed_exclude_area {fmt_area(rep.exclude_area)}: "
+            + _first(rep.excluded_in, rep.excluded_in_count, "inside")
+        )
+    return parts
+
+
+def _print_area_check(rep: BoundsReport) -> Check:
+    if not rep.plate_found:
+        return Check(
+            "print area",
+            WARN,
+            "UNVERIFIED: no ;LAYER_CHANGE / ; CHANGE_LAYER markers, "
+            "the plate section cannot be told from start/end G-code",
+        )
+    parts = _print_area_violations(rep)
+    if parts:
+        return Check(
+            "print area",
+            FAIL,
+            f"plate moves {fmt_extent(rep.plate_extent)}; " + "; ".join(parts),
+        )
+    if rep.printable_area is None:
+        return Check(
+            "print area", WARN, "UNVERIFIED: the G-code has no `; printable_area`"
+        )
+    return Check(
+        "print area",
+        PASS,
+        f"plate moves {fmt_extent(rep.plate_extent)} within "
+        f"{fmt_area(rep.printable_area)}",
+    )
+
+
 def check_moves(
     rep: BoundsReport,
     axis_limits: Limits | None,
     limits_source: str,
     trusted_macros: frozenset[str] = frozenset(),
 ) -> list[Check]:
-    out: list[Check] = []
-    if axis_limits is None:
-        why = f"{limits_source}; " if limits_source else ""
-        out.append(
-            Check(
-                "axis travel",
-                SKIP,
-                f"printer axis limits unknown ({why}pass --axis-limits "
-                f"X0:X1,Y0:Y1 or set axis_limits in {PROFILE_FILES})",
-            )
-        )
-    elif rep.axis_out_count:
-        out.append(
-            Check(
-                "axis travel",
-                FAIL,
-                f"{fmt_limits(axis_limits)} ({limits_source}): "
-                + _first(rep.axis_out, rep.axis_out_count),
-            )
-        )
-    else:
-        out.append(
-            Check(
-                "axis travel",
-                PASS,
-                f"all moves {fmt_extent(rep.all_extent)} within "
-                f"{fmt_limits(axis_limits)} ({limits_source})",
-            )
-        )
-
-    if not rep.plate_found:
-        out.append(
-            Check(
-                "print area",
-                WARN,
-                "UNVERIFIED: no ;LAYER_CHANGE / ; CHANGE_LAYER markers, "
-                "the plate section cannot be told from start/end G-code",
-            )
-        )
-    else:
-        # bed_exclude_area is evaluated on its own: a missing printable_area must not hide it
-        parts = []
-        if rep.area_out_count and rep.printable_area:
-            parts.append(
-                f"printable_area {fmt_area(rep.printable_area)}: "
-                + _first(rep.area_out, rep.area_out_count)
-            )
-        if rep.excluded_in_count and rep.exclude_area:
-            parts.append(
-                f"bed_exclude_area {fmt_area(rep.exclude_area)}: "
-                + _first(rep.excluded_in, rep.excluded_in_count, "inside")
-            )
-        if parts:
-            out.append(
-                Check(
-                    "print area",
-                    FAIL,
-                    f"plate moves {fmt_extent(rep.plate_extent)}; " + "; ".join(parts),
-                )
-            )
-        elif rep.printable_area is None:
-            out.append(
-                Check(
-                    "print area",
-                    WARN,
-                    "UNVERIFIED: the G-code has no `; printable_area`",
-                )
-            )
-        else:
-            out.append(
-                Check(
-                    "print area",
-                    PASS,
-                    f"plate moves {fmt_extent(rep.plate_extent)} within "
-                    f"{fmt_area(rep.printable_area)}",
-                )
-            )
-
+    out = [
+        _axis_travel_check(rep, axis_limits, limits_source),
+        _print_area_check(rep),
+    ]
     if rep.unverified_count:
         more = ", ..." if rep.unverified_count > len(rep.unverified) else ""
         out.append(
@@ -645,31 +676,25 @@ def bounds_report(
     )
 
 
-def check_bed_verdict(v: dict[str, Any]) -> Check:
-    """`bed_state.py status --json` (issue #303) -> the `bed` line. A verdict judged after the auto view
-    moved the bed names the Z it was judged at; a bed left away from where it was found is a WARN."""
-    bed, plate = v.get("bed", "unknown"), v.get("plate", "unknown")
+def _bed_when(v: dict[str, Any], view: dict[str, Any]) -> str:
+    """Where the verdict came from, and how the bed got to the Z it was judged at."""
     age = v.get("age_s")
     when = (
         f"{v.get('source', '?')}, {age:.0f} s ago"
         if isinstance(age, (int, float))
         else str(v.get("source", "?"))
     )
-    raw_view = v.get("view")
-    view: dict[str, Any] = raw_view if isinstance(raw_view, dict) else {}
     if view.get("action") == "moved":
         when += (
             f", judged at Z {view.get('z_used', v.get('z'))} after moving the bed from Z "
             f"{view.get('moved_from')}" + (" and back" if view.get("restored") else "")
         )
-    frame = [f"frame: {v['frame']}"] if v.get("frame") else []
-    why = str(v.get("reason") or "")
-    if view.get("action") == "moved" and not view.get("restored"):
-        frame.append(
-            f"BED NOT PUT BACK to Z {view.get('moved_from')}: {view.get('restore_error')}"
-        )
-        if plate != "missing" and bed != "occupied":
-            return Check("bed", WARN, f"bed state {bed} ({when}): {why}", frame)
+    return when
+
+
+def _bed_verdict_line(
+    bed: object, plate: object, when: str, why: str, frame: list[str]
+) -> Check:
     if plate == "missing":
         return Check("bed", FAIL, f"build plate missing ({when}): {why}", frame)
     if bed == "occupied":
@@ -679,6 +704,24 @@ def check_bed_verdict(v: dict[str, Any]) -> Check:
     if bed == "clear":
         return Check("bed", WARN, f"clear, plate not judged ({when}): {why}", frame)
     return Check("bed", WARN, f"bed state {bed} ({when}): {why}", frame)
+
+
+def check_bed_verdict(v: dict[str, Any]) -> Check:
+    """`bed_state.py status --json` (issue #303) -> the `bed` line. A verdict judged after the auto view
+    moved the bed names the Z it was judged at; a bed left away from where it was found is a WARN."""
+    bed, plate = v.get("bed", "unknown"), v.get("plate", "unknown")
+    raw_view = v.get("view")
+    view: dict[str, Any] = raw_view if isinstance(raw_view, dict) else {}
+    when = _bed_when(v, view)
+    frame = [f"frame: {v['frame']}"] if v.get("frame") else []
+    why = str(v.get("reason") or "")
+    if view.get("action") == "moved" and not view.get("restored"):
+        frame.append(
+            f"BED NOT PUT BACK to Z {view.get('moved_from')}: {view.get('restore_error')}"
+        )
+        if plate != "missing" and bed != "occupied":
+            return Check("bed", WARN, f"bed state {bed} ({when}): {why}", frame)
+    return _bed_verdict_line(bed, plate, when, why, frame)
 
 
 def check_bed(
@@ -744,8 +787,10 @@ def run_preflight(
     bridge_source: str = "default",
     bed: Check | None = None,
     printops: PrintopsContext | None = None,
+    colour_delta_e: float = DEFAULT_SLOT_DELTA_E,
 ) -> Report:
-    """`limits_source` names where `axis_limits` came from, or why they are unknown.
+    """`colour_delta_e` is the CIEDE2000 tolerance of the `slot Tn` colour (default 10; the line
+    shows the distance). `limits_source` names where `axis_limits` came from, or why they are unknown.
     `origin` is where the G-code lives when `gcode` is a snapshot copy (`printer start`): the
     sibling NAME.3mf and NAME.slice-warnings.json are looked up there. `bed` is the camera
     bed line (`check_bed` above), computed by the caller that knows the device."""
@@ -753,7 +798,9 @@ def run_preflight(
     report.checks.append(check_thumbnails(gcode))
     if status is not None:
         report.checks.append(check_printer_free(status))
-        report.checks.extend(check_slots(read_gcode_meta(gcode), status))
+        report.checks.extend(
+            check_slots(read_gcode_meta(gcode), status, colour_delta_e)
+        )
     if bed is not None:
         report.checks.append(bed)
     report.checks.extend(
