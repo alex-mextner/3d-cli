@@ -3,7 +3,7 @@
 ACCESSED VIA: `printops.backup_setup` (`3d init --env`), `3d printops backup discover`.
 
 WHAT: runs ONE read-only shell probe on the host that runs Spoolman (`run` = local bash or ssh — the
-install target the user chose) and turns `lsblk` / `df` / `findmnt` / `ls` output into `Candidate`s:
+install target the user chose) and turns `lsblk` / `df` / `find` output into `Candidate`s:
   mounted      a mounted filesystem with a real fstype (ext4, xfs, btrfs, ntfs, exfat, vfat, ...), with its
                size and free space; removable/USB flagged from lsblk (RM / HOTPLUG / TRAN=usb)
   network      nfs / cifs / smb3 / sshfs mounts
@@ -15,7 +15,8 @@ existing `.3d-backup-disk` marker id, `likely` (the whole disk's size is within 
 default 512 GB — a hint for sorting and for the label, never an automatic choice), and `same_as_data`
 (the Spoolman data lives on that very filesystem, so it is NOT a backup).
 
-INVARIANTS: the probe only runs lsblk, df, findmnt, ls, test and stat (no mount, no write, no mkdir);
+INVARIANTS: the probe only runs lsblk, df, find, test, tr, head, sed and timeout (no mount, no write, no mkdir), and every
+call that touches a mounted filesystem is bounded by `timeout` (a stale hard NFS mount must not hang `3d init --env`);
 the pseudo/system mounts are counted in `skipped`, not hidden silently; nothing is chosen here.
 """
 
@@ -36,6 +37,7 @@ class Shell(Protocol):
     """A RunHost that can also feed the script's stdin: a secret goes there, never into argv (`ps`, ssh logs)."""
 
     def __call__(self, script: str, stdin: str | None = None) -> tuple[int, str]: ...
+
 
 DEFAULT_HINT_GB = 512
 HINT_TOLERANCE = 0.08
@@ -79,13 +81,13 @@ SEP = "@@"
 PROBE = """export LC_ALL=C
 echo '@@lsblk'; lsblk -J -b -o NAME,PATH,SIZE,FSTYPE,LABEL,UUID,MOUNTPOINTS,RM,HOTPLUG,TRAN,TYPE,MODEL,PKNAME 2>/dev/null \
 || lsblk -J -b -o NAME,SIZE,FSTYPE,LABEL,UUID,MOUNTPOINT,RM,TYPE,MODEL 2>/dev/null
-echo '@@df'; df -PkT 2>/dev/null
-echo '@@data'; df -Pk {data} 2>/dev/null | tail -n 1
+echo '@@df'; timeout -k 1 15 df -PkT 2>/dev/null
+echo '@@data'; timeout -k 1 15 df -Pk {data} 2>/dev/null | tail -n 1
 """
 SCAN = """export LC_ALL=C
 for m in {mounts}; do
   echo "@@mount $m"
-  if [ -f "$m/.3d-backup-disk" ]; then echo "marker $(tr -d '\\n ' < "$m/.3d-backup-disk" | head -c 400)"; fi
+  if timeout -k 1 3 test -f "$m/.3d-backup-disk"; then echo "marker $(timeout -k 1 3 cat "$m/.3d-backup-disk" | tr -d '\\n ' | head -c 400)"; fi
   timeout 6 find "$m" -maxdepth 2 -type d \\( -iname '*backup*' -o -iname '3d-printops' \\) \
 -not -path '*/.*' -print 2>/dev/null | head -n 6 | sed 's/^/dir /'
 done

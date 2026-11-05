@@ -38,12 +38,26 @@ TARGET = "default"
 CONTAINER_ROOT = "/backup"
 
 
-def local_shell() -> Shell:
+def _finish(done: subprocess.CompletedProcess[str]) -> tuple[int, str]:
+    return done.returncode, done.stdout + (done.stderr if done.returncode else "")
+
+
+def local_shell(timeout: float | None = None) -> Shell:
+    """bash on this machine; `timeout` (seconds) turns a hung script into exit 124 instead of a hung stage."""
+
     def run(script: str, stdin: str | None = None) -> tuple[int, str]:
-        done = subprocess.run(
-            ["bash", "-c", script], capture_output=True, text=True, check=False, input=stdin
-        )
-        return done.returncode, done.stdout + (done.stderr if done.returncode else "")
+        try:
+            done = subprocess.run(
+                ["bash", "-c", script],
+                capture_output=True,
+                text=True,
+                check=False,
+                input=stdin,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired:
+            return 124, f"timed out after {timeout:g}s"
+        return _finish(done)
 
     return run
 
@@ -51,12 +65,21 @@ def local_shell() -> Shell:
 def ssh_shell(
     host: str,
     opts: tuple[str, ...] = ("-o", "BatchMode=yes", "-o", "ConnectTimeout=40"),
+    timeout: float | None = None,
 ) -> Shell:
     def run(script: str, stdin: str | None = None) -> tuple[int, str]:
-        done = subprocess.run(
-            ["ssh", *opts, host, script], capture_output=True, text=True, check=False, input=stdin
-        )
-        return done.returncode, done.stdout + (done.stderr if done.returncode else "")
+        try:
+            done = subprocess.run(
+                ["ssh", *opts, host, script],
+                capture_output=True,
+                text=True,
+                check=False,
+                input=stdin,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired:
+            return 124, f"timed out after {timeout:g}s"
+        return _finish(done)
 
     return run
 
@@ -75,6 +98,12 @@ class BackupContext:
     interactive: bool
     hint_gb: int = 512
     ha_candidates: list[Candidate] = field(default_factory=list)
+    probe: RunHost | None = (
+        None  # read-only probes (df, ls of mounts): a shell with a timeout, a stale NFS mount hangs them
+    )
+
+    def prober(self) -> RunHost:
+        return self.probe or self.run
 
 
 @dataclass
@@ -115,7 +144,10 @@ def show(ctx: BackupContext, found: Discovery) -> list[Candidate]:
 
 def discover(ctx: BackupContext) -> Discovery:
     return discover_backup_targets(
-        ctx.run, data_dir=ctx.data_dir, hint_gb=ctx.hint_gb, extra=ctx.ha_candidates
+        ctx.prober(),
+        data_dir=ctx.data_dir,
+        hint_gb=ctx.hint_gb,
+        extra=ctx.ha_candidates,
     )
 
 
@@ -153,8 +185,21 @@ DONE WHEN: `selftest ok` printed, `3d printops backup ls --target {TARGET}` list
 path. Report the exact commands you ran. If anything contradicts this text, stop and ask."""
 
 
+def _absolute(ctx: BackupContext, host_path: str) -> str:
+    """`host_path` as an absolute path on the host that runs the containers (where compose resolves it):
+    `~` and relative paths are made absolute there, so the bind never lands in the compose directory."""
+    target = (
+        '"$HOME"' + shlex.quote(host_path[1:])
+        if host_path == "~" or host_path.startswith("~/")
+        else shlex.quote(host_path)
+    )
+    rc, out = ctx.run(f"cd -- {target} 2>/dev/null && pwd")
+    return out.strip() if rc == 0 and out.strip().startswith("/") else host_path
+
+
 def configure_backup(ctx: BackupContext, host_path: str) -> Configured:
     """Bind `host_path` as the backup disk, register it and prove it with a selftest. The only writing step."""
+    host_path = _absolute(ctx, host_path)
     rc, out = ctx.run(
         f"test -d {shlex.quote(host_path)} -a -w {shlex.quote(host_path)}"
     )

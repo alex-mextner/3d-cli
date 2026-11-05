@@ -212,7 +212,7 @@ def _write_item(src: Source, tmp: Path, level: int) -> dict[str, Any]:
         }
     raw = tmp / f".{src.name}.raw"
     try:  # online backup + integrity_check
-        low_level.snapshot_db(src.path, raw, pages=256, pause=0.02)
+        low_level.snapshot_db(src.path, raw)
     except low_level.BackupError as e:
         raise BackupBroken(f"{src.name}: {e}") from e
     stored = tmp / f"{src.name}.db.gz"

@@ -31,7 +31,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, field_validator
 
 from printops import backup_config, backup_run
-from printops.backup_policy import Retention
+from printops.backup_policy import TARGET_NAME_PATTERN, Retention
 from printops.backup_store import BackupRefused
 from printops.api.deps import Principal, get_state, require
 from printops.api.state import ApiState
@@ -41,9 +41,7 @@ RUN_TIMEOUT_S = 1800
 
 
 class RunBody(BaseModel):
-    target: str = Field(
-        backup_run.DEFAULT_TARGET, pattern=r"^[A-Za-z0-9_-]+$", max_length=64
-    )
+    target: str = Field(backup_run.DEFAULT_TARGET, pattern=TARGET_NAME_PATTERN)
     subdir: str = Field(backup_run.DEFAULT_SUBDIR, max_length=128)
 
     @field_validator("subdir")

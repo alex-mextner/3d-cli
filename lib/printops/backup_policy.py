@@ -28,6 +28,8 @@ SET_PREFIX = "3d-backup-"
 SET_RE = re.compile(r"^3d-backup-(\d{8}T\d{6}Z)$")
 TMP_RE = re.compile(r"^\.3d-backup-tmp-[A-Za-z0-9_]+$")
 STAMP_FMT = "%Y%m%dT%H%M%SZ"
+TARGET_NAME_PATTERN = r"^[A-Za-z0-9_-]{1,64}$"  # ASCII only: the API, backup.yaml and the CLI share this one rule
+TARGET_NAME_RE = re.compile(TARGET_NAME_PATTERN, re.ASCII)
 
 
 @dataclass(frozen=True)

@@ -7,6 +7,7 @@ this module is what it runs (through 3d-api `POST /v1/backup/run`) and what a hu
 from __future__ import annotations
 
 import json
+import math
 import os
 from pathlib import Path
 from typing import Any
@@ -15,12 +16,22 @@ from cli import paths
 from errors import GateFailure, UsageError
 
 from printops import backup_config, backup_run, backup_setup, backup_store
-from printops.backup_discovery import DEFAULT_HINT_GB, describe, discover_backup_targets
-from printops.backup_policy import Retention, parse_keep
+from printops.backup_discovery import (
+    DEFAULT_HINT_GB,
+    Discovery,
+    Shell,
+    describe,
+    discover_backup_targets,
+)
+from printops.backup_policy import Retention, parse_keep, plan_prune
 from printops.backup_store import BackupBroken, BackupRefused, SetInfo
 from printops.cli import Sub
 from printops.cli._common import Parsed, parse
 from printops.settings import Settings
+
+DISCOVER_TIMEOUT_S = (
+    90.0  # a stale NFS mount hangs df for good; the look gives up instead
+)
 
 USAGE = """3d printops backup run [--target NAME | --dest DIR] [--subdir D] [--keep SPEC] [--json] ...
 3d printops backup ls|verify|prune|restore|target ...
@@ -28,7 +39,7 @@ USAGE = """3d printops backup run [--target NAME | --dest DIR] [--subdir D] [--k
   DISK that identifies itself: a run refuses (exit 1, nothing written, notification) when the
   disk's marker file `.3d-backup-disk` is missing or has another id — an unmounted disk never fills
   the root filesystem. A set is `3d-backup-<UTC>/` with gzip'd SQLite snapshots (online backup API,
-  small steps, nice 19 + ionice idle), MANIFEST.json and SHA256SUMS, verified (integrity_check on
+  one pass; nice 19 + ionice idle), MANIFEST.json and SHA256SUMS, verified (integrity_check on
   every decompressed DB) before it is published with one rename.
 
   run      write a set, then prune: keeps the newest set of each of the last N days/weeks/months
@@ -39,7 +50,10 @@ USAGE = """3d printops backup run [--target NAME | --dest DIR] [--subdir D] [--k
   prune    apply the policy now (--keep, else the policy of the last run on that disk; --dry-run)
   restore  [SET|latest] --into DIR: unpack a verified set (flat: spoolman.db, printops.db, tokens.json);
            --layout data writes the compose data-dir layout (spoolman/spoolman.db, api/...) and needs --yes;
-           an existing file is moved to <name>.pre-restore first. Stop the stack before restoring into it.
+           an existing file is moved to <name>.pre-restore first, with its -wal/-shm (an existing
+           .pre-restore is never overwritten: .pre-restore.1, ...). The set is copied to a private scratch
+           dir and verified THERE, so a disk that changes under the restore cannot redirect it.
+           Stop the stack before restoring into it.
   target   add NAME PATH [--init-marker]   |   ls   configured targets (backup.yaml next to the PrintOps DB)
   selftest run once, then restore that set into a scratch dir and compare integrity + row counts (what `3d init --env` runs)
   discover [--ssh USER@HOST] [--data-dir DIR] [--hint-gb N] [--json]   read-only list of disks that could hold backups
@@ -56,6 +70,9 @@ Examples:
   3d printops backup ls --target default
   3d printops backup verify latest --target default
   3d printops backup restore latest --target default --into ~/restore-test
+  # on the HOST, stack stopped (backup.yaml names the container's /backup, so name the disk itself):
+  3d printops backup restore latest --dest /mnt/backup --subdir 3d-printops --into ~/printops/data --layout data --yes
+  3d printops backup discover --ssh me@nas --data-dir /home/me/printops/data   # --data-dir: the path ON that host
   docker exec printops-api 3d printops backup run --target default --json   # what Home Assistant triggers"""
 
 VALUE_OPTS = {
@@ -93,13 +110,17 @@ def _request(p: Parsed) -> backup_run.RunRequest:
     if "--keep" in p.opts:
         req.retention = parse_keep(p.opts["--keep"])
     if "--min-free-gb" in p.opts:
+        raw = p.opts["--min-free-gb"]
         try:
-            req.min_free_bytes = int(float(p.opts["--min-free-gb"]) * (1 << 30))
-        except ValueError as e:
+            gb = float(raw)
+        except ValueError:
+            gb = float("nan")
+        if not math.isfinite(gb) or gb < 0:
             raise UsageError(
-                f"--min-free-gb needs a number, got {p.opts['--min-free-gb']!r}",
+                f"--min-free-gb needs a finite number >= 0, got {raw!r}",
                 command="printops backup",
-            ) from e
+            )
+        req.min_free_bytes = int(gb * (1 << 30))
     return req
 
 
@@ -171,7 +192,7 @@ def _ls(p: Parsed) -> int:
     dest, _ = _dest(p)
     retention = _request(p).retention or backup_store.read_state(dest) or Retention()
     sets = backup_store.list_sets(dest)
-    keep, _drop = backup_store.plan_prune(
+    keep, _drop = plan_prune(
         [s.name for s in sets if s.manifest is not None], retention
     )
     rows: list[dict[str, Any]] = [
@@ -225,8 +246,14 @@ def _prune(p: Parsed) -> int:
     dest, _ = _dest(p)
     retention = _request(p).retention or backup_store.read_state(dest) or Retention()
     try:
-        keep, drop = backup_store.prune(dest, retention, dry_run="--dry-run" in p.flags)
-    except BackupBroken as e:
+        if dest.is_dir() and "--dry-run" not in p.flags:
+            with backup_run.exclusive(
+                dest
+            ):  # the run that is writing a set right now must not race a prune
+                keep, drop = backup_store.prune(dest, retention)
+        else:
+            keep, drop = backup_store.prune(dest, retention, dry_run=True)
+    except (BackupBroken, BackupRefused) as e:
         raise GateFailure(str(e), command="printops backup prune") from e
     verb = "would remove" if "--dry-run" in p.flags else "removed"
     print(
@@ -278,7 +305,10 @@ def _target(p: Parsed) -> int:
         else backup_run.config_path(os.environ, Settings.from_env())
     )
     if verb == "ls":
-        return backup_config.print_targets(cfg_file)
+        try:
+            return backup_config.print_targets(cfg_file)
+        except BackupRefused as e:
+            raise GateFailure(str(e), command="printops backup target") from e
     if verb != "add" or len(p.pos) != 4:
         raise UsageError(
             "usage: backup target ls | backup target add NAME PATH [--init-marker]",
@@ -297,39 +327,51 @@ def _target(p: Parsed) -> int:
     return 0
 
 
-def _discover(p: Parsed) -> int:
-    """Read-only look at the host's disks (this machine, or --ssh USER@HOST); chooses nothing."""
-    shell = (
-        backup_setup.ssh_shell(p.opts["--ssh"])
-        if "--ssh" in p.opts
-        else backup_setup.local_shell()
-    )
-    hint = p.int_opt("--hint-gb", "backup discover") or DEFAULT_HINT_GB
-    data_dir = p.opts.get("--data-dir") or str(paths.data_dir())
-    found = discover_backup_targets(shell, data_dir=data_dir, hint_gb=hint)
-    if "--json" in p.flags:
-        print(
-            json.dumps(
-                {
-                    "data_device": found.data_device,
-                    "skipped": found.skipped,
-                    "candidates": [
-                        {**c.__dict__, "selectable": c.selectable}
-                        for c in found.candidates
-                    ],
-                },
-                indent=2,
-            )
-        )
-        return 0
+def _discover_shell(p: Parsed) -> Shell:
+    if "--ssh" in p.opts:
+        return backup_setup.ssh_shell(p.opts["--ssh"], timeout=DISCOVER_TIMEOUT_S)
+    return backup_setup.local_shell(DISCOVER_TIMEOUT_S)
+
+
+def _print_discovery(found: Discovery, as_json: bool, data_dir_unknown: bool) -> None:
+    if as_json:
+        candidates = [
+            {**c.__dict__, "selectable": c.selectable} for c in found.candidates
+        ]
+        body = {
+            "data_device": found.data_device,
+            "skipped": found.skipped,
+            "candidates": candidates,
+        }
+        print(json.dumps(body, indent=2))
+        return
     for c in found.candidates:
         print(("* " if c.selectable else "- ") + describe(c))
         for note in c.notes:
             print(f"    {note}")
+    if data_dir_unknown:
+        print(
+            "No --data-dir: which disk holds the Spoolman data on that host is unknown, so 'same as data' was not checked."
+        )
     print(
         f"{len([c for c in found.candidates if c.selectable])} selectable (*), {len(found.candidates)} listed, "
         f"{len(found.skipped)} system/pseudo mounts left out. Nothing was changed or chosen."
     )
+
+
+def _discover(p: Parsed) -> int:
+    """Read-only look at the host's disks (this machine, or --ssh USER@HOST); chooses nothing."""
+    hint = p.int_opt("--hint-gb", "backup discover") or DEFAULT_HINT_GB
+    # This machine's data dir means nothing on another host: without --data-dir an --ssh look cannot tell
+    # which disk holds the data, and says so instead of marking the wrong one.
+    remote_without_data_dir = "--ssh" in p.opts and "--data-dir" not in p.opts
+    data_dir = (
+        ""
+        if remote_without_data_dir
+        else p.opts.get("--data-dir") or str(paths.data_dir())
+    )
+    found = discover_backup_targets(_discover_shell(p), data_dir=data_dir, hint_gb=hint)
+    _print_discovery(found, "--json" in p.flags, remote_without_data_dir)
     return 0
 
 

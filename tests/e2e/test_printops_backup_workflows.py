@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import os
 import sqlite3
 import urllib.error
 import urllib.request
@@ -257,9 +258,44 @@ def test_a_targets_good_run_never_closes_another_targets_failure(
     assert status() == {"backup:a": "resolved", "backup:b": "resolved"}
 
 
+def test_one_targets_recovery_dismisses_only_its_own_ha_notification(
+    tmp_path: Path,
+) -> None:
+    """Targets a and b both failed; b's good run (or an ad-hoc one) must leave a's notification up."""
+    env = make_world(tmp_path)
+    ha = FakeHa()
+    try:
+        env.update({"PRINTOPS_HA_URL": ha.url, "PRINTOPS_HA_TOKEN": TOKEN})
+        db_path = Path(env["PRINTOPS_DB"])
+
+        def quiet(_line: str) -> None:
+            return None
+
+        for target in ("a", "b"):
+            notify.report_failure(
+                notify.Context(target, db_path, env), f"disk {target} missing", quiet
+            )
+        notify.report_recovered(notify.Context("b", db_path, env), quiet)
+        notify.report_recovered(notify.Context("adhoc", db_path, env), quiet)
+        created = [
+            r[2]["notification_id"]
+            for r in ha.requests
+            if r[1].endswith("/persistent_notification/create")
+        ]
+        dismissed = [
+            r[2]["notification_id"]
+            for r in ha.requests
+            if r[1].endswith("/persistent_notification/dismiss")
+        ]
+    finally:
+        ha.close()
+    assert created == ["printops_backup_failed_a", "printops_backup_failed_b"]
+    assert dismissed == ["printops_backup_failed_b", "printops_backup_failed_adhoc"]
+
+
 def _assert_ha_got_the_payload(payload: dict[str, str], ha: FakeHa) -> None:
     assert (
-        payload["notification_id"] == "printops_backup_failed"
+        payload["notification_id"] == "printops_backup_failed_default"
         and "not the backup disk" in payload["message"]
     )
     create = [
@@ -510,3 +546,158 @@ def test_the_api_route_runs_the_backup_niced_child_and_reports_failure_as_an_ans
     assert call("POST", "/v1/backup/run", {"target": "../etc"})[0] == 422
     assert call("POST", "/v1/backup/run", {"subdir": "../x"})[0] == 422
     assert call("POST", "/v1/backup/run", {}, token="read")[0] == 403
+
+
+def test_a_live_stack_is_restored_from_the_host_with_dest_and_subdir(
+    tmp_path: Path,
+) -> None:
+    """Story: the stack is down, the operator is on the HOST. `--target default` names the container's /backup in a
+    backup.yaml that does not exist here, so the runbook is `--dest <host disk root> --subdir 3d-printops`; a second
+    restore keeps the first restore's safety copy."""
+    env = make_world(tmp_path)
+    disk = tmp_path / "disk"
+    assert (
+        backup(
+            tmp_path, env, "target", "add", "default", str(disk), "--init-marker"
+        ).returncode
+        == 0
+    )
+    assert backup(tmp_path, env, "run", "--target", "default", "--json").returncode == 0
+    host_env = {
+        **env,
+        "PRINTOPS_BACKUP_CONFIG": str(tmp_path / "host-home" / "backup.yaml"),
+    }
+    live = tmp_path / "live"
+    (live / "spoolman").mkdir(parents=True)
+    (live / "spoolman" / "spoolman.db").write_text("the live one", encoding="utf-8")
+    (live / "spoolman" / "spoolman.db-wal").write_text(
+        "committed rows", encoding="utf-8"
+    )
+
+    by_target = backup(
+        tmp_path,
+        host_env,
+        "restore",
+        "latest",
+        "--target",
+        "default",
+        "--into",
+        str(live),
+        "--layout",
+        "data",
+        "--yes",
+    )
+    assert by_target.returncode == 1 and "not configured" in by_target.stderr
+
+    restore = (
+        "restore",
+        "latest",
+        "--dest",
+        str(disk),
+        "--subdir",
+        "3d-printops",
+        "--into",
+        str(live),
+        "--layout",
+        "data",
+        "--yes",
+    )
+    first = backup(tmp_path, host_env, *restore)
+    assert first.returncode == 0, first.stderr
+    assert sqlite3.connect(live / "spoolman" / "spoolman.db").execute(
+        "SELECT count(*) FROM spool"
+    ).fetchone() == (12,)
+    assert (live / "spoolman" / "spoolman.db.pre-restore").read_text(
+        encoding="utf-8"
+    ) == "the live one"
+    assert (live / "spoolman" / "spoolman.db.pre-restore-wal").read_text(
+        encoding="utf-8"
+    ) == "committed rows"
+    second = backup(tmp_path, host_env, *restore)
+    assert second.returncode == 0, second.stderr
+    assert (live / "spoolman" / "spoolman.db.pre-restore").read_text(
+        encoding="utf-8"
+    ) == "the live one"
+    assert (
+        live / "spoolman" / "spoolman.db.pre-restore.1"
+    ).is_file()  # the first restore's result, kept too
+
+
+@pytest.mark.parametrize("bad", ["inf", "-1", "nan", "ten"])
+def test_min_free_gb_must_be_a_finite_number_not_below_zero(
+    tmp_path: Path, bad: str
+) -> None:
+    env = make_world(tmp_path)
+    r = backup(tmp_path, env, "run", "--target", "default", "--min-free-gb", bad)
+    assert r.returncode == 2 and "--min-free-gb needs a finite number" in r.stderr
+    assert "Traceback" not in r.stderr
+
+
+def test_a_prune_waits_for_no_one_and_refuses_while_a_run_holds_the_disk_lock(
+    tmp_path: Path,
+) -> None:
+    import fcntl
+
+    env = make_world(tmp_path)
+    disk = tmp_path / "disk"
+    backup(tmp_path, env, "target", "add", "default", str(disk), "--init-marker")
+    assert backup(tmp_path, env, "run", "--target", "default").returncode == 0
+    with (disk / "3d-printops" / ".3d-backup.lock").open("a") as held:
+        fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)  # what a running backup holds
+        blocked = backup(tmp_path, env, "prune", "--target", "default")
+        peek = backup(tmp_path, env, "prune", "--target", "default", "--dry-run")
+    assert blocked.returncode == 1 and "another backup run holds" in blocked.stderr
+    assert peek.returncode == 0  # a dry run removes nothing, so it needs no lock
+    assert backup(tmp_path, env, "prune", "--target", "default").returncode == 0
+
+
+def test_a_broken_backup_yaml_is_a_clear_error_for_every_verb(tmp_path: Path) -> None:
+    env = make_world(tmp_path)
+    Path(env["PRINTOPS_BACKUP_CONFIG"]).write_text(
+        "targets: [unclosed\n", encoding="utf-8"
+    )
+    for verb in (
+        ("target", "ls"),
+        ("run", "--target", "default"),
+        ("ls", "--target", "default"),
+    ):
+        r = backup(tmp_path, env, *verb)
+        assert (
+            r.returncode == 1
+            and "not valid YAML" in r.stderr
+            and "Traceback" not in r.stderr
+        ), verb
+
+
+def test_discover_over_ssh_does_not_use_this_machines_data_dir(tmp_path: Path) -> None:
+    """Story: `backup discover --ssh me@box` on a laptop. The laptop's ~/.local/share/3d-cli means nothing on the box,
+    so without --data-dir no disk is marked as 'the data disk' and the output says it was not checked."""
+    bindir = tmp_path / "fakebin"
+    bindir.mkdir()
+    ssh = bindir / "ssh"
+    ssh.write_text(
+        '#!/bin/sh\nfor last; do :; done\nexec bash -c "$last"\n', encoding="utf-8"
+    )
+    ssh.chmod(0o755)
+    env = {**make_world(tmp_path), "PATH": f"{bindir}:{os.environ['PATH']}"}
+    found = backup(tmp_path, env, "discover", "--ssh", "me@box", "--json")
+    assert found.returncode == 0, found.stderr
+    body = json.loads(found.stdout)
+    assert body["data_device"] == "" and not any(
+        c["same_as_data"] for c in body["candidates"]
+    )
+    text = backup(tmp_path, env, "discover", "--ssh", "me@box")
+    assert "No --data-dir" in text.stdout
+    with_dir = backup(
+        tmp_path,
+        env,
+        "discover",
+        "--ssh",
+        "me@box",
+        "--data-dir",
+        str(tmp_path),
+        "--json",
+    )
+    assert (
+        json.loads(with_dir.stdout)["data_device"] != ""
+    )  # a data dir that exists on the box is honoured

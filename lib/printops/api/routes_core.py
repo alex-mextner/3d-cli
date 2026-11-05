@@ -1,7 +1,8 @@
 """routes_core.py — 3d-api core endpoints: health, the event log (JSON + SSE), and the WebSocket.
 
   GET /v1/live     no auth. Liveness: 200 {"ok": true} when the API serves and its DB opens.
-  GET /v1/health   no auth. 200 {"status": "ok"|"degraded", db, spoolman, version};
+  GET /v1/health   no auth. 200 {"status": "ok"|"degraded", db, spoolman, backup, version};
+                   `backup` ({configured, targets, last}) is information: it never changes `status`.
                    503 when the PrintOps DB itself is unusable.
   GET /v1/events   scope read. `Accept: application/json` → one page
                    {"events": [...], "cursor": N} (`since=N` → id > N, or `last=K` → newest K).
@@ -23,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import os
 import sqlite3
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from typing import Annotated, Any
@@ -39,6 +41,7 @@ from fastapi import (
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
+from printops import backup_run
 from printops import events as ev
 from printops.api.deps import authenticate, bearer_token, get_state, require
 from printops.api.state import ApiState
@@ -105,6 +108,7 @@ def health(request: Request) -> JSONResponse:
         "version": state.settings.version,
         "db": db,
         "spoolman": spoolman,
+        "backup": backup_run.health_summary(os.environ, state.settings),
     }
     return JSONResponse(body, status_code=200 if db["ok"] else 503)
 

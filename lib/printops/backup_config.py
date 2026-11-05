@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from printops import backup_store
+from printops.backup_policy import TARGET_NAME_RE
 from printops.backup_store import BackupRefused
 
 
@@ -43,8 +44,10 @@ def add_target(
     """Register `root` as target `name`; returns the disk id. Writes the marker only with init_marker."""
     from printops.backup_run import load_config
 
-    if not name.replace("-", "").replace("_", "").isalnum():
-        raise BackupRefused(f"target name {name!r}: letters, digits, - and _ only")
+    if not TARGET_NAME_RE.fullmatch(name):
+        raise BackupRefused(
+            f"target name {name!r}: ASCII letters, digits, - and _ only (max 64)"
+        )
     if not root.is_dir():
         raise BackupRefused(f"{root} is not a directory (is the disk mounted?)")
     marker = backup_store.read_marker(root)

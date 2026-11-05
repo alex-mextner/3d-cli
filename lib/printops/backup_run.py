@@ -4,7 +4,7 @@ ACCESSED VIA: `3d printops backup run` (lib/printops/cli/backup.py); 3d-api's `P
 spawns that CLI as a child process (so the run is niced and memory-isolated from the API).
 
 WHO DECIDES WHAT:
-  - WHERE the disk is, WHICH disk it must be (marker id) and which extra files matter: the
+  - WHERE the disk is and WHICH disk it must be (marker id): the
     `backup.yaml` next to the PrintOps DB (written by `3d init --env` / `3d printops backup target`).
   - WHEN, which sub-directory and how many sets to keep: Home Assistant
     (integrations/homeassistant/packages/printops_backup.yaml) — passed with every run. A run by hand
@@ -12,7 +12,7 @@ WHO DECIDES WHAT:
     Through the API a run is never kept below `retention_floor:` of that same backup.yaml (default 7/4/6).
 
 LIGHT ON A WEAK HOST: the process lowers its own CPU (nice 19) and I/O (ionice idle) priority, the
-SQLite copy runs in small steps with pauses, and compression is gzip level 1.
+SQLite copy is one online-backup pass over a single WAL snapshot, and compression is gzip level 1.
 
 FAILURE (`run_and_report`): the guard refusing, a full disk, a bad integrity check — anything raises
 and `printops.backup_notify` raises the notification + anomaly; the CLI exits non-zero.
@@ -30,7 +30,7 @@ import shutil
 import subprocess
 import time
 from collections.abc import Iterator, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -78,7 +78,6 @@ class RunRequest:
     min_free_bytes: int = int(DEFAULT_MIN_FREE_GB * (1 << 30))
     spoolman: bool = True
     low_priority: bool = True
-    extra_files: list[Path] = field(default_factory=list)
 
 
 @dataclass
@@ -166,7 +165,7 @@ def resolve_target(req: RunRequest, cfg: Mapping[str, Any], cfg_file: Path) -> T
 
 
 def build_sources(
-    req: RunRequest, settings: Settings, env: Mapping[str, str], cfg: Mapping[str, Any]
+    req: RunRequest, settings: Settings, env: Mapping[str, str]
 ) -> list[Source]:
     sources = [Source("printops", settings.db_path, True)]
     spoolman = env.get("SPOOLMAN_DB")
@@ -179,10 +178,6 @@ def build_sources(
         sources.append(Source("spoolman", Path(spoolman).expanduser(), True))
     if settings.tokens_file.is_file():
         sources.append(Source("tokens", settings.tokens_file, False))
-    extra = [*(Path(str(p)) for p in cfg.get("extra_files") or []), *req.extra_files]
-    sources += [
-        Source(p.name, p.expanduser(), False) for p in extra if p.expanduser().is_file()
-    ]
     missing = [s for s in sources if not s.path.is_file()]
     if missing:
         raise BackupBroken(
@@ -231,7 +226,7 @@ def run_backup(req: RunRequest, env: Mapping[str, str] | None = None) -> RunResu
         raise BackupRefused(
             f"bad sub-directory {req.subdir!r}: relative, letters/digits/._- only, no . or .."
         )
-    sources = build_sources(req, settings, env, cfg)
+    sources = build_sources(req, settings, env)
     dest = target.path / req.subdir
     started = time.monotonic()
     if req.low_priority:
@@ -259,6 +254,26 @@ def run_backup(req: RunRequest, env: Mapping[str, str] | None = None) -> RunResu
         round(time.monotonic() - started, 2),
         datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
     )
+
+
+def health_summary(env: Mapping[str, str], settings: Settings) -> dict[str, Any]:
+    """What `GET /v1/health` and `3d printops health` say about backups: are there targets, and how did the
+    last run end. A stack whose legacy timer was retired but whose backup was never set up is `configured:
+    false` — otherwise nothing would ever say that no backup is being taken."""
+    try:
+        targets = sorted(load_config(config_path(env, settings)).get("targets") or {})
+    except BackupRefused as e:
+        return {"configured": False, "targets": [], "error": str(e)}
+    last: dict[str, Any] = {}
+    with contextlib.suppress(OSError, ValueError):
+        body = json.loads(
+            (settings.db_path.parent / LAST_FILE).read_text(encoding="utf-8")
+        )
+        if isinstance(body, dict):
+            last = {
+                k: body[k] for k in ("status", "target", "at", "error") if k in body
+            }
+    return {"configured": bool(targets), "targets": targets, "last": last or None}
 
 
 def _write_last(env: Mapping[str, str], body: dict[str, Any]) -> None:

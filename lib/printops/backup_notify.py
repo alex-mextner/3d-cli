@@ -5,7 +5,7 @@ ACCESSED VIA: `printops.backup_run.run_and_report` (so `3d printops backup run` 
 
 THREE SIGNALS on failure, each independent (one failing never hides another):
   1. the notification payload is always printed (stderr) — what Home Assistant gets;
-  2. a Home Assistant persistent notification `printops_backup_failed`, when PRINTOPS_HA_URL and a
+  2. a Home Assistant persistent notification `printops_backup_failed_<target>`, when PRINTOPS_HA_URL and a
      token are configured (the same variables 3d-api uses for humidity, printops.homeassistant);
      the HA package raises the same notification id when 3d-api itself is unreachable, so the two
      replace each other instead of piling up;
@@ -28,9 +28,11 @@ from printops.db import open_db, transaction, utc_now
 from printops.ha_rest import HaRest, HaRestError
 from printops.homeassistant import HaError, HaStates
 
-NOTIFICATION_ID = "printops_backup_failed"
+NOTIFICATION_PREFIX = "printops_backup_failed"
 ANOMALY_KIND = "backup_failed"
-ANOMALY_SCOPE = "backup"  # one reconcile scope PER TARGET: `backup:<target>` (see `anomaly_scope`)
+ANOMALY_SCOPE = (
+    "backup"  # one reconcile scope PER TARGET: `backup:<target>` (see `anomaly_scope`)
+)
 
 
 @dataclass(frozen=True)
@@ -38,6 +40,12 @@ class Context:
     target: str
     db_path: Path | None  # the PrintOps DB; None = no anomaly can be recorded
     env: Mapping[str, str]
+
+
+def notification_id(target: str) -> str:
+    """One notification per target, like the anomaly: another target's (or an ad-hoc) good run must not
+    dismiss a failure that is still open."""
+    return f"{NOTIFICATION_PREFIX}_{target}"
 
 
 def anomaly_scope(target: str) -> str:
@@ -48,7 +56,7 @@ def anomaly_scope(target: str) -> str:
 
 def notification_payload(target: str, error: str) -> dict[str, Any]:
     return {
-        "notification_id": NOTIFICATION_ID,
+        "notification_id": notification_id(target),
         "title": "PrintOps backup FAILED",
         "message": (
             f"The scheduled Spoolman/PrintOps backup (target `{target}`) failed:\n\n{error}\n\n"
@@ -83,7 +91,9 @@ def _record_anomaly(ctx: Context, error: str | None) -> None:
     conn = open_db(ctx.db_path)
     try:
         with transaction(conn):
-            reconcile.sync(conn, anomaly_scope(ctx.target), finding, live_ok=True, now=utc_now())
+            reconcile.sync(
+                conn, anomaly_scope(ctx.target), finding, live_ok=True, now=utc_now()
+            )
     finally:
         conn.close()
 
@@ -129,7 +139,7 @@ def report_recovered(ctx: Context, say: Callable[[str], None] | None = None) -> 
             ha.call_service(
                 "persistent_notification",
                 "dismiss",
-                {"notification_id": NOTIFICATION_ID},
+                {"notification_id": notification_id(ctx.target)},
             )
 
     _guard("home assistant dismiss", dismiss, say)

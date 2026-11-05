@@ -1,5 +1,4 @@
-"""backup.py — the two low-level copy primitives of the backups: a consistent SQLite snapshot and an
-atomic file copy.
+"""backup.py — the low-level copy primitive of the backups: a consistent SQLite snapshot.
 
 ACCESSED VIA: `printops.backup_store` (which builds the backup sets `3d printops backup run` writes;
 the schedule is Home Assistant's, integrations/homeassistant/packages/printops_backup.yaml).
@@ -10,10 +9,10 @@ INVARIANTS:
   - Each snapshot is written to a temp file, `PRAGMA integrity_check`ed, then atomically renamed
     over the previous one — a failed run never replaces a good snapshot with a bad one.
 """
+
 from __future__ import annotations
 
 import os
-import shutil
 import sqlite3
 import tempfile
 from dataclasses import dataclass
@@ -35,27 +34,34 @@ def _refuse_overwriting_source(src: Path, dest: Path) -> None:
     # Renaming a snapshot over the live DB would swap the inode under open connections, and
     # their later WAL checkpoints would write to the orphaned file: data loss.
     if dest.resolve() == src.resolve() or (dest.exists() and dest.samefile(src)):
-        raise BackupError(f"backup destination {dest} is the source itself; choose another --dest")
+        raise BackupError(
+            f"backup destination {dest} is the source itself; choose another --dest"
+        )
 
 
-def snapshot_db(src: Path, dest: Path, *, pages: int = -1, pause: float = 0.0) -> Snapshot:
+def snapshot_db(src: Path, dest: Path) -> Snapshot:
     """Copy SQLite DB `src` to `dest` consistently (online backup + integrity check + rename).
 
-    `pages`/`pause`: copy that many pages per step and sleep between steps, so a weak host (the
-    Odroid) keeps serving while the copy runs; the default copies everything in one step."""
+    One backup step: the copy reads a single WAL snapshot, so Spoolman keeps writing meanwhile and a write
+    never restarts the copy. (CPython's `Connection.backup(pages=, sleep=)` sleeps only on BUSY/LOCKED, never
+    between steps, so there is no pacing to configure; the run's nice 19 + ionice idle keep the host usable.)"""
     if not src.is_file():
         raise BackupError(f"database {src} does not exist")
     _refuse_overwriting_source(src, dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(prefix=f".{dest.name}-", suffix=".tmp", dir=str(dest.parent))
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{dest.name}-", suffix=".tmp", dir=str(dest.parent)
+    )
     os.close(fd)
     tmp = Path(tmp_name)
     try:
-        source = sqlite3.connect(f"{src.resolve().as_uri()}?mode=rw", uri=True, timeout=30)
+        source = sqlite3.connect(
+            f"{src.resolve().as_uri()}?mode=rw", uri=True, timeout=30
+        )
         try:
             target = sqlite3.connect(str(tmp))
             try:
-                source.backup(target, pages=pages, sleep=pause)
+                source.backup(target)
                 verdict = target.execute("PRAGMA integrity_check").fetchone()[0]
                 # A snapshot must be self-contained: no -wal sidecar next to it.
                 target.execute("PRAGMA journal_mode = DELETE")
@@ -69,24 +75,6 @@ def snapshot_db(src: Path, dest: Path, *, pages: int = -1, pause: float = 0.0) -
         os.replace(tmp, dest)
     except sqlite3.Error as e:
         raise BackupError(f"snapshot of {src} failed: {e}") from e
-    finally:
-        tmp.unlink(missing_ok=True)
-    return Snapshot(src, dest, dest.stat().st_size)
-
-
-def copy_file(src: Path, dest: Path) -> Snapshot:
-    """Atomic 0600 copy of a small file (the tokens file)."""
-    if not src.is_file():
-        raise BackupError(f"file {src} does not exist")
-    _refuse_overwriting_source(src, dest)
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(prefix=f".{dest.name}-", suffix=".tmp", dir=str(dest.parent))
-    os.close(fd)
-    tmp = Path(tmp_name)
-    try:
-        shutil.copyfile(src, tmp)
-        tmp.chmod(0o600)
-        os.replace(tmp, dest)
     finally:
         tmp.unlink(missing_ok=True)
     return Snapshot(src, dest, dest.stat().st_size)
