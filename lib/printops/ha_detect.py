@@ -32,6 +32,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import time
 from cli import paths
 from errors import UsageError
 
@@ -107,7 +108,7 @@ def resolve_token(
         return str(cfg["token"]).strip(), str(path or config_file())
     if ask is not None:
         typed = ask(
-            "Home Assistant long-lived access token (Profile -> Security -> Long-lived access tokens): "
+            "Home Assistant long-lived access token (Profile -> Security -> Long-lived access tokens; not echoed): "
         )
         if typed.strip():
             return typed.strip(), "prompt"
@@ -199,27 +200,35 @@ def parse_mdns(buf: bytes) -> list[str]:
             elif rtype == 1 and rdlen == 4:  # A
                 addrs[name] = socket.inet_ntoa(buf[rdata : rdata + 4])
             pos = rdata + rdlen
-    except (struct.error, IndexError, ValueError):
+    except (
+        struct.error,
+        IndexError,
+        ValueError,
+        OSError,
+    ):  # OSError: inet_ntoa of a truncated A record
         return []
     return [f"http://{addrs[h]}:{p}" for h, p in ports.items() if h in addrs]
 
 
 def mdns_browse(timeout: float = 1.5) -> list[str]:
-    """One multicast PTR query; HA instances that answer within `timeout` seconds. [] on any network error."""
+    """One multicast PTR query; HA instances that answer within `timeout` seconds IN TOTAL (a host that keeps
+    sending datagrams to the query's port cannot stretch it). [] on any network error."""
     found: list[str] = []
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     except OSError:
         return found
+    deadline = time.monotonic() + timeout
     with contextlib.closing(sock):
-        sock.settimeout(timeout)
         try:
             sock.sendto(_query(), ("224.0.0.251", 5353))
-            while True:
+            while (left := deadline - time.monotonic()) > 0:
+                sock.settimeout(left)
                 data, _ = sock.recvfrom(9000)
                 found += [u for u in parse_mdns(data) if u not in found]
         except (TimeoutError, OSError):
-            return found
+            pass
+    return found
 
 
 def detect_ha(

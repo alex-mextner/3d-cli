@@ -19,13 +19,15 @@ FLAGS (added to `3d init --env`): --backup auto|skip|agent|path:DIR, --backup-di
 
 from __future__ import annotations
 
+import getpass
 import re
 import shlex
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
-from errors import InvalidArgument
+from errors import InvalidArgument, ThreeDError
 
 from printops import backup_setup, ha_detect, ha_locations, ha_wire
 from printops.backup_discovery import Candidate, Discovery, Shell
@@ -88,6 +90,14 @@ class StageEnv:
         backup_setup.ssh_shell(host) if host else backup_setup.local_shell()
     )
     ha_factory: Callable[[str, str], HaRest] = lambda url, token: HaRest(url, token)
+    ask_secret: Callable[[str], str] = (
+        getpass.getpass
+    )  # the HA token is never echoed to the terminal
+
+
+def _is_http_url(value: str) -> bool:
+    parts = urlsplit(value)
+    return parts.scheme in ("http", "https") and bool(parts.hostname)
 
 
 def parse_stage_options(values: Mapping[str, str], flags: set[str]) -> StageOptions:
@@ -111,6 +121,10 @@ def parse_stage_options(values: Mapping[str, str], flags: set[str]) -> StageOpti
             opts.backup,
             ["auto", "skip", "agent", "path:DIR"],
             command=CLI_NAME,
+        )
+    if opts.ha not in ("auto", "skip") and not _is_http_url(opts.ha):
+        raise InvalidArgument(
+            "--ha", opts.ha, ["auto", "skip", "http(s)://HOST[:PORT]"], command=CLI_NAME
         )
     if opts.ha_wire not in ("ask", "yes", "no"):
         raise InvalidArgument(
@@ -148,15 +162,17 @@ def _same_disk(ctx: BackupContext, path: str) -> bool:
     """`path` and the Spoolman data sit on the same filesystem device OR on partitions/volumes of one
     physical disk (lsblk -s walks a device up to its `disk` ancestors); a copy there dies with the data."""
     q = shlex.quote
-    rc, out = ctx.run(
-        "dev() { df -P \"$1\" | tail -n 1 | cut -d' ' -f1; }\n"
-        "disks() { lsblk -s -n -r -o NAME,TYPE \"$1\" 2>/dev/null | awk '$2 == \"disk\" { print $1 }'; }\n"
-        f"a=\"$(dev {q(path)})\"; b=\"$(dev {q(ctx.data_dir)})\"\n"
-        "if [ -n \"$a\" ] && [ \"$a\" = \"$b\" ]; then echo same; else\n"
-        "  for x in $(disks \"$a\"); do for y in $(disks \"$b\"); do [ \"$x\" = \"$y\" ] && echo same; done; done\n"
+    _, out = ctx.prober()(
+        "dev() { timeout -k 1 10 df -P \"$1\" | tail -n 1 | cut -d' ' -f1; }\n"
+        'disks() { lsblk -s -n -r -o NAME,TYPE "$1" 2>/dev/null | awk \'$2 == "disk" { print $1 }\'; }\n'
+        f'a="$(dev {q(path)})"; b="$(dev {q(ctx.data_dir)})"\n'
+        'if [ -n "$a" ] && [ "$a" = "$b" ]; then echo same; else\n'
+        '  for x in $(disks "$a"); do for y in $(disks "$b"); do [ "$x" = "$y" ] && echo same; done; done\n'
         "fi"
     )
-    return rc == 0 and "same" in out
+    return (
+        "same" in out
+    )  # the script's exit code is that of its last comparison: not a verdict
 
 
 def _menu_choice(ctx: BackupContext, found: Discovery) -> str | None:
@@ -276,7 +292,11 @@ def _trusted_origin(se: StageEnv, opts: StageOptions, url: str) -> bool:
     long-lived token must not be sent to it unless the user approves that origin."""
     if opts.ha not in ("auto", "skip"):
         return True
-    named = (se.env.get("HA_URL"), se.env.get("PRINTOPS_HA_URL"), ha_detect.load_ha_config().get("url"))
+    named = (
+        se.env.get("HA_URL"),
+        se.env.get("PRINTOPS_HA_URL"),
+        ha_detect.load_ha_config().get("url"),
+    )
     return url.rstrip("/") in {str(u).rstrip("/") for u in named if u}
 
 
@@ -311,7 +331,9 @@ def _confirm_wire(
 
 def _ha_token(se: StageEnv, url: str) -> str | None:
     ctx = se.ctx
-    token, where = ha_detect.resolve_token(se.env, ctx.ask if ctx.interactive else None)
+    token, where = ha_detect.resolve_token(
+        se.env, se.ask_secret if ctx.interactive else None
+    )
     if not token:
         ctx.say(
             "Home Assistant: no token (set $HA_TOKEN or put token: in ~/.config/3d-cli/ha.yaml, mode 600)"
@@ -400,12 +422,14 @@ def ha_stage(se: StageEnv, opts: StageOptions, url: str | None, backup_ok: bool)
             ctx.say(f"  {line}")
         failed = 1 if spool.status == "failed" else 0
         return max(failed, _install_package(se, opts, ha, backup_ok))
-    except HaRestError as e:
-        ctx.say(f"Home Assistant: {e.message}")
+    except (HaRestError, ThreeDError, RuntimeError) as e:
+        ctx.say(f"Home Assistant: {getattr(e, 'message', e)}")
         return 1
 
 
-def _ha_backup_candidates(se: StageEnv, opts: StageOptions, url: str | None) -> list[Candidate]:
+def _ha_backup_candidates(
+    se: StageEnv, opts: StageOptions, url: str | None
+) -> list[Candidate]:
     """HA's own backup locations as discovery hints — only with a token that needs no prompt, and only
     from an origin the user named (this authenticates, before any confirmation)."""
     if not url or not _trusted_origin(se, opts, url):
@@ -420,7 +444,11 @@ def run_stage(se: StageEnv, opts: StageOptions) -> int:
     se.ctx.ha_candidates = _ha_backup_candidates(se, opts, url)
     try:
         configured = backup_stage(se.ctx, opts)
-    except OSError as e:
+    except (
+        OSError,
+        RuntimeError,
+        ThreeDError,
+    ) as e:  # a failed compose step / ssh: say so, do not traceback
         se.ctx.say(f"backups: {e}")
         configured = backup_setup.Configured(False, "", str(e))
     code = 0
