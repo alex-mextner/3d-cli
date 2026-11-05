@@ -499,6 +499,7 @@ def test_fields_migrate_native_conflict_exits_1_and_keeps_the_field(
 def test_fields_migrate_native_needs_write_scope_for_apply(
     tmp_path: Path, shop: LiveApi
 ) -> None:
+    """A read-only token can run the `fields migrate-native` dry run but not `--apply`; the refused apply leaves the legacy value in Spoolman untouched."""
     ids = _legacy_world(shop)
     assert _cli(tmp_path, shop, "printops", "fields", "migrate-native", token="read").returncode == 0
     denied = _cli(tmp_path, shop, "printops", "fields", "migrate-native", "--apply", token="read")
@@ -588,10 +589,12 @@ def test_spool_receive_max_speed_flag_sets_the_new_filaments_max_speed(tmp_path:
 
 
 def test_spool_receive_without_max_speed_flag_keeps_the_default(tmp_path: Path, shop: LiveApi) -> None:
+    """A user receives a new spool without `--max-speed`: the filament it creates gets the default max speed of 300 mm/s."""
     assert _received_max_speed(tmp_path, shop) == 300
 
 
 def test_spool_receive_max_speed_must_be_a_positive_integer(tmp_path: Path, shop: LiveApi) -> None:
+    """A user mistypes `spool receive --max-speed` (text, a fraction, zero, negative): each is refused with a reason and no spool is created."""
     for bad, why in (("fast", "needs an integer"), ("4.5", "needs an integer"), ("0", "must be > 0"), ("-5", "must be > 0")):
         got = _cli(tmp_path, shop, "printops", "spool", "receive", "--vendor", "Elegoo", "--material", "PETG",
                    "--name", "Grey", "--net", "1000", "--max-speed", bad)

@@ -156,6 +156,9 @@ def test_drift_story_detect_heal_converge(tmp_path: Path, shop: LiveApi) -> None
 def test_an_unhealable_drift_needs_a_person_until_the_location_exists(
     tmp_path: Path, shop: LiveApi
 ) -> None:
+    """Someone moves a spool in the Spoolman UI to a shelf PrintOps has never heard of: `spool drift --heal`
+    cannot invent the shelf, so it says a person must decide and exits 1; once the owner adds the shelf
+    with `loc add`, the same heal converges and the drift check is quiet."""
     sid = receive(shop)
     shop.spoolman.update(
         "spool", sid, {"location": "WH:A/S2"}
@@ -180,14 +183,20 @@ def test_an_unhealable_drift_needs_a_person_until_the_location_exists(
 def test_drift_heal_needs_the_write_scope_and_drift_the_read_scope(
     tmp_path: Path, shop: LiveApi
 ) -> None:
+    """A bot with a read-only token can look at the drift but not heal it, and a write-only token cannot
+    even look: each refusal names the missing scope, and the refused heal changes nothing in Spoolman
+    or in the drift that is listed afterwards."""
     sid = receive(shop)
     ui_edit(shop, sid, 412)
     read_heal = cli(
         tmp_path, shop, "printops", "spool", "drift", "--heal", token="read"
     )
     assert read_heal.returncode == 1 and "403" in read_heal.stderr
+    assert "scope" in read_heal.stderr and "healed" not in read_heal.stdout
     write_only = cli(tmp_path, shop, "printops", "spool", "drift", token="write")
     assert write_only.returncode == 1 and "403" in write_only.stderr
+    assert "scope" in write_only.stderr and write_only.stdout == ""
+    assert shop.spoolman.get("spool", sid)["remaining_weight"] == 412  # nothing was written back
     still = cli(tmp_path, shop, "printops", "spool", "drift", token="read")
     assert (
         still.returncode == 1 and "[remaining]" in still.stdout
@@ -200,6 +209,7 @@ def test_drift_heal_needs_the_write_scope_and_drift_the_read_scope(
 def test_spool_help_lists_the_drift_action_and_drift_help_prints_its_usage(
     tmp_path: Path, shop: LiveApi
 ) -> None:
+    """A user asks `3d printops spool --help` what else the spool command can do and finds `drift` listed once under the extra actions; `spool drift --help` then prints exactly the usage text, with examples."""
     spool_help = cli(tmp_path, shop, "printops", "spool", "--help")
     assert spool_help.returncode == 0, spool_help.stderr
     more = spool_help.stdout.split("More actions", 1)
@@ -223,6 +233,7 @@ def _examples() -> list[list[str]]:
 def test_every_example_in_the_drift_usage_parses_and_runs(
     tmp_path: Path, shop: LiveApi
 ) -> None:
+    """A user copies each example from `spool drift --help` into a shell: with everything in step every one of them parses and exits 0."""
     receive(shop)  # an in-step world: every example exits 0
     for argv in _examples():
         got = cli(tmp_path, shop, *argv)
@@ -231,6 +242,7 @@ def test_every_example_in_the_drift_usage_parses_and_runs(
 
 
 def test_every_option_in_the_drift_usage_exists(tmp_path: Path, shop: LiveApi) -> None:
+    """Every option `spool drift --help` documents is accepted by the real command, and an invented one is refused by name."""
     options = re.findall(
         r"^  (--[a-z-]+)", spool_drift.USAGE.split("Options:")[1], re.M
     )
@@ -260,6 +272,7 @@ def test_every_option_in_the_drift_usage_exists(tmp_path: Path, shop: LiveApi) -
 def test_health_says_the_sync_is_off_when_nothing_schedules_it(
     tmp_path: Path, shop: LiveApi
 ) -> None:
+    """An operator runs `3d printops health` against a 3d-api whose spool sync schedule is off: it says so in text and in --json, and the overall status stays ok."""
     got = cli(tmp_path, shop, "printops", "health", token="read")
     assert got.returncode == 0, got.stdout + got.stderr
     assert "spool sync  OFF" in got.stdout
@@ -299,6 +312,7 @@ def _wait_for_a_pass(live: LiveApi, deadline_s: float = 10.0) -> dict[str, Any]:
 def test_health_is_ok_when_the_scheduled_pass_found_nothing(
     scheduled: tuple[FakeSpoolman, Path],
 ) -> None:
+    """An operator runs `3d printops health` against a 3d-api whose scheduled spool sync pass found nothing to fix: health reports the sync as ok and exits 0."""
     fake, tmp_path = scheduled
     with serve_api(tmp_path, fake) as live:
         _seed_locations(live)
@@ -383,6 +397,7 @@ def _preflight(
 def test_preflight_fails_a_drifted_spool_and_passes_after_the_heal(
     tmp_path: Path, shop: LiveApi, fleet: Path
 ) -> None:
+    """A user loads two spools, edits one weight in the Spoolman UI and runs print-preflight: the loaded drifted spool FAILs the plate with the fix line; after `spool drift --heal` the same preflight passes."""
     black, green = _load(shop, "T1", "#000000"), _load(shop, "T3", "#1B5E20")
     plate = _plate(tmp_path / "plate.gcode")  # 20 g from T1, 50 g from T3
 
