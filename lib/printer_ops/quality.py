@@ -37,8 +37,11 @@ THRESHOLDS are calibrated on one camera (docs/research/print-quality-monitor.md)
 
 from __future__ import annotations
 
+import json
+import re
 from collections import deque
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 # issues
@@ -90,7 +93,7 @@ class QualityConfig:
     first_layer_z: float = 0.8  # without a layer number: Z up to this is "first layers"
     # `order` under this in a first layer is `first_layer` warning (0 = off). Clean beads on the U1 camera read
     # 0.83-0.85, a stringy first layer 0.33-0.53 — but another camera/scene has its own normal (a K1 SE view of
-    # a part reads 0.5), so the floor is ON only for a calibrated camera (MODEL_PROFILES) or when configured.
+    # a part reads 0.5), so the floor is ON only f.
     first_layer_order: float = 0.0
     first_layer_severe: float = 0.45
     window: int = 4
@@ -117,14 +120,23 @@ def first_layer_floor(order: float, cfg: QualityConfig) -> str:
     return WARNING if order < cfg.first_layer_order else OK
 
 
-# Per camera model, what was calibrated beyond the generic defaults (docs/research/print-quality-monitor.md).
-MODEL_PROFILES: dict[str, dict[str, Any]] = {"snapmaker u1": {"first_layer_order": 0.6}}
+PROFILES_FILE = (
+    Path(__file__).resolve().parents[1] / "data" / "vision" / "quality_profiles.json"
+)
 
 
 def profile_for(model: str | None) -> dict[str, Any]:
-    """The calibrated defaults of a printer model (`device.model`, matched case-insensitively), else none."""
-    text = (model or "").strip().lower()
-    return dict(next((v for k, v in MODEL_PROFILES.items() if k in text), {}))
+    """The calibrated defaults of a printer model (`device.model`) from lib/data/vision/quality_profiles.json
+    (matched on the model name stripped to lowercase letters and digits, by its ending), else none."""
+    key = re.sub(r"[^a-z0-9]", "", (model or "").lower())
+    if not key:
+        return {}
+    profiles = json.loads(PROFILES_FILE.read_text(encoding="utf-8"))
+    hit: dict[str, Any] = next(
+        (v for k, v in profiles.items() if not k.startswith("_") and key.endswith(k)),
+        {},
+    )
+    return dict(hit)
 
 
 def quality_config(settings: Any, model: str | None = None) -> QualityConfig:

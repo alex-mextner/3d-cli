@@ -89,7 +89,7 @@ not separate measurements.
   A bowed corner is not told apart from other disorder on one frame.
 * **The first-layer floor is per camera.** An absolute `order` floor (0.6) separates the U1's clean first layer (0.83+) from
   the stringy phone photos (0.33-0.53), but a K1 SE view of a pasted part reads 0.5 normally (the job-watch fixtures of PR #727), so
-  the floor is on by default only for the Snapmaker U1 profile (`MODEL_PROFILES`) and a `watch.quality` key elsewhere.
+  the floor is on by default only for the Snapmaker U1 profile (`lib/data/vision/quality_profiles.json`) and a `watch.quality` key elsewhere.
 * **Baseline = the job's first layers.** A job whose first layers are already stringy teaches the monitor that this
   is normal; the absolute levels and the first-layer floor still apply. A supervisor started mid-print learns from
   what it sees then.
