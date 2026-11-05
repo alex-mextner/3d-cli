@@ -3,7 +3,7 @@
 RULES (run by printops.datalint; read-only):
   drying/policy          error  fleet/policy.yaml (as 3d-api sees it) breaks its schema — the
                                 periodic drying check and GET /v1/drying/due are off until fixed
-  drying/bad-date        error  spool extra `opened_at` / `last_dried_at` is not an ISO date, so
+  drying/bad-date        error  spool `first_used` / extra `last_dried_at` is not an ISO date, so
                                 its drying clock cannot run
   drying/forgotten       warn   a drying session still open more than FORGOTTEN_H after its
                                 target time — finish it (`3d printops dry finish ID`) so the
@@ -26,8 +26,7 @@ def _bad_dates(ctx: LintContext) -> list[Finding]:
     out: list[Finding] = []
     for sp in ctx.spools:
         extra = drying.decoded_extra(sp)
-        for key in ("opened_at", "last_dried_at"):
-            raw = extra.get(key)
+        for key, raw in (("first_used", sp.get("first_used")), ("last_dried_at", extra.get("last_dried_at"))):
             if not raw:
                 continue
             try:

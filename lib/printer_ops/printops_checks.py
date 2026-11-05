@@ -18,6 +18,10 @@ WHAT: the G-code's per-tool facts (slicer footer + body temperatures) checked ag
                            `3d slice-warnings`) has only the profile's default colour in the footer:
                            the colour is UNVERIFIED, never graded against the spool
     slot_binding_known     every used slot has a spool in the ledger (WARN: usage not booked)
+    spool_in_sync          Spoolman and PrintOps agree about the bound spool (printops.spool_sync):
+                           the ledger's remaining = Spoolman's ± 0.5 g, the spool is where both say,
+                           no other spool in the slot. A disagreement that makes the spool untrustworthy
+                           (weight, slot clash, unknown location, …) is hard; bookkeeping only is WARN
     filament_sufficient    `; filament used [g]` + purge + margin vs the ledger interval: FAIL
                            above its high end, WARN "weigh" inside it
     drying_due             the bound spool's drying assessment (drying.assess): wet = hard, due = WARN
@@ -363,8 +367,11 @@ class PrintopsContext:
 
 
 # Checks `--accept NAME --reason TEXT` may downgrade from FAIL to WARN: a mismatch the user knowingly
-# prints (other presets on purpose, #506). The reason is printed under the WARN.
-ACCEPTABLE = frozenset({"preset_match", "mix_calibration"})
+# prints (other presets on purpose #506, a spool whose Spoolman and PrintOps numbers differ and that
+# was weighed by hand #712). The reason is printed under the WARN. docs/commands/print-preflight.md
+# and the `--accept` synopsis of `3d print-preflight --help` list exactly these
+# (tests/test_printops_gates.py keeps the three in step).
+ACCEPTABLE = frozenset({"preset_match", "mix_calibration", "spool_in_sync"})
 
 
 def _parse_accept(
@@ -1067,6 +1074,62 @@ def check_binding(c: _Ctx) -> list[Finding]:
     return out
 
 
+_SYNC_WEIGHT_KINDS = ("remaining", "spoolman_rolled_back")
+
+
+def _sync_findings(spool: Mapping[str, Any]) -> list[Mapping[str, Any]] | None:
+    """The spool's sync findings, None when the state does not carry them (an older 3d-api)."""
+    sync = spool.get("sync")
+    if not isinstance(sync, dict) or not isinstance(sync.get("findings"), list):
+        return None
+    return [f for f in sync["findings"] if isinstance(f, dict)]
+
+
+def _sync_finding(
+    spool: Mapping[str, Any], found: list[Mapping[str, Any]] | None, t: int, slot: str
+) -> Finding:
+    """The `spool_in_sync` finding of one bound spool from its sync findings."""
+    name = "spool_in_sync"
+    label = str(spool.get("label"))
+    if found is None:
+        return _f(
+            name,
+            "unknown",
+            f"{label}: this PrintOps state does not say whether Spoolman agrees (older 3d-api)",
+            t,
+            slot,
+        )
+    if not found:
+        return _f(name, "ok", label, t, slot)
+    fix = (
+        " — `3d printops spool drift --heal`"
+        if all(f.get("healable") for f in found)
+        else " — `3d printops spool drift`"
+    )
+    what = "; ".join(str(f.get("summary")) for f in found[:3]) + (
+        f" (+{len(found) - 3} more)" if len(found) > 3 else ""
+    )
+    hard = any(f.get("blocks") for f in found)
+    return _f(
+        name,
+        "hard" if hard else "soft",
+        f"Spoolman and PrintOps disagree: {what}{fix}",
+        t,
+        slot,
+        "drift",
+    )
+
+
+def check_spool_sync(c: _Ctx) -> list[Finding]:
+    out: list[Finding] = []
+    for t, slot, entry, _head in c.tools():
+        spool = (entry or {}).get("spool")
+        if spool is None:
+            continue  # nothing bound: slot_binding_known says so
+        out.append(_sync_finding(spool, _sync_findings(spool), t, slot))
+    return out
+
+
 def _remaining_finding(
     spool: Mapping[str, Any],
     rem: Mapping[str, Any],
@@ -1101,6 +1164,50 @@ def _remaining_finding(
     return _f(name, "ok", msg, t, slot)
 
 
+def _sufficient_finding(
+    spool: Mapping[str, Any],
+    rem: Mapping[str, Any],
+    need: float,
+    grams: float,
+    t: int,
+    slot: str,
+) -> Finding:
+    weight = [
+        f for f in _sync_findings(spool) or [] if f.get("kind") in _SYNC_WEIGHT_KINDS
+    ]
+    if not weight:
+        return _remaining_finding(spool, rem, need, grams, t, slot)
+    have = spool.get("spoolman_remaining_g")
+    if all(not f.get("blocks") for f in weight) and isinstance(have, (int, float)):
+        # the drift is only late bookkeeping (usage Moonraker booked, a first sight): Spoolman's number
+        # is the right one, so grade against it — never let a short spool through on a WARN elsewhere
+        label = spool.get("label")
+        if need > have:
+            return _f(
+                "filament_sufficient",
+                "hard",
+                f"{label}: needs {need:.0f} g ({grams:.1f} + purge + margin), Spoolman has {have:g} g "
+                f"(the ledger is behind: {weight[0].get('summary')})",
+                t,
+                slot,
+                "short",
+            )
+        return _f(
+            "filament_sufficient",
+            "ok",
+            f"{label}: needs {need:.0f} g, Spoolman has {have:g} g (the ledger is behind)",
+            t,
+            slot,
+        )
+    return _f(  # two competing numbers: this check never picks one (spool_in_sync grades it)
+        "filament_sufficient",
+        "unknown",
+        f"needs {need:.0f} g; remaining not trustworthy: {weight[0].get('summary')}",
+        t,
+        slot,
+    )
+
+
 def check_sufficient(c: _Ctx) -> list[Finding]:
     name = "filament_sufficient"
     p = c.policy
@@ -1126,7 +1233,7 @@ def check_sufficient(c: _Ctx) -> list[Finding]:
                 _f(name, "unknown", f"needs {need:.0f} g; {c.unbound_reason}", t, slot)
             )
             continue
-        out.append(_remaining_finding(spool, rem, need, grams, t, slot))
+        out.append(_sufficient_finding(spool, rem, need, grams, t, slot))
     return out
 
 
@@ -1575,6 +1682,7 @@ CHECKS = {
     "filament_temp_range": check_temps,
     "loaded_filament_match": check_loaded,
     "slot_binding_known": check_binding,
+    "spool_in_sync": check_spool_sync,
     "filament_sufficient": check_sufficient,
     "drying_due": check_drying,
     "maintenance_due": check_maintenance,

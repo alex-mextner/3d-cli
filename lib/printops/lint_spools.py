@@ -14,7 +14,6 @@ from __future__ import annotations
 
 from printops import ledger, tares
 from printops.datalint import ERROR, WARN, Finding, LintContext, parse_utc
-from printops.spools import extra_value
 
 
 def _label(sp: dict) -> str:
@@ -54,7 +53,7 @@ def lint(ctx: LintContext) -> list[Finding]:
                     "3d printops tare add VENDOR GRAMS --source …",
                 )
             )
-        opened = extra_value(sp, "opened_at")
+        opened = sp.get("first_used")
         sealed = est.anchor_source == "receive" and est.deltas == 0 and not opened
         if sealed:
             continue

@@ -8,8 +8,10 @@ THE CHAIN for one spool, first hit wins (each step has a source and ± grams):
   1. `spool_tare_choice` — the tare 3d-api itself wrote into Spoolman spool.spool_weight, with
      the provenance it had then (only while Spoolman still holds that value);
   2. Spoolman spool.spool_weight set by someone else (Spoolman UI) — unsourced, ±UNSOURCED_SIGMA;
-  3. Spoolman filament.spool_weight, then vendor extra `spool_tare_g`, then vendor
-     empty_spool_weight — the user's Spoolman data, ±UNSOURCED_SIGMA;
+  3. Spoolman filament.spool_weight, then vendor `empty_spool_weight` — Spoolman's native
+     empty-spool-weight fields, the same chain Spoolman's own /measure resolves (spool >
+     filament > vendor), ±UNSOURCED_SIGMA. The old vendor extra `spool_tare_g` is NOT read any
+     more: `3d printops fields migrate-native` moves its values into `empty_spool_weight`;
   4. the tare DB (`spool_tare`, migration 0050: SpoolmanDB seed + `tare add`): rows of the
      spool's vendor, narrowed by spool kind (vendor extra `spool_kind`) and nominal net
      (filament.weight) when that keeps any row; used only if the remaining rows agree on one
@@ -294,16 +296,6 @@ def resolve_new(
             )
         )
     extra = vendor.get("extra") or {}
-    vendor_tare = decode_extra(extra.get("spool_tare_g"))
-    if vendor_tare:
-        return Resolution(
-            Tare(
-                float(vendor_tare),
-                UNSOURCED_SIGMA,
-                "Spoolman vendor spool_tare_g",
-                "vendor",
-            )
-        )
     if vendor.get("empty_spool_weight"):
         return Resolution(
             Tare(
@@ -321,3 +313,4 @@ def resolve_new(
     return lookup(
         conn, str(vendor["name"]), spool_kind=kind, net_g=filament.get("weight")
     )
+

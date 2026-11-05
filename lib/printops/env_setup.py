@@ -362,12 +362,8 @@ def check_health(api: str, token: str | None) -> Health:
             return Health("unreachable", detail=e.message)
         return _spoolman_health(client, e.message)
     if body.get("status") != "ok":
-        sp = body.get("spoolman") or {}
         return Health(
-            "degraded",
-            "3d-api",
-            f"status {body.get('status')}: spoolman "
-            f"{sp.get('error') or (sp.get('extra_fields') or {}).get('status') or 'not ok'}",
+            "degraded", "3d-api", f"status {body.get('status')}: {deploy.degraded_reason(body)}"
         )
     if token:
         try:
@@ -995,17 +991,26 @@ def _confirm_discouraged(target: Target, cands: Sequence[Candidate], opts: Optio
         opts.allow_discouraged = True
 
 
+def _pick_target(
+    cands: Sequence[Candidate], health: Health | None, cur_api: str | None, opts: Options, env: Env
+) -> Target | int:
+    """The target for `auto`: the user's menu choice, or the exit code to stop with (0 when --no-input
+    only lists the choices, 1 when the menu was cancelled)."""
+    if not _interactive(env, opts):
+        env.say("Spoolman/PrintOps is not configured; --no-input installs nothing. Choose a target:")
+        for line in unconfigured_hints(cands):
+            env.say(line)
+        return 0
+    picked = _choose_interactively(cands, health, cur_api, opts, env)
+    return 1 if picked is None else picked
+
+
 def _setup(target: Target, health: Health | None, cur_api: str | None, opts: Options, env: Env) -> int:
     cands = candidates()
     if target.kind == "auto":
-        if not _interactive(env, opts):
-            env.say("Spoolman/PrintOps is not configured; --no-input installs nothing. Choose a target:")
-            for line in unconfigured_hints(cands):
-                env.say(line)
-            return 0
-        picked = _choose_interactively(cands, health, cur_api, opts, env)
-        if picked is None:
-            return 1
+        picked = _pick_target(cands, health, cur_api, opts, env)
+        if isinstance(picked, int):
+            return picked
         target = picked
     if target.kind == "skip":
         env.say("skipped: Spoolman/PrintOps not configured (3d init --env when you want it)")

@@ -10,7 +10,7 @@ STATE (JSON, version 1) — one printer:
   heads: [{label, index, usable, reason, nozzle: {diameter_mm, material, type} | None}]
   tools: [{tool, slot, head, spool}] G-code tool index → slot ("T3", or "ams-lite/2" on a
                                      single-head printer with an AMS) and the spool bound there
-                                     (Spoolman `printops_slot` = "<printer>/<slot>"), or None
+                                     (its Spoolman `location` = "slot:<printer>/<slot>"), or None
   bindings: "ledger" | "unknown"     "unknown" = no 3d-api behind this state (fleet only): a None
                                      spool then means "not known", not "nothing loaded"
   source, taken_at                   "3d-api" | "fleet"; ISO-8601 UTC
@@ -18,7 +18,9 @@ STATE (JSON, version 1) — one printer:
   filament_id, nozzle_temp_min/max, bed_temp_min/max, abrasive, hygroscopic_class
   (Spoolman filament + its PrintOps extra fields, None = not entered), remaining (the ledger
   interval, ledger.Interval.to_dict), drying (drying.assess: state/reasons/class or {error}),
-  conflict (ids of other spools bound to the same slot)}.
+  conflict (ids of other spools bound to the same slot), sync ({status: "ok"|"drift", findings:
+  [{kind, summary, healable, blocks}]} — printops.spool_sync: where Spoolman and PrintOps disagree
+  about this spool; a gate never picks a side, `spool_in_sync` grades it by policy)}.
   Later slices ADD keys (maintenance #166, calibrations #167); a gate treats an absent key as
   "not known" (UNVERIFIED), never as "fine".
 
@@ -37,7 +39,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from printops import drying, spools
+from printops import drying, spool_sync, spools
 from printops.db import utc_now
 from printops.drying_policy import DryingPolicy
 from printops.fleet import Fleet, FleetPrinter, Head
@@ -225,12 +227,14 @@ def printer_state(
     bound = _bind_spools(conn, fp, state, _spools_by_slot(pool))
     if bound:
         assessed = _assessments(conn, spoolman, drying_policy, humidity, moment, bound)
+        drifts = spool_sync.detect_spools(conn, list(bound.values()), pool)
         for tool in state["tools"]:
             sp = tool["spool"]
             if sp is not None:
                 sp["drying"] = assessed.get(sp["id"]) or {
                     "error": drying_error or "not assessed"
                 }
+                sp["sync"] = spool_sync.gate_state(drifts.get(sp["id"], []))
     return state
 
 
