@@ -9,6 +9,8 @@ checkpoints (a quarter, half and all of the first layer, 25/50/100 % of the job)
 the printer's own signals; on a lost print it stops the job (PAUSE or CANCEL, see `--on-fail`), saves the
 frames and the klippy.log lines into `--out`, rings `tg call me --say ...` and sends the frame with `tg`.
 Decisions are in jobwatch.py, the stop/alert steps in jobwatch_actions.py, the readings in jobwatch_sources.py.
+The print-QUALITY monitor (stringing debris, a lost bead pattern, an uneven first layer: warnings only, never a
+stop) runs on the same frames (jobwatch_quality.py) and writes its monitoring report when the watch ends.
 
 NEVER: starts a print, moves an axis, resumes, sends G-code. The camera sees the plate at the print's own Z, so
 nothing is moved to look. Exit codes: 0 the job ended and nothing was lost, 3 a lost print was found (the stop
@@ -46,9 +48,11 @@ from printer_ops.jobwatch import (
     parse_checkpoints,
 )
 from printer_ops.jobwatch_actions import Bound, Responder, bind, find_tg
+from printer_ops.jobwatch_quality import QualityWatch, run_quality_tool
+from printer_ops.quality import QualityConfig, quality_config
 
 USAGE = """3d printer watch NAME --job --yes [--on-fail auto|pause|cancel] [--gcode FILE.gcode] [--out DIR]
-    [--interval S] [--checkpoints L1@25%,L1@50%,L1@100%,25%,50%,100%] [--dry-run | --tg-dry-run]
+    [--interval S] [--checkpoints L1@25%,L1@50%,L1@100%,25%,50%,100%] [--dry-run | --tg-dry-run] [--no-quality]
     [--fixture SCENARIO.json] [--duration S] [--wait-start S]
   Watch ONE running print and ABORT IT when it is lost. Start it right after `3d printer start NAME FILE --yes`
   (or give `start` --watch): it follows that job until it ends. Unlike the always-on `3d printer watch NAME`
@@ -63,6 +67,16 @@ USAGE = """3d printer watch NAME --job --yes [--on-fail auto|pause|cancel] [--gc
               camera says `blind` — never "gone".
     signals   the same Moonraker events as the always-on watch (filament runout, heater loss, bed off, exception,
               G-code error, homing lost) and the printer's own defect detection (`noodle` verdicts, p >= 0.8).
+    quality   the PRINT-QUALITY monitor (printer_ops/quality.py, lib/print_quality.py): white stringing debris,
+              a lost bead pattern (stripes, roughness, under-/over-extrusion) and an uneven first layer, judged
+              against the job's OWN first layers (the first 4 readings with the part on the plate are the
+              reference). It sends `tg --photo FRAME "<russian text>"` once per issue and level (warning, then
+              severe) and NEVER pauses or cancels: a bad surface is the owner's call. A `notice` is only
+              written to the report. When the job ends (or the watch stops) the MONITORING REPORT is written
+              to DIR/<date>-NAME-monitor-report/ (report.json, report.md, worst-frame.jpg): readings per
+              severity and issue, the alerts, the baseline, the worst frame. `--no-quality` or
+              `<printer>.watch.quality: false` turns it off; `<printer>.watch.quality: {key: value}` tunes it
+              (the QualityConfig fields).
   On a critical finding: the job is stopped, the frames + finding.json + the klippy.log lines of the job are saved
   to DIR/<date>-NAME-jobwatch/ (default ./print/runs), `tg call me --say "<russian text>"` rings the owner, then
   `tg --photo FRAME "<text>"` sends the picture. A warning (part moved, nothing seen, a heater drift) is a tg
@@ -77,6 +91,7 @@ USAGE = """3d printer watch NAME --job --yes [--on-fail auto|pause|cancel] [--gc
   --checkpoints LIST extra checks (see above); `--checkpoints none` for the periodic one only
   --dry-run          nothing is sent to the printer or the phone: the stop and both tg commands are printed
   --tg-dry-run       the job is really stopped, the tg commands are only printed
+  --no-quality       skip the print-quality monitor (and its report)
   --fixture FILE     no network at all: the printer and the camera come from a scenario file with saved frames
                      (implies --dry-run for the phone; a fixture printer records the stop it is given)
   --duration S       stop watching after S seconds (default: until the job ends)
@@ -99,6 +114,8 @@ STATE_FILES = (
     "candidate.png",
     "track.json",
     "candidate-track.json",
+    "quality-frame.jpg",
+    "quality-worst.jpg",
 )
 
 
@@ -118,6 +135,7 @@ class Args:
     fixture: str | None
     duration: float | None
     wait_start: float | None
+    no_quality: bool = False
 
 
 class _Parser(argparse.ArgumentParser):
@@ -145,6 +163,7 @@ def parse_args(argv: list[str]) -> Args:
         p.add_argument(flag, type=float)
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--tg-dry-run", action="store_true")
+    p.add_argument("--no-quality", action="store_true")
     a = p.parse_args(argv)
     return Args(
         a.name,
@@ -161,6 +180,7 @@ def parse_args(argv: list[str]) -> Args:
         a.fixture,
         a.duration,
         a.wait_start,
+        a.no_quality,
     )
 
 
@@ -415,6 +435,7 @@ class JobWatch:
         clock: Callable[[], float],
         sleep: Callable[[float], None],
         echo: Callable[[str], None] = print,
+        quality: QualityWatch | None = None,
     ) -> None:
         self.source, self.camera, self.responder, self.cfg, self.tracker = (
             source,
@@ -425,6 +446,7 @@ class JobWatch:
         )
         self.clock, self.sleep, self.echo = clock, sleep, echo
         self.judge = JobJudge(cfg)
+        self.quality = quality
         self.next_check = 0.0
         self.recheck_at: float | None = None
         self.ended = 0
@@ -448,6 +470,7 @@ class JobWatch:
 
     def check(self, o: Observation, now: float) -> Verdict:
         why = None
+        jpeg: bytes | None = None
         try:
             jpeg = self.source.grab()
             why = self.camera.ensure_baseline(jpeg, o)
@@ -457,6 +480,8 @@ class JobWatch:
         o.noodles = self.source.noodles()
         v = self.judge.step(o)
         self.camera.learn(v)
+        if self.quality is not None and jpeg is not None:
+            v.findings.extend(self.quality.check(jpeg, o))
         first = o.layer is not None and o.layer <= 1
         self.next_check = now + (
             self.cfg.first_layer_interval_s if first else self.cfg.interval_s
@@ -476,6 +501,8 @@ class JobWatch:
             )
             + "".join(f"; {x}" for x in v.notes)
         )
+        if self.quality is not None and (note := self.quality.note()):
+            self.say(note)
         if o.part is not None and o.part.frame:
             self.last_files = {
                 "frame.annotated.jpg": o.part.annotated,
@@ -535,10 +562,18 @@ class JobWatch:
                 "alert",
                 fresh,
                 layer=o.layer,
-                files=self.last_files,
+                files=self.alert_files(fresh),
                 extra={"observations": self.history, "action": "alert"},
             )
         return None
+
+    def alert_files(self, fresh: list[Finding]) -> dict[str, str | None]:
+        """The frames sent with an alert: the quality picture (debris marked) for a quality alert."""
+        if self.quality is not None and all(
+            f.kind.startswith("quality_") for f in fresh
+        ):
+            return {**self.quality.alert_files(), **self.last_files}
+        return self.last_files
 
     def wait_for_job(self, deadline: float) -> bool:
         while self.clock() < deadline:
@@ -549,6 +584,20 @@ class JobWatch:
         return False
 
     def run(self, duration: float | None) -> int:
+        """Watch until the job ends; the monitoring report is written whatever way the watch ends."""
+        try:
+            return self._run(duration)
+        finally:
+            self.report()
+
+    def report(self) -> None:
+        if self.quality is None:
+            return
+        folder, line = self.quality.finish(self.cfg.out_dir)
+        if folder is not None:
+            self.say(f"{line} -> {folder}")
+
+    def _run(self, duration: float | None) -> int:
         start = self.clock()
         if not self.wait_for_job(start + self.cfg.wait_start_s):
             self.say("no job is printing: nothing to watch")
@@ -708,11 +757,14 @@ def run(argv: list[str]) -> int:
         args, dict((device.watch or {}).get("job") or {}), default_out_dir(args.name)
     )
     tracker = CheckpointTracker(cfg.checkpoints, first_layer_range(args.gcode))
+    quality = quality_config((device.watch or {}).get("quality"))
     with one_watch_per_printer(args.name):
-        return _run_watch(args, cfg, tracker)
+        return _run_watch(args, cfg, tracker, quality)
 
 
-def _run_watch(args: Args, cfg: JobConfig, tracker: CheckpointTracker) -> int:
+def _run_watch(
+    args: Args, cfg: JobConfig, tracker: CheckpointTracker, quality_cfg: QualityConfig
+) -> int:
     from cli.paths import state_dir
 
     run_dir = state_dir() / "jobwatch" / args.name
@@ -729,7 +781,21 @@ def _run_watch(args: Args, cfg: JobConfig, tracker: CheckpointTracker) -> int:
     ):  # a new job starts from nothing: no baseline or footprint of the last one
         (run_dir / name).unlink(missing_ok=True)
     camera = CameraCheck(args.name, run_dir, run_part_tool, cfg)
-    watch = JobWatch(source, camera, responder, cfg, tracker, clock=now, sleep=sleep)
+    quality = (
+        None
+        if args.no_quality or not quality_cfg.enabled
+        else QualityWatch(
+            args.name,
+            run_dir,
+            run_quality_tool,
+            quality_cfg,
+            cfg,
+            responder.bound.filename,
+        )
+    )
+    watch = JobWatch(
+        source, camera, responder, cfg, tracker, clock=now, sleep=sleep, quality=quality
+    )
     print(
         f"watching {args.name}: {responder.bound.filename} (job {responder.bound.job_id or '?'}), every "
         f"{cfg.interval_s:g} s, on-fail {cfg.on_fail}, evidence -> {cfg.out_dir}"
