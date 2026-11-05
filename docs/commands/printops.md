@@ -151,29 +151,37 @@ It never touches the Home Assistant compose project and never restarts HA.
 Rotated, verified backups of Spoolman's DB, the PrintOps DB and the tokens file. **Home Assistant is the only scheduler**
 (04:00 daily, `integrations/homeassistant/packages/printops_backup.yaml` → `POST /v1/backup/run` on 3d-api); there is no
 cron job or systemd timer. A set is `3d-backup-<UTC>/` under `<disk>/<subdir>/`: gzip'd SQLite snapshots (online backup API in
-small steps, `nice 19` + `ionice` idle, gzip level 1), `MANIFEST.json` (row counts, sha256) and `SHA256SUMS`; it is
+one pass, `nice 19` + `ionice` idle, gzip level 1), `MANIFEST.json` (row counts, sha256) and `SHA256SUMS`; it is
 verified (every DB decompressed again + `PRAGMA integrity_check`) in a temp dir and published with one rename.
 
 ```
 3d printops backup run [--target NAME | --dest DIR] [--subdir D] [--keep daily=7,weekly=4,monthly=6] [--min-free-gb N] [--no-spoolman] [--json]
 3d printops backup ls | verify [SET|latest] | prune [--dry-run] | restore [SET|latest] --into DIR [--layout flat|data --yes] | selftest
 3d printops backup target add NAME PATH [--init-marker] | target ls
-3d printops backup discover [--ssh USER@HOST] [--data-dir DIR] [--hint-gb 512] [--json]
+3d printops backup restore latest --dest <host disk root> --subdir 3d-printops --into DIR --layout data --yes   # host-side runbook
+3d printops backup discover [--ssh USER@HOST] [--data-dir DIR] [--hint-gb 512] [--json]   # --data-dir is a path ON that host
 ```
 
 - **Disk guard.** A run refuses (exit 1, nothing written, notification) unless `<disk>/.3d-backup-disk` exists and carries the id
   recorded in `backup.yaml` (next to the PrintOps DB; `/data/backup.yaml` in the container). An unmounted disk never fills the
   root filesystem. `target add … --init-marker` writes that one marker file; discovery never writes. Free space ≥ run size + `--min-free-gb`.
+- **Retention floor.** `POST /v1/backup/run` raises `keep_*` to `retention_floor: {daily, weekly, monthly}` in `backup.yaml` (default
+  7/4/6), so a write token cannot prune the history; the raised policy is the one recorded. `/v1/health` and `3d printops health` carry
+  a `backup` block: `NOT CONFIGURED` when no disk is registered (no backups are taken), else the targets and the last run.
 - **Rotation.** Newest set of each of the last N days / ISO weeks / months (default 7 + 4 + 6); retention comes with every
   run from the HA package (the single place to edit it); a hand-run `prune` without `--keep` re-uses the policy of the last
   run on that disk. Prune touches only directories named `3d-backup-YYYYMMDDTHHMMSSZ` that hold a `MANIFEST.json`, and always
   keeps the newest one; other files/dirs on the disk are never touched.
 - **Failure** (disk missing/wrong, full, bad integrity, 3d-api down): exit 1 + the notification payload on stderr; with
-  `PRINTOPS_HA_URL` + `<data>/api/ha_token` 3d-api posts the HA persistent notification `printops_backup_failed`; the HA package
+  `PRINTOPS_HA_URL` + `<data>/api/ha_token` 3d-api posts the HA persistent notification `printops_backup_failed_<target>` (one per target); the HA package
   raises the same id itself (also when 3d-api is unreachable) and warns after 36 h without a good run; a PrintOps anomaly
   `backup_failed` (scope `backup:<target>`: each target is reconciled on its own) is opened (`3d printops anomalies`) and resolved by the next good run.
 - **Restore.** `3d printops backup restore latest --into ~/restore` unpacks verified files (`spoolman.db`, `printops.db`, `tokens.json`);
-  `--layout data --into <PRINTOPS_DATA_DIR> --yes` writes the compose layout (stop the stack first; old files become `*.pre-restore`).
+  `--layout data --into <PRINTOPS_DATA_DIR> --yes` writes the compose layout (stop the stack first; old files and their `-wal`/`-shm`
+  become `*.pre-restore`, never overwriting an earlier one: `.pre-restore.1`, ...). The set is copied to a private scratch dir and verified
+  there, so a disk that changes under the restore cannot redirect it. Restoring into a stopped stack from the HOST uses the disk itself,
+  because `backup.yaml` names the container's `/backup`:
+  `3d printops backup restore latest --dest <host disk root> --subdir 3d-printops --into <PRINTOPS_DATA_DIR> --layout data --yes`.
   A set taken while there was no tokens file (deny-all) restores that state: an existing tokens file is moved aside too.
   A set whose manifest names a file outside the set directory, or a link, is refused (`verify` reports it).
   `selftest` = one real run + restore into a scratch dir + integrity/row-count comparison (what `3d init --env` runs).
