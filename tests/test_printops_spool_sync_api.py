@@ -8,6 +8,7 @@ the two sides are in step afterwards."""
 
 from __future__ import annotations
 
+import datetime
 import sqlite3
 import time
 from dataclasses import dataclass
@@ -30,7 +31,7 @@ from printops.cli.health import (
     spool_sync_ok,
     spool_sync_status,
 )
-from printops.client import ApiClient, ApiError
+from printops.client import ApiClient
 from printops.settings import Settings
 from printops.spool_mirror import SyncedSpoolman
 from printops.spoolman import SpoolmanError, ensure_extra_fields
@@ -364,6 +365,8 @@ def test_status_needs_no_token_and_says_the_schedule_is_off(
         "enabled": False,
         "interval_s": 0,
         "last_pass": None,
+        "age_s": 0,
+        "stale": False,
         "anomalies_open": 0,
     }
     # off means off: nobody heals it behind the user's back
@@ -644,6 +647,8 @@ def test_health_reads_the_live_status_and_treats_a_404_as_an_old_api(
         "enabled": False,
         "interval_s": 0,
         "last_pass": None,
+        "age_s": 0,
+        "stale": False,
         "anomalies_open": 0,
     }
     assert spool_sync_ok(got) and "OFF" in render_spool_sync(got)
@@ -663,8 +668,76 @@ def test_health_reads_the_live_status_and_treats_a_404_as_an_old_api(
         "tok",
         TestClientTransport(TestClient(broken, raise_server_exceptions=False)),
     )
-    with pytest.raises(
-        ApiError
-    ) as e:  # only a 404 means "old": a 500 is a real failure
-        spool_sync_status(broken_api)
-    assert e.value.status == 500
+    # only a 404 means "old": a 500 is a real failure, reported (not raised) so `health` still prints
+    # the rest of its answer, which is where the DB diagnostic is
+    down = spool_sync_status(broken_api)
+    assert down is not None and "500" in down["unavailable"]
+    assert spool_sync_ok(down) is False
+    text = render_spool_sync(down)
+    assert "UNAVAILABLE" in text and "500" in text
+
+
+# -- the schedule cannot stop silently --------------------------------------------------------------------------
+
+
+def test_a_pass_that_cannot_open_the_db_is_recorded_and_does_not_end_the_loop(
+    printops_settings: Settings, fake_spoolman: FakeSpoolman, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app = create_app(printops_settings, spoolman=fake_spoolman)
+    with TestClient(app):
+        def locked(_path: Path) -> sqlite3.Connection:
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr(routes_spool_sync, "open_db", locked)
+        routes_spool_sync.pass_once(app.state.printops, app.state.spool_sync)  # must not raise
+        assert "database is locked" in app.state.spool_sync.status.error
+
+
+def test_the_status_calls_a_schedule_that_has_not_passed_for_a_few_intervals_stale(
+    printops_settings: Settings, fake_spoolman: FakeSpoolman
+) -> None:
+    from printops import spool_sync as sync
+
+    svc = routes_spool_sync.SpoolSyncService(60.0)
+    now = datetime.datetime(2026, 11, 5, 12, 0, tzinfo=datetime.timezone.utc)
+    svc.started_at = "2026-11-05T11:59:00.000Z"
+    assert svc.stale(now) is False  # just started
+    svc.started_at = "2026-11-05T11:00:00.000Z"
+    assert svc.stale(now) is True  # never passed in an hour
+    svc.status = sync.PassStatus(at="2026-11-05T11:59:30.000Z")
+    assert svc.stale(now) is False
+    svc.status = sync.PassStatus(at="2026-11-05T11:30:00.000Z", error="Spoolman is unreachable")
+    assert svc.stale(now) is True  # failing passes do not refresh `at`
+    assert routes_spool_sync.SpoolSyncService(0.0).stale(now) is False  # off is not stale
+
+    app = create_app(printops_settings, spoolman=fake_spoolman)
+    hour_ago = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=1)
+    stuck = routes_spool_sync.SpoolSyncService(60.0, started_at=hour_ago.strftime("%Y-%m-%dT%H:%M:%S.000Z"))
+    with TestClient(app) as client:
+        app.state.spool_sync = stuck
+        body = client.get("/v1/spool-sync/status").json()
+    assert body["stale"] is True and body["age_s"] >= 3600
+
+
+def test_health_calls_a_stale_status_not_ok_and_says_so() -> None:
+    stale = _status(stale=True, age_s=900)
+    assert spool_sync_ok(stale) is False
+    text = render_spool_sync(stale)
+    assert "STALE" in text and "900" in text
+    assert spool_sync_ok(_status(stale=False, age_s=5)) is True
+
+
+def test_health_still_prints_the_db_diagnostic_when_the_sync_status_is_unavailable() -> None:
+    """A DB that will not open fails /v1/health with `db FAIL <error>` and the status route with a 500:
+    the command must show both, not abort on the second."""
+    from printops.cli.health import render
+
+    body = {
+        "status": "degraded",
+        "version": "x",
+        "db": {"ok": False, "error": "unable to open database file"},
+        "spoolman": {"ok": True, "version": "0.27.0"},
+    }
+    text = render(body, "http://api", {"unavailable": "HTTP 500: Internal Server Error", "status": 500})
+    assert "db        FAIL  unable to open database file" in text
+    assert "spool sync  UNAVAILABLE" in text

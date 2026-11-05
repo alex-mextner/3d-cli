@@ -60,7 +60,9 @@ def spool_sync_status(api: ApiClient) -> dict[str, Any] | None:
     except ApiError as e:
         if e.status == 404:
             return None
-        raise
+        # a 500/503 here is usually the same DB failure /v1/health names: report it, so the rest of the
+        # answer (the `db FAIL <error>` line) is still printed
+        return {"unavailable": e.message, "status": e.status}
     return got if isinstance(got, dict) else None
 
 
@@ -68,6 +70,8 @@ def spool_sync_ok(s: dict[str, Any] | None) -> bool:
     """Nothing drifts and nothing is stuck: a disabled or never-run sync has nothing to report."""
     if s is None:
         return True
+    if s.get("unavailable") or s.get("stale"):
+        return False
     last = s.get("last_pass") or {}
     return not (last.get("drift") or last.get("error") or s.get("anomalies_open"))
 
@@ -75,6 +79,13 @@ def spool_sync_ok(s: dict[str, Any] | None) -> bool:
 def render_spool_sync(s: dict[str, Any] | None) -> str:
     if s is None:
         return "  spool sync  not available (this 3d-api has no /v1/spool-sync)"
+    if s.get("unavailable"):
+        return f"  spool sync  UNAVAILABLE: /v1/spool-sync/status answered {s.get('status')}: {s['unavailable']}"
+    if s.get("stale"):
+        return (
+            f"  spool sync  STALE: no pass completed for {s.get('age_s', '?')} s "
+            f"(every {s.get('interval_s', 0):g} s): the schedule is stuck or failing"
+        )
     last = s.get("last_pass")
     if not s.get("enabled"):
         return "  spool sync  OFF (PRINTOPS_SPOOL_SYNC_S=0): nothing reconciles Spoolman with the ledger by itself"

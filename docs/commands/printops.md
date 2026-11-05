@@ -91,7 +91,10 @@ add theirs there.
 ```
 
 A drifting spool prints `spool sync  DRIFT  3 drift, … → 3d printops spool drift` and the command exits 1
-([spool-sync.md](../printops/spool-sync.md)).
+([spool-sync.md](../printops/spool-sync.md));
+a schedule that completed no pass for several intervals prints `spool sync  STALE` (a stuck loop or passes that keep
+failing; `/v1/spool-sync/status` carries `age_s` and `stale`), and when that status route answers 500/503 (a DB that
+will not open) the command prints `spool sync  UNAVAILABLE` after the `db FAIL <error>` line instead of aborting.
 
 
 ### `events`

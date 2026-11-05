@@ -5,7 +5,8 @@
                                   {ok, tolerance_g, checked, drift, healable, unhealable, drifts[],
                                    last_pass, interval_s}
   GET  /v1/spool-sync/status      NO auth (like /v1/health). What the latest scheduled pass saw, no
-                                  Spoolman request: {enabled, interval_s, last_pass, anomalies_open}
+                                  Spoolman request: {enabled, interval_s, last_pass, age_s, stale,
+                                   anomalies_open} (stale: on, but no pass completed for several intervals)
   POST /v1/spool-sync/heal        scope write. {"spool_id"?} heal now (the same pass the schedule
                                   runs); answers {ok, before, healed, failed, after}.
   POST /v1/spool-sync/confirm-deleted
@@ -26,9 +27,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import datetime
 import logging
 import math
 import os
+import sqlite3
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
 from typing import Annotated, Any
@@ -40,7 +43,9 @@ from printops import reconcile as rc
 from printops import spool_sync as sync
 from printops.api.deps import Db, get_state, require
 from printops.api.state import ApiState
+from printops.datalint import parse_utc
 from printops.db import open_db
+from printops.db import utc_now as db_utc_now
 from printops.spoolman import SpoolmanError
 from printops.tokens import TokenRecord
 
@@ -49,6 +54,7 @@ log = logging.getLogger("printops.spool_sync")
 DEFAULT_INTERVAL_S = 60.0
 MIN_INTERVAL_S = 10.0
 FIELDS_WAIT_S = 120.0
+STALE_PASSES = 3  # a schedule with no pass for this many intervals (+ the fields wait) is stuck
 
 READ = [Depends(require("read"))]
 Writer = Annotated[TokenRecord, Depends(require("write"))]
@@ -60,10 +66,21 @@ class SpoolSyncService:
 
     interval_s: float
     status: sync.PassStatus = field(default_factory=sync.PassStatus)
+    started_at: str = field(default_factory=db_utc_now)
 
     @property
     def enabled(self) -> bool:
         return self.interval_s > 0
+
+    def age_s(self, now: datetime.datetime | None = None) -> float:
+        """Seconds since the last pass that completed (or since start when none did)."""
+        now = now or datetime.datetime.now(datetime.timezone.utc)
+        return (now - parse_utc(self.status.at or self.started_at)).total_seconds()
+
+    def stale(self, now: datetime.datetime | None = None) -> bool:
+        """The schedule is on but nothing completed for several intervals: a dead loop or passes that
+        keep failing. Without this `health` would keep reporting the last good pass as current."""
+        return self.enabled and self.age_s(now) > STALE_PASSES * self.interval_s + FIELDS_WAIT_S
 
     def last_pass(self) -> dict[str, Any] | None:
         return self.status.to_dict() if self.status.at or self.status.error else None
@@ -99,8 +116,9 @@ def interval_from_env(env: Mapping[str, str] | None = None) -> float:
 
 def pass_once(state: ApiState, svc: SpoolSyncService) -> None:
     """One scheduled pass in a worker thread; never raises (a background loop outlives a bad pass)."""
-    conn = open_db(state.settings.db_path)
+    conn: sqlite3.Connection | None = None
     try:
+        conn = open_db(state.settings.db_path)  # inside the try: a locked DB must not end the loop
         sm = state.synced(conn)
         if sm is None:
             svc.status = sync.PassStatus(error="SPOOLMAN_URL is not set")
@@ -123,7 +141,8 @@ def pass_once(state: ApiState, svc: SpoolSyncService) -> None:
             error=f"{type(e).__name__}: {e}",
         )
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
 
 
 async def _wait_for_fields(state: ApiState) -> None:
@@ -198,6 +217,8 @@ def status(request: Request, conn: Db) -> dict[str, Any]:
         "enabled": svc.enabled,
         "interval_s": svc.interval_s,
         "last_pass": svc.last_pass(),
+        "age_s": round(svc.age_s()),
+        "stale": svc.stale(),
         "anomalies_open": len(rc.list_anomalies(conn, scope=sync.SCOPE)),
     }
 

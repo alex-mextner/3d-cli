@@ -312,6 +312,8 @@ def test_health_says_the_sync_is_off_when_nothing_schedules_it(
         "enabled": False,
         "interval_s": 0,
         "last_pass": None,
+        "age_s": 0,
+        "stale": False,
         "anomalies_open": 0,
     }
     assert body["status"] == "ok"
