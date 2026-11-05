@@ -15,7 +15,9 @@ HOW IT DECIDES: against a reference frame of the EMPTY bed WITH the plate, taken
   Both frames are decoded at reduced size (480 px wide), blurred, the current one is mapped onto
   the reference colour by a robust per-channel gain/offset fit inside the ROI (auto-exposure and
   room light change the whole frame, a part changes a region), and the pixels still off by more
-  than `level` count as changed.
+  than `level` count as changed. When the light differs from the reference's (day vs night, the
+  printer's light on vs off, a gamma) that is not enough: lib/bed_norm.py adds the local texture as a
+  second channel and a pixel needs both to count (`_under_light_change`).
     view:  with a calibration, under `view_min` of the bed footprint in the frame at this Z (the
            U1 bed at Z >= ~215, Z 275 after a home: none of it) -> unknown, "out of the camera's
            view" — no reference can fix that, and none is captured there.
@@ -91,6 +93,8 @@ from bed_view import view_in_progress  # noqa: E402
 if TYPE_CHECKING:
     import numpy as np
 
+    from bed_norm import LightStats
+
     from printer_ops.devices import Device
     from vision_geometry import CameraModel
 
@@ -129,6 +133,7 @@ class Thresholds:
     open_px: int = 5             # objects: changed regions are opened with this square kernel (thinner lines go)
     low_view: float = 0.5        # calibrated: under this share of the bed in the frame the ROI is mostly the room ...
     occupied_blob_low_px: int = 1200  # ... and only a region this big (or occupied_min of the ROI) says occupied
+    light_norm: int = 1          # 1: when the light differs from the reference's, a pixel needs colour AND texture change (0: off)
 
 
 TH = Thresholds()
@@ -234,13 +239,14 @@ def _best_shift(cur: np.ndarray, ref: np.ndarray, shift: int) -> np.ndarray:
 
 
 def difference(ref: np.ndarray, cur: np.ndarray, roi: np.ndarray, level: float = TH.level,
-               detrend: int = 0, shift: int = 0, open_px: int = 3) -> Diff:
+               detrend: int = 0, shift: int = 0, open_px: int = 3, norm: bool = False) -> Diff:
     """Changed pixels of `cur` against `ref` inside `roi` after `align`. `detrend` (odd px > 0)
     also subtracts the median of the signed difference over that window: a light gradient or a
     reflection that moved with the room light is smooth and goes, a part narrower than half the
     window stays (used for objects; the plate test keeps the plain difference). `shift` (px) lets a
     pixel match anything within that distance in the reference, and changed regions are opened with an
-    `open_px` square: what is left is a patch of new colour, not the outline of an unchanged scene."""
+    `open_px` square: what is left is a patch of new colour, not the outline of an unchanged scene.
+    `norm` (the frames differ in light, bed_norm.py): a pixel also needs the local texture to have changed."""
     import cv2
     import numpy as np
 
@@ -256,7 +262,12 @@ def difference(ref: np.ndarray, cur: np.ndarray, roi: np.ndarray, level: float =
         packed = np.clip(signed / 2 + 128, 0, 255).astype(np.uint8)
         signed -= (cv2.medianBlur(packed, detrend | 1).astype(np.float32) - 128) * 2
     d = np.abs(signed).max(axis=2)
-    changed = ((d > level) & roi).astype(np.uint8)
+    changed = (d > level) & roi
+    if norm:
+        import bed_norm
+
+        changed = bed_norm.confirm(changed, bed_norm.structure_changed(ref, cur, roi, shift))
+    changed = changed.astype(np.uint8)
     changed = cv2.morphologyEx(changed, cv2.MORPH_OPEN, np.ones((open_px, open_px), np.uint8))
     n, _, stats, _ = cv2.connectedComponentsWithStats(changed)
     blob = int(stats[1:, cv2.CC_STAT_AREA].max()) if n > 1 else 0
@@ -473,15 +484,15 @@ class Verdict:
 
 
 def _judge_plate(img: np.ndarray, plate_ref: Reference | None, noplate_ref: Reference | None,
-                 z: float | None, th: Thresholds) -> tuple[str, str, dict[str, float]]:
+                 z: float | None, th: Thresholds, norm: bool = False) -> tuple[str, str, dict[str, float]]:
     base = plate_ref or noplate_ref
     assert base is not None
     cover = float(base.surface.mean())
     if cover < th.surface_min:
         return UNKNOWN, f"plate not judged: the bed surface is out of view at Z {_fz(z)} ({cover:.1%} of the frame)", {}
     if plate_ref is not None and noplate_ref is not None:
-        ds = difference(plate_ref.image, img, plate_ref.surface, th.level).frac
-        dn = difference(noplate_ref.image, img, noplate_ref.surface, th.level).frac
+        ds = difference(plate_ref.image, img, plate_ref.surface, th.level, norm=norm).frac
+        dn = difference(noplate_ref.image, img, noplate_ref.surface, th.level, norm=norm).frac
         if abs(ds - dn) < th.plate_tie:  # equally far from both: a human must look
             return UNKNOWN, (f"plate unclear: bed surface {ds:.0%} off the with-plate reference, "
                              f"{dn:.0%} off the bare-bed one"), {"surface_vs_plate": ds, "surface_vs_noplate": dn}
@@ -489,13 +500,13 @@ def _judge_plate(img: np.ndarray, plate_ref: Reference | None, noplate_ref: Refe
         return plate, (f"bed surface {ds:.0%} off the with-plate reference, {dn:.0%} off the bare-bed one"), \
             {"surface_vs_plate": ds, "surface_vs_noplate": dn}
     if plate_ref is not None:
-        ds = difference(plate_ref.image, img, plate_ref.surface, th.level).frac
+        ds = difference(plate_ref.image, img, plate_ref.surface, th.level, norm=norm).frac
         if ds >= th.plate_missing_min:
             return MISSING, (f"{ds:.0%} of the bed surface differs from the with-plate reference "
                              "(plate off, or the bed covered)"), {"surface_vs_plate": ds}
         return PRESENT, f"bed surface {ds:.0%} off the with-plate reference", {"surface_vs_plate": ds}
     assert noplate_ref is not None
-    dn = difference(noplate_ref.image, img, noplate_ref.surface, th.level).frac
+    dn = difference(noplate_ref.image, img, noplate_ref.surface, th.level, norm=norm).frac
     if dn >= th.plate_missing_min:
         return PRESENT, (f"{dn:.0%} of the bed surface differs from the bare-bed reference "
                          "(plate on, or the bed covered)"), {"surface_vs_noplate": dn}
@@ -549,6 +560,57 @@ def _select_refs(img: np.ndarray, refs: list[Reference], z: float | None, printe
     return plate_ref, noplate_ref, None
 
 
+def _light_stats(base: Reference, img: np.ndarray, th: Thresholds) -> LightStats | None:
+    """bed_norm.LightStats of the frame against the reference's bed ROI, or None when `light_norm` is off."""
+    if not th.light_norm:
+        return None
+    import bed_norm
+
+    return bed_norm.light_stats(base.image, img, base.volume)
+
+
+def _under_light_change(plain: Verdict, normed: Verdict, stats: LightStats, in_view: float | None, th: Thresholds,
+                        printer: str) -> Verdict:
+    """The verdict when the light differs from the reference's. `plain` is the colour difference alone,
+    `normed` needs colour AND texture (bed_norm.py). What both channels show is a part (`normed` occupied);
+    pixels only the colour difference flags are the light, so `plain` occupied without `normed` is unknown, never
+    occupied. `normed` may call the bed clear where `plain` could not, but not at a low view (most of the ROI
+    is the room there: see `_objects_verdict`)."""
+    note = f"light differs from the reference ({stats.why}): judged by colour and texture"
+    low_view = in_view is not None and in_view < th.low_view
+    light = {"light_ratio": stats.ratio, "light_mismatch": 1.0}
+    if plain.bed == CLEAR:
+        return replace(plain, metrics={**plain.metrics, **light})
+    if normed.bed == OCCUPIED or (normed.bed == CLEAR and not low_view):
+        return replace(normed, reason=f"{normed.reason}; {note}", metrics={**normed.metrics, **light})
+    if plain.bed == UNKNOWN:
+        return replace(plain, reason=f"{plain.reason}; {note}", metrics={**plain.metrics, **light})
+    changed = plain.metrics.get("changed", 0.0)
+    return replace(normed, bed=UNKNOWN, metrics={**normed.metrics, **light, "plain_changed": changed},
+                   reason=(f"{changed:.1%} of the bed view differs by colour but the texture did not change: the "
+                           f"light, not a part ({stats.why}); {normed.reason}; look at the frame or "
+                           f"`3d printer bed check {printer}`"))
+
+
+def _judge_objects(img: np.ndarray, ref: Reference, inner: np.ndarray, plate_info: tuple[str, str, dict[str, float]],
+                   where: tuple[float | None, float | None, str], th: Thresholds,
+                   stats: LightStats | None) -> Verdict:
+    """The objects verdict of `img` against `ref`; with a light change also the normalised one, combined."""
+    in_view, z, printer = where
+    plate, plate_why, plate_metrics = plate_info
+
+    def once(norm: bool) -> Verdict:
+        d = difference(ref.image, img, inner, th.level, th.detrend_px, th.shift_px, th.open_px, norm)
+        blob_px = d.blob * int(inner.sum())
+        metrics = {**plate_metrics, "changed": d.frac, "blob": d.blob, "blob_px": blob_px}
+        return _objects_verdict(d, blob_px, ref, (plate, plate_why, metrics), inner, in_view, z, printer, th)
+
+    plain = once(False)
+    if stats is None or not stats.mismatch:
+        return plain
+    return _under_light_change(plain, once(True), stats, in_view, th, printer)
+
+
 def classify(img: np.ndarray, refs: list[Reference], z: float | None, printer: str,
              th: Thresholds = TH, match: ZMatch | None = None) -> Verdict:
     import cv2
@@ -563,7 +625,10 @@ def classify(img: np.ndarray, refs: list[Reference], z: float | None, printer: s
     if early is not None:
         return early
     assert plate_ref is not None or noplate_ref is not None
-    plate, plate_why, metrics = _judge_plate(img, plate_ref, noplate_ref, z, th)
+    base = plate_ref or noplate_ref
+    assert base is not None
+    stats = _light_stats(base, img, th)
+    plate, plate_why, metrics = _judge_plate(img, plate_ref, noplate_ref, z, th, stats is not None and stats.mismatch)
     ref = noplate_ref if plate == MISSING else plate_ref
     if ref is None:
         why = ("plate missing and no bare-bed reference to judge objects against" if plate == MISSING
@@ -575,10 +640,7 @@ def classify(img: np.ndarray, refs: list[Reference], z: float | None, printer: s
     if inner.sum() < 100:  # a degenerate ROI inspects nothing: never call that clear
         return Verdict(UNKNOWN, plate, f"the bed ROI of {ref.path.name} is empty or tiny ({int(inner.sum())} px): "
                        f"fix watch.bed.roi and capture the reference again; {plate_why}", metrics)
-    d = difference(ref.image, img, inner, th.level, th.detrend_px, th.shift_px, th.open_px)
-    blob_px = d.blob * int(inner.sum())
-    metrics.update(changed=d.frac, blob=d.blob, blob_px=blob_px)
-    return _objects_verdict(d, blob_px, ref, (plate, plate_why, metrics), inner, match.in_view(z), z, printer, th)
+    return _judge_objects(img, ref, inner, (plate, plate_why, metrics), (match.in_view(z), z, printer), th, stats)
 
 
 def occupied_confident(v: Verdict, th: Thresholds, view_min: float) -> bool:
@@ -1261,14 +1323,21 @@ Config (fleet/printers.yaml or printer-devices.yaml, `<name>.watch.bed`):
                            (level, detrend_px, edge_px, clear_blob_px, clear_max, occupied_blob_px,
                            occupied_min, plate_missing_min, plate_tie, surface_min, change_min,
                            settle_frames, match_px, view_min, shift_px, open_px, low_view,
-                           occupied_blob_low_px)
+                           occupied_blob_low_px, light_norm)
   Objects are judged robustly: a pixel that matches the reference within shift_px (3) counts as
   unchanged (a bed parked at another Z, a vibrating camera), changed regions are opened with an
   open_px (5) square (a moved cable, an edge line), and where the camera sees less than low_view
   (0.5) of the bed (U1 at Z 200: 15 %) most of the ROI is the machine and the room behind it, so
   only a region of occupied_blob_low_px (1200) or occupied_min of the ROI says "occupied"; a
   smaller one stays "unknown" with the hint to `bed check` from a better Z. Light and exposure
-  changes are mapped out per channel, then smooth gradients are detrended.
+  changes are mapped out per channel, then smooth gradients are detrended. When the light differs
+  from the reference's (the brightness of the bed at its dark, middle or bright end off by more than
+  x0.8..x1.25: day vs night, the printer's light on vs off, a gamma; lib/bed_norm.py) a pixel also needs
+  its local TEXTURE (luminance over its neighbourhood spread) to have changed, which gain, offset and
+  tone curves leave alone: pixels only the colour difference flags are the light, so a frame that would
+  read `occupied` by colour alone is `unknown` (the verdict says "the light, not a part"), never
+  `occupied`; a real part changes both and stays `occupied`. At a low view (see low_view) the texture
+  channel may rescue an `occupied` but does not call the bed clear. thresholds.light_norm: 0 turns it off.
   The camera is the printer's watch.vision.camera (a printer without one cannot enable the bed check).
   clear_ack: {enabled: true, command: STEPPER_BUZZ STEPPER=stepper_z, debounce_minutes: 10,
               min_z_mm: 10}   one motor sound after bed_clear (the command must be in

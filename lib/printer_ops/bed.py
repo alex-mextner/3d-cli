@@ -83,7 +83,7 @@ BED_KEYS = ("enabled", "interval_s", "roi", "volume_height_mm", "z_tol_mm", "sta
 # another camera may need other values): every field of that dataclass, a test keeps the two in step.
 THRESHOLD_KEYS = ("level", "detrend_px", "edge_px", "clear_blob_px", "clear_max", "occupied_blob_px", "occupied_min",
                   "plate_missing_min", "plate_tie", "surface_min", "change_min", "settle_frames", "match_px", "view_min",
-                  "shift_px", "open_px", "low_view", "occupied_blob_low_px")
+                  "shift_px", "open_px", "low_view", "occupied_blob_low_px", "light_norm")
 ACK_KEYS = ("enabled", "command", "debounce_minutes", "min_z_mm")
 LIGHT_KEYS = ("enabled", "object", "on_gcode", "off_gcode", "settle_s")
 

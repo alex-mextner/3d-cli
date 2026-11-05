@@ -31,8 +31,12 @@ cv2 = pytest.importorskip("cv2")
 import bed_state as B  # noqa: E402  (needs numpy + OpenCV)
 
 OLD = dataclasses.replace(
-    B.TH, shift_px=0, open_px=3, occupied_blob_low_px=B.TH.occupied_blob_px
-)  # the classifier before #723
+    B.TH,
+    shift_px=0,
+    open_px=3,
+    occupied_blob_low_px=B.TH.occupied_blob_px,
+    light_norm=0,
+)  # the classifier before #723 (no shift tolerance, no lighting-normalised channel)
 
 
 @pytest.fixture(autouse=True)

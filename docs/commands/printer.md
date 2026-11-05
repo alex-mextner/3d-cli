@@ -751,7 +751,15 @@ until someone takes them off. The camera can see that, so nobody has to tell an 
   `3d printer bed check NAME` looks from a better Z» and the age of the reference. A real part
   is not hidden by this (the U1 frames of parts on the bed are 2700–3900 px regions, a 16 px
   object on the K1 SE stays `occupied`); a thing smaller than that from a 15 % view is
-  `unknown`, never `clear`. Every evidence image has the untouched camera frame beside it
+  `unknown`, never `clear`. **Another light** (day vs night, the printer's light on vs off, a gamma
+  or a white-balance shift of the camera): when the brightness of the bed at its dark, middle or
+  bright end is off by more than ×0.8…×1.25 from the reference's, a pixel also needs its local
+  *texture* (luminance over the spread of its neighbourhood, `lib/bed_norm.py`) to have changed —
+  gain, offset and any tone curve leave the texture alone, a part does not. Pixels only the colour
+  difference flags are the light: a frame that would read `occupied` by colour alone is `unknown`
+  («the light, not a part», never `occupied`), a real part changes both and stays `occupied`. At a
+  low view the texture channel may rescue an `occupied` but does not call the bed `clear`.
+  `thresholds.light_norm: 0` turns it off for a printer. Every evidence image has the untouched camera frame beside it
   (`…-label.raw.jpg`), so a doubtful verdict can be re-judged. ROI: `watch.bed.roi` (a polygon of the bed, 0..1 of
   the frame), else the camera calibration (bed plus 80 mm above it at the current Z), else the
   whole frame. On the U1 at Z 200 only parts taller than a few cm show, and only the plate's front
@@ -762,7 +770,7 @@ until someone takes them off. The camera can see that, so nobody has to tell an 
   `watch.bed.thresholds: {clear_max: 0.05, level: 30, ...}` overrides any of them for one printer
   (`level`, `detrend_px`, `edge_px`, `clear_blob_px`, `clear_max`, `occupied_blob_px`,
   `occupied_min`, `plate_missing_min`, `plate_tie`, `surface_min`, `change_min`, `settle_frames`,
-  `match_px`, `view_min`, `shift_px`, `open_px`, `low_view`, `occupied_blob_low_px`). The camera is the printer's `watch.vision.camera`; enabling the bed check
+  `match_px`, `view_min`, `shift_px`, `open_px`, `low_view`, `occupied_blob_low_px`, `light_norm`). The camera is the printer's `watch.vision.camera`; enabling the bed check
   on a printer without one is refused when the config is read.
 - **Monitor.** `3d printer watch` runs `bed monitor NAME` as a child for every Moonraker printer
   with `watch.bed.enabled: true`. Nothing is grabbed while a job runs; otherwise one snapshot per
