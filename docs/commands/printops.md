@@ -425,8 +425,9 @@ an absent key as "not known" (UNVERIFIED).
 ### `fields`
 
 `3d printops fields migrate-native [--apply] [--json] [--api URL] [--token TOKEN]` — run it once per
-Spoolman after upgrading (`3d printops health` lists the leftovers as `spoolman.legacy_fields` and is
-degraded until they are gone). **Dry run by default**: `3d printops fields migrate-native` prints one line
+Spoolman after upgrading (`3d printops health` lists the leftovers as `spoolman.legacy_fields` with the fix and exits 1 until
+they are gone; `/v1/health` keeps `status` `ok` for them, so `3d printops deploy` and `3d init --env`
+do not wait on a step that needs the new 3d-api running). **Dry run by default**: `3d printops fields migrate-native` prints one line
 per item and writes nothing; `3d printops fields migrate-native --apply` writes (token scope `write`);
 `--json` prints the report (`3d printops fields migrate-native --apply --json`). Moves:
 vendor `spool_tare_g` → `empty_spool_weight`; spool `printops_slot` → `location` `slot:<printer>/<head>`;

@@ -87,12 +87,12 @@ def _spoolman_health(state: ApiState) -> dict[str, Any]:
     fields = dict(state.fields)
     fields["missing"] = audit.missing
     body: dict[str, Any] = {
-        "ok": not audit.missing and not audit.legacy,
+        "ok": not audit.missing,  # leftover legacy definitions are a warning (`legacy_fields`), not a failure
         "version": info.get("version"),
         "extra_fields": fields,
         "legacy_fields": audit.legacy,
     }
-    if audit.legacy:
+    if audit.legacy:  # information for the operator: never changes `status`, a deploy waits for "ok"
         body["message"] = (
             f"legacy Spoolman extra field(s) {', '.join(audit.legacy)} still defined: run "
             "`3d printops fields migrate-native` (dry run), then `3d printops fields migrate-native --apply`"

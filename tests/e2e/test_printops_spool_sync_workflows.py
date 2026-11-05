@@ -309,6 +309,27 @@ def _wait_for_a_pass(live: LiveApi, deadline_s: float = 10.0) -> dict[str, Any]:
     raise AssertionError("the scheduled pass never ran")
 
 
+def test_health_lists_leftover_legacy_fields_and_exits_1_while_the_api_stays_ok(
+    tmp_path: Path, shop: LiveApi
+) -> None:
+    """An operator upgrades PrintOps and runs `3d printops health`: the stack answers "ok" (a deploy must
+    not wait on it), but the command names the old field definitions still in Spoolman, says to run
+    `fields migrate-native`, and exits 1 until they are gone."""
+    shop.spoolman.set_field("spool", "printops_slot", {"name": "Slot", "field_type": "text"})
+    shop.spoolman.set_field("vendor", "spool_tare_g", {"name": "Tare", "field_type": "float", "unit": "g"})
+
+    got = cli(tmp_path, shop, "printops", "health", token="read")
+    assert got.returncode == 1, got.stdout + got.stderr
+    assert "legacy    vendor.spool_tare_g, spool.printops_slot still defined" in got.stdout
+    assert "3d printops fields migrate-native" in got.stdout
+    assert got.stdout.splitlines()[0].split()[2] == "ok"  # the API's own status is not degraded
+
+    applied = cli(tmp_path, shop, "printops", "fields", "migrate-native", "--apply")
+    assert applied.returncode == 0, applied.stdout + applied.stderr
+    after = cli(tmp_path, shop, "printops", "health", token="read")
+    assert after.returncode == 0 and "legacy" not in after.stdout
+
+
 def test_health_is_ok_when_the_scheduled_pass_found_nothing(
     scheduled: tuple[FakeSpoolman, Path],
 ) -> None:

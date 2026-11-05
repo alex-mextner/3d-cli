@@ -16,8 +16,9 @@ USAGE = """3d printops health [--json] [--api URL] [--token TOKEN]
   without one takes NO backups; that line never changes the exit code), and the spool sync — how
   many spools differ between Spoolman and PrintOps right now (`3d printops spool drift` lists
   them), when the scheduled pass last ran and how many anomalies it could not fix. No token
-  needed. Exit 0 when everything is "ok" and nothing drifts, 1 when "degraded", unreachable, or
-  any spool drifts.
+  needed. Exit 0 when everything is "ok" and nothing drifts, 1 when "degraded", unreachable, any
+  spool drifts, or a legacy Spoolman extra field is still defined (a warning only: the API's own
+  status stays "ok", so a deploy does not wait on it; run `3d printops fields migrate-native --apply`).
 
 Options:
   --json         print the raw /v1/health JSON, plus `spool_sync` (the /v1/spool-sync/status answer)
@@ -140,7 +141,8 @@ def run(argv: list[str]) -> int:
         print(json.dumps({**h, "spool_sync": sync}, indent=2))
     else:
         print(render(h, api.base_url, sync))
-    return 0 if h.get("status") == "ok" and spool_sync_ok(sync) else 1
+    legacy = (h.get("spoolman") or {}).get("legacy_fields")
+    return 0 if h.get("status") == "ok" and not legacy and spool_sync_ok(sync) else 1
 
 
 SUB = Sub(

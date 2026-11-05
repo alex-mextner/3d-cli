@@ -12,6 +12,7 @@ from typing import Any
 
 import pytest
 from printops_fakes import FakeSpoolman
+from printops_fixtures import LiveApi
 
 from printops import native_fields, tares
 from printops.settings import Settings
@@ -564,31 +565,65 @@ def test_route_answers_502_when_spoolman_fails_and_503_without_spoolman(
     assert r.status_code == 503
 
 
-def test_health_reports_legacy_fields_as_degraded_until_migrated(
+def test_health_lists_legacy_fields_as_a_warning_that_keeps_the_status_ok_until_migrated(
     printops_client: Any, printops_tokens: dict[str, str], fake_spoolman: FakeSpoolman
 ) -> None:
+    """Leftover legacy definitions are information for the operator, not a failure of the stack: the
+    status stays "ok" (a deploy waits for "ok"), while `legacy_fields` and `message` name them and the fix."""
     clean = printops_client.get("/v1/health").json()
     assert clean["status"] == "ok" and clean["spoolman"]["legacy_fields"] == []
 
     for (entity, key), params in LEGACY_PARAMS.items():
         fake_spoolman.set_field(entity, key, params)  # type: ignore[arg-type]
     calls = len(fake_spoolman.calls)
-    degraded = printops_client.get("/v1/health").json()
+    warned = printops_client.get("/v1/health").json()
     assert (
         len(fake_spoolman.calls) - calls == 4
     )  # info + one field list per entity: no extra request
-    assert degraded["status"] == "degraded" and degraded["spoolman"]["ok"] is False
-    assert degraded["spoolman"]["legacy_fields"] == [
+    assert warned["status"] == "ok" and warned["spoolman"]["ok"] is True
+    assert warned["spoolman"]["legacy_fields"] == [
         f"{e}.{k}" for e, k in LEGACY_EXTRA_FIELDS
     ]
-    assert "3d printops fields migrate-native" in degraded["spoolman"]["message"]
-    assert degraded["spoolman"]["extra_fields"]["missing"] == []
+    assert "3d printops fields migrate-native" in warned["spoolman"]["message"]
+    assert warned["spoolman"]["extra_fields"]["missing"] == []
 
     printops_client.post(
         "/v1/fields/migrate-native", headers=_auth(printops_tokens, "write")
     )
     healed = printops_client.get("/v1/health").json()
     assert healed["status"] == "ok" and healed["spoolman"]["legacy_fields"] == []
+    assert "message" not in healed["spoolman"]
+
+
+def test_a_stack_with_only_legacy_fields_is_healthy_for_deploy_and_init(live_api: LiveApi) -> None:
+    """An upgraded install still has the old field definitions until `fields migrate-native --apply`
+    ran against the new 3d-api: `wait_healthy` (deploy, init --env) must not wait 300 s for it, and
+    `check_health` must call the stack ok."""
+    from printops import deploy, env_setup
+
+    for (entity, key), params in LEGACY_PARAMS.items():
+        live_api.spoolman.set_field(entity, key, params)  # type: ignore[arg-type]
+
+    body = deploy.wait_healthy(live_api.url, timeout_s=2, log=lambda _m: None, sleep=lambda _s: None)
+    assert body["status"] == "ok" and body["spoolman"]["legacy_fields"]
+    health = env_setup.check_health(live_api.url, None)
+    assert (health.state, health.kind) == ("ok", "3d-api")
+
+
+def test_a_degraded_wait_names_what_is_wrong_not_just_ok() -> None:
+    """The wait/init message used to read `spoolman ok` when the real problem was a missing field or a
+    DB error; the one formatter names the missing fields, the migrate hint, the DB or Spoolman error."""
+    from printops import deploy
+
+    missing = {
+        "status": "degraded",
+        "spoolman": {"ok": False, "extra_fields": {"status": "ok", "missing": ["spool.dry_state"]}},
+    }
+    assert "spool.dry_state" in deploy.degraded_reason(missing)
+    legacy = {"status": "degraded", "spoolman": {"ok": True, "message": "legacy x: run migrate-native"}}
+    assert "migrate-native" in deploy.degraded_reason(legacy)
+    assert deploy.degraded_reason({"status": "degraded", "spoolman": {"error": "unreachable"}}) == "spoolman: unreachable"
+    assert "locked" in deploy.degraded_reason({"status": "degraded", "db": {"ok": False, "error": "locked"}})
 
 
 # ------------------------------------------- #712: a recorded location id is not lost with its field

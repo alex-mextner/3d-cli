@@ -45,4 +45,5 @@ cannot.** Audit against the real Spoolman 0.27.0 `GET /api/v1/openapi.json` (sch
 idempotent, never overwrites a native value (`conflict`), deletes a legacy field definition only when no
 item holds a value any more (Spoolman destroys stored values with the definition). See
 [printops.md](../commands/printops.md#fields). `3d printops health` reports leftovers as
-`spoolman.legacy_fields`.
+`spoolman.legacy_fields` and exits 1 until they are gone; they are a warning, not a failure: `/v1/health`
+`status` stays `ok` (a deploy waits for `ok`, and the migration needs the new 3d-api running).
