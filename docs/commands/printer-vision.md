@@ -457,7 +457,7 @@ u1:
 `watch.quality` (a sibling of `vision:`, shared with `printer watch --job`) tunes the print-quality tier:
 `quality: false` turns it off, `quality: {baseline_n: 4, warning_ratio: 2.0, warning_abs: 0.035, severe_ratio:
 3.5, severe_abs: 0.06, warning_drop: 0.10, first_layer_order: 0.6, ...}` any `QualityConfig` field
-(`printer_ops/quality.py`); a wrong key is an error naming the valid ones.
+(`printer_ops/quality.py`); a wrong key is an error naming the valid ones. The first-layer floor (`first_layer_order`, 0 = off) is on by default only for a Snapmaker U1, the camera it was calibrated on.
 
 The block is per device, so every Moonraker printer in the fleet (U1, K1 SE, others) gets its own
 camera `snapshot`, thresholds and `crop`; nothing in tier (b) is U1-specific.

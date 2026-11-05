@@ -18,6 +18,9 @@ from errors import InvalidArgument
 from printer_ops import quality as Q
 from printer_ops.quality_report import render_markdown, summary_line, write_report
 
+U1 = Q.quality_config(
+    None, "Snapmaker U1"
+)  # the calibrated camera: the first-layer floor is on
 CLEAN = {
     "status": "ok",
     "fleck_frac": 0.014,
@@ -163,7 +166,7 @@ def test_pattern_loss_without_debris_is_texture() -> None:
 def test_the_first_layer_floor_needs_no_baseline_and_a_bad_first_layer_never_makes_the_baseline() -> (
     None
 ):
-    judge = Q.QualityJudge(Q.QualityConfig())
+    judge = Q.QualityJudge(U1)
     verdicts = [
         judge.feed(Q.QualityReading(float(i), nums(0.02, 0.40), layer=1))
         for i in range(2)
@@ -180,7 +183,7 @@ def test_the_first_layer_floor_needs_no_baseline_and_a_bad_first_layer_never_mak
 
 
 def test_without_a_layer_number_z_decides_what_a_first_layer_is() -> None:
-    judge = Q.QualityJudge(Q.QualityConfig())
+    judge = Q.QualityJudge(U1)
     assert (
         judge.feed(Q.QualityReading(0, nums(0.02, 0.5), z=0.3)).issue == Q.FIRST_LAYER
     )
@@ -250,7 +253,7 @@ def test_a_slowly_growing_debris_is_not_absorbed_into_the_baseline() -> None:
 
 
 def test_absolute_verdict_is_what_a_single_frame_can_say() -> None:
-    cfg = Q.QualityConfig()
+    cfg = U1
     assert Q.absolute_verdict(nums(0.014), 1.2, cfg) == (None, Q.OK)
     assert Q.absolute_verdict(nums(0.04), 1.2, cfg) == (Q.STRINGING, Q.WARNING)
     assert Q.absolute_verdict(nums(0.08), 1.2, cfg) == (Q.STRINGING, Q.SEVERE)
@@ -273,6 +276,27 @@ def test_owner_text_is_russian_short_and_says_what_to_change() -> None:
     assert Q.owner_text(
         Q.TEXTURE, Q.SEVERE, Q.QualityVerdict(Q.SEVERE, order_drop=0.2)
     ).startswith("усиливается")
+
+
+def test_the_first_layer_floor_is_on_only_for_a_calibrated_camera_or_when_configured() -> (
+    None
+):
+    assert Q.QualityConfig().first_layer_order == 0.0 and U1.first_layer_order == 0.6
+    assert Q.quality_config(None, "Creality K1 SE").first_layer_order == 0.0
+    assert (
+        Q.quality_config({"first_layer_order": 0.5}, "Creality K1 SE").first_layer_order
+        == 0.5
+    )
+    assert (
+        Q.quality_config(
+            {"first_layer_order": 0.0}, "snapmaker u1 (2026)"
+        ).first_layer_order
+        == 0.0
+    )
+    off = Q.QualityJudge(Q.QualityConfig())
+    assert off.feed(Q.QualityReading(0, nums(0.02, 0.2), layer=1)).issue is None, (
+        "a part that reads 0.2 is normal on some cameras"
+    )
 
 
 def test_quality_config_from_devices_yaml() -> None:

@@ -36,6 +36,7 @@ DEVICES = """k1se:
   port: 1
   model: Creality K1 SE
   watch:
+    quality: false
     vision: {snapshot: "http://127.0.0.1:1/?action=snapshot"}
     bed:
       enabled: true
@@ -439,7 +440,9 @@ def test_a_camera_that_jumps_beyond_what_can_be_followed_is_blind_never_gone(
     assert "the plate cannot be followed on the picture" in out
 
 
-def pixel_check(tmp_path: Path, frame: str, z: float, chained: bool = False) -> dict[str, Any]:
+def pixel_check(
+    tmp_path: Path, frame: str, z: float, chained: bool = False
+) -> dict[str, Any]:
     """bed_part.py on one frame against DATA/empty.jpg (Z 0.2); `chained`: start from the files of the last call."""
     argv = [
         *("check", "k1se", "--json", "--baseline", str(DATA / "empty.jpg")),

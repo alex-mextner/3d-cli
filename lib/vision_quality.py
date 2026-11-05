@@ -226,7 +226,10 @@ def build_quality(
     device: Any, evidence_dir: Path | None, *, once: bool, disabled: bool
 ) -> QualityTier | None:
     """The tier of a printer from `<printer>.watch.quality` (False = off); None when it is off."""
-    cfg = quality_config((getattr(device, "watch", None) or {}).get("quality"))
+    cfg = quality_config(
+        (getattr(device, "watch", None) or {}).get("quality"),
+        getattr(device, "model", None),
+    )
     if disabled or not cfg.enabled:
         return None
     return QualityTier(device, cfg, evidence_dir, once=once)

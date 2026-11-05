@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -147,3 +147,75 @@ def test_once_gives_the_absolute_verdict_of_one_frame(
 def test_a_disabled_tier_is_not_built(device) -> None:
     assert VQ.build_quality(device, None, once=False, disabled=True) is None
     assert VQ.build_quality(device, None, once=False, disabled=False) is not None
+
+
+class _NoSpaghetti:
+    """Stage 1 as it behaved on the day: no box on any frame (p 0.0)."""
+
+    def score_bgr(self, bgr: Any) -> Any:
+        from printer_ops.vision import FrameScore
+
+        return FrameScore(p=0.0, boxes=[], luma=70.0)
+
+
+def test_the_frame_scorer_adds_the_quality_findings_next_to_a_silent_spaghetti_model(
+    device, tmp_path: Path
+) -> None:
+    """The 2026-11-05 situation: p 0.0 / q 0.0 / no boxes — and now the same frame still says stringing."""
+    import vision_detect as VD
+
+    tier = VQ.QualityTier(device, VQ.QualityConfig(), tmp_path, once=True)
+    scorer = VD.FrameScorer(cast(Any, _NoSpaghetti()), quality=tier)
+    scorer.context = ctx(1.2)
+    score = scorer((DATA / "u1_f7.jpg").read_bytes())
+    assert score.p == 0.0 and score.boxes == []
+    assert [f.kind for f in score.findings] == ["quality_stringing_severe"]
+    scorer.context = ctx(1.2)
+    assert scorer((DATA / "u1_f5.jpg").read_bytes()).findings == []
+
+
+def test_once_report_carries_the_quality_block(device, tmp_path: Path) -> None:
+    import argparse
+    from types import SimpleNamespace
+
+    import vision_detect as VD
+
+    tier = VQ.QualityTier(device, VQ.QualityConfig(), tmp_path, once=True)
+    scorer = VD.FrameScorer(cast(Any, _NoSpaghetti()), quality=tier)
+    scorer.context = ctx(1.2)
+    score = scorer((DATA / "u1_f12.jpg").read_bytes())
+    rep = SimpleNamespace(
+        frame=None,
+        score=score,
+        events=[],
+        as_json=lambda name: {"printer": name},
+    )
+    monitor = SimpleNamespace(tracker=SimpleNamespace(adjusted=0.0))
+    out = VD._once_report(argparse.Namespace(save=None), scorer, monitor, rep, "u1")
+    assert out["findings"] == ["quality_stringing_warning"]
+    assert out["quality"]["level"] == "warning" and out["quality"]["fleck_frac"] > 0.035
+    assert "absolute" in out["quality"]["basis"]
+
+
+def test_the_scorer_resets_and_finishes_the_tier_with_the_print(
+    device, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import vision_detect as VD
+
+    tier = VQ.QualityTier(device, VQ.QualityConfig(), tmp_path)
+    scorer = VD.FrameScorer(cast(Any, _NoSpaghetti()), quality=tier)
+    for i in range(5):
+        scorer.context = ctx(0.2)
+        scorer.now = 100.0 + 15 * i
+        scorer(frame_jpeg("u1_f1.jpg" if i == 0 else "u1_f5.jpg"))
+    scorer.finish_print()
+    assert len(list(tmp_path.glob("*-u1-monitor-report"))) == 1
+    assert "print-quality monitor:" in capsys.readouterr().err
+    scorer.finish_print()
+    assert len(list(tmp_path.glob("*-u1-monitor-report"))) == 1, (
+        "ending twice writes one report"
+    )
+
+
+def frame_jpeg(name: str) -> bytes:
+    return (DATA / name).read_bytes()

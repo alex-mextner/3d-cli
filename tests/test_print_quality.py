@@ -93,8 +93,9 @@ def test_phone_photos_of_the_failed_first_layer_read_far_below_a_clean_first_lay
     first-layer floor, a clean first layer reads 0.83+."""
     n = whole(name)
     assert n["status"] == "ok" and n["region_source"] == "whole frame"
-    assert n["order"] < Q.QualityConfig().first_layer_order
-    issue, level = Q.absolute_verdict(n, 0.2, Q.QualityConfig())
+    cfg = Q.quality_config(None, "Snapmaker U1")
+    assert n["order"] < cfg.first_layer_order
+    issue, level = Q.absolute_verdict(n, 0.2, cfg)
     assert issue == Q.FIRST_LAYER and level in (Q.WARNING, Q.SEVERE)
 
 
@@ -201,7 +202,7 @@ def test_the_command_line_prints_one_json_object_and_help(
 def test_verdict_table_of_the_session_frames_through_the_judge(u1: str) -> None:
     """f1 empty (reference, not judged); the first layer f5 four times = the baseline; then the debris frames in
     the order they happened. Nothing before the debris, a WARNING on it, never above WARNING-severity events."""
-    judge = Q.QualityJudge(Q.QualityConfig())
+    judge = Q.QualityJudge(Q.quality_config(None, "Snapmaker U1"))
     rows = []
     sequence = [("u1_f1.jpg", False, 1)] + [("u1_f5.jpg", True, 1)] * 5
     sequence += [

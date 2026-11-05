@@ -757,7 +757,9 @@ def run(argv: list[str]) -> int:
         args, dict((device.watch or {}).get("job") or {}), default_out_dir(args.name)
     )
     tracker = CheckpointTracker(cfg.checkpoints, first_layer_range(args.gcode))
-    quality = quality_config((device.watch or {}).get("quality"))
+    quality = quality_config(
+        (device.watch or {}).get("quality"), getattr(device, "model", None)
+    )
     with one_watch_per_printer(args.name):
         return _run_watch(args, cfg, tracker, quality)
 

@@ -977,7 +977,7 @@ The judge compares them with the **job's own first layers**: the first 4 reading
 (bed_part says so) are the baseline, never judged against anything but a floor; a clean reading drifts it a
 little (bounded at 1.3x debris / 0.04 order), a bad one never does. Issues: `stringing` (debris against the
 baseline AND an absolute level), `texture` (the pattern got lost with no debris: stripes, roughness,
-under-/over-extrusion), `first_layer` (an absolute floor on `order` while layer <= 3). Levels: `notice`
+under-/over-extrusion), `first_layer` (an absolute floor on `order` while layer <= 3; ON by default only for the U1, whose camera it was calibrated on — `first_layer_order: 0.6` in `watch.quality` turns it on elsewhere, a K1 SE view of a part reads 0.5 normally). Levels: `notice`
 (report only) < `warning` < `severe`; a level is reported when 2 of the last 4 readings reach it (3 of 4
 for severe), it is latched and clears after 6 clean readings. A debris trend (ratio to the baseline gained
 per 10 min) lifts a notice to a warning.

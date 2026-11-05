@@ -88,9 +88,10 @@ class QualityConfig:
     # first layer: an absolute floor (no baseline can exist before the first layer is there)
     first_layer_max: int = 3
     first_layer_z: float = 0.8  # without a layer number: Z up to this is "first layers"
-    first_layer_order: float = (
-        0.6  # clean beads read 0.83-0.85, a stringy first layer 0.33-0.53
-    )
+    # `order` under this in a first layer is `first_layer` warning (0 = off). Clean beads on the U1 camera read
+    # 0.83-0.85, a stringy first layer 0.33-0.53 — but another camera/scene has its own normal (a K1 SE view of
+    # a part reads 0.5), so the floor is ON only for a calibrated camera (MODEL_PROFILES) or when configured.
+    first_layer_order: float = 0.0
     first_layer_severe: float = 0.45
     window: int = 4
     confirm: int = 2
@@ -107,17 +108,37 @@ class QualityConfig:
     timeline: int = 200  # readings kept in the report
 
 
-def quality_config(settings: Any) -> QualityConfig:
+def first_layer_floor(order: float, cfg: QualityConfig) -> str:
+    """The absolute first-layer level of an `order` reading (`ok` when the floor is off)."""
+    if cfg.first_layer_order <= 0:
+        return OK
+    if order < min(cfg.first_layer_severe, cfg.first_layer_order):
+        return SEVERE
+    return WARNING if order < cfg.first_layer_order else OK
+
+
+# Per camera model, what was calibrated beyond the generic defaults (docs/research/print-quality-monitor.md).
+MODEL_PROFILES: dict[str, dict[str, Any]] = {"snapmaker u1": {"first_layer_order": 0.6}}
+
+
+def profile_for(model: str | None) -> dict[str, Any]:
+    """The calibrated defaults of a printer model (`device.model`, matched case-insensitively), else none."""
+    text = (model or "").strip().lower()
+    return dict(next((v for k, v in MODEL_PROFILES.items() if k in text), {}))
+
+
+def quality_config(settings: Any, model: str | None = None) -> QualityConfig:
     """`<printer>.watch.quality` (a mapping of QualityConfig fields; `false` turns the monitor off) -> config.
     Unknown keys and values of the wrong type are an InvalidArgument naming the accepted keys."""
     from dataclasses import fields, replace
 
     from errors import InvalidArgument
 
-    if settings is None or settings is True:
-        return QualityConfig()
     if settings is False:
         return QualityConfig(enabled=False)
+    base = replace(QualityConfig(), **profile_for(model))
+    if settings is None or settings is True:
+        return base
     defaults = {f.name: getattr(QualityConfig(), f.name) for f in fields(QualityConfig)}
     accepted = sorted(defaults)
     if not isinstance(settings, dict):
@@ -135,7 +156,7 @@ def quality_config(settings: Any) -> QualityConfig:
             raise InvalidArgument(
                 f"watch.quality.{key}", repr(value), accepted, command="printer watch"
             )
-    return replace(QualityConfig(), **settings)
+    return replace(base, **settings)
 
 
 @dataclass
@@ -317,10 +338,7 @@ class QualityJudge:
         """The first-layer absolute floor on `order` (needs no baseline)."""
         if not first:
             return OK
-        order = float(r.numbers["order"])
-        if order < self.cfg.first_layer_severe:
-            return SEVERE
-        return WARNING if order < self.cfg.first_layer_order else OK
+        return first_layer_floor(float(r.numbers["order"]), self.cfg)
 
     def _learning(self, r: QualityReading, floor: str) -> QualityVerdict:
         # A reading that already fails the first-layer floor is judged, but never makes the reference.
@@ -548,15 +566,7 @@ def absolute_verdict(
     if numbers.get("status") != "ok":
         return None, OK
     if z is not None and z <= cfg.first_layer_z:
-        order = float(numbers["order"])
-        floor = (
-            SEVERE
-            if order < cfg.first_layer_severe
-            else WARNING
-            if order < cfg.first_layer_order
-            else OK
-        )
-        return _pick(OK, OK, floor)
+        return _pick(OK, OK, first_layer_floor(float(numbers["order"]), cfg))
     debris = _level_of(
         float(numbers["fleck_frac"]), (cfg.notice_abs, cfg.warning_abs, cfg.severe_abs)
     )
