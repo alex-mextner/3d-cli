@@ -179,3 +179,79 @@ def test_missing_helper_fails_closed(
     _home(monkeypatch, tmp_path)
     with pytest.raises(force_hatch.HatchUnavailable, match="not found"):
         force_hatch.load_hatch()
+
+
+# ---- tg-ctl `ask-forward not-posted … reason=send-failed` (issue #728) --------------------
+
+NOT_POSTED = (
+    "tg-ctl ask: ask-forward not-posted: agent=claude kind=permission req=hatch-3d-printer-start-force-d6543f0fc5b0 "
+    "daemon declined: reason=send-failed"
+)
+
+
+class ScriptedHatch:
+    """The shared hatch helper answering a fixed sequence of verdicts, one per request."""
+
+    def __init__(self, *verdicts: tuple[bool, bool, str]) -> None:
+        self.verdicts = list(verdicts)
+        self.requests = 0
+
+    def request_hatch_approval(self, hook_id: str, context: dict[str, object], **_: object) -> SimpleNamespace:
+        self.requests += 1
+        approved, should_stop, reason = self.verdicts.pop(0)
+        return SimpleNamespace(approved=approved, should_stop=should_stop, reason=reason)
+
+
+@pytest.fixture()
+def sleeps(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    slept: list[float] = []
+    monkeypatch.setattr(force_hatch.time, "sleep", slept.append)
+    return slept
+
+
+def ask(hatch: ScriptedHatch, monkeypatch: pytest.MonkeyPatch) -> str:
+    monkeypatch.setattr(force_hatch, "load_hatch", lambda: hatch)
+    return force_hatch.require_force_approval(
+        printer="u1", file="plate.gcode", sha256="0" * 64, checks=CHECKS, remote_name="plate-0123456789abcdef.gcode"
+    )
+
+
+def test_a_card_that_was_not_posted_is_asked_again_with_backoff_until_the_owner_answers(
+    monkeypatch: pytest.MonkeyPatch, sleeps: list[float], capsys: pytest.CaptureFixture[str]
+) -> None:
+    hatch = ScriptedHatch((False, True, NOT_POSTED), (False, True, NOT_POSTED), (True, True, "approved by tg-ctl ask"))
+    assert ask(hatch, monkeypatch) == "approved by tg-ctl ask"
+    assert hatch.requests == 3 and sleeps == [3.0, 10.0]
+    assert "asking again in 3 s" in capsys.readouterr().err
+
+
+def test_a_card_that_never_posts_ends_with_the_printer_screen_way(
+    monkeypatch: pytest.MonkeyPatch, sleeps: list[float]
+) -> None:
+    hatch = ScriptedHatch(*[(False, True, NOT_POSTED)] * 4)
+    with pytest.raises(PrinterRefused) as exc:
+        ask(hatch, monkeypatch)
+    assert hatch.requests == 4 and sleeps == [3.0, 10.0, 30.0]
+    assert "could not be posted to Telegram after 4 attempts" in exc.value.message
+    text = "\n".join(exc.value.remediation)
+    assert "Start from the printer screen" in text and "plate-0123456789abcdef.gcode" in text
+    assert "does NOT run these checks" in text and "tg-ctl.*.log" in text and "- macros:" in text
+
+
+@pytest.mark.parametrize(
+    "verdict",
+    [
+        (False, True, "tg-ctl ask decision was 'deny' (expected 'allow')"),
+        (False, True, "tg-ctl ask: ask-forward expired: messageId=7 — posted to Telegram; no decision"),
+        (False, True, "tg-ctl ask: ask-forward not-posted: daemon declined: reason=not-registered"),
+        (False, False, "RIG_HATCH_REQUEST_3D_PRINTER_START_FORCE is not set"),
+    ],
+)
+def test_other_outcomes_are_final_and_never_retried(
+    monkeypatch: pytest.MonkeyPatch, sleeps: list[float], verdict: tuple[bool, bool, str]
+) -> None:
+    hatch = ScriptedHatch(verdict)
+    with pytest.raises(PrinterRefused) as exc:
+        ask(hatch, monkeypatch)
+    assert hatch.requests == 1 and sleeps == []
+    assert "printer screen" not in "\n".join(exc.value.remediation)
