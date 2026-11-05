@@ -88,6 +88,7 @@ from printer_ops.bed import (  # noqa: E402
 )
 from printer_ops.bed_light import LightSession, write_block  # noqa: E402
 
+import bed_refs  # noqa: E402
 from bed_view import view_in_progress  # noqa: E402
 
 if TYPE_CHECKING:
@@ -286,6 +287,8 @@ class Reference:
     volume: np.ndarray    # bool: where objects on the bed show
     surface: np.ndarray   # bool: the bed surface (plate)
     path: Path
+    light: str = bed_refs.LIGHT_UNKNOWN   # the printer's light when it was taken: on | off | unknown
+    plate: str = bed_refs.DEFAULT_PLATE   # `watch.bed.plate` when it was taken
 
 
 def polygon_mask(poly: tuple[tuple[float, float], ...], shape: tuple[int, int]) -> np.ndarray:
@@ -456,15 +459,24 @@ def _load_reference(meta_path: Path) -> Reference | None:
             raise ValueError(f"masks {vol.shape}/{surf.shape} do not match the frame {image.shape[:2]}")
         return Reference(str(meta["kind"]), None if meta.get("z") is None else float(meta["z"]),
                          float(meta.get("ts", 0)), str(meta.get("roi_source", "")), image, vol > 0, surf > 0,
-                         meta_path)
+                         meta_path, _meta_light(meta), str(meta.get("plate") or bed_refs.DEFAULT_PLATE))
     except (OSError, ValueError, KeyError, TypeError) as exc:
         _log(f"skipping reference {meta_path}: {exc}")
         return None
 
 
-def nearest(refs: list[Reference], kind: str, z: float | None, match: ZMatch) -> Reference | None:
+def _meta_light(meta: dict[str, Any]) -> str:
+    light = meta.get("light")
+    return light if light in bed_refs.LIGHT_STATES else bed_refs.LIGHT_UNKNOWN
+
+
+def nearest(refs: list[Reference], kind: str, z: float | None, match: ZMatch, light: str | None = None,
+            plate: str | None = None) -> Reference | None:
+    """The reference of `kind` that stands for Z `z`: of the frame's plate type and light state first (bed_refs.rank),
+    then the nearest Z, then the newest. Another light state or plate type is a fallback the verdict says so."""
     cands = [r for r in refs if r.kind == kind and match(r.z, z)]
-    return min(cands, key=lambda r: (abs((r.z or 0) - (z or 0)), -r.ts)) if cands else None
+    return min(cands, key=lambda r: (*bed_refs.rank(r.plate, r.light, plate, light), abs((r.z or 0) - (z or 0)),
+                                     -r.ts)) if cands else None
 
 
 def _fz(z: float | None) -> str:
@@ -481,6 +493,7 @@ class Verdict:
     metrics: dict[str, float] = field(default_factory=dict)
     changed: Any = None          # bool mask of the changed pixels (evidence), or None
     roi: Any = None              # bool mask of the bed ROI (evidence), or None
+    info: dict[str, Any] = field(default_factory=dict)  # `reference` (which one, its age), `reference_light_mismatch`
 
 
 def _judge_plate(img: np.ndarray, plate_ref: Reference | None, noplate_ref: Reference | None,
@@ -542,9 +555,11 @@ def _objects_verdict(d: Diff, blob_px: float, ref: Reference, plate_info: tuple[
     return Verdict(UNKNOWN, plate, f"{seen}; {plate_why}", metrics, d.mask, inner)
 
 
-def _select_refs(img: np.ndarray, refs: list[Reference], z: float | None, printer: str,
-                 match: ZMatch) -> tuple[Reference | None, Reference | None, Verdict | None]:
-    plate_ref, noplate_ref = nearest(refs, "plate", z, match), nearest(refs, "noplate", z, match)
+def _select_refs(img: np.ndarray, refs: list[Reference], z: float | None, printer: str, match: ZMatch,
+                 ctx: bed_refs.JudgeContext | None = None) -> tuple[Reference | None, Reference | None, Verdict | None]:
+    light, plate = (ctx.light, ctx.plate) if ctx is not None else (None, None)
+    plate_ref = nearest(refs, "plate", z, match, light, plate)
+    noplate_ref = nearest(refs, "noplate", z, match, light, plate)
     if plate_ref is not None and noplate_ref is not None and noplate_ref.image.shape != plate_ref.image.shape:
         noplate_ref = None  # taken at another resolution: judge against the with-plate one only
     if plate_ref is None and noplate_ref is None:
@@ -560,13 +575,36 @@ def _select_refs(img: np.ndarray, refs: list[Reference], z: float | None, printe
     return plate_ref, noplate_ref, None
 
 
-def _light_stats(base: Reference, img: np.ndarray, th: Thresholds) -> LightStats | None:
-    """bed_norm.LightStats of the frame against the reference's bed ROI, or None when `light_norm` is off."""
+def _light_stats(base: Reference, img: np.ndarray, th: Thresholds,
+                 ctx: bed_refs.JudgeContext | None) -> LightStats | None:
+    """bed_norm.LightStats of the frame against the reference's bed ROI (a known difference of the light
+    states counts as a mismatch whatever the pixels say), or None when `light_norm` is off."""
     if not th.light_norm:
         return None
     import bed_norm
 
-    return bed_norm.light_stats(base.image, img, base.volume)
+    differs = ctx is not None and bed_refs.light_differs(base.light, ctx.light)
+    return bed_norm.light_stats(base.image, img, base.volume, differs)
+
+
+def _vet_reference(v: Verdict, ref: Reference, ctx: bed_refs.JudgeContext | None, printer: str) -> Verdict:
+    """Say which reference the verdict stands on (`info`: its age, plate type, light) and whether it was taken
+    in another light (`reference_light_mismatch`, judged by colour and texture). An `occupied` against a reference
+    that is stale or of another plate type is `unknown`, never `occupied`, with the command that takes a new one."""
+    if ctx is None:
+        return v
+    mismatch = bed_refs.light_differs(ref.light, ctx.light)
+    ref_info = bed_refs.describe(ref.ts, ref.light, ref.plate, ref.path, ctx)
+    info: dict[str, Any] = {"reference": ref_info, "reference_light_mismatch": mismatch}
+    reason = v.reason
+    if mismatch:
+        reason += (f"; reference_light_mismatch: the reference was taken with the light {ref.light}, this frame with "
+                   f"it {ctx.light}")
+    why = bed_refs.unfit_reason(ref_info, ctx, printer) if v.bed == OCCUPIED else None
+    if why is None:
+        return replace(v, reason=reason, info=info)
+    return replace(v, bed=UNKNOWN, reason=f"{reason}; not `occupied`: {why}", info=info,
+                   metrics={**v.metrics, "reference_unfit": 1.0})
 
 
 def _under_light_change(plain: Verdict, normed: Verdict, stats: LightStats, in_view: float | None, th: Thresholds,
@@ -612,7 +650,7 @@ def _judge_objects(img: np.ndarray, ref: Reference, inner: np.ndarray, plate_inf
 
 
 def classify(img: np.ndarray, refs: list[Reference], z: float | None, printer: str,
-             th: Thresholds = TH, match: ZMatch | None = None) -> Verdict:
+             th: Thresholds = TH, match: ZMatch | None = None, ctx: bed_refs.JudgeContext | None = None) -> Verdict:
     import cv2
     import numpy as np
 
@@ -621,13 +659,12 @@ def classify(img: np.ndarray, refs: list[Reference], z: float | None, printer: s
     if hidden is not None:  # before the references: no reference can show what the camera cannot see
         return Verdict(UNKNOWN, UNKNOWN, f"{hidden}: the camera cannot tell whether it is clear",
                        {"bed_in_view": match.in_view(z) or 0.0})
-    plate_ref, noplate_ref, early = _select_refs(img, refs, z, printer, match)
+    plate_ref, noplate_ref, early = _select_refs(img, refs, z, printer, match, ctx)
     if early is not None:
         return early
-    assert plate_ref is not None or noplate_ref is not None
     base = plate_ref or noplate_ref
     assert base is not None
-    stats = _light_stats(base, img, th)
+    stats = _light_stats(base, img, th, ctx)
     plate, plate_why, metrics = _judge_plate(img, plate_ref, noplate_ref, z, th, stats is not None and stats.mismatch)
     ref = noplate_ref if plate == MISSING else plate_ref
     if ref is None:
@@ -640,7 +677,8 @@ def classify(img: np.ndarray, refs: list[Reference], z: float | None, printer: s
     if inner.sum() < 100:  # a degenerate ROI inspects nothing: never call that clear
         return Verdict(UNKNOWN, plate, f"the bed ROI of {ref.path.name} is empty or tiny ({int(inner.sum())} px): "
                        f"fix watch.bed.roi and capture the reference again; {plate_why}", metrics)
-    return _judge_objects(img, ref, inner, (plate, plate_why, metrics), (match.in_view(z), z, printer), th, stats)
+    v = _judge_objects(img, ref, inner, (plate, plate_why, metrics), (match.in_view(z), z, printer), th, stats)
+    return _vet_reference(v, ref, ctx, printer)
 
 
 def occupied_confident(v: Verdict, th: Thresholds, view_min: float) -> bool:
@@ -997,7 +1035,11 @@ def _run_monitor(device: Device, cfg: BedConfig, *, duration: float | None = Non
     prev = read_state(name) or {}
     known_bed, known_plate = prev.get("known_bed", prev.get("bed")), prev.get("known_plate", prev.get("plate"))
     match = z_match(device, cfg)
-    mon = Monitor(lambda img, z: classify(img, store.load(), z, name, th, match), th, cfg.z_tol_mm)
+    def judge(img: np.ndarray, z: float | None) -> Verdict:
+        ctx = bed_refs.JudgeContext(plate=cfg.plate, max_age_days=cfg.reference_max_age_days, now=clock())
+        return classify(img, store.load(), z, name, th, match, ctx)
+
+    mon = Monitor(judge, th, cfg.z_tol_mm)
     w = _Watch(device, cfg, out, ack_fn, store, match, mon, prev, known_bed, known_plate)
     end = None if duration is None else clock() + duration
     _log(f"{name}: watching the bed every {cfg.interval_s:g} s while the printer is not printing "
@@ -1023,10 +1065,13 @@ def one_shot(device: Device, cfg: BedConfig, *, max_age: float | None, camera: A
              printer_fn: Callable[[Device], tuple[str, float | None]] = read_printer,
              th: Thresholds | None = None, now: float | None = None,
              sleep: Callable[[float], None] = time.sleep,
-             before_frame: Callable[[], object] | None = None) -> dict[str, Any]:
+             before_frame: Callable[[], object] | None = None,
+             light_state: Callable[[], str] | None = None) -> dict[str, Any]:
     """The bed now: the monitor's last verdict when it is fresher than `max_age` at this Z,
     else one fresh camera frame classified here (never written to the monitor's state).
-    `before_frame` runs right before the first camera grab of a fresh judgement (the light, status_view)."""
+    `before_frame` runs right before the first camera grab of a fresh judgement (the light, status_view);
+    `light_state` then says whether the frame is lit (`on` / `off` / `unknown`, bed_refs.light_state): the
+    reference of that light state is preferred and another one is marked `reference_light_mismatch`."""
     th = thresholds_for(cfg) if th is None else th
     now = time.time() if now is None else now
     state, z = printer_fn(device)
@@ -1042,31 +1087,44 @@ def one_shot(device: Device, cfg: BedConfig, *, max_age: float | None, camera: A
         return {**last, "source": "watch", "age_s": round(now - float(last["checked"]), 1)}
     if before_frame is not None:
         before_frame()
-    camera = camera if camera is not None else camera_for(device)
-    first = jpeg = grab(camera)
-    waited = 0.0
-    while jpeg == first and waited < FROZEN_CHECK_S:  # a live camera never repeats a frame byte for byte
-        sleep(1.0)
-        waited += 1.0
-        jpeg = grab(camera)  # the newer frame is the one judged
-    frozen = jpeg == first
-    try:
-        img = decode_small(jpeg)
-    except ValueError as exc:
-        from printer_ops.base import PrinterCommError
-
-        raise PrinterCommError(f"{device.name}: camera frame unusable: {exc}", command="printer bed") from exc
-    v = classify(img, RefStore(device.name).load(), z, device.name, th, match)
+    jpeg, frozen = _fresh_frame(device, camera, sleep)
+    img = _decode_frame(device, jpeg)
+    ctx = bed_refs.JudgeContext(bed_refs.LIGHT_UNKNOWN if light_state is None else light_state(), cfg.plate,
+                                cfg.reference_max_age_days, now)
+    v = classify(img, RefStore(device.name).load(), z, device.name, th, match, ctx)
     # a possibly stale frame may still show parts or a missing plate (a FAIL), never a clear bed
     if frozen and v.bed == CLEAR:
         v = Verdict(UNKNOWN, v.plate if v.plate == MISSING else UNKNOWN,
                     f"the camera returned the same frame over {FROZEN_CHECK_S:g} s: frozen camera? "
                     f"(`3d printer vision NAME --once` to check); the stale frame looked clear", v.metrics,
-                    v.changed, v.roi)
+                    v.changed, v.roi, v.info)
     frame = save_evidence(device.name, jpeg, v, f"status-{v.bed}", now)
     return {"printer": device.name, "bed": v.bed, "plate": v.plate, "z": z, "source": "camera now", "age_s": 0.0,
             "reason": v.reason, "metrics": {k: round(x, 4) for k, x in v.metrics.items()}, "frame": frame,
-            "raw_frame": str(raw_frame_path(frame)), "occupied_confident": occupied_confident(v, th, cfg.auto_view_min)}
+            "raw_frame": str(raw_frame_path(frame)), "occupied_confident": occupied_confident(v, th, cfg.auto_view_min),
+            **v.info}
+
+
+def _fresh_frame(device: Device, camera: Any, sleep: Callable[[float], None]) -> tuple[bytes, bool]:
+    """(a fresh camera frame, whether the camera looks frozen): a live camera never repeats a frame byte for
+    byte, so the same frame over FROZEN_CHECK_S seconds is a frozen one (the newer frame is the one judged)."""
+    camera = camera if camera is not None else camera_for(device)
+    first = jpeg = grab(camera)
+    waited = 0.0
+    while jpeg == first and waited < FROZEN_CHECK_S:
+        sleep(1.0)
+        waited += 1.0
+        jpeg = grab(camera)
+    return jpeg, jpeg == first
+
+
+def _decode_frame(device: Device, jpeg: bytes) -> np.ndarray:
+    try:
+        return decode_small(jpeg)
+    except ValueError as exc:
+        from printer_ops.base import PrinterCommError
+
+        raise PrinterCommError(f"{device.name}: camera frame unusable: {exc}", command="printer bed") from exc
 
 
 def status_view(device: Device, cfg: BedConfig, *, mode: str = "auto", max_age: float | None = None,
@@ -1093,7 +1151,7 @@ def status_view(device: Device, cfg: BedConfig, *, mode: str = "auto", max_age: 
 
     def judge(age: float | None) -> dict[str, Any]:
         return one_shot(device, cfg, max_age=age, camera=camera, printer_fn=printer_fn, th=th, now=now, sleep=sleep,
-                        before_frame=light.on)
+                        before_frame=light.on, light_state=lambda: bed_refs.light_state(light.report.to_dict()))
 
     def view(z: float) -> float | None:
         return 1.0 if match.cam is None else match.in_view(z)  # a roi polygon is in the frame by definition
@@ -1106,6 +1164,10 @@ def status_view(device: Device, cfg: BedConfig, *, mode: str = "auto", max_age: 
                                      part_height_mm=part_height, sleep=sleep,
                                      settle_s=AUTO_VIEW_SETTLE_S if settle_s is None else settle_s)
     verdict["light"] = light.report.to_dict()
+    if cfg.auto_reference:
+        import bed_refresh
+
+        verdict["auto_reference"] = bed_refresh.auto_refresh(device, cfg, verdict, now=now)
     return verdict
 
 
@@ -1167,7 +1229,8 @@ def capture_reference_best_view(device: Device, cfg: BedConfig, *, plate: bool, 
 
     def take(_: float | None) -> dict[str, Any]:
         return capture_reference(device, cfg, plate=plate, camera=camera, printer_fn=printer_fn, now=now,
-                                 before_frame=light.on)
+                                 before_frame=light.on,
+                                 light_state=lambda: bed_refs.light_state(light.report.to_dict()))
 
     def view(z: float) -> float | None:
         return 1.0 if match.cam is None else match.in_view(z)
@@ -1207,10 +1270,14 @@ def _reference_frame(device: Device, camera: Any, printer_fn: Callable[[Device],
 def capture_reference(device: Device, cfg: BedConfig, *, plate: bool, camera: Any = None,
                       printer_fn: Callable[[Device], tuple[str, float | None]] = read_printer,
                       now: float | None = None, frame: bytes | None = None,
-                      frame_z: float | None = None, before_frame: Callable[[], object] | None = None) -> dict[str, Any]:
+                      frame_z: float | None = None, before_frame: Callable[[], object] | None = None,
+                      light_state: Callable[[], str] | None = None, assumed: str | None = None) -> dict[str, Any]:
     """Store the current camera frame (or `frame`, a saved JPEG of the empty bed taken at gcode
-    Z `frame_z`, e.g. an earlier snapshot) as the printer's reference at that Z. `before_frame` runs right
-    before the camera is asked (the light), never for a saved frame."""
+    Z `frame_z`, e.g. an earlier snapshot) as the printer's reference at that Z, for the printer's plate type
+    (`watch.bed.plate`) and the light state of the frame (`light_state()` after `before_frame` ran; unknown
+    for a saved frame). It replaces the reference of the same kind, plate type, light state and view.
+    `before_frame` runs right before the camera is asked (the light), never for a saved frame. `assumed`: the
+    owner's reason when they vouch for an empty bed (`--assume-empty`), kept in the reference."""
     from errors import UsageError
 
     now = time.time() if now is None else now
@@ -1232,32 +1299,50 @@ def capture_reference(device: Device, cfg: BedConfig, *, plate: bool, camera: An
     d = refs_dir(device.name)
     d.mkdir(parents=True, exist_ok=True)
     with _flock(d / ".capture.lock"):  # two captures must not interleave their sibling files
-        return _store_reference(d, kind, z, jpeg, img, volume, surface, source, match, now)
+        tags = bed_refs.Tags(bed_refs.LIGHT_UNKNOWN if light_state is None else light_state(), cfg.plate, assumed)
+        return _store_reference(d, kind, z, jpeg, img, volume, surface, source, match, now, tags)
+
+
+def _drop_replaced(d: Path, kind: str, z: float, match: ZMatch, tags: bed_refs.Tags) -> None:
+    """Remove the stored reference a new one replaces: the same kind, plate type and light state at a Z the
+    new one stands for (ZMatch). References of another plate type or light state stay."""
+    for old in d.glob(f"{kind}-z*.json"):
+        try:
+            meta = json.loads(old.read_text(encoding="utf-8"))
+            oz = float(meta.get("z"))
+        except (OSError, ValueError, TypeError, AttributeError):
+            continue
+        same = (str(meta.get("plate") or bed_refs.DEFAULT_PLATE) == tags.plate
+                and (meta.get("light") if meta.get("light") in bed_refs.LIGHT_STATES else bed_refs.LIGHT_UNKNOWN)
+                == tags.light)
+        if same and match(oz, z):
+            for p in d.glob(old.stem + ".*"):
+                p.unlink(missing_ok=True)
 
 
 def _store_reference(d: Path, kind: str, z: float, jpeg: bytes, img: Any, volume: Any, surface: Any, source: str,
-                     match: ZMatch, now: float) -> dict[str, Any]:
+                     match: ZMatch, now: float, tags: bed_refs.Tags) -> dict[str, Any]:
     import cv2
 
-    for old in d.glob(f"{kind}-z*.json"):  # one reference per kind and view (ZMatch)
-        try:
-            oz = float(json.loads(old.read_text(encoding="utf-8")).get("z"))
-        except (OSError, ValueError, TypeError):
-            continue
-        if match(oz, z):
-            for p in d.glob(old.stem + ".*"):
-                p.unlink(missing_ok=True)
-    meta_path = d / f"{kind}-z{z:.1f}.json"
+    _drop_replaced(d, kind, z, match, tags)
+    meta_path = d / f"{bed_refs.stem(kind, z, tags.plate, tags.light)}.json"
     _sibling(meta_path, ".jpg").write_bytes(jpeg)
     cv2.imwrite(str(_sibling(meta_path, ".volume.png")), volume.astype("uint8") * 255)
     cv2.imwrite(str(_sibling(meta_path, ".surface.png")), surface.astype("uint8") * 255)
     meta = {"kind": kind, "z": z, "ts": now, "roi_source": source, "width": img.shape[1], "height": img.shape[0],
-            "volume_share": round(float(volume.mean()), 4), "surface_share": round(float(surface.mean()), 4)}
+            "volume_share": round(float(volume.mean()), 4), "surface_share": round(float(surface.mean()), 4),
+            "plate": tags.plate, "light": tags.light}
+    if tags.assumed:
+        meta["assumed_empty"] = tags.assumed
     meta_path.write_text(json.dumps(meta, indent=1), encoding="utf-8")  # last: RefStore keys on the .json
     return {**meta, "path": str(_sibling(meta_path, ".jpg"))}
 
 
-def list_references(printer: str) -> list[dict[str, Any]]:
+def list_references(printer: str, cfg: BedConfig | None = None, now: float | None = None) -> list[dict[str, Any]]:
+    """The stored references with their plate type, light state and age (`stale` against
+    `cfg.reference_max_age_days` when the config is given)."""
+    now = time.time() if now is None else now
+    max_days = None if cfg is None else cfg.reference_max_age_days
     out = []
     for p in sorted(refs_dir(printer).glob("*.json")):
         try:
@@ -1268,7 +1353,10 @@ def list_references(printer: str) -> list[dict[str, Any]]:
         except (OSError, ValueError, KeyError, TypeError) as exc:
             _log(f"skipping reference {p}: {exc}")
             continue
-        out.append({**meta, "path": str(_sibling(p, ".jpg"))})
+        age = bed_refs.age_days(float(meta.get("ts", 0)), now)
+        out.append({**meta, "plate": str(meta.get("plate") or bed_refs.DEFAULT_PLATE), "light": _meta_light(meta),
+                    "path": str(_sibling(p, ".jpg")), "age_days": None if age is None else round(age, 1),
+                    "stale": age is not None and max_days is not None and age > max_days})
     return out
 
 
@@ -1277,6 +1365,7 @@ def list_references(printer: str) -> list[dict[str, Any]]:
 USAGE = """3d printer bed check NAME [--expect empty|part] [--no-move] [--part-height MM] [--json]
 3d printer bed status NAME [--json] [--max-age S] [--best-view | --no-move] [--part-height MM]
 3d printer bed reference NAME [--capture [--best-view] [--no-plate] [--from FRAME.jpg --z Z]] [--json]
+3d printer bed reference NAME --refresh [--assume-empty "WHY"] [--part-height MM] [--json]
 3d printer bed monitor NAME [--duration S]
   Bed state from the printer's camera (issue #303): is the bed clear, is the build plate on.
   Needs one reference frame of the EMPTY bed WITH the plate per printer and resting Z, taken
@@ -1308,6 +1397,11 @@ USAGE = """3d printer bed check NAME [--expect empty|part] [--no-move] [--part-h
               empty bed taken at gcode Z instead of grabbing one. Stored in
               ~/.local/share/3d-cli/bed/NAME/. --best-view moves the bed (as `check`) to where
               the camera sees the plate and takes the reference THERE, then puts the bed back.
+              --refresh replaces a stale reference (see "References"): the best view, the light on,
+              the bed put back; it stores the frame only when that very frame is a confident `clear`
+              with the plate on in a good view with the light on (else it refuses, with the reason,
+              and nothing is stored); --assume-empty "WHY" is the owner's word that the bed is empty:
+              it replaces that check (WHY is kept in the reference and in the journal).
   monitor     the loop `3d printer watch` runs per printer with `watch.bed.enabled: true`:
               JSON lines on stdout (events bed_clear, bed_occupied, plate_present,
               plate_missing; the warning bed_unknown when the first verdict after a job
@@ -1348,6 +1442,20 @@ Config (fleet/printers.yaml or printer-devices.yaml, `<name>.watch.bed`):
   auto_view_part_mm: 60    declared height of the tallest thing that may stand on the bed (mm)
   light: {object: "output_pin chamber_light", on_gcode: LIGHT_ON, off_gcode: LIGHT_OFF, settle_s: 1.5,
           enabled: false}  the printer's light for every camera frame (see "Light"); all keys optional
+  plate: textured          the plate type in use (default `default`): references are kept per plate type
+  reference_max_age_days: 30   a reference older than this never makes a verdict `occupied` (see "References")
+  auto_reference: true     refresh the reference by itself after a confident clear check (default false)
+
+References (per printer, plate type, light state and view):
+  Each reference records the plate type (`watch.bed.plate`), whether the printer's light was on, and when
+  it was taken. A frame is judged against the reference of its own light state first; the other light
+  state is a fallback, judged by colour and texture (see light_norm) and marked `reference_light_mismatch`
+  in the verdict. A reference older than `watch.bed.reference_max_age_days` (30), or taken with another
+  plate type, makes an `occupied` an `unknown` with the reason and `bed reference NAME --refresh`.
+  `--refresh` replaces the reference of the same plate type, light state and view. With
+  `watch.bed.auto_reference: true` `bed status` / `bed check` and the one-shot `bed-free` check at the
+  job's end refresh it by themselves when the check is a confident `clear` in a good view with the light on
+  (idle printer only); each automatic refresh is one JSON line in ~/.local/state/3d-cli/bed/NAME.refs.log.
 
 Auto view (status; also the `bed` line of `3d print-preflight --printer` and `3d printer start`):
   The U1 rests at Z 200 after a job, where its camera sees ~15 % of the plate: window light there
@@ -1388,6 +1496,8 @@ Examples:
   3d printer bed check k1se --no-move --expect empty
   3d printer bed reference u1 --capture --best-view   # new empty-bed reference from the best view
   3d printer bed reference u1 --capture
+  3d printer bed reference u1 --refresh                       # new reference after a confident clear check
+  3d printer bed reference u1 --refresh --assume-empty "plate wiped and empty, I looked"
   3d printer bed status u1
   3d printer bed status u1 --no-move
   3d printer bed status u1 --best-view --part-height 0   # the plate is empty: look at the whole of it
@@ -1395,9 +1505,14 @@ Examples:
 
 
 def _cmd_reference(args: argparse.Namespace, device: Device, cfg: BedConfig) -> int:
-    """`bed reference`: list the references, or --capture one (from the camera, the best view or a saved frame)."""
+    """`bed reference`: list the references, --capture one (from the camera, the best view or a saved frame),
+    or --refresh the stale one (bed_refresh.py)."""
+    if args.refresh:
+        import bed_refresh
+
+        return bed_refresh.cmd_refresh(args, device, cfg)
     if not args.capture:
-        return _list_references_cmd(args, device)
+        return _list_references_cmd(args, device, cfg)
     frame = None
     if args.from_file:
         path = Path(args.from_file).expanduser()
@@ -1432,7 +1547,8 @@ def _capture_lit(device: Device, cfg: BedConfig, *, plate: bool, frame: bytes | 
     light = LightSession(make_adapter(device, timeout=10.0), cfg.light, note="the reference frame",
                          blocked=write_block(device))
     with light:
-        ref = capture_reference(device, cfg, plate=plate, frame_z=frame_z, before_frame=light.on)
+        ref = capture_reference(device, cfg, plate=plate, frame_z=frame_z, before_frame=light.on,
+                                light_state=lambda: bed_refs.light_state(light.report.to_dict()))
     ref["light"] = light.report.to_dict()
     return ref
 
@@ -1443,8 +1559,8 @@ def _light_line(v: dict[str, Any]) -> str:
     return f"\n  light: {light['text']}" if isinstance(light, dict) and light.get("text") else ""
 
 
-def _list_references_cmd(args: argparse.Namespace, device: Device) -> int:
-    refs = list_references(device.name)
+def _list_references_cmd(args: argparse.Namespace, device: Device, cfg: BedConfig) -> int:
+    refs = list_references(device.name, cfg)
     if args.json:
         print(json.dumps(refs, indent=1))
     elif not refs:
@@ -1453,7 +1569,9 @@ def _list_references_cmd(args: argparse.Namespace, device: Device) -> int:
     else:
         for r in refs:
             stamp = time.strftime("%Y-%m-%d %H:%M", time.localtime(float(r.get("ts", 0))))
-            print(f"{r['kind']:<8} Z {float(r['z']):6.1f}  {stamp}  {r['path']}  ROI: {r.get('roi_source')}")
+            age = "" if r["age_days"] is None else f", {r['age_days']:.0f} d old" + (" STALE" if r["stale"] else "")
+            print(f"{r['kind']:<8} Z {float(r['z']):6.1f}  {stamp}  plate {r['plate']}, light {r['light']}{age}  "
+                  f"{r['path']}  ROI: {r.get('roi_source')}")
     return 0
 
 
@@ -1484,16 +1602,37 @@ def _cmd_status(args: argparse.Namespace, device: Device, cfg: BedConfig) -> int
     return 0
 
 
+def _allowed_flags(args: argparse.Namespace) -> set[str]:
+    """The options each subcommand takes (`reference` depends on its mode)."""
+    reference = {"json", "capture", "refresh"}
+    if args.capture:
+        reference |= {"no_plate", "from_file", "z", "best_view", "part_height"}
+    if args.refresh:
+        reference |= {"assume_empty", "part_height"}
+    return {"check": {"json", "expect", "no_move", "part_height"},
+            "status": {"json", "max_age", "best_view", "no_move", "part_height"}, "monitor": {"duration"},
+            "reference": reference}[args.sub]
+
+
+def _validate_refresh(args: argparse.Namespace) -> None:
+    from errors import UsageError
+
+    if args.refresh and args.capture:
+        raise UsageError("--refresh and --capture contradict each other", command="printer bed",
+                         remediation=["--capture stores the bed as it is now (you say it is empty); --refresh replaces "
+                                      "a stale reference after a confident clear check, or after your --assume-empty."])
+    if args.assume_empty is not None and not args.assume_empty.strip():
+        raise UsageError("--assume-empty needs the reason: why is the bed empty?", command="printer bed",
+                         remediation=['e.g. --assume-empty "I looked, the plate is empty and clean"'])
+
+
 def _validate_args(args: argparse.Namespace, rest: list[str]) -> None:
     if rest:
         from errors import UsageError
 
         raise UsageError(f"unknown arguments for `printer bed {args.sub}`: {' '.join(rest)}", command="printer bed",
                          remediation=["See `3d printer bed --help`."])
-    allowed = {"check": {"json", "expect", "no_move", "part_height"},
-               "status": {"json", "max_age", "best_view", "no_move", "part_height"}, "monitor": {"duration"},
-               "reference": {"json", "capture"} | ({"no_plate", "from_file", "z", "best_view", "part_height"}
-                                                   if args.capture else set())}[args.sub]
+    allowed = _allowed_flags(args)
     stray = [f"--{k.replace('_', '-')}" if k != "from_file" else "--from" for k, v in vars(args).items()
              if k not in {"sub", "name", "help"} | allowed and v is not None and v is not False]
     if stray:
@@ -1506,6 +1645,7 @@ def _validate_args(args: argparse.Namespace, rest: list[str]) -> None:
 
         raise UsageError("--best-view and --no-move contradict each other", command="printer bed",
                          remediation=["Pass one: --best-view moves the bed to the best inspection Z, --no-move never."])
+    _validate_refresh(args)
     if args.part_height is not None and not (math.isfinite(args.part_height) and args.part_height >= 0):
         from errors import InvalidArgument
 
@@ -1533,6 +1673,8 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--no-move", action="store_true")
     ap.add_argument("--part-height", type=float)
     ap.add_argument("--expect", choices=("empty", "part"))
+    ap.add_argument("--refresh", action="store_true")
+    ap.add_argument("--assume-empty", dest="assume_empty")
     ap.add_argument("-h", "--help", action="store_true")
     args, rest = ap.parse_known_args(argv)
     if args.help:
@@ -1541,7 +1683,8 @@ def main(argv: list[str]) -> int:
     _validate_args(args, rest)
     device = get_device(args.name)
     cfg = bed_config(device)
-    if args.sub in ("monitor", "status", "check") or (args.sub == "reference" and args.capture and not args.from_file):
+    capturing = args.refresh or (args.capture and not args.from_file)
+    if args.sub in ("monitor", "status", "check") or (args.sub == "reference" and capturing):
         camera_for(device)  # a printer without a camera is refused here, before any printer request
     if args.sub == "monitor":
         run_monitor(device, cfg, duration=args.duration)
@@ -1556,6 +1699,7 @@ def main(argv: list[str]) -> int:
 if __name__ == "__main__":
     from errors import ThreeDError
 
+    sys.modules.setdefault("bed_state", sys.modules[__name__])  # bed_refresh imports this very module, not a copy
     try:
         sys.exit(main(sys.argv[1:]))
     except ThreeDError as exc:

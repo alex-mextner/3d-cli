@@ -77,7 +77,8 @@ AUTO_VIEW_SETTLE_S = 8.0      # after the move: the camera's own frame rewrite (
 BED_VIEW_EVENT = "bed_free"   # the event of the one-shot `3d printer subscribe --once --on bed-free`
 
 BED_KEYS = ("enabled", "interval_s", "roi", "volume_height_mm", "z_tol_mm", "stale_s", "clear_ack", "thresholds",
-            "auto_view", "auto_view_min", "auto_view_part_mm", "light")
+            "auto_view", "auto_view_min", "auto_view_part_mm", "light", "plate", "reference_max_age_days",
+            "auto_reference")
 
 # The per-printer overrides of bed_state.Thresholds (tuned on the U1 and K1 SE frames of tests/data/bed;
 # another camera may need other values): every field of that dataclass, a test keeps the two in step.
@@ -115,6 +116,9 @@ class BedConfig:
     auto_view_min: float = AUTO_VIEW_MIN  # share of the plate in the frame below which the bed is moved
     auto_view_part_mm: float | None = None  # declared height of the tallest thing that may stand on the bed
     light: LightConfig = LightConfig()    # the printer's light for every camera frame (bed_light.py)
+    plate: str = "default"                # the plate type in use: references are kept per plate type (bed_refs.py)
+    reference_max_age_days: float = 30.0  # an older reference never makes a verdict `occupied`
+    auto_reference: bool = False          # refresh the reference after a confident clear check (bed_refresh.py)
 
 
 def _num(value: Any, what: str, minimum: float) -> float:
@@ -234,6 +238,21 @@ def _light(value: Any, device: Device) -> LightConfig:
         settle_s=_num(value.get("settle_s", LightConfig.settle_s), f"{where}.settle_s", 0))
 
 
+def _plate(value: Any, what: str) -> str:
+    if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,39}", value):
+        raise InvalidArgument(what, str(value), ["a name of letters, digits, `_`, `-` or `.` (at most 40), e.g. textured"],
+                              command="printer")
+    return value
+
+
+def _reference_config(raw: dict[str, Any], where: str) -> dict[str, Any]:
+    """The keys of `watch.bed` about the references: plate type, age limit, the automatic refresh."""
+    return {"plate": _plate(raw.get("plate", "default"), f"{where}.plate"),
+            "reference_max_age_days": _num(raw.get("reference_max_age_days", 30.0),
+                                           f"{where}.reference_max_age_days", 0),
+            "auto_reference": _flag(raw.get("auto_reference", False), f"{where}.auto_reference")}
+
+
 def bed_config(device: Device) -> BedConfig:
     """`watch.bed` of a device, validated (absent = monitor off)."""
     raw = (device.watch or {}).get("bed")
@@ -260,6 +279,7 @@ def bed_config(device: Device) -> BedConfig:
         auto_view_part_mm=_num(raw["auto_view_part_mm"], f"{where}.auto_view_part_mm", 0)
         if "auto_view_part_mm" in raw else None,
         light=_light(raw["light"], device) if "light" in raw else LightConfig(),
+        **_reference_config(raw, where),
     )
     if cfg.enabled:
         from printer_ops.camera import camera_spec

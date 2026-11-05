@@ -96,7 +96,9 @@ USAGE = """3d printer [-n NAME] <subcommand> [args]
                                        a fresh frame (empty / objects / part-present, the changed
                                        share, annotated + raw frame) and puts the bed back (--no-move,
                                        --expect empty|part); `reference NAME --capture [--best-view]`
-                                       takes the empty-bed reference
+                                       takes the empty-bed reference, `reference NAME --refresh
+                                       [--assume-empty WHY]` replaces a stale one (confident clear
+                                       check, or your word)
                                        (see `3d printer bed --help`)
   subscribe --session ID [..]          printer alerts go to that omp session (it looks at the
                                        frame, tells the user only if real); `unsubscribe`,

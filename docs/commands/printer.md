@@ -28,7 +28,7 @@ Epic: [#90](https://github.com/alex-mextner/3d-cli/issues/90).
 3d printer supervise uninstall [NAME...|--all] [--yes] [--unit-dir DIR]
 3d printer supervise quiet NAME [--reason TEXT] | --clear
 3d printer vision NAME [--interval S] [--once] [--dry-run] [--scene] [--no-detach] ...  |  vision eval ...  |  vision record NAME DIR [--timeout S]  |  vision fetch-model
-3d printer bed status NAME [--json] [--max-age S] [--best-view | --no-move] [--part-height MM]  |  bed reference NAME [--capture [--no-plate]]  |  bed monitor NAME
+3d printer bed status NAME [--json] [--max-age S] [--best-view | --no-move] [--part-height MM]  |  bed reference NAME [--capture [--best-view] [--no-plate]] | bed reference NAME --refresh [--assume-empty WHY]  |  bed monitor NAME
 3d printer subscribe --session ID [--printer P,P] [--kinds K,K] [--min-severity LEVEL] ...
 3d printer subscribe --session ID --printer P --once --on bed-free
 3d printer unsubscribe --session ID | --id SUBID | --all
@@ -653,7 +653,28 @@ until someone takes them off. The camera can see that, so nobody has to tell an 
   the K1 SE) only within `z_tol_mm` (0.5) of the current Z. `--capture --no-plate` (plate off)
   adds the bare-bed reference that makes the plate test reliable. `--capture --from FRAME.jpg --z
   199.7` stores a saved snapshot of the empty bed taken at that Z instead. Stored in
-  `~/.local/share/3d-cli/bed/NAME/`; `3d printer bed reference u1` lists them.
+  `~/.local/share/3d-cli/bed/NAME/`; `3d printer bed reference u1` lists them (with plate type,
+  light state and age).
+- **References keep themselves in order** ([#723](https://github.com/alex-mextner/3d-cli/issues/723)).
+  A reference is per printer, **plate type** (`watch.bed.plate`, default `default`), **light state**
+  (the printer's light `on` / `off` / `unknown` when the frame was taken) and Z, and has its time.
+  A frame is judged against the reference of its own light state first; the other light state is a
+  fallback that the verdict marks `reference_light_mismatch` and judges by colour *and* texture (see
+  *Another light* below). A reference older than `watch.bed.reference_max_age_days` (default 30), or
+  taken with another plate type, never makes the verdict `occupied`: it is `unknown`, with the
+  age and the refresh command. `3d printer bed reference NAME --refresh [--assume-empty "why"]`
+  re-captures from the best view with the light on and replaces the reference of the same plate
+  type, light state and view. Without `--assume-empty` it stores the frame only when that very
+  frame is a **confident `clear` with the plate on, in a good view (`auto_view_min`) with the
+  light on** (a printer without a light needs no light); otherwise it refuses, says why and
+  stores nothing (exit 1). `--assume-empty "why"` is your word instead of that verdict; the reason
+  is kept in the reference (`assumed_empty`) and in the journal. With `watch.bed.auto_reference:
+  true` (default off) `bed status` / `bed check`, the preflight `bed` line and the one-shot
+  `bed-free` check at the end of a job do it by themselves after such a confident clear on an
+  idle printer (`auto_reference` in the verdict). Every refresh is one JSON line (`ts`, `mode`
+  `manual` | `assumed` | `auto`, `why`, `z`, `light`, `verdict`) in
+  `~/.local/state/3d-cli/bed/NAME.refs.log`. Config: `plate`, `reference_max_age_days`,
+  `auto_reference` under `watch.bed`.
 - **Out of view.** The calibration also says how much of the bed is in the frame: the U1 camera
   sits about 12 mm above the bed's Z 0, so the lower the bed goes the less of it shows (Z 10: 98 %,
   Z 200: 15 %, Z 215: under 10 %, Z 275 — where a home leaves it — none). Under 10 % the state is
@@ -815,6 +836,9 @@ u1:
       auto_view_min: 0.85       # share of the plate in the frame below which it is moved
       auto_view_part_mm: 60     # optional: the tallest thing that may stand on the bed (else the last job's object_height)
       light: {object: "output_pin chamber_light", on_gcode: LIGHT_ON, off_gcode: LIGHT_OFF, settle_s: 1.5}  # optional: autodetected when absent; enabled: false opts out
+      plate: textured           # plate type in use (default `default`): references are kept per plate type
+      reference_max_age_days: 30  # an older reference never makes the verdict `occupied`
+      auto_reference: false     # refresh the reference after a confident clear check (default false)
 k1se:
   watch:
     bed:
@@ -841,6 +865,10 @@ before the bed moves, restored after the bed is back; see *The light* under [Bed
   `out-of-view`, `busy`), else 0.
 - **Reference at the best Z:** `3d printer bed reference NAME --capture --best-view` moves the bed
   to where the camera sees the plate, takes the empty-bed reference there and puts the bed back.
+  `3d printer bed reference NAME --refresh [--assume-empty "why"] [--part-height MM] [--json]` is the
+  same flow for replacing a stale reference (see *References keep themselves in order* under
+  [Bed state](#bed-state)); examples: `3d printer bed reference u1 --refresh`,
+  `3d printer bed reference u1 --refresh --assume-empty "plate wiped, I looked at it"`.
 
 ## Job watch
 
