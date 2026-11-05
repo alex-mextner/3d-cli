@@ -4,6 +4,8 @@ reads what is due from a fake Moonraker history, and closes a fault."""
 from __future__ import annotations
 
 import json
+import time
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -45,11 +47,11 @@ rules:
 
 
 def _history(url: str) -> Any:
-    """Moonraker GET /server/history/*: 2240 m in total, 120 m in the last two weeks."""
+    """Moonraker GET /server/history/*: 2240 m in total, 120 m five days ago (after the maintenance logged ten days ago)."""
     if url.endswith("/server/history/totals"):
         return {"result": {"job_totals": {"total_jobs": 88.0, "total_print_time": 1191293.4,
                                           "total_filament_used": 2240300.0}}}
-    return {"result": {"count": 1, "jobs": [{"start_time": 1791900000.0, "print_duration": 7200.0,
+    return {"result": {"count": 1, "jobs": [{"start_time": time.time() - 5 * 86400, "print_duration": 7200.0,
                                              "filament_used": 120000.0}]}}
 
 
@@ -99,7 +101,7 @@ def test_user_tracks_a_broken_head_a_nozzle_swap_and_due_maintenance(maint: Any)
     assert "[days ?/30, filament_m 2240.3/1000; never logged]" in out
     assert "done? 3d printops maint log u1 --rule u1-linear-shafts" in out
 
-    code, out, err = maint("log", "u1", "--rule", "u1-linear-shafts", "--at", "2026-10-10",
+    code, out, err = maint("log", "u1", "--rule", "u1-linear-shafts", "--at", (date.today() - timedelta(days=10)).isoformat(),  # relative dates: fixed ones age "ok" into "soon"
                            "--notes", "IPA + white lithium grease")
     assert code == 0, err
     assert "logged #2 kinematics lube on u1" in out and "(rule u1-linear-shafts)" in out
@@ -120,8 +122,8 @@ def test_user_tracks_a_broken_head_a_nozzle_swap_and_due_maintenance(maint: Any)
     assert code == 0, err
     lines = out.splitlines()
     assert lines[0].startswith("#3  ") and "u1/T2  ptfe replace" in lines[0] and "invalidated: ptfe" in lines[0]
-    assert "u1/T3  nozzle replace" in lines[1] and "invalidated: nozzle_swap" in lines[1]
-    assert "kinematics lube" in lines[2] and "rule u1-linear-shafts" in lines[2]
+    assert "kinematics lube" in lines[1] and "rule u1-linear-shafts" in lines[1]  # ten days ago, after the 2026-10-14 swap
+    assert "u1/T3  nozzle replace" in lines[2] and "invalidated: nozzle_swap" in lines[2]
 
     code, out, err = maint("fault", "open", "u1/T1", "--symptom", "grinding", "--component", "extruder")
     assert code == 0, err
