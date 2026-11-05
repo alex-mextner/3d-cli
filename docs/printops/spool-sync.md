@@ -42,7 +42,10 @@ Ticket: [#704](https://github.com/alex-mextner/3d-cli/issues/704). Code: `lib/pr
    **anomaly** of scope `spools` (`3d printops anomalies --printer spools`) and clears by itself.
 9. **Loud**: `3d printops spool drift` (read-only, `--json`, exit 1 on drift, `--heal` applies), `3d printops
    health` (drift count, last pass, stuck anomalies, exit 1), and the print gates: `spool_in_sync` (policy
-   `block`) FAILs a loaded spool that drifted and `filament_sufficient` goes UNVERIFIED instead of picking a number.
+   `block`) FAILs a loaded spool whose two numbers really compete (a typed weight, a ledger that moved alone, a clash, an
+   unknown location) and `filament_sufficient` goes UNVERIFIED instead of picking a number; where the ledger is only
+   late (usage just booked, first sight) `spool_in_sync` warns and `filament_sufficient` is judged against Spoolman's
+   own number, so a short spool still FAILs.
 10. **Guards against the dangerous case**: a spool is "deleted" only after a 404 for that very id, and never
     when most of the known spools vanish at once (`spoolman_empty`: a wiped Spoolman or a wrong `SPOOLMAN_URL`);
     while that holds the pass heals **no** spool (its ids may belong to another inventory) and the way out is

@@ -1175,15 +1175,37 @@ def _sufficient_finding(
     weight = [
         f for f in _sync_findings(spool) or [] if f.get("kind") in _SYNC_WEIGHT_KINDS
     ]
-    if weight:  # two numbers for one spool: this check never picks one (spool_in_sync grades it)
+    if not weight:
+        return _remaining_finding(spool, rem, need, grams, t, slot)
+    have = spool.get("spoolman_remaining_g")
+    if all(not f.get("blocks") for f in weight) and isinstance(have, (int, float)):
+        # the drift is only late bookkeeping (usage Moonraker booked, a first sight): Spoolman's number
+        # is the right one, so grade against it — never let a short spool through on a WARN elsewhere
+        label = spool.get("label")
+        if need > have:
+            return _f(
+                "filament_sufficient",
+                "hard",
+                f"{label}: needs {need:.0f} g ({grams:.1f} + purge + margin), Spoolman has {have:g} g "
+                f"(the ledger is behind: {weight[0].get('summary')})",
+                t,
+                slot,
+                "short",
+            )
         return _f(
             "filament_sufficient",
-            "unknown",
-            f"needs {need:.0f} g; remaining not trustworthy: {weight[0].get('summary')}",
+            "ok",
+            f"{label}: needs {need:.0f} g, Spoolman has {have:g} g (the ledger is behind)",
             t,
             slot,
         )
-    return _remaining_finding(spool, rem, need, grams, t, slot)
+    return _f(  # two competing numbers: this check never picks one (spool_in_sync grades it)
+        "filament_sufficient",
+        "unknown",
+        f"needs {need:.0f} g; remaining not trustworthy: {weight[0].get('summary')}",
+        t,
+        slot,
+    )
 
 
 def check_sufficient(c: _Ctx) -> list[Finding]:

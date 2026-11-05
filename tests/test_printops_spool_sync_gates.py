@@ -505,3 +505,54 @@ def test_moonraker_usage_waiting_for_the_next_pass_is_a_warning_not_a_refusal(
     )
     [finding] = st["tools"][0]["spool"]["sync"]["findings"]
     assert (finding["kind"], finding["blocks"]) == ("remaining", False)
+
+
+# -- a drift that no longer blocks must not leave a short spool unchecked ---------------------------------------
+
+
+def _late(cause: str, spoolman_g: float, ledger_g: float = 800.0) -> dict[str, Any]:
+    """A spool whose ledger says `ledger_g` and Spoolman `spoolman_g`, the drift being only late bookkeeping."""
+    finding = {**REMAINING, "blocks": False, "detail": {"cause": cause}}
+    sp = drifted(finding, remaining=(ledger_g, 10.0, True))
+    sp["spoolman_remaining_g"] = spoolman_g
+    return sp
+
+
+@pytest.mark.parametrize("cause", ["usage", "first_sync", "adopt"])
+def test_a_short_spool_still_fails_filament_sufficient_while_its_drift_is_only_late(
+    tmp_path: Path, cause: str
+) -> None:
+    """Moonraker just booked a job (Spoolman 10 g, ledger 800 g): spool_in_sync warns, but the print
+    needs 57 g and Spoolman, which is right, has 10: it must FAIL, not go UNVERIFIED and start."""
+    got = checks_of(tmp_path, state(t0=spool(1), t2=_late(cause, 10.0)))
+    assert got["spool_in_sync"].status == "WARN"
+    sufficient = got["filament_sufficient"]
+    assert sufficient.status == "FAIL", sufficient.detail
+    assert "Spoolman has 10 g" in sufficient.detail and "needs 57 g" in sufficient.detail
+
+
+def test_enough_filament_passes_with_a_warn_from_spool_in_sync_while_the_drift_is_late(
+    tmp_path: Path,
+) -> None:
+    got = checks_of(tmp_path, state(t0=spool(1), t2=_late("usage", 400.0)))
+    assert got["spool_in_sync"].status == "WARN"
+    assert got["filament_sufficient"].status == "PASS", got["filament_sufficient"].detail
+
+
+def test_first_sync_after_the_upgrade_with_ledger_800_and_spoolman_30_fails_a_150_g_job(
+    tmp_path: Path,
+) -> None:
+    path = gcode(tmp_path, used_g=(0.0, 0.0, 150.0, 0.0))
+    ctx = PrintopsContext(
+        printer="u1", state=state(t0=spool(1), t2=_late("first_sync", 30.0))
+    )
+    checks = {c.name: c for c in run_checks(path, ctx, now=NOW).checks}
+    assert checks["filament_sufficient"].status == "FAIL"
+    assert checks["spool_in_sync"].status == "WARN"
+
+
+def test_a_late_drift_without_spoolmans_number_stays_unverified(tmp_path: Path) -> None:
+    sp = _late("usage", 0.0)
+    sp["spoolman_remaining_g"] = None
+    got = checks_of(tmp_path, state(t0=spool(1), t2=sp))
+    assert got["filament_sufficient"].status == "UNVERIFIED"
