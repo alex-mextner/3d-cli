@@ -53,14 +53,17 @@ USAGE = """3d printer [-n NAME] <subcommand> [args]
                                        A FILE without its preview thumbnails gets them first (in
                                        place, sha256 printed: `3d gcode-thumbnails check FILE`)
   start NAME FILE.gcode --yes [--as REMOTE] [--source-3mf X.3mf] [--bridge-max MM] [--force] [--secs S]
-                                       [--no-bed-move] [--colour-delta-e N] [--fix-colour [--fix-max-delta-e N]]
+                                       [--no-bed-move] [--watch] [--colour-delta-e N] [--fix-colour [--fix-max-delta-e N]]
                                        start a file that was uploaded before (also adds missing
                                        thumbnails to FILE in place: then upload FILE again); runs
                                        `3d print-preflight` first, plus the camera bed check
                                        (objects on the bed / plate missing FAIL) when the
                                        printer has watch.bed.enabled (an idle printer with
                                        watch.bed.auto_view has its bed moved in Z to where the
-                                       camera sees the whole plate, and back: --no-bed-move)
+                                       camera sees the whole plate, and back: --no-bed-move).
+                                       --watch: right after the start, begin `watch NAME --job --yes`
+                                       in the background (it may CANCEL the job, so it is never on
+                                       by default; without it `start` prints the command to run)
   slot set NAME T<n> --material M --color #RRGGBB [--brand B] [--sub-type S] [--dry-run] [--force-official]
                                        [--secs S] [--json]
                                        write the filament one head shows it holds (U1: the touchscreen's
@@ -80,6 +83,13 @@ USAGE = """3d printer [-n NAME] <subcommand> [args]
   watch NAME...|--all [options]        live read-only subscription: anomaly events to
                                        stdout JSONL / --exec / --steer SESSION / subscribers
                                        (see `3d printer watch --help`)
+  watch NAME --job --yes [options]     guard ONE running print: every 60 s and at the first-layer /
+                                       25/50/100 % checkpoints look at the plate (is the part still
+                                       there?) and the printer's signals; on a lost print PAUSE or
+                                       CANCEL (--on-fail), save the frames + klippy lines to
+                                       print/runs/, `tg call me --say`, tg with the frame. Start it
+                                       right after `printer start`. Never moves an axis; --dry-run,
+                                       --fixture (see `3d printer watch --job --help`)
   supervise status|install|uninstall|quiet [NAME...|--all]
                                        the ALWAYS-ON supervision: one watch + one vision systemd user unit per
                                        owned printer from the fleet registry, running without a login, waiting
@@ -92,11 +102,20 @@ USAGE = """3d printer [-n NAME] <subcommand> [args]
                                        `vision fetch-model [--tier a|b|all]`, `vision fit-head ..`,
                                        `vision doctor` (read-only: does any service run --dry-run?)
                                        (see docs/commands/printer-vision.md)
-  bed status|reference|monitor NAME    bed state from the camera: clear/occupied, build plate
-                                       present/missing; `reference NAME --capture` takes the
-                                       empty-bed reference; `status` moves an idle printer's bed
-                                       in Z only to where the whole plate is in view and back
-                                       (watch.bed.auto_view; --no-move, --best-view)
+  bed check|status|reference|calibrate|monitor NAME
+                                       bed state from the camera: clear/occupied, build plate
+                                       present/missing; `check NAME` is THE look at the bed: it moves
+                                       an idle bed in Z only to where the camera sees the plate, judges
+                                       a fresh frame (empty / objects / part-present, the changed
+                                       share, annotated + raw frame) and puts the bed back (--no-move,
+                                       --expect empty|part); `reference NAME --capture [--best-view]`
+                                       takes the empty-bed reference, `reference NAME --refresh
+                                       [--assume-empty WHY]` replaces a stale one (confident clear
+                                       check, or your word)
+                                       `calibrate NAME [--z-from A --z-to B --z-step S]` learns the
+                                       plate's visible share per Z (idle printer, bed moved in Z only);
+                                       `check NAME --assume-empty WHY` records that you looked: the
+                                       preflight bed line passes for 60 min while no job starts
                                        (see `3d printer bed --help`)
   subscribe --session ID [..]          printer alerts go to that omp session (it looks at the
                                        frame, tells the user only if real); `unsubscribe`,
@@ -132,6 +151,8 @@ Options:
   --bridge-max MM    preflight overhangs gate: longest bridge; overrides the printer's
                      bridge_max_mm in printer-devices.yaml (default 15)
   --no-bed-move      start: the camera bed check judges at the current Z (the bed is not moved)
+  --watch            start: launch `watch NAME --job --yes --gcode FILE` in the background once the printer
+                     accepted the start (log in ~/.local/state/3d-cli/jobwatch/NAME.log)
   --colour-delta-e N start: slot Tn colour tolerance, CIEDE2000 (default 10; the preflight line shows the
                      distance; a material mismatch is always a FAIL)
   --fix-colour       start: first rewrite `; filament_colour` / `; extruder_colour` of every tool the file
@@ -164,6 +185,9 @@ Examples:
   3d printer cancel k1se --yes
   3d printer evidence u1 --out projects/chekhov/print/runs --gcode print/chekhov.gcode
   3d printer watch u1 k1se --steer 01a12cd6
+  3d printer start u1 print/part.gcode --yes --watch   # and the job is guarded from the first layer
+  3d printer watch u1 --job --yes --gcode print/part.gcode --out print/runs
+  3d printer bed check u1 --json
   3d printer vision u1 --once --save /tmp/u1.jpg
   3d printer vision u1
   3d printer subscribe --session 01a12cd6 --printer u1,k1se
@@ -176,7 +200,7 @@ Examples:
   3d printer -n k1se issues add --title "X belt squeaks" --type inspect"""
 
 _VALUE = {"--secs", "--as", "--source-3mf", "--bridge-max", "--colour-delta-e", "--fix-max-delta-e"}
-_FLAGS = {"--json", "--yes", "--force", "--no-bed-move", "--fix-colour"}
+_FLAGS = {"--json", "--yes", "--force", "--no-bed-move", "--fix-colour", "--watch"}
 
 
 def _parse(argv: list[str], allowed: set[str], n_pos: int, sub: str) -> tuple[list[str], dict[str, str]]:
@@ -410,7 +434,7 @@ def _cmd_start(argv: list[str]) -> int:
     from pathlib import Path
 
     (name, file), opts = _parse(argv, {"--yes", "--force", "--as", "--source-3mf", "--secs", "--bridge-max", "--no-bed-move",
-                                 "--colour-delta-e", "--fix-colour", "--fix-max-delta-e"}, 2,
+                                 "--watch", "--colour-delta-e", "--fix-colour", "--fix-max-delta-e"}, 2,
                            "start")
     if "--yes" not in opts:
         raise UsageError(
@@ -568,6 +592,13 @@ def _fix_colour_and_upload(name: str, original: Path, local: Path, source: Path 
     print(f"uploaded the colour-fixed file to {name} as {res.name}: {res.size} B, size verified on the printer")
 
 
+def _after_start(name: str, original: Path, opts: dict[str, str]) -> None:
+    """The job watch: launched with --watch, else the command to run is printed."""
+    from printer_ops.jobwatch_launch import after_start
+
+    after_start(name, original, watch="--watch" in opts)
+
+
 def _start_snapshot(name: str, file: str, original: Path, local: Path, source: Path | None,
                     opts: dict[str, str]) -> int:
     from printer_ops.base import safe_remote_name
@@ -586,6 +617,7 @@ def _start_snapshot(name: str, file: str, original: Path, local: Path, source: P
     report = _preflight_report(name, adapter, st, original, local, source, opts)
     _require_preflight_pass(report, name, original, local_hash, remote, opts)
     _start_and_report(adapter, name, remote)
+    _after_start(name, original, opts)
     return 0
 
 
@@ -669,6 +701,10 @@ def _run_evidence(rest: list[str], name: str | None) -> int:
 
 
 def _run_watch(rest: list[str], name: str | None) -> int:
+    if "--job" in rest:
+        from printer_ops.jobwatch_run import run as jobwatch
+
+        return jobwatch(rest)
     from printer_ops.watch_run import run as watch
 
     return watch(rest)

@@ -5,7 +5,9 @@ WHAT (issue https://github.com/alex-mextner/3d-cli/issues/96), one PASS/WARN/FAI
                  (lib/gcode_thumbnails.py check(), the `3d gcode-thumbnails` checker);
   - printer      the target printer is free (not printing/paused/busy/unknown);
   - bed          (printers with `watch.bed.enabled`) the camera saw the bed clear with the plate
-                 on (printer_ops/bed.py, issue #303): objects or no plate FAIL, unknown WARN;
+                 on, from the best view with the printer's light on (printer_ops/bed.py, issue
+                 #303/#723): a missing plate or a CONFIDENT occupied FAIL, unknown or an occupied
+                 seen at a poor view WARN with the command to run;
   - slot Tn      for every tool the G-code uses: the printer's head is loaded, its material
                  equals the G-code's `; filament_type` and its colour is within a CIEDE2000
                  tolerance of `; filament_colour` (default 10, the distance is shown; a beige
@@ -428,22 +430,28 @@ def _head_sequence_verdict(result: dict[str, Any], project_source: str) -> Check
             f"({len(objs)} object(s), {project_source})",
         )
     if status == FAIL:
-        lines = [
-            f"{o.get('status')} {o.get('name')}: {o.get('detail') or 'heads ' + str(o.get('heads'))}"
-            for o in objs
-            if o.get("status") != "ok"
-        ]
-        return Check(
-            "head seq",
-            FAIL,
-            f"{result.get('failures')} object(s) off their recipes ({project_source})",
-            lines,
-        )
+        return _head_seq_failed(result, objs, project_source)
     return Check(
         "head seq",
         PASS,
         f"{len(objs)} object(s) on their recipes, {result.get('mixed_rows')} mixed row(s) "
         f"({project_source})",
+    )
+
+
+def _head_seq_failed(
+    result: dict[str, Any], objs: list[dict[str, Any]], project_source: str
+) -> Check:
+    lines = [
+        f"{o.get('status')} {o.get('name')}: {o.get('detail') or 'heads ' + str(o.get('heads'))}"
+        for o in objs
+        if o.get("status") != "ok"
+    ]
+    return Check(
+        "head seq",
+        FAIL,
+        f"{result.get('failures')} object(s) off their recipes ({project_source})",
+        lines,
     )
 
 
@@ -695,36 +703,92 @@ def _bed_when(v: dict[str, Any], view: dict[str, Any]) -> str:
     return when
 
 
-def _bed_verdict_line(
-    bed: object, plate: object, when: str, why: str, frame: list[str]
+def _bed_evidence(v: dict[str, Any], view: dict[str, Any]) -> list[str]:
+    """The frame, a bed left away from where it was found, and what the printer's light did."""
+    lines = [f"frame: {v['frame']}"] if v.get("frame") else []
+    if view.get("action") == "moved" and not view.get("restored"):
+        lines.append(
+            f"BED NOT PUT BACK to Z {view.get('moved_from')}: {view.get('restore_error')}"
+        )
+    light = v.get("light")
+    if isinstance(light, dict) and light.get("text"):
+        lines.append(f"light: {light['text']}")
+    return lines
+
+
+def _bed_check_command(v: dict[str, Any]) -> str:
+    return f"3d printer bed check {v.get('printer') or 'NAME'}"
+
+
+def _assume_hint(v: dict[str, Any]) -> str:
+    """How the owner says the bed is empty when they looked and the camera is wrong (bed_override.py)."""
+    return (
+        f'; if you looked and the bed is empty: `{_bed_check_command(v)} --assume-empty "why"` '
+        "(the line then passes for 60 min while no job starts)"
+    )
+
+
+def _check_bed_occupied(
+    v: dict[str, Any], when: str, lines: list[str], view_min: float
 ) -> Check:
-    if plate == "missing":
-        return Check("bed", FAIL, f"build plate missing ({when}): {why}", frame)
-    if bed == "occupied":
-        return Check("bed", FAIL, f"objects on the bed ({when}): {why}", frame)
-    if bed == "clear" and plate == "present":
-        return Check("bed", PASS, f"clear, plate present ({when})", frame)
-    if bed == "clear":
-        return Check("bed", WARN, f"clear, plate not judged ({when}): {why}", frame)
-    return Check("bed", WARN, f"bed state {bed} ({when}): {why}", frame)
+    """FAIL only on a CONFIDENT `occupied` (bed_state.occupied_confident: a region of the normal
+    occupied size with at least `view_min` of the plate in the frame). The same pixels at a poor view
+    (the U1 at Z 200 sees 15 % of the plate: a window light read as 16 % changed) or in a verdict
+    that does not say it is confident are a WARN with the way to look properly."""
+    why = str(v.get("reason") or "")
+    if v.get("occupied_confident") is True:
+        return Check(
+            "bed", FAIL, f"objects on the bed ({when}): {why}{_assume_hint(v)}", lines
+        )
+    in_view = (v.get("metrics") or {}).get("bed_in_view")
+    low = (
+        f"only {in_view:.0%} of the plate is in the camera's view at this Z (needs {view_min:.0%})"
+        if isinstance(in_view, (int, float)) and in_view < view_min
+        else "the verdict does not mark it as a confident find"
+    )
+    return Check(
+        "bed",
+        WARN,
+        f"objects suspected on the bed but not confirmed: {low} ({when}): {why}; "
+        f"run `{_bed_check_command(v)}` (best view, light on) and look at the frame"
+        f"{_assume_hint(v)}",
+        lines,
+    )
 
 
-def check_bed_verdict(v: dict[str, Any]) -> Check:
+def check_bed_verdict(v: dict[str, Any], *, view_min: float | None = None) -> Check:
     """`bed_state.py status --json` (issue #303) -> the `bed` line. A verdict judged after the auto view
-    moved the bed names the Z it was judged at; a bed left away from where it was found is a WARN."""
+    moved the bed names the Z it was judged at; a bed left away from where it was found is a WARN.
+    FAIL on a missing plate or a CONFIDENT `occupied` only; `unknown` and an occupied that is not
+    confident (low view of the plate, `view_min` = watch.bed.auto_view_min) are a WARN naming the command."""
+    from printer_ops.bed import AUTO_VIEW_MIN
+
     bed, plate = v.get("bed", "unknown"), v.get("plate", "unknown")
     raw_view = v.get("view")
     view: dict[str, Any] = raw_view if isinstance(raw_view, dict) else {}
-    when = _bed_when(v, view)
-    frame = [f"frame: {v['frame']}"] if v.get("frame") else []
+    when, lines = _bed_when(v, view), _bed_evidence(v, view)
     why = str(v.get("reason") or "")
-    if view.get("action") == "moved" and not view.get("restored"):
-        frame.append(
-            f"BED NOT PUT BACK to Z {view.get('moved_from')}: {view.get('restore_error')}"
+    left_away = view.get("action") == "moved" and not view.get("restored")
+    if left_away and plate != "missing" and bed != "occupied":
+        return Check("bed", WARN, f"bed state {bed} ({when}): {why}", lines)
+    if plate == "missing":
+        return Check("bed", FAIL, f"build plate missing ({when}): {why}", lines)
+    if bed == "occupied":
+        return _check_bed_occupied(
+            v, when, lines, AUTO_VIEW_MIN if view_min is None else view_min
         )
-        if plate != "missing" and bed != "occupied":
-            return Check("bed", WARN, f"bed state {bed} ({when}): {why}", frame)
-    return _bed_verdict_line(bed, plate, when, why, frame)
+    if bed == "clear" and plate == "present":
+        return Check("bed", PASS, f"clear, plate present ({when})", lines)
+    if bed == "clear":
+        return Check("bed", WARN, f"clear, plate not judged ({when}): {why}", lines)
+    return Check(
+        "bed",
+        WARN,
+        f"bed state {bed} ({when}): {why}; "
+        f"run `{_bed_check_command(v)}` for the best view with the light on"
+        f"{_assume_hint(v)}",
+        lines,
+    )
 
 
 def check_bed(
@@ -733,18 +797,16 @@ def check_bed(
     move: bool = True,
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
     timeout: float | None = None,
+    now: float | None = None,
+    adapter_for: Callable[[Device], Any] | None = None,
 ) -> Check:
-    """The camera `bed` line (printer_ops/bed.py): SKIP when the printer's bed monitor is off,
-    else the watcher's verdict when fresher than `stale_s` at the same Z, else a fresh one-shot
-    camera check (`bed_state.py status`). With `watch.bed.auto_view` and an idle printer that check
-    moves the bed in Z to where the camera sees the whole plate and back (`move=False`: --no-move).
-    A check that cannot run is a WARN, never a crash."""
-    from printer_ops.bed import (
-        STATUS_MOVE_TIMEOUT_S,
-        STATUS_TIMEOUT_S,
-        bed_config,
-        status_argv,
-    )
+    """The camera `bed` line (printer_ops/bed.py): SKIP when the printer's bed monitor is off, else
+    the FULL bed check path of an idle printer (`bed_state.py status --best-view`, what `3d printer
+    bed check` does): a fresh frame judged from the best view (the bed moved in Z only, put back),
+    with the printer's light on and restored, instead of the watcher's verdict at whatever Z the
+    bed rests at. `move=False` (--no-bed-move) judges at the current Z, light still on. FAIL only
+    on a confident `occupied` (check_bed_verdict). A check that cannot run is a WARN, never a crash."""
+    from printer_ops.bed import bed_config
 
     cfg = bed_config(device)
     if not cfg.enabled:
@@ -753,14 +815,46 @@ def check_bed(
             SKIP,
             f"bed camera check off for {device.name} (watch.bed.enabled in {device.source})",
         )
+    confirmed, why_not = _owner_confirmation(device, now, adapter_for)
+    if confirmed is not None:  # the owner looked: no camera, no move
+        return Check("bed", PASS, confirmed)
+    check = _bed_camera_check(device, cfg, move, runner, timeout)
+    if why_not:
+        check.lines.append(why_not)
+    return check
+
+
+def _owner_confirmation(
+    device: Device, now: float | None, adapter_for: Callable[[Device], Any] | None
+) -> tuple[str | None, str | None]:
+    """(the PASS note, or why a recorded `--assume-empty` does not count): bed_override.py. No record: no I/O."""
+    import time
+
+    from printer_ops import bed_override, make_adapter
+
+    if bed_override.read_record(device.name) is None:
+        return None, None
+    now = time.time() if now is None else now
+    adapter = adapter_for(device) if adapter_for else make_adapter(device, timeout=10.0)
+    confirmation, why = bed_override.honoured(device.name, adapter, now)
+    return (None if confirmation is None else confirmation.note(now)), why
+
+
+def _bed_camera_check(
+    device: Device,
+    cfg: Any,
+    move: bool,
+    runner: Callable[..., subprocess.CompletedProcess[str]],
+    timeout: float | None,
+) -> Check:
+    from printer_ops.bed import STATUS_MOVE_TIMEOUT_S, STATUS_TIMEOUT_S, status_argv
+
     if (
         timeout is None
     ):  # a move is two Z moves, a settle wait and a frame wait; never kill it half-way
-        timeout = STATUS_MOVE_TIMEOUT_S if move and cfg.auto_view else STATUS_TIMEOUT_S
+        timeout = STATUS_MOVE_TIMEOUT_S if move else STATUS_TIMEOUT_S
     try:
-        argv = status_argv(
-            device.name, max_age=cfg.stale_s, move="auto" if move else "never"
-        )
+        argv = status_argv(device.name, move="force" if move else "never")
         r = runner(argv, capture_output=True, text=True, timeout=timeout)
     except Exception as exc:  # no runtime / timeout
         return Check("bed", WARN, f"bed check could not run: {exc}")
@@ -773,7 +867,7 @@ def check_bed(
         )
     if not isinstance(verdict, dict):
         return Check("bed", WARN, f"bed check returned {str(verdict)[:200]}")
-    return check_bed_verdict(verdict)
+    return check_bed_verdict(verdict, view_min=cfg.auto_view_min)
 
 
 def run_preflight(

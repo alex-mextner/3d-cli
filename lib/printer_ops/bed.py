@@ -18,13 +18,17 @@ WHAT: the camera can tell whether the bed is clear (the parts were taken off) an
   * `clear_ack`   optional `watch.bed.clear_ack`: one short motor sound after bed_clear so the
                   person at the printer hears that the camera saw the clear bed.
 
-WRITES: two, both guarded by the printer reading idle/complete/cancelled just before the write.
+WRITES: three, all guarded by the printer reading idle/complete/cancelled just before the write (the light,
+  while a job prints, only for the job watch's frame).
   `clear_ack` is the first: one G-code line that the printer's `trusted_macros` lists, at most once
   per bed_clear event and per debounce window, never below `min_z_mm` (a Z buzz must not reach the
   nozzle). The second is the auto view (lib/bed_view.py, `watch.bed.auto_view`): a Z-only move of
   the bed to where the camera sees the whole plate and back, only from `3d printer bed status`
   and the checks built on it (preflight `bed`, the one-shot `bed-free` subscription); the watch
-  monitor never moves anything. Everything else only reads (camera snapshot, print_stats, toolhead).
+  monitor never moves anything. The third is the printer's light (printer_ops/bed_light.py,
+  `watch.bed.light`): switched on before a camera frame of those checks, a reference capture and the
+  job watch's frame, and back off after it; the watch monitor only reads idle frames and never
+  touches it. Everything else only reads (camera snapshot, print_stats, toolhead).
 
 INVARIANTS: stdlib only at import time; numpy/OpenCV live in bed_state.py.
 """
@@ -44,6 +48,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from errors import InvalidArgument
+from printer_ops.bed_light import BUILTIN_LIGHT_COMMANDS, LIGHT_KINDS, LightConfig
 
 if TYPE_CHECKING:
     from printer_ops.devices import Device
@@ -71,14 +76,17 @@ AUTO_VIEW_CLEARANCE = 15.0    # mm between the tallest thing that may stand on t
 AUTO_VIEW_SETTLE_S = 8.0      # after the move: the camera's own frame rewrite (~4 s) plus vibration
 BED_VIEW_EVENT = "bed_free"   # the event of the one-shot `3d printer subscribe --once --on bed-free`
 
-BED_KEYS = ("enabled", "interval_s", "roi", "volume_height_mm", "z_tol_mm", "stale_s", "clear_ack", "thresholds",
-            "auto_view", "auto_view_min", "auto_view_part_mm")
+BED_KEYS = ("enabled", "interval_s", "roi", "plate_mask", "volume_height_mm", "z_tol_mm", "stale_s", "clear_ack",
+            "thresholds", "auto_view", "auto_view_min", "auto_view_part_mm", "light", "plate", "reference_max_age_days",
+            "auto_reference", "views", "camera")
 
 # The per-printer overrides of bed_state.Thresholds (tuned on the U1 and K1 SE frames of tests/data/bed;
 # another camera may need other values): every field of that dataclass, a test keeps the two in step.
 THRESHOLD_KEYS = ("level", "detrend_px", "edge_px", "clear_blob_px", "clear_max", "occupied_blob_px", "occupied_min",
-                  "plate_missing_min", "plate_tie", "surface_min", "change_min", "settle_frames", "match_px", "view_min")
+                  "plate_missing_min", "plate_tie", "surface_min", "change_min", "settle_frames", "match_px", "view_min",
+                  "shift_px", "open_px", "low_view", "occupied_blob_low_px", "light_norm")
 ACK_KEYS = ("enabled", "command", "debounce_minutes", "min_z_mm")
+LIGHT_KEYS = ("enabled", "object", "on_gcode", "off_gcode", "settle_s")
 
 
 def _log(msg: str) -> None:
@@ -107,6 +115,12 @@ class BedConfig:
     auto_view: bool = False               # move the bed in Z to where the camera sees the whole plate (bed_view.py)
     auto_view_min: float = AUTO_VIEW_MIN  # share of the plate in the frame below which the bed is moved
     auto_view_part_mm: float | None = None  # declared height of the tallest thing that may stand on the bed
+    light: LightConfig = LightConfig()    # the printer's light for every camera frame (bed_light.py)
+    plate: str = "default"                # the plate type in use: references are kept per plate type (bed_refs.py)
+    reference_max_age_days: float = 30.0  # an older reference never makes a verdict `occupied`
+    auto_reference: bool = False          # refresh the reference after a confident clear check (bed_refresh.py)
+    views: tuple[tuple[float, float], ...] = ()  # (toolhead Z, share of the plate in the frame): the owner's override
+    camera: str | None = None             # snapshot URL of the bed camera (else watch.vision.camera / the model's)
 
 
 def _num(value: Any, what: str, minimum: float) -> float:
@@ -150,17 +164,52 @@ def _roi(value: Any, what: str) -> tuple[tuple[float, float], ...]:
     return tuple((float(x), float(y)) for x, y in value)
 
 
-def _ack(value: Any, device: Device) -> AckConfig | None:
-    where = f"{device.name}.watch.bed.clear_ack"
-    if not isinstance(value, dict):
-        raise InvalidArgument(where, str(value), ["a mapping: {enabled, command, debounce_minutes, min_z_mm}"],
-                              command="printer", extra=f"Fix {device.source}.")
-    unknown = sorted(set(value) - set(ACK_KEYS))
-    if unknown:
-        raise InvalidArgument(where, ", ".join(unknown), ACK_KEYS, command="printer", extra=f"Fix {device.source}.")
-    if not _flag(value.get("enabled", False), f"{where}.enabled"):
-        return None
-    raw = value.get("command")
+def _roi_config(raw: dict[str, Any], where: str) -> tuple[tuple[float, float], ...] | None:
+    """`roi`, or its alias `plate_mask`: the plate polygon (0..1 of the frame) at the reference Z."""
+    if "roi" in raw and "plate_mask" in raw:
+        raise InvalidArgument(f"{where}.plate_mask", "given with roi", ["only one of roi and plate_mask: the same polygon"],
+                              command="printer")
+    key = "roi" if "roi" in raw else "plate_mask"
+    return _roi(raw[key], f"{where}.{key}") if key in raw else None
+
+
+def _views(value: Any, what: str) -> tuple[tuple[float, float], ...]:
+    """`views: {Z: share of the plate in the frame}`, sorted by Z."""
+    if not isinstance(value, dict) or not value:
+        raise InvalidArgument(what, str(value), ["a mapping of toolhead Z (mm) to the share of the plate in the frame "
+                                                 "there (0..1), e.g. {70: 1.0, 200: 0.15}"], command="printer")
+    out = []
+    for key, share in value.items():
+        z = _num(key if not isinstance(key, str) else _number_text(key, what), f"{what} Z", 0)
+        frac = _num(share, f"{what}[{key}]", 0)
+        if frac > 1:
+            raise InvalidArgument(f"{what}[{key}]", str(share), ["a share of the plate in the frame, 0..1"],
+                                  command="printer")
+        out.append((z, frac))
+    return tuple(sorted(out))
+
+
+def _number_text(text: str, what: str) -> float:
+    try:
+        return float(text)
+    except ValueError:
+        raise InvalidArgument(what, text, ["a number of mm as the key"], command="printer") from None
+
+
+def _camera_url(value: Any, what: str) -> str:
+    if not isinstance(value, str) or not value.strip() or any(ch in value for ch in " \n\r\t"):
+        raise InvalidArgument(what, str(value), ["a snapshot URL (http://HOST:PORT/?action=snapshot) or a path on the "
+                                                 "printer's Moonraker"], command="printer")
+    return value.strip()
+
+
+def _view_config(raw: dict[str, Any], where: str) -> dict[str, Any]:
+    """The keys of `watch.bed` about what the camera sees: the Z views and the camera URL."""
+    return {"views": _views(raw["views"], f"{where}.views") if "views" in raw else (),
+            "camera": _camera_url(raw["camera"], f"{where}.camera") if "camera" in raw else None}
+
+
+def _ack_lines(raw: Any, where: str, device: Device) -> list[str]:
     lines = [raw] if isinstance(raw, str) else raw
     if (not isinstance(lines, list) or not lines
             or not all(isinstance(c, str) and c.strip() and not any(ch in c for ch in "\n\r;") for c in lines)):
@@ -177,9 +226,78 @@ def _ack(value: Any, device: Device) -> AckConfig | None:
                                   command="printer",
                                   extra=f"Add {word} to {device.name}.trusted_macros in {device.source} first "
                                         "(it is the list of commands 3d may let the printer run).")
+    return lines
+
+
+def _ack(value: Any, device: Device) -> AckConfig | None:
+    where = f"{device.name}.watch.bed.clear_ack"
+    if not isinstance(value, dict):
+        raise InvalidArgument(where, str(value), ["a mapping: {enabled, command, debounce_minutes, min_z_mm}"],
+                              command="printer", extra=f"Fix {device.source}.")
+    unknown = sorted(set(value) - set(ACK_KEYS))
+    if unknown:
+        raise InvalidArgument(where, ", ".join(unknown), ACK_KEYS, command="printer", extra=f"Fix {device.source}.")
+    if not _flag(value.get("enabled", False), f"{where}.enabled"):
+        return None
+    lines = _ack_lines(value.get("command"), where, device)
     return AckConfig(tuple(c.strip() for c in lines),
                      _num(value.get("debounce_minutes", 10), f"{where}.debounce_minutes", 0) * 60,
                      _num(value.get("min_z_mm", 10), f"{where}.min_z_mm", 0))
+
+
+def _light_object(value: Any, where: str, device: Device) -> str:
+    parts = value.split() if isinstance(value, str) else []
+    if len(parts) != 2 or parts[0] not in LIGHT_KINDS:
+        raise InvalidArgument(f"{where}.object", str(value), [f"{kind} NAME" for kind in LIGHT_KINDS],
+                              command="printer", extra=f"Name the light as Moonraker lists it. Fix {device.source}.")
+    return " ".join(parts)
+
+
+def _light_lines(raw: Any, where: str, device: Device) -> tuple[str, ...]:
+    lines = [raw] if isinstance(raw, str) else raw
+    if (not isinstance(lines, list) or not lines
+            or not all(isinstance(c, str) and c.strip() and not any(ch in c for ch in "\n\r;") for c in lines)):
+        raise InvalidArgument(where, str(raw), ["one G-code line (LIGHT_ON) or a list of lines, no comments"],
+                              command="printer", extra=f"Fix {device.source}.")
+    for line in lines:
+        word = line.split()[0].upper()
+        if word not in BUILTIN_LIGHT_COMMANDS and word not in device.trusted_macros:
+            raise InvalidArgument(where, line, [f"SET_LED, SET_PIN or a command listed in {device.name}.trusted_macros"],
+                                  command="printer",
+                                  extra=f"Add {word} to {device.name}.trusted_macros in {device.source} first "
+                                        "(it is the list of commands 3d may let the printer run).")
+    return tuple(c.strip() for c in lines)
+
+
+def _light(value: Any, device: Device) -> LightConfig:
+    where = f"{device.name}.watch.bed.light"
+    if not isinstance(value, dict):
+        raise InvalidArgument(where, str(value), ["a mapping: {object, on_gcode, off_gcode, settle_s, enabled}"],
+                              command="printer", extra=f"Fix {device.source}.")
+    unknown = sorted(set(value) - set(LIGHT_KEYS))
+    if unknown:
+        raise InvalidArgument(where, ", ".join(unknown), LIGHT_KEYS, command="printer", extra=f"Fix {device.source}.")
+    return LightConfig(
+        enabled=_flag(value.get("enabled", True), f"{where}.enabled"),
+        object=_light_object(value["object"], where, device) if "object" in value else None,
+        on_gcode=_light_lines(value["on_gcode"], f"{where}.on_gcode", device) if "on_gcode" in value else (),
+        off_gcode=_light_lines(value["off_gcode"], f"{where}.off_gcode", device) if "off_gcode" in value else (),
+        settle_s=_num(value.get("settle_s", LightConfig.settle_s), f"{where}.settle_s", 0))
+
+
+def _plate(value: Any, what: str) -> str:
+    if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,39}", value):
+        raise InvalidArgument(what, str(value), ["a name of letters, digits, `_`, `-` or `.` (at most 40), e.g. textured"],
+                              command="printer")
+    return value
+
+
+def _reference_config(raw: dict[str, Any], where: str) -> dict[str, Any]:
+    """The keys of `watch.bed` about the references: plate type, age limit, the automatic refresh."""
+    return {"plate": _plate(raw.get("plate", "default"), f"{where}.plate"),
+            "reference_max_age_days": _num(raw.get("reference_max_age_days", 30.0),
+                                           f"{where}.reference_max_age_days", 0),
+            "auto_reference": _flag(raw.get("auto_reference", False), f"{where}.auto_reference")}
 
 
 def bed_config(device: Device) -> BedConfig:
@@ -197,7 +315,7 @@ def bed_config(device: Device) -> BedConfig:
     cfg = BedConfig(
         enabled=_flag(raw.get("enabled", False), f"{where}.enabled"),
         interval_s=_num(raw.get("interval_s", 1.0), f"{where}.interval_s", 0.2),
-        roi=_roi(raw["roi"], f"{where}.roi") if "roi" in raw else None,
+        roi=_roi_config(raw, where),
         volume_height_mm=_num(raw.get("volume_height_mm", 80.0), f"{where}.volume_height_mm", 0),
         z_tol_mm=_num(raw.get("z_tol_mm", 0.5), f"{where}.z_tol_mm", 0),
         stale_s=_num(raw.get("stale_s", 120.0), f"{where}.stale_s", 1),
@@ -207,8 +325,11 @@ def bed_config(device: Device) -> BedConfig:
         auto_view_min=_fraction(raw.get("auto_view_min", AUTO_VIEW_MIN), f"{where}.auto_view_min"),
         auto_view_part_mm=_num(raw["auto_view_part_mm"], f"{where}.auto_view_part_mm", 0)
         if "auto_view_part_mm" in raw else None,
+        light=_light(raw["light"], device) if "light" in raw else LightConfig(),
+        **_reference_config(raw, where),
+        **_view_config(raw, where),
     )
-    if cfg.enabled:
+    if cfg.enabled and cfg.camera is None:
         from printer_ops.camera import camera_spec
 
         spec = camera_spec(device)
@@ -237,6 +358,47 @@ def evidence_dir() -> Path:
     from cli.paths import cache_dir
 
     return cache_dir() / "vision" / "bed"
+
+
+@dataclass(frozen=True)
+class Calibration:
+    """What `3d printer bed calibrate NAME` learnt (calibration.json next to the references)."""
+
+    views: tuple[tuple[float, float], ...]  # (toolhead Z, share of the plate in the frame), by Z
+    plate_mask: tuple[tuple[float, float], ...] | None  # the plate polygon (0..1 of the frame) where most of it shows
+    ts: float
+    method: str
+
+
+def calibration_path(printer: str) -> Path:
+    return refs_dir(printer) / "calibration.json"
+
+
+def read_calibration(printer: str) -> Calibration | None:
+    """The learnt Z views of `printer`, or None (never calibrated, or the file is unusable: logged)."""
+    path = calibration_path(printer)
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        views = tuple(sorted((float(z), float(f)) for z, f in doc["views"]))
+        if len(views) < 2 or not all(math.isfinite(z) and math.isfinite(f) and 0.0 <= f <= 1.0 for z, f in views):
+            raise ValueError("needs at least two finite Z views with a share of 0..1")
+        mask = doc.get("plate_mask")
+        return Calibration(views, None if not mask else tuple((float(x), float(y)) for x, y in mask),
+                           float(doc.get("ts", 0)), str(doc.get("method", "")))
+    except OSError:
+        return None
+    except (ValueError, KeyError, TypeError) as exc:
+        _log(f"ignoring {path}: {exc}")
+        return None
+
+
+def write_calibration(printer: str, doc: dict[str, Any]) -> Path:
+    path = calibration_path(printer)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(doc, indent=1, default=str), encoding="utf-8")
+    tmp.replace(path)
+    return path
 
 
 def read_state(printer: str) -> dict[str, Any] | None:
@@ -370,6 +532,11 @@ class BedChild:
 
 # ---- the clear acknowledgement --------------------------------------------------------------
 
+def _toolhead_z(adapter: Any) -> float | None:
+    pos = (adapter.query("toolhead").get("toolhead") or {}).get("position")
+    return pos[2] if isinstance(pos, list) and len(pos) > 2 and isinstance(pos[2], (int, float)) else None
+
+
 def clear_ack(device: Device, ack: AckConfig, *, z: float | None, last_ack: float | None, now: float,
               adapter: Any = None) -> tuple[bool, str]:
     """Send `ack.command` once (see WRITES above). -> (sent, what happened)."""
@@ -389,8 +556,7 @@ def clear_ack(device: Device, ack: AckConfig, *, z: float | None, last_ack: floa
     st = adapter.status()  # re-read right before the write: the bed may have been jogged since the frame
     if st.state not in QUIET_STATES:
         return False, f"printer is {st.state} [{st.raw_state}]"
-    pos = (adapter.query("toolhead").get("toolhead") or {}).get("position")
-    z_now = pos[2] if isinstance(pos, list) and len(pos) > 2 and isinstance(pos[2], (int, float)) else None
+    z_now = _toolhead_z(adapter)
     if z_now is None or not math.isfinite(z_now) or z_now < ack.min_z_mm:
         return False, f"bed Z now {z_now} is unknown or below min_z_mm {ack.min_z_mm:g}"
     script = "\n".join(ack.command)
@@ -439,6 +605,6 @@ def run_status(printer: str, *, move: str = "force", max_age: float | None = Non
 
 __all__ = ["AUTO_VIEW_CLEARANCE", "AUTO_VIEW_FEED", "AUTO_VIEW_MIN", "AUTO_VIEW_SETTLE_S",
            "AUTO_VIEW_Z_FLOOR", "AUTO_VIEW_Z_TOP_MARGIN", "BED_DEPS", "BED_TOOL", "BED_VIEW_EVENT", "KINDS",
-           "STATUS_MOVE_TIMEOUT_S", "STATUS_TIMEOUT_S", "AckConfig", "BedChild", "BedConfig", "bed_config",
-           "clear_ack", "event_from", "read_state", "refs_dir", "run_status", "state_path", "status_argv",
-           "transitions", "write_state"]
+           "STATUS_MOVE_TIMEOUT_S", "STATUS_TIMEOUT_S", "AckConfig", "BedChild", "BedConfig", "Calibration",
+           "bed_config", "calibration_path", "clear_ack", "event_from", "read_calibration", "read_state", "refs_dir",
+           "run_status", "state_path", "status_argv", "transitions", "write_calibration", "write_state"]
