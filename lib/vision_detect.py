@@ -247,7 +247,9 @@ class FrameScorer:
         model: Any = None,
         fixed_bed: Any = None,
     ) -> None:
-        self.fixed_bed = fixed_bed  # vision_detach.FixedBedDetach: uncalibrated part-detached check
+        self.fixed_bed = (
+            fixed_bed  # vision_detach.FixedBedDetach: uncalibrated part-detached check
+        )
         self.detector = detector
         self.verifier = verifier
         self.ignore = ignore or []
@@ -275,24 +277,11 @@ class FrameScorer:
         return not any(_inside(cx, cy, poly) for poly in self.ignore)
 
     def score_bgr(self, bgr: np.ndarray) -> FrameScore:
-        findings: list[Finding] = []
-        if self.geometry is not None:
-            if self.context is None:
-                # No print context this frame (poll failed, frame missing from a replay): no
-                # bed-volume mask at all, never the previous frame's (it may be for another Z).
-                self.roi = None
-            else:
-                now = time.time() if self.now is None else self.now
-                self.roi, findings = self.geometry.update(bgr, self.context, now)
-        if self.fixed_bed is not None:
-            findings = findings + self.fixed_bed.update(
-                bgr, time.time() if self.now is None else self.now
-            )
+        findings = self._bed_findings(bgr)
         s = self.detector.score_bgr(bgr)
         kept = [b for b in s.boxes if self._allowed(b)]
         if self.model is not None:
-            now = time.time() if self.now is None else self.now
-            findings = findings + self.model.update(bgr, self.context, now)
+            findings = findings + self.model.update(bgr, self.context, self._now())
         s = FrameScore(
             p=float(sum(b.conf for b in kept)),
             boxes=kept,
@@ -306,6 +295,25 @@ class FrameScorer:
             s.probs = self.verifier.box_probs(bgr, kept) if kept else []
             s.q = verified_score(kept, s.probs)
         return s
+
+    def _now(self) -> float:
+        return time.time() if self.now is None else self.now
+
+    def _bed_findings(self, bgr: np.ndarray) -> list[Finding]:
+        """Bed-change Findings from the geometry and fixed-bed detectors; updates `self.roi`."""
+        findings: list[Finding] = []
+        if self.geometry is not None:
+            if self.context is None:
+                # No print context this frame (poll failed, frame missing from a replay): no
+                # bed-volume mask at all, never the previous frame's (it may be for another Z).
+                self.roi = None
+            else:
+                self.roi, findings = self.geometry.update(
+                    bgr, self.context, self._now()
+                )
+        if self.fixed_bed is not None:
+            findings = findings + self.fixed_bed.update(bgr, self._now())
+        return findings
 
     def __call__(self, jpeg: bytes) -> FrameScore:
         return self.score_bgr(decode(jpeg))
@@ -324,7 +332,9 @@ class GeometryParams:
     pad_mm: float = 15.0  # calibration error is up to ~30 px near the camera (9 px RMS)
     above_mm: float = 40.0  # spaghetti tangles around the nozzle, above the part top
     grow_px: int = 40  # at 1920 px: boxes just outside the projected volume still count
-    band_mm: float = 4.0  # the newest layers; excluded from the change detector, checked for growth
+    band_mm: float = (
+        4.0  # the newest layers; excluded from the change detector, checked for growth
+    )
 
 
 class PrintGeometry:
@@ -411,7 +421,9 @@ class PrintGeometry:
         self, bgr: np.ndarray, ctx: PrintContext, now: float
     ) -> tuple[np.ndarray, list[Finding]]:
         """(ROI for the stage-1 boxes, Findings of the bed-change detectors) for one frame."""
-        if ctx.filename != self.file:  # another file: no reference frames from the old one
+        if (
+            ctx.filename != self.file
+        ):  # another file: no reference frames from the old one
             self.file = ctx.filename
             self.reset_print()
         m = self.masks(ctx, bgr.shape[:2])
@@ -508,9 +520,14 @@ def _device_camera(device: Any, args: argparse.Namespace) -> Any:
                 "Moonraker entry (adapter: moonraker, port 7125), not creality-stock."
             ],
         )
-    spec = require_camera(device, "printer vision")  # watch.vision.camera / model default, never a guess
+    spec = require_camera(
+        device, "printer vision"
+    )  # watch.vision.camera / model default, never a guess
     return open_camera(
-        device, spec, snapshot=args.snapshot, keepalive=False if args.no_keepalive else None
+        device,
+        spec,
+        snapshot=args.snapshot,
+        keepalive=False if args.no_keepalive else None,
     )
 
 
@@ -564,7 +581,11 @@ def fixed_bed_detach(setting: Any, bed_roi: Any) -> Any:
     if setting in (None, False):
         return None
     opts = {} if setting is True else setting
-    if not isinstance(opts, dict) or set(opts) - {"roi", "baseline_frames", "baseline_gap_s"}:
+    if not isinstance(opts, dict) or set(opts) - {
+        "roi",
+        "baseline_frames",
+        "baseline_gap_s",
+    }:
         raise UsageError(
             "watch.vision.fixed_bed must be true or a mapping of roi, baseline_frames, baseline_gap_s",
             command="printer vision",
@@ -573,7 +594,10 @@ def fixed_bed_detach(setting: Any, bed_roi: Any) -> Any:
     try:
         poly = [(float(x), float(y)) for x, y in roi or []]
     except (TypeError, ValueError) as exc:
-        raise UsageError(f"watch.vision.fixed_bed.roi must be [x, y] pairs (0..1): {exc}", command="printer vision") from exc
+        raise UsageError(
+            f"watch.vision.fixed_bed.roi must be [x, y] pairs (0..1): {exc}",
+            command="printer vision",
+        ) from exc
     if len(poly) < 3 or not all(0.0 <= v <= 1.0 for pt in poly for v in pt):
         raise UsageError(
             "watch.vision.fixed_bed needs a plate polygon of >= 3 points in 0..1: set "
@@ -607,6 +631,37 @@ def build_scorer(
     needed), None = build it only when its weights are already cached."""
     from errors import UsageError
 
+    polys = _ignore_polygons(cfg)
+    verifier = _clip_verifier() if verify and cfg.get("verify", True) else None
+    bed_change = scene or bool(cfg.get("scene", False))
+    geometry = _build_geometry(cfg, camera, bed_change, detach)
+    if bed_change and geometry is None:
+        raise UsageError(
+            "the bed-change detectors (--scene / watch.vision.scene) need the camera "
+            "calibration and `geometry: true`",
+            command="printer vision",
+            remediation=[
+                "Drop --scene, or see docs/research/printer-vision-geometry.md."
+            ],
+        )
+    fixed_bed = (
+        fixed_bed_detach(cfg.get("fixed_bed"), bed_roi)
+        if geometry is None and detach
+        else None
+    )
+    tier_b = None
+    if model is not False:
+        from vision_model import build_tier
+
+        tier_b = build_tier(cfg.get("model"), flag=model)
+    return FrameScorer(
+        ObicoScorer(ensure_model()), verifier, polys, geometry, tier_b, fixed_bed
+    )
+
+
+def _ignore_polygons(cfg: dict[str, Any]) -> list[list[tuple[float, float]]]:
+    from errors import UsageError
+
     try:
         polys = [
             [(float(x), float(y)) for x, y in poly] for poly in cfg.get("ignore") or []
@@ -627,42 +682,26 @@ def build_scorer(
             f"watch.vision.ignore polygons need >= 3 points with x, y in 0..1; got {bad[0]}",
             command="printer vision",
         )
-    verifier = None
-    if verify and cfg.get("verify", True):
-        from vision_verify import ClipVerifier, ensure_clip
+    return polys
 
-        verifier = ClipVerifier(ensure_clip(), threads=_threads())
-    bed_change = scene or bool(cfg.get("scene", False))
-    geometry = (
-        PrintGeometry(
-            camera,
-            scene=bed_change,
-            growth=bed_change,
-            detach=detach_params(cfg.get("detach", True)) if detach else None,
-            params=geometry_params(cfg.get("head")),
-        )
-        if camera is not None and cfg.get("geometry", True)
-        else None
-    )
-    if bed_change and geometry is None:
-        raise UsageError(
-            "the bed-change detectors (--scene / watch.vision.scene) need the camera "
-            "calibration and `geometry: true`",
-            command="printer vision",
-            remediation=["Drop --scene, or see docs/research/printer-vision-geometry.md."],
-        )
-    fixed_bed = (
-        fixed_bed_detach(cfg.get("fixed_bed"), bed_roi)
-        if geometry is None and detach
-        else None
-    )
-    tier_b = None
-    if model is not False:
-        from vision_model import build_tier
 
-        tier_b = build_tier(cfg.get("model"), flag=model)
-    return FrameScorer(
-        ObicoScorer(ensure_model()), verifier, polys, geometry, tier_b, fixed_bed
+def _clip_verifier() -> Any:
+    from vision_verify import ClipVerifier, ensure_clip
+
+    return ClipVerifier(ensure_clip(), threads=_threads())
+
+
+def _build_geometry(
+    cfg: dict[str, Any], camera: Any, bed_change: bool, detach: bool
+) -> PrintGeometry | None:
+    if camera is None or not cfg.get("geometry", True):
+        return None
+    return PrintGeometry(
+        camera,
+        scene=bed_change,
+        growth=bed_change,
+        detach=detach_params(cfg.get("detach", True)) if detach else None,
+        params=geometry_params(cfg.get("head")),
     )
 
 
@@ -674,27 +713,117 @@ def _calibration(device: Any, args: argparse.Namespace) -> Any:
     return load_calibration(device.name)
 
 
+def _vision_cfg(device: Any) -> dict[str, Any]:
+    cfg = (getattr(device, "watch", None) or {}).get("vision") or {}
+    return cfg if isinstance(cfg, dict) else {}
+
+
+def _live_dispatcher(device: Any, args: argparse.Namespace) -> Any:
+    from printer_ops.watch import severity_rank
+    from printer_ops.watch_sinks import Dispatcher
+
+    dispatcher = Dispatcher.for_devices([device], dry_run=args.dry_run)
+    dispatcher.start_startup_test([device.name], "vision")
+    if args.min_severity:
+        severity_rank(args.min_severity)
+        dispatcher.min_severity[device.name] = args.min_severity
+    return dispatcher
+
+
+def _score_fields(score: FrameScore) -> dict[str, Any]:
+    return {
+        "p": round(score.p, 3),
+        "q": None if score.q is None else round(score.q, 3),
+        "luma": round(score.luma, 1),
+        "masked": score.masked,
+        "boxes": [
+            {
+                **{k: round(v, 3) for k, v in vars(b).items()},
+                "verified": round(score.probs[i], 3) if i < len(score.probs) else None,
+            }
+            for i, b in enumerate(score.boxes)
+        ],
+        "findings": [f.kind for f in score.findings],
+    }
+
+
+def _detach_fields(scorer: FrameScorer) -> dict[str, Any]:
+    detach = scorer.geometry.detach if scorer.geometry is not None else None
+    if detach is None and scorer.fixed_bed is not None:
+        detach = scorer.fixed_bed.judge
+        detach.last_gap = scorer.fixed_bed.last_gap
+    if detach is None:
+        return {}
+    # one frame cannot satisfy the persistence rule, so --once reports the raw reading
+    gap = detach.last_gap
+    return {
+        "detach_gap": None if gap is None else round(gap, 3),
+        "part_detached": gap is not None and gap >= detach.params.gap_abs,
+    }
+
+
+def _once_report(
+    args: argparse.Namespace, scorer: FrameScorer, monitor: Any, rep: Any, name: str
+) -> dict[str, Any]:
+    frame, score = rep.frame, rep.score
+    report = rep.as_json(name)
+    if score is None and frame is not None:
+        score = scorer(frame.jpeg)  # not printing: still show what the model sees
+    if score is not None:
+        report.update(_score_fields(score))
+    report.update(_detach_fields(scorer))
+    if scorer.model is not None and scorer.model.last_scores:
+        report["model"] = scorer.model.report()
+    report["trend"] = round(monitor.tracker.adjusted, 3)
+    report["events"] = [e.to_json() for e in rep.events]
+    if frame is not None and args.save:
+        out = Path(args.save).expanduser()
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(
+            annotate(frame.jpeg, score) if score and score.boxes else frame.jpeg
+        )
+        report["frame"] = str(out)
+    return report
+
+
+def _print_verbose(rep: Any, monitor: Any, name: str) -> None:
+    score = rep.score
+    print(
+        json.dumps(
+            {
+                **rep.as_json(name),
+                "p": None if score is None else round(score.p, 3),
+                "q": None if score is None or score.q is None else round(score.q, 3),
+                "trend": round(monitor.tracker.adjusted, 3),
+            }
+        ),
+        file=sys.stderr,
+        flush=True,
+    )
+
+
 def run_live(args: argparse.Namespace) -> int:
     from cli.paths import cache_dir
     from printer_ops import make_adapter
     from printer_ops.devices import get_device
     from printer_ops.vision import ContextTap, KlippyLogTap, VisionMonitor
+    from printer_ops.vision_config import monitor_limits, npu_enabled
     from printer_ops.vision_cycle import VisionCycle
     from printer_ops.vision_status import VisionStatus
-    from printer_ops.watch import severity_rank
-    from printer_ops.watch_sinks import Dispatcher
 
     device = get_device(args.printer)
     camera = _device_camera(device, args)
     adapter = make_adapter(device)
-    from printer_ops.vision_config import monitor_limits, npu_enabled
-
     # the printer's own detector only where it has one (watch.vision.npu; default: a Snapmaker monitor camera)
-    tap = KlippyLogTap(device.host, device.port) if npu_enabled(device) and not args.no_npu else None
-    cfg = (getattr(device, "watch", None) or {}).get("vision") or {}
+    tap = (
+        KlippyLogTap(device.host, device.port)
+        if npu_enabled(device) and not args.no_npu
+        else None
+    )
+    cfg = _vision_cfg(device)
     cam = _calibration(device, args)
     scorer = build_scorer(
-        cfg if isinstance(cfg, dict) else {},
+        cfg,
         verify=not args.no_verify,
         camera=cam,
         scene=args.scene,
@@ -702,24 +831,18 @@ def run_live(args: argparse.Namespace) -> int:
         model=args.model,
         bed_roi=((getattr(device, "watch", None) or {}).get("bed") or {}).get("roi"),
     )
-    context_tap = (
-        ContextTap(device.host, device.port) if scorer.geometry else None
-    )
+    context_tap = ContextTap(device.host, device.port) if scorer.geometry else None
     evidence = (
         Path(args.evidence) if args.evidence else cache_dir() / "vision" / "evidence"
     )
     monitor = VisionMonitor(
         device.name, scorer, annotate=annotate, evidence_dir=evidence,
-        limits=monitor_limits(cfg if isinstance(cfg, dict) else {}),
+        limits=monitor_limits(cfg),
     )
-    status = None if args.once else VisionStatus(device.name)  # the file 3d-api serves to Home Assistant
-    dispatcher = None
-    if not args.once:
-        dispatcher = Dispatcher.for_devices([device], dry_run=args.dry_run)
-        dispatcher.start_startup_test([device.name], "vision")
-        if args.min_severity:
-            severity_rank(args.min_severity)
-            dispatcher.min_severity[device.name] = args.min_severity
+    status = (
+        None if args.once else VisionStatus(device.name)
+    )  # the file 3d-api serves to Home Assistant
+    dispatcher = None if args.once else _live_dispatcher(device, args)
 
     def set_context(ctx: Any) -> None:
         scorer.context = ctx
@@ -742,78 +865,34 @@ def run_live(args: argparse.Namespace) -> int:
         dispatcher=dispatcher,
         force_frame=args.once,
         **once_quiet,
-        after_keepalive=lambda: time.sleep(WAKE_S),  # a sleeping monitor writes its first fresh frame within ~4 s
+        after_keepalive=lambda: time.sleep(
+            WAKE_S
+        ),  # a sleeping monitor writes its first fresh frame within ~4 s
     )
     while True:
         rep = cycle.cycle()
-        frame, score, events = rep.frame, rep.score, rep.events
-        report = rep.as_json(device.name)
         if args.once:
-            if score is None and frame is not None:
-                score = scorer(
-                    frame.jpeg
-                )  # not printing: still show what the model sees
-            if score is not None:
-                report.update(
-                    p=round(score.p, 3),
-                    q=None if score.q is None else round(score.q, 3),
-                    luma=round(score.luma, 1),
-                    masked=score.masked,
-                    boxes=[
-                        {
-                            **{k: round(v, 3) for k, v in vars(b).items()},
-                            "verified": round(score.probs[i], 3)
-                            if i < len(score.probs)
-                            else None,
-                        }
-                        for i, b in enumerate(score.boxes)
-                    ],
-                    findings=[f.kind for f in score.findings],
-                )
-            detach = scorer.geometry.detach if scorer.geometry is not None else None
-            if detach is None and scorer.fixed_bed is not None:
-                detach = scorer.fixed_bed.judge
-                detach.last_gap = scorer.fixed_bed.last_gap
-            if detach is not None:
-                # one frame cannot satisfy the persistence rule, so --once reports the raw reading
-                gap = detach.last_gap
-                report["detach_gap"] = None if gap is None else round(gap, 3)
-                report["part_detached"] = gap is not None and gap >= detach.params.gap_abs
-            if scorer.model is not None and scorer.model.last_scores:
-                report["model"] = scorer.model.report()
-            report["trend"] = round(monitor.tracker.adjusted, 3)
-            report["events"] = [e.to_json() for e in events]
-            if frame is not None and args.save:
-                out = Path(args.save).expanduser()
-                out.parent.mkdir(parents=True, exist_ok=True)
-                out.write_bytes(
-                    annotate(frame.jpeg, score) if score and score.boxes else frame.jpeg
-                )
-                report["frame"] = str(out)
-            print(json.dumps(report, ensure_ascii=False))
-            return 0
-        if args.verbose:
             print(
                 json.dumps(
-                    {
-                        **report,
-                        "p": None if score is None else round(score.p, 3),
-                        "q": None
-                        if score is None or score.q is None
-                        else round(score.q, 3),
-                        "trend": round(monitor.tracker.adjusted, 3),
-                    }
-                ),
-                file=sys.stderr,
-                flush=True,
+                    _once_report(args, scorer, monitor, rep, device.name),
+                    ensure_ascii=False,
+                )
             )
+            return 0
+        if args.verbose:
+            _print_verbose(rep, monitor, device.name)
         time.sleep(rep.next_delay_s)
 
 
 def _frame_score_errors() -> tuple[type[Exception], ...]:
     """Native pixel/runtime failures only; programming and model-contract errors propagate."""
     import cv2
-    from onnxruntime.capi.onnxruntime_pybind11_state import EPFail, EngineError, Fail, RuntimeException
+    from onnxruntime.capi.onnxruntime_pybind11_state import (
+        EPFail,
+        EngineError,
+        Fail,
+        RuntimeException,
+    )
 
     return (FrameDecodeError, cv2.error, Fail, RuntimeException, EngineError, EPFail)
 
@@ -823,30 +902,44 @@ def run_guard(args: argparse.Namespace) -> int:
     from cli.paths import cache_dir, state_dir
     from errors import UsageError
     from printer_ops import make_adapter
-    from printer_ops.base import PrinterCommError
     from printer_ops.guard import PauseGuard, _write_result, guard_device, validate_args
     from printer_ops.vision import ContextTap
     from printer_ops.vision_config import monitor_limits
 
     validate_args(args)
     device = guard_device(args.printer)
-    cfg = (getattr(device, "watch", None) or {}).get("vision") or {}
-    cfg = cfg if isinstance(cfg, dict) else {}
+    cfg = _vision_cfg(device)
     if cfg.get("verify", True) is not True:
-        raise UsageError("guard requires the CLIP verifier; watch.vision.verify is disabled", command="printer guard")
-    camera_args = argparse.Namespace(snapshot=None, no_keepalive=False, no_geometry=False)
+        raise UsageError(
+            "guard requires the CLIP verifier; watch.vision.verify is disabled",
+            command="printer guard",
+        )
+    camera_args = argparse.Namespace(
+        snapshot=None, no_keepalive=False, no_geometry=False
+    )
     camera = _device_camera(device, camera_args)
     # guard pauses on confirmed spaghetti only: no detached-part check is built for it
     scorer = build_scorer(cfg, camera=_calibration(device, camera_args), detach=False)
     if scorer.verifier is None:
-        raise UsageError("guard requires a loaded CLIP verifier", command="printer guard")
+        raise UsageError(
+            "guard requires a loaded CLIP verifier", command="printer guard"
+        )
     score_errors = _frame_score_errors()
     context = ContextTap(device.host, device.port) if scorer.geometry else None
     root = state_dir() / "guard"
-    guard = PauseGuard.arm(make_adapter(device), args.job_id, state_dir=root,
-                           evidence_dir=Path(args.evidence).expanduser() if args.evidence else cache_dir() / "guard",
-                           clock=time.time, sleep=time.sleep, dry_run=args.dry_run, interval=args.interval,
-                           limits=monitor_limits(cfg))
+    guard = PauseGuard.arm(
+        make_adapter(device),
+        args.job_id,
+        state_dir=root,
+        evidence_dir=Path(args.evidence).expanduser()
+        if args.evidence
+        else cache_dir() / "guard",
+        clock=time.time,
+        sleep=time.sleep,
+        dry_run=args.dry_run,
+        interval=args.interval,
+        limits=monitor_limits(cfg),
+    )
     root.mkdir(parents=True, exist_ok=True)
 
     def report(value: dict[str, Any]) -> None:
@@ -856,22 +949,9 @@ def run_guard(args: argparse.Namespace) -> int:
     report(guard._report("armed"))
     while True:
         started = time.time()
-        frame, score, error, score_error = None, None, None, None
-        try:
-            camera.keepalive(started)
-            frame = camera.grab()
-            if context is not None:
-                scorer.context = context.poll()
-                if scorer.context.filename != guard.job.filename:
-                    raise PrinterCommError("camera context belongs to another file", command="printer guard")
-        except PrinterCommError as exc:
-            error = str(exc)
-        else:
-            # Only scoring is recoverable here. Identity, state writes and PAUSE stay outside.
-            try:
-                score = scorer(frame.jpeg)
-            except score_errors as exc:
-                score_error = f"{type(exc).__name__}: {exc}"[:2000]
+        frame, score, error, score_error = _guard_observe_inputs(
+            camera, scorer, context, guard, score_errors, started
+        )
         result = guard.observe(frame, score)
         if error:
             result["camera_error"] = error
@@ -883,6 +963,38 @@ def run_guard(args: argparse.Namespace) -> int:
         time.sleep(max(0.5, args.interval - (time.time() - started)))
 
 
+def _guard_observe_inputs(
+    camera: Any,
+    scorer: FrameScorer,
+    context: Any,
+    guard: Any,
+    score_errors: tuple[type[Exception], ...],
+    started: float,
+) -> tuple[Any, FrameScore | None, str | None, str | None]:
+    """One guard tick's (frame, score, camera error, score error)."""
+    from printer_ops.base import PrinterCommError
+
+    frame, score, error, score_error = None, None, None, None
+    try:
+        camera.keepalive(started)
+        frame = camera.grab()
+        if context is not None:
+            scorer.context = context.poll()
+            if scorer.context.filename != guard.job.filename:
+                raise PrinterCommError(
+                    "camera context belongs to another file", command="printer guard"
+                )
+    except PrinterCommError as exc:
+        error = str(exc)
+    else:
+        # Only scoring is recoverable here. Identity, state writes and PAUSE stay outside.
+        try:
+            score = scorer(frame.jpeg)
+        except score_errors as exc:
+            score_error = f"{type(exc).__name__}: {exc}"[:2000]
+    return frame, score, error, score_error
+
+
 def run_record(args: argparse.Namespace) -> int:
     """`vision record NAME DIR`: while a print is running OR paused (a paused printer is where a
     failure is still on the bed), save every frame plus where the print is (gcode Z, toolhead
@@ -892,7 +1004,6 @@ def run_record(args: argparse.Namespace) -> int:
     frame was saved within S seconds, so a script never waits forever on an idle printer."""
     from errors import GateFailure
     from printer_ops import make_adapter
-    from printer_ops.base import PAUSED, PRINTING, PrinterCommError
     from printer_ops.devices import get_device
     from printer_ops.vision import ContextTap
 
@@ -907,46 +1018,26 @@ def run_record(args: argparse.Namespace) -> int:
     with (out / "meta.jsonl").open("a") as meta:
         while args.max is None or n < args.max:
             t0 = time.time()
-            state, active = None, False
-            try:
-                state = adapter.status().state
-                active = state in (PRINTING, PAUSED)
-                if active:
-                    camera.keepalive(t0)
-                    frame = camera.grab()
-                    ctx = context_tap.poll()
-            except PrinterCommError as exc:
-                print(
-                    json.dumps({"t": round(t0, 1), "error": str(exc)}), file=sys.stderr
-                )
-                active = False
-            if state != last_state:  # say why nothing is saved (an idle printer was silent)
+            state, active, frame, ctx = _record_poll(adapter, camera, context_tap, t0)
+            if (
+                state != last_state
+            ):  # say why nothing is saved (an idle printer was silent)
                 last_state = state
                 print(
-                    json.dumps({"t": round(t0, 1), "state": state, "recording": active}),
+                    json.dumps(
+                        {"t": round(t0, 1), "state": state, "recording": active}
+                    ),
                     file=sys.stderr,
                     flush=True,
                 )
             if active:
-                # milliseconds: two frames inside one second must not overwrite each other
-                stamp = time.strftime("%Y%m%dT%H%M%S", time.gmtime(frame.ts))
-                name = f"{stamp}.{int(frame.ts * 1000) % 1000:03d}Z.jpg"
-                (out / name).write_bytes(frame.jpeg)
-                row: dict[str, Any] = {
-                    "frame": name,
-                    "t": round(frame.ts, 2),
-                    "file": ctx.filename,
-                    "state": state,
-                    "z": ctx.z,
-                    "x": round(ctx.x, 2),
-                    "y": round(ctx.y, 2),
-                }
-                if ctx.objects != objects:  # footprints only when they change
-                    row["objects"] = objects = ctx.objects
-                meta.write(json.dumps(row) + "\n")
-                meta.flush()
+                objects = _record_frame(out, meta, frame, ctx, state, objects)
                 n += 1
-            elif args.timeout is not None and n == 0 and time.time() - started >= args.timeout:
+            elif (
+                args.timeout is not None
+                and n == 0
+                and time.time() - started >= args.timeout
+            ):
                 raise GateFailure(
                     f"{device.name}: no frame saved in {args.timeout:g} s "
                     f"(printer state: {state or 'unreachable'})",
@@ -958,6 +1049,50 @@ def run_record(args: argparse.Namespace) -> int:
                 )
             time.sleep(max(0.5, args.interval - (time.time() - t0)))
     return 0
+
+
+def _record_poll(
+    adapter: Any, camera: Any, context_tap: Any, t0: float
+) -> tuple[Any, bool, Any, Any]:
+    """(printer state, recording?, frame, print context); a comms error only skips this tick."""
+    from printer_ops.base import PAUSED, PRINTING, PrinterCommError
+
+    state, active, frame, ctx = None, False, None, None
+    try:
+        state = adapter.status().state
+        active = state in (PRINTING, PAUSED)
+        if active:
+            camera.keepalive(t0)
+            frame = camera.grab()
+            ctx = context_tap.poll()
+    except PrinterCommError as exc:
+        print(json.dumps({"t": round(t0, 1), "error": str(exc)}), file=sys.stderr)
+        active = False
+    return state, active, frame, ctx
+
+
+def _record_frame(
+    out: Path, meta: Any, frame: Any, ctx: Any, state: Any, objects: Any
+) -> Any:
+    """Save one frame plus its meta row; returns the last footprints written."""
+    # milliseconds: two frames inside one second must not overwrite each other
+    stamp = time.strftime("%Y%m%dT%H%M%S", time.gmtime(frame.ts))
+    name = f"{stamp}.{int(frame.ts * 1000) % 1000:03d}Z.jpg"
+    (out / name).write_bytes(frame.jpeg)
+    row: dict[str, Any] = {
+        "frame": name,
+        "t": round(frame.ts, 2),
+        "file": ctx.filename,
+        "state": state,
+        "z": ctx.z,
+        "x": round(ctx.x, 2),
+        "y": round(ctx.y, 2),
+    }
+    if ctx.objects != objects:  # footprints only when they change
+        row["objects"] = objects = ctx.objects
+    meta.write(json.dumps(row) + "\n")
+    meta.flush()
+    return objects
 
 
 def load_replay(path: Path) -> dict[str, tuple[PrintContext, float]]:
@@ -972,9 +1107,7 @@ def load_replay(path: Path) -> dict[str, tuple[PrintContext, float]]:
         try:
             row = json.loads(line)
             if "objects" in row:
-                objects = tuple(
-                    tuple((float(x), float(y)) for x, y in o) for o in row["objects"]
-                )
+                objects = _footprints(row["objects"])
             if "frame" not in row:
                 continue
             ctx = PrintContext(
@@ -990,6 +1123,10 @@ def load_replay(path: Path) -> dict[str, tuple[PrintContext, float]]:
     return out
 
 
+def _footprints(raw: Any) -> tuple[tuple[tuple[float, float], ...], ...]:
+    return tuple(tuple((float(x), float(y)) for x, y in o) for o in raw)
+
+
 # ---- evaluation on recorded footage ------------------------------------------------------------
 
 IMAGE_EXT = {".jpg", ".jpeg", ".png"}
@@ -997,32 +1134,44 @@ IMAGE_EXT = {".jpg", ".jpeg", ".png"}
 
 def iter_frames(path: Path, every: int = 1) -> Any:
     """(name, bgr) for a directory of images (sorted), one image, or a video file."""
-    import cv2
-
     if path.is_dir():
-        files = sorted(p for p in path.iterdir() if p.suffix.lower() in IMAGE_EXT)
-        for i, p in enumerate(files):
-            if i % every == 0:
-                img = cv2.imread(str(p))
-                if img is not None:
-                    yield p.name, img
+        yield from _iter_dir_frames(path, every)
     elif path.suffix.lower() in IMAGE_EXT:
+        import cv2
+
         img = cv2.imread(str(path))
         if img is not None:
             yield path.name, img
     else:
-        cap = cv2.VideoCapture(str(path))
-        i = 0
-        try:
-            while True:
-                ok, img = cap.read()
-                if not ok:
-                    break
-                if i % every == 0:
-                    yield f"{path.name}#{i}", img
-                i += 1
-        finally:
-            cap.release()
+        yield from _iter_video_frames(path, every)
+
+
+def _iter_dir_frames(path: Path, every: int) -> Any:
+    import cv2
+
+    files = sorted(p for p in path.iterdir() if p.suffix.lower() in IMAGE_EXT)
+    for i, p in enumerate(files):
+        if i % every == 0:
+            img = cv2.imread(str(p))
+            if img is not None:
+                yield p.name, img
+
+
+def _iter_video_frames(path: Path, every: int) -> Any:
+    import cv2
+
+    cap = cv2.VideoCapture(str(path))
+    i = 0
+    try:
+        while True:
+            ok, img = cap.read()
+            if not ok:
+                break
+            if i % every == 0:
+                yield f"{path.name}#{i}", img
+            i += 1
+    finally:
+        cap.release()
 
 
 @dataclass
@@ -1058,36 +1207,49 @@ def evaluate(
     frames (score 0) go first, as if the print had run fine before the clip starts: a failure
     clip then meets the tracker the way a live failure does, after warm-up. `prepare(source,
     frame name)` runs before each frame (replays set the print position there)."""
-    out = []
-    for path, label in sources:
-        if new_print is not None:
-            new_print()
-        tracker = FailureTracker(params or TrackerParams())
-        for _ in range(lead_in):
-            tracker.update(0.0)
-        scores, levels, names, verified, found = [], [], [], [], []
-        for name, img in iter_frames(path, every):
-            if prepare is not None:
-                prepare(path, name)
-            s = score_bgr(img)
-            scores.append(s.p)
-            if s.q is not None:
-                verified.append(s.q)
-            levels.append(tracker.update(s.signal))
-            names.append(name)
-            found.append(tuple(sorted(f.kind for f in s.findings)))
-        out.append(
-            SeqResult(
-                str(path),
-                label,
-                scores,
-                levels,
-                names,
-                verified if scores and len(verified) == len(scores) else None,
-                found,
-            )
+    return [
+        _evaluate_source(
+            path, label, score_bgr, every, params, lead_in, prepare, new_print
         )
-    return out
+        for path, label in sources
+    ]
+
+
+def _evaluate_source(
+    path: Path,
+    label: str,
+    score_bgr: Any,
+    every: int,
+    params: TrackerParams | None,
+    lead_in: int,
+    prepare: Any,
+    new_print: Any,
+) -> SeqResult:
+    if new_print is not None:
+        new_print()
+    tracker = FailureTracker(params or TrackerParams())
+    for _ in range(lead_in):
+        tracker.update(0.0)
+    scores, levels, names, verified, found = [], [], [], [], []
+    for name, img in iter_frames(path, every):
+        if prepare is not None:
+            prepare(path, name)
+        s = score_bgr(img)
+        scores.append(s.p)
+        if s.q is not None:
+            verified.append(s.q)
+        levels.append(tracker.update(s.signal))
+        names.append(name)
+        found.append(tuple(sorted(f.kind for f in s.findings)))
+    return SeqResult(
+        str(path),
+        label,
+        scores,
+        levels,
+        names,
+        verified if scores and len(verified) == len(scores) else None,
+        found,
+    )
 
 
 def _table(
@@ -1114,26 +1276,75 @@ def metrics(
     thresholds: tuple[float, ...] = (0.1, 0.2, 0.3, 0.5),
     interval_s: float = 10.0,
 ) -> dict[str, Any]:
-    pos = [p for r in results if r.label == "pos" for p in r.scores]
-    neg = [p for r in results if r.label == "neg" for p in r.scores]
-    seqs = [
-        {
-            "source": r.source,
-            "label": r.label,
-            "frames": len(r.scores),
-            "max_p": round(max(r.scores, default=0.0), 3),
-            "max_q": None
-            if r.verified is None
-            else round(max(r.verified, default=0.0), 3),
-            "first_alert_frame": r.first_alert,
-            "alert_frames": sum(lv is not None for lv in r.levels),
-            "critical_frames": sum(lv == "critical" for lv in r.levels),
-        }
+    pos = _label_scores(results, "pos")
+    neg = _label_scores(results, "neg")
+    seqs = [_sequence_summary(r) for r in results]
+    days = len(neg) * interval_s / 86400.0
+    neg_alerts = _negative_alert_edges(results)
+    out = {
+        "frames": {"pos": len(pos), "neg": len(neg)},
+        "per_frame": _table(pos, neg, thresholds),
+        "worst_negatives": [
+            {"frame": n, "p": round(p, 3)} for p, n in _worst_negatives(results)
+        ],
+        "sequences": seqs,
+        "sequence_alerts": _sequence_alerts(seqs),
+        "healthy_days": round(days, 3),
+        "false_alarms_per_day": round(neg_alerts / days, 2) if days else None,
+        "finding_alarms_per_day": _finding_rates(_finding_episodes(results), days),
+    }
+    if results and all(r.verified is not None for r in results):
+        out["per_frame_verified"] = _table(
+            _label_scores(results, "pos", verified=True),
+            _label_scores(results, "neg", verified=True),
+            thresholds,
+        )
+    return out
+
+
+def _label_scores(
+    results: list[SeqResult], label: str, *, verified: bool = False
+) -> list[float]:
+    return [
+        p
         for r in results
+        if r.label == label
+        for p in (r.verified or [] if verified else r.scores)
     ]
+
+
+def _sequence_alerts(seqs: list[dict[str, Any]]) -> dict[str, int]:
     neg_seq = [s for s in seqs if s["label"] == "neg"]
     pos_seq = [s for s in seqs if s["label"] == "pos"]
-    worst = sorted(
+    return {
+        "pos_detected": sum(s["first_alert_frame"] is not None for s in pos_seq),
+        "pos_total": len(pos_seq),
+        "neg_false_alarms": sum(s["first_alert_frame"] is not None for s in neg_seq),
+        "neg_total": len(neg_seq),
+    }
+
+
+def _finding_rates(finding_eps: dict[str, int], days: float) -> dict[str, float]:
+    if not days:
+        return {}
+    return {k: round(v / days, 2) for k, v in sorted(finding_eps.items())}
+
+
+def _sequence_summary(r: SeqResult) -> dict[str, Any]:
+    return {
+        "source": r.source,
+        "label": r.label,
+        "frames": len(r.scores),
+        "max_p": round(max(r.scores, default=0.0), 3),
+        "max_q": None if r.verified is None else round(max(r.verified, default=0.0), 3),
+        "first_alert_frame": r.first_alert,
+        "alert_frames": sum(lv is not None for lv in r.levels),
+        "critical_frames": sum(lv == "critical" for lv in r.levels),
+    }
+
+
+def _worst_negatives(results: list[SeqResult]) -> list[tuple[float, str]]:
+    return sorted(
         (
             (p, r.names[i] if i < len(r.names) else f"{r.source}#{i}")
             for r in results
@@ -1142,8 +1353,11 @@ def metrics(
         ),
         reverse=True,
     )[:5]
-    # False alarms per day of printing on healthy footage: every rising edge of the tracker.
-    neg_alerts = sum(
+
+
+def _negative_alert_edges(results: list[SeqResult]) -> int:
+    """False alarms on healthy footage: every rising edge of the tracker."""
+    return sum(
         sum(
             1
             for i, lv in enumerate(r.levels)
@@ -1152,8 +1366,10 @@ def metrics(
         for r in results
         if r.label == "neg"
     )
-    days = len(neg) * interval_s / 86400.0
-    # Bed-change detectors: episodes (rising edges) per kind on healthy footage.
+
+
+def _finding_episodes(results: list[SeqResult]) -> dict[str, int]:
+    """Bed-change detectors: episodes (rising edges) per kind on healthy footage."""
     finding_eps: dict[str, int] = {}
     for r in results:
         if r.label != "neg":
@@ -1163,34 +1379,7 @@ def metrics(
             for k in set(kinds) - set(prev):
                 finding_eps[k] = finding_eps.get(k, 0) + 1
             prev = kinds
-    out = {
-        "frames": {"pos": len(pos), "neg": len(neg)},
-        "per_frame": _table(pos, neg, thresholds),
-        "worst_negatives": [{"frame": n, "p": round(p, 3)} for p, n in worst],
-        "sequences": seqs,
-        "sequence_alerts": {
-            "pos_detected": sum(s["first_alert_frame"] is not None for s in pos_seq),
-            "pos_total": len(pos_seq),
-            "neg_false_alarms": sum(
-                s["first_alert_frame"] is not None for s in neg_seq
-            ),
-            "neg_total": len(neg_seq),
-        },
-        "healthy_days": round(days, 3),
-        "false_alarms_per_day": round(neg_alerts / days, 2) if days else None,
-        "finding_alarms_per_day": {
-            k: round(v / days, 2) for k, v in sorted(finding_eps.items())
-        }
-        if days
-        else {},
-    }
-    if results and all(r.verified is not None for r in results):
-        out["per_frame_verified"] = _table(
-            [q for r in results if r.label == "pos" for q in r.verified or []],
-            [q for r in results if r.label == "neg" for q in r.verified or []],
-            thresholds,
-        )
-    return out
+    return finding_eps
 
 
 def _print_metrics(m: dict[str, Any]) -> None:
@@ -1233,42 +1422,14 @@ def _print_metrics(m: dict[str, Any]) -> None:
 
 
 def run_eval(args: argparse.Namespace) -> int:
-    from errors import UsageError
-
-    sources = [(Path(p), "pos") for p in args.pos] + [
-        (Path(p), "neg") for p in args.neg
-    ]
-    missing = [str(p) for p, _ in sources if not p.exists()]
-    if not sources or missing:
-        raise UsageError(
-            "eval needs existing --pos/--neg paths"
-            + (f"; missing: {', '.join(missing)}" if missing else ""),
-            command="printer vision eval",
-        )
-    cam = None
-    cfg: dict[str, Any] = {}
-    if args.printer:
-        from printer_ops.devices import get_device
-        from vision_geometry import load_calibration
-
-        cam = load_calibration(args.printer)
-        if cam is None:
-            raise UsageError(
-                f"no camera calibration for printer {args.printer}",
-                command="printer vision eval",
-                remediation=[
-                    "See docs/research/printer-vision-geometry.md; the U1 one ships "
-                    "with 3d-cli for devices with `model: Snapmaker U1`."
-                ],
-            )
-        # the device's live `watch: vision:` settings (ignore polygons, verify, scene), so eval
-        # scores what the live loop would
-        vision_cfg = (
-            getattr(get_device(args.printer), "watch", None) or {}
-        ).get("vision")
-        cfg = vision_cfg if isinstance(vision_cfg, dict) else {}
+    sources = _eval_sources(args)
+    cam, cfg = _eval_camera_cfg(args)
     scorer = build_scorer(
-        cfg, verify=not args.no_verify, camera=cam, scene=args.scene, detach=not args.no_detach
+        cfg,
+        verify=not args.no_verify,
+        camera=cam,
+        scene=args.scene,
+        detach=not args.no_detach,
     )
     replays = {str(p): load_replay(p) for p, _ in sources}
 
@@ -1309,12 +1470,56 @@ def run_eval(args: argparse.Namespace) -> int:
     return 0
 
 
+def _eval_sources(args: argparse.Namespace) -> list[tuple[Path, str]]:
+    from errors import UsageError
+
+    sources = [(Path(p), "pos") for p in args.pos] + [
+        (Path(p), "neg") for p in args.neg
+    ]
+    missing = [str(p) for p, _ in sources if not p.exists()]
+    if not sources or missing:
+        raise UsageError(
+            "eval needs existing --pos/--neg paths"
+            + (f"; missing: {', '.join(missing)}" if missing else ""),
+            command="printer vision eval",
+        )
+    return sources
+
+
+def _eval_camera_cfg(args: argparse.Namespace) -> tuple[Any, dict[str, Any]]:
+    """(calibration, the device's live `watch: vision:` settings); (None, {}) without --printer."""
+    from errors import UsageError
+
+    if not args.printer:
+        return None, {}
+    from printer_ops.devices import get_device
+    from vision_geometry import load_calibration
+
+    cam = load_calibration(args.printer)
+    if cam is None:
+        raise UsageError(
+            f"no camera calibration for printer {args.printer}",
+            command="printer vision eval",
+            remediation=[
+                "See docs/research/printer-vision-geometry.md; the U1 one ships "
+                "with 3d-cli for devices with `model: Snapmaker U1`."
+            ],
+        )
+    # the device's live `watch: vision:` settings (ignore polygons, verify, scene), so eval
+    # scores what the live loop would
+    return cam, _vision_cfg(get_device(args.printer))
+
+
 def main(argv: list[str]) -> int:
     from printer_ops.guard import add_arguments
 
     ap = argparse.ArgumentParser(prog="3d printer vision")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    add_arguments(sub.add_parser("guard", help="explicit one-job automatic PAUSE; local evidence only"))
+    add_arguments(
+        sub.add_parser(
+            "guard", help="explicit one-job automatic PAUSE; local evidence only"
+        )
+    )
     live = sub.add_parser("run")
     live.add_argument("printer")
     live.add_argument("--interval", type=float, default=10.0)
@@ -1348,8 +1553,14 @@ def main(argv: list[str]) -> int:
     ev.add_argument("--no-verify", action="store_true")
     ev.add_argument("--scene", action="store_true")
     ev.add_argument("--no-detach", action="store_true")
-    ev.add_argument("--model", action="store_true", help="also score every frame with tier (b)")
-    ev.add_argument("--model-class", default="spaghetti", help="tier (b) class the --pos frames show")
+    ev.add_argument(
+        "--model", action="store_true", help="also score every frame with tier (b)"
+    )
+    ev.add_argument(
+        "--model-class",
+        default="spaghetti",
+        help="tier (b) class the --pos frames show",
+    )
     ev.add_argument("--printer")
     ev.add_argument("--json", action="store_true")
     rec = sub.add_parser("record")
@@ -1364,7 +1575,11 @@ def main(argv: list[str]) -> int:
     fm.add_argument("--tier", choices=("a", "b", "all"), default="all")
     from vision_fit import add_fit_arguments
 
-    add_fit_arguments(sub.add_parser("fit-head", help="fit the tier (b) logistic head on labelled frames"))
+    add_fit_arguments(
+        sub.add_parser(
+            "fit-head", help="fit the tier (b) logistic head on labelled frames"
+        )
+    )
     args = ap.parse_args(argv)
     if args.cmd == "guard":
         return run_guard(args)
