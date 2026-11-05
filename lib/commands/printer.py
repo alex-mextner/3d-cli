@@ -87,7 +87,8 @@ USAGE = """3d printer [-n NAME] <subcommand> [args]
                                        when a printing/answering printer is unsupervised
                                        (see `3d printer supervise --help`)
   vision NAME [options]                camera failure detection (spaghetti, detached part, stale/dark camera)
-                                       into the same event sinks as watch; also
+                                       and print quality (stringing, lost bead pattern, uneven first layer:
+                                       warnings only, --no-quality) into the same event sinks as watch; also
                                        `vision eval --pos P.. --neg N..`, `vision record NAME DIR [--timeout S]`,
                                        `vision fetch-model [--tier a|b|all]`, `vision fit-head ..`,
                                        `vision doctor` (read-only: does any service run --dry-run?)

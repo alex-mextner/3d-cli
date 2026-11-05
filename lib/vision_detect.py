@@ -246,7 +246,11 @@ class FrameScorer:
         geometry: PrintGeometry | None = None,
         model: Any = None,
         fixed_bed: Any = None,
+        quality: Any = None,
     ) -> None:
+        self.quality = (
+            quality  # vision_quality.QualityTier: print-quality Findings, never p/q
+        )
         self.fixed_bed = (
             fixed_bed  # vision_detach.FixedBedDetach: uncalibrated part-detached check
         )
@@ -267,6 +271,13 @@ class FrameScorer:
             self.model.reset_print()
         if self.fixed_bed is not None:
             self.fixed_bed.reset()
+        if self.quality is not None:
+            self.quality.reset_print()  # writes the report of the print that just ended first
+
+    def finish_print(self) -> None:
+        """The print ended: write its monitoring report (no-op without the quality tier)."""
+        if self.quality is not None:
+            self.quality.finish()
 
     def _allowed(self, b: Box) -> bool:
         cx, cy = (b.x1 + b.x2) / 2, (b.y1 + b.y2) / 2
@@ -282,6 +293,8 @@ class FrameScorer:
         kept = [b for b in s.boxes if self._allowed(b)]
         if self.model is not None:
             findings = findings + self.model.update(bgr, self.context, self._now())
+        if self.quality is not None:
+            findings = findings + self.quality.update(bgr, self.context, self._now())
         s = FrameScore(
             p=float(sum(b.conf for b in kept)),
             boxes=kept,
@@ -617,6 +630,7 @@ def build_scorer(
     detach: bool = True,
     model: bool | None = False,
     bed_roi: Any = None,
+    quality: Any = None,
 ) -> FrameScorer:
     """The per-frame pipeline from a device's `watch: vision:` settings: `verify: false` turns
     stage 2 off, `ignore:` lists polygons (normalised [x, y] points) whose boxes are dropped,
@@ -628,7 +642,9 @@ def build_scorer(
     (or `detach=False`, --no-detach) turns it off, `detach: {gap_abs: 0.3, ...}` tunes it.
     `model`: tier (b), the whole-frame vision model (vision_model.py), driven by
     `watch.vision.model` — False (default) = not built, True = build it (downloads the weights if
-    needed), None = build it only when its weights are already cached."""
+    needed), None = build it only when its weights are already cached.
+    `quality`: the print-quality tier (vision_quality.QualityTier; built by run_live from
+    `watch.quality`), which only ever adds Findings."""
     from errors import UsageError
 
     polys = _ignore_polygons(cfg)
@@ -655,7 +671,13 @@ def build_scorer(
 
         tier_b = build_tier(cfg.get("model"), flag=model)
     return FrameScorer(
-        ObicoScorer(ensure_model()), verifier, polys, geometry, tier_b, fixed_bed
+        ObicoScorer(ensure_model()),
+        verifier,
+        polys,
+        geometry,
+        tier_b,
+        fixed_bed,
+        quality,
     )
 
 
@@ -772,6 +794,8 @@ def _once_report(
     if score is not None:
         report.update(_score_fields(score))
     report.update(_detach_fields(scorer))
+    if scorer.quality is not None:
+        report["quality"] = scorer.quality.once_report()
     if scorer.model is not None and scorer.model.last_scores:
         report["model"] = scorer.model.report()
     report["trend"] = round(monitor.tracker.adjusted, 3)
@@ -810,6 +834,7 @@ def run_live(args: argparse.Namespace) -> int:
     from printer_ops.vision_config import monitor_limits, npu_enabled
     from printer_ops.vision_cycle import VisionCycle
     from printer_ops.vision_status import VisionStatus
+    from vision_quality import build_quality
 
     device = get_device(args.printer)
     camera = _device_camera(device, args)
@@ -822,6 +847,9 @@ def run_live(args: argparse.Namespace) -> int:
     )
     cfg = _vision_cfg(device)
     cam = _calibration(device, args)
+    evidence = (
+        Path(args.evidence) if args.evidence else cache_dir() / "vision" / "evidence"
+    )
     scorer = build_scorer(
         cfg,
         verify=not args.no_verify,
@@ -830,13 +858,21 @@ def run_live(args: argparse.Namespace) -> int:
         detach=not args.no_detach,
         model=args.model,
         bed_roi=((getattr(device, "watch", None) or {}).get("bed") or {}).get("roi"),
+        quality=build_quality(
+            device, evidence, once=args.once, disabled=args.no_quality
+        ),
     )
-    context_tap = ContextTap(device.host, device.port) if scorer.geometry else None
-    evidence = (
-        Path(args.evidence) if args.evidence else cache_dir() / "vision" / "evidence"
+    # the print position (Z) feeds the camera masks and the quality tier's plate region
+    context_tap = (
+        ContextTap(device.host, device.port)
+        if scorer.geometry or scorer.quality
+        else None
     )
     monitor = VisionMonitor(
-        device.name, scorer, annotate=annotate, evidence_dir=evidence,
+        device.name,
+        scorer,
+        annotate=annotate,
+        evidence_dir=evidence,
         limits=monitor_limits(cfg),
     )
     status = (
@@ -857,6 +893,7 @@ def run_live(args: argparse.Namespace) -> int:
         camera=camera,
         monitor=monitor,
         reset_print=scorer.reset_print,
+        on_print_end=scorer.finish_print,
         interval_s=args.interval,
         context_tap=context_tap,
         set_context=set_context,
@@ -1532,6 +1569,12 @@ def main(argv: list[str]) -> int:
     live.add_argument("--no-geometry", action="store_true")
     live.add_argument("--scene", action="store_true")
     live.add_argument("--no-detach", action="store_true")
+    live.add_argument(
+        "--no-quality",
+        action="store_true",
+        help="skip the print-quality tier (stringing debris, lost bead pattern, uneven first "
+        "layer) and its per-print monitoring report; default follows watch.quality",
+    )
     live.add_argument(
         "--model",
         action=argparse.BooleanOptionalAction,

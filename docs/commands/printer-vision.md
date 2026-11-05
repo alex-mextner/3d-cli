@@ -9,7 +9,7 @@ from the device's `watch:` block in `printer-devices.yaml`).
 ```text
 3d printer vision NAME [--interval S] [--once] [--save OUT.jpg] [--dry-run] [--min-severity LEVEL]
                        [--snapshot URL|PATH] [--no-keepalive] [--no-npu] [--evidence DIR] [--verbose]
-                       [--no-verify] [--no-geometry] [--scene] [--no-detach] [--model | --no-model]
+                       [--no-verify] [--no-geometry] [--scene] [--no-detach] [--no-quality] [--model | --no-model]
 3d printer vision eval --pos PATH... --neg PATH... [--every N] [--warmup N] [--interval S]
                        [--lead-in N] [--printer NAME] [--no-verify] [--scene] [--no-detach] [--json]
                        [--model [--model-class CLASS]]
@@ -37,6 +37,11 @@ from the device's `watch:` block in `printer-devices.yaml`).
 - `--no-detach` — skip the part-detached check (`vision_part_detached`, below); same as `detach: false` in the
   device's `watch: vision:` block, which can also hold a mapping that tunes it. With `--once` the report adds
   `detach_gap` (0..1, null = the check abstained) and `part_detached` (gap at or above the absolute threshold).
+- `--no-quality` — skip the print-quality tier (below) and its per-print monitoring report; same as
+  `watch.quality: false`. With `--once` the report adds a `quality` block: the numbers
+  (`fleck_frac`, `order`), the ABSOLUTE verdict of that one frame (`level`, `issue`, `basis`) — a single
+  frame has no job baseline, so it is a hint to look at the frame — and `findings` lists
+  `quality_<issue>_<level>`. Without the print position (Z) it says `status: blind` and why.
 - `--scene` — also run the bed-change detectors (`vision_foreign_object`, `vision_part_moved` — against a
   3-12 min reference and, for slow drift, a 15-60 min one — and `vision_no_growth`). Off by default: they are still noisy (see
   [printer-vision-tuning.md](../research/printer-vision-tuning.md)). Same as `scene: true` in the
@@ -95,6 +100,9 @@ from the device's `watch:` block in `printer-devices.yaml`).
 | `vision_part_detached` | warning, then critical | the printed part looks lifted/peeled off the plate: bare build plate shows where the near wall of the part should be (details below); on by default with the camera calibration; never pauses |
 | `vision_model_spaghetti` | warning | tier (b): the whole-frame model scores loose filament >= 0.5 on 3 model runs (30 s apart) in a row; a second opinion next to `vision_spaghetti`, never a pause |
 | `vision_model_part_detached`, `vision_model_empty_bed` | warning | tier (b), **off by default** (no skill zero-shot): only with a fitted head (`fit-head`) or a `threshold` in `watch.vision.model`; `vision_model_empty_bed` is only judged once the print is at least `min_z` (10 mm) high |
+| `quality_stringing_warning`, `quality_stringing_severe` | warning | the print-quality tier: white stringing debris on the plate, against the print's own first layers (below); a WARNING event with the marked frame, once per issue and level, **never a pause** |
+| `quality_texture_*`, `quality_first_layer_*` | warning | the bead pattern got lost with no debris (stripes, roughness, under/over-extrusion) / an uneven first layer (absolute floor) |
+| `quality_<issue>_notice` | info | the first sign of the same; only subscribers that asked for info |
 | `vision_foreign_object`, `vision_part_moved` | warning | only with `--scene`: something new on the bed outside the parts / a part's silhouette changed |
 | `vision_no_growth` | info | only with `--scene`: the newest layers of a part look empty (under- or no extrusion) |
 | `printer_noodle_verdict` | warning | the U1's own NPU detector logs a defect label (table below) at or above 0.83 (once per episode, 5 min quiet ends it) |
@@ -336,6 +344,25 @@ an `auto_pause` event in `printer-agents/NAME/events.jsonl` and the journal.
    printing and logs each verdict to klippy.log; vision tails that log over HTTP Range requests.
    Moonraker does not expose the detector itself (`camera.detect_capture` → -32601).
 
+## Print quality (stringing, pattern loss, first layer)
+
+Tiers (a) and (b) look for FAILURES. None of them knows stringing: the Obico model scored p 0.0 / q 0.0 on all
+12 frames of the 2026-11-05 sheet job whose layers 2-4 were covered in white thread debris, so nothing was
+flagged until the owner saw the part. The quality tier (`lib/vision_quality.py`, `lib/print_quality.py`,
+`printer_ops/quality.py`) measures each frame in the plate region at the print's Z (`fleck_frac`: white
+specks and strands; `order`: regularity of the bead pattern) and judges it against the print's OWN first
+layers: the first frame of the print is the empty-plate reference (a part stands once a frame differs from
+it; past the first layers it always does), the first 4 readings with a part are the baseline. Levels notice
+< warning < severe, 2 of the last 4 readings to report one, one WARNING event with the marked frame
+(`tg --photo FRAME "<russian text>"` through the dispatcher) per issue and level — a second level inside the
+dispatcher's cooldown folds into its `+N more` line — and **never a pause**. When the print ends
+(or another starts) `<evidence>/<printer>-<stamp>-monitor-report/` gets `report.json`, `report.md` and
+`worst-frame.jpg`; one stderr line says where. It needs the camera calibration or `watch.bed.roi` for the plate
+region and the print context (Z) from Moonraker. Start the supervisor at the beginning of a job: a print adopted
+mid-way has no first layers to learn from. Numbers, calibration and limits:
+[print-quality-monitor.md](../research/print-quality-monitor.md). The job watch
+([`printer watch --job`](printer.md#print-quality-monitor)) runs the same tier on its own frames.
+
 ## Three tiers
 
 1. **(a) cheap checks, every frame.** The pipeline above: stale/dark camera, Obico boxes + CLIP
@@ -426,6 +453,11 @@ u1:
         crop: [0.0, 0.3, 1.0, 1.0] # normalised x1,y1,x2,y2 of the bed area; default the whole frame
         head: ~/.cache/3d-cli/vision/models/tier-b-head.json   # default; from `fit-head`
 ```
+
+`watch.quality` (a sibling of `vision:`, shared with `printer watch --job`) tunes the print-quality tier:
+`quality: false` turns it off, `quality: {baseline_n: 4, warning_ratio: 2.0, warning_abs: 0.035, severe_ratio:
+3.5, severe_abs: 0.06, warning_drop: 0.10, first_layer_order: 0.6, ...}` any `QualityConfig` field
+(`printer_ops/quality.py`); a wrong key is an error naming the valid ones.
 
 The block is per device, so every Moonraker printer in the fleet (U1, K1 SE, others) gets its own
 camera `snapshot`, thresholds and `crop`; nothing in tier (b) is U1-specific.

@@ -651,6 +651,7 @@ class _FakeScorer:
     geometry = None
     fixed_bed = None
     model = None
+    quality = None
     context = None
 
     def __init__(self) -> None:
@@ -658,6 +659,9 @@ class _FakeScorer:
 
     def reset_print(self) -> None:
         self.resets += 1
+
+    def finish_print(self) -> None:
+        pass
 
     def __call__(self, jpeg: bytes) -> FrameScore:
         return FrameScore(
@@ -725,6 +729,7 @@ def _live_args(**over: Any) -> argparse.Namespace:
         "no_verify": True,
         "scene": False,
         "no_detach": True,
+        "no_quality": True,
         "model": False,
         "evidence": None,
         "dry_run": False,
@@ -833,3 +838,17 @@ def test_run_live_loops_the_cycle_and_hands_events_to_the_dispatcher(
     )
     doc = read_status("u1")
     assert doc is not None and doc["reachable"] is False and doc["job"] is None
+
+
+def test_a_finished_print_calls_on_print_end_once(rig: Rig) -> None:
+    """The per-print quality report is written when the printer leaves printing/paused, once."""
+    ends: list[int] = []
+    rig.cycle.on_print_end = lambda: ends.append(1)
+    rig.print_file()
+    rig.tick()
+    rig.tick()
+    assert ends == []
+    rig.printer.state, rig.printer.filename = "standby", None
+    rig.tick()
+    rig.tick()
+    assert ends == [1]
