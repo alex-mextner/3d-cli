@@ -125,7 +125,7 @@ def add_spool(
     opened: str | None = None,
     dried: str | None = None,
     dry_state: str | None = None,
-    location_id: int | None = None,
+    location: str | None = None,
     filament_extra: dict[str, Any] | None = None,
 ) -> int:
     vendors = sp.find("vendor", {"name": "Elegoo"})
@@ -145,14 +145,13 @@ def add_spool(
     extra = {
         k: encode_extra(v)
         for k, v in (
-            ("opened_at", opened),
             ("last_dried_at", dried),
             ("dry_state", dry_state),
-            ("printops_location_id", location_id),
         )
         if v is not None
     }
-    return int(sp.create("spool", {"filament_id": fil["id"], "extra": extra})["id"])
+    native = {k: v for k, v in (("first_used", opened), ("location", location)) if v is not None}
+    return int(sp.create("spool", {"filament_id": fil["id"], "extra": extra, **native})["id"])
 
 
 def spool_extra(sp: FakeSpoolman, spool_id: int) -> dict[str, Any]:
@@ -305,9 +304,10 @@ def test_parse_rejects_a_non_integer_check_interval(dpolicy: DryingPolicy) -> No
 
 
 # -- the pure assessment --------------------------------------------------------------------
-def _spool(material: str, **extra: Any) -> dict[str, Any]:
+def _spool(material: str, opened_at: str | None = None, **extra: Any) -> dict[str, Any]:
     return {
         "id": 7,
+        "first_used": opened_at,
         "filament": {"material": material, "name": "x", "extra": {}},
         "extra": {k: json.dumps(v) for k, v in extra.items()},
     }
@@ -691,8 +691,8 @@ def test_check_reads_the_storage_sensor_through_the_location_tree(
         humidity_sensor_entity="sensor.box1_rh",
     )
     cell = locations.add(printops_db, "WH:A/BOX1/01", "slot", actor="t")
-    tpu = add_spool(registered, "TPU", dried=iso(2), location_id=cell.id)
-    pla = add_spool(registered, "PLA", dried=iso(2), location_id=box.id)
+    tpu = add_spool(registered, "TPU", dried=iso(2), location=cell.path)
+    pla = add_spool(registered, "PLA", dried=iso(2), location=box.path)
     with ha.serve() as url:
         report = drying.check(
             printops_db, registered, dpolicy, now=NOW, humidity=HaStates(url, ha.token)

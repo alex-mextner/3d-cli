@@ -16,7 +16,7 @@ WHAT IT FILLS, each with its source in `sources` (stored in incident.context):
   volumetric_mm3_s,  flow = speed × the slicer's ;WIDTH: × ;HEIGHT: bead (Orca's rounded
   fan_pct            rectangle). Without the G-code: the printer's live heater targets.
   head               given; else the printer's only head; else the G-code's active tool
-  spool, filament,   the spool bound to printer/head in Spoolman (`printops_slot`), or the
+  spool, filament,   the spool bound to printer/head in Spoolman (its `location` is `slot:<printer>/<head>`), or the
   vendor, lot        spool_id the reporter gave
   days_since_dried,  printops.drying assessment of that spool (Spoolman last_dried_at; the
   dry_box_rh         spool location's humidity sensor via Home Assistant, read-only)
@@ -699,9 +699,7 @@ def _from_drying(
             f"spool #{spool_id} has not been dried since it was opened {a.age_days:g} d ago"
         )
     else:
-        ctx.warnings.append(
-            f"spool #{spool_id}: no last_dried_at / opened_at in Spoolman"
-        )
+        ctx.warnings.append(f"spool #{spool_id}: no last_dried_at / first_used in Spoolman")
     ctx.put(
         "dry_box_rh",
         a.rh,

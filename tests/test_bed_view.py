@@ -485,12 +485,14 @@ def test_preflight_bed_line_judges_the_moved_view_and_names_the_z_used(refs: Non
     c = preflight.check_bed(dev, runner=run_status_in_process(printer, seen))
     assert c.status == "PASS"
     assert "judged at Z 70.0 after moving the bed from Z 200.0 and back" in c.detail
-    assert seen[0][-5:] == ["status", "u1", "--json", "--max-age", "30"] and "--no-move" not in seen[0]
+    assert seen[0][-4:] == ["status", "u1", "--json", "--best-view"] and "--no-move" not in seen[0]
+    assert "--max-age" not in seen[0]  # never the monitor's verdict at whatever Z the bed rests at
     assert printer.z == 200.0
     sliver = FakePrinter("complete", 200.0)
     c2 = preflight.check_bed(dev, move=False, runner=run_status_in_process(sliver, seen))
     assert "--no-move" in seen[-1] and sliver.scripts == []
-    assert c2.status == "FAIL"  # judged at the 15 % sliver, as before: the old verdict, never silently clear
+    # judged at the 15 % sliver: parts are suspected, never silently clear, and no longer a FAIL
+    assert c2.status == "WARN" and "3d printer bed check u1" in c2.detail and "15%" in c2.detail
 
 
 def test_preflight_while_printing_is_a_warn_that_says_nothing_was_moved(refs: None) -> None:
@@ -512,8 +514,8 @@ def test_preflight_gives_a_move_the_time_it_needs() -> None:
     preflight.check_bed(dev, runner=runner)
     preflight.check_bed(dev, move=False, runner=runner)
     off = device(watch={"bed": {"enabled": True}, "vision": {"camera": {"kind": "moonraker-monitor"}}})
-    preflight.check_bed(off, runner=runner)  # auto_view off: no move, no extra time
-    assert timeouts == [pbed.STATUS_MOVE_TIMEOUT_S, pbed.STATUS_TIMEOUT_S, pbed.STATUS_TIMEOUT_S]
+    preflight.check_bed(off, runner=runner)  # auto_view off: the preflight still runs the full check path
+    assert timeouts == [pbed.STATUS_MOVE_TIMEOUT_S, pbed.STATUS_TIMEOUT_S, pbed.STATUS_MOVE_TIMEOUT_S]
     assert pbed.STATUS_MOVE_TIMEOUT_S > 2 * V.MOVE_TIMEOUT_S + pbed.AUTO_VIEW_SETTLE_S + 2 * B.FROZEN_CHECK_S
 
 

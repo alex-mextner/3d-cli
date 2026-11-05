@@ -17,6 +17,14 @@ WHY it is not a flag: a FAIL is either a real defect (do not print) or a false p
   (fix the gate). Each approved or refused force is therefore an issue to analyse and a root cause to
   fix, not a habit — the refusal message says so.
 
+RETRY (issue https://github.com/alex-mextner/3d-cli/issues/728): the tg-ctl daemon answers a card it
+  could not send with `ask-forward not-posted: … daemon declined: reason=send-failed` (tg-cli
+  `forwardAndPostQuestion`: ONE `sendMessage`, no retry; on 2026-11-04 22:02 and 22:03 it was
+  `getaddrinfo EAI_AGAIN api.telegram.org`, a resolver blip, while a plain `tg` a moment later
+  worked). Nothing was posted, so asking again is safe: the ask is repeated after each pause of
+  RETRY_DELAYS_S (3, 10, 30 s). When it still fails the refusal says how to start from the
+  printer's own screen and where the daemon logs the cause.
+
 INVARIANTS: the helper is loaded from a FIXED path under the account's real home (never an env var,
   never the repo or $PATH), and only when its file is owned by you or root and not group/world
   writable; a helper that is missing or untrusted refuses the start (fail closed).
@@ -31,6 +39,7 @@ import pwd
 import shlex
 import stat
 import sys
+import time
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Protocol, cast
@@ -45,7 +54,15 @@ _MODULE = "agenttools_hatch_escalation"
 # agent-tools checkouts searched, relative to the real home; the first one that has the helper wins.
 _CHECKOUTS = (Path("dev") / "agent-tools", Path("xp") / "agent-tools")
 _DETAIL_CHARS = 240
-_CARD_VALUE_CHARS = 1000  # the shared hatch helper cuts each context value at this length
+_CARD_VALUE_CHARS = (
+    1000  # the shared hatch helper cuts each context value at this length
+)
+# The daemon's own wording for a card it could not post (agent-tools `_ask_forward_verdict`, tg-cli
+# question-cards.ts `dropAsk(socket, "send-failed")`).
+_SEND_FAILED = "reason=send-failed"
+# Pauses before each further ask while the card is not posted: a transient resolver/network failure
+# of the daemon clears in seconds, so the owner still gets the card and the start does not stall.
+RETRY_DELAYS_S = (3.0, 10.0, 30.0)
 
 
 class _Verdict(Protocol):
@@ -129,7 +146,9 @@ def failing_summary(checks: Sequence[Check], budget: int | None = None) -> str:
     return "\n".join(lines)
 
 
-def _refusal(failing: str, why: str, command: str) -> PrinterRefused:
+def _refusal(
+    failing: str, why: str, command: str, extra: Sequence[str] = ()
+) -> PrinterRefused:
     return PrinterRefused(
         f"--force does not override preflight FAIL by itself: {why}",
         command="printer",
@@ -139,13 +158,59 @@ def _refusal(failing: str, why: str, command: str) -> PrinterRefused:
             f"Only if forcing is truly needed, ask the owner for a one-time Telegram approval: "
             f'{ENV_VAR}="<why this FAIL is acceptable>" {command}',
             "Every forced case is analysed afterwards and its root cause fixed.",
+            *extra,
             "Failing checks:\n" + failing,
         ],
     )
 
 
+def _send_failed(verdict: _Verdict) -> bool:
+    """The daemon declined to post the card (`ask-forward not-posted … reason=send-failed`): its
+    Telegram send failed (a DNS or network blip, 2026-11-04 `getaddrinfo EAI_AGAIN api.telegram.org`).
+    No card exists then, so asking again cannot double-approve."""
+    return not verdict.approved and _SEND_FAILED in verdict.reason
+
+
+def _ask_with_retry(
+    hatch: _HatchLib, context: dict[str, object], command: str
+) -> _Verdict:
+    """`request_hatch_approval`, asked again after each `RETRY_DELAYS_S` pause while the card could not
+    be posted. Any other verdict (approved, denied, timed out, not requested) is final at once."""
+    verdict = hatch.request_hatch_approval(
+        HOOK_ID, context, cwd=os.getcwd(), command=command, critical=True
+    )
+    for delay in RETRY_DELAYS_S:
+        if not _send_failed(verdict):
+            break
+        print(
+            f"hatch: the approval card was not posted to Telegram ({verdict.reason}); asking again in {delay:g} s",
+            file=sys.stderr,
+        )
+        time.sleep(delay)
+        verdict = hatch.request_hatch_approval(
+            HOOK_ID, context, cwd=os.getcwd(), command=command, critical=True
+        )
+    return verdict
+
+
+def _screen_hint(remote_name: str | None) -> list[str]:
+    """How to start without Telegram: from the printer's own screen."""
+    what = f"`{remote_name}`" if remote_name else "the file"
+    return [
+        f"Start from the printer screen instead: {what} is already stored on the printer (Files, then Print). "
+        "The screen does NOT run these checks: only do it when the FAIL lines below are understood.",
+        "Why Telegram failed: tg-ctl's daemon could not send the card (plain `tg` can still work); see "
+        "`~/.config/tg-cli/tg-ctl.*.log`, lines `sendMessage failed` / `ask-forward dropped: reason=send-failed`.",
+    ]
+
+
 def require_force_approval(
-    *, printer: str, file: str, sha256: str, checks: Sequence[Check]
+    *,
+    printer: str,
+    file: str,
+    sha256: str,
+    checks: Sequence[Check],
+    remote_name: str | None = None,
 ) -> str:
     """Return the approval reason when the owner approved the forced start, else raise PrinterRefused.
 
@@ -169,11 +234,17 @@ def require_force_approval(
         "sha256": sha256,
         "failing_checks": failing_summary(checks, _CARD_VALUE_CHARS - 50),
     }
-    verdict = hatch.request_hatch_approval(
-        HOOK_ID, context, cwd=os.getcwd(), command=command, critical=True
-    )
+    verdict = _ask_with_retry(hatch, context, command)
     if verdict.approved:
         return verdict.reason
+    if _send_failed(verdict):
+        raise _refusal(
+            failing,
+            f"the approval request could not be posted to Telegram after {1 + len(RETRY_DELAYS_S)} attempts "
+            f"({verdict.reason})",
+            command,
+            extra=_screen_hint(remote_name),
+        )
     if verdict.should_stop:
         raise _refusal(
             failing,

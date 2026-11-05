@@ -1,0 +1,4 @@
+{
+  "_doc": "Print-quality monitor (lib/printer_ops/quality.py): what was CALIBRATED beyond the generic QualityConfig defaults, per printer model. A model matches when its name, lowercased and stripped to letters and digits, ends with the key (Snapmaker U1 -> ...u1). Same keys as `<printer>.watch.quality`; the printer's own watch.quality wins. See docs/research/print-quality-monitor.md.",
+  "u1": {"first_layer_order": 0.6}
+}

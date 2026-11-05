@@ -13,7 +13,6 @@ from fleet_fixtures import REPO_FLEET
 from printops_fixtures import LiveApi
 
 from printops import db, events
-from printops.spoolman import encode_extra
 
 from .workflow_helper import run_cli
 
@@ -263,7 +262,7 @@ def _load(live: LiveApi, material: str, slot: str) -> int:
     fil = sm.create("filament", {"name": f"{material} Grey", "vendor_id": vendor["id"], "material": material,
                                  "density": 1.24, "diameter": 1.75, "weight": 1000})
     return int(sm.create("spool", {"filament_id": fil["id"], "lot_nr": "L1",
-                                   "extra": {"printops_slot": encode_extra(slot)}})["id"])
+                                   "location": f"slot:{slot}"})["id"])
 
 
 def test_with_3d_api_the_record_is_a_calibration_plan_shows_it_and_a_nozzle_swap_makes_it_stale(

@@ -4,10 +4,11 @@ ACCESSED VIA: 3d-api `routes_spools.py` (the only caller that writes; 3d-api is 
 Spoolman writer, plan §5.1) and therefore `3d printops spool …`, the bot and HA. Issues #160/#163.
 
 WHERE THINGS LIVE (decision D2): vendor / filament / spool identity, remaining weight, lot,
-price, Spoolman `location` (+ extra `printops_location_id`, written only through
-`printops.locations.place_spool`), extra `printops_slot` ("u1/T3", "" when not loaded),
-`opened_at`, `external_key` (import idempotency) — in Spoolman. The ledger (interval of
-remaining), the tare provenance and the events — in the PrintOps DB.
+price, Spoolman `location` (written only through `printops.locations.place_spool`; a spool
+loaded in slot u1/T3 has location `slot:u1/T3` — there is no separate slot field), native
+`first_used` (the opened/exposure clock), extra `external_key` (import idempotency) — in
+Spoolman. The ledger (interval of remaining), the tare provenance and the events — in the
+PrintOps DB. docs/printops/native-fields.md lists what is native and why.
 
 INVARIANTS:
   - A spool sits in at most one printer slot and a slot holds at most one spool: `load` refuses
@@ -35,8 +36,9 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NoReturn
 
-from printops import db, head_sync, ledger, locations, maintenance, tares
+from printops import db, filament_defaults, head_sync, ledger, locations, maintenance, tares
 from printops import events as ev
+from printops.spool_mirror import slot_of_location
 from printops.spoolman import JSON, Spoolman, SpoolmanError, decode_extra, encode_extra
 
 if TYPE_CHECKING:
@@ -116,7 +118,8 @@ def extra_value(item: Mapping[str, Any], key: str) -> Any:
 
 
 def slot_of(spool: Mapping[str, Any]) -> str:
-    return str(extra_value(spool, "printops_slot") or "")
+    """`u1/T3` when the spool's `location` is `slot:u1/T3`, else ''."""
+    return slot_of_location(str(spool.get("location") or ""))
 
 
 # The Spoolman extra field (on the spool and on its filament) naming the slicer filament preset.
@@ -160,11 +163,10 @@ def view(conn: sqlite3.Connection, spool: Mapping[str, Any]) -> dict[str, Any]:
         "color_hex": fil.get("color_hex"),
         "filament_id": fil.get("id"),
         "location": spool.get("location") or None,
-        "location_id": extra_value(spool, "printops_location_id"),
         "slot": slot_of(spool) or None,
         "lot_nr": spool.get("lot_nr"),
         "price": spool.get("price"),
-        "opened_at": extra_value(spool, "opened_at"),
+        "opened_at": spool.get("first_used"),
         "external_key": extra_value(spool, "external_key"),
         "slicer_filament_preset": named[0] if named else None,
         "archived": bool(spool.get("archived")),
@@ -290,6 +292,7 @@ class Receive:
     opened: bool = False
     comment: str | None = None
     external_key: str | None = None
+    max_speed_mm_s: int | None = None  # filament max print speed, mm/s (default: filament_defaults)
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> Receive:
@@ -325,6 +328,8 @@ class Receive:
             v = getattr(self, name)
             if v is not None and (not math.isfinite(v) or v < 0):
                 raise SpoolError(422, f"{name} must be a finite number ≥ 0, got {v}")
+        if self.max_speed_mm_s is not None and self.max_speed_mm_s <= 0:
+            raise SpoolError(422, f"max_speed_mm_s must be > 0 mm/s, got {self.max_speed_mm_s}")
         for name in ("density", "diameter"):
             v = getattr(self, name)
             if v is not None and (not math.isfinite(v) or v <= 0):
@@ -345,6 +350,7 @@ def _matches_type(v: Any, want: type | tuple[type, ...]) -> bool:
 _NUMBER = (int, float)
 _RECEIVE_TYPES: dict[str, type | tuple[type, ...]] = {
     "filament_id": int,
+    "max_speed_mm_s": int,
     "opened": bool,
     **dict.fromkeys(
         (
@@ -434,6 +440,7 @@ def _resolve_filament(ctx: Ctx, r: Receive) -> tuple[JSON, bool]:
     body = {k: v for k, v in spec.items() if v is not None}
     if vendor is not None:
         body["vendor_id"] = vendor["id"]
+    body["extra"] = filament_defaults.creation_extra(spec, r.max_speed_mm_s)
     return sm.create("filament", body), True
 
 
@@ -456,16 +463,14 @@ def _receive_body(
     loc: locations.Location | None,
 ) -> dict[str, Any]:
     extra: dict[str, Any] = {}
-    if r.opened:
-        extra["opened_at"] = db.utc_now()
     if r.external_key:
         extra["external_key"] = r.external_key
-    if loc is not None:
-        extra["printops_location_id"] = loc.id
     body: dict[str, Any] = {
         "filament_id": fil["id"],
         "extra": {k: encode_extra(v) for k, v in extra.items()},
     }
+    if r.opened:
+        body["first_used"] = db.utc_now()
     if loc is not None:
         body["location"] = locations.spoolman_path(loc)
     if net is not None:
@@ -534,11 +539,6 @@ def receive(ctx: Ctx, r: Receive) -> dict[str, Any]:
         except SpoolmanError as e:
             raise SpoolError(502 if e.status in (0, 500) else 422, e.message) from e
         sid = int(spool["id"])
-        if r.external_key:
-            ctx.conn.execute(
-                "INSERT INTO spool_import (external_key, spool_id, at, actor) VALUES (?, ?, ?, ?)",
-                (r.external_key, sid, db.utc_now(), ctx.actor),
-            )
         if tare is not None:
             tares.record_choice(ctx.conn, sid, tare, actor=ctx.actor)
         _anchor_received(ctx, r, sid, net)
@@ -562,25 +562,16 @@ def receive(ctx: Ctx, r: Receive) -> dict[str, Any]:
 
 
 def _claim_key(ctx: Ctx, key: str) -> None:
-    """Refuse an external key that already names a spool (409). Runs inside the receive
-    transaction (BEGIN IMMEDIATE), so two concurrent imports of one key cannot both pass; a key
-    whose spool was deleted in Spoolman by hand is released."""
-    row = ctx.conn.execute(
-        "SELECT spool_id FROM spool_import WHERE external_key = ?", (key,)
-    ).fetchone()
-    if row is None:
-        return
-    sid = int(row["spool_id"])
-    try:
-        ctx.spoolman.get("spool", sid)
-    except SpoolmanError as e:
-        if e.status != 404:
-            raise SpoolError(502, e.message) from e
-        ctx.conn.execute("DELETE FROM spool_import WHERE external_key = ?", (key,))
-        return
-    raise SpoolError(
-        409, f"spool #{sid} already has external key {key!r}", detail={"spool_id": sid}
-    )
+    """Refuse an external key that already names a spool (409; archived spools count). Runs inside
+    the receive transaction (BEGIN IMMEDIATE), so two concurrent imports of one key cannot both
+    pass. Spoolman's extra `external_key` is the only record of the key."""
+    for sp in all_spools(ctx.spoolman, archived=True):
+        if extra_value(sp, "external_key") == key:
+            raise SpoolError(
+                409,
+                f"spool #{sp['id']} already has external key {key!r}",
+                detail={"spool_id": int(sp["id"])},
+            )
 
 
 # -- placement ---------------------------------------------------------------------------------
@@ -612,10 +603,13 @@ def _slot_location(ctx: Ctx, slot: SlotRef) -> locations.Location:
 
 
 def _place(
-    ctx: Ctx, spool_id: int, loc: locations.Location | None, extra: Mapping[str, Any]
+    ctx: Ctx,
+    spool_id: int,
+    loc: locations.Location | None,
+    fields: Mapping[str, Any] | None = None,
 ) -> JSON:
     try:
-        return locations.place_spool(ctx.conn, ctx.spoolman, spool_id, loc, extra=extra)
+        return locations.place_spool(ctx.conn, ctx.spoolman, spool_id, loc, fields=fields)
     except SpoolmanError as e:
         raise SpoolError(502, e.message) from e
     except ValueError as e:  # LocationError: archived location
@@ -660,7 +654,7 @@ def move(ctx: Ctx, spool_id: int, location: str) -> dict[str, Any]:
             {"from": sp.get("location"), "to": loc.path, "location_id": loc.id},
             ctx.actor,
         )
-        sp = _place(ctx, spool_id, loc, {"printops_slot": ""} if was else {})
+        sp = _place(ctx, spool_id, loc)
     return view(ctx.conn, sp)
 
 
@@ -771,7 +765,7 @@ def _usable_head(printer: str, h: Head, usable: bool) -> SlotRef:
 
 
 def spool_in_slot(sm: Spoolman, slot: SlotRef) -> list[JSON]:
-    """Spools whose `printops_slot` is `slot` (case-insensitive: a slot of a printer that
+    """Spools whose `location` is `slot:<slot>` (case-insensitive: a slot of a printer that
     left the fleet cannot be canonicalised by check_slot)."""
     key = slot.key.casefold()
     return [sp for sp in all_spools(sm) if slot_of(sp).casefold() == key]
@@ -825,7 +819,7 @@ def load(
     printer_write: bool = True,
     force_official: bool = False,
 ) -> dict[str, Any]:
-    """Bind a spool to a printer slot (`printops_slot` + location `slot:<p>/<head>`), then — after
+    """Bind a spool to a printer slot (its location becomes `slot:<p>/<head>`), then — after
     the binding is committed, unless `printer_write` is False — make the printer's head show it
     (printops.head_sync; `force_official` lets it overwrite an official RFID head) and, on a
     single-head Moonraker printer with `[spoolman]`, Moonraker's active spool. The answer's
@@ -856,12 +850,12 @@ def load(
             _emit_unloaded(
                 ctx, int(o["id"]), slot.key, back.path if back else None, "replaced"
             )
-            _place(ctx, int(o["id"]), back, {"printops_slot": ""})
+            _place(ctx, int(o["id"]), back)
         if was and was != slot.key:
             _emit_unloaded(ctx, spool_id, was, slot.path, "moved to another slot")
-        extra: dict[str, Any] = {"printops_slot": slot.key}
-        if not extra_value(sp, "opened_at"):
-            extra["opened_at"] = db.utc_now()
+        fields: dict[str, Any] = {}
+        if not sp.get("first_used"):
+            fields["first_used"] = db.utc_now()
         ev.emit(
             ctx.conn,
             "slot.loaded",
@@ -874,7 +868,7 @@ def load(
             },
             ctx.actor,
         )
-        sp = _place(ctx, spool_id, loc, extra)
+        sp = _place(ctx, spool_id, loc, fields)
     out = view(ctx.conn, sp)
     out["printer_write"] = (
         head_sync.sync_head(ctx, slot, sp, force_official=force_official)
@@ -924,7 +918,7 @@ def unload(
         for sp in _bound(ctx, slot, spool_id):
             sid = int(sp["id"])
             _emit_unloaded(ctx, sid, slot_of(sp), loc.path if loc else None, "unloaded")
-            placed.append(_place(ctx, sid, loc, {"printops_slot": ""}))
+            placed.append(_place(ctx, sid, loc))
     out = view(ctx.conn, placed[-1])
     if gross_g is not None:
         out["drift_g"] = drift
@@ -1170,7 +1164,7 @@ def empty(ctx: Ctx, spool_id: int, *, note: str | None = None) -> dict[str, Any]
             },
             ctx.actor,
         )
-        _place(ctx, spool_id, None, {"printops_slot": ""})
+        _place(ctx, spool_id, None)
         try:
             body: dict[str, Any] = {"archived": True}
             if sp.get("initial_weight"):

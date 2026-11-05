@@ -18,6 +18,9 @@ Epic: [#90](https://github.com/alex-mextner/3d-cli/issues/90).
 3d printer status NAME [--json] [--secs S]
 3d printer upload NAME FILE.gcode [--as REMOTE]
 3d printer start NAME FILE.gcode --yes [--as REMOTE] [--source-3mf X.3mf] [--bridge-max MM] [--force] [--secs S] [--no-bed-move]
+                     [--colour-delta-e N] [--fix-colour [--fix-max-delta-e N]]
+3d printer slot set NAME T<n> --material M --color #RRGGBB [--brand B] [--sub-type S] [--dry-run] [--force-official] [--secs S] [--json]
+3d printer slot show NAME [--secs S] [--json]
 3d printer cancel NAME --yes
 3d printer evidence NAME [--job ID | --last] [--out DIR] [--gcode FILE.gcode] [--note TEXT] [--klippy-log FILE] [--job-file FILE]
 3d printer guard NAME --job-id ID --yes [--interval S] [--evidence DIR]
@@ -28,7 +31,7 @@ Epic: [#90](https://github.com/alex-mextner/3d-cli/issues/90).
 3d printer supervise uninstall [NAME...|--all] [--yes] [--unit-dir DIR]
 3d printer supervise quiet NAME [--reason TEXT] | --clear
 3d printer vision NAME [--interval S] [--once] [--dry-run] [--scene] [--no-detach] ...  |  vision eval ...  |  vision record NAME DIR [--timeout S]  |  vision fetch-model
-3d printer bed status NAME [--json] [--max-age S] [--best-view | --no-move] [--part-height MM]  |  bed reference NAME [--capture [--no-plate]]  |  bed monitor NAME
+3d printer bed status NAME [--json] [--max-age S] [--best-view | --no-move] [--part-height MM]  |  bed reference NAME [--capture [--best-view] [--no-plate]] | bed reference NAME --refresh [--assume-empty WHY]  |  bed calibrate NAME [--z-from A --z-to B --z-step S] [--part-height MM]  |  bed monitor NAME
 3d printer subscribe --session ID [--printer P,P] [--kinds K,K] [--min-severity LEVEL] ...
 3d printer subscribe --session ID --printer P --once --on bed-free
 3d printer unsubscribe --session ID | --id SUBID | --all
@@ -49,8 +52,8 @@ Epic: [#90](https://github.com/alex-mextner/3d-cli/issues/90).
 |---|---|
 | `list` | Every fleet and configured printer: owner, access, model, address, heads (an unusable head with its reason), and where the device settings came from when a user/project file overrides the fleet. |
 | `status NAME` | State, current file and progress, temperatures, and (U1) what each head holds. |
-| `upload NAME FILE` | Store the file on the printer and verify its size there. Never starts a print. |
-| `start NAME FILE --yes` | Start a file that was uploaded before. Runs [`3d print-preflight`](print-preflight.md) first. |
+| `upload NAME FILE` | Store the file on the printer and verify its size there. Never starts a print. A FILE without its preview thumbnails gets them first, in place (old and new SHA-256 printed; see [`3d gcode-thumbnails`](gcode-thumbnails.md#layers-a-thumbnail-cannot-be-missing)). |
+| `start NAME FILE --yes` | Start a file that was uploaded before. Runs [`3d print-preflight`](print-preflight.md) first. Adds missing thumbnails to FILE in place like `upload`; the fixed bytes have another content-addressed name, so upload again. |
 | `cancel NAME --yes` | Cancel the running or paused job. |
 | `evidence NAME --out DIR` | After EVERY print (done, cancelled, failed): save the Moonraker history job and the klippy.log lines around its pauses and errors as `DIR/<date>-<outcome>.md` + `.json`, with the layer of each stop when `--gcode` is given; GET only. See [printer-evidence.md](printer-evidence.md). |
 | `guard NAME --job-id ID --yes` | Authorize one automatic native PAUSE of this exact live Moonraker job on confirmed camera failure; [policy and readiness](printer-vision.md#one-job-automatic-pause). |
@@ -92,6 +95,56 @@ Options:
   head-sequence check on it and `3d halves-check` (without it, the head-sequence check uses
   `NAME.3mf` next to `NAME.gcode` when present).
   `3d printer start u1 out/base.gcode --yes --source-3mf print/base.3mf`
+- `--colour-delta-e N` — `start`: the preflight `slot Tn` colour tolerance, CIEDE2000, default 10
+  (see [Slot colour](#slot-colour)). `3d printer start u1 out/plate.gcode --yes --colour-delta-e 8`
+- `--fix-colour` — `start`: first rewrite the file (and its project 3MF) to the colours the printer
+  reports, print the old/new SHA-256, upload the fixed file, then run the preflight and start.
+  `3d printer start u1 out/plate.gcode --yes --fix-colour`
+- `--fix-max-delta-e N` — the largest ΔE `--fix-colour` rewrites across (default 30).
+  `3d printer start u1 out/plate.gcode --yes --fix-colour --fix-max-delta-e 40`
+
+## Slot colour
+
+The preflight `slot Tn` line compares the colour the slicer wrote (`; filament_colour`) with the
+colour the printer reports for that head by **CIEDE2000 ΔE**, default tolerance 10
+(`--colour-delta-e`), and prints the distance. The same beige PETG is `#E8D8B0` in the slice and
+`#FEE5A5` on the U1 screen: ΔE 6.4, PASS. A material mismatch is always a FAIL. Three ways out of a
+real mismatch, none of them `--force`:
+
+```bash
+# 1. the file is wrong about the colour: rewrite it at the source (G-code + project 3MF + sidecars)
+3d print-preflight out/plate.gcode --printer u1 --fix
+3d printer start u1 out/plate.gcode --yes --fix-colour     # rewrite, upload the fixed file, preflight, start
+# 2. the printer is wrong about what is loaded: write the head's record (idle printers only)
+3d printer slot set u1 T4 --material PETG --color '#E8D8B0' --brand Elegoo --dry-run
+3d printer slot set u1 T4 --material PETG --color '#E8D8B0' --brand Elegoo
+# 3. load the filament the file was sliced for
+```
+
+`--fix` / `--fix-colour` set entry *n* of `filament_colour` and `extruder_colour` to the printer's
+colour for every tool the G-code uses, in the G-code and in its project 3MF
+(`Metadata/project_settings.config`, `plate_N.json`), keep mode and mtime, move
+`NAME.slice-warnings.json` to the new G-code SHA-256 and update `NAME.manifest.json`, and print the
+old and new SHA-256 of each file (the hash is part of the stored file name, hence the upload in
+`start --fix-colour`). A head whose colour is further than `--fix-max-delta-e` (default 30) from the
+slice is refused with nothing written: that is another filament, and relabelling it would hide a
+wrong-colour print.
+
+`slot set NAME T<n> --material M --color #RRGGBB [--brand B] [--sub-type S] [--dry-run]
+[--force-official]` is `3d printers filament set NAME/T<n>` (`--brand` is its `--vendor`); `T<n>`
+is the label the printer shows (U1: T1..T4 = G-code tools T0..T3). `slot show NAME` reads the heads.
+
+**What the Snapmaker U1 accepts** (Snapmaker/u1-klipper `print_task_config.py`, issue #400): the
+touchscreen's own Klipper command `SET_PRINT_FILAMENT_CONFIG CONFIG_EXTRUDER=<i> VENDOR=… FILAMENT_TYPE=…
+FILAMENT_SUBTYPE=… FILAMENT_COLOR_RGBA=RRGGBBFF`, sent through `POST /printer/gcode/script` (no
+webhook endpoint exists for it) and read back from `print_task_config`. It needs vendor, type and
+sub-type together (defaults Generic / Basic), persists to `print_task.json`, resets the head's
+pressure advance (the answer prints the K it has now), and refuses a head with official RFID filament
+unless `--force-official`. 3d refuses before sending when the fleet entry is not `access: full`
+(read-only and offline printers), while printing or paused, or when Klipper is not ready. Not used:
+the RFID path `FILAMENT_DT_UPDATE` / the Extended Firmware's `POST /printer/filament_detect/set`
+(it marks the slot official, which locks later writes). Other adapters (Creality) have no
+per-head write: `slot set` exits 2 and `slot show` is the read-only comparison.
 
 ## Examples
 
@@ -748,7 +801,51 @@ until someone takes them off. The camera can see that, so nobody has to tell an 
   the K1 SE) only within `z_tol_mm` (0.5) of the current Z. `--capture --no-plate` (plate off)
   adds the bare-bed reference that makes the plate test reliable. `--capture --from FRAME.jpg --z
   199.7` stores a saved snapshot of the empty bed taken at that Z instead. Stored in
-  `~/.local/share/3d-cli/bed/NAME/`; `3d printer bed reference u1` lists them.
+  `~/.local/share/3d-cli/bed/NAME/`; `3d printer bed reference u1` lists them (with plate type,
+  light state and age).
+- **References keep themselves in order** ([#723](https://github.com/alex-mextner/3d-cli/issues/723)).
+  A reference is per printer, **plate type** (`watch.bed.plate`, default `default`), **light state**
+  (the printer's light `on` / `off` / `unknown` when the frame was taken) and Z, and has its time.
+  A frame is judged against the reference of its own light state first; the other light state is a
+  fallback that the verdict marks `reference_light_mismatch` and judges by colour *and* texture (see
+  *Another light* below). A reference older than `watch.bed.reference_max_age_days` (default 30), or
+  taken with another plate type, never makes the verdict `occupied`: it is `unknown`, with the
+  age and the refresh command. `3d printer bed reference NAME --refresh [--assume-empty "why"]`
+  re-captures from the best view with the light on and replaces the reference of the same plate
+  type, light state and view. Without `--assume-empty` it stores the frame only when that very
+  frame is a **confident `clear` with the plate on, in a good view (`auto_view_min`) with the
+  light on** (a printer without a light needs no light); otherwise it refuses, says why and
+  stores nothing (exit 1). `--assume-empty "why"` is your word instead of that verdict; the reason
+  is kept in the reference (`assumed_empty`) and in the journal. With `watch.bed.auto_reference:
+  true` (default off) `bed status` / `bed check`, the preflight `bed` line and the one-shot
+  `bed-free` check at the end of a job do it by themselves after such a confident clear on an
+  idle printer (`auto_reference` in the verdict). Every refresh is one JSON line (`ts`, `mode`
+  `manual` | `assumed` | `auto`, `why`, `z`, `light`, `verdict`) in
+  `~/.local/state/3d-cli/bed/NAME.refs.log`. Config: `plate`, `reference_max_age_days`,
+  `auto_reference` under `watch.bed`.
+- **Calibrate** (`3d printer bed calibrate NAME [--z-from A --z-to B --z-step S] [--part-height MM] [--json]`,
+  [#723](https://github.com/alex-mextner/3d-cli/issues/723)). A printer without a camera calibration (the
+  K1 SE) used to count the plate as «in the frame by definition» at every Z, so the check never knew a poor view
+  and never moved the bed to a better one. `bed calibrate` learns it: on an **idle, homed, writable** printer
+  (refused otherwise, nothing moves) the bed goes through a grid of Zs **in Z only** — the guarded move of
+  `bed check`, within the clearance floor (`--part-height` + 15 mm, never below Z 10) and the axis ceiling
+  (`resume.z_max_mm` - 5), `--z-from` / `--z-to` default to those limits and `--z-step` to 20 mm (at most 60
+  Zs; a grid outside the limits is refused), with the printer's light on — takes one fresh frame per Z, and puts the
+  bed back in a `finally` (exceptions, Ctrl-C, SIGTERM; the displaced-Z marker is the same as the auto view's).
+  Then, without touching the printer, the plate is **followed** over the frames: from its outline in the
+  nearest empty-bed reference (`watch.bed.plate_mask`, the alias of `roi`, drawn on it; else the reference's own
+  bed surface; with neither, the largest dark low-saturation region of the frame — rough, the result says
+  «check it») frame to frame by the affine transform that carries the plate onto the next frame (ECC,
+  correlation based, so a light change does not move it; the polygon moves with it, so the part of the plate that
+  has left the frame is still counted). The visible share of the polygon per Z, the plate polygon where most of it
+  shows and the grid are stored in `~/.local/share/3d-cli/bed/NAME/calibration.json`. A plate that cannot be
+  followed (too little of it in the frame, no texture, correlation under 0.5) ends the chain: those Zs are listed
+  as `unfollowed` and **not stored** (no view is invented). `bed_in_view` / the auto view / `out of view` then use
+  the learnt shares (linear between the Zs, unknown beyond them) for a printer that has **neither a camera
+  calibration nor a `watch.bed.roi`**; `watch.bed.views: {70: 1.0, 200: 0.15}` overrides them. Limits: the
+  model is affine (a big move's perspective is followed approximately), the plate must show texture, the step must
+  be small enough for the plate to move a few tens of px between two Zs, and the share is relative to the plate's
+  area at that Z. Exit 1 when the bed could not be put back.
 - **Out of view.** The calibration also says how much of the bed is in the frame: the U1 camera
   sits about 12 mm above the bed's Z 0, so the lower the bed goes the less of it shows (Z 10: 98 %,
   Z 200: 15 %, Z 215: under 10 %, Z 275 — where a home leaves it — none). Under 10 % the state is
@@ -803,6 +900,28 @@ until someone takes them off. The camera can see that, so nobody has to tell an 
   The `3d printer watch` monitor never moves the bed, and judges nothing (no verdict, no event, no
   ack) while a check has the bed away from where it was found. Config: `watch.bed.auto_view: true|false`,
   `auto_view_min`, `auto_view_part_mm` (see below).
+- **The light** (`watch.bed.light`, on unless `enabled: false`). A frame of a dark chamber is not
+  comparable to the reference, so every camera frame of the bed — `bed check`, `bed status` when it
+  takes a frame, `bed reference --capture`, the preflight `bed` line and the [job
+  watch](#job-watch) frame — is taken with the printer's own light on, and the light goes back as it
+  was found (in a `finally`: also after a failed frame, Ctrl-C or SIGTERM). The light is found among
+  Moonraker's `printer.objects.list`: `led NAME`, `neopixel NAME`, `dotstar NAME` (switched with
+  `SET_LED`) or `output_pin NAME` (`SET_PIN`) whose name says light, lamp, led or chamber (light/lamp
+  first, LEDs before pins). Its state is read first (read-only `objects/query`: `value` of a pin,
+  `color_data` of a LED chain); a light that is already on is not touched; after switching on it waits
+  `settle_s` (1.5). Name it when the guess is wrong, or give a macro:
+  `light: {object: "output_pin chamber_light", on_gcode: LIGHT_ON, off_gcode: LIGHT_OFF, settle_s: 1.5}`.
+  Every `on_gcode`/`off_gcode` command must be `SET_LED`, `SET_PIN` or listed in the printer's
+  `trusted_macros` (checked when the config is read, like `clear_ack`); a macro whose light state
+  cannot be read is switched on and, its previous state being unknown, left on (the report says so).
+  `enabled: false` opts out. **No light found:** the verdict says `no light found (...)` and the
+  frame is taken as it is. **Never touched while a job prints or is paused**, nor on a printer that is
+  not full-access; the one exception is the job watch, whose frame is taken during the print: only
+  when the light was off, switched on for the frame and off right after. The `3d printer watch` bed
+  *monitor* only reads idle frames and never touches the light. The verdict (`--json`) carries
+  `light`: `found`, `object`, `was_on`, `switched`, `restored`, `on_for_frame`, `error`, `text`, and
+  `check` / `status` / `reference` print it as a `light:` line. `light.on_for_frame` tells a later
+  comparison whether the frame was lit.
 - **Bed free, once.** `3d printer subscribe --session ID --printer u1 --once --on bed-free`: when
   the running job ends (a `3d printer watch` sees printing/paused → idle / complete / cancelled) the
   watcher waits 20 s for the end macro, runs the auto-view bed check, sends **one** `bed_free`
@@ -811,7 +930,29 @@ until someone takes them off. The camera can see that, so nobody has to tell an 
 - **How.** Frames are decoded at 480 px; the current one is mapped onto the reference colours by
   a robust gain/offset fit (auto-exposure, room light) and a median detrend removes smooth light
   gradients; a changed region of ≥ 200 px (or ≥ 8 % of the bed view) is `occupied`, under 100 px
-  and ≤ 3 % is `clear`, in between `unknown`. ROI: `watch.bed.roi` (a polygon of the bed, 0..1 of
+  and ≤ 3 % is `clear`, in between `unknown`. Two things keep light and registration drift from
+  reading as objects ([#723](https://github.com/alex-mextner/3d-cli/issues/723): the idle U1 at
+  Z 200 reported «objects on the bed 14.3 %» on an empty plate — the window light behind the
+  printer had changed, a cable had moved and the picture sat a pixel or two off the October
+  reference): a pixel that matches the reference anywhere within `shift_px` (3) counts as
+  unchanged, and changed regions are opened with an `open_px` (5) square, so an edge outline
+  or a thin line goes while a patch of new colour stays. Where the camera sees under `low_view`
+  (0.5) of the bed (U1 at Z 200: 15 %) most of the ROI is the machine and the room behind the
+  bed, so there only a region of `occupied_blob_low_px` (1200 px) or `occupied_min` of the ROI
+  says `occupied`; a smaller change is `unknown` with «the room behind the bed? …
+  `3d printer bed check NAME` looks from a better Z» and the age of the reference. A real part
+  is not hidden by this (the U1 frames of parts on the bed are 2700–3900 px regions, a 16 px
+  object on the K1 SE stays `occupied`); a thing smaller than that from a 15 % view is
+  `unknown`, never `clear`. **Another light** (day vs night, the printer's light on vs off, a gamma
+  or a white-balance shift of the camera): when the brightness of the bed at its dark, middle or
+  bright end is off by more than ×0.8…×1.25 from the reference's, a pixel also needs its local
+  *texture* (luminance over the spread of its neighbourhood, `lib/bed_norm.py`) to have changed —
+  gain, offset and any tone curve leave the texture alone, a part does not. Pixels only the colour
+  difference flags are the light: a frame that would read `occupied` by colour alone is `unknown`
+  («the light, not a part», never `occupied`), a real part changes both and stays `occupied`. At a
+  low view the texture channel may rescue an `occupied` but does not call the bed `clear`.
+  `thresholds.light_norm: 0` turns it off for a printer. Every evidence image has the untouched camera frame beside it
+  (`…-label.raw.jpg`), so a doubtful verdict can be re-judged. ROI: `watch.bed.roi` (a polygon of the bed, 0..1 of
   the frame), else the camera calibration (bed plus 80 mm above it at the current Z), else the
   whole frame. On the U1 at Z 200 only parts taller than a few cm show, and only the plate's front
   edge is in view (about 2 % of the frame), so the plate verdict rests on that strip and the
@@ -821,7 +962,7 @@ until someone takes them off. The camera can see that, so nobody has to tell an 
   `watch.bed.thresholds: {clear_max: 0.05, level: 30, ...}` overrides any of them for one printer
   (`level`, `detrend_px`, `edge_px`, `clear_blob_px`, `clear_max`, `occupied_blob_px`,
   `occupied_min`, `plate_missing_min`, `plate_tie`, `surface_min`, `change_min`, `settle_frames`,
-  `match_px`, `view_min`). The camera is the printer's `watch.vision.camera`; enabling the bed check
+  `match_px`, `view_min`, `shift_px`, `open_px`, `low_view`, `occupied_blob_low_px`, `light_norm`). The camera is the printer's `watch.vision.camera`; enabling the bed check
   on a printer without one is refused when the config is read.
 - **Monitor.** `3d printer watch` runs `bed monitor NAME` as a child for every Moonraker printer
   with `watch.bed.enabled: true`. Nothing is grabbed while a job runs; otherwise one snapshot per
@@ -835,16 +976,23 @@ until someone takes them off. The camera can see that, so nobody has to tell an 
   (`watch.tg_fallback`). Subscribe an agent to them:
   `3d printer subscribe --session ID --kinds 'bed_*,plate_*' --min-severity info`.
   The last verdict is in `~/.local/state/3d-cli/bed/NAME.json` and in the watch heartbeat.
-- **Start gate.** `3d printer start` and `3d print-preflight --printer` add a `bed` line: FAIL on
-  objects or a missing plate, PASS on a clear bed with the plate, WARN when the camera cannot
-  tell (no reference at this Z, out of view, stale, plate out of view, camera down); a [forced start](#forcing-a-start) overrides it.
-  On an idle printer with `watch.bed.auto_view` the line is judged at the best Z (the bed moved in Z
-  only, and back; `--no-bed-move` judges at the current Z), see *Auto view* above.
+- **Start gate.** `3d printer start` and `3d print-preflight --printer` add a `bed` line. On an idle printer
+  the line runs the **full [bed check](#3d-printer-bed-check) path itself**: a fresh frame from the best
+  view (the bed moved in Z only, and back, even when `watch.bed.auto_view` is off), with the printer's
+  light on (see *The light* above) and restored — never the watcher's verdict at whatever Z the bed rests at.
+  `--no-bed-move` judges at the current Z (light still on). **FAIL only on a confident `occupied`**
+  (a changed region of the normal occupied size with at least `watch.bed.auto_view_min` of the plate in
+  the frame at the Z it was judged at; the verdict's `occupied_confident`) or a missing plate. PASS on a
+  clear bed with the plate. **WARN** (never FAIL) for `unknown` (no reference at this Z, out of view,
+  plate out of view, camera down) and for an occupied seen at a poor view: the U1 at Z 200 sees 15 % of
+  the plate and a window light there once read as «16.0 % changed: occupied», so that line is a WARN
+  that gives the reason, the share of the plate in view and `3d printer bed check NAME` to run. A
+  [forced start](#forcing-a-start) overrides a FAIL.
 - **Clear acknowledgement** (`watch.bed.clear_ack`, off by default): after `bed_clear` the
   printer makes one motor sound so the person at it knows the camera saw the empty bed. Neither
   printer has a beeper, so the command is `STEPPER_BUZZ STEPPER=stepper_z` (Klipper: ±1 mm ×10,
   ~10 s, net zero, works unhomed); a list of lines is allowed (the K1 SE can use shorter
-  `FORCE_MOVE` pulses). It is the only write the bed code makes: every command word must be in
+  `FORCE_MOVE` pulses). Besides the auto view's Z move and the light's on/off, it is the only write the bed code makes: every command word must be in
   `trusted_macros`, it is sent only when the printer reads idle/complete/cancelled right before,
   once per `bed_clear`, at most once per `debounce_minutes` (10), never below `min_z_mm` (10).
 
@@ -858,6 +1006,13 @@ u1:
       auto_view: true           # move the bed in Z to where the camera sees the whole plate (fleet U1: true; default false)
       auto_view_min: 0.85       # share of the plate in the frame below which it is moved
       auto_view_part_mm: 60     # optional: the tallest thing that may stand on the bed (else the last job's object_height)
+      light: {object: "output_pin chamber_light", on_gcode: LIGHT_ON, off_gcode: LIGHT_OFF, settle_s: 1.5}  # optional: autodetected when absent; enabled: false opts out
+      plate: textured           # plate type in use (default `default`): references are kept per plate type
+      reference_max_age_days: 30  # an older reference never makes the verdict `occupied`
+      auto_reference: false     # refresh the reference after a confident clear check (default false)
+      views: {70: 1.0, 200: 0.15}  # a camera without a calibration: share of the plate in the frame per Z (overrides `bed calibrate`)
+      camera: http://k1se:8080/?action=snapshot   # the bed camera's snapshot URL (default watch.vision.camera, else the model's)
+      plate_mask: [[0.31, 0.48], [0.72, 0.27], [0.92, 0.55], [0.92, 0.97], [0.41, 0.97]]  # the plate polygon (alias of roi)
 k1se:
   watch:
     bed:
@@ -866,6 +1021,217 @@ k1se:
 ```
 
 A Home Assistant bed sensor is a follow-up: [#305](https://github.com/alex-mextner/3d-cli/issues/305).
+
+### `3d printer bed check`
+
+`3d printer bed check NAME [--expect empty|part] [--no-move] [--part-height MM] [--json]` is **the** tool
+to look at the bed: a fresh frame judged from where the camera sees the plate. An idle printer's bed is
+moved in Z only (the guarded move of auto view, even when `watch.bed.auto_view` is off), judged and put
+back; `--no-move` judges at the current Z. The frame is taken with the printer's light on (switched on
+before the bed moves, restored after the bed is back; see *The light* under [Bed state](#bed-state)).
+
+- **Result:** `empty` | `objects` | `out-of-view` | `unknown` | `busy` (printing: the bed belongs to
+  the job, nothing is moved; use `3d printer watch NAME --job`). `--expect part` reads the same
+  pixels as `part-present` | `part-gone` — after a print, is the part still on the plate?
+  `fraction` is the share of the bed view that differs from the empty-bed reference; `frame` is the
+  annotated picture (ROI cyan, changed pixels red), `raw_frame` the camera frame it came from.
+- **Exit codes:** 1 when `--expect` is given and the result differs (and for `unknown`,
+  `out-of-view`, `busy`), else 0.
+- **Reference at the best Z:** `3d printer bed reference NAME --capture --best-view` moves the bed
+  to where the camera sees the plate, takes the empty-bed reference there and puts the bed back.
+  `3d printer bed reference NAME --refresh [--assume-empty "why"] [--part-height MM] [--json]` is the
+  same flow for replacing a stale reference (see *References keep themselves in order* under
+  [Bed state](#bed-state)); examples: `3d printer bed reference u1 --refresh`,
+  `3d printer bed reference u1 --refresh --assume-empty "plate wiped, I looked at it"`.
+
+### The owner's word: `bed check --assume-empty`
+
+`3d printer bed check NAME --assume-empty "why" [--assume-empty-ttl MIN]` is the **auditable** way out of a
+camera that is wrong about an empty bed ([#723](https://github.com/alex-mextner/3d-cli/issues/723)); it replaces
+`3d printer start --force` for that case. It runs the normal check, then records your confirmation:
+
+- `assume-empty-<ts>.json` in `~/.cache/3d-cli/vision/bed/` next to the frames: who (`$USER`), when, why, the
+  printer, the camera's verdict, the annotated and raw frame paths, Z, the light and the job it is bound to;
+- the state record `~/.local/state/3d-cli/bed/NAME.assumed.json` (`ts`, `why`, `ttl`, `job_marker`).
+
+The `bed` line of `3d print-preflight --printer` / `3d printer start` is then **PASS** with the note «owner
+confirmed empty at <time>: <why>» (the camera is not asked) while the record is younger than
+`--assume-empty-ttl` minutes (default 60) **and no job has started since**: the record carries Moonraker's newest
+history job id (and `print_stats.filename`), any other one later ends it (without the history component only a
+different file name does; the ttl ends the rest). It never overrides a printing/paused printer, nor a camera that
+sees the plate missing; `why` must be non-empty (exit 2 otherwise). The preflight's FAIL / WARN lines of the bed
+name this command. Exit 0 when the confirmation was recorded, 1 when it was refused (printing printer,
+unreadable printer, plate missing). Examples: `3d printer bed check u1 --assume-empty "plate wiped, I looked"`,
+`3d printer bed check u1 --assume-empty "empty" --assume-empty-ttl 15 --no-move`.
+
+## Job watch
+
+Why: on 2026-11-04 a part came off the plate during a print and nobody noticed, the printer went on
+extruding into thin air. `3d printer watch NAME --job --yes` guards **one** running print and stops
+it when it is lost. It is not the always-on [`3d printer watch`](#watching-printers) (read-only,
+alerts an agent): this one *acts*, so it needs `--yes` — you authorise a pause/cancel of this job.
+
+```
+3d printer watch NAME --job --yes [--on-fail auto|pause|cancel] [--gcode FILE.gcode] [--out DIR]
+    [--interval S] [--checkpoints L1@25%,L1@50%,L1@100%,25%,50%,100%] [--dry-run | --tg-dry-run]
+    [--fixture SCENARIO.json] [--duration S] [--wait-start S] [--no-quality]
+```
+
+Start it right after `3d printer start NAME FILE --yes` (or give `start` [`--watch`](#start---watch));
+it follows that job until it ends.
+
+**What is checked**, every `--interval` (60 s; 15 s while layer 1 prints) and at the checkpoints (a
+quarter, half and all of the first layer — the first-layer marks need `--gcode` — and 25/50/100 %):
+
+- *Camera.* The plate against an empty-plate baseline taken at the start of the job. The part's
+  footprint is learnt from layer 3 on, then `part_gone` (little of it left), `part_moved`,
+  `spaghetti` (much new material beyond it) and the `arm` state. A finding needs **2 readings of the
+  last 4**: a toolhead passing over the part is not a finding. With the plate out of view, no
+  baseline, or a plate that cannot be followed (no camera calibration: see
+  [below](#job-watch-no-calibration)) the camera says `blind` — **never "gone"**. Every
+  frame is taken with the printer's light on when it was off (and off again right after: the only
+  write the watcher makes besides pause/cancel; `watch.bed.light`, see *The light* under [Bed state](#bed-state)).
+- *Signals.* The same Moonraker events as the always-on watch (filament runout, heater loss, bed off,
+  exception, G-code error, homing lost), and the printer's own defect detection (`noodle` verdicts
+  with p >= 0.8, read from klippy.log).
+- *Print quality* ([below](#print-quality-monitor)). Is the print GOOD, not just still there: stringing
+  debris, a lost bead pattern (stripes, roughness), an uneven first layer. Warnings only, never a stop.
+
+**Actions on a critical finding**, in this order, each step runs even if an earlier one failed:
+
+1. save the frames and `finding.json`;
+2. **stop** the job (after re-reading the printer and binding it to the watched file — never another
+   job, never an idle printer; once per job, verified in the printer state);
+3. `tg call me --say "<russian text>"` rings the owner;
+4. the klippy.log lines of the job via `3d printer evidence` (GET only) into the same folder;
+5. `tg --photo FRAME "<text>"` with the frame that showed it.
+
+A warning (part moved, nothing seen, a heater drift) is only a tg message with the frame; nothing is
+touched and nobody is called.
+
+<a id="print-quality-monitor"></a>
+**The print-quality monitor** (#733; `lib/print_quality.py` measures, `printer_ops/quality.py` decides) runs
+on the same frame as the part check, in the plate region at the print's own Z. Why it exists: on 2026-11-05 a
+10 h sheet of small tags stringed from layer 2 on — white thread debris all over the part — while the part
+check (it only asks "is the part where it was") and the spaghetti model (no stringing class: p 0.0 on all
+12 frames) stayed silent.
+
+| number | what it is |
+|---|---|
+| `fleck_frac` | share of the plate region covered by small bright **neutral** specks and strands (the top-hat of the minimum colour channel: high only where R, G and B are all high, i.e. white debris — not beige part, not golden specular grain) |
+| `order` | structure-tensor coherence: 1 = every neighbourhood has one dominant bead direction, lower = debris, webs, broken or striped lines |
+
+The judge compares them with the **job's own first layers**: the first 4 readings with the part on the plate
+(bed_part says so) are the baseline, never judged against anything but a floor; a clean reading drifts it a
+little (bounded at 1.3x debris / 0.04 order), a bad one never does. Issues: `stringing` (debris against the
+baseline AND an absolute level), `texture` (the pattern got lost with no debris: stripes, roughness,
+under-/over-extrusion), `first_layer` (an absolute floor on `order` while layer <= 3; ON by default only for the U1, whose camera it was calibrated on — `first_layer_order: 0.6` in `watch.quality` turns it on elsewhere, a K1 SE view of a part reads 0.5 normally). Levels: `notice`
+(report only) < `warning` < `severe`; a level is reported when 2 of the last 4 readings reach it (3 of 4
+for severe), it is latched and clears after 6 clean readings. A debris trend (ratio to the baseline gained
+per 10 min) lifts a notice to a warning.
+
+A quality finding is **never critical**: one `tg --photo FRAME "<russian text: what is seen, what to
+change>"` per issue and level (the frame has the debris marked in red), nobody is rung, the job is not
+touched. Part gone, spaghetti and the noodle verdict still act as above. `--no-quality`, or
+`<printer>.watch.quality: false`, turns it off; `<printer>.watch.quality: {baseline_n: 4, warning_ratio: 2.0,
+warning_abs: 0.035, ...}` tunes any `QualityConfig` field (a wrong key is an error naming the valid ones).
+
+**The monitoring report.** When the watch ends — the job completed, a lost print stopped it, or `--duration`
+ran out — `DIR/<date>-NAME-monitor-report/` holds `report.json` (readings, counts per severity and per issue,
+the alerts that were sent, the baseline, the worst reading, the timeline), `report.md` (the same for a human)
+and `worst-frame.jpg`. A job with nothing wrong still gets one ("0 warnings in 41 judged readings"): silence
+then means *checked and fine*, not *never ran*. Calibration, limits and the numbers on the real frames:
+[print-quality-monitor.md](../research/print-quality-monitor.md).
+
+**`--on-fail`.** `auto` (default): CANCEL when the part is gone, or on a camera finding in the first
+layers (layer <= 3); PAUSE for everything else (runout, heater, later spaghetti: resumable).
+`pause` / `cancel`: always that. Defaults can also be set in `<printer>.watch.job` (`on_fail`,
+`interval_s`, `min_view`, `confirm`, `window`, `arm_layer`, `out_dir`, …); flags win.
+
+**It never starts a job and never moves an axis.** The only printer writes are PAUSE and CANCEL; no
+G-code, no resume, no start. In particular **the bed is not moved during a print**: the U1 camera sees
+98 % of the plate up to Z 30 and 77 % at Z 100, so the watcher looks at the print's own Z. Above about
+Z 130 the plate is mostly out of view and the camera is `blind` (`min_view` 0.5): the signals keep
+running, the part check does not.
+
+<a id="job-watch-no-calibration"></a>
+**A printer without a camera calibration (the K1 SE, a `watch.bed.roi` polygon) follows the plate.**
+Nothing says how the bed's move in Z shows in its picture, and the old rule (judge the part only within
+`z_tol_mm` = 2 mm of the baseline's Z) blinded the camera after ~10 layers. The job watch now *chains*
+the baseline:
+
+- Every healthy reading (label `present`, overlap >= `heal_overlap`, outside < 0.3) saves, next to the
+  part's footprint, the affine transform that carries the empty baseline's plate onto that frame
+  (`track.json` in the watcher's working folder).
+- The next reading starts from that transform and refines it by ECC (OpenCV `findTransformECC`:
+  correlation based, so a global light change does not move it) on the plate pixels only, **without the
+  part's footprint neighbourhood**: the part is excluded from the measurement of the drift. Layer to
+  layer the bed moves 0.2 mm (about a pixel), so the chain never has to jump, and every step is anchored
+  to the true empty first-layer baseline, so errors do not accumulate. The footprint is carried along by
+  the change of transform, the baseline is warped onto the frame, the compared region is the plate as it
+  moved.
+- **Gone** is then the footprint of the current frame matching the empty plate again whatever the Z:
+  a vanished part reads as overlap ~0, a part that stands as overlap ~1, a lighting change as neither.
+- Within `z_tol_mm` of the baseline's Z a failed tracking falls back to the baseline as it stands (the
+  old behaviour); beyond it the camera is `blind` with the reason (`... the plate cannot be followed on
+  the picture: ...`), never `gone`.
+
+*Limits.* The plate must show texture (a blank plate cannot be followed). The transform may not jump
+more than `TRACK_STEP_PX` (12 px of the 480-px frame, a few mm of bed) between two healthy readings (the
+camera was bumped, the watch was blind for a long time while the bed went far, a pause with a big Z
+hop): `blind`. An ECC correlation under 0.6 is `blind`. The model is affine, the real bed move is a
+perspective one: approximate over a big drift, absorbed by the comparison's shift tolerance. A part so
+tall that its top leaves the plate polygon, or spaghetti over most of the plate, may make the plate
+untrackable: `blind`, the signals keep running. A toolhead or a hand over the plate for one reading
+only lowers the correlation of that reading.
+
+**Exit codes.** 0 the job ended, nothing lost; 3 a lost print was found and the stop attempted;
+1 it could not run.
+
+**Testing without risk.** `--dry-run`: nothing is sent to the printer or the phone, the stop and both
+tg commands are printed. `--tg-dry-run`: the job is really stopped, the tg commands are only printed.
+`--fixture SCENARIO.json`: no network at all; the printer and the camera come from a scenario file,
+with saved frames (implies `--dry-run` for the phone; the fixture printer records the stop it is
+given):
+
+```json
+{"printer": "k1se", "file": "part.gcode", "steps": [
+  {"t": 0, "state": "printing", "layer": 1, "progress": 0.01, "z": 0.2, "frame": "empty.jpg"},
+  {"t": 600, "state": "printing", "layer": 40, "progress": 0.4, "z": 8.0, "frame": "gone.jpg",
+   "events": [{"kind": "filament", "severity": "critical", "text": "..."}], "noodles": [["noodle", 0.9]]}]}
+```
+
+Frame paths are relative to the scenario file; a step holds until the next step's `t` (seconds on
+the virtual clock).
+
+### `start --watch`
+
+`3d printer start NAME FILE --yes --watch` launches `3d printer watch NAME --job --yes --gcode FILE`
+detached once the printer acknowledged the start and its state was printed: it prints the pid, the log
+(`~/.local/state/3d-cli/jobwatch/NAME.log`) and how to stop it (`kill PID`). It is **opt-in** because
+the watcher has the authority to cancel the job. Without `--watch`, `start` prints one line,
+`NOT WATCHED: a lost print runs on unseen. Guard it (it may pause/cancel the job): 3d printer watch
+NAME --job --yes --gcode FILE`, with the estimated duration when the G-code header carries
+`; estimated printing time (normal mode) = 1h 32m 10s`, and the advice that jobs of 30 min or more
+should be watched.
+
+### Evidence folder
+
+On a lost print `DIR/<date>-NAME-jobwatch/` (default `./print/runs`, else
+`~/.local/state/3d-cli/jobwatch/NAME/runs`) holds the frames, `finding.json`, the klippy.log lines of
+the job and `outcome.json` (what was sent, what was verified, which step failed). The watcher's
+working files (baseline, footprint) live in `~/.local/state/3d-cli/jobwatch/NAME/`.
+
+### Open questions
+
+- Camera latency: how stale a frame can be when a part comes off is not measured.
+- Per-model Z positions: the 98 % / 77 % / blind-above-Z-130 numbers are the U1's; other models need
+  their own calibration.
+- Printers without a camera calibration (K1 SE): the chained baseline ([above](#job-watch-no-calibration))
+  was validated on frames of the real K1 SE bed moved by a synthetic affine drift, not on a real print of
+  many layers; the real picture's correlation (noise, the toolhead, shadows) may sit lower than the
+  fixtures' and `TRACK_MIN_CORR` (0.6) / `TRACK_STEP_PX` (12) may need tuning from the first real run.
+- Black-on-black parts (dark filament on a dark plate) give the footprint too little contrast.
 
 ## Safety
 
@@ -922,6 +1288,16 @@ RIG_HATCH_REQUEST_3D_PRINTER_START_FORCE="loaded_filament_match: slice has no co
   `RIG_HATCH_REQUEST_3D_PRINTER_START_FORCE=approved:hgr-…`, redeems.
 - Approved: the start continues, prints `FORCED: starting despite preflight FAIL (...)`, and the
   helper appends the use to `~/.config/agent-tools/overrides.log`.
+- If the daemon could not even post the card (`tg-ctl ask-forward not-posted … daemon declined:
+  reason=send-failed`: its Telegram `sendMessage` failed, 2026-11-04 it was `getaddrinfo EAI_AGAIN
+  api.telegram.org`, a resolver blip while plain `tg` worked) nothing was posted, so the ask is
+  repeated after 3, 10 and 30 s (four requests in all, each reported on stderr). If it still
+  fails the start is refused with the way around Telegram: the file is already stored on the
+  printer, so start it **from the printer screen** (Files, then Print) — the screen does not run
+  these checks, do it only when the listed FAILs are understood — and with the log to read
+  (`~/.config/tg-cli/tg-ctl.*.log`, lines `sendMessage failed` / `ask-forward dropped`).
+  The daemon itself sends once and never retries (tg-cli `forwardAndPostQuestion`), which is why
+  the retry lives here.
 - Without `--force`, without the variable, denied, timed out, or without a trusted `tg-ctl` /
   helper (`~/dev/agent-tools`, then `~/xp/agent-tools`, owned by you or root and not
   group/world-writable): exit 1, nothing is sent to the printer.

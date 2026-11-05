@@ -143,14 +143,15 @@ def _nearest_best(good: list[Candidate], current_z: float | None) -> Candidate:
 
 def pick_inspection_z(view: Callable[[float], float | None], ref_zs: Sequence[float],
                       stands: Callable[[float | None, float | None], bool], current_z: float | None, *,
-                      z_floor: float, z_ceiling: float, threshold: float) -> ViewPick:
+                      z_floor: float, z_ceiling: float, threshold: float, need_reference: bool = True) -> ViewPick:
     """The best Z to judge the bed at. `view(z)` = share of the plate in the frame (None: cannot tell),
     `ref_zs` = Zs of the empty-bed references, `stands(ref_z, z)` = the reference stands for the bed at z
-    (bed_state.ZMatch). See the module docstring for the rule."""
+    (bed_state.ZMatch). `need_reference` False: any Z in the range qualifies (taking a NEW reference: none
+    stands there yet). See the module docstring for the rule."""
     refs = sorted({round(float(z), 1) for z in ref_zs})
 
     def referenced(z: float) -> bool:
-        return any(stands(r, z) for r in refs)
+        return not need_reference or any(stands(r, z) for r in refs)
 
     top = max([z_ceiling, *refs, current_z or 0.0])
     grid = {round(i * GRID_MM, 1) for i in range(int(top // GRID_MM) + 1)}
@@ -538,10 +539,10 @@ def _no_move_reason(mode: str, cfg: BedConfig) -> str | None:
 
 def _pick_move(view: Callable[[float], float | None], ref_zs: Sequence[float],
                stands: Callable[[float | None, float | None], bool], m: Motion, limits: Limits, cfg: BedConfig,
-               base: dict[str, Any]) -> ViewPick:
+               base: dict[str, Any], need_reference: bool = True) -> ViewPick:
     """The Z to judge at, recorded in `base` together with the limits it was picked within."""
     pick = pick_inspection_z(view, ref_zs, stands, m.z, z_floor=limits.z_floor, z_ceiling=limits.z_ceiling,
-                             threshold=cfg.auto_view_min)
+                             threshold=cfg.auto_view_min, need_reference=need_reference)
     base.update(pick=pick.to_json(), part_mm=limits.part_mm, part_source=limits.part_source,
                 z_floor=limits.z_floor, z_ceiling=limits.z_ceiling)
     return pick
@@ -552,10 +553,12 @@ def auto_view(device: Any, cfg: BedConfig, *, mode: str, adapter: Any, judge: Ca
               stands: Callable[[float | None, float | None], bool], max_age: float | None = None,
               part_height_mm: float | None = None, settle_s: float = AUTO_VIEW_SETTLE_S,
               sleep: Callable[[float], None] = time.sleep, clock: Callable[[], float] = time.time,
-              read: Callable[[Any], Motion] = read_motion) -> dict[str, Any]:
+              read: Callable[[Any], Motion] = read_motion, need_reference: bool = True) -> dict[str, Any]:
     """The bed verdict of `judge`, at a better Z when the current one shows too little of the plate.
     `mode`: auto (cfg.auto_view decides) | force (--best-view) | never (--no-move). `judge(max_age)` is
-    `bed_state.one_shot` (max_age None = a fresh frame). The verdict carries `view`: what was done and why."""
+    `bed_state.one_shot` (max_age None = a fresh frame). `need_reference` False: the Z needs no empty-bed
+    reference because `judge` TAKES one (`bed reference --capture --best-view`). The verdict carries `view`:
+    what was done and why."""
     if mode not in ("auto", "force", "never"):
         raise ValueError(f"mode must be auto, force or never, not {mode!r}")
     m = read(adapter)
@@ -579,7 +582,7 @@ def auto_view(device: Any, cfg: BedConfig, *, mode: str, adapter: Any, judge: Ca
     limits = _may_move(device, adapter, cfg, m, part_height_mm)
     if not isinstance(limits, Limits):  # 3.-5. the guards that stop a move
         return _not_moved(judge, max_age, base, note, str(limits), f"{shown}, bed not moved: {limits}")
-    pick = _pick_move(view, ref_zs, stands, m, limits, cfg, base)
+    pick = _pick_move(view, ref_zs, stands, m, limits, cfg, base, need_reference)
     if pick.status != "move" or pick.z is None:
         return _not_moved(judge, max_age, base, note, pick.reason, f"bed not moved: {pick.reason}")
     with view_lock(device.name) as held:
@@ -659,6 +662,45 @@ def _moved_check(device: Any, adapter: Any, m: Motion, pick: ViewPick, limits: L
     return _annotate(verdict, {**base, **used}, _join(note, text))
 
 
-__all__ = ["Candidate", "Limits", "MoveRefused", "MoveVetoed", "Motion", "ViewPick", "auto_view", "guarded_z_move",
-           "move_limits", "no_write_access", "part_height", "pick_inspection_z", "read_motion", "recover_pending", "restore_z",
-           "view_in_progress"]
+@dataclass
+class Excursion:
+    """A bed that leaves where it was found for several Zs (`excursion`): `go(z)` moves it, `restore_error` is
+    None once it is back, else why not."""
+
+    device: Any
+    adapter: Any
+    start: Motion
+    limits: Limits
+    read: Callable[[Any], Motion] = read_motion
+    restore_error: str | None = None
+
+    def go(self, z: float) -> None:
+        """Move the bed to toolhead Z `z` (G-code Z under the offset found at the start), guarded: MoveRefused
+        when the printer is no longer idle and homed, `z` is outside the limits, or the offset changed."""
+        assert self.start.z is not None
+        guarded_z_move(self.adapter, to_gcode_z=z - self.start.offset, floor=self.limits.z_floor,
+                       ceiling=self.limits.z_ceiling, target_toolhead_z=z, read=self.read)
+
+
+@contextlib.contextmanager
+def excursion(device: Any, adapter: Any, m: Motion, limits: Limits, *, read: Callable[[Any], Motion] = read_motion,
+              clock: Callable[[], float] = time.time) -> Iterator[Excursion]:
+    """The bed's trips to several Zs and back, the same safety net as `auto_view` has for one: the per-printer
+    lock (MoveRefused when another view check runs), the displaced-Z marker, SIGTERM unwinding like an
+    exception, and the restore to where the bed was found (`m`) in the `finally`, after any exception. The
+    result of the restore is `Excursion.restore_error` (None = back)."""
+    trip = Excursion(device, adapter, m, limits, read)
+    with view_lock(device.name) as held:
+        if not held:
+            raise MoveRefused("another view check of this printer is running")
+        with terminate_as_exit():
+            _write_pending(device.name, m, clock())
+            try:
+                yield trip
+            finally:
+                trip.restore_error = _restore_and_clear(device, adapter, m, read)
+
+
+__all__ = ["Candidate", "Excursion", "Limits", "MoveRefused", "MoveVetoed", "Motion", "ViewPick", "auto_view",
+           "excursion", "guarded_z_move", "move_limits", "no_write_access", "part_height", "pick_inspection_z",
+           "read_motion", "recover_pending", "restore_z", "view_in_progress"]

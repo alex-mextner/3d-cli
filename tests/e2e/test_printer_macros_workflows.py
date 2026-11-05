@@ -34,6 +34,7 @@ U1_COMMANDS = {
 def test_a_user_lists_macros_then_runs_one_and_a_dry_run_sends_nothing(
     tmp_path: Path,
 ) -> None:
+    """A user lists the macros a U1 defines, runs one with typed parameters and sees the exact line sent; a dry run sends nothing."""
     u1 = FakeMoonrakerMacros(macros=dict(U1_MACROS), commands=dict(U1_COMMANDS))
     with u1.serve():
         env = {"THREED_FLEET": str(write_fleet(tmp_path, u1=u1))}
@@ -84,6 +85,7 @@ def test_a_user_lists_macros_then_runs_one_and_a_dry_run_sends_nothing(
 def test_a_user_runs_aliases_and_gets_a_clear_refusal_for_a_busy_printer_and_for_injection(
     tmp_path: Path,
 ) -> None:
+    """A user runs aliases such as home and preheat; a busy printer and an injected value are refused with a reason and nothing is sent."""
     u1 = FakeMoonrakerMacros(macros=dict(U1_MACROS), commands=dict(U1_COMMANDS))
     with u1.serve():
         env = {"THREED_FLEET": str(write_fleet(tmp_path, u1=u1))}
@@ -127,6 +129,7 @@ def test_a_user_runs_aliases_and_gets_a_clear_refusal_for_a_busy_printer_and_for
 def test_read_only_and_offline_printers_are_refused_and_never_contacted(
     tmp_path: Path,
 ) -> None:
+    """A user points `macro run` at a read-only and at an offline printer: both are refused and the printer is never contacted."""
     k1 = FakeMoonrakerMacros(macros={"PAUSE": "p"})
     with k1.serve():
         env = {
@@ -146,6 +149,7 @@ def test_read_only_and_offline_printers_are_refused_and_never_contacted(
 
 
 def test_aliases_listing_and_help_per_model(tmp_path: Path) -> None:
+    """A user reads `aliases` and one alias's --help per printer model and sees what each alias sends."""
     k1 = FakeMoonraker()
     with k1.serve():
         env = {"THREED_FLEET": str(write_fleet(tmp_path, k1se=k1))}

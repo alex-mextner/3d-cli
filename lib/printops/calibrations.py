@@ -14,7 +14,7 @@ A colour-mix kind (scope printer + `mix`, #412, plan §20.4) is keyed by its can
 (printops.mix_key, column `mix`, migration 0081): records of other mixes never supersede it.
 
 REQUIREMENT ENGINE (plan §8.1): for a printer head and the spool bound to it (Spoolman
-`printops_slot`, #160) every catalog kind of the printer's model gets a status:
+`location` = `slot:<p>/<head>`, #160) every catalog kind of the printer's model gets a status:
   current            a valid record matches every scope dimension
   assumed            baseline `assumed` kind, never recorded and never invalidated (factory state)
   new_lot            a valid record exists for this filament, but for another (or unknown) lot

@@ -14,7 +14,7 @@ from printops_fakes import FakeSpoolman
 
 from printops import datalint, db, ledger, lint_spools, tares
 from printops.importers import ImportFormatError, parse_bought, plates_owned
-from printops.spoolman import SpoolmanError, ensure_extra_fields, encode_extra
+from printops.spoolman import SpoolmanError, ensure_extra_fields
 
 
 @pytest.fixture
@@ -233,10 +233,10 @@ def test_tare_chain_order(printops_db: sqlite3.Connection, sm: FakeSpoolman) -> 
     res = tares.resolve(printops_db, by_db)
     assert res.tare is not None and res.tare.origin == "db" and res.tare.grams == 250.0
 
-    vendor_field = _spool(
-        sm, vendor={"name": "NoName", "extra": {"spool_tare_g": encode_extra(180.0)}}
-    )
-    res = tares.resolve(printops_db, vendor_field)
+    # Spoolman copies vendor.empty_spool_weight into filament/spool.spool_weight on creation, so the
+    # vendor step is exercised on a spool-less filament (resolve_new), as `receive` calls it.
+    vendor_field = {"vendor": {"name": "NoName", "empty_spool_weight": 180.0}}
+    res = tares.resolve_new(printops_db, vendor_field)
     assert res.tare is not None and (res.tare.origin, res.tare.grams) == (
         "vendor",
         180.0,
@@ -405,7 +405,7 @@ def test_lint_spools_survives_a_malformed_opened_at(
     sp = _spool(sm)
     bad = {
         **sp,
-        "extra": {**(sp.get("extra") or {}), "opened_at": "2026-10-14 not json"},
+        "first_used": "2026-10-14 not a date",
     }
     ctx = datalint.LintContext(
         conn=printops_db,

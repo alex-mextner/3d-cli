@@ -303,6 +303,22 @@ def plan(cfg: DeployConfig, *, dry_run: bool = False) -> list[Step]:
     return steps
 
 
+def degraded_reason(body: dict[str, Any]) -> str:
+    """Why a /v1/health body that is not "ok" is not: the DB error, Spoolman's error, the missing extra
+    fields, or the one-line hint of what is only a warning."""
+    db, sp = body.get("db") or {}, body.get("spoolman") or {}
+    if db.get("ok") is False:
+        return f"db: {db.get('error') or 'not ok'}"
+    if sp.get("error"):
+        return f"spoolman: {sp['error']}"
+    fields = sp.get("extra_fields") or {}
+    if fields.get("missing"):
+        return f"spoolman extra fields missing: {', '.join(fields['missing'])}"
+    if fields.get("error"):
+        return f"spoolman extra fields: {fields['error']}"
+    return str(sp.get("message") or f"spoolman extra fields {fields.get('status') or 'not ok'}")
+
+
 def wait_healthy(
     url: str,
     *,
@@ -321,8 +337,7 @@ def wait_healthy(
             h = api.health()
             if h.get("status") == "ok":
                 return h
-            sp = h.get("spoolman") or {}
-            msg = f"degraded: spoolman {sp.get('error') or (sp.get('extra_fields') or {}).get('status')}"
+            msg = f"degraded: {degraded_reason(h)}"
         except ApiError as e:
             msg = e.message
         if msg != last:

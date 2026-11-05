@@ -76,7 +76,7 @@ Each row: what you see, why, what to do, where it was observed.
 | `arrange-moves-objects` | objects overlap, slice fails with -101 | without `--arrange 0` the CLI arranges the plate itself | pass `--arrange 0` | babushkin-dom `gen/verify_slices.py` (P1S roofs, error -101) |
 | `inherits-one-level` | settings of grandparent presets are lost | `--load-settings` resolves one `inherits` level | flatten the chain (`SystemPresets.flat`) | babushkin-dom `gen/build_orca_3mf.py` |
 | `application-tag-newer` | the CLI refuses a project we wrote: `result.json` `return_code` -24, "Unsupported 3MF version" | an `Application` tag newer than the CLI's build number is rejected (even `Snapmaker_Orca-2.4.0`, the tag the CLI wrote itself; reproduced by `test_real_cli_refuses_its_own_unstamped_project`) | stamp the build number (`01.10.01.50`) | babushkin-dom `gen/build_orca_3mf.py` `orca_version()` |
-| `no-thumbnails` | sliced G-code has no preview image | `export_gcode` gets a null thumbnail callback | `3d gcode-thumbnails add FILE` | babushkin-dom `gen/verify_slices.py` |
+| `no-thumbnails` | sliced G-code has no preview image | `export_gcode` gets a null thumbnail callback | nothing: `slicing.orca_cli` asks for 48x48/96x96/300x300 and draws what is missing after every slice (by hand: `3d gcode-thumbnails add FILE`) | babushkin-dom `gen/verify_slices.py` |
 | `host-noise-warnings` | a clean slice lists warnings (version banner, OpenGL / GLFW / Wayland) | headless thumbnail renderer and banner logged as warnings / errors | ignore; `SliceOutcome.warnings` omits them (`slice_warnings.HOST_NOISE`) | `lib/slicing/slice_warnings.py` |
 
 ## Related

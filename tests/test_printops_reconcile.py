@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import copy
-import json
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -264,16 +263,10 @@ def add_spool(
             "extra": fil_extra,
         },
     )
-    extra: dict[str, str] = {}
-    if slot is not None:
-        extra["printops_slot"] = encode_extra(slot)
-    if tags is not None:
-        extra["tag_uids"] = encode_extra(
-            json.dumps(tags)
-        )  # a text field holding a JSON list
-    spool = sp.create(
-        "spool", {"filament_id": fil["id"], "location": location, "extra": extra}
-    )
+    place = location if location is not None else (f"slot:{slot}" if slot else None)
+    spool = sp.create("spool", {"filament_id": fil["id"], "location": place})
+    for uid in tags or []:
+        sp.link_tag(int(spool["id"]), uid)  # native Spoolman tags
     return int(spool["id"])
 
 
@@ -514,7 +507,7 @@ def test_compare_rules_cover_every_kind(
     add_spool(spoolman, slot="u1/T3")
     add_spool(spoolman, slot="u1/T3")  # two in one slot
     ghost = add_spool(spoolman, slot="u1/T9")  # no such head
-    moved = add_spool(spoolman, slot="u1/T4", location="WH:A/S1")  # also on a shelf
+    add_spool(spoolman, slot=None, location="WH:A/S1")  # on a shelf: not bound to a slot
     stranger = add_spool(spoolman, slot="x1c/T1")  # not in the fleet
     add_spool(spoolman, slot=None)  # unbound: ignored
     archived = add_spool(spoolman, slot="u1/T4")
@@ -524,7 +517,6 @@ def test_compare_rules_cover_every_kind(
         tagged,
         broken,
         ghost,
-        moved,
         stranger,
         tagged + 2,
         tagged + 3,
@@ -543,7 +535,6 @@ def test_compare_rules_cover_every_kind(
         ("empty_with_spool", "slot:u1/T2"),
         ("multiple_spools", "slot:u1/T3"),
         ("unknown_slot", f"spool:{ghost}"),
-        ("location_conflict", f"spool:{moved}"),
     }
     assert [(f.kind, f.scope, f.subject) for f in rc.compare_unknown(fleet, binds)] == [
         ("unknown_slot", "fleet", f"spool:{stranger}")
@@ -553,7 +544,6 @@ def test_compare_rules_cover_every_kind(
         "unusable_head",
         "multiple_spools",
         "unknown_slot",
-        "location_conflict",
     }
 
 
@@ -591,8 +581,9 @@ def test_binding_reads_multi_colour_and_garbage_extras(spoolman: FakeSpoolman) -
     spool = {
         "id": 7,
         "archived": False,
-        "location": "",
-        "extra": {"printops_slot": '"u1/T3"', "tag_uids": "not json"},
+        "location": "slot:u1/T3",
+        "tags": [{"uid": "04:aa:bb", "added": "x"}],
+        "extra": {},
         "filament": {
             "name": "Silk",
             "material": "PLA",
@@ -609,10 +600,11 @@ def test_binding_reads_multi_colour_and_garbage_extras(spoolman: FakeSpoolman) -
         "T3",
         "Sunlu Silk",
         ("#FF0000", "#00FF00"),
-        (),
-        None,
+        ("04AABB",),
+        "slot:u1/T3",
     )
-    assert rc.binding_of({**spool, "extra": {"printops_slot": '""'}}) is None
+    assert rc.binding_of({**spool, "location": "WH:A/S1"}) is None
+    assert rc.binding_of({**spool, "location": ""}) is None
 
 
 # ---- ack / resolve ----------------------------------------------------------------------------

@@ -10,7 +10,7 @@ resolution-markers = [
 
 [[package]]
 name = "3d-cli"
-version = "0.77.2"
+version = "0.79.0"
 source = { virtual = "." }
 dependencies = [
     { name = "manifold3d" },

@@ -1,7 +1,7 @@
 """reconcile.py — compare what printers report in their slots with the spools bound there (plan §5.3).
 
-WHAT: `bindings(spools)` reads the Spoolman spools whose extra `printops_slot` names a slot
-  ("u1/T3"); `compare_printer` / `compare_unknown` turn a printer `Reading` (printops.slots) plus
+WHAT: `bindings(spools)` reads the Spoolman spools whose native `location` is `slot:<printer>/<head>`
+  (slot "u1/T3"); `compare_printer` / `compare_unknown` turn a printer `Reading` (printops.slots) plus
   those bindings into `Finding`s; `sync` keeps the `anomaly` table (migration 0030) in step with
   the findings of one scope and emits the events; `Reconciler` ties it to the fleet, Spoolman, the
   latest readings and the DB (used by the 3d-api poller and routes_reconcile.py).
@@ -11,15 +11,13 @@ KINDS (evidence in anomaly.evidence):
     type_mismatch      printer material ≠ bound spool's filament.material (case/space-insensitive)
     color_mismatch     CIEDE2000(printer colour, spool colour) > max_delta_e (spool colour =
                        filament extra `measured_hex`, else color_hex / multi_color_hexes, nearest)
-    tag_mismatch       the slot read an RFID UID that is not in the bound spool's `tag_uids`
+    tag_mismatch       the slot read an RFID UID that is not among the bound spool's native Spoolman tags
     empty_with_spool   the printer says the slot is empty, a spool is bound to it
     unbound_filament   the printer says filament is loaded, no spool is bound to it
   binding — from Spoolman alone:
     multiple_spools    two or more spools bound to one slot
     unusable_head      a spool bound to a head the fleet marks usable: false
-    unknown_slot       printops_slot names a printer or head that is not in the fleet
-    location_conflict  the spool's Spoolman location is set and is not this slot ("slot:u1/T3"),
-                       i.e. the spool is in two places at once
+    unknown_slot       the spool's `slot:` location names a printer or head that is not in the fleet
   write — from the event log (printops.head_sync, #400):
     printer_write_failed  the latest write of a slot (`slot.printer_written` /
                        `slot.printer_write_failed`) failed for the spool still bound there. The
@@ -57,7 +55,8 @@ from printops.db import open_db, transaction, utc_now
 from printops.fleet import Fleet, FleetPrinter, Head
 from printops.head_sync import ACTIVE_STAGE
 from printops.slots import LiveSlot, Reading
-from printops.spoolman import Spoolman, decode_extra
+from printops.spool_mirror import slot_of_location
+from printops.spoolman import Spoolman, decode_extra, normalize_uid
 
 log = logging.getLogger("printops.reconcile")
 
@@ -73,7 +72,6 @@ BINDING_KINDS = (
     "multiple_spools",
     "unusable_head",
     "unknown_slot",
-    "location_conflict",
 )
 WRITE_KINDS = ("printer_write_failed",)
 KINDS = LIVE_KINDS + BINDING_KINDS + WRITE_KINDS
@@ -121,16 +119,6 @@ def _extra(obj: Mapping[str, Any], key: str) -> Any:
         return None
 
 
-def _tag_uids(value: Any) -> tuple[str, ...]:
-    """Spool extra `tag_uids`: a text field holding a JSON list ('["04A1..."]'); anything else → ()."""
-    if isinstance(value, str):
-        try:
-            value = json.loads(value)
-        except ValueError:
-            return ()
-    return tuple(str(t) for t in value) if isinstance(value, list) else ()
-
-
 def _spool_name(spool: Mapping[str, Any]) -> str:
     fil = spool.get("filament") or {}
     vendor = (fil.get("vendor") or {}).get("name")
@@ -140,14 +128,7 @@ def _spool_name(spool: Mapping[str, Any]) -> str:
     )
 
 
-def binding_of(spool: Mapping[str, Any]) -> Binding | None:
-    """The slot binding of one Spoolman spool, or None when `printops_slot` is unset/empty."""
-    slot = _extra(spool, "printops_slot")
-    if not isinstance(slot, str) or not slot.strip():
-        return None
-    slot = slot.strip()
-    printer, _, head = slot.partition("/")
-    fil = spool.get("filament") or {}
+def _binding_colors(fil: Mapping[str, Any]) -> tuple[str, ...]:
     # A measured colour (what the spool really looks like) replaces the catalogue colour(s).
     measured = _extra(fil, "measured_hex")
     colors = (
@@ -155,7 +136,17 @@ def binding_of(spool: Mapping[str, Any]) -> Binding | None:
         if parse_hex(measured)
         else [fil.get("color_hex"), *str(fil.get("multi_color_hexes") or "").split(",")]
     )
-    tags = _tag_uids(_extra(spool, "tag_uids"))
+    return tuple(dict.fromkeys(c for c in (parse_hex(x) for x in colors) if c))
+
+
+def binding_of(spool: Mapping[str, Any]) -> Binding | None:
+    """The slot binding of one Spoolman spool, or None when its `location` is not `slot:<p>/<head>`."""
+    slot = slot_of_location(str(spool.get("location") or ""))
+    if not slot:
+        return None
+    printer, _, head = slot.partition("/")
+    fil = spool.get("filament") or {}
+    tags = tuple(dict.fromkeys(normalize_uid(str(t["uid"])) for t in spool.get("tags") or [] if t.get("uid")))
     remaining = spool.get("remaining_weight")
     return Binding(
         spool_id=int(spool["id"]),
@@ -164,7 +155,7 @@ def binding_of(spool: Mapping[str, Any]) -> Binding | None:
         head=head,
         name=_spool_name(spool),
         material=fil.get("material") or None,
-        colors=tuple(dict.fromkeys(c for c in (parse_hex(x) for x in colors) if c)),
+        colors=_binding_colors(fil),
         tag_uids=tags,
         location=spool.get("location") or None,
         remaining_g=float(remaining) if isinstance(remaining, (int, float)) else None,
@@ -400,7 +391,7 @@ def _mismatch_findings(
                     live.color,
                 )
             )
-    if live.tag_uid and b.tag_uids and live.tag_uid not in b.tag_uids:
+    if live.tag_uid and b.tag_uids and normalize_uid(live.tag_uid) not in b.tag_uids:
         out.append(
             _finding(
                 printer_name,

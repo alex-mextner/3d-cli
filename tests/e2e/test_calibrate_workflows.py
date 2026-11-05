@@ -50,7 +50,7 @@ def _load(live: LiveApi, material: str, name: str, slot: str, lot: str = "L1") -
             {
                 "filament_id": fil["id"],
                 "lot_nr": lot,
-                "extra": {"printops_slot": encode_extra(slot)},
+                "location": f"slot:{slot}",
             },
         )["id"]
     )
@@ -457,10 +457,10 @@ def _bound_spool(
     if filament_extra:
         fil["extra"] = {"slicer_filament_preset": encode_extra(filament_extra)}
     fid = sm.create("filament", fil)["id"]
-    extra = {"printops_slot": encode_extra(slot)}
+    extra: dict[str, str] = {}
     if spool_extra:
         extra["slicer_filament_preset"] = encode_extra(spool_extra)
-    return int(sm.create("spool", {"filament_id": fid, "extra": extra})["id"])
+    return int(sm.create("spool", {"filament_id": fid, "location": f"slot:{slot}", "extra": extra})["id"])
 
 
 def test_gen_takes_the_filament_preset_from_the_spool_on_the_head(
