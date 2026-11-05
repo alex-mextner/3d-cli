@@ -23,6 +23,8 @@ INVARIANTS: stdlib-only at import time; printer_ops imported lazily inside the h
 """
 from __future__ import annotations
 
+import json
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -38,12 +40,14 @@ if TYPE_CHECKING:  # typing-only: printer_ops stays a lazy import inside the hel
 
 USAGE = """3d print-preflight FILE.gcode [--printer NAME] [--axis-limits X0:X1,Y0:Y1|NAME] [--source-3mf FILE.3mf]
                    [--visible [OBJ:]SPEC]... [--bridge-max MM] [--printops-api URL] [--offline]
-                   [--printops-snapshot FILE] [--accept preset_match|mix_calibration --reason TEXT] [--json] [--secs S]
+                   [--printops-snapshot FILE] [--accept preset_match|mix_calibration|spool_in_sync --reason TEXT] [--json] [--secs S]
                    [--no-bed-move] [--colour-delta-e N] [--fix [--fix-max-delta-e N]]
   Read-only checks before a print (the one write is opt-in: --fix). `3d printer start` runs the same checks and refuses on FAIL.
   Every G-code gate runs; one whose input is missing is SKIP and says what to pass.
 
-  thumbnails   preview images required by the G-code's `; thumbnails =` spec are present
+  thumbnails   preview images required by the G-code's `; thumbnails =` spec (48x48, 96x96 and
+               300x300 PNG when it names none) are present; a FAIL names the exact
+               `3d gcode-thumbnails add FILE` command, `--fix` runs it
   printer      (--printer) the printer is not printing / paused / busy / unreadable
   bed          (--printer with watch.bed.enabled) the camera sees the bed clear and the build
                plate on: objects or no plate FAIL, cannot tell WARN (`3d printer bed --help`). On
@@ -91,6 +95,10 @@ USAGE = """3d print-preflight FILE.gcode [--printer NAME] [--axis-limits X0:X1,Y
                          colour is UNVERIFIED when the slice recorded "no filament colors found in
                          projects" (an STL slice: the footer colour is the profile default)
   slot_binding_known     every used slot has a spool in the ledger (WARN: usage not booked)
+  spool_in_sync          Spoolman and PrintOps agree about the loaded spool (weight, slot, location):
+                         a typed weight, a clash or an unknown location FAILs, bookkeeping that is
+                         only late (usage just booked, a spool not processed yet) WARNs; fix with
+                         `3d printops spool drift --heal`. Override: --accept spool_in_sync --reason
   filament_sufficient    `; filament used [g]` + purge + margin vs the spool's remaining
                          interval: FAIL above it, WARN "weigh" inside it
   drying_due             the spool's drying state: wet FAIL, due WARN
@@ -124,21 +132,27 @@ Options:
                           used) and the PrintOps state comes from the snapshot file; not with --printops-api
   --printops-snapshot F   snapshot for --offline (default: $PRINTOPS_SNAPSHOT, else
                           ~/.cache/3d-cli/printops-snapshot.json; `3d printops gates snapshot`)
-  --accept CHECK          turn the FAIL of preset_match (printing with other presets on purpose) or of
+  --accept CHECK          turn the FAIL of preset_match (printing with other presets on purpose),
                           mix_calibration (a measured mix too far from the part's colour; the
-                          acceptance is also logged in 3d-api, needs a write token) into a WARN that
-                          carries --reason; only those two; needs --reason TEXT
+                          acceptance is also logged in 3d-api, needs a write token) or spool_in_sync
+                          (Spoolman and PrintOps disagree about the loaded spool, and you know why)
+                          into a WARN that carries --reason; only those three; needs --reason TEXT
   --reason TEXT           why the accepted mismatch is printed
   --no-bed-move           the bed line judges at the current Z: the printer's bed is not moved
   --colour-delta-e N      slot Tn colour tolerance, CIEDE2000 (default 10)
-  --fix                   (needs --printer) first rewrite `; filament_colour` / `; extruder_colour` of
+  --fix                   first add the thumbnails the G-code lacks, in place (header only: the toolpath
+                          is unchanged, mtime kept, a current slice-warnings record follows the new
+                          SHA-256); with a live --printer then also rewrite `; filament_colour` /
+                          `; extruder_colour` of
                           every tool the G-code uses to the colour the printer reports, in the G-code and
                           its project 3MF (--source-3mf, else NAME.3mf beside it; Metadata/
                           project_settings.config), keeping mode/mtime; NAME.slice-warnings.json and
                           NAME.manifest.json follow; old and new sha256 of each file are printed to
                           stderr. A head whose colour is further than --fix-max-delta-e away is refused
                           (another filament, nothing written). Then the checks run. The only option
-                          that writes (re-upload the file after it: its hash changed)
+                          that writes (re-upload the file after it: its hash changed). Without a live
+                          --printer (none given, --offline, an offline printer) only the thumbnails are
+                          added and stderr says the colours were not aligned
   --fix-max-delta-e N     the largest ΔE --fix rewrites across (default 30)
   --json                  JSON report on stdout
   --secs S                Creality: seconds to listen for pushed state (default 3)
@@ -250,10 +264,17 @@ def _static_device(opts: dict[str, str], profile: Device | None) -> tuple[Device
     return device_for(spec), trusted_macros_for(spec)
 
 
+def _fix_thumbnails(gcode: Path) -> None:
+    """--fix: add the missing thumbnails in place before the checks run."""
+    from slicing.thumbnails import fix_in_place
+
+    fixed = fix_in_place(gcode)
+    if fixed is not None:
+        print(f"--fix: added {', '.join(map(str, fixed.added))} to {gcode}", file=sys.stderr)
+
+
 def _fix_colours(gcode: Path, source: Path | None, status: PrinterStatus, opts: dict[str, str]) -> None:
     """--fix: rewrite the file to the loaded colours before the checks run (report on stderr)."""
-    import sys
-
     from printer_ops.colour_fix import DEFAULT_FIX_MAX_DELTA_E, fix_to_loaded, parse_delta_e
 
     limit = parse_delta_e(opts.get("--fix-max-delta-e"), "--fix-max-delta-e", DEFAULT_FIX_MAX_DELTA_E,
@@ -274,6 +295,8 @@ def _connect(opts: dict[str, str], profile: Device | None, gcode: Path, source: 
     if "--axis-limits" in opts:
         limits, limits_source = limits_from_option(opts["--axis-limits"], command="print-preflight")
     if "--printer" not in opts:
+        if "--fix" in opts:
+            print("--fix: no live --printer, the colours were not aligned (thumbnails only)", file=sys.stderr)
         return _Target(device, None, limits, limits_source, trusted)
     adapter = adapter_by_name(opts["--printer"], secs=opts.get("--secs"), command="print-preflight")
     status = adapter.status()
@@ -301,8 +324,6 @@ def run(argv: list[str]) -> int:
     if argv[0] in ("-h", "--help"):
         print(USAGE)
         return 0
-    import json
-
     pos, opts, visible = _parse_args(argv)
     gcode, source = _resolve_inputs(pos, opts)
 
@@ -316,10 +337,8 @@ def run(argv: list[str]) -> int:
     printer = opts.get("--printer")
     offline = "--offline" in opts
     profile = _offline_profile(opts, printer, offline)
-    if "--fix" in opts and "--printer" not in opts:
-        raise UsageError("--fix needs the loaded colours of a live --printer (not --offline, not an offline printer)",
-                         command="print-preflight",
-                         remediation=["3d print-preflight FILE --printer NAME --fix"])
+    if "--fix" in opts:
+        _fix_thumbnails(gcode)
     printops = context_from_options(printer, opts.get("--axis-limits"), api=opts.get("--printops-api"),
                                     offline=offline, snapshot=opts.get("--printops-snapshot"),
                                     command="print-preflight", accept=opts.get("--accept"),

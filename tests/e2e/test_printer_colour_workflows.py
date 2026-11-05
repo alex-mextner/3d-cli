@@ -4,15 +4,13 @@ loopback fake U1; never a real printer."""
 
 from __future__ import annotations
 
-import json
-
 from pathlib import Path
 
 from colour_fix_fixtures import LOADED, SLICED, load_beige_petg, write_plate
 from fleet_fixtures import u1_entry, write_fleet
 from printer_fakes import FakeMoonraker, u1_status, write_devices
 
-from .workflow_helper import hatch_requests, run_cli, run_cli_with_hatch
+from .workflow_helper import run_cli
 
 
 def slot_line(stdout: str) -> str:
@@ -22,22 +20,15 @@ def slot_line(stdout: str) -> str:
 def test_printer_start_fix_colour_needs_no_force_for_the_slot_colour(
     tmp_path: Path,
 ) -> None:
-    """The slot colour no longer blocks: `start --fix-colour` rewrites, uploads the fixed file and starts it;
-    only the unrelated thumbnail FAIL of this bare fixture needs the (approved) force."""
+    """The slot colour no longer blocks: `start --fix-colour` rewrites, uploads the fixed file and starts it
+    with no force and no approval request."""
     moon = FakeMoonraker()
     load_beige_petg(moon)
     g = write_plate(tmp_path)
     with moon.serve():
         write_devices(tmp_path / "xdg-config", moon=moon)
-        started = run_cli_with_hatch(
-            tmp_path,
-            "printer",
-            "start",
-            "u1",
-            str(g),
-            "--yes",
-            "--fix-colour",
-            "--force",
+        started = run_cli(
+            tmp_path, "printer", "start", "u1", str(g), "--yes", "--fix-colour"
         )
 
     assert started.returncode == 0, started.stdout + started.stderr
@@ -46,9 +37,7 @@ def test_printer_start_fix_colour_needs_no_force_for_the_slot_colour(
         and "uploaded the colour-fixed file" in started.stdout
     )
     assert slot_line(started.stdout).split()[0] == "PASS"
-    (request,) = hatch_requests(tmp_path)
-    failing = json.dumps(request["context"])
-    assert "slot T3" not in failing and "- thumbnails:" in failing
+    assert "FORCED" not in started.stdout
     assert [r.path for r in moon.writes()] == [
         "/server/files/upload",
         "/printer/print/start",

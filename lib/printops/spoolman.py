@@ -65,6 +65,8 @@ class Spoolman(Protocol):
     def set_field(
         self, entity: Entity, key: str, params: Mapping[str, Any]
     ) -> list[JSON]: ...  # POST /field/{entity}/{key}
+    def delete_field(self, entity: Entity, key: str) -> list[JSON]: ...  # DELETE /field/{entity}/{key} (also drops every stored value)
+    def link_tag(self, spool_id: int, uid: str) -> JSON: ...      # POST /spool/{id}/tag (409 = another spool holds the UID)
     def find(
         self, entity: Entity, params: Mapping[str, str] | None = None
     ) -> list[JSON]: ...  # GET /{entity}
@@ -95,6 +97,11 @@ def encode_extra(value: Any) -> str:
 
 def decode_extra(raw: str | None) -> Any:
     return None if raw is None else json.loads(raw)
+
+
+def normalize_uid(uid: str) -> str:
+    """A tag UID the way Spoolman stores it: separators (: - _ space) stripped, upper case."""
+    return "".join(c for c in uid if c not in ":-_ ").upper()
 
 
 class HttpSpoolman:
@@ -153,6 +160,12 @@ class HttpSpoolman:
         return list(
             self._call("POST", f"/field/{entity}/{urllib.parse.quote(key)}", params)
         )
+
+    def delete_field(self, entity: Entity, key: str) -> list[JSON]:
+        return list(self._call("DELETE", f"/field/{entity}/{urllib.parse.quote(key)}"))
+
+    def link_tag(self, spool_id: int, uid: str) -> JSON:
+        return dict(self._call("POST", f"/spool/{int(spool_id)}/tag", {"uid": uid}))
 
     def find(
         self, entity: Entity, params: Mapping[str, str] | None = None
@@ -227,8 +240,6 @@ class ExtraField:
 # retype or reorder an entry — Spoolman cannot change a field's type, and `order` is derived
 # from the position here.
 EXTRA_FIELDS: tuple[ExtraField, ...] = (
-    ExtraField("spool", "printops_slot", "PrintOps slot", "text"),
-    ExtraField("spool", "opened_at", "Opened at", "datetime"),
     ExtraField("spool", "last_dried_at", "Last dried at", "datetime"),
     ExtraField(
         "spool",
@@ -240,8 +251,6 @@ EXTRA_FIELDS: tuple[ExtraField, ...] = (
     ExtraField(
         "spool", "remaining_confidence_g", "Remaining ± (confidence)", "float", unit="g"
     ),
-    ExtraField("spool", "tag_uids", "Tag UIDs (JSON list)", "text"),
-    ExtraField("spool", "printops_location_id", "PrintOps location id", "integer"),
     ExtraField("filament", "nozzle_temp_min", "Nozzle temp min", "integer", unit="°C"),
     ExtraField("filament", "nozzle_temp_max", "Nozzle temp max", "integer", unit="°C"),
     ExtraField("filament", "bed_temp_min", "Bed temp min", "integer", unit="°C"),
@@ -265,9 +274,6 @@ EXTRA_FIELDS: tuple[ExtraField, ...] = (
         unit="mm³/s",
     ),
     ExtraField(
-        "vendor", "spool_tare_g", "Empty spool weight (tare)", "float", unit="g"
-    ),
-    ExtraField(
         "vendor",
         "spool_kind",
         "Spool kind",
@@ -283,6 +289,21 @@ EXTRA_FIELDS: tuple[ExtraField, ...] = (
         "spool", "slicer_filament_preset", "Slicer filament preset", "text"
     ),  # spools.PRESET_FIELD
     ExtraField("filament", "slicer_filament_preset", "Slicer filament preset", "text"),
+    # Max print speed of the filament, mm/s (printops.filament_defaults: 300, PLA+ 600). Not
+    # max_volumetric_mm3_s, which is mm³/s.
+    ExtraField("filament", "max_speed_mm_s", "Max speed", "integer", unit="mm/s"),
+)
+
+# Extra fields PrintOps used to register and no longer wants: each has a native Spoolman twin
+# (docs/printops/native-fields.md). `3d printops fields migrate-native` moves the values over and
+# only then deletes the definition (Spoolman destroys every stored value with it); health reports
+# a still-present definition as a warning (`legacy_fields`; the API status stays ok).
+LEGACY_EXTRA_FIELDS: tuple[tuple[Entity, str], ...] = (
+    ("vendor", "spool_tare_g"),  # -> vendor.empty_spool_weight
+    ("spool", "printops_slot"),  # -> spool.location = "slot:<printer>/<head>"
+    ("spool", "printops_location_id"),  # -> spool.location (the text is the only placement record)
+    ("spool", "opened_at"),  # -> spool.first_used
+    ("spool", "tag_uids"),  # -> spool tags (POST /spool/{id}/tag)
 )
 
 # PrintOps fields sort after any fields the user added by hand in the Spoolman UI.
@@ -386,11 +407,20 @@ def ensure_extra_fields(
     return report
 
 
-def missing_extra_fields(
+@dataclass(frozen=True)
+class FieldsAudit:
+    """What Spoolman's field lists say about the PrintOps registry: `entity.key` labels."""
+
+    missing: list[str]  # needed but absent or registered incompatibly
+    legacy: list[str]  # LEGACY_EXTRA_FIELDS definitions still present
+
+
+def audit_extra_fields(
     spoolman: Spoolman, fields: tuple[ExtraField, ...] = EXTRA_FIELDS
-) -> list[str]:
-    """`entity.key` of every PrintOps field missing in Spoolman or registered incompatibly."""
+) -> FieldsAudit:
+    """One `GET /field/{entity}` per entity, shared by the missing and the legacy check."""
     missing: list[str] = []
+    legacy: list[str] = []
     for entity in ENTITIES:
         have = {str(f["key"]): f for f in spoolman.list_fields(entity)}
         missing.extend(
@@ -398,4 +428,35 @@ def missing_extra_fields(
             for f in fields
             if f.entity == entity and not _registered(have.get(f.key), f)
         )
-    return missing
+        legacy.extend(f"{e}.{k}" for e, k in LEGACY_EXTRA_FIELDS if e == entity and k in have)
+    return FieldsAudit(missing=missing, legacy=legacy)
+
+
+def missing_extra_fields(spoolman: Spoolman, fields: tuple[ExtraField, ...] = EXTRA_FIELDS) -> list[str]:
+    """`entity.key` of every PrintOps field missing in Spoolman or registered incompatibly."""
+    return audit_extra_fields(spoolman, fields).missing
+
+
+def legacy_holders(items: list[JSON], key: str) -> list[JSON]:
+    """The items whose extra `key` still holds a value."""
+    return [i for i in items if (i.get("extra") or {}).get(key) is not None]
+
+
+def close_legacy_field(spoolman: Spoolman, entity: Entity, key: str, *, blocking: int, apply: bool) -> tuple[str, str]:
+    """(state, detail) of a legacy field definition after its values were migrated: `would_delete`
+    / `kept` (dry run, from the `blocking` items that would still hold a value), else a fresh read
+    decides — `kept` while any item holds a value (Spoolman destroys the stored values together
+    with the definition), `deleted`, or `failed`."""
+    if not apply:
+        if blocking:
+            return "kept", f"{blocking} {entity}(s) would still hold a value"
+        return "would_delete", f"no {entity} would hold a value afterwards"
+    try:
+        listing = spoolman.find(entity, {"allow_archived": "true"} if entity == "spool" else None)
+        remaining = legacy_holders(listing, key)
+        if remaining:
+            return "kept", f"{len(remaining)} {entity}(s) still hold a value; definition kept"
+        spoolman.delete_field(entity, key)
+    except SpoolmanError as e:
+        return "failed", f"could not delete the field definition: {e.message}"
+    return "deleted", f"no {entity} held a value; definition deleted"

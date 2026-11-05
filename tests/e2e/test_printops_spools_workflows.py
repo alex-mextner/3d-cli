@@ -403,3 +403,200 @@ def test_lint_printops_without_api_skips_data_rules(tmp_path: Path) -> None:
     )
     assert out.returncode == 0, out.stdout + out.stderr
     assert "data rules: skipped (no 3d-api configured" in out.stdout
+
+
+LEGACY = {
+    ("vendor", "spool_tare_g"): {"name": "Tare", "field_type": "float", "unit": "g"},
+    ("spool", "printops_slot"): {"name": "Slot", "field_type": "text"},
+    ("spool", "printops_location_id"): {"name": "Loc id", "field_type": "integer"},
+    ("spool", "opened_at"): {"name": "Opened", "field_type": "datetime"},
+    ("spool", "tag_uids"): {"name": "Tags", "field_type": "text"},
+}
+
+
+def _legacy_world(live: LiveApi) -> dict[str, int]:
+    """What an old PrintOps left in Spoolman: the legacy fields and values in them."""
+    sm = live.spoolman
+    for (entity, key), params in LEGACY.items():
+        if not any(f["key"] == key for f in sm.list_fields(entity)):  # type: ignore[arg-type]
+            sm.set_field(entity, key, params)  # type: ignore[arg-type]
+    vendor = sm.create("vendor", {"name": "Sunlu", "extra": {"spool_tare_g": json.dumps(135.0)}})
+    fil = sm.create("filament", {"name": "PLA", "material": "PLA", "density": 1.24, "diameter": 1.75, "weight": 1000})
+    loaded = sm.create(
+        "spool",
+        {
+            "filament_id": fil["id"],
+            "extra": {
+                "printops_slot": json.dumps("u1/T3"),
+                "printops_location_id": "7",
+                "opened_at": json.dumps("2026-10-01T10:00:00Z"),
+                "tag_uids": json.dumps('["04:aa:bb"]'),
+            },
+        },
+    )
+    return {"vendor": int(vendor["id"]), "spool": int(loaded["id"]), "filament": int(fil["id"])}
+
+
+def test_fields_migrate_native_dry_run_then_apply_then_noop(
+    tmp_path: Path, shop: LiveApi
+) -> None:
+    """A user upgrades PrintOps: `fields migrate-native` shows the plan, `--apply` moves every
+    legacy value to Spoolman's native field and removes the legacy fields, a second run is a no-op."""
+    ids = _legacy_world(shop)
+    writes = len(shop.spoolman.writes())
+
+    dry = _cli(tmp_path, shop, "printops", "fields", "migrate-native")
+    assert dry.returncode == 0, dry.stderr
+    assert "copy     vendor.spool_tare_g 'Sunlu': empty_spool_weight := 135 g" in dry.stdout
+    assert "location := 'slot:u1/T3'" in dry.stdout and "link tag(s) 04AABB" in dry.stdout
+    assert "field spool.tag_uids: would delete" in dry.stdout
+    assert "DRY RUN — nothing written; re-run with --apply" in dry.stdout
+    assert len(shop.spoolman.writes()) == writes  # the dry run wrote nothing to Spoolman
+
+    applied = _cli(tmp_path, shop, "printops", "fields", "migrate-native", "--apply")
+    assert applied.returncode == 0, applied.stdout + applied.stderr
+    assert applied.stdout.rstrip().endswith("applied")
+    vendor = shop.spoolman.get("vendor", ids["vendor"])
+    assert vendor["empty_spool_weight"] == 135.0 and vendor["extra"] == {}
+    spool = shop.spoolman.get("spool", ids["spool"])
+    assert spool["location"] == "slot:u1/T3" and spool["first_used"] == "2026-10-01T10:00:00Z"
+    assert [t["uid"] for t in spool["tags"]] == ["04AABB"] and spool["extra"] == {}
+    assert not {k for _, k in LEGACY} & {
+        str(f["key"]) for e in ("vendor", "spool") for f in shop.spoolman.list_fields(e)  # type: ignore[arg-type]
+    }
+
+    again = _cli(tmp_path, shop, "printops", "fields", "migrate-native", "--apply", "--json")
+    assert again.returncode == 0, again.stderr
+    report = json.loads(again.stdout)
+    assert report["changes"] == [] and report["blocked"] is False and report["pending"] is False
+
+    slots = _cli(tmp_path, shop, "printops", "spool", "show", str(ids["spool"]))
+    assert slots.returncode == 0 and "u1/T3" in slots.stdout
+
+
+def test_fields_migrate_native_conflict_exits_1_and_keeps_the_field(
+    tmp_path: Path, shop: LiveApi
+) -> None:
+    """A different native value is never overwritten: exit 1 so scripts can gate on it, the other
+    items still migrate, the legacy field stays until the user resolves it."""
+    ids = _legacy_world(shop)
+    shop.spoolman.update("vendor", ids["vendor"], {"empty_spool_weight": 150.0})
+
+    run = _cli(tmp_path, shop, "printops", "fields", "migrate-native", "--apply")
+    assert run.returncode == 1, run.stdout
+    assert "conflict vendor.spool_tare_g 'Sunlu': extra says 135 g, empty_spool_weight says 150 g" in run.stdout
+    assert "field vendor.spool_tare_g: kept" in run.stdout
+    assert shop.spoolman.get("vendor", ids["vendor"])["empty_spool_weight"] == 150.0
+    assert shop.spoolman.get("spool", ids["spool"])["location"] == "slot:u1/T3"  # the rest still moved
+    assert any(f["key"] == "spool_tare_g" for f in shop.spoolman.list_fields("vendor"))
+
+    shop.spoolman.update("vendor", ids["vendor"], {"empty_spool_weight": 135.0})
+    fixed = _cli(tmp_path, shop, "printops", "fields", "migrate-native", "--apply")
+    assert fixed.returncode == 0, fixed.stdout
+    assert not any(f["key"] == "spool_tare_g" for f in shop.spoolman.list_fields("vendor"))
+
+
+def test_fields_migrate_native_needs_write_scope_for_apply(
+    tmp_path: Path, shop: LiveApi
+) -> None:
+    """A read-only token can run the `fields migrate-native` dry run but not `--apply`; the refused apply leaves the legacy value in Spoolman untouched."""
+    ids = _legacy_world(shop)
+    assert _cli(tmp_path, shop, "printops", "fields", "migrate-native", token="read").returncode == 0
+    denied = _cli(tmp_path, shop, "printops", "fields", "migrate-native", "--apply", token="read")
+    assert denied.returncode != 0
+    assert shop.spoolman.get("vendor", ids["vendor"])["extra"] == {"spool_tare_g": "135.0"}
+
+
+def test_fields_fill_defaults_dry_run_apply_and_noop(tmp_path: Path, shop: LiveApi) -> None:
+    """`fields fill-defaults` shows the plan, `--apply` sets 300 / 600 (PLA+) only where empty, keeps a
+    number typed in the Spoolman UI, and a second run writes nothing."""
+    sm = shop.spoolman
+    vendor = sm.create("vendor", {"name": "Elegoo"})
+
+    def fil(material: str, name: str, **extra: str) -> int:
+        body = {"name": name, "vendor_id": vendor["id"], "material": material, "density": 1.24,
+                "diameter": 1.75, "weight": 1000, "extra": extra}
+        return int(sm.create("filament", body)["id"])
+
+    plus, petg = fil("PLA", "RAPID PLA+ Green"), fil("PETG", "Grey")
+    typed = fil("PLA+", "Typed", max_speed_mm_s="450")
+    writes = len(sm.writes())
+
+    dry = _cli(tmp_path, shop, "printops", "fields", "fill-defaults")
+    assert dry.returncode == 0, dry.stderr
+    assert "RAPID PLA+ Green" in dry.stdout and "new 600" in dry.stdout and "new 300" in dry.stdout
+    assert "keep" in dry.stdout and "DRY RUN — nothing written; re-run with --apply" in dry.stdout
+    assert len(sm.writes()) == writes
+
+    applied = _cli(tmp_path, shop, "printops", "fields", "fill-defaults", "--apply")
+    assert applied.returncode == 0, applied.stdout + applied.stderr
+    assert applied.stdout.rstrip().endswith("applied") and "2 set, 1 keep" in applied.stdout
+    got = {f: json.loads(sm.get("filament", f)["extra"]["max_speed_mm_s"]) for f in (plus, petg, typed)}
+    assert got == {plus: 600, petg: 300, typed: 450}
+
+    writes = len(sm.writes())
+    again = _cli(tmp_path, shop, "printops", "fields", "fill-defaults", "--apply", "--json")
+    assert again.returncode == 0, again.stderr
+    assert json.loads(again.stdout)["summary"] == {"set": 0, "keep": 3, "failed": 0}
+    assert len(sm.writes()) == writes
+
+    denied = _cli(tmp_path, shop, "printops", "fields", "fill-defaults", "--apply", token="read")
+    assert denied.returncode != 0
+
+
+
+def test_fields_migrate_native_restores_the_placement_the_location_id_recorded(
+    tmp_path: Path, shop: LiveApi
+) -> None:
+    """#712: a spool with a recorded PrintOps location id and no location text used to lose its place
+    when the legacy field went; the dry run lists the path it will write and the apply writes it."""
+    sm = shop.spoolman
+    _legacy_world(shop)
+    shelf = {loc.path: loc.id for loc in _locations(shop)}["WH:A/S1"]
+    fil = sm.create("filament", {"name": "PETG", "material": "PETG", "density": 1.27, "diameter": 1.75, "weight": 1000})
+    spool = sm.create("spool", {"filament_id": fil["id"], "extra": {"printops_location_id": str(shelf)}})
+
+    dry = _cli(tmp_path, shop, "printops", "fields", "migrate-native")
+    assert "location := 'WH:A/S1' (recorded as PrintOps location #" in dry.stdout
+    assert not sm.get("spool", spool["id"]).get("location")
+
+    applied = _cli(tmp_path, shop, "printops", "fields", "migrate-native", "--apply")
+    assert applied.returncode == 0, applied.stdout + applied.stderr
+    placed = sm.get("spool", spool["id"])
+    assert placed["location"] == "WH:A/S1" and placed["extra"] == {}
+
+
+def _locations(shop: LiveApi) -> list[locations.Location]:
+    conn = db.open_db(shop.settings.db_path)
+    try:
+        return locations.all_locations(conn)
+    finally:
+        conn.close()
+
+
+def _received_max_speed(tmp_path: Path, shop: LiveApi, *flags: str) -> int | None:
+    got = _cli(tmp_path, shop, "printops", "spool", "receive", "--vendor", "Elegoo", "--material", "PETG",
+               "--name", "Grey", "--net", "1000", "--json", *flags)
+    assert got.returncode == 0, got.stderr
+    filament_id = json.loads(got.stdout)["filament_id"]
+    raw = shop.spoolman.get("filament", filament_id)["extra"].get("max_speed_mm_s")
+    return None if raw is None else int(json.loads(raw))
+
+
+def test_spool_receive_max_speed_flag_sets_the_new_filaments_max_speed(tmp_path: Path, shop: LiveApi) -> None:
+    """`spool receive --max-speed N` overrides the default (300, PLA+ 600) for the filament it creates."""
+    assert _received_max_speed(tmp_path, shop, "--max-speed", "450") == 450
+
+
+def test_spool_receive_without_max_speed_flag_keeps_the_default(tmp_path: Path, shop: LiveApi) -> None:
+    """A user receives a new spool without `--max-speed`: the filament it creates gets the default max speed of 300 mm/s."""
+    assert _received_max_speed(tmp_path, shop) == 300
+
+
+def test_spool_receive_max_speed_must_be_a_positive_integer(tmp_path: Path, shop: LiveApi) -> None:
+    """A user mistypes `spool receive --max-speed` (text, a fraction, zero, negative): each is refused with a reason and no spool is created."""
+    for bad, why in (("fast", "needs an integer"), ("4.5", "needs an integer"), ("0", "must be > 0"), ("-5", "must be > 0")):
+        got = _cli(tmp_path, shop, "printops", "spool", "receive", "--vendor", "Elegoo", "--material", "PETG",
+                   "--name", "Grey", "--net", "1000", "--max-speed", bad)
+        assert got.returncode != 0 and why in got.stderr, (bad, got.stderr)
+    assert shop.spoolman.find("spool") == []  # nothing was created by a refused flag

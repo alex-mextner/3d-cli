@@ -14,6 +14,7 @@ import pytest
 from colour_fix_fixtures import (
     LOADED,
     SLICED,
+    THUMBNAILS,
     TOOLPATH,
     gcode_text,
     load_beige_petg,
@@ -175,7 +176,9 @@ def test_fix_rewrites_gcode_3mf_manifest_and_sidecar_consistently(
 
     # G-code: only the colour entries of tool 3 changed, the toolpath bytes did not
     text = g.read_text(encoding="utf-8")
-    assert text.startswith("; HEADER_BLOCK_START\n; HEADER_BLOCK_END\n" + TOOLPATH)
+    assert text.startswith(
+        "; HEADER_BLOCK_START\n; HEADER_BLOCK_END\n" + THUMBNAILS + TOOLPATH
+    )
     assert f"; filament_colour = #000000;#808080;#1B5E20;{LOADED}\n" in text
     assert f"; extruder_colour = #000000;#808080;#1B5E20;{LOADED}\n" in text
     assert "; filament_type = PLA;PLA;PLA;PETG\n" in text
@@ -319,5 +322,10 @@ def test_fix_keeps_quotes_crlf_and_the_other_entries(tmp_path: Path) -> None:
         b"; filament_type = PLA;PLA;PLA;PETG\r\n"
     )
     fix(g)
-    assert b'; filament_colour = "#000000";"#808080";"#1B5E20";"#FEE5A5"\r\n' in g.read_bytes()
-    assert g.read_bytes().count(b"\r\n") == 5 and g.read_bytes().startswith(b"G28\r\nT3\r\n")
+    assert (
+        b'; filament_colour = "#000000";"#808080";"#1B5E20";"#FEE5A5"\r\n'
+        in g.read_bytes()
+    )
+    assert g.read_bytes().count(b"\r\n") == 5 and g.read_bytes().startswith(
+        b"G28\r\nT3\r\n"
+    )

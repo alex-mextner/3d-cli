@@ -108,10 +108,8 @@ def _check_received_green(
     )  # sourced tare DB
     sp = fake_spoolman.get("spool", got["id"])
     assert sp["spool_weight"] == 154.0 and sp["initial_weight"] == 1000
-    assert (
-        json.loads(sp["extra"]["printops_location_id"])
-        == locations.get(printops_db, "WH:default").id
-    )
+    assert sp["location"] == locations.get(printops_db, "WH:default").path
+    assert "printops_location_id" not in sp["extra"]  # the location text is the only record
 
 
 def _check_use_then_unload_weighed(
@@ -210,9 +208,9 @@ def test_full_lifecycle_receive_store_load_use_unload_weigh_empty(
         and loaded["location"] == "slot:u1/T3"
         and loaded["opened_at"]
     )
-    assert (
-        json.loads(fake_spoolman.get("spool", sid)["extra"]["printops_slot"]) == "u1/T3"
-    )
+    bound = fake_spoolman.get("spool", sid)
+    assert bound["location"] == "slot:u1/T3" and "printops_slot" not in bound["extra"]
+    assert bound["first_used"] == loaded["opened_at"]  # load opens the spool (native first_used)
 
     _check_use_then_unload_weighed(po, fake_spoolman, sid)
     _check_empty_and_audit_trail(po, printops_db, sid)
@@ -621,7 +619,7 @@ def test_unload_canonicalises_the_slot_like_load(
     po.post("/v1/printers/p1s/slots/ams1/2/load", {"spool_id": a})
     assert po.post("/v1/printers/p1s/slots/ams1/02/unload", {})["slot"] is None
     # an unusable head can still be emptied (the spool got there by hand in Spoolman)
-    fake_spoolman.update("spool", a, {"extra": {"printops_slot": json.dumps("u1/T2")}})
+    fake_spoolman.update("spool", a, {"location": "slot:u1/T2"})
     assert po.post("/v1/printers/u1/slots/T2/unload", {})["slot"] is None
 
 
@@ -751,9 +749,7 @@ def test_unload_from_a_printer_that_left_the_fleet_ignores_case(
     po: ApiClient, fake_spoolman: FakeSpoolman
 ) -> None:
     sid = po.post("/v1/spools", GREEN)["id"]
-    fake_spoolman.update(
-        "spool", sid, {"extra": {"printops_slot": json.dumps("k2/T1")}}
-    )
+    fake_spoolman.update("spool", sid, {"location": "slot:k2/T1"})
     assert po.post("/v1/printers/k2/slots/t1/unload", {})["slot"] is None
 
 
@@ -765,7 +761,7 @@ def test_load_sees_an_occupant_whose_slot_differs_in_case(
     b = po.post(
         "/v1/spools", {**GREEN, "name": "RAPID PLA+ White", "color_hex": "#FFFFFF"}
     )["id"]
-    fake_spoolman.update("spool", a, {"extra": {"printops_slot": json.dumps("u1/t1")}})
+    fake_spoolman.update("spool", a, {"location": "slot:u1/t1"})
     busy = _err(po.post, "/v1/printers/u1/slots/T1/load", {"spool_id": b})
     assert busy.status == 409 and f"spool #{a}" in busy.message
     assert po.get(f"/v1/spools/{b}")["slot"] is None

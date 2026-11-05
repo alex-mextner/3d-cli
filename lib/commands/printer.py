@@ -15,6 +15,9 @@ SAFETY (enforced here, before any write):
     re-reads state immediately before the write, and runs `3d print-preflight` plus the camera
     `bed` check (printer_ops/bed.py; a FAIL blocks; --force needs the owner's Telegram hatch
     approval, printer_ops/force_hatch.py);
+  - upload and start first add the thumbnails FILE lacks (48x48/96x96/300x300 PNG per its
+    `; thumbnails =` spec) in place (lib/slicing/thumbnails.py `fix_in_place`): a G-code
+    never reaches a printer screen without its preview;
   - a failed/timed-out start is reported as UNKNOWN and never resent automatically.
 
 INVARIANTS: stdlib-only at import time (registry contract); printer_ops is imported lazily.
@@ -46,10 +49,13 @@ USAGE = """3d printer [-n NAME] <subcommand> [args]
   status NAME [--json] [--secs S]      state, job, progress, temperatures, loaded heads
                                        (everything about one printer — web UIs, queue, job
                                        history, settings: `3d printers show NAME`)
-  upload NAME FILE.gcode [--as REMOTE] store the file on the printer; never starts a print
+  upload NAME FILE.gcode [--as REMOTE] store the file on the printer; never starts a print.
+                                       A FILE without its preview thumbnails gets them first (in
+                                       place, sha256 printed: `3d gcode-thumbnails check FILE`)
   start NAME FILE.gcode --yes [--as REMOTE] [--source-3mf X.3mf] [--bridge-max MM] [--force] [--secs S]
                                        [--no-bed-move] [--colour-delta-e N] [--fix-colour [--fix-max-delta-e N]]
-                                       start a file that was uploaded before; runs
+                                       start a file that was uploaded before (also adds missing
+                                       thumbnails to FILE in place: then upload FILE again); runs
                                        `3d print-preflight` first, plus the camera bed check
                                        (objects on the bed / plate missing FAIL) when the
                                        printer has watch.bed.enabled (an idle printer with
@@ -334,6 +340,20 @@ def _local(path: str) -> Path:
     return p
 
 
+def _ensure_thumbnails(original: Path) -> None:
+    """A G-code reaches a printer with its preview or not at all: add the missing thumbnails to FILE in place
+    (atomic, mtime kept, the slice-warnings record follows) BEFORE the snapshot is hashed. The remote name is
+    content-addressed, so the fixed bytes get a name of their own and `start` of the same FILE refers to them."""
+    from printer_ops.base import file_sha256
+    from slicing.thumbnails import fix_in_place
+
+    old = file_sha256(original)
+    res = fix_in_place(original)
+    if res is not None:
+        print(f"thumbnails: {original} lacked {', '.join(map(str, res.added))}; added in place "
+              f"(sha256 {old[:12]}… -> {file_sha256(original)[:12]}…)")
+
+
 def _cmd_upload(argv: list[str]) -> int:
     import shutil
     import tempfile
@@ -341,6 +361,7 @@ def _cmd_upload(argv: list[str]) -> int:
 
     (name, file), opts = _parse(argv, {"--as", "--secs"}, 2, "upload")
     original = _local(file)
+    _ensure_thumbnails(original)
     # The bytes named by the hash are the bytes sent: hash and upload one snapshot, so a
     # slicer rewriting FILE meanwhile cannot store other content under this name.
     with tempfile.TemporaryDirectory(prefix="3d-upload-") as tmp:
@@ -401,6 +422,7 @@ def _cmd_start(argv: list[str]) -> int:
     source = Path(opts["--source-3mf"]) if "--source-3mf" in opts else None
     if source is not None and not source.is_file():
         raise InputNotFound(str(source), command="printer")
+    _ensure_thumbnails(original)
     # One immutable snapshot: the name hash, the read-back comparison and the preflight all see
     # the same bytes even if a slicer rewrites FILE meanwhile.
     with tempfile.TemporaryDirectory(prefix="3d-start-") as tmp:

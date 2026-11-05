@@ -19,7 +19,7 @@ def test_force_approval_that_telegram_could_not_post_is_retried_then_points_to_t
     then refuses with how to start from the printer's own screen; nothing is started."""
     moon = FakeMoonraker()
     load_beige_petg(moon)
-    g = write_plate(tmp_path)
+    g = write_plate(tmp_path, material="PLA")  # PLA sliced, PETG loaded: a real slot FAIL
     with moon.serve():
         write_devices(tmp_path / "xdg-config", moon=moon)
         assert run_cli(tmp_path, "printer", "upload", "u1", str(g)).returncode == 0

@@ -33,8 +33,8 @@ USAGE = """3d printops loc tree [ROOT] [--archived] [--json]
 3d printops loc resync
   Where spools live. A location is a path SCHEME:NAME[/NAME…] of at most 64 chars (Spoolman's
   `location` limit), e.g. WH:A/S2/B3/04, dryer:1, drybox:1; its parent must exist first.
-  Every spool stored in it carries the path in Spoolman `location` and the id in the extra field
-  `printops_location_id`; moving a location rewrites both for every spool inside.
+  Every spool stored in it carries the path in Spoolman `location` (the only record of where it
+  is); moving a location rewrites that text for every spool inside.
   Printer slots slot:<printer>/<head> (and slot:<printer>/<ams>/<n>) come from
   fleet/printers.yaml and follow it automatically. REF = path or numeric id.
   Kinds: warehouse zone shelf box slot dryer dry_box (printer, ams, printer_slot: fleet only).

@@ -48,8 +48,8 @@ Epic: [#90](https://github.com/alex-mextner/3d-cli/issues/90).
 |---|---|
 | `list` | Every fleet and configured printer: owner, access, model, address, heads (an unusable head with its reason), and where the device settings came from when a user/project file overrides the fleet. |
 | `status NAME` | State, current file and progress, temperatures, and (U1) what each head holds. |
-| `upload NAME FILE` | Store the file on the printer and verify its size there. Never starts a print. |
-| `start NAME FILE --yes` | Start a file that was uploaded before. Runs [`3d print-preflight`](print-preflight.md) first. |
+| `upload NAME FILE` | Store the file on the printer and verify its size there. Never starts a print. A FILE without its preview thumbnails gets them first, in place (old and new SHA-256 printed; see [`3d gcode-thumbnails`](gcode-thumbnails.md#layers-a-thumbnail-cannot-be-missing)). |
+| `start NAME FILE --yes` | Start a file that was uploaded before. Runs [`3d print-preflight`](print-preflight.md) first. Adds missing thumbnails to FILE in place like `upload`; the fixed bytes have another content-addressed name, so upload again. |
 | `cancel NAME --yes` | Cancel the running or paused job. |
 | `evidence NAME --out DIR` | After EVERY print (done, cancelled, failed): save the Moonraker history job and the klippy.log lines around its pauses and errors as `DIR/<date>-<outcome>.md` + `.json`, with the layer of each stop when `--gcode` is given; GET only. See [printer-evidence.md](printer-evidence.md). |
 | `guard NAME --job-id ID --yes` | Authorize one automatic native PAUSE of this exact live Moonraker job on confirmed camera failure; [policy and readiness](printer-vision.md#one-job-automatic-pause). |

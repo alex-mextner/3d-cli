@@ -200,10 +200,12 @@ def read_gcode_meta(path: Path) -> GcodeMeta:
     )
 
 
-def check_thumbnails(path: Path) -> Check:
+def check_thumbnails(path: Path, shown: Path | None = None) -> Check:
+    """`shown` is the file the fix command names (the original when `path` is a snapshot copy)."""
     from gcode_thumbnails import (
         check as thumb_check,
     )  # lazy: keeps `3d help` import-light
+    from slicing.thumbnails import fix_command
 
     r = thumb_check(str(path))
     if r.ok:
@@ -213,7 +215,8 @@ def check_thumbnails(path: Path) -> Check:
     reason = r.reason or "missing " + (
         ", ".join(str(t) for t in r.missing) or "thumbnails"
     )
-    return Check("thumbnails", FAIL, f"{reason}; fix: 3d gcode-thumbnails add FILE")
+    fix = fix_command(shown or path)
+    return Check("thumbnails", FAIL, f"{reason}; fix: {fix}  (or print-preflight --fix; upload/start add them themselves)")
 
 
 def check_printer_free(status: PrinterStatus) -> Check:
@@ -795,7 +798,7 @@ def run_preflight(
     sibling NAME.3mf and NAME.slice-warnings.json are looked up there. `bed` is the camera
     bed line (`check_bed` above), computed by the caller that knows the device."""
     report = Report(str(gcode))
-    report.checks.append(check_thumbnails(gcode))
+    report.checks.append(check_thumbnails(gcode, origin))
     if status is not None:
         report.checks.append(check_printer_free(status))
         report.checks.extend(

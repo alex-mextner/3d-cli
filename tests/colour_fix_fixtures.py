@@ -8,11 +8,22 @@ import json
 import zipfile
 from pathlib import Path
 
+import numpy as np
 from printer_fakes import FakeMoonraker
+
+import gcode_thumbnails as gt
 
 SLICED = "#E8D8B0"  # what the slicer wrote
 LOADED = "#FEE5A5"  # what the U1 screen shows for the same beige PETG
 COLOURS = ["#000000", "#808080", "#1B5E20", SLICED]
+# the three preview sizes a G-code must carry (print-preflight's `thumbnails` gate); drawn once, flat grey
+THUMBNAILS = "".join(
+    gt.block(
+        gt.Thumb(side, side, "PNG"),
+        gt.encode_png(np.full((side, side, 4), 128, np.uint8)),
+    )
+    for side in (48, 96, 300)
+)
 TOOLPATH = "G28\nT3\nG1 X10 Y10 E1\nG1 X20 Y20 E1\n"
 
 
@@ -20,6 +31,7 @@ def gcode_text(colour: str = SLICED, material: str = "PETG") -> str:
     colours = ";".join([*COLOURS[:3], colour])
     return (
         "; HEADER_BLOCK_START\n; HEADER_BLOCK_END\n"
+        + THUMBNAILS
         + TOOLPATH
         + "; filament used [mm] = 0.00, 0.00, 0.00, 30.50\n"
         + f"; extruder_colour = {colours}\n"
@@ -58,12 +70,13 @@ def write_manifest(path: Path, colour: str = SLICED) -> None:
     )
 
 
-def write_plate(directory: Path, name: str = "plate") -> Path:
-    """NAME.gcode + NAME.3mf + NAME.manifest.json + NAME.slice-warnings.json; the G-code's path."""
+def write_plate(directory: Path, name: str = "plate", material: str = "PETG") -> Path:
+    """NAME.gcode + NAME.3mf + NAME.manifest.json + NAME.slice-warnings.json; the G-code's path.
+    A `material` other than the loaded PETG makes the `slot` gate FAIL (the way a start needs --force)."""
     from slicing import slice_warnings as sw
 
     gcode = directory / f"{name}.gcode"
-    gcode.write_text(gcode_text(), encoding="utf-8")
+    gcode.write_text(gcode_text(material=material), encoding="utf-8")
     write_project(directory / f"{name}.3mf")
     write_manifest(directory / f"{name}.manifest.json")
     sw.record(gcode, logs=[("slice.log", "")])

@@ -34,7 +34,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, NoReturn
 from urllib.parse import parse_qs, urlsplit
 
-from printops.spoolman import ENTITIES, Entity, SpoolmanError
+from printops.spoolman import ENTITIES, Entity, SpoolmanError, normalize_uid
 
 JSON = dict[str, Any]
 FIELD_TYPES = {
@@ -187,6 +187,7 @@ class FakeSpoolman:
         self.items: dict[str, dict[int, JSON]] = {e: {} for e in ENTITIES}
         self.fields: dict[str, list[JSON]] = {e: [] for e in ENTITIES}
         self._next: dict[str, int] = dict.fromkeys(ENTITIES, 1)
+        self._tags: dict[str, int] = {}  # normalized tag UID -> spool id (a UID identifies ONE spool)
         self.calls: list[tuple[str, str]] = []
         self.down = False
         self.url: str | None = None
@@ -240,7 +241,7 @@ class FakeSpoolman:
         return out
 
     def _render_spool(self, out: JSON, row: JSON) -> None:
-        out["tags"] = []
+        out["tags"] = [{"uid": u, "added": _now()} for u, sid in sorted(self._tags.items()) if sid == row["id"]]
         fil = self.items["filament"][row["filament_id"]]
         out["filament"] = self._render("filament", fil)
         used = float(row["used_weight"])
@@ -475,21 +476,24 @@ class FakeSpoolman:
         self._enter("DELETE", f"/{entity}/{item_id}")
         with self._lock:
             self._row(entity, item_id)
-            if entity == "vendor" and any(
-                f.get("vendor_id") == item_id for f in self.items["filament"].values()
-            ):
-                # Spoolman nulls the vendor of its filaments rather than refusing.
-                for f in self.items["filament"].values():
-                    if f.get("vendor_id") == item_id:
-                        f["vendor_id"] = None
-            if entity == "filament" and any(
-                s["filament_id"] == item_id for s in self.items["spool"].values()
-            ):
-                raise _err(
-                    403,
-                    "Failed to delete filament, see server logs for more information.",
-                )
+            self._check_deletable(entity, item_id)
             del self.items[entity][int(item_id)]
+            if entity == "spool":
+                self._tags = {u: sid for u, sid in self._tags.items() if sid != int(item_id)}
+
+    def _check_deletable(self, entity: Entity, item_id: int) -> None:
+        if entity == "vendor":
+            # Spoolman nulls the vendor of its filaments rather than refusing.
+            for f in self.items["filament"].values():
+                if f.get("vendor_id") == item_id:
+                    f["vendor_id"] = None
+        if entity == "filament" and any(
+            s["filament_id"] == item_id for s in self.items["spool"].values()
+        ):
+            raise _err(
+                403,
+                "Failed to delete filament, see server logs for more information.",
+            )
 
     def _consume(self, row: JSON, weight: float) -> None:
         row["used_weight"] = (
@@ -565,6 +569,34 @@ class FakeSpoolman:
             initial = fil.get("weight") or 0
         return initial, tare
 
+    def delete_field(self, entity: Entity, key: str) -> list[JSON]:
+        """DELETE /field/{entity}/{key}: like the real one, also destroys every stored value."""
+        self._enter("DELETE", f"/field/{entity}/{key}")
+        with self._lock:
+            existing = self.fields[entity]
+            old = next((f for f in existing if f["key"] == key), None)
+            if old is None:
+                raise _err(404, f"Extra field with key {key} does not exist for entity type {entity}")
+            existing.remove(old)
+            for row in self.items[entity].values():
+                row["extra"].pop(key, None)
+            return copy.deepcopy(existing)
+
+    def link_tag(self, spool_id: int, uid: str) -> JSON:
+        """POST /spool/{id}/tag: UID normalized (separators stripped, upper case, hex only); a UID
+        another spool holds -> 409; re-linking to the holder is a success."""
+        self._enter("POST", f"/spool/{spool_id}/tag")
+        with self._lock:
+            self._row("spool", spool_id)
+            norm = normalize_uid(uid)
+            if not norm or any(c not in "0123456789ABCDEF" for c in norm):
+                raise _err(400, f'"{uid}" is not a valid tag UID. A UID must be hexadecimal.')
+            holder = self._tags.get(norm)
+            if holder is not None and holder != int(spool_id):
+                raise _err(409, f"Tag {norm} is already linked to spool {holder}.")
+            self._tags[norm] = int(spool_id)
+            return {"uid": norm, "added": _now()}
+
     # -- HTTP -----------------------------------------------------------------------------
     @contextlib.contextmanager
     def serve(self) -> Iterator[str]:
@@ -638,6 +670,8 @@ def _make_handler(fake: FakeSpoolman) -> type[BaseHTTPRequestHandler]:
                 return fake.list_fields(_entity(parts[1]))
             if len(parts) == 3 and method == "POST":
                 return fake.set_field(_entity(parts[1]), parts[2], self._body())
+            if len(parts) == 3 and method == "DELETE":
+                return fake.delete_field(_entity(parts[1]), parts[2])
             raise SpoolmanError("Not Found", status=404)
 
         def _route_entity(
@@ -658,11 +692,15 @@ def _make_handler(fake: FakeSpoolman) -> type[BaseHTTPRequestHandler]:
                 if method == "DELETE":
                     fake.delete(entity, item_id)
                     return {"message": "Success!"}
-            if len(parts) == 3 and entity == "spool" and method == "PUT":
-                return self._route_spool_put(parts)
+            if len(parts) == 3 and entity == "spool":
+                return self._route_spool_action(method, parts)
             raise SpoolmanError("Not Found", status=404)
 
-        def _route_spool_put(self, parts: list[str]) -> Any:
+        def _route_spool_action(self, method: str, parts: list[str]) -> Any:
+            if method == "POST" and parts[2] == "tag":
+                return fake.link_tag(int(parts[1]), str(self._body()["uid"]))
+            if method != "PUT":
+                raise SpoolmanError("Not Found", status=404)
             body = self._body()
             if parts[2] == "use":
                 return fake.use(

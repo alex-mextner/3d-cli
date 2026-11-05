@@ -12,6 +12,7 @@ Registered for the whole suite via `pytest_plugins` in tests/conftest.py, so tes
   live_api            a real uvicorn 3d-api on 127.0.0.1:<port> backed by FakeSpoolman over HTTP
                       (for SSE/streaming and `bin/3d` e2e) — LiveApi(url, settings, tokens, spoolman)
 """
+
 from __future__ import annotations
 
 import contextlib
@@ -45,13 +46,21 @@ class TestClientTransport:
     def __init__(self, client: Any) -> None:
         self.client = client
 
-    def request(self, method: str, url: str, headers: Mapping[str, str], body: bytes | None,
-                timeout: float) -> Response:
+    def request(
+        self,
+        method: str,
+        url: str,
+        headers: Mapping[str, str],
+        body: bytes | None,
+        timeout: float,
+    ) -> Response:
         r = self.client.request(method, url, headers=dict(headers), content=body)
         return Response(r.status_code, r.content, dict(r.headers))
 
     @contextlib.contextmanager
-    def stream_lines(self, url: str, headers: Mapping[str, str], timeout: float) -> Iterator[Iterator[str]]:
+    def stream_lines(
+        self, url: str, headers: Mapping[str, str], timeout: float
+    ) -> Iterator[Iterator[str]]:
         with self.client.stream("GET", url, headers=dict(headers)) as r:
             if r.status_code >= 400:
                 r.read()
@@ -60,9 +69,16 @@ class TestClientTransport:
 
 
 def mint_tokens(path: Path) -> dict[str, str]:
-    scopes = {"read": ("read",), "write": ("write",), "rw": ("read", "write"),
-              "all": ("read", "write", "printer-control"), "camera": ("camera",)}
-    return {name: tokens.create(path, f"test-{name}", s)[0] for name, s in scopes.items()}
+    scopes = {
+        "read": ("read",),
+        "write": ("write",),
+        "rw": ("read", "write"),
+        "all": ("read", "write", "printer-control"),
+        "camera": ("camera",),
+    }
+    return {
+        name: tokens.create(path, f"test-{name}", s)[0] for name, s in scopes.items()
+    }
 
 
 def wait_fields(app: Any, timeout: float = 5.0) -> None:
@@ -70,13 +86,27 @@ def wait_fields(app: Any, timeout: float = 5.0) -> None:
     deadline = time.monotonic() + timeout
     while app.state.printops.fields.get("status") == "pending":
         if time.monotonic() > deadline:
-            raise AssertionError(f"extra fields not registered: {app.state.printops.fields}")
+            raise AssertionError(
+                f"extra fields not registered: {app.state.printops.fields}"
+            )
         time.sleep(0.01)
+
+
+@pytest.fixture(autouse=True)
+def _spool_sync_loop_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The scheduled spool sync (routes_spool_sync) heals Spoolman-side changes in the background;
+    a test that did not ask for it must see only its own writes. Tests of the schedule set
+    PRINTOPS_SPOOL_SYNC_S themselves."""
+    monkeypatch.setenv("PRINTOPS_SPOOL_SYNC_S", "0")
 
 
 @pytest.fixture
 def printops_settings(tmp_path: Path) -> Settings:
-    return Settings(db_path=tmp_path / "printops.db", tokens_file=tmp_path / "tokens.json", version="test")
+    return Settings(
+        db_path=tmp_path / "printops.db",
+        tokens_file=tmp_path / "tokens.json",
+        version="test",
+    )
 
 
 @pytest.fixture
@@ -107,7 +137,9 @@ def printops_tokens(printops_settings: Settings) -> dict[str, str]:
 
 @pytest.fixture
 def api_client(printops_client: Any, printops_tokens: dict[str, str]) -> ApiClient:
-    return ApiClient("http://testserver", printops_tokens["rw"], TestClientTransport(printops_client))
+    return ApiClient(
+        "http://testserver", printops_tokens["rw"], TestClientTransport(printops_client)
+    )
 
 
 @pytest.fixture
@@ -142,12 +174,24 @@ def serve_api(tmp_path: Path, fake: FakeSpoolman) -> Iterator[LiveApi]:
     from printops.api.app import create_app
 
     with fake.serve() as spoolman_url:
-        settings = Settings(db_path=tmp_path / "live" / "printops.db", tokens_file=tmp_path / "live" / "tokens.json",
-                            spoolman_url=spoolman_url, version="live-test")
+        settings = Settings(
+            db_path=tmp_path / "live" / "printops.db",
+            tokens_file=tmp_path / "live" / "tokens.json",
+            spoolman_url=spoolman_url,
+            version="live-test",
+        )
         app = create_app(settings)
         port = _free_port()
-        server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning",
-                                               lifespan="on", timeout_graceful_shutdown=1))
+        server = uvicorn.Server(
+            uvicorn.Config(
+                app,
+                host="127.0.0.1",
+                port=port,
+                log_level="warning",
+                lifespan="on",
+                timeout_graceful_shutdown=1,
+            )
+        )
         thread = threading.Thread(target=server.run, daemon=True)
         thread.start()
         deadline = time.monotonic() + 10
@@ -157,7 +201,12 @@ def serve_api(tmp_path: Path, fake: FakeSpoolman) -> Iterator[LiveApi]:
             time.sleep(0.02)
         wait_fields(app)
         try:
-            yield LiveApi(f"http://127.0.0.1:{port}", settings, mint_tokens(settings.tokens_file), fake)
+            yield LiveApi(
+                f"http://127.0.0.1:{port}",
+                settings,
+                mint_tokens(settings.tokens_file),
+                fake,
+            )
         finally:
             server.should_exit = True
             thread.join(timeout=10)

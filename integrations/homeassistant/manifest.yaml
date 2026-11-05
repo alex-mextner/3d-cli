@@ -49,6 +49,7 @@ files:
   - {src: packages/u1_print_inspector.yaml, dest: packages/u1_print_inspector.yaml, mode: symlink}
   - {src: packages/printer_vision.yaml, dest: packages/printer_vision.yaml, mode: symlink}
   - {src: packages/printops_tasks.yaml, dest: packages/printops_tasks.yaml, mode: symlink}
+  - {src: packages/printops_backup.yaml, dest: packages/printops_backup.yaml, mode: symlink}
   - {src: dashboards/ui-3d-printers.yaml, dest: ui-3d-printers.yaml, mode: symlink}
   - {src: scripts/u1_mjpeg_proxy.py, dest: scripts/u1_mjpeg_proxy.py, mode: symlink, services: [u1-camera-proxy]}
   - {src: scripts/u1_print_inspector.py, dest: scripts/u1_print_inspector.py, mode: symlink, services: [u1-camera-proxy]}
@@ -77,5 +78,6 @@ internal:
   - vendor.lock
   - .yamllint
   - snippets/
+  - README.md
   - compose/
   - tests/

@@ -8,7 +8,14 @@ import json
 import zipfile
 from pathlib import Path
 
-from colour_fix_fixtures import LOADED, SLICED, gcode_text, load_beige_petg, write_plate
+from colour_fix_fixtures import (
+    LOADED,
+    SLICED,
+    THUMBNAILS,
+    gcode_text,
+    load_beige_petg,
+    write_plate,
+)
 from printer_fakes import FakeMoonraker, write_devices
 from slicing import slice_warnings as sw
 
@@ -122,3 +129,32 @@ def test_preflight_fix_aligns_gcode_3mf_and_sidecars_and_prints_the_hashes(
         0
     ].split()[0] == "PASS"
     assert moon.writes() == []
+
+
+def test_one_fix_adds_the_missing_thumbnails_and_aligns_the_colours(
+    tmp_path: Path,
+) -> None:
+    """A G-code without previews, sliced in another beige than the printer's: one `--fix` repairs both and the
+    preflight passes; its thumbnails gate would have FAILed before."""
+    moon = FakeMoonraker()
+    load_beige_petg(moon)
+    g = write_plate(tmp_path)
+    g.write_text(gcode_text().replace(THUMBNAILS, ""), encoding="utf-8")
+    sw.record(g, logs=[("slice.log", "")])
+    with moon.serve():
+        write_devices(tmp_path / "xdg-config", moon=moon)
+        plain = run_cli(tmp_path, "print-preflight", str(g), "--printer", "u1")
+        fixed = run_cli(tmp_path, "print-preflight", str(g), "--printer", "u1", "--fix")
+        offline = run_cli(
+            tmp_path, "print-preflight", str(g), "--axis-limits", "u1", "--fix"
+        )
+
+    assert plain.returncode == 1 and "FAIL  thumbnails" in plain.stdout
+    assert fixed.returncode == 0, fixed.stdout + fixed.stderr
+    assert "--fix: added 48x48/PNG, 96x96/PNG, 300x300/PNG" in fixed.stderr
+    assert f"colour fix: tool T3 (T4) {SLICED} -> {LOADED}" in fixed.stderr
+    text = g.read_text(encoding="utf-8")
+    assert "; thumbnail begin 300x300" in text and LOADED in text
+    assert sw.load(sw.sidecar_path(g))["gcode_sha256"] == sw.sha256_file(g)
+    # nothing to align to without a live printer: the colours stay, stderr says so, the thumbnails are done
+    assert offline.returncode == 0 and "colours were not aligned" in offline.stderr

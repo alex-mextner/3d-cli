@@ -36,7 +36,7 @@ def gates_ok(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         preflight,
         "check_thumbnails",
-        lambda p: preflight.Check("thumbnails", "PASS", "stub"),
+        lambda p, shown=None: preflight.Check("thumbnails", "PASS", "stub"),
     )
     monkeypatch.setattr(
         preflight,
@@ -152,8 +152,11 @@ def test_preflight_fix_json_stays_machine_readable(
     assert "sha256 old" in cap.err
 
 
-def test_preflight_fix_refuses_another_colour_and_needs_a_live_printer(
-    moon: FakeMoonraker, tmp_path: Path, gates_ok: None
+def test_preflight_fix_refuses_another_colour_and_aligns_colours_only_with_a_live_printer(
+    moon: FakeMoonraker,
+    tmp_path: Path,
+    gates_ok: None,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     g = tmp_path / "blue.gcode"
     g.write_text(gcode_text("#0000FF"), encoding="utf-8")
@@ -162,14 +165,18 @@ def test_preflight_fix_refuses_another_colour_and_needs_a_live_printer(
         preflight_cli(str(g), "--printer", "u1", "--fix")
     assert g.read_bytes() == before
     # widening the limit is an explicit, per-run decision
-    assert preflight_cli(str(g), "--printer", "u1", "--fix", "--fix-max-delta-e", "100") == 0
+    assert (
+        preflight_cli(str(g), "--printer", "u1", "--fix", "--fix-max-delta-e", "100")
+        == 0
+    )
     assert LOADED in g.read_text(encoding="utf-8")
     g.write_bytes(before)
-    with pytest.raises(UsageError, match="--fix needs"):
-        preflight_cli(str(g), "--fix")
-    with pytest.raises(UsageError, match="--fix needs"):
-        preflight_cli(str(g), "--printer", "u1", "--offline", "--fix")
-    assert g.read_bytes() == before
+    capsys.readouterr()
+    # no live printer (none, or --offline): the colours have nothing to align to, the rest of --fix still runs
+    for argv in (("--axis-limits", "u1"), ("--printer", "u1", "--offline")):
+        assert preflight_cli(str(g), *argv, "--fix") == 0
+        assert "colours were not aligned" in capsys.readouterr().err
+        assert g.read_bytes() == before
 
 
 # ---- printer start --fix-colour ----------------------------------------------------------

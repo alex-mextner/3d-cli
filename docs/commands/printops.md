@@ -33,11 +33,13 @@ service is never exposed to the internet.
 3d printops token create NAME --scopes SCOPES [--file PATH | --ssh HOST]
 3d printops token list [--file PATH | --ssh HOST]
 3d printops token revoke NAME [--file PATH | --ssh HOST]
-3d printops deploy [--dry-run] [--host USER@HOST] [--dir DIR] [--backup-dir DIR] [--api URL]
-3d printops backup [--dest DIR] [--spoolman-db PATH]
+3d printops deploy [--dry-run] [--host USER@HOST | --local] [--dir DIR] [--backup-dir DIR] [--api URL] [--bind ADDR]
+3d printops backup run|ls|verify|prune|restore|selftest|target|discover …
 3d printops loc tree|add|show|set|mv|archive|unarchive|label|resolve|sync-fleet|resync …
 3d printops spool ls|show|receive|move|load|unload|use|measure|empty|import-owned …
 3d printops tare ls|add|show …
+3d printops fields migrate-native [--apply] [--json] [--api URL] [--token TOKEN]
+3d printops fields fill-defaults [--apply] [--json] [--api URL] [--token TOKEN]
 3d printops dry start DRYER SPOOL_ID... [--temp C] [--hours H] [--rh PCT] [--weights ID=G,...] [--note TEXT]
 3d printops dry finish SESSION_ID [--rh PCT] [--weights ID=G,...]
 3d printops dry ls [--open] [--spool ID] [--limit N]
@@ -53,14 +55,15 @@ service is never exposed to the internet.
 
 | Subcommand | What |
 |---|---|
-| `health` | 3d-api status: DB migrations, Spoolman reachability and version, PrintOps extra fields registered. No token needed. Exit 0 = ok, 1 = degraded/unreachable. |
+| `health` | 3d-api status: DB migrations, Spoolman reachability and version, PrintOps extra fields registered, and the spool sync (how many spools differ between Spoolman and PrintOps, when the scheduled pass last ran, anomalies it could not fix). No token needed. Exit 0 = ok and nothing drifts, 1 = degraded/unreachable/drift. |
 | `events` | The PrintOps event log (`slot.mismatch`, `spool.measured`, `drying.due`, …), oldest first; `--follow` streams new ones (SSE). |
 | `token` | Mint, list and revoke 3d-api bearer tokens. Only sha256 is stored; `create` prints the token once. |
-| `deploy` | Ship Spoolman + 3d-api to the Odroid as the compose project `printops`, install the backup timer, wait until healthy. |
-| `backup` | Consistent snapshots of the PrintOps DB, tokens file and Spoolman DB (runs daily on the Odroid). |
+| `deploy` | Ship Spoolman + 3d-api to the Odroid (or `--host` any ssh host, or `--local`) as the compose project `printops`, wait until healthy. [`3d init --env`](init.md#environment-stage-3d-init---env) is the guided front end (target menu, token, config, backup disk, Home Assistant). |
+| `backup` | Rotated, verified backups of Spoolman + PrintOps DBs to a marker-checked disk; scheduled by Home Assistant at 04:00 (`run|ls|verify|prune|restore|selftest|target|discover`). |
 | `loc` | The location tree: warehouse cells, dry boxes, dryers and the printer slots from `fleet/printers.yaml`; moves re-sync Spoolman's `location`; printable QR label sheets. |
 | `spool` | Spool lifecycle — receive → store/move → load into a printer slot → unload → empty — with remaining as an interval (ledger), weighing and the idempotent `gen/plates.json` import. See [printops-spool.md](printops-spool.md). |
 | `tare` | The sourced empty-spool weight DB (SpoolmanDB seed + own weighings) and the tare chain of a spool. See [printops-spool.md](printops-spool.md#3d-printops-tare). |
+| `fields` | One-off, idempotent migration of the legacy PrintOps Spoolman extra fields (`spool_tare_g`, `printops_slot`, `printops_location_id`, `opened_at`, `tag_uids`) to Spoolman's native fields; dry run by default; `fill-defaults` gives filaments a default max print speed. See [`fields`](#fields) and [native-fields.md](../printops/native-fields.md). |
 | `dry` | Drying sessions (start / finish / ls) and the spools due for drying by the `drying:` policy in `fleet/policy.yaml`. |
 | `slots` | Every fleet printer slot by slot: what the printer reports loaded (live, read by 3d-api's poller), the spool bound to it in Spoolman, open anomalies. |
 | `anomalies` | Slot reconciliation anomalies (type/colour/tag mismatch, empty slot with a spool, unknown filament, impossible bindings, a printer head `spool load` could not write); `ack` / `resolve` them. |
@@ -73,8 +76,9 @@ add theirs there.
 
 ### `health`
 
-- `--json` — print the raw `/v1/health` body.
+- `--json` — print the raw `/v1/health` body plus `spool_sync` (the `/v1/spool-sync/status` answer).
   `3d printops health --json | jq '.spoolman.extra_fields.missing'`
+  `3d printops health --json | jq '.spool_sync.last_pass.drift'`
 - `--api URL` — 3d-api base URL.
   `PRINTOPS_API=http://192.168.0.39:8765 3d printops health`
 - `--token TOKEN` — bearer token (health itself does not need one).
@@ -83,7 +87,15 @@ add theirs there.
 3d-api http://192.168.0.39:8765  ok  (version 3f9c2a1b7d10)
   db        ok  migrations 1  last event #0
   spoolman  ok  v0.27.0  extra fields ok
+  spool sync  ok  0 drift, last pass 2026-11-01T21:40:11.312Z, every 60 s
 ```
+
+A drifting spool prints `spool sync  DRIFT  3 drift, … → 3d printops spool drift` and the command exits 1
+([spool-sync.md](../printops/spool-sync.md));
+a schedule that completed no pass for several intervals prints `spool sync  STALE` (a stuck loop or passes that keep
+failing; `/v1/spool-sync/status` carries `age_s` and `stale`), and when that status route answers 500/503 (a DB that
+will not open) the command prints `spool sync  UNAVAILABLE` after the `db FAIL <error>` line instead of aborting.
+
 
 ### `events`
 
@@ -118,34 +130,79 @@ Odroid is `/home/ultra/printops/data/api/tokens.json` (`/data/tokens.json` in th
 
 Steps, each printed before it runs: create `DIR/data/{api,spoolman}` and the backup dir →
 rsync `bin/3d lib fleet pyproject.toml services/3d-api` to `DIR/src` →
-`docker compose -p printops -f services/3d-api/compose.yaml up -d --build` → enable
-`printops-backup.timer` (systemd `--user`) → poll `/v1/health` until `ok` (up to 5 minutes).
+`docker compose -p printops -f services/3d-api/compose.yaml up -d --build` → poll `/v1/health` until `ok` (up to 5 minutes).
+No backup timer is installed: Home Assistant schedules the backup (see `backup`). A redeploy removes the
+`printops-backup.timer`/`.service` systemd --user units an older deploy installed (they ran a command that no longer backs
+anything up); it is idempotent and a no-op on a host that never had them.
 It never touches the Home Assistant compose project and never restarts HA.
 
 - `--dry-run` — run rsync with `--dry-run --itemize-changes` (shows what would change) and only print the rest.
   `3d printops deploy --dry-run`
-- `--host USER@HOST` — ssh target (default `ultra@192.168.0.39`).
+- `--host USER@HOST` — ssh target (default `ultra@192.168.0.39`). An empty value (an unset
+  `--host "$VAR"`) or one starting with `-` is an error (exit 2), never "this machine": that is `--local`.
   `3d printops deploy --host ultra@odroidn2 --api http://100.116.57.66:8765`
-- `--dir DIR` — remote base dir (default `/home/ultra/printops`).
+- `--local` — deploy on THIS machine instead: the same steps through `bash -c`, built from this
+  checkout (no rsync, no `DIR/src` copy). `--dir` defaults to `~/.local/share/3d-cli/printops`,
+  `--backup-dir` to `DIR/backup`.
+  Exclusive with `--host`. `3d printops deploy --local --dry-run`
+- `--dir DIR` — base dir on the target (default `/home/ultra/printops`).
   `3d printops deploy --dir /home/ultra/printops`
-- `--backup-dir DIR` — snapshot dir inside HA's backed-up config dir (default `/home/ultra/homeassistant/printops-backup`).
-  `3d printops deploy --backup-dir /home/ultra/homeassistant/printops-backup`
+- `--backup-dir DIR` — host dir bound as `/backup` in 3d-api: the BACKUP DISK (default `/home/ultra/homeassistant/printops-backup`);
+  register it with `3d printops backup target add default /backup --init-marker` (inside the container).
+  `3d printops deploy --backup-dir /mnt/backup512`
 - `--api URL` — health URL to wait on (default `http://<host>:8765`).
+- `--bind ADDR` — the host address Spoolman (`:7912`) and 3d-api (`:8765`) listen on, an IP address.
+  Default: all interfaces (`0.0.0.0`; the Odroid is behind NAT), `127.0.0.1` with `--local`.
+  Spoolman has no authentication: on a laptop or a VPS keep it on loopback or one LAN address.
+  Consequence of a narrow bind: other machines and printers (Moonraker's `[spoolman]`, Fluidd) can
+  only reach it on that address, so pass the address they use (or `0.0.0.0` on a trusted network).
+  `3d printops deploy --local --bind 192.168.0.20`
 
 ### `backup`
 
-Writes `DIR/printops.db`, `DIR/tokens.json` (if present) and `DIR/spoolman.db` (if
-`--spoolman-db`/`$SPOOLMAN_DB` is set), each via the SQLite online-backup API, checked with
-`PRAGMA integrity_check`, then atomically renamed. Exit 1 if any item failed. On the Odroid
-`printops-backup.timer` runs it daily at 04:15 into `/home/ultra/homeassistant/printops-backup/`,
-which Home Assistant's automatic daily backup (it ran 04:50–05:11 on the last three days; 3 copies kept) then includes.
+Rotated, verified backups of Spoolman's DB, the PrintOps DB and the tokens file. **Home Assistant is the only scheduler**
+(04:00 daily, `integrations/homeassistant/packages/printops_backup.yaml` → `POST /v1/backup/run` on 3d-api); there is no
+cron job or systemd timer. A set is `3d-backup-<UTC>/` under `<disk>/<subdir>/`: gzip'd SQLite snapshots (online backup API in
+one pass, `nice 19` + `ionice` idle, gzip level 1), `MANIFEST.json` (row counts, sha256) and `SHA256SUMS`; it is
+verified (every DB decompressed again + `PRAGMA integrity_check`) in a temp dir and published with one rename.
 
-- `--dest DIR` — backup directory (default `$PRINTOPS_BACKUP_DIR`).
-  `3d printops backup --dest ~/printops-backup`
-- `--spoolman-db PATH` — Spoolman's `spoolman.db` (default `$SPOOLMAN_DB`).
-  `3d printops backup --dest /backup --spoolman-db /spoolman-data/spoolman.db`
+```
+3d printops backup run [--target NAME | --dest DIR] [--subdir D] [--keep daily=7,weekly=4,monthly=6] [--min-free-gb N] [--no-spoolman] [--json]
+3d printops backup ls | verify [SET|latest] | prune [--dry-run] | restore [SET|latest] --into DIR [--layout flat|data --yes] | selftest
+3d printops backup target add NAME PATH [--init-marker] | target ls
+3d printops backup restore latest --dest <host disk root> --subdir 3d-printops --into DIR --layout data --yes   # host-side runbook
+3d printops backup discover [--ssh USER@HOST] [--data-dir DIR] [--hint-gb 512] [--json]   # --data-dir is a path ON that host
+```
 
-Run it by hand on the Odroid: `ssh ultra@192.168.0.39 docker exec printops-api 3d printops backup`.
+- **Disk guard.** A run refuses (exit 1, nothing written, notification) unless `<disk>/.3d-backup-disk` exists and carries the id
+  recorded in `backup.yaml` (next to the PrintOps DB; `/data/backup.yaml` in the container). An unmounted disk never fills the
+  root filesystem. `target add … --init-marker` writes that one marker file; discovery never writes. Free space ≥ run size + `--min-free-gb`.
+- **Retention floor.** `POST /v1/backup/run` raises `keep_*` to `retention_floor: {daily, weekly, monthly}` in `backup.yaml` (default
+  7/4/6), so a write token cannot prune the history; the raised policy is the one recorded. `/v1/health` and `3d printops health` carry
+  a `backup` block: `NOT CONFIGURED` when no disk is registered (no backups are taken), else the targets and the last run.
+- **Rotation.** Newest set of each of the last N days / ISO weeks / months (default 7 + 4 + 6); retention comes with every
+  run from the HA package (the single place to edit it); a hand-run `prune` without `--keep` re-uses the policy of the last
+  run on that disk. Prune touches only directories named `3d-backup-YYYYMMDDTHHMMSSZ` that hold a `MANIFEST.json`, and always
+  keeps the newest one; other files/dirs on the disk are never touched.
+- **Failure** (disk missing/wrong, full, bad integrity, 3d-api down): exit 1 + the notification payload on stderr; with
+  `PRINTOPS_HA_URL` + `<data>/api/ha_token` 3d-api posts the HA persistent notification `printops_backup_failed_<target>` (one per target); the HA package
+  raises the same id itself (also when 3d-api is unreachable) and warns after 36 h without a good run; a PrintOps anomaly
+  `backup_failed` (scope `backup:<target>`: each target is reconciled on its own) is opened (`3d printops anomalies`) and resolved by the next good run.
+- **Restore.** `3d printops backup restore latest --into ~/restore` unpacks verified files (`spoolman.db`, `printops.db`, `tokens.json`);
+  `--layout data --into <PRINTOPS_DATA_DIR> --yes` writes the compose layout (stop the stack first; old files and their `-wal`/`-shm`
+  become `*.pre-restore`, never overwriting an earlier one: `.pre-restore.1`, ...). The set is copied to a private scratch dir and verified
+  there, so a disk that changes under the restore cannot redirect it. Restoring into a stopped stack from the HOST uses the disk itself,
+  because `backup.yaml` names the container's `/backup`:
+  `3d printops backup restore latest --dest <host disk root> --subdir 3d-printops --into <PRINTOPS_DATA_DIR> --layout data --yes`.
+  A set taken while there was no tokens file (deny-all) restores that state: an existing tokens file is moved aside too.
+  A set whose manifest names a file outside the set directory, or a link, is refused (`verify` reports it).
+  `selftest` = one real run + restore into a scratch dir + integrity/row-count comparison (what `3d init --env` runs).
+- **Discovery** (`discover`, and `3d init --env`) reads `lsblk`/`df` on the Spoolman host (this machine or ssh): mounted disks, USB/removable,
+  network mounts (nfs/cifs), existing backup dirs and markers, unmounted filesystems (listed, never mounted), HA's own backup locations;
+  shows size/free; flags a disk near the `--hint-gb` size (default 512) as LIKELY and the disk holding the Spoolman data as not-a-backup.
+  Nothing is auto-selected, mounted, formatted or written.
+
+Inside the container: `docker exec printops-api 3d printops backup run --target default --json`.
 
 ### `loc`
 
@@ -164,10 +221,9 @@ reason in its note) and, for AMS-like units, `slot:<printer>/<unit>/<n>` follow
 `fleet/printers.yaml`: 3d-api re-syncs them on the first write request after the file changed
 (a deploy) and on `loc sync-fleet` (reads never sync: run `loc sync-fleet` after a deploy); slots that left the fleet are archived once empty.
 
-**Spoolman link.** A spool stored in a location has Spoolman `location` = the path and the extra
-field `printops_location_id` = the location id (both written in one PATCH). `show` lists the
-spools whose id points at the location, plus spools without an id whose `location` string was
-typed to the path in the Spoolman UI. `mv` renames the whole subtree in one DB transaction,
+**Spoolman link.** A spool stored in a location has Spoolman `location` = the path — that text is
+the only record of where it is (a move made in the Spoolman UI is a move). `show` lists the
+spools whose `location` string is the path or a former path of the location. `mv` renames the whole subtree in one DB transaction,
 remembers every old path as a former path of its location, then runs `resync`; if Spoolman is
 down then, the move stays, the failure is printed (exit 1), spools still naming an old path
 keep counting as inside the moved location, and `loc resync` repairs them later. `resync`
@@ -262,7 +318,7 @@ wet     spool 3 (Polymaker PA6-CF PA6-CF)  [extreme]  dried 7.5 d ago ≥ 2 × 3
 ```
 
 **How "due" is decided.** `fleet/policy.yaml` → `drying:` gives every hygroscopic class
-(`low|medium|high|extreme`) three limits: `max_days_opened` (days since Spoolman `opened_at` for a
+(`low|medium|high|extreme`) three limits: `max_days_opened` (days since Spoolman's native `first_used` for a
 spool we never dried), `max_days_since_dried` (days since `last_dried_at`) and `max_rh` (% RH of the
 spool's storage location — its own or nearest ancestor's `humidity_sensor_entity`, read from Home
 Assistant). The class comes from the filament's material (`materials:` table: PLA low, PETG/ABS/ASA
@@ -312,20 +368,19 @@ A head the fleet marks `usable: false` is annotated `T<n> (unusable: <reason>)` 
 ### `anomalies`
 
 Each reconcile pass (after every poll, and right after `slot.loaded` / `slot.unloaded` /
-`slot.printer_written` / `slot.printer_write_failed` / `spool.*` events) compares each slot with the spools whose Spoolman extra field
-`printops_slot` names it (`u1/T3`):
+`slot.printer_written` / `slot.printer_write_failed` / `spool.*` events) compares each slot with the spools whose Spoolman `location` is
+`slot:<printer>/<head>` (`slot:u1/T3`):
 
 | Kind | When |
 |---|---|
 | `type_mismatch` | printer material ≠ spool filament material (case/space-insensitive) |
 | `color_mismatch` | CIEDE2000 between the printer colour and the spool colour (filament `measured_hex`, else `color_hex` / nearest of `multi_color_hexes`) > `PRINTOPS_COLOR_DE_MAX` (default 15) |
-| `tag_mismatch` | the slot read an RFID UID that is not in the spool's `tag_uids` |
+| `tag_mismatch` | the slot read an RFID UID that is not among the spool's native Spoolman tags |
 | `empty_with_spool` | the printer says the slot is empty but a spool is bound to it |
 | `unbound_filament` | filament is loaded but no spool is bound to the slot |
 | `multiple_spools` | two or more spools bound to one slot |
 | `unusable_head` | a spool bound to a head the fleet marks `usable: false` |
-| `unknown_slot` | `printops_slot` names a printer or head not in the fleet |
-| `location_conflict` | the spool's Spoolman location is set and is not `slot:<printer>/<head>` |
+| `unknown_slot` | the spool's `slot:<printer>/<head>` location names a printer or head not in the fleet |
 | `printer_write_failed` | the latest head write of `spool load` (event `slot.printer_write_failed`) failed for the spool still bound there. Clears after a successful write (run the load again), when the binding changes, or — for a failed filament write — when the printer shows the spool's material and colour (set on the touchscreen). Stage `active_spool` = Moonraker's active spool could not be set (K1 SE: usage would be booked to the old spool); it is its own write, tracked apart from the head's (both can be open at once), and a successful head write does not clear it |
 
 A new anomaly emits `anomaly.opened` (and `slot.mismatch` for the slot kinds); one that is no
@@ -369,6 +424,37 @@ REST: `GET /v1/gates/state?printer=NAME` (404 unknown printer, 503 no fleet file
 `GET /v1/gates/snapshot` → `{version, taken_at, api, printers: {name: state}}`. State schema:
 `lib/printops/gates.py`. Later slices add keys (maintenance #166, calibrations #167); a gate reads
 an absent key as "not known" (UNVERIFIED).
+
+### `fields`
+
+`3d printops fields migrate-native [--apply] [--json] [--api URL] [--token TOKEN]` — run it once per
+Spoolman after upgrading (`3d printops health` lists the leftovers as `spoolman.legacy_fields` with the fix and exits 1 until
+they are gone; `/v1/health` keeps `status` `ok` for them, so `3d printops deploy` and `3d init --env`
+do not wait on a step that needs the new 3d-api running). **Dry run by default**: `3d printops fields migrate-native` prints one line
+per item and writes nothing; `3d printops fields migrate-native --apply` writes (token scope `write`);
+`--json` prints the report (`3d printops fields migrate-native --apply --json`). Moves:
+vendor `spool_tare_g` → `empty_spool_weight`; spool `printops_slot` → `location` `slot:<printer>/<head>`;
+`printops_location_id` → `location` = that PrintOps location's path where the text is empty (dropped where the text is there, where the id names no location, or where the spool is loaded and keeps its slot); `opened_at` → `first_used` (the earlier of the two, `adjust`);
+`tag_uids` → Spoolman tags; the filament temperature ranges stay and fill an empty native
+`settings_extruder_temp` / `settings_bed_temp` with their midpoint (`fill`). Per item: `copy`, `drop`
+(native value already equal), `adjust`, `link`, `fill` are written in one Spoolman call that also clears the
+legacy value (the reply is checked); `conflict` (a different native value, a tag held by another spool),
+`invalid` and `failed` are never overwritten and make the command exit 1. A field definition is deleted only
+once no item holds a value (Spoolman destroys stored values with the definition). Idempotent. REST:
+`GET /v1/fields/migrate-native` (scope read, dry run) and `POST /v1/fields/migrate-native` (scope write).
+
+`3d printops fields fill-defaults [--apply] [--json] [--api URL] [--token TOKEN]` — gives every existing
+filament the default **max speed** (extra field `max_speed_mm_s`, mm/s; not the mm³/s
+`max_volumetric_mm3_s`) where it is **empty**: 600 for PLA+ (material `PLA+`, or a name containing `PLA+`,
+e.g. `Elegoo RAPID PLA+`), 300 for everything else. A value already there — also one typed in the Spoolman
+UI, whatever the number — is never touched. **Dry run by default**: `3d printops fields fill-defaults`
+prints one line per filament (id, name, material, old, new, `set`/`keep`) and writes nothing;
+`3d printops fields fill-defaults --apply` writes (token scope `write`); `--json` prints the report
+(`3d printops fields fill-defaults --apply --json`). Idempotent: a second `--apply` writes nothing.
+Exit 1 only when a write failed. New filaments created by `spool receive` / `spool import-owned` / scan get
+the same default (a `max_speed_mm_s` in the receive body wins). REST: `GET /v1/fields/fill-defaults`
+(scope read, dry run) and `POST /v1/fields/fill-defaults` (scope write). Nothing in PrintOps consumes the
+value yet.
 
 ## Exit codes
 

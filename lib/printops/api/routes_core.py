@@ -1,7 +1,8 @@
 """routes_core.py — 3d-api core endpoints: health, the event log (JSON + SSE), and the WebSocket.
 
   GET /v1/live     no auth. Liveness: 200 {"ok": true} when the API serves and its DB opens.
-  GET /v1/health   no auth. 200 {"status": "ok"|"degraded", db, spoolman, version};
+  GET /v1/health   no auth. 200 {"status": "ok"|"degraded", db, spoolman, backup, version};
+                   `backup` ({configured, targets, last}) is information: it never changes `status`.
                    503 when the PrintOps DB itself is unusable.
   GET /v1/events   scope read. `Accept: application/json` → one page
                    {"events": [...], "cursor": N} (`since=N` → id > N, or `last=K` → newest K).
@@ -23,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import os
 import sqlite3
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from typing import Annotated, Any
@@ -39,11 +41,12 @@ from fastapi import (
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
+from printops import backup_run
 from printops import events as ev
 from printops.api.deps import authenticate, bearer_token, get_state, require
 from printops.api.state import ApiState
 from printops.db import applied_versions, open_db
-from printops.spoolman import SpoolmanError, missing_extra_fields
+from printops.spoolman import SpoolmanError, audit_extra_fields
 from printops.tokens import TokenRecord
 
 router = APIRouter()
@@ -78,12 +81,23 @@ def _spoolman_health(state: ApiState) -> dict[str, Any]:
         return {"ok": False, "error": "SPOOLMAN_URL is not set"}
     try:
         info = sp.info()
-        missing = missing_extra_fields(sp)
+        audit = audit_extra_fields(sp)
     except SpoolmanError as e:
         return {"ok": False, "error": e.message, "extra_fields": state.fields}
     fields = dict(state.fields)
-    fields["missing"] = missing
-    return {"ok": not missing, "version": info.get("version"), "extra_fields": fields}
+    fields["missing"] = audit.missing
+    body: dict[str, Any] = {
+        "ok": not audit.missing,  # leftover legacy definitions are a warning (`legacy_fields`), not a failure
+        "version": info.get("version"),
+        "extra_fields": fields,
+        "legacy_fields": audit.legacy,
+    }
+    if audit.legacy:  # information for the operator: never changes `status`, a deploy waits for "ok"
+        body["message"] = (
+            f"legacy Spoolman extra field(s) {', '.join(audit.legacy)} still defined: run "
+            "`3d printops fields migrate-native` (dry run), then `3d printops fields migrate-native --apply`"
+        )
+    return body
 
 
 @router.get("/v1/live")
@@ -105,6 +119,7 @@ def health(request: Request) -> JSONResponse:
         "version": state.settings.version,
         "db": db,
         "spoolman": spoolman,
+        "backup": backup_run.health_summary(os.environ, state.settings),
     }
     return JSONResponse(body, status_code=200 if db["ok"] else 503)
 

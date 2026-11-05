@@ -48,6 +48,7 @@ CHECKS: tuple[str, ...] = (
     "filament_temp_range",
     "loaded_filament_match",
     "slot_binding_known",
+    "spool_in_sync",
     "filament_sufficient",
     "drying_due",
     "maintenance_due",

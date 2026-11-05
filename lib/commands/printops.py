@@ -6,6 +6,7 @@ WHY: PrintOps grows one slice at a time (epic #154); every slice brings its own 
 INVARIANTS: stdlib-only at import time (registry contract) — the subs are discovered lazily
   inside run(), so `3d help` does not import them.
 """
+
 from __future__ import annotations
 
 from cli.registry import Command
@@ -26,8 +27,13 @@ def usage() -> str:
     subs = discover()
     width = max((len(n) for n in subs), default=8)
     lines = [INTRO, *(f"  {s.name:<{width}}  {s.summary}" for s in subs.values())]
-    lines += ["", "Examples:", "  3d printops health", "  3d printops events --follow",
-              "  3d printops token create bot --scopes read,write --ssh ultra@192.168.0.39"]
+    lines += [
+        "",
+        "Examples:",
+        "  3d printops health",
+        "  3d printops events --follow",
+        "  3d printops token create bot --scopes read,write --ssh ultra@192.168.0.39",
+    ]
     return "\n".join(lines)
 
 
@@ -35,14 +41,24 @@ def run(argv: list[str]) -> int:
     if not argv or argv[0] in ("-h", "--help", "help"):
         print(usage())
         return 0 if argv else 1
-    from printops.cli import discover
+    from printops.cli import actions_help, discover, discover_actions
 
     subs = discover()
     sub = subs.get(argv[0])
     if sub is None:
-        raise UsageError(f"unknown printops subcommand {argv[0]!r}; accepted: {', '.join(subs)}",
-                         command="printops", remediation=["Run `3d printops --help`."])
-    return sub.run(argv[1:])
+        raise UsageError(
+            f"unknown printops subcommand {argv[0]!r}; accepted: {', '.join(subs)}",
+            command="printops",
+            remediation=["Run `3d printops --help`."],
+        )
+    rest = argv[1:]
+    actions = discover_actions().get(sub.name, {})
+    if rest and rest[0] in actions:
+        return actions[rest[0]].run(rest[1:])
+    code = sub.run(rest)
+    if actions and (not rest or rest[0] in ("-h", "--help", "help")):
+        print(actions_help(actions))
+    return code
 
 
 COMMAND = Command(
