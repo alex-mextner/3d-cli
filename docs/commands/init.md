@@ -65,8 +65,13 @@ the token, the health check and the config.
 ```bash
 3d init --env                                            # interactive menu
 3d init --env --no-input --spoolman auto                 # CI/agent: "already configured" or the commands to run
+3d init --env --no-input --spoolman skip                 # do nothing, exit 0
 3d init --env --no-input --spoolman local
 3d init --env --no-input --spoolman local --bind 192.168.0.20   # reachable from the LAN on that address only
+3d init --env --no-input --spoolman printer:voron --ssh-user pi # a registry printer's host (`3d printer list`)
+3d init --env --no-input --spoolman printer:u1 --allow-discouraged   # "possible but not recommended" host
+3d init --env --no-input --spoolman ssh:me@nas.lan --dry-run    # print the steps, change nothing
+3d init --env --no-input --spoolman ssh:me@nas.lan --bind 192.168.0.9
 3d init --env --no-input --spoolman script --script-out ~/spoolman-setup.sh
 3d init --env --no-input --api http://nas.lan:8765 --token po_...
 ```
@@ -108,7 +113,12 @@ Behaviour:
   `PRINTOPS_SPOOLMAN_CORS_ORIGIN` (default: Spoolman's own address only,
   never `*`; add your Fluidd/Mainsail origins), `SPOOLMAN_ONLY=1`, `TOKEN_NAME` (header of the script).
   A relative `PRINTOPS_DIR` is taken from the directory you run the script in. Spoolman has no
-  auth: keep its port inside the LAN/VPN.
+  auth: keep its port inside the LAN/VPN. The script refuses (exit 1, also with `--dry-run`) to
+  replace a `PRINTOPS_DIR/src` it did not create, prints the one-time token even when the backup
+  timer cannot be installed, and warns when lingering is off (the systemd `--user` timer then stops
+  with your last session; `sudo loginctl enable-linger USER`). The same warning comes from the
+  `local`, `printer:` and `ssh:` targets, whose host also needs docker daemon access and, for ssh
+  hosts, rsync.
 
 ### Network exposure
 

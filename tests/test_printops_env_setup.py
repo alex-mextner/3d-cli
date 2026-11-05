@@ -566,6 +566,21 @@ def test_a_configured_api_without_a_scheme_is_reported_not_raised(cfg_home: Path
     assert err.value.exit_code == 1 and "--api URL" in err.value.render() and not rec.calls
 
 
+def test_help_and_docs_show_a_concrete_example_for_every_option_and_target() -> None:
+    """AGENTS.md help/docs sync: each flag and each --spoolman target has an example line in the
+    `3d init --env` help and in docs/commands/init.md."""
+    docs = (REPO / "docs" / "commands" / "init.md").read_text(encoding="utf-8")
+    needles = (
+        "--spoolman skip", "--spoolman local", "--spoolman printer:voron", "--spoolman ssh:me@nas.lan",
+        "--spoolman script", "--ssh-user pi", "--allow-discouraged", "--dry-run", "--bind 192.168.0.", "--api http",
+    )
+    for name, text in (("help", env_setup.USAGE), ("init.md", docs)):
+        for needle in needles:
+            assert any(needle in line and line.lstrip().startswith("3d init --env") for line in text.splitlines()), (
+                name, needle)
+    assert "~/.config/3d-cli/printops.yaml" in env_setup.USAGE  # not resolved from XDG at import time
+
+
 # ------------------------------------------------------------------ candidates and the menu
 
 

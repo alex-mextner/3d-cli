@@ -90,7 +90,7 @@ HOST_LIMITS: tuple[tuple[str, str, str], ...] = (
 USAGE = f"""3d init --env [--no-input] [--spoolman TARGET] [--script-out PATH] [--api URL] [--token TOKEN]
                 [--ssh-user USER] [--bind ADDR] [--dry-run] [--allow-discouraged]
   The MACHINE stage of `3d init` (plain `3d init [path]` still scaffolds a project): make Spoolman +
-  the 3d-api that `3d printops` talks to run somewhere, and write {config_path()} (api: + token:,
+  the 3d-api that `3d printops` talks to run somewhere, and write ~/.config/3d-cli/printops.yaml (api: + token:,
   mode 600) once the service answered its health check. Safe to re-run: when the configured api
   already answers /v1/health (3d-api; a bare Spoolman does not count) it says "already configured" and
   changes nothing. Exit 0 = configured / skipped / already configured; nonzero = failed, with the fix.
@@ -125,8 +125,13 @@ Options:
 Examples:
   3d init --env                                             # interactive menu
   3d init --env --no-input --spoolman auto                  # CI/agent: status + what to run
-  3d init --env --no-input --spoolman local
-  3d init --env --no-input --spoolman ssh:me@nas.lan --dry-run
+  3d init --env --no-input --spoolman skip                  # do nothing, exit 0 (a dotfiles installer that opts out)
+  3d init --env --no-input --spoolman local                 # docker compose here, listening on 127.0.0.1 only
+  3d init --env --no-input --spoolman local --bind 192.168.0.20   # reachable from the LAN on that address only
+  3d init --env --no-input --spoolman printer:voron --ssh-user pi          # a registry printer's host (`3d printer list`)
+  3d init --env --no-input --spoolman printer:u1 --allow-discouraged       # possible but not recommended hosts
+  3d init --env --no-input --spoolman ssh:me@nas.lan --dry-run             # print the steps, change nothing
+  3d init --env --no-input --spoolman ssh:me@nas.lan --bind 192.168.0.9    # one LAN address, not every interface
   3d init --env --no-input --spoolman script --script-out ~/spoolman-setup.sh
   3d init --env --no-input --api http://nas.lan:8765 --token po_..."""
 
