@@ -361,11 +361,12 @@ def test_status_needs_no_token_and_says_the_schedule_is_off(
     shop.ui_edit(sid, 412)
     r = http.get("/v1/spool-sync/status", token=None)
     assert r.status_code == 200
-    assert r.json() == {
+    body = r.json()
+    assert 0 <= body.pop("age_s") < 60  # wall clock since start: only its order of magnitude is stable
+    assert body == {
         "enabled": False,
         "interval_s": 0,
         "last_pass": None,
-        "age_s": 0,
         "stale": False,
         "anomalies_open": 0,
     }
@@ -643,11 +644,11 @@ def test_health_reads_the_live_status_and_treats_a_404_as_an_old_api(
     api_client: ApiClient, shop: Shop
 ) -> None:
     got = spool_sync_status(api_client)
+    assert got is not None and 0 <= got.pop("age_s") < 60  # wall clock: not compared exactly
     assert got == {
         "enabled": False,
         "interval_s": 0,
         "last_pass": None,
-        "age_s": 0,
         "stale": False,
         "anomalies_open": 0,
     }

@@ -308,11 +308,11 @@ def test_health_says_the_sync_is_off_when_nothing_schedules_it(
     as_json = cli(tmp_path, shop, "printops", "health", "--json", token="read")
     assert as_json.returncode == 0
     body = json.loads(as_json.stdout)
+    assert 0 <= body["spool_sync"].pop("age_s") < 60  # wall clock since start: not compared exactly
     assert body["spool_sync"] == {
         "enabled": False,
         "interval_s": 0,
         "last_pass": None,
-        "age_s": 0,
         "stale": False,
         "anomalies_open": 0,
     }
