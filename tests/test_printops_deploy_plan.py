@@ -79,7 +79,6 @@ def _local(tmp_path: Path, **kw: Any) -> deploy.DeployConfig:
         local=True,
         remote_dir=str(tmp_path / "p"),
         backup_dir=str(tmp_path / "p" / "backup"),
-        timer_required=False,
         **kw,
     )
 
@@ -147,7 +146,9 @@ def test_printops_deploy_local_listens_on_loopback_unless_bind_says_otherwise(
 def test_printops_deploy_to_a_host_keeps_the_default_bind_unless_asked(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    planned: list[deploy.Step] = []  # the plan is captured, never run: no rsync/ssh to any host
+    planned: list[
+        deploy.Step
+    ] = []  # the plan is captured, never run: no rsync/ssh to any host
     monkeypatch.setattr(deploy, "run_steps", lambda steps, **_kw: planned.extend(steps))
     assert deploy_cli.run(["--dry-run"]) == 0
     assert "PRINTOPS_BIND_ADDR" not in " ".join(s.argv[-1] for s in planned)
@@ -174,15 +175,23 @@ def _shims(root: Path) -> Path:
     from printops_env_fakes import fake_docker_bin
 
     bindir = fake_docker_bin(root)
-    (bindir / "timedatectl").write_text("#!/bin/sh\necho Europe/Paris\n", encoding="utf-8")
-    (bindir / "systemctl").write_text('#!/bin/sh\necho "systemctl $*" >> "$FAKE_LOG"\n', encoding="utf-8")
-    (bindir / "loginctl").write_text('#!/bin/sh\necho "Linger=${FAKE_LINGER:-yes}"\n', encoding="utf-8")
+    (bindir / "timedatectl").write_text(
+        "#!/bin/sh\necho Europe/Paris\n", encoding="utf-8"
+    )
+    (bindir / "systemctl").write_text(
+        '#!/bin/sh\necho "systemctl $*" >> "$FAKE_LOG"\n', encoding="utf-8"
+    )
+    (bindir / "loginctl").write_text(
+        '#!/bin/sh\necho "Linger=${FAKE_LINGER:-yes}"\n', encoding="utf-8"
+    )
     for name in ("timedatectl", "systemctl", "loginctl"):
         (bindir / name).chmod(0o755)
     return bindir
 
 
-def _run_step(step: deploy.Step, root: Path, **env: str) -> subprocess.CompletedProcess[str]:
+def _run_step(
+    step: deploy.Step, root: Path, **env: str
+) -> subprocess.CompletedProcess[str]:
     full = {
         **os.environ,
         "PATH": f"{_shims(root)}{os.pathsep}{os.environ['PATH']}",
@@ -191,16 +200,29 @@ def _run_step(step: deploy.Step, root: Path, **env: str) -> subprocess.Completed
         **env,
     }
     (root / "home").mkdir(exist_ok=True)
-    return subprocess.run(step.argv, env=full, capture_output=True, text=True, check=False)
+    return subprocess.run(
+        step.argv, env=full, capture_output=True, text=True, check=False
+    )
 
 
-def test_the_odroid_compose_script_leaves_prefix_tz_and_cors_to_compose(tmp_path: Path) -> None:
+def test_the_odroid_compose_script_leaves_prefix_tz_and_cors_to_compose(
+    tmp_path: Path,
+) -> None:
     compose = _compose_script(deploy.DeployConfig(repo_root=tmp_path, version="v1"))
-    for knob in ("PRINTOPS_CONTAINER_PREFIX", "PRINTOPS_TZ", "PRINTOPS_SPOOLMAN_CORS_ORIGIN", "timedatectl"):
-        assert knob not in compose  # the owner's Fluidd origins and Europe/Belgrade stay compose's defaults
+    for knob in (
+        "PRINTOPS_CONTAINER_PREFIX",
+        "PRINTOPS_TZ",
+        "PRINTOPS_SPOOLMAN_CORS_ORIGIN",
+        "timedatectl",
+    ):
+        assert (
+            knob not in compose
+        )  # the owner's Fluidd origins and Europe/Belgrade stay compose's defaults
 
 
-def test_a_pinned_deploy_ignores_the_callers_container_prefix_tz_and_cors(tmp_path: Path) -> None:
+def test_a_pinned_deploy_ignores_the_callers_container_prefix_tz_and_cors(
+    tmp_path: Path,
+) -> None:
     """The caller's own PRINTOPS_* environment must not rename the containers (the token mint and the
     backup unit exec into `printops-api`), pick the owner's time zone or widen Spoolman's origins."""
     done = _run_step(
@@ -213,49 +235,35 @@ def test_a_pinned_deploy_ignores_the_callers_container_prefix_tz_and_cors(tmp_pa
     assert done.returncode == 0, done.stderr
     calls = (tmp_path / "calls.log").read_text()
     assert "PRINTOPS_CONTAINER_PREFIX=printops\n" in calls and "-p printops" in calls
-    assert "PRINTOPS_TZ=Europe/Paris\n" in calls  # this host's, not the caller's and not Europe/Belgrade
-    assert "PRINTOPS_SPOOLMAN_CORS_ORIGIN=http://127.0.0.1:7912,http://localhost:7912\n" in calls
+    assert (
+        "PRINTOPS_TZ=Europe/Paris\n" in calls
+    )  # this host's, not the caller's and not Europe/Belgrade
+    assert (
+        "PRINTOPS_SPOOLMAN_CORS_ORIGIN=http://127.0.0.1:7912,http://localhost:7912\n"
+        in calls
+    )
     assert "evil.example" not in calls and "Mars" not in calls
 
 
 def test_the_spoolman_origin_is_the_address_the_service_is_reached_on() -> None:
-    nas = deploy.DeployConfig(repo_root=REPO, host="me@nas.lan", api_url="http://nas.lan:8765", pin_host_env=True)
-    assert nas.spoolman_origins == "http://nas.lan:7912"
-    v6 = deploy.DeployConfig(repo_root=REPO, host="me@v6", api_url="http://[2001:db8::7]:8765", pin_host_env=True)
-    assert v6.spoolman_origins == "http://[2001:db8::7]:7912"
-    assert _local(REPO, bind_addr="192.168.0.20").spoolman_origins == "http://192.168.0.20:7912"
-
-
-def test_a_pinned_backup_unit_execs_the_docker_this_host_has(tmp_path: Path) -> None:
-    """The shipped unit says /usr/bin/docker; with docker in snap or /usr/local/bin the timer would
-    be enabled and fail every night unseen."""
-    cfg = _local(REPO, pin_host_env=True)
-    done = _run_step(_step(cfg, "install daily backup timer"), tmp_path)
-    assert done.returncode == 0, done.stderr
-    unit = (tmp_path / "home" / ".config" / "systemd" / "user" / "printops-backup.service").read_text()
-    docker = tmp_path / "fakebin" / "docker"
-    assert f"ExecStart={docker} exec {deploy.API_CONTAINER} 3d printops backup" in unit
-    assert "systemctl --user enable --now printops-backup.timer" in (tmp_path / "calls.log").read_text()
-    assert (tmp_path / "home" / ".config" / "systemd" / "user" / "printops-backup.timer").is_file()
-
-
-def test_the_odroid_backup_unit_is_copied_as_shipped(tmp_path: Path) -> None:
-    cfg = deploy.DeployConfig(
-        repo_root=REPO, host="", local=True, remote_dir=str(tmp_path / "p"), backup_dir=str(tmp_path / "b")
+    nas = deploy.DeployConfig(
+        repo_root=REPO,
+        host="me@nas.lan",
+        api_url="http://nas.lan:8765",
+        pin_host_env=True,
     )
-    done = _run_step(_step(cfg, "install daily backup timer"), tmp_path)
-    assert done.returncode == 0, done.stderr
-    copied = tmp_path / "home" / ".config" / "systemd" / "user" / "printops-backup.service"
-    shipped = REPO / "services" / "3d-api" / "systemd" / "printops-backup.service"
-    assert copied.read_bytes() == shipped.read_bytes()
-
-
-def test_the_shipped_backup_unit_and_the_token_mint_name_the_same_container() -> None:
-    from printops.cli import token
-
-    shipped = (REPO / "services" / "3d-api" / "systemd" / "printops-backup.service").read_text(encoding="utf-8")
-    exec_start = next(ln for ln in shipped.splitlines() if ln.startswith("ExecStart="))
-    assert f" exec {deploy.API_CONTAINER} " in exec_start and token.CONTAINER == deploy.API_CONTAINER
+    assert nas.spoolman_origins == "http://nas.lan:7912"
+    v6 = deploy.DeployConfig(
+        repo_root=REPO,
+        host="me@v6",
+        api_url="http://[2001:db8::7]:8765",
+        pin_host_env=True,
+    )
+    assert v6.spoolman_origins == "http://[2001:db8::7]:7912"
+    assert (
+        _local(REPO, bind_addr="192.168.0.20").spoolman_origins
+        == "http://192.168.0.20:7912"
+    )
 
 
 # ------------------------------------------------------------------ "this machine" is never a default
@@ -285,16 +293,94 @@ def test_printops_deploy_refuses_an_empty_or_option_like_host_before_running_any
     assert not ran  # nothing was planned, let alone executed
 
 
-def test_a_host_without_lingering_is_told_the_backup_timer_stops_with_the_session(tmp_path: Path) -> None:
-    cfg = _local(REPO, pin_host_env=True)
-    off = _run_step(_step(cfg, "install daily backup timer"), tmp_path, FAKE_LINGER="no")
-    assert off.returncode == 0, off.stderr
-    assert "sudo loginctl enable-linger" in off.stdout and "only runs while you are logged in" in off.stdout
-    on = _run_step(_step(cfg, "install daily backup timer"), tmp_path / "on", FAKE_LINGER="yes")
-    assert on.returncode == 0, on.stderr
-    assert "linger" not in on.stdout
+# ------------------------------------------------------------------ the backup disk survives a later deploy
 
 
-def test_the_odroid_timer_step_has_no_linger_check(tmp_path: Path) -> None:
-    """Its plan output stays byte-identical, and the Odroid's linger is already on."""
-    assert "loginctl" not in _step(deploy.DeployConfig(repo_root=tmp_path), "install daily backup timer").argv[-1]
+def _compose_with_saved_bind(tmp_path: Path, saved: str | None, explicit: bool = False) -> str:
+    remote = tmp_path / "printops"
+    remote.mkdir(exist_ok=True)
+    if saved is not None:
+        (remote / deploy.BACKUP_BIND_FILE).write_text(saved, encoding="utf-8")
+    cfg = deploy.DeployConfig(
+        repo_root=tmp_path,
+        host="",
+        local=True,
+        remote_dir=str(remote),
+        backup_dir=str(remote / "backup"),
+        version="v1",
+        backup_explicit=explicit,
+    )
+    script = deploy._compose_script(cfg, str(tmp_path)).replace(
+        "docker compose", "echo docker compose"
+    )
+    done = subprocess.run(
+        [
+            "bash",
+            "-c",
+            script.replace(
+                " echo docker compose", " bash -c 'echo BD=$PRINTOPS_BACKUP_DIR' #"
+            ),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert done.returncode == 0, done.stderr
+    return done.stdout.strip()
+
+
+def test_a_plain_deploy_keeps_the_disk_an_earlier_stage_chose(tmp_path: Path) -> None:
+    assert _compose_with_saved_bind(tmp_path, "/mnt/backup512") == "BD=/mnt/backup512"
+
+
+def test_a_deploy_without_a_saved_disk_uses_its_default(tmp_path: Path) -> None:
+    assert (
+        _compose_with_saved_bind(tmp_path, None)
+        == f"BD={tmp_path / 'printops' / 'backup'}"
+    )
+
+
+def test_an_explicit_backup_dir_wins_over_the_saved_one_and_is_saved(
+    tmp_path: Path,
+) -> None:
+    out = _compose_with_saved_bind(tmp_path, "/mnt/old", explicit=True)
+    assert out == f"BD={tmp_path / 'printops' / 'backup'}"
+    assert (tmp_path / "printops" / deploy.BACKUP_BIND_FILE).read_text(
+        encoding="utf-8"
+    ) == str(tmp_path / "printops" / "backup")
+
+
+def test_creating_the_dirs_never_overwrites_a_gitignore_in_the_backup_dir(
+    tmp_path: Path,
+) -> None:
+    disk = tmp_path / "disk"
+    disk.mkdir()
+    (disk / ".gitignore").write_text("mine\n", encoding="utf-8")
+    cfg = deploy.DeployConfig(
+        repo_root=tmp_path,
+        host="",
+        local=True,
+        remote_dir=str(tmp_path / "p"),
+        backup_dir=str(disk),
+    )
+    assert (
+        subprocess.run(
+            ["bash", "-c", deploy._mkdirs_script(cfg)], check=False
+        ).returncode
+        == 0
+    )
+    assert (disk / ".gitignore").read_text(encoding="utf-8") == "mine\n"
+
+
+def test_the_compose_file_mounts_backup_with_rslave_so_a_late_disk_is_seen() -> None:
+    compose = yaml.safe_load(
+        (
+            Path(__file__).resolve().parents[1] / "services/3d-api/compose.yaml"
+        ).read_text(encoding="utf-8")
+    )
+    (mount,) = [
+        v
+        for v in compose["services"]["api"]["volumes"]
+        if isinstance(v, dict) and v["target"] == "/backup"
+    ]
+    assert mount["type"] == "bind" and mount["bind"] == {"propagation": "rslave"}

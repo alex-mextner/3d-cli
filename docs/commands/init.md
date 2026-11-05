@@ -137,6 +137,34 @@ address is the control that works:
   ([services/3d-api/README.md](../../services/3d-api/README.md#ports-lan--tailnet-only),
   [`3d printops deploy --bind`](printops.md#deploy)).
 
+### Backups and Home Assistant (after the stack answers, or alone with `--stage-only --spoolman TARGET`)
+
+`lib/printops/env_stage.py`. First it looks, read-only, for Home Assistant (a configured `$HA_URL`/`~/.config/3d-cli/ha.yaml`,
+one mDNS query, `homeassistant.local:8123`, the Spoolman host on `:8123`) and for places a backup could go **on the host that
+runs Spoolman** (this machine or ssh): mounted disks with size and free space, USB/removable, nfs/cifs mounts, existing
+backup dirs, unmounted filesystems (listed only) and, with an HA token, HA's own backup locations. A disk near
+`--backup-disk-gb` (default 512) is marked LIKELY; the disk that holds the Spoolman data is marked not-a-backup. You
+choose: a found location (number), `m` a directory you type, `a` a self-contained hand-off prompt for an AI agent (or
+yourself), `s` skip. Nothing is pre-selected and discovery never mounts, formats or writes. After you confirm, the chosen
+directory is bound as `/backup` in the 3d-api container (Spoolman is not restarted), the disk marker `.3d-backup-disk` and
+`backup.yaml` are written (the disk is saved in `<dir>/backup-dir`, so a later `3d printops deploy` keeps it), and `3d printops backup selftest` does a real backup, verifies it and restores it into a scratch dir.
+
+Your HA token is sent only to a URL you named (`--ha URL`, `$HA_URL`/`$PRINTOPS_HA_URL`, `url:` in `ha.yaml`); an instance that merely
+answered on the network is asked about first and, with `--no-input`, never receives it.
+
+If Home Assistant answered and you confirm (`--ha-wire ask|yes|no`; `--no-input` needs `yes`), it adds (1) the Spoolman
+integration through HA's config-flow API — Home Assistant core has **no** Spoolman integration, the one that exists is the
+community `Disane87/spoolman-homeassistant` (HACS, restart HA once; if missing you get the install steps and nothing is created) —
+and (2) the 04:00 backup package `packages/printops_backup.yaml` into HA's config dir (`--ha-dir`, `--ha-ssh`; refused for a
+config managed by `3d ha deploy`), then `check_config` and targeted reloads (no restart). Declining writes nothing. The HA
+token comes from `$HA_TOKEN`, then `~/.config/3d-cli/ha.yaml` (mode 600 enforced), then a prompt (stored only if you say so).
+`--stage-only` recreates ONLY 3d-api (`docker compose up -d --no-deps api`) with every other value (data dir, ports, bind address, time
+zone, CORS) read from the running stack through `docker inspect`; it refuses when the stack is not there, creates no directory and
+never overwrites a `.gitignore` in your directory. The 3d-api and Spoolman URLs given to Home Assistant are the address the deploy
+reached (or the ssh `HostName`), never the ssh alias. The token prompt is not echoed; `--ha` must be `auto`, `skip` or an `http(s)://` URL.
+Flags: `--backup auto|skip|agent|path:DIR`, `--backup-disk-gb N`, `--allow-same-disk`, `--ha auto|skip|URL`, `--ha-wire`,
+`--ha-dir`, `--ha-ssh`, `--keep daily=7,weekly=4,monthly=6`, `--backup-at HH:MM`. See [printops backup](printops.md#backup).
+
 Exit codes: 0 configured / skipped / already configured, 1 a step or the health check failed,
 2 bad options.
 

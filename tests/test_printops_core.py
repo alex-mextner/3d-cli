@@ -795,15 +795,16 @@ def test_deploy_plan_targets_a_separate_compose_project(tmp_path: Path) -> None:
     cfg = deploy.DeployConfig(repo_root=tmp_path, version="abc123")
     steps = deploy.plan(cfg)
     titles = [s.title for s in steps]
-    assert titles[0].startswith("create data") and titles[-1] == "install daily backup timer"
-    mkdirs, rsync, compose, timer = (s.argv for s in steps)
+    assert titles[0].startswith("create data") and titles[2].startswith("build + start")
+    assert len(steps) == 4 and titles[-1].startswith("retire the legacy backup timer")
+    assert not any("enable" in s.argv[-1] for s in steps)  # nothing installs a timer any more
+    mkdirs, rsync, compose, _retire = (s.argv for s in steps)
     assert mkdirs[:3] == ["ssh", "-o", "BatchMode=yes"] and "/home/ultra/printops/data/spoolman" in mkdirs[-1]
     assert "printf '*\\n' > /home/ultra/homeassistant/printops-backup/.gitignore" in mkdirs[-1]
     assert rsync[-1] == "ultra@192.168.0.39:/home/ultra/printops/src/"
     assert "bin/3d" in rsync and "lib" in rsync and "fleet" not in rsync  # only existing paths
     assert "docker compose -p printops -f services/3d-api/compose.yaml up -d --build" in compose[-1]
     assert "PRINTOPS_VERSION=abc123" in compose[-1] and "homeassistant/ha" not in compose[-1]
-    assert "systemctl --user enable --now printops-backup.timer" in timer[-1]
     dry = deploy.plan(cfg, dry_run=True)[1].argv
     assert "--dry-run" in dry and "--itemize-changes" in dry
     assert cfg.health_url == "http://192.168.0.39:8765"

@@ -5,7 +5,7 @@ WHAT: TEMPLATE is the whole script with three placeholders (@GENERATED_BY@, @PAY
   (copied to a server that has no 3d-cli), kept as a string because the repo's tools are Python;
   tests/test_printops_standalone_script.py runs shellcheck and `bash -n` on every generated script.
 WHY a template and not generated shell: the logic (preflight, idempotent unpack, compose env, health
-  waits, token mint, backup timer) is long enough that it must stay readable as bash.
+  waits, token mint) is long enough that it must stay readable as bash.
 """
 from __future__ import annotations
 
@@ -36,7 +36,6 @@ TEMPLATE = r'''#!/usr/bin/env bash
 #                                 (default: Spoolman's own address only; list your Fluidd/Mainsail
 #                                 origins here, never *: Spoolman has no authentication)
 #   PRINTOPS_HOST                 address shown in the printed URLs (default: first host IP)
-#   PRINTOPS_BACKUP_TIMER=0       do not install the daily backup timer (systemd --user)
 #   SPOOLMAN_ONLY=1               start only Spoolman (no 3d-api image build, no token)
 #   TOKEN_NAME                    name of the 3d-api token to mint (default cli-<hostname>)
 #   WAIT_SECONDS                  how long to wait for the services to become healthy (default 300)
@@ -215,51 +214,19 @@ mint_token() {
     die "could not mint a token: docker exec ${PREFIX}-api 3d printops token create $name --scopes read,write"
 }
 
-# Every command carries `|| return 1`: the caller runs this under `if !`, where errexit is off, and a
-# failure here must neither stop the script before it prints the one-time token nor go unnoticed.
-install_backup_timer() {
-  [ "${PRINTOPS_BACKUP_TIMER:-1}" = 1 ] || return 0
-  if ! command -v systemctl >/dev/null 2>&1 || ! systemctl --user show-environment >/dev/null 2>&1; then
-    log "no systemd --user here: skipping the daily backup timer (by hand: docker exec ${PREFIX}-api 3d printops backup)"
-    return 0
+# An older run of this script installed `${PREFIX}-backup.timer` (systemd --user); it runs a command
+# that no longer backs anything up, so a re-run removes it. A host that never had it is untouched.
+retire_legacy_backup_timer() {
+  local unit_dir="$HOME/.config/systemd/user"
+  [ -e "$unit_dir/${PREFIX}-backup.timer" ] || [ -e "$unit_dir/${PREFIX}-backup.service" ] || return 0
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl --user disable --now "${PREFIX}-backup.timer" >/dev/null 2>&1 || true
   fi
-  local unit_dir="$HOME/.config/systemd/user" docker_bin
-  docker_bin="$(command -v docker)" || return 1
-  mkdir -p "$unit_dir" || return 1
-  cat >"$unit_dir/${PREFIX}-backup.service" <<EOF || return 1
-[Unit]
-Description=PrintOps: snapshot the PrintOps + Spoolman SQLite DBs into $DIR/backup
-
-[Service]
-Type=oneshot
-ExecStart=$docker_bin exec ${PREFIX}-api 3d printops backup
-EOF
-  cat >"$unit_dir/${PREFIX}-backup.timer" <<EOF || return 1
-[Unit]
-Description=Daily PrintOps DB snapshot
-
-[Timer]
-OnCalendar=*-*-* 04:15:00
-Persistent=true
-RandomizedDelaySec=5min
-
-[Install]
-WantedBy=timers.target
-EOF
-  systemctl --user daemon-reload || return 1
-  systemctl --user enable --now "${PREFIX}-backup.timer" >/dev/null || return 1
-  log "daily backup timer installed (${PREFIX}-backup.timer)"
-  warn_if_no_linger
-}
-
-# A systemd --user manager (and so the timer) stops when the last session of the user ends, unless
-# lingering is on: on a headless server the nightly backup would silently never run.
-warn_if_no_linger() {
-  local user linger
-  user="$(id -un)"
-  linger="$(loginctl show-user "$user" -p Linger 2>/dev/null)" || linger=""
-  [ "$linger" = "Linger=yes" ] ||
-    log "warning: lingering is off for $user, so the backup timer only runs while you are logged in; enable it: sudo loginctl enable-linger $user"
+  rm -f "$unit_dir/${PREFIX}-backup.timer" "$unit_dir/${PREFIX}-backup.service"
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl --user daemon-reload >/dev/null 2>&1 || true
+  fi
+  log "removed the legacy ${PREFIX}-backup.timer: Home Assistant schedules the backup now (3d init --env sets that up)"
 }
 
 summary() {
@@ -313,6 +280,7 @@ main() {
   fi
   mkdir -p "$DIR/data/api" "$DIR/data/spoolman" "$DIR/backup" "$DIR/gcodes"
   extract_payload
+  retire_legacy_backup_timer
   if [ "$SPOOLMAN_ONLY" = 1 ]; then
     compose up -d spoolman
   else
@@ -324,9 +292,7 @@ main() {
     wait_for 3d-api "http://$(local_host):${API_PORT}/v1/health" '"status": *"ok"'
     mint_token "$token_name"
     token="$TOKEN"
-    if ! install_backup_timer; then
-      log "warning: the daily backup timer was not installed; the stack and the token are fine (by hand: docker exec ${PREFIX}-api 3d printops backup)"
-    fi
+    log "no backup timer here: Home Assistant schedules the backup (3d init --env sets that up; 3d printops backup --help)"
   fi
   summary "$token_name" "$token"
 }
