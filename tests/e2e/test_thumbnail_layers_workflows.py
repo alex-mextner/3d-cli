@@ -70,6 +70,7 @@ def test_slice_output_has_every_thumbnail_without_a_separate_step(
 
 
 def test_slice_dry_run_keeps_nothing_and_renders_nothing(tmp_path: Path) -> None:
+    """A user previews a slice with --dry-run: no G-code is written and no thumbnail is drawn or announced."""
     model = tmp_path / "part.stl"
     model.write_text("solid x\nendsolid x\n")
     dry = run_cli(
@@ -86,6 +87,8 @@ def test_slice_dry_run_keeps_nothing_and_renders_nothing(tmp_path: Path) -> None
 def test_slice_of_a_3mf_project_asks_the_slicer_for_the_sizes_and_leaves_the_input_alone(
     tmp_path: Path,
 ) -> None:
+    """A user slices a project 3MF: the slicer is asked for the thumbnail sizes through a temporary copy
+    and the 3MF on disk stays byte for byte as it was."""
     project = plate_project(tmp_path / "p.3mf")
     before = project.read_bytes()
     slicer = tmp_path / "spy-slicer"
@@ -159,6 +162,7 @@ def test_upload_adds_the_missing_thumbnails_and_the_printer_receives_them(
 
 
 def test_upload_of_a_complete_gcode_is_untouched_and_silent(tmp_path: Path) -> None:
+    """A user uploads a G-code that already has its previews: the file is not touched, nothing is announced."""
     gcode = complete(tmp_path / "part.gcode")
     before = gcode.read_bytes()
     moon = FakeMoonraker()
@@ -225,6 +229,7 @@ def test_gcode_thumbnails_add_updates_the_plate_pictures_of_a_project(
 
 
 def test_help_documents_the_layers(tmp_path: Path) -> None:
+    """A user reads the three --help pages and finds where thumbnails are added and how --fix does it."""
     thumbs = run_cli(tmp_path, "gcode-thumbnails", "--help")
     flight = run_cli(tmp_path, "print-preflight", "--help")
     printer = run_cli(tmp_path, "printer", "--help")

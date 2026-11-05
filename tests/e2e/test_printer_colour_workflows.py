@@ -117,6 +117,7 @@ def test_printer_slot_set_dry_run_then_write_aligns_the_printer_with_the_file(
 
 
 def test_slot_set_refuses_an_offline_printer_and_a_missing_head(tmp_path: Path) -> None:
+    """The owner tries `slot set` on a read-only printer and on a head that is not there: both are refused."""
     moon = FakeMoonraker()
     with moon.serve():
         env = {

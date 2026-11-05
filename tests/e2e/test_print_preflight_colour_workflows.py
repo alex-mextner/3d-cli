@@ -58,6 +58,8 @@ def test_preflight_accepts_the_same_beige_and_prints_the_distance(
 def test_preflight_still_fails_a_wrong_material_and_a_different_colour(
     tmp_path: Path,
 ) -> None:
+    """A PLA file on a PETG head and a blue file on a beige head still FAIL; `--fix` refuses to rewrite across
+    another colour and leaves the file as it was."""
     moon = FakeMoonraker()
     load_beige_petg(moon)
     pla = tmp_path / "pla.gcode"
