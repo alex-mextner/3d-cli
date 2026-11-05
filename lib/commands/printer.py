@@ -100,7 +100,9 @@ USAGE = """3d printer [-n NAME] <subcommand> [args]
                                        [--assume-empty WHY]` replaces a stale one (confident clear
                                        check, or your word)
                                        `calibrate NAME [--z-from A --z-to B --z-step S]` learns the
-                                       plate's visible share per Z (idle printer, bed moved in Z only)
+                                       plate's visible share per Z (idle printer, bed moved in Z only);
+                                       `check NAME --assume-empty WHY` records that you looked: the
+                                       preflight bed line passes for 60 min while no job starts
                                        (see `3d printer bed --help`)
   subscribe --session ID [..]          printer alerts go to that omp session (it looks at the
                                        frame, tells the user only if real); `unsubscribe`,

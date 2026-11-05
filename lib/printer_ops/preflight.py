@@ -672,6 +672,14 @@ def _bed_check_command(v: dict[str, Any]) -> str:
     return f"3d printer bed check {v.get('printer') or 'NAME'}"
 
 
+def _assume_hint(v: dict[str, Any]) -> str:
+    """How the owner says the bed is empty when they looked and the camera is wrong (bed_override.py)."""
+    return (
+        f'; if you looked and the bed is empty: `{_bed_check_command(v)} --assume-empty "why"` '
+        "(the line then passes for 60 min while no job starts)"
+    )
+
+
 def _check_bed_occupied(
     v: dict[str, Any], when: str, lines: list[str], view_min: float
 ) -> Check:
@@ -681,7 +689,9 @@ def _check_bed_occupied(
     that does not say it is confident are a WARN with the way to look properly."""
     why = str(v.get("reason") or "")
     if v.get("occupied_confident") is True:
-        return Check("bed", FAIL, f"objects on the bed ({when}): {why}", lines)
+        return Check(
+            "bed", FAIL, f"objects on the bed ({when}): {why}{_assume_hint(v)}", lines
+        )
     in_view = (v.get("metrics") or {}).get("bed_in_view")
     low = (
         f"only {in_view:.0%} of the plate is in the camera's view at this Z (needs {view_min:.0%})"
@@ -692,7 +702,8 @@ def _check_bed_occupied(
         "bed",
         WARN,
         f"objects suspected on the bed but not confirmed: {low} ({when}): {why}; "
-        f"run `{_bed_check_command(v)}` (best view, light on) and look at the frame",
+        f"run `{_bed_check_command(v)}` (best view, light on) and look at the frame"
+        f"{_assume_hint(v)}",
         lines,
     )
 
@@ -726,7 +737,8 @@ def check_bed_verdict(v: dict[str, Any], *, view_min: float | None = None) -> Ch
         "bed",
         WARN,
         f"bed state {bed} ({when}): {why}; "
-        f"run `{_bed_check_command(v)}` for the best view with the light on",
+        f"run `{_bed_check_command(v)}` for the best view with the light on"
+        f"{_assume_hint(v)}",
         lines,
     )
 
@@ -737,6 +749,8 @@ def check_bed(
     move: bool = True,
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
     timeout: float | None = None,
+    now: float | None = None,
+    adapter_for: Callable[[Device], Any] | None = None,
 ) -> Check:
     """The camera `bed` line (printer_ops/bed.py): SKIP when the printer's bed monitor is off, else
     the FULL bed check path of an idle printer (`bed_state.py status --best-view`, what `3d printer
@@ -744,12 +758,7 @@ def check_bed(
     with the printer's light on and restored, instead of the watcher's verdict at whatever Z the
     bed rests at. `move=False` (--no-bed-move) judges at the current Z, light still on. FAIL only
     on a confident `occupied` (check_bed_verdict). A check that cannot run is a WARN, never a crash."""
-    from printer_ops.bed import (
-        STATUS_MOVE_TIMEOUT_S,
-        STATUS_TIMEOUT_S,
-        bed_config,
-        status_argv,
-    )
+    from printer_ops.bed import bed_config
 
     cfg = bed_config(device)
     if not cfg.enabled:
@@ -758,6 +767,40 @@ def check_bed(
             SKIP,
             f"bed camera check off for {device.name} (watch.bed.enabled in {device.source})",
         )
+    confirmed, why_not = _owner_confirmation(device, now, adapter_for)
+    if confirmed is not None:  # the owner looked: no camera, no move
+        return Check("bed", PASS, confirmed)
+    check = _bed_camera_check(device, cfg, move, runner, timeout)
+    if why_not:
+        check.lines.append(why_not)
+    return check
+
+
+def _owner_confirmation(
+    device: Device, now: float | None, adapter_for: Callable[[Device], Any] | None
+) -> tuple[str | None, str | None]:
+    """(the PASS note, or why a recorded `--assume-empty` does not count): bed_override.py. No record: no I/O."""
+    import time
+
+    from printer_ops import bed_override, make_adapter
+
+    if bed_override.read_record(device.name) is None:
+        return None, None
+    now = time.time() if now is None else now
+    adapter = adapter_for(device) if adapter_for else make_adapter(device, timeout=10.0)
+    confirmation, why = bed_override.honoured(device.name, adapter, now)
+    return (None if confirmation is None else confirmation.note(now)), why
+
+
+def _bed_camera_check(
+    device: Device,
+    cfg: Any,
+    move: bool,
+    runner: Callable[..., subprocess.CompletedProcess[str]],
+    timeout: float | None,
+) -> Check:
+    from printer_ops.bed import STATUS_MOVE_TIMEOUT_S, STATUS_TIMEOUT_S, status_argv
+
     if (
         timeout is None
     ):  # a move is two Z moves, a settle wait and a frame wait; never kill it half-way

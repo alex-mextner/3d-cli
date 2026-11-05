@@ -896,6 +896,26 @@ before the bed moves, restored after the bed is back; see *The light* under [Bed
   [Bed state](#bed-state)); examples: `3d printer bed reference u1 --refresh`,
   `3d printer bed reference u1 --refresh --assume-empty "plate wiped, I looked at it"`.
 
+### The owner's word: `bed check --assume-empty`
+
+`3d printer bed check NAME --assume-empty "why" [--assume-empty-ttl MIN]` is the **auditable** way out of a
+camera that is wrong about an empty bed ([#723](https://github.com/alex-mextner/3d-cli/issues/723)); it replaces
+`3d printer start --force` for that case. It runs the normal check, then records your confirmation:
+
+- `assume-empty-<ts>.json` in `~/.cache/3d-cli/vision/bed/` next to the frames: who (`$USER`), when, why, the
+  printer, the camera's verdict, the annotated and raw frame paths, Z, the light and the job it is bound to;
+- the state record `~/.local/state/3d-cli/bed/NAME.assumed.json` (`ts`, `why`, `ttl`, `job_marker`).
+
+The `bed` line of `3d print-preflight --printer` / `3d printer start` is then **PASS** with the note «owner
+confirmed empty at <time>: <why>» (the camera is not asked) while the record is younger than
+`--assume-empty-ttl` minutes (default 60) **and no job has started since**: the record carries Moonraker's newest
+history job id (and `print_stats.filename`), any other one later ends it (without the history component only a
+different file name does; the ttl ends the rest). It never overrides a printing/paused printer, nor a camera that
+sees the plate missing; `why` must be non-empty (exit 2 otherwise). The preflight's FAIL / WARN lines of the bed
+name this command. Exit 0 when the confirmation was recorded, 1 when it was refused (printing printer,
+unreadable printer, plate missing). Examples: `3d printer bed check u1 --assume-empty "plate wiped, I looked"`,
+`3d printer bed check u1 --assume-empty "empty" --assume-empty-ttl 15 --no-move`.
+
 ## Job watch
 
 Why: on 2026-11-04 a part came off the plate during a print and nobody noticed, the printer went on

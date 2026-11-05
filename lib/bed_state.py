@@ -1411,6 +1411,7 @@ def list_references(printer: str, cfg: BedConfig | None = None, now: float | Non
 # ---- CLI ------------------------------------------------------------------------------------
 
 USAGE = """3d printer bed check NAME [--expect empty|part] [--no-move] [--part-height MM] [--json]
+3d printer bed check NAME --assume-empty "WHY" [--assume-empty-ttl MIN] [--no-move] [--part-height MM] [--json]
 3d printer bed status NAME [--json] [--max-age S] [--best-view | --no-move] [--part-height MM]
 3d printer bed reference NAME [--capture [--best-view] [--no-plate] [--from FRAME.jpg --z Z]] [--json]
 3d printer bed reference NAME --refresh [--assume-empty "WHY"] [--part-height MM] [--json]
@@ -1435,6 +1436,15 @@ USAGE = """3d printer bed check NAME [--expect empty|part] [--no-move] [--part-h
               picture (ROI cyan, changed pixels red), `raw_frame` = the camera frame it came
               from. Exit 1 when --expect is given and the result differs from it (and for
               unknown / out-of-view / busy), else 0.
+  --assume-empty "WHY"   the owner looked and the bed IS empty (the camera is wrong): after the normal check
+              this records who ($USER), when, why, the verdict, the frame paths, Z and light as
+              assume-empty-<ts>.json in ~/.cache/3d-cli/vision/bed/ and as the small record
+              ~/.local/state/3d-cli/bed/NAME.assumed.json. The `bed` line of the preflight (`3d
+              print-preflight --printer`, `3d printer start`) then PASSES with the note "owner confirmed
+              empty at <time>: WHY" for --assume-empty-ttl minutes (default 60) as long as no job has
+              started since (Moonraker's newest history job id / print_stats.filename are recorded and
+              compared; without a history only the file name is). It never overrides a printing printer,
+              nor a camera that sees the plate missing; WHY must say something. Exit 0 when recorded.
   status      the bed now: clear | occupied | unknown, plate present | missing | unknown,
               with the reason and an evidence frame (~/.cache/3d-cli/vision/bed/). With
               --max-age S the `3d printer watch` monitor's last verdict is used when it was
@@ -1557,6 +1567,8 @@ Light (check, status, reference --capture, the `bed` line of the preflight, `pri
 Examples:
   3d printer bed check u1                        # move the bed to the camera, look, put it back
   3d printer bed check u1 --expect part --json   # after a print: is the part still on the plate?
+  3d printer bed check u1 --assume-empty "plate wiped, I looked"            # the camera is wrong: say so, on record
+  3d printer bed check u1 --assume-empty "empty" --assume-empty-ttl 15 --no-move
   3d printer bed check k1se --no-move --expect empty
   3d printer bed reference u1 --capture --best-view   # new empty-bed reference from the best view
   3d printer bed reference u1 --capture
@@ -1641,19 +1653,38 @@ def _list_references_cmd(args: argparse.Namespace, device: Device, cfg: BedConfi
     return 0
 
 
+def _assume_line(c: dict[str, Any]) -> str:
+    a = c.get("assume_empty")
+    if not isinstance(a, dict):
+        return ""
+    if not a.get("recorded"):
+        return f"\n  owner confirmation NOT recorded: {a.get('refused')}"
+    until = time.strftime("%H:%M", time.localtime(float(a["until"])))
+    return (f"\n  owner confirmed empty: recorded in {a['evidence']}; the preflight `bed` line passes until {until} "
+            "(ttl) while no job starts")
+
+
 def _cmd_check(args: argparse.Namespace, device: Device, cfg: BedConfig) -> int:
+    from printer_ops import bed_override
+
     c = check_view(device, cfg, mode="never" if args.no_move else "force", expect=args.expect,
                    part_height=args.part_height)
+    if args.assume_empty is not None:
+        c["assume_empty"] = bed_override.confirm_empty(
+            device, c, why=args.assume_empty, ttl_min=bed_override.DEFAULT_TTL_MIN if args.assume_empty_ttl is None
+            else args.assume_empty_ttl)
+    ok = c["assume_empty"]["recorded"] if "assume_empty" in c else c["ok"]  # the owner's word is the outcome
     if args.json:
         print(json.dumps(c, indent=1, default=str))
-        return 0 if c["ok"] else 1
+        return 0 if ok else 1
     frac = "" if c.get("fraction") is None else f" ({c['fraction']:.1%} of the bed view differs from the empty bed)"
     moved = (c.get("view") or {}).get("action")
     print(f"{device.name}: {c['result']}{frac}; Z {_fz(c.get('z'))}"
           + (f", bed {moved}" if moved else "") + f"\n  {c.get('reason', '')}"
           + (f"\n  frame: {c['frame']}" if c.get("frame") else "")
-          + (f"\n  camera frame: {c['raw_frame']}" if c.get("raw_frame") else "") + _light_line(c))
-    return 0 if c["ok"] else 1
+          + (f"\n  camera frame: {c['raw_frame']}" if c.get("raw_frame") else "") + _light_line(c)
+          + _assume_line(c))
+    return 0 if ok else 1
 
 
 def _cmd_status(args: argparse.Namespace, device: Device, cfg: BedConfig) -> int:
@@ -1675,7 +1706,7 @@ def _allowed_flags(args: argparse.Namespace) -> set[str]:
         reference |= {"no_plate", "from_file", "z", "best_view", "part_height"}
     if args.refresh:
         reference |= {"assume_empty", "part_height"}
-    return {"check": {"json", "expect", "no_move", "part_height"},
+    return {"check": {"json", "expect", "no_move", "part_height", "assume_empty", "assume_empty_ttl"},
             "status": {"json", "max_age", "best_view", "no_move", "part_height"}, "monitor": {"duration"},
             "calibrate": {"json", "z_from", "z_to", "z_step", "part_height"}, "reference": reference}[args.sub]
 
@@ -1690,6 +1721,10 @@ def _validate_refresh(args: argparse.Namespace) -> None:
     if args.assume_empty is not None and not args.assume_empty.strip():
         raise UsageError("--assume-empty needs the reason: why is the bed empty?", command="printer bed",
                          remediation=['e.g. --assume-empty "I looked, the plate is empty and clean"'])
+    ttl = args.assume_empty_ttl
+    if ttl is not None and (args.assume_empty is None or not (math.isfinite(ttl) and ttl > 0)):
+        raise UsageError("--assume-empty-ttl is a positive number of minutes and goes with --assume-empty",
+                         command="printer bed", remediation=['e.g. --assume-empty "why" --assume-empty-ttl 30'])
 
 
 def _validate_args(args: argparse.Namespace, rest: list[str]) -> None:
@@ -1744,6 +1779,7 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--z-step", dest="z_step", type=float)
     ap.add_argument("--refresh", action="store_true")
     ap.add_argument("--assume-empty", dest="assume_empty")
+    ap.add_argument("--assume-empty-ttl", dest="assume_empty_ttl", type=float)
     ap.add_argument("-h", "--help", action="store_true")
     args, rest = ap.parse_known_args(argv)
     if args.help:
