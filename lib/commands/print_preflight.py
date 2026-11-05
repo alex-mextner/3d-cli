@@ -81,6 +81,10 @@ USAGE = """3d print-preflight FILE.gcode [--printer NAME] [--axis-limits X0:X1,Y
                          colour is UNVERIFIED when the slice recorded "no filament colors found in
                          projects" (an STL slice: the footer colour is the profile default)
   slot_binding_known     every used slot has a spool in the ledger (WARN: usage not booked)
+  spool_in_sync          Spoolman and PrintOps agree about the loaded spool (weight, slot, location):
+                         a typed weight, a clash or an unknown location FAILs, bookkeeping that is
+                         only late (usage just booked, a spool not processed yet) WARNs; fix with
+                         `3d printops spool drift --heal`. Override: --accept spool_in_sync --reason
   filament_sufficient    `; filament used [g]` + purge + margin vs the spool's remaining
                          interval: FAIL above it, WARN "weigh" inside it
   drying_due             the spool's drying state: wet FAIL, due WARN

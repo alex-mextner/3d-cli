@@ -92,6 +92,14 @@ class Plant:
         spools.load(self.ctx, "u1", head, sid, printer_write=False)
         return sid
 
+    def loaded_in(self, printer: str, head: str) -> int:
+        out = spools.receive(
+            self.ctx, spools.Receive.from_dict({**GREEN, "location": "WH:default"})
+        )
+        sid = int(out["id"])
+        spools.load(self.ctx, printer, head, sid, printer_write=False)
+        return sid
+
     def state(self) -> dict[str, Any]:
         fleet = load_fleet()
         assert fleet is not None
@@ -444,3 +452,56 @@ def test_ui_edit_fails_the_gate_and_a_heal_clears_it_end_to_end(
     assert healed["spool_in_sync"].status == "PASS"
     # the ledger now agrees with Spoolman, so the numbers can be judged again: 30 g cannot print 57 g
     assert healed["filament_sufficient"].status == "FAIL"
+
+
+# -- bookkeeping lag does not block a print; a real divergence still does ----------------------------------------
+
+
+def _remaining_drift(cause: str) -> spool_sync.Drift:
+    return spool_sync.Drift(3, spool_sync.KIND_REMAINING, "x", True, "", {"cause": cause})
+
+
+@pytest.mark.parametrize(
+    ("cause", "blocks"),
+    [
+        ("edit", True),  # somebody typed another number: two numbers for one spool
+        ("ledger_moved", True),  # PrintOps' own ledger moved without Spoolman
+        ("usage", False),  # Moonraker booked a job into Spoolman: it is right, the ledger is late
+        ("adopt", False),
+        ("first_sync", False),  # a spool that existed before the first pass
+    ],
+)
+def test_only_a_real_weight_divergence_blocks(cause: str, blocks: bool) -> None:
+    assert _remaining_drift(cause).blocks is blocks
+
+
+def test_a_spool_without_a_bookmark_yet_does_not_fail_the_gate(tmp_path: Path, plant: Plant) -> None:
+    """Right after the 0105 upgrade no spool has a bookmark until the first pass: a loaded spool whose
+    ledger and Spoolman agree must not FAIL `3d printer start` for that."""
+    plant.loaded("T1")
+    plant.loaded("T3")
+    plant.conn.execute("DELETE FROM spool_sync")  # the upgrade: nothing processed yet
+    plant.conn.commit()
+
+    st = plant.state()
+    for slot, sp in plant.bound(st).items():
+        kinds = {f["kind"]: f["blocks"] for f in sp["sync"]["findings"]}
+        assert kinds == {"unknown_spool": False, "location": False}, slot  # nothing blocks
+    check = checks_of(tmp_path, st)["spool_in_sync"]
+    assert check.status == "WARN", check.detail
+
+
+def test_moonraker_usage_waiting_for_the_next_pass_is_a_warning_not_a_refusal(
+    tmp_path: Path, plant: Plant
+) -> None:
+    """A K1 SE (single head, Moonraker `[spoolman]`) books a job into Spoolman; until the next pass the
+    ledger is late. Spoolman is right, so the loaded spool must not FAIL the next start."""
+    k1 = plant.loaded_in("k1se", "T1")
+    plant.fake.use(k1, use_weight=11.8)
+    fleet = load_fleet()
+    assert fleet is not None
+    st = gates.printer_state(
+        plant.conn, plant.fake, fleet.printers["k1se"], drying_policy=None, now=NOW
+    )
+    [finding] = st["tools"][0]["spool"]["sync"]["findings"]
+    assert (finding["kind"], finding["blocks"]) == ("remaining", False)

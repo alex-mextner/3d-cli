@@ -1703,3 +1703,16 @@ def test_preset_match_filament_is_compared_on_a_printer_without_fleet_presets_or
     assert wrong.status == "FAIL" and "the spool on T1 prints with" in "\n".join(
         wrong.lines
     )
+
+
+def test_every_policy_check_is_listed_in_the_preflight_help_and_in_the_doc() -> None:
+    """The help text and docs/commands/print-preflight.md list the same gates as the policy (a check added
+    to the policy without its help line, as `spool_in_sync` was, is caught here)."""
+    from commands.print_preflight import USAGE
+    from printops.gates_policy import CHECKS
+
+    doc = (Path(__file__).parents[1] / "docs" / "commands" / "print-preflight.md").read_text(encoding="utf-8")
+    help_names = set(re.findall(r"^  ([a-z_]+)  ", USAGE, re.M))
+    doc_names = set(re.findall(r"^\| `([a-z_]+)` \|", doc, re.M))
+    assert set(CHECKS) <= help_names, sorted(set(CHECKS) - help_names)
+    assert set(CHECKS) <= doc_names, sorted(set(CHECKS) - doc_names)

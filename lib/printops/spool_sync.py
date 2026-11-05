@@ -118,17 +118,20 @@ KINDS = (
 
 # Kinds that make a print decision on the spool untrustworthy: the gates grade them hard (FAIL
 # under policy `block`). The others are bookkeeping that Spoolman already has right (a move that
-# has no event yet, a cached ±): the gates warn.
+# has no event yet, a cached ±, a spool PrintOps has not processed yet): the gates warn.
 BLOCKING_KINDS = frozenset(
     {
         KIND_REMAINING,
         KIND_ROLLED_BACK,
         KIND_SLOT_CONFLICT,
         KIND_LOCATION_UNKNOWN,
-        KIND_UNKNOWN,
         KIND_DELETED,
     }
 )
+# A `remaining` drift blocks only when two numbers really compete for one spool: a typed edit, or a
+# ledger that moved alone. Usage Moonraker booked into Spoolman (the ledger is late for up to one pass),
+# a spool seen for the first time and a first sync after the upgrade are Spoolman being right.
+BLOCKING_WEIGHT_CAUSES = frozenset({"edit", "ledger_moved"})
 
 
 @dataclass(frozen=True)
@@ -151,6 +154,8 @@ class Drift:
         """A gate must not trust the spool while this stands (see BLOCKING_KINDS)."""
         if self.kind == KIND_LOCATION:
             return "archived_in_slot" in self.detail.get("change", ())
+        if self.kind == KIND_REMAINING:
+            return self.detail.get("cause") in BLOCKING_WEIGHT_CAUSES
         return self.kind in BLOCKING_KINDS
 
     def to_dict(self) -> dict[str, Any]:
