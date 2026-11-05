@@ -39,7 +39,9 @@ class HaRest:
         self.token = token
         self.timeout = timeout
 
-    def request(self, method: str, path: str, body: Any = None) -> Any:
+    def request(
+        self, method: str, path: str, body: Any = None, *, timeout: float | None = None
+    ) -> Any:
         data = None if body is None else json.dumps(body).encode()
         req = urllib.request.Request(
             f"{self.base_url}{path}",
@@ -52,7 +54,7 @@ class HaRest:
             },
         )
         try:
-            with _OPENER.open(req, timeout=self.timeout) as resp:  # noqa: S310 — operator-configured URL
+            with _OPENER.open(req, timeout=timeout or self.timeout) as resp:  # noqa: S310 — operator-configured URL
                 raw = resp.read()
         except urllib.error.HTTPError as e:
             detail = e.read().decode("utf-8", "replace")[:300]
@@ -74,8 +76,8 @@ class HaRest:
     def get(self, path: str) -> Any:
         return self.request("GET", path)
 
-    def post(self, path: str, body: Any = None) -> Any:
-        return self.request("POST", path, {} if body is None else body)
+    def post(self, path: str, body: Any = None, *, timeout: float | None = None) -> Any:
+        return self.request("POST", path, {} if body is None else body, timeout=timeout)
 
     def call_service(self, domain: str, service: str, data: dict[str, Any]) -> Any:
         return self.post(f"/api/services/{domain}/{service}", data)

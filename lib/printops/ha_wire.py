@@ -4,12 +4,14 @@ install the backup package, and add the Spoolman integration. Nothing here promp
 ACCESSED VIA: `printops.env_stage`.
 
 1. BACKUP PACKAGE (`install_package`): renders integrations/homeassistant/packages/printops_backup.yaml with
-   the user's values (only the lines of its two EDIT HERE spots change), writes it to
-   `<HA config>/packages/printops_backup.yaml` through `run` (local bash or ssh to the HA host), adds the
-   `printops_api_auth` secret when the HA secrets.yaml lacks it, asks HA's own `check_config`
-   (POST /api/config/core/check_config) and, only if that says valid, reloads script / automation /
-   rest_command / input_datetime. Invalid -> the old file (or none) is put back and HA is not reloaded.
-   HA is never restarted; a domain that is not loaded yet is reported as "needs a restart".
+   the user's values (only the lines of its EDIT HERE spots change; the 3d-api URL goes into the
+   rest_command's own `url:`, never into service data, so a caller cannot redirect the bearer token), makes
+   sure the `printops_api_auth` secret exists (minted BEFORE anything is written, so a failed mint leaves
+   Home Assistant untouched), writes it to `<HA config>/packages/printops_backup.yaml` through `run` (local
+   bash or ssh to the HA host), asks HA's own `check_config` (POST /api/config/core/check_config) and, only
+   if that says valid, reloads script / automation / rest_command / input_datetime and proves the package
+   loaded (`script.printops_backup_run` exists). Invalid -> the old file (or none) is put back and HA is not
+   reloaded. HA is never restarted; a domain that is not loaded yet is reported as "needs a restart".
    A HA config managed by `3d ha deploy` (a 3d-cli submodule next to configuration.yaml) is REFUSED:
    deploy it there (`3d ha deploy`), a second copy would fight the symlink.
 
@@ -25,6 +27,7 @@ from __future__ import annotations
 import base64
 import contextlib
 import re
+import shlex
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -36,8 +39,8 @@ from printops.ha_rest import HaRest, HaRestError
 PACKAGE_REL = "integrations/homeassistant/packages/printops_backup.yaml"
 PACKAGE_NAME = "printops_backup.yaml"
 AUTH_SECRET_NAME = "printops_api_auth"
+URL_KEY = "api_url"  # rendered into the rest_command's `url:`, not into the script's variables
 VALUE_KEYS = (
-    "api_url",
     "target",
     "subdir",
     "keep_daily",
@@ -45,6 +48,14 @@ VALUE_KEYS = (
     "keep_monthly",
     "min_free_gb",
 )
+LOADED_ENTITY = "script.printops_backup_run"
+CHECK_CONFIG_TIMEOUT_S = (
+    180.0  # check_config on a Pi or an Odroid takes far longer than a normal API call
+)
+PACKAGES_INCLUDE = re.compile(
+    r"""^\s*packages:\s*!include_dir_named\s+["']?(?P<dir>[^"'\s#]+)["']?\s*(?:#.*)?$"""
+)
+URL_SAFE = re.compile(r"https?://(?:[A-Za-z0-9._-]+|\[[0-9A-Fa-f:.]+\])(?::\d{1,5})?/?")
 RELOADS = (
     "script.reload",
     "automation.reload",
@@ -87,6 +98,23 @@ def _set_value(lines: list[str], start: int, end: int, key: str, value: object) 
     lines[hit[0]] = f"      {key}: {_fmt(value)}"
 
 
+def _set_url(lines: list[str], api_url: str) -> None:
+    if not URL_SAFE.fullmatch(api_url):
+        raise ValueError(f"3d-api URL {api_url!r}: http(s)://HOST[:PORT] only")
+    marker = _marker_index(lines, "EDIT HERE (url)")
+    hit = next(
+        (
+            i
+            for i in range(marker + 1, len(lines))
+            if re.fullmatch(r'\s+url: ".*"', lines[i])
+        ),
+        None,
+    )
+    if hit is None:
+        raise ValueError("package has no `url:` line after its EDIT HERE (url) marker")
+    lines[hit] = f'    url: "{api_url.rstrip("/")}/v1/backup/run"'
+
+
 def render_package(
     text: str, values: Mapping[str, object], at: str = "04:00:00"
 ) -> str:
@@ -96,6 +124,8 @@ def render_package(
     end = _marker_index(lines, "end of the editable values")
     for key in (k for k in VALUE_KEYS if k in values):
         _set_value(lines, start, end, key, values[key])
+    if URL_KEY in values:
+        _set_url(lines, str(values[URL_KEY]))
     marker = _marker_index(lines, "EDIT HERE (2/2)")
     at_idx = next(
         i for i in range(marker, len(lines)) if re.fullmatch(r'\s+at: ".*"', lines[i])
@@ -109,9 +139,15 @@ def render_package(
 
 def _write_script(path: str, text: str) -> str:
     b64 = base64.b64encode(text.encode()).decode()
+    q, new, bak = (
+        shlex.quote(path),
+        shlex.quote(path + ".new"),
+        shlex.quote(path + ".3d-bak"),
+    )
     return (
-        f"set -e; mkdir -p \"$(dirname '{path}')\"; [ -f '{path}' ] && cp -p '{path}' '{path}.3d-bak'; "
-        f"printf %s '{b64}' | base64 -d > '{path}.new' && mv '{path}.new' '{path}'"
+        f'set -e; mkdir -p "$(dirname {q})"; '
+        f"if [ -f {q} ]; then cp -p {q} {bak}; else rm -f {bak}; fi; "
+        f"printf %s '{b64}' | base64 -d > {new} && mv {new} {q}"
     )
 
 
@@ -123,11 +159,12 @@ def _ensure_secret(
     The bearer token travels on the script's STDIN (not in argv, where `ps` and ssh logs would show it) and
     is appended under `umask 077`: a secrets.yaml that did not exist is created 0600, never briefly 0644 (an
     existing one keeps the mode its owner gave it)."""
-    rc, _ = run(f"[ -f '{secrets}' ] && grep -q '^{AUTH_SECRET_NAME}:' '{secrets}'")
+    q = shlex.quote(secrets)
+    rc, _ = run(f"[ -f {q} ] && grep -q '^{AUTH_SECRET_NAME}:' {q}")
     if rc == 0:
         return 0, ""
     line = f'{AUTH_SECRET_NAME}: "Bearer {bearer()}"'
-    return run(f"umask 077; cat >> '{secrets}'", f"\n{line}\n")
+    return run(f"umask 077; cat >> {q}", f"\n{line}\n")
 
 
 def plan_install(ha_dir: str, values: Mapping[str, object], at: str) -> list[str]:
@@ -143,22 +180,44 @@ def plan_install(ha_dir: str, values: Mapping[str, object], at: str) -> list[str
 
 
 def _refuse_reason(run: RunHost, ha_dir: str) -> str:
+    cfg = shlex.quote(f"{ha_dir}/configuration.yaml")
+    managed = shlex.quote(f"{ha_dir}/3d-cli/integrations/homeassistant/manifest.yaml")
     rc, out = run(
-        f"test -f '{ha_dir}/configuration.yaml' && echo cfg; "
-        f"test -f '{ha_dir}/3d-cli/integrations/homeassistant/manifest.yaml' && echo managed; "
-        f"grep -Eq '^[[:space:]]*packages:' '{ha_dir}/configuration.yaml' && echo packages; true"
+        f"test -f {cfg} && echo cfg; test -f {managed} && echo managed; "
+        f"grep -E '^[[:space:]]*packages:' {cfg} | sed 's/^/packages-line: /'; true"
     )
-    flags = set(out.split())
+    lines = out.splitlines()
+    flags = {ln.strip() for ln in lines if not ln.startswith("packages-line: ")}
+    includes = [
+        ln.removeprefix("packages-line: ")
+        for ln in lines
+        if ln.startswith("packages-line: ")
+    ]
     if rc != 0 or "cfg" not in flags:
         return f"{ha_dir}/configuration.yaml not found on the HA host"
     if "managed" in flags:
         return f"{ha_dir} is managed by `3d ha deploy` (3d-cli submodule): deploy the package there with `3d ha deploy`"
-    if "packages" not in flags:
+    if not includes:
         return (
             f"{ha_dir}/configuration.yaml has no `packages:` entry; add under `homeassistant:` "
             "`packages: !include_dir_named packages` first (3d does not edit configuration.yaml)"
         )
+    if not any(_loads_packages_dir(line, ha_dir) for line in includes):
+        return (
+            f"{ha_dir}/configuration.yaml has `{includes[0].strip()}`, which does not load {ha_dir}/packages/ "
+            "(where 3d writes the file); make it `packages: !include_dir_named packages` or put "
+            f"{PACKAGE_REL} where your `packages:` points (3d does not edit configuration.yaml)"
+        )
     return ""
+
+
+def _loads_packages_dir(line: str, ha_dir: str) -> bool:
+    """True when this `packages:` line is `!include_dir_named` of `<ha_dir>/packages` (relative or absolute)."""
+    m = PACKAGES_INCLUDE.match(line)
+    if m is None:
+        return False
+    target = m["dir"].removeprefix("./").rstrip("/")
+    return target in ("packages", f"{ha_dir.rstrip('/')}/packages")
 
 
 def _reload(ha: HaRest) -> list[str]:
@@ -175,39 +234,46 @@ def _reload(ha: HaRest) -> list[str]:
 
 
 def _restore(run: RunHost, path: str) -> None:
-    run(
-        f"if [ -f '{path}.3d-bak' ]; then mv '{path}.3d-bak' '{path}'; else rm -f '{path}'; fi"
-    )
+    q, bak = shlex.quote(path), shlex.quote(path + ".3d-bak")
+    run(f"if [ -f {bak} ]; then mv {bak} {q}; else rm -f {q}; fi")
+
+
+def _package_loaded(ha: HaRest) -> bool:
+    try:
+        ha.get(f"/api/states/{LOADED_ENTITY}")
+    except HaRestError as e:
+        if e.status == 404:
+            return False
+        raise
+    return True
 
 
 def _activate(ha: HaRest) -> tuple[str, str]:
-    """check_config, then the targeted reloads. (status, detail): `valid`, `invalid` or `api-failed`."""
+    """check_config, the targeted reloads, then the proof the package loaded. (status, detail): `valid`,
+    `invalid`, `not-loaded` or `api-failed`."""
     try:
-        verdict = ha.post("/api/config/core/check_config")
+        verdict = ha.post(
+            "/api/config/core/check_config", timeout=CHECK_CONFIG_TIMEOUT_S
+        )
         if not isinstance(verdict, dict) or verdict.get("result") != "valid":
             return "invalid", f"HA check_config rejected the package: {verdict}"
         missing = _reload(ha)
+        if not missing and not _package_loaded(ha):
+            return "not-loaded", LOADED_ENTITY
     except HaRestError as e:
         return "api-failed", f"HA API failed: {e.message}"
     return "valid", ", ".join(missing)
 
 
-def _put_files(
-    run: Shell, path: str, text: str, secrets: str, bearer: Callable[[], str]
-) -> tuple[bool, str]:
-    """Write the package when it differs and make sure the secret exists. (wrote, problem)."""
-    rc, current = run(f"cat '{path}' 2>/dev/null")
-    wrote = not (rc == 0 and current == text)
-    if wrote:
-        rc, out = run(_write_script(path, text))
-        if rc != 0:
-            return False, f"could not write {path}: {out.strip()}"
-    rc, out = _ensure_secret(run, secrets, bearer)
+def _put_package(run: Shell, path: str, text: str) -> tuple[bool, str]:
+    """Write the package when it differs. (wrote, problem)."""
+    rc, current = run(f"cat {shlex.quote(path)} 2>/dev/null")
+    if rc == 0 and current == text:
+        return False, ""
+    rc, out = run(_write_script(path, text))
     if rc != 0:
-        if wrote:
-            _restore(run, path)
-        return wrote, f"could not update secrets.yaml: {out.strip()}"
-    return wrote, ""
+        return False, f"could not write {path}: {out.strip()}"
+    return True, ""
 
 
 def _outcome(
@@ -218,9 +284,19 @@ def _outcome(
             _restore(run, path)
         left = f"; the package already on disk is left in place (fix or remove {path})"
         return WireOutcome("failed", steps, detail + (", put back" if wrote else left))
+    if state == "not-loaded":
+        return WireOutcome(
+            "failed",
+            steps,
+            f"HA validated and reloaded, but {detail} does not exist: Home Assistant does not load {path}. "
+            "Make configuration.yaml load it (`homeassistant: packages: !include_dir_named packages`), "
+            "then run again",
+        )
     if state == "api-failed":
         return WireOutcome(
-            "failed", steps, f"package on disk but not activated ({detail}); run again to retry"
+            "failed",
+            steps,
+            f"package on disk but not activated ({detail}); run again to retry",
         )
     if detail:
         return WireOutcome(
@@ -232,7 +308,9 @@ def _outcome(
     if wrote:
         return WireOutcome("done", steps, f"installed; HA reloaded {reloaded}")
     return WireOutcome(
-        "unchanged", steps, f"the same package was already installed; HA validated and reloaded {reloaded}"
+        "unchanged",
+        steps,
+        f"the same package was already installed; HA validated and reloaded {reloaded}",
     )
 
 
@@ -256,11 +334,23 @@ def install_package(
         (repo_root / PACKAGE_REL).read_text(encoding="utf-8"), values, at
     )
     path = f"{ha_dir}/packages/{PACKAGE_NAME}"
-    wrote, problem = _put_files(run, path, text, f"{ha_dir}/secrets.yaml", bearer)
+    rc, out = _ensure_secret(
+        run, f"{ha_dir}/secrets.yaml", bearer
+    )  # before any write: a failed mint changes nothing
+    if rc != 0:
+        return WireOutcome(
+            "failed", steps, f"could not update secrets.yaml: {out.strip()}"
+        )
+    wrote, problem = _put_package(run, path, text)
     if problem:
         return WireOutcome("failed", steps, problem)
-    state, detail = _activate(ha)
-    return _outcome(run, steps, path, wrote, state, detail)
+    try:
+        state, detail = _activate(ha)
+        return _outcome(run, steps, path, wrote, state, detail)
+    except BaseException:
+        if wrote:
+            _restore(run, path)  # never leave a package behind that nobody validated
+        raise
 
 
 # ----------------------------------------------------------------------- Spoolman integration

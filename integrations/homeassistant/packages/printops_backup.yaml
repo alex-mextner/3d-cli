@@ -4,9 +4,10 @@
 # automation below runs script.printops_backup_run, which asks 3d-api (POST /v1/backup/run) to write a
 # verified, rotated backup set to the backup disk. 3d-api runs the job niced, as a child process.
 #
-# >>> TO CHANGE ANYTHING, EDIT ONLY THE TWO "EDIT HERE" SPOTS BELOW: the values in script.printops_backup_run, the time in the automation <<<
+# >>> TO CHANGE ANYTHING, EDIT ONLY THE THREE "EDIT HERE" SPOTS BELOW: the url, the script values, the time <<<
 #   at                the time of day (04:00; HA's own automatic backup runs ~04:50, so keep 04:00-04:30)
-#   api_url           3d-api as HA sees it
+#   url               3d-api as HA sees it. It is written into the rest_command itself and NOT taken from the service
+#                     data: whoever may call a service must not be able to send the bearer token to another host
 #   target            the backup disk: a name from backup.yaml on the Spoolman host (`3d printops backup target ls`);
 #                     the disk's marker file decides whether the run may start — a missing or different disk
 #                     is refused, nothing is written
@@ -21,11 +22,12 @@
 #   printops_api_auth: "Bearer <3d-api token with scopes read,write>"     (3d printops token create ha --scopes read,write)
 #
 # A failed run (3d-api down, wrong disk, disk full, bad integrity check) raises the persistent notification
-# "printops_backup_failed" (3d-api also opens the PrintOps anomaly `backup_failed`); the next good run dismisses it.
+# "printops_backup_failed_<target>" (3d-api also opens the PrintOps anomaly `backup_failed`); the next good run of THAT target dismisses it.
 # printops_backup_stale fires when 36 h pass without a good run (HA was down at 04:00, the automation is off).
 rest_command:
   printops_backup_run:
-    url: "{{ api_url }}/v1/backup/run"
+    # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>> EDIT HERE (url): 3d-api as HA sees it <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+    url: "http://192.168.0.39:8765/v1/backup/run"
     method: post
     headers:
       Authorization: !secret printops_api_auth
@@ -49,7 +51,6 @@ script:
     mode: single
     variables:
       # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>> EDIT HERE (1/2) <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
-      api_url: "http://192.168.0.39:8765"
       target: "default"
       subdir: "3d-printops"
       keep_daily: 7
@@ -60,7 +61,6 @@ script:
     sequence:
       - action: rest_command.printops_backup_run
         data:
-          api_url: "{{ api_url }}"
           target: "{{ target }}"
           subdir: "{{ subdir }}"
           keep_daily: "{{ keep_daily }}"
@@ -74,14 +74,14 @@ script:
             {{ backup is defined and backup.status == 200 and backup.content is mapping
                and backup.content.status == 'ok' }}
           why: >-
-            {% if backup is not defined %}3d-api at {{ api_url }} did not answer (unreachable, rejected token or timeout)
+            {% if backup is not defined %}3d-api did not answer (unreachable, rejected token or timeout)
             {% elif backup.content is mapping and backup.content.error is defined %}{{ backup.content.error }}
             {% else %}3d-api answered HTTP {{ backup.status }}{% endif %}
       - if: "{{ ok }}"
         then:
           - action: persistent_notification.dismiss
             data:
-              notification_id: printops_backup_failed
+              notification_id: "printops_backup_failed_{{ target }}"
           - action: persistent_notification.dismiss
             data:
               notification_id: printops_backup_stale
@@ -93,7 +93,7 @@ script:
         else:
           - action: persistent_notification.create
             data:
-              notification_id: printops_backup_failed
+              notification_id: "printops_backup_failed_{{ target }}"
               title: "PrintOps backup FAILED"
               message: "The scheduled Spoolman/PrintOps backup (target {{ target }}) failed: {{ why | trim }}"
 
@@ -118,13 +118,16 @@ automation:
     conditions:
       - condition: template
         value_template: >-
-          {% set last = as_timestamp(states('input_datetime.printops_backup_last_ok'), 0) %}
-          {{ last > 0 and (as_timestamp(now()) - last) > 36 * 3600 }}
+          {% set raw = states('input_datetime.printops_backup_last_ok') %}
+          {% set never = raw in ['unknown', 'unavailable', '', 'none', '1970-01-01 00:00:00'] %}
+          {{ never or (as_timestamp(now()) - as_timestamp(raw, 0)) > 36 * 3600 }}
     actions:
       - action: persistent_notification.create
         data:
           notification_id: printops_backup_stale
           title: "PrintOps backup is overdue"
           message: >-
-            Last good Spoolman/PrintOps backup: {{ states('input_datetime.printops_backup_last_ok') }}.
+            {% set raw = states('input_datetime.printops_backup_last_ok') %}
+            {% if raw in ['unknown', 'unavailable', '', 'none', '1970-01-01 00:00:00'] %}No good backup has been recorded yet.
+            {% else %}Last good Spoolman/PrintOps backup: {{ raw }}.{% endif %}
             Run script.printops_backup_run and check `3d printops backup ls`.

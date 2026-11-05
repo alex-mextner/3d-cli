@@ -29,11 +29,13 @@ class FakeHa:
         check_valid: bool = True,
         reload_missing: tuple[str, ...] = (),
         spoolman_url_ok: bool = True,
+        package_loaded: bool = True,
     ) -> None:
         self.spoolman_installed = spoolman_installed
         self.check_valid = check_valid
         self.reload_missing = reload_missing
         self.spoolman_url_ok = spoolman_url_ok
+        self.package_loaded = package_loaded
         self.entries: list[dict[str, Any]] = []
         self.requests: list[tuple[str, str, Any]] = []
         self.ws_commands: list[str] = []
@@ -74,7 +76,9 @@ class FakeHa:
                 path = self.path.split("?")[0]
                 outer.requests.append((self.command, self.path, body))
                 if self.headers.get("Authorization"):
-                    outer.presented.append(self.headers["Authorization"].removeprefix("Bearer "))
+                    outer.presented.append(
+                        self.headers["Authorization"].removeprefix("Bearer ")
+                    )
                 if path == "/manifest.json":
                     return self._send(200, {"name": "Home Assistant"})
                 if path == "/api/websocket":
@@ -123,6 +127,11 @@ class FakeHa:
                 list(self.entries),
             ),
             ("POST", "/api/config/config_entries/flow"): self._start_flow,
+            ("GET", "/api/states/script.printops_backup_run"): lambda b, p: (
+                (200, {"entity_id": "script.printops_backup_run", "state": "off"})
+                if self.package_loaded
+                else (404, {"message": "Entity not found."})
+            ),
             ("POST", "/api/config/core/check_config"): lambda b, p: (
                 200,
                 {
