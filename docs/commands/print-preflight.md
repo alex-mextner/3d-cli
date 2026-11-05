@@ -10,12 +10,14 @@ input is missing is SKIP and its line says what to pass — it never passes sile
 ```
 3d print-preflight FILE.gcode [--printer NAME] [--axis-limits X0:X1,Y0:Y1|NAME] [--source-3mf FILE.3mf]
                    [--visible [OBJ:]SPEC]... [--bridge-max MM] [--printops-api URL] [--offline]
-                   [--printops-snapshot FILE] [--accept preset_match|mix_calibration|spool_in_sync --reason TEXT] [--json] [--secs S] [--no-bed-move]
+                   [--printops-snapshot FILE] [--accept preset_match|mix_calibration|spool_in_sync --reason TEXT] [--json] [--secs S] [--no-bed-move] [--fix]
 ```
+
+`--fix` adds the thumbnails the G-code lacks, in place (header only; mtime kept, a current slice-warnings record follows the new SHA-256), then runs the checks. It is the only option that writes.
 
 | Check | When | FAIL means |
 |---|---|---|
-| `thumbnails` | always | The G-code lacks preview images its `; thumbnails =` spec asks for (fix: `3d gcode-thumbnails add FILE`). |
+| `thumbnails` | always | The G-code lacks preview images its `; thumbnails =` spec asks for (48x48, 96x96 and 300x300 PNG when it names none). The line names the exact fix, `3d gcode-thumbnails add 'FILE'`; `--fix` runs it. [Layers](gcode-thumbnails.md#layers-a-thumbnail-cannot-be-missing) add thumbnails earlier, so this FAIL means the G-code came from outside them. |
 | `printer` | `--printer` | The printer is printing, paused, busy, or its state cannot be read. |
 | `bed` | `--printer` with `watch.bed.enabled` (SKIP otherwise) | The camera sees objects on the bed or the build plate missing against the empty-bed reference; WARN when it cannot tell (no reference at this Z, plate out of view, camera down). See [Bed state](printer.md#bed-state). On an idle printer with `watch.bed.auto_view` (the U1: its camera sees 15 % of the plate at the Z 200 rest) the bed is moved in Z only to where the whole plate is in view, judged there and put back, and the line names the Z used; never while printing/paused, never homing; `--no-bed-move` judges at the current Z. |
 | `slot Tn` | `--printer` on a printer with per-head data (Snapmaker U1) | Tool *n* is used by the G-code but head T*n+1* is empty, or its colour/material differs from `; filament_colour` / `; filament_type`. |

@@ -120,7 +120,8 @@ def test_printer_force_approved_request_lists_the_failing_checks(tmp_path: Path)
     assert isinstance(context, dict)
     assert request["hook"] == "3d-printer-start-force" and request["critical"] is True
     assert context["printer"] == "u1" and context["file"].endswith("part.gcode")
-    assert "- slicer warn:" in context["failing_checks"] and "- thumbnails:" in context["failing_checks"]
+    # the upload added the thumbnails this G-code lacked: only the slicer-warnings record is left to force
+    assert "- slicer warn:" in context["failing_checks"] and "- thumbnails:" not in context["failing_checks"]
     assert request["command"] == f"3d printer start u1 {context['file']} --yes --force"
 
 

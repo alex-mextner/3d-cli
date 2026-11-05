@@ -417,6 +417,11 @@ skills (`atomic-commits`, `ai-review-before-commit`, `pre-commit-gate`,
   recorded in `NAME.slice-warnings.json` (`3d slice-warnings record`, or `3d slice`) and
   resolved or accepted with a reason. The full model → slice → G-code → start order is
   `docs/workflows/print-pipeline.md`.
+- A G-code never lacks its thumbnails (the Orca CLI writes none): every code path that runs a
+  slicer calls `slicing.thumbnails.finalize_*` on its output before the G-code is hashed or moved,
+  `3d printer upload|start` call `fix_in_place`, `print-preflight --fix` repairs. A new slicing
+  entry point without it fails `tests/test_thumbnail_guard.py`; layers in
+  `docs/commands/gcode-thumbnails.md`.
 
 ## Verification before "done"
 

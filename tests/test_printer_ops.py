@@ -84,8 +84,11 @@ def hatch(monkeypatch: pytest.MonkeyPatch) -> FakeHatch:
 @pytest.fixture()
 def gates_ok(monkeypatch: pytest.MonkeyPatch) -> None:
     """Command tests check printer logic, not the G-code gates with their own tests
-    (thumbnails, overhangs, slicer warnings): pin those to PASS."""
-    monkeypatch.setattr(preflight, "check_thumbnails", lambda p: preflight.Check("thumbnails", "PASS", "stub"))
+    (thumbnails, overhangs, slicer warnings): pin those to PASS. `upload`/`start` add missing
+    thumbnails to the G-code in place (tests/test_thumbnail_preflight.py, the e2e thumbnail tests);
+    here the fixture's bytes must stay what the fake printer holds."""
+    monkeypatch.setattr(preflight, "check_thumbnails", lambda p, shown=None: preflight.Check("thumbnails", "PASS", "stub"))
+    monkeypatch.setattr("commands.printer._ensure_thumbnails", lambda original: None)
     monkeypatch.setattr(preflight, "check_overhangs", lambda p, *_: preflight.Check("overhangs", "PASS", "stub"))
     monkeypatch.setattr(
         preflight, "check_slice_warnings", lambda o, g: preflight.Check("slicer warn", "PASS", "stub")
@@ -644,7 +647,7 @@ def test_cmd_upload_refused_while_creality_busy(
 
 
 def test_cmd_upload_refused_over_the_running_file_on_moonraker(
-    moon: FakeMoonraker, env: Path, tmp_path: Path
+    moon: FakeMoonraker, env: Path, tmp_path: Path, gates_ok: None
 ) -> None:
     g = gcode(tmp_path)
     moon.status = u1_status("printing", safe_remote_name(g))
@@ -1838,7 +1841,7 @@ def test_ws_connection_reset_counts_as_closed() -> None:
 
 
 def test_cmd_upload_sends_the_bytes_it_named(
-    moon: FakeMoonraker, env: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    moon: FakeMoonraker, env: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, gates_ok: None
 ) -> None:
     """Review #132: a rewrite of FILE between naming and sending must not store other bytes
     under the first content's hash."""

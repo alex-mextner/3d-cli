@@ -145,13 +145,12 @@ def test_ensure_adds_only_the_missing_size_after_existing_blocks(tmp_path: Path)
     assert [(w, h) for w, h, _ in _moonraker_blocks(g.read_text(encoding="ascii"))] == [(48, 48), (96, 96)]
 
 
-def test_no_spec_needs_sizes_and_passes_with_any_thumbnail(tmp_path: Path) -> None:
+def test_no_spec_requires_the_default_sizes_and_extra_sizes_are_added_on_top(tmp_path: Path) -> None:
     g = make_gcode(tmp_path / "a.gcode", spec=None)
     c = gt.check(str(g))
-    assert not c.ok and c.required == []
-    with pytest.raises(gt.ThumbnailError):
-        gt.ensure(str(g))
-    gt.ensure(str(g), sizes=[gt.Thumb(32, 32, "PNG")])
+    assert not c.ok and c.required == list(gt.DEFAULT_SIZES)
+    c = gt.ensure(str(g), sizes=[gt.Thumb(32, 32, "PNG")])
+    assert c.ok and c.added == [*gt.DEFAULT_SIZES, gt.Thumb(32, 32, "PNG")]
     assert gt.check(str(g)).ok
 
 

@@ -29,6 +29,7 @@ import os
 import re
 import shutil
 import subprocess
+import zipfile
 import sys
 import tempfile
 from dataclasses import dataclass
@@ -120,9 +121,49 @@ def _slice_prusa(binary: str, work_input: str, out: str, profile: str, printer: 
                 args += ["--load", p]
     if printer:
         args += ["--load", printer]  # best-effort; slicer-specific preset naming varies.
+    args += _prusa_thumbnail_args()  # layer (a)
     args.append(work_input)
     with open(log, "w") as lf:
         return subprocess.run(args, stdout=lf, stderr=subprocess.STDOUT).returncode
+
+
+def _prusa_thumbnail_args() -> list[str]:
+    from slicing.thumbnails import PRUSA_ARGS
+
+    return list(PRUSA_ARGS)
+
+
+def _with_thumbnail_spec(work_input: str, tmpdir: str, slicer_kind: str) -> str:
+    """Layer (a) for a 3MF project given to an Orca-family slicer: a copy of it that also asks for the
+    thumbnail sizes (the user's file stays as it is). Other inputs are sliced as given."""
+    if slicer_kind == "prusa" or not work_input.lower().endswith(".3mf") or not zipfile.is_zipfile(work_input):
+        return work_input  # (a file that is no zip is the slicer's to reject, with its own message)
+    from pathlib import Path
+
+    from slicing.thumbnails import with_project_spec
+
+    copy = Path(tmpdir) / os.path.basename(work_input)
+    with_project_spec(Path(work_input), copy)
+    return str(copy)
+
+
+def _finalize_thumbnails(produced: str) -> None:
+    """Layer (b): the slicer's output carries every required thumbnail before it is kept. A `.gcode.3mf`
+    gets its plate images instead. A failure is a failed slice: the message names the repair command."""
+    from pathlib import Path
+
+    from slicing import thumbnails
+
+    out = Path(produced)
+    try:
+        if out.name.lower().endswith(".3mf"):
+            thumbnails.finalize_embedded(out)
+        else:
+            thumbnails.finalize_slice(out)
+    except GateFailure as exc:
+        print(f"STATUS: FAIL - sliced, but the thumbnails could not be added: {exc.message}")
+        raise
+    print(f"  thumbnails: present ({os.path.basename(produced)})")
 
 
 def _slice_orca(binary: str, work_input: str, outdir: str, profile: str, printer: str, log: str) -> int:
@@ -137,7 +178,8 @@ def _slice_orca(binary: str, work_input: str, outdir: str, profile: str, printer
         return subprocess.run(args, stdout=lf, stderr=subprocess.STDOUT).returncode
 
 
-def run(argv: list[str]) -> int:
+def _early_exit(argv: list[str]) -> int | None:
+    """Exit code for the argv shapes that never slice (no args, help, profile listing); None otherwise."""
     if not argv:
         print(USAGE)
         return 1
@@ -147,12 +189,11 @@ def run(argv: list[str]) -> int:
     if argv == ["--list-profiles"]:
         _print_profiles()
         return 0
+    return None
 
-    opts = _parse(argv)
-    _validate_input(opts.inp)
-    if opts.profile:
-        _validate_profiles(opts.profile)
 
+def _require_slicer() -> tuple[str, str]:
+    """(kind, binary) of the slicer to use, or MissingDependency when none is installed."""
     sl = _find_slicer()
     if sl is None:
         raise MissingDependency(
@@ -161,56 +202,82 @@ def run(argv: list[str]) -> int:
             degrades="3d slice cannot run, including --dry-run sliceability verification",
             command="slice",
         )
-    slicer_kind, slicer_bin = sl
+    return sl
+
+
+def _print_banner(opts: _Options, profile: str, slicer_kind: str, slicer_bin: str, final_out: str) -> None:
+    print("================================================================")
+    print(f"slice: {os.path.basename(opts.inp)}  via {slicer_kind}  ({slicer_bin})")
+    note = "   (--dry-run: verify only, G-code discarded)" if opts.dry_run else ""
+    extra = (f"   printer={opts.printer}" if opts.printer else "") + (
+        f"   material={opts.material}" if opts.material else ""
+    ) + (
+        f"   profile={profile}" if profile else ""
+    )
+    print(f"  -> {final_out}{note}{extra}")
+    print("================================================================")
+
+
+def _report_success(produced: str, final_out: str, dry_run: bool, log_text: str, tmpdir: str) -> None:
+    """Keep (or, for --dry-run, discard) the produced G-code and print the PASS block."""
+    size = os.path.getsize(produced)
+    if dry_run:
+        print(f"STATUS: PASS - sliceable ({size} bytes produced, discarded; --dry-run gate)")
+    else:
+        _finalize_thumbnails(produced)
+        os.makedirs(os.path.dirname(final_out) or ".", exist_ok=True)
+        shutil.move(produced, final_out)
+        print(f"STATUS: PASS - sliced OK -> {final_out} ({size} bytes)")
+        _record_warnings(final_out, log_text, tmpdir)
+    est_time = _grep1(log_text, r"estimated printing time[^0-9]*[0-9hms: ]+")
+    est_fil = _grep1(log_text, r"filament used[^0-9]*[0-9.]+ ?[gm]+")
+    if est_time:
+        print(f"  {est_time}")
+    if est_fil:
+        print(f"  {est_fil}")
+    print("================================================================")
+
+
+def _report_failure(rc: int) -> None:
+    print(f"STATUS: FAIL - slicer did not produce G-code (rc={rc})")
+    print("  Check --profile/--printer. Many slicers require machine/process/filament profiles.")
+    print(f"  {PROFILE_EXPORT_STEPS}")
+    print("================================================================")
+
+
+def run(argv: list[str]) -> int:
+    early = _early_exit(argv)
+    if early is not None:
+        return early
+
+    opts = _parse(argv)
+    _validate_input(opts.inp)
+    if opts.profile:
+        _validate_profiles(opts.profile)
+
+    slicer_kind, slicer_bin = _require_slicer()
     profile = opts.profile or _resolve_profile(opts)
     _validate_profiles(profile)
 
     tmpdir = tempfile.mkdtemp(prefix="3dslice.")
     log = tempfile.mktemp(prefix="3dslicelog.")
     try:
-        work_input = _prepare_input(opts.inp, opts.defs, tmpdir)
+        work_input = _with_thumbnail_spec(_prepare_input(opts.inp, opts.defs, tmpdir), tmpdir, slicer_kind)
         final_out = opts.out or (opts.inp.rsplit(".", 1)[0] + ".gcode")
         prusa_out = os.path.join(tmpdir, "out.gcode")
 
-        print("================================================================")
-        print(f"slice: {os.path.basename(opts.inp)}  via {slicer_kind}  ({slicer_bin})")
-        note = "   (--dry-run: verify only, G-code discarded)" if opts.dry_run else ""
-        extra = (f"   printer={opts.printer}" if opts.printer else "") + (
-            f"   material={opts.material}" if opts.material else ""
-        ) + (
-            f"   profile={profile}" if profile else ""
-        )
-        print(f"  -> {final_out}{note}{extra}")
-        print("================================================================")
+        _print_banner(opts, profile, slicer_kind, slicer_bin, final_out)
 
         rc = _run_slicer(slicer_kind, slicer_bin, work_input, tmpdir, prusa_out, opts, profile, log)
         produced = _find_produced_gcode(tmpdir, prusa_out) if rc == 0 else ""
         log_text = _read_log(log)
         _print_log_tail(log_text)
 
-        est_time = _grep1(log_text, r"estimated printing time[^0-9]*[0-9hms: ]+")
-        est_fil = _grep1(log_text, r"filament used[^0-9]*[0-9.]+ ?[gm]+")
-
         if rc == 0 and produced and os.path.getsize(produced) > 0:
-            size = os.path.getsize(produced)
-            if opts.dry_run:
-                print(f"STATUS: PASS - sliceable ({size} bytes produced, discarded; --dry-run gate)")
-            else:
-                os.makedirs(os.path.dirname(final_out) or ".", exist_ok=True)
-                shutil.move(produced, final_out)
-                print(f"STATUS: PASS - sliced OK -> {final_out} ({size} bytes)")
-                _record_warnings(final_out, log_text, tmpdir)
-            if est_time:
-                print(f"  {est_time}")
-            if est_fil:
-                print(f"  {est_fil}")
-            print("================================================================")
+            _report_success(produced, final_out, opts.dry_run, log_text, tmpdir)
             return 0
 
-        print(f"STATUS: FAIL - slicer did not produce G-code (rc={rc})")
-        print("  Check --profile/--printer. Many slicers require machine/process/filament profiles.")
-        print(f"  {PROFILE_EXPORT_STEPS}")
-        print("================================================================")
+        _report_failure(rc)
         return 1
     finally:
         with contextlib.suppress(OSError):
@@ -412,37 +479,49 @@ def _profile_score(
     material_terms: tuple[str, ...],
 ) -> int:
     haystack = _profile_haystack(path)
-    if any(term in haystack for term in excluded_terms):
+    if _has_any(haystack, excluded_terms):
         return 0
-    score = 0
     if role == "machine":
-        if not all(term in haystack for term in printer_terms):
-            return 0
-        if any(term in haystack for term in ("filament", "material", "process")):
-            return 0
-        score += 30
-        score += 10 if any(term in haystack for term in ("machine", "printer", "nozzle")) else 0
-    elif role == "process":
-        if not _matches_process_printer(haystack, printer_terms):
-            return 0
-        if any(term not in material_terms and term in haystack for term in AUTO_PROFILE_ALL_MATERIAL_TERMS):
-            return 0
-        if any(term in haystack for term in ("filament", "material", "machine", "printer", "nozzle")):
-            return 0
-        score += 30
-        score += 15 if any(term in haystack for term in ("process", "print", "quality", "standard", "layer")) else 0
-        score += 8 if any(term in haystack for term in material_terms) else 0
-        score += 5 if "0-2" in haystack or "0-20" in haystack or "0-20mm" in haystack else 0
-    elif role == "filament":
-        if not any(term in haystack for term in material_terms):
-            return 0
-        if any(term in haystack for term in ("machine", "printer", "process")):
-            return 0
-        score += 25
-        score += 10 if any(term in haystack for term in ("filament", "material")) else 0
-    else:
+        return _machine_score(haystack, printer_terms)
+    if role == "process":
+        return _process_score(haystack, printer_terms, material_terms)
+    if role == "filament":
+        return _filament_score(haystack, material_terms)
+    return 0
+
+
+def _has_any(haystack: str, terms: tuple[str, ...]) -> bool:
+    return any(term in haystack for term in terms)
+
+
+def _machine_score(haystack: str, printer_terms: tuple[str, ...]) -> int:
+    if not all(term in haystack for term in printer_terms):
         return 0
+    if _has_any(haystack, ("filament", "material", "process")):
+        return 0
+    return 30 + (10 if _has_any(haystack, ("machine", "printer", "nozzle")) else 0)
+
+
+def _process_score(haystack: str, printer_terms: tuple[str, ...], material_terms: tuple[str, ...]) -> int:
+    if not _matches_process_printer(haystack, printer_terms):
+        return 0
+    if any(term not in material_terms and term in haystack for term in AUTO_PROFILE_ALL_MATERIAL_TERMS):
+        return 0
+    if _has_any(haystack, ("filament", "material", "machine", "printer", "nozzle")):
+        return 0
+    score = 30
+    score += 15 if _has_any(haystack, ("process", "print", "quality", "standard", "layer")) else 0
+    score += 8 if _has_any(haystack, material_terms) else 0
+    score += 5 if _has_any(haystack, ("0-2", "0-20", "0-20mm")) else 0
     return score
+
+
+def _filament_score(haystack: str, material_terms: tuple[str, ...]) -> int:
+    if not _has_any(haystack, material_terms):
+        return 0
+    if _has_any(haystack, ("machine", "printer", "process")):
+        return 0
+    return 25 + (10 if _has_any(haystack, ("filament", "material")) else 0)
 
 
 def _profile_haystack(path: str) -> str:
@@ -638,20 +717,24 @@ def _profile_roots() -> list[str]:
     return roots
 
 
+def _prune_profile_dirs(cur: str, dirs: list[str], root: str) -> None:
+    """In-place os.walk pruning: stop below depth 4 and skip hidden/cache/log directories."""
+    rel = os.path.relpath(cur, root)
+    depth = 0 if rel == "." else rel.count(os.sep) + 1
+    if depth >= 4:
+        dirs[:] = []
+    dirs[:] = [d for d in dirs if not d.startswith(".") and d not in ("cache", "logs", "__pycache__")]
+
+
 def _walk_profile_files(root: str) -> list[str]:
     out: list[str] = []
-    max_depth = 4
     for cur, dirs, files in os.walk(root):
-        rel = os.path.relpath(cur, root)
-        depth = 0 if rel == "." else rel.count(os.sep) + 1
-        if depth >= max_depth:
-            dirs[:] = []
-        dirs[:] = [d for d in dirs if not d.startswith(".") and d not in ("cache", "logs", "__pycache__")]
-        for fn in files:
-            if os.path.splitext(fn)[1].lower() in (".ini", ".json"):
-                out.append(os.path.join(cur, fn))
-                if len(out) >= 200:
-                    return out
+        _prune_profile_dirs(cur, dirs, root)
+        profile_files = [fn for fn in files if os.path.splitext(fn)[1].lower() in (".ini", ".json")]
+        for fn in profile_files:
+            out.append(os.path.join(cur, fn))
+            if len(out) >= 200:
+                return out
     return out
 
 
