@@ -132,11 +132,13 @@ class VisionCycle:
         log: Callable[[str], None] = _stderr,
         force_frame: bool = False,
         after_keepalive: Callable[[], None] | None = None,
+        on_print_end: Callable[[], None] | None = None,
     ) -> None:
         """`force_frame`: grab a frame even when nothing prints or the printer is silent (`--once`);
         `after_keepalive`: called when a keepalive was sent in such a cycle (`--once` waits for the first
         fresh frame of a sleeping camera). `quiet` / `clear_quiet` default to the printer's
-        intentional-off marker (printer_ops.intentional_off)."""
+        intentional-off marker (printer_ops.intentional_off). `on_print_end`: called once when a print that
+        was supervised ends (the printer left printing/paused): the per-print quality report is written there."""
         self.printer = printer
         self.adapter = adapter
         self.camera = camera
@@ -156,6 +158,7 @@ class VisionCycle:
         self.log = log
         self.force_frame = force_frame
         self.after_keepalive = after_keepalive
+        self.on_print_end = on_print_end
         self.reachable: bool | None = None  # None until the first poll
         self.unreachable_since: float | None = None
         self.last_poll_ok: float | None = None
@@ -223,7 +226,10 @@ class VisionCycle:
         self, state: str, filename: str | None, new_print: bool, now: float
     ) -> None:
         if state not in (PRINTING, PAUSED):
+            ended = self.job_file is not None
             self.job_file = self.job_started = None
+            if ended and self.on_print_end is not None:
+                self.on_print_end()
         elif new_print or self.job_started is None or filename != self.job_file:
             self.job_file, self.job_started = filename, now
 

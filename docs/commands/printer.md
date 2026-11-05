@@ -979,7 +979,7 @@ alerts an agent): this one *acts*, so it needs `--yes` — you authorise a pause
 ```
 3d printer watch NAME --job --yes [--on-fail auto|pause|cancel] [--gcode FILE.gcode] [--out DIR]
     [--interval S] [--checkpoints L1@25%,L1@50%,L1@100%,25%,50%,100%] [--dry-run | --tg-dry-run]
-    [--fixture SCENARIO.json] [--duration S] [--wait-start S]
+    [--fixture SCENARIO.json] [--duration S] [--wait-start S] [--no-quality]
 ```
 
 Start it right after `3d printer start NAME FILE --yes` (or give `start` [`--watch`](#start---watch));
@@ -999,6 +999,8 @@ quarter, half and all of the first layer — the first-layer marks need `--gcode
 - *Signals.* The same Moonraker events as the always-on watch (filament runout, heater loss, bed off,
   exception, G-code error, homing lost), and the printer's own defect detection (`noodle` verdicts
   with p >= 0.8, read from klippy.log).
+- *Print quality* ([below](#print-quality-monitor)). Is the print GOOD, not just still there: stringing
+  debris, a lost bead pattern (stripes, roughness), an uneven first layer. Warnings only, never a stop.
 
 **Actions on a critical finding**, in this order, each step runs even if an earlier one failed:
 
@@ -1011,6 +1013,40 @@ quarter, half and all of the first layer — the first-layer marks need `--gcode
 
 A warning (part moved, nothing seen, a heater drift) is only a tg message with the frame; nothing is
 touched and nobody is called.
+
+<a id="print-quality-monitor"></a>
+**The print-quality monitor** (#733; `lib/print_quality.py` measures, `printer_ops/quality.py` decides) runs
+on the same frame as the part check, in the plate region at the print's own Z. Why it exists: on 2026-11-05 a
+10 h sheet of small tags stringed from layer 2 on — white thread debris all over the part — while the part
+check (it only asks "is the part where it was") and the spaghetti model (no stringing class: p 0.0 on all
+12 frames) stayed silent.
+
+| number | what it is |
+|---|---|
+| `fleck_frac` | share of the plate region covered by small bright **neutral** specks and strands (the top-hat of the minimum colour channel: high only where R, G and B are all high, i.e. white debris — not beige part, not golden specular grain) |
+| `order` | structure-tensor coherence: 1 = every neighbourhood has one dominant bead direction, lower = debris, webs, broken or striped lines |
+
+The judge compares them with the **job's own first layers**: the first 4 readings with the part on the plate
+(bed_part says so) are the baseline, never judged against anything but a floor; a clean reading drifts it a
+little (bounded at 1.3x debris / 0.04 order), a bad one never does. Issues: `stringing` (debris against the
+baseline AND an absolute level), `texture` (the pattern got lost with no debris: stripes, roughness,
+under-/over-extrusion), `first_layer` (an absolute floor on `order` while layer <= 3; ON by default only for the U1, whose camera it was calibrated on — `first_layer_order: 0.6` in `watch.quality` turns it on elsewhere, a K1 SE view of a part reads 0.5 normally). Levels: `notice`
+(report only) < `warning` < `severe`; a level is reported when 2 of the last 4 readings reach it (3 of 4
+for severe), it is latched and clears after 6 clean readings. A debris trend (ratio to the baseline gained
+per 10 min) lifts a notice to a warning.
+
+A quality finding is **never critical**: one `tg --photo FRAME "<russian text: what is seen, what to
+change>"` per issue and level (the frame has the debris marked in red), nobody is rung, the job is not
+touched. Part gone, spaghetti and the noodle verdict still act as above. `--no-quality`, or
+`<printer>.watch.quality: false`, turns it off; `<printer>.watch.quality: {baseline_n: 4, warning_ratio: 2.0,
+warning_abs: 0.035, ...}` tunes any `QualityConfig` field (a wrong key is an error naming the valid ones).
+
+**The monitoring report.** When the watch ends — the job completed, a lost print stopped it, or `--duration`
+ran out — `DIR/<date>-NAME-monitor-report/` holds `report.json` (readings, counts per severity and per issue,
+the alerts that were sent, the baseline, the worst reading, the timeline), `report.md` (the same for a human)
+and `worst-frame.jpg`. A job with nothing wrong still gets one ("0 warnings in 41 judged readings"): silence
+then means *checked and fine*, not *never ran*. Calibration, limits and the numbers on the real frames:
+[print-quality-monitor.md](../research/print-quality-monitor.md).
 
 **`--on-fail`.** `auto` (default): CANCEL when the part is gone, or on a camera finding in the first
 layers (layer <= 3); PAUSE for everything else (runout, heater, later spaghetti: resumable).

@@ -89,7 +89,10 @@ USAGE = """3d printer [-n NAME] <subcommand> [args]
                                        CANCEL (--on-fail), save the frames + klippy lines to
                                        print/runs/, `tg call me --say`, tg with the frame. Start it
                                        right after `printer start`. Never moves an axis; --dry-run,
-                                       --fixture (see `3d printer watch --job --help`)
+                                       --fixture (see `3d printer watch --job --help`). Also the
+                                       PRINT-QUALITY monitor (stringing debris, lost bead pattern,
+                                       uneven first layer): tg --photo warnings only, never a stop,
+                                       and a monitor-report/ folder at the end; --no-quality
   supervise status|install|uninstall|quiet [NAME...|--all]
                                        the ALWAYS-ON supervision: one watch + one vision systemd user unit per
                                        owned printer from the fleet registry, running without a login, waiting
@@ -97,7 +100,8 @@ USAGE = """3d printer [-n NAME] <subcommand> [args]
                                        when a printing/answering printer is unsupervised
                                        (see `3d printer supervise --help`)
   vision NAME [options]                camera failure detection (spaghetti, detached part, stale/dark camera)
-                                       into the same event sinks as watch; also
+                                       and print quality (stringing, lost bead pattern, uneven first layer:
+                                       warnings only, --no-quality) into the same event sinks as watch; also
                                        `vision eval --pos P.. --neg N..`, `vision record NAME DIR [--timeout S]`,
                                        `vision fetch-model [--tier a|b|all]`, `vision fit-head ..`,
                                        `vision doctor` (read-only: does any service run --dry-run?)
