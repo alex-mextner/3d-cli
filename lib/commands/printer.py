@@ -53,7 +53,7 @@ USAGE = """3d printer [-n NAME] <subcommand> [args]
                                        A FILE without its preview thumbnails gets them first (in
                                        place, sha256 printed: `3d gcode-thumbnails check FILE`)
   start NAME FILE.gcode --yes [--as REMOTE] [--source-3mf X.3mf] [--bridge-max MM] [--force] [--secs S]
-                                       [--no-bed-move]
+                                       [--no-bed-move] [--colour-delta-e N] [--fix-colour [--fix-max-delta-e N]]
                                        start a file that was uploaded before (also adds missing
                                        thumbnails to FILE in place: then upload FILE again); runs
                                        `3d print-preflight` first, plus the camera bed check
@@ -61,6 +61,14 @@ USAGE = """3d printer [-n NAME] <subcommand> [args]
                                        printer has watch.bed.enabled (an idle printer with
                                        watch.bed.auto_view has its bed moved in Z to where the
                                        camera sees the whole plate, and back: --no-bed-move)
+  slot set NAME T<n> --material M --color #RRGGBB [--brand B] [--sub-type S] [--dry-run] [--force-official]
+                                       [--secs S] [--json]
+                                       write the filament one head shows it holds (U1: the touchscreen's
+                                       SET_PRINT_FILAMENT_CONFIG, read back) so the printer's record equals
+                                       what is loaded; T<n> is the label on the printer (T1..T4 = G-code
+                                       T0..T3). Idle, `access: full` printers only; --dry-run prints the
+                                       before/after and every rule that would refuse, writing nothing.
+                                       `slot show NAME` reads the heads (see `3d printers filament --help`)
   cancel NAME --yes                    cancel the running/paused job
   evidence NAME [--job ID | --last] [--out DIR] [--gcode F] [--note T]
                                        after EVERY print (done/cancelled/failed): save the Moonraker
@@ -124,6 +132,14 @@ Options:
   --bridge-max MM    preflight overhangs gate: longest bridge; overrides the printer's
                      bridge_max_mm in printer-devices.yaml (default 15)
   --no-bed-move      start: the camera bed check judges at the current Z (the bed is not moved)
+  --colour-delta-e N start: slot Tn colour tolerance, CIEDE2000 (default 10; the preflight line shows the
+                     distance; a material mismatch is always a FAIL)
+  --fix-colour       start: first rewrite `; filament_colour` / `; extruder_colour` of every tool the file
+                     uses to the colour the printer reports, in FILE and its project 3MF (--source-3mf,
+                     else NAME.3mf beside it), keeping mtime/mode; slice-warnings and manifest follow;
+                     old/new sha256 are printed; the fixed FILE is uploaded (its hash, so its stored
+                     name, changed), then the preflight runs. A head whose colour is further than
+                     --fix-max-delta-e (default 30) away is refused: another filament
 
 Safety: start refuses while the printer is printing, paused, busy or unreadable, and when
 the content-addressed remote file is missing, differs in size, or (Moonraker, read back)
@@ -141,6 +157,8 @@ Examples:
   3d printer upload k1se "out/roof left.gcode" --as roof_left.gcode
   3d printer start u1 out/part.gcode --yes
   3d printer start u1 out/base.gcode --yes --source-3mf print/base.3mf
+  3d printer start u1 out/plate.gcode --yes --fix-colour   # slicer beige != the screen's beige: rewrite, upload, start
+  3d printer slot set u1 T3 --material PETG --color '#FEE5A5' --brand Elegoo --dry-run
   RIG_HATCH_REQUEST_3D_PRINTER_START_FORCE="roof overhang FAIL is a stale map, issue #N" \\
     3d printer start k1se out/roof.gcode --yes --force   # waits for the owner's Telegram tap
   3d printer cancel k1se --yes
@@ -157,8 +175,8 @@ Examples:
   3d printer todo list u1
   3d printer -n k1se issues add --title "X belt squeaks" --type inspect"""
 
-_VALUE = {"--secs", "--as", "--source-3mf", "--bridge-max"}
-_FLAGS = {"--json", "--yes", "--force", "--no-bed-move"}
+_VALUE = {"--secs", "--as", "--source-3mf", "--bridge-max", "--colour-delta-e", "--fix-max-delta-e"}
+_FLAGS = {"--json", "--yes", "--force", "--no-bed-move", "--fix-colour"}
 
 
 def _parse(argv: list[str], allowed: set[str], n_pos: int, sub: str) -> tuple[list[str], dict[str, str]]:
@@ -391,7 +409,8 @@ def _cmd_start(argv: list[str]) -> int:
     import tempfile
     from pathlib import Path
 
-    (name, file), opts = _parse(argv, {"--yes", "--force", "--as", "--source-3mf", "--secs", "--bridge-max", "--no-bed-move"}, 2,
+    (name, file), opts = _parse(argv, {"--yes", "--force", "--as", "--source-3mf", "--secs", "--bridge-max", "--no-bed-move",
+                                 "--colour-delta-e", "--fix-colour", "--fix-max-delta-e"}, 2,
                            "start")
     if "--yes" not in opts:
         raise UsageError(
@@ -450,6 +469,7 @@ def _preflight_report(name: str, adapter: Adapter, st: PrinterStatus, original: 
                       source: Path | None, opts: dict[str, str]) -> Any:
     """Run and print the preflight on the snapshot; the report is relabelled with the original path."""
     from printer_ops import bridge_max_for
+    from printer_ops.colour_fix import DEFAULT_SLOT_DELTA_E, parse_delta_e
     from printer_ops.preflight import check_bed, run_preflight
     from printer_ops.printops_checks import context_from_options
 
@@ -464,6 +484,8 @@ def _preflight_report(name: str, adapter: Adapter, st: PrinterStatus, original: 
     report = run_preflight(local, status=st, source_3mf=source, axis_limits=limits, limits_source=limits_source,
                            trusted_macros=adapter.trusted_macros, origin=original,
                            bridge_max=bridge, bridge_source=bridge_source, printops=printops,
+                           colour_delta_e=parse_delta_e(opts.get("--colour-delta-e"), "--colour-delta-e",
+                                                        DEFAULT_SLOT_DELTA_E, command="printer"),
                            bed=check_bed(adapter.device, move="--no-bed-move" not in opts) if adapter.device is not None
                            else None)
     report.file = f"{original} (snapshot)"
@@ -471,7 +493,7 @@ def _preflight_report(name: str, adapter: Adapter, st: PrinterStatus, original: 
     return report
 
 
-def _require_preflight_pass(report: Any, name: str, original: Path, local_hash: str,
+def _require_preflight_pass(report: Any, name: str, original: Path, local_hash: str, remote: str,
                             opts: dict[str, str]) -> None:
     """Refuse on a preflight FAIL unless --force is given and the owner approves it."""
     from printer_ops.base import PrinterRefused
@@ -488,7 +510,8 @@ def _require_preflight_pass(report: Any, name: str, original: Path, local_hash: 
     from printer_ops.force_hatch import require_force_approval
 
     forced = ", ".join(c.name for c in report.checks if c.status == FAIL)
-    approval = require_force_approval(printer=name, file=str(original), sha256=local_hash, checks=report.checks)
+    approval = require_force_approval(printer=name, file=str(original), sha256=local_hash, checks=report.checks,
+                                      remote_name=remote)
     print(f"FORCED: starting despite preflight FAIL ({forced}); owner approved on Telegram ({approval})")
 
 
@@ -524,22 +547,75 @@ def _start_and_report(adapter: Adapter, name: str, remote: str) -> None:
     print(render_status(name, adapter, after))
 
 
+def _fix_colour_and_upload(name: str, original: Path, local: Path, source: Path | None, st: PrinterStatus,
+                           adapter: Adapter, opts: dict[str, str]) -> None:
+    """start --fix-colour: rewrite ORIGINAL (and its project 3MF) to the colours the printer reports,
+    refresh the snapshot LOCAL from it and upload it: its hash, so its stored name, changed."""
+    import shutil
+
+    from printer_ops.base import safe_remote_name
+    from printer_ops.colour_fix import DEFAULT_FIX_MAX_DELTA_E, fix_to_loaded, parse_delta_e
+
+    limit = parse_delta_e(opts.get("--fix-max-delta-e"), "--fix-max-delta-e", DEFAULT_FIX_MAX_DELTA_E,
+                          command="printer")
+    fixed = fix_to_loaded(original, st, source, limit, command="printer")
+    if fixed is None:
+        print("--fix-colour: the loaded colours already equal the G-code's; nothing rewritten")
+        return
+    print("\n".join(fixed.lines()))
+    shutil.copyfile(original, local)
+    res = adapter.upload(local, safe_remote_name(local, opts.get("--as")))
+    print(f"uploaded the colour-fixed file to {name} as {res.name}: {res.size} B, size verified on the printer")
+
+
 def _start_snapshot(name: str, file: str, original: Path, local: Path, source: Path | None,
                     opts: dict[str, str]) -> int:
     from printer_ops.base import safe_remote_name
 
-    remote = safe_remote_name(local, opts.get("--as"))  # content-addressed: <stem>-<sha256[:16]>.gcode
-    size = local.stat().st_size
+    safe_remote_name(local, opts.get("--as"))  # a name the printer would refuse fails before anything is written
     adapter = _adapter(name, opts, write=True)
 
     st = adapter.status()
     _refuse_if_busy(name, st, "before preflight")
+    if "--fix-colour" in opts:
+        _fix_colour_and_upload(name, original, local, source, st, adapter, opts)
+    remote = safe_remote_name(local, opts.get("--as"))  # content-addressed: <stem>-<sha256[:16]>.gcode
+    size = local.stat().st_size
     _require_stored_file(adapter, name, file, remote, size, opts)
     local_hash = _verify_remote_identity(adapter, name, file, remote, local)
     report = _preflight_report(name, adapter, st, original, local, source, opts)
-    _require_preflight_pass(report, name, original, local_hash, opts)
+    _require_preflight_pass(report, name, original, local_hash, remote, opts)
     _start_and_report(adapter, name, remote)
     return 0
+
+
+_SLOT_PASS_THROUGH = {"--brand": "--vendor", "--colour": "--color"}  # `slot set` spellings -> `printers filament set`
+
+
+def _cmd_slot(argv: list[str]) -> int:
+    """`slot set NAME T<n> --material M --color #RRGGBB [--brand B]` and `slot show NAME`: the head
+    filament record of the printer, through `3d printers filament` (ONE implementation of the write:
+    Adapter.set_head_filament, read back; refusals for non-`full` access, a running job, official RFID)."""
+    import re
+
+    from printers_cli.filament import run as filament
+
+    if not argv or argv[0] in ("-h", "--help", "help"):
+        print(USAGE)
+        return 0 if argv else 1
+    action, rest = argv[0], argv[1:]
+    if action == "show":
+        return filament(["show", *rest])
+    if action != "set":
+        raise UsageError(f"unknown slot action {action!r}; accepted: set, show", command="printer",
+                         remediation=["3d printer slot set NAME T<n> --material PETG --color '#RRGGBB'"])
+    if len(rest) < 2 or rest[0].startswith("-") or rest[1].startswith("-"):
+        raise UsageError("slot set needs the printer and the head: slot set NAME T<n> --material M --color #RRGGBB",
+                         command="printer", remediation=["3d printer slot set u1 T3 --material PETG --color '#FEE5A5'"])
+    name, head, options = rest[0], rest[1], rest[2:]
+    if not re.fullmatch(r"[Tt][0-9]+", head):
+        raise UsageError(f"{head!r} is not a head label: T<n> as the printer shows it (U1: T1..T4)", command="printer")
+    return filament(["set", f"{name}/{head.upper()}", *(_SLOT_PASS_THROUGH.get(o, o) for o in options)])
 
 
 def _cmd_cancel(argv: list[str]) -> int:
@@ -643,6 +719,7 @@ _SUBCOMMANDS: dict[str, Callable[[list[str], str | None], int]] = {
     "status": lambda rest, name: _cmd_status(rest),
     "upload": lambda rest, name: _cmd_upload(rest),
     "start": lambda rest, name: _cmd_start(rest),
+    "slot": lambda rest, name: _cmd_slot(rest),
     "cancel": lambda rest, name: _cmd_cancel(rest),
     "evidence": _run_evidence,
     "watch": _run_watch,
@@ -678,7 +755,7 @@ def run(argv: list[str]) -> int:
     handler = _SUBCOMMANDS.get(sub)
     if handler is None:
         raise UsageError(f"unknown subcommand '{sub}'", command="printer",
-                         remediation=["Use list, status, upload, start, cancel, evidence, watch, supervise, vision, guard, bed, subscribe, unsubscribe, "
+                         remediation=["Use list, status, upload, start, slot, cancel, evidence, watch, supervise, vision, guard, bed, subscribe, unsubscribe, "
                                       "subscriptions, agent, doctor or todo (issues) — see `3d printer --help`."])
     return handler(rest, name)
 
@@ -702,7 +779,7 @@ def _printer_name(argv: list[str]) -> tuple[str | None, list[str]]:
 COMMAND = Command(
     name="printer",
     group="SLICING",
-    summary="drive configured printers: list / status / upload / start --yes / cancel --yes / evidence / watch / vision / subscribe / agent / todo",
+    summary="drive configured printers: list / status / upload / start --yes / slot set / cancel --yes / evidence / watch / vision / subscribe / agent / todo",
     usage=USAGE,
     run=run,
 )

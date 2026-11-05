@@ -3,8 +3,10 @@
 An e2e test cannot tap Approve on a real phone, and the shared hatch helper refuses every tg-ctl
 outside the test sandbox. This runner is `python hatch_runner.py <3d args>`: it swaps
 `printer_ops.force_hatch.load_hatch` for a fake whose verdict comes from THREED_TEST_HATCH_VERDICT
-("approve" | "deny") and appends each request (hook id, context, command) as one JSON line to the
+("approve" | "deny" | "send-failed") and appends each request (hook id, context, command) as one JSON line to the
 file in THREED_TEST_HATCH_LOG, then runs the real dispatcher. Everything else is the real CLI.
+Verdict "send-failed" answers every request as the tg-ctl daemon does when its Telegram send failed
+(`ask-forward not-posted … reason=send-failed`); the retry pauses are zeroed so the test does not wait.
 """
 
 from __future__ import annotations
@@ -52,8 +54,11 @@ class _FakeHatch:
                 )
                 + "\n"
             )
-        if os.environ["THREED_TEST_HATCH_VERDICT"] == "approve":
+        verdict = os.environ["THREED_TEST_HATCH_VERDICT"]
+        if verdict == "approve":
             return _Verdict(True, True, "test double approved")
+        if verdict == "send-failed":
+            return _Verdict(False, True, "tg-ctl ask: ask-forward not-posted: daemon declined: reason=send-failed")
         return _Verdict(False, True, "test double denied")
 
 
@@ -62,5 +67,5 @@ def _fake_hatch() -> _FakeHatch:
 
 
 if __name__ == "__main__":
-    with patch.object(force_hatch, "load_hatch", _fake_hatch):
+    with patch.object(force_hatch, "load_hatch", _fake_hatch), patch.object(force_hatch, "RETRY_DELAYS_S", (0.0,) * 3):
         sys.exit(main(sys.argv[1:]))

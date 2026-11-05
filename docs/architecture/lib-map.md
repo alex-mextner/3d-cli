@@ -112,6 +112,8 @@ Target package: `lib/geometry/`, with subpackages only when a real boundary appe
   `dossier.py` / `dossier_render.py` / `webui.py` / `render.py` (`3d printers show NAME`: name
   resolution, the concurrent read-only live reads, the web UI probe, the text; `render.py` is
   the status text shared with `3d printer status`), `preflight.py` (pre-print checks),
+  `colour_fix.py` (the CIEDE2000 slot colour tolerance and the `--fix` / `--fix-colour` rewrite of a
+  G-code + project 3MF + sidecars to the loaded colour),
   `move_bounds.py` (G-code moves and arc extremes vs axis travel / printable area),
   `force_hatch.py` (the owner's Telegram hatch approval that `3d printer start --force` needs),
   `watch.py` / `watch_run.py` / `watch_sinks.py` (`3d printer watch`: detectors, streams,
